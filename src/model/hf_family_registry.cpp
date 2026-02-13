@@ -1,4 +1,5 @@
 #include "trtf/hf_family_registry.h"
+#include "qwen3_decoder_model_loader.h"
 
 #include <algorithm>
 #include <cctype>
@@ -224,7 +225,7 @@ DecoderModel load_decoder_definition_model(const HfModelMetadata& metadata)
     // Prefer HF-root loading when tokenizer assets exist so TRT path uses real upstream tokenization.
     if (has_qwen_root_checkpoint(metadata) && std::filesystem::exists(model_dir / "tokenizer.json"))
     {
-        return LoadDecoderModel(metadata.model_dir);
+        return LoadQwen3DecoderModel(metadata.model_dir);
     }
 
     if (has_decoder_definition_files(decoder_dir))
@@ -235,7 +236,7 @@ DecoderModel load_decoder_definition_model(const HfModelMetadata& metadata)
     if (has_qwen_root_checkpoint(metadata))
     {
         // Upstream path: load directly from HF root config + model.safetensors (or sharded index).
-        return LoadDecoderModel(metadata.model_dir);
+        return LoadQwen3DecoderModel(metadata.model_dir);
     }
 
     throw std::runtime_error("Missing required decoder-definition files for family model at "

@@ -59,9 +59,11 @@ add_library(trtf_core
   src/model/model_resolver.cpp
   src/model/trt_model_definition.cpp
   src/model/qwen3_trt_model_definition.cpp
+  src/model/qwen3_decoder_model_loader.cpp
   src/runtime/cpu_reference_backend.cpp
   src/runtime/hf_python_backend.cpp
   src/runtime/runtime_factory.cpp
+  src/runtime/trt_backend.cpp
   src/runtime/trt_backend_qwen.cpp
   src/utils/trt/engine_cache.cpp
   src/tokenizer/toy_tokenizer.cpp

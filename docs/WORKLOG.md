@@ -350,3 +350,131 @@ Validation run summary:
 Notes:
 - This script/logging path now makes startup behavior inspectable entirely from stdout/stderr, per request.
 - TRT compilation warnings from TensorRT headers remain visible during build and are expected in this environment.
+
+## 2026-02-13 (continued: modularity audit + HF-aligned refactor plan)
+
+Important audit findings (authoritative):
+- Current architecture has good extension seams (`model_resolver`, `runtime_factory`, `hf_family_registry`), but two files remain high-risk bottlenecks for parallel model development:
+  - `src/runtime/trt_backend_qwen.cpp` (~1732 LOC): mixes TRT logger/CUDA plumbing, engine build/cache, model graph construction, and autoregressive runtime loop.
+  - `src/model/model_loader.cpp` (~1554 LOC): mixes generic directory/config/vocab loading, safetensors parsing/sharding, family-specific tensor mapping, and fallback behaviors.
+- Resulting risk:
+  - Adding a new model family still requires edits in shared core files, increasing merge conflicts and regression blast radius.
+  - Family-specific checkpoint mapping and TRT graph behavior are not fully isolated into model-owned modules.
+
+Target end-state (HF-style ownership model):
+- Model-family contributors own only family modules under `src/model/<family>/...` (config mapping + checkpoint mapping + TRT graph builder hooks).
+- Shared runtime owns only:
+  - autoregressive prefill/decode loop,
+  - KV cache/state bookkeeping,
+  - backend selection/fallback policy,
+  - engine lifecycle and execution plumbing.
+- Shared TRT utils own engine cache/keying, common TRT layer helpers, and generic builder/runtime wrappers.
+
+HF Transformers comparison baseline:
+- HF pattern:
+  - Family-owned code in `transformers/models/<family>/` (configuration/modeling/tokenization/processing).
+  - Shared generation and cache in common modules (for example generation utilities and cache abstractions).
+  - Auto-mapping/registry routes model id/config to family class without touching core generation logic.
+- trtf target mapping:
+  - `src/model/<family>/` should mirror HF family ownership for model-specific definitions.
+  - `src/runtime/` should mirror HF shared generation runtime (family-agnostic decode + scheduling).
+  - `src/model/hf_family_registry.cpp` should mirror HF auto-mapping role.
+
+Phased plan to remove bottlenecks:
+1. Runtime decomposition (shared vs family-specific):
+   - Extract from `src/runtime/trt_backend_qwen.cpp`:
+     - shared decode runtime (`trt_decode_runtime.*`),
+     - shared TRT execution wrappers (`trt_execution.*`),
+     - shared TRT graph helper primitives (`trt_graph_ops.*`),
+     - minimal backend facade (`trt_backend.cpp`) that wires tokenizer+definition+runtime only.
+   - Keep model graph building out of runtime files.
+2. Family-owned TRT graph builders:
+   - Create `src/model/qwen3/trt_graph_builder.*` implementing a small family graph-builder interface.
+   - Runtime selects graph builder based on normalized family/definition metadata rather than hardcoding Qwen branches.
+3. Model loader decomposition:
+   - Split `src/model/model_loader.cpp` into focused units:
+     - `model_config_parser.*`,
+     - `vocab_transitions_loader.*`,
+     - `checkpoint_loader_common.*`,
+     - `safetensors_index_parser.*`,
+     - family checkpoint mappers (for example `qwen3_checkpoint_mapper.*`).
+   - Keep generic loader path family-agnostic; delegate family tensor key mapping to family modules.
+4. Registry and contract hardening:
+   - Extend family registration contract to include optional checkpoint mapper + optional TRT graph builder provider.
+   - Ensure onboarding a new dense decoder family can be done without touching `src/runtime/*` shared core.
+5. Test gate upgrades (correctness-first):
+   - Promote diff tooling to a deterministic gate:
+     - unit tests for tensor mapping and shape contracts,
+     - per-layer/op diff checks against HF reference for selected prompts/tokens,
+     - E2E parity checks with engine cache warm/cold behavior.
+   - Keep MMLU as benchmark/integration signal, not primary numerical-debug tool.
+
+Execution order selected for next implementation cycles:
+1. Extract runtime shared core and introduce graph-builder interface.
+2. Move Qwen3 TRT graph construction to model-owned files.
+3. Split model loader and migrate Qwen-specific mapping into family-owned mapper.
+4. Add diff-test gate integration into standard test runs.
+
+## 2026-02-13 (continued: phase-1 modularization implementation slice)
+
+Implemented in this iteration (first concrete cut of bottleneck reduction):
+- Introduced shared TRT backend dispatch facade:
+  - Added `src/runtime/trt_backend.cpp`.
+  - `CreateTrtBackend(...)` now acts as dispatch seam, routing Qwen-family models to family implementation.
+- Isolated current family implementation entrypoint:
+  - Added `src/runtime/trt_backend_qwen_impl.h`.
+  - Renamed factory in `src/runtime/trt_backend_qwen.cpp` from `CreateTrtBackend(...)` to `CreateTrtQwenBackend(...)`.
+- Introduced family-owned loader seam in `src/model`:
+  - Added `src/model/qwen3_decoder_model_loader.h` and `src/model/qwen3_decoder_model_loader.cpp`.
+  - `src/model/hf_family_registry.cpp` now routes HF-root Qwen checkpoint loading through `LoadQwen3DecoderModel(...)`.
+  - Kept normalized `trtf_decoder/` fixture path compatible (`LoadDecoderModel(...)`) and added fallback handling in the Qwen loader seam for fixture metadata.
+- Wired build graph:
+  - `CMakeLists.txt` now compiles `src/runtime/trt_backend.cpp` and `src/model/qwen3_decoder_model_loader.cpp`.
+
+Why this matters for modularity:
+- Shared runtime now has an explicit dispatch seam (`CreateTrtBackend`) so additional family backends can be added without replacing existing runtime factory contracts.
+- Family registry now has a concrete family-owned model-loading hook under `src/model`, reducing direct coupling from registry to monolithic shared loader entrypoints.
+- This is an incremental step; large hotspots (`src/runtime/trt_backend_qwen.cpp`, `src/model/model_loader.cpp`) still require deeper extraction in subsequent slices.
+
+Validation after refactor:
+- Host build/tests:
+  - `cmake --build build -j` passed.
+  - `ctest --test-dir build --output-on-failure` passed (`9/9`).
+- Container full E2E script (authoritative TRT path):
+  - `./scripts/test_qwen3_trt_e2e.sh "Hello"` inside `trtf-dev` container passed.
+  - Container `ctest` passed (`9/9`).
+  - TRT run 1 output: `backend=trt`, `Hello Answer`.
+  - TRT run 2 output: `backend=trt`, `Hello Answer`.
+- Real-model TRT sanity prompt:
+  - Prompt: `Tell me about nvidia`
+  - Output (TRT): `Tell me about nvidia's latest update for the graphics card, and what are the features that make it different from previous models`
+- Accuracy sanity (TRT backend, real Qwen3):
+  - `scripts/eval_mmlu.py --backend trtf --model QWEN3 --force-trt --num-samples 4`
+  - Result: `answered=4`, `correct=2`, `accuracy=0.5000`, `status=PASS`.
+
+Known validation gap from this iteration:
+- Direct HF side-by-side generation comparison in container was blocked because `.venv-hf` currently lacks `torch` (`ModuleNotFoundError: No module named 'torch'`).
+- TRT path itself remains validated via container E2E + MMLU sanity above.
+
+Next-step TODO (priority order):
+1. Restore HF reference parity path:
+   - Install `torch` (and `accelerate` if needed) in `.venv-hf` inside the TRT container.
+   - Re-run direct TRT vs HF prompt comparison for at least:
+     - `Hello`
+     - `Tell me about nvidia`
+   - Capture both outputs and a short parity judgment in worklog.
+2. Continue runtime modularization (shared runtime extraction):
+   - Extract decode-loop and CUDA enqueue helpers from `src/runtime/trt_backend_qwen.cpp` into shared runtime module(s) (for example `src/runtime/trt_decode_runtime.*` / `src/runtime/trt_execution.*`).
+   - Keep `CreateTrtBackend(...)` as the shared facade and keep Qwen-specific graph construction out of shared runtime file boundaries.
+3. Continue model modularization (family-owned graph builder):
+   - Introduce initial `src/model/qwen3/trt_graph_builder.*` seam and move Qwen graph-builder logic there incrementally.
+   - Ensure runtime selects graph builder via family/definition metadata rather than hardcoded branches.
+4. Validation gate after each refactor slice (required):
+   - Host: `cmake --build build -j` + `ctest --test-dir build --output-on-failure`.
+   - Container: `./scripts/test_qwen3_trt_e2e.sh "Hello"`.
+   - Accuracy sanity: `scripts/eval_mmlu.py --backend trtf --model QWEN3 --force-trt --num-samples 4`.
+5. Acceptance criteria for next checkpoint:
+   - All tests pass (host + container).
+   - Real Qwen3 TRT still returns `backend=trt` and coherent output.
+   - HF side-by-side prompt comparison is unblocked and documented.
+

@@ -71,6 +71,8 @@ python3 -m venv .venv-hf
 source .venv-hf/bin/activate
 pip install -U pip
 pip install "transformers>=4.57.0" tokenizers safetensors sentencepiece huggingface_hub datasets
+# Optional but recommended for HF-reference generation/parity scripts:
+pip install torch accelerate
 ```
 
 ### 3) Download real upstream Qwen3 weights locally
@@ -110,18 +112,18 @@ Notes:
 Inside container:
 ```bash
 nvidia-smi -L
-cmake -S . -B build-container-qwen2 -G Ninja \
+cmake -S . -B build-container-phase1 -G Ninja \
   -DTRTF_TRT_INCLUDE_DIR=/opt/trt/include/zapped_headers \
   -DTRTF_TRT_LIBRARY=/opt/trt/Debug/lib/libnvinfer.so \
   -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
   -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
-cmake --build build-container-qwen2 -j
-ctest --test-dir build-container-qwen2 --output-on-failure
+cmake --build build-container-phase1 -j
+ctest --test-dir build-container-phase1 --output-on-failure
 ```
 
 Important:
 - Do not reuse host-generated build dirs inside container.
-- Use a container-specific build dir (`build-container-qwen2` above).
+- Use a container-specific build dir (`build-container-phase1` above).
 
 ### 5) Validate real Qwen3 TRT E2E generation
 Inside container:
@@ -129,12 +131,19 @@ Inside container:
 TRTF_HF_PYTHON=$PWD/.venv-hf/bin/python \
 TRTF_MAX_CACHE_LENGTH=1 \
 TRTF_MAX_NEW_TOKENS=1 \
-./build-container-qwen2/trtf_load_model --force-trt QWEN3 "Hello"
+./build-container-phase1/trtf_load_model --force-trt QWEN3 "Hello"
 ```
 
 Expected:
 - `backend=trt`
 - output starts with `Hello Answer`
+
+Recommended diagnostic path (build + tests + 2 TRT runs + logs):
+```bash
+./scripts/test_qwen3_trt_e2e.sh "Hello"
+```
+This script writes logs to `/tmp/trtf_qwen3_trt_e2e.log` by default and includes TRT logger output.
+It defaults to `build-container-phase1` and can be redirected with `TRTF_BUILD_DIR=<build-dir>`.
 
 Optional logits debug (for HF/TRT parity checks):
 ```bash
@@ -142,17 +151,25 @@ TRTF_HF_PYTHON=$PWD/.venv-hf/bin/python \
 TRTF_MAX_CACHE_LENGTH=1 \
 TRTF_MAX_NEW_TOKENS=1 \
 TRTF_DEBUG_LOGITS_TOPK=5 \
-./build-container-qwen2/trtf_load_model --force-trt QWEN3 "Hello"
+./build-container-phase1/trtf_load_model --force-trt QWEN3 "Hello"
 ```
 
 Expected debug line shape:
 - `TRTF_DEBUG_LOGITS step=0 <token_id>:<logit> ...`
 
+Optional TensorRT logger output controls:
+```bash
+TRTF_TRT_LOG_STDERR=1 \
+TRTF_TRT_LOG_MIN_SEVERITY=INFO \
+./build-container-phase1/trtf_load_model --force-trt QWEN3 "Hello"
+```
+`TRTF_TRT_LOG_MIN_SEVERITY` can be `INTERNAL_ERROR`, `ERROR`, `WARNING`, `INFO`, or `VERBOSE`.
+
 Longer sanity prompt:
 ```bash
 TRTF_HF_PYTHON=$PWD/.venv-hf/bin/python \
 TRTF_MAX_NEW_TOKENS=20 \
-./build-container-qwen2/trtf_load_model --force-trt QWEN3 "The capital of France is"
+./build-container-phase1/trtf_load_model --force-trt QWEN3 "The capital of France is"
 ```
 
 ### 6) MMLU sanity check (TRT backend)
@@ -163,7 +180,7 @@ TRTF_MAX_NEW_TOKENS=8 \
 $PWD/.venv-hf/bin/python scripts/eval_mmlu.py \
   --backend trtf \
   --model QWEN3 \
-  --trtf-binary ./build-container-qwen2/trtf_load_model \
+  --trtf-binary ./build-container-phase1/trtf_load_model \
   --force-trt \
   --subject all \
   --split test \
@@ -200,9 +217,9 @@ ctest --test-dir build-trt --output-on-failure
 ### 8) Optional HF-transformers parity check on tiny GPT2
 ```bash
 source .venv-hf/bin/activate
-python scripts/compare_hf_pipeline_vs_transformers.py \
+python3 scripts/compare_hf_pipeline_vs_transformers.py \
   --model-dir models/hf/hf-internal-testing__tiny-random-gpt2 \
-  --binary ./build-container-qwen2/trtf_text_generation \
+  --binary ./build-container-phase1/trtf_text_generation \
   --prompt "Hello from trtf" \
   --max-new-tokens 20
 ```
@@ -229,6 +246,10 @@ Python interpreter resolution for `hf-transformers` backend and HF tokenizer bri
 
 Decoder-definition cache-length override:
 - `TRTF_MAX_CACHE_LENGTH=<positive-int>` can cap/override runtime cache length when loading model definitions.
+
+TRT engine-plan cache controls:
+- `TRTF_TRT_ENGINE_CACHE_DIR=<path>` sets the on-disk cache location for serialized TRT engine plans.
+- `TRTF_DISABLE_ENGINE_CACHE=1` disables plan cache read/write (forces rebuild/deserialize path each process).
 
 ## Model format reference
 Built-in model id:

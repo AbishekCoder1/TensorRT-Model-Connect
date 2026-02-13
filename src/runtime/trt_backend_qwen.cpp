@@ -1724,7 +1724,7 @@ private:
 
 } // namespace
 
-std::unique_ptr<IGenerationBackend> CreateTrtBackend(const ITokenizer& tokenizer, const DecoderModel& model)
+std::unique_ptr<IGenerationBackend> CreateTrtQwenBackend(const ITokenizer& tokenizer, const DecoderModel& model)
 {
     return std::make_unique<TrtBackend>(tokenizer, model);
 }
