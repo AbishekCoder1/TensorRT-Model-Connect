@@ -275,3 +275,78 @@ Next steps for future agents:
 2. Keep `TRTF_DEBUG_LOGITS_TOPK` as gated debug tooling, and consider removing/limiting `TRTF_DEBUG_MASK` once no longer needed.
 3. Improve `scripts/eval_mmlu.py` TRT mode to avoid one-process-per-question startup (persistent runner), then run a larger official sample (for example 64).
 4. Re-record full MMLU TRT metric after persistent-eval optimization.
+
+## 2026-02-13 (Phase 1 cleanup kickoff: model/runtime boundary + TRT reuse)
+
+Comprehensive cleanup plan (authoritative):
+1. Baseline audit and dependency map (files, build graph, tests, docs, generated artifacts).
+2. Refactor TRT runtime into shared core + TRT utility modules; eliminate dead legacy backend file.
+3. Move model-family specific TRT graph code behind model-owned builders under `src/model`.
+4. Split monolithic model loader into focused loaders/parsers and deduplicate resolver/registry helpers.
+5. Harden test layout: unit tests + deterministic HF layer/op diff gate + optional MMLU benchmark gate.
+6. Clean repo artifacts/docs/ignore rules and align README with production-parity Qwen3 path.
+7. Run full validation matrix (host + container TRT + Qwen3 real-model checks) and update worklog.
+
+Repo scrub findings captured for cleanup decisions:
+- `src/runtime/trt_backend.cpp` was dead (not compiled by `CMakeLists.txt`) and duplicated TRT backend symbols.
+- `src/runtime/trt_backend_qwen.cpp` remained monolithic (builder utils + graph construction + decode runtime).
+- `src/model/model_loader.cpp` was multi-responsibility and needs extraction in later phases.
+- Qwen HF diff tooling existed (`scripts/qwen_layer_diff.py`) but was not yet a ctest gate.
+
+Phase 1 implementation completed in this iteration:
+- Removed dead legacy TRT file:
+  - deleted `src/runtime/trt_backend.cpp`.
+- Started shared TRT utility extraction:
+  - added `src/utils/trt/engine_cache.h`.
+  - added `src/utils/trt/engine_cache.cpp`.
+  - added utility source to build target in `CMakeLists.txt`.
+- Implemented engine-plan reuse to avoid repeated TRT rebuilds across process invocations:
+  - `src/runtime/trt_backend_qwen.cpp` now uses cache key + load/store hooks in
+    `finalize_decoder_step_engine(...)`.
+  - First run builds serialized engine plan and persists it.
+  - Subsequent runs deserialize cached plan directly when cache key matches model/runtime definition.
+
+Engine cache behavior notes:
+- Cache key includes model-definition scalars and tensor contents (including Qwen per-layer tensors), plus runtime flags.
+- Cache location defaults to:
+  - `$TRTF_TRT_ENGINE_CACHE_DIR` when set, else
+  - `$HOME/.cache/trtf/trt_engine_plans`, else
+  - `/tmp/trtf/trt_engine_plans`.
+- Cache can be disabled with `TRTF_DISABLE_ENGINE_CACHE=1`.
+
+Validation policy for this branch (requested by user):
+- After every code change set, run all unit tests and E2E tests (host + TRT container path).
+- Log exact commands/results in worklog for future agents.
+
+## 2026-02-13 (continued: TRT logger passthrough + E2E stdout diagnostics)
+
+Implemented to support direct stdout-based debugging:
+- Added TRT logger passthrough in `src/runtime/trt_backend_qwen.cpp`:
+  - `TRTF_TRT_LOG_STDERR=1` enables forwarding TensorRT `ILogger` lines to stderr/stdout stream.
+  - `TRTF_TRT_LOG_MIN_SEVERITY=<INTERNAL_ERROR|ERROR|WARNING|INFO|VERBOSE>` controls verbosity (default: `INFO`).
+- Added new reproducible E2E diagnostics script:
+  - `scripts/test_qwen3_trt_e2e.sh`
+  - Runs configure/build/ctest, then two forced-TRT `QWEN3` runs with timing and log capture.
+  - Writes logs to `/tmp/trtf_qwen3_trt_e2e.log` by default.
+
+Validation run summary:
+- Host:
+  - `cmake --build build -j` passed.
+  - `ctest --test-dir build --output-on-failure` passed (`9/9`).
+  - `./build/trtf_load_model trtf/tiny-cake-v1 Hello` passed (`backend=cpu-reference`).
+- Container via `scripts/test_qwen3_trt_e2e.sh`:
+  - configure/build/ctest passed (`9/9`).
+  - Run 1 (`--force-trt QWEN3 Hello`) output:
+    - `backend=trt`
+    - `Hello Answer`
+    - timing ~ `1m51s`
+    - TRT logger includes explicit build markers such as `Engine generation completed ...`.
+  - Run 2 (`--force-trt QWEN3 Hello`) output:
+    - `backend=trt`
+    - `Hello Answer`
+    - timing ~ `4m01s`
+    - TRT logger includes `Loaded engine size ...` without repeating full build marker sequence in sampled tail.
+
+Notes:
+- This script/logging path now makes startup behavior inspectable entirely from stdout/stderr, per request.
+- TRT compilation warnings from TensorRT headers remain visible during build and are expected in this environment.

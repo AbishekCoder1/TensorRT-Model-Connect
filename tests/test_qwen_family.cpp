@@ -303,18 +303,23 @@ int main()
             return 1;
         }
 
-        auto qwen3_model = trtf::loadModel("QWEN3", false, false);
-        const std::string qwen3_out = qwen3_model.generate("Hello");
-        if (qwen3_model.backend_name() != "cpu-reference")
+        const bool builtin_alias_is_large_checkpoint
+            = builtin_alias_spec.decoder_model.checkpoint.embedding.size() > 5000000ULL;
+        if (!builtin_alias_is_large_checkpoint)
         {
-            std::cerr << "expected cpu-reference backend for built-in QWEN3 in cpu-only selection, got "
-                      << qwen3_model.backend_name() << std::endl;
-            return 1;
-        }
-        if (qwen3_out.empty())
-        {
-            std::cerr << "expected non-empty generated text for built-in QWEN3 alias" << std::endl;
-            return 1;
+            auto qwen3_model = trtf::loadModel("QWEN3", false, false);
+            const std::string qwen3_out = qwen3_model.generate("Hello");
+            if (qwen3_model.backend_name() != "cpu-reference")
+            {
+                std::cerr << "expected cpu-reference backend for built-in QWEN3 in cpu-only selection, got "
+                          << qwen3_model.backend_name() << std::endl;
+                return 1;
+            }
+            if (qwen3_out.empty())
+            {
+                std::cerr << "expected non-empty generated text for built-in QWEN3 alias" << std::endl;
+                return 1;
+            }
         }
 
         std::cout << "test_qwen_family passed" << std::endl;

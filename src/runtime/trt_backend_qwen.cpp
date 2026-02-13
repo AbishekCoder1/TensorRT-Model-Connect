@@ -2,6 +2,7 @@
 #include "trtf/model.h"
 #include "trtf/tokenizer.h"
 #include "model/trt_model_definition.h"
+#include "utils/trt/engine_cache.h"
 
 #include <algorithm>
 #include <cmath>
@@ -29,6 +30,72 @@ namespace trtf {
 namespace {
 
 #if TRTF_HAS_TRT
+const char* trt_severity_name(nvinfer1::ILogger::Severity severity)
+{
+    switch (severity)
+    {
+    case nvinfer1::ILogger::Severity::kINTERNAL_ERROR:
+        return "INTERNAL_ERROR";
+    case nvinfer1::ILogger::Severity::kERROR:
+        return "ERROR";
+    case nvinfer1::ILogger::Severity::kWARNING:
+        return "WARNING";
+    case nvinfer1::ILogger::Severity::kINFO:
+        return "INFO";
+    case nvinfer1::ILogger::Severity::kVERBOSE:
+        return "VERBOSE";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+bool trt_log_to_stderr_enabled()
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("TRTF_TRT_LOG_STDERR");
+        if (env == nullptr || env[0] == '\0')
+        {
+            return false;
+        }
+        return std::strcmp(env, "0") != 0;
+    }();
+    return enabled;
+}
+
+nvinfer1::ILogger::Severity trt_log_stderr_min_severity()
+{
+    static const nvinfer1::ILogger::Severity severity = [] {
+        const char* env = std::getenv("TRTF_TRT_LOG_MIN_SEVERITY");
+        if (env == nullptr || env[0] == '\0')
+        {
+            return nvinfer1::ILogger::Severity::kINFO;
+        }
+
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(),
+            [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+
+        if (value == "INTERNAL_ERROR")
+        {
+            return nvinfer1::ILogger::Severity::kINTERNAL_ERROR;
+        }
+        if (value == "ERROR")
+        {
+            return nvinfer1::ILogger::Severity::kERROR;
+        }
+        if (value == "WARNING")
+        {
+            return nvinfer1::ILogger::Severity::kWARNING;
+        }
+        if (value == "VERBOSE")
+        {
+            return nvinfer1::ILogger::Severity::kVERBOSE;
+        }
+        return nvinfer1::ILogger::Severity::kINFO;
+    }();
+    return severity;
+}
+
 class TrtLogger final : public nvinfer1::ILogger {
 public:
     void log(Severity severity, const char* msg) noexcept override
@@ -36,6 +103,11 @@ public:
         if (severity <= Severity::kERROR && msg != nullptr)
         {
             mLastError = msg;
+        }
+
+        if (msg != nullptr && trt_log_to_stderr_enabled() && severity <= trt_log_stderr_min_severity())
+        {
+            std::cerr << "TRT_LOG[" << trt_severity_name(severity) << "] " << msg << '\n';
         }
     }
 
@@ -540,22 +612,39 @@ std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuild
     const std::vector<std::string>& cache_v_input_names, const std::vector<std::string>& present_k_output_names,
     const std::vector<std::string>& present_v_output_names, bool requires_position_input)
 {
-    auto plan = TrtUniquePtr<nvinfer1::IHostMemory>(builder.buildSerializedNetwork(network, config));
-    if (!plan)
-    {
-        return nullptr;
-    }
-
     auto runtime = TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
     if (!runtime)
     {
         return nullptr;
     }
 
-    auto trt_engine = TrtUniquePtr<nvinfer1::ICudaEngine>(runtime->deserializeCudaEngine(plan->data(), plan->size()));
+    TrtEngineCacheKeyParams cache_key_params;
+    cache_key_params.requires_position_input = requires_position_input;
+    cache_key_params.num_layers = static_cast<int32_t>(cache_k_input_names.size());
+    const std::string cache_key = BuildTrtEngineCacheKey(weights, cache_key_params);
+
+    TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine;
+    if (const auto cached_plan = LoadTrtEnginePlanFromCache(cache_key))
+    {
+        trt_engine = TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime->deserializeCudaEngine(cached_plan->data(), cached_plan->size()));
+    }
+
     if (!trt_engine)
     {
-        return nullptr;
+        auto plan = TrtUniquePtr<nvinfer1::IHostMemory>(builder.buildSerializedNetwork(network, config));
+        if (!plan)
+        {
+            return nullptr;
+        }
+
+        trt_engine = TrtUniquePtr<nvinfer1::ICudaEngine>(runtime->deserializeCudaEngine(plan->data(), plan->size()));
+        if (!trt_engine)
+        {
+            return nullptr;
+        }
+
+        SaveTrtEnginePlanToCache(cache_key, plan->data(), plan->size());
     }
 
     auto execution_context = TrtUniquePtr<nvinfer1::IExecutionContext>(trt_engine->createExecutionContext());

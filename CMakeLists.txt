@@ -63,6 +63,7 @@ add_library(trtf_core
   src/runtime/hf_python_backend.cpp
   src/runtime/runtime_factory.cpp
   src/runtime/trt_backend_qwen.cpp
+  src/utils/trt/engine_cache.cpp
   src/tokenizer/toy_tokenizer.cpp
   src/tokenizer/hf_python_tokenizer.cpp
 )
