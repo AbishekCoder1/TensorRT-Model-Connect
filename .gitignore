@@ -55,3 +55,10 @@ models/hf/*/.cache/
 models/hf/Qwen__Qwen3-0.6B/model.safetensors
 models/hf/*/model-*.safetensors
 models/hf/*/model.safetensors.index.json
+
+.*
+config
+HEAD
+hooks
+objects
+refs
