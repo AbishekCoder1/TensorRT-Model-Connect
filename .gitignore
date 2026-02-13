@@ -1,0 +1,54 @@
+# Build outputs
+/build/
+/build-*/
+/build-container/
+/build-container-*/
+/build-docker/
+/build-gpu/
+/build-gpu-*/
+cmake-build-*/
+
+# CMake/Ninja generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+Makefile
+.ninja_*
+*.ninja
+Testing/
+compile_commands.json
+
+# Native build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.d
+*.pdb
+
+# Python envs and caches
+.venv/
+.venv-*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Logs and editor swap files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Local model/download caches and heavyweight local checkpoints
+models/hf/*/.cache/
+models/hf/Qwen__Qwen3-0.6B/model.safetensors
+models/hf/*/model-*.safetensors
+models/hf/*/model.safetensors.index.json

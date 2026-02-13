@@ -1,0 +1,6 @@
+{
+  "model_type": "tiny_decoder_block",
+  "default_next_token": "to",
+  "max_cache_length": 32,
+  "weights_file": "weights.txt"
+}

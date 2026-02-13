@@ -1,0 +1,15 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trtf-dev
+    working_dir: /workspace/trt-transformers-cpp
+    tty: true
+    stdin_open: true
+    gpus: all
+    environment:
+      - TRT_ROOT=/opt/trt
+    volumes:
+      - ./:/workspace/trt-transformers-cpp
+      - /home/yifeif/repos/trt/build/tensorrt-base-dev/rel-10.15-native-x86_64-ubuntu20.04-cuda11.8-auto/cmake:/opt/trt:ro
