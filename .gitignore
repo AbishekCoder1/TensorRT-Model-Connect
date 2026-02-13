@@ -41,6 +41,9 @@ __pycache__/
 .ruff_cache/
 .ipynb_checkpoints/
 
+# Claude Code
+.claude/
+
 # Logs and editor swap files
 *.log
 *.tmp
