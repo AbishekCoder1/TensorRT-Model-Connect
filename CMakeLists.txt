@@ -65,6 +65,16 @@ add_library(trtf_core
   src/runtime/runtime_factory.cpp
   src/runtime/trt_backend.cpp
   src/runtime/trt_backend_qwen.cpp
+  src/runtime/trt/trt_common.cpp
+  src/runtime/trt/trt_graph_ops.cpp
+  src/runtime/trt/trt_engine_lifecycle.cpp
+  src/runtime/trt/trt_decode_runtime.cpp
+  src/runtime/trt/trt_backend_shared.cpp
+  src/runtime/trt/trt_graph_builder.cpp
+  src/models/qwen/registration.cpp
+  src/utils/text_parsers.cpp
+  src/utils/json_helpers.cpp
+  src/utils/tensor_math.cpp
   src/utils/trt/engine_cache.cpp
   src/tokenizer/toy_tokenizer.cpp
   src/tokenizer/hf_python_tokenizer.cpp

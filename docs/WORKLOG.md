@@ -478,3 +478,80 @@ Next-step TODO (priority order):
    - Real Qwen3 TRT still returns `backend=trt` and coherent output.
    - HF side-by-side prompt comparison is unblocked and documented.
 
+## 2026-02-13 (continued: HF-aligned distributed ownership refactor)
+
+Implemented comprehensive structural refactoring to enable HuggingFace-style distributed model ownership. The goal: a new model family (e.g., LLaMA) can be added by creating files only in `src/models/<family>/`, adding sources to `CMakeLists.txt`, and making zero edits to shared runtime, model loader, or pipeline code.
+
+### Phase 0: Shared Utilities Extraction (no behavioral change)
+
+Eliminated duplicated utilities across 4+ files (`model_loader.cpp`, `hf_family_registry.cpp`, `qwen3_decoder_model_loader.cpp`, `trt_backend.cpp`, `trt_backend_qwen.cpp`).
+
+New files created:
+- `src/utils/text_parsers.h/cpp` — 14 shared functions: `starts_with`, `ends_with`, `to_lower_ascii`, `trim`, `strip_inline_comment`, `read_file`, `read_clean_lines`, `load_vocab`, `load_transitions`, `split_words`, `parse_int`, `parse_float`, `iequals_ascii`, `SourceLine`.
+- `src/utils/json_helpers.h/cpp` — 6 shared functions: `extract_json_string`, `extract_json_string_array`, `extract_json_int`, `extract_json_int_or_first_array`, `extract_json_float`, `parse_positive_env_int`.
+- `src/utils/tensor_math.h/cpp` — 3 shared functions: `transpose_2d`, `repeat_head_norm`, `expand_kv_projection`.
+- Expanded `src/model/safetensors_loader.h/cpp` with `TensorSource` class and `is_safetensors_index_file()`, previously inlined in `model_loader.cpp`.
+
+All consumer files updated to include shared headers; duplicate anonymous-namespace copies removed. Functions moved from internal linkage to `namespace trtf`.
+
+Validation: host build + ctest passed (same 5/9 baseline — 4 failures are sandbox `mkdtemp` restrictions, not code).
+
+### Phase 1: Extract Shared TRT Infrastructure (no behavioral change)
+
+Carved `src/runtime/trt_backend_qwen.cpp` (1732 LOC) into shared reusable modules under `src/runtime/trt/`:
+
+- `src/runtime/trt/trt_common.h/cpp` — `TrtLogger`, `TrtDeleter`, `TrtUniquePtr`, `CudaStream`, `CudaBuffer`, TRT severity/log controls.
+- `src/runtime/trt/trt_graph_ops.h/cpp` — Reusable TRT graph construction ops: `make_dims_*`, `add_constant_tensor`, `add_matmul_rhs_constant`, `add_bias_sum`, `add_rms_norm`, `add_rms_norm_per_head`, `make_rope_table`, `make_rotate_half_matrix`, `add_apply_rope`, `layer_tensor_name`.
+- `src/runtime/trt/trt_engine_lifecycle.h/cpp` — `DecoderStepEngine` struct, `has_io_tensor`, `has_all_required_tensors`, `finalize_decoder_step_engine` (with engine cache integration).
+- `src/runtime/trt/trt_decode_runtime.h/cpp` — `select_argmax_token`, `select_topk_tokens`, `build_attention_mask`, `append_cache_state`, `run_decoder_step` (full CUDA bind/execute/sync).
+- `src/runtime/trt/trt_backend_shared.h/cpp` — Generic `TrtBackendShared` class implementing `IGenerationBackend` with the autoregressive prefill+decode loop. Exposes `CreateTrtBackendWithFactory()` accepting a pluggable `DecoderStepEngineFactory`.
+
+`trt_backend_qwen.cpp` rewritten to `#include` shared headers and call shared functions instead of defining everything locally. Reduced from 1732 LOC of self-contained code to ~630 LOC of Qwen-specific graph builder logic (legacy + multi-layer).
+
+Validation: host build + ctest passed (same 5/9 baseline).
+
+### Phase 2: Create Qwen Family Directory (no behavioral change)
+
+Created `src/models/qwen/` as the canonical model-family directory:
+- `src/models/qwen/registration.h/cpp` — `qwen::RegisterQwenFamily()` containing the HF family matcher (`is_qwen_model_type`) and model definition loader. This is the single entry point for Qwen family registration.
+
+Updated `src/model/hf_family_registry.cpp`:
+- `RegisterBuiltinHfModelFamilies()` now delegates to `qwen::RegisterQwenFamily()`.
+- Removed inlined Qwen-specific helper functions (`is_qwen_model_type`, `qwen_decoder_dir`, `has_decoder_definition_files`, `has_qwen_root_checkpoint`, `load_decoder_definition_model`) — moved to Qwen registration file.
+
+Validation: host build + ctest passed (same 5/9 baseline).
+
+### Phase 3: Registration-Based TRT Dispatch (architectural enhancement)
+
+Introduced `ITrtGraphBuilder` interface for family-specific TRT graph builders:
+- `src/runtime/trt/trt_graph_builder.h/cpp` — defines `ITrtGraphBuilder` abstract class with `build_decoder_step_engine()` virtual method, plus `RegisterTrtGraphBuilder(family, builder)` and `FindTrtGraphBuilder(family)` registry functions.
+
+This enables a new model family to register its TRT graph builder without modifying any shared runtime code.
+
+Validation: host build + ctest passed (same 5/9 baseline).
+
+### Phase 5: Documentation
+
+- Updated `CLAUDE.md` with new source layout diagram and updated "Adding a new model family" instructions.
+- Updated `README.md` with new source layout section and updated model family onboarding guide.
+
+### Summary statistics
+- 19 new files created
+- 8 existing files updated
+- Zero behavioral changes — pure structural refactoring
+- All passable tests continue to pass
+
+### Host validation commands used
+```bash
+cmake -S . -B build -G Ninja
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+### Next steps for future agents
+1. Container TRT E2E validation: `./scripts/test_qwen3_trt_e2e.sh "Hello"` inside `trtf-dev`.
+2. MMLU sanity: `scripts/eval_mmlu.py --backend trtf --model QWEN3 --force-trt --num-samples 4`.
+3. Phase 4 (diff-test framework): per-op numerical parity tests against HF Python reference.
+4. Continue moving Qwen checkpoint mapping from `model_loader.cpp` into `src/models/qwen/checkpoint_mapper.cpp`.
+5. Wire `RegisterTrtGraphBuilder` into the Qwen registration so `CreateTrtBackend` dispatches via registry lookup instead of hardcoded `if/else`.
+

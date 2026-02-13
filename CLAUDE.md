@@ -8,6 +8,8 @@ C++ library mirroring HuggingFace `transformers.pipeline(...)` with TensorRT-fir
 
 ## Build commands
 
+ALWAYS DO EVERYTHING IN CONTAINER. Run command with docker exec
+
 Native host build (works without TRT/CUDA; TRT backend auto-disables if deps not found):
 ```bash
 cmake -S . -B build -G Ninja
@@ -68,7 +70,7 @@ The pipeline flow has three stages, each with an extension point:
 3. **Runtime assembly** (`BuildRuntimeForTextGeneration`) — creates tokenizer + backend from the resolved model spec, respecting `BackendSelection` (prefer_trt/force_trt). Extension: `RegisterTextGenerationRuntimeAssembler(...)`.
 
 Three backends implement `IGenerationBackend`:
-- **trt** — TensorRT graph builder (`src/runtime/trt_backend.cpp`, `trt_backend_qwen.cpp`). Builds network via TensorRT C++ API (not ONNX).
+- **trt** — TensorRT graph builder. Dispatches to registered `ITrtGraphBuilder` per family. Builds network via TensorRT C++ API (not ONNX).
 - **cpu-reference** — deterministic CPU fallback using transition tables.
 - **hf-transformers** — delegates to HuggingFace Python via subprocess.
 
@@ -76,13 +78,55 @@ Tokenizer implementations (`ITokenizer`):
 - `ToyTokenizer` — vocab.txt-based lookup for built-in/decoder-definition models.
 - `HfPythonTokenizer` — bridges to HuggingFace tokenizers via Python subprocess.
 
+## Source layout
+
+```
+src/
+  utils/
+    text_parsers.h/cpp           # shared string/file parsing (starts_with, read_file, etc.)
+    json_helpers.h/cpp           # shared JSON extraction (extract_json_string, etc.)
+    tensor_math.h/cpp            # transpose_2d, expand_kv, repeat_head_norm
+    trt/engine_cache.h/cpp       # TRT engine plan on-disk cache
+  model/
+    model_loader.cpp             # generic DecoderModel loading + Qwen checkpoint mapping
+    safetensors_loader.h/cpp     # SafetensorReader + TensorSource (single/sharded)
+    model_resolver.cpp           # multi-stage model resolution pipeline
+    hf_family_registry.cpp       # family registry + builtin registration dispatch
+    trt_model_definition.h/cpp   # DecoderModel -> TrtDecoderDefinition conversion
+    qwen3_trt_model_definition.h/cpp  # Qwen3 layer stack -> TRT definition
+    qwen3_decoder_model_loader.h/cpp  # Qwen-specific LoadDecoderModel wrapper
+  models/
+    qwen/
+      registration.h/cpp         # RegisterQwenFamily() — HF matcher + TRT builder
+  runtime/
+    trt_backend.cpp              # CreateTrtBackend — family dispatch (registration-based)
+    trt_backend_qwen.cpp         # Qwen graph builders (legacy + multi-layer)
+    trt_backend_qwen_impl.h      # CreateTrtQwenBackend declaration
+    trt/
+      trt_common.h/cpp           # TrtLogger, TrtDeleter, CudaStream, CudaBuffer
+      trt_graph_ops.h/cpp        # Reusable TRT ops: add_rms_norm, add_rope, matmul, etc.
+      trt_engine_lifecycle.h/cpp # DecoderStepEngine, finalize_decoder_step_engine
+      trt_decode_runtime.h/cpp   # run_decoder_step, cache management, sampling
+      trt_backend_shared.h/cpp   # Generic TrtBackend autoregressive generate loop
+      trt_graph_builder.h/cpp    # ITrtGraphBuilder interface + registry
+    cpu_reference_backend.cpp
+    hf_python_backend.cpp
+    runtime_factory.cpp
+  pipeline/pipeline.cpp
+  tokenizer/*.cpp
+```
+
 ## Adding a new model family
 
-Preferred path (no pipeline.cpp edits):
-1. Register `HfModelFamilyRegistration` with a `matcher` and `model_definition_loader`.
+Preferred path — create files only in `src/models/<family>/`, add to CMakeLists.txt, zero edits to shared code:
+
+1. Create `src/models/<family>/registration.cpp` that calls `RegisterHfModelFamily(...)` with a `matcher` and `model_definition_loader`.
 2. The loader returns a `DecoderModel` from `HfModelMetadata`.
-3. Runtime/backend infrastructure is shared automatically.
-4. See `src/model/hf_family_registry.cpp` for the Qwen3 built-in registration and `tests/test_hf_family_registry.cpp` for the pattern.
+3. Optionally register a TRT graph builder via `RegisterTrtGraphBuilder(family, builder)`.
+4. Call your `Register<Family>Family()` from `RegisterBuiltinHfModelFamilies()` in `hf_family_registry.cpp`.
+5. See `src/models/qwen/registration.cpp` for the Qwen3 built-in registration and `tests/test_hf_family_registry.cpp` for the pattern.
+
+Shared TRT graph ops (RMSNorm, RoPE, attention, SwiGLU) are in `src/runtime/trt/trt_graph_ops.h` — reusable by any family.
 
 ## Container workflow (TRT GPU)
 

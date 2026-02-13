@@ -1,4 +1,5 @@
 #include "safetensors_loader.h"
+#include "utils/text_parsers.h"
 
 #include <algorithm>
 #include <array>
@@ -7,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -520,6 +522,246 @@ std::vector<float> SafetensorReader::load_f32(const std::string& name) const
     }
 
     throw std::runtime_error("Unsupported safetensors dtype for tensor " + name + ": " + meta.dtype);
+}
+
+namespace {
+
+void skip_json_ws(const std::string& text, std::size_t& pos)
+{
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])) != 0)
+    {
+        ++pos;
+    }
+}
+
+std::string parse_json_string_raw(const std::string& text, std::size_t& pos)
+{
+    if (pos >= text.size() || text[pos] != '"')
+    {
+        throw std::runtime_error("Invalid JSON string while parsing safetensors index.");
+    }
+
+    ++pos;
+    std::string out;
+    while (pos < text.size())
+    {
+        const char c = text[pos++];
+        if (c == '"')
+        {
+            return out;
+        }
+        if (c == '\\')
+        {
+            if (pos >= text.size())
+            {
+                throw std::runtime_error("Invalid JSON escape while parsing safetensors index.");
+            }
+            const char esc = text[pos++];
+            switch (esc)
+            {
+            case '"':
+            case '\\':
+            case '/':
+                out.push_back(esc);
+                break;
+            case 'b':
+                out.push_back('\b');
+                break;
+            case 'f':
+                out.push_back('\f');
+                break;
+            case 'n':
+                out.push_back('\n');
+                break;
+            case 'r':
+                out.push_back('\r');
+                break;
+            case 't':
+                out.push_back('\t');
+                break;
+            case 'u':
+                if (pos + 4 > text.size())
+                {
+                    throw std::runtime_error("Invalid JSON unicode escape while parsing safetensors index.");
+                }
+                pos += 4;
+                out.push_back('?');
+                break;
+            default:
+                throw std::runtime_error("Invalid JSON escape while parsing safetensors index.");
+            }
+            continue;
+        }
+        out.push_back(c);
+    }
+
+    throw std::runtime_error("Unterminated JSON string while parsing safetensors index.");
+}
+
+std::unordered_map<std::string, std::string> parse_safetensors_index_weight_map(const std::filesystem::path& path)
+{
+    const std::string text = trtf::read_file(path);
+    const std::string needle = "\"weight_map\"";
+    const std::size_t key_pos = text.find(needle);
+    if (key_pos == std::string::npos)
+    {
+        throw std::runtime_error("Missing weight_map in safetensors index: " + path.string());
+    }
+
+    std::size_t pos = text.find(':', key_pos);
+    if (pos == std::string::npos)
+    {
+        throw std::runtime_error("Invalid weight_map in safetensors index: " + path.string());
+    }
+    ++pos;
+    skip_json_ws(text, pos);
+    if (pos >= text.size() || text[pos] != '{')
+    {
+        throw std::runtime_error("Invalid weight_map object in safetensors index: " + path.string());
+    }
+    ++pos;
+
+    std::unordered_map<std::string, std::string> out;
+    while (true)
+    {
+        skip_json_ws(text, pos);
+        if (pos >= text.size())
+        {
+            throw std::runtime_error("Unexpected EOF in safetensors index weight_map: " + path.string());
+        }
+        if (text[pos] == '}')
+        {
+            ++pos;
+            break;
+        }
+
+        const std::string tensor_name = parse_json_string_raw(text, pos);
+        skip_json_ws(text, pos);
+        if (pos >= text.size() || text[pos] != ':')
+        {
+            throw std::runtime_error("Expected ':' in safetensors index weight_map: " + path.string());
+        }
+        ++pos;
+        skip_json_ws(text, pos);
+        const std::string shard_name = parse_json_string_raw(text, pos);
+
+        out.emplace(tensor_name, shard_name);
+
+        skip_json_ws(text, pos);
+        if (pos >= text.size())
+        {
+            throw std::runtime_error("Unexpected EOF in safetensors index weight_map: " + path.string());
+        }
+        if (text[pos] == ',')
+        {
+            ++pos;
+            continue;
+        }
+        if (text[pos] == '}')
+        {
+            ++pos;
+            break;
+        }
+        throw std::runtime_error("Invalid separator in safetensors index weight_map: " + path.string());
+    }
+
+    return out;
+}
+
+} // namespace
+
+bool is_safetensors_index_file(const std::filesystem::path& path)
+{
+    return ends_with(path.filename().string(), ".safetensors.index.json");
+}
+
+TensorSource::TensorSource(const std::filesystem::path& path)
+{
+    if (is_safetensors_index_file(path))
+    {
+        init_from_index(path);
+        return;
+    }
+
+    mSinglePath = path;
+    mSingleReader = std::make_unique<SafetensorReader>(path);
+}
+
+bool TensorSource::has(const std::string& name) const
+{
+    if (mSingleReader)
+    {
+        return mSingleReader->has(name);
+    }
+    return mTensorToShard.find(name) != mTensorToShard.end();
+}
+
+const SafetensorEntry& TensorSource::entry(const std::string& name) const
+{
+    if (mSingleReader)
+    {
+        return mSingleReader->entry(name);
+    }
+    return shard_reader_for(name).entry(name);
+}
+
+std::vector<float> TensorSource::load_f32(const std::string& name) const
+{
+    if (mSingleReader)
+    {
+        return mSingleReader->load_f32(name);
+    }
+    return shard_reader_for(name).load_f32(name);
+}
+
+const SafetensorReader& TensorSource::shard_reader_for(const std::string& name) const
+{
+    const auto it = mTensorToShard.find(name);
+    if (it == mTensorToShard.end())
+    {
+        throw std::runtime_error("Safetensors key not found in sharded index: " + name);
+    }
+    return *mShardReaders[it->second];
+}
+
+void TensorSource::init_from_index(const std::filesystem::path& index_path)
+{
+    const auto weight_map = parse_safetensors_index_weight_map(index_path);
+    if (weight_map.empty())
+    {
+        throw std::runtime_error("Safetensors index has empty weight_map: " + index_path.string());
+    }
+
+    std::unordered_map<std::string, std::size_t> shard_idx_by_path;
+    const std::filesystem::path base_dir = index_path.parent_path();
+
+    for (const auto& kv : weight_map)
+    {
+        const std::filesystem::path shard_path = (base_dir / kv.second).lexically_normal();
+        const std::string shard_key = shard_path.string();
+
+        std::size_t shard_idx = 0;
+        const auto shard_it = shard_idx_by_path.find(shard_key);
+        if (shard_it == shard_idx_by_path.end())
+        {
+            shard_idx = mShardReaders.size();
+            mShardReaders.push_back(std::make_unique<SafetensorReader>(shard_path));
+            mShardPaths.push_back(shard_path);
+            shard_idx_by_path.emplace(shard_key, shard_idx);
+        }
+        else
+        {
+            shard_idx = shard_it->second;
+        }
+
+        if (!mShardReaders[shard_idx]->has(kv.first))
+        {
+            throw std::runtime_error("Tensor " + kv.first + " is mapped to shard " + shard_path.string()
+                + " but was not found in that file.");
+        }
+
+        mTensorToShard.emplace(kv.first, shard_idx);
+    }
 }
 
 } // namespace trtf

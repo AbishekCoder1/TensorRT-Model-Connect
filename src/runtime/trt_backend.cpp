@@ -1,25 +1,9 @@
 #include "trt_backend_qwen_impl.h"
+#include "utils/text_parsers.h"
 
-#include <algorithm>
-#include <cctype>
 #include <string>
 
 namespace trtf {
-namespace {
-
-std::string to_lower_ascii(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
-}
-
-bool starts_with(std::string_view value, std::string_view prefix)
-{
-    return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
-}
-
-} // namespace
 
 std::unique_ptr<IGenerationBackend> CreateTrtBackend(const ITokenizer& tokenizer, const DecoderModel& model)
 {
