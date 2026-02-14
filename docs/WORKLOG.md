@@ -676,3 +676,13 @@ Addressed all friction points identified in the developer experience audit above
 - 11/11 tests pass in container. 6/11 pass on host (5 fail due to sandbox `mkdtemp`).
 - Build: clean, all targets compile with no warnings.
 
+### 7. Added software design documentation to wiki
+- `Static-Design.md`: Mermaid class diagrams for 7 software units (Public API, Model Data, Model Loading, Registry System, TRT Backend, Tokenization, Alternative Backends) with logical descriptions.
+- `Dynamic-Design.md`: 7 Mermaid sequence/flow diagrams (pipeline creation, family resolution, checkpoint mapping, TRT engine build, autoregressive generation, single decode step, data transformation pipeline).
+
+### 8. Architecture extensibility assessment
+- `Architecture-Extensibility-Assessment.md`: Identified 5 hard-coded assumptions blocking non-standard architectures.
+- Assessed effort for MoE, Mamba/SSM, DeepSeek MLA, hybrid, encoder-only, and encoder-decoder.
+- Proposed 4-phase refactoring roadmap (A: generalize checkpoint, B: abstract state, C: generalize I/O, D: new graph ops).
+- Designed subagent parallelization strategy: 6 Tier-1 (today), 4 Tier-2 (new graph builder), 3 Tier-3 (after shared refactor).
+

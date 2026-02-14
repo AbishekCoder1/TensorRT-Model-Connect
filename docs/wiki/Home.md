@@ -13,6 +13,7 @@ A C++ library that mirrors HuggingFace's `transformers.pipeline()` API with Tens
 | **[TRT Internals](TRT-Internals.md)** | How TensorRT graph building works, decoder layer anatomy, engine lifecycle |
 | **[HF vs TRT Comparison](HF-vs-TRT-Comparison.md)** | Side-by-side comparison of HuggingFace Transformers and this library |
 | **[Adding a Model Family](Adding-a-Model-Family.md)** | Step-by-step guide with code examples for onboarding a new model |
+| **[Extensibility Assessment](Architecture-Extensibility-Assessment.md)** | How hard to add MoE, Mamba/SSM, MLA? Blocking assumptions, refactoring roadmap, subagent parallelization strategy |
 | **[Source Layout](Source-Layout.md)** | File-by-file guide to the codebase |
 
 ## Core Design Principles
