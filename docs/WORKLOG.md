@@ -839,3 +839,119 @@ All source modules now have dedicated test coverage:
 | Edit | `docs/wiki/Source-Layout.md` |
 | Edit | `docs/WORKLOG.md` |
 
+## 2026-02-14 (Parallel model family subagent system + Tier 1 onboarding)
+
+### Subagent orchestration infrastructure
+
+Created a system for parallel implementation of HuggingFace model families by independent agents:
+
+- **`scripts/agents/implement-model-family.md`**: Self-contained agent prompt template (~460 lines) with all code patterns inline. Uses `__placeholder__` markers for safe string substitution (avoids brace conflicts with C++ code). Includes complete source patterns (checkpoint_mapper, registration, test), build commands, container validation steps, and Tier 2 custom graph builder extension.
+
+- **`scripts/launch_model_agents.py`**: Orchestrator script that defines 10 model families (6 Tier 1 standard, 4 Tier 2 custom), creates git branches, generates concrete agent prompts via string substitution, and provides merge helpers. Modes: `--dry-run`, `--prompt-only`, `--task-tool`, `--merge`.
+
+### Tier 1 model families implemented
+
+Added 6 standard dense decoder families using the plug-and-play 4-registry architecture:
+
+| Family | model_type | Architectures | Graph Builder |
+|--------|-----------|---------------|---------------|
+| Yi | `yi` | YiForCausalLM | StandardDecoderGraphBuilder |
+| Mistral | `mistral` | MistralForCausalLM | StandardDecoderGraphBuilder |
+| Gemma | `gemma` | GemmaForCausalLM | StandardDecoderGraphBuilder |
+| InternLM | `internlm` | InternLMForCausalLM | StandardDecoderGraphBuilder |
+| DeepSeek | `deepseek` | DeepseekForCausalLM | StandardDecoderGraphBuilder |
+| Baichuan | `baichuan` | BaichuanForCausalLM | StandardDecoderGraphBuilder |
+
+Each family follows the LLaMA pattern:
+- `src/models/<family>/checkpoint_mapper.h/cpp` — `StandardCheckpointMapper` subclass, only overrides `can_map()`
+- `src/models/<family>/registration.h/cpp` — registers into all 4 registries
+- `tests/test_<family>_family.cpp` — synthetic checkpoint integration test
+
+Execution: 6 Haiku subagents ran in parallel (~25s), each creating one family's isolated files. Shared file edits (`hf_family_registry.cpp`, `CMakeLists.txt`) done by main orchestrator.
+
+### Validation
+
+- Host build: 47 compilation units, zero warnings
+- Host tests: 13/24 pass (11 fail due to known sandbox read-only `/tmp`)
+- Container tests: **24/24 pass** (100%)
+
+### Gemma checkpoint mapper fix
+
+`GemmaCheckpointMapper::map_checkpoint()` now overrides the base class to fix two Gemma-specific weight conventions:
+1. **RMSNorm `(1+gamma)` offset**: Gemma stores gamma weights near 0.0 and computes `(1+gamma)*normalized`. Our RMSNorm computes `gamma*normalized`, so we add 1.0 to all RMSNorm gamma vectors (input_norm, post_attn_norm, final_norm) during checkpoint loading.
+2. **Embedding scaling**: Gemma scales embeddings by `sqrt(hidden_size)` before the decoder. We bake this into the embedding weights.
+
+Before fix: all-zero logits (signal death at first RMSNorm). After fix: non-zero logits confirmed with `backend=trt`.
+
+### TRT E2E validation with real weights
+
+| Model | Size | Family Path | `model_type` | `backend=trt` | Output |
+|-------|------|------------|-------------|--------------|--------|
+| **Qwen3-0.6B** | 0.6B | Qwen | `qwen2` | Yes | "Paris...Rome...Madrid..." |
+| **TinyLlama-1.1B** | 1.1B | LLaMA | `llama` | Yes | "Paris, largest city..." |
+| **TinyMistral-248M** | 248M | Mistral | `mistral` | Yes | "capital of the city of Paris" |
+| **Yi-Coder-1.5B** | 1.5B | LLaMA | `llama` | Yes | "Paris." + code text |
+| **DeepSeek-R1-Distill-Qwen-1.5B** | 1.5B | Qwen | `qwen2` | Yes | Non-zero logits (reasoning model) |
+| **Gemma tiny-random** | tiny | Gemma | `gemma` | Yes | Non-zero logits (random weights) |
+
+All 6 models confirmed `backend=trt` with correct computation.
+
+### Friction points discovered during E2E validation
+
+1. **Download glob pattern bug**: `"model.safetensors*"` doesn't match sharded files (`model-00001-of-00003.safetensors`). Fixed: template now uses `"model-*.safetensors"` separately.
+2. **GPU memory (FP32)**: 6-7B models OOM on 24GB GPU — weights alone are 24-28GB in FP32. Validated with ~1B models instead.
+3. **`model_type` mismatches**: Yi models use `model_type: "llama"`, DeepSeek-R1-Distill uses `"qwen2"`. These go through LLaMA/Qwen family paths, making the Yi and DeepSeek registrations dead code for those models.
+4. **No safetensors**: InternLM, DeepSeek-dense, Baichuan only publish `.bin` weights — can't test until `.bin` loader added.
+5. **Gemma gated**: `google/gemma-2b` requires HF auth. Used `trl-internal-testing/tiny-GemmaForCausalLM` instead.
+6. **Subagent sandbox**: Agents blocked on `docker exec` — sandbox doesn't allow Unix socket access. Downloads/validation must be done from main context or pre-staged.
+
+### Files changed
+
+| Action | File |
+|--------|------|
+| Create | `scripts/agents/implement-model-family.md` |
+| Create | `scripts/launch_model_agents.py` |
+| Create | `src/models/{yi,mistral,gemma,internlm,deepseek,baichuan}/checkpoint_mapper.h` |
+| Create | `src/models/{yi,mistral,gemma,internlm,deepseek,baichuan}/checkpoint_mapper.cpp` |
+| Create | `src/models/{yi,mistral,gemma,internlm,deepseek,baichuan}/registration.h` |
+| Create | `src/models/{yi,mistral,gemma,internlm,deepseek,baichuan}/registration.cpp` |
+| Create | `tests/test_{yi,mistral,gemma,internlm,deepseek,baichuan}_family.cpp` |
+| Edit | `src/model/hf_family_registry.cpp` |
+| Edit | `CMakeLists.txt` |
+| Edit | `docs/WORKLOG.md` |
+
+## 2026-02-14 (continued: generic QKV bias support)
+
+### Problem
+
+DeepSeek-R1-Distill-Qwen-1.5B (a Qwen2-architecture model) produced garbled output despite using `backend=trt`. Root cause: Qwen2 models have `q_proj.bias`, `k_proj.bias`, `v_proj.bias` attention biases that were silently ignored. Max logit divergence from HF reference: 11.0.
+
+### Fix: Generic optional QKV biases (no model-specific code)
+
+Same pattern as `q_norm`/`k_norm` — empty vector = no bias (skip), non-empty = add bias after matmul. Auto-detected from safetensors presence.
+
+Changes:
+- **`include/trtf/model.h`**: Added `q_bias`, `k_bias`, `v_bias` fields to `DecoderLayerCheckpoint`
+- **`src/model/trt_model_definition.h`**: Added same fields to `TrtDecoderLayerDefinition`
+- **`src/model/standard_checkpoint_mapper.cpp`**: Loads `self_attn.{q,k,v}_proj.bias` when present. K/V biases expanded from `kv_hidden` to `q_hidden` for GQA models (same expansion pattern as K/V weights).
+- **`src/model/standard_trt_model_definition_populator.cpp`**: Copies biases through to TRT definition
+- **`src/runtime/trt/standard_decoder_graph_builder.cpp`**: Calls `add_bias_sum()` after Q/K/V matmuls when bias vectors are non-empty
+
+### Validation
+
+- Container tests: **24/24 pass**
+- DeepSeek-R1-Distill-Qwen-1.5B (`model_type: qwen2`): `backend=trt`, output: "The capital of France is Paris, and the capital of Germany is Berlin."
+- Qwen3-0.6B: No regression (Qwen3 has no QKV biases — empty vectors, bias addition skipped)
+- TinyLlama-1.1B: No regression
+- TinyMistral-248M: No regression
+
+### Updated TRT E2E validation table
+
+| Model | Size | Family Path | `model_type` | `backend=trt` | Output |
+|-------|------|------------|-------------|--------------|--------|
+| **Qwen3-0.6B** | 0.6B | Qwen | `qwen3` | Yes | "Paris...Rome...Madrid..." |
+| **TinyLlama-1.1B** | 1.1B | LLaMA | `llama` | Yes | "Paris, largest city..." |
+| **TinyMistral-248M** | 248M | Mistral | `mistral` | Yes | "capital of the city of Paris" |
+| **Yi-Coder-1.5B** | 1.5B | LLaMA | `llama` | Yes | "Paris." + code text |
+| **DeepSeek-R1-Distill-1.5B** | 1.5B | Qwen | `qwen2` | Yes | "Paris...Berlin..." |
+| **Gemma tiny-random** | tiny | Gemma | `gemma` | Yes | Non-zero logits (random weights) |

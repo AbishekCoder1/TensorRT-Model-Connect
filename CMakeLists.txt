@@ -79,6 +79,18 @@ add_library(trtf_core
   src/models/qwen/trt_model_populator.cpp
   src/models/llama/registration.cpp
   src/models/llama/checkpoint_mapper.cpp
+  src/models/yi/registration.cpp
+  src/models/yi/checkpoint_mapper.cpp
+  src/models/mistral/registration.cpp
+  src/models/mistral/checkpoint_mapper.cpp
+  src/models/gemma/registration.cpp
+  src/models/gemma/checkpoint_mapper.cpp
+  src/models/internlm/registration.cpp
+  src/models/internlm/checkpoint_mapper.cpp
+  src/models/deepseek/registration.cpp
+  src/models/deepseek/checkpoint_mapper.cpp
+  src/models/baichuan/registration.cpp
+  src/models/baichuan/checkpoint_mapper.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
   src/utils/tensor_math.cpp
@@ -167,6 +179,30 @@ add_test(NAME test_qwen_family COMMAND test_qwen_family)
 add_executable(test_llama_family tests/test_llama_family.cpp)
 target_link_libraries(test_llama_family PRIVATE trtf_core)
 add_test(NAME test_llama_family COMMAND test_llama_family)
+
+add_executable(test_yi_family tests/test_yi_family.cpp)
+target_link_libraries(test_yi_family PRIVATE trtf_core)
+add_test(NAME test_yi_family COMMAND test_yi_family)
+
+add_executable(test_mistral_family tests/test_mistral_family.cpp)
+target_link_libraries(test_mistral_family PRIVATE trtf_core)
+add_test(NAME test_mistral_family COMMAND test_mistral_family)
+
+add_executable(test_gemma_family tests/test_gemma_family.cpp)
+target_link_libraries(test_gemma_family PRIVATE trtf_core)
+add_test(NAME test_gemma_family COMMAND test_gemma_family)
+
+add_executable(test_internlm_family tests/test_internlm_family.cpp)
+target_link_libraries(test_internlm_family PRIVATE trtf_core)
+add_test(NAME test_internlm_family COMMAND test_internlm_family)
+
+add_executable(test_deepseek_family tests/test_deepseek_family.cpp)
+target_link_libraries(test_deepseek_family PRIVATE trtf_core)
+add_test(NAME test_deepseek_family COMMAND test_deepseek_family)
+
+add_executable(test_baichuan_family tests/test_baichuan_family.cpp)
+target_link_libraries(test_baichuan_family PRIVATE trtf_core)
+add_test(NAME test_baichuan_family COMMAND test_baichuan_family)
 
 add_executable(test_tensor_math tests/test_tensor_math.cpp)
 target_link_libraries(test_tensor_math PRIVATE trtf_core)

@@ -55,6 +55,48 @@ File-by-file guide to the codebase.
 | `registration.h/cpp` | `RegisterLlamaFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher |
 | `checkpoint_mapper.h/cpp` | `LlamaCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for llama family detection |
 
+### Yi (`src/models/yi/`)
+
+| File | Purpose |
+|------|---------|
+| `registration.h/cpp` | `RegisterYiFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: yi` |
+| `checkpoint_mapper.h/cpp` | `YiCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for yi family detection |
+
+### Mistral (`src/models/mistral/`)
+
+| File | Purpose |
+|------|---------|
+| `registration.h/cpp` | `RegisterMistralFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: mistral` |
+| `checkpoint_mapper.h/cpp` | `MistralCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for mistral family detection |
+
+### Gemma (`src/models/gemma/`)
+
+| File | Purpose |
+|------|---------|
+| `registration.h/cpp` | `RegisterGemmaFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: gemma` |
+| `checkpoint_mapper.h/cpp` | `GemmaCheckpointMapper`: overrides both `can_map()` and `map_checkpoint()`. Adds +1.0 to RMSNorm gamma (Gemma `(1+gamma)` convention) and scales embedding by `sqrt(hidden_size)`. |
+
+### InternLM (`src/models/internlm/`)
+
+| File | Purpose |
+|------|---------|
+| `registration.h/cpp` | `RegisterInternLMFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: internlm` |
+| `checkpoint_mapper.h/cpp` | `InternLMCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for internlm family detection |
+
+### DeepSeek (`src/models/deepseek/`)
+
+| File | Purpose |
+|------|---------|
+| `registration.h/cpp` | `RegisterDeepSeekFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: deepseek` |
+| `checkpoint_mapper.h/cpp` | `DeepSeekCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for deepseek family detection |
+
+### Baichuan (`src/models/baichuan/`)
+
+| File | Purpose |
+|------|---------|
+| `registration.h/cpp` | `RegisterBaichuanFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: baichuan` |
+| `checkpoint_mapper.h/cpp` | `BaichuanCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for baichuan family detection |
+
 ### Template (`src/models/template/`)
 
 | File | Purpose |

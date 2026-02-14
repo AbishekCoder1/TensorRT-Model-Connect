@@ -17,6 +17,9 @@ struct TrtDecoderLayerDefinition {
     std::vector<float> w_q;
     std::vector<float> w_k;
     std::vector<float> w_v;
+    std::vector<float> q_bias;
+    std::vector<float> k_bias;
+    std::vector<float> v_bias;
     std::vector<float> w_o;
     std::vector<float> post_attn_norm;
     std::vector<float> w_gate;

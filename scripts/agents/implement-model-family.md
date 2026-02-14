@@ -17,6 +17,13 @@ The framework uses a 4-registry plug-and-play architecture. For standard dense d
 | `has_qk_norm` (per-head Q/K RMSNorm) | `__has_qk_norm__` |
 | `hf_repo_id` (for E2E validation) | `__hf_repo_id__` |
 
+## CRITICAL: Sandbox and Execution Requirements
+
+- **ALL docker exec commands MUST use `dangerouslyDisableSandbox: true`** — the container has its own network access for HuggingFace downloads and GPU access for TRT inference. The host sandbox cannot see inside the container.
+- **You MUST complete ALL validation steps** (build, test, download, TRT E2E) before returning. Do not return with "blocked" status — debug and fix issues autonomously.
+- **Verify `backend=trt`** in inference output. If you see `backend=hf-transformers` or `backend=cpu-reference`, the TRT path is not being exercised.
+- **If sharded model downloads fail**, check that both `"model.safetensors"` AND `"model-*.safetensors"` patterns are in the download call — sharded models use `model-00001-of-NNNNN.safetensors` filenames.
+
 ## Step 0: Create Branch
 
 ```bash
@@ -347,10 +354,11 @@ snapshot_download(
     local_dir="models/hf/__hf_local_dir__",
     local_dir_use_symlinks=False,
     allow_patterns=[
-        "config.json", "generation_config.json", "model.safetensors*",
+        "config.json", "generation_config.json",
+        "model.safetensors", "model.safetensors.index.json",
+        "model-*.safetensors",
         "tokenizer.json", "tokenizer_config.json", "vocab.json",
         "merges.txt", "special_tokens_map.json", "*.model",
-        "README.md", "LICENSE", ".gitattributes",
     ],
 )
 PYEOF

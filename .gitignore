@@ -44,6 +44,9 @@ __pycache__/
 # Claude Code
 .claude/
 
+# Generated agent prompts (from launch_model_agents.py)
+scripts/agents/prompts/
+
 # Logs and editor swap files
 *.log
 *.tmp
@@ -55,6 +58,15 @@ __pycache__/
 models/hf/Qwen__Qwen3-0.6B/
 models/hf/TinyLlama__*/
 models/hf/tiny-random-*/
+models/hf/01-ai__*/
+models/hf/Locutusque__*/
+models/hf/mistralai__*/
+models/hf/google__*/
+models/hf/deepseek-ai__*/
+models/hf/internlm__*/
+models/hf/baichuan-inc__*/
+models/hf/hf-internal-testing__*/
+models/hf/trl-internal-testing__*/
 models/hf/*/.cache/
 
 .*

@@ -3,6 +3,12 @@
 #include "model/trt_model_definition_populator.h"
 #include "models/qwen/registration.h"
 #include "models/llama/registration.h"
+#include "models/yi/registration.h"
+#include "models/mistral/registration.h"
+#include "models/gemma/registration.h"
+#include "models/internlm/registration.h"
+#include "models/deepseek/registration.h"
+#include "models/baichuan/registration.h"
 #include "utils/text_parsers.h"
 #include "utils/json_helpers.h"
 
@@ -126,6 +132,12 @@ void RegisterBuiltinHfModelFamilies()
 
     qwen::RegisterQwenFamily();
     llama::RegisterLlamaFamily();
+    yi::RegisterYiFamily();
+    mistral::RegisterMistralFamily();
+    gemma::RegisterGemmaFamily();
+    internlm::RegisterInternLMFamily();
+    deepseek::RegisterDeepSeekFamily();
+    baichuan::RegisterBaichuanFamily();
 }
 
 std::optional<ResolvedModelSpec> ResolveHfModelViaFamilyRegistry(const std::string& model_id)

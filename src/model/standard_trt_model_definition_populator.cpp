@@ -71,6 +71,9 @@ bool StandardTrtModelDefinitionPopulator::populate(TrtDecoderDefinition& definit
         layer.w_q = src.w_q;
         layer.w_k = src.w_k;
         layer.w_v = src.w_v;
+        layer.q_bias = src.q_bias;
+        layer.k_bias = src.k_bias;
+        layer.v_bias = src.v_bias;
         layer.w_o = src.w_o;
         layer.post_attn_norm = src.post_attn_norm;
         layer.w_gate = src.w_gate;

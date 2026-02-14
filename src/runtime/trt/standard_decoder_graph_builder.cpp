@@ -63,6 +63,24 @@ DecoderLayerTensors add_standard_decoder_layer_block(nvinfer1::INetworkDefinitio
         return out;
     }
 
+    // Optional QKV biases (Qwen2, etc.). Empty = skip.
+    if (!layer.q_bias.empty())
+    {
+        q = add_bias_sum(network, *q, attention_size, layer.q_bias);
+    }
+    if (!layer.k_bias.empty())
+    {
+        k = add_bias_sum(network, *k, attention_size, layer.k_bias);
+    }
+    if (!layer.v_bias.empty())
+    {
+        v = add_bias_sum(network, *v, attention_size, layer.v_bias);
+    }
+    if (q == nullptr || k == nullptr || v == nullptr)
+    {
+        return out;
+    }
+
     if (!layer.q_norm.empty())
     {
         q = add_rms_norm_per_head(

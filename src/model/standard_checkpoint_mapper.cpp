@@ -168,6 +168,56 @@ DecoderCheckpoint StandardCheckpointMapper::map_checkpoint(
         DecoderLayerCheckpoint layer;
         layer.input_norm = reader.load_f32(input_norm_key);
 
+        // Per-head QKV biases: load if present (Qwen2), leave empty otherwise.
+        // Empty bias tells the graph builder to skip the bias addition.
+        // K/V biases are expanded from kv_hidden to q_hidden (same GQA expansion as weights).
+        const std::string q_bias_key = layer_tensor_key(layer_idx, "self_attn.q_proj.bias");
+        const std::string k_bias_key = layer_tensor_key(layer_idx, "self_attn.k_proj.bias");
+        const std::string v_bias_key = layer_tensor_key(layer_idx, "self_attn.v_proj.bias");
+        if (reader.has(q_bias_key))
+        {
+            layer.q_bias = reader.load_f32(q_bias_key);
+        }
+        if (reader.has(k_bias_key))
+        {
+            const std::vector<float> raw_k_bias = reader.load_f32(k_bias_key);
+            if (static_cast<int32_t>(raw_k_bias.size()) == kv_hidden && kv_hidden != q_hidden && head_dim > 0)
+            {
+                // Expand KV bias from [kv_hidden] to [q_hidden] by repeating each KV head's block.
+                layer.k_bias.resize(static_cast<std::size_t>(q_hidden));
+                for (int32_t qh = 0; qh < num_attention_heads; ++qh)
+                {
+                    const int32_t kvh = std::min(num_kv_heads - 1, qh / (num_attention_heads / num_kv_heads));
+                    std::copy_n(raw_k_bias.data() + static_cast<std::size_t>(kvh) * static_cast<std::size_t>(head_dim),
+                        static_cast<std::size_t>(head_dim),
+                        layer.k_bias.data() + static_cast<std::size_t>(qh) * static_cast<std::size_t>(head_dim));
+                }
+            }
+            else
+            {
+                layer.k_bias = raw_k_bias;
+            }
+        }
+        if (reader.has(v_bias_key))
+        {
+            const std::vector<float> raw_v_bias = reader.load_f32(v_bias_key);
+            if (static_cast<int32_t>(raw_v_bias.size()) == kv_hidden && kv_hidden != q_hidden && head_dim > 0)
+            {
+                layer.v_bias.resize(static_cast<std::size_t>(q_hidden));
+                for (int32_t qh = 0; qh < num_attention_heads; ++qh)
+                {
+                    const int32_t kvh = std::min(num_kv_heads - 1, qh / (num_attention_heads / num_kv_heads));
+                    std::copy_n(raw_v_bias.data() + static_cast<std::size_t>(kvh) * static_cast<std::size_t>(head_dim),
+                        static_cast<std::size_t>(head_dim),
+                        layer.v_bias.data() + static_cast<std::size_t>(qh) * static_cast<std::size_t>(head_dim));
+                }
+            }
+            else
+            {
+                layer.v_bias = raw_v_bias;
+            }
+        }
+
         // Per-head q_norm/k_norm: load if present (Qwen3), leave empty otherwise.
         // Empty q_norm/k_norm tells the graph builder to skip per-head RMS norm entirely,
         // which is correct for LLaMA, Mistral, and other models without QK norm.
