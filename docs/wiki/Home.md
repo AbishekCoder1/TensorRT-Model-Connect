@@ -7,6 +7,8 @@ A C++ library that mirrors HuggingFace's `transformers.pipeline()` API with Tens
 | Page | Description |
 |------|-------------|
 | **[Architecture Overview](Architecture-Overview.md)** | Three-stage pipeline, 4-registry system, backend cascade |
+| **[Static Design](Static-Design.md)** | Class-level UML diagrams and logical descriptions for every software unit |
+| **[Dynamic Design](Dynamic-Design.md)** | Sequence diagrams (Mermaid) and data flow for pipeline creation, generation, TRT engine build |
 | **[Pipeline Deep Dive](Pipeline-Deep-Dive.md)** | Detailed walkthrough of model resolution, family registry, runtime assembly |
 | **[TRT Internals](TRT-Internals.md)** | How TensorRT graph building works, decoder layer anatomy, engine lifecycle |
 | **[HF vs TRT Comparison](HF-vs-TRT-Comparison.md)** | Side-by-side comparison of HuggingFace Transformers and this library |
