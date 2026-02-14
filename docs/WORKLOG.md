@@ -762,3 +762,80 @@ Extracted KV-cache management from `generate()` into an interface:
 | Edit | `docs/wiki/Source-Layout.md` |
 | Edit | `docs/WORKLOG.md` |
 
+## 2026-02-13 (continued: comprehensive test suite for 100% coverage)
+
+Implemented 7 new test files and extended gold tensor tests to achieve comprehensive functional coverage across all source modules.
+
+### Group 1: CPU-only unit tests (7 new files)
+
+| Test file | What it covers | Test count |
+|-----------|---------------|------------|
+| `tests/test_tensor_math.cpp` | `transpose_2d`, `repeat_head_norm`, `expand_kv_projection` | 9 tests |
+| `tests/test_json_helpers.cpp` | `extract_json_string/int/float/array`, `int_or_first_array` | 17 tests |
+| `tests/test_text_parsers.cpp` | `starts_with`, `ends_with`, `trim`, `split_words`, `iequals_ascii`, `strip_inline_comment` | 22 tests |
+| `tests/test_decode_runtime.cpp` | `select_argmax_token`, `select_topk_tokens`, `build_attention_mask`, `append_cache_state` (TRT-guarded) | 16 tests |
+| `tests/test_engine_cache_key.cpp` | `BuildTrtEngineCacheKey` determinism, sensitivity to extra_params/tensors, order independence | 7 tests |
+| `tests/test_kv_cache_step_state.cpp` | `KvCacheStepState` constructor, step sequence, position capping, multi-layer, overflow (TRT-guarded) | 7 tests |
+| `tests/test_extra_fields.cpp` | Phase A extensibility: `extra_tensors` round-trip through `StandardTrtModelDefinitionPopulator`, `extra_int/float_params`, `find_extra_bindings` | 5 tests |
+
+### Group 2: GPU gold tensor op tests (4 new ops)
+
+Extended `tests/test_trt_graph_ops_gold.cpp` from 2 to 6 op tests:
+- **swiglu**: SiLU(gate) * up activation (atol=1e-5)
+- **rope**: Rotary position embedding with make_rope_table + rotate_half_matrix (atol=1e-4)
+- **rms_norm_per_head**: Per-head RMS normalization (atol=1e-5)
+- **bias_sum**: Element-wise bias addition (atol=1e-6)
+
+### Group 3: Gold tensor generator
+
+Updated `scripts/generate_op_gold_tensors.py`:
+- Added `generate_bias_sum()` (seed=47)
+- Changed rope/rms_norm_per_head metadata to F32 for SafetensorReader compatibility
+- Updated rope reference implementation to match trtf's make_rope_table + rotate_half_matrix formula
+- Total: 6 gold tensor files generated
+
+### Build integration
+
+- Added 7 new test targets to `CMakeLists.txt`
+- Total test executables: 18 (up from 11)
+
+### Expected test results
+
+| Environment | Expected pass | Notes |
+|-------------|--------------|-------|
+| Host (no TRT) | 13/18 | 5 fail due to sandbox `mkdtemp: Read-only file system` |
+| Container (TRT) | 18/18 | All tests pass including GPU gold tensor tests |
+
+### Coverage matrix
+
+All source modules now have dedicated test coverage:
+- `src/utils/tensor_math.cpp` → test_tensor_math
+- `src/utils/json_helpers.cpp` → test_json_helpers
+- `src/utils/text_parsers.cpp` → test_text_parsers
+- `src/utils/trt/engine_cache.cpp` → test_engine_cache_key
+- `src/runtime/trt/trt_decode_runtime.cpp` → test_decode_runtime
+- `src/runtime/trt/kv_cache_step_state.cpp` → test_kv_cache_step_state
+- `src/runtime/trt/step_state.h` → test_kv_cache_step_state
+- `src/runtime/trt/trt_engine_lifecycle.cpp` → test_extra_fields + test_trt_ops_gold
+- `include/trtf/model.h` (extra fields) → test_extra_fields
+- `src/model/trt_model_definition.h` (extra fields) → test_extra_fields
+- `src/runtime/trt/trt_graph_ops.cpp` → test_trt_ops_gold (6 ops)
+- `src/model/standard_trt_model_definition_populator.cpp` → test_extra_fields
+
+### File summary
+
+| Action | File |
+|--------|------|
+| Create | `tests/test_tensor_math.cpp` |
+| Create | `tests/test_json_helpers.cpp` |
+| Create | `tests/test_text_parsers.cpp` |
+| Create | `tests/test_decode_runtime.cpp` |
+| Create | `tests/test_engine_cache_key.cpp` |
+| Create | `tests/test_kv_cache_step_state.cpp` |
+| Create | `tests/test_extra_fields.cpp` |
+| Edit | `tests/test_trt_graph_ops_gold.cpp` |
+| Edit | `scripts/generate_op_gold_tensors.py` |
+| Edit | `CMakeLists.txt` |
+| Edit | `docs/wiki/Source-Layout.md` |
+| Edit | `docs/WORKLOG.md` |
+

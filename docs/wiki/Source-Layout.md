@@ -112,7 +112,14 @@ File-by-file guide to the codebase.
 | `test_hf_family_registry.cpp` | Family priority ordering, metadata parsing, mock family |
 | `test_qwen_family.cpp` | Qwen family detection, checkpoint with q_norm/k_norm, QWEN3 alias |
 | `test_llama_family.cpp` | LLaMA family detection, checkpoint without q_norm/k_norm, GQA |
-| `test_trt_graph_ops_gold.cpp` | Per-op gold tensor tests (GPU-only, loads fixtures from `tests/gold/`) |
+| `test_tensor_math.cpp` | transpose_2d, repeat_head_norm, expand_kv_projection (CPU-only) |
+| `test_json_helpers.cpp` | extract_json_string/int/float/array, int_or_first_array (CPU-only) |
+| `test_text_parsers.cpp` | starts_with, ends_with, trim, split_words, iequals_ascii (CPU-only) |
+| `test_decode_runtime.cpp` | select_argmax_token, select_topk_tokens, build_attention_mask, append_cache_state (TRT-guarded) |
+| `test_engine_cache_key.cpp` | BuildTrtEngineCacheKey determinism, extra_params sensitivity (CPU-only) |
+| `test_kv_cache_step_state.cpp` | KvCacheStepState position tracking, mask generation, cache overflow (TRT-guarded) |
+| `test_extra_fields.cpp` | Phase A extensibility: extra_tensors round-trip, extra_params, find_extra_bindings |
+| `test_trt_graph_ops_gold.cpp` | Per-op gold tensor tests: rms_norm, matmul, swiglu, rope, rms_norm_per_head, bias_sum (GPU-only) |
 
 ## Scripts (`scripts/`)
 
