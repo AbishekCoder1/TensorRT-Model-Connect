@@ -1,3 +1,7 @@
+// Test: ToyTokenizer encode/decode round-trip and unknown token handling.
+// Verifies: Token encoding from built-in vocabulary, decode back to text, and
+// unknown token fallback using the built-in tiny-cake-v1 vocabulary.
+
 #include "trtf/tokenizer.h"
 
 #include <iostream>

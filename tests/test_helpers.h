@@ -10,6 +10,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <stdlib.h>
@@ -94,6 +95,28 @@ inline void write_safetensors_f32(const std::filesystem::path& path, const std::
         out.write(reinterpret_cast<const char*>(spec.data.data()),
             static_cast<std::streamsize>(spec.data.size() * sizeof(float)));
     }
+}
+
+// Writes a model.safetensors.index.json file mapping tensor names to shard filenames.
+inline void write_safetensors_index(const std::filesystem::path& path,
+    const std::vector<std::pair<std::string, std::string>>& weight_map)
+{
+    std::ofstream out(path, std::ios::trunc);
+    if (!out)
+    {
+        throw std::runtime_error("Failed to write safetensors index file: " + path.string());
+    }
+
+    out << "{\n";
+    out << "  \"metadata\": {},\n";
+    out << "  \"weight_map\": {\n";
+    for (std::size_t i = 0; i < weight_map.size(); ++i)
+    {
+        out << "    \"" << weight_map[i].first << "\": \"" << weight_map[i].second << "\"";
+        out << (i + 1 == weight_map.size() ? "\n" : ",\n");
+    }
+    out << "  }\n";
+    out << "}\n";
 }
 
 // Creates a standard decoder model checkpoint (embedding, per-layer attention+MLP, final_norm, lm_head).

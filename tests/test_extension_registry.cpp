@@ -1,3 +1,7 @@
+// Test: Custom extension points for model resolution and runtime assembly.
+// Verifies: RegisterTextGenerationModelResolver and RegisterTextGenerationRuntimeAssembler
+// with a mock backend produce expected pipeline output.
+
 #include "trtf/model_resolver.h"
 #include "trtf/pipeline.h"
 #include "trtf/runtime_factory.h"

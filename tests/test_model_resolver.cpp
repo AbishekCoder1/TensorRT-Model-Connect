@@ -1,3 +1,7 @@
+// Test: Model resolution pipeline with multiple resolution strategies.
+// Verifies: Built-in model resolves as kDecoderDefinition, HF directory resolves
+// as kHuggingFaceLocal, and unknown model throws an appropriate error.
+
 #include "trtf/model_resolver.h"
 
 #include <cerrno>

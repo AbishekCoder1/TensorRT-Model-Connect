@@ -95,12 +95,12 @@ src/
     checkpoint_mapper.h/cpp      # ICheckpointMapper interface + registry (Registry 2)
     trt_model_definition.h/cpp   # DecoderModel -> TrtDecoderDefinition conversion
     trt_model_definition_populator.h/cpp  # ITrtModelDefinitionPopulator interface + registry (Registry 3)
-    qwen3_decoder_model_loader.h/cpp  # Qwen-specific LoadDecoderModel wrapper
+    standard_trt_model_definition_populator.h/cpp  # Family-agnostic populator for has_decoder_layers models
   models/
     qwen/
       registration.h/cpp         # RegisterQwenFamily() — registers into all 4 registries
       checkpoint_mapper.h/cpp    # QwenCheckpointMapper — HF Qwen tensor keys -> DecoderCheckpoint
-      trt_model_populator.h/cpp  # QwenTrtModelDefinitionPopulator — layer stack -> TRT definition
+      trt_model_populator.h/cpp  # Type alias for StandardTrtModelDefinitionPopulator
     template/
       registration.cpp           # Skeleton for adding a new model family
   runtime/
@@ -124,6 +124,7 @@ scripts/
   generate_op_gold_tensors.py    # Generate gold .safetensors fixtures for TRT ops
 tests/
   gold/                          # Committed gold tensor files for per-op tests
+  test_helpers.h                 # Shared helpers: temp dirs, safetensors writing, write_standard_decoder_checkpoint()
   test_trt_graph_ops_gold.cpp    # Per-op gold tensor tests (GPU-only)
 ```
 
@@ -145,9 +146,9 @@ The plug-and-play architecture uses 4 registries. Adding a new family requires:
 
 ### Steps
 
-1. **Create `src/models/<family>/registration.cpp`** — call `Register<Family>Family()` which registers into all 4 registries.
-2. **Create `src/models/<family>/checkpoint_mapper.h/cpp`** — implement `ICheckpointMapper` to map HF tensor keys to `DecoderCheckpoint`.
-3. **Optionally create a TRT model populator** if the default Qwen populator doesn't work for your architecture.
+1. **Create `src/models/<family>/registration.cpp`** — call `Register<Family>Family()` which registers into registries 1, 2, and 4.
+2. **Create `src/models/<family>/checkpoint_mapper.h/cpp`** — implement `ICheckpointMapper` to map HF tensor keys to `DecoderCheckpoint`. Consider subclassing `StandardCheckpointMapper` (`src/model/standard_checkpoint_mapper.h`) if your model uses the standard HF naming convention.
+3. **Registry 3 (TRT Definition Populator) is handled automatically** — `StandardTrtModelDefinitionPopulator` is registered as a low-priority fallback in `RegisterBuiltinHfModelFamilies()` and handles any model with `has_decoder_layers`. Only register a custom populator if your architecture has non-standard TRT definition requirements.
 4. **Choose or create a TRT graph builder**:
    - `StandardDecoderGraphBuilder` works for LLaMA, Qwen, Yi, Mistral-dense, DeepSeek-dense (Pre-RMSNorm + GQA + RoPE + SwiGLU).
    - Create a custom `ITrtGraphBuilder` for non-standard architectures (MoE, parallel attention).

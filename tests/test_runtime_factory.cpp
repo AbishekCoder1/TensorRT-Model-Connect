@@ -1,3 +1,7 @@
+// Test: Runtime assembly from resolved model specs.
+// Verifies: Runtime creation from decoder-definition specs, backend selection
+// validation, and force_trt error handling when TRT is unavailable.
+
 #include "trtf/model_resolver.h"
 #include "trtf/runtime_factory.h"
 

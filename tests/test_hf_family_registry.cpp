@@ -1,3 +1,7 @@
+// Test: HF family registry with priority ordering and metadata parsing.
+// Verifies: Mock family registration, priority-based matching, metadata extraction
+// from config.json, and end-to-end pipeline with family-defined decoder model.
+
 #include "trtf/hf_family_registry.h"
 #include "trtf/model_resolver.h"
 #include "trtf/pipeline.h"

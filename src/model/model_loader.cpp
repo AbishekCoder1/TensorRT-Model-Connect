@@ -550,7 +550,7 @@ DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const s
     {
         model.max_cache_length = env_max_cache;
     }
-    // Family-specific cache caps belong in the family loader (e.g., qwen3_decoder_model_loader.cpp).
+    // Family-specific cache caps belong in the family loader (e.g., qwen/registration.cpp).
 
     model.architecture.num_layers = std::max(extract_json_int(config_text, "num_hidden_layers", 1), 1);
     model.architecture.num_attention_heads = std::max(extract_json_int(config_text, "num_attention_heads", 1), 1);

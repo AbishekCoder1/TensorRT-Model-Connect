@@ -1,3 +1,7 @@
+// Test: Pipeline API end-to-end with built-in tiny-cake-v1.
+// Verifies: Text generation produces expected output, error handling for invalid
+// backend selections, and unknown model IDs throw appropriate errors.
+
 #include "trtf/pipeline.h"
 
 #include <iostream>

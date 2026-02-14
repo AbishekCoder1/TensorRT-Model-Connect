@@ -1,16 +1,13 @@
 #pragma once
 
-#include "model/trt_model_definition_populator.h"
+#include "model/standard_trt_model_definition_populator.h"
 
 namespace trtf {
 namespace qwen {
 
-class QwenTrtModelDefinitionPopulator final : public ITrtModelDefinitionPopulator {
-public:
-    bool can_populate(const DecoderModel& model) const override;
-    bool populate(TrtDecoderDefinition& definition,
-                  const DecoderModel& model) const override;
-};
+// Qwen-specific populator — currently identical to StandardTrtModelDefinitionPopulator.
+// Kept as a subclass in case Qwen-specific overrides are needed in the future.
+using QwenTrtModelDefinitionPopulator = StandardTrtModelDefinitionPopulator;
 
 } // namespace qwen
 } // namespace trtf
