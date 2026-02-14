@@ -1,4 +1,5 @@
-#include "trt_backend_qwen_impl.h"
+#include "runtime/trt/trt_graph_builder.h"
+#include "runtime/trt/trt_backend_shared.h"
 #include "utils/text_parsers.h"
 
 #include <string>
@@ -7,18 +8,27 @@ namespace trtf {
 
 std::unique_ptr<IGenerationBackend> CreateTrtBackend(const ITokenizer& tokenizer, const DecoderModel& model)
 {
+#if TRTF_HAS_TRT
     const std::string family = to_lower_ascii(model.architecture.family);
 
-    // Keep dispatch explicit so new families can register backend implementations
-    // without modifying TRT runtime internals.
-    if (starts_with(family, "qwen") || starts_with(family, "qwq") || model.checkpoint.has_qwen_layers)
+    // 1. Family-specific builder
+    if (auto* builder = FindTrtGraphBuilder(family))
     {
-        return CreateTrtQwenBackend(tokenizer, model);
+        return CreateTrtBackendWithBuilder(tokenizer, model, *builder);
     }
 
-    // Temporary fallback: non-family-tagged decoder definitions still use the
-    // existing TRT implementation path until dedicated builders are split out.
-    return CreateTrtQwenBackend(tokenizer, model);
+    // 2. Standard decoder fallback (works for most LLM families)
+    if (auto* builder = FindTrtGraphBuilder("standard-decoder"))
+    {
+        return CreateTrtBackendWithBuilder(tokenizer, model, *builder);
+    }
+
+    return nullptr;
+#else
+    (void) tokenizer;
+    (void) model;
+    return nullptr;
+#endif
 }
 
 } // namespace trtf

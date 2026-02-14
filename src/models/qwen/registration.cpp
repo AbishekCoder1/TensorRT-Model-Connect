@@ -1,23 +1,18 @@
 #include "models/qwen/registration.h"
+#include "models/qwen/checkpoint_mapper.h"
+#include "models/qwen/trt_model_populator.h"
 #include "trtf/hf_family_registry.h"
+#include "model/checkpoint_mapper.h"
+#include "model/trt_model_definition_populator.h"
 #include "model/qwen3_decoder_model_loader.h"
 #include "runtime/trt/trt_graph_builder.h"
 #include "runtime/trt/trt_common.h"
-#include "runtime/trt/trt_engine_lifecycle.h"
-#include "runtime/trt/trt_graph_ops.h"
-#include "runtime/trt/trt_backend_shared.h"
-#include "model/trt_model_definition.h"
+#include "runtime/trt/standard_decoder_graph_builder.h"
 #include "utils/text_parsers.h"
 
-#include <algorithm>
-#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <string>
-
-#if TRTF_HAS_TRT
-#include <NvInfer.h>
-#endif
 
 namespace trtf {
 namespace qwen {
@@ -83,6 +78,21 @@ DecoderModel load_decoder_definition_model(const HfModelMetadata& metadata)
 
 void RegisterQwenFamily()
 {
+    RegisterCheckpointMapper("qwen", 100, std::make_unique<QwenCheckpointMapper>());
+    RegisterTrtModelDefinitionPopulator("qwen", 100,
+        std::make_unique<QwenTrtModelDefinitionPopulator>());
+
+#if TRTF_HAS_TRT
+    RegisterTrtGraphBuilder("qwen", std::make_unique<StandardDecoderGraphBuilder>());
+    RegisterTrtGraphBuilder("qwen2", std::make_unique<StandardDecoderGraphBuilder>());
+    RegisterTrtGraphBuilder("qwen3", std::make_unique<StandardDecoderGraphBuilder>());
+    RegisterTrtGraphBuilder("qwq", std::make_unique<StandardDecoderGraphBuilder>());
+    if (!FindTrtGraphBuilder("standard-decoder"))
+    {
+        RegisterTrtGraphBuilder("standard-decoder", std::make_unique<StandardDecoderGraphBuilder>());
+    }
+#endif
+
     RegisterHfModelFamily({
         "qwen-decoder-definition",
         100,

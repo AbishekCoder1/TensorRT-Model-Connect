@@ -37,8 +37,8 @@ struct DecoderCheckpoint {
     std::vector<float> w_out;
     std::vector<float> b_out;
 
-    bool has_qwen_layers{false};
-    std::vector<DecoderLayerCheckpoint> qwen_layers;
+    bool has_decoder_layers{false};
+    std::vector<DecoderLayerCheckpoint> decoder_layers;
     std::vector<float> final_norm;
 };
 

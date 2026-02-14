@@ -1,18 +1,14 @@
-#include "trtf/backend.h"
-#include "trtf/model.h"
-#include "trtf/tokenizer.h"
-#include "model/trt_model_definition.h"
+#include "runtime/trt/standard_decoder_graph_builder.h"
 #include "runtime/trt/trt_common.h"
 #include "runtime/trt/trt_graph_ops.h"
 #include "runtime/trt/trt_engine_lifecycle.h"
-#include "runtime/trt/trt_backend_shared.h"
+#include "model/trt_model_definition.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -21,24 +17,26 @@
 #endif
 
 namespace trtf {
-namespace {
 
 #if TRTF_HAS_TRT
 
-struct QwenLayerTensors {
+namespace {
+
+struct DecoderLayerTensors {
     nvinfer1::ITensor* hidden{nullptr};
     nvinfer1::ITensor* present_k{nullptr};
     nvinfer1::ITensor* present_v{nullptr};
 };
 
-QwenLayerTensors add_qwen_layer_block(nvinfer1::INetworkDefinition& network, const TrtDecoderDefinition& weights,
+DecoderLayerTensors add_standard_decoder_layer_block(nvinfer1::INetworkDefinition& network,
+    const TrtDecoderDefinition& weights,
     const TrtDecoderLayerDefinition& layer, nvinfer1::ITensor& hidden, nvinfer1::ITensor& cache_k,
     nvinfer1::ITensor& cache_v,
     nvinfer1::ITensor& attention_mask, nvinfer1::ITensor& position_id, nvinfer1::ITensor& cos_table,
     nvinfer1::ITensor& sin_table, nvinfer1::ITensor& rotate_half_matrix,
     nvinfer1::ITensor& attention_scale_tensor, nvinfer1::ITensor& eps_tensor)
 {
-    QwenLayerTensors out;
+    DecoderLayerTensors out;
     const int32_t attention_size = weights.attention_size > 0 ? weights.attention_size : weights.hidden_size;
     if (attention_size <= 0 || weights.num_attention_heads <= 0 || attention_size % weights.num_attention_heads != 0)
     {
@@ -267,7 +265,7 @@ std::unique_ptr<DecoderStepEngine> create_decoder_step_engine_legacy(
     }
 
 #if NV_TENSORRT_MAJOR >= 8
-    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1U << 20);
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
     config->clearFlag(nvinfer1::BuilderFlag::kTF32);
 #endif
 
@@ -426,7 +424,7 @@ std::unique_ptr<DecoderStepEngine> create_decoder_step_engine_legacy(
         {cache_k_name}, {cache_v_name}, {present_k_name}, {present_v_name}, false);
 }
 
-std::unique_ptr<DecoderStepEngine> create_decoder_step_engine_qwen(
+std::unique_ptr<DecoderStepEngine> create_decoder_step_engine_multi_layer(
     const TrtDecoderDefinition& weights, TrtLogger& logger)
 {
     const int32_t attention_size = weights.attention_size > 0 ? weights.attention_size : weights.hidden_size;
@@ -457,7 +455,7 @@ std::unique_ptr<DecoderStepEngine> create_decoder_step_engine_qwen(
     }
 
 #if NV_TENSORRT_MAJOR >= 8
-    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1U << 20);
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
     config->clearFlag(nvinfer1::BuilderFlag::kTF32);
 #endif
 
@@ -477,7 +475,7 @@ std::unique_ptr<DecoderStepEngine> create_decoder_step_engine_qwen(
     std::vector<std::string> present_k_names;
     std::vector<std::string> present_v_names;
 
-    const int32_t num_layers = static_cast<int32_t>(weights.qwen_layers.size());
+    const int32_t num_layers = static_cast<int32_t>(weights.decoder_layers.size());
     cache_k_inputs.reserve(static_cast<std::size_t>(num_layers));
     cache_v_inputs.reserve(static_cast<std::size_t>(num_layers));
     cache_k_names.reserve(static_cast<std::size_t>(num_layers));
@@ -547,8 +545,8 @@ std::unique_ptr<DecoderStepEngine> create_decoder_step_engine_qwen(
 
     for (int32_t layer_idx = 0; layer_idx < num_layers; ++layer_idx)
     {
-        const TrtDecoderLayerDefinition& layer = weights.qwen_layers[static_cast<std::size_t>(layer_idx)];
-        QwenLayerTensors layer_tensors = add_qwen_layer_block(
+        const TrtDecoderLayerDefinition& layer = weights.decoder_layers[static_cast<std::size_t>(layer_idx)];
+        DecoderLayerTensors layer_tensors = add_standard_decoder_layer_block(
             *network, weights, layer, *hidden, *cache_k_inputs[static_cast<std::size_t>(layer_idx)],
             *cache_v_inputs[static_cast<std::size_t>(layer_idx)], *attention_mask, *position_id,
             *cos_tensor, *sin_tensor, *rotate_half_tensor, *attention_scale_tensor, *eps_tensor);
@@ -604,28 +602,18 @@ std::unique_ptr<DecoderStepEngine> create_decoder_step_engine_qwen(
         cache_k_names, cache_v_names, present_k_names, present_v_names, true);
 }
 
-std::unique_ptr<DecoderStepEngine> create_decoder_step_engine(const TrtDecoderDefinition& weights, TrtLogger& logger)
+} // namespace
+
+std::unique_ptr<DecoderStepEngine> StandardDecoderGraphBuilder::build_decoder_step_engine(
+    const TrtDecoderDefinition& weights, TrtLogger& logger)
 {
-    if (weights.has_qwen_layers && !weights.qwen_layers.empty())
+    if (weights.has_decoder_layers && !weights.decoder_layers.empty())
     {
-        return create_decoder_step_engine_qwen(weights, logger);
+        return create_decoder_step_engine_multi_layer(weights, logger);
     }
     return create_decoder_step_engine_legacy(weights, logger);
 }
 
 #endif // TRTF_HAS_TRT
-
-} // namespace
-
-std::unique_ptr<IGenerationBackend> CreateTrtQwenBackend(const ITokenizer& tokenizer, const DecoderModel& model)
-{
-#if TRTF_HAS_TRT
-    return CreateTrtBackendWithFactory(tokenizer, model, create_decoder_step_engine);
-#else
-    (void) tokenizer;
-    (void) model;
-    return nullptr;
-#endif
-}
 
 } // namespace trtf

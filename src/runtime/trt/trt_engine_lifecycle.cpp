@@ -96,7 +96,7 @@ std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuild
     out->context = std::move(execution_context);
     out->vocab_size = weights.vocab_size;
     out->hidden_size = weights.hidden_size;
-    out->cache_state_size = (weights.has_qwen_layers && weights.attention_size > 0)
+    out->cache_state_size = (weights.has_decoder_layers && weights.attention_size > 0)
         ? weights.attention_size
         : weights.hidden_size;
     out->attention_mask_size = requires_position_input ? (weights.max_cache_length + 1) : weights.max_cache_length;

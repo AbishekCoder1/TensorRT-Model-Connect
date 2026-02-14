@@ -555,3 +555,84 @@ ctest --test-dir build --output-on-failure
 4. Continue moving Qwen checkpoint mapping from `model_loader.cpp` into `src/models/qwen/checkpoint_mapper.cpp`.
 5. Wire `RegisterTrtGraphBuilder` into the Qwen registration so `CreateTrtBackend` dispatches via registry lookup instead of hardcoded `if/else`.
 
+## 2026-02-13 (continued: container TRT E2E verification + LLaMA validation)
+
+Container TRT validation of the refactored codebase (all phases 0-5 applied):
+
+### Container test results
+- Build: `cmake --build build-container-phase1 -j` passed (TRT enabled).
+- Tests: `ctest --test-dir build-container-phase1 --output-on-failure` — **11/11 passed**.
+  - Original 9 tests all pass.
+  - `test_llama_family` — new, passes (synthetic 2-layer LLaMA checkpoint: family detection, multi-layer load, GQA layout, absent q_norm/k_norm verified).
+  - `test_trt_ops_gold` — new, passes (per-op gold tensor comparison against committed fixtures).
+
+### Qwen3 TRT E2E (real upstream Qwen3-0.6B, container)
+- Prompt: `"What is the capital of the United States?"`
+  - Output: `"The capital of the United States is Washington, D.C. It is also known as the capital city of the country."`
+  - Backend: `trt`. Coherent, factually correct.
+- Prompt: `"The capital of France is"`
+  - Output: `"Paris. The capital of Italy is Rome. The capital of Spain is Madrid."`
+  - Backend: `trt`. Correct continuation.
+
+### TinyLlama 1.1B TRT E2E (real TinyLlama-1.1B-Chat-v1.0, container)
+- Prompt: `"The capital of France is"`
+  - Output: `"Paris, which is also the largest city in the country."`
+  - Backend: `trt`. **First real LLaMA-family TRT result.** Coherent, factually correct.
+- This validates the full plug-and-play pipeline: LLaMA HF family detection → StandardCheckpointMapper → StandardDecoderGraphBuilder → shared TRT decode loop.
+
+### tiny-random-LlamaForCausalLM TRT E2E (random weights, container)
+- Prompt: `"Hello"`
+  - Output: garbage (expected from random weights).
+  - Backend: `trt`. Pipeline succeeds without errors.
+
+### MMLU sanity (Qwen3 TRT, container)
+- `--num-samples 1 --min-accuracy 0.0` → 1/1 correct, PASS.
+
+### New-family developer experience audit
+
+**Goal**: assess how much work it takes for a developer or AI subagent to implement a new model family.
+
+**Concrete deliverables to add a new standard decoder family (e.g., Mistral, Yi, Gemma):**
+
+| File | LOC | What to write |
+|------|-----|---------------|
+| `src/models/<family>/registration.h` | ~11 | Declare `Register<Family>Family()` |
+| `src/models/<family>/registration.cpp` | ~60-80 | HF matcher + loader + register into 4 registries |
+| `src/models/<family>/checkpoint_mapper.h` | ~14 | Subclass `StandardCheckpointMapper`, override `can_map()` |
+| `src/models/<family>/checkpoint_mapper.cpp` | ~14 | Implement `can_map()` with family name match |
+| `tests/test_<family>_family.cpp` | ~200-270 | Synthetic checkpoint fixture + assertions |
+
+**Shared files requiring edits (unavoidable):**
+
+| File | Edit size | What to add |
+|------|-----------|-------------|
+| `src/model/hf_family_registry.cpp` | 2 lines | `#include` + `Register<Family>Family()` call |
+| `CMakeLists.txt` | 5 lines | 2 source files + test target (3 lines) |
+
+**Total new code for a standard dense decoder: ~120 LOC family-specific + ~270 LOC test + 7 lines in shared files.**
+
+For a family that uses the standard HF tensor naming (model.embed_tokens, model.layers.N.self_attn.*, model.layers.N.mlp.*, model.norm, lm_head) — which covers LLaMA, Mistral, Yi, Gemma, DeepSeek-dense, InternLM — the checkpoint mapper is trivial because `StandardCheckpointMapper` does all the heavy lifting. The developer only writes a `can_map()` one-liner.
+
+**What works automatically (zero family code):**
+- Safetensors loading (single + sharded) via `TensorSource`
+- GQA / MQA KV expansion via `expand_kv_projection()`
+- Optional per-head q_norm/k_norm auto-detection
+- Tied lm_head (when `lm_head.weight` is absent)
+- TRT graph construction via `StandardDecoderGraphBuilder`
+- TRT engine caching/serialization
+- Autoregressive decode loop with KV cache
+- HF Python tokenizer bridge
+- Engine plan on-disk caching
+
+**Friction points identified:**
+1. **No `StandardTrtModelDefinitionPopulator`**: LLaMA registers `StandardDecoderGraphBuilder` but doesn't register its own `ITrtModelDefinitionPopulator`. Currently the Qwen populator handles all `has_decoder_layers` models (checked via `can_populate`). This works but is semantically wrong — a new family shouldn't depend on the Qwen populator being registered. A `StandardTrtModelDefinitionPopulator` should exist in `src/model/` for the common case.
+2. **Qwen registration has legacy coupling**: `src/models/qwen/registration.cpp` still references `qwen3_decoder_model_loader.h` for the `trtf_decoder/` subdir compatibility path. This is Qwen-specific historical baggage and doesn't affect other families.
+3. **Test boilerplate**: Writing the synthetic safetensors fixture in each test file (~100 LOC of `write_safetensors_f32()` helper + tensor setup) is repetitive. A shared `tests/test_helpers.h` exists but the safetensors writer could be extracted there.
+4. **No auto-discovery of model families**: Each family must be explicitly called from `RegisterBuiltinHfModelFamilies()`. This is acceptable for a small number of families but won't scale to 100+ like HF transformers. A static-init or compile-time registration pattern could remove this.
+
+**For non-standard architectures (MoE, parallel attention):**
+- Requires a custom `ITrtGraphBuilder` (~200-300 LOC).
+- May need custom checkpoint mapper if tensor naming differs significantly.
+- Shared TRT graph ops (`add_rms_norm`, `add_apply_rope`, etc.) are still reusable as building blocks.
+- Estimated total: ~400-600 LOC family-specific code.
+

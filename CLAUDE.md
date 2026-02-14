@@ -88,43 +88,101 @@ src/
     tensor_math.h/cpp            # transpose_2d, expand_kv, repeat_head_norm
     trt/engine_cache.h/cpp       # TRT engine plan on-disk cache
   model/
-    model_loader.cpp             # generic DecoderModel loading + Qwen checkpoint mapping
+    model_loader.cpp             # generic DecoderModel loading (delegates to checkpoint mapper registry)
     safetensors_loader.h/cpp     # SafetensorReader + TensorSource (single/sharded)
     model_resolver.cpp           # multi-stage model resolution pipeline
     hf_family_registry.cpp       # family registry + builtin registration dispatch
+    checkpoint_mapper.h/cpp      # ICheckpointMapper interface + registry (Registry 2)
     trt_model_definition.h/cpp   # DecoderModel -> TrtDecoderDefinition conversion
-    qwen3_trt_model_definition.h/cpp  # Qwen3 layer stack -> TRT definition
+    trt_model_definition_populator.h/cpp  # ITrtModelDefinitionPopulator interface + registry (Registry 3)
     qwen3_decoder_model_loader.h/cpp  # Qwen-specific LoadDecoderModel wrapper
   models/
     qwen/
-      registration.h/cpp         # RegisterQwenFamily() — HF matcher + TRT builder
+      registration.h/cpp         # RegisterQwenFamily() — registers into all 4 registries
+      checkpoint_mapper.h/cpp    # QwenCheckpointMapper — HF Qwen tensor keys -> DecoderCheckpoint
+      trt_model_populator.h/cpp  # QwenTrtModelDefinitionPopulator — layer stack -> TRT definition
+    template/
+      registration.cpp           # Skeleton for adding a new model family
   runtime/
-    trt_backend.cpp              # CreateTrtBackend — family dispatch (registration-based)
-    trt_backend_qwen.cpp         # Qwen graph builders (legacy + multi-layer)
-    trt_backend_qwen_impl.h      # CreateTrtQwenBackend declaration
+    trt_backend.cpp              # CreateTrtBackend — dispatches via FindTrtGraphBuilder() registry
     trt/
       trt_common.h/cpp           # TrtLogger, TrtDeleter, CudaStream, CudaBuffer
       trt_graph_ops.h/cpp        # Reusable TRT ops: add_rms_norm, add_rope, matmul, etc.
       trt_engine_lifecycle.h/cpp # DecoderStepEngine, finalize_decoder_step_engine
       trt_decode_runtime.h/cpp   # run_decoder_step, cache management, sampling
       trt_backend_shared.h/cpp   # Generic TrtBackend autoregressive generate loop
-      trt_graph_builder.h/cpp    # ITrtGraphBuilder interface + registry
+      trt_graph_builder.h/cpp    # ITrtGraphBuilder interface + registry (Registry 4)
+      standard_decoder_graph_builder.h/cpp  # Pre-RMSNorm+GQA+RoPE+SwiGLU decoder pattern
     cpu_reference_backend.cpp
     hf_python_backend.cpp
     runtime_factory.cpp
   pipeline/pipeline.cpp
   tokenizer/*.cpp
+scripts/
+  diff_logits.py                 # E2E logit comparison (trtf vs HF transformers)
+  diff_layers.py                 # Per-layer hidden state comparison
+  generate_op_gold_tensors.py    # Generate gold .safetensors fixtures for TRT ops
+tests/
+  gold/                          # Committed gold tensor files for per-op tests
+  test_trt_graph_ops_gold.cpp    # Per-op gold tensor tests (GPU-only)
 ```
 
 ## Adding a new model family
 
-Preferred path — create files only in `src/models/<family>/`, add to CMakeLists.txt, zero edits to shared code:
+The plug-and-play architecture uses 4 registries. Adding a new family requires:
+1. Files only in `src/models/<family>/`
+2. One line in `RegisterBuiltinHfModelFamilies()` in `hf_family_registry.cpp`
+3. Source entries in `CMakeLists.txt`
 
-1. Create `src/models/<family>/registration.cpp` that calls `RegisterHfModelFamily(...)` with a `matcher` and `model_definition_loader`.
-2. The loader returns a `DecoderModel` from `HfModelMetadata`.
-3. Optionally register a TRT graph builder via `RegisterTrtGraphBuilder(family, builder)`.
-4. Call your `Register<Family>Family()` from `RegisterBuiltinHfModelFamilies()` in `hf_family_registry.cpp`.
-5. See `src/models/qwen/registration.cpp` for the Qwen3 built-in registration and `tests/test_hf_family_registry.cpp` for the pattern.
+### The 4 Registries
+
+| # | Registry | Interface | Purpose |
+|---|----------|-----------|---------|
+| 1 | HF Family | `RegisterHfModelFamily(...)` | Match HF model_type → load DecoderModel |
+| 2 | Checkpoint Mapper | `RegisterCheckpointMapper(...)` | Map HF safetensors keys → DecoderCheckpoint |
+| 3 | TRT Definition Populator | `RegisterTrtModelDefinitionPopulator(...)` | Populate TrtDecoderDefinition from checkpoint |
+| 4 | TRT Graph Builder | `RegisterTrtGraphBuilder(...)` | Build TRT network from definition |
+
+### Steps
+
+1. **Create `src/models/<family>/registration.cpp`** — call `Register<Family>Family()` which registers into all 4 registries.
+2. **Create `src/models/<family>/checkpoint_mapper.h/cpp`** — implement `ICheckpointMapper` to map HF tensor keys to `DecoderCheckpoint`.
+3. **Optionally create a TRT model populator** if the default Qwen populator doesn't work for your architecture.
+4. **Choose or create a TRT graph builder**:
+   - `StandardDecoderGraphBuilder` works for LLaMA, Qwen, Yi, Mistral-dense, DeepSeek-dense (Pre-RMSNorm + GQA + RoPE + SwiGLU).
+   - Create a custom `ITrtGraphBuilder` for non-standard architectures (MoE, parallel attention).
+5. **Call `Register<Family>Family()`** from `RegisterBuiltinHfModelFamilies()` in `hf_family_registry.cpp`.
+6. **Add source files** to `CMakeLists.txt`.
+
+### Example: Dense decoder (LLaMA-like)
+
+```
+src/models/llama/
+  registration.h        # void RegisterLlamaFamily();
+  registration.cpp      # Registers into all 4 registries
+  checkpoint_mapper.h   # LlamaCheckpointMapper : ICheckpointMapper
+  checkpoint_mapper.cpp # HF LLaMA tensor keys → DecoderCheckpoint
+```
+
+See `src/models/template/registration.cpp` for the minimal skeleton.
+See `src/models/qwen/registration.cpp` for the full Qwen3 built-in registration.
+
+### Diff-test framework
+
+After implementing a new family, validate with:
+```bash
+# E2E logit comparison
+python3 scripts/diff_logits.py \
+  --model-dir <hf-model-dir> --binary ./build/trtf_load_model \
+  --backend-flag --force-trt --atol 1e-3 --battery
+
+# Per-layer hidden state comparison
+python3 scripts/diff_layers.py --model-dir <hf-model-dir>
+
+# Per-op gold tensor tests (generate + run, GPU only)
+python3 scripts/generate_op_gold_tensors.py
+ctest --test-dir build -R test_trt_ops_gold --output-on-failure
+```
 
 Shared TRT graph ops (RMSNorm, RoPE, attention, SwiGLU) are in `src/runtime/trt/trt_graph_ops.h` — reusable by any family.
 

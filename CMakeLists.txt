@@ -58,20 +58,26 @@ add_library(trtf_core
   src/model/hf_family_registry.cpp
   src/model/model_resolver.cpp
   src/model/trt_model_definition.cpp
-  src/model/qwen3_trt_model_definition.cpp
+  src/model/trt_model_definition_populator.cpp
   src/model/qwen3_decoder_model_loader.cpp
   src/runtime/cpu_reference_backend.cpp
   src/runtime/hf_python_backend.cpp
   src/runtime/runtime_factory.cpp
   src/runtime/trt_backend.cpp
-  src/runtime/trt_backend_qwen.cpp
   src/runtime/trt/trt_common.cpp
   src/runtime/trt/trt_graph_ops.cpp
   src/runtime/trt/trt_engine_lifecycle.cpp
   src/runtime/trt/trt_decode_runtime.cpp
   src/runtime/trt/trt_backend_shared.cpp
   src/runtime/trt/trt_graph_builder.cpp
+  src/runtime/trt/standard_decoder_graph_builder.cpp
+  src/model/checkpoint_mapper.cpp
+  src/model/standard_checkpoint_mapper.cpp
   src/models/qwen/registration.cpp
+  src/models/qwen/checkpoint_mapper.cpp
+  src/models/qwen/trt_model_populator.cpp
+  src/models/llama/registration.cpp
+  src/models/llama/checkpoint_mapper.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
   src/utils/tensor_math.cpp
@@ -156,3 +162,16 @@ add_test(NAME test_hf_family_registry COMMAND test_hf_family_registry)
 add_executable(test_qwen_family tests/test_qwen_family.cpp)
 target_link_libraries(test_qwen_family PRIVATE trtf_core)
 add_test(NAME test_qwen_family COMMAND test_qwen_family)
+
+add_executable(test_llama_family tests/test_llama_family.cpp)
+target_link_libraries(test_llama_family PRIVATE trtf_core)
+add_test(NAME test_llama_family COMMAND test_llama_family)
+
+add_executable(test_trt_ops_gold tests/test_trt_graph_ops_gold.cpp)
+target_link_libraries(test_trt_ops_gold PRIVATE trtf_core)
+target_include_directories(test_trt_ops_gold PRIVATE ${PROJECT_SOURCE_DIR}/src)
+if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
+  target_include_directories(test_trt_ops_gold PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_trt_ops_gold PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
+endif()
+add_test(NAME test_trt_ops_gold COMMAND test_trt_ops_gold)

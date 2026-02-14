@@ -1,5 +1,4 @@
 #include "trtf/model_resolver.h"
-#include "trtf/pipeline.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -95,7 +94,7 @@ void write_safetensors_f32(const std::filesystem::path& path, const std::vector<
     }
 }
 
-void write_qwen_root_checkpoint(const std::filesystem::path& dir)
+void write_llama_root_checkpoint(const std::filesystem::path& dir)
 {
     const int32_t vocab = 8;
     const int32_t hidden = 8;
@@ -131,7 +130,6 @@ void write_qwen_root_checkpoint(const std::filesystem::path& dir)
     }
 
     std::vector<float> norm(static_cast<std::size_t>(hidden), 1.0F);
-    std::vector<float> qk_norm(static_cast<std::size_t>(q_hidden / 2), 1.0F);
     std::vector<float> up_proj(static_cast<std::size_t>(mlp) * static_cast<std::size_t>(hidden), 0.0F);
     std::vector<float> gate_proj(static_cast<std::size_t>(mlp) * static_cast<std::size_t>(hidden), 0.0F);
     std::vector<float> down_proj(static_cast<std::size_t>(hidden) * static_cast<std::size_t>(mlp), 0.0F);
@@ -141,14 +139,14 @@ void write_qwen_root_checkpoint(const std::filesystem::path& dir)
         lm_head[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) + static_cast<std::size_t>(i)] = 1.0F;
     }
 
+    // LLaMA checkpoint: same as Qwen but WITHOUT q_norm/k_norm tensors.
     std::vector<TensorSpec> tensors;
     tensors.push_back({"model.embed_tokens.weight", {vocab, hidden}, embedding});
     for (int32_t layer = 0; layer < layers; ++layer)
     {
         const std::string prefix = "model.layers." + std::to_string(layer) + ".";
         tensors.push_back({prefix + "input_layernorm.weight", {hidden}, norm});
-        tensors.push_back({prefix + "self_attn.q_norm.weight", {q_hidden / 2}, qk_norm});
-        tensors.push_back({prefix + "self_attn.k_norm.weight", {q_hidden / 2}, qk_norm});
+        // No q_norm / k_norm for LLaMA.
         tensors.push_back({prefix + "self_attn.q_proj.weight", {q_hidden, hidden}, q_proj});
         tensors.push_back({prefix + "self_attn.k_proj.weight", {kv_hidden, hidden}, k_proj});
         tensors.push_back({prefix + "self_attn.v_proj.weight", {kv_hidden, hidden}, v_proj});
@@ -163,12 +161,12 @@ void write_qwen_root_checkpoint(const std::filesystem::path& dir)
     write_safetensors_f32(dir / "model.safetensors", tensors);
 }
 
-void write_hf_qwen_root(const std::filesystem::path& dir)
+void write_hf_llama_root(const std::filesystem::path& dir)
 {
     write_file(dir / "config.json",
         "{\n"
-        "  \"model_type\": \"qwen2\",\n"
-        "  \"architectures\": [\"Qwen2ForCausalLM\"],\n"
+        "  \"model_type\": \"llama\",\n"
+        "  \"architectures\": [\"LlamaForCausalLM\"],\n"
         "  \"vocab_size\": 8,\n"
         "  \"hidden_size\": 8,\n"
         "  \"num_hidden_layers\": 2,\n"
@@ -177,166 +175,97 @@ void write_hf_qwen_root(const std::filesystem::path& dir)
         "  \"rms_norm_eps\": 1e-5,\n"
         "  \"rope_theta\": 10000.0\n"
         "}\n");
-    write_qwen_root_checkpoint(dir);
-}
-
-void write_decoder_definition(const std::filesystem::path& dir)
-{
-    const std::filesystem::path decoder_dir = dir / "trtf_decoder";
-    std::filesystem::create_directories(decoder_dir);
-
-    write_file(decoder_dir / "config.json",
-        "{\n"
-        "  \"default_next_token\": \"from\",\n"
-        "  \"max_cache_length\": 16\n"
-        "}\n");
-
-    write_file(decoder_dir / "vocab.txt",
-        "<unk>\n"
-        "<bos>\n"
-        "<eos>\n"
-        "<pad>\n"
-        "hello\n"
-        "from\n"
-        "qwen\n"
-        ".\n");
-
-    write_file(decoder_dir / "transitions.txt",
-        "hello from\n"
-        "from qwen\n"
-        "qwen .\n"
-        ". <eos>\n");
+    write_llama_root_checkpoint(dir);
 }
 
 } // namespace
 
 int main()
 {
-    std::filesystem::path with_definition;
-    std::filesystem::path without_definition;
+    std::filesystem::path llama_dir;
 
     try
     {
-        with_definition = make_temp_dir_or_throw("/tmp/trtf_qwen_family_with_def_XXXXXX");
-        without_definition = make_temp_dir_or_throw("/tmp/trtf_qwen_family_without_def_XXXXXX");
+        llama_dir = make_temp_dir_or_throw("/tmp/trtf_llama_family_XXXXXX");
 
-        write_hf_qwen_root(with_definition);
-        write_decoder_definition(with_definition);
+        write_hf_llama_root(llama_dir);
 
-        write_hf_qwen_root(without_definition);
-
-        const trtf::ResolvedModelSpec qwen_spec = trtf::ResolveTextGenerationModel(with_definition.string());
-        if (qwen_spec.kind != trtf::ResolvedModelKind::kDecoderDefinition)
+        // Verify that the LLaMA model resolves correctly through the family registry.
+        const trtf::ResolvedModelSpec spec = trtf::ResolveTextGenerationModel(llama_dir.string());
+        if (spec.kind != trtf::ResolvedModelKind::kDecoderDefinition)
         {
-            std::cerr << "expected qwen+decoder-definition to resolve as decoder-definition" << std::endl;
+            std::cerr << "expected llama hf dir to resolve as decoder-definition" << std::endl;
             return 1;
         }
-        if (qwen_spec.decoder_model.model_id != with_definition.string())
+        if (spec.decoder_model.model_id != llama_dir.string())
         {
             std::cerr << "expected resolved model_id to track original hf dir" << std::endl;
             return 1;
         }
-
-        auto pipeline = trtf::Pipeline::CreateTextGeneration(with_definition.string(), false, false);
-        if (pipeline.backend_name() != "cpu-reference")
+        if (!spec.decoder_model.has_checkpoint)
         {
-            std::cerr << "expected cpu-reference backend for qwen family definition path, got "
-                      << pipeline.backend_name() << std::endl;
-            return 1;
-        }
-        const auto out = pipeline("hello");
-        if (out.size() != 1 || out[0].generated_text.find("hello from qwen.") == std::string::npos)
-        {
-            std::cerr << "unexpected output for qwen family definition path: "
-                      << (out.empty() ? std::string("<empty>") : out[0].generated_text) << std::endl;
+            std::cerr << "expected llama safetensors bridge to load checkpoint" << std::endl;
             return 1;
         }
 
-        const trtf::ResolvedModelSpec fallback_spec = trtf::ResolveTextGenerationModel(without_definition.string());
-        if (fallback_spec.kind != trtf::ResolvedModelKind::kDecoderDefinition)
+        // Verify the family is detected as llama.
         {
-            std::cerr << "expected qwen hf dir without decoder-definition to resolve through qwen safetensors bridge"
-                      << std::endl;
-            return 1;
-        }
-        if (!fallback_spec.decoder_model.has_checkpoint)
-        {
-            std::cerr << "expected qwen root safetensors bridge path to load checkpoint" << std::endl;
-            return 1;
-        }
-        {
-            const std::string family = fallback_spec.decoder_model.architecture.family;
-            if (family.substr(0, 4) != "qwen" && family.substr(0, 3) != "qwq")
+            const std::string family = spec.decoder_model.architecture.family;
+            if (family.substr(0, 5) != "llama")
             {
-                std::cerr << "expected qwen root path to set a qwen/qwq architecture family, got "
-                          << family << std::endl;
-                return 1;
-            }
-        }
-        if (!fallback_spec.decoder_model.checkpoint.has_decoder_layers
-            || fallback_spec.decoder_model.checkpoint.decoder_layers.size() != 2)
-        {
-            std::cerr << "expected qwen root bridge to load full multi-layer qwen checkpoint tensors" << std::endl;
-            return 1;
-        }
-        if (fallback_spec.decoder_model.checkpoint.final_norm.size() != 8)
-        {
-            std::cerr << "expected qwen root bridge to load final_norm tensor" << std::endl;
-            return 1;
-        }
-        if (fallback_spec.decoder_model.checkpoint.attention_size != 16)
-        {
-            std::cerr << "expected qwen root bridge to preserve non-square q attention width" << std::endl;
-            return 1;
-        }
-
-        const trtf::ResolvedModelSpec builtin_alias_spec = trtf::ResolveTextGenerationModel("QWEN3");
-        if (builtin_alias_spec.kind != trtf::ResolvedModelKind::kDecoderDefinition)
-        {
-            std::cerr << "expected built-in QWEN3 alias to resolve as decoder-definition" << std::endl;
-            return 1;
-        }
-        if (builtin_alias_spec.decoder_model.model_id != "QWEN3")
-        {
-            std::cerr << "expected built-in QWEN3 alias to preserve requested model_id" << std::endl;
-            return 1;
-        }
-        if (!builtin_alias_spec.decoder_model.has_checkpoint)
-        {
-            std::cerr << "expected built-in QWEN3 alias to load checkpoint tensors" << std::endl;
-            return 1;
-        }
-
-        const bool builtin_alias_is_large_checkpoint
-            = builtin_alias_spec.decoder_model.checkpoint.embedding.size() > 5000000ULL;
-        if (!builtin_alias_is_large_checkpoint)
-        {
-            auto qwen3_model = trtf::loadModel("QWEN3", false, false);
-            const std::string qwen3_out = qwen3_model.generate("Hello");
-            if (qwen3_model.backend_name() != "cpu-reference")
-            {
-                std::cerr << "expected cpu-reference backend for built-in QWEN3 in cpu-only selection, got "
-                          << qwen3_model.backend_name() << std::endl;
-                return 1;
-            }
-            if (qwen3_out.empty())
-            {
-                std::cerr << "expected non-empty generated text for built-in QWEN3 alias" << std::endl;
+                std::cerr << "expected llama architecture family, got " << family << std::endl;
                 return 1;
             }
         }
 
-        std::cout << "test_qwen_family passed" << std::endl;
+        // Verify multi-layer checkpoint was loaded.
+        if (!spec.decoder_model.checkpoint.has_decoder_layers
+            || spec.decoder_model.checkpoint.decoder_layers.size() != 2)
+        {
+            std::cerr << "expected llama bridge to load full multi-layer checkpoint tensors" << std::endl;
+            return 1;
+        }
+
+        // Verify final_norm was loaded.
+        if (spec.decoder_model.checkpoint.final_norm.size() != 8)
+        {
+            std::cerr << "expected llama bridge to load final_norm tensor" << std::endl;
+            return 1;
+        }
+
+        // Verify attention_size is preserved (q_proj has q_hidden=16 with hidden=8).
+        if (spec.decoder_model.checkpoint.attention_size != 16)
+        {
+            std::cerr << "expected llama bridge to preserve non-square q attention width, got "
+                      << spec.decoder_model.checkpoint.attention_size << std::endl;
+            return 1;
+        }
+
+        // Verify q_norm/k_norm are empty since LLaMA has no per-head norms.
+        // Empty q_norm tells the graph builder to skip per-head RMS norm entirely.
+        {
+            const auto& layer0 = spec.decoder_model.checkpoint.decoder_layers[0];
+            if (!layer0.q_norm.empty())
+            {
+                std::cerr << "expected llama q_norm to be empty (no QK norm), got size " << layer0.q_norm.size() << std::endl;
+                return 1;
+            }
+            if (!layer0.k_norm.empty())
+            {
+                std::cerr << "expected llama k_norm to be empty (no QK norm), got size " << layer0.k_norm.size() << std::endl;
+                return 1;
+            }
+        }
+
+        std::cout << "test_llama_family passed" << std::endl;
     }
     catch (const std::exception& e)
     {
-        std::cerr << "test_qwen_family failed: " << e.what() << std::endl;
-        std::filesystem::remove_all(with_definition);
-        std::filesystem::remove_all(without_definition);
+        std::cerr << "test_llama_family failed: " << e.what() << std::endl;
+        std::filesystem::remove_all(llama_dir);
         return 1;
     }
 
-    std::filesystem::remove_all(with_definition);
-    std::filesystem::remove_all(without_definition);
+    std::filesystem::remove_all(llama_dir);
     return 0;
 }

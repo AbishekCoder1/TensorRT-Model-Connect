@@ -178,7 +178,16 @@ private:
 std::unique_ptr<IGenerationBackend> CreateTrtBackendWithFactory(
     const ITokenizer& tokenizer, const DecoderModel& model, DecoderStepEngineFactory factory)
 {
-    return std::make_unique<TrtBackendShared>(tokenizer, model, factory);
+    return std::make_unique<TrtBackendShared>(tokenizer, model, std::move(factory));
+}
+
+std::unique_ptr<IGenerationBackend> CreateTrtBackendWithBuilder(
+    const ITokenizer& tokenizer, const DecoderModel& model, ITrtGraphBuilder& builder)
+{
+    return CreateTrtBackendWithFactory(tokenizer, model,
+        [&builder](const TrtDecoderDefinition& weights, TrtLogger& logger) {
+            return builder.build_decoder_step_engine(weights, logger);
+        });
 }
 
 #endif // TRTF_HAS_TRT

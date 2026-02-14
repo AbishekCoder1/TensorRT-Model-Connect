@@ -30,7 +30,7 @@ struct TrtDecoderDefinition {
     int32_t max_cache_length{32};
     int32_t id_bos{0};
     int32_t id_eos{0};
-    bool has_qwen_layers{false};
+    bool has_decoder_layers{false};
     float rms_norm_eps{1.0e-5F};
     int32_t num_attention_heads{1};
     int32_t num_key_value_heads{1};
@@ -47,7 +47,7 @@ struct TrtDecoderDefinition {
     std::vector<float> w_out;
     std::vector<float> b_out;
     std::vector<float> final_norm;
-    std::vector<TrtDecoderLayerDefinition> qwen_layers;
+    std::vector<TrtDecoderLayerDefinition> decoder_layers;
 };
 
 TrtDecoderDefinition BuildTrtDecoderWeights(const ITokenizer& tokenizer, const DecoderModel& model);

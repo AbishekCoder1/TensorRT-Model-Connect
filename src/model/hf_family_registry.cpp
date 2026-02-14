@@ -1,6 +1,7 @@
 #include "trtf/hf_family_registry.h"
 #include "qwen3_decoder_model_loader.h"
 #include "models/qwen/registration.h"
+#include "models/llama/registration.h"
 #include "utils/text_parsers.h"
 #include "utils/json_helpers.h"
 
@@ -116,6 +117,7 @@ void RegisterHfModelFamily(HfModelFamilyRegistration registration)
 void RegisterBuiltinHfModelFamilies()
 {
     qwen::RegisterQwenFamily();
+    llama::RegisterLlamaFamily();
 }
 
 std::optional<ResolvedModelSpec> ResolveHfModelViaFamilyRegistry(const std::string& model_id)

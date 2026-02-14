@@ -1,4 +1,4 @@
-#include "qwen3_trt_model_definition.h"
+#include "models/qwen/trt_model_populator.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -6,10 +6,17 @@
 #include <string>
 
 namespace trtf {
+namespace qwen {
 
-bool PopulateQwen3TrtModelDefinition(TrtDecoderDefinition& definition, const DecoderModel& model)
+bool QwenTrtModelDefinitionPopulator::can_populate(const DecoderModel& model) const
 {
-    if (!model.checkpoint.has_qwen_layers || model.checkpoint.qwen_layers.empty())
+    return model.checkpoint.has_decoder_layers && !model.checkpoint.decoder_layers.empty();
+}
+
+bool QwenTrtModelDefinitionPopulator::populate(TrtDecoderDefinition& definition,
+                                               const DecoderModel& model) const
+{
+    if (!model.checkpoint.has_decoder_layers || model.checkpoint.decoder_layers.empty())
     {
         return false;
     }
@@ -30,10 +37,10 @@ bool PopulateQwen3TrtModelDefinition(TrtDecoderDefinition& definition, const Dec
         = model.checkpoint.attention_size > 0 ? model.checkpoint.attention_size : definition.attention_size;
     if (checkpoint_attention <= 0)
     {
-        throw std::runtime_error("Qwen3 checkpoint is missing a valid attention size.");
+        throw std::runtime_error("Checkpoint is missing a valid attention size.");
     }
 
-    definition.has_qwen_layers = true;
+    definition.has_decoder_layers = true;
     definition.attention_size = checkpoint_attention;
     definition.rms_norm_eps = std::max(model.architecture.rms_norm_eps, 1.0e-9F);
     definition.num_attention_heads = std::max(model.architecture.num_attention_heads, 1);
@@ -43,7 +50,7 @@ bool PopulateQwen3TrtModelDefinition(TrtDecoderDefinition& definition, const Dec
 
     if (definition.attention_size % definition.num_attention_heads != 0)
     {
-        throw std::runtime_error("Qwen3 attention_size must be divisible by num_attention_heads.");
+        throw std::runtime_error("attention_size must be divisible by num_attention_heads.");
     }
 
     const std::size_t attention = static_cast<std::size_t>(definition.attention_size);
@@ -54,10 +61,10 @@ bool PopulateQwen3TrtModelDefinition(TrtDecoderDefinition& definition, const Dec
     }
     expect_size(definition.final_norm, hidden, "final_norm");
 
-    definition.qwen_layers.reserve(model.checkpoint.qwen_layers.size());
-    for (std::size_t i = 0; i < model.checkpoint.qwen_layers.size(); ++i)
+    definition.decoder_layers.reserve(model.checkpoint.decoder_layers.size());
+    for (std::size_t i = 0; i < model.checkpoint.decoder_layers.size(); ++i)
     {
-        const DecoderLayerCheckpoint& src = model.checkpoint.qwen_layers[i];
+        const DecoderLayerCheckpoint& src = model.checkpoint.decoder_layers[i];
         TrtDecoderLayerDefinition layer;
         layer.input_norm = src.input_norm;
         layer.q_norm = src.q_norm;
@@ -71,18 +78,18 @@ bool PopulateQwen3TrtModelDefinition(TrtDecoderDefinition& definition, const Dec
         layer.w_up = src.w_up;
         layer.w_down = src.w_down;
 
-        const std::string prefix = "qwen_layers[" + std::to_string(i) + "].";
+        const std::string prefix = "decoder_layers[" + std::to_string(i) + "].";
         expect_size(layer.input_norm, hidden, (prefix + "input_norm").c_str());
-        if (layer.q_norm.empty())
+        // q_norm/k_norm may be empty (LLaMA, Mistral) — leave them empty so the graph
+        // builder skips per-head RMS norm. Only validate size when non-empty (Qwen3).
+        if (!layer.q_norm.empty())
         {
-            layer.q_norm.assign(attention, 1.0F);
+            expect_size(layer.q_norm, attention, (prefix + "q_norm").c_str());
         }
-        if (layer.k_norm.empty())
+        if (!layer.k_norm.empty())
         {
-            layer.k_norm.assign(attention, 1.0F);
+            expect_size(layer.k_norm, attention, (prefix + "k_norm").c_str());
         }
-        expect_size(layer.q_norm, attention, (prefix + "q_norm").c_str());
-        expect_size(layer.k_norm, attention, (prefix + "k_norm").c_str());
         expect_size(layer.w_q, hidden * attention, (prefix + "w_q").c_str());
         expect_size(layer.w_k, hidden * attention, (prefix + "w_k").c_str());
         expect_size(layer.w_v, hidden * attention, (prefix + "w_v").c_str());
@@ -92,9 +99,10 @@ bool PopulateQwen3TrtModelDefinition(TrtDecoderDefinition& definition, const Dec
         expect_size(layer.w_up, hidden * mlp, (prefix + "w_up").c_str());
         expect_size(layer.w_down, mlp * hidden, (prefix + "w_down").c_str());
 
-        definition.qwen_layers.push_back(std::move(layer));
+        definition.decoder_layers.push_back(std::move(layer));
     }
     return true;
 }
 
+} // namespace qwen
 } // namespace trtf

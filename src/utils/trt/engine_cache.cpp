@@ -149,7 +149,7 @@ std::string BuildTrtEngineCacheKey(const TrtDecoderDefinition& definition, const
     hash_scalar(hash, definition.max_cache_length);
     hash_scalar(hash, definition.id_bos);
     hash_scalar(hash, definition.id_eos);
-    hash_scalar(hash, definition.has_qwen_layers ? 1 : 0);
+    hash_scalar(hash, definition.has_decoder_layers ? 1 : 0);
     hash_scalar(hash, definition.rms_norm_eps);
     hash_scalar(hash, definition.num_attention_heads);
     hash_scalar(hash, definition.num_key_value_heads);
@@ -170,9 +170,9 @@ std::string BuildTrtEngineCacheKey(const TrtDecoderDefinition& definition, const
     hash_vector(hash, definition.b_out);
     hash_vector(hash, definition.final_norm);
 
-    const uint64_t num_qwen_layers = static_cast<uint64_t>(definition.qwen_layers.size());
-    hash_scalar(hash, num_qwen_layers);
-    for (const TrtDecoderLayerDefinition& layer : definition.qwen_layers)
+    const uint64_t num_decoder_layers = static_cast<uint64_t>(definition.decoder_layers.size());
+    hash_scalar(hash, num_decoder_layers);
+    for (const TrtDecoderLayerDefinition& layer : definition.decoder_layers)
     {
         hash_layer(hash, layer);
     }

@@ -1,8 +1,8 @@
 #include "trtf/model.h"
+#include "checkpoint_mapper.h"
 #include "safetensors_loader.h"
 #include "utils/text_parsers.h"
 #include "utils/json_helpers.h"
-#include "utils/tensor_math.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -311,16 +311,6 @@ int32_t checked_i32(int64_t value, const std::string& context)
     return static_cast<int32_t>(value);
 }
 
-bool is_qwen_architecture(const DecoderArchitectureConfig& architecture)
-{
-    const std::string family = to_lower_ascii(architecture.family);
-    return starts_with(family, "qwen");
-}
-
-std::string qwen_layer_tensor_key(int32_t layer_idx, const std::string& suffix)
-{
-    return "model.layers." + std::to_string(layer_idx) + "." + suffix;
-}
 
 DecoderCheckpoint load_checkpoint_from_safetensors_direct(
     const TensorSource& reader, std::size_t vocab_size, const std::filesystem::path& path)
@@ -384,230 +374,6 @@ DecoderCheckpoint load_checkpoint_from_safetensors_direct(
     return checkpoint;
 }
 
-DecoderCheckpoint load_checkpoint_from_safetensors_qwen3(const TensorSource& reader, std::size_t vocab_size,
-    const std::filesystem::path& path, const DecoderArchitectureConfig& architecture)
-{
-    const std::string key_embedding = "model.embed_tokens.weight";
-    const std::string key_lm_head = "lm_head.weight";
-    const std::string key_final_norm = "model.norm.weight";
-
-    const auto require_2d = [&](const std::string& name) -> std::pair<int32_t, int32_t> {
-        if (!reader.has(name))
-        {
-            throw std::runtime_error("Missing required Qwen3 safetensors tensor " + name + " in " + path.string());
-        }
-        const SafetensorEntry& entry = reader.entry(name);
-        if (entry.shape.size() != 2)
-        {
-            throw std::runtime_error("Expected rank-2 Qwen3 safetensors tensor for " + name + " in " + path.string());
-        }
-        return {checked_i32(entry.shape[0], name), checked_i32(entry.shape[1], name)};
-    };
-    const auto require_1d = [&](const std::string& name) -> int32_t {
-        if (!reader.has(name))
-        {
-            throw std::runtime_error("Missing required Qwen3 safetensors tensor " + name + " in " + path.string());
-        }
-        const SafetensorEntry& entry = reader.entry(name);
-        if (entry.shape.size() != 1)
-        {
-            throw std::runtime_error("Expected rank-1 Qwen3 safetensors tensor for " + name + " in " + path.string());
-        }
-        return checked_i32(entry.shape[0], name);
-    };
-
-    const auto embedding_shape = require_2d(key_embedding);
-    const int32_t vocab = embedding_shape.first;
-    const int32_t hidden = embedding_shape.second;
-    if (vocab != static_cast<int32_t>(vocab_size))
-    {
-        throw std::runtime_error("Qwen3 safetensors vocab size mismatch. embedding rows="
-            + std::to_string(vocab) + ", vocab.txt size=" + std::to_string(vocab_size));
-    }
-
-    const int32_t num_layers = std::max(architecture.num_layers, 1);
-    const int32_t num_attention_heads = std::max(architecture.num_attention_heads, 1);
-    const int32_t num_kv_heads = std::max(architecture.num_key_value_heads, 1);
-
-    DecoderCheckpoint checkpoint;
-    checkpoint.hidden_size = hidden;
-    checkpoint.has_qwen_layers = true;
-    checkpoint.embedding = reader.load_f32(key_embedding);
-    checkpoint.qwen_layers.reserve(static_cast<std::size_t>(num_layers));
-
-    int32_t inferred_mlp_size = 0;
-    int32_t inferred_attention_size = 0;
-    for (int32_t layer_idx = 0; layer_idx < num_layers; ++layer_idx)
-    {
-        const std::string input_norm_key = qwen_layer_tensor_key(layer_idx, "input_layernorm.weight");
-        const std::string q_norm_key = qwen_layer_tensor_key(layer_idx, "self_attn.q_norm.weight");
-        const std::string k_norm_key = qwen_layer_tensor_key(layer_idx, "self_attn.k_norm.weight");
-        const std::string q_key = qwen_layer_tensor_key(layer_idx, "self_attn.q_proj.weight");
-        const std::string k_key = qwen_layer_tensor_key(layer_idx, "self_attn.k_proj.weight");
-        const std::string v_key = qwen_layer_tensor_key(layer_idx, "self_attn.v_proj.weight");
-        const std::string o_key = qwen_layer_tensor_key(layer_idx, "self_attn.o_proj.weight");
-        const std::string post_norm_key = qwen_layer_tensor_key(layer_idx, "post_attention_layernorm.weight");
-        const std::string gate_key = qwen_layer_tensor_key(layer_idx, "mlp.gate_proj.weight");
-        const std::string up_key = qwen_layer_tensor_key(layer_idx, "mlp.up_proj.weight");
-        const std::string down_key = qwen_layer_tensor_key(layer_idx, "mlp.down_proj.weight");
-
-        const int32_t input_norm = require_1d(input_norm_key);
-        const auto q_shape = require_2d(q_key);
-        const auto k_shape = require_2d(k_key);
-        const auto v_shape = require_2d(v_key);
-        const auto o_shape = require_2d(o_key);
-        const int32_t post_norm = require_1d(post_norm_key);
-        const auto gate_shape = require_2d(gate_key);
-        const auto up_shape = require_2d(up_key);
-        const auto down_shape = require_2d(down_key);
-
-        const int32_t q_hidden = q_shape.first;
-        const int32_t kv_hidden = k_shape.first;
-
-        if (input_norm != hidden || post_norm != hidden)
-        {
-            throw std::runtime_error("Qwen3 RMSNorm shape mismatch at layer " + std::to_string(layer_idx)
-                + " in " + path.string());
-        }
-        if (q_shape.second != hidden || o_shape.first != hidden || o_shape.second != q_hidden)
-        {
-            throw std::runtime_error("Qwen3 attention projection shape mismatch at layer " + std::to_string(layer_idx)
-                + " in " + path.string());
-        }
-        if (k_shape.second != hidden || v_shape.second != hidden || kv_hidden != v_shape.first)
-        {
-            throw std::runtime_error("Qwen3 k/v projection shape mismatch at layer " + std::to_string(layer_idx)
-                + " in " + path.string());
-        }
-        if (gate_shape.second != hidden || up_shape.second != hidden || gate_shape.first != up_shape.first
-            || down_shape.first != hidden || down_shape.second != gate_shape.first)
-        {
-            throw std::runtime_error("Qwen3 MLP projection shape mismatch at layer " + std::to_string(layer_idx)
-                + " in " + path.string());
-        }
-
-        if (inferred_mlp_size == 0)
-        {
-            inferred_mlp_size = gate_shape.first;
-        }
-        else if (inferred_mlp_size != gate_shape.first)
-        {
-            throw std::runtime_error("Qwen3 inconsistent MLP size across layers in " + path.string());
-        }
-
-        if (inferred_attention_size == 0)
-        {
-            inferred_attention_size = q_hidden;
-        }
-        else if (inferred_attention_size != q_hidden)
-        {
-            throw std::runtime_error("Qwen3 inconsistent attention projection size across layers in " + path.string());
-        }
-
-        if (q_hidden % num_attention_heads != 0)
-        {
-            throw std::runtime_error("Qwen3 q_proj out_features must be divisible by num_attention_heads at layer "
-                + std::to_string(layer_idx) + " in " + path.string());
-        }
-        const int32_t head_dim = q_hidden / num_attention_heads;
-        const bool grouped_kv_layout = num_attention_heads % num_kv_heads == 0
-            && kv_hidden == head_dim * num_kv_heads;
-        if (!grouped_kv_layout && kv_hidden != q_hidden)
-        {
-            throw std::runtime_error("Qwen3 k/v projection out_features do not match grouped-KV or full-attention layout at layer "
-                + std::to_string(layer_idx) + " in " + path.string());
-        }
-
-        DecoderLayerCheckpoint layer;
-        layer.input_norm = reader.load_f32(input_norm_key);
-
-        std::vector<float> q_norm_head(static_cast<std::size_t>(head_dim), 1.0F);
-        if (reader.has(q_norm_key))
-        {
-            const int32_t q_norm_size = require_1d(q_norm_key);
-            if (q_norm_size != head_dim)
-            {
-                throw std::runtime_error("Qwen3 q_norm shape mismatch at layer " + std::to_string(layer_idx)
-                    + " in " + path.string());
-            }
-            q_norm_head = reader.load_f32(q_norm_key);
-        }
-        layer.q_norm = repeat_head_norm(q_norm_head, num_attention_heads);
-
-        std::vector<float> k_norm_head(static_cast<std::size_t>(head_dim), 1.0F);
-        if (reader.has(k_norm_key))
-        {
-            const int32_t k_norm_size = require_1d(k_norm_key);
-            if (k_norm_size != head_dim)
-            {
-                throw std::runtime_error("Qwen3 k_norm shape mismatch at layer " + std::to_string(layer_idx)
-                    + " in " + path.string());
-            }
-            k_norm_head = reader.load_f32(k_norm_key);
-        }
-        layer.k_norm = repeat_head_norm(k_norm_head, num_attention_heads);
-
-        layer.w_q = transpose_2d(reader.load_f32(q_key), q_hidden, hidden, "q_proj");
-
-        const std::vector<float> k_t = transpose_2d(reader.load_f32(k_key), kv_hidden, hidden, "k_proj");
-        const std::vector<float> v_t = transpose_2d(reader.load_f32(v_key), kv_hidden, hidden, "v_proj");
-        layer.w_k = expand_kv_projection(k_t, hidden, kv_hidden, q_hidden, architecture, "k_proj");
-        layer.w_v = expand_kv_projection(v_t, hidden, kv_hidden, q_hidden, architecture, "v_proj");
-
-        layer.w_o = transpose_2d(reader.load_f32(o_key), hidden, q_hidden, "o_proj");
-        layer.post_attn_norm = reader.load_f32(post_norm_key);
-        layer.w_gate = transpose_2d(reader.load_f32(gate_key), inferred_mlp_size, hidden, "gate_proj");
-        layer.w_up = transpose_2d(reader.load_f32(up_key), inferred_mlp_size, hidden, "up_proj");
-        layer.w_down = transpose_2d(reader.load_f32(down_key), hidden, inferred_mlp_size, "down_proj");
-        checkpoint.qwen_layers.push_back(std::move(layer));
-    }
-
-    checkpoint.attention_size = inferred_attention_size > 0 ? inferred_attention_size : hidden;
-    checkpoint.mlp_size = inferred_mlp_size;
-
-    if (reader.has(key_final_norm))
-    {
-        if (require_1d(key_final_norm) != hidden)
-        {
-            throw std::runtime_error("Qwen3 model.norm.weight shape mismatch in " + path.string());
-        }
-        checkpoint.final_norm = reader.load_f32(key_final_norm);
-    }
-    else
-    {
-        checkpoint.final_norm.assign(static_cast<std::size_t>(hidden), 1.0F);
-    }
-
-    if (reader.has(key_lm_head))
-    {
-        const auto lm_shape = require_2d(key_lm_head);
-        if (lm_shape.first != vocab || lm_shape.second != hidden)
-        {
-            throw std::runtime_error("Qwen3 lm_head shape mismatch in " + path.string());
-        }
-        checkpoint.w_out = transpose_2d(reader.load_f32(key_lm_head), vocab, hidden, "lm_head");
-    }
-    else
-    {
-        checkpoint.w_out = transpose_2d(checkpoint.embedding, vocab, hidden, "embedding");
-    }
-
-    // Populate layer-0 compatibility tensors for legacy paths.
-    if (!checkpoint.qwen_layers.empty())
-    {
-        const DecoderLayerCheckpoint& layer0 = checkpoint.qwen_layers.front();
-        checkpoint.w_q = layer0.w_q;
-        checkpoint.w_k = layer0.w_k;
-        checkpoint.w_v = layer0.w_v;
-        checkpoint.w1 = layer0.w_up;
-        checkpoint.b1.assign(static_cast<std::size_t>(checkpoint.mlp_size), 0.0F);
-        checkpoint.w2 = layer0.w_down;
-        checkpoint.b2.assign(static_cast<std::size_t>(hidden), 0.0F);
-    }
-
-    checkpoint.b_out.assign(static_cast<std::size_t>(vocab), 0.0F);
-    return checkpoint;
-}
 
 DecoderCheckpoint load_checkpoint_from_safetensors(
     const std::filesystem::path& path, std::size_t vocab_size, const DecoderArchitectureConfig& architecture)
@@ -622,13 +388,15 @@ DecoderCheckpoint load_checkpoint_from_safetensors(
         return load_checkpoint_from_safetensors_direct(reader, vocab_size, path);
     }
 
-    if (is_qwen_architecture(architecture))
+    ICheckpointMapper* mapper = FindCheckpointMapper(architecture);
+    if (mapper)
     {
-        return load_checkpoint_from_safetensors_qwen3(reader, vocab_size, path, architecture);
+        return mapper->map_checkpoint(reader, vocab_size, path, architecture);
     }
 
-    throw std::runtime_error("Unsupported safetensors checkpoint layout in " + path.string()
-        + ". Provide direct trtf tensor names or set architecture_family=qwen3 for Qwen mapping.");
+    throw std::runtime_error("No checkpoint mapper for family: " + architecture.family
+        + " in " + path.string()
+        + ". Provide direct trtf tensor names or register a checkpoint mapper.");
 }
 
 DecoderCheckpoint load_checkpoint(
@@ -725,8 +493,7 @@ DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const s
     model.architecture.family = extract_json_string(config_text, "architecture_family", "");
     if (model.architecture.family.empty())
     {
-        const std::string lowered = to_lower_ascii(model_type);
-        model.architecture.family = starts_with(lowered, "qwen") ? "qwen3" : "toy-decoder";
+        model.architecture.family = model_type.empty() ? "toy-decoder" : to_lower_ascii(model_type);
     }
 
     if (std::filesystem::exists(vocab_path))
@@ -783,15 +550,7 @@ DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const s
     {
         model.max_cache_length = env_max_cache;
     }
-    else if (configured_max_cache <= 0)
-    {
-        const std::string family_lower = to_lower_ascii(model.architecture.family);
-        if (starts_with(family_lower, "qwen") && model.max_cache_length > 4096)
-        {
-            // Default cap keeps TRT step-engine memory practical for large upstream checkpoints.
-            model.max_cache_length = 4096;
-        }
-    }
+    // Family-specific cache caps belong in the family loader (e.g., qwen3_decoder_model_loader.cpp).
 
     model.architecture.num_layers = std::max(extract_json_int(config_text, "num_hidden_layers", 1), 1);
     model.architecture.num_attention_heads = std::max(extract_json_int(config_text, "num_attention_heads", 1), 1);

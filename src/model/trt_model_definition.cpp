@@ -1,5 +1,5 @@
 #include "trt_model_definition.h"
-#include "qwen3_trt_model_definition.h"
+#include "trt_model_definition_populator.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -82,7 +82,7 @@ TrtDecoderDefinition BuildTrtDecoderWeights(const ITokenizer& tokenizer, const D
         definition.w_out = model.checkpoint.w_out;
         definition.b_out = model.checkpoint.b_out;
 
-        if (PopulateQwen3TrtModelDefinition(definition, model))
+        if (PopulateViaRegistry(definition, model))
         {
             return definition;
         }
