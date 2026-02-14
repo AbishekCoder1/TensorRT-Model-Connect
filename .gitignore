@@ -50,11 +50,12 @@ __pycache__/
 *.swp
 *.swo
 
-# Local model/download caches and heavyweight local checkpoints
+# Downloaded HF model directories (heavyweight, not committed)
+# Only bundled demo assets (models/hf/qwen3/, etc.) are tracked.
+models/hf/Qwen__Qwen3-0.6B/
+models/hf/TinyLlama__*/
+models/hf/tiny-random-*/
 models/hf/*/.cache/
-models/hf/Qwen__Qwen3-0.6B/model.safetensors
-models/hf/*/model-*.safetensors
-models/hf/*/model.safetensors.index.json
 
 .*
 config
