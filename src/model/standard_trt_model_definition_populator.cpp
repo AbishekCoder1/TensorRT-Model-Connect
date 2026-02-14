@@ -76,6 +76,7 @@ bool StandardTrtModelDefinitionPopulator::populate(TrtDecoderDefinition& definit
         layer.w_gate = src.w_gate;
         layer.w_up = src.w_up;
         layer.w_down = src.w_down;
+        layer.extra_tensors = src.extra_tensors;
 
         const std::string prefix = "decoder_layers[" + std::to_string(i) + "].";
         expect_size(layer.input_norm, hidden, (prefix + "input_norm").c_str());

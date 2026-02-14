@@ -114,6 +114,9 @@ classDiagram
         +int32_t pad_token_id
         +float rms_norm_eps
         +float rope_theta
+        +map~string,int32_t~ extra_int_params
+        +map~string,float~ extra_float_params
+        +map~string,string~ extra_string_params
     }
 
     class DecoderCheckpoint {
@@ -136,6 +139,7 @@ classDiagram
         +vector~float~ w_q, w_k, w_v, w_o
         +vector~float~ post_attn_norm
         +vector~float~ w_gate, w_up, w_down
+        +map~string,vector~float~~ extra_tensors
     }
 
     class ResolvedModelSpec {
@@ -358,12 +362,34 @@ classDiagram
         +vector~string~ cache_v_input_names
         +vector~string~ present_k_output_names
         +vector~string~ present_v_output_names
+        +vector~TensorBinding~ extra_bindings
         +int32_t num_layers
         +bool requires_position_input
         +int32_t vocab_size
         +int32_t hidden_size
         +int32_t cache_state_size
         +int32_t max_cache_length
+    }
+
+    class IStepState {
+        <<interface>>
+        +prepare_step(position_id, mask)* bool
+        +cache_k_by_layer()* vector~vector~float~~
+        +cache_v_by_layer()* vector~vector~float~~
+        +update_after_step(present_k, present_v)*
+    }
+
+    class KvCacheStepState {
+        -int32_t mCacheStateSize
+        -int32_t mMaxCacheLength
+        -int32_t mNumLayers
+        -int32_t mCacheLength
+        -vector~vector~float~~ mCacheK
+        -vector~vector~float~~ mCacheV
+        +prepare_step(position_id, mask) bool
+        +cache_k_by_layer() vector~vector~float~~
+        +cache_v_by_layer() vector~vector~float~~
+        +update_after_step(present_k, present_v)
     }
 
     class TrtDecoderDefinition {
@@ -389,6 +415,7 @@ classDiagram
         +vector~float~ w_q, w_k, w_v, w_o
         +vector~float~ post_attn_norm
         +vector~float~ w_gate, w_up, w_down
+        +map~string,vector~float~~ extra_tensors
     }
 
     class TrtLogger {
@@ -419,8 +446,10 @@ classDiagram
     TrtBackendShared *-- DecoderStepEngine : owns
     TrtBackendShared *-- TrtDecoderDefinition : holds
     TrtBackendShared *-- TrtLogger : holds
+    TrtBackendShared ..> IStepState : creates during generate()
     TrtBackendShared ..> CudaStream : uses during generate()
     TrtBackendShared ..> CudaBuffer : uses during generate()
+    IStepState <|-- KvCacheStepState
     TrtDecoderDefinition *-- "0..*" TrtDecoderLayerDefinition
     DecoderStepEngine ..> CudaStream : executes on
 ```
@@ -429,8 +458,10 @@ classDiagram
 
 | Class | Role | Implementation |
 |-------|------|---------------|
-| **TrtBackendShared** | `IGenerationBackend` implementation for TRT. Owns the compiled engine and runs the autoregressive loop. | Constructor calls `BuildTrtDecoderWeights()` (Registry 3 dispatch) then the provided engine factory (Registry 4 dispatch) to produce a `DecoderStepEngine`. `generate()` allocates per-layer `CudaBuffer` KV caches, runs prefill (one step per input token), then decode loop (greedy argmax until EOS or max tokens). Supports `TRTF_DEBUG_LOGITS_TOPK` for debugging. File: `src/runtime/trt/trt_backend_shared.cpp` (195 LOC). |
-| **DecoderStepEngine** | Compiled TRT engine + execution context + tensor binding metadata. | Created by `finalize_decoder_step_engine()` which builds `ICudaEngine` from `INetworkDefinition` (or loads from cache). Stores all tensor names for inputs (token_id, position_id, attention_mask, per-layer cache_k/v) and outputs (logits, per-layer present_k/v). File: `src/runtime/trt/trt_engine_lifecycle.h`. |
+| **TrtBackendShared** | `IGenerationBackend` implementation for TRT. Owns the compiled engine and runs the autoregressive loop. | Constructor calls `BuildTrtDecoderWeights()` (Registry 3 dispatch) then the provided engine factory (Registry 4 dispatch) to produce a `DecoderStepEngine`. `generate()` creates a `KvCacheStepState` (via `IStepState` interface), runs prefill then decode loop (greedy argmax until EOS or max tokens). Supports `TRTF_DEBUG_LOGITS_TOPK` for debugging. File: `src/runtime/trt/trt_backend_shared.cpp`. |
+| **IStepState** | Abstract interface for per-step state management during autoregressive generation. | Defines `prepare_step()` (compute position/mask), `cache_k/v_by_layer()` (access current state), `update_after_step()` (incorporate new outputs). Enables Mamba/SSM models to provide recurrent state instead of KV cache. File: `src/runtime/trt/step_state.h`. |
+| **KvCacheStepState** | KV-cache state implementation for standard attention-based decoders. | Manages per-layer `cache_k`/`cache_v` vectors, tracks `cache_length`, builds attention masks, appends new state via `append_cache_state()`. Extracted from the previous inline cache management in `generate()`. File: `src/runtime/trt/kv_cache_step_state.cpp`. |
+| **DecoderStepEngine** | Compiled TRT engine + execution context + tensor binding metadata. | Created by `finalize_decoder_step_engine()` which builds `ICudaEngine` from `INetworkDefinition` (or loads from cache). Stores all tensor names for inputs (token_id, position_id, attention_mask, per-layer cache_k/v) and outputs (logits, per-layer present_k/v). Also supports `extra_bindings` for non-KV-cache models. File: `src/runtime/trt/trt_engine_lifecycle.h`. |
 | **TrtDecoderDefinition** | TRT-ready model weights + architecture parameters. | Produced by `BuildTrtDecoderWeights()` which calls `PopulateViaRegistry()` (Registry 3). Contains all data needed by the graph builder: embedding, per-layer weights, final norm, LM head, dims, special token IDs, RoPE/RMSNorm params. File: `src/model/trt_model_definition.h`. |
 | **TrtLogger** | TRT `ILogger` implementation. | Forwards TRT log messages to stderr when `TRTF_TRT_LOG_STDERR=1`. Captures last error for diagnostic reporting. Filters by `TRTF_TRT_LOG_MIN_SEVERITY`. File: `src/runtime/trt/trt_common.cpp`. |
 | **CudaStream** | RAII wrapper for `cudaStream_t`. | Constructor calls `cudaStreamCreate()`, destructor calls `cudaStreamDestroy()`. Non-copyable. `ok()` checks `cudaSuccess`. File: `src/runtime/trt/trt_common.cpp`. |

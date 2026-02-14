@@ -561,6 +561,12 @@ DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const s
     model.architecture.rms_norm_eps = extract_json_float(config_text, "rms_norm_eps", 1.0e-5F);
     model.architecture.rope_theta = extract_json_float(config_text, "rope_theta", 10000.0F);
 
+    const int32_t intermediate_size = extract_json_int(config_text, "intermediate_size", -1);
+    if (intermediate_size > 0)
+    {
+        model.architecture.extra_int_params["intermediate_size"] = intermediate_size;
+    }
+
     if (model.max_cache_length <= 0)
     {
         model.max_cache_length = 32;

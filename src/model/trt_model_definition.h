@@ -4,6 +4,8 @@
 #include "trtf/tokenizer.h"
 
 #include <cstdint>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace trtf {
@@ -20,6 +22,8 @@ struct TrtDecoderLayerDefinition {
     std::vector<float> w_gate;
     std::vector<float> w_up;
     std::vector<float> w_down;
+
+    std::unordered_map<std::string, std::vector<float>> extra_tensors;
 };
 
 struct TrtDecoderDefinition {
@@ -48,6 +52,10 @@ struct TrtDecoderDefinition {
     std::vector<float> b_out;
     std::vector<float> final_norm;
     std::vector<TrtDecoderLayerDefinition> decoder_layers;
+
+    std::unordered_map<std::string, int32_t> extra_int_params;
+    std::unordered_map<std::string, float> extra_float_params;
+    std::unordered_map<std::string, std::vector<float>> extra_tensors;
 };
 
 TrtDecoderDefinition BuildTrtDecoderWeights(const ITokenizer& tokenizer, const DecoderModel& model);

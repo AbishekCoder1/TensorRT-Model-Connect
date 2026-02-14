@@ -33,6 +33,15 @@ struct DecoderStepEngine {
     std::vector<std::string> present_k_output_names;
     std::vector<std::string> present_v_output_names;
 
+    // Generic tensor bindings for non-KV-cache models (Mamba, MLA, etc.)
+    struct TensorBinding {
+        std::string logical_name;
+        std::string engine_name;
+        bool is_input{true};
+        int32_t element_count{0};
+    };
+    std::vector<TensorBinding> extra_bindings;
+
     int32_t num_layers{1};
     bool requires_position_input{false};
     int32_t vocab_size{0};
@@ -45,11 +54,21 @@ struct DecoderStepEngine {
 bool has_io_tensor(const nvinfer1::ICudaEngine& engine, const std::string& tensor_name);
 bool has_all_required_tensors(const DecoderStepEngine& engine);
 
+std::vector<const DecoderStepEngine::TensorBinding*> find_extra_bindings(
+    const DecoderStepEngine& engine, const std::string& prefix, bool is_input);
+
 std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuilder& builder,
     nvinfer1::INetworkDefinition& network, nvinfer1::IBuilderConfig& config, TrtLogger& logger,
     const TrtDecoderDefinition& weights, const std::vector<std::string>& cache_k_input_names,
     const std::vector<std::string>& cache_v_input_names, const std::vector<std::string>& present_k_output_names,
     const std::vector<std::string>& present_v_output_names, bool requires_position_input);
+
+std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuilder& builder,
+    nvinfer1::INetworkDefinition& network, nvinfer1::IBuilderConfig& config, TrtLogger& logger,
+    const TrtDecoderDefinition& weights, const std::vector<std::string>& cache_k_input_names,
+    const std::vector<std::string>& cache_v_input_names, const std::vector<std::string>& present_k_output_names,
+    const std::vector<std::string>& present_v_output_names, bool requires_position_input,
+    const std::vector<DecoderStepEngine::TensorBinding>& extra_bindings);
 
 #endif // TRTF_HAS_TRT
 

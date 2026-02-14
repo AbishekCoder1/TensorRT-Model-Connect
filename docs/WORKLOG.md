@@ -686,3 +686,79 @@ Addressed all friction points identified in the developer experience audit above
 - Proposed 4-phase refactoring roadmap (A: generalize checkpoint, B: abstract state, C: generalize I/O, D: new graph ops).
 - Designed subagent parallelization strategy: 6 Tier-1 (today), 4 Tier-2 (new graph builder), 3 Tier-3 (after shared refactor).
 
+## 2026-02-13 (continued: extensibility foundation refactor — Phases A-C)
+
+Implemented the "extensibility foundation" commit from the Architecture-Extensibility-Assessment roadmap. Three phases of zero-behavioral-change refactoring to unblock non-standard architectures (MoE, Mamba/SSM, MLA, hybrid).
+
+### Phase A: Generalize checkpoint and definition structs
+
+Added `extra_tensors`/`extra_params` maps so families can carry arbitrary weights and config:
+
+- `include/trtf/model.h`:
+  - `DecoderLayerCheckpoint.extra_tensors` (`unordered_map<string, vector<float>>`)
+  - `DecoderArchitectureConfig.extra_int_params`, `extra_float_params`, `extra_string_params`
+- `src/model/trt_model_definition.h`:
+  - `TrtDecoderLayerDefinition.extra_tensors`
+  - `TrtDecoderDefinition.extra_int_params`, `extra_float_params`, `extra_tensors`
+- `src/model/standard_trt_model_definition_populator.cpp`: copies `extra_tensors` in layer loop
+- `src/model/model_loader.cpp`: parses `intermediate_size` from config.json into `extra_int_params`
+- `src/utils/trt/engine_cache.cpp`: hashes all extra fields (sorted keys for determinism), bumped version to `"trtf-trt-plan-v4"`
+
+### Phase B: Generalize engine I/O bindings
+
+Added generic tensor bindings to `DecoderStepEngine` for non-KV-cache models:
+
+- `src/runtime/trt/trt_engine_lifecycle.h`:
+  - Added `DecoderStepEngine::TensorBinding` struct (logical_name, engine_name, is_input, element_count)
+  - Added `extra_bindings` vector to `DecoderStepEngine`
+  - Added `find_extra_bindings()` free function (prefix match + is_input filter)
+  - Added second `finalize_decoder_step_engine` overload accepting extra bindings
+- `src/runtime/trt/trt_engine_lifecycle.cpp`: implemented all new functions; `has_all_required_tensors()` now validates extra bindings
+
+### Phase C: Abstract state management (IStepState)
+
+Extracted KV-cache management from `generate()` into an interface:
+
+- Created `src/runtime/trt/step_state.h`: `IStepState` abstract interface with `prepare_step()`, `cache_k/v_by_layer()`, `update_after_step()`
+- Created `src/runtime/trt/kv_cache_step_state.h/cpp`: `KvCacheStepState` implementing `IStepState` — mechanical extraction from previous inline code in `generate()`
+- Refactored `src/runtime/trt/trt_backend_shared.cpp`: `generate()` now uses `KvCacheStepState` via the `IStepState` interface (reduced from ~97 LOC to ~65 LOC, identical behavior)
+- Added `kv_cache_step_state.cpp` to `CMakeLists.txt`
+
+### Phase D: Documentation updates
+
+- `docs/wiki/Static-Design.md`: Added `IStepState`, `KvCacheStepState`, `TensorBinding` to class diagrams and logical descriptions
+- `docs/wiki/Dynamic-Design.md`: Updated autoregressive generation sequence diagram to show `KvCacheStepState` interaction
+- `docs/wiki/Architecture-Extensibility-Assessment.md`: Marked Phases A-C as completed with implementation details
+- `docs/wiki/Source-Layout.md`: Added new files (`step_state.h`, `kv_cache_step_state.h/cpp`)
+
+### Validation
+
+- Host build: `cmake --build build -j` passed (zero warnings)
+- Host tests: 6/11 pass (same baseline — 5 fail due to sandbox `mkdtemp: Read-only file system`)
+  - Passing: test_tokenizer, test_pipeline, test_trt_smoke, test_runtime_factory, test_extension_registry, test_trt_ops_gold
+  - Failing (sandbox): test_model_loader, test_model_resolver, test_hf_family_registry, test_qwen_family, test_llama_family
+- Zero new test failures. Zero behavioral changes.
+
+### File summary
+
+| Action | File |
+|--------|------|
+| Edit | `include/trtf/model.h` |
+| Edit | `src/model/trt_model_definition.h` |
+| Edit | `src/model/standard_trt_model_definition_populator.cpp` |
+| Edit | `src/model/model_loader.cpp` |
+| Edit | `src/utils/trt/engine_cache.cpp` |
+| Edit | `src/runtime/trt/trt_engine_lifecycle.h` |
+| Edit | `src/runtime/trt/trt_engine_lifecycle.cpp` |
+| Create | `src/runtime/trt/step_state.h` |
+| Create | `src/runtime/trt/kv_cache_step_state.h` |
+| Create | `src/runtime/trt/kv_cache_step_state.cpp` |
+| Edit | `src/runtime/trt/trt_backend_shared.h` |
+| Edit | `src/runtime/trt/trt_backend_shared.cpp` |
+| Edit | `CMakeLists.txt` |
+| Edit | `docs/wiki/Static-Design.md` |
+| Edit | `docs/wiki/Dynamic-Design.md` |
+| Edit | `docs/wiki/Architecture-Extensibility-Assessment.md` |
+| Edit | `docs/wiki/Source-Layout.md` |
+| Edit | `docs/WORKLOG.md` |
+

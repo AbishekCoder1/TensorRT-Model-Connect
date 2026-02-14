@@ -289,44 +289,17 @@ src/runtime/trt/
 
 To enable a dozen subagents to work in parallel on different model families, I recommend these changes in priority order:
 
-### Phase A: Generalize Layer Checkpoint (Unblocks: MoE, MLA, Mamba)
+### Phase A: Generalize Layer Checkpoint (Unblocks: MoE, MLA, Mamba) — COMPLETED
 
-Add `extra_tensors` to `DecoderLayerCheckpoint` and `TrtDecoderLayerDefinition`:
+Added `extra_tensors` to `DecoderLayerCheckpoint` and `TrtDecoderLayerDefinition`, plus `extra_int_params`/`extra_float_params`/`extra_string_params` to `DecoderArchitectureConfig`, and matching fields to `TrtDecoderDefinition`. Engine cache hashing updated for all extra fields (version bumped to v4). Model loader now parses `intermediate_size` into `extra_int_params`. Standard populator copies `extra_tensors` through the layer pipeline.
 
-```cpp
-// model.h — additive, backward compatible
-struct DecoderLayerCheckpoint {
-    // ... existing fields unchanged ...
-    std::unordered_map<std::string, std::vector<float>> extra_tensors;
-    std::unordered_map<std::string, int32_t> extra_int_params;
-};
-```
+### Phase B: Generalize Engine I/O (Unblocks: Mamba, MLA) — COMPLETED
 
-**Effort**: ~30 LOC across 2 files. Zero behavioral change. Unblocks all non-standard checkpoint mappers immediately.
+Added `TensorBinding` struct and `extra_bindings` vector to `DecoderStepEngine`. Added `find_extra_bindings()` for prefix-based lookup. Added `finalize_decoder_step_engine` overload accepting extra bindings. `has_all_required_tensors()` now validates extra bindings. Existing KV-cache I/O is unchanged; extra bindings are additive for non-standard architectures.
 
-### Phase B: Abstract State Management (Unblocks: Mamba, Hybrid)
+### Phase C: Abstract State Management (Unblocks: Mamba, Hybrid) — COMPLETED
 
-Extract `IStepState` interface from `TrtBackendShared::generate()`:
-
-```cpp
-class IStepState {
-public:
-    virtual ~IStepState() = default;
-    virtual std::vector<CudaBuffer> allocate_device_buffers() = 0;
-    virtual void bind_to_context(IExecutionContext& ctx, int32_t position) = 0;
-    virtual void update_after_step(/* present outputs */) = 0;
-};
-```
-
-Existing `generate()` loop refactored to use `IStepState`. `KvCacheStepState` preserves exact current behavior.
-
-**Effort**: ~200 LOC refactor. Zero behavioral change for existing models.
-
-### Phase C: Generalize Engine I/O (Unblocks: Mamba, MLA)
-
-Replace hardcoded `cache_k_input_names` / `present_k_output_names` in `DecoderStepEngine` with generic tensor bindings. Update `run_decoder_step()` to use generic binding loop.
-
-**Effort**: ~150 LOC refactor.
+Extracted `IStepState` interface (`src/runtime/trt/step_state.h`) from `TrtBackendShared::generate()`. Implemented `KvCacheStepState` (`kv_cache_step_state.h/cpp`) preserving exact current KV-cache behavior. Refactored `generate()` to use `state->prepare_step()`, `state->cache_k/v_by_layer()`, and `state->update_after_step()`. Zero behavioral change — identical token output for all existing models.
 
 ### Phase D: New Graph Ops Library (Unblocks: MoE, Mamba, MLA, GELU models)
 

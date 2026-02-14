@@ -1,10 +1,11 @@
 #include "runtime/trt/trt_backend_shared.h"
+#include "runtime/trt/kv_cache_step_state.h"
 #include "runtime/trt/trt_decode_runtime.h"
 #include "utils/json_helpers.h"
 
-#include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -78,66 +79,48 @@ public:
             return output;
         }
 
-        const int32_t cache_state_size = mDecoderStepEngine->cache_state_size;
-        const int32_t max_cache_length = mDecoderStepEngine->max_cache_length;
-        const int32_t num_layers = mDecoderStepEngine->num_layers;
-        const bool include_current_slot = mDecoderStepEngine->requires_position_input;
-        const int32_t position_limit = include_current_slot ? max_cache_length : std::max(max_cache_length - 1, 0);
-        const std::size_t cache_elems
-            = static_cast<std::size_t>(max_cache_length) * static_cast<std::size_t>(cache_state_size);
-
-        std::vector<std::vector<float>> cache_k(
-            static_cast<std::size_t>(num_layers), std::vector<float>(cache_elems, 0.0F));
-        std::vector<std::vector<float>> cache_v(
-            static_cast<std::size_t>(num_layers), std::vector<float>(cache_elems, 0.0F));
-        int32_t cache_length = 0;
+        auto state = std::make_unique<KvCacheStepState>(*mDecoderStepEngine);
 
         std::vector<float> logits;
         std::vector<std::vector<float>> present_k;
         std::vector<std::vector<float>> present_v;
         const int32_t debug_logits_topk = parse_positive_env_int("TRTF_DEBUG_LOGITS_TOPK", 0);
 
+        // Prefill: process all input tokens except the last
         if (input_ids.size() > 1)
         {
             for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
             {
-                const std::vector<float> mask = build_attention_mask(cache_length, max_cache_length, include_current_slot);
-                const int32_t position_id = std::min(cache_length, position_limit);
+                int32_t position_id{};
+                std::vector<float> mask;
+                state->prepare_step(position_id, mask);
                 std::string error;
-                if (!run_decoder_step(*mDecoderStepEngine, input_ids[i], position_id, cache_k, cache_v, mask, logits,
-                        present_k, present_v, error))
+                if (!run_decoder_step(*mDecoderStepEngine, input_ids[i], position_id,
+                        state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
+                        logits, present_k, present_v, error))
                 {
                     throw std::runtime_error("prefill step failed: " + error);
                 }
-                for (int32_t layer = 0; layer < num_layers; ++layer)
-                {
-                    const std::size_t idx = static_cast<std::size_t>(layer);
-                    append_cache_state(cache_k[idx], present_k[idx], cache_state_size, max_cache_length, cache_length);
-                    append_cache_state(cache_v[idx], present_v[idx], cache_state_size, max_cache_length, cache_length);
-                }
-                cache_length = std::min(cache_length + 1, max_cache_length);
+                state->update_after_step(present_k, present_v);
             }
         }
 
+        // Decode: generate new tokens autoregressively
         int32_t current_token = input_ids.empty() ? mWeights.id_bos : input_ids.back();
 
         for (std::size_t step = 0; step < config.max_new_tokens; ++step)
         {
-            const std::vector<float> mask = build_attention_mask(cache_length, max_cache_length, include_current_slot);
-            const int32_t position_id = std::min(cache_length, position_limit);
+            int32_t position_id{};
+            std::vector<float> mask;
+            state->prepare_step(position_id, mask);
             std::string error;
-            if (!run_decoder_step(*mDecoderStepEngine, current_token, position_id, cache_k, cache_v, mask, logits,
-                    present_k, present_v, error))
+            if (!run_decoder_step(*mDecoderStepEngine, current_token, position_id,
+                    state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
+                    logits, present_k, present_v, error))
             {
                 throw std::runtime_error("decode step failed: " + error);
             }
-            for (int32_t layer = 0; layer < num_layers; ++layer)
-            {
-                const std::size_t idx = static_cast<std::size_t>(layer);
-                append_cache_state(cache_k[idx], present_k[idx], cache_state_size, max_cache_length, cache_length);
-                append_cache_state(cache_v[idx], present_v[idx], cache_state_size, max_cache_length, cache_length);
-            }
-            cache_length = std::min(cache_length + 1, max_cache_length);
+            state->update_after_step(present_k, present_v);
 
             if (debug_logits_topk > 0)
             {

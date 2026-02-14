@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -19,6 +20,9 @@ struct DecoderLayerCheckpoint {
     std::vector<float> w_gate;
     std::vector<float> w_up;
     std::vector<float> w_down;
+
+    // Extension: arbitrary named tensors for non-standard layers (MoE experts, SSM weights, etc.)
+    std::unordered_map<std::string, std::vector<float>> extra_tensors;
 };
 
 struct DecoderCheckpoint {
@@ -52,6 +56,11 @@ struct DecoderArchitectureConfig {
     int32_t pad_token_id{-1};
     float rms_norm_eps{1.0e-5F};
     float rope_theta{10000.0F};
+
+    // Extension: arbitrary architecture parameters for non-standard configs
+    std::unordered_map<std::string, int32_t> extra_int_params;
+    std::unordered_map<std::string, float> extra_float_params;
+    std::unordered_map<std::string, std::string> extra_string_params;
 };
 
 struct DecoderModel {

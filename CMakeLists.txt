@@ -69,6 +69,7 @@ add_library(trtf_core
   src/runtime/trt/trt_engine_lifecycle.cpp
   src/runtime/trt/trt_decode_runtime.cpp
   src/runtime/trt/trt_backend_shared.cpp
+  src/runtime/trt/kv_cache_step_state.cpp
   src/runtime/trt/trt_graph_builder.cpp
   src/runtime/trt/standard_decoder_graph_builder.cpp
   src/model/checkpoint_mapper.cpp

@@ -78,9 +78,11 @@ File-by-file guide to the codebase.
 | `trt_graph_ops.h/cpp` | Reusable TRT graph operations: RMSNorm, matmul, RoPE, bias, dimension helpers |
 | `trt_graph_builder.h/cpp` | `ITrtGraphBuilder` interface + name-based registry |
 | `standard_decoder_graph_builder.h/cpp` | Builds Pre-RMSNorm+GQA+RoPE+SwiGLU decoder network. Two paths: multi-layer (real models) and legacy (tiny built-in) |
-| `trt_engine_lifecycle.h/cpp` | `DecoderStepEngine` struct, `finalize_decoder_step_engine()` (build + serialize engine) |
+| `trt_engine_lifecycle.h/cpp` | `DecoderStepEngine` struct (with `TensorBinding` and `extra_bindings`), `finalize_decoder_step_engine()`, `find_extra_bindings()` |
 | `trt_decode_runtime.h/cpp` | `run_decoder_step()`, `select_argmax_token()`, `build_attention_mask()`, `append_cache_state()` |
-| `trt_backend_shared.h/cpp` | `TrtBackendShared`: full autoregressive generate loop with prefill + decode phases |
+| `step_state.h` | `IStepState` interface: abstract per-step state management for autoregressive generation |
+| `kv_cache_step_state.h/cpp` | `KvCacheStepState`: KV-cache implementation of `IStepState` for attention-based decoders |
+| `trt_backend_shared.h/cpp` | `TrtBackendShared`: autoregressive generate loop using `IStepState` with prefill + decode phases |
 
 ## Tokenizers (`src/tokenizer/`)
 

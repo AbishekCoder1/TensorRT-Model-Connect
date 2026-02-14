@@ -3,6 +3,7 @@
 #include "trtf/backend.h"
 #include "trtf/model.h"
 #include "trtf/tokenizer.h"
+#include "runtime/trt/step_state.h"
 #include "runtime/trt/trt_common.h"
 #include "runtime/trt/trt_engine_lifecycle.h"
 #include "runtime/trt/trt_graph_builder.h"

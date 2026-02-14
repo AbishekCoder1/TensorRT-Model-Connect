@@ -1,6 +1,8 @@
 #include "runtime/trt/trt_engine_lifecycle.h"
 #include "utils/trt/engine_cache.h"
 
+#include <string>
+
 namespace trtf {
 
 #if TRTF_HAS_TRT
@@ -17,6 +19,22 @@ bool has_io_tensor(const nvinfer1::ICudaEngine& engine, const std::string& tenso
         }
     }
     return false;
+}
+
+std::vector<const DecoderStepEngine::TensorBinding*> find_extra_bindings(
+    const DecoderStepEngine& engine, const std::string& prefix, bool is_input)
+{
+    std::vector<const DecoderStepEngine::TensorBinding*> result;
+    for (const DecoderStepEngine::TensorBinding& binding : engine.extra_bindings)
+    {
+        if (binding.is_input == is_input
+            && binding.logical_name.size() >= prefix.size()
+            && binding.logical_name.compare(0, prefix.size(), prefix) == 0)
+        {
+            result.push_back(&binding);
+        }
+    }
+    return result;
 }
 
 bool has_all_required_tensors(const DecoderStepEngine& engine)
@@ -37,6 +55,14 @@ bool has_all_required_tensors(const DecoderStepEngine& engine)
             || !has_io_tensor(*engine.engine, engine.cache_v_input_names[static_cast<std::size_t>(i)])
             || !has_io_tensor(*engine.engine, engine.present_k_output_names[static_cast<std::size_t>(i)])
             || !has_io_tensor(*engine.engine, engine.present_v_output_names[static_cast<std::size_t>(i)]))
+        {
+            return false;
+        }
+    }
+
+    for (const DecoderStepEngine::TensorBinding& binding : engine.extra_bindings)
+    {
+        if (!has_io_tensor(*engine.engine, binding.engine_name))
         {
             return false;
         }
@@ -113,6 +139,27 @@ std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuild
         return nullptr;
     }
     return out;
+}
+
+std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuilder& builder,
+    nvinfer1::INetworkDefinition& network, nvinfer1::IBuilderConfig& config, TrtLogger& logger,
+    const TrtDecoderDefinition& weights, const std::vector<std::string>& cache_k_input_names,
+    const std::vector<std::string>& cache_v_input_names, const std::vector<std::string>& present_k_output_names,
+    const std::vector<std::string>& present_v_output_names, bool requires_position_input,
+    const std::vector<DecoderStepEngine::TensorBinding>& extra_bindings)
+{
+    auto result = finalize_decoder_step_engine(builder, network, config, logger, weights,
+        cache_k_input_names, cache_v_input_names, present_k_output_names, present_v_output_names,
+        requires_position_input);
+    if (result)
+    {
+        result->extra_bindings = extra_bindings;
+        if (!has_all_required_tensors(*result))
+        {
+            return nullptr;
+        }
+    }
+    return result;
 }
 
 #endif // TRTF_HAS_TRT

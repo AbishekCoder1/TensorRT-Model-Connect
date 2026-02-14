@@ -262,6 +262,7 @@ sequenceDiagram
     participant P as Pipeline
     participant T as ITokenizer
     participant B as TrtBackendShared
+    participant S as KvCacheStepState
     participant E as DecoderStepEngine
     participant GPU as CUDA GPU
 
@@ -269,35 +270,34 @@ sequenceDiagram
     T-->>P: [token_1, token_2]
     P->>B: generate([token_1, token_2], config)
 
-    Note over B: Allocate GPU buffers
-    B->>GPU: CudaBuffer for per-layer cache_k, cache_v
-    B->>GPU: CudaBuffer for logits, mask
+    Note over B: Create step state (IStepState)
+    B->>S: KvCacheStepState(engine)
+    Note over S: Allocates per-layer cache_k, cache_v
 
     Note over B: Prefill phase
-    loop for each input token
-        B->>B: build_attention_mask(position, max_cache)
-        B->>E: run_decoder_step(token, position, mask, caches)
+    loop for each input token except last
+        B->>S: prepare_step(position_id, mask)
+        S-->>B: position_id, attention_mask
+        B->>E: run_decoder_step(token, position, mask, state.caches)
         E->>GPU: enqueueV3(stream) → execute TRT engine
         GPU-->>E: logits[vocab_size] + present_k/v
-        B->>B: append_cache_state(present_k → cache_k)
-        B->>B: append_cache_state(present_v → cache_v)
-        B->>B: position++
+        B->>S: update_after_step(present_k, present_v)
+        Note over S: append_cache_state(), cache_length++
     end
 
     Note over B: Decode phase
-    B->>B: select_argmax_token(logits) → next_token
     loop step = 0..max_new_tokens
-        B->>B: build_attention_mask(position, max_cache)
-        B->>E: run_decoder_step(next_token, position, mask, caches)
+        B->>S: prepare_step(position_id, mask)
+        S-->>B: position_id, attention_mask
+        B->>E: run_decoder_step(current_token, position, mask, state.caches)
         E->>GPU: enqueueV3(stream)
         GPU-->>E: logits[vocab_size] + present_k/v
-        B->>B: append_cache_state(present_k/v → caches)
+        B->>S: update_after_step(present_k, present_v)
         B->>B: select_argmax_token(logits) → next_token
         alt next_token == eos_token
             Note over B: Stop generation
         end
         B->>B: output.push_back(next_token)
-        B->>B: position++
     end
 
     B-->>P: [token_1, token_2, gen_1, gen_2, ...]
@@ -308,6 +308,7 @@ sequenceDiagram
 
 ### Key implementation details
 
+- **State management is abstracted via `IStepState`**. `KvCacheStepState` implements it for standard attention models. Mamba/SSM models can provide `RecurrentStepState`, hybrid models can combine both.
 - **KV cache is a fixed-size circular buffer** per layer: `[max_cache_length, attention_size]`. `append_cache_state()` writes new K/V at `position % max_cache_length`.
 - **Attention mask** is built each step: `0.0` for visible positions, `-1e9` for masked. Grows by 1 each step.
 - **Greedy sampling** via `select_argmax_token()` — scans logits array for maximum value.

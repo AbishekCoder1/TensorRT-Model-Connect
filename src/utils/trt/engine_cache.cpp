@@ -119,6 +119,24 @@ void hash_vector(uint64_t& hash, const std::vector<float>& value)
     }
 }
 
+void hash_extra_tensors(uint64_t& hash, const std::unordered_map<std::string, std::vector<float>>& tensors)
+{
+    std::vector<std::string> keys;
+    keys.reserve(tensors.size());
+    for (const auto& kv : tensors)
+    {
+        keys.push_back(kv.first);
+    }
+    std::sort(keys.begin(), keys.end());
+    const uint64_t count = static_cast<uint64_t>(keys.size());
+    hash_scalar(hash, count);
+    for (const std::string& key : keys)
+    {
+        hash_string(hash, key);
+        hash_vector(hash, tensors.at(key));
+    }
+}
+
 void hash_layer(uint64_t& hash, const TrtDecoderLayerDefinition& layer)
 {
     hash_vector(hash, layer.input_norm);
@@ -132,6 +150,7 @@ void hash_layer(uint64_t& hash, const TrtDecoderLayerDefinition& layer)
     hash_vector(hash, layer.w_gate);
     hash_vector(hash, layer.w_up);
     hash_vector(hash, layer.w_down);
+    hash_extra_tensors(hash, layer.extra_tensors);
 }
 
 } // namespace
@@ -140,7 +159,7 @@ std::string BuildTrtEngineCacheKey(const TrtDecoderDefinition& definition, const
 {
     uint64_t hash = kFnvOffsetBasis;
 
-    hash_string(hash, "trtf-trt-plan-v3");
+    hash_string(hash, "trtf-trt-plan-v4");
 
     hash_scalar(hash, definition.vocab_size);
     hash_scalar(hash, definition.hidden_size);
@@ -175,6 +194,41 @@ std::string BuildTrtEngineCacheKey(const TrtDecoderDefinition& definition, const
     for (const TrtDecoderLayerDefinition& layer : definition.decoder_layers)
     {
         hash_layer(hash, layer);
+    }
+
+    // Hash extra params (sorted for determinism)
+    {
+        std::vector<std::string> int_keys;
+        int_keys.reserve(definition.extra_int_params.size());
+        for (const auto& kv : definition.extra_int_params)
+        {
+            int_keys.push_back(kv.first);
+        }
+        std::sort(int_keys.begin(), int_keys.end());
+        const uint64_t int_count = static_cast<uint64_t>(int_keys.size());
+        hash_scalar(hash, int_count);
+        for (const std::string& key : int_keys)
+        {
+            hash_string(hash, key);
+            hash_scalar(hash, definition.extra_int_params.at(key));
+        }
+
+        std::vector<std::string> float_keys;
+        float_keys.reserve(definition.extra_float_params.size());
+        for (const auto& kv : definition.extra_float_params)
+        {
+            float_keys.push_back(kv.first);
+        }
+        std::sort(float_keys.begin(), float_keys.end());
+        const uint64_t float_count = static_cast<uint64_t>(float_keys.size());
+        hash_scalar(hash, float_count);
+        for (const std::string& key : float_keys)
+        {
+            hash_string(hash, key);
+            hash_scalar(hash, definition.extra_float_params.at(key));
+        }
+
+        hash_extra_tensors(hash, definition.extra_tensors);
     }
 
     std::ostringstream oss;
