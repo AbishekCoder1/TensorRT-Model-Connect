@@ -25,7 +25,7 @@ File-by-file guide to the codebase.
 | `text_parsers.h/cpp` | `starts_with()`, `to_lower_ascii()`, `iequals_ascii()`, `read_file()`, `parse_positive_env_int()` |
 | `json_helpers.h/cpp` | `extract_json_string()`, `extract_json_int()`, `extract_json_float()`, `extract_json_string_array()` |
 | `tensor_math.h/cpp` | `transpose_2d()`, `expand_kv_projection()`, `repeat_head_norm()` — used by checkpoint mappers |
-| `trt/engine_cache.h/cpp` | On-disk TRT engine plan cache (mmap-based read, serialize/deserialize `ICudaEngine`) |
+| `trt/engine_cache.h/cpp` | On-disk TRT engine plan cache (mmap-based read, serialize/deserialize). Includes model-dir index (`BuildModelDirIndexKey`, `SaveModelDirIndex`, `LookupModelDirIndex`) for zero-weight fast-path startup. |
 
 ## Model Loading (`src/model/`)
 
@@ -147,7 +147,8 @@ File-by-file guide to the codebase.
 
 | File | Purpose |
 |------|---------|
-| `trtf_c.cpp` | `extern "C"` factory: `trtf_create_pipeline()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`. Contains `PipelineImpl` (concrete `IPipeline`). |
+| `trtf_c.cpp` | `extern "C"` factory: `trtf_create_pipeline()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`. Contains `PipelineImpl` (concrete `IPipeline`). Fast path via `try_create_from_cached_engine()`. |
+| `fast_path_config.h/cpp` | `FastPathModelConfig` struct + `parse_fast_path_config()` — extracts model metadata from config.json text for the zero-weight fast path. |
 
 ## Pipeline (`src/pipeline/`)
 
@@ -175,6 +176,9 @@ File-by-file guide to the codebase.
 | `test_text_parsers.cpp` | starts_with, ends_with, trim, split_words, iequals_ascii (CPU-only) |
 | `test_decode_runtime.cpp` | select_argmax_token, select_topk_tokens, build_attention_mask, append_cache_state (TRT-guarded) |
 | `test_engine_cache_key.cpp` | BuildTrtEngineCacheKey determinism, extra_params sensitivity (CPU-only) |
+| `test_engine_cache_index.cpp` | BuildModelDirIndexKey, SaveModelDirIndex, LookupModelDirIndex: roundtrip, staleness, cache disable (CPU-only) |
+| `test_engine_cache_io.cpp` | SaveTrtEnginePlanToCache, LoadTrtEnginePlanFromCache: roundtrip, mmap, 10MB large file, cache disable (CPU-only) |
+| `test_fast_path_config.cpp` | parse_fast_path_config: head_dim explicit/computed, GQA attention_size, cache length capping, eos/bos from array/scalar (CPU-only) |
 | `test_kv_cache_step_state.cpp` | KvCacheStepState position tracking, mask generation, cache overflow (TRT-guarded) |
 | `test_extra_fields.cpp` | Phase A extensibility: extra_tensors round-trip, extra_params, find_extra_bindings |
 | `test_trt_graph_ops_gold.cpp` | Per-op gold tensor tests: rms_norm, matmul, swiglu, rope, rms_norm_per_head, bias_sum (GPU-only) |

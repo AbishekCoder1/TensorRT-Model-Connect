@@ -4,6 +4,7 @@
 #include "trtf/model_resolver.h"
 #include "trtf/runtime_factory.h"
 #include "bundle/bundle_format.h"
+#include "cabi/fast_path_config.h"
 #include "model/trt_model_definition.h"
 #include "utils/data_dir.h"
 #include "utils/json_helpers.h"
@@ -156,18 +157,10 @@ PipelineImpl* try_create_from_cached_engine(const std::string& input, const std:
     }
 
     const std::string config_text = trtf::read_file(std::filesystem::path(model_dir) / "config.json");
-    int32_t max_cache_length = trtf::parse_positive_env_int("TRTF_MAX_CACHE_LENGTH", -1);
-    if (max_cache_length <= 0)
-    {
-        max_cache_length = trtf::extract_json_int(config_text, "max_position_embeddings", 32);
-        // Apply same caps as model loader
-        if (max_cache_length > 4096)
-        {
-            max_cache_length = 4096;
-        }
-    }
+    const int32_t max_cache_override = trtf::parse_positive_env_int("TRTF_MAX_CACHE_LENGTH", -1);
+    const trtf::FastPathModelConfig fp_cfg = trtf::parse_fast_path_config(config_text, max_cache_override);
 
-    const std::string index_key = trtf::BuildModelDirIndexKey(model_dir, max_cache_length);
+    const std::string index_key = trtf::BuildModelDirIndexKey(model_dir, fp_cfg.max_cache_length);
     const auto cache_key = trtf::LookupModelDirIndex(index_key);
     if (!cache_key)
     {
@@ -203,28 +196,19 @@ PipelineImpl* try_create_from_cached_engine(const std::string& input, const std:
         return nullptr;
     }
 
-    // Read minimal metadata from config for engine dimensions
-    const int32_t vocab_size = trtf::extract_json_int(config_text, "vocab_size", 0);
-    const int32_t hidden_size = trtf::extract_json_int(config_text, "hidden_size", 0);
-    const int32_t num_layers = std::max(trtf::extract_json_int(config_text, "num_hidden_layers", 1), 1);
-    const int32_t num_heads = std::max(trtf::extract_json_int(config_text, "num_attention_heads", 1), 1);
-    const int32_t num_kv_heads = std::max(trtf::extract_json_int(config_text, "num_key_value_heads", 1), 1);
-    // head_dim may be explicit in config (e.g., Qwen3 has head_dim=128 != hidden/heads=64)
-    const int32_t head_dim = trtf::extract_json_int(config_text, "head_dim", hidden_size / num_heads);
-    const int32_t attention_size = num_heads * head_dim;
-
+    // Populate engine metadata from parsed config
     auto engine_struct = std::make_unique<trtf::DecoderStepEngine>();
     engine_struct->engine = std::move(trt_engine);
     engine_struct->context = std::move(exec_ctx);
-    engine_struct->vocab_size = vocab_size;
-    engine_struct->hidden_size = hidden_size;
-    engine_struct->cache_state_size = attention_size;
-    engine_struct->attention_mask_size = max_cache_length + 1;
-    engine_struct->max_cache_length = max_cache_length;
-    engine_struct->num_layers = num_layers;
+    engine_struct->vocab_size = fp_cfg.vocab_size;
+    engine_struct->hidden_size = fp_cfg.hidden_size;
+    engine_struct->cache_state_size = fp_cfg.attention_size;
+    engine_struct->attention_mask_size = fp_cfg.max_cache_length + 1;
+    engine_struct->max_cache_length = fp_cfg.max_cache_length;
+    engine_struct->num_layers = fp_cfg.num_layers;
     engine_struct->requires_position_input = true;
 
-    for (int32_t i = 0; i < num_layers; ++i)
+    for (int32_t i = 0; i < fp_cfg.num_layers; ++i)
     {
         engine_struct->cache_k_input_names.push_back(trtf::layer_tensor_name("cache_k", i));
         engine_struct->cache_v_input_names.push_back(trtf::layer_tensor_name("cache_v", i));
@@ -232,8 +216,8 @@ PipelineImpl* try_create_from_cached_engine(const std::string& input, const std:
         engine_struct->present_v_output_names.push_back(trtf::layer_tensor_name("present_v", i));
     }
 
-    engine_struct->id_bos = trtf::extract_json_int_or_first_array(config_text, "bos_token_id", -1);
-    engine_struct->id_eos = trtf::extract_json_int_or_first_array(config_text, "eos_token_id", -1);
+    engine_struct->id_bos = fp_cfg.id_bos;
+    engine_struct->id_eos = fp_cfg.id_eos;
 
     if (!trtf::has_all_required_tensors(*engine_struct))
     {

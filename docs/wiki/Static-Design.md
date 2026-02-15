@@ -467,6 +467,19 @@ classDiagram
         +data() void*
     }
 
+    class FastPathModelConfig {
+        +int32_t vocab_size
+        +int32_t hidden_size
+        +int32_t num_layers
+        +int32_t num_heads
+        +int32_t num_kv_heads
+        +int32_t head_dim
+        +int32_t attention_size
+        +int32_t max_cache_length
+        +int32_t id_bos
+        +int32_t id_eos
+    }
+
     IGenerationBackend <|-- TrtBackendShared
     TrtBackendShared *-- DecoderStepEngine : owns
     TrtBackendShared *-- TrtDecoderDefinition : holds
@@ -477,6 +490,8 @@ classDiagram
     IStepState <|-- KvCacheStepState
     TrtDecoderDefinition *-- "0..*" TrtDecoderLayerDefinition
     DecoderStepEngine ..> CudaStream : executes on
+
+    note for FastPathModelConfig "Used by try_create_from_cached_engine()\nto populate DecoderStepEngine metadata\nfrom config.json without loading weights.\nFile: src/cabi/fast_path_config.h"
 ```
 
 ### Logical Description
@@ -491,6 +506,8 @@ classDiagram
 | **TrtLogger** | TRT `ILogger` implementation. | Forwards TRT log messages to stderr when `TRTF_TRT_LOG_STDERR=1`. Captures last error for diagnostic reporting. Filters by `TRTF_TRT_LOG_MIN_SEVERITY`. File: `src/runtime/trt/trt_common.cpp`. |
 | **CudaStream** | RAII wrapper for `cudaStream_t`. | Constructor calls `cudaStreamCreate()`, destructor calls `cudaStreamDestroy()`. Non-copyable. `ok()` checks `cudaSuccess`. File: `src/runtime/trt/trt_common.cpp`. |
 | **CudaBuffer** | RAII wrapper for GPU memory allocation. | Constructor calls `cudaMalloc()`, destructor calls `cudaFree()`. Non-copyable. `ok()` checks `cudaSuccess`. File: `src/runtime/trt/trt_common.cpp`. |
+| **FastPathModelConfig** | Lightweight config struct for the zero-weight fast path. | Parsed from `config.json` text by `parse_fast_path_config()` without loading any safetensors data. Contains dimensions, cache length (with 4096 cap), and special token IDs needed to populate `DecoderStepEngine` metadata. File: `src/cabi/fast_path_config.h/cpp`. |
+| **CreateTrtBackendFromEngine()** | Creates a TRT backend from a pre-built `DecoderStepEngine` (fast path). | Wraps the engine in a `TrtBackendShared` without calling any graph builder or weight populator. Used when the engine was deserialized from a cached `.plan` file. File: `src/runtime/trt/trt_backend_shared.cpp`. |
 
 ### TRT Graph Ops (Reusable Building Blocks)
 

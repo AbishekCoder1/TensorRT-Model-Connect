@@ -5,12 +5,13 @@ This page shows the runtime behavior of the system through sequence diagrams and
 ## Table of Contents
 
 1. [Pipeline Creation (Full Sequence)](#1-pipeline-creation-full-sequence)
-2. [HF Family Resolution Detail](#2-hf-family-resolution-detail)
-3. [Checkpoint Loading and Mapping](#3-checkpoint-loading-and-mapping)
-4. [TRT Engine Build](#4-trt-engine-build)
-5. [Autoregressive Generation](#5-autoregressive-generation)
-6. [Single Decode Step (TRT)](#6-single-decode-step-trt)
-7. [Data Transformation Pipeline](#7-data-transformation-pipeline)
+2. [Pipeline Creation — Fast Path (Cached Engine)](#2-pipeline-creation--fast-path-cached-engine)
+3. [HF Family Resolution Detail](#3-hf-family-resolution-detail)
+4. [Checkpoint Loading and Mapping](#4-checkpoint-loading-and-mapping)
+5. [TRT Engine Build](#5-trt-engine-build)
+6. [Autoregressive Generation](#6-autoregressive-generation)
+7. [Single Decode Step (TRT)](#7-single-decode-step-trt)
+8. [Data Transformation Pipeline](#8-data-transformation-pipeline)
 
 ---
 
@@ -81,7 +82,94 @@ sequenceDiagram
 
 ---
 
-## 2. HF Family Resolution Detail
+## 2. Pipeline Creation -- Fast Path (Cached Engine)
+
+When a TRT engine has been previously built and cached to disk, the fast path bypasses all weight loading, checkpoint mapping, and TRT graph building. This reduces cached startup from ~260s to ~7s.
+
+The fast path is attempted **before** the slow path. On cache miss, it returns `nullptr` and the slow path runs normally. On the first successful slow-path build, the engine cache index is saved so subsequent runs take the fast path.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CABI as trtf_c.cpp
+    participant Dir as resolve_model_dir_lightweight
+    participant Cfg as parse_fast_path_config
+    participant Idx as BuildModelDirIndexKey
+    participant Lkp as LookupModelDirIndex
+    participant Load as LoadTrtEnginePlanFromCache
+    participant TRT as TensorRT Runtime
+    participant Tok as HfPythonTokenizer
+    participant BE as CreateTrtBackendFromEngine
+
+    User->>CABI: trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)
+
+    Note over CABI: Fast path attempt
+    CABI->>Dir: resolve_model_dir_lightweight("QWEN3")
+    Dir-->>CABI: models/hf/Qwen__Qwen3-0.6B
+
+    CABI->>Cfg: parse_fast_path_config(config.json text, env override)
+    Cfg-->>CABI: FastPathModelConfig (dims, max_cache_length, eos/bos)
+
+    CABI->>Idx: BuildModelDirIndexKey(model_dir, max_cache_length)
+    Idx-->>CABI: index_key (FNV-1a hash)
+
+    CABI->>Lkp: LookupModelDirIndex(index_key)
+    alt cache HIT (index + .plan file exist)
+        Lkp-->>CABI: cache_key
+
+        CABI->>Load: LoadTrtEnginePlanFromCache(cache_key)
+        Load->>Load: mmap .plan file (~2.5 GB)
+        Load-->>CABI: plan bytes
+
+        CABI->>TRT: createInferRuntime(logger)
+        CABI->>TRT: deserializeCudaEngine(plan)
+        TRT-->>CABI: ICudaEngine
+        CABI->>TRT: createExecutionContext()
+        TRT-->>CABI: IExecutionContext
+
+        Note over CABI: Build DecoderStepEngine from config metadata<br/>(no weight loading — zero allocation)
+
+        CABI->>Tok: CreateHfPythonTokenizer(model_dir)
+        Tok-->>CABI: tokenizer
+
+        CABI->>BE: CreateTrtBackendFromEngine(engine)
+        BE-->>CABI: TrtBackend (fast path)
+
+        CABI-->>User: Pipeline (ready in ~7s)
+    else cache MISS
+        Lkp-->>CABI: nullopt
+        Note over CABI: Fall through to slow path (Section 1)
+    end
+```
+
+### What makes the fast path fast
+
+| Slow path step | Time | Fast path equivalent |
+|---------------|------|---------------------|
+| Load safetensors (600M+ FP32 weights) | ~120s | **Skipped entirely** |
+| Checkpoint mapping (transpose, GQA expand) | ~40s | **Skipped entirely** |
+| TRT engine build (or cache load) | ~100s | mmap .plan file (~400ms) |
+| Engine deserialization | ~5s | Same (~5s) |
+| Tokenizer init | ~3s | Same (~3s) |
+
+### Model-dir index key
+
+`BuildModelDirIndexKey()` hashes:
+- Canonical model directory path
+- `config.json` file content (captures all architecture changes)
+- `model.safetensors` file size (catches weight file changes without reading data)
+- `model.safetensors.index.json` content (for sharded models)
+- `max_cache_length` (different cache lengths need different engines)
+
+This ensures any change to the model files invalidates the cache automatically.
+
+### Cache invalidation
+
+`LookupModelDirIndex()` verifies the `.plan` file still exists before returning a cache hit. If the plan was deleted (e.g., TRT version upgrade), it returns `nullopt` and the slow path rebuilds.
+
+---
+
+## 3. HF Family Resolution Detail
 
 Detailed view of how the family registry matches and dispatches.
 
@@ -121,7 +209,7 @@ sequenceDiagram
 
 ---
 
-## 3. Checkpoint Loading and Mapping
+## 4. Checkpoint Loading and Mapping
 
 How HF safetensors tensor keys are translated into the canonical `DecoderCheckpoint`.
 
@@ -190,7 +278,7 @@ sequenceDiagram
 
 ---
 
-## 4. TRT Engine Build
+## 5. TRT Engine Build
 
 How `StandardDecoderGraphBuilder` constructs the TensorRT network graph.
 
@@ -255,7 +343,7 @@ sequenceDiagram
 
 ---
 
-## 5. Autoregressive Generation
+## 6. Autoregressive Generation
 
 How `TrtBackendShared::generate()` runs the prefill + decode loop.
 
@@ -318,7 +406,7 @@ sequenceDiagram
 
 ---
 
-## 6. Single Decode Step (TRT)
+## 7. Single Decode Step (TRT)
 
 Detailed view of what happens inside `run_decoder_step()`.
 
@@ -364,7 +452,7 @@ sequenceDiagram
 
 ---
 
-## 7. Data Transformation Pipeline
+## 8. Data Transformation Pipeline
 
 End-to-end data transformation from HF files to generated text.
 

@@ -139,6 +139,42 @@ static void test_last_error_cleared_on_success()
     delete p2;
 }
 
+static void test_fast_path_miss_falls_through()
+{
+    // No cached engine for the builtin model → fast path misses, slow path runs.
+    // This verifies the fast path code doesn't crash when there's no cache hit.
+    auto* p = trtf_create_pipeline("trtf/tiny-cake-v1", TRTF_PREFER_TRT);
+    check(p != nullptr, "fast path miss falls through to slow path");
+    if (p != nullptr)
+    {
+        const char* result = p->generate("hello", 3);
+        check(result != nullptr, "generate works after fast path miss");
+        check(std::strlen(result) > 0, "generate produces output after fast path miss");
+        delete p;
+    }
+}
+
+static void test_fast_path_no_config_skips()
+{
+    // trtf/tiny-cake-v1 has no config.json in the expected HF location →
+    // fast path should skip gracefully and fall through to slow path without crash.
+    auto* p = trtf_create_pipeline("trtf/tiny-cake-v1", TRTF_FORCE_TRT);
+    // On CPU-only builds, force_trt may fail (no TRT available), which is fine.
+    // On TRT builds, the builtin model should still work via slow path.
+    // Either way, this must not crash.
+    if (p != nullptr)
+    {
+        const char* bn = p->backend_name();
+        check(bn != nullptr, "backend_name not null after fast path skip");
+        delete p;
+    }
+    else
+    {
+        // Expected on non-TRT builds: force_trt fails for builtin model
+        check(true, "fast path skip: null pipeline acceptable on non-TRT build");
+    }
+}
+
 int main()
 {
     test_version_not_null();
@@ -153,6 +189,8 @@ int main()
     test_delete_null_safe();
     test_flags_cpu_only();
     test_last_error_cleared_on_success();
+    test_fast_path_miss_falls_through();
+    test_fast_path_no_config_skips();
 
     if (failures > 0)
     {

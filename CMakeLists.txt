@@ -96,6 +96,7 @@ add_library(trtf_core
   src/bundle/bundle_format.cpp
   src/bundle/bundle_api.cpp
   src/cabi/trtf_c.cpp
+  src/cabi/fast_path_config.cpp
   src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
@@ -275,6 +276,21 @@ add_test(NAME test_bundle_format COMMAND test_bundle_format)
 add_executable(test_c_abi_entry tests/test_c_abi_entry.cpp)
 target_link_libraries(test_c_abi_entry PRIVATE trtf_core)
 add_test(NAME test_c_abi_entry COMMAND test_c_abi_entry)
+
+add_executable(test_engine_cache_index tests/test_engine_cache_index.cpp)
+target_link_libraries(test_engine_cache_index PRIVATE trtf_core)
+target_include_directories(test_engine_cache_index PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/tests)
+add_test(NAME test_engine_cache_index COMMAND test_engine_cache_index)
+
+add_executable(test_engine_cache_io tests/test_engine_cache_io.cpp)
+target_link_libraries(test_engine_cache_io PRIVATE trtf_core)
+target_include_directories(test_engine_cache_io PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/tests)
+add_test(NAME test_engine_cache_io COMMAND test_engine_cache_io)
+
+add_executable(test_fast_path_config tests/test_fast_path_config.cpp)
+target_link_libraries(test_fast_path_config PRIVATE trtf_core)
+target_include_directories(test_fast_path_config PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_fast_path_config COMMAND test_fast_path_config)
 
 add_executable(test_pipeline_api tests/test_pipeline_api.cpp)
 target_link_libraries(test_pipeline_api PRIVATE trtf_core)

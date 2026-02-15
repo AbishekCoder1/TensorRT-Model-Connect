@@ -191,6 +191,10 @@ Cache files are read using `mmap` + `MADV_SEQUENTIAL` for fast access to multi-G
 
 Set `TRTF_TRT_ENGINE_CACHE_DIR` to enable. Engine compilation takes 30-90s; cached load takes 2-3s.
 
+3. **Model-dir index** (`BuildModelDirIndexKey()` / `SaveModelDirIndex()` / `LookupModelDirIndex()`): Maps a model directory + `max_cache_length` to a cache key **without loading any weights**. The index key is an FNV-1a hash of the canonical path, `config.json` content, safetensors file sizes, and cache length. On the first slow-path run, `trtf_create_pipeline()` saves the index. On subsequent runs, the fast path in `try_create_from_cached_engine()` looks up the index, loads the cached `.plan` via mmap, deserializes the engine, and populates `DecoderStepEngine` metadata from `config.json` alone. This eliminates all weight loading (~120s) and checkpoint mapping (~40s), reducing cached startup from ~260s to ~7s.
+
+Set `TRTF_DISABLE_ENGINE_CACHE=1` to disable both the plan cache and the model-dir index.
+
 ---
 
 ## Autoregressive Generation Loop

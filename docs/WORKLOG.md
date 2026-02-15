@@ -1080,3 +1080,13 @@ Key bug found: Qwen3 has `head_dim=128` in config.json (explicit), not `hidden_s
 | **Total** | **~260s** | **~31s** | **~7s** |
 
 Container tests: **30/30 pass**.
+
+## 2026-02-14
+- **Comprehensive test coverage for engine cache fast path** (3 new test files, 23 test cases):
+  - `test_engine_cache_index.cpp` (10 tests): BuildModelDirIndexKey determinism, cache-length/config variation, save/lookup roundtrip, stale plan detection, auto-directory creation, cache-disable behavior, overwrite semantics.
+  - `test_engine_cache_io.cpp` (6 tests): SaveTrtEnginePlanToCache/LoadTrtEnginePlanFromCache roundtrip, missing/empty file handling, 10MB large file mmap, cache-disable behavior.
+  - `test_fast_path_config.cpp` (7 tests): parse_fast_path_config with explicit vs computed head_dim, GQA attention_size, TRTF_MAX_CACHE_LENGTH override, 4096 cap, eos/bos from JSON array vs scalar.
+- **Extracted `FastPathModelConfig` struct** from `trtf_c.cpp` into `src/cabi/fast_path_config.h/cpp` for testability. Refactored `try_create_from_cached_engine()` to use it.
+- **Added 2 fast-path integration tests** to `test_c_abi_entry.cpp`: fast-path miss falls through to slow path, fast-path skip for models without config.json.
+- **Documentation updates**: Dynamic-Design.md (fast-path sequence diagram, section 2), Static-Design.md (FastPathModelConfig class + CreateTrtBackendFromEngine), TRT-Internals.md (model-dir index description), Source-Layout.md (new files + test descriptions).
+- Container tests: **33/33 pass**. Qwen3 E2E parity confirmed.
