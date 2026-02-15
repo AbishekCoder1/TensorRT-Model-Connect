@@ -1,8 +1,6 @@
-// Test: Generic model loading from multiple checkpoint formats.
-// Verifies: Built-in weights.txt loading, single safetensors file, sharded safetensors
-// with model.safetensors.index.json, and checkpoint tensor shape validation.
-// Approach: Loads built-in tiny-cake-v1, then creates synthetic single/sharded
-// safetensors in temp dirs and validates loaded checkpoint shapes.
+// Test: Generic model loading from safetensors checkpoint formats.
+// Verifies: Single safetensors file and sharded safetensors with
+// model.safetensors.index.json. Validates checkpoint tensor shapes.
 
 #include "test_helpers.h"
 #include "trtf/model.h"
@@ -49,9 +47,6 @@ int main()
 {
     try
     {
-        const trtf::DecoderModel builtin = trtf::LoadDecoderModel("trtf/tiny-cake-v1");
-        validate_checkpoint_shapes(builtin, "built-in weights.txt");
-
         const std::filesystem::path tmp_dir = trtf_test::make_temp_dir_or_throw("/tmp/trtf_model_loader_XXXXXX");
         trtf_test::write_file(tmp_dir / "config.json",
             "{\n"
@@ -90,10 +85,6 @@ int main()
         if (safetensors_model.vocab.size() != 4)
         {
             throw std::runtime_error("expected placeholder vocab size=4 for safetensors model");
-        }
-        if (safetensors_model.transitions.empty())
-        {
-            throw std::runtime_error("expected fallback transitions for safetensors model");
         }
 
         const std::filesystem::path sharded_dir = tmp_dir / "sharded";
@@ -139,8 +130,7 @@ int main()
         validate_checkpoint_shapes(sharded_model, "sharded safetensors");
 
         std::filesystem::remove_all(tmp_dir);
-        std::cout << "test_model_loader passed with hidden_size=" << builtin.checkpoint.hidden_size
-                  << " vocab=" << builtin.vocab.size() << std::endl;
+        std::cout << "test_model_loader passed" << std::endl;
         return 0;
     }
     catch (const std::exception& e)

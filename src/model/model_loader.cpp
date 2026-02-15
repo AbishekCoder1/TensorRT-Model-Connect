@@ -22,283 +22,6 @@
 namespace trtf {
 namespace {
 
-struct ParsedTensor {
-    std::vector<int32_t> dims;
-    std::vector<float> data;
-};
-
-std::size_t checked_element_count(const std::vector<int32_t>& dims, const std::filesystem::path& path, int line_number)
-{
-    std::size_t count = 1;
-    for (const int32_t dim : dims)
-    {
-        if (dim <= 0)
-        {
-            throw std::runtime_error(
-                "Tensor dimension must be > 0 at " + path.string() + ":" + std::to_string(line_number));
-        }
-        if (count > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(dim))
-        {
-            throw std::runtime_error("Tensor element count overflow at " + path.string() + ":" + std::to_string(line_number));
-        }
-        count *= static_cast<std::size_t>(dim);
-    }
-    return count;
-}
-
-std::size_t flatten_index(const std::vector<int32_t>& dims, const std::vector<int32_t>& indices,
-    const std::filesystem::path& path, int line_number)
-{
-    if (dims.size() != indices.size())
-    {
-        throw std::runtime_error(
-            "Invalid index rank at " + path.string() + ":" + std::to_string(line_number));
-    }
-
-    std::size_t offset = 0;
-    for (std::size_t i = 0; i < dims.size(); ++i)
-    {
-        if (indices[i] < 0 || indices[i] >= dims[i])
-        {
-            throw std::runtime_error(
-                "Index out of range at " + path.string() + ":" + std::to_string(line_number));
-        }
-        offset *= static_cast<std::size_t>(dims[i]);
-        offset += static_cast<std::size_t>(indices[i]);
-    }
-    return offset;
-}
-
-DecoderCheckpoint load_checkpoint_text(const std::filesystem::path& path, std::size_t vocab_size)
-{
-    std::vector<SourceLine> lines = read_clean_lines(path);
-
-    int32_t hidden_size = 0;
-    int32_t mlp_size = 0;
-    std::unordered_map<std::string, ParsedTensor> tensors;
-
-    for (std::size_t i = 0; i < lines.size(); ++i)
-    {
-        const SourceLine& line = lines[i];
-        const std::vector<std::string> words = split_words(line.text);
-        if (words.empty())
-        {
-            continue;
-        }
-
-        if (words[0] == "hidden_size")
-        {
-            if (words.size() != 2)
-            {
-                throw std::runtime_error(
-                    "Invalid hidden_size syntax at " + path.string() + ":" + std::to_string(line.number));
-            }
-            hidden_size = parse_int(words[1], path, line.number, "hidden_size");
-            continue;
-        }
-
-        if (words[0] == "mlp_size")
-        {
-            if (words.size() != 2)
-            {
-                throw std::runtime_error(
-                    "Invalid mlp_size syntax at " + path.string() + ":" + std::to_string(line.number));
-            }
-            mlp_size = parse_int(words[1], path, line.number, "mlp_size");
-            continue;
-        }
-
-        if (words[0] != "tensor")
-        {
-            throw std::runtime_error(
-                "Unexpected token in checkpoint at " + path.string() + ":" + std::to_string(line.number));
-        }
-
-        if (words.size() < 4)
-        {
-            throw std::runtime_error(
-                "Invalid tensor header at " + path.string() + ":" + std::to_string(line.number));
-        }
-
-        const std::string name = words[1];
-        const int32_t rank = parse_int(words[2], path, line.number, "rank");
-        if (rank <= 0 || static_cast<std::size_t>(rank) + 3 != words.size())
-        {
-            throw std::runtime_error("Invalid tensor rank/dims at " + path.string() + ":" + std::to_string(line.number));
-        }
-
-        ParsedTensor tensor;
-        tensor.dims.reserve(static_cast<std::size_t>(rank));
-        for (int32_t d = 0; d < rank; ++d)
-        {
-            tensor.dims.push_back(parse_int(words[static_cast<std::size_t>(d) + 3], path, line.number, "dimension"));
-        }
-        tensor.data.assign(checked_element_count(tensor.dims, path, line.number), 0.0F);
-
-        bool saw_end = false;
-        for (++i; i < lines.size(); ++i)
-        {
-            const SourceLine& op_line = lines[i];
-            const std::vector<std::string> op = split_words(op_line.text);
-            if (op.empty())
-            {
-                continue;
-            }
-
-            if (op[0] == "end")
-            {
-                saw_end = true;
-                break;
-            }
-
-            if (op[0] == "fill")
-            {
-                if (op.size() != 2)
-                {
-                    throw std::runtime_error(
-                        "Invalid fill syntax at " + path.string() + ":" + std::to_string(op_line.number));
-                }
-                std::fill(tensor.data.begin(), tensor.data.end(), parse_float(op[1], path, op_line.number, "fill"));
-                continue;
-            }
-
-            if (op[0] == "identity")
-            {
-                if (op.size() != 2 || tensor.dims.size() != 2 || tensor.dims[0] != tensor.dims[1])
-                {
-                    throw std::runtime_error(
-                        "Invalid identity syntax at " + path.string() + ":" + std::to_string(op_line.number));
-                }
-                const float value = parse_float(op[1], path, op_line.number, "identity");
-                const std::size_t dim = static_cast<std::size_t>(tensor.dims[0]);
-                for (std::size_t d = 0; d < dim; ++d)
-                {
-                    tensor.data[d * dim + d] = value;
-                }
-                continue;
-            }
-
-            if (op[0] == "set")
-            {
-                const std::size_t expected = 2 + tensor.dims.size();
-                if (op.size() != expected)
-                {
-                    throw std::runtime_error(
-                        "Invalid set syntax at " + path.string() + ":" + std::to_string(op_line.number));
-                }
-                std::vector<int32_t> indices;
-                indices.reserve(tensor.dims.size());
-                for (std::size_t d = 0; d < tensor.dims.size(); ++d)
-                {
-                    indices.push_back(parse_int(op[d + 1], path, op_line.number, "set_index"));
-                }
-                const float value = parse_float(op.back(), path, op_line.number, "set_value");
-                const std::size_t offset = flatten_index(tensor.dims, indices, path, op_line.number);
-                tensor.data[offset] = value;
-                continue;
-            }
-
-            if (op[0] == "row_transition")
-            {
-                if (op.size() != 5 || tensor.dims.size() != 2)
-                {
-                    throw std::runtime_error(
-                        "Invalid row_transition syntax at " + path.string() + ":" + std::to_string(op_line.number));
-                }
-                const int32_t row = parse_int(op[1], path, op_line.number, "row");
-                const int32_t col = parse_int(op[2], path, op_line.number, "col");
-                const float high = parse_float(op[3], path, op_line.number, "high");
-                const float low = parse_float(op[4], path, op_line.number, "low");
-                if (row < 0 || row >= tensor.dims[0] || col < 0 || col >= tensor.dims[1])
-                {
-                    throw std::runtime_error(
-                        "row_transition index out of range at " + path.string() + ":" + std::to_string(op_line.number));
-                }
-                const std::size_t cols = static_cast<std::size_t>(tensor.dims[1]);
-                const std::size_t row_start = static_cast<std::size_t>(row) * cols;
-                std::fill(tensor.data.begin() + static_cast<std::ptrdiff_t>(row_start),
-                    tensor.data.begin() + static_cast<std::ptrdiff_t>(row_start + cols), low);
-                tensor.data[row_start + static_cast<std::size_t>(col)] = high;
-                continue;
-            }
-
-            if (op[0] == "all_rows_transition")
-            {
-                if (op.size() != 4 || tensor.dims.size() != 2)
-                {
-                    throw std::runtime_error("Invalid all_rows_transition syntax at " + path.string() + ":"
-                        + std::to_string(op_line.number));
-                }
-                const int32_t col = parse_int(op[1], path, op_line.number, "col");
-                const float high = parse_float(op[2], path, op_line.number, "high");
-                const float low = parse_float(op[3], path, op_line.number, "low");
-                if (col < 0 || col >= tensor.dims[1])
-                {
-                    throw std::runtime_error("all_rows_transition column out of range at " + path.string() + ":"
-                        + std::to_string(op_line.number));
-                }
-                const std::size_t rows = static_cast<std::size_t>(tensor.dims[0]);
-                const std::size_t cols = static_cast<std::size_t>(tensor.dims[1]);
-                for (std::size_t row = 0; row < rows; ++row)
-                {
-                    const std::size_t start = row * cols;
-                    std::fill(tensor.data.begin() + static_cast<std::ptrdiff_t>(start),
-                        tensor.data.begin() + static_cast<std::ptrdiff_t>(start + cols), low);
-                    tensor.data[start + static_cast<std::size_t>(col)] = high;
-                }
-                continue;
-            }
-
-            throw std::runtime_error(
-                "Unknown tensor op at " + path.string() + ":" + std::to_string(op_line.number) + ": " + op[0]);
-        }
-
-        if (!saw_end)
-        {
-            throw std::runtime_error("Missing 'end' for tensor " + name + " in " + path.string());
-        }
-
-        tensors[name] = std::move(tensor);
-    }
-
-    if (hidden_size <= 0 || mlp_size <= 0)
-    {
-        throw std::runtime_error("Checkpoint missing valid hidden_size/mlp_size: " + path.string());
-    }
-
-    const int32_t vocab = static_cast<int32_t>(vocab_size);
-    const auto require_tensor = [&](const std::string& name, std::initializer_list<int32_t> expected_dims) -> const ParsedTensor& {
-        const auto it = tensors.find(name);
-        if (it == tensors.end())
-        {
-            throw std::runtime_error("Checkpoint missing tensor: " + name + " in " + path.string());
-        }
-        const std::vector<int32_t> expected(expected_dims.begin(), expected_dims.end());
-        if (it->second.dims != expected)
-        {
-            std::ostringstream oss;
-            oss << "Tensor " << name << " has invalid shape in " << path.string();
-            throw std::runtime_error(oss.str());
-        }
-        return it->second;
-    };
-
-    DecoderCheckpoint checkpoint;
-    checkpoint.hidden_size = hidden_size;
-    checkpoint.mlp_size = mlp_size;
-    checkpoint.embedding = require_tensor("embedding", {vocab, hidden_size}).data;
-    checkpoint.w_q = require_tensor("w_q", {hidden_size, hidden_size}).data;
-    checkpoint.w_k = require_tensor("w_k", {hidden_size, hidden_size}).data;
-    checkpoint.w_v = require_tensor("w_v", {hidden_size, hidden_size}).data;
-    checkpoint.w1 = require_tensor("w1", {hidden_size, mlp_size}).data;
-    checkpoint.b1 = require_tensor("b1", {mlp_size}).data;
-    checkpoint.w2 = require_tensor("w2", {mlp_size, hidden_size}).data;
-    checkpoint.b2 = require_tensor("b2", {hidden_size}).data;
-    checkpoint.w_out = require_tensor("w_out", {hidden_size, vocab}).data;
-    checkpoint.b_out = require_tensor("b_out", {vocab}).data;
-    return checkpoint;
-}
-
 int32_t checked_i32(int64_t value, const std::string& context)
 {
     if (value <= 0 || value > static_cast<int64_t>(std::numeric_limits<int32_t>::max()))
@@ -307,7 +30,6 @@ int32_t checked_i32(int64_t value, const std::string& context)
     }
     return static_cast<int32_t>(value);
 }
-
 
 DecoderCheckpoint load_checkpoint_from_safetensors_direct(
     const TensorSource& reader, std::size_t vocab_size, const std::filesystem::path& path)
@@ -371,7 +93,6 @@ DecoderCheckpoint load_checkpoint_from_safetensors_direct(
     return checkpoint;
 }
 
-
 DecoderCheckpoint load_checkpoint_from_safetensors(
     const std::filesystem::path& path, std::size_t vocab_size, const DecoderArchitectureConfig& architecture)
 {
@@ -394,21 +115,6 @@ DecoderCheckpoint load_checkpoint_from_safetensors(
     throw std::runtime_error("No checkpoint mapper for family: " + architecture.family
         + " in " + path.string()
         + ". Provide direct trtf tensor names or register a checkpoint mapper.");
-}
-
-DecoderCheckpoint load_checkpoint(
-    const std::filesystem::path& path, std::size_t vocab_size, const DecoderArchitectureConfig& architecture)
-{
-    if (path.extension() == ".safetensors" || is_safetensors_index_file(path))
-    {
-        return load_checkpoint_from_safetensors(path, vocab_size, architecture);
-    }
-    return load_checkpoint_text(path, vocab_size);
-}
-
-std::filesystem::path builtin_model_dir()
-{
-    return std::filesystem::path(model_path("tiny-cake-v1"));
 }
 
 std::vector<std::string> make_placeholder_vocab(int32_t vocab_size)
@@ -451,8 +157,6 @@ std::vector<std::pair<std::string, std::string>> default_fallback_transitions()
 DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const std::string& model_id)
 {
     const std::filesystem::path config_path = model_dir / "config.json";
-    const std::filesystem::path vocab_path = model_dir / "vocab.txt";
-    const std::filesystem::path transitions_path = model_dir / "transitions.txt";
 
     const std::string config_text = read_file(config_path);
     const std::string weights_file = extract_json_string(config_text, "weights_file", "");
@@ -477,11 +181,7 @@ DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const s
             }
         }
     }
-    if (checkpoint_path.empty())
-    {
-        checkpoint_path = model_dir / "weights.txt";
-    }
-    const bool has_checkpoint_file = std::filesystem::exists(checkpoint_path);
+    const bool has_checkpoint_file = !checkpoint_path.empty() && std::filesystem::exists(checkpoint_path);
 
     DecoderModel model;
     model.model_id = model_id;
@@ -490,50 +190,21 @@ DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const s
     model.architecture.family = extract_json_string(config_text, "architecture_family", "");
     if (model.architecture.family.empty())
     {
-        model.architecture.family = model_type.empty() ? "toy-decoder" : to_lower_ascii(model_type);
+        model.architecture.family = model_type.empty() ? "unknown" : to_lower_ascii(model_type);
     }
 
-    if (std::filesystem::exists(vocab_path))
+    const int32_t vocab_size = extract_json_int(config_text, "vocab_size", 0);
+    if (vocab_size > 0)
     {
-        model.vocab = load_vocab(vocab_path);
-    }
-    else if (has_checkpoint_file)
-    {
-        const int32_t vocab_size = extract_json_int(config_text, "vocab_size", 0);
-        if (vocab_size <= 0)
-        {
-            throw std::runtime_error("Missing vocab.txt and no valid vocab_size in config for checkpoint-backed model: "
-                + model_dir.string());
-        }
         model.vocab = make_placeholder_vocab(vocab_size);
     }
-    else
+    else if (!has_checkpoint_file)
     {
-        throw std::runtime_error("Failed to open vocab file: " + vocab_path.string());
+        throw std::runtime_error("Missing vocab_size in config.json for model: " + model_dir.string());
     }
 
-    if (std::filesystem::exists(transitions_path))
-    {
-        model.transitions = load_transitions(transitions_path);
-    }
-    else if (has_checkpoint_file)
-    {
-        model.transitions = default_fallback_transitions();
-    }
-    else
-    {
-        throw std::runtime_error("Failed to open transitions file: " + transitions_path.string());
-    }
-
-    model.default_next_token = extract_json_string(config_text, "default_next_token", "<eos>");
-    if (std::find(model.vocab.begin(), model.vocab.end(), model.default_next_token) == model.vocab.end())
-    {
-        model.default_next_token = "<eos>";
-        if (std::find(model.vocab.begin(), model.vocab.end(), model.default_next_token) == model.vocab.end())
-        {
-            model.default_next_token = model.vocab.front();
-        }
-    }
+    model.transitions = default_fallback_transitions();
+    model.default_next_token = "<eos>";
 
     const int32_t configured_max_cache = extract_json_int(config_text, "max_cache_length", -1);
     model.max_cache_length = configured_max_cache;
@@ -547,7 +218,6 @@ DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const s
     {
         model.max_cache_length = env_max_cache;
     }
-    // Family-specific cache caps belong in the family loader (e.g., qwen/registration.cpp).
 
     model.architecture.num_layers = std::max(extract_json_int(config_text, "num_hidden_layers", 1), 1);
     model.architecture.num_attention_heads = std::max(extract_json_int(config_text, "num_attention_heads", 1), 1);
@@ -577,7 +247,7 @@ DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const s
 
     if (has_checkpoint_file)
     {
-        model.checkpoint = load_checkpoint(checkpoint_path, model.vocab.size(), model.architecture);
+        model.checkpoint = load_checkpoint_from_safetensors(checkpoint_path, model.vocab.size(), model.architecture);
         model.has_checkpoint = true;
     }
     return model;
@@ -587,29 +257,19 @@ DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const s
 
 DecoderModel LoadDecoderModel(const std::string& model_id)
 {
-    static constexpr char kBuiltinModelId[] = "trtf/tiny-cake-v1";
-
-    if (!model_id.empty())
+    if (model_id.empty())
     {
-        std::filesystem::path requested(model_id);
-        if (std::filesystem::exists(requested) && std::filesystem::is_directory(requested))
-        {
-            return load_model_from_dir(requested, model_id);
-        }
-
-        if (model_id != kBuiltinModelId)
-        {
-            throw std::runtime_error("Unknown model_id: " + model_id
-                + ". Use \"" + std::string(kBuiltinModelId) + "\" or a local model directory path.");
-        }
+        throw std::runtime_error("model_id must not be empty.");
     }
 
-    const std::filesystem::path builtin = builtin_model_dir();
-    if (!std::filesystem::exists(builtin))
+    std::filesystem::path requested(model_id);
+    if (std::filesystem::exists(requested) && std::filesystem::is_directory(requested))
     {
-        throw std::runtime_error("Built-in model directory not found: " + builtin.string());
+        return load_model_from_dir(requested, model_id);
     }
-    return load_model_from_dir(builtin, kBuiltinModelId);
+
+    throw std::runtime_error("Unknown model_id: " + model_id
+        + ". Use a local model directory path or an HF model alias.");
 }
 
 } // namespace trtf

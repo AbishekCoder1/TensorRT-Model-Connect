@@ -5,8 +5,8 @@ This page explains how the TensorRT backend works: from `DecoderModel` to compil
 ## Overview
 
 The TRT backend takes a `DecoderModel` with checkpoint weights and:
-1. Converts it to a `TrtDecoderDefinition` (via Registry 3)
-2. Builds a TensorRT `INetworkDefinition` using reusable graph ops (via Registry 4)
+1. Converts it to a `TrtDecoderDefinition` (inlined in `trt_model_definition.cpp`)
+2. Builds a TensorRT `INetworkDefinition` using reusable graph ops (via TRT Graph Builder registry)
 3. Compiles the network to an `ICudaEngine` (compiled GPU kernels)
 4. Runs an autoregressive generation loop with KV-cache management
 
@@ -132,22 +132,17 @@ These building blocks are used by the StandardDecoderGraphBuilder and can be reu
 ```
 StandardDecoderGraphBuilder::build_decoder_step_engine(weights, logger)
   │
-  ├── If weights.has_decoder_layers:
-  │     └── create_decoder_step_engine_multi_layer()
-  │           1. Create IBuilder, INetworkDefinition, IBuilderConfig
-  │           2. Add inputs: token_id[1], position_id[1], attention_mask[1, window],
-  │              per-layer cache_k/cache_v [max_cache, attn_size]
-  │           3. Add embedding gather: token_id → hidden[1, H]
-  │           4. Precompute RoPE tables, eps, attention scale as constants
-  │           5. For each decoder layer:
-  │              └── add_standard_decoder_layer_block() → {hidden, present_k, present_v}
-  │           6. Final RMSNorm + LM head matmul → logits[1, vocab]
-  │           7. Mark outputs: logits + per-layer present_k/present_v
-  │           8. finalize_decoder_step_engine() → builds ICudaEngine
-  │
-  └── Else (legacy single-layer):
-        └── create_decoder_step_engine_legacy()
-              Simpler path for tiny built-in models (no RoPE, no GQA)
+  └── create_decoder_step_engine_multi_layer()
+        1. Create IBuilder, INetworkDefinition, IBuilderConfig
+        2. Add inputs: token_id[1], position_id[1], attention_mask[1, window],
+           per-layer cache_k/cache_v [max_cache, attn_size]
+        3. Add embedding gather: token_id → hidden[1, H]
+        4. Precompute RoPE tables, eps, attention scale as constants
+        5. For each decoder layer:
+           └── add_standard_decoder_layer_block() → {hidden, present_k, present_v}
+        6. Final RMSNorm + LM head matmul → logits[1, vocab]
+        7. Mark outputs: logits + per-layer present_k/present_v
+        8. finalize_decoder_step_engine() → builds ICudaEngine
 ```
 
 ### DecoderStepEngine
@@ -244,21 +239,10 @@ All GPU resources use RAII wrappers from `trt_common.h`:
 
 ---
 
-## Two Graph Building Paths
+## Graph Building
 
-The `StandardDecoderGraphBuilder` supports two paths:
-
-### Multi-Layer Path (Real Models)
-Used when `weights.has_decoder_layers == true`. Builds the full N-layer decoder stack with:
+The `StandardDecoderGraphBuilder` builds the full N-layer decoder stack with:
 - Per-layer KV cache inputs/outputs
 - RoPE with precomputed tables
 - GQA attention with multi-head reshaping
 - SwiGLU MLP
-
-### Legacy Path (Built-in Models)
-Used for the tiny built-in model (`trtf/tiny-cake-v1`). Single-layer, no RoPE, no GQA:
-- Simple attention: Q @ K^T, scaled, masked, softmax, @ V
-- ReLU MLP (not SwiGLU)
-- Single cache_k/cache_v pair
-
-The legacy path exists for backward compatibility with the original tiny decoder and is not used for real HF models.

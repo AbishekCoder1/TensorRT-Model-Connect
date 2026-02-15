@@ -6,14 +6,13 @@ File-by-file guide to the codebase.
 
 | File | Purpose |
 |------|---------|
-| `pipeline.h` | **C ABI entry point**: `IPipeline` virtual interface, `trtf_create_pipeline()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()` |
-| `pipeline_legacy.h` | Legacy `Pipeline` class (retained for backward compatibility with existing examples) |
+| `pipeline.h` | **C ABI entry point**: `IPipeline` virtual interface, `TrtfPipelineOptions`, `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()` |
 | `bundle.h` | Bundle API: `BuildBundle()`, `InspectBundle()`, `IsBundle()`, `BundleInfo` |
 | `model.h` | `DecoderModel`, `DecoderCheckpoint`, `DecoderLayerCheckpoint`, `DecoderArchitectureConfig`, `LoadDecoderModel()` |
-| `backend.h` | `IGenerationBackend` interface, `CreateCpuReferenceBackend()`, `CreateTrtBackend()`, `CreateHfPythonBackend()` |
+| `backend.h` | `IGenerationBackend` interface, `CreateTrtBackend()`, `CreateHfPythonBackend()` |
 | `tokenizer.h` | `ITokenizer` interface, `CreateVocabTokenizer()`, `CreateHfPythonTokenizer()` |
 | `generation.h` | `GenerationConfig`, `GenerationResult` |
-| `model_resolver.h` | `ResolvedModelSpec`, `ResolveTextGenerationModel()`, `RegisterTextGenerationModelResolver()` |
+| `model_resolver.h` | `ResolvedModelSpec`, `ResolveTextGenerationModel()` |
 | `runtime_factory.h` | `RuntimeAssembly`, `BackendSelection`, `BuildRuntimeForTextGeneration()` |
 | `hf_family_registry.h` | `HfModelFamilyRegistration`, `RegisterHfModelFamily()`, `ResolveHfModelViaFamilyRegistry()` |
 
@@ -37,9 +36,7 @@ File-by-file guide to the codebase.
 | `hf_family_registry.cpp` | Family registry, alias resolution (QWEN3), `RegisterBuiltinHfModelFamilies()` |
 | `checkpoint_mapper.h/cpp` | `ICheckpointMapper` interface + priority-sorted registry |
 | `standard_checkpoint_mapper.h/cpp` | Base class for standard HF tensor naming (transpose, GQA expand, tied lm_head) |
-| `trt_model_definition.h/cpp` | `TrtDecoderDefinition`, `BuildTrtDecoderWeights()` |
-| `trt_model_definition_populator.h/cpp` | `ITrtModelDefinitionPopulator` interface + registry |
-| `standard_trt_model_definition_populator.h/cpp` | Family-agnostic populator for any model with `has_decoder_layers` |
+| `trt_model_definition.h/cpp` | `TrtDecoderDefinition`, `BuildTrtDecoderWeights()` (inlined conversion, no registry) |
 
 ## Model Families (`src/models/`)
 
@@ -47,9 +44,8 @@ File-by-file guide to the codebase.
 
 | File | Purpose |
 |------|---------|
-| `registration.h/cpp` | `RegisterQwenFamily()`: registers into all 4 registries. Handles Qwen, Qwen2, Qwen3, QWQ model types. Contains inline `load_qwen_decoder_model()` with cache-length cap. |
+| `registration.h/cpp` | `RegisterQwenFamily()`: registers into all 3 registries. Handles Qwen, Qwen2, Qwen3, QWQ model types. Contains inline `load_qwen_decoder_model()` with cache-length cap. |
 | `checkpoint_mapper.h/cpp` | `QwenCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for qwen/qwq family detection |
-| `trt_model_populator.h/cpp` | Type alias for `StandardTrtModelDefinitionPopulator` (placeholder, no custom logic) |
 
 ### LLaMA (`src/models/llama/`)
 
@@ -57,13 +53,6 @@ File-by-file guide to the codebase.
 |------|---------|
 | `registration.h/cpp` | `RegisterLlamaFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher |
 | `checkpoint_mapper.h/cpp` | `LlamaCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for llama family detection |
-
-### Yi (`src/models/yi/`)
-
-| File | Purpose |
-|------|---------|
-| `registration.h/cpp` | `RegisterYiFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: yi` |
-| `checkpoint_mapper.h/cpp` | `YiCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for yi family detection |
 
 ### Mistral (`src/models/mistral/`)
 
@@ -79,27 +68,6 @@ File-by-file guide to the codebase.
 | `registration.h/cpp` | `RegisterGemmaFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: gemma` |
 | `checkpoint_mapper.h/cpp` | `GemmaCheckpointMapper`: overrides both `can_map()` and `map_checkpoint()`. Adds +1.0 to RMSNorm gamma (Gemma `(1+gamma)` convention) and scales embedding by `sqrt(hidden_size)`. |
 
-### InternLM (`src/models/internlm/`)
-
-| File | Purpose |
-|------|---------|
-| `registration.h/cpp` | `RegisterInternLMFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: internlm` |
-| `checkpoint_mapper.h/cpp` | `InternLMCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for internlm family detection |
-
-### DeepSeek (`src/models/deepseek/`)
-
-| File | Purpose |
-|------|---------|
-| `registration.h/cpp` | `RegisterDeepSeekFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: deepseek` |
-| `checkpoint_mapper.h/cpp` | `DeepSeekCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for deepseek family detection |
-
-### Baichuan (`src/models/baichuan/`)
-
-| File | Purpose |
-|------|---------|
-| `registration.h/cpp` | `RegisterBaichuanFamily()`: registers checkpoint mapper + TRT graph builder + HF family matcher for `model_type: baichuan` |
-| `checkpoint_mapper.h/cpp` | `BaichuanCheckpointMapper`: subclasses `StandardCheckpointMapper`, overrides `can_map()` for baichuan family detection |
-
 ### Template (`src/models/template/`)
 
 | File | Purpose |
@@ -112,7 +80,6 @@ File-by-file guide to the codebase.
 |------|---------|
 | `runtime_factory.cpp` | `BuildRuntimeForTextGeneration()`: tokenizer selection + backend cascade |
 | `trt_backend.cpp` | `CreateTrtBackend()`: finds graph builder, dispatches to `CreateTrtBackendWithBuilder()` |
-| `cpu_reference_backend.cpp` | `CpuReferenceBackend`: transition-table-based deterministic generation |
 | `hf_python_backend.cpp` | `HfPythonBackend`: spawns Python subprocess with HF transformers |
 
 ## TRT Infrastructure (`src/runtime/trt/`)
@@ -122,7 +89,7 @@ File-by-file guide to the codebase.
 | `trt_common.h/cpp` | RAII wrappers: `TrtLogger`, `TrtUniquePtr`, `CudaStream`, `CudaBuffer` |
 | `trt_graph_ops.h/cpp` | Reusable TRT graph operations: RMSNorm, matmul, RoPE, bias, dimension helpers |
 | `trt_graph_builder.h/cpp` | `ITrtGraphBuilder` interface + name-based registry |
-| `standard_decoder_graph_builder.h/cpp` | Builds Pre-RMSNorm+GQA+RoPE+SwiGLU decoder network. Two paths: multi-layer (real models) and legacy (tiny built-in) |
+| `standard_decoder_graph_builder.h/cpp` | Builds Pre-RMSNorm+GQA+RoPE+SwiGLU decoder network |
 | `trt_engine_lifecycle.h/cpp` | `DecoderStepEngine` struct (with `TensorBinding` and `extra_bindings`), `finalize_decoder_step_engine()`, `find_extra_bindings()` |
 | `trt_decode_runtime.h/cpp` | `run_decoder_step()`, `select_argmax_token()`, `build_attention_mask()`, `append_cache_state()` |
 | `step_state.h` | `IStepState` interface: abstract per-step state management for autoregressive generation |
@@ -133,7 +100,7 @@ File-by-file guide to the codebase.
 
 | File | Purpose |
 |------|---------|
-| `toy_tokenizer.cpp` | Word-to-id lookup from `vocab.txt`. Used for built-in models. |
+| `vocab_tokenizer.cpp` | Word-to-id lookup from vocabulary list. |
 | `hf_python_tokenizer.cpp` | Bridges to HF `tokenizers` library via Python subprocess. Exact parity with HF. |
 
 ## Bundle Format (`src/bundle/`)
@@ -147,27 +114,18 @@ File-by-file guide to the codebase.
 
 | File | Purpose |
 |------|---------|
-| `trtf_c.cpp` | `extern "C"` factory: `trtf_create_pipeline()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`. Contains `PipelineImpl` (concrete `IPipeline`). Fast path via `try_create_from_cached_engine()`. |
+| `trtf_c.cpp` | `extern "C"` factory: `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`. Contains `PipelineImpl` (concrete `IPipeline`). Fast path via `try_create_from_cached_engine()`. |
 | `fast_path_config.h/cpp` | `FastPathModelConfig` struct + `parse_fast_path_config()` — extracts model metadata from config.json text for the zero-weight fast path. |
-
-## Pipeline (`src/pipeline/`)
-
-| File | Purpose |
-|------|---------|
-| `pipeline.cpp` | Legacy `Pipeline::CreateTextGeneration()`, `operator()()`, `generate()`. Orchestrates all stages. |
 
 ## Tests (`tests/`)
 
 | File | What it tests |
 |------|--------------|
 | `test_helpers.h` | Shared utilities: temp dirs, safetensors writing, `write_standard_decoder_checkpoint()` |
-| `test_tokenizer.cpp` | ToyTokenizer encode/decode round-trip, unknown token handling |
-| `test_pipeline.cpp` | Pipeline E2E with tiny-cake-v1, error handling for invalid backends |
-| `test_trt_smoke.cpp` | TRT backend force + graceful fallback when TRT unavailable |
-| `test_model_loader.cpp` | Built-in loading, single safetensors, sharded safetensors |
-| `test_model_resolver.cpp` | Resolution pipeline: built-in → HF → unknown |
+| `test_tokenizer.cpp` | VocabTokenizer encode/decode round-trip, unknown token handling |
+| `test_model_loader.cpp` | Single safetensors, sharded safetensors |
+| `test_model_resolver.cpp` | Resolution pipeline: HF → unknown |
 | `test_runtime_factory.cpp` | Runtime assembly, backend selection, force_trt errors |
-| `test_extension_registry.cpp` | Custom resolver + assembler with mock backend |
 | `test_hf_family_registry.cpp` | Family priority ordering, metadata parsing, mock family |
 | `test_qwen_family.cpp` | Qwen family detection, checkpoint with q_norm/k_norm, QWEN3 alias |
 | `test_llama_family.cpp` | LLaMA family detection, checkpoint without q_norm/k_norm, GQA |

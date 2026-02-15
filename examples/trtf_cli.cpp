@@ -200,7 +200,11 @@ int cmd_run(const CliArgs& args)
         return EXIT_FAILURE;
     }
 
-    auto* pipeline = trtf_create_pipeline(args.model_or_bundle.c_str(), args.flags);
+    TrtfPipelineOptions opts{};
+    opts.flags = args.flags;
+    opts.max_new_tokens = args.max_new_tokens;
+    opts.max_cache_length = args.max_cache_length;
+    auto* pipeline = trtf_create_pipeline_ex(args.model_or_bundle.c_str(), &opts);
     if (pipeline == nullptr)
     {
         std::cerr << "Error: " << trtf_last_error() << '\n';

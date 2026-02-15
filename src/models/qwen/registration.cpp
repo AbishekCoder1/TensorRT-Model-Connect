@@ -1,9 +1,7 @@
 #include "models/qwen/registration.h"
 #include "models/qwen/checkpoint_mapper.h"
-#include "models/qwen/trt_model_populator.h"
 #include "trtf/hf_family_registry.h"
 #include "model/checkpoint_mapper.h"
-#include "model/trt_model_definition_populator.h"
 #include "runtime/trt/trt_graph_builder.h"
 #include "runtime/trt/trt_common.h"
 #include "runtime/trt/standard_decoder_graph_builder.h"
@@ -112,8 +110,6 @@ DecoderModel load_decoder_definition_model(const HfModelMetadata& metadata)
 void RegisterQwenFamily()
 {
     RegisterCheckpointMapper("qwen", 100, std::make_unique<QwenCheckpointMapper>());
-    RegisterTrtModelDefinitionPopulator("qwen", 100,
-        std::make_unique<QwenTrtModelDefinitionPopulator>());
 
 #if TRTF_HAS_TRT
     RegisterTrtGraphBuilder("qwen", std::make_unique<StandardDecoderGraphBuilder>());

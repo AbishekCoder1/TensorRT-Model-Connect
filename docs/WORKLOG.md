@@ -1090,3 +1090,51 @@ Container tests: **30/30 pass**.
 - **Added 2 fast-path integration tests** to `test_c_abi_entry.cpp`: fast-path miss falls through to slow path, fast-path skip for models without config.json.
 - **Documentation updates**: Dynamic-Design.md (fast-path sequence diagram, section 2), Static-Design.md (FastPathModelConfig class + CreateTrtBackendFromEngine), TRT-Internals.md (model-dir index description), Source-Layout.md (new files + test descriptions).
 - Container tests: **33/33 pass**. Qwen3 E2E parity confirmed.
+
+## 2026-02-14 (continued: simplification audit — dead code removal)
+
+Major simplification pass removing dead code, unused abstractions, and legacy compatibility layers.
+
+### Removed 4 dead model families
+- Deleted Yi, DeepSeek, InternLM, Baichuan — none had exercisable real models (Yi uses `model_type: "llama"`, DeepSeek-distill uses `"qwen2"`, InternLM/Baichuan have no safetensors).
+- Remaining 4 families: **Qwen**, **LLaMA**, **Mistral**, **Gemma** — all validated with real weights.
+
+### Removed Registry 3 (TrtModelDefinitionPopulator)
+- Deleted `ITrtModelDefinitionPopulator` interface, `StandardTrtModelDefinitionPopulator`, `trt_model_definition_populator.h/cpp`, `standard_trt_model_definition_populator.h/cpp`.
+- `DecoderModel` → `TrtDecoderDefinition` conversion inlined into `trt_model_definition.cpp`.
+- Now 3 active registries: HfModelFamily (matching), CheckpointMapper (tensor key translation), TrtGraphBuilder (network construction).
+
+### Removed legacy Pipeline class
+- Deleted `include/trtf/pipeline_legacy.h` and `src/pipeline/pipeline.cpp`.
+- Only C ABI entry points remain: `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`.
+
+### Added TrtfPipelineOptions
+- `trtf_create_pipeline_ex()` accepts a `TrtfPipelineOptions` struct with flags, `max_new_tokens`, `max_cache_length`.
+
+### Removed example binaries
+- Deleted `trtf_text_generation` and `trtf_load_model` example executables.
+- Only the `trtf` CLI remains (`trtf run`, `trtf build`, `trtf inspect`, `trtf version`).
+
+### Removed tiny-cake-v1 model + CPU reference backend
+- Deleted `models/tiny-cake-v1/` bundled model assets.
+- Deleted `src/runtime/cpu_reference_backend.cpp` (`CpuReferenceBackend`).
+- Only TRT and HF-Python backends remain.
+
+### Removed ToyTokenizer
+- Deleted `CreateToyTokenizer()`. `CreateVocabTokenizer()` kept (file renamed to `vocab_tokenizer.cpp`).
+
+### Removed unused extension points
+- Deleted `RegisterTextGenerationModelResolver()` and `RegisterTextGenerationRuntimeAssembler()`.
+- Removed `kCustom` from `ResolvedModelKind`.
+
+### Removed debug env vars
+- Removed `TRTF_DEBUG_LOGITS_TOPK` and `TRTF_DEBUG_MASK`.
+
+### Removed text-format checkpoint loading
+- Deleted `load_checkpoint_text()`, `ParsedTensor`, and related text-format weight parsing.
+
+### Documentation updates
+- Updated all wiki pages: Architecture-Overview (3 registries, 2 backends, 4 families), Static-Design (removed Pipeline class, Registry 3, CpuReferenceBackend, ToyTokenizer), Dynamic-Design (removed custom resolver step, CPU fallback), Adding-a-Model-Family (3 registries), Source-Layout (removed deleted files/families), TRT-Internals (removed legacy path, CPU fallback), Pipeline-Deep-Dive (removed legacy Pipeline, Registry 3 references).
+- Updated CLAUDE.md: source layout, registry description, env vars, executable commands, built-in model IDs.
+- Updated README.md: 4 families, 2 backends, removed tiny-cake-v1 and debug env vars.
+- Updated Home.md: removed CPU-reference backend references.

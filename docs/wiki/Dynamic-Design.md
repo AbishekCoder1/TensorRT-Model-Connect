@@ -37,7 +37,6 @@ sequenceDiagram
 
     Note over P: Stage 1: Model Resolution
     P->>R: ResolveTextGenerationModel("QWEN3")
-    R->>R: Try custom resolvers (none)
     R->>FR: ResolveHfModelViaFamilyRegistry("QWEN3")
     FR->>FR: resolve_model_dir_from_alias("QWEN3") → path
     FR->>FR: is_hf_transformers_model_dir(path) → true
@@ -64,7 +63,7 @@ sequenceDiagram
     RF->>RF: Create HfPythonTokenizer(hf_tokenizer_dir)
     RF->>TB: CreateTrtBackend(tokenizer, model)
     TB->>TB: FindTrtGraphBuilder("qwen3") → StandardDecoderGraphBuilder
-    TB->>TB: BuildTrtDecoderWeights(model) via Registry 3
+    TB->>TB: BuildTrtDecoderWeights(model) (inlined conversion)
     TB->>TB: builder.build_decoder_step_engine(weights, logger)
     TB-->>RF: TrtBackendShared
     RF-->>P: RuntimeAssembly{tokenizer, backend}
@@ -78,7 +77,7 @@ sequenceDiagram
 
 **Stage 2** parses `config.json` to get `model_type`, matches it against registered families (Qwen matches), and the family loader calls `LoadDecoderModel()` which reads safetensors through the checkpoint mapper registry.
 
-**Stage 3** creates the tokenizer (HfPythonTokenizer if `tokenizer.json` exists) and backend (TRT preferred, with CPU-reference fallback). The TRT backend finds the graph builder, converts model weights to TRT format via the populator registry, builds the TensorRT engine, and wraps it in `TrtBackendShared`.
+**Stage 3** creates the tokenizer (HfPythonTokenizer if `tokenizer.json` exists) and backend (TRT preferred, with HF-Python fallback). The TRT backend finds the graph builder, converts model weights to TRT format, builds the TensorRT engine, and wraps it in `TrtBackendShared`.
 
 ---
 
@@ -181,11 +180,10 @@ sequenceDiagram
     participant LLaMA as LLaMAFamily
 
     FR->>FR: RegisterBuiltinHfModelFamilies()
-    Note over FR: Register StandardTrtModelDefinitionPopulator (p=0)
     FR->>Qwen: RegisterQwenFamily()
-    Note over Qwen: Registers into 4 registries
+    Note over Qwen: Registers into 3 registries
     FR->>LLaMA: RegisterLlamaFamily()
-    Note over LLaMA: Registers into 3 registries (populator automatic)
+    Note over LLaMA: Registers into 3 registries
 
     FR->>Meta: load_hf_metadata(model_dir)
     Meta->>Meta: read config.json
@@ -402,7 +400,7 @@ sequenceDiagram
 - **KV cache is a fixed-size circular buffer** per layer: `[max_cache_length, attention_size]`. `append_cache_state()` writes new K/V at `position % max_cache_length`.
 - **Attention mask** is built each step: `0.0` for visible positions, `-1e9` for masked. Grows by 1 each step.
 - **Greedy sampling** via `select_argmax_token()` — scans logits array for maximum value.
-- **Debug mode**: `TRTF_DEBUG_LOGITS_TOPK=N` prints top-N logits per step for parity checks.
+- **Greedy sampling** via `select_argmax_token()` -- scans logits array for maximum value.
 
 ---
 
@@ -473,12 +471,12 @@ flowchart TD
     G --> H
 
     subgraph "Stage 3a: TRT Definition"
-        H --> I["PopulateViaRegistry()<br/><i>(Registry 3)</i>"]
+        H --> I["BuildTrtDecoderWeights()<br/><i>(inlined conversion)</i>"]
         I --> J["TrtDecoderDefinition<br/><i>TRT-ready weights + arch params</i>"]
     end
 
     subgraph "Stage 3b: TRT Engine"
-        J --> K["StandardDecoderGraphBuilder<br/><i>(Registry 4)</i>"]
+        J --> K["StandardDecoderGraphBuilder<br/><i>(Registry 3)</i>"]
         K --> L["INetworkDefinition<br/><i>TRT graph: embed → N layers → logits</i>"]
         L --> M["finalize_decoder_step_engine()<br/><i>Compile or load from cache</i>"]
         M --> N["DecoderStepEngine<br/><i>ICudaEngine + IExecutionContext</i>"]
@@ -491,7 +489,7 @@ flowchart TD
         Q -->|"loop until EOS"| O
     end
 
-    A --> R["HfPythonTokenizer<br/><i>or ToyTokenizer</i>"]
+    A --> R["HfPythonTokenizer<br/><i>or VocabTokenizer</i>"]
     R -->|"encode(prompt)"| O
     O -->|"token IDs"| R
     R -->|"decode(ids)"| S(["Generated Text"])
@@ -509,7 +507,7 @@ flowchart TD
 |-------|-------------|---------------|
 | HF files | Safetensors binary (F32/F16/BF16) + JSON config | HF tensor naming, `[out, in]` weight layout |
 | After CheckpointMapper | `DecoderCheckpoint` with `vector<float>` per tensor | Transposed to `[in, out]`, GQA KV expanded, canonical field names |
-| After Populator | `TrtDecoderDefinition` with per-layer `TrtDecoderLayerDefinition` | Same data as checkpoint but organized for TRT graph builder consumption, with validated sizes |
+| After BuildTrtDecoderWeights | `TrtDecoderDefinition` with per-layer `TrtDecoderLayerDefinition` | Same data as checkpoint but organized for TRT graph builder consumption, with validated sizes |
 | TRT Network | `INetworkDefinition` with `ITensor*` nodes | Weights baked as constant tensors, ops fused by TRT compiler |
 | Compiled Engine | `ICudaEngine` serialized plan | Optimized CUDA kernels, can be cached to disk |
 | Runtime | Host `int32_t` token IDs + device `float` KV caches | Prefill processes input tokens, decode generates one token per step |

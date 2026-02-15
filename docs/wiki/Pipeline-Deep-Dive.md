@@ -4,30 +4,26 @@ This page traces the complete execution path from user code to generated text, w
 
 ## The Call Chain
 
-The primary entry point is now `trtf_create_pipeline()` (C ABI, `src/cabi/trtf_c.cpp`). The legacy `Pipeline::CreateTextGeneration()` (`src/pipeline/pipeline.cpp`) follows the same internal path.
+The primary entry point is `trtf_create_pipeline()` / `trtf_create_pipeline_ex()` (C ABI, `src/cabi/trtf_c.cpp`).
 
 ```
 User: trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)
   │     src/cabi/trtf_c.cpp
   │
-  ├── Pipeline::CreateTextGeneration("QWEN3", prefer_trt=true, force_trt=true)
-  │     src/pipeline/pipeline.cpp
+  ├── Stage 1: ResolveTextGenerationModel("QWEN3")
+  │     src/model/model_resolver.cpp
   │     │
-  │     ├── Stage 1: ResolveTextGenerationModel("QWEN3")
-  │     │     src/model/model_resolver.cpp
-  │     │     │
-  │     │     └── ResolveHfModelViaFamilyRegistry("QWEN3")
-  │     │           src/model/hf_family_registry.cpp
-  │     │           │
-  │     │           ├── resolve_model_dir_from_alias("QWEN3")
-  │     │           │     → "models/hf/Qwen__Qwen3-0.6B" (or demo fallback)
-  │     │           │
-  │     │           ├── RegisterBuiltinHfModelFamilies() [once]
-  │     │           │     ├── StandardTrtModelDefinitionPopulator (p=0)
-  │     │           │     ├── qwen::RegisterQwenFamily()
-  │     │           │     ├── llama::RegisterLlamaFamily()
-  │     │           │     ├── yi, mistral, gemma, internlm, deepseek, baichuan
-  │     │           │     └── (8 families total)
+  │     └── ResolveHfModelViaFamilyRegistry("QWEN3")
+  │           src/model/hf_family_registry.cpp
+  │           │
+  │           ├── resolve_model_dir_from_alias("QWEN3")
+  │           │     → "models/hf/Qwen__Qwen3-0.6B" (or demo fallback)
+  │           │
+  │           ├── RegisterBuiltinHfModelFamilies() [once]
+  │           │     ├── qwen::RegisterQwenFamily()
+  │           │     ├── llama::RegisterLlamaFamily()
+  │           │     ├── mistral::RegisterMistralFamily()
+  │           │     └── gemma::RegisterGemmaFamily()
   │     │           │
   │     │           ├── load_hf_metadata() → {model_type: "qwen3", architectures: [...]}
   │     │           │
@@ -41,12 +37,12 @@ User: trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)
   │     │                         ├── Parse config.json → architecture, dims
   │     │                         ├── Detect safetensors → create TensorSource
   │     │                         ├── FindCheckpointMapper("qwen3") → QwenCheckpointMapper
-  │     │                         └── map_checkpoint() → DecoderCheckpoint
-  │     │                               src/models/qwen/checkpoint_mapper.cpp
-  │     │                               (inherits StandardCheckpointMapper)
-  │     │
-  │     └── Stage 3: BuildRuntimeForTextGeneration(spec, selection)
-  │           src/runtime/runtime_factory.cpp
+  │                         └── map_checkpoint() → DecoderCheckpoint
+  │                               src/models/qwen/checkpoint_mapper.cpp
+  │                               (inherits StandardCheckpointMapper)
+  │
+  ├── Stage 3: BuildRuntimeForTextGeneration(spec, selection)
+  │     src/runtime/runtime_factory.cpp
   │           │
   │           ├── CreateHfPythonTokenizer(hf_tokenizer_dir)
   │           │     src/tokenizer/hf_python_tokenizer.cpp
@@ -60,7 +56,7 @@ User: trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)
   │                       src/runtime/trt/trt_backend_shared.cpp
   │                       │
   │                       ├── BuildTrtDecoderWeights(model) → TrtDecoderDefinition
-  │                       │     PopulateViaRegistry() → StandardTrtModelDefinitionPopulator
+  │                       │     (inlined conversion in trt_model_definition.cpp)
   │                       │
   │                       ├── builder.build_decoder_step_engine(definition, logger)
   │                       │     src/runtime/trt/standard_decoder_graph_builder.cpp
@@ -87,7 +83,7 @@ The output of Stage 1. Tells Stage 3 what kind of model we have:
 ```cpp
 struct ResolvedModelSpec {
     std::string model_id;            // Original user-provided ID
-    ResolvedModelKind kind;          // kDecoderDefinition | kHuggingFaceLocal | kCustom
+    ResolvedModelKind kind;          // kDecoderDefinition | kHuggingFaceLocal
     DecoderModel decoder_model;      // Populated for kDecoderDefinition
     std::string huggingface_model_dir; // Populated for kHuggingFaceLocal
 };
@@ -101,8 +97,6 @@ The unified internal representation. All model sources (HF, built-in, custom) co
 struct DecoderModel {
     std::string model_id;
     std::vector<std::string> vocab;                        // Token vocabulary
-    std::vector<std::pair<std::string, std::string>> transitions;  // CPU-reference transition table
-    std::string default_next_token;
     int32_t max_cache_length;
     DecoderArchitectureConfig architecture;                // Family, dims, RoPE, etc.
     bool prefer_hf_tokenizer;
@@ -120,10 +114,7 @@ Contains all loaded weight tensors:
 struct DecoderCheckpoint {
     int32_t hidden_size, attention_size, mlp_size;
 
-    // Legacy single-layer fields (for built-in tiny models)
-    std::vector<float> embedding, w_q, w_k, w_v, w1, b1, w2, b2, w_out, b_out;
-
-    // Multi-layer fields (for real HF models)
+    // Multi-layer fields (for HF models)
     bool has_decoder_layers;
     std::vector<DecoderLayerCheckpoint> decoder_layers;  // Per-layer weights
     std::vector<float> final_norm;                       // Final RMSNorm weights
@@ -156,7 +147,7 @@ struct DecoderArchitectureConfig {
 
 ### TrtDecoderDefinition
 
-TRT-ready version of the model weights, produced by Registry 3:
+TRT-ready version of the model weights, produced by `BuildTrtDecoderWeights()`:
 
 ```cpp
 struct TrtDecoderDefinition {
@@ -171,9 +162,6 @@ struct TrtDecoderDefinition {
     std::vector<float> b_out;      // [vocab] (bias, may be zeros)
     std::vector<float> final_norm; // [hidden]
 
-    // Legacy single-layer fields (for tiny models)
-    std::vector<float> w_q, w_k, w_v, w1, b1, w2, b2;
-
     bool has_decoder_layers;
     std::vector<TrtDecoderLayerDefinition> decoder_layers;
 };
@@ -187,7 +175,7 @@ The output of Stage 3, consumed by the Pipeline constructor:
 struct RuntimeAssembly {
     std::unique_ptr<ITokenizer> tokenizer;
     std::unique_ptr<IGenerationBackend> backend;
-    std::string backend_name;  // "trt", "cpu-reference", or "hf-transformers"
+    std::string backend_name;  // "trt" or "hf-transformers"
 };
 ```
 
@@ -252,5 +240,4 @@ The model loader reads these fields from `config.json`:
 | `TRTF_HF_PYTHON` | none | Path to Python for HF tokenizer/backend |
 | `TRTF_TRT_ENGINE_CACHE_DIR` | none | Directory for serialized TRT engine plans |
 | `TRTF_DISABLE_ENGINE_CACHE` | 0 | Force engine rebuild every run |
-| `TRTF_DEBUG_LOGITS_TOPK` | 0 | Print top-N logits per decode step |
 | `TRTF_TRT_LOG_STDERR` | 0 | Enable TRT logger output to stderr |

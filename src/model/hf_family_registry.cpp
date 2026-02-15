@@ -1,14 +1,8 @@
 #include "trtf/hf_family_registry.h"
-#include "model/standard_trt_model_definition_populator.h"
-#include "model/trt_model_definition_populator.h"
 #include "models/qwen/registration.h"
 #include "models/llama/registration.h"
-#include "models/yi/registration.h"
 #include "models/mistral/registration.h"
 #include "models/gemma/registration.h"
-#include "models/internlm/registration.h"
-#include "models/deepseek/registration.h"
-#include "models/baichuan/registration.h"
 #include "utils/data_dir.h"
 #include "utils/text_parsers.h"
 #include "utils/json_helpers.h"
@@ -121,20 +115,10 @@ void RegisterHfModelFamily(HfModelFamilyRegistration registration)
 
 void RegisterBuiltinHfModelFamilies()
 {
-    // Low-priority fallback: StandardTrtModelDefinitionPopulator handles any model
-    // with has_decoder_layers, so new families don't need to register their own
-    // populator unless they have non-standard TRT definition requirements.
-    RegisterTrtModelDefinitionPopulator("standard", 0,
-        std::make_unique<StandardTrtModelDefinitionPopulator>());
-
     qwen::RegisterQwenFamily();
     llama::RegisterLlamaFamily();
-    yi::RegisterYiFamily();
     mistral::RegisterMistralFamily();
     gemma::RegisterGemmaFamily();
-    internlm::RegisterInternLMFamily();
-    deepseek::RegisterDeepSeekFamily();
-    baichuan::RegisterBaichuanFamily();
 }
 
 std::optional<ResolvedModelSpec> ResolveHfModelViaFamilyRegistry(const std::string& model_id)

@@ -1,6 +1,5 @@
 #include "trtf/pipeline.h"
 #include "trtf/bundle.h"
-#include "trtf/pipeline_legacy.h"
 #include "trtf/model_resolver.h"
 #include "trtf/runtime_factory.h"
 #include "bundle/bundle_format.h"
@@ -108,26 +107,8 @@ private:
     std::string mLastOutput;
 };
 
-std::size_t resolve_max_new_tokens(std::size_t fallback)
-{
-    const char* env = std::getenv("TRTF_MAX_NEW_TOKENS");
-    if (env == nullptr || env[0] == '\0')
-    {
-        return fallback;
-    }
-    try
-    {
-        const long long parsed = std::stoll(env);
-        if (parsed > 0)
-        {
-            return static_cast<std::size_t>(parsed);
-        }
-    }
-    catch (const std::exception&)
-    {
-    }
-    return fallback;
-}
+// Intentionally removed: resolve_max_new_tokens env var reader.
+// Use TrtfPipelineOptions::max_new_tokens instead.
 
 // Resolve model alias to directory path (cheap — no weight loading).
 std::string resolve_model_dir_lightweight(const std::string& input)
@@ -251,7 +232,7 @@ PipelineImpl* try_create_from_cached_engine(const std::string& input, const std:
     std::cerr << "[trtf] Runtime ready (backend=trt, fast-path)" << std::endl;
 
     trtf::GenerationConfig gen_config{};
-    gen_config.max_new_tokens = resolve_max_new_tokens(gen_config.max_new_tokens);
+    // max_new_tokens set by caller via options
 
     return new PipelineImpl(input, std::move(tokenizer), std::move(backend), "trt", gen_config);
 }
@@ -263,6 +244,15 @@ extern "C" {
 
 trtf::IPipeline* trtf_create_pipeline(const char* model_or_bundle, int flags)
 {
+    TrtfPipelineOptions opts{};
+    opts.flags = flags;
+    opts.max_new_tokens = 0;
+    opts.max_cache_length = 0;
+    return trtf_create_pipeline_ex(model_or_bundle, &opts);
+}
+
+trtf::IPipeline* trtf_create_pipeline_ex(const char* model_or_bundle, const TrtfPipelineOptions* options)
+{
     clear_last_error();
 
     if (model_or_bundle == nullptr || model_or_bundle[0] == '\0')
@@ -270,6 +260,11 @@ trtf::IPipeline* trtf_create_pipeline(const char* model_or_bundle, int flags)
         set_last_error("model_or_bundle must not be null or empty");
         return nullptr;
     }
+
+    const int flags = options ? options->flags : TRTF_PREFER_TRT;
+    const int opt_max_new_tokens = options ? options->max_new_tokens : 0;
+    const int opt_max_cache_length = options ? options->max_cache_length : 0;
+    (void) opt_max_cache_length; // TODO: wire through to model loading path
 
     try
     {
@@ -324,7 +319,7 @@ trtf::IPipeline* trtf_create_pipeline(const char* model_or_bundle, int flags)
         auto t1 = std::chrono::steady_clock::now();
         std::cerr << "[trtf] Model resolved (kind="
                   << (model_spec.kind == trtf::ResolvedModelKind::kDecoderDefinition ? "decoder-definition"
-                      : model_spec.kind == trtf::ResolvedModelKind::kHuggingFaceLocal ? "hf-local" : "custom")
+                      : "hf-local")
                   << ") ["
                   << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() << " ms]"
                   << std::endl;
@@ -367,7 +362,10 @@ trtf::IPipeline* trtf_create_pipeline(const char* model_or_bundle, int flags)
 #endif
 
         trtf::GenerationConfig gen_config{};
-        gen_config.max_new_tokens = resolve_max_new_tokens(gen_config.max_new_tokens);
+        if (opt_max_new_tokens > 0)
+        {
+            gen_config.max_new_tokens = static_cast<std::size_t>(opt_max_new_tokens);
+        }
 
         return new PipelineImpl(
             input,

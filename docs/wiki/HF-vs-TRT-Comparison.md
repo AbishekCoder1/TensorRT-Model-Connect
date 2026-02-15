@@ -11,7 +11,7 @@ This page provides a detailed comparison between HuggingFace's Python `transform
 | Entry point | `pipeline("text-generation", model=...)` | `trtf_create_pipeline(model_id, flags)` |
 | Generation | `pipeline("Hello")` | `pipeline->generate("Hello")` |
 | Model loading | `AutoModelForCausalLM.from_pretrained()` | `LoadDecoderModel(model_dir)` via family registry |
-| Tokenizer | `AutoTokenizer.from_pretrained()` | `HfPythonTokenizer` (subprocess) or `ToyTokenizer` |
+| Tokenizer | `AutoTokenizer.from_pretrained()` | `HfPythonTokenizer` (subprocess) or `VocabTokenizer` |
 | Config | `AutoConfig.from_pretrained()` | `config.json` parsing in `model_loader.cpp` |
 | Backend selection | `device_map="auto"` / `.to("cuda")` | `prefer_trt=true` / `force_trt=true` |
 
@@ -74,7 +74,7 @@ Both implement the same mathematical operations. The differences are in executio
 
 **TRT-Transformers-CPP**: Two paths:
 1. **HfPythonTokenizer**: Spawns a Python subprocess that imports `transformers` and calls the same HF tokenizer. Exact parity guaranteed.
-2. **ToyTokenizer**: Simple word-to-id lookup from `vocab.txt`. Only used for built-in toy models.
+2. **VocabTokenizer**: Simple word-to-id lookup from vocabulary list.
 
 The subprocess approach ensures tokenization parity. The `TRTF_HF_PYTHON` environment variable must point to a Python with `transformers` installed.
 
@@ -92,7 +92,7 @@ For the same model weights and input, TRT and HF should produce nearly identical
 Validation tools:
 ```bash
 # E2E logit comparison
-python3 scripts/diff_logits.py --model-dir <hf-dir> --binary ./build/trtf_load_model \
+python3 scripts/diff_logits.py --model-dir <hf-dir> --binary ./build/trtf \
   --backend-flag --force-trt --atol 1e-3 --battery
 
 # Per-layer hidden state comparison

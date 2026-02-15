@@ -20,10 +20,10 @@ A C++ library that mirrors HuggingFace's `transformers.pipeline()` API with Tens
 
 1. **Mirror the HF API**: `pipeline("text-generation", model=...)` becomes `trtf_create_pipeline(model_id, flags)`.
 2. **C ABI stability**: Single `extern "C"` factory function returns a C++ virtual interface (`IPipeline`). ABI-safe across compiler/STL versions.
-3. **TensorRT-first, always-fallback**: Try TRT GPU inference first, fall back gracefully to CPU reference or HF Python subprocess.
+3. **TensorRT-first, always-fallback**: Try TRT GPU inference first, fall back gracefully to HF Python subprocess.
 4. **Plug-and-play families**: Adding a new model family requires ~50 lines of code in `src/models/<family>/` and two one-line edits.
 5. **Direct C++ TRT graph building**: No ONNX intermediate. Build `INetworkDefinition` directly using reusable op primitives.
-6. **Shared infrastructure**: StandardCheckpointMapper, StandardTrtModelDefinitionPopulator, and StandardDecoderGraphBuilder handle 95% of modern decoder-only LLMs out of the box.
+6. **Shared infrastructure**: StandardCheckpointMapper and StandardDecoderGraphBuilder handle 95% of modern decoder-only LLMs out of the box.
 7. **Distributable bundles**: `.trtfb` files package compiled TRT engines + tokenizer into a single artifact.
 
 ## Architecture at a Glance
@@ -34,7 +34,7 @@ The library processes a model request in three stages:
 
 1. **Model Resolution** — Turns a `model_id` string (e.g., `"QWEN3"`, a path to an HF directory, or a `.trtfb` bundle) into a `ResolvedModelSpec`.
 2. **HF Family Registry** — When the model is an HF directory, matches `model_type` from `config.json` to a registered family, loads weights via a checkpoint mapper, and produces a unified `DecoderModel`.
-3. **Runtime Assembly** — Creates a tokenizer and selects a backend (TRT > CPU-reference > HF-Python), producing a ready-to-use `IPipeline` object.
+3. **Runtime Assembly** — Creates a tokenizer and selects a backend (TRT > HF-Python), producing a ready-to-use `IPipeline` object.
 
 ## Minimum Viable Example
 
@@ -62,7 +62,8 @@ trtf run QWEN3 --prompt "What is the capital of France?" --force-trt --max-new-t
 
 | Model ID | Description | Backend |
 |----------|-------------|---------|
-| `trtf/tiny-cake-v1` | Bundled tiny decoder (always available) | CPU-reference |
-| `QWEN3` | Qwen3-0.6B (real weights or bundled demo) | TRT or CPU-reference |
-| Any HF LLaMA directory | LLaMA, TinyLlama, etc. | TRT or CPU-reference |
-| Any HF Qwen directory | Qwen, Qwen2, Qwen3, QWQ | TRT or CPU-reference |
+| `QWEN3` | Qwen3-0.6B (real weights or bundled demo) | TRT |
+| Any HF LLaMA directory | LLaMA, TinyLlama, etc. | TRT |
+| Any HF Qwen directory | Qwen, Qwen2, Qwen3, QWQ | TRT |
+| Any HF Mistral directory | Mistral, TinyMistral | TRT |
+| Any HF Gemma directory | Gemma | TRT |

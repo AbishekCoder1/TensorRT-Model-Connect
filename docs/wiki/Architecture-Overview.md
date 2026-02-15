@@ -8,19 +8,17 @@ Every model request flows through three stages, each with an extension point:
 
 ### Stage 1: Model Resolution (`model_resolver.cpp`)
 
-Converts a `model_id` string into a `ResolvedModelSpec`. The resolver tries four strategies in order:
+Converts a `model_id` string into a `ResolvedModelSpec`. The resolver tries three strategies in order:
 
 | Order | Strategy | When it matches |
 |-------|----------|----------------|
-| 1 | Custom resolvers | User-registered via `RegisterTextGenerationModelResolver()` |
-| 2 | HF Family Registry | Directory has `config.json` + `model.safetensors` and a registered family matches `model_type` |
-| 3 | Raw HF directory | Directory has `config.json` + safetensors but no family matched → `kHuggingFaceLocal` |
-| 4 | Decoder definition | `LoadDecoderModel(model_id)` — tries built-in models, then filesystem path |
+| 1 | HF Family Registry | Directory has `config.json` + `model.safetensors` and a registered family matches `model_type` |
+| 2 | Raw HF directory | Directory has `config.json` + safetensors but no family matched → `kHuggingFaceLocal` |
+| 3 | Decoder definition | `LoadDecoderModel(model_id)` — tries filesystem path |
 
-The output is a `ResolvedModelSpec` with one of three kinds:
-- **`kDecoderDefinition`** — Full `DecoderModel` with weights loaded in memory. Ready for TRT or CPU-reference backend.
+The output is a `ResolvedModelSpec` with one of two kinds:
+- **`kDecoderDefinition`** — Full `DecoderModel` with weights loaded in memory. Ready for TRT backend.
 - **`kHuggingFaceLocal`** — Path to HF directory. Will use HF Python subprocess backend.
-- **`kCustom`** — User-provided via custom resolver.
 
 ### Stage 2: HF Family Registry (`hf_family_registry.cpp`)
 
@@ -28,15 +26,10 @@ Only activates when the input is an HF model directory. Registered once via `std
 
 ```
 RegisterBuiltinHfModelFamilies()
-  ├── StandardTrtModelDefinitionPopulator (priority=0, fallback)
   ├── qwen::RegisterQwenFamily()
   ├── llama::RegisterLlamaFamily()
-  ├── yi::RegisterYiFamily()
   ├── mistral::RegisterMistralFamily()
-  ├── gemma::RegisterGemmaFamily()
-  ├── internlm::RegisterInternLMFamily()
-  ├── deepseek::RegisterDeepSeekFamily()
-  └── baichuan::RegisterBaichuanFamily()
+  └── gemma::RegisterGemmaFamily()
 ```
 
 For each registered family (sorted by priority, highest first):
@@ -50,7 +43,7 @@ For each registered family (sorted by priority, highest first):
 
 ### C ABI Entry Point (`trtf_c.cpp`)
 
-Users access the library through a single `extern "C"` factory function `trtf_create_pipeline()` which returns an `IPipeline*`. This function orchestrates stages 1-3 internally. The `IPipeline` interface uses `const char*` (not `std::string`) for ABI safety across compilers/STL versions.
+Users access the library through `extern "C"` factory functions `trtf_create_pipeline()` and `trtf_create_pipeline_ex()` which return an `IPipeline*`. These functions orchestrate stages 1-3 internally. The `IPipeline` interface uses `const char*` (not `std::string`) for ABI safety across compilers/STL versions. `trtf_create_pipeline_ex()` accepts a `TrtfPipelineOptions` struct with flags, `max_new_tokens`, and `max_cache_length`.
 
 ### Stage 3: Runtime Assembly (`runtime_factory.cpp`)
 
@@ -58,20 +51,19 @@ Creates the final `{tokenizer, backend}` pair:
 
 **Tokenizer selection:**
 - If model has `prefer_hf_tokenizer=true` and `tokenizer.json` exists → `HfPythonTokenizer` (subprocess bridge to HF `tokenizers` library)
-- Otherwise → `ToyTokenizer` (vocab.txt-based lookup)
+- Otherwise → `VocabTokenizer` (vocab.txt-based lookup)
 
 **Backend cascade:**
-- If `prefer_trt`: Try `CreateTrtBackend()` → on failure, fall back to `CreateCpuReferenceBackend()`
 - If `force_trt`: Try `CreateTrtBackend()` → on failure, throw error
-- Otherwise: `CreateCpuReferenceBackend()` directly
+- Otherwise: Try `CreateTrtBackend()` → on failure, fall back to `CreateHfPythonBackend()`
 
 ---
 
-## The 4-Registry System
+## The 3-Registry System
 
 ![Registry System](diagrams/registry_system.svg)
 
-All four registries use priority-sorted dispatch: higher priority wins. Thread-safe via mutex.
+All three registries use priority-sorted dispatch: higher priority wins. Thread-safe via mutex.
 
 ### Registry 1: HF Family (`RegisterHfModelFamily`)
 
@@ -95,15 +87,7 @@ Translates HF safetensors tensor keys (e.g., `model.layers.0.self_attn.q_proj.we
 
 Both `QwenCheckpointMapper` and `LlamaCheckpointMapper` simply subclass `StandardCheckpointMapper` and only override `can_map()` to match their family name.
 
-### Registry 3: TRT Definition Populator (`RegisterTrtModelDefinitionPopulator`)
-
-**Interface**: `ITrtModelDefinitionPopulator { can_populate(), populate() }`
-
-Converts `DecoderModel` → `TrtDecoderDefinition`. The `TrtDecoderDefinition` holds per-layer weight arrays in the exact format needed for TRT graph building, plus architectural parameters (hidden_size, attention_size, num_heads, RoPE theta, RMSNorm eps, etc.).
-
-**StandardTrtModelDefinitionPopulator** is registered at **priority 0** as a fallback. It handles any model where `checkpoint.has_decoder_layers == true`. New families **do not need** to register their own populator.
-
-### Registry 4: TRT Graph Builder (`RegisterTrtGraphBuilder`)
+### Registry 3: TRT Graph Builder (`RegisterTrtGraphBuilder`)
 
 **Interface**: `ITrtGraphBuilder { build_decoder_step_engine() }`
 
@@ -116,7 +100,7 @@ Lookup order: exact family name (e.g., `"llama"`) → `"standard-decoder"` fallb
 
 ---
 
-## The Three Backends
+## The Two Backends
 
 All implement `IGenerationBackend`:
 
@@ -132,13 +116,8 @@ class IGenerationBackend {
 ### TRT Backend (`trt_backend.cpp` + `trt_backend_shared.cpp`)
 - **Name**: `"trt"`
 - **Available when**: `TRTF_HAS_TRT=1` and GPU is present
-- **How it works**: Builds a TensorRT engine from the model weights using Registry 3 + Registry 4, then runs an autoregressive generation loop on GPU with KV-cache management, CUDA memory allocation, and greedy argmax sampling.
+- **How it works**: Builds a TensorRT engine from the model weights, then runs an autoregressive generation loop on GPU with KV-cache management, CUDA memory allocation, and greedy argmax sampling.
 - **Engine caching**: When `TRTF_TRT_ENGINE_CACHE_DIR` is set, serialized engine plans are cached to disk. Subsequent runs load from cache instead of rebuilding.
-
-### CPU Reference Backend (`cpu_reference_backend.cpp`)
-- **Name**: `"cpu-reference"`
-- **Always available**: `is_available()` returns `true`
-- **How it works**: Uses transition tables from the `DecoderModel`. Maps each token to its deterministic next token. No neural network computation — used for testing and as a fallback.
 
 ### HF Python Backend (`hf_python_backend.cpp`)
 - **Name**: `"hf-transformers"`
@@ -167,12 +146,11 @@ HF Model Directory (config.json + model.safetensors + tokenizer.json)
                           ▼
                     DecoderModel (unified representation)
                           │
-                    ┌─────┴──────┐
-                    ▼            ▼
-            CPU Reference   TRT Pipeline
-            Backend         │
-                           ├─→ TrtDecoderDefinition (Registry 3)
-                           ├─→ INetworkDefinition (Registry 4)
+                          ▼
+                    TRT Pipeline
+                           │
+                           ├─→ TrtDecoderDefinition (inlined conversion)
+                           ├─→ INetworkDefinition (Registry 3: TRT Graph Builder)
                            ├─→ ICudaEngine (TRT compilation)
                            └─→ Autoregressive generation loop
 ```
@@ -196,12 +174,11 @@ Every model source (HF safetensors, built-in weights.txt, custom format) is conv
 
 ### Why priority-sorted registries?
 Family-specific implementations override shared defaults. For example:
-- Qwen's populator at priority 100 beats the standard populator at priority 0
+- A custom checkpoint mapper at priority 100 beats a standard mapper at lower priority
 - This allows families to customize specific stages while inheriting shared infrastructure for others
 - External code can register at any priority to override built-in behavior
 
 ### Why lazy initialization?
 `RegisterBuiltinHfModelFamilies()` is called via `std::call_once` only when the HF family registry is actually needed. This means:
-- Applications that only use built-in models (`trtf/tiny-cake-v1`) pay no registration cost
 - The order of static initialization doesn't matter
 - Thread-safe without explicit ordering

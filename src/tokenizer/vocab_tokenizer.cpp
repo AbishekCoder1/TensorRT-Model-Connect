@@ -10,9 +10,9 @@
 namespace trtf {
 namespace {
 
-class ToyTokenizer final : public ITokenizer {
+class VocabTokenizer final : public ITokenizer {
 public:
-    explicit ToyTokenizer(std::vector<std::string> vocab)
+    explicit VocabTokenizer(std::vector<std::string> vocab)
     {
         mVocab = std::move(vocab);
         for (std::size_t i = 0; i < mVocab.size(); ++i)
@@ -128,45 +128,13 @@ private:
 
 } // namespace
 
-std::unique_ptr<ITokenizer> CreateToyTokenizer()
-{
-    return CreateVocabTokenizer({
-        "<unk>",
-        "<bos>",
-        "<eos>",
-        "the",
-        "secret",
-        "to",
-        "baking",
-        "a",
-        "really",
-        "good",
-        "cake",
-        "is",
-        "use",
-        "fresh",
-        "butter",
-        "and",
-        "measure",
-        "carefully",
-        "follow",
-        "recipe",
-        "exactly",
-        ".",
-        ",",
-        "?",
-        "!",
-        "<pad>",
-    });
-}
-
 std::unique_ptr<ITokenizer> CreateVocabTokenizer(std::vector<std::string> vocab)
 {
     if (vocab.empty())
     {
         throw std::invalid_argument("Vocabulary must not be empty.");
     }
-    return std::make_unique<ToyTokenizer>(std::move(vocab));
+    return std::make_unique<VocabTokenizer>(std::move(vocab));
 }
 
 } // namespace trtf

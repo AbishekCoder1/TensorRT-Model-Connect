@@ -4,7 +4,7 @@
 
 #include "trtf/hf_family_registry.h"
 #include "trtf/model_resolver.h"
-#include "trtf/pipeline_legacy.h"
+#include "trtf/pipeline.h"
 
 #include <cerrno>
 #include <cstring>
@@ -102,23 +102,6 @@ int main()
     if (spec.decoder_model.default_next_token != "<eos>")
     {
         std::cerr << "expected higher-priority family registration to win" << std::endl;
-        std::filesystem::remove_all(hf_dir);
-        return 1;
-    }
-
-    auto pipeline = trtf::Pipeline::CreateTextGeneration(hf_dir.string(), false, false);
-    if (pipeline.backend_name() != "cpu-reference")
-    {
-        std::cerr << "expected cpu-reference backend for mock family, got " << pipeline.backend_name() << std::endl;
-        std::filesystem::remove_all(hf_dir);
-        return 1;
-    }
-
-    const auto out = pipeline("hello");
-    if (out.size() != 1 || out[0].generated_text.find("hello from mock.") == std::string::npos)
-    {
-        std::cerr << "unexpected output for family-defined decoder model: "
-                  << (out.empty() ? std::string("<empty>") : out[0].generated_text) << std::endl;
         std::filesystem::remove_all(hf_dir);
         return 1;
     }

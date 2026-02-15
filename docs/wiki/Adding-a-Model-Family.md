@@ -1,6 +1,6 @@
 # Adding a New Model Family
 
-This guide walks through adding support for a new HuggingFace model family (e.g., Gemma, Phi, Yi). By the end, your model will be loadable via `Pipeline::CreateTextGeneration("path/to/your-model")` with TRT GPU inference.
+This guide walks through adding support for a new HuggingFace model family (e.g., Phi). By the end, your model will be loadable via `trtf_create_pipeline("path/to/your-model", TRTF_FORCE_TRT)` with TRT GPU inference.
 
 ![What You Write vs What's Automatic](diagrams/add_model_family.svg)
 
@@ -163,9 +163,7 @@ void RegisterYiFamily()
     // Registry 2: Checkpoint mapper
     RegisterCheckpointMapper("yi", 100, std::make_unique<YiCheckpointMapper>());
 
-    // Registry 3: NOT needed — StandardTrtModelDefinitionPopulator handles this automatically
-
-    // Registry 4: TRT graph builder
+    // Registry 3: TRT graph builder
 #if TRTF_HAS_TRT
     RegisterTrtGraphBuilder("yi", std::make_unique<StandardDecoderGraphBuilder>());
 #endif
@@ -194,9 +192,6 @@ In `src/model/hf_family_registry.cpp`, add one line to `RegisterBuiltinHfModelFa
 
 void RegisterBuiltinHfModelFamilies()
 {
-    RegisterTrtModelDefinitionPopulator("standard", 0,
-        std::make_unique<StandardTrtModelDefinitionPopulator>());
-
     qwen::RegisterQwenFamily();
     llama::RegisterLlamaFamily();
     yi::RegisterYiFamily();            // Add this line
@@ -300,7 +295,7 @@ ctest --test-dir build -R test_yi_family --output-on-failure
 
 # E2E logit comparison against HF (in container with GPU)
 python3 scripts/diff_logits.py \
-  --model-dir path/to/yi-model --binary ./build/trtf_load_model \
+  --model-dir path/to/yi-model --binary ./build/trtf \
   --backend-flag --force-trt --atol 1e-3 --battery
 ```
 
@@ -348,21 +343,3 @@ RegisterTrtGraphBuilder("your_family", std::make_unique<YourGraphBuilder>());
 ```
 
 You can still reuse the ops from `trt_graph_ops.h` (RMSNorm, matmul, RoPE, etc.) — just compose them differently.
-
-## Advanced: Custom TRT Definition Populator
-
-If your model's `DecoderCheckpoint` doesn't map cleanly to `TrtDecoderDefinition` (e.g., you have expert-specific weight tensors), implement `ITrtModelDefinitionPopulator`:
-
-```cpp
-class YourPopulator final : public ITrtModelDefinitionPopulator {
-public:
-    bool can_populate(const DecoderModel& model) const override { ... }
-    bool populate(TrtDecoderDefinition& definition, const DecoderModel& model) const override { ... }
-};
-```
-
-Register at a higher priority than the standard fallback (priority > 0):
-```cpp
-RegisterTrtModelDefinitionPopulator("your_family", 100,
-    std::make_unique<YourPopulator>());
-```

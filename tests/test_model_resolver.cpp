@@ -1,6 +1,5 @@
 // Test: Model resolution pipeline with multiple resolution strategies.
-// Verifies: Built-in model resolves as kDecoderDefinition, HF directory resolves
-// as kHuggingFaceLocal, and unknown model throws an appropriate error.
+// Verifies: HF directory resolves as kHuggingFaceLocal, and unknown model throws error.
 
 #include "trtf/model_resolver.h"
 
@@ -16,18 +15,6 @@
 
 int main()
 {
-    const trtf::ResolvedModelSpec builtin = trtf::ResolveTextGenerationModel("trtf/tiny-cake-v1");
-    if (builtin.kind != trtf::ResolvedModelKind::kDecoderDefinition)
-    {
-        std::cerr << "expected built-in model to resolve as decoder-definition" << std::endl;
-        return 1;
-    }
-    if (builtin.decoder_model.vocab.empty())
-    {
-        std::cerr << "expected built-in decoder model vocab to be non-empty" << std::endl;
-        return 1;
-    }
-
     char temp_dir_template[] = "/tmp/trtf_hf_resolver_XXXXXX";
     char* created_dir = mkdtemp(temp_dir_template);
     if (created_dir == nullptr)

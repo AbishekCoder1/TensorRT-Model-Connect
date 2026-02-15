@@ -8,11 +8,10 @@ A C++ library that mirrors HuggingFace `transformers.pipeline(...)` with TensorR
 - **CLI**: `trtf build/run/inspect/version` subcommands.
 - **Bundle format**: `.trtfb` files package compiled TRT engines + tokenizer into a single artifact.
 - **CMake install**: `find_package(trtf)` support, installs library + headers + CLI.
-- Three backends: `trt` (TensorRT GPU), `cpu-reference` (deterministic), `hf-transformers` (Python subprocess).
-- 4-registry plug-and-play architecture. 8 built-in model families.
-- `StandardDecoderGraphBuilder` handles Pre-RMSNorm + GQA + RoPE + SwiGLU (LLaMA, Qwen, Mistral, Yi, etc.).
+- Two backends: `trt` (TensorRT GPU), `hf-transformers` (Python subprocess fallback).
+- 3-registry plug-and-play architecture. 4 built-in model families (Qwen, LLaMA, Mistral, Gemma).
+- `StandardDecoderGraphBuilder` handles Pre-RMSNorm + GQA + RoPE + SwiGLU (LLaMA, Qwen, Mistral, Gemma).
 - Verified TRT output: Qwen3-0.6B, TinyLlama-1.1B, TinyMistral-248M, DeepSeek-R1-Distill-1.5B.
-- **30/30 tests pass** in container.
 
 ## Quick start
 
@@ -41,7 +40,7 @@ cmake -S . -B build -G Ninja \
   -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
 cmake --build build -j
 
-# Run all tests (30/30 should pass)
+# Run all tests
 ctest --test-dir build --output-on-failure
 ```
 
@@ -164,9 +163,6 @@ export TRTF_MAX_NEW_TOKENS=50
 # DeepSeek-R1-Distill-Qwen-1.5B (chain-of-thought model — outputs <think>...</think> reasoning)
 ./build/trtf run models/hf/deepseek-ai__DeepSeek-R1-Distill-Qwen-1.5B \
   --prompt "Tell me something about TensorRT" --force-trt
-
-# CPU-only with built-in toy model (no GPU needed, no HF Python needed)
-./build/trtf run "trtf/tiny-cake-v1" --prompt "hello" --cpu-only
 ```
 
 ### Engine caching (skip recompilation on subsequent runs)
@@ -206,7 +202,6 @@ ls -lh /tmp/trtf_engines/
 ### Flags
 
 - `--force-trt`: require TRT backend, fail if unavailable
-- `--cpu-only`: bypass TRT, use `cpu-reference`
 - `--max-new-tokens N`: override max generation tokens
 - `--max-cache-length N`: cap KV cache length (build only)
 
@@ -219,7 +214,6 @@ ls -lh /tmp/trtf_engines/
 | `TRTF_MAX_CACHE_LENGTH` | Cap KV cache length (saves GPU memory) |
 | `TRTF_TRT_ENGINE_CACHE_DIR` | On-disk cache for compiled TRT engines (set this to avoid recompilation) |
 | `TRTF_DATA_DIR` | Override source directory for scripts/models |
-| `TRTF_DEBUG_LOGITS_TOPK` | Print top-N logit debug info per decode step |
 
 ## Supported models
 
@@ -233,9 +227,8 @@ Any HF model directory with `config.json` + `model.safetensors` that uses a regi
 | DeepSeek-R1-Distill-1.5B | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | `qwen2` | Qwen | Yes |
 | Yi-Coder-1.5B | `01-ai/Yi-Coder-1.5B` | `llama` | LLaMA | Yes |
 | Gemma-2B | `google/gemma-2b` | `gemma` | Gemma | Yes |
-| `trtf/tiny-cake-v1` | (bundled) | — | — | Always |
 
-The 8 registered families are: **Qwen**, **LLaMA**, **Mistral**, **Gemma**, **Yi**, **InternLM**, **DeepSeek**, **Baichuan**. Any model whose `model_type` matches a family will load automatically.
+The 4 registered families are: **Qwen**, **LLaMA**, **Mistral**, **Gemma**. Any model whose `model_type` matches a family will load automatically.
 
 ## Adding a new model family
 
@@ -252,7 +245,7 @@ See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full gui
 
 | Page | Description |
 |------|-------------|
-| [Architecture Overview](docs/wiki/Architecture-Overview.md) | Three-stage pipeline, 4-registry system, backend cascade |
+| [Architecture Overview](docs/wiki/Architecture-Overview.md) | Three-stage pipeline, 3-registry system, backend cascade |
 | [Pipeline Deep Dive](docs/wiki/Pipeline-Deep-Dive.md) | Full call chain, data structures, safetensors loading |
 | [TRT Internals](docs/wiki/TRT-Internals.md) | Decoder layer anatomy, graph ops, engine lifecycle |
 | [HF vs TRT Comparison](docs/wiki/HF-vs-TRT-Comparison.md) | Side-by-side comparison with HuggingFace Transformers |

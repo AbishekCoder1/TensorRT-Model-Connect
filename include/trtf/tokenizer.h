@@ -19,7 +19,6 @@ public:
     virtual std::string token_for_id(int32_t id) const = 0;
 };
 
-std::unique_ptr<ITokenizer> CreateToyTokenizer();
 std::unique_ptr<ITokenizer> CreateVocabTokenizer(std::vector<std::string> vocab);
 std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir);
 

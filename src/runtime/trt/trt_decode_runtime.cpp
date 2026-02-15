@@ -2,9 +2,7 @@
 #include "runtime/trt/trt_common.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
-#include <iostream>
 #include <string_view>
 
 namespace trtf {
@@ -208,16 +206,6 @@ bool run_decoder_step(const DecoderStepEngine& engine, int32_t token_id, int32_t
     {
         return fail("bind input position_id failed");
     }
-    if (const char* debug_mask = std::getenv("TRTF_DEBUG_MASK"); debug_mask != nullptr && debug_mask[0] != '\0')
-    {
-        std::cerr << "TRTF_DEBUG_MASK size=" << attention_mask.size();
-        if (!attention_mask.empty())
-        {
-            std::cerr << " first=" << attention_mask.front() << " last=" << attention_mask.back();
-        }
-        std::cerr << '\n';
-    }
-
     if (!bind_input(engine.mask_input_name, attention_mask.data(), mask_bytes))
     {
         return fail("bind input attention_mask failed");

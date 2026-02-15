@@ -54,15 +54,11 @@ if(TRTF_ENABLE_TRT)
 endif()
 
 add_library(trtf_core
-  src/pipeline/pipeline.cpp
   src/model/model_loader.cpp
   src/model/safetensors_loader.cpp
   src/model/hf_family_registry.cpp
   src/model/model_resolver.cpp
   src/model/trt_model_definition.cpp
-  src/model/trt_model_definition_populator.cpp
-  src/model/standard_trt_model_definition_populator.cpp
-  src/runtime/cpu_reference_backend.cpp
   src/runtime/hf_python_backend.cpp
   src/runtime/runtime_factory.cpp
   src/runtime/trt_backend.cpp
@@ -78,21 +74,12 @@ add_library(trtf_core
   src/model/standard_checkpoint_mapper.cpp
   src/models/qwen/registration.cpp
   src/models/qwen/checkpoint_mapper.cpp
-  src/models/qwen/trt_model_populator.cpp
   src/models/llama/registration.cpp
   src/models/llama/checkpoint_mapper.cpp
-  src/models/yi/registration.cpp
-  src/models/yi/checkpoint_mapper.cpp
   src/models/mistral/registration.cpp
   src/models/mistral/checkpoint_mapper.cpp
   src/models/gemma/registration.cpp
   src/models/gemma/checkpoint_mapper.cpp
-  src/models/internlm/registration.cpp
-  src/models/internlm/checkpoint_mapper.cpp
-  src/models/deepseek/registration.cpp
-  src/models/deepseek/checkpoint_mapper.cpp
-  src/models/baichuan/registration.cpp
-  src/models/baichuan/checkpoint_mapper.cpp
   src/bundle/bundle_format.cpp
   src/bundle/bundle_api.cpp
   src/cabi/trtf_c.cpp
@@ -102,7 +89,7 @@ add_library(trtf_core
   src/utils/json_helpers.cpp
   src/utils/tensor_math.cpp
   src/utils/trt/engine_cache.cpp
-  src/tokenizer/toy_tokenizer.cpp
+  src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/hf_python_tokenizer.cpp
 )
 
@@ -141,24 +128,10 @@ else()
   message(STATUS "TensorRT backend disabled (missing TensorRT or CUDA dev dependencies)")
 endif()
 
-add_executable(trtf_text_generation examples/text_generation.cpp)
-target_link_libraries(trtf_text_generation PRIVATE trtf_core)
-
-add_executable(trtf_load_model examples/load_model.cpp)
-target_link_libraries(trtf_load_model PRIVATE trtf_core)
-
 add_executable(trtf examples/trtf_cli.cpp)
 target_link_libraries(trtf PRIVATE trtf_core)
 
 enable_testing()
-
-add_executable(test_tokenizer tests/test_tokenizer.cpp)
-target_link_libraries(test_tokenizer PRIVATE trtf_core)
-add_test(NAME test_tokenizer COMMAND test_tokenizer)
-
-add_executable(test_pipeline tests/test_pipeline.cpp)
-target_link_libraries(test_pipeline PRIVATE trtf_core)
-add_test(NAME test_pipeline COMMAND test_pipeline)
 
 add_executable(test_trt_smoke tests/test_trt_smoke.cpp)
 target_link_libraries(test_trt_smoke PRIVATE trtf_core)
@@ -176,10 +149,6 @@ add_executable(test_runtime_factory tests/test_runtime_factory.cpp)
 target_link_libraries(test_runtime_factory PRIVATE trtf_core)
 add_test(NAME test_runtime_factory COMMAND test_runtime_factory)
 
-add_executable(test_extension_registry tests/test_extension_registry.cpp)
-target_link_libraries(test_extension_registry PRIVATE trtf_core)
-add_test(NAME test_extension_registry COMMAND test_extension_registry)
-
 add_executable(test_hf_family_registry tests/test_hf_family_registry.cpp)
 target_link_libraries(test_hf_family_registry PRIVATE trtf_core)
 add_test(NAME test_hf_family_registry COMMAND test_hf_family_registry)
@@ -192,10 +161,6 @@ add_executable(test_llama_family tests/test_llama_family.cpp)
 target_link_libraries(test_llama_family PRIVATE trtf_core)
 add_test(NAME test_llama_family COMMAND test_llama_family)
 
-add_executable(test_yi_family tests/test_yi_family.cpp)
-target_link_libraries(test_yi_family PRIVATE trtf_core)
-add_test(NAME test_yi_family COMMAND test_yi_family)
-
 add_executable(test_mistral_family tests/test_mistral_family.cpp)
 target_link_libraries(test_mistral_family PRIVATE trtf_core)
 add_test(NAME test_mistral_family COMMAND test_mistral_family)
@@ -203,18 +168,6 @@ add_test(NAME test_mistral_family COMMAND test_mistral_family)
 add_executable(test_gemma_family tests/test_gemma_family.cpp)
 target_link_libraries(test_gemma_family PRIVATE trtf_core)
 add_test(NAME test_gemma_family COMMAND test_gemma_family)
-
-add_executable(test_internlm_family tests/test_internlm_family.cpp)
-target_link_libraries(test_internlm_family PRIVATE trtf_core)
-add_test(NAME test_internlm_family COMMAND test_internlm_family)
-
-add_executable(test_deepseek_family tests/test_deepseek_family.cpp)
-target_link_libraries(test_deepseek_family PRIVATE trtf_core)
-add_test(NAME test_deepseek_family COMMAND test_deepseek_family)
-
-add_executable(test_baichuan_family tests/test_baichuan_family.cpp)
-target_link_libraries(test_baichuan_family PRIVATE trtf_core)
-add_test(NAME test_baichuan_family COMMAND test_baichuan_family)
 
 add_executable(test_tensor_math tests/test_tensor_math.cpp)
 target_link_libraries(test_tensor_math PRIVATE trtf_core)

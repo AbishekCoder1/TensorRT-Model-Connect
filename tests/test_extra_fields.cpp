@@ -3,8 +3,8 @@
 // Requires mkdtemp for checkpoint fixture — runs in container, may fail in sandbox.
 
 #include "trtf/model.h"
+#include "trtf/tokenizer.h"
 #include "model/trt_model_definition.h"
-#include "model/standard_trt_model_definition_populator.h"
 #include "runtime/trt/trt_engine_lifecycle.h"
 
 #include <cmath>
@@ -25,7 +25,7 @@ bool check_close(float actual, float expected, float atol, const char* label)
     return true;
 }
 
-bool test_extra_tensors_through_populator()
+bool test_extra_tensors_through_build()
 {
     // Create a minimal DecoderModel with extra_tensors in a decoder layer
     trtf::DecoderModel model;
@@ -59,26 +59,9 @@ bool test_extra_tensors_through_populator()
     layer.extra_tensors["router_weight"] = {1.0F, 2.0F, 3.0F};
     model.checkpoint.decoder_layers.push_back(layer);
 
-    // Run through populator
-    trtf::TrtDecoderDefinition definition;
-    definition.vocab_size = 10;
-    definition.hidden_size = 4;
-    definition.attention_size = 4;
-    definition.mlp_size = 8;
-    definition.max_cache_length = 4;
-
-    trtf::StandardTrtModelDefinitionPopulator populator;
-    if (!populator.can_populate(model))
-    {
-        std::cerr << "extra_tensors: can_populate returned false" << std::endl;
-        return false;
-    }
-
-    if (!populator.populate(definition, model))
-    {
-        std::cerr << "extra_tensors: populate returned false" << std::endl;
-        return false;
-    }
+    // Run through BuildTrtDecoderWeights (which inlines the populator logic)
+    auto tokenizer = trtf::CreateVocabTokenizer(model.vocab);
+    trtf::TrtDecoderDefinition definition = trtf::BuildTrtDecoderWeights(*tokenizer, model);
 
     if (definition.decoder_layers.size() != 1)
     {
@@ -228,7 +211,7 @@ int main()
         all_passed &= ok;
     };
 
-    run("extra_tensors_through_populator", test_extra_tensors_through_populator);
+    run("extra_tensors_through_build", test_extra_tensors_through_build);
     run("extra_int_params_in_architecture", test_extra_int_params_in_architecture);
     run("extra_float_params_in_architecture", test_extra_float_params_in_architecture);
     run("trt_definition_extra_params", test_trt_definition_extra_params);

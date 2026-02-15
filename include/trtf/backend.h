@@ -42,7 +42,6 @@ public:
     }
 };
 
-std::unique_ptr<IGenerationBackend> CreateCpuReferenceBackend(const ITokenizer& tokenizer, const DecoderModel& model);
 std::unique_ptr<IGenerationBackend> CreateTrtBackend(const ITokenizer& tokenizer, const DecoderModel& model);
 std::unique_ptr<IGenerationBackend> CreateHfPythonBackend(const std::string& model_dir);
 

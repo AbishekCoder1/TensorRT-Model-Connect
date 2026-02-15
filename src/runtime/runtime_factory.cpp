@@ -2,67 +2,16 @@
 
 #include <chrono>
 #include <iostream>
-#include <mutex>
 #include <stdexcept>
 #include <utility>
-#include <vector>
 
 namespace trtf {
-namespace {
-
-std::mutex& custom_assemblers_mutex()
-{
-    static std::mutex m;
-    return m;
-}
-
-std::vector<TextGenerationRuntimeAssembler>& custom_assemblers()
-{
-    static std::vector<TextGenerationRuntimeAssembler> assemblers;
-    return assemblers;
-}
-
-} // namespace
-
-void RegisterTextGenerationRuntimeAssembler(TextGenerationRuntimeAssembler assembler)
-{
-    if (!assembler)
-    {
-        throw std::invalid_argument("RegisterTextGenerationRuntimeAssembler requires a valid assembler.");
-    }
-
-    std::lock_guard<std::mutex> lock(custom_assemblers_mutex());
-    custom_assemblers().push_back(std::move(assembler));
-}
 
 RuntimeAssembly BuildRuntimeForTextGeneration(const ResolvedModelSpec& model_spec, const BackendSelection& selection)
 {
     if (selection.force_trt && !selection.prefer_trt)
     {
         throw std::invalid_argument("force_trt requires prefer_trt=true.");
-    }
-
-    std::vector<TextGenerationRuntimeAssembler> assemblers_snapshot;
-    {
-        std::lock_guard<std::mutex> lock(custom_assemblers_mutex());
-        assemblers_snapshot = custom_assemblers();
-    }
-
-    for (const auto& assembler : assemblers_snapshot)
-    {
-        std::optional<RuntimeAssembly> assembly = assembler(model_spec, selection);
-        if (assembly.has_value())
-        {
-            if (!assembly->backend)
-            {
-                throw std::runtime_error("Custom runtime assembler returned no backend.");
-            }
-            if (assembly->backend_name.empty())
-            {
-                assembly->backend_name = assembly->backend->name();
-            }
-            return std::move(*assembly);
-        }
     }
 
     RuntimeAssembly assembly;
@@ -149,23 +98,26 @@ RuntimeAssembly BuildRuntimeForTextGeneration(const ResolvedModelSpec& model_spe
 
         if (!assembly.backend)
         {
-            auto cpu_backend = CreateCpuReferenceBackend(*assembly.tokenizer, model);
-            if (!cpu_backend || !cpu_backend->is_available())
+            if (!model.hf_tokenizer_dir.empty())
+            {
+                auto hf_backend = CreateHfPythonBackend(model.hf_tokenizer_dir);
+                if (hf_backend && hf_backend->is_available())
+                {
+                    assembly.backend_name = hf_backend->name();
+                    assembly.backend = std::move(hf_backend);
+                }
+            }
+            if (!assembly.backend)
             {
                 throw std::runtime_error("No available generation backend.");
             }
-            assembly.backend_name = cpu_backend->name();
-            assembly.backend = std::move(cpu_backend);
         }
 
         return assembly;
     }
-
-    case ResolvedModelKind::kCustom:
-        break;
     }
 
-    throw std::runtime_error("Unsupported resolved model kind (no runtime assembler registered).");
+    throw std::runtime_error("Unsupported resolved model kind.");
 }
 
 } // namespace trtf

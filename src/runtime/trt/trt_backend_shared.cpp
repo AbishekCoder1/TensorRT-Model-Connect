@@ -98,7 +98,6 @@ public:
         std::vector<float> logits;
         std::vector<std::vector<float>> present_k;
         std::vector<std::vector<float>> present_v;
-        const int32_t debug_logits_topk = parse_positive_env_int("TRTF_DEBUG_LOGITS_TOPK", 0);
 
         // Prefill: process all input tokens except the last
         if (input_ids.size() > 1)
@@ -135,18 +134,6 @@ public:
                 throw std::runtime_error("decode step failed: " + error);
             }
             state->update_after_step(present_k, present_v);
-
-            if (debug_logits_topk > 0)
-            {
-                const std::vector<int32_t> top_ids = select_topk_tokens(logits, debug_logits_topk);
-                std::cerr << "TRTF_DEBUG_LOGITS step=" << step;
-                for (int32_t token_id : top_ids)
-                {
-                    const std::size_t idx = static_cast<std::size_t>(token_id);
-                    std::cerr << ' ' << token_id << ':' << logits[idx];
-                }
-                std::cerr << '\n';
-            }
 
             const int32_t next_token = select_argmax_token(logits);
             output.push_back(next_token);
