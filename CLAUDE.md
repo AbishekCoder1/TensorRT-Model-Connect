@@ -166,6 +166,13 @@ python3 scripts/diff_layers.py \
 
 The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python TRT inference with KV cache management, matching the C++ runtime behavior exactly. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.
 
+**Runner parity guarantee**: If you change the C++ mask/cache/position logic (`trt_decode_runtime.cpp`, `kv_cache_step_state.cpp`), you MUST also update `debug_runner.py` and verify with:
+```bash
+python3 scripts/test_runner_parity.py \
+  --bundle /tmp/qwen3.trtfb --binary ./build/trtf \
+  --hf-python .venv/bin/python --max-new-tokens 20
+```
+
 ## Container workflow (TRT GPU)
 
 Prerequisites: Docker + NVIDIA Container Toolkit. The container is fully self-contained — no host TRT artifacts needed. TRT headers come from apt (`libnvinfer-headers-dev` baked into the Dockerfile), TRT libs come from pip (`tensorrt_cu12`).
