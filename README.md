@@ -126,9 +126,13 @@ Create a plugin file in `trtf_build/trtf_build/families/<family>.py` implementin
 
 See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full guide, or `trtf_build/trtf_build/families/qwen.py` for an example.
 
-After implementing, validate with:
+After implementing, validate with the pure-Python diff framework (requires `torch`):
 ```bash
-python3 scripts/diff_logits.py --model-dir <hf-model-dir> --binary ./build/trtf --atol 1e-3 --battery
+# E2E logit comparison (per-step, all tokens)
+python3 scripts/diff_logits.py --model <hf-model-dir-or-repo-id> --atol 1e-3 --battery
+
+# Per-layer hidden state comparison (embedding, all layers, logits)
+python3 scripts/diff_layers.py --model <hf-model-dir-or-repo-id> --atol 0.05
 ```
 
 ## Environment variables

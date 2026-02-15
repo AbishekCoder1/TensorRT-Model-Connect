@@ -28,6 +28,31 @@
   - Python API examples, CLI reference, C API reference.
   - Cleaned up: removed stale env vars, engine cache, `/opt/trt` references, old C API patterns.
 
+## 2026-02-15 — Pure-Python Diff Test Framework
+
+- **Pure-Python TRT inference runner** (`trtf_build/trtf_build/debug_runner.py`)
+  - `TrtRunner` class: deserializes TRT engine, runs single-step autoregressive decoding with KV cache management.
+  - Matches C++ runtime behavior exactly (position tracking, attention mask, cache append/shift).
+  - Auto-detects `attention_size` from engine tensor shapes (handles non-standard head_dim like Qwen3).
+  - Uses `cuda-python` for CUDA memory management.
+
+- **Per-layer debug output marking** (`standard_decoder_builder.py`)
+  - `debug_layer_outputs=True` parameter marks per-layer hidden states as TRT network outputs.
+  - Outputs: `debug_embed`, `debug_hidden_{i}`, `debug_post_attn_{i}` for each decoder layer.
+  - Uses identity layers to avoid tensor aliasing issues.
+
+- **Rewritten diff_logits.py** — pure-Python E2E logit comparison
+  - Builds TRT engine from HF repo ID or local dir, runs inference in Python.
+  - Compares per-step logits against HF transformers. Reports max_diff, argmax match, top-K overlap.
+  - Validated: Qwen3-0.6B, max_diff = 0.000026 across 10 steps.
+
+- **Rewritten diff_layers.py** — per-layer TRT-vs-HF hidden state comparison
+  - Builds debug TRT engine with per-layer outputs.
+  - Compares embedding, per-layer hidden states, and final logits against HF `output_hidden_states`.
+  - Validated: Qwen3-0.6B, layers 0-26 match to 0.001465 max_diff, logits match to 0.000021.
+
+- **Fixed eval_mmlu.py** — updated CLI invocation to `trtf run <bundle> --prompt` format.
+
 ## 2026-02-15 — Python Build / C++ Runtime Architecture Split
 
 - **Migrated TRT Engine Build from C++ to Python**

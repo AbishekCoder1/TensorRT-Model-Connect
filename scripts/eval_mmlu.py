@@ -70,13 +70,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--trtf-binary",
-        default="./build/trtf_load_model",
+        default="./build/trtf",
         help="Path to trtf binary when --backend=trtf.",
     )
     parser.add_argument(
-        "--force-trt",
-        action="store_true",
-        help="When using trtf backend, pass --force-trt to binary.",
+        "--hf-python",
+        default="",
+        help="Path to Python for HF tokenizer bridge (--backend=trtf).",
     )
     parser.add_argument(
         "--min-accuracy",
@@ -202,12 +202,13 @@ def evaluate_transformers(model_name: str, examples: list[MmluExample], max_new_
 
 
 def evaluate_trtf(
-    model_id: str, binary_path: str, examples: list[MmluExample], max_new_tokens: int, force_trt: bool
+    model_id: str, binary_path: str, examples: list[MmluExample],
+    max_new_tokens: int, hf_python: str,
 ) -> tuple[float, int, int]:
-    cmd_prefix = [binary_path]
-    if force_trt:
-        cmd_prefix.append("--force-trt")
-    cmd_prefix.extend([model_id, ""])
+    cmd_prefix = [binary_path, "run", model_id, "--prompt", ""]
+    cmd_prefix.extend(["--max-new-tokens", str(max_new_tokens)])
+    if hf_python:
+        cmd_prefix.extend(["--hf-python", hf_python])
 
     correct = 0
     answered = 0
@@ -215,14 +216,14 @@ def evaluate_trtf(
     for _, ex in iter_progress(examples, total):
         prompt = build_prompt(ex)
         cmd = list(cmd_prefix)
-        cmd[-1] = prompt
+        # Replace the placeholder prompt
+        prompt_idx = cmd.index("--prompt") + 1
+        cmd[prompt_idx] = prompt
         proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
         if proc.returncode != 0:
             continue
 
-        # trtf_load_model prints:
-        #   backend=<name>
-        #   <generated_text>
+        # trtf run prints generated text to stdout (after [trtf] status on stderr)
         output_lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
         if not output_lines:
             continue
@@ -255,7 +256,7 @@ def main() -> int:
             args.trtf_binary,
             examples,
             args.max_new_tokens,
-            args.force_trt,
+            args.hf_python,
         )
 
     total = len(examples)

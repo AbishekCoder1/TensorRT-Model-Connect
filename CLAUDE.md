@@ -152,16 +152,19 @@ See `trtf_build/trtf_build/families/base.py` for the plugin protocol.
 
 ### Diff-test framework
 
-After implementing a new family, validate with:
-```bash
-# E2E logit comparison
-python3 scripts/diff_logits.py \
-  --model-dir <hf-model-dir> --binary ./build/trtf \
-  --atol 1e-3 --battery
+Pure-Python TRT-vs-HF comparison (no C++ binary needed). Requires `torch`.
 
-# Per-layer hidden state comparison
-python3 scripts/diff_layers.py --model-dir <hf-model-dir>
+```bash
+# E2E logit comparison (per-step logits, text match)
+python3 scripts/diff_logits.py \
+  --model Qwen/Qwen3-0.6B --atol 1e-3 --battery
+
+# Per-layer hidden state comparison (embedding, all layers, logits)
+python3 scripts/diff_layers.py \
+  --model Qwen/Qwen3-0.6B --atol 0.05
 ```
+
+The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python TRT inference with KV cache management, matching the C++ runtime behavior exactly. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.
 
 ## Container workflow (TRT GPU)
 

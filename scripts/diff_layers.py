@@ -1,127 +1,213 @@
 #!/usr/bin/env python3
-"""Per-layer model diff: compare HF model hidden states against manual reimplementation.
+"""Per-layer TRT-vs-HF hidden state comparison.
 
-Auto-detects model family from config.json and hooks into forward pass to capture
-per-layer hidden states.
+Builds a TRT debug engine with per-layer outputs marked, runs a single
+forward pass, and compares per-layer hidden states against HF transformers.
 
 Usage:
     python3 scripts/diff_layers.py \
-      --model-dir models/hf/Qwen__Qwen3-0.6B \
-      --prompt "Hello" \
-      --max-new-tokens 1
+      --model Qwen/Qwen3-0.6B \
+      --prompt "Hello" --atol 0.05
+
+    python3 scripts/diff_layers.py \
+      --model models/hf/Qwen__Qwen3-0.6B --atol 0.05
 """
 import argparse
-import json
-import os
 import sys
 
 import numpy as np
 
 
-def load_model_config(model_dir: str) -> dict:
-    """Load and return config.json from model directory."""
-    config_path = os.path.join(model_dir, "config.json")
-    with open(config_path) as f:
-        return json.load(f)
+def build_debug_engine(model_id_or_path, max_cache_length, verbose):
+    """Build TRT engine with debug layer outputs marked."""
+    from trtf_build.engine_builder import _resolve_model
+    from trtf_build.config import ModelConfig
+    from trtf_build.families import find_plugin
+    from trtf_build.standard_decoder_builder import build_standard_decoder_engine
+
+    model_dir = _resolve_model(model_id_or_path)
+    config = ModelConfig.from_dir(model_dir)
+    plugin = find_plugin(config.model_type)
+    if plugin is None:
+        raise ValueError(f"No plugin for model_type={config.model_type!r}")
+
+    print(f"[diff-layers] Model: {config.model_type} "
+          f"(layers={config.num_hidden_layers}, hidden={config.hidden_size})",
+          file=sys.stderr)
+
+    print(f"[diff-layers] Loading weights ...", file=sys.stderr)
+    weights = plugin.load_weights(model_dir, config)
+
+    # Build with debug outputs — call the builder directly with the flag
+    print(f"[diff-layers] Building debug TRT engine (cache={max_cache_length}) ...",
+          file=sys.stderr)
+    engine_plan = build_standard_decoder_engine(
+        config, weights, max_cache_length,
+        verbose=verbose, debug_layer_outputs=True)
+    print(f"[diff-layers] Debug engine built ({len(engine_plan) / 1e6:.1f} MB)",
+          file=sys.stderr)
+
+    return engine_plan, config, model_dir
+
+
+def run_trt_single_step(engine_plan, config, token_id, max_cache_length):
+    """Run one TRT step at position 0. Returns dict with all outputs."""
+    from trtf_build.debug_runner import TrtRunner
+
+    runner = TrtRunner(
+        engine_plan=engine_plan,
+        max_cache_length=max_cache_length,
+        num_layers=config.num_hidden_layers,
+    )
+    return runner.step(token_id)
+
+
+def run_hf_single_step(model_dir, token_id):
+    """Run HF model on a single token, return per-layer hidden states."""
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, trust_remote_code=True, torch_dtype=torch.float32)
+    model.eval()
+
+    ids_tensor = torch.tensor([[token_id]], dtype=torch.long)
+    with torch.no_grad():
+        outputs = model(ids_tensor, output_hidden_states=True)
+
+    # outputs.hidden_states: tuple of (batch, seq, hidden) tensors
+    # [0] = embedding, [1] = after layer 0, [2] = after layer 1, ...
+    hidden_states = []
+    for hs in outputs.hidden_states:
+        hidden_states.append(hs[0, 0].numpy())  # (hidden,)
+
+    logits = outputs.logits[0, 0].numpy()  # (vocab,)
+    return hidden_states, logits
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Per-layer model diff")
-    parser.add_argument("--model-dir", required=True, help="Path to HF model directory")
-    parser.add_argument("--prompt", default="Hello", help="Input prompt")
-    parser.add_argument("--max-new-tokens", type=int, default=1, help="Max tokens to generate")
-    parser.add_argument("--atol", type=float, default=1e-4, help="Absolute tolerance")
+    parser = argparse.ArgumentParser(
+        description="Per-layer TRT-vs-HF hidden state comparison")
+    parser.add_argument("--model", required=True,
+                        help="HF repo ID or local model directory")
+    parser.add_argument("--prompt", default="Hello",
+                        help="Input prompt (first token used)")
+    parser.add_argument("--max-cache-length", type=int, default=64)
+    parser.add_argument("--atol", type=float, default=0.05,
+                        help="Absolute tolerance for hidden state comparison")
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    try:
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-    except ImportError:
-        print("ERROR: transformers and torch are required", file=sys.stderr)
-        sys.exit(1)
+    # Build debug engine
+    engine_plan, config, model_dir = build_debug_engine(
+        args.model, args.max_cache_length, args.verbose)
 
-    config = load_model_config(args.model_dir)
-    model_type = config.get("model_type", "unknown")
-    num_layers = config.get("num_hidden_layers", 0)
-    print(f"Model type: {model_type}")
-    print(f"Num layers: {num_layers}")
+    # Tokenize — use first token only for single-step comparison
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    input_ids = tokenizer.encode(args.prompt)
+    token_id = input_ids[0]
+    print(f"\n[diff-layers] Token: id={token_id} "
+          f"text={tokenizer.decode([token_id])!r}")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_dir, trust_remote_code=True, torch_dtype=torch.float32
-    )
-    model.eval()
+    # Run TRT (single step at position 0)
+    print(f"[diff-layers] Running TRT ...", file=sys.stderr)
+    trt_results = run_trt_single_step(
+        engine_plan, config, token_id, args.max_cache_length)
 
-    # Hook into model layers to capture hidden states
-    hidden_states = {}
+    # Run HF (single token forward pass)
+    print(f"[diff-layers] Running HF ...", file=sys.stderr)
+    hf_hidden, hf_logits = run_hf_single_step(model_dir, token_id)
 
-    def make_hook(layer_idx):
-        def hook_fn(module, input, output):
-            if isinstance(output, tuple):
-                hidden_states[layer_idx] = output[0].detach().cpu().numpy()
-            else:
-                hidden_states[layer_idx] = output.detach().cpu().numpy()
-        return hook_fn
+    # Compare
+    print(f"\n{'=' * 72}")
+    print(f"{'Layer':<20} {'Shape':>14} {'MaxDiff':>10} {'MeanDiff':>10} "
+          f"{'TRT_std':>10} {'HF_std':>10} {'Status':>8}")
+    print(f"{'-' * 72}")
 
-    hooks = []
-    # Try common layer accessor patterns
-    layer_container = None
-    for attr in ["model.layers", "transformer.h", "gpt_neox.layers"]:
-        obj = model
-        try:
-            for part in attr.split("."):
-                obj = getattr(obj, part)
-            layer_container = obj
-            break
-        except AttributeError:
+    max_overall = 0.0
+    all_passed = True
+
+    # Embedding
+    if "debug_embed" in trt_results:
+        trt_embed = trt_results["debug_embed"].flatten()
+        hf_embed = hf_hidden[0]  # outputs.hidden_states[0] = embedding
+        diff = np.abs(trt_embed - hf_embed)
+        md = float(diff.max())
+        max_overall = max(max_overall, md)
+        status = "OK" if md <= args.atol else "FAIL"
+        if status == "FAIL":
+            all_passed = False
+        print(f"{'embed':<20} {str(trt_embed.shape):>14} "
+              f"{md:>10.6f} {float(diff.mean()):>10.6f} "
+              f"{float(trt_embed.std()):>10.4f} {float(hf_embed.std()):>10.4f} "
+              f"{status:>8}")
+
+    # Per-layer hidden states
+    num_layers = config.num_hidden_layers
+    for i in range(num_layers):
+        hidden_key = f"debug_hidden_{i}"
+        if hidden_key not in trt_results:
+            print(f"  Layer {i}: debug output not found")
             continue
 
-    if layer_container is None:
-        print("WARNING: Could not find layer container, skipping per-layer hooks")
-    else:
-        for i, layer in enumerate(layer_container):
-            hooks.append(layer.register_forward_hook(make_hook(i)))
+        trt_h = trt_results[hidden_key].flatten()
+        # HF hidden_states[i+1] = output of layer i
+        hf_h = hf_hidden[i + 1] if (i + 1) < len(hf_hidden) else None
 
-    inputs = tokenizer(args.prompt, return_tensors="pt")
-    with torch.no_grad():
-        outputs = model(**inputs, output_hidden_states=True)
+        if hf_h is None:
+            print(f"  Layer {i}: HF hidden state not available")
+            continue
 
-    # Clean up hooks
-    for h in hooks:
-        h.remove()
+        diff = np.abs(trt_h - hf_h)
+        md = float(diff.max())
+        max_overall = max(max_overall, md)
+        status = "OK" if md <= args.atol else "FAIL"
+        if status == "FAIL":
+            all_passed = False
 
-    # Report per-layer statistics
-    print(f"\nPer-layer hidden state statistics:")
-    print(f"{'Layer':>6} {'Shape':>20} {'Mean':>12} {'Std':>12} {'Max Abs':>12}")
-    print("-" * 68)
+        print(f"{'layer.' + str(i) + '.hidden':<20} {str(trt_h.shape):>14} "
+              f"{md:>10.6f} {float(diff.mean()):>10.6f} "
+              f"{float(trt_h.std()):>10.4f} {float(hf_h.std()):>10.4f} "
+              f"{status:>8}")
 
-    all_hidden = outputs.hidden_states if hasattr(outputs, "hidden_states") else []
-    for i, hs in enumerate(all_hidden):
-        arr = hs.detach().cpu().numpy()
-        print(f"{i:>6} {str(arr.shape):>20} {arr.mean():>12.6f} {arr.std():>12.6f} {np.abs(arr).max():>12.6f}")
+    # Per-layer post-attention
+    for i in range(num_layers):
+        attn_key = f"debug_post_attn_{i}"
+        if attn_key not in trt_results:
+            continue
 
-    # Compare hook-captured vs model output hidden states
-    if hidden_states and all_hidden:
-        print(f"\nHook vs output_hidden_states comparison:")
-        max_overall_diff = 0.0
-        for layer_idx in sorted(hidden_states.keys()):
-            if layer_idx + 1 < len(all_hidden):
-                hook_arr = hidden_states[layer_idx]
-                ref_arr = all_hidden[layer_idx + 1].detach().cpu().numpy()
-                if hook_arr.shape == ref_arr.shape:
-                    diff = np.abs(hook_arr - ref_arr).max()
-                    max_overall_diff = max(max_overall_diff, diff)
-                    status = "OK" if diff <= args.atol else "MISMATCH"
-                    print(f"  Layer {layer_idx}: max_abs_diff={diff:.8f} [{status}]")
+        trt_a = trt_results[attn_key].flatten()
+        # No direct HF equivalent for post-attention residual without hooks,
+        # so just report the TRT values for reference
+        print(f"{'layer.' + str(i) + '.post_attn':<20} {str(trt_a.shape):>14} "
+              f"{'---':>10} {'---':>10} "
+              f"{float(trt_a.std()):>10.4f} {'---':>10} "
+              f"{'(ref)':>8}")
 
-        print(f"\n  Overall max diff: {max_overall_diff:.8f}")
-        if max_overall_diff <= args.atol:
-            print(f"  PASS (within atol={args.atol})")
-        else:
-            print(f"  FAIL (exceeds atol={args.atol})")
-            sys.exit(1)
+    # Logits
+    trt_logits = trt_results["logits"].flatten()
+    diff = np.abs(trt_logits - hf_logits)
+    md = float(diff.max())
+    max_overall = max(max_overall, md)
+    status = "OK" if md <= args.atol else "FAIL"
+    if status == "FAIL":
+        all_passed = False
 
-    print("\nDone.")
+    trt_argmax = int(np.argmax(trt_logits))
+    hf_argmax = int(np.argmax(hf_logits))
+    print(f"{'logits':<20} {str(trt_logits.shape):>14} "
+          f"{md:>10.6f} {float(diff.mean()):>10.6f} "
+          f"{float(trt_logits.std()):>10.4f} {float(hf_logits.std()):>10.4f} "
+          f"{status:>8}")
+    print(f"\n  TRT argmax: {trt_argmax} ({tokenizer.decode([trt_argmax])!r})")
+    print(f"  HF  argmax: {hf_argmax} ({tokenizer.decode([hf_argmax])!r})")
+    print(f"  Argmax match: {trt_argmax == hf_argmax}")
+
+    print(f"\n  Overall max diff: {max_overall:.6f}")
+    print(f"  Tolerance: {args.atol}")
+    print(f"  {'PASS' if all_passed else 'FAIL'}")
+    sys.exit(0 if all_passed else 1)
 
 
 if __name__ == "__main__":

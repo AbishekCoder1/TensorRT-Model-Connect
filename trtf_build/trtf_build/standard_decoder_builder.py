@@ -21,12 +21,27 @@ if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
 
 
+def _mark_debug_output(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    name: str,
+) -> None:
+    """Mark a tensor as a network output for debug inspection."""
+    # Use an identity layer to avoid aliasing issues with existing outputs.
+    identity = network.add_identity(tensor)
+    out = identity.get_output(0)
+    out.name = name
+    network.mark_output(out)
+    out.dtype = trt.float32
+
+
 def build_standard_decoder_engine(
     config: ModelConfig,
     weights: WeightDict,
     max_cache_length: int,
     *,
     verbose: bool = False,
+    debug_layer_outputs: bool = False,
 ) -> bytes:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 
@@ -35,6 +50,11 @@ def build_standard_decoder_engine(
         weights: Loaded weight dict from checkpoint_mapper.
         max_cache_length: KV cache length (engine is compiled for this value).
         verbose: Print TRT builder logs.
+        debug_layer_outputs: If True, mark per-layer hidden states as network
+            outputs for diff testing. Adds outputs named:
+            - ``debug_embed``: embedding output (1, hidden)
+            - ``debug_hidden_{i}``: hidden state after decoder layer i (1, hidden)
+            - ``debug_post_attn_{i}``: hidden state after attention+residual (1, hidden)
 
     Returns:
         Serialized engine plan bytes.
@@ -106,6 +126,9 @@ def build_standard_decoder_engine(
     gather = network.add_gather(embedding_table, token_id, 0)
     hidden_state = gather.get_output(0)
 
+    if debug_layer_outputs:
+        _mark_debug_output(network, hidden_state, "debug_embed")
+
     # ---------------------------------------------------------------
     # Decoder layers
     # ---------------------------------------------------------------
@@ -140,6 +163,10 @@ def build_standard_decoder_engine(
         hidden_state = result["hidden"]
         present_k_outputs.append(result["present_k"])
         present_v_outputs.append(result["present_v"])
+
+        if debug_layer_outputs:
+            _mark_debug_output(network, result["post_attn"], f"debug_post_attn_{layer_idx}")
+            _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
 
     # ---------------------------------------------------------------
     # Final norm
@@ -356,6 +383,7 @@ def _add_decoder_layer(
 
     return {
         "hidden": residual2.get_output(0),
+        "post_attn": residual1.get_output(0),
         "present_k": present_k,
         "present_v": present_v,
     }

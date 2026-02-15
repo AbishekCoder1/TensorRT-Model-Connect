@@ -1,154 +1,153 @@
 #!/usr/bin/env python3
-"""E2E logit comparison between trtf binary and HuggingFace transformers.
+"""Pure-Python E2E logit comparison between TRT engine and HF transformers.
+
+No C++ binary needed. Builds a TRT engine via trtf_build, runs inference
+in Python, and compares per-step logits against HF transformers.
 
 Usage:
     python3 scripts/diff_logits.py \
-      --model-dir models/hf/Qwen__Qwen3-0.6B \
-      --binary ./build-container-phase1/trtf_load_model \
-      --backend-flag --force-trt --atol 1e-3 \
-      --prompt "The capital of France is"
+      --model Qwen/Qwen3-0.6B \
+      --prompt "The capital of France is" \
+      --max-new-tokens 10 --atol 1e-3
+
+    python3 scripts/diff_logits.py \
+      --model models/hf/Qwen__Qwen3-0.6B --battery
 """
 import argparse
-import json
-import os
-import re
-import subprocess
 import sys
+
+import numpy as np
 
 STANDARD_PROMPTS = [
     ("factual", "The capital of France is"),
-    ("reasoning", "Explain why water boils at 100 degrees Celsius at sea level in one sentence."),
+    ("reasoning", "Explain why water boils at 100 degrees Celsius."),
     ("code", "Write a Python function that checks if a number is prime:"),
     ("multi-turn", "User: What is 2+2?\nAssistant:"),
 ]
 
 
-def parse_trtf_debug_logits(stderr_text: str):
-    """Parse TRTF_DEBUG_LOGITS lines from stderr."""
-    steps = {}
-    for line in stderr_text.splitlines():
-        if not line.startswith("TRTF_DEBUG_LOGITS"):
-            continue
-        match = re.match(r"TRTF_DEBUG_LOGITS step=(\d+)(.*)", line)
-        if not match:
-            continue
-        step = int(match.group(1))
-        pairs = match.group(2).strip().split()
-        logit_map = {}
-        for pair in pairs:
-            parts = pair.split(":")
-            if len(parts) == 2:
-                token_id = int(parts[0])
-                logit_val = float(parts[1])
-                logit_map[token_id] = logit_val
-        steps[step] = logit_map
-    return steps
+def build_trt_engine(model_id_or_path, max_cache_length, verbose):
+    """Build TRT engine and return (engine_plan_bytes, config, weights)."""
+    from trtf_build.engine_builder import _resolve_model
+    from trtf_build.config import ModelConfig
+    from trtf_build.families import find_plugin
+
+    model_dir = _resolve_model(model_id_or_path)
+    config = ModelConfig.from_dir(model_dir)
+    plugin = find_plugin(config.model_type)
+    if plugin is None:
+        raise ValueError(f"No plugin for model_type={config.model_type!r}")
+
+    print(f"[diff] Loading weights ({config.model_type}) ...", file=sys.stderr)
+    weights = plugin.load_weights(model_dir, config)
+    print(f"[diff] Building TRT engine (cache={max_cache_length}) ...",
+          file=sys.stderr)
+    engine_plan = plugin.build_engine(
+        config, weights, max_cache_length, verbose=verbose)
+    print(f"[diff] Engine built ({len(engine_plan) / 1e6:.1f} MB)",
+          file=sys.stderr)
+
+    return engine_plan, config, model_dir
 
 
-def run_trtf(binary, model_dir, prompt, backend_flag, max_new_tokens):
-    """Run the trtf binary and capture output + debug logits."""
-    env = os.environ.copy()
-    env["TRTF_DEBUG_LOGITS_TOPK"] = "10"
-    env["TRTF_MAX_NEW_TOKENS"] = str(max_new_tokens)
-    env["TRTF_MAX_CACHE_LENGTH"] = str(max_new_tokens + 128)
+def run_trt(engine_plan, config, input_ids, max_new_tokens, max_cache_length):
+    """Run TRT inference, return list of logit arrays (one per step)."""
+    from trtf_build.debug_runner import TrtRunner
 
-    cmd = [binary]
-    if backend_flag:
-        cmd.append(backend_flag)
-    cmd.extend([model_dir, prompt])
+    runner = TrtRunner(
+        engine_plan=engine_plan,
+        max_cache_length=max_cache_length,
+        num_layers=config.num_hidden_layers,
+    )
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
-    except subprocess.TimeoutExpired:
-        print("ERROR: trtf binary timed out after 300s", file=sys.stderr)
-        return None, None, None
-
-    generated_text = result.stdout.strip()
-    debug_logits = parse_trtf_debug_logits(result.stderr)
-    return generated_text, debug_logits, result.returncode
+    results = runner.generate(input_ids, max_new_tokens)
+    return [r["logits"].flatten() for r in results]
 
 
-def run_hf_transformers(model_dir, prompt, max_new_tokens):
-    """Run HuggingFace transformers and capture output + logits."""
-    try:
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-    except ImportError:
-        print("WARNING: transformers/torch not available, skipping HF comparison",
-              file=sys.stderr)
-        return None, None
+def run_hf(model_dir, input_ids, max_new_tokens):
+    """Run HF transformers, return list of logit arrays (one per step)."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        model_dir, trust_remote_code=True, torch_dtype=torch.float32
-    )
+        model_dir, trust_remote_code=True, torch_dtype=torch.float32)
     model.eval()
 
-    inputs = tokenizer(prompt, return_tensors="pt")
+    # Run prefill to get logits at each position
+    ids_tensor = torch.tensor([input_ids], dtype=torch.long)
+    all_logits = []
+
     with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            output_scores=True,
-            return_dict_in_generate=True,
-        )
+        # Prefill: get logits at each input position
+        outputs = model(ids_tensor)
+        prefill_logits = outputs.logits[0].numpy()  # (seq_len, vocab)
+        for i in range(len(input_ids)):
+            all_logits.append(prefill_logits[i])
 
-    generated_ids = outputs.sequences[0].tolist()
-    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        # Generate: autoregressive
+        gen_ids = list(input_ids)
+        for _ in range(max_new_tokens):
+            next_token = int(np.argmax(all_logits[-1]))
+            gen_ids.append(next_token)
+            ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
+            outputs = model(ids_tensor)
+            all_logits.append(outputs.logits[0, -1].numpy())
 
-    hf_logits = {}
-    if hasattr(outputs, "scores") and outputs.scores:
-        for step_idx, score_tensor in enumerate(outputs.scores):
-            logits = score_tensor[0]
-            top_vals, top_ids = torch.topk(logits, k=min(10, logits.shape[0]))
-            hf_logits[step_idx] = {
-                int(tid): float(tval)
-                for tid, tval in zip(top_ids.tolist(), top_vals.tolist())
-            }
-
-    return generated_text, hf_logits
+    return all_logits
 
 
-def compare_logits(trtf_logits, hf_logits, atol):
-    """Compare top-K logits from both sources."""
-    max_abs_diff = 0.0
-    compared = 0
+def compare_logits(trt_logits, hf_logits, atol, top_k=10):
+    """Compare logit arrays step by step. Returns (max_diff, report_lines)."""
+    n = min(len(trt_logits), len(hf_logits))
+    max_diff = 0.0
+    lines = []
 
-    common_steps = set(trtf_logits.keys()) & set(hf_logits.keys())
-    for step in sorted(common_steps):
-        trtf_step = trtf_logits[step]
-        hf_step = hf_logits[step]
-        common_tokens = set(trtf_step.keys()) & set(hf_step.keys())
-        for tid in common_tokens:
-            diff = abs(trtf_step[tid] - hf_step[tid])
-            max_abs_diff = max(max_abs_diff, diff)
-            compared += 1
+    for step in range(n):
+        trt_l = trt_logits[step]
+        hf_l = hf_logits[step]
 
-    return max_abs_diff, compared
+        if trt_l.shape != hf_l.shape:
+            lines.append(f"  step {step}: shape mismatch "
+                         f"trt={trt_l.shape} hf={hf_l.shape}")
+            continue
 
+        # Full logit comparison
+        diff = np.abs(trt_l - hf_l)
+        step_max = float(diff.max())
+        max_diff = max(max_diff, step_max)
 
-def compute_token_match_rate(trtf_text, hf_text):
-    """Compute simple word-level match rate."""
-    trtf_words = trtf_text.split()
-    hf_words = hf_text.split()
-    if not trtf_words and not hf_words:
-        return 1.0
-    if not trtf_words or not hf_words:
-        return 0.0
-    matches = sum(1 for a, b in zip(trtf_words, hf_words) if a == b)
-    return matches / max(len(trtf_words), len(hf_words))
+        # Top-K token agreement
+        trt_top = set(np.argsort(trt_l)[-top_k:])
+        hf_top = set(np.argsort(hf_l)[-top_k:])
+        overlap = len(trt_top & hf_top)
+
+        trt_argmax = int(np.argmax(trt_l))
+        hf_argmax = int(np.argmax(hf_l))
+        argmax_match = "Y" if trt_argmax == hf_argmax else "N"
+
+        lines.append(
+            f"  step {step:3d}: max_diff={step_max:10.6f}  "
+            f"argmax_match={argmax_match}  "
+            f"top{top_k}_overlap={overlap}/{top_k}")
+
+    return max_diff, lines
 
 
 def main():
-    parser = argparse.ArgumentParser(description="E2E logit diff between trtf and HF transformers")
-    parser.add_argument("--model-dir", required=True, help="Path to HF model directory")
-    parser.add_argument("--binary", required=True, help="Path to trtf binary")
-    parser.add_argument("--backend-flag", default="", help="Backend flag (e.g., --force-trt)")
-    parser.add_argument("--prompt", default="", help="Single prompt to test (overrides battery)")
-    parser.add_argument("--max-new-tokens", type=int, default=20, help="Max tokens to generate")
-    parser.add_argument("--atol", type=float, default=1e-3, help="Absolute tolerance for logit comparison")
-    parser.add_argument("--battery", action="store_true", help="Run standard prompt battery")
+    parser = argparse.ArgumentParser(
+        description="Pure-Python E2E logit comparison: TRT vs HF transformers")
+    parser.add_argument("--model", required=True,
+                        help="HF repo ID or local model directory")
+    parser.add_argument("--prompt", default="",
+                        help="Single prompt (overrides --battery)")
+    parser.add_argument("--max-new-tokens", type=int, default=10)
+    parser.add_argument("--max-cache-length", type=int, default=64)
+    parser.add_argument("--atol", type=float, default=1e-3,
+                        help="Absolute tolerance for logit comparison")
+    parser.add_argument("--battery", action="store_true",
+                        help="Run standard prompt battery")
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     prompts = []
@@ -159,44 +158,57 @@ def main():
     else:
         prompts = [("default", "The capital of France is")]
 
+    # Build engine once
+    engine_plan, config, model_dir = build_trt_engine(
+        args.model, args.max_cache_length, args.verbose)
+
+    # Load HF tokenizer for encoding prompts
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+
     all_passed = True
     for label, prompt in prompts:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Prompt [{label}]: {prompt[:80]}{'...' if len(prompt) > 80 else ''}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
-        trtf_text, trtf_logits, rc = run_trtf(
-            args.binary, args.model_dir, prompt, args.backend_flag or None, args.max_new_tokens
-        )
-        if rc is None or rc != 0:
-            print(f"  TRTF: FAILED (rc={rc})")
+        input_ids = tokenizer.encode(prompt)
+        print(f"  Input tokens: {len(input_ids)}")
+
+        # Run TRT
+        print(f"  Running TRT ...", file=sys.stderr)
+        trt_logits = run_trt(
+            engine_plan, config, input_ids,
+            args.max_new_tokens, args.max_cache_length)
+
+        # Run HF
+        print(f"  Running HF ...", file=sys.stderr)
+        hf_logits = run_hf(model_dir, input_ids, args.max_new_tokens)
+
+        # Compare
+        max_diff, report = compare_logits(trt_logits, hf_logits, args.atol)
+
+        # Decode generated text
+        trt_gen_ids = [int(np.argmax(l)) for l in trt_logits[len(input_ids) - 1:]]
+        hf_gen_ids = [int(np.argmax(l)) for l in hf_logits[len(input_ids) - 1:]]
+        trt_text = tokenizer.decode(trt_gen_ids, skip_special_tokens=True)
+        hf_text = tokenizer.decode(hf_gen_ids, skip_special_tokens=True)
+
+        print(f"  TRT text: {trt_text[:120]}")
+        print(f"  HF  text: {hf_text[:120]}")
+        print(f"  Text match: {trt_text.strip() == hf_text.strip()}")
+        print()
+
+        for line in report:
+            print(line)
+
+        passed = max_diff <= args.atol
+        print(f"\n  max_abs_logit_diff: {max_diff:.6f}")
+        print(f"  atol: {args.atol}")
+        print(f"  {'PASS' if passed else 'FAIL'}")
+
+        if not passed:
             all_passed = False
-            continue
-
-        print(f"  TRTF output: {trtf_text[:120]}{'...' if len(trtf_text) > 120 else ''}")
-        print(f"  TRTF debug logit steps: {len(trtf_logits)}")
-
-        hf_text, hf_logits = run_hf_transformers(args.model_dir, prompt, args.max_new_tokens)
-        if hf_text is None:
-            print("  HF: skipped (not available)")
-            continue
-
-        print(f"  HF output: {hf_text[:120]}{'...' if len(hf_text) > 120 else ''}")
-
-        text_exact = trtf_text.strip() == hf_text.strip()
-        token_match = compute_token_match_rate(trtf_text, hf_text)
-        max_diff, compared = compare_logits(trtf_logits, hf_logits, args.atol)
-
-        print(f"  text_exact_match: {text_exact}")
-        print(f"  token_match_rate: {token_match:.4f}")
-        print(f"  max_abs_logit_diff: {max_diff:.6f} (compared {compared} values)")
-        print(f"  within_atol ({args.atol}): {max_diff <= args.atol}")
-
-        if max_diff > args.atol and compared > 0:
-            print(f"  FAIL: logit diff {max_diff:.6f} exceeds atol {args.atol}")
-            all_passed = False
-        else:
-            print(f"  PASS")
 
     sys.exit(0 if all_passed else 1)
 
