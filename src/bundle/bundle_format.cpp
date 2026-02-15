@@ -11,16 +11,6 @@ namespace trtf {
 
 namespace {
 
-void write_u64_le(std::ofstream& out, uint64_t value)
-{
-    unsigned char bytes[8];
-    for (int i = 0; i < 8; ++i)
-    {
-        bytes[i] = static_cast<unsigned char>((value >> (8 * i)) & 0xFFU);
-    }
-    out.write(reinterpret_cast<const char*>(bytes), 8);
-}
-
 uint64_t read_u64_le(std::ifstream& in)
 {
     unsigned char bytes[8];
@@ -35,68 +25,6 @@ uint64_t read_u64_le(std::ifstream& in)
         value = (value << 8) | bytes[i];
     }
     return value;
-}
-
-std::string escape_json_string(const std::string& s)
-{
-    std::string out;
-    out.reserve(s.size() + 2);
-    out.push_back('"');
-    for (char c : s)
-    {
-        switch (c)
-        {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default: out.push_back(c); break;
-        }
-    }
-    out.push_back('"');
-    return out;
-}
-
-} // namespace
-
-std::string BundleInfoToJson(const BundleInfo& info,
-    const std::vector<std::pair<std::string, std::size_t>>& section_offsets_and_sizes)
-{
-    std::ostringstream oss;
-    oss << "{\n";
-    oss << "  \"model_id\": " << escape_json_string(info.model_id) << ",\n";
-    oss << "  \"model_type\": " << escape_json_string(info.model_type) << ",\n";
-    oss << "  \"family\": " << escape_json_string(info.family) << ",\n";
-    oss << "  \"trt_version\": " << escape_json_string(info.trt_version) << ",\n";
-    oss << "  \"gpu_name\": " << escape_json_string(info.gpu_name) << ",\n";
-    oss << "  \"created_at\": " << escape_json_string(info.created_at) << ",\n";
-    oss << "  \"vocab_size\": " << info.vocab_size << ",\n";
-    oss << "  \"hidden_size\": " << info.hidden_size << ",\n";
-    oss << "  \"num_layers\": " << info.num_layers << ",\n";
-    oss << "  \"num_attention_heads\": " << info.num_attention_heads << ",\n";
-    oss << "  \"num_key_value_heads\": " << info.num_key_value_heads << ",\n";
-    oss << "  \"max_cache_length\": " << info.max_cache_length << ",\n";
-    oss << "  \"sections\": {\n";
-
-    std::size_t offset = 0;
-    for (std::size_t i = 0; i < section_offsets_and_sizes.size(); ++i)
-    {
-        const auto& [name, size] = section_offsets_and_sizes[i];
-        oss << "    " << escape_json_string(name) << ": {"
-            << "\"offset\": " << offset << ", "
-            << "\"size\": " << size << "}";
-        if (i + 1 < section_offsets_and_sizes.size())
-        {
-            oss << ",";
-        }
-        oss << "\n";
-        offset += size;
-    }
-
-    oss << "  }\n";
-    oss << "}";
-    return oss.str();
 }
 
 BundleInfo BundleInfoFromJson(const std::string& json,
@@ -177,37 +105,7 @@ BundleInfo BundleInfoFromJson(const std::string& json,
     return info;
 }
 
-void WriteBundleFile(const std::string& path, const BundleFile& bundle)
-{
-    std::vector<std::pair<std::string, std::size_t>> section_sizes;
-    section_sizes.reserve(bundle.sections.size());
-    for (const auto& section : bundle.sections)
-    {
-        section_sizes.push_back({section.name, section.data.size()});
-    }
-
-    const std::string header_json = BundleInfoToJson(bundle.info, section_sizes);
-
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out)
-    {
-        throw std::runtime_error("Failed to open bundle output file: " + path);
-    }
-
-    out.write(reinterpret_cast<const char*>(kBundleMagic), sizeof(kBundleMagic));
-    write_u64_le(out, static_cast<uint64_t>(header_json.size()));
-    out.write(header_json.data(), static_cast<std::streamsize>(header_json.size()));
-
-    for (const auto& section : bundle.sections)
-    {
-        out.write(section.data.data(), static_cast<std::streamsize>(section.data.size()));
-    }
-
-    if (!out)
-    {
-        throw std::runtime_error("Failed to write bundle file: " + path);
-    }
-}
+} // namespace
 
 BundleFile ReadBundleFile(const std::string& path)
 {

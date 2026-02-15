@@ -1,355 +1,127 @@
 # Dynamic Design: Sequence Diagrams and Data Flow
 
-This page shows the runtime behavior of the system through sequence diagrams and data flow descriptions.
+This page shows the runtime behavior of the system through sequence diagrams and data flow descriptions. The system is split: Python builds bundles, C++ runs them.
 
 ## Table of Contents
 
-1. [Pipeline Creation (Full Sequence)](#1-pipeline-creation-full-sequence)
-2. [Pipeline Creation — Fast Path (Cached Engine)](#2-pipeline-creation--fast-path-cached-engine)
-3. [HF Family Resolution Detail](#3-hf-family-resolution-detail)
-4. [Checkpoint Loading and Mapping](#4-checkpoint-loading-and-mapping)
-5. [TRT Engine Build](#5-trt-engine-build)
-6. [Autoregressive Generation](#6-autoregressive-generation)
-7. [Single Decode Step (TRT)](#7-single-decode-step-trt)
-8. [Data Transformation Pipeline](#8-data-transformation-pipeline)
+1. [Bundle Build (Python)](#1-bundle-build-python)
+2. [Bundle Load and Pipeline Creation (C++)](#2-bundle-load-and-pipeline-creation-c)
+3. [Autoregressive Generation (C++)](#3-autoregressive-generation-c)
+4. [Single Decode Step (TRT)](#4-single-decode-step-trt)
+5. [Data Transformation Pipeline](#5-data-transformation-pipeline)
 
 ---
 
-## 1. Pipeline Creation (Full Sequence)
+## 1. Bundle Build (Python)
 
-End-to-end sequence from `trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)` to a ready-to-use IPipeline object. The C ABI factory in `trtf_c.cpp` delegates to the same internal stages.
+End-to-end sequence for `trtf-build build path/to/Qwen3-0.6B -o qwen3.trtfb`.
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant CABI as trtf_c.cpp
-    participant P as Pipeline
-    participant R as ModelResolver
-    participant FR as HfFamilyRegistry
-    participant QR as QwenRegistration
-    participant ML as ModelLoader
+    participant CLI as trtf-build CLI
+    participant Reg as FamilyRegistry
+    participant Plug as QwenPlugin
+    participant ST as safetensors lib
     participant CM as CheckpointMapper
-    participant RF as RuntimeFactory
-    participant TB as TrtBackend
+    participant GB as GraphBuilder
+    participant TRT as TensorRT Python API
+    participant Bun as BundleWriter
 
-    User->>CABI: trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)
-    CABI->>P: ResolveTextGenerationModel + BuildRuntimeForTextGeneration
+    User->>CLI: trtf-build build path/to/Qwen3-0.6B -o qwen3.trtfb
 
-    Note over P: Stage 1: Model Resolution
-    P->>R: ResolveTextGenerationModel("QWEN3")
-    R->>FR: ResolveHfModelViaFamilyRegistry("QWEN3")
-    FR->>FR: resolve_model_dir_from_alias("QWEN3") → path
-    FR->>FR: is_hf_transformers_model_dir(path) → true
-    FR->>FR: RegisterBuiltinHfModelFamilies() [once]
+    CLI->>CLI: parse config.json -> model_type="qwen3", dims, heads
+    CLI->>Reg: match_family("qwen3")
+    Reg->>Plug: QwenPlugin.matches("qwen3") -> true
 
-    Note over FR: Stage 2: Family Dispatch
-    FR->>FR: load_hf_metadata(path) → {model_type: "qwen3"}
-    FR->>QR: matcher({model_type: "qwen3"}) → true
-    QR->>ML: LoadDecoderModel(model_dir)
-    ML->>ML: parse config.json → architecture
-    ML->>ML: detect model.safetensors → TensorSource
-    ML->>CM: FindCheckpointMapper("qwen3")
-    CM-->>ML: QwenCheckpointMapper
-    ML->>CM: map_checkpoint(reader, vocab, path, arch)
-    CM-->>ML: DecoderCheckpoint (per-layer weights)
-    ML-->>QR: DecoderModel
-    QR->>QR: cap max_cache_length if > 4096
-    QR-->>FR: DecoderModel
-    FR-->>R: ResolvedModelSpec{kDecoderDefinition}
-    R-->>P: ResolvedModelSpec
+    Note over CLI: Load weights
+    CLI->>ST: open model.safetensors
+    CLI->>CM: QwenCheckpointMapper.map(safetensors, config)
+    CM->>ST: read tensors (embedding, per-layer weights, lm_head)
+    CM->>CM: transpose [out,in] -> [in,out]
+    CM->>CM: expand K/V for GQA
+    CM->>CM: handle q_norm/k_norm (Qwen3)
+    CM-->>CLI: canonical weights dict
 
-    Note over P: Stage 3: Runtime Assembly
-    P->>RF: BuildRuntimeForTextGeneration(spec, selection)
-    RF->>RF: Create HfPythonTokenizer(hf_tokenizer_dir)
-    RF->>TB: CreateTrtBackend(tokenizer, model)
-    TB->>TB: FindModelRuntime("qwen3") → IModelRuntime (via CreateStandardDecoderRuntime)
-    TB->>TB: BuildTrtDecoderWeights(model) (inlined conversion)
-    TB->>TB: runtime.build_engine(weights, logger)
-    TB-->>RF: TrtBackend
-    RF-->>P: RuntimeAssembly{tokenizer, backend}
+    Note over CLI: Build TRT network
+    CLI->>GB: StandardGraphBuilder.build(weights, config)
+    GB->>TRT: createBuilder + createNetwork + createBuilderConfig
+    GB->>TRT: add inputs (token_id, position_id, mask, cache_k/v)
+    GB->>TRT: add embedding gather
+    GB->>TRT: precompute RoPE tables
+    loop each decoder layer
+        GB->>TRT: add_rms_norm + QKV proj + QK norm + RoPE
+        GB->>TRT: KV concat + attention + output proj + residual
+        GB->>TRT: add_rms_norm + SwiGLU MLP + residual
+    end
+    GB->>TRT: final RMSNorm + LM head
+    GB->>TRT: mark outputs (logits, present_k/v)
 
-    P-->>User: Pipeline (ready)
+    Note over CLI: Compile engine
+    GB->>TRT: buildEngineWithConfig(network, config)
+    Note over TRT: GPU kernel compilation (30-300s)
+    TRT-->>GB: ICudaEngine
+    GB->>TRT: serialize() -> plan bytes
+    GB-->>CLI: engine plan bytes
+
+    Note over CLI: Package bundle
+    CLI->>Bun: write .trtfb (plan + tokenizer.json + config.json)
+    Bun-->>User: qwen3.trtfb
 ```
 
-### What happens at each stage
-
-**Stage 1** resolves the model ID. For `"QWEN3"`, alias resolution maps it to a local directory. The resolver tries custom resolvers first (none registered), then the HF family registry.
-
-**Stage 2** parses `config.json` to get `model_type`, matches it against registered families (Qwen matches), and the family loader calls `LoadDecoderModel()` which reads safetensors through the checkpoint mapper registry.
-
-**Stage 3** creates the tokenizer (HfPythonTokenizer if `tokenizer.json` exists) and backend (TRT preferred, with HF-Python fallback). The TRT backend finds the model runtime, converts model weights to TRT format, builds the TensorRT engine, and wraps it in `TrtBackend`.
-
 ---
 
-## 2. Pipeline Creation -- Fast Path (Cached Engine)
+## 2. Bundle Load and Pipeline Creation (C++)
 
-When a TRT engine has been previously built and cached to disk, the fast path bypasses all weight loading, checkpoint mapping, and TRT graph building. This reduces cached startup from ~260s to ~7s.
-
-The fast path is attempted **before** the slow path. On cache miss, it returns `nullptr` and the slow path runs normally. On the first successful slow-path build, the engine cache index is saved so subsequent runs take the fast path.
+Sequence for `trtf_create_pipeline("qwen3.trtfb", TRTF_FORCE_TRT)`.
 
 ```mermaid
 sequenceDiagram
     actor User
     participant CABI as trtf_c.cpp
-    participant Dir as resolve_model_dir_lightweight
-    participant Cfg as parse_fast_path_config
-    participant Idx as BuildModelDirIndexKey
-    participant Lkp as LookupModelDirIndex
-    participant Load as LoadTrtEnginePlanFromCache
+    participant BF as bundle_format.cpp
     participant TRT as TensorRT Runtime
     participant Tok as HfPythonTokenizer
-    participant BE as CreateTrtBackendFromEngine
+    participant BE as TrtBackendFastPath
 
-    User->>CABI: trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)
+    User->>CABI: trtf_create_pipeline("qwen3.trtfb", TRTF_FORCE_TRT)
 
-    Note over CABI: Fast path attempt
-    CABI->>Dir: resolve_model_dir_lightweight("QWEN3")
-    Dir-->>CABI: models/hf/Qwen__Qwen3-0.6B
+    CABI->>CABI: HasBundleMagic("qwen3.trtfb") -> true
 
-    CABI->>Cfg: parse_fast_path_config(config.json text, env override)
-    Cfg-->>CABI: FastPathModelConfig (dims, max_cache_length, eos/bos)
+    CABI->>BF: ReadBundleFile("qwen3.trtfb")
+    BF->>BF: parse JSON header (metadata, section offsets)
+    BF->>BF: extract engine plan bytes
+    BF->>BF: extract tokenizer files to temp dir
+    BF-->>CABI: engine plan + temp dir path + metadata
 
-    CABI->>Idx: BuildModelDirIndexKey(model_dir, max_cache_length)
-    Idx-->>CABI: index_key (FNV-1a hash)
+    CABI->>TRT: createInferRuntime(logger)
+    CABI->>TRT: deserializeCudaEngine(plan_bytes)
+    TRT-->>CABI: ICudaEngine
+    CABI->>TRT: createExecutionContext()
+    TRT-->>CABI: IExecutionContext
 
-    CABI->>Lkp: LookupModelDirIndex(index_key)
-    alt cache HIT (index + .plan file exist)
-        Lkp-->>CABI: cache_key
+    Note over CABI: Build DecoderStepEngine from metadata
 
-        CABI->>Load: LoadTrtEnginePlanFromCache(cache_key)
-        Load->>Load: mmap .plan file (~2.5 GB)
-        Load-->>CABI: plan bytes
+    CABI->>Tok: CreateHfPythonTokenizer(temp_dir)
+    Tok-->>CABI: tokenizer
 
-        CABI->>TRT: createInferRuntime(logger)
-        CABI->>TRT: deserializeCudaEngine(plan)
-        TRT-->>CABI: ICudaEngine
-        CABI->>TRT: createExecutionContext()
-        TRT-->>CABI: IExecutionContext
+    CABI->>BE: CreateTrtBackendFromEngine(engine)
+    BE-->>CABI: TrtBackendFastPath
 
-        Note over CABI: Build DecoderStepEngine from config metadata<br/>(no weight loading — zero allocation)
-
-        CABI->>Tok: CreateHfPythonTokenizer(model_dir)
-        Tok-->>CABI: tokenizer
-
-        CABI->>BE: CreateTrtBackendFromEngine(engine)
-        BE-->>CABI: TrtBackend (fast path)
-
-        CABI-->>User: Pipeline (ready in ~7s)
-    else cache MISS
-        Lkp-->>CABI: nullopt
-        Note over CABI: Fall through to slow path (Section 1)
-    end
-```
-
-### What makes the fast path fast
-
-| Slow path step | Time | Fast path equivalent |
-|---------------|------|---------------------|
-| Load safetensors (600M+ FP32 weights) | ~120s | **Skipped entirely** |
-| Checkpoint mapping (transpose, GQA expand) | ~40s | **Skipped entirely** |
-| TRT engine build (or cache load) | ~100s | mmap .plan file (~400ms) |
-| Engine deserialization | ~5s | Same (~5s) |
-| Tokenizer init | ~3s | Same (~3s) |
-
-### Model-dir index key
-
-`BuildModelDirIndexKey()` hashes:
-- Canonical model directory path
-- `config.json` file content (captures all architecture changes)
-- `model.safetensors` file size (catches weight file changes without reading data)
-- `model.safetensors.index.json` content (for sharded models)
-- `max_cache_length` (different cache lengths need different engines)
-
-This ensures any change to the model files invalidates the cache automatically.
-
-### Cache invalidation
-
-`LookupModelDirIndex()` verifies the `.plan` file still exists before returning a cache hit. If the plan was deleted (e.g., TRT version upgrade), it returns `nullopt` and the slow path rebuilds.
-
----
-
-## 3. HF Family Resolution Detail
-
-Detailed view of how the family registry matches and dispatches.
-
-```mermaid
-sequenceDiagram
-    participant FR as HfFamilyRegistry
-    participant Meta as load_hf_metadata
-    participant Qwen as QwenFamily
-    participant LLaMA as LLaMAFamily
-
-    FR->>FR: RegisterBuiltinHfModelFamilies()
-    FR->>Qwen: RegisterQwenFamily()
-    Note over Qwen: Registers into 3 registries
-    FR->>LLaMA: RegisterLlamaFamily()
-    Note over LLaMA: Registers into 3 registries
-
-    FR->>Meta: load_hf_metadata(model_dir)
-    Meta->>Meta: read config.json
-    Meta-->>FR: {model_type, architectures}
-
-    FR->>FR: Sort families by priority (highest first)
-
-    FR->>Qwen: matcher(metadata)
-    alt model_type starts with "qwen" or "qwq"
-        Qwen-->>FR: true
-        FR->>Qwen: model_definition_loader(metadata)
-        Qwen-->>FR: DecoderModel
-    else model_type starts with "llama"
-        Qwen-->>FR: false
-        FR->>LLaMA: matcher(metadata)
-        LLaMA-->>FR: true
-        FR->>LLaMA: model_definition_loader(metadata)
-        LLaMA-->>FR: DecoderModel
-    end
+    CABI-->>User: PipelineImpl (ready)
 ```
 
 ---
 
-## 4. Checkpoint Loading and Mapping
+## 3. Autoregressive Generation (C++)
 
-How HF safetensors tensor keys are translated into the canonical `DecoderCheckpoint`.
-
-```mermaid
-sequenceDiagram
-    participant ML as ModelLoader
-    participant TS as TensorSource
-    participant SR as SafetensorReader
-    participant CM as StandardCheckpointMapper
-
-    ML->>ML: detect model.safetensors or index.json
-    alt single file
-        ML->>TS: TensorSource(single_path)
-        TS->>SR: SafetensorReader(model.safetensors)
-        SR->>SR: parse JSON header
-    else sharded
-        ML->>TS: TensorSource(model_dir, index_path)
-        TS->>TS: parse model.safetensors.index.json
-        loop each shard file
-            TS->>SR: SafetensorReader(shard_N.safetensors)
-        end
-    end
-
-    ML->>ML: FindCheckpointMapper(arch) → family mapper
-    ML->>CM: map_checkpoint(reader, vocab_size, path, arch)
-
-    Note over CM: Read embedding
-    CM->>TS: read_f32("model.embed_tokens.weight")
-    TS-->>CM: [vocab × hidden] (row-major)
-
-    Note over CM: Read per-layer weights
-    loop for each layer 0..N-1
-        CM->>TS: read_f32("model.layers.{i}.input_layernorm.weight")
-        CM->>TS: read_f32("model.layers.{i}.self_attn.q_proj.weight")
-        Note over CM: Transpose [out,in] → [in,out]
-        CM->>TS: read_f32("model.layers.{i}.self_attn.k_proj.weight")
-        Note over CM: Transpose + expand_kv_projection() for GQA
-        CM->>TS: read_f32("model.layers.{i}.self_attn.v_proj.weight")
-        Note over CM: Transpose + expand_kv_projection() for GQA
-        CM->>TS: read_f32("model.layers.{i}.self_attn.o_proj.weight")
-        CM->>TS: read_f32("model.layers.{i}.mlp.gate_proj.weight")
-        CM->>TS: read_f32("model.layers.{i}.mlp.up_proj.weight")
-        CM->>TS: read_f32("model.layers.{i}.mlp.down_proj.weight")
-        opt if q_norm exists (Qwen3)
-            CM->>TS: read_f32("model.layers.{i}.self_attn.q_norm.weight")
-            Note over CM: repeat_head_norm() to full attention_size
-        end
-    end
-
-    Note over CM: Read final norm + lm_head
-    CM->>TS: read_f32("model.norm.weight")
-    CM->>TS: read_f32("lm_head.weight")
-    Note over CM: If absent → tied to embedding
-
-    CM-->>ML: DecoderCheckpoint
-```
-
-### Key transformations during mapping
-
-| Transformation | When | Why |
-|---------------|------|-----|
-| **Transpose** | All weight matrices | HF stores `[out, in]`, TRT matmul needs `[in, out]` for right-side constant |
-| **GQA KV expansion** | `num_kv_heads < num_attention_heads` | `expand_kv_projection()` repeats KV heads to match Q heads, so the TRT graph builder doesn't need special GQA logic |
-| **Per-head norm repeat** | When `q_norm`/`k_norm` present | `repeat_head_norm()` expands `[head_dim]` to `[num_heads × head_dim]` for per-head RMSNorm |
-| **Tied lm_head** | When `lm_head.weight` absent | Reuses embedding matrix (transposed) as LM head projection |
-
----
-
-## 5. TRT Engine Build
-
-How `StandardDecoderGraphBuilder` constructs the TensorRT network graph.
-
-```mermaid
-sequenceDiagram
-    participant SDB as StandardDecoderGraphBuilder
-    participant NV as TensorRT API
-    participant OPS as trt_graph_ops
-    participant LC as EngineLifecycle
-    participant Cache as EngineCache
-
-    SDB->>NV: createInferBuilder(logger)
-    SDB->>NV: createNetworkV2(flags)
-    SDB->>NV: createBuilderConfig()
-    SDB->>NV: setMemoryPoolLimit(1GB)
-
-    Note over SDB: Add network inputs
-    SDB->>NV: addInput("token_id", INT32, [1])
-    SDB->>NV: addInput("position_id", INT32, [1])
-    SDB->>NV: addInput("attention_mask", FLOAT, [1, window])
-    loop each layer
-        SDB->>NV: addInput("cache_k_{i}", FLOAT, [max_cache, attn_size])
-        SDB->>NV: addInput("cache_v_{i}", FLOAT, [max_cache, attn_size])
-    end
-
-    Note over SDB: Add embedding lookup
-    SDB->>OPS: add_constant_tensor(embedding)
-    SDB->>NV: addGather(embedding, token_id)
-
-    Note over SDB: Precompute RoPE tables as constants
-    SDB->>OPS: make_rope_table(cos) → constant
-    SDB->>OPS: make_rope_table(sin) → constant
-    SDB->>OPS: make_rotate_half_matrix() → constant
-
-    Note over SDB: Build decoder layers
-    loop each layer 0..N-1
-        SDB->>SDB: add_standard_decoder_layer_block()
-        Note over SDB: RMSNorm → QKV proj → QK norm → RoPE →<br/>KV cache concat → GQA attention →<br/>output proj → residual →<br/>RMSNorm → SwiGLU MLP → residual
-    end
-
-    Note over SDB: Final norm + LM head
-    SDB->>OPS: add_rms_norm(hidden, final_norm)
-    SDB->>OPS: add_matmul_rhs_constant(hidden, w_out)
-    SDB->>NV: markOutput(logits)
-    loop each layer
-        SDB->>NV: markOutput(present_k_{i}, present_v_{i})
-    end
-
-    Note over SDB: Build engine (or load from cache)
-    SDB->>LC: finalize_decoder_step_engine(builder, network, config)
-    LC->>Cache: check cache for serialized plan
-    alt cache hit
-        Cache-->>LC: serialized plan bytes
-        LC->>NV: deserializeCudaEngine(plan)
-    else cache miss
-        LC->>NV: buildEngineWithConfig(network, config)
-        Note over NV: Kernel compilation (30+ seconds)
-        LC->>Cache: store serialized plan
-    end
-    LC-->>SDB: DecoderStepEngine
-```
-
----
-
-## 6. Autoregressive Generation
-
-How `TrtBackend::generate()` runs the prefill + decode loop.
+How `TrtBackendFastPath::generate()` runs the prefill + decode loop.
 
 ```mermaid
 sequenceDiagram
     participant P as Pipeline
     participant T as ITokenizer
-    participant B as TrtBackend
+    participant B as TrtBackendFastPath
     participant S as KvCacheStepState
     participant E as DecoderStepEngine
     participant GPU as CUDA GPU
@@ -367,7 +139,7 @@ sequenceDiagram
         B->>S: prepare_step(position_id, mask)
         S-->>B: position_id, attention_mask
         B->>E: run_decoder_step(token, position, mask, state.caches)
-        E->>GPU: enqueueV3(stream) → execute TRT engine
+        E->>GPU: enqueueV3(stream)
         GPU-->>E: logits[vocab_size] + present_k/v
         B->>S: update_after_step(present_k, present_v)
         Note over S: append_cache_state(), cache_length++
@@ -381,7 +153,7 @@ sequenceDiagram
         E->>GPU: enqueueV3(stream)
         GPU-->>E: logits[vocab_size] + present_k/v
         B->>S: update_after_step(present_k, present_v)
-        B->>B: select_argmax_token(logits) → next_token
+        B->>B: select_argmax_token(logits) -> next_token
         alt next_token == eos_token
             Note over B: Stop generation
         end
@@ -396,15 +168,14 @@ sequenceDiagram
 
 ### Key implementation details
 
-- **State management is abstracted via `IStepState`**. `KvCacheStepState` implements it for standard attention models. Mamba/SSM models can provide `RecurrentStepState`, hybrid models can combine both.
+- **State management is abstracted via `IStepState`**. `KvCacheStepState` implements it for standard attention models.
 - **KV cache is a fixed-size circular buffer** per layer: `[max_cache_length, attention_size]`. `append_cache_state()` writes new K/V at `position % max_cache_length`.
 - **Attention mask** is built each step: `0.0` for visible positions, `-1e9` for masked. Grows by 1 each step.
-- **Greedy sampling** via `select_argmax_token()` — scans logits array for maximum value.
 - **Greedy sampling** via `select_argmax_token()` -- scans logits array for maximum value.
 
 ---
 
-## 7. Single Decode Step (TRT)
+## 4. Single Decode Step (TRT)
 
 Detailed view of what happens inside `run_decoder_step()`.
 
@@ -432,17 +203,17 @@ sequenceDiagram
     end
 
     Note over RT: Copy input data to GPU
-    RT->>GPU: cudaMemcpyAsync(token_id, H→D)
-    RT->>GPU: cudaMemcpyAsync(position_id, H→D)
-    RT->>GPU: cudaMemcpyAsync(attention_mask, H→D)
+    RT->>GPU: cudaMemcpyAsync(token_id, H->D)
+    RT->>GPU: cudaMemcpyAsync(position_id, H->D)
+    RT->>GPU: cudaMemcpyAsync(attention_mask, H->D)
 
     Note over RT: Execute TRT inference
     RT->>Ctx: enqueueV3(stream)
-    Note over GPU: TRT runs fused CUDA kernels:<br/>embedding → N×(RMSNorm+attn+MLP) → logits
+    Note over GPU: TRT runs fused CUDA kernels:<br/>embedding -> N x (RMSNorm+attn+MLP) -> logits
 
     Note over RT: Copy outputs from GPU
-    RT->>GPU: cudaMemcpyAsync(logits, D→H)
-    RT->>GPU: cudaMemcpyAsync(present_k/v, D→H)
+    RT->>GPU: cudaMemcpyAsync(logits, D->H)
+    RT->>GPU: cudaMemcpyAsync(present_k/v, D->H)
     RT->>Stream: cudaStreamSynchronize()
 
     RT-->>RT: return logits + present_k/v
@@ -450,64 +221,56 @@ sequenceDiagram
 
 ---
 
-## 8. Data Transformation Pipeline
+## 5. Data Transformation Pipeline
 
-End-to-end data transformation from HF files to generated text.
+End-to-end data transformation from HF files to generated text, showing the Python/C++ boundary.
 
 ```mermaid
 flowchart TD
     A[("HF Model Directory<br/>config.json + model.safetensors<br/>+ tokenizer.json")] --> B
 
-    subgraph "Stage 1+2: Loading"
-        B["config.json Parser<br/><i>model_loader.cpp</i>"] --> C["DecoderArchitectureConfig<br/><i>family, dims, heads, rope_theta</i>"]
-        A --> D["SafetensorReader<br/><i>safetensors_loader.cpp</i>"]
-        D --> E["TensorSource<br/><i>Single or sharded access</i>"]
-        E --> F["CheckpointMapper<br/><i>(Registry 2)</i>"]
-        C --> F
-        F --> G["DecoderCheckpoint<br/><i>Per-layer: input_norm, w_qkvo,<br/>post_attn_norm, w_gate/up/down</i>"]
+    subgraph "Python: trtf-build"
+        B["config.json Parser"] --> C["Architecture Config<br/><i>family, dims, heads, rope_theta</i>"]
+        A --> D["safetensors library"]
+        D --> E["Checkpoint Mapper<br/><i>Per-family plugin</i>"]
+        C --> E
+        E --> F["Canonical Weights<br/><i>Transposed, GQA-expanded</i>"]
+        F --> G["TRT Graph Builder<br/><i>TensorRT Python API</i>"]
+        C --> G
+        G --> H["INetworkDefinition"]
+        H --> I["Engine Compilation<br/><i>buildEngineWithConfig</i>"]
+        I --> J["Serialized Plan Bytes"]
     end
 
-    C --> H["DecoderModel<br/><i>Unified representation</i>"]
-    G --> H
+    J --> K[(".trtfb Bundle<br/><i>plan + tokenizer files</i>")]
 
-    subgraph "Stage 3a: TRT Definition"
-        H --> I["BuildTrtDecoderWeights()<br/><i>(inlined conversion)</i>"]
-        I --> J["TrtDecoderDefinition<br/><i>TRT-ready weights + arch params</i>"]
+    subgraph "C++: trtf runtime"
+        K --> L["ReadBundleFile()"]
+        L --> M["deserializeCudaEngine()"]
+        M --> N["DecoderStepEngine"]
+        K --> O["HfPythonTokenizer<br/><i>or VocabTokenizer</i>"]
+        N --> P["TrtBackendFastPath::generate()<br/><i>Prefill + Decode loop</i>"]
+        O -->|"encode(prompt)"| P
+        P --> Q["run_decoder_step()<br/><i>GPU kernel execution</i>"]
+        Q --> R["select_argmax_token()"]
+        R -->|"loop until EOS"| P
+        P -->|"token IDs"| O
+        O -->|"decode(ids)"| S(["Generated Text"])
     end
-
-    subgraph "Stage 3b: TRT Engine"
-        J --> K["StandardDecoderGraphBuilder<br/><i>(Registry 3)</i>"]
-        K --> L["INetworkDefinition<br/><i>TRT graph: embed → N layers → logits</i>"]
-        L --> M["finalize_decoder_step_engine()<br/><i>Compile or load from cache</i>"]
-        M --> N["DecoderStepEngine<br/><i>ICudaEngine + IExecutionContext</i>"]
-    end
-
-    subgraph "Stage 3c: Generation"
-        N --> O["TrtBackend::generate()<br/><i>Prefill + Decode loop</i>"]
-        O --> P["run_decoder_step()<br/><i>GPU kernel execution</i>"]
-        P --> Q["select_argmax_token()<br/><i>Greedy sampling</i>"]
-        Q -->|"loop until EOS"| O
-    end
-
-    A --> R["HfPythonTokenizer<br/><i>or VocabTokenizer</i>"]
-    R -->|"encode(prompt)"| O
-    O -->|"token IDs"| R
-    R -->|"decode(ids)"| S(["Generated Text"])
 
     style A fill:#f1f5f9,stroke:#94a3b8
-    style H fill:#dbeafe,stroke:#2563eb
-    style J fill:#fdf2f8,stroke:#db2777
+    style K fill:#dbeafe,stroke:#2563eb
     style N fill:#dcfce7,stroke:#16a34a
     style S fill:#fef3c7,stroke:#f59e0b
 ```
 
 ### Data formats at each stage
 
-| Stage | Data Format | Key Properties |
-|-------|-------------|---------------|
-| HF files | Safetensors binary (F32/F16/BF16) + JSON config | HF tensor naming, `[out, in]` weight layout |
-| After CheckpointMapper | `DecoderCheckpoint` with `vector<float>` per tensor | Transposed to `[in, out]`, GQA KV expanded, canonical field names |
-| After BuildTrtDecoderWeights | `TrtDecoderDefinition` with per-layer `TrtDecoderLayerDefinition` | Same data as checkpoint but organized for TRT graph builder consumption, with validated sizes |
-| TRT Network | `INetworkDefinition` with `ITensor*` nodes | Weights baked as constant tensors, ops fused by TRT compiler |
-| Compiled Engine | `ICudaEngine` serialized plan | Optimized CUDA kernels, can be cached to disk |
-| Runtime | Host `int32_t` token IDs + device `float` KV caches | Prefill processes input tokens, decode generates one token per step |
+| Stage | Location | Data Format |
+|-------|----------|-------------|
+| HF files | Input | Safetensors binary (F32/F16/BF16) + JSON config |
+| After checkpoint mapper | Python | NumPy arrays, transposed to `[in, out]`, GQA KV expanded |
+| TRT Network | Python | `INetworkDefinition` with weights as constant tensors |
+| Compiled engine | `.trtfb` bundle | Serialized plan bytes (optimized CUDA kernels) |
+| Deserialized engine | C++ runtime | `ICudaEngine` + `IExecutionContext` |
+| Runtime | C++ | Host `int32_t` token IDs + device `float` KV caches |

@@ -1,9 +1,7 @@
 // trtf CLI -- command-line interface using the library API.
 //
 // Usage:
-//   trtf build   <model-dir> -o <output.trtfb> [--max-cache-length N] [--hf-python PATH]
-//   trtf run     <model-or-bundle> --prompt "text" [--max-new-tokens N] [--force-trt] [--cpu-only]
-//                [--hf-python PATH] [--engine-cache-dir DIR] [--no-engine-cache]
+//   trtf run     <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
 //   trtf inspect <bundle.trtfb>
 //   trtf version
 
@@ -14,21 +12,15 @@
 #include <cstring>
 #include <iostream>
 #include <string>
-#include <vector>
 
 namespace {
 
 struct CliArgs {
     std::string command;
-    std::string model_or_bundle;
-    std::string output_path;
+    std::string bundle_path;
     std::string prompt;
     std::string hf_python;
-    std::string engine_cache_dir;
     int max_new_tokens{0};
-    int max_cache_length{-1};
-    int flags{TRTF_PREFER_TRT};
-    bool no_engine_cache{false};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -38,9 +30,7 @@ void print_usage()
 {
     std::cerr <<
         "Usage:\n"
-        "  trtf build   <model-dir> -o <output.trtfb> [--max-cache-length N] [--hf-python PATH]\n"
-        "  trtf run     <model-or-bundle> --prompt \"text\" [--max-new-tokens N] [--force-trt] [--cpu-only]\n"
-        "               [--hf-python PATH] [--engine-cache-dir DIR] [--no-engine-cache]\n"
+        "  trtf run     <bundle.trtfb> --prompt \"text\" [--max-new-tokens N] [--hf-python PATH]\n"
         "  trtf inspect <bundle.trtfb>\n"
         "  trtf version\n";
 }
@@ -69,7 +59,7 @@ CliArgs parse_args(int argc, char** argv)
         return args;
     }
 
-    if (args.command != "build" && args.command != "run" && args.command != "inspect")
+    if (args.command != "run" && args.command != "inspect")
     {
         args.parse_error = true;
         args.error_message = "Unknown command: " + args.command;
@@ -80,18 +70,6 @@ CliArgs parse_args(int argc, char** argv)
     for (int i = 2; i < argc; ++i)
     {
         const std::string arg = argv[i];
-
-        if (arg == "-o" || arg == "--output")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.output_path = argv[++i];
-            continue;
-        }
 
         if (arg == "--prompt" || arg == "-p")
         {
@@ -117,18 +95,6 @@ CliArgs parse_args(int argc, char** argv)
             continue;
         }
 
-        if (arg == "--max-cache-length")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.max_cache_length = std::atoi(argv[++i]);
-            continue;
-        }
-
         if (arg == "--hf-python")
         {
             if (i + 1 >= argc)
@@ -141,36 +107,6 @@ CliArgs parse_args(int argc, char** argv)
             continue;
         }
 
-        if (arg == "--engine-cache-dir")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.engine_cache_dir = argv[++i];
-            continue;
-        }
-
-        if (arg == "--no-engine-cache")
-        {
-            args.no_engine_cache = true;
-            continue;
-        }
-
-        if (arg == "--force-trt")
-        {
-            args.flags = TRTF_FORCE_TRT;
-            continue;
-        }
-
-        if (arg == "--cpu-only")
-        {
-            args.flags = TRTF_CPU_ONLY;
-            continue;
-        }
-
         if (arg[0] == '-')
         {
             args.parse_error = true;
@@ -179,9 +115,9 @@ CliArgs parse_args(int argc, char** argv)
         }
 
         // Positional argument
-        if (args.model_or_bundle.empty())
+        if (args.bundle_path.empty())
         {
-            args.model_or_bundle = arg;
+            args.bundle_path = arg;
         }
         else
         {
@@ -201,62 +137,18 @@ int cmd_version()
     return EXIT_SUCCESS;
 }
 
-int cmd_build(const CliArgs& args)
-{
-    if (args.model_or_bundle.empty())
-    {
-        std::cerr << "Error: build requires a model directory\n";
-        return EXIT_FAILURE;
-    }
-    if (args.output_path.empty())
-    {
-        std::cerr << "Error: build requires -o <output.trtfb>\n";
-        return EXIT_FAILURE;
-    }
-
-    TrtfPipelineOptions opts{};
-    opts.flags = TRTF_FORCE_TRT;
-    opts.max_new_tokens = 0;
-    opts.max_cache_length = args.max_cache_length;
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    opts.engine_cache_dir = args.engine_cache_dir.empty() ? nullptr : args.engine_cache_dir.c_str();
-    opts.no_engine_cache = args.no_engine_cache ? 1 : 0;
-
-    auto* pipeline = trtf_create_pipeline_ex(args.model_or_bundle.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
-
-    if (!pipeline->save_bundle(args.output_path.c_str()))
-    {
-        std::cerr << "Error: save_bundle failed (TRT engine serialization not available)\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    std::cout << "Bundle saved to: " << args.output_path << '\n';
-    delete pipeline;
-    return EXIT_SUCCESS;
-}
-
 int cmd_run(const CliArgs& args)
 {
-    if (args.model_or_bundle.empty())
+    if (args.bundle_path.empty())
     {
-        std::cerr << "Error: run requires a model path, alias, or bundle file\n";
+        std::cerr << "Error: run requires a .trtfb bundle file\n";
         return EXIT_FAILURE;
     }
 
     TrtfPipelineOptions opts{};
-    opts.flags = args.flags;
     opts.max_new_tokens = args.max_new_tokens;
-    opts.max_cache_length = args.max_cache_length;
     opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    opts.engine_cache_dir = args.engine_cache_dir.empty() ? nullptr : args.engine_cache_dir.c_str();
-    opts.no_engine_cache = args.no_engine_cache ? 1 : 0;
-    auto* pipeline = trtf_create_pipeline_ex(args.model_or_bundle.c_str(), &opts);
+    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
     if (pipeline == nullptr)
     {
         std::cerr << "Error: " << trtf_last_error() << '\n';
@@ -285,21 +177,21 @@ int cmd_run(const CliArgs& args)
 
 int cmd_inspect(const CliArgs& args)
 {
-    if (args.model_or_bundle.empty())
+    if (args.bundle_path.empty())
     {
         std::cerr << "Error: inspect requires a bundle file path\n";
         return EXIT_FAILURE;
     }
 
-    if (!trtf::IsBundle(args.model_or_bundle))
+    if (!trtf::IsBundle(args.bundle_path))
     {
-        std::cerr << "Error: not a valid .trtfb bundle: " << args.model_or_bundle << '\n';
+        std::cerr << "Error: not a valid .trtfb bundle: " << args.bundle_path << '\n';
         return EXIT_FAILURE;
     }
 
     try
     {
-        const auto info = trtf::InspectBundle(args.model_or_bundle);
+        const auto info = trtf::InspectBundle(args.bundle_path);
         std::cout << "Model ID:           " << info.model_id << '\n';
         std::cout << "Model type:         " << info.model_type << '\n';
         std::cout << "Family:             " << info.family << '\n';
@@ -343,10 +235,6 @@ int main(int argc, char** argv)
     if (args.command == "version")
     {
         return cmd_version();
-    }
-    if (args.command == "build")
-    {
-        return cmd_build(args);
     }
     if (args.command == "run")
     {

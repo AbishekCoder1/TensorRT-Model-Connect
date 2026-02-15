@@ -1,8 +1,6 @@
 # Adding a New Model Family
 
-This guide walks through adding support for a new HuggingFace model family (e.g., Phi). By the end, your model will be loadable via `trtf_create_pipeline("path/to/your-model", TRTF_FORCE_TRT)` with TRT GPU inference.
-
-![What You Write vs What's Automatic](diagrams/add_model_family.svg)
+This guide walks through adding support for a new HuggingFace model family. Since engine building has migrated to Python, adding a new family is now a **Python-only task** in the `trtf_build/` package. No C++ changes are needed.
 
 ## Prerequisites
 
@@ -13,22 +11,21 @@ Before starting, verify your model follows the standard dense decoder pattern:
 - **SwiGLU MLP** (gate + up projection with SiLU activation)
 - **Post-Attention RMSNorm** before MLP
 
-If yes, you only need to write a checkpoint mapper. Everything else is handled automatically.
+If yes, you only need to write a checkpoint mapper. The shared graph builder handles the rest.
 
-If your model has a non-standard architecture (MoE, parallel attention, different norm types), you'll need a custom model runtime — see [Advanced: Custom Model Runtime](#advanced-custom-model-runtime) at the bottom.
+If your model has a non-standard architecture (MoE, parallel attention, different norm types), you will need a custom graph builder -- see [Advanced: Custom Graph Builder](#advanced-custom-graph-builder) at the bottom.
 
 ## Step-by-Step Guide
 
-We'll use a hypothetical "Yi" model family as our example.
+We will use a hypothetical "Yi" model family as our example.
 
-### Step 1: Create the directory
+### Step 1: Create the plugin directory
 
 ```
-src/models/yi/
-  registration.h
-  registration.cpp
-  checkpoint_mapper.h
-  checkpoint_mapper.cpp
+trtf_build/families/yi/
+  __init__.py
+  plugin.py
+  checkpoint.py
 ```
 
 ### Step 2: Implement the checkpoint mapper
@@ -49,45 +46,18 @@ model.norm.weight
 lm_head.weight
 ```
 
-**If yes** (most models), subclass `StandardCheckpointMapper` and only override `can_map()`:
+**If yes** (most models), use the standard checkpoint mapper and only specify the family name:
 
-**`checkpoint_mapper.h`:**
-```cpp
-#pragma once
+**`checkpoint.py`:**
+```python
+from trtf_build.checkpoint import StandardCheckpointMapper
 
-#include "model/standard_checkpoint_mapper.h"
-
-namespace trtf {
-namespace yi {
-
-class YiCheckpointMapper final : public StandardCheckpointMapper {
-public:
-    bool can_map(const DecoderArchitectureConfig& architecture) const override;
-};
-
-} // namespace yi
-} // namespace trtf
+class YiCheckpointMapper(StandardCheckpointMapper):
+    """Yi uses standard HF tensor naming, identical to LLaMA."""
+    pass
 ```
 
-**`checkpoint_mapper.cpp`:**
-```cpp
-#include "models/yi/checkpoint_mapper.h"
-#include "utils/text_parsers.h"
-
-namespace trtf {
-namespace yi {
-
-bool YiCheckpointMapper::can_map(const DecoderArchitectureConfig& architecture) const
-{
-    const std::string family = to_lower_ascii(architecture.family);
-    return starts_with(family, "yi");
-}
-
-} // namespace yi
-} // namespace trtf
-```
-
-That's it. `StandardCheckpointMapper::map_checkpoint()` handles:
+The `StandardCheckpointMapper` base class handles:
 - Reading all weight tensors from safetensors
 - Transposing weight matrices from `[out, in]` to `[in, out]`
 - Expanding K/V projections for GQA (when `num_key_value_heads < num_attention_heads`)
@@ -95,179 +65,64 @@ That's it. `StandardCheckpointMapper::map_checkpoint()` handles:
 - Handling tied `lm_head` (when `lm_head.weight` is absent, reuses embedding)
 - Reading optional `q_norm`/`k_norm` weights
 
-**If no** (non-standard tensor keys), implement `ICheckpointMapper` directly. See `src/models/qwen/checkpoint_mapper.cpp` for the pattern — though Qwen also uses `StandardCheckpointMapper`.
+**If your model has non-standard tensor keys**, override the mapping methods. See `trtf_build/families/gemma/checkpoint.py` for an example that adds +1.0 to RMSNorm gamma and scales the embedding.
 
-### Step 3: Write the registration
+### Step 3: Write the plugin registration
 
-**`registration.h`:**
-```cpp
-#pragma once
+**`plugin.py`:**
+```python
+from trtf_build.registry import FamilyPlugin
+from .checkpoint import YiCheckpointMapper
 
-namespace trtf {
-namespace yi {
 
-void RegisterYiFamily();
-
-} // namespace yi
-} // namespace trtf
+def register():
+    """Register the Yi model family plugin."""
+    return FamilyPlugin(
+        family_name="yi",
+        model_types=["yi"],       # Matches model_type from config.json
+        checkpoint_mapper=YiCheckpointMapper(),
+        # Uses the standard decoder graph builder by default.
+        # Set graph_builder=YiGraphBuilder() for custom architectures.
+    )
 ```
 
-**`registration.cpp`:**
-```cpp
-#include "models/yi/registration.h"
-#include "models/yi/checkpoint_mapper.h"
-#include "trtf/hf_family_registry.h"
-#include "model/checkpoint_mapper.h"
-#include "runtime/trt/model_runtime_fwd.h"
-#include "utils/text_parsers.h"
-
-#include <filesystem>
-#include <memory>
-#include <string>
-
-namespace trtf {
-namespace yi {
-namespace {
-
-bool is_yi_model_type(const std::string& model_type)
-{
-    if (model_type.empty()) return false;
-    return starts_with(to_lower_ascii(model_type), "yi");
-}
-
-bool has_root_checkpoint(const HfModelMetadata& metadata)
-{
-    const std::filesystem::path dir(metadata.model_dir);
-    return std::filesystem::exists(dir / "model.safetensors")
-        || std::filesystem::exists(dir / "model.safetensors.index.json");
-}
-
-DecoderModel load_yi_model(const HfModelMetadata& metadata)
-{
-    DecoderModel model = LoadDecoderModel(metadata.model_dir);
-    // Optional: cap cache length for large models
-    const int32_t env_max_cache = parse_positive_env_int("TRTF_MAX_CACHE_LENGTH", -1);
-    if (env_max_cache <= 0 && model.max_cache_length > 4096)
-    {
-        model.max_cache_length = 4096;
-    }
-    return model;
-}
-
-} // namespace
-
-void RegisterYiFamily()
-{
-    // Registry 2: Checkpoint mapper
-    RegisterCheckpointMapper("yi", 100, std::make_unique<YiCheckpointMapper>());
-
-    // Registry 3: Model runtime (graph + state + per-step execution)
-#if TRTF_HAS_TRT
-    RegisterModelRuntime("yi", CreateStandardDecoderRuntime());
-#endif
-
-    // Registry 1: HF family matcher + loader
-    RegisterHfModelFamily({
-        "yi-safetensors",
-        100,
-        [](const HfModelMetadata& metadata) {
-            return is_yi_model_type(metadata.model_type) && has_root_checkpoint(metadata);
-        },
-        [](const HfModelMetadata& metadata) { return load_yi_model(metadata); },
-    });
-}
-
-} // namespace yi
-} // namespace trtf
+**`__init__.py`:**
+```python
+from .plugin import register
 ```
 
-### Step 4: Re-run CMake
+### Step 4: Write tests
 
-CMake auto-discovers new families via GLOB patterns. No edits to any shared files:
+Create Python tests for the new family:
+
+```python
+# tests/test_yi_family.py
+
+def test_yi_checkpoint_mapping():
+    """Verify Yi checkpoint mapper produces correct canonical tensors."""
+    # Create mock safetensors with Yi tensor naming
+    # Run mapper
+    # Assert canonical format is correct
+    ...
+
+def test_yi_family_detection():
+    """Verify Yi model_type is correctly matched."""
+    # Create mock config.json with model_type: "yi"
+    # Assert family plugin claims the model
+    ...
+```
+
+### Step 5: Build and validate
 
 ```bash
-cmake -S . -B build -G Ninja   # Picks up new src/models/yi/*.cpp + tests/test_yi_family.cpp
-cmake --build build -j
-```
+# Build a bundle from a Yi model directory
+trtf-build build path/to/yi-model -o yi.trtfb --max-cache-length 256
 
-### Step 5: Write a test
+# Inspect the bundle
+trtf-build inspect yi.trtfb
 
-Create `tests/test_yi_family.cpp` (auto-discovered by CMake GLOB `tests/test_*_family.cpp`):
-
-```cpp
-// Test: Yi model family registration and checkpoint loading.
-// Verifies: HF family detection for model_type "yi", multi-layer safetensors
-// bridge, and checkpoint structure validation.
-
-#include "test_helpers.h"
-#include "trtf/model_resolver.h"
-
-#include <filesystem>
-#include <iostream>
-
-namespace {
-
-void write_hf_yi_root(const std::filesystem::path& dir)
-{
-    trtf_test::write_file(dir / "config.json",
-        "{\n"
-        "  \"model_type\": \"yi\",\n"
-        "  \"architectures\": [\"YiForCausalLM\"],\n"
-        "  \"vocab_size\": 8,\n"
-        "  \"hidden_size\": 8,\n"
-        "  \"num_hidden_layers\": 2,\n"
-        "  \"num_attention_heads\": 2,\n"
-        "  \"num_key_value_heads\": 1,\n"
-        "  \"rms_norm_eps\": 1e-5,\n"
-        "  \"rope_theta\": 10000.0\n"
-        "}\n");
-    // Yi has no q_norm/k_norm, like LLaMA
-    trtf_test::write_standard_decoder_checkpoint(dir, 8, 8, 16, 8, 16, 2, false);
-}
-
-} // namespace
-
-int main()
-{
-    std::filesystem::path yi_dir;
-    try
-    {
-        yi_dir = trtf_test::make_temp_dir_or_throw("/tmp/trtf_yi_family_XXXXXX");
-        write_hf_yi_root(yi_dir);
-
-        const trtf::ResolvedModelSpec spec = trtf::ResolveTextGenerationModel(yi_dir.string());
-        if (spec.kind != trtf::ResolvedModelKind::kDecoderDefinition)
-        {
-            std::cerr << "expected yi to resolve as decoder-definition" << std::endl;
-            return 1;
-        }
-        if (!spec.decoder_model.checkpoint.has_decoder_layers
-            || spec.decoder_model.checkpoint.decoder_layers.size() != 2)
-        {
-            std::cerr << "expected 2 decoder layers" << std::endl;
-            return 1;
-        }
-
-        std::cout << "test_yi_family passed" << std::endl;
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "test_yi_family failed: " << e.what() << std::endl;
-        std::filesystem::remove_all(yi_dir);
-        return 1;
-    }
-
-    std::filesystem::remove_all(yi_dir);
-    return 0;
-}
-```
-
-### Step 6: Validate
-
-```bash
-# Build and run unit tests
-cmake -S . -B build -G Ninja && cmake --build build -j
-ctest --test-dir build -R test_yi_family --output-on-failure
+# Run inference from the bundle (C++)
+trtf run yi.trtfb --prompt "Hello" --max-new-tokens 10 --hf-python $PWD/.venv-hf/bin/python
 
 # E2E logit comparison against HF (in container with GPU)
 python3 scripts/diff_logits.py \
@@ -279,60 +134,74 @@ python3 scripts/diff_logits.py \
 
 ## Checklist Summary
 
-| Step | Files | Lines of code |
-|------|-------|--------------|
-| Checkpoint mapper | `checkpoint_mapper.h/cpp` | ~15 (if subclassing Standard) |
-| Registration | `registration.h/cpp` | ~40 |
-| Test | `test_yi_family.cpp` | ~50 |
-| Re-run cmake | (zero shared file edits) | 0 |
-| **Total** | **5 new files, 0 existing files edited** | **~105** |
+| Step | Files | Approximate lines |
+|------|-------|-------------------|
+| Checkpoint mapper | `checkpoint.py` | ~10 (if using standard base) |
+| Plugin registration | `plugin.py` | ~15 |
+| Init | `__init__.py` | ~1 |
+| Tests | `test_yi_family.py` | ~30 |
+| **Total** | **4 new files, 0 existing files edited** | **~56** |
 
 ---
 
-## Advanced: Custom Model Runtime
+## Advanced: Custom Graph Builder
 
-If your model doesn't follow the Pre-RMSNorm + GQA + RoPE + SwiGLU pattern, you'll need a custom model runtime. The `IModelRuntime` interface gives families full control over graph construction, state creation, and per-step execution.
+If your model does not follow the Pre-RMSNorm + GQA + RoPE + SwiGLU pattern, you need a custom graph builder. The shared TRT graph ops in `trtf_build/graph_ops.py` provide reusable building blocks.
 
 Examples of when this is needed:
 
-- **MoE (Mixture of Experts)**: Expert routing layer instead of dense MLP — use `CreateKvCacheRuntime(lambda)` with a custom graph builder
-- **MLA (Multi-head Latent Attention)**: Compressed KV cache — implement `IModelRuntime` directly
-- **Mamba/SSM**: Fundamentally different state (no KV cache) — implement `IModelRuntime` directly
+- **MoE (Mixture of Experts)**: Expert routing layer instead of dense MLP
+- **MLA (Multi-head Latent Attention)**: Compressed KV cache
+- **Mamba/SSM**: Fundamentally different architecture (no attention)
 - **Parallel attention**: Attention and MLP computed in parallel (GPT-J style)
 - **Different normalization**: LayerNorm instead of RMSNorm
 
-### Option A: Custom graph, standard KV-cache I/O (MoE, parallel attention)
+### Custom graph builder example (MoE)
 
-Use `CreateKvCacheRuntime()` with a lambda that builds your custom engine. You get KV-cache state management for free:
+```python
+# trtf_build/families/mixtral/graph_builder.py
 
-```cpp
-RegisterModelRuntime("mixtral", CreateKvCacheRuntime(
-    [](const TrtDecoderDefinition& weights, TrtLogger& logger) {
-        MixtralGraphBuilder builder;
-        return builder.build_decoder_step_engine(weights, logger);
-    }));
+from trtf_build.graph_ops import (
+    add_rms_norm, add_matmul, add_rope, add_attention,
+    add_swiglu_expert, add_topk_routing,
+)
+
+class MixtralGraphBuilder:
+    """Builds TRT network for Mixtral MoE architecture."""
+
+    def build_layer(self, network, hidden, layer_weights, config):
+        # Standard attention (reuse shared ops)
+        norm1 = add_rms_norm(network, hidden, layer_weights.input_norm)
+        q, k, v = self.project_qkv(network, norm1, layer_weights)
+        q, k = add_rope(network, q, k, config)
+        attn_out = add_attention(network, q, k, v, config)
+        hidden = add_residual(network, hidden, attn_out)
+
+        # MoE MLP (custom)
+        norm2 = add_rms_norm(network, hidden, layer_weights.post_attn_norm)
+        routing = add_topk_routing(network, norm2, layer_weights.router, top_k=2)
+        mlp_out = add_swiglu_expert(network, norm2, layer_weights.experts, routing)
+        hidden = add_residual(network, hidden, mlp_out)
+
+        return hidden
 ```
 
-### Option B: Fully custom runtime (Mamba, hybrid)
+Register it in the plugin:
 
-Implement `IModelRuntime` directly for architectures that don't use KV-cache attention:
+```python
+# trtf_build/families/mixtral/plugin.py
 
-```cpp
-class MambaRuntime final : public IModelRuntime {
-public:
-    std::unique_ptr<DecoderStepEngine> build_engine(
-        const TrtDecoderDefinition& weights, TrtLogger& logger) override { /* SSM graph */ }
-    std::unique_ptr<IStepState> create_state(
-        const DecoderStepEngine& engine) override { /* SSM state */ }
-    bool run_step(const DecoderStepEngine& engine, IStepState& state,
-        int32_t token_id, std::vector<float>& out_logits,
-        std::string& error) override { /* SSM step */ }
-};
+from trtf_build.registry import FamilyPlugin
+from .checkpoint import MixtralCheckpointMapper
+from .graph_builder import MixtralGraphBuilder
+
+def register():
+    return FamilyPlugin(
+        family_name="mixtral",
+        model_types=["mixtral"],
+        checkpoint_mapper=MixtralCheckpointMapper(),
+        graph_builder=MixtralGraphBuilder(),
+    )
 ```
 
-Register it:
-```cpp
-RegisterModelRuntime("mamba", std::make_unique<MambaRuntime>());
-```
-
-You can still reuse the ops from `trt_graph_ops.h` (RMSNorm, matmul, RoPE, etc.) — just compose them differently.
+The shared graph ops from `trtf_build/graph_ops.py` (RMSNorm, matmul, RoPE, attention, etc.) are reusable by any custom graph builder -- compose them differently for your architecture.

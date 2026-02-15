@@ -1,5 +1,31 @@
 # Worklog
 
+## 2026-02-15 — Python Build / C++ Runtime Architecture Split
+
+- **Migrated TRT Engine Build from C++ to Python**
+  - **Architecture shift**: C++ is now a bundle-only runtime. Python builds engines, C++ runs them.
+  - New `trtf_build/` Python package uses TensorRT Python API + `safetensors` library to build TRT engines and produce `.trtfb` bundles.
+  - C++ runtime simplified to bundle-only execution: ~13 source files, down from ~40.
+  - **Removed ~3500 lines of C++ build code**:
+    - Safetensors reader (`SafetensorReader`, `TensorSource`)
+    - Checkpoint mapper system (`ICheckpointMapper`, `StandardCheckpointMapper`, per-family mappers)
+    - Model loader (`LoadDecoderModel`, config.json parsing)
+    - Graph builder (`StandardDecoderGraphBuilder`, `trt_graph_ops`)
+    - TRT model definition (`TrtDecoderDefinition`, `BuildTrtDecoderWeights`)
+    - Model runtime registry (`IModelRuntime`, `RegisterModelRuntime`, `FindModelRuntime`)
+    - Model resolver pipeline (`ResolveTextGenerationModel`, `ResolveHfModelViaFamilyRegistry`)
+    - HF family registry (`RegisterHfModelFamily`, `RegisterBuiltinHfModelFamilies`)
+    - Engine cache system (`engine_cache.h/cpp`)
+    - Fast-path config (`FastPathModelConfig`)
+    - Tensor math utilities (`transpose_2d`, `expand_kv_projection`, `repeat_head_norm`)
+  - **4 family plugins ported to Python**: Qwen, LLaMA, Mistral, Gemma — each as a Python module in `trtf_build/`.
+  - **C++ tests reduced from 26 to 11**: removed tests for C++ build infrastructure (checkpoint mappers, model loader, engine cache, family registries, model runtime, tensor math, etc.). Remaining tests cover bundle format, C ABI, CLI, pipeline API, tokenizer, and TRT runtime.
+  - **New CLI split**:
+    - `trtf-build build|inspect|version` — Python CLI for building bundles from HF model directories.
+    - `trtf run|inspect|version` — C++ CLI for running inference from `.trtfb` bundles.
+  - **What C++ still owns**: Bundle loading/deserialization, TRT engine deserialization, autoregressive generation loop (prefill + decode), KV-cache management, CUDA resource management, tokenizer bridge, C ABI entry point.
+  - **What Python now owns**: HF config.json parsing, safetensors loading, checkpoint mapping (HF tensor keys to canonical format), TRT network graph construction (via TensorRT Python API), engine compilation, bundle packaging.
+
 ## 2026-02-15 (continued)
 
 - **Complete Bundle System + Remove Environment Variables**

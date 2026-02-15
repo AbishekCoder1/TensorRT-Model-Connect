@@ -1,25 +1,24 @@
 // =============================================================================
-// Test suite: Pipeline C ABI — IPipeline virtual interface via trtf_create_pipeline
+// Test suite: Pipeline C ABI -- IPipeline virtual interface via trtf_create_pipeline
 // =============================================================================
 //
 // Purpose:
 //   Validates the public C ABI entry point trtf_create_pipeline() and the
-//   IPipeline virtual interface it returns. Tests cover basic generation
-//   functionality, pointer lifetime semantics, and ABI stability guarantees.
-//   Uses the QWEN3 built-in model, which falls back gracefully if the model
-//   directory is not available (tests SKIP rather than FAIL).
+//   IPipeline virtual interface it returns. Tests cover null/invalid input
+//   handling, version queries, and ABI stability guarantees. Since the
+//   runtime is now bundle-only (requires pre-built .trtfb files), tests
+//   focus on error paths and compile-time interface properties rather than
+//   successful generation.
 //
 // Dependencies:
 //   - trtf/pipeline.h (IPipeline, trtf_create_pipeline, trtf_last_error,
-//     TRTF_CPU_ONLY flag)
-//   - QWEN3 built-in model (optional — tests skip if unavailable)
+//     trtf_version, trtf_has_trt)
+//   - No TRT, GPU, or model files required.
 //
 // Approach:
-//   Each test function creates a pipeline via the C ABI, exercises the
-//   generate() method, and checks return values. A simple check() helper
-//   tracks failure count. Tests are designed to be order-independent but
-//   run sequentially in main(). The TRTF_CPU_ONLY flag is used to avoid
-//   requiring GPU/TRT for these API-level tests.
+//   Each test function exercises the C ABI entry points with invalid inputs
+//   and checks return values. A simple check() helper tracks failure count.
+//   Tests are designed to be order-independent but run sequentially in main().
 // =============================================================================
 
 #include "trtf/pipeline.h"
@@ -32,7 +31,7 @@ static int failures = 0;
 
 // -----------------------------------------------------------------------------
 // Helper: Assert a boolean condition and report failure with a descriptive name.
-// Increments the global failure counter on false. Does not abort — all tests
+// Increments the global failure counter on false. Does not abort -- all tests
 // run to completion so the full failure picture is visible.
 // -----------------------------------------------------------------------------
 static void check(bool condition, const char* test_name)
@@ -45,93 +44,78 @@ static void check(bool condition, const char* test_name)
 }
 
 // -----------------------------------------------------------------------------
-// Test: generate() returns non-null, non-empty text
+// Test: null input returns nullptr with error message
 //
 // Intention:
-//   Verify the most basic contract of IPipeline::generate() — that it returns
-//   a valid C string with at least one character when given a valid prompt
-//   and a positive max_new_tokens value.
+//   Verify that passing nullptr as the bundle path to trtf_create_pipeline
+//   returns nullptr and sets a descriptive error via trtf_last_error().
 //
-// Setup:
-//   Creates a QWEN3 pipeline with TRTF_CPU_ONLY flag. Skips (without failure)
-//   if the model is not available.
+// Setup: None.
 //
 // Mechanism:
-//   Calls generate("hello", 3) and checks that the result pointer is non-null
-//   and that strlen(result) > 0.
+//   Calls trtf_create_pipeline(nullptr, 0) and checks the return and error.
 // -----------------------------------------------------------------------------
-static void test_generate_returns_text()
+static void test_null_input_returns_null()
 {
-    auto* p = trtf_create_pipeline("QWEN3", TRTF_CPU_ONLY);
-    if (p == nullptr)
-    {
-        std::cerr << "SKIP: QWEN3 not available: " << trtf_last_error() << '\n';
-        return;
-    }
-    const char* result = p->generate("hello", 3);
-    check(result != nullptr, "generate returns non-null");
-    if (result != nullptr)
-    {
-        check(std::strlen(result) > 0, "generate returns non-empty text");
-    }
-    delete p;
+    auto* p = trtf_create_pipeline(nullptr, 0);
+    check(p == nullptr, "null input returns nullptr");
+    const char* err = trtf_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "error set after null input");
 }
 
 // -----------------------------------------------------------------------------
-// Test: generate() with explicit max_tokens returns non-null
+// Test: invalid path returns nullptr with error message
 //
 // Intention:
-//   Verify that the max_new_tokens parameter is accepted and that generation
-//   succeeds (returns non-null) when a specific token limit is provided.
-//   This is a simpler variant of test_generate_returns_text focused on the
-//   max_tokens parameter path.
+//   Verify that a nonexistent bundle path is rejected with a clear error.
 //
-// Setup:
-//   Creates a QWEN3 pipeline with TRTF_CPU_ONLY. Skips if unavailable.
+// Setup: None.
 //
 // Mechanism:
-//   Calls generate("hello", 3) and checks that the returned pointer is
-//   non-null.
+//   Calls trtf_create_pipeline with a path that does not exist, checks nullptr
+//   return and non-empty error message.
 // -----------------------------------------------------------------------------
-static void test_generate_with_max_tokens()
+static void test_invalid_path_returns_null()
 {
-    auto* p = trtf_create_pipeline("QWEN3", TRTF_CPU_ONLY);
-    if (p == nullptr) return;
-    const char* result = p->generate("hello", 3);
-    check(result != nullptr, "generate with max_tokens returns non-null");
-    delete p;
+    auto* p = trtf_create_pipeline("/nonexistent/path/to/bundle.trtfb", 0);
+    check(p == nullptr, "invalid path returns nullptr");
+    const char* err = trtf_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "error set after invalid path");
 }
 
 // -----------------------------------------------------------------------------
-// Test: Result pointer lifetime — valid until next generate() call
+// Test: version string is available and non-empty
 //
 // Intention:
-//   Verify that the pointer returned by generate() remains valid at least
-//   until the next call to generate(). This tests the implicit contract that
-//   the pipeline owns the result buffer and may reuse/overwrite it on
-//   subsequent calls, but the previous pointer is usable before that happens.
+//   Verify that trtf_version() returns a usable version string.
 //
-// Setup:
-//   Creates a QWEN3 pipeline with TRTF_CPU_ONLY. Skips if unavailable.
+// Setup: None.
 //
 // Mechanism:
-//   Calls generate() twice with different prompts. After the first call,
-//   copies the result string to verify it was non-empty. After the second
-//   call, checks that the second result is also non-null. The copy of the
-//   first result confirms it was readable before the second call.
+//   Calls trtf_version(), checks non-null and non-empty.
 // -----------------------------------------------------------------------------
-static void test_generate_pointer_valid_until_next()
+static void test_version_available()
 {
-    auto* p = trtf_create_pipeline("QWEN3", TRTF_CPU_ONLY);
-    if (p == nullptr) return;
-    const char* first = p->generate("hello", 3);
-    check(first != nullptr, "first generate result valid");
-    const std::string first_copy(first ? first : "");
+    const char* ver = trtf_version();
+    check(ver != nullptr, "version is non-null");
+    check(std::strlen(ver) > 0, "version is non-empty");
+}
 
-    const char* second = p->generate("world", 3);
-    check(second != nullptr, "second generate result valid");
-    check(!first_copy.empty(), "first result was non-empty");
-    delete p;
+// -----------------------------------------------------------------------------
+// Test: trtf_has_trt returns a valid boolean
+//
+// Intention:
+//   Verify that the TRT detection function returns 0 or 1.
+//
+// Setup: None.
+//
+// Mechanism:
+//   Calls trtf_has_trt(), checks the value is 0 or 1.
+// -----------------------------------------------------------------------------
+static void test_has_trt_returns_bool()
+{
+    const int val = trtf_has_trt();
+    check(val == 0 || val == 1, "trtf_has_trt returns 0 or 1");
 }
 
 // -----------------------------------------------------------------------------
@@ -139,13 +123,13 @@ static void test_generate_pointer_valid_until_next()
 //
 // Intention:
 //   Verify the ABI stability guarantee that IPipeline is a pure abstract
-//   interface with no data members — its size must equal exactly one pointer
+//   interface with no data members -- its size must equal exactly one pointer
 //   (the vtable pointer). This ensures the C ABI boundary is safe: callers
 //   compiled with different compilers/settings can use IPipeline* as long
 //   as the vtable layout is stable.
 //
 // Setup:
-//   None — this is a compile-time/static property check.
+//   None -- this is a compile-time/static property check.
 //
 // Mechanism:
 //   Compares sizeof(trtf::IPipeline) against sizeof(void*). If they differ,
@@ -157,12 +141,32 @@ static void test_sizeof_ipipeline_is_vtable()
     check(sizeof(trtf::IPipeline) == sizeof(void*), "sizeof(IPipeline) equals vtable pointer size");
 }
 
+// -----------------------------------------------------------------------------
+// Test: delete null IPipeline is safe
+//
+// Intention:
+//   Verify that deleting a null IPipeline pointer does not crash.
+//
+// Setup: A null IPipeline pointer.
+//
+// Mechanism:
+//   Calls delete on the null pointer, asserts true if we reach this point.
+// -----------------------------------------------------------------------------
+static void test_delete_null_safe()
+{
+    trtf::IPipeline* p = nullptr;
+    delete p;
+    check(true, "delete null IPipeline is safe");
+}
+
 int main()
 {
-    test_generate_returns_text();
-    test_generate_with_max_tokens();
-    test_generate_pointer_valid_until_next();
+    test_null_input_returns_null();
+    test_invalid_path_returns_null();
+    test_version_available();
+    test_has_trt_returns_bool();
     test_sizeof_ipipeline_is_vtable();
+    test_delete_null_safe();
 
     if (failures > 0)
     {

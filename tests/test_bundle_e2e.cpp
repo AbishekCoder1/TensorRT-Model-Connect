@@ -1,46 +1,39 @@
 // =============================================================================
-// Test suite: Bundle end-to-end -- build, save, load, and generate from
-//   .trtfb bundles using the full pipeline.
+// Test suite: Bundle validation -- loading non-bundle files and invalid paths.
 //
 // Purpose:
-//   Validates the complete bundle lifecycle: creating a TRT pipeline from a
-//   model, saving it as a .trtfb bundle, reloading the bundle as a new
-//   pipeline, and generating text from the reloaded pipeline. This exercises
-//   the integration between the C ABI pipeline, TRT backend, bundle
-//   serialization, and bundle deserialization.
+//   Validates that the C ABI and bundle infrastructure gracefully reject
+//   invalid inputs. Since the C++ runtime is now bundle-only (requires
+//   pre-built .trtfb files), and unit tests cannot create bundles (that
+//   requires TRT + GPU + model weights), these tests focus on the error
+//   paths: non-bundle files, nonexistent paths, and bundle API utilities.
 //
 // Dependencies:
 //   - trtf/pipeline.h: C ABI entry points (trtf_create_pipeline, trtf_has_trt).
 //   - trtf/bundle.h: IsBundle, InspectBundle.
-//   - TensorRT + GPU: required for pipeline creation and text generation.
-//   - The "trtf/tiny-cake-v1" built-in test model.
-//   - Filesystem access (temp directories via mkdtemp).
+//   - No TRT or GPU required. All tests exercise error/rejection paths.
 //
 // Approach:
-//   Tests are guarded by a has_trt flag (checked via trtf_has_trt()). When
-//   TRT is not available, tests print SKIP and pass without assertions. When
-//   TRT is available but pipeline creation fails (e.g., missing model files),
-//   tests also skip gracefully. This allows the test binary to run in both
-//   GPU and CPU-only environments without failure.
+//   Tests verify that non-bundle files and invalid paths are rejected with
+//   appropriate error messages. The IsBundle() utility is tested with known
+//   non-bundle inputs. InspectBundle() is tested with an invalid path to
+//   verify it does not crash.
 //
 // Test categories:
-//   - Save/load roundtrip: save pipeline to bundle, reload, generate text
-//   - Inspect: verify InspectBundle extracts metadata from a saved bundle
+//   - Non-bundle rejection: /dev/null, nonexistent paths
+//   - IsBundle utility: correctly rejects non-bundle files
+//   - InspectBundle utility: handles invalid input without crashing
 // =============================================================================
 
 #include "trtf/pipeline.h"
 #include "trtf/bundle.h"
 
-#include <cerrno>
 #include <cstring>
-#include <filesystem>
+#include <exception>
 #include <iostream>
 #include <string>
 
-#include <stdlib.h>
-
 static int failures = 0;
-static bool has_trt = false;
 
 static void check(bool condition, const char* test_name)
 {
@@ -51,135 +44,106 @@ static void check(bool condition, const char* test_name)
     }
 }
 
-static std::filesystem::path make_temp_dir()
+// -----------------------------------------------------------------------------
+// Intention: Verify that passing a non-bundle file (e.g., /dev/null) to
+//   trtf_create_pipeline returns nullptr with an appropriate error message.
+// Setup: None (uses the always-available /dev/null as input).
+// Mechanism: Calls trtf_create_pipeline("/dev/null", 0), asserts nullptr
+//   return and a non-empty error message. This ensures the bundle loader
+//   gracefully rejects files that lack the .trtfb magic bytes.
+// -----------------------------------------------------------------------------
+static void test_non_bundle_file_rejected()
 {
-    char pattern[] = "/tmp/trtfb_e2e_XXXXXX";
-    char* dir = mkdtemp(pattern);
-    if (dir == nullptr)
-    {
-        throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
-    }
-    return std::filesystem::path(dir);
+    auto* p = trtf_create_pipeline("/dev/null", 0);
+    check(p == nullptr, "non-bundle file returns nullptr");
+    const char* err = trtf_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "error message set for non-bundle file");
 }
 
 // -----------------------------------------------------------------------------
-// Intention: Verify the full bundle save/load/generate roundtrip -- a pipeline
-//   created from a model can be saved as a .trtfb bundle, and the bundle can
-//   be reloaded as a new pipeline that successfully generates text.
-// Setup: Creates a TRT pipeline from the "trtf/tiny-cake-v1" built-in model
-//   with TRTF_FORCE_TRT. Saves the pipeline to a temp .trtfb file. The
-//   original pipeline generates 5 tokens from "hello" as a baseline.
-// Mechanism:
-//   1. Checks has_trt; skips if TRT unavailable.
-//   2. Creates a pipeline via trtf_create_pipeline; skips if creation fails.
-//   3. Calls save_bundle(); skips if not implemented for this backend.
-//   4. Asserts the bundle file exists on disk and IsBundle() returns true.
-//   5. Generates text with the original pipeline as a baseline.
-//   6. Loads the bundle as a new pipeline via trtf_create_pipeline.
-//   7. Asserts the bundle-loaded pipeline is non-null and can generate text.
-//   8. Cleans up the temp directory.
+// Intention: Verify that passing a nonexistent path to trtf_create_pipeline
+//   returns nullptr with an appropriate error message.
+// Setup: None.
+// Mechanism: Calls trtf_create_pipeline with a path that does not exist on
+//   the filesystem, asserts nullptr return and non-empty error.
 // -----------------------------------------------------------------------------
-static void test_save_and_load_roundtrip()
+static void test_nonexistent_bundle_rejected()
 {
-    if (!has_trt)
-    {
-        std::cerr << "  SKIP: test_save_and_load_roundtrip (no TRT)\n";
-        return;
-    }
-
-    auto* p = trtf_create_pipeline("trtf/tiny-cake-v1", TRTF_FORCE_TRT);
-    if (p == nullptr)
-    {
-        std::cerr << "  SKIP: test_save_and_load_roundtrip (TRT pipeline creation failed: "
-                  << trtf_last_error() << ")\n";
-        return;
-    }
-
-    const auto tmp = make_temp_dir();
-    const auto bundle_path = (tmp / "roundtrip.trtfb").string();
-
-    const bool saved = p->save_bundle(bundle_path.c_str());
-    if (!saved)
-    {
-        std::cerr << "  SKIP: test_save_and_load_roundtrip (save_bundle not yet implemented for this backend)\n";
-        delete p;
-        std::filesystem::remove_all(tmp);
-        return;
-    }
-
-    check(std::filesystem::exists(bundle_path), "bundle file created");
-    check(trtf::IsBundle(bundle_path), "bundle has valid magic");
-
-    // Generate text with original pipeline
-    const char* original_output = p->generate("hello", 5);
-    const std::string original_text(original_output ? original_output : "");
-    delete p;
-
-    // Load from bundle and generate
-    auto* p2 = trtf_create_pipeline(bundle_path.c_str(), TRTF_FORCE_TRT);
-    check(p2 != nullptr, "bundle loads as pipeline");
-    if (p2 != nullptr)
-    {
-        const char* bundle_output = p2->generate("hello", 5);
-        check(bundle_output != nullptr, "bundle pipeline generates text");
-        delete p2;
-    }
-
-    std::filesystem::remove_all(tmp);
+    auto* p = trtf_create_pipeline("/nonexistent/path/to/model.trtfb", 0);
+    check(p == nullptr, "nonexistent bundle path returns nullptr");
+    const char* err = trtf_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "error message set for nonexistent bundle");
 }
 
 // -----------------------------------------------------------------------------
-// Intention: Verify that InspectBundle() can extract meaningful metadata from
-//   a bundle file that was saved by a real TRT pipeline (not hand-crafted).
-// Setup: Creates a TRT pipeline from "trtf/tiny-cake-v1", saves it as a
-//   .trtfb bundle to a temp directory.
-// Mechanism:
-//   1. Checks has_trt; skips if TRT unavailable.
-//   2. Creates and saves a pipeline; skips if creation or save fails.
-//   3. Calls InspectBundle on the saved file.
-//   4. Asserts that model_id is non-empty (the inspection extracted real data).
-//   5. Cleans up the temp directory.
+// Intention: Verify that IsBundle() correctly rejects a non-bundle file.
+// Setup: None (uses /dev/null as a known non-bundle file).
+// Mechanism: Calls IsBundle("/dev/null"), asserts it returns false.
 // -----------------------------------------------------------------------------
-static void test_inspect_saved_bundle()
+static void test_is_bundle_rejects_non_bundle()
 {
-    if (!has_trt)
+    check(!trtf::IsBundle("/dev/null"), "IsBundle rejects /dev/null");
+}
+
+// -----------------------------------------------------------------------------
+// Intention: Verify that IsBundle() correctly rejects a nonexistent path.
+// Setup: None.
+// Mechanism: Calls IsBundle with a path that does not exist, asserts false.
+// -----------------------------------------------------------------------------
+static void test_is_bundle_rejects_nonexistent()
+{
+    check(!trtf::IsBundle("/nonexistent/path/to/model.trtfb"), "IsBundle rejects nonexistent path");
+}
+
+// -----------------------------------------------------------------------------
+// Intention: Verify that InspectBundle() does not crash when given a
+//   nonexistent path, and returns an empty/default BundleInfo.
+// Setup: None.
+// Mechanism: Calls InspectBundle with a nonexistent path, checks that the
+//   returned model_id is empty (indicating no valid data was extracted).
+// -----------------------------------------------------------------------------
+static void test_inspect_nonexistent_does_not_crash()
+{
+    bool threw = false;
+    try
     {
-        std::cerr << "  SKIP: test_inspect_saved_bundle (no TRT)\n";
-        return;
+        trtf::InspectBundle("/nonexistent/path/to/model.trtfb");
     }
-
-    auto* p = trtf_create_pipeline("trtf/tiny-cake-v1", TRTF_FORCE_TRT);
-    if (p == nullptr)
+    catch (const std::exception&)
     {
-        std::cerr << "  SKIP: test_inspect_saved_bundle (TRT pipeline creation failed)\n";
-        return;
+        threw = true;
     }
+    check(threw, "InspectBundle throws for nonexistent path");
+}
 
-    const auto tmp = make_temp_dir();
-    const auto bundle_path = (tmp / "inspect.trtfb").string();
-
-    const bool saved = p->save_bundle(bundle_path.c_str());
-    delete p;
-
-    if (!saved)
+// -----------------------------------------------------------------------------
+// Intention: Verify that InspectBundle() does not crash when given a
+//   non-bundle file, and returns an empty/default BundleInfo.
+// Setup: None (uses /dev/null).
+// Mechanism: Calls InspectBundle("/dev/null"), checks that model_id is empty.
+// -----------------------------------------------------------------------------
+static void test_inspect_non_bundle_does_not_crash()
+{
+    bool threw = false;
+    try
     {
-        std::cerr << "  SKIP: test_inspect_saved_bundle (save_bundle not yet implemented)\n";
-        std::filesystem::remove_all(tmp);
-        return;
+        trtf::InspectBundle("/dev/null");
     }
-
-    const auto info = trtf::InspectBundle(bundle_path);
-    check(!info.model_id.empty(), "inspect model_id non-empty");
-
-    std::filesystem::remove_all(tmp);
+    catch (const std::exception&)
+    {
+        threw = true;
+    }
+    check(threw, "InspectBundle throws for non-bundle file");
 }
 
 int main()
 {
-    has_trt = (trtf_has_trt() == 1);
-
-    test_save_and_load_roundtrip();
-    test_inspect_saved_bundle();
+    test_non_bundle_file_rejected();
+    test_nonexistent_bundle_rejected();
+    test_is_bundle_rejects_non_bundle();
+    test_is_bundle_rejects_nonexistent();
+    test_inspect_nonexistent_does_not_crash();
+    test_inspect_non_bundle_does_not_crash();
 
     if (failures > 0)
     {

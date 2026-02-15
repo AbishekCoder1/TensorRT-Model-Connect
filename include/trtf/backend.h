@@ -1,17 +1,13 @@
 #pragma once
 
 #include "trtf/generation.h"
-#include "trtf/model.h"
 
 #include <cstdint>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace trtf {
-
-class ITokenizer;
 
 class IGenerationBackend {
 public:
@@ -28,26 +24,6 @@ public:
     virtual std::vector<int32_t> generate(
         const std::vector<int32_t>& input_ids,
         const GenerationConfig& config) = 0;
-
-    virtual bool supports_text_generation() const
-    {
-        return false;
-    }
-
-    virtual std::string generate_text(const std::string& prompt, const GenerationConfig& config)
-    {
-        (void) prompt;
-        (void) config;
-        throw std::runtime_error("Backend does not support direct text generation.");
-    }
-
-    virtual std::vector<char> serialize_engine_plan() const
-    {
-        return {};
-    }
 };
-
-std::unique_ptr<IGenerationBackend> CreateTrtBackend(const ITokenizer& tokenizer, const DecoderModel& model);
-std::unique_ptr<IGenerationBackend> CreateHfPythonBackend(const std::string& model_dir, const std::string& python_path = "");
 
 } // namespace trtf

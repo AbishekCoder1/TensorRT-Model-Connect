@@ -53,61 +53,21 @@ if(TRTF_ENABLE_TRT)
   )
 endif()
 
-# --- Auto-discover model families ---
-# Families live in src/models/<name>/ with a registration.h header.
-# Adding a new family = create files + re-run cmake (zero shared file edits).
-file(GLOB _family_reg_headers src/models/*/registration.h)
-set(TRTF_FAMILY_INCLUDES "")
-set(TRTF_FAMILY_CALLS "")
-set(_trtf_family_sources "")
-foreach(_header IN LISTS _family_reg_headers)
-  get_filename_component(_dir ${_header} DIRECTORY)
-  get_filename_component(_name ${_dir} NAME)
-  string(SUBSTRING ${_name} 0 1 _first)
-  string(TOUPPER ${_first} _first)
-  string(SUBSTRING ${_name} 1 -1 _rest)
-  set(_pascal "${_first}${_rest}")
-  string(APPEND TRTF_FAMILY_INCLUDES "#include \"models/${_name}/registration.h\"\n")
-  string(APPEND TRTF_FAMILY_CALLS "    ${_name}::Register${_pascal}Family();\n")
-  # Collect all .cpp files in the family directory
-  file(GLOB _family_cpps src/models/${_name}/*.cpp)
-  list(APPEND _trtf_family_sources ${_family_cpps})
-endforeach()
-configure_file(cmake/family_dispatch.cpp.in
-  ${CMAKE_BINARY_DIR}/generated/family_dispatch.cpp @ONLY)
-
+# --- Bundle-only runtime library ---
 add_library(trtf_core
-  src/model/model_loader.cpp
-  src/model/safetensors_loader.cpp
-  src/model/hf_family_registry.cpp
-  src/model/model_resolver.cpp
-  src/model/trt_model_definition.cpp
-  src/model/standard_decoder_graph_builder.cpp
-  src/model/checkpoint_mapper.cpp
-  src/model/standard_checkpoint_mapper.cpp
-  src/runtime/hf_python_backend.cpp
-  src/runtime/runtime_factory.cpp
-  src/runtime/trt_backend.cpp
+  src/bundle/bundle_format.cpp
+  src/cabi/trtf_c.cpp
+  src/cabi/fast_path_config.cpp
   src/runtime/trt/trt_common.cpp
-  src/runtime/trt/trt_graph_ops.cpp
   src/runtime/trt/trt_engine_lifecycle.cpp
   src/runtime/trt/trt_decode_runtime.cpp
   src/runtime/trt/trt_backend_shared.cpp
   src/runtime/trt/kv_cache_step_state.cpp
-  src/runtime/trt/model_runtime.cpp
-  ${_trtf_family_sources}
-  ${CMAKE_BINARY_DIR}/generated/family_dispatch.cpp
-  src/bundle/bundle_format.cpp
-  src/bundle/bundle_api.cpp
-  src/cabi/trtf_c.cpp
-  src/cabi/fast_path_config.cpp
+  src/tokenizer/hf_python_tokenizer.cpp
+  src/tokenizer/vocab_tokenizer.cpp
   src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
-  src/utils/tensor_math.cpp
-  src/utils/trt/engine_cache.cpp
-  src/tokenizer/vocab_tokenizer.cpp
-  src/tokenizer/hf_python_tokenizer.cpp
 )
 
 target_include_directories(trtf_core
@@ -150,86 +110,7 @@ target_link_libraries(trtf PRIVATE trtf_core)
 
 enable_testing()
 
-add_executable(test_trt_smoke tests/test_trt_smoke.cpp)
-target_link_libraries(test_trt_smoke PRIVATE trtf_core)
-add_test(NAME test_trt_smoke COMMAND test_trt_smoke)
-
-add_executable(test_model_loader tests/test_model_loader.cpp)
-target_link_libraries(test_model_loader PRIVATE trtf_core)
-add_test(NAME test_model_loader COMMAND test_model_loader)
-
-add_executable(test_model_resolver tests/test_model_resolver.cpp)
-target_link_libraries(test_model_resolver PRIVATE trtf_core)
-add_test(NAME test_model_resolver COMMAND test_model_resolver)
-
-add_executable(test_runtime_factory tests/test_runtime_factory.cpp)
-target_link_libraries(test_runtime_factory PRIVATE trtf_core)
-add_test(NAME test_runtime_factory COMMAND test_runtime_factory)
-
-add_executable(test_hf_family_registry tests/test_hf_family_registry.cpp)
-target_link_libraries(test_hf_family_registry PRIVATE trtf_core)
-add_test(NAME test_hf_family_registry COMMAND test_hf_family_registry)
-
-# Auto-discover family tests (re-run cmake after adding a new family test)
-file(GLOB _trtf_family_tests tests/test_*_family.cpp)
-foreach(_src IN LISTS _trtf_family_tests)
-  get_filename_component(_name ${_src} NAME_WE)
-  add_executable(${_name} ${_src})
-  target_link_libraries(${_name} PRIVATE trtf_core)
-  add_test(NAME ${_name} COMMAND ${_name})
-endforeach()
-
-add_executable(test_tensor_math tests/test_tensor_math.cpp)
-target_link_libraries(test_tensor_math PRIVATE trtf_core)
-target_include_directories(test_tensor_math PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_tensor_math COMMAND test_tensor_math)
-
-add_executable(test_json_helpers tests/test_json_helpers.cpp)
-target_link_libraries(test_json_helpers PRIVATE trtf_core)
-target_include_directories(test_json_helpers PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_json_helpers COMMAND test_json_helpers)
-
-add_executable(test_text_parsers tests/test_text_parsers.cpp)
-target_link_libraries(test_text_parsers PRIVATE trtf_core)
-target_include_directories(test_text_parsers PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_text_parsers COMMAND test_text_parsers)
-
-add_executable(test_decode_runtime tests/test_decode_runtime.cpp)
-target_link_libraries(test_decode_runtime PRIVATE trtf_core)
-target_include_directories(test_decode_runtime PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_decode_runtime SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_decode_runtime PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_decode_runtime COMMAND test_decode_runtime)
-
-add_executable(test_engine_cache_key tests/test_engine_cache_key.cpp)
-target_link_libraries(test_engine_cache_key PRIVATE trtf_core)
-target_include_directories(test_engine_cache_key PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_engine_cache_key COMMAND test_engine_cache_key)
-
-add_executable(test_kv_cache_step_state tests/test_kv_cache_step_state.cpp)
-target_link_libraries(test_kv_cache_step_state PRIVATE trtf_core)
-target_include_directories(test_kv_cache_step_state PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_kv_cache_step_state SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_kv_cache_step_state PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_kv_cache_step_state COMMAND test_kv_cache_step_state)
-
-add_executable(test_extra_fields tests/test_extra_fields.cpp)
-target_link_libraries(test_extra_fields PRIVATE trtf_core)
-target_include_directories(test_extra_fields PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_extra_fields SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_extra_fields PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_extra_fields COMMAND test_extra_fields)
-
-add_executable(test_data_dir tests/test_data_dir.cpp)
-target_link_libraries(test_data_dir PRIVATE trtf_core)
-target_include_directories(test_data_dir PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_data_dir COMMAND test_data_dir)
+# --- Tests ---
 
 add_executable(test_bundle_format tests/test_bundle_format.cpp)
 target_link_libraries(test_bundle_format PRIVATE trtf_core)
@@ -240,20 +121,43 @@ add_executable(test_c_abi_entry tests/test_c_abi_entry.cpp)
 target_link_libraries(test_c_abi_entry PRIVATE trtf_core)
 add_test(NAME test_c_abi_entry COMMAND test_c_abi_entry)
 
-add_executable(test_engine_cache_index tests/test_engine_cache_index.cpp)
-target_link_libraries(test_engine_cache_index PRIVATE trtf_core)
-target_include_directories(test_engine_cache_index PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/tests)
-add_test(NAME test_engine_cache_index COMMAND test_engine_cache_index)
-
-add_executable(test_engine_cache_io tests/test_engine_cache_io.cpp)
-target_link_libraries(test_engine_cache_io PRIVATE trtf_core)
-target_include_directories(test_engine_cache_io PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/tests)
-add_test(NAME test_engine_cache_io COMMAND test_engine_cache_io)
-
 add_executable(test_fast_path_config tests/test_fast_path_config.cpp)
 target_link_libraries(test_fast_path_config PRIVATE trtf_core)
 target_include_directories(test_fast_path_config PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_fast_path_config COMMAND test_fast_path_config)
+
+add_executable(test_text_parsers tests/test_text_parsers.cpp)
+target_link_libraries(test_text_parsers PRIVATE trtf_core)
+target_include_directories(test_text_parsers PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_text_parsers COMMAND test_text_parsers)
+
+add_executable(test_json_helpers tests/test_json_helpers.cpp)
+target_link_libraries(test_json_helpers PRIVATE trtf_core)
+target_include_directories(test_json_helpers PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_json_helpers COMMAND test_json_helpers)
+
+add_executable(test_data_dir tests/test_data_dir.cpp)
+target_link_libraries(test_data_dir PRIVATE trtf_core)
+target_include_directories(test_data_dir PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_data_dir COMMAND test_data_dir)
+
+add_executable(test_decode_runtime tests/test_decode_runtime.cpp)
+target_link_libraries(test_decode_runtime PRIVATE trtf_core)
+target_include_directories(test_decode_runtime PRIVATE ${PROJECT_SOURCE_DIR}/src)
+if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
+  target_include_directories(test_decode_runtime SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_decode_runtime PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
+endif()
+add_test(NAME test_decode_runtime COMMAND test_decode_runtime)
+
+add_executable(test_kv_cache_step_state tests/test_kv_cache_step_state.cpp)
+target_link_libraries(test_kv_cache_step_state PRIVATE trtf_core)
+target_include_directories(test_kv_cache_step_state PRIVATE ${PROJECT_SOURCE_DIR}/src)
+if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
+  target_include_directories(test_kv_cache_step_state SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_kv_cache_step_state PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
+endif()
+add_test(NAME test_kv_cache_step_state COMMAND test_kv_cache_step_state)
 
 add_executable(test_pipeline_api tests/test_pipeline_api.cpp)
 target_link_libraries(test_pipeline_api PRIVATE trtf_core)
@@ -266,15 +170,6 @@ add_test(NAME test_bundle_e2e COMMAND test_bundle_e2e)
 add_executable(test_cli_args tests/test_cli_args.cpp)
 target_link_libraries(test_cli_args PRIVATE trtf_core)
 add_test(NAME test_cli_args COMMAND test_cli_args)
-
-add_executable(test_trt_ops_gold tests/test_trt_graph_ops_gold.cpp)
-target_link_libraries(test_trt_ops_gold PRIVATE trtf_core)
-target_include_directories(test_trt_ops_gold PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_trt_ops_gold SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_trt_ops_gold PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_trt_ops_gold COMMAND test_trt_ops_gold)
 
 # --- Install ---
 include(CMakePackageConfigHelpers)

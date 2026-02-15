@@ -15,36 +15,25 @@ public:
     // Metadata -- pointers valid for lifetime of the pipeline.
     virtual const char* model_id() const = 0;
     virtual const char* backend_name() const = 0;
-
-    // Bundle: serialize current engine + tokenizer to a single .trtfb file.
-    virtual bool save_bundle(const char* output_path) = 0;
 };
 
 } // namespace trtf
 
 extern "C" {
 
-#define TRTF_PREFER_TRT  0
-#define TRTF_FORCE_TRT   1
-#define TRTF_CPU_ONLY    2
-
 struct TrtfPipelineOptions {
-    int flags;                    // TRTF_PREFER_TRT / TRTF_FORCE_TRT / TRTF_CPU_ONLY
     int max_new_tokens;           // 0 = use model default (20)
-    int max_cache_length;         // 0 = use config.json value (capped at 4096)
     const char* hf_python;        // nullptr = auto-detect
-    const char* engine_cache_dir; // nullptr = default (~/.cache/trtf/)
-    int no_engine_cache;          // 0 = enabled, 1 = disabled
 };
 
-// Create a pipeline from a model directory, model alias, or .trtfb bundle.
+// Create a pipeline from a .trtfb bundle file.
 // Returns owning pointer. Caller deletes with `delete`.
 // Returns nullptr on failure (call trtf_last_error() for message).
-trtf::IPipeline* trtf_create_pipeline(const char* model_or_bundle, int flags);
+trtf::IPipeline* trtf_create_pipeline(const char* bundle_path, int flags);
 
-// Extended creation with options for max_new_tokens and max_cache_length.
+// Extended creation with options.
 // Pass nullptr for options to use defaults.
-trtf::IPipeline* trtf_create_pipeline_ex(const char* model_or_bundle, const TrtfPipelineOptions* options);
+trtf::IPipeline* trtf_create_pipeline_ex(const char* bundle_path, const TrtfPipelineOptions* options);
 
 // Last error message (thread-local). Valid until next trtf_ call on this thread.
 const char* trtf_last_error(void);
