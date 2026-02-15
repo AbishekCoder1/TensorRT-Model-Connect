@@ -257,6 +257,114 @@ static void test_large_section()
     std::filesystem::remove_all(tmp);
 }
 
+static void test_realistic_bundle_sections()
+{
+    // Test with section names matching real bundle format (engine_plan, config.json, tokenizer.json)
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "realistic.trtfb").string();
+
+    trtf::BundleFile bundle;
+    bundle.info.model_id = "qwen3-test";
+    bundle.info.model_type = "qwen3";
+    bundle.info.family = "qwen";
+    bundle.info.vocab_size = 151936;
+    bundle.info.hidden_size = 1024;
+    bundle.info.num_layers = 28;
+    bundle.info.max_cache_length = 256;
+
+    bundle.sections.push_back({"engine_plan", {'E', 'N', 'G', 'I', 'N', 'E'}});
+    bundle.sections.push_back({"config.json", {'{', '"', 'a', '"', ':', '1', '}'}});
+    bundle.sections.push_back({"tokenizer.json", {'{', '}'}});
+    bundle.sections.push_back({"tokenizer_config.json", {'{', '}'}});
+
+    trtf::WriteBundleFile(path, bundle);
+    const auto loaded = trtf::ReadBundleFile(path);
+
+    check(loaded.sections.size() == 4, "realistic section count");
+    check(loaded.sections[0].name == "engine_plan", "engine_plan section name");
+    check(loaded.sections[0].data == std::vector<char>{'E', 'N', 'G', 'I', 'N', 'E'}, "engine_plan data");
+    check(loaded.sections[1].name == "config.json", "config.json section name");
+    check(loaded.sections[2].name == "tokenizer.json", "tokenizer.json section name");
+    check(loaded.sections[3].name == "tokenizer_config.json", "tokenizer_config.json section name");
+
+    // Inspect should also work
+    const auto info = trtf::InspectBundle(path);
+    check(info.model_id == "qwen3-test", "inspect realistic model_id");
+    check(info.family == "qwen", "inspect realistic family");
+
+    std::filesystem::remove_all(tmp);
+}
+
+static void test_large_section_offsets_int64()
+{
+    // Test that section offset/size JSON parsing handles values > INT32_MAX
+    // We don't create a 3GB file, but verify the JSON parser handles large numbers
+    trtf::BundleInfo info;
+    info.model_id = "large-model";
+
+    // Manually create JSON with large offsets
+    const std::string json = R"({
+  "model_id": "large-model",
+  "model_type": "",
+  "family": "",
+  "trt_version": "",
+  "gpu_name": "",
+  "created_at": "",
+  "vocab_size": 0,
+  "hidden_size": 0,
+  "num_layers": 0,
+  "num_attention_heads": 1,
+  "num_key_value_heads": 1,
+  "max_cache_length": 32,
+  "sections": {
+    "engine_plan": {"offset": 0, "size": 3000000000},
+    "config.json": {"offset": 3000000000, "size": 1024}
+  }
+})";
+
+    std::vector<std::pair<std::string, std::pair<std::size_t, std::size_t>>> parsed_sections;
+    const auto parsed = trtf::BundleInfoFromJson(json, parsed_sections);
+
+    check(parsed.model_id == "large-model", "int64 model_id");
+    check(parsed_sections.size() == 2, "int64 section count");
+    check(parsed_sections[0].first == "engine_plan", "int64 section 0 name");
+    check(parsed_sections[0].second.second == 3000000000ULL, "int64 engine_plan size 3GB");
+    check(parsed_sections[1].first == "config.json", "int64 section 1 name");
+    check(parsed_sections[1].second.first == 3000000000ULL, "int64 config.json offset 3GB");
+    check(parsed_sections[1].second.second == 1024, "int64 config.json size");
+}
+
+static void test_truncated_bundle_throws()
+{
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "truncated.trtfb").string();
+
+    // Write valid magic + header length but truncate the actual header
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(trtf::kBundleMagic), 8);
+        // Write header length of 1000 but only write 10 bytes
+        uint64_t len = 1000;
+        unsigned char bytes[8];
+        for (int i = 0; i < 8; ++i) bytes[i] = static_cast<unsigned char>((len >> (8 * i)) & 0xFF);
+        out.write(reinterpret_cast<const char*>(bytes), 8);
+        out.write("short", 5);
+    }
+
+    bool threw = false;
+    try
+    {
+        trtf::ReadBundleFile(path);
+    }
+    catch (const std::runtime_error&)
+    {
+        threw = true;
+    }
+    check(threw, "truncated bundle throws");
+
+    std::filesystem::remove_all(tmp);
+}
+
 int main()
 {
     test_write_read_roundtrip();
@@ -267,6 +375,9 @@ int main()
     test_is_bundle_invalid();
     test_inspect_returns_metadata();
     test_large_section();
+    test_realistic_bundle_sections();
+    test_large_section_offsets_int64();
+    test_truncated_bundle_throws();
 
     if (failures > 0)
     {

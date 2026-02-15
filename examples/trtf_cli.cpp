@@ -1,8 +1,9 @@
 // trtf CLI -- command-line interface using the library API.
 //
 // Usage:
-//   trtf build   <model-dir> -o <output.trtfb> [--max-cache-length N]
+//   trtf build   <model-dir> -o <output.trtfb> [--max-cache-length N] [--hf-python PATH]
 //   trtf run     <model-or-bundle> --prompt "text" [--max-new-tokens N] [--force-trt] [--cpu-only]
+//                [--hf-python PATH] [--engine-cache-dir DIR] [--no-engine-cache]
 //   trtf inspect <bundle.trtfb>
 //   trtf version
 
@@ -22,9 +23,12 @@ struct CliArgs {
     std::string model_or_bundle;
     std::string output_path;
     std::string prompt;
+    std::string hf_python;
+    std::string engine_cache_dir;
     int max_new_tokens{0};
     int max_cache_length{-1};
     int flags{TRTF_PREFER_TRT};
+    bool no_engine_cache{false};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -34,8 +38,9 @@ void print_usage()
 {
     std::cerr <<
         "Usage:\n"
-        "  trtf build   <model-dir> -o <output.trtfb> [--max-cache-length N]\n"
+        "  trtf build   <model-dir> -o <output.trtfb> [--max-cache-length N] [--hf-python PATH]\n"
         "  trtf run     <model-or-bundle> --prompt \"text\" [--max-new-tokens N] [--force-trt] [--cpu-only]\n"
+        "               [--hf-python PATH] [--engine-cache-dir DIR] [--no-engine-cache]\n"
         "  trtf inspect <bundle.trtfb>\n"
         "  trtf version\n";
 }
@@ -124,6 +129,36 @@ CliArgs parse_args(int argc, char** argv)
             continue;
         }
 
+        if (arg == "--hf-python")
+        {
+            if (i + 1 >= argc)
+            {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.hf_python = argv[++i];
+            continue;
+        }
+
+        if (arg == "--engine-cache-dir")
+        {
+            if (i + 1 >= argc)
+            {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.engine_cache_dir = argv[++i];
+            continue;
+        }
+
+        if (arg == "--no-engine-cache")
+        {
+            args.no_engine_cache = true;
+            continue;
+        }
+
         if (arg == "--force-trt")
         {
             args.flags = TRTF_FORCE_TRT;
@@ -179,17 +214,31 @@ int cmd_build(const CliArgs& args)
         return EXIT_FAILURE;
     }
 
-    try
+    TrtfPipelineOptions opts{};
+    opts.flags = TRTF_FORCE_TRT;
+    opts.max_new_tokens = 0;
+    opts.max_cache_length = args.max_cache_length;
+    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
+    opts.engine_cache_dir = args.engine_cache_dir.empty() ? nullptr : args.engine_cache_dir.c_str();
+    opts.no_engine_cache = args.no_engine_cache ? 1 : 0;
+
+    auto* pipeline = trtf_create_pipeline_ex(args.model_or_bundle.c_str(), &opts);
+    if (pipeline == nullptr)
     {
-        trtf::BuildBundle(args.model_or_bundle, args.output_path, args.max_cache_length);
-        std::cout << "Bundle saved to: " << args.output_path << '\n';
-        return EXIT_SUCCESS;
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "Error: " << e.what() << '\n';
+        std::cerr << "Error: " << trtf_last_error() << '\n';
         return EXIT_FAILURE;
     }
+
+    if (!pipeline->save_bundle(args.output_path.c_str()))
+    {
+        std::cerr << "Error: save_bundle failed (TRT engine serialization not available)\n";
+        delete pipeline;
+        return EXIT_FAILURE;
+    }
+
+    std::cout << "Bundle saved to: " << args.output_path << '\n';
+    delete pipeline;
+    return EXIT_SUCCESS;
 }
 
 int cmd_run(const CliArgs& args)
@@ -204,6 +253,9 @@ int cmd_run(const CliArgs& args)
     opts.flags = args.flags;
     opts.max_new_tokens = args.max_new_tokens;
     opts.max_cache_length = args.max_cache_length;
+    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
+    opts.engine_cache_dir = args.engine_cache_dir.empty() ? nullptr : args.engine_cache_dir.c_str();
+    opts.no_engine_cache = args.no_engine_cache ? 1 : 0;
     auto* pipeline = trtf_create_pipeline_ex(args.model_or_bundle.c_str(), &opts);
     if (pipeline == nullptr)
     {

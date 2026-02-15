@@ -83,6 +83,45 @@ static void test_last_error_cleared_on_success()
     }
 }
 
+static void test_pipeline_options_zero_init()
+{
+    // Verify that zero-initialized TrtfPipelineOptions is safe and backward-compatible
+    TrtfPipelineOptions opts{};
+    check(opts.flags == 0, "zero-init flags == 0 (TRTF_PREFER_TRT)");
+    check(opts.max_new_tokens == 0, "zero-init max_new_tokens == 0");
+    check(opts.max_cache_length == 0, "zero-init max_cache_length == 0");
+    check(opts.hf_python == nullptr, "zero-init hf_python == nullptr");
+    check(opts.engine_cache_dir == nullptr, "zero-init engine_cache_dir == nullptr");
+    check(opts.no_engine_cache == 0, "zero-init no_engine_cache == 0");
+
+    // Should work with null options (uses defaults)
+    auto* p = trtf_create_pipeline_ex("/nonexistent", nullptr);
+    check(p == nullptr, "null options with bad path returns null");
+}
+
+static void test_create_ex_with_options()
+{
+    TrtfPipelineOptions opts{};
+    opts.flags = TRTF_FORCE_TRT;
+    opts.max_new_tokens = 5;
+    opts.max_cache_length = 128;
+    opts.hf_python = "/nonexistent/python";
+    opts.engine_cache_dir = "/tmp/nonexistent_cache";
+    opts.no_engine_cache = 1;
+
+    auto* p = trtf_create_pipeline_ex("/nonexistent/model", &opts);
+    check(p == nullptr, "bad model with options returns null");
+    const char* err = trtf_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "error set with options");
+}
+
+static void test_bundle_path_not_bundle()
+{
+    // Test that passing a non-bundle file doesn't crash
+    auto* p = trtf_create_pipeline("/dev/null", TRTF_PREFER_TRT);
+    check(p == nullptr, "non-bundle file returns null");
+}
+
 int main()
 {
     test_version_not_null();
@@ -92,6 +131,9 @@ int main()
     test_create_bad_path_returns_null();
     test_delete_null_safe();
     test_last_error_cleared_on_success();
+    test_pipeline_options_zero_init();
+    test_create_ex_with_options();
+    test_bundle_path_not_bundle();
 
     if (failures > 0)
     {

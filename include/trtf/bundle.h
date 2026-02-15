@@ -23,7 +23,8 @@ struct BundleInfo {
 // Compile model -> save as .trtfb bundle.
 void BuildBundle(const std::string& model_dir,
     const std::string& output_path,
-    int max_cache_length = -1);
+    int max_cache_length = -1,
+    const std::string& hf_python = "");
 
 // Read metadata without loading the engine.
 BundleInfo InspectBundle(const std::string& bundle_path);

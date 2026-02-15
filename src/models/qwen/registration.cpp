@@ -56,10 +56,7 @@ DecoderModel load_qwen_decoder_model(const std::string& model_dir)
     DecoderModel model = LoadDecoderModel(model_dir);
     if (is_qwen_family(model.architecture.family))
     {
-        // Default cap keeps TRT step-engine memory practical for large upstream checkpoints
-        // when no explicit config or env override is set.
-        const int32_t env_max_cache = parse_positive_env_int("TRTF_MAX_CACHE_LENGTH", -1);
-        if (env_max_cache <= 0 && model.max_cache_length > 4096)
+        if (model.max_cache_length > 4096)
         {
             model.max_cache_length = 4096;
         }

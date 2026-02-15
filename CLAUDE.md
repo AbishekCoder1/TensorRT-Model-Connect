@@ -45,19 +45,24 @@ Tests are plain C++ executables (no framework). They use `main()`, print to stde
 ## Running executables
 
 ```bash
-./build/trtf run <model-or-bundle> --prompt "text" [--force-trt] [--max-new-tokens N]
-./build/trtf version
+./build/trtf build   <model-dir> -o <output.trtfb> [--max-cache-length N] [--hf-python PATH]
+./build/trtf run     <model-or-bundle> --prompt "text" [--max-new-tokens N] [--force-trt]
+                     [--hf-python PATH] [--engine-cache-dir DIR] [--no-engine-cache]
 ./build/trtf inspect <bundle.trtfb>
+./build/trtf version
 ```
 
 ## Key environment variables
 
-- `TRTF_MAX_NEW_TOKENS` - override max generation tokens
-- `TRTF_MAX_CACHE_LENGTH` - cap/override runtime cache length for model definitions
-- `TRTF_HF_PYTHON` - path to Python interpreter for HF tokenizer bridge / hf-transformers backend
-- `TRTF_TRT_ENGINE_CACHE_DIR` - on-disk cache for serialized TRT engine plans
-- `TRTF_DISABLE_ENGINE_CACHE=1` - disable plan cache (force rebuild each process)
+- `TRTF_DATA_DIR` - source directory override (internal/dev only)
 - `TRTF_TRT_LOG_STDERR=1` / `TRTF_TRT_LOG_MIN_SEVERITY` - TRT logger controls
+
+All other configuration is done via CLI flags or `TrtfPipelineOptions`:
+- `--hf-python PATH` (replaces `TRTF_HF_PYTHON`)
+- `--engine-cache-dir DIR` (replaces `TRTF_TRT_ENGINE_CACHE_DIR`)
+- `--no-engine-cache` (replaces `TRTF_DISABLE_ENGINE_CACHE`)
+- `--max-cache-length N` (replaces `TRTF_MAX_CACHE_LENGTH`)
+- `--max-new-tokens N` (replaces `TRTF_MAX_NEW_TOKENS`)
 
 ## Architecture
 
@@ -266,10 +271,8 @@ Do not reuse host-generated build dirs inside the container. Always use a contai
 
 ### 5) Validate Qwen3 TRT E2E (inside container)
 ```bash
-TRTF_HF_PYTHON=$PWD/.venv-hf/bin/python \
-TRTF_MAX_CACHE_LENGTH=1 \
-TRTF_MAX_NEW_TOKENS=1 \
-./build-container-phase1/trtf run QWEN3 --prompt "Hello" --force-trt
+./build-container-phase1/trtf run QWEN3 --prompt "Hello" --force-trt \
+  --hf-python $PWD/.venv-hf/bin/python --max-cache-length 1 --max-new-tokens 1
 ```
 Expected: `backend=trt`, output starts with `Hello Answer`.
 
@@ -279,10 +282,22 @@ Recommended all-in-one diagnostic script:
 ```
 Logs to `/tmp/trtf_qwen3_trt_e2e.log`. Override build dir with `TRTF_BUILD_DIR=<dir>`.
 
-### 6) MMLU sanity check (inside container)
+### 6) Build + run from bundle (inside container)
 ```bash
-TRTF_HF_PYTHON=$PWD/.venv-hf/bin/python \
-TRTF_MAX_NEW_TOKENS=8 \
+# Build a bundle
+./build-container-phase1/trtf build models/hf/Qwen__Qwen3-0.6B \
+  -o /tmp/qwen3.trtfb --max-cache-length 256 --hf-python $PWD/.venv-hf/bin/python
+
+# Inspect it
+./build-container-phase1/trtf inspect /tmp/qwen3.trtfb
+
+# Run from bundle
+./build-container-phase1/trtf run /tmp/qwen3.trtfb --prompt "Hello" --max-new-tokens 5 \
+  --hf-python $PWD/.venv-hf/bin/python
+```
+
+### 7) MMLU sanity check (inside container)
+```bash
 $PWD/.venv-hf/bin/python scripts/eval_mmlu.py \
   --backend trtf --model QWEN3 \
   --trtf-binary ./build-container-phase1/trtf \

@@ -4,7 +4,11 @@ This page traces the complete execution path from user code to generated text, w
 
 ## The Call Chain
 
-The primary entry point is `trtf_create_pipeline()` / `trtf_create_pipeline_ex()` (C ABI, `src/cabi/trtf_c.cpp`).
+The primary entry point is `trtf_create_pipeline()` / `trtf_create_pipeline_ex()` (C ABI, `src/cabi/trtf_c.cpp`). These accept a model directory, alias (e.g., `QWEN3`), or `.trtfb` bundle path.
+
+**Bundle fast path**: When the input is a `.trtfb` bundle, the factory detects the bundle magic bytes, deserializes the pre-compiled engine plan + tokenizer config, and returns a pipeline immediately -- bypassing model resolution, weight loading, and engine compilation entirely.
+
+**Standard path** (model directory or alias):
 
 ```
 User: trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)
@@ -231,13 +235,29 @@ The model loader reads these fields from `config.json`:
 | `eos_token_id` | `architecture.eos_token_id` | Stop generation |
 | `max_position_embeddings` | `max_cache_length` | KV cache size |
 
-## Environment Variables
+## Configuration: CLI Flags, API Options, and Environment Variables
+
+Most runtime configuration is now done via `TrtfPipelineOptions` fields (C API) or CLI flags (`trtf run`). Only 3 environment variables remain for debugging/development.
+
+### TrtfPipelineOptions / CLI Flags
+
+| CLI Flag | Options Field | Default | Effect |
+|----------|--------------|---------|--------|
+| `--max-new-tokens N` | `max_new_tokens` | 20 | Max generation tokens |
+| `--max-cache-length N` | `max_cache_length` | from config (capped at 4096) | Cap KV cache length (saves GPU memory) |
+| `--hf-python PATH` | `hf_python` | auto-detect | Path to Python for HF tokenizer/backend |
+| `--engine-cache-dir DIR` | `engine_cache_dir` | `~/.cache/trtf/` | Directory for serialized TRT engine plans |
+| `--no-engine-cache` | `no_engine_cache` | 0 | Force engine rebuild every run |
+| `--force-trt` | `flags = TRTF_FORCE_TRT` | prefer | Require TRT backend (fail if unavailable) |
+
+The C ABI layer threads `engine_cache_dir` and `no_engine_cache` into the engine cache subsystem via a thread-local `EngineCacheConfig` (set before pipeline creation, cleared after).
+
+### Remaining Environment Variables
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `TRTF_MAX_NEW_TOKENS` | 20 | Override max generation tokens |
-| `TRTF_MAX_CACHE_LENGTH` | from config | Cap KV cache length (saves GPU memory) |
-| `TRTF_HF_PYTHON` | none | Path to Python for HF tokenizer/backend |
-| `TRTF_TRT_ENGINE_CACHE_DIR` | none | Directory for serialized TRT engine plans |
-| `TRTF_DISABLE_ENGINE_CACHE` | 0 | Force engine rebuild every run |
+| `TRTF_DATA_DIR` | auto-detected | Override source directory for built-in model/script paths |
 | `TRTF_TRT_LOG_STDERR` | 0 | Enable TRT logger output to stderr |
+| `TRTF_TRT_LOG_MIN_SEVERITY` | 2 (warning) | Minimum TRT log severity (0=verbose, 1=info, 2=warning, 3=error) |
+
+The following environment variables have been **removed** and replaced by CLI flags / API options: `TRTF_MAX_NEW_TOKENS`, `TRTF_MAX_CACHE_LENGTH`, `TRTF_HF_PYTHON`, `TRTF_TRT_ENGINE_CACHE_DIR`, `TRTF_DISABLE_ENGINE_CACHE`.

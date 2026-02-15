@@ -178,7 +178,7 @@ std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuild
     if (!trt_engine)
     {
         std::cerr << "[trtf] No cached engine found. Compiling TRT engine from scratch ..." << std::endl;
-        std::cerr << "[trtf] (Set TRTF_TRT_ENGINE_CACHE_DIR to cache for faster subsequent runs)" << std::endl;
+        std::cerr << "[trtf] (Use --engine-cache-dir to cache for faster subsequent runs)" << std::endl;
         auto tcomp0 = std::chrono::steady_clock::now();
         auto plan = TrtUniquePtr<nvinfer1::IHostMemory>(builder.buildSerializedNetwork(network, config));
         if (!plan)
@@ -250,6 +250,23 @@ std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuild
         }
     }
     return result;
+}
+
+std::vector<char> SerializeEnginePlan(const DecoderStepEngine& engine)
+{
+    if (!engine.engine)
+    {
+        return {};
+    }
+
+    auto plan = TrtUniquePtr<nvinfer1::IHostMemory>(engine.engine->serialize());
+    if (!plan || plan->size() == 0)
+    {
+        return {};
+    }
+
+    const auto* data = static_cast<const char*>(plan->data());
+    return std::vector<char>(data, data + plan->size());
 }
 
 #endif // TRTF_HAS_TRT

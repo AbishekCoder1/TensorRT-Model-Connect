@@ -125,6 +125,15 @@ public:
         return output;
     }
 
+    std::vector<char> serialize_engine_plan() const override
+    {
+        if (!mDecoderStepEngine)
+        {
+            return {};
+        }
+        return SerializeEnginePlan(*mDecoderStepEngine);
+    }
+
 private:
     const ITokenizer& mTokenizer;
     IModelRuntime& mRuntime;
@@ -200,6 +209,15 @@ public:
             if (next_token == mDecoderStepEngine->id_eos) break;
         }
         return output;
+    }
+
+    std::vector<char> serialize_engine_plan() const override
+    {
+        if (!mDecoderStepEngine)
+        {
+            return {};
+        }
+        return SerializeEnginePlan(*mDecoderStepEngine);
     }
 
 private:

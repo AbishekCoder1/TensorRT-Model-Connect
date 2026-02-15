@@ -40,9 +40,14 @@ public:
         (void) config;
         throw std::runtime_error("Backend does not support direct text generation.");
     }
+
+    virtual std::vector<char> serialize_engine_plan() const
+    {
+        return {};
+    }
 };
 
 std::unique_ptr<IGenerationBackend> CreateTrtBackend(const ITokenizer& tokenizer, const DecoderModel& model);
-std::unique_ptr<IGenerationBackend> CreateHfPythonBackend(const std::string& model_dir);
+std::unique_ptr<IGenerationBackend> CreateHfPythonBackend(const std::string& model_dir, const std::string& python_path = "");
 
 } // namespace trtf

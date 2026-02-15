@@ -6,10 +6,10 @@ File-by-file guide to the codebase.
 
 | File | Purpose |
 |------|---------|
-| `pipeline.h` | **C ABI entry point**: `IPipeline` virtual interface, `TrtfPipelineOptions`, `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()` |
-| `bundle.h` | Bundle API: `BuildBundle()`, `InspectBundle()`, `IsBundle()`, `BundleInfo` |
+| `pipeline.h` | **C ABI entry point**: `IPipeline` virtual interface (with `save_bundle()`), `TrtfPipelineOptions` (flags, max_new_tokens, max_cache_length, hf_python, engine_cache_dir, no_engine_cache), `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`. Accepts model directories, aliases, or `.trtfb` bundle paths. |
+| `bundle.h` | Bundle API: `BuildBundle()`, `InspectBundle()`, `IsBundle()`, `BundleInfo`. Bundles (`.trtfb`) package a serialized TRT engine plan + tokenizer config for instant load without weight re-conversion. |
 | `model.h` | `DecoderModel`, `DecoderCheckpoint`, `DecoderLayerCheckpoint`, `DecoderArchitectureConfig`, `LoadDecoderModel()` |
-| `backend.h` | `IGenerationBackend` interface, `CreateTrtBackend()`, `CreateHfPythonBackend()` |
+| `backend.h` | `IGenerationBackend` interface (includes `serialize_engine_plan()` for bundle support), `CreateTrtBackend()`, `CreateHfPythonBackend()` |
 | `tokenizer.h` | `ITokenizer` interface, `CreateVocabTokenizer()`, `CreateHfPythonTokenizer()` |
 | `generation.h` | `GenerationConfig`, `GenerationResult` |
 | `model_resolver.h` | `ResolvedModelSpec`, `ResolveTextGenerationModel()` |
@@ -24,7 +24,7 @@ File-by-file guide to the codebase.
 | `text_parsers.h/cpp` | `starts_with()`, `to_lower_ascii()`, `iequals_ascii()`, `read_file()`, `parse_positive_env_int()` |
 | `json_helpers.h/cpp` | `extract_json_string()`, `extract_json_int()`, `extract_json_float()`, `extract_json_string_array()` |
 | `tensor_math.h/cpp` | `transpose_2d()`, `expand_kv_projection()`, `repeat_head_norm()` — used by checkpoint mappers |
-| `trt/engine_cache.h/cpp` | On-disk TRT engine plan cache (mmap-based read, serialize/deserialize). Includes model-dir index (`BuildModelDirIndexKey`, `SaveModelDirIndex`, `LookupModelDirIndex`) for zero-weight fast-path startup. |
+| `trt/engine_cache.h/cpp` | On-disk TRT engine plan cache (mmap-based read, serialize/deserialize). Includes model-dir index (`BuildModelDirIndexKey`, `SaveModelDirIndex`, `LookupModelDirIndex`) for zero-weight fast-path startup. Thread-local `EngineCacheConfig` (`SetThreadEngineCacheConfig`/`ClearThreadEngineCacheConfig`) replaces the former `TRTF_TRT_ENGINE_CACHE_DIR`/`TRTF_DISABLE_ENGINE_CACHE` env vars; config is now set by the C ABI layer from `TrtfPipelineOptions` or CLI flags. |
 
 ## Model Loading (`src/model/`)
 
@@ -109,13 +109,13 @@ File-by-file guide to the codebase.
 | File | Purpose |
 |------|---------|
 | `bundle_format.h/cpp` | `.trtfb` binary format: `WriteBundleFile()`, `ReadBundleFile()`, `HasBundleMagic()`, JSON header serialization |
-| `bundle_api.cpp` | Public API implementation: `BuildBundle()`, `InspectBundle()`, `IsBundle()` |
+| `bundle_api.cpp` | Public API implementation: `BuildBundle()`, `InspectBundle()`, `IsBundle()`. `BuildBundle()` calls `serialize_engine_plan()` on the TRT backend to capture the compiled engine plan, then packages it with tokenizer config into a `.trtfb` file. Loading a bundle bypasses weight loading and engine compilation entirely. |
 
 ## C ABI Layer (`src/cabi/`)
 
 | File | Purpose |
 |------|---------|
-| `trtf_c.cpp` | `extern "C"` factory: `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`. Contains `PipelineImpl` (concrete `IPipeline`). Fast path via `try_create_from_cached_engine()`. |
+| `trtf_c.cpp` | `extern "C"` factory: `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`. Contains `PipelineImpl` (concrete `IPipeline` with `save_bundle()`). Fast path via `try_create_from_cached_engine()`. Threads `TrtfPipelineOptions` (hf_python, engine_cache_dir, no_engine_cache) into subsystems via thread-local `EngineCacheConfig` and function parameters. Detects `.trtfb` bundles and loads them directly. |
 | `fast_path_config.h/cpp` | `FastPathModelConfig` struct + `parse_fast_path_config()` — extracts model metadata from config.json text for the zero-weight fast path. |
 
 ## Tests (`tests/`)

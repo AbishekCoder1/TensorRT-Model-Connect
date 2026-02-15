@@ -77,6 +77,9 @@ std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuild
     const std::vector<std::string>& present_v_output_names, bool requires_position_input,
     const std::vector<DecoderStepEngine::TensorBinding>& extra_bindings);
 
+// Serialize an engine plan to a byte vector for bundling.
+std::vector<char> SerializeEnginePlan(const DecoderStepEngine& engine);
+
 #endif // TRTF_HAS_TRT
 
 } // namespace trtf

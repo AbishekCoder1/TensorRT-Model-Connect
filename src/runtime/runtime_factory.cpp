@@ -25,7 +25,7 @@ RuntimeAssembly BuildRuntimeForTextGeneration(const ResolvedModelSpec& model_spe
             throw std::runtime_error("force_trt is not supported for raw Hugging Face model directories.");
         }
 
-        auto hf_backend = CreateHfPythonBackend(model_spec.huggingface_model_dir);
+        auto hf_backend = CreateHfPythonBackend(model_spec.huggingface_model_dir, selection.hf_python);
         if (!hf_backend || !hf_backend->is_available())
         {
             throw std::runtime_error(
@@ -45,7 +45,7 @@ RuntimeAssembly BuildRuntimeForTextGeneration(const ResolvedModelSpec& model_spe
             {
                 auto ttok0 = std::chrono::steady_clock::now();
                 std::cerr << "[trtf] Initializing HF tokenizer ..." << std::endl;
-                assembly.tokenizer = CreateHfPythonTokenizer(model.hf_tokenizer_dir);
+                assembly.tokenizer = CreateHfPythonTokenizer(model.hf_tokenizer_dir, selection.hf_python);
                 auto ttok1 = std::chrono::steady_clock::now();
                 std::cerr << "[trtf] Tokenizer ready ["
                           << std::chrono::duration_cast<std::chrono::milliseconds>(ttok1 - ttok0).count()
@@ -100,7 +100,7 @@ RuntimeAssembly BuildRuntimeForTextGeneration(const ResolvedModelSpec& model_spe
         {
             if (!model.hf_tokenizer_dir.empty())
             {
-                auto hf_backend = CreateHfPythonBackend(model.hf_tokenizer_dir);
+                auto hf_backend = CreateHfPythonBackend(model.hf_tokenizer_dir, selection.hf_python);
                 if (hf_backend && hf_backend->is_available())
                 {
                     assembly.backend_name = hf_backend->name();

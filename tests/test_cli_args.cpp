@@ -28,9 +28,12 @@ struct CliArgs {
     std::string model_or_bundle;
     std::string output_path;
     std::string prompt;
+    std::string hf_python;
+    std::string engine_cache_dir;
     int max_new_tokens{0};
     int max_cache_length{-1};
     int flags{TRTF_PREFER_TRT};
+    bool no_engine_cache{false};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -95,6 +98,19 @@ CliArgs parse_args(int argc, const char** argv)
             args.max_cache_length = std::atoi(argv[++i]);
             continue;
         }
+        if (arg == "--hf-python")
+        {
+            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+            args.hf_python = argv[++i];
+            continue;
+        }
+        if (arg == "--engine-cache-dir")
+        {
+            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+            args.engine_cache_dir = argv[++i];
+            continue;
+        }
+        if (arg == "--no-engine-cache") { args.no_engine_cache = true; continue; }
         if (arg == "--force-trt") { args.flags = TRTF_FORCE_TRT; continue; }
         if (arg == "--cpu-only") { args.flags = TRTF_CPU_ONLY; continue; }
         if (arg[0] == '-') { args.parse_error = true; args.error_message = "Unknown flag: " + arg; return args; }
@@ -194,6 +210,51 @@ static void test_unknown_command_errors()
     check(args.error_message.find("foobar") != std::string::npos, "error message mentions command");
 }
 
+static void test_hf_python_flag()
+{
+    auto args = parse({"trtf", "run", "model", "--prompt", "hi", "--hf-python", "/usr/bin/python3"});
+    check(!args.parse_error, "hf-python no parse error");
+    check(args.hf_python == "/usr/bin/python3", "hf-python value");
+}
+
+static void test_engine_cache_dir_flag()
+{
+    auto args = parse({"trtf", "run", "model", "--prompt", "hi", "--engine-cache-dir", "/tmp/cache"});
+    check(!args.parse_error, "engine-cache-dir no parse error");
+    check(args.engine_cache_dir == "/tmp/cache", "engine-cache-dir value");
+}
+
+static void test_no_engine_cache_flag()
+{
+    auto args = parse({"trtf", "run", "model", "--prompt", "hi", "--no-engine-cache"});
+    check(!args.parse_error, "no-engine-cache no parse error");
+    check(args.no_engine_cache, "no-engine-cache is true");
+}
+
+static void test_build_with_hf_python()
+{
+    auto args = parse({"trtf", "build", "model_dir", "-o", "out.trtfb", "--hf-python", "/opt/python"});
+    check(!args.parse_error, "build+hf-python no parse error");
+    check(args.hf_python == "/opt/python", "build hf-python value");
+}
+
+static void test_all_run_flags_combined()
+{
+    auto args = parse({"trtf", "run", "model", "--prompt", "hello",
+        "--max-new-tokens", "10", "--force-trt",
+        "--hf-python", "/usr/bin/python3",
+        "--engine-cache-dir", "/tmp/cache",
+        "--no-engine-cache"});
+    check(!args.parse_error, "combined flags no parse error");
+    check(args.model_or_bundle == "model", "combined model");
+    check(args.prompt == "hello", "combined prompt");
+    check(args.max_new_tokens == 10, "combined max_new_tokens");
+    check(args.flags == TRTF_FORCE_TRT, "combined force_trt");
+    check(args.hf_python == "/usr/bin/python3", "combined hf-python");
+    check(args.engine_cache_dir == "/tmp/cache", "combined engine-cache-dir");
+    check(args.no_engine_cache, "combined no-engine-cache");
+}
+
 int main()
 {
     test_build_subcommand();
@@ -208,6 +269,11 @@ int main()
     test_version_subcommand();
     test_unknown_flag_errors();
     test_unknown_command_errors();
+    test_hf_python_flag();
+    test_engine_cache_dir_flag();
+    test_no_engine_cache_flag();
+    test_build_with_hf_python();
+    test_all_run_flags_combined();
 
     if (failures > 0)
     {

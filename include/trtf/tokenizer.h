@@ -20,6 +20,6 @@ public:
 };
 
 std::unique_ptr<ITokenizer> CreateVocabTokenizer(std::vector<std::string> vocab);
-std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir);
+std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir, std::string python_path = "");
 
 } // namespace trtf

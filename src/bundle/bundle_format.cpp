@@ -153,8 +153,20 @@ BundleInfo BundleInfoFromJson(const std::string& json,
                 if (inner_brace_end == std::string::npos) break;
 
                 const std::string inner = sections_json.substr(inner_brace, inner_brace_end - inner_brace + 1);
-                const int64_t offset_val = static_cast<int64_t>(extract_json_int(inner, "offset", 0));
-                const int64_t size_val = static_cast<int64_t>(extract_json_int(inner, "size", 0));
+
+                // Parse offset/size as int64 (stoll) since engine plans can exceed 2 GB.
+                const auto parse_int64 = [&](const std::string& key) -> int64_t {
+                    const std::string needle = "\"" + key + "\"";
+                    auto kpos = inner.find(needle);
+                    if (kpos == std::string::npos) return 0;
+                    auto colon = inner.find(':', kpos + needle.size());
+                    if (colon == std::string::npos) return 0;
+                    auto start = inner.find_first_of("-0123456789", colon + 1);
+                    if (start == std::string::npos) return 0;
+                    try { return std::stoll(inner.substr(start)); } catch (...) { return 0; }
+                };
+                const int64_t offset_val = parse_int64("offset");
+                const int64_t size_val = parse_int64("size");
                 sections_out.push_back({section_name, {static_cast<std::size_t>(offset_val), static_cast<std::size_t>(size_val)}});
 
                 search_pos = inner_brace_end + 1;

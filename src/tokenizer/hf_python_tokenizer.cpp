@@ -94,14 +94,11 @@ CommandResult run_command_capture(std::string command)
     return CommandResult{exit_code, output};
 }
 
-std::string find_python_command()
+std::string find_python_command(const std::string& override_path)
 {
-    if (const char* env = std::getenv("TRTF_HF_PYTHON"))
+    if (!override_path.empty())
     {
-        if (env[0] != '\0')
-        {
-            return env;
-        }
+        return override_path;
     }
 
     const std::filesystem::path venv_python("/opt/hf-venv/bin/python");
@@ -205,10 +202,10 @@ std::string join_ids_csv(const std::vector<int32_t>& ids)
 
 class HfPythonTokenizer final : public ITokenizer {
 public:
-    explicit HfPythonTokenizer(std::string model_dir)
+    HfPythonTokenizer(std::string model_dir, std::string python_path)
         : mModelDir(std::move(model_dir))
     {
-        mPythonCommand = find_python_command();
+        mPythonCommand = find_python_command(python_path);
         mScript = tokenizer_script_path();
 
         if (!std::filesystem::exists(mScript))
@@ -326,9 +323,9 @@ private:
 
 } // namespace
 
-std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir)
+std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir, std::string python_path)
 {
-    return std::make_unique<HfPythonTokenizer>(std::move(model_dir));
+    return std::make_unique<HfPythonTokenizer>(std::move(model_dir), std::move(python_path));
 }
 
 } // namespace trtf

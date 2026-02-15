@@ -15,6 +15,16 @@ struct TrtEngineCacheKeyParams {
     int32_t num_layers{0};
 };
 
+// Thread-local engine cache configuration.
+// Set before pipeline creation, cleared after.
+struct EngineCacheConfig {
+    std::string cache_dir;  // empty = use default (~/.cache/trtf/)
+    bool no_cache{false};
+};
+
+void SetThreadEngineCacheConfig(const EngineCacheConfig& config);
+void ClearThreadEngineCacheConfig();
+
 std::string BuildTrtEngineCacheKey(const TrtDecoderDefinition& definition, const TrtEngineCacheKeyParams& params);
 std::optional<std::vector<char>> LoadTrtEnginePlanFromCache(const std::string& cache_key);
 void SaveTrtEnginePlanToCache(const std::string& cache_key, const void* plan_data, std::size_t plan_size);

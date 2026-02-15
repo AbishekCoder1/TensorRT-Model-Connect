@@ -12,6 +12,7 @@ namespace trtf {
 struct BackendSelection {
     bool prefer_trt{true};
     bool force_trt{false};
+    std::string hf_python;  // empty = auto-detect
 };
 
 struct RuntimeAssembly {

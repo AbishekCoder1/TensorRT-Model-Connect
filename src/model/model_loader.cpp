@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -211,12 +210,6 @@ DecoderModel load_model_from_dir(const std::filesystem::path& model_dir, const s
     if (model.max_cache_length <= 0)
     {
         model.max_cache_length = extract_json_int(config_text, "max_position_embeddings", 32);
-    }
-
-    const int32_t env_max_cache = parse_positive_env_int("TRTF_MAX_CACHE_LENGTH", -1);
-    if (env_max_cache > 0)
-    {
-        model.max_cache_length = env_max_cache;
     }
 
     model.architecture.num_layers = std::max(extract_json_int(config_text, "num_hidden_layers", 1), 1);

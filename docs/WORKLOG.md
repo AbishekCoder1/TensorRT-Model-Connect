@@ -1,5 +1,46 @@
 # Worklog
 
+## 2026-02-15 (continued)
+
+- **Complete Bundle System + Remove Environment Variables**
+  - Implemented complete `.trtfb` bundle build/save/load pipeline:
+    - `trtf build <model-dir> -o model.trtfb` — compiles TRT engine + embeds tokenizer files
+    - `trtf run model.trtfb --prompt "text"` — loads self-contained bundle for inference
+    - `trtf inspect model.trtfb` — shows bundle metadata
+  - **Engine plan serialization**: Added `SerializeEnginePlan()` to `trt_engine_lifecycle`, `serialize_engine_plan()` virtual to `IGenerationBackend`, overridden in both `TrtBackend` and `TrtBackendFastPath`.
+  - **Bundle save**: `PipelineImpl::save_bundle()` serializes engine plan + embeds `config.json`, `tokenizer.json`, `tokenizer_config.json` from model directory. Metadata includes TRT version, GPU name, timestamp, architecture info.
+  - **Bundle load**: `try_create_from_bundle()` deserializes engine, extracts tokenizer files to temp dir, creates pipeline. Temp dir cleaned up in destructor.
+  - **`BuildBundle()` implementation**: Delegates to `trtf_create_pipeline_ex()` + `save_bundle()`.
+  - **Removed 5 user-facing environment variables** (replaced by CLI flags / API options):
+    - `TRTF_HF_PYTHON` → `--hf-python PATH` / `TrtfPipelineOptions::hf_python`
+    - `TRTF_MAX_CACHE_LENGTH` → `--max-cache-length N` / `TrtfPipelineOptions::max_cache_length`
+    - `TRTF_TRT_ENGINE_CACHE_DIR` → `--engine-cache-dir DIR` / `TrtfPipelineOptions::engine_cache_dir`
+    - `TRTF_DISABLE_ENGINE_CACHE` → `--no-engine-cache` / `TrtfPipelineOptions::no_engine_cache`
+    - `TRTF_MAX_NEW_TOKENS` → `--max-new-tokens N` / `TrtfPipelineOptions::max_new_tokens`
+  - Kept 3 env vars: `TRTF_DATA_DIR` (internal), `TRTF_TRT_LOG_STDERR`, `TRTF_TRT_LOG_MIN_SEVERITY` (TRT debug).
+  - **Engine cache config**: Thread-local `EngineCacheConfig` struct with RAII guard. Set before pipeline creation, cleared after.
+  - **Python path threading**: Added `python_path` parameter to `CreateHfPythonTokenizer()`, `CreateHfPythonBackend()`, `BackendSelection`, threaded from `TrtfPipelineOptions`.
+  - Extended `TrtfPipelineOptions` C struct: added `hf_python`, `engine_cache_dir`, `no_engine_cache` fields.
+  - 5 new CLI tests for `--hf-python`, `--engine-cache-dir`, `--no-engine-cache`, build+hf-python, combined flags.
+  - **Post-audit fixes**:
+    - Fixed temp directory leak in `try_create_from_bundle()` — added RAII guard that cleans up temp dir on exception, transfers ownership to PipelineImpl on success.
+    - Added `mModelDir` empty check in `save_bundle()` — returns false instead of writing bundle with missing files.
+    - Fixed `cmd_build` to create pipeline directly with all CLI options (was going through `BuildBundle()` which didn't pass `--no-engine-cache`).
+    - Populated architecture metadata on fast path (was missing `set_architecture_info`, `set_model_type`, `set_family`).
+    - Fixed bundle format int64 parsing for >2GB engine plans (stoi overflow).
+    - Updated cache tests to use `SetThreadEngineCacheConfig` instead of removed env vars.
+  - **New tests added in audit**:
+    - `test_bundle_format`: realistic section names, int64 offset parsing, truncated bundle error handling (3 new)
+    - `test_engine_cache_io`: RAII guard cleanup, nested guards (2 new)
+    - `test_c_abi_entry`: TrtfPipelineOptions zero-init, create_ex with options, non-bundle file path (3 new)
+  - **E2E bundle validation** (all 4 families, container GPU):
+    - Qwen3 (0.6B): build + inspect + inference from bundle matches direct
+    - TinyLlama (1.1B): build + inspect + inference from bundle matches direct
+    - TinyMistral (248M): build + inspect + inference from bundle matches direct
+    - Gemma (2B toy): build + inspect + inference from bundle matches direct
+    - Longer prompt tests (20-30 tokens) with cache=256: coherent multi-token generation confirmed
+  - All 26 tests pass in container (100%).
+
 ## 2026-02-15
 
 - **Zero-Edit Parallel Agent Architecture**

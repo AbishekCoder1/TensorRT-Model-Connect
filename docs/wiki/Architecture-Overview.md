@@ -45,7 +45,22 @@ For each registered family (sorted by priority, highest first):
 
 ### C ABI Entry Point (`trtf_c.cpp`)
 
-Users access the library through `extern "C"` factory functions `trtf_create_pipeline()` and `trtf_create_pipeline_ex()` which return an `IPipeline*`. These functions orchestrate stages 1-3 internally. The `IPipeline` interface uses `const char*` (not `std::string`) for ABI safety across compilers/STL versions. `trtf_create_pipeline_ex()` accepts a `TrtfPipelineOptions` struct with flags, `max_new_tokens`, and `max_cache_length`.
+Users access the library through `extern "C"` factory functions `trtf_create_pipeline()` and `trtf_create_pipeline_ex()` which return an `IPipeline*`. These functions accept model directories, aliases (e.g., `QWEN3`), or `.trtfb` bundle paths. When a bundle is detected, the factory loads the pre-compiled engine plan directly, bypassing stages 1-3 entirely. The `IPipeline` interface uses `const char*` (not `std::string`) for ABI safety across compilers/STL versions, and includes `save_bundle()` for serializing the current pipeline to a `.trtfb` file.
+
+`trtf_create_pipeline_ex()` accepts a `TrtfPipelineOptions` struct:
+
+```cpp
+struct TrtfPipelineOptions {
+    int flags;                    // TRTF_PREFER_TRT / TRTF_FORCE_TRT / TRTF_CPU_ONLY
+    int max_new_tokens;           // 0 = use model default (20)
+    int max_cache_length;         // 0 = use config.json value (capped at 4096)
+    const char* hf_python;        // nullptr = auto-detect
+    const char* engine_cache_dir; // nullptr = default (~/.cache/trtf/)
+    int no_engine_cache;          // 0 = enabled, 1 = disabled
+};
+```
+
+These fields replace the former `TRTF_MAX_NEW_TOKENS`, `TRTF_MAX_CACHE_LENGTH`, `TRTF_HF_PYTHON`, `TRTF_TRT_ENGINE_CACHE_DIR`, and `TRTF_DISABLE_ENGINE_CACHE` environment variables, which have been removed. The CLI (`trtf run`) maps its `--max-new-tokens`, `--max-cache-length`, `--hf-python`, `--engine-cache-dir`, and `--no-engine-cache` flags to these fields.
 
 ### Stage 3: Runtime Assembly (`runtime_factory.cpp`)
 
@@ -114,18 +129,22 @@ class IGenerationBackend {
     virtual const char* name() const = 0;
     virtual std::vector<int32_t> generate(const std::vector<int32_t>& input_ids,
                                            const GenerationConfig& config) = 0;
+    virtual std::vector<char> serialize_engine_plan() const { return {}; }
 };
 ```
+
+The `serialize_engine_plan()` method enables the bundle system: the TRT backend returns the compiled engine plan bytes, which can then be packaged into a `.trtfb` bundle for instant loading.
 
 ### TRT Backend (`trt_backend.cpp` + `trt_backend_shared.cpp`)
 - **Name**: `"trt"`
 - **Available when**: `TRTF_HAS_TRT=1` and GPU is present
 - **How it works**: Builds a TensorRT engine from the model weights, then runs an autoregressive generation loop on GPU with KV-cache management, CUDA memory allocation, and greedy argmax sampling.
-- **Engine caching**: When `TRTF_TRT_ENGINE_CACHE_DIR` is set, serialized engine plans are cached to disk. Subsequent runs load from cache instead of rebuilding.
+- **Engine caching**: Serialized engine plans are cached to disk (default `~/.cache/trtf/`). The cache directory and enable/disable flag are configured via `TrtfPipelineOptions` (fields `engine_cache_dir`, `no_engine_cache`) or CLI flags (`--engine-cache-dir`, `--no-engine-cache`). The C ABI layer sets a thread-local `EngineCacheConfig` that the cache layer reads.
+- **Bundle serialization**: Implements `serialize_engine_plan()` to return the compiled engine plan bytes for packaging into `.trtfb` bundles.
 
 ### HF Python Backend (`hf_python_backend.cpp`)
 - **Name**: `"hf-transformers"`
-- **Available when**: `TRTF_HF_PYTHON` env var points to a Python with `transformers` installed
+- **Available when**: A Python interpreter with `transformers` installed is provided via `TrtfPipelineOptions.hf_python` or CLI flag `--hf-python` (no environment variable)
 - **How it works**: Spawns a Python subprocess, passes the prompt, and reads the generated text. Maximum compatibility with any HF model, but slowest path.
 
 ---

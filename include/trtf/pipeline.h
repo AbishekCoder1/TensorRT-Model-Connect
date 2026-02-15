@@ -32,6 +32,9 @@ struct TrtfPipelineOptions {
     int flags;                    // TRTF_PREFER_TRT / TRTF_FORCE_TRT / TRTF_CPU_ONLY
     int max_new_tokens;           // 0 = use model default (20)
     int max_cache_length;         // 0 = use config.json value (capped at 4096)
+    const char* hf_python;        // nullptr = auto-detect
+    const char* engine_cache_dir; // nullptr = default (~/.cache/trtf/)
+    int no_engine_cache;          // 0 = enabled, 1 = disabled
 };
 
 // Create a pipeline from a model directory, model alias, or .trtfb bundle.

@@ -16,6 +16,26 @@
 #include <unistd.h>
 
 namespace trtf {
+
+namespace {
+
+thread_local bool g_has_cache_config{false};
+thread_local EngineCacheConfig g_cache_config;
+
+} // namespace
+
+void SetThreadEngineCacheConfig(const EngineCacheConfig& config)
+{
+    g_cache_config = config;
+    g_has_cache_config = true;
+}
+
+void ClearThreadEngineCacheConfig()
+{
+    g_cache_config = EngineCacheConfig{};
+    g_has_cache_config = false;
+}
+
 namespace {
 
 constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ULL;
@@ -23,19 +43,18 @@ constexpr uint64_t kFnvPrime = 1099511628211ULL;
 
 bool cache_disabled()
 {
-    const char* env = std::getenv("TRTF_DISABLE_ENGINE_CACHE");
-    if (env == nullptr || env[0] == '\0')
+    if (g_has_cache_config)
     {
-        return false;
+        return g_cache_config.no_cache;
     }
-    return std::strcmp(env, "0") != 0;
+    return false;
 }
 
 std::filesystem::path default_cache_dir()
 {
-    if (const char* env = std::getenv("TRTF_TRT_ENGINE_CACHE_DIR"); env != nullptr && env[0] != '\0')
+    if (g_has_cache_config && !g_cache_config.cache_dir.empty())
     {
-        return std::filesystem::path(env);
+        return std::filesystem::path(g_cache_config.cache_dir);
     }
 
     if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0')

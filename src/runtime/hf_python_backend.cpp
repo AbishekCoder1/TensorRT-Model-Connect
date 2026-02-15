@@ -91,14 +91,11 @@ CommandResult run_command_capture(std::string command)
     return CommandResult{exit_code, output};
 }
 
-std::string find_python_command()
+std::string find_python_command(const std::string& override_path)
 {
-    if (const char* env = std::getenv("TRTF_HF_PYTHON"))
+    if (!override_path.empty())
     {
-        if (env[0] != '\0')
-        {
-            return env;
-        }
+        return override_path;
     }
 
     const std::filesystem::path venv_python("/opt/hf-venv/bin/python");
@@ -117,10 +114,10 @@ std::filesystem::path runner_script_path()
 
 class HfPythonBackend final : public IGenerationBackend {
 public:
-    explicit HfPythonBackend(std::string model_dir)
+    HfPythonBackend(std::string model_dir, std::string python_path)
         : mModelDir(std::move(model_dir))
     {
-        mPythonCommand = find_python_command();
+        mPythonCommand = find_python_command(python_path);
         mRunnerScript = runner_script_path();
 
         if (!std::filesystem::exists(mRunnerScript))
@@ -225,9 +222,9 @@ private:
 
 } // namespace
 
-std::unique_ptr<IGenerationBackend> CreateHfPythonBackend(const std::string& model_dir)
+std::unique_ptr<IGenerationBackend> CreateHfPythonBackend(const std::string& model_dir, const std::string& python_path)
 {
-    return std::make_unique<HfPythonBackend>(model_dir);
+    return std::make_unique<HfPythonBackend>(model_dir, python_path);
 }
 
 } // namespace trtf
