@@ -6,16 +6,17 @@ The system is split into two phases across two languages:
 
 | Phase | Language | Tool | Input | Output |
 |-------|----------|------|-------|--------|
-| **Build** | Python | `trtf-build` | HF model directory | `.trtfb` bundle |
+| **Build** | Python | `trtf-build` / `trtf_build.build()` | HF repo ID or local directory | `.trtfb` bundle |
 | **Run** | C++ | `trtf` / C ABI | `.trtfb` bundle | Generated text |
 
-**Build phase** (Python `trtf_build/` package):
-1. Parse `config.json` to identify model family and architecture
-2. Load safetensors weights via the `safetensors` Python library
-3. Map HF tensor keys to canonical format (per-family checkpoint mapper)
-4. Build TRT `INetworkDefinition` via the TensorRT Python API
-5. Compile to `ICudaEngine` (GPU kernel compilation)
-6. Package engine plan + tokenizer files into a `.trtfb` bundle
+**Build phase** (Python `trtf_build/` package — accepts HF repo IDs or local directories):
+1. Resolve model: auto-download from HuggingFace Hub if needed
+2. Parse `config.json` to identify model family and architecture
+3. Load safetensors weights via the `safetensors` Python library
+4. Map HF tensor keys to canonical format (per-family checkpoint mapper)
+5. Build TRT `INetworkDefinition` via the TensorRT Python API
+6. Compile to `ICudaEngine` (GPU kernel compilation)
+7. Package engine plan + tokenizer files into a `.trtfb` bundle
 
 **Run phase** (C++ runtime, ~13 source files):
 1. Load `.trtfb` bundle, deserialize TRT engine plan
@@ -25,27 +26,38 @@ The system is split into two phases across two languages:
 
 ---
 
-## Build Phase: Python CLI (`trtf-build`)
+## Build Phase: Python CLI + API
+
+### CLI (`trtf-build`)
 
 ```
-trtf-build build <hf-model-dir> -o output.trtfb [--max-cache-length N]
+trtf-build build Qwen/Qwen3-0.6B -o output.trtfb [--max-cache-length N]
+trtf-build build <local-model-dir> -o output.trtfb [--max-cache-length N]
 trtf-build inspect <bundle.trtfb>
 trtf-build version
+```
+
+### Python API
+
+```python
+import trtf_build
+trtf_build.build("Qwen/Qwen3-0.6B", "qwen3.trtfb")            # auto-downloads
+trtf_build.build("models/hf/Qwen__Qwen3-0.6B", "qwen3.trtfb")  # local directory
 ```
 
 The build phase uses the `trtf_build/` Python package, which provides:
 
 ### Family Plugin System
 
-Each model family is a Python plugin in `trtf_build/families/<family>/`:
+Each model family is a single Python file in `trtf_build/trtf_build/families/`:
 
 ```
-trtf_build/
-  families/
-    qwen/       # Qwen, Qwen2, Qwen3, QWQ
-    llama/      # LLaMA, TinyLlama
-    mistral/    # Mistral, TinyMistral
-    gemma/      # Gemma (adds +1.0 to RMSNorm gamma, scales embedding)
+trtf_build/trtf_build/families/
+  base.py       # FamilyPlugin protocol
+  qwen.py       # Qwen, Qwen2, Qwen3, QWQ
+  llama.py      # LLaMA, TinyLlama
+  mistral.py    # Mistral, TinyMistral
+  gemma.py      # Gemma (adds +1.0 to RMSNorm gamma, scales embedding)
 ```
 
 A family plugin provides:
@@ -83,9 +95,7 @@ Users access the library through `extern "C"` factory functions `trtf_create_pip
 
 ```cpp
 struct TrtfPipelineOptions {
-    int flags;                    // TRTF_PREFER_TRT / TRTF_FORCE_TRT
     int max_new_tokens;           // 0 = use model default (20)
-    int max_cache_length;         // 0 = use config.json value (capped at 4096)
     const char* hf_python;        // nullptr = auto-detect
 };
 ```
@@ -132,7 +142,8 @@ class IGenerationBackend {
 ### Python CLI: `trtf-build`
 
 ```bash
-trtf-build build <hf-model-dir> -o output.trtfb [--max-cache-length N]
+trtf-build build Qwen/Qwen3-0.6B -o output.trtfb [--max-cache-length N]  # HF repo ID
+trtf-build build <local-model-dir> -o output.trtfb [--max-cache-length N]  # local dir
 trtf-build inspect <bundle.trtfb>
 trtf-build version
 ```

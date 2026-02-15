@@ -2,6 +2,6 @@
 
 __version__ = "0.1.0"
 
-from .engine_builder import build_bundle
+from .engine_builder import build, build_bundle
 from .bundle_writer import write_bundle
 from .config import ModelConfig

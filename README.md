@@ -1,255 +1,152 @@
 # trt-transformers-cpp
 
-A C++ library that mirrors HuggingFace `transformers.pipeline(...)` with TensorRT-first execution. Reads HuggingFace model checkpoints directly, builds optimized TensorRT engines from the C++ API (no ONNX), and runs GPU-accelerated inference.
+Python builds TensorRT engines from HuggingFace models. C++ runs them.
 
-## Current status
-
-- **Library API**: C ABI entry point (`trtf_create_pipeline()`) returns `IPipeline*` virtual interface. ABI-safe across compilers.
-- **CLI**: `trtf build/run/inspect/version` subcommands.
-- **Bundle format**: `.trtfb` files package compiled TRT engines + tokenizer into a single artifact.
-- **CMake install**: `find_package(trtf)` support, installs library + headers + CLI.
-- Two backends: `trt` (TensorRT GPU), `hf-transformers` (Python subprocess fallback).
-- 3-registry plug-and-play architecture. 4 built-in model families (Qwen, LLaMA, Mistral, Gemma).
-- `StandardDecoderGraphBuilder` handles Pre-RMSNorm + GQA + RoPE + SwiGLU (LLaMA, Qwen, Mistral, Gemma).
-- Verified TRT output: Qwen3-0.6B, TinyLlama-1.1B, TinyMistral-248M, DeepSeek-R1-Distill-1.5B.
+The system is split into two stages:
+- **`trtf_build`** (Python) — downloads an HF model, builds a TRT engine, and packages it into a `.trtfb` bundle.
+- **`trtf`** (C++) — loads a `.trtfb` bundle and runs autoregressive inference on GPU.
 
 ## Quick start
 
-Prerequisites: Docker + NVIDIA Container Toolkit + TensorRT host artifacts.
-
-### 1. Launch the dev container
+Prerequisites: Docker + NVIDIA Container Toolkit.
 
 ```bash
+# 1. Build and launch the dev container
 ./scripts/docker_build.sh
-./scripts/docker_run.sh       # starts interactive container named trtf-dev
+./scripts/docker_run.sh
+
+# 2. Inside the container: install deps + build C++ runtime
+./scripts/setup_container.sh
+source .venv/bin/activate
+
+# 3. Build a bundle from a HuggingFace model (auto-downloads)
+trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb
+
+# 4. Run inference
+export LD_LIBRARY_PATH="$(python3 -c 'import importlib.util; s=importlib.util.find_spec(\"tensorrt_libs\"); print(s.submodule_search_locations[0])'):/usr/local/cuda/lib64"
+./build/trtf run /tmp/qwen3.trtfb \
+  --prompt "The capital of France is" \
+  --max-new-tokens 20 \
+  --hf-python .venv/bin/python
 ```
 
-### 2. Build and test (inside container)
+## Python API
 
-All remaining commands run inside the container.
+```python
+import trtf_build
 
+# From a HuggingFace repo ID (auto-downloads):
+trtf_build.build("Qwen/Qwen3-0.6B", "qwen3.trtfb")
+
+# From a local directory:
+trtf_build.build("models/hf/Qwen__Qwen3-0.6B", "qwen3.trtfb")
+
+# With options:
+trtf_build.build("Qwen/Qwen3-0.6B", "qwen3.trtfb",
+                  max_cache_length=512, verbose=True)
+```
+
+Install the package:
 ```bash
-# Clean any stale host-side CMake cache (safe to skip on first run)
-rm -rf build
-
-# Configure and build
-cmake -S . -B build -G Ninja \
-  -DTRTF_TRT_INCLUDE_DIR=/opt/trt/include/zapped_headers \
-  -DTRTF_TRT_LIBRARY=/opt/trt/Debug/lib/libnvinfer.so \
-  -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-  -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
-cmake --build build -j
-
-# Run all tests
-ctest --test-dir build --output-on-failure
-```
-
-### 3. Set up Python env + download model weights (one-time)
-
-```bash
-python3 -m venv .venv-hf
-source .venv-hf/bin/activate
-pip install -U pip
-pip install "transformers>=4.57.0" tokenizers safetensors sentencepiece huggingface_hub
-
-python3 -c "
-from huggingface_hub import snapshot_download
-
-allow = ['config.json', 'generation_config.json', 'model.safetensors', 'model-*.safetensors',
-         'model.safetensors.index.json',
-         'tokenizer.json', 'tokenizer_config.json', 'vocab.json',
-         'merges.txt', 'special_tokens_map.json', '*.model']
-
-for repo, local in [
-    ('Qwen/Qwen3-0.6B',                           'models/hf/Qwen__Qwen3-0.6B'),
-    ('TinyLlama/TinyLlama-1.1B-Chat-v1.0',        'models/hf/TinyLlama__TinyLlama-1.1B-Chat-v1.0'),
-    ('Felladrin/TinyMistral-248M-Chat-v2',         'models/hf/Felladrin__TinyMistral-248M-Chat-v2'),
-    ('deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B', 'models/hf/deepseek-ai__DeepSeek-R1-Distill-Qwen-1.5B'),
-]:
-    print(f'Downloading {repo}...')
-    snapshot_download(repo_id=repo, local_dir=local,
-                      local_dir_use_symlinks=False, allow_patterns=allow)
-"
-```
-
-### 4. Use the C API: write, compile, and run
-
-```bash
-cat > /tmp/hello_trtf.cpp <<'EOF'
-#include <trtf/pipeline.h>
-#include <iostream>
-
-int main() {
-    auto* p = trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT);
-    if (!p) { std::cerr << "Error: " << trtf_last_error() << std::endl; return 1; }
-    std::cout << "backend: " << p->backend_name() << std::endl;
-    std::cout << p->generate("Hello", 1) << std::endl;
-    delete p;
-}
-EOF
-
-c++ -std=c++17 /tmp/hello_trtf.cpp \
-  -I include -Lbuild -ltrtf_core \
-  -L/opt/trt/Debug/lib -lnvinfer \
-  -L/usr/local/cuda/lib64 -lcudart \
-  -lstdc++fs -o /tmp/hello_trtf
-
-TRTF_HF_PYTHON=$PWD/.venv-hf/bin/python \
-TRTF_MAX_CACHE_LENGTH=1 \
-/tmp/hello_trtf
-```
-
-Expected output:
-```
-backend: trt
-Hello Answer
-```
-
-## C API reference
-
-The entire public API is a single `extern "C"` factory that returns a C++ virtual interface:
-
-```cpp
-// <trtf/pipeline.h>
-
-// Factory -- the only extern "C" symbol users need
-trtf::IPipeline* trtf_create_pipeline(const char* model_or_bundle, int flags);
-//   flags: TRTF_PREFER_TRT (0), TRTF_FORCE_TRT (1), TRTF_CPU_ONLY (2)
-
-// IPipeline -- stable vtable, safe across shared library boundary
-pipeline->generate(prompt, max_new_tokens)  // returns const char* (valid until next call)
-pipeline->model_id()                        // returns const char*
-pipeline->backend_name()                    // returns const char*
-pipeline->save_bundle(output_path)          // returns bool
-delete pipeline;                            // cleanup
-
-// Utilities
-const char* trtf_last_error();  // thread-local error message
-const char* trtf_version();
-int trtf_has_trt();             // 1 if compiled with TRT support
+pip install --no-deps -e trtf_build/
 ```
 
 ## CLI
 
-The `trtf` CLI is a thin wrapper around the same C API. All examples below assume you are
-inside the container and have run the Python/model setup from step 3.
-
-For convenience, set these once per session:
-```bash
-export TRTF_HF_PYTHON=$PWD/.venv-hf/bin/python
-export TRTF_MAX_CACHE_LENGTH=256
-export TRTF_MAX_NEW_TOKENS=50
-```
-
-### Running each supported model
+### Python builder (`trtf-build`)
 
 ```bash
-# Qwen3-0.6B (alias)
-./build/trtf run QWEN3 \
-  --prompt "Tell me something about TensorRT" --force-trt
+# Build from HF repo ID (auto-downloads)
+trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
 
-# Qwen3-0.6B (explicit path — same model, just showing the pattern)
-./build/trtf run models/hf/Qwen__Qwen3-0.6B \
-  --prompt "Tell me something about TensorRT" --force-trt
+# Build from local directory
+trtf-build build models/hf/Qwen__Qwen3-0.6B -o qwen3.trtfb
 
-# TinyLlama-1.1B
-./build/trtf run models/hf/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
-  --prompt "Tell me something about TensorRT" --force-trt
+# Options
+trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb --max-cache-length 512 --verbose
 
-# TinyMistral-248M
-./build/trtf run models/hf/Felladrin__TinyMistral-248M-Chat-v2 \
-  --prompt "Tell me something about TensorRT" --force-trt
+# Inspect a bundle
+trtf-build inspect qwen3.trtfb
 
-# DeepSeek-R1-Distill-Qwen-1.5B (chain-of-thought model — outputs <think>...</think> reasoning)
-./build/trtf run models/hf/deepseek-ai__DeepSeek-R1-Distill-Qwen-1.5B \
-  --prompt "Tell me something about TensorRT" --force-trt
+# Version info
+trtf-build version
 ```
 
-### Engine caching (skip recompilation on subsequent runs)
-
-TRT engine compilation can take 10-30+ seconds. Set `TRTF_TRT_ENGINE_CACHE_DIR` to cache
-the compiled engine plan to disk. The second run loads instantly:
+### C++ runtime (`trtf`)
 
 ```bash
-# First run: compiles engine and saves to cache (~20s)
-TRTF_TRT_ENGINE_CACHE_DIR=/tmp/trtf_engines \
-./build/trtf run QWEN3 --prompt "Tell me something about TensorRT" --force-trt
+# Run inference from a bundle
+./build/trtf run qwen3.trtfb --prompt "Hello" --max-new-tokens 50 \
+  --hf-python .venv/bin/python
 
-# Second run: loads cached engine (<1s)
-TRTF_TRT_ENGINE_CACHE_DIR=/tmp/trtf_engines \
-./build/trtf run QWEN3 --prompt "What is CUDA?" --force-trt
+# Inspect bundle metadata
+./build/trtf inspect qwen3.trtfb
 
-# See what got cached
-ls -lh /tmp/trtf_engines/
+# Version info
+./build/trtf version
 ```
 
-### Other commands
+## C API
 
-```bash
-./build/trtf version                    # Print version and TRT support
-./build/trtf inspect model.trtfb        # Print .trtfb bundle metadata
+The public C++ API is a single header (`include/trtf/pipeline.h`):
+
+```cpp
+#include <trtf/pipeline.h>
+
+// Create from .trtfb bundle
+TrtfPipelineOptions opts = {.max_new_tokens = 50, .hf_python = "/path/to/python"};
+auto* p = trtf_create_pipeline_ex("model.trtfb", &opts);
+
+p->generate("Hello", 50);   // returns const char*
+p->model_id();               // returns const char*
+p->backend_name();           // returns const char*
+delete p;
+
+// Utilities
+trtf_last_error();           // thread-local error message
+trtf_version();
+trtf_has_trt();              // 1 if compiled with TRT support
 ```
-
-### Subcommands
-
-| Subcommand | Description |
-|-----------|-------------|
-| `trtf run <model-or-bundle> --prompt "text"` | Generate text |
-| `trtf build <model-dir> -o <output.trtfb>` | Compile model to `.trtfb` bundle |
-| `trtf inspect <bundle.trtfb>` | Print bundle metadata |
-| `trtf version` | Print version and TRT support status |
-
-### Flags
-
-- `--force-trt`: require TRT backend, fail if unavailable
-- `--max-new-tokens N`: override max generation tokens
-- `--max-cache-length N`: cap KV cache length (build only)
-
-### Environment variables
-
-| Variable | Description |
-|----------|-------------|
-| `TRTF_HF_PYTHON` | Path to Python for HF tokenizer bridge |
-| `TRTF_MAX_NEW_TOKENS` | Override max generation tokens |
-| `TRTF_MAX_CACHE_LENGTH` | Cap KV cache length (saves GPU memory) |
-| `TRTF_TRT_ENGINE_CACHE_DIR` | On-disk cache for compiled TRT engines (set this to avoid recompilation) |
-| `TRTF_DATA_DIR` | Override source directory for scripts/models |
 
 ## Supported models
 
-Any HF model directory with `config.json` + `model.safetensors` that uses a registered `model_type` works automatically.
+| Model | HF Repo | `model_type` | Family |
+|-------|---------|-------------|--------|
+| Qwen3-0.6B | `Qwen/Qwen3-0.6B` | `qwen3` | Qwen |
+| DeepSeek-R1-Distill-1.5B | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | `qwen2` | Qwen |
+| TinyLlama-1.1B | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | `llama` | LLaMA |
+| TinyMistral-248M | `Felladrin/TinyMistral-248M-Chat-v2` | `mistral` | Mistral |
+| Gemma-2B | `google/gemma-2b` | `gemma` | Gemma |
 
-| Model | HF Repo | `model_type` | Family | Verified |
-|-------|---------|-------------|--------|----------|
-| Qwen3-0.6B | `Qwen/Qwen3-0.6B` | `qwen3` | Qwen | Yes |
-| TinyLlama-1.1B | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | `llama` | LLaMA | Yes |
-| TinyMistral-248M | `Felladrin/TinyMistral-248M-Chat-v2` | `mistral` | Mistral | Yes |
-| DeepSeek-R1-Distill-1.5B | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | `qwen2` | Qwen | Yes |
-| Yi-Coder-1.5B | `01-ai/Yi-Coder-1.5B` | `llama` | LLaMA | Yes |
-| Gemma-2B | `google/gemma-2b` | `gemma` | Gemma | Yes |
+Any HF model whose `model_type` matches a supported family works automatically.
 
-The 4 registered families are: **Qwen**, **LLaMA**, **Mistral**, **Gemma**. Any model whose `model_type` matches a family will load automatically.
+## Adding a model family
 
-## Adding a new model family
+Create a plugin file in `trtf_build/trtf_build/families/<family>.py` implementing the `FamilyPlugin` protocol (see `base.py`). It is auto-discovered — no registration code needed. No C++ changes required.
 
-For standard dense decoders (LLaMA-like), create files + re-run cmake (**zero edits to shared files**):
+See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full guide, or `trtf_build/trtf_build/families/qwen.py` for an example.
 
-1. `src/models/<family>/checkpoint_mapper.h/cpp` — subclass `StandardCheckpointMapper`, override `can_map()`
-2. `src/models/<family>/registration.h/cpp` — register into HF Family + Checkpoint Mapper + Model Runtime registries
-3. `tests/test_<family>_family.cpp` — unit test (auto-discovered by CMake GLOB)
-4. Re-run `cmake -S . -B build -G Ninja` — CMake auto-discovers new families
+After implementing, validate with:
+```bash
+python3 scripts/diff_logits.py --model-dir <hf-model-dir> --binary ./build/trtf --atol 1e-3 --battery
+```
 
-See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full guide, or `scripts/templates/model_family/registration.cpp` for the skeleton.
+## Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `TRTF_TRT_LOG_STDERR=1` | Enable TRT logger output to stderr |
+| `TRTF_TRT_LOG_MIN_SEVERITY` | Minimum TRT log severity |
 
 ## Documentation
 
 | Page | Description |
 |------|-------------|
-| [Architecture Overview](docs/wiki/Architecture-Overview.md) | Three-stage pipeline, 3-registry system, backend cascade |
-| [Pipeline Deep Dive](docs/wiki/Pipeline-Deep-Dive.md) | Full call chain, data structures, safetensors loading |
-| [TRT Internals](docs/wiki/TRT-Internals.md) | Decoder layer anatomy, graph ops, engine lifecycle |
-| [HF vs TRT Comparison](docs/wiki/HF-vs-TRT-Comparison.md) | Side-by-side comparison with HuggingFace Transformers |
-| [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) | Step-by-step guide with code examples |
-| [Source Layout](docs/wiki/Source-Layout.md) | File-by-file guide to the codebase |
-| [Development Log](docs/WORKLOG.md) | Chronological development history |
+| [Architecture Overview](docs/wiki/Architecture-Overview.md) | Two-stage pipeline, bundle format |
+| [Pipeline Deep Dive](docs/wiki/Pipeline-Deep-Dive.md) | Full call chain, data structures |
+| [TRT Internals](docs/wiki/TRT-Internals.md) | Decoder layer anatomy, graph ops |
+| [HF vs TRT Comparison](docs/wiki/HF-vs-TRT-Comparison.md) | Side-by-side comparison |
+| [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) | Step-by-step guide |
+| [Source Layout](docs/wiki/Source-Layout.md) | File-by-file guide |
+| [Development Log](docs/WORKLOG.md) | Chronological history |
 | [CLAUDE.md](CLAUDE.md) | Full build/test/container runbook |

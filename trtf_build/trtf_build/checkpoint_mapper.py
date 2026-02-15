@@ -10,6 +10,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+
+# Register bfloat16 dtype with numpy (needed for safetensors without torch).
+try:
+    import ml_dtypes  # noqa: F401
+except ImportError:
+    pass
+
 from safetensors import safe_open
 
 from .config import ModelConfig
@@ -239,8 +246,8 @@ def load_standard_weights(
 # Safetensors I/O helpers
 # ---------------------------------------------------------------------------
 
-def _detect_framework(model_dir: Path) -> str:
-    """Use 'torch' if available (handles BF16), else 'numpy'."""
+def _detect_framework() -> str:
+    """Use 'torch' if available (handles BF16 natively), else 'numpy'."""
     try:
         import torch  # noqa: F401
         return "torch"
@@ -250,7 +257,7 @@ def _detect_framework(model_dir: Path) -> str:
 
 def _open_safetensors(model_dir: Path) -> list:
     """Open all safetensor shards in a model directory."""
-    fw = _detect_framework(model_dir)
+    fw = _detect_framework()
     single = model_dir / "model.safetensors"
     if single.exists():
         return [safe_open(str(single), framework=fw)]
@@ -285,8 +292,11 @@ def _load_tensor(readers: list, name: str) -> np.ndarray:
                 # torch.Tensor — handles BF16 natively
                 return t.float().numpy()
             # numpy path — handle BF16 via uint16 bit-shift
-            if t.dtype == np.uint16 or str(t.dtype) == "bfloat16":
+            dtype_str = str(t.dtype)
+            if t.dtype == np.uint16 or dtype_str == "bfloat16":
                 t = t.view(np.uint16).astype(np.uint32) << 16
                 t = t.view(np.float32)
+            elif dtype_str == "float16":
+                t = t.astype(np.float32)
             return t.astype(np.float32)
     raise KeyError(f"Tensor not found: {name}")

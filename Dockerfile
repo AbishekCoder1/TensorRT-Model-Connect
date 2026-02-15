@@ -12,11 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-venv \
     python3-pip \
+    libnvinfer-headers-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/trt-transformers-cpp
-
-# TensorRT is expected via mounted host path, e.g. /opt/trt
-ENV TRT_ROOT=/opt/trt
 
 CMD ["bash"]

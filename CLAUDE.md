@@ -31,8 +31,15 @@ cmake --build build -j
 ### Python build package
 
 ```bash
-pip install -e trtf_build/
+pip install --no-deps -e trtf_build/
+
+# Build from HF repo ID (auto-downloads) or local directory
+trtf-build build Qwen/Qwen3-0.6B -o <output.trtfb> [--max-cache-length N] [--verbose]
 trtf-build build <model-dir> -o <output.trtfb> [--max-cache-length N] [--verbose]
+
+# Or use the Python API
+python3 -c "import trtf_build; trtf_build.build('Qwen/Qwen3-0.6B', 'qwen3.trtfb')"
+
 trtf-build inspect <bundle.trtfb>
 trtf-build version
 ```
@@ -117,6 +124,7 @@ src/                                 # C++ bundle-only runtime
     text_parsers.h/cpp               # shared string/file parsing (starts_with, read_file, etc.)
     json_helpers.h/cpp               # shared JSON extraction (extract_json_string, etc.)
 scripts/
+  setup_container.sh                 # One-shot container setup (venv, deps, build, test)
   diff_logits.py                     # E2E logit comparison (trtf vs HF transformers)
   diff_layers.py                     # Per-layer hidden state comparison
 tests/
@@ -157,99 +165,44 @@ python3 scripts/diff_layers.py --model-dir <hf-model-dir>
 
 ## Container workflow (TRT GPU)
 
-Prerequisites: Docker + NVIDIA Container Toolkit. The container is fully self-contained — no host TRT artifacts needed.
+Prerequisites: Docker + NVIDIA Container Toolkit. The container is fully self-contained — no host TRT artifacts needed. TRT headers come from apt (`libnvinfer-headers-dev` baked into the Dockerfile), TRT libs come from pip (`tensorrt_cu12`).
 
 ### 1) Build and launch the dev container
 ```bash
 ./scripts/docker_build.sh
 ./scripts/docker_run.sh
 ```
-Or directly:
+
+### 2) One-shot setup (inside container)
 ```bash
-docker run --rm -it --gpus all \
-  -v "$PWD":/workspace/trt-transformers-cpp \
-  -w /workspace/trt-transformers-cpp \
-  trtf-dev bash
+./scripts/setup_container.sh
+source .venv/bin/activate
 ```
 
-### 2) Install TRT + Python deps (inside container)
+This creates `.venv`, installs TRT + Python deps, builds the C++ runtime into `build/`, and runs tests.
+
+### 3) Build bundle + validate Qwen3 TRT E2E (inside container)
 ```bash
-# TRT headers (for C++ compilation) + CUDA 12 runtime libs (from pip)
-apt-get update && apt-get install -y --no-install-recommends libnvinfer-headers-dev
+source .venv/bin/activate
 
-python3 -m venv .venv-hf
-source .venv-hf/bin/activate
-pip install -U pip
-pip install tensorrt_cu12 && pip install tensorrt --no-deps  # CUDA 12 TRT Python
-pip install "transformers>=4.57.0" tokenizers safetensors sentencepiece huggingface_hub datasets
-pip install --no-deps -e trtf_build/
-# Optional for HF-reference parity scripts:
-pip install torch accelerate
-```
-
-### 3) Download real Qwen3 weights (inside container)
-```bash
-source .venv-hf/bin/activate
-python3 - <<'PY'
-from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id='Qwen/Qwen3-0.6B',
-    local_dir='models/hf/Qwen__Qwen3-0.6B',
-    local_dir_use_symlinks=False,
-    allow_patterns=[
-        'config.json', 'generation_config.json', 'model.safetensors*',
-        'tokenizer.json', 'tokenizer_config.json', 'vocab.json',
-        'merges.txt', 'special_tokens_map.json', '*.model',
-        'README.md', 'LICENSE', '.gitattributes',
-    ],
-)
-PY
-```
-
-### 4) Configure and build C++ runtime (inside container)
-
-The C++ runtime uses apt TRT headers + pip TRT cu12 libs (fully self-contained):
-```bash
-# Find pip-installed TRT libs
-TRT_LIB_DIR=$(python3 -c "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])")
-# Create libnvinfer.so symlink if needed
-[ ! -f "$TRT_LIB_DIR/libnvinfer.so" ] && ln -sf libnvinfer.so.10 "$TRT_LIB_DIR/libnvinfer.so"
-
-cmake -S . -B build-container -G Ninja \
-  -DTRTF_TRT_INCLUDE_DIR=/usr/include/x86_64-linux-gnu \
-  -DTRTF_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so \
-  -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-  -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
-cmake --build build-container -j
-
-# Run tests (set LD_LIBRARY_PATH for pip TRT libs)
-export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
-ctest --test-dir build-container --output-on-failure
-```
-Do not reuse host-generated build dirs inside the container. Always use a container-specific build dir.
-
-### 5) Build bundle + validate Qwen3 TRT E2E (inside container)
-```bash
-source .venv-hf/bin/activate
-
-# Build a bundle using the Python builder
-trtf-build build models/hf/Qwen__Qwen3-0.6B \
-  -o /tmp/qwen3.trtfb --max-cache-length 256
+# Build a bundle (auto-downloads from HuggingFace)
+trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
 
 # Inspect it
 trtf-build inspect /tmp/qwen3.trtfb
 
 # Run from bundle using the C++ runtime
+TRT_LIB_DIR=$(python3 -c "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])")
 export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
-./build-container/trtf run /tmp/qwen3.trtfb --prompt "Hello" --max-new-tokens 5 \
-  --hf-python $PWD/.venv-hf/bin/python
+./build/trtf run /tmp/qwen3.trtfb --prompt "Hello" --max-new-tokens 5 \
+  --hf-python $PWD/.venv/bin/python
 ```
 
-### 6) MMLU sanity check (inside container)
+### 4) MMLU sanity check (inside container)
 ```bash
-$PWD/.venv-hf/bin/python scripts/eval_mmlu.py \
+$PWD/.venv/bin/python scripts/eval_mmlu.py \
   --backend trtf --model /tmp/qwen3.trtfb \
-  --trtf-binary ./build-container/trtf \
+  --trtf-binary ./build/trtf \
   --subject all --split test \
   --num-samples 4 --min-accuracy 0.0
 ```

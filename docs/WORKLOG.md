@@ -1,5 +1,33 @@
 # Worklog
 
+## 2026-02-15 — HuggingFace-like Python API + Self-Contained Container + README Rewrite
+
+- **HuggingFace-like Python API** (`trtf_build.build()`)
+  - New `build(model_id_or_path, output_path, ...)` accepts HF repo IDs (auto-downloads) or local directories.
+  - `_resolve_model()` helper: checks for local `config.json`, falls back to `huggingface_hub.snapshot_download()`.
+  - Exported from `trtf_build.__init__`: `from trtf_build import build`.
+  - CLI updated: `trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb` (auto-downloads).
+
+- **Self-contained Dockerfile**
+  - Added `libnvinfer-headers-dev` to apt packages in Dockerfile (no host TRT mount needed).
+  - Removed `TRT_ROOT=/opt/trt` env var from Dockerfile.
+  - Simplified `docker_run.sh`: removed `/opt/trt` volume mount and `LD_LIBRARY_PATH` env var.
+
+- **One-shot container setup** (`scripts/setup_container.sh`)
+  - Creates `.venv`, installs TRT cu12 from pip, installs trtf_build, builds C++ runtime, runs tests.
+  - Single command: `./scripts/setup_container.sh` after `docker run`.
+
+- **Fix: bfloat16 loading without torch** (`checkpoint_mapper.py`)
+  - Added `ml_dtypes` dependency to register bfloat16 dtype with numpy.
+  - `safetensors>=0.7` with `framework="numpy"` requires `ml_dtypes` for bfloat16 models.
+  - Without this, `data type 'bfloat16' not understood` error on Qwen3/LLaMA etc.
+  - Falls back gracefully: imports `ml_dtypes` if available, torch still preferred when present.
+
+- **README rewrite**
+  - 3-command quick start: docker build → setup → build+run.
+  - Python API examples, CLI reference, C API reference.
+  - Cleaned up: removed stale env vars, engine cache, `/opt/trt` references, old C API patterns.
+
 ## 2026-02-15 — Python Build / C++ Runtime Architecture Split
 
 - **Migrated TRT Engine Build from C++ to Python**

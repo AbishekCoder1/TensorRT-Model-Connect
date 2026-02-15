@@ -11,6 +11,49 @@ from .config import ModelConfig
 from .families import find_plugin
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
 
+# Standard HF file patterns to download (matches what the builder needs).
+_HF_ALLOW_PATTERNS = [
+    "config.json",
+    "generation_config.json",
+    "model.safetensors",
+    "model-*.safetensors",
+    "model.safetensors.index.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "*.model",
+]
+
+
+def _resolve_model(model_id_or_path: str) -> str:
+    """Resolve a HuggingFace repo ID or local path to a local directory.
+
+    If model_id_or_path is an existing directory with config.json, returns it
+    directly. Otherwise, downloads via huggingface_hub.snapshot_download().
+    """
+    local = Path(model_id_or_path)
+    if local.is_dir() and (local / "config.json").exists():
+        return str(local)
+
+    # Treat as HuggingFace repo ID — download to HF cache.
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        raise ImportError(
+            "huggingface_hub is required for auto-downloading models. "
+            "Install it with: pip install huggingface_hub"
+        )
+
+    print(f"[trtf-build] Downloading {model_id_or_path} ...", file=sys.stderr)
+    local_dir = snapshot_download(
+        repo_id=model_id_or_path,
+        allow_patterns=_HF_ALLOW_PATTERNS,
+    )
+    print(f"[trtf-build] Downloaded to {local_dir}", file=sys.stderr)
+    return local_dir
+
 
 def _get_trt_version() -> str:
     try:
@@ -110,3 +153,26 @@ def build_bundle(
     t4 = time.monotonic()
     print(f"[trtf-build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
           file=sys.stderr)
+
+
+def build(
+    model_id_or_path: str,
+    output_path: str,
+    max_cache_length: int = 256,
+    *,
+    verbose: bool = False,
+) -> None:
+    """Build a .trtfb bundle from a HuggingFace model ID or local path.
+
+    Like HF transformers, accepts either:
+    - A HuggingFace repo ID: ``"Qwen/Qwen3-0.6B"`` (auto-downloads)
+    - A local directory: ``"models/hf/Qwen__Qwen3-0.6B"``
+
+    Args:
+        model_id_or_path: HF repo ID or local directory with config.json + safetensors.
+        output_path: Where to write the .trtfb bundle.
+        max_cache_length: KV cache length for the engine.
+        verbose: Print detailed TRT builder logs.
+    """
+    model_dir = _resolve_model(model_id_or_path)
+    build_bundle(model_dir, output_path, max_cache_length, verbose=verbose)

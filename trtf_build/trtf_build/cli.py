@@ -12,18 +12,19 @@ from . import __version__
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
-    from .engine_builder import build_bundle
+    from .engine_builder import build
 
-    if not args.model_dir:
-        print("Error: model directory required", file=sys.stderr)
+    if not args.model:
+        print("Error: model (HF repo ID or local directory) required",
+              file=sys.stderr)
         return 1
     if not args.output:
         print("Error: -o / --output required", file=sys.stderr)
         return 1
 
     try:
-        build_bundle(
-            model_dir=args.model_dir,
+        build(
+            model_id_or_path=args.model,
             output_path=args.output,
             max_cache_length=args.max_cache_length,
             verbose=args.verbose,
@@ -98,9 +99,10 @@ def main() -> None:
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # trtf-build build <model-dir> -o <out.trtfb>
+    # trtf-build build <model> -o <out.trtfb>
     build_p = subparsers.add_parser("build", help="Build a .trtfb bundle")
-    build_p.add_argument("model_dir", help="HF model directory")
+    build_p.add_argument("model",
+                         help="HF repo ID (e.g. Qwen/Qwen3-0.6B) or local directory")
     build_p.add_argument("-o", "--output", required=True,
                          help="Output .trtfb file path")
     build_p.add_argument("--max-cache-length", type=int, default=256,

@@ -8,44 +8,28 @@ File-by-file guide to the codebase. The system is split: Python (`trtf_build/`) 
 
 | File/Dir | Purpose |
 |----------|---------|
-| `trtf_build/__main__.py` | CLI entry point: `trtf-build build|inspect|version` |
-| `trtf_build/builder.py` | Main build pipeline: load config, match family, build engine, create bundle |
-| `trtf_build/bundle.py` | `.trtfb` bundle writing: package engine plan + tokenizer files |
+| `trtf_build/__init__.py` | Package init: exports `build`, `build_bundle`, `ModelConfig` |
+| `trtf_build/__main__.py` | CLI entry point: `python -m trtf_build` |
+| `trtf_build/cli.py` | CLI implementation: `trtf-build build|inspect|version` |
+| `trtf_build/engine_builder.py` | Orchestrator: `build()` (HF ID or local) and `build_bundle()` (local only) |
+| `trtf_build/bundle_writer.py` | `.trtfb` bundle writing: package engine plan + tokenizer files |
 | `trtf_build/config.py` | `config.json` parsing: extract architecture params (family, dims, heads, etc.) |
 | `trtf_build/graph_ops.py` | Shared TRT graph ops (Python): RMSNorm, matmul, RoPE, SwiGLU, attention |
-| `trtf_build/registry.py` | Family plugin registry: match `model_type` to family plugin |
+| `trtf_build/standard_decoder_builder.py` | Standard decoder TRT engine builder |
+| `trtf_build/checkpoint_mapper.py` | HF safetensors → weight dict (transpose, GQA expansion) |
 
-### Family Plugins (`trtf_build/families/`)
+### Family Plugins (`trtf_build/trtf_build/families/`)
 
-Each family provides a checkpoint mapper (HF tensor keys to canonical) and optionally a custom graph builder.
-
-#### Qwen (`trtf_build/families/qwen/`)
-
-| File | Purpose |
-|------|---------|
-| `plugin.py` | Family registration: matches `model_type` starting with `qwen`/`qwq`. Handles Qwen, Qwen2, Qwen3, QWQ. |
-| `checkpoint.py` | Checkpoint mapper: standard HF tensor naming, handles q_norm/k_norm for Qwen3. |
-
-#### LLaMA (`trtf_build/families/llama/`)
+Each family is a single Python file implementing the `FamilyPlugin` protocol (see `base.py`). Auto-discovered by `__init__.py`.
 
 | File | Purpose |
 |------|---------|
-| `plugin.py` | Family registration: matches `model_type` `llama`. |
-| `checkpoint.py` | Checkpoint mapper: standard HF tensor naming, no q_norm/k_norm. |
-
-#### Mistral (`trtf_build/families/mistral/`)
-
-| File | Purpose |
-|------|---------|
-| `plugin.py` | Family registration: matches `model_type` `mistral`. |
-| `checkpoint.py` | Checkpoint mapper: standard HF tensor naming. |
-
-#### Gemma (`trtf_build/families/gemma/`)
-
-| File | Purpose |
-|------|---------|
-| `plugin.py` | Family registration: matches `model_type` `gemma`. |
-| `checkpoint.py` | Checkpoint mapper: adds +1.0 to RMSNorm gamma, scales embedding by `sqrt(hidden_size)`. |
+| `__init__.py` | Auto-discovers plugin files, exports `find_plugin()` |
+| `base.py` | `FamilyPlugin` protocol definition |
+| `qwen.py` | Qwen family: matches `qwen`/`qwen2`/`qwen3`/`qwq`. Handles q_norm/k_norm for Qwen3. |
+| `llama.py` | LLaMA family: matches `llama`. Standard HF tensor naming. |
+| `mistral.py` | Mistral family: matches `mistral`. Standard HF tensor naming. |
+| `gemma.py` | Gemma family: matches `gemma`. Adds +1.0 to RMSNorm gamma, scales embedding by `sqrt(hidden_size)`. |
 
 ---
 
@@ -65,7 +49,7 @@ Each family provides a checkpoint mapper (HF tensor keys to canonical) and optio
 
 | File | Purpose |
 |------|---------|
-| `data_dir.h/cpp` | Centralized source-dir resolution: `source_dir()`, `scripts_dir()`, `models_dir()`. Supports `TRTF_DATA_DIR` env override. |
+| `data_dir.h/cpp` | Centralized source-dir resolution: `source_dir()`, `scripts_dir()`. |
 | `text_parsers.h/cpp` | `starts_with()`, `to_lower_ascii()`, `read_file()`, etc. |
 | `json_helpers.h/cpp` | `extract_json_string()`, `extract_json_int()`, etc. |
 
@@ -128,7 +112,7 @@ The following C++ files were removed as part of the Python build migration (~350
 | `src/models/gemma/` | Gemma C++ registration + mapper | `trtf_build/families/gemma/` |
 | `src/utils/tensor_math.h/cpp` | `transpose_2d`, `expand_kv_projection` | NumPy operations |
 | `src/utils/trt/engine_cache.h/cpp` | On-disk TRT engine plan cache | Bundles replace caching |
-| `src/cabi/fast_path_config.h/cpp` | Zero-weight fast path config | Not needed (bundle-only) |
+| `src/cabi/fast_path_config.h/cpp` | Config.json metadata parsing for bundles | Still in codebase (used by bundle loader) |
 | `src/runtime/trt_backend.cpp` | `CreateTrtBackend()` with model runtime dispatch | Not needed (bundle-only) |
 | `src/runtime/runtime_factory.cpp` | Runtime assembly from resolved model | Not needed (bundle-only) |
 | `src/runtime/trt/model_runtime.h/cpp` | `IModelRuntime` + registry + factories | Python family dispatch |
@@ -160,9 +144,10 @@ The following C++ files were removed as part of the Python build migration (~350
 
 | File | Purpose |
 |------|---------|
+| `setup_container.sh` | One-shot container setup: venv, pip deps, cmake build, tests |
+| `docker_build.sh` | Build the self-contained dev container image |
+| `docker_run.sh` | Launch the dev container |
 | `diff_logits.py` | E2E logit comparison: trtf binary vs HF transformers |
 | `diff_layers.py` | Per-layer hidden state comparison between trtf and HF |
 | `eval_mmlu.py` | MMLU benchmark evaluation |
-| `docker_build.sh` | Build the TRT dev container image |
-| `docker_run.sh` | Launch the TRT dev container |
 | `test_qwen3_trt_e2e.sh` | All-in-one Qwen3 TRT E2E diagnostic script |

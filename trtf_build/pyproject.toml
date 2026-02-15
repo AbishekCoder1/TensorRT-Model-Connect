@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "safetensors>=0.4",
     "numpy>=1.24",
+    "ml_dtypes>=0.4",
     "transformers>=4.40",
 ]
 # TensorRT must be installed separately for your CUDA version:
