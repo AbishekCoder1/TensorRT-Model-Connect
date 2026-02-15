@@ -83,7 +83,7 @@ classDiagram
 |-------|------|---------------|
 | **IPipeline / PipelineImpl** | C ABI entry point. Resolves model, assembles runtime, provides generation API. | `trtf_create_pipeline()` / `trtf_create_pipeline_ex()` in `src/cabi/trtf_c.cpp` creates `PipelineImpl` which calls `ResolveTextGenerationModel()` (Stage 1) then `BuildRuntimeForTextGeneration()` (Stage 3). `generate()` encodes prompt via tokenizer, calls backend's `generate()`, decodes output. |
 | **ITokenizer** | Abstract interface for text-to-token-ids and back. | Pure virtual. Two concrete implementations: `VocabTokenizer` (vocab.txt lookup) and `HfPythonTokenizer` (subprocess bridge). See [Unit 6](#unit-6-tokenization). |
-| **IGenerationBackend** | Abstract interface for token-level autoregressive generation. | Pure virtual `generate()` takes input token IDs and returns input + generated IDs. `is_available()` for runtime capability check. Optional `generate_text()` for text-level backends (HF Python). Two implementations: `TrtBackendShared`, `HfPythonBackend`. |
+| **IGenerationBackend** | Abstract interface for token-level autoregressive generation. | Pure virtual `generate()` takes input token IDs and returns input + generated IDs. `is_available()` for runtime capability check. Optional `generate_text()` for text-level backends (HF Python). Two implementations: `TrtBackend`, `HfPythonBackend`. |
 | **GenerationConfig** | Value struct for generation parameters. | Currently supports `max_new_tokens`, `do_sample`, `temperature`. Passed through from PipelineImpl to backend. |
 
 ---
@@ -296,8 +296,11 @@ classDiagram
 | **StandardCheckpointMapper** | Base class for the standard HF tensor naming convention. | Handles `model.embed_tokens.weight`, `model.layers.N.self_attn.{q,k,v,o}_proj.weight`, `model.layers.N.mlp.{gate,up,down}_proj.weight`, `model.norm.weight`, `lm_head.weight`. Transposes all weight matrices (`[out,in]` → `[in,out]`). Expands K/V for GQA via `expand_kv_projection()`. Repeats per-head norms via `repeat_head_norm()`. Detects tied `lm_head`. File: `src/model/standard_checkpoint_mapper.cpp` (260 LOC). |
 | **QwenCheckpointMapper** | Qwen family mapper. | Inherits all logic from `StandardCheckpointMapper`. Only overrides `can_map()` to match `starts_with(family, "qwen")` or `"qwq"`. 15 LOC. File: `src/models/qwen/checkpoint_mapper.cpp`. |
 | **LlamaCheckpointMapper** | LLaMA family mapper. | Same pattern: inherits `StandardCheckpointMapper`, overrides `can_map()` for `"llama"`. 15 LOC. File: `src/models/llama/checkpoint_mapper.cpp`. |
-| **ITrtGraphBuilder** | Registry 3 interface. Builds TRT `INetworkDefinition` from `TrtDecoderDefinition`. | `build_decoder_step_engine()` returns a compiled `DecoderStepEngine`. Name-based registry in `trt_graph_builder.cpp`. Lookup: exact family name → `"standard-decoder"` fallback. |
-| **StandardDecoderGraphBuilder** | Builds the dominant LLM decoder pattern in TRT. | Creates `INetworkDefinition` with embedding gather, N decoder layers (each: RMSNorm → QKV → optional QK norm → RoPE → GQA attention → residual → RMSNorm → SwiGLU MLP → residual), final RMSNorm, LM head projection. Uses reusable ops from `trt_graph_ops.h`. File: `src/runtime/trt/standard_decoder_graph_builder.cpp`. |
+| **IModelRuntime** | Registry 3 interface. Families own their full forward pass: graph construction, state creation, and per-step execution. | `build_engine()` returns a compiled `DecoderStepEngine`. `create_state()` creates per-step state. `run_step()` executes one decode step. Name-based registry in `model_runtime.cpp`. Lookup: exact family name → `"standard-decoder"` fallback. |
+| **CreateStandardDecoderRuntime()** | Factory for standard dense decoders. | Returns an anonymous `IModelRuntime` that delegates `build_engine()` to `StandardDecoderGraphBuilder` and uses KV-cache state/step. No public class to subclass. File: `src/runtime/trt/model_runtime.cpp`. |
+| **CreateKvCacheRuntime(factory)** | Factory for custom graph + standard KV-cache I/O. | Accepts an `EngineFactory` lambda for custom graph construction; provides `create_state()` → `KvCacheStepState` and `run_step()` → `run_decoder_step()` automatically. File: `src/runtime/trt/model_runtime.cpp`. |
+| **ITrtGraphBuilder** | Graph building interface (no registry). | `build_decoder_step_engine()` builds TRT network. Used internally by runtime implementations. Header-only: `trt_graph_builder.h`. |
+| **StandardDecoderGraphBuilder** | Builds the dominant LLM decoder pattern in TRT. | Creates `INetworkDefinition` with embedding gather, N decoder layers (each: RMSNorm → QKV → optional QK norm → RoPE → GQA attention → residual → RMSNorm → SwiGLU MLP → residual), final RMSNorm, LM head projection. Uses reusable ops from `trt_graph_ops.h`. File: `src/model/standard_decoder_graph_builder.cpp`. |
 
 ### Registry Free Functions
 
@@ -307,8 +310,8 @@ classDiagram
         <<module>>
         +RegisterCheckpointMapper(family, priority, mapper)
         +FindCheckpointMapper(architecture) ICheckpointMapper*
-        +RegisterTrtGraphBuilder(family, builder)
-        +FindTrtGraphBuilder(family) ITrtGraphBuilder*
+        +RegisterModelRuntime(family, runtime)
+        +FindModelRuntime(family) IModelRuntime*
         +RegisterHfModelFamily(registration)
         +ResolveHfModelViaFamilyRegistry(model_id) optional~ResolvedModelSpec~
         +RegisterBuiltinHfModelFamilies()
@@ -325,8 +328,9 @@ The TRT backend comprises RAII resource wrappers, the compiled engine, decode ru
 
 ```mermaid
 classDiagram
-    class TrtBackendShared {
+    class TrtBackend {
         -const ITokenizer& mTokenizer
+        -IModelRuntime& mRuntime
         -bool mAvailable
         -string mInitError
         -TrtLogger mLogger
@@ -442,13 +446,13 @@ classDiagram
         +int32_t id_eos
     }
 
-    IGenerationBackend <|-- TrtBackendShared
-    TrtBackendShared *-- DecoderStepEngine : owns
-    TrtBackendShared *-- TrtDecoderDefinition : holds
-    TrtBackendShared *-- TrtLogger : holds
-    TrtBackendShared ..> IStepState : creates during generate()
-    TrtBackendShared ..> CudaStream : uses during generate()
-    TrtBackendShared ..> CudaBuffer : uses during generate()
+    IGenerationBackend <|-- TrtBackend
+    TrtBackend *-- DecoderStepEngine : owns
+    TrtBackend *-- TrtDecoderDefinition : holds
+    TrtBackend *-- TrtLogger : holds
+    TrtBackend ..> IModelRuntime : delegates state/step
+    TrtBackend ..> CudaStream : uses during generate()
+    TrtBackend ..> CudaBuffer : uses during generate()
     IStepState <|-- KvCacheStepState
     TrtDecoderDefinition *-- "0..*" TrtDecoderLayerDefinition
     DecoderStepEngine ..> CudaStream : executes on
@@ -460,7 +464,7 @@ classDiagram
 
 | Class | Role | Implementation |
 |-------|------|---------------|
-| **TrtBackendShared** | `IGenerationBackend` implementation for TRT. Owns the compiled engine and runs the autoregressive loop. | Constructor calls `BuildTrtDecoderWeights()` (inlined conversion) then the provided engine factory (Registry 3 dispatch) to produce a `DecoderStepEngine`. `generate()` creates a `KvCacheStepState` (via `IStepState` interface), runs prefill then decode loop (greedy argmax until EOS or max tokens). File: `src/runtime/trt/trt_backend_shared.cpp`. |
+| **TrtBackend** | `IGenerationBackend` implementation for TRT. Owns the compiled engine and runs the autoregressive loop. | Constructor calls `BuildTrtDecoderWeights()` (inlined conversion) then `IModelRuntime::build_engine()` to produce a `DecoderStepEngine`. `generate()` delegates state creation and per-step execution to the `IModelRuntime`. Runs prefill then decode loop (greedy argmax until EOS or max tokens). File: `src/runtime/trt/trt_backend_shared.cpp`. |
 | **IStepState** | Abstract interface for per-step state management during autoregressive generation. | Defines `prepare_step()` (compute position/mask), `cache_k/v_by_layer()` (access current state), `update_after_step()` (incorporate new outputs). Enables Mamba/SSM models to provide recurrent state instead of KV cache. File: `src/runtime/trt/step_state.h`. |
 | **KvCacheStepState** | KV-cache state implementation for standard attention-based decoders. | Manages per-layer `cache_k`/`cache_v` vectors, tracks `cache_length`, builds attention masks, appends new state via `append_cache_state()`. Extracted from the previous inline cache management in `generate()`. File: `src/runtime/trt/kv_cache_step_state.cpp`. |
 | **DecoderStepEngine** | Compiled TRT engine + execution context + tensor binding metadata. | Created by `finalize_decoder_step_engine()` which builds `ICudaEngine` from `INetworkDefinition` (or loads from cache). Stores all tensor names for inputs (token_id, position_id, attention_mask, per-layer cache_k/v) and outputs (logits, per-layer present_k/v). Also supports `extra_bindings` for non-KV-cache models. File: `src/runtime/trt/trt_engine_lifecycle.h`. |
@@ -469,7 +473,7 @@ classDiagram
 | **CudaStream** | RAII wrapper for `cudaStream_t`. | Constructor calls `cudaStreamCreate()`, destructor calls `cudaStreamDestroy()`. Non-copyable. `ok()` checks `cudaSuccess`. File: `src/runtime/trt/trt_common.cpp`. |
 | **CudaBuffer** | RAII wrapper for GPU memory allocation. | Constructor calls `cudaMalloc()`, destructor calls `cudaFree()`. Non-copyable. `ok()` checks `cudaSuccess`. File: `src/runtime/trt/trt_common.cpp`. |
 | **FastPathModelConfig** | Lightweight config struct for the zero-weight fast path. | Parsed from `config.json` text by `parse_fast_path_config()` without loading any safetensors data. Contains dimensions, cache length (with 4096 cap), and special token IDs needed to populate `DecoderStepEngine` metadata. File: `src/cabi/fast_path_config.h/cpp`. |
-| **CreateTrtBackendFromEngine()** | Creates a TRT backend from a pre-built `DecoderStepEngine` (fast path). | Wraps the engine in a `TrtBackendShared` without calling any graph builder or weight populator. Used when the engine was deserialized from a cached `.plan` file. File: `src/runtime/trt/trt_backend_shared.cpp`. |
+| **CreateTrtBackendFromEngine()** | Creates a TRT backend from a pre-built `DecoderStepEngine` (fast path). | Wraps the engine in a `TrtBackendFastPath` without calling any graph builder or weight populator. Used when the engine was deserialized from a cached `.plan` file. File: `src/runtime/trt/trt_backend_shared.cpp`. |
 
 ### TRT Graph Ops (Reusable Building Blocks)
 

@@ -2,9 +2,7 @@
 #include "models/llama/checkpoint_mapper.h"
 #include "trtf/hf_family_registry.h"
 #include "model/checkpoint_mapper.h"
-#include "runtime/trt/trt_graph_builder.h"
-#include "runtime/trt/trt_common.h"
-#include "runtime/trt/standard_decoder_graph_builder.h"
+#include "runtime/trt/model_runtime_fwd.h"
 #include "utils/text_parsers.h"
 #include "utils/json_helpers.h"
 
@@ -54,10 +52,10 @@ void RegisterLlamaFamily()
     RegisterCheckpointMapper("llama", 100, std::make_unique<LlamaCheckpointMapper>());
 
 #if TRTF_HAS_TRT
-    RegisterTrtGraphBuilder("llama", std::make_unique<StandardDecoderGraphBuilder>());
-    if (!FindTrtGraphBuilder("standard-decoder"))
+    RegisterModelRuntime("llama", CreateStandardDecoderRuntime());
+    if (!FindModelRuntime("standard-decoder"))
     {
-        RegisterTrtGraphBuilder("standard-decoder", std::make_unique<StandardDecoderGraphBuilder>());
+        RegisterModelRuntime("standard-decoder", CreateStandardDecoderRuntime());
     }
 #endif
 

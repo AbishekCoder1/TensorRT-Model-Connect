@@ -1,4 +1,4 @@
-#include "runtime/trt/standard_decoder_graph_builder.h"
+#include "model/standard_decoder_graph_builder.h"
 #include "runtime/trt/trt_common.h"
 #include "runtime/trt/trt_graph_ops.h"
 #include "runtime/trt/trt_engine_lifecycle.h"

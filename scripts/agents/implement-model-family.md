@@ -4,7 +4,7 @@
 
 Implement the **__Family__** model family for the trt-transformers-cpp framework. This is a self-contained prompt — all code patterns are included inline. You do NOT need to read reference files.
 
-The framework uses a 4-registry plug-and-play architecture. For standard dense decoders (Pre-RMSNorm + GQA + RoPE + SwiGLU), you only need to create 3 source files + 1 test file, then add integration lines to 2 existing files.
+The framework uses a 3-registry plug-and-play architecture with zero-edit parallel agent support. For standard dense decoders (Pre-RMSNorm + GQA + RoPE + SwiGLU), you only need to create 4 source files + 1 test file, then re-run cmake. **No edits to any shared file.**
 
 ## Parameters
 
@@ -91,9 +91,7 @@ void Register__Family__Family();
 #include "models/__family__/checkpoint_mapper.h"
 #include "trtf/hf_family_registry.h"
 #include "model/checkpoint_mapper.h"
-#include "runtime/trt/trt_graph_builder.h"
-#include "runtime/trt/trt_common.h"
-#include "runtime/trt/standard_decoder_graph_builder.h"
+#include "runtime/trt/model_runtime_fwd.h"
 #include "utils/text_parsers.h"
 #include "utils/json_helpers.h"
 
@@ -141,10 +139,10 @@ void Register__Family__Family()
     RegisterCheckpointMapper("__family__", 100, std::make_unique<__Family__CheckpointMapper>());
 
 #if TRTF_HAS_TRT
-    RegisterTrtGraphBuilder("__family__", std::make_unique<StandardDecoderGraphBuilder>());
-    if (!FindTrtGraphBuilder("standard-decoder"))
+    RegisterModelRuntime("__family__", CreateStandardDecoderRuntime());
+    if (!FindModelRuntime("standard-decoder"))
     {
-        RegisterTrtGraphBuilder("standard-decoder", std::make_unique<StandardDecoderGraphBuilder>());
+        RegisterModelRuntime("standard-decoder", CreateStandardDecoderRuntime());
     }
 #endif
 
@@ -283,40 +281,9 @@ __qk_norm_assertions__
 }
 ```
 
-## Step 3: Integrate into Existing Files
+## Step 3: Host Build and Test
 
-### Edit `src/model/hf_family_registry.cpp`
-
-Add this include near the other model family includes (after `#include "models/llama/registration.h"`):
-
-```cpp
-#include "models/__family__/registration.h"
-```
-
-Add this call inside `RegisterBuiltinHfModelFamilies()`, after `llama::RegisterLlamaFamily();`:
-
-```cpp
-    __family__::Register__Family__Family();
-```
-
-### Edit `CMakeLists.txt`
-
-Add these source files to the `trtf_core` library (after the llama source lines):
-
-```cmake
-  src/models/__family__/registration.cpp
-  src/models/__family__/checkpoint_mapper.cpp
-```
-
-Add the test executable (after the `test_llama_family` block):
-
-```cmake
-add_executable(test___family___family tests/test___family___family.cpp)
-target_link_libraries(test___family___family PRIVATE trtf_core)
-add_test(NAME test___family___family COMMAND test___family___family)
-```
-
-## Step 4: Host Build and Test
+**No shared file edits needed.** CMake auto-discovers new families via GLOB patterns.
 
 ```bash
 cmake -S . -B build -G Ninja
@@ -333,7 +300,7 @@ ctest --test-dir build --output-on-failure
 
 Expected: Same pass/fail as baseline. Tests that use temp dirs (test_model_loader, test_model_resolver, test_hf_family_registry, test_qwen_family, test_llama_family, test___family___family) may fail on read-only `/tmp` but pass in container.
 
-## Step 5: Container Build and Test
+## Step 4: Container Build and Test
 
 ```bash
 docker exec trtf-dev bash -c 'cmake --build build-container-phase1 -j'
@@ -342,7 +309,7 @@ docker exec trtf-dev bash -c 'ctest --test-dir build-container-phase1 --output-o
 
 Expected: ALL tests pass including `test___family___family`.
 
-## Step 6: Download Real Model Weights (Container)
+## Step 5: Download Real Model Weights (Container)
 
 ```bash
 docker exec trtf-dev bash -c '
@@ -365,7 +332,7 @@ PYEOF
 '
 ```
 
-## Step 7: TRT E2E Validation (Container, GPU required)
+## Step 6: TRT E2E Validation (Container, GPU required)
 
 ```bash
 docker exec trtf-dev bash -c '
@@ -378,7 +345,7 @@ TRTF_MAX_CACHE_LENGTH=256 \
 
 Expected: Coherent text output, `backend=trt`.
 
-## Step 8: Numerical Parity Check (Container, GPU required)
+## Step 7: Numerical Parity Check (Container, GPU required)
 
 ```bash
 docker exec trtf-dev bash -c '
@@ -392,26 +359,27 @@ python3 scripts/diff_logits.py \
 
 Expected: All logit comparisons within tolerance.
 
-## Step 9: Commit
+## Step 8: Commit
 
 ```bash
-git add src/models/__family__/ tests/test___family___family.cpp src/model/hf_family_registry.cpp CMakeLists.txt
+git add src/models/__family__/ tests/test___family___family.cpp
 git commit -m "feat: Add __Family__ model family support
 
-Registers __Family__ into the 4-registry plug-and-play architecture:
+Registers __Family__ into the 3-registry plug-and-play architecture:
 - Registry 1 (HF Family): matches model_type '__model_type_prefix__'
 - Registry 2 (Checkpoint Mapper): StandardCheckpointMapper subclass
-- Registry 3 (TRT Populator): uses StandardTrtModelDefinitionPopulator fallback
-- Registry 4 (TRT Graph Builder): StandardDecoderGraphBuilder
+- Registry 3 (Model Runtime): CreateStandardDecoderRuntime()
 
+Zero shared file edits — CMake auto-discovers new families.
 Validated: host build, container build, unit tests, TRT E2E, diff_logits parity."
 ```
 
 ## Important Notes
 
+- **Zero shared file edits**: CMake auto-discovers families via `src/models/*/registration.h` GLOB. No edits to `hf_family_registry.cpp` or `CMakeLists.txt`.
 - The `StandardCheckpointMapper` base class handles ALL standard HF tensor key mapping (model.embed_tokens, model.layers.N.self_attn.*, model.layers.N.mlp.*, model.norm, lm_head). Your subclass only overrides `can_map()`.
-- The `StandardTrtModelDefinitionPopulator` is registered as a priority-0 fallback globally. You do NOT register your own populator (Registry 3 is automatic).
-- The `StandardDecoderGraphBuilder` handles Pre-RMSNorm + GQA + RoPE + SwiGLU. Register it for your family name in Registry 4.
+- `CreateStandardDecoderRuntime()` handles Pre-RMSNorm + GQA + RoPE + SwiGLU via `StandardDecoderGraphBuilder`.
+- Use `#include "runtime/trt/model_runtime_fwd.h"` (not `model_runtime.h`) — avoids pulling TRT/CUDA headers.
 - Per-head Q/K RMSNorm is auto-detected from safetensors (present = loaded, absent = skipped). The `__has_qk_norm__` parameter only affects the test assertions.
 - All utility functions (`starts_with`, `to_lower_ascii`, `parse_positive_env_int`, `read_file`, `extract_json_string`, etc.) are already available in `src/utils/`.
 
@@ -459,12 +427,20 @@ Available ops:
 - `make_dims_1d/2d/3d(...)` - TRT dimension helpers
 - `layer_tensor_name(stem, layer)` - "stem_L{layer}" naming
 
-Reference `src/runtime/trt/standard_decoder_graph_builder.cpp` for the full standard decoder implementation to adapt from.
+Reference `src/model/standard_decoder_graph_builder.cpp` for the full standard decoder implementation to adapt from.
 
-In registration.cpp, replace `StandardDecoderGraphBuilder` with your custom builder:
+In registration.cpp, replace `CreateStandardDecoderRuntime()` with your custom runtime. For attention-based models that only need a custom graph, use `CreateKvCacheRuntime(lambda)`. For fundamentally different architectures, implement `IModelRuntime` directly:
 
 ```cpp
 #if TRTF_HAS_TRT
-    RegisterTrtGraphBuilder("__family__", std::make_unique<__Family__TrtGraphBuilder>());
+    // Custom graph, standard KV-cache I/O:
+    RegisterModelRuntime("__family__", CreateKvCacheRuntime(
+        [](const TrtDecoderDefinition& weights, TrtLogger& logger) {
+            __Family__GraphBuilder builder;
+            return builder.build_decoder_step_engine(weights, logger);
+        }));
+
+    // Or: fully custom runtime (Mamba/SSM):
+    // RegisterModelRuntime("__family__", std::make_unique<__Family__Runtime>());
 #endif
 ```

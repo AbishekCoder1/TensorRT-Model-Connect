@@ -70,7 +70,7 @@ The pipeline flow has three stages:
 3. **Runtime assembly** (`BuildRuntimeForTextGeneration`) — creates tokenizer + backend from the resolved model spec, respecting `BackendSelection` (force_trt).
 
 Two backends implement `IGenerationBackend`:
-- **trt** — TensorRT graph builder. Dispatches to registered `ITrtGraphBuilder` per family. Builds network via TensorRT C++ API (not ONNX).
+- **trt** — TensorRT model runtime. Dispatches to registered `IModelRuntime` per family. Each family owns graph construction, state creation, and per-step execution. Builds network via TensorRT C++ API (not ONNX).
 - **hf-transformers** — delegates to HuggingFace Python via subprocess.
 
 Tokenizer implementations (`ITokenizer`):
@@ -94,6 +94,7 @@ src/
     hf_family_registry.cpp       # family registry + builtin registration dispatch
     checkpoint_mapper.h/cpp      # ICheckpointMapper interface + registry (Registry 2)
     standard_checkpoint_mapper.h/cpp  # Base class for standard HF tensor naming
+    standard_decoder_graph_builder.h/cpp  # Pre-RMSNorm+GQA+RoPE+SwiGLU decoder pattern (shared build-time infrastructure)
     trt_model_definition.h/cpp   # DecoderModel -> TrtDecoderDefinition conversion (inlined, no registry)
   models/
     qwen/
@@ -108,18 +109,17 @@ src/
     gemma/
       registration.h/cpp         # RegisterGemmaFamily()
       checkpoint_mapper.h/cpp    # GemmaCheckpointMapper (adds +1.0 to RMSNorm gamma, scales embedding)
-    template/
-      registration.cpp           # Skeleton for adding a new model family
   runtime/
-    trt_backend.cpp              # CreateTrtBackend — dispatches via FindTrtGraphBuilder() registry
+    trt_backend.cpp              # CreateTrtBackend — dispatches via FindModelRuntime() registry
     trt/
       trt_common.h/cpp           # TrtLogger, TrtDeleter, CudaStream, CudaBuffer
       trt_graph_ops.h/cpp        # Reusable TRT ops: add_rms_norm, add_rope, matmul, etc.
       trt_engine_lifecycle.h/cpp # DecoderStepEngine, finalize_decoder_step_engine
       trt_decode_runtime.h/cpp   # run_decoder_step, cache management, sampling
-      trt_backend_shared.h/cpp   # Generic TrtBackend autoregressive generate loop
-      trt_graph_builder.h/cpp    # ITrtGraphBuilder interface + registry (Registry 3)
-      standard_decoder_graph_builder.h/cpp  # Pre-RMSNorm+GQA+RoPE+SwiGLU decoder pattern
+      trt_backend_shared.h/cpp   # TrtBackend + TrtBackendFastPath autoregressive generate loop
+      model_runtime.h/cpp        # IModelRuntime interface + registry + factory helpers
+      model_runtime_fwd.h        # Lightweight header for family registrations (no TRT/CUDA includes)
+      trt_graph_builder.h        # ITrtGraphBuilder interface (header-only, no registry)
       step_state.h               # IStepState interface for per-step state management
       kv_cache_step_state.h/cpp  # KvCacheStepState for attention-based decoders
     hf_python_backend.cpp
@@ -137,6 +137,9 @@ scripts/
   diff_logits.py                 # E2E logit comparison (trtf vs HF transformers)
   diff_layers.py                 # Per-layer hidden state comparison
   generate_op_gold_tensors.py    # Generate gold .safetensors fixtures for TRT ops
+  templates/model_family/        # Skeleton for adding a new model family
+cmake/
+  family_dispatch.cpp.in         # Template for auto-generated RegisterBuiltinHfModelFamilies()
 tests/
   gold/                          # Committed gold tensor files for per-op tests
   test_helpers.h                 # Shared helpers: temp dirs, safetensors writing, write_standard_decoder_checkpoint()
@@ -146,9 +149,8 @@ tests/
 ## Adding a new model family
 
 The plug-and-play architecture uses 3 registries. Adding a new family requires:
-1. Files only in `src/models/<family>/`
-2. One line in `RegisterBuiltinHfModelFamilies()` in `hf_family_registry.cpp`
-3. Source entries in `CMakeLists.txt`
+1. Files only in `src/models/<family>/` + `tests/`
+2. Re-run cmake (GLOB auto-discovers new files — **zero edits to any shared file**)
 
 ### The 3 Registries
 
@@ -156,17 +158,18 @@ The plug-and-play architecture uses 3 registries. Adding a new family requires:
 |---|----------|-----------|---------|
 | 1 | HF Family | `RegisterHfModelFamily(...)` | Match HF model_type → load DecoderModel |
 | 2 | Checkpoint Mapper | `RegisterCheckpointMapper(...)` | Map HF safetensors keys → DecoderCheckpoint |
-| 3 | TRT Graph Builder | `RegisterTrtGraphBuilder(...)` | Build TRT network from definition |
+| 3 | Model Runtime | `RegisterModelRuntime(...)` | Build engine, create state, run per-step execution |
 
 ### Steps
 
-1. **Create `src/models/<family>/registration.cpp`** — call `Register<Family>Family()` which registers into all 3 registries.
+1. **Create `src/models/<family>/registration.h/cpp`** — call `Register<Family>Family()` which registers into all 3 registries.
 2. **Create `src/models/<family>/checkpoint_mapper.h/cpp`** — implement `ICheckpointMapper` to map HF tensor keys to `DecoderCheckpoint`. Consider subclassing `StandardCheckpointMapper` (`src/model/standard_checkpoint_mapper.h`) if your model uses the standard HF naming convention.
-3. **Choose or create a TRT graph builder**:
-   - `StandardDecoderGraphBuilder` works for LLaMA, Qwen, Mistral-dense, Gemma (Pre-RMSNorm + GQA + RoPE + SwiGLU).
-   - Create a custom `ITrtGraphBuilder` for non-standard architectures (MoE, parallel attention).
-4. **Call `Register<Family>Family()`** from `RegisterBuiltinHfModelFamilies()` in `hf_family_registry.cpp`.
-5. **Add source files** to `CMakeLists.txt`.
+3. **Choose or create a model runtime**:
+   - `CreateStandardDecoderRuntime()` works for LLaMA, Qwen, Mistral-dense, Gemma (Pre-RMSNorm + GQA + RoPE + SwiGLU).
+   - `CreateKvCacheRuntime(engine_factory)` for non-standard graph architectures (MoE) that still use KV-cache attention.
+   - Implement `IModelRuntime` directly for fundamentally different architectures (Mamba/SSM).
+4. **Create `tests/test_<family>_family.cpp`** — auto-discovered by CMake GLOB.
+5. **Re-run cmake** — `cmake -S . -B build -G Ninja` picks up new sources and generates dispatch.
 
 ### Example: Dense decoder (LLaMA-like)
 
@@ -178,7 +181,7 @@ src/models/llama/
   checkpoint_mapper.cpp # HF LLaMA tensor keys → DecoderCheckpoint
 ```
 
-See `src/models/template/registration.cpp` for the minimal skeleton.
+See `scripts/templates/model_family/registration.cpp` for the minimal skeleton.
 See `src/models/qwen/registration.cpp` for the full Qwen3 built-in registration.
 
 ### Diff-test framework

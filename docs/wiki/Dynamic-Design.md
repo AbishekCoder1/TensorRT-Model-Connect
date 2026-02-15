@@ -62,10 +62,10 @@ sequenceDiagram
     P->>RF: BuildRuntimeForTextGeneration(spec, selection)
     RF->>RF: Create HfPythonTokenizer(hf_tokenizer_dir)
     RF->>TB: CreateTrtBackend(tokenizer, model)
-    TB->>TB: FindTrtGraphBuilder("qwen3") → StandardDecoderGraphBuilder
+    TB->>TB: FindModelRuntime("qwen3") → IModelRuntime (via CreateStandardDecoderRuntime)
     TB->>TB: BuildTrtDecoderWeights(model) (inlined conversion)
-    TB->>TB: builder.build_decoder_step_engine(weights, logger)
-    TB-->>RF: TrtBackendShared
+    TB->>TB: runtime.build_engine(weights, logger)
+    TB-->>RF: TrtBackend
     RF-->>P: RuntimeAssembly{tokenizer, backend}
 
     P-->>User: Pipeline (ready)
@@ -77,7 +77,7 @@ sequenceDiagram
 
 **Stage 2** parses `config.json` to get `model_type`, matches it against registered families (Qwen matches), and the family loader calls `LoadDecoderModel()` which reads safetensors through the checkpoint mapper registry.
 
-**Stage 3** creates the tokenizer (HfPythonTokenizer if `tokenizer.json` exists) and backend (TRT preferred, with HF-Python fallback). The TRT backend finds the graph builder, converts model weights to TRT format, builds the TensorRT engine, and wraps it in `TrtBackendShared`.
+**Stage 3** creates the tokenizer (HfPythonTokenizer if `tokenizer.json` exists) and backend (TRT preferred, with HF-Python fallback). The TRT backend finds the model runtime, converts model weights to TRT format, builds the TensorRT engine, and wraps it in `TrtBackend`.
 
 ---
 
@@ -343,13 +343,13 @@ sequenceDiagram
 
 ## 6. Autoregressive Generation
 
-How `TrtBackendShared::generate()` runs the prefill + decode loop.
+How `TrtBackend::generate()` runs the prefill + decode loop.
 
 ```mermaid
 sequenceDiagram
     participant P as Pipeline
     participant T as ITokenizer
-    participant B as TrtBackendShared
+    participant B as TrtBackend
     participant S as KvCacheStepState
     participant E as DecoderStepEngine
     participant GPU as CUDA GPU
@@ -483,7 +483,7 @@ flowchart TD
     end
 
     subgraph "Stage 3c: Generation"
-        N --> O["TrtBackendShared::generate()<br/><i>Prefill + Decode loop</i>"]
+        N --> O["TrtBackend::generate()<br/><i>Prefill + Decode loop</i>"]
         O --> P["run_decoder_step()<br/><i>GPU kernel execution</i>"]
         P --> Q["select_argmax_token()<br/><i>Greedy sampling</i>"]
         Q -->|"loop until EOS"| O

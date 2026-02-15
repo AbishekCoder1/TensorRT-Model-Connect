@@ -152,7 +152,7 @@ struct TensorBinding {
 
 ### Assumption #4: SwiGLU-Only Graph Builder
 
-**Where**: `StandardDecoderGraphBuilder::add_standard_decoder_layer_block()` in `src/runtime/trt/standard_decoder_graph_builder.cpp`
+**Where**: `StandardDecoderGraphBuilder::add_standard_decoder_layer_block()` in `src/model/standard_decoder_graph_builder.cpp`
 
 **Problem**: The graph builder hardcodes the SwiGLU MLP pattern:
 ```cpp

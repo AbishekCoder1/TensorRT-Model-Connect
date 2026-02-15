@@ -18,9 +18,6 @@ public:
         const TrtDecoderDefinition& weights, TrtLogger& logger) = 0;
 };
 
-void RegisterTrtGraphBuilder(const std::string& family, std::unique_ptr<ITrtGraphBuilder> builder);
-ITrtGraphBuilder* FindTrtGraphBuilder(const std::string& family);
-
 #endif // TRTF_HAS_TRT
 
 } // namespace trtf

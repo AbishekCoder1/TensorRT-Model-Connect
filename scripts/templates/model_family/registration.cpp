@@ -8,17 +8,14 @@
 //      consider subclassing StandardCheckpointMapper (src/model/standard_checkpoint_mapper.h).
 //      You only need to override can_map() and optionally map_checkpoint() if your tensor
 //      key naming differs from the standard pattern.
-// 3. Choose a TRT graph builder (StandardDecoderGraphBuilder works for most LLMs).
-// 4. Call RegisterYourFamily() from RegisterBuiltinHfModelFamilies() in hf_family_registry.cpp.
-// 5. Add your .cpp files to CMakeLists.txt.
+// 3. Choose a runtime pattern (see Registry 3 below).
+// 4. Re-run cmake — CMake auto-discovers new families via GLOB (zero shared file edits).
 //
 // What you get for free:
-// - StandardTrtModelDefinitionPopulator is registered as a low-priority fallback in
-//   RegisterBuiltinHfModelFamilies(). It handles any model with has_decoder_layers,
-//   so you do NOT need to register your own populator for standard decoder architectures.
-// - StandardDecoderGraphBuilder handles Pre-RMSNorm + GQA + RoPE + SwiGLU (LLaMA, Qwen,
-//   Yi, Mistral-dense). Only create a custom ITrtGraphBuilder for non-standard architectures
-//   (MoE, parallel attention, etc.).
+// - CMake auto-discovers this directory via GLOB on src/models/*/registration.h.
+//   It generates RegisterBuiltinHfModelFamilies() with your Register*Family() call.
+// - CreateStandardDecoderRuntime() handles Pre-RMSNorm + GQA + RoPE + SwiGLU (LLaMA, Qwen,
+//   Yi, Mistral-dense). Only use a custom pattern for non-standard architectures.
 //
 // Testing your family:
 // - Use tests/test_helpers.h for temp-dir creation, safetensors writing, and
@@ -30,9 +27,7 @@
 
 #include "trtf/hf_family_registry.h"
 #include "model/checkpoint_mapper.h"
-#include "runtime/trt/trt_graph_builder.h"
-#include "runtime/trt/trt_common.h"
-#include "runtime/trt/standard_decoder_graph_builder.h"
+#include "runtime/trt/model_runtime_fwd.h"
 #include "utils/text_parsers.h"
 
 #include <filesystem>
@@ -87,17 +82,32 @@ void RegisterYourFamily()
     RegisterCheckpointMapper("your_family", 100,
         std::make_unique<YourCheckpointMapper>());
 
-    // Registry 3: TRT model definition populator — NOT needed for standard decoders.
-    // StandardTrtModelDefinitionPopulator is registered as a low-priority fallback
-    // in RegisterBuiltinHfModelFamilies() and handles any model with has_decoder_layers.
-    // Only register a custom populator if your architecture has non-standard TRT
-    // definition requirements (e.g., MoE expert routing, custom attention patterns).
-
-    // Registry 4: TRT graph builder
-    // StandardDecoderGraphBuilder handles the common pattern:
-    //   Pre-RMSNorm -> QKV+RoPE+GQA -> residual -> Post-RMSNorm -> SwiGLU MLP -> residual
+    // Registry 3: Model runtime (graph + state + per-step execution)
+    //
+    // Three patterns, from simplest to most flexible:
+    //
+    // (A) Standard dense decoder (LLaMA, Qwen, Mistral-dense, Gemma):
+    //     One line — uses StandardDecoderGraphBuilder + KV-cache state/step.
+    //
+    // (B) Custom graph, same KV-cache I/O (MoE, custom attention):
+    //     Provide a lambda that builds the engine; state + step are standard.
+    //
+    // (C) Exotic architecture (Mamba/SSM, custom state):
+    //     Implement IModelRuntime directly in your_family/runtime.h/cpp.
+    //
 #if TRTF_HAS_TRT
-    RegisterTrtGraphBuilder("your_family", std::make_unique<StandardDecoderGraphBuilder>());
+    // --- Pattern A: standard dense decoder ---
+    RegisterModelRuntime("your_family", CreateStandardDecoderRuntime());
+
+    // --- Pattern B: custom graph, standard KV-cache ---
+    // RegisterModelRuntime("your_family", CreateKvCacheRuntime(
+    //     [](const TrtDecoderDefinition& weights, TrtLogger& logger) {
+    //         YourCustomGraphBuilder builder;
+    //         return builder.build_decoder_step_engine(weights, logger);
+    //     }));
+
+    // --- Pattern C: exotic architecture ---
+    // RegisterModelRuntime("your_family", std::make_unique<YourRuntime>());
 #endif
 
     // Registry 1: HF family matcher + model loader

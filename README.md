@@ -232,14 +232,14 @@ The 4 registered families are: **Qwen**, **LLaMA**, **Mistral**, **Gemma**. Any 
 
 ## Adding a new model family
 
-For standard dense decoders (LLaMA-like), create 2 files + 2 one-line edits:
+For standard dense decoders (LLaMA-like), create files + re-run cmake (**zero edits to shared files**):
 
 1. `src/models/<family>/checkpoint_mapper.h/cpp` — subclass `StandardCheckpointMapper`, override `can_map()`
-2. `src/models/<family>/registration.h/cpp` — register into HF Family + Checkpoint Mapper + TRT Graph Builder registries
-3. Add `Register<Family>Family()` call in `hf_family_registry.cpp`
-4. Add source files to `CMakeLists.txt`
+2. `src/models/<family>/registration.h/cpp` — register into HF Family + Checkpoint Mapper + Model Runtime registries
+3. `tests/test_<family>_family.cpp` — unit test (auto-discovered by CMake GLOB)
+4. Re-run `cmake -S . -B build -G Ninja` — CMake auto-discovers new families
 
-See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full guide, or `src/models/template/registration.cpp` for the skeleton.
+See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full guide, or `scripts/templates/model_family/registration.cpp` for the skeleton.
 
 ## Documentation
 

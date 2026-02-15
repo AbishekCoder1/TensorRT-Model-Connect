@@ -10,7 +10,7 @@ The TRT backend takes a `DecoderModel` with checkpoint weights and:
 3. Compiles the network to an `ICudaEngine` (compiled GPU kernels)
 4. Runs an autoregressive generation loop with KV-cache management
 
-All of this happens within `CreateTrtBackend()` → `CreateTrtBackendWithBuilder()` → `TrtBackendShared`.
+All of this happens within `CreateTrtBackend()` → `CreateTrtBackendWithRuntime()` → `TrtBackend`.
 
 ## Decoder Layer Anatomy
 
@@ -194,7 +194,7 @@ Set `TRTF_DISABLE_ENGINE_CACHE=1` to disable both the plan cache and the model-d
 
 ## Autoregressive Generation Loop
 
-`TrtBackendShared::generate()` in `trt_backend_shared.cpp`:
+`TrtBackend::generate()` in `trt_backend_shared.cpp`:
 
 ```
 generate(input_ids, config):

@@ -15,7 +15,7 @@ Before starting, verify your model follows the standard dense decoder pattern:
 
 If yes, you only need to write a checkpoint mapper. Everything else is handled automatically.
 
-If your model has a non-standard architecture (MoE, parallel attention, different norm types), you'll also need a custom TRT graph builder — see [Advanced: Custom Graph Builder](#advanced-custom-graph-builder) at the bottom.
+If your model has a non-standard architecture (MoE, parallel attention, different norm types), you'll need a custom model runtime — see [Advanced: Custom Model Runtime](#advanced-custom-model-runtime) at the bottom.
 
 ## Step-by-Step Guide
 
@@ -118,9 +118,7 @@ void RegisterYiFamily();
 #include "models/yi/checkpoint_mapper.h"
 #include "trtf/hf_family_registry.h"
 #include "model/checkpoint_mapper.h"
-#include "runtime/trt/trt_graph_builder.h"
-#include "runtime/trt/trt_common.h"
-#include "runtime/trt/standard_decoder_graph_builder.h"
+#include "runtime/trt/model_runtime_fwd.h"
 #include "utils/text_parsers.h"
 
 #include <filesystem>
@@ -163,9 +161,9 @@ void RegisterYiFamily()
     // Registry 2: Checkpoint mapper
     RegisterCheckpointMapper("yi", 100, std::make_unique<YiCheckpointMapper>());
 
-    // Registry 3: TRT graph builder
+    // Registry 3: Model runtime (graph + state + per-step execution)
 #if TRTF_HAS_TRT
-    RegisterTrtGraphBuilder("yi", std::make_unique<StandardDecoderGraphBuilder>());
+    RegisterModelRuntime("yi", CreateStandardDecoderRuntime());
 #endif
 
     // Registry 1: HF family matcher + loader
@@ -183,33 +181,18 @@ void RegisterYiFamily()
 } // namespace trtf
 ```
 
-### Step 4: Register the family
+### Step 4: Re-run CMake
 
-In `src/model/hf_family_registry.cpp`, add one line to `RegisterBuiltinHfModelFamilies()`:
+CMake auto-discovers new families via GLOB patterns. No edits to any shared files:
 
-```cpp
-#include "models/yi/registration.h"   // Add include
-
-void RegisterBuiltinHfModelFamilies()
-{
-    qwen::RegisterQwenFamily();
-    llama::RegisterLlamaFamily();
-    yi::RegisterYiFamily();            // Add this line
-}
+```bash
+cmake -S . -B build -G Ninja   # Picks up new src/models/yi/*.cpp + tests/test_yi_family.cpp
+cmake --build build -j
 ```
 
-### Step 5: Add to CMakeLists.txt
+### Step 5: Write a test
 
-In the `trtf_core` sources list:
-
-```cmake
-  src/models/yi/registration.cpp
-  src/models/yi/checkpoint_mapper.cpp
-```
-
-### Step 6: Write a test
-
-Create `tests/test_yi_family.cpp` using the shared test helpers:
+Create `tests/test_yi_family.cpp` (auto-discovered by CMake GLOB `tests/test_*_family.cpp`):
 
 ```cpp
 // Test: Yi model family registration and checkpoint loading.
@@ -279,14 +262,7 @@ int main()
 }
 ```
 
-Add to `CMakeLists.txt`:
-```cmake
-add_executable(test_yi_family tests/test_yi_family.cpp)
-target_link_libraries(test_yi_family PRIVATE trtf_core)
-add_test(NAME test_yi_family COMMAND test_yi_family)
-```
-
-### Step 7: Validate
+### Step 6: Validate
 
 ```bash
 # Build and run unit tests
@@ -307,39 +283,56 @@ python3 scripts/diff_logits.py \
 |------|-------|--------------|
 | Checkpoint mapper | `checkpoint_mapper.h/cpp` | ~15 (if subclassing Standard) |
 | Registration | `registration.h/cpp` | ~40 |
-| Wire up | `hf_family_registry.cpp` (1 line), `CMakeLists.txt` (2 lines) | 3 |
 | Test | `test_yi_family.cpp` | ~50 |
-| **Total** | **5 files touched, 2 new** | **~108** |
+| Re-run cmake | (zero shared file edits) | 0 |
+| **Total** | **5 new files, 0 existing files edited** | **~105** |
 
 ---
 
-## Advanced: Custom Graph Builder
+## Advanced: Custom Model Runtime
 
-If your model doesn't follow the Pre-RMSNorm + GQA + RoPE + SwiGLU pattern, you'll need a custom `ITrtGraphBuilder`. Examples of when this is needed:
+If your model doesn't follow the Pre-RMSNorm + GQA + RoPE + SwiGLU pattern, you'll need a custom model runtime. The `IModelRuntime` interface gives families full control over graph construction, state creation, and per-step execution.
 
-- **MoE (Mixture of Experts)**: Expert routing layer instead of dense MLP
+Examples of when this is needed:
+
+- **MoE (Mixture of Experts)**: Expert routing layer instead of dense MLP — use `CreateKvCacheRuntime(lambda)` with a custom graph builder
+- **MLA (Multi-head Latent Attention)**: Compressed KV cache — implement `IModelRuntime` directly
+- **Mamba/SSM**: Fundamentally different state (no KV cache) — implement `IModelRuntime` directly
 - **Parallel attention**: Attention and MLP computed in parallel (GPT-J style)
 - **Different normalization**: LayerNorm instead of RMSNorm
-- **Different activation**: GELU instead of SwiGLU
-- **Multi-modal**: Vision encoder + language decoder
 
-Implement the interface:
+### Option A: Custom graph, standard KV-cache I/O (MoE, parallel attention)
+
+Use `CreateKvCacheRuntime()` with a lambda that builds your custom engine. You get KV-cache state management for free:
 
 ```cpp
-class YourGraphBuilder final : public ITrtGraphBuilder {
+RegisterModelRuntime("mixtral", CreateKvCacheRuntime(
+    [](const TrtDecoderDefinition& weights, TrtLogger& logger) {
+        MixtralGraphBuilder builder;
+        return builder.build_decoder_step_engine(weights, logger);
+    }));
+```
+
+### Option B: Fully custom runtime (Mamba, hybrid)
+
+Implement `IModelRuntime` directly for architectures that don't use KV-cache attention:
+
+```cpp
+class MambaRuntime final : public IModelRuntime {
 public:
-    std::unique_ptr<DecoderStepEngine> build_decoder_step_engine(
-        const TrtDecoderDefinition& weights, TrtLogger& logger) override
-    {
-        // Build your TRT network using trt_graph_ops.h primitives
-        // See standard_decoder_graph_builder.cpp for the full pattern
-    }
+    std::unique_ptr<DecoderStepEngine> build_engine(
+        const TrtDecoderDefinition& weights, TrtLogger& logger) override { /* SSM graph */ }
+    std::unique_ptr<IStepState> create_state(
+        const DecoderStepEngine& engine) override { /* SSM state */ }
+    bool run_step(const DecoderStepEngine& engine, IStepState& state,
+        int32_t token_id, std::vector<float>& out_logits,
+        std::string& error) override { /* SSM step */ }
 };
 ```
 
 Register it:
 ```cpp
-RegisterTrtGraphBuilder("your_family", std::make_unique<YourGraphBuilder>());
+RegisterModelRuntime("mamba", std::make_unique<MambaRuntime>());
 ```
 
 You can still reuse the ops from `trt_graph_ops.h` (RMSNorm, matmul, RoPE, etc.) — just compose them differently.

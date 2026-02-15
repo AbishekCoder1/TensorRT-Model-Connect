@@ -53,12 +53,38 @@ if(TRTF_ENABLE_TRT)
   )
 endif()
 
+# --- Auto-discover model families ---
+# Families live in src/models/<name>/ with a registration.h header.
+# Adding a new family = create files + re-run cmake (zero shared file edits).
+file(GLOB _family_reg_headers src/models/*/registration.h)
+set(TRTF_FAMILY_INCLUDES "")
+set(TRTF_FAMILY_CALLS "")
+set(_trtf_family_sources "")
+foreach(_header IN LISTS _family_reg_headers)
+  get_filename_component(_dir ${_header} DIRECTORY)
+  get_filename_component(_name ${_dir} NAME)
+  string(SUBSTRING ${_name} 0 1 _first)
+  string(TOUPPER ${_first} _first)
+  string(SUBSTRING ${_name} 1 -1 _rest)
+  set(_pascal "${_first}${_rest}")
+  string(APPEND TRTF_FAMILY_INCLUDES "#include \"models/${_name}/registration.h\"\n")
+  string(APPEND TRTF_FAMILY_CALLS "    ${_name}::Register${_pascal}Family();\n")
+  # Collect all .cpp files in the family directory
+  file(GLOB _family_cpps src/models/${_name}/*.cpp)
+  list(APPEND _trtf_family_sources ${_family_cpps})
+endforeach()
+configure_file(cmake/family_dispatch.cpp.in
+  ${CMAKE_BINARY_DIR}/generated/family_dispatch.cpp @ONLY)
+
 add_library(trtf_core
   src/model/model_loader.cpp
   src/model/safetensors_loader.cpp
   src/model/hf_family_registry.cpp
   src/model/model_resolver.cpp
   src/model/trt_model_definition.cpp
+  src/model/standard_decoder_graph_builder.cpp
+  src/model/checkpoint_mapper.cpp
+  src/model/standard_checkpoint_mapper.cpp
   src/runtime/hf_python_backend.cpp
   src/runtime/runtime_factory.cpp
   src/runtime/trt_backend.cpp
@@ -68,18 +94,9 @@ add_library(trtf_core
   src/runtime/trt/trt_decode_runtime.cpp
   src/runtime/trt/trt_backend_shared.cpp
   src/runtime/trt/kv_cache_step_state.cpp
-  src/runtime/trt/trt_graph_builder.cpp
-  src/runtime/trt/standard_decoder_graph_builder.cpp
-  src/model/checkpoint_mapper.cpp
-  src/model/standard_checkpoint_mapper.cpp
-  src/models/qwen/registration.cpp
-  src/models/qwen/checkpoint_mapper.cpp
-  src/models/llama/registration.cpp
-  src/models/llama/checkpoint_mapper.cpp
-  src/models/mistral/registration.cpp
-  src/models/mistral/checkpoint_mapper.cpp
-  src/models/gemma/registration.cpp
-  src/models/gemma/checkpoint_mapper.cpp
+  src/runtime/trt/model_runtime.cpp
+  ${_trtf_family_sources}
+  ${CMAKE_BINARY_DIR}/generated/family_dispatch.cpp
   src/bundle/bundle_format.cpp
   src/bundle/bundle_api.cpp
   src/cabi/trtf_c.cpp
@@ -153,21 +170,14 @@ add_executable(test_hf_family_registry tests/test_hf_family_registry.cpp)
 target_link_libraries(test_hf_family_registry PRIVATE trtf_core)
 add_test(NAME test_hf_family_registry COMMAND test_hf_family_registry)
 
-add_executable(test_qwen_family tests/test_qwen_family.cpp)
-target_link_libraries(test_qwen_family PRIVATE trtf_core)
-add_test(NAME test_qwen_family COMMAND test_qwen_family)
-
-add_executable(test_llama_family tests/test_llama_family.cpp)
-target_link_libraries(test_llama_family PRIVATE trtf_core)
-add_test(NAME test_llama_family COMMAND test_llama_family)
-
-add_executable(test_mistral_family tests/test_mistral_family.cpp)
-target_link_libraries(test_mistral_family PRIVATE trtf_core)
-add_test(NAME test_mistral_family COMMAND test_mistral_family)
-
-add_executable(test_gemma_family tests/test_gemma_family.cpp)
-target_link_libraries(test_gemma_family PRIVATE trtf_core)
-add_test(NAME test_gemma_family COMMAND test_gemma_family)
+# Auto-discover family tests (re-run cmake after adding a new family test)
+file(GLOB _trtf_family_tests tests/test_*_family.cpp)
+foreach(_src IN LISTS _trtf_family_tests)
+  get_filename_component(_name ${_src} NAME_WE)
+  add_executable(${_name} ${_src})
+  target_link_libraries(${_name} PRIVATE trtf_core)
+  add_test(NAME ${_name} COMMAND ${_name})
+endforeach()
 
 add_executable(test_tensor_math tests/test_tensor_math.cpp)
 target_link_libraries(test_tensor_math PRIVATE trtf_core)

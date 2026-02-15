@@ -239,7 +239,7 @@ def generate_prompt(fam: ModelFamily) -> str:
             f"You MUST create a custom `ITrtGraphBuilder` instead of using "
             f"`StandardDecoderGraphBuilder`. See the 'Tier 2 Extension' section at the end "
             f"of this prompt for the template and available TRT graph ops.\n\n"
-            f"Read `src/runtime/trt/standard_decoder_graph_builder.cpp` to understand the "
+            f"Read `src/model/standard_decoder_graph_builder.cpp` to understand the "
             f"standard pattern, then modify it for this family's architecture.\n"
         )
         insert_point = prompt.find("## Step 0:")

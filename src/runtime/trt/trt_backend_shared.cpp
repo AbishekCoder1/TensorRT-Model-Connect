@@ -1,4 +1,5 @@
 #include "runtime/trt/trt_backend_shared.h"
+#include "runtime/trt/model_runtime.h"
 #include "runtime/trt/kv_cache_step_state.h"
 #include "runtime/trt/trt_decode_runtime.h"
 #include "utils/json_helpers.h"
@@ -16,10 +17,12 @@ namespace trtf {
 
 namespace {
 
-class TrtBackendShared final : public IGenerationBackend {
+// TRT backend using IModelRuntime — family owns graph, state, and per-step execution.
+class TrtBackend final : public IGenerationBackend {
 public:
-    TrtBackendShared(const ITokenizer& tokenizer, const DecoderModel& model, DecoderStepEngineFactory factory)
+    TrtBackend(const ITokenizer& tokenizer, const DecoderModel& model, IModelRuntime& runtime)
         : mTokenizer(tokenizer)
+        , mRuntime(runtime)
     {
         const cudaError_t init_err = cudaFree(nullptr);
         if (init_err != cudaSuccess)
@@ -43,7 +46,7 @@ public:
                       << std::chrono::duration_cast<std::chrono::milliseconds>(tw1 - tw0).count()
                       << " ms]" << std::endl;
             std::cerr << "[trtf] Building TRT engine (this may take a while) ..." << std::endl;
-            mDecoderStepEngine = factory(mWeights, mLogger);
+            mDecoderStepEngine = mRuntime.build_engine(mWeights, mLogger);
             auto tw2 = std::chrono::steady_clock::now();
             std::cerr << "[trtf] Engine ready ["
                       << std::chrono::duration_cast<std::chrono::milliseconds>(tw2 - tw1).count()
@@ -54,7 +57,7 @@ public:
                 mInitError = mLogger.last_error();
                 if (mInitError.empty())
                 {
-                    mInitError = "create_decoder_step_engine returned null";
+                    mInitError = "build_engine returned null";
                 }
             }
         }
@@ -65,20 +68,9 @@ public:
         }
     }
 
-    bool is_available() const override
-    {
-        return mAvailable;
-    }
-
-    const char* name() const override
-    {
-        return "trt";
-    }
-
-    const char* unavailable_reason() const override
-    {
-        return mInitError.c_str();
-    }
+    bool is_available() const override { return mAvailable; }
+    const char* name() const override { return "trt"; }
+    const char* unavailable_reason() const override { return mInitError.c_str(); }
 
     std::vector<int32_t> generate(const std::vector<int32_t>& input_ids, const GenerationConfig& config) override
     {
@@ -93,28 +85,19 @@ public:
             return output;
         }
 
-        auto state = std::make_unique<KvCacheStepState>(*mDecoderStepEngine);
-
+        auto state = mRuntime.create_state(*mDecoderStepEngine);
         std::vector<float> logits;
-        std::vector<std::vector<float>> present_k;
-        std::vector<std::vector<float>> present_v;
 
         // Prefill: process all input tokens except the last
         if (input_ids.size() > 1)
         {
             for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
             {
-                int32_t position_id{};
-                std::vector<float> mask;
-                state->prepare_step(position_id, mask);
                 std::string error;
-                if (!run_decoder_step(*mDecoderStepEngine, input_ids[i], position_id,
-                        state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
-                        logits, present_k, present_v, error))
+                if (!mRuntime.run_step(*mDecoderStepEngine, *state, input_ids[i], logits, error))
                 {
                     throw std::runtime_error("prefill step failed: " + error);
                 }
-                state->update_after_step(present_k, present_v);
             }
         }
 
@@ -123,17 +106,11 @@ public:
 
         for (std::size_t step = 0; step < config.max_new_tokens; ++step)
         {
-            int32_t position_id{};
-            std::vector<float> mask;
-            state->prepare_step(position_id, mask);
             std::string error;
-            if (!run_decoder_step(*mDecoderStepEngine, current_token, position_id,
-                    state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
-                    logits, present_k, present_v, error))
+            if (!mRuntime.run_step(*mDecoderStepEngine, *state, current_token, logits, error))
             {
                 throw std::runtime_error("decode step failed: " + error);
             }
-            state->update_after_step(present_k, present_v);
 
             const int32_t next_token = select_argmax_token(logits);
             output.push_back(next_token);
@@ -150,31 +127,13 @@ public:
 
 private:
     const ITokenizer& mTokenizer;
+    IModelRuntime& mRuntime;
     bool mAvailable{false};
     std::string mInitError;
     TrtLogger mLogger;
     TrtDecoderDefinition mWeights;
     std::unique_ptr<DecoderStepEngine> mDecoderStepEngine;
 };
-
-} // namespace
-
-std::unique_ptr<IGenerationBackend> CreateTrtBackendWithFactory(
-    const ITokenizer& tokenizer, const DecoderModel& model, DecoderStepEngineFactory factory)
-{
-    return std::make_unique<TrtBackendShared>(tokenizer, model, std::move(factory));
-}
-
-std::unique_ptr<IGenerationBackend> CreateTrtBackendWithBuilder(
-    const ITokenizer& tokenizer, const DecoderModel& model, ITrtGraphBuilder& builder)
-{
-    return CreateTrtBackendWithFactory(tokenizer, model,
-        [&builder](const TrtDecoderDefinition& weights, TrtLogger& logger) {
-            return builder.build_decoder_step_engine(weights, logger);
-        });
-}
-
-namespace {
 
 // Lightweight TRT backend for the fast path (pre-built engine, no weight data needed).
 class TrtBackendFastPath final : public IGenerationBackend {
@@ -248,6 +207,12 @@ private:
 };
 
 } // namespace
+
+std::unique_ptr<IGenerationBackend> CreateTrtBackendWithRuntime(
+    const ITokenizer& tokenizer, const DecoderModel& model, IModelRuntime& runtime)
+{
+    return std::make_unique<TrtBackend>(tokenizer, model, runtime);
+}
 
 std::unique_ptr<IGenerationBackend> CreateTrtBackendFromEngine(
     std::unique_ptr<DecoderStepEngine> engine)

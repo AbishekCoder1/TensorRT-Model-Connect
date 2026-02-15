@@ -1,4 +1,4 @@
-#include "runtime/trt/trt_graph_builder.h"
+#include "runtime/trt/model_runtime.h"
 #include "runtime/trt/trt_backend_shared.h"
 #include "utils/text_parsers.h"
 
@@ -11,16 +11,16 @@ std::unique_ptr<IGenerationBackend> CreateTrtBackend(const ITokenizer& tokenizer
 #if TRTF_HAS_TRT
     const std::string family = to_lower_ascii(model.architecture.family);
 
-    // 1. Family-specific builder
-    if (auto* builder = FindTrtGraphBuilder(family))
+    // 1. Family-specific runtime
+    if (auto* runtime = FindModelRuntime(family))
     {
-        return CreateTrtBackendWithBuilder(tokenizer, model, *builder);
+        return CreateTrtBackendWithRuntime(tokenizer, model, *runtime);
     }
 
     // 2. Standard decoder fallback (works for most LLM families)
-    if (auto* builder = FindTrtGraphBuilder("standard-decoder"))
+    if (auto* runtime = FindModelRuntime("standard-decoder"))
     {
-        return CreateTrtBackendWithBuilder(tokenizer, model, *builder);
+        return CreateTrtBackendWithRuntime(tokenizer, model, *runtime);
     }
 
     return nullptr;

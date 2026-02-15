@@ -17,14 +17,14 @@ public:
     explicit KvCacheStepState(const DecoderStepEngine& engine);
 
     bool prepare_step(int32_t& out_position_id,
-                      std::vector<float>& out_attention_mask) override;
+                      std::vector<float>& out_attention_mask);
 
-    const std::vector<std::vector<float>>& cache_k_by_layer() const override;
-    const std::vector<std::vector<float>>& cache_v_by_layer() const override;
+    const std::vector<std::vector<float>>& cache_k_by_layer() const;
+    const std::vector<std::vector<float>>& cache_v_by_layer() const;
 
     void update_after_step(
         const std::vector<std::vector<float>>& present_k_by_layer,
-        const std::vector<std::vector<float>>& present_v_by_layer) override;
+        const std::vector<std::vector<float>>& present_v_by_layer);
 
 private:
     int32_t mCacheStateSize;

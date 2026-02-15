@@ -1,5 +1,42 @@
 # Worklog
 
+## 2026-02-15
+
+- **Zero-Edit Parallel Agent Architecture**
+  - Adding a new model family now requires **zero edits to any shared file**. Create files in `src/models/<family>/` + `tests/`, re-run cmake.
+  - **Phase 1**: Created `model_runtime_fwd.h` — lightweight header with forward-declared TRT types. Family registrations no longer include `trt_common.h` or `NvInfer.h`.
+  - **Phase 2**: CMake-generated family dispatch. `RegisterBuiltinHfModelFamilies()` is now auto-generated from `cmake/family_dispatch.cpp.in`. CMake discovers families by globbing `src/models/*/registration.h`. Removed manual includes + calls from `hf_family_registry.cpp`.
+  - **Phase 3**: CMake GLOB for sources and tests. Family `.cpp` files auto-discovered. Test files matching `tests/test_*_family.cpp` auto-discovered. Moved template to `scripts/templates/model_family/`.
+  - **Phase 4**: Relocated `StandardDecoderGraphBuilder` from `src/runtime/trt/` to `src/model/` — correct layering (build-time infrastructure alongside `StandardCheckpointMapper`).
+  - Merge conflict risk: **ZERO** for parallel agents working on different families.
+  - Validated: 26/26 unit tests pass in container. TRT E2E pass for Qwen3 (0.6B), TinyLlama (1.1B), TinyMistral (248M). Gemma E2E skipped (gated model, no HF token available; TRT pipeline verified with toy fixture).
+
+- **DI-Clean IModelRuntime — Interface-Centered Architecture**
+  - Completed true Dependency Inversion: both the autoregressive loop and family implementations depend only on `IModelRuntime`. No concrete classes cross the boundary. No public base classes to subclass.
+  - Replaced public `KvCacheRuntime` base class with anonymous `KvCacheRuntimeImpl` in `model_runtime.cpp`. Families compose via factory helpers instead of inheritance.
+  - Added factory functions: `CreateStandardDecoderRuntime()` (standard dense decoder) and `CreateKvCacheRuntime(engine_factory)` (custom graph + standard KV-cache I/O).
+  - Deleted `StandardDecoderRuntime` class and its files (`standard_decoder_runtime.h/cpp`).
+  - Removed dead code: `TrtBackendShared` class, `DecoderStepEngineFactory` typedef, `CreateTrtBackendWithFactory()`, `CreateTrtBackendWithBuilder()`.
+  - Removed stale `#include "runtime/trt/trt_graph_builder.h"` from `trt_backend_shared.h`.
+  - Renamed `TrtBackendGeneric` → `TrtBackend` (it's the only normal-path backend now).
+  - Updated all 4 family registrations to use `CreateStandardDecoderRuntime()` instead of `std::make_unique<StandardDecoderRuntime>()`.
+  - Updated template skeleton with 3 patterns: (A) standard dense, (B) custom graph via `CreateKvCacheRuntime(lambda)`, (C) exotic via `IModelRuntime` directly.
+  - Updated all wiki pages and CLAUDE.md.
+  - All 26 tests pass (16 host, 10 sandbox-blocked as expected).
+
+- **IModelRuntime — Decouple Runtime from Architecture** (earlier in the day)
+  - Introduced `IModelRuntime` interface (`build_engine()`, `create_state()`, `run_step()`) so each model family owns its full forward pass — graph construction, state creation, AND per-step execution.
+  - Created `KvCacheRuntime` base class that provides `create_state()` → `KvCacheStepState` and `run_step()` → `run_decoder_step()` for all attention-based models. Subclasses only override `build_engine()`.
+  - Created `StandardDecoderRuntime : KvCacheRuntime` that delegates `build_engine()` to `StandardDecoderGraphBuilder`. Used by Qwen, LLaMA, Mistral, Gemma.
+  - Replaced Registry 3 (`RegisterTrtGraphBuilder`/`FindTrtGraphBuilder`) with `RegisterModelRuntime`/`FindModelRuntime`.
+  - Made `IStepState` opaque (removed KV-cache virtual methods), with `KvCacheStepState` as a concrete class.
+  - Added `CreateTrtBackendWithRuntime()` factory and `TrtBackendGeneric` backend class that uses `IModelRuntime`.
+  - Updated all 4 family registrations (Qwen, LLaMA, Mistral, Gemma) and the template skeleton.
+  - New files: `model_runtime.h/cpp`, `standard_decoder_runtime.h/cpp`.
+  - Removed `trt_graph_builder.cpp` from build (registry code removed; `ITrtGraphBuilder` interface remains as header-only).
+  - Class hierarchy enables future MoE/MLA/Mamba families without modifying shared runtime code.
+  - All 26 tests pass (16 host, 10 sandbox-blocked as expected).
+
 ## 2026-02-09
 - Created new repository scaffold at `/home/yifeif/repos/trt-transformers-cpp`.
 - Chosen strategy: API-first TensorRT implementation, avoid default dependence on ONNX parser.
