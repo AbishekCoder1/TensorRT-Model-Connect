@@ -29,6 +29,10 @@ std::unique_ptr<IGenerationBackend> CreateTrtBackendWithFactory(
 std::unique_ptr<IGenerationBackend> CreateTrtBackendWithBuilder(
     const ITokenizer& tokenizer, const DecoderModel& model, ITrtGraphBuilder& builder);
 
+// Creates a TRT backend from a pre-built engine (fast path — no weight loading).
+std::unique_ptr<IGenerationBackend> CreateTrtBackendFromEngine(
+    std::unique_ptr<DecoderStepEngine> engine);
+
 #endif // TRTF_HAS_TRT
 
 } // namespace trtf

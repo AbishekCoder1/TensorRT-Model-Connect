@@ -49,6 +49,8 @@ struct DecoderStepEngine {
     int32_t cache_state_size{0};
     int32_t attention_mask_size{0};
     int32_t max_cache_length{kDefaultMaxCacheLength};
+    int32_t id_bos{0};
+    int32_t id_eos{0};
 };
 
 bool has_io_tensor(const nvinfer1::ICudaEngine& engine, const std::string& tensor_name);

@@ -324,4 +324,105 @@ void SaveTrtEnginePlanToCache(const std::string& cache_key, const void* plan_dat
     }
 }
 
+std::string BuildModelDirIndexKey(const std::string& model_dir, int32_t max_cache_length)
+{
+    uint64_t hash = kFnvOffsetBasis;
+    hash_string(hash, "trtf-model-dir-idx-v1");
+
+    // Hash the canonical model directory path
+    std::error_code ec;
+    const std::string canonical = std::filesystem::canonical(model_dir, ec).string();
+    hash_string(hash, ec ? model_dir : canonical);
+
+    // Hash config.json content (captures all architecture params)
+    const std::filesystem::path config_path = std::filesystem::path(model_dir) / "config.json";
+    {
+        std::ifstream in(config_path);
+        if (in)
+        {
+            const std::string content((std::istreambuf_iterator<char>(in)),
+                std::istreambuf_iterator<char>());
+            hash_string(hash, content);
+        }
+    }
+
+    // Hash safetensors file sizes (catches weight changes without reading data)
+    const std::filesystem::path st_path = std::filesystem::path(model_dir) / "model.safetensors";
+    const std::filesystem::path idx_path = std::filesystem::path(model_dir) / "model.safetensors.index.json";
+    if (std::filesystem::exists(st_path))
+    {
+        const uint64_t sz = static_cast<uint64_t>(std::filesystem::file_size(st_path, ec));
+        hash_scalar(hash, sz);
+    }
+    if (std::filesystem::exists(idx_path))
+    {
+        std::ifstream in(idx_path);
+        if (in)
+        {
+            const std::string content((std::istreambuf_iterator<char>(in)),
+                std::istreambuf_iterator<char>());
+            hash_string(hash, content);
+        }
+    }
+
+    hash_scalar(hash, max_cache_length);
+
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return oss.str();
+}
+
+void SaveModelDirIndex(const std::string& index_key, const std::string& cache_key)
+{
+    if (cache_disabled() || index_key.empty() || cache_key.empty())
+    {
+        return;
+    }
+
+    const std::filesystem::path idx_path = default_cache_dir() / (index_key + ".idx");
+
+    std::error_code ec;
+    std::filesystem::create_directories(idx_path.parent_path(), ec);
+    if (ec)
+    {
+        return;
+    }
+
+    std::ofstream out(idx_path, std::ios::trunc);
+    if (out)
+    {
+        out << cache_key;
+    }
+}
+
+std::optional<std::string> LookupModelDirIndex(const std::string& index_key)
+{
+    if (cache_disabled() || index_key.empty())
+    {
+        return std::nullopt;
+    }
+
+    const std::filesystem::path idx_path = default_cache_dir() / (index_key + ".idx");
+    std::ifstream in(idx_path);
+    if (!in)
+    {
+        return std::nullopt;
+    }
+
+    std::string cache_key;
+    std::getline(in, cache_key);
+    if (cache_key.empty())
+    {
+        return std::nullopt;
+    }
+
+    // Verify the plan file still exists
+    if (!std::filesystem::exists(plan_path_for_key(cache_key)))
+    {
+        return std::nullopt;
+    }
+
+    return cache_key;
+}
+
 } // namespace trtf

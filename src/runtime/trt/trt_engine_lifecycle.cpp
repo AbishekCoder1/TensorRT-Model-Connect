@@ -127,6 +127,8 @@ std::unique_ptr<DecoderStepEngine> try_load_cached_engine(TrtLogger& logger,
     out->max_cache_length = weights.max_cache_length;
     out->num_layers = num_layers;
     out->requires_position_input = requires_position_input;
+    out->id_bos = weights.id_bos;
+    out->id_eos = weights.id_eos;
 
     for (int32_t i = 0; i < num_layers; ++i)
     {
@@ -219,6 +221,8 @@ std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuild
     out->cache_v_input_names = cache_v_input_names;
     out->present_k_output_names = present_k_output_names;
     out->present_v_output_names = present_v_output_names;
+    out->id_bos = weights.id_bos;
+    out->id_eos = weights.id_eos;
 
     if (!has_all_required_tensors(*out))
     {

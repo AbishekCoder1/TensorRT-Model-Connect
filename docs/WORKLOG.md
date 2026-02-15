@@ -1061,14 +1061,22 @@ Fix: Added `try_load_cached_engine()` that checks the cache *before* graph build
 - Suppressed TRT header deprecation warnings via `SYSTEM` include directories
 - Removed deprecated `kOBEY_PRECISION_CONSTRAINTS` flag from test code
 
-**Cached engine load timeline (Qwen3-0.6B):**
+**Bottleneck 3: Unnecessary safetensors weight loading on cached engine hit**
 
-| Stage | Before | After |
-|-------|--------|-------|
-| Model resolution (safetensors) | 22s | 22s (unchanged — next optimization target) |
-| HF tokenizer init | 4s | 4s |
-| Weight conversion | 2s | 2s |
-| **Engine load (cached)** | **222s** | **3s** |
-| **Total** | **~260s** | **~31s** |
+When a cached engine exists, the pipeline still loaded all safetensors weights (~22s for Qwen3-0.6B) just to compute the cache key hash. The TRT engine already has all weights baked in.
+
+Fix: Model-dir index (`BuildModelDirIndexKey`) maps `model_dir + config.json + file_sizes + max_cache_length` to the weight-hash cache key. On cache hit, the entire safetensors loading pipeline is bypassed. `CreateTrtBackendFromEngine` wraps the pre-built engine in a lightweight `TrtBackendFastPath` that runs the same generate loop without `BuildTrtDecoderWeights`.
+
+Key bug found: Qwen3 has `head_dim=128` in config.json (explicit), not `hidden_size/num_heads = 64`. The fast path must read `head_dim` from config rather than computing it, otherwise `cache_state_size` is wrong and the KV cache buffers are misaligned.
+
+**Final cached engine load timeline (Qwen3-0.6B):**
+
+| Stage | Before (no cache) | After (mmap cache) | After (fast path) |
+|-------|-------|--------|-------|
+| Model resolution (safetensors) | 22s | 22s | **0s (skipped)** |
+| HF tokenizer init | 4s | 4s | 4s |
+| Weight conversion | 2s | 2s | **0s (skipped)** |
+| Engine load | 222s (file read) | 3s (mmap) | 3s (mmap) |
+| **Total** | **~260s** | **~31s** | **~7s** |
 
 Container tests: **30/30 pass**.
