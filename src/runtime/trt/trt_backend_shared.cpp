@@ -3,6 +3,7 @@
 #include "runtime/trt/trt_decode_runtime.h"
 #include "utils/json_helpers.h"
 
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -32,8 +33,21 @@ public:
         try
         {
             mLogger.clear_error();
+            auto tw0 = std::chrono::steady_clock::now();
+            std::cerr << "[trtf] Loading model weights (vocab=" << model.vocab.size()
+                      << ", layers=" << model.architecture.num_layers
+                      << ", hidden=" << model.checkpoint.hidden_size << ") ..." << std::endl;
             mWeights = BuildTrtDecoderWeights(mTokenizer, model);
+            auto tw1 = std::chrono::steady_clock::now();
+            std::cerr << "[trtf] Weights ready ["
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(tw1 - tw0).count()
+                      << " ms]" << std::endl;
+            std::cerr << "[trtf] Building TRT engine (this may take a while) ..." << std::endl;
             mDecoderStepEngine = factory(mWeights, mLogger);
+            auto tw2 = std::chrono::steady_clock::now();
+            std::cerr << "[trtf] Engine ready ["
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(tw2 - tw1).count()
+                      << " ms]" << std::endl;
             mAvailable = static_cast<bool>(mDecoderStepEngine);
             if (!mAvailable)
             {

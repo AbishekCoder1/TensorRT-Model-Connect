@@ -1,4 +1,5 @@
 #include "trtf/tokenizer.h"
+#include "utils/data_dir.h"
 
 #include <algorithm>
 #include <array>
@@ -114,10 +115,7 @@ std::string find_python_command()
 
 std::filesystem::path tokenizer_script_path()
 {
-#ifndef TRTF_SOURCE_DIR
-#define TRTF_SOURCE_DIR "."
-#endif
-    return std::filesystem::path(TRTF_SOURCE_DIR) / "scripts" / "hf_tokenizer.py";
+    return std::filesystem::path(script_path("hf_tokenizer.py"));
 }
 
 std::string trim_ascii_whitespace(std::string text)

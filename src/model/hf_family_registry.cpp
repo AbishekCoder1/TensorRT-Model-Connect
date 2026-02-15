@@ -9,6 +9,7 @@
 #include "models/internlm/registration.h"
 #include "models/deepseek/registration.h"
 #include "models/baichuan/registration.h"
+#include "utils/data_dir.h"
 #include "utils/text_parsers.h"
 #include "utils/json_helpers.h"
 
@@ -18,10 +19,6 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
-
-#ifndef TRTF_SOURCE_DIR
-#define TRTF_SOURCE_DIR "."
-#endif
 
 namespace trtf {
 namespace {
@@ -41,12 +38,12 @@ bool is_hf_transformers_model_dir(const std::string& model_id)
 
 std::filesystem::path builtin_qwen3_hf_demo_dir()
 {
-    return std::filesystem::path(TRTF_SOURCE_DIR) / "models" / "hf" / "qwen3";
+    return std::filesystem::path(model_path("hf/qwen3"));
 }
 
 std::filesystem::path builtin_qwen3_hf_real_dir()
 {
-    return std::filesystem::path(TRTF_SOURCE_DIR) / "models" / "hf" / "Qwen__Qwen3-0.6B";
+    return std::filesystem::path(model_path("hf/Qwen__Qwen3-0.6B"));
 }
 
 bool is_hf_checkpoint_dir(const std::filesystem::path& dir)

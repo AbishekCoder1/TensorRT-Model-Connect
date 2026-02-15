@@ -1,6 +1,7 @@
 #include "trtf/model.h"
 #include "checkpoint_mapper.h"
 #include "safetensors_loader.h"
+#include "utils/data_dir.h"
 #include "utils/text_parsers.h"
 #include "utils/json_helpers.h"
 
@@ -17,10 +18,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-#ifndef TRTF_SOURCE_DIR
-#define TRTF_SOURCE_DIR "."
-#endif
 
 namespace trtf {
 namespace {
@@ -411,7 +408,7 @@ DecoderCheckpoint load_checkpoint(
 
 std::filesystem::path builtin_model_dir()
 {
-    return std::filesystem::path(TRTF_SOURCE_DIR) / "models" / "tiny-cake-v1";
+    return std::filesystem::path(model_path("tiny-cake-v1"));
 }
 
 std::vector<std::string> make_placeholder_vocab(int32_t vocab_size)

@@ -1,4 +1,5 @@
 #include "trtf/backend.h"
+#include "utils/data_dir.h"
 
 #include <array>
 #include <cerrno>
@@ -111,10 +112,7 @@ std::string find_python_command()
 
 std::filesystem::path runner_script_path()
 {
-#ifndef TRTF_SOURCE_DIR
-#define TRTF_SOURCE_DIR "."
-#endif
-    return std::filesystem::path(TRTF_SOURCE_DIR) / "scripts" / "hf_generate.py";
+    return std::filesystem::path(script_path("hf_generate.py"));
 }
 
 class HfPythonBackend final : public IGenerationBackend {

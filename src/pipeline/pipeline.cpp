@@ -1,4 +1,4 @@
-#include "trtf/pipeline.h"
+#include "trtf/pipeline_legacy.h"
 #include "trtf/model_resolver.h"
 #include "trtf/runtime_factory.h"
 

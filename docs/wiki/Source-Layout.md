@@ -6,7 +6,9 @@ File-by-file guide to the codebase.
 
 | File | Purpose |
 |------|---------|
-| `pipeline.h` | Main entry point: `Pipeline::CreateTextGeneration()`, `pipeline.generate()` |
+| `pipeline.h` | **C ABI entry point**: `IPipeline` virtual interface, `trtf_create_pipeline()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()` |
+| `pipeline_legacy.h` | Legacy `Pipeline` class (retained for backward compatibility with existing examples) |
+| `bundle.h` | Bundle API: `BuildBundle()`, `InspectBundle()`, `IsBundle()`, `BundleInfo` |
 | `model.h` | `DecoderModel`, `DecoderCheckpoint`, `DecoderLayerCheckpoint`, `DecoderArchitectureConfig`, `LoadDecoderModel()` |
 | `backend.h` | `IGenerationBackend` interface, `CreateCpuReferenceBackend()`, `CreateTrtBackend()`, `CreateHfPythonBackend()` |
 | `tokenizer.h` | `ITokenizer` interface, `CreateVocabTokenizer()`, `CreateHfPythonTokenizer()` |
@@ -19,10 +21,11 @@ File-by-file guide to the codebase.
 
 | File | Purpose |
 |------|---------|
+| `data_dir.h/cpp` | Centralized source-dir resolution: `source_dir()`, `scripts_dir()`, `models_dir()`, `script_path()`, `model_path()`. Supports `TRTF_DATA_DIR` env override. |
 | `text_parsers.h/cpp` | `starts_with()`, `to_lower_ascii()`, `iequals_ascii()`, `read_file()`, `parse_positive_env_int()` |
 | `json_helpers.h/cpp` | `extract_json_string()`, `extract_json_int()`, `extract_json_float()`, `extract_json_string_array()` |
 | `tensor_math.h/cpp` | `transpose_2d()`, `expand_kv_projection()`, `repeat_head_norm()` — used by checkpoint mappers |
-| `trt/engine_cache.h/cpp` | On-disk TRT engine plan cache (serialize/deserialize `ICudaEngine`) |
+| `trt/engine_cache.h/cpp` | On-disk TRT engine plan cache (mmap-based read, serialize/deserialize `ICudaEngine`) |
 
 ## Model Loading (`src/model/`)
 
@@ -133,11 +136,24 @@ File-by-file guide to the codebase.
 | `toy_tokenizer.cpp` | Word-to-id lookup from `vocab.txt`. Used for built-in models. |
 | `hf_python_tokenizer.cpp` | Bridges to HF `tokenizers` library via Python subprocess. Exact parity with HF. |
 
+## Bundle Format (`src/bundle/`)
+
+| File | Purpose |
+|------|---------|
+| `bundle_format.h/cpp` | `.trtfb` binary format: `WriteBundleFile()`, `ReadBundleFile()`, `HasBundleMagic()`, JSON header serialization |
+| `bundle_api.cpp` | Public API implementation: `BuildBundle()`, `InspectBundle()`, `IsBundle()` |
+
+## C ABI Layer (`src/cabi/`)
+
+| File | Purpose |
+|------|---------|
+| `trtf_c.cpp` | `extern "C"` factory: `trtf_create_pipeline()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`. Contains `PipelineImpl` (concrete `IPipeline`). |
+
 ## Pipeline (`src/pipeline/`)
 
 | File | Purpose |
 |------|---------|
-| `pipeline.cpp` | `Pipeline::CreateTextGeneration()`, `operator()()`, `generate()`. Orchestrates all stages. |
+| `pipeline.cpp` | Legacy `Pipeline::CreateTextGeneration()`, `operator()()`, `generate()`. Orchestrates all stages. |
 
 ## Tests (`tests/`)
 
@@ -162,6 +178,12 @@ File-by-file guide to the codebase.
 | `test_kv_cache_step_state.cpp` | KvCacheStepState position tracking, mask generation, cache overflow (TRT-guarded) |
 | `test_extra_fields.cpp` | Phase A extensibility: extra_tensors round-trip, extra_params, find_extra_bindings |
 | `test_trt_graph_ops_gold.cpp` | Per-op gold tensor tests: rms_norm, matmul, swiglu, rope, rms_norm_per_head, bias_sum (GPU-only) |
+| `test_data_dir.cpp` | data_dir resolution, env override, script/model path construction |
+| `test_bundle_format.cpp` | .trtfb format: write/read roundtrip, magic validation, JSON header, inspect |
+| `test_c_abi_entry.cpp` | C ABI factory: create/destroy pipeline, error handling, flags, version/has_trt |
+| `test_pipeline_api.cpp` | IPipeline interface: generate, max_tokens, pointer lifetime, save_bundle, vtable ABI |
+| `test_bundle_e2e.cpp` | Bundle E2E: save + load roundtrip, inspect (TRT-guarded, auto-skip without GPU) |
+| `test_cli_args.cpp` | CLI arg parsing: subcommands, flags, error handling for unknown flags/commands |
 
 ## Scripts (`scripts/`)
 

@@ -59,6 +59,7 @@ models/hf/Qwen__Qwen3-0.6B/
 models/hf/TinyLlama__*/
 models/hf/tiny-random-*/
 models/hf/01-ai__*/
+models/hf/Felladrin__*/
 models/hf/Locutusque__*/
 models/hf/mistralai__*/
 models/hf/google__*/
@@ -75,3 +76,4 @@ HEAD
 hooks
 objects
 refs
+engines

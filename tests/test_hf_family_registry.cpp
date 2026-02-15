@@ -4,7 +4,7 @@
 
 #include "trtf/hf_family_registry.h"
 #include "trtf/model_resolver.h"
-#include "trtf/pipeline.h"
+#include "trtf/pipeline_legacy.h"
 
 #include <cerrno>
 #include <cstring>

@@ -16,12 +16,33 @@ This page decomposes the architecture into software units, showing class-level U
 
 ## Unit 1: Public API Layer
 
-The public API provides the user-facing surface. Users interact only with `Pipeline`, `ITokenizer`, and `IGenerationBackend` (through `Pipeline`).
+The public API has two tiers: (1) the **C ABI entry point** (`trtf_create_pipeline` → `IPipeline*`) for library consumers, and (2) the **legacy Pipeline class** retained for backward compatibility with existing examples.
 
 ### Class Diagram
 
 ```mermaid
 classDiagram
+    class IPipeline {
+        <<interface>>
+        +generate(prompt, max_new_tokens)* const char*
+        +model_id()* const char*
+        +backend_name()* const char*
+        +save_bundle(output_path)* bool
+    }
+
+    class PipelineImpl {
+        -string mModelId
+        -unique_ptr~ITokenizer~ mTokenizer
+        -unique_ptr~IGenerationBackend~ mBackend
+        -string mBackendName
+        -GenerationConfig mGenConfig
+        -string mLastOutput
+        +generate(prompt, max_new_tokens) const char*
+        +model_id() const char*
+        +backend_name() const char*
+        +save_bundle(output_path) bool
+    }
+
     class Pipeline {
         -string mTask
         -string mModelId
@@ -37,6 +58,10 @@ classDiagram
         +model_id() string
         +backend_name() string
     }
+
+    IPipeline <|.. PipelineImpl
+
+    note for IPipeline "C ABI: trtf_create_pipeline() returns IPipeline*\nconst char* only, no std::string"
 
     class ITokenizer {
         <<interface>>

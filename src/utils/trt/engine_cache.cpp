@@ -10,6 +10,11 @@
 #include <sstream>
 #include <string_view>
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 namespace trtf {
 namespace {
 
@@ -243,17 +248,37 @@ std::optional<std::vector<char>> LoadTrtEnginePlanFromCache(const std::string& c
         return std::nullopt;
     }
 
-    std::ifstream in(plan_path_for_key(cache_key), std::ios::binary);
-    if (!in)
+    const std::filesystem::path path = plan_path_for_key(cache_key);
+    const int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0)
     {
         return std::nullopt;
     }
 
-    std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (bytes.empty())
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || st.st_size <= 0)
+    {
+        close(fd);
+        return std::nullopt;
+    }
+
+    const std::size_t file_size = static_cast<std::size_t>(st.st_size);
+
+    // mmap the file for fast access — avoids copying 2+GB through userspace read()
+    void* mapped = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mapped == MAP_FAILED)
     {
         return std::nullopt;
     }
+
+    // Advise sequential access for read-ahead
+    madvise(mapped, file_size, MADV_SEQUENTIAL);
+
+    std::vector<char> bytes(static_cast<const char*>(mapped),
+        static_cast<const char*>(mapped) + file_size);
+    munmap(mapped, file_size);
+
     return bytes;
 }
 

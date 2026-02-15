@@ -2,7 +2,7 @@
 // Verifies: TRT backend can be forced and produces correct output with the built-in
 // model, with graceful fallback when TRT is unavailable.
 
-#include "trtf/pipeline.h"
+#include "trtf/pipeline_legacy.h"
 
 #include <iostream>
 #include <stdexcept>

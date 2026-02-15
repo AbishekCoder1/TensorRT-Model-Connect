@@ -4,10 +4,13 @@ This page traces the complete execution path from user code to generated text, w
 
 ## The Call Chain
 
+The primary entry point is now `trtf_create_pipeline()` (C ABI, `src/cabi/trtf_c.cpp`). The legacy `Pipeline::CreateTextGeneration()` (`src/pipeline/pipeline.cpp`) follows the same internal path.
+
 ```
-User: pipeline.generate("Hello")
+User: trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)
+  │     src/cabi/trtf_c.cpp
   │
-  ├── Pipeline::CreateTextGeneration("QWEN3", prefer_trt=true, force_trt=false)
+  ├── Pipeline::CreateTextGeneration("QWEN3", prefer_trt=true, force_trt=true)
   │     src/pipeline/pipeline.cpp
   │     │
   │     ├── Stage 1: ResolveTextGenerationModel("QWEN3")
@@ -22,7 +25,9 @@ User: pipeline.generate("Hello")
   │     │           ├── RegisterBuiltinHfModelFamilies() [once]
   │     │           │     ├── StandardTrtModelDefinitionPopulator (p=0)
   │     │           │     ├── qwen::RegisterQwenFamily()
-  │     │           │     └── llama::RegisterLlamaFamily()
+  │     │           │     ├── llama::RegisterLlamaFamily()
+  │     │           │     ├── yi, mistral, gemma, internlm, deepseek, baichuan
+  │     │           │     └── (8 families total)
   │     │           │
   │     │           ├── load_hf_metadata() → {model_type: "qwen3", architectures: [...]}
   │     │           │

@@ -1,5 +1,7 @@
 #include "trtf/runtime_factory.h"
 
+#include <chrono>
+#include <iostream>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -92,7 +94,13 @@ RuntimeAssembly BuildRuntimeForTextGeneration(const ResolvedModelSpec& model_spe
         {
             try
             {
+                auto ttok0 = std::chrono::steady_clock::now();
+                std::cerr << "[trtf] Initializing HF tokenizer ..." << std::endl;
                 assembly.tokenizer = CreateHfPythonTokenizer(model.hf_tokenizer_dir);
+                auto ttok1 = std::chrono::steady_clock::now();
+                std::cerr << "[trtf] Tokenizer ready ["
+                          << std::chrono::duration_cast<std::chrono::milliseconds>(ttok1 - ttok0).count()
+                          << " ms]" << std::endl;
             }
             catch (const std::exception& e)
             {

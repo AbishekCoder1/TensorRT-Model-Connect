@@ -1,4 +1,4 @@
-#include "trtf/pipeline.h"
+#include "trtf/pipeline_legacy.h"
 
 #include <cstdlib>
 #include <exception>

@@ -1,40 +1,45 @@
 #pragma once
 
-#include "trtf/backend.h"
-#include "trtf/generation.h"
-#include "trtf/tokenizer.h"
-
-#include <memory>
-#include <string>
-#include <vector>
+#include <cstddef>
+#include <cstdint>
 
 namespace trtf {
 
-class Pipeline {
+class IPipeline {
 public:
-    static Pipeline CreateTextGeneration(
-        const std::string& model_id, bool prefer_trt = true, bool force_trt = false);
-    static Pipeline LoadModel(const std::string& model_id, bool prefer_trt = true, bool force_trt = false);
+    virtual ~IPipeline() = default;
 
-    std::vector<GenerationResult> operator()(const std::string& prompt) const;
-    std::string generate(const std::string& prompt) const;
+    // Generate text. Returns pointer valid until next generate() or destruction.
+    virtual const char* generate(const char* prompt, std::size_t max_new_tokens = 0) = 0;
 
-    const std::string& task() const;
-    const std::string& model_id() const;
-    const std::string& backend_name() const;
+    // Metadata -- pointers valid for lifetime of the pipeline.
+    virtual const char* model_id() const = 0;
+    virtual const char* backend_name() const = 0;
 
-private:
-    Pipeline(std::string task, std::string model_id, std::unique_ptr<ITokenizer> tokenizer,
-        std::unique_ptr<IGenerationBackend> backend, std::string backend_name, GenerationConfig generation_config);
-
-    std::string mTask;
-    std::string mModelId;
-    std::unique_ptr<ITokenizer> mTokenizer;
-    std::unique_ptr<IGenerationBackend> mBackend;
-    std::string mBackendName;
-    GenerationConfig mGenerationConfig;
+    // Bundle: serialize current engine + tokenizer to a single .trtfb file.
+    virtual bool save_bundle(const char* output_path) = 0;
 };
 
-Pipeline loadModel(const std::string& model_id, bool prefer_trt = true, bool force_trt = false);
-
 } // namespace trtf
+
+extern "C" {
+
+#define TRTF_PREFER_TRT  0
+#define TRTF_FORCE_TRT   1
+#define TRTF_CPU_ONLY    2
+
+// Create a pipeline from a model directory, model alias, or .trtfb bundle.
+// Returns owning pointer. Caller deletes with `delete`.
+// Returns nullptr on failure (call trtf_last_error() for message).
+trtf::IPipeline* trtf_create_pipeline(const char* model_or_bundle, int flags);
+
+// Last error message (thread-local). Valid until next trtf_ call on this thread.
+const char* trtf_last_error(void);
+
+// Version string.
+const char* trtf_version(void);
+
+// 1 if compiled with TRT support, 0 otherwise.
+int trtf_has_trt(void);
+
+}

@@ -30,7 +30,13 @@ Only activates when the input is an HF model directory. Registered once via `std
 RegisterBuiltinHfModelFamilies()
   ├── StandardTrtModelDefinitionPopulator (priority=0, fallback)
   ├── qwen::RegisterQwenFamily()
-  └── llama::RegisterLlamaFamily()
+  ├── llama::RegisterLlamaFamily()
+  ├── yi::RegisterYiFamily()
+  ├── mistral::RegisterMistralFamily()
+  ├── gemma::RegisterGemmaFamily()
+  ├── internlm::RegisterInternLMFamily()
+  ├── deepseek::RegisterDeepSeekFamily()
+  └── baichuan::RegisterBaichuanFamily()
 ```
 
 For each registered family (sorted by priority, highest first):
@@ -41,6 +47,10 @@ For each registered family (sorted by priority, highest first):
    - Generic loader reads `config.json`, derives architecture, reads safetensors
    - Dispatches to the **Checkpoint Mapper** registry to translate HF tensor keys
    - Returns a `DecoderModel` with checkpoint populated
+
+### C ABI Entry Point (`trtf_c.cpp`)
+
+Users access the library through a single `extern "C"` factory function `trtf_create_pipeline()` which returns an `IPipeline*`. This function orchestrates stages 1-3 internally. The `IPipeline` interface uses `const char*` (not `std::string`) for ABI safety across compilers/STL versions.
 
 ### Stage 3: Runtime Assembly (`runtime_factory.cpp`)
 

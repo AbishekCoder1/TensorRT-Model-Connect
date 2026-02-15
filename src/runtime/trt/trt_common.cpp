@@ -79,9 +79,19 @@ void TrtLogger::log(Severity severity, const char* msg) noexcept
         mLastError = msg;
     }
 
-    if (msg != nullptr && trt_log_to_stderr_enabled() && severity <= trt_log_stderr_min_severity())
+    if (msg == nullptr)
+    {
+        return;
+    }
+
+    if (trt_log_to_stderr_enabled() && severity <= trt_log_stderr_min_severity())
     {
         std::cerr << "TRT_LOG[" << trt_severity_name(severity) << "] " << msg << '\n';
+    }
+    else if (severity <= Severity::kWARNING)
+    {
+        // Always show warnings and errors even without TRTF_TRT_LOG_STDERR
+        std::cerr << "[trt] " << trt_severity_name(severity) << ": " << msg << '\n';
     }
 }
 

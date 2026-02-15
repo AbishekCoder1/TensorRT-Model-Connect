@@ -104,7 +104,7 @@ bool test_rms_norm()
 #if NV_TENSORRT_MAJOR >= 8
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
     config->clearFlag(nvinfer1::BuilderFlag::kTF32);
-    config->setFlag(nvinfer1::BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
+
 #endif
 
     auto* input_tensor = network->addInput("input", nvinfer1::DataType::kFLOAT,
@@ -198,7 +198,7 @@ bool test_matmul_rhs_constant()
 #if NV_TENSORRT_MAJOR >= 8
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
     config->clearFlag(nvinfer1::BuilderFlag::kTF32);
-    config->setFlag(nvinfer1::BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
+
 #endif
 
     auto* input_tensor = network->addInput("input", nvinfer1::DataType::kFLOAT,
@@ -261,7 +261,7 @@ bool test_swiglu()
 #if NV_TENSORRT_MAJOR >= 8
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
     config->clearFlag(nvinfer1::BuilderFlag::kTF32);
-    config->setFlag(nvinfer1::BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
+
 #endif
 
     auto* gate_in = network->addInput("gate", nvinfer1::DataType::kFLOAT, trtf::make_dims_2d(1, size));
@@ -346,7 +346,7 @@ bool test_rope()
 #if NV_TENSORRT_MAJOR >= 8
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
     config->clearFlag(nvinfer1::BuilderFlag::kTF32);
-    config->setFlag(nvinfer1::BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
+
 #endif
 
     auto* input_tensor = network->addInput("input", nvinfer1::DataType::kFLOAT,
@@ -448,7 +448,7 @@ bool test_rms_norm_per_head()
 #if NV_TENSORRT_MAJOR >= 8
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
     config->clearFlag(nvinfer1::BuilderFlag::kTF32);
-    config->setFlag(nvinfer1::BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
+
 #endif
 
     auto* input_tensor = network->addInput("input", nvinfer1::DataType::kFLOAT,
@@ -520,7 +520,7 @@ bool test_bias_sum()
 #if NV_TENSORRT_MAJOR >= 8
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
     config->clearFlag(nvinfer1::BuilderFlag::kTF32);
-    config->setFlag(nvinfer1::BuilderFlag::kOBEY_PRECISION_CONSTRAINTS);
+
 #endif
 
     auto* input_tensor = network->addInput("input", nvinfer1::DataType::kFLOAT,

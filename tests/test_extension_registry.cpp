@@ -3,7 +3,7 @@
 // with a mock backend produce expected pipeline output.
 
 #include "trtf/model_resolver.h"
-#include "trtf/pipeline.h"
+#include "trtf/pipeline_legacy.h"
 #include "trtf/runtime_factory.h"
 
 #include <cstdint>

@@ -452,6 +452,14 @@ std::unique_ptr<DecoderStepEngine> create_decoder_step_engine_multi_layer(
         return nullptr;
     }
 
+    // Fast path: try loading a cached engine before building the graph.
+    const int32_t num_layers = static_cast<int32_t>(weights.decoder_layers.size());
+    auto cached = try_load_cached_engine(logger, weights, num_layers, /*requires_position_input=*/true);
+    if (cached)
+    {
+        return cached;
+    }
+
     const int32_t head_dim = attention_size / weights.num_attention_heads;
     const int32_t attention_window = weights.max_cache_length + 1;
 
@@ -493,7 +501,6 @@ std::unique_ptr<DecoderStepEngine> create_decoder_step_engine_multi_layer(
     std::vector<std::string> present_k_names;
     std::vector<std::string> present_v_names;
 
-    const int32_t num_layers = static_cast<int32_t>(weights.decoder_layers.size());
     cache_k_inputs.reserve(static_cast<std::size_t>(num_layers));
     cache_v_inputs.reserve(static_cast<std::size_t>(num_layers));
     cache_k_names.reserve(static_cast<std::size_t>(num_layers));

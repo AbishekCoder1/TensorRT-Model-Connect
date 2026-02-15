@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(GNUInstallDirs)
+
 option(TRTF_ENABLE_TRT "Enable TensorRT backend integration" ON)
 
 set(_trtf_default_search_paths
@@ -91,6 +93,10 @@ add_library(trtf_core
   src/models/deepseek/checkpoint_mapper.cpp
   src/models/baichuan/registration.cpp
   src/models/baichuan/checkpoint_mapper.cpp
+  src/bundle/bundle_format.cpp
+  src/bundle/bundle_api.cpp
+  src/cabi/trtf_c.cpp
+  src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
   src/utils/tensor_math.cpp
@@ -101,7 +107,8 @@ add_library(trtf_core
 
 target_include_directories(trtf_core
   PUBLIC
-    ${PROJECT_SOURCE_DIR}/include
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
     ${PROJECT_SOURCE_DIR}/src
 )
@@ -109,6 +116,7 @@ target_include_directories(trtf_core
 target_compile_definitions(trtf_core
   PUBLIC
     TRTF_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\"
+    TRTF_VERSION_STRING=\"${PROJECT_VERSION}\"
 )
 
 target_compile_options(trtf_core
@@ -120,7 +128,7 @@ target_compile_options(trtf_core
 
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
   target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=1)
-  target_include_directories(trtf_core PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  target_include_directories(trtf_core SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
   target_link_libraries(trtf_core PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
   message(STATUS "TensorRT backend enabled")
   message(STATUS "  TRT include: ${TRTF_TRT_INCLUDE_DIR}")
@@ -137,6 +145,9 @@ target_link_libraries(trtf_text_generation PRIVATE trtf_core)
 
 add_executable(trtf_load_model examples/load_model.cpp)
 target_link_libraries(trtf_load_model PRIVATE trtf_core)
+
+add_executable(trtf examples/trtf_cli.cpp)
+target_link_libraries(trtf PRIVATE trtf_core)
 
 enable_testing()
 
@@ -223,7 +234,7 @@ add_executable(test_decode_runtime tests/test_decode_runtime.cpp)
 target_link_libraries(test_decode_runtime PRIVATE trtf_core)
 target_include_directories(test_decode_runtime PRIVATE ${PROJECT_SOURCE_DIR}/src)
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_decode_runtime PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  target_include_directories(test_decode_runtime SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
   target_link_libraries(test_decode_runtime PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
 endif()
 add_test(NAME test_decode_runtime COMMAND test_decode_runtime)
@@ -237,7 +248,7 @@ add_executable(test_kv_cache_step_state tests/test_kv_cache_step_state.cpp)
 target_link_libraries(test_kv_cache_step_state PRIVATE trtf_core)
 target_include_directories(test_kv_cache_step_state PRIVATE ${PROJECT_SOURCE_DIR}/src)
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_kv_cache_step_state PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  target_include_directories(test_kv_cache_step_state SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
   target_link_libraries(test_kv_cache_step_state PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
 endif()
 add_test(NAME test_kv_cache_step_state COMMAND test_kv_cache_step_state)
@@ -246,16 +257,89 @@ add_executable(test_extra_fields tests/test_extra_fields.cpp)
 target_link_libraries(test_extra_fields PRIVATE trtf_core)
 target_include_directories(test_extra_fields PRIVATE ${PROJECT_SOURCE_DIR}/src)
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_extra_fields PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  target_include_directories(test_extra_fields SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
   target_link_libraries(test_extra_fields PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
 endif()
 add_test(NAME test_extra_fields COMMAND test_extra_fields)
+
+add_executable(test_data_dir tests/test_data_dir.cpp)
+target_link_libraries(test_data_dir PRIVATE trtf_core)
+target_include_directories(test_data_dir PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_data_dir COMMAND test_data_dir)
+
+add_executable(test_bundle_format tests/test_bundle_format.cpp)
+target_link_libraries(test_bundle_format PRIVATE trtf_core)
+target_include_directories(test_bundle_format PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_bundle_format COMMAND test_bundle_format)
+
+add_executable(test_c_abi_entry tests/test_c_abi_entry.cpp)
+target_link_libraries(test_c_abi_entry PRIVATE trtf_core)
+add_test(NAME test_c_abi_entry COMMAND test_c_abi_entry)
+
+add_executable(test_pipeline_api tests/test_pipeline_api.cpp)
+target_link_libraries(test_pipeline_api PRIVATE trtf_core)
+add_test(NAME test_pipeline_api COMMAND test_pipeline_api)
+
+add_executable(test_bundle_e2e tests/test_bundle_e2e.cpp)
+target_link_libraries(test_bundle_e2e PRIVATE trtf_core)
+add_test(NAME test_bundle_e2e COMMAND test_bundle_e2e)
+
+add_executable(test_cli_args tests/test_cli_args.cpp)
+target_link_libraries(test_cli_args PRIVATE trtf_core)
+add_test(NAME test_cli_args COMMAND test_cli_args)
 
 add_executable(test_trt_ops_gold tests/test_trt_graph_ops_gold.cpp)
 target_link_libraries(test_trt_ops_gold PRIVATE trtf_core)
 target_include_directories(test_trt_ops_gold PRIVATE ${PROJECT_SOURCE_DIR}/src)
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_trt_ops_gold PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  target_include_directories(test_trt_ops_gold SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
   target_link_libraries(test_trt_ops_gold PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
 endif()
 add_test(NAME test_trt_ops_gold COMMAND test_trt_ops_gold)
+
+# --- Install ---
+include(CMakePackageConfigHelpers)
+
+# Install library
+install(TARGETS trtf_core
+  EXPORT trtfTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# Install public headers
+install(DIRECTORY include/trtf/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/trtf
+  FILES_MATCHING PATTERN "*.h"
+)
+
+# Install CLI executable
+install(TARGETS trtf
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Generate and install CMake config files
+configure_package_config_file(
+  "${PROJECT_SOURCE_DIR}/cmake/trtfConfig.cmake.in"
+  "${PROJECT_BINARY_DIR}/trtfConfig.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/trtf
+)
+
+write_basic_package_version_file(
+  "${PROJECT_BINARY_DIR}/trtfConfigVersion.cmake"
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+
+install(EXPORT trtfTargets
+  FILE trtfTargets.cmake
+  NAMESPACE trtf::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/trtf
+)
+
+install(FILES
+  "${PROJECT_BINARY_DIR}/trtfConfig.cmake"
+  "${PROJECT_BINARY_DIR}/trtfConfigVersion.cmake"
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/trtf
+)

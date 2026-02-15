@@ -6,7 +6,7 @@
 
 #include "test_helpers.h"
 #include "trtf/model_resolver.h"
-#include "trtf/pipeline.h"
+#include "trtf/pipeline_legacy.h"
 
 #include <filesystem>
 #include <iostream>

@@ -8,8 +8,8 @@ This page provides a detailed comparison between HuggingFace's Python `transform
 
 | Concept | HuggingFace Transformers | TRT-Transformers-CPP |
 |---------|-------------------------|---------------------|
-| Entry point | `pipeline("text-generation", model=...)` | `Pipeline::CreateTextGeneration(model_id)` |
-| Generation | `pipeline("Hello")` | `pipeline.generate("Hello")` |
+| Entry point | `pipeline("text-generation", model=...)` | `trtf_create_pipeline(model_id, flags)` |
+| Generation | `pipeline("Hello")` | `pipeline->generate("Hello")` |
 | Model loading | `AutoModelForCausalLM.from_pretrained()` | `LoadDecoderModel(model_dir)` via family registry |
 | Tokenizer | `AutoTokenizer.from_pretrained()` | `HfPythonTokenizer` (subprocess) or `ToyTokenizer` |
 | Config | `AutoConfig.from_pretrained()` | `config.json` parsing in `model_loader.cpp` |

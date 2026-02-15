@@ -955,3 +955,120 @@ Changes:
 | **Yi-Coder-1.5B** | 1.5B | LLaMA | `llama` | Yes | "Paris." + code text |
 | **DeepSeek-R1-Distill-1.5B** | 1.5B | Qwen | `qwen2` | Yes | "Paris...Berlin..." |
 | **Gemma tiny-random** | tiny | Gemma | `gemma` | Yes | Non-zero logits (random weights) |
+
+---
+
+## 2026-02-14 — Library API: C ABI Entry Point + Bundle Format + CLI
+
+Packaged trt-transformers-cpp as a distributable library following the TensorRT pattern: a single `extern "C"` factory function returns a C++ virtual interface. All subsequent operations are C++ method calls.
+
+### Phase 1: TRTF_SOURCE_DIR Refactor
+
+Centralized all `TRTF_SOURCE_DIR` macro usage into `src/utils/data_dir.h/cpp`. Functions: `source_dir()`, `scripts_dir()`, `models_dir()`, `script_path()`, `model_path()`. Supports `TRTF_DATA_DIR` env override for relocatable installs.
+
+Updated 4 sites: `hf_python_tokenizer.cpp`, `hf_python_backend.cpp`, `model_loader.cpp`, `hf_family_registry.cpp`.
+
+### Phase 2: Bundle Format + C ABI Factory
+
+**New public API** (`include/trtf/pipeline.h`):
+- `IPipeline` virtual interface with `generate()`, `model_id()`, `backend_name()`, `save_bundle()`
+- `extern "C"` entry points: `trtf_create_pipeline()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`
+- Flags: `TRTF_PREFER_TRT`, `TRTF_FORCE_TRT`, `TRTF_CPU_ONLY`
+- No `std::string` in the interface — `const char*` only for ABI safety
+
+**Old API preserved**: `include/trtf/pipeline_legacy.h` retains the original `Pipeline` class. All existing code updated to use legacy header.
+
+**Bundle format** (`.trtfb`):
+- Magic: `TRTFB\x00\x01\x00` (8 bytes)
+- JSON metadata header with section table
+- Binary sections (TRT plan, tokenizer data, etc.)
+- `src/bundle/bundle_format.h/cpp`: `WriteBundleFile()`, `ReadBundleFile()`, `HasBundleMagic()`
+- `include/trtf/bundle.h`: Public API: `BuildBundle()`, `InspectBundle()`, `IsBundle()`
+
+**C ABI implementation** (`src/cabi/trtf_c.cpp`):
+- `PipelineImpl` concrete class implementing `IPipeline`
+- Thread-local error storage
+- Auto-detects `.trtfb` bundles vs model directories
+
+### Phase 3: Pipeline + Bundle I/O
+
+- `PipelineImpl::generate()` supports both token-based and text-based generation backends
+- `save_bundle()` returns false for non-TRT backends (no engine to serialize); TRT serialization placeholder ready
+- `BuildBundle()` stub in `src/bundle/bundle_api.cpp` — awaits TRT engine serialization wiring
+
+### Phase 4: CLI
+
+`examples/trtf_cli.cpp` — new `trtf` executable with subcommands:
+```
+trtf build   <model-dir> -o <output.trtfb> [--max-cache-length N]
+trtf run     <model-or-bundle> --prompt "text" [--max-new-tokens N] [--force-trt] [--cpu-only]
+trtf inspect <bundle.trtfb>
+trtf version
+```
+
+### Phase 5: CMake Install
+
+- `install()` targets for `trtf_core` (static lib), public headers, `trtf` CLI binary
+- `cmake/trtfConfig.cmake.in` + version file for `find_package(trtf)` support
+- Generator expressions for proper build/install include path separation
+
+### New files (15 created)
+
+| File | Purpose |
+|------|---------|
+| `src/utils/data_dir.h/cpp` | Centralized source-dir resolution |
+| `include/trtf/pipeline.h` | IPipeline + C ABI factory (rewrote) |
+| `include/trtf/pipeline_legacy.h` | Old Pipeline class preserved |
+| `include/trtf/bundle.h` | Bundle public API |
+| `src/bundle/bundle_format.h/cpp` | .trtfb binary format read/write |
+| `src/bundle/bundle_api.cpp` | BuildBundle() stub |
+| `src/cabi/trtf_c.cpp` | C ABI factory implementation |
+| `examples/trtf_cli.cpp` | CLI with build/run/inspect/version |
+| `cmake/trtfConfig.cmake.in` | CMake package config template |
+| `tests/test_data_dir.cpp` | 7 tests |
+| `tests/test_bundle_format.cpp` | 8 tests |
+| `tests/test_c_abi_entry.cpp` | 12 tests |
+| `tests/test_pipeline_api.cpp` | 6 tests |
+| `tests/test_bundle_e2e.cpp` | 2 tests (TRT-guarded) |
+| `tests/test_cli_args.cpp` | 12 tests |
+
+### Test summary
+
+- 6 new test files, 47 individual test cases
+- Host tests: **13/13 new tests pass** (+ all existing tests pass)
+- Bundle E2E tests auto-skip without GPU (pass with SKIP message)
+
+### Profiling and performance optimization
+
+Profiled the full pipeline startup with timing at every stage. Discovered two critical bottlenecks:
+
+**Bottleneck 1: Cached engine plan loading — 220s for 2.5GB file read**
+
+`LoadTrtEnginePlanFromCache` used `ifstream` + `istreambuf_iterator` to read the entire 2.5GB TRT plan file into a `std::vector<char>`. Under memory pressure (swap full), this took 220s due to page thrashing.
+
+Fix: Replaced with `mmap` + `MADV_SEQUENTIAL`. The OS now maps the file and pages in sequentially, reducing read time from **220s to 1.8s** (124x faster).
+
+**Bottleneck 2: Graph building before cache check**
+
+`StandardDecoderGraphBuilder` built the entire TRT graph (copying gigabytes of weight constants into the builder) before `finalize_decoder_step_engine` checked the cache. On cache hit, all that work was discarded.
+
+Fix: Added `try_load_cached_engine()` that checks the cache *before* graph building. On cache hit, the graph builder returns immediately after deserialization.
+
+**Other improvements:**
+
+- Added progress logging with wall-clock timing at every pipeline stage (`[trtf] ...`)
+- TRT warnings now always shown on stderr (not just with `TRTF_TRT_LOG_STDERR`)
+- Suppressed TRT header deprecation warnings via `SYSTEM` include directories
+- Removed deprecated `kOBEY_PRECISION_CONSTRAINTS` flag from test code
+
+**Cached engine load timeline (Qwen3-0.6B):**
+
+| Stage | Before | After |
+|-------|--------|-------|
+| Model resolution (safetensors) | 22s | 22s (unchanged — next optimization target) |
+| HF tokenizer init | 4s | 4s |
+| Weight conversion | 2s | 2s |
+| **Engine load (cached)** | **222s** | **3s** |
+| **Total** | **~260s** | **~31s** |
+
+Container tests: **30/30 pass**.

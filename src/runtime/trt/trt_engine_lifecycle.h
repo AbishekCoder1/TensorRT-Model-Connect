@@ -57,6 +57,11 @@ bool has_all_required_tensors(const DecoderStepEngine& engine);
 std::vector<const DecoderStepEngine::TensorBinding*> find_extra_bindings(
     const DecoderStepEngine& engine, const std::string& prefix, bool is_input);
 
+// Try to load a cached engine without building the TRT graph.
+// Returns nullptr if no cache hit (caller should build graph and call finalize_decoder_step_engine).
+std::unique_ptr<DecoderStepEngine> try_load_cached_engine(TrtLogger& logger,
+    const TrtDecoderDefinition& weights, int32_t num_layers, bool requires_position_input);
+
 std::unique_ptr<DecoderStepEngine> finalize_decoder_step_engine(nvinfer1::IBuilder& builder,
     nvinfer1::INetworkDefinition& network, nvinfer1::IBuilderConfig& config, TrtLogger& logger,
     const TrtDecoderDefinition& weights, const std::vector<std::string>& cache_k_input_names,

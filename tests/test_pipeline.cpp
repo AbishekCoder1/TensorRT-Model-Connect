@@ -2,7 +2,7 @@
 // Verifies: Text generation produces expected output, error handling for invalid
 // backend selections, and unknown model IDs throw appropriate errors.
 
-#include "trtf/pipeline.h"
+#include "trtf/pipeline_legacy.h"
 
 #include <iostream>
 #include <stdexcept>

@@ -16,11 +16,12 @@ This page shows the runtime behavior of the system through sequence diagrams and
 
 ## 1. Pipeline Creation (Full Sequence)
 
-End-to-end sequence from `Pipeline::CreateTextGeneration("QWEN3")` to a ready-to-use Pipeline object.
+End-to-end sequence from `trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)` to a ready-to-use IPipeline object. The C ABI factory in `trtf_c.cpp` delegates to the same internal stages.
 
 ```mermaid
 sequenceDiagram
     actor User
+    participant CABI as trtf_c.cpp
     participant P as Pipeline
     participant R as ModelResolver
     participant FR as HfFamilyRegistry
@@ -30,7 +31,8 @@ sequenceDiagram
     participant RF as RuntimeFactory
     participant TB as TrtBackend
 
-    User->>P: CreateTextGeneration("QWEN3", prefer_trt=true)
+    User->>CABI: trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT)
+    CABI->>P: ResolveTextGenerationModel + BuildRuntimeForTextGeneration
 
     Note over P: Stage 1: Model Resolution
     P->>R: ResolveTextGenerationModel("QWEN3")

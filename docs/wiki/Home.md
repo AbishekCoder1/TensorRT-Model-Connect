@@ -1,6 +1,6 @@
 # TRT-Transformers-CPP Wiki
 
-A C++ library that mirrors HuggingFace's `transformers.pipeline()` API with TensorRT-first execution. Read HuggingFace model checkpoints directly, build optimized TensorRT engines from the C++ API (no ONNX), and run GPU-accelerated inference — all from a single `Pipeline` call.
+A C++ library that mirrors HuggingFace's `transformers.pipeline()` API with TensorRT-first execution. Read HuggingFace model checkpoints directly, build optimized TensorRT engines from the C++ API (no ONNX), and run GPU-accelerated inference — all from a single `trtf_create_pipeline()` call. Distributable as a library with C ABI entry point, `.trtfb` engine bundles, and a CLI.
 
 ## Quick Navigation
 
@@ -18,11 +18,13 @@ A C++ library that mirrors HuggingFace's `transformers.pipeline()` API with Tens
 
 ## Core Design Principles
 
-1. **Mirror the HF API**: `pipeline("text-generation", model=...)` becomes `Pipeline::CreateTextGeneration(model_id)`.
-2. **TensorRT-first, always-fallback**: Try TRT GPU inference first, fall back gracefully to CPU reference or HF Python subprocess.
-3. **Plug-and-play families**: Adding a new model family requires ~50 lines of code in `src/models/<family>/` and two one-line edits.
-4. **Direct C++ TRT graph building**: No ONNX intermediate. Build `INetworkDefinition` directly using reusable op primitives.
-5. **Shared infrastructure**: StandardCheckpointMapper, StandardTrtModelDefinitionPopulator, and StandardDecoderGraphBuilder handle 95% of modern decoder-only LLMs out of the box.
+1. **Mirror the HF API**: `pipeline("text-generation", model=...)` becomes `trtf_create_pipeline(model_id, flags)`.
+2. **C ABI stability**: Single `extern "C"` factory function returns a C++ virtual interface (`IPipeline`). ABI-safe across compiler/STL versions.
+3. **TensorRT-first, always-fallback**: Try TRT GPU inference first, fall back gracefully to CPU reference or HF Python subprocess.
+4. **Plug-and-play families**: Adding a new model family requires ~50 lines of code in `src/models/<family>/` and two one-line edits.
+5. **Direct C++ TRT graph building**: No ONNX intermediate. Build `INetworkDefinition` directly using reusable op primitives.
+6. **Shared infrastructure**: StandardCheckpointMapper, StandardTrtModelDefinitionPopulator, and StandardDecoderGraphBuilder handle 95% of modern decoder-only LLMs out of the box.
+7. **Distributable bundles**: `.trtfb` files package compiled TRT engines + tokenizer into a single artifact.
 
 ## Architecture at a Glance
 
@@ -30,21 +32,30 @@ A C++ library that mirrors HuggingFace's `transformers.pipeline()` API with Tens
 
 The library processes a model request in three stages:
 
-1. **Model Resolution** — Turns a `model_id` string (e.g., `"QWEN3"`, a path to an HF directory) into a `ResolvedModelSpec`.
+1. **Model Resolution** — Turns a `model_id` string (e.g., `"QWEN3"`, a path to an HF directory, or a `.trtfb` bundle) into a `ResolvedModelSpec`.
 2. **HF Family Registry** — When the model is an HF directory, matches `model_type` from `config.json` to a registered family, loads weights via a checkpoint mapper, and produces a unified `DecoderModel`.
-3. **Runtime Assembly** — Creates a tokenizer and selects a backend (TRT > CPU-reference > HF-Python), producing a ready-to-use `Pipeline` object.
+3. **Runtime Assembly** — Creates a tokenizer and selects a backend (TRT > CPU-reference > HF-Python), producing a ready-to-use `IPipeline` object.
 
 ## Minimum Viable Example
 
 ```cpp
-#include "trtf/pipeline.h"
+#include <trtf/pipeline.h>
+#include <iostream>
 
 int main() {
-    // Mirrors: transformers.pipeline("text-generation", model="Qwen/Qwen3-0.6B")
-    auto pipeline = trtf::Pipeline::CreateTextGeneration("QWEN3");
-    std::string output = pipeline.generate("What is the capital of France?");
-    // output: "What is the capital of France? The capital of France is Paris..."
+    auto* pipeline = trtf_create_pipeline("QWEN3", TRTF_FORCE_TRT);
+    if (!pipeline) {
+        std::cerr << trtf_last_error() << std::endl;
+        return 1;
+    }
+    std::cout << pipeline->generate("What is the capital of France?", 30) << std::endl;
+    delete pipeline;
 }
+```
+
+Or using the CLI:
+```bash
+trtf run QWEN3 --prompt "What is the capital of France?" --force-trt --max-new-tokens 30
 ```
 
 ## Built-in Model Support

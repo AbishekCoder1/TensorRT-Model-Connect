@@ -181,13 +181,15 @@ struct DecoderStepEngine {
 
 ### Engine Caching
 
-When `TRTF_TRT_ENGINE_CACHE_DIR` is set, `finalize_decoder_step_engine()` will:
-1. Compute a cache key from the model weights hash
-2. Check if a serialized engine plan exists on disk
-3. If yes, deserialize and skip compilation (fast path)
-4. If no, compile the engine and serialize to disk for next time
+The engine cache avoids recompilation on subsequent runs. Two-level check:
 
-This is critical because TRT engine compilation can take 30+ seconds for large models.
+1. **Early cache check** (`try_load_cached_engine()`): Called *before* building the TRT graph. Computes a cache key from the model weights hash, checks disk. On hit, skips all graph building and returns the deserialized engine directly. This avoids copying gigabytes of weight constants into the TRT builder.
+
+2. **Late cache check** (`finalize_decoder_step_engine()`): If the early check misses (cache disabled or first run), the graph is built and compiled. The serialized plan is then saved to disk.
+
+Cache files are read using `mmap` + `MADV_SEQUENTIAL` for fast access to multi-GB plan files.
+
+Set `TRTF_TRT_ENGINE_CACHE_DIR` to enable. Engine compilation takes 30-90s; cached load takes 2-3s.
 
 ---
 
