@@ -1,5 +1,24 @@
-// Test: Runtime assembly validation.
-// Verifies: Backend selection validation and force_trt error handling.
+// =============================================================================
+// Test suite: Runtime factory — backend selection validation
+// =============================================================================
+//
+// Purpose:
+//   Validates that BuildRuntimeForTextGeneration() correctly rejects invalid
+//   or unsupported backend selection configurations. This test exercises the
+//   error-handling paths in the runtime assembly stage (stage 3 of the
+//   pipeline flow), ensuring that contradictory or inapplicable flag
+//   combinations are caught early with appropriate exceptions.
+//
+// Dependencies:
+//   - trtf/model_resolver.h (ResolvedModelSpec, ResolvedModelKind)
+//   - trtf/runtime_factory.h (BuildRuntimeForTextGeneration, BackendSelection)
+//
+// Approach:
+//   Constructs synthetic ResolvedModelSpec objects (without real model data)
+//   and calls BuildRuntimeForTextGeneration with intentionally invalid
+//   BackendSelection configurations. Expects specific exception types/messages.
+//   No GPU, model files, or TensorRT installation required.
+// =============================================================================
 
 #include "trtf/model_resolver.h"
 #include "trtf/runtime_factory.h"
@@ -10,7 +29,23 @@
 
 int main()
 {
-    // Test invalid backend selection
+    // -------------------------------------------------------------------------
+    // Test: Contradictory backend flags (force_trt=true, prefer_trt=false)
+    //
+    // Intention:
+    //   Verify that setting force_trt=true while prefer_trt=false is rejected
+    //   as a logical contradiction. The force_trt flag implies TRT is mandatory,
+    //   but prefer_trt=false says "do not use TRT" — these cannot coexist.
+    //
+    // Setup:
+    //   A dummy ResolvedModelSpec with kind=kDecoderDefinition (the kind that
+    //   would normally route to TRT). A BackendSelection with the contradictory
+    //   flag combination.
+    //
+    // Mechanism:
+    //   Calls BuildRuntimeForTextGeneration and catches std::invalid_argument.
+    //   If the exception is not thrown, the test fails.
+    // -------------------------------------------------------------------------
     bool saw_invalid_argument = false;
     trtf::BackendSelection invalid_selection;
     invalid_selection.prefer_trt = false;
@@ -35,7 +70,24 @@ int main()
         return 1;
     }
 
-    // Test HF spec with force_trt
+    // -------------------------------------------------------------------------
+    // Test: force_trt with HuggingFace-local model (unsupported combination)
+    //
+    // Intention:
+    //   Verify that requesting force_trt on a model resolved as
+    //   kHuggingFaceLocal (i.e., a model that only has an HF Python backend,
+    //   not a registered TRT model runtime) produces a clear runtime_error.
+    //
+    // Setup:
+    //   A ResolvedModelSpec with kind=kHuggingFaceLocal pointing to a fake
+    //   directory. A BackendSelection with both prefer_trt and force_trt set
+    //   to true.
+    //
+    // Mechanism:
+    //   Calls BuildRuntimeForTextGeneration and catches std::runtime_error.
+    //   Inspects the error message for the substring "force_trt is not
+    //   supported" to confirm the correct error path was taken.
+    // -------------------------------------------------------------------------
     trtf::ResolvedModelSpec hf_spec;
     hf_spec.model_id = "/tmp/fake-hf";
     hf_spec.kind = trtf::ResolvedModelKind::kHuggingFaceLocal;

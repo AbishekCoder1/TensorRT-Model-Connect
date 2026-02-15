@@ -1,6 +1,36 @@
+// =============================================================================
 // Test: Generic model loading from safetensors checkpoint formats.
-// Verifies: Single safetensors file and sharded safetensors with
-// model.safetensors.index.json. Validates checkpoint tensor shapes.
+//
+// Purpose:
+//   Validates the low-level DecoderModel loading pipeline (LoadDecoderModel)
+//   for both single-file and sharded safetensors checkpoint formats. This tests
+//   the safetensors parser (SafetensorReader), the generic checkpoint mapper,
+//   and tensor shape validation -- independent of any specific model family.
+//
+// What is verified:
+//   - Single safetensors loading: A model with weights_file pointing to a
+//     single .safetensors file loads all tensors with correct shapes.
+//   - Sharded safetensors loading: A model with model.safetensors.index.json
+//     pointing to multiple shard files loads and reassembles all tensors
+//     correctly.
+//   - Tensor shape validation: All loaded tensors (embedding, attention, MLP,
+//     output) match the expected dimensions derived from config parameters.
+//   - Vocab placeholder: The placeholder vocabulary has the correct size.
+//
+// Dependencies:
+//   - test_helpers.h: make_temp_dir_or_throw, write_file, write_safetensors_f32,
+//     write_safetensors_index, TensorSpec
+//   - trtf/model.h: DecoderModel, LoadDecoderModel
+//
+// Approach:
+//   1. Creates a temporary directory with a config.json and a single
+//      weights.safetensors file containing 10 tensors (embedding, attention
+//      weights, MLP weights, output projection). Loads the model and validates
+//      all tensor shapes.
+//   2. Creates a subdirectory with the same tensors split across two shard files
+//      and a model.safetensors.index.json mapping file. Loads the sharded model
+//      and validates all tensor shapes match the single-file case.
+// =============================================================================
 
 #include "test_helpers.h"
 #include "trtf/model.h"
@@ -11,6 +41,17 @@
 
 namespace {
 
+// ---------------------------------------------------------------------------
+// validate_checkpoint_shapes
+//
+// Intention: Validate that all checkpoint tensors have the correct sizes given
+//   the model's vocab_size, hidden_size, and mlp_size.
+// Setup: Receives a loaded DecoderModel and a context string for error messages.
+// Mechanism: Computes expected sizes from vocab * hidden, hidden * hidden,
+//   hidden * mlp, etc. and compares against actual tensor vector sizes. Throws
+//   on any mismatch. Checks all 10 core tensors: embedding, w_q, w_k, w_v,
+//   w1, b1, w2, b2, w_out, b_out.
+// ---------------------------------------------------------------------------
 void validate_checkpoint_shapes(const trtf::DecoderModel& model, const char* context)
 {
     if (!model.has_checkpoint)
@@ -47,6 +88,20 @@ int main()
 {
     try
     {
+        // =================================================================
+        // Section 1: Single safetensors file loading
+        //
+        // Intention: Verify that LoadDecoderModel correctly reads a single
+        //   safetensors file referenced via the "weights_file" config key.
+        // Setup: Creates a temp dir with:
+        //   - config.json: model_type="toy_decoder_block", vocab_size=4,
+        //     max_cache_length=8, weights_file="weights.safetensors"
+        //   - weights.safetensors: 10 tensors with shapes matching a
+        //     hidden=4, mlp=8, vocab=4 toy model. Embedding and w_q use
+        //     identity matrices; w_out uses -1.0 fill with identity diagonal.
+        // Mechanism: Calls LoadDecoderModel, then validate_checkpoint_shapes
+        //   to verify all 10 tensors have the correct dimensionality.
+        // =================================================================
         const std::filesystem::path tmp_dir = trtf_test::make_temp_dir_or_throw("/tmp/trtf_model_loader_XXXXXX");
         trtf_test::write_file(tmp_dir / "config.json",
             "{\n"
@@ -80,6 +135,15 @@ int main()
         };
         trtf_test::write_safetensors_f32(tmp_dir / "weights.safetensors", tensors);
 
+        // -----------------------------------------------------------------
+        // Assertion: Single-file model loads with correct shapes and vocab
+        //
+        // Intention: Confirm LoadDecoderModel parses the safetensors header,
+        //   reads the tensor data, and populates the checkpoint struct with
+        //   correctly-sized tensors.
+        // Mechanism: validate_checkpoint_shapes checks all 10 tensors;
+        //   vocab size is checked separately (should be 4 from config).
+        // -----------------------------------------------------------------
         const trtf::DecoderModel safetensors_model = trtf::LoadDecoderModel(tmp_dir.string());
         validate_checkpoint_shapes(safetensors_model, "safetensors");
         if (safetensors_model.vocab.size() != 4)
@@ -87,6 +151,24 @@ int main()
             throw std::runtime_error("expected placeholder vocab size=4 for safetensors model");
         }
 
+        // =================================================================
+        // Section 2: Sharded safetensors loading
+        //
+        // Intention: Verify that LoadDecoderModel correctly reads sharded
+        //   safetensors files via model.safetensors.index.json.
+        // Setup: Creates a "sharded" subdirectory with:
+        //   - config.json: same toy model config (no weights_file key, which
+        //     triggers the sharded loading path).
+        //   - model-00001-of-00002.safetensors: first 6 tensors (embedding
+        //     through b1).
+        //   - model-00002-of-00002.safetensors: remaining 4 tensors (w2
+        //     through b_out).
+        //   - model.safetensors.index.json: maps each tensor name to its
+        //     shard file.
+        // Mechanism: Calls LoadDecoderModel on the sharded dir, then
+        //   validate_checkpoint_shapes to verify all tensors reassembled
+        //   correctly from the two shards.
+        // =================================================================
         const std::filesystem::path sharded_dir = tmp_dir / "sharded";
         std::filesystem::create_directories(sharded_dir);
         trtf_test::write_file(sharded_dir / "config.json",
@@ -126,6 +208,14 @@ int main()
                 {"b_out", "model-00002-of-00002.safetensors"},
             });
 
+        // -----------------------------------------------------------------
+        // Assertion: Sharded model loads with correct shapes
+        //
+        // Intention: Confirm that the sharded loading path (triggered by
+        //   model.safetensors.index.json) reads from multiple shard files
+        //   and produces the same tensor shapes as the single-file case.
+        // Mechanism: validate_checkpoint_shapes checks all 10 tensors.
+        // -----------------------------------------------------------------
         const trtf::DecoderModel sharded_model = trtf::LoadDecoderModel(sharded_dir.string());
         validate_checkpoint_shapes(sharded_model, "sharded safetensors");
 

@@ -1,5 +1,37 @@
-// Test: Bundle format (.trtfb) read/write, magic validation, JSON roundtrip.
-// No TRT/GPU needed -- tests binary format with synthetic data.
+// =============================================================================
+// Test suite: .trtfb bundle format read/write, magic validation, and JSON
+//   header roundtrip.
+//
+// Purpose:
+//   Validates the binary bundle format (.trtfb) used to package TRT engine
+//   plans alongside metadata and tokenizer data into a single distributable
+//   file. Tests cover the full lifecycle: writing a BundleFile to disk,
+//   reading it back, and verifying all metadata fields and section data are
+//   preserved byte-for-byte.
+//
+// Dependencies:
+//   - bundle/bundle_format.h: BundleFile, BundleInfo, BundleSection,
+//     WriteBundleFile, ReadBundleFile, IsBundle, InspectBundle,
+//     BundleInfoToJson, BundleInfoFromJson, kBundleMagic.
+//   - Filesystem access (temp directories via mkdtemp).
+//   - No TRT, GPU, or CUDA required -- all data is synthetic.
+//
+// Approach:
+//   Each test creates a temporary directory, constructs a BundleFile with
+//   synthetic metadata and section data, writes it to disk, reads it back,
+//   and asserts field-level equality. Temp directories are cleaned up after
+//   each test. Tests also cover edge cases: invalid magic bytes, empty
+//   sections, large payloads, 64-bit offsets, truncated files, and the
+//   IsBundle/InspectBundle utility functions.
+//
+// Test categories:
+//   - Roundtrip: write then read, verify all fields match
+//   - Magic validation: reject files with incorrect magic bytes
+//   - Edge cases: empty sections, large (1MB) sections, 64-bit offsets
+//   - JSON header: BundleInfo <-> JSON serialization roundtrip
+//   - Utilities: IsBundle detection, InspectBundle metadata extraction
+//   - Error handling: truncated file throws runtime_error
+// =============================================================================
 
 #include "bundle/bundle_format.h"
 
@@ -35,6 +67,17 @@ static std::filesystem::path make_temp_dir()
     return std::filesystem::path(dir);
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that a fully populated BundleFile survives a write-then-read
+//   cycle with all metadata fields and section data intact.
+// Setup: Creates a BundleFile with a complete BundleInfo (model_id, model_type,
+//   family, trt_version, gpu_name, created_at, vocab_size, hidden_size,
+//   num_layers, num_attention_heads, num_key_value_heads, max_cache_length)
+//   and two sections ("trt_plan" with 4 bytes, "tokenizer_json" with 2 bytes).
+// Mechanism: Writes the bundle via WriteBundleFile, reads it back via
+//   ReadBundleFile, and asserts every metadata field and every section's name
+//   and data byte-vector match exactly.
+// -----------------------------------------------------------------------------
 static void test_write_read_roundtrip()
 {
     const auto tmp = make_temp_dir();
@@ -89,6 +132,15 @@ static void test_write_read_roundtrip()
     std::filesystem::remove_all(tmp);
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that ReadBundleFile rejects files with invalid magic bytes
+//   by throwing a runtime_error with a descriptive message.
+// Setup: Creates a file containing "NOTMAGIC" (8 bytes) instead of the valid
+//   kBundleMagic header.
+// Mechanism: Calls ReadBundleFile on the invalid file, catches the expected
+//   runtime_error, and checks that the exception message references "magic"
+//   or "Invalid".
+// -----------------------------------------------------------------------------
 static void test_magic_validation()
 {
     const auto tmp = make_temp_dir();
@@ -115,6 +167,13 @@ static void test_magic_validation()
     std::filesystem::remove_all(tmp);
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that a bundle with zero sections (metadata only) can be
+//   written and read back correctly.
+// Setup: Creates a BundleFile with model_id="empty" and no sections added.
+// Mechanism: Writes via WriteBundleFile, reads back, checks model_id matches
+//   and loaded.sections is empty.
+// -----------------------------------------------------------------------------
 static void test_empty_sections()
 {
     const auto tmp = make_temp_dir();
@@ -133,6 +192,16 @@ static void test_empty_sections()
     std::filesystem::remove_all(tmp);
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that BundleInfo serializes to JSON and deserializes back
+//   with all fields intact, including computed section offsets. This tests the
+//   JSON layer independently of the binary file format.
+// Setup: Creates a BundleInfo with LLaMA-like metadata and a section_sizes
+//   vector with two entries: {"plan", 1024} and {"tok", 256}.
+// Mechanism: Calls BundleInfoToJson to serialize, then BundleInfoFromJson to
+//   parse. Checks all metadata fields match and that parsed section offsets
+//   are correctly computed (section 1 offset = section 0 size = 1024).
+// -----------------------------------------------------------------------------
 static void test_header_json_roundtrip()
 {
     trtf::BundleInfo info;
@@ -176,6 +245,12 @@ static void test_header_json_roundtrip()
     check(parsed_sections[1].second.second == 256, "json roundtrip section 1 size");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that IsBundle() returns true for a valid .trtfb file
+//   (one written by WriteBundleFile with correct magic bytes).
+// Setup: Creates a minimal valid bundle (model_id="valid", no sections) on disk.
+// Mechanism: Calls IsBundle() on the written file path and asserts it returns true.
+// -----------------------------------------------------------------------------
 static void test_is_bundle_valid()
 {
     const auto tmp = make_temp_dir();
@@ -190,6 +265,13 @@ static void test_is_bundle_valid()
     std::filesystem::remove_all(tmp);
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that IsBundle() returns false for non-bundle inputs:
+//   a plain text file, a directory path, and a nonexistent path.
+// Setup: Creates a text file ("Hello world"), and uses the temp directory itself
+//   and a nonexistent path as additional test inputs.
+// Mechanism: Calls IsBundle() for each input and asserts it returns false.
+// -----------------------------------------------------------------------------
 static void test_is_bundle_invalid()
 {
     const auto tmp = make_temp_dir();
@@ -208,6 +290,14 @@ static void test_is_bundle_invalid()
     std::filesystem::remove_all(tmp);
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that InspectBundle() extracts metadata from a bundle file
+//   without loading the full section data, returning the BundleInfo.
+// Setup: Creates a bundle with model_id="inspectable", vocab_size=50000,
+//   num_layers=12, and a single 3-byte section.
+// Mechanism: Writes the bundle, calls InspectBundle, and checks that the
+//   returned BundleInfo fields match the original values.
+// -----------------------------------------------------------------------------
 static void test_inspect_returns_metadata()
 {
     const auto tmp = make_temp_dir();
@@ -233,6 +323,14 @@ static void test_inspect_returns_metadata()
     std::filesystem::remove_all(tmp);
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that the bundle format handles large section payloads
+//   (1 MB) without corruption, ensuring the first and last bytes match.
+// Setup: Creates a bundle with a single section named "big_data" containing
+//   1,048,576 bytes all set to 'A'.
+// Mechanism: Writes the bundle, reads it back, checks section count, size,
+//   and samples the first and last byte for correctness.
+// -----------------------------------------------------------------------------
 static void test_large_section()
 {
     const auto tmp = make_temp_dir();
@@ -257,6 +355,16 @@ static void test_large_section()
     std::filesystem::remove_all(tmp);
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that the bundle format works with section names matching
+//   real production usage (engine_plan, config.json, tokenizer.json,
+//   tokenizer_config.json), simulating a Qwen3 bundle.
+// Setup: Creates a bundle with Qwen3-like metadata and four sections with
+//   production section names and small synthetic payloads.
+// Mechanism: Writes the bundle, reads it back, checks all section names and
+//   data match. Also calls InspectBundle to verify metadata extraction works
+//   on the realistic file.
+// -----------------------------------------------------------------------------
 static void test_realistic_bundle_sections()
 {
     // Test with section names matching real bundle format (engine_plan, config.json, tokenizer.json)
@@ -295,6 +403,16 @@ static void test_realistic_bundle_sections()
     std::filesystem::remove_all(tmp);
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that the JSON header parser correctly handles section
+//   offsets and sizes exceeding INT32_MAX (>2 GB), ensuring 64-bit integer
+//   support in the serialization layer.
+// Setup: Constructs a raw JSON string with an "engine_plan" section of 3 GB
+//   and a "config.json" section at offset 3 GB. No actual file of that size
+//   is created -- this tests the JSON parser in isolation.
+// Mechanism: Calls BundleInfoFromJson with the hand-crafted JSON, checks that
+//   parsed section sizes and offsets are correct 64-bit values (3000000000ULL).
+// -----------------------------------------------------------------------------
 static void test_large_section_offsets_int64()
 {
     // Test that section offset/size JSON parsing handles values > INT32_MAX
@@ -334,6 +452,15 @@ static void test_large_section_offsets_int64()
     check(parsed_sections[1].second.second == 1024, "int64 config.json size");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that ReadBundleFile throws a runtime_error when the file
+//   has valid magic bytes but is truncated (header length claims 1000 bytes
+//   but only 5 bytes of header data follow).
+// Setup: Manually writes the 8-byte kBundleMagic, then a little-endian uint64
+//   header length of 1000, followed by only 5 bytes of content ("short").
+// Mechanism: Calls ReadBundleFile on the truncated file, catches the expected
+//   runtime_error, and asserts that an exception was indeed thrown.
+// -----------------------------------------------------------------------------
 static void test_truncated_bundle_throws()
 {
     const auto tmp = make_temp_dir();

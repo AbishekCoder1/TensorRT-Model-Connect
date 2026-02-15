@@ -1,7 +1,33 @@
-// Test: CLI argument parsing for trtf_cli.
-// Verifies: subcommand parsing, flag handling, error on unknown flags.
-// Approach: We replicate the parse_args struct+function from trtf_cli.cpp here
-// to test in isolation (trtf_cli has its own main()).
+// =============================================================================
+// Test suite: CLI argument parsing for the `trtf` command-line interface.
+//
+// Purpose:
+//   Validates the CLI argument parser that powers the `trtf` executable. The
+//   parser handles subcommands (run, build, inspect, version, help), positional
+//   arguments (model/bundle path), and option flags (--prompt, --force-trt,
+//   --max-new-tokens, --hf-python, --engine-cache-dir, --no-engine-cache, etc.).
+//
+// Dependencies:
+//   - trtf/pipeline.h: only for TRTF_PREFER_TRT / TRTF_FORCE_TRT / TRTF_CPU_ONLY
+//     flag constants. No GPU, TRT, or filesystem access required.
+//
+// Approach:
+//   The production CLI parser lives inside trtf_cli.cpp, which has its own
+//   main(). To test in isolation without linking two main() symbols, this file
+//   replicates the CliArgs struct and parse_args() function verbatim from the
+//   production code. A convenience wrapper parse(vector<const char*>) converts
+//   a brace-init list to argc/argv for concise test invocations.
+//
+//   Each test function simulates a specific command-line invocation, parses it,
+//   and asserts that the resulting CliArgs fields match expected values.
+//
+// Test categories:
+//   - Subcommand parsing: build, run, inspect, version, help
+//   - Flag handling: --prompt, --force-trt, --cpu-only, --max-new-tokens,
+//     --max-cache-length, --hf-python, --engine-cache-dir, --no-engine-cache
+//   - Error handling: unknown flags, unknown commands, missing args
+//   - Combination: all flags used together in a single invocation
+// =============================================================================
 
 #include "trtf/pipeline.h"
 
@@ -129,6 +155,14 @@ CliArgs parse(std::vector<const char*> argv_vec)
 
 } // namespace
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that "trtf build model_dir -o out.trtfb" correctly parses
+//   the "build" subcommand, extracts the positional model directory, and
+//   captures the -o output path.
+// Setup: Simulated argv: {"trtf", "build", "model_dir", "-o", "out.trtfb"}.
+// Mechanism: Calls parse(), checks command=="build", model_or_bundle=="model_dir",
+//   output_path=="out.trtfb", and no parse error occurred.
+// -----------------------------------------------------------------------------
 static void test_build_subcommand()
 {
     auto args = parse({"trtf", "build", "model_dir", "-o", "out.trtfb"});
@@ -138,6 +172,12 @@ static void test_build_subcommand()
     check(!args.parse_error, "build no parse error");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that --max-cache-length is correctly parsed with the build
+//   subcommand, producing the expected integer value.
+// Setup: Simulated argv with "build" + "--max-cache-length 256".
+// Mechanism: Calls parse(), checks command=="build" and max_cache_length==256.
+// -----------------------------------------------------------------------------
 static void test_build_with_max_cache()
 {
     auto args = parse({"trtf", "build", "model_dir", "-o", "out.trtfb", "--max-cache-length", "256"});
@@ -145,6 +185,13 @@ static void test_build_with_max_cache()
     check(args.max_cache_length == 256, "build max_cache_length");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that "trtf run model --prompt 'hello world'" correctly
+//   parses the run subcommand and captures the prompt string with spaces.
+// Setup: Simulated argv with "run", a model name, and a multi-word prompt.
+// Mechanism: Calls parse(), checks command=="run", model_or_bundle=="model",
+//   and prompt=="hello world".
+// -----------------------------------------------------------------------------
 static void test_run_with_prompt()
 {
     auto args = parse({"trtf", "run", "model", "--prompt", "hello world"});
@@ -153,24 +200,49 @@ static void test_run_with_prompt()
     check(args.prompt == "hello world", "run prompt");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that --max-new-tokens is parsed as an integer for the run
+//   subcommand.
+// Setup: Simulated argv with "run" + "--max-new-tokens 50".
+// Mechanism: Calls parse(), checks max_new_tokens==50.
+// -----------------------------------------------------------------------------
 static void test_run_max_tokens()
 {
     auto args = parse({"trtf", "run", "model", "--prompt", "hi", "--max-new-tokens", "50"});
     check(args.max_new_tokens == 50, "run max_new_tokens");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that --force-trt sets the flags field to TRTF_FORCE_TRT,
+//   overriding the default TRTF_PREFER_TRT.
+// Setup: Simulated argv with "run" + "--force-trt".
+// Mechanism: Calls parse(), checks flags==TRTF_FORCE_TRT.
+// -----------------------------------------------------------------------------
 static void test_run_force_trt()
 {
     auto args = parse({"trtf", "run", "model", "--prompt", "hi", "--force-trt"});
     check(args.flags == TRTF_FORCE_TRT, "run force_trt flag");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that --cpu-only sets the flags field to TRTF_CPU_ONLY,
+//   overriding the default TRTF_PREFER_TRT.
+// Setup: Simulated argv with "run" + "--cpu-only".
+// Mechanism: Calls parse(), checks flags==TRTF_CPU_ONLY.
+// -----------------------------------------------------------------------------
 static void test_run_cpu_only()
 {
     auto args = parse({"trtf", "run", "model", "--prompt", "hi", "--cpu-only"});
     check(args.flags == TRTF_CPU_ONLY, "run cpu_only flag");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that the "inspect" subcommand correctly parses and captures
+//   the positional bundle file path.
+// Setup: Simulated argv: {"trtf", "inspect", "file.trtfb"}.
+// Mechanism: Calls parse(), checks command=="inspect" and
+//   model_or_bundle=="file.trtfb".
+// -----------------------------------------------------------------------------
 static void test_inspect_subcommand()
 {
     auto args = parse({"trtf", "inspect", "file.trtfb"});
@@ -178,24 +250,47 @@ static void test_inspect_subcommand()
     check(args.model_or_bundle == "file.trtfb", "inspect file path");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that invoking "trtf" with no arguments sets show_help=true
+//   (the expected behavior for a bare invocation with no subcommand).
+// Setup: Simulated argv: {"trtf"} (argc==1, no subcommand).
+// Mechanism: Calls parse(), checks show_help==true.
+// -----------------------------------------------------------------------------
 static void test_no_args_shows_usage()
 {
     auto args = parse({"trtf"});
     check(args.show_help, "no args shows help");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that "trtf --help" sets show_help=true.
+// Setup: Simulated argv: {"trtf", "--help"}.
+// Mechanism: Calls parse(), checks show_help==true.
+// -----------------------------------------------------------------------------
 static void test_help_flag()
 {
     auto args = parse({"trtf", "--help"});
     check(args.show_help, "--help shows help");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that "trtf version" parses the version subcommand.
+// Setup: Simulated argv: {"trtf", "version"}.
+// Mechanism: Calls parse(), checks command=="version".
+// -----------------------------------------------------------------------------
 static void test_version_subcommand()
 {
     auto args = parse({"trtf", "version"});
     check(args.command == "version", "version command");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that an unknown flag (e.g., --bogus) is rejected with a
+//   parse error whose message mentions the offending flag.
+// Setup: Simulated argv with "run" + "--bogus".
+// Mechanism: Calls parse(), checks parse_error==true and error_message contains
+//   "--bogus".
+// -----------------------------------------------------------------------------
 static void test_unknown_flag_errors()
 {
     auto args = parse({"trtf", "run", "model", "--bogus"});
@@ -203,6 +298,13 @@ static void test_unknown_flag_errors()
     check(args.error_message.find("--bogus") != std::string::npos, "error message mentions flag");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that an unknown subcommand (e.g., "foobar") is rejected
+//   with a parse error whose message mentions the unknown command name.
+// Setup: Simulated argv: {"trtf", "foobar"}.
+// Mechanism: Calls parse(), checks parse_error==true and error_message contains
+//   "foobar".
+// -----------------------------------------------------------------------------
 static void test_unknown_command_errors()
 {
     auto args = parse({"trtf", "foobar"});
@@ -210,6 +312,12 @@ static void test_unknown_command_errors()
     check(args.error_message.find("foobar") != std::string::npos, "error message mentions command");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that --hf-python correctly captures the path to a Python
+//   interpreter, used for the HuggingFace tokenizer bridge.
+// Setup: Simulated argv with "run" + "--hf-python /usr/bin/python3".
+// Mechanism: Calls parse(), checks no parse error and hf_python=="/usr/bin/python3".
+// -----------------------------------------------------------------------------
 static void test_hf_python_flag()
 {
     auto args = parse({"trtf", "run", "model", "--prompt", "hi", "--hf-python", "/usr/bin/python3"});
@@ -217,6 +325,13 @@ static void test_hf_python_flag()
     check(args.hf_python == "/usr/bin/python3", "hf-python value");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that --engine-cache-dir correctly captures the cache
+//   directory path for on-disk TRT engine plan caching.
+// Setup: Simulated argv with "run" + "--engine-cache-dir /tmp/cache".
+// Mechanism: Calls parse(), checks no parse error and
+//   engine_cache_dir=="/tmp/cache".
+// -----------------------------------------------------------------------------
 static void test_engine_cache_dir_flag()
 {
     auto args = parse({"trtf", "run", "model", "--prompt", "hi", "--engine-cache-dir", "/tmp/cache"});
@@ -224,6 +339,12 @@ static void test_engine_cache_dir_flag()
     check(args.engine_cache_dir == "/tmp/cache", "engine-cache-dir value");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that --no-engine-cache sets the boolean flag to true,
+//   indicating engine plan caching should be disabled.
+// Setup: Simulated argv with "run" + "--no-engine-cache".
+// Mechanism: Calls parse(), checks no parse error and no_engine_cache==true.
+// -----------------------------------------------------------------------------
 static void test_no_engine_cache_flag()
 {
     auto args = parse({"trtf", "run", "model", "--prompt", "hi", "--no-engine-cache"});
@@ -231,6 +352,12 @@ static void test_no_engine_cache_flag()
     check(args.no_engine_cache, "no-engine-cache is true");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that --hf-python works correctly with the "build"
+//   subcommand (not just "run"), since build also needs tokenizer access.
+// Setup: Simulated argv with "build" + "--hf-python /opt/python".
+// Mechanism: Calls parse(), checks no parse error and hf_python=="/opt/python".
+// -----------------------------------------------------------------------------
 static void test_build_with_hf_python()
 {
     auto args = parse({"trtf", "build", "model_dir", "-o", "out.trtfb", "--hf-python", "/opt/python"});
@@ -238,6 +365,15 @@ static void test_build_with_hf_python()
     check(args.hf_python == "/opt/python", "build hf-python value");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify that all run flags can be combined in a single invocation
+//   without conflicts or parse errors. This is the integration test for flag
+//   coexistence: prompt, max-new-tokens, force-trt, hf-python, engine-cache-dir,
+//   and no-engine-cache all specified together.
+// Setup: Simulated argv with "run" and every supported flag.
+// Mechanism: Calls parse(), checks every field matches the expected value
+//   and no parse error occurred.
+// -----------------------------------------------------------------------------
 static void test_all_run_flags_combined()
 {
     auto args = parse({"trtf", "run", "model", "--prompt", "hello",

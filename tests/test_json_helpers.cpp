@@ -1,5 +1,30 @@
-// Unit tests for src/utils/json_helpers.cpp (JSON extraction functions).
-// CPU-only, no TRT/CUDA deps.
+// =============================================================================
+// test_json_helpers.cpp — Unit tests for src/utils/json_helpers.cpp
+// =============================================================================
+//
+// Purpose:
+//   Validates the lightweight, regex-free JSON extraction functions used
+//   throughout the codebase to parse HuggingFace config.json and
+//   generation_config.json files. These extractors operate on raw JSON strings
+//   (no DOM parser) and must correctly handle common JSON patterns including
+//   nested objects, arrays, negative integers, scientific-notation floats,
+//   and missing keys (fallback values).
+//
+// Dependencies:
+//   - utils/json_helpers.h (extract_json_string, extract_json_int,
+//     extract_json_int_or_first_array, extract_json_float,
+//     extract_json_string_array)
+//
+// Approach:
+//   Each test constructs a minimal JSON string literal, calls the appropriate
+//   extraction function, and verifies the returned value matches the expected
+//   result (or the specified fallback when the key is absent). Tests cover
+//   both happy paths and edge cases (missing keys, nested braces, empty
+//   arrays, float-valued integers, scientific notation).
+//
+// Environment:
+//   CPU-only, no TRT/CUDA dependencies. No filesystem access required.
+// =============================================================================
 
 #include "utils/json_helpers.h"
 
@@ -11,6 +36,15 @@
 
 namespace {
 
+// ---------------------------------------------------------------------------
+// extract_json_string tests
+// ---------------------------------------------------------------------------
+
+// Intention: Verify that extract_json_string finds a key that exists and
+//            returns its string value.
+// Setup:     JSON with "model_type": "qwen3" alongside another key.
+// Mechanism: Calls extract_json_string with key "model_type", checks that the
+//            returned value is "qwen3" (not the fallback).
 bool test_extract_json_string_present()
 {
     const std::string json = R"({"model_type": "qwen3", "other": "value"})";
@@ -23,6 +57,11 @@ bool test_extract_json_string_present()
     return true;
 }
 
+// Intention: Verify that extract_json_string returns the fallback when the
+//            requested key is not present in the JSON.
+// Setup:     JSON with only an unrelated key ("other").
+// Mechanism: Calls extract_json_string with key "model_type" and fallback
+//            "fallback", checks the fallback is returned.
 bool test_extract_json_string_absent()
 {
     const std::string json = R"({"other": "value"})";
@@ -35,6 +74,12 @@ bool test_extract_json_string_absent()
     return true;
 }
 
+// Intention: Verify that the parser correctly handles JSON with nested brace
+//            structures (inner objects) before the target key.
+// Setup:     JSON with a nested object "config": {"inner": 1} preceding the
+//            target key "model_type": "llama".
+// Mechanism: Calls extract_json_string and verifies "llama" is returned,
+//            confirming the parser is not confused by nested braces.
 bool test_extract_json_string_nested_braces()
 {
     const std::string json = R"({"config": {"inner": 1}, "model_type": "llama"})";
@@ -47,6 +92,13 @@ bool test_extract_json_string_nested_braces()
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// extract_json_int tests
+// ---------------------------------------------------------------------------
+
+// Intention: Verify extraction of a positive integer value from JSON.
+// Setup:     JSON with "hidden_size": 768.
+// Mechanism: Calls extract_json_int, checks the result equals 768.
 bool test_extract_json_int_positive()
 {
     const std::string json = R"({"hidden_size": 768})";
@@ -59,6 +111,9 @@ bool test_extract_json_int_positive()
     return true;
 }
 
+// Intention: Verify extraction of a negative integer value from JSON.
+// Setup:     JSON with "offset": -42.
+// Mechanism: Calls extract_json_int, checks the result equals -42.
 bool test_extract_json_int_negative()
 {
     const std::string json = R"({"offset": -42})";
@@ -71,6 +126,10 @@ bool test_extract_json_int_negative()
     return true;
 }
 
+// Intention: Verify that extract_json_int returns the fallback value when
+//            the key does not exist in the JSON.
+// Setup:     JSON with only "other": 5, no "hidden_size" key.
+// Mechanism: Calls extract_json_int with fallback -99, checks -99 is returned.
 bool test_extract_json_int_missing()
 {
     const std::string json = R"({"other": 5})";
@@ -83,6 +142,12 @@ bool test_extract_json_int_missing()
     return true;
 }
 
+// Intention: Verify the behavior of extract_json_int when the value is a
+//            floating-point number (3.14). The parser reads digits until it
+//            hits the decimal point and returns the integer portion.
+// Setup:     JSON with "hidden_size": 3.14.
+// Mechanism: Calls extract_json_int, checks the result is 3 (the parser
+//            stops at the '.' and returns what it has parsed so far).
 bool test_extract_json_int_float_value()
 {
     // Float values should return fallback (parser stops at '.')
@@ -97,6 +162,15 @@ bool test_extract_json_int_float_value()
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// extract_json_int_or_first_array tests
+// ---------------------------------------------------------------------------
+
+// Intention: Verify that extract_json_int_or_first_array extracts a plain
+//            scalar integer value (not wrapped in an array).
+// Setup:     JSON with "bos_token_id": 123 (scalar).
+// Mechanism: Calls extract_json_int_or_first_array, checks the result is 123.
+//            This exercises the scalar branch of the dual-format parser.
 bool test_extract_json_int_or_first_array_scalar()
 {
     const std::string json = R"({"bos_token_id": 123})";
@@ -109,6 +183,12 @@ bool test_extract_json_int_or_first_array_scalar()
     return true;
 }
 
+// Intention: Verify that extract_json_int_or_first_array extracts the first
+//            element from a JSON array value.
+// Setup:     JSON with "bos_token_id": [456, 789] (array of two elements).
+// Mechanism: Calls extract_json_int_or_first_array, checks the result is 456
+//            (the first element). This exercises the array branch, which is
+//            needed because some HF configs encode token IDs as arrays.
 bool test_extract_json_int_or_first_array_array()
 {
     const std::string json = R"({"bos_token_id": [456, 789]})";
@@ -121,6 +201,11 @@ bool test_extract_json_int_or_first_array_array()
     return true;
 }
 
+// Intention: Verify that an empty array causes the fallback to be returned,
+//            since there is no first element to extract.
+// Setup:     JSON with "bos_token_id": [] (empty array).
+// Mechanism: Calls extract_json_int_or_first_array with fallback -1, checks
+//            the result is -1.
 bool test_extract_json_int_or_first_array_empty_array()
 {
     const std::string json = R"({"bos_token_id": []})";
@@ -133,6 +218,10 @@ bool test_extract_json_int_or_first_array_empty_array()
     return true;
 }
 
+// Intention: Verify that a missing key causes the fallback to be returned.
+// Setup:     JSON with only "other": 5, no "bos_token_id" key.
+// Mechanism: Calls extract_json_int_or_first_array with fallback -1, checks
+//            the result is -1.
 bool test_extract_json_int_or_first_array_missing()
 {
     const std::string json = R"({"other": 5})";
@@ -145,6 +234,14 @@ bool test_extract_json_int_or_first_array_missing()
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// extract_json_float tests
+// ---------------------------------------------------------------------------
+
+// Intention: Verify extraction of a basic floating-point value from JSON.
+// Setup:     JSON with "rope_theta": 3.14.
+// Mechanism: Calls extract_json_float, checks the result is within 0.01 of
+//            3.14F.
 bool test_extract_json_float_basic()
 {
     const std::string json = R"({"rope_theta": 3.14})";
@@ -157,6 +254,11 @@ bool test_extract_json_float_basic()
     return true;
 }
 
+// Intention: Verify extraction of a float in scientific notation (e.g., 1e-5),
+//            which is the common format for epsilon values in HF configs.
+// Setup:     JSON with "eps": 1e-5.
+// Mechanism: Calls extract_json_float, checks the result is within 1e-8 of
+//            1e-5F.
 bool test_extract_json_float_scientific()
 {
     const std::string json = R"({"eps": 1e-5})";
@@ -169,6 +271,11 @@ bool test_extract_json_float_scientific()
     return true;
 }
 
+// Intention: Verify that extract_json_float returns the fallback when the key
+//            is absent from the JSON.
+// Setup:     JSON with only "other": 5, no "eps" key.
+// Mechanism: Calls extract_json_float with fallback -1.0F, checks -1.0F is
+//            returned.
 bool test_extract_json_float_missing()
 {
     const std::string json = R"({"other": 5})";
@@ -181,6 +288,15 @@ bool test_extract_json_float_missing()
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// extract_json_string_array tests
+// ---------------------------------------------------------------------------
+
+// Intention: Verify extraction of a JSON string array with multiple elements.
+// Setup:     JSON with "architectures": ["QwenForCausalLM", "Qwen2ForCausalLM"].
+// Mechanism: Calls extract_json_string_array, checks the returned vector has
+//            exactly 2 elements matching the expected values. This mirrors the
+//            real-world "architectures" field in HF config.json.
 bool test_extract_json_string_array_basic()
 {
     const std::string json = R"({"architectures": ["QwenForCausalLM", "Qwen2ForCausalLM"]})";
@@ -193,6 +309,9 @@ bool test_extract_json_string_array_basic()
     return true;
 }
 
+// Intention: Verify that an empty JSON array returns an empty vector.
+// Setup:     JSON with "architectures": [].
+// Mechanism: Calls extract_json_string_array, checks the result is empty.
 bool test_extract_json_string_array_empty()
 {
     const std::string json = R"({"architectures": []})";
@@ -205,6 +324,9 @@ bool test_extract_json_string_array_empty()
     return true;
 }
 
+// Intention: Verify that a missing key returns an empty vector (not an error).
+// Setup:     JSON with only "other": 5, no "architectures" key.
+// Mechanism: Calls extract_json_string_array, checks the result is empty.
 bool test_extract_json_string_array_missing()
 {
     const std::string json = R"({"other": 5})";

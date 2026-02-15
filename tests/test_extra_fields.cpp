@@ -1,6 +1,41 @@
-// Unit tests for Phase A extensibility: extra_tensors, extra_int_params, extra_float_params.
-// Tests round-trip through StandardTrtModelDefinitionPopulator and find_extra_bindings.
-// Requires mkdtemp for checkpoint fixture — runs in container, may fail in sandbox.
+// =============================================================================
+// Test suite: Extensibility fields (extra_tensors, extra_int/float_params)
+// =============================================================================
+//
+// Purpose:
+//   Validates the "extra fields" extensibility mechanism that allows model
+//   families (e.g. MoE, Mamba/SSM) to attach arbitrary named tensors, integer
+//   parameters, and float parameters at the architecture, checkpoint, and TRT
+//   definition levels. Tests verify that:
+//   - Extra tensors in DecoderLayerCheckpoint survive the round-trip through
+//     BuildTrtDecoderWeights into TrtDecoderLayerDefinition.
+//   - Extra int/float params can be stored and retrieved on
+//     DecoderArchitectureConfig and TrtDecoderDefinition.
+//   - The find_extra_bindings utility correctly filters DecoderStepEngine's
+//     extra binding list by prefix and direction (TRT-only).
+//
+// Dependencies:
+//   - trtf/model.h                       (DecoderModel, DecoderLayerCheckpoint,
+//                                          DecoderArchitectureConfig)
+//   - trtf/tokenizer.h                   (CreateVocabTokenizer)
+//   - model/trt_model_definition.h       (TrtDecoderDefinition,
+//                                          BuildTrtDecoderWeights)
+//   - runtime/trt/trt_engine_lifecycle.h  (DecoderStepEngine,
+//                                          find_extra_bindings; TRT-only)
+//
+// Approach:
+//   Mostly CPU-only in-memory tests. The extra_tensors_through_build test
+//   creates a minimal DecoderModel in memory (no disk), populates a layer with
+//   extra_tensors, runs it through BuildTrtDecoderWeights, and verifies the
+//   tensor appears in the resulting TrtDecoderDefinition. The architecture and
+//   definition tests are simple store-and-retrieve checks. The
+//   find_extra_bindings test (TRT-only) populates a DecoderStepEngine's
+//   extra_bindings vector and queries it.
+//
+// Environment:
+//   No disk I/O or GPU required for CPU tests. The find_extra_bindings test
+//   is guarded by TRTF_HAS_TRT and skips gracefully without TensorRT.
+// =============================================================================
 
 #include "trtf/model.h"
 #include "trtf/tokenizer.h"
@@ -25,6 +60,19 @@ bool check_close(float actual, float expected, float atol, const char* label)
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify that extra_tensors attached to a DecoderLayerCheckpoint
+//             survive the full weight-building pipeline and appear in the
+//             corresponding TrtDecoderLayerDefinition's extra_tensors map with
+//             correct values.
+// Setup:      A minimal in-memory DecoderModel with one decoder layer. The
+//             layer's extra_tensors map contains "router_weight" = {1, 2, 3}.
+//             A VocabTokenizer is created from the model's vocab for the build.
+// Mechanism:  Calls BuildTrtDecoderWeights to produce a TrtDecoderDefinition.
+//             Asserts that the output has exactly one layer, that "router_weight"
+//             exists in its extra_tensors, that the vector has 3 elements, and
+//             that each element matches the original value within 1e-6 tolerance.
+// -----------------------------------------------------------------------------
 bool test_extra_tensors_through_build()
 {
     // Create a minimal DecoderModel with extra_tensors in a decoder layer
@@ -93,6 +141,14 @@ bool test_extra_tensors_through_build()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify that extra_int_params can be stored on and retrieved from
+//             a DecoderArchitectureConfig, confirming the map is functional for
+//             MoE-style integer configuration (num_experts, top-k).
+// Setup:      A DecoderArchitectureConfig with two entries in extra_int_params:
+//             "num_experts"=8 and "num_experts_per_tok"=2.
+// Mechanism:  Reads back each entry and asserts the values match what was set.
+// -----------------------------------------------------------------------------
 bool test_extra_int_params_in_architecture()
 {
     trtf::DecoderArchitectureConfig arch;
@@ -112,6 +168,13 @@ bool test_extra_int_params_in_architecture()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify that extra_float_params can be stored on and retrieved
+//             from a DecoderArchitectureConfig, confirming the map is
+//             functional for floating-point extension parameters.
+// Setup:      A DecoderArchitectureConfig with "moe_gate_threshold"=0.5.
+// Mechanism:  Reads back the entry and asserts it is within 1e-6 of 0.5.
+// -----------------------------------------------------------------------------
 bool test_extra_float_params_in_architecture()
 {
     trtf::DecoderArchitectureConfig arch;
@@ -125,6 +188,16 @@ bool test_extra_float_params_in_architecture()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify that all three extra field maps (extra_int_params,
+//             extra_float_params, extra_tensors) work correctly on
+//             TrtDecoderDefinition, which is the struct consumed by the TRT
+//             engine builder.
+// Setup:      A TrtDecoderDefinition with one entry in each extra map:
+//             "num_experts"=8, "routing_scale"=1.5, "global_router"={0.1,0.2,0.3}.
+// Mechanism:  Checks that each map has exactly one entry with the expected
+//             key and value/size.
+// -----------------------------------------------------------------------------
 bool test_trt_definition_extra_params()
 {
     trtf::TrtDecoderDefinition def;
@@ -152,6 +225,19 @@ bool test_trt_definition_extra_params()
 
 #if TRTF_HAS_TRT
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify that find_extra_bindings correctly filters a
+//             DecoderStepEngine's extra_bindings vector by logical name prefix
+//             and input/output direction.
+// Setup:      A DecoderStepEngine with 4 extra bindings:
+//             - 2 input bindings with "mamba_ssm" prefix (SSM states)
+//             - 1 input binding with "mamba_conv" prefix (conv state)
+//             - 1 output binding with "output_ssm" prefix
+// Mechanism:  Queries with prefix "mamba_ssm" + is_input=true and asserts 2
+//             results. Queries with "nonexistent" prefix and asserts 0 results.
+//             Queries with "output_ssm" + is_input=false and asserts 1 result
+//             with the correct logical_name.
+// -----------------------------------------------------------------------------
 bool test_find_extra_bindings()
 {
     trtf::DecoderStepEngine engine;

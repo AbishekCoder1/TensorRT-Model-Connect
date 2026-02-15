@@ -1,6 +1,36 @@
-// Unit tests for src/runtime/trt/kv_cache_step_state.cpp (IStepState Phase C).
-// Tests cache state machine, position tracking, and mask generation.
-// Guarded by TRTF_HAS_TRT — skips gracefully when TRT not available.
+// =============================================================================
+// test_kv_cache_step_state.cpp — Unit tests for KvCacheStepState (IStepState)
+// =============================================================================
+//
+// Purpose:
+//   Validates the KV-cache state machine that manages key/value cache buffers,
+//   position tracking, and attention mask generation for autoregressive
+//   decoding in the TRT backend. KvCacheStepState is the concrete IStepState
+//   implementation used by all standard attention-based decoder families
+//   (Qwen, LLaMA, Mistral, Gemma). It maintains:
+//     - Per-layer KV cache buffers (flat float vectors, row-major).
+//     - A monotonically increasing cache_length counter.
+//     - Position ID computation (capped at max_cache_length).
+//     - Attention mask generation (causal mask with visible/masked positions).
+//
+// Dependencies:
+//   - runtime/trt/kv_cache_step_state.h (KvCacheStepState class)
+//   - runtime/trt/trt_decode_runtime.h (DecoderStepEngine struct — metadata)
+//   - Guarded by TRTF_HAS_TRT: tests are skipped at runtime if TRT headers
+//     were not available at compile time.
+//
+// Approach:
+//   Tests construct a minimal DecoderStepEngine with only the metadata fields
+//   populated (no actual TRT engine pointer needed — KvCacheStepState only
+//   reads dimension metadata). Each test then drives the state machine through
+//   prepare_step / update_after_step cycles and verifies the resulting
+//   positions, masks, and cache contents.
+//
+// Environment:
+//   CPU-only execution (no GPU needed). Requires TRTF_HAS_TRT=1 at compile
+//   time for the KvCacheStepState class to be available. Gracefully skips
+//   with exit code 0 when TRT is not available.
+// =============================================================================
 
 #include "runtime/trt/kv_cache_step_state.h"
 #include "runtime/trt/trt_decode_runtime.h"
@@ -14,7 +44,14 @@
 
 namespace {
 
-// Create a minimal DecoderStepEngine with just metadata (no actual TRT engine).
+// Helper: creates a DecoderStepEngine with only the metadata fields needed by
+// KvCacheStepState. No actual TRT engine or execution context is created.
+// Parameters:
+//   cache_state_size    — number of floats per cache row (num_kv_heads * head_dim)
+//   max_cache_length    — maximum number of past tokens the cache can hold
+//   num_layers          — number of transformer layers (one KV cache per layer)
+//   requires_position_input — whether the engine uses explicit position IDs
+//                             (affects mask width: max_cache + 1 vs max_cache)
 trtf::DecoderStepEngine make_test_engine(int32_t cache_state_size, int32_t max_cache_length,
     int32_t num_layers, bool requires_position_input)
 {
@@ -27,6 +64,13 @@ trtf::DecoderStepEngine make_test_engine(int32_t cache_state_size, int32_t max_c
     return engine;
 }
 
+// Intention: Verify that the constructor allocates KV cache buffers with the
+//            correct dimensions (num_layers x max_cache_length x cache_state_size)
+//            and initializes all values to zero.
+// Setup:     Engine with cache_state_size=4, max_cache_length=3, num_layers=2.
+// Mechanism: Constructs KvCacheStepState, inspects cache_k_by_layer() and
+//            cache_v_by_layer() to verify: (a) 2 layers each for K and V,
+//            (b) each layer has 3 * 4 = 12 elements, (c) all elements are 0.0F.
 bool test_constructor_cache_dimensions()
 {
     const auto engine = make_test_engine(4, 3, 2, true);
@@ -61,6 +105,14 @@ bool test_constructor_cache_dimensions()
     return true;
 }
 
+// Intention: Verify that the first call to prepare_step (step 0) produces
+//            position_id=0 and an attention mask of the correct width with
+//            the current-token slot marked as visible (0.0F).
+// Setup:     Engine with max_cache_length=3, requires_position_input=true,
+//            so mask width = 3 + 1 = 4.
+// Mechanism: Calls prepare_step on a fresh state. Checks position_id == 0,
+//            mask size == 4, and the last element (current slot) is 0.0F
+//            (visible).
 bool test_step0_position_and_mask()
 {
     // requires_position_input=true: mask width = max_cache + 1
@@ -94,6 +146,15 @@ bool test_step0_position_and_mask()
     return true;
 }
 
+// Intention: Verify that the position ID advances correctly across a
+//            multi-step sequence (step 0 -> update -> step 1) and that the
+//            attention mask reflects the growing number of visible positions.
+// Setup:     Engine with cache_state_size=2, max_cache_length=3,
+//            requires_position_input=true. Mask width = 4.
+// Mechanism: Performs step 0 (checks pos=0), then updates the cache with
+//            known present_k/v vectors, then performs step 1 (checks pos=1).
+//            After one update, there should be 2 visible mask positions:
+//            one cached token and the current token.
 bool test_step_sequence()
 {
     // With position input: position advances with cache length
@@ -149,6 +210,13 @@ bool test_step_sequence()
     return true;
 }
 
+// Intention: Verify that update_after_step correctly writes the provided
+//            present_k and present_v vectors into the first row of the cache.
+// Setup:     Engine with cache_state_size=2, max_cache_length=3, 1 layer.
+//            present_k = {1.0, 2.0}, present_v = {3.0, 4.0}.
+// Mechanism: Calls update_after_step with the known vectors, then reads
+//            cache_k_by_layer()[0] and cache_v_by_layer()[0] to verify
+//            the first row contains the expected values.
 bool test_update_after_step_writes_cache()
 {
     const auto engine = make_test_engine(2, 3, 1, true);
@@ -176,6 +244,13 @@ bool test_update_after_step_writes_cache()
     return true;
 }
 
+// Intention: Verify that the position ID caps at max_cache_length when the
+//            cache overflows (more updates than max_cache_length slots).
+//            This prevents out-of-bounds RoPE position embeddings.
+// Setup:     Engine with max_cache_length=2, requires_position_input=true.
+//            Three updates are performed, exceeding the cache capacity.
+// Mechanism: After 3 updates, calls prepare_step and checks that position_id
+//            is capped at 2 (= max_cache_length), not 3.
 bool test_overflow_position_caps()
 {
     // max_cache=2, requires_position=true -> position_limit = max_cache = 2
@@ -204,6 +279,12 @@ bool test_overflow_position_caps()
     return true;
 }
 
+// Intention: Verify behavior when requires_position_input is false. In this
+//            mode, the mask width is max_cache_length (no extra current-token
+//            slot), and the position limit is max_cache_length - 1.
+// Setup:     Engine with max_cache_length=3, requires_position_input=false.
+// Mechanism: Calls prepare_step on a fresh state. Checks position_id == 0
+//            and mask size == 3 (no +1 for the current slot).
 bool test_no_position_input()
 {
     // requires_position_input=false: position_limit = max_cache - 1
@@ -230,6 +311,14 @@ bool test_no_position_input()
     return true;
 }
 
+// Intention: Verify that update_after_step correctly handles multiple layers,
+//            writing each layer's present_k/v to the corresponding cache.
+// Setup:     Engine with num_layers=2, cache_state_size=2, max_cache_length=3.
+//            Layer 0 receives pk0={1,2} pv0={3,4}, layer 1 receives
+//            pk1={5,6} pv1={7,8}.
+// Mechanism: Calls update_after_step with per-layer vectors, then reads
+//            cache_k_by_layer() to verify layer 0's first element is 1.0 and
+//            layer 1's first element is 5.0 (confirming layer-level separation).
 bool test_multi_layer()
 {
     const auto engine = make_test_engine(2, 3, 2, true);

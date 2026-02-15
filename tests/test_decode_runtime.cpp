@@ -1,6 +1,42 @@
-// Unit tests for src/runtime/trt/trt_decode_runtime.cpp CPU-side functions.
-// Tests argmax, topk, attention mask, and cache append.
-// Guarded by TRTF_HAS_TRT — skips gracefully when TRT not available.
+// =============================================================================
+// Test suite: TRT decode runtime CPU-side helper functions
+// =============================================================================
+//
+// Purpose:
+//   Validates the CPU-side utility functions from trt_decode_runtime.cpp that
+//   support the autoregressive decoding loop: token selection (argmax, top-k),
+//   causal attention mask construction, and KV-cache append operations. These
+//   functions are exercised without a GPU — they operate on CPU vectors and
+//   return CPU results.
+//
+// Dependencies:
+//   - runtime/trt/trt_decode_runtime.h (select_argmax_token, select_topk_tokens,
+//                                        build_attention_mask, append_cache_state)
+//
+// Approach:
+//   All tests construct small input vectors, call the target function, and
+//   verify the output against expected values. The test groups are:
+//
+//   1. Argmax tests — verify select_argmax_token returns the index of the
+//      maximum logit value, including edge cases (single element, empty input,
+//      all negatives, ties).
+//
+//   2. Top-k tests — verify select_topk_tokens returns the k indices with
+//      highest logit values in descending order, including edge cases (k > size,
+//      k=0, empty input).
+//
+//   3. Attention mask tests — verify build_attention_mask produces correct
+//      causal masks for various cache occupancy levels (empty, partial, full,
+//      with/without current-token slot).
+//
+//   4. Cache append tests — verify append_cache_state writes a new hidden
+//      state row into the correct position, shifts rows when the cache is full,
+//      and is a no-op on size mismatch.
+//
+// Environment:
+//   Guarded by TRTF_HAS_TRT. Skips gracefully (exit 0) when TensorRT headers
+//   are not available. No GPU execution — tests only exercise CPU logic.
+// =============================================================================
 
 #include "runtime/trt/trt_decode_runtime.h"
 
@@ -14,6 +50,12 @@
 
 namespace {
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify basic argmax — selecting the index of the highest logit
+//             from a 3-element vector.
+// Setup:      logits = {0.1, 0.9, 0.3}. Maximum is at index 1.
+// Mechanism:  Calls select_argmax_token and asserts the result is 1.
+// -----------------------------------------------------------------------------
 bool test_argmax_basic()
 {
     const std::vector<float> logits = {0.1F, 0.9F, 0.3F};
@@ -26,6 +68,12 @@ bool test_argmax_basic()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify argmax with a single-element vector — the only valid
+//             index is 0.
+// Setup:      logits = {5.0}. Only one element, so index must be 0.
+// Mechanism:  Calls select_argmax_token and asserts the result is 0.
+// -----------------------------------------------------------------------------
 bool test_argmax_single()
 {
     const std::vector<float> logits = {5.0F};
@@ -38,6 +86,12 @@ bool test_argmax_single()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify argmax with an empty vector — should return 0 as a safe
+//             default rather than crashing.
+// Setup:      An empty logits vector.
+// Mechanism:  Calls select_argmax_token and asserts the result is 0.
+// -----------------------------------------------------------------------------
 bool test_argmax_empty()
 {
     const std::vector<float> logits;
@@ -50,6 +104,12 @@ bool test_argmax_empty()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify argmax when all logit values are negative — the function
+//             should still return the index of the maximum (least negative).
+// Setup:      logits = {-3.0, -1.0, -5.0, -2.0}. Maximum is -1.0 at index 1.
+// Mechanism:  Calls select_argmax_token and asserts the result is 1.
+// -----------------------------------------------------------------------------
 bool test_argmax_all_negative()
 {
     const std::vector<float> logits = {-3.0F, -1.0F, -5.0F, -2.0F};
@@ -62,6 +122,14 @@ bool test_argmax_all_negative()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify argmax tie-breaking behavior — when multiple elements
+//             share the maximum value, the function should return the first
+//             occurrence (consistent with std::max_element).
+// Setup:      logits = {1.0, 5.0, 5.0, 2.0}. Tie at indices 1 and 2.
+// Mechanism:  Calls select_argmax_token and asserts the result is 1 (the first
+//             occurrence of the maximum).
+// -----------------------------------------------------------------------------
 bool test_argmax_tie()
 {
     // std::max_element returns first occurrence
@@ -75,6 +143,14 @@ bool test_argmax_tie()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify basic top-k selection — the 2 indices with the highest
+//             logit values should be returned in descending order of value.
+// Setup:      logits = {0.1, 0.9, 0.3, 0.7}. Top-2: index 1 (0.9), index 3
+//             (0.7).
+// Mechanism:  Calls select_topk_tokens with k=2, asserts the result has 2
+//             elements, and verifies the indices are [1, 3].
+// -----------------------------------------------------------------------------
 bool test_topk_basic()
 {
     const std::vector<float> logits = {0.1F, 0.9F, 0.3F, 0.7F};
@@ -93,6 +169,14 @@ bool test_topk_basic()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify top-k behavior when k exceeds the vector size — the
+//             function should return all elements (clamped to vector size)
+//             rather than crashing.
+// Setup:      logits = {0.1, 0.9} with k=5.
+// Mechanism:  Calls select_topk_tokens and asserts the result has exactly 2
+//             elements (the full vector).
+// -----------------------------------------------------------------------------
 bool test_topk_k_greater_than_size()
 {
     const std::vector<float> logits = {0.1F, 0.9F};
@@ -105,6 +189,11 @@ bool test_topk_k_greater_than_size()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify top-k behavior with k=0 — should return an empty vector.
+// Setup:      logits = {0.1, 0.9} with k=0.
+// Mechanism:  Calls select_topk_tokens and asserts the result is empty.
+// -----------------------------------------------------------------------------
 bool test_topk_k_zero()
 {
     const std::vector<float> logits = {0.1F, 0.9F};
@@ -117,6 +206,12 @@ bool test_topk_k_zero()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify top-k behavior with an empty logits vector — should return
+//             an empty result without crashing.
+// Setup:      An empty logits vector with k=3.
+// Mechanism:  Calls select_topk_tokens and asserts the result is empty.
+// -----------------------------------------------------------------------------
 bool test_topk_empty()
 {
     const std::vector<float> logits;
@@ -129,6 +224,15 @@ bool test_topk_empty()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify the causal attention mask when the cache is empty
+//             (cache_length=0) and include_current is false. Only the first
+//             position should be visible (0.0); the rest should be masked
+//             (large negative).
+// Setup:      cache_length=0, max_cache=4, include_current=false.
+// Mechanism:  Calls build_attention_mask and asserts: size is 4, mask[0]=0.0
+//             (visible), mask[1..3] < 0.0 (masked).
+// -----------------------------------------------------------------------------
 bool test_mask_cache0_no_current()
 {
     // cache_length=0, max=4, include_current=false
@@ -155,6 +259,14 @@ bool test_mask_cache0_no_current()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify the causal attention mask when 3 of 4 cache slots are
+//             occupied and include_current is false. The first 3 positions
+//             should be visible; the last should be masked.
+// Setup:      cache_length=3, max_cache=4, include_current=false.
+// Mechanism:  Calls build_attention_mask and asserts: size is 4, mask[0..2]=0.0,
+//             mask[3] < 0.0.
+// -----------------------------------------------------------------------------
 bool test_mask_cache3_no_current()
 {
     // cache_length=3, max=4, include_current=false -> 3 visible, 1 masked
@@ -180,6 +292,14 @@ bool test_mask_cache3_no_current()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify that include_current=true appends an extra slot to the
+//             mask (for the current token being decoded), and that this slot is
+//             visible (0.0).
+// Setup:      cache_length=0, max_cache=4, include_current=true.
+// Mechanism:  Calls build_attention_mask and asserts: size is 5 (4 cache + 1
+//             current), and mask[4] (the current-token slot) equals 0.0.
+// -----------------------------------------------------------------------------
 bool test_mask_with_current_slot()
 {
     // cache_length=0, max=4, include_current=true -> width=5, last slot visible
@@ -198,6 +318,14 @@ bool test_mask_with_current_slot()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify the attention mask when cache_length >= max_cache_length —
+//             all positions should be visible (the cache is fully occupied).
+// Setup:      cache_length=5, max_cache=4, include_current=false. The cache
+//             length exceeds max, so all 4 positions should be unmasked.
+// Mechanism:  Calls build_attention_mask and asserts: size is 4, every element
+//             equals 0.0.
+// -----------------------------------------------------------------------------
 bool test_mask_full_cache()
 {
     // cache_length >= max -> all positions visible
@@ -218,6 +346,15 @@ bool test_mask_full_cache()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify normal cache append — writing a hidden state vector into
+//             an empty cache at write_index=0. Only the target row should be
+//             written; remaining rows should stay zero.
+// Setup:      A zero-initialized cache of shape [3, 2] (max_cache=3, hidden=2),
+//             and a state vector {1.0, 2.0}.
+// Mechanism:  Calls append_cache_state with write_index=0, then asserts row 0
+//             contains {1.0, 2.0} and rows 1-2 remain {0.0, 0.0}.
+// -----------------------------------------------------------------------------
 bool test_cache_append_normal()
 {
     // write_index=0, hidden=2, max_cache=3
@@ -241,6 +378,16 @@ bool test_cache_append_normal()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify cache append overflow behavior — when write_index >=
+//             max_cache, the cache should shift all rows left by one (evicting
+//             the oldest entry) and write the new state into the last row.
+// Setup:      A fully populated cache [3, 2] containing {1,2, 3,4, 5,6} with
+//             write_index=3 (one past the end) and new state {7.0, 8.0}.
+// Mechanism:  Calls append_cache_state, then asserts the cache now contains
+//             {3,4, 5,6, 7,8} — row 0 was evicted, rows shifted left, new
+//             state written to the tail.
+// -----------------------------------------------------------------------------
 bool test_cache_append_overflow()
 {
     // write_index >= max_cache -> shifts rows left, writes at tail
@@ -263,6 +410,15 @@ bool test_cache_append_overflow()
     return true;
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify that append_cache_state is a safe no-op when the state
+//             vector's size does not match hidden_size — this prevents memory
+//             corruption from mismatched dimensions.
+// Setup:      A zero-initialized cache [3, 2] and a state vector of size 3
+//             (mismatched with hidden=2).
+// Mechanism:  Calls append_cache_state, then asserts the entire cache remains
+//             zero (no write occurred).
+// -----------------------------------------------------------------------------
 bool test_cache_append_size_mismatch()
 {
     // state.size != hidden_size -> no-op
