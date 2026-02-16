@@ -259,5 +259,6 @@ Each family is a Python package in `trtf_build/families/<family>/`:
 | LLaMA | llama | Standard mapper, no q_norm |
 | Mistral | mistral | Standard mapper |
 | Gemma | gemma | +1.0 to RMSNorm gamma, scale embedding by sqrt(hidden_size) |
+| Phi | phi3, phi | Fused QKV splitting, fused gate_up splitting |
 
 Adding a new family requires creating a plugin directory with `plugin.py` and `checkpoint.py`. See [Adding a Model Family](Adding-a-Model-Family.md).

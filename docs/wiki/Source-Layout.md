@@ -30,6 +30,7 @@ Each family is a single Python file implementing the `FamilyPlugin` protocol (se
 | `llama.py` | LLaMA family: matches `llama`. Standard HF tensor naming. |
 | `mistral.py` | Mistral family: matches `mistral`. Standard HF tensor naming. |
 | `gemma.py` | Gemma family: matches `gemma`. Adds +1.0 to RMSNorm gamma, scales embedding by `sqrt(hidden_size)`. |
+| `phi.py` | Phi family: matches `phi3`/`phi`. Splits fused QKV and gate_up projections. |
 
 ---
 
@@ -150,4 +151,7 @@ The following C++ files were removed as part of the Python build migration (~350
 | `diff_logits.py` | E2E logit comparison: trtf binary vs HF transformers |
 | `diff_layers.py` | Per-layer hidden state comparison between trtf and HF |
 | `eval_mmlu.py` | MMLU benchmark evaluation |
+| `new_family.py` | Scaffold a new family plugin from HF repo |
+| `validate_family.sh` | One-command validation gate (build + diff + parity) |
+| `test_runner_parity.py` | Python-vs-C++ runner parity cross-validation |
 | `test_qwen3_trt_e2e.sh` | All-in-one Qwen3 TRT E2E diagnostic script |

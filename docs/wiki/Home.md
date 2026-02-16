@@ -31,7 +31,7 @@ The system has two phases:
 
 1. **Build phase (Python)** -- `trtf-build build <hf-model-dir> -o model.trtfb`
    - Reads HF `config.json` + `model.safetensors` + `tokenizer.json`
-   - Matches `model_type` to a family plugin (Qwen, LLaMA, Mistral, Gemma)
+   - Matches `model_type` to a family plugin (Qwen, LLaMA, Mistral, Gemma, Phi)
    - Maps HF tensor keys to canonical format, builds TRT network, compiles engine
    - Packages engine plan + tokenizer files into a `.trtfb` bundle
 
@@ -74,3 +74,4 @@ int main() {
 | LLaMA | LLaMA, TinyLlama | `trtf_build/families/llama/` |
 | Mistral | Mistral, TinyMistral | `trtf_build/families/mistral/` |
 | Gemma | Gemma | `trtf_build/families/gemma/` |
+| Phi | Phi-3 | `trtf_build/families/phi/` |

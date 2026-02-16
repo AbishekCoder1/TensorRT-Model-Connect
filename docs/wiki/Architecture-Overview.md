@@ -58,6 +58,7 @@ trtf_build/trtf_build/families/
   llama.py      # LLaMA, TinyLlama
   mistral.py    # Mistral, TinyMistral
   gemma.py      # Gemma (adds +1.0 to RMSNorm gamma, scales embedding)
+  phi.py        # Phi-3 (fused QKV and gate_up weight splitting)
 ```
 
 A family plugin provides:

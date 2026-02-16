@@ -101,7 +101,7 @@ trtf_build/                          # Python package (engine builder)
     families/
       __init__.py                    # Auto-discover plugins
       base.py                        # FamilyPlugin protocol
-      qwen.py llama.py mistral.py gemma.py
+      qwen.py llama.py mistral.py gemma.py phi.py
   pyproject.toml
 src/                                 # C++ bundle-only runtime
   bundle/
@@ -168,6 +168,7 @@ $EDITOR trtf_build/trtf_build/families/phi.py
 ### Example
 
 See `trtf_build/trtf_build/families/qwen.py` for the Qwen3 plugin.
+See `trtf_build/trtf_build/families/phi.py` for Phi-3 (fused QKV/gate_up weight splitting).
 See `trtf_build/trtf_build/families/base.py` for the plugin protocol.
 
 ### Diff-test framework
@@ -182,6 +183,10 @@ python3 scripts/diff_logits.py \
 # Per-layer hidden state comparison (embedding, all layers, logits)
 python3 scripts/diff_layers.py \
   --model Qwen/Qwen3-0.6B --atol 0.05
+
+# For models requiring custom tokenizer code (e.g., Phi-3), add --trust-remote-code:
+python3 scripts/diff_logits.py \
+  --model microsoft/Phi-3-mini-4k-instruct --atol 1e-3 --battery --trust-remote-code
 ```
 
 The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python TRT inference with KV cache management, matching the C++ runtime behavior exactly. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.

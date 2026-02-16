@@ -113,6 +113,8 @@ def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
     return weights
 ```
 
+Some models use fused projections (e.g., Phi-3 ships a single `qkv_proj` instead of separate Q/K/V, and a single `gate_up_proj` instead of separate gate/up). In these cases, split the fused tensor during weight loading. See `trtf_build/trtf_build/families/phi.py` for an example.
+
 ### Step 3: Validate
 
 Run the one-command validation gate:
@@ -144,6 +146,10 @@ python3 scripts/test_runner_parity.py \
   --bundle /tmp/test.trtfb --binary ./build/trtf \
   --hf-python .venv/bin/python --max-new-tokens 20
 ```
+
+For models that require custom tokenizer code (e.g., Phi-3), add `--trust-remote-code` to diff_logits.py, diff_layers.py, and validate_family.sh.
+
+**Memory note**: Large models (3B+ parameters) can require significant RAM during TRT engine compilation. Phi-3-mini (3.8B) peaks at ~44GB. On 64GB machines, 16GB swap is recommended.
 
 ## Checklist
 

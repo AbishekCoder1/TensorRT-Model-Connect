@@ -1,5 +1,24 @@
 # Worklog
 
+## 2026-02-16 — Phi-3 Family Plugin + Shared Script Hardening
+
+- **Phi-3 family plugin** (`trtf_build/trtf_build/families/phi.py`)
+  - Matches `model_type` starting with `phi3` or `phi`.
+  - Handles fused QKV projection splitting (`qkv_proj` -> separate Q, K, V).
+  - Handles fused gate-up projection splitting (`gate_up_proj` -> separate gate, up).
+  - Validated on Phi-3-mini-4k-instruct (3.8B): diff_logits PASS, diff_layers PASS, coherent C++ output.
+  - 5 family plugins now: Qwen, LLaMA, Mistral, Gemma, Phi.
+
+- **Shared script hardening**
+  - `--trust-remote-code` flag added to `diff_logits.py`, `diff_layers.py`, and `validate_family.sh` for models that require custom tokenizer code (e.g., Phi-3).
+  - `test_runner_parity.py` now stops on EOS token, matching C++ runtime behavior.
+  - `diff_layers.py` handles transformers 5.x `tie_last_hidden_states` (skips last layer when it duplicates the second-to-last).
+
+- **Security: engine builder no longer downloads `*.py` files**
+  - `engine_builder.py` excludes `*.py` from HF snapshot downloads. The engine builder never needs custom model code.
+
+- **Memory note**: Phi-3-mini (3.8B) requires ~44GB peak RAM during TRT engine build. On 64GB machines, 16GB swap is recommended.
+
 ## 2026-02-15 — Parallel Agent Scale-Up: Auto-Discovery, head_dim Fix, Scaffolding
 
 - **True auto-discovery in `families/__init__.py`**
