@@ -122,18 +122,21 @@ Any HF model whose `model_type` matches a supported family works automatically.
 
 ## Adding a model family
 
-Create a plugin file in `trtf_build/trtf_build/families/<family>.py` implementing the `FamilyPlugin` protocol (see `base.py`). It is auto-discovered — no registration code needed. No C++ changes required.
+```bash
+# 1. Scaffold a plugin from a HuggingFace model
+python3 scripts/new_family.py \
+  --model-type phi3 --hf-repo microsoft/Phi-3-mini-4k-instruct --family-name phi
+
+# 2. Review and customize the generated plugin
+#    (edit trtf_build/trtf_build/families/phi.py)
+
+# 3. One-command validation (build + diff_logits + diff_layers + runner parity)
+./scripts/validate_family.sh microsoft/Phi-3-mini-4k-instruct
+```
+
+Plugins are auto-discovered — no registration code needed. No C++ changes required.
 
 See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full guide, or `trtf_build/trtf_build/families/qwen.py` for an example.
-
-After implementing, validate with the pure-Python diff framework (requires `torch`):
-```bash
-# E2E logit comparison (per-step, all tokens)
-python3 scripts/diff_logits.py --model <hf-model-dir-or-repo-id> --atol 1e-3 --battery
-
-# Per-layer hidden state comparison (embedding, all layers, logits)
-python3 scripts/diff_layers.py --model <hf-model-dir-or-repo-id> --atol 0.05
-```
 
 ## Environment variables
 

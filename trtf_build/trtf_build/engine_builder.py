@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import ModelConfig
-from .families import find_plugin
+from .families import find_plugin, _ALL_PLUGINS
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
 
 # Standard HF file patterns to download (matches what the builder needs).
@@ -103,9 +103,10 @@ def build_bundle(
     # 2. Find family plugin
     plugin = find_plugin(config.model_type)
     if plugin is None:
+        supported = ", ".join(p.name for p in _ALL_PLUGINS)
         raise ValueError(
             f"No family plugin for model_type={config.model_type!r}. "
-            f"Supported: qwen, llama, mistral, gemma")
+            f"Supported: {supported}")
 
     print(f"[trtf-build] Family: {plugin.name}", file=sys.stderr)
 

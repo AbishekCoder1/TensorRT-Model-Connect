@@ -1,5 +1,29 @@
 # Worklog
 
+## 2026-02-15 — Parallel Agent Scale-Up: Auto-Discovery, head_dim Fix, Scaffolding
+
+- **True auto-discovery in `families/__init__.py`**
+  - Replaced manual imports with `pkgutil.iter_modules()` directory scanning.
+  - Any `.py` file in `families/` (excluding `_`-prefixed and `base.py`) with a module-level `plugin` attribute is auto-registered.
+  - Adding a new family = drop a `.py` file, zero edits to shared files. Eliminates merge conflicts.
+
+- **Fix `ModelConfig.head_dim` to respect config.json**
+  - Added `_head_dim` field backed by `config.json`'s `head_dim` key.
+  - `head_dim` property uses explicit value if > 0, else falls back to `hidden_size // num_attention_heads`.
+  - Fixes Qwen3-0.6B (head_dim=128 with hidden=1024, heads=16) and any model with non-standard head_dim.
+
+- **Dynamic plugin list in error messages**
+  - `engine_builder.py` now lists discovered plugin names dynamically instead of hardcoded string.
+
+- **Scaffolding script** (`scripts/new_family.py`)
+  - Downloads config.json from HF repo, detects architecture features (GQA, tied embeddings, MoE, etc.).
+  - Generates a plugin .py file with correct `matches()`, standard `load_weights()` and `build_engine()`.
+  - Prints next steps for validation.
+
+- **Validation gate** (`scripts/validate_family.sh`)
+  - One-command validation: build bundle + diff_logits (battery) + diff_layers + runner parity.
+  - Prints PASS/FAIL summary. Accepts `--max-cache-length` and `--binary` flags.
+
 ## 2026-02-15 — HuggingFace-like Python API + Self-Contained Container + README Rewrite
 
 - **HuggingFace-like Python API** (`trtf_build.build()`)

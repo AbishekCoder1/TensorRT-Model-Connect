@@ -127,13 +127,33 @@ scripts/
   setup_container.sh                 # One-shot container setup (venv, deps, build, test)
   diff_logits.py                     # E2E logit comparison (trtf vs HF transformers)
   diff_layers.py                     # Per-layer hidden state comparison
+  new_family.py                      # Scaffold a new family plugin from HF repo
+  validate_family.sh                 # One-command validation gate (build + diff + parity)
 tests/
   test_helpers.h                     # Shared helpers: temp dirs, safetensors writing
 ```
 
 ## Adding a new model family
 
-Adding a new model family is done in the Python build package. Create a new plugin file in `trtf_build/trtf_build/families/`:
+Adding a new model family is done in the Python build package. No C++ changes needed.
+
+### Quick path (scaffolding script)
+
+```bash
+# 1. Generate a plugin from a HuggingFace model
+python3 scripts/new_family.py \
+  --model-type phi3 \
+  --hf-repo microsoft/Phi-3-mini-4k-instruct \
+  --family-name phi
+
+# 2. Review and customize the generated plugin
+$EDITOR trtf_build/trtf_build/families/phi.py
+
+# 3. Validate end-to-end
+./scripts/validate_family.sh microsoft/Phi-3-mini-4k-instruct
+```
+
+### Manual path
 
 1. **Create `trtf_build/trtf_build/families/<family>.py`** — implement the `FamilyPlugin` protocol (see `base.py`). This handles:
    - Matching HF `model_type` / `architectures`
@@ -141,9 +161,9 @@ Adding a new model family is done in the Python build package. Create a new plug
    - Any family-specific weight pre-processing (e.g., Gemma's +1.0 to RMSNorm gamma, embedding scaling)
    - Graph construction customization if the family diverges from the standard decoder pattern
 
-2. **The plugin is auto-discovered** — `trtf_build/trtf_build/families/__init__.py` auto-discovers all plugin files in the directory.
+2. **The plugin is auto-discovered** — `families/__init__.py` uses `pkgutil.iter_modules()` to scan for any `.py` file with a module-level `plugin` attribute. Zero edits to shared files needed.
 
-3. **No C++ changes needed** — the C++ runtime is family-agnostic; it only loads pre-built `.trtfb` bundles.
+3. **Validate** — run `./scripts/validate_family.sh <hf-repo-or-path>` which builds a bundle, runs diff_logits (battery), diff_layers, and runner parity tests.
 
 ### Example
 

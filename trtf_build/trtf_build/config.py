@@ -27,11 +27,16 @@ class ModelConfig:
     tie_word_embeddings: bool = False
     max_position_embeddings: int = 8192
 
+    # Explicit head_dim from config.json (0 = not set, fall back to computed).
+    _head_dim: int = 0
+
     # Raw JSON dict for family-specific fields
     raw: dict = field(default_factory=dict, repr=False)
 
     @property
     def head_dim(self) -> int:
+        if self._head_dim > 0:
+            return self._head_dim
         if self.num_attention_heads <= 0:
             return 0
         return self.hidden_size // self.num_attention_heads
@@ -60,6 +65,7 @@ class ModelConfig:
             pad_token_id=d.get("pad_token_id", -1) or -1,
             tie_word_embeddings=d.get("tie_word_embeddings", False),
             max_position_embeddings=d.get("max_position_embeddings", 8192),
+            _head_dim=d.get("head_dim", 0),
             raw=d,
         )
 
