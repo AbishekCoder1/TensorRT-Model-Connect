@@ -26,6 +26,7 @@ class ModelConfig:
     pad_token_id: int = -1
     tie_word_embeddings: bool = False
     max_position_embeddings: int = 8192
+    hidden_act: str = ""
 
     # Explicit head_dim from config.json (0 = not set, fall back to computed).
     _head_dim: int = 0
@@ -48,23 +49,41 @@ class ModelConfig:
     @staticmethod
     def from_json(text: str) -> ModelConfig:
         d = json.loads(text)
+
+        # GPT-2 uses n_embd/n_head/n_layer/n_inner instead of standard names.
+        hidden_size = d.get("hidden_size", 0) or d.get("n_embd", 0)
+        num_heads = d.get("num_attention_heads", 0) or d.get("n_head", 1)
+        num_layers = d.get("num_hidden_layers", 0) or d.get("n_layer", 0)
+        intermediate = (d.get("intermediate_size", 0)
+                        or d.get("n_inner", 0)
+                        or hidden_size * 4)
+
+        # Norm epsilon: try rms_norm_eps, then layer_norm_epsilon, then
+        # layer_norm_eps, then norm_epsilon.
+        eps = (d.get("rms_norm_eps")
+               or d.get("layer_norm_epsilon")
+               or d.get("layer_norm_eps")
+               or d.get("norm_epsilon")
+               or 1e-5)
+
         return ModelConfig(
             model_type=d.get("model_type", ""),
             architectures=d.get("architectures", []),
             vocab_size=d.get("vocab_size", 0),
-            hidden_size=d.get("hidden_size", 0),
-            intermediate_size=d.get("intermediate_size", 0),
-            num_hidden_layers=d.get("num_hidden_layers", 0),
-            num_attention_heads=d.get("num_attention_heads", 1),
-            num_key_value_heads=d.get("num_key_value_heads",
-                                     d.get("num_attention_heads", 1)),
-            rms_norm_eps=d.get("rms_norm_eps", 1e-5),
+            hidden_size=hidden_size,
+            intermediate_size=intermediate,
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            num_key_value_heads=d.get("num_key_value_heads", num_heads),
+            rms_norm_eps=eps,
             rope_theta=d.get("rope_theta", 10000.0),
             bos_token_id=d.get("bos_token_id", -1) or -1,
             eos_token_id=d.get("eos_token_id", -1) or -1,
             pad_token_id=d.get("pad_token_id", -1) or -1,
             tie_word_embeddings=d.get("tie_word_embeddings", False),
-            max_position_embeddings=d.get("max_position_embeddings", 8192),
+            max_position_embeddings=d.get("max_position_embeddings",
+                                          d.get("n_positions", 8192)),
+            hidden_act=d.get("hidden_act", ""),
             _head_dim=d.get("head_dim", 0),
             raw=d,
         )

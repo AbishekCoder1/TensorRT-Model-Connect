@@ -18,6 +18,7 @@ _HF_ALLOW_PATTERNS = [
     "model.safetensors",
     "model-*.safetensors",
     "model.safetensors.index.json",
+    "pytorch_model.bin",
     "tokenizer.json",
     "tokenizer_config.json",
     "vocab.json",
@@ -74,6 +75,24 @@ def _get_gpu_name() -> str:
     except Exception:
         pass
     return ""
+
+
+def _ensure_tokenizer_json(model_dir: Path) -> None:
+    """If the model directory lacks tokenizer.json, generate it from the
+    slow tokenizer using HF transformers. This ensures the C++ runtime can
+    always load the tokenizer via AutoTokenizer."""
+    if (model_dir / "tokenizer.json").exists():
+        return
+    try:
+        from transformers import AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=False)
+        tok.save_pretrained(str(model_dir))
+        if (model_dir / "tokenizer.json").exists():
+            print("[trtf-build] Generated tokenizer.json from slow tokenizer",
+                  file=sys.stderr)
+    except Exception as e:
+        print(f"[trtf-build] Warning: could not generate tokenizer.json: {e}",
+              file=sys.stderr)
 
 
 def build_bundle(
@@ -144,8 +163,14 @@ def build_bundle(
 
     sections = [BundleSection("engine_plan", engine_plan)]
 
+    # If model lacks tokenizer.json (fast format), generate it from the
+    # slow tokenizer so the C++ runtime can always load via AutoTokenizer.
+    _ensure_tokenizer_json(model_dir_path)
+
     # Embed tokenizer + config files
-    for filename in ("config.json", "tokenizer.json", "tokenizer_config.json"):
+    for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
+                     "vocab.json", "merges.txt", "special_tokens_map.json",
+                     "tokenizer.model"):
         file_path = model_dir_path / filename
         if file_path.exists():
             sections.append(BundleSection(filename, file_path.read_bytes()))

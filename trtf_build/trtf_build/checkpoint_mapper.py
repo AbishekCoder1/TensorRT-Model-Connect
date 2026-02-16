@@ -255,8 +255,23 @@ def _detect_framework() -> str:
         return "numpy"
 
 
+class _TorchBinReader:
+    """Adapter that wraps a pytorch .bin state dict with the safetensors reader
+    interface (keys() / get_tensor())."""
+
+    def __init__(self, path: Path):
+        import torch
+        self._state = torch.load(str(path), map_location="cpu", weights_only=True)
+
+    def keys(self) -> list[str]:
+        return list(self._state.keys())
+
+    def get_tensor(self, name: str):
+        return self._state[name]
+
+
 def _open_safetensors(model_dir: Path) -> list:
-    """Open all safetensor shards in a model directory."""
+    """Open all safetensor shards (or pytorch .bin) in a model directory."""
     fw = _detect_framework()
     single = model_dir / "model.safetensors"
     if single.exists():
@@ -272,8 +287,13 @@ def _open_safetensors(model_dir: Path) -> list:
             for f in shard_files
         ]
 
+    # Fallback: pytorch_model.bin (older HF models)
+    bin_single = model_dir / "pytorch_model.bin"
+    if bin_single.exists():
+        return [_TorchBinReader(bin_single)]
+
     raise FileNotFoundError(
-        f"No model.safetensors or index.json in {model_dir}")
+        f"No model.safetensors, index.json, or pytorch_model.bin in {model_dir}")
 
 
 def _has_tensor(readers: list, name: str) -> bool:

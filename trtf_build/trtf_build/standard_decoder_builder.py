@@ -1,7 +1,14 @@
-"""1:1 port of standard_decoder_graph_builder.cpp (multi-layer path only).
+"""Standard decoder engine builder (parameterized).
 
-Builds a TensorRT engine for a standard pre-RMSNorm + GQA + RoPE + SwiGLU
-decoder. Tensor names MUST match what the C++ runtime expects:
+Builds a TensorRT engine for a decoder-only transformer. Supports multiple
+norm, MLP, and position embedding strategies via parameters:
+
+  norm_type:     "rmsnorm" | "layernorm"
+  mlp_type:      "swiglu"  | "gelu_fc"
+  position_type: "rope"    | "learned"
+  activation:    "silu" | "gelu_new" | "gelu" | "relu" (used by gelu_fc MLP)
+
+Tensor names MUST match what the C++ runtime expects:
   Inputs:  token_id, position_id, attention_mask, cache_k_0..N, cache_v_0..N
   Outputs: logits, present_k_0..N, present_v_0..N
 """
@@ -40,6 +47,11 @@ def build_standard_decoder_engine(
     weights: WeightDict,
     max_cache_length: int,
     *,
+    norm_type: str = "rmsnorm",
+    mlp_type: str = "swiglu",
+    position_type: str = "rope",
+    activation: str = "silu",
+    partial_rotary_factor: float = 1.0,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
 ) -> bytes:
@@ -49,12 +61,15 @@ def build_standard_decoder_engine(
         config: Model architecture from config.json.
         weights: Loaded weight dict from checkpoint_mapper.
         max_cache_length: KV cache length (engine is compiled for this value).
+        norm_type: "rmsnorm" or "layernorm".
+        mlp_type: "swiglu" (3 projections: gate/up/down) or
+                  "gelu_fc" (2 projections: fc1/fc2 with activation).
+        position_type: "rope" (rotary) or "learned" (absolute position embeddings).
+        activation: Activation function for gelu_fc MLP ("gelu_new", "gelu", "relu").
+        partial_rotary_factor: Fraction of head dims that get RoPE (default 1.0).
         verbose: Print TRT builder logs.
         debug_layer_outputs: If True, mark per-layer hidden states as network
-            outputs for diff testing. Adds outputs named:
-            - ``debug_embed``: embedding output (1, hidden)
-            - ``debug_hidden_{i}``: hidden state after decoder layer i (1, hidden)
-            - ``debug_post_attn_{i}``: hidden state after attention+residual (1, hidden)
+            outputs for diff testing.
 
     Returns:
         Serialized engine plan bytes.
@@ -101,19 +116,33 @@ def build_standard_decoder_engine(
     embedding_table = graph_ops.add_constant(
         network, (vocab, hidden), weights["embedding"])
 
-    cos_table_np = graph_ops.make_rope_table(
-        attention_window, attention_size, num_heads, config.rope_theta, True)
-    sin_table_np = graph_ops.make_rope_table(
-        attention_window, attention_size, num_heads, config.rope_theta, False)
-    rotate_half_np = graph_ops.make_rotate_half_matrix(
-        attention_size, num_heads)
+    # RoPE tables (only needed when position_type == "rope")
+    cos_tensor = None
+    sin_tensor = None
+    rotate_half_tensor = None
+    position_embed_table = None
 
-    cos_tensor = graph_ops.add_constant(
-        network, (attention_window, attention_size), cos_table_np)
-    sin_tensor = graph_ops.add_constant(
-        network, (attention_window, attention_size), sin_table_np)
-    rotate_half_tensor = graph_ops.add_constant(
-        network, (attention_size, attention_size), rotate_half_np)
+    if position_type == "rope":
+        cos_table_np = graph_ops.make_rope_table(
+            attention_window, attention_size, num_heads, config.rope_theta, True,
+            partial_rotary_factor)
+        sin_table_np = graph_ops.make_rope_table(
+            attention_window, attention_size, num_heads, config.rope_theta, False,
+            partial_rotary_factor)
+        rotate_half_np = graph_ops.make_rotate_half_matrix(
+            attention_size, num_heads, partial_rotary_factor)
+
+        cos_tensor = graph_ops.add_constant(
+            network, (attention_window, attention_size), cos_table_np)
+        sin_tensor = graph_ops.add_constant(
+            network, (attention_window, attention_size), sin_table_np)
+        rotate_half_tensor = graph_ops.add_constant(
+            network, (attention_size, attention_size), rotate_half_np)
+    elif position_type == "learned":
+        pos_embed_np = weights["position_embedding"]
+        position_embed_table = graph_ops.add_constant(
+            network, pos_embed_np.shape, pos_embed_np)
+
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
@@ -125,6 +154,14 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     gather = network.add_gather(embedding_table, token_id, 0)
     hidden_state = gather.get_output(0)
+
+    # Add learned position embedding if applicable
+    if position_type == "learned" and position_embed_table is not None:
+        pos_gather = network.add_gather(position_embed_table, position_id, 0)
+        pos_add = network.add_elementwise(
+            hidden_state, pos_gather.get_output(0),
+            trt.ElementWiseOperation.SUM)
+        hidden_state = pos_add.get_output(0)
 
     if debug_layer_outputs:
         _mark_debug_output(network, hidden_state, "debug_embed")
@@ -158,6 +195,10 @@ def build_standard_decoder_engine(
             num_heads=num_heads,
             head_dim=head_dim,
             max_cache_length=max_cache_length,
+            norm_type=norm_type,
+            mlp_type=mlp_type,
+            position_type=position_type,
+            activation=activation,
         )
 
         hidden_state = result["hidden"]
@@ -173,8 +214,9 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     final_norm = weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
-        hidden_state = graph_ops.add_rms_norm(
-            network, hidden_state, hidden, final_norm, eps_tensor)
+        hidden_state = _apply_norm(
+            network, hidden_state, hidden, final_norm,
+            weights.get("final_norm_beta"), eps_tensor, norm_type)
 
     # ---------------------------------------------------------------
     # LM head (logits)
@@ -214,6 +256,26 @@ def build_standard_decoder_engine(
     return bytes(plan)
 
 
+def _apply_norm(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    hidden_size: int,
+    gamma: np.ndarray,
+    beta: np.ndarray | None,
+    eps_tensor: trt.ITensor,
+    norm_type: str,
+) -> trt.ITensor:
+    """Dispatch to RMSNorm or LayerNorm based on norm_type."""
+    if norm_type == "layernorm":
+        if beta is None:
+            beta = np.zeros(hidden_size, dtype=np.float32)
+        return graph_ops.add_layer_norm(
+            network, inp, hidden_size, gamma, beta, eps_tensor)
+    else:
+        return graph_ops.add_rms_norm(
+            network, inp, hidden_size, gamma, eps_tensor)
+
+
 def _add_decoder_layer(
     *,
     network: trt.INetworkDefinition,
@@ -222,9 +284,9 @@ def _add_decoder_layer(
     cache_v: trt.ITensor,
     attention_mask: trt.ITensor,
     position_id: trt.ITensor,
-    cos_tensor: trt.ITensor,
-    sin_tensor: trt.ITensor,
-    rotate_half_tensor: trt.ITensor,
+    cos_tensor: trt.ITensor | None,
+    sin_tensor: trt.ITensor | None,
+    rotate_half_tensor: trt.ITensor | None,
     attn_scale_tensor: trt.ITensor,
     eps_tensor: trt.ITensor,
     weights: WeightDict,
@@ -235,14 +297,20 @@ def _add_decoder_layer(
     num_heads: int,
     head_dim: int,
     max_cache_length: int,
+    norm_type: str = "rmsnorm",
+    mlp_type: str = "swiglu",
+    position_type: str = "rope",
+    activation: str = "silu",
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
     attention_window = max_cache_length + 1
 
-    # Pre-attention RMSNorm
-    norm1 = graph_ops.add_rms_norm(
+    # Pre-attention norm
+    norm1 = _apply_norm(
         network, hidden, hidden_size,
-        weights[f"{prefix}.input_norm"], eps_tensor)
+        weights[f"{prefix}.input_norm"],
+        weights.get(f"{prefix}.input_norm_beta"),
+        eps_tensor, norm_type)
 
     # QKV projections
     q = graph_ops.add_matmul_rhs_constant(
@@ -276,11 +344,14 @@ def _add_decoder_layer(
         k = graph_ops.add_rms_norm_per_head(
             network, k, num_heads, head_dim, k_norm, eps_tensor)
 
-    # RoPE
-    q = graph_ops.add_apply_rope(
-        network, q, position_id, cos_tensor, sin_tensor, rotate_half_tensor)
-    k = graph_ops.add_apply_rope(
-        network, k, position_id, cos_tensor, sin_tensor, rotate_half_tensor)
+    # Apply RoPE if using rotary positions
+    if position_type == "rope" and cos_tensor is not None:
+        q = graph_ops.add_apply_rope(
+            network, q, position_id, cos_tensor, sin_tensor,
+            rotate_half_tensor)
+        k = graph_ops.add_apply_rope(
+            network, k, position_id, cos_tensor, sin_tensor,
+            rotate_half_tensor)
 
     # Save present K/V (before concatenation, this is the raw projection output)
     present_k = k
@@ -350,36 +421,61 @@ def _add_decoder_layer(
         attention_size, hidden_size,
         weights[f"{prefix}.w_o"])
 
+    # Optional output projection bias
+    o_bias = weights.get(f"{prefix}.o_bias")
+    if o_bias is not None:
+        attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size, o_bias)
+
     # Residual connection
     residual1 = network.add_elementwise(
         hidden, attn_out, trt.ElementWiseOperation.SUM)
 
-    # Post-attention RMSNorm
-    norm2 = graph_ops.add_rms_norm(
+    # Post-attention norm
+    norm2 = _apply_norm(
         network, residual1.get_output(0), hidden_size,
-        weights[f"{prefix}.post_attn_norm"], eps_tensor)
+        weights[f"{prefix}.post_attn_norm"],
+        weights.get(f"{prefix}.post_attn_norm_beta"),
+        eps_tensor, norm_type)
 
-    # SwiGLU MLP
-    gate = graph_ops.add_matmul_rhs_constant(
-        network, norm2, hidden_size, mlp_size,
-        weights[f"{prefix}.w_gate"])
-    up = graph_ops.add_matmul_rhs_constant(
-        network, norm2, hidden_size, mlp_size,
-        weights[f"{prefix}.w_up"])
+    # MLP
+    if mlp_type == "gelu_fc":
+        # Two-projection MLP: fc1 -> activation -> fc2
+        fc1 = graph_ops.add_matmul_rhs_constant(
+            network, norm2, hidden_size, mlp_size,
+            weights[f"{prefix}.w_fc1"])
+        fc1_bias = weights.get(f"{prefix}.fc1_bias")
+        if fc1_bias is not None:
+            fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias)
+        activated = graph_ops.add_activation(network, fc1, activation)
+        fc2 = graph_ops.add_matmul_rhs_constant(
+            network, activated, mlp_size, hidden_size,
+            weights[f"{prefix}.w_fc2"])
+        fc2_bias = weights.get(f"{prefix}.fc2_bias")
+        if fc2_bias is not None:
+            fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, fc2_bias)
+        mlp_out = fc2
+    else:
+        # SwiGLU MLP: gate/up/down with SiLU gating
+        gate = graph_ops.add_matmul_rhs_constant(
+            network, norm2, hidden_size, mlp_size,
+            weights[f"{prefix}.w_gate"])
+        up = graph_ops.add_matmul_rhs_constant(
+            network, norm2, hidden_size, mlp_size,
+            weights[f"{prefix}.w_up"])
 
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+        sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
+        swish = network.add_elementwise(
+            gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+        gated = network.add_elementwise(
+            swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
-    down = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), mlp_size, hidden_size,
-        weights[f"{prefix}.w_down"])
+        mlp_out = graph_ops.add_matmul_rhs_constant(
+            network, gated.get_output(0), mlp_size, hidden_size,
+            weights[f"{prefix}.w_down"])
 
     # Residual connection
     residual2 = network.add_elementwise(
-        residual1.get_output(0), down, trt.ElementWiseOperation.SUM)
+        residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM)
 
     return {
         "hidden": residual2.get_output(0),

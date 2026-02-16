@@ -78,8 +78,10 @@ class InternLMPlugin:
             weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
-            # ---- Fused QKV projection ----
-            # Shape: [q_dim + 2*kv_dim, hidden]
+            # ---- Fused QKV projection (group-interleaved) ----
+            # InternLM2 interleaves QKV by group:
+            #   For each KV group g: [Q_heads_in_group, K_head, V_head]
+            # Layout: [Q0,Q1,K0,V0, Q2,Q3,K1,V1, ...] when group_size=2
             wqkv_raw = _load_tensor(
                 readers, f"{hf_prefix}.attention.wqkv.weight")
             total_qkv = wqkv_raw.shape[0]
@@ -88,10 +90,21 @@ class InternLMPlugin:
                 f"Layer {layer_idx} wqkv rows {total_qkv} != "
                 f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})")
 
-            q_raw = wqkv_raw[:q_dim, :]              # [q_dim, hidden]
-            k_raw = wqkv_raw[q_dim:q_dim+kv_dim, :]  # [kv_dim, hidden]
-            v_raw = wqkv_raw[q_dim+kv_dim:, :]       # [kv_dim, hidden]
-            del wqkv_raw
+            group_size = num_heads // num_kv_heads
+            rows_per_group = group_size * head_dim + 2 * head_dim
+            q_parts, k_parts, v_parts = [], [], []
+            for g in range(num_kv_heads):
+                start = g * rows_per_group
+                q_end = start + group_size * head_dim
+                k_end = q_end + head_dim
+                v_end = k_end + head_dim
+                q_parts.append(wqkv_raw[start:q_end, :])
+                k_parts.append(wqkv_raw[q_end:k_end, :])
+                v_parts.append(wqkv_raw[k_end:v_end, :])
+            q_raw = np.concatenate(q_parts, axis=0)
+            k_raw = np.concatenate(k_parts, axis=0)
+            v_raw = np.concatenate(v_parts, axis=0)
+            del wqkv_raw, q_parts, k_parts, v_parts
 
             if attention_size == 0:
                 attention_size = q_dim

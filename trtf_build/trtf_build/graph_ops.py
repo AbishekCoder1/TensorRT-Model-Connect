@@ -121,8 +121,14 @@ def make_rope_table(
     num_attention_heads: int,
     rope_theta: float,
     cosine: bool,
+    partial_rotary_factor: float = 1.0,
 ) -> np.ndarray:
-    """Build cos or sin RoPE table of shape [max_cache_length, hidden_size]."""
+    """Build cos or sin RoPE table of shape [max_cache_length, hidden_size].
+
+    Args:
+        partial_rotary_factor: Fraction of head dimensions that get RoPE
+            (e.g. 0.25 for StableLM-2). Default 1.0 = full RoPE.
+    """
     table = np.full(
         (max_cache_length, hidden_size),
         1.0 if cosine else 0.0,
@@ -134,16 +140,16 @@ def make_rope_table(
         return table
 
     head_dim = hidden_size // num_attention_heads
-    half_head_dim = head_dim // 2
-    if half_head_dim <= 0 or rope_theta <= 0.0:
+    rotary_ndims = int(head_dim * partial_rotary_factor)
+    half_rotary = rotary_ndims // 2
+    if half_rotary <= 0 or rope_theta <= 0.0:
         return table
 
     for pos in range(max_cache_length):
         for head in range(num_attention_heads):
-            rope_dims = half_head_dim * 2
-            for dim in range(rope_dims):
-                freq_idx = dim % half_head_dim
-                exponent = (2.0 * freq_idx) / head_dim
+            for dim in range(rotary_ndims):
+                freq_idx = dim % half_rotary
+                exponent = (2.0 * freq_idx) / rotary_ndims
                 inv_freq = rope_theta ** (-exponent)
                 angle = pos * inv_freq
                 value = np.cos(angle) if cosine else np.sin(angle)
@@ -156,8 +162,14 @@ def make_rope_table(
 def make_rotate_half_matrix(
     hidden_size: int,
     num_attention_heads: int,
+    partial_rotary_factor: float = 1.0,
 ) -> np.ndarray:
-    """Build the rotate-half permutation matrix [hidden_size, hidden_size]."""
+    """Build the rotate-half permutation matrix [hidden_size, hidden_size].
+
+    For partial rotary (factor < 1.0), non-rotary dims pass through unchanged
+    via the sin=0 multiplication (the matrix zeros here don't matter since
+    they're multiplied by sin=0). But we still set identity for safety.
+    """
     matrix = np.zeros((hidden_size, hidden_size), dtype=np.float32)
     if (hidden_size <= 0 or num_attention_heads <= 0
             or hidden_size % num_attention_heads != 0):
@@ -165,21 +177,127 @@ def make_rotate_half_matrix(
         return matrix
 
     head_dim = hidden_size // num_attention_heads
-    half_head_dim = head_dim // 2
+    rotary_ndims = int(head_dim * partial_rotary_factor)
+    half_rotary = rotary_ndims // 2
 
     for head in range(num_attention_heads):
         base = head * head_dim
-        for i in range(half_head_dim):
+        for i in range(half_rotary):
             out_left = base + i
-            out_right = base + half_head_dim + i
+            out_right = base + half_rotary + i
             matrix[out_left, out_right] = 1.0
             matrix[out_right, out_left] = -1.0
 
-        if head_dim % 2 != 0:
-            tail = base + 2 * half_head_dim
+        if rotary_ndims % 2 != 0:
+            tail = base + 2 * half_rotary
             matrix[tail, tail] = 1.0
 
+        # Non-rotary dims: identity (pass through, since sin=0 for these)
+        for d in range(rotary_ndims, head_dim):
+            matrix[base + d, base + d] = 1.0
+
     return matrix
+
+
+def add_layer_norm(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    hidden_size: int,
+    gamma: np.ndarray,
+    beta: np.ndarray,
+    eps_tensor: trt.ITensor,
+) -> trt.ITensor:
+    """LayerNorm: gamma * ((x - mean) / sqrt(var + eps)) + beta."""
+    # mean = reduce_mean(x)
+    mean = network.add_reduce(
+        inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    # x - mean
+    centered = network.add_elementwise(
+        inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
+    # variance = mean((x - mean)^2)
+    sq = network.add_elementwise(
+        centered.get_output(0), centered.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    var = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    # sqrt(var + eps)
+    denom_in = network.add_elementwise(
+        var.get_output(0), eps_tensor, trt.ElementWiseOperation.SUM)
+    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
+    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
+    # normalized = (x - mean) / sqrt(var + eps)
+    normalized = network.add_elementwise(
+        centered.get_output(0), recip.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    # gamma * normalized + beta
+    gamma_t = add_constant(network, (1, hidden_size), gamma)
+    scaled = network.add_elementwise(
+        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
+    beta_t = add_constant(network, (1, hidden_size), beta)
+    result = network.add_elementwise(
+        scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
+    return result.get_output(0)
+
+
+def add_gelu_new(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+) -> trt.ITensor:
+    """GELU (tanh approximation): 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))."""
+    # x^3
+    x_sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
+    x_cu = network.add_elementwise(
+        x_sq.get_output(0), inp, trt.ElementWiseOperation.PROD)
+    # 0.044715 * x^3
+    coeff = add_constant(network, (1, 1), np.array([0.044715], dtype=np.float32))
+    scaled_cube = network.add_elementwise(
+        x_cu.get_output(0), coeff, trt.ElementWiseOperation.PROD)
+    # x + 0.044715 * x^3
+    inner_sum = network.add_elementwise(
+        inp, scaled_cube.get_output(0), trt.ElementWiseOperation.SUM)
+    # sqrt(2/pi) * (x + 0.044715 * x^3)
+    sqrt_2_over_pi = add_constant(
+        network, (1, 1),
+        np.array([np.sqrt(2.0 / np.pi)], dtype=np.float32))
+    tanh_arg = network.add_elementwise(
+        sqrt_2_over_pi, inner_sum.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    # tanh(...)
+    tanh_l = network.add_activation(
+        tanh_arg.get_output(0), trt.ActivationType.TANH)
+    # 1 + tanh(...)
+    one = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    one_plus_tanh = network.add_elementwise(
+        one, tanh_l.get_output(0), trt.ElementWiseOperation.SUM)
+    # 0.5 * x
+    half = add_constant(network, (1, 1), np.array([0.5], dtype=np.float32))
+    half_x = network.add_elementwise(
+        half, inp, trt.ElementWiseOperation.PROD)
+    # 0.5 * x * (1 + tanh(...))
+    result = network.add_elementwise(
+        half_x.get_output(0), one_plus_tanh.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    return result.get_output(0)
+
+
+def add_activation(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    activation_type: str,
+) -> trt.ITensor:
+    """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu'."""
+    if activation_type in ("gelu_new", "gelu"):
+        return add_gelu_new(network, inp)
+    elif activation_type == "relu":
+        act = network.add_activation(inp, trt.ActivationType.RELU)
+        return act.get_output(0)
+    elif activation_type == "silu":
+        sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID)
+        swish = network.add_elementwise(
+            inp, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+        return swish.get_output(0)
+    else:
+        raise ValueError(f"Unsupported activation: {activation_type}")
 
 
 def add_apply_rope(

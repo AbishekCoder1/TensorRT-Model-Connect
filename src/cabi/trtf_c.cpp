@@ -112,6 +112,10 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
     const std::vector<char>* config_json_data = nullptr;
     const std::vector<char>* tokenizer_json_data = nullptr;
     const std::vector<char>* tokenizer_config_data = nullptr;
+    const std::vector<char>* vocab_json_data = nullptr;
+    const std::vector<char>* merges_txt_data = nullptr;
+    const std::vector<char>* special_tokens_data = nullptr;
+    const std::vector<char>* tokenizer_model_data = nullptr;
 
     for (const auto& section : bundle.sections)
     {
@@ -119,6 +123,10 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
         else if (section.name == "config.json") config_json_data = &section.data;
         else if (section.name == "tokenizer.json") tokenizer_json_data = &section.data;
         else if (section.name == "tokenizer_config.json") tokenizer_config_data = &section.data;
+        else if (section.name == "vocab.json") vocab_json_data = &section.data;
+        else if (section.name == "merges.txt") merges_txt_data = &section.data;
+        else if (section.name == "special_tokens_map.json") special_tokens_data = &section.data;
+        else if (section.name == "tokenizer.model") tokenizer_model_data = &section.data;
     }
 
     if (plan_data == nullptr || plan_data->empty())
@@ -218,7 +226,12 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
     } temp_guard{temp_dir_cleanup};
 
     std::unique_ptr<trtf::ITokenizer> tokenizer;
-    if (tokenizer_json_data != nullptr && !tokenizer_json_data->empty())
+
+    // Need at least tokenizer.json, vocab.json, or tokenizer.model to initialize the tokenizer.
+    bool has_tokenizer_data = (tokenizer_json_data != nullptr && !tokenizer_json_data->empty())
+        || (vocab_json_data != nullptr && !vocab_json_data->empty())
+        || (tokenizer_model_data != nullptr && !tokenizer_model_data->empty());
+    if (has_tokenizer_data)
     {
         char temp_pattern[] = "/tmp/trtfb_tok_XXXXXX";
         char* created = mkdtemp(temp_pattern);
@@ -229,26 +242,23 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
         temp_dir_str = created;
         const std::filesystem::path temp_dir(temp_dir_str);
 
-        // Write tokenizer.json
-        {
-            std::ofstream out(temp_dir / "tokenizer.json", std::ios::binary | std::ios::trunc);
-            if (out)
+        auto write_section = [&](const char* filename, const std::vector<char>* data) {
+            if (data != nullptr && !data->empty())
             {
-                out.write(tokenizer_json_data->data(),
-                    static_cast<std::streamsize>(tokenizer_json_data->size()));
+                std::ofstream out(temp_dir / filename, std::ios::binary | std::ios::trunc);
+                if (out)
+                {
+                    out.write(data->data(), static_cast<std::streamsize>(data->size()));
+                }
             }
-        }
+        };
 
-        // Write tokenizer_config.json if present
-        if (tokenizer_config_data != nullptr && !tokenizer_config_data->empty())
-        {
-            std::ofstream out(temp_dir / "tokenizer_config.json", std::ios::binary | std::ios::trunc);
-            if (out)
-            {
-                out.write(tokenizer_config_data->data(),
-                    static_cast<std::streamsize>(tokenizer_config_data->size()));
-            }
-        }
+        write_section("tokenizer.json", tokenizer_json_data);
+        write_section("tokenizer_config.json", tokenizer_config_data);
+        write_section("vocab.json", vocab_json_data);
+        write_section("merges.txt", merges_txt_data);
+        write_section("special_tokens_map.json", special_tokens_data);
+        write_section("tokenizer.model", tokenizer_model_data);
 
         std::cerr << "[trtf] Initializing HF tokenizer from bundle ..." << std::endl;
         auto ttok0 = std::chrono::steady_clock::now();
@@ -260,7 +270,7 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
     }
     else
     {
-        throw std::runtime_error("Bundle has no tokenizer.json section: " + bundle_path);
+        throw std::runtime_error("Bundle has no tokenizer files: " + bundle_path);
     }
 
     // Create backend

@@ -24,22 +24,45 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_tokenizer(model_dir: str):
+    import os
     from transformers import AutoTokenizer
 
+    tokenizer_json = os.path.join(model_dir, "tokenizer.json")
+
+    tok = None
     try:
-        return AutoTokenizer.from_pretrained(
+        tok = AutoTokenizer.from_pretrained(
             model_dir,
             local_files_only=True,
             trust_remote_code=True,
             use_fast=True,
         )
     except Exception:
-        return AutoTokenizer.from_pretrained(
-            model_dir,
-            local_files_only=True,
-            trust_remote_code=True,
-            use_fast=False,
-        )
+        try:
+            tok = AutoTokenizer.from_pretrained(
+                model_dir,
+                local_files_only=True,
+                trust_remote_code=True,
+                use_fast=False,
+            )
+        except Exception:
+            # AutoTokenizer failed entirely (e.g. custom tokenizer class not
+            # available). Fall back to PreTrainedTokenizerFast from tokenizer.json.
+            if os.path.exists(tokenizer_json):
+                from transformers import PreTrainedTokenizerFast
+                return PreTrainedTokenizerFast(tokenizer_file=tokenizer_json)
+            raise
+
+    # Verify byte-level BPE decode round-trips correctly. Some tokenizers
+    # (e.g. LlamaTokenizer loading a Qwen2 tokenizer.json) lose spaces or
+    # produce raw byte tokens (Ġ for space). Fall back to PreTrainedTokenizerFast.
+    if os.path.exists(tokenizer_json):
+        test_ids = tok.encode("Hello world")
+        test_dec = tok.decode(test_ids, skip_special_tokens=True)
+        if "Hello world" not in test_dec:
+            from transformers import PreTrainedTokenizerFast
+            tok = PreTrainedTokenizerFast(tokenizer_file=tokenizer_json)
+    return tok
 
 
 def parse_ids_csv(ids_text: str) -> list[int]:
