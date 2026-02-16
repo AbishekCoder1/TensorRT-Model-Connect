@@ -52,6 +52,7 @@ def build_standard_decoder_engine(
     position_type: str = "rope",
     activation: str = "silu",
     partial_rotary_factor: float = 1.0,
+    parallel_residual: bool = False,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
 ) -> bytes:
@@ -199,6 +200,7 @@ def build_standard_decoder_engine(
             mlp_type=mlp_type,
             position_type=position_type,
             activation=activation,
+            parallel_residual=parallel_residual,
         )
 
         hidden_state = result["hidden"]
@@ -301,6 +303,7 @@ def _add_decoder_layer(
     mlp_type: str = "swiglu",
     position_type: str = "rope",
     activation: str = "silu",
+    parallel_residual: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
     attention_window = max_cache_length + 1
@@ -426,16 +429,28 @@ def _add_decoder_layer(
     if o_bias is not None:
         attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size, o_bias)
 
-    # Residual connection
-    residual1 = network.add_elementwise(
-        hidden, attn_out, trt.ElementWiseOperation.SUM)
-
-    # Post-attention norm
-    norm2 = _apply_norm(
-        network, residual1.get_output(0), hidden_size,
-        weights[f"{prefix}.post_attn_norm"],
-        weights.get(f"{prefix}.post_attn_norm_beta"),
-        eps_tensor, norm_type)
+    # --- Parallel vs sequential residual ---
+    if parallel_residual:
+        # Parallel residual: MLP uses a separate norm of the ORIGINAL hidden input.
+        # GPT-NeoX: post_attention_layernorm is applied to hidden (not to norm1).
+        post_attn_norm_w = weights.get(f"{prefix}.post_attn_norm")
+        if post_attn_norm_w is not None:
+            norm2 = _apply_norm(
+                network, hidden, hidden_size,
+                post_attn_norm_w,
+                weights.get(f"{prefix}.post_attn_norm_beta"),
+                eps_tensor, norm_type)
+        else:
+            norm2 = norm1
+    else:
+        # Sequential: residual after attention, then norm before MLP
+        residual1 = network.add_elementwise(
+            hidden, attn_out, trt.ElementWiseOperation.SUM)
+        norm2 = _apply_norm(
+            network, residual1.get_output(0), hidden_size,
+            weights[f"{prefix}.post_attn_norm"],
+            weights.get(f"{prefix}.post_attn_norm_beta"),
+            eps_tensor, norm_type)
 
     # MLP
     if mlp_type == "gelu_fc":
@@ -473,13 +488,22 @@ def _add_decoder_layer(
             network, gated.get_output(0), mlp_size, hidden_size,
             weights[f"{prefix}.w_down"])
 
-    # Residual connection
-    residual2 = network.add_elementwise(
-        residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM)
+    # Final residual connection
+    if parallel_residual:
+        # hidden + attn_out + mlp_out
+        sum_attn = network.add_elementwise(
+            hidden, attn_out, trt.ElementWiseOperation.SUM)
+        residual2 = network.add_elementwise(
+            sum_attn.get_output(0), mlp_out, trt.ElementWiseOperation.SUM)
+        post_attn_tensor = sum_attn.get_output(0)
+    else:
+        residual2 = network.add_elementwise(
+            residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM)
+        post_attn_tensor = residual1.get_output(0)
 
     return {
         "hidden": residual2.get_output(0),
-        "post_attn": residual1.get_output(0),
+        "post_attn": post_attn_tensor,
         "present_k": present_k,
         "present_v": present_v,
     }

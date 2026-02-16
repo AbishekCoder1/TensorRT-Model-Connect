@@ -50,12 +50,19 @@ class ModelConfig:
     def from_json(text: str) -> ModelConfig:
         d = json.loads(text)
 
-        # GPT-2 uses n_embd/n_head/n_layer/n_inner instead of standard names.
-        hidden_size = d.get("hidden_size", 0) or d.get("n_embd", 0)
-        num_heads = d.get("num_attention_heads", 0) or d.get("n_head", 1)
-        num_layers = d.get("num_hidden_layers", 0) or d.get("n_layer", 0)
+        # Handle non-standard config key names:
+        #   GPT-2: n_embd, n_head, n_layer, n_inner
+        #   XGLM/Bloom: d_model, attention_heads, num_layers, ffn_dim
+        hidden_size = (d.get("hidden_size", 0) or d.get("n_embd", 0)
+                       or d.get("d_model", 0) or d.get("n_embed", 0))
+        num_heads = (d.get("num_attention_heads", 0) or d.get("n_head", 0)
+                     or d.get("attention_heads", 0) or d.get("num_heads", 0)
+                     or 1)
+        num_layers = (d.get("num_hidden_layers", 0) or d.get("n_layer", 0)
+                      or d.get("num_layers", 0))
         intermediate = (d.get("intermediate_size", 0)
                         or d.get("n_inner", 0)
+                        or d.get("ffn_dim", 0)
                         or hidden_size * 4)
 
         # Norm epsilon: try rms_norm_eps, then layer_norm_epsilon, then
@@ -83,7 +90,7 @@ class ModelConfig:
             tie_word_embeddings=d.get("tie_word_embeddings", False),
             max_position_embeddings=d.get("max_position_embeddings",
                                           d.get("n_positions", 8192)),
-            hidden_act=d.get("hidden_act", ""),
+            hidden_act=d.get("hidden_act", "") or d.get("activation_function", ""),
             _head_dim=d.get("head_dim", 0),
             raw=d,
         )

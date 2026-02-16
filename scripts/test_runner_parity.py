@@ -6,6 +6,9 @@ generated tokens. This is the consistency guarantee between the Python
 debug runner and the C++ runtime — if either side changes its mask,
 cache, or position logic, this test catches the divergence.
 
+Supports both standard KV-cache decoders (TrtRunner) and Mamba/SSM
+models (MambaTrtRunner), auto-detected from the bundle's config.json.
+
 Usage (inside container):
     python3 scripts/test_runner_parity.py \
       --bundle /tmp/qwen3.trtfb \
@@ -17,11 +20,57 @@ Usage (inside container):
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
+import struct
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 import numpy as np
+
+
+def _read_bundle_header(bundle: str) -> tuple[dict, dict, int]:
+    """Read bundle header, sections, and data_start offset.
+
+    Returns (header_raw, sections, data_start).
+    """
+    with open(bundle, "rb") as f:
+        _magic = f.read(8)
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header_raw = json.loads(f.read(header_len).decode("utf-8"))
+        sections = header_raw.get("sections", {})
+        data_start = 16 + header_len
+    return header_raw, sections, data_start
+
+
+def _extract_bundle_files(bundle: str, sections: dict,
+                          data_start: int) -> str:
+    """Extract tokenizer and config files from bundle into a temp dir."""
+    tmpdir = tempfile.mkdtemp(prefix="trtf_parity_")
+    with open(bundle, "rb") as f:
+        for name in ("tokenizer.json", "tokenizer_config.json",
+                     "config.json", "special_tokens_map.json",
+                     "vocab.json", "merges.txt"):
+            if name in sections:
+                meta = sections[name]
+                f.seek(data_start + meta["offset"])
+                data = f.read(meta["size"])
+                Path(tmpdir, name).write_bytes(data)
+    return tmpdir
+
+
+def _read_bundle_config(bundle: str, sections: dict,
+                        data_start: int) -> dict:
+    """Read config.json from the bundle."""
+    if "config.json" not in sections:
+        return {}
+    with open(bundle, "rb") as f:
+        meta = sections["config.json"]
+        f.seek(data_start + meta["offset"])
+        return json.loads(f.read(meta["size"]).decode("utf-8"))
 
 
 def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int,
@@ -43,58 +92,47 @@ def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int,
     return result.stdout.strip()
 
 
-def run_python(bundle: str, prompt: str, max_new_tokens: int) -> tuple[str, list[int]]:
-    """Run Python TrtRunner, return (generated_text, all_token_ids)."""
+def run_python(bundle: str, prompt: str,
+               max_new_tokens: int) -> tuple[str, list[int]]:
+    """Run Python TrtRunner (or MambaTrtRunner), return (text, token_ids)."""
     from trtf_build.debug_runner import load_engine_from_bundle, TrtRunner
 
-    engine_plan, header = load_engine_from_bundle(bundle)
+    engine_plan, _header = load_engine_from_bundle(bundle)
 
-    # We need a tokenizer — extract from the bundle or use HF
-    import json
-    import struct
-    import tempfile
-    from pathlib import Path
+    header_raw, sections, data_start = _read_bundle_header(bundle)
+    tmpdir = _extract_bundle_files(bundle, sections, data_start)
+    cfg = _read_bundle_config(bundle, sections, data_start)
 
-    # Read tokenizer files and config from bundle
-    eos_token_id = -1
-    with open(bundle, "rb") as f:
-        magic = f.read(8)
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header_raw = json.loads(f.read(header_len).decode("utf-8"))
-        sections = header_raw.get("sections", {})
-        data_start = 16 + header_len
+    # Determine runtime strategy
+    runtime_strategy = cfg.get("runtime_strategy", "decoder_kv_cache")
 
-        tmpdir = tempfile.mkdtemp(prefix="trtf_parity_")
-        for name in ("tokenizer.json", "tokenizer_config.json", "config.json"):
-            if name in sections:
-                meta = sections[name]
-                f.seek(data_start + meta["offset"])
-                data = f.read(meta["size"])
-                Path(tmpdir, name).write_bytes(data)
-
-        # Extract eos_token_id from config.json (matches C++ EOS detection)
-        if "config.json" in sections:
-            meta = sections["config.json"]
-            f.seek(data_start + meta["offset"])
-            cfg = json.loads(f.read(meta["size"]).decode("utf-8"))
-            eid = cfg.get("eos_token_id", -1)
-            # eos_token_id can be an int or a list — use first element if list
-            if isinstance(eid, list):
-                eos_token_id = eid[0] if eid else -1
-            else:
-                eos_token_id = eid
+    # Extract eos_token_id (matches C++ EOS detection)
+    eid = cfg.get("eos_token_id", -1)
+    if isinstance(eid, list):
+        eos_token_id = eid[0] if eid else -1
+    else:
+        eos_token_id = eid
 
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(tmpdir, trust_remote_code=True)
 
-    runner = TrtRunner(
-        engine_plan=engine_plan,
-        max_cache_length=header_raw["max_cache_length"],
-        num_layers=header_raw["num_layers"],
-    )
+    # Create the appropriate runner
+    if runtime_strategy == "ssm_recurrent":
+        from trtf_build.debug_runner import MambaTrtRunner
+        runner = MambaTrtRunner(
+            engine_plan=engine_plan,
+            num_layers=header_raw["num_layers"],
+        )
+    else:
+        runner = TrtRunner(
+            engine_plan=engine_plan,
+            max_cache_length=header_raw["max_cache_length"],
+            num_layers=header_raw["num_layers"],
+        )
 
-    # Encode prompt
-    input_ids = tokenizer.encode(prompt)
+    # Encode prompt — use add_special_tokens=False to match the C++ runtime,
+    # which calls hf_tokenizer.py with add_special_tokens=False.
+    input_ids = tokenizer.encode(prompt, add_special_tokens=False)
 
     # Prefill
     for tid in input_ids:
@@ -114,7 +152,6 @@ def run_python(bundle: str, prompt: str, max_new_tokens: int) -> tuple[str, list
     text = tokenizer.decode(gen_ids, skip_special_tokens=True)
 
     # Cleanup
-    import shutil
     shutil.rmtree(tmpdir, ignore_errors=True)
 
     return text, gen_ids
@@ -149,7 +186,9 @@ def main():
                                   args.max_new_tokens)
     print(f"Python: {py_text!r}")
 
-    # Compare
+    # Compare (strip both to normalize trailing whitespace from stdout)
+    cpp_text = cpp_text.strip()
+    py_text = py_text.strip()
     match = cpp_text == py_text
     print(f"\nExact match: {match}")
 
