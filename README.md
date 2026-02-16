@@ -20,11 +20,12 @@ Prerequisites: Docker + NVIDIA Container Toolkit.
 source .venv/bin/activate
 
 # 3. Build a bundle from a HuggingFace model (auto-downloads)
-trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb
+#    Bundles are stored on persistent storage so they survive container restarts.
+trtf-build build Qwen/Qwen3-0.6B -o /mnt/storage/trt-transformers/engines/qwen3.trtfb
 
 # 4. Run inference
 export LD_LIBRARY_PATH="$(python3 -c 'import importlib.util; s=importlib.util.find_spec(\"tensorrt_libs\"); print(s.submodule_search_locations[0])'):/usr/local/cuda/lib64"
-./build/trtf run /tmp/qwen3.trtfb \
+./build/trtf run /mnt/storage/trt-transformers/engines/qwen3.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --hf-python .venv/bin/python
@@ -110,15 +111,37 @@ trtf_has_trt();              // 1 if compiled with TRT support
 
 ## Supported models
 
-| Model | HF Repo | `model_type` | Family |
-|-------|---------|-------------|--------|
-| Qwen3-0.6B | `Qwen/Qwen3-0.6B` | `qwen3` | Qwen |
-| DeepSeek-R1-Distill-1.5B | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | `qwen2` | Qwen |
-| TinyLlama-1.1B | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` | `llama` | LLaMA |
-| TinyMistral-248M | `Felladrin/TinyMistral-248M-Chat-v2` | `mistral` | Mistral |
-| Gemma-2B | `google/gemma-2b` | `gemma` | Gemma |
+13 model families covering dense decoders, MoE, and multiple architecture variants.
 
-Any HF model whose `model_type` matches a supported family works automatically.
+### Standard decoder (RMSNorm + RoPE + SwiGLU)
+
+| Family | Example Model | `model_type` | Build Command |
+|--------|--------------|-------------|---------------|
+| **Qwen** | Qwen/Qwen3-0.6B | `qwen`, `qwen2`, `qwen3` | `trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb` |
+| **LLaMA** | TinyLlama/TinyLlama-1.1B-Chat-v1.0 | `llama` | `trtf-build build TinyLlama/TinyLlama-1.1B-Chat-v1.0 -o tinyllama.trtfb` |
+| **Mistral** | mistralai/Mistral-7B-v0.1 | `mistral` | `trtf-build build mistralai/Mistral-7B-v0.1 -o mistral.trtfb` |
+| **Gemma** | google/gemma-2-2b | `gemma`, `gemma2` | `trtf-build build google/gemma-2-2b -o gemma2.trtfb` |
+| **Phi-3** | microsoft/Phi-3-mini-4k-instruct | `phi`, `phi3` | `trtf-build build microsoft/Phi-3-mini-4k-instruct -o phi3.trtfb` |
+| **Granite** | ibm-granite/granite-3.1-2b-base | `granite` | `trtf-build build ibm-granite/granite-3.1-2b-base -o granite.trtfb` |
+| **InternLM** | internlm/internlm2-math-plus-1_8b | `internlm2` | `trtf-build build internlm/internlm2-math-plus-1_8b -o internlm2.trtfb` |
+
+### Extended decoder (LayerNorm, GELU, learned positions)
+
+| Family | Example Model | `model_type` | Build Command |
+|--------|--------------|-------------|---------------|
+| **StarCoder2** | bigcode/starcoder2-3b | `starcoder2` | `trtf-build build bigcode/starcoder2-3b -o starcoder2.trtfb` |
+| **GPT-2** | openai-community/gpt2 | `gpt2` | `trtf-build build openai-community/gpt2 -o gpt2.trtfb` |
+| **OPT** | facebook/opt-125m | `opt` | `trtf-build build facebook/opt-125m -o opt.trtfb` |
+| **Falcon** | tiiuae/Falcon3-1B-Base | `falcon` | `trtf-build build tiiuae/Falcon3-1B-Base -o falcon.trtfb` |
+| **StableLM** | stabilityai/stablelm-2-1_6b | `stablelm` | `trtf-build build stabilityai/stablelm-2-1_6b -o stablelm.trtfb` |
+
+### Mixture of Experts (MoE)
+
+| Family | Example Model | `model_type` | Build Command |
+|--------|--------------|-------------|---------------|
+| **Phi-MoE** | microsoft/Phi-tiny-MoE-instruct | `phimoe` | `trtf-build build microsoft/Phi-tiny-MoE-instruct -o phi-moe.trtfb` |
+
+Any HF model whose `model_type` matches a supported family works automatically. Store bundles on persistent storage with `-o /mnt/storage/trt-transformers/engines/model.trtfb`.
 
 ## Adding a model family
 
