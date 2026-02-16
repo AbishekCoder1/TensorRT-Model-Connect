@@ -1,4 +1,4 @@
-"""Qwen family plugin — Qwen, Qwen2, Qwen3, QwQ."""
+"""Qwen family plugin — Qwen, Qwen2, Qwen3, QwQ (text-only, not VL)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,9 @@ class QwenPlugin:
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
+        # Exclude vision-language variants (handled by qwen_vl plugin).
+        if "vl" in mt:
+            return False
         return mt.startswith("qwen") or mt.startswith("qwq")
 
     def load_weights(

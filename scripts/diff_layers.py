@@ -14,6 +14,7 @@ Usage:
 """
 import argparse
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -68,9 +69,31 @@ def _load_hf_model(model_dir, trust_remote_code=False):
     If the model requires custom code (e.g. older repos without native
     transformers support), pass --trust-remote-code to enable it.
     This executes Python code from the model repository.
+
+    For vision-language models (e.g. Qwen2.5-VL), loads the full VL model
+    but only uses the text decoder path for comparison.
     """
+    import json
     import torch
     from transformers import AutoModelForCausalLM
+
+    # Check if this is a VL model that requires a different AutoModel class.
+    config_path = Path(model_dir) / "config.json"
+    is_vl_model = False
+    if config_path.exists():
+        cfg = json.loads(config_path.read_text())
+        model_type = cfg.get("model_type", "").lower()
+        if "vl" in model_type or "vision" in model_type:
+            is_vl_model = True
+
+    if is_vl_model:
+        from transformers import AutoModelForImageTextToText
+        print("[diff-layers] Loading VL model via AutoModelForImageTextToText ...",
+              file=sys.stderr)
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_dir, trust_remote_code=trust_remote_code,
+            torch_dtype=torch.float32)
+        return model
 
     try:
         return AutoModelForCausalLM.from_pretrained(
