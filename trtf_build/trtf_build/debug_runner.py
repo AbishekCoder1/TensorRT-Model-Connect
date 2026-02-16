@@ -106,11 +106,24 @@ class TrtRunner:
             self._device_buffers[name] = d_ptr
             self._host_buffers[name] = np.zeros(shape, dtype=dtype_np)
 
-    def step(self, token_id: int) -> dict[str, np.ndarray]:
+    @property
+    def has_embed_input(self) -> bool:
+        """True if the engine has input_embed and use_input_embed inputs."""
+        return "input_embed" in self._host_buffers
+
+    def step(
+        self,
+        token_id: int,
+        input_embed: np.ndarray | None = None,
+        use_input_embed: float = 0.0,
+    ) -> dict[str, np.ndarray]:
         """Run one decode step (manages position and cache internally).
 
         Args:
             token_id: Input token ID.
+            input_embed: Optional pre-computed embedding [1, hidden] for VL prefill.
+                Only used if the engine was built with embed_input=True.
+            use_input_embed: 0.0 = use token_id lookup, 1.0 = use input_embed.
 
         Returns:
             Dict with 'logits' (1D float32 array of vocab size) and any
@@ -134,6 +147,17 @@ class TrtRunner:
         self._host_buffers["token_id"][:] = np.array([token_id], dtype=np.int32)
         self._host_buffers["position_id"][:] = np.array([position_id], dtype=np.int32)
         self._host_buffers["attention_mask"][:] = mask
+
+        # VL embed_input support
+        if self.has_embed_input:
+            if input_embed is not None and use_input_embed > 0.5:
+                self._host_buffers["input_embed"][:] = input_embed.astype(np.float32)
+                self._host_buffers["use_input_embed"][:] = np.array(
+                    [use_input_embed], dtype=np.float32)
+            else:
+                self._host_buffers["input_embed"][:] = 0.0
+                self._host_buffers["use_input_embed"][:] = np.array(
+                    [0.0], dtype=np.float32)
 
         for i in range(self.num_layers):
             ck_name = f"cache_k_{i}"
@@ -445,3 +469,372 @@ def runner_from_bundle(bundle_path: str) -> TrtRunner:
         max_cache_length=header["max_cache_length"],
         num_layers=header["num_layers"],
     )
+
+
+def load_vision_engine_from_bundle(bundle_path: str) -> tuple[bytes | None, dict]:
+    """Load vision engine plan bytes from a .trtfb bundle.
+
+    Returns:
+        (vision_engine_plan_bytes_or_None, header_dict)
+    """
+    import json
+    import struct
+
+    with open(bundle_path, "rb") as f:
+        magic = f.read(8)
+        if magic != b"TRTFB\x00\x01\x00":
+            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len).decode("utf-8"))
+        sections = header.get("sections", {})
+        vision_meta = sections.get("vision_engine_plan")
+        if vision_meta is None:
+            return None, header
+        f.seek(16 + header_len + vision_meta["offset"])
+        vision_plan = f.read(vision_meta["size"])
+
+    return vision_plan, header
+
+
+class VisionTrtRunner:
+    """Single-pass TRT inference for vision encoder. Validation only.
+
+    Deserializes a vision TRT engine and runs a single forward pass.
+    No KV cache, no autoregressive loop.
+    """
+
+    def __init__(self, engine_plan: bytes):
+        logger = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(logger)
+        self.engine = runtime.deserialize_cuda_engine(engine_plan)
+        if self.engine is None:
+            raise RuntimeError("Failed to deserialize vision TRT engine")
+        self.context = self.engine.create_execution_context()
+
+        err, self.stream = cudart.cudaStreamCreate()
+        _check_cuda(err)
+
+        # Discover IO tensors
+        self._input_names = []
+        self._output_names = []
+        self._device_buffers: dict[str, int] = {}
+        self._host_buffers: dict[str, np.ndarray] = {}
+
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            mode = self.engine.get_tensor_mode(name)
+            shape = tuple(self.engine.get_tensor_shape(name))
+            dtype_trt = self.engine.get_tensor_dtype(name)
+            dtype_np = trt.nptype(dtype_trt)
+            nbytes = int(np.prod(shape)) * np.dtype(dtype_np).itemsize
+
+            err, d_ptr = cudart.cudaMalloc(nbytes)
+            _check_cuda(err)
+            self._device_buffers[name] = d_ptr
+            self._host_buffers[name] = np.zeros(shape, dtype=dtype_np)
+
+            if mode == trt.TensorIOMode.INPUT:
+                self._input_names.append(name)
+            else:
+                self._output_names.append(name)
+
+    def encode(self, **inputs: np.ndarray) -> dict[str, np.ndarray]:
+        """Run a single forward pass through the vision encoder.
+
+        Args:
+            **inputs: Named input arrays (e.g. patch_embeds=...).
+
+        Returns:
+            Dict of output name -> numpy array.
+        """
+        # Set input values
+        for name, value in inputs.items():
+            if name in self._host_buffers:
+                self._host_buffers[name][:] = value.astype(
+                    self._host_buffers[name].dtype)
+
+        # Copy inputs to device
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            mode = self.engine.get_tensor_mode(name)
+            self.context.set_tensor_address(name, self._device_buffers[name])
+            if mode == trt.TensorIOMode.INPUT:
+                h_buf = self._host_buffers[name]
+                cudart.cudaMemcpyAsync(
+                    self._device_buffers[name],
+                    h_buf.ctypes.data,
+                    h_buf.nbytes,
+                    cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
+                    self.stream,
+                )
+
+        self.context.execute_async_v3(self.stream)
+
+        # Copy outputs
+        results: dict[str, np.ndarray] = {}
+        for name in self._output_names:
+            h_buf = self._host_buffers[name]
+            cudart.cudaMemcpyAsync(
+                h_buf.ctypes.data,
+                self._device_buffers[name],
+                h_buf.nbytes,
+                cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+                self.stream,
+            )
+
+        cudart.cudaStreamSynchronize(self.stream)
+
+        for name in self._output_names:
+            results[name] = self._host_buffers[name].copy()
+
+        return results
+
+    def __del__(self):
+        for d_ptr in self._device_buffers.values():
+            cudart.cudaFree(d_ptr)
+        if hasattr(self, "stream"):
+            cudart.cudaStreamDestroy(self.stream)
+
+
+# ---------------------------------------------------------------------------
+# Bundle section utilities
+# ---------------------------------------------------------------------------
+
+def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | None:
+    """Load a named section's raw bytes from a .trtfb bundle.
+
+    Returns None if the section doesn't exist.
+    """
+    import json
+    import struct
+
+    with open(bundle_path, "rb") as f:
+        magic = f.read(8)
+        if magic != b"TRTFB\x00\x01\x00":
+            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len).decode("utf-8"))
+        sections = header.get("sections", {})
+        meta = sections.get(section_name)
+        if meta is None:
+            return None
+        f.seek(16 + header_len + meta["offset"])
+        return f.read(meta["size"])
+
+
+def load_config_from_bundle(bundle_path: str) -> dict:
+    """Load and parse config.json from a .trtfb bundle."""
+    import json
+    data = load_section_from_bundle(bundle_path, "config.json")
+    if data is None:
+        return {}
+    return json.loads(data.decode("utf-8"))
+
+
+def load_preprocessor_config_from_bundle(bundle_path: str) -> dict:
+    """Load and parse preprocessor_config.json from a .trtfb bundle."""
+    import json
+    data = load_section_from_bundle(bundle_path, "preprocessor_config.json")
+    if data is None:
+        return {}
+    return json.loads(data.decode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# VL combined runner
+# ---------------------------------------------------------------------------
+
+def preprocess_image_for_trt(
+    image_path: str,
+    fixed_image_size: int = 448,
+    temporal_patch_size: int = 2,
+    image_mean: tuple[float, ...] = (0.48145466, 0.4578275, 0.40821073),
+    image_std: tuple[float, ...] = (0.26862954, 0.26130258, 0.27577711),
+    patch_size: int = 14,
+    merge_size: int = 2,
+) -> np.ndarray:
+    """Load and preprocess an image for the TRT vision engine.
+
+    Returns pixel_values [C*T, H, W] with merge-group patch permutation.
+
+    The TRT vision engine's Conv2D produces patches in raster order of the
+    input image. To match HF's pipeline (where patches come out in merge-group
+    order after the processor's reshape+transpose), we spatially rearrange
+    the image at the 14x14 patch level: patches that should be in merge-group
+    positions are placed at the corresponding raster positions.
+
+    Channel layout: [R_t0, R_t1, G_t0, G_t1, B_t0, B_t1] matching Conv3D
+    weight layout [out, C, T, kH, kW] reshaped to Conv2D [out, C*T, kH, kW].
+    """
+    from PIL import Image
+
+    img = Image.open(image_path).convert("RGB")
+    img = img.resize((fixed_image_size, fixed_image_size), Image.BICUBIC)
+    img_np = np.array(img, dtype=np.float32) / 255.0
+
+    # Normalize per channel
+    mean = np.array(image_mean, dtype=np.float32)
+    std = np.array(image_std, dtype=np.float32)
+    img_np = (img_np - mean) / std
+
+    # HWC -> CHW
+    img_chw = img_np.transpose(2, 0, 1)  # [C, H, W]
+    C = img_chw.shape[0]
+    T = temporal_patch_size
+    H = W = fixed_image_size
+    grid_h = H // patch_size
+    grid_w = W // patch_size
+
+    # Extract 14x14 patches from the original image: [gH, gW, C, pH, pW]
+    orig_patches = img_chw.reshape(
+        C, grid_h, patch_size, grid_w, patch_size
+    ).transpose(1, 3, 0, 2, 4)  # [gH, gW, C, pH, pW]
+
+    # Build merge-group ordering: maps merge-group index → (orig_h, orig_w)
+    # Merge groups iterate: (mh, mw, dh, dw) with orig = (mh*2+dh, mw*2+dw)
+    merge_h = grid_h // merge_size
+    merge_w = grid_w // merge_size
+    merge_idx = np.zeros((grid_h * grid_w, 2), dtype=np.int32)
+    idx = 0
+    for mh in range(merge_h):
+        for mw in range(merge_w):
+            for dh in range(merge_size):
+                for dw in range(merge_size):
+                    merge_idx[idx] = [mh * merge_size + dh, mw * merge_size + dw]
+                    idx += 1
+
+    # Place merge-group-ordered patches at raster positions in pseudo-image.
+    # Patch at raster position i in the pseudo-image gets the content from
+    # the original position merge_idx[i], so Conv2D output patch i matches
+    # HF's i-th merge-group-ordered patch.
+    pseudo_patches = np.zeros_like(orig_patches)  # [gH, gW, C, pH, pW]
+    for i in range(grid_h * grid_w):
+        ph = i // grid_w
+        pw = i % grid_w
+        oh, ow = merge_idx[i]
+        pseudo_patches[ph, pw] = orig_patches[oh, ow]
+
+    # Reconstruct pseudo-image: [C, H, W]
+    pseudo_img = pseudo_patches.transpose(2, 0, 3, 1, 4).reshape(C, H, W)
+
+    # Temporal duplication with [C, T] channel layout:
+    # [R_t0, R_t1, G_t0, G_t1, B_t0, B_t1]
+    pixel_values = np.repeat(pseudo_img, T, axis=0)  # [C*T, H, W]
+    return pixel_values.astype(np.float32)
+
+
+class VLTrtRunner:
+    """Full VL pipeline runner combining vision encoder + text decoder.
+
+    Runs: preprocess image -> vision TRT -> build prompt -> text TRT decode.
+    Matches the C++ VLBackendFastPath pipeline exactly.
+    """
+
+    def __init__(
+        self,
+        bundle_path: str,
+        tokenizer=None,
+    ):
+        self.bundle_path = bundle_path
+        self.config = load_config_from_bundle(bundle_path)
+        self.preproc_config = load_preprocessor_config_from_bundle(bundle_path)
+
+        # Load text decoder engine
+        engine_plan, header = load_engine_from_bundle(bundle_path)
+        self.text_runner = TrtRunner(
+            engine_plan=engine_plan,
+            max_cache_length=header["max_cache_length"],
+            num_layers=header["num_layers"],
+        )
+
+        # Load vision engine
+        vision_plan, _ = load_vision_engine_from_bundle(bundle_path)
+        self.vision_runner = VisionTrtRunner(vision_plan) if vision_plan else None
+
+        # VL config from bundle
+        self.image_token_id = self.config.get("image_token_id", -1)
+        self.num_image_pad_tokens = self.config.get("num_image_pad_tokens", 256)
+        self.vl_prompt_template = self.config.get("vl_prompt_template", "")
+        self.image_token_str = self.config.get("image_token_str", "")
+        self.fixed_image_size = self.config.get("fixed_image_size", 448)
+
+        # Preprocessor config
+        self.temporal_patch_size = self.preproc_config.get("temporal_patch_size", 2)
+        self.image_mean = tuple(self.preproc_config.get(
+            "image_mean", [0.48145466, 0.4578275, 0.40821073]))
+        self.image_std = tuple(self.preproc_config.get(
+            "image_std", [0.26862954, 0.26130258, 0.27577711]))
+
+        self.tokenizer = tokenizer
+
+    def encode_image(self, image_path: str) -> np.ndarray:
+        """Run the vision encoder on an image. Returns [N, dim] features."""
+        if self.vision_runner is None:
+            raise RuntimeError("No vision engine in bundle")
+
+        pixel_values = preprocess_image_for_trt(
+            image_path,
+            fixed_image_size=self.fixed_image_size,
+            temporal_patch_size=self.temporal_patch_size,
+            image_mean=self.image_mean,
+            image_std=self.image_std,
+        )
+        results = self.vision_runner.encode(pixel_values=pixel_values)
+        return results["image_features"]
+
+    def format_prompt(self, user_prompt: str) -> str:
+        """Format the VL prompt with image pad tokens."""
+        image_pads = self.image_token_str * self.num_image_pad_tokens
+        result = self.vl_prompt_template
+        result = result.replace("{image_pads}", image_pads)
+        result = result.replace("{prompt}", user_prompt)
+        return result
+
+    def generate_vl(
+        self,
+        input_ids: list[int],
+        image_features: np.ndarray,
+        max_new_tokens: int,
+    ) -> list[int]:
+        """Run VL generation with pre-computed image features.
+
+        Matches C++ VLBackendFastPath::generate_vl exactly:
+        - During prefill, image_token_id tokens are replaced with image features.
+        - During decode, normal autoregressive generation.
+        """
+        feat_idx = 0
+        output_ids = list(input_ids)
+
+        # Prefill: all but last token
+        for tid in input_ids[:-1]:
+            embed = None
+            use_embed = 0.0
+            if tid == self.image_token_id and feat_idx < len(image_features):
+                embed = image_features[feat_idx:feat_idx+1]  # [1, dim]
+                use_embed = 1.0
+                feat_idx += 1
+            self.text_runner.step(tid, input_embed=embed, use_input_embed=use_embed)
+
+        # Last prefill token
+        last_tid = input_ids[-1]
+        embed = None
+        use_embed = 0.0
+        if last_tid == self.image_token_id and feat_idx < len(image_features):
+            embed = image_features[feat_idx:feat_idx+1]
+            use_embed = 1.0
+            feat_idx += 1
+        result = self.text_runner.step(last_tid, input_embed=embed, use_input_embed=use_embed)
+
+        # Decode
+        for _ in range(max_new_tokens):
+            logits = result["logits"].flatten()
+            next_token = int(np.argmax(logits))
+            output_ids.append(next_token)
+            eos_ids = self.config.get("eos_token_id", [])
+            if isinstance(eos_ids, int):
+                eos_ids = [eos_ids]
+            if next_token in eos_ids:
+                break
+            result = self.text_runner.step(next_token)
+
+        return output_ids

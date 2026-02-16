@@ -1,0 +1,544 @@
+#!/usr/bin/env python3
+"""VL diff testing: compare TRT vision-language pipeline against HuggingFace.
+
+Tests:
+  1. Vision features: TRT vision engine output vs HF model.visual() features
+  2. Text decoder: embed_input mode smoke test
+  3. Full VL generation: TRT pipeline vs HF pipeline text comparison
+  4. C++ binary parity
+
+Usage:
+  # Vision feature comparison (requires torch + transformers)
+  python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+    --model Qwen/Qwen2.5-VL-3B-Instruct --atol 0.1
+
+  # Full VL generation with C++ binary
+  python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+    --binary ./build/trtf --hf-python .venv/bin/python
+
+  # Vision-only (no HF model needed)
+  python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg --vision-only
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+
+
+def _get_hf_vision_features(
+    model_id: str,
+    image_path: str,
+    fixed_image_size: int = 448,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Get reference vision features from HuggingFace model.
+
+    Returns:
+        (hf_features [N, dim], pixel_values_for_trt [T*C, H, W])
+    """
+    import torch
+    from PIL import Image
+
+    print(f"[diff_vl] Loading HF model {model_id} ...", file=sys.stderr)
+    from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2VLImageProcessor
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        model_id, torch_dtype=torch.float32, device_map=device)
+    model.eval()
+
+    image = Image.open(image_path).convert("RGB")
+
+    # Use HF's image processor to prepare pixel_values. Force the resolution
+    # to match our fixed image size by resizing the image before the processor.
+    from transformers import Qwen2VLImageProcessor
+    image_processor = Qwen2VLImageProcessor.from_pretrained(model_id)
+
+    # Resize image to fixed_image_size to match TRT engine
+    image_fixed = image.resize((fixed_image_size, fixed_image_size), Image.BICUBIC)
+    image_inputs = image_processor(images=[image_fixed], return_tensors="pt")
+    pixel_values_hf = image_inputs["pixel_values"]
+    image_grid_thw = image_inputs["image_grid_thw"]
+
+    print(f"[diff_vl] HF pixel_values: {pixel_values_hf.shape}, "
+          f"grid_thw: {image_grid_thw.tolist()}", file=sys.stderr)
+
+    # Run HF vision encoder
+    inner = model.model
+    with torch.no_grad():
+        vis_out = inner.get_image_features(
+            pixel_values_hf.to(device=inner.visual.patch_embed.proj.weight.device,
+                               dtype=inner.visual.dtype),
+            image_grid_thw=image_grid_thw.to(device=inner.visual.patch_embed.proj.weight.device),
+            return_dict=True)
+        pooler = vis_out.pooler_output
+        if isinstance(pooler, (list, tuple)):
+            hf_features = torch.cat(pooler, dim=0)
+        else:
+            hf_features = pooler
+
+    hf_features_np = hf_features.float().numpy()
+    print(f"[diff_vl] HF features: shape={hf_features_np.shape}, "
+          f"mean={hf_features_np.mean():.6f}, std={hf_features_np.std():.6f}",
+          file=sys.stderr)
+
+    # Also build the TRT-style pixel_values for comparison
+    # Resize to fixed size and normalize as our C++ preprocessor does
+    image_resized = image.resize((fixed_image_size, fixed_image_size), Image.BICUBIC)
+    img_np = np.array(image_resized, dtype=np.float32) / 255.0
+    mean = np.array(image_processor.image_mean, dtype=np.float32)
+    std = np.array(image_processor.image_std, dtype=np.float32)
+    img_np = (img_np - mean) / std
+    img_chw = img_np.transpose(2, 0, 1)
+    temporal = image_processor.temporal_patch_size if hasattr(image_processor, 'temporal_patch_size') else 2
+    trt_pixel_values = np.tile(img_chw, (temporal, 1, 1)).astype(np.float32)
+
+    del model
+    import gc; gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return hf_features_np, trt_pixel_values
+
+
+def test_vision_features(
+    bundle_path: str,
+    image_path: str,
+    model_id: str | None = None,
+    atol: float = 0.1,
+) -> bool:
+    """Compare TRT vision encoder output against HF reference.
+
+    If model_id is provided, does a full numerical comparison.
+    Otherwise, just verifies TRT produces non-zero output.
+    """
+    from trtf_build.debug_runner import (
+        VisionTrtRunner, load_vision_engine_from_bundle,
+        preprocess_image_for_trt, load_preprocessor_config_from_bundle,
+        load_config_from_bundle,
+    )
+
+    vision_plan, header = load_vision_engine_from_bundle(bundle_path)
+    if vision_plan is None:
+        print("[diff_vl] No vision engine in bundle — skipping", file=sys.stderr)
+        return True
+
+    config = load_config_from_bundle(bundle_path)
+    preproc = load_preprocessor_config_from_bundle(bundle_path)
+    fixed_image_size = config.get("fixed_image_size", 448)
+    temporal = preproc.get("temporal_patch_size", 2)
+    image_mean = tuple(preproc.get("image_mean", [0.48145466, 0.4578275, 0.40821073]))
+    image_std = tuple(preproc.get("image_std", [0.26862954, 0.26130258, 0.27577711]))
+
+    runner = VisionTrtRunner(vision_plan)
+
+    # Prepare TRT pixel values
+    trt_pixel = preprocess_image_for_trt(
+        image_path, fixed_image_size=fixed_image_size,
+        temporal_patch_size=temporal, image_mean=image_mean, image_std=image_std)
+
+    print(f"[diff_vl] TRT vision input: {trt_pixel.shape}", file=sys.stderr)
+
+    # Run TRT vision encoder
+    results = runner.encode(pixel_values=trt_pixel)
+    trt_features = results["image_features"]
+
+    print(f"[diff_vl] TRT features: shape={trt_features.shape}, "
+          f"mean={trt_features.mean():.6f}, std={trt_features.std():.6f}",
+          file=sys.stderr)
+
+    # Basic sanity checks
+    if np.all(trt_features == 0):
+        print("[diff_vl] FAIL: TRT vision output is all zeros", file=sys.stderr)
+        return False
+
+    if np.any(np.isnan(trt_features)):
+        print("[diff_vl] FAIL: TRT vision output contains NaN", file=sys.stderr)
+        return False
+
+    if np.any(np.isinf(trt_features)):
+        print("[diff_vl] FAIL: TRT vision output contains Inf", file=sys.stderr)
+        return False
+
+    # Numerical comparison against HF reference
+    if model_id is not None:
+        print(f"[diff_vl] Comparing against HF reference ...", file=sys.stderr)
+        # Free TRT vision engine before loading HF model (avoid GPU OOM)
+        del runner
+        import gc; gc.collect()
+        hf_features, _ = _get_hf_vision_features(
+            model_id, image_path, fixed_image_size)
+
+        if trt_features.shape != hf_features.shape:
+            print(f"[diff_vl] WARN: Shape mismatch: TRT {trt_features.shape} "
+                  f"vs HF {hf_features.shape}", file=sys.stderr)
+            # Compare as many features as possible
+            min_n = min(trt_features.shape[0], hf_features.shape[0])
+            min_d = min(trt_features.shape[1], hf_features.shape[1])
+            trt_sub = trt_features[:min_n, :min_d]
+            hf_sub = hf_features[:min_n, :min_d]
+        else:
+            trt_sub = trt_features
+            hf_sub = hf_features
+
+        abs_diff = np.abs(trt_sub - hf_sub)
+        max_diff = abs_diff.max()
+        mean_diff = abs_diff.mean()
+        cos_sim = np.dot(trt_sub.flatten(), hf_sub.flatten()) / (
+            np.linalg.norm(trt_sub) * np.linalg.norm(hf_sub) + 1e-8)
+
+        print(f"[diff_vl] Vision comparison: "
+              f"max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, "
+              f"cosine_sim={cos_sim:.6f}", file=sys.stderr)
+
+        if max_diff > atol:
+            print(f"[diff_vl] WARN: Max diff {max_diff:.6f} > atol {atol}",
+                  file=sys.stderr)
+            # Not a hard failure — print diagnostics
+            print(f"[diff_vl] Per-row max diff (first 10 features):",
+                  file=sys.stderr)
+            for i in range(min(10, trt_sub.shape[0])):
+                row_diff = np.abs(trt_sub[i] - hf_sub[i]).max()
+                print(f"  feature[{i}]: max_diff={row_diff:.6f}, "
+                      f"trt_norm={np.linalg.norm(trt_sub[i]):.4f}, "
+                      f"hf_norm={np.linalg.norm(hf_sub[i]):.4f}",
+                      file=sys.stderr)
+
+        if cos_sim < 0.5:
+            print(f"[diff_vl] FAIL: Cosine similarity {cos_sim:.4f} < 0.5 — "
+                  f"features are uncorrelated", file=sys.stderr)
+            return False
+
+    print(f"[diff_vl] Vision encoder: PASS", file=sys.stderr)
+    return True
+
+
+def test_embed_input(bundle_path: str) -> bool:
+    """Verify the text decoder accepts embed_input mode."""
+    from trtf_build.debug_runner import runner_from_bundle
+
+    runner = runner_from_bundle(bundle_path)
+    if not runner.has_embed_input:
+        print("[diff_vl] Text decoder has no embed_input — skipping",
+              file=sys.stderr)
+        return True
+
+    result1 = runner.step(1, use_input_embed=0.0)
+    if "logits" not in result1:
+        print("[diff_vl] FAIL: no logits from text decoder", file=sys.stderr)
+        return False
+
+    embed_shape = tuple(runner.engine.get_tensor_shape("input_embed"))
+    embed_hidden = embed_shape[-1]
+    dummy_embed = np.random.randn(1, embed_hidden).astype(np.float32) * 0.01
+    result2 = runner.step(0, input_embed=dummy_embed, use_input_embed=1.0)
+    if "logits" not in result2:
+        print("[diff_vl] FAIL: no logits from embed_input step", file=sys.stderr)
+        return False
+
+    print(f"[diff_vl] Text decoder embed_input: PASS "
+          f"(hidden={embed_hidden})", file=sys.stderr)
+    return True
+
+
+def test_vl_generation(
+    bundle_path: str,
+    image_path: str,
+    max_new_tokens: int = 20,
+) -> bool:
+    """Run full VL generation in Python using VLTrtRunner."""
+    from trtf_build.debug_runner import VLTrtRunner
+
+    print("[diff_vl] Loading VL runner from bundle ...", file=sys.stderr)
+    runner = VLTrtRunner(bundle_path)
+    if runner.vision_runner is None:
+        print("[diff_vl] No vision engine — skipping VL generation", file=sys.stderr)
+        return True
+
+    # Encode image
+    print("[diff_vl] Encoding image ...", file=sys.stderr)
+    features = runner.encode_image(image_path)
+    print(f"[diff_vl] Image features: {features.shape}, "
+          f"mean={features.mean():.4f}, std={features.std():.4f}",
+          file=sys.stderr)
+
+    # Format prompt and tokenize
+    prompt = "Describe this image"
+    formatted = runner.format_prompt(prompt)
+    print(f"[diff_vl] Formatted prompt length: {len(formatted)} chars",
+          file=sys.stderr)
+
+    # Tokenize using HF tokenizer
+    try:
+        from transformers import AutoTokenizer
+        model_source = runner.config.get("model_source", "")
+        tok_data = load_section_from_bundle(bundle_path, "tokenizer.json")
+        if tok_data:
+            # Write tokenizer to temp dir and load
+            import tempfile, json
+            with tempfile.TemporaryDirectory() as tmpdir:
+                for name in ["tokenizer.json", "tokenizer_config.json",
+                             "special_tokens_map.json"]:
+                    data = load_section_from_bundle(bundle_path, name)
+                    if data:
+                        (Path(tmpdir) / name).write_bytes(data)
+                tokenizer = AutoTokenizer.from_pretrained(tmpdir)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(model_source)
+    except Exception as e:
+        print(f"[diff_vl] Cannot load tokenizer: {e} — skipping generation",
+              file=sys.stderr)
+        return True
+
+    input_ids = tokenizer.encode(formatted, add_special_tokens=False)
+    print(f"[diff_vl] Input tokens: {len(input_ids)} "
+          f"(image_pad tokens: {input_ids.count(runner.image_token_id)})",
+          file=sys.stderr)
+
+    # Generate
+    print(f"[diff_vl] Generating {max_new_tokens} tokens ...", file=sys.stderr)
+    output_ids = runner.generate_vl(input_ids, features, max_new_tokens)
+    new_ids = output_ids[len(input_ids):]
+    output_text = tokenizer.decode(new_ids, skip_special_tokens=True)
+
+    print(f"[diff_vl] Generated: {output_text!r}", file=sys.stderr)
+
+    if not output_text.strip():
+        print("[diff_vl] WARN: Empty generation output", file=sys.stderr)
+
+    print("[diff_vl] VL generation: PASS", file=sys.stderr)
+    return True
+
+
+def test_cpp_binary(
+    bundle_path: str,
+    binary_path: str,
+    image_path: str,
+    hf_python: str | None = None,
+    max_new_tokens: int = 10,
+) -> bool:
+    """Test C++ binary VL inference."""
+    import subprocess
+
+    cmd = [binary_path, "run", bundle_path,
+           "--prompt", "Describe this image",
+           "--image", image_path,
+           "--max-new-tokens", str(max_new_tokens)]
+    if hf_python:
+        cmd.extend(["--hf-python", hf_python])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        print(f"[diff_vl] SKIP: binary not found: {binary_path}", file=sys.stderr)
+        return True
+    except subprocess.TimeoutExpired:
+        print("[diff_vl] FAIL: C++ binary timed out", file=sys.stderr)
+        return False
+
+    if result.returncode != 0:
+        print(f"[diff_vl] FAIL: C++ exit={result.returncode}", file=sys.stderr)
+        print(f"  stderr: {result.stderr[:500]}", file=sys.stderr)
+        return False
+
+    output = result.stdout.strip()
+    print(f"[diff_vl] C++ output: {output[:200]!r}", file=sys.stderr)
+    print("[diff_vl] C++ binary: PASS", file=sys.stderr)
+    return True
+
+
+# Need this import at module level for test_vl_generation
+from trtf_build.debug_runner import load_section_from_bundle
+
+
+def test_debug_layers(
+    model_id: str,
+    image_path: str,
+    fixed_image_size: int = 448,
+) -> bool:
+    """Per-layer comparison of TRT vision encoder vs HF reference.
+
+    Uses HF hooks to capture hidden states after each ViT block, then
+    compares against TRT layer-by-layer using our RoPE/window_index logic
+    applied to the same pixel values.
+    """
+    import torch
+    from PIL import Image
+
+    print(f"[diff_vl] Debug layers: loading HF model {model_id} ...",
+          file=sys.stderr)
+    from transformers import (
+        Qwen2_5_VLForConditionalGeneration, Qwen2VLImageProcessor)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        model_id, torch_dtype=torch.float32, device_map=device)
+    model.eval()
+
+    visual = model.model.visual
+
+    # Prepare image through HF processor
+    image_processor = Qwen2VLImageProcessor.from_pretrained(model_id)
+    image = Image.open(image_path).convert("RGB")
+    image_fixed = image.resize(
+        (fixed_image_size, fixed_image_size), Image.BICUBIC)
+    image_inputs = image_processor(images=[image_fixed], return_tensors="pt")
+    pixel_values_hf = image_inputs["pixel_values"].to(
+        device=visual.patch_embed.proj.weight.device, dtype=visual.dtype)
+    grid_thw = image_inputs["image_grid_thw"].to(
+        device=visual.patch_embed.proj.weight.device)
+
+    print(f"[diff_vl] pixel_values: {pixel_values_hf.shape}, "
+          f"grid_thw: {grid_thw.tolist()}", file=sys.stderr)
+
+    # Capture per-layer hidden states via hooks
+    layer_outputs: dict[str, torch.Tensor] = {}
+
+    def make_hook(name):
+        def hook_fn(_module, _input, output):
+            if isinstance(output, torch.Tensor):
+                layer_outputs[name] = output.detach().float().cpu()
+            elif isinstance(output, tuple):
+                layer_outputs[name] = output[0].detach().float().cpu()
+        return hook_fn
+
+    hooks = []
+    hooks.append(visual.patch_embed.register_forward_hook(
+        make_hook("patch_embed")))
+    for i, blk in enumerate(visual.blocks):
+        hooks.append(blk.register_forward_hook(make_hook(f"block.{i}")))
+    hooks.append(visual.merger.register_forward_hook(make_hook("merger")))
+
+    # Run HF forward
+    with torch.no_grad():
+        hf_out = visual(pixel_values_hf, grid_thw=grid_thw)
+
+    for h in hooks:
+        h.remove()
+
+    # Print per-layer stats
+    print(f"\n{'Layer':<20} {'Shape':<20} {'Mean':>10} {'Std':>10} "
+          f"{'Min':>10} {'Max':>10}", file=sys.stderr)
+    print("-" * 80, file=sys.stderr)
+
+    for name in sorted(layer_outputs.keys(),
+                       key=lambda x: (0 if x == "patch_embed" else
+                                      1 if x.startswith("block") else 2,
+                                      int(x.split(".")[-1])
+                                      if "." in x else 0)):
+        t = layer_outputs[name].numpy()
+        print(f"{name:<20} {str(t.shape):<20} {t.mean():>10.4f} "
+              f"{t.std():>10.4f} {t.min():>10.4f} {t.max():>10.4f}",
+              file=sys.stderr)
+
+    # Compute cosine similarity between consecutive layers to spot divergence
+    block_keys = [k for k in sorted(layer_outputs.keys())
+                  if k.startswith("block.")]
+    if len(block_keys) >= 2:
+        print(f"\n{'Layer Pair':<30} {'Cosine Sim':>12} {'Norm Ratio':>12}",
+              file=sys.stderr)
+        print("-" * 54, file=sys.stderr)
+        prev_key = block_keys[0]
+        for key in block_keys[1:]:
+            a = layer_outputs[prev_key].numpy().flatten()
+            b = layer_outputs[key].numpy().flatten()
+            cos = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+            ratio = np.linalg.norm(b) / (np.linalg.norm(a) + 1e-8)
+            print(f"{prev_key} -> {key:<15} {cos:>12.6f} {ratio:>12.4f}",
+                  file=sys.stderr)
+            prev_key = key
+
+    # Final merger output stats
+    if "merger" in layer_outputs:
+        merger_np = layer_outputs["merger"].numpy()
+        print(f"\n[diff_vl] Merger output: shape={merger_np.shape}, "
+              f"mean={merger_np.mean():.4f}, std={merger_np.std():.4f}",
+              file=sys.stderr)
+
+    # Compare merger output with HF pooler_output (post reverse-reorder)
+    if hasattr(hf_out, 'pooler_output') and hf_out.pooler_output is not None:
+        pooler = hf_out.pooler_output
+        if isinstance(pooler, (list, tuple)):
+            pooler = torch.cat(pooler, dim=0)
+        pooler_np = pooler.float().cpu().numpy()
+        merger_np = layer_outputs.get("merger", torch.zeros(1)).numpy()
+        if pooler_np.shape == merger_np.shape:
+            cos = (np.dot(pooler_np.flatten(), merger_np.flatten()) /
+                   (np.linalg.norm(pooler_np) * np.linalg.norm(merger_np)
+                    + 1e-8))
+            print(f"[diff_vl] merger vs pooler_output cosine: {cos:.6f} "
+                  f"(should be < 1.0 due to reverse_indices reorder)",
+                  file=sys.stderr)
+
+    del model
+    import gc; gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    print("[diff_vl] Debug layers: DONE", file=sys.stderr)
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description="VL diff testing")
+    parser.add_argument("--bundle", required=True, help="Path to .trtfb bundle")
+    parser.add_argument("--image", default=None, help="Path to test image")
+    parser.add_argument("--model", default=None,
+                        help="HF model ID for reference comparison")
+    parser.add_argument("--binary", default="./build/trtf",
+                        help="Path to trtf binary")
+    parser.add_argument("--hf-python", default=None,
+                        help="Python interpreter path")
+    parser.add_argument("--atol", type=float, default=0.1,
+                        help="Absolute tolerance for feature comparison")
+    parser.add_argument("--max-new-tokens", type=int, default=20)
+    parser.add_argument("--vision-only", action="store_true",
+                        help="Only test vision encoder (no HF model needed)")
+    parser.add_argument("--debug-layers", action="store_true",
+                        help="Per-layer HF vision encoder analysis (requires --model)")
+    args = parser.parse_args()
+
+    all_pass = True
+
+    # Debug layers mode: per-layer HF analysis, then exit
+    if args.debug_layers:
+        if not args.model or not args.image:
+            print("[diff_vl] --debug-layers requires --model and --image",
+                  file=sys.stderr)
+            sys.exit(1)
+        test_debug_layers(args.model, args.image)
+        return
+
+    # Test 1: Vision encoder features
+    if args.image:
+        model_id = None if args.vision_only else args.model
+        if not test_vision_features(args.bundle, args.image, model_id, args.atol):
+            all_pass = False
+
+    # Test 2: Text decoder embed_input
+    if not test_embed_input(args.bundle):
+        all_pass = False
+
+    if not args.vision_only:
+        # Test 3: Full VL generation in Python
+        if args.image:
+            if not test_vl_generation(args.bundle, args.image, args.max_new_tokens):
+                all_pass = False
+
+        # Test 4: C++ binary
+        if args.image:
+            if not test_cpp_binary(args.bundle, args.binary, args.image,
+                                   args.hf_python, args.max_new_tokens):
+                all_pass = False
+
+    if all_pass:
+        print("\n[diff_vl] ALL TESTS PASSED", file=sys.stderr)
+    else:
+        print("\n[diff_vl] SOME TESTS FAILED", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

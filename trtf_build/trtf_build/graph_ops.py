@@ -326,3 +326,435 @@ def add_apply_rope(
         x_cos.get_output(0), rot_sin.get_output(0),
         trt.ElementWiseOperation.SUM)
     return result.get_output(0)
+
+
+# ---------------------------------------------------------------------------
+# Vision encoder graph ops
+# ---------------------------------------------------------------------------
+
+def add_self_attention_block(
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    w_q: np.ndarray,
+    w_k: np.ndarray,
+    w_v: np.ndarray,
+    w_o: np.ndarray,
+    hidden_size: int,
+    num_heads: int,
+    seq_length: int,
+    q_bias: np.ndarray | None = None,
+    k_bias: np.ndarray | None = None,
+    v_bias: np.ndarray | None = None,
+    o_bias: np.ndarray | None = None,
+) -> trt.ITensor:
+    """Full self-attention without KV cache (single-pass, for vision encoders).
+
+    Input hidden: [seq_length, hidden_size]
+    Output: [seq_length, hidden_size]
+    """
+    head_dim = hidden_size // num_heads
+    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
+
+    # Q, K, V projections: [seq, hidden] @ [hidden, hidden] = [seq, hidden]
+    q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q)
+    k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k)
+    v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v)
+
+    if q_bias is not None:
+        q = add_bias_sum(network, q, hidden_size, q_bias)
+    if k_bias is not None:
+        k = add_bias_sum(network, k, hidden_size, k_bias)
+    if v_bias is not None:
+        v = add_bias_sum(network, v, hidden_size, v_bias)
+
+    # Reshape to [num_heads, seq, head_dim]
+    q_heads = network.add_shuffle(q)
+    q_heads.reshape_dims = (seq_length, num_heads, head_dim)
+    q_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+    k_heads = network.add_shuffle(k)
+    k_heads.reshape_dims = (seq_length, num_heads, head_dim)
+    k_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+    v_heads = network.add_shuffle(v)
+    v_heads.reshape_dims = (seq_length, num_heads, head_dim)
+    v_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+    # Attention scores: [num_heads, seq, head_dim] @ [num_heads, head_dim, seq]
+    score = network.add_matrix_multiply(
+        q_heads.get_output(0), trt.MatrixOperation.NONE,
+        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
+
+    # Scale
+    scale_const = add_constant(
+        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+    scaled = network.add_elementwise(
+        score.get_output(0), scale_const,
+        trt.ElementWiseOperation.PROD)
+
+    # Softmax over last dim
+    softmax = network.add_softmax(scaled.get_output(0))
+    softmax.axes = 1 << 2  # last dim
+
+    # Context: [num_heads, seq, head_dim]
+    context = network.add_matrix_multiply(
+        softmax.get_output(0), trt.MatrixOperation.NONE,
+        v_heads.get_output(0), trt.MatrixOperation.NONE)
+
+    # Reshape back to [seq, hidden]
+    context_flat = network.add_shuffle(context.get_output(0))
+    context_flat.first_transpose = trt.Permutation([1, 0, 2])
+    context_flat.reshape_dims = (seq_length, hidden_size)
+
+    # Output projection
+    out = add_matmul_rhs_constant(
+        network, context_flat.get_output(0), hidden_size, hidden_size, w_o)
+    if o_bias is not None:
+        out = add_bias_sum(network, out, hidden_size, o_bias)
+
+    return out
+
+
+def add_self_attention_block_with_rope(
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    w_q: np.ndarray,
+    w_k: np.ndarray,
+    w_v: np.ndarray,
+    w_o: np.ndarray,
+    hidden_size: int,
+    num_heads: int,
+    seq_length: int,
+    cos_table: np.ndarray,
+    sin_table: np.ndarray,
+    q_bias: np.ndarray | None = None,
+    k_bias: np.ndarray | None = None,
+    v_bias: np.ndarray | None = None,
+    o_bias: np.ndarray | None = None,
+) -> trt.ITensor:
+    """Full self-attention with precomputed RoPE (for vision encoders with 3D RoPE).
+
+    Unlike the KV-cache decoder attention, this processes all positions at once
+    and applies RoPE via precomputed per-position cos/sin tables.
+
+    Input hidden: [seq_length, hidden_size]
+    cos_table/sin_table: [seq_length, hidden_size] precomputed constants
+    Output: [seq_length, hidden_size]
+    """
+    head_dim = hidden_size // num_heads
+    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
+
+    # Q, K, V projections: [seq, hidden] @ [hidden, hidden] = [seq, hidden]
+    q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q)
+    k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k)
+    v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v)
+
+    if q_bias is not None:
+        q = add_bias_sum(network, q, hidden_size, q_bias)
+    if k_bias is not None:
+        k = add_bias_sum(network, k, hidden_size, k_bias)
+    if v_bias is not None:
+        v = add_bias_sum(network, v, hidden_size, v_bias)
+
+    # Apply RoPE using precomputed per-position cos/sin tables.
+    # q_rot = q * cos + rotate_half(q) * sin  (element-wise per position)
+    cos_const = add_constant(network, (seq_length, hidden_size), cos_table)
+    sin_const = add_constant(network, (seq_length, hidden_size), sin_table)
+
+    # Build rotate-half matrix for this hidden_size/num_heads config
+    rot_half_np = make_rotate_half_matrix(hidden_size, num_heads)
+    rot_half_const = add_constant(network, (hidden_size, hidden_size), rot_half_np)
+
+    # Apply RoPE to Q
+    q_rot = network.add_matrix_multiply(
+        q, trt.MatrixOperation.NONE, rot_half_const, trt.MatrixOperation.NONE)
+    q_cos = network.add_elementwise(q, cos_const, trt.ElementWiseOperation.PROD)
+    q_sin = network.add_elementwise(
+        q_rot.get_output(0), sin_const, trt.ElementWiseOperation.PROD)
+    q = network.add_elementwise(
+        q_cos.get_output(0), q_sin.get_output(0), trt.ElementWiseOperation.SUM)
+    q = q.get_output(0)
+
+    # Apply RoPE to K
+    k_rot = network.add_matrix_multiply(
+        k, trt.MatrixOperation.NONE, rot_half_const, trt.MatrixOperation.NONE)
+    k_cos = network.add_elementwise(k, cos_const, trt.ElementWiseOperation.PROD)
+    k_sin = network.add_elementwise(
+        k_rot.get_output(0), sin_const, trt.ElementWiseOperation.PROD)
+    k = network.add_elementwise(
+        k_cos.get_output(0), k_sin.get_output(0), trt.ElementWiseOperation.SUM)
+    k = k.get_output(0)
+
+    # Reshape to [num_heads, seq, head_dim]
+    q_heads = network.add_shuffle(q)
+    q_heads.reshape_dims = (seq_length, num_heads, head_dim)
+    q_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+    k_heads = network.add_shuffle(k)
+    k_heads.reshape_dims = (seq_length, num_heads, head_dim)
+    k_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+    v_heads = network.add_shuffle(v)
+    v_heads.reshape_dims = (seq_length, num_heads, head_dim)
+    v_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+    # Attention scores: [num_heads, seq, head_dim] @ [num_heads, head_dim, seq]
+    score = network.add_matrix_multiply(
+        q_heads.get_output(0), trt.MatrixOperation.NONE,
+        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
+
+    # Scale
+    scale_const = add_constant(
+        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+    scaled = network.add_elementwise(
+        score.get_output(0), scale_const,
+        trt.ElementWiseOperation.PROD)
+
+    # Softmax over last dim
+    softmax = network.add_softmax(scaled.get_output(0))
+    softmax.axes = 1 << 2  # last dim
+
+    # Context: [num_heads, seq, head_dim]
+    context = network.add_matrix_multiply(
+        softmax.get_output(0), trt.MatrixOperation.NONE,
+        v_heads.get_output(0), trt.MatrixOperation.NONE)
+
+    # Reshape back to [seq, hidden]
+    context_flat = network.add_shuffle(context.get_output(0))
+    context_flat.first_transpose = trt.Permutation([1, 0, 2])
+    context_flat.reshape_dims = (seq_length, hidden_size)
+
+    # Output projection
+    out = add_matmul_rhs_constant(
+        network, context_flat.get_output(0), hidden_size, hidden_size, w_o)
+    if o_bias is not None:
+        out = add_bias_sum(network, out, hidden_size, o_bias)
+
+    return out
+
+
+def add_windowed_self_attention_with_rope(
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    w_q: np.ndarray,
+    w_k: np.ndarray,
+    w_v: np.ndarray,
+    w_o: np.ndarray,
+    hidden_size: int,
+    num_heads: int,
+    seq_length: int,
+    num_windows: int,
+    cos_table: np.ndarray,
+    sin_table: np.ndarray,
+    q_bias: np.ndarray | None = None,
+    k_bias: np.ndarray | None = None,
+    v_bias: np.ndarray | None = None,
+    o_bias: np.ndarray | None = None,
+) -> trt.ITensor:
+    """Windowed self-attention with precomputed RoPE.
+
+    Splits the sequence into non-overlapping windows and runs attention
+    independently per window. Patches must already be reordered so that
+    each window's patches are contiguous in the sequence.
+
+    Input hidden: [seq_length, hidden_size]
+    cos_table/sin_table: [seq_length, hidden_size]
+    Output: [seq_length, hidden_size]
+    """
+    head_dim = hidden_size // num_heads
+    win_seq = seq_length // num_windows  # patches per window
+    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
+
+    # Q, K, V projections: [seq, hidden] @ [hidden, hidden]
+    q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q)
+    k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k)
+    v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v)
+
+    if q_bias is not None:
+        q = add_bias_sum(network, q, hidden_size, q_bias)
+    if k_bias is not None:
+        k = add_bias_sum(network, k, hidden_size, k_bias)
+    if v_bias is not None:
+        v = add_bias_sum(network, v, hidden_size, v_bias)
+
+    # RoPE: same as full attention
+    cos_const = add_constant(network, (seq_length, hidden_size), cos_table)
+    sin_const = add_constant(network, (seq_length, hidden_size), sin_table)
+    rot_half_np = make_rotate_half_matrix(hidden_size, num_heads)
+    rot_half_const = add_constant(network, (hidden_size, hidden_size), rot_half_np)
+
+    q_rot = network.add_matrix_multiply(
+        q, trt.MatrixOperation.NONE, rot_half_const, trt.MatrixOperation.NONE)
+    q_cos = network.add_elementwise(q, cos_const, trt.ElementWiseOperation.PROD)
+    q_sin = network.add_elementwise(
+        q_rot.get_output(0), sin_const, trt.ElementWiseOperation.PROD)
+    q = network.add_elementwise(
+        q_cos.get_output(0), q_sin.get_output(0), trt.ElementWiseOperation.SUM)
+    q = q.get_output(0)
+
+    k_rot = network.add_matrix_multiply(
+        k, trt.MatrixOperation.NONE, rot_half_const, trt.MatrixOperation.NONE)
+    k_cos = network.add_elementwise(k, cos_const, trt.ElementWiseOperation.PROD)
+    k_sin = network.add_elementwise(
+        k_rot.get_output(0), sin_const, trt.ElementWiseOperation.PROD)
+    k = network.add_elementwise(
+        k_cos.get_output(0), k_sin.get_output(0), trt.ElementWiseOperation.SUM)
+    k = k.get_output(0)
+
+    # Reshape to [num_windows, win_seq, num_heads, head_dim]
+    # then transpose to [num_windows, num_heads, win_seq, head_dim]
+    # then merge first two dims: [num_windows * num_heads, win_seq, head_dim]
+    q_win = network.add_shuffle(q)
+    q_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
+    q_win.second_transpose = trt.Permutation([0, 2, 1, 3])
+    q_flat = network.add_shuffle(q_win.get_output(0))
+    q_flat.reshape_dims = (num_windows * num_heads, win_seq, head_dim)
+
+    k_win = network.add_shuffle(k)
+    k_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
+    k_win.second_transpose = trt.Permutation([0, 2, 1, 3])
+    k_flat = network.add_shuffle(k_win.get_output(0))
+    k_flat.reshape_dims = (num_windows * num_heads, win_seq, head_dim)
+
+    v_win = network.add_shuffle(v)
+    v_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
+    v_win.second_transpose = trt.Permutation([0, 2, 1, 3])
+    v_flat = network.add_shuffle(v_win.get_output(0))
+    v_flat.reshape_dims = (num_windows * num_heads, win_seq, head_dim)
+
+    # Attention: [NW*NH, win_seq, head_dim] @ [NW*NH, head_dim, win_seq]
+    score = network.add_matrix_multiply(
+        q_flat.get_output(0), trt.MatrixOperation.NONE,
+        k_flat.get_output(0), trt.MatrixOperation.TRANSPOSE)
+
+    scale_const = add_constant(
+        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+    scaled = network.add_elementwise(
+        score.get_output(0), scale_const, trt.ElementWiseOperation.PROD)
+
+    softmax = network.add_softmax(scaled.get_output(0))
+    softmax.axes = 1 << 2
+
+    context = network.add_matrix_multiply(
+        softmax.get_output(0), trt.MatrixOperation.NONE,
+        v_flat.get_output(0), trt.MatrixOperation.NONE)
+
+    # Reshape back: [NW*NH, win_seq, head_dim] → [NW, NH, win_seq, head_dim]
+    # → [NW, win_seq, NH, head_dim] → [seq_length, hidden_size]
+    ctx_unflat = network.add_shuffle(context.get_output(0))
+    ctx_unflat.reshape_dims = (num_windows, num_heads, win_seq, head_dim)
+    ctx_unflat.second_transpose = trt.Permutation([0, 2, 1, 3])
+    ctx_flat = network.add_shuffle(ctx_unflat.get_output(0))
+    ctx_flat.reshape_dims = (seq_length, hidden_size)
+
+    # Output projection
+    out = add_matmul_rhs_constant(
+        network, ctx_flat.get_output(0), hidden_size, hidden_size, w_o)
+    if o_bias is not None:
+        out = add_bias_sum(network, out, hidden_size, o_bias)
+
+    return out
+
+
+def add_patch_embed_3d(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    weight: np.ndarray,
+    bias: np.ndarray | None,
+    in_channels: int,
+    embed_dim: int,
+    temporal_patch_size: int,
+    patch_size: int,
+) -> trt.ITensor:
+    """3D patch embedding via convolution.
+
+    Input: [T*C, H, W] (already flattened temporal*channels) or [T, C, H, W]
+    Output: [num_patches, embed_dim]
+
+    The 3D convolution is implemented as a 2D convolution over the flattened
+    temporal*channel dimension, matching HuggingFace's PatchEmbed3D.
+    """
+    # Input may be [T*C, H, W] (3D) or [T, C, H, W] (4D).
+    # We need [1, T*C, H, W] for conv2d.
+    inp_ndims = len(inp.shape)
+    reshape_in = network.add_shuffle(inp)
+    if inp_ndims == 3:
+        # [T*C, H, W] -> [1, T*C, H, W]
+        tc = inp.shape[0]
+        h = inp.shape[1]
+        w = inp.shape[2]
+        reshape_in.reshape_dims = (1, tc, h, w)
+    else:
+        # [T, C, H, W] -> [1, T*C, H, W]
+        reshape_in.reshape_dims = (1, temporal_patch_size * in_channels, -1, 0)
+
+    # Conv2D with kernel [embed_dim, T*C, patch_size, patch_size]
+    # weight shape from HF: [embed_dim, T*C, patch_size, patch_size]
+    conv_w = trt.Weights(np.ascontiguousarray(weight, dtype=np.float32))
+    conv_b = trt.Weights()
+    if bias is not None:
+        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
+
+    conv = network.add_convolution_nd(
+        reshape_in.get_output(0),
+        num_output_maps=embed_dim,
+        kernel_shape=(patch_size, patch_size),
+        kernel=conv_w,
+        bias=conv_b,
+    )
+    conv.stride_nd = (patch_size, patch_size)
+
+    # Output shape: [1, embed_dim, H', W'] -> flatten to [num_patches, embed_dim]
+    reshape_out = network.add_shuffle(conv.get_output(0))
+    reshape_out.first_transpose = trt.Permutation([0, 2, 3, 1])
+    reshape_out.reshape_dims = (-1, embed_dim)
+
+    return reshape_out.get_output(0)
+
+
+def add_spatial_merge(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    w_fc1: np.ndarray,
+    w_fc2: np.ndarray,
+    b_fc1: np.ndarray | None,
+    b_fc2: np.ndarray | None,
+    norm_gamma: np.ndarray,
+    input_dim: int,
+    hidden_dim: int,
+    output_dim: int,
+    eps_tensor: trt.ITensor,
+    seq_length: int,
+    merge_size: int = 2,
+) -> trt.ITensor:
+    """Spatial merge: 2x2 merge MLP that reduces spatial resolution.
+
+    Reshapes [seq, dim] -> merge adjacent 2x2 patches, then MLP.
+    Input: [seq_length, input_dim]
+    Output: [seq_length // (merge_size^2), output_dim]
+
+    Note: This is a simplified version. For Qwen2.5-VL, the merge
+    concatenates merge_size^2 adjacent patches, then applies layernorm + MLP.
+    """
+    merged_dim = input_dim * merge_size * merge_size
+
+    # LayerNorm on the merged representation
+    norm = add_layer_norm(
+        network, inp, input_dim,
+        norm_gamma, np.zeros(input_dim, dtype=np.float32), eps_tensor)
+
+    # For simplicity in the TRT graph, we use a 2-layer MLP directly
+    # on the already-flattened input. The spatial rearrangement is handled
+    # during preprocessing.
+    fc1 = add_matmul_rhs_constant(network, norm, input_dim, hidden_dim, w_fc1)
+    if b_fc1 is not None:
+        fc1 = add_bias_sum(network, fc1, hidden_dim, b_fc1)
+
+    # GELU activation
+    activated = add_gelu_new(network, fc1)
+
+    fc2 = add_matmul_rhs_constant(network, activated, hidden_dim, output_dim, w_fc2)
+    if b_fc2 is not None:
+        fc2 = add_bias_sum(network, fc2, output_dim, b_fc2)
+
+    return fc2
