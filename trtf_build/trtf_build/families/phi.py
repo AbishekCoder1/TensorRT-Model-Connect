@@ -22,7 +22,8 @@ class PhiPlugin:
     name = "phi"
 
     def matches(self, model_type: str) -> bool:
-        return model_type.lower().startswith("phi")
+        mt = model_type.lower()
+        return mt.startswith("phi") and mt != "phimoe"
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,

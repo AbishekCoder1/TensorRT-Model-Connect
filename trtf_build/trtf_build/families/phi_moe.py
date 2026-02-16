@@ -1,0 +1,787 @@
+"""Phi-MoE family plugin — Mixture of Experts with SparseMixer routing.
+
+Phi-MoE uses the standard decoder attention (RoPE + GQA) but replaces the
+SwiGLU MLP with a router + N expert MLPs. The router uses SparseMixer
+(not standard top-k softmax) to select top-2 experts per token. Each
+expert's weight is computed from an independent masked softmax over all
+logits, so the weights do NOT sum to 1.0.
+
+Key differences from standard Phi-3:
+  - LayerNorm (with bias) instead of RMSNorm
+  - Separate Q/K/V/O projections (not fused) with biases
+  - MoE block: router + 16 experts, each a SwiGLU MLP
+  - lm_head has bias
+
+Weight key mapping:
+  HF: model.layers.{i}.block_sparse_moe.gate.weight         -> router [num_experts, hidden]
+  HF: model.layers.{i}.block_sparse_moe.experts.{e}.w1.weight -> expert gate [inter, hidden]
+  HF: model.layers.{i}.block_sparse_moe.experts.{e}.w3.weight -> expert up   [inter, hidden]
+  HF: model.layers.{i}.block_sparse_moe.experts.{e}.w2.weight -> expert down [hidden, inter]
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import tensorrt as trt
+
+from ..config import ModelConfig
+from ..checkpoint_mapper import (
+    WeightDict,
+    _open_safetensors,
+    _load_tensor,
+    _has_tensor,
+    _transpose_2d,
+    _expand_kv_projection,
+)
+from .. import graph_ops
+from ..standard_decoder_builder import _apply_norm, _mark_debug_output
+
+
+class PhiMoEPlugin:
+    name = "phi_moe"
+
+    def matches(self, model_type: str) -> bool:
+        return model_type.lower() == "phimoe"
+
+    def load_weights(
+        self, model_dir: str, config: ModelConfig,
+    ) -> WeightDict:
+        """Load Phi-MoE weights: standard attention + per-expert MLP weights."""
+        model_dir_path = Path(model_dir)
+        readers = _open_safetensors(model_dir_path)
+
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        num_layers = config.num_hidden_layers
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+        head_dim = config.head_dim
+        num_experts = config.raw.get("num_local_experts", 16)
+        intermediate_size = config.intermediate_size  # per-expert intermediate
+
+        q_dim = num_heads * head_dim
+        kv_dim = num_kv_heads * head_dim
+
+        weights = WeightDict()
+
+        # Embedding
+        embedding = _load_tensor(readers, "model.embed_tokens.weight")
+        assert embedding.shape == (vocab, hidden), (
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+        weights["embedding"] = embedding.astype(np.float32)
+
+        attention_size = 0
+
+        for layer_idx in range(num_layers):
+            prefix = f"layer.{layer_idx}"
+            hf_prefix = f"model.layers.{layer_idx}"
+
+            # LayerNorm weights + biases
+            input_norm = _load_tensor(
+                readers, f"{hf_prefix}.input_layernorm.weight")
+            weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
+
+            input_norm_bias_key = f"{hf_prefix}.input_layernorm.bias"
+            if _has_tensor(readers, input_norm_bias_key):
+                weights[f"{prefix}.input_norm_beta"] = _load_tensor(
+                    readers, input_norm_bias_key).astype(np.float32)
+
+            post_norm = _load_tensor(
+                readers, f"{hf_prefix}.post_attention_layernorm.weight")
+            weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
+
+            post_norm_bias_key = f"{hf_prefix}.post_attention_layernorm.bias"
+            if _has_tensor(readers, post_norm_bias_key):
+                weights[f"{prefix}.post_attn_norm_beta"] = _load_tensor(
+                    readers, post_norm_bias_key).astype(np.float32)
+
+            # Q/K/V/O projections (separate, not fused) with biases
+            q_raw = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.q_proj.weight")
+            k_raw = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.k_proj.weight")
+            v_raw = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.v_proj.weight")
+            o_raw = _load_tensor(
+                readers, f"{hf_prefix}.self_attn.o_proj.weight")
+
+            if attention_size == 0:
+                attention_size = q_raw.shape[0]
+
+            # Transpose [out, in] -> [in, out]
+            q_t = _transpose_2d(q_raw, "q_proj")
+            k_t = _transpose_2d(k_raw, "k_proj")
+            v_t = _transpose_2d(v_raw, "v_proj")
+            o_t = _transpose_2d(o_raw, "o_proj")
+            del q_raw, k_raw, v_raw, o_raw
+
+            # GQA expansion for K, V
+            k_expanded = _expand_kv_projection(
+                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+            v_expanded = _expand_kv_projection(
+                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+            del k_t, v_t
+
+            weights[f"{prefix}.w_q"] = q_t
+            weights[f"{prefix}.w_k"] = k_expanded
+            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_o"] = o_t
+
+            # Attention biases
+            for proj, tag in [
+                ("q_proj", "q_bias"), ("k_proj", "k_bias"),
+                ("v_proj", "v_bias"), ("o_proj", "o_bias"),
+            ]:
+                bias_key = f"{hf_prefix}.self_attn.{proj}.bias"
+                if _has_tensor(readers, bias_key):
+                    raw = _load_tensor(readers, bias_key).astype(np.float32)
+                    # Expand GQA K/V biases
+                    if tag in ("k_bias", "v_bias"):
+                        if raw.shape[0] == kv_dim and kv_dim != q_dim:
+                            expanded = np.zeros(q_dim, dtype=np.float32)
+                            group_size = num_heads // num_kv_heads
+                            for qh in range(num_heads):
+                                kvh = min(num_kv_heads - 1,
+                                          qh // group_size)
+                                expanded[qh * head_dim:(qh + 1) * head_dim] = \
+                                    raw[kvh * head_dim:(kvh + 1) * head_dim]
+                            raw = expanded
+                    weights[f"{prefix}.{tag}"] = raw
+
+            # Router weight
+            router_raw = _load_tensor(
+                readers, f"{hf_prefix}.block_sparse_moe.gate.weight")
+            # Shape: [num_experts, hidden] — transpose to [hidden, num_experts]
+            weights[f"{prefix}.router"] = _transpose_2d(
+                router_raw, "router")
+            del router_raw
+
+            # Per-expert weights
+            for e in range(num_experts):
+                exp_prefix = f"{hf_prefix}.block_sparse_moe.experts.{e}"
+                # w1 = gate projection [intermediate, hidden]
+                w1_raw = _load_tensor(readers, f"{exp_prefix}.w1.weight")
+                # w3 = up projection [intermediate, hidden]
+                w3_raw = _load_tensor(readers, f"{exp_prefix}.w3.weight")
+                # w2 = down projection [hidden, intermediate]
+                w2_raw = _load_tensor(readers, f"{exp_prefix}.w2.weight")
+
+                weights[f"{prefix}.expert.{e}.w_gate"] = _transpose_2d(
+                    w1_raw, f"expert_{e}_gate")
+                weights[f"{prefix}.expert.{e}.w_up"] = _transpose_2d(
+                    w3_raw, f"expert_{e}_up")
+                weights[f"{prefix}.expert.{e}.w_down"] = _transpose_2d(
+                    w2_raw, f"expert_{e}_down")
+                del w1_raw, w3_raw, w2_raw
+
+        # Final norm
+        final_norm_key = "model.norm.weight"
+        if _has_tensor(readers, final_norm_key):
+            weights["final_norm"] = _load_tensor(
+                readers, final_norm_key).astype(np.float32)
+        else:
+            weights["final_norm"] = np.ones(hidden, dtype=np.float32)
+
+        final_norm_bias_key = "model.norm.bias"
+        if _has_tensor(readers, final_norm_bias_key):
+            weights["final_norm_beta"] = _load_tensor(
+                readers, final_norm_bias_key).astype(np.float32)
+
+        # LM head (weight + bias)
+        lm_head_key = "lm_head.weight"
+        if _has_tensor(readers, lm_head_key):
+            weights["w_out"] = _transpose_2d(
+                _load_tensor(readers, lm_head_key), "lm_head")
+        else:
+            weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
+
+        lm_head_bias_key = "lm_head.bias"
+        if _has_tensor(readers, lm_head_bias_key):
+            weights["lm_head_bias"] = _load_tensor(
+                readers, lm_head_bias_key).astype(np.float32)
+
+        weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        weights["_num_experts"] = num_experts  # type: ignore[assignment]
+        weights["_moe_intermediate_size"] = intermediate_size  # type: ignore[assignment]
+        weights["_num_experts_per_tok"] = config.raw.get(
+            "num_experts_per_tok", 2)  # type: ignore[assignment]
+
+        return weights
+
+    def build_engine(
+        self, config: ModelConfig, weights: WeightDict,
+        max_cache_length: int, *, verbose: bool = False,
+        debug_layer_outputs: bool = False,
+    ) -> bytes:
+        """Build TRT engine with MoE layers.
+
+        The attention is standard (reuses _add_decoder_layer logic), but the MLP
+        is replaced with MoE routing + expert dispatch.
+        """
+        attention_size: int = weights.get("_attention_size", config.attention_size)
+        num_experts: int = weights["_num_experts"]
+        moe_intermediate: int = weights["_moe_intermediate_size"]
+        top_k: int = weights["_num_experts_per_tok"]
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        num_layers = config.num_hidden_layers
+        num_heads = config.num_attention_heads
+        head_dim = attention_size // num_heads
+        attention_window = max_cache_length + 1
+        norm_type = "layernorm"
+        jitter_eps = config.raw.get("router_jitter_noise", 0.01)
+
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        builder = trt.Builder(logger)
+        network = builder.create_network()
+        trt_config = builder.create_builder_config()
+        trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
+
+        # -----------------------------------------------------------
+        # Inputs
+        # -----------------------------------------------------------
+        token_id = network.add_input("token_id", trt.int32, (1,))
+        position_id = network.add_input("position_id", trt.int32, (1,))
+        attention_mask = network.add_input(
+            "attention_mask", trt.float32, (1, attention_window))
+
+        cache_k_inputs = []
+        cache_v_inputs = []
+        for i in range(num_layers):
+            ck = network.add_input(
+                graph_ops.layer_tensor_name("cache_k", i),
+                trt.float32, (max_cache_length, attention_size))
+            cv = network.add_input(
+                graph_ops.layer_tensor_name("cache_v", i),
+                trt.float32, (max_cache_length, attention_size))
+            cache_k_inputs.append(ck)
+            cache_v_inputs.append(cv)
+
+        # -----------------------------------------------------------
+        # Shared constants
+        # -----------------------------------------------------------
+        embedding_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["embedding"])
+
+        cos_table_np = graph_ops.make_rope_table(
+            attention_window, attention_size, num_heads,
+            config.rope_theta, True)
+        sin_table_np = graph_ops.make_rope_table(
+            attention_window, attention_size, num_heads,
+            config.rope_theta, False)
+        rotate_half_np = graph_ops.make_rotate_half_matrix(
+            attention_size, num_heads)
+
+        cos_tensor = graph_ops.add_constant(
+            network, (attention_window, attention_size), cos_table_np)
+        sin_tensor = graph_ops.add_constant(
+            network, (attention_window, attention_size), sin_table_np)
+        rotate_half_tensor = graph_ops.add_constant(
+            network, (attention_size, attention_size), rotate_half_np)
+
+        eps_tensor = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([config.rms_norm_eps], dtype=np.float32))
+        attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
+        attn_scale_tensor = graph_ops.add_constant(
+            network, (1, 1, 1),
+            np.array([attn_scale], dtype=np.float32))
+
+        # -----------------------------------------------------------
+        # Embedding lookup
+        # -----------------------------------------------------------
+        gather = network.add_gather(embedding_table, token_id, 0)
+        hidden_state = gather.get_output(0)  # [1, hidden]
+
+        if debug_layer_outputs:
+            _mark_debug_output(network, hidden_state, "debug_embed")
+
+        # -----------------------------------------------------------
+        # Decoder layers
+        # -----------------------------------------------------------
+        present_k_outputs = []
+        present_v_outputs = []
+
+        for layer_idx in range(num_layers):
+            prefix = f"layer.{layer_idx}"
+
+            result = _add_moe_decoder_layer(
+                network=network,
+                hidden=hidden_state,
+                cache_k=cache_k_inputs[layer_idx],
+                cache_v=cache_v_inputs[layer_idx],
+                attention_mask=attention_mask,
+                position_id=position_id,
+                cos_tensor=cos_tensor,
+                sin_tensor=sin_tensor,
+                rotate_half_tensor=rotate_half_tensor,
+                attn_scale_tensor=attn_scale_tensor,
+                eps_tensor=eps_tensor,
+                weights=weights,
+                prefix=prefix,
+                hidden_size=hidden,
+                attention_size=attention_size,
+                num_heads=num_heads,
+                head_dim=head_dim,
+                max_cache_length=max_cache_length,
+                num_experts=num_experts,
+                moe_intermediate=moe_intermediate,
+                top_k=top_k,
+                jitter_eps=jitter_eps,
+                norm_type=norm_type,
+            )
+
+            hidden_state = result["hidden"]
+            present_k_outputs.append(result["present_k"])
+            present_v_outputs.append(result["present_v"])
+
+            if debug_layer_outputs:
+                _mark_debug_output(
+                    network, result["post_attn"],
+                    f"debug_post_attn_{layer_idx}")
+                _mark_debug_output(
+                    network, hidden_state,
+                    f"debug_hidden_{layer_idx}")
+
+        # -----------------------------------------------------------
+        # Final norm
+        # -----------------------------------------------------------
+        final_norm = weights.get("final_norm")
+        if final_norm is not None and len(final_norm) > 0:
+            hidden_state = _apply_norm(
+                network, hidden_state, hidden, final_norm,
+                weights.get("final_norm_beta"), eps_tensor, norm_type)
+
+        # -----------------------------------------------------------
+        # LM head (logits)
+        # -----------------------------------------------------------
+        logits = graph_ops.add_matmul_rhs_constant(
+            network, hidden_state, hidden, vocab, weights["w_out"])
+
+        # LM head bias
+        lm_bias = weights.get("lm_head_bias")
+        if lm_bias is not None:
+            logits = graph_ops.add_bias_sum(network, logits, vocab, lm_bias)
+        else:
+            b_out = np.zeros(vocab, dtype=np.float32)
+            logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+
+        logits.name = "logits"
+        network.mark_output(logits)
+
+        # -----------------------------------------------------------
+        # Present K/V outputs
+        # -----------------------------------------------------------
+        for i in range(num_layers):
+            pk = present_k_outputs[i]
+            pv = present_v_outputs[i]
+            pk.name = graph_ops.layer_tensor_name("present_k", i)
+            pv.name = graph_ops.layer_tensor_name("present_v", i)
+            network.mark_output(pk)
+            network.mark_output(pv)
+
+        # -----------------------------------------------------------
+        # Build engine
+        # -----------------------------------------------------------
+        if verbose:
+            print(f"[trtf-build] Building MoE TRT engine ({num_layers} layers, "
+                  f"hidden={hidden}, attn={attention_size}, "
+                  f"experts={num_experts}, top_k={top_k}, "
+                  f"inter={moe_intermediate}, "
+                  f"cache={max_cache_length}) ...", file=sys.stderr)
+
+        plan = builder.build_serialized_network(network, trt_config)
+        if plan is None:
+            raise RuntimeError("TensorRT engine build failed")
+
+        return bytes(plan)
+
+
+def _add_swiglu_expert(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    hidden_size: int,
+    intermediate_size: int,
+    w_gate: np.ndarray,
+    w_up: np.ndarray,
+    w_down: np.ndarray,
+) -> trt.ITensor:
+    """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
+    gate = graph_ops.add_matmul_rhs_constant(
+        network, inp, hidden_size, intermediate_size, w_gate)
+    up = graph_ops.add_matmul_rhs_constant(
+        network, inp, hidden_size, intermediate_size, w_up)
+
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
+    swish = network.add_elementwise(
+        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(
+        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+
+    down = graph_ops.add_matmul_rhs_constant(
+        network, gated.get_output(0), intermediate_size, hidden_size, w_down)
+    return down
+
+
+def _sparsemixer_weight(
+    network: trt.INetworkDefinition,
+    scores: trt.ITensor,
+    num_experts: int,
+    jitter_eps: float,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Compute one expert selection via SparseMixer (inference mode).
+
+    Replicates the HF ``sparsemixer()`` function for a single expert:
+      1. max_val, max_ind = max(scores)
+      2. factor = clamp(|scores|, min=max_val)
+      3. mask = ((max_val - scores) / factor) > (2 * jitter_eps)
+      4. masked = where(mask, -inf, scores)
+      5. weight = softmax(masked)[max_ind]
+
+    Args:
+        scores: [1, num_experts] router logits (may contain -inf for
+                previously selected experts).
+        num_experts: Number of experts.
+        jitter_eps: Router jitter epsilon from config.
+
+    Returns:
+        (weight, index) where weight is [1, 1] float32 and index is [1, 1] int32.
+    """
+    # max_val [1, 1], max_ind [1, 1]
+    topk1 = network.add_topk(scores, trt.TopKOperation.MAX, 1, 1 << 1)
+    max_val = topk1.get_output(0)   # [1, 1]
+    max_ind = topk1.get_output(1)   # [1, 1]
+
+    # factor = clamp(|scores|, min=max_val)  ->  max(|scores|, max_val)
+    abs_scores = network.add_unary(scores, trt.UnaryOperation.ABS)
+    factor = network.add_elementwise(
+        abs_scores.get_output(0), max_val,
+        trt.ElementWiseOperation.MAX)
+
+    # (max_val - scores) / factor
+    diff = network.add_elementwise(
+        max_val, scores, trt.ElementWiseOperation.SUB)
+    ratio = network.add_elementwise(
+        diff.get_output(0), factor.get_output(0),
+        trt.ElementWiseOperation.DIV)
+
+    # > 2 * jitter_eps  (boolean mask)
+    threshold = graph_ops.add_constant(
+        network, (1, 1),
+        np.array([2.0 * jitter_eps], dtype=np.float32))
+    mask_float = network.add_elementwise(
+        ratio.get_output(0), threshold,
+        trt.ElementWiseOperation.GREATER)  # bool tensor
+
+    # where(mask, -inf, scores)  ->  scores + mask * (-inf - scores)
+    # Simpler: mask * -1e9 + (1 - mask) * 0 added to scores
+    # Actually: just add mask * -1e9 to scores, where mask=1 for masked positions
+    neginf = graph_ops.add_constant(
+        network, (1, 1),
+        np.array([-1e9], dtype=np.float32))
+    # Cast bool mask to float
+    mask_f = network.add_identity(mask_float.get_output(0))
+    mask_f.set_output_type(0, trt.float32)
+    penalty = network.add_elementwise(
+        mask_f.get_output(0), neginf, trt.ElementWiseOperation.PROD)
+    masked = network.add_elementwise(
+        scores, penalty.get_output(0),
+        trt.ElementWiseOperation.SUM)
+
+    # softmax over masked logits
+    sm = network.add_softmax(masked.get_output(0))
+    sm.axes = 1 << 1
+    sm_out = sm.get_output(0)  # [1, num_experts]
+
+    # Gather the weight at max_ind: reshape max_ind to scalar
+    idx_flat = network.add_shuffle(max_ind)
+    idx_flat.reshape_dims = (1,)
+    weight = network.add_gather(sm_out, idx_flat.get_output(0), 1)
+    # weight shape: [1, 1]
+
+    return weight.get_output(0), max_ind
+
+
+def _add_moe_block(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    num_experts: int,
+    moe_intermediate: int,
+    top_k: int,
+    jitter_eps: float = 0.01,
+) -> trt.ITensor:
+    """Add Mixture of Experts block with SparseMixer routing (top-2).
+
+    Dense implementation: computes all expert outputs, then selects top-2
+    via SparseMixer routing weights. The SparseMixer algorithm computes
+    each expert's weight from an independent softmax (weights do NOT
+    sum to 1.0).
+
+    Steps:
+      1. Router logits: inp @ router_weight -> [1, num_experts]
+      2. SparseMixer expert 1: masked softmax -> weight_1, index_1
+      3. Scatter -inf at index_1, SparseMixer expert 2 -> weight_2, index_2
+      4. Compute all expert SwiGLU outputs -> [num_experts, hidden]
+      5. Gather selected experts and apply weights
+      6. Weighted sum -> [1, hidden]
+    """
+    # 1. Router logits
+    router_logits = graph_ops.add_matmul_rhs_constant(
+        network, inp, hidden_size, num_experts,
+        weights[f"{prefix}.router"])  # [1, num_experts]
+
+    # 2. SparseMixer expert 1 selection
+    weight_1, idx_1 = _sparsemixer_weight(
+        network, router_logits, num_experts, jitter_eps)
+    # weight_1: [1, 1], idx_1: [1, 1]
+
+    # 3. Mask out expert 1 for second selection
+    # Create one-hot of idx_1: [1, num_experts]
+    idx_1_flat = network.add_shuffle(idx_1)
+    idx_1_flat.reshape_dims = (1,)
+    range_const = graph_ops.add_constant(
+        network, (1, num_experts),
+        np.arange(num_experts, dtype=np.float32).reshape(1, -1))
+    idx_1_broadcast = network.add_shuffle(idx_1_flat.get_output(0))
+    idx_1_broadcast.reshape_dims = (1, 1)
+    # Cast idx to float for comparison
+    idx_1_f = network.add_identity(idx_1_broadcast.get_output(0))
+    idx_1_f.set_output_type(0, trt.float32)
+    # one_hot_mask: 1 where expert == idx_1, 0 elsewhere
+    eq = network.add_elementwise(
+        range_const, idx_1_f.get_output(0),
+        trt.ElementWiseOperation.EQUAL)
+    eq_f = network.add_identity(eq.get_output(0))
+    eq_f.set_output_type(0, trt.float32)
+    # Subtract large value at expert 1 position
+    neginf_mask = graph_ops.add_constant(
+        network, (1, 1),
+        np.array([-1e9], dtype=np.float32))
+    penalty = network.add_elementwise(
+        eq_f.get_output(0), neginf_mask,
+        trt.ElementWiseOperation.PROD)
+    scores_2 = network.add_elementwise(
+        router_logits, penalty.get_output(0),
+        trt.ElementWiseOperation.SUM)
+
+    # 4. SparseMixer expert 2 selection
+    weight_2, idx_2 = _sparsemixer_weight(
+        network, scores_2.get_output(0), num_experts, jitter_eps)
+
+    # 5. Compute ALL expert outputs and stack
+    expert_outputs = []
+    for e in range(num_experts):
+        exp_out = _add_swiglu_expert(
+            network, inp, hidden_size, moe_intermediate,
+            weights[f"{prefix}.expert.{e}.w_gate"],
+            weights[f"{prefix}.expert.{e}.w_up"],
+            weights[f"{prefix}.expert.{e}.w_down"],
+        )  # [1, hidden_size]
+        expert_outputs.append(exp_out)
+
+    # Stack: [num_experts, hidden_size]
+    stacked = network.add_concatenation(expert_outputs)
+    stacked.axis = 0
+    stacked_out = stacked.get_output(0)  # [num_experts, hidden_size]
+
+    # 6. Gather expert 1 output and scale
+    idx_1_scalar = network.add_shuffle(idx_1)
+    idx_1_scalar.reshape_dims = (1,)
+    expert_1_out = network.add_gather(stacked_out, idx_1_scalar.get_output(0), 0)
+    # expert_1_out: [1, hidden_size]
+    scaled_1 = network.add_elementwise(
+        expert_1_out.get_output(0), weight_1,
+        trt.ElementWiseOperation.PROD)
+
+    # Gather expert 2 output and scale
+    idx_2_scalar = network.add_shuffle(idx_2)
+    idx_2_scalar.reshape_dims = (1,)
+    expert_2_out = network.add_gather(stacked_out, idx_2_scalar.get_output(0), 0)
+    scaled_2 = network.add_elementwise(
+        expert_2_out.get_output(0), weight_2,
+        trt.ElementWiseOperation.PROD)
+
+    # Sum: weighted expert 1 + weighted expert 2
+    moe_out = network.add_elementwise(
+        scaled_1.get_output(0), scaled_2.get_output(0),
+        trt.ElementWiseOperation.SUM)
+
+    return moe_out.get_output(0)  # [1, hidden_size]
+
+
+def _add_moe_decoder_layer(
+    *,
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    cache_k: trt.ITensor,
+    cache_v: trt.ITensor,
+    attention_mask: trt.ITensor,
+    position_id: trt.ITensor,
+    cos_tensor: trt.ITensor,
+    sin_tensor: trt.ITensor,
+    rotate_half_tensor: trt.ITensor,
+    attn_scale_tensor: trt.ITensor,
+    eps_tensor: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    attention_size: int,
+    num_heads: int,
+    head_dim: int,
+    max_cache_length: int,
+    num_experts: int,
+    moe_intermediate: int,
+    top_k: int,
+    jitter_eps: float = 0.01,
+    norm_type: str = "layernorm",
+) -> dict[str, trt.ITensor]:
+    """Add one decoder layer with MoE MLP. Attention is standard."""
+    attention_window = max_cache_length + 1
+
+    # Pre-attention norm
+    norm1 = _apply_norm(
+        network, hidden, hidden_size,
+        weights[f"{prefix}.input_norm"],
+        weights.get(f"{prefix}.input_norm_beta"),
+        eps_tensor, norm_type)
+
+    # QKV projections
+    q = graph_ops.add_matmul_rhs_constant(
+        network, norm1, hidden_size, attention_size,
+        weights[f"{prefix}.w_q"])
+    k = graph_ops.add_matmul_rhs_constant(
+        network, norm1, hidden_size, attention_size,
+        weights[f"{prefix}.w_k"])
+    v = graph_ops.add_matmul_rhs_constant(
+        network, norm1, hidden_size, attention_size,
+        weights[f"{prefix}.w_v"])
+
+    # QKV biases
+    q_bias = weights.get(f"{prefix}.q_bias")
+    if q_bias is not None:
+        q = graph_ops.add_bias_sum(network, q, attention_size, q_bias)
+    k_bias = weights.get(f"{prefix}.k_bias")
+    if k_bias is not None:
+        k = graph_ops.add_bias_sum(network, k, attention_size, k_bias)
+    v_bias = weights.get(f"{prefix}.v_bias")
+    if v_bias is not None:
+        v = graph_ops.add_bias_sum(network, v, attention_size, v_bias)
+
+    # Apply RoPE
+    q = graph_ops.add_apply_rope(
+        network, q, position_id, cos_tensor, sin_tensor,
+        rotate_half_tensor)
+    k = graph_ops.add_apply_rope(
+        network, k, position_id, cos_tensor, sin_tensor,
+        rotate_half_tensor)
+
+    # Save present K/V
+    present_k = k
+    present_v = v
+
+    # Reshape current K, V for concatenation
+    k_reshape = network.add_shuffle(k)
+    k_reshape.reshape_dims = (1, attention_size)
+    v_reshape = network.add_shuffle(v)
+    v_reshape.reshape_dims = (1, attention_size)
+
+    # Concatenate with cache
+    all_k = network.add_concatenation(
+        [cache_k, k_reshape.get_output(0)])
+    all_k.axis = 0
+    all_v = network.add_concatenation(
+        [cache_v, v_reshape.get_output(0)])
+    all_v.axis = 0
+
+    # Reshape for multi-head attention
+    q_heads = network.add_shuffle(q)
+    q_heads.reshape_dims = (num_heads, 1, head_dim)
+
+    k_heads = network.add_shuffle(all_k.get_output(0))
+    k_heads.reshape_dims = (attention_window, num_heads, head_dim)
+    v_heads = network.add_shuffle(all_v.get_output(0))
+    v_heads.reshape_dims = (attention_window, num_heads, head_dim)
+
+    k_heads.second_transpose = trt.Permutation([1, 0, 2])
+    v_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+    # Attention scores: Q @ K^T
+    score = network.add_matrix_multiply(
+        q_heads.get_output(0), trt.MatrixOperation.NONE,
+        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
+
+    # Scale
+    scaled = network.add_elementwise(
+        score.get_output(0), attn_scale_tensor,
+        trt.ElementWiseOperation.PROD)
+
+    # Mask
+    mask3d = network.add_shuffle(attention_mask)
+    mask3d.reshape_dims = (1, 1, attention_window)
+
+    masked = network.add_elementwise(
+        scaled.get_output(0), mask3d.get_output(0),
+        trt.ElementWiseOperation.SUM)
+
+    # Softmax
+    softmax = network.add_softmax(masked.get_output(0))
+    softmax.axes = 1 << 2
+
+    # Context: softmax @ V
+    context_heads = network.add_matrix_multiply(
+        softmax.get_output(0), trt.MatrixOperation.NONE,
+        v_heads.get_output(0), trt.MatrixOperation.NONE)
+
+    # Reshape back to [1, attention_size]
+    context_flat = network.add_shuffle(context_heads.get_output(0))
+    context_flat.reshape_dims = (1, attention_size)
+
+    # Output projection
+    attn_out = graph_ops.add_matmul_rhs_constant(
+        network, context_flat.get_output(0),
+        attention_size, hidden_size,
+        weights[f"{prefix}.w_o"])
+
+    # Output projection bias
+    o_bias = weights.get(f"{prefix}.o_bias")
+    if o_bias is not None:
+        attn_out = graph_ops.add_bias_sum(
+            network, attn_out, hidden_size, o_bias)
+
+    # Residual connection
+    residual1 = network.add_elementwise(
+        hidden, attn_out, trt.ElementWiseOperation.SUM)
+
+    # Post-attention norm
+    norm2 = _apply_norm(
+        network, residual1.get_output(0), hidden_size,
+        weights[f"{prefix}.post_attn_norm"],
+        weights.get(f"{prefix}.post_attn_norm_beta"),
+        eps_tensor, norm_type)
+
+    # MoE block (replaces standard MLP)
+    moe_out = _add_moe_block(
+        network, norm2, weights, prefix,
+        hidden_size, num_experts, moe_intermediate, top_k,
+        jitter_eps=jitter_eps)
+
+    # Residual connection
+    residual2 = network.add_elementwise(
+        residual1.get_output(0), moe_out, trt.ElementWiseOperation.SUM)
+
+    return {
+        "hidden": residual2.get_output(0),
+        "post_attn": residual1.get_output(0),
+        "present_k": present_k,
+        "present_v": present_v,
+    }
+
+
+plugin = PhiMoEPlugin()
