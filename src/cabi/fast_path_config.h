@@ -16,6 +16,13 @@ struct FastPathModelConfig {
     int32_t max_cache_length{32};
     int32_t id_bos{-1};
     int32_t id_eos{-1};
+
+    // Runtime strategy determines which backend and state management to use.
+    // "decoder_kv_cache" (default): standard attention-based decoder with KV cache
+    // "decoder_moe":  MoE decoder (same KV cache, routing in TRT graph)
+    // "ssm_recurrent": Mamba/SSM (conv_state + ssm_state, no KV cache)
+    // "vision_language": two-engine (vision encoder + text decoder)
+    std::string runtime_strategy{"decoder_kv_cache"};
 };
 
 // Parse model configuration from config.json text for the fast path.

@@ -273,14 +273,29 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
         throw std::runtime_error("Bundle has no tokenizer files: " + bundle_path);
     }
 
-    // Create backend
-    auto backend = trtf::CreateTrtBackendFromEngine(std::move(engine_struct));
+    // Create backend based on runtime strategy.
+    // "decoder_kv_cache" and "decoder_moe" both use the standard KV-cache backend
+    // (MoE routing happens inside the TRT graph, transparent to the runtime).
+    // Future: "ssm_recurrent" -> MambaBackend, "vision_language" -> VLBackend.
+    const auto& strategy = fp_cfg.runtime_strategy;
+    std::unique_ptr<trtf::IGenerationBackend> backend;
+
+    if (strategy == "decoder_kv_cache" || strategy == "decoder_moe")
+    {
+        backend = trtf::CreateTrtBackendFromEngine(std::move(engine_struct));
+    }
+    else
+    {
+        throw std::runtime_error("Unsupported runtime_strategy: " + strategy
+            + " (supported: decoder_kv_cache, decoder_moe)");
+    }
+
     if (!backend || !backend->is_available())
     {
         throw std::runtime_error("Failed to create TRT backend from bundle engine");
     }
 
-    std::cerr << "[trtf] Runtime ready (backend=trt, bundle)" << std::endl;
+    std::cerr << "[trtf] Runtime ready (backend=trt, strategy=" << strategy << ")" << std::endl;
 
     trtf::GenerationConfig gen_config{};
     auto* pipeline = new PipelineImpl(

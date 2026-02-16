@@ -47,6 +47,10 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
     cfg.id_bos = extract_json_int_or_first_array(config_text, "bos_token_id", -1);
     cfg.id_eos = extract_json_int_or_first_array(config_text, "eos_token_id", -1);
 
+    // Runtime strategy: determines backend type. Default is "decoder_kv_cache".
+    // MoE models use the same KV cache strategy (routing is in the TRT graph).
+    cfg.runtime_strategy = extract_json_string(config_text, "runtime_strategy", "decoder_kv_cache");
+
     return cfg;
 }
 
