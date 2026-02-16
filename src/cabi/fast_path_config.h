@@ -23,6 +23,11 @@ struct FastPathModelConfig {
     // "ssm_recurrent": Mamba/SSM (conv_state + ssm_state, no KV cache)
     // "vision_language": two-engine (vision encoder + text decoder)
     std::string runtime_strategy{"decoder_kv_cache"};
+
+    // Mamba/SSM-specific fields (used when runtime_strategy == "ssm_recurrent")
+    int32_t d_inner{0};      // intermediate_size / d_inner
+    int32_t state_size{16};  // SSM state dimension
+    int32_t conv_kernel{4};  // causal conv1d kernel size
 };
 
 // Parse model configuration from config.json text for the fast path.

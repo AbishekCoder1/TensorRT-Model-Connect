@@ -52,13 +52,20 @@ def build_trt_engine(model_id_or_path, max_cache_length, verbose):
 
 def run_trt(engine_plan, config, input_ids, max_new_tokens, max_cache_length):
     """Run TRT inference, return list of logit arrays (one per step)."""
-    from trtf_build.debug_runner import TrtRunner
-
-    runner = TrtRunner(
-        engine_plan=engine_plan,
-        max_cache_length=max_cache_length,
-        num_layers=config.num_hidden_layers,
-    )
+    # Use MambaTrtRunner for SSM models, TrtRunner for standard decoders.
+    if config.model_type.lower() == "mamba":
+        from trtf_build.debug_runner import MambaTrtRunner
+        runner = MambaTrtRunner(
+            engine_plan=engine_plan,
+            num_layers=config.num_hidden_layers,
+        )
+    else:
+        from trtf_build.debug_runner import TrtRunner
+        runner = TrtRunner(
+            engine_plan=engine_plan,
+            max_cache_length=max_cache_length,
+            num_layers=config.num_hidden_layers,
+        )
 
     results = runner.generate(input_ids, max_new_tokens)
     return [r["logits"].flatten() for r in results]

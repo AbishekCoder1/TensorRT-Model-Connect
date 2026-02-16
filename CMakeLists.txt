@@ -63,6 +63,9 @@ add_library(trtf_core
   src/runtime/trt/trt_decode_runtime.cpp
   src/runtime/trt/trt_backend_shared.cpp
   src/runtime/trt/kv_cache_step_state.cpp
+  src/runtime/trt/mamba_step_state.cpp
+  src/runtime/trt/mamba_decode_runtime.cpp
+  src/runtime/trt/mamba_backend.cpp
   src/tokenizer/hf_python_tokenizer.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/utils/data_dir.cpp

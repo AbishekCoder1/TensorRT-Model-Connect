@@ -7,6 +7,8 @@
 #include "utils/text_parsers.h"
 #include "runtime/trt/trt_engine_lifecycle.h"
 #include "runtime/trt/trt_backend_shared.h"
+#include "runtime/trt/mamba_backend.h"
+#include "runtime/trt/mamba_decode_runtime.h"
 #include "runtime/trt/trt_common.h"
 
 #include <chrono>
@@ -183,7 +185,116 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
         fp_cfg.max_cache_length = bundle.info.max_cache_length;
     }
 
-    // Build DecoderStepEngine
+    // Build engine struct based on runtime strategy.
+    const auto& strategy = fp_cfg.runtime_strategy;
+
+    // Mamba/SSM path: use MambaStepEngine
+    if (strategy == "ssm_recurrent")
+    {
+        auto mamba_engine = std::make_unique<trtf::MambaStepEngine>();
+        mamba_engine->engine = std::move(trt_engine);
+        mamba_engine->context = std::move(exec_ctx);
+        mamba_engine->vocab_size = fp_cfg.vocab_size;
+        mamba_engine->hidden_size = fp_cfg.hidden_size;
+        mamba_engine->d_inner = fp_cfg.d_inner;
+        mamba_engine->state_size = fp_cfg.state_size;
+        mamba_engine->conv_kernel = fp_cfg.conv_kernel;
+        mamba_engine->num_layers = fp_cfg.num_layers;
+        mamba_engine->id_bos = fp_cfg.id_bos;
+        mamba_engine->id_eos = fp_cfg.id_eos;
+
+        for (int32_t i = 0; i < fp_cfg.num_layers; ++i)
+        {
+            mamba_engine->conv_state_input_names.push_back(trtf::layer_tensor_name("conv_state", i));
+            mamba_engine->ssm_state_input_names.push_back(trtf::layer_tensor_name("ssm_state", i));
+            mamba_engine->present_conv_output_names.push_back(trtf::layer_tensor_name("present_conv", i));
+            mamba_engine->present_ssm_output_names.push_back(trtf::layer_tensor_name("present_ssm", i));
+        }
+
+        if (!trtf::has_all_required_mamba_tensors(*mamba_engine))
+        {
+            throw std::runtime_error("Bundle engine missing required Mamba tensors: " + bundle_path);
+        }
+
+        // Skip tokenizer/backend creation below, handle inline here
+        // Extract tokenizer files to temp dir
+        std::string mamba_temp_dir_str;
+        bool mamba_temp_transferred = false;
+        auto mamba_temp_cleanup = [&]() {
+            if (!mamba_temp_transferred && !mamba_temp_dir_str.empty())
+            {
+                std::error_code ec;
+                std::filesystem::remove_all(mamba_temp_dir_str, ec);
+            }
+        };
+        struct MambaTempGuard {
+            std::function<void()> cleanup;
+            ~MambaTempGuard() { cleanup(); }
+        } mamba_guard{mamba_temp_cleanup};
+
+        std::unique_ptr<trtf::ITokenizer> mamba_tokenizer;
+        bool mamba_has_tok = (tokenizer_json_data != nullptr && !tokenizer_json_data->empty())
+            || (vocab_json_data != nullptr && !vocab_json_data->empty())
+            || (tokenizer_model_data != nullptr && !tokenizer_model_data->empty());
+        if (mamba_has_tok)
+        {
+            char mamba_temp_pattern[] = "/tmp/trtfb_tok_XXXXXX";
+            char* mamba_created = mkdtemp(mamba_temp_pattern);
+            if (mamba_created == nullptr)
+            {
+                throw std::runtime_error("Failed to create temp dir for bundle tokenizer");
+            }
+            mamba_temp_dir_str = mamba_created;
+            const std::filesystem::path mamba_temp_dir(mamba_temp_dir_str);
+
+            auto write_section_m = [&](const char* filename, const std::vector<char>* data) {
+                if (data != nullptr && !data->empty())
+                {
+                    std::ofstream out(mamba_temp_dir / filename, std::ios::binary | std::ios::trunc);
+                    if (out)
+                    {
+                        out.write(data->data(), static_cast<std::streamsize>(data->size()));
+                    }
+                }
+            };
+
+            write_section_m("tokenizer.json", tokenizer_json_data);
+            write_section_m("tokenizer_config.json", tokenizer_config_data);
+            write_section_m("vocab.json", vocab_json_data);
+            write_section_m("merges.txt", merges_txt_data);
+            write_section_m("special_tokens_map.json", special_tokens_data);
+            write_section_m("tokenizer.model", tokenizer_model_data);
+
+            std::cerr << "[trtf] Initializing HF tokenizer from bundle ..." << std::endl;
+            auto ttok0 = std::chrono::steady_clock::now();
+            mamba_tokenizer = trtf::CreateHfPythonTokenizer(mamba_temp_dir_str, hf_python);
+            auto ttok1 = std::chrono::steady_clock::now();
+            std::cerr << "[trtf] Tokenizer ready ["
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(ttok1 - ttok0).count()
+                      << " ms]" << std::endl;
+        }
+        else
+        {
+            throw std::runtime_error("Bundle has no tokenizer files: " + bundle_path);
+        }
+
+        auto mamba_backend = trtf::CreateMambaBackendFromEngine(std::move(mamba_engine));
+        if (!mamba_backend || !mamba_backend->is_available())
+        {
+            throw std::runtime_error("Failed to create Mamba TRT backend from bundle engine");
+        }
+
+        std::cerr << "[trtf] Runtime ready (backend=trt_mamba, strategy=" << strategy << ")" << std::endl;
+
+        trtf::GenerationConfig gen_config{};
+        auto* pipeline = new PipelineImpl(
+            bundle.info.model_id, std::move(mamba_tokenizer), std::move(mamba_backend), "trt_mamba", gen_config);
+        pipeline->set_bundle_temp_dir(mamba_temp_dir_str);
+        mamba_temp_transferred = true;
+        return pipeline;
+    }
+
+    // Standard decoder path: build DecoderStepEngine
     auto engine_struct = std::make_unique<trtf::DecoderStepEngine>();
     engine_struct->engine = std::move(trt_engine);
     engine_struct->context = std::move(exec_ctx);
@@ -273,11 +384,8 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
         throw std::runtime_error("Bundle has no tokenizer files: " + bundle_path);
     }
 
-    // Create backend based on runtime strategy.
-    // "decoder_kv_cache" and "decoder_moe" both use the standard KV-cache backend
-    // (MoE routing happens inside the TRT graph, transparent to the runtime).
-    // Future: "ssm_recurrent" -> MambaBackend, "vision_language" -> VLBackend.
-    const auto& strategy = fp_cfg.runtime_strategy;
+    // Create backend. At this point, only decoder_kv_cache and decoder_moe reach here
+    // (ssm_recurrent already returned above).
     std::unique_ptr<trtf::IGenerationBackend> backend;
 
     if (strategy == "decoder_kv_cache" || strategy == "decoder_moe")
@@ -287,7 +395,7 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
     else
     {
         throw std::runtime_error("Unsupported runtime_strategy: " + strategy
-            + " (supported: decoder_kv_cache, decoder_moe)");
+            + " (supported: decoder_kv_cache, decoder_moe, ssm_recurrent)");
     }
 
     if (!backend || !backend->is_available())

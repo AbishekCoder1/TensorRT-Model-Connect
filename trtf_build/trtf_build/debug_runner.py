@@ -2,6 +2,8 @@
 
 No C++ binary needed. Deserializes a TRT engine plan and runs
 single-step autoregressive decoding with KV cache management.
+
+Supports both standard decoder (KV cache) and Mamba/SSM (recurrent state).
 """
 
 from __future__ import annotations
@@ -212,6 +214,186 @@ class TrtRunner:
         all_results = []
 
         # Prefill: process input tokens one by one
+        for tid in input_ids:
+            result = self.step(tid)
+            all_results.append(result)
+
+        # Generate: autoregressive decoding
+        for _ in range(max_new_tokens):
+            last_logits = all_results[-1]["logits"].flatten()
+            next_token = int(np.argmax(last_logits))
+            result = self.step(next_token)
+            all_results.append(result)
+
+        return all_results
+
+    def __del__(self):
+        for d_ptr in self._device_buffers.values():
+            cudart.cudaFree(d_ptr)
+        if hasattr(self, "stream"):
+            cudart.cudaStreamDestroy(self.stream)
+
+
+class MambaTrtRunner:
+    """Run inference on a Mamba/SSM TRT engine in Python.
+
+    Supports autoregressive decoding with recurrent state (conv_state + ssm_state),
+    matching the C++ MambaBackendFastPath behavior exactly.
+    """
+
+    def __init__(
+        self,
+        engine_plan: bytes,
+        num_layers: int,
+        d_inner: int | None = None,
+        state_size: int | None = None,
+        conv_kernel: int | None = None,
+    ):
+        self.num_layers = num_layers
+
+        # Deserialize engine
+        logger = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(logger)
+        self.engine = runtime.deserialize_cuda_engine(engine_plan)
+        if self.engine is None:
+            raise RuntimeError("Failed to deserialize TRT engine")
+        self.context = self.engine.create_execution_context()
+
+        # Auto-detect state dimensions from conv_state_0 and ssm_state_0 tensor shapes
+        if d_inner is None or conv_kernel is None:
+            conv_shape = tuple(self.engine.get_tensor_shape("conv_state_0"))
+            # conv_state shape: (d_inner, conv_kernel)
+            d_inner = conv_shape[0]
+            conv_kernel = conv_shape[1]
+        if state_size is None:
+            ssm_shape = tuple(self.engine.get_tensor_shape("ssm_state_0"))
+            # ssm_state shape: (d_inner, state_size)
+            state_size = ssm_shape[1]
+
+        self.d_inner = d_inner
+        self.state_size = state_size
+        self.conv_kernel = conv_kernel
+
+        # Create CUDA stream
+        err, self.stream = cudart.cudaStreamCreate()
+        _check_cuda(err)
+
+        # Initialize recurrent states (zeros)
+        self.conv_state = [
+            np.zeros((d_inner, conv_kernel), dtype=np.float32)
+            for _ in range(num_layers)
+        ]
+        self.ssm_state = [
+            np.zeros((d_inner, state_size), dtype=np.float32)
+            for _ in range(num_layers)
+        ]
+
+        # Discover all output tensor names and shapes
+        self._output_names = []
+        self._output_shapes = {}
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            mode = self.engine.get_tensor_mode(name)
+            if mode == trt.TensorIOMode.OUTPUT:
+                shape = tuple(self.engine.get_tensor_shape(name))
+                self._output_names.append(name)
+                self._output_shapes[name] = shape
+
+        # Allocate device buffers for all tensors
+        self._device_buffers: dict[str, int] = {}
+        self._host_buffers: dict[str, np.ndarray] = {}
+
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            shape = tuple(self.engine.get_tensor_shape(name))
+            dtype_trt = self.engine.get_tensor_dtype(name)
+            dtype_np = trt.nptype(dtype_trt)
+            nbytes = int(np.prod(shape)) * np.dtype(dtype_np).itemsize
+
+            err, d_ptr = cudart.cudaMalloc(nbytes)
+            _check_cuda(err)
+            self._device_buffers[name] = d_ptr
+            self._host_buffers[name] = np.zeros(shape, dtype=dtype_np)
+
+    def step(self, token_id: int) -> dict[str, np.ndarray]:
+        """Run one Mamba decode step.
+
+        Args:
+            token_id: Input token ID.
+
+        Returns:
+            Dict with 'logits' and any debug outputs.
+        """
+        # Prepare input host buffers
+        self._host_buffers["token_id"][:] = np.array([token_id], dtype=np.int32)
+
+        for i in range(self.num_layers):
+            cs_name = f"conv_state_{i}"
+            ss_name = f"ssm_state_{i}"
+            self._host_buffers[cs_name][:] = self.conv_state[i]
+            self._host_buffers[ss_name][:] = self.ssm_state[i]
+
+        # Copy inputs to device
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            mode = self.engine.get_tensor_mode(name)
+            self.context.set_tensor_address(name, self._device_buffers[name])
+
+            if mode == trt.TensorIOMode.INPUT:
+                h_buf = self._host_buffers[name]
+                cudart.cudaMemcpyAsync(
+                    self._device_buffers[name],
+                    h_buf.ctypes.data,
+                    h_buf.nbytes,
+                    cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
+                    self.stream,
+                )
+
+        # Execute
+        self.context.execute_async_v3(self.stream)
+
+        # Copy outputs to host
+        results: dict[str, np.ndarray] = {}
+        for name in self._output_names:
+            h_buf = self._host_buffers[name]
+            cudart.cudaMemcpyAsync(
+                h_buf.ctypes.data,
+                self._device_buffers[name],
+                h_buf.nbytes,
+                cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+                self.stream,
+            )
+
+        cudart.cudaStreamSynchronize(self.stream)
+
+        # Collect results
+        for name in self._output_names:
+            results[name] = self._host_buffers[name].copy()
+
+        # Update recurrent states (direct replacement, not shift/append)
+        for i in range(self.num_layers):
+            self.conv_state[i] = results[f"present_conv_{i}"].copy()
+            self.ssm_state[i] = results[f"present_ssm_{i}"].copy()
+
+        return results
+
+    def generate(
+        self,
+        input_ids: list[int],
+        max_new_tokens: int,
+    ) -> list[dict[str, np.ndarray]]:
+        """Run autoregressive generation with Mamba.
+
+        Args:
+            input_ids: Prompt token IDs.
+            max_new_tokens: Number of tokens to generate after the prompt.
+
+        Returns:
+            List of per-step result dicts.
+        """
+        all_results = []
+
+        # Prefill: process input tokens one by one (Mamba is recurrent)
         for tid in input_ids:
             result = self.step(tid)
             all_results.append(result)

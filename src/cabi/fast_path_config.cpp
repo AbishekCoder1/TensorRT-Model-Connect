@@ -51,6 +51,16 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
     // MoE models use the same KV cache strategy (routing is in the TRT graph).
     cfg.runtime_strategy = extract_json_string(config_text, "runtime_strategy", "decoder_kv_cache");
 
+    // Mamba/SSM-specific fields
+    if (cfg.runtime_strategy == "ssm_recurrent")
+    {
+        cfg.d_inner = extract_json_int(config_text, "intermediate_size", 0);
+        if (cfg.d_inner == 0)
+            cfg.d_inner = extract_json_int(config_text, "d_inner", cfg.hidden_size * 2);
+        cfg.state_size = extract_json_int(config_text, "state_size", 16);
+        cfg.conv_kernel = extract_json_int(config_text, "conv_kernel", 4);
+    }
+
     return cfg;
 }
 

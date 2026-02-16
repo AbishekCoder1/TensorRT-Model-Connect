@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from datetime import datetime, timezone
@@ -167,13 +168,22 @@ def build_bundle(
     # slow tokenizer so the C++ runtime can always load via AutoTokenizer.
     _ensure_tokenizer_json(model_dir_path)
 
-    # Embed tokenizer + config files
+    # Embed tokenizer + config files.
+    # For config.json, inject runtime_strategy if the plugin provides one.
     for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
                      "vocab.json", "merges.txt", "special_tokens_map.json",
                      "tokenizer.model"):
         file_path = model_dir_path / filename
         if file_path.exists():
-            sections.append(BundleSection(filename, file_path.read_bytes()))
+            data = file_path.read_bytes()
+            # Inject runtime_strategy into config.json for C++ runtime dispatch.
+            if filename == "config.json":
+                runtime_strategy = getattr(plugin, "runtime_strategy", None)
+                if runtime_strategy:
+                    cfg_dict = json.loads(data)
+                    cfg_dict["runtime_strategy"] = runtime_strategy
+                    data = json.dumps(cfg_dict, indent=2).encode("utf-8")
+            sections.append(BundleSection(filename, data))
 
     write_bundle(output_path, info, sections)
     t4 = time.monotonic()
