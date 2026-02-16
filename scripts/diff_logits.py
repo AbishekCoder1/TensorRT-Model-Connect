@@ -64,14 +64,39 @@ def run_trt(engine_plan, config, input_ids, max_new_tokens, max_cache_length):
     return [r["logits"].flatten() for r in results]
 
 
-def run_hf(model_dir, input_ids, max_new_tokens):
+def _load_hf_model(model_dir, trust_remote_code=False):
+    """Load HF model. Uses native transformers support by default.
+
+    If the model requires custom code (e.g. older repos without native
+    transformers support), pass --trust-remote-code to enable it.
+    This executes Python code from the model repository.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    try:
+        return AutoModelForCausalLM.from_pretrained(
+            model_dir, trust_remote_code=False, torch_dtype=torch.float32)
+    except (ValueError, KeyError, ImportError) as e:
+        if trust_remote_code:
+            print(f"[diff] Native loading failed ({e}), "
+                  f"retrying with trust_remote_code=True ...",
+                  file=sys.stderr)
+            return AutoModelForCausalLM.from_pretrained(
+                model_dir, trust_remote_code=True, torch_dtype=torch.float32)
+        raise ValueError(
+            f"Failed to load model from {model_dir} without custom code. "
+            f"If this model requires custom code, re-run with "
+            f"--trust-remote-code. Original error: {e}"
+        ) from e
+
+
+def run_hf(model_dir, input_ids, max_new_tokens, trust_remote_code=False):
     """Run HF transformers, return list of logit arrays (one per step)."""
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir, trust_remote_code=True, torch_dtype=torch.float32)
+    model = _load_hf_model(model_dir, trust_remote_code=trust_remote_code)
     model.eval()
 
     # Run prefill to get logits at each position
@@ -147,6 +172,10 @@ def main():
                         help="Absolute tolerance for logit comparison")
     parser.add_argument("--battery", action="store_true",
                         help="Run standard prompt battery")
+    parser.add_argument("--trust-remote-code", action="store_true",
+                        help="Allow executing custom Python code from the "
+                             "model repository (required for models without "
+                             "native transformers support)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -164,7 +193,8 @@ def main():
 
     # Load HF tokenizer for encoding prompts
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_dir, trust_remote_code=args.trust_remote_code)
 
     all_passed = True
     for label, prompt in prompts:
@@ -183,7 +213,8 @@ def main():
 
         # Run HF
         print(f"  Running HF ...", file=sys.stderr)
-        hf_logits = run_hf(model_dir, input_ids, args.max_new_tokens)
+        hf_logits = run_hf(model_dir, input_ids, args.max_new_tokens,
+                           trust_remote_code=args.trust_remote_code)
 
         # Compare
         max_diff, report = compare_logits(trt_logits, hf_logits, args.atol)

@@ -18,6 +18,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 MAX_CACHE_LENGTH=256
 BINARY="${PROJECT_DIR}/build/trtf"
 BUNDLE_DIR="/tmp"
+TRUST_REMOTE_CODE=""
 
 # Parse args
 MODEL=""
@@ -26,8 +27,9 @@ while [[ $# -gt 0 ]]; do
         --max-cache-length) MAX_CACHE_LENGTH="$2"; shift 2 ;;
         --binary) BINARY="$2"; shift 2 ;;
         --bundle-dir) BUNDLE_DIR="$2"; shift 2 ;;
+        --trust-remote-code) TRUST_REMOTE_CODE="--trust-remote-code"; shift ;;
         -h|--help)
-            echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR]"
+            echo "Usage: $0 <model-id-or-path> [--max-cache-length N] [--binary PATH] [--bundle-dir DIR] [--trust-remote-code]"
             exit 0
             ;;
         *)
@@ -91,13 +93,13 @@ run_step "Build bundle" \
 run_step "diff_logits (battery)" \
     python3 "${SCRIPT_DIR}/diff_logits.py" \
         --model "$MODEL" --atol 1e-3 --battery \
-        --max-cache-length "$MAX_CACHE_LENGTH"
+        --max-cache-length "$MAX_CACHE_LENGTH" $TRUST_REMOTE_CODE
 
 # Step 3: diff_layers (per-layer hidden state comparison)
 run_step "diff_layers" \
     python3 "${SCRIPT_DIR}/diff_layers.py" \
         --model "$MODEL" --atol 0.05 \
-        --max-cache-length "$MAX_CACHE_LENGTH"
+        --max-cache-length "$MAX_CACHE_LENGTH" $TRUST_REMOTE_CODE
 
 # Step 4: Runner parity (Python vs C++)
 if [[ -x "$BINARY" ]]; then

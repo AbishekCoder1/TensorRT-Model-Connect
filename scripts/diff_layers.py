@@ -62,13 +62,38 @@ def run_trt_single_step(engine_plan, config, token_id, max_cache_length):
     return runner.step(token_id)
 
 
-def run_hf_single_step(model_dir, token_id):
-    """Run HF model on a single token, return per-layer hidden states."""
+def _load_hf_model(model_dir, trust_remote_code=False):
+    """Load HF model. Uses native transformers support by default.
+
+    If the model requires custom code (e.g. older repos without native
+    transformers support), pass --trust-remote-code to enable it.
+    This executes Python code from the model repository.
+    """
     import torch
     from transformers import AutoModelForCausalLM
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir, trust_remote_code=True, torch_dtype=torch.float32)
+    try:
+        return AutoModelForCausalLM.from_pretrained(
+            model_dir, trust_remote_code=False, torch_dtype=torch.float32)
+    except (ValueError, KeyError, ImportError) as e:
+        if trust_remote_code:
+            print(f"[diff-layers] Native loading failed ({e}), "
+                  f"retrying with trust_remote_code=True ...",
+                  file=sys.stderr)
+            return AutoModelForCausalLM.from_pretrained(
+                model_dir, trust_remote_code=True, torch_dtype=torch.float32)
+        raise ValueError(
+            f"Failed to load model from {model_dir} without custom code. "
+            f"If this model requires custom code, re-run with "
+            f"--trust-remote-code. Original error: {e}"
+        ) from e
+
+
+def run_hf_single_step(model_dir, token_id, trust_remote_code=False):
+    """Run HF model on a single token, return per-layer hidden states."""
+    import torch
+
+    model = _load_hf_model(model_dir, trust_remote_code=trust_remote_code)
     model.eval()
 
     ids_tensor = torch.tensor([[token_id]], dtype=torch.long)
@@ -95,6 +120,10 @@ def main():
     parser.add_argument("--max-cache-length", type=int, default=64)
     parser.add_argument("--atol", type=float, default=0.05,
                         help="Absolute tolerance for hidden state comparison")
+    parser.add_argument("--trust-remote-code", action="store_true",
+                        help="Allow executing custom Python code from the "
+                             "model repository (required for models without "
+                             "native transformers support)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -104,7 +133,8 @@ def main():
 
     # Tokenize — use first token only for single-step comparison
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_dir, trust_remote_code=args.trust_remote_code)
     input_ids = tokenizer.encode(args.prompt)
     token_id = input_ids[0]
     print(f"\n[diff-layers] Token: id={token_id} "
@@ -117,7 +147,8 @@ def main():
 
     # Run HF (single token forward pass)
     print(f"[diff-layers] Running HF ...", file=sys.stderr)
-    hf_hidden, hf_logits = run_hf_single_step(model_dir, token_id)
+    hf_hidden, hf_logits = run_hf_single_step(
+        model_dir, token_id, trust_remote_code=args.trust_remote_code)
 
     # Compare
     print(f"\n{'=' * 72}")
@@ -144,6 +175,15 @@ def main():
               f"{status:>8}")
 
     # Per-layer hidden states
+    #
+    # In transformers 5.x, the `check_model_inputs` wrapper with
+    # tie_last_hidden_states=True (default for LMs) overwrites
+    # hidden_states[-1] with last_hidden_state (which is post-final-norm).
+    # So hidden_states has num_layers+2 entries:
+    #   [0]=embed, [1]..[N]=after layers 0..N-1, [N+1]=post-final-norm
+    # The last entry does NOT correspond to the raw output of the last
+    # decoder layer. We skip the comparison for the last layer and rely
+    # on the logits comparison to validate correctness instead.
     num_layers = config.num_hidden_layers
     for i in range(num_layers):
         hidden_key = f"debug_hidden_{i}"
@@ -152,7 +192,18 @@ def main():
             continue
 
         trt_h = trt_results[hidden_key].flatten()
-        # HF hidden_states[i+1] = output of layer i
+        # HF hidden_states[i+1] = output of layer i (for all but the last).
+        # For the last layer, hf_hidden[num_layers] is the post-final-norm
+        # output (due to tie_last_hidden_states), so skip the comparison.
+        is_last = (i == num_layers - 1)
+        if is_last and len(hf_hidden) == num_layers + 1:
+            # The last HF entry is post-norm; skip direct comparison.
+            print(f"{'layer.' + str(i) + '.hidden':<20} {str(trt_h.shape):>14} "
+                  f"{'---':>10} {'---':>10} "
+                  f"{float(trt_h.std()):>10.4f} {'---':>10} "
+                  f"{'(skip: post-norm in HF)':>8}")
+            continue
+
         hf_h = hf_hidden[i + 1] if (i + 1) < len(hf_hidden) else None
 
         if hf_h is None:

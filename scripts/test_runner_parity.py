@@ -55,7 +55,8 @@ def run_python(bundle: str, prompt: str, max_new_tokens: int) -> tuple[str, list
     import tempfile
     from pathlib import Path
 
-    # Read tokenizer files from bundle
+    # Read tokenizer files and config from bundle
+    eos_token_id = -1
     with open(bundle, "rb") as f:
         magic = f.read(8)
         header_len = struct.unpack("<Q", f.read(8))[0]
@@ -70,6 +71,18 @@ def run_python(bundle: str, prompt: str, max_new_tokens: int) -> tuple[str, list
                 f.seek(data_start + meta["offset"])
                 data = f.read(meta["size"])
                 Path(tmpdir, name).write_bytes(data)
+
+        # Extract eos_token_id from config.json (matches C++ EOS detection)
+        if "config.json" in sections:
+            meta = sections["config.json"]
+            f.seek(data_start + meta["offset"])
+            cfg = json.loads(f.read(meta["size"]).decode("utf-8"))
+            eid = cfg.get("eos_token_id", -1)
+            # eos_token_id can be an int or a list — use first element if list
+            if isinstance(eid, list):
+                eos_token_id = eid[0] if eid else -1
+            else:
+                eos_token_id = eid
 
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(tmpdir, trust_remote_code=True)
@@ -87,12 +100,14 @@ def run_python(bundle: str, prompt: str, max_new_tokens: int) -> tuple[str, list
     for tid in input_ids:
         result = runner.step(tid)
 
-    # Generate
+    # Generate (stop on EOS to match C++ runtime behavior)
     gen_ids = list(input_ids)
     for _ in range(max_new_tokens):
         logits = result["logits"].flatten()
         next_token = int(np.argmax(logits))
         gen_ids.append(next_token)
+        if next_token == eos_token_id:
+            break
         result = runner.step(next_token)
 
     # Decode
