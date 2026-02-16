@@ -4,16 +4,23 @@ Adding support for a new HuggingFace model family is a **Python-only task** in t
 
 ## Prerequisites
 
-Verify your model follows the standard dense decoder pattern:
-- **Pre-RMSNorm** before attention
-- **Grouped Query Attention** (GQA) or standard multi-head attention
-- **Rotary Position Embeddings** (RoPE)
-- **SwiGLU MLP** (gate + up projection with SiLU activation)
-- **Post-Attention RMSNorm** before MLP
+The standard decoder builder is parameterized and handles most decoder-only architectures:
 
-If yes, the standard decoder builder handles the graph — you only need a plugin file with weight mapping.
+**Norm types**: RMSNorm (LLaMA, Qwen, etc.) or LayerNorm (GPT-2, Falcon, StableLM, etc.)
+**MLP types**: SwiGLU (LLaMA, Qwen, etc.) or GELU FC (GPT-2, Falcon, StarCoder2, etc.)
+**Position types**: RoPE (most modern models) or learned absolute (GPT-2, OPT)
+**Activations**: silu, gelu_new, gelu, relu
 
-If your model diverges (MoE, parallel attention, different norm types), you will need a custom `build_engine()` — see [Advanced: Custom Build Engine](#advanced-custom-build-engine) below.
+Pass these as keyword arguments to `build_standard_decoder_engine()`:
+```python
+build_standard_decoder_engine(config, weights, max_cache_length,
+                              norm_type="layernorm", mlp_type="gelu_fc",
+                              position_type="learned", activation="gelu_new")
+```
+
+If your model uses one of these combinations, you only need a plugin file with weight mapping.
+
+If your model diverges further (MoE routing, SSM/Mamba, parallel attention), you will need a custom `build_engine()` — see [Advanced: Custom Build Engine](#advanced-custom-build-engine) below. For SSM models, you also need C++ state management changes.
 
 ## Quick Path: Scaffolding Script
 
@@ -155,8 +162,8 @@ For models that require custom tokenizer code (e.g., Phi-3), add `--trust-remote
 
 | Step | Files | Lines |
 |------|-------|-------|
-| Plugin file | `families/<family>.py` | ~30 (standard), more if custom |
-| **Total** | **1 new file, 0 existing files edited** | **~30** |
+| Plugin file | `families/<family>.py` | ~30 (standard decoder), ~60 (extended decoder), ~300+ (custom graph) |
+| **Total** | **1 new file, 0 existing files edited** | **~30-300** |
 
 ## FamilyPlugin Protocol
 
@@ -174,10 +181,15 @@ class FamilyPlugin(Protocol):
 
 ## Advanced: Custom Build Engine
 
-If your model has a non-standard architecture (MoE, parallel attention, different norm types), override `build_engine()` to use custom graph construction. The shared TRT graph ops in `trtf_build/graph_ops.py` (RMSNorm, RoPE, matmul, attention, SwiGLU, etc.) are reusable building blocks — compose them differently for your architecture.
+If your model has an architecture not covered by the parameterized standard builder, override `build_engine()` to use custom graph construction. The shared TRT graph ops in `trtf_build/graph_ops.py` (RMSNorm, LayerNorm, RoPE, matmul, attention, SwiGLU, GELU, etc.) are reusable building blocks -- compose them differently for your architecture.
 
-Examples of when custom `build_engine()` is needed:
-- **MoE (Mixture of Experts)**: Expert routing instead of dense MLP
-- **MLA (Multi-head Latent Attention)**: Compressed KV cache
-- **Parallel attention**: Attention and MLP computed in parallel (GPT-J style)
-- **Different normalization**: LayerNorm instead of RMSNorm
+### Already implemented custom architectures
+
+- **MoE (Phi-MoE)**: SparseMixer routing + per-expert SwiGLU MLPs. See `families/phi_moe.py`. Uses `runtime_strategy="decoder_moe"` (same KV-cache C++ backend).
+- **Mamba/SSM**: Selective state space model with conv1d + selective scan. See `families/mamba.py`. Uses `runtime_strategy="ssm_recurrent"` and requires the C++ `MambaBackend`.
+
+### Architectures needing custom `build_engine()`
+
+- **MLA (Multi-head Latent Attention)**: Compressed KV cache (DeepSeek-V2/V3). Needs Python graph builder + C++ cache shape changes.
+- **Parallel attention**: Attention and MLP computed in parallel (GPT-J style).
+- **Hybrid SSM+Attention (Jamba)**: Mix of attention and Mamba layers.

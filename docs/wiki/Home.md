@@ -13,7 +13,7 @@ A split-language system for TensorRT LLM inference: **Python builds** optimized 
 | **[TRT Internals](TRT-Internals.md)** | How TensorRT graph building works (now in Python), decoder layer anatomy, engine lifecycle |
 | **[HF vs TRT Comparison](HF-vs-TRT-Comparison.md)** | Side-by-side comparison of HuggingFace Transformers and this library |
 | **[Adding a Model Family](Adding-a-Model-Family.md)** | Step-by-step guide for adding a new model family in Python |
-| **[Extensibility Assessment](Architecture-Extensibility-Assessment.md)** | How hard to add MoE, Mamba/SSM, MLA? Blocking assumptions, refactoring roadmap |
+| **[Extensibility Assessment](Architecture-Extensibility-Assessment.md)** | MoE, Mamba/SSM support status; MLA roadmap |
 | **[Source Layout](Source-Layout.md)** | File-by-file guide to the codebase (Python + C++) |
 
 ## Core Design Principles
@@ -31,14 +31,17 @@ The system has two phases:
 
 1. **Build phase (Python)** -- `trtf-build build <hf-model-dir> -o model.trtfb`
    - Reads HF `config.json` + `model.safetensors` + `tokenizer.json`
-   - Matches `model_type` to a family plugin (Qwen, LLaMA, Mistral, Gemma, Phi)
+   - Matches `model_type` to a family plugin (15 families: Qwen, LLaMA, Mistral, Gemma, Phi, Phi-MoE, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, Mamba, Qwen-VL)
    - Maps HF tensor keys to canonical format, builds TRT network, compiles engine
    - Packages engine plan + tokenizer files into a `.trtfb` bundle
 
 2. **Run phase (C++)** -- `trtf run model.trtfb --prompt "text"`
    - Loads `.trtfb` bundle, deserializes TRT engine
+   - Dispatches to the correct backend based on `runtime_strategy` in config.json:
+     - `decoder_kv_cache` / `decoder_moe`: `TrtBackendFastPath` with KV-cache management
+     - `ssm_recurrent`: `MambaBackend` with conv + SSM recurrent state
    - Creates tokenizer + autoregressive generation loop
-   - Runs GPU-accelerated inference with KV-cache management
+   - Runs GPU-accelerated inference
 
 ## Minimum Viable Example
 
@@ -68,10 +71,24 @@ int main() {
 
 ## Built-in Model Support
 
+15 family plugins covering dense decoders, extended decoders, MoE, SSM, and vision-language.
+
 | Family | Model Types | Python Plugin |
 |--------|-------------|---------------|
-| Qwen | Qwen, Qwen2, Qwen3, QWQ | `trtf_build/families/qwen/` |
-| LLaMA | LLaMA, TinyLlama | `trtf_build/families/llama/` |
-| Mistral | Mistral, TinyMistral | `trtf_build/families/mistral/` |
-| Gemma | Gemma | `trtf_build/families/gemma/` |
-| Phi | Phi-3 | `trtf_build/families/phi/` |
+| Qwen | qwen, qwen2, qwen3, qwq | `families/qwen.py` |
+| LLaMA | llama | `families/llama.py` |
+| Mistral | mistral | `families/mistral.py` |
+| Gemma | gemma, gemma2 | `families/gemma.py` |
+| Phi | phi, phi3 (not phimoe) | `families/phi.py` |
+| Phi-MoE | phimoe | `families/phi_moe.py` |
+| Granite | granite | `families/granite.py` |
+| InternLM | internlm, internlm2 | `families/internlm.py` |
+| StarCoder2 | starcoder2 | `families/starcoder2.py` |
+| GPT-2 | gpt2 | `families/gpt2.py` |
+| OPT | opt | `families/opt.py` |
+| Falcon | falcon | `families/falcon.py` |
+| StableLM | stablelm | `families/stablelm.py` |
+| Mamba | mamba | `families/mamba.py` |
+| Qwen-VL | qwen2_vl, qwen2_5_vl | `families/qwen_vl.py` |
+
+All plugin paths relative to `trtf_build/trtf_build/`.

@@ -111,7 +111,7 @@ trtf_has_trt();              // 1 if compiled with TRT support
 
 ## Supported models
 
-14 model families covering dense decoders, MoE, SSM, and multiple architecture variants. Any HF model whose `config.json` `model_type` matches a supported family works automatically.
+15 model families covering dense decoders, MoE, SSM, vision-language, and multiple architecture variants. Any HF model whose `config.json` `model_type` matches a supported family works automatically.
 
 ### Standard decoder (RMSNorm + RoPE + SwiGLU)
 
@@ -146,6 +146,12 @@ trtf_has_trt();              // 1 if compiled with TRT support
 | Family | Matched `model_type` | Compatible Models | Build Command |
 |--------|---------------------|-------------------|---------------|
 | **Mamba** | `mamba` | Mamba (130M–2.8B) | `trtf-build build state-spaces/mamba-130m-hf -o mamba-130m.trtfb` |
+
+### Vision-Language (text decoder only)
+
+| Family | Matched `model_type` | Compatible Models | Build Command |
+|--------|---------------------|-------------------|---------------|
+| **Qwen-VL** | `qwen2_vl`, `qwen2_5_vl` | Qwen2.5-VL (text decoder) | `trtf-build build Qwen/Qwen2.5-VL-3B -o qwen-vl.trtfb` |
 
 ### Notable compatible models (via model_type matching)
 
@@ -208,6 +214,8 @@ See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full gui
 | [TRT Internals](docs/wiki/TRT-Internals.md) | Decoder layer anatomy, graph ops |
 | [HF vs TRT Comparison](docs/wiki/HF-vs-TRT-Comparison.md) | Side-by-side comparison |
 | [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) | Step-by-step guide |
+| [Static Design](docs/wiki/Static-Design.md) | Class-level UML diagrams and descriptions |
 | [Source Layout](docs/wiki/Source-Layout.md) | File-by-file guide |
+| [Extensibility Assessment](docs/wiki/Architecture-Extensibility-Assessment.md) | MoE, Mamba/SSM, MLA support status |
 | [Development Log](docs/WORKLOG.md) | Chronological history |
 | [CLAUDE.md](CLAUDE.md) | Full build/test/container runbook |

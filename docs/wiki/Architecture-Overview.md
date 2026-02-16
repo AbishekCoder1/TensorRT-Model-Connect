@@ -18,7 +18,7 @@ The system is split into two phases across two languages:
 6. Compile to `ICudaEngine` (GPU kernel compilation)
 7. Package engine plan + tokenizer files into a `.trtfb` bundle
 
-**Run phase** (C++ runtime, ~13 source files):
+**Run phase** (C++ runtime, ~17 source files):
 1. Load `.trtfb` bundle, deserialize TRT engine plan
 2. Create tokenizer (HfPythonTokenizer or VocabTokenizer)
 3. Run autoregressive generation loop on GPU with KV-cache management
@@ -53,12 +53,22 @@ Each model family is a single Python file in `trtf_build/trtf_build/families/`:
 
 ```
 trtf_build/trtf_build/families/
-  base.py       # FamilyPlugin protocol
-  qwen.py       # Qwen, Qwen2, Qwen3, QWQ
-  llama.py      # LLaMA, TinyLlama
-  mistral.py    # Mistral, TinyMistral
-  gemma.py      # Gemma (adds +1.0 to RMSNorm gamma, scales embedding)
-  phi.py        # Phi-3 (fused QKV and gate_up weight splitting)
+  base.py         # FamilyPlugin protocol
+  qwen.py         # Qwen, Qwen2, Qwen3, QWQ
+  llama.py        # LLaMA, TinyLlama
+  mistral.py      # Mistral
+  gemma.py        # Gemma (adds +1.0 to RMSNorm gamma, scales embedding)
+  phi.py          # Phi-3 (fused QKV and gate_up weight splitting)
+  phi_moe.py      # Phi-MoE (SparseMixer routing, expert MLPs)
+  granite.py      # Granite (multiplier absorption)
+  internlm.py     # InternLM2 (fused wqkv, custom key names)
+  starcoder2.py   # StarCoder2 (LayerNorm + GELU FC + RoPE)
+  gpt2.py         # GPT-2 (learned positions, fused QKV, Conv1D)
+  opt.py          # OPT (learned positions, ReLU, position offset)
+  falcon.py       # Falcon (LayerNorm + GELU FC + RoPE)
+  stablelm.py     # StableLM (LayerNorm + SwiGLU + RoPE)
+  mamba.py        # Mamba (SSM, custom graph, no KV cache)
+  qwen_vl.py      # Qwen-VL (text decoder for vision-language)
 ```
 
 A family plugin provides:
@@ -109,15 +119,18 @@ trtf_create_pipeline("model.trtfb", TRTF_FORCE_TRT)
   +-- Detect bundle magic bytes
   +-- ReadBundleFile() -> engine plan bytes + tokenizer files
   +-- TRT deserializeCudaEngine(plan)
+  +-- Parse runtime_strategy from config.json
+  +-- Dispatch based on strategy:
+  |     "decoder_kv_cache" / "decoder_moe" -> TrtBackendFastPath
+  |     "ssm_recurrent" -> MambaBackend
   +-- Extract tokenizer files to temp dir
   +-- Create HfPythonTokenizer or VocabTokenizer
-  +-- Create TrtBackendFastPath (engine + generation loop)
   +-- Return PipelineImpl
 ```
 
-### The Two Backends
+### Runtime Strategy Dispatch
 
-Both implement `IGenerationBackend`:
+The C++ runtime dispatches to the correct backend based on the `runtime_strategy` field in the bundle's config.json. All backends implement `IGenerationBackend`:
 
 ```cpp
 class IGenerationBackend {
@@ -128,13 +141,15 @@ class IGenerationBackend {
 };
 ```
 
-**TRT Backend** (`trt_backend_shared.cpp`):
+**TRT Backend (KV Cache)** (`trt_backend_shared.cpp`):
+- **Strategies**: `decoder_kv_cache`, `decoder_moe`
 - **Name**: `"trt"`
-- **How it works**: Deserializes a pre-compiled TRT engine from a `.trtfb` bundle, then runs an autoregressive generation loop on GPU with KV-cache management, CUDA memory allocation, and greedy argmax sampling.
+- **How it works**: Deserializes a pre-compiled TRT engine from a `.trtfb` bundle, then runs an autoregressive generation loop on GPU with KV-cache management, CUDA memory allocation, and greedy argmax sampling. MoE routing is handled entirely within the TRT graph, so both strategies use the same C++ backend.
 
-**HF Python Backend** (`hf_python_backend.cpp`):
-- **Name**: `"hf-transformers"`
-- **How it works**: Spawns a Python subprocess with HF transformers for maximum compatibility fallback.
+**Mamba Backend (SSM)** (`mamba_backend.cpp`):
+- **Strategy**: `ssm_recurrent`
+- **Name**: `"trt-mamba"`
+- **How it works**: Loads a Mamba TRT engine from a `.trtfb` bundle, then runs an autoregressive loop with conv_state and ssm_state per layer (constant memory, no cache growth). Uses `MambaStepState` instead of `KvCacheStepState`.
 
 ---
 

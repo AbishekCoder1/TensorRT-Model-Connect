@@ -1,21 +1,21 @@
 # Architecture Extensibility Assessment
 
-How hard is it to add non-standard model architectures? What needs to change to support MoE, Mamba/SSM, DeepSeek MLA, and other diverse architectures?
+Status of non-standard architecture support. MoE and Mamba/SSM are fully implemented. DeepSeek MLA and hybrid SSM+Attention are planned.
 
 ## Executive Summary
 
-With the Python build / C++ runtime split, adding new model families is now a **Python-only task**. The Python `trtf_build/` package provides a plugin system for family-specific checkpoint mappers and graph builders, while the C++ runtime handles only bundle loading and inference.
+With the Python build / C++ runtime split, adding new model families is a **Python-only task** for most architectures. The Python `trtf_build/` package provides a plugin system for family-specific checkpoint mappers and graph builders, while the C++ runtime handles bundle loading and inference with strategy-based dispatch.
 
-For non-standard architectures, the effort is focused on **Python graph builders** (using the TensorRT Python API) and, in some cases, **C++ state management** changes for the autoregressive loop.
+As of 2026-02-16, MoE and Mamba/SSM support is **fully implemented**. The standard decoder builder is parameterized to support LayerNorm, GELU, learned positions, and multiple activations.
 
-| Architecture Class | Current Support | Effort to Add | Where Changes Needed |
+| Architecture Class | Current Support | Effort to Add New Instance | Where Changes Needed |
 |---|---|---|---|
-| Dense decoder (LLaMA, Yi, Gemma, Phi-3) | **Works today** | ~30 LOC Python | Python plugin only |
-| Dense decoder + different MLP/norm (GPT-2, OPT) | **Needs custom graph builder** | ~150 LOC Python | Python graph builder |
-| MoE decoder (Mixtral, Qwen-MoE) | **Needs custom graph builder** | ~300 LOC Python | Python graph builder + checkpoint mapper |
-| Multi-Latent Attention -- MLA (DeepSeek-V2/V3) | **Needs custom graph + C++ cache** | ~400 LOC Python + C++ | Python graph builder + C++ KV cache shape |
-| SSM / Mamba | **Needs custom graph + C++ state** | ~600 LOC Python + C++ | Python graph builder + C++ `IStepState` impl |
-| Hybrid SSM+Attention (Jamba) | **Needs both above** | ~800 LOC Python + C++ | All of the above |
+| Standard decoder (RMSNorm + RoPE + SwiGLU) | **Works today** (7 families) | ~30 LOC Python | Python plugin only |
+| Extended decoder (LayerNorm, GELU, learned positions) | **Works today** (5 families) | ~60 LOC Python | Python plugin only |
+| MoE decoder (SparseMixer routing) | **Works today** (Phi-MoE) | ~300 LOC Python | Python graph builder + checkpoint mapper |
+| SSM / Mamba | **Works today** (Mamba 130M-2.8B) | ~400 LOC Python | Python graph builder (C++ backend exists) |
+| Multi-Latent Attention -- MLA (DeepSeek-V2/V3) | **Not yet implemented** | ~400 LOC Python + C++ | Python graph builder + C++ KV cache shape |
+| Hybrid SSM+Attention (Jamba) | **Not yet implemented** | ~500 LOC Python + C++ | Python + C++ hybrid state |
 
 ---
 
@@ -23,59 +23,72 @@ For non-standard architectures, the effort is focused on **Python graph builders
 
 ### Adding a standard dense decoder family
 
-Create a Python plugin in `trtf_build/families/<family>/` with a checkpoint mapper. Uses the standard graph builder. ~30 LOC.
+Create a Python plugin file in `trtf_build/trtf_build/families/` with a checkpoint mapper. Uses the parameterized standard decoder builder. ~30-60 LOC.
 
-**Examples**: Yi, InternLM, Baichuan, DeepSeek-dense.
+**Implemented**: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM (standard decoder); StarCoder2, GPT-2, OPT, Falcon, StableLM (extended decoder).
 
-### Adding a custom graph builder
+### Adding a new MoE family
 
-Write a Python graph builder using the TensorRT Python API and shared `graph_ops.py` ops. Register it in the family plugin. No C++ changes.
+Write a Python graph builder for the expert routing logic. The C++ runtime uses the same KV-cache backend (routing is handled in the TRT graph). ~300 LOC.
 
-**Examples**: GPT-2/OPT (LayerNorm + GELU), Phi (parallel attention), Mixtral MoE (expert routing).
+**Implemented**: Phi-MoE (SparseMixer routing, `runtime_strategy="decoder_moe"`).
+
+### Adding a new Mamba/SSM family
+
+Write a Python graph builder for the SSM architecture. The C++ `MambaBackend` and `MambaStepState` are already implemented for the `ssm_recurrent` runtime strategy. ~400 LOC Python.
+
+**Implemented**: Mamba (130M-2.8B, selective scan + conv1d).
 
 ---
 
 ## What Requires C++ Changes
 
-### Different state management (Mamba/SSM)
+### Different state management (done for Mamba/SSM)
 
-The C++ autoregressive loop assumes KV-cache state (`KvCacheStepState`). Models with fundamentally different state (recurrent hidden state, SSM state) need:
+The C++ runtime now supports multiple state backends via `runtime_strategy` dispatch in `trtf_c.cpp`:
+- `decoder_kv_cache` / `decoder_moe` -> `TrtBackendFastPath` + `KvCacheStepState`
+- `ssm_recurrent` -> `MambaBackend` + `MambaStepState`
+
+New state types (e.g., for hybrid architectures) would need:
 1. A new `IStepState` implementation in C++
-2. Modifications to the generate loop to handle the new state type
-
-The `IStepState` interface is already abstract (`virtual ~IStepState() = default`), so new implementations can be added without modifying existing code.
+2. A new backend class implementing `IGenerationBackend`
+3. A new `runtime_strategy` value and dispatch branch in `trtf_c.cpp`
 
 ### Different KV cache shapes (DeepSeek MLA)
 
-Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, attention_size]`) need changes to `KvCacheStepState` in C++ to support variable cache sizes.
+Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, attention_size]`) need changes to `KvCacheStepState` in C++ to support variable cache sizes per layer.
 
 ---
 
 ## Architecture-Specific Deep Dives
 
-### MoE (Mixtral, Qwen-MoE, DeepSeek-MoE)
+### MoE (Phi-MoE -- IMPLEMENTED)
 
-**Python changes**:
-- Checkpoint mapper: Map expert weights (`model.layers.N.block_sparse_moe.experts.E.*`)
-- Graph builder: Expert routing logic (router -> top_k -> dispatch -> per-expert SwiGLU -> combine)
-- New graph ops: `add_topk_routing()`, `add_expert_dispatch()`
+**Status**: Fully implemented. Phi-MoE plugin with SparseMixer routing.
 
-**C++ changes**: None. Standard KV-cache autoregressive loop works unchanged.
+**Python** (`families/phi_moe.py`):
+- Checkpoint mapper: Maps router weights + per-expert gate/up/down projections
+- Custom graph builder: SparseMixer routing (independent masked softmax, not standard top-k), per-expert SwiGLU MLPs with gather/scatter dispatch
+- LayerNorm with bias, separate Q/K/V/O with biases
 
-**Estimated work**: ~300 LOC Python.
+**C++**: No changes. Uses `runtime_strategy="decoder_moe"` which dispatches to the same `TrtBackendFastPath` (routing is handled entirely in the TRT graph).
 
-### Mamba / SSM
+### Mamba / SSM (IMPLEMENTED)
 
-**Python changes**:
-- Checkpoint mapper: Map SSM weights (`conv1d`, `x_proj`, `dt_proj`, `A_log`, `B`, `C`, `D`)
-- Graph builder: Selective scan, 1D convolution, discrete state-space update
-- Engine I/O: No attention mask/position. Input: token + per-layer hidden state. Output: logits + new hidden state.
+**Status**: Fully implemented. Mamba plugin with selective scan + C++ MambaBackend.
 
-**C++ changes**:
-- New `IStepState` implementation: `RecurrentStepState` (per-layer hidden state, no KV cache)
-- Generate loop modifications for different state update pattern
+**Python** (`families/mamba.py`):
+- Checkpoint mapper: Maps SSM weights (in_proj, conv1d, x_proj, dt_proj, A_log, D, out_proj)
+- Custom graph builder: Selective scan, causal conv1d with cached state, input-dependent discretization
+- Engine I/O: token_id + per-layer conv_state/ssm_state inputs, logits + present_conv/present_ssm outputs
 
-**Estimated work**: ~400 LOC Python + ~200 LOC C++.
+**C++** (new files):
+- `MambaStepState` (`mamba_step_state.h/cpp`): conv_state + ssm_state per layer (constant memory)
+- `MambaStepEngine` + `run_mamba_step()` (`mamba_decode_runtime.h/cpp`)
+- `MambaBackend` (`mamba_backend.h/cpp`): autoregressive loop without prefill
+- `runtime_strategy="ssm_recurrent"` dispatch in `trtf_c.cpp`
+
+**Debug runner**: `MambaTrtRunner` in `debug_runner.py` for pure-Python Mamba TRT inference.
 
 ### DeepSeek MLA (Multi-Latent Attention)
 
@@ -100,21 +113,22 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 
 ## Recommended Approach for New Families
 
-### Tier 1: Python-only (start immediately)
-Standard dense decoders using the existing graph builder:
-- Yi, InternLM, Baichuan, DeepSeek-dense, CodeLlama, Vicuna
-- ~30 LOC each, independent work
+### Tier 1: Python-only, standard builder (implemented for 12 families)
+Standard and extended decoders using the parameterized graph builder:
+- Already done: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM
+- Candidates: Yi (use llama), Baichuan, DeepSeek-dense, CodeLlama (use llama), Vicuna (use llama), GPT-NeoX
+- ~30-60 LOC each, fully parallelizable
 
-### Tier 2: Python custom graph builder
-Non-standard graph topologies:
-- GPT-2/OPT (GELU MLP), Phi (parallel attention), GPT-NeoX, Falcon
-- ~150-200 LOC each, independent work
+### Tier 2: Python custom graph builder (implemented for 2 families)
+Non-standard graph topologies with existing C++ backends:
+- Already done: Phi-MoE (MoE, Python only), Mamba (SSM, Python + existing C++ backend)
+- Candidates: Mixtral MoE (~300 LOC, can reuse decoder_moe strategy), other Mamba variants
+- ~300-400 LOC each
 
-### Tier 3: Python + C++ state changes
-Fundamentally different architectures:
-- Mixtral MoE (Python only, ~300 LOC)
-- DeepSeek MLA (Python + C++ cache, ~400 LOC)
-- Mamba (Python + C++ state, ~600 LOC)
-- Jamba hybrid (Python + C++ state, ~800 LOC)
+### Tier 3: Python + new C++ backend (not yet needed)
+Fundamentally different architectures requiring new C++ state management:
+- DeepSeek MLA (Python + C++ cache shape, ~400 LOC total)
+- Jamba hybrid SSM+Attention (Python + C++ hybrid state, ~500 LOC total)
+- RWKV (Python + C++ recurrent state)
 
 Each tier can be worked on independently. Tier 1 and 2 families are fully parallelizable since they only touch Python plugins with no shared file edits.

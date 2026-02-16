@@ -8,8 +8,7 @@ This page decomposes the architecture into software units, showing class-level U
 2. [Unit 2: Bundle Format (C++)](#unit-2-bundle-format-c)
 3. [Unit 3: TRT Backend Infrastructure (C++)](#unit-3-trt-backend-infrastructure-c)
 4. [Unit 4: Tokenization (C++)](#unit-4-tokenization-c)
-5. [Unit 5: HF Python Backend (C++)](#unit-5-hf-python-backend-c)
-6. [Unit 6: Python Build Package](#unit-6-python-build-package)
+5. [Unit 5: Python Build Package](#unit-5-python-build-package)
 
 ---
 
@@ -72,7 +71,7 @@ classDiagram
 |-------|------|---------------|
 | **IPipeline / PipelineImpl** | C ABI entry point. Loads bundle, creates tokenizer + backend, provides generation API. | `trtf_create_pipeline()` / `trtf_create_pipeline_ex()` in `src/cabi/trtf_c.cpp`. Detects `.trtfb` bundle, loads engine plan, creates tokenizer from extracted files, wraps in `TrtBackendFastPath`. |
 | **ITokenizer** | Abstract interface for text-to-token-ids and back. | Two implementations: `VocabTokenizer` (vocab.txt lookup) and `HfPythonTokenizer` (subprocess bridge). |
-| **IGenerationBackend** | Abstract interface for token-level autoregressive generation. | Two implementations: `TrtBackendFastPath` (GPU inference from bundle), `HfPythonBackend` (Python subprocess fallback). |
+| **IGenerationBackend** | Abstract interface for token-level autoregressive generation. | Two implementations: `TrtBackendFastPath` (GPU inference from bundle, KV-cache decoder and MoE), `MambaBackend` (GPU inference from bundle, SSM recurrent state). |
 | **GenerationConfig** | Value struct for generation parameters. | `max_new_tokens`, `do_sample`, `temperature`. Passed from PipelineImpl to backend. |
 
 ---
@@ -87,7 +86,7 @@ Handles reading `.trtfb` bundle files.
 |---------------|------|---------------|
 | **ReadBundleFile()** | Parses `.trtfb` binary format: JSON header + section data. | Returns engine plan bytes, extracted tokenizer files, and metadata. File: `src/bundle/bundle_format.cpp`. |
 | **HasBundleMagic()** | Checks if a file starts with the `.trtfb` magic bytes. | Used by the C ABI factory to detect bundles. |
-| **InspectBundle()** | Returns human-readable metadata from a bundle. | Reads JSON header without deserializing engine plan. File: `src/bundle/bundle_api.cpp`. |
+| **InspectBundle()** | Returns human-readable metadata from a bundle. | Reads JSON header without deserializing engine plan. File: `src/bundle/bundle_format.cpp`. |
 
 ---
 
@@ -159,13 +158,46 @@ classDiagram
         +data() void*
     }
 
+    class MambaBackend {
+        -TrtLogger mLogger
+        -unique_ptr~MambaStepEngine~ mEngine
+        +is_available() bool
+        +name() string
+        +generate(input_ids, config) vector~int32_t~
+    }
+
+    class MambaStepEngine {
+        +TrtUniquePtr~ICudaEngine~ engine
+        +TrtUniquePtr~IExecutionContext~ context
+        +vector~string~ conv_state_input_names
+        +vector~string~ ssm_state_input_names
+        +vector~string~ present_conv_output_names
+        +vector~string~ present_ssm_output_names
+        +int32_t d_inner
+        +int32_t state_size
+        +int32_t conv_kernel
+    }
+
+    class MambaStepState {
+        -int32_t mDInner
+        -int32_t mStateSize
+        -int32_t mConvKernel
+        -vector~vector~float~~ mConvState
+        -vector~vector~float~~ mSsmState
+    }
+
     IGenerationBackend <|-- TrtBackendFastPath
+    IGenerationBackend <|-- MambaBackend
     TrtBackendFastPath *-- DecoderStepEngine : owns
     TrtBackendFastPath *-- TrtLogger : holds
     TrtBackendFastPath ..> CudaStream : uses during generate()
     TrtBackendFastPath ..> CudaBuffer : uses during generate()
+    MambaBackend *-- MambaStepEngine : owns
+    MambaBackend *-- TrtLogger : holds
     IStepState <|-- KvCacheStepState
+    IStepState <|-- MambaStepState
     DecoderStepEngine ..> CudaStream : executes on
+    MambaStepEngine ..> CudaStream : executes on
 ```
 
 ### Logical Description
@@ -173,8 +205,11 @@ classDiagram
 | Class | Role | Implementation |
 |-------|------|---------------|
 | **TrtBackendFastPath** | `IGenerationBackend` for bundle-loaded engines. Owns the deserialized engine and runs the autoregressive loop. | `generate()` creates `KvCacheStepState`, runs prefill then decode loop (greedy argmax until EOS or max tokens). File: `src/runtime/trt/trt_backend_shared.cpp`. |
-| **IStepState** | Abstract interface for per-step state. | Opaque base (`virtual ~IStepState() = default`). Enables future non-KV-cache architectures (Mamba, hybrid). File: `src/runtime/trt/step_state.h`. |
+| **IStepState** | Abstract interface for per-step state. | Opaque base (`virtual ~IStepState() = default`). Two implementations: `KvCacheStepState` (attention) and `MambaStepState` (SSM). File: `src/runtime/trt/step_state.h`. |
 | **KvCacheStepState** | KV-cache state for standard attention decoders. | Manages per-layer `cache_k`/`cache_v` vectors, tracks `cache_length`, builds attention masks, appends new state. File: `src/runtime/trt/kv_cache_step_state.cpp`. |
+| **MambaBackend** | `IGenerationBackend` for Mamba/SSM bundle-loaded engines. | `generate()` creates `MambaStepState`, runs single-step recurrent loop (no prefill phase). File: `src/runtime/trt/mamba_backend.cpp`. |
+| **MambaStepEngine** | Mamba TRT engine + execution context + tensor binding metadata. | Holds conv_state/ssm_state tensor names, SSM dimensions. File: `src/runtime/trt/mamba_decode_runtime.h`. |
+| **MambaStepState** | Recurrent state for Mamba/SSM models. | Manages per-layer conv_state and ssm_state vectors (constant size, no growth). File: `src/runtime/trt/mamba_step_state.cpp`. |
 | **DecoderStepEngine** | Deserialized TRT engine + execution context + tensor binding metadata. | Populated from bundle metadata during loading. File: `src/runtime/trt/trt_engine_lifecycle.h`. |
 | **TrtLogger** | TRT `ILogger` implementation. | Forwards to stderr when `TRTF_TRT_LOG_STDERR=1`. File: `src/runtime/trt/trt_common.cpp`. |
 | **CudaStream** | RAII wrapper for `cudaStream_t`. | File: `src/runtime/trt/trt_common.cpp`. |
@@ -222,19 +257,7 @@ classDiagram
 
 ---
 
-## Unit 5: HF Python Backend (C++)
-
-Non-TRT backend for fallback and compatibility.
-
-### Logical Description
-
-| Class | Role | Implementation |
-|-------|------|---------------|
-| **HfPythonBackend** | Delegates generation to HuggingFace Python subprocess. | Maximum compatibility with any HF model. File: `src/runtime/hf_python_backend.cpp`. |
-
----
-
-## Unit 6: Python Build Package
+## Unit 5: Python Build Package
 
 The `trtf_build/` package handles all engine building. This is where new model families are added.
 
@@ -245,20 +268,30 @@ The `trtf_build/` package handles all engine building. This is where new model f
 | **FamilyRegistry** | Matches `model_type` from config.json to a registered family plugin. |
 | **FamilyPlugin** | Per-family registration: matcher function, checkpoint mapper, optional custom graph builder. |
 | **StandardCheckpointMapper** | Base class for the standard HF tensor naming convention. Handles transpose, GQA expansion, tied lm_head. |
-| **StandardGraphBuilder** | Builds the Pre-RMSNorm + GQA + RoPE + SwiGLU decoder network using TRT Python API. |
+| **StandardGraphBuilder** | Parameterized decoder builder supporting `norm_type` (rmsnorm/layernorm), `mlp_type` (swiglu/gelu_fc), `position_type` (rope/learned), and `activation` (silu/gelu_new/gelu/relu). |
 | **graph_ops** | Shared reusable TRT graph ops: RMSNorm, matmul, RoPE, attention, SwiGLU. |
 | **BundleWriter** | Writes `.trtfb` bundles: engine plan + tokenizer files + metadata. |
 
 ### Family Plugins
 
-Each family is a Python package in `trtf_build/families/<family>/`:
+Each family is a single Python file in `trtf_build/trtf_build/families/`:
 
-| Family | Model Types | Custom Behavior |
-|--------|-------------|-----------------|
-| Qwen | qwen, qwen2, qwen3, qwq | Handles q_norm/k_norm for Qwen3 |
-| LLaMA | llama | Standard mapper, no q_norm |
-| Mistral | mistral | Standard mapper |
-| Gemma | gemma | +1.0 to RMSNorm gamma, scale embedding by sqrt(hidden_size) |
-| Phi | phi3, phi | Fused QKV splitting, fused gate_up splitting |
+| Family | Model Types | Architecture | Custom Behavior |
+|--------|-------------|--------------|-----------------|
+| Qwen | qwen, qwen2, qwen3, qwq | Standard decoder | Handles q_norm/k_norm for Qwen3 |
+| LLaMA | llama | Standard decoder | Standard mapper |
+| Mistral | mistral | Standard decoder | Standard mapper |
+| Gemma | gemma, gemma2 | Standard decoder | +1.0 to RMSNorm gamma, scale embedding |
+| Phi | phi3, phi (not phimoe) | Standard decoder | Fused QKV/gate_up splitting |
+| Phi-MoE | phimoe | MoE decoder | SparseMixer routing, expert MLPs |
+| Granite | granite | Standard decoder | Multiplier absorption |
+| InternLM | internlm, internlm2 | Standard decoder | Fused wqkv, custom key names |
+| StarCoder2 | starcoder2 | Extended decoder | LayerNorm + GELU FC + RoPE |
+| GPT-2 | gpt2 | Extended decoder | Learned positions, fused QKV, Conv1D |
+| OPT | opt | Extended decoder | Learned positions, ReLU, position offset |
+| Falcon | falcon | Extended decoder | LayerNorm + GELU FC + RoPE + GQA |
+| StableLM | stablelm | Extended decoder | LayerNorm + SwiGLU + RoPE |
+| Mamba | mamba | SSM | Selective scan, custom graph, no KV cache |
+| Qwen-VL | qwen*vl | Vision-language | Text decoder only |
 
-Adding a new family requires creating a plugin directory with `plugin.py` and `checkpoint.py`. See [Adding a Model Family](Adding-a-Model-Family.md).
+Adding a new family requires creating a single plugin `.py` file with a `plugin` attribute. See [Adding a Model Family](Adding-a-Model-Family.md).

@@ -1,5 +1,74 @@
 # Worklog
 
+## 2026-02-16 — Mamba/SSM Support with Recurrent State Runtime
+
+- **Mamba family plugin** (`trtf_build/trtf_build/families/mamba.py`)
+  - Matches `model_type == "mamba"`.
+  - Custom graph builder: selective scan, causal conv1d with cached state, input-dependent discretization.
+  - Engine I/O: token_id + per-layer conv_state/ssm_state inputs, logits + present_conv/present_ssm outputs.
+  - No attention mask, no position_id, no KV cache.
+  - Sets `runtime_strategy="ssm_recurrent"` in bundle config.json.
+  - Validated on Mamba 130M (state-spaces/mamba-130m-hf).
+
+- **C++ MambaBackend** (new files: `mamba_backend.h/cpp`, `mamba_decode_runtime.h/cpp`, `mamba_step_state.h/cpp`)
+  - `MambaStepState`: conv_state + ssm_state per layer (constant memory, no growth).
+  - `MambaStepEngine`: engine struct with SSM-specific tensor names and dimensions.
+  - `run_mamba_step()`: single-step inference, updates conv + SSM state.
+  - `MambaBackend`: autoregressive loop without prefill phase.
+  - Dispatch from `trtf_c.cpp` via `runtime_strategy == "ssm_recurrent"`.
+
+- **Python debug runner** (`debug_runner.py`)
+  - Added `MambaTrtRunner` alongside `TrtRunner` for pure-Python Mamba TRT inference.
+  - `diff_logits.py` updated to detect Mamba models and use `MambaTrtRunner`.
+
+- 15 family plugins total: Qwen, LLaMA, Mistral, Gemma, Phi, Phi-MoE, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, Mamba, Qwen-VL.
+
+## 2026-02-16 — Phi-MoE Family Plugin (Mixture of Experts)
+
+- **Phi-MoE family plugin** (`trtf_build/trtf_build/families/phi_moe.py`)
+  - Matches `model_type == "phimoe"`.
+  - SparseMixer routing: independent masked softmax over all expert logits (not standard top-k), top-2 selection.
+  - Custom graph builder: router + 16 expert SwiGLU MLPs with gather/scatter dispatch.
+  - LayerNorm with bias (not RMSNorm), separate Q/K/V/O with biases, lm_head with bias.
+  - Sets `runtime_strategy="decoder_moe"` in bundle config.json.
+  - C++ runtime reuses `TrtBackendFastPath` (routing is handled entirely in the TRT graph).
+
+## 2026-02-16 — Runtime Strategy Dispatch in C++ Runtime
+
+- **`FastPathModelConfig.runtime_strategy`** field (default: `"decoder_kv_cache"`)
+  - `"decoder_kv_cache"`: standard attention decoder with KV cache.
+  - `"decoder_moe"`: MoE decoder (same KV cache, routing in TRT graph).
+  - `"ssm_recurrent"`: Mamba/SSM (conv_state + ssm_state, no KV cache).
+- **`trtf_c.cpp`** dispatches to the correct backend based on `runtime_strategy`.
+- **`fast_path_config.cpp`** parses `runtime_strategy` from config.json, with SSM-specific fields (d_inner, state_size, conv_kernel).
+
+## 2026-02-16 — Extended Standard Decoder Builder + 5 New Plugins
+
+- **Parameterized standard decoder builder** (`standard_decoder_builder.py`)
+  - `norm_type`: `"rmsnorm"` (default) or `"layernorm"` (with optional bias).
+  - `mlp_type`: `"swiglu"` (default) or `"gelu_fc"` (2-projection MLP).
+  - `position_type`: `"rope"` (default) or `"learned"` (absolute position embeddings).
+  - `activation`: `"silu"` (default), `"gelu_new"`, `"gelu"`, or `"relu"`.
+  - New graph ops: `add_layer_norm()`, `add_gelu()`, `add_learned_position_embedding()`.
+
+- **5 new family plugins** (all using the parameterized builder):
+  - **StarCoder2** (`starcoder2.py`): LayerNorm + GELU FC + RoPE. Handles QKV biases and sliding_window.
+  - **GPT-2** (`gpt2.py`): Learned positions + LayerNorm + GELU FC. Fused QKV via Conv1D weights, tied embeddings.
+  - **OPT** (`opt.py`): Learned positions (offset=2) + LayerNorm + ReLU FC. Optional project_in/project_out.
+  - **Falcon** (`falcon.py`): LayerNorm + GELU FC + RoPE + GQA. Custom weight key mapping (dense_h_to_4h).
+  - **StableLM** (`stablelm.py`): LayerNorm + SwiGLU + RoPE. QKV biases.
+
+## 2026-02-16 — Granite + InternLM2 Family Plugins
+
+- **Granite family plugin** (`trtf_build/trtf_build/families/granite.py`)
+  - Matches `model_type` starting with `granite`.
+  - Absorbs four Granite-specific multipliers (embedding, attention, residual, logits) into weight tensors at load time.
+  - Standard decoder builder used without modification after multiplier absorption.
+
+- **InternLM2 family plugin** (`trtf_build/trtf_build/families/internlm.py`)
+  - Matches `model_type` starting with `internlm`.
+  - Handles fused wqkv projection splitting and non-standard key names (tok_embeddings, attention.wqkv, feed_forward.w1/w2/w3, etc.).
+
 ## 2026-02-16 — Phi-3 Family Plugin + Shared Script Hardening
 
 - **Phi-3 family plugin** (`trtf_build/trtf_build/families/phi.py`)

@@ -78,7 +78,10 @@ The system is split into two stages:
 
 1. **Python build** (`trtf_build/`) — takes an HF model directory (with `config.json` + safetensors), builds a TRT engine via TensorRT's Python API, and packages it into a `.trtfb` bundle. Model family plugins in `trtf_build/trtf_build/families/` handle family-specific weight mapping and graph construction.
 
-2. **C++ runtime** — loads a `.trtfb` bundle, deserializes the TRT engine plan, and runs autoregressive inference. The runtime is bundle-only: it does not load HF model directories directly.
+2. **C++ runtime** — loads a `.trtfb` bundle, deserializes the TRT engine plan, and runs autoregressive inference. The runtime is bundle-only: it does not load HF model directories directly. The `runtime_strategy` field in the bundle's config.json selects the backend:
+   - `decoder_kv_cache` (default): standard attention with KV cache (`TrtBackendFastPath`)
+   - `decoder_moe`: MoE decoder (same KV cache, routing handled in TRT graph)
+   - `ssm_recurrent`: Mamba/SSM with conv + SSM recurrent state (`MambaBackend`)
 
 Tokenizer implementations (`ITokenizer`):
 - `VocabTokenizer` — vocab.txt-based lookup.
@@ -98,10 +101,13 @@ trtf_build/                          # Python package (engine builder)
     checkpoint_mapper.py             # HF safetensors -> weight dict
     bundle_writer.py                 # Write .trtfb files
     engine_builder.py                # Orchestrator: load -> build -> bundle
+    debug_runner.py                  # TrtRunner + MambaTrtRunner for pure-Python inference
     families/
       __init__.py                    # Auto-discover plugins
       base.py                        # FamilyPlugin protocol
-      qwen.py llama.py mistral.py gemma.py phi.py
+      qwen.py llama.py mistral.py gemma.py phi.py phi_moe.py
+      granite.py internlm.py starcoder2.py gpt2.py opt.py
+      falcon.py stablelm.py mamba.py qwen_vl.py
   pyproject.toml
 src/                                 # C++ bundle-only runtime
   bundle/
@@ -116,6 +122,9 @@ src/                                 # C++ bundle-only runtime
     trt_backend_shared.h/cpp         # TrtBackendFastPath autoregressive loop
     kv_cache_step_state.h/cpp        # KV cache state management
     step_state.h                     # IStepState interface
+    mamba_backend.h/cpp              # MambaBackend: SSM autoregressive loop
+    mamba_decode_runtime.h/cpp       # MambaStepEngine, run_mamba_step
+    mamba_step_state.h/cpp           # MambaStepState: conv + SSM recurrent state
   tokenizer/
     vocab_tokenizer.cpp              # Word-to-id lookup from vocabulary list
     hf_python_tokenizer.cpp          # HF tokenizers bridge via Python subprocess
@@ -135,7 +144,7 @@ tests/
 
 ## Adding a new model family
 
-Adding a new model family is done in the Python build package. No C++ changes needed.
+Adding a new model family is done in the Python build package. For standard decoder, MoE, and extended-decoder families, no C++ changes are needed. Families with fundamentally different state management (e.g., Mamba/SSM) require a new `IStepState` implementation and backend in C++.
 
 ### Quick path (scaffolding script)
 
@@ -167,8 +176,10 @@ $EDITOR trtf_build/trtf_build/families/phi.py
 
 ### Example
 
-See `trtf_build/trtf_build/families/qwen.py` for the Qwen3 plugin.
+See `trtf_build/trtf_build/families/qwen.py` for the Qwen3 plugin (standard decoder).
 See `trtf_build/trtf_build/families/phi.py` for Phi-3 (fused QKV/gate_up weight splitting).
+See `trtf_build/trtf_build/families/phi_moe.py` for Phi-MoE (MoE with SparseMixer routing).
+See `trtf_build/trtf_build/families/mamba.py` for Mamba (SSM, custom graph + C++ backend).
 See `trtf_build/trtf_build/families/base.py` for the plugin protocol.
 
 ### Diff-test framework
@@ -189,7 +200,7 @@ python3 scripts/diff_logits.py \
   --model microsoft/Phi-3-mini-4k-instruct --atol 1e-3 --battery --trust-remote-code
 ```
 
-The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python TRT inference with KV cache management, matching the C++ runtime behavior exactly. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.
+The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python TRT inference with KV cache management, matching the C++ runtime behavior exactly. For Mamba/SSM models, `MambaTrtRunner` handles recurrent state instead of KV cache. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.
 
 **Runner parity guarantee**: If you change the C++ mask/cache/position logic (`trt_decode_runtime.cpp`, `kv_cache_step_state.cpp`), you MUST also update `debug_runner.py` and verify with:
 ```bash
