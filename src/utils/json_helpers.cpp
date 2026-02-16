@@ -216,6 +216,72 @@ float extract_json_float(const std::string& text, const std::string& key, float 
     }
 }
 
+std::vector<float> extract_json_float_array(const std::string& text, const std::string& key, std::size_t max_count)
+{
+    const std::string needle = "\"" + key + "\"";
+    const std::size_t key_pos = text.find(needle);
+    if (key_pos == std::string::npos)
+    {
+        return {};
+    }
+
+    const std::size_t colon = text.find(':', key_pos);
+    if (colon == std::string::npos)
+    {
+        return {};
+    }
+
+    const std::size_t open_bracket = text.find('[', colon + 1);
+    if (open_bracket == std::string::npos)
+    {
+        return {};
+    }
+
+    std::vector<float> out;
+    std::size_t pos = open_bracket + 1;
+    while (pos < text.size() && out.size() < max_count)
+    {
+        while (pos < text.size() && (std::isspace(static_cast<unsigned char>(text[pos])) != 0 || text[pos] == ','))
+        {
+            ++pos;
+        }
+        if (pos >= text.size() || text[pos] == ']')
+        {
+            break;
+        }
+
+        std::size_t end = pos;
+        while (end < text.size())
+        {
+            const char c = text[end];
+            const bool numeric = (std::isdigit(static_cast<unsigned char>(c)) != 0) || c == '-' || c == '+'
+                || c == '.' || c == 'e' || c == 'E';
+            if (!numeric)
+            {
+                break;
+            }
+            ++end;
+        }
+
+        if (end == pos)
+        {
+            break;
+        }
+
+        try
+        {
+            out.push_back(std::stof(text.substr(pos, end - pos)));
+        }
+        catch (const std::exception&)
+        {
+            break;
+        }
+        pos = end;
+    }
+
+    return out;
+}
+
 int32_t parse_positive_env_int(const char* env_name, int32_t fallback)
 {
     const char* env = std::getenv(env_name);

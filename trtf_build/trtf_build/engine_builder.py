@@ -16,6 +16,7 @@ from .bundle_writer import BundleInfo, BundleSection, write_bundle
 _HF_ALLOW_PATTERNS = [
     "config.json",
     "generation_config.json",
+    "preprocessor_config.json",
     "model.safetensors",
     "model-*.safetensors",
     "model.safetensors.index.json",
@@ -112,6 +113,8 @@ def build_bundle(
         verbose: Print detailed logs.
     """
     model_dir_path = Path(model_dir)
+    model_id_or_path_orig = getattr(
+        build_bundle, '_model_id_or_path_orig', model_dir)
     t0 = time.monotonic()
 
     # 1. Parse config
@@ -146,6 +149,20 @@ def build_bundle(
     print(f"[trtf-build] Engine built [{t3 - t2:.1f}s] "
           f"({len(engine_plan) / (1024 * 1024):.1f} MB)", file=sys.stderr)
 
+    # 4b. Build vision engine (optional, VL models only)
+    vision_plan = None
+    build_vision = getattr(plugin, 'build_vision_engine', None)
+    if build_vision is not None:
+        print(f"[trtf-build] Building vision encoder engine ...",
+              file=sys.stderr)
+        vision_plan = build_vision(
+            str(model_dir_path), config, weights, verbose=verbose)
+        if vision_plan is not None:
+            t3b = time.monotonic()
+            print(f"[trtf-build] Vision engine built [{t3b - t3:.1f}s] "
+                  f"({len(vision_plan) / (1024 * 1024):.1f} MB)",
+                  file=sys.stderr)
+
     # 5. Write bundle
     info = BundleInfo(
         model_id=model_dir_path.name,
@@ -164,6 +181,10 @@ def build_bundle(
 
     sections = [BundleSection("engine_plan", engine_plan)]
 
+    # Add vision engine section if present
+    if vision_plan is not None:
+        sections.append(BundleSection("vision_engine_plan", vision_plan))
+
     # If model lacks tokenizer.json (fast format), generate it from the
     # slow tokenizer so the C++ runtime can always load via AutoTokenizer.
     _ensure_tokenizer_json(model_dir_path)
@@ -172,17 +193,28 @@ def build_bundle(
     # For config.json, inject runtime_strategy if the plugin provides one.
     for filename in ("config.json", "tokenizer.json", "tokenizer_config.json",
                      "vocab.json", "merges.txt", "special_tokens_map.json",
-                     "tokenizer.model"):
+                     "tokenizer.model", "preprocessor_config.json"):
         file_path = model_dir_path / filename
         if file_path.exists():
             data = file_path.read_bytes()
-            # Inject runtime_strategy into config.json for C++ runtime dispatch.
+            # Inject runtime_strategy and VL fields into config.json.
             if filename == "config.json":
+                cfg_dict = json.loads(data)
                 runtime_strategy = getattr(plugin, "runtime_strategy", None)
                 if runtime_strategy:
-                    cfg_dict = json.loads(data)
                     cfg_dict["runtime_strategy"] = runtime_strategy
-                    data = json.dumps(cfg_dict, indent=2).encode("utf-8")
+                embed_input = getattr(plugin, "embed_input", False)
+                if embed_input:
+                    cfg_dict["embed_input"] = True
+                if vision_plan is not None:
+                    cfg_dict["has_vision_engine"] = True
+                # Inject VL config from plugin (image_token_id, prompt template, etc.)
+                get_vl_config = getattr(plugin, 'get_vl_config', None)
+                if get_vl_config is not None:
+                    vl_cfg = get_vl_config(config)
+                    if vl_cfg is not None:
+                        cfg_dict.update(vl_cfg)
+                data = json.dumps(cfg_dict, indent=2).encode("utf-8")
             sections.append(BundleSection(filename, data))
 
     write_bundle(output_path, info, sections)
@@ -211,4 +243,5 @@ def build(
         verbose: Print detailed TRT builder logs.
     """
     model_dir = _resolve_model(model_id_or_path)
+    build_bundle._model_id_or_path_orig = model_id_or_path
     build_bundle(model_dir, output_path, max_cache_length, verbose=verbose)

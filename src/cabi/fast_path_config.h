@@ -28,6 +28,16 @@ struct FastPathModelConfig {
     int32_t d_inner{0};      // intermediate_size / d_inner
     int32_t state_size{16};  // SSM state dimension
     int32_t conv_kernel{4};  // causal conv1d kernel size
+
+    // Vision-Language fields (used when runtime_strategy == "vision_language")
+    bool has_vision_engine{false};  // bundle contains vision_engine_plan
+    bool embed_input{false};        // text decoder uses input_embed mode
+    int32_t image_token_id{-1};     // special token ID for <|image_pad|>
+    int32_t vision_output_dim{0};   // vision encoder output feature dim (= text hidden)
+    int32_t fixed_image_size{448};  // image size the vision engine was compiled for
+    int32_t num_image_pad_tokens{0}; // number of image pad tokens per image
+    std::string vl_prompt_template; // prompt template with {image_pads} and {prompt}
+    std::string image_token_str;    // string for one image pad token (e.g. "<|image_pad|>")
 };
 
 // Parse model configuration from config.json text for the fast path.

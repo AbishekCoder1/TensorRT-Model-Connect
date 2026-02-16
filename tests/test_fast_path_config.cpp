@@ -228,6 +228,69 @@ static void test_eos_bos_from_scalar()
     check(cfg.id_bos == 1, "bos_token_id from scalar → 1");
 }
 
+// -----------------------------------------------------------------------------
+// Intention:  Verify that vision_language runtime_strategy correctly parses
+//             VL-specific config fields.
+// Setup:      A JSON config with runtime_strategy="vision_language" and
+//             VL-specific fields (has_vision_engine, embed_input, image_token_id).
+// Mechanism:  Calls parse_fast_path_config and checks VL fields are populated.
+// -----------------------------------------------------------------------------
+static void test_vision_language_config()
+{
+    const std::string config = R"({
+        "vocab_size": 32000,
+        "hidden_size": 2048,
+        "num_hidden_layers": 16,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 16,
+        "runtime_strategy": "vision_language",
+        "has_vision_engine": 1,
+        "embed_input": 1,
+        "image_token_id": 151655,
+        "vision_output_dim": 2048,
+        "fixed_image_size": 448,
+        "num_image_pad_tokens": 256,
+        "vl_prompt_template": "test {image_pads} {prompt}",
+        "image_token_str": "<|image_pad|>",
+        "max_position_embeddings": 4096
+    })";
+
+    const auto cfg = trtf::parse_fast_path_config(config, -1);
+    check(cfg.runtime_strategy == "vision_language", "runtime_strategy = vision_language");
+    check(cfg.has_vision_engine == true, "has_vision_engine = true");
+    check(cfg.embed_input == true, "embed_input = true");
+    check(cfg.image_token_id == 151655, "image_token_id = 151655");
+    check(cfg.vision_output_dim == 2048, "vision_output_dim = 2048");
+    check(cfg.fixed_image_size == 448, "fixed_image_size = 448");
+    check(cfg.num_image_pad_tokens == 256, "num_image_pad_tokens = 256");
+    check(cfg.vl_prompt_template == "test {image_pads} {prompt}", "vl_prompt_template parsed");
+    check(cfg.image_token_str == "<|image_pad|>", "image_token_str parsed");
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify that non-VL models don't accidentally parse VL fields.
+// Setup:      A standard decoder config (runtime_strategy="decoder_kv_cache").
+// Mechanism:  Calls parse_fast_path_config and checks VL fields are at defaults.
+// -----------------------------------------------------------------------------
+static void test_non_vl_config_defaults()
+{
+    const std::string config = R"({
+        "vocab_size": 32000,
+        "hidden_size": 2048,
+        "num_hidden_layers": 16,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 16,
+        "max_position_embeddings": 4096
+    })";
+
+    const auto cfg = trtf::parse_fast_path_config(config, -1);
+    check(cfg.runtime_strategy == "decoder_kv_cache", "default strategy = decoder_kv_cache");
+    check(cfg.has_vision_engine == false, "has_vision_engine = false (default)");
+    check(cfg.embed_input == false, "embed_input = false (default)");
+    check(cfg.image_token_id == -1, "image_token_id = -1 (default)");
+    check(cfg.vision_output_dim == 0, "vision_output_dim = 0 (default)");
+}
+
 int main()
 {
     test_head_dim_explicit_in_config();
@@ -237,6 +300,8 @@ int main()
     test_max_cache_length_capped_at_4096();
     test_eos_bos_from_array();
     test_eos_bos_from_scalar();
+    test_vision_language_config();
+    test_non_vl_config_defaults();
 
     if (failures > 0)
     {

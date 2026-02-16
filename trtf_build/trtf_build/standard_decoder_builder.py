@@ -53,6 +53,7 @@ def build_standard_decoder_engine(
     activation: str = "silu",
     partial_rotary_factor: float = 1.0,
     parallel_residual: bool = False,
+    embed_input: bool = False,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
 ) -> bytes:
@@ -68,6 +69,10 @@ def build_standard_decoder_engine(
         position_type: "rope" (rotary) or "learned" (absolute position embeddings).
         activation: Activation function for gelu_fc MLP ("gelu_new", "gelu", "relu").
         partial_rotary_factor: Fraction of head dims that get RoPE (default 1.0).
+        embed_input: If True, add input_embed [1, hidden] and use_input_embed [1]
+            engine inputs. When use_input_embed==1, the decoder uses input_embed
+            directly instead of the embedding lookup. Used for VL models where
+            the vision encoder provides fused embeddings during prefill.
         verbose: Print TRT builder logs.
         debug_layer_outputs: If True, mark per-layer hidden states as network
             outputs for diff testing.
@@ -98,6 +103,16 @@ def build_standard_decoder_engine(
     position_id = network.add_input("position_id", trt.int32, (1,))
     attention_mask = network.add_input(
         "attention_mask", trt.float32, (1, attention_window))
+
+    # Optional VL inputs: when embed_input=True, the decoder can accept
+    # a pre-computed embedding vector instead of a token ID.
+    input_embed_tensor = None
+    use_input_embed_tensor = None
+    if embed_input:
+        input_embed_tensor = network.add_input(
+            "input_embed", trt.float32, (1, hidden))
+        use_input_embed_tensor = network.add_input(
+            "use_input_embed", trt.float32, (1,))
 
     cache_k_inputs = []
     cache_v_inputs = []
@@ -151,10 +166,36 @@ def build_standard_decoder_engine(
         network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
 
     # ---------------------------------------------------------------
-    # Embedding lookup
+    # Embedding lookup (with optional embed_input override for VL)
     # ---------------------------------------------------------------
     gather = network.add_gather(embedding_table, token_id, 0)
-    hidden_state = gather.get_output(0)
+    token_embed = gather.get_output(0)
+
+    if embed_input and input_embed_tensor is not None and use_input_embed_tensor is not None:
+        # Conditional embedding: (1 - flag) * token_embed + flag * input_embed
+        # use_input_embed is [1] scalar, broadcast to [1, hidden]
+        flag_broadcast = network.add_shuffle(use_input_embed_tensor)
+        flag_broadcast.reshape_dims = (1, 1)
+        one_const = graph_ops.add_constant(
+            network, (1, 1), np.array([1.0], dtype=np.float32))
+        inv_flag = network.add_elementwise(
+            one_const, flag_broadcast.get_output(0),
+            trt.ElementWiseOperation.SUB)
+        # (1 - flag) * token_embed
+        tok_part = network.add_elementwise(
+            inv_flag.get_output(0), token_embed,
+            trt.ElementWiseOperation.PROD)
+        # flag * input_embed
+        embed_part = network.add_elementwise(
+            flag_broadcast.get_output(0), input_embed_tensor,
+            trt.ElementWiseOperation.PROD)
+        # sum
+        hidden_state_sum = network.add_elementwise(
+            tok_part.get_output(0), embed_part.get_output(0),
+            trt.ElementWiseOperation.SUM)
+        hidden_state = hidden_state_sum.get_output(0)
+    else:
+        hidden_state = token_embed
 
     # Add learned position embedding if applicable
     if position_type == "learned" and position_embed_table is not None:

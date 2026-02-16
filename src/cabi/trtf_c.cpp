@@ -9,6 +9,9 @@
 #include "runtime/trt/trt_backend_shared.h"
 #include "runtime/trt/mamba_backend.h"
 #include "runtime/trt/mamba_decode_runtime.h"
+#include "runtime/trt/vl_backend.h"
+#include "runtime/trt/vision_engine.h"
+#include "runtime/trt/image_preprocessor.h"
 #include "runtime/trt/trt_common.h"
 
 #include <chrono>
@@ -81,6 +84,76 @@ public:
         return mLastOutput.c_str();
     }
 
+    const char* generate(const char* prompt, const char* image_path,
+                         std::size_t max_new_tokens) override
+    {
+        if (!mBackend->supports_vision() || image_path == nullptr)
+        {
+            return generate(prompt, max_new_tokens);
+        }
+
+        if (prompt == nullptr)
+        {
+            mLastOutput = "";
+            return mLastOutput.c_str();
+        }
+
+        trtf::GenerationConfig config = mGenConfig;
+        if (max_new_tokens > 0)
+        {
+            config.max_new_tokens = max_new_tokens;
+        }
+
+#if TRTF_HAS_TRT
+        // Native VL pipeline: preprocess image in C++, run vision TRT, tokenize, generate
+        auto* vl = dynamic_cast<trtf::VLBackendFastPath*>(mBackend.get());
+        if (vl != nullptr)
+        {
+            // Step 1-2: Load image + run vision encoder (C++ native)
+            std::vector<float> image_features;
+            int32_t num_features = 0;
+            int32_t feature_dim = 0;
+            std::string prep_error;
+            if (!vl->prepare_image(std::string(image_path),
+                    image_features, num_features, feature_dim, prep_error))
+            {
+                std::cerr << "[trtf] VL image preparation failed: " << prep_error
+                          << ", falling back to text-only" << std::endl;
+                auto input_ids = mTokenizer->encode(prompt);
+                auto output_ids = mBackend->generate(input_ids, config);
+                mLastOutput = mTokenizer->decode(output_ids);
+                return mLastOutput.c_str();
+            }
+
+            // Step 3: Format VL prompt with image pad tokens (C++ string)
+            const std::string formatted = trtf::format_vl_prompt(
+                std::string(prompt), vl->vl_config());
+
+            // Step 4: Tokenize via Python tokenizer subprocess
+            auto input_ids = mTokenizer->encode(formatted.c_str());
+
+            // Step 5-6: Generate with image features + decode
+            auto output_ids = vl->generate_vl(
+                input_ids,
+                image_features.data(), num_features, feature_dim,
+                {}, config);
+            mLastOutput = mTokenizer->decode(output_ids);
+        }
+        else
+#endif // TRTF_HAS_TRT
+        {
+            auto input_ids = mTokenizer->encode(prompt);
+            auto output_ids = mBackend->generate(input_ids, config);
+            mLastOutput = mTokenizer->decode(output_ids);
+        }
+        return mLastOutput.c_str();
+    }
+
+    bool supports_vision() const override
+    {
+        return mBackend->supports_vision();
+    }
+
     const char* model_id() const override
     {
         return mModelId.c_str();
@@ -111,7 +184,9 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
 
     // Find engine plan section
     const std::vector<char>* plan_data = nullptr;
+    const std::vector<char>* vision_plan_data = nullptr;
     const std::vector<char>* config_json_data = nullptr;
+    const std::vector<char>* preprocessor_config_data = nullptr;
     const std::vector<char>* tokenizer_json_data = nullptr;
     const std::vector<char>* tokenizer_config_data = nullptr;
     const std::vector<char>* vocab_json_data = nullptr;
@@ -122,7 +197,9 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
     for (const auto& section : bundle.sections)
     {
         if (section.name == "engine_plan") plan_data = &section.data;
+        else if (section.name == "vision_engine_plan") vision_plan_data = &section.data;
         else if (section.name == "config.json") config_json_data = &section.data;
+        else if (section.name == "preprocessor_config.json") preprocessor_config_data = &section.data;
         else if (section.name == "tokenizer.json") tokenizer_json_data = &section.data;
         else if (section.name == "tokenizer_config.json") tokenizer_config_data = &section.data;
         else if (section.name == "vocab.json") vocab_json_data = &section.data;
@@ -294,6 +371,167 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
         return pipeline;
     }
 
+    // Vision-Language path: two-engine (vision encoder + text decoder)
+    if (strategy == "vision_language")
+    {
+        // Build text decoder engine struct (same as standard decoder)
+        auto decoder_engine = std::make_unique<trtf::DecoderStepEngine>();
+        decoder_engine->engine = std::move(trt_engine);
+        decoder_engine->context = std::move(exec_ctx);
+        decoder_engine->vocab_size = fp_cfg.vocab_size;
+        decoder_engine->hidden_size = fp_cfg.hidden_size;
+        decoder_engine->cache_state_size = fp_cfg.attention_size;
+        decoder_engine->attention_mask_size = fp_cfg.max_cache_length + 1;
+        decoder_engine->max_cache_length = fp_cfg.max_cache_length;
+        decoder_engine->num_layers = fp_cfg.num_layers;
+        decoder_engine->requires_position_input = true;
+        decoder_engine->id_bos = fp_cfg.id_bos;
+        decoder_engine->id_eos = fp_cfg.id_eos;
+
+        for (int32_t i = 0; i < fp_cfg.num_layers; ++i)
+        {
+            decoder_engine->cache_k_input_names.push_back(trtf::layer_tensor_name("cache_k", i));
+            decoder_engine->cache_v_input_names.push_back(trtf::layer_tensor_name("cache_v", i));
+            decoder_engine->present_k_output_names.push_back(trtf::layer_tensor_name("present_k", i));
+            decoder_engine->present_v_output_names.push_back(trtf::layer_tensor_name("present_v", i));
+        }
+
+        if (!trtf::has_all_required_tensors(*decoder_engine))
+        {
+            throw std::runtime_error("Bundle engine missing required tensors: " + bundle_path);
+        }
+
+        // Deserialize vision engine (if present in the bundle)
+        std::unique_ptr<trtf::VisionStepEngine> vision_step_engine;
+        if (vision_plan_data != nullptr && !vision_plan_data->empty())
+        {
+            std::cerr << "[trtf] Deserializing vision TRT engine from bundle ("
+                      << vision_plan_data->size() / (1024 * 1024) << " MB) ..." << std::endl;
+
+            auto vision_trt_engine = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+                runtime_ptr->deserializeCudaEngine(vision_plan_data->data(), vision_plan_data->size()));
+            if (!vision_trt_engine)
+            {
+                throw std::runtime_error("Failed to deserialize vision engine from bundle: " + bundle_path);
+            }
+
+            auto vision_exec_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                vision_trt_engine->createExecutionContext());
+            if (!vision_exec_ctx)
+            {
+                throw std::runtime_error("Failed to create vision execution context");
+            }
+
+            vision_step_engine = std::make_unique<trtf::VisionStepEngine>();
+            vision_step_engine->engine = std::move(vision_trt_engine);
+            vision_step_engine->context = std::move(vision_exec_ctx);
+            vision_step_engine->num_output_features = fp_cfg.num_image_pad_tokens;
+            vision_step_engine->feature_dim = (fp_cfg.vision_output_dim > 0)
+                ? fp_cfg.vision_output_dim : fp_cfg.hidden_size;
+
+            std::cerr << "[trtf] Vision engine deserialized (features="
+                      << vision_step_engine->num_output_features
+                      << ", dim=" << vision_step_engine->feature_dim << ")" << std::endl;
+        }
+
+        // Parse VL preprocessing config from bundle sections
+        std::string config_text_vl;
+        if (config_json_data != nullptr && !config_json_data->empty())
+        {
+            config_text_vl.assign(config_json_data->begin(), config_json_data->end());
+        }
+        std::string preproc_text;
+        if (preprocessor_config_data != nullptr && !preprocessor_config_data->empty())
+        {
+            preproc_text.assign(preprocessor_config_data->begin(), preprocessor_config_data->end());
+        }
+        trtf::VLPreprocessConfig vl_preproc = trtf::parse_vl_preprocess_config(
+            config_text_vl, preproc_text);
+
+        // Extract tokenizer files to temp dir
+        std::string vl_temp_dir_str;
+        bool vl_temp_transferred = false;
+        auto vl_temp_cleanup = [&]() {
+            if (!vl_temp_transferred && !vl_temp_dir_str.empty())
+            {
+                std::error_code ec;
+                std::filesystem::remove_all(vl_temp_dir_str, ec);
+            }
+        };
+        struct VlTempGuard {
+            std::function<void()> cleanup;
+            ~VlTempGuard() { cleanup(); }
+        } vl_guard{vl_temp_cleanup};
+
+        std::unique_ptr<trtf::ITokenizer> vl_tokenizer;
+        bool vl_has_tok = (tokenizer_json_data != nullptr && !tokenizer_json_data->empty())
+            || (vocab_json_data != nullptr && !vocab_json_data->empty())
+            || (tokenizer_model_data != nullptr && !tokenizer_model_data->empty());
+        if (vl_has_tok)
+        {
+            char vl_temp_pattern[] = "/tmp/trtfb_tok_XXXXXX";
+            char* vl_created = mkdtemp(vl_temp_pattern);
+            if (vl_created == nullptr)
+            {
+                throw std::runtime_error("Failed to create temp dir for bundle tokenizer");
+            }
+            vl_temp_dir_str = vl_created;
+            const std::filesystem::path vl_temp_dir(vl_temp_dir_str);
+
+            auto write_section_vl = [&](const char* filename, const std::vector<char>* data) {
+                if (data != nullptr && !data->empty())
+                {
+                    std::ofstream out(vl_temp_dir / filename, std::ios::binary | std::ios::trunc);
+                    if (out)
+                    {
+                        out.write(data->data(), static_cast<std::streamsize>(data->size()));
+                    }
+                }
+            };
+
+            write_section_vl("tokenizer.json", tokenizer_json_data);
+            write_section_vl("tokenizer_config.json", tokenizer_config_data);
+            write_section_vl("vocab.json", vocab_json_data);
+            write_section_vl("merges.txt", merges_txt_data);
+            write_section_vl("special_tokens_map.json", special_tokens_data);
+            write_section_vl("tokenizer.model", tokenizer_model_data);
+
+            // Also write preprocessor_config.json for image preprocessing
+            write_section_vl("preprocessor_config.json", preprocessor_config_data);
+
+            std::cerr << "[trtf] Initializing HF tokenizer from bundle ..." << std::endl;
+            auto ttok0 = std::chrono::steady_clock::now();
+            vl_tokenizer = trtf::CreateHfPythonTokenizer(vl_temp_dir_str, hf_python);
+            auto ttok1 = std::chrono::steady_clock::now();
+            std::cerr << "[trtf] Tokenizer ready ["
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(ttok1 - ttok0).count()
+                      << " ms]" << std::endl;
+        }
+        else
+        {
+            throw std::runtime_error("Bundle has no tokenizer files: " + bundle_path);
+        }
+
+        auto vl_backend_raw = trtf::CreateVLBackendFromEngines(
+            std::move(decoder_engine),
+            std::move(vision_step_engine),
+            fp_cfg,
+            std::move(vl_preproc));
+        if (!vl_backend_raw || !vl_backend_raw->is_available())
+        {
+            throw std::runtime_error("Failed to create VL TRT backend from bundle engine");
+        }
+
+        std::cerr << "[trtf] Runtime ready (backend=trt_vl, strategy=" << strategy << ")" << std::endl;
+
+        trtf::GenerationConfig gen_config{};
+        auto* pipeline = new PipelineImpl(
+            bundle.info.model_id, std::move(vl_tokenizer), std::move(vl_backend_raw), "trt_vl", gen_config);
+        pipeline->set_bundle_temp_dir(vl_temp_dir_str);
+        vl_temp_transferred = true;
+        return pipeline;
+    }
+
     // Standard decoder path: build DecoderStepEngine
     auto engine_struct = std::make_unique<trtf::DecoderStepEngine>();
     engine_struct->engine = std::move(trt_engine);
@@ -395,7 +633,7 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
     else
     {
         throw std::runtime_error("Unsupported runtime_strategy: " + strategy
-            + " (supported: decoder_kv_cache, decoder_moe, ssm_recurrent)");
+            + " (supported: decoder_kv_cache, decoder_moe, ssm_recurrent, vision_language)");
     }
 
     if (!backend || !backend->is_available())

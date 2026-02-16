@@ -95,7 +95,8 @@ bool run_decoder_step(const DecoderStepEngine& engine, int32_t token_id, int32_t
     const std::vector<std::vector<float>>& cache_k_by_layer, const std::vector<std::vector<float>>& cache_v_by_layer,
     const std::vector<float>& attention_mask, std::vector<float>& logits,
     std::vector<std::vector<float>>& present_k_by_layer, std::vector<std::vector<float>>& present_v_by_layer,
-    std::string& error)
+    std::string& error,
+    const float* input_embed, int32_t embed_dim, float use_input_embed)
 {
     auto fail = [&error](std::string_view stage) {
         error = std::string(stage);
@@ -209,6 +210,28 @@ bool run_decoder_step(const DecoderStepEngine& engine, int32_t token_id, int32_t
     if (!bind_input(engine.mask_input_name, attention_mask.data(), mask_bytes))
     {
         return fail("bind input attention_mask failed");
+    }
+
+    // Bind VL embed_input tensors if the engine has them.
+    // When use_input_embed==0 (text-only), we still bind zeros so TRT doesn't crash.
+    if (has_io_tensor(*engine.engine, "input_embed"))
+    {
+        const std::size_t embed_bytes = (embed_dim > 0)
+            ? static_cast<std::size_t>(embed_dim) * sizeof(float)
+            : static_cast<std::size_t>(engine.hidden_size) * sizeof(float);
+        std::vector<float> embed_buf(embed_bytes / sizeof(float), 0.0F);
+        if (input_embed != nullptr && embed_dim > 0 && use_input_embed > 0.5F)
+        {
+            std::memcpy(embed_buf.data(), input_embed, embed_bytes);
+        }
+        if (!bind_input("input_embed", embed_buf.data(), embed_bytes))
+        {
+            return fail("bind input input_embed failed");
+        }
+        if (!bind_input("use_input_embed", &use_input_embed, sizeof(use_input_embed)))
+        {
+            return fail("bind input use_input_embed failed");
+        }
     }
 
     for (int32_t layer = 0; layer < engine.num_layers; ++layer)

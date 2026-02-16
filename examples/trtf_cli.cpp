@@ -20,6 +20,7 @@ struct CliArgs {
     std::string bundle_path;
     std::string prompt;
     std::string hf_python;
+    std::string image_path;
     int max_new_tokens{0};
     bool show_help{false};
     bool parse_error{false};
@@ -30,7 +31,7 @@ void print_usage()
 {
     std::cerr <<
         "Usage:\n"
-        "  trtf run     <bundle.trtfb> --prompt \"text\" [--max-new-tokens N] [--hf-python PATH]\n"
+        "  trtf run     <bundle.trtfb> --prompt \"text\" [--image PATH] [--max-new-tokens N] [--hf-python PATH]\n"
         "  trtf inspect <bundle.trtfb>\n"
         "  trtf version\n";
 }
@@ -107,6 +108,18 @@ CliArgs parse_args(int argc, char** argv)
             continue;
         }
 
+        if (arg == "--image")
+        {
+            if (i + 1 >= argc)
+            {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.image_path = argv[++i];
+            continue;
+        }
+
         if (arg[0] == '-')
         {
             args.parse_error = true;
@@ -148,6 +161,7 @@ int cmd_run(const CliArgs& args)
     TrtfPipelineOptions opts{};
     opts.max_new_tokens = args.max_new_tokens;
     opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
+    opts.image_path = args.image_path.empty() ? nullptr : args.image_path.c_str();
     auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
     if (pipeline == nullptr)
     {
@@ -159,7 +173,15 @@ int cmd_run(const CliArgs& args)
     const std::size_t max_tokens = args.max_new_tokens > 0
         ? static_cast<std::size_t>(args.max_new_tokens) : 0;
 
-    const char* output = pipeline->generate(prompt.c_str(), max_tokens);
+    const char* output = nullptr;
+    if (!args.image_path.empty() && pipeline->supports_vision())
+    {
+        output = pipeline->generate(prompt.c_str(), args.image_path.c_str(), max_tokens);
+    }
+    else
+    {
+        output = pipeline->generate(prompt.c_str(), max_tokens);
+    }
     if (output != nullptr)
     {
         std::cout << output << '\n';

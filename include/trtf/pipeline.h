@@ -12,6 +12,17 @@ public:
     // Generate text. Returns pointer valid until next generate() or destruction.
     virtual const char* generate(const char* prompt, std::size_t max_new_tokens = 0) = 0;
 
+    // Generate text with an image (VL models). Default: ignores image, calls text-only.
+    virtual const char* generate(const char* prompt, const char* image_path,
+                                 std::size_t max_new_tokens = 0)
+    {
+        (void) image_path;
+        return generate(prompt, max_new_tokens);
+    }
+
+    // Returns true if this pipeline has a vision encoder and supports images.
+    virtual bool supports_vision() const { return false; }
+
     // Metadata -- pointers valid for lifetime of the pipeline.
     virtual const char* model_id() const = 0;
     virtual const char* backend_name() const = 0;
@@ -24,6 +35,7 @@ extern "C" {
 struct TrtfPipelineOptions {
     int max_new_tokens;           // 0 = use model default (20)
     const char* hf_python;        // nullptr = auto-detect
+    const char* image_path;       // nullptr = text-only (no image)
 };
 
 // Create a pipeline from a .trtfb bundle file.

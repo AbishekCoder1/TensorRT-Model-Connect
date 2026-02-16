@@ -73,6 +73,19 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.conv_kernel = extract_json_int(config_text, "conv_kernel", 4);
     }
 
+    // Vision-Language fields
+    if (cfg.runtime_strategy == "vision_language")
+    {
+        cfg.has_vision_engine = extract_json_int(config_text, "has_vision_engine", 0) != 0;
+        cfg.embed_input = extract_json_int(config_text, "embed_input", 0) != 0;
+        cfg.image_token_id = extract_json_int(config_text, "image_token_id", -1);
+        cfg.vision_output_dim = extract_json_int(config_text, "vision_output_dim", 0);
+        cfg.fixed_image_size = extract_json_int(config_text, "fixed_image_size", 448);
+        cfg.num_image_pad_tokens = extract_json_int(config_text, "num_image_pad_tokens", 0);
+        cfg.vl_prompt_template = extract_json_string(config_text, "vl_prompt_template", "");
+        cfg.image_token_str = extract_json_string(config_text, "image_token_str", "");
+    }
+
     return cfg;
 }
 

@@ -24,7 +24,8 @@ bool run_decoder_step(const DecoderStepEngine& engine, int32_t token_id, int32_t
     const std::vector<std::vector<float>>& cache_k_by_layer, const std::vector<std::vector<float>>& cache_v_by_layer,
     const std::vector<float>& attention_mask, std::vector<float>& logits,
     std::vector<std::vector<float>>& present_k_by_layer, std::vector<std::vector<float>>& present_v_by_layer,
-    std::string& error);
+    std::string& error,
+    const float* input_embed = nullptr, int32_t embed_dim = 0, float use_input_embed = 0.0F);
 
 #endif // TRTF_HAS_TRT
 

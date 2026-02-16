@@ -66,6 +66,10 @@ add_library(trtf_core
   src/runtime/trt/mamba_step_state.cpp
   src/runtime/trt/mamba_decode_runtime.cpp
   src/runtime/trt/mamba_backend.cpp
+  src/runtime/trt/vl_backend.cpp
+  src/runtime/trt/image_preprocessor.cpp
+  src/runtime/trt/vision_engine.cpp
+  src/runtime/trt/stb_impl.cpp
   src/tokenizer/hf_python_tokenizer.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/utils/data_dir.cpp
@@ -79,6 +83,7 @@ target_include_directories(trtf_core
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
     ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/third_party/stb
 )
 
 target_compile_definitions(trtf_core
@@ -173,6 +178,11 @@ add_test(NAME test_bundle_e2e COMMAND test_bundle_e2e)
 add_executable(test_cli_args tests/test_cli_args.cpp)
 target_link_libraries(test_cli_args PRIVATE trtf_core)
 add_test(NAME test_cli_args COMMAND test_cli_args)
+
+add_executable(test_image_preprocessor tests/test_image_preprocessor.cpp)
+target_link_libraries(test_image_preprocessor PRIVATE trtf_core)
+target_include_directories(test_image_preprocessor PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_image_preprocessor COMMAND test_image_preprocessor)
 
 # --- Install ---
 include(CMakePackageConfigHelpers)
