@@ -111,7 +111,7 @@ trtf_has_trt();              // 1 if compiled with TRT support
 
 ## Supported models
 
-13 model families covering dense decoders, MoE, and multiple architecture variants. Any HF model whose `config.json` `model_type` matches a supported family works automatically.
+14 model families covering dense decoders, MoE, SSM, and multiple architecture variants. Any HF model whose `config.json` `model_type` matches a supported family works automatically.
 
 ### Standard decoder (RMSNorm + RoPE + SwiGLU)
 
@@ -140,6 +140,12 @@ trtf_has_trt();              // 1 if compiled with TRT support
 | Family | Matched `model_type` | Compatible Models | Build Command |
 |--------|---------------------|-------------------|---------------|
 | **Phi-MoE** | `phimoe` | Phi-tiny-MoE (3.8B/1.1B active) | `trtf-build build microsoft/Phi-tiny-MoE-instruct -o phi-moe.trtfb` |
+
+### State Space Models (SSM)
+
+| Family | Matched `model_type` | Compatible Models | Build Command |
+|--------|---------------------|-------------------|---------------|
+| **Mamba** | `mamba` | Mamba (130M–2.8B) | `trtf-build build state-spaces/mamba-130m-hf -o mamba-130m.trtfb` |
 
 ### Notable compatible models (via model_type matching)
 
