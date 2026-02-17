@@ -350,7 +350,7 @@ Expected: Coherent text output, `backend=trt`.
 ```bash
 docker exec trtf-dev bash -c '
 source .venv-hf/bin/activate
-python3 scripts/diff_logits.py \
+python3 tools/diff_logits.py \
   --model-dir models/hf/__hf_local_dir__ \
   --binary ./build-container-phase1/trtf_load_model \
   --backend-flag --force-trt --atol 1e-3 --battery

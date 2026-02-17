@@ -11,6 +11,7 @@ echo "=== Installing Python packages ==="
 pip install -U pip
 pip install tensorrt_cu12 && pip install tensorrt --no-deps
 pip install "transformers>=4.57.0" tokenizers safetensors sentencepiece huggingface_hub ml_dtypes datasets
+pip install pytest torch --index-url https://download.pytorch.org/whl/cu124
 pip install --no-deps -e trtf_build/
 
 echo "=== Configuring C++ build ==="

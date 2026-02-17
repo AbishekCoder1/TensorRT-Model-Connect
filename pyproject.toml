@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+testpaths = ["tests/builder", "tests/tools", "tests/e2e"]
+markers = [
+    "trt: tests requiring TensorRT + CUDA GPU",
+    "e2e: end-to-end tests requiring GPU and engine bundles",
+]

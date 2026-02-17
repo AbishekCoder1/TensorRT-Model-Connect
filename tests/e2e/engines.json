@@ -1,0 +1,17 @@
+{
+  "engine_dir": "/mnt/storage/trt-transformers/engines",
+  "models": [
+    {
+      "name": "qwen3-0.6b",
+      "hf_id": "Qwen/Qwen3-0.6B",
+      "bundle": "qwen3-0.6b.trtfb",
+      "family": "qwen",
+      "runtime_strategy": "decoder_kv_cache",
+      "max_cache_length": 256,
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 30,
+      "logit_atol": 1e-3,
+      "layer_atol": 0.05
+    }
+  ]
+}

@@ -9,15 +9,15 @@ Tests:
 
 Usage:
   # Vision feature comparison (requires torch + transformers)
-  python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+  python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
     --model Qwen/Qwen2.5-VL-3B-Instruct --atol 0.1
 
   # Full VL generation with C++ binary
-  python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+  python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
     --binary ./build/trtf --hf-python .venv/bin/python
 
   # Vision-only (no HF model needed)
-  python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg --vision-only
+  python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg --vision-only
 """
 
 from __future__ import annotations

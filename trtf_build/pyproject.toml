@@ -17,8 +17,12 @@ dependencies = [
 #   pip install tensorrt_cu12>=10.0   # for CUDA 12.x
 #   pip install tensorrt>=10.0        # for CUDA 13.x (default)
 
+[project.optional-dependencies]
+test = ["pytest>=7.0", "torch>=2.0"]
+
 [project.scripts]
 trtf-build = "trtf_build.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+

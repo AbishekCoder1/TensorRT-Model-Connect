@@ -5,11 +5,11 @@ Builds a TRT debug engine with per-layer outputs marked, runs a single
 forward pass, and compares per-layer hidden states against HF transformers.
 
 Usage:
-    python3 scripts/diff_layers.py \
+    python3 tools/diff_layers.py \
       --model Qwen/Qwen3-0.6B \
       --prompt "Hello" --atol 0.05
 
-    python3 scripts/diff_layers.py \
+    python3 tools/diff_layers.py \
       --model models/hf/Qwen__Qwen3-0.6B --atol 0.05
 """
 import argparse

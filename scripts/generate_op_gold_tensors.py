@@ -204,7 +204,7 @@ def generate_bias_sum(output_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate gold tensor fixtures for TRT ops")
-    parser.add_argument("--output-dir", default="tests/gold", help="Output directory")
+    parser.add_argument("--output-dir", default="tests/cpp/gold", help="Output directory")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)

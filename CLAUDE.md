@@ -46,19 +46,33 @@ trtf-build version
 
 ## Running tests
 
-All tests:
+C++ runtime unit tests:
 ```bash
 ctest --test-dir build --output-on-failure
-```
-
-Single test:
-```bash
 ctest --test-dir build -R test_pipeline --output-on-failure
-# or directly:
-./build/test_pipeline
 ```
 
-Tests are plain C++ executables (no framework). They use `main()`, print to stderr on failure, and return 0 on success / non-zero on failure. Test names in CMake match their source files in `tests/`.
+Python builder unit tests:
+```bash
+pytest tests/builder/ -v
+```
+
+Diff framework self-tests:
+```bash
+pytest tests/tools/ -v
+```
+
+E2E tests (requires GPU + engine bundles):
+```bash
+TRTF_ENGINE_DIR=/mnt/storage/trt-transformers/engines pytest tests/e2e/ -v
+```
+
+All Python tests at once:
+```bash
+pytest tests/ -v --ignore=tests/cpp
+```
+
+C++ tests are plain executables (no framework) in `tests/cpp/`. They use `main()`, print to stderr on failure, and return 0 on success / non-zero on failure. Test names in CMake match their source files.
 
 ## Running executables
 
@@ -135,15 +149,27 @@ src/                                 # C++ bundle-only runtime
     data_dir.h/cpp                   # centralized source-dir resolution
     text_parsers.h/cpp               # shared string/file parsing (starts_with, read_file, etc.)
     json_helpers.h/cpp               # shared JSON extraction (extract_json_string, etc.)
-scripts/
-  setup_container.sh                 # One-shot container setup (venv, deps, build, test)
+tools/                               # Diff test framework (TRT vs HF comparison)
   diff_logits.py                     # E2E logit comparison (trtf vs HF transformers)
   diff_layers.py                     # Per-layer hidden state comparison
   diff_vl.py                         # VL diff testing (vision features, generation, C++ parity)
+  test_runner_parity.py              # Python vs C++ runtime parity
+  test_graph_ops.py                  # TRT graph operation testing
+scripts/                             # Infrastructure & utility scripts
+  setup_container.sh                 # One-shot container setup (venv, deps, build, test)
   new_family.py                      # Scaffold a new family plugin from HF repo
   validate_family.sh                 # One-command validation gate (build + diff + parity)
 tests/
-  test_helpers.h                     # Shared helpers: temp dirs, safetensors writing
+  cpp/                               # C++ runtime unit tests
+    test_helpers.h                   # Shared helpers: temp dirs, safetensors writing
+    test_bundle_format.cpp ...       # 12 test executables
+  builder/                           # Python builder unit tests (from trtf_build/tests/)
+    conftest.py test_config.py ...   # 11 test modules
+  tools/                             # Diff framework self-tests
+    test_diff_logits.py ...          # Mocked tests for diff tools
+  e2e/                               # E2E tests with JSON manifest
+    engines.json                     # Model manifest
+    test_inference.py ...            # GPU-required E2E tests
 ```
 
 ## Adding a new model family
@@ -192,15 +218,15 @@ Pure-Python TRT-vs-HF comparison (no C++ binary needed). Requires `torch`.
 
 ```bash
 # E2E logit comparison (per-step logits, text match)
-python3 scripts/diff_logits.py \
+python3 tools/diff_logits.py \
   --model Qwen/Qwen3-0.6B --atol 1e-3 --battery
 
 # Per-layer hidden state comparison (embedding, all layers, logits)
-python3 scripts/diff_layers.py \
+python3 tools/diff_layers.py \
   --model Qwen/Qwen3-0.6B --atol 0.05
 
 # For models requiring custom tokenizer code (e.g., Phi-3), add --trust-remote-code:
-python3 scripts/diff_logits.py \
+python3 tools/diff_logits.py \
   --model microsoft/Phi-3-mini-4k-instruct --atol 1e-3 --battery --trust-remote-code
 ```
 
@@ -209,24 +235,24 @@ The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python
 **VL diff testing** (`diff_vl.py`):
 ```bash
 # Vision encoder feature comparison (TRT vs HF)
-python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
   --model Qwen/Qwen2.5-VL-3B-Instruct --atol 0.1
 
 # Vision-only smoke test (no HF model needed)
-python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg --vision-only
+python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg --vision-only
 
 # Debug with preprocessor override
-python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
   --vision-only --preprocessor-type simple_chw
 
 # Full VL generation + C++ binary parity
-python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
   --binary ./build/trtf --hf-python .venv/bin/python
 ```
 
 **Runner parity guarantee**: If you change the C++ mask/cache/position logic (`trt_decode_runtime.cpp`, `kv_cache_step_state.cpp`), you MUST also update `debug_runner.py` and verify with:
 ```bash
-python3 scripts/test_runner_parity.py \
+python3 tools/test_runner_parity.py \
   --bundle /tmp/qwen3.trtfb --binary ./build/trtf \
   --hf-python .venv/bin/python --max-new-tokens 20
 ```

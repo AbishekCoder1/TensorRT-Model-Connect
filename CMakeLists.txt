@@ -120,36 +120,36 @@ enable_testing()
 
 # --- Tests ---
 
-add_executable(test_bundle_format tests/test_bundle_format.cpp)
+add_executable(test_bundle_format tests/cpp/test_bundle_format.cpp)
 target_link_libraries(test_bundle_format PRIVATE trtf_core)
 target_include_directories(test_bundle_format PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_bundle_format COMMAND test_bundle_format)
 
-add_executable(test_c_abi_entry tests/test_c_abi_entry.cpp)
+add_executable(test_c_abi_entry tests/cpp/test_c_abi_entry.cpp)
 target_link_libraries(test_c_abi_entry PRIVATE trtf_core)
 add_test(NAME test_c_abi_entry COMMAND test_c_abi_entry)
 
-add_executable(test_fast_path_config tests/test_fast_path_config.cpp)
+add_executable(test_fast_path_config tests/cpp/test_fast_path_config.cpp)
 target_link_libraries(test_fast_path_config PRIVATE trtf_core)
 target_include_directories(test_fast_path_config PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_fast_path_config COMMAND test_fast_path_config)
 
-add_executable(test_text_parsers tests/test_text_parsers.cpp)
+add_executable(test_text_parsers tests/cpp/test_text_parsers.cpp)
 target_link_libraries(test_text_parsers PRIVATE trtf_core)
 target_include_directories(test_text_parsers PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_text_parsers COMMAND test_text_parsers)
 
-add_executable(test_json_helpers tests/test_json_helpers.cpp)
+add_executable(test_json_helpers tests/cpp/test_json_helpers.cpp)
 target_link_libraries(test_json_helpers PRIVATE trtf_core)
 target_include_directories(test_json_helpers PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_json_helpers COMMAND test_json_helpers)
 
-add_executable(test_data_dir tests/test_data_dir.cpp)
+add_executable(test_data_dir tests/cpp/test_data_dir.cpp)
 target_link_libraries(test_data_dir PRIVATE trtf_core)
 target_include_directories(test_data_dir PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_data_dir COMMAND test_data_dir)
 
-add_executable(test_decode_runtime tests/test_decode_runtime.cpp)
+add_executable(test_decode_runtime tests/cpp/test_decode_runtime.cpp)
 target_link_libraries(test_decode_runtime PRIVATE trtf_core)
 target_include_directories(test_decode_runtime PRIVATE ${PROJECT_SOURCE_DIR}/src)
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
@@ -158,7 +158,7 @@ if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_I
 endif()
 add_test(NAME test_decode_runtime COMMAND test_decode_runtime)
 
-add_executable(test_kv_cache_step_state tests/test_kv_cache_step_state.cpp)
+add_executable(test_kv_cache_step_state tests/cpp/test_kv_cache_step_state.cpp)
 target_link_libraries(test_kv_cache_step_state PRIVATE trtf_core)
 target_include_directories(test_kv_cache_step_state PRIVATE ${PROJECT_SOURCE_DIR}/src)
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
@@ -167,19 +167,19 @@ if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_I
 endif()
 add_test(NAME test_kv_cache_step_state COMMAND test_kv_cache_step_state)
 
-add_executable(test_pipeline_api tests/test_pipeline_api.cpp)
+add_executable(test_pipeline_api tests/cpp/test_pipeline_api.cpp)
 target_link_libraries(test_pipeline_api PRIVATE trtf_core)
 add_test(NAME test_pipeline_api COMMAND test_pipeline_api)
 
-add_executable(test_bundle_e2e tests/test_bundle_e2e.cpp)
+add_executable(test_bundle_e2e tests/cpp/test_bundle_e2e.cpp)
 target_link_libraries(test_bundle_e2e PRIVATE trtf_core)
 add_test(NAME test_bundle_e2e COMMAND test_bundle_e2e)
 
-add_executable(test_cli_args tests/test_cli_args.cpp)
+add_executable(test_cli_args tests/cpp/test_cli_args.cpp)
 target_link_libraries(test_cli_args PRIVATE trtf_core)
 add_test(NAME test_cli_args COMMAND test_cli_args)
 
-add_executable(test_image_preprocessor tests/test_image_preprocessor.cpp)
+add_executable(test_image_preprocessor tests/cpp/test_image_preprocessor.cpp)
 target_link_libraries(test_image_preprocessor PRIVATE trtf_core)
 target_include_directories(test_image_preprocessor PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_image_preprocessor COMMAND test_image_preprocessor)

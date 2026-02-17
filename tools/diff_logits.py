@@ -5,12 +5,12 @@ No C++ binary needed. Builds a TRT engine via trtf_build, runs inference
 in Python, and compares per-step logits against HF transformers.
 
 Usage:
-    python3 scripts/diff_logits.py \
+    python3 tools/diff_logits.py \
       --model Qwen/Qwen3-0.6B \
       --prompt "The capital of France is" \
       --max-new-tokens 10 --atol 1e-3
 
-    python3 scripts/diff_logits.py \
+    python3 tools/diff_logits.py \
       --model models/hf/Qwen__Qwen3-0.6B --battery
 """
 import argparse

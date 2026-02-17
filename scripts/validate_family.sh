@@ -91,20 +91,20 @@ run_step "Build bundle" \
 
 # Step 2: diff_logits (E2E logit comparison, 4 prompts)
 run_step "diff_logits (battery)" \
-    python3 "${SCRIPT_DIR}/diff_logits.py" \
+    python3 "${PROJECT_DIR}/tools/diff_logits.py" \
         --model "$MODEL" --atol 1e-3 --battery \
         --max-cache-length "$MAX_CACHE_LENGTH" $TRUST_REMOTE_CODE
 
 # Step 3: diff_layers (per-layer hidden state comparison)
 run_step "diff_layers" \
-    python3 "${SCRIPT_DIR}/diff_layers.py" \
+    python3 "${PROJECT_DIR}/tools/diff_layers.py" \
         --model "$MODEL" --atol 0.05 \
         --max-cache-length "$MAX_CACHE_LENGTH" $TRUST_REMOTE_CODE
 
 # Step 4: Runner parity (Python vs C++)
 if [[ -x "$BINARY" ]]; then
     run_step "test_runner_parity" \
-        python3 "${SCRIPT_DIR}/test_runner_parity.py" \
+        python3 "${PROJECT_DIR}/tools/test_runner_parity.py" \
             --bundle "$BUNDLE_PATH" --binary "$BINARY" \
             --hf-python "$HF_PYTHON" --max-new-tokens 20
 else

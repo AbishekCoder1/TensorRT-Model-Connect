@@ -61,7 +61,7 @@
   - Documents all four `preprocessor_type` values and their use cases.
   - Documents all three `interpolation` mode values.
 
-- **`diff_vl.py` enhancements** (`scripts/diff_vl.py`)
+- **`diff_vl.py` enhancements** (`tools/diff_vl.py`)
   - 4D tensor handling in generic HF feature extraction (reshape `(B, C, H, W)` to `(B, D)`).
   - Preprocessor logging: prints `type`, `interpolation`, `image_size` before running.
   - Config divergence warning: compares bundle's `image_mean`/`image_std` against HF processor values.

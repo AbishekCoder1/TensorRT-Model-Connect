@@ -10,7 +10,7 @@ Supports both standard KV-cache decoders (TrtRunner) and Mamba/SSM
 models (MambaTrtRunner), auto-detected from the bundle's config.json.
 
 Usage (inside container):
-    python3 scripts/test_runner_parity.py \
+    python3 tools/test_runner_parity.py \
       --bundle /tmp/qwen3.trtfb \
       --binary ./build/trtf \
       --hf-python .venv/bin/python \

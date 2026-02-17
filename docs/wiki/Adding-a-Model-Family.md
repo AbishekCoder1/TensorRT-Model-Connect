@@ -143,13 +143,13 @@ Or run each step individually:
 trtf-build build <model> -o /tmp/test.trtfb --max-cache-length 256
 
 # E2E logit comparison (per-step, all tokens)
-python3 scripts/diff_logits.py --model <model> --atol 1e-3 --battery
+python3 tools/diff_logits.py --model <model> --atol 1e-3 --battery
 
 # Per-layer hidden state comparison
-python3 scripts/diff_layers.py --model <model> --atol 0.05
+python3 tools/diff_layers.py --model <model> --atol 0.05
 
 # Python-vs-C++ runner parity
-python3 scripts/test_runner_parity.py \
+python3 tools/test_runner_parity.py \
   --bundle /tmp/test.trtfb --binary ./build/trtf \
   --hf-python .venv/bin/python --max-new-tokens 20
 ```

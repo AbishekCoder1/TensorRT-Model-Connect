@@ -88,18 +88,18 @@ For the same model weights and input, TRT and HF should produce nearly identical
 Validation tools:
 ```bash
 # E2E logit comparison
-python3 scripts/diff_logits.py --model-dir <hf-dir> --binary ./build/trtf \
+python3 tools/diff_logits.py --model-dir <hf-dir> --binary ./build/trtf \
   --backend-flag --force-trt --atol 1e-3 --battery
 
 # Per-layer hidden state comparison
-python3 scripts/diff_layers.py --model-dir <hf-dir>
+python3 tools/diff_layers.py --model-dir <hf-dir>
 
 # Vision-language feature comparison (TRT vision encoder vs HF)
-python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
   --model Qwen/Qwen2.5-VL-3B-Instruct --atol 0.1
 
 # Debug preprocessor with override
-python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
   --vision-only --preprocessor-type simple_chw
 ```
 

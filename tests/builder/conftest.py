@@ -1,0 +1,145 @@
+"""Shared fixtures and markers for trtf_build tests."""
+
+from __future__ import annotations
+
+import math
+import numpy as np
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# trtf_build package availability check
+# ---------------------------------------------------------------------------
+
+def _trtf_build_importable() -> bool:
+    """Check if trtf_build can be imported (requires tensorrt in the chain)."""
+    try:
+        import trtf_build  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# TRT availability check (for engine execution)
+# ---------------------------------------------------------------------------
+
+def _trt_available() -> bool:
+    try:
+        import tensorrt as trt  # noqa: F401
+        try:
+            from cuda.bindings import runtime as cudart  # noqa: F401
+        except ImportError:
+            from cuda import cudart  # type: ignore[no-redef]  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+requires_trt = pytest.mark.skipif(
+    not _trt_available(), reason="TensorRT + CUDA not available"
+)
+
+requires_trtf_build = pytest.mark.skipif(
+    not _trtf_build_importable(),
+    reason="trtf_build not importable (TensorRT not installed)"
+)
+
+
+# ---------------------------------------------------------------------------
+# TRT engine runner fixture
+# ---------------------------------------------------------------------------
+
+def _check_cuda(status):
+    """Raise on CUDA error."""
+    try:
+        from cuda.bindings import runtime as cudart
+    except ImportError:
+        from cuda import cudart  # type: ignore[no-redef]
+    if hasattr(cudart, "cudaError_t"):
+        ok = cudart.cudaError_t.cudaSuccess
+    else:
+        ok = 0
+    if status != ok:
+        raise RuntimeError(f"CUDA error: {status}")
+
+
+def run_trt_graph(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Build a TRT engine from build_fn, feed inputs, return outputs.
+
+    build_fn(network, trt_inputs) -> dict[str, ITensor]
+    """
+    import tensorrt as trt
+    try:
+        from cuda.bindings import runtime as cudart
+    except ImportError:
+        from cuda import cudart  # type: ignore[no-redef]
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network()
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
+    config.clear_flag(trt.BuilderFlag.TF32)
+
+    trt_inputs = {}
+    for name, arr in inputs.items():
+        dt = trt.float32 if arr.dtype == np.float32 else trt.int32
+        t = network.add_input(name, dt, tuple(arr.shape))
+        trt_inputs[name] = t
+
+    trt_outputs = build_fn(network, trt_inputs)
+
+    for name, tensor in trt_outputs.items():
+        tensor.name = name
+        network.mark_output(tensor)
+        tensor.dtype = trt.float32
+
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError("TRT build failed")
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(plan)
+    ctx = engine.create_execution_context()
+
+    err, stream = cudart.cudaStreamCreate()
+    _check_cuda(err)
+
+    device_bufs = {}
+    host_out = {}
+    for i in range(engine.num_io_tensors):
+        tname = engine.get_tensor_name(i)
+        shape = tuple(engine.get_tensor_shape(tname))
+        nbytes = int(np.prod(shape)) * 4
+        err, ptr = cudart.cudaMallocAsync(nbytes, stream)
+        _check_cuda(err)
+        device_bufs[tname] = ptr
+        mode = engine.get_tensor_mode(tname)
+        if mode == trt.TensorIOMode.INPUT:
+            arr = inputs[tname]
+            cudart.cudaMemcpyAsync(
+                ptr, arr.ctypes.data, nbytes,
+                cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, stream)
+        else:
+            host_out[tname] = np.zeros(shape, dtype=np.float32)
+        ctx.set_tensor_address(tname, ptr)
+
+    ctx.execute_async_v3(stream)
+
+    for name, arr in host_out.items():
+        cudart.cudaMemcpyAsync(
+            arr.ctypes.data, device_bufs[name], arr.nbytes,
+            cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost, stream)
+
+    cudart.cudaStreamSynchronize(stream)
+    for ptr in device_bufs.values():
+        cudart.cudaFreeAsync(ptr, stream)
+    cudart.cudaStreamDestroy(stream)
+
+    return host_out
+
+
+@pytest.fixture
+def trt_runner():
+    """Fixture providing the run_trt_graph helper."""
+    return run_trt_graph
