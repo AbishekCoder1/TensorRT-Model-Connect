@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -20,10 +21,7 @@ def _load_manifest():
         return json.load(f)
 
 
-def _engine_dir():
-    env = os.environ.get("TRTF_ENGINE_DIR")
-    if env:
-        return Path(env)
+def _default_engine_dir():
     manifest = _load_manifest()
     return Path(manifest.get("engine_dir", "/mnt/storage/trt-transformers/engines"))
 
@@ -34,34 +32,59 @@ def _models():
 
 
 # ---------------------------------------------------------------------------
+# CLI options
+# ---------------------------------------------------------------------------
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--engine-dir", default=None,
+        help="Directory containing .trtfb bundles (default: from engines.json)")
+    parser.addoption(
+        "--trtf-binary", default=None,
+        help="Path to the C++ trtf binary (default: build/trtf)")
+    parser.addoption(
+        "--hf-python", default=None,
+        help="Python interpreter with HuggingFace tokenizers (default: .venv/bin/python)")
+    parser.addoption(
+        "--rebuild-engines", action="store_true", default=False,
+        help="Force rebuild of all engine bundles (default: use cached)")
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
-def engine_dir():
-    """Resolved engine directory. Skips entire session if missing."""
-    d = _engine_dir()
-    if not d.is_dir():
-        pytest.skip(f"Engine directory not found: {d}")
+def engine_dir(request):
+    """Resolved engine directory. Creates it if it doesn't exist."""
+    cli_val = request.config.getoption("--engine-dir")
+    if cli_val:
+        d = Path(cli_val)
+    else:
+        d = _default_engine_dir()
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 @pytest.fixture(scope="session")
-def trtf_binary():
+def trtf_binary(request):
     """Path to the C++ trtf binary."""
-    env = os.environ.get("TRTF_BINARY")
-    binary = Path(env) if env else PROJECT_DIR / "build" / "trtf"
+    cli_val = request.config.getoption("--trtf-binary")
+    if cli_val:
+        binary = Path(cli_val)
+    else:
+        binary = PROJECT_DIR / "build" / "trtf"
     if not binary.is_file():
         pytest.skip(f"trtf binary not found: {binary}")
     return binary
 
 
 @pytest.fixture(scope="session")
-def hf_python():
+def hf_python(request):
     """Python interpreter with HuggingFace tokenizers."""
-    env = os.environ.get("TRTF_HF_PYTHON")
-    if env:
-        return Path(env)
+    cli_val = request.config.getoption("--hf-python")
+    if cli_val:
+        return Path(cli_val)
     venv_python = PROJECT_DIR / ".venv" / "bin" / "python"
     if venv_python.is_file():
         return venv_python
@@ -112,3 +135,70 @@ def model_entry(request, engine_dir):
         pytest.skip(f"Bundle not found: {bundle_path}")
     entry["bundle_path"] = str(bundle_path)
     return entry
+
+
+# ---------------------------------------------------------------------------
+# Built-bundle fixture (for full-pipeline tests)
+# ---------------------------------------------------------------------------
+
+def _build_bundle(hf_id, bundle_path, max_cache_length):
+    """Build a .trtfb bundle as a subprocess to isolate GPU memory.
+
+    Returns build time in seconds.
+    """
+    cmd = [
+        "trtf-build", "build",
+        hf_id, "-o", str(bundle_path),
+        "--max-cache-length", str(max_cache_length),
+    ]
+    t0 = time.monotonic()
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    elapsed = time.monotonic() - t0
+
+    if result.returncode != 0:
+        pytest.fail(
+            f"Bundle build failed for {hf_id} (rc={result.returncode}):\n"
+            f"{result.stderr[-2000:]}")
+
+    return elapsed
+
+
+@pytest.fixture(params=_model_ids() or ["__no_models__"])
+def built_bundle(request, engine_dir):
+    """Parametrized fixture that ensures a bundle exists, building if needed.
+
+    Returns a dict:
+        path: str          — absolute path to the .trtfb file
+        entry: dict        — the model manifest entry
+        build_time_s: float | None  — build time if freshly built
+        was_cached: bool   — True if the existing bundle was reused
+    """
+    name = request.param
+    if name == "__no_models__":
+        pytest.skip("No models in engines.json")
+
+    entry = _model_by_name(name)
+    bundle_path = engine_dir / entry["bundle"]
+    rebuild = request.config.getoption("--rebuild-engines")
+
+    if bundle_path.is_file() and not rebuild:
+        entry["bundle_path"] = str(bundle_path)
+        return {
+            "path": str(bundle_path),
+            "entry": entry,
+            "build_time_s": None,
+            "was_cached": True,
+        }
+
+    # Build the bundle
+    hf_id = entry["hf_id"]
+    max_cache = entry.get("max_cache_length", 256)
+    build_time = _build_bundle(hf_id, bundle_path, max_cache)
+
+    entry["bundle_path"] = str(bundle_path)
+    return {
+        "path": str(bundle_path),
+        "entry": entry,
+        "build_time_s": build_time,
+        "was_cached": False,
+    }
