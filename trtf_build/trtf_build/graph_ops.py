@@ -122,12 +122,17 @@ def make_rope_table(
     rope_theta: float,
     cosine: bool,
     partial_rotary_factor: float = 1.0,
+    interleaved: bool = False,
 ) -> np.ndarray:
     """Build cos or sin RoPE table of shape [max_cache_length, hidden_size].
 
     Args:
         partial_rotary_factor: Fraction of head dimensions that get RoPE
             (e.g. 0.25 for StableLM-2). Default 1.0 = full RoPE.
+        interleaved: If True, use interleaved frequency assignment where
+            adjacent dims (d, d+1) share the same frequency (CodeGen/GPT-J).
+            If False (default), use rotated-half where dims (d, d+half) share
+            the same frequency (LLaMA/Qwen/GPT-NeoX).
     """
     table = np.full(
         (max_cache_length, hidden_size),
@@ -148,7 +153,10 @@ def make_rope_table(
     for pos in range(max_cache_length):
         for head in range(num_attention_heads):
             for dim in range(rotary_ndims):
-                freq_idx = dim % half_rotary
+                if interleaved:
+                    freq_idx = dim // 2
+                else:
+                    freq_idx = dim % half_rotary
                 exponent = (2.0 * freq_idx) / rotary_ndims
                 inv_freq = rope_theta ** (-exponent)
                 angle = pos * inv_freq
@@ -163,12 +171,13 @@ def make_rotate_half_matrix(
     hidden_size: int,
     num_attention_heads: int,
     partial_rotary_factor: float = 1.0,
+    interleaved: bool = False,
 ) -> np.ndarray:
     """Build the rotate-half permutation matrix [hidden_size, hidden_size].
 
-    For partial rotary (factor < 1.0), non-rotary dims pass through unchanged
-    via the sin=0 multiplication (the matrix zeros here don't matter since
-    they're multiplied by sin=0). But we still set identity for safety.
+    Args:
+        interleaved: If True, pair adjacent dims (d, d+1): (-x1,x0,-x3,x2,...).
+            If False (default), pair halves (d, d+half): (-x_half..,-x_end.., x0..,x_half..).
     """
     matrix = np.zeros((hidden_size, hidden_size), dtype=np.float32)
     if (hidden_size <= 0 or num_attention_heads <= 0
@@ -182,11 +191,24 @@ def make_rotate_half_matrix(
 
     for head in range(num_attention_heads):
         base = head * head_dim
-        for i in range(half_rotary):
-            out_left = base + i
-            out_right = base + half_rotary + i
-            matrix[out_left, out_right] = 1.0
-            matrix[out_right, out_left] = -1.0
+
+        if interleaved:
+            # Pair adjacent dims: (0,1), (2,3), ...
+            # rotate_every_two: (-x1, x0, -x3, x2, ...)
+            # Matrix convention: rotated = inp @ matrix
+            # rotated[j] = sum(inp[i] * matrix[i, j])
+            for i in range(half_rotary):
+                d_even = base + 2 * i
+                d_odd = base + 2 * i + 1
+                matrix[d_odd, d_even] = -1.0    # rotated[even] = -inp[odd]
+                matrix[d_even, d_odd] = 1.0      # rotated[odd]  =  inp[even]
+        else:
+            # Pair halves: (0, half), (1, half+1), ...
+            for i in range(half_rotary):
+                out_left = base + i
+                out_right = base + half_rotary + i
+                matrix[out_left, out_right] = 1.0
+                matrix[out_right, out_left] = -1.0
 
         if rotary_ndims % 2 != 0:
             tail = base + 2 * half_rotary
@@ -298,6 +320,29 @@ def add_activation(
         return swish.get_output(0)
     else:
         raise ValueError(f"Unsupported activation: {activation_type}")
+
+
+def compute_alibi_slopes(num_heads: int) -> np.ndarray:
+    """Compute ALiBi slopes for each attention head (from the ALiBi paper).
+
+    For power-of-2 num_heads: geometric sequence 2^(-8/n * i), i in 1..n.
+    For non-power-of-2: interleave two geometric sequences.
+
+    Returns: [num_heads] float32 array.
+    """
+    def _get_slopes_power_of_2(n: int) -> list[float]:
+        start = 2 ** (-(2 ** -(np.log2(n) - 3)))
+        return [start * (start ** i) for i in range(n)]
+
+    if num_heads > 0 and (num_heads & (num_heads - 1)) == 0:
+        # Power of 2
+        return np.array(_get_slopes_power_of_2(num_heads), dtype=np.float32)
+    else:
+        closest_power_of_2 = 2 ** int(np.floor(np.log2(num_heads)))
+        slopes_a = _get_slopes_power_of_2(closest_power_of_2)
+        slopes_b = _get_slopes_power_of_2(2 * closest_power_of_2)
+        slopes_b = slopes_b[0::2][: num_heads - closest_power_of_2]
+        return np.array(slopes_a + slopes_b, dtype=np.float32)
 
 
 def add_apply_rope(

@@ -5,7 +5,7 @@ norm, MLP, and position embedding strategies via parameters:
 
   norm_type:     "rmsnorm" | "layernorm"
   mlp_type:      "swiglu"  | "gelu_fc"
-  position_type: "rope"    | "learned"
+  position_type: "rope"    | "learned" | "alibi"
   activation:    "silu" | "gelu_new" | "gelu" | "relu" (used by gelu_fc MLP)
 
 Tensor names MUST match what the C++ runtime expects:
@@ -52,7 +52,9 @@ def build_standard_decoder_engine(
     position_type: str = "rope",
     activation: str = "silu",
     partial_rotary_factor: float = 1.0,
+    interleaved_rope: bool = False,
     parallel_residual: bool = False,
+    scale_attn_weights: bool = True,
     embed_input: bool = False,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
@@ -66,9 +68,15 @@ def build_standard_decoder_engine(
         norm_type: "rmsnorm" or "layernorm".
         mlp_type: "swiglu" (3 projections: gate/up/down) or
                   "gelu_fc" (2 projections: fc1/fc2 with activation).
-        position_type: "rope" (rotary) or "learned" (absolute position embeddings).
+        position_type: "rope" (rotary), "learned" (absolute position embeddings),
+            or "alibi" (attention with linear biases, no position embeddings).
         activation: Activation function for gelu_fc MLP ("gelu_new", "gelu", "relu").
         partial_rotary_factor: Fraction of head dims that get RoPE (default 1.0).
+        interleaved_rope: If True, use interleaved RoPE (CodeGen/GPT-J) where
+            adjacent dims (d, d+1) share frequencies. Default False uses
+            rotated-half (LLaMA/Qwen) where (d, d+half) share frequencies.
+        scale_attn_weights: Whether to scale attention scores by 1/sqrt(head_dim).
+            Most models use this (True, default). GPT-Neo does NOT scale (False).
         embed_input: If True, add input_embed [1, hidden] and use_input_embed [1]
             engine inputs. When use_input_embed==1, the decoder uses input_embed
             directly instead of the embedding lookup. Used for VL models where
@@ -137,16 +145,19 @@ def build_standard_decoder_engine(
     sin_tensor = None
     rotate_half_tensor = None
     position_embed_table = None
+    alibi_slopes_tensor = None
+    alibi_indices_tensor = None
 
     if position_type == "rope":
         cos_table_np = graph_ops.make_rope_table(
             attention_window, attention_size, num_heads, config.rope_theta, True,
-            partial_rotary_factor)
+            partial_rotary_factor, interleaved=interleaved_rope)
         sin_table_np = graph_ops.make_rope_table(
             attention_window, attention_size, num_heads, config.rope_theta, False,
-            partial_rotary_factor)
+            partial_rotary_factor, interleaved=interleaved_rope)
         rotate_half_np = graph_ops.make_rotate_half_matrix(
-            attention_size, num_heads, partial_rotary_factor)
+            attention_size, num_heads, partial_rotary_factor,
+            interleaved=interleaved_rope)
 
         cos_tensor = graph_ops.add_constant(
             network, (attention_window, attention_size), cos_table_np)
@@ -158,10 +169,20 @@ def build_standard_decoder_engine(
         pos_embed_np = weights["position_embedding"]
         position_embed_table = graph_ops.add_constant(
             network, pos_embed_np.shape, pos_embed_np)
+    elif position_type == "alibi":
+        alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads)
+        alibi_slopes_tensor = graph_ops.add_constant(
+            network, (num_heads, 1, 1),
+            alibi_slopes_np.reshape(num_heads, 1, 1))
+        # Cache position indices [0, 1, ..., max_cache_length-1].
+        # The current token's position (position_id) is appended at runtime.
+        alibi_indices_tensor = graph_ops.add_constant(
+            network, (max_cache_length,),
+            np.arange(max_cache_length, dtype=np.float32))
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
-    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
+    attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
     attn_scale_tensor = graph_ops.add_constant(
         network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
 
@@ -205,6 +226,16 @@ def build_standard_decoder_engine(
             trt.ElementWiseOperation.SUM)
         hidden_state = pos_add.get_output(0)
 
+    # Optional embedding LayerNorm (e.g. BLOOM)
+    embed_norm = weights.get("embedding_norm")
+    if embed_norm is not None:
+        embed_norm_beta = weights.get("embedding_norm_beta")
+        if embed_norm_beta is None:
+            embed_norm_beta = np.zeros(hidden, dtype=np.float32)
+        hidden_state = graph_ops.add_layer_norm(
+            network, hidden_state, hidden, embed_norm, embed_norm_beta,
+            eps_tensor)
+
     if debug_layer_outputs:
         _mark_debug_output(network, hidden_state, "debug_embed")
 
@@ -242,6 +273,8 @@ def build_standard_decoder_engine(
             position_type=position_type,
             activation=activation,
             parallel_residual=parallel_residual,
+            alibi_slopes_tensor=alibi_slopes_tensor,
+            alibi_indices_tensor=alibi_indices_tensor,
         )
 
         hidden_state = result["hidden"]
@@ -266,9 +299,13 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     logits = graph_ops.add_matmul_rhs_constant(
         network, hidden_state, hidden, vocab, weights["w_out"])
-    # Zero bias — match C++ behavior
-    b_out = np.zeros(vocab, dtype=np.float32)
-    logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+    # LM head bias (if present, e.g. CodeGen) or zero bias for C++ parity
+    lm_bias = weights.get("lm_head_bias")
+    if lm_bias is not None:
+        logits = graph_ops.add_bias_sum(network, logits, vocab, lm_bias)
+    else:
+        b_out = np.zeros(vocab, dtype=np.float32)
+        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
 
     logits.name = "logits"
     network.mark_output(logits)
@@ -345,6 +382,8 @@ def _add_decoder_layer(
     position_type: str = "rope",
     activation: str = "silu",
     parallel_residual: bool = False,
+    alibi_slopes_tensor: trt.ITensor | None = None,
+    alibi_indices_tensor: trt.ITensor | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
     attention_window = max_cache_length + 1
@@ -437,6 +476,36 @@ def _add_decoder_layer(
     scaled = network.add_elementwise(
         score.get_output(0), attn_scale_tensor,
         trt.ElementWiseOperation.PROD)
+
+    # ALiBi bias: slopes * (key_position - query_position)
+    # Cache indices 0..max_cache_length-1 = actual positions 0..max_cache_length-1.
+    # The current token is at index max_cache_length but its actual position is
+    # position_id, so we build indices = [0, 1, ..., max_cache_length-1, position_id].
+    if alibi_slopes_tensor is not None and alibi_indices_tensor is not None:
+        pos_float = network.add_identity(position_id)
+        pos_float.set_output_type(0, trt.float32)
+        pos_1d = network.add_shuffle(pos_float.get_output(0))
+        pos_1d.reshape_dims = (1,)
+        # Concatenate cache indices [0..max_cache-1] with [position_id]
+        full_indices = network.add_concatenation(
+            [alibi_indices_tensor, pos_1d.get_output(0)])
+        full_indices.axis = 0  # [attention_window]
+        # Reshape for broadcasting: [1, 1, attention_window]
+        idx_3d = network.add_shuffle(full_indices.get_output(0))
+        idx_3d.reshape_dims = (1, 1, attention_window)
+        # relative_positions = key_positions - query_position
+        pos_reshaped = network.add_shuffle(pos_float.get_output(0))
+        pos_reshaped.reshape_dims = (1, 1, 1)
+        rel_pos = network.add_elementwise(
+            idx_3d.get_output(0), pos_reshaped.get_output(0),
+            trt.ElementWiseOperation.SUB)
+        # alibi_bias = slopes * relative_positions  [num_heads, 1, attention_window]
+        alibi_bias = network.add_elementwise(
+            alibi_slopes_tensor, rel_pos.get_output(0),
+            trt.ElementWiseOperation.PROD)
+        scaled = network.add_elementwise(
+            scaled.get_output(0), alibi_bias.get_output(0),
+            trt.ElementWiseOperation.SUM)
 
     # Mask (reshape to [1, 1, attention_window])
     mask3d = network.add_shuffle(attention_mask)

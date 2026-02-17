@@ -1,5 +1,42 @@
 # Worklog
 
+## 2026-02-16 — Add GPT-Neo, CodeGen, BLOOM, Mixtral Families (18 → 22)
+
+- **GPT-Neo plugin** (`trtf_build/trtf_build/families/gpt_neo.py`)
+  - Matches `model_type == "gpt_neo"` (EleutherAI/gpt-neo-125m).
+  - Learned positions, LayerNorm, GELU, separate Q/K/V Linear projections, Conv1D MLP (like GPT-2), tied embeddings.
+  - Local/global attention alternation ignored (causal mask handles it).
+
+- **CodeGen plugin** (`trtf_build/trtf_build/families/codegen.py`)
+  - Matches `model_type == "codegen"` (Salesforce/codegen-350M-mono).
+  - GPT-J-like: parallel residual, partial RoPE (`rotary_dim / head_dim`), fused QKV, single LayerNorm per block.
+  - `lm_head.bias` support (new in standard builder).
+
+- **BLOOM plugin** (`trtf_build/trtf_build/families/bloom.py`)
+  - Matches `model_type == "bloom"` (bigscience/bloom-560m).
+  - ALiBi position encoding (new `position_type="alibi"` in builder).
+  - Embedding LayerNorm, fused QKV with per-head interleaving (like GPT-NeoX), all biases, tied embeddings.
+
+- **Mixtral plugin** (`trtf_build/trtf_build/families/mixtral.py`)
+  - Matches `model_type == "mixtral"` (mistralai/Mixtral-8x7B-v0.1).
+  - Custom MoE builder adapted from `phi_moe.py`, standard top-k softmax routing (not SparseMixer).
+  - RMSNorm + RoPE + GQA attention, `runtime_strategy="decoder_moe"`.
+  - 8 experts, top-2 routing, renormalized weights sum to 1.0.
+
+- **Builder changes** (`standard_decoder_builder.py`)
+  - New `position_type="alibi"`: computes ALiBi slopes per head, adds linear position bias to attention scores.
+  - `embedding_norm` support: optional LayerNorm applied right after embedding lookup (used by BLOOM).
+  - `lm_head_bias` support: uses actual bias when present instead of always-zero (used by CodeGen).
+
+- **Graph ops** (`graph_ops.py`)
+  - New `compute_alibi_slopes(num_heads)`: geometric slope sequence from ALiBi paper, handles non-power-of-2 heads.
+  - `make_rope_table` / `make_rotate_half_matrix`: new `interleaved` parameter for CodeGen/GPT-J style RoPE (pairs adjacent dims via `rotate_every_two`).
+
+- **Bug fixes found during E2E validation**
+  - GPT-Neo: `scale_attn_weights=False` — GPT-Neo does NOT scale attention scores by 1/sqrt(head_dim).
+  - CodeGen: mp_num=4 QKV interleaving with Q,V,K order (not Q,K,V); interleaved RoPE with correct `rotate_every_two` sign convention.
+  - BLOOM ALiBi: current token's key position must use `position_id` (not `max_cache_length` window index) for correct relative position bias.
+
 ## 2026-02-16 — VL Preprocessing Infrastructure Gaps Fix
 
 - **New image preprocessing strategies** (C++ `image_preprocessor.cpp` + Python `debug_runner.py`)

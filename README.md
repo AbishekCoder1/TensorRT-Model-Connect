@@ -111,7 +111,7 @@ trtf_has_trt();              // 1 if compiled with TRT support
 
 ## Supported models
 
-18 model families covering dense decoders, MoE, SSM, vision-language, and multiple architecture variants. Any HF model whose `config.json` `model_type` matches a supported family works automatically.
+22 model families covering dense decoders, MoE, SSM, vision-language, and multiple architecture variants. Any HF model whose `config.json` `model_type` matches a supported family works automatically.
 
 All models below have been **E2E verified**: build from scratch + C++ inference on RTX 3090 Ti (24GB). Recommended `--max-cache-length 256` for all standard models.
 
@@ -139,12 +139,16 @@ All models below have been **E2E verified**: build from scratch + C++ inference 
 | **OLMo** | `olmo` | allenai/OLMo-1B-hf | `trtf-build build allenai/OLMo-1B-hf -o olmo.trtfb --max-cache-length 256` |
 | **XGLM** | `xglm` | facebook/xglm-564M | `trtf-build build facebook/xglm-564M -o xglm.trtfb --max-cache-length 256` |
 | **GPT-NeoX** | `gpt_neox` | EleutherAI/pythia-70m | `trtf-build build EleutherAI/pythia-70m -o pythia.trtfb --max-cache-length 256` |
+| **GPT-Neo** | `gpt_neo` | EleutherAI/gpt-neo-125m | `trtf-build build EleutherAI/gpt-neo-125m -o gpt-neo.trtfb --max-cache-length 256` |
+| **CodeGen** | `codegen` | Salesforce/codegen-350M-mono | `trtf-build build Salesforce/codegen-350M-mono -o codegen.trtfb --max-cache-length 256` |
+| **BLOOM** | `bloom` | bigscience/bloom-560m | `trtf-build build bigscience/bloom-560m -o bloom.trtfb --max-cache-length 256` |
 
 ### Mixture of Experts (MoE)
 
 | Family | Matched `model_type` | E2E Verified Model | Build Command |
 |--------|---------------------|-------------------|---------------|
 | **Phi-MoE** | `phimoe` | microsoft/Phi-tiny-MoE-instruct | `trtf-build build microsoft/Phi-tiny-MoE-instruct -o phi-moe.trtfb --max-cache-length 256` |
+| **Mixtral** | `mixtral` | mistralai/Mixtral-8x7B-v0.1 | `trtf-build build mistralai/Mixtral-8x7B-v0.1 -o mixtral.trtfb --max-cache-length 256` |
 
 ### State Space Models (SSM)
 
