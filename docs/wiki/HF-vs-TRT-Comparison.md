@@ -93,6 +93,14 @@ python3 scripts/diff_logits.py --model-dir <hf-dir> --binary ./build/trtf \
 
 # Per-layer hidden state comparison
 python3 scripts/diff_layers.py --model-dir <hf-dir>
+
+# Vision-language feature comparison (TRT vision encoder vs HF)
+python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+  --model Qwen/Qwen2.5-VL-3B-Instruct --atol 0.1
+
+# Debug preprocessor with override
+python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+  --vision-only --preprocessor-type simple_chw
 ```
 
 ## What HF Has That We Don't (Yet)

@@ -56,7 +56,7 @@ class QwenVLPlugin:
         if vision_config is None:
             return None
 
-        from ..vision_encoder_builder import build_qwen_vl_vision_engine
+        from ..qwen_vl_vision_builder import build_qwen_vl_vision_engine
 
         # Load vision-specific weights from safetensors.
         vision_weights = _load_vision_weights(model_dir, config)
@@ -85,6 +85,7 @@ class QwenVLPlugin:
             "fixed_image_size": fixed_image_size,
             "num_image_pad_tokens": num_merged,
             "vision_output_dim": config.hidden_size,
+            "preprocessor_type": "qwen_merge_group",
             "vl_prompt_template": (
                 "<|im_start|>user\n"
                 "<|vision_start|>{image_pads}<|vision_end|>\n"

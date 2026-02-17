@@ -65,6 +65,19 @@ class FamilyPlugin(Protocol):
         Return None (default) if this is not a VL model. VL plugins should
         return a dict with keys like:
             image_token_id, fixed_image_size, num_image_pad_tokens,
-            vision_output_dim, vl_prompt_template, image_token_str
+            vision_output_dim, vl_prompt_template, image_token_str,
+            preprocessor_type  — image preprocessing strategy:
+                "qwen_merge_group": merge-group patch permutation + temporal
+                    duplication (Qwen2.5-VL)
+                "simple_chw": standard resize + normalize to [C, H, W]
+                    (LLaVA, InternVL, Phi-3-Vision, etc.)
+                "center_crop_chw": center-crop to square, then resize + normalize
+                    (CLIP, DINOv2-based models)
+                "aspect_preserve_chw": aspect-ratio-preserving resize + zero-pad
+                    (InternVL v2 and similar)
+            interpolation  — resize interpolation mode:
+                "bicubic" (default, matches PIL BICUBIC / Catmull-Rom)
+                "bilinear" (matches PIL BILINEAR)
+                "nearest" (matches PIL NEAREST)
         """
         return None

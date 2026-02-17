@@ -1,5 +1,44 @@
 # Worklog
 
+## 2026-02-16 — VL Preprocessing Infrastructure Gaps Fix
+
+- **New image preprocessing strategies** (C++ `image_preprocessor.cpp` + Python `debug_runner.py`)
+  - `center_crop_chw`: Center-crop non-square images to square, then resize + normalize to `[C, H, W]`. For CLIP and DINOv2-based VL models.
+  - `aspect_preserve_chw`: Aspect-ratio-preserving resize + zero-pad to square, then normalize to `[C, H, W]`. For InternVL v2 and similar models.
+  - Both new strategies use configurable interpolation and produce `[C, H, W]` output (no temporal duplication).
+
+- **Configurable interpolation mode** (C++ + Python)
+  - New `interpolation` field in `VLPreprocessConfig`: `"bicubic"` (default), `"bilinear"`, or `"nearest"`.
+  - C++ `resolve_stbir_filter()` maps mode strings to stb_image_resize2 filter constants (Catmull-Rom, triangle, point sample).
+  - Python `_resolve_pil_interpolation()` maps mode strings to PIL constants.
+  - Config parsing: `interpolation` read from `config.json` (set by engine builder). Falls back to HF `preprocessor_config.json` `resample` int (PIL enum: 0=NEAREST, 2=BILINEAR, 3=BICUBIC) if not explicitly set.
+
+- **Unknown preprocessor_type fallback** (C++ + Python)
+  - Unrecognized `preprocessor_type` values now emit a warning and fall back to `qwen_merge_group` instead of silently failing.
+
+- **Single-image constraint documented** (C++ + Python)
+  - `load_and_preprocess_image()` comment documents single-image-only constraint.
+  - Python `VLTrtRunner.encode_image()` raises `NotImplementedError` for multi-image input.
+
+- **Updated `FamilyPlugin.get_vl_config()` docstring** (`base.py`)
+  - Documents all four `preprocessor_type` values and their use cases.
+  - Documents all three `interpolation` mode values.
+
+- **`diff_vl.py` enhancements** (`scripts/diff_vl.py`)
+  - 4D tensor handling in generic HF feature extraction (reshape `(B, C, H, W)` to `(B, D)`).
+  - Preprocessor logging: prints `type`, `interpolation`, `image_size` before running.
+  - Config divergence warning: compares bundle's `image_mean`/`image_std` against HF processor values.
+  - New `--preprocessor-type` CLI flag for debugging override.
+
+- **6 new C++ tests** (`tests/test_image_preprocessor.cpp`)
+  - `test_unknown_preprocessor_type_fallback`: unknown type falls back to qwen_merge_group.
+  - `test_center_crop_chw_strategy`: non-square image center-cropped then resized.
+  - `test_aspect_preserve_chw_strategy`: non-square image aspect-preserved with zero-pad verification.
+  - `test_parse_interpolation_default`: interpolation defaults to bicubic.
+  - `test_parse_interpolation_bilinear`: bilinear round-trips through config parse.
+  - `test_parse_resample_from_preprocessor`: HF resample int (0/2/3) maps correctly, explicit interpolation overrides resample.
+  - Non-square PPM helper (`write_test_ppm_nonsquare`) for crop/aspect tests.
+
 ## 2026-02-16 — Mamba/SSM Support with Recurrent State Runtime
 
 - **Mamba family plugin** (`trtf_build/trtf_build/families/mamba.py`)

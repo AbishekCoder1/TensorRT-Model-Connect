@@ -264,6 +264,31 @@ flowchart TD
     style S fill:#fef3c7,stroke:#f59e0b
 ```
 
+### VL Pipeline Data Flow (Vision-Language Models)
+
+For vision-language bundles, an additional image preprocessing step occurs before text generation:
+
+```
+Image file
+  |
+  +-- load_and_preprocess_image(path, VLPreprocessConfig)
+  |     Dispatches to preprocessor_type strategy:
+  |       "qwen_merge_group" -> [C*T, H, W] with patch permutation
+  |       "simple_chw"       -> [C, H, W] standard resize
+  |       "center_crop_chw"  -> [C, H, W] center-crop + resize
+  |       "aspect_preserve_chw" -> [C, H, W] aspect-preserve + pad
+  |     Uses configurable interpolation (bicubic/bilinear/nearest)
+  |
+  +-- Vision TRT engine -> image features [N, dim]
+  |
+  +-- format_vl_prompt(user_prompt, config) -> formatted prompt
+  |     Replaces {image_pads} and {prompt} in template
+  |
+  +-- Text decoder with embed_input mode (features replace pad tokens)
+  |
+  +-- Autoregressive generation (same as decoder pipeline)
+```
+
 ### Data formats at each stage
 
 | Stage | Location | Data Format |

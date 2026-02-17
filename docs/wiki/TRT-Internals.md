@@ -116,7 +116,20 @@ create_decoder_step_network():
   9. Serialize engine plan to bytes
 ```
 
-Custom family graph builders can reuse these shared ops and compose them differently (e.g., MoE routing, parallel attention).
+Custom family graph builders can reuse these shared ops and compose them differently (e.g., MoE routing, parallel attention, vision encoder).
+
+### VL Image Preprocessing (Non-TRT)
+
+Vision-language models require image preprocessing before the vision TRT engine. This is handled by `image_preprocessor.cpp` (C++) and `debug_runner.py` (Python), both implementing the same 4 strategies:
+
+| Strategy | Pipeline | Use Case |
+|----------|----------|----------|
+| `qwen_merge_group` | Load -> resize -> normalize -> merge-group patch permutation -> temporal duplication | Qwen2.5-VL |
+| `simple_chw` | Load -> resize -> normalize | Standard ViT (LLaVA, InternVL, Phi-3-Vision) |
+| `center_crop_chw` | Load -> center-crop to square -> resize -> normalize | CLIP, DINOv2-based models |
+| `aspect_preserve_chw` | Load -> aspect-preserving resize -> zero-pad to square -> normalize | InternVL v2 |
+
+Interpolation is configurable: `"bicubic"` (default, Catmull-Rom), `"bilinear"` (triangle), `"nearest"` (point sample). The mode is read from `config.json` (set by the engine builder), with fallback to the HF `preprocessor_config.json` `resample` integer.
 
 ---
 

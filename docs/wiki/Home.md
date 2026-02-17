@@ -89,6 +89,6 @@ int main() {
 | Falcon | falcon | `families/falcon.py` |
 | StableLM | stablelm | `families/stablelm.py` |
 | Mamba | mamba | `families/mamba.py` |
-| Qwen-VL | qwen2_vl, qwen2_5_vl | `families/qwen_vl.py` |
+| Qwen-VL | qwen2_vl, qwen2_5_vl | `families/qwen_vl.py` (vision encoder + text decoder) |
 
 All plugin paths relative to `trtf_build/trtf_build/`.

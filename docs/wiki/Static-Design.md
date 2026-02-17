@@ -216,6 +216,18 @@ classDiagram
 | **CudaBuffer** | RAII wrapper for GPU memory. | File: `src/runtime/trt/trt_common.cpp`. |
 | **CreateTrtBackendFromEngine()** | Creates TrtBackendFastPath from a deserialized engine. | Used when loading from `.trtfb` bundle. File: `src/runtime/trt/trt_backend_shared.cpp`. |
 
+### VL Image Preprocessing
+
+VL (vision-language) image preprocessing is handled by `image_preprocessor.h/cpp`:
+
+| Struct/Function | Role | Implementation |
+|----------------|------|---------------|
+| **VLPreprocessConfig** | Configuration for VL image preprocessing. | Contains `fixed_image_size`, `patch_size`, `merge_size`, `image_mean`/`image_std`, `preprocessor_type`, `interpolation`, prompt template, and token fields. File: `src/runtime/trt/image_preprocessor.h`. |
+| **PreprocessedImage** | Result of image preprocessing. | Contains `pixel_values` (float vector), `channels`, `height`, `width`, `ok` flag. Layout depends on preprocessor_type. |
+| **load_and_preprocess_image()** | Loads and preprocesses a single image. | Dispatches to strategy based on `preprocessor_type`: `qwen_merge_group` (merge-group patch permutation), `simple_chw` (standard resize), `center_crop_chw` (center-crop then resize), `aspect_preserve_chw` (aspect-preserving resize + zero-pad). Unknown types warn and fall back to `qwen_merge_group`. |
+| **parse_vl_preprocess_config()** | Parses VL config from JSON strings. | Reads from `config.json` (preprocessor_type, interpolation, image_token_id, etc.) and `preprocessor_config.json` (patch_size, merge_size, image_mean/std, resample int). Explicit `interpolation` overrides `resample`. |
+| **format_vl_prompt()** | Formats a VL prompt with image pad tokens. | Replaces `{image_pads}` and `{prompt}` in `vl_prompt_template`. |
+
 ---
 
 ## Unit 4: Tokenization (C++)
@@ -292,6 +304,6 @@ Each family is a single Python file in `trtf_build/trtf_build/families/`:
 | Falcon | falcon | Extended decoder | LayerNorm + GELU FC + RoPE + GQA |
 | StableLM | stablelm | Extended decoder | LayerNorm + SwiGLU + RoPE |
 | Mamba | mamba | SSM | Selective scan, custom graph, no KV cache |
-| Qwen-VL | qwen*vl | Vision-language | Text decoder only |
+| Qwen-VL | qwen*vl | Vision-language | Vision encoder + text decoder with embed_input |
 
 Adding a new family requires creating a single plugin `.py` file with a `plugin` attribute. See [Adding a Model Family](Adding-a-Model-Family.md).

@@ -17,7 +17,9 @@ File-by-file guide to the codebase. The system is split: Python (`trtf_build/`) 
 | `trtf_build/graph_ops.py` | Shared TRT graph ops (Python): RMSNorm, matmul, RoPE, SwiGLU, attention |
 | `trtf_build/standard_decoder_builder.py` | Standard decoder TRT engine builder |
 | `trtf_build/checkpoint_mapper.py` | HF safetensors → weight dict (transpose, GQA expansion) |
-| `trtf_build/debug_runner.py` | `TrtRunner` (KV cache) and `MambaTrtRunner` (SSM) for pure-Python TRT inference |
+| `trtf_build/debug_runner.py` | `TrtRunner` (KV cache), `MambaTrtRunner` (SSM), `VisionTrtRunner`, `VLTrtRunner` for pure-Python TRT inference. VL image preprocessing with 4 strategies + configurable interpolation. |
+| `trtf_build/qwen_vl_vision_builder.py` | Qwen2.5-VL vision encoder TRT engine builder: 3D patch embedding, 2D RoPE with spatial merge, ViT blocks, spatial merge MLP. |
+| `trtf_build/vision_encoder_builder.py` | Deprecated shim: re-exports from `qwen_vl_vision_builder.py`. |
 
 ### Family Plugins (`trtf_build/trtf_build/families/`)
 
@@ -41,11 +43,11 @@ Each family is a single Python file implementing the `FamilyPlugin` protocol (se
 | `falcon.py` | Falcon family: matches `falcon`. LayerNorm + GELU FC + RoPE + GQA. |
 | `stablelm.py` | StableLM family: matches `stablelm`. LayerNorm + SwiGLU + RoPE. |
 | `mamba.py` | Mamba family: matches `mamba`. SSM with selective scan, custom graph builder. Runtime strategy: `ssm_recurrent`. |
-| `qwen_vl.py` | Qwen-VL family: matches `qwen*vl`. Text decoder only (vision encoder not yet implemented). |
+| `qwen_vl.py` | Qwen-VL family: matches `qwen*vl`. Vision encoder (ViT + 3D RoPE + spatial merge) + text decoder with embed_input mode. |
 
 ---
 
-## C++: Runtime (~17 source files)
+## C++: Runtime (~18 source files)
 
 ### Public API (`include/trtf/`)
 
@@ -91,6 +93,7 @@ Each family is a single Python file implementing the `FamilyPlugin` protocol (se
 | `mamba_backend.h/cpp` | `MambaBackend`: SSM autoregressive loop with recurrent state. `CreateMambaBackendFromEngine()`. |
 | `mamba_decode_runtime.h/cpp` | `MambaStepEngine` struct, `run_mamba_step()`, `has_all_required_mamba_tensors()`. |
 | `mamba_step_state.h/cpp` | `MambaStepState`: conv_state + ssm_state per layer (constant memory, no growth). |
+| `image_preprocessor.h/cpp` | VL image preprocessing: `VLPreprocessConfig`, `PreprocessedImage`, `load_and_preprocess_image()`, `format_vl_prompt()`, `parse_vl_preprocess_config()`. Supports 4 strategies: `qwen_merge_group`, `simple_chw`, `center_crop_chw`, `aspect_preserve_chw`. Configurable interpolation (`bicubic`/`bilinear`/`nearest`). |
 
 ### Tokenizers (`src/tokenizer/`)
 
@@ -132,7 +135,7 @@ The following C++ files were removed as part of the Python build migration (~350
 
 ## Tests (`tests/`)
 
-11 test executables (down from 26). Removed tests covered C++ build infrastructure that migrated to Python.
+12 test executables (down from 26). Removed tests covered C++ build infrastructure that migrated to Python.
 
 | File | What it tests |
 |------|--------------|
@@ -148,6 +151,7 @@ The following C++ files were removed as part of the Python build migration (~350
 | `test_fast_path_config.cpp` | FastPathModelConfig parsing, runtime_strategy detection |
 | `test_kv_cache_step_state.cpp` | KvCacheStepState: cache append, mask building, state management |
 | `test_decode_runtime.cpp` | select_argmax_token, build_attention_mask (TRT-guarded) |
+| `test_image_preprocessor.cpp` | VL image preprocessing: qwen_merge_group, simple_chw, center_crop_chw, aspect_preserve_chw, interpolation parsing, unknown type fallback, prompt formatting, config parsing (13 tests) |
 
 ## Scripts (`scripts/`)
 
@@ -158,6 +162,7 @@ The following C++ files were removed as part of the Python build migration (~350
 | `docker_run.sh` | Launch the dev container |
 | `diff_logits.py` | E2E logit comparison: trtf binary vs HF transformers |
 | `diff_layers.py` | Per-layer hidden state comparison between trtf and HF |
+| `diff_vl.py` | VL diff testing: vision features, embed_input, full VL generation, C++ binary parity. Supports `--preprocessor-type` override. |
 | `eval_mmlu.py` | MMLU benchmark evaluation |
 | `new_family.py` | Scaffold a new family plugin from HF repo |
 | `validate_family.sh` | One-command validation gate (build + diff + parity) |

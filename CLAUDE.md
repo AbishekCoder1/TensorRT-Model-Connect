@@ -82,6 +82,7 @@ The system is split into two stages:
    - `decoder_kv_cache` (default): standard attention with KV cache (`TrtBackendFastPath`)
    - `decoder_moe`: MoE decoder (same KV cache, routing handled in TRT graph)
    - `ssm_recurrent`: Mamba/SSM with conv + SSM recurrent state (`MambaBackend`)
+   - `vision_language`: VL pipeline with vision encoder + text decoder + image preprocessing
 
 Tokenizer implementations (`ITokenizer`):
 - `VocabTokenizer` — vocab.txt-based lookup.
@@ -101,7 +102,8 @@ trtf_build/                          # Python package (engine builder)
     checkpoint_mapper.py             # HF safetensors -> weight dict
     bundle_writer.py                 # Write .trtfb files
     engine_builder.py                # Orchestrator: load -> build -> bundle
-    debug_runner.py                  # TrtRunner + MambaTrtRunner for pure-Python inference
+    debug_runner.py                  # TrtRunner + MambaTrtRunner + VLTrtRunner for pure-Python inference
+    qwen_vl_vision_builder.py        # Qwen2.5-VL vision encoder TRT engine builder
     families/
       __init__.py                    # Auto-discover plugins
       base.py                        # FamilyPlugin protocol
@@ -125,6 +127,7 @@ src/                                 # C++ bundle-only runtime
     mamba_backend.h/cpp              # MambaBackend: SSM autoregressive loop
     mamba_decode_runtime.h/cpp       # MambaStepEngine, run_mamba_step
     mamba_step_state.h/cpp           # MambaStepState: conv + SSM recurrent state
+    image_preprocessor.h/cpp         # VL image preprocessing: 4 strategies + configurable interpolation
   tokenizer/
     vocab_tokenizer.cpp              # Word-to-id lookup from vocabulary list
     hf_python_tokenizer.cpp          # HF tokenizers bridge via Python subprocess
@@ -136,6 +139,7 @@ scripts/
   setup_container.sh                 # One-shot container setup (venv, deps, build, test)
   diff_logits.py                     # E2E logit comparison (trtf vs HF transformers)
   diff_layers.py                     # Per-layer hidden state comparison
+  diff_vl.py                         # VL diff testing (vision features, generation, C++ parity)
   new_family.py                      # Scaffold a new family plugin from HF repo
   validate_family.sh                 # One-command validation gate (build + diff + parity)
 tests/
@@ -200,7 +204,25 @@ python3 scripts/diff_logits.py \
   --model microsoft/Phi-3-mini-4k-instruct --atol 1e-3 --battery --trust-remote-code
 ```
 
-The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python TRT inference with KV cache management, matching the C++ runtime behavior exactly. For Mamba/SSM models, `MambaTrtRunner` handles recurrent state instead of KV cache. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.
+The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python TRT inference with KV cache management, matching the C++ runtime behavior exactly. For Mamba/SSM models, `MambaTrtRunner` handles recurrent state instead of KV cache. For VL models, `VLTrtRunner` combines vision + text decoders with image preprocessing. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.
+
+**VL diff testing** (`diff_vl.py`):
+```bash
+# Vision encoder feature comparison (TRT vs HF)
+python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+  --model Qwen/Qwen2.5-VL-3B-Instruct --atol 0.1
+
+# Vision-only smoke test (no HF model needed)
+python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg --vision-only
+
+# Debug with preprocessor override
+python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+  --vision-only --preprocessor-type simple_chw
+
+# Full VL generation + C++ binary parity
+python3 scripts/diff_vl.py --bundle model.trtfb --image test.jpg \
+  --binary ./build/trtf --hf-python .venv/bin/python
+```
 
 **Runner parity guarantee**: If you change the C++ mask/cache/position logic (`trt_decode_runtime.cpp`, `kv_cache_step_state.cpp`), you MUST also update `debug_runner.py` and verify with:
 ```bash

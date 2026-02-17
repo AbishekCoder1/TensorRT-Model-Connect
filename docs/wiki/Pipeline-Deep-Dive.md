@@ -195,6 +195,47 @@ Metadata in the JSON header includes:
 - Architecture info (family, hidden_size, num_layers, etc.)
 - Max cache length
 
+## VL Image Preprocessing (Vision-Language)
+
+For vision-language models, the runtime preprocesses images before feeding pixel values to the vision TRT engine. The preprocessing strategy is configured via `preprocessor_type` in the bundle's config.json (set by the family plugin's `get_vl_config()`).
+
+### Supported Strategies
+
+| Strategy | Output Layout | Description | Use Case |
+|----------|--------------|-------------|----------|
+| `qwen_merge_group` | `[C*T, H, W]` | Merge-group patch permutation + temporal channel duplication | Qwen2.5-VL |
+| `simple_chw` | `[C, H, W]` | Standard resize to square + normalize | LLaVA, InternVL, Phi-3-Vision |
+| `center_crop_chw` | `[C, H, W]` | Center-crop to square, then resize + normalize | CLIP, DINOv2-based models |
+| `aspect_preserve_chw` | `[C, H, W]` | Aspect-ratio-preserving resize + zero-pad to square | InternVL v2 |
+
+### Interpolation
+
+The `interpolation` field controls resize filtering:
+- `"bicubic"` (default) -- matches PIL BICUBIC / Catmull-Rom
+- `"bilinear"` -- matches PIL BILINEAR / triangle filter
+- `"nearest"` -- matches PIL NEAREST / point sample
+
+The C++ implementation uses `stb_image_resize2` filters; the Python debug runner uses PIL constants. The mode is read from `config.json` (set by the engine builder). If not explicitly set, it falls back to the HF `preprocessor_config.json` `resample` integer (PIL enum: 0=NEAREST, 2=BILINEAR, 3=BICUBIC).
+
+### Config Flow
+
+```
+FamilyPlugin.get_vl_config()  -->  bundle config.json  -->  parse_vl_preprocess_config()
+                                                              |
+                                                              +-- preprocessor_type
+                                                              +-- interpolation
+                                                              +-- fixed_image_size
+                                                              +-- image_mean / image_std
+                                                              +-- image_token_id
+                                                              +-- vl_prompt_template
+```
+
+### Parity
+
+Both C++ (`image_preprocessor.cpp`) and Python (`debug_runner.py`) implement the same four preprocessing strategies with the same interpolation dispatch. The `diff_vl.py` script compares TRT vision encoder output against HuggingFace reference features to validate parity.
+
+---
+
 ## Configuration
 
 ### Python CLI (`trtf-build`) Flags

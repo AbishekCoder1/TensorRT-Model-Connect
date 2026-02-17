@@ -9,6 +9,7 @@ Supports both standard decoder (KV cache) and Mamba/SSM (recurrent state).
 from __future__ import annotations
 
 import sys
+import warnings
 from typing import Any
 
 import numpy as np
@@ -644,7 +645,18 @@ def load_preprocessor_config_from_bundle(bundle_path: str) -> dict:
 # VL combined runner
 # ---------------------------------------------------------------------------
 
-def preprocess_image_for_trt(
+def _resolve_pil_interpolation(mode: str):
+    """Map interpolation mode string to PIL constant."""
+    from PIL import Image
+    _map = {
+        "bicubic": Image.BICUBIC,
+        "bilinear": Image.BILINEAR,
+        "nearest": Image.NEAREST,
+    }
+    return _map.get(mode, Image.BICUBIC)
+
+
+def _preprocess_qwen_merge_group(
     image_path: str,
     fixed_image_size: int = 448,
     temporal_patch_size: int = 2,
@@ -652,10 +664,9 @@ def preprocess_image_for_trt(
     image_std: tuple[float, ...] = (0.26862954, 0.26130258, 0.27577711),
     patch_size: int = 14,
     merge_size: int = 2,
+    interpolation: str = "bicubic",
 ) -> np.ndarray:
-    """Load and preprocess an image for the TRT vision engine.
-
-    Returns pixel_values [C*T, H, W] with merge-group patch permutation.
+    """Qwen merge-group preprocessing: [C*T, H, W] with patch permutation.
 
     The TRT vision engine's Conv2D produces patches in raster order of the
     input image. To match HF's pipeline (where patches come out in merge-group
@@ -668,8 +679,9 @@ def preprocess_image_for_trt(
     """
     from PIL import Image
 
+    resample = _resolve_pil_interpolation(interpolation)
     img = Image.open(image_path).convert("RGB")
-    img = img.resize((fixed_image_size, fixed_image_size), Image.BICUBIC)
+    img = img.resize((fixed_image_size, fixed_image_size), resample)
     img_np = np.array(img, dtype=np.float32) / 255.0
 
     # Normalize per channel
@@ -690,7 +702,7 @@ def preprocess_image_for_trt(
         C, grid_h, patch_size, grid_w, patch_size
     ).transpose(1, 3, 0, 2, 4)  # [gH, gW, C, pH, pW]
 
-    # Build merge-group ordering: maps merge-group index → (orig_h, orig_w)
+    # Build merge-group ordering: maps merge-group index -> (orig_h, orig_w)
     # Merge groups iterate: (mh, mw, dh, dw) with orig = (mh*2+dh, mw*2+dw)
     merge_h = grid_h // merge_size
     merge_w = grid_w // merge_size
@@ -721,6 +733,136 @@ def preprocess_image_for_trt(
     # [R_t0, R_t1, G_t0, G_t1, B_t0, B_t1]
     pixel_values = np.repeat(pseudo_img, T, axis=0)  # [C*T, H, W]
     return pixel_values.astype(np.float32)
+
+
+def _preprocess_simple_chw(
+    image_path: str,
+    fixed_image_size: int = 448,
+    image_mean: tuple[float, ...] = (0.48145466, 0.4578275, 0.40821073),
+    image_std: tuple[float, ...] = (0.26862954, 0.26130258, 0.27577711),
+    interpolation: str = "bicubic",
+    **_kwargs: Any,
+) -> np.ndarray:
+    """Standard resize + normalize preprocessing: [C, H, W].
+
+    No patch permutation, no temporal duplication. Works for LLaVA,
+    InternVL, Phi-3-Vision, and other standard ViT-based VL models.
+    """
+    from PIL import Image
+
+    resample = _resolve_pil_interpolation(interpolation)
+    img = Image.open(image_path).convert("RGB")
+    img = img.resize((fixed_image_size, fixed_image_size), resample)
+    img_np = np.array(img, dtype=np.float32) / 255.0
+
+    mean = np.array(image_mean, dtype=np.float32)
+    std = np.array(image_std, dtype=np.float32)
+    img_np = (img_np - mean) / std
+
+    # HWC -> CHW
+    return img_np.transpose(2, 0, 1).astype(np.float32)
+
+
+def _preprocess_center_crop_chw(
+    image_path: str,
+    fixed_image_size: int = 448,
+    image_mean: tuple[float, ...] = (0.48145466, 0.4578275, 0.40821073),
+    image_std: tuple[float, ...] = (0.26862954, 0.26130258, 0.27577711),
+    interpolation: str = "bicubic",
+    **_kwargs: Any,
+) -> np.ndarray:
+    """Center-crop to square, then resize + normalize: [C, H, W].
+
+    For traditional CLIP and DINOv2-based VL models that center-crop
+    before resize.
+    """
+    from PIL import Image
+
+    resample = _resolve_pil_interpolation(interpolation)
+    img = Image.open(image_path).convert("RGB")
+
+    # Center-crop to square
+    w, h = img.size
+    crop_size = min(w, h)
+    left = (w - crop_size) // 2
+    top = (h - crop_size) // 2
+    img = img.crop((left, top, left + crop_size, top + crop_size))
+
+    img = img.resize((fixed_image_size, fixed_image_size), resample)
+    img_np = np.array(img, dtype=np.float32) / 255.0
+
+    mean = np.array(image_mean, dtype=np.float32)
+    std = np.array(image_std, dtype=np.float32)
+    img_np = (img_np - mean) / std
+
+    return img_np.transpose(2, 0, 1).astype(np.float32)
+
+
+def _preprocess_aspect_preserve_chw(
+    image_path: str,
+    fixed_image_size: int = 448,
+    image_mean: tuple[float, ...] = (0.48145466, 0.4578275, 0.40821073),
+    image_std: tuple[float, ...] = (0.26862954, 0.26130258, 0.27577711),
+    interpolation: str = "bicubic",
+    **_kwargs: Any,
+) -> np.ndarray:
+    """Aspect-ratio-preserving resize + zero-pad to square: [C, H, W].
+
+    Fits image into fixed_image_size x fixed_image_size without distortion,
+    padding the remainder with zeros. For InternVL v2 and similar models.
+    """
+    from PIL import Image
+
+    resample = _resolve_pil_interpolation(interpolation)
+    img = Image.open(image_path).convert("RGB")
+
+    # Compute scaled dimensions fitting inside target square
+    w, h = img.size
+    scale = fixed_image_size / max(w, h)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+
+    img = img.resize((new_w, new_h), resample)
+
+    # Zero-pad to target square (top-left aligned)
+    padded = Image.new("RGB", (fixed_image_size, fixed_image_size), (0, 0, 0))
+    padded.paste(img, (0, 0))
+
+    img_np = np.array(padded, dtype=np.float32) / 255.0
+
+    mean = np.array(image_mean, dtype=np.float32)
+    std = np.array(image_std, dtype=np.float32)
+    img_np = (img_np - mean) / std
+
+    return img_np.transpose(2, 0, 1).astype(np.float32)
+
+
+def preprocess_image_for_trt(
+    image_path: str,
+    preprocessor_type: str = "qwen_merge_group",
+    **kwargs: Any,
+) -> np.ndarray:
+    """Load and preprocess an image for the TRT vision engine.
+
+    Dispatches to the appropriate strategy based on preprocessor_type:
+      "qwen_merge_group":    [C*T, H, W] with merge-group patch permutation
+      "simple_chw":          [C, H, W] standard resize + normalize
+      "center_crop_chw":     [C, H, W] center-crop to square, then resize + normalize
+      "aspect_preserve_chw": [C, H, W] aspect-preserving resize + zero-pad
+    """
+    if preprocessor_type == "simple_chw":
+        return _preprocess_simple_chw(image_path, **kwargs)
+    if preprocessor_type == "center_crop_chw":
+        return _preprocess_center_crop_chw(image_path, **kwargs)
+    if preprocessor_type == "aspect_preserve_chw":
+        return _preprocess_aspect_preserve_chw(image_path, **kwargs)
+    if preprocessor_type != "qwen_merge_group":
+        warnings.warn(
+            f"Unknown preprocessor_type {preprocessor_type!r}, "
+            f"falling back to qwen_merge_group",
+            stacklevel=2,
+        )
+    return _preprocess_qwen_merge_group(image_path, **kwargs)
 
 
 class VLTrtRunner:
@@ -757,6 +899,8 @@ class VLTrtRunner:
         self.vl_prompt_template = self.config.get("vl_prompt_template", "")
         self.image_token_str = self.config.get("image_token_str", "")
         self.fixed_image_size = self.config.get("fixed_image_size", 448)
+        self.preprocessor_type = self.config.get(
+            "preprocessor_type", "qwen_merge_group")
 
         # Preprocessor config
         self.temporal_patch_size = self.preproc_config.get("temporal_patch_size", 2)
@@ -764,20 +908,30 @@ class VLTrtRunner:
             "image_mean", [0.48145466, 0.4578275, 0.40821073]))
         self.image_std = tuple(self.preproc_config.get(
             "image_std", [0.26862954, 0.26130258, 0.27577711]))
+        self.interpolation = self.config.get("interpolation", "bicubic")
 
         self.tokenizer = tokenizer
 
     def encode_image(self, image_path: str) -> np.ndarray:
-        """Run the vision encoder on an image. Returns [N, dim] features."""
+        """Run the vision encoder on a single image. Returns [N, dim] features.
+
+        Only single-image input is supported. Pass a single path string.
+        """
+        if isinstance(image_path, (list, tuple)):
+            raise NotImplementedError(
+                "Multi-image input is not yet supported. "
+                "Pass a single image path string.")
         if self.vision_runner is None:
             raise RuntimeError("No vision engine in bundle")
 
         pixel_values = preprocess_image_for_trt(
             image_path,
+            preprocessor_type=self.preprocessor_type,
             fixed_image_size=self.fixed_image_size,
             temporal_patch_size=self.temporal_patch_size,
             image_mean=self.image_mean,
             image_std=self.image_std,
+            interpolation=self.interpolation,
         )
         results = self.vision_runner.encode(pixel_values=pixel_values)
         return results["image_features"]

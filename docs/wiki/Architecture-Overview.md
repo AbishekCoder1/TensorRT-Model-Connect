@@ -18,11 +18,12 @@ The system is split into two phases across two languages:
 6. Compile to `ICudaEngine` (GPU kernel compilation)
 7. Package engine plan + tokenizer files into a `.trtfb` bundle
 
-**Run phase** (C++ runtime, ~17 source files):
+**Run phase** (C++ runtime, ~18 source files):
 1. Load `.trtfb` bundle, deserialize TRT engine plan
 2. Create tokenizer (HfPythonTokenizer or VocabTokenizer)
-3. Run autoregressive generation loop on GPU with KV-cache management
-4. Return generated text via C ABI
+3. For VL bundles: load and preprocess image via `image_preprocessor` (4 strategies + configurable interpolation)
+4. Run autoregressive generation loop on GPU with KV-cache management
+5. Return generated text via C ABI
 
 ---
 
@@ -68,7 +69,7 @@ trtf_build/trtf_build/families/
   falcon.py       # Falcon (LayerNorm + GELU FC + RoPE)
   stablelm.py     # StableLM (LayerNorm + SwiGLU + RoPE)
   mamba.py        # Mamba (SSM, custom graph, no KV cache)
-  qwen_vl.py      # Qwen-VL (text decoder for vision-language)
+  qwen_vl.py      # Qwen-VL (vision encoder + text decoder with embed_input)
 ```
 
 A family plugin provides:
@@ -123,6 +124,8 @@ trtf_create_pipeline("model.trtfb", TRTF_FORCE_TRT)
   +-- Dispatch based on strategy:
   |     "decoder_kv_cache" / "decoder_moe" -> TrtBackendFastPath
   |     "ssm_recurrent" -> MambaBackend
+  |     "vision_language" -> VL pipeline (vision + text decoders)
+  +-- For VL bundles: parse VLPreprocessConfig (preprocessor_type, interpolation, etc.)
   +-- Extract tokenizer files to temp dir
   +-- Create HfPythonTokenizer or VocabTokenizer
   +-- Return PipelineImpl
@@ -150,6 +153,23 @@ class IGenerationBackend {
 - **Strategy**: `ssm_recurrent`
 - **Name**: `"trt-mamba"`
 - **How it works**: Loads a Mamba TRT engine from a `.trtfb` bundle, then runs an autoregressive loop with conv_state and ssm_state per layer (constant memory, no cache growth). Uses `MambaStepState` instead of `KvCacheStepState`.
+
+### VL Image Preprocessing (`image_preprocessor.cpp`)
+
+For vision-language models, the C++ runtime preprocesses images before passing pixel values to the vision TRT engine. The preprocessing strategy is configurable via `preprocessor_type` in the bundle's config.json:
+
+| Strategy | Output Layout | Description |
+|----------|--------------|-------------|
+| `qwen_merge_group` | `[C*T, H, W]` | Merge-group patch permutation + temporal duplication (Qwen2.5-VL) |
+| `simple_chw` | `[C, H, W]` | Standard resize + normalize (LLaVA, InternVL, Phi-3-Vision) |
+| `center_crop_chw` | `[C, H, W]` | Center-crop to square, then resize + normalize (CLIP, DINOv2-based) |
+| `aspect_preserve_chw` | `[C, H, W]` | Aspect-ratio-preserving resize + zero-pad (InternVL v2) |
+
+Interpolation mode is configurable via the `interpolation` field: `"bicubic"` (default, matches PIL BICUBIC), `"bilinear"`, or `"nearest"`. The C++ implementation uses stb_image_resize2 filters; the Python debug runner uses PIL constants. The interpolation mode is read from `config.json` (set by the engine builder), with a fallback to the HF `preprocessor_config.json` `resample` integer (PIL enum: 0=NEAREST, 2=BILINEAR, 3=BICUBIC).
+
+Unknown `preprocessor_type` values emit a warning and fall back to `qwen_merge_group`.
+
+Only single-image input is currently supported.
 
 ---
 

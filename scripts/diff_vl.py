@@ -29,20 +29,29 @@ from pathlib import Path
 import numpy as np
 
 
-def _get_hf_vision_features(
+def _detect_model_type(model_id: str) -> str:
+    """Detect model_type from HF config (e.g. 'qwen2_5_vl', 'llava', etc.)."""
+    from transformers import AutoConfig
+    cfg = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    return getattr(cfg, "model_type", "unknown")
+
+
+def _is_qwen_vl(model_type: str) -> bool:
+    """True if the model_type is a Qwen VL variant."""
+    mt = model_type.lower()
+    return "qwen" in mt and "vl" in mt
+
+
+def _get_hf_vision_features_qwen(
     model_id: str,
     image_path: str,
     fixed_image_size: int = 448,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Get reference vision features from HuggingFace model.
-
-    Returns:
-        (hf_features [N, dim], pixel_values_for_trt [T*C, H, W])
-    """
+    """Qwen-specific HF vision feature extraction."""
     import torch
     from PIL import Image
 
-    print(f"[diff_vl] Loading HF model {model_id} ...", file=sys.stderr)
+    print(f"[diff_vl] Loading HF Qwen VL model {model_id} ...", file=sys.stderr)
     from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2VLImageProcessor
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -52,9 +61,6 @@ def _get_hf_vision_features(
 
     image = Image.open(image_path).convert("RGB")
 
-    # Use HF's image processor to prepare pixel_values. Force the resolution
-    # to match our fixed image size by resizing the image before the processor.
-    from transformers import Qwen2VLImageProcessor
     image_processor = Qwen2VLImageProcessor.from_pretrained(model_id)
 
     # Resize image to fixed_image_size to match TRT engine
@@ -86,7 +92,6 @@ def _get_hf_vision_features(
           file=sys.stderr)
 
     # Also build the TRT-style pixel_values for comparison
-    # Resize to fixed size and normalize as our C++ preprocessor does
     image_resized = image.resize((fixed_image_size, fixed_image_size), Image.BICUBIC)
     img_np = np.array(image_resized, dtype=np.float32) / 255.0
     mean = np.array(image_processor.image_mean, dtype=np.float32)
@@ -103,11 +108,109 @@ def _get_hf_vision_features(
     return hf_features_np, trt_pixel_values
 
 
+def _get_hf_vision_features_generic(
+    model_id: str,
+    image_path: str,
+    fixed_image_size: int = 448,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generic HF vision feature extraction using AutoModelForVision2Seq."""
+    import torch
+    from PIL import Image
+
+    print(f"[diff_vl] Loading HF generic VL model {model_id} ...", file=sys.stderr)
+    from transformers import AutoModelForVision2Seq, AutoProcessor
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = AutoModelForVision2Seq.from_pretrained(
+        model_id, torch_dtype=torch.float32, device_map=device,
+        trust_remote_code=True)
+    model.eval()
+
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+    image = Image.open(image_path).convert("RGB")
+    image_fixed = image.resize((fixed_image_size, fixed_image_size), Image.BICUBIC)
+
+    inputs = processor(images=[image_fixed], text="Describe", return_tensors="pt")
+    pixel_values_hf = inputs.get("pixel_values")
+
+    print(f"[diff_vl] HF pixel_values: {pixel_values_hf.shape}", file=sys.stderr)
+
+    # Run vision encoder via the model's get_image_features or equivalent
+    with torch.no_grad():
+        if hasattr(model, "get_image_features"):
+            hf_features = model.get_image_features(
+                pixel_values_hf.to(device=device))
+        elif hasattr(model, "vision_tower"):
+            hf_features = model.vision_tower(
+                pixel_values_hf.to(device=device))
+        else:
+            print("[diff_vl] WARN: Cannot find vision feature method — "
+                  "falling back to full forward", file=sys.stderr)
+            outputs = model(**{k: v.to(device=device) for k, v in inputs.items()},
+                           output_hidden_states=True)
+            hf_features = outputs.hidden_states[0]
+
+    if isinstance(hf_features, (list, tuple)):
+        hf_features = torch.cat(hf_features, dim=0)
+    hf_features_np = hf_features.float().cpu().numpy()
+    # Handle 4D tensors (batch, seq, hidden) or (batch, C, H, W)
+    if hf_features_np.ndim == 4:
+        # Reshape to (N, D) by flattening spatial dims
+        b, *rest = hf_features_np.shape
+        hf_features_np = hf_features_np.reshape(b, -1)
+    if hf_features_np.ndim == 3:
+        hf_features_np = hf_features_np.squeeze(0)
+
+    print(f"[diff_vl] HF features: shape={hf_features_np.shape}, "
+          f"mean={hf_features_np.mean():.6f}, std={hf_features_np.std():.6f}",
+          file=sys.stderr)
+
+    # Build simple CHW pixel_values for TRT comparison
+    image_resized = image.resize((fixed_image_size, fixed_image_size), Image.BICUBIC)
+    img_np = np.array(image_resized, dtype=np.float32) / 255.0
+    image_mean = getattr(processor, "image_mean", [0.48145466, 0.4578275, 0.40821073])
+    image_std = getattr(processor, "image_std", [0.26862954, 0.26130258, 0.27577711])
+    mean = np.array(image_mean, dtype=np.float32)
+    std = np.array(image_std, dtype=np.float32)
+    img_np = (img_np - mean) / std
+    trt_pixel_values = img_np.transpose(2, 0, 1).astype(np.float32)
+
+    del model
+    import gc; gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return hf_features_np, trt_pixel_values
+
+
+def _get_hf_vision_features(
+    model_id: str,
+    image_path: str,
+    fixed_image_size: int = 448,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Get reference vision features from HuggingFace model.
+
+    Auto-detects model type and dispatches to the appropriate loader.
+
+    Returns:
+        (hf_features [N, dim], pixel_values_for_trt)
+    """
+    model_type = _detect_model_type(model_id)
+    print(f"[diff_vl] Detected model_type: {model_type}", file=sys.stderr)
+
+    if _is_qwen_vl(model_type):
+        return _get_hf_vision_features_qwen(
+            model_id, image_path, fixed_image_size)
+    return _get_hf_vision_features_generic(
+        model_id, image_path, fixed_image_size)
+
+
 def test_vision_features(
     bundle_path: str,
     image_path: str,
     model_id: str | None = None,
     atol: float = 0.1,
+    preprocessor_type_override: str | None = None,
 ) -> bool:
     """Compare TRT vision encoder output against HF reference.
 
@@ -131,13 +234,28 @@ def test_vision_features(
     temporal = preproc.get("temporal_patch_size", 2)
     image_mean = tuple(preproc.get("image_mean", [0.48145466, 0.4578275, 0.40821073]))
     image_std = tuple(preproc.get("image_std", [0.26862954, 0.26130258, 0.27577711]))
+    preprocessor_type = config.get("preprocessor_type", "qwen_merge_group")
+    interpolation = config.get("interpolation", "bicubic")
+
+    # Allow CLI override for debugging
+    if preprocessor_type_override is not None:
+        print(f"[diff_vl] Overriding preprocessor_type: "
+              f"{preprocessor_type!r} -> {preprocessor_type_override!r}",
+              file=sys.stderr)
+        preprocessor_type = preprocessor_type_override
+
+    print(f"[diff_vl] Preprocessor: type={preprocessor_type!r}, "
+          f"interpolation={interpolation!r}, "
+          f"image_size={fixed_image_size}", file=sys.stderr)
 
     runner = VisionTrtRunner(vision_plan)
 
     # Prepare TRT pixel values
     trt_pixel = preprocess_image_for_trt(
-        image_path, fixed_image_size=fixed_image_size,
-        temporal_patch_size=temporal, image_mean=image_mean, image_std=image_std)
+        image_path, preprocessor_type=preprocessor_type,
+        fixed_image_size=fixed_image_size,
+        temporal_patch_size=temporal, image_mean=image_mean, image_std=image_std,
+        interpolation=interpolation)
 
     print(f"[diff_vl] TRT vision input: {trt_pixel.shape}", file=sys.stderr)
 
@@ -165,6 +283,25 @@ def test_vision_features(
     # Numerical comparison against HF reference
     if model_id is not None:
         print(f"[diff_vl] Comparing against HF reference ...", file=sys.stderr)
+
+        # Warn if HF processor's image_mean/std differ from bundle values
+        try:
+            from transformers import AutoProcessor
+            hf_proc = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+            hf_im = getattr(hf_proc, "image_processor", hf_proc)
+            hf_mean = getattr(hf_im, "image_mean", None)
+            hf_std = getattr(hf_im, "image_std", None)
+            if hf_mean is not None and tuple(hf_mean) != tuple(image_mean):
+                print(f"[diff_vl] WARN: image_mean divergence: "
+                      f"bundle={list(image_mean)} vs HF={list(hf_mean)}",
+                      file=sys.stderr)
+            if hf_std is not None and tuple(hf_std) != tuple(image_std):
+                print(f"[diff_vl] WARN: image_std divergence: "
+                      f"bundle={list(image_std)} vs HF={list(hf_std)}",
+                      file=sys.stderr)
+        except Exception:
+            pass  # non-critical
+
         # Free TRT vision engine before loading HF model (avoid GPU OOM)
         del runner
         import gc; gc.collect()
@@ -367,6 +504,12 @@ def test_debug_layers(
     import torch
     from PIL import Image
 
+    model_type = _detect_model_type(model_id)
+    if not _is_qwen_vl(model_type):
+        print(f"[diff_vl] Debug layers: only supported for Qwen VL models "
+              f"(got model_type={model_type!r})", file=sys.stderr)
+        return True
+
     print(f"[diff_vl] Debug layers: loading HF model {model_id} ...",
           file=sys.stderr)
     from transformers import (
@@ -498,6 +641,8 @@ def main():
                         help="Only test vision encoder (no HF model needed)")
     parser.add_argument("--debug-layers", action="store_true",
                         help="Per-layer HF vision encoder analysis (requires --model)")
+    parser.add_argument("--preprocessor-type", default=None,
+                        help="Override preprocessor_type for debugging")
     args = parser.parse_args()
 
     all_pass = True
@@ -514,7 +659,8 @@ def main():
     # Test 1: Vision encoder features
     if args.image:
         model_id = None if args.vision_only else args.model
-        if not test_vision_features(args.bundle, args.image, model_id, args.atol):
+        if not test_vision_features(args.bundle, args.image, model_id, args.atol,
+                                    preprocessor_type_override=args.preprocessor_type):
             all_pass = False
 
     # Test 2: Text decoder embed_input

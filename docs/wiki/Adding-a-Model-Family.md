@@ -187,6 +187,20 @@ If your model has an architecture not covered by the parameterized standard buil
 
 - **MoE (Phi-MoE)**: SparseMixer routing + per-expert SwiGLU MLPs. See `families/phi_moe.py`. Uses `runtime_strategy="decoder_moe"` (same KV-cache C++ backend).
 - **Mamba/SSM**: Selective state space model with conv1d + selective scan. See `families/mamba.py`. Uses `runtime_strategy="ssm_recurrent"` and requires the C++ `MambaBackend`.
+- **Vision-Language (Qwen-VL)**: Vision encoder (ViT + 3D RoPE + spatial merge) + text decoder with embed_input. See `families/qwen_vl.py`. Uses `runtime_strategy="vision_language"`. Requires `build_vision_engine()` and `get_vl_config()` methods.
+
+### Adding a Vision-Language Family
+
+VL plugins require two additional methods beyond the standard `FamilyPlugin` protocol:
+
+1. **`build_vision_engine()`**: Build a TRT engine for the vision encoder. Return serialized engine bytes or `None`.
+2. **`get_vl_config()`**: Return a dict with VL configuration to inject into the bundle's config.json:
+   - `preprocessor_type`: Image preprocessing strategy (`"qwen_merge_group"`, `"simple_chw"`, `"center_crop_chw"`, or `"aspect_preserve_chw"`)
+   - `interpolation`: Resize interpolation mode (`"bicubic"` (default), `"bilinear"`, or `"nearest"`)
+   - `image_token_id`, `num_image_pad_tokens`, `vision_output_dim`
+   - `vl_prompt_template`, `image_token_str`
+
+The C++ runtime handles 4 image preprocessing strategies out of the box. No C++ changes needed for standard VL models.
 
 ### Architectures needing custom `build_engine()`
 

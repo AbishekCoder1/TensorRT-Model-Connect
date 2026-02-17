@@ -111,47 +111,52 @@ trtf_has_trt();              // 1 if compiled with TRT support
 
 ## Supported models
 
-15 model families covering dense decoders, MoE, SSM, vision-language, and multiple architecture variants. Any HF model whose `config.json` `model_type` matches a supported family works automatically.
+18 model families covering dense decoders, MoE, SSM, vision-language, and multiple architecture variants. Any HF model whose `config.json` `model_type` matches a supported family works automatically.
+
+All models below have been **E2E verified**: build from scratch + C++ inference on RTX 3090 Ti (24GB). Recommended `--max-cache-length 256` for all standard models.
 
 ### Standard decoder (RMSNorm + RoPE + SwiGLU)
 
-| Family | Matched `model_type` | Compatible Models | Build Command |
+| Family | Matched `model_type` | E2E Verified Model | Build Command |
 |--------|---------------------|-------------------|---------------|
-| **Qwen** | `qwen`, `qwen2`, `qwen3`, `qwq` | Qwen3 (0.6B–72B), Qwen2.5, QwQ, DeepSeek-R1-Distill-Qwen, DeepSeek-Coder-V2-Lite | `trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb` |
-| **LLaMA** | `llama` | LLaMA 2/3, TinyLlama, CodeLlama, Vicuna, Yi, Yi-Coder, DeepSeek-Coder-1.3B | `trtf-build build TinyLlama/TinyLlama-1.1B-Chat-v1.0 -o tinyllama.trtfb` |
-| **Mistral** | `mistral` | Mistral 7B, Mistral Nemo | `trtf-build build mistralai/Mistral-7B-v0.1 -o mistral.trtfb` |
-| **Gemma** | `gemma`, `gemma2` | Gemma, Gemma 2 (2B–27B) | `trtf-build build google/gemma-2-2b -o gemma2.trtfb` |
-| **Phi** | `phi`, `phi3` (not `phimoe`) | Phi-3, Phi-3.5, Phi-4 | `trtf-build build microsoft/Phi-3-mini-4k-instruct -o phi3.trtfb` |
-| **Granite** | `granite` | Granite 3.1 (2B–8B) | `trtf-build build ibm-granite/granite-3.1-2b-base -o granite.trtfb` |
-| **InternLM** | `internlm`, `internlm2` | InternLM2, InternLM2.5, InternLM2-Math | `trtf-build build internlm/internlm2-math-plus-1_8b -o internlm2.trtfb` |
+| **Qwen** | `qwen`, `qwen2`, `qwen3`, `qwq` | Qwen/Qwen3-0.6B | `trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb --max-cache-length 256` |
+| **LLaMA** | `llama` | TinyLlama/TinyLlama-1.1B-Chat-v1.0 | `trtf-build build TinyLlama/TinyLlama-1.1B-Chat-v1.0 -o tinyllama.trtfb --max-cache-length 256` |
+| **Mistral** | `mistral` | mistralai/Mistral-7B-v0.1 | `trtf-build build mistralai/Mistral-7B-v0.1 -o mistral.trtfb --max-cache-length 256` |
+| **Gemma** | `gemma`, `gemma2` | google/gemma-2-2b (gated) | `trtf-build build google/gemma-2-2b -o gemma2.trtfb --max-cache-length 256` |
+| **Phi** | `phi`, `phi3` (not `phimoe`) | microsoft/Phi-3-mini-4k-instruct | `trtf-build build microsoft/Phi-3-mini-4k-instruct -o phi3.trtfb --max-cache-length 256` |
+| **Granite** | `granite` | ibm-granite/granite-3.1-2b-base | `trtf-build build ibm-granite/granite-3.1-2b-base -o granite.trtfb --max-cache-length 256` |
+| **InternLM** | `internlm`, `internlm2` | internlm/internlm2-math-plus-1_8b | `trtf-build build internlm/internlm2-math-plus-1_8b -o internlm2.trtfb --max-cache-length 256` |
 
 ### Extended decoder (LayerNorm, GELU, learned positions)
 
-| Family | Matched `model_type` | Compatible Models | Build Command |
+| Family | Matched `model_type` | E2E Verified Model | Build Command |
 |--------|---------------------|-------------------|---------------|
-| **StarCoder2** | `starcoder2` | StarCoder2 (3B–15B) | `trtf-build build bigcode/starcoder2-3b -o starcoder2.trtfb` |
-| **GPT-2** | `gpt2` | GPT-2 (125M–1.5B), DistilGPT-2 | `trtf-build build openai-community/gpt2 -o gpt2.trtfb` |
-| **OPT** | `opt` | OPT (125M–66B) | `trtf-build build facebook/opt-125m -o opt.trtfb` |
-| **Falcon** | `falcon` | Falcon 3 (1B–10B), Falcon (7B–180B) | `trtf-build build tiiuae/Falcon3-1B-Base -o falcon.trtfb` |
-| **StableLM** | `stablelm` | StableLM 2 (1.6B–12B) | `trtf-build build stabilityai/stablelm-2-1_6b -o stablelm.trtfb` |
+| **StarCoder2** | `starcoder2` | bigcode/starcoder2-3b | `trtf-build build bigcode/starcoder2-3b -o starcoder2.trtfb --max-cache-length 256` |
+| **GPT-2** | `gpt2` | openai-community/gpt2 | `trtf-build build openai-community/gpt2 -o gpt2.trtfb --max-cache-length 256` |
+| **OPT** | `opt` | facebook/opt-125m | `trtf-build build facebook/opt-125m -o opt.trtfb --max-cache-length 256` |
+| **Falcon** | `falcon` | tiiuae/Falcon3-1B-Base | `trtf-build build tiiuae/Falcon3-1B-Base -o falcon.trtfb --max-cache-length 256` |
+| **StableLM** | `stablelm` | stabilityai/stablelm-2-1_6b | `trtf-build build stabilityai/stablelm-2-1_6b -o stablelm.trtfb --max-cache-length 256` |
+| **OLMo** | `olmo` | allenai/OLMo-1B-hf | `trtf-build build allenai/OLMo-1B-hf -o olmo.trtfb --max-cache-length 256` |
+| **XGLM** | `xglm` | facebook/xglm-564M | `trtf-build build facebook/xglm-564M -o xglm.trtfb --max-cache-length 256` |
+| **GPT-NeoX** | `gpt_neox` | EleutherAI/pythia-70m | `trtf-build build EleutherAI/pythia-70m -o pythia.trtfb --max-cache-length 256` |
 
 ### Mixture of Experts (MoE)
 
-| Family | Matched `model_type` | Compatible Models | Build Command |
+| Family | Matched `model_type` | E2E Verified Model | Build Command |
 |--------|---------------------|-------------------|---------------|
-| **Phi-MoE** | `phimoe` | Phi-tiny-MoE (3.8B/1.1B active) | `trtf-build build microsoft/Phi-tiny-MoE-instruct -o phi-moe.trtfb` |
+| **Phi-MoE** | `phimoe` | microsoft/Phi-tiny-MoE-instruct | `trtf-build build microsoft/Phi-tiny-MoE-instruct -o phi-moe.trtfb --max-cache-length 256` |
 
 ### State Space Models (SSM)
 
-| Family | Matched `model_type` | Compatible Models | Build Command |
+| Family | Matched `model_type` | E2E Verified Model | Build Command |
 |--------|---------------------|-------------------|---------------|
-| **Mamba** | `mamba` | Mamba (130M–2.8B) | `trtf-build build state-spaces/mamba-130m-hf -o mamba-130m.trtfb` |
+| **Mamba** | `mamba` | state-spaces/mamba-130m-hf | `trtf-build build state-spaces/mamba-130m-hf -o mamba-130m.trtfb` |
 
-### Vision-Language (text decoder only)
+### Vision-Language
 
-| Family | Matched `model_type` | Compatible Models | Build Command |
+| Family | Matched `model_type` | E2E Verified Model | Build Command |
 |--------|---------------------|-------------------|---------------|
-| **Qwen-VL** | `qwen2_vl`, `qwen2_5_vl` | Qwen2.5-VL (text decoder) | `trtf-build build Qwen/Qwen2.5-VL-3B -o qwen-vl.trtfb` |
+| **Qwen-VL** | `qwen2_vl`, `qwen2_5_vl` | Qwen/Qwen2.5-VL-3B-Instruct | `trtf-build build Qwen/Qwen2.5-VL-3B-Instruct -o qwen-vl.trtfb --max-cache-length 256` |
 
 ### Notable compatible models (via model_type matching)
 
