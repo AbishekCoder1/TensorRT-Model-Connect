@@ -5,8 +5,9 @@ Runs both backends in-process Python for a controlled, apples-to-apples
 comparison. TRT uses TrtRunner (debug_runner.py); HF uses
 AutoModelForCausalLM on CUDA with KV cache enabled.
 
-Both models must fit in GPU memory simultaneously.  Use --dtype float16
-(default) to reduce HF memory usage.
+TRT and HF run serially (not simultaneously), so large models that
+exceed GPU memory when loaded together are supported.  Use --dtype
+float16 (default) to reduce HF memory usage.
 
 Usage:
     # Build TRT engine on the fly from HF model
@@ -182,14 +183,14 @@ def bench_trt(engine_plan: bytes, num_layers: int, max_cache_length: int,
               input_ids: list[int], max_new_tokens: int,
               warmup: int, iterations: int, eos_token_id: int | None,
               verbose: bool) -> dict:
-    """Benchmark TRT inference via TrtRunner.
+    """Benchmark TRT inference via PerfTrtRunner (device-resident KV cache).
 
     Returns dict with timing lists and generated token IDs.
     """
-    from trtf_build.debug_runner import TrtRunner
+    from trtf_build.debug_runner import PerfTrtRunner
 
     # Create runner once (deserialization outside timing)
-    runner = TrtRunner(
+    runner = PerfTrtRunner(
         engine_plan=engine_plan,
         max_cache_length=max_cache_length,
         num_layers=num_layers,
@@ -204,16 +205,13 @@ def bench_trt(engine_plan: bytes, num_layers: int, max_cache_length: int,
     for run_idx in range(total_runs):
         is_warmup = run_idx < warmup
 
-        # Reset cache state
-        runner.cache_length = 0
-        for i in range(num_layers):
-            runner.cache_k[i][:] = 0.0
-            runner.cache_v[i][:] = 0.0
+        # Reset device-side cache
+        runner.reset()
 
         # -- Prefill --
         t0 = time.perf_counter()
         for tid in input_ids:
-            result = runner.step(tid)
+            logits = runner.step(tid)
         prefill_ms = (time.perf_counter() - t0) * 1000
 
         # -- Decode --
@@ -221,12 +219,11 @@ def bench_trt(engine_plan: bytes, num_layers: int, max_cache_length: int,
         run_gen_ids: list[int] = []
         t0 = time.perf_counter()
         for _ in range(max_new_tokens):
-            logits = result["logits"].flatten()
             next_token = int(np.argmax(logits))
             run_gen_ids.append(next_token)
             if eos_token_id is not None and next_token == eos_token_id:
                 break
-            result = runner.step(next_token)
+            logits = runner.step(next_token)
             tokens_generated += 1
         decode_ms = (time.perf_counter() - t0) * 1000
 
@@ -254,14 +251,14 @@ def bench_trt_mamba(engine_plan: bytes, num_layers: int,
                     input_ids: list[int], max_new_tokens: int,
                     warmup: int, iterations: int, eos_token_id: int | None,
                     verbose: bool) -> dict:
-    """Benchmark TRT inference for Mamba/SSM via MambaTrtRunner.
+    """Benchmark TRT inference for Mamba/SSM via PerfMambaTrtRunner.
 
     Returns dict with timing lists and generated token IDs.
     """
-    from trtf_build.debug_runner import MambaTrtRunner
+    from trtf_build.debug_runner import PerfMambaTrtRunner
 
     # Create runner once (deserialization outside timing)
-    runner = MambaTrtRunner(
+    runner = PerfMambaTrtRunner(
         engine_plan=engine_plan,
         num_layers=num_layers,
     )
@@ -275,15 +272,13 @@ def bench_trt_mamba(engine_plan: bytes, num_layers: int,
     for run_idx in range(total_runs):
         is_warmup = run_idx < warmup
 
-        # Reset recurrent state
-        for i in range(num_layers):
-            runner.conv_state[i][:] = 0.0
-            runner.ssm_state[i][:] = 0.0
+        # Reset device-side recurrent state
+        runner.reset()
 
         # -- Prefill --
         t0 = time.perf_counter()
         for tid in input_ids:
-            result = runner.step(tid)
+            logits = runner.step(tid)
         prefill_ms = (time.perf_counter() - t0) * 1000
 
         # -- Decode --
@@ -291,12 +286,11 @@ def bench_trt_mamba(engine_plan: bytes, num_layers: int,
         run_gen_ids: list[int] = []
         t0 = time.perf_counter()
         for _ in range(max_new_tokens):
-            logits = result["logits"].flatten()
             next_token = int(np.argmax(logits))
             run_gen_ids.append(next_token)
             if eos_token_id is not None and next_token == eos_token_id:
                 break
-            result = runner.step(next_token)
+            logits = runner.step(next_token)
             tokens_generated += 1
         decode_ms = (time.perf_counter() - t0) * 1000
 
@@ -667,11 +661,7 @@ def main():
         num_layers = config.num_hidden_layers
         max_cache_length = args.max_cache_length
 
-    # -- Load HF model --
-    print(f"[perf] Loading HF model (dtype={args.dtype}) ...", file=sys.stderr)
-    hf_model = load_hf_model(model_dir, args.dtype, args.trust_remote_code)
-
-    # -- Run benchmarks --
+    # -- Bench TRT (GPU-exclusive) --
     backend_label = "TRT-Mamba" if is_mamba else "TRT"
     print(f"[perf] Benchmarking {backend_label} ({args.warmup} warmup + "
           f"{args.iterations} iterations) ...", file=sys.stderr)
@@ -685,12 +675,25 @@ def main():
             engine_plan, num_layers, max_cache_length,
             input_ids, args.max_new_tokens,
             args.warmup, args.iterations, eos_token_id, args.verbose)
+    del engine_plan
 
+    # Free TRT GPU memory before loading HF
+    import gc
+    import torch
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # -- Bench HF (GPU-exclusive) --
+    print(f"[perf] Loading HF model (dtype={args.dtype}) ...", file=sys.stderr)
+    hf_model = load_hf_model(model_dir, args.dtype, args.trust_remote_code)
     print(f"[perf] Benchmarking HF ({args.warmup} warmup + "
           f"{args.iterations} iterations) ...", file=sys.stderr)
     hf_res = bench_hf(
         hf_model, input_ids, args.max_new_tokens,
         args.warmup, args.iterations, eos_token_id, args.verbose)
+    del hf_model
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # -- Report --
     print_report(

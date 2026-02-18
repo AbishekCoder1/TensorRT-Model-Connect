@@ -64,7 +64,19 @@ pytest tests/tools/ -v
 
 E2E tests (requires GPU + engine bundles):
 ```bash
-TRTF_ENGINE_DIR=/mnt/storage/trt-transformers/engines pytest tests/e2e/ -v
+pytest tests/e2e/ -v --engine-dir /mnt/storage/trt-transformers/engines
+```
+
+Full-pipeline E2E tests (build + infer + compare):
+```bash
+pytest tests/e2e/test_full_pipeline.py -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+
+# Force rebuild all bundles from HF:
+pytest tests/e2e/test_full_pipeline.py -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python --rebuild-engines
 ```
 
 All Python tests at once:
@@ -78,9 +90,12 @@ C++ tests are plain executables (no framework) in `tests/cpp/`. They use `main()
 
 ```bash
 ./build/trtf run     <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
+./build/trtf run     <bundle.trtfb> --prompt "text" --image <image.jpg> [--max-new-tokens N] [--hf-python PATH]
 ./build/trtf inspect <bundle.trtfb>
 ./build/trtf version
 ```
+
+For vision-language models, pass `--image` with the path to an image file. The VL bundle must have been built from a VL model (e.g. Qwen2.5-VL) and contains both a text decoder and vision encoder engine.
 
 ## Key environment variables
 
@@ -292,7 +307,22 @@ export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
   --hf-python $PWD/.venv/bin/python
 ```
 
-### 4) MMLU sanity check (inside container)
+### 4) Build + run a vision-language model (inside container)
+```bash
+source .venv/bin/activate
+
+# Build a VL bundle (text decoder + vision encoder)
+trtf-build build Qwen/Qwen2.5-VL-3B-Instruct -o /tmp/qwen25vl.trtfb --max-cache-length 384
+
+# Run with an image
+TRT_LIB_DIR=$(python3 -c "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])")
+export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+./build/trtf run /tmp/qwen25vl.trtfb --prompt "Describe this image." \
+  --image /path/to/image.jpg --max-new-tokens 30 \
+  --hf-python $PWD/.venv/bin/python
+```
+
+### 5) MMLU sanity check (inside container)
 ```bash
 $PWD/.venv/bin/python scripts/eval_mmlu.py \
   --backend trtf --model /tmp/qwen3.trtfb \

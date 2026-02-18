@@ -155,6 +155,51 @@ def _run_diff_vl_subprocess(bundle_path, image_path, hf_id, binary, hf_python,
     }
 
 
+def _run_perf_compare_subprocess(hf_id, bundle_path, prompt, max_new_tokens,
+                                  trust_remote_code=False,
+                                  warmup=2, iterations=3):
+    """Run perf_compare.py as a subprocess (TRT + HF both in separate process).
+
+    Returns:
+        dict with keys: passed, perf_data (parsed JSON or None), time_s, output
+    """
+    perf_compare = TOOLS_DIR / "perf_compare.py"
+    json_path = Path("/tmp/claude") / f"{Path(bundle_path).stem}_perf.json"
+
+    cmd = [
+        sys.executable, str(perf_compare),
+        "--model", hf_id,
+        "--bundle", str(bundle_path),
+        "--prompt", prompt,
+        "--max-new-tokens", str(max_new_tokens),
+        "--warmup", str(warmup),
+        "--iterations", str(iterations),
+        "--json", str(json_path),
+    ]
+    if trust_remote_code:
+        cmd.append("--trust-remote-code")
+
+    t0 = time.monotonic()
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=600)
+    elapsed = time.monotonic() - t0
+
+    perf_data = None
+    if json_path.is_file():
+        try:
+            with open(json_path) as f:
+                perf_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return {
+        "passed": result.returncode == 0,
+        "perf_data": perf_data,
+        "time_s": elapsed,
+        "output": result.stdout + result.stderr,
+    }
+
+
 def _get_gpu_name():
     """Get GPU name via nvidia-smi, or return 'unknown'."""
     try:
@@ -239,14 +284,27 @@ def test_full_pipeline(built_bundle, trtf_binary, hf_python, ld_library_path):
         hf_id, atol, max_cache_length, max_new_tokens,
         trust_remote_code=trust_remote_code)
 
-    # Step 3: Build and save results
+    # Step 3: perf_compare — TRT vs HF performance (subprocess, informational)
+    # Skip for SSM/Mamba models (perf_compare rejects them)
+    runtime_strategy = entry.get("runtime_strategy", "decoder_kv_cache")
+    perf_result = None
+    if runtime_strategy != "ssm_recurrent":
+        perf_result = _run_perf_compare_subprocess(
+            hf_id, bundle_path, prompt, max_new_tokens,
+            trust_remote_code=trust_remote_code)
+        if not perf_result["passed"]:
+            print(f"\n[full_pipeline] WARNING: perf_compare failed for "
+                  f"{entry['name']} (non-fatal):\n"
+                  f"{perf_result['output'][-1000:]}")
+
+    # Step 4: Build and save results
     bundle_size = os.path.getsize(bundle_path)
     results = {
         "model": {
             "name": entry["name"],
             "hf_id": hf_id,
             "family": entry.get("family", "unknown"),
-            "runtime_strategy": entry.get("runtime_strategy", "decoder_kv_cache"),
+            "runtime_strategy": runtime_strategy,
         },
         "build": {
             "was_cached": built_bundle["was_cached"],
@@ -275,15 +333,27 @@ def test_full_pipeline(built_bundle, trtf_binary, hf_python, ld_library_path):
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
+    # Merge perf data if available
+    if perf_result and perf_result["perf_data"]:
+        results["performance"] = perf_result["perf_data"]
+        results["timing"]["perf_compare_time_s"] = perf_result["time_s"]
+
     results_path = _save_results(bundle_path, results)
 
-    # Assertions
+    # Assertions (correctness only — perf is informational)
     assert diff_result["passed"], (
         f"diff_logits FAILED for {entry['name']}:\n"
         f"{diff_result['output'][-2000:]}")
 
+    perf_summary = ""
+    if perf_result and perf_result["perf_data"]:
+        sp = perf_result["perf_data"].get("speedup", {})
+        total_sp = sp.get("total")
+        if total_sp is not None:
+            perf_summary = f", speedup={total_sp:.2f}x"
     print(f"\n[full_pipeline] {entry['name']}: PASS "
-          f"(max_diff={diff_result['max_diff']}, cpp_text={len(cpp_result['text'])} chars)")
+          f"(max_diff={diff_result['max_diff']}, "
+          f"cpp_text={len(cpp_result['text'])} chars{perf_summary})")
     print(f"  Results saved: {results_path}")
 
 

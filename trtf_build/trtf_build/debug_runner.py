@@ -259,6 +259,217 @@ class TrtRunner:
             cudart.cudaStreamDestroy(self.stream)
 
 
+class PerfTrtRunner:
+    """Device-resident TRT runner for performance benchmarking.
+
+    Unlike TrtRunner, keeps KV cache on-device. Only transfers
+    token_id/position_id/mask (H2D, ~1 KB) and logits (D2H, ~600 KB)
+    per step. Cache updates are D2D memcpy.
+    """
+
+    def __init__(
+        self,
+        engine_plan: bytes,
+        max_cache_length: int,
+        num_layers: int,
+    ):
+        self.max_cache_length = max_cache_length
+        self.num_layers = num_layers
+
+        # Deserialize engine
+        logger = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(logger)
+        self.engine = runtime.deserialize_cuda_engine(engine_plan)
+        if self.engine is None:
+            raise RuntimeError("Failed to deserialize TRT engine")
+        self.context = self.engine.create_execution_context()
+
+        # Auto-detect attention_size from cache_k_0 shape
+        cache_shape = tuple(self.engine.get_tensor_shape("cache_k_0"))
+        self.attention_size = cache_shape[1]  # (max_cache_length, attention_size)
+
+        # Create CUDA stream
+        err, self.stream = cudart.cudaStreamCreate()
+        _check_cuda(err)
+
+        self.cache_length = 0
+        attention_window = max_cache_length + 1
+        row_bytes = self.attention_size * 4  # float32
+
+        # Discover IO tensor metadata
+        self._io_names: list[str] = []
+        self._io_modes: dict[str, int] = {}
+        self._output_names: list[str] = []
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            mode = self.engine.get_tensor_mode(name)
+            self._io_names.append(name)
+            self._io_modes[name] = mode
+            if mode == trt.TensorIOMode.OUTPUT:
+                self._output_names.append(name)
+
+        # --- Persistent device cache buffers (not copied per step) ---
+        cache_bytes = max_cache_length * row_bytes
+        self._d_cache_k: list[int] = []
+        self._d_cache_v: list[int] = []
+        for _ in range(num_layers):
+            err, dk = cudart.cudaMalloc(cache_bytes)
+            _check_cuda(err)
+            self._d_cache_k.append(dk)
+            err, dv = cudart.cudaMalloc(cache_bytes)
+            _check_cuda(err)
+            self._d_cache_v.append(dv)
+
+        # --- Device buffers for present_k/v outputs (single-row each) ---
+        self._d_present_k: list[int] = []
+        self._d_present_v: list[int] = []
+        for _ in range(num_layers):
+            err, pk = cudart.cudaMalloc(row_bytes)
+            _check_cuda(err)
+            self._d_present_k.append(pk)
+            err, pv = cudart.cudaMalloc(row_bytes)
+            _check_cuda(err)
+            self._d_present_v.append(pv)
+
+        # --- Small I/O: device + host buffers ---
+        # token_id (4 B), position_id (4 B)
+        self._h_token_id = np.zeros((1,), dtype=np.int32)
+        self._h_position_id = np.zeros((1,), dtype=np.int32)
+        err, self._d_token_id = cudart.cudaMalloc(4)
+        _check_cuda(err)
+        err, self._d_position_id = cudart.cudaMalloc(4)
+        _check_cuda(err)
+
+        # attention_mask (attention_window * 4 bytes)
+        self._h_mask = np.zeros((1, attention_window), dtype=np.float32)
+        err, self._d_mask = cudart.cudaMalloc(attention_window * 4)
+        _check_cuda(err)
+
+        # logits — find shape from engine
+        logits_shape = tuple(self.engine.get_tensor_shape("logits"))
+        self._logits_numel = int(np.prod(logits_shape))
+        logits_bytes = self._logits_numel * 4
+        self._h_logits = np.zeros(logits_shape, dtype=np.float32)
+        err, self._d_logits = cudart.cudaMalloc(logits_bytes)
+        _check_cuda(err)
+
+        # Zero-init device cache
+        for i in range(num_layers):
+            _check_cuda(cudart.cudaMemsetAsync(
+                self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
+            _check_cuda(cudart.cudaMemsetAsync(
+                self._d_cache_v[i], 0, cache_bytes, self.stream)[0])
+        cudart.cudaStreamSynchronize(self.stream)
+
+    def step(self, token_id: int) -> np.ndarray:
+        """Run one decode step. Returns logits as 1D numpy array."""
+        H2D = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+        D2H = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
+        D2D = cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice
+        stream = self.stream
+        attention_window = self.max_cache_length + 1
+
+        # Build attention mask (same logic as TrtRunner)
+        position_id = min(self.cache_length, self.max_cache_length)
+        self._h_mask[:] = -1e9
+        valid = min(self.cache_length, self.max_cache_length)
+        self._h_mask[0, :valid] = 0.0
+        self._h_mask[0, -1] = 0.0
+
+        # Prepare small host buffers
+        self._h_token_id[0] = token_id
+        self._h_position_id[0] = position_id
+
+        # H2D: small inputs only
+        cudart.cudaMemcpyAsync(
+            self._d_token_id, self._h_token_id.ctypes.data,
+            4, H2D, stream)
+        cudart.cudaMemcpyAsync(
+            self._d_position_id, self._h_position_id.ctypes.data,
+            4, H2D, stream)
+        cudart.cudaMemcpyAsync(
+            self._d_mask, self._h_mask.ctypes.data,
+            attention_window * 4, H2D, stream)
+
+        # Set tensor addresses
+        self.context.set_tensor_address("token_id", self._d_token_id)
+        self.context.set_tensor_address("position_id", self._d_position_id)
+        self.context.set_tensor_address("attention_mask", self._d_mask)
+        self.context.set_tensor_address("logits", self._d_logits)
+
+        for i in range(self.num_layers):
+            self.context.set_tensor_address(f"cache_k_{i}", self._d_cache_k[i])
+            self.context.set_tensor_address(f"cache_v_{i}", self._d_cache_v[i])
+            self.context.set_tensor_address(f"present_k_{i}", self._d_present_k[i])
+            self.context.set_tensor_address(f"present_v_{i}", self._d_present_v[i])
+
+        # Execute
+        self.context.execute_async_v3(stream)
+
+        # D2D cache update
+        row_bytes = self.attention_size * 4
+        for i in range(self.num_layers):
+            for cache_buf, present_buf in [
+                (self._d_cache_k[i], self._d_present_k[i]),
+                (self._d_cache_v[i], self._d_present_v[i]),
+            ]:
+                if self.cache_length < self.max_cache_length:
+                    # Append: present -> cache[cache_length]
+                    offset = self.cache_length * row_bytes
+                    cudart.cudaMemcpyAsync(
+                        cache_buf + offset, present_buf,
+                        row_bytes, D2D, stream)
+                else:
+                    # Shift left: cache[0:-1] = cache[1:]
+                    cudart.cudaMemcpyAsync(
+                        cache_buf, cache_buf + row_bytes,
+                        (self.max_cache_length - 1) * row_bytes,
+                        D2D, stream)
+                    # Append: cache[-1] = present
+                    offset = (self.max_cache_length - 1) * row_bytes
+                    cudart.cudaMemcpyAsync(
+                        cache_buf + offset, present_buf,
+                        row_bytes, D2D, stream)
+
+        # D2H: logits only
+        cudart.cudaMemcpyAsync(
+            self._h_logits.ctypes.data, self._d_logits,
+            self._logits_numel * 4, D2H, stream)
+
+        cudart.cudaStreamSynchronize(stream)
+        self.cache_length = min(self.cache_length + 1, self.max_cache_length)
+        return self._h_logits.flatten().copy()
+
+    def reset(self):
+        """Zero all device cache buffers and reset cache_length."""
+        cache_bytes = self.max_cache_length * self.attention_size * 4
+        for i in range(self.num_layers):
+            _check_cuda(cudart.cudaMemsetAsync(
+                self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
+            _check_cuda(cudart.cudaMemsetAsync(
+                self._d_cache_v[i], 0, cache_bytes, self.stream)[0])
+        cudart.cudaStreamSynchronize(self.stream)
+        self.cache_length = 0
+
+    def __del__(self):
+        if not hasattr(self, "_d_token_id"):
+            return
+        bufs = [self._d_token_id, self._d_position_id, self._d_mask,
+                self._d_logits]
+        bufs.extend(self._d_cache_k)
+        bufs.extend(self._d_cache_v)
+        bufs.extend(self._d_present_k)
+        bufs.extend(self._d_present_v)
+        for d_ptr in bufs:
+            cudart.cudaFree(d_ptr)
+        if hasattr(self, "stream"):
+            cudart.cudaStreamDestroy(self.stream)
+        if hasattr(self, "context"):
+            del self.context
+        if hasattr(self, "engine"):
+            del self.engine
+
+
 class MambaTrtRunner:
     """Run inference on a Mamba/SSM TRT engine in Python.
 
@@ -437,6 +648,163 @@ class MambaTrtRunner:
             cudart.cudaFree(d_ptr)
         if hasattr(self, "stream"):
             cudart.cudaStreamDestroy(self.stream)
+
+
+class PerfMambaTrtRunner:
+    """Device-resident Mamba/SSM runner for performance benchmarking.
+
+    Unlike MambaTrtRunner, keeps conv_state and ssm_state on-device.
+    Only transfers token_id (H2D, 4 B) and logits (D2H, ~600 KB)
+    per step. State updates are D2D memcpy.
+    """
+
+    def __init__(
+        self,
+        engine_plan: bytes,
+        num_layers: int,
+    ):
+        self.num_layers = num_layers
+
+        # Deserialize engine
+        logger = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(logger)
+        self.engine = runtime.deserialize_cuda_engine(engine_plan)
+        if self.engine is None:
+            raise RuntimeError("Failed to deserialize TRT engine")
+        self.context = self.engine.create_execution_context()
+
+        # Auto-detect state dimensions
+        conv_shape = tuple(self.engine.get_tensor_shape("conv_state_0"))
+        self.d_inner = conv_shape[0]
+        self.conv_kernel = conv_shape[1]
+        ssm_shape = tuple(self.engine.get_tensor_shape("ssm_state_0"))
+        self.state_size = ssm_shape[1]
+
+        # Create CUDA stream
+        err, self.stream = cudart.cudaStreamCreate()
+        _check_cuda(err)
+
+        conv_state_bytes = self.d_inner * self.conv_kernel * 4
+        ssm_state_bytes = self.d_inner * self.state_size * 4
+
+        # --- Persistent device state buffers ---
+        self._d_conv_state: list[int] = []
+        self._d_ssm_state: list[int] = []
+        for _ in range(num_layers):
+            err, dc = cudart.cudaMalloc(conv_state_bytes)
+            _check_cuda(err)
+            self._d_conv_state.append(dc)
+            err, ds = cudart.cudaMalloc(ssm_state_bytes)
+            _check_cuda(err)
+            self._d_ssm_state.append(ds)
+
+        # --- Device buffers for present outputs ---
+        self._d_present_conv: list[int] = []
+        self._d_present_ssm: list[int] = []
+        for _ in range(num_layers):
+            err, pc = cudart.cudaMalloc(conv_state_bytes)
+            _check_cuda(err)
+            self._d_present_conv.append(pc)
+            err, ps = cudart.cudaMalloc(ssm_state_bytes)
+            _check_cuda(err)
+            self._d_present_ssm.append(ps)
+
+        # --- Small I/O ---
+        self._h_token_id = np.zeros((1,), dtype=np.int32)
+        err, self._d_token_id = cudart.cudaMalloc(4)
+        _check_cuda(err)
+
+        logits_shape = tuple(self.engine.get_tensor_shape("logits"))
+        self._logits_numel = int(np.prod(logits_shape))
+        logits_bytes = self._logits_numel * 4
+        self._h_logits = np.zeros(logits_shape, dtype=np.float32)
+        err, self._d_logits = cudart.cudaMalloc(logits_bytes)
+        _check_cuda(err)
+
+        # Zero-init device state
+        for i in range(num_layers):
+            _check_cuda(cudart.cudaMemsetAsync(
+                self._d_conv_state[i], 0, conv_state_bytes, self.stream)[0])
+            _check_cuda(cudart.cudaMemsetAsync(
+                self._d_ssm_state[i], 0, ssm_state_bytes, self.stream)[0])
+        cudart.cudaStreamSynchronize(self.stream)
+
+    def step(self, token_id: int) -> np.ndarray:
+        """Run one Mamba decode step. Returns logits as 1D numpy array."""
+        H2D = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+        D2H = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
+        D2D = cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice
+        stream = self.stream
+
+        self._h_token_id[0] = token_id
+        cudart.cudaMemcpyAsync(
+            self._d_token_id, self._h_token_id.ctypes.data,
+            4, H2D, stream)
+
+        # Set tensor addresses
+        self.context.set_tensor_address("token_id", self._d_token_id)
+        self.context.set_tensor_address("logits", self._d_logits)
+
+        conv_state_bytes = self.d_inner * self.conv_kernel * 4
+        ssm_state_bytes = self.d_inner * self.state_size * 4
+
+        for i in range(self.num_layers):
+            self.context.set_tensor_address(
+                f"conv_state_{i}", self._d_conv_state[i])
+            self.context.set_tensor_address(
+                f"ssm_state_{i}", self._d_ssm_state[i])
+            self.context.set_tensor_address(
+                f"present_conv_{i}", self._d_present_conv[i])
+            self.context.set_tensor_address(
+                f"present_ssm_{i}", self._d_present_ssm[i])
+
+        # Execute
+        self.context.execute_async_v3(stream)
+
+        # D2D state update (direct replacement — Mamba state is overwritten)
+        for i in range(self.num_layers):
+            cudart.cudaMemcpyAsync(
+                self._d_conv_state[i], self._d_present_conv[i],
+                conv_state_bytes, D2D, stream)
+            cudart.cudaMemcpyAsync(
+                self._d_ssm_state[i], self._d_present_ssm[i],
+                ssm_state_bytes, D2D, stream)
+
+        # D2H: logits only
+        cudart.cudaMemcpyAsync(
+            self._h_logits.ctypes.data, self._d_logits,
+            self._logits_numel * 4, D2H, stream)
+
+        cudart.cudaStreamSynchronize(stream)
+        return self._h_logits.flatten().copy()
+
+    def reset(self):
+        """Zero all device state buffers."""
+        conv_state_bytes = self.d_inner * self.conv_kernel * 4
+        ssm_state_bytes = self.d_inner * self.state_size * 4
+        for i in range(self.num_layers):
+            _check_cuda(cudart.cudaMemsetAsync(
+                self._d_conv_state[i], 0, conv_state_bytes, self.stream)[0])
+            _check_cuda(cudart.cudaMemsetAsync(
+                self._d_ssm_state[i], 0, ssm_state_bytes, self.stream)[0])
+        cudart.cudaStreamSynchronize(self.stream)
+
+    def __del__(self):
+        if not hasattr(self, "_d_token_id"):
+            return
+        bufs = [self._d_token_id, self._d_logits]
+        bufs.extend(self._d_conv_state)
+        bufs.extend(self._d_ssm_state)
+        bufs.extend(self._d_present_conv)
+        bufs.extend(self._d_present_ssm)
+        for d_ptr in bufs:
+            cudart.cudaFree(d_ptr)
+        if hasattr(self, "stream"):
+            cudart.cudaStreamDestroy(self.stream)
+        if hasattr(self, "context"):
+            del self.context
+        if hasattr(self, "engine"):
+            del self.engine
 
 
 def load_engine_from_bundle(bundle_path: str) -> tuple[bytes, dict]:

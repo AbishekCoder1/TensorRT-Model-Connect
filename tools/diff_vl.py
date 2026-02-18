@@ -86,7 +86,7 @@ def _get_hf_vision_features_qwen(
         else:
             hf_features = pooler
 
-    hf_features_np = hf_features.float().numpy()
+    hf_features_np = hf_features.float().cpu().numpy()
     print(f"[diff_vl] HF features: shape={hf_features_np.shape}, "
           f"mean={hf_features_np.mean():.6f}, std={hf_features_np.std():.6f}",
           file=sys.stderr)

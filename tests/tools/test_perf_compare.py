@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -276,3 +277,149 @@ class TestPrintReport:
         assert "..." in out
         # Should not print all 100 characters
         assert "A" * 100 not in out
+
+
+# ---------------------------------------------------------------------------
+# Serial GPU execution — main() ordering
+# ---------------------------------------------------------------------------
+
+def _fake_bench_result():
+    return {
+        "prefill_times": [10.0],
+        "decode_times": [50.0],
+        "decode_token_counts": [5],
+        "gen_ids": [1, 2, 3],
+    }
+
+
+class TestSerialGpuExecution:
+    """Verify main() runs TRT before HF and frees GPU between them."""
+
+    def _run_main_with_mocks(self, monkeypatch, is_mamba=False):
+        """Patch all heavy deps in main() and return the call log."""
+        mod = _import_perf_compare()
+        call_log = []
+
+        # Patch sys.argv
+        monkeypatch.setattr("sys.argv", [
+            "perf_compare.py",
+            "--model", "fake/model",
+            "--bundle", "/fake/bundle.trtfb",
+            "--prompt", "Hello",
+            "--max-new-tokens", "5",
+            "--warmup", "0",
+            "--iterations", "1",
+        ])
+
+        # Patch _resolve_model
+        monkeypatch.setattr(
+            "trtf_build.engine_builder._resolve_model",
+            lambda _: "/fake/model_dir")
+
+        # Patch AutoTokenizer
+        fake_tok = mock.MagicMock()
+        fake_tok.encode.return_value = [1, 2, 3]
+        fake_tok.eos_token_id = None
+        monkeypatch.setattr(
+            "transformers.AutoTokenizer.from_pretrained",
+            lambda *a, **kw: fake_tok)
+
+        # Patch load_trt_from_bundle
+        def fake_load_bundle(path):
+            call_log.append("load_bundle")
+            return (b"fake_plan", 2, 128, {}, is_mamba)
+        monkeypatch.setattr(mod, "load_trt_from_bundle", fake_load_bundle)
+
+        # Patch bench_trt / bench_trt_mamba
+        def fake_bench_trt(*args, **kwargs):
+            call_log.append("bench_trt")
+            return _fake_bench_result()
+        monkeypatch.setattr(mod, "bench_trt", fake_bench_trt)
+
+        def fake_bench_trt_mamba(*args, **kwargs):
+            call_log.append("bench_trt_mamba")
+            return _fake_bench_result()
+        monkeypatch.setattr(mod, "bench_trt_mamba", fake_bench_trt_mamba)
+
+        # Patch gc.collect and torch.cuda.empty_cache to track calls
+        real_gc_mod = __import__("gc")
+        original_collect = real_gc_mod.collect
+
+        def tracking_gc_collect():
+            call_log.append("gc_collect")
+            return original_collect()
+        monkeypatch.setattr(real_gc_mod, "collect", tracking_gc_collect)
+
+        fake_cuda = mock.MagicMock()
+        fake_cuda.empty_cache = lambda: call_log.append("empty_cache")
+        fake_torch = mock.MagicMock()
+        fake_torch.cuda = fake_cuda
+        monkeypatch.setitem(__import__("sys").modules, "torch", fake_torch)
+
+        # Patch load_hf_model / bench_hf
+        def fake_load_hf(*args, **kwargs):
+            call_log.append("load_hf")
+            return mock.MagicMock()
+        monkeypatch.setattr(mod, "load_hf_model", fake_load_hf)
+
+        def fake_bench_hf(*args, **kwargs):
+            call_log.append("bench_hf")
+            return _fake_bench_result()
+        monkeypatch.setattr(mod, "bench_hf", fake_bench_hf)
+
+        # Patch print_report to suppress output
+        monkeypatch.setattr(mod, "print_report", lambda *a, **kw: None)
+
+        mod.main()
+        return call_log
+
+    def test_trt_runs_before_hf_load(self, monkeypatch):
+        """TRT benchmark must complete before HF model is loaded."""
+        log = self._run_main_with_mocks(monkeypatch)
+        trt_idx = log.index("bench_trt")
+        hf_load_idx = log.index("load_hf")
+        assert trt_idx < hf_load_idx, (
+            f"bench_trt ({trt_idx}) must run before load_hf ({hf_load_idx}): {log}")
+
+    def test_gpu_freed_between_trt_and_hf(self, monkeypatch):
+        """gc.collect + empty_cache must happen between TRT and HF."""
+        log = self._run_main_with_mocks(monkeypatch)
+        trt_idx = log.index("bench_trt")
+        hf_load_idx = log.index("load_hf")
+
+        # Find gc_collect and empty_cache between TRT and HF load
+        mid_section = log[trt_idx + 1:hf_load_idx]
+        assert "gc_collect" in mid_section, (
+            f"gc.collect() missing between bench_trt and load_hf: {log}")
+        assert "empty_cache" in mid_section, (
+            f"torch.cuda.empty_cache() missing between bench_trt and load_hf: {log}")
+
+    def test_hf_freed_after_bench(self, monkeypatch):
+        """HF model is freed after benchmarking (gc + empty_cache at end)."""
+        log = self._run_main_with_mocks(monkeypatch)
+        bench_hf_idx = log.index("bench_hf")
+        remaining = log[bench_hf_idx + 1:]
+        assert "gc_collect" in remaining, (
+            f"gc.collect() missing after bench_hf: {log}")
+        assert "empty_cache" in remaining, (
+            f"torch.cuda.empty_cache() missing after bench_hf: {log}")
+
+    def test_mamba_path_serial_execution(self, monkeypatch):
+        """Mamba/SSM path also runs TRT before HF with GPU cleanup."""
+        log = self._run_main_with_mocks(monkeypatch, is_mamba=True)
+        trt_idx = log.index("bench_trt_mamba")
+        hf_load_idx = log.index("load_hf")
+        assert trt_idx < hf_load_idx
+
+        mid_section = log[trt_idx + 1:hf_load_idx]
+        assert "gc_collect" in mid_section
+        assert "empty_cache" in mid_section
+
+    def test_hf_never_loaded_before_trt_completes(self, monkeypatch):
+        """Verify full ordering: load_bundle → bench_trt → cleanup → load_hf → bench_hf → cleanup."""
+        log = self._run_main_with_mocks(monkeypatch)
+        expected_order = ["load_bundle", "bench_trt", "gc_collect",
+                          "empty_cache", "load_hf", "bench_hf",
+                          "gc_collect", "empty_cache"]
+        assert log == expected_order, (
+            f"Expected exact serial order:\n  {expected_order}\nGot:\n  {log}")
