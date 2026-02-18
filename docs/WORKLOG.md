@@ -1,5 +1,33 @@
 # Worklog
 
+## 2026-02-18 — Qwen3-VL DeepStack: vision parity with HuggingFace
+
+Achieved identical vision features (cosine=0.999996) between TRT and HF for Qwen3-VL-2B.
+
+**Root causes fixed:**
+1. **Missing RoPE in vision attention**: Qwen3-VL uses BOTH learned position embeddings AND 2D RoPE in ViT blocks. Added `add_self_attention_block_with_rope` with merge-group-ordered 2D RoPE tables.
+2. **Position embedding ordering**: Learned position embeddings were built in raster order but patches arrive at attention in merge-group order (from `qwen_merge_group` preprocessor). Reordered to merge-group iteration `(block_h, block_w, intra_h, intra_w)`.
+3. **Preprocessor patch_size**: `diff_vl.py` and `VLTrtRunner` were using default `patch_size=14` for Qwen3-VL which needs `patch_size=16`. Now reads from `preprocessor_config.json` in bundle.
+4. **GPU OOM in diff_vl.py**: Added `_free_gpu()` helper called after every test to serialize GPU usage. Switched `AutoProcessor` to `AutoImageProcessor` (avoids video processor import error).
+
+**Qwen3-VL architecture notes (vs Qwen2.5-VL):**
+- ViT: learned position embedding (not pure 3D RoPE), LayerNorm with bias (not RMSNorm), GELU FC MLP (not SwiGLU), full attention (no windowed)
+- Both learned positions AND RoPE in ViT blocks
+- Merge-group patch ordering (same concept, different code path)
+- DeepStack: 3 merger MLPs at ViT layers [5, 11, 17] with `use_postshuffle_norm=True`
+- Text decoder: `model.language_model.*` prefix, q_norm/k_norm, tied embeddings
+
+## 2026-02-18 — Add Mixtral E2E test coverage
+
+Added `mixtral-stories-15m` (ggml-org/stories15M_MOE, 36M params) to E2E test suite.
+This is a tiny toy Mixtral model (4 experts, top-2 routing) that exercises the full
+`decoder_moe` code path: RMSNorm + RoPE + GQA + top-k softmax routing + per-expert
+SwiGLU + renormalization. Uses `logit_atol: 2e-3` (same as Mamba) due to MoE routing
+sensitivity.
+
+- New: `tests/e2e/models/mixtral-stories-15m.json`
+- Updated: `tests/e2e/engines.json` (added entry)
+
 ## 2026-02-17 — Phase 2: Modular Builder Refactoring + C++ Dispatch Cleanup
 
 ### Part A: Python builder three-layer stack (`graph_blocks.py`)
