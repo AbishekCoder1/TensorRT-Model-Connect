@@ -1085,12 +1085,22 @@ def preprocess_image_for_trt(
       "center_crop_chw":     [C, H, W] center-crop to square, then resize + normalize
       "aspect_preserve_chw": [C, H, W] aspect-preserving resize + zero-pad
     """
+    temporal = kwargs.get("temporal_patch_size", 1)
     if preprocessor_type == "simple_chw":
-        return _preprocess_simple_chw(image_path, **kwargs)
+        result = _preprocess_simple_chw(image_path, **kwargs)
+        if temporal > 1 and result.shape[0] < temporal * 3:
+            result = np.tile(result, (temporal, 1, 1))
+        return result
     if preprocessor_type == "center_crop_chw":
-        return _preprocess_center_crop_chw(image_path, **kwargs)
+        result = _preprocess_center_crop_chw(image_path, **kwargs)
+        if temporal > 1 and result.shape[0] < temporal * 3:
+            result = np.tile(result, (temporal, 1, 1))
+        return result
     if preprocessor_type == "aspect_preserve_chw":
-        return _preprocess_aspect_preserve_chw(image_path, **kwargs)
+        result = _preprocess_aspect_preserve_chw(image_path, **kwargs)
+        if temporal > 1 and result.shape[0] < temporal * 3:
+            result = np.tile(result, (temporal, 1, 1))
+        return result
     if preprocessor_type != "qwen_merge_group":
         warnings.warn(
             f"Unknown preprocessor_type {preprocessor_type!r}, "
@@ -1139,6 +1149,8 @@ class VLTrtRunner:
 
         # Preprocessor config
         self.temporal_patch_size = self.preproc_config.get("temporal_patch_size", 2)
+        self.patch_size = self.preproc_config.get("patch_size", 14)
+        self.merge_size = self.preproc_config.get("merge_size", 2)
         self.image_mean = tuple(self.preproc_config.get(
             "image_mean", [0.48145466, 0.4578275, 0.40821073]))
         self.image_std = tuple(self.preproc_config.get(
@@ -1166,6 +1178,8 @@ class VLTrtRunner:
             temporal_patch_size=self.temporal_patch_size,
             image_mean=self.image_mean,
             image_std=self.image_std,
+            patch_size=self.patch_size,
+            merge_size=self.merge_size,
             interpolation=self.interpolation,
         )
         results = self.vision_runner.encode(pixel_values=pixel_values)

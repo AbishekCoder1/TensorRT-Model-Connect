@@ -118,12 +118,15 @@ class QwenVLPlugin:
         num_patches = grid_h * grid_w
         num_merged = num_patches // (merge_size * merge_size)
 
+        # Both Qwen2.5-VL and Qwen3-VL use merge-group pixel ordering
+        preproc = "qwen_merge_group"
+
         vl_cfg = {
             "image_token_id": 151655,
             "fixed_image_size": fixed_image_size,
             "num_image_pad_tokens": num_merged,
             "vision_output_dim": config.hidden_size,
-            "preprocessor_type": "qwen_merge_group",
+            "preprocessor_type": preproc,
             "vl_prompt_template": (
                 "<|im_start|>user\n"
                 "<|vision_start|>{image_pads}<|vision_end|>\n"
