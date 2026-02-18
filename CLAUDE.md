@@ -128,7 +128,7 @@ the bundle from scratch — avoids testing against stale cached bundles.
 
 ### Tier 4: Full E2E suite (~90 min, needs GPU)
 
-All models in engines.json: force-rebuild every bundle, then
+All models in tests/e2e/models/: force-rebuild every bundle, then
 infer/compare for each. This is the gold-standard regression gate.
 
 ```bash
@@ -162,7 +162,7 @@ python3 tools/perf_compare.py \
 | KV cache / mask / position logic | 1, 3, 4 |
 | debug_runner.py | 1, 3 |
 | perf_compare.py | 1 (tools tests), 5 |
-| New model family | 1, 2, validate_family.sh, then add to engines.json + tier 4 |
+| New model family | 1, 2, validate_family.sh, then add to tests/e2e/models/ + tier 4 |
 
 ## Running executables
 
@@ -264,7 +264,7 @@ tests/
   tools/                             # Diff framework self-tests
     test_diff_logits.py ...          # Mocked tests for diff tools
   e2e/                               # E2E tests with JSON manifest
-    engines.json                     # Model manifest
+    models/                          # Per-model JSON manifests (one file per model)
     test_inference.py ...            # GPU-required E2E tests
 ```
 

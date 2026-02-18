@@ -1,0 +1,13 @@
+{
+  "name": "qwen3-4b-instruct-2507",
+  "hf_id": "Qwen/Qwen3-4B-Instruct-2507",
+  "bundle": "qwen3-4b-instruct-2507.trtfb",
+  "family": "qwen",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+  "max_new_tokens": 20,
+  "logit_atol": 1e-3,
+  "layer_atol": 0.05,
+  "trust_remote_code": false
+}

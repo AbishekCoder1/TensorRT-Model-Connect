@@ -17,16 +17,22 @@ Achieved identical vision features (cosine=0.999996) between TRT and HF for Qwen
 - DeepStack: 3 merger MLPs at ViT layers [5, 11, 17] with `use_postshuffle_norm=True`
 - Text decoder: `model.language_model.*` prefix, q_norm/k_norm, tied embeddings
 
-## 2026-02-18 — Add Mixtral E2E test coverage
+## 2026-02-18 — Add Mixtral + Qwen3-4B E2E test coverage
 
-Added `mixtral-stories-15m` (ggml-org/stories15M_MOE, 36M params) to E2E test suite.
-This is a tiny toy Mixtral model (4 experts, top-2 routing) that exercises the full
-`decoder_moe` code path: RMSNorm + RoPE + GQA + top-k softmax routing + per-expert
-SwiGLU + renormalization. Uses `logit_atol: 2e-3` (same as Mamba) due to MoE routing
-sensitivity.
+Added two models to E2E test suite:
+
+1. **mixtral-stories-15m** (ggml-org/stories15M_MOE, 36M params) — tiny toy Mixtral
+   (4 experts, top-2 routing) exercising the full `decoder_moe` code path: RMSNorm +
+   RoPE + GQA + top-k softmax routing + per-expert SwiGLU + renormalization.
+   `logit_atol: 2e-3` due to MoE routing sensitivity.
+
+2. **qwen3-4b-instruct-2507** (Qwen/Qwen3-4B-Instruct-2507, 4B params) — latest
+   Qwen3 instruct model (July 2025). 36 layers, GQA (32 Q / 8 KV heads), hidden=2560.
+   Exercises the qwen plugin at a larger scale than qwen3-0.6b.
 
 - New: `tests/e2e/models/mixtral-stories-15m.json`
-- Updated: `tests/e2e/engines.json` (added entry)
+- New: `tests/e2e/models/qwen3-4b-instruct-2507.json`
+- Updated: `tests/e2e/engines.json` (added both entries)
 
 ## 2026-02-17 — Phase 2: Modular Builder Refactoring + C++ Dispatch Cleanup
 

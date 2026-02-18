@@ -12,29 +12,20 @@ from pathlib import Path
 import pytest
 
 E2E_DIR = Path(__file__).resolve().parent
-MANIFEST_PATH = E2E_DIR / "engines.json"
 MODELS_DIR = E2E_DIR / "models"
 PROJECT_DIR = E2E_DIR.parents[1]
 
 
 def _load_manifest():
-    """Load model manifest: try per-model JSON files first, fall back to engines.json."""
+    """Load model manifest from per-model JSON files in tests/e2e/models/."""
     models = []
     engine_dir = "/mnt/storage/trt-transformers/engines"
 
-    # Primary: per-model JSON files in models/ directory
     if MODELS_DIR.is_dir():
         for model_file in sorted(MODELS_DIR.glob("*.json")):
             with open(model_file) as f:
                 entry = json.load(f)
             models.append(entry)
-
-    # Fallback: engines.json (for backward compatibility)
-    if not models and MANIFEST_PATH.is_file():
-        with open(MANIFEST_PATH) as f:
-            manifest = json.load(f)
-        engine_dir = manifest.get("engine_dir", engine_dir)
-        models = manifest.get("models", [])
 
     return {"engine_dir": engine_dir, "models": models}
 
