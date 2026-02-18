@@ -122,7 +122,7 @@ sequenceDiagram
     participant P as Pipeline
     participant T as ITokenizer
     participant B as TrtBackendFastPath
-    participant S as KvCacheStepState
+    participant S as DeviceKvCache
     participant E as DecoderStepEngine
     participant GPU as CUDA GPU
 
@@ -130,29 +130,27 @@ sequenceDiagram
     T-->>P: [token_1, token_2]
     P->>B: generate([token_1, token_2], config)
 
-    Note over B: Create step state (IStepState)
-    B->>S: KvCacheStepState(engine)
-    Note over S: Allocates per-layer cache_k, cache_v
+    Note over B: Create device-resident KV cache + I/O buffers
+    B->>S: DeviceKvCache(engine)
+    Note over S: Allocates per-layer cache_k, cache_v on GPU
 
     Note over B: Prefill phase
     loop for each input token except last
         B->>S: prepare_step(position_id, mask)
         S-->>B: position_id, attention_mask
-        B->>E: run_decoder_step(token, position, mask, state.caches)
+        B->>E: run_decoder_step_device(token, position, mask, cache)
         E->>GPU: enqueueV3(stream)
-        GPU-->>E: logits[vocab_size] + present_k/v
-        B->>S: update_after_step(present_k, present_v)
-        Note over S: append_cache_state(), cache_length++
+        GPU-->>E: logits[vocab_size], D2D cache update internal
+        Note over S: cache_length++
     end
 
     Note over B: Decode phase
     loop step = 0..max_new_tokens
         B->>S: prepare_step(position_id, mask)
         S-->>B: position_id, attention_mask
-        B->>E: run_decoder_step(current_token, position, mask, state.caches)
+        B->>E: run_decoder_step_device(current_token, position, mask, cache)
         E->>GPU: enqueueV3(stream)
-        GPU-->>E: logits[vocab_size] + present_k/v
-        B->>S: update_after_step(present_k, present_v)
+        GPU-->>E: logits[vocab_size], D2D cache update internal
         B->>B: select_argmax_token(logits) -> next_token
         alt next_token == eos_token
             Note over B: Stop generation
@@ -168,8 +166,8 @@ sequenceDiagram
 
 ### Key implementation details
 
-- **State management is abstracted via `IStepState`**. `KvCacheStepState` implements it for standard attention models.
-- **KV cache is a fixed-size circular buffer** per layer: `[max_cache_length, attention_size]`. `append_cache_state()` writes new K/V at `position % max_cache_length`.
+- **State management is abstracted via `IStepState`**. `DeviceKvCache` implements it for standard attention models, keeping KV cache resident on GPU.
+- **KV cache is a fixed-size circular buffer** per layer: `[max_cache_length, attention_size]`, held in device memory. D2D cache update is internal to `DeviceKvCache` (no host round-trip). Only small inputs (token ID, position, mask) are transferred H2D per step.
 - **Attention mask** is built each step: `0.0` for visible positions, `-1e9` for masked. Grows by 1 each step.
 - **Greedy sampling** via `select_argmax_token()` -- scans logits array for maximum value.
 
@@ -177,22 +175,27 @@ sequenceDiagram
 
 ## 4. Single Decode Step (TRT)
 
-Detailed view of what happens inside `run_decoder_step()`.
+Detailed view of what happens inside `run_decoder_step_device()`.
 
 ```mermaid
 sequenceDiagram
-    participant RT as run_decoder_step()
+    participant RT as run_decoder_step_device()
     participant Ctx as IExecutionContext
     participant GPU as CUDA Buffers
     participant Stream as CudaStream
 
-    Note over RT: Set tensor addresses for inputs
-    RT->>Ctx: setTensorAddress("token_id", &host_token)
-    RT->>Ctx: setTensorAddress("position_id", &host_position)
-    RT->>Ctx: setTensorAddress("attention_mask", device_mask)
+    Note over RT: Set tensor addresses for inputs (small H2D transfers)
+    RT->>GPU: cudaMemcpyAsync(token_id, H->D, DeviceResources.token_id_buf)
+    RT->>GPU: cudaMemcpyAsync(position_id, H->D, DeviceResources.position_id_buf)
+    RT->>GPU: cudaMemcpyAsync(attention_mask, H->D, DeviceResources.mask_buf)
+
+    Note over RT: Bind device-resident KV cache (already on GPU)
+    RT->>Ctx: setTensorAddress("token_id", device_token_buf)
+    RT->>Ctx: setTensorAddress("position_id", device_position_buf)
+    RT->>Ctx: setTensorAddress("attention_mask", device_mask_buf)
     loop each layer
-        RT->>Ctx: setTensorAddress("cache_k_{i}", device_cache_k[i])
-        RT->>Ctx: setTensorAddress("cache_v_{i}", device_cache_v[i])
+        RT->>Ctx: setTensorAddress("cache_k_{i}", DeviceKvCache.cache_k[i])
+        RT->>Ctx: setTensorAddress("cache_v_{i}", DeviceKvCache.cache_v[i])
     end
 
     Note over RT: Set tensor addresses for outputs
@@ -202,21 +205,16 @@ sequenceDiagram
         RT->>Ctx: setTensorAddress("present_v_{i}", device_present_v)
     end
 
-    Note over RT: Copy input data to GPU
-    RT->>GPU: cudaMemcpyAsync(token_id, H->D)
-    RT->>GPU: cudaMemcpyAsync(position_id, H->D)
-    RT->>GPU: cudaMemcpyAsync(attention_mask, H->D)
-
     Note over RT: Execute TRT inference
     RT->>Ctx: enqueueV3(stream)
     Note over GPU: TRT runs fused CUDA kernels:<br/>embedding -> N x (RMSNorm+attn+MLP) -> logits
 
-    Note over RT: Copy outputs from GPU
+    Note over RT: D2D cache update internal to DeviceKvCache
+    Note over RT: Copy only logits from GPU
     RT->>GPU: cudaMemcpyAsync(logits, D->H)
-    RT->>GPU: cudaMemcpyAsync(present_k/v, D->H)
     RT->>Stream: cudaStreamSynchronize()
 
-    RT-->>RT: return logits + present_k/v
+    RT-->>RT: return logits (cache stays on device)
 ```
 
 ---
@@ -251,7 +249,7 @@ flowchart TD
         K --> O["HfPythonTokenizer<br/><i>or VocabTokenizer</i>"]
         N --> P["TrtBackendFastPath::generate()<br/><i>Prefill + Decode loop</i>"]
         O -->|"encode(prompt)"| P
-        P --> Q["run_decoder_step()<br/><i>GPU kernel execution</i>"]
+        P --> Q["run_decoder_step_device()<br/><i>GPU kernel execution</i>"]
         Q --> R["select_argmax_token()"]
         R -->|"loop until EOS"| P
         P -->|"token IDs"| O
@@ -298,4 +296,4 @@ Image file
 | TRT Network | Python | `INetworkDefinition` with weights as constant tensors |
 | Compiled engine | `.trtfb` bundle | Serialized plan bytes (optimized CUDA kernels) |
 | Deserialized engine | C++ runtime | `ICudaEngine` + `IExecutionContext` |
-| Runtime | C++ | Host `int32_t` token IDs + device `float` KV caches |
+| Runtime | C++ | Host `int32_t` token IDs, device-resident `float` KV caches (`DeviceKvCache`), small H2D per-step I/O via `DeviceResources` |

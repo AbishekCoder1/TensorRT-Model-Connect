@@ -17,7 +17,7 @@ File-by-file guide to the codebase. The system is split: Python (`trtf_build/`) 
 | `trtf_build/graph_ops.py` | Shared TRT graph ops (Python): RMSNorm, matmul, RoPE, SwiGLU, attention |
 | `trtf_build/standard_decoder_builder.py` | Standard decoder TRT engine builder |
 | `trtf_build/checkpoint_mapper.py` | HF safetensors → weight dict (transpose, GQA expansion) |
-| `trtf_build/debug_runner.py` | `TrtRunner` (KV cache), `MambaTrtRunner` (SSM), `VisionTrtRunner`, `VLTrtRunner` for pure-Python TRT inference. VL image preprocessing with 4 strategies + configurable interpolation. |
+| `trtf_build/debug_runner.py` | `TrtRunner` (device-resident KV cache), `MambaTrtRunner` (device-resident SSM), `VisionTrtRunner`, `VLTrtRunner` for pure-Python TRT inference. VL image preprocessing with 4 strategies + configurable interpolation. |
 | `trtf_build/qwen_vl_vision_builder.py` | Qwen2.5-VL vision encoder TRT engine builder: 3D patch embedding, 2D RoPE with spatial merge, ViT blocks, spatial merge MLP. |
 | `trtf_build/vision_encoder_builder.py` | Deprecated shim: re-exports from `qwen_vl_vision_builder.py`. |
 
@@ -44,6 +44,7 @@ Each family is a single Python file implementing the `FamilyPlugin` protocol (se
 | `stablelm.py` | StableLM family: matches `stablelm`. LayerNorm + SwiGLU + RoPE. |
 | `mamba.py` | Mamba family: matches `mamba`. SSM with selective scan, custom graph builder. Runtime strategy: `ssm_recurrent`. |
 | `qwen_vl.py` | Qwen-VL family: matches `qwen*vl`. Vision encoder (ViT + 3D RoPE + spatial merge) + text decoder with embed_input mode. |
+| `nemotron.py` | Nemotron-4 family: matches `nemotron`. LayerNorm1P (+1 gamma) + squared ReLU MLP + GQA + partial RoPE. |
 
 ---
 
@@ -86,10 +87,10 @@ Each family is a single Python file implementing the `FamilyPlugin` protocol (se
 |------|---------|
 | `trt_common.h/cpp` | RAII wrappers: `TrtLogger`, `TrtUniquePtr`, `CudaStream`, `CudaBuffer` |
 | `trt_engine_lifecycle.h/cpp` | `DecoderStepEngine` struct, `finalize_decoder_step_engine()` |
-| `trt_decode_runtime.h/cpp` | `run_decoder_step()`, `select_argmax_token()`, `build_attention_mask()`, `append_cache_state()` |
+| `trt_decode_runtime.h/cpp` | `select_argmax_token()`, `select_topk_tokens()`, `build_attention_mask()` |
 | `step_state.h` | `IStepState` interface: opaque base for per-step state during autoregressive generation |
-| `kv_cache_step_state.h/cpp` | `KvCacheStepState`: KV-cache implementation of `IStepState` |
-| `trt_backend_shared.h/cpp` | `TrtBackendFastPath`: autoregressive generate loop with prefill + decode phases. `CreateTrtBackendFromEngine()`. |
+| `device_kv_cache.h/cpp` | `DeviceKvCache`: device-resident KV cache (persistent GPU buffers, D2D updates). `DeviceResources`: pre-allocated per-step I/O buffers. `run_decoder_step_device()`: device-resident decode step. |
+| `trt_backend_shared.h/cpp` | `TrtBackendFastPath`: autoregressive generate loop with device-resident cache. `CreateTrtBackendFromEngine()`. |
 | `mamba_backend.h/cpp` | `MambaBackend`: SSM autoregressive loop with recurrent state. `CreateMambaBackendFromEngine()`. |
 | `mamba_decode_runtime.h/cpp` | `MambaStepEngine` struct, `run_mamba_step()`, `has_all_required_mamba_tensors()`. |
 | `mamba_step_state.h/cpp` | `MambaStepState`: conv_state + ssm_state per layer (constant memory, no growth). |
@@ -135,7 +136,7 @@ The following C++ files were removed as part of the Python build migration (~350
 
 ## Tests (`tests/`)
 
-12 test executables (down from 26). Removed tests covered C++ build infrastructure that migrated to Python.
+11 test executables. Removed tests covered C++ build infrastructure that migrated to Python.
 
 | File | What it tests |
 |------|--------------|
@@ -149,8 +150,7 @@ The following C++ files were removed as part of the Python build migration (~350
 | `test_text_parsers.cpp` | starts_with, ends_with, trim, split_words |
 | `test_json_helpers.cpp` | extract_json_string/int/float/array |
 | `test_fast_path_config.cpp` | FastPathModelConfig parsing, runtime_strategy detection |
-| `test_kv_cache_step_state.cpp` | KvCacheStepState: cache append, mask building, state management |
-| `test_decode_runtime.cpp` | select_argmax_token, build_attention_mask (TRT-guarded) |
+| `test_decode_runtime.cpp` | select_argmax_token, select_topk_tokens, build_attention_mask (TRT-guarded) |
 | `test_image_preprocessor.cpp` | VL image preprocessing: qwen_merge_group, simple_chw, center_crop_chw, aspect_preserve_chw, interpolation parsing, unknown type fallback, prompt formatting, config parsing (13 tests) |
 
 ## Scripts (`scripts/`)

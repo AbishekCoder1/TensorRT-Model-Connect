@@ -1,5 +1,63 @@
 # Worklog
 
+## 2026-02-17 — Device-Resident KV Cache (C++ + Python)
+
+- **C++ device-resident KV cache** (`src/runtime/trt/device_kv_cache.h/cpp`)
+  - `DeviceKvCache`: persistent GPU buffers for KV cache. D2D append/shift-left per step instead of full H2D cache transfer.
+  - `DeviceResources`: pre-allocated per-step I/O buffers (token_id, position_id, mask, logits, present_k/v, VL embed).
+  - `run_decoder_step_device()`: replaces `run_decoder_step()`. Only H2D for small inputs (~1KB), D2D cache update, D2H for logits.
+
+- **CudaBuffer/CudaStream move semantics** (`trt_common.h/cpp`)
+  - Added move ctor + move assign to both classes. Required for `std::vector<CudaBuffer>` in DeviceKvCache.
+  - Added `CudaBuffer::size()` accessor.
+
+- **Backend updates**
+  - `TrtBackendFastPath` (`trt_backend_shared.cpp`): uses `DeviceKvCache` + `DeviceResources` + `run_decoder_step_device()`.
+  - `VLBackendFastPath` (`vl_backend.cpp`): same device-resident path for text-only, VL prefill with embed, and decode.
+
+- **Deleted old host-based path**
+  - Removed `kv_cache_step_state.h/cpp`, `test_kv_cache_step_state.cpp`.
+  - Removed `run_decoder_step()` and `append_cache_state()` from `trt_decode_runtime.h/cpp`.
+  - Removed 3 cache append tests from `test_decode_runtime.cpp` (13 → 10 subtests).
+  - C++ test count: 12 → 11 executables.
+
+- **Python runner consolidation** (`debug_runner.py`)
+  - `TrtRunner` rewritten to device-resident: persistent GPU cache, D2D updates, H2D only for small inputs.
+  - `PerfTrtRunner` deleted (TrtRunner now IS device-resident).
+  - `MambaTrtRunner` rewritten to device-resident: persistent GPU conv_state/ssm_state.
+  - `PerfMambaTrtRunner` deleted.
+  - Both runners now return `dict[str, np.ndarray]` from `step()` with `logits` + debug outputs.
+  - Both runners have `reset()` for benchmarking (zeros device state).
+  - `VLTrtRunner` automatically benefits (uses `TrtRunner` internally).
+
+- **perf_compare.py** updated: `PerfTrtRunner` → `TrtRunner`, `PerfMambaTrtRunner` → `MambaTrtRunner`, step() returns dict.
+
+- **New test**: `tests/tools/test_perf_parity.py` — C++ binary vs Python TrtRunner head-to-head comparison.
+
+- **Documentation**: Updated CLAUDE.md, Source-Layout.md, step_state.h comment.
+
+## 2026-02-17 — Add Nemotron-4 Family + NVIDIA Model Entries (22 → 23 families, 19 → 25 E2E models)
+
+- **Nemotron-4 plugin** (`trtf_build/trtf_build/families/nemotron.py`)
+  - Matches `model_type == "nemotron"` (NVIDIA Nemotron-4 / Minitron).
+  - NemotronLayerNorm1P: LayerNorm with bias + gamma offset (+1 to stored weight, matching HF's `self.weight + 1`).
+  - 2-projection MLP (up_proj → squared ReLU → down_proj), no gate projection. Maps to `gelu_fc` builder MLP type with `relu2` activation.
+  - GQA (24 Q heads / 8 KV heads for 4B models), partial RoPE (`partial_rotary_factor=0.5`).
+  - No attention or MLP biases by default; optional bias support for variants that enable them.
+  - Tested models: nvidia/Nemotron-Mini-4B-Instruct, nvidia/Nemotron-4-Mini-Hindi-4B-Base.
+
+- **New `relu2`/`squared_relu` activation** (`graph_ops.py`)
+  - ReLU followed by element-wise square: `sq(relu(x))`.
+  - Added to `add_activation()` dispatch; parametrized unit test added.
+
+- **`norm_eps` config support** (`config.py`)
+  - Added `d.get("norm_eps")` to the epsilon fallback chain (Nemotron uses `norm_eps` instead of `rms_norm_eps`).
+
+- **6 new E2E entries** (`tests/e2e/engines.json`)
+  - `nemotron-mini-4b` (Nemotron plugin), `nemotron-hindi-4b` (Nemotron plugin)
+  - `nemotron-nano-4b` (LLaMA plugin), `minitron-4b-depth` (LLaMA plugin), `minitron-4b-width` (LLaMA plugin)
+  - `riva-translate-4b` (Mistral plugin)
+
 ## 2026-02-16 — Add GPT-Neo, CodeGen, BLOOM, Mixtral Families (18 → 22)
 
 - **GPT-Neo plugin** (`trtf_build/trtf_build/families/gpt_neo.py`)

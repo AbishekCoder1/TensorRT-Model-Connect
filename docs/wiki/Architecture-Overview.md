@@ -152,7 +152,7 @@ class IGenerationBackend {
 **Mamba Backend (SSM)** (`mamba_backend.cpp`):
 - **Strategy**: `ssm_recurrent`
 - **Name**: `"trt-mamba"`
-- **How it works**: Loads a Mamba TRT engine from a `.trtfb` bundle, then runs an autoregressive loop with conv_state and ssm_state per layer (constant memory, no cache growth). Uses `MambaStepState` instead of `KvCacheStepState`.
+- **How it works**: Loads a Mamba TRT engine from a `.trtfb` bundle, then runs an autoregressive loop with conv_state and ssm_state per layer (constant memory, no cache growth). Uses `MambaStepState` instead of `DeviceKvCache`.
 
 ### VL Image Preprocessing (`image_preprocessor.cpp`)
 

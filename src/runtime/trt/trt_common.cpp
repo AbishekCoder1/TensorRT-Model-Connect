@@ -118,6 +118,28 @@ CudaStream::~CudaStream()
     }
 }
 
+CudaStream::CudaStream(CudaStream&& other) noexcept
+    : mStream(other.mStream)
+    , mStatus(other.mStatus)
+{
+    other.mStream = nullptr;
+}
+
+CudaStream& CudaStream::operator=(CudaStream&& other) noexcept
+{
+    if (this != &other)
+    {
+        if (mStream != nullptr)
+        {
+            cudaStreamDestroy(mStream);
+        }
+        mStream = other.mStream;
+        mStatus = other.mStatus;
+        other.mStream = nullptr;
+    }
+    return *this;
+}
+
 bool CudaStream::ok() const
 {
     return mStatus == cudaSuccess;
@@ -146,6 +168,32 @@ CudaBuffer::~CudaBuffer()
     }
 }
 
+CudaBuffer::CudaBuffer(CudaBuffer&& other) noexcept
+    : mPtr(other.mPtr)
+    , mBytes(other.mBytes)
+    , mStatus(other.mStatus)
+{
+    other.mPtr = nullptr;
+    other.mBytes = 0;
+}
+
+CudaBuffer& CudaBuffer::operator=(CudaBuffer&& other) noexcept
+{
+    if (this != &other)
+    {
+        if (mPtr != nullptr)
+        {
+            cudaFree(mPtr);
+        }
+        mPtr = other.mPtr;
+        mBytes = other.mBytes;
+        mStatus = other.mStatus;
+        other.mPtr = nullptr;
+        other.mBytes = 0;
+    }
+    return *this;
+}
+
 bool CudaBuffer::ok() const
 {
     return mStatus == cudaSuccess;
@@ -154,6 +202,11 @@ bool CudaBuffer::ok() const
 void* CudaBuffer::data() const
 {
     return mPtr;
+}
+
+std::size_t CudaBuffer::size() const
+{
+    return mBytes;
 }
 
 #endif // TRTF_HAS_TRT

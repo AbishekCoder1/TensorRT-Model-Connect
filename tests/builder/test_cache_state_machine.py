@@ -2,7 +2,7 @@
 
 Extracts and tests the pure-numpy cache/mask/position logic from TrtRunner
 without needing TRT or a real engine. Validates that the state machine
-matches the C++ runtime's KvCacheStepState behavior.
+matches the C++ runtime's DeviceKvCache behavior.
 """
 
 from __future__ import annotations

@@ -186,14 +186,15 @@ struct DecoderStepEngine {
 
 ```
 generate(input_ids, config):
-  1. Create KvCacheStepState:
-     - Allocate per-layer cache_k, cache_v [max_cache_length, attention_size]
+  1. Create DeviceKvCache + DeviceResources:
+     - Allocate per-layer cache_k, cache_v on GPU [max_cache_length, attention_size]
+     - Pre-allocate per-step I/O buffers (token, position, mask, logits)
 
   2. Prefill phase:
      For each token in input_ids:
        - Build causal attention mask (0 for visible, -1e9 for masked)
-       - run_decoder_step(engine, token_id, position, mask, caches)
-       - Append K/V outputs to cache (circular buffer)
+       - run_decoder_step_device(engine, token_id, position, mask, cache)
+       - D2D cache update internal to DeviceKvCache
        - Advance position counter
 
   3. Decode phase:
@@ -209,9 +210,10 @@ generate(input_ids, config):
 
 ### KV-Cache Management
 
-The cache uses a fixed-size circular buffer per layer:
-- Size: `[max_cache_length, attention_size]` per layer, per K and V
-- `append_cache_state()` copies new K/V into the next available slot
+The cache uses a fixed-size circular buffer per layer, held in device memory (`DeviceKvCache`):
+- Size: `[max_cache_length, attention_size]` per layer, per K and V, resident on GPU
+- D2D cache update is internal to `DeviceKvCache` (present K/V written directly to cache slots on device, no host round-trip)
+- Only small inputs (token ID, position, mask) are transferred H2D per step via `DeviceResources`
 - Attention mask grows by one position each step
 - When cache is full, oldest entries are evicted (sliding window)
 

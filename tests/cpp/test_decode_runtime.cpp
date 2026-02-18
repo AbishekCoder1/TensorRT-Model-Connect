@@ -4,14 +4,13 @@
 //
 // Purpose:
 //   Validates the CPU-side utility functions from trt_decode_runtime.cpp that
-//   support the autoregressive decoding loop: token selection (argmax, top-k),
-//   causal attention mask construction, and KV-cache append operations. These
-//   functions are exercised without a GPU — they operate on CPU vectors and
-//   return CPU results.
+//   support the autoregressive decoding loop: token selection (argmax, top-k)
+//   and causal attention mask construction. These functions are exercised
+//   without a GPU — they operate on CPU vectors and return CPU results.
 //
 // Dependencies:
 //   - runtime/trt/trt_decode_runtime.h (select_argmax_token, select_topk_tokens,
-//                                        build_attention_mask, append_cache_state)
+//                                        build_attention_mask)
 //
 // Approach:
 //   All tests construct small input vectors, call the target function, and
@@ -28,10 +27,6 @@
 //   3. Attention mask tests — verify build_attention_mask produces correct
 //      causal masks for various cache occupancy levels (empty, partial, full,
 //      with/without current-token slot).
-//
-//   4. Cache append tests — verify append_cache_state writes a new hidden
-//      state row into the correct position, shifts rows when the cache is full,
-//      and is a no-op on size mismatch.
 //
 // Environment:
 //   Guarded by TRTF_HAS_TRT. Skips gracefully (exit 0) when TensorRT headers
@@ -346,99 +341,6 @@ bool test_mask_full_cache()
     return true;
 }
 
-// -----------------------------------------------------------------------------
-// Intention:  Verify normal cache append — writing a hidden state vector into
-//             an empty cache at write_index=0. Only the target row should be
-//             written; remaining rows should stay zero.
-// Setup:      A zero-initialized cache of shape [3, 2] (max_cache=3, hidden=2),
-//             and a state vector {1.0, 2.0}.
-// Mechanism:  Calls append_cache_state with write_index=0, then asserts row 0
-//             contains {1.0, 2.0} and rows 1-2 remain {0.0, 0.0}.
-// -----------------------------------------------------------------------------
-bool test_cache_append_normal()
-{
-    // write_index=0, hidden=2, max_cache=3
-    const int32_t hidden = 2;
-    const int32_t max_cache = 3;
-    std::vector<float> cache(static_cast<std::size_t>(max_cache) * static_cast<std::size_t>(hidden), 0.0F);
-    const std::vector<float> state = {1.0F, 2.0F};
-    trtf::append_cache_state(cache, state, hidden, max_cache, 0);
-    // Row 0 should be [1.0, 2.0]
-    if (cache[0] != 1.0F || cache[1] != 2.0F)
-    {
-        std::cerr << "cache_normal: [0]=" << cache[0] << " [1]=" << cache[1] << std::endl;
-        return false;
-    }
-    // Row 1, 2 should still be zero
-    if (cache[2] != 0.0F || cache[4] != 0.0F)
-    {
-        std::cerr << "cache_normal: rows 1,2 not zero" << std::endl;
-        return false;
-    }
-    return true;
-}
-
-// -----------------------------------------------------------------------------
-// Intention:  Verify cache append overflow behavior — when write_index >=
-//             max_cache, the cache should shift all rows left by one (evicting
-//             the oldest entry) and write the new state into the last row.
-// Setup:      A fully populated cache [3, 2] containing {1,2, 3,4, 5,6} with
-//             write_index=3 (one past the end) and new state {7.0, 8.0}.
-// Mechanism:  Calls append_cache_state, then asserts the cache now contains
-//             {3,4, 5,6, 7,8} — row 0 was evicted, rows shifted left, new
-//             state written to the tail.
-// -----------------------------------------------------------------------------
-bool test_cache_append_overflow()
-{
-    // write_index >= max_cache -> shifts rows left, writes at tail
-    const int32_t hidden = 2;
-    const int32_t max_cache = 3;
-    std::vector<float> cache = {1,2, 3,4, 5,6};
-    const std::vector<float> state = {7.0F, 8.0F};
-    trtf::append_cache_state(cache, state, hidden, max_cache, 3);
-    // After shift: row0=3,4 row1=5,6 row2=7,8
-    const std::vector<float> expected = {3,4, 5,6, 7,8};
-    for (std::size_t i = 0; i < expected.size(); ++i)
-    {
-        if (cache[i] != expected[i])
-        {
-            std::cerr << "cache_overflow: [" << i << "]=" << cache[i]
-                      << " expected=" << expected[i] << std::endl;
-            return false;
-        }
-    }
-    return true;
-}
-
-// -----------------------------------------------------------------------------
-// Intention:  Verify that append_cache_state is a safe no-op when the state
-//             vector's size does not match hidden_size — this prevents memory
-//             corruption from mismatched dimensions.
-// Setup:      A zero-initialized cache [3, 2] and a state vector of size 3
-//             (mismatched with hidden=2).
-// Mechanism:  Calls append_cache_state, then asserts the entire cache remains
-//             zero (no write occurred).
-// -----------------------------------------------------------------------------
-bool test_cache_append_size_mismatch()
-{
-    // state.size != hidden_size -> no-op
-    const int32_t hidden = 2;
-    const int32_t max_cache = 3;
-    std::vector<float> cache(static_cast<std::size_t>(max_cache) * static_cast<std::size_t>(hidden), 0.0F);
-    const std::vector<float> state = {1.0F, 2.0F, 3.0F}; // wrong size
-    trtf::append_cache_state(cache, state, hidden, max_cache, 0);
-    // Cache should be unchanged (all zeros)
-    for (std::size_t i = 0; i < cache.size(); ++i)
-    {
-        if (cache[i] != 0.0F)
-        {
-            std::cerr << "cache_mismatch: [" << i << "]=" << cache[i] << std::endl;
-            return false;
-        }
-    }
-    return true;
-}
-
 } // namespace
 
 #endif // TRTF_HAS_TRT
@@ -468,9 +370,6 @@ int main()
     run("mask_cache3_no_current", test_mask_cache3_no_current);
     run("mask_with_current_slot", test_mask_with_current_slot);
     run("mask_full_cache", test_mask_full_cache);
-    run("cache_append_normal", test_cache_append_normal);
-    run("cache_append_overflow", test_cache_append_overflow);
-    run("cache_append_size_mismatch", test_cache_append_size_mismatch);
 
     if (all_passed)
     {

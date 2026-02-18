@@ -58,6 +58,9 @@ public:
     CudaStream(const CudaStream&) = delete;
     CudaStream& operator=(const CudaStream&) = delete;
 
+    CudaStream(CudaStream&& other) noexcept;
+    CudaStream& operator=(CudaStream&& other) noexcept;
+
     bool ok() const;
     cudaStream_t get() const;
 
@@ -74,8 +77,12 @@ public:
     CudaBuffer(const CudaBuffer&) = delete;
     CudaBuffer& operator=(const CudaBuffer&) = delete;
 
+    CudaBuffer(CudaBuffer&& other) noexcept;
+    CudaBuffer& operator=(CudaBuffer&& other) noexcept;
+
     bool ok() const;
     void* data() const;
+    std::size_t size() const;
 
 private:
     void* mPtr{nullptr};

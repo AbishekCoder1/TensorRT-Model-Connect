@@ -11,7 +11,7 @@ As of 2026-02-16, MoE, Mamba/SSM, and vision-language support are **fully implem
 | Architecture Class | Current Support | Effort to Add New Instance | Where Changes Needed |
 |---|---|---|---|
 | Standard decoder (RMSNorm + RoPE + SwiGLU) | **Works today** (7 families) | ~30 LOC Python | Python plugin only |
-| Extended decoder (LayerNorm, GELU, learned positions) | **Works today** (11 families) | ~60 LOC Python | Python plugin only |
+| Extended decoder (LayerNorm, GELU, learned positions) | **Works today** (12 families) | ~60 LOC Python | Python plugin only |
 | MoE decoder (top-k softmax / SparseMixer routing) | **Works today** (2 families) | ~300 LOC Python | Python graph builder + checkpoint mapper |
 | SSM / Mamba | **Works today** (Mamba 130M-2.8B) | ~400 LOC Python | Python graph builder (C++ backend exists) |
 | Vision-Language | **Works today** (Qwen-VL) | ~200 LOC Python | Python vision builder + plugin VL config |
@@ -26,7 +26,7 @@ As of 2026-02-16, MoE, Mamba/SSM, and vision-language support are **fully implem
 
 Create a Python plugin file in `trtf_build/trtf_build/families/` with a checkpoint mapper. Uses the parameterized standard decoder builder. ~30-60 LOC.
 
-**Implemented**: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM (standard decoder); StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM (extended decoder).
+**Implemented**: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM (standard decoder); StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Nemotron (extended decoder).
 
 ### Adding a new MoE family
 
@@ -53,7 +53,7 @@ Write a Python plugin with `build_vision_engine()` for the vision encoder and `g
 ### Different state management (done for Mamba/SSM)
 
 The C++ runtime now supports multiple state backends via `runtime_strategy` dispatch in `trtf_c.cpp`:
-- `decoder_kv_cache` / `decoder_moe` -> `TrtBackendFastPath` + `KvCacheStepState`
+- `decoder_kv_cache` / `decoder_moe` -> `TrtBackendFastPath` + `DeviceKvCache`
 - `ssm_recurrent` -> `MambaBackend` + `MambaStepState`
 
 New state types (e.g., for hybrid architectures) would need:
@@ -63,7 +63,7 @@ New state types (e.g., for hybrid architectures) would need:
 
 ### Different KV cache shapes (DeepSeek MLA)
 
-Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, attention_size]`) need changes to `KvCacheStepState` in C++ to support variable cache sizes per layer.
+Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, attention_size]`) need changes to `DeviceKvCache` in C++ to support variable cache sizes per layer.
 
 ---
 
@@ -128,7 +128,7 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 - Graph builder: Decomposed attention with low-rank KV
 
 **C++ changes**:
-- `KvCacheStepState` generalization for different cache shapes per layer
+- `DeviceKvCache` generalization for different cache shapes per layer
 
 **Estimated work**: ~300 LOC Python + ~100 LOC C++.
 
@@ -144,9 +144,9 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 
 ## Recommended Approach for New Families
 
-### Tier 1: Python-only, standard builder (implemented for 18 families)
+### Tier 1: Python-only, standard builder (implemented for 19 families)
 Standard and extended decoders using the parameterized graph builder:
-- Already done: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM
+- Already done: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Nemotron
 - Candidates: Yi (use llama), Baichuan, DeepSeek-dense, CodeLlama (use llama), Vicuna (use llama)
 - ~30-60 LOC each, fully parallelizable
 

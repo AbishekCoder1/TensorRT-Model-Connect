@@ -1,5 +1,5 @@
 #include "runtime/trt/trt_backend_shared.h"
-#include "runtime/trt/kv_cache_step_state.h"
+#include "runtime/trt/device_kv_cache.h"
 #include "runtime/trt/trt_decode_runtime.h"
 
 #include <cstdint>
@@ -14,6 +14,7 @@ namespace trtf {
 namespace {
 
 // Lightweight TRT backend for the bundle load path (pre-built engine, no weight data).
+// Uses device-resident KV cache — only small inputs transferred H2D per step.
 class TrtBackendFastPath final : public IGenerationBackend {
 public:
     explicit TrtBackendFastPath(std::unique_ptr<DecoderStepEngine> engine)
@@ -34,26 +35,26 @@ public:
         std::vector<int32_t> output = input_ids;
         if (config.max_new_tokens == 0) return output;
 
-        auto state = std::make_unique<KvCacheStepState>(*mDecoderStepEngine);
+        DeviceKvCache cache(*mDecoderStepEngine);
+        DeviceResources resources(*mDecoderStepEngine);
+        if (!cache.ok() || !resources.ok())
+        {
+            throw std::runtime_error("Failed to allocate device resources");
+        }
+
         std::vector<float> logits;
-        std::vector<std::vector<float>> present_k, present_v;
 
         // Prefill
         if (input_ids.size() > 1)
         {
             for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
             {
-                int32_t position_id{};
-                std::vector<float> mask;
-                state->prepare_step(position_id, mask);
                 std::string error;
-                if (!run_decoder_step(*mDecoderStepEngine, input_ids[i], position_id,
-                        state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
-                        logits, present_k, present_v, error))
+                if (!run_decoder_step_device(*mDecoderStepEngine, cache, resources,
+                        input_ids[i], logits, error))
                 {
                     throw std::runtime_error("prefill step failed: " + error);
                 }
-                state->update_after_step(present_k, present_v);
             }
         }
 
@@ -61,17 +62,12 @@ public:
         int32_t current_token = input_ids.empty() ? mDecoderStepEngine->id_bos : input_ids.back();
         for (std::size_t step = 0; step < config.max_new_tokens; ++step)
         {
-            int32_t position_id{};
-            std::vector<float> mask;
-            state->prepare_step(position_id, mask);
             std::string error;
-            if (!run_decoder_step(*mDecoderStepEngine, current_token, position_id,
-                    state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
-                    logits, present_k, present_v, error))
+            if (!run_decoder_step_device(*mDecoderStepEngine, cache, resources,
+                    current_token, logits, error))
             {
                 throw std::runtime_error("decode step failed: " + error);
             }
-            state->update_after_step(present_k, present_v);
             const int32_t next_token = select_argmax_token(logits);
             output.push_back(next_token);
             current_token = next_token;

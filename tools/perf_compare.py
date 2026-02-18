@@ -183,14 +183,14 @@ def bench_trt(engine_plan: bytes, num_layers: int, max_cache_length: int,
               input_ids: list[int], max_new_tokens: int,
               warmup: int, iterations: int, eos_token_id: int | None,
               verbose: bool) -> dict:
-    """Benchmark TRT inference via PerfTrtRunner (device-resident KV cache).
+    """Benchmark TRT inference via TrtRunner (device-resident KV cache).
 
     Returns dict with timing lists and generated token IDs.
     """
-    from trtf_build.debug_runner import PerfTrtRunner
+    from trtf_build.debug_runner import TrtRunner
 
     # Create runner once (deserialization outside timing)
-    runner = PerfTrtRunner(
+    runner = TrtRunner(
         engine_plan=engine_plan,
         max_cache_length=max_cache_length,
         num_layers=num_layers,
@@ -211,7 +211,8 @@ def bench_trt(engine_plan: bytes, num_layers: int, max_cache_length: int,
         # -- Prefill --
         t0 = time.perf_counter()
         for tid in input_ids:
-            logits = runner.step(tid)
+            result = runner.step(tid)
+        logits = result["logits"].flatten()
         prefill_ms = (time.perf_counter() - t0) * 1000
 
         # -- Decode --
@@ -223,7 +224,8 @@ def bench_trt(engine_plan: bytes, num_layers: int, max_cache_length: int,
             run_gen_ids.append(next_token)
             if eos_token_id is not None and next_token == eos_token_id:
                 break
-            logits = runner.step(next_token)
+            result = runner.step(next_token)
+            logits = result["logits"].flatten()
             tokens_generated += 1
         decode_ms = (time.perf_counter() - t0) * 1000
 
@@ -251,14 +253,14 @@ def bench_trt_mamba(engine_plan: bytes, num_layers: int,
                     input_ids: list[int], max_new_tokens: int,
                     warmup: int, iterations: int, eos_token_id: int | None,
                     verbose: bool) -> dict:
-    """Benchmark TRT inference for Mamba/SSM via PerfMambaTrtRunner.
+    """Benchmark TRT inference for Mamba/SSM via MambaTrtRunner.
 
     Returns dict with timing lists and generated token IDs.
     """
-    from trtf_build.debug_runner import PerfMambaTrtRunner
+    from trtf_build.debug_runner import MambaTrtRunner
 
     # Create runner once (deserialization outside timing)
-    runner = PerfMambaTrtRunner(
+    runner = MambaTrtRunner(
         engine_plan=engine_plan,
         num_layers=num_layers,
     )
@@ -278,7 +280,8 @@ def bench_trt_mamba(engine_plan: bytes, num_layers: int,
         # -- Prefill --
         t0 = time.perf_counter()
         for tid in input_ids:
-            logits = runner.step(tid)
+            result = runner.step(tid)
+        logits = result["logits"].flatten()
         prefill_ms = (time.perf_counter() - t0) * 1000
 
         # -- Decode --
@@ -290,7 +293,8 @@ def bench_trt_mamba(engine_plan: bytes, num_layers: int,
             run_gen_ids.append(next_token)
             if eos_token_id is not None and next_token == eos_token_id:
                 break
-            logits = runner.step(next_token)
+            result = runner.step(next_token)
+            logits = result["logits"].flatten()
             tokens_generated += 1
         decode_ms = (time.perf_counter() - t0) * 1000
 

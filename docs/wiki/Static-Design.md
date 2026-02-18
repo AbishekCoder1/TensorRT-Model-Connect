@@ -130,13 +130,21 @@ classDiagram
         +~IStepState()
     }
 
-    class KvCacheStepState {
+    class DeviceKvCache {
         -int32_t mCacheStateSize
         -int32_t mMaxCacheLength
         -int32_t mNumLayers
         -int32_t mCacheLength
-        -vector~vector~float~~ mCacheK
-        -vector~vector~float~~ mCacheV
+        -vector~CudaBuffer~ mCacheK
+        -vector~CudaBuffer~ mCacheV
+    }
+
+    class DeviceResources {
+        +CudaStream stream
+        +CudaBuffer token_id_buf
+        +CudaBuffer position_id_buf
+        +CudaBuffer mask_buf
+        +CudaBuffer logits_buf
     }
 
     class TrtLogger {
@@ -194,7 +202,7 @@ classDiagram
     TrtBackendFastPath ..> CudaBuffer : uses during generate()
     MambaBackend *-- MambaStepEngine : owns
     MambaBackend *-- TrtLogger : holds
-    IStepState <|-- KvCacheStepState
+    IStepState <|-- DeviceKvCache
     IStepState <|-- MambaStepState
     DecoderStepEngine ..> CudaStream : executes on
     MambaStepEngine ..> CudaStream : executes on
@@ -204,9 +212,10 @@ classDiagram
 
 | Class | Role | Implementation |
 |-------|------|---------------|
-| **TrtBackendFastPath** | `IGenerationBackend` for bundle-loaded engines. Owns the deserialized engine and runs the autoregressive loop. | `generate()` creates `KvCacheStepState`, runs prefill then decode loop (greedy argmax until EOS or max tokens). File: `src/runtime/trt/trt_backend_shared.cpp`. |
-| **IStepState** | Abstract interface for per-step state. | Opaque base (`virtual ~IStepState() = default`). Two implementations: `KvCacheStepState` (attention) and `MambaStepState` (SSM). File: `src/runtime/trt/step_state.h`. |
-| **KvCacheStepState** | KV-cache state for standard attention decoders. | Manages per-layer `cache_k`/`cache_v` vectors, tracks `cache_length`, builds attention masks, appends new state. File: `src/runtime/trt/kv_cache_step_state.cpp`. |
+| **TrtBackendFastPath** | `IGenerationBackend` for bundle-loaded engines. Owns the deserialized engine and runs the autoregressive loop. | `generate()` creates `DeviceKvCache` and `DeviceResources`, runs prefill then decode loop (greedy argmax until EOS or max tokens). File: `src/runtime/trt/trt_backend_shared.cpp`. |
+| **IStepState** | Abstract interface for per-step state. | Opaque base (`virtual ~IStepState() = default`). Two implementations: `DeviceKvCache` (attention) and `MambaStepState` (SSM). File: `src/runtime/trt/step_state.h`. |
+| **DeviceKvCache** | Device-resident KV-cache for standard attention decoders. Keeps KV cache on GPU; only transfers small inputs H2D per step. | Manages per-layer GPU `cache_k`/`cache_v` buffers, tracks `cache_length`, builds attention masks. D2D cache update is internal. File: `src/runtime/trt/device_kv_cache.cpp`. |
+| **DeviceResources** | Pre-allocated per-step I/O buffers for TRT execution. | Holds CUDA stream, token/position/mask/logits device buffers. Allocated once and reused across steps. File: `src/runtime/trt/device_kv_cache.h`. |
 | **MambaBackend** | `IGenerationBackend` for Mamba/SSM bundle-loaded engines. | `generate()` creates `MambaStepState`, runs single-step recurrent loop (no prefill phase). File: `src/runtime/trt/mamba_backend.cpp`. |
 | **MambaStepEngine** | Mamba TRT engine + execution context + tensor binding metadata. | Holds conv_state/ssm_state tensor names, SSM dimensions. File: `src/runtime/trt/mamba_decode_runtime.h`. |
 | **MambaStepState** | Recurrent state for Mamba/SSM models. | Manages per-layer conv_state and ssm_state vectors (constant size, no growth). File: `src/runtime/trt/mamba_step_state.cpp`. |

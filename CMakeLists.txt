@@ -62,7 +62,7 @@ add_library(trtf_core
   src/runtime/trt/trt_engine_lifecycle.cpp
   src/runtime/trt/trt_decode_runtime.cpp
   src/runtime/trt/trt_backend_shared.cpp
-  src/runtime/trt/kv_cache_step_state.cpp
+  src/runtime/trt/device_kv_cache.cpp
   src/runtime/trt/mamba_step_state.cpp
   src/runtime/trt/mamba_decode_runtime.cpp
   src/runtime/trt/mamba_backend.cpp
@@ -157,15 +157,6 @@ if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_I
   target_link_libraries(test_decode_runtime PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
 endif()
 add_test(NAME test_decode_runtime COMMAND test_decode_runtime)
-
-add_executable(test_kv_cache_step_state tests/cpp/test_kv_cache_step_state.cpp)
-target_link_libraries(test_kv_cache_step_state PRIVATE trtf_core)
-target_include_directories(test_kv_cache_step_state PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_kv_cache_step_state SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_kv_cache_step_state PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_kv_cache_step_state COMMAND test_kv_cache_step_state)
 
 add_executable(test_pipeline_api tests/cpp/test_pipeline_api.cpp)
 target_link_libraries(test_pipeline_api PRIVATE trtf_core)

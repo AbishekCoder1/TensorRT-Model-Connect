@@ -96,19 +96,20 @@ pipeline->generate("Hello", 30)
   +-- backend->generate(token_ids, config)
   |     TrtBackendFastPath::generate()
   |     |
-  |     +-- Create KvCacheStepState(engine)
-  |     |     - Allocate per-layer cache_k, cache_v on GPU
+  |     +-- Create DeviceKvCache(engine) + DeviceResources
+  |     |     - Allocate per-layer cache_k, cache_v on GPU (device-resident)
+  |     |     - Pre-allocate per-step I/O buffers (DeviceResources)
   |     |
   |     +-- Prefill phase
   |     |     For each input token (except last):
   |     |       - Build causal attention mask
-  |     |       - run_decoder_step(token, position, mask, caches)
-  |     |       - Append K/V outputs to cache
+  |     |       - run_decoder_step_device(token, position, mask, cache)
+  |     |       - D2D cache update internal to DeviceKvCache
   |     |       - Advance position counter
   |     |
   |     +-- Decode phase
   |           For step = 0 to max_new_tokens:
-  |             - run_decoder_step(current_token, position, mask, caches)
+  |             - run_decoder_step_device(current_token, position, mask, cache)
   |             - select_argmax_token(logits) -> next_token
   |             - If next_token == eos_token: break
   |             - Append to output, update cache
@@ -148,18 +149,26 @@ struct DecoderStepEngine {
 };
 ```
 
-### KvCacheStepState
+### DeviceKvCache
 
-Manages per-step state during autoregressive generation:
+Device-resident KV cache for autoregressive generation. Keeps KV cache on GPU; only small inputs (token ID, position, mask) are transferred H2D per step. D2D cache update is internal.
 
 ```cpp
-class KvCacheStepState {
+class DeviceKvCache {
     int32_t mCacheStateSize;
     int32_t mMaxCacheLength;
     int32_t mNumLayers;
-    int32_t mCacheLength;       // Current filled length
-    std::vector<std::vector<float>> mCacheK;  // Per-layer [max_cache, attn_size]
-    std::vector<std::vector<float>> mCacheV;  // Per-layer [max_cache, attn_size]
+    int32_t mCacheLength;                 // Current filled length
+    std::vector<CudaBuffer> mCacheK;      // Per-layer [max_cache, attn_size] on GPU
+    std::vector<CudaBuffer> mCacheV;      // Per-layer [max_cache, attn_size] on GPU
+};
+
+struct DeviceResources {
+    CudaStream stream;
+    CudaBuffer token_id_buf;     // Pre-allocated per-step I/O
+    CudaBuffer position_id_buf;
+    CudaBuffer mask_buf;
+    CudaBuffer logits_buf;
 };
 ```
 

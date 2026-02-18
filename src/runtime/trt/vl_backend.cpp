@@ -1,5 +1,5 @@
 #include "runtime/trt/vl_backend.h"
-#include "runtime/trt/kv_cache_step_state.h"
+#include "runtime/trt/device_kv_cache.h"
 #include "runtime/trt/trt_decode_runtime.h"
 #include "runtime/trt/image_preprocessor.h"
 #include "runtime/trt/vision_engine.h"
@@ -55,26 +55,26 @@ std::vector<int32_t> VLBackendFastPath::generate(
     std::vector<int32_t> output = input_ids;
     if (config.max_new_tokens == 0) return output;
 
-    auto state = std::make_unique<KvCacheStepState>(*mDecoderEngine);
+    DeviceKvCache cache(*mDecoderEngine);
+    DeviceResources resources(*mDecoderEngine);
+    if (!cache.ok() || !resources.ok())
+    {
+        throw std::runtime_error("Failed to allocate VL device resources");
+    }
+
     std::vector<float> logits;
-    std::vector<std::vector<float>> present_k, present_v;
 
     // Prefill
     if (input_ids.size() > 1)
     {
         for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
         {
-            int32_t position_id{};
-            std::vector<float> mask;
-            state->prepare_step(position_id, mask);
             std::string error;
-            if (!run_decoder_step(*mDecoderEngine, input_ids[i], position_id,
-                    state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
-                    logits, present_k, present_v, error))
+            if (!run_decoder_step_device(*mDecoderEngine, cache, resources,
+                    input_ids[i], logits, error))
             {
                 throw std::runtime_error("VL prefill step failed: " + error);
             }
-            state->update_after_step(present_k, present_v);
         }
     }
 
@@ -82,17 +82,12 @@ std::vector<int32_t> VLBackendFastPath::generate(
     int32_t current_token = input_ids.empty() ? mDecoderEngine->id_bos : input_ids.back();
     for (std::size_t step = 0; step < config.max_new_tokens; ++step)
     {
-        int32_t position_id{};
-        std::vector<float> mask;
-        state->prepare_step(position_id, mask);
         std::string error;
-        if (!run_decoder_step(*mDecoderEngine, current_token, position_id,
-                state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
-                logits, present_k, present_v, error))
+        if (!run_decoder_step_device(*mDecoderEngine, cache, resources,
+                current_token, logits, error))
         {
             throw std::runtime_error("VL decode step failed: " + error);
         }
-        state->update_after_step(present_k, present_v);
         const int32_t next_token = select_argmax_token(logits);
         output.push_back(next_token);
         current_token = next_token;
@@ -123,10 +118,14 @@ std::vector<int32_t> VLBackendFastPath::generate_vl(
     std::vector<int32_t> output = input_ids;
     if (config.max_new_tokens == 0) return output;
 
-    auto state = std::make_unique<KvCacheStepState>(*mDecoderEngine);
-    std::vector<float> logits;
-    std::vector<std::vector<float>> present_k, present_v;
+    DeviceKvCache cache(*mDecoderEngine);
+    DeviceResources resources(*mDecoderEngine);
+    if (!cache.ok() || !resources.ok())
+    {
+        throw std::runtime_error("Failed to allocate VL device resources");
+    }
 
+    std::vector<float> logits;
     int32_t feat_idx = 0;
 
     // Prefill: process all input tokens
@@ -134,10 +133,6 @@ std::vector<int32_t> VLBackendFastPath::generate_vl(
     {
         for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
         {
-            int32_t position_id{};
-            std::vector<float> mask;
-            state->prepare_step(position_id, mask);
-
             const int32_t token = input_ids[i];
             const float* embed_ptr = nullptr;
             float use_embed = 0.0F;
@@ -150,14 +145,12 @@ std::vector<int32_t> VLBackendFastPath::generate_vl(
             }
 
             std::string error;
-            if (!run_decoder_step(*mDecoderEngine, token, position_id,
-                    state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
-                    logits, present_k, present_v, error,
+            if (!run_decoder_step_device(*mDecoderEngine, cache, resources,
+                    token, logits, error,
                     embed_ptr, feature_dim, use_embed))
             {
                 throw std::runtime_error("VL prefill step failed: " + error);
             }
-            state->update_after_step(present_k, present_v);
         }
     }
 
@@ -173,18 +166,13 @@ std::vector<int32_t> VLBackendFastPath::generate_vl(
             ++feat_idx;
         }
 
-        int32_t position_id{};
-        std::vector<float> mask;
-        state->prepare_step(position_id, mask);
         std::string error;
-        if (!run_decoder_step(*mDecoderEngine, current_token, position_id,
-                state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
-                logits, present_k, present_v, error,
+        if (!run_decoder_step_device(*mDecoderEngine, cache, resources,
+                current_token, logits, error,
                 embed_ptr, feature_dim, use_embed))
         {
             throw std::runtime_error("VL last-prefill step failed: " + error);
         }
-        state->update_after_step(present_k, present_v);
     }
 
     // Decode: autoregressive generation (text-only, no more image features)
@@ -194,17 +182,12 @@ std::vector<int32_t> VLBackendFastPath::generate_vl(
         output.push_back(next_token);
         if (next_token == mDecoderEngine->id_eos) break;
 
-        int32_t position_id{};
-        std::vector<float> mask;
-        state->prepare_step(position_id, mask);
         std::string error;
-        if (!run_decoder_step(*mDecoderEngine, next_token, position_id,
-                state->cache_k_by_layer(), state->cache_v_by_layer(), mask,
-                logits, present_k, present_v, error))
+        if (!run_decoder_step_device(*mDecoderEngine, cache, resources,
+                next_token, logits, error))
         {
             throw std::runtime_error("VL decode step failed: " + error);
         }
-        state->update_after_step(present_k, present_v);
     }
     return output;
 }

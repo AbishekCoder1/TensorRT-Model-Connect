@@ -102,7 +102,7 @@ Fast, deterministic tests for logic correctness. Always run first.
 # Tools self-tests (diff framework, perf_compare stats/formatting/serial ordering)
 .venv/bin/python -m pytest tests/tools/ -v
 
-# C++ unit tests (bundle format, KV cache state, decode runtime, image preprocessor)
+# C++ unit tests (bundle format, decode runtime, image preprocessor)
 ctest --test-dir build --output-on-failure
 ```
 
@@ -186,8 +186,8 @@ The system is split into two stages:
 1. **Python build** (`trtf_build/`) — takes an HF model directory (with `config.json` + safetensors), builds a TRT engine via TensorRT's Python API, and packages it into a `.trtfb` bundle. Model family plugins in `trtf_build/trtf_build/families/` handle family-specific weight mapping and graph construction.
 
 2. **C++ runtime** — loads a `.trtfb` bundle, deserializes the TRT engine plan, and runs autoregressive inference. The runtime is bundle-only: it does not load HF model directories directly. The `runtime_strategy` field in the bundle's config.json selects the backend:
-   - `decoder_kv_cache` (default): standard attention with KV cache (`TrtBackendFastPath`)
-   - `decoder_moe`: MoE decoder (same KV cache, routing handled in TRT graph)
+   - `decoder_kv_cache` (default): standard attention with device-resident KV cache (`TrtBackendFastPath` + `DeviceKvCache`)
+   - `decoder_moe`: MoE decoder (same device-resident KV cache, routing handled in TRT graph)
    - `ssm_recurrent`: Mamba/SSM with conv + SSM recurrent state (`MambaBackend`)
    - `vision_language`: VL pipeline with vision encoder + text decoder + image preprocessing
 
@@ -216,7 +216,7 @@ trtf_build/                          # Python package (engine builder)
       base.py                        # FamilyPlugin protocol
       qwen.py llama.py mistral.py gemma.py phi.py phi_moe.py
       granite.py internlm.py starcoder2.py gpt2.py opt.py
-      falcon.py stablelm.py mamba.py qwen_vl.py olmo.py
+      falcon.py stablelm.py mamba.py qwen_vl.py olmo.py nemotron.py
       xglm.py gpt_neox.py gpt_neo.py codegen.py bloom.py mixtral.py
   pyproject.toml
 src/                                 # C++ bundle-only runtime
@@ -226,11 +226,11 @@ src/                                 # C++ bundle-only runtime
     trtf_c.cpp                       # C ABI: trtf_create_pipeline_ex()
     fast_path_config.h/cpp           # Parse config.json for bundle metadata
   runtime/trt/
-    trt_common.h/cpp                 # TRT logger, CUDA helpers
+    trt_common.h/cpp                 # TRT logger, CUDA helpers (CudaBuffer/CudaStream with move semantics)
     trt_engine_lifecycle.h/cpp       # DecoderStepEngine, tensor validation
-    trt_decode_runtime.h/cpp         # run_decoder_step, sampling
-    trt_backend_shared.h/cpp         # TrtBackendFastPath autoregressive loop
-    kv_cache_step_state.h/cpp        # KV cache state management
+    trt_decode_runtime.h/cpp         # select_argmax_token, build_attention_mask
+    device_kv_cache.h/cpp            # DeviceKvCache, DeviceResources, run_decoder_step_device
+    trt_backend_shared.h/cpp         # TrtBackendFastPath autoregressive loop (device-resident cache)
     step_state.h                     # IStepState interface
     mamba_backend.h/cpp              # MambaBackend: SSM autoregressive loop
     mamba_decode_runtime.h/cpp       # MambaStepEngine, run_mamba_step
@@ -324,7 +324,7 @@ python3 tools/diff_logits.py \
   --model microsoft/Phi-3-mini-4k-instruct --atol 1e-3 --battery --trust-remote-code
 ```
 
-The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python TRT inference with KV cache management, matching the C++ runtime behavior exactly. For Mamba/SSM models, `MambaTrtRunner` handles recurrent state instead of KV cache. For VL models, `VLTrtRunner` combines vision + text decoders with image preprocessing. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.
+The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python TRT inference with device-resident KV cache, matching the C++ `DeviceKvCache` behavior exactly. For Mamba/SSM models, `MambaTrtRunner` handles device-resident recurrent state. For VL models, `VLTrtRunner` combines vision + text decoders with image preprocessing. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.
 
 **VL diff testing** (`diff_vl.py`):
 ```bash
@@ -344,7 +344,7 @@ python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
   --binary ./build/trtf --hf-python .venv/bin/python
 ```
 
-**Runner parity guarantee**: If you change the C++ mask/cache/position logic (`trt_decode_runtime.cpp`, `kv_cache_step_state.cpp`), you MUST also update `debug_runner.py` and verify with:
+**Runner parity guarantee**: If you change the C++ mask/cache/position logic (`trt_decode_runtime.cpp`, `device_kv_cache.cpp`), you MUST also update `debug_runner.py` and verify with:
 ```bash
 python3 tools/test_runner_parity.py \
   --bundle /tmp/qwen3.trtfb --binary ./build/trtf \
