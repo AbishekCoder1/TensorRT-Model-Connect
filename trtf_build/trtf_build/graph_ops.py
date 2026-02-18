@@ -307,12 +307,18 @@ def add_activation(
     inp: trt.ITensor,
     activation_type: str,
 ) -> trt.ITensor:
-    """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu'."""
+    """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
     if activation_type in ("gelu_new", "gelu"):
         return add_gelu_new(network, inp)
     elif activation_type == "relu":
         act = network.add_activation(inp, trt.ActivationType.RELU)
         return act.get_output(0)
+    elif activation_type in ("relu2", "squared_relu"):
+        relu = network.add_activation(inp, trt.ActivationType.RELU)
+        sq = network.add_elementwise(
+            relu.get_output(0), relu.get_output(0),
+            trt.ElementWiseOperation.PROD)
+        return sq.get_output(0)
     elif activation_type == "silu":
         sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID)
         swish = network.add_elementwise(

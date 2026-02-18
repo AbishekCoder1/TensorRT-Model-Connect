@@ -152,7 +152,7 @@ def _build_bundle(hf_id, bundle_path, max_cache_length):
         "--max-cache-length", str(max_cache_length),
     ]
     t0 = time.monotonic()
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
     elapsed = time.monotonic() - t0
 
     if result.returncode != 0:

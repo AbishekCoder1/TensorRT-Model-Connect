@@ -248,6 +248,84 @@
       "logit_atol": 1e-3,
       "layer_atol": 0.05,
       "trust_remote_code": false
+    },
+    {
+      "name": "nemotron-mini-4b",
+      "hf_id": "nvidia/Nemotron-Mini-4B-Instruct",
+      "bundle": "nemotron-mini-4b.trtfb",
+      "family": "nemotron",
+      "runtime_strategy": "decoder_kv_cache",
+      "max_cache_length": 256,
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20,
+      "logit_atol": 1e-3,
+      "layer_atol": 0.05,
+      "trust_remote_code": false
+    },
+    {
+      "name": "nemotron-hindi-4b",
+      "hf_id": "nvidia/Nemotron-4-Mini-Hindi-4B-Base",
+      "bundle": "nemotron-hindi-4b.trtfb",
+      "family": "nemotron",
+      "runtime_strategy": "decoder_kv_cache",
+      "max_cache_length": 256,
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20,
+      "logit_atol": 1e-3,
+      "layer_atol": 0.05,
+      "trust_remote_code": false
+    },
+    {
+      "name": "nemotron-nano-4b",
+      "hf_id": "nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1",
+      "bundle": "nemotron-nano-4b.trtfb",
+      "family": "llama",
+      "runtime_strategy": "decoder_kv_cache",
+      "max_cache_length": 256,
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 20,
+      "logit_atol": 1e-3,
+      "layer_atol": 0.05,
+      "trust_remote_code": false
+    },
+    {
+      "name": "minitron-4b-depth",
+      "hf_id": "nvidia/Llama-3.1-Minitron-4B-Depth-Base",
+      "bundle": "minitron-4b-depth.trtfb",
+      "family": "llama",
+      "runtime_strategy": "decoder_kv_cache",
+      "max_cache_length": 256,
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 20,
+      "logit_atol": 1e-3,
+      "layer_atol": 0.05,
+      "trust_remote_code": false
+    },
+    {
+      "name": "minitron-4b-width",
+      "hf_id": "nvidia/Llama-3.1-Minitron-4B-Width-Base",
+      "bundle": "minitron-4b-width.trtfb",
+      "family": "llama",
+      "runtime_strategy": "decoder_kv_cache",
+      "max_cache_length": 256,
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 20,
+      "logit_atol": 1e-3,
+      "layer_atol": 0.05,
+      "trust_remote_code": false
+    },
+    {
+      "name": "riva-translate-4b",
+      "hf_id": "nvidia/Riva-Translate-4B-Instruct-v1.1",
+      "bundle": "riva-translate-4b.trtfb",
+      "family": "mistral",
+      "runtime_strategy": "decoder_kv_cache",
+      "max_cache_length": 256,
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20,
+      "logit_atol": 1e-3,
+      "layer_atol": 0.05,
+      "trust_remote_code": false
     }
   ]
 }

@@ -99,7 +99,7 @@ def _run_diff_logits_subprocess(hf_id, atol, max_cache_length, max_new_tokens,
 
     t0 = time.monotonic()
     result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=600)
+        cmd, capture_output=True, text=True, timeout=1800)
     elapsed = time.monotonic() - t0
 
     # Parse max_abs_logit_diff from output
@@ -144,7 +144,7 @@ def _run_diff_vl_subprocess(bundle_path, image_path, hf_id, binary, hf_python,
 
     t0 = time.monotonic()
     result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=600, env=env)
+        cmd, capture_output=True, text=True, timeout=1800, env=env)
     elapsed = time.monotonic() - t0
 
     return {
@@ -181,7 +181,7 @@ def _run_perf_compare_subprocess(hf_id, bundle_path, prompt, max_new_tokens,
 
     t0 = time.monotonic()
     result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=600)
+        cmd, capture_output=True, text=True, timeout=1800)
     elapsed = time.monotonic() - t0
 
     perf_data = None

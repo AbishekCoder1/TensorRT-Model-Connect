@@ -31,7 +31,7 @@ The system has two phases:
 
 1. **Build phase (Python)** -- `trtf-build build <hf-model-dir> -o model.trtfb`
    - Reads HF `config.json` + `model.safetensors` + `tokenizer.json`
-   - Matches `model_type` to a family plugin (22 families: Qwen, LLaMA, Mistral, Gemma, Phi, Phi-MoE, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, Mamba, Qwen-VL, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Mixtral)
+   - Matches `model_type` to a family plugin (23 families: Qwen, LLaMA, Mistral, Gemma, Phi, Phi-MoE, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, Mamba, Qwen-VL, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Mixtral, Nemotron)
    - Maps HF tensor keys to canonical format, builds TRT network, compiles engine
    - Packages engine plan + tokenizer files into a `.trtfb` bundle
 
@@ -72,7 +72,7 @@ int main() {
 
 ## Built-in Model Support
 
-22 family plugins covering dense decoders, extended decoders, MoE, SSM, and vision-language.
+23 family plugins covering dense decoders, extended decoders, MoE, SSM, and vision-language.
 
 | Family | Model Types | Python Plugin |
 |--------|-------------|---------------|
@@ -98,5 +98,6 @@ int main() {
 | CodeGen | codegen | `families/codegen.py` |
 | BLOOM | bloom | `families/bloom.py` |
 | Mixtral | mixtral | `families/mixtral.py` |
+| Nemotron | nemotron | `families/nemotron.py` |
 
 All plugin paths relative to `trtf_build/trtf_build/`.

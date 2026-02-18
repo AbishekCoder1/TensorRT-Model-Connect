@@ -66,11 +66,12 @@ class ModelConfig:
                         or hidden_size * 4)
 
         # Norm epsilon: try rms_norm_eps, then layer_norm_epsilon, then
-        # layer_norm_eps, then norm_epsilon.
+        # layer_norm_eps, then norm_epsilon, then norm_eps (Nemotron).
         eps = (d.get("rms_norm_eps")
                or d.get("layer_norm_epsilon")
                or d.get("layer_norm_eps")
                or d.get("norm_epsilon")
+               or d.get("norm_eps")
                or 1e-5)
 
         return ModelConfig(

@@ -383,7 +383,8 @@ class TestAddGeluNew:
 # 12. add_activation
 @requires_trt
 class TestAddActivation:
-    @pytest.mark.parametrize("act_name", ["silu", "relu", "gelu_new", "gelu"])
+    @pytest.mark.parametrize("act_name", [
+        "silu", "relu", "gelu_new", "gelu", "relu2", "squared_relu"])
     def test_vs_torch(self, trt_runner, act_name):
         import torch
         import torch.nn as nn
@@ -400,6 +401,9 @@ class TestAddActivation:
             ref = nn.SiLU()(x_t).numpy()
         elif act_name == "relu":
             ref = nn.ReLU()(x_t).numpy()
+        elif act_name in ("relu2", "squared_relu"):
+            relu_out = nn.ReLU()(x_t)
+            ref = (relu_out * relu_out).numpy()
         else:  # gelu_new, gelu
             ref = (0.5 * x_t * (1.0 + torch.tanh(
                 math.sqrt(2.0 / math.pi) * (x_t + 0.044715 * x_t ** 3)))).numpy()

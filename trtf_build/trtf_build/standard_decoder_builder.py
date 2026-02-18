@@ -6,7 +6,7 @@ norm, MLP, and position embedding strategies via parameters:
   norm_type:     "rmsnorm" | "layernorm"
   mlp_type:      "swiglu"  | "gelu_fc"
   position_type: "rope"    | "learned" | "alibi"
-  activation:    "silu" | "gelu_new" | "gelu" | "relu" (used by gelu_fc MLP)
+  activation:    "silu" | "gelu_new" | "gelu" | "relu" | "relu2" (used by gelu_fc MLP)
 
 Tensor names MUST match what the C++ runtime expects:
   Inputs:  token_id, position_id, attention_mask, cache_k_0..N, cache_v_0..N
@@ -70,7 +70,7 @@ def build_standard_decoder_engine(
                   "gelu_fc" (2 projections: fc1/fc2 with activation).
         position_type: "rope" (rotary), "learned" (absolute position embeddings),
             or "alibi" (attention with linear biases, no position embeddings).
-        activation: Activation function for gelu_fc MLP ("gelu_new", "gelu", "relu").
+        activation: Activation function for gelu_fc MLP ("gelu_new", "gelu", "relu", "relu2").
         partial_rotary_factor: Fraction of head dims that get RoPE (default 1.0).
         interleaved_rope: If True, use interleaved RoPE (CodeGen/GPT-J) where
             adjacent dims (d, d+1) share frequencies. Default False uses
