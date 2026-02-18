@@ -29,6 +29,23 @@ from pathlib import Path
 import numpy as np
 
 
+def _free_gpu():
+    """Force-free all GPU memory (TRT contexts, torch cache)."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    try:
+        from cuda import cudart  # type: ignore[import-untyped]
+        cudart.cudaDeviceSynchronize()
+    except ImportError:
+        pass
+
+
 def _detect_model_type(model_id: str) -> str:
     """Detect model_type from HF config (e.g. 'qwen2_5_vl', 'llava', etc.)."""
     from transformers import AutoConfig
@@ -289,14 +306,17 @@ def test_vision_features(
     # Basic sanity checks
     if np.all(trt_features == 0):
         print("[diff_vl] FAIL: TRT vision output is all zeros", file=sys.stderr)
+        del runner; _free_gpu()
         return False
 
     if np.any(np.isnan(trt_features)):
         print("[diff_vl] FAIL: TRT vision output contains NaN", file=sys.stderr)
+        del runner; _free_gpu()
         return False
 
     if np.any(np.isinf(trt_features)):
         print("[diff_vl] FAIL: TRT vision output contains Inf", file=sys.stderr)
+        del runner; _free_gpu()
         return False
 
     # Numerical comparison against HF reference
@@ -305,9 +325,9 @@ def test_vision_features(
 
         # Warn if HF processor's image_mean/std differ from bundle values
         try:
-            from transformers import AutoProcessor
-            hf_proc = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-            hf_im = getattr(hf_proc, "image_processor", hf_proc)
+            from transformers import AutoImageProcessor
+            hf_im = AutoImageProcessor.from_pretrained(
+                model_id, trust_remote_code=True)
             hf_mean = getattr(hf_im, "image_mean", None)
             hf_std = getattr(hf_im, "image_std", None)
             if hf_mean is not None and tuple(hf_mean) != tuple(image_mean):
@@ -323,7 +343,7 @@ def test_vision_features(
 
         # Free TRT vision engine before loading HF model (avoid GPU OOM)
         del runner
-        import gc; gc.collect()
+        _free_gpu()
         hf_features, _ = _get_hf_vision_features(
             model_id, image_path, fixed_image_size)
 
@@ -365,9 +385,16 @@ def test_vision_features(
         if cos_sim < 0.5:
             print(f"[diff_vl] FAIL: Cosine similarity {cos_sim:.4f} < 0.5 — "
                   f"features are uncorrelated", file=sys.stderr)
+            _free_gpu()
             return False
 
     print(f"[diff_vl] Vision encoder: PASS", file=sys.stderr)
+    # Ensure GPU is free for next test (runner may already be deleted by HF path)
+    try:
+        del runner
+    except (NameError, UnboundLocalError):
+        pass
+    _free_gpu()
     return True
 
 
@@ -379,11 +406,13 @@ def test_embed_input(bundle_path: str) -> bool:
     if not runner.has_embed_input:
         print("[diff_vl] Text decoder has no embed_input — skipping",
               file=sys.stderr)
+        del runner; _free_gpu()
         return True
 
     result1 = runner.step(1, use_input_embed=0.0)
     if "logits" not in result1:
         print("[diff_vl] FAIL: no logits from text decoder", file=sys.stderr)
+        del runner; _free_gpu()
         return False
 
     embed_shape = tuple(runner.engine.get_tensor_shape("input_embed"))
@@ -392,10 +421,12 @@ def test_embed_input(bundle_path: str) -> bool:
     result2 = runner.step(0, input_embed=dummy_embed, use_input_embed=1.0)
     if "logits" not in result2:
         print("[diff_vl] FAIL: no logits from embed_input step", file=sys.stderr)
+        del runner; _free_gpu()
         return False
 
     print(f"[diff_vl] Text decoder embed_input: PASS "
           f"(hidden={embed_hidden})", file=sys.stderr)
+    del runner; _free_gpu()
     return True
 
 
@@ -465,6 +496,7 @@ def test_vl_generation(
         print("[diff_vl] WARN: Empty generation output", file=sys.stderr)
 
     print("[diff_vl] VL generation: PASS", file=sys.stderr)
+    del runner; _free_gpu()
     return True
 
 
