@@ -14,8 +14,9 @@ File-by-file guide to the codebase. The system is split: Python (`trtf_build/`) 
 | `trtf_build/engine_builder.py` | Orchestrator: `build()` (HF ID or local) and `build_bundle()` (local only) |
 | `trtf_build/bundle_writer.py` | `.trtfb` bundle writing: package engine plan + tokenizer files |
 | `trtf_build/config.py` | `config.json` parsing: extract architecture params (family, dims, heads, etc.) |
-| `trtf_build/graph_ops.py` | Shared TRT graph ops (Python): RMSNorm, matmul, RoPE, SwiGLU, attention |
-| `trtf_build/standard_decoder_builder.py` | Standard decoder TRT engine builder |
+| `trtf_build/graph_ops.py` | Layer 1: Atomic TRT graph ops (tensor-in/tensor-out, no weight naming) |
+| `trtf_build/graph_blocks.py` | Layer 2: Composable building blocks (weight-aware attention, SwiGLU MLP, GELU MLP, norm dispatch). Callers compose residual patterns. |
+| `trtf_build/standard_decoder_builder.py` | Layer 3: Standard decoder TRT engine builder (uses `graph_blocks`) |
 | `trtf_build/checkpoint_mapper.py` | HF safetensors → weight dict (transpose, GQA expansion) |
 | `trtf_build/debug_runner.py` | `TrtRunner` (device-resident KV cache), `MambaTrtRunner` (device-resident SSM), `VisionTrtRunner`, `VLTrtRunner` for pure-Python TRT inference. VL image preprocessing with 4 strategies + configurable interpolation. |
 | `trtf_build/qwen_vl_vision_builder.py` | Qwen2.5-VL vision encoder TRT engine builder: 3D patch embedding, 2D RoPE with spatial merge, ViT blocks, spatial merge MLP. |
@@ -78,8 +79,9 @@ Each family is a single Python file implementing the `FamilyPlugin` protocol (se
 
 | File | Purpose |
 |------|---------|
-| `trtf_c.cpp` | `extern "C"` factory: `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`. Contains `PipelineImpl`. Dispatches to `TrtBackendFastPath` or `MambaBackend` based on `runtime_strategy`. |
+| `trtf_c.cpp` | Thin dispatch: `PipelineImpl`, per-strategy factory functions, `extern "C"` API. ~200 lines. |
 | `fast_path_config.h/cpp` | `FastPathModelConfig`: parses config.json for runtime parameters including `runtime_strategy`, SSM dimensions. |
+| `bundle_helpers.h/cpp` | Shared plumbing: `BundleSections`, `extract_tokenizer_from_bundle()`, `make_decoder_engine()`. Eliminates tokenizer/engine-init duplication across strategies. |
 
 ### TRT Infrastructure (`src/runtime/trt/`)
 

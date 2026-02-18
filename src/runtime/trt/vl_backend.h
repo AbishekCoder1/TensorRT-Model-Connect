@@ -57,6 +57,10 @@ public:
 
     const VLPreprocessConfig& vl_config() const { return mVLConfig; }
 
+    // DeepStack: store per-level features after vision encoding.
+    // Set by prepare_image() when the vision engine has deepstack outputs.
+    std::vector<std::vector<float>> deepstack_features;
+
 private:
     std::unique_ptr<DecoderStepEngine> mDecoderEngine;
     std::unique_ptr<VisionStepEngine> mVisionEngine;

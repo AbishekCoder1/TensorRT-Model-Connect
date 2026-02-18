@@ -47,21 +47,36 @@ def _get_hf_vision_features_qwen(
     image_path: str,
     fixed_image_size: int = 448,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Qwen-specific HF vision feature extraction."""
+    """Qwen-specific HF vision feature extraction (Qwen2.5-VL and Qwen3-VL)."""
     import torch
     from PIL import Image
 
-    print(f"[diff_vl] Loading HF Qwen VL model {model_id} ...", file=sys.stderr)
-    from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2VLImageProcessor
+    model_type = _detect_model_type(model_id)
+    is_qwen3 = "qwen3" in model_type.lower()
+
+    if is_qwen3:
+        print(f"[diff_vl] Loading HF Qwen3 VL model {model_id} ...", file=sys.stderr)
+        from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+        model_cls = Qwen3VLForConditionalGeneration
+    else:
+        print(f"[diff_vl] Loading HF Qwen2.5 VL model {model_id} ...", file=sys.stderr)
+        from transformers import Qwen2_5_VLForConditionalGeneration
+        model_cls = Qwen2_5_VLForConditionalGeneration
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    model = model_cls.from_pretrained(
         model_id, torch_dtype=torch.float32, device_map=device)
     model.eval()
 
     image = Image.open(image_path).convert("RGB")
 
-    image_processor = Qwen2VLImageProcessor.from_pretrained(model_id)
+    # Use AutoImageProcessor for Qwen3-VL, Qwen2VLImageProcessor for Qwen2.5-VL
+    if is_qwen3:
+        from transformers import AutoImageProcessor
+        image_processor = AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
+    else:
+        from transformers import Qwen2VLImageProcessor
+        image_processor = Qwen2VLImageProcessor.from_pretrained(model_id)
 
     # Resize image to fixed_image_size to match TRT engine
     image_fixed = image.resize((fixed_image_size, fixed_image_size), Image.BICUBIC)
@@ -80,6 +95,7 @@ def _get_hf_vision_features_qwen(
                                dtype=inner.visual.dtype),
             image_grid_thw=image_grid_thw.to(device=inner.visual.patch_embed.proj.weight.device),
             return_dict=True)
+        # Qwen3-VL returns pooler_output (main features) + deepstack_features
         pooler = vis_out.pooler_output
         if isinstance(pooler, (list, tuple)):
             hf_features = torch.cat(pooler, dim=0)
@@ -98,7 +114,7 @@ def _get_hf_vision_features_qwen(
     std = np.array(image_processor.image_std, dtype=np.float32)
     img_np = (img_np - mean) / std
     img_chw = img_np.transpose(2, 0, 1)
-    temporal = image_processor.temporal_patch_size if hasattr(image_processor, 'temporal_patch_size') else 2
+    temporal = getattr(image_processor, 'temporal_patch_size', 2)
     trt_pixel_values = np.tile(img_chw, (temporal, 1, 1)).astype(np.float32)
 
     del model

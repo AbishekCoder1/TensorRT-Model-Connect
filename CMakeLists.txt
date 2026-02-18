@@ -58,6 +58,7 @@ add_library(trtf_core
   src/bundle/bundle_format.cpp
   src/cabi/trtf_c.cpp
   src/cabi/fast_path_config.cpp
+  src/cabi/bundle_helpers.cpp
   src/runtime/trt/trt_common.cpp
   src/runtime/trt/trt_engine_lifecycle.cpp
   src/runtime/trt/trt_decode_runtime.cpp

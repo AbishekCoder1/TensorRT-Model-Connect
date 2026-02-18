@@ -55,6 +55,8 @@ struct DeviceResources {
     CudaBuffer d_logits;
     CudaBuffer d_input_embed;      // VL only (0 bytes otherwise)
     CudaBuffer d_use_input_embed;  // VL only (0 bytes otherwise)
+    std::vector<CudaBuffer> d_deepstack_embeds;  // DeepStack VL only
+    CudaBuffer d_deepstack_active;               // DeepStack VL only (0 bytes otherwise)
     std::vector<CudaBuffer> d_present_k;  // [num_layers] single-row each
     std::vector<CudaBuffer> d_present_v;
 
@@ -73,7 +75,9 @@ bool run_decoder_step_device(
     std::string& error,
     const float* input_embed_host = nullptr,
     int32_t embed_dim = 0,
-    float use_input_embed = 0.0F);
+    float use_input_embed = 0.0F,
+    const std::vector<const float*>& deepstack_embeds_host = {},
+    float deepstack_active = 0.0F);
 
 #endif // TRTF_HAS_TRT
 

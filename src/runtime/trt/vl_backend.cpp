@@ -144,10 +144,26 @@ std::vector<int32_t> VLBackendFastPath::generate_vl(
                 ++feat_idx;
             }
 
+            // DeepStack: pass per-level embeddings during image token prefill
+            std::vector<const float*> ds_ptrs;
+            float ds_active = 0.0F;
+            if (use_embed > 0.5F && !deepstack_features.empty())
+            {
+                for (const auto& ds : deepstack_features)
+                {
+                    ds_ptrs.push_back(
+                        (feat_idx - 1 < static_cast<int32_t>(ds.size() / feature_dim))
+                        ? ds.data() + static_cast<std::size_t>(feat_idx - 1) * feature_dim
+                        : nullptr);
+                }
+                ds_active = 1.0F;
+            }
+
             std::string error;
             if (!run_decoder_step_device(*mDecoderEngine, cache, resources,
                     token, logits, error,
-                    embed_ptr, feature_dim, use_embed))
+                    embed_ptr, feature_dim, use_embed,
+                    ds_ptrs, ds_active))
             {
                 throw std::runtime_error("VL prefill step failed: " + error);
             }
@@ -166,10 +182,25 @@ std::vector<int32_t> VLBackendFastPath::generate_vl(
             ++feat_idx;
         }
 
+        std::vector<const float*> ds_ptrs;
+        float ds_active = 0.0F;
+        if (use_embed > 0.5F && !deepstack_features.empty())
+        {
+            for (const auto& ds : deepstack_features)
+            {
+                ds_ptrs.push_back(
+                    (feat_idx - 1 < static_cast<int32_t>(ds.size() / feature_dim))
+                    ? ds.data() + static_cast<std::size_t>(feat_idx - 1) * feature_dim
+                    : nullptr);
+            }
+            ds_active = 1.0F;
+        }
+
         std::string error;
         if (!run_decoder_step_device(*mDecoderEngine, cache, resources,
                 current_token, logits, error,
-                embed_ptr, feature_dim, use_embed))
+                embed_ptr, feature_dim, use_embed,
+                ds_ptrs, ds_active))
         {
             throw std::runtime_error("VL last-prefill step failed: " + error);
         }
@@ -217,9 +248,12 @@ bool VLBackendFastPath::prepare_image(
     // Step 2: Run vision encoder (C++ TRT)
     std::cerr << "[trtf] Running vision encoder ..." << std::endl;
     const std::size_t pixel_bytes = preprocessed.pixel_values.size() * sizeof(float);
-    if (!run_vision_encoder(*mVisionEngine,
+
+    // Try deepstack-aware encoder first, falls back to standard
+    deepstack_features.clear();
+    if (!run_vision_encoder_with_deepstack(*mVisionEngine,
             preprocessed.pixel_values.data(), pixel_bytes,
-            image_features, error))
+            image_features, deepstack_features, error))
     {
         return false;
     }
@@ -228,7 +262,12 @@ bool VLBackendFastPath::prepare_image(
     feature_dim = mVisionEngine->feature_dim;
 
     std::cerr << "[trtf] Vision encoder done (features=" << num_features
-              << ", dim=" << feature_dim << ")" << std::endl;
+              << ", dim=" << feature_dim;
+    if (!deepstack_features.empty())
+    {
+        std::cerr << ", deepstack_levels=" << deepstack_features.size();
+    }
+    std::cerr << ")" << std::endl;
     return true;
 }
 

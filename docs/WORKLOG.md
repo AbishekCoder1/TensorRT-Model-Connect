@@ -1,5 +1,55 @@
 # Worklog
 
+## 2026-02-17 — Phase 2: Modular Builder Refactoring + C++ Dispatch Cleanup
+
+### Part A: Python builder three-layer stack (`graph_blocks.py`)
+
+**Problem**: `phi_moe.py` duplicated ~200 lines of attention code from `standard_decoder_builder.py` because the monolithic builder couldn't express MoE as a parameter. Every new architecture (DeepStack, hybrid SSM) would cause the same duplication.
+
+**Solution**: Extracted composable building blocks into `trtf_build/trtf_build/graph_blocks.py` (Layer 2):
+- `add_attention_block()` — pre-norm → QKV → RoPE/ALiBi → cache → MHA → output proj. Returns dict without residuals.
+- `add_swiglu_mlp()` — gate/up/down SwiGLU MLP
+- `add_gelu_fc_mlp()` — fc1 → activation → fc2
+- `apply_norm()` — RMSNorm/LayerNorm dispatch
+
+`standard_decoder_builder.py`'s `_add_decoder_layer()` shrunk from ~260 lines to ~60 lines. `phi_moe.py`'s `_add_moe_decoder_layer()` dropped ~150 lines of duplicated attention code, now calls `graph_blocks.add_attention_block()`.
+
+**Design rationale**: Blocks do NOT apply residuals. Callers compose the residual pattern (sequential, parallel, DeepStack injection). This keeps `graph_blocks` reusable across all architectures.
+
+### Part A2: C++ dispatch refactoring (`bundle_helpers.{h,cpp}`)
+
+**Problem**: `trtf_c.cpp` had a 470-line `try_create_from_bundle()` with tokenizer extraction duplicated 3x and DecoderStepEngine init duplicated 2x.
+
+**Solution**:
+- New `src/cabi/bundle_helpers.{h,cpp}`: `BundleSections` (section discovery), `extract_tokenizer_from_bundle()` (write to temp dir + create tokenizer), `make_decoder_engine()` (fill DecoderStepEngine from config).
+- Per-strategy factory functions in `trtf_c.cpp`: `create_mamba_pipeline()`, `create_vl_pipeline()`, `create_decoder_pipeline()`.
+- `try_create_from_bundle()` shrunk to ~50 lines of dispatch.
+
+### Part B: Test scalability + documentation
+- `test_families.py`: `assert len == 23` → `assert len >= 20`, added test that all plugins have match cases
+- `tests/e2e/models/`: Per-model JSON files (25 files), `conftest.py` auto-discovers them with engines.json fallback
+- `docs/wiki/Architecture-Overview.md`: Added "Builder Stack: Three-Layer Abstraction" and "C++ Runtime: Dispatch Architecture" sections
+- `docs/wiki/Source-Layout.md`: Added `graph_blocks.py` and `bundle_helpers.{h,cpp}` entries
+- `CLAUDE.md`: Updated source layout
+
+### Part C: Qwen3-VL + DeepStack implementation
+
+**Qwen3-VL vision encoder** (`qwen_vl_vision_builder.py`):
+- New `build_qwen3_vl_vision_engine()` — differs from Qwen2.5-VL: learned position embedding (no 3D RoPE), LayerNorm with bias (not RMSNorm), GELU FC MLP (not SwiGLU), full attention (no windowed), multi-level DeepStack outputs at ViT layers [5,11,17]
+- Engine outputs: `image_features` + `deepstack_features_0/1/2`
+
+**Qwen3-VL text decoder** (`qwen_vl.py`):
+- Detection: `deepstack_visual_indexes` in vision_config → Qwen3-VL path
+- `_build_qwen3_vl_decoder()`: graph_blocks composition with DeepStack injection at layers 0,1,2
+- Engine inputs: `deepstack_embed_0/1/2` [1, hidden] + `deepstack_active` [1] flag
+- Custom weight loader for `model.language_model.*` prefix
+
+**Config parsing** (`config.py`): `text_config` nested dict auto-merged into top-level for VL model compatibility.
+
+**C++ runtime**: `DeviceResources` auto-detects deepstack engine bindings. `run_decoder_step_device()` accepts optional deepstack host pointers + active flag. VL backend passes deepstack during image token prefill, zeros during decode. `run_vision_encoder_with_deepstack()` extracts multi-level outputs.
+
+**Validated**: Qwen3-VL-2B text-only inference works E2E (build bundle → C++ runtime → correct output). Qwen2.5-VL backward compatible.
+
 ## 2026-02-17 — Device-Resident KV Cache (C++ + Python)
 
 - **C++ device-resident KV cache** (`src/runtime/trt/device_kv_cache.h/cpp`)

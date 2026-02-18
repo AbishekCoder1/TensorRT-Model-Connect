@@ -50,6 +50,14 @@ class ModelConfig:
     def from_json(text: str) -> ModelConfig:
         d = json.loads(text)
 
+        # VL models (e.g. Qwen3-VL) nest text model config under "text_config".
+        # Merge text_config into top level so standard key lookup works.
+        original_raw = d
+        text_config = d.get("text_config")
+        if text_config and isinstance(text_config, dict):
+            merged = {**d, **text_config}
+            d = merged
+
         # Handle non-standard config key names:
         #   GPT-2: n_embd, n_head, n_layer, n_inner
         #   XGLM/Bloom: d_model, attention_heads, num_layers, ffn_dim
@@ -93,7 +101,7 @@ class ModelConfig:
                                           d.get("n_positions", 8192)),
             hidden_act=d.get("hidden_act", "") or d.get("activation_function", ""),
             _head_dim=d.get("head_dim", 0),
-            raw=d,
+            raw=original_raw,
         )
 
     @staticmethod

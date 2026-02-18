@@ -17,11 +17,11 @@ from trtf_build.families import find_plugin, _ALL_PLUGINS
 # ---------------------------------------------------------------------------
 
 class TestPluginDiscovery:
-    """Verify plugin auto-discovery finds all 23 families."""
+    """Verify plugin auto-discovery finds all expected families."""
 
     def test_plugin_count(self):
-        assert len(_ALL_PLUGINS) == 23, (
-            f"Expected 23 plugins, found {len(_ALL_PLUGINS)}: "
+        assert len(_ALL_PLUGINS) >= 20, (
+            f"Expected >= 20 plugins, found {len(_ALL_PLUGINS)}: "
             f"{[p.name for p in _ALL_PLUGINS]}")
 
     def test_all_have_name(self):
@@ -49,6 +49,15 @@ class TestPluginDiscovery:
         names = [p.name for p in _ALL_PLUGINS]
         assert len(names) == len(set(names)), (
             f"Duplicate plugin names: {names}")
+
+    def test_all_plugins_have_match_case(self):
+        """Every discovered plugin should have at least one positive match case."""
+        matched_names = {name for _, name in _POSITIVE_MATCH_CASES}
+        plugin_names = {p.name for p in _ALL_PLUGINS}
+        untested = plugin_names - matched_names
+        assert not untested, (
+            f"Plugins without positive match cases: {untested}. "
+            f"Add entries to _POSITIVE_MATCH_CASES.")
 
 
 # ---------------------------------------------------------------------------

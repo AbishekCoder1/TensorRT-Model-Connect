@@ -189,7 +189,7 @@ The system is split into two stages:
    - `decoder_kv_cache` (default): standard attention with device-resident KV cache (`TrtBackendFastPath` + `DeviceKvCache`)
    - `decoder_moe`: MoE decoder (same device-resident KV cache, routing handled in TRT graph)
    - `ssm_recurrent`: Mamba/SSM with conv + SSM recurrent state (`MambaBackend`)
-   - `vision_language`: VL pipeline with vision encoder + text decoder + image preprocessing
+   - `vision_language`: VL pipeline with vision encoder + text decoder + image preprocessing. Qwen3-VL adds DeepStack: multi-level vision features injected at early text decoder layers.
 
 Tokenizer implementations (`ITokenizer`):
 - `VocabTokenizer` — vocab.txt-based lookup.
@@ -204,13 +204,14 @@ trtf_build/                          # Python package (engine builder)
     __main__.py
     cli.py                           # CLI: trtf-build build|inspect|version
     config.py                        # ModelConfig from config.json
-    graph_ops.py                     # TRT graph ops (RMSNorm, RoPE, etc.)
-    standard_decoder_builder.py      # Standard decoder engine builder
+    graph_ops.py                     # Layer 1: Atomic TRT graph ops (tensor-in/tensor-out)
+    graph_blocks.py                  # Layer 2: Composable blocks (attention, SwiGLU, GELU MLP, norm)
+    standard_decoder_builder.py      # Layer 3: Standard decoder engine builder (uses graph_blocks)
     checkpoint_mapper.py             # HF safetensors -> weight dict
     bundle_writer.py                 # Write .trtfb files
     engine_builder.py                # Orchestrator: load -> build -> bundle
     debug_runner.py                  # TrtRunner + MambaTrtRunner + VLTrtRunner for pure-Python inference
-    qwen_vl_vision_builder.py        # Qwen2.5-VL vision encoder TRT engine builder
+    qwen_vl_vision_builder.py        # Vision encoder builders: Qwen2.5-VL (3D RoPE) + Qwen3-VL (DeepStack)
     families/
       __init__.py                    # Auto-discover plugins
       base.py                        # FamilyPlugin protocol
@@ -225,6 +226,7 @@ src/                                 # C++ bundle-only runtime
   cabi/
     trtf_c.cpp                       # C ABI: trtf_create_pipeline_ex()
     fast_path_config.h/cpp           # Parse config.json for bundle metadata
+    bundle_helpers.h/cpp             # Shared plumbing: tokenizer extraction, engine init
   runtime/trt/
     trt_common.h/cpp                 # TRT logger, CUDA helpers (CudaBuffer/CudaStream with move semantics)
     trt_engine_lifecycle.h/cpp       # DecoderStepEngine, tensor validation
@@ -302,7 +304,8 @@ $EDITOR trtf_build/trtf_build/families/phi.py
 
 See `trtf_build/trtf_build/families/qwen.py` for the Qwen3 plugin (standard decoder).
 See `trtf_build/trtf_build/families/phi.py` for Phi-3 (fused QKV/gate_up weight splitting).
-See `trtf_build/trtf_build/families/phi_moe.py` for Phi-MoE (MoE with SparseMixer routing).
+See `trtf_build/trtf_build/families/phi_moe.py` for Phi-MoE (MoE with SparseMixer routing, uses `graph_blocks.add_attention_block`).
+See `trtf_build/trtf_build/families/qwen_vl.py` for Qwen VL (Qwen2.5-VL standard + Qwen3-VL DeepStack via `graph_blocks` composition).
 See `trtf_build/trtf_build/families/mamba.py` for Mamba (SSM, custom graph + C++ backend).
 See `trtf_build/trtf_build/families/base.py` for the plugin protocol.
 
@@ -401,7 +404,26 @@ export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
   --hf-python $PWD/.venv/bin/python
 ```
 
-### 5) MMLU sanity check (inside container)
+### 5) Build + run Qwen3-VL with DeepStack (inside container)
+```bash
+source .venv/bin/activate
+
+# Build a Qwen3-VL bundle (text decoder with DeepStack + vision encoder with multi-level outputs)
+trtf-build build Qwen/Qwen3-VL-2B-Instruct -o /tmp/qwen3vl.trtfb --max-cache-length 256
+
+# Text-only inference (DeepStack inactive during text-only)
+TRT_LIB_DIR=$(python3 -c "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])")
+export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+./build/trtf run /tmp/qwen3vl.trtfb --prompt "The capital of France is" \
+  --max-new-tokens 20 --hf-python $PWD/.venv/bin/python
+
+# VL inference with image (DeepStack active during image token prefill)
+./build/trtf run /tmp/qwen3vl.trtfb --prompt "Describe this image." \
+  --image /path/to/image.jpg --max-new-tokens 30 \
+  --hf-python $PWD/.venv/bin/python
+```
+
+### 6) MMLU sanity check (inside container)
 ```bash
 $PWD/.venv/bin/python scripts/eval_mmlu.py \
   --backend trtf --model /tmp/qwen3.trtfb \

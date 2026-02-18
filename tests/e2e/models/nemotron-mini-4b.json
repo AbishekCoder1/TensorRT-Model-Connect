@@ -1,0 +1,13 @@
+{
+  "name": "nemotron-mini-4b",
+  "hf_id": "nvidia/Nemotron-Mini-4B-Instruct",
+  "bundle": "nemotron-mini-4b.trtfb",
+  "family": "nemotron",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 20,
+  "logit_atol": 1e-3,
+  "layer_atol": 0.05,
+  "trust_remote_code": false
+}

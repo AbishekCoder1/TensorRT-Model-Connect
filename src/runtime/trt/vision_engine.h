@@ -36,6 +36,14 @@ bool run_vision_encoder(
     std::vector<float>& image_features,
     std::string& error);
 
+// Extended: also extract deepstack_features_0..N outputs (if present in engine).
+bool run_vision_encoder_with_deepstack(
+    const VisionStepEngine& engine,
+    const float* pixel_values, std::size_t pixel_bytes,
+    std::vector<float>& image_features,
+    std::vector<std::vector<float>>& deepstack_features,
+    std::string& error);
+
 #endif // TRTF_HAS_TRT
 
 } // namespace trtf

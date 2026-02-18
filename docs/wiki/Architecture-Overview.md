@@ -77,6 +77,69 @@ A family plugin provides:
 - **Checkpoint mapper**: Translates HF safetensors tensor keys to canonical format (transpose, GQA KV expansion, etc.)
 - **Graph builder**: Constructs the TRT network definition (reusing shared ops for RMSNorm, RoPE, GQA attention, SwiGLU, etc.)
 
+### Builder Stack: Three-Layer Abstraction
+
+The Python builder uses a three-layer abstraction for TRT engine construction:
+
+```
+graph_ops.py            Layer 1: Atomic TRT operations
+    |
+graph_blocks.py         Layer 2: Composable architectural blocks
+    |
+builders / plugins      Layer 3: Full engine assembly
+```
+
+**Layer 1 — `graph_ops.py` (atomic ops)**: 1:1 port of TRT graph operations. Each function adds a single logical op to the TRT network (one RMSNorm, one matmul, one RoPE application). Functions take raw `trt.ITensor` inputs and `np.ndarray` weights — they know nothing about weight naming conventions, layer prefixes, or model architecture. This file is a stable foundation that rarely changes.
+
+**Layer 2 — `graph_blocks.py` (composable blocks)**: Weight-aware, architecture-aware building blocks that compose multiple `graph_ops` into reusable sub-structures. Functions accept a `weights` dict + `prefix` string to resolve weight names. Blocks do NOT apply residual connections — callers compose the residual pattern, which is what varies across architectures.
+
+Available blocks:
+- `add_attention_block()` — pre-norm → QKV → optional biases/norms → optional RoPE/ALiBi → cache concat → multi-head attention → output projection
+- `add_swiglu_mlp()` — gate/up/down SwiGLU MLP
+- `add_gelu_fc_mlp()` — fc1 → activation → fc2 MLP
+- `apply_norm()` — dispatch to RMSNorm or LayerNorm
+
+**Layer 3 — Builders + family plugins (full engines)**: `standard_decoder_builder.py` is the default recipe (sequential residual, standard MLP). Family plugins that need non-standard topology (MoE, DeepStack, hybrid SSM) compose their own layer loop from Layer 2 blocks directly.
+
+| When you need to... | Change... |
+|---------------------|-----------|
+| Add a new TRT primitive | `graph_ops.py` |
+| Reuse attention/MLP with different wiring | `graph_blocks.py` |
+| Standard decoder with different weights/norms | Family plugin using `standard_decoder_builder` |
+| Non-standard topology (MoE, DeepStack, hybrid) | Family plugin composing `graph_blocks` directly |
+
+---
+
+### C++ Runtime: Dispatch Architecture
+
+The C++ runtime uses a thin dispatch pattern with shared helpers and per-strategy factory functions:
+
+```
+trtf_c.cpp              Thin dispatch on runtime_strategy
+    |
+bundle_helpers.{h,cpp}  Shared plumbing (tokenizer extraction, engine init)
+    |
+Per-backend factories    create_decoder_pipeline / create_mamba_pipeline / create_vl_pipeline
+    |
+Backend implementations  TrtBackendFastPath / MambaBackend / VLBackendFastPath
+```
+
+**`bundle_helpers.{h,cpp}`**: Shared plumbing — bundle section discovery (`find_bundle_sections`), tokenizer file extraction to temp dir (`extract_tokenizer_from_bundle`), and `DecoderStepEngine` initialization from config (`make_decoder_engine`). Backend-agnostic.
+
+**Per-strategy factory functions**: Live in `trtf_c.cpp`. Each factory takes the shared components (TRT engine, config, sections) and returns a fully assembled `PipelineImpl`. The strategy-specific setup (Mamba state tensors, VL vision engine, etc.) is encapsulated in each factory.
+
+**`trtf_c.cpp`**: Thin dispatch on `runtime_strategy` string (~200 lines). Adding a new strategy = one new factory function + one new `if` line in the dispatch.
+
+**How to add a new runtime strategy:**
+1. Create `new_backend.{h,cpp}` implementing `IGenerationBackend`
+2. Add a `create_new_pipeline()` factory in `trtf_c.cpp`
+3. Add one `if (strategy == "new_strategy")` line in `try_create_from_bundle()`
+4. Add config fields to `FastPathModelConfig` if needed
+
+Design rationale: factory functions instead of a full registry (simpler for 3-5 backends, no self-registration macro overhead, explicit > implicit).
+
+---
+
 ### What Python replaced in C++
 
 The following C++ code (~3500 lines) was removed and replaced by Python equivalents:

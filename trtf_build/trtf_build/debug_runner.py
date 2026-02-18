@@ -152,6 +152,27 @@ class TrtRunner:
                 err, self._d_use_input_embed = cudart.cudaMalloc(4)
                 _check_cuda(err)
 
+        # DeepStack inputs (auto-detected from engine bindings)
+        self._deepstack_names: list[str] = []
+        self._d_deepstack: dict[str, int] = {}
+        self._h_deepstack: dict[str, np.ndarray] = {}
+        self._d_deepstack_active = 0
+        self._h_deepstack_active: np.ndarray | None = None
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            if name.startswith("deepstack_embed_"):
+                self._deepstack_names.append(name)
+                shape = tuple(self.engine.get_tensor_shape(name))
+                nbytes = int(np.prod(shape)) * 4
+                self._h_deepstack[name] = np.zeros(shape, dtype=np.float32)
+                err, d_ptr = cudart.cudaMalloc(nbytes)
+                _check_cuda(err)
+                self._d_deepstack[name] = d_ptr
+            elif name == "deepstack_active":
+                self._h_deepstack_active = np.zeros((1,), dtype=np.float32)
+                err, self._d_deepstack_active = cudart.cudaMalloc(4)
+                _check_cuda(err)
+
         # Debug output device/host buffers
         self._d_debug: dict[str, int] = {}
         self._h_debug: dict[str, np.ndarray] = {}
@@ -183,6 +204,8 @@ class TrtRunner:
         token_id: int,
         input_embed: np.ndarray | None = None,
         use_input_embed: float = 0.0,
+        deepstack_embeds: list[np.ndarray] | None = None,
+        deepstack_active: float = 0.0,
     ) -> dict[str, np.ndarray]:
         """Run one decode step (manages position and cache internally).
 
@@ -190,6 +213,8 @@ class TrtRunner:
             token_id: Input token ID.
             input_embed: Optional pre-computed embedding [1, hidden] for VL prefill.
             use_input_embed: 0.0 = use token_id lookup, 1.0 = use input_embed.
+            deepstack_embeds: Optional per-level DeepStack embeddings for VL prefill.
+            deepstack_active: 0.0 = inactive, 1.0 = inject DeepStack.
 
         Returns:
             Dict with 'logits' and any debug outputs (e.g. 'debug_hidden_0').
@@ -237,6 +262,25 @@ class TrtRunner:
                 self._d_use_input_embed, self._h_use_input_embed.ctypes.data,
                 4, H2D, stream)
 
+        # DeepStack H2D transfers
+        if self._deepstack_names:
+            for idx, ds_name in enumerate(self._deepstack_names):
+                if (deepstack_embeds is not None and idx < len(deepstack_embeds)
+                        and deepstack_active > 0.5):
+                    self._h_deepstack[ds_name][:] = deepstack_embeds[idx].astype(np.float32)
+                else:
+                    self._h_deepstack[ds_name][:] = 0.0
+                cudart.cudaMemcpyAsync(
+                    self._d_deepstack[ds_name],
+                    self._h_deepstack[ds_name].ctypes.data,
+                    self._h_deepstack[ds_name].nbytes, H2D, stream)
+            if self._h_deepstack_active is not None:
+                self._h_deepstack_active[0] = deepstack_active
+                cudart.cudaMemcpyAsync(
+                    self._d_deepstack_active,
+                    self._h_deepstack_active.ctypes.data,
+                    4, H2D, stream)
+
         # Set tensor addresses
         self.context.set_tensor_address("token_id", self._d_token_id)
         self.context.set_tensor_address("position_id", self._d_position_id)
@@ -247,6 +291,13 @@ class TrtRunner:
             self.context.set_tensor_address("input_embed", self._d_input_embed)
             self.context.set_tensor_address(
                 "use_input_embed", self._d_use_input_embed)
+
+        # DeepStack tensor binding (zeroed by default, set during VL prefill)
+        for ds_name in self._deepstack_names:
+            self.context.set_tensor_address(ds_name, self._d_deepstack[ds_name])
+        if self._d_deepstack_active:
+            self.context.set_tensor_address(
+                "deepstack_active", self._d_deepstack_active)
 
         for i in range(self.num_layers):
             self.context.set_tensor_address(f"cache_k_{i}", self._d_cache_k[i])
@@ -359,6 +410,10 @@ class TrtRunner:
             bufs.append(self._d_input_embed)
         if self._d_use_input_embed:
             bufs.append(self._d_use_input_embed)
+        for d_ptr in self._d_deepstack.values():
+            bufs.append(d_ptr)
+        if self._d_deepstack_active:
+            bufs.append(self._d_deepstack_active)
         for d_ptr in self._d_debug.values():
             bufs.append(d_ptr)
         for d_ptr in bufs:

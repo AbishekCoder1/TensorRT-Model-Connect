@@ -1,0 +1,13 @@
+{
+  "name": "phi3-mini",
+  "hf_id": "microsoft/Phi-3-mini-4k-instruct",
+  "bundle": "phi3-mini.trtfb",
+  "family": "phi",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 20,
+  "logit_atol": 1e-3,
+  "layer_atol": 0.05,
+  "trust_remote_code": true
+}

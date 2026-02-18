@@ -146,6 +146,7 @@ DeviceResources::DeviceResources(const DecoderStepEngine& engine)
           ? static_cast<std::size_t>(std::max(engine.hidden_size, 1)) * sizeof(float)
           : 0)
     , d_use_input_embed(has_io_tensor(*engine.engine, "input_embed") ? sizeof(float) : 0)
+    , d_deepstack_active(has_io_tensor(*engine.engine, "deepstack_active") ? sizeof(float) : 0)
 {
     const std::size_t state_bytes = static_cast<std::size_t>(engine.cache_state_size) * sizeof(float);
     d_present_k.reserve(static_cast<std::size_t>(engine.num_layers));
@@ -154,6 +155,15 @@ DeviceResources::DeviceResources(const DecoderStepEngine& engine)
     {
         d_present_k.emplace_back(state_bytes);
         d_present_v.emplace_back(state_bytes);
+    }
+
+    // DeepStack embed buffers: auto-detect from engine bindings
+    const std::size_t embed_bytes = static_cast<std::size_t>(std::max(engine.hidden_size, 1)) * sizeof(float);
+    for (int32_t i = 0; ; ++i)
+    {
+        std::string name = "deepstack_embed_" + std::to_string(i);
+        if (!has_io_tensor(*engine.engine, name)) break;
+        d_deepstack_embeds.emplace_back(embed_bytes);
     }
 }
 
@@ -166,6 +176,11 @@ bool DeviceResources::ok() const
     }
     if (d_input_embed.size() > 0 && !d_input_embed.ok()) return false;
     if (d_use_input_embed.size() > 0 && !d_use_input_embed.ok()) return false;
+    if (d_deepstack_active.size() > 0 && !d_deepstack_active.ok()) return false;
+    for (const auto& buf : d_deepstack_embeds)
+    {
+        if (!buf.ok()) return false;
+    }
     for (const auto& buf : d_present_k)
     {
         if (!buf.ok()) return false;
@@ -190,7 +205,9 @@ bool run_decoder_step_device(
     std::string& error,
     const float* input_embed_host,
     int32_t embed_dim,
-    float use_input_embed)
+    float use_input_embed,
+    const std::vector<const float*>& deepstack_embeds_host,
+    float deepstack_active)
 {
     auto fail = [&error](std::string_view stage) {
         error = std::string(stage);
@@ -251,6 +268,36 @@ bool run_decoder_step_device(
         }
     }
 
+    // DeepStack H2D transfers
+    if (!resources.d_deepstack_embeds.empty() && has_io_tensor(*engine.engine, "deepstack_active"))
+    {
+        const std::size_t ds_embed_bytes = static_cast<std::size_t>(std::max(engine.hidden_size, 1)) * sizeof(float);
+        for (std::size_t di = 0; di < resources.d_deepstack_embeds.size(); ++di)
+        {
+            if (di < deepstack_embeds_host.size() && deepstack_embeds_host[di] != nullptr
+                && deepstack_active > 0.5F)
+            {
+                if (cudaMemcpyAsync(resources.d_deepstack_embeds[di].data(),
+                        deepstack_embeds_host[di], ds_embed_bytes,
+                        cudaMemcpyHostToDevice, stream) != cudaSuccess)
+                {
+                    return fail("H2D deepstack_embed failed");
+                }
+            }
+            else
+            {
+                cudaMemsetAsync(resources.d_deepstack_embeds[di].data(), 0,
+                    resources.d_deepstack_embeds[di].size(), stream);
+            }
+        }
+        float ds_active_val = deepstack_active;
+        if (cudaMemcpyAsync(resources.d_deepstack_active.data(), &ds_active_val, sizeof(float),
+                cudaMemcpyHostToDevice, stream) != cudaSuccess)
+        {
+            return fail("H2D deepstack_active failed");
+        }
+    }
+
     // 3. Bind tensor addresses
     if (!engine.context->setTensorAddress(engine.token_input_name.c_str(), resources.d_token_id.data()))
     {
@@ -279,6 +326,28 @@ bool run_decoder_step_device(
         if (!engine.context->setTensorAddress("use_input_embed", resources.d_use_input_embed.data()))
         {
             return fail("bind use_input_embed failed");
+        }
+    }
+
+    // Bind DeepStack tensors (if present in engine)
+    for (std::size_t di = 0; di < resources.d_deepstack_embeds.size(); ++di)
+    {
+        std::string ds_name = "deepstack_embed_" + std::to_string(di);
+        if (has_io_tensor(*engine.engine, ds_name))
+        {
+            if (!engine.context->setTensorAddress(ds_name.c_str(),
+                    resources.d_deepstack_embeds[di].data()))
+            {
+                return fail("bind deepstack_embed failed");
+            }
+        }
+    }
+    if (resources.d_deepstack_active.size() > 0 && has_io_tensor(*engine.engine, "deepstack_active"))
+    {
+        if (!engine.context->setTensorAddress("deepstack_active",
+                resources.d_deepstack_active.data()))
+        {
+            return fail("bind deepstack_active failed");
         }
     }
 

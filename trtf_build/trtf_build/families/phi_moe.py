@@ -37,6 +37,7 @@ from ..checkpoint_mapper import (
     _expand_kv_projection,
 )
 from .. import graph_ops
+from .. import graph_blocks
 from ..standard_decoder_builder import _apply_norm, _mark_debug_output
 
 
@@ -643,117 +644,20 @@ def _add_moe_decoder_layer(
     norm_type: str = "layernorm",
 ) -> dict[str, trt.ITensor]:
     """Add one decoder layer with MoE MLP. Attention is standard."""
-    attention_window = max_cache_length + 1
 
-    # Pre-attention norm
-    norm1 = _apply_norm(
-        network, hidden, hidden_size,
-        weights[f"{prefix}.input_norm"],
-        weights.get(f"{prefix}.input_norm_beta"),
-        eps_tensor, norm_type)
-
-    # QKV projections
-    q = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, attention_size,
-        weights[f"{prefix}.w_q"])
-    k = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, attention_size,
-        weights[f"{prefix}.w_k"])
-    v = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, attention_size,
-        weights[f"{prefix}.w_v"])
-
-    # QKV biases
-    q_bias = weights.get(f"{prefix}.q_bias")
-    if q_bias is not None:
-        q = graph_ops.add_bias_sum(network, q, attention_size, q_bias)
-    k_bias = weights.get(f"{prefix}.k_bias")
-    if k_bias is not None:
-        k = graph_ops.add_bias_sum(network, k, attention_size, k_bias)
-    v_bias = weights.get(f"{prefix}.v_bias")
-    if v_bias is not None:
-        v = graph_ops.add_bias_sum(network, v, attention_size, v_bias)
-
-    # Apply RoPE
-    q = graph_ops.add_apply_rope(
-        network, q, position_id, cos_tensor, sin_tensor,
-        rotate_half_tensor)
-    k = graph_ops.add_apply_rope(
-        network, k, position_id, cos_tensor, sin_tensor,
-        rotate_half_tensor)
-
-    # Save present K/V
-    present_k = k
-    present_v = v
-
-    # Reshape current K, V for concatenation
-    k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, attention_size)
-    v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, attention_size)
-
-    # Concatenate with cache
-    all_k = network.add_concatenation(
-        [cache_k, k_reshape.get_output(0)])
-    all_k.axis = 0
-    all_v = network.add_concatenation(
-        [cache_v, v_reshape.get_output(0)])
-    all_v.axis = 0
-
-    # Reshape for multi-head attention
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (num_heads, 1, head_dim)
-
-    k_heads = network.add_shuffle(all_k.get_output(0))
-    k_heads.reshape_dims = (attention_window, num_heads, head_dim)
-    v_heads = network.add_shuffle(all_v.get_output(0))
-    v_heads.reshape_dims = (attention_window, num_heads, head_dim)
-
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention scores: Q @ K^T
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-    # Scale
-    scaled = network.add_elementwise(
-        score.get_output(0), attn_scale_tensor,
-        trt.ElementWiseOperation.PROD)
-
-    # Mask
-    mask3d = network.add_shuffle(attention_mask)
-    mask3d.reshape_dims = (1, 1, attention_window)
-
-    masked = network.add_elementwise(
-        scaled.get_output(0), mask3d.get_output(0),
-        trt.ElementWiseOperation.SUM)
-
-    # Softmax
-    softmax = network.add_softmax(masked.get_output(0))
-    softmax.axes = 1 << 2
-
-    # Context: softmax @ V
-    context_heads = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    # Reshape back to [1, attention_size]
-    context_flat = network.add_shuffle(context_heads.get_output(0))
-    context_flat.reshape_dims = (1, attention_size)
-
-    # Output projection
-    attn_out = graph_ops.add_matmul_rhs_constant(
-        network, context_flat.get_output(0),
-        attention_size, hidden_size,
-        weights[f"{prefix}.w_o"])
-
-    # Output projection bias
-    o_bias = weights.get(f"{prefix}.o_bias")
-    if o_bias is not None:
-        attn_out = graph_ops.add_bias_sum(
-            network, attn_out, hidden_size, o_bias)
+    # Attention block (pre-norm -> QKV -> RoPE -> cache -> attn -> out proj)
+    attn = graph_blocks.add_attention_block(
+        network, hidden, cache_k, cache_v, attention_mask, position_id,
+        weights=weights, prefix=prefix,
+        hidden_size=hidden_size, attention_size=attention_size,
+        num_heads=num_heads, head_dim=head_dim,
+        max_cache_length=max_cache_length,
+        cos_tensor=cos_tensor, sin_tensor=sin_tensor,
+        rotate_half_tensor=rotate_half_tensor,
+        attn_scale_tensor=attn_scale_tensor, eps_tensor=eps_tensor,
+        norm_type=norm_type, position_type="rope",
+    )
+    attn_out = attn["attn_out"]
 
     # Residual connection
     residual1 = network.add_elementwise(
@@ -779,8 +683,8 @@ def _add_moe_decoder_layer(
     return {
         "hidden": residual2.get_output(0),
         "post_attn": residual1.get_output(0),
-        "present_k": present_k,
-        "present_v": present_v,
+        "present_k": attn["present_k"],
+        "present_v": attn["present_v"],
     }
 
 
