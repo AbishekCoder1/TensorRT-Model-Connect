@@ -193,6 +193,43 @@ class TestEdgeCases:
         }))
         assert cfg.hidden_act == "gelu_new"
 
+    def test_rope_theta_from_rope_parameters(self):
+        """Llama-3.1 variants store rope_theta inside rope_parameters."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "llama",
+            "hidden_size": 3072,
+            "num_attention_heads": 32,
+            "num_hidden_layers": 32,
+            "vocab_size": 128256,
+            "rope_parameters": {
+                "rope_type": "llama3",
+                "rope_theta": 500000.0,
+            },
+        }))
+        assert cfg.rope_theta == 500000.0
+
+    def test_rope_theta_top_level_takes_precedence(self):
+        """Top-level rope_theta takes precedence over rope_parameters."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "llama",
+            "hidden_size": 1024,
+            "num_attention_heads": 16,
+            "rope_theta": 1000000.0,
+            "rope_parameters": {
+                "rope_theta": 500000.0,
+            },
+        }))
+        assert cfg.rope_theta == 1000000.0
+
+    def test_rope_theta_default_no_rope_parameters(self):
+        """Default rope_theta when neither top-level nor rope_parameters present."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "llama",
+            "hidden_size": 1024,
+            "num_attention_heads": 16,
+        }))
+        assert cfg.rope_theta == 10000.0
+
     def test_raw_dict_preserved(self):
         raw = {
             "model_type": "test",

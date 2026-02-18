@@ -115,7 +115,8 @@ def _run_diff_logits_subprocess(hf_id, atol, max_cache_length, max_new_tokens,
         "passed": result.returncode == 0,
         "max_diff": max_diff,
         "returncode": result.returncode,
-        "output": result.stdout + result.stderr,
+        "output": result.stdout,
+        "stderr": result.stderr,
         "time_s": elapsed,
     }
 
@@ -150,7 +151,8 @@ def _run_diff_vl_subprocess(bundle_path, image_path, hf_id, binary, hf_python,
     return {
         "passed": result.returncode == 0,
         "returncode": result.returncode,
-        "output": result.stdout + result.stderr,
+        "output": result.stdout,
+        "stderr": result.stderr,
         "time_s": elapsed,
     }
 
@@ -196,7 +198,8 @@ def _run_perf_compare_subprocess(hf_id, bundle_path, prompt, max_new_tokens,
         "passed": result.returncode == 0,
         "perf_data": perf_data,
         "time_s": elapsed,
-        "output": result.stdout + result.stderr,
+        "output": result.stdout,
+        "stderr": result.stderr,
     }
 
 

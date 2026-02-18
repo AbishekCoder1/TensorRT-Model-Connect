@@ -82,6 +82,17 @@ class ModelConfig:
                or d.get("norm_eps")
                or 1e-5)
 
+        # rope_theta: check top-level first, then rope_parameters dict
+        # (Llama-3.1 variants like Minitron/Nemotron-Nano store it there).
+        rope_theta = d.get("rope_theta", None)
+        if rope_theta is None:
+            rope_params = d.get("rope_parameters")
+            if isinstance(rope_params, dict):
+                rope_theta = rope_params.get("rope_theta", 10000.0)
+            else:
+                rope_theta = 10000.0
+        rope_theta = float(rope_theta)
+
         return ModelConfig(
             model_type=d.get("model_type", ""),
             architectures=d.get("architectures", []),
@@ -92,7 +103,7 @@ class ModelConfig:
             num_attention_heads=num_heads,
             num_key_value_heads=d.get("num_key_value_heads", num_heads),
             rms_norm_eps=eps,
-            rope_theta=d.get("rope_theta", 10000.0),
+            rope_theta=rope_theta,
             bos_token_id=d.get("bos_token_id", -1) or -1,
             eos_token_id=d.get("eos_token_id", -1) or -1,
             pad_token_id=d.get("pad_token_id", -1) or -1,

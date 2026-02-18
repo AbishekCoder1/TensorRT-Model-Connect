@@ -9,5 +9,6 @@
   "max_new_tokens": 20,
   "logit_atol": 1e-3,
   "layer_atol": 0.05,
-  "trust_remote_code": true
+  "trust_remote_code": true,
+  "skip": "HF custom model code incompatible with transformers 5.x (DynamicCache.from_legacy_cache removed)"
 }

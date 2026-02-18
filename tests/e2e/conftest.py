@@ -139,6 +139,8 @@ def model_entry(request, engine_dir):
     if name == "__no_models__":
         pytest.skip("No models in engines.json")
     entry = _model_by_name(name)
+    if entry.get("skip"):
+        pytest.skip(entry["skip"])
     bundle_path = engine_dir / entry["bundle"]
     if not bundle_path.is_file():
         pytest.skip(f"Bundle not found: {bundle_path}")
@@ -187,6 +189,8 @@ def built_bundle(request, engine_dir):
         pytest.skip("No models in engines.json")
 
     entry = _model_by_name(name)
+    if entry.get("skip"):
+        pytest.skip(entry["skip"])
     bundle_path = engine_dir / entry["bundle"]
     rebuild = request.config.getoption("--rebuild-engines")
 
