@@ -44,7 +44,7 @@ Each family is a single Python file implementing the `FamilyPlugin` protocol (se
 | `falcon.py` | Falcon family: matches `falcon`. LayerNorm + GELU FC + RoPE + GQA. |
 | `stablelm.py` | StableLM family: matches `stablelm`. LayerNorm + SwiGLU + RoPE. |
 | `mamba.py` | Mamba family: matches `mamba`. SSM with selective scan, custom graph builder. Runtime strategy: `ssm_recurrent`. |
-| `qwen_vl.py` | Qwen-VL family: matches `qwen*vl`. Vision encoder (ViT + 3D RoPE + spatial merge) + text decoder with embed_input mode. |
+| `qwen_vl.py` | Qwen-VL family: matches `qwen*vl`. Qwen2.5-VL (3D RoPE ViT) + Qwen3-VL (learned pos + RoPE + DeepStack). Text decoder with embed_input mode; Qwen3-VL adds deepstack injection via `graph_blocks`. |
 | `nemotron.py` | Nemotron-4 family: matches `nemotron`. LayerNorm1P (+1 gamma) + squared ReLU MLP + GQA + partial RoPE. |
 
 ---

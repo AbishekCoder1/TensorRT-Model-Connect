@@ -90,7 +90,7 @@ Family plugins covering dense decoders, extended decoders, MoE, SSM, and vision-
 | Falcon | falcon | `families/falcon.py` |
 | StableLM | stablelm | `families/stablelm.py` |
 | Mamba | mamba | `families/mamba.py` |
-| Qwen-VL | qwen2_vl, qwen2_5_vl | `families/qwen_vl.py` (vision encoder + text decoder) |
+| Qwen-VL | qwen2_vl, qwen2_5_vl, qwen3_vl | `families/qwen_vl.py` (vision encoder + text decoder; Qwen3-VL adds DeepStack) |
 | OLMo | olmo | `families/olmo.py` |
 | XGLM | xglm | `families/xglm.py` |
 | GPT-NeoX | gpt_neox | `families/gpt_neox.py` |

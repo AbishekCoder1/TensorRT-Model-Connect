@@ -107,6 +107,7 @@ _POSITIVE_MATCH_CASES = [
     # Qwen-VL
     ("qwen2_vl", "qwen_vl"),
     ("qwen2_5_vl", "qwen_vl"),
+    ("qwen3_vl", "qwen_vl"),
     # OLMo
     ("olmo", "olmo"),
     # XGLM
