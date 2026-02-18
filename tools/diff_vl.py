@@ -267,10 +267,13 @@ def test_vision_features(
     runner = VisionTrtRunner(vision_plan)
 
     # Prepare TRT pixel values
+    vis_patch_size = preproc.get("patch_size", 14)
+    vis_merge_size = preproc.get("merge_size", 2)
     trt_pixel = preprocess_image_for_trt(
         image_path, preprocessor_type=preprocessor_type,
         fixed_image_size=fixed_image_size,
         temporal_patch_size=temporal, image_mean=image_mean, image_std=image_std,
+        patch_size=vis_patch_size, merge_size=vis_merge_size,
         interpolation=interpolation)
 
     print(f"[diff_vl] TRT vision input: {trt_pixel.shape}", file=sys.stderr)

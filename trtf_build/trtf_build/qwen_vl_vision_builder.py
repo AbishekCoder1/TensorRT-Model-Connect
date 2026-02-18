@@ -690,21 +690,30 @@ def build_qwen3_vl_vision_engine(
     dh = h_idxs - h_floor.astype(np.float32)
     dw = w_idxs - w_floor.astype(np.float32)
 
-    # Bilinear interpolation of position embeddings
-    pos_embed_interp = np.zeros((grid_h * grid_w, pos_embed_w.shape[1]), dtype=np.float32)
-    for hi in range(grid_h):
-        for wi in range(grid_w):
-            idx = hi * grid_w + wi
-            w00 = (1 - dh[hi]) * (1 - dw[wi])
-            w01 = (1 - dh[hi]) * dw[wi]
-            w10 = dh[hi] * (1 - dw[wi])
-            w11 = dh[hi] * dw[wi]
-            i00 = h_floor[hi] * num_grid_per_side + w_floor[wi]
-            i01 = h_floor[hi] * num_grid_per_side + w_ceil[wi]
-            i10 = h_ceil[hi] * num_grid_per_side + w_floor[wi]
-            i11 = h_ceil[hi] * num_grid_per_side + w_ceil[wi]
-            pos_embed_interp[idx] = (w00 * pos_embed_w[i00] + w01 * pos_embed_w[i01]
-                                     + w10 * pos_embed_w[i10] + w11 * pos_embed_w[i11])
+    # Bilinear interpolation of position embeddings in MERGE-GROUP order.
+    # Patches arrive in merge-group order from the conv (because qwen_merge_group
+    # preprocessor reorders pixels). The position embedding must match this order.
+    merged_h_pos = grid_h // merge_size
+    merged_w_pos = grid_w // merge_size
+    pos_embed_interp = np.zeros((num_patches, pos_embed_w.shape[1]), dtype=np.float32)
+    idx = 0
+    for bh in range(merged_h_pos):
+        for bw in range(merged_w_pos):
+            for ih in range(merge_size):
+                for iw in range(merge_size):
+                    hi = bh * merge_size + ih
+                    wi = bw * merge_size + iw
+                    w00 = (1 - dh[hi]) * (1 - dw[wi])
+                    w01 = (1 - dh[hi]) * dw[wi]
+                    w10 = dh[hi] * (1 - dw[wi])
+                    w11 = dh[hi] * dw[wi]
+                    i00 = h_floor[hi] * num_grid_per_side + w_floor[wi]
+                    i01 = h_floor[hi] * num_grid_per_side + w_ceil[wi]
+                    i10 = h_ceil[hi] * num_grid_per_side + w_floor[wi]
+                    i11 = h_ceil[hi] * num_grid_per_side + w_ceil[wi]
+                    pos_embed_interp[idx] = (w00 * pos_embed_w[i00] + w01 * pos_embed_w[i01]
+                                             + w10 * pos_embed_w[i10] + w11 * pos_embed_w[i11])
+                    idx += 1
 
     pos_const = graph_ops.add_constant(
         network, (num_patches, embed_dim), pos_embed_interp)
