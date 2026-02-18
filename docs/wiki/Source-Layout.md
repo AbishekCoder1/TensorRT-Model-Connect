@@ -160,11 +160,22 @@ The following C++ files were removed as part of the Python build migration (~350
 | `setup_container.sh` | One-shot container setup: venv, pip deps, cmake build, tests |
 | `docker_build.sh` | Build the self-contained dev container image |
 | `docker_run.sh` | Launch the dev container |
-| `diff_logits.py` | E2E logit comparison: trtf binary vs HF transformers |
-| `diff_layers.py` | Per-layer hidden state comparison between trtf and HF |
-| `diff_vl.py` | VL diff testing: vision features, embed_input, full VL generation, C++ binary parity. Supports `--preprocessor-type` override. |
 | `eval_mmlu.py` | MMLU benchmark evaluation |
 | `new_family.py` | Scaffold a new family plugin from HF repo |
 | `validate_family.sh` | One-command validation gate (build + diff + parity) |
-| `test_runner_parity.py` | Python-vs-C++ runner parity cross-validation |
+| `hf_tokenizer.py` | HuggingFace tokenizer bridge for C++ subprocess calls |
+| `hf_generate.py` | HuggingFace reference generation for parity testing |
 | `test_qwen3_trt_e2e.sh` | All-in-one Qwen3 TRT E2E diagnostic script |
+
+## Tools (`tools/`)
+
+Diff-test and performance comparison tools (TRT vs HF).
+
+| File | Purpose |
+|------|---------|
+| `diff_logits.py` | E2E logit comparison: TRT vs HF transformers (per-step logits, text match) |
+| `diff_layers.py` | Per-layer hidden state comparison between TRT and HF |
+| `diff_vl.py` | VL diff testing: vision features, embed_input, full VL generation, C++ binary parity. Supports `--preprocessor-type` override. |
+| `test_runner_parity.py` | Python-vs-C++ runner parity cross-validation |
+| `test_graph_ops.py` | TRT graph operation unit testing |
+| `perf_compare.py` | TRT vs HF performance comparison — serial GPU execution to support large models on 24GB GPUs |

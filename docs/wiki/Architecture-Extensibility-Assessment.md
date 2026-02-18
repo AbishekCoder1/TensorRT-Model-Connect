@@ -11,8 +11,8 @@ As of 2026-02-16, MoE, Mamba/SSM, and vision-language support are **fully implem
 | Architecture Class | Current Support | Effort to Add New Instance | Where Changes Needed |
 |---|---|---|---|
 | Standard decoder (RMSNorm + RoPE + SwiGLU) | **Works today** (7 families) | ~30 LOC Python | Python plugin only |
-| Extended decoder (LayerNorm, GELU, learned positions) | **Works today** (5 families) | ~60 LOC Python | Python plugin only |
-| MoE decoder (SparseMixer routing) | **Works today** (Phi-MoE) | ~300 LOC Python | Python graph builder + checkpoint mapper |
+| Extended decoder (LayerNorm, GELU, learned positions) | **Works today** (11 families) | ~60 LOC Python | Python plugin only |
+| MoE decoder (top-k softmax / SparseMixer routing) | **Works today** (2 families) | ~300 LOC Python | Python graph builder + checkpoint mapper |
 | SSM / Mamba | **Works today** (Mamba 130M-2.8B) | ~400 LOC Python | Python graph builder (C++ backend exists) |
 | Vision-Language | **Works today** (Qwen-VL) | ~200 LOC Python | Python vision builder + plugin VL config |
 | Multi-Latent Attention -- MLA (DeepSeek-V2/V3) | **Not yet implemented** | ~400 LOC Python + C++ | Python graph builder + C++ KV cache shape |
@@ -26,13 +26,13 @@ As of 2026-02-16, MoE, Mamba/SSM, and vision-language support are **fully implem
 
 Create a Python plugin file in `trtf_build/trtf_build/families/` with a checkpoint mapper. Uses the parameterized standard decoder builder. ~30-60 LOC.
 
-**Implemented**: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM (standard decoder); StarCoder2, GPT-2, OPT, Falcon, StableLM (extended decoder).
+**Implemented**: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM (standard decoder); StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM (extended decoder).
 
 ### Adding a new MoE family
 
 Write a Python graph builder for the expert routing logic. The C++ runtime uses the same KV-cache backend (routing is handled in the TRT graph). ~300 LOC.
 
-**Implemented**: Phi-MoE (SparseMixer routing, `runtime_strategy="decoder_moe"`).
+**Implemented**: Phi-MoE (SparseMixer routing), Mixtral (standard top-2 softmax routing). Both use `runtime_strategy="decoder_moe"`.
 
 ### Adding a new Mamba/SSM family
 
@@ -144,16 +144,16 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 
 ## Recommended Approach for New Families
 
-### Tier 1: Python-only, standard builder (implemented for 12 families)
+### Tier 1: Python-only, standard builder (implemented for 18 families)
 Standard and extended decoders using the parameterized graph builder:
-- Already done: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM
-- Candidates: Yi (use llama), Baichuan, DeepSeek-dense, CodeLlama (use llama), Vicuna (use llama), GPT-NeoX
+- Already done: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM
+- Candidates: Yi (use llama), Baichuan, DeepSeek-dense, CodeLlama (use llama), Vicuna (use llama)
 - ~30-60 LOC each, fully parallelizable
 
-### Tier 2: Python custom graph builder (implemented for 3 families)
+### Tier 2: Python custom graph builder (implemented for 4 families)
 Non-standard graph topologies with existing C++ backends:
-- Already done: Phi-MoE (MoE, Python only), Mamba (SSM, Python + existing C++ backend), Qwen-VL (VL, Python + existing C++ image preprocessor)
-- Candidates: Mixtral MoE (~300 LOC, can reuse decoder_moe strategy), other Mamba variants, LLaVA/InternVL (can reuse simple_chw/aspect_preserve_chw preprocessor)
+- Already done: Phi-MoE (MoE, Python only), Mixtral (MoE, Python only), Mamba (SSM, Python + existing C++ backend), Qwen-VL (VL, Python + existing C++ image preprocessor)
+- Candidates: Other Mamba variants, LLaVA/InternVL (can reuse simple_chw/aspect_preserve_chw preprocessor)
 - ~200-400 LOC each
 
 ### Tier 3: Python + new C++ backend (not yet needed)

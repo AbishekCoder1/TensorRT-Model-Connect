@@ -214,6 +214,29 @@ See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full gui
 | `TRTF_TRT_LOG_STDERR=1` | Enable TRT logger output to stderr |
 | `TRTF_TRT_LOG_MIN_SEVERITY` | Minimum TRT log severity |
 
+## Testing
+
+```bash
+# Unit tests (no GPU)
+pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
+pytest tests/tools/ -v
+ctest --test-dir build --output-on-failure
+
+# E2E tests (GPU required; --rebuild-engines forces fresh bundle builds)
+pytest tests/e2e/ -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --rebuild-engines
+
+# Performance comparison (serial GPU — supports large models on 24GB)
+python3 tools/perf_compare.py \
+  --model Qwen/Qwen3-0.6B \
+  --bundle /path/to/qwen3.trtfb \
+  --prompt "Hello" --max-new-tokens 20
+```
+
+See [CLAUDE.md](CLAUDE.md) for the full regression test plan.
+
 ## Documentation
 
 | Page | Description |

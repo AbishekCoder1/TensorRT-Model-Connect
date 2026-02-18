@@ -101,6 +101,12 @@ python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
 # Debug preprocessor with override
 python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
   --vision-only --preprocessor-type simple_chw
+
+# Performance comparison (serial GPU execution — supports large models on 24GB)
+python3 tools/perf_compare.py \
+  --model Qwen/Qwen3-0.6B \
+  --bundle /path/to/qwen3.trtfb \
+  --prompt "Hello" --max-new-tokens 20
 ```
 
 ## What HF Has That We Don't (Yet)

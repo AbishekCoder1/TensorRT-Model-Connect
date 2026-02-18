@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
 from trtf_build.cli import main
 
 

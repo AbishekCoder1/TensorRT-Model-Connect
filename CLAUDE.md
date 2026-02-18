@@ -86,6 +86,84 @@ pytest tests/ -v --ignore=tests/cpp
 
 C++ tests are plain executables (no framework) in `tests/cpp/`. They use `main()`, print to stderr on failure, and return 0 on success / non-zero on failure. Test names in CMake match their source files.
 
+## Regression test plan
+
+Standard regression gate before merging changes. Run in order; each tier
+catches progressively harder issues.
+
+### Tier 1: Unit tests (no GPU, ~60s)
+
+Fast, deterministic tests for logic correctness. Always run first.
+
+```bash
+# Python builder unit tests (config, checkpoint_mapper, bundle_writer, etc.)
+.venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
+
+# Tools self-tests (diff framework, perf_compare stats/formatting/serial ordering)
+.venv/bin/python -m pytest tests/tools/ -v
+
+# C++ unit tests (bundle format, KV cache state, decode runtime, image preprocessor)
+ctest --test-dir build --output-on-failure
+```
+
+### Tier 2: Graph-op GPU tests (~2 min, needs TRT)
+
+Validates TRT graph operations (RMSNorm, RoPE, attention, etc.) on real GPU.
+
+```bash
+.venv/bin/python -m pytest tests/builder/test_graph_ops.py -v -m trt
+```
+
+### Tier 3: E2E single-model smoke test (~5 min, needs GPU)
+
+Quick sanity with one small model. Always use `--rebuild-engines` to build
+the bundle from scratch — avoids testing against stale cached bundles.
+
+```bash
+.venv/bin/python -m pytest tests/e2e/test_full_pipeline.py -v -k qwen3-0.6b \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --rebuild-engines
+```
+
+### Tier 4: Full E2E suite (~90 min, needs GPU)
+
+All models in engines.json: force-rebuild every bundle, then
+infer/compare for each. This is the gold-standard regression gate.
+
+```bash
+.venv/bin/python -m pytest tests/e2e/ -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --rebuild-engines
+```
+
+### Tier 5: Performance regression (~10 min per model, needs GPU + bundle)
+
+Spot-check inference speed for key models. Not in CI; run manually for
+perf-sensitive changes.
+
+```bash
+source .venv/bin/activate
+python3 tools/perf_compare.py \
+  --model Qwen/Qwen3-0.6B \
+  --bundle /mnt/storage/trt-transformers/engines/qwen3-0.6b.trtfb \
+  --prompt "The capital of France is" --max-new-tokens 20 --json results.json
+```
+
+### What to run when
+
+| Change type | Tiers to run |
+|-------------|-------------|
+| Python builder logic | 1, 2 |
+| Family plugin | 1, 2, 3 (the specific model) |
+| C++ runtime | 1 (ctest), 3 |
+| Graph ops | 1, 2 |
+| KV cache / mask / position logic | 1, 3, 4 |
+| debug_runner.py | 1, 3 |
+| perf_compare.py | 1 (tools tests), 5 |
+| New model family | 1, 2, validate_family.sh, then add to engines.json + tier 4 |
+
 ## Running executables
 
 ```bash
@@ -138,7 +216,8 @@ trtf_build/                          # Python package (engine builder)
       base.py                        # FamilyPlugin protocol
       qwen.py llama.py mistral.py gemma.py phi.py phi_moe.py
       granite.py internlm.py starcoder2.py gpt2.py opt.py
-      falcon.py stablelm.py mamba.py qwen_vl.py
+      falcon.py stablelm.py mamba.py qwen_vl.py olmo.py
+      xglm.py gpt_neox.py gpt_neo.py codegen.py bloom.py mixtral.py
   pyproject.toml
 src/                                 # C++ bundle-only runtime
   bundle/

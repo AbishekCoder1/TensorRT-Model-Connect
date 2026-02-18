@@ -31,7 +31,7 @@ The system has two phases:
 
 1. **Build phase (Python)** -- `trtf-build build <hf-model-dir> -o model.trtfb`
    - Reads HF `config.json` + `model.safetensors` + `tokenizer.json`
-   - Matches `model_type` to a family plugin (15 families: Qwen, LLaMA, Mistral, Gemma, Phi, Phi-MoE, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, Mamba, Qwen-VL)
+   - Matches `model_type` to a family plugin (22 families: Qwen, LLaMA, Mistral, Gemma, Phi, Phi-MoE, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, Mamba, Qwen-VL, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Mixtral)
    - Maps HF tensor keys to canonical format, builds TRT network, compiles engine
    - Packages engine plan + tokenizer files into a `.trtfb` bundle
 
@@ -40,6 +40,7 @@ The system has two phases:
    - Dispatches to the correct backend based on `runtime_strategy` in config.json:
      - `decoder_kv_cache` / `decoder_moe`: `TrtBackendFastPath` with KV-cache management
      - `ssm_recurrent`: `MambaBackend` with conv + SSM recurrent state
+     - `vision_language`: VL pipeline with vision encoder + text decoder + image preprocessing
    - Creates tokenizer + autoregressive generation loop
    - Runs GPU-accelerated inference
 
@@ -71,7 +72,7 @@ int main() {
 
 ## Built-in Model Support
 
-15 family plugins covering dense decoders, extended decoders, MoE, SSM, and vision-language.
+22 family plugins covering dense decoders, extended decoders, MoE, SSM, and vision-language.
 
 | Family | Model Types | Python Plugin |
 |--------|-------------|---------------|
@@ -90,5 +91,12 @@ int main() {
 | StableLM | stablelm | `families/stablelm.py` |
 | Mamba | mamba | `families/mamba.py` |
 | Qwen-VL | qwen2_vl, qwen2_5_vl | `families/qwen_vl.py` (vision encoder + text decoder) |
+| OLMo | olmo | `families/olmo.py` |
+| XGLM | xglm | `families/xglm.py` |
+| GPT-NeoX | gpt_neox | `families/gpt_neox.py` |
+| GPT-Neo | gpt_neo | `families/gpt_neo.py` |
+| CodeGen | codegen | `families/codegen.py` |
+| BLOOM | bloom | `families/bloom.py` |
+| Mixtral | mixtral | `families/mixtral.py` |
 
 All plugin paths relative to `trtf_build/trtf_build/`.

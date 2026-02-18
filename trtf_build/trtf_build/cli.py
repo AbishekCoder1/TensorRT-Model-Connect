@@ -8,7 +8,22 @@ import struct
 import sys
 from pathlib import Path
 
-from . import __version__
+
+def _get_version() -> str:
+    """Get package version, trying importlib.metadata first, then __init__."""
+    try:
+        from importlib.metadata import version
+        return version("trtf-build")
+    except Exception:
+        pass
+    try:
+        from . import __version__
+        return __version__
+    except ImportError:
+        return "0.1.0"
+
+
+__version__ = _get_version()
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
