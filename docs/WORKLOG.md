@@ -1,5 +1,37 @@
 # Worklog
 
+## 2026-02-18 — GB300 ARM (aarch64) support
+
+Set up the project on `gb300-nvl-019-compute01.nvidia.com` (aarch64, 4x GB300 284GB each, CUDA 13.2, driver 595.37).
+
+### Changes
+
+**CMakeLists.txt** — Added aarch64 + SBSA search paths to `_trtf_default_search_paths`:
+- `/usr/include/aarch64-linux-gnu`, `/usr/lib/aarch64-linux-gnu`, `/lib/aarch64-linux-gnu`
+- `/usr/local/cuda/targets/sbsa-linux/include`, `/usr/local/cuda/targets/sbsa-linux/lib`
+
+**New files:**
+- `Dockerfile.gb300` — based on `nvidia/cuda:13.0.0-devel-ubuntu24.04` (aarch64). No cmake/ninja from apt (installed via pip).
+- `scripts/setup_gb300.sh` — pip installs `tensorrt` (auto-selects `tensorrt_cu13`), `cmake`, `ninja`. Dynamically finds TRT headers with `find /usr/include -name NvInferRuntime.h`. Builds C++ runtime and runs tests.
+- `scripts/docker_build_gb300.sh` — builds `trtf-dev-gb300` Docker image.
+- `scripts/docker_run_gb300.sh` — launches container with `--gpus all` and storage mounts.
+
+### Verification results
+
+| Step | Result |
+|------|--------|
+| Docker image | `nvidia/cuda:13.0.0-devel-ubuntu24.04` aarch64 built OK |
+| TensorRT pip | `tensorrt_cu13==10.15.1.29` (aarch64 wheel) |
+| C++ build | 46/46 Ninja targets compiled |
+| C++ unit tests | 11/11 passed |
+| Qwen3-0.6B bundle build | 90s total (weights 34s + engine 55s, 2.5GB) |
+| C++ E2E inference | Correct: "The capital of France is Paris. The capital of Italy is Rome..." |
+| Python builder tests | 161 passed, 11 failed (`test_debug_runner.py` — missing `cuda-python` bindings on CUDA 13) |
+
+### Known gap
+
+`test_debug_runner.py` failures: `cuda.bindings.runtime` / `cuda.cudart` Python package not installed. Only affects Python-side TRT debug runner, not engine building or C++ runtime. Fix: `pip install cuda-python` (not yet verified on CUDA 13 aarch64).
+
 ## 2026-02-18 — Fix 7 E2E test failures (rope_parameters, stderr, atol)
 
 Investigated and resolved all 7 failing E2E models across 3 root cause categories.

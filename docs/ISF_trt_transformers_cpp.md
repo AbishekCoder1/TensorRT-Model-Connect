@@ -1,358 +1,435 @@
 # ISF Document
 
-**Title**: "An Agentic, Infinitely-Scalable System for Bridging HuggingFace Models to TensorRT Inference at Speed of Light"
+**Title**: "An Agent-Guided Differential Testing Framework for Automated Bridging of HuggingFace Models to TensorRT Inference"
 
 ---
 
 ## 4. What is the problem you are trying to solve? If others have tried to solve this problem previously, please summarize what you know of those attempted solutions and their shortcomings.
 
-### The Core Problem: The HuggingFace-to-TensorRT Gap
+### The Core Problem: No Automated Oracle Exists to Guide an Agent From HF Model to Correct TRT Engine
 
-The HuggingFace (HF) Hub hosts thousands of large language models (LLMs) and vision-language models (VLMs) across hundreds of model families. TensorRT (TRT) delivers the fastest GPU inference for these models — often 2-5x faster than PyTorch. However, **bridging any given HF model to TRT inference today requires significant manual engineering**, creating a bottleneck that prevents organizations from deploying the best available models at optimal speed.
+The HuggingFace (HF) Hub hosts thousands of large language models (LLMs) and vision-language models (VLMs) across hundreds of model families. TensorRT (TRT) delivers the fastest GPU inference — often 2-5x faster than PyTorch. Bridging a new HF model to TRT requires constructing a TRT computation graph that is **numerically equivalent** to the original HF model's forward pass, mapping HF weight tensors into the graph, and verifying that the resulting engine produces identical token-by-token output across diverse inputs.
 
-The ideal system would allow an AI agent (or human engineer) to take any HF model and produce a production-ready TRT inference pipeline with minimal effort — ideally just a single command — while achieving the theoretical maximum inference throughput on the hardware. Furthermore, the system should scale to accommodate new model families as they appear on the Hub, without requiring changes to any shared infrastructure.
+The fundamental bottleneck is not writing the bridge code — it is **knowing whether the bridge code is correct**. An AI agent (or human engineer) writing a TRT graph for a new model family faces a debugging problem with no automated oracle: if the engine produces wrong tokens, where is the bug? Is it a weight mapping error (wrong tensor transposition, missing GQA expansion)? A graph construction error (wrong normalization, wrong activation function)? A positional encoding error (wrong RoPE mode, wrong frequency computation)? A runtime error (wrong mask, wrong cache update)? Without an oracle that can localize the error to a specific layer, operation, or component, the agent cannot efficiently iterate to correctness.
 
-### Problem 1: Manual, Per-Family TRT Integration is O(N) and Unscalable
+**This is the problem we solve: we invent a multi-tier differential testing framework that serves as an automated oracle, guiding an AI agent (or human) through the implementation of a correct HF-to-TRT bridge for any model family.**
 
-Each HF model family (Qwen, LLaMA, Mistral, Gemma, Phi, Mamba, etc.) has its own unique combination of:
-- Normalization type (RMSNorm vs LayerNorm)
-- MLP structure (SwiGLU vs GELU FC vs MoE routing)
-- Positional encoding (RoPE vs learned vs ALiBi, with variants: standard vs interleaved, full vs partial rotary)
-- Attention pattern (MHA vs GQA vs MQA, sequential vs parallel residuals)
-- Weight storage format (separate Q/K/V vs fused QKV, separate gate/up vs fused gate_up)
-- Architectural class (standard decoder, MoE, SSM/Mamba, vision-language)
+### Problem 1: Existing Validation Approaches Cannot Localize Errors Across the HF-to-TRT Boundary
 
-Prior approaches to bridging HF models to TRT:
+When a TRT engine produces different tokens from the HF model, the error could originate at any point in a deep pipeline:
 
-- **TensorRT-LLM**: Provides TRT support for a curated set of models, but each model requires hand-written C++ graph construction code. Adding a new family requires deep TRT expertise, takes weeks, and changes are tightly coupled to a specific TRT version. The codebase uses a monolithic builder with deeply nested conditionals. An AI agent cannot productively work in this environment because the blast radius of any change is uncontrollable.
+| Error class | Example | Where it hides |
+|---|---|---|
+| Weight mapping | K/V not transposed, GQA not expanded, fused QKV not split correctly | Load-time, invisible until inference |
+| Atomic op | Wrong RMSNorm epsilon, wrong GELU approximation variant | Single TRT layer, propagates through all downstream layers |
+| Graph structure | Wrong residual pattern, wrong attention mask shape, missing bias | Compound effect across layers |
+| Positional encoding | Wrong RoPE mode (interleaved vs standard), wrong theta, wrong partial rotary | Subtle — first tokens may be correct, errors grow with position |
+| Cache management | Wrong eviction order, wrong position clamping | Only manifests after max_cache_length tokens |
+| Cross-language parity | Python build and C++ runtime disagree on mask construction | Only manifests in deployed binary, not in Python testing |
 
-- **ONNX export + TRT conversion**: HF models can be exported to ONNX and converted to TRT engines. However, the ONNX intermediate representation is lossy (dynamic shapes are poorly supported, operator coverage is incomplete), the conversion adds a fragile step, and the resulting engines are often suboptimal because TRT cannot fuse operations across ONNX boundaries.
+Prior validation approaches:
 
-- **torch.compile + TRT backend**: PyTorch 2.x's `torch.compile` with the TensorRT backend (`torch_tensorrt`) can JIT-compile PyTorch models. However, compilation is slow (minutes per model), not all operations are supported (frequent graph breaks), and the resulting artifacts are not portable across machines — they depend on the exact PyTorch and CUDA version.
+- **Golden file comparison**: Record expected outputs and diff against them. Brittle — any change to the model, TRT version, or GPU hardware invalidates all golden files. Cannot localize errors within the pipeline. Cannot guide an agent to the fix.
 
-- **Manual per-model scripts**: Many teams write bespoke conversion scripts per model. This is O(N) in the number of model families, requires deep expertise in both HF internals and TRT APIs, and produces unmaintainable one-off artifacts.
+- **End-to-end integration tests**: Run the full pipeline and check final output. If the test fails, the engineer must manually bisect the pipeline to find the error. An AI agent cannot perform this bisection because it requires understanding the full stack.
 
-None of these approaches are **agentic-ready**: they cannot be driven by an AI agent that reads a model's `config.json`, generates the bridge code, validates correctness, and produces a deployable artifact — all in a single automated pipeline.
+- **ONNX-based validation**: Export to ONNX and compare intermediate values. But ONNX export itself introduces errors (incomplete operator coverage, dynamic shape limitations), so the ONNX intermediate does not serve as a faithful reference.
 
-### Problem 2: Inference Runtime is Not Separated from Build Concerns
+- **Manual per-layer inspection**: An expert manually inserts debug prints at each layer and compares against HF. This is O(layers * models) manual work and does not scale.
 
-Existing TRT inference systems (TensorRT-LLM, vLLM with TRT backend, Triton Inference Server) typically combine model weight loading, TRT engine construction, and autoregressive inference into a single monolithic runtime. This means:
+None of these approaches provide what an AI agent needs: **immediate, automatically-localized feedback at the right abstraction level for the specific class of error encountered**.
 
-- The runtime must link against safetensors/PyTorch/HuggingFace libraries, creating a large, fragile deployment footprint.
-- Cold start requires re-parsing model checkpoints and potentially rebuilding TRT engines.
-- The runtime must handle all model families' weight formats, making it impossible to keep the runtime minimal and fast.
-- Security exposure: loading models from untrusted sources may require executing arbitrary Python code (`trust_remote_code`).
+### Problem 2: No Dual-Implementation Mirror Exists for Cross-Language Parity
 
-A clean separation between build-time (Python, with full HF/TRT ecosystem) and runtime (minimal C++, no dependencies) is needed so that the agentic build system can iterate freely without affecting the deployed runtime.
+The HF-to-TRT system has a two-language architecture: Python builds the TRT engine, C++ runs it. The C++ runtime implements mask construction, KV cache management, position tracking, and VL gating — all of which must be algorithmically identical to the assumptions baked into the TRT engine at build time. If the C++ runtime computes the attention mask differently from what the engine expects, the tokens are wrong.
 
-### Problem 3: KV Cache PCIe Bottleneck Prevents Speed-of-Light Inference
+No existing system provides a **behaviorally-identical mirror implementation** — a second implementation in a different language that can be directly compared at the token level to detect cross-language divergence. Without this mirror, cross-language bugs can only be found by end-to-end testing, which cannot localize the error.
 
-Standard KV cache implementations transfer cache state between host (CPU) and device (GPU) memory at every decode step. For a 32-layer model with 4096-dimensional attention at `max_cache_length=2048`, this is approximately 2 GB of PCIe round-trip transfer per step — the dominant bottleneck that prevents achieving speed-of-light throughput. Even with PagedAttention (vLLM) or inflight batching (TensorRT-LLM), the host-managed cache paradigm requires PCIe traffic for cache state.
+### Problem 3: The Combinatorial Space of LLM Architectures Makes Manual Bridging O(N) and Unscalable
 
-### Problem 4: No Automated Correctness Guarantee Across the HF-to-TRT Bridge
+Each HF model family has its own combination of normalization (RMSNorm vs LayerNorm), MLP (SwiGLU vs GELU FC vs MoE), positional encoding (RoPE vs learned vs ALiBi, standard vs interleaved, full vs partial rotary), attention (MHA vs GQA vs MQA, sequential vs parallel residuals), weight format (separate vs fused Q/K/V, separate vs fused gate/up), and architectural class (decoder, MoE, SSM/Mamba, vision-language).
 
-When an agent (human or AI) creates a new model family bridge, how do you know the TRT engine produces the same tokens as the original HF model? Prior approaches use:
-- **Golden file comparison**: Brittle — any change invalidates all golden files.
-- **Integration tests only**: Catches end-to-end failures but cannot localize the bug.
-- **Manual inspection**: Does not scale to hundreds of models.
+Prior bridging approaches:
 
-What's needed is a **multi-tier automated validation pipeline** that an agent can invoke after generating a new plugin to get immediate, actionable feedback on correctness at every level — from individual TRT operations through per-layer hidden states to full autoregressive generation.
+- **TensorRT-LLM**: Each model requires hand-written C++ code across 10-20 files. Deep TRT expertise needed. Monolithic builder with deeply nested conditionals. An AI agent cannot work productively — blast radius of any change is uncontrollable.
+- **ONNX export**: Lossy intermediate representation, suboptimal engines, fragile conversion.
+- **torch.compile + TRT**: Slow compilation, frequent graph breaks, non-portable artifacts.
+- **Manual scripts**: O(N), unmaintainable.
 
-### Problem 5: Vision-Language Models Require Architectural Innovations for TRT
+None of these are **agentic-ready**: they cannot be driven by an AI agent that reads `config.json`, generates bridge code, invokes an oracle for correctness feedback, and iterates to a correct solution.
 
-VL models (Qwen2.5-VL, Qwen3-VL, LLaVA, InternVL) inject visual features into the text decoder, but TRT compiles a single static graph with no conditional branching. The Qwen3-VL "DeepStack" architecture introduces multi-level vision features from intermediate ViT layers that must be injected at specific early decoder layers. No prior system handles this within a single static TRT engine.
+### Problem 4: Speed-of-Light Inference Requires Eliminating PCIe Bottleneck
+
+Standard KV cache implementations transfer cache state H2D/D2H each step (~2 GB for a 32-layer model at 2048 cache length). This PCIe traffic is the dominant bottleneck preventing theoretical maximum throughput.
+
+### Problem 5: VL Models Require Architectural Innovations for Static TRT Graphs
+
+Vision-language models inject visual features into the text decoder, but TRT compiles a single static graph with no conditional branching. Qwen3-VL "DeepStack" adds multi-level vision features from intermediate ViT layers. No prior system handles this in a single static engine.
 
 ---
 
 ## 5. How does your invention solve the problem described in the previous question? Be specific.
 
-This invention introduces an **agentic, infinitely-scalable system** that bridges any HuggingFace model to speed-of-light TensorRT inference. The system is designed so that adding support for a new model family is a single-file operation that an AI agent can perform autonomously, with automated validation providing immediate correctness guarantees. The system comprises six interconnected innovations.
+This invention introduces an **agent-guided differential testing framework** that serves as an automated oracle for bridging HuggingFace models to TensorRT inference. The framework provides immediate, localized correctness feedback at five independent abstraction levels, enabling an AI agent to iterate from a scaffolded plugin to a correct, production-ready TRT bridge without human intervention. The framework is supported by a composable builder stack, a device-resident runtime, and an auto-discovery plugin architecture that together make the agent's task tractable.
 
-### Innovation 1: Zero-Registration Auto-Discovery Plugin Architecture for Infinite Scalability
+### Innovation 1 (Core Invention): Multi-Tier Differential Testing Framework as an Automated Agent Oracle
 
-The core of the system's scalability is a plugin architecture designed for agentic extension. Adding a new HF model family to TRT requires **creating a single Python file** — no edits to any shared code, no registration, no configuration changes, no C++ modifications.
+The central invention is a **five-plane differential testing architecture** where each plane serves as an oracle at a different abstraction level. An agent encountering a failure at one plane receives diagnostic output that is specific enough to guide the fix — not just "the output is wrong" but "layer 7's hidden state diverges by 0.3 after attention, suggesting a Q/K weight mapping error."
 
-**Auto-discovery mechanism**: At import time, `pkgutil.iter_modules()` scans the `families/` directory for `.py` files with a module-level `plugin` attribute:
+The five planes form a correctness pyramid. Lower planes catch lower-level errors with higher precision; higher planes catch integration errors that span multiple components:
+
+#### Plane 1 — Atomic Operation Oracle (`test_graph_ops.py`)
+
+**What it validates**: Every function in `graph_ops.py` (Layer 1 of the builder stack) against HF/PyTorch reference implementations.
+
+**How it works**: For each operation (RMSNorm, LayerNorm, RoPE, GELU, ALiBi slopes, etc.), the framework:
+1. Builds a minimal TRT engine containing **only** the operation under test
+2. Generates randomized input tensors matching the operation's expected shapes
+3. Executes the TRT engine on GPU
+4. Executes the HF/PyTorch reference implementation on the same inputs
+5. Compares outputs at `atol=1e-5` (fp32 TRT precision)
+
+Each operation variant is tested across multiple parameter combinations — RoPE covers standard/interleaved mode, full/partial rotary factor, and positions 0/3/7/max_cache_length. The tolerance `1e-5` is tight enough to catch any mathematical error while accommodating fp32 non-determinism.
+
+**Agent guidance**: If an agent modifies or adds a Layer 1 operation, this plane provides immediate feedback on numerical correctness in isolation. A failure here means the math is wrong, independent of any model or weight mapping.
+
+**Prior art distinction**: No prior TRT inference system provides isolated, per-operation unit tests against reference implementations. TensorRT-LLM tests are integration-level, testing entire models.
+
+#### Plane 2 — Per-Layer Hidden State Oracle (`diff_layers.py`)
+
+**What it validates**: The hidden state tensor after every transformer block in the TRT engine against the corresponding HF model layer output.
+
+**How it works**:
+1. The engine builder is invoked with `debug_layer_outputs=True`, which causes the standard decoder builder to mark intermediate hidden states as additional network outputs. Each intermediate tensor is wrapped in a TRT identity layer to prevent buffer aliasing:
+```python
+def _mark_debug_output(network, tensor, name):
+    identity = network.add_identity(tensor)  # prevents fusion affecting debug values
+    out = identity.get_output(0)
+    out.name = name
+    network.mark_output(out)
+    out.dtype = trt.float32
+```
+2. The resulting engine has outputs: `debug_embed`, `debug_hidden_0` through `debug_hidden_N`, and `logits` — in addition to the normal `present_k/v` outputs
+3. The HF model is run with `output_hidden_states=True` on the same input
+4. Each layer's hidden state is compared at `atol=0.05`
+
+The comparison output is a diagnostic table designed for agent consumption:
+```
+Layer                Shape    MaxDiff   MeanDiff  TRT_std   HF_std    Status
+embed              (4096,)  0.000003  0.000001   1.2341    1.2341       OK
+layer.0.hidden     (4096,)  0.004812  0.000231   0.8732    0.8742       OK
+layer.7.hidden     (4096,)  0.312451  0.089123   0.5432    0.8901     FAIL
+```
+
+**Agent guidance**: The table tells the agent **exactly which layer** first diverges significantly. The `TRT_std` vs `HF_std` columns distinguish between:
+- **Scaling errors** (stds match but max_diff is high): weight magnitude issue, e.g., missing Gemma +1.0 gamma correction
+- **Permutation/rotation errors** (stds differ): wrong RoPE mode, wrong head dimension mapping
+- **Accumulation errors** (divergence grows linearly layer by layer): small per-layer error, likely an epsilon or activation variant issue
+
+The tolerance `0.05` reflects error accumulation physics: fp32 TRT operations introduce ~1e-5 noise per op; over ~28 transformer layers with multiple ops per layer, this accumulates to ~0.05 at the hidden state level.
+
+**Prior art distinction**: No prior system provides per-layer differential comparison with diagnostic std/mean/max columns. ONNX-based validation compares at the ONNX graph boundary, not at the original model's layer boundaries.
+
+#### Plane 3 — Autoregressive Logit Trajectory Oracle (`diff_logits.py`)
+
+**What it validates**: The complete autoregressive decode loop — not just a single forward pass, but the full multi-step generation trajectory including cache accumulation.
+
+**How it works**:
+1. Builds a standard TRT engine (no debug outputs)
+2. Runs the engine through the Python mirror runner (`TrtRunner`) for N steps, recording logit vectors at each step
+3. Runs the HF model for N steps, recording logit vectors at each step
+4. Compares per-step: `max_diff`, `argmax_match` (same predicted token?), `top_K_overlap` (how many top-10 candidates agree?)
+
+**The "battery" design**: The test runs across four canonical prompts simultaneously:
+- `"factual"`: "The capital of France is" — short, high-confidence distributions
+- `"reasoning"`: "Explain why water boils at 100 degrees Celsius." — multi-sentence, tests sustained coherence
+- `"code"`: "Write a Python function that checks if a number is prime:" — syntax tokens, low-frequency in general text
+- `"multi-turn"`: "User: What is 2+2?\nAssistant:" — chat template, tests tokenization edge cases
+
+**Agent guidance**: Different failure patterns in the battery point to different error classes:
+- All prompts fail at step 0 → weight mapping or graph structure error (Plane 2 would also fail)
+- All prompts diverge gradually → epsilon, activation variant, or normalization error
+- Only `code` prompt fails → tokenizer issue or embedding edge case for rare tokens
+- Prompts pass for first K steps then diverge → cache management or position tracking bug (cache fills at step `max_cache_length` and eviction begins)
+
+**Prior art distinction**: The battery concept — testing across multiple prompt types simultaneously to triangulate error classes — is novel. Prior systems test with a single prompt.
+
+#### Plane 4 — Cross-Language Parity Oracle (`test_runner_parity.py`)
+
+**What it validates**: Token-level exact equality between the Python mirror runner (`TrtRunner`) and the C++ binary (`trtf run`), both executing the same TRT engine plan.
+
+**How it works**:
+1. Reads the `.trtfb` bundle directly (parses magic, header, section table)
+2. Extracts tokenizer files from the bundle to a temp directory
+3. Runs the C++ binary as a subprocess: `trtf run bundle.trtfb --prompt "text"`
+4. Runs the Python `TrtRunner` with identical input
+5. Asserts character-for-character string equality of generated text
+
+**Why this is the hardest-to-pass plane**: The Python `TrtRunner` and C++ `TrtBackendFastPath` both execute the same TRT engine plan. Any divergence must come from differences in:
+- Attention mask construction
+- Position ID computation and clamping
+- Cache write ordering (especially sliding window eviction)
+- EOS token detection
+- Tokenizer encoding/decoding (`add_special_tokens=False` must match)
+
+Because autoregressive generation amplifies any single-token divergence — one wrong token changes all subsequent predictions — this test is exquisitely sensitive to every runtime component simultaneously.
+
+**The Mirror Runner (`debug_runner.py`) — the key enabling invention**: `TrtRunner` is not a convenience wrapper. It is a **behaviorally-identical reimplementation** of the C++ runtime in Python, using `cuda-python` for GPU memory management. Every aspect is mirrored:
 
 ```python
-for _finder, _name, _ispkg in pkgutil.iter_modules([_pkg_dir]):
-    if _name.startswith("_") or _name == "base":
-        continue
-    _mod = importlib.import_module(f"{__name__}.{_name}")
-    _plugin = getattr(_mod, "plugin", None)
-    if _plugin is not None:
-        _ALL_PLUGINS.append(_plugin)
+# Attention mask (matches C++ build_attention_mask exactly)
+position_id = min(self.cache_length, self.max_cache_length)
+self._h_mask[:] = -1e9
+valid = min(self.cache_length, self.max_cache_length)
+self._h_mask[0, :valid] = 0.0
+self._h_mask[0, -1] = 0.0
 ```
-
-**Structural typing protocol**: Plugins implement the `FamilyPlugin` protocol via Python's `typing.Protocol` — no inheritance required, no base class import needed. A minimal plugin that bridges a standard-architecture HF model to TRT is ~30 lines:
 
 ```python
-class QwenPlugin:
-    name = "qwen"
-    def matches(self, model_type): return mt.startswith("qwen") and "vl" not in mt
-    def load_weights(self, model_dir, config): return load_standard_weights(model_dir, config)
-    def build_engine(self, config, weights, max_cache_length, *, verbose=False):
-        return build_standard_decoder_engine(config, weights, max_cache_length, verbose=verbose)
-plugin = QwenPlugin()
+# Sliding-window cache eviction (matches C++ DeviceKvCache::update_after_step exactly)
+if self.cache_length < self.max_cache_length:
+    offset = self.cache_length * row_bytes
+    cudart.cudaMemcpyAsync(cache_buf + offset, present_buf, row_bytes, D2D, stream)
+else:
+    cudart.cudaMemcpyAsync(cache_buf, cache_buf + row_bytes,
+                           (self.max_cache_length - 1) * row_bytes, D2D, stream)
+    offset = (self.max_cache_length - 1) * row_bytes
+    cudart.cudaMemcpyAsync(cache_buf + offset, present_buf, row_bytes, D2D, stream)
 ```
 
-**Four levels of customization depth** — an agent selects the minimal level needed:
+The mirror runner auto-detects engine capabilities (VL embeddings, DeepStack levels) by probing tensor names, identical to the C++ `DeviceResources` constructor. This means the mirror stays synchronized with any new capabilities added to the Python builder without code changes.
 
-1. **Pure delegation** (~30 lines): Plugin maps model_type and delegates to shared functions. Covers architecturally-standard models (Qwen, LLaMA, Mistral, OLMo). An AI agent can generate these from `config.json` alone.
-2. **Post-load weight transformation** (~50 lines): Standard loading + family-specific math on weights. Covers models with unusual normalization conventions (Gemma: +1.0 to RMSNorm gamma, sqrt(hidden) embed scale).
-3. **Custom weight loading, standard graph** (~100 lines): Handles non-standard weight tensor layouts (Phi-3: fused QKV and gate_up projections that must be split) while reusing the standard graph builder.
-4. **Fully custom graph** (~300 lines): Complete TRT graph construction for fundamentally different architectures (Mamba/SSM, PhiMoE SparseMixer routing). Even at this level, the plugin reuses Layer 1 and Layer 2 building blocks.
+**Maintenance invariant**: The project enforces: "If you change the C++ mask/cache/position logic, you MUST also update `debug_runner.py` and verify with `test_runner_parity.py`." The mirror is a specification document — divergence is a bug.
 
-**Agentic scaffolding**: The `scripts/new_family.py` tool downloads a model's `config.json`, detects architectural features (GQA, MoE, LayerNorm, tied embeddings, fused weights), and generates a working plugin with appropriate warnings:
+**Agent guidance**: If Planes 1-3 all pass but Plane 4 fails, the error is in the C++ runtime, not the plugin or engine. If Planes 1-3 fail AND Plane 4 fails, the error is in the Python-side build.
 
-```bash
-python3 scripts/new_family.py --hf-repo microsoft/Phi-3-mini-4k-instruct --family-name phi
-```
+**Prior art distinction**: No prior TRT inference system maintains a behaviorally-identical dual-language implementation for cross-language parity testing. The mirror runner pattern — where a Python reimplementation of the C++ runtime serves as both a testing oracle and a living specification — is novel.
 
-**Agentic validation gate**: After creating a plugin, the agent runs a single command:
+#### Plane 5 — Vision-Language Pipeline Oracle (`diff_vl.py`)
+
+**What it validates**: The complete VL pipeline: image preprocessing, vision encoder, feature injection, text generation, and C++ binary parity.
+
+**How it works**: Four independent subtests, each with GPU memory isolation (TRT runner freed before HF model loads to prevent OOM on single-GPU machines):
+
+1. **Vision feature comparison**: Cosine similarity of TRT vs HF vision encoder outputs. Hard gate at `cosine_similarity >= 0.5` catches structural errors (wrong patch ordering, wrong channel layout) that element-wise tolerance alone might miss when feature magnitudes are small.
+
+2. **embed_input gate test**: Verifies the scalar-gate VL embedding injection mechanism — calls `step()` with `use_input_embed=0.0` (normal) and `1.0` (bypass), asserting both produce valid logits.
+
+3. **Full VL generation**: `VLTrtRunner` runs the complete image-token substitution pipeline: encode image → format prompt → tokenize → prefill with vision features → decode.
+
+4. **C++ binary parity**: `trtf run --image` subprocess, verifying the C++ VL pipeline produces non-empty output.
+
+**Debug-layers mode**: When initial feature comparison fails, `--debug-layers` attaches PyTorch forward hooks to every ViT block, printing per-block statistics and inter-block cosine similarity. This pinpoints the exact vision encoder block where divergence begins.
+
+**Agent guidance**: Vision feature comparison failure → preprocessor or vision encoder builder error. embed_input failure → TRT graph gating error. Generation failure but features pass → text decoder injection error. C++ failure but Python passes → C++ VL backend error.
+
+**Prior art distinction**: The structured decomposition of VL validation into four independent subtests with GPU memory isolation is novel. Prior VL validation is typically monolithic end-to-end testing.
+
+#### The Validation Gate: One-Command Agent Oracle
+
+All five planes are orchestrated by `validate_family.sh`:
 
 ```bash
 ./scripts/validate_family.sh Qwen/Qwen3-0.6B
 ```
 
-This executes four validation stages in sequence — build bundle, diff_logits (battery of 4 prompts), diff_layers (per-layer hidden state comparison), and test_runner_parity (Python vs C++ exact token match) — and prints a structured pass/fail summary. All four stages run even if earlier ones fail, giving complete diagnostic information in a single invocation.
+This executes in sequence:
+1. Build bundle (`trtf-build build`)
+2. Logit trajectory comparison (`diff_logits.py --battery`)
+3. Per-layer hidden state comparison (`diff_layers.py`)
+4. Cross-language parity (`test_runner_parity.py`)
 
-**Security boundary**: The build pipeline never downloads or executes `*.py` files from HF repos. `snapshot_download` uses an explicit allowlist that excludes executable code. No `trust_remote_code` path exists in the engine builder.
+All stages run even if earlier ones fail, providing complete diagnostics in a single invocation. The output is a structured summary:
 
-**Current coverage**: 24+ model families bridged to TRT via this system: Qwen, Qwen VL (Qwen2.5-VL + Qwen3-VL DeepStack), LLaMA, Mistral, Gemma, Phi-3, Phi-MoE, Mamba, Mixtral, GPT-2, GPT-Neo, GPT-NeoX, OPT, BLOOM, Falcon, StableLM, StarCoder2, InternLM, Granite, OLMo, Nemotron, XGLM, CodeGen.
-
-### Innovation 2: Three-Layer Composable Graph Builder Stack
-
-The plugin system's power comes from a three-layer architecture that decomposes the combinatorial space of LLM architectures into orthogonal, reusable components. This is what makes agentic extension tractable — an agent working on a new family can compose from existing building blocks rather than constructing TRT graphs from scratch.
-
-**Layer 1 — `graph_ops.py` (Atomic TRT Operations)**: Pure tensor-in/tensor-out functions. No model configuration, no weight naming, no side effects. Every function takes a TRT network + input tensors + NumPy weight arrays and returns an output tensor. Operations include:
-
-- `add_rms_norm`: Decomposed into 7 standard TRT layers (no native RMSNorm — full TRT graph optimization)
-- `add_apply_rope`: RoPE via sparse matrix multiply (`rotate_half(x) = x @ M`), with pre-computed cos/sin tables baked as TRT constants. Supports both standard and interleaved modes, partial rotary factor.
-- `add_self_attention_block` / `add_windowed_self_attention_with_rope`: Vision encoder attention variants
-- `add_patch_embed_3d`: 3D patch embedding as Conv2D over flattened temporal-channel dimension
-
-**Layer 2 — `graph_blocks.py` (Weight-Aware Composable Blocks)**: Each function accepts a `weights: WeightDict` and a `prefix: str` for weight lookups. The critical design principle: **blocks do not apply residual connections**. `add_attention_block` returns `{"normed", "attn_out", "present_k", "present_v"}` — the caller composes the residual pattern. This single design decision enables the same attention block to handle:
-- Sequential residuals (standard decoders)
-- Parallel residuals (GPT-J/Falcon)
-- DeepStack injection points (Qwen3-VL, where features are injected between attention and MLP)
-
-Optional features are weight-driven: if `q_bias` weights exist, bias is added; if `q_norm` weights exist, per-head RMSNorm is applied. No configuration flags needed — the weights ARE the configuration.
-
-**Layer 3 — `standard_decoder_builder.py` + Family Plugins**: Full engine assembly parameterized by: `norm_type`, `mlp_type`, `position_type`, `activation`, `partial_rotary_factor`, `interleaved_rope`, `parallel_residual`, `scale_attn_weights`, `embed_input`, `debug_layer_outputs`. The parameter space covers the full combinatorial space of known decoder architectures.
-
-**Why this enables agentic scaling**: An AI agent examining a new model's `config.json` can determine which Layer 3 parameters to set. For standard decoders, the agent writes a ~30-line plugin. For models with unusual weight layouts, the agent writes a custom `load_weights()` (~100 lines) while reusing the standard builder. Only for fundamentally new architectures (like Mamba) does the agent need to construct a custom graph — and even then, it composes from Layer 1 and Layer 2 blocks. The validation pipeline gives the agent immediate feedback on correctness.
-
-### Innovation 3: Two-Stage Bundle Architecture with Engine-Introspection-Driven Feature Detection
-
-The system cleanly separates build-time concerns (Python, with full HF/TRT ecosystem) from runtime concerns (minimal C++, no dependencies) via a portable binary artifact: the `.trtfb` bundle.
-
-**Stage 1 — Python Build** (`trtf_build/`): One-command bridge from HF to TRT:
-
-```bash
-trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
+```
+========================================
+  Validation Summary: Qwen/Qwen3-0.6B
+========================================
+  PASS  Build bundle
+  PASS  diff_logits (battery)
+  PASS  diff_layers
+  PASS  test_runner_parity
+----------------------------------------
+  4 passed, 0 failed
+========================================
 ```
 
-This auto-downloads from HF Hub, parses config, selects the matching plugin, loads and transforms weights, builds TRT engine(s), packages everything into a self-contained `.trtfb` bundle. The bundle contains: serialized TRT engine plan(s), config.json augmented with runtime metadata, tokenizer artifacts, and preprocessor configuration.
+**Agent decision tree from validation output**:
 
-**Bundle format**: Binary layout with 8-byte magic, uint64 JSON header with section index (name -> {offset, size}), and concatenated binary sections. Any section is located with a single file seek. int64 section offsets support engine plans exceeding 2 GB.
+| Failure Pattern | Diagnosis | Agent Action |
+|---|---|---|
+| Build fails | Config parsing or weight loading error | Fix `matches()` or `load_weights()` in plugin |
+| Plane 2 fails at layer 0 | Embedding or first-layer weight mapping | Check embedding table shape, transposition |
+| Plane 2 fails at layer N | Weight mapping error at layer N | Check Q/K/V/O/gate/up/down mapping for that layer |
+| Plane 2: TRT_std != HF_std | Rotation or permutation error | Check RoPE mode, head dimension order |
+| Plane 2: TRT_std == HF_std but high MaxDiff | Scaling or normalization error | Check norm epsilon, activation variant, Gemma +1.0 |
+| Plane 3 fails only after K steps | Cache eviction or position clamping bug | Check `max_cache_length` parameter |
+| Plane 3: `code` prompt fails, others pass | Tokenizer or rare-token embedding issue | Check tokenizer extraction, special tokens |
+| Plane 4 fails but Planes 1-3 pass | C++ runtime disagreement | Mirror runner bug — check mask/position/cache logic |
+| Plane 5 vision features fail | Preprocessor or vision encoder error | Check pixel ordering, patch_size, merge_size |
 
-**Stage 2 — C++ Runtime**: Loads the `.trtfb` bundle and runs autoregressive inference. Zero dependency on Python, PyTorch, safetensors, or HuggingFace. The runtime binary is minimal (~13 source files) and deployment-ready.
+This decision tree is what makes the framework agentic — the diagnostic output maps directly to corrective actions in the plugin code.
 
-**Engine-Introspection-Driven Feature Detection**: The C++ runtime discovers model capabilities by probing the TRT engine's IO tensor registry — not by reading configuration fields:
+### Innovation 2: Composable Builder Stack Designed for Agent Iteration
 
-```cpp
-// Auto-detect VL embedding support
-d_input_embed(has_io_tensor(*engine.engine, "input_embed") ? embed_bytes : 0)
+The builder stack is structured so that each layer of the framework corresponds to a layer of validation, creating a tight feedback loop:
 
-// Auto-detect DeepStack levels (0, 1, 2, 3, ...)
-for (int32_t i = 0; ; ++i) {
-    std::string name = "deepstack_embed_" + std::to_string(i);
-    if (!has_io_tensor(*engine.engine, name)) break;
-    d_deepstack_embeds.emplace_back(embed_bytes);
-}
-```
+**Layer 1 — `graph_ops.py` (Atomic TRT Operations)** → validated by **Plane 1** (atomic op oracle). Pure tensor-in/tensor-out functions: `add_rms_norm`, `add_apply_rope`, `add_layer_norm`, `add_gelu_new`, etc. An agent adding a new op writes the function, then runs Plane 1 to verify numerical correctness in isolation.
 
-A text-only decoder, a standard VL model, and a Qwen3-VL with 3 DeepStack levels execute through identical C++ code. The engine IS the interface contract. This means **an agent can add new capabilities to the Python builder without ever touching the C++ runtime** — as long as the new capabilities are expressed through named engine tensors, the runtime adapts automatically.
+**Layer 2 — `graph_blocks.py` (Weight-Aware Composable Blocks)** → validated by **Plane 2** (per-layer oracle). `add_attention_block`, `add_swiglu_mlp`, `add_gelu_fc_mlp`. Blocks explicitly do NOT apply residual connections — the caller composes residuals. This means the same attention block works for sequential, parallel, and DeepStack-injected residual patterns. An agent composing blocks runs Plane 2 to see which layer first diverges.
 
-### Innovation 4: Device-Resident KV Cache for Speed-of-Light Inference
+**Layer 3 — `standard_decoder_builder.py` + Plugins** → validated by **Plane 3** (trajectory oracle). Parameterized by `norm_type`, `mlp_type`, `position_type`, `activation`, etc. An agent creating a new plugin selects parameters, runs Plane 3, and gets per-step feedback across 4 prompt types.
 
-The `DeviceKvCache` achieves theoretical maximum inference throughput by eliminating PCIe transfers for the KV cache — the largest data structure in autoregressive inference.
+**Layer 4 — C++ Runtime** → validated by **Plane 4** (cross-language oracle). The mirror runner (`TrtRunner`) is the specification; the C++ runtime must match it exactly.
 
-**Architecture**: `2 * num_layers` persistent GPU memory allocations, each sized to `max_cache_length * attention_size * sizeof(float)`. Allocated once at generation start. No per-step `cudaMalloc` or `cudaFree`.
+**The builder-validation correspondence is the key design insight**: an agent working at Layer N can trust that Layers 1..N-1 are correct (validated by Planes 1..N-1), and focus debugging on Layer N using Plane N's diagnostic output.
 
-**Per-step operation** (`run_decoder_step_device`) — all on a single CUDA stream:
-1. CPU: compute position_id (one integer min) and attention mask (~1 KB) — the only CPU work
-2. H2D async: token_id (4B) + position_id (4B) + mask (~1KB) — the only PCIe transfers
-3. TRT engine bind: persistent cache device pointers bound directly (zero-copy)
-4. `enqueueV3(stream)`: TRT forward pass
-5. D2D async: cache update — append during fill, shift-and-append during eviction
-6. D2H async: logits (vocab_size * 4B) — the only result back
-7. Single `cudaStreamSynchronize`
+### Innovation 3: Zero-Registration Auto-Discovery Plugin Architecture
 
-The KV cache (potentially hundreds of MB) **never crosses the PCIe bus**. Only ~2 KB of control inputs go H2D per step.
+Adding a new HF model family requires creating a single Python file — the framework validates it automatically. Plugins are discovered via `pkgutil.iter_modules()` scanning for `.py` files with a module-level `plugin` attribute. The `FamilyPlugin` protocol uses structural typing. Four customization levels (pure delegation, weight transformation, custom loading, fully custom graph) let the agent select minimal effort for the model's complexity. Scaffolding via `new_family.py` generates a working plugin from `config.json`.
 
-**Sliding-window eviction**:
-```
-if (cache_length < max_cache_length):
-    cudaMemcpyAsync(cache + offset, present, row_bytes, D2D, stream)  // append
-else:
-    cudaMemcpyAsync(cache, cache + row_bytes, (max-1) * row_bytes, D2D, stream)  // shift left
-    cudaMemcpyAsync(cache + tail, present, row_bytes, D2D, stream)  // append at end
-```
+### Innovation 4: Two-Stage Bundle Architecture with Engine-Introspection
 
-**Pre-allocated per-step I/O** (`DeviceResources`): Every tensor touched per step is allocated once, driven by engine introspection. This includes auto-detected DeepStack and VL buffers.
+Build-time Python produces `.trtfb` bundles; C++ runtime loads them. The runtime discovers capabilities by probing TRT engine tensor names (`has_io_tensor`), not config fields. An agent adds new Python-side capabilities without C++ changes — the runtime auto-detects new tensor names.
 
-**Position clamping**: Once the cache fills, position_id is clamped to `max_cache_length` to prevent out-of-bounds RoPE table indexing. The RoPE tables are baked into the TRT engine as constants at build time.
+### Innovation 5: Device-Resident KV Cache for Speed-of-Light Inference
 
-### Innovation 5: Branchless Soft-Switch for Vision-Language Models
+`DeviceKvCache`: persistent GPU allocations, zero per-step malloc, ~2 KB PCIe per step (vs ~2 GB in prior art). Sliding-window D2D eviction. Single CUDA stream. Pre-allocated I/O via engine introspection.
 
-The system bridges VL models to TRT without conditional branching, using scalar-multiplication gating that produces exact arithmetic zeros:
+### Innovation 6: Branchless Soft-Switch for Vision-Language Models
 
-**VL embedding blend** (single static TRT graph, no branching):
-```python
-hidden = (1 - use_input_embed) * token_embed + use_input_embed * input_embed
-```
-When `flag=0.0`: `hidden = token_embed`. When `flag=1.0`: `hidden = input_embed`.
-
-**DeepStack multi-level injection** at early decoder layers:
-```python
-post_attn = post_attn + deepstack_embed[layer_idx] * deepstack_active
-```
-When `deepstack_active=0.0`, the runtime `cudaMemset`s embed buffers to zero — product is exactly 0.0, sum is a no-op. One TRT engine for all inference phases.
-
-**Merge-group image preprocessing**: Rather than adding a GPU-side gather/scatter to reorder patches, the preprocessor physically reorders input pixels on the CPU so the Conv2D naturally produces patches in merge-group order. Three-way coordinate system agreement (preprocessor layout, Conv2D output order, position embedding order) eliminates any in-engine reordering.
-
-### Innovation 6: Multi-Tier Automated Validation Pipeline for Agentic Correctness
-
-The system provides **immediate, multi-level correctness feedback** that an AI agent can use to iterate on a new model family bridge. The validation architecture has five independent planes, each catching a different class of error:
-
-**The Mirror Runner**: A pure-Python TRT inference runner (`TrtRunner`) maintains exact algorithmic parity with the C++ runtime — identical mask construction, position clamping, cache eviction, VL gating, DeepStack injection. This is not an approximation — it is a specification document written as executable code.
-
-**Plane 1 — Atomic op unit tests** (`test_graph_ops.py`): Each `graph_ops.py` function tested against HF/PyTorch reference implementations at `atol=1e-5`. An agent modifying Layer 1 gets immediate feedback on numerical correctness.
-
-**Plane 2 — Per-layer hidden state comparison** (`diff_layers.py`): Debug engine with intermediate outputs compared against HF `output_hidden_states=True` at `atol=0.05`. An agent whose plugin has a weight mapping bug sees exactly which layer diverges.
-
-**Plane 3 — Full autoregressive logit trajectory** (`diff_logits.py`): Four "battery" prompts (factual, reasoning, code, multi-turn) stress different token distributions. Per-step logit comparison at `atol=1e-3`. An agent whose plugin produces correct single-step outputs but has a cache bug sees divergence at the step where it manifests.
-
-**Plane 4 — Token-level Python vs C++ parity** (`test_runner_parity.py`): Exact string equality of generated text between Python mirror and C++ binary. Because autoregressive generation amplifies any single-token divergence, this catches every component simultaneously.
-
-**Plane 5 — VL pipeline validation** (`diff_vl.py`): Vision feature cosine similarity, embed_input gate test, full VL generation, and C++ binary parity — with GPU memory isolation (TRT freed before HF loads to prevent OOM).
-
-**The agentic workflow**: An AI agent:
-1. Reads a model's `config.json` and determines the architectural delta from standard
-2. Runs `new_family.py` to scaffold a plugin (or writes one from scratch)
-3. Runs `validate_family.sh` — gets immediate pass/fail with localized diagnostics
-4. Iterates on the plugin based on which validation plane failed
-5. Upon all-pass, the model is permanently bridged to TRT inference
-
-The entire cycle — from "new model appears on HF Hub" to "production-ready TRT inference" — can be completed by an AI agent in a single session.
+Single static TRT engine for all inference phases via scalar-multiplication gating: `hidden = (1-flag)*token + flag*embed`. DeepStack multi-level injection: `post_attn += embed * active`. Merge-group pixel preprocessing eliminates in-engine gather/scatter. Build-time baking of GQA expansion, RoPE tables, ALiBi slopes.
 
 ---
 
 ## 6. What are the specific technical differences (not benefits) between the solution described in the previous question and prior solutions?
 
-### Difference 1: Single-File Agentic Extension vs. Multi-File Manual Integration
+### Difference 1: Five-Plane Differential Testing Oracle vs. Single-Level Validation
 
-**Prior art** (TensorRT-LLM): Adding a new model family requires editing multiple C++ files across the codebase: model definition, weight loader, graph builder, config parser, and registration code. Typical new-model PRs touch 10-20 files.
+**Prior art**: Correctness validation uses golden-file comparison (brittle, cannot localize errors), end-to-end integration tests (pass/fail only, no localization), or manual per-layer inspection (O(layers * models), unscalable).
 
-**This invention**: Adding a new model family requires creating a single `.py` file in the `families/` directory with a module-level `plugin` attribute. Zero shared files are edited. The plugin is discovered at import time via `pkgutil.iter_modules()`. The `FamilyPlugin` protocol uses structural typing (`typing.Protocol`) — no inheritance, no base class import. Optional capabilities (VL engine building, runtime strategy override) are detected via `getattr(plugin, 'method', None)` probing. The scaffolding script auto-generates a working plugin from a model's `config.json`. The validation script provides a one-command correctness gate. This pipeline is designed for an AI agent to execute autonomously.
+**This invention**: Five independent validation planes, each providing error-class-specific diagnostics:
+- Plane 1: Per-operation TRT-vs-PyTorch comparison at `atol=1e-5`, testing each graph_ops function in isolation across multiple parameter combinations
+- Plane 2: Per-layer hidden state comparison using TRT identity layers to expose intermediate outputs without affecting graph fusion, with diagnostic `TRT_std`/`HF_std` columns that distinguish scaling from permutation errors
+- Plane 3: Multi-step autoregressive logit trajectory across a battery of 4 prompt types (factual/reasoning/code/multi-turn), where different failure patterns map to different error classes (step-0 = weight mapping, late divergence = cache bug, code-only = tokenizer issue)
+- Plane 4: Cross-language parity via a behaviorally-identical Python mirror runner using cuda-python, asserting exact string equality of generated text between Python and C++
+- Plane 5: Decomposed VL validation (vision features, embed gate, full generation, C++ parity) with GPU memory isolation and cosine-similarity hard gate
 
-### Difference 2: Three-Layer Composable Stack vs. Monolithic Builders or Per-Model Code
+All planes are invoked by a single `validate_family.sh` command. Each plane's diagnostic output maps to specific corrective actions in the plugin code, forming an agent decision tree.
 
-**Prior art** (TensorRT-LLM): Single builder with deeply nested conditionals for architectural variations. (HuggingFace): Per-model `modeling_*.py` files with O(N) code duplication.
+### Difference 2: Behaviorally-Identical Dual-Language Mirror Runner vs. No Cross-Language Validation
 
-**This invention**: Three composable layers with strict separation. Layer 1 (graph_ops) is purely tensor-in/tensor-out — no weight naming, no model awareness. Layer 2 (graph_blocks) provides weight-aware blocks that explicitly do NOT apply residual connections — the caller composes the residual pattern, enabling one attention block implementation across sequential residuals, parallel residuals, and DeepStack injection points. Layer 3 (standard_decoder_builder + plugins) assembles full engines through parameterization. An agent working at Layer 3 composes from Layers 1 and 2 without understanding TRT internals. An agent at Layer 4 (fully custom graph) still reuses Layer 1 and 2 blocks.
+**Prior art**: No existing TRT inference system maintains a second implementation of the runtime in a different language for parity testing. Cross-language correctness is validated only at the end-to-end level.
 
-### Difference 3: Automated Multi-Tier Validation Pipeline vs. Manual Testing
+**This invention**: `TrtRunner` in Python reimplements every algorithm in the C++ runtime — attention mask construction, position clamping, sliding-window cache eviction, VL scalar gating, DeepStack injection — using cuda-python for GPU memory management. The mirror auto-detects engine capabilities via tensor name probing, identical to the C++ `DeviceResources` constructor. Token-level divergence between Python and C++ is treated as a bug in either implementation. The mirror serves simultaneously as a testing oracle, a living specification, and the engine that powers Planes 2 and 3.
 
-**Prior art**: Correctness validation uses golden-file comparison (brittle) or end-to-end tests (cannot localize bugs). Adding a new model requires manual test authoring.
+### Difference 3: Builder-Validation Layer Correspondence vs. Unstructured Test Suites
 
-**This invention**: Five independent validation planes (atomic ops, per-layer hidden states, autoregressive logit trajectories across 4 prompt types, token-level Python/C++ parity, VL pipeline) are invoked by a single `validate_family.sh` command. A pure-Python TRT runner maintains exact algorithmic parity with the C++ runtime, serving as a specification document. The debug engine uses TRT identity layers to expose intermediate hidden states as outputs without affecting fusion. Per-model JSON manifests in `tests/e2e/models/` enable adding a new model to the E2E test suite by creating one JSON file. The validation pipeline is designed to be invoked by an AI agent after each iteration.
+**Prior art**: Tests are organized by test type (unit, integration, e2e) with no structural correspondence to the system's architectural layers.
 
-### Difference 4: Engine-Introspection Feature Detection vs. Configuration-Driven Dispatch
+**This invention**: Each builder layer has a corresponding validation plane: Layer 1 (graph_ops) → Plane 1, Layer 2 (graph_blocks) → Plane 2, Layer 3 (standard_decoder_builder + plugins) → Plane 3, Layer 4 (C++ runtime) → Plane 4. An agent working at Layer N can trust that Layers 1..N-1 are correct and focus debugging using Plane N's output. The `debug_layer_outputs=True` flag in the builder produces a debug engine with intermediate outputs at every layer boundary, enabling Plane 2 without changing the builder's production output.
 
-**Prior art** (TensorRT-LLM, vLLM, Triton): Runtime reads explicit configuration fields or plugin registries to determine model capabilities. Adding a new capability requires modifying the runtime's dispatch logic.
+### Difference 4: Prompt Battery for Error-Class Triangulation vs. Single-Prompt Testing
 
-**This invention**: The C++ runtime discovers capabilities by probing TRT engine tensor names (`has_io_tensor(*engine, "deepstack_embed_0")`). The engine's IO tensor table IS the interface contract. A text-only model, a standard VL model, and a Qwen3-VL with 3 DeepStack levels execute through identical C++ code paths. An agent can add new Python-side capabilities (new tensor outputs) without any C++ changes — the runtime adapts automatically via tensor name probing.
+**Prior art**: Logit comparison tests use a single test prompt.
 
-### Difference 5: Fully Device-Resident KV Cache vs. Host-Managed Cache
+**This invention**: The battery of 4 prompts (factual, reasoning, code, multi-turn) is designed so that different error classes produce different failure patterns across the battery. A weight mapping error fails all prompts at step 0. A cache bug fails all prompts at the same step. A tokenizer issue fails only the code prompt. An activation variant error causes gradual divergence across all prompts. This triangulation maps failure patterns to specific plugin code locations, guiding the agent's fix.
 
-**Prior art** (standard TRT inference): KV cache transferred H2D/D2H each step (~2 GB/step for large models). PagedAttention manages fragmentation but not PCIe elimination.
+### Difference 5: Single-File Agentic Extension with Validation Gate vs. Multi-File Manual Integration
 
-**This invention**: KV cache allocated once, remains on GPU for entire generation. Per-step PCIe: ~2 KB control inputs H2D, vocab_size*4 bytes logits D2H. Cache update is purely D2D. Complete decode loop on a single CUDA stream with a single `cudaStreamSynchronize`. Pre-allocated I/O buffers driven by engine introspection — including auto-detected DeepStack and VL buffers.
+**Prior art** (TensorRT-LLM): Adding a new model requires editing 10-20 files with no automated correctness gate.
 
-### Difference 6: Bundle-Only Runtime vs. Monolithic Load+Build+Infer
+**This invention**: Single `.py` file, auto-discovered, validated by one command. Scaffolding generates working plugins from `config.json`. The validation gate provides localized diagnostics that guide the agent's iterations.
 
-**Prior art**: Runtime links against safetensors/PyTorch/HF libraries and can rebuild engines on the fly.
+### Difference 6: Engine-Introspection Feature Detection vs. Configuration-Driven Dispatch
 
-**This invention**: Complete stage separation. Python build (`trtf_build/`) has full HF/TRT ecosystem access. C++ runtime is bundle-only — cannot load weights, cannot build engines, has zero dependency on Python/PyTorch/safetensors. Connected by a portable `.trtfb` binary artifact with int64 section offsets. The build stage is where the agent operates; the runtime is a fixed, minimal, deploy-anywhere binary.
+**Prior art**: Runtime reads config fields to determine capabilities.
 
-### Difference 7: Branchless Scalar-Gate VL Integration vs. Separate Engines or Dynamic Shapes
+**This invention**: C++ runtime probes TRT engine tensor names. An agent adds new capabilities (new tensor outputs) without C++ changes — the runtime auto-detects. The mirror runner uses the same probing pattern, keeping parity tests synchronized.
 
-**Prior art**: Separate engine compilation for text-only and VL-prefill modes, or dynamic shape support with optimization limitations.
+### Difference 7: Fully Device-Resident KV Cache vs. Host-Managed Cache
 
-**This invention**: Single static TRT engine for all phases. Mode selection via scalar multiplication: `hidden = (1 - flag) * token_embed + flag * input_embed`. DeepStack injection: `post_attn = post_attn + embed * active_gate`. When gate is 0.0, `cudaMemset` zeros the embed buffers — product is exactly 0.0. TRT compiles and optimizes the full graph. No engine switching, no dynamic shapes. Image preprocessing reorders pixels on CPU so Conv2D naturally produces merge-group-ordered patches, eliminating in-engine gather/scatter.
+**Prior art**: KV cache transferred H2D/D2H each step.
 
-### Difference 8: Build-Time Weight and Positional Encoding Baking vs. Runtime Computation
+**This invention**: KV cache on GPU for entire generation. ~2 KB PCIe per step. D2D sliding-window eviction. Single CUDA stream with single sync point.
 
-**Prior art**: GQA head expansion and RoPE positional encoding computed at inference time.
+### Difference 8: Branchless Scalar-Gate VL vs. Separate Engines
 
-**This invention**: GQA K/V weights expanded at build time by replicating each KV head's columns. RoPE cos/sin tables pre-computed as NumPy arrays and baked as TRT constants. Rotate-half matrix pre-computed as sparse `[attention_size, attention_size]` matrix. ALiBi cached index tensors baked. Only scalar `position_id` is dynamic at runtime. All positional encoding computation is shifted to build time; the runtime does only trivial integer arithmetic per step.
+**Prior art**: Separate engines per mode or dynamic shapes.
+
+**This invention**: One static engine. Scalar multiplication gates: `(1-flag)*token + flag*embed`. `cudaMemset` zeros inactive buffers — exact arithmetic zero. Merge-group pixel preprocessing eliminates in-engine gather. Build-time baking of GQA, RoPE, ALiBi.
 
 ---
 
 ## Additional Notes
 
-### The Agentic Workflow in Practice
+### The Agent-Guided Development Loop in Practice
 
-The system has been used to bridge 24+ model families to TRT. The typical workflow for an AI agent adding a new family:
+The system has been used to bridge 24+ model families. The agent-framework interaction follows a tight loop:
 
-| Step | Agent Action | Time |
-|------|-------------|------|
-| 1 | Read model's `config.json` from HF Hub | Seconds |
-| 2 | Run `new_family.py --hf-repo <repo>` to scaffold plugin | Seconds |
-| 3 | Examine scaffolded plugin, customize if needed | Minutes |
-| 4 | Run `validate_family.sh <repo>` | ~5 min |
-| 5 | If validation fails, iterate on plugin based on diagnostic output | Minutes per iteration |
-| 6 | All planes pass — model is permanently bridged to TRT | — |
+```
+Agent reads config.json → Scaffolds plugin → Runs validate_family.sh
+                                                    │
+                                    ┌───────────────┴───────────────┐
+                                    │                               │
+                                All PASS                      Failure(s)
+                                    │                               │
+                            Model bridged ✓             Read diagnostic output
+                                                               │
+                                                    Map failure pattern to
+                                                    error class (decision tree)
+                                                               │
+                                                    Fix specific plugin code
+                                                               │
+                                                    Re-run validate_family.sh
+                                                               │
+                                                          (loop back)
+```
 
-For architecturally-standard models (Level 1 plugins), the scaffolded plugin works without modification. For models with unusual weight layouts (Level 3), the agent typically needs 1-2 iterations. The validation pipeline pinpoints exactly where the issue is — the agent never has to guess.
+| Model Complexity | Plugin Level | Typical Agent Iterations | Guided By |
+|---|---|---|---|
+| Standard decoder (Qwen, LLaMA) | Level 1 (~30 lines) | 0-1 | Scaffolding produces working plugin |
+| Unusual norms (Gemma) | Level 2 (~50 lines) | 1-2 | Plane 2 shows norm layers diverging |
+| Fused weights (Phi-3) | Level 3 (~100 lines) | 2-3 | Plane 2 shows Q/K/V layers diverging |
+| Custom architecture (Mamba) | Level 4 (~300 lines) | 3-5 | Plane 1 validates new ops, Plane 3 validates trajectory |
 
 ### Scaling Properties
 
 | Dimension | Scaling Behavior |
-|-----------|-----------------|
-| New model family | O(1): single file, no shared code changes |
-| New architectural feature (e.g., DeepStack) | O(1) in C++ runtime via tensor-name auto-detection |
-| New TRT operation | O(1): add to Layer 1, compose in Layer 2/3 |
-| New runtime strategy (e.g., Mamba) | O(1): one factory function + one backend class |
-| Validation of new model | O(1): one JSON manifest file for E2E suite |
-| Agent iterations per family | Typically 1-3 for standard, 3-5 for custom |
+|---|---|
+| New model family | O(1): single file + validation gate |
+| New architectural feature | O(1) in C++ via tensor-name auto-detection |
+| New TRT operation | O(1): add to Layer 1, validate with Plane 1 |
+| New validation to E2E suite | O(1): one JSON manifest file |
+| Agent iterations per family | 0-5, guided by diagnostic output |
 
 ### Key Implementation Files
 
 | Component | Files |
 |---|---|
+| **Differential Testing Framework** | |
+| Mirror runner (Python ↔ C++ oracle) | `trtf_build/trtf_build/debug_runner.py` |
+| Plane 1: Atomic op oracle | `tools/test_graph_ops.py` |
+| Plane 2: Per-layer oracle | `tools/diff_layers.py` |
+| Plane 3: Logit trajectory oracle | `tools/diff_logits.py` |
+| Plane 4: Cross-language parity | `tools/test_runner_parity.py` |
+| Plane 5: VL pipeline oracle | `tools/diff_vl.py` |
+| Validation gate (all planes) | `scripts/validate_family.sh` |
+| E2E test framework | `tests/e2e/test_full_pipeline.py`, `tests/e2e/conftest.py` |
+| Per-model manifests | `tests/e2e/models/*.json` |
+| **Composable Builder Stack** | |
+| Layer 1: atomic ops | `trtf_build/trtf_build/graph_ops.py` |
+| Layer 2: composable blocks | `trtf_build/trtf_build/graph_blocks.py` |
+| Layer 3: decoder builder | `trtf_build/trtf_build/standard_decoder_builder.py` |
+| **Plugin Architecture** | |
 | Plugin auto-discovery | `trtf_build/trtf_build/families/__init__.py` |
 | Plugin protocol | `trtf_build/trtf_build/families/base.py` |
 | Family plugins (24+) | `trtf_build/trtf_build/families/*.py` |
 | Plugin scaffolding | `scripts/new_family.py` |
-| Validation gate | `scripts/validate_family.sh` |
-| Layer 1: atomic ops | `trtf_build/trtf_build/graph_ops.py` |
-| Layer 2: composable blocks | `trtf_build/trtf_build/graph_blocks.py` |
-| Layer 3: decoder builder | `trtf_build/trtf_build/standard_decoder_builder.py` |
 | Engine builder orchestrator | `trtf_build/trtf_build/engine_builder.py` |
-| Bundle format (C++ reader) | `src/bundle/bundle_format.{h,cpp}` |
-| Bundle format (Python writer) | `trtf_build/trtf_build/bundle_writer.py` |
+| **Runtime** | |
 | Device-resident KV cache | `src/runtime/trt/device_kv_cache.{h,cpp}` |
-| Decode step execution | `src/runtime/trt/device_kv_cache.cpp` |
 | Engine-introspection dispatch | `src/cabi/trtf_c.cpp`, `src/cabi/bundle_helpers.{h,cpp}` |
+| Bundle format | `src/bundle/bundle_format.{h,cpp}`, `trtf_build/trtf_build/bundle_writer.py` |
 | VL vision encoder builder | `trtf_build/trtf_build/qwen_vl_vision_builder.py` |
 | Image preprocessor (4 strategies) | `src/runtime/trt/image_preprocessor.{h,cpp}` |
-| Mirror runner (Python) | `trtf_build/trtf_build/debug_runner.py` |
-| Diff tools | `tools/diff_logits.py`, `tools/diff_layers.py`, `tools/diff_vl.py` |
-| Runner parity test | `tools/test_runner_parity.py` |
-| Graph op unit tests | `tools/test_graph_ops.py` |
-| E2E test framework | `tests/e2e/test_full_pipeline.py`, `tests/e2e/conftest.py` |
-| Per-model manifests | `tests/e2e/models/*.json` |

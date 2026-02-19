@@ -11,12 +11,17 @@ option(TRTF_ENABLE_TRT "Enable TensorRT backend integration" ON)
 
 set(_trtf_default_search_paths
   /usr/include/x86_64-linux-gnu
+  /usr/include/aarch64-linux-gnu
   /usr/include
   /usr/lib/x86_64-linux-gnu
+  /usr/lib/aarch64-linux-gnu
   /lib/x86_64-linux-gnu
+  /lib/aarch64-linux-gnu
   /usr/local/cuda
   /usr/local/cuda/include
   /usr/local/cuda/lib64
+  /usr/local/cuda/targets/sbsa-linux/include
+  /usr/local/cuda/targets/sbsa-linux/lib
 )
 
 if(DEFINED ENV{TRT_ROOT})
