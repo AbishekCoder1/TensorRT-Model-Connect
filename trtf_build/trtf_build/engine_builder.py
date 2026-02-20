@@ -27,6 +27,17 @@ _HF_ALLOW_PATTERNS = [
     "merges.txt",
     "special_tokens_map.json",
     "*.model",
+    # Diffusers format
+    "model_index.json",
+    "*/config.json",
+    "*/model.safetensors",
+    "*/model-*.safetensors",
+    "*/model.safetensors.index.json",
+    "*/diffusion_pytorch_model.safetensors",
+    "*/diffusion_pytorch_model-*.safetensors",
+    "*/diffusion_pytorch_model.safetensors.index.json",
+    "scheduler/*",
+    "tokenizer/*",
 ]
 
 
@@ -37,7 +48,8 @@ def _resolve_model(model_id_or_path: str) -> str:
     directly. Otherwise, downloads via huggingface_hub.snapshot_download().
     """
     local = Path(model_id_or_path)
-    if local.is_dir() and (local / "config.json").exists():
+    if local.is_dir() and ((local / "config.json").exists()
+                           or (local / "model_index.json").exists()):
         return str(local)
 
     # Treat as HuggingFace repo ID — download to HF cache.
@@ -116,6 +128,15 @@ def build_bundle(
     model_id_or_path_orig = getattr(
         build_bundle, '_model_id_or_path_orig', model_dir)
     t0 = time.monotonic()
+
+    # Detect diffusers format (model_index.json present)
+    is_diffusers = (model_dir_path / "model_index.json").exists()
+
+    if is_diffusers:
+        _build_diffusion_bundle(
+            model_dir_path, output_path, max_cache_length,
+            verbose=verbose, t0=t0)
+        return
 
     # 1. Parse config
     config = ModelConfig.from_dir(model_dir_path)
@@ -221,6 +242,145 @@ def build_bundle(
     t4 = time.monotonic()
     print(f"[trtf-build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
           file=sys.stderr)
+
+
+def _build_diffusion_bundle(
+    model_dir_path: Path,
+    output_path: str,
+    max_cache_length: int,
+    *,
+    verbose: bool = False,
+    t0: float = 0.0,
+) -> None:
+    """Build a diffusion model bundle from a diffusers-format directory."""
+    import json as json_module
+
+    # Parse model_index.json to determine pipeline type
+    model_index = json.loads(
+        (model_dir_path / "model_index.json").read_text())
+    pipeline_class = model_index.get("_class_name", "")
+
+    print(f"[trtf-build] Diffusion pipeline: {pipeline_class}",
+          file=sys.stderr)
+
+    # Synthesize a ModelConfig from the model_index
+    # For diffusers, model_type comes from the pipeline class
+    model_type = _diffusers_pipeline_to_model_type(pipeline_class)
+    config = ModelConfig(model_type=model_type, raw=model_index)
+
+    # Find plugin
+    plugin = find_plugin(model_type)
+    if plugin is None:
+        supported = ", ".join(p.name for p in _ALL_PLUGINS)
+        raise ValueError(
+            f"No family plugin for diffusion model_type={model_type!r}. "
+            f"Supported: {supported}")
+
+    print(f"[trtf-build] Family: {plugin.name}", file=sys.stderr)
+
+    # Load weights (lightweight — just paths for diffusion)
+    t1 = time.monotonic()
+    weights = plugin.load_weights(str(model_dir_path), config)
+    t2 = time.monotonic()
+
+    # Build all component engines
+    build_components = getattr(plugin, 'build_components', None)
+    if build_components is None:
+        raise ValueError(
+            f"Plugin {plugin.name} does not support build_components()")
+
+    components = build_components(
+        str(model_dir_path), config, weights, verbose=verbose)
+    if components is None:
+        raise ValueError(
+            f"Plugin {plugin.name}.build_components() returned None")
+
+    t3 = time.monotonic()
+    print(f"[trtf-build] All engines built [{t3 - t1:.1f}s]", file=sys.stderr)
+
+    # Assemble bundle sections
+    sections = []
+
+    # Text encoder plans
+    for i, (enc_name, enc_plan) in enumerate(components["text_encoders"]):
+        sections.append(BundleSection(
+            f"text_encoder_{i}_plan", enc_plan))
+        print(f"  text_encoder_{i} ({enc_name}): "
+              f"{len(enc_plan) / (1024 * 1024):.1f} MB", file=sys.stderr)
+
+    # Denoiser plan
+    denoiser_plan = components["denoiser"]
+    sections.append(BundleSection("denoiser_plan", denoiser_plan))
+    print(f"  denoiser: {len(denoiser_plan) / (1024 * 1024):.1f} MB",
+          file=sys.stderr)
+
+    # VAE decoder plan
+    vae_plan = components["vae_decoder"]
+    sections.append(BundleSection("vae_decoder_plan", vae_plan))
+    print(f"  vae_decoder: {len(vae_plan) / (1024 * 1024):.1f} MB",
+          file=sys.stderr)
+
+    # Preprocessor weights (patch embedding, timestep MLP, text projection)
+    if "preprocessor_weights" in components:
+        pp_data = components["preprocessor_weights"]
+        sections.append(BundleSection("preprocessor_weights", pp_data))
+        print(f"  preprocessor_weights: {len(pp_data) / (1024):.1f} KB",
+              file=sys.stderr)
+
+    # Build config.json with diffusion config injected
+    cfg_dict = {
+        "model_type": model_type,
+        "runtime_strategy": getattr(plugin, "runtime_strategy", "diffusion"),
+        "num_text_encoders": len(components["text_encoders"]),
+    }
+
+    # Inject diffusion config from plugin
+    get_diff_config = getattr(plugin, 'get_diffusion_config', None)
+    if get_diff_config is not None:
+        diff_cfg = get_diff_config(config)
+        if diff_cfg is not None:
+            cfg_dict.update(diff_cfg)
+
+    cfg_data = json.dumps(cfg_dict, indent=2).encode("utf-8")
+    sections.append(BundleSection("config.json", cfg_data))
+
+    # Embed tokenizer files from tokenizer/ subdirectory if present
+    tokenizer_dir = model_dir_path / "tokenizer"
+    if tokenizer_dir.is_dir():
+        for filename in ("tokenizer.json", "tokenizer_config.json",
+                         "special_tokens_map.json", "spiece.model",
+                         "tokenizer.model"):
+            file_path = tokenizer_dir / filename
+            if file_path.exists():
+                sections.append(BundleSection(filename, file_path.read_bytes()))
+
+    # Write bundle
+    info = BundleInfo(
+        model_id=model_dir_path.name,
+        model_type=model_type,
+        family=plugin.name,
+        trt_version=_get_trt_version(),
+        gpu_name=_get_gpu_name(),
+        created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+    write_bundle(output_path, info, sections)
+    t4 = time.monotonic()
+    print(f"[trtf-build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
+          file=sys.stderr)
+
+
+def _diffusers_pipeline_to_model_type(pipeline_class: str) -> str:
+    """Map diffusers pipeline class name to our model_type string."""
+    mapping = {
+        "WanPipeline": "wan_t2v",
+        "WanVideoToVideoPipeline": "wan_t2v",
+        "FluxPipeline": "flux",
+        "StableDiffusion3Pipeline": "sd3",
+        "CogVideoXPipeline": "cogvideox",
+        "HunyuanVideoPipeline": "hunyuan_video",
+    }
+    return mapping.get(pipeline_class, pipeline_class.lower())
 
 
 def build(

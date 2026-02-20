@@ -1,5 +1,70 @@
 # Worklog
 
+## 2026-02-19 — Diffusion pipeline parity with HF diffusers
+
+Systematic component-by-component debugging of the Wan2.1-T2V-1.3B diffusion
+pipeline. The C++ TRT pipeline was producing noise/checkerboard instead of
+coherent video. Root-caused and fixed 7 bugs; final output now matches HF
+diffusers quality (cat walking in garden, 480×832@17fr, 30 steps).
+
+### Debugging methodology
+
+Created `tools/debug_diffusion_pipeline.py` — 9-step automated comparison:
+config verification, text projection activation, T5 encoding, timestep
+embedding, patch embedding, 3D RoPE, single DiT step, scheduler sigmas, and
+full multi-step pipeline. Also created `tools/diff_dit.py` (TRT DiT engine
+vs HF single-step) and `tools/diff_full_pipeline.py` (full 30-step CFG
+pipeline in Python using TRT engines).
+
+Key isolation technique: inject TRT T5 embeddings into HF's `pipe()` via
+`prompt_embeds=` parameter. This proved T5 was correct (cat appears) while
+TRT DiT appeared broken — which turned out to be a `text_seq_len` config
+mismatch, not an engine bug.
+
+### Bugs found and fixed
+
+| # | Bug | Severity | Files |
+|---|-----|----------|-------|
+| 1 | **Unpatchify output ordering** — DiT `proj_out` outputs `[pt,ph,pw,C]` but unpatchify assumed `[C,pt,ph,pw]`, scrambling spatial layout into a 16×16-pixel checkerboard | Critical | `diffusion_backend.cpp`, `diffusion_runner.py` |
+| 2 | **T5 text_seq_len=512 vs HF's 226** — T5 engine built for 226 tokens but C++ defaulted to 512, reading garbage from unallocated GPU memory | Critical | `wan_t2v.py`, `fast_path_config.h/.cpp`, `diffusion_backend.cpp` |
+| 3 | **Missing EOS token** — `hf_tokenizer.py` used `add_special_tokens=False`, dropping the T5 EOS token (id=1) | Critical | `scripts/hf_tokenizer.py` |
+| 4 | **CFG null text was zeros** — Unconditional embedding used zero vectors instead of T5-encoded empty string `""`, breaking classifier-free guidance | High | `diffusion_backend.cpp` |
+| 5 | **T5 padding positions not zeroed** — T5 produces non-zero output at padding positions (via residual connections); DiT cross-attention has no mask, so these dilute the text signal | High | `diffusion_backend.cpp`, `diffusion_runner.py` |
+| 6 | **Scheduler sigma_min** — C++ used `linspace(1,0,N+1)` in sigma-space; HF uses `sigma_min=shift*(1/N)/(1+(shift-1)/N)` and linspaces in t-space | Medium | `diffusion_backend.cpp`, `flow_match_euler.py` |
+| 7 | **text_seq_len not in bundle config** — Field was never written to config.json or parsed by C++ | Medium | `wan_t2v.py`, `fast_path_config.h/.cpp` |
+
+### What was NOT a bug
+
+- **Text projection activation**: GELU(tanh) was correct (not SiLU as initially suspected)
+- **flow_shift**: Bundle correctly stores 3.0
+- **Patch embedding, timestep embedding, 3D RoPE**: All matched HF perfectly
+- **TRT DiT engine**: Correct — single-step cosine=1.0, 5-step cosine=1.0
+
+### Verification
+
+- `tools/debug_diffusion_pipeline.py`: 9/9 PASS
+- `tools/diff_dit.py`: single-step cosine=1.0, 5-step cosine=1.0
+- `tools/diff_full_pipeline.py`: 30-step Python TRT pipeline produces clear cat
+- C++ `trtf generate-video`: 17 frames at 480×832, clear cat walking in garden
+- 11/11 C++ unit tests pass, 64/64 Python family tests pass
+
+### Files changed
+
+- `src/runtime/trt/diffusion_backend.cpp` — unpatchify loop order, scheduler, T5 mask + zeroing, CFG null text encoding, text_seq_len wiring
+- `src/runtime/trt/diffusion_backend.h` — (unchanged, text_seq_len already had default 512)
+- `src/cabi/fast_path_config.h` — added `text_seq_len` field
+- `src/cabi/fast_path_config.cpp` — parse `text_seq_len` from config JSON
+- `trtf_build/trtf_build/diffusion_runner.py` — encode_text mask + zeroing, unpatchify ordering
+- `trtf_build/trtf_build/families/wan_t2v.py` — `_T5_MAX_SEQ_LEN=226`, `text_seq_len` in config
+- `trtf_build/trtf_build/schedulers/flow_match_euler.py` — match HF sigma schedule
+- `scripts/hf_tokenizer.py` — `add_special_tokens=True`
+- `tools/debug_diffusion_pipeline.py` — new: 9-step automated comparison
+- `tools/diff_dit.py` — new: DiT engine diff test
+- `tools/diff_full_pipeline.py` — new: full pipeline Python reference
+- `tools/test_trt_t5_hf_dit.py` — new: T5 isolation test
+
+---
+
 ## 2026-02-18 — GB300 ARM (aarch64) support
 
 Set up the project on `gb300-nvl-019-compute01.nvidia.com` (aarch64, 4x GB300 284GB each, CUDA 13.2, driver 595.37).

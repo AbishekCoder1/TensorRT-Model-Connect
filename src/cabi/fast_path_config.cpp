@@ -86,6 +86,33 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.image_token_str = extract_json_string(config_text, "image_token_str", "");
     }
 
+    // Diffusion fields
+    if (cfg.runtime_strategy == "diffusion")
+    {
+        cfg.num_text_encoders = extract_json_int(config_text, "num_text_encoders", 0);
+        cfg.scheduler = extract_json_string(config_text, "scheduler", "flow_match_euler");
+        cfg.num_inference_steps = extract_json_int(config_text, "num_inference_steps", 50);
+        cfg.guidance_scale = extract_json_float(config_text, "guidance_scale", 5.0F);
+        cfg.flow_shift = extract_json_float(config_text, "flow_shift", 1.0F);
+        cfg.video_height = extract_json_int(config_text, "video_height", 480);
+        cfg.video_width = extract_json_int(config_text, "video_width", 832);
+        cfg.video_num_frames = extract_json_int(config_text, "video_num_frames", 81);
+        cfg.z_dim = extract_json_int(config_text, "z_dim", 16);
+        cfg.scale_factor_temporal = extract_json_int(config_text, "scale_factor_temporal", 4);
+        cfg.scale_factor_spatial = extract_json_int(config_text, "scale_factor_spatial", 8);
+        cfg.dit_dim = extract_json_int(config_text, "dit_dim", 1536);
+        cfg.dit_num_heads = extract_json_int(config_text, "dit_num_heads", 12);
+        cfg.dit_num_layers = extract_json_int(config_text, "dit_num_layers", 30);
+        cfg.freq_dim = extract_json_int(config_text, "freq_dim", 256);
+        cfg.num_vae_caches = extract_json_int(config_text, "num_vae_caches", 0);
+        cfg.text_encoder_dim = extract_json_int(config_text, "text_encoder_dim", 4096);
+        cfg.text_seq_len = extract_json_int(config_text, "text_seq_len", 512);
+        cfg.latents_mean = extract_json_float_array(config_text, "latents_mean");
+        cfg.latents_std = extract_json_float_array(config_text, "latents_std");
+        cfg.patch_size = extract_json_int_array(config_text, "patch_size");
+        cfg.vae_model_id = extract_json_string(config_text, "vae_model_id", "");
+    }
+
     return cfg;
 }
 

@@ -1,8 +1,9 @@
 // trtf CLI -- command-line interface using the library API.
 //
 // Usage:
-//   trtf run     <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
-//   trtf inspect <bundle.trtfb>
+//   trtf run             <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
+//   trtf generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N] [--guidance-scale S] [--hf-python PATH]
+//   trtf inspect         <bundle.trtfb>
 //   trtf version
 
 #include "trtf/pipeline.h"
@@ -21,7 +22,10 @@ struct CliArgs {
     std::string prompt;
     std::string hf_python;
     std::string image_path;
+    std::string output_dir;
     int max_new_tokens{0};
+    int num_steps{-1};
+    float guidance_scale{-1.0F};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -31,8 +35,9 @@ void print_usage()
 {
     std::cerr <<
         "Usage:\n"
-        "  trtf run     <bundle.trtfb> --prompt \"text\" [--image PATH] [--max-new-tokens N] [--hf-python PATH]\n"
-        "  trtf inspect <bundle.trtfb>\n"
+        "  trtf run             <bundle.trtfb> --prompt \"text\" [--image PATH] [--max-new-tokens N] [--hf-python PATH]\n"
+        "  trtf generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] [--guidance-scale S] [--hf-python PATH]\n"
+        "  trtf inspect         <bundle.trtfb>\n"
         "  trtf version\n";
 }
 
@@ -60,7 +65,8 @@ CliArgs parse_args(int argc, char** argv)
         return args;
     }
 
-    if (args.command != "run" && args.command != "inspect")
+    if (args.command != "run" && args.command != "inspect" &&
+        args.command != "generate-video")
     {
         args.parse_error = true;
         args.error_message = "Unknown command: " + args.command;
@@ -117,6 +123,42 @@ CliArgs parse_args(int argc, char** argv)
                 return args;
             }
             args.image_path = argv[++i];
+            continue;
+        }
+
+        if (arg == "--output" || arg == "-o")
+        {
+            if (i + 1 >= argc)
+            {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.output_dir = argv[++i];
+            continue;
+        }
+
+        if (arg == "--num-steps")
+        {
+            if (i + 1 >= argc)
+            {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.num_steps = std::atoi(argv[++i]);
+            continue;
+        }
+
+        if (arg == "--guidance-scale")
+        {
+            if (i + 1 >= argc)
+            {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
 
@@ -197,6 +239,55 @@ int cmd_run(const CliArgs& args)
     return EXIT_SUCCESS;
 }
 
+int cmd_generate_video(const CliArgs& args)
+{
+    if (args.bundle_path.empty())
+    {
+        std::cerr << "Error: generate-video requires a .trtfb bundle file\n";
+        return EXIT_FAILURE;
+    }
+
+    if (args.prompt.empty())
+    {
+        std::cerr << "Error: generate-video requires --prompt\n";
+        return EXIT_FAILURE;
+    }
+
+    TrtfPipelineOptions opts{};
+    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
+    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
+    if (pipeline == nullptr)
+    {
+        std::cerr << "Error: " << trtf_last_error() << '\n';
+        return EXIT_FAILURE;
+    }
+
+    if (!pipeline->supports_video())
+    {
+        std::cerr << "Error: this bundle does not support video generation\n";
+        delete pipeline;
+        return EXIT_FAILURE;
+    }
+
+    const std::string out_dir = args.output_dir.empty()
+        ? "/tmp/trtf_frames" : args.output_dir;
+
+    const int32_t num_frames = pipeline->generate_video(
+        args.prompt.c_str(), out_dir.c_str(),
+        args.num_steps, args.guidance_scale);
+
+    if (num_frames < 0)
+    {
+        std::cerr << "Error: video generation failed\n";
+        delete pipeline;
+        return EXIT_FAILURE;
+    }
+
+    std::cout << "Generated " << num_frames << " frames in " << out_dir << '\n';
+    delete pipeline;
+    return EXIT_SUCCESS;
+}
+
 int cmd_inspect(const CliArgs& args)
 {
     if (args.bundle_path.empty())
@@ -261,6 +352,10 @@ int main(int argc, char** argv)
     if (args.command == "run")
     {
         return cmd_run(args);
+    }
+    if (args.command == "generate-video")
+    {
+        return cmd_generate_video(args);
     }
     if (args.command == "inspect")
     {

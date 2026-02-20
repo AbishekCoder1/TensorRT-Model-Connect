@@ -11,9 +11,13 @@
 #include "runtime/trt/vl_backend.h"
 #include "runtime/trt/vision_engine.h"
 #include "runtime/trt/image_preprocessor.h"
+#include "runtime/trt/diffusion_backend.h"
 #include "runtime/trt/trt_common.h"
 
+#include "stb_image_write.h"
+
 #include <chrono>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <iostream>
@@ -149,6 +153,76 @@ public:
     bool supports_vision() const override
     {
         return mBackend->supports_vision();
+    }
+
+    bool supports_video() const override
+    {
+#if TRTF_HAS_TRT
+        auto* diff = dynamic_cast<trtf::DiffusionBackend*>(mBackend.get());
+        return diff != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    int32_t generate_video(const char* prompt, const char* output_dir,
+                           int32_t num_steps, float guidance_scale) override
+    {
+#if TRTF_HAS_TRT
+        auto* diff = dynamic_cast<trtf::DiffusionBackend*>(mBackend.get());
+        if (diff == nullptr)
+        {
+            return -1;
+        }
+
+        // Tokenize prompt
+        std::vector<int32_t> input_ids;
+        if (mTokenizer && prompt != nullptr)
+        {
+            input_ids = mTokenizer->encode(prompt);
+        }
+
+        // Generate video
+        auto video = diff->generate_video(input_ids, num_steps, guidance_scale);
+        if (video.frames.empty() || video.num_frames <= 0)
+        {
+            return -1;
+        }
+
+        // Write PNG frames
+        const std::string dir(output_dir != nullptr ? output_dir : "/tmp/trtf_frames");
+        std::filesystem::create_directories(dir);
+
+        for (int32_t t = 0; t < video.num_frames; ++t)
+        {
+            const auto frame_size = static_cast<std::size_t>(video.height) *
+                                    static_cast<std::size_t>(video.width) * 3;
+            const float* frame_f = video.frames.data() +
+                static_cast<std::size_t>(t) * frame_size;
+
+            // Convert float32 [0,1] -> uint8 [0,255]
+            std::vector<uint8_t> pixels(frame_size);
+            for (std::size_t i = 0; i < frame_size; ++i)
+            {
+                pixels[i] = static_cast<uint8_t>(
+                    std::max(0.0F, std::min(255.0F, frame_f[i] * 255.0F)));
+            }
+
+            char fname[64];
+            std::snprintf(fname, sizeof(fname), "/frame_%04d.png", t);
+            const std::string path = dir + fname;
+
+            stbi_write_png(path.c_str(), video.width, video.height, 3,
+                           pixels.data(), video.width * 3);
+        }
+
+        std::cerr << "[trtf] Wrote " << video.num_frames << " PNG frames to "
+                  << dir << std::endl;
+        return video.num_frames;
+#else
+        (void) prompt; (void) output_dir; (void) num_steps; (void) guidance_scale;
+        return -1;
+#endif
     }
 
     const char* model_id() const override
@@ -346,12 +420,141 @@ PipelineImpl* create_decoder_pipeline(
     return make_pipeline(model_id, std::move(tok), std::move(backend), "trt");
 }
 
+PipelineImpl* create_diffusion_pipeline(
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    trtf::TrtUniquePtr<nvinfer1::IRuntime>& runtime_ptr,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& bundle_path)
+{
+    std::cerr << "[trtf] Creating diffusion pipeline ..." << std::endl;
+
+    // Deserialize text encoder engines
+    std::vector<trtf::DiffusionEngine> text_encoders;
+    for (std::size_t i = 0; i < sections.text_encoder_plans.size(); ++i)
+    {
+        const auto* plan = sections.text_encoder_plans[i];
+        if (plan == nullptr || plan->empty()) continue;
+
+        std::cerr << "[trtf] Deserializing text encoder " << i
+                  << " (" << plan->size() / (1024 * 1024) << " MB) ..." << std::endl;
+
+        trtf::DiffusionEngine te;
+        te.name = "text_encoder_" + std::to_string(i);
+        te.engine = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(plan->data(), plan->size()));
+        if (!te.engine)
+            throw std::runtime_error("Failed to deserialize text encoder " + std::to_string(i));
+        te.context = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+            te.engine->createExecutionContext());
+        if (!te.context)
+            throw std::runtime_error("Failed to create text encoder context " + std::to_string(i));
+        text_encoders.push_back(std::move(te));
+    }
+
+    // Deserialize denoiser engine
+    if (sections.denoiser_plan_data == nullptr || sections.denoiser_plan_data->empty())
+        throw std::runtime_error("Bundle has no denoiser_plan section: " + bundle_path);
+
+    std::cerr << "[trtf] Deserializing denoiser ("
+              << sections.denoiser_plan_data->size() / (1024 * 1024) << " MB) ..." << std::endl;
+
+    trtf::DiffusionEngine denoiser;
+    denoiser.name = "denoiser";
+    denoiser.engine = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+        runtime_ptr->deserializeCudaEngine(
+            sections.denoiser_plan_data->data(), sections.denoiser_plan_data->size()));
+    if (!denoiser.engine)
+        throw std::runtime_error("Failed to deserialize denoiser engine");
+    denoiser.context = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+        denoiser.engine->createExecutionContext());
+
+    // Deserialize VAE decoder engine
+    if (sections.vae_decoder_plan_data == nullptr || sections.vae_decoder_plan_data->empty())
+        throw std::runtime_error("Bundle has no vae_decoder_plan section: " + bundle_path);
+
+    std::cerr << "[trtf] Deserializing VAE decoder ("
+              << sections.vae_decoder_plan_data->size() / (1024 * 1024) << " MB) ..." << std::endl;
+
+    trtf::DiffusionEngine vae_decoder;
+    vae_decoder.name = "vae_decoder";
+    vae_decoder.engine = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+        runtime_ptr->deserializeCudaEngine(
+            sections.vae_decoder_plan_data->data(), sections.vae_decoder_plan_data->size()));
+    if (!vae_decoder.engine)
+        throw std::runtime_error("Failed to deserialize VAE decoder engine");
+    vae_decoder.context = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+        vae_decoder.engine->createExecutionContext());
+
+    // Create backend
+    auto backend = trtf::CreateDiffusionBackend(
+        std::move(text_encoders), std::move(denoiser), std::move(vae_decoder), fp_cfg);
+    if (!backend || !backend->is_available())
+        throw std::runtime_error("Failed to create diffusion backend");
+
+    // Load preprocessor weights (patch embedding, timestep MLP, text projection)
+    if (sections.preprocessor_weights_data != nullptr &&
+        !sections.preprocessor_weights_data->empty())
+    {
+        auto pp_weights = trtf::parse_preprocessor_weights(*sections.preprocessor_weights_data);
+        backend->set_preprocessor_weights(std::move(pp_weights));
+    }
+
+    // Set paths for VAE subprocess and bundle info
+    backend->set_hf_python(hf_python);
+    backend->set_bundle_path(bundle_path);
+
+    // Tokenizer (optional for diffusion — some models use sentencepiece)
+    trtf::TokenizerResult tok = {nullptr, ""};
+    try
+    {
+        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[trtf] Warning: no tokenizer in bundle (" << e.what() << ")" << std::endl;
+    }
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_diffusion, strategy=diffusion)" << std::endl;
+
+    if (tok.tokenizer)
+    {
+        return make_pipeline(model_id, std::move(tok), std::move(backend), "trt_diffusion");
+    }
+
+    // No tokenizer — create pipeline with a null tokenizer
+    auto* pipeline = new PipelineImpl(
+        model_id, nullptr, std::move(backend), "trt_diffusion", trtf::GenerationConfig{});
+    return pipeline;
+}
+
 // --- Main dispatch ---
 
 PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::string& hf_python)
 {
     trtf::BundleFile bundle = trtf::ReadBundleFile(bundle_path);
     auto sections = trtf::find_bundle_sections(bundle);
+
+    // Check for diffusion bundle early (no engine_plan needed)
+    // Parse config to detect strategy before engine deserialization
+    trtf::FastPathModelConfig fp_cfg_early;
+    if (sections.config_json_data != nullptr && !sections.config_json_data->empty())
+    {
+        const std::string config_text_early(
+            sections.config_json_data->begin(), sections.config_json_data->end());
+        fp_cfg_early = trtf::parse_fast_path_config(config_text_early, bundle.info.max_cache_length);
+    }
+
+    if (fp_cfg_early.runtime_strategy == "diffusion")
+    {
+        trtf::TrtLogger logger;
+        auto runtime_ptr = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
+        if (!runtime_ptr) throw std::runtime_error("Failed to create TRT runtime");
+        return create_diffusion_pipeline(
+            fp_cfg_early, sections, runtime_ptr,
+            bundle.info.model_id, hf_python, bundle_path);
+    }
 
     if (sections.plan_data == nullptr || sections.plan_data->empty())
     {
@@ -421,6 +624,13 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
         return create_vl_pipeline(
             std::move(trt_engine), std::move(exec_ctx), fp_cfg,
             sections, runtime_ptr, bundle.info.model_id, hf_python, bundle_path);
+    }
+
+    if (strategy == "diffusion")
+    {
+        return create_diffusion_pipeline(
+            fp_cfg, sections, runtime_ptr,
+            bundle.info.model_id, hf_python, bundle_path);
     }
 
     return create_decoder_pipeline(

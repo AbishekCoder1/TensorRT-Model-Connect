@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace trtf {
 
@@ -38,6 +39,30 @@ struct FastPathModelConfig {
     int32_t num_image_pad_tokens{0}; // number of image pad tokens per image
     std::string vl_prompt_template; // prompt template with {image_pads} and {prompt}
     std::string image_token_str;    // string for one image pad token (e.g. "<|image_pad|>")
+
+    // Diffusion fields (used when runtime_strategy == "diffusion")
+    int32_t num_text_encoders{0};
+    std::string scheduler;              // "flow_match_euler", etc.
+    int32_t num_inference_steps{50};
+    float guidance_scale{5.0F};
+    float flow_shift{1.0F};
+    int32_t video_height{480};
+    int32_t video_width{832};
+    int32_t video_num_frames{81};
+    int32_t z_dim{16};
+    int32_t scale_factor_temporal{4};
+    int32_t scale_factor_spatial{8};
+    int32_t dit_dim{1536};
+    int32_t dit_num_heads{12};
+    int32_t dit_num_layers{30};
+    int32_t freq_dim{256};
+    int32_t num_vae_caches{0};
+    int32_t text_encoder_dim{4096};
+    int32_t text_seq_len{512};
+    std::vector<float> latents_mean;
+    std::vector<float> latents_std;
+    std::vector<int32_t> patch_size;    // [pt, ph, pw]
+    std::string vae_model_id;
 };
 
 // Parse model configuration from config.json text for the fast path.

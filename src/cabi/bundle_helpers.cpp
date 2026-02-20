@@ -25,6 +25,16 @@ BundleSections find_bundle_sections(const BundleFile& bundle)
         else if (section.name == "merges.txt") s.merges_txt_data = &section.data;
         else if (section.name == "special_tokens_map.json") s.special_tokens_data = &section.data;
         else if (section.name == "tokenizer.model") s.tokenizer_model_data = &section.data;
+        // Diffusion sections
+        else if (section.name == "denoiser_plan") s.denoiser_plan_data = &section.data;
+        else if (section.name == "vae_decoder_plan") s.vae_decoder_plan_data = &section.data;
+        else if (section.name == "preprocessor_weights") s.preprocessor_weights_data = &section.data;
+        else if (section.name.rfind("text_encoder_", 0) == 0 &&
+                 section.name.find("_plan") != std::string::npos)
+        {
+            // text_encoder_0_plan, text_encoder_1_plan, ...
+            s.text_encoder_plans.push_back(&section.data);
+        }
     }
     return s;
 }

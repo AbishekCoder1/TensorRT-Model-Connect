@@ -282,6 +282,65 @@ std::vector<float> extract_json_float_array(const std::string& text, const std::
     return out;
 }
 
+std::vector<int32_t> extract_json_int_array(const std::string& text, const std::string& key, std::size_t max_count)
+{
+    const std::string needle = "\"" + key + "\"";
+    const std::size_t key_pos = text.find(needle);
+    if (key_pos == std::string::npos)
+    {
+        return {};
+    }
+
+    const std::size_t colon = text.find(':', key_pos);
+    if (colon == std::string::npos)
+    {
+        return {};
+    }
+
+    const std::size_t open_bracket = text.find('[', colon + 1);
+    if (open_bracket == std::string::npos)
+    {
+        return {};
+    }
+
+    std::vector<int32_t> out;
+    std::size_t pos = open_bracket + 1;
+    while (pos < text.size() && out.size() < max_count)
+    {
+        while (pos < text.size() && (std::isspace(static_cast<unsigned char>(text[pos])) != 0 || text[pos] == ','))
+        {
+            ++pos;
+        }
+        if (pos >= text.size() || text[pos] == ']')
+        {
+            break;
+        }
+
+        std::size_t end = pos;
+        while (end < text.size() && (std::isdigit(static_cast<unsigned char>(text[end])) != 0 || text[end] == '-'))
+        {
+            ++end;
+        }
+
+        if (end == pos)
+        {
+            break;
+        }
+
+        try
+        {
+            out.push_back(static_cast<int32_t>(std::stoi(text.substr(pos, end - pos))));
+        }
+        catch (const std::exception&)
+        {
+            break;
+        }
+        pos = end;
+    }
+
+    return out;
+}
+
 int32_t parse_positive_env_int(const char* env_name, int32_t fallback)
 {
     const char* env = std::getenv(env_name);

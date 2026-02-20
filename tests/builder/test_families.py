@@ -125,6 +125,9 @@ _POSITIVE_MATCH_CASES = [
     ("mixtral", "mixtral"),
     # Nemotron
     ("nemotron", "nemotron"),
+    # Wan T2V (diffusion)
+    ("wan_t2v", "wan_t2v"),
+    ("wan", "wan_t2v"),
 ]
 
 

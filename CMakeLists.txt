@@ -75,6 +75,7 @@ add_library(trtf_core
   src/runtime/trt/vl_backend.cpp
   src/runtime/trt/image_preprocessor.cpp
   src/runtime/trt/vision_engine.cpp
+  src/runtime/trt/diffusion_backend.cpp
   src/runtime/trt/stb_impl.cpp
   src/tokenizer/hf_python_tokenizer.cpp
   src/tokenizer/vocab_tokenizer.cpp

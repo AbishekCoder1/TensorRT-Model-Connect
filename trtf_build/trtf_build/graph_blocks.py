@@ -291,3 +291,249 @@ def add_gelu_fc_mlp(
         fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, fc2_bias)
 
     return fc2
+
+
+# ---------------------------------------------------------------------------
+# Diffusion building blocks
+# ---------------------------------------------------------------------------
+
+def add_gated_mlp(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    *,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    mlp_size: int,
+    activation: str = "gelu_new",
+) -> trt.ITensor:
+    """Gated MLP: activation(fc1(x)) * fc1_gate(x), then fc2.
+
+    Used by T5 encoder (gated GELU) and DiT FFN. Two parallel projections
+    where one is gated by activation.
+
+    Weight keys: {prefix}.w_fc1, {prefix}.w_fc1_gate, {prefix}.w_fc2
+    Optional: {prefix}.fc1_bias, {prefix}.fc1_gate_bias, {prefix}.fc2_bias
+    """
+    # Two parallel projections
+    fc1 = graph_ops.add_matmul_rhs_constant(
+        network, inp, hidden_size, mlp_size,
+        weights[f"{prefix}.w_fc1"])
+    fc1_bias = weights.get(f"{prefix}.fc1_bias")
+    if fc1_bias is not None:
+        fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias)
+
+    fc1_gate = graph_ops.add_matmul_rhs_constant(
+        network, inp, hidden_size, mlp_size,
+        weights[f"{prefix}.w_fc1_gate"])
+    fc1_gate_bias = weights.get(f"{prefix}.fc1_gate_bias")
+    if fc1_gate_bias is not None:
+        fc1_gate = graph_ops.add_bias_sum(
+            network, fc1_gate, mlp_size, fc1_gate_bias)
+
+    # Gate: activation(fc1) * fc1_gate
+    activated = graph_ops.add_activation(network, fc1, activation)
+    gated = network.add_elementwise(
+        activated, fc1_gate, trt.ElementWiseOperation.PROD)
+
+    # Output projection
+    fc2 = graph_ops.add_matmul_rhs_constant(
+        network, gated.get_output(0), mlp_size, hidden_size,
+        weights[f"{prefix}.w_fc2"])
+    fc2_bias = weights.get(f"{prefix}.fc2_bias")
+    if fc2_bias is not None:
+        fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, fc2_bias)
+
+    return fc2
+
+
+def add_dit_block(
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    context: trt.ITensor,
+    adaln_params: trt.ITensor,
+    *,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    context_dim: int,
+    num_heads: int,
+    q_seq_len: int,
+    kv_seq_len: int,
+    mlp_size: int,
+    eps: float = 1e-5,
+) -> trt.ITensor:
+    """DiT block: AdaLN self-attention + cross-attention + AdaLN FFN.
+
+    adaln_params: [1, 6 * hidden_size] — from timestep MLP, split into
+        (scale1, shift1, gate1, scale2, shift2, gate2) for self-attn and FFN.
+
+    Weight keys expected:
+        {prefix}.self_attn.w_q/w_k/w_v/w_o
+        {prefix}.cross_attn.w_q/w_k/w_v/w_o
+        {prefix}.ffn.w_fc1/w_fc1_gate/w_fc2
+        {prefix}.norm_cross.gamma  (for cross-attn norm)
+
+    Returns updated hidden state.
+    """
+    # Split AdaLN params: 6 chunks of hidden_size
+    # [scale1, shift1, gate1, scale2, shift2, gate2]
+    chunks = []
+    for i in range(6):
+        s = network.add_slice(
+            adaln_params,
+            start=(0, i * hidden_size),
+            shape=(1, hidden_size),
+            stride=(1, 1),
+        )
+        chunks.append(s.get_output(0))
+    scale1, shift1, gate1, scale2, shift2, gate2 = chunks
+
+    # --- Self-attention with AdaLN ---
+    normed = graph_ops.add_adaptive_layernorm(
+        network, hidden, scale1, shift1, hidden_size, eps)
+
+    self_attn_out = graph_ops.add_self_attention_block(
+        network, normed,
+        w_q=weights[f"{prefix}.self_attn.w_q"],
+        w_k=weights[f"{prefix}.self_attn.w_k"],
+        w_v=weights[f"{prefix}.self_attn.w_v"],
+        w_o=weights[f"{prefix}.self_attn.w_o"],
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        seq_length=q_seq_len,
+    )
+
+    # Gate and residual
+    gated_self_attn = network.add_elementwise(
+        self_attn_out, gate1, trt.ElementWiseOperation.PROD)
+    hidden = network.add_elementwise(
+        hidden, gated_self_attn.get_output(0),
+        trt.ElementWiseOperation.SUM).get_output(0)
+
+    # --- Cross-attention (no AdaLN, uses standard LayerNorm) ---
+    cross_norm_gamma = weights.get(f"{prefix}.norm_cross.gamma")
+    if cross_norm_gamma is not None:
+        eps_t = graph_ops.add_constant(
+            network, (1, 1), np.array([eps], dtype=np.float32))
+        cross_normed = graph_ops.add_layer_norm(
+            network, hidden, hidden_size,
+            cross_norm_gamma,
+            weights.get(f"{prefix}.norm_cross.beta",
+                        np.zeros(hidden_size, dtype=np.float32)),
+            eps_t)
+    else:
+        cross_normed = hidden
+
+    cross_attn_out = graph_ops.add_cross_attention(
+        network, cross_normed, context,
+        w_q=weights[f"{prefix}.cross_attn.w_q"],
+        w_k=weights[f"{prefix}.cross_attn.w_k"],
+        w_v=weights[f"{prefix}.cross_attn.w_v"],
+        w_o=weights[f"{prefix}.cross_attn.w_o"],
+        hidden_size=hidden_size,
+        context_dim=context_dim,
+        num_heads=num_heads,
+        q_seq_len=q_seq_len,
+        kv_seq_len=kv_seq_len,
+    )
+
+    hidden = network.add_elementwise(
+        hidden, cross_attn_out,
+        trt.ElementWiseOperation.SUM).get_output(0)
+
+    # --- FFN with AdaLN ---
+    ffn_normed = graph_ops.add_adaptive_layernorm(
+        network, hidden, scale2, shift2, hidden_size, eps)
+
+    ffn_out = add_gated_mlp(
+        network, ffn_normed,
+        weights=weights,
+        prefix=f"{prefix}.ffn",
+        hidden_size=hidden_size,
+        mlp_size=mlp_size,
+        activation="silu",
+    )
+
+    # Gate and residual
+    gated_ffn = network.add_elementwise(
+        ffn_out, gate2, trt.ElementWiseOperation.PROD)
+    hidden = network.add_elementwise(
+        hidden, gated_ffn.get_output(0),
+        trt.ElementWiseOperation.SUM).get_output(0)
+
+    return hidden
+
+
+def add_vae_resblock_3d(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    cache_in1: trt.ITensor,
+    cache_in2: trt.ITensor,
+    *,
+    weights: WeightDict,
+    prefix: str,
+    in_channels: int,
+    out_channels: int,
+    num_groups: int = 32,
+    temporal_kernel: int = 3,
+    eps: float = 1e-6,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """3D VAE residual block with causal temporal convolutions.
+
+    Input: [B, C_in, 1, H, W] (single frame)
+    cache_in1, cache_in2: temporal caches for the two causal convs
+
+    Returns: (output, updated_cache1, updated_cache2)
+
+    Structure: GroupNorm -> SiLU -> CausalConv3D -> GroupNorm -> SiLU -> CausalConv3D + shortcut
+    """
+    # First GroupNorm + SiLU + CausalConv3D
+    normed1 = graph_ops.add_group_norm(
+        network, inp, in_channels, num_groups,
+        weights[f"{prefix}.norm1.weight"],
+        weights[f"{prefix}.norm1.bias"],
+        eps)
+    act1 = graph_ops.add_silu(network, normed1)
+    conv1_out, cache_out1 = graph_ops.add_causal_conv3d(
+        network, act1, cache_in1,
+        weight=weights[f"{prefix}.conv1.weight"],
+        bias=weights.get(f"{prefix}.conv1.bias"),
+        out_channels=out_channels,
+        kernel_size=(temporal_kernel, 3, 3),
+        padding_hw=(1, 1),
+    )
+
+    # Second GroupNorm + SiLU + CausalConv3D
+    normed2 = graph_ops.add_group_norm(
+        network, conv1_out, out_channels, num_groups,
+        weights[f"{prefix}.norm2.weight"],
+        weights[f"{prefix}.norm2.bias"],
+        eps)
+    act2 = graph_ops.add_silu(network, normed2)
+    conv2_out, cache_out2 = graph_ops.add_causal_conv3d(
+        network, act2, cache_in2,
+        weight=weights[f"{prefix}.conv2.weight"],
+        bias=weights.get(f"{prefix}.conv2.bias"),
+        out_channels=out_channels,
+        kernel_size=(temporal_kernel, 3, 3),
+        padding_hw=(1, 1),
+    )
+
+    # Shortcut (1x1 conv if channel mismatch)
+    if in_channels != out_channels:
+        shortcut = graph_ops.add_conv3d_as_conv2d(
+            network, inp,
+            weight=weights[f"{prefix}.shortcut.weight"],
+            bias=weights.get(f"{prefix}.shortcut.bias"),
+            out_channels=out_channels,
+            kernel_size=(1, 1, 1),
+        )
+    else:
+        shortcut = inp
+
+    # Residual connection
+    out = network.add_elementwise(
+        conv2_out, shortcut, trt.ElementWiseOperation.SUM)
+
+    return out.get_output(0), cache_out1, cache_out2

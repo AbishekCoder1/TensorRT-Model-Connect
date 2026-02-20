@@ -100,7 +100,7 @@ def main() -> int:
             print("--text-file is required for encode", file=sys.stderr)
             return 4
         text = pathlib.Path(args.text_file).read_text(encoding="utf-8")
-        ids = tokenizer.encode(text, add_special_tokens=False)
+        ids = tokenizer.encode(text, add_special_tokens=True)
         print(" ".join(str(i) for i in ids))
         return 0
 

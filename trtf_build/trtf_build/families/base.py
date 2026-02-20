@@ -81,3 +81,36 @@ class FamilyPlugin(Protocol):
                 "nearest" (matches PIL NEAREST)
         """
         return None
+
+    # ------------------------------------------------------------------
+    # Optional: Diffusion model support
+    # ------------------------------------------------------------------
+
+    def build_components(
+        self, model_dir: str, config: ModelConfig, weights: WeightDict,
+        *, verbose: bool = False,
+    ) -> dict | None:
+        """Build all diffusion engine components.
+
+        Return None (default) if this is not a diffusion model. Diffusion
+        plugins should return a dict:
+            {
+                "text_encoders": [(name, plan_bytes), ...],  # 1+ text encoders
+                "denoiser": plan_bytes,                       # DiT or UNet
+                "vae_decoder": plan_bytes,                    # VAE decoder
+            }
+        """
+        return None
+
+    def get_diffusion_config(self, config: ModelConfig) -> dict | None:
+        """Return diffusion config dict to inject into the bundle's config.json.
+
+        Return None (default) if this is not a diffusion model. Diffusion
+        plugins should return a dict with keys like:
+            scheduler, num_inference_steps, guidance_scale, flow_shift,
+            video_height, video_width, video_num_frames,
+            latents_mean, latents_std, dit_dim, dit_num_heads, patch_size,
+            z_dim, scale_factor_temporal, scale_factor_spatial, freq_dim,
+            num_vae_caches.
+        """
+        return None

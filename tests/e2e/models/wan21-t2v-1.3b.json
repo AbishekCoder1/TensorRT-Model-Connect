@@ -1,0 +1,18 @@
+{
+    "model_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "model_type": "wan_t2v",
+    "family": "wan_t2v",
+    "runtime_strategy": "diffusion",
+    "description": "Wan2.1 Text-to-Video 1.3B (diffusers format)",
+    "build_args": {
+        "max_cache_length": 256
+    },
+    "test_prompt": "A cat sitting on a beach watching the sunset",
+    "test_type": "diffusion",
+    "video_num_frames": 17,
+    "video_height": 480,
+    "video_width": 832,
+    "num_inference_steps": 10,
+    "skip_text_comparison": true,
+    "notes": "First diffusion model. Uses flow matching Euler scheduler with shift=3.0."
+}

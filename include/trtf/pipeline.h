@@ -23,6 +23,18 @@ public:
     // Returns true if this pipeline has a vision encoder and supports images.
     virtual bool supports_vision() const { return false; }
 
+    // Returns true if this pipeline supports video generation.
+    virtual bool supports_video() const { return false; }
+
+    // Generate video frames. Returns number of frames written to output_dir,
+    // or -1 on failure. Only works if supports_video() is true.
+    virtual int32_t generate_video(const char* prompt, const char* output_dir,
+                                   int32_t num_steps = -1, float guidance_scale = -1.0F)
+    {
+        (void) prompt; (void) output_dir; (void) num_steps; (void) guidance_scale;
+        return -1;
+    }
+
     // Metadata -- pointers valid for lifetime of the pipeline.
     virtual const char* model_id() const = 0;
     virtual const char* backend_name() const = 0;

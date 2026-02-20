@@ -287,6 +287,21 @@ def _open_safetensors(model_dir: Path) -> list:
             for f in shard_files
         ]
 
+    # Diffusers format: diffusion_pytorch_model.safetensors
+    diff_single = model_dir / "diffusion_pytorch_model.safetensors"
+    if diff_single.exists():
+        return [safe_open(str(diff_single), framework=fw)]
+
+    diff_index = model_dir / "diffusion_pytorch_model.safetensors.index.json"
+    if diff_index.exists():
+        import json
+        index = json.loads(diff_index.read_text())
+        shard_files = sorted(set(index.get("weight_map", {}).values()))
+        return [
+            safe_open(str(model_dir / f), framework=fw)
+            for f in shard_files
+        ]
+
     # Fallback: pytorch_model.bin (older HF models)
     bin_single = model_dir / "pytorch_model.bin"
     if bin_single.exists():

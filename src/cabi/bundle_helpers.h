@@ -31,6 +31,12 @@ struct BundleSections {
     const std::vector<char>* merges_txt_data{nullptr};
     const std::vector<char>* special_tokens_data{nullptr};
     const std::vector<char>* tokenizer_model_data{nullptr};
+
+    // Diffusion sections
+    std::vector<const std::vector<char>*> text_encoder_plans;  // text_encoder_0_plan, ...
+    const std::vector<char>* denoiser_plan_data{nullptr};
+    const std::vector<char>* vae_decoder_plan_data{nullptr};
+    const std::vector<char>* preprocessor_weights_data{nullptr};
 };
 
 // Scan bundle sections and populate pointers by name.
