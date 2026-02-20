@@ -1200,14 +1200,14 @@ def add_temporal_upsample(
     return resize.get_output(0)
 
 
-def add_wan_rms_norm(
+def add_l2_channel_norm(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     num_channels: int,
     gamma: np.ndarray,
     eps: float = 1e-6,
 ) -> trt.ITensor:
-    """WanRMS_norm: F.normalize(x, dim=1) * sqrt(C) * gamma.
+    """L2 channel norm: F.normalize(x, dim=1) * sqrt(C) * gamma.
 
     L2-normalizes over channel dimension (axis=1), then scales by
     sqrt(num_channels) and learnable gamma.

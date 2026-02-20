@@ -33,3 +33,17 @@ def find_plugin(model_type: str) -> FamilyPlugin | None:
         if p.matches(model_type):
             return p
     return None
+
+
+def find_diffusion_plugin(pipeline_class: str) -> FamilyPlugin | None:
+    """Find the first plugin that handles the given diffusers pipeline class.
+
+    Plugins declare supported pipeline classes via a ``pipeline_classes``
+    attribute (list of class name strings). This enables auto-discovery
+    without a hardcoded mapping dict.
+    """
+    for p in _ALL_PLUGINS:
+        classes = getattr(p, 'pipeline_classes', None)
+        if classes and pipeline_class in classes:
+            return p
+    return None

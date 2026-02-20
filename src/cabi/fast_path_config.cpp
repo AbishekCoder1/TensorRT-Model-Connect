@@ -111,6 +111,7 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.latents_std = extract_json_float_array(config_text, "latents_std");
         cfg.patch_size = extract_json_int_array(config_text, "patch_size");
         cfg.vae_model_id = extract_json_string(config_text, "vae_model_id", "");
+        cfg.diffusion_backend_type = extract_json_string(config_text, "diffusion_backend_type", "wan_3d");
     }
 
     return cfg;

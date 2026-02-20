@@ -38,11 +38,16 @@ def load_vae_weights(
     base_dim: int = 96,
     dim_mult: tuple[int, ...] = (1, 2, 4, 4),
     num_res_blocks: int = 2,
+    norm_type: str = "l2_channel_norm",
 ) -> "WeightDict":
     """Load VAE decoder weights from a diffusers-format vae directory.
 
     Only loads decoder weights (not encoder). Returns raw weight arrays
     (no transposition — conv weights are used as-is).
+
+    Args:
+        norm_type: "l2_channel_norm" loads .gamma keys (Wan-style),
+                   "group_norm" loads .weight/.bias keys.
     """
     from pathlib import Path
     from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
@@ -59,6 +64,14 @@ def load_vae_weights(
             return _w(name)
         return None
 
+    def _load_norm(prefix: str, channels: int) -> None:
+        """Load norm weights based on norm_type."""
+        if norm_type == "l2_channel_norm":
+            weights[f"{prefix}.gamma"] = _w(f"{prefix}.gamma")
+        else:
+            weights[f"{prefix}.weight"] = _w(f"{prefix}.weight")
+            weights[f"{prefix}.bias"] = _w(f"{prefix}.bias")
+
     # post_quant_conv [z_dim, z_dim, 1, 1, 1]
     weights["post_quant_conv.weight"] = _w("post_quant_conv.weight")
     weights["post_quant_conv.bias"] = _w("post_quant_conv.bias")
@@ -68,43 +81,47 @@ def load_vae_weights(
     weights["decoder.conv_in.bias"] = _w("decoder.conv_in.bias")
 
     # mid_block: 2 resnets + 1 attention
+    channels_list = [base_dim * m for m in dim_mult]
+    mid_ch = channels_list[-1]
     for i in range(2):
         p = f"decoder.mid_block.resnets.{i}"
-        weights[f"{p}.norm1.gamma"] = _w(f"{p}.norm1.gamma")
-        weights[f"{p}.norm2.gamma"] = _w(f"{p}.norm2.gamma")
+        _load_norm(f"{p}.norm1", mid_ch)
+        _load_norm(f"{p}.norm2", mid_ch)
         weights[f"{p}.conv1.weight"] = _w(f"{p}.conv1.weight")
         weights[f"{p}.conv1.bias"] = _w(f"{p}.conv1.bias")
         weights[f"{p}.conv2.weight"] = _w(f"{p}.conv2.weight")
         weights[f"{p}.conv2.bias"] = _w(f"{p}.conv2.bias")
 
-    # mid_block attention
-    weights["decoder.mid_block.attentions.0.norm.gamma"] = _w(
-        "decoder.mid_block.attentions.0.norm.gamma")
-    weights["decoder.mid_block.attentions.0.to_qkv.weight"] = _w(
-        "decoder.mid_block.attentions.0.to_qkv.weight")
-    weights["decoder.mid_block.attentions.0.to_qkv.bias"] = _w(
-        "decoder.mid_block.attentions.0.to_qkv.bias")
-    weights["decoder.mid_block.attentions.0.proj.weight"] = _w(
-        "decoder.mid_block.attentions.0.proj.weight")
-    weights["decoder.mid_block.attentions.0.proj.bias"] = _w(
-        "decoder.mid_block.attentions.0.proj.bias")
+    # mid_block attention norm
+    attn_prefix = "decoder.mid_block.attentions.0"
+    if norm_type == "l2_channel_norm":
+        weights[f"{attn_prefix}.norm.gamma"] = _w(f"{attn_prefix}.norm.gamma")
+    else:
+        weights[f"{attn_prefix}.norm.weight"] = _w(f"{attn_prefix}.norm.weight")
+        weights[f"{attn_prefix}.norm.bias"] = _w(f"{attn_prefix}.norm.bias")
+    weights[f"{attn_prefix}.to_qkv.weight"] = _w(f"{attn_prefix}.to_qkv.weight")
+    weights[f"{attn_prefix}.to_qkv.bias"] = _w(f"{attn_prefix}.to_qkv.bias")
+    weights[f"{attn_prefix}.proj.weight"] = _w(f"{attn_prefix}.proj.weight")
+    weights[f"{attn_prefix}.proj.bias"] = _w(f"{attn_prefix}.proj.bias")
 
     # up_blocks
     num_levels = len(dim_mult)
     for level in range(num_levels):
         for blk in range(num_res_blocks + 1):
             p = f"decoder.up_blocks.{level}.resnets.{blk}"
-            weights[f"{p}.norm1.gamma"] = _w(f"{p}.norm1.gamma")
-            weights[f"{p}.norm2.gamma"] = _w(f"{p}.norm2.gamma")
+            ch = channels_list[-(level + 1)]
+            _load_norm(f"{p}.norm1", ch)
+            _load_norm(f"{p}.norm2", ch)
             weights[f"{p}.conv1.weight"] = _w(f"{p}.conv1.weight")
             weights[f"{p}.conv1.bias"] = _w(f"{p}.conv1.bias")
             weights[f"{p}.conv2.weight"] = _w(f"{p}.conv2.weight")
             weights[f"{p}.conv2.bias"] = _w(f"{p}.conv2.bias")
             # Channel shortcut
-            sc_w = _maybe(f"{p}.conv_shortcut.weight")
+            sc_prefix = f"{p}.conv_shortcut" if norm_type == "l2_channel_norm" else f"{p}.shortcut"
+            sc_w = _maybe(f"{sc_prefix}.weight")
             if sc_w is not None:
-                weights[f"{p}.conv_shortcut.weight"] = sc_w
-                weights[f"{p}.conv_shortcut.bias"] = _w(f"{p}.conv_shortcut.bias")
+                weights[f"{sc_prefix}.weight"] = sc_w
+                weights[f"{sc_prefix}.bias"] = _w(f"{sc_prefix}.bias")
 
         # Upsampler (spatial 2D conv + optional temporal)
         sp_w = _maybe(f"decoder.up_blocks.{level}.upsamplers.0.resample.1.weight")
@@ -119,7 +136,11 @@ def load_vae_weights(
                 f"decoder.up_blocks.{level}.upsamplers.0.time_conv.bias")
 
     # Output norm + conv
-    weights["decoder.norm_out.gamma"] = _w("decoder.norm_out.gamma")
+    if norm_type == "l2_channel_norm":
+        weights["decoder.norm_out.gamma"] = _w("decoder.norm_out.gamma")
+    else:
+        weights["decoder.norm_out.weight"] = _w("decoder.norm_out.weight")
+        weights["decoder.norm_out.bias"] = _w("decoder.norm_out.bias")
     weights["decoder.conv_out.weight"] = _w("decoder.conv_out.weight")
     weights["decoder.conv_out.bias"] = _w("decoder.conv_out.bias")
 
@@ -173,6 +194,8 @@ def build_causal_vae_3d_engine(
     h_lat: int = 60,
     w_lat: int = 104,
     out_channels: int = 3,
+    norm_type: str = "l2_channel_norm",
+    num_groups: int = 32,
     eps: float = 1e-6,
     verbose: bool = False,
 ) -> bytes:
@@ -254,20 +277,22 @@ def build_causal_vae_3d_engine(
         prefix = f"decoder.mid_block.resnets.{mi}"
         c1 = _add_cache_input(mid_ch, 2, cur_h, cur_w)
         c2 = _add_cache_input(mid_ch, 2, cur_h, cur_w)
-        x, co1, co2 = graph_blocks.add_wan_vae_resblock(
+        x, co1, co2 = graph_blocks.add_vae_resblock_3d(
             network, x, c1, c2,
             weights=weights, prefix=prefix,
-            in_channels=mid_ch, out_channels=mid_ch, eps=eps)
+            in_channels=mid_ch, out_channels=mid_ch,
+            norm_type=norm_type, num_groups=num_groups, eps=eps)
         _set_cache_output(cache_idx - 2, co1)
         _set_cache_output(cache_idx - 1, co2)
 
         # Attention after first mid resnet
         if mi == 0:
-            x = graph_blocks.add_wan_spatial_attention(
+            x = graph_blocks.add_vae_spatial_attention(
                 network, x,
                 weights=weights,
                 prefix="decoder.mid_block.attentions.0",
-                channels=mid_ch, eps=eps)
+                channels=mid_ch,
+                norm_type=norm_type, num_groups=num_groups, eps=eps)
 
     print(f"[vae-3d] mid_block done, T={cur_t}, {cur_h}x{cur_w}",
           file=sys.stderr)
@@ -293,10 +318,11 @@ def build_causal_vae_3d_engine(
 
             c1 = _add_cache_input(in_ch, 2, cur_h, cur_w)
             c2 = _add_cache_input(out_ch, 2, cur_h, cur_w)
-            x, co1, co2 = graph_blocks.add_wan_vae_resblock(
+            x, co1, co2 = graph_blocks.add_vae_resblock_3d(
                 network, x, c1, c2,
                 weights=weights, prefix=prefix,
-                in_channels=in_ch, out_channels=out_ch, eps=eps)
+                in_channels=in_ch, out_channels=out_ch,
+                norm_type=norm_type, num_groups=num_groups, eps=eps)
             _set_cache_output(cache_idx - 2, co1)
             _set_cache_output(cache_idx - 1, co2)
 
@@ -347,9 +373,15 @@ def build_causal_vae_3d_engine(
                   file=sys.stderr)
 
     # --- norm_out + SiLU ---
-    x = graph_ops.add_wan_rms_norm(
-        network, x, prev_ch,
-        weights["decoder.norm_out.gamma"], eps)
+    if norm_type == "l2_channel_norm":
+        x = graph_ops.add_l2_channel_norm(
+            network, x, prev_ch,
+            weights["decoder.norm_out.gamma"], eps)
+    else:
+        x = graph_ops.add_group_norm(
+            network, x, prev_ch, num_groups,
+            weights["decoder.norm_out.weight"],
+            weights["decoder.norm_out.bias"], eps)
     x = graph_ops.add_silu(network, x)
 
     # --- conv_out: CausalConv3D [96 -> 3, (3,3,3)] ---

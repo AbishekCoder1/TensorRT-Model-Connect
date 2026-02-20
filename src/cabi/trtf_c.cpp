@@ -12,6 +12,7 @@
 #include "runtime/trt/vision_engine.h"
 #include "runtime/trt/image_preprocessor.h"
 #include "runtime/trt/diffusion_backend.h"
+#include "runtime/trt/wan_diffusion_backend.h"
 #include "runtime/trt/trt_common.h"
 
 #include "stb_image_write.h"
@@ -158,7 +159,7 @@ public:
     bool supports_video() const override
     {
 #if TRTF_HAS_TRT
-        auto* diff = dynamic_cast<trtf::DiffusionBackend*>(mBackend.get());
+        auto* diff = dynamic_cast<trtf::IDiffusionBackend*>(mBackend.get());
         return diff != nullptr;
 #else
         return false;
@@ -169,7 +170,7 @@ public:
                            int32_t num_steps, float guidance_scale) override
     {
 #if TRTF_HAS_TRT
-        auto* diff = dynamic_cast<trtf::DiffusionBackend*>(mBackend.get());
+        auto* diff = dynamic_cast<trtf::IDiffusionBackend*>(mBackend.get());
         if (diff == nullptr)
         {
             return -1;

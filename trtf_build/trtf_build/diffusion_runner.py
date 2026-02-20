@@ -211,8 +211,11 @@ class DiffusionRunner:
         # Even with attention masking, T5 produces non-zero output at padding
         # positions (via residual connections). These non-zero values dilute the
         # text signal in DiT cross-attention which has no masking.
-        valid_mask = (ids_flat != 0).astype(np.float32)
-        valid_mask = valid_mask.reshape(1, -1, 1)
+        # Note: T5 engine may output fewer tokens than input (engine's built
+        # max_sequence_length). Truncate mask to match actual output length.
+        out_seq_len = embeddings.shape[1]
+        valid_mask = (ids_flat[:out_seq_len] != 0).astype(np.float32)
+        valid_mask = valid_mask.reshape(1, out_seq_len, 1)
         embeddings = embeddings * valid_mask
 
         # Truncate to actual content length + padding matching HF's convention.

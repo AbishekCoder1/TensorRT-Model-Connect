@@ -475,25 +475,37 @@ def add_vae_resblock_3d(
     prefix: str,
     in_channels: int,
     out_channels: int,
+    norm_type: str = "group_norm",
     num_groups: int = 32,
     temporal_kernel: int = 3,
     eps: float = 1e-6,
 ) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
     """3D VAE residual block with causal temporal convolutions.
 
-    Input: [B, C_in, 1, H, W] (single frame)
+    Input: [B, C_in, T, H, W] (T >= 1)
     cache_in1, cache_in2: temporal caches for the two causal convs
+
+    Args:
+        norm_type: "group_norm" uses GroupNorm with weight/bias keys,
+                   "l2_channel_norm" uses L2 channel norm with gamma key.
 
     Returns: (output, updated_cache1, updated_cache2)
 
-    Structure: GroupNorm -> SiLU -> CausalConv3D -> GroupNorm -> SiLU -> CausalConv3D + shortcut
+    Structure: Norm -> SiLU -> CausalConv3D -> Norm -> SiLU -> CausalConv3D + shortcut
     """
-    # First GroupNorm + SiLU + CausalConv3D
-    normed1 = graph_ops.add_group_norm(
-        network, inp, in_channels, num_groups,
-        weights[f"{prefix}.norm1.weight"],
-        weights[f"{prefix}.norm1.bias"],
-        eps)
+    def _apply_vae_norm(x, channels, norm_idx):
+        if norm_type == "l2_channel_norm":
+            return graph_ops.add_l2_channel_norm(
+                network, x, channels,
+                weights[f"{prefix}.norm{norm_idx}.gamma"], eps)
+        else:
+            return graph_ops.add_group_norm(
+                network, x, channels, num_groups,
+                weights[f"{prefix}.norm{norm_idx}.weight"],
+                weights[f"{prefix}.norm{norm_idx}.bias"], eps)
+
+    # First Norm + SiLU + CausalConv3D
+    normed1 = _apply_vae_norm(inp, in_channels, 1)
     act1 = graph_ops.add_silu(network, normed1)
     conv1_out, cache_out1 = graph_ops.add_causal_conv3d(
         network, act1, cache_in1,
@@ -504,12 +516,8 @@ def add_vae_resblock_3d(
         padding_hw=(1, 1),
     )
 
-    # Second GroupNorm + SiLU + CausalConv3D
-    normed2 = graph_ops.add_group_norm(
-        network, conv1_out, out_channels, num_groups,
-        weights[f"{prefix}.norm2.weight"],
-        weights[f"{prefix}.norm2.bias"],
-        eps)
+    # Second Norm + SiLU + CausalConv3D
+    normed2 = _apply_vae_norm(conv1_out, out_channels, 2)
     act2 = graph_ops.add_silu(network, normed2)
     conv2_out, cache_out2 = graph_ops.add_causal_conv3d(
         network, act2, cache_in2,
@@ -521,11 +529,13 @@ def add_vae_resblock_3d(
     )
 
     # Shortcut (1x1 conv if channel mismatch)
+    # Weight key differs: l2_channel_norm models use "conv_shortcut", group_norm use "shortcut"
     if in_channels != out_channels:
+        sc_key = f"{prefix}.conv_shortcut" if norm_type == "l2_channel_norm" else f"{prefix}.shortcut"
         shortcut = graph_ops.add_conv3d_as_conv2d(
             network, inp,
-            weight=weights[f"{prefix}.shortcut.weight"],
-            bias=weights.get(f"{prefix}.shortcut.bias"),
+            weight=weights[f"{sc_key}.weight"],
+            bias=weights.get(f"{sc_key}.bias"),
             out_channels=out_channels,
             kernel_size=(1, 1, 1),
         )
@@ -539,96 +549,25 @@ def add_vae_resblock_3d(
     return out.get_output(0), cache_out1, cache_out2
 
 
-def add_wan_vae_resblock(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    cache_in1: trt.ITensor,
-    cache_in2: trt.ITensor,
-    *,
-    weights: WeightDict,
-    prefix: str,
-    in_channels: int,
-    out_channels: int,
-    temporal_kernel: int = 3,
-    eps: float = 1e-6,
-) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
-    """Wan VAE residual block with WanRMS_norm and causal temporal convolutions.
-
-    Uses WanRMS_norm (L2-normalize over channels) instead of GroupNorm.
-    Norm weights are gamma [C, 1, 1, 1] (no beta).
-
-    Input: [B, C_in, T, H, W] (T >= 1)
-    cache_in1, cache_in2: temporal caches for the two causal convs
-
-    Returns: (output, updated_cache1, updated_cache2)
-
-    Structure: WanRMS_norm -> SiLU -> CausalConv3D -> WanRMS_norm -> SiLU -> CausalConv3D + shortcut
-    """
-    # First WanRMS_norm + SiLU + CausalConv3D
-    normed1 = graph_ops.add_wan_rms_norm(
-        network, inp, in_channels,
-        weights[f"{prefix}.norm1.gamma"],
-        eps)
-    act1 = graph_ops.add_silu(network, normed1)
-    conv1_out, cache_out1 = graph_ops.add_causal_conv3d(
-        network, act1, cache_in1,
-        weight=weights[f"{prefix}.conv1.weight"],
-        bias=weights.get(f"{prefix}.conv1.bias"),
-        out_channels=out_channels,
-        kernel_size=(temporal_kernel, 3, 3),
-        padding_hw=(1, 1),
-    )
-
-    # Second WanRMS_norm + SiLU + CausalConv3D
-    normed2 = graph_ops.add_wan_rms_norm(
-        network, conv1_out, out_channels,
-        weights[f"{prefix}.norm2.gamma"],
-        eps)
-    act2 = graph_ops.add_silu(network, normed2)
-    conv2_out, cache_out2 = graph_ops.add_causal_conv3d(
-        network, act2, cache_in2,
-        weight=weights[f"{prefix}.conv2.weight"],
-        bias=weights.get(f"{prefix}.conv2.bias"),
-        out_channels=out_channels,
-        kernel_size=(temporal_kernel, 3, 3),
-        padding_hw=(1, 1),
-    )
-
-    # Shortcut (1x1x1 conv if channel mismatch)
-    if in_channels != out_channels:
-        shortcut = graph_ops.add_conv3d_as_conv2d(
-            network, inp,
-            weight=weights[f"{prefix}.conv_shortcut.weight"],
-            bias=weights.get(f"{prefix}.conv_shortcut.bias"),
-            out_channels=out_channels,
-            kernel_size=(1, 1, 1),
-        )
-    else:
-        shortcut = inp
-
-    # Residual connection
-    result = network.add_elementwise(
-        conv2_out, shortcut, trt.ElementWiseOperation.SUM)
-
-    return result.get_output(0), cache_out1, cache_out2
-
-
-def add_wan_spatial_attention(
+def add_vae_spatial_attention(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     *,
     weights: WeightDict,
     prefix: str,
     channels: int,
+    norm_type: str = "l2_channel_norm",
+    num_groups: int = 32,
     eps: float = 1e-6,
 ) -> trt.ITensor:
-    """Wan VAE mid-block spatial self-attention with WanRMS_norm.
+    """VAE mid-block spatial self-attention with configurable norm.
 
     Single-head attention over spatial positions (H*W) per frame.
 
     Input: [B, C, T, H, W]
     Weight keys:
-        {prefix}.norm.gamma           [C, 1, 1, 1]
+        {prefix}.norm.gamma           [C, 1, 1, 1]  (l2_channel_norm)
+        {prefix}.norm.weight/.bias    [C]            (group_norm)
         {prefix}.to_qkv.weight        [3C, C, 1, 1, 1]
         {prefix}.to_qkv.bias          [3C]
         {prefix}.proj.weight           [C, C, 1, 1, 1]
@@ -643,10 +582,16 @@ def add_wan_spatial_attention(
 
     identity = inp
 
-    # WanRMS_norm
-    normed = graph_ops.add_wan_rms_norm(
-        network, inp, channels,
-        weights[f"{prefix}.norm.gamma"], eps)
+    # Configurable norm
+    if norm_type == "l2_channel_norm":
+        normed = graph_ops.add_l2_channel_norm(
+            network, inp, channels,
+            weights[f"{prefix}.norm.gamma"], eps)
+    else:
+        normed = graph_ops.add_group_norm(
+            network, inp, channels, num_groups,
+            weights[f"{prefix}.norm.weight"],
+            weights[f"{prefix}.norm.bias"], eps)
 
     # Reshape [B, C, T, H, W] -> [B*T*H*W, C]  (2D for matmul compat)
     flatten = network.add_shuffle(normed)

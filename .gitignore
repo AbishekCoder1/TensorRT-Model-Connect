@@ -80,3 +80,4 @@ hooks
 objects
 refs
 engines
+*.png

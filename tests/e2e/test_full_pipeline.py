@@ -266,6 +266,10 @@ def test_full_pipeline(built_bundle, trtf_binary, hf_python, ld_library_path):
     if entry.get("runtime_strategy") == "vision_language":
         pytest.skip("VL model — use test_full_pipeline_vlm")
 
+    # Skip diffusion models (handled by test_diffusion_pipeline)
+    if entry.get("test_type") == "diffusion":
+        pytest.skip("Diffusion model — use test_diffusion_pipeline")
+
     prompt = entry.get("prompt", "The capital of France is")
     max_new_tokens = entry.get("max_new_tokens", 30)
     atol = entry.get("logit_atol", 1e-3)

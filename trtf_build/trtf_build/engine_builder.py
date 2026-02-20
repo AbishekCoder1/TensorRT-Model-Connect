@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import ModelConfig
-from .families import find_plugin, _ALL_PLUGINS
+from .families import find_plugin, find_diffusion_plugin, _ALL_PLUGINS
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
 
 # Standard HF file patterns to download (matches what the builder needs).
@@ -263,18 +263,19 @@ def _build_diffusion_bundle(
     print(f"[trtf-build] Diffusion pipeline: {pipeline_class}",
           file=sys.stderr)
 
-    # Synthesize a ModelConfig from the model_index
-    # For diffusers, model_type comes from the pipeline class
-    model_type = _diffusers_pipeline_to_model_type(pipeline_class)
-    config = ModelConfig(model_type=model_type, raw=model_index)
-
-    # Find plugin
-    plugin = find_plugin(model_type)
+    # Auto-discover plugin from pipeline_classes attribute
+    plugin = find_diffusion_plugin(pipeline_class)
+    if plugin is None:
+        # Fallback: try model_type-based lookup with lowercased pipeline class
+        plugin = find_plugin(pipeline_class.lower())
     if plugin is None:
         supported = ", ".join(p.name for p in _ALL_PLUGINS)
         raise ValueError(
-            f"No family plugin for diffusion model_type={model_type!r}. "
+            f"No family plugin for diffusion pipeline {pipeline_class!r}. "
             f"Supported: {supported}")
+
+    model_type = getattr(plugin, 'name', pipeline_class.lower())
+    config = ModelConfig(model_type=model_type, raw=model_index)
 
     print(f"[trtf-build] Family: {plugin.name}", file=sys.stderr)
 
@@ -368,19 +369,6 @@ def _build_diffusion_bundle(
     t4 = time.monotonic()
     print(f"[trtf-build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
           file=sys.stderr)
-
-
-def _diffusers_pipeline_to_model_type(pipeline_class: str) -> str:
-    """Map diffusers pipeline class name to our model_type string."""
-    mapping = {
-        "WanPipeline": "wan_t2v",
-        "WanVideoToVideoPipeline": "wan_t2v",
-        "FluxPipeline": "flux",
-        "StableDiffusion3Pipeline": "sd3",
-        "CogVideoXPipeline": "cogvideox",
-        "HunyuanVideoPipeline": "hunyuan_video",
-    }
-    return mapping.get(pipeline_class, pipeline_class.lower())
 
 
 def build(

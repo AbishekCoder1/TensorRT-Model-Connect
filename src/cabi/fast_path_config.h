@@ -63,6 +63,7 @@ struct FastPathModelConfig {
     std::vector<float> latents_std;
     std::vector<int32_t> patch_size;    // [pt, ph, pw]
     std::string vae_model_id;
+    std::string diffusion_backend_type{"wan_3d"};
 };
 
 // Parse model configuration from config.json text for the fast path.

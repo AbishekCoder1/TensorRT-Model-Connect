@@ -38,6 +38,8 @@ struct DiffusionConfig {
     std::vector<float> latents_std;
     std::vector<int32_t> patch_size;  // [pt, ph, pw]
     std::string vae_model_id;
+
+    std::string diffusion_backend_type{"wan_3d"};
 };
 
 /// Preprocessor weights for the DiT (external to the TRT engine graph).
@@ -81,107 +83,61 @@ struct VideoResult {
     int32_t width{0};
 };
 
-/// Generic diffusion backend: N text encoders + denoiser + VAE decoder.
-///
-/// Handles Wan (1 T5 + DiT + 3D VAE), FLUX (CLIP + T5 + MMDiT + 2D VAE),
-/// etc. without per-model C++ code. The scheduler and component count are
-/// determined by the bundle config.
-class DiffusionBackend final : public IGenerationBackend {
+/// Interface for diffusion backends. Each model family implements this.
+class IDiffusionBackend : public IGenerationBackend {
 public:
-    DiffusionBackend(
+    ~IDiffusionBackend() override = default;
+
+    /// Generate a video from text tokens.
+    virtual VideoResult generate_video(
+        const std::vector<int32_t>& input_ids,
+        int32_t num_inference_steps = -1,
+        float guidance_scale = -1.0F) = 0;
+
+    virtual bool supports_video() const { return true; }
+
+    /// Set preprocessor weights (patch embed, timestep MLP, text proj).
+    virtual void set_preprocessor_weights(PreprocessorWeights weights) = 0;
+
+    /// Set paths needed for VAE subprocess decode.
+    virtual void set_hf_python(std::string path) = 0;
+    virtual void set_bundle_path(std::string path) = 0;
+};
+
+/// Base class with shared utilities for diffusion backends.
+class DiffusionBackendBase : public IDiffusionBackend {
+public:
+    DiffusionBackendBase(
         std::vector<DiffusionEngine> text_encoders,
         DiffusionEngine denoiser,
         DiffusionEngine vae_decoder,
         DiffusionConfig config);
 
-    ~DiffusionBackend() override = default;
+    ~DiffusionBackendBase() override = default;
 
     bool is_available() const override;
     const char* name() const override;
 
-    /// For diffusion, generate() is not text generation — it returns an
-    /// empty vector. Use generate_video() instead.
+    /// For diffusion, generate() returns empty. Use generate_video() instead.
     std::vector<int32_t> generate(
         const std::vector<int32_t>& input_ids,
         const GenerationConfig& config) override;
 
-    /// Generate a video from text tokens.
-    /// Returns frames as float array [T * H * W * 3].
-    VideoResult generate_video(
-        const std::vector<int32_t>& input_ids,
-        int32_t num_inference_steps = -1,
-        float guidance_scale = -1.0F);
+    void set_preprocessor_weights(PreprocessorWeights weights) override;
+    void set_hf_python(std::string path) override { mHfPython = std::move(path); }
+    void set_bundle_path(std::string path) override { mBundlePath = std::move(path); }
 
-    bool supports_video() const { return true; }
+protected:
+    // --- Shared CPU math helpers ---
+    static void cpu_matmul_bias(const float* A, const float* B, const float* bias,
+                                float* out, int32_t M, int32_t K, int32_t N);
+    static void cpu_silu_inplace(float* data, std::size_t count);
+    static void cpu_gelu_tanh_inplace(float* data, std::size_t count);
 
-    /// Set preprocessor weights (patch embed, timestep MLP, text proj).
-    void set_preprocessor_weights(PreprocessorWeights weights);
-
-    /// Set paths needed for VAE subprocess decode.
-    void set_hf_python(std::string path) { mHfPython = std::move(path); }
-    void set_bundle_path(std::string path) { mBundlePath = std::move(path); }
-
-private:
-    std::vector<DiffusionEngine> mTextEncoders;
-    DiffusionEngine mDenoiser;
-    DiffusionEngine mVaeDecoder;
-    DiffusionConfig mConfig;
-    PreprocessorWeights mWeights;
-
-    CudaStream mStream;
-
-    // Persistent device buffers for T5 encoder
-    CudaBuffer mD_InputIds;         // [1, text_seq_len] int32
-    CudaBuffer mD_AttentionMask;    // [1, text_seq_len] float32
-    CudaBuffer mD_TextEmbeddings;   // [1, text_seq_len, text_encoder_dim] float32
-
-    // Persistent device buffers for DiT denoiser
-    CudaBuffer mD_Hidden;           // [num_patches, dit_dim] float32
-    CudaBuffer mD_Temb;             // [1, 6*dit_dim] float32
-    CudaBuffer mD_TimeEmbed;        // [1, dit_dim] float32
-    CudaBuffer mD_EncoderHidden;    // [text_seq_len, dit_dim] float32
-    CudaBuffer mD_RotaryCos;        // [num_patches, head_dim] float32
-    CudaBuffer mD_RotarySin;        // [num_patches, head_dim] float32
-    CudaBuffer mD_Output;           // [num_patches, out_dim] float32
-
-    // For VAE subprocess fallback
-    std::string mHfPython;
-    std::string mBundlePath;
-
-    // Native VAE decode state
-    CudaBuffer mD_VaeInput;         // [1, z_dim, 1, h_lat, w_lat]
-    CudaBuffer mD_VaeOutput;        // [1, 3, T_out, h_out, w_out]
-    std::vector<CudaBuffer> mD_VaeCacheIn;   // 32 cache input buffers
-    std::vector<CudaBuffer> mD_VaeCacheOut;  // 32 cache output buffers
-    std::vector<std::size_t> mVaeCacheSizes; // byte size per cache
-    int32_t mVaeOutputT{1};         // temporal dim of VAE output per frame
-
-    bool mOk{false};
-
-    // --- Private helpers ---
-
+    // --- Shared engine execution ---
     bool run_t5_encoder(const std::vector<int32_t>& input_ids,
                         std::vector<float>& text_embeddings,
                         std::string& error);
-
-    void compute_timestep_embedding(float timestep,
-                                    std::vector<float>& temb_6d,
-                                    std::vector<float>& time_embed) const;
-
-    void project_text(const std::vector<float>& in, int32_t seq_len,
-                      std::vector<float>& out) const;
-
-    void patchify(const std::vector<float>& latents,
-                  int32_t c, int32_t t, int32_t h, int32_t w,
-                  std::vector<float>& patches) const;
-
-    void unpatchify(const std::vector<float>& patches,
-                    int32_t c, int32_t t, int32_t h, int32_t w,
-                    std::vector<float>& output) const;
-
-    void compute_3d_rope(int32_t nt, int32_t nh, int32_t nw,
-                         std::vector<float>& cos_out,
-                         std::vector<float>& sin_out) const;
 
     bool run_denoiser(const std::vector<float>& hidden,
                       const std::vector<float>& temb_6d,
@@ -192,23 +148,44 @@ private:
                       std::vector<float>& output,
                       std::string& error);
 
-    bool decode_vae_native(const std::vector<float>& latents,
-                           int32_t c, int32_t t, int32_t h, int32_t w,
-                           VideoResult& result, std::string& error);
-
     bool decode_vae_subprocess(const std::vector<float>& latents,
                                int32_t c, int32_t t, int32_t h, int32_t w,
                                VideoResult& result, std::string& error);
 
-    void init_vae_buffers();
+    std::vector<DiffusionEngine> mTextEncoders;
+    DiffusionEngine mDenoiser;
+    DiffusionEngine mVaeDecoder;
+    DiffusionConfig mConfig;
+    PreprocessorWeights mWeights;
+
+    CudaStream mStream;
+
+    // Persistent device buffers for T5 encoder
+    CudaBuffer mD_InputIds;
+    CudaBuffer mD_AttentionMask;
+    CudaBuffer mD_TextEmbeddings;
+
+    // Persistent device buffers for DiT denoiser
+    CudaBuffer mD_Hidden;
+    CudaBuffer mD_Temb;
+    CudaBuffer mD_TimeEmbed;
+    CudaBuffer mD_EncoderHidden;
+    CudaBuffer mD_RotaryCos;
+    CudaBuffer mD_RotarySin;
+    CudaBuffer mD_Output;
+
+    std::string mHfPython;
+    std::string mBundlePath;
+
+    bool mOk{false};
 };
 
 /// Parse preprocessor weights from bundle section bytes.
 PreprocessorWeights parse_preprocessor_weights(
     const std::vector<char>& data);
 
-/// Factory: create DiffusionBackend from deserialized engines + config.
-std::unique_ptr<DiffusionBackend> CreateDiffusionBackend(
+/// Factory: create the appropriate IDiffusionBackend based on config.
+std::unique_ptr<IDiffusionBackend> CreateDiffusionBackend(
     std::vector<DiffusionEngine> text_encoders,
     DiffusionEngine denoiser,
     DiffusionEngine vae_decoder,

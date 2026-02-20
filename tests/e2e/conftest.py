@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 E2E_DIR = Path(__file__).resolve().parent
@@ -172,6 +173,38 @@ def _build_bundle(hf_id, bundle_path, max_cache_length):
             f"{result.stderr[-2000:]}")
 
     return elapsed
+
+
+# ---------------------------------------------------------------------------
+# Frame quality helpers (for diffusion tests)
+# ---------------------------------------------------------------------------
+
+def compute_frame_stats(frame_dir: Path) -> dict:
+    """Load PNG frames from a directory, return aggregate pixel statistics.
+
+    Returns dict with keys: count, mean, std, min, max.
+    Pixel values are normalized to [0, 1].
+    """
+    from PIL import Image
+
+    frames = sorted(frame_dir.glob("frame_*.png"))
+    if not frames:
+        return {"count": 0, "mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+
+    all_pixels = []
+    for fp in frames:
+        img = Image.open(fp).convert("RGB")
+        arr = np.array(img, dtype=np.float32) / 255.0
+        all_pixels.append(arr.flatten())
+
+    combined = np.concatenate(all_pixels)
+    return {
+        "count": len(frames),
+        "mean": float(np.mean(combined)),
+        "std": float(np.std(combined)),
+        "min": float(np.min(combined)),
+        "max": float(np.max(combined)),
+    }
 
 
 @pytest.fixture(params=_model_ids() or ["__no_models__"])

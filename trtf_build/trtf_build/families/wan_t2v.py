@@ -12,6 +12,7 @@ from ..checkpoint_mapper import WeightDict
 class WanT2VPlugin:
     name = "wan_t2v"
     runtime_strategy = "diffusion"
+    pipeline_classes = ["WanPipeline", "WanVideoToVideoPipeline"]
 
     # Wan2.1-T2V-1.3B architecture params
     _T5_D_MODEL = 4096
@@ -156,6 +157,7 @@ class WanT2VPlugin:
             base_dim=self._VAE_BASE_DIM,
             dim_mult=self._VAE_DIM_MULT,
             num_res_blocks=self._VAE_NUM_RES_BLOCKS,
+            norm_type="l2_channel_norm",
         )
         vae_plan = build_causal_vae_3d_engine(
             vae_weights,
@@ -166,6 +168,7 @@ class WanT2VPlugin:
             temporal_upsample=self._VAE_TEMPORAL_UPSAMPLE,
             h_lat=h_lat,
             w_lat=w_lat,
+            norm_type="l2_channel_norm",
             verbose=verbose,
         )
 
@@ -191,6 +194,7 @@ class WanT2VPlugin:
         video_num_frames = config.raw.get("video_num_frames", 17)
 
         return {
+            "diffusion_backend_type": "wan_3d",
             "scheduler": "flow_match_euler",
             "num_inference_steps": 50,
             "guidance_scale": 5.0,
