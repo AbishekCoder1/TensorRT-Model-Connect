@@ -262,6 +262,8 @@ DiffusionBackend::DiffusionBackend(
     , mD_RotaryCos(0)
     , mD_RotarySin(0)
     , mD_Output(0)
+    , mD_VaeInput(0)
+    , mD_VaeOutput(0)
 {
     mOk = mStream.ok();
     if (!mOk) {
@@ -316,6 +318,9 @@ DiffusionBackend::DiffusionBackend(
     std::cerr << "[diffusion] Buffers allocated: num_patches=" << num_patches
               << ", dit_dim=" << dit_dim << ", head_dim=" << head_dim
               << ", out_dim=" << out_dim << "\n";
+
+    // Allocate VAE buffers (discover shapes from engine)
+    init_vae_buffers();
 }
 
 void DiffusionBackend::set_preprocessor_weights(PreprocessorWeights weights)
@@ -880,6 +885,244 @@ bool DiffusionBackend::decode_vae_subprocess(
 }
 
 // ---------------------------------------------------------------------------
+// Native VAE decode
+// ---------------------------------------------------------------------------
+
+void DiffusionBackend::init_vae_buffers()
+{
+    auto& engine = mVaeDecoder.engine;
+    if (!engine) return;
+
+    const int32_t num_caches = mConfig.num_vae_caches;
+    if (num_caches <= 0) return;
+
+    // Discover tensor shapes from the TRT engine
+    for (int32_t i = 0; i < engine->getNbIOTensors(); ++i) {
+        const char* name = engine->getIOTensorName(i);
+        const auto dims = engine->getTensorShape(name);
+        const std::string sname(name);
+
+        if (sname == "latent_frame") {
+            std::size_t sz = sizeof(float);
+            for (int32_t d = 0; d < dims.nbDims; ++d)
+                sz *= static_cast<std::size_t>(std::max(static_cast<int32_t>(dims.d[d]), 1));
+            mD_VaeInput = CudaBuffer(sz);
+        }
+        else if (sname == "video_frame") {
+            std::size_t sz = sizeof(float);
+            for (int32_t d = 0; d < dims.nbDims; ++d)
+                sz *= static_cast<std::size_t>(std::max(static_cast<int32_t>(dims.d[d]), 1));
+            mD_VaeOutput = CudaBuffer(sz);
+            // T dimension is dims.d[2]
+            if (dims.nbDims >= 3) {
+                mVaeOutputT = std::max(static_cast<int32_t>(dims.d[2]), 1);
+            }
+        }
+    }
+
+    // Allocate cache buffers (CudaBuffer is move-only, can't use fill-resize)
+    mD_VaeCacheIn.reserve(static_cast<std::size_t>(num_caches));
+    mD_VaeCacheOut.reserve(static_cast<std::size_t>(num_caches));
+    for (int32_t ci = 0; ci < num_caches; ++ci) {
+        mD_VaeCacheIn.emplace_back(0);
+        mD_VaeCacheOut.emplace_back(0);
+    }
+    mVaeCacheSizes.resize(static_cast<std::size_t>(num_caches), 0);
+
+    for (int32_t ci = 0; ci < num_caches; ++ci) {
+        const std::string cin_name = "cache_" + std::to_string(ci);
+        const std::string cout_name = "cache_out_" + std::to_string(ci);
+
+        // Find the input cache tensor and compute its size
+        for (int32_t i = 0; i < engine->getNbIOTensors(); ++i) {
+            const char* tname = engine->getIOTensorName(i);
+            if (cin_name == tname) {
+                const auto dims = engine->getTensorShape(tname);
+                std::size_t sz = sizeof(float);
+                for (int32_t d = 0; d < dims.nbDims; ++d)
+                    sz *= static_cast<std::size_t>(std::max(static_cast<int32_t>(dims.d[d]), 1));
+                mD_VaeCacheIn[static_cast<std::size_t>(ci)] = CudaBuffer(sz);
+                mD_VaeCacheOut[static_cast<std::size_t>(ci)] = CudaBuffer(sz);
+                mVaeCacheSizes[static_cast<std::size_t>(ci)] = sz;
+                break;
+            }
+        }
+    }
+
+    std::cerr << "[diffusion] VAE buffers allocated: "
+              << num_caches << " caches, output_T=" << mVaeOutputT << "\n";
+}
+
+bool DiffusionBackend::decode_vae_native(
+    const std::vector<float>& latents,
+    int32_t c, int32_t t_lat, int32_t h_lat, int32_t w_lat,
+    VideoResult& result, std::string& error)
+{
+    const int32_t num_caches = mConfig.num_vae_caches;
+    auto& ctx = mVaeDecoder.context;
+    if (!ctx) {
+        error = "No VAE execution context";
+        return false;
+    }
+
+    const std::size_t frame_size =
+        static_cast<std::size_t>(c) * 1 *
+        static_cast<std::size_t>(h_lat) * static_cast<std::size_t>(w_lat);
+    const std::size_t frame_bytes = frame_size * sizeof(float);
+
+    // Zero all caches
+    for (int32_t ci = 0; ci < num_caches; ++ci) {
+        const auto idx = static_cast<std::size_t>(ci);
+        if (mVaeCacheSizes[idx] > 0) {
+            cudaMemsetAsync(mD_VaeCacheIn[idx].data(), 0,
+                            mVaeCacheSizes[idx], mStream.get());
+        }
+    }
+
+    // Output dims
+    const int32_t sft = mConfig.scale_factor_temporal;
+    const int32_t H_out = mConfig.video_height;
+    const int32_t W_out = mConfig.video_width;
+    const int32_t T_out_per_frame = mVaeOutputT;  // typically sft (4)
+
+    // Collect all output frames
+    const std::size_t out_frame_floats =
+        static_cast<std::size_t>(3) * static_cast<std::size_t>(T_out_per_frame) *
+        static_cast<std::size_t>(H_out) * static_cast<std::size_t>(W_out);
+    const std::size_t out_frame_bytes = out_frame_floats * sizeof(float);
+
+    std::vector<float> all_raw_frames;
+    all_raw_frames.reserve(
+        static_cast<std::size_t>(t_lat) * out_frame_floats);
+
+    for (int32_t t = 0; t < t_lat; ++t) {
+        // Build contiguous [1, c, 1, h, w] from [c, t_lat, h, w]
+        std::vector<float> frame_buf(frame_size);
+        const auto spatial = static_cast<std::size_t>(h_lat) *
+                             static_cast<std::size_t>(w_lat);
+        for (int32_t ci = 0; ci < c; ++ci) {
+            const float* ch_src = latents.data() +
+                static_cast<std::size_t>(ci) *
+                static_cast<std::size_t>(t_lat) * spatial +
+                static_cast<std::size_t>(t) * spatial;
+            std::memcpy(frame_buf.data() +
+                static_cast<std::size_t>(ci) * spatial,
+                ch_src, spatial * sizeof(float));
+        }
+
+        cudaMemcpyAsync(mD_VaeInput.data(), frame_buf.data(), frame_bytes,
+                         cudaMemcpyHostToDevice, mStream.get());
+
+        // Set tensor addresses
+        ctx->setTensorAddress("latent_frame", mD_VaeInput.data());
+        ctx->setTensorAddress("video_frame", mD_VaeOutput.data());
+
+        for (int32_t ci = 0; ci < num_caches; ++ci) {
+            const auto idx = static_cast<std::size_t>(ci);
+            const std::string cin = "cache_" + std::to_string(ci);
+            const std::string cout = "cache_out_" + std::to_string(ci);
+            ctx->setTensorAddress(cin.c_str(), mD_VaeCacheIn[idx].data());
+            ctx->setTensorAddress(cout.c_str(), mD_VaeCacheOut[idx].data());
+        }
+
+        if (!ctx->enqueueV3(mStream.get())) {
+            error = "VAE enqueueV3 failed at frame " + std::to_string(t);
+            return false;
+        }
+
+        // Download output frame [1, 3, T_out, H, W]
+        std::vector<float> out_buf(out_frame_floats);
+        cudaMemcpyAsync(out_buf.data(), mD_VaeOutput.data(), out_frame_bytes,
+                         cudaMemcpyDeviceToHost, mStream.get());
+        cudaStreamSynchronize(mStream.get());
+
+        all_raw_frames.insert(all_raw_frames.end(),
+                              out_buf.begin(), out_buf.end());
+
+        // Swap caches: copy cache_out -> cache_in
+        for (int32_t ci = 0; ci < num_caches; ++ci) {
+            const auto idx = static_cast<std::size_t>(ci);
+            if (mVaeCacheSizes[idx] > 0) {
+                cudaMemcpyAsync(mD_VaeCacheIn[idx].data(),
+                                mD_VaeCacheOut[idx].data(),
+                                mVaeCacheSizes[idx],
+                                cudaMemcpyDeviceToDevice, mStream.get());
+            }
+        }
+
+        if (t % 2 == 0) {
+            std::cerr << "  VAE frame " << (t + 1) << "/" << t_lat << "\n";
+        }
+    }
+
+    // Concatenated raw: [t_lat * T_out_per_frame, 3, H, W] in CHW layout
+    // Trim first (sft - 1) frames
+    const int32_t total_out_frames = t_lat * T_out_per_frame;
+    const int32_t trim = sft - 1;
+    const int32_t T_final = total_out_frames - trim;
+
+    result.num_frames = std::min(T_final, mConfig.video_num_frames);
+    result.height = H_out;
+    result.width = W_out;
+    const auto final_pixel_count =
+        static_cast<std::size_t>(result.num_frames) *
+        static_cast<std::size_t>(H_out) * static_cast<std::size_t>(W_out) * 3;
+    result.frames.resize(final_pixel_count);
+
+    // Convert [3, T_out_per_frame, H, W] per-input-frame layout to [T, H, W, 3]
+    // Each input frame produced T_out_per_frame output frames in layout [1, 3, T_out, H, W]
+    const auto per_frame_spatial =
+        static_cast<std::size_t>(H_out) * static_cast<std::size_t>(W_out);
+
+    for (int32_t input_t = 0; input_t < t_lat; ++input_t) {
+        const float* raw_base = all_raw_frames.data() +
+            static_cast<std::size_t>(input_t) * out_frame_floats;
+
+        for (int32_t sub_t = 0; sub_t < T_out_per_frame; ++sub_t) {
+            const int32_t global_t = input_t * T_out_per_frame + sub_t;
+
+            // Skip trimmed frames
+            if (global_t < trim) continue;
+            const int32_t final_t = global_t - trim;
+            if (final_t >= result.num_frames) continue;
+
+            for (int32_t fh = 0; fh < H_out; ++fh) {
+                for (int32_t fw = 0; fw < W_out; ++fw) {
+                    for (int32_t fc = 0; fc < 3; ++fc) {
+                        // Source: [1, 3, T_out, H, W] layout
+                        const auto s_idx =
+                            static_cast<std::size_t>(fc) *
+                                static_cast<std::size_t>(T_out_per_frame) *
+                                per_frame_spatial +
+                            static_cast<std::size_t>(sub_t) * per_frame_spatial +
+                            static_cast<std::size_t>(fh) *
+                                static_cast<std::size_t>(W_out) +
+                            static_cast<std::size_t>(fw);
+
+                        // Dest: [T, H, W, 3] layout
+                        const auto d_idx =
+                            static_cast<std::size_t>(final_t) *
+                                static_cast<std::size_t>(H_out) *
+                                static_cast<std::size_t>(W_out) * 3 +
+                            static_cast<std::size_t>(fh) *
+                                static_cast<std::size_t>(W_out) * 3 +
+                            static_cast<std::size_t>(fw) * 3 +
+                            static_cast<std::size_t>(fc);
+
+                        // Normalize [-1,1] -> [0,1] and clamp
+                        float v = (raw_base[s_idx] + 1.0F) * 0.5F;
+                        v = std::max(0.0F, std::min(1.0F, v));
+                        result.frames[d_idx] = v;
+                    }
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Main generation pipeline
 // ---------------------------------------------------------------------------
 
@@ -1059,11 +1302,22 @@ VideoResult DiffusionBackend::generate_video(
         }
     }
 
-    // 7. VAE decode
+    // 7. VAE decode (native TRT engine, fallback to subprocess)
     std::cerr << "[diffusion] Decoding video ...\n";
-    if (!decode_vae_subprocess(latents, z_dim, t_lat, h_lat, w_lat, result, error)) {
-        std::cerr << "[diffusion] VAE decode failed: " << error << "\n";
-        return result;
+    if (mConfig.num_vae_caches > 0 && !mD_VaeCacheIn.empty()) {
+        if (!decode_vae_native(latents, z_dim, t_lat, h_lat, w_lat, result, error)) {
+            std::cerr << "[diffusion] Native VAE decode failed: " << error
+                      << ", falling back to subprocess\n";
+            if (!decode_vae_subprocess(latents, z_dim, t_lat, h_lat, w_lat, result, error)) {
+                std::cerr << "[diffusion] VAE subprocess also failed: " << error << "\n";
+                return result;
+            }
+        }
+    } else {
+        if (!decode_vae_subprocess(latents, z_dim, t_lat, h_lat, w_lat, result, error)) {
+            std::cerr << "[diffusion] VAE decode failed: " << error << "\n";
+            return result;
+        }
     }
 
     result.num_frames = mConfig.video_num_frames;

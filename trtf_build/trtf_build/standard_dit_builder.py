@@ -94,7 +94,7 @@ def build_standard_dit_engine(
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
     config.clear_flag(trt.BuilderFlag.TF32)
 
     network = builder.create_network()

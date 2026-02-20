@@ -380,8 +380,18 @@ class DiffusionRunner:
                 if out_name in results:
                     cache_states[name] = results[out_name]
 
-        # Stack frames: list of [1, 3, 1, H, W] -> [1, 3, T, H, W]
+        # Stack frames along temporal dim
         video = np.concatenate(frames, axis=2)
+
+        # Trim extra frames from frame-0's temporal upsample.
+        # The TRT engine always runs temporal pixel-shuffle (even for frame 0
+        # with zero caches), producing scale_factor_temporal output frames per
+        # input frame. HF skips pixel-shuffle for frame 0, producing only 1.
+        # Trim the first (scale_factor_temporal - 1) frames to match HF.
+        sft = self.config.get("scale_factor_temporal", 1)
+        trim = sft - 1
+        if trim > 0 and video.shape[2] > trim:
+            video = video[:, :, trim:, :, :]
 
         # Clamp to [0, 1]
         video = np.clip((video + 1.0) / 2.0, 0.0, 1.0)

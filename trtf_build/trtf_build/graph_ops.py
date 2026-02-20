@@ -1042,18 +1042,19 @@ def add_causal_conv3d(
     stride: tuple[int, int, int] = (1, 1, 1),
     padding_hw: tuple[int, int] = (0, 0),
 ) -> tuple[trt.ITensor, trt.ITensor]:
-    """Causal 3D convolution with temporal cache (for frame-by-frame VAE decode).
+    """Causal 3D convolution with temporal cache.
 
-    Input: [B, C_in, 1, H, W] (single frame)
+    Input: [B, C_in, T, H, W] (T >= 1)
     Cache: [B, C_in, Kt-1, H, W] (previous frames)
     Weight: [C_out, C_in, Kt, Kh, Kw]
 
-    Returns: (output [B, C_out, 1, H', W'], updated_cache [B, C_in, Kt-1, H, W])
+    Returns: (output [B, C_out, T, H', W'], updated_cache [B, C_in, Kt-1, H, W])
 
     The cache stores Kt-1 previous frames. We concatenate cache + input along
-    temporal dim, then apply a standard 3D conv (decomposed as 2D).
+    temporal dim, then apply convolution. For T=1 uses optimized 2D decomposition,
+    for T>1 uses native 3D convolution.
     """
-    b, c_in, _, h, w = inp.shape
+    b, c_in, t_in, h, w = inp.shape
     kt, kh, kw = kernel_size
     ph, pw = padding_hw
 
@@ -1066,45 +1067,66 @@ def add_causal_conv3d(
         # Cache is unchanged
         return result, cache
 
-    # Concatenate cache + input along temporal dim: [B, C, Kt-1, H, W] cat [B, C, 1, H, W]
-    # -> [B, C, Kt, H, W]
+    # Concatenate cache + input along temporal dim:
+    # [B, C, Kt-1, H, W] cat [B, C, T, H, W] -> [B, C, Kt-1+T, H, W]
     concat = network.add_concatenation([cache, inp])
     concat.axis = 2  # temporal dim
     full_temporal = concat.get_output(0)
 
-    # Apply conv: reshape [B, C_in, Kt, H, W] -> [B, C_in*Kt, H, W] for Conv2D
-    reshape_in = network.add_shuffle(full_temporal)
-    reshape_in.reshape_dims = (b, c_in * kt, h, w)
+    if t_in == 1:
+        # Optimized T=1 path: reshape to 2D and use Conv2D
+        # full_temporal is [B, C_in, Kt, H, W]
+        reshape_in = network.add_shuffle(full_temporal)
+        reshape_in.reshape_dims = (b, c_in * kt, h, w)
 
-    # Weight: [C_out, C_in, Kt, Kh, Kw] -> [C_out, C_in*Kt, Kh, Kw]
-    w2d = weight.reshape(out_channels, c_in * kt, kh, kw)
-    conv_w = trt.Weights(np.ascontiguousarray(w2d, dtype=np.float32))
-    conv_b = trt.Weights()
-    if bias is not None:
-        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
+        w2d = weight.reshape(out_channels, c_in * kt, kh, kw)
+        conv_w = trt.Weights(np.ascontiguousarray(w2d, dtype=np.float32))
+        conv_b = trt.Weights()
+        if bias is not None:
+            conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
 
-    conv = network.add_convolution_nd(
-        reshape_in.get_output(0),
-        num_output_maps=out_channels,
-        kernel_shape=(kh, kw),
-        kernel=conv_w,
-        bias=conv_b,
-    )
-    conv.stride_nd = (stride[1], stride[2])
-    conv.padding_nd = (ph, pw)
+        conv = network.add_convolution_nd(
+            reshape_in.get_output(0),
+            num_output_maps=out_channels,
+            kernel_shape=(kh, kw),
+            kernel=conv_w,
+            bias=conv_b,
+        )
+        conv.stride_nd = (stride[1], stride[2])
+        conv.padding_nd = (ph, pw)
 
-    # Output: [B, C_out, H', W'] -> [B, C_out, 1, H', W']
-    h_out = (h + 2 * ph - kh) // stride[1] + 1
-    w_out = (w + 2 * pw - kw) // stride[2] + 1
-    reshape_out = network.add_shuffle(conv.get_output(0))
-    reshape_out.reshape_dims = (b, out_channels, 1, h_out, w_out)
+        h_out = (h + 2 * ph - kh) // stride[1] + 1
+        w_out = (w + 2 * pw - kw) // stride[2] + 1
+        reshape_out = network.add_shuffle(conv.get_output(0))
+        reshape_out.reshape_dims = (b, out_channels, 1, h_out, w_out)
+        result = reshape_out.get_output(0)
+    else:
+        # General T>1 path: native 3D convolution
+        # full_temporal is [B, C_in, Kt-1+T, H, W]
+        w3d = weight.reshape(out_channels, c_in, kt, kh, kw)
+        conv_w = trt.Weights(np.ascontiguousarray(w3d, dtype=np.float32))
+        conv_b = trt.Weights()
+        if bias is not None:
+            conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
 
-    # Update cache: drop oldest frame, append current input
-    # New cache = full_temporal[:, :, 1:, :, :] (slice off first frame)
+        conv = network.add_convolution_nd(
+            full_temporal,
+            num_output_maps=out_channels,
+            kernel_shape=(kt, kh, kw),
+            kernel=conv_w,
+            bias=conv_b,
+        )
+        conv.stride_nd = (stride[0], stride[1], stride[2])
+        conv.padding_nd = (0, ph, pw)  # No temporal padding (cache provides it)
+        result = conv.get_output(0)  # [B, C_out, T, H', W']
+
+    # Update cache: last Kt-1 frames from the concatenated tensor
+    total_t = (kt - 1) + t_in
+    cache_start_t = total_t - (kt - 1)  # = t_in
     if kt > 1:
         slice_layer = network.add_slice(
             full_temporal,
-            start=(0, 0, 1, 0, 0),
+            start=(0, 0, cache_start_t, 0, 0),
             shape=(b, c_in, kt - 1, h, w),
             stride=(1, 1, 1, 1, 1),
         )
@@ -1112,7 +1134,7 @@ def add_causal_conv3d(
     else:
         new_cache = cache
 
-    return reshape_out.get_output(0), new_cache
+    return result, new_cache
 
 
 def add_spatial_upsample(
@@ -1131,6 +1153,37 @@ def add_spatial_upsample(
     return resize.get_output(0)
 
 
+def add_spatial_upsample_with_conv(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    weight: np.ndarray,
+    bias: np.ndarray | None,
+    scale: int = 2,
+) -> trt.ITensor:
+    """Spatial nearest-neighbor 2x upsample + Conv3D(1,3,3) smoothing.
+
+    Matches HF WanResample's nn.Sequential(Upsample(2x), Conv3d(1,3,3)).
+
+    Input: [B, C_in, T, H, W]
+    Weight: [C_out, C_in, 1, 3, 3]  (C_out detected from weight shape)
+    Output: [B, C_out, T, H*scale, W*scale]
+    """
+    out_channels = weight.shape[0]
+
+    # Step 1: nearest-neighbor 2x spatial
+    upsampled = add_spatial_upsample(network, inp, scale)
+
+    # Step 2: Conv3D(1,3,3) = per-frame 2D conv with 3x3 kernel
+    result = add_conv3d_as_conv2d(
+        network, upsampled,
+        weight=weight, bias=bias,
+        out_channels=out_channels,
+        kernel_size=(1, 3, 3),
+        padding=(0, 1, 1),
+    )
+    return result
+
+
 def add_temporal_upsample(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -1145,6 +1198,78 @@ def add_temporal_upsample(
     resize.resize_mode = trt.InterpolationMode.NEAREST
     resize.shape = (b, c, t * scale_factor, h, w)
     return resize.get_output(0)
+
+
+def add_wan_rms_norm(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    num_channels: int,
+    gamma: np.ndarray,
+    eps: float = 1e-6,
+) -> trt.ITensor:
+    """WanRMS_norm: F.normalize(x, dim=1) * sqrt(C) * gamma.
+
+    L2-normalizes over channel dimension (axis=1), then scales by
+    sqrt(num_channels) and learnable gamma.
+
+    Input: [B, C, T, H, W] (5D tensor)
+    gamma: [C, 1, 1, 1] reshaped to [1, C, 1, 1, 1] for broadcast
+    Output: same shape
+    """
+    # L2 norm over channel dim: ||x||_2 = sqrt(sum(x^2, dim=1))
+    sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
+    sum_sq = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
+
+    eps_t = add_constant(network, (1, 1, 1, 1, 1),
+                         np.array([eps], dtype=np.float32))
+    denom_in = network.add_elementwise(
+        sum_sq.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
+    norm = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
+    recip = network.add_unary(norm.get_output(0), trt.UnaryOperation.RECIP)
+
+    # normalized = x / ||x||_2
+    normalized = network.add_elementwise(
+        inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
+
+    # Scale by sqrt(C) * gamma  →  gamma_scaled shape [1, C, 1, 1, 1]
+    gamma_flat = gamma.flatten()[:num_channels]
+    scale = np.sqrt(num_channels) * gamma_flat
+    scale_t = add_constant(
+        network, (1, num_channels, 1, 1, 1),
+        scale.reshape(1, num_channels, 1, 1, 1))
+
+    return network.add_elementwise(
+        normalized.get_output(0), scale_t,
+        trt.ElementWiseOperation.PROD).get_output(0)
+
+
+def add_temporal_pixel_shuffle(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    factor: int = 2,
+) -> trt.ITensor:
+    """Temporal pixel shuffle: [B, factor*C, T, H, W] → [B, C, factor*T, H, W].
+
+    Interleaves temporal frames by splitting the channel dimension and
+    folding it into the temporal dimension.
+    """
+    b, c_total, t, h, w = inp.shape
+    c = c_total // factor  # output channels
+
+    # Reshape: [B, factor*C, T, H, W] → [B, factor, C, T, H, W]
+    reshape1 = network.add_shuffle(inp)
+    reshape1.reshape_dims = (b, factor, c, t, h, w)
+
+    # Permute: [B, factor, C, T, H, W] → [B, C, T, factor, H, W]
+    transpose = network.add_shuffle(reshape1.get_output(0))
+    transpose.first_transpose = trt.Permutation([0, 2, 3, 1, 4, 5])
+
+    # Reshape: [B, C, T, factor, H, W] → [B, C, factor*T, H, W]
+    reshape2 = network.add_shuffle(transpose.get_output(0))
+    reshape2.reshape_dims = (b, c, factor * t, h, w)
+
+    return reshape2.get_output(0)
 
 
 def add_timestep_embedding(

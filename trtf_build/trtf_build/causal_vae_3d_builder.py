@@ -178,74 +178,209 @@ def build_causal_vae_3d_engine(
 ) -> bytes:
     """Build causal 3D VAE decoder TRT engine plan.
 
-    For now, this builds a placeholder engine that just passes through
-    the latent frame. The full causal conv implementation requires
-    significant graph complexity due to:
-    - Temporal pixel shuffle in upsampler (time_conv → reshape → interleave)
-    - 2D spatial upsample (nearest + conv2d) mixed with 3D temporal ops
-    - Mid-block spatial attention
-    - WanRMS_norm (not standard GroupNorm)
+    Full causal decoder with 32 cache I/O tensors. Processes one latent frame
+    at a time; temporal expansion happens via pixel-shuffle inside the graph.
 
-    A full implementation will be done incrementally. The placeholder
-    allows the bundle to be built and the pipeline to execute end-to-end.
+    Output temporal dim = scale_factor_temporal (4 for Wan2.1). The caller
+    trims extra frames from frame-0 to get the correct total count.
     """
     import tensorrt as trt
+    from . import graph_ops, graph_blocks
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network()
     config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
     config.clear_flag(trt.BuilderFlag.TF32)
 
-    # Compute output spatial dims (8x upsample from latent)
-    h_out = h_lat * 8
-    w_out = w_lat * 8
+    num_levels = len(dim_mult)
+    channels_list = [base_dim * m for m in dim_mult]  # [96, 192, 384, 384]
+    # Decoder processes in reversed order
+    dec_channels = list(reversed(channels_list))       # [384, 384, 192, 96]
+    mid_ch = dec_channels[0]                           # 384
+    temp_up = list(reversed(temporal_upsample))        # [True, True, False]
 
-    # Input: single latent frame [1, z_dim, 1, h_lat, w_lat]
+    # --- Track spatial/temporal dims through the graph ---
+    cur_h, cur_w = h_lat, w_lat
+    cur_t = 1  # Starts at T=1
+
+    # --- Input ---
     latent = network.add_input(
         "latent_frame", trt.float32, (1, z_dim, 1, h_lat, w_lat))
 
-    # For the placeholder: just resize to output dims and project channels
-    # This produces garbage output but validates the pipeline I/O
-    from . import graph_ops
+    # --- Cache inputs ---
+    cache_idx = 0
+    cache_inputs = {}   # idx -> trt.ITensor
+    cache_outputs = {}  # idx -> trt.ITensor
 
-    # Reshape to [1, z_dim, h_lat, w_lat] for 2D operations
-    reshape_2d = network.add_shuffle(latent)
-    reshape_2d.reshape_dims = (1, z_dim, h_lat, w_lat)
+    def _add_cache_input(channels: int, t_cache: int, h_c: int, w_c: int) -> trt.ITensor:
+        nonlocal cache_idx
+        name = f"cache_{cache_idx}"
+        shape = (1, channels, t_cache, h_c, w_c)
+        t = network.add_input(name, trt.float32, shape)
+        cache_inputs[cache_idx] = t
+        cache_idx += 1
+        return t
 
-    # Resize to output spatial dims
-    resize = network.add_resize(reshape_2d.get_output(0))
-    resize.resize_mode = trt.InterpolationMode.NEAREST
-    resize.shape = (1, z_dim, h_out, w_out)
+    def _set_cache_output(idx: int, tensor: trt.ITensor) -> None:
+        cache_outputs[idx] = tensor
 
-    # 1x1 conv to project z_dim -> out_channels
-    proj_w = np.zeros((out_channels, z_dim, 1, 1), dtype=np.float32)
-    # Initialize with simple channel averaging
-    for c in range(out_channels):
-        proj_w[c, :, 0, 0] = 1.0 / z_dim
-    conv_w = trt.Weights(np.ascontiguousarray(proj_w))
-    conv = network.add_convolution_nd(
-        resize.get_output(0),
-        num_output_maps=out_channels,
-        kernel_shape=(1, 1),
-        kernel=conv_w,
-        bias=trt.Weights(),
+    # --- post_quant_conv: 1x1x1 Conv3D [z_dim -> z_dim] ---
+    x = graph_ops.add_conv3d_as_conv2d(
+        network, latent,
+        weight=weights["post_quant_conv.weight"],
+        bias=weights["post_quant_conv.bias"],
+        out_channels=z_dim,
+        kernel_size=(1, 1, 1),
     )
 
-    # Reshape to [1, out_channels, 1, h_out, w_out]
-    reshape_5d = network.add_shuffle(conv.get_output(0))
-    reshape_5d.reshape_dims = (1, out_channels, 1, h_out, w_out)
+    # --- conv_in: CausalConv3D [z_dim -> mid_ch, (3,3,3)] ---
+    ci_cache = _add_cache_input(z_dim, 2, cur_h, cur_w)
+    x, ci_cache_out = graph_ops.add_causal_conv3d(
+        network, x, ci_cache,
+        weight=weights["decoder.conv_in.weight"],
+        bias=weights["decoder.conv_in.bias"],
+        out_channels=mid_ch,
+        kernel_size=(3, 3, 3),
+        padding_hw=(1, 1),
+    )
+    _set_cache_output(cache_idx - 1, ci_cache_out)
+    print(f"[vae-3d] conv_in: [{z_dim}]->[{mid_ch}], "
+          f"T={cur_t}, {cur_h}x{cur_w}", file=sys.stderr)
 
-    out_t = reshape_5d.get_output(0)
-    out_t.name = "video_frame"
-    network.mark_output(out_t)
-    out_t.dtype = trt.float32
+    # --- mid_block: resnet.0 -> attention -> resnet.1 ---
+    for mi in range(2):
+        prefix = f"decoder.mid_block.resnets.{mi}"
+        c1 = _add_cache_input(mid_ch, 2, cur_h, cur_w)
+        c2 = _add_cache_input(mid_ch, 2, cur_h, cur_w)
+        x, co1, co2 = graph_blocks.add_wan_vae_resblock(
+            network, x, c1, c2,
+            weights=weights, prefix=prefix,
+            in_channels=mid_ch, out_channels=mid_ch, eps=eps)
+        _set_cache_output(cache_idx - 2, co1)
+        _set_cache_output(cache_idx - 1, co2)
 
-    # Build
-    print(f"[vae-3d] Building placeholder TRT engine "
-          f"(z_dim={z_dim}, latent={h_lat}x{w_lat} -> {h_out}x{w_out}) ...",
+        # Attention after first mid resnet
+        if mi == 0:
+            x = graph_blocks.add_wan_spatial_attention(
+                network, x,
+                weights=weights,
+                prefix="decoder.mid_block.attentions.0",
+                channels=mid_ch, eps=eps)
+
+    print(f"[vae-3d] mid_block done, T={cur_t}, {cur_h}x{cur_w}",
           file=sys.stderr)
+
+    # --- up_blocks ---
+    # Channel assignment: each level's resnets output dec_channels[level].
+    # The spatial upsample conv transitions channels to the next level's input.
+    # Level 0: resnets 384, spatial 384->192
+    # Level 1: resnets 192->384 (shortcut), spatial 384->192
+    # Level 2: resnets 192, spatial 192->96
+    # Level 3: resnets 96, no upsample
+    prev_ch = mid_ch
+    for level in range(num_levels):
+        out_ch = dec_channels[level]
+        has_spatial = level < num_levels - 1
+        has_temporal = (level < len(temp_up) and temp_up[level]
+                        and level < num_levels - 1)
+
+        # 3 resnets per block (num_res_blocks + 1)
+        for blk in range(num_res_blocks + 1):
+            prefix = f"decoder.up_blocks.{level}.resnets.{blk}"
+            in_ch = prev_ch if blk == 0 else out_ch
+
+            c1 = _add_cache_input(in_ch, 2, cur_h, cur_w)
+            c2 = _add_cache_input(out_ch, 2, cur_h, cur_w)
+            x, co1, co2 = graph_blocks.add_wan_vae_resblock(
+                network, x, c1, c2,
+                weights=weights, prefix=prefix,
+                in_channels=in_ch, out_channels=out_ch, eps=eps)
+            _set_cache_output(cache_idx - 2, co1)
+            _set_cache_output(cache_idx - 1, co2)
+
+        prev_ch = out_ch
+        print(f"[vae-3d] up_block {level}: ch={out_ch}, T={cur_t}, "
+              f"{cur_h}x{cur_w}", file=sys.stderr)
+
+        # HF order: temporal upsample FIRST, then spatial upsample
+        if has_temporal:
+            # Temporal pixel-shuffle: time_conv (C->2C, kt=3,1,1) + reshape
+            tc_prefix = f"decoder.up_blocks.{level}.upsamplers.0.time_conv"
+            tc_w = weights[f"{tc_prefix}.weight"]
+            tc_in_ch = tc_w.shape[1]   # Input channels to time_conv
+            tc_out_ch = tc_w.shape[0]  # Output channels (= 2 * tc_in_ch)
+            tc_cache = _add_cache_input(tc_in_ch, 2, cur_h, cur_w)
+            x, tc_cache_out = graph_ops.add_causal_conv3d(
+                network, x, tc_cache,
+                weight=tc_w,
+                bias=weights[f"{tc_prefix}.bias"],
+                out_channels=tc_out_ch,
+                kernel_size=(3, 1, 1),
+                padding_hw=(0, 0),
+            )
+            _set_cache_output(cache_idx - 1, tc_cache_out)
+
+            # Pixel shuffle: [1, 2C, T, H, W] -> [1, C, 2T, H, W]
+            x = graph_ops.add_temporal_pixel_shuffle(network, x, factor=2)
+            prev_ch = tc_in_ch  # After pixel shuffle, channels = tc_in_ch
+            cur_t *= 2
+            print(f"[vae-3d]   temporal 2x -> {tc_in_ch}ch, T={cur_t}",
+                  file=sys.stderr)
+
+        if has_spatial:
+            # Spatial 2x upsample: nearest + Conv3D(1,3,3)
+            # The conv may change channels (e.g., 384->192 between levels)
+            sp_prefix = f"decoder.up_blocks.{level}.upsamplers.0.resample.1"
+            sp_w = weights[f"{sp_prefix}.weight"]
+            sp_out_ch = sp_w.shape[0]  # Detect output channels from weight
+            x = graph_ops.add_spatial_upsample_with_conv(
+                network, x,
+                weight=sp_w,
+                bias=weights[f"{sp_prefix}.bias"],
+                scale=2)
+            cur_h *= 2
+            cur_w *= 2
+            prev_ch = sp_out_ch  # Track channel change from spatial conv
+            print(f"[vae-3d]   spatial 2x -> {sp_out_ch}ch, {cur_h}x{cur_w}",
+                  file=sys.stderr)
+
+    # --- norm_out + SiLU ---
+    x = graph_ops.add_wan_rms_norm(
+        network, x, prev_ch,
+        weights["decoder.norm_out.gamma"], eps)
+    x = graph_ops.add_silu(network, x)
+
+    # --- conv_out: CausalConv3D [96 -> 3, (3,3,3)] ---
+    co_cache = _add_cache_input(prev_ch, 2, cur_h, cur_w)
+    x, co_cache_out = graph_ops.add_causal_conv3d(
+        network, x, co_cache,
+        weight=weights["decoder.conv_out.weight"],
+        bias=weights["decoder.conv_out.bias"],
+        out_channels=out_channels,
+        kernel_size=(3, 3, 3),
+        padding_hw=(1, 1),
+    )
+    _set_cache_output(cache_idx - 1, co_cache_out)
+
+    # --- Mark outputs ---
+    x.name = "video_frame"
+    network.mark_output(x)
+    x.dtype = trt.float32
+
+    # Mark cache outputs
+    for idx in sorted(cache_outputs.keys()):
+        t = cache_outputs[idx]
+        t.name = f"cache_out_{idx}"
+        network.mark_output(t)
+        t.dtype = trt.float32
+
+    total_caches = cache_idx
+    print(f"[vae-3d] Building TRT engine: {total_caches} caches, "
+          f"output [1, {out_channels}, {cur_t}, {cur_h}, {cur_w}]",
+          file=sys.stderr)
+
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("TRT engine serialization failed for 3D VAE")

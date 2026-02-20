@@ -537,3 +537,187 @@ def add_vae_resblock_3d(
         conv2_out, shortcut, trt.ElementWiseOperation.SUM)
 
     return out.get_output(0), cache_out1, cache_out2
+
+
+def add_wan_vae_resblock(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    cache_in1: trt.ITensor,
+    cache_in2: trt.ITensor,
+    *,
+    weights: WeightDict,
+    prefix: str,
+    in_channels: int,
+    out_channels: int,
+    temporal_kernel: int = 3,
+    eps: float = 1e-6,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """Wan VAE residual block with WanRMS_norm and causal temporal convolutions.
+
+    Uses WanRMS_norm (L2-normalize over channels) instead of GroupNorm.
+    Norm weights are gamma [C, 1, 1, 1] (no beta).
+
+    Input: [B, C_in, T, H, W] (T >= 1)
+    cache_in1, cache_in2: temporal caches for the two causal convs
+
+    Returns: (output, updated_cache1, updated_cache2)
+
+    Structure: WanRMS_norm -> SiLU -> CausalConv3D -> WanRMS_norm -> SiLU -> CausalConv3D + shortcut
+    """
+    # First WanRMS_norm + SiLU + CausalConv3D
+    normed1 = graph_ops.add_wan_rms_norm(
+        network, inp, in_channels,
+        weights[f"{prefix}.norm1.gamma"],
+        eps)
+    act1 = graph_ops.add_silu(network, normed1)
+    conv1_out, cache_out1 = graph_ops.add_causal_conv3d(
+        network, act1, cache_in1,
+        weight=weights[f"{prefix}.conv1.weight"],
+        bias=weights.get(f"{prefix}.conv1.bias"),
+        out_channels=out_channels,
+        kernel_size=(temporal_kernel, 3, 3),
+        padding_hw=(1, 1),
+    )
+
+    # Second WanRMS_norm + SiLU + CausalConv3D
+    normed2 = graph_ops.add_wan_rms_norm(
+        network, conv1_out, out_channels,
+        weights[f"{prefix}.norm2.gamma"],
+        eps)
+    act2 = graph_ops.add_silu(network, normed2)
+    conv2_out, cache_out2 = graph_ops.add_causal_conv3d(
+        network, act2, cache_in2,
+        weight=weights[f"{prefix}.conv2.weight"],
+        bias=weights.get(f"{prefix}.conv2.bias"),
+        out_channels=out_channels,
+        kernel_size=(temporal_kernel, 3, 3),
+        padding_hw=(1, 1),
+    )
+
+    # Shortcut (1x1x1 conv if channel mismatch)
+    if in_channels != out_channels:
+        shortcut = graph_ops.add_conv3d_as_conv2d(
+            network, inp,
+            weight=weights[f"{prefix}.conv_shortcut.weight"],
+            bias=weights.get(f"{prefix}.conv_shortcut.bias"),
+            out_channels=out_channels,
+            kernel_size=(1, 1, 1),
+        )
+    else:
+        shortcut = inp
+
+    # Residual connection
+    result = network.add_elementwise(
+        conv2_out, shortcut, trt.ElementWiseOperation.SUM)
+
+    return result.get_output(0), cache_out1, cache_out2
+
+
+def add_wan_spatial_attention(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    *,
+    weights: WeightDict,
+    prefix: str,
+    channels: int,
+    eps: float = 1e-6,
+) -> trt.ITensor:
+    """Wan VAE mid-block spatial self-attention with WanRMS_norm.
+
+    Single-head attention over spatial positions (H*W) per frame.
+
+    Input: [B, C, T, H, W]
+    Weight keys:
+        {prefix}.norm.gamma           [C, 1, 1, 1]
+        {prefix}.to_qkv.weight        [3C, C, 1, 1, 1]
+        {prefix}.to_qkv.bias          [3C]
+        {prefix}.proj.weight           [C, C, 1, 1, 1]
+        {prefix}.proj.bias             [C]
+
+    Output: [B, C, T, H, W] (residual connection applied)
+    """
+    b, c, t, h, w = inp.shape
+    bt = b * t
+    hw = h * w
+    attn_scale = 1.0 / np.sqrt(max(c, 1))
+
+    identity = inp
+
+    # WanRMS_norm
+    normed = graph_ops.add_wan_rms_norm(
+        network, inp, channels,
+        weights[f"{prefix}.norm.gamma"], eps)
+
+    # Reshape [B, C, T, H, W] -> [B*T*H*W, C]  (2D for matmul compat)
+    flatten = network.add_shuffle(normed)
+    flatten.first_transpose = trt.Permutation([0, 2, 3, 4, 1])  # [B,T,H,W,C]
+    flatten.reshape_dims = (bt * hw, c)
+
+    # QKV projection: [BT*HW, C] @ [C, 3C] -> [BT*HW, 3C]
+    qkv_w = weights[f"{prefix}.to_qkv.weight"]
+    qkv_w_2d = qkv_w.reshape(3 * c, c).T.copy()
+    qkv = graph_ops.add_matmul_rhs_constant(
+        network, flatten.get_output(0), c, 3 * c, qkv_w_2d)
+    qkv_bias = weights.get(f"{prefix}.to_qkv.bias")
+    if qkv_bias is not None:
+        qkv = graph_ops.add_bias_sum(network, qkv, 3 * c, qkv_bias)
+
+    # Reshape to [BT, HW, 3C] then split Q, K, V
+    qkv_3d = network.add_shuffle(qkv)
+    qkv_3d.reshape_dims = (bt, hw, 3 * c)
+
+    q_slice = network.add_slice(
+        qkv_3d.get_output(0),
+        start=(0, 0, 0), shape=(bt, hw, c), stride=(1, 1, 1))
+    k_slice = network.add_slice(
+        qkv_3d.get_output(0),
+        start=(0, 0, c), shape=(bt, hw, c), stride=(1, 1, 1))
+    v_slice = network.add_slice(
+        qkv_3d.get_output(0),
+        start=(0, 0, 2 * c), shape=(bt, hw, c), stride=(1, 1, 1))
+
+    q = q_slice.get_output(0)  # [BT, HW, C]
+    k = k_slice.get_output(0)
+    v = v_slice.get_output(0)
+
+    # Attention: score = Q @ K^T / sqrt(C)  -> [BT, HW, HW]
+    score = network.add_matrix_multiply(
+        q, trt.MatrixOperation.NONE,
+        k, trt.MatrixOperation.TRANSPOSE)
+
+    scale_const = graph_ops.add_constant(
+        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+    scaled = network.add_elementwise(
+        score.get_output(0), scale_const, trt.ElementWiseOperation.PROD)
+
+    softmax = network.add_softmax(scaled.get_output(0))
+    softmax.axes = 1 << 2  # last dim
+
+    # Context = softmax @ V  -> [BT, HW, C]
+    context = network.add_matrix_multiply(
+        softmax.get_output(0), trt.MatrixOperation.NONE,
+        v, trt.MatrixOperation.NONE)
+
+    # Flatten context to 2D for output projection: [BT*HW, C]
+    ctx_flat = network.add_shuffle(context.get_output(0))
+    ctx_flat.reshape_dims = (bt * hw, c)
+
+    # Output projection: [BT*HW, C] @ [C, C] -> [BT*HW, C]
+    proj_w = weights[f"{prefix}.proj.weight"]
+    proj_w_2d = proj_w.reshape(c, c).T.copy()
+    proj_out = graph_ops.add_matmul_rhs_constant(
+        network, ctx_flat.get_output(0), c, c, proj_w_2d)
+    proj_bias = weights.get(f"{prefix}.proj.bias")
+    if proj_bias is not None:
+        proj_out = graph_ops.add_bias_sum(network, proj_out, c, proj_bias)
+
+    # Reshape back to [B, C, T, H, W]
+    reshape_out = network.add_shuffle(proj_out)
+    reshape_out.reshape_dims = (b, t, h, w, c)
+    reshape_out.second_transpose = trt.Permutation([0, 4, 1, 2, 3])  # [B,C,T,H,W]
+
+    # Residual
+    result = network.add_elementwise(
+        reshape_out.get_output(0), identity, trt.ElementWiseOperation.SUM)
+
+    return result.get_output(0)

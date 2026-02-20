@@ -144,9 +144,17 @@ private:
     CudaBuffer mD_RotarySin;        // [num_patches, head_dim] float32
     CudaBuffer mD_Output;           // [num_patches, out_dim] float32
 
-    // For VAE subprocess
+    // For VAE subprocess fallback
     std::string mHfPython;
     std::string mBundlePath;
+
+    // Native VAE decode state
+    CudaBuffer mD_VaeInput;         // [1, z_dim, 1, h_lat, w_lat]
+    CudaBuffer mD_VaeOutput;        // [1, 3, T_out, h_out, w_out]
+    std::vector<CudaBuffer> mD_VaeCacheIn;   // 32 cache input buffers
+    std::vector<CudaBuffer> mD_VaeCacheOut;  // 32 cache output buffers
+    std::vector<std::size_t> mVaeCacheSizes; // byte size per cache
+    int32_t mVaeOutputT{1};         // temporal dim of VAE output per frame
 
     bool mOk{false};
 
@@ -184,9 +192,15 @@ private:
                       std::vector<float>& output,
                       std::string& error);
 
+    bool decode_vae_native(const std::vector<float>& latents,
+                           int32_t c, int32_t t, int32_t h, int32_t w,
+                           VideoResult& result, std::string& error);
+
     bool decode_vae_subprocess(const std::vector<float>& latents,
                                int32_t c, int32_t t, int32_t h, int32_t w,
                                VideoResult& result, std::string& error);
+
+    void init_vae_buffers();
 };
 
 /// Parse preprocessor weights from bundle section bytes.
