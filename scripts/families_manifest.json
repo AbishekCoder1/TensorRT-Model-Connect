@@ -1,0 +1,34 @@
+[
+  {
+    "slot": 0,
+    "gpu": 0,
+    "family": "yi",
+    "model_type": "yi",
+    "hf_repo": "01-ai/Yi-6B",
+    "test_model": "01-ai/Yi-1.5-500M"
+  },
+  {
+    "slot": 1,
+    "gpu": 1,
+    "family": "baichuan",
+    "model_type": "baichuan",
+    "hf_repo": "baichuan-inc/Baichuan2-7B-Base",
+    "test_model": "baichuan-inc/Baichuan2-7B-Base"
+  },
+  {
+    "slot": 2,
+    "gpu": 2,
+    "family": "deepseek",
+    "model_type": "deepseek",
+    "hf_repo": "deepseek-ai/deepseek-llm-7b-base",
+    "test_model": "deepseek-ai/deepseek-llm-7b-base"
+  },
+  {
+    "slot": 3,
+    "gpu": 3,
+    "family": "mpt",
+    "model_type": "mpt",
+    "hf_repo": "mosaicml/mpt-7b",
+    "test_model": "mosaicml/mpt-7b"
+  }
+]
