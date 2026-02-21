@@ -708,5 +708,161 @@ def main():
               file=sys.stderr)
 
 
+def run_as_diff_test(ctx):
+    """Framework entry point. Returns DiffResult."""
+    from diff_framework.protocol import DiffResult
+    import time as _time
+
+    t0 = _time.monotonic()
+    try:
+        from trtf_build.engine_builder import _resolve_model
+        from transformers import AutoTokenizer
+
+        model_dir = _resolve_model(ctx.model)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_dir, trust_remote_code=ctx.trust_remote_code)
+        input_ids = tokenizer.encode("The capital of France is")
+        eos_token_id = tokenizer.eos_token_id
+
+        warmup, iterations = 1, 3
+
+        if ctx.bundle_path:
+            engine_plan, num_layers, max_cache_length, _, is_mamba = \
+                load_trt_from_bundle(ctx.bundle_path)
+        else:
+            engine_plan, config, _, is_mamba = build_trt_engine(
+                ctx.model, ctx.max_cache_length, ctx.verbose)
+            num_layers = config.num_hidden_layers
+            max_cache_length = ctx.max_cache_length
+
+        if is_mamba:
+            trt_res = bench_trt_mamba(
+                engine_plan, num_layers, input_ids, ctx.max_new_tokens,
+                warmup, iterations, eos_token_id, ctx.verbose)
+        else:
+            trt_res = bench_trt(
+                engine_plan, num_layers, max_cache_length,
+                input_ids, ctx.max_new_tokens,
+                warmup, iterations, eos_token_id, ctx.verbose)
+        del engine_plan
+
+        import gc, torch
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        hf_model = load_hf_model(model_dir, "float16", ctx.trust_remote_code)
+        hf_res = bench_hf(
+            hf_model, input_ids, ctx.max_new_tokens,
+            warmup, iterations, eos_token_id, ctx.verbose)
+        del hf_model
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        import statistics
+        trt_total = statistics.mean(
+            [p + d for p, d in zip(trt_res["prefill_times"],
+                                   trt_res["decode_times"])])
+        hf_total = statistics.mean(
+            [p + d for p, d in zip(hf_res["prefill_times"],
+                                   hf_res["decode_times"])])
+        speedup = hf_total / trt_total if trt_total > 0 else 0.0
+        token_match = trt_res["gen_ids"] == hf_res["gen_ids"]
+
+        return DiffResult(
+            test_name="perf_benchmark", model=ctx.model,
+            runtime_strategy=ctx.runtime_strategy,
+            passed=True,  # perf is informational, always passes
+            status="PASS",
+            message=f"TRT {trt_total:.1f}ms vs HF {hf_total:.1f}ms "
+                    f"({speedup:.2f}x speedup)",
+            metrics={
+                "trt_total_ms": round(trt_total, 1),
+                "hf_total_ms": round(hf_total, 1),
+                "speedup": round(speedup, 2),
+                "token_match": token_match,
+            },
+            duration_s=_time.monotonic() - t0)
+    except Exception as e:
+        return DiffResult.error(
+            "perf_benchmark", ctx.model, ctx.runtime_strategy, str(e))
+
+
+def run_as_diff_test(ctx):
+    """Framework entry point. Returns DiffResult."""
+    from diff_framework.protocol import DiffResult
+    import time as _time
+
+    t0 = _time.monotonic()
+    try:
+        from trtf_build.engine_builder import _resolve_model
+        model_dir = _resolve_model(ctx.model)
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_dir, trust_remote_code=ctx.trust_remote_code)
+        input_ids = tokenizer.encode("The capital of France is")
+
+        eos_token_id = tokenizer.eos_token_id
+
+        # Build or load TRT engine
+        if ctx.bundle_path:
+            engine_plan, num_layers, max_cache_length, _, is_mamba = \
+                load_trt_from_bundle(ctx.bundle_path)
+        else:
+            engine_plan, config, _, is_mamba = build_trt_engine(
+                ctx.model, ctx.max_cache_length, ctx.verbose)
+            num_layers = config.num_hidden_layers
+            max_cache_length = ctx.max_cache_length
+
+        warmup, iterations = 1, 3
+        if is_mamba:
+            trt_res = bench_trt_mamba(
+                engine_plan, num_layers,
+                input_ids, ctx.max_new_tokens,
+                warmup, iterations, eos_token_id, ctx.verbose)
+        else:
+            trt_res = bench_trt(
+                engine_plan, num_layers, max_cache_length,
+                input_ids, ctx.max_new_tokens,
+                warmup, iterations, eos_token_id, ctx.verbose)
+        del engine_plan
+
+        import gc, torch
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        hf_model = load_hf_model(model_dir, "float16", ctx.trust_remote_code)
+        hf_res = bench_hf(
+            hf_model, input_ids, ctx.max_new_tokens,
+            warmup, iterations, eos_token_id, ctx.verbose)
+        del hf_model
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        trt_decode = _stats(trt_res["decode_times"])
+        hf_decode = _stats(hf_res["decode_times"])
+        speedup = (hf_decode["mean"] / trt_decode["mean"]
+                   if trt_decode["mean"] > 0 else 0.0)
+        token_match = trt_res["gen_ids"] == hf_res["gen_ids"]
+
+        return DiffResult(
+            test_name="perf_benchmark", model=ctx.model,
+            runtime_strategy=ctx.runtime_strategy,
+            passed=True,  # perf tests always "pass" — they report metrics
+            status="PASS",
+            message=(f"decode_speedup={speedup:.2f}x, "
+                     f"token_match={token_match}"),
+            metrics={
+                "trt_decode_ms": trt_decode["mean"],
+                "hf_decode_ms": hf_decode["mean"],
+                "decode_speedup": round(speedup, 2),
+                "token_match": token_match,
+            },
+            duration_s=_time.monotonic() - t0)
+    except Exception as e:
+        return DiffResult.error(
+            "perf_benchmark", ctx.model, ctx.runtime_strategy, str(e))
+
+
 if __name__ == "__main__":
     main()

@@ -32,6 +32,7 @@ class BundleInfo:
     num_attention_heads: int = 1
     num_key_value_heads: int = 1
     max_cache_length: int = 32
+    runtime_strategy: str = ""
 
 
 @dataclass
@@ -71,6 +72,8 @@ def write_bundle(
         "num_attention_heads": info.num_attention_heads,
         "num_key_value_heads": info.num_key_value_heads,
         "max_cache_length": info.max_cache_length,
+        **({"runtime_strategy": info.runtime_strategy}
+           if info.runtime_strategy else {}),
         "sections": {
             s["name"]: {"offset": s["offset"], "size": s["size"]}
             for s in section_meta

@@ -21,7 +21,7 @@ pip install cuda-python
 
 # Python deps
 pip install "transformers>=4.57.0" tokenizers safetensors sentencepiece huggingface_hub ml_dtypes datasets
-pip install pytest torch
+pip install pytest torch accelerate diffusers
 
 # Install trtf_build
 pip install --no-deps -e trtf_build/

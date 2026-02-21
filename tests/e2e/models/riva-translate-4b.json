@@ -9,5 +9,7 @@
   "max_new_tokens": 20,
   "logit_atol": 1e-3,
   "layer_atol": 0.05,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "gated": true,
+  "skip_logit_parity": true
 }

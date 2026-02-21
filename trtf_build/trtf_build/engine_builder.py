@@ -198,6 +198,7 @@ def build_bundle(
         num_attention_heads=config.num_attention_heads,
         num_key_value_heads=config.num_key_value_heads,
         max_cache_length=max_cache_length,
+        runtime_strategy=getattr(plugin, "runtime_strategy", ""),
     )
 
     sections = [BundleSection("engine_plan", engine_plan)]
@@ -363,6 +364,7 @@ def _build_diffusion_bundle(
         trt_version=_get_trt_version(),
         gpu_name=_get_gpu_name(),
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        runtime_strategy=getattr(plugin, "runtime_strategy", "diffusion"),
     )
 
     write_bundle(output_path, info, sections)

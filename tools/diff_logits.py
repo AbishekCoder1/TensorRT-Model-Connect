@@ -202,5 +202,105 @@ def main():
     sys.exit(0 if all_passed else 1)
 
 
+def run_as_diff_test(ctx):
+    """Framework entry point. Returns DiffResult."""
+    from diff_framework.protocol import DiffResult
+    import time as _time
+
+    t0 = _time.monotonic()
+    try:
+        engine_plan, config, model_dir = build_trt_engine(
+            ctx.model, ctx.max_cache_length, ctx.verbose)
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_dir, trust_remote_code=ctx.trust_remote_code)
+
+        prompts = STANDARD_PROMPTS
+
+        worst_diff = 0.0
+        all_passed = True
+        details_lines = []
+
+        for label, prompt in prompts:
+            input_ids = tokenizer.encode(prompt)
+            trt_logits = run_trt(
+                engine_plan, config, input_ids,
+                ctx.max_new_tokens, ctx.max_cache_length)
+            hf_logits = run_hf(model_dir, input_ids, ctx.max_new_tokens,
+                               trust_remote_code=ctx.trust_remote_code)
+            max_diff, report = compare_logits(trt_logits, hf_logits, ctx.atol)
+            worst_diff = max(worst_diff, max_diff)
+            passed = max_diff <= ctx.atol
+            if not passed:
+                all_passed = False
+            details_lines.append(
+                f"[{label}] max_diff={max_diff:.6f} "
+                f"{'PASS' if passed else 'FAIL'}")
+
+        return DiffResult(
+            test_name="logit_diff", model=ctx.model,
+            runtime_strategy=ctx.runtime_strategy,
+            passed=all_passed,
+            status="PASS" if all_passed else "FAIL",
+            message=f"max_abs_logit_diff={worst_diff:.6f} (atol={ctx.atol})",
+            metrics={"max_abs_diff": worst_diff, "atol": ctx.atol,
+                     "num_prompts": len(prompts)},
+            duration_s=_time.monotonic() - t0,
+            details="\n".join(details_lines))
+    except Exception as e:
+        return DiffResult.error(
+            "logit_diff", ctx.model, ctx.runtime_strategy, str(e))
+
+
+def run_as_diff_test(ctx):
+    """Framework entry point. Returns DiffResult."""
+    from diff_framework.protocol import DiffResult
+    import time as _time
+
+    t0 = _time.monotonic()
+    try:
+        engine_plan, config, model_dir = build_trt_engine(
+            ctx.model, ctx.max_cache_length, ctx.verbose)
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_dir, trust_remote_code=ctx.trust_remote_code)
+
+        prompts = STANDARD_PROMPTS
+        worst_diff = 0.0
+        all_passed = True
+        details_lines = []
+
+        for label, prompt in prompts:
+            input_ids = tokenizer.encode(prompt)
+            trt_logits = run_trt(
+                engine_plan, config, input_ids,
+                ctx.max_new_tokens, ctx.max_cache_length)
+            hf_logits = run_hf(model_dir, input_ids, ctx.max_new_tokens,
+                               trust_remote_code=ctx.trust_remote_code)
+            max_diff, lines = compare_logits(trt_logits, hf_logits, ctx.atol)
+            worst_diff = max(worst_diff, max_diff)
+            passed = max_diff <= ctx.atol
+            if not passed:
+                all_passed = False
+            details_lines.append(
+                f"[{label}] max_diff={max_diff:.6f} "
+                f"{'PASS' if passed else 'FAIL'}")
+
+        return DiffResult(
+            test_name="logit_diff", model=ctx.model,
+            runtime_strategy=ctx.runtime_strategy,
+            passed=all_passed,
+            status="PASS" if all_passed else "FAIL",
+            message=f"max_abs_logit_diff={worst_diff:.6f} (atol={ctx.atol})",
+            metrics={"max_abs_diff": worst_diff, "atol": ctx.atol},
+            duration_s=_time.monotonic() - t0,
+            details="\n".join(details_lines))
+    except Exception as e:
+        return DiffResult.error(
+            "logit_diff", ctx.model, ctx.runtime_strategy, str(e))
+
+
 if __name__ == "__main__":
     main()

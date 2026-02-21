@@ -1,0 +1,17 @@
+"""Runner parity check — Python TrtRunner vs C++ trtf binary."""
+
+from diff_framework.registry import register
+from diff_framework.protocol import DiffResult, TestContext
+
+
+@register
+class RunnerParityTest:
+    name = "runner_parity"
+    description = "Cross-validate Python TrtRunner vs C++ trtf binary"
+    runtime_strategies = ["decoder_kv_cache", "decoder_moe", "ssm_recurrent"]
+    requires_bundle = True
+    requires_gpu = True
+
+    def run(self, ctx: TestContext) -> DiffResult:
+        from test_runner_parity import run_as_diff_test
+        return run_as_diff_test(ctx)

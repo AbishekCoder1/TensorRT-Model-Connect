@@ -106,7 +106,8 @@ def step2_text_projection_activation(model_id: str, pp: dict, atol: float) -> bo
     from diffusers import WanPipeline
 
     print("  Loading HF pipeline ...", file=sys.stderr)
-    pipe = WanPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
+    pipe = WanPipeline.from_pretrained(
+        model_id, torch_dtype=torch.float32, low_cpu_mem_usage=True)
     ctx.pipe = pipe
 
     text_embedder = pipe.transformer.condition_embedder.text_embedder
@@ -580,6 +581,60 @@ def main():
     num_pass = sum(results.values())
     print(f"\n  {num_pass}/{len(results)} passed")
     return 0 if all(results.values()) else 1
+
+
+def run_as_diff_test(ctx_fw):
+    """Framework entry point. Returns DiffResult."""
+    from diff_framework.protocol import DiffResult
+    import time as _time
+
+    t0 = _time.monotonic()
+    try:
+        bundle = ctx_fw.bundle_path
+        if not bundle:
+            return DiffResult.skip(
+                "diffusion_components", ctx_fw.model,
+                ctx_fw.runtime_strategy, "No bundle provided")
+
+        model_id = ctx_fw.model
+        atol = ctx_fw.atol
+        num_steps = ctx_fw.num_inference_steps
+
+        pp = load_pp_weights(bundle)
+        results = {}
+
+        results["config"] = step1_verify_config(bundle)
+        results["text_proj_activation"] = step2_text_projection_activation(
+            model_id, pp, atol)
+        results["t5_text_proj"] = step3_t5_and_text_proj(bundle, pp, atol)
+        results["timestep_embedding"] = step4_timestep_embedding(pp, atol)
+        results["patch_embedding"] = step5_patch_embedding(pp, atol)
+        results["3d_rope"] = step6_3d_rope(atol)
+        results["dit_step"] = step7_dit_step(bundle, pp, atol)
+        results["scheduler"] = step8_scheduler_sigmas(bundle, atol)
+        results["full_pipeline"] = step9_full_pipeline(
+            bundle, pp, num_steps, atol)
+
+        step_results = {k: "PASS" if v else "FAIL" for k, v in results.items()}
+        all_passed = all(results.values())
+        steps_passed = sum(results.values())
+
+        return DiffResult(
+            test_name="diffusion_components", model=ctx_fw.model,
+            runtime_strategy=ctx_fw.runtime_strategy,
+            passed=all_passed,
+            status="PASS" if all_passed else "FAIL",
+            message=f"{steps_passed}/{len(results)} steps passed",
+            metrics={
+                **step_results,
+                "steps_passed": steps_passed,
+                "steps_total": len(results),
+            },
+            duration_s=_time.monotonic() - t0)
+    except Exception as e:
+        return DiffResult.error(
+            "diffusion_components", ctx_fw.model,
+            ctx_fw.runtime_strategy, str(e))
 
 
 if __name__ == "__main__":

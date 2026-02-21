@@ -4,8 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Persistent storage paths (host)
-STORAGE_ROOT="/mnt/storage/trt-transformers"
-HF_CACHE="${STORAGE_ROOT}/model-weights"
+STORAGE_ROOT="/workspace/users/yifeif/trt-transformers"
+HF_CACHE="/mnt/storage/trt-transformers/model-weights"
 ENGINE_DIR="${STORAGE_ROOT}/engines"
 
 # Create dirs if needed (may fail if storage not mounted — non-fatal)

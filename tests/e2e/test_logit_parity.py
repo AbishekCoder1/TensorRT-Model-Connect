@@ -14,6 +14,12 @@ PROJECT_DIR = Path(__file__).resolve().parents[2]
 @pytest.mark.e2e
 def test_logit_parity(model_entry):
     """Run diff_logits battery and verify it passes."""
+    if model_entry.get("test_type") == "diffusion":
+        pytest.skip("Diffusion model — use test_diffusion_pipeline for logit checks")
+    if model_entry.get("runtime_strategy") == "vision_language":
+        pytest.skip("VL model — diff_logits requires decoder-only models")
+    if model_entry.get("skip_logit_parity"):
+        pytest.skip("Model requires HF auth — skipping logit parity")
     hf_id = model_entry["hf_id"]
     atol = model_entry.get("logit_atol", 1e-3)
     max_cache = model_entry.get("max_cache_length", 64)

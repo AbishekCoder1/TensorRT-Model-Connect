@@ -14,6 +14,8 @@ PROJECT_DIR = Path(__file__).resolve().parents[2]
 @pytest.mark.e2e
 def test_runner_parity(model_entry, trtf_binary, hf_python, ld_library_path):
     """Run test_runner_parity.py and verify C++ matches Python."""
+    if model_entry.get("test_type") == "diffusion":
+        pytest.skip("Diffusion model — no text runner parity")
     max_new = min(model_entry.get("max_new_tokens", 20), 20)
 
     parity_script = PROJECT_DIR / "tools" / "test_runner_parity.py"

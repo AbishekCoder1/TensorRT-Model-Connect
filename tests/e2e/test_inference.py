@@ -9,6 +9,8 @@ import pytest
 @pytest.mark.e2e
 def test_inference_produces_text(model_entry, trtf_binary, hf_python, ld_library_path):
     """trtf run <bundle> should generate non-empty text."""
+    if model_entry.get("test_type") == "diffusion":
+        pytest.skip("Diffusion model — no text inference")
     prompt = model_entry.get("prompt", "Hello")
     max_new = model_entry.get("max_new_tokens", 10)
 
@@ -28,6 +30,8 @@ def test_inference_produces_text(model_entry, trtf_binary, hf_python, ld_library
 @pytest.mark.e2e
 def test_inference_deterministic(model_entry, trtf_binary, hf_python, ld_library_path):
     """Two runs with the same prompt should produce identical output."""
+    if model_entry.get("test_type") == "diffusion":
+        pytest.skip("Diffusion model — no text inference")
     prompt = model_entry.get("prompt", "Hello")
     max_new = min(model_entry.get("max_new_tokens", 10), 5)
 

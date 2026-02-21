@@ -192,6 +192,8 @@ class TestTrtRunnerCleanup:
         runner._d_present_v = [5000, 5001]
         runner._d_input_embed = 0
         runner._d_use_input_embed = 0
+        runner._d_deepstack = {}
+        runner._d_deepstack_active = 0
         runner._d_debug = {}
         runner.stream = 9999
         runner.context = MagicMock()

@@ -737,5 +737,60 @@ def main():
         sys.exit(1)
 
 
+def run_as_diff_test(ctx):
+    """Framework entry point. Returns DiffResult."""
+    from diff_framework.protocol import DiffResult
+    import time as _time
+
+    t0 = _time.monotonic()
+    try:
+        bundle = ctx.bundle_path
+        if not bundle:
+            return DiffResult.skip(
+                "vl_pipeline", ctx.model, ctx.runtime_strategy,
+                "No bundle provided")
+
+        sub_results = {}
+
+        # Test 1: Vision features
+        if ctx.image_path:
+            sub_results["vision"] = (
+                "PASS" if test_vision_features(
+                    bundle, ctx.image_path, ctx.model, ctx.atol)
+                else "FAIL")
+
+        # Test 2: Embed input
+        sub_results["embed"] = (
+            "PASS" if test_embed_input(bundle) else "FAIL")
+
+        # Test 3: VL generation
+        if ctx.image_path:
+            sub_results["generation"] = (
+                "PASS" if test_vl_generation(
+                    bundle, ctx.image_path, ctx.max_new_tokens)
+                else "FAIL")
+
+        # Test 4: C++ binary
+        if ctx.image_path and ctx.binary_path:
+            sub_results["cpp_parity"] = (
+                "PASS" if test_cpp_binary(
+                    bundle, ctx.binary_path, ctx.image_path,
+                    ctx.hf_python, ctx.max_new_tokens)
+                else "FAIL")
+
+        all_passed = all(v == "PASS" for v in sub_results.values())
+        return DiffResult(
+            test_name="vl_pipeline", model=ctx.model,
+            runtime_strategy=ctx.runtime_strategy,
+            passed=all_passed,
+            status="PASS" if all_passed else "FAIL",
+            message=f"sub-tests: {sub_results}",
+            metrics=sub_results,
+            duration_s=_time.monotonic() - t0)
+    except Exception as e:
+        return DiffResult.error(
+            "vl_pipeline", ctx.model, ctx.runtime_strategy, str(e))
+
+
 if __name__ == "__main__":
     main()

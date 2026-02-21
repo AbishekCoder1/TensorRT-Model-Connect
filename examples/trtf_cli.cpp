@@ -317,6 +317,10 @@ int cmd_inspect(const CliArgs& args)
         std::cout << "Attention heads:    " << info.num_attention_heads << '\n';
         std::cout << "KV heads:           " << info.num_key_value_heads << '\n';
         std::cout << "Max cache length:   " << info.max_cache_length << '\n';
+        if (!info.runtime_strategy.empty())
+        {
+            std::cout << "Runtime strategy:   " << info.runtime_strategy << '\n';
+        }
         return EXIT_SUCCESS;
     }
     catch (const std::exception& e)
