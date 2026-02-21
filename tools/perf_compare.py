@@ -43,6 +43,8 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from tool_helpers import load_hf_model as _load_hf_model_base
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -127,7 +129,6 @@ def load_trt_from_bundle(bundle_path: str):
 def load_hf_model(model_dir: str, dtype: str, trust_remote_code: bool):
     """Load HF model on CUDA with the specified dtype."""
     import torch
-    from transformers import AutoModelForCausalLM
 
     dtype_map = {
         "float16": torch.float16,
@@ -139,25 +140,10 @@ def load_hf_model(model_dir: str, dtype: str, trust_remote_code: bool):
         raise ValueError(f"Unsupported dtype: {dtype!r}. "
                          f"Choose from: {list(dtype_map)}")
 
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_dir, trust_remote_code=False,
-            torch_dtype=torch_dtype).to("cuda")
-    except (ValueError, KeyError, ImportError) as e:
-        if trust_remote_code:
-            print(f"[perf] Native loading failed ({e}), "
-                  f"retrying with trust_remote_code=True ...",
-                  file=sys.stderr)
-            model = AutoModelForCausalLM.from_pretrained(
-                model_dir, trust_remote_code=True,
-                torch_dtype=torch_dtype).to("cuda")
-        else:
-            raise ValueError(
-                f"Failed to load model from {model_dir}. "
-                f"If custom code is required, use --trust-remote-code. "
-                f"Error: {e}"
-            ) from e
-
+    model = _load_hf_model_base(
+        model_dir, trust_remote_code=trust_remote_code,
+        torch_dtype=torch_dtype, tag="perf")
+    model = model.to("cuda")
     model.eval()
     return model
 

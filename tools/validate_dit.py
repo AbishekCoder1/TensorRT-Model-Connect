@@ -19,58 +19,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-
-def _get_cudart():
-    try:
-        from cuda import cudart
-        return cudart
-    except ImportError:
-        from cuda.bindings import runtime as cudart
-        return cudart
-
-
-def _run_trt_engine(plan, inputs, output_specs):
-    import tensorrt as trt
-    cudart = _get_cudart()
-
-    logger = trt.Logger(trt.Logger.WARNING)
-    runtime = trt.Runtime(logger)
-    engine = runtime.deserialize_cuda_engine(plan)
-    context = engine.create_execution_context()
-
-    stream = cudart.cudaStreamCreate()[1]
-    device_ptrs = {}
-
-    for name, arr in inputs.items():
-        arr = np.ascontiguousarray(arr)
-        d_ptr = cudart.cudaMalloc(arr.nbytes)[1]
-        cudart.cudaMemcpyAsync(d_ptr, arr.ctypes.data, arr.nbytes,
-                               cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, stream)
-        context.set_tensor_address(name, d_ptr)
-        device_ptrs[name] = d_ptr
-
-    outputs = {}
-    for name, (shape, dtype) in output_specs.items():
-        h_out = np.empty(shape, dtype=dtype)
-        d_ptr = cudart.cudaMalloc(h_out.nbytes)[1]
-        context.set_tensor_address(name, d_ptr)
-        device_ptrs[name] = d_ptr
-        outputs[name] = (h_out, d_ptr)
-
-    context.execute_async_v3(stream)
-    cudart.cudaStreamSynchronize(stream)
-
-    results = {}
-    for name, (h_out, d_ptr) in outputs.items():
-        cudart.cudaMemcpy(h_out.ctypes.data, d_ptr, h_out.nbytes,
-                          cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost)
-        results[name] = h_out
-
-    for d_ptr in device_ptrs.values():
-        cudart.cudaFree(d_ptr)
-    cudart.cudaStreamDestroy(stream)
-
-    return results
+from diffusion_helpers import run_trt_engine as _run_trt_engine
 
 
 def main():

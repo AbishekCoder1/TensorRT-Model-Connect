@@ -15,9 +15,10 @@ Usage:
 """
 import argparse
 import sys
-from pathlib import Path
 
 import numpy as np
+
+from tool_helpers import build_trt_engine, load_hf_model as _load_hf_model
 
 STANDARD_PROMPTS = [
     ("factual", "The capital of France is"),
@@ -25,30 +26,6 @@ STANDARD_PROMPTS = [
     ("code", "Write a Python function that checks if a number is prime:"),
     ("multi-turn", "User: What is 2+2?\nAssistant:"),
 ]
-
-
-def build_trt_engine(model_id_or_path, max_cache_length, verbose):
-    """Build TRT engine and return (engine_plan_bytes, config, weights)."""
-    from trtf_build.engine_builder import _resolve_model
-    from trtf_build.config import ModelConfig
-    from trtf_build.families import find_plugin
-
-    model_dir = _resolve_model(model_id_or_path)
-    config = ModelConfig.from_dir(model_dir)
-    plugin = find_plugin(config.model_type)
-    if plugin is None:
-        raise ValueError(f"No plugin for model_type={config.model_type!r}")
-
-    print(f"[diff] Loading weights ({config.model_type}) ...", file=sys.stderr)
-    weights = plugin.load_weights(model_dir, config)
-    print(f"[diff] Building TRT engine (cache={max_cache_length}) ...",
-          file=sys.stderr)
-    engine_plan = plugin.build_engine(
-        config, weights, max_cache_length, verbose=verbose)
-    print(f"[diff] Engine built ({len(engine_plan) / 1e6:.1f} MB)",
-          file=sys.stderr)
-
-    return engine_plan, config, model_dir
 
 
 def run_trt(engine_plan, config, input_ids, max_new_tokens, max_cache_length):
@@ -70,55 +47,6 @@ def run_trt(engine_plan, config, input_ids, max_new_tokens, max_cache_length):
 
     results = runner.generate(input_ids, max_new_tokens)
     return [r["logits"].flatten() for r in results]
-
-
-def _load_hf_model(model_dir, trust_remote_code=False):
-    """Load HF model. Uses native transformers support by default.
-
-    If the model requires custom code (e.g. older repos without native
-    transformers support), pass --trust-remote-code to enable it.
-    This executes Python code from the model repository.
-
-    For vision-language models (e.g. Qwen2.5-VL), loads the full VL model
-    but only uses the text decoder path for comparison.
-    """
-    import json
-    import torch
-    from transformers import AutoModelForCausalLM
-
-    # Check if this is a VL model that requires a different AutoModel class.
-    config_path = Path(model_dir) / "config.json"
-    is_vl_model = False
-    if config_path.exists():
-        cfg = json.loads(config_path.read_text())
-        model_type = cfg.get("model_type", "").lower()
-        if "vl" in model_type or "vision" in model_type:
-            is_vl_model = True
-
-    if is_vl_model:
-        from transformers import AutoModelForImageTextToText
-        print("[diff] Loading VL model via AutoModelForImageTextToText ...",
-              file=sys.stderr)
-        model = AutoModelForImageTextToText.from_pretrained(
-            model_dir, trust_remote_code=trust_remote_code,
-            torch_dtype=torch.float32)
-        return model
-
-    try:
-        return AutoModelForCausalLM.from_pretrained(
-            model_dir, trust_remote_code=False, torch_dtype=torch.float32)
-    except (ValueError, KeyError, ImportError) as e:
-        if trust_remote_code:
-            print(f"[diff] Native loading failed ({e}), "
-                  f"retrying with trust_remote_code=True ...",
-                  file=sys.stderr)
-            return AutoModelForCausalLM.from_pretrained(
-                model_dir, trust_remote_code=True, torch_dtype=torch.float32)
-        raise ValueError(
-            f"Failed to load model from {model_dir} without custom code. "
-            f"If this model requires custom code, re-run with "
-            f"--trust-remote-code. Original error: {e}"
-        ) from e
 
 
 def run_hf(model_dir, input_ids, max_new_tokens, trust_remote_code=False):
