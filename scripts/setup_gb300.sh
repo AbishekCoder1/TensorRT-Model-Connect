@@ -16,6 +16,9 @@ pip install cmake ninja
 # TensorRT (auto-selects cu13 for CUDA 13.x)
 pip install tensorrt && pip install tensorrt --no-deps
 
+# CUDA Python bindings (needed by debug_runner.py / diff tools)
+pip install cuda-python
+
 # Python deps
 pip install "transformers>=4.57.0" tokenizers safetensors sentencepiece huggingface_hub ml_dtypes datasets
 pip install pytest torch
