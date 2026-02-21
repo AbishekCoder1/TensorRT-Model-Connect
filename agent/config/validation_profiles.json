@@ -1,0 +1,86 @@
+{
+  "defaults": {
+    "atol": 0.001,
+    "prompt": "The capital of France is",
+    "max_new_tokens": 20,
+    "cache_len": 256
+  },
+  "by_modality": {
+    "decoder": {
+      "atol": 0.001,
+      "max_new_tokens": 32
+    },
+    "encoder": {
+      "atol": 0.0001,
+      "max_new_tokens": 0,
+      "cache_len": 128
+    },
+    "encoder_decoder": {
+      "atol": 0.001,
+      "max_new_tokens": 32,
+      "cache_len": 128
+    },
+    "vision_language": {
+      "atol": 0.001,
+      "max_new_tokens": 24
+    },
+    "diffusion": {
+      "prompt": "A cinematic clip of waves hitting black volcanic rocks at sunset",
+      "cache_len": 64
+    },
+    "vision_encoder": {
+      "atol": 0.0001,
+      "cache_len": 128
+    },
+    "audio_encoder": {
+      "atol": 0.0001,
+      "cache_len": 128
+    },
+    "video_encoder": {
+      "atol": 0.001,
+      "max_new_tokens": 0,
+      "cache_len": 128
+    },
+    "video_diffusion": {
+      "prompt": "A calm drone shot flying over a green valley at sunrise",
+      "cache_len": 64
+    },
+    "time_series": {
+      "atol": 0.0001,
+      "prompt": "Forecast next 24 timesteps",
+      "max_new_tokens": 0,
+      "cache_len": 128
+    },
+    "rl_inference": {
+      "atol": 0.0001,
+      "prompt": "Evaluate fixed observation batch",
+      "max_new_tokens": 0,
+      "cache_len": 128
+    }
+  },
+  "by_runtime_strategy": {
+    "ssm_recurrent": {
+      "prompt": "A short explanation of recurrent state updates in state space models.",
+      "max_new_tokens": 40
+    },
+    "decoder_moe": {
+      "max_new_tokens": 24
+    },
+    "video_diffusion": {
+      "prompt": "A photoreal video of ocean waves hitting volcanic rock at sunset.",
+      "cache_len": 64
+    },
+    "time_series_forecaster": {
+      "prompt": "Forecast next 48 timesteps",
+      "max_new_tokens": 0
+    },
+    "rl_policy_inference": {
+      "prompt": "Compute policy logits for fixed observation tensor",
+      "max_new_tokens": 0
+    },
+    "rl_value_inference": {
+      "prompt": "Compute value head outputs for fixed observation tensor",
+      "max_new_tokens": 0
+    }
+  }
+}

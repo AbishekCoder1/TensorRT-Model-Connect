@@ -14,6 +14,7 @@ A split-language system for TensorRT LLM inference: **Python builds** optimized 
 | **[HF vs TRT Comparison](HF-vs-TRT-Comparison.md)** | Side-by-side comparison of HuggingFace Transformers and this library |
 | **[Adding a Model Family](Adding-a-Model-Family.md)** | Step-by-step guide for adding a new model family in Python |
 | **[Testing and Validation](Testing-and-Validation.md)** | Regression tiers, unified diff framework, per-category test strategies |
+| **[Agent Orchestration](../AGENT_ORCHESTRATION.md)** | Autonomous multi-agent HF onboarding flow, validation, and merge gating |
 | **[Extensibility Assessment](Architecture-Extensibility-Assessment.md)** | MoE, Mamba/SSM, diffusion support status; MLA roadmap |
 | **[Source Layout](Source-Layout.md)** | File-by-file guide to the codebase (Python + C++) |
 

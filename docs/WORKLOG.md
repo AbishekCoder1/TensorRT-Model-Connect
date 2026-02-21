@@ -1791,3 +1791,36 @@ Major simplification pass removing dead code, unused abstractions, and legacy co
 - Updated CLAUDE.md: source layout, registry description, env vars, executable commands, built-in model IDs.
 - Updated README.md: 4 families, 2 backends, removed tiny-cake-v1 and debug env vars.
 - Updated Home.md: removed CPU-reference backend references.
+
+## 2026-02-21 (autonomous orchestration runtime implementation)
+
+Implemented the first working end-to-end autonomous orchestration runtime under `agent/`:
+
+- Added queue/state core:
+  - `agent/schemas.py`, `agent/store.py`, `agent/orchestrator.py`.
+  - Task graph decomposition from HF links, dependency-aware statuses, inbox drain workflow.
+- Added execution stack:
+  - `agent/scheduler.py` (resource-aware dispatch: CPU/RAM + GPU free-memory slots),
+  - `agent/worker.py`, `agent/run_subagent.sh`,
+  - `agent/merge_manager.py` (serialized integration + canary gating without hard reset).
+- Added standardized validation:
+  - `agent/validator.py` with modality-specific pipelines (decoder, encoder, encoder-decoder, VL, diffusion),
+  - hook-based strict parity extension points for modalities that need custom comparators.
+- Added configuration + prompts:
+  - `agent/config/canaries.json`, `agent/config/validation_profiles.json`,
+  - prompt templates in `agent/prompts/*.md`.
+- Added operational tooling:
+  - `agent/submit_links.py`, `agent/report_status.py`, `agent/agent_loop.sh`,
+  - updated `agent/README.md` with user flow and container commands.
+- Added tests:
+  - `tests/tools/test_agent_store.py`,
+  - `tests/tools/test_agent_orchestrator.py`,
+  - `tests/tools/test_agent_scheduler.py`,
+  - `tests/tools/test_agent_validator.py`.
+
+Design updates from initial draft:
+
+- Per-model tasks now share a single feature branch (`agent/<model_slug>`) and execute in dependency order to avoid cross-task branch drift.
+- Scheduler no longer claims tasks before capacity checks (prevents stranded `DISPATCHED` tasks).
+- Merge manager performs integration on a temporary branch and fast-forwards `master` only after canaries pass.
+- Added onboarding runbook `docs/AGENT_ORCHESTRATION.md` plus `agent/config/env.example.sh` so new developers can configure hooks and operate the flow from a single document.

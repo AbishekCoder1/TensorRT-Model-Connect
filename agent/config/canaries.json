@@ -1,0 +1,82 @@
+{
+  "tier_a": {
+    "global": [
+      {
+        "cmd": "python3 -m pytest tests/tools -q",
+        "timeout_s": 900
+      }
+    ],
+    "by_modality": {
+      "decoder": [],
+      "encoder": [],
+      "encoder_decoder": [],
+      "vision_language": [],
+      "diffusion": [],
+      "vision_encoder": [],
+      "audio_encoder": [],
+      "video_encoder": [],
+      "video_diffusion": [],
+      "time_series": [],
+      "rl_inference": []
+    },
+    "by_runtime_strategy": {
+      "decoder_kv_cache": [],
+      "decoder_moe": [],
+      "ssm_recurrent": [],
+      "encoder_only": [],
+      "encoder_decoder": [],
+      "vision_encoder": [],
+      "audio_encoder": [],
+      "vision_language": [],
+      "diffusion": [],
+      "video_diffusion": [],
+      "video_encoder": [],
+      "time_series_encoder": [],
+      "time_series_forecaster": [],
+      "rl_policy_inference": [],
+      "rl_value_inference": []
+    }
+  },
+  "tier_b": {
+    "global": [
+      {
+        "cmd": "python3 -m pytest tests/builder -q --ignore=tests/builder/test_graph_ops.py",
+        "timeout_s": 1200
+      },
+      {
+        "cmd": "ctest --test-dir build -R test_pipeline --output-on-failure",
+        "timeout_s": 600
+      }
+    ],
+    "by_modality": {
+      "decoder": [],
+      "encoder": [],
+      "encoder_decoder": [],
+      "vision_language": [],
+      "diffusion": [],
+      "vision_encoder": [],
+      "audio_encoder": [],
+      "video_encoder": [],
+      "video_diffusion": [],
+      "time_series": [],
+      "rl_inference": []
+    },
+    "by_runtime_strategy": {
+      "decoder_kv_cache": [],
+      "decoder_moe": [],
+      "ssm_recurrent": [],
+      "encoder_only": [],
+      "encoder_decoder": [],
+      "vision_encoder": [],
+      "audio_encoder": [],
+      "vision_language": [],
+      "diffusion": [],
+      "video_diffusion": [],
+      "video_encoder": [],
+      "time_series_encoder": [],
+      "time_series_forecaster": [],
+      "rl_policy_inference": [],
+      "rl_value_inference": []
+    }
+  }
+}
