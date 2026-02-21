@@ -21,6 +21,15 @@ File-by-file guide to the codebase. The system is split: Python (`trtf_build/`) 
 | `trtf_build/debug_runner.py` | `TrtRunner` (device-resident KV cache), `MambaTrtRunner` (device-resident SSM), `VisionTrtRunner`, `VLTrtRunner` for pure-Python TRT inference. VL image preprocessing with 4 strategies + configurable interpolation. |
 | `trtf_build/qwen_vl_vision_builder.py` | Qwen2.5-VL vision encoder TRT engine builder: 3D patch embedding, 2D RoPE with spatial merge, ViT blocks, spatial merge MLP. |
 | `trtf_build/vision_encoder_builder.py` | Deprecated shim: re-exports from `qwen_vl_vision_builder.py`. |
+| `trtf_build/onnx_vision_builder.py` | ONNX-based vision encoder builder: trace HF vision model to ONNX, convert to TRT via `trt.OnnxParser`. |
+| `trtf_build/diffusion_runner.py` | `DiffusionRunner`: pure-Python TRT diffusion pipeline (T5 encode, denoising loop with CFG, frame-by-frame VAE decode). |
+| `trtf_build/standard_dit_builder.py` | Shared DiT (Diffusion Transformer) TRT engine builder: self-attention with AdaLN, cross-attention, FFN, 3D RoPE. |
+| `trtf_build/causal_vae_3d_builder.py` | Shared Causal 3D VAE decoder TRT engine builder: per-frame decoding with temporal caches, causal convolutions, spatial upsampling. |
+| `trtf_build/t5_encoder_builder.py` | Shared T5 encoder TRT engine builder: UMT5/mT5/T5 with relative position bias, gated GELU FFN, RMSNorm. |
+| `trtf_build/pipeline.py` | Thin Python wrapper around the C++ `trtf` CLI: `Pipeline` class for Pythonic inference via subprocess. |
+| `trtf_build/schedulers/` | Noise scheduler implementations for diffusion models. |
+| `trtf_build/schedulers/base.py` | Scheduler protocol (pure numpy interface). |
+| `trtf_build/schedulers/flow_match_euler.py` | Flow matching Euler discrete scheduler (Wan2.1, FLUX, SD3). Implements `z_t = (1-t)*x + t*noise` with configurable shift. |
 
 ### Family Plugins (`trtf_build/trtf_build/families/`)
 
@@ -46,10 +55,18 @@ Each family is a single Python file implementing the `FamilyPlugin` protocol (se
 | `mamba.py` | Mamba family: matches `mamba`. SSM with selective scan, custom graph builder. Runtime strategy: `ssm_recurrent`. |
 | `qwen_vl.py` | Qwen-VL family: matches `qwen*vl`. Qwen2.5-VL (3D RoPE ViT) + Qwen3-VL (learned pos + RoPE + DeepStack). Text decoder with embed_input mode; Qwen3-VL adds deepstack injection via `graph_blocks`. |
 | `nemotron.py` | Nemotron-4 family: matches `nemotron`. LayerNorm1P (+1 gamma) + squared ReLU MLP + GQA + partial RoPE. |
+| `olmo.py` | OLMo family: matches `olmo`. Standard decoder. |
+| `xglm.py` | XGLM family: matches `xglm`. Standard decoder. |
+| `gpt_neox.py` | GPT-NeoX family: matches `gpt_neox`. Standard decoder. |
+| `gpt_neo.py` | GPT-Neo family: matches `gpt_neo`. Standard decoder. |
+| `codegen.py` | CodeGen family: matches `codegen`. Standard decoder. |
+| `bloom.py` | BLOOM family: matches `bloom`. ALiBi attention, GELU MLP. |
+| `mixtral.py` | Mixtral family: matches `mixtral`. Standard top-2 softmax MoE routing. Runtime strategy: `decoder_moe`. |
+| `wan_t2v.py` | Wan2.1 T2V family: matches `wan`. Composes T5 encoder + DiT denoiser + Causal 3D VAE. Runtime strategy: `diffusion`. |
 
 ---
 
-## C++: Runtime (~18 source files)
+## C++: Runtime (~26 source files)
 
 ### Public API (`include/trtf/`)
 
@@ -97,6 +114,12 @@ Each family is a single Python file implementing the `FamilyPlugin` protocol (se
 | `mamba_decode_runtime.h/cpp` | `MambaStepEngine` struct, `run_mamba_step()`, `has_all_required_mamba_tensors()`. |
 | `mamba_step_state.h/cpp` | `MambaStepState`: conv_state + ssm_state per layer (constant memory, no growth). |
 | `image_preprocessor.h/cpp` | VL image preprocessing: `VLPreprocessConfig`, `PreprocessedImage`, `load_and_preprocess_image()`, `format_vl_prompt()`, `parse_vl_preprocess_config()`. Supports 4 strategies: `qwen_merge_group`, `simple_chw`, `center_crop_chw`, `aspect_preserve_chw`. Configurable interpolation (`bicubic`/`bilinear`/`nearest`). |
+| `vision_engine.h/cpp` | `VisionStepEngine`: TRT engine wrapper for vision encoders. `run_vision_encoder()`, `run_vision_encoder_with_deepstack()` (multi-level features for Qwen3-VL). |
+| `vl_backend.h/cpp` | `VLBackendFastPath`: vision-language pipeline backend. Owns decoder engine + vision encoder. `generate_vl()` with image features, `prepare_image()` for full image pipeline. DeepStack support for multi-scale injection. |
+| `diffusion_backend.h` | Core diffusion abstractions: `DiffusionConfig`, `PreprocessorWeights`, `DiffusionEngine`, `VideoResult`, `IDiffusionBackend` protocol, `DiffusionBackendBase` shared base. |
+| `diffusion_backend_base.cpp` | Shared diffusion utilities: CPU math helpers (`cpu_matmul_bias`, `cpu_silu_inplace`, `cpu_gelu_tanh_inplace`), preprocessor weight parsing, `run_t5_encoder()`, `run_denoiser()`, `decode_vae_subprocess()`. |
+| `wan_diffusion_backend.h/cpp` | `WanDiffusionBackend`: Wan2.1-specific diffusion backend. Flow-match Euler scheduler, 3D RoPE, patchify/unpatchify, causal VAE decode with cache management, `generate_video()`. |
+| `stb_impl.cpp` | STB library implementation file: defines `STB_IMAGE_IMPLEMENTATION`, `STB_IMAGE_RESIZE_IMPLEMENTATION`, `STB_IMAGE_WRITE_IMPLEMENTATION` for single-compilation-unit linking. |
 
 ### Tokenizers (`src/tokenizer/`)
 
@@ -138,6 +161,8 @@ The following C++ files were removed as part of the Python build migration (~350
 
 ## Tests (`tests/`)
 
+### C++ Unit Tests (`tests/cpp/`)
+
 11 test executables. Removed tests covered C++ build infrastructure that migrated to Python.
 
 | File | What it tests |
@@ -155,6 +180,36 @@ The following C++ files were removed as part of the Python build migration (~350
 | `test_decode_runtime.cpp` | select_argmax_token, select_topk_tokens, build_attention_mask (TRT-guarded) |
 | `test_image_preprocessor.cpp` | VL image preprocessing: qwen_merge_group, simple_chw, center_crop_chw, aspect_preserve_chw, interpolation parsing, unknown type fallback, prompt formatting, config parsing (13 tests) |
 
+### Python Builder Tests (`tests/builder/`)
+
+11 test modules covering config parsing, checkpoint mapping, bundle writing, graph ops, and CLI.
+
+### Tools Self-Tests (`tests/tools/`)
+
+| File | What it tests |
+|------|--------------|
+| `test_diff_framework.py` | Diff framework: DiffResult serialization, registry lookup, runner orchestration, CLI parsing |
+| `test_diff_logits.py` | diff_logits.py: battery list sanity, numpy logit comparison, argmax matching, top-k overlap |
+| `test_diff_layers.py` | diff_layers.py: per-layer comparison, tolerance checks, std/mean computation |
+| `test_diff_vl.py` | diff_vl.py: model name matching, cosine similarity, sanity checks, preprocessor defaults |
+| `test_parity.py` | test_runner_parity.py: text matching logic, token ID comparison |
+| `test_perf_compare.py` | perf_compare.py: timing stats, formatting, JSON output, serial GPU execution order |
+| `test_perf_parity.py` | Performance parity: C++ binary vs Python TrtRunner output comparison |
+
+### E2E Tests (`tests/e2e/`)
+
+| File | What it tests |
+|------|--------------|
+| `conftest.py` | Fixtures: engine_dir, trtf_binary, hf_python, model parametrization, bundle building |
+| `test_full_pipeline.py` | Full pipeline: build + C++ inference + diff_logits + perf_compare (standard + VL models) |
+| `test_inference.py` | Basic inference: non-empty output, deterministic generation |
+| `test_bundle_inspect.py` | `trtf inspect` output validation, runtime_strategy presence |
+| `test_logit_parity.py` | `diff_logits.py --battery` wrapper |
+| `test_runner_parity.py` | `test_runner_parity.py` wrapper (Python vs C++) |
+| `test_vl_pipeline.py` | VL: vision-only smoke test + VL generation via C++ binary |
+| `test_diffusion_pipeline.py` | Diffusion: build + 9-step debug pipeline + C++ generate-video + frame quality checks |
+| `models/*.json` | Per-model JSON manifests (28 models across 5 runtime strategies) |
+
 ## Scripts (`scripts/`)
 
 | File | Purpose |
@@ -162,16 +217,29 @@ The following C++ files were removed as part of the Python build migration (~350
 | `setup_container.sh` | One-shot container setup: venv, pip deps, cmake build, tests |
 | `docker_build.sh` | Build the self-contained dev container image |
 | `docker_run.sh` | Launch the dev container |
+| `docker_build_gb300.sh` | Build the GB300 (aarch64) container image |
+| `docker_run_gb300.sh` | Launch the GB300 container |
+| `setup_gb300.sh` | GB300 container setup (cuda-python, deps, build) |
+| `setup_host_gb300.sh` | GB300 host-side setup |
 | `eval_mmlu.py` | MMLU benchmark evaluation |
 | `new_family.py` | Scaffold a new family plugin from HF repo |
 | `validate_family.sh` | One-command validation gate (build + diff + parity) |
 | `hf_tokenizer.py` | HuggingFace tokenizer bridge for C++ subprocess calls |
 | `hf_generate.py` | HuggingFace reference generation for parity testing |
-| `test_qwen3_trt_e2e.sh` | All-in-one Qwen3 TRT E2E diagnostic script |
+| `build_wan14b.py` | Build Wan2.1-T2V-14B bundle with configurable frame count and video dimensions |
+| `vae_decode.py` | VAE decode subprocess: loads `AutoencoderKLWan` from HF, decodes binary latents to video frames. Called by C++ `DiffusionBackend`. |
+| `families_manifest.json` | Parallel family setup manifest (model slots, GPU assignments) |
+| `parallel_dispatch.sh` | Dispatch mechanism for parallel family setup |
+| `parallel_family_setup.sh` | Set up multiple families in parallel across GPUs |
+| `parallel_family_teardown.sh` | Clean up parallel family setup |
+| `launch_model_agents.py` | Launch parallel model implementation agents |
+| `agents/` | Agent templates (e.g., `implement-model-family.md`) |
 
 ## Tools (`tools/`)
 
-Diff-test and performance comparison tools (TRT vs HF).
+Diff-test, performance comparison, and validation tools (TRT vs HF).
+
+### Standalone Diff Tools
 
 | File | Purpose |
 |------|---------|
@@ -180,4 +248,31 @@ Diff-test and performance comparison tools (TRT vs HF).
 | `diff_vl.py` | VL diff testing: vision features, embed_input, full VL generation, C++ binary parity. Supports `--preprocessor-type` override. |
 | `test_runner_parity.py` | Python-vs-C++ runner parity cross-validation |
 | `test_graph_ops.py` | TRT graph operation unit testing |
-| `perf_compare.py` | TRT vs HF performance comparison — serial GPU execution to support large models on 24GB GPUs |
+| `perf_compare.py` | TRT vs HF performance comparison -- serial GPU execution to support large models on 24GB GPUs |
+
+### Unified Diff Framework
+
+| File | Purpose |
+|------|---------|
+| `diff.py` | Unified CLI: `list` (show checks) and `run` (execute applicable checks). Auto-detects `runtime_strategy`. |
+| `diff_framework/__init__.py` | Framework public API, auto-discovers check modules |
+| `diff_framework/protocol.py` | Core types: `DiffResult`, `TestContext`, `DiffTest` protocol |
+| `diff_framework/registry.py` | Check registry: `register()` decorator, `get_all_tests()`, `get_tests_for_strategy()` |
+| `diff_framework/runner.py` | Runner: `detect_runtime_strategy()`, `list_tests()`, `run_tests()` |
+| `diff_framework/checks/logit_diff.py` | `LogitDiffTest`: delegates to `diff_logits.py` |
+| `diff_framework/checks/layer_diff.py` | `LayerDiffTest`: delegates to `diff_layers.py` |
+| `diff_framework/checks/runner_parity.py` | `RunnerParityTest`: delegates to `test_runner_parity.py` |
+| `diff_framework/checks/vl_pipeline.py` | `VLPipelineTest`: delegates to `diff_vl.py` |
+| `diff_framework/checks/perf_benchmark.py` | `PerfBenchmarkTest`: delegates to `perf_compare.py` |
+| `diff_framework/checks/diffusion_components.py` | `DiffusionComponentsTest`: delegates to `debug_diffusion_pipeline.py` |
+
+### Diffusion Validation Tools
+
+| File | Purpose |
+|------|---------|
+| `debug_diffusion_pipeline.py` | 9-step component-by-component TRT-vs-HF diffusion validation (config, T5, DiT, scheduler, full pipeline) |
+| `diffusion_helpers.py` | Shared diffusion utilities: activation functions, weight loading, timestep embedding, TRT engine execution |
+| `diff_t5.py` | T5 encoder TRT vs HF validation with configurable tolerance |
+| `validate_dit.py` | DiT denoiser single-step validation with cosine similarity check |
+| `validate_t5.py` | T5 encoder per-token validation with attention mask handling |
+| `tool_helpers.py` | Shared utilities for standard tools: `build_trt_engine()`, `load_hf_model()`, `cosine_sim()`, `compare_arrays()` |

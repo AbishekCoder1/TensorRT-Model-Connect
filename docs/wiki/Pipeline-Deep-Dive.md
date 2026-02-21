@@ -48,6 +48,55 @@ trtf-build build path/to/Qwen3-0.6B -o qwen3.trtfb --max-cache-length 256
           - Bundle metadata (TRT version, GPU, timestamp, architecture)
 ```
 
+## Phase 1b: Building a Diffusion Bundle (Python)
+
+For diffusion models (e.g., Wan2.1 T2V), the build phase produces a multi-engine bundle containing three TRT engines plus preprocessor weights.
+
+```
+trtf-build build Wan-AI/Wan2.1-T2V-1.3B-Diffusers -o wan21.trtfb
+  |
+  +-- Parse config.json / model_index.json
+  |     - Detect model_type ("wan"), load diffusers-format config
+  |     - Extract T5 encoder, DiT denoiser, and VAE decoder configs
+  |
+  +-- Match family plugin
+  |     - wan_t2v.py matches model_type "wan"
+  |
+  +-- Load weights (diffusers format)
+  |     - T5 encoder weights (text_encoder/)
+  |     - DiT denoiser weights (transformer/)
+  |     - VAE decoder weights (vae/)
+  |
+  +-- Build T5 encoder engine (t5_encoder_builder.py)
+  |     - UMT5 architecture: 24 layers, 4096D, 226 token sequence
+  |     - Inputs: input_ids, attention_mask
+  |     - Output: text_embeddings
+  |
+  +-- Build DiT denoiser engine (standard_dit_builder.py)
+  |     - 30 DiT blocks with AdaLN modulation, QK norm, 3D RoPE
+  |     - Self-attention + cross-attention + gated FFN
+  |     - Inputs: hidden_states, timestep_embedding, encoder_hidden_states, rotary_cos/sin
+  |     - Output: denoised patches
+  |
+  +-- Build Causal 3D VAE decoder engine (causal_vae_3d_builder.py)
+  |     - Per-frame decoding with temporal convolution caches
+  |     - Inputs: latent frame, cache inputs
+  |     - Outputs: decoded frame, cache outputs
+  |
+  +-- Serialize preprocessor weights
+  |     - Patch embedding (Conv3D equivalent)
+  |     - Timestep MLP (sinusoidal + 2-layer MLP)
+  |     - Text projection (linear + activation)
+  |     - Packed as binary with JSON index
+  |
+  +-- Package bundle
+        - Write .trtfb file containing:
+          - t5_engine_plan, dit_engine_plan, vae_engine_plan
+          - preprocessor_weights binary section
+          - config.json (runtime_strategy="diffusion", video dims, scheduler config)
+          - Bundle metadata
+```
+
 ## Phase 2: Running from a Bundle (C++)
 
 The C++ runtime loads a `.trtfb` bundle and runs inference. This is the only path the C++ runtime supports -- it does not load raw HF model directories.
@@ -242,6 +291,58 @@ FamilyPlugin.get_vl_config()  -->  bundle config.json  -->  parse_vl_preprocess_
 ### Parity
 
 Both C++ (`image_preprocessor.cpp`) and Python (`debug_runner.py`) implement the same four preprocessing strategies with the same interpolation dispatch. The `diff_vl.py` script compares TRT vision encoder output against HuggingFace reference features to validate parity.
+
+---
+
+## Phase 2b: Running a Diffusion Bundle (C++)
+
+For `runtime_strategy="diffusion"`, the C++ runtime runs a multi-stage pipeline producing video frames instead of text tokens.
+
+```
+trtf generate-video wan21.trtfb --prompt "A cat on a beach" --output ./frames/
+  |
+  +-- Load bundle, deserialize 3 TRT engines
+  |     - T5 encoder engine
+  |     - DiT denoiser engine
+  |     - VAE decoder engine
+  |     - Parse preprocessor weights from bundle section
+  |
+  +-- Text encoding
+  |     - Tokenize prompt (HfPythonTokenizer)
+  |     - Run T5 encoder engine: input_ids + attention_mask -> text_embeddings
+  |     - CPU: project text embeddings to DiT dimension (linear + activation)
+  |
+  +-- Denoising loop (flow-match Euler, 30 steps)
+  |     For each timestep t:
+  |       - CPU: compute timestep embedding (sinusoidal + 2-layer MLP)
+  |       - CPU: compute 3D RoPE (temporal + spatial split)
+  |       - CPU: patchify latents -> patches
+  |       - GPU: run DiT engine (patches, timestep_emb, text_emb, rope) -> velocity
+  |       - CPU: unpatchify velocity -> latent space
+  |       - CPU: Euler step: z_{t-dt} = z_t - dt * v
+  |       Note: CFG (classifier-free guidance) runs DiT twice per step
+  |             (conditional + unconditional) and interpolates
+  |
+  +-- VAE decode (frame-by-frame)
+  |     For each latent frame:
+  |       - GPU: run VAE decoder engine with temporal caches
+  |       - CPU: convert decoded tensor to pixel values [0, 255]
+  |       - Write PNG file: frames/frame_000.png, frame_001.png, ...
+  |     Temporal caches carry causal convolution state between frames
+  |
+  +-- Output: directory of PNG frames
+```
+
+### Key Differences from Decoder Pipeline
+
+| Aspect | Decoder Pipeline | Diffusion Pipeline |
+|--------|-----------------|-------------------|
+| Output | Token sequence (text) | Video frames (PNG images) |
+| Engines | 1 (decoder) | 3 (T5 + DiT + VAE) |
+| Loop type | Autoregressive (token-by-token) | Denoising (fixed N steps) |
+| State | KV cache (grows per token) | Latent tensor (fixed size, refined per step) |
+| CPU work | Minimal (mask, argmax) | Significant (patchify, RoPE, timestep embed, Euler step) |
+| Preprocessing | Tokenization only | Tokenization + sinusoidal embeddings + patch operations |
 
 ---
 

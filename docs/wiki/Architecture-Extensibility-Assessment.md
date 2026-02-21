@@ -1,12 +1,12 @@
 # Architecture Extensibility Assessment
 
-Status of non-standard architecture support. MoE, Mamba/SSM, and vision-language (Qwen-VL) are fully implemented. DeepSeek MLA and hybrid SSM+Attention are planned.
+Status of non-standard architecture support. MoE, Mamba/SSM, vision-language (Qwen-VL), and diffusion (Wan2.1 T2V) are fully implemented. DeepSeek MLA and hybrid SSM+Attention are planned.
 
 ## Executive Summary
 
 With the Python build / C++ runtime split, adding new model families is a **Python-only task** for most architectures. The Python `trtf_build/` package provides a plugin system for family-specific checkpoint mappers and graph builders, while the C++ runtime handles bundle loading and inference with strategy-based dispatch.
 
-As of 2026-02-16, MoE, Mamba/SSM, and vision-language support are **fully implemented**. The standard decoder builder is parameterized to support LayerNorm, GELU, learned positions, and multiple activations. The VL image preprocessor supports 4 strategies with configurable interpolation.
+As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support are **fully implemented**. The standard decoder builder is parameterized to support LayerNorm, GELU, learned positions, and multiple activations. The VL image preprocessor supports 4 strategies with configurable interpolation. The diffusion pipeline supports text-to-video with T5 encoding, DiT denoising, and causal 3D VAE decoding.
 
 | Architecture Class | Current Support | Effort to Add New Instance | Where Changes Needed |
 |---|---|---|---|
@@ -15,6 +15,7 @@ As of 2026-02-16, MoE, Mamba/SSM, and vision-language support are **fully implem
 | MoE decoder (top-k softmax / SparseMixer routing) | **Works today** (2 families) | ~300 LOC Python | Python graph builder + checkpoint mapper |
 | SSM / Mamba | **Works today** (Mamba 130M-2.8B) | ~400 LOC Python | Python graph builder (C++ backend exists) |
 | Vision-Language | **Works today** (Qwen-VL) | ~200 LOC Python | Python vision builder + plugin VL config |
+| Diffusion (T2V) | **Works today** (Wan2.1) | ~500 LOC Python | Python builders (T5+DiT+VAE) + family plugin |
 | Multi-Latent Attention -- MLA (DeepSeek-V2/V3) | **Not yet implemented** | ~400 LOC Python + C++ | Python graph builder + C++ KV cache shape |
 | Hybrid SSM+Attention (Jamba) | **Not yet implemented** | ~500 LOC Python + C++ | Python + C++ hybrid state |
 
@@ -46,6 +47,12 @@ Write a Python plugin with `build_vision_engine()` for the vision encoder and `g
 
 **Implemented**: Qwen-VL (Qwen2.5-VL, ViT + 3D RoPE + spatial merge, `runtime_strategy="vision_language"`).
 
+### Adding a new Diffusion family
+
+Write a Python family plugin that composes the shared builders (`t5_encoder_builder`, `standard_dit_builder`, `causal_vae_3d_builder`). The C++ `DiffusionBackendBase` provides shared infrastructure; family-specific backends extend it. ~500 LOC Python.
+
+**Implemented**: Wan2.1-T2V (1.3B-14B, flow-match Euler scheduler, `runtime_strategy="diffusion"`).
+
 ---
 
 ## What Requires C++ Changes
@@ -55,6 +62,8 @@ Write a Python plugin with `build_vision_engine()` for the vision encoder and `g
 The C++ runtime now supports multiple state backends via `runtime_strategy` dispatch in `trtf_c.cpp`:
 - `decoder_kv_cache` / `decoder_moe` -> `TrtBackendFastPath` + `DeviceKvCache`
 - `ssm_recurrent` -> `MambaBackend` + `MambaStepState`
+- `vision_language` -> `VLBackendFastPath` + vision encoder + decoder
+- `diffusion` -> `WanDiffusionBackend` (T5 + DiT + VAE engines)
 
 New state types (e.g., for hybrid architectures) would need:
 1. A new `IStepState` implementation in C++
@@ -121,6 +130,41 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 
 **Adding a new VL family**: Create a plugin with `build_vision_engine()` and `get_vl_config()` methods. The `preprocessor_type` and `interpolation` fields in `get_vl_config()` control C++ image preprocessing. See `families/qwen_vl.py` for an example.
 
+### Diffusion -- T2V (Wan2.1 -- IMPLEMENTED)
+
+**Status**: Fully implemented. Wan2.1 text-to-video plugin with T5 encoder, DiT denoiser, and causal 3D VAE decoder.
+
+**Python** (`families/wan_t2v.py`):
+- Family plugin that composes three shared builders:
+  - `t5_encoder_builder.py`: UMT5 encoder (4096D, 24 layers, 226 token sequence)
+  - `standard_dit_builder.py`: DiT denoiser (1536D, 12 heads, 30 layers for 1.3B) with AdaLN modulation, QK norm, 3D RoPE
+  - `causal_vae_3d_builder.py`: Causal 3D VAE decoder (16 latent channels, per-frame with temporal caches)
+- `_serialize_preprocessor_weights()`: Packs DiT preprocessor weights (patch embedding, timestep MLP, text projection) into binary with JSON index
+- `get_diffusion_config()`: Returns pipeline configuration with preset latent statistics, scheduler type, guidance scale
+
+**Python debug runner** (`diffusion_runner.py`):
+- `DiffusionRunner`: Pure-Python TRT diffusion pipeline
+  - `encode_text()`: T5 encoder with attention masking, zeros padding positions
+  - `denoise()`: Flow-match Euler denoising loop with classifier-free guidance (CFG)
+  - `decode_video()`: Frame-by-frame VAE decode with causal convolution caches
+  - `generate()`: Full pipeline: text encode -> denoise -> VAE decode
+
+**C++** (`wan_diffusion_backend.h/cpp`, `diffusion_backend.h`, `diffusion_backend_base.cpp`):
+- `DiffusionBackendBase`: Shared infrastructure -- CPU math helpers, preprocessor weight parsing, `run_t5_encoder()`, `run_denoiser()`, `decode_vae_subprocess()` (Python fallback)
+- `WanDiffusionBackend`: Wan-specific implementation -- flow-match Euler scheduler, 3D RoPE (temporal + spatial), patchify/unpatchify, native causal VAE decode with cache management
+- `generate_video()`: Full C++ pipeline producing PNG frames
+- `DiffusionConfig`: Pipeline parameters (scheduler type, steps, guidance, video dimensions, model dimensions)
+- `PreprocessorWeights`: DiT preprocessor weights loaded from bundle section
+
+**Schedulers** (`schedulers/flow_match_euler.py`, C++ inline in `wan_diffusion_backend.cpp`):
+- Flow matching: `z_t = (1-t)*x + t*noise`, Euler step: `z_{t-dt} = z_t - dt*v`
+- Configurable shift parameter for timestep adjustment
+- Both Python (numpy) and C++ implementations for parity
+
+**Testing**: See [Testing and Validation](Testing-and-Validation.md#diffusion-diffusion) for the 9-step component validation and frame quality checks.
+
+**Adding a new diffusion family**: Create a plugin with `build_components()` that composes the shared builders, plus `get_diffusion_config()` for pipeline parameters. If the scheduler differs, add a new scheduler in `schedulers/`. If the architecture differs significantly from DiT, create a new builder module and C++ backend extending `DiffusionBackendBase`. See `families/wan_t2v.py` for an example.
+
 ### DeepSeek MLA (Multi-Latent Attention)
 
 **Python changes**:
@@ -150,11 +194,11 @@ Standard and extended decoders using the parameterized graph builder:
 - Candidates: Yi (use llama), Baichuan, DeepSeek-dense, CodeLlama (use llama), Vicuna (use llama)
 - ~30-60 LOC each, fully parallelizable
 
-### Tier 2: Python custom graph builder (implemented for 4 families)
+### Tier 2: Python custom graph builder (implemented for 6 families)
 Non-standard graph topologies with existing C++ backends:
-- Already done: Phi-MoE (MoE, Python only), Mixtral (MoE, Python only), Mamba (SSM, Python + existing C++ backend), Qwen-VL (VL, Python + existing C++ image preprocessor)
-- Candidates: Other Mamba variants, LLaVA/InternVL (can reuse simple_chw/aspect_preserve_chw preprocessor)
-- ~200-400 LOC each
+- Already done: Phi-MoE (MoE, Python only), Mixtral (MoE, Python only), Mamba (SSM, Python + existing C++ backend), Qwen-VL (VL, Python + existing C++ image preprocessor), Wan2.1-T2V (diffusion, Python builders + C++ diffusion backend)
+- Candidates: Other Mamba variants, LLaVA/InternVL (can reuse simple_chw/aspect_preserve_chw preprocessor), other DiT-based diffusion models (can reuse shared builders)
+- ~200-500 LOC each
 
 ### Tier 3: Python + new C++ backend (not yet needed)
 Fundamentally different architectures requiring new C++ state management:

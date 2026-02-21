@@ -13,7 +13,8 @@ A split-language system for TensorRT LLM inference: **Python builds** optimized 
 | **[TRT Internals](TRT-Internals.md)** | How TensorRT graph building works (now in Python), decoder layer anatomy, engine lifecycle |
 | **[HF vs TRT Comparison](HF-vs-TRT-Comparison.md)** | Side-by-side comparison of HuggingFace Transformers and this library |
 | **[Adding a Model Family](Adding-a-Model-Family.md)** | Step-by-step guide for adding a new model family in Python |
-| **[Extensibility Assessment](Architecture-Extensibility-Assessment.md)** | MoE, Mamba/SSM support status; MLA roadmap |
+| **[Testing and Validation](Testing-and-Validation.md)** | Regression tiers, unified diff framework, per-category test strategies |
+| **[Extensibility Assessment](Architecture-Extensibility-Assessment.md)** | MoE, Mamba/SSM, diffusion support status; MLA roadmap |
 | **[Source Layout](Source-Layout.md)** | File-by-file guide to the codebase (Python + C++) |
 
 ## Core Design Principles
@@ -41,7 +42,8 @@ The system has two phases:
      - `decoder_kv_cache` / `decoder_moe`: `TrtBackendFastPath` with KV-cache management
      - `ssm_recurrent`: `MambaBackend` with conv + SSM recurrent state
      - `vision_language`: VL pipeline with vision encoder + text decoder + image preprocessing
-   - Creates tokenizer + autoregressive generation loop
+     - `diffusion`: `WanDiffusionBackend` with T5 encoder + DiT denoiser + VAE decoder for text-to-video
+   - Creates tokenizer + autoregressive generation loop (or diffusion pipeline)
    - Runs GPU-accelerated inference
 
 ## Minimum Viable Example
@@ -72,7 +74,7 @@ int main() {
 
 ## Built-in Model Support
 
-Family plugins covering dense decoders, extended decoders, MoE, SSM, and vision-language (auto-discovered from `trtf_build/trtf_build/families/`).
+Family plugins covering dense decoders, extended decoders, MoE, SSM, vision-language, and diffusion (auto-discovered from `trtf_build/trtf_build/families/`).
 
 | Family | Model Types | Python Plugin |
 |--------|-------------|---------------|
@@ -99,5 +101,6 @@ Family plugins covering dense decoders, extended decoders, MoE, SSM, and vision-
 | BLOOM | bloom | `families/bloom.py` |
 | Mixtral | mixtral | `families/mixtral.py` |
 | Nemotron | nemotron | `families/nemotron.py` |
+| Wan T2V | wan | `families/wan_t2v.py` (T5 encoder + DiT denoiser + Causal 3D VAE; text-to-video) |
 
 All plugin paths relative to `trtf_build/trtf_build/`.

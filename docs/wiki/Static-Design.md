@@ -9,6 +9,7 @@ This page decomposes the architecture into software units, showing class-level U
 3. [Unit 3: TRT Backend Infrastructure (C++)](#unit-3-trt-backend-infrastructure-c)
 4. [Unit 4: Tokenization (C++)](#unit-4-tokenization-c)
 5. [Unit 5: Python Build Package](#unit-5-python-build-package)
+6. [Unit 6: Diffusion Backend (C++)](#unit-6-diffusion-backend-c)
 
 ---
 
@@ -292,6 +293,11 @@ The `trtf_build/` package handles all engine building. This is where new model f
 | **StandardGraphBuilder** | Parameterized decoder builder supporting `norm_type` (rmsnorm/layernorm), `mlp_type` (swiglu/gelu_fc), `position_type` (rope/learned), and `activation` (silu/gelu_new/gelu/relu). |
 | **graph_ops** | Shared reusable TRT graph ops: RMSNorm, matmul, RoPE, attention, SwiGLU. |
 | **BundleWriter** | Writes `.trtfb` bundles: engine plan + tokenizer files + metadata. |
+| **DiffusionRunner** | Pure-Python TRT diffusion pipeline: T5 encoding, denoising loop with CFG, frame-by-frame VAE decode. |
+| **FlowMatchEulerScheduler** | Flow matching Euler discrete scheduler (numpy). Implements `z_t = (1-t)*x + t*noise`, configurable shift. |
+| **StandardDiTBuilder** | Shared DiT engine builder: self-attention with AdaLN, cross-attention, FFN, 3D RoPE. |
+| **CausalVAE3DBuilder** | Shared Causal 3D VAE decoder builder: per-frame with temporal caches, causal convolutions. |
+| **T5EncoderBuilder** | Shared T5 encoder builder: UMT5/mT5/T5 with relative position bias, gated GELU FFN. |
 
 ### Family Plugins
 
@@ -314,5 +320,103 @@ Each family is a single Python file in `trtf_build/trtf_build/families/`:
 | StableLM | stablelm | Extended decoder | LayerNorm + SwiGLU + RoPE |
 | Mamba | mamba | SSM | Selective scan, custom graph, no KV cache |
 | Qwen-VL | qwen*vl | Vision-language | Vision encoder + text decoder with embed_input |
+| Wan T2V | wan | Diffusion (T2V) | T5 + DiT + Causal 3D VAE; flow-match Euler scheduler |
 
 Adding a new family requires creating a single plugin `.py` file with a `plugin` attribute. See [Adding a Model Family](Adding-a-Model-Family.md).
+
+---
+
+## Unit 6: Diffusion Backend (C++)
+
+The diffusion backend handles text-to-video generation with a multi-engine pipeline. Unlike autoregressive decoders, diffusion uses a fixed-step denoising loop producing video frames.
+
+### Class Diagram
+
+```mermaid
+classDiagram
+    class IDiffusionBackend {
+        <<interface>>
+        +generate_video(prompt, config)* VideoResult
+    }
+
+    class DiffusionBackendBase {
+        #TrtLogger mLogger
+        #DiffusionConfig mConfig
+        #DiffusionEngine mT5Engine
+        #DiffusionEngine mDiTEngine
+        #DiffusionEngine mVAEEngine
+        #PreprocessorWeights mPPWeights
+        +run_t5_encoder(input_ids, mask) vector~float~
+        +run_denoiser(hidden, timestep_emb, text_emb, rope) vector~float~
+        +decode_vae_subprocess(latents, model_dir) vector~uint8_t~
+        #cpu_matmul_bias(A, B, bias, M, N, K) vector~float~
+        #cpu_silu_inplace(data)
+        #cpu_gelu_tanh_inplace(data)
+    }
+
+    class WanDiffusionBackend {
+        -vector~CudaBuffer~ mVAECaches
+        +generate_video(prompt, config) VideoResult
+        -compute_timestep_embedding(timestep) vector~float~
+        -project_text(text_emb) vector~float~
+        -patchify(latents) vector~float~
+        -unpatchify(patches) vector~float~
+        -compute_3d_rope(num_frames, h, w) pair~vector,vector~
+        -decode_vae_native(latents) vector~vector~uint8_t~~
+        -init_vae_buffers()
+    }
+
+    class DiffusionConfig {
+        +string scheduler_type
+        +int num_inference_steps
+        +float guidance_scale
+        +int video_num_frames
+        +int video_height
+        +int video_width
+        +int dit_hidden_size
+        +int dit_num_heads
+        +int latent_channels
+    }
+
+    class PreprocessorWeights {
+        +vector~float~ patch_embed_weight
+        +vector~float~ patch_embed_bias
+        +vector~float~ timestep_mlp_w1
+        +vector~float~ timestep_mlp_b1
+        +vector~float~ timestep_mlp_w2
+        +vector~float~ timestep_mlp_b2
+        +vector~float~ text_proj_weight
+        +vector~float~ text_proj_bias
+    }
+
+    class DiffusionEngine {
+        +TrtUniquePtr~ICudaEngine~ engine
+        +TrtUniquePtr~IExecutionContext~ context
+    }
+
+    class VideoResult {
+        +vector~vector~uint8_t~~ frames
+        +int width
+        +int height
+        +bool ok
+    }
+
+    IDiffusionBackend <|-- DiffusionBackendBase
+    DiffusionBackendBase <|-- WanDiffusionBackend
+    DiffusionBackendBase *-- DiffusionConfig : holds
+    DiffusionBackendBase *-- PreprocessorWeights : holds
+    DiffusionBackendBase *-- DiffusionEngine : owns (x3: T5, DiT, VAE)
+    IDiffusionBackend ..> VideoResult : returns
+```
+
+### Logical Description
+
+| Class | Role | Implementation |
+|-------|------|---------------|
+| **IDiffusionBackend** | Abstract interface for diffusion pipelines. | `generate_video()` takes a prompt and returns video frames. File: `src/runtime/trt/diffusion_backend.h`. |
+| **DiffusionBackendBase** | Shared base class for diffusion backends. | CPU math helpers, preprocessor weight parsing, T5/DiT engine execution, VAE subprocess fallback. File: `src/runtime/trt/diffusion_backend_base.cpp`. |
+| **WanDiffusionBackend** | Wan2.1-specific diffusion backend. | Flow-match Euler scheduler, 3D RoPE (temporal + spatial split), patchify/unpatchify, native causal VAE decode with cache management. File: `src/runtime/trt/wan_diffusion_backend.cpp`. |
+| **DiffusionConfig** | Pipeline configuration. | Scheduler type, inference steps, guidance scale, video dimensions, model dimensions. File: `src/runtime/trt/diffusion_backend.h`. |
+| **PreprocessorWeights** | DiT preprocessor weights loaded from bundle section. | Patch embedding, timestep MLP, text projection weights. Parsed from binary+JSON index. File: `src/runtime/trt/diffusion_backend.h`. |
+| **DiffusionEngine** | TRT engine wrapper for diffusion components. | Wraps engine + execution context for T5, DiT, and VAE engines. File: `src/runtime/trt/diffusion_backend.h`. |
+| **VideoResult** | Output of diffusion generation. | Contains decoded frames as byte vectors, dimensions, success flag. File: `src/runtime/trt/diffusion_backend.h`. |

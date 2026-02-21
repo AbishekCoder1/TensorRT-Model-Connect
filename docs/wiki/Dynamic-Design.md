@@ -8,7 +8,8 @@ This page shows the runtime behavior of the system through sequence diagrams and
 2. [Bundle Load and Pipeline Creation (C++)](#2-bundle-load-and-pipeline-creation-c)
 3. [Autoregressive Generation (C++)](#3-autoregressive-generation-c)
 4. [Single Decode Step (TRT)](#4-single-decode-step-trt)
-5. [Data Transformation Pipeline](#5-data-transformation-pipeline)
+5. [Diffusion Pipeline (C++)](#5-diffusion-pipeline-c)
+6. [Data Transformation Pipeline](#6-data-transformation-pipeline)
 
 ---
 
@@ -219,7 +220,71 @@ sequenceDiagram
 
 ---
 
-## 5. Data Transformation Pipeline
+## 5. Diffusion Pipeline (C++)
+
+How `WanDiffusionBackend::generate_video()` runs the text-to-video pipeline. Unlike autoregressive generation, diffusion uses a fixed-step denoising loop with three TRT engines.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant DB as WanDiffusionBackend
+    participant T5 as T5 Engine (TRT)
+    participant CPU as CPU Preprocessing
+    participant DiT as DiT Engine (TRT)
+    participant VAE as VAE Engine (TRT)
+    participant Disk as Frame Output
+
+    U->>DB: generate_video("A cat on a beach", config)
+
+    Note over DB: Phase 1: Text Encoding
+    DB->>DB: tokenize prompt (HfPythonTokenizer)
+    DB->>T5: run_t5_encoder(input_ids, attention_mask)
+    T5-->>DB: text_embeddings [seq_len, 4096]
+    DB->>CPU: project_text(text_embeddings) -> [seq_len, dit_dim]
+
+    Note over DB: Phase 2: Initialize latents
+    DB->>DB: sample random noise z ~ N(0,1) [B, C, T, H/8, W/8]
+    DB->>CPU: compute flow-match sigma schedule (30 steps)
+
+    Note over DB: Phase 3: Denoising Loop (30 steps)
+    loop step = 0..29 (flow-match Euler)
+        DB->>CPU: compute_timestep_embedding(sigma[step])
+        DB->>CPU: compute_3d_rope(T, H/patch, W/patch)
+        DB->>CPU: patchify(z_t) -> patches [N_patches, dit_dim]
+
+        Note over DB: CFG: run DiT twice (conditional + unconditional)
+        DB->>DiT: run_denoiser(patches, timestep_emb, text_emb, rope_cos, rope_sin)
+        DiT-->>DB: velocity_cond
+        DB->>DiT: run_denoiser(patches, timestep_emb, null_emb, rope_cos, rope_sin)
+        DiT-->>DB: velocity_uncond
+
+        DB->>CPU: v = uncond + guidance_scale * (cond - uncond)
+        DB->>CPU: unpatchify(v) -> velocity [B, C, T, H/8, W/8]
+        DB->>CPU: Euler step: z_{t-dt} = z_t - dt * velocity
+    end
+
+    Note over DB: Phase 4: VAE Decode (frame-by-frame)
+    loop frame = 0..num_frames-1
+        DB->>VAE: decode(latent_frame, caches)
+        VAE-->>DB: decoded_frame + updated_caches
+        DB->>CPU: clamp + scale to [0, 255]
+        DB->>Disk: write frame_NNN.png
+    end
+
+    DB-->>U: VideoResult (num_frames PNG files)
+```
+
+### Key implementation details
+
+- **Three TRT engines**: T5 (text encoding), DiT (denoising), VAE (latent-to-pixel decoding). Each deserialized from the `.trtfb` bundle.
+- **CPU preprocessing** is significant: patchify/unpatchify, 3D RoPE computation, timestep embedding MLP, text projection, Euler step arithmetic. Done on CPU using `PreprocessorWeights` loaded from the bundle.
+- **Classifier-free guidance (CFG)**: Each denoising step runs the DiT twice -- once with the text condition, once without. The outputs are interpolated with `guidance_scale`.
+- **Causal VAE**: Decodes one latent frame at a time. Temporal convolution caches carry state between frames, enabling causal generation without seeing future frames.
+- **Flow-match Euler scheduler**: Implements `z_t = (1-t)*x + t*noise`, with step `z_{t-dt} = z_t - dt * v(z_t, t)`. Configurable `shift` parameter adjusts the noise schedule.
+
+---
+
+## 6. Data Transformation Pipeline
 
 End-to-end data transformation from HF files to generated text, showing the Python/C++ boundary.
 
