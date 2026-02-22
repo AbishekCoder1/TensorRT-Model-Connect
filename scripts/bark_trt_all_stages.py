@@ -62,7 +62,7 @@ sem_plan = plugin.build_engine(config, weights, 512)
 print(f"  Semantic: {len(sem_plan)/(1024*1024):.0f}MB [{time.time()-t0:.1f}s]", file=sys.stderr)
 
 t0 = time.time()
-extra = plugin.build_extra_engines(config, weights, 512)
+extra = plugin.build_extra_engines(config, weights, 1024)
 coarse_plan = extra["coarse_engine"]
 print(f"  Coarse: {len(coarse_plan)/(1024*1024):.0f}MB [{time.time()-t0:.1f}s]", file=sys.stderr)
 
@@ -100,52 +100,61 @@ print("  Semantic patched ✓", file=sys.stderr)
 # Patch 2: Coarse forward → TRT
 # =====================================================================
 print("=== Patching Coarse ===", file=sys.stderr)
-_coarse = {"runner": TrtRunner(coarse_plan, max_cache_length=512, num_layers=12)}
+_coarse = {"runner": TrtRunner(coarse_plan, max_cache_length=1024, num_layers=12)}
 
-from transformers import DynamicCache
-_coarse_cache = {"cache": None}
+class _TrtCache:
+    """Minimal cache that tracks seq_length for HF's generate() incremental mode.
+    Duck-types as HF Cache without inheriting (to avoid __init__ issues)."""
+    def __init__(self, seq_len=0, num_layers=12):
+        self._seq_len = seq_len
+        self._num_layers = num_layers
+    def get_seq_length(self, layer_idx=0):
+        return self._seq_len
+    def get_max_cache_shape(self):
+        return None
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        # Just track length, don't store actual KV
+        if layer_idx == 0:
+            self._seq_len += key_states.shape[2]
+        return (key_states, value_states)
+    def __getitem__(self, idx):
+        return (torch.empty(0, device=device), torch.empty(0, device=device))
+    def __len__(self):
+        return self._num_layers
+    def __iter__(self):
+        for _ in range(self._num_layers):
+            yield (torch.empty(0, device=device), torch.empty(0, device=device))
+
+_coarse_trt_cache = [None]
 
 def _trt_coarse_forward(input_ids=None, inputs_embeds=None, **kwargs):
     runner = _coarse["runner"]
     past = kwargs.get("past_key_values")
     use_cache = kwargs.get("use_cache", True)
 
-    if input_ids is not None and input_ids.shape[1] > 1:
-        # Prefill: reset runner, feed all tokens one-by-one
-        runner = TrtRunner(coarse_plan, max_cache_length=512, num_layers=12)
+    if past is None or (input_ids is not None and input_ids.shape[1] > 1):
+        # Prefill: reset runner for new sliding window
+        runner = TrtRunner(coarse_plan, max_cache_length=1024, num_layers=12)
         _coarse["runner"] = runner
-        _coarse["call_count"] = 0
         toks = input_ids[0].cpu().tolist()
         for tok in toks[:-1]:
             runner.step(0, input_embed=coarse_embed_np[tok:tok+1].astype(np.float32),
                        use_input_embed=1.0)
         result = runner.step(0, input_embed=coarse_embed_np[toks[-1]:toks[-1]+1].astype(np.float32),
                              use_input_embed=1.0)
-        # Create DynamicCache with dummy KV for proper seq_length tracking
-        cache = DynamicCache()
-        seq = len(toks)
-        for lyr in range(12):
-            cache.update(torch.zeros(1,12,seq,64,device=device),
-                        torch.zeros(1,12,seq,64,device=device), lyr)
-        _coarse_cache["cache"] = cache
+        _coarse_trt_cache[0] = _TrtCache(seq_len=len(toks), num_layers=12)
     elif input_ids is not None:
-        # Decode: single token
         tok = input_ids[0, -1].item()
         result = runner.step(0, input_embed=coarse_embed_np[tok:tok+1].astype(np.float32),
                              use_input_embed=1.0)
-        # Grow cache by 1
-        cache = _coarse_cache["cache"]
-        if cache is not None:
-            for lyr in range(12):
-                cache.update(torch.zeros(1,12,1,64,device=device),
-                            torch.zeros(1,12,1,64,device=device), lyr)
+        if _coarse_trt_cache[0] is not None:
+            _coarse_trt_cache[0]._seq_len += 1
     else:
         raise ValueError("Expected input_ids for coarse")
 
     logits_t = torch.tensor(result["logits"], device=device).unsqueeze(0)
-    return CausalLMOutputWithPast(
-        logits=logits_t,
-        past_key_values=_coarse_cache["cache"] if use_cache else None)
+    # No past_key_values: forces HF to re-send full sequence each step (like semantic)
+    return CausalLMOutputWithPast(logits=logits_t)
 
 model.coarse_acoustics.forward = _trt_coarse_forward
 print("  Coarse patched ✓", file=sys.stderr)
