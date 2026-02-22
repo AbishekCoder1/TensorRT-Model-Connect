@@ -20,16 +20,6 @@ SegmentationBackend::SegmentationBackend(
     , mContext(std::move(context))
     , mConfig(std::move(config))
 {
-    // Allocate device buffers
-    const auto input_bytes = static_cast<std::size_t>(3) *
-        static_cast<std::size_t>(mConfig.input_image_h) *
-        static_cast<std::size_t>(mConfig.input_image_w) * sizeof(float);
-    mInputBuffer = CudaBuffer(input_bytes);
-
-    const auto output_bytes = static_cast<std::size_t>(mConfig.num_classes) *
-        static_cast<std::size_t>(mConfig.output_h) *
-        static_cast<std::size_t>(mConfig.output_w) * sizeof(float);
-    mOutputBuffer = CudaBuffer(output_bytes);
 }
 
 SegmentationBackend::~SegmentationBackend() = default;
@@ -59,26 +49,21 @@ SegmentationResult SegmentationBackend::segment_image(const std::string& image_p
         throw std::runtime_error("Failed to load image: " + image_path);
     }
 
-    // Bilinear resize to H x W and normalize
+    // Resize to H x W and normalize to CHW float32
     std::vector<float> pixel_values(static_cast<std::size_t>(3) * H * W);
     for (int32_t y = 0; y < H; ++y)
     {
         for (int32_t x = 0; x < W; ++x)
         {
-            // Map to source coordinates
             const float src_y = static_cast<float>(y) * static_cast<float>(img_h) / static_cast<float>(H);
             const float src_x = static_cast<float>(x) * static_cast<float>(img_w) / static_cast<float>(W);
-
             const int32_t y0 = std::min(static_cast<int32_t>(src_y), img_h - 1);
             const int32_t x0 = std::min(static_cast<int32_t>(src_x), img_w - 1);
-
             const auto src_idx = static_cast<std::size_t>((y0 * img_w + x0) * 3);
             for (int32_t c = 0; c < 3; ++c)
             {
                 float val = static_cast<float>(raw[src_idx + c]) / 255.0F;
-                // ImageNet normalize
                 val = (val - mConfig.image_mean[c]) / mConfig.image_std[c];
-                // CHW layout: [c, y, x]
                 pixel_values[static_cast<std::size_t>(c) * H * W +
                              static_cast<std::size_t>(y) * W + x] = val;
             }
@@ -86,27 +71,33 @@ SegmentationResult SegmentationBackend::segment_image(const std::string& image_p
     }
     stbi_image_free(raw);
 
+    // Allocate GPU buffers
+    const auto input_bytes = pixel_values.size() * sizeof(float);
+    CudaBuffer input_buf(input_bytes);
+    if (!input_buf.ok())
+        throw std::runtime_error("Failed to allocate GPU input buffer");
+
+    const auto logits_size = static_cast<std::size_t>(mConfig.num_classes) * out_H * out_W;
+    CudaBuffer output_buf(logits_size * sizeof(float));
+    if (!output_buf.ok())
+        throw std::runtime_error("Failed to allocate GPU output buffer");
+
     // H2D
-    cudaMemcpyAsync(mInputBuffer.get(), pixel_values.data(),
-        pixel_values.size() * sizeof(float),
+    cudaMemcpyAsync(input_buf.data(), pixel_values.data(), input_bytes,
         cudaMemcpyHostToDevice, mStream.get());
 
-    // Set tensor addresses
-    mContext->setTensorAddress("pixel_values", mInputBuffer.get());
-    mContext->setTensorAddress("logits", mOutputBuffer.get());
-
-    // Execute
+    // Run TRT
+    mContext->setTensorAddress("pixel_values", input_buf.data());
+    mContext->setTensorAddress("logits", output_buf.data());
     mContext->enqueueV3(mStream.get());
 
-    // D2H logits
-    const auto logits_size = static_cast<std::size_t>(mConfig.num_classes) * out_H * out_W;
+    // D2H
     std::vector<float> logits(logits_size);
-    cudaMemcpyAsync(logits.data(), mOutputBuffer.get(),
-        logits_size * sizeof(float),
+    cudaMemcpyAsync(logits.data(), output_buf.data(), logits_size * sizeof(float),
         cudaMemcpyDeviceToHost, mStream.get());
     cudaStreamSynchronize(mStream.get());
 
-    // Argmax over classes for each pixel
+    // Argmax over classes
     result.class_map.resize(static_cast<std::size_t>(out_H) * out_W);
     for (int32_t y = 0; y < out_H; ++y)
     {
@@ -143,10 +134,14 @@ std::unique_ptr<SegmentationBackend> CreateSegmentationBackend(
     seg_cfg.input_image_w = cfg.input_image_w;
     seg_cfg.output_h = cfg.output_h;
     seg_cfg.output_w = cfg.output_w;
-    if (!cfg.seg_image_mean.empty())
-        seg_cfg.image_mean = cfg.seg_image_mean;
-    if (!cfg.seg_image_std.empty())
-        seg_cfg.image_std = cfg.seg_image_std;
+    if (cfg.seg_image_mean.size() >= 3)
+    {
+        for (int i = 0; i < 3; ++i) seg_cfg.image_mean[i] = cfg.seg_image_mean[i];
+    }
+    if (cfg.seg_image_std.size() >= 3)
+    {
+        for (int i = 0; i < 3; ++i) seg_cfg.image_std[i] = cfg.seg_image_std[i];
+    }
 
     return std::make_unique<SegmentationBackend>(
         std::move(engine), std::move(context), std::move(seg_cfg));

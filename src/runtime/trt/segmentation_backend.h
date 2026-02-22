@@ -50,10 +50,6 @@ private:
     TrtUniquePtr<nvinfer1::IExecutionContext> mContext;
     SegmentationConfig mConfig;
     CudaStream mStream;
-
-    // Device buffers
-    CudaBuffer mInputBuffer;   // pixel_values [1, 3, H, W]
-    CudaBuffer mOutputBuffer;  // logits [1, num_classes, H/4, W/4]
 };
 
 // Create from engine + config
