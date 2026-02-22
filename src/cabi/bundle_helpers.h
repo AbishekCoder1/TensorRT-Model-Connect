@@ -57,7 +57,8 @@ struct TokenizerResult {
 // an HfPythonTokenizer. Throws on failure.
 TokenizerResult extract_tokenizer_from_bundle(
     const BundleSections& sections,
-    const std::string& hf_python);
+    const std::string& hf_python,
+    bool add_special_tokens = false);
 
 // Build a DecoderStepEngine from a TRT engine + config.
 std::unique_ptr<DecoderStepEngine> make_decoder_engine(

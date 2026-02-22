@@ -20,6 +20,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ids", default="", help="Comma-separated token IDs for decode")
     parser.add_argument("--token", default="", help="Token string for id-for-token")
     parser.add_argument("--id", type=int, default=0, help="Token ID for token-for-id")
+    parser.add_argument("--add-special-tokens", action="store_true",
+                        help="Include special tokens (e.g. EOS) during encode")
     return parser.parse_args()
 
 
@@ -100,7 +102,7 @@ def main() -> int:
             print("--text-file is required for encode", file=sys.stderr)
             return 4
         text = pathlib.Path(args.text_file).read_text(encoding="utf-8")
-        ids = tokenizer.encode(text, add_special_tokens=False)
+        ids = tokenizer.encode(text, add_special_tokens=args.add_special_tokens)
         print(" ".join(str(i) for i in ids))
         return 0
 

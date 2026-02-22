@@ -45,7 +45,8 @@ BundleSections find_bundle_sections(const BundleFile& bundle)
 
 TokenizerResult extract_tokenizer_from_bundle(
     const BundleSections& sections,
-    const std::string& hf_python)
+    const std::string& hf_python,
+    bool add_special_tokens)
 {
     bool has_tok = (sections.tokenizer_json_data != nullptr && !sections.tokenizer_json_data->empty())
         || (sections.vocab_json_data != nullptr && !sections.vocab_json_data->empty())
@@ -86,7 +87,7 @@ TokenizerResult extract_tokenizer_from_bundle(
 
     std::cerr << "[trtf] Initializing HF tokenizer from bundle ..." << std::endl;
     auto ttok0 = std::chrono::steady_clock::now();
-    auto tokenizer = CreateHfPythonTokenizer(temp_dir_str, hf_python);
+    auto tokenizer = CreateHfPythonTokenizer(temp_dir_str, hf_python, add_special_tokens);
     auto ttok1 = std::chrono::steady_clock::now();
     std::cerr << "[trtf] Tokenizer ready ["
               << std::chrono::duration_cast<std::chrono::milliseconds>(ttok1 - ttok0).count()

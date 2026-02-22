@@ -833,7 +833,7 @@ PipelineImpl* create_diffusion_pipeline(
     trtf::TokenizerResult tok = {nullptr, ""};
     try
     {
-        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python, /*add_special_tokens=*/true);
     }
     catch (const std::exception& e)
     {

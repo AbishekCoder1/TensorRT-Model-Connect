@@ -202,8 +202,9 @@ std::string join_ids_csv(const std::vector<int32_t>& ids)
 
 class HfPythonTokenizer final : public ITokenizer {
 public:
-    HfPythonTokenizer(std::string model_dir, std::string python_path)
+    HfPythonTokenizer(std::string model_dir, std::string python_path, bool add_special_tokens)
         : mModelDir(std::move(model_dir))
+        , mAddSpecialTokens(add_special_tokens)
     {
         mPythonCommand = find_python_command(python_path);
         mScript = tokenizer_script_path();
@@ -247,10 +248,14 @@ public:
         }
         close(fd);
 
-        const std::string cmd = shell_quote(mPythonCommand) + " " + shell_quote(mScript.string())
+        std::string cmd = shell_quote(mPythonCommand) + " " + shell_quote(mScript.string())
             + " --model-dir " + shell_quote(mModelDir)
             + " --op encode"
             + " --text-file " + shell_quote(temp_path);
+        if (mAddSpecialTokens)
+        {
+            cmd += " --add-special-tokens";
+        }
 
         const CommandResult result = run_command_capture(cmd);
         std::error_code remove_ec;
@@ -319,13 +324,15 @@ private:
     std::string mModelDir;
     std::string mPythonCommand;
     std::filesystem::path mScript;
+    bool mAddSpecialTokens{false};
 };
 
 } // namespace
 
-std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir, std::string python_path)
+std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir, std::string python_path,
+                                                    bool add_special_tokens)
 {
-    return std::make_unique<HfPythonTokenizer>(std::move(model_dir), std::move(python_path));
+    return std::make_unique<HfPythonTokenizer>(std::move(model_dir), std::move(python_path), add_special_tokens);
 }
 
 } // namespace trtf
