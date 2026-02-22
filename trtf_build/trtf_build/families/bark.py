@@ -32,7 +32,7 @@ import tensorrt as trt
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict
 from .. import graph_ops
-from ..standard_decoder_builder import build_standard_decoder
+from ..standard_decoder_builder import build_standard_decoder_engine
 
 
 def _load_bark_state_dict(model_dir: str) -> dict:
@@ -52,9 +52,23 @@ def _load_bark_state_dict(model_dir: str) -> dict:
 
 
 def _detect_sub_model_config(state_dict: dict, prefix: str) -> dict:
-    """Auto-detect dimensions from state dict for a sub-model."""
+    """Auto-detect dimensions from state dict for a sub-model.
+
+    HF Bark uses keys like:
+      {prefix}.input_embeds_layer.weight  [vocab, hidden]
+      {prefix}.position_embeds_layer.weight  [max_pos, hidden]
+      {prefix}.layers.{i}.layernorm_1.weight
+      {prefix}.layers.{i}.attn.att_proj.weight  [3*H, H]
+      {prefix}.lm_head.weight  [output_vocab, hidden]  (semantic/coarse only)
+    Fine model uses:
+      {prefix}.input_embeds_layers.{i}.weight  [vocab, hidden]
+      {prefix}.lm_heads.{i}.weight  [output_vocab, hidden]
+    """
     # Find embedding weight to get vocab_size, hidden_size
-    wte_key = f"{prefix}.model.transformer.wte.weight"
+    wte_key = f"{prefix}.input_embeds_layer.weight"
+    if wte_key not in state_dict:
+        # Fine model has multiple embedding tables
+        wte_key = f"{prefix}.input_embeds_layers.0.weight"
     if wte_key not in state_dict:
         return {}
     wte = state_dict[wte_key]
@@ -64,31 +78,35 @@ def _detect_sub_model_config(state_dict: dict, prefix: str) -> dict:
 
     # Count layers
     num_layers = 0
-    while f"{prefix}.model.transformer.h.{num_layers}.layernorm_1.weight" in state_dict:
+    while f"{prefix}.layers.{num_layers}.layernorm_1.weight" in state_dict:
         num_layers += 1
 
     # Detect num_heads from att_proj shape
-    att_key = f"{prefix}.model.transformer.h.0.attn.att_proj.weight"
     num_heads = hidden_size // 64  # Default guess
+    att_key = f"{prefix}.layers.0.attn.att_proj.weight"
     if att_key in state_dict:
-        att_w = state_dict[att_key]
-        if hasattr(att_w, 'numpy'):
-            att_w = att_w.numpy()
-        # att_proj is [3*H, H], head_dim = H / num_heads
-        # Try common head dims: 64, 128
         for hd in [64, 128, 96]:
             if hidden_size % hd == 0:
                 num_heads = hidden_size // hd
                 break
 
     # Detect position embedding max length
-    wpe_key = f"{prefix}.model.transformer.wpe.weight"
-    max_position = 256
+    wpe_key = f"{prefix}.position_embeds_layer.weight"
+    max_position = 1024
     if wpe_key in state_dict:
         wpe = state_dict[wpe_key]
         if hasattr(wpe, 'numpy'):
             wpe = wpe.numpy()
         max_position = wpe.shape[0]
+
+    # Output vocab (from lm_head)
+    lm_key = f"{prefix}.lm_head.weight"
+    output_vocab = vocab_size
+    if lm_key in state_dict:
+        lm_w = state_dict[lm_key]
+        if hasattr(lm_w, 'numpy'):
+            lm_w = lm_w.numpy()
+        output_vocab = lm_w.shape[0]
 
     return {
         "vocab_size": int(vocab_size),
@@ -96,6 +114,8 @@ def _detect_sub_model_config(state_dict: dict, prefix: str) -> dict:
         "num_layers": int(num_layers),
         "num_heads": int(num_heads),
         "max_position": int(max_position),
+        "output_vocab": int(output_vocab),
+        "intermediate_size": int(hidden_size * 4),
     }
 
 
@@ -104,10 +124,31 @@ def _map_bark_decoder_weights(
     prefix: str,
     sub_config: dict,
 ) -> WeightDict:
-    """Map HF Bark decoder weights to standard decoder format."""
+    """Map HF Bark decoder weights to standard decoder format.
+
+    HF Bark key patterns:
+      {prefix}.input_embeds_layer.weight  [vocab, hidden]
+      {prefix}.position_embeds_layer.weight  [max_pos, hidden]
+      {prefix}.layers.{i}.layernorm_1.weight  [hidden]  (no bias in bark-small)
+      {prefix}.layers.{i}.attn.att_proj.weight  [3*H, H]  (fused QKV)
+      {prefix}.layers.{i}.attn.out_proj.weight  [H, H]
+      {prefix}.layers.{i}.mlp.in_proj.weight  [4*H, H]
+      {prefix}.layers.{i}.mlp.out_proj.weight  [H, 4*H]
+      {prefix}.layernorm_final.weight  [hidden]
+      {prefix}.lm_head.weight  [output_vocab, hidden]
+
+    Standard decoder builder expects:
+      embedding [vocab, hidden], position_embedding [max_pos, hidden]
+      layer.{i}.input_norm [hidden], layer.{i}.input_norm_beta [hidden]
+      layer.{i}.w_q/w_k/w_v [hidden, hidden] (transposed: [in, out])
+      layer.{i}.w_o [hidden, hidden]
+      layer.{i}.post_attn_norm [hidden], layer.{i}.post_attn_norm_beta [hidden]
+      layer.{i}.w_fc1 [hidden, 4*hidden], layer.{i}.w_fc2 [4*hidden, hidden]
+      final_norm [hidden], final_norm_beta [hidden]
+      w_out [hidden, output_vocab]
+    """
     weights = WeightDict()
     hidden = sub_config["hidden_size"]
-    vocab = sub_config["vocab_size"]
     num_layers = sub_config["num_layers"]
 
     def _to_np(t):
@@ -123,57 +164,80 @@ def _map_bark_decoder_weights(
         return a
 
     # Embedding
-    weights["embedding"] = _to_np(state_dict[f"{prefix}.model.transformer.wte.weight"])
+    weights["embedding"] = _to_np(state_dict[f"{prefix}.input_embeds_layer.weight"])
 
     # Position embedding
-    weights["position_embedding"] = _to_np(state_dict[f"{prefix}.model.transformer.wpe.weight"])
+    weights["position_embedding"] = _to_np(state_dict[f"{prefix}.position_embeds_layer.weight"])
 
     for i in range(num_layers):
-        hf_layer = f"{prefix}.model.transformer.h.{i}"
+        hf = f"{prefix}.layers.{i}"
         layer = f"layer.{i}"
 
-        # Layer norms
-        weights[f"{layer}.norm1_gamma"] = _to_np(state_dict[f"{hf_layer}.layernorm_1.weight"])
-        weights[f"{layer}.norm1_beta"] = _to_np(state_dict[f"{hf_layer}.layernorm_1.bias"])
-        weights[f"{layer}.norm2_gamma"] = _to_np(state_dict[f"{hf_layer}.layernorm_2.weight"])
-        weights[f"{layer}.norm2_beta"] = _to_np(state_dict[f"{hf_layer}.layernorm_2.bias"])
+        # Layer norms (bark-small has weight only, no bias)
+        weights[f"{layer}.input_norm"] = _to_np(state_dict[f"{hf}.layernorm_1.weight"])
+        if f"{hf}.layernorm_1.bias" in state_dict:
+            weights[f"{layer}.input_norm_beta"] = _to_np(state_dict[f"{hf}.layernorm_1.bias"])
+        else:
+            weights[f"{layer}.input_norm_beta"] = np.zeros(hidden, dtype=np.float32)
 
-        # att_proj: [3*H, H] -> split into Q [H,H], K [H,H], V [H,H]
-        att_w = _to_np(state_dict[f"{hf_layer}.attn.att_proj.weight"])  # [3H, H]
-        w_q = att_w[:hidden, :]     # [H, H]
-        w_k = att_w[hidden:2*hidden, :]  # [H, H]
-        w_v = att_w[2*hidden:, :]   # [H, H]
+        weights[f"{layer}.post_attn_norm"] = _to_np(state_dict[f"{hf}.layernorm_2.weight"])
+        if f"{hf}.layernorm_2.bias" in state_dict:
+            weights[f"{layer}.post_attn_norm_beta"] = _to_np(state_dict[f"{hf}.layernorm_2.bias"])
+        else:
+            weights[f"{layer}.post_attn_norm_beta"] = np.zeros(hidden, dtype=np.float32)
 
-        # Transpose each: [H, H] -> [H, H] for matmul (lhs @ rhs)
-        weights[f"{layer}.w_q"] = _t2d(w_q)
+        # att_proj: [3*H, H] -> split into Q [H,H], K [H,H], V [H,H], transpose each
+        att_w = _to_np(state_dict[f"{hf}.attn.att_proj.weight"])  # [3H, H]
+        w_q = att_w[:hidden, :]           # [H, H] in [out, in]
+        w_k = att_w[hidden:2*hidden, :]   # [H, H]
+        w_v = att_w[2*hidden:, :]         # [H, H]
+        weights[f"{layer}.w_q"] = _t2d(w_q)  # [in, out] = [H, H]
         weights[f"{layer}.w_k"] = _t2d(w_k)
         weights[f"{layer}.w_v"] = _t2d(w_v)
 
         # Output projection
-        weights[f"{layer}.w_o"] = _t2d(state_dict[f"{hf_layer}.attn.out_proj.weight"])
-        weights[f"{layer}.b_o"] = _to_np(state_dict[f"{hf_layer}.attn.out_proj.bias"])
+        weights[f"{layer}.w_o"] = _t2d(state_dict[f"{hf}.attn.out_proj.weight"])
 
-        # MLP
-        weights[f"{layer}.w_fc1"] = _t2d(state_dict[f"{hf_layer}.mlp.in_proj.weight"])
-        weights[f"{layer}.b_fc1"] = _to_np(state_dict[f"{hf_layer}.mlp.in_proj.bias"])
-        weights[f"{layer}.w_fc2"] = _t2d(state_dict[f"{hf_layer}.mlp.out_proj.weight"])
-        weights[f"{layer}.b_fc2"] = _to_np(state_dict[f"{hf_layer}.mlp.out_proj.bias"])
+        # MLP: fc1 = in_proj, fc2 = out_proj
+        weights[f"{layer}.w_fc1"] = _t2d(state_dict[f"{hf}.mlp.in_proj.weight"])
+        weights[f"{layer}.w_fc2"] = _t2d(state_dict[f"{hf}.mlp.out_proj.weight"])
+
+        # Biases (bark-small typically has no biases on attn/mlp, but handle if present)
+        for bkey, wkey in [
+            (f"{layer}.q_bias", f"{hf}.attn.att_proj.bias"),
+            (f"{layer}.o_bias", f"{hf}.attn.out_proj.bias"),
+            (f"{layer}.fc1_bias", f"{hf}.mlp.in_proj.bias"),
+            (f"{layer}.fc2_bias", f"{hf}.mlp.out_proj.bias"),
+        ]:
+            if wkey in state_dict:
+                b = _to_np(state_dict[wkey])
+                if "q_bias" in bkey and len(b) == 3 * hidden:
+                    # Fused QKV bias, split
+                    weights[f"{layer}.q_bias"] = b[:hidden]
+                    weights[f"{layer}.k_bias"] = b[hidden:2*hidden]
+                    weights[f"{layer}.v_bias"] = b[2*hidden:]
+                else:
+                    weights[bkey] = b
 
     # Final layer norm
-    ln_f_prefix = f"{prefix}.model.transformer.layernorm_final"
-    if f"{ln_f_prefix}.weight" in state_dict:
-        weights["final_norm_gamma"] = _to_np(state_dict[f"{ln_f_prefix}.weight"])
-        weights["final_norm_beta"] = _to_np(state_dict[f"{ln_f_prefix}.bias"])
+    ln_key = f"{prefix}.layernorm_final.weight"
+    if ln_key in state_dict:
+        weights["final_norm"] = _to_np(state_dict[ln_key])
     else:
-        weights["final_norm_gamma"] = np.ones(hidden, dtype=np.float32)
+        weights["final_norm"] = np.ones(hidden, dtype=np.float32)
+    ln_bias_key = f"{prefix}.layernorm_final.bias"
+    if ln_bias_key in state_dict:
+        weights["final_norm_beta"] = _to_np(state_dict[ln_bias_key])
+    else:
         weights["final_norm_beta"] = np.zeros(hidden, dtype=np.float32)
 
-    # LM head
-    lm_key = f"{prefix}.model.lm_head.weight"
+    # LM head: standard_decoder_builder uses "w_out"
+    lm_key = f"{prefix}.lm_head.weight"
     if lm_key in state_dict:
-        weights["w_lm_head"] = _t2d(state_dict[lm_key])
+        weights["w_out"] = _t2d(state_dict[lm_key])  # [hidden, output_vocab]
     else:
-        weights["w_lm_head"] = _t2d(state_dict[f"{prefix}.model.transformer.wte.weight"])
+        # Tied embeddings
+        weights["w_out"] = _t2d(state_dict[f"{prefix}.input_embeds_layer.weight"])
 
     return weights
 
@@ -207,9 +271,8 @@ class BarkPlugin:
         for k, v in coarse_w.items():
             weights[f"coarse.{k}"] = v
 
-        fine_w = _map_bark_decoder_weights(state_dict, "fine_acoustics", fine_cfg)
-        for k, v in fine_w.items():
-            weights[f"fine.{k}"] = v
+        # Fine model has different structure (8 embed tables, 7 LM heads) — store raw state_dict keys
+        weights["_state_dict"] = state_dict  # Needed for fine + codec engine builds
 
         # Store sub-model configs
         weights["_semantic_cfg"] = semantic_cfg
@@ -227,7 +290,7 @@ class BarkPlugin:
     ) -> bytes:
         """Build TRT engine for semantic decoder (primary engine)."""
         sem_cfg = weights["_semantic_cfg"]
-        return _build_bark_decoder_engine(
+        return _build_bark_standard_engine(
             weights, "semantic", sem_cfg, max_cache_length,
             embed_input=True, verbose=verbose)
 
@@ -239,23 +302,18 @@ class BarkPlugin:
         coarse_cfg = weights["_coarse_cfg"]
         fine_cfg = weights["_fine_cfg"]
 
-        coarse_plan = _build_bark_decoder_engine(
+        coarse_plan = _build_bark_standard_engine(
             weights, "coarse", coarse_cfg, max_cache_length,
             embed_input=True, verbose=verbose)
 
-        fine_plan = _build_bark_fine_engine(
-            weights, fine_cfg, verbose=verbose)
+        # Fine and codec engines require additional work (different architectures).
+        # For now, only build semantic + coarse TRT engines.
+        # Fine stage and codec will use HF models at runtime for full pipeline,
+        # or the codec can be built separately via encodec_builder.
 
-        # Codec engine is built separately from EnCodec weights
-        codec_plan = None  # Built from encodec_builder at runtime
-
-        result = {
-            "coarse_engine_plan": coarse_plan,
-            "fine_engine_plan": fine_plan,
+        return {
+            "coarse_engine": coarse_plan,
         }
-        if codec_plan is not None:
-            result["codec_engine_plan"] = codec_plan
-        return result
 
     def get_audio_config(self, config: ModelConfig) -> dict:
         """Return audio config for bundle config.json."""
@@ -271,6 +329,63 @@ class BarkPlugin:
             "coarse_semantic_pad_token": 12048,
             "coarse_infer_token": 12050,
         }
+
+
+def _build_bark_standard_engine(
+    weights: WeightDict,
+    sub_model: str,
+    sub_cfg: dict,
+    max_cache_length: int,
+    embed_input: bool = True,
+    verbose: bool = False,
+) -> bytes:
+    """Build a standard decoder engine for semantic or coarse using build_standard_decoder_engine."""
+    from ..standard_decoder_builder import build_standard_decoder_engine
+
+    # Extract sub-model weights (strip prefix)
+    prefix = f"{sub_model}."
+    sub_weights = WeightDict()
+    for k, v in weights.items():
+        if k.startswith(prefix) and not k.startswith("_"):
+            sub_weights[k[len(prefix):]] = v
+
+    # Also need _attention_size and _mlp_size for the builder
+    hidden = sub_cfg["hidden_size"]
+    num_heads = sub_cfg["num_heads"]
+    head_dim = hidden // num_heads
+    sub_weights["_attention_size"] = num_heads * head_dim
+    sub_weights["_mlp_size"] = sub_cfg.get("intermediate_size", hidden * 4)
+
+    # Create a ModelConfig for this sub-model
+    sub_mc = ModelConfig(
+        model_type="bark",
+        vocab_size=sub_cfg["vocab_size"],
+        hidden_size=hidden,
+        intermediate_size=sub_cfg.get("intermediate_size", hidden * 4),
+        num_hidden_layers=sub_cfg["num_layers"],
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_heads,
+        max_position_embeddings=sub_cfg.get("max_position", 1024),
+        rms_norm_eps=1e-5,
+        rope_theta=10000.0,
+        raw={},
+    )
+
+    if verbose:
+        print(f"[trtf-build]   Building {sub_model} engine: "
+              f"layers={sub_cfg['num_layers']}, hidden={hidden}, "
+              f"vocab={sub_cfg['vocab_size']}, output_vocab={sub_cfg.get('output_vocab', sub_cfg['vocab_size'])}",
+              file=sys.stderr)
+
+    return build_standard_decoder_engine(
+        sub_mc, sub_weights, max_cache_length,
+        norm_type="layernorm",
+        mlp_type="gelu_fc",
+        position_type="learned",
+        activation="gelu_new",
+        embed_input=embed_input,
+        verbose=verbose,
+    )
 
 
 def _build_bark_decoder_engine(

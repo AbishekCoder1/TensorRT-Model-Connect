@@ -298,15 +298,18 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     # LM head (logits)
     # ---------------------------------------------------------------
+    # Output vocab may differ from input vocab (e.g. Bark semantic: 129600 in, 10048 out).
+    # Derive from w_out shape if available.
+    out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
     logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, weights["w_out"])
+        network, hidden_state, hidden, out_vocab, weights["w_out"])
     # LM head bias (if present, e.g. CodeGen) or zero bias for C++ parity
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
-        logits = graph_ops.add_bias_sum(network, logits, vocab, lm_bias)
+        logits = graph_ops.add_bias_sum(network, logits, out_vocab, lm_bias)
     else:
-        b_out = np.zeros(vocab, dtype=np.float32)
-        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+        b_out = np.zeros(out_vocab, dtype=np.float32)
+        logits = graph_ops.add_bias_sum(network, logits, out_vocab, b_out)
 
     logits.name = "logits"
     network.mark_output(logits)

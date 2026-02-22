@@ -81,3 +81,5 @@ objects
 refs
 engines
 *.png
+*.wav
+*.trtfb
