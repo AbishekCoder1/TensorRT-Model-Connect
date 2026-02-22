@@ -96,6 +96,33 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.image_token_str = extract_json_string(config_text, "image_token_str", "");
     }
 
+    // Segmentation fields
+    if (cfg.runtime_strategy == "segmentation")
+    {
+        cfg.num_classes = extract_json_int(config_text, "num_classes", 150);
+        cfg.input_image_h = extract_json_int(config_text, "input_image_h", 512);
+        cfg.input_image_w = extract_json_int(config_text, "input_image_w", 512);
+        cfg.output_h = extract_json_int(config_text, "output_h", 128);
+        cfg.output_w = extract_json_int(config_text, "output_w", 128);
+        cfg.seg_image_mean = extract_json_float_array(config_text, "image_mean");
+        cfg.seg_image_std = extract_json_float_array(config_text, "image_std");
+    }
+
+    // Audio/Bark fields
+    if (cfg.runtime_strategy == "text_to_audio")
+    {
+        cfg.audio_sample_rate = extract_json_int(config_text, "sample_rate", 24000);
+        cfg.semantic_vocab_size = extract_json_int(config_text, "semantic_vocab_size", 10000);
+        cfg.coarse_vocab_size = extract_json_int(config_text, "coarse_vocab_size", 1024);
+        cfg.fine_vocab_size = extract_json_int(config_text, "fine_vocab_size", 1024);
+        cfg.n_coarse_codebooks = extract_json_int(config_text, "n_coarse_codebooks", 2);
+        cfg.n_fine_codebooks = extract_json_int(config_text, "n_fine_codebooks", 8);
+        cfg.semantic_pad_token = extract_json_int(config_text, "semantic_pad_token", 10000);
+        cfg.semantic_infer_token = extract_json_int(config_text, "semantic_infer_token", 10001);
+        cfg.coarse_semantic_pad_token = extract_json_int(config_text, "coarse_semantic_pad_token", 12048);
+        cfg.coarse_infer_token = extract_json_int(config_text, "coarse_infer_token", 12050);
+    }
+
     // Diffusion fields
     if (cfg.runtime_strategy == "diffusion")
     {

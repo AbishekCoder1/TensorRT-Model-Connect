@@ -79,6 +79,8 @@ add_library(trtf_core
   src/runtime/trt/vl_backend.cpp
   src/runtime/trt/image_preprocessor.cpp
   src/runtime/trt/vision_engine.cpp
+  src/runtime/trt/segmentation_backend.cpp
+  src/runtime/trt/bark_backend.cpp
   src/runtime/trt/diffusion_backend.cpp
   src/runtime/trt/diffusion_backend_base.cpp
   src/runtime/trt/wan_diffusion_backend.cpp

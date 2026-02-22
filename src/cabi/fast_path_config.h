@@ -48,6 +48,27 @@ struct FastPathModelConfig {
     std::string vl_prompt_template; // prompt template with {image_pads} and {prompt}
     std::string image_token_str;    // string for one image pad token (e.g. "<|image_pad|>")
 
+    // Segmentation fields (used when runtime_strategy == "segmentation")
+    int32_t num_classes{150};
+    int32_t input_image_h{512};
+    int32_t input_image_w{512};
+    int32_t output_h{128};
+    int32_t output_w{128};
+    std::vector<float> seg_image_mean;
+    std::vector<float> seg_image_std;
+
+    // Audio/Bark fields (used when runtime_strategy == "text_to_audio")
+    int32_t audio_sample_rate{24000};
+    int32_t semantic_vocab_size{10000};
+    int32_t coarse_vocab_size{1024};
+    int32_t fine_vocab_size{1024};
+    int32_t n_coarse_codebooks{2};
+    int32_t n_fine_codebooks{8};
+    int32_t semantic_pad_token{10000};
+    int32_t semantic_infer_token{10001};
+    int32_t coarse_semantic_pad_token{12048};
+    int32_t coarse_infer_token{12050};
+
     // Diffusion fields (used when runtime_strategy == "diffusion")
     int32_t num_text_encoders{0};
     std::string scheduler;              // "flow_match_euler", etc.

@@ -35,6 +35,29 @@ public:
         return -1;
     }
 
+    // Returns true if this pipeline supports semantic segmentation.
+    virtual bool supports_segmentation() const { return false; }
+
+    // Segment an image. Writes a PNG with raw class indices to output_path.
+    // Returns 0 on success, -1 on failure.
+    virtual int32_t segment(const char* image_path, const char* output_path)
+    {
+        (void) image_path; (void) output_path;
+        return -1;
+    }
+
+    // Returns true if this pipeline supports audio generation.
+    virtual bool supports_audio() const { return false; }
+
+    // Generate audio from text. Writes a WAV file to output_path.
+    // Returns number of samples on success, -1 on failure.
+    virtual int32_t generate_audio(const char* prompt, const char* output_path,
+                                   int32_t max_tokens = -1)
+    {
+        (void) prompt; (void) output_path; (void) max_tokens;
+        return -1;
+    }
+
     // Metadata -- pointers valid for lifetime of the pipeline.
     virtual const char* model_id() const = 0;
     virtual const char* backend_name() const = 0;

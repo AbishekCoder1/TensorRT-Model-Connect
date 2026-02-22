@@ -23,6 +23,7 @@ struct CliArgs {
     std::string hf_python;
     std::string image_path;
     std::string output_dir;
+    std::string output_path;  // for segment/generate-audio
     int max_new_tokens{0};
     int num_steps{-1};
     float guidance_scale{-1.0F};
@@ -36,6 +37,8 @@ void print_usage()
     std::cerr <<
         "Usage:\n"
         "  trtf run             <bundle.trtfb> --prompt \"text\" [--image PATH] [--max-new-tokens N] [--hf-python PATH]\n"
+        "  trtf segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
+        "  trtf generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH [--max-new-tokens N] [--hf-python PATH]\n"
         "  trtf generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] [--guidance-scale S] [--hf-python PATH]\n"
         "  trtf inspect         <bundle.trtfb>\n"
         "  trtf version\n";
@@ -66,7 +69,8 @@ CliArgs parse_args(int argc, char** argv)
     }
 
     if (args.command != "run" && args.command != "inspect" &&
-        args.command != "generate-video")
+        args.command != "generate-video" &&
+        args.command != "segment" && args.command != "generate-audio")
     {
         args.parse_error = true;
         args.error_message = "Unknown command: " + args.command;
@@ -288,6 +292,100 @@ int cmd_generate_video(const CliArgs& args)
     return EXIT_SUCCESS;
 }
 
+int cmd_segment(const CliArgs& args)
+{
+    if (args.bundle_path.empty())
+    {
+        std::cerr << "Error: segment requires a .trtfb bundle file\n";
+        return EXIT_FAILURE;
+    }
+
+    if (args.image_path.empty())
+    {
+        std::cerr << "Error: segment requires --image\n";
+        return EXIT_FAILURE;
+    }
+
+    const std::string out_path = args.output_dir.empty()
+        ? "/tmp/segmentation_output.png" : args.output_dir;
+
+    TrtfPipelineOptions opts{};
+    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
+    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
+    if (pipeline == nullptr)
+    {
+        std::cerr << "Error: " << trtf_last_error() << '\n';
+        return EXIT_FAILURE;
+    }
+
+    if (!pipeline->supports_segmentation())
+    {
+        std::cerr << "Error: this bundle does not support segmentation\n";
+        delete pipeline;
+        return EXIT_FAILURE;
+    }
+
+    const int32_t rc = pipeline->segment(args.image_path.c_str(), out_path.c_str());
+    if (rc != 0)
+    {
+        std::cerr << "Error: segmentation failed\n";
+        delete pipeline;
+        return EXIT_FAILURE;
+    }
+
+    std::cout << "Segmentation saved to " << out_path << '\n';
+    delete pipeline;
+    return EXIT_SUCCESS;
+}
+
+int cmd_generate_audio(const CliArgs& args)
+{
+    if (args.bundle_path.empty())
+    {
+        std::cerr << "Error: generate-audio requires a .trtfb bundle file\n";
+        return EXIT_FAILURE;
+    }
+
+    if (args.prompt.empty())
+    {
+        std::cerr << "Error: generate-audio requires --prompt\n";
+        return EXIT_FAILURE;
+    }
+
+    const std::string out_path = args.output_dir.empty()
+        ? "/tmp/generated_audio.wav" : args.output_dir;
+
+    TrtfPipelineOptions opts{};
+    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
+    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
+    if (pipeline == nullptr)
+    {
+        std::cerr << "Error: " << trtf_last_error() << '\n';
+        return EXIT_FAILURE;
+    }
+
+    if (!pipeline->supports_audio())
+    {
+        std::cerr << "Error: this bundle does not support audio generation\n";
+        delete pipeline;
+        return EXIT_FAILURE;
+    }
+
+    const int32_t num_samples = pipeline->generate_audio(
+        args.prompt.c_str(), out_path.c_str(), args.max_new_tokens);
+
+    if (num_samples < 0)
+    {
+        std::cerr << "Error: audio generation failed\n";
+        delete pipeline;
+        return EXIT_FAILURE;
+    }
+
+    std::cout << "Generated " << num_samples << " audio samples -> " << out_path << '\n';
+    delete pipeline;
+    return EXIT_SUCCESS;
+}
+
 int cmd_inspect(const CliArgs& args)
 {
     if (args.bundle_path.empty())
@@ -356,6 +454,14 @@ int main(int argc, char** argv)
     if (args.command == "run")
     {
         return cmd_run(args);
+    }
+    if (args.command == "segment")
+    {
+        return cmd_segment(args);
+    }
+    if (args.command == "generate-audio")
+    {
+        return cmd_generate_audio(args);
     }
     if (args.command == "generate-video")
     {

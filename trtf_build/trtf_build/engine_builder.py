@@ -184,6 +184,18 @@ def build_bundle(
                   f"({len(vision_plan) / (1024 * 1024):.1f} MB)",
                   file=sys.stderr)
 
+    # 4c. Build extra engines (optional, multi-engine models like Bark)
+    extra_engines = {}
+    build_extra = getattr(plugin, 'build_extra_engines', None)
+    if build_extra is not None:
+        print(f"[trtf-build] Building extra engines ...", file=sys.stderr)
+        extra_engines = build_extra(
+            config, weights, max_cache_length, verbose=verbose) or {}
+        t3c = time.monotonic()
+        for ename, eplan in extra_engines.items():
+            print(f"[trtf-build]   {ename}: {len(eplan) / (1024 * 1024):.1f} MB",
+                  file=sys.stderr)
+
     # 5. Write bundle
     info = BundleInfo(
         model_id=model_dir_path.name,
@@ -207,9 +219,16 @@ def build_bundle(
     if vision_plan is not None:
         sections.append(BundleSection("vision_engine_plan", vision_plan))
 
+    # Add extra engine sections (coarse, fine, codec for Bark, etc.)
+    for ename, eplan in extra_engines.items():
+        sections.append(BundleSection(ename, eplan))
+
     # If model lacks tokenizer.json (fast format), generate it from the
     # slow tokenizer so the C++ runtime can always load via AutoTokenizer.
-    _ensure_tokenizer_json(model_dir_path)
+    # Skip for non-text models (segmentation, audio) that don't use tokenizers.
+    runtime_strategy = getattr(plugin, "runtime_strategy", "")
+    if runtime_strategy not in ("segmentation",):
+        _ensure_tokenizer_json(model_dir_path)
 
     # Embed tokenizer + config files.
     # For config.json, inject runtime_strategy if the plugin provides one.
@@ -236,6 +255,18 @@ def build_bundle(
                     vl_cfg = get_vl_config(config)
                     if vl_cfg is not None:
                         cfg_dict.update(vl_cfg)
+                # Inject segmentation config from plugin
+                get_seg_config = getattr(plugin, 'get_segmentation_config', None)
+                if get_seg_config is not None:
+                    seg_cfg = get_seg_config(config)
+                    if seg_cfg is not None:
+                        cfg_dict.update(seg_cfg)
+                # Inject audio config from plugin
+                get_audio_config = getattr(plugin, 'get_audio_config', None)
+                if get_audio_config is not None:
+                    audio_cfg = get_audio_config(config)
+                    if audio_cfg is not None:
+                        cfg_dict.update(audio_cfg)
                 # Inject generic config overrides from plugin
                 get_overrides = getattr(plugin, 'get_bundle_config_overrides', None)
                 if get_overrides is not None:

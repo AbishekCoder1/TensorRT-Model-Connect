@@ -1495,6 +1495,99 @@ def preprocess_image_for_trt(
     return _preprocess_qwen_merge_group(image_path, **kwargs)
 
 
+class SegmentationTrtRunner:
+    """Single-pass TRT inference for segmentation models.
+
+    No KV cache, no autoregressive loop. Takes pixel_values [1, 3, H, W]
+    and returns logits [1, num_classes, H/4, W/4].
+    """
+
+    def __init__(self, engine_plan: bytes):
+        logger = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(logger)
+        self.engine = runtime.deserialize_cuda_engine(engine_plan)
+        if self.engine is None:
+            raise RuntimeError("Failed to deserialize segmentation TRT engine")
+        self.context = self.engine.create_execution_context()
+
+        err, self.stream = cudart.cudaStreamCreate()
+        _check_cuda(err)
+
+        # Discover IO tensors
+        self._device_buffers: dict[str, int] = {}
+        self._host_buffers: dict[str, np.ndarray] = {}
+        self._input_names: list[str] = []
+        self._output_names: list[str] = []
+
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            mode = self.engine.get_tensor_mode(name)
+            shape = tuple(self.engine.get_tensor_shape(name))
+            dtype_trt = self.engine.get_tensor_dtype(name)
+            dtype_np = trt.nptype(dtype_trt)
+            nbytes = int(np.prod(shape)) * np.dtype(dtype_np).itemsize
+
+            err, d_ptr = cudart.cudaMalloc(nbytes)
+            _check_cuda(err)
+            self._device_buffers[name] = d_ptr
+            self._host_buffers[name] = np.zeros(shape, dtype=dtype_np)
+
+            if mode == trt.TensorIOMode.INPUT:
+                self._input_names.append(name)
+            else:
+                self._output_names.append(name)
+
+    def forward(self, pixel_values: np.ndarray) -> dict[str, np.ndarray]:
+        """Run a single forward pass.
+
+        Args:
+            pixel_values: [1, 3, H, W] float32 normalized image.
+
+        Returns:
+            Dict with 'logits' [1, num_classes, H/4, W/4].
+        """
+        H2D = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+        D2H = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
+        stream = self.stream
+
+        # Set input
+        self._host_buffers["pixel_values"][:] = pixel_values.astype(np.float32)
+
+        # H2D all inputs
+        for name in self._input_names:
+            h_buf = self._host_buffers[name]
+            self.context.set_tensor_address(name, self._device_buffers[name])
+            cudart.cudaMemcpyAsync(
+                self._device_buffers[name], h_buf.ctypes.data,
+                h_buf.nbytes, H2D, stream)
+
+        for name in self._output_names:
+            self.context.set_tensor_address(name, self._device_buffers[name])
+
+        self.context.execute_async_v3(stream)
+
+        # D2H outputs
+        results: dict[str, np.ndarray] = {}
+        for name in self._output_names:
+            h_buf = self._host_buffers[name]
+            cudart.cudaMemcpyAsync(
+                h_buf.ctypes.data, self._device_buffers[name],
+                h_buf.nbytes, D2H, stream)
+
+        cudart.cudaStreamSynchronize(stream)
+
+        for name in self._output_names:
+            results[name] = self._host_buffers[name].copy()
+
+        return results
+
+    def __del__(self):
+        for d_ptr in self._device_buffers.values():
+            cudart.cudaFree(d_ptr)
+        if hasattr(self, "stream"):
+            cudart.cudaStreamDestroy(self.stream)
+
+
 class VLTrtRunner:
     """Full VL pipeline runner combining vision encoder + text decoder.
 

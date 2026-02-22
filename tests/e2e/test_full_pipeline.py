@@ -270,6 +270,14 @@ def test_full_pipeline(built_bundle, trtf_binary, hf_python, ld_library_path):
     if entry.get("test_type") == "diffusion":
         pytest.skip("Diffusion model — use test_diffusion_pipeline")
 
+    # Skip segmentation models (handled by test_segmentation_pipeline)
+    if entry.get("test_type") == "segmentation" or entry.get("runtime_strategy") == "segmentation":
+        pytest.skip("Segmentation model — use test_segmentation_pipeline")
+
+    # Skip audio models (handled by test_audio_pipeline)
+    if entry.get("test_type") == "audio" or entry.get("runtime_strategy") == "text_to_audio":
+        pytest.skip("Audio model — use test_audio_pipeline")
+
     # Skip gated models (require HF auth for diff_logits)
     if entry.get("gated"):
         pytest.skip("Gated model — requires HF authentication")
@@ -453,3 +461,82 @@ def test_full_pipeline_vlm(built_bundle, trtf_binary, hf_python, ld_library_path
     print(f"\n[full_pipeline_vlm] {entry['name']}: PASS")
     print(f"  C++ output: {cpp_result['text'][:200]}")
     print(f"  Results saved: {results_path}")
+
+
+@pytest.mark.e2e
+def test_segmentation_pipeline(built_bundle, trtf_binary, hf_python,
+                               ld_library_path, engine_dir):
+    """Full segmentation pipeline: build -> C++ segment -> verify output."""
+    entry = built_bundle["entry"]
+    bundle_path = built_bundle["path"]
+
+    if entry.get("runtime_strategy") != "segmentation":
+        pytest.skip(f"{entry['name']} is not a segmentation model")
+
+    test_image = entry.get("test_image")
+    if not test_image:
+        pytest.skip(f"No test_image configured for {entry['name']}")
+
+    image_path = Path(test_image)
+    if not image_path.is_absolute():
+        image_path = engine_dir / test_image
+    if not image_path.is_file():
+        pytest.skip(f"Test image not found: {image_path}")
+
+    output_path = Path("/tmp") / f"{entry['name']}_seg_output.png"
+
+    # Run segmentation via C++ binary
+    cmd = [
+        str(trtf_binary), "segment", str(bundle_path),
+        "--image", str(image_path),
+        "--output", str(output_path),
+    ]
+    if hf_python:
+        cmd.extend(["--hf-python", str(hf_python)])
+
+    env = {"LD_LIBRARY_PATH": ld_library_path}
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
+
+    assert result.returncode == 0, (
+        f"Segmentation failed (rc={result.returncode}):\n{result.stderr}")
+    assert output_path.is_file(), "Segmentation output not written"
+
+    print(f"\n[segmentation_pipeline] {entry['name']}: PASS")
+    print(f"  Output: {output_path}")
+
+
+@pytest.mark.e2e
+def test_audio_pipeline(built_bundle, trtf_binary, hf_python,
+                        ld_library_path):
+    """Full audio pipeline: build -> C++ generate-audio -> verify output."""
+    entry = built_bundle["entry"]
+    bundle_path = built_bundle["path"]
+
+    if entry.get("runtime_strategy") != "text_to_audio":
+        pytest.skip(f"{entry['name']} is not an audio model")
+
+    prompt = entry.get("prompt", "Hello, this is a test.")
+    output_path = Path("/tmp") / f"{entry['name']}_audio_output.wav"
+
+    # Run audio generation via C++ binary
+    cmd = [
+        str(trtf_binary), "generate-audio", str(bundle_path),
+        "--prompt", prompt,
+        "--output", str(output_path),
+    ]
+    if hf_python:
+        cmd.extend(["--hf-python", str(hf_python)])
+
+    env = {"LD_LIBRARY_PATH": ld_library_path}
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
+
+    assert result.returncode == 0, (
+        f"Audio generation failed (rc={result.returncode}):\n{result.stderr}")
+    assert output_path.is_file(), "Audio output not written"
+
+    # Verify WAV file has content
+    file_size = os.path.getsize(output_path)
+    assert file_size > 44, "WAV file is too small (header only?)"
+
+    print(f"\n[audio_pipeline] {entry['name']}: PASS")
+    print(f"  Output: {output_path} ({file_size} bytes)")

@@ -16,6 +16,8 @@
 #include "runtime/trt/image_preprocessor.h"
 #include "runtime/trt/diffusion_backend.h"
 #include "runtime/trt/wan_diffusion_backend.h"
+#include "runtime/trt/segmentation_backend.h"
+#include "runtime/trt/bark_backend.h"
 #include "runtime/trt/trt_common.h"
 
 #include "stb_image_write.h"
@@ -239,7 +241,115 @@ public:
         return mBackendName.c_str();
     }
 
+    bool supports_segmentation() const override
+    {
+#if TRTF_HAS_TRT
+        return mSegBackend != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    int32_t segment(const char* image_path, const char* output_path) override
+    {
+#if TRTF_HAS_TRT
+        if (mSegBackend == nullptr || image_path == nullptr || output_path == nullptr)
+            return -1;
+
+        try
+        {
+            auto result = mSegBackend->segment_image(std::string(image_path));
+
+            // Write PNG with raw class indices (NOT scaled to 255).
+            // Each pixel stores the class index as a grayscale value.
+            const int32_t w = result.width;
+            const int32_t h = result.height;
+            std::vector<uint8_t> pixels(static_cast<std::size_t>(w) * h);
+            for (int32_t i = 0; i < w * h; ++i)
+            {
+                // Store raw class index (0-149 for ADE20K)
+                pixels[i] = static_cast<uint8_t>(
+                    std::min(result.class_map[i], 255));
+            }
+
+            stbi_write_png(output_path, w, h, 1, pixels.data(), w);
+            std::cerr << "[trtf] Segmentation saved: " << output_path
+                      << " (" << w << "x" << h << ", "
+                      << result.num_classes << " classes)" << std::endl;
+            return 0;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] Segmentation error: " << e.what() << std::endl;
+            return -1;
+        }
+#else
+        (void) image_path; (void) output_path;
+        return -1;
+#endif
+    }
+
+    bool supports_audio() const override
+    {
+#if TRTF_HAS_TRT
+        return mBarkBackend != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    int32_t generate_audio(const char* prompt, const char* output_path,
+                           int32_t max_tokens) override
+    {
+#if TRTF_HAS_TRT
+        if (mBarkBackend == nullptr || prompt == nullptr || output_path == nullptr)
+            return -1;
+
+        try
+        {
+            std::vector<int32_t> input_ids;
+            if (mTokenizer)
+            {
+                input_ids = mTokenizer->encode(prompt);
+            }
+
+            auto result = mBarkBackend->generate_audio(
+                input_ids, max_tokens > 0 ? max_tokens : 768);
+
+            if (result.num_samples <= 0)
+                return -1;
+
+            trtf::write_wav(std::string(output_path),
+                result.waveform.data(), result.num_samples, result.sample_rate);
+
+            std::cerr << "[trtf] Audio saved: " << output_path
+                      << " (" << result.num_samples << " samples @ "
+                      << result.sample_rate << " Hz)" << std::endl;
+            return result.num_samples;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] Audio generation error: " << e.what() << std::endl;
+            return -1;
+        }
+#else
+        (void) prompt; (void) output_path; (void) max_tokens;
+        return -1;
+#endif
+    }
+
     void set_bundle_temp_dir(std::string dir) { mBundleTempDir = std::move(dir); }
+
+#if TRTF_HAS_TRT
+    void set_seg_backend(std::unique_ptr<trtf::SegmentationBackend> backend)
+    {
+        mSegBackend = std::move(backend);
+    }
+    void set_bark_backend(std::unique_ptr<trtf::BarkBackend> backend)
+    {
+        mBarkBackend = std::move(backend);
+    }
+#endif
 
 private:
     std::string mModelId;
@@ -249,6 +359,10 @@ private:
     trtf::GenerationConfig mGenConfig;
     std::string mLastOutput;
     std::string mBundleTempDir;
+#if TRTF_HAS_TRT
+    std::unique_ptr<trtf::SegmentationBackend> mSegBackend;
+    std::unique_ptr<trtf::BarkBackend> mBarkBackend;
+#endif
 };
 
 #if TRTF_HAS_TRT
@@ -496,6 +610,104 @@ PipelineImpl* create_vl_pipeline(
 
     std::cerr << "[trtf] Runtime ready (backend=trt_vl, strategy=vision_language)" << std::endl;
     return make_pipeline(model_id, std::move(tok), std::move(backend), "trt_vl");
+}
+
+PipelineImpl* create_segmentation_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const std::string& model_id,
+    const std::string& bundle_path)
+{
+    auto seg_backend = trtf::CreateSegmentationBackend(
+        std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+    if (!seg_backend || !seg_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create segmentation backend from bundle engine");
+    }
+
+    // Segmentation pipelines don't need a tokenizer or generation backend
+    auto* pipeline = new PipelineImpl(
+        model_id, nullptr, nullptr, "trt_segmentation", trtf::GenerationConfig{});
+    pipeline->set_seg_backend(std::move(seg_backend));
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_segmentation, strategy=segmentation)" << std::endl;
+    return pipeline;
+}
+
+PipelineImpl* create_bark_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    trtf::TrtUniquePtr<nvinfer1::IRuntime>& runtime_ptr,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& bundle_path)
+{
+    auto decoder_engine = trtf::make_decoder_engine(
+        std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+    if (!trtf::has_all_required_tensors(*decoder_engine))
+    {
+        throw std::runtime_error("Bundle engine missing required tensors: " + bundle_path);
+    }
+
+    auto bark_backend = trtf::CreateBarkBackend(std::move(decoder_engine), fp_cfg);
+    if (!bark_backend || !bark_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create Bark backend from bundle engine");
+    }
+
+    // Deserialize optional coarse/fine/codec engines
+    if (sections.coarse_engine_plan_data != nullptr && !sections.coarse_engine_plan_data->empty())
+    {
+        auto coarse_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.coarse_engine_plan_data->data(),
+                sections.coarse_engine_plan_data->size()));
+        if (coarse_trt)
+        {
+            auto coarse_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                coarse_trt->createExecutionContext());
+            auto coarse_engine = trtf::make_decoder_engine(
+                std::move(coarse_trt), std::move(coarse_ctx), fp_cfg);
+            bark_backend->set_coarse_engine(std::move(coarse_engine));
+        }
+    }
+
+    if (sections.fine_engine_plan_data != nullptr && !sections.fine_engine_plan_data->empty())
+    {
+        auto fine_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.fine_engine_plan_data->data(),
+                sections.fine_engine_plan_data->size()));
+        if (fine_trt)
+        {
+            auto fine_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                fine_trt->createExecutionContext());
+            bark_backend->set_fine_engine(std::move(fine_trt), std::move(fine_ctx));
+        }
+    }
+
+    // Tokenizer (optional for Bark)
+    trtf::TokenizerResult tok = {nullptr, ""};
+    try
+    {
+        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[trtf] Warning: no tokenizer for Bark (" << e.what() << ")" << std::endl;
+    }
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_bark, strategy=text_to_audio)" << std::endl;
+
+    auto* pipeline = new PipelineImpl(
+        model_id, std::move(tok.tokenizer), nullptr, "trt_bark", trtf::GenerationConfig{});
+    if (!tok.temp_dir.empty())
+        pipeline->set_bundle_temp_dir(std::move(tok.temp_dir));
+    pipeline->set_bark_backend(std::move(bark_backend));
+    return pipeline;
 }
 
 PipelineImpl* create_decoder_pipeline(
@@ -748,6 +960,20 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
     if (strategy == "vision_language")
     {
         return create_vl_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            sections, runtime_ptr, bundle.info.model_id, hf_python, bundle_path);
+    }
+
+    if (strategy == "segmentation")
+    {
+        return create_segmentation_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            bundle.info.model_id, bundle_path);
+    }
+
+    if (strategy == "text_to_audio")
+    {
+        return create_bark_pipeline(
             std::move(trt_engine), std::move(exec_ctx), fp_cfg,
             sections, runtime_ptr, bundle.info.model_id, hf_python, bundle_path);
     }

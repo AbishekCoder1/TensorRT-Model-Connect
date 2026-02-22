@@ -25,6 +25,10 @@ BundleSections find_bundle_sections(const BundleFile& bundle)
         else if (section.name == "merges.txt") s.merges_txt_data = &section.data;
         else if (section.name == "special_tokens_map.json") s.special_tokens_data = &section.data;
         else if (section.name == "tokenizer.model") s.tokenizer_model_data = &section.data;
+        // Bark/multi-engine sections
+        else if (section.name == "coarse_engine_plan") s.coarse_engine_plan_data = &section.data;
+        else if (section.name == "fine_engine_plan") s.fine_engine_plan_data = &section.data;
+        else if (section.name == "codec_engine_plan") s.codec_engine_plan_data = &section.data;
         // Diffusion sections
         else if (section.name == "denoiser_plan") s.denoiser_plan_data = &section.data;
         else if (section.name == "vae_decoder_plan") s.vae_decoder_plan_data = &section.data;

@@ -1,0 +1,13 @@
+{
+  "name": "segformer-b0-ade",
+  "hf_id": "nvidia/segformer-b0-finetuned-ade-512-512",
+  "bundle": "segformer-b0-ade.trtfb",
+  "family": "segformer",
+  "runtime_strategy": "segmentation",
+  "test_type": "segmentation",
+  "max_cache_length": 1,
+  "prompt": "",
+  "max_new_tokens": 0,
+  "logit_atol": 0.5,
+  "trust_remote_code": false
+}

@@ -32,6 +32,11 @@ struct BundleSections {
     const std::vector<char>* special_tokens_data{nullptr};
     const std::vector<char>* tokenizer_model_data{nullptr};
 
+    // Bark/multi-engine sections
+    const std::vector<char>* coarse_engine_plan_data{nullptr};
+    const std::vector<char>* fine_engine_plan_data{nullptr};
+    const std::vector<char>* codec_engine_plan_data{nullptr};
+
     // Diffusion sections
     std::vector<const std::vector<char>*> text_encoder_plans;  // text_encoder_0_plan, ...
     const std::vector<char>* denoiser_plan_data{nullptr};
