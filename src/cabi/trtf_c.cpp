@@ -8,6 +8,9 @@
 #include "runtime/trt/trt_backend_shared.h"
 #include "runtime/trt/mamba_backend.h"
 #include "runtime/trt/mamba_decode_runtime.h"
+#include "runtime/trt/rwkv_backend.h"
+#include "runtime/trt/rwkv_decode_runtime.h"
+#include "runtime/trt/whisper_backend.h"
 #include "runtime/trt/vl_backend.h"
 #include "runtime/trt/vision_engine.h"
 #include "runtime/trt/image_preprocessor.h"
@@ -310,6 +313,114 @@ PipelineImpl* create_mamba_pipeline(
     return make_pipeline(model_id, std::move(tok), std::move(backend), "trt_mamba");
 }
 
+PipelineImpl* create_rwkv_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& bundle_path)
+{
+    auto rwkv_engine = std::make_unique<trtf::RwkvStepEngine>();
+    rwkv_engine->engine = std::move(trt_engine);
+    rwkv_engine->context = std::move(exec_ctx);
+    rwkv_engine->vocab_size = fp_cfg.vocab_size;
+    rwkv_engine->hidden_size = fp_cfg.hidden_size;
+    rwkv_engine->num_layers = fp_cfg.num_layers;
+    rwkv_engine->id_bos = fp_cfg.id_bos;
+    rwkv_engine->id_eos = fp_cfg.id_eos;
+
+    for (int32_t i = 0; i < fp_cfg.num_layers; ++i)
+    {
+        rwkv_engine->attn_state_input_names.push_back(trtf::layer_tensor_name("attn_state", i));
+        rwkv_engine->ff_state_input_names.push_back(trtf::layer_tensor_name("ff_state", i));
+        rwkv_engine->num_state_input_names.push_back(trtf::layer_tensor_name("num_state", i));
+        rwkv_engine->den_state_input_names.push_back(trtf::layer_tensor_name("den_state", i));
+        rwkv_engine->max_state_input_names.push_back(trtf::layer_tensor_name("max_state", i));
+        rwkv_engine->present_attn_output_names.push_back(trtf::layer_tensor_name("present_attn", i));
+        rwkv_engine->present_ff_output_names.push_back(trtf::layer_tensor_name("present_ff", i));
+        rwkv_engine->present_num_output_names.push_back(trtf::layer_tensor_name("present_num", i));
+        rwkv_engine->present_den_output_names.push_back(trtf::layer_tensor_name("present_den", i));
+        rwkv_engine->present_max_output_names.push_back(trtf::layer_tensor_name("present_max", i));
+    }
+
+    if (!trtf::has_all_required_rwkv_tensors(*rwkv_engine))
+    {
+        throw std::runtime_error("Bundle engine missing required RWKV tensors: " + bundle_path);
+    }
+
+    auto tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    auto backend = trtf::CreateRwkvBackendFromEngine(std::move(rwkv_engine));
+    if (!backend || !backend->is_available())
+    {
+        throw std::runtime_error("Failed to create RWKV TRT backend from bundle engine");
+    }
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_rwkv, strategy=rwkv_recurrent)" << std::endl;
+    return make_pipeline(model_id, std::move(tok), std::move(backend), "trt_rwkv");
+}
+
+PipelineImpl* create_whisper_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    trtf::TrtUniquePtr<nvinfer1::IRuntime>& runtime_ptr,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& bundle_path)
+{
+    // Build text decoder engine (standard KV cache decoder)
+    auto decoder_engine = trtf::make_decoder_engine(std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+    if (!trtf::has_all_required_tensors(*decoder_engine))
+    {
+        throw std::runtime_error("Bundle engine missing required decoder tensors: " + bundle_path);
+    }
+
+    // Deserialize encoder engine from vision_engine_plan section
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> encoder_engine;
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> encoder_ctx;
+    if (sections.vision_plan_data != nullptr && !sections.vision_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing Whisper encoder TRT engine ("
+                  << sections.vision_plan_data->size() / (1024 * 1024) << " MB) ..." << std::endl;
+
+        encoder_engine = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.vision_plan_data->data(), sections.vision_plan_data->size()));
+        if (!encoder_engine)
+        {
+            throw std::runtime_error("Failed to deserialize Whisper encoder engine: " + bundle_path);
+        }
+        encoder_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+            encoder_engine->createExecutionContext());
+        if (!encoder_ctx)
+        {
+            throw std::runtime_error("Failed to create Whisper encoder execution context");
+        }
+    }
+
+    trtf::WhisperConfig whisper_cfg;
+    whisper_cfg.num_mel_bins = fp_cfg.num_mel_bins;
+    whisper_cfg.max_source_positions = fp_cfg.max_source_positions;
+    whisper_cfg.max_target_positions = fp_cfg.max_target_positions;
+    whisper_cfg.encoder_layers = fp_cfg.encoder_layers;
+    whisper_cfg.decoder_layers = fp_cfg.decoder_layers;
+
+    auto tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    auto backend = trtf::CreateWhisperBackend(
+        std::move(decoder_engine), std::move(encoder_engine), std::move(encoder_ctx),
+        whisper_cfg, fp_cfg);
+    if (!backend || !backend->is_available())
+    {
+        throw std::runtime_error("Failed to create Whisper TRT backend from bundle engine");
+    }
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_whisper, strategy=speech_to_text)" << std::endl;
+    return make_pipeline(model_id, std::move(tok), std::move(backend), "trt_whisper");
+}
+
 PipelineImpl* create_vl_pipeline(
     trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
     trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
@@ -408,7 +519,7 @@ PipelineImpl* create_decoder_pipeline(
     if (strategy != "decoder_kv_cache" && strategy != "decoder_moe")
     {
         throw std::runtime_error("Unsupported runtime_strategy: " + strategy
-            + " (supported: decoder_kv_cache, decoder_moe, ssm_recurrent, vision_language)");
+            + " (supported: decoder_kv_cache, decoder_moe, ssm_recurrent, rwkv_recurrent, speech_to_text, vision_language)");
     }
 
     auto backend = trtf::CreateTrtBackendFromEngine(std::move(engine_struct));
@@ -618,6 +729,20 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
         return create_mamba_pipeline(
             std::move(trt_engine), std::move(exec_ctx), fp_cfg,
             sections, bundle.info.model_id, hf_python, bundle_path);
+    }
+
+    if (strategy == "rwkv_recurrent")
+    {
+        return create_rwkv_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            sections, bundle.info.model_id, hf_python, bundle_path);
+    }
+
+    if (strategy == "speech_to_text")
+    {
+        return create_whisper_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            sections, runtime_ptr, bundle.info.model_id, hf_python, bundle_path);
     }
 
     if (strategy == "vision_language")

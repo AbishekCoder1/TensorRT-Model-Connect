@@ -15,10 +15,9 @@ Usage:
 """
 import argparse
 import sys
+from pathlib import Path
 
 import numpy as np
-
-from tool_helpers import build_trt_engine, load_hf_model as _load_hf_model
 
 STANDARD_PROMPTS = [
     ("factual", "The capital of France is"),
@@ -28,15 +27,82 @@ STANDARD_PROMPTS = [
 ]
 
 
+def build_trt_engine(model_id_or_path, max_cache_length, verbose):
+    """Build TRT engine and return (engine_plan_bytes, config, model_dir).
+
+    For Whisper, also returns encoder_plan via config._encoder_plan.
+    """
+    from trtf_build.engine_builder import _resolve_model
+    from trtf_build.config import ModelConfig
+    from trtf_build.families import find_plugin
+
+    model_dir = _resolve_model(model_id_or_path)
+    config = ModelConfig.from_dir(model_dir)
+    plugin = find_plugin(config.model_type)
+    if plugin is None:
+        raise ValueError(f"No plugin for model_type={config.model_type!r}")
+
+    print(f"[diff] Loading weights ({config.model_type}) ...", file=sys.stderr)
+    weights = plugin.load_weights(model_dir, config)
+    print(f"[diff] Building TRT engine (cache={max_cache_length}) ...",
+          file=sys.stderr)
+    engine_plan = plugin.build_engine(
+        config, weights, max_cache_length, verbose=verbose)
+    print(f"[diff] Engine built ({len(engine_plan) / 1e6:.1f} MB)",
+          file=sys.stderr)
+
+    # For Whisper: also build encoder engine
+    build_vision = getattr(plugin, 'build_vision_engine', None)
+    if build_vision is not None and config.model_type.lower() == "whisper":
+        print(f"[diff] Building Whisper encoder engine ...", file=sys.stderr)
+        encoder_plan = build_vision(model_dir, config, weights, verbose=verbose)
+        if encoder_plan is not None:
+            print(f"[diff] Encoder built ({len(encoder_plan) / 1e6:.1f} MB)",
+                  file=sys.stderr)
+            config._encoder_plan = encoder_plan
+            config._weights = weights  # save for mel info
+
+    return engine_plan, config, model_dir
+
+
 def run_trt(engine_plan, config, input_ids, max_new_tokens, max_cache_length):
     """Run TRT inference, return list of logit arrays (one per step)."""
-    # Use MambaTrtRunner for SSM models, TrtRunner for standard decoders.
+    # Use model-specific runner based on model_type.
     if config.model_type.lower() == "mamba":
         from trtf_build.debug_runner import MambaTrtRunner
         runner = MambaTrtRunner(
             engine_plan=engine_plan,
             num_layers=config.num_hidden_layers,
         )
+    elif config.model_type.lower() == "rwkv":
+        from trtf_build.debug_runner import RwkvTrtRunner
+        runner = RwkvTrtRunner(
+            engine_plan=engine_plan,
+            num_layers=config.num_hidden_layers,
+        )
+    elif config.model_type.lower() == "whisper":
+        from trtf_build.debug_runner import WhisperTrtRunner
+        encoder_plan = getattr(config, '_encoder_plan', None)
+        if encoder_plan is None:
+            raise RuntimeError("Whisper encoder plan not built")
+        raw = config.raw
+        num_layers = raw.get("decoder_layers", config.num_hidden_layers)
+        max_source = raw.get("max_source_positions", 1500)
+        num_mel_bins = raw.get("num_mel_bins", 80)
+        runner = WhisperTrtRunner(
+            decoder_plan=engine_plan,
+            encoder_plan=encoder_plan,
+            num_layers=num_layers,
+            max_cache_length=max_cache_length,
+            max_source_positions=max_source,
+            hidden_size=config.hidden_size,
+        )
+        # Run encoder on dummy mel features (zeros)
+        mel_length = max_source * 2
+        mel_features = np.zeros((num_mel_bins, mel_length), dtype=np.float32)
+        print(f"  Running TRT encoder (mel={num_mel_bins}x{mel_length}) ...",
+              file=sys.stderr)
+        runner.run_encoder(mel_features)
     else:
         from trtf_build.debug_runner import TrtRunner
         runner = TrtRunner(
@@ -49,7 +115,63 @@ def run_trt(engine_plan, config, input_ids, max_new_tokens, max_cache_length):
     return [r["logits"].flatten() for r in results]
 
 
-def run_hf(model_dir, input_ids, max_new_tokens, trust_remote_code=False):
+def _load_hf_model(model_dir, trust_remote_code=False):
+    """Load HF model. Uses native transformers support by default.
+
+    If the model requires custom code (e.g. older repos without native
+    transformers support), pass --trust-remote-code to enable it.
+
+    For vision-language models (e.g. Qwen2.5-VL), loads the full VL model
+    but only uses the text decoder path for comparison.
+    """
+    import json
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    # Check if this is a VL model that requires a different AutoModel class.
+    config_path = Path(model_dir) / "config.json"
+    is_vl_model = False
+    model_type = ""
+    if config_path.exists():
+        cfg = json.loads(config_path.read_text())
+        model_type = cfg.get("model_type", "").lower()
+        if "vl" in model_type or "vision" in model_type:
+            is_vl_model = True
+
+    if model_type == "whisper":
+        from transformers import WhisperForConditionalGeneration
+        print("[diff] Loading Whisper model via WhisperForConditionalGeneration ...",
+              file=sys.stderr)
+        return WhisperForConditionalGeneration.from_pretrained(
+            model_dir, torch_dtype=torch.float32)
+
+    if is_vl_model:
+        from transformers import AutoModelForImageTextToText
+        print("[diff] Loading VL model via AutoModelForImageTextToText ...",
+              file=sys.stderr)
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_dir, trust_remote_code=trust_remote_code,
+            torch_dtype=torch.float32)
+        return model
+
+    try:
+        return AutoModelForCausalLM.from_pretrained(
+            model_dir, trust_remote_code=False, torch_dtype=torch.float32)
+    except (ValueError, KeyError, ImportError) as e:
+        if trust_remote_code:
+            print(f"[diff] Native loading failed ({e}), "
+                  f"retrying with trust_remote_code=True ...",
+                  file=sys.stderr)
+            return AutoModelForCausalLM.from_pretrained(
+                model_dir, trust_remote_code=True, torch_dtype=torch.float32)
+        raise ValueError(
+            f"Failed to load model from {model_dir} without custom code. "
+            f"If this model requires custom code, re-run with "
+            f"--trust-remote-code. Original error: {e}"
+        ) from e
+
+
+def run_hf(model_dir, config, input_ids, max_new_tokens, trust_remote_code=False):
     """Run HF transformers, return list of logit arrays (one per step)."""
     import torch
     from transformers import AutoTokenizer
@@ -57,7 +179,11 @@ def run_hf(model_dir, input_ids, max_new_tokens, trust_remote_code=False):
     model = _load_hf_model(model_dir, trust_remote_code=trust_remote_code)
     model.eval()
 
-    # Run prefill to get logits at each position
+    # Whisper: encoder-decoder model with cross-attention
+    if config.model_type.lower() == "whisper":
+        return _run_hf_whisper(model, config, input_ids, max_new_tokens)
+
+    # Standard causal LM
     ids_tensor = torch.tensor([input_ids], dtype=torch.long)
     all_logits = []
 
@@ -76,6 +202,57 @@ def run_hf(model_dir, input_ids, max_new_tokens, trust_remote_code=False):
             ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
             outputs = model(ids_tensor)
             all_logits.append(outputs.logits[0, -1].numpy())
+
+    return all_logits
+
+
+def _run_hf_whisper(model, config, input_ids, max_new_tokens):
+    """Run HF Whisper encoder-decoder with dummy mel, return per-step decoder logits.
+
+    Uses single-token-at-a-time decoding to match TRT's incremental KV cache
+    behavior exactly. Each step feeds only the current token and relies on
+    HF's past_key_values for context (equivalent to TRT's device KV cache).
+    """
+    import torch
+    from transformers.modeling_outputs import BaseModelOutput
+
+    raw = config.raw
+    max_source = raw.get("max_source_positions", 1500)
+    num_mel_bins = raw.get("num_mel_bins", 80)
+    mel_length = max_source * 2
+
+    # Same dummy mel features as TRT (zeros)
+    mel_features = torch.zeros(1, num_mel_bins, mel_length, dtype=torch.float32)
+
+    all_logits = []
+    with torch.no_grad():
+        # Run encoder
+        encoder_outputs = model.model.encoder(mel_features)
+        encoder_hidden = encoder_outputs.last_hidden_state  # [1, max_source, hidden]
+        enc_out = BaseModelOutput(last_hidden_state=encoder_hidden)
+
+        # Decoder: single-token steps with past_key_values (matches TRT KV cache)
+        past_key_values = None
+        gen_ids = list(input_ids)
+
+        for step_idx in range(len(input_ids) + max_new_tokens):
+            if step_idx < len(input_ids):
+                token = input_ids[step_idx]
+            else:
+                token = int(np.argmax(all_logits[-1]))
+                gen_ids.append(token)
+
+            ids_tensor = torch.tensor([[token]], dtype=torch.long)
+
+            outputs = model(
+                decoder_input_ids=ids_tensor,
+                encoder_outputs=enc_out,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            past_key_values = outputs.past_key_values
+            logits = outputs.logits[0, -1].numpy()  # [vocab]
+            all_logits.append(logits)
 
     return all_logits
 
@@ -154,13 +331,23 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         model_dir, trust_remote_code=args.trust_remote_code)
 
+    # For Whisper, use decoder start tokens as the "prompt"
+    if config.model_type.lower() == "whisper":
+        # Whisper decoder starts with: <|startoftranscript|> <|en|> <|transcribe|> <|notimestamps|>
+        # Use forced_decoder_ids or fallback to standard tokens
+        start_ids = [50258, 50259, 50359, 50363]  # startoftranscript, en, transcribe, notimestamps
+        prompts = [("whisper-decode", f"[decoder start tokens: {start_ids}]")]
+
     all_passed = True
     for label, prompt in prompts:
         print(f"\n{'=' * 60}")
         print(f"Prompt [{label}]: {prompt[:80]}{'...' if len(prompt) > 80 else ''}")
         print(f"{'=' * 60}")
 
-        input_ids = tokenizer.encode(prompt)
+        if config.model_type.lower() == "whisper":
+            input_ids = start_ids
+        else:
+            input_ids = tokenizer.encode(prompt)
         print(f"  Input tokens: {len(input_ids)}")
 
         # Run TRT
@@ -171,7 +358,7 @@ def main():
 
         # Run HF
         print(f"  Running HF ...", file=sys.stderr)
-        hf_logits = run_hf(model_dir, input_ids, args.max_new_tokens,
+        hf_logits = run_hf(model_dir, config, input_ids, args.max_new_tokens,
                            trust_remote_code=args.trust_remote_code)
 
         # Compare
@@ -200,106 +387,6 @@ def main():
             all_passed = False
 
     sys.exit(0 if all_passed else 1)
-
-
-def run_as_diff_test(ctx):
-    """Framework entry point. Returns DiffResult."""
-    from diff_framework.protocol import DiffResult
-    import time as _time
-
-    t0 = _time.monotonic()
-    try:
-        engine_plan, config, model_dir = build_trt_engine(
-            ctx.model, ctx.max_cache_length, ctx.verbose)
-
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_dir, trust_remote_code=ctx.trust_remote_code)
-
-        prompts = STANDARD_PROMPTS
-
-        worst_diff = 0.0
-        all_passed = True
-        details_lines = []
-
-        for label, prompt in prompts:
-            input_ids = tokenizer.encode(prompt)
-            trt_logits = run_trt(
-                engine_plan, config, input_ids,
-                ctx.max_new_tokens, ctx.max_cache_length)
-            hf_logits = run_hf(model_dir, input_ids, ctx.max_new_tokens,
-                               trust_remote_code=ctx.trust_remote_code)
-            max_diff, report = compare_logits(trt_logits, hf_logits, ctx.atol)
-            worst_diff = max(worst_diff, max_diff)
-            passed = max_diff <= ctx.atol
-            if not passed:
-                all_passed = False
-            details_lines.append(
-                f"[{label}] max_diff={max_diff:.6f} "
-                f"{'PASS' if passed else 'FAIL'}")
-
-        return DiffResult(
-            test_name="logit_diff", model=ctx.model,
-            runtime_strategy=ctx.runtime_strategy,
-            passed=all_passed,
-            status="PASS" if all_passed else "FAIL",
-            message=f"max_abs_logit_diff={worst_diff:.6f} (atol={ctx.atol})",
-            metrics={"max_abs_diff": worst_diff, "atol": ctx.atol,
-                     "num_prompts": len(prompts)},
-            duration_s=_time.monotonic() - t0,
-            details="\n".join(details_lines))
-    except Exception as e:
-        return DiffResult.error(
-            "logit_diff", ctx.model, ctx.runtime_strategy, str(e))
-
-
-def run_as_diff_test(ctx):
-    """Framework entry point. Returns DiffResult."""
-    from diff_framework.protocol import DiffResult
-    import time as _time
-
-    t0 = _time.monotonic()
-    try:
-        engine_plan, config, model_dir = build_trt_engine(
-            ctx.model, ctx.max_cache_length, ctx.verbose)
-
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_dir, trust_remote_code=ctx.trust_remote_code)
-
-        prompts = STANDARD_PROMPTS
-        worst_diff = 0.0
-        all_passed = True
-        details_lines = []
-
-        for label, prompt in prompts:
-            input_ids = tokenizer.encode(prompt)
-            trt_logits = run_trt(
-                engine_plan, config, input_ids,
-                ctx.max_new_tokens, ctx.max_cache_length)
-            hf_logits = run_hf(model_dir, input_ids, ctx.max_new_tokens,
-                               trust_remote_code=ctx.trust_remote_code)
-            max_diff, lines = compare_logits(trt_logits, hf_logits, ctx.atol)
-            worst_diff = max(worst_diff, max_diff)
-            passed = max_diff <= ctx.atol
-            if not passed:
-                all_passed = False
-            details_lines.append(
-                f"[{label}] max_diff={max_diff:.6f} "
-                f"{'PASS' if passed else 'FAIL'}")
-
-        return DiffResult(
-            test_name="logit_diff", model=ctx.model,
-            runtime_strategy=ctx.runtime_strategy,
-            passed=all_passed,
-            status="PASS" if all_passed else "FAIL",
-            message=f"max_abs_logit_diff={worst_diff:.6f} (atol={ctx.atol})",
-            metrics={"max_abs_diff": worst_diff, "atol": ctx.atol},
-            duration_s=_time.monotonic() - t0,
-            details="\n".join(details_lines))
-    except Exception as e:
-        return DiffResult.error(
-            "logit_diff", ctx.model, ctx.runtime_strategy, str(e))
 
 
 if __name__ == "__main__":

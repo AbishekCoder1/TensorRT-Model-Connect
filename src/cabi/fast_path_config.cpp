@@ -73,6 +73,16 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.conv_kernel = extract_json_int(config_text, "conv_kernel", 4);
     }
 
+    // Whisper/speech-to-text fields
+    if (cfg.runtime_strategy == "speech_to_text")
+    {
+        cfg.num_mel_bins = extract_json_int(config_text, "num_mel_bins", 80);
+        cfg.max_source_positions = extract_json_int(config_text, "max_source_positions", 1500);
+        cfg.max_target_positions = extract_json_int(config_text, "max_target_positions", 448);
+        cfg.encoder_layers = extract_json_int(config_text, "encoder_layers", cfg.num_layers);
+        cfg.decoder_layers = extract_json_int(config_text, "decoder_layers", cfg.num_layers);
+    }
+
     // Vision-Language fields
     if (cfg.runtime_strategy == "vision_language")
     {

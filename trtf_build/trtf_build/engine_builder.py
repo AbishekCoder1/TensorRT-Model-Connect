@@ -236,6 +236,12 @@ def build_bundle(
                     vl_cfg = get_vl_config(config)
                     if vl_cfg is not None:
                         cfg_dict.update(vl_cfg)
+                # Inject generic config overrides from plugin
+                get_overrides = getattr(plugin, 'get_bundle_config_overrides', None)
+                if get_overrides is not None:
+                    overrides = get_overrides(config)
+                    if overrides is not None:
+                        cfg_dict.update(overrides)
                 data = json.dumps(cfg_dict, indent=2).encode("utf-8")
             sections.append(BundleSection(filename, data))
 

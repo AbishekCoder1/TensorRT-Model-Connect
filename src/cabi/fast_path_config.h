@@ -22,6 +22,7 @@ struct FastPathModelConfig {
     // "decoder_kv_cache" (default): standard attention-based decoder with KV cache
     // "decoder_moe":  MoE decoder (same KV cache, routing in TRT graph)
     // "ssm_recurrent": Mamba/SSM (conv_state + ssm_state, no KV cache)
+    // "rwkv_recurrent": RWKV (5 recurrent state vectors per layer, no KV cache)
     // "vision_language": two-engine (vision encoder + text decoder)
     std::string runtime_strategy{"decoder_kv_cache"};
 
@@ -29,6 +30,13 @@ struct FastPathModelConfig {
     int32_t d_inner{0};      // intermediate_size / d_inner
     int32_t state_size{16};  // SSM state dimension
     int32_t conv_kernel{4};  // causal conv1d kernel size
+
+    // Whisper/speech-to-text fields (used when runtime_strategy == "speech_to_text")
+    int32_t num_mel_bins{80};
+    int32_t max_source_positions{1500};
+    int32_t max_target_positions{448};
+    int32_t encoder_layers{0};
+    int32_t decoder_layers{0};
 
     // Vision-Language fields (used when runtime_strategy == "vision_language")
     bool has_vision_engine{false};  // bundle contains vision_engine_plan

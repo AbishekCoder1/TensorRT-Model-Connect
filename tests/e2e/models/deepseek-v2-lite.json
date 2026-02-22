@@ -1,0 +1,14 @@
+{
+  "name": "deepseek-v2-lite",
+  "hf_id": "deepseek-ai/DeepSeek-V2-Lite",
+  "bundle": "deepseek-v2-lite.trtfb",
+  "family": "deepseek_v2",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 128,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 10,
+  "logit_atol": 1e-2,
+  "layer_atol": 0.1,
+  "trust_remote_code": false,
+  "skip": "Large model (15.7B params, 64 experts) - skip in default CI, run manually"
+}

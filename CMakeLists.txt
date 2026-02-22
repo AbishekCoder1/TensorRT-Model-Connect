@@ -72,6 +72,10 @@ add_library(trtf_core
   src/runtime/trt/mamba_step_state.cpp
   src/runtime/trt/mamba_decode_runtime.cpp
   src/runtime/trt/mamba_backend.cpp
+  src/runtime/trt/rwkv_step_state.cpp
+  src/runtime/trt/rwkv_decode_runtime.cpp
+  src/runtime/trt/rwkv_backend.cpp
+  src/runtime/trt/whisper_backend.cpp
   src/runtime/trt/vl_backend.cpp
   src/runtime/trt/image_preprocessor.cpp
   src/runtime/trt/vision_engine.cpp

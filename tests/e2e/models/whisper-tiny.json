@@ -1,0 +1,15 @@
+{
+  "name": "whisper-tiny",
+  "hf_id": "openai/whisper-tiny",
+  "bundle": "whisper-tiny.trtfb",
+  "family": "whisper",
+  "runtime_strategy": "speech_to_text",
+  "test_type": "transcription",
+  "max_cache_length": 64,
+  "prompt": "test",
+  "max_new_tokens": 10,
+  "logit_atol": 1e-2,
+  "layer_atol": 0.1,
+  "trust_remote_code": false,
+  "skip": "Whisper E2E requires audio input; use diff_logits for decoder validation"
+}
