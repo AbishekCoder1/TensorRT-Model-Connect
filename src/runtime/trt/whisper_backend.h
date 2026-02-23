@@ -15,6 +15,7 @@ namespace trtf {
 
 struct TranscriptionResult {
     std::string text;
+    std::vector<int32_t> output_ids;
     int32_t num_tokens{0};
 };
 
@@ -26,6 +27,7 @@ struct WhisperConfig {
     int32_t decoder_layers{0};
     int32_t decoder_attention_heads{0};
     int32_t decoder_start_token_id{50258};  // <|startoftranscript|>
+    int32_t language_token_id{50259};      // <|en|>
     int32_t translate_token_id{50358};
     int32_t transcribe_token_id{50359};
     int32_t notimestamps_token_id{50363};

@@ -37,7 +37,16 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         raw_heads = extract_json_int(config_text, "attention_heads", 0);
     if (raw_heads == 0)
         raw_heads = extract_json_int(config_text, "num_heads", 0);
+    if (raw_heads == 0)
+        raw_heads = extract_json_int(config_text, "decoder_attention_heads", 0);
     cfg.num_heads = std::max(raw_heads, 1);
+
+    // Whisper uses decoder_layers for layer count
+    if (raw_layers == 0)
+    {
+        int32_t dl = extract_json_int(config_text, "decoder_layers", 0);
+        if (dl > 0) cfg.num_layers = dl;
+    }
 
     cfg.num_kv_heads = std::max(extract_json_int(config_text, "num_key_value_heads", cfg.num_heads), 1);
     cfg.head_dim = extract_json_int(config_text, "head_dim", cfg.hidden_size / cfg.num_heads);
@@ -73,6 +82,18 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.conv_kernel = extract_json_int(config_text, "conv_kernel", 4);
     }
 
+    // Hybrid Mamba-Attention fields
+    if (cfg.runtime_strategy == "hybrid_mamba_attention")
+    {
+        cfg.num_mamba_layers = extract_json_int(config_text, "num_mamba_layers", 0);
+        cfg.num_attention_layers = extract_json_int(config_text, "num_attention_layers", 0);
+        cfg.d_inner = extract_json_int(config_text, "d_inner", cfg.hidden_size * 2);
+        cfg.mamba_d_state = extract_json_int(config_text, "mamba_d_state", 128);
+        cfg.mamba_d_conv = extract_json_int(config_text, "mamba_d_conv", 4);
+        cfg.mamba_nheads = extract_json_int(config_text, "mamba_nheads", 0);
+        cfg.layer_types = extract_json_string_array(config_text, "layer_types");
+    }
+
     // Whisper/speech-to-text fields
     if (cfg.runtime_strategy == "speech_to_text")
     {
@@ -106,6 +127,21 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.output_w = extract_json_int(config_text, "output_w", 128);
         cfg.seg_image_mean = extract_json_float_array(config_text, "image_mean");
         cfg.seg_image_std = extract_json_float_array(config_text, "image_std");
+    }
+
+    // SAM prompted segmentation fields
+    if (cfg.runtime_strategy == "prompted_segmentation")
+    {
+        cfg.input_image_h = extract_json_int(config_text, "input_image_h", 1024);
+        cfg.input_image_w = extract_json_int(config_text, "input_image_w", 1024);
+        cfg.sam_image_embedding_size = extract_json_int(config_text, "sam_image_embedding_size", 64);
+        cfg.sam_decoder_hidden_size = extract_json_int(config_text, "sam_decoder_hidden_size", 256);
+        cfg.sam_num_mask_outputs = extract_json_int(config_text, "sam_num_mask_outputs", 4);
+        cfg.sam_num_multimask_outputs = extract_json_int(config_text, "sam_num_multimask_outputs", 3);
+        cfg.seg_image_mean = extract_json_float_array(config_text, "image_mean");
+        cfg.seg_image_std = extract_json_float_array(config_text, "image_std");
+        cfg.sam_point_embed_fg = extract_json_float_array(config_text, "sam_point_embed_1");
+        cfg.sam_point_embed_bg = extract_json_float_array(config_text, "sam_point_embed_0");
     }
 
     // Audio/Bark fields
@@ -144,6 +180,102 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.fine_seq_length = extract_json_int(config_text, "fine_seq_length", 0);
     }
 
+    // Object detection fields
+    if (cfg.runtime_strategy == "object_detection")
+    {
+        cfg.det_num_classes = extract_json_int(config_text, "det_num_classes", 80);
+        cfg.det_input_h = extract_json_int(config_text, "det_input_h", 640);
+        cfg.det_input_w = extract_json_int(config_text, "det_input_w", 640);
+        cfg.det_conf_threshold = extract_json_float(config_text, "det_conf_threshold", 0.5F);
+        cfg.det_nms_threshold = extract_json_float(config_text, "det_nms_threshold", 0.45F);
+        cfg.det_image_mean = extract_json_float_array(config_text, "image_mean");
+        cfg.det_image_std = extract_json_float_array(config_text, "image_std");
+    }
+
+    // Neural operator fields
+    if (cfg.runtime_strategy == "neural_operator")
+    {
+        cfg.operator_type = extract_json_string(config_text, "operator_type", "deeponet");
+        cfg.num_sensors = extract_json_int(config_text, "num_sensors", 100);
+        cfg.spatial_dim = extract_json_int(config_text, "spatial_dim", 2);
+        cfg.output_dim = extract_json_int(config_text, "output_dim", 1);
+        // FNO-specific fields
+        cfg.fno_in_channels = extract_json_int(config_text, "in_channels", 3);
+        cfg.fno_out_channels = extract_json_int(config_text, "out_channels", 1);
+        cfg.fno_hidden_channels = extract_json_int(config_text, "hidden_channels", 64);
+        cfg.fno_grid_h = extract_json_int(config_text, "grid_h", 64);
+        cfg.fno_grid_w = extract_json_int(config_text, "grid_w", 64);
+    }
+
+    // Encoder-only fields
+    if (cfg.runtime_strategy == "encoder_only")
+    {
+        cfg.type_vocab_size = extract_json_int(config_text, "type_vocab_size", 2);
+    }
+
+    // Embedding fields
+    if (cfg.runtime_strategy == "embedding")
+    {
+        cfg.embedding_dim = extract_json_int(config_text, "embedding_dim", cfg.hidden_size);
+    }
+
+    // Reranking fields
+    if (cfg.runtime_strategy == "reranking")
+    {
+        cfg.is_reranker = extract_json_int(config_text, "is_reranker", 0) != 0;
+    }
+
+    // Speech-to-speech fields
+    if (cfg.runtime_strategy == "speech_to_speech")
+    {
+        cfg.speech_sample_rate = extract_json_int(config_text, "sample_rate", 24000);
+        cfg.speech_num_codebooks = extract_json_int(config_text, "num_codebooks", 8);
+        cfg.speech_codebook_size = extract_json_int(config_text, "codebook_size", 2048);
+        cfg.speech_frame_rate = extract_json_float(config_text, "frame_rate", 12.5F);
+        cfg.speech_depth_hidden_size = extract_json_int(config_text, "depth_hidden_size", cfg.hidden_size);
+        cfg.speech_depth_num_layers = extract_json_int(config_text, "depth_num_layers", 6);
+        cfg.speech_depth_num_heads = extract_json_int(config_text, "depth_num_attention_heads", cfg.num_heads);
+        cfg.speech_depth_num_kv_heads = extract_json_int(config_text, "depth_num_key_value_heads", cfg.speech_depth_num_heads);
+        // Reuse codebook fields for the C++ SpeechConfig
+        cfg.codec_n_codebooks = cfg.speech_num_codebooks;
+        cfg.codebook_size = cfg.speech_codebook_size;
+        cfg.audio_sample_rate = cfg.speech_sample_rate;
+        cfg.fine_num_layers = cfg.speech_depth_num_layers;
+        cfg.fine_hidden_size = cfg.speech_depth_hidden_size;
+        cfg.fine_num_heads = cfg.speech_depth_num_heads;
+    }
+
+    // Omni multimodal fields
+    if (cfg.runtime_strategy == "omni_multimodal")
+    {
+        cfg.omni_sample_rate = extract_json_int(config_text, "audio_sample_rate", 24000);
+        cfg.omni_num_experts = extract_json_int(config_text, "num_local_experts", 8);
+        cfg.omni_num_experts_per_tok = extract_json_int(config_text, "num_experts_per_tok", 2);
+
+        // Talker config
+        cfg.omni_talker_hidden_size = extract_json_int(config_text, "omni_talker_hidden_size", 0);
+        cfg.omni_talker_num_layers = extract_json_int(config_text, "omni_talker_num_layers", 0);
+        cfg.omni_talker_max_cache_length = extract_json_int(config_text, "omni_talker_max_cache_length", 1024);
+        cfg.omni_n_codebooks = extract_json_int(config_text, "omni_n_codebooks", 8);
+        cfg.omni_codebook_size = extract_json_int(config_text, "omni_codebook_size", 2048);
+
+        // Audio encoder config
+        cfg.omni_audio_embed_dim = extract_json_int(config_text, "omni_audio_embed_dim", 1280);
+        cfg.omni_audio_num_mel = extract_json_int(config_text, "omni_audio_num_mel", 128);
+        cfg.omni_audio_num_layers = extract_json_int(config_text, "omni_audio_num_layers", 0);
+        cfg.omni_audio_num_frames = extract_json_int(config_text, "omni_audio_num_frames", 1500);
+
+        // VL fields (Omni also supports vision)
+        cfg.has_vision_engine = extract_json_int(config_text, "has_vision_engine", 0) != 0;
+        cfg.embed_input = extract_json_int(config_text, "embed_input", 0) != 0;
+        cfg.image_token_id = extract_json_int(config_text, "image_token_id", -1);
+        cfg.vision_output_dim = extract_json_int(config_text, "vision_output_dim", 0);
+        cfg.fixed_image_size = extract_json_int(config_text, "fixed_image_size", 448);
+        cfg.num_image_pad_tokens = extract_json_int(config_text, "num_image_pad_tokens", 0);
+        cfg.vl_prompt_template = extract_json_string(config_text, "vl_prompt_template", "");
+        cfg.image_token_str = extract_json_string(config_text, "image_token_str", "");
+    }
+
     // Diffusion fields
     if (cfg.runtime_strategy == "diffusion")
     {
@@ -170,6 +302,18 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.patch_size = extract_json_int_array(config_text, "patch_size");
         cfg.vae_model_id = extract_json_string(config_text, "vae_model_id", "");
         cfg.diffusion_backend_type = extract_json_string(config_text, "diffusion_backend_type", "wan_3d");
+    }
+
+    // Embedding fields
+    if (cfg.runtime_strategy == "embedding")
+    {
+        cfg.embedding_dim = extract_json_int(config_text, "embedding_dim", cfg.hidden_size);
+    }
+
+    // Reranking fields
+    if (cfg.runtime_strategy == "reranking")
+    {
+        cfg.is_reranker = extract_json_int(config_text, "is_reranker", 0) != 0;
     }
 
     return cfg;

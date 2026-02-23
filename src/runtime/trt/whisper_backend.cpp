@@ -82,9 +82,10 @@ TranscriptionResult WhisperBackend::transcribe(
     std::cerr << "[whisper] Computing cross-attention K/V ..." << std::endl;
     compute_cross_kv();
 
-    // Initial decoder tokens: <|startoftranscript|> <|transcribe|> <|notimestamps|>
+    // Initial decoder tokens: <|startoftranscript|> <|en|> <|transcribe|> <|notimestamps|>
     std::vector<int32_t> initial_tokens;
     initial_tokens.push_back(mWhisperConfig.decoder_start_token_id);
+    initial_tokens.push_back(mWhisperConfig.language_token_id);
     initial_tokens.push_back(mWhisperConfig.transcribe_token_id);
     initial_tokens.push_back(mWhisperConfig.notimestamps_token_id);
 
@@ -92,7 +93,8 @@ TranscriptionResult WhisperBackend::transcribe(
     auto output_ids = run_decoder(initial_tokens, max_new_tokens);
 
     TranscriptionResult result;
-    result.num_tokens = static_cast<int32_t>(output_ids.size());
+    result.output_ids = std::move(output_ids);
+    result.num_tokens = static_cast<int32_t>(result.output_ids.size());
     return result;
 }
 

@@ -16,21 +16,36 @@
 #include "runtime/trt/image_preprocessor.h"
 #include "runtime/trt/diffusion_backend.h"
 #include "runtime/trt/wan_diffusion_backend.h"
+#include "runtime/trt/encoder_backend.h"
+#include "runtime/trt/embedding_backend.h"
+#include "runtime/trt/reranking_backend.h"
 #include "runtime/trt/segmentation_backend.h"
+#include "runtime/trt/detection_backend.h"
+#include "runtime/trt/sam_backend.h"
+#include "runtime/trt/neural_operator_backend.h"
+#include "runtime/trt/hybrid_backend.h"
 #include "runtime/trt/bark_backend.h"
+#include "runtime/trt/omni_backend.h"
+#include "runtime/trt/speech_backend.h"
 #include "runtime/trt/trt_common.h"
 
 #include "stb_image_write.h"
 
+#include "utils/data_dir.h"
+
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <utility>
+
+#include <unistd.h>
 
 #ifndef TRTF_VERSION_STRING
 #define TRTF_VERSION_STRING "0.1.0"
@@ -48,6 +63,67 @@ void set_last_error(const std::string& msg)
 void clear_last_error()
 {
     g_last_error.clear();
+}
+
+std::string shell_quote(const std::string& value)
+{
+    std::string out;
+    out.reserve(value.size() + 2);
+    out.push_back('\'');
+    for (char ch : value)
+    {
+        if (ch == '\'')
+        {
+            out += "'\"'\"'";
+        }
+        else
+        {
+            out.push_back(ch);
+        }
+    }
+    out.push_back('\'');
+    return out;
+}
+
+struct SubprocessResult {
+    int exit_code{1};
+    std::string output;
+};
+
+SubprocessResult run_subprocess(const std::string& command)
+{
+    std::string cmd = command + " 2>&1";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (pipe == nullptr)
+    {
+        return SubprocessResult{1, "popen failed"};
+    }
+
+    std::array<char, 512> buffer{};
+    std::string output;
+    while (true)
+    {
+        const std::size_t n = std::fread(buffer.data(), 1, buffer.size(), pipe);
+        if (n > 0)
+        {
+            output.append(buffer.data(), n);
+        }
+        if (n < buffer.size())
+        {
+            if (std::feof(pipe) != 0 || std::ferror(pipe) != 0)
+            {
+                break;
+            }
+        }
+    }
+
+    const int status = pclose(pipe);
+    int exit_code = 1;
+    if (WIFEXITED(status))
+    {
+        exit_code = WEXITSTATUS(status);
+    }
+    return SubprocessResult{exit_code, output};
 }
 
 class PipelineImpl final : public trtf::IPipeline {
@@ -84,6 +160,25 @@ public:
         if (max_new_tokens > 0)
         {
             config.max_new_tokens = max_new_tokens;
+        }
+
+#if TRTF_HAS_TRT
+        // Omni backend: use Thinker decoder for text generation
+        if (mOmniBackend != nullptr && mTokenizer)
+        {
+            auto input_ids = mTokenizer->encode(prompt);
+            const int32_t max_tok = config.max_new_tokens > 0
+                ? static_cast<int32_t>(config.max_new_tokens) : 128;
+            auto output_ids = mOmniBackend->generate_text(input_ids, max_tok);
+            mLastOutput = mTokenizer->decode(output_ids);
+            return mLastOutput.c_str();
+        }
+#endif
+
+        if (!mBackend || !mTokenizer)
+        {
+            mLastOutput = "";
+            return mLastOutput.c_str();
         }
 
         auto input_ids = mTokenizer->encode(prompt);
@@ -293,7 +388,7 @@ public:
     bool supports_audio() const override
     {
 #if TRTF_HAS_TRT
-        return mBarkBackend != nullptr;
+        return mBarkBackend != nullptr || mOmniBackend != nullptr;
 #else
         return false;
 #endif
@@ -303,6 +398,38 @@ public:
                            int32_t max_tokens) override
     {
 #if TRTF_HAS_TRT
+        // Try Omni backend first
+        if (mOmniBackend != nullptr && prompt != nullptr && output_path != nullptr)
+        {
+            try
+            {
+                std::vector<int32_t> input_ids;
+                if (mTokenizer)
+                {
+                    input_ids = mTokenizer->encode(prompt);
+                }
+
+                auto result = mOmniBackend->generate_audio(
+                    input_ids, max_tokens > 0 ? max_tokens : 768);
+
+                if (result.num_samples <= 0)
+                    return -1;
+
+                trtf::write_wav(std::string(output_path),
+                    result.waveform.data(), result.num_samples, result.sample_rate);
+
+                std::cerr << "[trtf] Omni audio saved: " << output_path
+                          << " (" << result.num_samples << " samples @ "
+                          << result.sample_rate << " Hz)" << std::endl;
+                return result.num_samples;
+            }
+            catch (const std::exception& e)
+            {
+                std::cerr << "[trtf] Omni audio error: " << e.what() << std::endl;
+                return -1;
+            }
+        }
+
         if (mBarkBackend == nullptr || prompt == nullptr || output_path == nullptr)
             return -1;
 
@@ -339,6 +466,99 @@ public:
 #endif
     }
 
+    bool supports_transcription() const override
+    {
+#if TRTF_HAS_TRT
+        return mWhisperBackend != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    const char* transcribe(const char* audio_path, int32_t max_new_tokens) override
+    {
+#if TRTF_HAS_TRT
+        if (mWhisperBackend == nullptr || audio_path == nullptr)
+            return nullptr;
+
+        try
+        {
+            char mel_temp[] = "/tmp/trtf_mel_XXXXXX";
+            const int fd = mkstemp(mel_temp);
+            if (fd < 0)
+            {
+                std::cerr << "[trtf] Failed to create temp file for mel" << std::endl;
+                return nullptr;
+            }
+            close(fd);
+
+            const std::string script = trtf::script_path("hf_mel_extract.py");
+            const std::string python = mHfPython.empty() ? "python3" : mHfPython;
+            const std::string cmd = shell_quote(python) + " " + shell_quote(script)
+                + " --audio " + shell_quote(std::string(audio_path))
+                + " --output " + shell_quote(std::string(mel_temp));
+
+            const auto sub = run_subprocess(cmd);
+            if (sub.exit_code != 0)
+            {
+                std::cerr << "[trtf] Mel extraction failed: " << sub.output << std::endl;
+                std::error_code ec;
+                std::filesystem::remove(mel_temp, ec);
+                return nullptr;
+            }
+
+            std::ifstream in(mel_temp, std::ios::binary);
+            if (!in)
+            {
+                std::cerr << "[trtf] Failed to read mel temp file" << std::endl;
+                std::error_code ec;
+                std::filesystem::remove(mel_temp, ec);
+                return nullptr;
+            }
+
+            int32_t shape[2] = {0, 0};
+            in.read(reinterpret_cast<char*>(shape), sizeof(shape));
+            if (!in || shape[0] <= 0 || shape[1] <= 0)
+            {
+                std::cerr << "[trtf] Invalid mel shape" << std::endl;
+                std::error_code ec;
+                std::filesystem::remove(mel_temp, ec);
+                return nullptr;
+            }
+
+            const auto nf = static_cast<std::size_t>(shape[0]) * static_cast<std::size_t>(shape[1]);
+            std::vector<float> mel_data(nf);
+            in.read(reinterpret_cast<char*>(mel_data.data()),
+                static_cast<std::streamsize>(nf * sizeof(float)));
+            in.close();
+            { std::error_code ec; std::filesystem::remove(mel_temp, ec); }
+
+            std::cerr << "[trtf] Mel spectrogram: " << shape[0] << " bins x "
+                      << shape[1] << " frames" << std::endl;
+
+            auto tr = mWhisperBackend->transcribe(
+                mel_data.data(), shape[0], shape[1],
+                max_new_tokens > 0 ? max_new_tokens : 224);
+
+            if (mTokenizer && !tr.output_ids.empty())
+                mLastOutput = mTokenizer->decode(tr.output_ids);
+            else
+                mLastOutput = tr.text;
+
+            std::cerr << "[trtf] Transcribed " << tr.num_tokens << " tokens" << std::endl;
+            return mLastOutput.c_str();
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] Transcription error: " << e.what() << std::endl;
+            return nullptr;
+        }
+#else
+        (void) audio_path; (void) max_new_tokens;
+        return nullptr;
+#endif
+    }
+
     void set_bundle_temp_dir(std::string dir) { mBundleTempDir = std::move(dir); }
 
 #if TRTF_HAS_TRT
@@ -350,7 +570,383 @@ public:
     {
         mBarkBackend = std::move(backend);
     }
+    void set_omni_backend(std::unique_ptr<trtf::OmniBackend> backend)
+    {
+        mOmniBackend = std::move(backend);
+    }
+    void set_encoder_backend(std::unique_ptr<trtf::EncoderBackend> backend)
+    {
+        mEncoderBackend = std::move(backend);
+    }
+    void set_neural_operator_backend(std::unique_ptr<trtf::NeuralOperatorBackend> backend)
+    {
+        mNeuralOpBackend = std::move(backend);
+    }
+    void set_detection_backend(std::unique_ptr<trtf::DetectionBackend> backend)
+    {
+        mDetBackend = std::move(backend);
+    }
+    void set_speech_backend(std::unique_ptr<trtf::SpeechToSpeechBackend> backend)
+    {
+        mSpeechBackend = std::move(backend);
+    }
+    void set_embedding_backend(std::unique_ptr<trtf::EmbeddingBackend> backend)
+    {
+        mEmbeddingBackend = std::move(backend);
+    }
+    void set_reranking_backend(std::unique_ptr<trtf::RerankingBackend> backend)
+    {
+        mRerankBackend = std::move(backend);
+    }
+    void set_whisper_backend(std::unique_ptr<trtf::WhisperBackend> backend)
+    {
+        mWhisperBackend = std::move(backend);
+    }
+    void set_sam_backend(std::unique_ptr<trtf::SamBackend> backend)
+    {
+        mSamBackend = std::move(backend);
+    }
 #endif
+
+    void set_hf_python(std::string path) { mHfPython = std::move(path); }
+
+    bool supports_embedding() const override
+    {
+#if TRTF_HAS_TRT
+        return mEmbeddingBackend != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    const float* embed(const char* text, int32_t* out_dim) override
+    {
+#if TRTF_HAS_TRT
+        if (mEmbeddingBackend == nullptr || text == nullptr) return nullptr;
+        try {
+            std::vector<int32_t> ids;
+            if (mTokenizer) ids = mTokenizer->encode(text);
+            mLastEmbResult = mEmbeddingBackend->embed(ids);
+            if (out_dim) *out_dim = mLastEmbResult.embedding_dim;
+            return mLastEmbResult.embedding.data();
+        } catch (const std::exception& e) {
+            std::cerr << "[trtf] Embed error: " << e.what() << std::endl;
+            return nullptr;
+        }
+#else
+        (void) text; (void) out_dim; return nullptr;
+#endif
+    }
+
+    bool supports_reranking() const override
+    {
+#if TRTF_HAS_TRT
+        return mRerankBackend != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    float rerank(const char* query, const char* document) override
+    {
+#if TRTF_HAS_TRT
+        if (mRerankBackend == nullptr || !query || !document) return 0.0F;
+        try {
+            std::string combined = std::string(query) + " " + std::string(document);
+            std::vector<int32_t> ids;
+            if (mTokenizer) ids = mTokenizer->encode(combined.c_str());
+            return mRerankBackend->rerank(ids).score;
+        } catch (const std::exception& e) {
+            std::cerr << "[trtf] Rerank error: " << e.what() << std::endl;
+            return 0.0F;
+        }
+#else
+        (void) query; (void) document; return 0.0F;
+#endif
+    }
+
+    bool supports_encoding() const override
+    {
+#if TRTF_HAS_TRT
+        return mEncoderBackend != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    const float* encode(const char* text, int32_t* out_seq_len,
+                        int32_t* out_hidden_size) override
+    {
+#if TRTF_HAS_TRT
+        if (mEncoderBackend == nullptr || text == nullptr)
+            return nullptr;
+
+        try
+        {
+            std::vector<int32_t> input_ids;
+            if (mTokenizer)
+            {
+                input_ids = mTokenizer->encode(text);
+            }
+
+            mLastEncoderResult = mEncoderBackend->encode(input_ids);
+
+            if (out_seq_len != nullptr)
+                *out_seq_len = mLastEncoderResult.seq_length;
+            if (out_hidden_size != nullptr)
+                *out_hidden_size = mLastEncoderResult.hidden_size;
+
+            return mLastEncoderResult.hidden_states.data();
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] Encode error: " << e.what() << std::endl;
+            return nullptr;
+        }
+#else
+        (void) text; (void) out_seq_len; (void) out_hidden_size;
+        return nullptr;
+#endif
+    }
+
+    bool supports_solve() const override
+    {
+#if TRTF_HAS_TRT
+        return mNeuralOpBackend != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    const float* solve(const float* branch_input, int32_t branch_len,
+                       const float* trunk_input, int32_t trunk_len,
+                       int32_t* out_dim) override
+    {
+#if TRTF_HAS_TRT
+        if (mNeuralOpBackend == nullptr || branch_input == nullptr || trunk_input == nullptr)
+            return nullptr;
+
+        try
+        {
+            mLastSolveResult = mNeuralOpBackend->solve(
+                branch_input, branch_len, trunk_input, trunk_len);
+
+            if (out_dim != nullptr)
+                *out_dim = mLastSolveResult.output_dim;
+
+            return mLastSolveResult.output.data();
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] Solve error: " << e.what() << std::endl;
+            return nullptr;
+        }
+#else
+        (void) branch_input; (void) branch_len;
+        (void) trunk_input; (void) trunk_len; (void) out_dim;
+        return nullptr;
+#endif
+    }
+
+    const float* solve_field(const float* field_input, int32_t input_size,
+                             int32_t* out_channels, int32_t* out_h,
+                             int32_t* out_w) override
+    {
+#if TRTF_HAS_TRT
+        if (mNeuralOpBackend == nullptr || field_input == nullptr)
+            return nullptr;
+
+        try
+        {
+            mLastSolveResult = mNeuralOpBackend->solve_field(
+                field_input, input_size);
+
+            if (out_channels != nullptr)
+                *out_channels = mLastSolveResult.out_channels;
+            if (out_h != nullptr)
+                *out_h = mLastSolveResult.height;
+            if (out_w != nullptr)
+                *out_w = mLastSolveResult.width;
+
+            return mLastSolveResult.output.data();
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] Solve field error: " << e.what() << std::endl;
+            return nullptr;
+        }
+#else
+        (void) field_input; (void) input_size;
+        (void) out_channels; (void) out_h; (void) out_w;
+        return nullptr;
+#endif
+    }
+
+    bool supports_detection() const override
+    {
+#if TRTF_HAS_TRT
+        return mDetBackend != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    int32_t detect(const char* image_path, const char* output_path,
+                   float conf_threshold) override
+    {
+#if TRTF_HAS_TRT
+        if (mDetBackend == nullptr || image_path == nullptr || output_path == nullptr)
+            return -1;
+
+        try
+        {
+            (void) conf_threshold;
+            auto result = mDetBackend->detect_image(std::string(image_path));
+
+            std::string json = "[\n";
+            for (std::size_t i = 0; i < result.detections.size(); ++i)
+            {
+                const auto& d = result.detections[i];
+                if (i > 0) json += ",\n";
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    "  {\"class_id\": %d, \"confidence\": %.4f, "
+                    "\"x1\": %.1f, \"y1\": %.1f, \"x2\": %.1f, \"y2\": %.1f}",
+                    d.class_id, d.confidence, d.x1, d.y1, d.x2, d.y2);
+                json += buf;
+            }
+            json += "\n]\n";
+
+            std::FILE* fp = std::fopen(output_path, "w");
+            if (fp == nullptr)
+            {
+                std::cerr << "[trtf] Failed to open output: " << output_path << std::endl;
+                return -1;
+            }
+            std::fwrite(json.data(), 1, json.size(), fp);
+            std::fclose(fp);
+
+            std::cerr << "[trtf] Detection saved: " << output_path
+                      << " (" << result.detections.size() << " objects)" << std::endl;
+            return static_cast<int32_t>(result.detections.size());
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] Detection error: " << e.what() << std::endl;
+            return -1;
+        }
+#else
+        (void) image_path; (void) output_path; (void) conf_threshold;
+        return -1;
+#endif
+    }
+
+    bool supports_speech() const override
+    {
+#if TRTF_HAS_TRT
+        return mSpeechBackend != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    int32_t speak(const char* audio_in, const char* audio_out,
+                  int32_t max_output_frames) override
+    {
+#if TRTF_HAS_TRT
+        if (!mSpeechBackend || !audio_in || !audio_out) return -1;
+        try {
+            std::ifstream infile(audio_in, std::ios::binary);
+            if (!infile) return -1;
+            infile.seekg(44);
+            std::vector<char> raw((std::istreambuf_iterator<char>(infile)),
+                                   std::istreambuf_iterator<char>());
+            auto ns = static_cast<int32_t>(raw.size() / sizeof(float));
+            if (ns <= 0) return -1;
+            auto r = mSpeechBackend->process_audio(
+                reinterpret_cast<const float*>(raw.data()), ns,
+                max_output_frames > 0 ? max_output_frames : 375);
+            if (r.num_samples <= 0) return -1;
+            trtf::write_wav(std::string(audio_out),
+                r.waveform.data(), r.num_samples, r.sample_rate);
+            return r.num_samples;
+        } catch (const std::exception& e) {
+            std::cerr << "[trtf] Speech error: " << e.what() << std::endl;
+            return -1;
+        }
+#else
+        (void) audio_in; (void) audio_out; (void) max_output_frames;
+        return -1;
+#endif
+    }
+
+    bool supports_prompted_segmentation() const override
+    {
+#if TRTF_HAS_TRT
+        return mSamBackend != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    int32_t segment_sam(const char* image_path, const char* output_dir,
+                        float point_x, float point_y, bool is_foreground) override
+    {
+#if TRTF_HAS_TRT
+        if (mSamBackend == nullptr || image_path == nullptr || output_dir == nullptr)
+            return -1;
+
+        try
+        {
+            // Encode image (cached on GPU)
+            if (!mSamBackend->encode_image(std::string(image_path)))
+            {
+                std::cerr << "[trtf] SAM: Failed to encode image" << std::endl;
+                return -1;
+            }
+
+            // Segment with point prompt
+            auto result = mSamBackend->segment_point(point_x, point_y, is_foreground);
+
+            // Write each mask as a separate PNG
+            std::filesystem::create_directories(output_dir);
+            for (int32_t m = 0; m < result.num_masks; ++m)
+            {
+                const auto offset = static_cast<std::size_t>(m) *
+                    static_cast<std::size_t>(result.mask_height) * result.mask_width;
+                std::vector<uint8_t> pixels(
+                    static_cast<std::size_t>(result.mask_height) * result.mask_width);
+                for (int32_t i = 0; i < result.mask_height * result.mask_width; ++i)
+                {
+                    // Sigmoid threshold at 0 -> binary mask
+                    pixels[i] = result.masks[offset + i] > 0.0F
+                        ? static_cast<uint8_t>(255) : static_cast<uint8_t>(0);
+                }
+
+                char fname[64];
+                std::snprintf(fname, sizeof(fname), "/mask_%d_iou_%.4f.png",
+                              m, result.iou_scores[m]);
+                const std::string path = std::string(output_dir) + fname;
+
+                stbi_write_png(path.c_str(), result.mask_width, result.mask_height,
+                               1, pixels.data(), result.mask_width);
+            }
+
+            std::cerr << "[trtf] SAM: " << result.num_masks << " masks saved to "
+                      << output_dir << std::endl;
+            return result.num_masks;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] SAM error: " << e.what() << std::endl;
+            return -1;
+        }
+#else
+        (void) image_path; (void) output_dir;
+        (void) point_x; (void) point_y; (void) is_foreground;
+        return -1;
+#endif
+    }
 
 private:
     std::string mModelId;
@@ -363,7 +959,20 @@ private:
 #if TRTF_HAS_TRT
     std::unique_ptr<trtf::SegmentationBackend> mSegBackend;
     std::unique_ptr<trtf::BarkBackend> mBarkBackend;
+    std::unique_ptr<trtf::OmniBackend> mOmniBackend;
+    std::unique_ptr<trtf::EncoderBackend> mEncoderBackend;
+    trtf::EncoderResult mLastEncoderResult;
+    std::unique_ptr<trtf::NeuralOperatorBackend> mNeuralOpBackend;
+    trtf::NeuralOperatorResult mLastSolveResult;
+    std::unique_ptr<trtf::SpeechToSpeechBackend> mSpeechBackend;
+    std::unique_ptr<trtf::DetectionBackend> mDetBackend;
+    std::unique_ptr<trtf::EmbeddingBackend> mEmbeddingBackend;
+    trtf::EmbeddingResult mLastEmbResult;
+    std::unique_ptr<trtf::RerankingBackend> mRerankBackend;
+    std::unique_ptr<trtf::SamBackend> mSamBackend;
+    std::unique_ptr<trtf::WhisperBackend> mWhisperBackend;
 #endif
+    std::string mHfPython;
 };
 
 #if TRTF_HAS_TRT
@@ -533,7 +1142,14 @@ PipelineImpl* create_whisper_pipeline(
     }
 
     std::cerr << "[trtf] Runtime ready (backend=trt_whisper, strategy=speech_to_text)" << std::endl;
-    return make_pipeline(model_id, std::move(tok), std::move(backend), "trt_whisper");
+
+    auto* pipeline = new PipelineImpl(
+        model_id, std::move(tok.tokenizer), nullptr, "trt_whisper", trtf::GenerationConfig{});
+    if (!tok.temp_dir.empty())
+        pipeline->set_bundle_temp_dir(std::move(tok.temp_dir));
+    pipeline->set_whisper_backend(std::move(backend));
+    pipeline->set_hf_python(hf_python);
+    return pipeline;
 }
 
 PipelineImpl* create_vl_pipeline(
@@ -633,6 +1249,106 @@ PipelineImpl* create_segmentation_pipeline(
     pipeline->set_seg_backend(std::move(seg_backend));
 
     std::cerr << "[trtf] Runtime ready (backend=trt_segmentation, strategy=segmentation)" << std::endl;
+    return pipeline;
+}
+
+PipelineImpl* create_detection_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const std::string& model_id,
+    const std::string& bundle_path)
+{
+    auto det_backend = trtf::CreateDetectionBackend(
+        std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+    if (!det_backend || !det_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create detection backend from bundle engine");
+    }
+
+    // Detection pipelines don't need a tokenizer or generation backend
+    auto* pipeline = new PipelineImpl(
+        model_id, nullptr, nullptr, "trt_detection", trtf::GenerationConfig{});
+    pipeline->set_detection_backend(std::move(det_backend));
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_detection, strategy=object_detection)" << std::endl;
+    return pipeline;
+}
+
+PipelineImpl* create_sam_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    trtf::TrtUniquePtr<nvinfer1::IRuntime>& runtime_ptr,
+    const std::string& model_id,
+    const std::string& bundle_path)
+{
+    // Primary engine is the ViT image encoder
+    // Deserialize mask decoder engine from vision_engine_plan section
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> decoder_engine;
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> decoder_ctx;
+    if (sections.vision_plan_data != nullptr && !sections.vision_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing SAM mask decoder TRT engine ("
+                  << sections.vision_plan_data->size() / (1024 * 1024) << " MB) ..." << std::endl;
+
+        decoder_engine = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.vision_plan_data->data(), sections.vision_plan_data->size()));
+        if (!decoder_engine)
+        {
+            throw std::runtime_error("Failed to deserialize SAM mask decoder engine: " + bundle_path);
+        }
+        decoder_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+            decoder_engine->createExecutionContext());
+        if (!decoder_ctx)
+        {
+            throw std::runtime_error("Failed to create SAM mask decoder execution context");
+        }
+    }
+    else
+    {
+        throw std::runtime_error("SAM bundle missing vision_engine_plan (mask decoder): " + bundle_path);
+    }
+
+    auto sam_backend = trtf::CreateSamBackend(
+        std::move(trt_engine), std::move(exec_ctx),
+        std::move(decoder_engine), std::move(decoder_ctx), fp_cfg);
+    if (!sam_backend || !sam_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create SAM backend from bundle engines");
+    }
+
+    // SAM pipelines don't need a tokenizer or generation backend
+    auto* pipeline = new PipelineImpl(
+        model_id, nullptr, nullptr, "trt_sam", trtf::GenerationConfig{});
+    pipeline->set_sam_backend(std::move(sam_backend));
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_sam, strategy=prompted_segmentation)" << std::endl;
+    return pipeline;
+}
+
+PipelineImpl* create_neural_operator_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const std::string& model_id,
+    const std::string& bundle_path)
+{
+    auto no_backend = trtf::CreateNeuralOperatorBackend(
+        std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+    if (!no_backend || !no_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create neural operator backend from bundle engine");
+    }
+
+    // Neural operator pipelines don't need a tokenizer or generation backend
+    auto* pipeline = new PipelineImpl(
+        model_id, nullptr, nullptr, "trt_neural_operator", trtf::GenerationConfig{});
+    pipeline->set_neural_operator_backend(std::move(no_backend));
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_neural_operator, strategy=neural_operator)" << std::endl;
     return pipeline;
 }
 
@@ -844,6 +1560,290 @@ PipelineImpl* create_bark_pipeline(
     return pipeline;
 }
 
+PipelineImpl* create_encoder_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& /* bundle_path */)
+{
+    auto enc_backend = trtf::CreateEncoderBackend(
+        std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+    if (!enc_backend || !enc_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create encoder backend from bundle engine");
+    }
+
+    // Tokenizer (optional — BERT typically uses one)
+    trtf::TokenizerResult tok = {nullptr, ""};
+    try
+    {
+        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[trtf] Warning: no tokenizer for encoder (" << e.what() << ")" << std::endl;
+    }
+
+    auto* pipeline = new PipelineImpl(
+        model_id, std::move(tok.tokenizer), nullptr, "trt_encoder", trtf::GenerationConfig{});
+    if (!tok.temp_dir.empty())
+        pipeline->set_bundle_temp_dir(std::move(tok.temp_dir));
+    pipeline->set_encoder_backend(std::move(enc_backend));
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_encoder, strategy=encoder_only)" << std::endl;
+    return pipeline;
+}
+
+PipelineImpl* create_embedding_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& /* bundle_path */)
+{
+    auto emb_backend = trtf::CreateEmbeddingBackend(
+        std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+    if (!emb_backend || !emb_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create embedding backend from bundle engine");
+    }
+
+    trtf::TokenizerResult tok = {nullptr, ""};
+    try
+    {
+        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[trtf] Warning: no tokenizer for embedding (" << e.what() << ")" << std::endl;
+    }
+
+    auto* pipeline = new PipelineImpl(
+        model_id, std::move(tok.tokenizer), nullptr, "trt_embedding", trtf::GenerationConfig{});
+    if (!tok.temp_dir.empty())
+        pipeline->set_bundle_temp_dir(std::move(tok.temp_dir));
+    pipeline->set_embedding_backend(std::move(emb_backend));
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_embedding, strategy=embedding)" << std::endl;
+    return pipeline;
+}
+
+PipelineImpl* create_reranking_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& /* bundle_path */)
+{
+    auto rerank_backend = trtf::CreateRerankingBackend(
+        std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+    if (!rerank_backend || !rerank_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create reranking backend from bundle engine");
+    }
+
+    trtf::TokenizerResult tok = {nullptr, ""};
+    try
+    {
+        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[trtf] Warning: no tokenizer for reranking (" << e.what() << ")" << std::endl;
+    }
+
+    auto* pipeline = new PipelineImpl(
+        model_id, std::move(tok.tokenizer), nullptr, "trt_reranking", trtf::GenerationConfig{});
+    if (!tok.temp_dir.empty())
+        pipeline->set_bundle_temp_dir(std::move(tok.temp_dir));
+    pipeline->set_reranking_backend(std::move(rerank_backend));
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_reranking, strategy=reranking)" << std::endl;
+    return pipeline;
+}
+
+PipelineImpl* create_omni_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    trtf::TrtUniquePtr<nvinfer1::IRuntime>& runtime_ptr,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& bundle_path)
+{
+    // Build Thinker decoder engine (primary engine = MoE text decoder)
+    auto thinker_engine = trtf::make_decoder_engine(
+        std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+    if (!trtf::has_all_required_tensors(*thinker_engine))
+    {
+        throw std::runtime_error("Bundle engine missing required Thinker tensors: " + bundle_path);
+    }
+
+    // Create OmniBackend from Thinker engine + config
+    auto omni_backend = trtf::CreateOmniBackend(std::move(thinker_engine), fp_cfg);
+    if (!omni_backend || !omni_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create Omni backend from bundle engine");
+    }
+
+    // Deserialize optional audio encoder engine
+    if (sections.audio_encoder_plan_data != nullptr && !sections.audio_encoder_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing Omni audio encoder TRT engine ("
+                  << sections.audio_encoder_plan_data->size() / (1024 * 1024)
+                  << " MB) ..." << std::endl;
+
+        auto audio_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.audio_encoder_plan_data->data(),
+                sections.audio_encoder_plan_data->size()));
+        if (audio_trt)
+        {
+            auto audio_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                audio_trt->createExecutionContext());
+            omni_backend->set_audio_encoder(std::move(audio_trt), std::move(audio_ctx));
+        }
+    }
+
+    // Deserialize optional Talker decoder engine
+    if (sections.talker_engine_plan_data != nullptr && !sections.talker_engine_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing Omni Talker TRT engine ("
+                  << sections.talker_engine_plan_data->size() / (1024 * 1024)
+                  << " MB) ..." << std::endl;
+
+        auto talker_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.talker_engine_plan_data->data(),
+                sections.talker_engine_plan_data->size()));
+        if (talker_trt)
+        {
+            auto talker_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                talker_trt->createExecutionContext());
+
+            // Build Talker decoder config from omni config
+            trtf::FastPathModelConfig talker_cfg;
+            talker_cfg.hidden_size = fp_cfg.omni_talker_hidden_size;
+            talker_cfg.num_layers = fp_cfg.omni_talker_num_layers;
+            talker_cfg.num_heads = std::max(fp_cfg.omni_talker_hidden_size / 64, 1);
+            talker_cfg.num_kv_heads = talker_cfg.num_heads;
+            talker_cfg.head_dim = talker_cfg.hidden_size / std::max(talker_cfg.num_heads, 1);
+            talker_cfg.attention_size = talker_cfg.num_heads * talker_cfg.head_dim;
+            talker_cfg.max_cache_length = fp_cfg.omni_talker_max_cache_length;
+            talker_cfg.vocab_size = fp_cfg.omni_codebook_size * fp_cfg.omni_n_codebooks;
+
+            auto talker_engine = trtf::make_decoder_engine(
+                std::move(talker_trt), std::move(talker_ctx), talker_cfg);
+            omni_backend->set_talker_engine(std::move(talker_engine));
+        }
+    }
+
+    // Deserialize optional Code2Wav engine
+    if (sections.code2wav_engine_plan_data != nullptr && !sections.code2wav_engine_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing Omni Code2Wav TRT engine ("
+                  << sections.code2wav_engine_plan_data->size() / (1024 * 1024)
+                  << " MB) ..." << std::endl;
+
+        auto code2wav_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.code2wav_engine_plan_data->data(),
+                sections.code2wav_engine_plan_data->size()));
+        if (code2wav_trt)
+        {
+            auto code2wav_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                code2wav_trt->createExecutionContext());
+            omni_backend->set_code2wav_engine(std::move(code2wav_trt), std::move(code2wav_ctx));
+        }
+    }
+
+    // Tokenizer
+    trtf::TokenizerResult tok = {nullptr, ""};
+    try
+    {
+        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[trtf] Warning: no tokenizer for Omni (" << e.what() << ")" << std::endl;
+    }
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_omni, strategy=omni_multimodal)" << std::endl;
+
+    auto* pipeline = new PipelineImpl(
+        model_id, std::move(tok.tokenizer), nullptr, "trt_omni", trtf::GenerationConfig{});
+    if (!tok.temp_dir.empty())
+        pipeline->set_bundle_temp_dir(std::move(tok.temp_dir));
+    pipeline->set_omni_backend(std::move(omni_backend));
+    return pipeline;
+}
+
+PipelineImpl* create_hybrid_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& bundle_path)
+{
+    auto hybrid_engine = std::make_unique<trtf::HybridStepEngine>();
+    hybrid_engine->engine = std::move(trt_engine);
+    hybrid_engine->context = std::move(exec_ctx);
+    hybrid_engine->vocab_size = fp_cfg.vocab_size;
+    hybrid_engine->hidden_size = fp_cfg.hidden_size;
+    hybrid_engine->attention_size = fp_cfg.attention_size;
+    hybrid_engine->max_cache_length = fp_cfg.max_cache_length;
+    hybrid_engine->d_inner = fp_cfg.d_inner;
+    hybrid_engine->d_state = fp_cfg.mamba_d_state;
+    hybrid_engine->d_conv = fp_cfg.mamba_d_conv;
+    hybrid_engine->nheads = fp_cfg.mamba_nheads;
+    hybrid_engine->num_mamba_layers = fp_cfg.num_mamba_layers;
+    hybrid_engine->num_attention_layers = fp_cfg.num_attention_layers;
+    hybrid_engine->layer_types = fp_cfg.layer_types;
+    hybrid_engine->id_bos = fp_cfg.id_bos;
+    hybrid_engine->id_eos = fp_cfg.id_eos;
+
+    for (int32_t i = 0; i < fp_cfg.num_mamba_layers; ++i)
+    {
+        hybrid_engine->conv_state_input_names.push_back(trtf::layer_tensor_name("conv_state", i));
+        hybrid_engine->ssm_state_input_names.push_back(trtf::layer_tensor_name("ssm_state", i));
+        hybrid_engine->present_conv_output_names.push_back(trtf::layer_tensor_name("present_conv", i));
+        hybrid_engine->present_ssm_output_names.push_back(trtf::layer_tensor_name("present_ssm", i));
+    }
+
+    for (int32_t i = 0; i < fp_cfg.num_attention_layers; ++i)
+    {
+        hybrid_engine->cache_k_input_names.push_back(trtf::layer_tensor_name("cache_k", i));
+        hybrid_engine->cache_v_input_names.push_back(trtf::layer_tensor_name("cache_v", i));
+        hybrid_engine->present_k_output_names.push_back(trtf::layer_tensor_name("present_k", i));
+        hybrid_engine->present_v_output_names.push_back(trtf::layer_tensor_name("present_v", i));
+    }
+
+    if (!trtf::has_all_required_hybrid_tensors(*hybrid_engine))
+    {
+        throw std::runtime_error("Bundle engine missing required hybrid tensors: " + bundle_path);
+    }
+
+    auto tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    auto backend = trtf::CreateHybridBackendFromEngine(std::move(hybrid_engine));
+    if (!backend || !backend->is_available())
+    {
+        throw std::runtime_error("Failed to create hybrid TRT backend from bundle engine");
+    }
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_hybrid, strategy=hybrid_mamba_attention)" << std::endl;
+    return make_pipeline(model_id, std::move(tok), std::move(backend), "trt_hybrid");
+}
+
 PipelineImpl* create_decoder_pipeline(
     trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
     trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
@@ -987,6 +1987,126 @@ PipelineImpl* create_diffusion_pipeline(
     return pipeline;
 }
 
+PipelineImpl* create_speech_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    trtf::TrtUniquePtr<nvinfer1::IRuntime>& runtime_ptr,
+    const std::string& model_id,
+    const std::string& /* hf_python */,
+    const std::string& bundle_path)
+{
+    // Build temporal decoder engine (primary engine, standard KV cache decoder)
+    auto temporal_engine = trtf::make_decoder_engine(
+        std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+    if (!trtf::has_all_required_tensors(*temporal_engine))
+    {
+        throw std::runtime_error(
+            "Bundle engine missing required temporal tensors: " + bundle_path);
+    }
+
+    // Create SpeechToSpeechBackend from temporal engine + config
+    auto speech_backend = trtf::CreateSpeechBackend(
+        std::move(temporal_engine), fp_cfg);
+    if (!speech_backend || !speech_backend->is_available())
+    {
+        throw std::runtime_error(
+            "Failed to create speech backend from bundle engine");
+    }
+
+    // Deserialize depth engine (if present)
+    if (sections.depth_engine_plan_data != nullptr &&
+        !sections.depth_engine_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing depth TRT engine ("
+                  << sections.depth_engine_plan_data->size() / (1024 * 1024)
+                  << " MB) ..." << std::endl;
+
+        auto depth_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.depth_engine_plan_data->data(),
+                sections.depth_engine_plan_data->size()));
+        if (depth_trt)
+        {
+            auto depth_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                depth_trt->createExecutionContext());
+
+            // Build depth-specific config
+            trtf::FastPathModelConfig depth_cfg = fp_cfg;
+            if (fp_cfg.speech_depth_hidden_size > 0)
+                depth_cfg.hidden_size = fp_cfg.speech_depth_hidden_size;
+            if (fp_cfg.speech_depth_num_layers > 0)
+                depth_cfg.num_layers = fp_cfg.speech_depth_num_layers;
+            if (fp_cfg.speech_depth_num_heads > 0)
+            {
+                depth_cfg.num_heads = fp_cfg.speech_depth_num_heads;
+                depth_cfg.num_kv_heads = fp_cfg.speech_depth_num_kv_heads > 0
+                    ? fp_cfg.speech_depth_num_kv_heads : fp_cfg.speech_depth_num_heads;
+            }
+            depth_cfg.vocab_size = fp_cfg.speech_codebook_size;
+            depth_cfg.head_dim = depth_cfg.hidden_size / std::max(depth_cfg.num_heads, 1);
+            depth_cfg.attention_size = depth_cfg.num_heads * depth_cfg.head_dim;
+            depth_cfg.max_cache_length = fp_cfg.speech_num_codebooks + 2;
+
+            auto depth_engine = trtf::make_decoder_engine(
+                std::move(depth_trt), std::move(depth_ctx), depth_cfg);
+            speech_backend->set_depth_engine(std::move(depth_engine));
+        }
+    }
+
+    // Deserialize Mimi encoder engine (if present)
+    if (sections.mimi_encoder_plan_data != nullptr &&
+        !sections.mimi_encoder_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing Mimi encoder TRT engine ("
+                  << sections.mimi_encoder_plan_data->size() / (1024 * 1024)
+                  << " MB) ..." << std::endl;
+
+        auto enc_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.mimi_encoder_plan_data->data(),
+                sections.mimi_encoder_plan_data->size()));
+        if (enc_trt)
+        {
+            auto enc_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                enc_trt->createExecutionContext());
+            speech_backend->set_mimi_encoder(
+                std::move(enc_trt), std::move(enc_ctx));
+        }
+    }
+
+    // Deserialize Mimi decoder engine (if present)
+    if (sections.mimi_decoder_plan_data != nullptr &&
+        !sections.mimi_decoder_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing Mimi decoder TRT engine ("
+                  << sections.mimi_decoder_plan_data->size() / (1024 * 1024)
+                  << " MB) ..." << std::endl;
+
+        auto dec_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.mimi_decoder_plan_data->data(),
+                sections.mimi_decoder_plan_data->size()));
+        if (dec_trt)
+        {
+            auto dec_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                dec_trt->createExecutionContext());
+            speech_backend->set_mimi_decoder(
+                std::move(dec_trt), std::move(dec_ctx));
+        }
+    }
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_speech, strategy=speech_to_speech)"
+              << std::endl;
+
+    // Speech pipelines don't need a tokenizer or generation backend
+    auto* pipeline = new PipelineImpl(
+        model_id, nullptr, nullptr, "trt_speech", trtf::GenerationConfig{});
+    pipeline->set_speech_backend(std::move(speech_backend));
+    return pipeline;
+}
+
 // --- Main dispatch ---
 
 PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::string& hf_python)
@@ -1105,9 +2225,65 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
             bundle.info.model_id, bundle_path);
     }
 
+    if (strategy == "object_detection")
+    {
+        return create_detection_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            bundle.info.model_id, bundle_path);
+    }
+
+    if (strategy == "prompted_segmentation")
+    {
+        return create_sam_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            sections, runtime_ptr, bundle.info.model_id, bundle_path);
+    }
+
+    if (strategy == "neural_operator")
+    {
+        return create_neural_operator_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            bundle.info.model_id, bundle_path);
+    }
+
+    if (strategy == "encoder_only")
+    {
+        return create_encoder_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            sections, bundle.info.model_id, hf_python, bundle_path);
+    }
+
+    if (strategy == "embedding")
+    {
+        return create_embedding_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            sections, bundle.info.model_id, hf_python, bundle_path);
+    }
+
+    if (strategy == "reranking")
+    {
+        return create_reranking_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            sections, bundle.info.model_id, hf_python, bundle_path);
+    }
+
     if (strategy == "text_to_audio")
     {
         return create_bark_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            sections, runtime_ptr, bundle.info.model_id, hf_python, bundle_path);
+    }
+
+    if (strategy == "omni_multimodal")
+    {
+        return create_omni_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            sections, runtime_ptr, bundle.info.model_id, hf_python, bundle_path);
+    }
+
+    if (strategy == "speech_to_speech")
+    {
+        return create_speech_pipeline(
             std::move(trt_engine), std::move(exec_ctx), fp_cfg,
             sections, runtime_ptr, bundle.info.model_id, hf_python, bundle_path);
     }
@@ -1117,6 +2293,13 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
         return create_diffusion_pipeline(
             fp_cfg, sections, runtime_ptr,
             bundle.info.model_id, hf_python, bundle_path);
+    }
+
+    if (strategy == "hybrid_mamba_attention")
+    {
+        return create_hybrid_pipeline(
+            std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+            sections, bundle.info.model_id, hf_python, bundle_path);
     }
 
     return create_decoder_pipeline(
