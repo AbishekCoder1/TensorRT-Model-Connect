@@ -496,7 +496,11 @@ std::vector<int32_t> BarkBackend::run_fine(const std::vector<int32_t>& coarse_to
         cfg.fine_seq_length > 0 ? cfg.fine_seq_length : n_frames_raw);
 
     // codes[cb * n_frames + frame] = raw code index [0, codebook_size)
-    std::vector<int32_t> codes(static_cast<std::size_t>(8) * n_frames, 0);
+    // Initialize CB2-7 to codebook_size (matching HF's F.pad(..., codebook_size)).
+    // The fine model's forward includes the current codebook in the embedding sum,
+    // so the initial pad value matters — embed[cb, codebook_size] is the pad embedding.
+    std::vector<int32_t> codes(static_cast<std::size_t>(8) * n_frames,
+                                cfg.codebook_size);
     for (int32_t t = 0; t < n_frames * cfg.n_coarse_codebooks; ++t)
     {
         int32_t cb = t % cfg.n_coarse_codebooks;
