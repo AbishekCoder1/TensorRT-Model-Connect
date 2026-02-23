@@ -495,8 +495,10 @@ class SegformerPlugin:
             else:
                 projected.append(to_4d2_t.get_output(0))
 
-        # Concatenate all stages along channel dim
-        concat = network.add_concatenation(projected)
+        # Concatenate all stages along channel dim.
+        # HF reverses the order: cat(stage3, stage2, stage1, stage0).
+        # The fuse conv weights are trained with this reversed layout.
+        concat = network.add_concatenation(projected[::-1])
         concat.axis = 1  # [1, 4*D, target_H, target_W]
 
         total_ch = 4 * decoder_hidden_size
