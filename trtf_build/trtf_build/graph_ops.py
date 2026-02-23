@@ -167,6 +167,75 @@ def make_rope_table(
     return table
 
 
+def _yarn_correction_dim(num_rotations, dim, base, max_position_embeddings):
+    """Find the YaRN correction dimension boundary."""
+    return dim * np.log(max_position_embeddings / (num_rotations * 2 * np.pi)) / (2 * np.log(base))
+
+
+def make_yarn_rope_table(
+    max_cache_length: int,
+    hidden_size: int,
+    num_attention_heads: int,
+    rope_theta: float,
+    cosine: bool,
+    scaling_factor: float,
+    original_max_position_embeddings: int,
+    beta_fast: float,
+    beta_slow: float,
+    interleaved: bool = False,
+) -> np.ndarray:
+    """Build YaRN-scaled RoPE table matching HF DeepseekV2YarnRotaryEmbedding.
+
+    YaRN mixes standard and interpolated inv_freq using a correction ramp
+    based on beta_fast/beta_slow boundaries.
+
+    Args:
+        interleaved: If True, adjacent dims (d, d+1) share the same frequency.
+            If False (default), half-dims (d, d+half) share the same frequency.
+    """
+    table = np.full(
+        (max_cache_length, hidden_size),
+        1.0 if cosine else 0.0,
+        dtype=np.float32,
+    )
+    if (max_cache_length <= 0 or hidden_size <= 0
+            or num_attention_heads <= 0
+            or hidden_size % num_attention_heads != 0):
+        return table
+
+    head_dim = hidden_size // num_attention_heads
+    half = head_dim // 2
+    if half <= 0 or rope_theta <= 0.0:
+        return table
+
+    # Standard and interpolated frequencies
+    freq_extra = 1.0 / (rope_theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim))
+    freq_inter = freq_extra / scaling_factor
+
+    # Correction range ramp
+    low = max(int(np.floor(_yarn_correction_dim(
+        beta_fast, head_dim, rope_theta, original_max_position_embeddings))), 0)
+    high = min(int(np.ceil(_yarn_correction_dim(
+        beta_slow, head_dim, rope_theta, original_max_position_embeddings))), half - 1)
+    ramp = np.clip((np.arange(half, dtype=np.float64) - low) / max(high - low, 1), 0.0, 1.0)
+    inv_freq = freq_inter * ramp + freq_extra * (1 - ramp)
+
+    # Build table [max_cache_length, hidden_size] — same layout as make_rope_table
+    for pos in range(max_cache_length):
+        for head in range(num_attention_heads):
+            for dim in range(head_dim):
+                if interleaved:
+                    freq_idx = dim // 2
+                else:
+                    freq_idx = dim % half
+                angle = pos * inv_freq[freq_idx]
+                value = np.cos(angle) if cosine else np.sin(angle)
+                offset = head * head_dim + dim
+                table[pos, offset] = float(value)
+
+    return table
+
+
 def make_rotate_half_matrix(
     hidden_size: int,
     num_attention_heads: int,

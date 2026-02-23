@@ -281,6 +281,8 @@ class DeepSeekV2Plugin:
         weights["_moe_layer_freq"] = moe_layer_freq  # type: ignore[assignment]
         weights["_moe_intermediate_size"] = moe_intermediate_size  # type: ignore[assignment]
         weights["_shared_intermediate_size"] = shared_intermediate  # type: ignore[assignment]
+        weights["_norm_topk_prob"] = raw.get("norm_topk_prob", False)  # type: ignore[assignment]
+        weights["_routed_scaling_factor"] = raw.get("routed_scaling_factor", 1.0)  # type: ignore[assignment]
 
         return weights
 
@@ -309,6 +311,8 @@ class DeepSeekV2Plugin:
         moe_layer_freq: int = weights["_moe_layer_freq"]
         moe_intermediate: int = weights["_moe_intermediate_size"]
         shared_intermediate: int = weights["_shared_intermediate_size"]
+        norm_topk_prob: bool = weights["_norm_topk_prob"]
+        routed_scaling_factor: float = weights["_routed_scaling_factor"]
         dense_intermediate = config.intermediate_size
 
         # K head dim = nope + rope; this is the per-head cache dimension
@@ -317,6 +321,10 @@ class DeepSeekV2Plugin:
         attention_window = max_cache_length + 1
 
         # Attention scale: 1 / sqrt(full_head_dim) where full = nope + rope
+        # HF uses: self.scaling = self.qk_head_dim ** (-0.5)
+        # YaRN mscale is handled via rope_utils attention_factor which scales
+        # cos/sin directly. For V2-Lite, mscale == mscale_all_dim so they
+        # cancel out (attention_factor = 1.0). No adjustment needed here.
         attn_scale = 1.0 / np.sqrt(max(k_head_dim, 1))
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -356,14 +364,31 @@ class DeepSeekV2Plugin:
         # Shape: [attention_window, num_heads * qk_rope_head_dim]
         rope_total = num_heads * qk_rope_head_dim
 
-        cos_table_np = graph_ops.make_rope_table(
-            attention_window, rope_total, num_heads,
-            config.rope_theta, True)
-        sin_table_np = graph_ops.make_rope_table(
-            attention_window, rope_total, num_heads,
-            config.rope_theta, False)
+        # DeepSeek-V2 uses complex (interleaved) RoPE: adjacent dims (d, d+1)
+        # share a frequency, matching HF's apply_rotary_emb with torch.polar.
+        rope_scaling = config.raw.get("rope_scaling")
+        if rope_scaling and rope_scaling.get("type") == "yarn":
+            yarn_kwargs = dict(
+                scaling_factor=rope_scaling["factor"],
+                original_max_position_embeddings=rope_scaling["original_max_position_embeddings"],
+                beta_fast=rope_scaling["beta_fast"],
+                beta_slow=rope_scaling["beta_slow"],
+            )
+            cos_table_np = graph_ops.make_yarn_rope_table(
+                attention_window, rope_total, num_heads,
+                config.rope_theta, True, **yarn_kwargs, interleaved=True)
+            sin_table_np = graph_ops.make_yarn_rope_table(
+                attention_window, rope_total, num_heads,
+                config.rope_theta, False, **yarn_kwargs, interleaved=True)
+        else:
+            cos_table_np = graph_ops.make_rope_table(
+                attention_window, rope_total, num_heads,
+                config.rope_theta, True, interleaved=True)
+            sin_table_np = graph_ops.make_rope_table(
+                attention_window, rope_total, num_heads,
+                config.rope_theta, False, interleaved=True)
         rotate_half_np = graph_ops.make_rotate_half_matrix(
-            rope_total, num_heads)
+            rope_total, num_heads, interleaved=True)
 
         cos_tensor = graph_ops.add_constant(
             network, (attention_window, rope_total), cos_table_np)
@@ -432,6 +457,8 @@ class DeepSeekV2Plugin:
                 moe_intermediate=moe_intermediate,
                 shared_intermediate=shared_intermediate,
                 dense_intermediate=dense_intermediate,
+                norm_topk_prob=norm_topk_prob,
+                routed_scaling_factor=routed_scaling_factor,
             )
 
             hidden_state = result["hidden"]
@@ -822,13 +849,17 @@ def _add_moe_with_shared_experts(
     moe_intermediate: int,
     num_experts_per_tok: int,
     shared_intermediate: int,
+    norm_topk_prob: bool = False,
+    routed_scaling_factor: float = 1.0,
 ) -> trt.ITensor:
     """MoE block with shared experts (DeepSeek-V2 style).
 
-    1. Router logits -> softmax -> top-k selection with renormalization
-    2. Compute all routed expert outputs, select top-k, weighted sum
-    3. Compute shared expert output (always active)
-    4. Final = routed_output + shared_output
+    1. Router logits -> softmax -> top-k selection
+    2. Scale weights: renormalize (norm_topk_prob=True) or multiply by
+       routed_scaling_factor (norm_topk_prob=False)
+    3. Compute all routed expert outputs, select top-k, weighted sum
+    4. Compute shared expert output (always active)
+    5. Final = routed_output + shared_output
     """
     # 1. Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
@@ -846,12 +877,25 @@ def _add_moe_with_shared_experts(
     top_values = topk.get_output(0)   # [1, top_k]
     top_indices = topk.get_output(1)  # [1, top_k]
 
-    # 4. Renormalize: values / sum(values)
-    sum_val = network.add_reduce(
-        top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
-    norm_weights = network.add_elementwise(
-        top_values, sum_val.get_output(0),
-        trt.ElementWiseOperation.DIV)  # [1, top_k]
+    # 4. Scale routing weights (matches HF route_tokens_to_experts)
+    if norm_topk_prob:
+        # Renormalize: values / sum(values)
+        sum_val = network.add_reduce(
+            top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
+        scaled_weights = network.add_elementwise(
+            top_values, sum_val.get_output(0),
+            trt.ElementWiseOperation.DIV).get_output(0)  # [1, top_k]
+    elif routed_scaling_factor != 1.0:
+        # Multiply by routed_scaling_factor
+        scale_c = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([[routed_scaling_factor]], dtype=np.float32))
+        scaled_weights = network.add_elementwise(
+            top_values, scale_c,
+            trt.ElementWiseOperation.PROD).get_output(0)
+    else:
+        # V2-Lite: use raw softmax top-k values directly (scaling=1.0)
+        scaled_weights = top_values
 
     # 5. Compute ALL routed expert outputs and stack
     expert_outputs = []
@@ -879,7 +923,7 @@ def _add_moe_with_shared_experts(
 
         # Extract weight k
         w_slice = network.add_slice(
-            norm_weights.get_output(0),
+            scaled_weights,
             start=(0, k), shape=(1, 1), stride=(1, 1))
 
         # Gather expert output
@@ -949,6 +993,8 @@ def _add_deepseek_v2_decoder_layer(
     moe_intermediate: int,
     shared_intermediate: int,
     dense_intermediate: int,
+    norm_topk_prob: bool = False,
+    routed_scaling_factor: float = 1.0,
 ) -> dict[str, trt.ITensor]:
     """Add one DeepSeek-V2 decoder layer: MLA attention + (dense MLP or MoE)."""
 
@@ -1000,7 +1046,9 @@ def _add_deepseek_v2_decoder_layer(
         mlp_out = _add_moe_with_shared_experts(
             network, norm2, weights, prefix,
             hidden_size, n_routed_experts, moe_intermediate,
-            num_experts_per_tok, shared_intermediate)
+            num_experts_per_tok, shared_intermediate,
+            norm_topk_prob=norm_topk_prob,
+            routed_scaling_factor=routed_scaling_factor)
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2,
