@@ -13,6 +13,8 @@ def test_inference_produces_text(model_entry, trtf_binary, hf_python, ld_library
         pytest.skip("Diffusion model — no text inference")
     if model_entry.get("test_type") == "segmentation":
         pytest.skip("Segmentation model — use test_segmentation_pipeline")
+    if model_entry.get("test_type") == "audio":
+        pytest.skip("Audio model — use test_audio_pipeline")
     prompt = model_entry.get("prompt", "Hello")
     max_new = model_entry.get("max_new_tokens", 10)
 
@@ -36,6 +38,8 @@ def test_inference_deterministic(model_entry, trtf_binary, hf_python, ld_library
         pytest.skip("Diffusion model — no text inference")
     if model_entry.get("test_type") == "segmentation":
         pytest.skip("Segmentation model — use test_segmentation_pipeline")
+    if model_entry.get("test_type") == "audio":
+        pytest.skip("Audio model — use test_audio_pipeline")
     prompt = model_entry.get("prompt", "Hello")
     max_new = min(model_entry.get("max_new_tokens", 10), 5)
 

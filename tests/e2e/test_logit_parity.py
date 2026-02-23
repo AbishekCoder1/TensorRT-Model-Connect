@@ -18,6 +18,8 @@ def test_logit_parity(model_entry):
         pytest.skip("Diffusion model — use test_diffusion_pipeline for logit checks")
     if model_entry.get("test_type") == "segmentation":
         pytest.skip("Segmentation model — use test_segmentation_pipeline")
+    if model_entry.get("test_type") == "audio":
+        pytest.skip("Audio model — use test_audio_pipeline")
     if model_entry.get("runtime_strategy") == "vision_language":
         pytest.skip("VL model — diff_logits requires decoder-only models")
     if model_entry.get("skip_logit_parity"):

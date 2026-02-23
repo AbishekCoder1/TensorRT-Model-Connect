@@ -128,6 +128,16 @@ _POSITIVE_MATCH_CASES = [
     # Wan T2V (diffusion)
     ("wan_t2v", "wan_t2v"),
     ("wan", "wan_t2v"),
+    # Bark (text-to-audio)
+    ("bark", "bark"),
+    # SegFormer (segmentation)
+    ("segformer", "segformer"),
+    # Whisper (speech-to-text)
+    ("whisper", "whisper"),
+    # RWKV
+    ("rwkv", "rwkv"),
+    # DeepSeek-V2
+    ("deepseek_v2", "deepseek_v2"),
 ]
 
 
@@ -151,7 +161,6 @@ _NEGATIVE_MATCH_CASES = [
     "unknown_model",
     "bert",
     "t5",
-    "whisper",
     "clip",
     "",
 ]
