@@ -29,6 +29,10 @@ BundleSections find_bundle_sections(const BundleFile& bundle)
         else if (section.name == "coarse_engine_plan") s.coarse_engine_plan_data = &section.data;
         else if (section.name == "fine_engine_plan") s.fine_engine_plan_data = &section.data;
         else if (section.name == "codec_engine_plan") s.codec_engine_plan_data = &section.data;
+        else if (section.name == "semantic_embed") s.semantic_embed_data = &section.data;
+        else if (section.name == "coarse_embed") s.coarse_embed_data = &section.data;
+        else if (section.name == "fine_embed") s.fine_embed_data = &section.data;
+        else if (section.name == "fine_position_embed") s.fine_position_embed_data = &section.data;
         // Diffusion sections
         else if (section.name == "denoiser_plan") s.denoiser_plan_data = &section.data;
         else if (section.name == "vae_decoder_plan") s.vae_decoder_plan_data = &section.data;

@@ -118,9 +118,30 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.n_coarse_codebooks = extract_json_int(config_text, "n_coarse_codebooks", 2);
         cfg.n_fine_codebooks = extract_json_int(config_text, "n_fine_codebooks", 8);
         cfg.semantic_pad_token = extract_json_int(config_text, "semantic_pad_token", 10000);
-        cfg.semantic_infer_token = extract_json_int(config_text, "semantic_infer_token", 10001);
+        cfg.semantic_infer_token = extract_json_int(config_text, "semantic_infer_token", 129599);
         cfg.coarse_semantic_pad_token = extract_json_int(config_text, "coarse_semantic_pad_token", 12048);
         cfg.coarse_infer_token = extract_json_int(config_text, "coarse_infer_token", 12050);
+        cfg.text_encoding_offset = extract_json_int(config_text, "text_encoding_offset", 10048);
+        cfg.text_pad_token = extract_json_int(config_text, "text_pad_token", 129595);
+        cfg.semantic_input_vocab = extract_json_int(config_text, "semantic_input_vocab", 129600);
+        cfg.coarse_input_vocab = extract_json_int(config_text, "coarse_input_vocab", 12096);
+        cfg.codebook_size = extract_json_int(config_text, "codebook_size", 1024);
+        // Coarse sub-model dimensions (defaults to main model dims if not specified)
+        cfg.coarse_hidden_size = extract_json_int(config_text, "coarse_hidden_size", cfg.hidden_size);
+        cfg.coarse_num_layers = extract_json_int(config_text, "coarse_num_layers", cfg.num_layers);
+        cfg.coarse_num_heads = extract_json_int(config_text, "coarse_num_heads", cfg.num_heads);
+        cfg.coarse_max_cache_length = extract_json_int(config_text, "coarse_max_cache_length", 1024);
+        // Codec engine config
+        cfg.codec_seq_length = extract_json_int(config_text, "codec_seq_length", 0);
+        cfg.codec_upsample_factor = extract_json_int(config_text, "codec_upsample_factor", 320);
+        cfg.codec_n_codebooks = extract_json_int(config_text, "codec_n_codebooks", 8);
+        // Fine model config
+        cfg.fine_hidden_size = extract_json_int(config_text, "fine_hidden_size", cfg.hidden_size);
+        cfg.fine_num_layers = extract_json_int(config_text, "fine_num_layers", 12);
+        cfg.fine_num_heads = extract_json_int(config_text, "fine_num_heads", 12);
+        cfg.fine_codebook_size = extract_json_int(config_text, "fine_codebook_size", 1056);
+        cfg.fine_n_lm_heads = extract_json_int(config_text, "fine_n_lm_heads", 7);
+        cfg.fine_seq_length = extract_json_int(config_text, "fine_seq_length", 0);
     }
 
     // Diffusion fields

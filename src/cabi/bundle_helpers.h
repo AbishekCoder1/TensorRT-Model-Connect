@@ -36,6 +36,10 @@ struct BundleSections {
     const std::vector<char>* coarse_engine_plan_data{nullptr};
     const std::vector<char>* fine_engine_plan_data{nullptr};
     const std::vector<char>* codec_engine_plan_data{nullptr};
+    const std::vector<char>* semantic_embed_data{nullptr};
+    const std::vector<char>* coarse_embed_data{nullptr};
+    const std::vector<char>* fine_embed_data{nullptr};
+    const std::vector<char>* fine_position_embed_data{nullptr};
 
     // Diffusion sections
     std::vector<const std::vector<char>*> text_encoder_plans;  // text_encoder_0_plan, ...

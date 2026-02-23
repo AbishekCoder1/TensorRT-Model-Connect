@@ -1768,7 +1768,10 @@ def add_lstm_unrolled(
     hidden_size: int,
     seq_length: int,
 ) -> trt.ITensor:
-    """Unrolled LSTM for fixed-length sequences (no TRT native RNN).
+    """LSTM using TRT native loop API (ILoopLayer + IRecurrenceLayer).
+
+    Uses TRT's built-in loop construct instead of Python-level unrolling,
+    so graph size is O(1) regardless of sequence length.
 
     Input: [1, seq_length, input_size] (batch=1)
     Output: [1, seq_length, hidden_size]
@@ -1791,42 +1794,82 @@ def add_lstm_unrolled(
                           np.ascontiguousarray(w_hh.T, dtype=np.float32))
     bias_t = add_constant(network, (1, 4 * H), bias.reshape(1, -1))
 
-    # Init h, c to zeros
+    # Init h, c to zeros [1, H]
     zero_h = add_constant(network, (1, H), np.zeros((1, H), dtype=np.float32))
     zero_c = add_constant(network, (1, H), np.zeros((1, H), dtype=np.float32))
-    one_t = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
 
-    h = zero_h
-    c = zero_c
+    # --- TRT loop ---
+    loop = network.add_loop()
 
-    outputs = []
-    for t_step in range(seq_length):
-        # Extract x_t: [1, input_size]
-        x_t = network.add_slice(
-            inp,
-            start=(0, t_step, 0) if len(inp.shape) == 3 else (t_step, 0),
-            shape=(1, 1, input_size) if len(inp.shape) == 3 else (1, input_size),
-            stride=(1, 1, 1) if len(inp.shape) == 3 else (1, 1))
-        x_flat = network.add_shuffle(x_t.get_output(0))
-        x_flat.reshape_dims = (1, input_size)
+    # Trip count = seq_length (scalar int32)
+    trip_count = network.add_constant(
+        (), trt.Weights(np.array(seq_length, dtype=np.int32)))
+    loop.add_trip_limit(trip_count.get_output(0), trt.TripLimit.COUNT)
 
-        # gates = x @ W_ih^T + h @ W_hh^T + bias
-        xw = network.add_matrix_multiply(
-            x_flat.get_output(0), trt.MatrixOperation.NONE,
-            w_ih_t, trt.MatrixOperation.NONE)
-        hw = network.add_matrix_multiply(
-            h, trt.MatrixOperation.NONE,
-            w_hh_t, trt.MatrixOperation.NONE)
-        gates = network.add_elementwise(
-            xw.get_output(0), hw.get_output(0), trt.ElementWiseOperation.SUM)
-        gates = network.add_elementwise(
-            gates.get_output(0), bias_t, trt.ElementWiseOperation.SUM)
+    # Iterator over input: [1, seq_length, input_size] → [1, input_size] per step
+    x_iter = loop.add_iterator(inp, axis=1)
 
-        # Split gates: i, f, g, o each [1, H]
-        # This is a simplified version -- in practice we'd use slice layers
-        # For now, just pass through as identity (placeholder)
-        outputs.append(h)
-        # Full implementation would compute sigmoid/tanh for each gate
+    # Recurrence layers for h and c state
+    h_rec = loop.add_recurrence(zero_h)
+    c_rec = loop.add_recurrence(zero_c)
 
-    # For brevity, return input unchanged (full impl needed for EnCodec)
-    return inp
+    # Loop body: one LSTM timestep
+    x_t = x_iter.get_output(0)  # [1, input_size]
+    h = h_rec.get_output(0)     # [1, H]
+    c = c_rec.get_output(0)     # [1, H]
+
+    # gates = x_t @ W_ih^T + h @ W_hh^T + bias   [1, 4*H]
+    xw = network.add_matrix_multiply(
+        x_t, trt.MatrixOperation.NONE,
+        w_ih_t, trt.MatrixOperation.NONE)
+    hw = network.add_matrix_multiply(
+        h, trt.MatrixOperation.NONE,
+        w_hh_t, trt.MatrixOperation.NONE)
+    gates = network.add_elementwise(
+        xw.get_output(0), hw.get_output(0), trt.ElementWiseOperation.SUM)
+    gates = network.add_elementwise(
+        gates.get_output(0), bias_t, trt.ElementWiseOperation.SUM)
+
+    # Split gates: i, f, g, o each [1, H]
+    gate_i = network.add_slice(
+        gates.get_output(0), start=(0, 0), shape=(1, H), stride=(1, 1))
+    gate_f = network.add_slice(
+        gates.get_output(0), start=(0, H), shape=(1, H), stride=(1, 1))
+    gate_g = network.add_slice(
+        gates.get_output(0), start=(0, 2 * H), shape=(1, H), stride=(1, 1))
+    gate_o = network.add_slice(
+        gates.get_output(0), start=(0, 3 * H), shape=(1, H), stride=(1, 1))
+
+    # Activations: sigmoid(i), sigmoid(f), tanh(g), sigmoid(o)
+    i_t = network.add_activation(
+        gate_i.get_output(0), trt.ActivationType.SIGMOID).get_output(0)
+    f_t = network.add_activation(
+        gate_f.get_output(0), trt.ActivationType.SIGMOID).get_output(0)
+    g_t = network.add_activation(
+        gate_g.get_output(0), trt.ActivationType.TANH).get_output(0)
+    o_t = network.add_activation(
+        gate_o.get_output(0), trt.ActivationType.SIGMOID).get_output(0)
+
+    # c_new = f * c + i * g
+    fc = network.add_elementwise(
+        f_t, c, trt.ElementWiseOperation.PROD).get_output(0)
+    ig = network.add_elementwise(
+        i_t, g_t, trt.ElementWiseOperation.PROD).get_output(0)
+    c_new = network.add_elementwise(
+        fc, ig, trt.ElementWiseOperation.SUM).get_output(0)
+
+    # h_new = o * tanh(c_new)
+    tanh_c = network.add_activation(
+        c_new, trt.ActivationType.TANH).get_output(0)
+    h_new = network.add_elementwise(
+        o_t, tanh_c, trt.ElementWiseOperation.PROD).get_output(0)
+
+    # Feed new h, c back to recurrence
+    h_rec.set_input(1, h_new)
+    c_rec.set_input(1, c_new)
+
+    # Collect h at every timestep: [1, H] → [1, seq_length, H]
+    h_output = loop.add_loop_output(h_rec.get_output(0), trt.LoopOutput.CONCATENATE, 1)
+    h_output.set_input(1, trip_count.get_output(0))
+
+    return h_output.get_output(0)

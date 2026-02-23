@@ -108,6 +108,30 @@ def _detect_sub_model_config(state_dict: dict, prefix: str) -> dict:
             lm_w = lm_w.numpy()
         output_vocab = lm_w.shape[0]
 
+    # Count embedding tables (fine model has multiple: input_embeds_layers.0..N)
+    n_embed_tables = 0
+    while f"{prefix}.input_embeds_layers.{n_embed_tables}.weight" in state_dict:
+        n_embed_tables += 1
+    if n_embed_tables == 0:
+        # Semantic/coarse: single embedding table
+        n_embed_tables = 1
+
+    # Count LM heads (fine model has multiple: lm_heads.0..N)
+    n_lm_heads = 0
+    while f"{prefix}.lm_heads.{n_lm_heads}.weight" in state_dict:
+        n_lm_heads += 1
+    if n_lm_heads == 0:
+        n_lm_heads = 1  # Semantic/coarse: single lm_head
+
+    # Detect codebook_size from first LM head (fine model)
+    codebook_size = output_vocab
+    lm0_key = f"{prefix}.lm_heads.0.weight"
+    if lm0_key in state_dict:
+        lm0_w = state_dict[lm0_key]
+        if hasattr(lm0_w, 'numpy'):
+            lm0_w = lm0_w.numpy()
+        codebook_size = int(lm0_w.shape[0])
+
     return {
         "vocab_size": int(vocab_size),
         "hidden_size": int(hidden_size),
@@ -116,6 +140,9 @@ def _detect_sub_model_config(state_dict: dict, prefix: str) -> dict:
         "max_position": int(max_position),
         "output_vocab": int(output_vocab),
         "intermediate_size": int(hidden_size * 4),
+        "n_embed_tables": int(n_embed_tables),
+        "n_lm_heads": int(n_lm_heads),
+        "codebook_size": int(codebook_size),
     }
 
 
@@ -242,9 +269,137 @@ def _map_bark_decoder_weights(
     return weights
 
 
+def _map_bark_fine_weights(
+    state_dict: dict,
+    fine_cfg: dict,
+) -> WeightDict:
+    """Map HF Bark fine model weights to the fine engine format.
+
+    The fine model (BarkFineModel) differs from semantic/coarse:
+      - 8 embedding tables (one per codebook): input_embeds_layers.{i}.weight
+      - 1 position embedding: position_embeds_layer.weight
+      - 12 transformer layers (same structure as semantic/coarse)
+      - 7 LM heads (codebooks 1-7): lm_heads.{j}.weight
+      - Final layernorm
+
+    Weight mapping:
+      fine_acoustics.input_embeds_layers.{i}.weight  -> fine.embedding_{i}
+      fine_acoustics.position_embeds_layer.weight     -> fine.position_embedding
+      fine_acoustics.layers.{i}.*                     -> fine.layer.{i}.*
+      fine_acoustics.layernorm_final.weight/bias      -> fine.final_norm / fine.final_norm_beta
+      fine_acoustics.lm_heads.{j}.weight              -> fine.w_lm_head_{j}  (transposed)
+    """
+    weights = WeightDict()
+    prefix = "fine_acoustics"
+    hidden = fine_cfg["hidden_size"]
+    num_layers = fine_cfg["num_layers"]
+    n_embed_tables = fine_cfg.get("n_embed_tables", 8)
+    n_lm_heads = fine_cfg.get("n_lm_heads", 7)
+
+    def _to_np(t):
+        if hasattr(t, 'numpy'):
+            return t.numpy().astype(np.float32)
+        return np.asarray(t, dtype=np.float32)
+
+    def _t2d(w):
+        """Transpose [out, in] -> [in, out] for matmul."""
+        a = _to_np(w)
+        if a.ndim == 2:
+            return np.ascontiguousarray(a.T)
+        return a
+
+    # 8 embedding tables
+    for i in range(n_embed_tables):
+        key = f"{prefix}.input_embeds_layers.{i}.weight"
+        if key in state_dict:
+            weights[f"fine.embedding_{i}"] = _to_np(state_dict[key])
+
+    # Position embedding
+    wpe_key = f"{prefix}.position_embeds_layer.weight"
+    if wpe_key in state_dict:
+        weights["fine.position_embedding"] = _to_np(state_dict[wpe_key])
+
+    # Transformer layers (same pattern as _map_bark_decoder_weights)
+    for i in range(num_layers):
+        hf = f"{prefix}.layers.{i}"
+        layer = f"fine.layer.{i}"
+
+        # Layer norms
+        weights[f"{layer}.input_norm"] = _to_np(state_dict[f"{hf}.layernorm_1.weight"])
+        if f"{hf}.layernorm_1.bias" in state_dict:
+            weights[f"{layer}.input_norm_beta"] = _to_np(state_dict[f"{hf}.layernorm_1.bias"])
+        else:
+            weights[f"{layer}.input_norm_beta"] = np.zeros(hidden, dtype=np.float32)
+
+        weights[f"{layer}.post_attn_norm"] = _to_np(state_dict[f"{hf}.layernorm_2.weight"])
+        if f"{hf}.layernorm_2.bias" in state_dict:
+            weights[f"{layer}.post_attn_norm_beta"] = _to_np(state_dict[f"{hf}.layernorm_2.bias"])
+        else:
+            weights[f"{layer}.post_attn_norm_beta"] = np.zeros(hidden, dtype=np.float32)
+
+        # att_proj: [3*H, H] -> split into Q, K, V, transpose each
+        att_w = _to_np(state_dict[f"{hf}.attn.att_proj.weight"])  # [3H, H]
+        w_q = att_w[:hidden, :]
+        w_k = att_w[hidden:2*hidden, :]
+        w_v = att_w[2*hidden:, :]
+        weights[f"{layer}.w_q"] = _t2d(w_q)
+        weights[f"{layer}.w_k"] = _t2d(w_k)
+        weights[f"{layer}.w_v"] = _t2d(w_v)
+
+        # Output projection
+        weights[f"{layer}.w_o"] = _t2d(state_dict[f"{hf}.attn.out_proj.weight"])
+
+        # MLP
+        weights[f"{layer}.w_fc1"] = _t2d(state_dict[f"{hf}.mlp.in_proj.weight"])
+        weights[f"{layer}.w_fc2"] = _t2d(state_dict[f"{hf}.mlp.out_proj.weight"])
+
+        # Biases
+        for bkey, wkey in [
+            (f"{layer}.q_bias", f"{hf}.attn.att_proj.bias"),
+            (f"{layer}.o_bias", f"{hf}.attn.out_proj.bias"),
+            (f"{layer}.fc1_bias", f"{hf}.mlp.in_proj.bias"),
+            (f"{layer}.fc2_bias", f"{hf}.mlp.out_proj.bias"),
+        ]:
+            if wkey in state_dict:
+                b = _to_np(state_dict[wkey])
+                if "q_bias" in bkey and len(b) == 3 * hidden:
+                    weights[f"{layer}.q_bias"] = b[:hidden]
+                    weights[f"{layer}.k_bias"] = b[hidden:2*hidden]
+                    weights[f"{layer}.v_bias"] = b[2*hidden:]
+                else:
+                    weights[bkey] = b
+
+    # Final layer norm
+    ln_key = f"{prefix}.layernorm_final.weight"
+    if ln_key in state_dict:
+        weights["fine.final_norm"] = _to_np(state_dict[ln_key])
+    else:
+        weights["fine.final_norm"] = np.ones(hidden, dtype=np.float32)
+    ln_bias_key = f"{prefix}.layernorm_final.bias"
+    if ln_bias_key in state_dict:
+        weights["fine.final_norm_beta"] = _to_np(state_dict[ln_bias_key])
+    else:
+        weights["fine.final_norm_beta"] = np.zeros(hidden, dtype=np.float32)
+
+    # 7 LM heads: transposed to [hidden, codebook_size]
+    for j in range(n_lm_heads):
+        lm_key = f"{prefix}.lm_heads.{j}.weight"
+        if lm_key in state_dict:
+            weights[f"fine.w_lm_head_{j}"] = _t2d(state_dict[lm_key])
+
+    return weights
+
+
 class BarkPlugin:
     name = "bark"
     runtime_strategy = "text_to_audio"
+
+    def __init__(self):
+        self._semantic_cfg: dict = {}
+        self._coarse_cfg: dict = {}
+        self._fine_cfg: dict = {}
+        self._codec_seq_length: int = 0
+        self._fine_seq_length: int = 0
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("bark",)
@@ -271,13 +426,21 @@ class BarkPlugin:
         for k, v in coarse_w.items():
             weights[f"coarse.{k}"] = v
 
-        # Fine model has different structure (8 embed tables, 7 LM heads) — store raw state_dict keys
-        weights["_state_dict"] = state_dict  # Needed for fine + codec engine builds
+        # Map fine model weights
+        fine_w = _map_bark_fine_weights(state_dict, fine_cfg)
+        for k, v in fine_w.items():
+            weights[k] = v
+
+        # Store raw state_dict for codec engine builds
+        weights["_state_dict"] = state_dict
 
         # Store sub-model configs
         weights["_semantic_cfg"] = semantic_cfg
         weights["_coarse_cfg"] = coarse_cfg
         weights["_fine_cfg"] = fine_cfg
+        self._semantic_cfg = semantic_cfg
+        self._coarse_cfg = coarse_cfg
+        self._fine_cfg = fine_cfg
 
         # Store codec info
         weights["_codec_model_id"] = "facebook/encodec_24khz"
@@ -298,7 +461,7 @@ class BarkPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, verbose: bool = False,
     ) -> dict:
-        """Build coarse, fine, and codec engines."""
+        """Build coarse, fine, codec engines + embedding tables for C++ runtime."""
         coarse_cfg = weights["_coarse_cfg"]
         fine_cfg = weights["_fine_cfg"]
 
@@ -306,18 +469,88 @@ class BarkPlugin:
             weights, "coarse", coarse_cfg, max_cache_length,
             embed_input=True, verbose=verbose)
 
-        # Fine and codec engines require additional work (different architectures).
-        # For now, only build semantic + coarse TRT engines.
-        # Fine stage and codec will use HF models at runtime for full pipeline,
-        # or the codec can be built separately via encodec_builder.
-
-        return {
-            "coarse_engine": coarse_plan,
+        result = {
+            "coarse_engine_plan": coarse_plan,
         }
+
+        # Add embedding tables as raw bundle sections.
+        # The C++ runtime does host-side embedding lookup for embed_input mode.
+        state_dict = weights.get("_state_dict")
+        if state_dict is not None:
+            sem_key = "semantic.input_embeds_layer.weight"
+            if sem_key in state_dict:
+                w = state_dict[sem_key]
+                if hasattr(w, 'numpy'):
+                    w = w.numpy()
+                result["semantic_embed"] = np.asarray(w, dtype=np.float32).tobytes()
+
+            coarse_key = "coarse_acoustics.input_embeds_layer.weight"
+            if coarse_key in state_dict:
+                w = state_dict[coarse_key]
+                if hasattr(w, 'numpy'):
+                    w = w.numpy()
+                result["coarse_embed"] = np.asarray(w, dtype=np.float32).tobytes()
+
+        # Calculate max codec frames from max_cache_length.
+        # Semantic generates at most ~(max_cache_length - 257) tokens.
+        # Coarse frames ≈ semantic_tokens * (75 / 49.9).
+        max_semantic = max(max_cache_length - 257, 100)
+        max_codec_frames = int(max_semantic * 75 / 49.9) + 1
+        # Round up to multiple of 64 for TRT efficiency
+        max_codec_frames = ((max_codec_frames + 63) // 64) * 64
+        # Cap at 256 frames — LSTM unrolling creates O(N) TRT layers per
+        # timestep; larger values make the Myelin compiler OOM.  256 frames
+        # = 256*320/24000 ~= 3.4s of audio, enough for typical speech.
+        max_codec_frames = min(max_codec_frames, 256)
+        self._codec_seq_length = max_codec_frames
+
+        # Build fine engine (non-autoregressive, bidirectional attention)
+        fine_seq_length = max_codec_frames  # match codec_seq_length
+        self._fine_seq_length = fine_seq_length
+        if verbose:
+            print(f"[trtf-build]   Building fine engine "
+                  f"(seq_length={fine_seq_length}) ...",
+                  file=sys.stderr)
+        fine_plan = _build_bark_fine_engine(
+            weights, fine_cfg, seq_length=fine_seq_length, verbose=verbose)
+        result["fine_engine_plan"] = fine_plan
+
+        # Add fine embedding tables as a single concatenated section.
+        # Layout: table0 || table1 || ... || table7, each [codebook_size, hidden_size].
+        # The C++ runtime indexes as: table[cb * codebook_size * hidden + code * hidden + h].
+        n_embed_tables = fine_cfg.get("n_embed_tables", 8)
+        embed_parts = []
+        for i in range(n_embed_tables):
+            embed_key = f"fine.embedding_{i}"
+            if embed_key in weights:
+                embed_parts.append(
+                    np.asarray(weights[embed_key], dtype=np.float32))
+        if embed_parts:
+            result["fine_embed"] = np.concatenate(
+                [e.ravel() for e in embed_parts]).tobytes()
+        pos_key = "fine.position_embedding"
+        if pos_key in weights:
+            result["fine_position_embed"] = np.asarray(
+                weights[pos_key], dtype=np.float32).ravel().tobytes()
+
+        # Build codec (EnCodec) engine for waveform synthesis
+        if state_dict is not None:
+            from ..encodec_builder import build_encodec_decoder_engine
+
+            if verbose:
+                print(f"[trtf-build]   Building codec engine "
+                      f"(max_frames={max_codec_frames}) ...",
+                      file=sys.stderr)
+
+            codec_plan = build_encodec_decoder_engine(
+                state_dict, seq_length=max_codec_frames, verbose=verbose)
+            result["codec_engine_plan"] = codec_plan
+
+        return result
 
     def get_audio_config(self, config: ModelConfig) -> dict:
         """Return audio config for bundle config.json."""
-        return {
+        cfg = {
             "sample_rate": 24000,
             "semantic_vocab_size": 10000,
             "coarse_vocab_size": 1024,
@@ -325,10 +558,45 @@ class BarkPlugin:
             "n_coarse_codebooks": 2,
             "n_fine_codebooks": 8,
             "semantic_pad_token": 10000,
-            "semantic_infer_token": 10001,
+            "semantic_infer_token": 129599,
             "coarse_semantic_pad_token": 12048,
             "coarse_infer_token": 12050,
+            "text_encoding_offset": 10048,
+            "text_pad_token": 129595,
+            "semantic_input_vocab": 129600,
+            "coarse_input_vocab": 12096,
+            "codebook_size": 1024,
         }
+        # Inject semantic sub-model dimensions at top level.
+        # HF Bark config.json nests these inside semantic_config/coarse_acoustics_config
+        # but the C++ parser needs them at top level.
+        if self._semantic_cfg:
+            cfg["vocab_size"] = self._semantic_cfg["vocab_size"]
+            cfg["hidden_size"] = self._semantic_cfg["hidden_size"]
+            cfg["num_hidden_layers"] = self._semantic_cfg["num_layers"]
+            cfg["num_attention_heads"] = self._semantic_cfg["num_heads"]
+            cfg["num_key_value_heads"] = self._semantic_cfg["num_heads"]
+        # Inject coarse sub-model dimensions (detected during load_weights)
+        if self._coarse_cfg:
+            cfg["coarse_hidden_size"] = self._coarse_cfg["hidden_size"]
+            cfg["coarse_num_layers"] = self._coarse_cfg["num_layers"]
+            cfg["coarse_num_heads"] = self._coarse_cfg["num_heads"]
+        # Inject fine sub-model dimensions (detected during load_weights)
+        if self._fine_cfg:
+            cfg["fine_hidden_size"] = self._fine_cfg["hidden_size"]
+            cfg["fine_num_layers"] = self._fine_cfg["num_layers"]
+            cfg["fine_num_heads"] = self._fine_cfg["num_heads"]
+            cfg["fine_codebook_size"] = self._fine_cfg.get("codebook_size", 1056)
+            cfg["fine_n_lm_heads"] = self._fine_cfg.get("n_lm_heads", 7)
+            if self._fine_seq_length > 0:
+                cfg["fine_seq_length"] = self._fine_seq_length
+        # Codec engine config
+        if self._codec_seq_length > 0:
+            cfg["codec_seq_length"] = self._codec_seq_length
+            cfg["codec_upsample_factor"] = 320  # 8*5*4*2
+            cfg["codec_n_codebooks"] = 8
+        return cfg
+
 
 
 def _build_bark_standard_engine(
@@ -617,19 +885,41 @@ def _build_bark_decoder_engine(
 def _build_bark_fine_engine(
     weights: WeightDict,
     fine_cfg: dict,
+    seq_length: int = 1024,
     verbose: bool = False,
 ) -> bytes:
-    """Build a non-autoregressive fine decoder engine.
+    """Build a non-autoregressive TRT engine for the Bark fine model.
 
-    Input: input_ids [1, seq_len] (coarse+fine codes)
-    Output: logits [1, vocab_size]
+    The fine model processes a full sequence at once with BIDIRECTIONAL
+    self-attention (no causal mask, no KV cache). It predicts codebooks 1-7
+    via 7 separate LM heads.
+
+    Architecture:
+      - Input: input_embeds [seq_length, hidden_size] float32 (pre-computed
+        summed embeddings from C++, covering all 8 codebook embeddings +
+        position embedding)
+      - 12 transformer layers: LayerNorm -> bidirectional self-attention ->
+        residual -> LayerNorm -> GELU MLP -> residual
+      - Final LayerNorm
+      - 7 LM heads, each producing [seq_length, codebook_size] logits
+
+    Outputs: logits_cb1 through logits_cb7, each [seq_length, codebook_size].
+
+    Args:
+        weights: Weight dict with fine.* keys from _map_bark_fine_weights.
+        fine_cfg: Fine sub-model config from _detect_sub_model_config.
+        seq_length: Fixed sequence length (should match codec_seq_length).
+        verbose: Print TRT builder logs.
+
+    Returns:
+        Serialized engine plan bytes.
     """
     hidden = fine_cfg["hidden_size"]
-    vocab = fine_cfg["vocab_size"]
     num_layers = fine_cfg["num_layers"]
     num_heads = fine_cfg["num_heads"]
     head_dim = hidden // num_heads
-    max_seq = 1024  # fixed sequence length for fine model
+    n_lm_heads = fine_cfg.get("n_lm_heads", 7)
+    codebook_size = fine_cfg.get("codebook_size", 1056)
     prefix = "fine."
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -639,22 +929,13 @@ def _build_bark_fine_engine(
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     trt_config.clear_flag(trt.BuilderFlag.TF32)
 
-    # Input: single token for iterative refinement
-    token_id = network.add_input("token_id", trt.int32, (1,))
-    position_id = network.add_input("position_id", trt.int32, (1,))
+    # Input: pre-computed summed embeddings [seq_length, hidden_size]
+    # C++ runtime sums the 8 codebook embeddings + position embedding and
+    # passes the result directly.
+    input_embeds = network.add_input(
+        "input_embeds", trt.float32, (seq_length, hidden))
 
-    # Embedding
-    embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), weights[f"{prefix}embedding"])
-    position_table = graph_ops.add_constant(
-        network, (fine_cfg["max_position"], hidden),
-        weights[f"{prefix}position_embedding"])
-
-    tok_embed = network.add_gather(embedding_table, token_id, 0)
-    pos_embed = network.add_gather(position_table, position_id, 0)
-    hidden_state = network.add_elementwise(
-        tok_embed.get_output(0), pos_embed.get_output(0),
-        trt.ElementWiseOperation.SUM).get_output(0)
+    hidden_state = input_embeds
 
     eps_t = graph_ops.add_constant(
         network, (1, 1), np.array([1e-5], dtype=np.float32))
@@ -662,71 +943,128 @@ def _build_bark_fine_engine(
     for layer_idx in range(num_layers):
         lp = f"{prefix}layer.{layer_idx}"
 
+        # Pre-attention LayerNorm
         normed = graph_ops.add_layer_norm(
             network, hidden_state, hidden,
-            weights[f"{lp}.norm1_gamma"],
-            weights[f"{lp}.norm1_beta"], eps_t)
+            weights[f"{lp}.input_norm"],
+            weights[f"{lp}.input_norm_beta"], eps_t)
 
-        # Simple self-attention (no cache for fine model -- single pass)
-        q = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{lp}.w_q"])
-        k = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{lp}.w_k"])
-        v = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{lp}.w_v"])
-
+        # Bidirectional self-attention (no causal mask, no KV cache)
+        # normed: [seq_length, hidden]
+        attention_size = num_heads * head_dim
         attn_scale = 1.0 / np.sqrt(head_dim)
+
+        q = graph_ops.add_matmul_rhs_constant(
+            network, normed, hidden, attention_size, weights[f"{lp}.w_q"])
+        k = graph_ops.add_matmul_rhs_constant(
+            network, normed, hidden, attention_size, weights[f"{lp}.w_k"])
+        v = graph_ops.add_matmul_rhs_constant(
+            network, normed, hidden, attention_size, weights[f"{lp}.w_v"])
+
+        # Optional QKV biases
+        for bias_name, tensor_ref in [
+            (f"{lp}.q_bias", "q"), (f"{lp}.k_bias", "k"), (f"{lp}.v_bias", "v")]:
+            b = weights.get(bias_name)
+            if b is not None:
+                ref = {"q": q, "k": k, "v": v}[tensor_ref]
+                ref_out = graph_ops.add_bias_sum(network, ref, attention_size, b)
+                if tensor_ref == "q": q = ref_out
+                elif tensor_ref == "k": k = ref_out
+                else: v = ref_out
+
+        # Reshape for multi-head: [S, A] -> [H, S, D]
+        q_h = network.add_shuffle(q)
+        q_h.reshape_dims = (seq_length, num_heads, head_dim)
+        q_h.second_transpose = trt.Permutation([1, 0, 2])
+
+        k_h = network.add_shuffle(k)
+        k_h.reshape_dims = (seq_length, num_heads, head_dim)
+        k_h.second_transpose = trt.Permutation([1, 0, 2])
+
+        v_h = network.add_shuffle(v)
+        v_h.reshape_dims = (seq_length, num_heads, head_dim)
+        v_h.second_transpose = trt.Permutation([1, 0, 2])
+
+        # Scores: [H, S, D] @ [H, D, S] -> [H, S, S]
         score = network.add_matrix_multiply(
-            q, trt.MatrixOperation.NONE,
-            k, trt.MatrixOperation.TRANSPOSE)
+            q_h.get_output(0), trt.MatrixOperation.NONE,
+            k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
         scale_c = graph_ops.add_constant(
-            network, (1, 1), np.array([attn_scale], dtype=np.float32))
+            network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
         scaled = network.add_elementwise(
-            score.get_output(0), scale_c, trt.ElementWiseOperation.PROD)
+            score.get_output(0), scale_c,
+            trt.ElementWiseOperation.PROD)
 
+        # No causal mask — bidirectional attention
         softmax = network.add_softmax(scaled.get_output(0))
-        softmax.axes = 1 << 1
+        softmax.axes = 1 << 2  # softmax over last dim (key positions)
 
+        # Context: [H, S, S] @ [H, S, D] -> [H, S, D]
         ctx = network.add_matrix_multiply(
             softmax.get_output(0), trt.MatrixOperation.NONE,
-            v, trt.MatrixOperation.NONE)
+            v_h.get_output(0), trt.MatrixOperation.NONE)
 
+        # Reshape back: [H, S, D] -> [S, A]
+        ctx_flat = network.add_shuffle(ctx.get_output(0))
+        ctx_flat.first_transpose = trt.Permutation([1, 0, 2])
+        ctx_flat.reshape_dims = (seq_length, attention_size)
+
+        # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, ctx.get_output(0), hidden, hidden, weights[f"{lp}.w_o"])
-        attn_out = graph_ops.add_bias_sum(
-            network, attn_out, hidden, weights[f"{lp}.b_o"])
+            network, ctx_flat.get_output(0), attention_size, hidden,
+            weights[f"{lp}.w_o"])
+        o_bias = weights.get(f"{lp}.o_bias")
+        if o_bias is not None:
+            attn_out = graph_ops.add_bias_sum(network, attn_out, hidden, o_bias)
 
-        res1 = network.add_elementwise(
-            hidden_state, attn_out, trt.ElementWiseOperation.SUM)
-        hidden_state = res1.get_output(0)
+        # Residual
+        hidden_state = network.add_elementwise(
+            hidden_state, attn_out, trt.ElementWiseOperation.SUM).get_output(0)
 
+        # Pre-FFN LayerNorm
         normed2 = graph_ops.add_layer_norm(
             network, hidden_state, hidden,
-            weights[f"{lp}.norm2_gamma"],
-            weights[f"{lp}.norm2_beta"], eps_t)
+            weights[f"{lp}.post_attn_norm"],
+            weights[f"{lp}.post_attn_norm_beta"], eps_t)
 
-        ffn_hidden = weights[f"{lp}.w_fc1"].shape[1]
+        # MLP: FC1 -> GELU -> FC2
+        mlp_size = weights[f"{lp}.w_fc1"].shape[1]
         fc1 = graph_ops.add_matmul_rhs_constant(
-            network, normed2, hidden, ffn_hidden, weights[f"{lp}.w_fc1"])
-        fc1 = graph_ops.add_bias_sum(network, fc1, ffn_hidden, weights[f"{lp}.b_fc1"])
+            network, normed2, hidden, mlp_size, weights[f"{lp}.w_fc1"])
+        fc1_bias = weights.get(f"{lp}.fc1_bias")
+        if fc1_bias is not None:
+            fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias)
         gelu = graph_ops.add_gelu_new(network, fc1)
         fc2 = graph_ops.add_matmul_rhs_constant(
-            network, gelu, ffn_hidden, hidden, weights[f"{lp}.w_fc2"])
-        fc2 = graph_ops.add_bias_sum(network, fc2, hidden, weights[f"{lp}.b_fc2"])
+            network, gelu, mlp_size, hidden, weights[f"{lp}.w_fc2"])
+        fc2_bias = weights.get(f"{lp}.fc2_bias")
+        if fc2_bias is not None:
+            fc2 = graph_ops.add_bias_sum(network, fc2, hidden, fc2_bias)
 
-        res2 = network.add_elementwise(
-            hidden_state, fc2, trt.ElementWiseOperation.SUM)
-        hidden_state = res2.get_output(0)
+        # Residual
+        hidden_state = network.add_elementwise(
+            hidden_state, fc2, trt.ElementWiseOperation.SUM).get_output(0)
 
+    # Final LayerNorm
     hidden_state = graph_ops.add_layer_norm(
         network, hidden_state, hidden,
-        weights[f"{prefix}final_norm_gamma"],
+        weights[f"{prefix}final_norm"],
         weights[f"{prefix}final_norm_beta"], eps_t)
 
-    logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, weights[f"{prefix}w_lm_head"])
-    logits.name = "logits"
-    network.mark_output(logits)
+    # 7 LM heads: each [seq_length, hidden] -> [seq_length, codebook_size]
+    for j in range(n_lm_heads):
+        logits_j = graph_ops.add_matmul_rhs_constant(
+            network, hidden_state, hidden, codebook_size,
+            weights[f"{prefix}w_lm_head_{j}"])
+        logits_j.name = f"logits_cb{j + 1}"
+        network.mark_output(logits_j)
+
+    if verbose:
+        print(f"[trtf-build] Building Bark fine engine "
+              f"(layers={num_layers}, hidden={hidden}, heads={num_heads}, "
+              f"seq_length={seq_length}, lm_heads={n_lm_heads}, "
+              f"codebook_size={codebook_size}) ...",
+              file=sys.stderr)
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:

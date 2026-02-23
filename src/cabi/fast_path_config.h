@@ -65,9 +65,30 @@ struct FastPathModelConfig {
     int32_t n_coarse_codebooks{2};
     int32_t n_fine_codebooks{8};
     int32_t semantic_pad_token{10000};
-    int32_t semantic_infer_token{10001};
+    int32_t semantic_infer_token{129599};
     int32_t coarse_semantic_pad_token{12048};
     int32_t coarse_infer_token{12050};
+    int32_t text_encoding_offset{10048};
+    int32_t text_pad_token{129595};
+    int32_t semantic_input_vocab{129600};
+    int32_t coarse_input_vocab{12096};
+    int32_t codebook_size{1024};
+    // Sub-model dimensions for coarse engine (semantic uses main hidden/layers/heads)
+    int32_t coarse_hidden_size{0};
+    int32_t coarse_num_layers{0};
+    int32_t coarse_num_heads{0};
+    int32_t coarse_max_cache_length{1024};
+    // Codec (EnCodec) engine config
+    int32_t codec_seq_length{0};       // max frames the codec engine was compiled for
+    int32_t codec_upsample_factor{320}; // total upsample ratio (8*5*4*2)
+    int32_t codec_n_codebooks{8};      // number of codebooks in codec engine input
+    // Fine model config
+    int32_t fine_hidden_size{768};
+    int32_t fine_num_layers{12};
+    int32_t fine_num_heads{12};
+    int32_t fine_codebook_size{1056};
+    int32_t fine_n_lm_heads{7};
+    int32_t fine_seq_length{0};        // 0 = no fine engine
 
     // Diffusion fields (used when runtime_strategy == "diffusion")
     int32_t num_text_encoders{0};

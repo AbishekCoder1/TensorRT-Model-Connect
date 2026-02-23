@@ -24,6 +24,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <iostream>
@@ -645,38 +646,146 @@ PipelineImpl* create_bark_pipeline(
     const std::string& hf_python,
     const std::string& bundle_path)
 {
-    auto decoder_engine = trtf::make_decoder_engine(
+    // Build semantic decoder engine (primary engine)
+    auto semantic_engine = trtf::make_decoder_engine(
         std::move(trt_engine), std::move(exec_ctx), fp_cfg);
-    if (!trtf::has_all_required_tensors(*decoder_engine))
+    if (!trtf::has_all_required_tensors(*semantic_engine))
     {
-        throw std::runtime_error("Bundle engine missing required tensors: " + bundle_path);
+        throw std::runtime_error("Bundle engine missing required semantic tensors: " + bundle_path);
     }
 
-    auto bark_backend = trtf::CreateBarkBackend(std::move(decoder_engine), fp_cfg);
-    if (!bark_backend || !bark_backend->is_available())
+    // Override vocab_size from engine output shape.
+    // Bark semantic: input_vocab=129600 but lm_head outputs only 10048.
+    // The config.json vocab_size is the input embedding size, not the output.
     {
-        throw std::runtime_error("Failed to create Bark backend from bundle engine");
+        auto logits_shape = semantic_engine->engine->getTensorShape("logits");
+        if (logits_shape.nbDims >= 2)
+        {
+            int32_t actual_vocab = logits_shape.d[logits_shape.nbDims - 1];
+            if (actual_vocab > 0 && actual_vocab != semantic_engine->vocab_size)
+            {
+                std::cerr << "[trtf] Semantic: output vocab " << actual_vocab
+                          << " (config says " << semantic_engine->vocab_size << ")" << std::endl;
+                semantic_engine->vocab_size = actual_vocab;
+            }
+        }
     }
 
-    // Deserialize optional coarse/fine/codec engines
+    // Load embedding tables from bundle sections
+    std::vector<float> semantic_embed;
+    if (sections.semantic_embed_data != nullptr && !sections.semantic_embed_data->empty())
+    {
+        const auto n_floats = sections.semantic_embed_data->size() / sizeof(float);
+        semantic_embed.resize(n_floats);
+        std::memcpy(semantic_embed.data(), sections.semantic_embed_data->data(),
+                     sections.semantic_embed_data->size());
+        std::cerr << "[trtf] Loaded semantic embedding table ("
+                  << n_floats / std::max(fp_cfg.hidden_size, 1) << " x "
+                  << fp_cfg.hidden_size << ")" << std::endl;
+    }
+    else
+    {
+        throw std::runtime_error("Bundle missing semantic_embed section: " + bundle_path);
+    }
+
+    std::vector<float> coarse_embed;
+    if (sections.coarse_embed_data != nullptr && !sections.coarse_embed_data->empty())
+    {
+        const auto n_floats = sections.coarse_embed_data->size() / sizeof(float);
+        coarse_embed.resize(n_floats);
+        std::memcpy(coarse_embed.data(), sections.coarse_embed_data->data(),
+                     sections.coarse_embed_data->size());
+        std::cerr << "[trtf] Loaded coarse embedding table ("
+                  << n_floats / std::max(fp_cfg.hidden_size, 1) << " x "
+                  << fp_cfg.hidden_size << ")" << std::endl;
+    }
+    else
+    {
+        throw std::runtime_error("Bundle missing coarse_embed section: " + bundle_path);
+    }
+
+    // Deserialize coarse engine
+    std::unique_ptr<trtf::DecoderStepEngine> coarse_engine;
     if (sections.coarse_engine_plan_data != nullptr && !sections.coarse_engine_plan_data->empty())
     {
+        std::cerr << "[trtf] Deserializing coarse TRT engine ("
+                  << sections.coarse_engine_plan_data->size() / (1024 * 1024)
+                  << " MB) ..." << std::endl;
+
         auto coarse_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
             runtime_ptr->deserializeCudaEngine(
                 sections.coarse_engine_plan_data->data(),
                 sections.coarse_engine_plan_data->size()));
-        if (coarse_trt)
+        if (!coarse_trt)
         {
-            auto coarse_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
-                coarse_trt->createExecutionContext());
-            auto coarse_engine = trtf::make_decoder_engine(
-                std::move(coarse_trt), std::move(coarse_ctx), fp_cfg);
-            bark_backend->set_coarse_engine(std::move(coarse_engine));
+            throw std::runtime_error("Failed to deserialize coarse engine: " + bundle_path);
+        }
+        auto coarse_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+            coarse_trt->createExecutionContext());
+        if (!coarse_ctx)
+        {
+            throw std::runtime_error("Failed to create coarse execution context");
+        }
+
+        // Build coarse-specific config (may differ from semantic)
+        trtf::FastPathModelConfig coarse_cfg = fp_cfg;
+        if (fp_cfg.coarse_hidden_size > 0)
+            coarse_cfg.hidden_size = fp_cfg.coarse_hidden_size;
+        if (fp_cfg.coarse_num_layers > 0)
+            coarse_cfg.num_layers = fp_cfg.coarse_num_layers;
+        if (fp_cfg.coarse_num_heads > 0)
+        {
+            coarse_cfg.num_heads = fp_cfg.coarse_num_heads;
+            coarse_cfg.num_kv_heads = fp_cfg.coarse_num_heads;
+        }
+        coarse_cfg.vocab_size = fp_cfg.coarse_input_vocab;
+        coarse_cfg.head_dim = coarse_cfg.hidden_size / std::max(coarse_cfg.num_heads, 1);
+        coarse_cfg.attention_size = coarse_cfg.num_heads * coarse_cfg.head_dim;
+        coarse_cfg.max_cache_length = fp_cfg.coarse_max_cache_length;
+
+        coarse_engine = trtf::make_decoder_engine(
+            std::move(coarse_trt), std::move(coarse_ctx), coarse_cfg);
+        if (!trtf::has_all_required_tensors(*coarse_engine))
+        {
+            throw std::runtime_error("Bundle coarse engine missing required tensors: " + bundle_path);
+        }
+    }
+    else
+    {
+        throw std::runtime_error("Bundle missing coarse_engine section: " + bundle_path);
+    }
+
+    // Create BarkBackend with both engines + embedding tables
+    auto bark_backend = trtf::CreateBarkBackend(
+        std::move(semantic_engine), std::move(coarse_engine),
+        std::move(semantic_embed), std::move(coarse_embed), fp_cfg);
+    if (!bark_backend || !bark_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create Bark backend from bundle engines");
+    }
+
+    // Deserialize optional codec engine
+    if (sections.codec_engine_plan_data != nullptr && !sections.codec_engine_plan_data->empty())
+    {
+        auto codec_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.codec_engine_plan_data->data(),
+                sections.codec_engine_plan_data->size()));
+        if (codec_trt)
+        {
+            auto codec_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                codec_trt->createExecutionContext());
+            bark_backend->set_codec_engine(std::move(codec_trt), std::move(codec_ctx));
         }
     }
 
+    // Deserialize optional fine engine
     if (sections.fine_engine_plan_data != nullptr && !sections.fine_engine_plan_data->empty())
     {
+        std::cerr << "[trtf] Deserializing fine TRT engine ("
+                  << sections.fine_engine_plan_data->size() / (1024 * 1024)
+                  << " MB) ..." << std::endl;
+
         auto fine_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
             runtime_ptr->deserializeCudaEngine(
                 sections.fine_engine_plan_data->data(),
@@ -687,6 +796,31 @@ PipelineImpl* create_bark_pipeline(
                 fine_trt->createExecutionContext());
             bark_backend->set_fine_engine(std::move(fine_trt), std::move(fine_ctx));
         }
+    }
+
+    // Load fine embedding tables
+    if (sections.fine_embed_data != nullptr && !sections.fine_embed_data->empty())
+    {
+        const auto n_floats = sections.fine_embed_data->size() / sizeof(float);
+        std::vector<float> fine_embed(n_floats);
+        std::memcpy(fine_embed.data(), sections.fine_embed_data->data(),
+                     sections.fine_embed_data->size());
+
+        std::vector<float> fine_pos_embed;
+        if (sections.fine_position_embed_data != nullptr &&
+            !sections.fine_position_embed_data->empty())
+        {
+            const auto pos_n = sections.fine_position_embed_data->size() / sizeof(float);
+            fine_pos_embed.resize(pos_n);
+            std::memcpy(fine_pos_embed.data(),
+                         sections.fine_position_embed_data->data(),
+                         sections.fine_position_embed_data->size());
+        }
+
+        bark_backend->set_fine_embeddings(std::move(fine_embed),
+                                           std::move(fine_pos_embed));
+        std::cerr << "[trtf] Loaded fine embedding tables ("
+                  << n_floats << " floats)" << std::endl;
     }
 
     // Tokenizer (optional for Bark)
