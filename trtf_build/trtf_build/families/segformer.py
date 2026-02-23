@@ -169,6 +169,13 @@ class SegformerPlugin:
                 weights[f"{w_prefix}.mlp.dwconv.weight"] = dw_w.astype(np.float32)
                 weights[f"{w_prefix}.mlp.dwconv.bias"] = dw_b.astype(np.float32)
 
+            # Per-stage final LayerNorm
+            ln_prefix = f"segformer.encoder.layer_norm.{stage_idx}"
+            weights[f"stage{stage_idx}.final_norm.weight"] = _load_tensor(
+                readers, f"{ln_prefix}.weight").astype(np.float32)
+            weights[f"stage{stage_idx}.final_norm.bias"] = _load_tensor(
+                readers, f"{ln_prefix}.bias").astype(np.float32)
+
         # Decode head
         for i in range(4):
             w_proj = _load_tensor(readers, f"decode_head.linear_c.{i}.proj.weight")
@@ -207,6 +214,7 @@ class SegformerPlugin:
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, verbose: bool = False,
+        debug_layer_outputs: bool = False,
     ) -> bytes:
         """Build single TRT engine for SegFormer segmentation.
 
@@ -233,6 +241,16 @@ class SegformerPlugin:
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
         trt_config.clear_flag(trt.BuilderFlag.TF32)
+
+        def _mark_debug(tensor, name):
+            """Mark a tensor as debug output (identity to avoid aliasing)."""
+            if not debug_layer_outputs:
+                return
+            identity = network.add_identity(tensor)
+            out = identity.get_output(0)
+            out.name = name
+            network.mark_output(out)
+            out.dtype = trt.float32
 
         # Input: [1, 3, H, W]
         pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, H_in, W_in))
@@ -285,6 +303,15 @@ class SegformerPlugin:
             hidden_state = graph_ops.add_layer_norm(
                 network, reshape_to_seq.get_output(0), hidden,
                 pe_ln_w, pe_ln_b, eps_t)
+
+            # Debug: patch embed output as NCHW [1, hidden, H', W']
+            if debug_layer_outputs:
+                pe_dbg = network.add_shuffle(hidden_state)
+                pe_dbg.reshape_dims = (1, cur_H, cur_W, hidden)
+                pe_dbg_t = network.add_shuffle(pe_dbg.get_output(0))
+                pe_dbg_t.first_transpose = trt.Permutation([0, 3, 1, 2])
+                _mark_debug(pe_dbg_t.get_output(0),
+                            f"debug_stage{stage_idx}_patch_embed")
 
             # --- Transformer blocks ---
             for block_idx in range(n_blocks):
@@ -452,6 +479,22 @@ class SegformerPlugin:
                     hidden_state, fc2, trt.ElementWiseOperation.SUM)
                 hidden_state = res2.get_output(0)
 
+                # Debug: per-block output as NCHW [1, hidden, H', W']
+                if debug_layer_outputs:
+                    blk_dbg = network.add_shuffle(hidden_state)
+                    blk_dbg.reshape_dims = (1, cur_H, cur_W, hidden)
+                    blk_dbg_t = network.add_shuffle(blk_dbg.get_output(0))
+                    blk_dbg_t.first_transpose = trt.Permutation([0, 3, 1, 2])
+                    _mark_debug(blk_dbg_t.get_output(0),
+                                f"debug_stage{stage_idx}_block{block_idx}")
+
+            # Per-stage final LayerNorm (encoder.layer_norm[i])
+            final_ln_w = weights[f"stage{stage_idx}.final_norm.weight"]
+            final_ln_b = weights[f"stage{stage_idx}.final_norm.bias"]
+            hidden_state = graph_ops.add_layer_norm(
+                network, hidden_state, hidden,
+                final_ln_w, final_ln_b, eps_t)
+
             # Reshape back to 4D: [seq_len, hidden] -> [1, hidden, H', W']
             to_4d = network.add_shuffle(hidden_state)
             to_4d.reshape_dims = (1, cur_H, cur_W, hidden)
@@ -459,6 +502,7 @@ class SegformerPlugin:
             to_4d_t.first_transpose = trt.Permutation([0, 3, 1, 2])
 
             stage_outputs.append((to_4d_t.get_output(0), cur_H, cur_W, hidden))
+            _mark_debug(to_4d_t.get_output(0), f"debug_stage{stage_idx}")
             x = to_4d_t.get_output(0)
 
         # --- Decode Head ---
@@ -487,9 +531,11 @@ class SegformerPlugin:
             to_4d2_t.first_transpose = trt.Permutation([0, 3, 1, 2])
 
             # Bilinear upsample to target_H x target_W
+            # Match PyTorch F.interpolate(mode='bilinear', align_corners=False)
             if feat_H != target_H or feat_W != target_W:
                 resize = network.add_resize(to_4d2_t.get_output(0))
                 resize.resize_mode = trt.InterpolationMode.LINEAR
+                resize.coordinate_transformation = trt.ResizeCoordinateTransformation.HALF_PIXEL
                 resize.shape = (1, decoder_hidden_size, target_H, target_W)
                 projected.append(resize.get_output(0))
             else:

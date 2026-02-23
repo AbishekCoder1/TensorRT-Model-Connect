@@ -463,10 +463,46 @@ def test_full_pipeline_vlm(built_bundle, trtf_binary, hf_python, ld_library_path
     print(f"  Results saved: {results_path}")
 
 
+def _run_segmentation_hf_subprocess(hf_id, image_path, output_path):
+    """Run HF SegFormer inference in a subprocess, return per-pixel class map.
+
+    Writes a .npy file with shape [H, W] of int32 class indices.
+    Returns dict with keys: returncode, output, stderr, time_s
+    """
+    script = (
+        "import sys, numpy as np, torch\n"
+        "from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor\n"
+        "from PIL import Image\n"
+        "hf_id, img_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "proc = SegformerImageProcessor.from_pretrained(hf_id)\n"
+        "model = SegformerForSemanticSegmentation.from_pretrained(hf_id).eval()\n"
+        "img = Image.open(img_path).convert('RGB')\n"
+        "inputs = proc(images=img, return_tensors='pt')\n"
+        "with torch.no_grad():\n"
+        "    logits = model(**inputs).logits\n"
+        "pred = logits.argmax(dim=1)[0].numpy().astype(np.int32)\n"
+        "np.save(out_path, pred)\n"
+        "print(f'shape={pred.shape} classes={len(np.unique(pred))}')\n"
+    )
+
+    t0 = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", script, hf_id, str(image_path), str(output_path)],
+        capture_output=True, text=True, timeout=300)
+    elapsed = time.monotonic() - t0
+
+    return {
+        "returncode": result.returncode,
+        "output": result.stdout,
+        "stderr": result.stderr,
+        "time_s": elapsed,
+    }
+
+
 @pytest.mark.e2e
 def test_segmentation_pipeline(built_bundle, trtf_binary, hf_python,
                                ld_library_path, engine_dir):
-    """Full segmentation pipeline: build -> C++ segment -> verify output."""
+    """Full segmentation pipeline: build -> C++ segment -> compare with HF."""
     entry = built_bundle["entry"]
     bundle_path = built_bundle["path"]
 
@@ -479,13 +515,16 @@ def test_segmentation_pipeline(built_bundle, trtf_binary, hf_python,
 
     image_path = Path(test_image)
     if not image_path.is_absolute():
-        image_path = engine_dir / test_image
+        # Resolve relative to tests/e2e/ directory
+        e2e_dir = Path(__file__).resolve().parent
+        image_path = e2e_dir / test_image
     if not image_path.is_file():
         pytest.skip(f"Test image not found: {image_path}")
 
-    output_path = Path("/tmp") / f"{entry['name']}_seg_output.png"
+    output_path = Path("/tmp/claude") / f"{entry['name']}_seg_output.png"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Run segmentation via C++ binary
+    # Step 1: C++ segmentation
     cmd = [
         str(trtf_binary), "segment", str(bundle_path),
         "--image", str(image_path),
@@ -501,8 +540,206 @@ def test_segmentation_pipeline(built_bundle, trtf_binary, hf_python,
         f"Segmentation failed (rc={result.returncode}):\n{result.stderr}")
     assert output_path.is_file(), "Segmentation output not written"
 
+    # Step 2: HF reference (subprocess to isolate GPU memory)
+    hf_npy_path = Path("/tmp/claude") / f"{entry['name']}_hf_seg.npy"
+    hf_result = _run_segmentation_hf_subprocess(
+        entry["hf_id"], str(image_path), str(hf_npy_path))
+    assert hf_result["returncode"] == 0, (
+        f"HF segmentation failed:\n{hf_result['stderr']}")
+
+    # Step 3: Compare C++ output vs HF
+    from PIL import Image as PILImage
+    trt_class_img = np.array(PILImage.open(output_path).convert("L"))
+    hf_class_map = np.load(str(hf_npy_path))  # [H, W]
+
+    # Upsample TRT (128x128) to HF resolution via nearest-neighbor
+    trt_pil = PILImage.fromarray(trt_class_img)
+    trt_upsampled = np.array(
+        trt_pil.resize((hf_class_map.shape[1], hf_class_map.shape[0]),
+                       PILImage.NEAREST)).astype(np.int32)
+
+    pixel_agreement = float((trt_upsampled == hf_class_map).mean())
+    min_agreement = entry.get("min_pixel_agreement", 0.95)
+
+    # Save results
+    results = {
+        "model": {
+            "name": entry["name"],
+            "hf_id": entry["hf_id"],
+            "family": entry.get("family", "unknown"),
+            "runtime_strategy": "segmentation",
+        },
+        "build": {
+            "was_cached": built_bundle["was_cached"],
+            "build_time_s": built_bundle["build_time_s"],
+            "engine_size_bytes": os.path.getsize(bundle_path),
+            "trt_version": _get_trt_version(),
+            "gpu_name": _get_gpu_name(),
+        },
+        "comparison": {
+            "pixel_agreement": pixel_agreement,
+            "min_pixel_agreement": min_agreement,
+            "trt_output_shape": list(trt_class_img.shape),
+            "hf_output_shape": list(hf_class_map.shape),
+            "trt_unique_classes": int(len(np.unique(trt_class_img))),
+            "hf_unique_classes": int(len(np.unique(hf_class_map))),
+        },
+        "status": "PASS" if pixel_agreement >= min_agreement else "FAIL",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    results_path = _save_results(bundle_path, results)
+
+    assert pixel_agreement >= min_agreement, (
+        f"Pixel agreement {pixel_agreement:.4f} < {min_agreement} "
+        f"for {entry['name']}")
+
     print(f"\n[segmentation_pipeline] {entry['name']}: PASS")
-    print(f"  Output: {output_path}")
+    print(f"  Pixel agreement: {pixel_agreement:.4f} "
+          f"(min={min_agreement})")
+    print(f"  TRT classes: {int(len(np.unique(trt_class_img)))}, "
+          f"HF classes: {int(len(np.unique(hf_class_map)))}")
+    print(f"  Results saved: {results_path}")
+
+
+def _run_segmentation_engine_parity_subprocess(hf_id, image_path):
+    """Build debug engine, preprocess with HF, run both TRT and HF, compare.
+
+    Returns dict with keys: returncode, pixel_agreement, cosine, max_diff,
+    output, stderr, time_s.
+    """
+    script = (
+        "import sys, numpy as np, torch\n"
+        "from transformers import (SegformerForSemanticSegmentation,\n"
+        "                          SegformerImageProcessor)\n"
+        "from PIL import Image\n"
+        "hf_id, img_path = sys.argv[1], sys.argv[2]\n"
+        "proc = SegformerImageProcessor.from_pretrained(hf_id)\n"
+        "img = Image.open(img_path).convert('RGB')\n"
+        "inputs = proc(images=img, return_tensors='pt')\n"
+        "pv = inputs['pixel_values']\n"
+        "# HF\n"
+        "model = SegformerForSemanticSegmentation.from_pretrained(\n"
+        "    hf_id, torch_dtype=torch.float32).eval()\n"
+        "with torch.no_grad():\n"
+        "    hf_logits = model(pv).logits[0].numpy()\n"
+        "del model\n"
+        "# TRT\n"
+        "from trtf_build.engine_builder import _resolve_model\n"
+        "from trtf_build.config import ModelConfig\n"
+        "from trtf_build.families import find_plugin\n"
+        "model_dir = _resolve_model(hf_id)\n"
+        "config = ModelConfig.from_dir(model_dir)\n"
+        "plugin = find_plugin(config.model_type)\n"
+        "weights = plugin.load_weights(model_dir, config)\n"
+        "engine_plan = plugin.build_engine(config, weights, 0)\n"
+        "import tensorrt as trt\n"
+        "try:\n"
+        "    from cuda.bindings import runtime as cudart\n"
+        "except ImportError:\n"
+        "    from cuda import cudart\n"
+        "def chk(s):\n"
+        "    ok = getattr(cudart,'cudaError_t',type(None))\n"
+        "    if hasattr(ok,'cudaSuccess') and s!=ok.cudaSuccess: raise RuntimeError(s)\n"
+        "    elif not hasattr(ok,'cudaSuccess') and s!=0: raise RuntimeError(s)\n"
+        "rt = trt.Runtime(trt.Logger(trt.Logger.WARNING))\n"
+        "engine = rt.deserialize_cuda_engine(engine_plan)\n"
+        "ctx = engine.create_execution_context()\n"
+        "pv_np = pv.numpy().astype(np.float32)\n"
+        "out_shape = tuple(engine.get_tensor_shape('logits'))\n"
+        "trt_out = np.zeros(out_shape, dtype=np.float32)\n"
+        "e,stream = cudart.cudaStreamCreate(); chk(e)\n"
+        "H2D = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice\n"
+        "D2H = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost\n"
+        "e,d_in = cudart.cudaMalloc(pv_np.nbytes); chk(e)\n"
+        "e,d_out = cudart.cudaMalloc(trt_out.nbytes); chk(e)\n"
+        "cudart.cudaMemcpyAsync(d_in,pv_np.ctypes.data,pv_np.nbytes,H2D,stream)\n"
+        "ctx.set_tensor_address('pixel_values',d_in)\n"
+        "ctx.set_tensor_address('logits',d_out)\n"
+        "ctx.execute_async_v3(stream)\n"
+        "cudart.cudaMemcpyAsync(trt_out.ctypes.data,d_out,trt_out.nbytes,D2H,stream)\n"
+        "cudart.cudaStreamSynchronize(stream)\n"
+        "trt_logits = trt_out[0]\n"
+        "cudart.cudaFree(d_in); cudart.cudaFree(d_out)\n"
+        "cudart.cudaStreamDestroy(stream)\n"
+        "# Compare\n"
+        "diff = np.abs(hf_logits - trt_logits)\n"
+        "hf_pred = np.argmax(hf_logits, axis=0)\n"
+        "trt_pred = np.argmax(trt_logits, axis=0)\n"
+        "agree = float((hf_pred == trt_pred).mean())\n"
+        "cos = float(np.dot(hf_logits.flatten(),trt_logits.flatten()) / \n"
+        "            (np.linalg.norm(hf_logits.flatten())*np.linalg.norm(trt_logits.flatten())+1e-12))\n"
+        "print(f'pixel_agreement={agree}')\n"
+        "print(f'cosine={cos}')\n"
+        "print(f'max_diff={float(diff.max())}')\n"
+    )
+
+    t0 = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", script, hf_id, str(image_path)],
+        capture_output=True, text=True, timeout=600)
+    elapsed = time.monotonic() - t0
+
+    # Parse metrics from stdout
+    metrics = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, val = line.split("=", 1)
+            try:
+                metrics[key.strip()] = float(val.strip())
+            except ValueError:
+                pass
+
+    return {
+        "returncode": result.returncode,
+        "pixel_agreement": metrics.get("pixel_agreement"),
+        "cosine": metrics.get("cosine"),
+        "max_diff": metrics.get("max_diff"),
+        "output": result.stdout,
+        "stderr": result.stderr,
+        "time_s": elapsed,
+    }
+
+
+@pytest.mark.e2e
+def test_segmentation_engine_parity(built_bundle, engine_dir):
+    """Engine parity: same HF-preprocessed input -> TRT vs HF logits match."""
+    entry = built_bundle["entry"]
+
+    if entry.get("runtime_strategy") != "segmentation":
+        pytest.skip(f"{entry['name']} is not a segmentation model")
+
+    test_image = entry.get("test_image")
+    if not test_image:
+        pytest.skip(f"No test_image configured for {entry['name']}")
+
+    image_path = Path(test_image)
+    if not image_path.is_absolute():
+        e2e_dir = Path(__file__).resolve().parent
+        image_path = e2e_dir / test_image
+    if not image_path.is_file():
+        pytest.skip(f"Test image not found: {image_path}")
+
+    result = _run_segmentation_engine_parity_subprocess(
+        entry["hf_id"], str(image_path))
+
+    assert result["returncode"] == 0, (
+        f"Engine parity subprocess failed:\n{result['stderr']}")
+
+    pixel_agreement = result["pixel_agreement"]
+    cosine = result["cosine"]
+    max_diff = result["max_diff"]
+
+    assert pixel_agreement is not None, "Failed to parse pixel_agreement"
+    assert pixel_agreement >= 0.99, (
+        f"Engine parity pixel agreement {pixel_agreement:.4f} < 0.99 "
+        f"for {entry['name']}")
+    assert cosine is not None and cosine >= 0.9999, (
+        f"Engine parity cosine {cosine} < 0.9999 for {entry['name']}")
+
+    print(f"\n[segmentation_engine_parity] {entry['name']}: PASS")
+    print(f"  Pixel agreement: {pixel_agreement:.4f}")
+    print(f"  Cosine similarity: {cosine:.6f}")
+    print(f"  Max logit diff: {max_diff:.4f}")
 
 
 @pytest.mark.e2e
