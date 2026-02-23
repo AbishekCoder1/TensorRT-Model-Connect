@@ -86,6 +86,139 @@ pytest tests/ -v --ignore=tests/cpp
 
 C++ tests are plain executables (no framework) in `tests/cpp/`. They use `main()`, print to stderr on failure, and return 0 on success / non-zero on failure. Test names in CMake match their source files.
 
+## Test architecture
+
+Tests are organized in four layers, each with different scope, dependencies,
+and intended use.
+
+### Layer 1: Python builder unit tests (`tests/builder/`)
+
+**Intent:** Verify Python build logic in isolation — config parsing, weight
+loading, checkpoint mapping, bundle writing, engine orchestration, family
+plugin dispatch, graph ops, and debug runner infrastructure.
+
+**Implementation:**
+- Tests use `pytest` with shared fixtures from `tests/builder/conftest.py`.
+- Two skip markers: `requires_trt` (TRT + CUDA available) and
+  `requires_trtf_build` (trtf_build importable). All files use
+  `try/except` with `pytest.skip(allow_module_level=True)` so they skip
+  cleanly when TRT is not installed.
+- TRT graph tests use the `trt_runner` fixture: a `build_fn(network, inputs)`
+  closure constructs a small TRT graph, the fixture builds an engine, runs
+  inference, and returns NumPy outputs for comparison against PyTorch/NumPy
+  references via `np.testing.assert_allclose`.
+- Mock-based tests (engine_builder, pipeline, debug_runner cleanup) use
+  `unittest.mock.patch` and require no GPU.
+- Family plugin tests create synthetic safetensors with correct weight shapes,
+  call `plugin.load_weights()`, and assert on returned WeightDict keys and
+  family-specific transforms (e.g., Gemma gamma+1.0, Phi fused QKV split).
+
+**Key files:**
+| File | Tests | GPU? |
+|------|-------|------|
+| `test_config.py` | ModelConfig parsing, VL text_config merge, edge cases | No |
+| `test_checkpoint_mapper.py` | Weight loading, GQA expansion, tied embeddings, biases | No |
+| `test_family_plugins.py` | 10 family plugins: load_weights correctness | No |
+| `test_families.py` | Plugin match/dispatch, runtime_strategy, embed_input | No |
+| `test_graph_ops.py` | 18 graph ops (RoPE, ALiBi, RMSNorm, attention, etc.) | Mix |
+| `test_graph_ops_extended.py` | YaRN RoPE, T5 bias, extended ALiBi, conv/norm/ELU/pad ops | Mix |
+| `test_graph_blocks.py` | apply_norm, SwiGLU MLP, GELU FC MLP blocks | TRT |
+| `test_engine_builder_extended.py` | build_bundle orchestration, GPU name, TRT version | Mock |
+| `test_pipeline.py` | Pipeline subprocess wrapper, binary detection | Mock |
+| `test_debug_runner_extended.py` | Bundle section loading, runner cleanup, generate sequencing | Mix |
+| `test_vision_compute_extended.py` | Vision RoPE, DeepStack config, patch embed, spatial merge | Mix |
+| `test_standard_decoder.py` | Tensor naming contract, debug outputs | TRT |
+| `test_bundle_writer.py` | Bundle format round-trip, section integrity | No |
+| `test_cache_state_machine.py` | Position, mask, cache append/shift logic | No |
+| `test_cli.py` | CLI inspect/build command dispatch | Mock |
+
+### Layer 2: C++ runtime unit tests (`tests/cpp/`)
+
+**Intent:** Verify C++ runtime correctness — bundle parsing, tokenizers,
+CUDA RAII wrappers, KV cache device operations, TRT engine lifecycle, image
+preprocessing, CLI argument parsing, and helper utilities.
+
+**Implementation:**
+- Plain `main()` executables with no test framework. A `check(condition, name)`
+  helper accumulates `failures`; `main()` returns non-zero if any failed.
+- Registered in `CMakeLists.txt` with `add_executable` + `add_test`.
+- TRT-dependent tests guard with `#if TRTF_HAS_TRT` and skip gracefully
+  (exit 0) when TRT headers are unavailable.
+- Shared utilities in `test_helpers.h`: temp dirs, safetensors writing,
+  standard decoder checkpoint generation.
+
+**Key files:**
+| File | Tests | GPU? |
+|------|-------|------|
+| `test_bundle_format.cpp` | Bundle magic, section parsing, round-trip | No |
+| `test_vocab_tokenizer.cpp` | Encode/decode, round-trip, case insensitivity | No |
+| `test_hf_python_tokenizer.cpp` | Shell quoting, int parsing, HF output sanitization | No |
+| `test_text_parsers.cpp` | String/file parsing helpers | No |
+| `test_json_helpers.cpp` | JSON extraction helpers | No |
+| `test_cli_args.cpp` | CLI argument parsing | No |
+| `test_data_dir.cpp` | Source/scripts dir resolution, env overrides | No |
+| `test_trt_logger.cpp` | Severity names, error storage, env-var controls | TRT headers |
+| `test_trt_engine_lifecycle.cpp` | layer_tensor_name, constants | TRT headers |
+| `test_bundle_helpers.cpp` | find_bundle_sections for all bundle types | TRT headers |
+| `test_image_preprocessor.cpp` | All 4 strategies, config parsing, prompt formatting | No |
+| `test_cuda_buffer.cpp` | RAII alloc, move semantics, data round-trip | GPU |
+| `test_cuda_stream.cpp` | RAII stream, move semantics | GPU |
+| `test_device_kv_cache.cpp` | Cache construction, mask progression, position clamping, reset | GPU |
+| `test_decode_runtime.cpp` | Argmax, mask building | TRT headers |
+| `test_fast_path_config.cpp` | Config JSON parsing | TRT headers |
+| `test_pipeline_api.cpp` | C API pipeline creation | TRT headers |
+| `test_bundle_e2e.cpp` | Bundle build + load round-trip | TRT headers |
+| `test_c_abi_entry.cpp` | C ABI entry point | TRT headers |
+
+### Layer 3: Tool self-tests (`tests/tools/`)
+
+**Intent:** Verify diff framework and comparison utilities in isolation —
+logit comparison, layer diffing, perf benchmarking, audio/segmentation
+metrics — without needing models or GPU.
+
+**Implementation:**
+- Pure Python tests, no TRT/GPU needed. `conftest.py` adds `tools/` to path.
+- Tests use `importlib.import_module` for lazy importing of tool modules.
+- Comparison logic tested with synthetic NumPy arrays and known expected values.
+- WAV round-trip tests create real audio files via `write_wav_f32`/`read_wav_f32`.
+- Bundle config/weight loading tests create synthetic `.trtfb` bundles in memory.
+
+**Key files:**
+| File | Tests |
+|------|-------|
+| `test_tool_helpers.py` | cosine_sim, compare_arrays |
+| `test_diff_audio.py` | Energy computation, WAV I/O, token stats |
+| `test_diff_segmentation.py` | Pixel agreement, logit diff, argument parsing |
+| `test_diffusion_helpers.py` | silu, gelu_tanh, bundle config/weights, timestep embedding |
+| `test_diff_logits.py` | Logit comparison, argmax match, top-k overlap |
+| `test_diff_framework.py` | DiffResult, registry, runner, CLI parsing |
+| `test_parity.py` | Text/token comparison for runner parity |
+| `test_perf_compare.py` | Stats, formatting, JSON output, serial GPU execution |
+
+### Layer 4: E2E tests (`tests/e2e/`)
+
+**Intent:** Validate the full pipeline end-to-end — build bundle from HF,
+run C++ inference, compare output against HuggingFace reference. This is
+the gold-standard correctness gate.
+
+**Implementation:**
+- Per-model JSON manifests in `tests/e2e/models/` define HF model ID, family,
+  runtime strategy, tolerances, and test prompts.
+- `conftest.py` provides session-scoped fixtures for binary paths, engine dirs,
+  and LD_LIBRARY_PATH. The `built_bundle` fixture auto-builds bundles via
+  `trtf-build` subprocess if missing (or if `--rebuild-engines` is set).
+- `test_full_pipeline.py` compares C++ greedy decoding output against HF
+  for logit parity and text match.
+- `test_error_handling.py` verifies graceful failure for malformed/missing
+  bundles and bad arguments (no GPU needed for error cases).
+- `test_cache_correctness.py` validates KV cache overflow and consistency
+  across different cache sizes.
+
+**Model manifests (39 models):** Standard decoders (Qwen3, LLaMA, Gemma,
+Mistral, Falcon, Phi, GPT-2, OPT, Bloom, etc.), MoE (Mixtral, Phi-MoE),
+SSM (Mamba, RWKV), VL (Qwen2.5-VL, Qwen3-VL), diffusion (Wan2.1-T2V),
+audio (Bark), segmentation (SegFormer), speech (Whisper).
+
 ## Regression test plan
 
 Standard regression gate before merging changes. Run in order; each tier
@@ -96,22 +229,23 @@ catches progressively harder issues.
 Fast, deterministic tests for logic correctness. Always run first.
 
 ```bash
-# Python builder unit tests (config, checkpoint_mapper, bundle_writer, etc.)
+# Python builder unit tests (config, checkpoint_mapper, bundle_writer, family plugins, etc.)
 .venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
 
-# Tools self-tests (diff framework, perf_compare stats/formatting/serial ordering)
+# Tools self-tests (diff framework, perf_compare, audio/segmentation/diffusion helpers)
 .venv/bin/python -m pytest tests/tools/ -v
 
-# C++ unit tests (bundle format, decode runtime, image preprocessor)
+# C++ unit tests (bundle format, tokenizers, CUDA wrappers, KV cache, image preprocessor)
 ctest --test-dir build --output-on-failure
 ```
 
 ### Tier 2: Graph-op GPU tests (~2 min, needs TRT)
 
-Validates TRT graph operations (RMSNorm, RoPE, attention, etc.) on real GPU.
+Validates TRT graph operations (RMSNorm, RoPE, attention, conv, norm, etc.) and
+composable graph blocks (SwiGLU MLP, GELU MLP, attention block) on real GPU.
 
 ```bash
-.venv/bin/python -m pytest tests/builder/test_graph_ops.py -v -m trt
+.venv/bin/python -m pytest tests/builder/test_graph_ops.py tests/builder/test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -m trt
 ```
 
 ### Tier 3: E2E single-model smoke test (~5 min, needs GPU)
@@ -156,12 +290,16 @@ python3 tools/perf_compare.py \
 | Change type | Tiers to run |
 |-------------|-------------|
 | Python builder logic | 1, 2 |
-| Family plugin | 1, 2, 3 (the specific model) |
-| C++ runtime | 1 (ctest), 3 |
-| Graph ops | 1, 2 |
-| KV cache / mask / position logic | 1, 3, 4 |
-| debug_runner.py | 1, 3 |
+| Family plugin | 1 (includes plugin load_weights tests), 2, 3 (the specific model) |
+| C++ runtime | 1 (ctest — includes CUDA, KV cache, tokenizer tests), 3 |
+| Graph ops / graph blocks | 1, 2 |
+| KV cache / mask / position logic | 1 (ctest test_device_kv_cache + Python cache_state_machine), 3, 4 |
+| debug_runner.py | 1 (debug_runner_extended), 3 |
+| Image preprocessor | 1 (ctest test_image_preprocessor) |
+| Tokenizer (vocab or HF) | 1 (ctest test_vocab_tokenizer / test_hf_python_tokenizer) |
 | perf_compare.py | 1 (tools tests), 5 |
+| Diff tools (audio/seg/diffusion) | 1 (tools tests) |
+| Vision encoder / VL pipeline | 1 (vision_compute_extended), 2, 3 |
 | New model family | 1, 2, validate_family.sh, then add to tests/e2e/models/ + tier 4 |
 
 ## Running executables
@@ -258,14 +396,17 @@ scripts/                             # Infrastructure & utility scripts
 tests/
   cpp/                               # C++ runtime unit tests
     test_helpers.h                   # Shared helpers: temp dirs, safetensors writing
-    test_bundle_format.cpp ...       # 12 test executables
-  builder/                           # Python builder unit tests (from trtf_build/tests/)
-    conftest.py test_config.py ...   # 11 test modules
+    test_bundle_format.cpp ...       # 19 test executables (bundle, tokenizers, CUDA, KV cache, etc.)
+  builder/                           # Python builder unit tests
+    conftest.py                      # TRT runner fixture, skip markers
+    test_config.py ...               # 19 test modules (config, weights, graph ops/blocks, plugins, etc.)
   tools/                             # Diff framework self-tests
-    test_diff_logits.py ...          # Mocked tests for diff tools
+    conftest.py                      # Adds tools/ to import path
+    test_diff_logits.py ...          # 11 test modules (logits, audio, segmentation, diffusion, etc.)
   e2e/                               # E2E tests with JSON manifest
-    models/                          # Per-model JSON manifests (one file per model)
-    test_inference.py ...            # GPU-required E2E tests
+    conftest.py                      # CLI options, bundle building, model parametrization
+    models/                          # 39 per-model JSON manifests
+    test_full_pipeline.py ...        # 8 test modules (pipeline, inference, error handling, cache, etc.)
 ```
 
 ## Adding a new model family

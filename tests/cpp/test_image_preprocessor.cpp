@@ -484,6 +484,176 @@ static void test_parse_resample_from_preprocessor()
           "explicit interpolation overrides resample");
 }
 
+// Test: parse_vl_preprocess_config with complete JSON (all fields populated).
+static void test_parse_complete_json()
+{
+    const std::string config_json = R"({
+        "image_token_id": 200,
+        "fixed_image_size": 336,
+        "num_image_pad_tokens": 128,
+        "vision_output_dim": 4096,
+        "vl_prompt_template": "system {image_pads}\nuser: {prompt}\nassistant:",
+        "image_token_str": "<img>",
+        "preprocessor_type": "center_crop_chw",
+        "interpolation": "bilinear"
+    })";
+
+    const std::string preproc_json = R"({
+        "patch_size": 16,
+        "merge_size": 4,
+        "temporal_patch_size": 1,
+        "image_mean": [0.5, 0.5, 0.5],
+        "image_std": [0.25, 0.25, 0.25]
+    })";
+
+    auto cfg = trtf::parse_vl_preprocess_config(config_json, preproc_json);
+
+    check(cfg.image_token_id == 200, "complete: image_token_id=200");
+    check(cfg.fixed_image_size == 336, "complete: fixed_image_size=336");
+    check(cfg.num_image_pad_tokens == 128, "complete: num_image_pad_tokens=128");
+    check(cfg.vision_output_dim == 4096, "complete: vision_output_dim=4096");
+    check(cfg.image_token_str == "<img>", "complete: image_token_str=<img>");
+    check(cfg.preprocessor_type == "center_crop_chw", "complete: preprocessor_type=center_crop_chw");
+    check(cfg.interpolation == "bilinear", "complete: interpolation=bilinear");
+    check(cfg.patch_size == 16, "complete: patch_size=16");
+    check(cfg.merge_size == 4, "complete: merge_size=4");
+    check(cfg.temporal_patch_size == 1, "complete: temporal_patch_size=1");
+    check(std::abs(cfg.image_mean[0] - 0.5F) < 1e-5F, "complete: image_mean[0]=0.5");
+    check(std::abs(cfg.image_mean[1] - 0.5F) < 1e-5F, "complete: image_mean[1]=0.5");
+    check(std::abs(cfg.image_mean[2] - 0.5F) < 1e-5F, "complete: image_mean[2]=0.5");
+    check(std::abs(cfg.image_std[0] - 0.25F) < 1e-5F, "complete: image_std[0]=0.25");
+    check(std::abs(cfg.image_std[1] - 0.25F) < 1e-5F, "complete: image_std[1]=0.25");
+    check(std::abs(cfg.image_std[2] - 0.25F) < 1e-5F, "complete: image_std[2]=0.25");
+
+    // Verify template substitution includes the newline unescaping
+    check(cfg.vl_prompt_template.find("user:") != std::string::npos,
+          "complete: template contains user:");
+}
+
+// Test: parse_vl_preprocess_config with missing fields uses defaults.
+static void test_parse_missing_fields_defaults()
+{
+    // Config JSON with only one field
+    const std::string config_json = R"({
+        "image_token_id": 42
+    })";
+
+    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+
+    check(cfg.image_token_id == 42, "defaults: image_token_id=42");
+    check(cfg.fixed_image_size == 448, "defaults: fixed_image_size=448");
+    check(cfg.num_image_pad_tokens == 256, "defaults: num_image_pad_tokens=256");
+    check(cfg.vision_output_dim == 0, "defaults: vision_output_dim=0");
+    check(cfg.preprocessor_type == "qwen_merge_group", "defaults: preprocessor_type=qwen_merge_group");
+    check(cfg.interpolation == "bicubic", "defaults: interpolation=bicubic");
+    check(cfg.vl_prompt_template.empty(), "defaults: vl_prompt_template empty");
+    check(cfg.image_token_str.empty(), "defaults: image_token_str empty");
+    // Default image_mean/std from struct init
+    check(std::abs(cfg.image_mean[0] - 0.48145466F) < 1e-5F, "defaults: image_mean[0] is default");
+    check(std::abs(cfg.image_std[0] - 0.26862954F) < 1e-5F, "defaults: image_std[0] is default");
+}
+
+// Test: parse_vl_preprocess_config with empty JSON string.
+static void test_parse_empty_json()
+{
+    auto cfg = trtf::parse_vl_preprocess_config("", "");
+
+    // All fields should be at their struct default values
+    check(cfg.image_token_id == -1, "empty: image_token_id=-1");
+    check(cfg.fixed_image_size == 448, "empty: fixed_image_size=448");
+    check(cfg.num_image_pad_tokens == 256, "empty: num_image_pad_tokens=256");
+    check(cfg.preprocessor_type == "qwen_merge_group", "empty: preprocessor_type=qwen_merge_group");
+    check(cfg.interpolation == "bicubic", "empty: interpolation=bicubic");
+    check(cfg.patch_size == 14, "empty: patch_size=14 (struct default)");
+    check(cfg.merge_size == 2, "empty: merge_size=2 (struct default)");
+}
+
+// Test: parse_vl_preprocess_config with empty config but populated preprocessor.
+static void test_parse_only_preprocessor_config()
+{
+    const std::string preproc_json = R"({
+        "patch_size": 32,
+        "merge_size": 1,
+        "temporal_patch_size": 4,
+        "image_mean": [0.1, 0.2, 0.3],
+        "image_std": [0.4, 0.5, 0.6]
+    })";
+
+    auto cfg = trtf::parse_vl_preprocess_config("{}", preproc_json);
+
+    check(cfg.patch_size == 32, "preproc_only: patch_size=32");
+    check(cfg.merge_size == 1, "preproc_only: merge_size=1");
+    check(cfg.temporal_patch_size == 4, "preproc_only: temporal_patch_size=4");
+    check(std::abs(cfg.image_mean[0] - 0.1F) < 1e-5F, "preproc_only: image_mean[0]=0.1");
+    check(std::abs(cfg.image_mean[1] - 0.2F) < 1e-5F, "preproc_only: image_mean[1]=0.2");
+    check(std::abs(cfg.image_mean[2] - 0.3F) < 1e-5F, "preproc_only: image_mean[2]=0.3");
+    check(std::abs(cfg.image_std[0] - 0.4F) < 1e-5F, "preproc_only: image_std[0]=0.4");
+    check(std::abs(cfg.image_std[1] - 0.5F) < 1e-5F, "preproc_only: image_std[1]=0.5");
+    check(std::abs(cfg.image_std[2] - 0.6F) < 1e-5F, "preproc_only: image_std[2]=0.6");
+}
+
+// Test: format_vl_prompt with empty template returns empty string.
+static void test_format_vl_prompt_empty_template()
+{
+    trtf::VLPreprocessConfig config;
+    config.num_image_pad_tokens = 5;
+    config.image_token_str = "<pad>";
+    config.vl_prompt_template = "";
+
+    const std::string result = trtf::format_vl_prompt("Hello", config);
+    check(result.empty(), "empty_template: returns empty string");
+}
+
+// Test: format_vl_prompt with template missing placeholders.
+static void test_format_vl_prompt_no_placeholders()
+{
+    trtf::VLPreprocessConfig config;
+    config.num_image_pad_tokens = 2;
+    config.image_token_str = "<tok>";
+    config.vl_prompt_template = "Fixed template with no substitution.";
+
+    const std::string result = trtf::format_vl_prompt("User input", config);
+    check(result == "Fixed template with no substitution.",
+          "no_placeholders: template returned unchanged");
+}
+
+// Test: preprocessor_type = "aspect_preserve_chw" round-trips through parse.
+static void test_parse_vl_config_aspect_preserve()
+{
+    const std::string config_json = R"({
+        "preprocessor_type": "aspect_preserve_chw"
+    })";
+
+    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    check(cfg.preprocessor_type == "aspect_preserve_chw",
+          "preprocessor_type aspect_preserve_chw parsed correctly");
+}
+
+// Test: preprocessor_type = "center_crop_chw" round-trips through parse.
+static void test_parse_vl_config_center_crop()
+{
+    const std::string config_json = R"({
+        "preprocessor_type": "center_crop_chw"
+    })";
+
+    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    check(cfg.preprocessor_type == "center_crop_chw",
+          "preprocessor_type center_crop_chw parsed correctly");
+}
+
+// Test: vl_prompt_template with escaped newlines (\n) gets unescaped.
+static void test_parse_vl_prompt_template_newline_unescape()
+{
+    const std::string config_json = R"({
+        "vl_prompt_template": "Line1\\nLine2\\nLine3"
+    })";
+
+    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    // The \\n sequences should be unescaped to real newlines
+    check(cfg.vl_prompt_template.find('\n') != std::string::npos,
+          "newline_unescape: template contains real newlines");
+}
+
 int main()
 {
     test_qwen_merge_group_strategy();
@@ -499,6 +669,16 @@ int main()
     test_parse_interpolation_default();
     test_parse_interpolation_bilinear();
     test_parse_resample_from_preprocessor();
+    // New tests
+    test_parse_complete_json();
+    test_parse_missing_fields_defaults();
+    test_parse_empty_json();
+    test_parse_only_preprocessor_config();
+    test_format_vl_prompt_empty_template();
+    test_format_vl_prompt_no_placeholders();
+    test_parse_vl_config_aspect_preserve();
+    test_parse_vl_config_center_crop();
+    test_parse_vl_prompt_template_newline_unescape();
 
     if (failures > 0)
     {

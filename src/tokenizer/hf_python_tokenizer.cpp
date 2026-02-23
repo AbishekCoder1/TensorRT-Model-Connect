@@ -1,4 +1,5 @@
 #include "trtf/tokenizer.h"
+#include "tokenizer/hf_python_tokenizer_helpers.h"
 #include "utils/data_dir.h"
 
 #include <algorithm>
@@ -22,12 +23,10 @@
 #include <unistd.h>
 
 namespace trtf {
-namespace {
 
-struct CommandResult {
-    int exit_code{1};
-    std::string output;
-};
+// --- Exported helper functions (hf_tok_detail namespace) ---
+
+namespace hf_tok_detail {
 
 std::string trim_trailing_newlines(std::string text)
 {
@@ -57,6 +56,104 @@ std::string shell_quote(std::string_view value)
     out.push_back('\'');
     return out;
 }
+
+std::vector<int32_t> parse_int_list(const std::string& text)
+{
+    std::vector<int32_t> out;
+    std::istringstream iss(text);
+    std::string token;
+    while (iss >> token)
+    {
+        try
+        {
+            std::size_t parsed = 0;
+            const long long value = std::stoll(token, &parsed);
+            if (parsed == token.size())
+            {
+                out.push_back(static_cast<int32_t>(value));
+            }
+        }
+        catch (const std::exception&)
+        {
+        }
+    }
+    return out;
+}
+
+std::string join_ids_csv(const std::vector<int32_t>& ids)
+{
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < ids.size(); ++i)
+    {
+        if (i != 0)
+        {
+            oss << ',';
+        }
+        oss << ids[i];
+    }
+    return oss.str();
+}
+
+namespace {
+
+std::string trim_ascii_whitespace(std::string text)
+{
+    const auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+    text.erase(text.begin(), std::find_if(text.begin(), text.end(), [&](unsigned char c) { return !is_space(c); }));
+    text.erase(std::find_if(text.rbegin(), text.rend(), [&](unsigned char c) { return !is_space(c); }).base(), text.end());
+    return text;
+}
+
+bool starts_with_ascii(std::string_view value, std::string_view prefix)
+{
+    return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool is_ignorable_hf_warning_line(const std::string& line)
+{
+    const std::string trimmed = trim_ascii_whitespace(line);
+    if (trimmed.empty())
+    {
+        return true;
+    }
+    return starts_with_ascii(trimmed, "None of PyTorch, TensorFlow >= 2.0, or Flax have been found")
+        || starts_with_ascii(trimmed, "Skipping import of cpp extensions due to incompatible torch version");
+}
+
+} // namespace
+
+std::string sanitize_hf_output(const std::string& text)
+{
+    std::istringstream iss(text);
+    std::string line;
+    std::ostringstream filtered;
+    bool first = true;
+    while (std::getline(iss, line))
+    {
+        if (is_ignorable_hf_warning_line(line))
+        {
+            continue;
+        }
+
+        if (!first)
+        {
+            filtered << '\n';
+        }
+        filtered << line;
+        first = false;
+    }
+
+    return trim_trailing_newlines(filtered.str());
+}
+
+} // namespace hf_tok_detail
+
+namespace {
+
+struct CommandResult {
+    int exit_code{1};
+    std::string output;
+};
 
 CommandResult run_command_capture(std::string command)
 {
@@ -115,91 +212,6 @@ std::filesystem::path tokenizer_script_path()
     return std::filesystem::path(script_path("hf_tokenizer.py"));
 }
 
-std::string trim_ascii_whitespace(std::string text)
-{
-    const auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
-    text.erase(text.begin(), std::find_if(text.begin(), text.end(), [&](unsigned char c) { return !is_space(c); }));
-    text.erase(std::find_if(text.rbegin(), text.rend(), [&](unsigned char c) { return !is_space(c); }).base(), text.end());
-    return text;
-}
-
-bool starts_with_ascii(std::string_view value, std::string_view prefix)
-{
-    return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
-}
-
-bool is_ignorable_hf_warning_line(const std::string& line)
-{
-    const std::string trimmed = trim_ascii_whitespace(line);
-    if (trimmed.empty())
-    {
-        return true;
-    }
-    return starts_with_ascii(trimmed, "None of PyTorch, TensorFlow >= 2.0, or Flax have been found")
-        || starts_with_ascii(trimmed, "Skipping import of cpp extensions due to incompatible torch version");
-}
-
-std::string sanitize_hf_output(const std::string& text)
-{
-    std::istringstream iss(text);
-    std::string line;
-    std::ostringstream filtered;
-    bool first = true;
-    while (std::getline(iss, line))
-    {
-        if (is_ignorable_hf_warning_line(line))
-        {
-            continue;
-        }
-
-        if (!first)
-        {
-            filtered << '\n';
-        }
-        filtered << line;
-        first = false;
-    }
-
-    return trim_trailing_newlines(filtered.str());
-}
-
-std::vector<int32_t> parse_int_list(const std::string& text)
-{
-    std::vector<int32_t> out;
-    std::istringstream iss(text);
-    std::string token;
-    while (iss >> token)
-    {
-        try
-        {
-            std::size_t parsed = 0;
-            const long long value = std::stoll(token, &parsed);
-            if (parsed == token.size())
-            {
-                out.push_back(static_cast<int32_t>(value));
-            }
-        }
-        catch (const std::exception&)
-        {
-        }
-    }
-    return out;
-}
-
-std::string join_ids_csv(const std::vector<int32_t>& ids)
-{
-    std::ostringstream oss;
-    for (std::size_t i = 0; i < ids.size(); ++i)
-    {
-        if (i != 0)
-        {
-            oss << ',';
-        }
-        oss << ids[i];
-    }
-    return oss.str();
-}
-
 class HfPythonTokenizer final : public ITokenizer {
 public:
     HfPythonTokenizer(std::string model_dir, std::string python_path, bool add_special_tokens)
@@ -218,12 +230,14 @@ public:
             throw std::runtime_error("HF tokenizer model directory does not exist: " + mModelDir);
         }
 
-        const std::string check_cmd = shell_quote(mPythonCommand) + " " + shell_quote(mScript.string())
-            + " --check --model-dir " + shell_quote(mModelDir);
+        const std::string check_cmd = hf_tok_detail::shell_quote(mPythonCommand) + " "
+            + hf_tok_detail::shell_quote(mScript.string())
+            + " --check --model-dir " + hf_tok_detail::shell_quote(mModelDir);
         const CommandResult check = run_command_capture(check_cmd);
         if (check.exit_code != 0)
         {
-            throw std::runtime_error("HF tokenizer check failed: " + trim_trailing_newlines(check.output));
+            throw std::runtime_error("HF tokenizer check failed: "
+                + hf_tok_detail::trim_trailing_newlines(check.output));
         }
     }
 
@@ -248,10 +262,11 @@ public:
         }
         close(fd);
 
-        std::string cmd = shell_quote(mPythonCommand) + " " + shell_quote(mScript.string())
-            + " --model-dir " + shell_quote(mModelDir)
+        std::string cmd = hf_tok_detail::shell_quote(mPythonCommand) + " "
+            + hf_tok_detail::shell_quote(mScript.string())
+            + " --model-dir " + hf_tok_detail::shell_quote(mModelDir)
             + " --op encode"
-            + " --text-file " + shell_quote(temp_path);
+            + " --text-file " + hf_tok_detail::shell_quote(temp_path);
         if (mAddSpecialTokens)
         {
             cmd += " --add-special-tokens";
@@ -263,41 +278,46 @@ public:
 
         if (result.exit_code != 0)
         {
-            throw std::runtime_error("HF tokenizer encode failed: " + trim_trailing_newlines(result.output));
+            throw std::runtime_error("HF tokenizer encode failed: "
+                + hf_tok_detail::trim_trailing_newlines(result.output));
         }
 
-        return parse_int_list(sanitize_hf_output(result.output));
+        return hf_tok_detail::parse_int_list(hf_tok_detail::sanitize_hf_output(result.output));
     }
 
     std::string decode(const std::vector<int32_t>& ids) const override
     {
-        const std::string cmd = shell_quote(mPythonCommand) + " " + shell_quote(mScript.string())
-            + " --model-dir " + shell_quote(mModelDir)
+        const std::string cmd = hf_tok_detail::shell_quote(mPythonCommand) + " "
+            + hf_tok_detail::shell_quote(mScript.string())
+            + " --model-dir " + hf_tok_detail::shell_quote(mModelDir)
             + " --op decode"
-            + " --ids " + shell_quote(join_ids_csv(ids));
+            + " --ids " + hf_tok_detail::shell_quote(hf_tok_detail::join_ids_csv(ids));
 
         const CommandResult result = run_command_capture(cmd);
         if (result.exit_code != 0)
         {
-            throw std::runtime_error("HF tokenizer decode failed: " + trim_trailing_newlines(result.output));
+            throw std::runtime_error("HF tokenizer decode failed: "
+                + hf_tok_detail::trim_trailing_newlines(result.output));
         }
-        return sanitize_hf_output(result.output);
+        return hf_tok_detail::sanitize_hf_output(result.output);
     }
 
     int32_t id_for_token(std::string_view token) const override
     {
-        const std::string cmd = shell_quote(mPythonCommand) + " " + shell_quote(mScript.string())
-            + " --model-dir " + shell_quote(mModelDir)
+        const std::string cmd = hf_tok_detail::shell_quote(mPythonCommand) + " "
+            + hf_tok_detail::shell_quote(mScript.string())
+            + " --model-dir " + hf_tok_detail::shell_quote(mModelDir)
             + " --op id-for-token"
-            + " --token " + shell_quote(std::string(token));
+            + " --token " + hf_tok_detail::shell_quote(std::string(token));
 
         const CommandResult result = run_command_capture(cmd);
         if (result.exit_code != 0)
         {
-            throw std::runtime_error("HF tokenizer id-for-token failed: " + trim_trailing_newlines(result.output));
+            throw std::runtime_error("HF tokenizer id-for-token failed: "
+                + hf_tok_detail::trim_trailing_newlines(result.output));
         }
 
-        const std::string out = sanitize_hf_output(result.output);
+        const std::string out = hf_tok_detail::sanitize_hf_output(result.output);
         if (out.empty())
         {
             return 0;
@@ -307,17 +327,19 @@ public:
 
     std::string token_for_id(int32_t id) const override
     {
-        const std::string cmd = shell_quote(mPythonCommand) + " " + shell_quote(mScript.string())
-            + " --model-dir " + shell_quote(mModelDir)
+        const std::string cmd = hf_tok_detail::shell_quote(mPythonCommand) + " "
+            + hf_tok_detail::shell_quote(mScript.string())
+            + " --model-dir " + hf_tok_detail::shell_quote(mModelDir)
             + " --op token-for-id"
             + " --id " + std::to_string(id);
 
         const CommandResult result = run_command_capture(cmd);
         if (result.exit_code != 0)
         {
-            throw std::runtime_error("HF tokenizer token-for-id failed: " + trim_trailing_newlines(result.output));
+            throw std::runtime_error("HF tokenizer token-for-id failed: "
+                + hf_tok_detail::trim_trailing_newlines(result.output));
         }
-        return sanitize_hf_output(result.output);
+        return hf_tok_detail::sanitize_hf_output(result.output);
     }
 
 private:

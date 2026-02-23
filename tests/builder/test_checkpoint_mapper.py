@@ -296,3 +296,332 @@ class TestLoadStandardWeights:
 
         assert weights["_attention_size"] == 16
         assert weights["_mlp_size"] == 32
+
+
+class TestLoadStandardWeightsExtended:
+    """Extended tests for load_standard_weights edge cases."""
+
+    def _create_model_dir(self, tmp_path, config, tensors):
+        """Create a model dir with config.json and custom tensors."""
+        from safetensors.numpy import save_file
+
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        save_file(tensors, str(tmp_path / "model.safetensors"))
+        return tmp_path
+
+    def _make_standard_tensors(self, num_layers, hidden, vocab,
+                               num_heads, num_kv_heads, mlp_size,
+                               include_lm_head=True,
+                               include_biases=False):
+        """Build the standard set of tensors for a model."""
+        head_dim = hidden // num_heads
+        kv_hidden = num_kv_heads * head_dim
+        rng = np.random.RandomState(42)
+        tensors = {}
+
+        tensors["model.embed_tokens.weight"] = rng.randn(
+            vocab, hidden).astype(np.float32)
+
+        for i in range(num_layers):
+            prefix = f"model.layers.{i}"
+            tensors[f"{prefix}.input_layernorm.weight"] = rng.randn(
+                hidden).astype(np.float32)
+            tensors[f"{prefix}.post_attention_layernorm.weight"] = rng.randn(
+                hidden).astype(np.float32)
+            tensors[f"{prefix}.self_attn.q_proj.weight"] = rng.randn(
+                hidden, hidden).astype(np.float32)
+            tensors[f"{prefix}.self_attn.k_proj.weight"] = rng.randn(
+                kv_hidden, hidden).astype(np.float32)
+            tensors[f"{prefix}.self_attn.v_proj.weight"] = rng.randn(
+                kv_hidden, hidden).astype(np.float32)
+            tensors[f"{prefix}.self_attn.o_proj.weight"] = rng.randn(
+                hidden, hidden).astype(np.float32)
+            tensors[f"{prefix}.mlp.gate_proj.weight"] = rng.randn(
+                mlp_size, hidden).astype(np.float32)
+            tensors[f"{prefix}.mlp.up_proj.weight"] = rng.randn(
+                mlp_size, hidden).astype(np.float32)
+            tensors[f"{prefix}.mlp.down_proj.weight"] = rng.randn(
+                hidden, mlp_size).astype(np.float32)
+
+            if include_biases:
+                tensors[f"{prefix}.self_attn.q_proj.bias"] = rng.randn(
+                    hidden).astype(np.float32)
+                tensors[f"{prefix}.self_attn.k_proj.bias"] = rng.randn(
+                    kv_hidden).astype(np.float32)
+                tensors[f"{prefix}.self_attn.v_proj.bias"] = rng.randn(
+                    kv_hidden).astype(np.float32)
+
+        tensors["model.norm.weight"] = rng.randn(hidden).astype(np.float32)
+        if include_lm_head:
+            tensors["lm_head.weight"] = rng.randn(
+                vocab, hidden).astype(np.float32)
+
+        return tensors
+
+    # --- GQA expansion value correctness ---
+
+    def test_gqa_expansion_values_correct(self, tmp_path):
+        """Verify GQA K/V expansion produces correct repeated head values.
+
+        Query heads in the same group should share identical K/V weight columns.
+        group_size = num_heads / num_kv_heads = 4, so heads 0-3 share one KV
+        head and heads 4-7 share the other.
+        """
+        hidden = 16
+        num_heads = 8
+        num_kv_heads = 2
+        head_dim = hidden // num_heads  # 2
+
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": 32,
+            "hidden_size": hidden,
+            "num_hidden_layers": 1,
+            "num_attention_heads": num_heads,
+            "num_key_value_heads": num_kv_heads,
+        }
+        tensors = self._make_standard_tensors(
+            num_layers=1, hidden=hidden, vocab=32,
+            num_heads=num_heads, num_kv_heads=num_kv_heads, mlp_size=32)
+
+        model_dir = self._create_model_dir(tmp_path, config, tensors)
+        cfg = ModelConfig.from_dir(model_dir)
+        weights = load_standard_weights(model_dir, cfg)
+
+        # K and V should be expanded from [hidden, kv_hidden=4] to [hidden, hidden=16]
+        assert weights["layer.0.w_k"].shape == (hidden, hidden)
+        assert weights["layer.0.w_v"].shape == (hidden, hidden)
+
+        # Verify the expansion pattern: all query heads in the same group
+        # share identical weight columns.
+        k_weight = weights["layer.0.w_k"]
+        group_size = num_heads // num_kv_heads  # 4
+        for group in range(num_kv_heads):
+            # First head in the group as reference
+            ref_start = group * group_size * head_dim
+            for member in range(1, group_size):
+                member_start = (group * group_size + member) * head_dim
+                for d in range(head_dim):
+                    np.testing.assert_equal(
+                        k_weight[:, member_start + d],
+                        k_weight[:, ref_start + d])
+
+    # --- Tied embeddings ---
+
+    def test_tied_embeddings_no_lm_head(self, tmp_path):
+        """When lm_head.weight is absent, w_out = transposed embedding."""
+        hidden = 16
+        vocab = 32
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": vocab,
+            "hidden_size": hidden,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "tie_word_embeddings": True,
+        }
+        tensors = self._make_standard_tensors(
+            num_layers=1, hidden=hidden, vocab=vocab,
+            num_heads=4, num_kv_heads=4, mlp_size=32,
+            include_lm_head=False)
+
+        model_dir = self._create_model_dir(tmp_path, config, tensors)
+        cfg = ModelConfig.from_dir(model_dir)
+        weights = load_standard_weights(model_dir, cfg)
+
+        # w_out should be transposed embedding: [hidden, vocab]
+        assert weights["w_out"].shape == (hidden, vocab)
+        embedding = tensors["model.embed_tokens.weight"]
+        np.testing.assert_allclose(weights["w_out"], embedding.T, atol=1e-6)
+
+    def test_lm_head_present_ignores_tie(self, tmp_path):
+        """When lm_head.weight exists, it is used even if tie_word_embeddings=True."""
+        hidden = 16
+        vocab = 32
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": vocab,
+            "hidden_size": hidden,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "tie_word_embeddings": True,
+        }
+        tensors = self._make_standard_tensors(
+            num_layers=1, hidden=hidden, vocab=vocab,
+            num_heads=4, num_kv_heads=4, mlp_size=32,
+            include_lm_head=True)
+
+        model_dir = self._create_model_dir(tmp_path, config, tensors)
+        cfg = ModelConfig.from_dir(model_dir)
+        weights = load_standard_weights(model_dir, cfg)
+
+        # w_out should be transposed lm_head.weight, NOT embedding
+        lm_head_raw = tensors["lm_head.weight"]
+        np.testing.assert_allclose(weights["w_out"], lm_head_raw.T, atol=1e-6)
+
+    # --- Optional biases ---
+
+    def test_biases_loaded_when_present(self, tmp_path):
+        """QKV biases are loaded when present in safetensors."""
+        hidden = 16
+        config = {
+            "model_type": "qwen2",
+            "vocab_size": 32,
+            "hidden_size": hidden,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+        }
+        tensors = self._make_standard_tensors(
+            num_layers=1, hidden=hidden, vocab=32,
+            num_heads=4, num_kv_heads=4, mlp_size=32,
+            include_biases=True)
+
+        model_dir = self._create_model_dir(tmp_path, config, tensors)
+        cfg = ModelConfig.from_dir(model_dir)
+        weights = load_standard_weights(model_dir, cfg)
+
+        assert "layer.0.q_bias" in weights
+        assert "layer.0.k_bias" in weights
+        assert "layer.0.v_bias" in weights
+        assert weights["layer.0.q_bias"].shape == (hidden,)
+        assert weights["layer.0.k_bias"].shape == (hidden,)
+        assert weights["layer.0.v_bias"].shape == (hidden,)
+
+    def test_no_biases_when_absent(self, tmp_path):
+        """QKV biases are absent from weights when not in safetensors."""
+        hidden = 16
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": 32,
+            "hidden_size": hidden,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+        }
+        tensors = self._make_standard_tensors(
+            num_layers=1, hidden=hidden, vocab=32,
+            num_heads=4, num_kv_heads=4, mlp_size=32,
+            include_biases=False)
+
+        model_dir = self._create_model_dir(tmp_path, config, tensors)
+        cfg = ModelConfig.from_dir(model_dir)
+        weights = load_standard_weights(model_dir, cfg)
+
+        assert "layer.0.q_bias" not in weights
+        assert "layer.0.k_bias" not in weights
+        assert "layer.0.v_bias" not in weights
+
+    def test_gqa_bias_expansion(self, tmp_path):
+        """K/V biases are GQA-expanded when num_kv_heads < num_heads."""
+        hidden = 16
+        num_heads = 8
+        num_kv_heads = 2
+        head_dim = hidden // num_heads  # 2
+        kv_hidden = num_kv_heads * head_dim  # 4
+
+        config = {
+            "model_type": "qwen2",
+            "vocab_size": 32,
+            "hidden_size": hidden,
+            "num_hidden_layers": 1,
+            "num_attention_heads": num_heads,
+            "num_key_value_heads": num_kv_heads,
+        }
+        tensors = self._make_standard_tensors(
+            num_layers=1, hidden=hidden, vocab=32,
+            num_heads=num_heads, num_kv_heads=num_kv_heads, mlp_size=32,
+            include_biases=True)
+
+        model_dir = self._create_model_dir(tmp_path, config, tensors)
+        cfg = ModelConfig.from_dir(model_dir)
+        weights = load_standard_weights(model_dir, cfg)
+
+        # q_bias stays at hidden size (no expansion for Q)
+        assert weights["layer.0.q_bias"].shape == (hidden,)
+        # k_bias and v_bias should be expanded from kv_hidden to hidden
+        assert weights["layer.0.k_bias"].shape == (hidden,)
+        assert weights["layer.0.v_bias"].shape == (hidden,)
+
+        # Verify expansion pattern: each KV head bias repeated for its group
+        k_bias_raw = tensors["model.layers.0.self_attn.k_proj.bias"]
+        k_bias_expanded = weights["layer.0.k_bias"]
+        group_size = num_heads // num_kv_heads
+        for qh in range(num_heads):
+            kvh = qh // group_size
+            for d in range(head_dim):
+                assert k_bias_expanded[qh * head_dim + d] == \
+                    k_bias_raw[kvh * head_dim + d]
+
+    # --- Error paths ---
+
+    def test_missing_embed_tokens_raises(self, tmp_path):
+        """Missing embed_tokens.weight raises KeyError with descriptive message."""
+        from safetensors.numpy import save_file
+
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": 32,
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+        }
+        (tmp_path / "config.json").write_text(json.dumps(config))
+
+        # Create safetensors WITHOUT embed_tokens
+        tensors = {
+            "model.layers.0.input_layernorm.weight":
+                np.ones(16, dtype=np.float32),
+        }
+        save_file(tensors, str(tmp_path / "model.safetensors"))
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        with pytest.raises(KeyError, match="model.embed_tokens.weight"):
+            load_standard_weights(tmp_path, cfg)
+
+    def test_wrong_embedding_shape_raises(self, tmp_path):
+        """Embedding with wrong shape raises AssertionError."""
+        from safetensors.numpy import save_file
+
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": 32,
+            "hidden_size": 16,
+            "num_hidden_layers": 0,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+        }
+        (tmp_path / "config.json").write_text(json.dumps(config))
+
+        # Embedding with wrong vocab dimension
+        tensors = {
+            "model.embed_tokens.weight":
+                np.random.randn(64, 16).astype(np.float32),  # vocab=64 != 32
+            "model.norm.weight": np.ones(16, dtype=np.float32),
+            "lm_head.weight": np.random.randn(32, 16).astype(np.float32),
+        }
+        save_file(tensors, str(tmp_path / "model.safetensors"))
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        with pytest.raises(AssertionError, match="Embedding shape"):
+            load_standard_weights(tmp_path, cfg)
+
+    def test_no_safetensors_raises(self, tmp_path):
+        """Model dir without any safetensors/bin files raises FileNotFoundError."""
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": 32,
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+        }
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        # No safetensors file created
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            load_standard_weights(tmp_path, cfg)

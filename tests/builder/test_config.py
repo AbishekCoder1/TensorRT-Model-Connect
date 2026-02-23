@@ -239,3 +239,184 @@ class TestEdgeCases:
         }
         cfg = ModelConfig.from_json(json.dumps(raw))
         assert cfg.raw["custom_field"] == "custom_value"
+
+
+class TestModelConfigExtended:
+    """Extended edge case tests for ModelConfig parsing."""
+
+    # --- VL text_config merging ---
+
+    def test_text_config_merged_into_top_level(self):
+        """VL models nest text model config under text_config; fields merge to top."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "qwen2_vl",
+            "architectures": ["Qwen2VLForConditionalGeneration"],
+            "text_config": {
+                "hidden_size": 1024,
+                "num_hidden_layers": 24,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 4,
+                "intermediate_size": 2816,
+                "vocab_size": 151936,
+                "rms_norm_eps": 1e-6,
+                "rope_theta": 1000000.0,
+            },
+        }))
+        assert cfg.model_type == "qwen2_vl"
+        assert cfg.hidden_size == 1024
+        assert cfg.num_hidden_layers == 24
+        assert cfg.num_attention_heads == 16
+        assert cfg.num_key_value_heads == 4
+        assert cfg.intermediate_size == 2816
+        assert cfg.vocab_size == 151936
+        assert cfg.rms_norm_eps == 1e-6
+        assert cfg.rope_theta == 1000000.0
+
+    def test_text_config_overrides_top_level(self):
+        """text_config fields override top-level fields (merged second)."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "qwen2_vl",
+            "hidden_size": 512,
+            "text_config": {
+                "hidden_size": 1024,
+                "num_hidden_layers": 24,
+                "num_attention_heads": 16,
+            },
+        }))
+        # text_config's hidden_size should win over top-level
+        assert cfg.hidden_size == 1024
+
+    def test_no_text_config_uses_top_level(self):
+        """Without text_config, top-level fields are used directly."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "llama",
+            "hidden_size": 2048,
+            "num_hidden_layers": 22,
+            "num_attention_heads": 32,
+        }))
+        assert cfg.hidden_size == 2048
+        assert cfg.num_hidden_layers == 22
+
+    def test_text_config_preserves_raw_as_original(self):
+        """raw dict should be the original JSON dict, not the merged one."""
+        original = {
+            "model_type": "qwen2_vl",
+            "vision_config": {"image_size": 224},
+            "text_config": {
+                "hidden_size": 1024,
+                "num_attention_heads": 16,
+            },
+        }
+        cfg = ModelConfig.from_json(json.dumps(original))
+        assert "text_config" in cfg.raw
+        assert "vision_config" in cfg.raw
+        assert cfg.raw["vision_config"]["image_size"] == 224
+
+    # --- Error handling ---
+
+    def test_malformed_json_raises(self):
+        """Malformed JSON string raises json.JSONDecodeError."""
+        with pytest.raises(json.JSONDecodeError):
+            ModelConfig.from_json("{not valid json}")
+
+    def test_missing_num_hidden_layers_defaults_to_zero(self):
+        """Config without num_hidden_layers defaults to 0."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "test",
+            "hidden_size": 768,
+            "num_attention_heads": 12,
+        }))
+        assert cfg.num_hidden_layers == 0
+
+    def test_rope_theta_explicit_none_falls_back_to_default(self):
+        """Config with rope_theta=None falls back to default 10000.0."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "llama",
+            "hidden_size": 1024,
+            "num_attention_heads": 16,
+            "rope_theta": None,
+        }))
+        assert cfg.rope_theta == 10000.0
+
+    # --- Edge cases ---
+
+    def test_intermediate_size_takes_priority_over_n_inner(self):
+        """When both intermediate_size and n_inner are present, intermediate_size wins."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "gpt2",
+            "hidden_size": 768,
+            "num_attention_heads": 12,
+            "num_hidden_layers": 12,
+            "intermediate_size": 4096,
+            "n_inner": 3072,
+        }))
+        # intermediate_size is checked first in the `or` chain
+        assert cfg.intermediate_size == 4096
+
+    def test_n_inner_used_when_no_intermediate_size(self):
+        """n_inner is used as fallback when intermediate_size is absent."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "gpt2",
+            "hidden_size": 768,
+            "num_attention_heads": 12,
+            "n_inner": 3072,
+        }))
+        assert cfg.intermediate_size == 3072
+
+    def test_rope_scaling_with_nested_rope_type_and_factor(self):
+        """Config with rope_scaling dict — verify raw dict captures it."""
+        raw_config = {
+            "model_type": "llama",
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+            "num_hidden_layers": 32,
+            "rope_theta": 500000.0,
+            "rope_scaling": {
+                "rope_type": "llama3",
+                "factor": 8.0,
+                "low_freq_factor": 1.0,
+                "high_freq_factor": 4.0,
+                "original_max_position_embeddings": 8192,
+            },
+        }
+        cfg = ModelConfig.from_json(json.dumps(raw_config))
+        assert cfg.rope_theta == 500000.0
+        # rope_scaling should be preserved in raw dict
+        assert "rope_scaling" in cfg.raw
+        assert cfg.raw["rope_scaling"]["rope_type"] == "llama3"
+        assert cfg.raw["rope_scaling"]["factor"] == 8.0
+
+    def test_head_dim_from_config_json(self):
+        """Explicit head_dim in config.json overrides computed value."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "phi3",
+            "hidden_size": 3072,
+            "num_attention_heads": 32,
+            "head_dim": 96,
+        }))
+        # Without head_dim: 3072/32 = 96, but the explicit override path matters
+        assert cfg.head_dim == 96
+        assert cfg._head_dim == 96
+
+    def test_intermediate_size_fallback_to_hidden_times_four(self):
+        """When no intermediate_size, n_inner, or ffn_dim, falls back to hidden*4."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "test",
+            "hidden_size": 512,
+            "num_attention_heads": 8,
+        }))
+        assert cfg.intermediate_size == 512 * 4
+
+    def test_empty_string_not_valid_json(self):
+        """Empty string raises json.JSONDecodeError."""
+        with pytest.raises(json.JSONDecodeError):
+            ModelConfig.from_json("")
+
+    def test_num_key_value_heads_defaults_to_num_heads(self):
+        """When num_key_value_heads is missing, defaults to num_attention_heads."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "llama",
+            "hidden_size": 1024,
+            "num_attention_heads": 16,
+        }))
+        assert cfg.num_key_value_heads == 16

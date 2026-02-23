@@ -1,0 +1,13 @@
+{
+  "name": "mistral-7b",
+  "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
+  "bundle": "mistral-7b.trtfb",
+  "family": "mistral",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+  "max_new_tokens": 20,
+  "logit_atol": 1e-3,
+  "layer_atol": 0.05,
+  "trust_remote_code": false
+}

@@ -103,3 +103,185 @@ class TestCmdBuildValidation:
                                   max_cache_length=256, verbose=False)
         result = _cmd_build(args)
         assert result == 1
+
+
+class TestCmdInspect:
+    """Tests for _cmd_inspect with real and invalid bundle files."""
+
+    def test_inspect_valid_bundle(self, tmp_path, capsys):
+        """Inspect a real (synthetic) .trtfb bundle and verify output."""
+        import json
+        import struct
+
+        bundle_path = tmp_path / "test.trtfb"
+        header = {
+            "model_id": "test-model",
+            "model_type": "qwen3",
+            "family": "qwen",
+            "trt_version": "10.0.0",
+            "gpu_name": "A100",
+            "created_at": "2025-01-01T00:00:00Z",
+            "vocab_size": 32000,
+            "hidden_size": 1024,
+            "num_layers": 24,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "max_cache_length": 256,
+            "sections": {
+                "engine_plan": {"offset": 0, "size": 100},
+            },
+        }
+        header_json = json.dumps(header).encode("utf-8")
+
+        with open(bundle_path, "wb") as f:
+            f.write(b"TRTFB\x00\x01\x00")
+            f.write(struct.pack("<Q", len(header_json)))
+            f.write(header_json)
+            f.write(b"\x00" * 100)  # fake engine plan
+
+        from trtf_build.cli import _cmd_inspect
+        result = _cmd_inspect(argparse.Namespace(bundle_path=str(bundle_path)))
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert "qwen3" in captured.out
+        assert "test-model" in captured.out
+        assert "qwen" in captured.out
+        assert "engine_plan" in captured.out
+
+    def test_inspect_nonexistent_file(self):
+        """_cmd_inspect returns 1 for non-existent file."""
+        from trtf_build.cli import _cmd_inspect
+        result = _cmd_inspect(argparse.Namespace(
+            bundle_path="/nonexistent/path/bundle.trtfb"))
+        assert result == 1
+
+    def test_inspect_invalid_magic(self, tmp_path):
+        """_cmd_inspect returns 1 for file with wrong magic bytes."""
+        bundle_path = tmp_path / "bad.trtfb"
+        bundle_path.write_bytes(b"NOT_TRTFB_MAGIC_1234567890")
+
+        from trtf_build.cli import _cmd_inspect
+        result = _cmd_inspect(argparse.Namespace(
+            bundle_path=str(bundle_path)))
+        assert result == 1
+
+    def test_inspect_empty_bundle_path(self):
+        """_cmd_inspect returns 1 when bundle_path is empty."""
+        from trtf_build.cli import _cmd_inspect
+        result = _cmd_inspect(argparse.Namespace(bundle_path=""))
+        assert result == 1
+
+
+class TestCmdBuildMocked:
+    """Tests for _cmd_build with mocked engine_builder."""
+
+    def test_build_calls_engine_builder_with_correct_args(self, tmp_path):
+        """Verify _cmd_build passes model, output, cache length, verbose to build()."""
+        from trtf_build.cli import _cmd_build
+        import trtf_build.engine_builder as eb
+
+        captured_kwargs = {}
+
+        def mock_build(model_id_or_path, output_path, max_cache_length, *,
+                       verbose=False):
+            captured_kwargs["model_id_or_path"] = model_id_or_path
+            captured_kwargs["output_path"] = output_path
+            captured_kwargs["max_cache_length"] = max_cache_length
+            captured_kwargs["verbose"] = verbose
+
+        # _cmd_build does a lazy `from .engine_builder import build` at call
+        # time, so we patch the attribute on the engine_builder module.
+        original_build = eb.build
+        eb.build = mock_build
+        try:
+            args = argparse.Namespace(
+                model="/path/to/model",
+                output=str(tmp_path / "out.trtfb"),
+                max_cache_length=512,
+                verbose=True,
+            )
+            result = _cmd_build(args)
+            assert result == 0
+            assert captured_kwargs["model_id_or_path"] == "/path/to/model"
+            assert captured_kwargs["output_path"] == str(
+                tmp_path / "out.trtfb")
+            assert captured_kwargs["max_cache_length"] == 512
+            assert captured_kwargs["verbose"] is True
+        finally:
+            eb.build = original_build
+
+    def test_verbose_flag_propagated(self, tmp_path):
+        """Verify verbose=True is forwarded to engine_builder.build()."""
+        from trtf_build.cli import _cmd_build
+        import trtf_build.engine_builder as eb
+
+        received_verbose = []
+
+        def mock_build(model_id_or_path, output_path, max_cache_length, *,
+                       verbose=False):
+            received_verbose.append(verbose)
+
+        original_build = eb.build
+        eb.build = mock_build
+        try:
+            args = argparse.Namespace(
+                model="some-model", output=str(tmp_path / "out.trtfb"),
+                max_cache_length=256, verbose=True)
+            _cmd_build(args)
+            assert received_verbose == [True]
+
+            received_verbose.clear()
+            args = argparse.Namespace(
+                model="some-model", output=str(tmp_path / "out.trtfb"),
+                max_cache_length=256, verbose=False)
+            _cmd_build(args)
+            assert received_verbose == [False]
+        finally:
+            eb.build = original_build
+
+    def test_max_cache_length_propagated(self, tmp_path):
+        """Verify max_cache_length value is forwarded to engine_builder.build()."""
+        from trtf_build.cli import _cmd_build
+        import trtf_build.engine_builder as eb
+
+        received_cache = []
+
+        def mock_build(model_id_or_path, output_path, max_cache_length, *,
+                       verbose=False):
+            received_cache.append(max_cache_length)
+
+        original_build = eb.build
+        eb.build = mock_build
+        try:
+            for cache_len in [128, 1024, 4096]:
+                args = argparse.Namespace(
+                    model="some-model",
+                    output=str(tmp_path / "out.trtfb"),
+                    max_cache_length=cache_len,
+                    verbose=False)
+                _cmd_build(args)
+            assert received_cache == [128, 1024, 4096]
+        finally:
+            eb.build = original_build
+
+    def test_build_exception_returns_1(self, tmp_path):
+        """When engine_builder.build() raises, _cmd_build returns 1."""
+        from trtf_build.cli import _cmd_build
+        import trtf_build.engine_builder as eb
+
+        def mock_build(*args, **kwargs):
+            raise RuntimeError("TRT build failed: out of memory")
+
+        original_build = eb.build
+        eb.build = mock_build
+        try:
+            args = argparse.Namespace(
+                model="some-model",
+                output=str(tmp_path / "out.trtfb"),
+                max_cache_length=256,
+                verbose=False)
+            result = _cmd_build(args)
+            assert result == 1
+        finally:
+            eb.build = original_build
