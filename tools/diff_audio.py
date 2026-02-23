@@ -18,8 +18,10 @@ Staged comparison to isolate audio quality issues:
     both TRT codec (via C++ binary) and HF EnCodec, and compare waveforms
     sample-by-sample.
 
-  Stage 4: Layer-by-layer codec debug (future)
-    Build a debug EnCodec engine with intermediate outputs.
+  Stage 4: Greedy token parity (TRT engine vs HF, per-stage)
+    Build TRT engines from HF weights, run all 4 Bark stages with greedy
+    decoding through both TRT (via TrtRunner) and HF, compare outputs
+    token-by-token. Requires --model (builds engines from HF directly).
 
 Usage:
     # Stage 1: Quick smoke test -- does C++ produce speech?
@@ -42,7 +44,12 @@ Usage:
       --prompt "Hello, my dog is cute" \\
       --hf-python .venv/bin/python --stage 3
 
-    # All stages (default)
+    # Stage 4: Greedy parity (TRT engine vs HF)
+    python3 tools/diff_audio.py \\
+      --model suno/bark-small \\
+      --stage 4 --max-semantic-tokens 100
+
+    # All stages 1-3 (default)
     python3 tools/diff_audio.py \\
       --bundle bark.trtfb --binary ./build/trtf \\
       --model suno/bark-small \\
@@ -53,6 +60,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import os
 import struct
 import subprocess
@@ -570,6 +579,544 @@ def stage3_codec_comparison(args) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Stage 4: Greedy token parity (TRT engine vs HF, per-stage)
+# ---------------------------------------------------------------------------
+
+def stage4_greedy_parity(args) -> bool:
+    """Build TRT engines from HF, run all 4 Bark stages with greedy decoding,
+    compare TRT vs HF outputs token-by-token."""
+    print("\n=== Stage 4: Greedy Token Parity ===", file=sys.stderr)
+
+    if not args.model:
+        print("  SKIP: --model required for stage 4", file=sys.stderr)
+        return True
+
+    max_sem_tokens = getattr(args, "max_semantic_tokens", 100)
+
+    # --- Lazy imports (heavy deps only needed for stage 4) ---
+    try:
+        import torch
+        from transformers import AutoProcessor, BarkModel
+        from transformers.models.bark.generation_configuration_bark import (
+            BarkSemanticGenerationConfig,
+            BarkCoarseGenerationConfig,
+        )
+        try:
+            from transformers.models.bark.generation_configuration_bark import (
+                BarkFineGenerationConfig,
+            )
+        except ImportError:
+            BarkFineGenerationConfig = None
+        from trtf_build.engine_builder import _resolve_model
+        from trtf_build.config import ModelConfig
+        from trtf_build.families import find_plugin
+        from trtf_build.debug_runner import TrtRunner, VisionTrtRunner
+    except ImportError as e:
+        print(f"  SKIP: missing dependency: {e}", file=sys.stderr)
+        return True
+
+    # --- Load HF model + processor ---
+    print("  Loading HF model...", file=sys.stderr)
+    processor = AutoProcessor.from_pretrained(args.model)
+    model = BarkModel.from_pretrained(args.model).eval()
+
+    # --- Build TRT engines from HF weights ---
+    print("  Building TRT engines from HF weights...", file=sys.stderr)
+    model_dir = _resolve_model(args.model)
+    config = ModelConfig.from_dir(model_dir)
+    plg = find_plugin(config.model_type)
+    weights = plg.load_weights(model_dir, config)
+    max_cache = 256
+
+    sem_plan = plg.build_engine(config, weights, max_cache)
+    extra = plg.build_extra_engines(config, weights, max_cache)
+    audio_cfg = plg.get_audio_config(config)
+
+    # Sub-model configs
+    sem_cfg = weights["_semantic_cfg"]
+    coarse_cfg = weights["_coarse_cfg"]
+    fine_cfg = weights["_fine_cfg"]
+
+    # Embedding tables
+    sem_embed = np.frombuffer(
+        extra["semantic_embed"], dtype=np.float32
+    ).reshape(sem_cfg["vocab_size"], sem_cfg["hidden_size"]).copy()
+    coarse_embed = np.frombuffer(
+        extra["coarse_embed"], dtype=np.float32
+    ).reshape(coarse_cfg["vocab_size"], coarse_cfg["hidden_size"]).copy()
+
+    # Audio config constants
+    semantic_pad_token = audio_cfg["semantic_pad_token"]
+    semantic_infer_token = audio_cfg["semantic_infer_token"]
+    text_encoding_offset = audio_cfg["text_encoding_offset"]
+    text_pad_token = audio_cfg["text_pad_token"]
+    semantic_vocab_size = audio_cfg["semantic_vocab_size"]
+    coarse_semantic_pad_token = audio_cfg["coarse_semantic_pad_token"]
+    coarse_infer_token = audio_cfg["coarse_infer_token"]
+    codebook_size = audio_cfg["codebook_size"]
+    n_coarse_codebooks = audio_cfg.get("n_coarse_codebooks", 2)
+
+    # Coarse generation constants (matching C++ BarkConfig defaults)
+    coarse_rate_hz = 75
+    semantic_rate_hz = 49.9
+    max_coarse_history = 630
+    max_coarse_input_length = 256
+    sliding_window_len = 60
+
+    # Tokenize prompt
+    inputs = processor(args.prompt, return_tensors="pt")
+    input_ids = inputs["input_ids"][0].tolist()
+
+    # Build generation configs (greedy)
+    sem_gen_cfg = BarkSemanticGenerationConfig(
+        **model.generation_config.semantic_config)
+    sem_gen_cfg.do_sample = False
+    sem_gen_cfg.temperature = 1.0
+    sem_gen_cfg.max_new_tokens = max_sem_tokens
+
+    coarse_gen_cfg = BarkCoarseGenerationConfig(
+        **model.generation_config.coarse_acoustics_config)
+    coarse_gen_cfg.do_sample = False
+    coarse_gen_cfg.temperature = 1.0
+
+    all_pass = True
+
+    # =================================================================
+    # Stage 4a: Semantic greedy parity
+    # =================================================================
+    print("\n  Stage 4a: Semantic greedy parity...", file=sys.stderr)
+
+    # --- HF semantic (greedy) ---
+    with torch.no_grad():
+        hf_semantic_output = model.semantic.generate(
+            inputs["input_ids"],
+            semantic_generation_config=sem_gen_cfg,
+        )
+    hf_sem_all = hf_semantic_output[0].cpu().numpy()
+    hf_sem_tokens = hf_sem_all[hf_sem_all < semantic_pad_token]
+
+    # --- TRT semantic ---
+    sem_runner = TrtRunner(
+        engine_plan=sem_plan,
+        max_cache_length=max_cache,
+        num_layers=sem_cfg["num_layers"],
+    )
+    hidden = sem_cfg["hidden_size"]
+
+    # Prefill: 256 positions (text context + semantic history)
+    n_text = len(input_ids)
+    for pos in range(256):
+        if pos < n_text and input_ids[pos] != 0:
+            text_tok = input_ids[pos] + text_encoding_offset
+        else:
+            text_tok = text_pad_token
+        embed = (sem_embed[text_tok] + sem_embed[semantic_pad_token]
+                 ).reshape(1, hidden)
+        sem_runner.step(token_id=0, input_embed=embed, use_input_embed=1.0)
+
+    # Feed infer token
+    embed = sem_embed[semantic_infer_token].reshape(1, hidden)
+    result = sem_runner.step(
+        token_id=0, input_embed=embed, use_input_embed=1.0)
+
+    # Autoregressive decode (greedy, matching C++ run_semantic)
+    trt_sem_tokens = []
+    for _ in range(max_sem_tokens):
+        logits = result["logits"].flatten().copy()
+        logits[semantic_pad_token + 1:] = -1e9
+        token = int(np.argmax(logits[:semantic_pad_token + 1]))
+        if token == semantic_pad_token:
+            break
+        trt_sem_tokens.append(token)
+        # C++ uses token_id mode for decode (use_input_embed=0.0)
+        result = sem_runner.step(token_id=token)
+
+    trt_sem_tokens = np.array(trt_sem_tokens, dtype=np.int32)
+    del sem_runner
+
+    # Compare
+    sem_n = min(len(hf_sem_tokens), len(trt_sem_tokens))
+    sem_matched = (int(np.sum(hf_sem_tokens[:sem_n] == trt_sem_tokens[:sem_n]))
+                   if sem_n > 0 else 0)
+    sem_pass = (sem_matched == sem_n
+                and len(hf_sem_tokens) == len(trt_sem_tokens))
+    print(f"    semantic:  {sem_matched}/{max(len(hf_sem_tokens), len(trt_sem_tokens))} "
+          f"tokens match   {'PASS' if sem_pass else 'FAIL'}",
+          file=sys.stderr)
+    if not sem_pass:
+        all_pass = False
+        if len(hf_sem_tokens) != len(trt_sem_tokens):
+            print(f"    Length mismatch: HF={len(hf_sem_tokens)}, "
+                  f"TRT={len(trt_sem_tokens)}", file=sys.stderr)
+        for i in range(sem_n):
+            if hf_sem_tokens[i] != trt_sem_tokens[i]:
+                print(f"    First mismatch at index {i}: "
+                      f"HF={hf_sem_tokens[i]}, TRT={trt_sem_tokens[i]}",
+                      file=sys.stderr)
+                break
+
+    # =================================================================
+    # Stage 4b: Coarse greedy parity
+    # =================================================================
+    print("\n  Stage 4b: Coarse greedy parity...", file=sys.stderr)
+
+    # --- HF coarse (greedy) ---
+    with torch.no_grad():
+        hf_coarse_output = model.coarse_acoustics.generate(
+            hf_semantic_output,
+            semantic_generation_config=sem_gen_cfg,
+            coarse_generation_config=coarse_gen_cfg,
+        )
+    hf_coarse_all = hf_coarse_output[0].cpu().numpy()
+    hf_coarse_tokens = hf_coarse_all[
+        (hf_coarse_all >= semantic_vocab_size)
+        & (hf_coarse_all < semantic_vocab_size + n_coarse_codebooks * codebook_size)
+    ]
+
+    # --- TRT coarse (replicate C++ sliding window logic) ---
+    coarse_plan = extra["coarse_engine_plan"]
+    coarse_hidden = coarse_cfg["hidden_size"]
+
+    # Use HF semantic tokens as input (ensures same input regardless of 4a)
+    x_semantic = [
+        coarse_semantic_pad_token if t == semantic_pad_token else int(t)
+        for t in hf_sem_tokens
+    ]
+    sem_len = len(x_semantic)
+    n_steps = max(
+        int(math.floor(sem_len * coarse_rate_hz / semantic_rate_hz))
+        * n_coarse_codebooks,
+        0,
+    )
+
+    x_coarse = []
+    n_window_steps = (int(math.ceil(n_steps / sliding_window_len))
+                      if n_steps > 0 else 0)
+
+    for win in range(n_window_steps):
+        gen_this_window = min(sliding_window_len, n_steps - len(x_coarse))
+        if gen_this_window <= 0:
+            break
+
+        # Build semantic context (matching C++ bark_backend.cpp:344-376)
+        total_generated = len(x_coarse)
+        max_sem_hist = int(math.floor(
+            max_coarse_history * semantic_rate_hz / coarse_rate_hz))
+        semantic_idx = int(round(
+            total_generated * semantic_rate_hz / coarse_rate_hz))
+        sem_start = max(0, semantic_idx - max_sem_hist)
+        sem_context_len = min(sem_len - sem_start, max_coarse_input_length)
+
+        # Build input token sequence
+        input_tokens = []
+        for i in range(sem_start, sem_start + sem_context_len):
+            input_tokens.append(x_semantic[i])
+        for _ in range(sem_context_len, max_coarse_input_length):
+            input_tokens.append(coarse_semantic_pad_token)
+        input_tokens.append(coarse_infer_token)
+        hist_start = max(0, len(x_coarse) - max_coarse_history)
+        for i in range(hist_start, len(x_coarse)):
+            input_tokens.append(x_coarse[i])
+
+        # New KV cache per window
+        coarse_runner = TrtRunner(
+            engine_plan=coarse_plan,
+            max_cache_length=max_cache,
+            num_layers=coarse_cfg["num_layers"],
+        )
+
+        # Prefill all but last token
+        for i in range(len(input_tokens) - 1):
+            embed = coarse_embed[input_tokens[i]].reshape(1, coarse_hidden)
+            coarse_runner.step(
+                token_id=0, input_embed=embed, use_input_embed=1.0)
+
+        # Feed last prefill token and get first logits
+        embed = coarse_embed[input_tokens[-1]].reshape(1, coarse_hidden)
+        result = coarse_runner.step(
+            token_id=0, input_embed=embed, use_input_embed=1.0)
+
+        # Generate window tokens
+        window_start = len(x_coarse)
+        for step in range(gen_this_window):
+            logits = result["logits"].flatten().copy()
+            total_gen = window_start + step
+            cb_idx = total_gen % n_coarse_codebooks
+
+            # Mask to valid codebook range
+            cb_start = semantic_vocab_size + cb_idx * codebook_size
+            cb_end = cb_start + codebook_size
+            masked = np.full_like(logits, -1e9)
+            masked[cb_start:cb_end] = logits[cb_start:cb_end]
+
+            token = int(np.argmax(masked))
+            x_coarse.append(token)
+
+            if step + 1 < gen_this_window:
+                embed = coarse_embed[token].reshape(1, coarse_hidden)
+                result = coarse_runner.step(
+                    token_id=0, input_embed=embed, use_input_embed=1.0)
+
+        del coarse_runner
+
+    trt_coarse_tokens = np.array(x_coarse, dtype=np.int32)
+
+    # Compare
+    coarse_n = min(len(hf_coarse_tokens), len(trt_coarse_tokens))
+    coarse_matched = (int(np.sum(
+        hf_coarse_tokens[:coarse_n] == trt_coarse_tokens[:coarse_n]))
+        if coarse_n > 0 else 0)
+    coarse_pass = (coarse_matched == coarse_n
+                   and len(hf_coarse_tokens) == len(trt_coarse_tokens))
+    print(f"    coarse:    {coarse_matched}/"
+          f"{max(len(hf_coarse_tokens), len(trt_coarse_tokens))} "
+          f"codes match  {'PASS' if coarse_pass else 'FAIL'}",
+          file=sys.stderr)
+    if not coarse_pass:
+        all_pass = False
+        if len(hf_coarse_tokens) != len(trt_coarse_tokens):
+            print(f"    Length mismatch: HF={len(hf_coarse_tokens)}, "
+                  f"TRT={len(trt_coarse_tokens)}", file=sys.stderr)
+        for i in range(coarse_n):
+            if hf_coarse_tokens[i] != trt_coarse_tokens[i]:
+                print(f"    First mismatch at index {i}: "
+                      f"HF={hf_coarse_tokens[i]}, TRT={trt_coarse_tokens[i]}",
+                      file=sys.stderr)
+                break
+
+    # =================================================================
+    # Stage 4c: Fine greedy parity
+    # =================================================================
+    print("\n  Stage 4c: Fine greedy parity...", file=sys.stderr)
+
+    fine_plan = extra.get("fine_engine_plan")
+    if fine_plan is None:
+        print("    SKIP: No fine engine built", file=sys.stderr)
+        fine_pass = True
+    else:
+        # --- HF fine (always deterministic — argmax) ---
+        fine_gen_cfg_dict = getattr(
+            model.generation_config, "fine_acoustics_config", {})
+        if BarkFineGenerationConfig is not None and fine_gen_cfg_dict:
+            fine_gen_cfg = BarkFineGenerationConfig(**fine_gen_cfg_dict)
+        else:
+            fine_gen_cfg = None
+
+        with torch.no_grad():
+            generate_kwargs = {
+                "semantic_generation_config": sem_gen_cfg,
+                "coarse_generation_config": coarse_gen_cfg,
+                "codebook_size": codebook_size,
+            }
+            if fine_gen_cfg is not None:
+                generate_kwargs["fine_generation_config"] = fine_gen_cfg
+            hf_fine_output = model.fine_acoustics.generate(
+                hf_coarse_output, **generate_kwargs)
+
+        # hf_fine_output: [1, n_codebooks, seq_len]
+        hf_fine_codes = hf_fine_output[0].cpu().numpy()  # [8, seq_len]
+
+        # --- TRT fine (replicate C++ run_fine) ---
+        fine_hidden = fine_cfg["hidden_size"]
+        fine_cb_size = fine_cfg.get("codebook_size", 1056)
+        fine_seq_length = audio_cfg.get("fine_seq_length", 256)
+
+        # Load fine embedding tables
+        n_embed_tables = fine_cfg.get("n_embed_tables", 8)
+        fine_embed_flat = np.frombuffer(
+            extra["fine_embed"], dtype=np.float32).copy()
+        fine_embed = fine_embed_flat.reshape(
+            n_embed_tables, fine_cb_size, fine_hidden)
+        fine_pos_embed = np.frombuffer(
+            extra["fine_position_embed"], dtype=np.float32
+        ).reshape(-1, fine_hidden).copy()
+
+        # De-interleave HF coarse tokens into codes [8, n_frames]
+        n_frames_raw = len(hf_coarse_tokens) // n_coarse_codebooks
+        n_frames = min(n_frames_raw, fine_seq_length)
+
+        # CB0-1 from coarse, CB2-7 initialized to codebook_size (padding)
+        trt_fine_codes = np.full((8, n_frames), codebook_size, dtype=np.int32)
+        for t in range(n_frames * n_coarse_codebooks):
+            cb = t % n_coarse_codebooks
+            frame = t // n_coarse_codebooks
+            if frame < n_frames:
+                raw = (int(hf_coarse_tokens[t]) - semantic_vocab_size
+                       - cb * codebook_size)
+                trt_fine_codes[cb, frame] = max(0, min(raw, codebook_size - 1))
+
+        # Run TRT fine engine
+        fine_runner = VisionTrtRunner(fine_plan)
+
+        for cb_idx in range(2, 8):
+            # Sum embeddings for CB 0..cb_idx + position (matching C++)
+            input_embeds = np.zeros(
+                (fine_seq_length, fine_hidden), dtype=np.float32)
+            actual_frames = min(n_frames, fine_seq_length)
+            for frame in range(actual_frames):
+                for cb in range(cb_idx + 1):
+                    code = int(trt_fine_codes[cb, frame])
+                    input_embeds[frame] += fine_embed[cb, code]
+                input_embeds[frame] += fine_pos_embed[frame]
+
+            outputs = fine_runner.encode(input_embeds=input_embeds)
+
+            # Read logits for this codebook's head.
+            # Engine naming: logits_cb1..logits_cb7, using w_lm_head_0..6.
+            # C++ reads head_idx = cb_idx - 1, i.e. logits_cb{cb_idx}.
+            head_name = f"logits_cb{cb_idx}"
+            if head_name not in outputs:
+                print(f"    WARNING: output {head_name} not found in engine",
+                      file=sys.stderr)
+                continue
+            head_logits = outputs[head_name]  # [seq_length, codebook_size]
+            valid_range = min(codebook_size, fine_cb_size)
+            for frame in range(actual_frames):
+                best = int(np.argmax(head_logits[frame, :valid_range]))
+                trt_fine_codes[cb_idx, frame] = best
+
+        del fine_runner
+
+        # Compare codebooks 2-7
+        n_compare = min(n_frames, hf_fine_codes.shape[1])
+        fine_total = 0
+        fine_matched = 0
+        for cb in range(2, 8):
+            for frame in range(n_compare):
+                fine_total += 1
+                if trt_fine_codes[cb, frame] == hf_fine_codes[cb, frame]:
+                    fine_matched += 1
+
+        fine_pass = fine_total > 0 and fine_matched == fine_total
+        print(f"    fine:      {fine_matched}/{fine_total} codes match "
+              f"(6x{n_compare})  {'PASS' if fine_pass else 'FAIL'}",
+              file=sys.stderr)
+        if not fine_pass:
+            all_pass = False
+            # Show first mismatch per codebook
+            for cb in range(2, 8):
+                for frame in range(n_compare):
+                    if trt_fine_codes[cb, frame] != hf_fine_codes[cb, frame]:
+                        print(f"    CB{cb} mismatch at frame {frame}: "
+                              f"HF={hf_fine_codes[cb, frame]}, "
+                              f"TRT={trt_fine_codes[cb, frame]}",
+                              file=sys.stderr)
+                        break
+
+    # =================================================================
+    # Stage 4d: Codec parity
+    # =================================================================
+    print("\n  Stage 4d: Codec parity...", file=sys.stderr)
+
+    codec_plan = extra.get("codec_engine_plan")
+    if codec_plan is None:
+        print("    SKIP: No codec engine built", file=sys.stderr)
+    elif fine_plan is None:
+        print("    SKIP: No fine codes available (fine engine skipped)",
+              file=sys.stderr)
+    else:
+        codec_seq_length = audio_cfg.get("codec_seq_length", 256)
+        upsample = audio_cfg.get("codec_upsample_factor", 320)
+
+        # Use HF fine codes as input to both sides
+        hf_fine_codes_np = hf_fine_codes  # [8, seq_len]
+        n_codec_frames = min(hf_fine_codes_np.shape[1], codec_seq_length)
+
+        # --- TRT codec ---
+        codec_runner = VisionTrtRunner(codec_plan)
+        audio_codes_input = np.zeros(
+            (1, 8, codec_seq_length), dtype=np.int32)
+        audio_codes_input[0, :, :n_codec_frames] = (
+            hf_fine_codes_np[:, :n_codec_frames])
+        codec_output = codec_runner.encode(audio_codes=audio_codes_input)
+        trt_waveform = codec_output["waveform"].flatten()
+        trt_waveform = trt_waveform[:n_codec_frames * upsample]
+        del codec_runner
+
+        # --- HF codec ---
+        codec_model = model.codec_model
+        codes_tensor = torch.from_numpy(
+            hf_fine_codes_np[:, :n_codec_frames].astype(np.int64)
+        ).unsqueeze(1)  # [n_q, 1, T]
+        with torch.no_grad():
+            emb = codec_model.quantizer.decode(codes_tensor)
+            hf_audio = codec_model.decoder(emb)
+            hf_waveform = hf_audio.squeeze().cpu().numpy()
+
+        # Compare waveforms
+        min_len = min(len(trt_waveform), len(hf_waveform))
+        if min_len > 0:
+            diff = np.abs(trt_waveform[:min_len] - hf_waveform[:min_len])
+            cos_num = np.dot(trt_waveform[:min_len], hf_waveform[:min_len])
+            cos_den = (np.linalg.norm(trt_waveform[:min_len])
+                       * np.linalg.norm(hf_waveform[:min_len]) + 1e-12)
+            cosine = float(cos_num / cos_den)
+            max_diff = float(diff.max())
+            codec_pass = cosine > 0.99 and max_diff < 0.5
+        else:
+            cosine = 0.0
+            max_diff = float("inf")
+            codec_pass = False
+
+        print(f"    codec:     cos={cosine:.3f} max={max_diff:.3f}  "
+              f"{'PASS' if codec_pass else 'FAIL'}", file=sys.stderr)
+        if not codec_pass:
+            all_pass = False
+
+    # =================================================================
+    # Summary + JSON output
+    # =================================================================
+    stage_results = {
+        "semantic": {
+            "pass": bool(sem_pass),
+            "hf_tokens": int(len(hf_sem_tokens)),
+            "trt_tokens": int(len(trt_sem_tokens)),
+            "matched": int(sem_matched),
+        },
+        "coarse": {
+            "pass": bool(coarse_pass),
+            "hf_tokens": int(len(hf_coarse_tokens)),
+            "trt_tokens": int(len(trt_coarse_tokens)),
+            "matched": int(coarse_matched),
+        },
+        "fine": {
+            "pass": bool(fine_pass),
+            "total": int(fine_total) if fine_plan else 0,
+            "matched": int(fine_matched) if fine_plan else 0,
+            "n_frames": int(n_compare) if fine_plan else 0,
+        },
+    }
+    if codec_plan is not None and fine_plan is not None:
+        stage_results["codec"] = {
+            "pass": bool(codec_pass),
+            "cosine": float(cosine),
+            "max_diff": float(max_diff),
+            "n_samples": int(min_len),
+        }
+
+    # Write JSON if --json specified
+    json_path = getattr(args, "json", None)
+    if json_path:
+        with open(json_path, "w") as f:
+            json.dump({
+                "model": args.model,
+                "prompt": args.prompt,
+                "max_semantic_tokens": max_sem_tokens,
+                "all_pass": all_pass,
+                "stages": stage_results,
+            }, f, indent=2)
+        print(f"  Results written to {json_path}", file=sys.stderr)
+
+    print(file=sys.stderr)
+    if all_pass:
+        print("  Stage 4: ALL PASSED", file=sys.stderr)
+    else:
+        print("  Stage 4: SOME STAGES FAILED", file=sys.stderr)
+
+    return all_pass
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -582,13 +1129,18 @@ Stages:
   1  C++ sampling smoke test (needs --bundle, --binary)
   2  Token distribution comparison (needs --bundle, --binary, --model)
   3  Codec waveform comparison (needs --bundle, --binary, --model)
+  4  Greedy token parity (needs --model; builds TRT engines from HF)
 
 Examples:
   # Quick smoke test
   python3 tools/diff_audio.py --bundle bark.trtfb --binary ./build/trtf \\
     --prompt "Hello, my dog is cute" --hf-python .venv/bin/python --stage 1
 
-  # Full comparison
+  # Greedy parity (TRT engine vs HF)
+  python3 tools/diff_audio.py --model suno/bark-small --stage 4 \\
+    --max-semantic-tokens 100
+
+  # Stages 1-3 comparison
   python3 tools/diff_audio.py --bundle bark.trtfb --binary ./build/trtf \\
     --model suno/bark-small --prompt "Hello, my dog is cute" \\
     --hf-python .venv/bin/python
@@ -611,7 +1163,11 @@ Examples:
                         "8 codebooks while Stage 3 HF reference uses only 2, "
                         "so larger diffs are expected.")
     parser.add_argument("--stage", type=int, default=0,
-                        help="Run specific stage (0=all, 1/2/3)")
+                        help="Run specific stage (0=all 1-3, 1/2/3/4)")
+    parser.add_argument("--max-semantic-tokens", type=int, default=100,
+                        help="Max semantic tokens for stage 4 (default: 100)")
+    parser.add_argument("--json", default=None,
+                        help="Write stage 4 results to this JSON file")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -626,6 +1182,8 @@ Examples:
             ok = stage2_token_comparison(args)
         elif stage == 3:
             ok = stage3_codec_comparison(args)
+        elif stage == 4:
+            ok = stage4_greedy_parity(args)
         else:
             print(f"Unknown stage: {stage}", file=sys.stderr)
             ok = False

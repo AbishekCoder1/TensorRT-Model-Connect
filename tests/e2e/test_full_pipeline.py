@@ -742,6 +742,158 @@ def test_segmentation_engine_parity(built_bundle, engine_dir):
     print(f"  Max logit diff: {max_diff:.4f}")
 
 
+def _run_diff_audio_stage4_subprocess(hf_id, prompt, json_path,
+                                      max_semantic_tokens=100):
+    """Run diff_audio.py --stage 4 as a subprocess (GPU-isolated).
+
+    Returns:
+        dict with keys: passed, returncode, output, stderr, time_s,
+                        stage_data (parsed JSON or None)
+    """
+    diff_audio = TOOLS_DIR / "diff_audio.py"
+    cmd = [
+        sys.executable, str(diff_audio),
+        "--model", hf_id,
+        "--prompt", prompt,
+        "--stage", "4",
+        "--max-semantic-tokens", str(max_semantic_tokens),
+        "--json", str(json_path),
+    ]
+
+    t0 = time.monotonic()
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=1800)
+    elapsed = time.monotonic() - t0
+
+    # Parse structured results from JSON
+    stage_data = None
+    if Path(json_path).is_file():
+        try:
+            with open(json_path) as f:
+                stage_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return {
+        "passed": result.returncode == 0,
+        "returncode": result.returncode,
+        "output": result.stdout,
+        "stderr": result.stderr,
+        "time_s": elapsed,
+        "stage_data": stage_data,
+    }
+
+
+def _run_cpp_audio_generation(binary, bundle_path, prompt, output_wav,
+                               hf_python, ld_library_path):
+    """Run C++ generate-audio and return (success, file_size)."""
+    cmd = [
+        str(binary), "generate-audio", str(bundle_path),
+        "--prompt", prompt,
+        "--output", str(output_wav),
+    ]
+    if hf_python:
+        cmd.extend(["--hf-python", str(hf_python)])
+
+    env = {"LD_LIBRARY_PATH": ld_library_path}
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=600, env=env)
+
+    if result.returncode != 0:
+        return False, 0, result.stderr
+    if not Path(output_wav).is_file():
+        return False, 0, "No output WAV file"
+
+    file_size = os.path.getsize(output_wav)
+    return True, file_size, result.stderr
+
+
+@pytest.mark.e2e
+def test_bark_stage_parity(built_bundle, trtf_binary, hf_python,
+                           ld_library_path):
+    """Bark stage-by-stage greedy parity: TRT engine vs HF, per stage.
+
+    1. Runs diff_audio.py --stage 4 (builds TRT engines from HF, greedy
+       parity for all 4 Bark stages) as a subprocess.
+    2. Runs C++ generate-audio to produce a .wav file alongside the bundle.
+    3. Saves a results.json next to the bundle with per-stage metrics.
+    """
+    entry = built_bundle["entry"]
+    bundle_path = built_bundle["path"]
+
+    if entry.get("runtime_strategy") != "text_to_audio":
+        pytest.skip(f"{entry['name']} is not an audio model")
+
+    hf_id = entry["hf_id"]
+    prompt = entry.get("prompt", "Hello, this is a test.")
+
+    # Step 1: Stage 4 parity (subprocess — GPU-isolated)
+    json_path = Path("/tmp/claude") / f"{entry['name']}_stage4.json"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    parity_result = _run_diff_audio_stage4_subprocess(
+        hf_id, prompt, json_path, max_semantic_tokens=100)
+
+    # Step 2: C++ generate-audio — produce a .wav next to the bundle
+    bundle_p = Path(bundle_path)
+    wav_path = bundle_p.with_suffix(".wav")
+    cpp_ok, wav_size, cpp_stderr = _run_cpp_audio_generation(
+        trtf_binary, bundle_path, prompt, str(wav_path),
+        hf_python, ld_library_path)
+
+    # Step 3: Build and save results.json next to the bundle
+    stage_data = parity_result.get("stage_data") or {}
+    results = {
+        "model": {
+            "name": entry["name"],
+            "hf_id": hf_id,
+            "family": entry.get("family", "unknown"),
+            "runtime_strategy": "text_to_audio",
+        },
+        "build": {
+            "was_cached": built_bundle["was_cached"],
+            "build_time_s": built_bundle["build_time_s"],
+            "engine_size_bytes": os.path.getsize(bundle_path),
+            "trt_version": _get_trt_version(),
+            "gpu_name": _get_gpu_name(),
+        },
+        "stage_parity": stage_data.get("stages", {}),
+        "stage_parity_pass": parity_result["passed"],
+        "inference": {
+            "prompt": prompt,
+            "cpp_generate_audio_ok": cpp_ok,
+            "wav_file": str(wav_path) if cpp_ok else None,
+            "wav_size_bytes": wav_size,
+        },
+        "timing": {
+            "build_time_s": built_bundle["build_time_s"],
+            "stage4_parity_time_s": parity_result["time_s"],
+        },
+        "status": "PASS" if parity_result["passed"] else "FAIL",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    results_path = _save_results(bundle_path, results)
+
+    # Assertions
+    assert parity_result["passed"], (
+        f"Bark stage parity FAILED for {entry['name']}:\n"
+        f"{parity_result['stderr'][-2000:]}")
+
+    # WAV generation is informational (not gating)
+    wav_status = f", wav={wav_size}B" if cpp_ok else ", wav=FAILED"
+    stages = stage_data.get("stages", {})
+    sem_info = stages.get("semantic", {})
+    coarse_info = stages.get("coarse", {})
+    codec_info = stages.get("codec", {})
+    print(f"\n[bark_stage_parity] {entry['name']}: PASS "
+          f"(sem={sem_info.get('matched', '?')}/{sem_info.get('hf_tokens', '?')}, "
+          f"coarse={coarse_info.get('matched', '?')}/{coarse_info.get('hf_tokens', '?')}, "
+          f"codec_cos={codec_info.get('cosine', '?')}"
+          f"{wav_status})")
+    print(f"  Results saved: {results_path}")
+    if cpp_ok:
+        print(f"  WAV saved: {wav_path}")
+
+
 @pytest.mark.e2e
 def test_audio_pipeline(built_bundle, trtf_binary, hf_python,
                         ld_library_path):
