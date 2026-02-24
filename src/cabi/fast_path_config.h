@@ -37,6 +37,8 @@ struct FastPathModelConfig {
     int32_t mamba_d_state{128};
     int32_t mamba_d_conv{4};
     int32_t mamba_nheads{0};
+    int32_t mamba_head_dim{0};
+    int32_t conv_dim{0};          // d_inner + 2*n_groups*d_state (conv1d channels)
     std::vector<std::string> layer_types;  // "mamba2", "mlp", "attention"
 
     // Whisper/speech-to-text fields (used when runtime_strategy == "speech_to_text")
@@ -72,6 +74,8 @@ struct FastPathModelConfig {
     int32_t sam_num_multimask_outputs{3};
     std::vector<float> sam_point_embed_fg;
     std::vector<float> sam_point_embed_bg;
+    std::vector<float> sam_not_a_point_embed;
+    std::vector<float> sam_shared_image_pe;
 
     // Audio/Bark fields (used when runtime_strategy == "text_to_audio")
     int32_t audio_sample_rate{24000};

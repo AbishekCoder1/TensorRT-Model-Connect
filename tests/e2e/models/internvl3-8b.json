@@ -1,0 +1,14 @@
+{
+  "name": "internvl3-8b",
+  "hf_id": "OpenGVLab/InternVL3-8B-hf",
+  "bundle": "internvl3-8b-vl.trtfb",
+  "family": "internvl",
+  "runtime_strategy": "vision_language",
+  "max_cache_length": 384,
+  "prompt": "Describe this image in detail.",
+  "max_new_tokens": 30,
+  "logit_atol": 1e-3,
+  "layer_atol": 0.05,
+  "test_image": "/workspace/users/yifeif/trt-transformers/engines/test_image.jpg",
+  "trust_remote_code": false
+}

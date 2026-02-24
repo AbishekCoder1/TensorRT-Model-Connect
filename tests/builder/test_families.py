@@ -165,6 +165,12 @@ _POSITIVE_MATCH_CASES = [
     # NemotronH (hybrid Mamba-Attention)
     ("nemotron_h", "nemotron_h"),
     ("nemotron_hybrid", "nemotron_h"),
+    # SAM (prompted segmentation)
+    ("sam", "sam"),
+    # Phi-4 Multimodal
+    ("phi4_multimodal", "phi4_multimodal"),
+    # FNO (Fourier Neural Operator)
+    ("fno", "fno"),
 ]
 
 

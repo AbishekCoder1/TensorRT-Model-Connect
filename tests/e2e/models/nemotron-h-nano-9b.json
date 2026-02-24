@@ -1,0 +1,13 @@
+{
+  "name": "nemotron-h-nano-9b",
+  "hf_id": "nvidia/Nemotron-H-Nano-9B-Base",
+  "bundle": "nemotron-h-nano-9b.trtfb",
+  "family": "nemotron_h",
+  "runtime_strategy": "hybrid_mamba_attention",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 20,
+  "logit_atol": 5e-3,
+  "layer_atol": 0.1,
+  "trust_remote_code": false
+}

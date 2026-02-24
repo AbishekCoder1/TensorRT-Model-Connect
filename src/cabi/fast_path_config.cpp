@@ -91,6 +91,8 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.mamba_d_state = extract_json_int(config_text, "mamba_d_state", 128);
         cfg.mamba_d_conv = extract_json_int(config_text, "mamba_d_conv", 4);
         cfg.mamba_nheads = extract_json_int(config_text, "mamba_nheads", 0);
+        cfg.mamba_head_dim = extract_json_int(config_text, "mamba_head_dim", 0);
+        cfg.conv_dim = extract_json_int(config_text, "conv_dim", cfg.d_inner);
         cfg.layer_types = extract_json_string_array(config_text, "layer_types");
     }
 
@@ -142,6 +144,8 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.seg_image_std = extract_json_float_array(config_text, "image_std");
         cfg.sam_point_embed_fg = extract_json_float_array(config_text, "sam_point_embed_1");
         cfg.sam_point_embed_bg = extract_json_float_array(config_text, "sam_point_embed_0");
+        cfg.sam_not_a_point_embed = extract_json_float_array(config_text, "sam_not_a_point_embed");
+        cfg.sam_shared_image_pe = extract_json_float_array(config_text, "sam_shared_image_pe");
     }
 
     // Audio/Bark fields

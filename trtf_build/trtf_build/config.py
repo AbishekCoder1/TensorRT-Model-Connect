@@ -52,10 +52,18 @@ class ModelConfig:
 
         # VL models (e.g. Qwen3-VL) nest text model config under "text_config".
         # Merge text_config into top level so standard key lookup works.
+        # Preserve top-level model_type and architectures (these identify the
+        # VL model, not the text backbone).
         original_raw = d
         text_config = d.get("text_config")
         if text_config and isinstance(text_config, dict):
+            top_model_type = d.get("model_type")
+            top_architectures = d.get("architectures")
             merged = {**d, **text_config}
+            if top_model_type:
+                merged["model_type"] = top_model_type
+            if top_architectures:
+                merged["architectures"] = top_architectures
             d = merged
 
         # Handle non-standard config key names:

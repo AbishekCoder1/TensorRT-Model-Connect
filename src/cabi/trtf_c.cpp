@@ -1806,6 +1806,8 @@ PipelineImpl* create_hybrid_pipeline(
     hybrid_engine->d_state = fp_cfg.mamba_d_state;
     hybrid_engine->d_conv = fp_cfg.mamba_d_conv;
     hybrid_engine->nheads = fp_cfg.mamba_nheads;
+    hybrid_engine->head_dim = fp_cfg.mamba_head_dim;
+    hybrid_engine->conv_dim = fp_cfg.conv_dim;
     hybrid_engine->num_mamba_layers = fp_cfg.num_mamba_layers;
     hybrid_engine->num_attention_layers = fp_cfg.num_attention_layers;
     hybrid_engine->layer_types = fp_cfg.layer_types;

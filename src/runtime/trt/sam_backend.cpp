@@ -50,14 +50,27 @@ bool SamBackend::encode_image(const std::string& image_path)
         return false;
     }
 
-    // Resize and normalize to CHW float32
-    std::vector<float> pixel_values(static_cast<std::size_t>(3) * H * W);
-    for (int32_t y = 0; y < H; ++y)
+    // SAM preprocessing: resize longest side to image_size, pad to image_size x image_size
+    // (matching HuggingFace SamImageProcessor behavior)
+    const int32_t longest = std::max(img_w, img_h);
+    const float scale = static_cast<float>(H) / static_cast<float>(longest);
+    const int32_t new_w = static_cast<int32_t>(std::round(static_cast<float>(img_w) * scale));
+    const int32_t new_h = static_cast<int32_t>(std::round(static_cast<float>(img_h) * scale));
+
+    // Store rescaled dimensions for point coordinate transformation
+    mRescaledW = new_w;
+    mRescaledH = new_h;
+
+    // Resize, normalize, and pad to CHW float32
+    // HF SAM pads with 0.0 (not (0-mean)/std)
+    std::vector<float> pixel_values(static_cast<std::size_t>(3) * H * W, 0.0F);
+    // Fill the resized image region
+    for (int32_t y = 0; y < new_h; ++y)
     {
-        for (int32_t x = 0; x < W; ++x)
+        for (int32_t x = 0; x < new_w; ++x)
         {
-            const float src_y = static_cast<float>(y) * static_cast<float>(img_h) / static_cast<float>(H);
-            const float src_x = static_cast<float>(x) * static_cast<float>(img_w) / static_cast<float>(W);
+            const float src_y = static_cast<float>(y) * static_cast<float>(img_h) / static_cast<float>(new_h);
+            const float src_x = static_cast<float>(x) * static_cast<float>(img_w) / static_cast<float>(new_w);
             const int32_t y0 = std::min(static_cast<int32_t>(src_y), img_h - 1);
             const int32_t x0 = std::min(static_cast<int32_t>(src_x), img_w - 1);
             const auto src_idx = static_cast<std::size_t>((y0 * img_w + x0) * 3);
@@ -103,31 +116,47 @@ bool SamBackend::encode_image(const std::string& image_path)
 std::vector<float> SamBackend::encode_point(float x, float y, bool is_foreground)
 {
     const int32_t dim = mConfig.decoder_hidden_size;
+    const int32_t num_pos_feats = dim / 2;  // 128
 
-    // Build sparse prompt: single point embedding [1, dim]
+    // HF SAM _embed_points: points = points + 0.5 (shift to center of pixel)
+    // Then normalize: coords[:,:,:,0] /= input_image_size, coords[:,:,:,1] /= input_image_size
+    // Then: coords = 2 * coords - 1
+    // Then: B = coords @ positional_embedding  (positional_embedding is [2, 128])
+    // Then: PE = cat(sin(2*pi*B), cos(2*pi*B))  -> [256]
+    // Then: PE += point_embed[label]
+
+    // x, y are in image coordinates (0..1023 for 1024x1024 image space)
+    // Add 0.5 and normalize to [0, 1]
+    float nx = (x + 0.5F) / static_cast<float>(mConfig.image_size);
+    float ny = (y + 0.5F) / static_cast<float>(mConfig.image_size);
+
+    // Map to [-1, 1]
+    float cx = 2.0F * nx - 1.0F;
+    float cy = 2.0F * ny - 1.0F;
+
+    // shared_image_pe is [2, num_pos_feats] stored flattened as [2*num_pos_feats]
+    // B[i] = cx * shared_pe[0][i] + cy * shared_pe[1][i]
     std::vector<float> sparse(static_cast<std::size_t>(dim), 0.0F);
+    const auto& pe = mConfig.shared_image_pe;
 
-    // Use point embeddings from config (fg=index 1, bg=index 0)
-    const auto& point_embed = is_foreground
-        ? mConfig.point_embed_fg : mConfig.point_embed_bg;
-
-    if (static_cast<int32_t>(point_embed.size()) >= dim)
+    if (static_cast<int32_t>(pe.size()) >= 2 * num_pos_feats)
     {
-        for (int32_t i = 0; i < dim; ++i)
+        for (int32_t i = 0; i < num_pos_feats; ++i)
         {
-            sparse[i] = point_embed[i];
+            float b = cx * pe[i] + cy * pe[num_pos_feats + i];
+            float angle = 2.0F * 3.14159265358979F * b;
+            sparse[i] = std::sin(angle);
+            sparse[num_pos_feats + i] = std::cos(angle);
         }
     }
 
-    // Add positional encoding for the point location
-    // Simple sinusoidal encoding based on normalized coordinates
-    const float scale = 2.0F * 3.14159265F;
-    for (int32_t i = 0; i < dim / 2 && i < dim; ++i)
+    // Add point type embedding
+    const auto& point_embed = is_foreground
+        ? mConfig.point_embed_fg : mConfig.point_embed_bg;
+    if (static_cast<int32_t>(point_embed.size()) >= dim)
     {
-        float freq = std::pow(2.0F, -static_cast<float>(i) / static_cast<float>(dim / 2));
-        sparse[i] += std::sin(x * scale * freq);
-        if (i + dim / 2 < dim)
-            sparse[i + dim / 2] += std::sin(y * scale * freq);
+        for (int32_t i = 0; i < dim; ++i)
+            sparse[i] += point_embed[i];
     }
 
     return sparse;
@@ -149,9 +178,7 @@ SamResult SamBackend::run_decoder(const std::vector<float>& sparse_prompt)
     result.mask_height = 256;
     result.mask_width = 256;
 
-    const int32_t dim = mConfig.decoder_hidden_size;
     const int32_t num_masks = mConfig.num_mask_outputs;
-    const int32_t embed_size = mConfig.image_embedding_size;
 
     // Sparse prompt -> GPU
     CudaBuffer sparse_buf(sparse_prompt.size() * sizeof(float));
@@ -161,13 +188,6 @@ SamResult SamBackend::run_decoder(const std::vector<float>& sparse_prompt)
     cudaMemcpyAsync(sparse_buf.data(), sparse_prompt.data(),
         sparse_prompt.size() * sizeof(float),
         cudaMemcpyHostToDevice, mStream.get());
-
-    // Dense prompt: zeros [1, dim, embed_size, embed_size]
-    const auto dense_size = static_cast<std::size_t>(dim) * embed_size * embed_size;
-    CudaBuffer dense_buf(dense_size * sizeof(float));
-    if (!dense_buf.ok())
-        throw std::runtime_error("SAM: Failed to allocate dense prompt GPU buffer");
-    cudaMemsetAsync(dense_buf.data(), 0, dense_size * sizeof(float), mStream.get());
 
     // Output buffers
     const auto masks_size = static_cast<std::size_t>(num_masks) * 256 * 256;
@@ -205,7 +225,32 @@ SamResult SamBackend::segment_point(float point_x, float point_y, bool is_foregr
     if (!mHasImage)
         throw std::runtime_error("SAM: No image encoded. Call encode_image() first.");
 
-    auto sparse = encode_point(point_x, point_y, is_foreground);
+    const int32_t dim = mConfig.decoder_hidden_size;
+
+    // Transform point from normalized [0,1] coords to rescaled image coords
+    // HF: point coords are in original image space, then scaled by the resize factor
+    float px = point_x * static_cast<float>(mRescaledW);
+    float py = point_y * static_cast<float>(mRescaledH);
+
+    // Build sparse prompt: [point_embedding, padding_embedding]
+    // HF adds padding when no box is provided (pad=True)
+    auto point_emb = encode_point(px, py, is_foreground);
+
+    // Padding token: not_a_point_embed (label = -1)
+    std::vector<float> pad_emb(static_cast<std::size_t>(dim), 0.0F);
+    if (static_cast<int32_t>(mConfig.not_a_point_embed.size()) >= dim)
+    {
+        for (int32_t i = 0; i < dim; ++i)
+            pad_emb[i] = mConfig.not_a_point_embed[i];
+    }
+
+    // Concatenate: [2, dim]
+    std::vector<float> sparse(static_cast<std::size_t>(2) * dim);
+    std::memcpy(sparse.data(), point_emb.data(),
+        static_cast<std::size_t>(dim) * sizeof(float));
+    std::memcpy(sparse.data() + dim, pad_emb.data(),
+        static_cast<std::size_t>(dim) * sizeof(float));
+
     return run_decoder(sparse);
 }
 
@@ -247,6 +292,8 @@ std::unique_ptr<SamBackend> CreateSamBackend(
 
     sam_cfg.point_embed_fg = cfg.sam_point_embed_fg;
     sam_cfg.point_embed_bg = cfg.sam_point_embed_bg;
+    sam_cfg.not_a_point_embed = cfg.sam_not_a_point_embed;
+    sam_cfg.shared_image_pe = cfg.sam_shared_image_pe;
 
     return std::make_unique<SamBackend>(
         std::move(encoder_engine), std::move(encoder_ctx),

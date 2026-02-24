@@ -1,0 +1,15 @@
+{
+  "name": "phi4-multimodal",
+  "hf_id": "microsoft/Phi-4-multimodal-instruct",
+  "bundle": "phi4-multimodal.trtfb",
+  "family": "phi4_multimodal",
+  "runtime_strategy": "vision_language",
+  "max_cache_length": 384,
+  "prompt": "Describe this image.",
+  "max_new_tokens": 30,
+  "logit_atol": 1e-2,
+  "layer_atol": 0.1,
+  "trust_remote_code": true,
+  "test_image": "/workspace/users/yifeif/trt-transformers/engines/test_image.jpg",
+  "skip": "Phi-4-multimodal requires trust_remote_code and large download; run manually"
+}
