@@ -1,0 +1,319 @@
+"""Encoder-only engine builder (BERT-style).
+
+Builds a TensorRT engine for an encoder-only transformer. Unlike the standard
+decoder builder, this has:
+  - No KV cache (processes entire sequence at once)
+  - No causal attention mask (full bidirectional attention)
+  - POST-norm architecture (residual + LayerNorm after attention/FFN)
+  - Token type embeddings (segment A/B)
+  - Output: hidden_states [seq_len, hidden_size]
+
+Tensor names for the C++ runtime:
+  Inputs:  input_ids [seq_len], token_type_ids [seq_len]
+  Outputs: hidden_states [seq_len, hidden_size]
+"""
+
+from __future__ import annotations
+
+import sys
+from typing import TYPE_CHECKING
+
+import numpy as np
+import tensorrt as trt
+
+from . import graph_ops
+from . import graph_blocks
+from .config import ModelConfig
+
+if TYPE_CHECKING:
+    from .checkpoint_mapper import WeightDict
+
+
+def build_encoder_engine(
+    config: ModelConfig,
+    weights: WeightDict,
+    max_seq_length: int,
+    *,
+    verbose: bool = False,
+) -> bytes:
+    """Build a TRT engine plan for a BERT-style encoder.
+
+    Args:
+        config: Model architecture from config.json.
+        weights: Loaded weight dict from BERT plugin.
+        max_seq_length: Maximum sequence length the engine is compiled for.
+        verbose: Print TRT builder logs.
+
+    Returns:
+        Serialized engine plan bytes.
+    """
+    hidden = config.hidden_size
+    vocab = config.vocab_size
+    num_layers = config.num_hidden_layers
+    num_heads = config.num_attention_heads
+    head_dim = hidden // num_heads
+    intermediate = config.intermediate_size
+    eps = config.rms_norm_eps  # Actually layer_norm_eps for BERT
+    type_vocab_size = config.raw.get("type_vocab_size", 2)
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network()
+    trt_config = builder.create_builder_config()
+    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    trt_config.clear_flag(trt.BuilderFlag.TF32)
+
+    # -------------------------------------------------------------------
+    # Inputs
+    # -------------------------------------------------------------------
+    input_ids = network.add_input("input_ids", trt.int32, (max_seq_length,))
+    token_type_ids = network.add_input("token_type_ids", trt.int32, (max_seq_length,))
+
+    # -------------------------------------------------------------------
+    # Shared constants
+    # -------------------------------------------------------------------
+    embedding_table = graph_ops.add_constant(
+        network, (vocab, hidden), weights["embedding"])
+    position_embed_table = graph_ops.add_constant(
+        network, weights["position_embedding"].shape, weights["position_embedding"])
+    token_type_table = graph_ops.add_constant(
+        network, (type_vocab_size, hidden), weights["token_type_embedding"])
+
+    eps_tensor = graph_ops.add_constant(
+        network, (1, 1), np.array([eps], dtype=np.float32))
+    attn_scale_tensor = graph_ops.add_constant(
+        network, (1, 1, 1), np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=np.float32))
+
+    # Position indices: [0, 1, 2, ..., max_seq_length-1]
+    position_indices = graph_ops.add_constant(
+        network, (max_seq_length,),
+        np.arange(max_seq_length, dtype=np.int32).astype(np.float32))
+    # Cast back to int32 for gather
+    pos_int = network.add_identity(position_indices)
+    pos_int.set_output_type(0, trt.int32)
+
+    # -------------------------------------------------------------------
+    # Embedding: word + position + token_type + LayerNorm
+    # -------------------------------------------------------------------
+    word_embed = network.add_gather(embedding_table, input_ids, 0)
+    pos_embed = network.add_gather(position_embed_table, pos_int.get_output(0), 0)
+    tt_embed = network.add_gather(token_type_table, token_type_ids, 0)
+
+    # Sum all three embedding types
+    embed_sum1 = network.add_elementwise(
+        word_embed.get_output(0), pos_embed.get_output(0),
+        trt.ElementWiseOperation.SUM)
+    embed_sum2 = network.add_elementwise(
+        embed_sum1.get_output(0), tt_embed.get_output(0),
+        trt.ElementWiseOperation.SUM)
+
+    # Embedding LayerNorm
+    hidden_state = _add_seq_layer_norm(
+        network, embed_sum2.get_output(0), hidden, max_seq_length,
+        weights["embed_norm"], weights["embed_norm_beta"], eps)
+
+    # -------------------------------------------------------------------
+    # Encoder layers
+    # -------------------------------------------------------------------
+    for layer_idx in range(num_layers):
+        prefix = f"layer.{layer_idx}"
+
+        hidden_state = _add_encoder_layer(
+            network=network,
+            hidden=hidden_state,
+            weights=weights,
+            prefix=prefix,
+            hidden_size=hidden,
+            intermediate_size=intermediate,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            seq_length=max_seq_length,
+            attn_scale_tensor=attn_scale_tensor,
+            eps=eps,
+        )
+
+    # -------------------------------------------------------------------
+    # Output
+    # -------------------------------------------------------------------
+    hidden_state.name = "hidden_states"
+    network.mark_output(hidden_state)
+
+    # -------------------------------------------------------------------
+    # Build engine
+    # -------------------------------------------------------------------
+    if verbose:
+        print(f"[trtf-build] Building BERT encoder TRT engine "
+              f"({num_layers} layers, hidden={hidden}, "
+              f"seq_len={max_seq_length}) ...", file=sys.stderr)
+
+    plan = builder.build_serialized_network(network, trt_config)
+    if plan is None:
+        raise RuntimeError("TensorRT engine build failed")
+
+    return bytes(plan)
+
+
+def _add_seq_layer_norm(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    hidden_size: int,
+    seq_length: int,
+    gamma: np.ndarray,
+    beta: np.ndarray,
+    eps: float,
+) -> trt.ITensor:
+    """LayerNorm over sequence of vectors: [seq_len, hidden] -> [seq_len, hidden].
+
+    Processes each position independently via reshape to apply per-position norm.
+    """
+    # Reshape to [seq_len, 1, hidden] so that the reduce ops work on the last dim
+    # Actually, for a [seq_len, hidden] tensor, reduce on axis 1 is already correct.
+    # graph_ops.add_layer_norm expects [batch, hidden] with reduce on axis 1.
+    # But our input is [seq_len, hidden] — same layout, so we can just apply
+    # per-position layernorm by treating each position as a batch element.
+    gamma_t = graph_ops.add_constant(network, (1, hidden_size), gamma)
+    beta_t = graph_ops.add_constant(network, (1, hidden_size), beta)
+    eps_t = graph_ops.add_constant(
+        network, (1, 1), np.array([eps], dtype=np.float32))
+
+    # mean = reduce_mean(x, axis=-1)
+    mean = network.add_reduce(
+        inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    centered = network.add_elementwise(
+        inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
+    sq = network.add_elementwise(
+        centered.get_output(0), centered.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    var = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    denom_in = network.add_elementwise(
+        var.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
+    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
+    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
+    normalized = network.add_elementwise(
+        centered.get_output(0), recip.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    scaled = network.add_elementwise(
+        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
+    result = network.add_elementwise(
+        scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
+    return result.get_output(0)
+
+
+def _add_encoder_layer(
+    *,
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    intermediate_size: int,
+    num_heads: int,
+    head_dim: int,
+    seq_length: int,
+    attn_scale_tensor: trt.ITensor,
+    eps: float,
+) -> trt.ITensor:
+    """Add one BERT encoder layer with POST-norm.
+
+    BERT architecture per layer:
+        attn_out = MultiHeadSelfAttention(hidden)
+        hidden = LayerNorm(hidden + attn_out)  # post-norm
+        ffn_out = FFN(hidden)
+        hidden = LayerNorm(hidden + ffn_out)   # post-norm
+    """
+    attention_size = num_heads * head_dim
+
+    # --- Self-attention (no causal mask, bidirectional) ---
+    # QKV projections
+    q = graph_ops.add_matmul_rhs_constant(
+        network, hidden, hidden_size, attention_size,
+        weights[f"{prefix}.w_q"])
+    k = graph_ops.add_matmul_rhs_constant(
+        network, hidden, hidden_size, attention_size,
+        weights[f"{prefix}.w_k"])
+    v = graph_ops.add_matmul_rhs_constant(
+        network, hidden, hidden_size, attention_size,
+        weights[f"{prefix}.w_v"])
+
+    # QKV biases
+    q = graph_ops.add_bias_sum(network, q, attention_size, weights[f"{prefix}.q_bias"])
+    k = graph_ops.add_bias_sum(network, k, attention_size, weights[f"{prefix}.k_bias"])
+    v = graph_ops.add_bias_sum(network, v, attention_size, weights[f"{prefix}.v_bias"])
+
+    # Reshape for multi-head attention: [seq_len, hidden] -> [num_heads, seq_len, head_dim]
+    q_heads = network.add_shuffle(q)
+    q_heads.reshape_dims = (seq_length, num_heads, head_dim)
+    q_heads.second_transpose = trt.Permutation([1, 0, 2])  # [num_heads, seq_len, head_dim]
+
+    k_heads = network.add_shuffle(k)
+    k_heads.reshape_dims = (seq_length, num_heads, head_dim)
+    k_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+    v_heads = network.add_shuffle(v)
+    v_heads.reshape_dims = (seq_length, num_heads, head_dim)
+    v_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+    # Attention scores: Q @ K^T -> [num_heads, seq_len, seq_len]
+    score = network.add_matrix_multiply(
+        q_heads.get_output(0), trt.MatrixOperation.NONE,
+        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
+
+    # Scale
+    scaled = network.add_elementwise(
+        score.get_output(0), attn_scale_tensor,
+        trt.ElementWiseOperation.PROD)
+
+    # No causal mask for BERT — full bidirectional attention
+    # Softmax over last dimension
+    softmax = network.add_softmax(scaled.get_output(0))
+    softmax.axes = 1 << 2  # last dim (seq_len)
+
+    # Context: softmax @ V -> [num_heads, seq_len, head_dim]
+    context_heads = network.add_matrix_multiply(
+        softmax.get_output(0), trt.MatrixOperation.NONE,
+        v_heads.get_output(0), trt.MatrixOperation.NONE)
+
+    # Reshape back: [num_heads, seq_len, head_dim] -> [seq_len, attention_size]
+    context_flat = network.add_shuffle(context_heads.get_output(0))
+    context_flat.first_transpose = trt.Permutation([1, 0, 2])  # [seq_len, num_heads, head_dim]
+    context_flat.reshape_dims = (seq_length, attention_size)
+
+    # Output projection
+    attn_out = graph_ops.add_matmul_rhs_constant(
+        network, context_flat.get_output(0),
+        attention_size, hidden_size,
+        weights[f"{prefix}.w_o"])
+    attn_out = graph_ops.add_bias_sum(
+        network, attn_out, hidden_size, weights[f"{prefix}.o_bias"])
+
+    # POST-norm: LayerNorm(hidden + attn_out)
+    residual1 = network.add_elementwise(
+        hidden, attn_out, trt.ElementWiseOperation.SUM)
+    normed1 = _add_seq_layer_norm(
+        network, residual1.get_output(0), hidden_size, seq_length,
+        weights[f"{prefix}.post_attn_norm"],
+        weights[f"{prefix}.post_attn_norm_beta"], eps)
+
+    # --- FFN: fc1 -> GELU -> fc2 ---
+    fc1 = graph_ops.add_matmul_rhs_constant(
+        network, normed1, hidden_size, intermediate_size,
+        weights[f"{prefix}.w_fc1"])
+    fc1 = graph_ops.add_bias_sum(network, fc1, intermediate_size,
+                                  weights[f"{prefix}.fc1_bias"])
+    activated = graph_ops.add_activation(network, fc1, "gelu_new")
+    fc2 = graph_ops.add_matmul_rhs_constant(
+        network, activated, intermediate_size, hidden_size,
+        weights[f"{prefix}.w_fc2"])
+    fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size,
+                                  weights[f"{prefix}.fc2_bias"])
+
+    # POST-norm: LayerNorm(normed1 + ffn_out)
+    residual2 = network.add_elementwise(
+        normed1, fc2, trt.ElementWiseOperation.SUM)
+    normed2 = _add_seq_layer_norm(
+        network, residual2.get_output(0), hidden_size, seq_length,
+        weights[f"{prefix}.output_norm"],
+        weights[f"{prefix}.output_norm_beta"], eps)
+
+    return normed2

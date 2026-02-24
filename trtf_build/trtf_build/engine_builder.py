@@ -227,8 +227,13 @@ def build_bundle(
     # slow tokenizer so the C++ runtime can always load via AutoTokenizer.
     # Skip for non-text models (segmentation, audio) that don't use tokenizers.
     runtime_strategy = getattr(plugin, "runtime_strategy", "")
-    if runtime_strategy not in ("segmentation",):
+    if runtime_strategy not in ("segmentation", "neural_operator", "object_detection", "prompted_segmentation"):
         _ensure_tokenizer_json(model_dir_path)
+
+    # Inject encoder_only config overrides
+    if runtime_strategy == "encoder_only":
+        # Use max_cache_length as max_seq_length for encoder
+        pass
 
     # Embed tokenizer + config files.
     # For config.json, inject runtime_strategy if the plugin provides one.
@@ -261,6 +266,12 @@ def build_bundle(
                     seg_cfg = get_seg_config(config)
                     if seg_cfg is not None:
                         cfg_dict.update(seg_cfg)
+                # Inject detection config from plugin
+                get_det_config = getattr(plugin, 'get_detection_config', None)
+                if get_det_config is not None:
+                    det_cfg = get_det_config(config)
+                    if det_cfg is not None:
+                        cfg_dict.update(det_cfg)
                 # Inject audio config from plugin
                 get_audio_config = getattr(plugin, 'get_audio_config', None)
                 if get_audio_config is not None:

@@ -41,6 +41,16 @@ struct BundleSections {
     const std::vector<char>* fine_embed_data{nullptr};
     const std::vector<char>* fine_position_embed_data{nullptr};
 
+    // Omni multimodal sections
+    const std::vector<char>* audio_encoder_plan_data{nullptr};
+    const std::vector<char>* talker_engine_plan_data{nullptr};
+    const std::vector<char>* code2wav_engine_plan_data{nullptr};
+
+    // Speech-to-speech (PersonaPlex/Moshi) sections
+    const std::vector<char>* depth_engine_plan_data{nullptr};
+    const std::vector<char>* mimi_encoder_plan_data{nullptr};
+    const std::vector<char>* mimi_decoder_plan_data{nullptr};
+
     // Diffusion sections
     std::vector<const std::vector<char>*> text_encoder_plans;  // text_encoder_0_plan, ...
     const std::vector<char>* denoiser_plan_data{nullptr};

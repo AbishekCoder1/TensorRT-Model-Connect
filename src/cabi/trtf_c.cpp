@@ -1576,11 +1576,11 @@ PipelineImpl* create_encoder_pipeline(
         throw std::runtime_error("Failed to create encoder backend from bundle engine");
     }
 
-    // Tokenizer (optional — BERT typically uses one)
+    // Tokenizer — encoder models need special tokens ([CLS], [SEP]) added
     trtf::TokenizerResult tok = {nullptr, ""};
     try
     {
-        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python, /*add_special_tokens=*/true);
     }
     catch (const std::exception& e)
     {

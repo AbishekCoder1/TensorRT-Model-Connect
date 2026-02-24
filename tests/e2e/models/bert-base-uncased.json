@@ -1,0 +1,12 @@
+{
+    "model_id": "google-bert/bert-base-uncased",
+    "family": "bert",
+    "runtime_strategy": "encoder_only",
+    "max_cache_length": 128,
+    "test_prompts": [
+        "The capital of France is Paris."
+    ],
+    "skip_text_match": true,
+    "skip_logit_comparison": true,
+    "notes": "Encoder-only model — outputs hidden states, not logits for next token. E2E test validates bundle build + inference without text comparison."
+}

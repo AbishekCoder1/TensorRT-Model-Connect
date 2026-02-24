@@ -291,6 +291,179 @@ static void test_non_vl_config_defaults()
     check(cfg.vision_output_dim == 0, "vision_output_dim = 0 (default)");
 }
 
+static void test_encoder_only_config()
+{
+    const std::string config = R"({
+        "model_type": "bert",
+        "vocab_size": 30522,
+        "hidden_size": 768,
+        "num_hidden_layers": 12,
+        "num_attention_heads": 12,
+        "runtime_strategy": "encoder_only",
+        "type_vocab_size": 2,
+        "max_position_embeddings": 512
+    })";
+
+    const auto cfg = trtf::parse_fast_path_config(config, 128);
+    check(cfg.runtime_strategy == "encoder_only", "encoder_only: runtime_strategy");
+    check(cfg.vocab_size == 30522, "encoder_only: vocab_size");
+    check(cfg.hidden_size == 768, "encoder_only: hidden_size");
+    check(cfg.num_layers == 12, "encoder_only: num_layers");
+    check(cfg.num_heads == 12, "encoder_only: num_heads");
+    check(cfg.type_vocab_size == 2, "encoder_only: type_vocab_size");
+    check(cfg.max_cache_length == 128, "encoder_only: max_cache_length (override)");
+    check(cfg.head_dim == 64, "encoder_only: head_dim = 768/12 = 64");
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify that omni_multimodal runtime_strategy correctly parses
+//             all Omni-specific config fields.
+// Setup:      A JSON config with runtime_strategy="omni_multimodal" and
+//             Omni-specific fields (talker, audio encoder, codebook config).
+// Mechanism:  Calls parse_fast_path_config and checks all omni fields.
+// -----------------------------------------------------------------------------
+static void test_omni_multimodal_config()
+{
+    const std::string config = R"({
+        "vocab_size": 128000,
+        "hidden_size": 2048,
+        "num_hidden_layers": 28,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 4,
+        "runtime_strategy": "omni_multimodal",
+        "audio_sample_rate": 24000,
+        "num_local_experts": 8,
+        "num_experts_per_tok": 2,
+        "omni_talker_hidden_size": 1024,
+        "omni_talker_num_layers": 12,
+        "omni_talker_max_cache_length": 512,
+        "omni_n_codebooks": 8,
+        "omni_codebook_size": 2048,
+        "omni_audio_embed_dim": 1280,
+        "omni_audio_num_mel": 128,
+        "omni_audio_num_layers": 32,
+        "omni_audio_num_frames": 1500,
+        "has_vision_engine": 1,
+        "embed_input": 1,
+        "image_token_id": 151655,
+        "vision_output_dim": 2048,
+        "max_position_embeddings": 4096
+    })";
+
+    const auto cfg = trtf::parse_fast_path_config(config, 256);
+    check(cfg.runtime_strategy == "omni_multimodal", "omni: runtime_strategy");
+    check(cfg.omni_sample_rate == 24000, "omni: sample_rate");
+    check(cfg.omni_num_experts == 8, "omni: num_experts");
+    check(cfg.omni_num_experts_per_tok == 2, "omni: num_experts_per_tok");
+    check(cfg.omni_talker_hidden_size == 1024, "omni: talker_hidden_size");
+    check(cfg.omni_talker_num_layers == 12, "omni: talker_num_layers");
+    check(cfg.omni_talker_max_cache_length == 512, "omni: talker_max_cache_length");
+    check(cfg.omni_n_codebooks == 8, "omni: n_codebooks");
+    check(cfg.omni_codebook_size == 2048, "omni: codebook_size");
+    check(cfg.omni_audio_embed_dim == 1280, "omni: audio_embed_dim");
+    check(cfg.omni_audio_num_mel == 128, "omni: audio_num_mel");
+    check(cfg.omni_audio_num_layers == 32, "omni: audio_num_layers");
+    check(cfg.omni_audio_num_frames == 1500, "omni: audio_num_frames");
+    check(cfg.has_vision_engine == true, "omni: has_vision_engine");
+    check(cfg.embed_input == true, "omni: embed_input");
+    check(cfg.image_token_id == 151655, "omni: image_token_id");
+    check(cfg.vision_output_dim == 2048, "omni: vision_output_dim");
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify that speech_to_speech runtime_strategy correctly parses
+//             PersonaPlex/Moshi speech-specific config fields.
+// Setup:      A JSON config with runtime_strategy="speech_to_speech" and
+//             speech-specific fields (sample_rate, codebooks, depth transformer).
+// Mechanism:  Calls parse_fast_path_config and checks all speech fields.
+// -----------------------------------------------------------------------------
+static void test_speech_to_speech_config()
+{
+    const std::string config = R"({
+        "vocab_size": 32000,
+        "hidden_size": 4096,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "runtime_strategy": "speech_to_speech",
+        "sample_rate": 24000,
+        "num_codebooks": 8,
+        "codebook_size": 2048,
+        "frame_rate": 12.5,
+        "depth_hidden_size": 1024,
+        "depth_num_layers": 6,
+        "depth_num_attention_heads": 16,
+        "depth_num_key_value_heads": 4,
+        "max_position_embeddings": 4096
+    })";
+
+    const auto cfg = trtf::parse_fast_path_config(config, 512);
+    check(cfg.runtime_strategy == "speech_to_speech", "speech: runtime_strategy");
+    check(cfg.speech_sample_rate == 24000, "speech: sample_rate");
+    check(cfg.speech_num_codebooks == 8, "speech: num_codebooks");
+    check(cfg.speech_codebook_size == 2048, "speech: codebook_size");
+    check(cfg.speech_depth_hidden_size == 1024, "speech: depth_hidden_size");
+    check(cfg.speech_depth_num_layers == 6, "speech: depth_num_layers");
+    check(cfg.speech_depth_num_heads == 16, "speech: depth_num_heads");
+    check(cfg.speech_depth_num_kv_heads == 4, "speech: depth_num_kv_heads");
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify that hybrid_mamba_attention runtime_strategy correctly
+//             parses all hybrid Mamba-2 + Attention config fields.
+// Setup:      A JSON config with runtime_strategy="hybrid_mamba_attention" and
+//             hybrid-specific fields (layer counts, Mamba-2 dims, layer_types).
+// Mechanism:  Calls parse_fast_path_config and checks all hybrid fields.
+// -----------------------------------------------------------------------------
+static void test_hybrid_mamba_attention_config()
+{
+    const std::string config = R"({
+        "vocab_size": 64256,
+        "hidden_size": 4096,
+        "num_hidden_layers": 56,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "runtime_strategy": "hybrid_mamba_attention",
+        "num_mamba_layers": 27,
+        "num_attention_layers": 4,
+        "d_inner": 8192,
+        "mamba_d_state": 128,
+        "mamba_d_conv": 4,
+        "mamba_nheads": 64,
+        "layer_types": ["mamba2", "mlp", "attention", "mamba2"],
+        "max_position_embeddings": 4096,
+        "bos_token_id": 0,
+        "eos_token_id": 1
+    })";
+
+    const auto cfg = trtf::parse_fast_path_config(config, 256);
+    check(cfg.runtime_strategy == "hybrid_mamba_attention", "hybrid: runtime_strategy");
+    check(cfg.vocab_size == 64256, "hybrid: vocab_size");
+    check(cfg.hidden_size == 4096, "hybrid: hidden_size");
+    check(cfg.num_layers == 56, "hybrid: num_layers");
+    check(cfg.num_heads == 32, "hybrid: num_heads");
+    check(cfg.num_kv_heads == 8, "hybrid: num_kv_heads");
+    check(cfg.num_mamba_layers == 27, "hybrid: num_mamba_layers");
+    check(cfg.num_attention_layers == 4, "hybrid: num_attention_layers");
+    check(cfg.d_inner == 8192, "hybrid: d_inner");
+    check(cfg.mamba_d_state == 128, "hybrid: mamba_d_state");
+    check(cfg.mamba_d_conv == 4, "hybrid: mamba_d_conv");
+    check(cfg.mamba_nheads == 64, "hybrid: mamba_nheads");
+    check(cfg.max_cache_length == 256, "hybrid: max_cache_length (override)");
+    check(cfg.id_bos == 0, "hybrid: bos_token_id");
+    check(cfg.id_eos == 1, "hybrid: eos_token_id");
+
+    // Verify layer_types array was parsed
+    check(cfg.layer_types.size() == 4, "hybrid: layer_types has 4 entries");
+    if (cfg.layer_types.size() == 4)
+    {
+        check(cfg.layer_types[0] == "mamba2", "hybrid: layer_types[0] = mamba2");
+        check(cfg.layer_types[1] == "mlp", "hybrid: layer_types[1] = mlp");
+        check(cfg.layer_types[2] == "attention", "hybrid: layer_types[2] = attention");
+        check(cfg.layer_types[3] == "mamba2", "hybrid: layer_types[3] = mamba2");
+    }
+}
+
 int main()
 {
     test_head_dim_explicit_in_config();
@@ -302,6 +475,10 @@ int main()
     test_eos_bos_from_scalar();
     test_vision_language_config();
     test_non_vl_config_defaults();
+    test_encoder_only_config();
+    test_omni_multimodal_config();
+    test_speech_to_speech_config();
+    test_hybrid_mamba_attention_config();
 
     if (failures > 0)
     {

@@ -23,7 +23,9 @@ class PhiPlugin:
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
-        return mt.startswith("phi") and mt != "phimoe"
+        return (mt.startswith("phi")
+                and mt != "phimoe"
+                and mt not in ("phi4mm", "phi4_multimodal"))
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,

@@ -152,6 +152,44 @@ static void test_find_sections_diffusion()
     check(sections.preprocessor_weights_data != nullptr, "find_sections diffusion: preproc weights not null");
 }
 
+static void test_find_sections_speech()
+{
+    trtf::BundleFile bundle;
+    bundle.sections.push_back({"engine_plan", {'P'}});
+    bundle.sections.push_back({"depth_engine_plan", {'D', 'E'}});
+    bundle.sections.push_back({"mimi_encoder_plan", {'M', 'E'}});
+    bundle.sections.push_back({"mimi_decoder_plan", {'M', 'D'}});
+
+    const auto sections = trtf::find_bundle_sections(bundle);
+    check(sections.plan_data != nullptr, "find_sections speech: engine_plan not null");
+    check(sections.depth_engine_plan_data != nullptr, "find_sections speech: depth not null");
+    check(sections.mimi_encoder_plan_data != nullptr, "find_sections speech: mimi_encoder not null");
+    check(sections.mimi_decoder_plan_data != nullptr, "find_sections speech: mimi_decoder not null");
+    check((*sections.depth_engine_plan_data)[0] == 'D', "find_sections speech: depth data[0]");
+    check((*sections.mimi_encoder_plan_data)[0] == 'M', "find_sections speech: mimi_enc data[0]");
+    check((*sections.mimi_decoder_plan_data)[0] == 'M', "find_sections speech: mimi_dec data[0]");
+}
+
+static void test_find_sections_omni()
+{
+    trtf::BundleFile bundle;
+    bundle.sections.push_back({"engine_plan", {'P'}});
+    bundle.sections.push_back({"audio_encoder_plan", {'A', 'E'}});
+    bundle.sections.push_back({"talker_engine_plan", {'T', 'E'}});
+    bundle.sections.push_back({"code2wav_engine_plan", {'C', 'W'}});
+    bundle.sections.push_back({"vision_engine_plan", {'V', 'E'}});
+
+    const auto sections = trtf::find_bundle_sections(bundle);
+    check(sections.plan_data != nullptr, "find_sections omni: engine_plan not null");
+    check(sections.audio_encoder_plan_data != nullptr, "find_sections omni: audio_encoder not null");
+    check(sections.talker_engine_plan_data != nullptr, "find_sections omni: talker not null");
+    check(sections.code2wav_engine_plan_data != nullptr, "find_sections omni: code2wav not null");
+    check(sections.vision_plan_data != nullptr, "find_sections omni: vision not null");
+    check((*sections.audio_encoder_plan_data)[0] == 'A', "find_sections omni: audio data[0]");
+    check((*sections.talker_engine_plan_data)[0] == 'T', "find_sections omni: talker data[0]");
+    check((*sections.code2wav_engine_plan_data)[0] == 'C', "find_sections omni: code2wav data[0]");
+}
+
 #endif // TRTF_HAS_TRT
 
 int main()
@@ -165,6 +203,8 @@ int main()
     test_find_sections_unknown_ignored();
     test_find_sections_bark_sections();
     test_find_sections_diffusion();
+    test_find_sections_speech();
+    test_find_sections_omni();
 
     if (failures > 0)
     {

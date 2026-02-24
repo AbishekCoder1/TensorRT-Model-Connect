@@ -1,0 +1,13 @@
+{
+  "name": "qwen3-moe-30b-a3b",
+  "hf_id": "Qwen/Qwen3-30B-A3B",
+  "bundle": "qwen3-moe-30b-a3b.trtfb",
+  "family": "qwen_moe",
+  "runtime_strategy": "decoder_moe",
+  "max_cache_length": 128,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 10,
+  "logit_atol": 0.01,
+  "layer_atol": 0.05,
+  "trust_remote_code": false
+}

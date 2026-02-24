@@ -33,6 +33,14 @@ BundleSections find_bundle_sections(const BundleFile& bundle)
         else if (section.name == "coarse_embed") s.coarse_embed_data = &section.data;
         else if (section.name == "fine_embed") s.fine_embed_data = &section.data;
         else if (section.name == "fine_position_embed") s.fine_position_embed_data = &section.data;
+        // Speech-to-speech (PersonaPlex/Moshi) sections
+        else if (section.name == "depth_engine_plan") s.depth_engine_plan_data = &section.data;
+        else if (section.name == "mimi_encoder_plan") s.mimi_encoder_plan_data = &section.data;
+        else if (section.name == "mimi_decoder_plan") s.mimi_decoder_plan_data = &section.data;
+        // Omni multimodal sections
+        else if (section.name == "audio_encoder_plan") s.audio_encoder_plan_data = &section.data;
+        else if (section.name == "talker_engine_plan") s.talker_engine_plan_data = &section.data;
+        else if (section.name == "code2wav_engine_plan") s.code2wav_engine_plan_data = &section.data;
         // Diffusion sections
         else if (section.name == "denoiser_plan") s.denoiser_plan_data = &section.data;
         else if (section.name == "vae_decoder_plan") s.vae_decoder_plan_data = &section.data;

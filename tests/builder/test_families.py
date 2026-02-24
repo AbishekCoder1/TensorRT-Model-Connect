@@ -87,6 +87,8 @@ _POSITIVE_MATCH_CASES = [
     ("Phi3", "phi"),
     # Phi-MoE
     ("phimoe", "phi_moe"),
+    # Qwen3 MoE
+    ("qwen3_moe", "qwen_moe"),
     # Granite
     ("granite", "granite"),
     # InternLM
@@ -138,6 +140,31 @@ _POSITIVE_MATCH_CASES = [
     ("rwkv", "rwkv"),
     # DeepSeek-V2
     ("deepseek_v2", "deepseek_v2"),
+    # InternVL
+    ("internvl_chat", "internvl"),
+    ("internvl3", "internvl"),
+    # BERT (encoder-only)
+    ("bert", "bert"),
+    # DeepONet (neural operator)
+    ("deeponet", "deeponet"),
+    ("deep_o_net", "deeponet"),
+    # YOLOX (object detection)
+    ("yolox", "yolox"),
+    ("yolox_document", "yolox"),
+    ("yolox-doc", "yolox"),
+    # Eagle VLM (embedding/reranking)
+    ("eagle", "eagle_vlm"),
+    # Qwen3-Omni (omni multimodal)
+    ("qwen3_omni", "qwen3_omni"),
+    ("qwen3omni", "qwen3_omni"),
+    ("qwen3_omni_moe", "qwen3_omni"),
+    # PersonaPlex (speech-to-speech)
+    ("personaplex", "personaplex"),
+    ("moshi", "personaplex"),
+    ("personaplex_7b", "personaplex"),
+    # NemotronH (hybrid Mamba-Attention)
+    ("nemotron_h", "nemotron_h"),
+    ("nemotron_hybrid", "nemotron_h"),
 ]
 
 
@@ -159,7 +186,6 @@ class TestMatchPositive:
 
 _NEGATIVE_MATCH_CASES = [
     "unknown_model",
-    "bert",
     "t5",
     "clip",
     "",
@@ -248,6 +274,22 @@ class TestRuntimeStrategy:
         plugin = find_plugin("qwen2_vl")
         assert getattr(plugin, "runtime_strategy", None) == "vision_language"
 
+    def test_internvl_strategy(self):
+        plugin = find_plugin("internvl_chat")
+        assert getattr(plugin, "runtime_strategy", None) == "vision_language"
+
+    def test_omni_strategy(self):
+        plugin = find_plugin("qwen3_omni")
+        assert getattr(plugin, "runtime_strategy", None) == "omni_multimodal"
+
+    def test_personaplex_strategy(self):
+        plugin = find_plugin("personaplex")
+        assert getattr(plugin, "runtime_strategy", None) == "speech_to_speech"
+
+    def test_nemotron_h_strategy(self):
+        plugin = find_plugin("nemotron_h")
+        assert getattr(plugin, "runtime_strategy", None) == "hybrid_mamba_attention"
+
     def test_standard_decoder_no_strategy(self):
         """Standard decoder plugins have no runtime_strategy (defaults to decoder_kv_cache)."""
         for name in ("qwen", "llama", "mistral", "gemma", "phi", "gpt2", "opt"):
@@ -266,6 +308,14 @@ class TestEmbedInput:
         plugin = find_plugin("qwen2_vl")
         assert getattr(plugin, "embed_input", False) is True
 
+    def test_internvl_has_embed_input(self):
+        plugin = find_plugin("internvl_chat")
+        assert getattr(plugin, "embed_input", False) is True
+
+    def test_omni_has_embed_input(self):
+        plugin = find_plugin("qwen3_omni")
+        assert getattr(plugin, "embed_input", False) is True
+
     def test_standard_plugins_no_embed_input(self):
         for name in ("qwen", "llama", "mistral", "mamba", "mixtral"):
             plugin = find_plugin(name)
@@ -281,6 +331,17 @@ class TestVLMethods:
         plugin = find_plugin("qwen2_vl")
         assert callable(getattr(plugin, "build_vision_engine", None))
         assert callable(getattr(plugin, "get_vl_config", None))
+
+    def test_internvl_has_vl_methods(self):
+        plugin = find_plugin("internvl_chat")
+        assert callable(getattr(plugin, "build_vision_engine", None))
+        assert callable(getattr(plugin, "get_vl_config", None))
+
+    def test_omni_has_vl_methods(self):
+        plugin = find_plugin("qwen3_omni")
+        assert callable(getattr(plugin, "build_vision_engine", None))
+        assert callable(getattr(plugin, "get_vl_config", None))
+        assert callable(getattr(plugin, "build_extra_engines", None))
 
     def test_standard_plugins_vl_methods_return_none(self):
         """Non-VL plugins should return None from get_vl_config if they have it."""

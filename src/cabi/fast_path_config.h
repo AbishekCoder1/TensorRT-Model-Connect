@@ -31,6 +31,14 @@ struct FastPathModelConfig {
     int32_t state_size{16};  // SSM state dimension
     int32_t conv_kernel{4};  // causal conv1d kernel size
 
+    // Hybrid Mamba-Attention fields (used when runtime_strategy == "hybrid_mamba_attention")
+    int32_t num_mamba_layers{0};
+    int32_t num_attention_layers{0};
+    int32_t mamba_d_state{128};
+    int32_t mamba_d_conv{4};
+    int32_t mamba_nheads{0};
+    std::vector<std::string> layer_types;  // "mamba2", "mlp", "attention"
+
     // Whisper/speech-to-text fields (used when runtime_strategy == "speech_to_text")
     int32_t num_mel_bins{80};
     int32_t max_source_positions{1500};
@@ -56,6 +64,14 @@ struct FastPathModelConfig {
     int32_t output_w{128};
     std::vector<float> seg_image_mean;
     std::vector<float> seg_image_std;
+
+    // SAM prompted segmentation fields (used when runtime_strategy == "prompted_segmentation")
+    int32_t sam_image_embedding_size{64};
+    int32_t sam_decoder_hidden_size{256};
+    int32_t sam_num_mask_outputs{4};
+    int32_t sam_num_multimask_outputs{3};
+    std::vector<float> sam_point_embed_fg;
+    std::vector<float> sam_point_embed_bg;
 
     // Audio/Bark fields (used when runtime_strategy == "text_to_audio")
     int32_t audio_sample_rate{24000};
@@ -89,6 +105,60 @@ struct FastPathModelConfig {
     int32_t fine_codebook_size{1056};
     int32_t fine_n_lm_heads{7};
     int32_t fine_seq_length{0};        // 0 = no fine engine
+
+    // Object detection fields (used when runtime_strategy == "object_detection")
+    int32_t det_num_classes{80};
+    int32_t det_input_h{640};
+    int32_t det_input_w{640};
+    float det_conf_threshold{0.5F};
+    float det_nms_threshold{0.45F};
+    std::vector<float> det_image_mean;
+    std::vector<float> det_image_std;
+
+    // Neural operator fields (used when runtime_strategy == "neural_operator")
+    std::string operator_type{"deeponet"};
+    int32_t num_sensors{100};
+    int32_t spatial_dim{2};
+    int32_t output_dim{1};
+    // FNO-specific fields (operator_type == "fno")
+    int32_t fno_in_channels{3};
+    int32_t fno_out_channels{1};
+    int32_t fno_hidden_channels{64};
+    int32_t fno_grid_h{64};
+    int32_t fno_grid_w{64};
+
+    // Encoder-only fields (used when runtime_strategy == "encoder_only")
+    int32_t type_vocab_size{2};  // BERT token type embeddings (segment A/B)
+
+    // Embedding fields (used when runtime_strategy == "embedding")
+    int32_t embedding_dim{0};  // output embedding dimension (0 = same as hidden_size)
+
+    // Reranking fields (used when runtime_strategy == "reranking")
+    bool is_reranker{false};  // true for reranking models
+
+    // Speech-to-speech fields (used when runtime_strategy == "speech_to_speech")
+    int32_t speech_sample_rate{24000};
+    int32_t speech_num_codebooks{8};
+    int32_t speech_codebook_size{2048};
+    float speech_frame_rate{12.5F};
+    int32_t speech_depth_hidden_size{0};
+    int32_t speech_depth_num_layers{6};
+    int32_t speech_depth_num_heads{0};
+    int32_t speech_depth_num_kv_heads{0};
+
+    // Omni multimodal fields (used when runtime_strategy == "omni_multimodal")
+    int32_t omni_sample_rate{24000};
+    int32_t omni_num_experts{8};
+    int32_t omni_num_experts_per_tok{2};
+    int32_t omni_talker_hidden_size{0};
+    int32_t omni_talker_num_layers{0};
+    int32_t omni_talker_max_cache_length{1024};
+    int32_t omni_n_codebooks{8};
+    int32_t omni_codebook_size{2048};
+    int32_t omni_audio_embed_dim{1280};
+    int32_t omni_audio_num_mel{128};
+    int32_t omni_audio_num_layers{0};
+    int32_t omni_audio_num_frames{1500};
 
     // Diffusion fields (used when runtime_strategy == "diffusion")
     int32_t num_text_encoders{0};

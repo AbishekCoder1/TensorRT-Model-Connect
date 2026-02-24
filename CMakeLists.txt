@@ -79,8 +79,17 @@ add_library(trtf_core
   src/runtime/trt/vl_backend.cpp
   src/runtime/trt/image_preprocessor.cpp
   src/runtime/trt/vision_engine.cpp
+  src/runtime/trt/encoder_backend.cpp
+  src/runtime/trt/embedding_backend.cpp
+  src/runtime/trt/reranking_backend.cpp
   src/runtime/trt/segmentation_backend.cpp
+  src/runtime/trt/sam_backend.cpp
+  src/runtime/trt/detection_backend.cpp
+  src/runtime/trt/neural_operator_backend.cpp
+  src/runtime/trt/hybrid_backend.cpp
   src/runtime/trt/bark_backend.cpp
+  src/runtime/trt/omni_backend.cpp
+  src/runtime/trt/speech_backend.cpp
   src/runtime/trt/diffusion_backend.cpp
   src/runtime/trt/diffusion_backend_base.cpp
   src/runtime/trt/wan_diffusion_backend.cpp
@@ -252,6 +261,11 @@ if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_I
   target_link_libraries(test_bundle_helpers PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
 endif()
 add_test(NAME test_bundle_helpers COMMAND test_bundle_helpers)
+
+add_executable(test_neural_operator_config tests/cpp/test_neural_operator_config.cpp)
+target_link_libraries(test_neural_operator_config PRIVATE trtf_core)
+target_include_directories(test_neural_operator_config PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_neural_operator_config COMMAND test_neural_operator_config)
 
 # --- Install ---
 include(CMakePackageConfigHelpers)
