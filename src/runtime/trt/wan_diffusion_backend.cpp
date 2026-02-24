@@ -729,22 +729,11 @@ VideoResult WanDiffusionBackend::generate_video(
         }
     }
 
-    // 7. VAE decode (native TRT engine, fallback to subprocess)
+    // 7. VAE decode (native TRT engine)
     std::cerr << "[diffusion] Decoding video ...\n";
-    if (mConfig.num_vae_caches > 0 && !mD_VaeCacheIn.empty()) {
-        if (!decode_vae_native(latents, z_dim, t_lat, h_lat, w_lat, result, error)) {
-            std::cerr << "[diffusion] Native VAE decode failed: " << error
-                      << ", falling back to subprocess\n";
-            if (!decode_vae_subprocess(latents, z_dim, t_lat, h_lat, w_lat, result, error)) {
-                std::cerr << "[diffusion] VAE subprocess also failed: " << error << "\n";
-                return result;
-            }
-        }
-    } else {
-        if (!decode_vae_subprocess(latents, z_dim, t_lat, h_lat, w_lat, result, error)) {
-            std::cerr << "[diffusion] VAE decode failed: " << error << "\n";
-            return result;
-        }
+    if (!decode_vae_native(latents, z_dim, t_lat, h_lat, w_lat, result, error)) {
+        std::cerr << "[diffusion] VAE decode failed: " << error << "\n";
+        return result;
     }
 
     result.num_frames = mConfig.video_num_frames;

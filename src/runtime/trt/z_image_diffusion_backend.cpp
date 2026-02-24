@@ -881,22 +881,11 @@ VideoResult ZImageDiffusionBackend::generate_video(
         }
     }
 
-    // 8. VAE decode
+    // 8. VAE decode (native TRT engine)
     std::cerr << "[z-image] Decoding latents via native VAE ...\n";
-    if (mVaeDecoder.engine) {
-        if (!decode_vae_native(latents, z_dim, h_lat, w_lat, result, error)) {
-            std::cerr << "[z-image] Native VAE decode failed: " << error << "\n";
-            std::cerr << "[z-image] Falling back to subprocess ...\n";
-            if (!decode_vae_subprocess(latents, z_dim, 1, h_lat, w_lat, result, error)) {
-                std::cerr << "[z-image] VAE subprocess also failed: " << error << "\n";
-                return result;
-            }
-        }
-    } else {
-        if (!decode_vae_subprocess(latents, z_dim, 1, h_lat, w_lat, result, error)) {
-            std::cerr << "[z-image] VAE decode failed: " << error << "\n";
-            return result;
-        }
+    if (!decode_vae_native(latents, z_dim, h_lat, w_lat, result, error)) {
+        std::cerr << "[z-image] VAE decode failed: " << error << "\n";
+        return result;
     }
 
     result.num_frames = 1;

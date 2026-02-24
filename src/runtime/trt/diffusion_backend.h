@@ -174,10 +174,6 @@ protected:
                       std::vector<float>& output,
                       std::string& error);
 
-    bool decode_vae_subprocess(const std::vector<float>& latents,
-                               int32_t c, int32_t t, int32_t h, int32_t w,
-                               VideoResult& result, std::string& error);
-
     std::vector<DiffusionEngine> mTextEncoders;
     DiffusionEngine mDenoiser;
     DiffusionEngine mVaeDecoder;
