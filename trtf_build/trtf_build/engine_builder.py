@@ -408,15 +408,27 @@ def _build_diffusion_bundle(
     cfg_data = json.dumps(cfg_dict, indent=2).encode("utf-8")
     sections.append(BundleSection("config.json", cfg_data))
 
-    # Embed tokenizer files from tokenizer/ subdirectory if present
-    tokenizer_dir = model_dir_path / "tokenizer"
-    if tokenizer_dir.is_dir():
-        for filename in ("tokenizer.json", "tokenizer_config.json",
-                         "special_tokens_map.json", "spiece.model",
-                         "tokenizer.model"):
+    # Embed tokenizer files from tokenizer subdirectories.
+    # Multi-encoder models (FLUX, SD3) have tokenizer/ (CLIP) and
+    # tokenizer_2/ (T5).  Prefer tokenizer_2/ if it has tokenizer.json
+    # (fast tokenizer format) since T5 provides the main text conditioning.
+    # Fall back to tokenizer/ for single-tokenizer models (Wan, Z-Image).
+    _tok_filenames = ("tokenizer.json", "tokenizer_config.json",
+                      "special_tokens_map.json", "vocab.json",
+                      "merges.txt", "spiece.model", "tokenizer.model")
+    _tok_embedded = set()
+
+    for tok_subdir in ("tokenizer_2", "tokenizer"):
+        tokenizer_dir = model_dir_path / tok_subdir
+        if not tokenizer_dir.is_dir():
+            continue
+        for filename in _tok_filenames:
+            if filename in _tok_embedded:
+                continue  # already embedded from higher-priority dir
             file_path = tokenizer_dir / filename
             if file_path.exists():
                 sections.append(BundleSection(filename, file_path.read_bytes()))
+                _tok_embedded.add(filename)
 
     # Write bundle
     info = BundleInfo(
