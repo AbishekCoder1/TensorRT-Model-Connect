@@ -347,6 +347,10 @@ def _build_diffusion_bundle(
     weights = plugin.load_weights(str(model_dir_path), config)
     t2 = time.monotonic()
 
+    # Propagate transformer config to ModelConfig so get_diffusion_config can access it
+    if "_transformer_config" in weights:
+        config.raw["_transformer_config"] = weights["_transformer_config"]
+
     # Build all component engines
     build_components = getattr(plugin, 'build_components', None)
     if build_components is None:
@@ -429,6 +433,22 @@ def _build_diffusion_bundle(
             if file_path.exists():
                 sections.append(BundleSection(filename, file_path.read_bytes()))
                 _tok_embedded.add(filename)
+
+    # For dual-tokenizer models (FLUX): also embed CLIP tokenizer files
+    # under prefixed names so the C++ runtime can create a separate CLIP
+    # tokenizer.  CLIP lives in tokenizer/ (BPE with vocab.json + merges.txt).
+    _clip_file_map = {
+        "vocab.json": "clip_vocab.json",
+        "merges.txt": "clip_merges.txt",
+        "tokenizer_config.json": "clip_tokenizer_config.json",
+        "special_tokens_map.json": "clip_special_tokens_map.json",
+    }
+    clip_tokenizer_dir = model_dir_path / "tokenizer"
+    if clip_tokenizer_dir.is_dir() and (model_dir_path / "tokenizer_2").is_dir():
+        for src_name, dst_name in _clip_file_map.items():
+            file_path = clip_tokenizer_dir / src_name
+            if file_path.exists():
+                sections.append(BundleSection(dst_name, file_path.read_bytes()))
 
     # Write bundle
     info = BundleInfo(

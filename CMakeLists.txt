@@ -93,6 +93,8 @@ add_library(trtf_core
   src/runtime/trt/diffusion_backend.cpp
   src/runtime/trt/diffusion_backend_base.cpp
   src/runtime/trt/wan_diffusion_backend.cpp
+  src/runtime/trt/flux_diffusion_backend.cpp
+  src/runtime/trt/z_image_diffusion_backend.cpp
   src/runtime/trt/stb_impl.cpp
   src/tokenizer/hf_python_tokenizer.cpp
   src/tokenizer/vocab_tokenizer.cpp

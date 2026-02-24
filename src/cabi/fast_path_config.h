@@ -150,6 +150,10 @@ struct FastPathModelConfig {
     int32_t speech_depth_num_layers{6};
     int32_t speech_depth_num_heads{0};
     int32_t speech_depth_num_kv_heads{0};
+    std::vector<int32_t> speech_delays;  // delay pattern per codebook
+    int32_t speech_text_initial_token_id{32000};
+    int32_t speech_audio_initial_token_id{2048};
+    int32_t speech_text_padding_id{3};
 
     // Omni multimodal fields (used when runtime_strategy == "omni_multimodal")
     int32_t omni_sample_rate{24000};

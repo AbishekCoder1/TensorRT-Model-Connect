@@ -37,6 +37,24 @@ BundleSections find_bundle_sections(const BundleFile& bundle)
         else if (section.name == "depth_engine_plan") s.depth_engine_plan_data = &section.data;
         else if (section.name == "mimi_encoder_plan") s.mimi_encoder_plan_data = &section.data;
         else if (section.name == "mimi_decoder_plan") s.mimi_decoder_plan_data = &section.data;
+        else if (section.name == "depth_projection") s.depth_projection_data = &section.data;
+        else if (section.name == "audio_embeddings") s.audio_embeddings_data = &section.data;
+        else if (section.name == "temporal_text_embedding") s.temporal_text_embedding_data = &section.data;
+        else if (section.name == "depth_text_embedding") s.depth_text_embedding_data = &section.data;
+        else if (section.name == "depth_audio_embeddings") s.depth_audio_embeddings_data = &section.data;
+        else if (section.name.rfind("depth_engine_plan_", 0) == 0)
+        {
+            // depth_engine_plan_0, depth_engine_plan_1, ...
+            // Parse codebook index from suffix
+            auto idx_str = section.name.substr(18);  // strlen("depth_engine_plan_")
+            int idx = std::stoi(idx_str);
+            if (idx >= 0)
+            {
+                if (static_cast<std::size_t>(idx) >= s.depth_engine_plans.size())
+                    s.depth_engine_plans.resize(static_cast<std::size_t>(idx) + 1, nullptr);
+                s.depth_engine_plans[static_cast<std::size_t>(idx)] = &section.data;
+            }
+        }
         // Omni multimodal sections
         else if (section.name == "audio_encoder_plan") s.audio_encoder_plan_data = &section.data;
         else if (section.name == "talker_engine_plan") s.talker_engine_plan_data = &section.data;
@@ -51,6 +69,11 @@ BundleSections find_bundle_sections(const BundleFile& bundle)
             // text_encoder_0_plan, text_encoder_1_plan, ...
             s.text_encoder_plans.push_back(&section.data);
         }
+        // CLIP tokenizer sections (for FLUX dual-tokenizer)
+        else if (section.name == "clip_tokenizer_config.json") s.clip_tokenizer_config_data = &section.data;
+        else if (section.name == "clip_vocab.json") s.clip_vocab_json_data = &section.data;
+        else if (section.name == "clip_merges.txt") s.clip_merges_txt_data = &section.data;
+        else if (section.name == "clip_special_tokens_map.json") s.clip_special_tokens_data = &section.data;
     }
     return s;
 }
@@ -103,6 +126,53 @@ TokenizerResult extract_tokenizer_from_bundle(
     auto ttok1 = std::chrono::steady_clock::now();
     std::cerr << "[trtf] Tokenizer ready ["
               << std::chrono::duration_cast<std::chrono::milliseconds>(ttok1 - ttok0).count()
+              << " ms]" << std::endl;
+
+    return TokenizerResult{std::move(tokenizer), std::move(temp_dir_str)};
+}
+
+TokenizerResult extract_clip_tokenizer_from_bundle(
+    const BundleSections& sections,
+    const std::string& hf_python)
+{
+    bool has_clip = (sections.clip_vocab_json_data != nullptr && !sections.clip_vocab_json_data->empty());
+    if (!has_clip)
+    {
+        throw std::runtime_error("Bundle has no CLIP tokenizer files");
+    }
+
+    char temp_pattern[] = "/tmp/trtfb_clip_XXXXXX";
+    char* created = mkdtemp(temp_pattern);
+    if (created == nullptr)
+    {
+        throw std::runtime_error("Failed to create temp dir for CLIP tokenizer");
+    }
+    std::string temp_dir_str(created);
+    const std::filesystem::path temp_dir(temp_dir_str);
+
+    auto write_section = [&](const char* filename, const std::vector<char>* data) {
+        if (data != nullptr && !data->empty())
+        {
+            std::ofstream out(temp_dir / filename, std::ios::binary | std::ios::trunc);
+            if (out)
+            {
+                out.write(data->data(), static_cast<std::streamsize>(data->size()));
+            }
+        }
+    };
+
+    // Write CLIP tokenizer files with standard names (HfPythonTokenizer expects them)
+    write_section("vocab.json", sections.clip_vocab_json_data);
+    write_section("merges.txt", sections.clip_merges_txt_data);
+    write_section("tokenizer_config.json", sections.clip_tokenizer_config_data);
+    write_section("special_tokens_map.json", sections.clip_special_tokens_data);
+
+    std::cerr << "[trtf] Initializing CLIP tokenizer from bundle ..." << std::endl;
+    auto t0 = std::chrono::steady_clock::now();
+    auto tokenizer = CreateHfPythonTokenizer(temp_dir_str, hf_python, /*add_special_tokens=*/true);
+    auto t1 = std::chrono::steady_clock::now();
+    std::cerr << "[trtf] CLIP tokenizer ready ["
+              << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count()
               << " ms]" << std::endl;
 
     return TokenizerResult{std::move(tokenizer), std::move(temp_dir_str)};

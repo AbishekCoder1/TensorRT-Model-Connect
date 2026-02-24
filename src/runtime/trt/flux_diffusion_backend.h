@@ -18,6 +18,8 @@ public:
     ~FluxDiffusionBackend() override = default;
 
     void set_preprocessor_weights(PreprocessorWeights weights) override;
+    void set_clip_tokenizer(std::unique_ptr<ITokenizer> tok) override;
+    void set_prompt(std::string prompt) override;
 
     VideoResult generate_video(
         const std::vector<int32_t>& input_ids,
@@ -82,6 +84,10 @@ private:
     int32_t mNumImgTokens{0};
     int32_t mHLatent{0};
     int32_t mWLatent{0};
+
+    // Dual tokenizer support: CLIP (BPE) for CLIP encoder, T5 (sentencepiece) for T5 encoder
+    std::unique_ptr<ITokenizer> mClipTokenizer;
+    std::string mRawPrompt;
 };
 
 #endif // TRTF_HAS_TRT

@@ -20,6 +20,9 @@ struct DiffusionConfig {
     int32_t num_inference_steps{50};
     float guidance_scale{5.0F};
     float flow_shift{1.0F};
+    bool use_dynamic_shifting{false};
+    float base_shift{0.5F};
+    float max_shift{1.15F};
 
     int32_t video_height{480};
     int32_t video_width{832};

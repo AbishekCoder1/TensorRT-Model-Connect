@@ -1,4 +1,6 @@
 #include "runtime/trt/wan_diffusion_backend.h"
+#include "runtime/trt/flux_diffusion_backend.h"
+#include "runtime/trt/z_image_diffusion_backend.h"
 
 #if TRTF_HAS_TRT
 
@@ -767,6 +769,9 @@ std::unique_ptr<IDiffusionBackend> CreateDiffusionBackend(
     config.num_inference_steps = fp_cfg.num_inference_steps;
     config.guidance_scale = fp_cfg.guidance_scale;
     config.flow_shift = fp_cfg.flow_shift;
+    config.use_dynamic_shifting = fp_cfg.use_dynamic_shifting;
+    config.base_shift = fp_cfg.base_shift;
+    config.max_shift = fp_cfg.max_shift;
     config.video_height = fp_cfg.video_height;
     config.video_width = fp_cfg.video_width;
     config.video_num_frames = fp_cfg.video_num_frames;
@@ -783,10 +788,24 @@ std::unique_ptr<IDiffusionBackend> CreateDiffusionBackend(
     config.latents_std = fp_cfg.latents_std;
     config.patch_size = fp_cfg.patch_size;
     config.vae_model_id = fp_cfg.vae_model_id;
+    config.guidance_embeds = fp_cfg.guidance_embeds;
     config.diffusion_backend_type = fp_cfg.diffusion_backend_type;
 
     // Dispatch on backend type. Default to wan_3d for backward compatibility.
-    // Future model families add new branches here.
+    if (config.diffusion_backend_type == "flux_2d") {
+        return std::make_unique<FluxDiffusionBackend>(
+            std::move(text_encoders),
+            std::move(denoiser),
+            std::move(vae_decoder),
+            std::move(config));
+    }
+    if (config.diffusion_backend_type == "z_image_2d") {
+        return std::make_unique<ZImageDiffusionBackend>(
+            std::move(text_encoders),
+            std::move(denoiser),
+            std::move(vae_decoder),
+            std::move(config));
+    }
     return std::make_unique<WanDiffusionBackend>(
         std::move(text_encoders),
         std::move(denoiser),

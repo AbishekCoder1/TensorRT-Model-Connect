@@ -48,14 +48,26 @@ struct BundleSections {
 
     // Speech-to-speech (PersonaPlex/Moshi) sections
     const std::vector<char>* depth_engine_plan_data{nullptr};
+    std::vector<const std::vector<char>*> depth_engine_plans;  // per-codebook: depth_engine_plan_0, ...
     const std::vector<char>* mimi_encoder_plan_data{nullptr};
     const std::vector<char>* mimi_decoder_plan_data{nullptr};
+    const std::vector<char>* depth_projection_data{nullptr};
+    const std::vector<char>* audio_embeddings_data{nullptr};
+    const std::vector<char>* temporal_text_embedding_data{nullptr};
+    const std::vector<char>* depth_text_embedding_data{nullptr};
+    const std::vector<char>* depth_audio_embeddings_data{nullptr};
 
     // Diffusion sections
     std::vector<const std::vector<char>*> text_encoder_plans;  // text_encoder_0_plan, ...
     const std::vector<char>* denoiser_plan_data{nullptr};
     const std::vector<char>* vae_decoder_plan_data{nullptr};
     const std::vector<char>* preprocessor_weights_data{nullptr};
+
+    // CLIP tokenizer sections (for FLUX dual-tokenizer: CLIP + T5)
+    const std::vector<char>* clip_tokenizer_config_data{nullptr};
+    const std::vector<char>* clip_vocab_json_data{nullptr};
+    const std::vector<char>* clip_merges_txt_data{nullptr};
+    const std::vector<char>* clip_special_tokens_data{nullptr};
 };
 
 // Scan bundle sections and populate pointers by name.
@@ -73,6 +85,13 @@ TokenizerResult extract_tokenizer_from_bundle(
     const BundleSections& sections,
     const std::string& hf_python,
     bool add_special_tokens = false);
+
+// Extract a CLIP tokenizer from bundle sections (for dual-tokenizer models).
+// Writes clip_vocab.json, clip_merges.txt, clip_tokenizer_config.json,
+// clip_special_tokens_map.json to a temp dir and creates an HfPythonTokenizer.
+TokenizerResult extract_clip_tokenizer_from_bundle(
+    const BundleSections& sections,
+    const std::string& hf_python);
 
 // Build a DecoderStepEngine from a TRT engine + config.
 std::unique_ptr<DecoderStepEngine> make_decoder_engine(

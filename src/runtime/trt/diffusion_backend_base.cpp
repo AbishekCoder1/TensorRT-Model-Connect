@@ -133,18 +133,45 @@ PreprocessorWeights parse_preprocessor_weights(const std::vector<char>& data)
         return true;
     };
 
-    load_floats("patch_embedding.weight", w.patch_embed_weight);
-    load_floats("patch_embedding.bias", w.patch_embed_bias);
-    load_floats("condition_embedder.time_embedding.0.weight", w.time_emb_0_weight);
-    load_floats("condition_embedder.time_embedding.0.bias", w.time_emb_0_bias);
-    load_floats("condition_embedder.time_embedding.2.weight", w.time_emb_2_weight);
-    load_floats("condition_embedder.time_embedding.2.bias", w.time_emb_2_bias);
+    // Try Wan-style keys first, then FLUX-style fallbacks
+    auto load_with_fallback = [&](const std::string& primary,
+                                   const std::string& fallback,
+                                   std::vector<float>& dst) -> bool {
+        if (load_floats(primary, dst)) return true;
+        if (!fallback.empty()) return load_floats(fallback, dst);
+        return false;
+    };
+
+    load_with_fallback("patch_embedding.weight", "x_embedder.weight", w.patch_embed_weight);
+    load_with_fallback("patch_embedding.bias", "x_embedder.bias", w.patch_embed_bias);
+    load_with_fallback("condition_embedder.time_embedding.0.weight",
+                       "time_text_embed.timestep_embedder.linear_1.weight", w.time_emb_0_weight);
+    load_with_fallback("condition_embedder.time_embedding.0.bias",
+                       "time_text_embed.timestep_embedder.linear_1.bias", w.time_emb_0_bias);
+    load_with_fallback("condition_embedder.time_embedding.2.weight",
+                       "time_text_embed.timestep_embedder.linear_2.weight", w.time_emb_2_weight);
+    load_with_fallback("condition_embedder.time_embedding.2.bias",
+                       "time_text_embed.timestep_embedder.linear_2.bias", w.time_emb_2_bias);
     load_floats("condition_embedder.time_proj.weight", w.time_proj_weight);
     load_floats("condition_embedder.time_proj.bias", w.time_proj_bias);
-    load_floats("condition_embedder.text_embedding.weight", w.text_proj_weight);
-    load_floats("condition_embedder.text_embedding.bias", w.text_proj_bias);
-    load_floats("condition_embedder.text_embedding_2.weight", w.text_proj_2_weight);
-    load_floats("condition_embedder.text_embedding_2.bias", w.text_proj_2_bias);
+    load_with_fallback("condition_embedder.text_embedding.weight",
+                       "time_text_embed.text_embedder.linear_1.weight", w.text_proj_weight);
+    load_with_fallback("condition_embedder.text_embedding.bias",
+                       "time_text_embed.text_embedder.linear_1.bias", w.text_proj_bias);
+    load_with_fallback("condition_embedder.text_embedding_2.weight",
+                       "time_text_embed.text_embedder.linear_2.weight", w.text_proj_2_weight);
+    load_with_fallback("condition_embedder.text_embedding_2.bias",
+                       "time_text_embed.text_embedder.linear_2.bias", w.text_proj_2_bias);
+
+    // FLUX context embedder (optional)
+    load_floats("context_embedder.weight", w.context_embed_weight);
+    load_floats("context_embedder.bias", w.context_embed_bias);
+
+    // FLUX guidance embedding MLP (optional, only for guidance_embeds=true models)
+    load_floats("condition_embedder.guidance_embedding.0.weight", w.guidance_emb_0_weight);
+    load_floats("condition_embedder.guidance_embedding.0.bias", w.guidance_emb_0_bias);
+    load_floats("condition_embedder.guidance_embedding.2.weight", w.guidance_emb_2_weight);
+    load_floats("condition_embedder.guidance_embedding.2.bias", w.guidance_emb_2_bias);
 
     if (!w.patch_embed_weight.empty() && !w.patch_embed_bias.empty()) {
         const auto dit_dim = static_cast<int32_t>(w.patch_embed_bias.size());

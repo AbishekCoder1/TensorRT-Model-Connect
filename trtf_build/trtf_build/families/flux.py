@@ -21,7 +21,7 @@ from ..checkpoint_mapper import WeightDict
 class FluxPlugin:
     name = "flux"
     runtime_strategy = "diffusion"
-    pipeline_classes = ["FluxPipeline"]
+    pipeline_classes = ["FluxPipeline", "Flux2Pipeline"]
 
     # Default FLUX.1-dev architecture params
     _CLIP_HIDDEN = 768
@@ -287,6 +287,9 @@ class FluxPlugin:
             "num_inference_steps": 28 if guidance_embeds else 4,
             "guidance_scale": 3.5 if guidance_embeds else 0.0,
             "flow_shift": 3.0,
+            "use_dynamic_shifting": 1,
+            "base_shift": 0.5,
+            "max_shift": 1.15,
             "image_height": img_h,
             "image_width": img_w,
             "video_height": img_h,
@@ -305,7 +308,7 @@ class FluxPlugin:
             "text_encoder_dim": self._T5_D_MODEL,
             "vae_scaling_factor": self._VAE_SCALING_FACTOR,
             "vae_shift_factor": self._VAE_SHIFT_FACTOR,
-            "guidance_embeds": guidance_embeds,
+            "guidance_embeds": 1 if guidance_embeds else 0,
             "axes_dims_rope": list(tc.get("axes_dims_rope", self._AXES_DIMS_ROPE)),
             "num_vae_caches": 0,
             "vae_model_id": "sayakpaul/FLUX.1-merged",

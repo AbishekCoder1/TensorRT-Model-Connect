@@ -241,6 +241,11 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.speech_depth_num_layers = extract_json_int(config_text, "depth_num_layers", 6);
         cfg.speech_depth_num_heads = extract_json_int(config_text, "depth_num_attention_heads", cfg.num_heads);
         cfg.speech_depth_num_kv_heads = extract_json_int(config_text, "depth_num_key_value_heads", cfg.speech_depth_num_heads);
+        // Delay pattern and initial token IDs
+        cfg.speech_delays = extract_json_int_array(config_text, "delays", 32);
+        cfg.speech_text_initial_token_id = extract_json_int(config_text, "text_initial_token_id", 32000);
+        cfg.speech_audio_initial_token_id = extract_json_int(config_text, "audio_initial_token_id", 2048);
+        cfg.speech_text_padding_id = extract_json_int(config_text, "text_padding_id", 3);
         // Reuse codebook fields for the C++ SpeechConfig
         cfg.codec_n_codebooks = cfg.speech_num_codebooks;
         cfg.codebook_size = cfg.speech_codebook_size;

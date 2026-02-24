@@ -59,6 +59,7 @@ def build_standard_decoder_engine(
     embed_input: bool = False,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
+    hidden_state_output: bool = False,
 ) -> bytes:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 
@@ -294,6 +295,12 @@ def build_standard_decoder_engine(
         hidden_state = _apply_norm(
             network, hidden_state, hidden, final_norm,
             weights.get("final_norm_beta"), eps_tensor, norm_type)
+
+    # Optional: mark hidden state as extra output for speech pipelines
+    if hidden_state_output:
+        hs_out = network.add_identity(hidden_state).get_output(0)
+        hs_out.name = "hidden_state"
+        network.mark_output(hs_out)
 
     # ---------------------------------------------------------------
     # LM head (logits)

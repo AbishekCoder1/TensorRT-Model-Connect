@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -21,34 +22,85 @@ struct FlowMatchEulerState {
     std::vector<float> timesteps;
     int32_t num_train_timesteps{1000};
     float shift{1.0F};
+    bool use_dynamic_shifting{false};
+    float base_shift{0.5F};
+    float max_shift{1.15F};
+    int32_t image_seq_len{4096};
 
     void set_timesteps(int32_t num_steps) {
         const double N = static_cast<double>(num_train_timesteps);
-        const double s = static_cast<double>(shift);
-        const double raw_sigma_min = 1.0 / N;
-        const double sigma_min = s * raw_sigma_min /
-            (1.0 + (s - 1.0) * raw_sigma_min);
-        const double t_max = 1.0 * N;
-        const double t_min = sigma_min * N;
 
-        sigmas.resize(static_cast<std::size_t>(num_steps) + 1);
-        for (int32_t i = 0; i < num_steps; ++i) {
-            const double frac = static_cast<double>(i) /
-                static_cast<double>(std::max(num_steps - 1, 1));
-            const double t_val = t_max + frac * (t_min - t_max);
-            double sigma = t_val / N;
-            if (std::abs(shift - 1.0F) > 1e-6F) {
-                sigma = s * sigma / (1.0 + (s - 1.0) * sigma);
+        if (use_dynamic_shifting) {
+            // HF FLUX scheduler: generate sigmas as linspace(1, 1/N, N)
+            // then apply exponential dynamic shifting with mu
+            const double base_seq = 256.0;
+            const double max_seq = 4096.0;
+            const double m = (static_cast<double>(max_shift) -
+                              static_cast<double>(base_shift)) /
+                             (max_seq - base_seq);
+            const double b = static_cast<double>(base_shift) -
+                             m * base_seq;
+            const double mu = static_cast<double>(image_seq_len) * m + b;
+
+            // Generate raw sigmas: linspace(1.0, 1.0/num_steps, num_steps)
+            std::vector<double> raw_sigmas(static_cast<std::size_t>(num_steps));
+            for (int32_t i = 0; i < num_steps; ++i) {
+                raw_sigmas[static_cast<std::size_t>(i)] =
+                    1.0 - static_cast<double>(i) *
+                    (1.0 - 1.0 / static_cast<double>(num_steps)) /
+                    static_cast<double>(std::max(num_steps - 1, 1));
             }
-            sigmas[static_cast<std::size_t>(i)] = sigma;
-        }
-        sigmas[static_cast<std::size_t>(num_steps)] = 0.0;
 
-        timesteps.resize(static_cast<std::size_t>(num_steps));
-        for (int32_t i = 0; i < num_steps; ++i) {
-            timesteps[static_cast<std::size_t>(i)] =
-                static_cast<float>(sigmas[static_cast<std::size_t>(i)] *
-                                   num_train_timesteps);
+            // Apply exponential time shift: sigma = exp(mu)/(exp(mu)+(1/t-1))
+            const double exp_mu = std::exp(mu);
+            sigmas.resize(static_cast<std::size_t>(num_steps) + 1);
+            for (int32_t i = 0; i < num_steps; ++i) {
+                const double t = raw_sigmas[static_cast<std::size_t>(i)];
+                // Clamp to avoid division by zero
+                const double t_clamped = std::max(t, 1e-10);
+                const double shifted = exp_mu /
+                    (exp_mu + (1.0 / t_clamped - 1.0));
+                sigmas[static_cast<std::size_t>(i)] = shifted;
+            }
+            sigmas[static_cast<std::size_t>(num_steps)] = 0.0;
+
+            timesteps.resize(static_cast<std::size_t>(num_steps));
+            for (int32_t i = 0; i < num_steps; ++i) {
+                timesteps[static_cast<std::size_t>(i)] =
+                    static_cast<float>(sigmas[static_cast<std::size_t>(i)] * N);
+            }
+
+            std::cerr << "[flux-scheduler] Dynamic shifting: mu=" << mu
+                      << ", exp_mu=" << exp_mu
+                      << ", image_seq_len=" << image_seq_len << "\n";
+        } else {
+            // Original linear shift (for non-FLUX models)
+            const double s = static_cast<double>(shift);
+            const double raw_sigma_min = 1.0 / N;
+            const double sigma_min = s * raw_sigma_min /
+                (1.0 + (s - 1.0) * raw_sigma_min);
+            const double t_max = 1.0 * N;
+            const double t_min = sigma_min * N;
+
+            sigmas.resize(static_cast<std::size_t>(num_steps) + 1);
+            for (int32_t i = 0; i < num_steps; ++i) {
+                const double frac = static_cast<double>(i) /
+                    static_cast<double>(std::max(num_steps - 1, 1));
+                const double t_val = t_max + frac * (t_min - t_max);
+                double sigma = t_val / N;
+                if (std::abs(shift - 1.0F) > 1e-6F) {
+                    sigma = s * sigma / (1.0 + (s - 1.0) * sigma);
+                }
+                sigmas[static_cast<std::size_t>(i)] = sigma;
+            }
+            sigmas[static_cast<std::size_t>(num_steps)] = 0.0;
+
+            timesteps.resize(static_cast<std::size_t>(num_steps));
+            for (int32_t i = 0; i < num_steps; ++i) {
+                timesteps[static_cast<std::size_t>(i)] =
+                    static_cast<float>(sigmas[static_cast<std::size_t>(i)] *
+                                       num_train_timesteps);
+            }
         }
     }
 
@@ -197,16 +249,62 @@ void FluxDiffusionBackend::compute_flux_timestep_embedding(
         }
     }
 
-    // Combined: temb = timestep_embed + text_embed [+ guidance_embed]
+    // Guidance embedding MLP (if guidance_embeds is enabled)
+    std::vector<float> guidance_proj(static_cast<std::size_t>(dim), 0.0F);
+    if (mConfig.guidance_embeds &&
+        !mWeights.guidance_emb_0_weight.empty()) {
+        // Sinusoidal embedding of guidance (NOT multiplied by 1000!
+        // HF passes guidance_scale directly to Timesteps sinusoidal, unlike
+        // timestep which goes through transformer.forward's *1000 multiply.)
+        std::vector<float> g_emb(static_cast<std::size_t>(freq_dim));
+        {
+            const float g = guidance;
+            const int32_t half = freq_dim / 2;
+            for (int32_t i = 0; i < half; ++i) {
+                const float freq = std::exp(
+                    -std::log(10000.0F) * static_cast<float>(i) /
+                    static_cast<float>(half));
+                g_emb[static_cast<std::size_t>(i)] = std::cos(g * freq);
+                g_emb[static_cast<std::size_t>(i + half)] = std::sin(g * freq);
+            }
+        }
+
+        // Linear -> SiLU -> Linear
+        std::vector<float> g_proj(static_cast<std::size_t>(dim));
+        cpu_matmul_bias(g_emb.data(),
+            mWeights.guidance_emb_0_weight.data(),
+            mWeights.guidance_emb_0_bias.data(),
+            g_proj.data(), 1, freq_dim, dim);
+        cpu_silu_inplace(g_proj.data(), static_cast<std::size_t>(dim));
+
+        cpu_matmul_bias(g_proj.data(),
+            mWeights.guidance_emb_2_weight.data(),
+            mWeights.guidance_emb_2_bias.data(),
+            guidance_proj.data(), 1, dim, dim);
+    }
+
+    // Combined: temb = timestep_embed + text_embed + guidance_embed
     temb.resize(static_cast<std::size_t>(dim));
     for (int32_t i = 0; i < dim; ++i) {
         temb[static_cast<std::size_t>(i)] =
             t_proj2[static_cast<std::size_t>(i)] +
-            text_proj[static_cast<std::size_t>(i)];
+            text_proj[static_cast<std::size_t>(i)] +
+            guidance_proj[static_cast<std::size_t>(i)];
     }
 
-    // TODO: Add guidance embedding if guidance_embeds is true
-    (void)guidance;
+    // Diagnostic: print temb statistics
+    {
+        float tmin = temb[0], tmax = temb[0];
+        double tsum = 0.0;
+        for (auto v : temb) {
+            tmin = std::min(tmin, v);
+            tmax = std::max(tmax, v);
+            tsum += static_cast<double>(v);
+        }
+        std::cerr << "[flux-temb] t=" << timestep << " g=" << guidance
+                  << " temb=[" << tmin << "," << tmax
+                  << ",mean=" << (tsum / static_cast<double>(dim)) << "]\n";
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -230,8 +328,9 @@ void FluxDiffusionBackend::compute_flux_rope(
     // For text tokens: only text_pos dimension is used
     // For image tokens: h and w dimensions are used
 
-    // Text tokens: positions 0..text_seq_len-1 in the text axis
-    // Image tokens: (h, w) grid positions in the spatial axes
+    // HF FLUX RoPE: text_ids = zeros(text_seq, 3), image_ids[:,0]=0, [:,1]=h, [:,2]=w
+    // ALL text tokens have position 0 on ALL axes (identity rotation).
+    // Image tokens have position 0 on axis 0 (text), h on axis 1, w on axis 2.
 
     const float theta = 10000.0F;
     const int32_t text_dim = 16;    // First axis
@@ -272,15 +371,17 @@ void FluxDiffusionBackend::compute_flux_rope(
         }
     };
 
-    // Text tokens
+    // Text tokens: ALL positions are (0, 0, 0) -- identity rotation
+    // cos_out/sin_out are already initialized to 1.0/0.0 respectively,
+    // which is correct for position 0 on all axes.
     for (int32_t t = 0; t < text_seq_len; ++t) {
         encode_pos(
             cos_out.data() + static_cast<std::size_t>(t) * static_cast<std::size_t>(head_dim),
             sin_out.data() + static_cast<std::size_t>(t) * static_cast<std::size_t>(head_dim),
-            t, 0, 0);
+            0, 0, 0);
     }
 
-    // Image tokens
+    // Image tokens: position (0, h, w)
     for (int32_t h = 0; h < h_patches; ++h) {
         for (int32_t w = 0; w < w_patches; ++w) {
             const int32_t idx = text_seq_len + h * w_patches + w;
@@ -513,6 +614,21 @@ void FluxDiffusionBackend::set_preprocessor_weights(PreprocessorWeights weights)
 }
 
 // ---------------------------------------------------------------------------
+// set_clip_tokenizer / set_prompt
+// ---------------------------------------------------------------------------
+
+void FluxDiffusionBackend::set_clip_tokenizer(std::unique_ptr<ITokenizer> tok)
+{
+    mClipTokenizer = std::move(tok);
+    std::cerr << "[flux] CLIP tokenizer set\n";
+}
+
+void FluxDiffusionBackend::set_prompt(std::string prompt)
+{
+    mRawPrompt = std::move(prompt);
+}
+
+// ---------------------------------------------------------------------------
 // Generate image (full pipeline)
 // ---------------------------------------------------------------------------
 
@@ -542,9 +658,22 @@ VideoResult FluxDiffusionBackend::generate_video(
     const int32_t w_packed = mWLatent / pw;  // 64
 
     // 1. Run CLIP encoder (pooled output for conditioning)
+    //    FLUX needs CLIP tokens (BPE vocab), not T5 tokens (sentencepiece).
+    //    If a separate CLIP tokenizer is available, re-tokenize the raw prompt.
     std::vector<float> pooled_output;
     if (mTextEncoders.size() >= 2) {
-        if (!run_clip_encoder(input_ids, pooled_output, error)) {
+        std::vector<int32_t> clip_ids;
+        if (mClipTokenizer && !mRawPrompt.empty()) {
+            clip_ids = mClipTokenizer->encode(mRawPrompt);
+            std::cerr << "[flux] CLIP tokenized prompt (" << clip_ids.size()
+                      << " tokens) from raw text\n";
+        } else {
+            // Fallback: use same input_ids (will produce wrong results
+            // if these are T5 tokens, but better than nothing)
+            clip_ids = input_ids;
+            std::cerr << "[flux] Warning: no CLIP tokenizer, using T5 tokens for CLIP encoder\n";
+        }
+        if (!run_clip_encoder(clip_ids, pooled_output, error)) {
             std::cerr << "[flux] CLIP encoder failed: " << error << "\n";
             return result;
         }
@@ -555,6 +684,7 @@ VideoResult FluxDiffusionBackend::generate_video(
     }
 
     // 2. Run T5 encoder (sequence output for cross-attention)
+    //    Uses the original input_ids (T5 sentencepiece tokens).
     std::vector<float> text_embeddings;
     const int32_t t5_idx = (mTextEncoders.size() > 1) ? 1 : 0;
     if (!run_t5_encoder_at(t5_idx, input_ids, text_embeddings, error)) {
@@ -597,6 +727,10 @@ VideoResult FluxDiffusionBackend::generate_video(
     // 6. Setup scheduler
     FlowMatchEulerState scheduler;
     scheduler.shift = mConfig.flow_shift;
+    scheduler.use_dynamic_shifting = mConfig.use_dynamic_shifting;
+    scheduler.base_shift = mConfig.base_shift;
+    scheduler.max_shift = mConfig.max_shift;
+    scheduler.image_seq_len = mNumImgTokens;
     scheduler.set_timesteps(num_inference_steps);
 
     std::cerr << "[flux] Starting denoising loop (" << num_inference_steps << " steps)"
@@ -693,7 +827,54 @@ VideoResult FluxDiffusionBackend::generate_video(
                       latent_size, step);
         latents = std::move(next_latents);
 
-        std::cerr << "[flux] Step " << (step + 1) << "/" << num_inference_steps << "\n";
+        // Diagnostics: print latent and output statistics
+        {
+            float lat_min = latents[0], lat_max = latents[0];
+            double lat_sum = 0.0;
+            for (auto v : latents) {
+                lat_min = std::min(lat_min, v);
+                lat_max = std::max(lat_max, v);
+                lat_sum += static_cast<double>(v);
+            }
+            float vel_min = velocity[0], vel_max = velocity[0];
+            double vel_sum = 0.0;
+            for (auto v : velocity) {
+                vel_min = std::min(vel_min, v);
+                vel_max = std::max(vel_max, v);
+                vel_sum += static_cast<double>(v);
+            }
+            float hid_min = hidden[0], hid_max = hidden[0];
+            double hid_sum = 0.0;
+            for (auto v : hidden) {
+                hid_min = std::min(hid_min, v);
+                hid_max = std::max(hid_max, v);
+                hid_sum += static_cast<double>(v);
+            }
+            std::cerr << "[flux] Step " << (step + 1) << "/" << num_inference_steps
+                      << " t=" << scheduler.timesteps[static_cast<std::size_t>(step)]
+                      << " dt=" << (scheduler.sigmas[static_cast<std::size_t>(step) + 1] -
+                                    scheduler.sigmas[static_cast<std::size_t>(step)])
+                      << " latent=[" << lat_min << "," << lat_max
+                      << ",mean=" << (lat_sum / static_cast<double>(latent_size))
+                      << "] vel=[" << vel_min << "," << vel_max
+                      << ",mean=" << (vel_sum / static_cast<double>(latent_size))
+                      << "] hidden=[" << hid_min << "," << hid_max
+                      << ",mean=" << (hid_sum / static_cast<double>(hidden.size()))
+                      << "]\n";
+        }
+    }
+
+    // Dump final latents to file for external comparison
+    {
+        const std::string dump_path = "/tmp/flux_final_latents.raw";
+        std::ofstream dump(dump_path, std::ios::binary);
+        if (dump.is_open()) {
+            dump.write(reinterpret_cast<const char*>(latents.data()),
+                       latents.size() * sizeof(float));
+            dump.close();
+            std::cerr << "[flux] Dumped final latents (" << latents.size()
+                      << " floats) to " << dump_path << "\n";
+        }
     }
 
     // 8. VAE decode via native TRT engine
