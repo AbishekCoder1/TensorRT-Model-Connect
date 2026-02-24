@@ -649,6 +649,20 @@ void ZImageDiffusionBackend::load_z_image_preprocessor_weights(
 }
 
 // ---------------------------------------------------------------------------
+// Chat template (Qwen3 format for Z-Image text encoder)
+// ---------------------------------------------------------------------------
+
+std::string ZImageDiffusionBackend::prepare_prompt(const std::string& prompt) const
+{
+    // HF ZImagePipeline._encode_prompt wraps the prompt in Qwen3 chat template:
+    //   tokenizer.apply_chat_template(
+    //       [{"role": "user", "content": prompt}],
+    //       tokenize=False, add_generation_prompt=True, enable_thinking=True)
+    // Which produces: <|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
+    return "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+}
+
+// ---------------------------------------------------------------------------
 // Generate image (full pipeline)
 // ---------------------------------------------------------------------------
 

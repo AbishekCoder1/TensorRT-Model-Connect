@@ -1,6 +1,7 @@
 #pragma once
 
 #include "trtf/backend.h"
+#include "trtf/tokenizer.h"
 #include "cabi/fast_path_config.h"
 #include "runtime/trt/trt_common.h"
 
@@ -39,6 +40,8 @@ struct DiffusionConfig {
     std::vector<int32_t> patch_size;  // [pt, ph, pw]
     std::string vae_model_id;
 
+    bool guidance_embeds{false};
+
     std::string diffusion_backend_type{"wan_3d"};
 };
 
@@ -64,6 +67,16 @@ struct PreprocessorWeights {
     std::vector<float> text_proj_bias;      // [dim]
     std::vector<float> text_proj_2_weight;  // [dim, dim] (optional second layer)
     std::vector<float> text_proj_2_bias;    // [dim]
+
+    // Context embedder (FLUX): Linear(text_encoder_dim, dit_dim)
+    std::vector<float> context_embed_weight;  // [text_encoder_dim, dit_dim]
+    std::vector<float> context_embed_bias;    // [dit_dim]
+
+    // Guidance embedding MLP (FLUX): sinusoidal(freq_dim) -> Linear -> SiLU -> Linear
+    std::vector<float> guidance_emb_0_weight;  // [freq_dim, dim]
+    std::vector<float> guidance_emb_0_bias;    // [dim]
+    std::vector<float> guidance_emb_2_weight;  // [dim, dim]
+    std::vector<float> guidance_emb_2_bias;    // [dim]
 
     bool valid{false};
 };
@@ -102,6 +115,16 @@ public:
     /// Set paths needed for VAE subprocess decode.
     virtual void set_hf_python(std::string path) = 0;
     virtual void set_bundle_path(std::string path) = 0;
+
+    /// Set a secondary (CLIP) tokenizer for dual-tokenizer models like FLUX.
+    virtual void set_clip_tokenizer(std::unique_ptr<ITokenizer> tok) { (void)tok; }
+
+    /// Set raw prompt text (for subprocess-based backends like Z-Image).
+    virtual void set_prompt(std::string prompt) { (void)prompt; }
+
+    /// Prepare prompt text before tokenization (e.g. apply chat template).
+    /// Default: return prompt unchanged. Override for models that need wrapping.
+    virtual std::string prepare_prompt(const std::string& prompt) const { return prompt; }
 };
 
 /// Base class with shared utilities for diffusion backends.

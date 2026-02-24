@@ -47,6 +47,9 @@ public:
 
     bool supports_video() const override { return true; }
 
+    /// Apply Qwen3 chat template: <|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n
+    std::string prepare_prompt(const std::string& prompt) const override;
+
     /// Override: parse Z-Image-specific preprocessor weights from raw bytes.
     void set_preprocessor_weights(PreprocessorWeights weights) override;
 
