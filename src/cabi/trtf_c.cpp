@@ -284,11 +284,12 @@ public:
             diff->set_prompt(std::string(prompt));
         }
 
-        // Tokenize prompt
+        // Tokenize prompt (apply chat template if backend requires it)
         std::vector<int32_t> input_ids;
         if (mTokenizer && prompt != nullptr)
         {
-            input_ids = mTokenizer->encode(prompt);
+            const std::string prepared = diff->prepare_prompt(std::string(prompt));
+            input_ids = mTokenizer->encode(prepared);
         }
 
         // Generate video
@@ -1308,7 +1309,7 @@ PipelineImpl* create_vl_pipeline(
     }
     trtf::VLPreprocessConfig vl_preproc = trtf::parse_vl_preprocess_config(config_text_vl, preproc_text);
 
-    auto tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    auto tok = trtf::extract_tokenizer_from_bundle(sections, hf_python, fp_cfg.tokenizer_add_special_tokens);
     auto backend = trtf::CreateVLBackendFromEngines(
         std::move(decoder_engine), std::move(vision_step_engine), fp_cfg, std::move(vl_preproc));
     if (!backend || !backend->is_available())
@@ -1707,7 +1708,8 @@ PipelineImpl* create_embedding_pipeline(
     trtf::TokenizerResult tok = {nullptr, ""};
     try
     {
-        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+        // Embedding models need special tokens (BOS) for correct encoding.
+        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python, /*add_special_tokens=*/true);
     }
     catch (const std::exception& e)
     {
@@ -1743,7 +1745,8 @@ PipelineImpl* create_reranking_pipeline(
     trtf::TokenizerResult tok = {nullptr, ""};
     try
     {
-        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+        // Reranking models need special tokens (BOS) for correct encoding.
+        tok = trtf::extract_tokenizer_from_bundle(sections, hf_python, /*add_special_tokens=*/true);
     }
     catch (const std::exception& e)
     {
@@ -2062,6 +2065,21 @@ PipelineImpl* create_diffusion_pipeline(
     backend->set_hf_python(hf_python);
     backend->set_bundle_path(bundle_path);
 
+    // CLIP tokenizer (for dual-tokenizer models like FLUX)
+    if (sections.clip_vocab_json_data != nullptr && !sections.clip_vocab_json_data->empty())
+    {
+        try
+        {
+            auto clip_tok = trtf::extract_clip_tokenizer_from_bundle(sections, hf_python);
+            backend->set_clip_tokenizer(std::move(clip_tok.tokenizer));
+            std::cerr << "[trtf] CLIP tokenizer loaded for dual-tokenizer model" << std::endl;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] Warning: CLIP tokenizer extraction failed (" << e.what() << ")" << std::endl;
+        }
+    }
+
     // Tokenizer (optional for diffusion — some models use sentencepiece)
     trtf::TokenizerResult tok = {nullptr, ""};
     try
@@ -2115,9 +2133,167 @@ PipelineImpl* create_speech_pipeline(
             "Failed to create speech backend from bundle engine");
     }
 
-    // Deserialize depth engine (if present)
-    if (sections.depth_engine_plan_data != nullptr &&
-        !sections.depth_engine_plan_data->empty())
+    // Load depth projection matrix (if present)
+    if (sections.depth_projection_data != nullptr &&
+        !sections.depth_projection_data->empty())
+    {
+        auto& proj_data = *sections.depth_projection_data;
+        auto num_floats = proj_data.size() / sizeof(float);
+        auto& cfg_ref = const_cast<trtf::SpeechConfig&>(speech_backend->config());
+        cfg_ref.depth_projection.resize(num_floats);
+        std::memcpy(cfg_ref.depth_projection.data(), proj_data.data(),
+                    proj_data.size());
+        cfg_ref.temporal_hidden_for_proj = fp_cfg.hidden_size;
+        std::cerr << "[trtf] Loaded depth_projection: "
+                  << num_floats << " floats" << std::endl;
+    }
+
+    // Load per-codebook audio embedding tables (if present)
+    // Layout: [num_codebooks, audio_vocab, temporal_hidden] as float32
+    if (sections.audio_embeddings_data != nullptr &&
+        !sections.audio_embeddings_data->empty())
+    {
+        auto& emb_data = *sections.audio_embeddings_data;
+        auto num_floats = emb_data.size() / sizeof(float);
+        auto& cfg_ref = const_cast<trtf::SpeechConfig&>(speech_backend->config());
+        cfg_ref.audio_embeddings.resize(num_floats);
+        std::memcpy(cfg_ref.audio_embeddings.data(), emb_data.data(),
+                    emb_data.size());
+        // Infer audio_vocab_size: total_floats / (num_codebooks * hidden_size)
+        if (fp_cfg.speech_num_codebooks > 0 && fp_cfg.hidden_size > 0)
+        {
+            cfg_ref.audio_vocab_size = static_cast<int32_t>(
+                num_floats / (static_cast<std::size_t>(fp_cfg.speech_num_codebooks)
+                              * fp_cfg.hidden_size));
+        }
+        std::cerr << "[trtf] Loaded audio_embeddings: "
+                  << num_floats << " floats ("
+                  << fp_cfg.speech_num_codebooks << " codebooks x "
+                  << cfg_ref.audio_vocab_size << " vocab x "
+                  << fp_cfg.hidden_size << " hidden)"
+                  << std::endl;
+    }
+
+    // Load temporal text embedding table (text_emb.weight) for temporal input.
+    // The official Moshi code adds text_emb(text_token) at every temporal step.
+    if (sections.temporal_text_embedding_data != nullptr &&
+        !sections.temporal_text_embedding_data->empty())
+    {
+        auto& tte_data = *sections.temporal_text_embedding_data;
+        auto num_floats = tte_data.size() / sizeof(float);
+        auto& cfg_ref = const_cast<trtf::SpeechConfig&>(speech_backend->config());
+        cfg_ref.temporal_text_embedding.resize(num_floats);
+        std::memcpy(cfg_ref.temporal_text_embedding.data(), tte_data.data(),
+                    tte_data.size());
+        // Infer text vocab: total_floats / temporal_hidden_size
+        if (fp_cfg.hidden_size > 0)
+        {
+            cfg_ref.temporal_text_vocab = static_cast<int32_t>(
+                num_floats / static_cast<std::size_t>(fp_cfg.hidden_size));
+        }
+        std::cerr << "[trtf] Loaded temporal_text_embedding: "
+                  << num_floats << " floats ("
+                  << cfg_ref.temporal_text_vocab << " vocab x "
+                  << fp_cfg.hidden_size << " hidden)"
+                  << std::endl;
+    }
+
+    // Load depth text embedding table (depformer_text_emb) for depth position 0
+    if (sections.depth_text_embedding_data != nullptr &&
+        !sections.depth_text_embedding_data->empty())
+    {
+        auto& te_data = *sections.depth_text_embedding_data;
+        auto num_floats = te_data.size() / sizeof(float);
+        auto& cfg_ref = const_cast<trtf::SpeechConfig&>(speech_backend->config());
+        cfg_ref.depth_text_embedding.resize(num_floats);
+        std::memcpy(cfg_ref.depth_text_embedding.data(), te_data.data(),
+                    te_data.size());
+        // Infer text vocab: total_floats / depth_hidden_size
+        if (fp_cfg.speech_depth_hidden_size > 0)
+        {
+            cfg_ref.depth_text_vocab = static_cast<int32_t>(
+                num_floats / static_cast<std::size_t>(fp_cfg.speech_depth_hidden_size));
+        }
+        std::cerr << "[trtf] Loaded depth_text_embedding: "
+                  << num_floats << " floats ("
+                  << cfg_ref.depth_text_vocab << " vocab x "
+                  << fp_cfg.speech_depth_hidden_size << " hidden)"
+                  << std::endl;
+    }
+
+    // Load depth per-codebook audio embedding tables (depformer_emb.{0-N})
+    if (sections.depth_audio_embeddings_data != nullptr &&
+        !sections.depth_audio_embeddings_data->empty())
+    {
+        auto& dae_data = *sections.depth_audio_embeddings_data;
+        auto num_floats = dae_data.size() / sizeof(float);
+        auto& cfg_ref = const_cast<trtf::SpeechConfig&>(speech_backend->config());
+        cfg_ref.depth_audio_embeddings.resize(num_floats);
+        std::memcpy(cfg_ref.depth_audio_embeddings.data(), dae_data.data(),
+                    dae_data.size());
+        // Infer num_depformer_emb: total / (audio_vocab * depth_hidden)
+        int32_t audio_vocab = cfg_ref.audio_vocab_size;
+        int32_t d_hidden = fp_cfg.speech_depth_hidden_size;
+        if (audio_vocab > 0 && d_hidden > 0)
+        {
+            cfg_ref.num_depformer_emb = static_cast<int32_t>(
+                num_floats / (static_cast<std::size_t>(audio_vocab) * d_hidden));
+        }
+        std::cerr << "[trtf] Loaded depth_audio_embeddings: "
+                  << num_floats << " floats ("
+                  << cfg_ref.num_depformer_emb << " codebooks x "
+                  << audio_vocab << " vocab x "
+                  << d_hidden << " hidden)"
+                  << std::endl;
+    }
+
+    // Build depth-specific config (shared across all codebook engines)
+    trtf::FastPathModelConfig depth_cfg = fp_cfg;
+    if (fp_cfg.speech_depth_hidden_size > 0)
+        depth_cfg.hidden_size = fp_cfg.speech_depth_hidden_size;
+    if (fp_cfg.speech_depth_num_layers > 0)
+        depth_cfg.num_layers = fp_cfg.speech_depth_num_layers;
+    if (fp_cfg.speech_depth_num_heads > 0)
+    {
+        depth_cfg.num_heads = fp_cfg.speech_depth_num_heads;
+        depth_cfg.num_kv_heads = fp_cfg.speech_depth_num_kv_heads > 0
+            ? fp_cfg.speech_depth_num_kv_heads : fp_cfg.speech_depth_num_heads;
+    }
+    depth_cfg.vocab_size = fp_cfg.speech_codebook_size;
+    depth_cfg.head_dim = depth_cfg.hidden_size / std::max(depth_cfg.num_heads, 1);
+    depth_cfg.attention_size = depth_cfg.num_heads * depth_cfg.head_dim;
+    depth_cfg.max_cache_length = fp_cfg.speech_num_codebooks + 2;
+
+    // Deserialize per-codebook depth engines (depth_engine_plan_0, _1, ...)
+    if (!sections.depth_engine_plans.empty())
+    {
+        std::cerr << "[trtf] Deserializing " << sections.depth_engine_plans.size()
+                  << " per-codebook depth engines ..." << std::endl;
+        for (std::size_t cb = 0; cb < sections.depth_engine_plans.size(); ++cb)
+        {
+            auto* plan = sections.depth_engine_plans[cb];
+            if (plan == nullptr || plan->empty()) continue;
+
+            std::cerr << "[trtf] Deserializing depth engine cb=" << cb
+                      << " (" << plan->size() / (1024 * 1024) << " MB) ..."
+                      << std::endl;
+
+            auto depth_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+                runtime_ptr->deserializeCudaEngine(plan->data(), plan->size()));
+            if (depth_trt)
+            {
+                auto depth_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                    depth_trt->createExecutionContext());
+                auto depth_engine = trtf::make_decoder_engine(
+                    std::move(depth_trt), std::move(depth_ctx), depth_cfg);
+                speech_backend->set_depth_engine(
+                    static_cast<int32_t>(cb), std::move(depth_engine));
+            }
+        }
+    }
+    // Fallback: single depth engine (backward compatibility)
+    else if (sections.depth_engine_plan_data != nullptr &&
+             !sections.depth_engine_plan_data->empty())
     {
         std::cerr << "[trtf] Deserializing depth TRT engine ("
                   << sections.depth_engine_plan_data->size() / (1024 * 1024)
@@ -2131,24 +2307,6 @@ PipelineImpl* create_speech_pipeline(
         {
             auto depth_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
                 depth_trt->createExecutionContext());
-
-            // Build depth-specific config
-            trtf::FastPathModelConfig depth_cfg = fp_cfg;
-            if (fp_cfg.speech_depth_hidden_size > 0)
-                depth_cfg.hidden_size = fp_cfg.speech_depth_hidden_size;
-            if (fp_cfg.speech_depth_num_layers > 0)
-                depth_cfg.num_layers = fp_cfg.speech_depth_num_layers;
-            if (fp_cfg.speech_depth_num_heads > 0)
-            {
-                depth_cfg.num_heads = fp_cfg.speech_depth_num_heads;
-                depth_cfg.num_kv_heads = fp_cfg.speech_depth_num_kv_heads > 0
-                    ? fp_cfg.speech_depth_num_kv_heads : fp_cfg.speech_depth_num_heads;
-            }
-            depth_cfg.vocab_size = fp_cfg.speech_codebook_size;
-            depth_cfg.head_dim = depth_cfg.hidden_size / std::max(depth_cfg.num_heads, 1);
-            depth_cfg.attention_size = depth_cfg.num_heads * depth_cfg.head_dim;
-            depth_cfg.max_cache_length = fp_cfg.speech_num_codebooks + 2;
-
             auto depth_engine = trtf::make_decoder_engine(
                 std::move(depth_trt), std::move(depth_ctx), depth_cfg);
             speech_backend->set_depth_engine(std::move(depth_engine));
