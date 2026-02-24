@@ -57,6 +57,7 @@ struct FastPathModelConfig {
     int32_t num_image_pad_tokens{0}; // number of image pad tokens per image
     std::string vl_prompt_template; // prompt template with {image_pads} and {prompt}
     std::string image_token_str;    // string for one image pad token (e.g. "<|image_pad|>")
+    bool tokenizer_add_special_tokens{false}; // whether tokenizer should add BOS/EOS
 
     // Segmentation fields (used when runtime_strategy == "segmentation")
     int32_t num_classes{150};
@@ -170,6 +171,9 @@ struct FastPathModelConfig {
     int32_t num_inference_steps{50};
     float guidance_scale{5.0F};
     float flow_shift{1.0F};
+    bool use_dynamic_shifting{false};
+    float base_shift{0.5F};
+    float max_shift{1.15F};
     int32_t video_height{480};
     int32_t video_width{832};
     int32_t video_num_frames{81};
@@ -187,6 +191,7 @@ struct FastPathModelConfig {
     std::vector<float> latents_std;
     std::vector<int32_t> patch_size;    // [pt, ph, pw]
     std::string vae_model_id;
+    bool guidance_embeds{false};
     std::string diffusion_backend_type{"wan_3d"};
 };
 

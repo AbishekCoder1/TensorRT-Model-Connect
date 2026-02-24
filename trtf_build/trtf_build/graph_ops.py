@@ -371,6 +371,27 @@ def add_gelu_new(
     return result.get_output(0)
 
 
+def add_gelu_erf(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+) -> trt.ITensor:
+    """GELU (exact, erf-based): 0.5 * x * (1 + erf(x / sqrt(2)))."""
+    inv_sqrt2 = add_constant(network, (1, 1), np.array([1.0 / np.sqrt(2.0)], dtype=np.float32))
+    x_scaled = network.add_elementwise(
+        inp, inv_sqrt2, trt.ElementWiseOperation.PROD)
+    erf_out = network.add_unary(x_scaled.get_output(0), trt.UnaryOperation.ERF)
+    one = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    one_plus_erf = network.add_elementwise(
+        one, erf_out.get_output(0), trt.ElementWiseOperation.SUM)
+    half = add_constant(network, (1, 1), np.array([0.5], dtype=np.float32))
+    half_x = network.add_elementwise(
+        half, inp, trt.ElementWiseOperation.PROD)
+    result = network.add_elementwise(
+        half_x.get_output(0), one_plus_erf.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    return result.get_output(0)
+
+
 def add_activation(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -1942,3 +1963,33 @@ def add_lstm_unrolled(
     h_output.set_input(1, trip_count.get_output(0))
 
     return h_output.get_output(0)
+
+
+def add_layer_norm_no_affine(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    hidden_size: int,
+    eps_tensor: trt.ITensor,
+) -> trt.ITensor:
+    """LayerNorm without learnable affine: (x - mean) / sqrt(var + eps)."""
+    mean = network.add_reduce(
+        inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    centered = network.add_elementwise(
+        inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
+    sq = network.add_elementwise(
+        centered.get_output(0), centered.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    var = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    denom_in = network.add_elementwise(
+        var.get_output(0), eps_tensor, trt.ElementWiseOperation.SUM)
+    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
+    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
+    normalized = network.add_elementwise(
+        centered.get_output(0), recip.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    return normalized.get_output(0)
+
+
+# Alias: add_gelu_tanh is the same as add_gelu_new (tanh approximation)
+add_gelu_tanh = add_gelu_new

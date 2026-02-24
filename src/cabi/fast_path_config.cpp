@@ -117,6 +117,7 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.num_image_pad_tokens = extract_json_int(config_text, "num_image_pad_tokens", 0);
         cfg.vl_prompt_template = extract_json_string(config_text, "vl_prompt_template", "");
         cfg.image_token_str = extract_json_string(config_text, "image_token_str", "");
+        cfg.tokenizer_add_special_tokens = extract_json_int(config_text, "tokenizer_add_special_tokens", 0) != 0;
     }
 
     // Segmentation fields
@@ -288,6 +289,9 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.num_inference_steps = extract_json_int(config_text, "num_inference_steps", 50);
         cfg.guidance_scale = extract_json_float(config_text, "guidance_scale", 5.0F);
         cfg.flow_shift = extract_json_float(config_text, "flow_shift", 1.0F);
+        cfg.use_dynamic_shifting = extract_json_int(config_text, "use_dynamic_shifting", 0) != 0;
+        cfg.base_shift = extract_json_float(config_text, "base_shift", 0.5F);
+        cfg.max_shift = extract_json_float(config_text, "max_shift", 1.15F);
         cfg.video_height = extract_json_int(config_text, "video_height", 480);
         cfg.video_width = extract_json_int(config_text, "video_width", 832);
         cfg.video_num_frames = extract_json_int(config_text, "video_num_frames", 81);
@@ -305,6 +309,7 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.latents_std = extract_json_float_array(config_text, "latents_std");
         cfg.patch_size = extract_json_int_array(config_text, "patch_size");
         cfg.vae_model_id = extract_json_string(config_text, "vae_model_id", "");
+        cfg.guidance_embeds = extract_json_int(config_text, "guidance_embeds", 0) != 0;
         cfg.diffusion_backend_type = extract_json_string(config_text, "diffusion_backend_type", "wan_3d");
     }
 

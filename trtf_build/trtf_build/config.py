@@ -66,6 +66,23 @@ class ModelConfig:
                 merged["architectures"] = top_architectures
             d = merged
 
+        # DeepSeek-VL-v2 models nest the language decoder config under
+        # "language_config".  Merge into top level like text_config.
+        if not d.get("hidden_size"):
+            lang_config = d.get("language_config")
+            if isinstance(lang_config, dict):
+                top_model_type = d.get("model_type")
+                top_architectures = d.get("architectures")
+                top_vision_config = d.get("vision_config")
+                merged = {**d, **lang_config}
+                if top_model_type:
+                    merged["model_type"] = top_model_type
+                if top_architectures:
+                    merged["architectures"] = top_architectures
+                if top_vision_config:
+                    merged["vision_config"] = top_vision_config
+                d = merged
+
         # Eagle VLM / Nemotron VL models nest LLM config under "llm_config".
         # Merge into top level like text_config, preserving top-level
         # model_type, architectures, and vision_config.

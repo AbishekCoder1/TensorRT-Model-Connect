@@ -244,6 +244,87 @@ static LoadedImage load_aspect_preserve_resize_normalize(
     return loaded;
 }
 
+// Aspect-ratio-preserving resize + center-pad with mean color, then normalize.
+// Matches PIL ImageOps.pad(image, (size, size), color=mean*255).
+static LoadedImage load_pad_center_resize_normalize(
+    const std::string& image_path,
+    const VLPreprocessConfig& config)
+{
+    LoadedImage loaded;
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* raw = stbi_load(image_path.c_str(), &width, &height, &channels, 3);
+    if (raw == nullptr)
+    {
+        std::cerr << "[trtf] Failed to load image: " << image_path
+                  << " (" << stbi_failure_reason() << ")" << std::endl;
+        return loaded;
+    }
+
+    const int target_size = config.fixed_image_size;
+    const stbir_filter filter = resolve_stbir_filter(config.interpolation);
+
+    // Compute scaled dimensions that fit inside target_size x target_size
+    // This matches PIL ImageOps.pad behavior: scale to fit, then center.
+    const float scale_w = static_cast<float>(target_size) / static_cast<float>(width);
+    const float scale_h = static_cast<float>(target_size) / static_cast<float>(height);
+    const float scale = std::min(scale_w, scale_h);
+    const int new_w = std::max(1, static_cast<int>(width * scale));
+    const int new_h = std::max(1, static_cast<int>(height * scale));
+
+    // Resize preserving aspect ratio
+    std::vector<unsigned char> resized_small(
+        static_cast<std::size_t>(new_w) * new_h * 3);
+
+    void* resize_result = stbir_resize(
+        raw, width, height, width * 3,
+        resized_small.data(), new_w, new_h, new_w * 3,
+        STBIR_RGB, STBIR_TYPE_UINT8,
+        STBIR_EDGE_CLAMP, filter);
+
+    stbi_image_free(raw);
+
+    if (resize_result == nullptr)
+    {
+        std::cerr << "[trtf] Failed to resize image (pad-center)" << std::endl;
+        return loaded;
+    }
+
+    // Fill pad with mean color (mean * 255), matching ImageOps.pad color arg
+    const unsigned char pad_r = static_cast<unsigned char>(config.image_mean[0] * 255.0F);
+    const unsigned char pad_g = static_cast<unsigned char>(config.image_mean[1] * 255.0F);
+    const unsigned char pad_b = static_cast<unsigned char>(config.image_mean[2] * 255.0F);
+
+    std::vector<unsigned char> padded(
+        static_cast<std::size_t>(target_size) * target_size * 3);
+    for (std::size_t i = 0; i < padded.size(); i += 3)
+    {
+        padded[i + 0] = pad_r;
+        padded[i + 1] = pad_g;
+        padded[i + 2] = pad_b;
+    }
+
+    // Center the resized image in the padded canvas
+    const int x_off = (target_size - new_w) / 2;
+    const int y_off = (target_size - new_h) / 2;
+    for (int y = 0; y < new_h; ++y)
+    {
+        const unsigned char* src_row = resized_small.data()
+            + static_cast<std::size_t>(y) * new_w * 3;
+        unsigned char* dst_row = padded.data()
+            + (static_cast<std::size_t>(y + y_off) * target_size + x_off) * 3;
+        std::memcpy(dst_row, src_row, static_cast<std::size_t>(new_w) * 3);
+    }
+
+    normalize_to_chw(padded, target_size, config, loaded.img_chw);
+    loaded.target_size = target_size;
+    loaded.channels = config.in_channels;
+    loaded.ok = true;
+    return loaded;
+}
+
 // ---------------------------------------------------------------------------
 // Strategy: qwen_merge_group
 // ---------------------------------------------------------------------------
@@ -388,6 +469,13 @@ PreprocessedImage load_and_preprocess_image(
         return preprocess_simple_chw(loaded, config);
     }
 
+    if (ptype == "pad_center_chw")
+    {
+        loaded = load_pad_center_resize_normalize(image_path, config);
+        if (!loaded.ok) return PreprocessedImage{};
+        return preprocess_simple_chw(loaded, config);
+    }
+
     if (ptype == "simple_chw")
     {
         loaded = load_resize_normalize(image_path, config);
@@ -504,6 +592,27 @@ VLPreprocessConfig parse_vl_preprocess_config(
                 cfg.interpolation = "bilinear";
             else if (resample == 3)
                 cfg.interpolation = "bicubic";
+        }
+    }
+
+    // Fallback: read image_mean/image_std from config.json if not set by
+    // preprocessor_config.json.  Models without preprocessor_config.json
+    // (e.g. DeepSeek-OCR-2) inject these via get_vl_config().
+    {
+        auto mean_vals = extract_json_float_array(config_text, "image_mean", 3);
+        if (mean_vals.size() >= 3)
+        {
+            cfg.image_mean[0] = mean_vals[0];
+            cfg.image_mean[1] = mean_vals[1];
+            cfg.image_mean[2] = mean_vals[2];
+        }
+
+        auto std_vals = extract_json_float_array(config_text, "image_std", 3);
+        if (std_vals.size() >= 3)
+        {
+            cfg.image_std[0] = std_vals[0];
+            cfg.image_std[1] = std_vals[1];
+            cfg.image_std[2] = std_vals[2];
         }
     }
 

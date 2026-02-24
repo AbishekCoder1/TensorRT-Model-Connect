@@ -419,6 +419,65 @@ static void test_aspect_preserve_chw_strategy()
     std::filesystem::remove_all(dir);
 }
 
+// Test: pad_center_chw strategy — aspect-ratio-preserving resize + center-pad with mean color.
+static void test_pad_center_chw_strategy()
+{
+    char temp_pattern[] = "/tmp/claude/trtf_test_padctr_XXXXXX";
+    char* temp_dir = mkdtemp(temp_pattern);
+    if (temp_dir == nullptr)
+    {
+        std::cerr << "SKIP: test_pad_center_chw_strategy (cannot create temp dir)\n";
+        return;
+    }
+    const std::string dir(temp_dir);
+    const std::string image_path = write_test_ppm_nonsquare(dir);
+
+    trtf::VLPreprocessConfig config;
+    config.fixed_image_size = 8;
+    config.in_channels = 3;
+    config.preprocessor_type = "pad_center_chw";
+    config.image_mean[0] = 0.5F;
+    config.image_mean[1] = 0.5F;
+    config.image_mean[2] = 0.5F;
+    config.image_std[0] = 0.5F;
+    config.image_std[1] = 0.5F;
+    config.image_std[2] = 0.5F;
+
+    auto result = trtf::load_and_preprocess_image(image_path, config);
+
+    check(result.ok, "pad_center_chw: ok=true");
+    check(result.channels == 3, "pad_center_chw: channels = 3");
+    check(result.height == 8, "pad_center_chw: height = 8");
+    check(result.width == 8, "pad_center_chw: width = 8");
+
+    const std::size_t expected_size = 3 * 8 * 8;
+    check(result.pixel_values.size() == expected_size,
+          "pad_center_chw: pixel_values size = C * H * W");
+
+    // Padded region should have normalized-mean-color values:
+    // (128/255 - 0.5) / 0.5 = (0.502 - 0.5) / 0.5 ≈ 0.004 (close to 0)
+    // The 6x4 image scaled to fit 8x8 -> new_w=8, new_h=5
+    // Center-padded: y_off = (8-5)/2 = 1, so row 0 and rows 6-7 are padded
+    // Pad color = mean * 255 = 0.5 * 255 = 127 (truncated from 127.5)
+    // Normalized: (127/255 - 0.5) / 0.5 = (0.498 - 0.5) / 0.5 = -0.004
+    const float pad_pixel = static_cast<float>(static_cast<unsigned char>(0.5F * 255.0F));
+    const float expected_pad = (pad_pixel / 255.0F - 0.5F) / 0.5F;
+    bool pad_ok = true;
+    // Check row 0 of first channel (should be padded)
+    for (int x = 0; x < 8; ++x)
+    {
+        const std::size_t idx = static_cast<std::size_t>(0) * 64 + 0 * 8 + x;
+        if (std::abs(result.pixel_values[idx] - expected_pad) > 0.05F)
+        {
+            pad_ok = false;
+            break;
+        }
+    }
+    check(pad_ok, "pad_center_chw: center-padded rows have mean-color value");
+
+    std::filesystem::remove_all(dir);
+}
+
 // Test Gap 4: interpolation defaults to "bicubic".
 static void test_parse_interpolation_default()
 {
@@ -666,6 +725,7 @@ int main()
     test_unknown_preprocessor_type_fallback();
     test_center_crop_chw_strategy();
     test_aspect_preserve_chw_strategy();
+    test_pad_center_chw_strategy();
     test_parse_interpolation_default();
     test_parse_interpolation_bilinear();
     test_parse_resample_from_preprocessor();

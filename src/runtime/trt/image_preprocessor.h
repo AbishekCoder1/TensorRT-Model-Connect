@@ -21,7 +21,7 @@ struct VLPreprocessConfig {
     std::string vl_prompt_template;
     std::string image_token_str;
     // Preprocessing strategy: "qwen_merge_group", "simple_chw",
-    // "center_crop_chw", or "aspect_preserve_chw"
+    // "center_crop_chw", "aspect_preserve_chw", or "pad_center_chw"
     std::string preprocessor_type{"qwen_merge_group"};
     // Interpolation mode for resize: "bicubic", "bilinear", or "nearest"
     std::string interpolation{"bicubic"};
@@ -42,6 +42,7 @@ struct PreprocessedImage {
 //   "simple_chw":          [C, H, W] standard resize + normalize
 //   "center_crop_chw":     [C, H, W] center-crop to square, then resize + normalize
 //   "aspect_preserve_chw": [C, H, W] aspect-ratio-preserving resize + zero-pad
+//   "pad_center_chw":      [C, H, W] aspect-ratio-preserving resize + center-pad with mean color
 //
 // NOTE: Only single-image input is supported. Multi-image batching
 // is not yet implemented; callers must process one image at a time.
