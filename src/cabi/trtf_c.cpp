@@ -16,6 +16,7 @@
 #include "runtime/trt/image_preprocessor.h"
 #include "runtime/trt/diffusion_backend.h"
 #include "runtime/trt/wan_diffusion_backend.h"
+#include "runtime/trt/z_image_diffusion_backend.h"
 #include "runtime/trt/encoder_backend.h"
 #include "runtime/trt/embedding_backend.h"
 #include "runtime/trt/reranking_backend.h"
@@ -275,6 +276,12 @@ public:
         if (diff == nullptr)
         {
             return -1;
+        }
+
+        // Pass raw prompt text for subprocess-based backends (Z-Image, etc.)
+        if (prompt != nullptr)
+        {
+            diff->set_prompt(std::string(prompt));
         }
 
         // Tokenize prompt
@@ -858,13 +865,97 @@ public:
         try {
             std::ifstream infile(audio_in, std::ios::binary);
             if (!infile) return -1;
-            infile.seekg(44);
+
+            // Parse WAV header
+            char header[44];
+            infile.read(header, 44);
+            if (!infile || infile.gcount() < 44) return -1;
+
+            auto fmt_tag = *reinterpret_cast<const uint16_t*>(header + 20);
+            auto channels = *reinterpret_cast<const uint16_t*>(header + 22);
+            auto sample_rate = *reinterpret_cast<const uint32_t*>(header + 24);
+            auto bits_per_sample = *reinterpret_cast<const uint16_t*>(header + 34);
+
+            // Read raw audio data after header
             std::vector<char> raw((std::istreambuf_iterator<char>(infile)),
                                    std::istreambuf_iterator<char>());
-            auto ns = static_cast<int32_t>(raw.size() / sizeof(float));
+            if (raw.empty()) return -1;
+
+            // Convert to float32 mono samples
+            std::vector<float> samples;
+            if (fmt_tag == 3 && bits_per_sample == 32)
+            {
+                // IEEE float32
+                auto ns = static_cast<int32_t>(raw.size() / sizeof(float));
+                samples.resize(ns);
+                std::memcpy(samples.data(), raw.data(), ns * sizeof(float));
+            }
+            else if (fmt_tag == 1 && bits_per_sample == 16)
+            {
+                // PCM int16
+                auto ns = static_cast<int32_t>(raw.size() / sizeof(int16_t));
+                samples.resize(ns);
+                const auto* pcm = reinterpret_cast<const int16_t*>(raw.data());
+                for (int32_t i = 0; i < ns; ++i)
+                    samples[i] = static_cast<float>(pcm[i]) / 32768.0F;
+            }
+            else
+            {
+                std::cerr << "[trtf] Unsupported WAV format: tag="
+                          << fmt_tag << " bits=" << bits_per_sample << std::endl;
+                return -1;
+            }
+
+            // Convert stereo to mono (average channels)
+            if (channels == 2)
+            {
+                auto mono_len = static_cast<int32_t>(samples.size()) / 2;
+                std::vector<float> mono(mono_len);
+                for (int32_t i = 0; i < mono_len; ++i)
+                    mono[i] = (samples[2 * i] + samples[2 * i + 1]) * 0.5F;
+                samples = std::move(mono);
+            }
+            else if (channels > 2)
+            {
+                // Take first channel
+                auto mono_len = static_cast<int32_t>(samples.size()) / channels;
+                std::vector<float> mono(mono_len);
+                for (int32_t i = 0; i < mono_len; ++i)
+                    mono[i] = samples[i * channels];
+                samples = std::move(mono);
+            }
+
+            // Simple resample to 24kHz if needed (Mimi codec rate)
+            const int32_t target_rate = mSpeechBackend->config().sample_rate;
+            if (static_cast<int32_t>(sample_rate) != target_rate && sample_rate > 0)
+            {
+                auto in_len = static_cast<int32_t>(samples.size());
+                auto out_len = static_cast<int32_t>(
+                    static_cast<int64_t>(in_len) * target_rate / sample_rate);
+                std::vector<float> resampled(out_len);
+                for (int32_t i = 0; i < out_len; ++i)
+                {
+                    float src_pos = static_cast<float>(i) *
+                        static_cast<float>(sample_rate) /
+                        static_cast<float>(target_rate);
+                    auto idx = static_cast<int32_t>(src_pos);
+                    float frac = src_pos - static_cast<float>(idx);
+                    if (idx + 1 < in_len)
+                        resampled[i] = samples[idx] * (1.0F - frac)
+                                      + samples[idx + 1] * frac;
+                    else if (idx < in_len)
+                        resampled[i] = samples[idx];
+                }
+                samples = std::move(resampled);
+                std::cerr << "[trtf] Resampled " << sample_rate << " -> "
+                          << target_rate << " Hz (" << in_len << " -> "
+                          << out_len << " samples)" << std::endl;
+            }
+
+            auto ns = static_cast<int32_t>(samples.size());
             if (ns <= 0) return -1;
             auto r = mSpeechBackend->process_audio(
-                reinterpret_cast<const float*>(raw.data()), ns,
+                samples.data(), ns,
                 max_output_frames > 0 ? max_output_frames : 375);
             if (r.num_samples <= 0) return -1;
             trtf::write_wav(std::string(audio_out),
@@ -1959,6 +2050,12 @@ PipelineImpl* create_diffusion_pipeline(
     {
         auto pp_weights = trtf::parse_preprocessor_weights(*sections.preprocessor_weights_data);
         backend->set_preprocessor_weights(std::move(pp_weights));
+
+        // Z-Image uses a custom preprocessor weight format
+        auto* z_image = dynamic_cast<trtf::ZImageDiffusionBackend*>(backend.get());
+        if (z_image != nullptr) {
+            z_image->load_z_image_preprocessor_weights(*sections.preprocessor_weights_data);
+        }
     }
 
     // Set paths for VAE subprocess and bundle info
@@ -1996,7 +2093,7 @@ PipelineImpl* create_speech_pipeline(
     const trtf::BundleSections& sections,
     trtf::TrtUniquePtr<nvinfer1::IRuntime>& runtime_ptr,
     const std::string& model_id,
-    const std::string& /* hf_python */,
+    const std::string& hf_python,
     const std::string& bundle_path)
 {
     // Build temporal decoder engine (primary engine, standard KV cache decoder)
@@ -2009,8 +2106,9 @@ PipelineImpl* create_speech_pipeline(
     }
 
     // Create SpeechToSpeechBackend from temporal engine + config
+    // Pass hf_python for Python-based Mimi codec bridge
     auto speech_backend = trtf::CreateSpeechBackend(
-        std::move(temporal_engine), fp_cfg);
+        std::move(temporal_engine), fp_cfg, hf_python);
     if (!speech_backend || !speech_backend->is_available())
     {
         throw std::runtime_error(

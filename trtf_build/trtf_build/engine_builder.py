@@ -278,12 +278,26 @@ def build_bundle(
                     audio_cfg = get_audio_config(config)
                     if audio_cfg is not None:
                         cfg_dict.update(audio_cfg)
-                # Inject generic config overrides from plugin
+                # Inject generic config overrides from plugin.
+                # Build the final dict so overrides appear FIRST in the
+                # serialized JSON.  The C++ fast_path_config parser uses
+                # flat text search (text.find) which picks up the first
+                # occurrence of a key.  For models with nested configs
+                # (e.g. Qwen3-Omni thinker_config.text_config) the nested
+                # copy of "hidden_size" etc. would otherwise shadow the
+                # top-level value.
                 get_overrides = getattr(plugin, 'get_bundle_config_overrides', None)
                 if get_overrides is not None:
                     overrides = get_overrides(config)
                     if overrides is not None:
-                        cfg_dict.update(overrides)
+                        # Put overrides first, then original dict.  Dict
+                        # union preserves insertion order; overrides keys
+                        # appear before any nested dicts.
+                        merged = dict(overrides)
+                        merged.update(cfg_dict)
+                        # Ensure overrides win for top-level keys.
+                        merged.update(overrides)
+                        cfg_dict = merged
                 data = json.dumps(cfg_dict, indent=2).encode("utf-8")
             sections.append(BundleSection(filename, data))
 

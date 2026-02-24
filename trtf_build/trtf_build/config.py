@@ -66,6 +66,45 @@ class ModelConfig:
                 merged["architectures"] = top_architectures
             d = merged
 
+        # Eagle VLM / Nemotron VL models nest LLM config under "llm_config".
+        # Merge into top level like text_config, preserving top-level
+        # model_type, architectures, and vision_config.
+        if not d.get("hidden_size"):
+            llm_config = d.get("llm_config")
+            if isinstance(llm_config, dict):
+                top_model_type = d.get("model_type")
+                top_architectures = d.get("architectures")
+                top_vision_config = d.get("vision_config")
+                merged = {**d, **llm_config}
+                if top_model_type:
+                    merged["model_type"] = top_model_type
+                if top_architectures:
+                    merged["architectures"] = top_architectures
+                if top_vision_config:
+                    merged["vision_config"] = top_vision_config
+                d = merged
+
+        # Omni models (e.g. Qwen3-Omni) nest the primary decoder config
+        # under thinker_config.text_config. If top-level hidden_size is
+        # still missing after the text_config merge above, look there.
+        if not d.get("hidden_size"):
+            thinker_cfg = d.get("thinker_config")
+            if isinstance(thinker_cfg, dict):
+                thinker_text = thinker_cfg.get("text_config")
+                if isinstance(thinker_text, dict):
+                    top_model_type = d.get("model_type")
+                    top_architectures = d.get("architectures")
+                    merged = {**d, **thinker_text}
+                    if top_model_type:
+                        merged["model_type"] = top_model_type
+                    if top_architectures:
+                        merged["architectures"] = top_architectures
+                    # Also propagate vision_config from thinker_config
+                    # so VL pipelines can find it.
+                    if "vision_config" not in merged and "vision_config" in thinker_cfg:
+                        merged["vision_config"] = thinker_cfg["vision_config"]
+                    d = merged
+
         # Handle non-standard config key names:
         #   GPT-2: n_embd, n_head, n_layer, n_inner
         #   XGLM/Bloom: d_model, attention_heads, num_layers, ffn_dim
