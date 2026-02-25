@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1142,7 +1143,8 @@ std::vector<float> SpeechToSpeechBackend::run_mimi_decode(
 AudioResult SpeechToSpeechBackend::process_audio(
     const float* input_samples, int32_t num_input_samples,
     int32_t max_output_frames,
-    int32_t input_sample_rate)
+    int32_t input_sample_rate,
+    int32_t tail_frames)
 {
     AudioResult result;
     result.sample_rate = mConfig.sample_rate;
@@ -1431,7 +1433,14 @@ AudioResult SpeechToSpeechBackend::process_audio(
     }
     int32_t effective_frames = std::min(num_frames, nominal_input_frames);
     effective_frames = std::max(0, effective_frames - 2);
-    const int32_t output_frames = std::min(effective_frames, max_output_frames);
+    const int32_t extra_tail = std::max(0, tail_frames);
+    int64_t target_frames = static_cast<int64_t>(effective_frames)
+        + static_cast<int64_t>(extra_tail);
+    target_frames = std::max<int64_t>(0, target_frames);
+    const int32_t output_frames = std::min(
+        static_cast<int32_t>(std::min<int64_t>(
+            target_frames, static_cast<int64_t>(std::numeric_limits<int32_t>::max()))),
+        max_output_frames);
     const int32_t mimi_cb = mConfig.mimi_decode_codebooks;
     std::vector<int32_t> output_codes;
     output_codes.reserve(
@@ -1443,7 +1452,9 @@ AudioResult SpeechToSpeechBackend::process_audio(
 
     std::cerr << "[speech] Interleaved temporal+depth with delay pattern: "
               << output_frames << " output frames, " << total_iters
-              << " total iterations (max_delay=" << max_delay << ")"
+              << " total iterations (max_delay=" << max_delay
+              << ", input_effective=" << effective_frames
+              << ", tail_frames=" << extra_tail << ")"
               << std::endl;
 
     int32_t frames_collected = 0;

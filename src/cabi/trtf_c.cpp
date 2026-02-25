@@ -859,7 +859,8 @@ public:
     }
 
     int32_t speak(const char* audio_in, const char* audio_out,
-                  int32_t max_output_frames) override
+                  int32_t max_output_frames,
+                  int32_t tail_frames) override
     {
 #if TRTF_HAS_TRT
         if (!mSpeechBackend || !audio_in || !audio_out) return -1;
@@ -1016,7 +1017,8 @@ public:
             auto r = mSpeechBackend->process_audio(
                 samples.data(), ns,
                 max_output_frames > 0 ? max_output_frames : 375,
-                static_cast<int32_t>(sample_rate));
+                static_cast<int32_t>(sample_rate),
+                std::max(0, tail_frames));
             if (r.num_samples <= 0) return -1;
             trtf::write_wav(std::string(audio_out),
                 r.waveform.data(), r.num_samples, r.sample_rate);
@@ -1026,7 +1028,7 @@ public:
             return -1;
         }
 #else
-        (void) audio_in; (void) audio_out; (void) max_output_frames;
+        (void) audio_in; (void) audio_out; (void) max_output_frames; (void) tail_frames;
         return -1;
 #endif
     }

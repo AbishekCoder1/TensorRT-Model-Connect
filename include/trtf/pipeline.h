@@ -162,10 +162,13 @@ public:
 
     // Speech-to-speech: read audio from audio_in WAV, process, write to
     // audio_out WAV. Returns number of output samples on success, -1 on failure.
+    // tail_frames extends generation budget beyond input-derived frames.
     virtual int32_t speak(const char* audio_in, const char* audio_out,
-                          int32_t max_output_frames = -1)
+                          int32_t max_output_frames = -1,
+                          int32_t tail_frames = 0)
     {
         (void) audio_in; (void) audio_out; (void) max_output_frames;
+        (void) tail_frames;
         return -1;
     }
 

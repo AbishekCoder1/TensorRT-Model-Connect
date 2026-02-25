@@ -8,6 +8,19 @@ PersonaPlex (nvidia/personaplex-7b-v1) is based on the Moshi architecture:
 Pipeline:
   audio_in -> Mimi_encode -> Temporal_process -> Depth_generate -> Mimi_decode -> audio_out
 
+Bring-up CLI reference (used for PersonaPlex TRT/C++ iteration):
+  # Rebuild C++ runtime after speech backend / CLI changes
+  docker exec trtf-dev-gb300 bash -lc 'cd /workspace/trt-transformers-cpp && cmake --build build -j'
+
+  # Build a PersonaPlex bundle from HF (base engine bundle)
+  docker exec trtf-dev-gb300 bash -lc 'cd /workspace/trt-transformers-cpp && .venv/bin/trtf-build build nvidia/personaplex-7b-v1 -o /mnt/storage/trt-transformers/engines/personaplex-7b.trtfb --max-cache-length 256 --verbose'
+
+  # Rebuild only Mimi decoder capacity (example: 320 frames) and repack bundle
+  docker exec trtf-dev-gb300 bash -lc 'cd /workspace/trt-transformers-cpp && .venv/bin/python <inline script calling _build_mimi_decoder_engine(..., num_input_codebooks=8, num_frames=320) and replacing mimi_decoder_plan in an existing .trtfb>'
+
+  # Run speech inference (long-form test using tail frame extension)
+  docker exec trtf-dev-gb300 bash -lc 'cd /workspace/trt-transformers-cpp && ./build/trtf speak /mnt/storage/trt-transformers/engines/personaplex-7b-ropefix2-dec320.trtfb --audio-in tests/e2e/data/Recording.wav --audio-out /workspace/trt-transformers-cpp/personaplex_recording_ropefix2_dec320_tail300_max1000.wav --max-new-tokens 1000 --tail-frames 300'
+
 Real weight key structure (nvidia/personaplex-7b-v1):
   Temporal Transformer (32 layers, hidden=4096):
     transformer.layers.{i}.self_attn.in_proj_weight: [12288, 4096]  # fused QKV
@@ -1278,6 +1291,7 @@ def _build_mimi_decoder_engine(
     *,
     verbose: bool = False,
     num_input_codebooks: int = 0,
+    num_frames: int = 53,
 ) -> bytes | None:
     """Build Mimi decoder as a native TRT engine.
 
@@ -1320,8 +1334,9 @@ def _build_mimi_decoder_engine(
     residual_kernel_size = mimi_cfg.get("residual_kernel_size", 3)
     last_kernel_size = mimi_cfg.get("last_kernel_size", 3)
 
-    # Fixed number of input frames (must match encoder output for 100800 samples)
-    num_frames = 53
+    # Fixed decoder frame capacity for this engine plan.
+    # Runtime can decode up to this many frames per invocation.
+    num_frames = int(max(1, num_frames))
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)

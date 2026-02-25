@@ -3,6 +3,7 @@
 // Usage:
 //   trtf run             <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
 //   trtf transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]
+//   trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav [--max-new-tokens N] [--tail-frames N]
 //   trtf generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N] [--guidance-scale S] [--hf-python PATH]
 //   trtf inspect         <bundle.trtfb>
 //   trtf version
@@ -10,6 +11,7 @@
 #include "trtf/pipeline.h"
 #include "trtf/bundle.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -32,6 +34,7 @@ struct CliArgs {
     std::string document;     // document text for rerank
     std::string audio_in;     // input audio WAV for speak
     std::string audio_out;    // output audio WAV for speak
+    int tail_frames{0};       // extra speech frames beyond input-derived length
     float point_x{0.5F};     // SAM point prompt X (normalized 0-1)
     float point_y{0.5F};     // SAM point prompt Y (normalized 0-1)
     bool is_foreground{true}; // SAM point: foreground or background
@@ -58,7 +61,7 @@ void print_usage()
         "  trtf embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
         "  trtf rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" [--hf-python PATH]\n"
         "  trtf transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]\n"
-        "  trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav [--max-new-tokens N]\n"
+        "  trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav [--max-new-tokens N] [--tail-frames N]\n"
         "  trtf solve           <bundle.trtfb> --branch-input \"0.1,0.2,...\" --trunk-input \"0.5,0.5\"  (DeepONet)\n"
         "  trtf solve           <bundle.trtfb> --field-input \"0.1,0.2,...\"                          (FNO)\n"
         "  trtf inspect         <bundle.trtfb>\n"
@@ -128,6 +131,18 @@ CliArgs parse_args(int argc, char** argv)
                 return args;
             }
             args.max_new_tokens = std::atoi(argv[++i]);
+            continue;
+        }
+
+        if (arg == "--tail-frames")
+        {
+            if (i + 1 >= argc)
+            {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.tail_frames = std::max(0, std::atoi(argv[++i]));
             continue;
         }
 
@@ -939,7 +954,7 @@ int cmd_speak(const CliArgs& args)
         ? args.max_new_tokens : -1;
 
     const int32_t num_samples = pipeline->speak(
-        args.audio_in.c_str(), out_path.c_str(), max_frames);
+        args.audio_in.c_str(), out_path.c_str(), max_frames, args.tail_frames);
 
     if (num_samples < 0)
     {

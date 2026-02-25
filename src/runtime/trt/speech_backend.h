@@ -105,7 +105,8 @@ public:
     AudioResult process_audio(
         const float* input_samples, int32_t num_input_samples,
         int32_t max_output_frames = 375,
-        int32_t input_sample_rate = 0);
+        int32_t input_sample_rate = 0,
+        int32_t tail_frames = 0);
 
     const SpeechConfig& config() const { return mConfig; }
 
