@@ -154,6 +154,10 @@ struct FastPathModelConfig {
     int32_t speech_text_initial_token_id{32000};
     int32_t speech_audio_initial_token_id{2048};
     int32_t speech_text_padding_id{3};
+    float speech_depth_temperature{0.0F};   // 0 = greedy, 0.8 = official PersonaPlex
+    int32_t speech_depth_top_k{0};          // 0 = greedy, 250 = official PersonaPlex
+    std::string speech_system_prompt;       // text prompt to inject before user audio
+    std::vector<int32_t> speech_text_prompt_ids;  // pre-tokenized prompt IDs
 
     // Omni multimodal fields (used when runtime_strategy == "omni_multimodal")
     int32_t omni_sample_rate{24000};

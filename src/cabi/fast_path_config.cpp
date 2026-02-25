@@ -246,6 +246,29 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.speech_text_initial_token_id = extract_json_int(config_text, "text_initial_token_id", 32000);
         cfg.speech_audio_initial_token_id = extract_json_int(config_text, "audio_initial_token_id", 2048);
         cfg.speech_text_padding_id = extract_json_int(config_text, "text_padding_id", 3);
+        cfg.speech_depth_temperature = extract_json_float(config_text, "speech_depth_temperature", 0.0F);
+        cfg.speech_depth_top_k = extract_json_int(config_text, "speech_depth_top_k", 0);
+        cfg.speech_system_prompt = extract_json_string(config_text, "speech_system_prompt", "");
+        // Parse pre-tokenized text prompt IDs: "speech_text_prompt_ids": [493, 298, ...]
+        {
+            auto pos = config_text.find("\"speech_text_prompt_ids\"");
+            if (pos != std::string::npos) {
+                auto bracket = config_text.find('[', pos);
+                auto end_bracket = config_text.find(']', bracket);
+                if (bracket != std::string::npos && end_bracket != std::string::npos) {
+                    std::string arr = config_text.substr(bracket + 1, end_bracket - bracket - 1);
+                    std::size_t p = 0;
+                    while (p < arr.size()) {
+                        auto num_start = arr.find_first_of("0123456789", p);
+                        if (num_start == std::string::npos) break;
+                        cfg.speech_text_prompt_ids.push_back(std::stoi(arr.substr(num_start)));
+                        p = arr.find_first_of(",]", num_start);
+                        if (p == std::string::npos) break;
+                        p++;
+                    }
+                }
+            }
+        }
         // Reuse codebook fields for the C++ SpeechConfig
         cfg.codec_n_codebooks = cfg.speech_num_codebooks;
         cfg.codebook_size = cfg.speech_codebook_size;

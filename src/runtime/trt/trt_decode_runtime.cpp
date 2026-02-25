@@ -1,6 +1,8 @@
 #include "runtime/trt/trt_decode_runtime.h"
 
 #include <algorithm>
+#include <cmath>
+#include <numeric>
 
 namespace trtf {
 
@@ -14,6 +16,74 @@ int32_t select_argmax_token(const std::vector<float>& logits)
     }
     const auto it = std::max_element(logits.begin(), logits.end());
     return static_cast<int32_t>(std::distance(logits.begin(), it));
+}
+
+int32_t sample_token_topk(const std::vector<float>& logits,
+                          float temperature, int32_t top_k,
+                          uint64_t& rng_state)
+{
+    if (logits.empty()) return 0;
+
+    const auto n = static_cast<int32_t>(logits.size());
+
+    // Fallback to argmax if temperature is near zero
+    if (temperature < 1e-6F)
+    {
+        return select_argmax_token(logits);
+    }
+
+    // Build index array sorted by logit value (descending)
+    std::vector<int32_t> indices(static_cast<std::size_t>(n));
+    std::iota(indices.begin(), indices.end(), 0);
+    const int32_t k = std::min(std::max(top_k, 1), n);
+    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
+        [&](int32_t a, int32_t b) {
+            return logits[static_cast<std::size_t>(a)] >
+                   logits[static_cast<std::size_t>(b)];
+        });
+
+    // Temperature-scaled softmax over top-k
+    float max_logit = logits[static_cast<std::size_t>(indices[0])];
+    std::vector<float> probs(static_cast<std::size_t>(k));
+    float sum = 0.0F;
+    for (int32_t i = 0; i < k; ++i)
+    {
+        float scaled = (logits[static_cast<std::size_t>(indices[i])] - max_logit)
+                       / temperature;
+        probs[i] = std::exp(scaled);
+        sum += probs[i];
+    }
+
+    // Normalize
+    if (sum > 0.0F)
+    {
+        for (int32_t i = 0; i < k; ++i)
+            probs[i] /= sum;
+    }
+    else
+    {
+        // Degenerate case: uniform
+        for (int32_t i = 0; i < k; ++i)
+            probs[i] = 1.0F / static_cast<float>(k);
+    }
+
+    // xorshift64 random number generation
+    rng_state ^= rng_state << 13;
+    rng_state ^= rng_state >> 7;
+    rng_state ^= rng_state << 17;
+    float u = static_cast<float>(rng_state & 0xFFFFFFFF) / 4294967296.0F;
+
+    // Sample from cumulative distribution
+    float cumulative = 0.0F;
+    for (int32_t i = 0; i < k; ++i)
+    {
+        cumulative += probs[i];
+        if (u < cumulative)
+        {
+            return indices[i];
+        }
+    }
+    return indices[k - 1];
 }
 
 std::vector<int32_t> select_topk_tokens(const std::vector<float>& logits, int32_t k)

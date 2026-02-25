@@ -292,6 +292,20 @@ class TestRuntimeStrategy:
         plugin = find_plugin("personaplex")
         assert getattr(plugin, "runtime_strategy", None) == "speech_to_speech"
 
+    def test_personaplex_bundle_overrides(self):
+        from trtf_build.config import ModelConfig
+
+        plugin = find_plugin("personaplex")
+        # Exercise the override path without requiring local tokenizer files.
+        if hasattr(plugin, "_model_dir"):
+            plugin._model_dir = None
+        overrides = plugin.get_bundle_config_overrides(
+            ModelConfig(model_type="personaplex"))
+        assert overrides["speech_depth_temperature"] == pytest.approx(0.8)
+        assert overrides["speech_depth_top_k"] == 250
+        assert overrides["speech_system_prompt"] == "You are a helpful AI assistant."
+        assert isinstance(overrides["speech_text_prompt_ids"], list)
+
     def test_nemotron_h_strategy(self):
         plugin = find_plugin("nemotron_h")
         assert getattr(plugin, "runtime_strategy", None) == "hybrid_mamba_attention"

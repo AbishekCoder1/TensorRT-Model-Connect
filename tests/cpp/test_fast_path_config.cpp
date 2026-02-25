@@ -394,6 +394,10 @@ static void test_speech_to_speech_config()
         "depth_num_layers": 6,
         "depth_num_attention_heads": 16,
         "depth_num_key_value_heads": 4,
+        "speech_depth_temperature": 0.8,
+        "speech_depth_top_k": 250,
+        "speech_system_prompt": "You are a helpful AI assistant.",
+        "speech_text_prompt_ids": [493, 298, 22],
         "max_position_embeddings": 4096
     })";
 
@@ -406,6 +410,18 @@ static void test_speech_to_speech_config()
     check(cfg.speech_depth_num_layers == 6, "speech: depth_num_layers");
     check(cfg.speech_depth_num_heads == 16, "speech: depth_num_heads");
     check(cfg.speech_depth_num_kv_heads == 4, "speech: depth_num_kv_heads");
+    check(cfg.speech_depth_temperature > 0.79F && cfg.speech_depth_temperature < 0.81F,
+          "speech: depth_temperature");
+    check(cfg.speech_depth_top_k == 250, "speech: depth_top_k");
+    check(cfg.speech_system_prompt == "You are a helpful AI assistant.",
+          "speech: system_prompt");
+    check(cfg.speech_text_prompt_ids.size() == 3, "speech: text_prompt_ids size");
+    if (cfg.speech_text_prompt_ids.size() == 3)
+    {
+        check(cfg.speech_text_prompt_ids[0] == 493, "speech: text_prompt_ids[0]");
+        check(cfg.speech_text_prompt_ids[1] == 298, "speech: text_prompt_ids[1]");
+        check(cfg.speech_text_prompt_ids[2] == 22, "speech: text_prompt_ids[2]");
+    }
 }
 
 // -----------------------------------------------------------------------------

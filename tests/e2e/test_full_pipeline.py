@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import struct
 import subprocess
 import sys
 import time
@@ -808,6 +810,175 @@ def _run_cpp_audio_generation(binary, bundle_path, prompt, output_wav,
     return True, file_size, result.stderr
 
 
+def _load_bundle_sections(bundle_path: str) -> tuple[dict, list[tuple[str, bytes]]]:
+    """Load a .trtfb bundle header and all raw sections."""
+    with open(bundle_path, "rb") as f:
+        magic = f.read(8)
+        if magic != b"TRTFB\x00\x01\x00":
+            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len).decode("utf-8"))
+        sections_meta = header.get("sections", {})
+        data_start = 16 + header_len
+
+        sections: list[tuple[str, bytes]] = []
+        for name, meta in sections_meta.items():
+            offset = int(meta["offset"])
+            size = int(meta["size"])
+            f.seek(data_start + offset)
+            sections.append((name, f.read(size)))
+    return header, sections
+
+
+def _write_bundle_sections(
+    out_path: str | Path, header: dict, sections: list[tuple[str, bytes]],
+) -> None:
+    """Write a .trtfb bundle from header metadata + raw section bytes."""
+    section_meta: dict[str, dict[str, int]] = {}
+    offset = 0
+    for name, data in sections:
+        section_meta[name] = {"offset": offset, "size": len(data)}
+        offset += len(data)
+
+    out_header = dict(header)
+    out_header["sections"] = section_meta
+    header_json = json.dumps(out_header, indent=2).encode("utf-8")
+
+    with open(out_path, "wb") as f:
+        f.write(b"TRTFB\x00\x01\x00")
+        f.write(struct.pack("<Q", len(header_json)))
+        f.write(header_json)
+        for _, data in sections:
+            f.write(data)
+
+
+def _make_speech_greedy_bundle(
+    src_bundle: str, dst_bundle: str | Path,
+) -> None:
+    """Create a temp bundle copy with deterministic speech decode settings."""
+    header, sections = _load_bundle_sections(src_bundle)
+    new_sections: list[tuple[str, bytes]] = []
+    patched = False
+
+    for name, data in sections:
+        if name != "config.json":
+            new_sections.append((name, data))
+            continue
+
+        cfg_text = data.decode("utf-8", errors="ignore").rstrip("\x00").strip()
+        cfg = json.loads(cfg_text)
+        cfg["speech_depth_temperature"] = 0.0
+        cfg["speech_depth_top_k"] = 0
+        cfg["speech_system_prompt"] = ""
+        cfg["speech_text_prompt_ids"] = []
+        new_sections.append((name, json.dumps(cfg, indent=2).encode("utf-8")))
+        patched = True
+
+    if not patched:
+        raise RuntimeError("Bundle missing config.json section; cannot patch speech decode mode")
+
+    _write_bundle_sections(dst_bundle, header, new_sections)
+
+
+def _run_cpp_speech_generation(binary, bundle_path, input_wav, output_wav,
+                               max_frames, hf_python, ld_library_path):
+    """Run C++ speak command and return subprocess result metadata."""
+    cmd = [
+        str(binary), "speak", str(bundle_path),
+        "--audio-in", str(input_wav),
+        "--audio-out", str(output_wav),
+        "--max-new-tokens", str(max_frames),
+    ]
+    if hf_python:
+        cmd.extend(["--hf-python", str(hf_python)])
+
+    env = {"LD_LIBRARY_PATH": ld_library_path}
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=1200, env=env)
+
+    return {
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def _parse_speech_output_tokens(stderr_text: str) -> np.ndarray:
+    """Parse `[speech] Output frame N: ...` tokens from C++ stderr."""
+    per_frame: dict[int, list[int]] = {}
+    for line in stderr_text.splitlines():
+        m = re.match(r"^\[speech\]\s+Output frame\s+(\d+):\s*(.*)$", line.strip())
+        if not m:
+            continue
+        frame_idx = int(m.group(1))
+        token_text = m.group(2).strip()
+        if not token_text:
+            continue
+        tokens = [int(x) for x in token_text.split()]
+        per_frame[frame_idx] = tokens
+
+    if not per_frame:
+        return np.zeros((0, 0), dtype=np.int32)
+
+    max_frame = max(per_frame.keys())
+    num_cb = len(per_frame[min(per_frame.keys())])
+    out = np.zeros((max_frame + 1, num_cb), dtype=np.int32)
+    for fidx, toks in per_frame.items():
+        if len(toks) == num_cb:
+            out[fidx, :] = np.asarray(toks, dtype=np.int32)
+    return out
+
+
+def _read_wav_f32(path: str | Path) -> np.ndarray:
+    """Read WAV PCM16/float32 and return mono float32 samples in [-1, 1]."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < 44 or data[:4] != b"RIFF":
+        return np.zeros((0,), dtype=np.float32)
+
+    pos = 12
+    while pos + 8 <= len(data):
+        chunk_id = data[pos:pos + 4]
+        chunk_size = struct.unpack("<I", data[pos + 4:pos + 8])[0]
+        if pos + 8 + chunk_size > len(data):
+            break
+        if chunk_id == b"data":
+            payload = data[pos + 8:pos + 8 + chunk_size]
+            fmt_pos = data.find(b"fmt ")
+            if fmt_pos >= 0 and fmt_pos + 24 <= len(data):
+                fmt_tag = struct.unpack("<H", data[fmt_pos + 8:fmt_pos + 10])[0]
+                bits = struct.unpack("<H", data[fmt_pos + 22:fmt_pos + 24])[0]
+                if fmt_tag == 1 and bits == 16:
+                    return (
+                        np.frombuffer(payload, dtype=np.int16).astype(np.float32) / 32768.0
+                    )
+                if fmt_tag == 3 and bits == 32:
+                    return np.frombuffer(payload, dtype=np.float32)
+            break
+        pos += 8 + chunk_size + (chunk_size & 1)
+    return np.zeros((0,), dtype=np.float32)
+
+
+def _speech_token_match_metrics(
+    reference: np.ndarray, actual: np.ndarray,
+) -> tuple[float, float, int]:
+    """Return token_match, frame_exact, and compared frame count."""
+    if reference.ndim != 2 or actual.ndim != 2:
+        return 0.0, 0.0, 0
+    n_frames = min(reference.shape[0], actual.shape[0])
+    n_cb = min(reference.shape[1], actual.shape[1])
+    if n_frames <= 0 or n_cb <= 0:
+        return 0.0, 0.0, 0
+
+    ref = reference[:n_frames, :n_cb]
+    got = actual[:n_frames, :n_cb]
+    eq = (ref == got)
+    token_match = float(eq.mean())
+    frame_exact = float(eq.all(axis=1).mean())
+    return token_match, frame_exact, int(n_frames)
+
+
 @pytest.mark.e2e
 def test_bark_stage_parity(built_bundle, trtf_binary, hf_python,
                            ld_library_path):
@@ -929,3 +1100,111 @@ def test_audio_pipeline(built_bundle, trtf_binary, hf_python,
 
     print(f"\n[audio_pipeline] {entry['name']}: PASS")
     print(f"  Output: {output_path} ({file_size} bytes)")
+
+
+@pytest.mark.e2e
+def test_speech_to_speech_pipeline(model_entry, trtf_binary, hf_python,
+                                   ld_library_path):
+    """Speech pipeline parity: run `trtf speak` and compare tokens to reference."""
+    entry = model_entry
+    bundle_path = entry["bundle_path"]
+
+    if entry.get("runtime_strategy") != "speech_to_speech":
+        pytest.skip(f"{entry['name']} is not a speech-to-speech model")
+
+    e2e_dir = Path(__file__).resolve().parent
+    input_audio = Path(entry.get("test_input_audio", "data/Recording.wav"))
+    if not input_audio.is_absolute():
+        input_audio = e2e_dir / input_audio
+    if not input_audio.is_file():
+        pytest.skip(f"Input audio not found: {input_audio}")
+
+    ref_tokens_path = entry.get("speech_reference_tokens")
+    if not ref_tokens_path:
+        pytest.skip("No speech_reference_tokens configured")
+    ref_tokens_file = Path(ref_tokens_path)
+    if not ref_tokens_file.is_absolute():
+        ref_tokens_file = e2e_dir / ref_tokens_file
+    if not ref_tokens_file.is_file():
+        pytest.skip(f"Speech reference tokens not found: {ref_tokens_file}")
+
+    max_frames = int(entry.get("speech_test_max_frames", 50))
+    min_token_match = float(entry.get("speech_min_token_match", 0.80))
+    min_frame_exact = float(entry.get("speech_min_frame_exact", 0.70))
+    min_rms = float(entry.get("speech_min_rms", 1e-3))
+
+    temp_dir = Path("/tmp/claude") / f"{entry['name']}_speech"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    greedy_bundle = temp_dir / f"{Path(bundle_path).stem}.greedy.trtfb"
+    output_wav = temp_dir / f"{entry['name']}_speech_output.wav"
+
+    _make_speech_greedy_bundle(bundle_path, greedy_bundle)
+
+    run = _run_cpp_speech_generation(
+        trtf_binary, greedy_bundle, input_audio, output_wav,
+        max_frames, hf_python, ld_library_path)
+    assert run["returncode"] == 0, (
+        f"Speech generation failed (rc={run['returncode']}):\n{run['stderr']}")
+    assert output_wav.is_file(), "Speech output WAV not written"
+
+    out_size = os.path.getsize(output_wav)
+    assert out_size > 44, "Speech output WAV is too small (header only?)"
+
+    audio = _read_wav_f32(output_wav)
+    assert audio.size > 0, "Speech output audio is empty"
+    rms = float(np.sqrt(np.mean(audio * audio)))
+    assert rms >= min_rms, f"Speech output RMS too low ({rms:.6f} < {min_rms})"
+
+    got_tokens = _parse_speech_output_tokens(run["stderr"])
+    assert got_tokens.size > 0, (
+        "Failed to parse output tokens from stderr; missing `[speech] Output frame ...` logs")
+
+    ref_tokens = np.load(str(ref_tokens_file)).astype(np.int32)
+    token_match, frame_exact, compared_frames = _speech_token_match_metrics(
+        ref_tokens, got_tokens)
+    assert compared_frames >= 10, (
+        f"Insufficient frames for parity check: {compared_frames}")
+    assert token_match >= min_token_match, (
+        f"Speech token match {token_match:.4f} < {min_token_match:.4f} "
+        f"(frames={compared_frames})")
+    assert frame_exact >= min_frame_exact, (
+        f"Speech frame-exact {frame_exact:.4f} < {min_frame_exact:.4f} "
+        f"(frames={compared_frames})")
+
+    results = {
+        "model": {
+            "name": entry["name"],
+            "hf_id": entry["hf_id"],
+            "family": entry.get("family", "unknown"),
+            "runtime_strategy": "speech_to_speech",
+        },
+        "build": {
+            "engine_size_bytes": os.path.getsize(bundle_path),
+            "trt_version": _get_trt_version(),
+            "gpu_name": _get_gpu_name(),
+        },
+        "inference": {
+            "input_audio": str(input_audio),
+            "output_audio": str(output_wav),
+            "output_wav_size_bytes": out_size,
+            "output_rms": rms,
+            "max_frames": max_frames,
+        },
+        "comparison": {
+            "reference_tokens": str(ref_tokens_file),
+            "compared_frames": compared_frames,
+            "token_match": token_match,
+            "frame_exact_match": frame_exact,
+            "min_token_match": min_token_match,
+            "min_frame_exact": min_frame_exact,
+        },
+        "status": "PASS",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    results_path = _save_results(bundle_path, results)
+
+    print(f"\n[speech_pipeline] {entry['name']}: PASS "
+          f"(token_match={token_match:.4f}, frame_exact={frame_exact:.4f}, "
+          f"rms={rms:.4f})")
+    print(f"  Output: {output_wav} ({out_size} bytes)")
+    print(f"  Results saved: {results_path}")

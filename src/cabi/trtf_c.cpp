@@ -867,36 +867,82 @@ public:
             std::ifstream infile(audio_in, std::ios::binary);
             if (!infile) return -1;
 
-            // Parse WAV header
-            char header[44];
-            infile.read(header, 44);
-            if (!infile || infile.gcount() < 44) return -1;
+            // Read full WAV file and parse chunks (do not assume 44-byte header).
+            std::vector<char> wav_bytes((std::istreambuf_iterator<char>(infile)),
+                                        std::istreambuf_iterator<char>());
+            if (wav_bytes.size() < 44) return -1;
+            if (std::memcmp(wav_bytes.data(), "RIFF", 4) != 0 ||
+                std::memcmp(wav_bytes.data() + 8, "WAVE", 4) != 0)
+            {
+                std::cerr << "[trtf] Invalid WAV container" << std::endl;
+                return -1;
+            }
 
-            auto fmt_tag = *reinterpret_cast<const uint16_t*>(header + 20);
-            auto channels = *reinterpret_cast<const uint16_t*>(header + 22);
-            auto sample_rate = *reinterpret_cast<const uint32_t*>(header + 24);
-            auto bits_per_sample = *reinterpret_cast<const uint16_t*>(header + 34);
+            uint16_t fmt_tag = 0;
+            uint16_t channels = 0;
+            uint32_t sample_rate = 0;
+            uint16_t bits_per_sample = 0;
+            const char* raw_ptr = nullptr;
+            std::size_t raw_size = 0;
+            bool have_fmt = false;
+            bool have_data = false;
 
-            // Read raw audio data after header
-            std::vector<char> raw((std::istreambuf_iterator<char>(infile)),
-                                   std::istreambuf_iterator<char>());
-            if (raw.empty()) return -1;
+            std::size_t pos = 12;
+            while (pos + 8 <= wav_bytes.size())
+            {
+                const char* chunk = wav_bytes.data() + pos;
+                const char* chunk_data = chunk + 8;
+                auto chunk_size = *reinterpret_cast<const uint32_t*>(chunk + 4);
+                if (pos + 8 + static_cast<std::size_t>(chunk_size) > wav_bytes.size())
+                    break;
+
+                if (std::memcmp(chunk, "fmt ", 4) == 0)
+                {
+                    if (chunk_size < 16)
+                    {
+                        std::cerr << "[trtf] WAV fmt chunk too small" << std::endl;
+                        return -1;
+                    }
+                    fmt_tag = *reinterpret_cast<const uint16_t*>(chunk_data + 0);
+                    channels = *reinterpret_cast<const uint16_t*>(chunk_data + 2);
+                    sample_rate = *reinterpret_cast<const uint32_t*>(chunk_data + 4);
+                    bits_per_sample = *reinterpret_cast<const uint16_t*>(chunk_data + 14);
+                    have_fmt = true;
+                }
+                else if (std::memcmp(chunk, "data", 4) == 0)
+                {
+                    raw_ptr = chunk_data;
+                    raw_size = static_cast<std::size_t>(chunk_size);
+                    have_data = true;
+                    // Keep parsing in case fmt appears later, but first data is enough.
+                }
+
+                pos += 8 + static_cast<std::size_t>(chunk_size);
+                if ((chunk_size & 1U) != 0)
+                    ++pos;  // RIFF chunks are word-aligned.
+            }
+
+            if (!have_fmt || !have_data || raw_ptr == nullptr || raw_size == 0)
+            {
+                std::cerr << "[trtf] WAV missing fmt/data chunk" << std::endl;
+                return -1;
+            }
 
             // Convert to float32 mono samples
             std::vector<float> samples;
             if (fmt_tag == 3 && bits_per_sample == 32)
             {
                 // IEEE float32
-                auto ns = static_cast<int32_t>(raw.size() / sizeof(float));
+                auto ns = static_cast<int32_t>(raw_size / sizeof(float));
                 samples.resize(ns);
-                std::memcpy(samples.data(), raw.data(), ns * sizeof(float));
+                std::memcpy(samples.data(), raw_ptr, ns * sizeof(float));
             }
             else if (fmt_tag == 1 && bits_per_sample == 16)
             {
                 // PCM int16
-                auto ns = static_cast<int32_t>(raw.size() / sizeof(int16_t));
+                auto ns = static_cast<int32_t>(raw_size / sizeof(int16_t));
                 samples.resize(ns);
-                const auto* pcm = reinterpret_cast<const int16_t*>(raw.data());
+                const auto* pcm = reinterpret_cast<const int16_t*>(raw_ptr);
                 for (int32_t i = 0; i < ns; ++i)
                     samples[i] = static_cast<float>(pcm[i]) / 32768.0F;
             }
@@ -928,36 +974,49 @@ public:
 
             // Simple resample to 24kHz if needed (Mimi codec rate)
             const int32_t target_rate = mSpeechBackend->config().sample_rate;
+            const bool prefer_python_codec =
+                !mSpeechBackend->config().hf_python.empty();
             if (static_cast<int32_t>(sample_rate) != target_rate && sample_rate > 0)
             {
-                auto in_len = static_cast<int32_t>(samples.size());
-                auto out_len = static_cast<int32_t>(
-                    static_cast<int64_t>(in_len) * target_rate / sample_rate);
-                std::vector<float> resampled(out_len);
-                for (int32_t i = 0; i < out_len; ++i)
+                if (prefer_python_codec)
                 {
-                    float src_pos = static_cast<float>(i) *
-                        static_cast<float>(sample_rate) /
-                        static_cast<float>(target_rate);
-                    auto idx = static_cast<int32_t>(src_pos);
-                    float frac = src_pos - static_cast<float>(idx);
-                    if (idx + 1 < in_len)
-                        resampled[i] = samples[idx] * (1.0F - frac)
-                                      + samples[idx + 1] * frac;
-                    else if (idx < in_len)
-                        resampled[i] = samples[idx];
+                    std::cerr << "[trtf] Keeping input at " << sample_rate
+                              << " Hz; Python Mimi encoder will resample to "
+                              << target_rate << " Hz" << std::endl;
                 }
-                samples = std::move(resampled);
-                std::cerr << "[trtf] Resampled " << sample_rate << " -> "
-                          << target_rate << " Hz (" << in_len << " -> "
-                          << out_len << " samples)" << std::endl;
+                else
+                {
+                    auto in_len = static_cast<int32_t>(samples.size());
+                    auto out_len = static_cast<int32_t>(
+                        static_cast<int64_t>(in_len) * target_rate / sample_rate);
+                    std::vector<float> resampled(out_len);
+                    for (int32_t i = 0; i < out_len; ++i)
+                    {
+                        float src_pos = static_cast<float>(i) *
+                            static_cast<float>(sample_rate) /
+                            static_cast<float>(target_rate);
+                        auto idx = static_cast<int32_t>(src_pos);
+                        float frac = src_pos - static_cast<float>(idx);
+                        if (idx + 1 < in_len)
+                            resampled[i] = samples[idx] * (1.0F - frac)
+                                          + samples[idx + 1] * frac;
+                        else if (idx < in_len)
+                            resampled[i] = samples[idx];
+                    }
+                    samples = std::move(resampled);
+                    std::cerr << "[trtf] Resampled " << sample_rate << " -> "
+                              << target_rate << " Hz (" << in_len << " -> "
+                              << out_len << " samples)" << std::endl;
+                    sample_rate = static_cast<uint32_t>(target_rate);
+                }
             }
 
             auto ns = static_cast<int32_t>(samples.size());
             if (ns <= 0) return -1;
             auto r = mSpeechBackend->process_audio(
                 samples.data(), ns,
-                max_output_frames > 0 ? max_output_frames : 375);
+                max_output_frames > 0 ? max_output_frames : 375,
+                static_cast<int32_t>(sample_rate));
             if (r.num_samples <= 0) return -1;
             trtf::write_wav(std::string(audio_out),
                 r.waveform.data(), r.num_samples, r.sample_rate);
