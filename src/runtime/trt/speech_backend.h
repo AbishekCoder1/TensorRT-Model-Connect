@@ -84,9 +84,8 @@ struct SpeechConfig {
     // Pre-tokenized system prompt IDs (avoids runtime tokenization)
     std::vector<int32_t> text_prompt_ids;
 
-    // Python codec bridge (for Mimi encode/decode via HF MimiModel)
-    std::string hf_python;    // path to Python interpreter with transformers
-    std::string scripts_dir;  // path to scripts/ directory containing mimi_codec.py
+    // Optional Python path used only for runtime text tokenization fallback.
+    std::string hf_python;
 };
 
 class SpeechToSpeechBackend {
@@ -164,17 +163,6 @@ private:
         DeviceKvCache& cache, DeviceResources& resources,
         CudaBuffer& d_hidden_state);
 
-    /// Python-based Mimi encode (fallback when TRT encoder not available).
-    std::vector<int32_t> run_mimi_encode_python(
-        const float* samples, int32_t num_samples,
-        int32_t input_sample_rate,
-        int32_t& out_num_frames, int32_t& out_num_codebooks);
-
-    /// Python-based Mimi decode (fallback when TRT decoder not available).
-    std::vector<float> run_mimi_decode_python(
-        const std::vector<int32_t>& codec_tokens,
-        int32_t num_codebooks, int32_t num_frames);
-
     // Temporal Transformer (main decoder)
     std::unique_ptr<DecoderStepEngine> mTemporalEngine;
 
@@ -206,8 +194,7 @@ private:
 std::unique_ptr<SpeechToSpeechBackend> CreateSpeechBackend(
     std::unique_ptr<DecoderStepEngine> temporal_engine,
     const FastPathModelConfig& cfg,
-    const std::string& hf_python = "",
-    const std::string& scripts_dir = "");
+    const std::string& hf_python = "");
 
 } // namespace trtf
 

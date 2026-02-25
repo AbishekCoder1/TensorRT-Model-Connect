@@ -3,7 +3,6 @@
 #if TRTF_HAS_TRT
 
 #include "runtime/trt/trt_decode_runtime.h"
-#include "utils/data_dir.h"
 
 #include <algorithm>
 #include <array>
@@ -80,7 +79,7 @@ void SpeechToSpeechBackend::set_mimi_decoder(
 }
 
 // ---------------------------------------------------------------------------
-// Python-based Mimi codec (uses scripts/mimi_codec.py via subprocess)
+// Subprocess helper (used for runtime text tokenization fallback)
 // ---------------------------------------------------------------------------
 
 /// Run a subprocess: write input_data to stdin, read stdout/stderr.
@@ -171,196 +170,6 @@ static int run_subprocess(
     int status = 0;
     waitpid(pid, &status, 0);
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-}
-
-std::vector<int32_t> SpeechToSpeechBackend::run_mimi_encode_python(
-    const float* samples, int32_t num_samples,
-    int32_t input_sample_rate,
-    int32_t& out_num_frames, int32_t& out_num_codebooks)
-{
-    const auto& cfg = mConfig;
-    std::string python = cfg.hf_python;
-    std::string script = cfg.scripts_dir + "/mimi_codec.py";
-
-    if (python.empty())
-    {
-        std::cerr << "[speech] No hf_python path set, cannot run Mimi Python codec"
-                  << std::endl;
-        out_num_frames = 0;
-        out_num_codebooks = cfg.num_codebooks;
-        return {};
-    }
-
-    std::cerr << "[speech] Running Mimi encode via Python ("
-              << num_samples << " samples) ..." << std::endl;
-
-    std::vector<std::string> argv = {
-        python, script, "encode",
-        "--num-samples", std::to_string(num_samples),
-        "--sample-rate", std::to_string(
-            input_sample_rate > 0 ? input_sample_rate : mConfig.sample_rate)
-    };
-
-    std::vector<char> stdout_data;
-    std::string stderr_data;
-    auto input_bytes = static_cast<std::size_t>(num_samples) * sizeof(float);
-    int rc = run_subprocess(argv, samples, input_bytes, stdout_data, stderr_data);
-
-    if (rc != 0)
-    {
-        std::cerr << "[speech] Mimi encode Python failed (rc=" << rc << ")"
-                  << std::endl;
-        // Print last few lines of stderr
-        auto pos = stderr_data.rfind('\n', stderr_data.size() > 1 ? stderr_data.size() - 2 : 0);
-        if (pos != std::string::npos)
-            std::cerr << stderr_data.substr(pos + 1) << std::endl;
-        else
-            std::cerr << stderr_data << std::endl;
-        out_num_frames = 0;
-        out_num_codebooks = cfg.num_codebooks;
-        return {};
-    }
-
-    // Parse metadata from stderr: "FRAMES <n> CODEBOOKS <m>"
-    out_num_frames = 0;
-    out_num_codebooks = cfg.num_codebooks;
-    std::istringstream ss(stderr_data);
-    std::string line;
-    while (std::getline(ss, line))
-    {
-        if (line.find("FRAMES") != std::string::npos)
-        {
-            std::istringstream ls(line);
-            std::string tok;
-            ls >> tok >> out_num_frames >> tok >> out_num_codebooks;
-            break;
-        }
-    }
-
-    auto expected = static_cast<std::size_t>(out_num_codebooks) * out_num_frames;
-    auto got = stdout_data.size() / sizeof(int32_t);
-    if (got < expected)
-    {
-        std::cerr << "[speech] Mimi encode: expected " << expected
-                  << " int32s, got " << got << std::endl;
-        return {};
-    }
-
-    // Python codec output is codebook-major [num_codebooks, num_frames].
-    // Convert to frame-major [num_frames, num_codebooks] for runtime pipeline.
-    std::vector<int32_t> tokens_cb_major(expected);
-    std::memcpy(tokens_cb_major.data(), stdout_data.data(),
-                expected * sizeof(int32_t));
-    std::vector<int32_t> tokens(expected);
-    for (int32_t cb = 0; cb < out_num_codebooks; ++cb)
-    {
-        for (int32_t f = 0; f < out_num_frames; ++f)
-        {
-            auto src = static_cast<std::size_t>(cb) * out_num_frames + f;
-            auto dst = static_cast<std::size_t>(f) * out_num_codebooks + cb;
-            tokens[dst] = tokens_cb_major[src];
-        }
-    }
-
-    std::cerr << "[speech] Mimi encode (Python): " << num_samples
-              << " samples -> " << out_num_frames << " frames x "
-              << out_num_codebooks << " codebooks" << std::endl;
-    return tokens;
-}
-
-std::vector<float> SpeechToSpeechBackend::run_mimi_decode_python(
-    const std::vector<int32_t>& codec_tokens,
-    int32_t num_codebooks, int32_t num_frames)
-{
-    const auto& cfg = mConfig;
-    std::string python = cfg.hf_python;
-    std::string script = cfg.scripts_dir + "/mimi_codec.py";
-
-    if (python.empty())
-    {
-        std::cerr << "[speech] No hf_python path set, cannot run Mimi Python codec"
-                  << std::endl;
-        return {};
-    }
-
-    std::cerr << "[speech] Running Mimi decode via Python ("
-              << num_codebooks << " codebooks x " << num_frames
-              << " frames) ..." << std::endl;
-
-    std::vector<std::string> argv = {
-        python, script, "decode",
-        "--num-codebooks", std::to_string(num_codebooks),
-        "--num-frames", std::to_string(num_frames)
-    };
-
-    if (num_codebooks <= 0 || num_frames <= 0)
-    {
-        std::cerr << "[speech] Mimi decode Python: invalid shape "
-                  << num_codebooks << "x" << num_frames << std::endl;
-        return {};
-    }
-
-    // Runtime pipeline uses frame-major [num_frames, num_codebooks].
-    // Python codec expects codebook-major [num_codebooks, num_frames].
-    const auto token_count = static_cast<std::size_t>(num_codebooks) * num_frames;
-    std::vector<int32_t> tokens_cb_major(token_count, 0);
-    for (int32_t f = 0; f < num_frames; ++f)
-    {
-        for (int32_t cb = 0; cb < num_codebooks; ++cb)
-        {
-            auto src = static_cast<std::size_t>(f) * num_codebooks + cb;
-            auto dst = static_cast<std::size_t>(cb) * num_frames + f;
-            if (src < codec_tokens.size())
-                tokens_cb_major[dst] = codec_tokens[src];
-        }
-    }
-
-    auto input_bytes = token_count * sizeof(int32_t);
-    std::vector<char> stdout_data;
-    std::string stderr_data;
-    int rc = run_subprocess(argv, tokens_cb_major.data(), input_bytes,
-                            stdout_data, stderr_data);
-
-    if (rc != 0)
-    {
-        std::cerr << "[speech] Mimi decode Python failed (rc=" << rc << ")"
-                  << std::endl;
-        auto pos = stderr_data.rfind('\n', stderr_data.size() > 1 ? stderr_data.size() - 2 : 0);
-        if (pos != std::string::npos)
-            std::cerr << stderr_data.substr(pos + 1) << std::endl;
-        else
-            std::cerr << stderr_data << std::endl;
-        return {};
-    }
-
-    // Parse metadata from stderr: "SAMPLES <n>"
-    int32_t num_samples = 0;
-    std::istringstream ss(stderr_data);
-    std::string line;
-    while (std::getline(ss, line))
-    {
-        if (line.find("SAMPLES") != std::string::npos)
-        {
-            std::istringstream ls(line);
-            std::string tok;
-            ls >> tok >> num_samples;
-            break;
-        }
-    }
-
-    auto got_samples = stdout_data.size() / sizeof(float);
-    if (got_samples == 0)
-    {
-        std::cerr << "[speech] Mimi decode: no audio data received" << std::endl;
-        return {};
-    }
-
-    std::vector<float> waveform(got_samples);
-    std::memcpy(waveform.data(), stdout_data.data(), got_samples * sizeof(float));
-
-    std::cerr << "[speech] Mimi decode (Python): " << num_codebooks << "x"
-              << num_frames << " -> " << got_samples << " samples" << std::endl;
-    return waveform;
 }
 
 // ---------------------------------------------------------------------------
@@ -495,28 +304,6 @@ std::vector<int32_t> SpeechToSpeechBackend::run_mimi_encode(
 {
     mLastEncodeFrames = 0;
     mLastEncodeCodebooks = 0;
-
-    if (!mConfig.hf_python.empty())
-    {
-        int32_t py_frames = 0;
-        int32_t py_codebooks = 0;
-        auto py_tokens = run_mimi_encode_python(
-            samples, num_samples, input_sample_rate,
-            py_frames, py_codebooks);
-        if (!py_tokens.empty())
-        {
-            mLastEncodeFrames = py_frames;
-            mLastEncodeCodebooks = py_codebooks;
-            std::cerr << "[speech] Encoder tokens [0:16]: ";
-            for (int32_t i = 0;
-                 i < std::min(16, static_cast<int32_t>(py_tokens.size())); ++i)
-                std::cerr << py_tokens[static_cast<std::size_t>(i)] << " ";
-            std::cerr << std::endl;
-            return py_tokens;
-        }
-        std::cerr << "[speech] Mimi encode: falling back to TRT engine"
-                  << std::endl;
-    }
 
     if (!mMimiEncoderEngine || !mMimiEncoderCtx)
     {
@@ -1031,16 +818,6 @@ std::vector<float> SpeechToSpeechBackend::run_mimi_decode(
     int32_t actual_codebooks = 0;
     if (!codec_tokens.empty())
         actual_codebooks = static_cast<int32_t>(codec_tokens.size()) / num_frames;
-
-    if (!mConfig.hf_python.empty() && actual_codebooks > 0)
-    {
-        auto py_wave = run_mimi_decode_python(
-            codec_tokens, actual_codebooks, num_frames);
-        if (!py_wave.empty())
-            return py_wave;
-        std::cerr << "[speech] Mimi decode: falling back to TRT engine"
-                  << std::endl;
-    }
 
     if (!mMimiDecoderEngine || !mMimiDecoderCtx)
     {
@@ -1686,8 +1463,7 @@ AudioResult SpeechToSpeechBackend::process_audio(
 std::unique_ptr<SpeechToSpeechBackend> CreateSpeechBackend(
     std::unique_ptr<DecoderStepEngine> temporal_engine,
     const FastPathModelConfig& cfg,
-    const std::string& hf_python,
-    const std::string& scripts_dir_path)
+    const std::string& hf_python)
 {
     SpeechConfig speech_cfg;
     speech_cfg.sample_rate = cfg.audio_sample_rate;
@@ -1715,10 +1491,8 @@ std::unique_ptr<SpeechToSpeechBackend> CreateSpeechBackend(
     speech_cfg.system_prompt = cfg.speech_system_prompt;
     speech_cfg.text_prompt_ids = cfg.speech_text_prompt_ids;
 
-    // Python codec bridge for Mimi encode/decode
+    // Optional Python path for runtime text tokenization fallback.
     speech_cfg.hf_python = hf_python;
-    speech_cfg.scripts_dir = scripts_dir_path.empty()
-        ? trtf::scripts_dir() : scripts_dir_path;
 
     return std::make_unique<SpeechToSpeechBackend>(
         std::move(temporal_engine), std::move(speech_cfg));
