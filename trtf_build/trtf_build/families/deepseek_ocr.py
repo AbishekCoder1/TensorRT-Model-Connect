@@ -23,6 +23,11 @@ Architecture:
   - Layer 0: Dense SwiGLU MLP (intermediate_size=6848)
   - Layers 1-11: MoE (64 experts, top-6, intermediate=896) + shared experts (2, intermediate=1792)
   - Norm: RMSNorm
+
+Operational note:
+  - DeepSeek-OCR VL prefill injects 257 image tokens before user text.
+  - Very small max_cache_length (especially <=257) can degrade OCR output
+    (prompt echo / repeated "skip" style tokens). Use 4096 for stable OCR.
 """
 
 from __future__ import annotations
@@ -238,6 +243,21 @@ class DeepSeekOCRPlugin:
         max_cache_length: int, *, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
+        image_prefill_tokens = 257
+        if max_cache_length <= image_prefill_tokens:
+            print(
+                "[trtf-build] WARNING: DeepSeek-OCR-2 uses 257 image prefill tokens. "
+                f"max_cache_length={max_cache_length} is too small and can cause "
+                "prompt echo / repeated skip-like tokens. Use --max-cache-length 4096.",
+                file=sys.stderr,
+            )
+        elif max_cache_length < 4096:
+            print(
+                "[trtf-build] NOTE: DeepSeek-OCR-2 is more stable with "
+                "--max-cache-length 4096.",
+                file=sys.stderr,
+            )
+
         attention_size: int = weights.get("_attention_size", config.attention_size)
         n_routed_experts: int = weights["_n_routed_experts"]
         num_experts_per_tok: int = weights["_num_experts_per_tok"]
