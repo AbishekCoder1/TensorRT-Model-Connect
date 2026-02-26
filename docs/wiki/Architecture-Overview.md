@@ -7,7 +7,7 @@ The system is split into two phases across two languages:
 | Phase | Language | Tool | Input | Output |
 |-------|----------|------|-------|--------|
 | **Build** | Python | `trtf-build` / `trtf_build.build()` | HF repo ID or local directory | `.trtfb` bundle |
-| **Run** | C++ | `trtf` / C ABI | `.trtfb` bundle | Generated text |
+| **Run** | C++ | `trtf` / C ABI | `.trtfb` bundle | Task-specific outputs (text, masks, detections, embeddings, audio, video frames, etc.) |
 
 **Build phase** (Python `trtf_build/` package — accepts HF repo IDs or local directories):
 1. Resolve model: auto-download from HuggingFace Hub if needed
@@ -18,12 +18,12 @@ The system is split into two phases across two languages:
 6. Compile to `ICudaEngine` (GPU kernel compilation)
 7. Package engine plan + tokenizer files into a `.trtfb` bundle
 
-**Run phase** (C++ runtime, ~18 source files):
+**Run phase** (C++ runtime):
 1. Load `.trtfb` bundle, deserialize TRT engine plan
 2. Create tokenizer (HfPythonTokenizer or VocabTokenizer)
-3. For VL bundles: load and preprocess image via `image_preprocessor` (4 strategies + configurable interpolation)
-4. Run autoregressive generation loop on GPU with KV-cache management
-5. Return generated text via C ABI
+3. Parse `runtime_strategy` from bundle config and dispatch to the matching backend
+4. Run task-specific GPU execution loops (autoregressive decode, recurrent state updates, diffusion denoising, segmentation/detection heads, speech pipelines, etc.)
+5. Return task-specific outputs via `IPipeline`
 
 ---
 
@@ -50,7 +50,7 @@ The build phase uses the `trtf_build/` Python package, which provides:
 
 ### Family Plugin System
 
-Each model family is a single Python file in `trtf_build/trtf_build/families/`:
+Each model family is a single Python file in `trtf_build/trtf_build/families/` (list below is illustrative, not exhaustive):
 
 ```
 trtf_build/trtf_build/families/
@@ -70,6 +70,15 @@ trtf_build/trtf_build/families/
   stablelm.py     # StableLM (LayerNorm + SwiGLU + RoPE)
   mamba.py        # Mamba (SSM, custom graph, no KV cache)
   qwen_vl.py      # Qwen-VL (vision encoder + text decoder with embed_input)
+```
+
+List all currently available family modules in your checkout:
+
+```bash
+ls trtf_build/trtf_build/families/*.py \
+  | sed 's|.*/||; s|\.py$||' \
+  | rg -v '^(__init__|base)$' \
+  | sort
 ```
 
 A family plugin provides:
@@ -119,9 +128,11 @@ trtf_c.cpp              Thin dispatch on runtime_strategy
     |
 bundle_helpers.{h,cpp}  Shared plumbing (tokenizer extraction, engine init)
     |
-Per-backend factories    create_decoder_pipeline / create_mamba_pipeline / create_vl_pipeline
+Per-backend factories    create_decoder_pipeline / create_mamba_pipeline / create_rwkv_pipeline / ...
     |
-Backend implementations  TrtBackendFastPath / MambaBackend / VLBackendFastPath
+Backend implementations  trt / trt_mamba / trt_rwkv / trt_vl / trt_segmentation / trt_detection /
+                         trt_sam / trt_whisper / trt_bark / trt_speech / trt_encoder / trt_embedding /
+                         trt_reranking / trt_neural_operator / trt_omni / trt_diffusion / trt_hybrid
 ```
 
 **`bundle_helpers.{h,cpp}`**: Shared plumbing — bundle section discovery (`find_bundle_sections`), tokenizer file extraction to temp dir (`extract_tokenizer_from_bundle`), and `DecoderStepEngine` initialization from config (`make_decoder_engine`). Backend-agnostic.
@@ -131,12 +142,12 @@ Backend implementations  TrtBackendFastPath / MambaBackend / VLBackendFastPath
 **`trtf_c.cpp`**: Thin dispatch on `runtime_strategy` string (~200 lines). Adding a new strategy = one new factory function + one new `if` line in the dispatch.
 
 **How to add a new runtime strategy:**
-1. Create `new_backend.{h,cpp}` implementing `IGenerationBackend`
+1. Create `new_backend.{h,cpp}` implementing the required backend interface(s) (`IGenerationBackend` for decoder-style text paths, or task-specific pipeline adapters for non-text strategies)
 2. Add a `create_new_pipeline()` factory in `trtf_c.cpp`
 3. Add one `if (strategy == "new_strategy")` line in `try_create_from_bundle()`
 4. Add config fields to `FastPathModelConfig` if needed
 
-Design rationale: factory functions instead of a full registry (simpler for 3-5 backends, no self-registration macro overhead, explicit > implicit).
+Design rationale: factory functions instead of a full registry (explicit strategy-to-factory mapping in one place, no self-registration macro overhead, easier review/debug as strategy coverage grows).
 
 ---
 
@@ -172,6 +183,7 @@ Users access the library through `extern "C"` factory functions `trtf_create_pip
 struct TrtfPipelineOptions {
     int max_new_tokens;           // 0 = use model default (20)
     const char* hf_python;        // nullptr = auto-detect
+    const char* image_path;       // nullptr = text-only
 };
 ```
 
@@ -185,10 +197,13 @@ trtf_create_pipeline("model.trtfb", TRTF_FORCE_TRT)
   +-- TRT deserializeCudaEngine(plan)
   +-- Parse runtime_strategy from config.json
   +-- Dispatch based on strategy:
-  |     "decoder_kv_cache" / "decoder_moe" -> TrtBackendFastPath
-  |     "ssm_recurrent" -> MambaBackend
-  |     "vision_language" -> VL pipeline (vision + text decoders)
-  +-- For VL bundles: parse VLPreprocessConfig (preprocessor_type, interpolation, etc.)
+  |     "decoder_kv_cache" / "decoder_moe" -> trt
+  |     "ssm_recurrent" -> trt_mamba
+  |     "rwkv_recurrent" -> trt_rwkv
+  |     "vision_language" / "segmentation" / "object_detection" / "prompted_segmentation" -> vision task pipelines
+  |     "speech_to_text" / "text_to_audio" / "speech_to_speech" -> speech/audio pipelines
+  |     "encoder_only" / "embedding" / "reranking" / "neural_operator" / "omni_multimodal" / "diffusion" / "hybrid_mamba_attention"
+  +-- For vision bundles: parse image preprocess config (preprocessor_type, interpolation, etc.)
   +-- Extract tokenizer files to temp dir
   +-- Create HfPythonTokenizer or VocabTokenizer
   +-- Return PipelineImpl
@@ -196,7 +211,7 @@ trtf_create_pipeline("model.trtfb", TRTF_FORCE_TRT)
 
 ### Runtime Strategy Dispatch
 
-The C++ runtime dispatches to the correct backend based on the `runtime_strategy` field in the bundle's config.json. All backends implement `IGenerationBackend`:
+The C++ runtime dispatches to the correct backend based on `runtime_strategy` in bundle `config.json`. Decoder-style text backends implement `IGenerationBackend`; other strategies are exposed through specialized `IPipeline` methods (segment, detect, transcribe, generate_audio, embed, rerank, solve, generate_video, etc.).
 
 ```cpp
 class IGenerationBackend {
@@ -214,8 +229,16 @@ class IGenerationBackend {
 
 **Mamba Backend (SSM)** (`mamba_backend.cpp`):
 - **Strategy**: `ssm_recurrent`
-- **Name**: `"trt-mamba"`
+- **Name**: `"trt_mamba"`
 - **How it works**: Loads a Mamba TRT engine from a `.trtfb` bundle, then runs an autoregressive loop with conv_state and ssm_state per layer (constant memory, no cache growth). Uses `MambaStepState` instead of `DeviceKvCache`.
+
+**Additional runtime backends** (`trtf_c.cpp` dispatch):
+- **RWKV**: `rwkv_recurrent` (`trt_rwkv`)
+- **Vision-language**: `vision_language` (`trt_vl`)
+- **Segmentation / detection / prompted segmentation**: `segmentation` (`trt_segmentation`), `object_detection` (`trt_detection`), `prompted_segmentation` (`trt_sam`)
+- **Speech/audio**: `speech_to_text` (`trt_whisper`), `text_to_audio` (`trt_bark`), `speech_to_speech` (`trt_speech`)
+- **Encoder/ranking**: `encoder_only` (`trt_encoder`), `embedding` (`trt_embedding`), `reranking` (`trt_reranking`)
+- **Specialized**: `neural_operator` (`trt_neural_operator`), `omni_multimodal` (`trt_omni`), `diffusion` (`trt_diffusion`), `hybrid_mamba_attention` (`trt_hybrid`)
 
 ### VL Image Preprocessing (`image_preprocessor.cpp`)
 
@@ -251,6 +274,18 @@ trtf-build version
 
 ```bash
 trtf run <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
+trtf encode <bundle.trtfb> --prompt "text" [--hf-python PATH]
+trtf segment <bundle.trtfb> --image INPUT --output MASK.png [--hf-python PATH]
+trtf segment-sam <bundle.trtfb> --image INPUT --output DIR [--point-x 0.5] [--point-y 0.5] [--background]
+trtf detect <bundle.trtfb> --image INPUT --output DETECTIONS.json [--threshold 0.5] [--hf-python PATH]
+trtf embed <bundle.trtfb> --prompt "text" [--hf-python PATH]
+trtf rerank <bundle.trtfb> --prompt "query" --document "text" [--hf-python PATH]
+trtf transcribe <bundle.trtfb> --audio INPUT.wav [--max-new-tokens N] [--hf-python PATH]
+trtf generate-audio <bundle.trtfb> --prompt "text" --output OUTPUT.wav [--max-new-tokens N] [--hf-python PATH]
+trtf speak <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav [--max-new-tokens N] [--tail-frames N]
+trtf solve <bundle.trtfb> --branch-input "..." --trunk-input "..."   # DeepONet
+trtf solve <bundle.trtfb> --field-input "..."                         # FNO
+trtf generate-video <bundle.trtfb> --prompt "text" --output DIR [--num-steps N] [--guidance-scale S] [--hf-python PATH]
 trtf inspect <bundle.trtfb>
 trtf version
 ```
@@ -261,7 +296,7 @@ trtf version
 
 ### Why split Python/C++?
 
-The TensorRT C++ API for network construction is verbose and error-prone. The Python API is more ergonomic for graph building, checkpoint loading (via the `safetensors` library and NumPy), and iterating on new model families. Meanwhile, C++ excels at the runtime: engine deserialization, CUDA memory management, and the tight autoregressive loop. The bundle format bridges the two cleanly.
+The TensorRT C++ API for network construction is verbose and error-prone. The Python API is more ergonomic for graph building, checkpoint loading (via the `safetensors` library and NumPy), and iterating on new model families. Meanwhile, C++ excels at the runtime: engine deserialization, CUDA memory management, and tight GPU execution loops across strategies (autoregressive, diffusion, vision, and speech). The bundle format bridges the two cleanly.
 
 ### Why no ONNX?
 

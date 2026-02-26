@@ -11,12 +11,12 @@ Every TRT engine must produce output matching HuggingFace Transformers (the grou
 ### Three Pillars
 
 1. **Unit tests** -- Fast, deterministic, no GPU. Validate config parsing, checkpoint mapping, bundle I/O, CLI args, diff framework mechanics, and C++ decode runtime logic.
-2. **Diff framework** -- GPU-accelerated TRT-vs-HF comparison. The unified `tools/diff.py` CLI auto-detects model type and runs applicable checks. Six registered checks cover all five runtime strategies.
+2. **Diff framework** -- GPU-accelerated TRT-vs-HF comparison. The unified `tools/diff.py` CLI auto-detects model type and runs applicable checks. Six registered checks currently cover five core runtime strategies (`decoder_kv_cache`, `decoder_moe`, `ssm_recurrent`, `vision_language`, `diffusion`); other strategies are covered primarily by unit and E2E tests.
 3. **E2E suite** -- Full pipeline tests: build bundle from HF, run C++ inference, compare against HF reference. 28 model manifests in `tests/e2e/models/` drive parametrized pytest tests.
 
 ### Test Applicability Matrix
 
-Which checks apply to which `runtime_strategy`:
+Which checks apply to which `runtime_strategy` (for strategies currently supported by `tools/diff.py` checks):
 
 | Check | `decoder_kv_cache` | `decoder_moe` | `ssm_recurrent` | `vision_language` | `diffusion` |
 |-------|:--:|:--:|:--:|:--:|:--:|
@@ -26,6 +26,8 @@ Which checks apply to which `runtime_strategy`:
 | `vl_pipeline` | -- | -- | -- | Y | -- |
 | `diffusion_components` | -- | -- | -- | -- | Y |
 | `perf_benchmark` | Y | Y | Y | -- | -- |
+
+Additional runtime strategies in the C++ dispatcher (for example `segmentation`, `object_detection`, `prompted_segmentation`, `speech_to_text`, `text_to_audio`, `speech_to_speech`, `embedding`, `reranking`, `neural_operator`, `omni_multimodal`, `rwkv_recurrent`, `hybrid_mamba_attention`) are validated through dedicated unit/E2E suites rather than the unified diff checks above.
 
 ---
 
@@ -208,8 +210,8 @@ Falls back to `"decoder_kv_cache"` if detection fails.
 # List all registered checks
 python tools/diff.py list
 
-# List checks for a specific strategy
-python tools/diff.py list --strategy diffusion
+# List checks applicable to a specific model (strategy auto-detected)
+python tools/diff.py list --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers
 
 # Run all applicable checks for a model
 python tools/diff.py run --model Qwen/Qwen3-0.6B
@@ -217,14 +219,14 @@ python tools/diff.py run --model Qwen/Qwen3-0.6B
 # Run specific checks with a bundle
 python tools/diff.py run --model Qwen/Qwen3-0.6B \
   --bundle qwen3.trtfb --binary ./build/trtf \
-  --tests logit_diff runner_parity
+  --test logit_diff --test runner_parity
 
 # Run with JSON output
 python tools/diff.py run --model Qwen/Qwen3-0.6B --json results.json
 
-# Diffusion model
+# Diffusion model (run only diffusion component check)
 python tools/diff.py run --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
-  --bundle wan21.trtfb --num-steps 30
+  --bundle wan21.trtfb --test diffusion_components
 
 # VL model with test image
 python tools/diff.py run --model Qwen/Qwen2.5-VL-3B-Instruct \
