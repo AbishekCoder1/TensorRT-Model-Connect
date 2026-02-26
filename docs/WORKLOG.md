@@ -1,5 +1,41 @@
 # Worklog
 
+## 2026-02-26 - FLUX blur regression triage and E2E quality recovery
+
+Investigated FLUX image blur against HuggingFace reference and reran full
+containerized E2E (`trtf generate-video`) repeatedly until quality recovered.
+
+### Root causes identified
+
+- **Guidance embedding scale mismatch**: guidance sinusoidal input needed the
+  same `*1000` convention as timestep in current diffusers FLUX forward path.
+- **CLIP pooled conditioning mismatch**: TRT CLIP `pooled_output` tensor did
+  not match HF pooler semantics; HF pools from EOS/argmax token position.
+- **T5 padding postprocessing mismatch**: runtime zeroed padded T5 rows after
+  encoder execution, while HF keeps model outputs and relies on attention mask.
+- **Scheduler branch mismatch**: dynamic FLUX path needed to match installed HF
+  `FluxPipeline` behavior (`sigmas=linspace(1, 1/num_steps, num_steps)` before
+  dynamic shifting with `mu`).
+
+### Fixes applied
+
+- `src/runtime/trt/flux_diffusion_backend.cpp`
+  - Guidance embedding uses `guidance * 1000.0F`.
+  - CLIP pooled conditioning now derived from CLIP hidden states at first EOS
+    (with OpenAI-compatible argmax fallback).
+  - Removed post-encoder zeroing of padded T5 rows in `run_t5_encoder_at`.
+  - Dynamic scheduler sigma base generation aligned to current HF FLUX path.
+
+### Verification
+
+- Full E2E rerun in container with rebuilt runtime.
+- Sharpness metrics improved significantly on regenerated output:
+  - Laplacian variance: `0.000180 -> 0.000823`
+  - Tenengrad: `9.03e-05 -> 8.10e-04`
+- Artifact snapshots:
+  - `tests/e2e/data/flux1_dev_trt_before_fix.png`
+  - `tests/e2e/data/flux1_dev_trt_after_fix.png`
+
 ## 2026-02-19 — Diffusion pipeline parity with HF diffusers
 
 Systematic component-by-component debugging of the Wan2.1-T2V-1.3B diffusion

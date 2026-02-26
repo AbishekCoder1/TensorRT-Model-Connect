@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <numeric>
@@ -31,8 +32,10 @@ struct FlowMatchEulerState {
         const double N = static_cast<double>(num_train_timesteps);
 
         if (use_dynamic_shifting) {
-            // HF FLUX scheduler: generate sigmas as linspace(1, 1/N, N)
-            // then apply exponential dynamic shifting with mu
+            // HF FLUX scheduler:
+            // 1) base sigmas = linspace(1.0, 1.0/num_steps, num_steps)
+            //    (current FluxPipeline path when scheduler.use_flow_sigmas is false)
+            // 2) apply exponential dynamic shifting with mu
             const double base_seq = 256.0;
             const double max_seq = 4096.0;
             const double m = (static_cast<double>(max_shift) -
@@ -42,13 +45,15 @@ struct FlowMatchEulerState {
                              m * base_seq;
             const double mu = static_cast<double>(image_seq_len) * m + b;
 
-            // Generate raw sigmas: linspace(1.0, 1.0/num_steps, num_steps)
+            // Generate raw sigmas in scheduler sigma-space (not inference-step space).
+            const double sigma_max = 1.0;
+            const double sigma_min = 1.0 / static_cast<double>(std::max(num_steps, 1));
             std::vector<double> raw_sigmas(static_cast<std::size_t>(num_steps));
             for (int32_t i = 0; i < num_steps; ++i) {
-                raw_sigmas[static_cast<std::size_t>(i)] =
-                    1.0 - static_cast<double>(i) *
-                    (1.0 - 1.0 / static_cast<double>(num_steps)) /
+                const double frac = static_cast<double>(i) /
                     static_cast<double>(std::max(num_steps - 1, 1));
+                raw_sigmas[static_cast<std::size_t>(i)] =
+                    sigma_max + frac * (sigma_min - sigma_max);
             }
 
             // Apply exponential time shift: sigma = exp(mu)/(exp(mu)+(1/t-1))
@@ -253,12 +258,11 @@ void FluxDiffusionBackend::compute_flux_timestep_embedding(
     std::vector<float> guidance_proj(static_cast<std::size_t>(dim), 0.0F);
     if (mConfig.guidance_embeds &&
         !mWeights.guidance_emb_0_weight.empty()) {
-        // Sinusoidal embedding of guidance (NOT multiplied by 1000!
-        // HF passes guidance_scale directly to Timesteps sinusoidal, unlike
-        // timestep which goes through transformer.forward's *1000 multiply.)
+        // Diffusers FLUX forward currently scales guidance by 1000 before
+        // feeding it into time_text_embed (same convention as timestep).
         std::vector<float> g_emb(static_cast<std::size_t>(freq_dim));
         {
-            const float g = guidance;
+            const float g = guidance * 1000.0F;
             const int32_t half = freq_dim / 2;
             for (int32_t i = 0; i < half; ++i) {
                 const float freq = std::exp(
@@ -412,7 +416,9 @@ bool FluxDiffusionBackend::run_clip_encoder(
     const int32_t seq_len = 77;
     const int32_t clip_dim = 768;
 
-    std::vector<int32_t> padded(static_cast<std::size_t>(seq_len), 0);
+    std::vector<int32_t> padded(
+        static_cast<std::size_t>(seq_len),
+        std::max(mClipPadTokenId, 0));
     const auto n = std::min(static_cast<std::size_t>(seq_len), input_ids.size());
     std::copy_n(input_ids.begin(), n, padded.begin());
 
@@ -429,11 +435,47 @@ bool FluxDiffusionBackend::run_clip_encoder(
         return false;
     }
 
-    pooled_output.resize(static_cast<std::size_t>(clip_dim));
-    cudaMemcpyAsync(pooled_output.data(), mD_ClipPooled.data(),
-        clip_dim * sizeof(float),
+    // HF CLIP pools from the EOS-position logic (argmax over token IDs for
+    // OpenAI-style CLIP tokenizers), not from the final padded token.
+    // We reproduce that behavior from text_embeddings to avoid blurred/weak
+    // conditioning when prompts are shorter than max length.
+    std::vector<float> clip_hidden(
+        static_cast<std::size_t>(seq_len) *
+        static_cast<std::size_t>(clip_dim));
+    cudaMemcpyAsync(clip_hidden.data(), mD_ClipTextEmb.data(),
+        clip_hidden.size() * sizeof(float),
         cudaMemcpyDeviceToHost, mStream.get());
     cudaStreamSynchronize(mStream.get());
+
+    int32_t pool_idx = -1;
+    if (mClipEosTokenId >= 0) {
+        for (int32_t i = 0; i < seq_len; ++i) {
+            if (padded[static_cast<std::size_t>(i)] == mClipEosTokenId) {
+                pool_idx = i;
+                break;  // first EOS position, matching HF behavior
+            }
+        }
+    }
+
+    if (pool_idx < 0) {
+        // Fallback to OpenAI CLIP-compatible pooling when EOS is unavailable:
+        // choose the first position of the largest token id.
+        int32_t max_token_id = padded[0];
+        pool_idx = 0;
+        for (int32_t i = 1; i < seq_len; ++i) {
+            if (padded[static_cast<std::size_t>(i)] > max_token_id) {
+                max_token_id = padded[static_cast<std::size_t>(i)];
+                pool_idx = i;
+            }
+        }
+    }
+    if (pool_idx < 0) pool_idx = 0;
+    if (pool_idx >= seq_len) pool_idx = seq_len - 1;
+
+    pooled_output.resize(static_cast<std::size_t>(clip_dim));
+    const float* pooled_src = clip_hidden.data() +
+        static_cast<std::size_t>(pool_idx) * static_cast<std::size_t>(clip_dim);
+    std::copy_n(pooled_src, static_cast<std::size_t>(clip_dim), pooled_output.begin());
 
     return true;
 }
@@ -540,15 +582,6 @@ bool FluxDiffusionBackend::run_t5_encoder_at(
         cudaMemcpyDeviceToHost, mStream.get());
     cudaStreamSynchronize(mStream.get());
 
-    // Zero out padding positions
-    for (int32_t i = 0; i < seq_len; ++i) {
-        if (padded_ids[static_cast<std::size_t>(i)] == 0) {
-            float* row = text_embeddings.data() +
-                static_cast<std::size_t>(i) * static_cast<std::size_t>(te_dim);
-            std::fill_n(row, static_cast<std::size_t>(te_dim), 0.0F);
-        }
-    }
-
     return true;
 }
 
@@ -620,7 +653,50 @@ void FluxDiffusionBackend::set_preprocessor_weights(PreprocessorWeights weights)
 void FluxDiffusionBackend::set_clip_tokenizer(std::unique_ptr<ITokenizer> tok)
 {
     mClipTokenizer = std::move(tok);
-    std::cerr << "[flux] CLIP tokenizer set\n";
+    mClipEosTokenId = -1;
+    mClipPadTokenId = 0;
+    if (mClipTokenizer) {
+        const char* kCandidates[] = {
+            "<|endoftext|>",
+            "</s>",
+            "<eos>",
+        };
+        for (const char* tok_name : kCandidates) {
+            try {
+                const int32_t id = mClipTokenizer->id_for_token(tok_name);
+                if (id >= 0) {
+                    mClipEosTokenId = id;
+                    break;
+                }
+            } catch (const std::exception&) {
+                // Best-effort lookup; ignore and fall back.
+            }
+        }
+
+        if (mClipEosTokenId >= 0) {
+            // OpenAI CLIP-style tokenizers use EOS as pad token.
+            mClipPadTokenId = mClipEosTokenId;
+        } else {
+            const char* kPadCandidates[] = {
+                "<pad>",
+                "</s>",
+                "<eos>",
+            };
+            for (const char* tok_name : kPadCandidates) {
+                try {
+                    const int32_t id = mClipTokenizer->id_for_token(tok_name);
+                    if (id >= 0) {
+                        mClipPadTokenId = id;
+                        break;
+                    }
+                } catch (const std::exception&) {
+                    // Best-effort lookup; ignore and keep fallback.
+                }
+            }
+        }
+    }
+    std::cerr << "[flux] CLIP tokenizer set (eos_id=" << mClipEosTokenId
+              << ", pad_id=" << mClipPadTokenId << ")\n";
 }
 
 void FluxDiffusionBackend::set_prompt(std::string prompt)

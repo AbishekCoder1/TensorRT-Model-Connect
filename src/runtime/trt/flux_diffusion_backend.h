@@ -87,6 +87,8 @@ private:
 
     // Dual tokenizer support: CLIP (BPE) for CLIP encoder, T5 (sentencepiece) for T5 encoder
     std::unique_ptr<ITokenizer> mClipTokenizer;
+    int32_t mClipEosTokenId{-1};
+    int32_t mClipPadTokenId{0};
     std::string mRawPrompt;
 };
 
