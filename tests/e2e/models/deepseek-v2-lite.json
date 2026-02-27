@@ -9,6 +9,5 @@
   "max_new_tokens": 10,
   "logit_atol": 1e-2,
   "layer_atol": 0.1,
-  "trust_remote_code": false,
-  "skip": "Large model (15.7B params, 64 experts) - skip in default CI, run manually"
+  "trust_remote_code": false
 }

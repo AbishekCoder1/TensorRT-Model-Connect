@@ -1,6 +1,6 @@
 {
   "name": "nemotron-h-nano-9b",
-  "hf_id": "nvidia/Nemotron-H-Nano-9B-Base",
+  "hf_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
   "bundle": "nemotron-h-nano-9b.trtfb",
   "family": "nemotron_h",
   "runtime_strategy": "hybrid_mamba_attention",
@@ -9,5 +9,6 @@
   "max_new_tokens": 20,
   "logit_atol": 5e-3,
   "layer_atol": 0.1,
-  "trust_remote_code": false
+  "trust_remote_code": true,
+  "skip": "Requires mamba-ssm package not available in container"
 }

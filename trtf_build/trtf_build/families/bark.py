@@ -498,10 +498,10 @@ class BarkPlugin:
         max_codec_frames = int(max_semantic * 75 / 49.9) + 1
         # Round up to multiple of 64 for TRT efficiency
         max_codec_frames = ((max_codec_frames + 63) // 64) * 64
-        # Cap at 256 frames — LSTM unrolling creates O(N) TRT layers per
-        # timestep; larger values make the Myelin compiler OOM.  256 frames
-        # = 256*320/24000 ~= 3.4s of audio, enough for typical speech.
-        max_codec_frames = min(max_codec_frames, 256)
+        # Cap at 1024 frames — LSTM unrolling creates O(N) TRT layers per
+        # timestep; very large values may make the Myelin compiler OOM.
+        # 1024 frames = 1024*320/24000 ~= 13.7s of audio.
+        max_codec_frames = min(max_codec_frames, 1024)
         self._codec_seq_length = max_codec_frames
 
         # Build fine engine (non-autoregressive, bidirectional attention)

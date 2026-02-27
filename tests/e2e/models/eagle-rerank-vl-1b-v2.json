@@ -12,5 +12,6 @@
     "trust_remote_code": true,
     "skip_text_match": true,
     "skip_logit_comparison": true,
-    "notes": "Reranking model — outputs relevance score, not logits. E2E test validates bundle build + reranking inference."
+    "notes": "Reranking model — outputs relevance score, not logits. E2E test validates bundle build + reranking inference.",
+    "skip": "HF repo not published (404)"
 }

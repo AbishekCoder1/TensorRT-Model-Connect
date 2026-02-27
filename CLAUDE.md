@@ -62,21 +62,33 @@ Diff framework self-tests:
 pytest tests/tools/ -v
 ```
 
-E2E tests (requires GPU + engine bundles):
+Unified E2E tests (requires GPU + engine bundles):
 ```bash
-pytest tests/e2e/ -v --engine-dir /mnt/storage/trt-transformers/engines
-```
+# All models (50 models — auto-builds missing bundles):
+pytest tests/test_e2e.py -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python
 
-Full-pipeline E2E tests (build + infer + compare):
-```bash
-pytest tests/e2e/test_full_pipeline.py -v \
+# Single model:
+pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
   --engine-dir /mnt/storage/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python .venv/bin/python
 
 # Force rebuild all bundles from HF:
-pytest tests/e2e/test_full_pipeline.py -v \
+pytest tests/test_e2e.py -v \
   --engine-dir /mnt/storage/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python .venv/bin/python --rebuild-engines
+
+# Filter by task strategy:
+pytest tests/test_e2e.py -v --e2e-task-strategy text_generation_causal \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+
+# With artifact output (WAV, PNG, frames, logits):
+pytest tests/test_e2e.py -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --e2e-artifacts-dir /tmp/e2e_artifacts
 ```
 
 All Python tests at once:
@@ -195,34 +207,117 @@ metrics — without needing models or GPU.
 | `test_parity.py` | Text/token comparison for runner parity |
 | `test_perf_compare.py` | Stats, formatting, JSON output, serial GPU execution |
 
-### Layer 4: E2E tests (`tests/e2e/`)
+### Layer 4: Unified E2E tests (`tests/test_e2e.py` + `tests/e2e_harness/`)
 
 **Intent:** Validate the full pipeline end-to-end — build bundle from HF,
 run C++ inference, compare output against HuggingFace reference. This is
-the gold-standard correctness gate.
+the gold-standard correctness gate. All modalities use the same harness.
 
-**Implementation:**
-- Per-model JSON manifests in `tests/e2e/models/` define HF model ID, family,
-  runtime strategy, tolerances, and test prompts.
-- `conftest.py` provides session-scoped fixtures for binary paths, engine dirs,
-  and LD_LIBRARY_PATH. The `built_bundle` fixture auto-builds bundles via
-  `trtf-build` subprocess if missing (or if `--rebuild-engines` is set).
-- `test_full_pipeline.py` compares C++ greedy decoding output against HF
-  for logit parity and text match.
-- `test_error_handling.py` verifies graceful failure for malformed/missing
-  bundles and bad arguments (no GPU needed for error cases).
-- `test_cache_correctness.py` validates KV cache overflow and consistency
-  across different cache sizes.
+**Architecture (DIP-first):**
+- `tests/test_e2e.py` — single parametrized pytest entrypoint, one test
+  per model manifest. Resolves paths, builds `RunContext`, invokes the
+  orchestrator.
+- `tests/e2e_harness/orchestrator.py` — coordinates the full lifecycle:
+  preflight → bundle resolve/build → per-stage TRT run → reference run →
+  comparison → artifact persistence. Depends only on abstract contracts.
+- `tests/e2e_harness/contracts.py` — dataclasses and protocols
+  (`E2ECase`, `StageOutput`, `CompareResult`, `TaskStrategyRunner`,
+  `ReferenceBackendRunner`, `Comparator`, `ArtifactSink`).
+- `tests/e2e_harness/registry.py` — auto-discovers plugins from
+  `runners/`, `references/`, `comparators/` via module-level `plugin`
+  attributes.
+- `tests/e2e_harness/manifest_loader.py` — loads per-model JSON manifests,
+  infers `task_strategy` from `runtime_strategy`, builds default stages
+  and preflight requirements.
 
-**Model manifests (39 models):** Standard decoders (Qwen3, LLaMA, Gemma,
-Mistral, Falcon, Phi, GPT-2, OPT, Bloom, etc.), MoE (Mixtral, Phi-MoE),
-SSM (Mamba, RWKV), VL (Qwen2.5-VL, Qwen3-VL), diffusion (Wan2.1-T2V),
-audio (Bark), segmentation (SegFormer), speech (Whisper).
+**Strategy runners** (`tests/e2e_harness/runners/`):
+Each runner handles one `task_strategy` and executes TRT inference via
+subprocess (C++ binary or Python debug runner).
+
+| Runner | Task Strategy | Models |
+|--------|--------------|--------|
+| `text_generation.py` | text_generation_causal | All decoders, MoE, SSM, RWKV |
+| `vision_language.py` | vision_language_generation | Qwen2.5-VL, Qwen3-VL, InternVL3 |
+| `audio_speech.py` | speech_to_text, text_to_audio, speech_to_speech | Whisper, Bark, PersonaPlex |
+| `diffusion.py` | diffusion_media_generation | Wan2.1-T2V, FLUX, Z-Image |
+| `segmentation.py` | segmentation, prompted_segmentation | SegFormer, SAM |
+| `embedding.py` | embedding | Eagle-embed |
+| `reranking.py` | reranking | Eagle-rerank |
+| `encoder_only.py` | encoder_only_nlp | BERT |
+
+**Reference backends** (`tests/e2e_harness/references/`):
+| Backend | Used by |
+|---------|---------|
+| `hf_transformers.py` | Text gen, VL, audio, segmentation, embedding, reranking |
+| `hf_diffusers.py` | Diffusion (Wan, FLUX, Z-Image) |
+| `torch_reference.py` | Speech-to-speech |
+
+**Comparators** (`tests/e2e_harness/comparators/`):
+Each comparator computes modality-specific metrics and applies
+threshold-based gating.
+
+| Comparator | Key Metrics |
+|-----------|-------------|
+| `text.py` | logit_cosine_p5, stable_top1_match, token_agreement, NED (composite rule) |
+| `vision_language.py` | vision_embedding_cosine, NED, word agreement (composite) |
+| `text_to_audio.py` | RMS bounds, duration ratio, mel spectrogram distance |
+| `diffusion.py` | pixel mean/std range, temporal consistency, PSNR, SSIM |
+| `segmentation.py` | mIoU, pixel accuracy, boundary F-score |
+| `speech_to_text.py` | Transcript text similarity |
+
+**Thresholds:** Defaults in `tests/e2e_harness/thresholds/defaults/*.json`,
+per-model overrides via manifest `threshold_overrides` or inline fields
+(`logit_atol`, `layer_atol`, etc.).
+
+**Rich artifacts:** All runners persist human-inspectable artifacts to
+`--e2e-artifacts-dir`: WAV audio, PNG frames/images, transcript text,
+logits `.npy`, colorized segmentation maps.
+
+**Model manifests (50 models)** in `tests/e2e/models/*.json`:
+
+| Category | Count | Examples |
+|----------|-------|---------|
+| Standard decoder | 24 | Qwen3, LLaMA, Mistral, Phi, GPT-2, OPT, Bloom, Nemotron |
+| MoE decoder | 3 | Mixtral, Phi-MoE, Qwen3-MoE |
+| SSM | 2 | Mamba, RWKV |
+| Encoder-only | 1 | BERT |
+| Speech-to-text | 1 | Whisper |
+| Text-to-audio | 2 | Bark-small, Bark-large |
+| Speech-to-speech | 1 | PersonaPlex |
+| Segmentation | 1 | SegFormer |
+| Prompted segmentation | 1 | SAM |
+| Vision-language | 3+2 skip | Qwen2.5-VL, Qwen3-VL, InternVL3 (+Phi4, InternLM2 skip) |
+| Text-to-video diffusion | 1 | Wan2.1-T2V |
+| Text-to-image diffusion | 2 | FLUX.1-schnell, Z-Image-Turbo |
+| Embedding/Reranking | 2 skip | Eagle-embed, Eagle-rerank (repos 404) |
+| Hybrid | 1 skip | Nemotron-H (needs mamba-ssm) |
+
+**Manifest schema:**
+```json
+{
+  "name": "model-name",
+  "hf_id": "HuggingFace/Model-ID",
+  "bundle": "model.trtfb",
+  "family": "family_name",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "Test prompt",
+  "max_new_tokens": 20,
+  "logit_atol": 1e-3,
+  "trust_remote_code": false,
+  "skip": "optional reason to skip this model"
+}
+```
+
+The `runtime_strategy` auto-maps to a `task_strategy` which selects the
+runner, comparator, reference, default stages, and default thresholds.
+Adding a new model requires only a JSON manifest — no code changes.
 
 ## Regression test plan
 
 Standard regression gate before merging changes. Run in order; each tier
-catches progressively harder issues.
+catches progressively harder issues. All E2E tests use the unified harness
+(`tests/test_e2e.py`).
 
 ### Tier 1: Unit tests (no GPU, ~60s)
 
@@ -254,22 +349,42 @@ Quick sanity with one small model. Always use `--rebuild-engines` to build
 the bundle from scratch — avoids testing against stale cached bundles.
 
 ```bash
-.venv/bin/python -m pytest tests/e2e/test_full_pipeline.py -v -k qwen3-0.6b \
+.venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
   --engine-dir /mnt/storage/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python .venv/bin/python \
   --rebuild-engines
 ```
 
-### Tier 4: Full E2E suite (~90 min, needs GPU)
+### Tier 4: Full E2E suite (~2-3 hours, needs GPU)
 
-All models in tests/e2e/models/: force-rebuild every bundle, then
-infer/compare for each. This is the gold-standard regression gate.
+All 50 models via the unified harness. Force-rebuild every bundle, then
+infer/compare. This is the gold-standard regression gate.
 
 ```bash
-.venv/bin/python -m pytest tests/e2e/ -v \
+# All models:
+.venv/bin/python -m pytest tests/test_e2e.py -v \
   --engine-dir /mnt/storage/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python .venv/bin/python \
-  --rebuild-engines
+  --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
+
+# By modality (faster targeted runs):
+.venv/bin/python -m pytest tests/test_e2e.py -v \
+  --e2e-task-strategy text_generation_causal \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+
+# Available task strategies for filtering:
+#   text_generation_causal    (26 models — decoders, MoE, SSM, RWKV)
+#   vision_language_generation (5 models — Qwen VL, InternVL, Phi4)
+#   diffusion_media_generation (3 models — Wan T2V, FLUX, Z-Image)
+#   text_to_audio             (2 models — Bark)
+#   speech_to_text            (1 model — Whisper)
+#   speech_to_speech          (1 model — PersonaPlex)
+#   segmentation              (1 model — SegFormer)
+#   prompted_segmentation     (1 model — SAM)
+#   encoder_only_nlp          (1 model — BERT)
+#   embedding                 (1 model — Eagle-embed, currently skipped)
+#   reranking                 (1 model — Eagle-rerank, currently skipped)
 ```
 
 ### Tier 5: Performance regression (~10 min per model, needs GPU + bundle)
@@ -300,7 +415,9 @@ python3 tools/perf_compare.py \
 | perf_compare.py | 1 (tools tests), 5 |
 | Diff tools (audio/seg/diffusion) | 1 (tools tests) |
 | Vision encoder / VL pipeline | 1 (vision_compute_extended), 2, 3 |
-| New model family | 1, 2, validate_family.sh, then add to tests/e2e/models/ + tier 4 |
+| New model family | 1, 2, validate_family.sh, then add manifest to tests/e2e/models/ + tier 4 |
+| New model (existing family) | Add JSON manifest to tests/e2e/models/, run tier 3 with that model |
+| E2E harness (runners/comparators) | Tier 3 or 4 (run affected models) |
 
 ## Running executables
 
@@ -357,6 +474,10 @@ trtf_build/                          # Python package (engine builder)
       granite.py internlm.py starcoder2.py gpt2.py opt.py
       falcon.py stablelm.py mamba.py qwen_vl.py olmo.py nemotron.py
       xglm.py gpt_neox.py gpt_neo.py codegen.py bloom.py mixtral.py
+      bert.py sam.py segformer.py whisper.py bark.py personaplex.py
+      internvl.py phi4_multimodal.py eagle_vlm.py nemotron_h.py rwkv.py
+      deepseek_v2.py qwen_moe.py qwen3_omni.py deepseek_ocr.py
+      wan_t2v.py flux.py z_image.py                # Diffusion T2V/T2I
   pyproject.toml
 src/                                 # C++ bundle-only runtime
   bundle/
@@ -394,6 +515,8 @@ scripts/                             # Infrastructure & utility scripts
   new_family.py                      # Scaffold a new family plugin from HF repo
   validate_family.sh                 # One-command validation gate (build + diff + parity)
 tests/
+  test_e2e.py                        # Unified E2E entrypoint (parametrized over all manifests)
+  conftest.py                        # Shared CLI options (--engine-dir, --trtf-binary, etc.)
   cpp/                               # C++ runtime unit tests
     test_helpers.h                   # Shared helpers: temp dirs, safetensors writing
     test_bundle_format.cpp ...       # 19 test executables (bundle, tokenizers, CUDA, KV cache, etc.)
@@ -403,10 +526,35 @@ tests/
   tools/                             # Diff framework self-tests
     conftest.py                      # Adds tools/ to import path
     test_diff_logits.py ...          # 11 test modules (logits, audio, segmentation, diffusion, etc.)
-  e2e/                               # E2E tests with JSON manifest
-    conftest.py                      # CLI options, bundle building, model parametrization
-    models/                          # 39 per-model JSON manifests
-    test_full_pipeline.py ...        # 8 test modules (pipeline, inference, error handling, cache, etc.)
+  e2e/                               # E2E model manifests
+    models/                          # 50 per-model JSON manifests (one file per model)
+  e2e_harness/                       # Unified E2E test framework (DIP architecture)
+    contracts.py                     # Dataclasses + protocols (E2ECase, StageOutput, CompareResult)
+    orchestrator.py                  # Lifecycle coordinator (preflight -> build -> run -> compare)
+    registry.py                      # Auto-discovery of runners, references, comparators
+    manifest_loader.py               # JSON manifest -> E2ECase with auto-inferred fields
+    artifact_sink.py                 # Persist artifacts (JSON metadata, logits, audio, images)
+    runners/                         # TRT strategy runners (one per task_strategy)
+      text_generation.py             # Causal LM (decoder, MoE, SSM, RWKV)
+      vision_language.py             # VL models (Qwen VL, InternVL)
+      audio_speech.py                # Whisper, Bark, PersonaPlex
+      diffusion.py                   # Wan T2V, FLUX, Z-Image
+      segmentation.py                # SegFormer, SAM
+      embedding.py reranking.py      # Eagle models
+      encoder_only.py                # BERT
+    references/                      # Gold-standard reference backends
+      hf_transformers.py             # HF Transformers (text, VL, audio, segmentation)
+      hf_diffusers.py                # HF Diffusers (Wan, FLUX, Z-Image)
+      torch_reference.py             # PyTorch reference (speech-to-speech)
+    comparators/                     # Metric computation + threshold gating
+      text.py                        # 6-metric composite gating for text gen
+      vision_language.py             # Vision cosine + text NED/agreement
+      text_to_audio.py               # RMS, duration ratio, mel/spectral distance
+      diffusion.py                   # Pixel stats, temporal consistency, PSNR/SSIM
+      segmentation.py                # mIoU, pixel accuracy, boundary F-score
+      speech_to_text.py audio.py     # Transcript similarity
+    thresholds/                      # Default + per-model threshold profiles
+      defaults/                      # Per-strategy JSON threshold files
 ```
 
 ## Adding a new model family
@@ -440,6 +588,75 @@ $EDITOR trtf_build/trtf_build/families/phi.py
 2. **The plugin is auto-discovered** — `families/__init__.py` uses `pkgutil.iter_modules()` to scan for any `.py` file with a module-level `plugin` attribute. Zero edits to shared files needed.
 
 3. **Validate** — run `./scripts/validate_family.sh <hf-repo-or-path>` which builds a bundle, runs diff_logits (battery), diff_layers, and runner parity tests.
+
+4. **Add E2E manifest** — create `tests/e2e/models/<model-name>.json`:
+   ```json
+   {
+     "name": "my-model",
+     "hf_id": "org/model-name",
+     "bundle": "my-model.trtfb",
+     "family": "my_family",
+     "runtime_strategy": "decoder_kv_cache",
+     "max_cache_length": 256,
+     "prompt": "The capital of France is",
+     "max_new_tokens": 20,
+     "logit_atol": 1e-3
+   }
+   ```
+   The `runtime_strategy` auto-selects the runner, comparator, reference,
+   stages, and thresholds. No code changes needed. Run:
+   ```bash
+   pytest tests/test_e2e.py::test_e2e[my-model] -v \
+     --engine-dir /mnt/storage/trt-transformers/engines \
+     --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+     --rebuild-engines
+   ```
+
+### Adding a model with an existing family (no new plugin)
+
+If the model's `model_type` matches an existing family plugin, you only need
+the JSON manifest — no Python code at all:
+
+```bash
+# 1. Create the manifest
+cat > tests/e2e/models/my-new-model.json << 'EOF'
+{
+  "name": "my-new-model",
+  "hf_id": "org/my-new-model",
+  "bundle": "my-new-model.trtfb",
+  "family": "qwen",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "Hello world",
+  "max_new_tokens": 20
+}
+EOF
+
+# 2. Run E2E (auto-builds bundle, runs TRT, compares against HF)
+pytest tests/test_e2e.py::test_e2e[my-new-model] -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --rebuild-engines
+```
+
+### runtime_strategy to task_strategy mapping
+
+| runtime_strategy | task_strategy | Runner | Reference |
+|-----------------|---------------|--------|-----------|
+| decoder_kv_cache | text_generation_causal | text_generation | hf_transformers |
+| decoder_moe | text_generation_causal | text_generation | hf_transformers |
+| ssm_recurrent | text_generation_causal | text_generation | hf_transformers |
+| rwkv_recurrent | text_generation_causal | text_generation | hf_transformers |
+| vision_language | vision_language_generation | vision_language | hf_transformers |
+| speech_to_text | speech_to_text | audio_speech | hf_transformers |
+| text_to_audio | text_to_audio | audio_speech | hf_transformers |
+| speech_to_speech | speech_to_speech | audio_speech | torch_reference |
+| diffusion | diffusion_media_generation | diffusion | hf_diffusers |
+| segmentation | segmentation | segmentation | hf_transformers |
+| prompted_segmentation | prompted_segmentation | segmentation | hf_transformers |
+| encoder_only | encoder_only_nlp | encoder_only | hf_transformers |
+| embedding | embedding | embedding | hf_transformers |
+| reranking | reranking | reranking | hf_transformers |
 
 ### Example
 
@@ -564,7 +781,38 @@ export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
   --hf-python $PWD/.venv/bin/python
 ```
 
-### 6) MMLU sanity check (inside container)
+### 6) Run unified E2E suite (inside container)
+```bash
+source .venv/bin/activate
+
+# Single model (auto-builds bundle if missing):
+python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+
+# All 50 models (force rebuild):
+python -m pytest tests/test_e2e.py -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
+
+# Text-gen models only (~30 min):
+python -m pytest tests/test_e2e.py -v \
+  --e2e-task-strategy text_generation_causal \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+
+# Diffusion models (Wan T2V, FLUX, Z-Image — ~45 min):
+python -m pytest tests/test_e2e.py -v \
+  --e2e-task-strategy diffusion_media_generation \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+```
+
+Artifacts (WAV audio, PNG frames/images, logits, transcripts) are saved to
+`--e2e-artifacts-dir` for human inspection.
+
+### 7) MMLU sanity check (inside container)
 ```bash
 $PWD/.venv/bin/python scripts/eval_mmlu.py \
   --backend trtf --model /tmp/qwen3.trtfb \

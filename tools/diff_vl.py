@@ -131,7 +131,7 @@ def _get_hf_vision_features_qwen(
     std = np.array(image_processor.image_std, dtype=np.float32)
     img_np = (img_np - mean) / std
     img_chw = img_np.transpose(2, 0, 1)
-    temporal = getattr(image_processor, 'temporal_patch_size', 2)
+    temporal = getattr(image_processor, 'temporal_patch_size', 1)
     trt_pixel_values = np.tile(img_chw, (temporal, 1, 1)).astype(np.float32)
 
     del model
@@ -264,7 +264,7 @@ def test_vision_features(
     config = load_config_from_bundle(bundle_path)
     preproc = load_preprocessor_config_from_bundle(bundle_path)
     fixed_image_size = config.get("fixed_image_size", 448)
-    temporal = preproc.get("temporal_patch_size", 2)
+    temporal = preproc.get("temporal_patch_size", 1)
     image_mean = tuple(preproc.get("image_mean", [0.48145466, 0.4578275, 0.40821073]))
     image_std = tuple(preproc.get("image_std", [0.26862954, 0.26130258, 0.27577711]))
     preprocessor_type = config.get("preprocessor_type", "qwen_merge_group")

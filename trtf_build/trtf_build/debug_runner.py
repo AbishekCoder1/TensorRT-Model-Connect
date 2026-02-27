@@ -1083,12 +1083,31 @@ def load_engine_from_bundle(bundle_path: str) -> tuple[bytes, dict]:
 
 
 def runner_from_bundle(bundle_path: str) -> TrtRunner:
-    """Create a TrtRunner from a .trtfb bundle file."""
+    """Create the appropriate TrtRunner from a .trtfb bundle file.
+
+    Dispatches to MambaTrtRunner, RwkvTrtRunner, or TrtRunner based on
+    the runtime_strategy in the bundle config.
+    """
+    config = load_config_from_bundle(bundle_path)
     engine_plan, header = load_engine_from_bundle(bundle_path)
+    runtime_strategy = config.get("runtime_strategy", "decoder_kv_cache")
+    num_layers = header.get("num_layers", config.get("num_hidden_layers", 1))
+
+    if runtime_strategy == "ssm_recurrent":
+        return MambaTrtRunner(
+            engine_plan=engine_plan,
+            num_layers=num_layers,
+        )
+    if runtime_strategy == "rwkv_recurrent":
+        return RwkvTrtRunner(
+            engine_plan=engine_plan,
+            num_layers=num_layers,
+        )
+
     return TrtRunner(
         engine_plan=engine_plan,
         max_cache_length=header["max_cache_length"],
-        num_layers=header["num_layers"],
+        num_layers=num_layers,
     )
 
 
@@ -1472,10 +1491,8 @@ def preprocess_image_for_trt(
     """
     temporal = kwargs.get("temporal_patch_size", 1)
     if preprocessor_type == "simple_chw":
-        result = _preprocess_simple_chw(image_path, **kwargs)
-        if temporal > 1 and result.shape[0] < temporal * 3:
-            result = np.tile(result, (temporal, 1, 1))
-        return result
+        # Standard RGB ViT models (InternVL, etc.) — no temporal tiling.
+        return _preprocess_simple_chw(image_path, **kwargs)
     if preprocessor_type == "center_crop_chw":
         result = _preprocess_center_crop_chw(image_path, **kwargs)
         if temporal > 1 and result.shape[0] < temporal * 3:
