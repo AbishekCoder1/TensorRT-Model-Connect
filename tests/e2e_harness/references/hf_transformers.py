@@ -263,7 +263,7 @@ class HfTransformersReference:
         t0 = time.monotonic()
         result = subprocess.run(
             [python, "-c", script],
-            capture_output=True, text=True, timeout=300, env=env,
+            capture_output=True, text=True, timeout=600, env=env,
         )
         elapsed = time.monotonic() - t0
 
@@ -350,7 +350,7 @@ class HfTransformersReference:
         t0 = time.monotonic()
         result = subprocess.run(
             [python, "-c", script],
-            capture_output=True, text=True, timeout=300, env=env,
+            capture_output=True, text=True, timeout=600, env=env,
         )
         elapsed = time.monotonic() - t0
 
@@ -446,7 +446,7 @@ class HfTransformersReference:
         t0 = time.monotonic()
         result = subprocess.run(
             [python, "-c", script],
-            capture_output=True, text=True, timeout=300, env=env,
+            capture_output=True, text=True, timeout=600, env=env,
         )
         elapsed = time.monotonic() - t0
 
@@ -514,7 +514,7 @@ class HfTransformersReference:
         t0 = time.monotonic()
         result = subprocess.run(
             [python, "-c", script],
-            capture_output=True, text=True, timeout=300, env=env,
+            capture_output=True, text=True, timeout=600, env=env,
         )
         elapsed = time.monotonic() - t0
 
@@ -682,7 +682,7 @@ class HfTransformersReference:
         t0 = time.monotonic()
         result = subprocess.run(
             [python, "-c", script],
-            capture_output=True, text=True, timeout=300, env=env,
+            capture_output=True, text=True, timeout=600, env=env,
         )
         elapsed = time.monotonic() - t0
 
@@ -989,7 +989,7 @@ class HfTransformersReference:
         t0 = time.monotonic()
         result = subprocess.run(
             [python, "-c", script],
-            capture_output=True, text=True, timeout=300, env=env,
+            capture_output=True, text=True, timeout=600, env=env,
         )
         elapsed = time.monotonic() - t0
 

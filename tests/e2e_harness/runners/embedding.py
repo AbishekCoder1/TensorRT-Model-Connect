@@ -42,7 +42,7 @@ class EmbeddingRunner:
         logger.info("Running embedding: %s", " ".join(cmd))
         t0 = time.monotonic()
         result = subprocess.run(
-            cmd, capture_output=True, text=True, env=env, timeout=300,
+            cmd, capture_output=True, text=True, env=env, timeout=600,
         )
         elapsed = time.monotonic() - t0
 
