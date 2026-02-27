@@ -57,6 +57,7 @@ def serialize_result(result: E2EResult) -> Dict[str, Any]:
         "timing": dict(result.timing),
         "env_fingerprint": dict(result.env_fingerprint),
         "timestamp": result.timestamp,
+        "repro_commands": dict(result.repro_commands),
     }
 
 
@@ -80,4 +81,5 @@ def deserialize_result(data: Dict[str, Any]) -> E2EResult:
         timing=data.get("timing", {}),
         env_fingerprint=data.get("env_fingerprint", {}),
         timestamp=data.get("timestamp", ""),
+        repro_commands=data.get("repro_commands", {}),
     )

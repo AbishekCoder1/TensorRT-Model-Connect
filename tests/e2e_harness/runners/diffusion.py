@@ -24,7 +24,7 @@ import textwrap
 import time
 from pathlib import Path
 
-from .. import save_full_stderr
+from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -168,9 +168,9 @@ class DiffusionMediaRunner:
             input_ids = tokens["input_ids"].astype(np.int32)
             text_output = runner.encode_text(input_ids)
             import os as _os
-            _arts = {str(Path(ctx.artifacts_dir or '/tmp/claude'))!r}
+            _arts = {str(Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) if ctx.artifacts_dir else Path('/tmp/claude'))!r}
             _os.makedirs(_arts, exist_ok=True)
-            _npy_path = _os.path.join(_arts, "{case.name}_trt_t5_output.npy")
+            _npy_path = _os.path.join(_arts, "trt_t5_output.npy")
             np.save(_npy_path, text_output)
             print("output_path=" + _npy_path)
             print("shape=" + str(list(text_output.shape)))
@@ -269,7 +269,7 @@ class DiffusionMediaRunner:
             artifact_frames_dir = None
             if ctx.artifacts_dir and num_frames > 0:
                 artifact_frames_dir = os.path.join(
-                    ctx.artifacts_dir, f"{case.name}_frames")
+                    _case_artifact_dir(ctx.artifacts_dir, case.name), "frames")
                 os.makedirs(artifact_frames_dir, exist_ok=True)
                 for fp in frame_files:
                     shutil.copy2(str(fp), artifact_frames_dir)

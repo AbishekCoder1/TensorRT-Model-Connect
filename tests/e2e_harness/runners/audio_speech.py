@@ -22,7 +22,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .. import save_full_stderr
+from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -176,9 +176,8 @@ class SpeechToTextRunner:
 
         # Persist transcript for human inspection
         if ctx.artifacts_dir and transcript:
-            art_dir = Path(ctx.artifacts_dir)
-            art_dir.mkdir(parents=True, exist_ok=True)
-            txt_path = art_dir / f"{case.name}_trt_transcript.txt"
+            art_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+            txt_path = art_dir / "trt_transcript.txt"
             txt_path.write_text(transcript, encoding="utf-8")
 
         stderr_truncated, stderr_log = save_full_stderr(
@@ -305,9 +304,8 @@ class TextToAudioRunner:
                 # Persist WAV to artifacts_dir — also update wav_path so
                 # comparators can access it after the tempdir is cleaned up.
                 if ctx.artifacts_dir:
-                    art_dir = Path(ctx.artifacts_dir)
-                    art_dir.mkdir(parents=True, exist_ok=True)
-                    dst = str(art_dir / f"{case.name}_trt_audio.wav")
+                    art_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+                    dst = str(art_dir / "trt_audio.wav")
                     shutil.copy2(wav_path, dst)
                     data["wav_path"] = dst
             else:
@@ -315,9 +313,8 @@ class TextToAudioRunner:
 
             # Persist input prompt for traceability
             if ctx.artifacts_dir:
-                art_dir = Path(ctx.artifacts_dir)
-                art_dir.mkdir(parents=True, exist_ok=True)
-                prompt_file = art_dir / f"{case.name}_input_prompt.txt"
+                art_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+                prompt_file = art_dir / "input_prompt.txt"
                 prompt_file.write_text(prompt, encoding="utf-8")
 
             return StageOutput(
@@ -437,9 +434,8 @@ class SpeechToSpeechRunner:
                 # Persist WAV to artifacts_dir — update wav_path so
                 # comparators can access it after the tempdir is cleaned up.
                 if ctx.artifacts_dir:
-                    art_dir = Path(ctx.artifacts_dir)
-                    art_dir.mkdir(parents=True, exist_ok=True)
-                    dst = str(art_dir / f"{case.name}_trt_speech_out.wav")
+                    art_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+                    dst = str(art_dir / "trt_speech_out.wav")
                     shutil.copy2(wav_path, dst)
                     data["wav_path"] = dst
             else:

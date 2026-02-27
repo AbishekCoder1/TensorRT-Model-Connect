@@ -260,6 +260,9 @@ class E2EResult:
         timing: Phase-level timing (build_s, trt_run_s, ref_run_s, etc.).
         env_fingerprint: Environment info (GPU, driver, TRT version, etc.).
         timestamp: ISO 8601 timestamp of when this result was produced.
+        repro_commands: Shell commands to reproduce each phase of the test
+            (build_bundle, trt_inference, rerun_test). Enables one-command
+            local reproduction of failures.
     """
 
     case_name: str
@@ -271,6 +274,7 @@ class E2EResult:
     timing: Dict[str, float] = field(default_factory=dict)
     env_fingerprint: Dict[str, str] = field(default_factory=dict)
     timestamp: str = ""
+    repro_commands: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-from .. import save_full_stderr
+from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -89,11 +89,8 @@ class SegmentationRunner:
                           "skipped": True},
             )
 
-        output_path = os.path.join(
-            ctx.artifacts_dir or "/tmp/claude",
-            f"{case.name}_seg_output.png",
-        )
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        _model_dir = _case_artifact_dir(ctx.artifacts_dir or "/tmp/claude", case.name)
+        output_path = os.path.join(_model_dir, "seg_output.png")
 
         cmd = [
             str(ctx.binary_path), "segment", str(bundle_path),
@@ -219,10 +216,9 @@ class PromptedSegmentationRunner:
         num_expected_masks = case.inputs.get("num_expected_masks", 4)
 
         output_dir = os.path.join(
-            ctx.artifacts_dir or "/tmp/claude",
-            f"{case.name}_masks",
+            _case_artifact_dir(ctx.artifacts_dir or "/tmp/claude", case.name),
+            "masks",
         )
-        os.makedirs(output_dir, exist_ok=True)
 
         cmd = [
             str(ctx.binary_path), "segment", str(bundle_path),

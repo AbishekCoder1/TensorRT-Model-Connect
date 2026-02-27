@@ -18,6 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from .. import _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -70,8 +71,9 @@ class HfDiffusersReference:
 
         # Save to artifacts_dir so the file persists for comparator access
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        os.makedirs(artifacts_dir, exist_ok=True)
-        output_path = os.path.join(artifacts_dir, f"{case.name}_hf_t5_output.npy")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        os.makedirs(model_dir, exist_ok=True)
+        output_path = os.path.join(model_dir, "hf_t5_output.npy")
 
         script = f"""
 import torch, numpy as np, sys
@@ -201,7 +203,8 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
 
         # Save frames to artifacts_dir so they persist for comparator access
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        frames_dir = os.path.join(artifacts_dir, f"{case.name}_hf_frames")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        frames_dir = os.path.join(model_dir, "hf_frames")
         os.makedirs(frames_dir, exist_ok=True)
 
         script = f"""

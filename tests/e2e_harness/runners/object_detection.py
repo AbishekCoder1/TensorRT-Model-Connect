@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from .. import save_full_stderr
+from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -85,11 +85,8 @@ class ObjectDetectionRunner:
                           "skipped": True},
             )
 
-        json_output_path = os.path.join(
-            ctx.artifacts_dir or "/tmp/claude",
-            f"{case.name}_detections.json",
-        )
-        os.makedirs(os.path.dirname(json_output_path), exist_ok=True)
+        _model_dir = _case_artifact_dir(ctx.artifacts_dir or "/tmp/claude", case.name)
+        json_output_path = os.path.join(_model_dir, "detections.json")
 
         # Detection confidence threshold from case inputs
         score_threshold = case.inputs.get("score_threshold", 0.3)

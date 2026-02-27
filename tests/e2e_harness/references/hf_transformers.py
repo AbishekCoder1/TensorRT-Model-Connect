@@ -16,7 +16,7 @@ import textwrap
 import time
 from pathlib import Path
 
-from .. import save_full_stderr
+from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -64,8 +64,9 @@ class HfTransformersReference:
             return self._run_speech_to_text_ref(case, stage, ctx)
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        logits_path = str(Path(artifacts_dir) / f"{case.name}_hf_logits.npy")
-        text_path = str(Path(artifacts_dir) / f"{case.name}_hf_text.txt")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        logits_path = str(Path(model_dir) / "hf_logits.npy")
+        text_path = str(Path(model_dir) / "hf_text.txt")
 
         prompt = case.inputs.get("prompt", "The capital of France is")
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
@@ -174,7 +175,8 @@ class HfTransformersReference:
 
         meta = {
             "returncode": result.returncode,
-            "stdout": result.stdout.strip(),
+            "stdout": result.stdout,
+            "stderr": result.stderr,
             "trust_remote_code": trust_remote_code,
         }
 
@@ -218,7 +220,8 @@ class HfTransformersReference:
     ) -> StageOutput:
         """Run HF encoder-only model (e.g. BERT) and return CLS embedding."""
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        output_path = str(Path(artifacts_dir) / f"{case.name}_hf_encoder.json")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_encoder.json")
 
         prompt = case.inputs.get("prompt", "Hello world")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
@@ -305,7 +308,8 @@ class HfTransformersReference:
     ) -> StageOutput:
         """Run HF segmentation model as reference."""
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        output_path = str(Path(artifacts_dir) / f"{case.name}_hf_seg.npy")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_seg.npy")
 
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         trust_remote_code = case.metadata.get("trust_remote_code", False)
@@ -398,7 +402,8 @@ class HfTransformersReference:
     ) -> StageOutput:
         """Run HF model for embedding and return normalized vector."""
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        output_path = str(Path(artifacts_dir) / f"{case.name}_hf_embed.json")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_embed.json")
 
         prompt = case.inputs.get("prompt", "Hello world")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
@@ -467,7 +472,8 @@ class HfTransformersReference:
     ) -> StageOutput:
         """Run HF model for reranking and return scores."""
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        output_path = str(Path(artifacts_dir) / f"{case.name}_hf_rerank.json")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_rerank.json")
 
         prompt = case.inputs.get("prompt", "query: test")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
@@ -534,7 +540,8 @@ class HfTransformersReference:
     ) -> StageOutput:
         """Run HF Whisper model for speech-to-text reference."""
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        output_path = str(Path(artifacts_dir) / f"{case.name}_hf_stt.json")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_stt.json")
 
         audio_path = case.inputs.get("audio", "")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
@@ -621,7 +628,8 @@ class HfTransformersReference:
     ) -> StageOutput:
         """Run HF object detection model as reference."""
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        output_path = str(Path(artifacts_dir) / f"{case.name}_hf_det.json")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_det.json")
 
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         trust_remote_code = case.metadata.get("trust_remote_code", False)
@@ -701,8 +709,9 @@ class HfTransformersReference:
     ) -> StageOutput:
         """Run HF Bark model for text-to-audio reference."""
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        output_path = str(Path(artifacts_dir) / f"{case.name}_hf_audio.json")
-        wav_path = str(Path(artifacts_dir) / f"{case.name}_hf_audio.wav")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_audio.json")
+        wav_path = str(Path(model_dir) / "hf_audio.wav")
 
         prompt = case.inputs.get("prompt", "Hello, this is a test.")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
@@ -792,7 +801,8 @@ class HfTransformersReference:
     ) -> StageOutput:
         """Run HF vision-language model for reference generation."""
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        text_path = str(Path(artifacts_dir) / f"{case.name}_hf_vl_text.txt")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        text_path = str(Path(model_dir) / "hf_vl_text.txt")
 
         prompt = case.inputs.get("prompt", "Describe this image.")
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
@@ -909,8 +919,9 @@ class HfTransformersReference:
     ) -> StageOutput:
         """Run HF SAM model for prompted segmentation reference."""
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        output_path = str(Path(artifacts_dir) / f"{case.name}_hf_sam.json")
-        masks_path = str(Path(artifacts_dir) / f"{case.name}_hf_sam_masks.npy")
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_sam.json")
+        masks_path = str(Path(model_dir) / "hf_sam_masks.npy")
 
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         trust_remote_code = case.metadata.get("trust_remote_code", False)

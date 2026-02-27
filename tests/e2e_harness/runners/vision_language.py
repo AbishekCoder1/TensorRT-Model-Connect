@@ -22,7 +22,7 @@ import sys
 import time
 from pathlib import Path
 
-from .. import save_full_stderr
+from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -129,8 +129,8 @@ class VisionLanguageRunner:
         meta: dict = {
             "command": cmd,
             "returncode": result.returncode,
-            "stdout": result.stdout[-2000:] if result.stdout else "",
-            "stderr": stderr_truncated,
+            "stdout": result.stdout or "",
+            "stderr": result.stderr or "",
         }
         if stderr_log:
             meta["stderr_log"] = stderr_log
@@ -167,10 +167,11 @@ class VisionLanguageRunner:
             )
 
         artifacts = ctx.artifacts_dir or "/tmp/claude"
-        logits_path = os.path.join(artifacts, f"{case.name}_vl_logits.npy")
-        features_path = os.path.join(artifacts, f"{case.name}_vl_features.npy")
-        text_path = os.path.join(artifacts, f"{case.name}_vl_text.txt")
-        os.makedirs(artifacts, exist_ok=True)
+        model_dir = _case_artifact_dir(artifacts, case.name) if ctx.artifacts_dir else artifacts
+        logits_path = os.path.join(model_dir, "vl_logits.npy")
+        features_path = os.path.join(model_dir, "vl_features.npy")
+        text_path = os.path.join(model_dir, "vl_text.txt")
+        os.makedirs(model_dir, exist_ok=True)
 
         # Build inline script that runs VLTrtRunner in an isolated process
         script = _VL_TEXT_DECODE_SCRIPT.format(
@@ -230,8 +231,8 @@ class VisionLanguageRunner:
             "text_decode", case.name)
         meta_td: dict = {
             "returncode": result.returncode,
-            "stdout": result.stdout[-2000:] if result.stdout else "",
-            "stderr": stderr_truncated,
+            "stdout": result.stdout or "",
+            "stderr": result.stderr or "",
         }
         if stderr_log:
             meta_td["stderr_log"] = stderr_log
@@ -312,9 +313,8 @@ class VisionLanguageRunner:
 
         # Persist generated text for human inspection
         if ctx.artifacts_dir and generated_text:
-            art_dir = Path(ctx.artifacts_dir)
-            art_dir.mkdir(parents=True, exist_ok=True)
-            txt_path = art_dir / f"{case.name}_vl_output.txt"
+            art_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+            txt_path = art_dir / "vl_output.txt"
             txt_path.write_text(generated_text, encoding="utf-8")
 
         stderr_truncated, stderr_log = save_full_stderr(
@@ -323,7 +323,8 @@ class VisionLanguageRunner:
         meta_fg: dict = {
             "command": cmd,
             "returncode": result.returncode,
-            "stderr": stderr_truncated,
+            "stdout": result.stdout or "",
+            "stderr": result.stderr or "",
         }
         if stderr_log:
             meta_fg["stderr_log"] = stderr_log

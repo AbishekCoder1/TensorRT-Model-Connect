@@ -12,14 +12,23 @@ __version__ = "0.1.0"
 import os
 
 
+def _case_artifact_dir(artifacts_dir: str, case_name: str) -> str:
+    """Return per-model artifact subdirectory, creating it if needed."""
+    if case_name:
+        d = os.path.join(artifacts_dir, case_name)
+    else:
+        d = artifacts_dir
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def save_full_stderr(stderr: str, artifacts_dir: str, stage_name: str, case_name: str = "") -> tuple:
     """Write full stderr to file, return (truncated_msg, file_path) or (truncated_msg, None) if no artifacts_dir."""
     truncated = stderr[-2000:] if len(stderr) > 2000 else stderr
     if not artifacts_dir:
         return truncated, None
-    os.makedirs(artifacts_dir, exist_ok=True)
-    prefix = f"{case_name}_" if case_name else ""
-    path = os.path.join(artifacts_dir, f"{prefix}{stage_name}_stderr.log")
+    d = _case_artifact_dir(artifacts_dir, case_name)
+    path = os.path.join(d, f"{stage_name}_stderr.log")
     with open(path, "w") as f:
         f.write(stderr)
     return truncated, path
@@ -69,4 +78,5 @@ __all__ = [
     "RUNTIME_TO_TASK_STRATEGY",
     # Helpers
     "save_full_stderr",
+    "_case_artifact_dir",
 ]

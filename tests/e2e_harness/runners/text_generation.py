@@ -23,7 +23,7 @@ import textwrap
 import time
 from pathlib import Path
 
-from .. import save_full_stderr
+from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -188,11 +188,13 @@ class TextGenerationCausalRunner:
         meta: dict = {
             "returncode": result.returncode,
             "command": cmd,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
         }
         if result.returncode != 0:
             truncated, log_path = save_full_stderr(
                 result.stderr, ctx.artifacts_dir or "", "cpp_binary")
-            meta["stderr"] = truncated
+            meta["stderr_truncated"] = truncated
             if log_path:
                 meta["stderr_log"] = log_path
 
@@ -217,8 +219,9 @@ class TextGenerationCausalRunner:
         Returns (logits_npy_path, time_s, meta).
         """
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         logits_path = str(
-            Path(artifacts_dir) / f"{case.name}_trt_{phase}_logits.npy"
+            Path(model_dir) / f"trt_{phase}_logits.npy"
         )
         max_cache_length = case.inputs.get("max_cache_length", 256)
         runtime_strategy = case.runtime_strategy
@@ -291,14 +294,15 @@ class TextGenerationCausalRunner:
 
         meta: dict = {
             "returncode": result.returncode,
-            "stdout": result.stdout.strip(),
+            "stdout": result.stdout,
+            "stderr": result.stderr,
             "phase": phase,
         }
         if result.returncode != 0:
             truncated, log_path = save_full_stderr(
                 result.stderr, ctx.artifacts_dir or "",
                 f"debug_runner_{phase}", case.name)
-            meta["stderr"] = truncated
+            meta["stderr_truncated"] = truncated
             if log_path:
                 meta["stderr_log"] = log_path
             logger.warning(

@@ -98,11 +98,17 @@ def _check_asset_exists(ctx: RunContext, req: PreflightRequirement) -> tuple[boo
     asset_path = req.args.get("path", "")
     if not asset_path:
         return False, "Asset path not specified"
-    # Resolve relative paths against project root or e2e data dir
+    # Resolve relative paths against project root, then e2e data dir
     p = Path(asset_path)
     if not p.is_absolute():
-        e2e_dir = Path(__file__).resolve().parent.parent / "e2e"
-        p = e2e_dir / asset_path
+        project_root = Path(__file__).resolve().parent.parent.parent
+        candidate = project_root / asset_path
+        if candidate.is_file():
+            p = candidate
+        else:
+            # Fallback: try e2e data dir with just the filename
+            e2e_data = project_root / "tests" / "e2e" / "data"
+            p = e2e_data / Path(asset_path).name
     if p.is_file():
         return True, f"Asset found: {p}"
     return False, f"Asset not found: {p}"
@@ -174,13 +180,18 @@ def run_preflight(
 def _resolve_bundle(
     case: E2ECase,
     ctx: RunContext,
-) -> tuple[str | None, float | None, str]:
-    """Resolve or build the bundle. Returns (path, build_time_s, error_msg)."""
+) -> tuple[str | None, float | None, str, dict[str, Any]]:
+    """Resolve or build the bundle.
+
+    Returns (path, build_time_s, error_msg, build_info) where build_info
+    contains the subprocess command, stdout, stderr, and returncode when a
+    build was executed.  build_info is empty when the bundle already exists.
+    """
     engine_dir = Path(ctx.engine_dir)
     bundle_path = engine_dir / case.bundle
 
     if bundle_path.is_file() and not ctx.rebuild:
-        return str(bundle_path), None, ""
+        return str(bundle_path), None, "", {}
 
     # Build the bundle
     hf_id = case.hf_id
@@ -201,9 +212,26 @@ def _resolve_bundle(
             cmd, capture_output=True, text=True, timeout=3600)
         elapsed = time.monotonic() - t0
     except subprocess.TimeoutExpired:
-        return None, None, f"Bundle build timed out for {hf_id}"
+        return None, None, f"Bundle build timed out for {hf_id}", {
+            "command": cmd,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": "timeout",
+        }
     except Exception as e:
-        return None, None, f"Bundle build failed for {hf_id}: {e}"
+        return None, None, f"Bundle build failed for {hf_id}: {e}", {
+            "command": cmd,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": str(e),
+        }
+
+    build_info: dict[str, Any] = {
+        "command": cmd,
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
 
     if result.returncode != 0:
         truncated, log_path = save_full_stderr(
@@ -211,9 +239,9 @@ def _resolve_bundle(
         msg = f"Bundle build failed for {hf_id} (rc={result.returncode}):\n{truncated}"
         if log_path:
             msg += f" (full stderr: {log_path})"
-        return None, elapsed, msg
+        return None, elapsed, msg, build_info
 
-    return str(bundle_path), elapsed, ""
+    return str(bundle_path), elapsed, "", build_info
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +290,129 @@ def _resolve_threshold(
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
+
+
+def _log_stage_subprocess(
+    sink: Any,
+    stage_name: str,
+    output: StageOutput,
+    prefix: str,
+) -> None:
+    """Extract subprocess info from StageOutput.metadata and log to the sink.
+
+    Runners store subprocess details in metadata under various conventions:
+    - Text generation: metadata = {"cpp": {...}, "debug_runner": {...}}
+    - Vision language: metadata has "command", "returncode", "stdout", "stderr"
+    - Other runners: flat metadata with "command", "returncode", etc.
+
+    This function handles all conventions and writes log files for each
+    subprocess found in the metadata.
+    """
+    meta = output.metadata
+    if not meta:
+        return
+
+    # Check for nested sub-metadata dicts (e.g., text_generation has "cpp" and "debug_runner")
+    nested_found = False
+    for key, value in meta.items():
+        if isinstance(value, dict) and "returncode" in value:
+            nested_found = True
+            label = f"{stage_name}_{prefix}_{key}"
+            cmd = value.get("command", [])
+            rc = value.get("returncode", -1)
+            stdout = value.get("stdout", "")
+            stderr = value.get("stderr", "")
+            sink.log_command(
+                command=cmd if isinstance(cmd, list) else [str(cmd)],
+                rc=rc,
+                stdout=str(stdout),
+                stderr=str(stderr),
+                label=label,
+            )
+
+    # If no nested dicts, check for flat metadata with command/returncode
+    if not nested_found and "returncode" in meta:
+        label = f"{stage_name}_{prefix}"
+        cmd = meta.get("command", [])
+        rc = meta.get("returncode", -1)
+        stdout = meta.get("stdout", "")
+        stderr = meta.get("stderr", "")
+        sink.log_command(
+            command=cmd if isinstance(cmd, list) else [str(cmd)],
+            rc=rc,
+            stdout=str(stdout),
+            stderr=str(stderr),
+            label=label,
+        )
+
+
+def _build_repro_commands(
+    case: E2ECase,
+    ctx: RunContext,
+    bundle_path: str | None,
+    build_info: dict[str, Any],
+) -> dict[str, str]:
+    """Construct shell commands that reproduce each phase of the E2E test.
+
+    Returns a dict with keys like "build_bundle", "trt_inference", "rerun_test",
+    each mapped to a copy-pasteable shell command string.
+    """
+    repro: dict[str, str] = {}
+
+    # Build command
+    max_cache = case.inputs.get("max_cache_length", 256)
+    bundle_target = bundle_path or str(Path(ctx.engine_dir) / case.bundle)
+    build_parts = [
+        "trtf-build", "build", case.hf_id,
+        "-o", bundle_target,
+        "--max-cache-length", str(max_cache),
+    ]
+    if case.metadata.get("trust_remote_code"):
+        build_parts.append("--trust-remote-code")
+    repro["build_bundle"] = " ".join(build_parts)
+
+    # TRT inference command (text-gen models via C++ binary)
+    if bundle_path and ctx.binary_path:
+        infer_parts = [
+            ctx.binary_path, "run", bundle_path,
+            "--prompt", _shell_quote(case.inputs.get("prompt", "")),
+            "--max-new-tokens", str(case.inputs.get("max_new_tokens", 20)),
+        ]
+        if ctx.hf_python:
+            infer_parts.extend(["--hf-python", ctx.hf_python])
+        # Add image flag for VL models
+        image = (case.inputs.get("image") or case.inputs.get("test_image")
+                 or case.inputs.get("image_path"))
+        if image:
+            infer_parts.extend(["--image", str(image)])
+        repro["trt_inference"] = " ".join(infer_parts)
+
+    # Rerun this exact test case
+    rerun_parts = [
+        "pytest", f"tests/test_e2e.py::test_e2e[{case.name}]", "-v",
+        "--engine-dir", ctx.engine_dir,
+        "--trtf-binary", ctx.binary_path,
+        "--hf-python", ctx.hf_python or "python",
+    ]
+    repro["rerun_test"] = " ".join(rerun_parts)
+
+    # Rerun with forced rebuild
+    rebuild_parts = list(rerun_parts) + ["--rebuild-engines"]
+    repro["rerun_test_rebuild"] = " ".join(rebuild_parts)
+
+    return repro
+
+
+def _shell_quote(s: str) -> str:
+    """Simple shell quoting for inclusion in repro commands."""
+    if not s:
+        return '""'
+    # If string contains special chars, wrap in single quotes
+    if any(c in s for c in " \t\n\"'\\$!&|;(){}[]<>?*~`#"):
+        # Escape single quotes inside
+        escaped = s.replace("'", "'\\''")
+        return f"'{escaped}'"
+    return s
 
 
 class E2EOrchestrator:
@@ -327,12 +478,23 @@ class E2EOrchestrator:
 
         # 2. Resolve or build bundle
         t0 = time.monotonic()
-        bundle_path, build_time, build_err = _resolve_bundle(case, ctx)
+        bundle_path, build_time, build_err, build_info = _resolve_bundle(case, ctx)
         timing["build_s"] = time.monotonic() - t0
         if build_time is not None:
             timing["bundle_build_s"] = build_time
 
+        # Log build subprocess output
+        if build_info:
+            sink.log_command(
+                command=build_info.get("command", []),
+                rc=build_info.get("returncode", -1),
+                stdout=build_info.get("stdout", ""),
+                stderr=build_info.get("stderr", ""),
+                label="build",
+            )
+
         if bundle_path is None:
+            repro = _build_repro_commands(case, ctx, None, build_info)
             result = E2EResult(
                 case_name=case.name,
                 status=E2EStatus.FAIL.value,
@@ -343,6 +505,7 @@ class E2EOrchestrator:
                 timing=timing,
                 env_fingerprint=env_fp,
                 timestamp=timestamp,
+                repro_commands=repro,
             )
             sink.finalize(result)
             return result
@@ -380,6 +543,7 @@ class E2EOrchestrator:
                     trt_output = runner.run_stage(case, stage, ctx_with_bundle)
                     timing[f"trt_{stage_name}_s"] = time.monotonic() - t0
                     sink.write_stage_output(stage_name, trt_output, prefix="trt")
+                    _log_stage_subprocess(sink, stage_name, trt_output, "trt")
                 except Exception as e:
                     timing[f"trt_{stage_name}_s"] = time.monotonic() - t0
                     tb = traceback.format_exc()
@@ -413,6 +577,7 @@ class E2EOrchestrator:
                     ref_output = reference.run_stage(case, stage, ctx_with_bundle)
                     timing[f"ref_{stage_name}_s"] = time.monotonic() - t0
                     sink.write_stage_output(stage_name, ref_output, prefix="ref")
+                    _log_stage_subprocess(sink, stage_name, ref_output, "ref")
                 except Exception as e:
                     timing[f"ref_{stage_name}_s"] = time.monotonic() - t0
                     tb = traceback.format_exc()
@@ -468,7 +633,10 @@ class E2EOrchestrator:
             # TODO: implement rerun logic when determinism policy is available
             determinism_results["status"] = "not_implemented"
 
-        # 5. Aggregate result
+        # 5. Build reproducibility commands
+        repro = _build_repro_commands(case, ctx, bundle_path, build_info)
+
+        # 6. Aggregate result
         if all_stages_pass:
             status = E2EStatus.PASS.value
             failure_type = None
@@ -495,9 +663,10 @@ class E2EOrchestrator:
             timing=timing,
             env_fingerprint=env_fp,
             timestamp=timestamp,
+            repro_commands=repro,
         )
 
-        # 6. Finalize artifacts
+        # 7. Finalize artifacts
         try:
             sink.finalize(result)
         except Exception as e:

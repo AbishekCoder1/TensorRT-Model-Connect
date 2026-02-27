@@ -250,8 +250,15 @@ def _get_case_names(config=None) -> list[str]:
     return [c.name for c in cases]
 
 
-# Collect case names at module level for parametrize
-_CASE_NAMES = _get_case_names()
+# ---------------------------------------------------------------------------
+# Dynamic parametrization (respects --e2e-task-strategy at collection time)
+# ---------------------------------------------------------------------------
+
+
+def pytest_generate_tests(metafunc):
+    if "case_name" in metafunc.fixturenames:
+        names = _get_case_names(metafunc.config)
+        metafunc.parametrize("case_name", names)
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +266,6 @@ _CASE_NAMES = _get_case_names()
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("case_name", _CASE_NAMES)
 def test_e2e(case_name: str, request) -> None:
     """Unified E2E test — run full lifecycle for one model.
 

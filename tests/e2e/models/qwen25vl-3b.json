@@ -9,7 +9,7 @@
   "max_new_tokens": 30,
   "logit_atol": 0.001,
   "layer_atol": 0.05,
-  "test_image": "/workspace/users/yifeif/trt-transformers/engines/test_image.jpg",
+  "test_image": "tests/e2e/data/test_img.jpeg",
   "trust_remote_code": false,
   "core": true
 }
