@@ -10,6 +10,12 @@ Usage:
     # Filter by strategy:
     pytest tests/test_e2e.py --e2e-task-strategy text_generation_causal
 
+    # Core models only:
+    pytest tests/test_e2e.py --e2e-core-only
+
+    # Partitioned execution (agent 0 of 4):
+    pytest tests/test_e2e.py --e2e-partition-id 0 --e2e-partition-size 4
+
     # With artifacts:
     pytest tests/test_e2e.py --e2e-artifacts-dir /tmp/e2e_artifacts
 
@@ -35,6 +41,7 @@ from tests.e2e_harness.orchestrator import E2EOrchestrator
 # ---------------------------------------------------------------------------
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+_WAIVES_FILE = Path(__file__).resolve().parent / "e2e" / "waives.txt"
 
 
 def _resolve_binary(config) -> str:
@@ -88,6 +95,58 @@ def _resolve_ld_library_path() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Waives loader
+# ---------------------------------------------------------------------------
+
+
+def _load_waives() -> dict[str, tuple[str, str]]:
+    """Load waives.txt and return model-name -> (action, reason) mapping.
+
+    Supports platform-specific prefixes like "GB300/model-name".
+    The current platform is read from the TRTF_PLATFORM environment variable.
+
+    Returns:
+        Dict mapping model-name to ("SKIP"|"XFAIL", reason).
+    """
+    waives: dict[str, tuple[str, str]] = {}
+
+    if not _WAIVES_FILE.is_file():
+        return waives
+
+    platform = os.environ.get("TRTF_PLATFORM", "").strip()
+
+    with open(_WAIVES_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            # Parse: [platform/]model-name  SKIP|XFAIL  (reason)
+            parts = line.split(None, 2)
+            if len(parts) < 2:
+                continue
+
+            name_part = parts[0]
+            action = parts[1].upper()
+            reason = parts[2] if len(parts) > 2 else ""
+
+            if action not in ("SKIP", "XFAIL"):
+                continue
+
+            # Handle platform prefix
+            if "/" in name_part:
+                plat, model_name = name_part.split("/", 1)
+                if plat != platform:
+                    continue
+            else:
+                model_name = name_part
+
+            waives[model_name] = (action, reason)
+
+    return waives
+
+
+# ---------------------------------------------------------------------------
 # CLI options
 # ---------------------------------------------------------------------------
 
@@ -133,6 +192,24 @@ def pytest_addoption(parser):
             help="Directory for E2E artifacts output")
     except ValueError:
         pass
+    try:
+        parser.addoption(
+            "--e2e-core-only", action="store_true", default=False,
+            help="Only run core models (marked with core: true in manifest)")
+    except ValueError:
+        pass
+    try:
+        parser.addoption(
+            "--e2e-partition-id", type=int, default=None,
+            help="Agent partition ID (0-based) for parallel execution")
+    except ValueError:
+        pass
+    try:
+        parser.addoption(
+            "--e2e-partition-size", type=int, default=None,
+            help="Total number of partitions for parallel execution")
+    except ValueError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -143,13 +220,31 @@ def pytest_addoption(parser):
 def _get_case_names(config=None) -> list[str]:
     """Load all case names for parametrization.
 
-    Respects --e2e-task-strategy filter if set.
+    Respects --e2e-task-strategy, --e2e-core-only, and partition filters.
     """
     strategy_filter = None
+    core_only = False
+    partition_id = None
+    partition_size = None
+
     if config is not None:
         strategy_filter = config.getoption("--e2e-task-strategy", default=None)
+        core_only = config.getoption("--e2e-core-only", default=False)
+        partition_id = config.getoption("--e2e-partition-id", default=None)
+        partition_size = config.getoption("--e2e-partition-size", default=None)
 
     cases = load_all_manifests(task_strategy_filter=strategy_filter)
+
+    # Filter to core models only
+    if core_only:
+        cases = [c for c in cases if c.metadata.get("core", False)]
+
+    # Apply LPT partitioning
+    if partition_id is not None and partition_size is not None:
+        from tests.e2e_partition import partition_models
+        assigned = partition_models(cases, partition_size, partition_id)
+        cases = [c for c in cases if c.name in assigned]
+
     if not cases:
         return ["__no_models__"]
     return [c.name for c in cases]
@@ -180,6 +275,16 @@ def test_e2e(case_name: str, request) -> None:
     """
     if case_name == "__no_models__":
         pytest.skip("No model manifests found")
+
+    # Apply waives before running
+    waives = _load_waives()
+    if case_name in waives:
+        action, reason = waives[case_name]
+        if action == "SKIP":
+            pytest.skip(reason)
+        elif action == "XFAIL":
+            request.node.add_marker(
+                pytest.mark.xfail(reason=reason, strict=False))
 
     # Load the case
     case = get_case_by_name(case_name)

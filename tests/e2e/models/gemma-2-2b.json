@@ -7,8 +7,7 @@
   "max_cache_length": 256,
   "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
   "max_new_tokens": 30,
-  "logit_atol": 1e-3,
+  "logit_atol": 0.001,
   "layer_atol": 0.05,
-  "trust_remote_code": false,
-  "skip": "Gated model requires HF auth token (run with HF_TOKEN set)"
+  "trust_remote_code": false
 }

@@ -203,3 +203,94 @@ class TestMultiLayer:
         np.testing.assert_array_equal(sm.cache_v[0][0], [10, 20])
         np.testing.assert_array_equal(sm.cache_v[1][0], [30, 40])
         np.testing.assert_array_equal(sm.cache_v[2][0], [50, 60])
+
+
+class TestCacheEdgeCases:
+    """Edge-case tests for CacheStateMachine with extreme max_cache_length values."""
+
+    def test_max_cache_length_zero_construction(self):
+        """max_cache_length=0 creates zero-length cache arrays."""
+        sm = CacheStateMachine(max_cache_length=0, attention_size=4)
+        assert sm.max_cache_length == 0
+        assert sm.cache_length == 0
+        assert sm.cache_k[0].shape == (0, 4)
+        assert sm.cache_v[0].shape == (0, 4)
+
+    def test_max_cache_length_zero_step_raises(self):
+        """max_cache_length=0: step raises IndexError on cache update.
+
+        With cache_length=0 and max_cache_length=0, the condition
+        cache_length < max_cache_length is False, so it enters the
+        shift-left branch and tries to index [-1] on the zero-length
+        cache array. This documents the current behavior — callers must
+        use max_cache_length >= 1.
+        """
+        sm = CacheStateMachine(max_cache_length=0, attention_size=4)
+
+        pk = [np.ones((1, 4), dtype=np.float32)]
+        pv = [np.ones((1, 4), dtype=np.float32)]
+        with pytest.raises(IndexError):
+            sm.step(pk, pv)
+
+    def test_max_cache_length_one_construction(self):
+        """max_cache_length=1 creates a single-slot cache."""
+        sm = CacheStateMachine(max_cache_length=1, attention_size=2)
+        assert sm.cache_k[0].shape == (1, 2)
+        assert sm.cache_v[0].shape == (1, 2)
+
+    def test_max_cache_length_one_first_step(self):
+        """max_cache_length=1: first step appends to empty cache, position=0."""
+        sm = CacheStateMachine(max_cache_length=1, attention_size=2)
+
+        pk = [np.array([[10.0, 20.0]], dtype=np.float32)]
+        pv = [np.array([[30.0, 40.0]], dtype=np.float32)]
+        pos, mask = sm.step(pk, pv)
+
+        assert pos == 0
+        # attention_window = 1 + 1 = 2
+        # valid = min(0, 1) = 0 before step, so mask = [-1e9, 0.0]
+        assert mask.shape == (1, 2)
+        assert mask[0, 0] == -1e9
+        assert mask[0, 1] == 0.0
+
+        # Cache should contain the appended value
+        assert sm.cache_length == 1
+        np.testing.assert_array_equal(sm.cache_k[0][0], [10.0, 20.0])
+        np.testing.assert_array_equal(sm.cache_v[0][0], [30.0, 40.0])
+
+    def test_max_cache_length_one_second_step_shifts(self):
+        """max_cache_length=1: second step shifts out the first entry."""
+        sm = CacheStateMachine(max_cache_length=1, attention_size=2)
+
+        # First step: append
+        pk = [np.array([[1.0, 2.0]], dtype=np.float32)]
+        pv = [np.array([[3.0, 4.0]], dtype=np.float32)]
+        sm.step(pk, pv)
+
+        # Second step: should shift-left and replace
+        pk = [np.array([[5.0, 6.0]], dtype=np.float32)]
+        pv = [np.array([[7.0, 8.0]], dtype=np.float32)]
+        pos, mask = sm.step(pk, pv)
+
+        assert pos == 1  # clamped to max_cache_length
+        # valid = min(1, 1) = 1, so both slots are open: [0.0, 0.0]
+        assert mask.shape == (1, 2)
+        assert mask[0, 0] == 0.0
+        assert mask[0, 1] == 0.0
+
+        # Cache should have the second value only
+        assert sm.cache_length == 1
+        np.testing.assert_array_equal(sm.cache_k[0][0], [5.0, 6.0])
+        np.testing.assert_array_equal(sm.cache_v[0][0], [7.0, 8.0])
+
+    def test_max_cache_length_one_position_clamp(self):
+        """max_cache_length=1: position clamps at 1 after two steps."""
+        sm = CacheStateMachine(max_cache_length=1, attention_size=2)
+        positions = []
+        for step in range(5):
+            pk = [np.array([[float(step), float(step)]], dtype=np.float32)]
+            pv = [np.array([[float(step), float(step)]], dtype=np.float32)]
+            pos, _ = sm.step(pk, pv)
+            positions.append(pos)
+
+        assert positions == [0, 1, 1, 1, 1]

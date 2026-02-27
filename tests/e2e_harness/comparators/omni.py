@@ -146,8 +146,16 @@ class OmniComparator:
         ref_emb = ref.data.get("embedding", [])
 
         if not trt_emb or not ref_emb:
+            missing = []
+            if not trt_emb:
+                missing.append("TRT")
+            if not ref_emb:
+                missing.append("ref")
             return CompareResult(
                 stage_name=stage.name, passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[f"early return: missing embedding from {', '.join(missing)} for {stage.name}"],
                 message=f"Missing embedding for {stage.name}",
             )
 
@@ -242,6 +250,9 @@ class OmniComparator:
 
         return CompareResult(
             stage_name=stage.name, passed=True,
+            metrics={},
+            per_metric_pass={},
+            gate_details=[f"No comparable data for stage {stage.name} (pass by default)"],
             message=f"No comparable data for stage {stage.name} (pass by default)",
         )
 

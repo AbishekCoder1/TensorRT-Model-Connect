@@ -8,6 +8,7 @@
   "max_cache_length": 1024,
   "prompt": "Hello, this is a test of the audio generation system.",
   "max_new_tokens": 0,
-  "logit_atol": 1e-2,
-  "trust_remote_code": false
+  "logit_atol": 0.01,
+  "trust_remote_code": false,
+  "core": true
 }

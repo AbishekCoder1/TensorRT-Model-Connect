@@ -3,4 +3,24 @@ testpaths = ["tests/builder", "tests/tools", "tests/e2e"]
 markers = [
     "trt: tests requiring TensorRT + CUDA GPU",
     "e2e: end-to-end tests requiring GPU and engine bundles",
+    "unit: Unit tests — no GPU, no TRT",
+    "gpu: Requires NVIDIA GPU",
+    "slow: Slow tests (>30s)",
+    "text: Text generation models",
+    "vision: Vision/VL models",
+    "audio: Audio models (Whisper, Bark, PersonaPlex)",
+    "diffusion: Diffusion models (Wan, FLUX, Z-Image)",
+]
+
+[tool.coverage.run]
+source = ["trtf_build/trtf_build"]
+omit = ["*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "raise NotImplementedError",
 ]

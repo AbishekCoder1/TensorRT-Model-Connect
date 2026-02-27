@@ -11,6 +11,7 @@ import os
 import subprocess
 import time
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -49,10 +50,14 @@ class RerankingRunner:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Reranking inference failed (rc={result.returncode}): "
-                f"{result.stderr[-2000:]}"
-            )
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "reranking", case.name)
+            msg = (f"Reranking inference failed (rc={result.returncode}): "
+                   f"{truncated}")
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         scores = _parse_scores(result.stdout.strip())
 

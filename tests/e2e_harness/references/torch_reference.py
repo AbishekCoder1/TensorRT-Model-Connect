@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -133,11 +134,16 @@ np.save("/tmp/hf_bark_audio.npy", audio)
             capture_output=True, text=True, timeout=600)
         elapsed = time.monotonic() - t0
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "torch_text_to_audio", case.name)
         data: dict = {
             "returncode": result.returncode,
             "stdout": result.stdout,
-            "stderr": result.stderr[-2000:] if result.stderr else "",
+            "stderr": stderr_truncated,
         }
+        if stderr_log:
+            data["stderr_log"] = stderr_log
 
         # Parse JSON output
         try:
@@ -213,11 +219,16 @@ print(json.dumps(result))
             capture_output=True, text=True, timeout=600)
         elapsed = time.monotonic() - t0
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "torch_speech_to_text", case.name)
         data: dict = {
             "returncode": result.returncode,
             "stdout": result.stdout,
-            "stderr": result.stderr[-2000:] if result.stderr else "",
+            "stderr": stderr_truncated,
         }
+        if stderr_log:
+            data["stderr_log"] = stderr_log
 
         try:
             import json as json_mod

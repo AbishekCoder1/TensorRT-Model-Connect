@@ -10,6 +10,7 @@
 // =============================================================================
 
 #include "runtime/trt/image_preprocessor.h"
+#include "test_helpers.h"
 
 #include <cmath>
 #include <cstdio>
@@ -54,15 +55,8 @@ static std::string write_test_ppm(const std::string& dir)
 // Test: qwen_merge_group strategy — default, produces [C*T, H, W] with permutation.
 static void test_qwen_merge_group_strategy()
 {
-    // Create temp directory
-    char temp_pattern[] = "/tmp/claude/trtf_test_img_XXXXXX";
-    char* temp_dir = mkdtemp(temp_pattern);
-    if (temp_dir == nullptr)
-    {
-        std::cerr << "SKIP: test_qwen_merge_group_strategy (cannot create temp dir)\n";
-        return;
-    }
-    const std::string dir(temp_dir);
+    trtf_test::TempDirGuard tmp;
+    const std::string& dir = tmp.path();
 
     // Write test image
     const std::string image_path = write_test_ppm(dir);
@@ -102,23 +96,13 @@ static void test_qwen_merge_group_strategy()
         }
     }
     check(in_range, "qwen_merge_group: all normalized values in [-1.1, 1.1]");
-
-    // Cleanup
-    std::filesystem::remove_all(dir);
 }
 
 // Test: simple_chw strategy — produces [C, H, W] without permutation.
 static void test_simple_chw_strategy()
 {
-    // Create temp directory
-    char temp_pattern[] = "/tmp/claude/trtf_test_img_chw_XXXXXX";
-    char* temp_dir = mkdtemp(temp_pattern);
-    if (temp_dir == nullptr)
-    {
-        std::cerr << "SKIP: test_simple_chw_strategy (cannot create temp dir)\n";
-        return;
-    }
-    const std::string dir(temp_dir);
+    trtf_test::TempDirGuard tmp;
+    const std::string& dir = tmp.path();
 
     // Write test image
     const std::string image_path = write_test_ppm(dir);
@@ -156,9 +140,6 @@ static void test_simple_chw_strategy()
         }
     }
     check(in_range, "simple_chw: all normalized values in [-1.1, 1.1]");
-
-    // Cleanup
-    std::filesystem::remove_all(dir);
 }
 
 // Test: load non-existent image returns ok=false.
@@ -280,14 +261,8 @@ static std::string write_test_ppm_nonsquare(const std::string& dir)
 // Test Gap 1: unknown preprocessor_type falls back to qwen_merge_group with ok=true.
 static void test_unknown_preprocessor_type_fallback()
 {
-    char temp_pattern[] = "/tmp/claude/trtf_test_unknown_XXXXXX";
-    char* temp_dir = mkdtemp(temp_pattern);
-    if (temp_dir == nullptr)
-    {
-        std::cerr << "SKIP: test_unknown_preprocessor_type_fallback (cannot create temp dir)\n";
-        return;
-    }
-    const std::string dir(temp_dir);
+    trtf_test::TempDirGuard tmp;
+    const std::string& dir = tmp.path();
     const std::string image_path = write_test_ppm(dir);
 
     trtf::VLPreprocessConfig config;
@@ -309,21 +284,13 @@ static void test_unknown_preprocessor_type_fallback()
     check(result.channels == 6, "unknown type fallback: channels = C*T = 6");
     check(result.height == 8, "unknown type fallback: height = 8");
     check(result.width == 8, "unknown type fallback: width = 8");
-
-    std::filesystem::remove_all(dir);
 }
 
 // Test Gap 2: center_crop_chw strategy with non-square image.
 static void test_center_crop_chw_strategy()
 {
-    char temp_pattern[] = "/tmp/claude/trtf_test_crop_XXXXXX";
-    char* temp_dir = mkdtemp(temp_pattern);
-    if (temp_dir == nullptr)
-    {
-        std::cerr << "SKIP: test_center_crop_chw_strategy (cannot create temp dir)\n";
-        return;
-    }
-    const std::string dir(temp_dir);
+    trtf_test::TempDirGuard tmp;
+    const std::string& dir = tmp.path();
     const std::string image_path = write_test_ppm_nonsquare(dir);
 
     trtf::VLPreprocessConfig config;
@@ -358,21 +325,13 @@ static void test_center_crop_chw_strategy()
         }
     }
     check(in_range, "center_crop_chw: all normalized values in [-1.1, 1.1]");
-
-    std::filesystem::remove_all(dir);
 }
 
 // Test Gap 3: aspect_preserve_chw strategy with non-square image.
 static void test_aspect_preserve_chw_strategy()
 {
-    char temp_pattern[] = "/tmp/claude/trtf_test_aspect_XXXXXX";
-    char* temp_dir = mkdtemp(temp_pattern);
-    if (temp_dir == nullptr)
-    {
-        std::cerr << "SKIP: test_aspect_preserve_chw_strategy (cannot create temp dir)\n";
-        return;
-    }
-    const std::string dir(temp_dir);
+    trtf_test::TempDirGuard tmp;
+    const std::string& dir = tmp.path();
     const std::string image_path = write_test_ppm_nonsquare(dir);
 
     trtf::VLPreprocessConfig config;
@@ -415,21 +374,13 @@ static void test_aspect_preserve_chw_strategy()
         }
     }
     check(pad_ok, "aspect_preserve_chw: padded rows have correct normalized zero value");
-
-    std::filesystem::remove_all(dir);
 }
 
 // Test: pad_center_chw strategy — aspect-ratio-preserving resize + center-pad with mean color.
 static void test_pad_center_chw_strategy()
 {
-    char temp_pattern[] = "/tmp/claude/trtf_test_padctr_XXXXXX";
-    char* temp_dir = mkdtemp(temp_pattern);
-    if (temp_dir == nullptr)
-    {
-        std::cerr << "SKIP: test_pad_center_chw_strategy (cannot create temp dir)\n";
-        return;
-    }
-    const std::string dir(temp_dir);
+    trtf_test::TempDirGuard tmp;
+    const std::string& dir = tmp.path();
     const std::string image_path = write_test_ppm_nonsquare(dir);
 
     trtf::VLPreprocessConfig config;
@@ -474,8 +425,6 @@ static void test_pad_center_chw_strategy()
         }
     }
     check(pad_ok, "pad_center_chw: center-padded rows have mean-color value");
-
-    std::filesystem::remove_all(dir);
 }
 
 // Test Gap 4: interpolation defaults to "bicubic".

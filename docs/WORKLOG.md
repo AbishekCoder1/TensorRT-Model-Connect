@@ -1,5 +1,113 @@
 # Worklog
 
+## 2026-02-26 — Test infrastructure hardening (11 issues fixed)
+
+Audited the testing infrastructure after the model-onboarding upgrade (299
+per-family engine tests, registry enforcement, waives.txt, partitioning, GPU
+isolation). Fixed 11 confirmed issues across 8 parallel agents with
+non-overlapping file ownership.
+
+### Issues fixed
+
+| # | Issue | Fix |
+|---|-------|-----|
+| 2 | Missing engine tests for 4 custom-builder families | Created `test_engine_{bark,whisper,segformer,phi_moe}.py` (71 new tests) |
+| 4 | stderr truncation loses debug info in E2E | Added `save_full_stderr()` helper; replaced 35 `result.stderr[-2000:]` across 16 files |
+| 5 | Bare exceptions lose tracebacks in orchestrator | Added `traceback.format_exc()` to 3 except blocks (runner/reference/comparator failures) |
+| 6 | Missing edge-case tests for config/cache/checkpoint | Added 24 parametrized tests: negative dims, zero/one cache, 8x GQA expansion |
+| 7 | No coverage configuration | Added `[tool.coverage.run/report]` to pyproject.toml |
+| 8 | Missing pytest markers | Added `@pytest.mark.{unit,trt,gpu}` to all 13 FamilyPluginTestMixin methods |
+| 10 | Inconsistent comparator diagnostics | Standardized `per_metric_pass` + `gate_details` across 10 comparator files (21 return paths) |
+| 11 | Weak/tautological assertions | Added 12 tests (plugin matches, corrupted bundles); fixed 2 `preds == preds` tautologies |
+| 12 | C++ test resource leaks | Added `EnvVarGuard` + `TempDirGuard` RAII classes; replaced 13 manual patterns |
+| 13 | No manifest schema validation | Added `_validate_manifest()` (required fields, type checks, unknown strategy warnings) + 13 tests |
+
+### Issues closed without change
+
+| # | Issue | Reason |
+|---|-------|--------|
+| 3 | Duplicate test patterns | False — old `test_family_*.py` (hand-crafted per-family) and new `test_engine_*.py` (mixin-based multi-tier) are complementary |
+| 9 | Missing threshold rationale | Low-value retroactive documentation; thresholds already in JSON defaults |
+
+### Test counts after fix
+
+| Suite | Files | Tests | Result |
+|-------|:--:|:--:|--------|
+| Python builder (`tests/builder/`) | 50 | 939 | all pass (15 skip — no TRT) |
+| Tools self-tests (`tests/tools/`) | 11 | 163 | all pass |
+| C++ runtime (`tests/cpp/`) | 19 | 20 | all pass |
+| E2E model manifests | 50 | — | harness imports OK |
+
+### New files
+
+- `tests/builder/test_engine_bark.py` — 18 tests (Tier 0/1, multi-stage audio)
+- `tests/builder/test_engine_whisper.py` — 16 tests (Tier 0/1, encoder-decoder ASR)
+- `tests/builder/test_engine_segformer.py` — 17 tests (Tier 0/1, hierarchical segmentation)
+- `tests/builder/test_engine_phi_moe.py` — 20 tests (Tier 0/1, MoE with SparseMixer)
+- `tests/builder/test_manifest_validation.py` — 13 tests (manifest schema validation)
+
+### Files modified (key changes only)
+
+- `tests/e2e_harness/__init__.py` — added `save_full_stderr()` helper
+- `tests/e2e_harness/orchestrator.py` — traceback capture in 3 except blocks
+- `tests/e2e_harness/manifest_loader.py` — `_validate_manifest()` with 4 checks
+- `tests/builder/family_plugin_test_mixin.py` — pytest markers on all 13 methods
+- `tests/cpp/test_helpers.h` — `EnvVarGuard` + `TempDirGuard` RAII classes
+- `tests/cpp/test_data_dir.cpp` — 7 raw setenv/unsetenv → EnvVarGuard
+- `tests/cpp/test_image_preprocessor.cpp` — 6 manual mkdtemp → TempDirGuard
+- `tests/cpp/test_cuda_buffer.cpp` — index info in large buffer comparison failures
+- `pyproject.toml` — coverage config + 6 new pytest markers
+- 10 comparator files — standardized `per_metric_pass` + `gate_details`
+- 16 runner/reference/orchestrator files — `save_full_stderr()` integration
+
+## 2026-02-26 - E2E test commands
+  Single model:                                                                                                                                                                          
+  docker exec trtf-dev-gb300 bash -c "cd /workspace/trt-transformers-cpp && \
+    source .venv/bin/activate && \                                                                                                                                                       
+    python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \                                                                                                                      
+    --engine-dir /mnt/storage/trt-transformers/engines \
+    --trtf-binary ./build/trtf --hf-python .venv/bin/python"
+
+  All 50 models (use cached bundles):
+  docker exec trtf-dev-gb300 bash -c "cd /workspace/trt-transformers-cpp && \
+    source .venv/bin/activate && \
+    python -m pytest tests/test_e2e.py -v \
+    --engine-dir /mnt/storage/trt-transformers/engines \
+    --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+    --e2e-artifacts-dir /tmp/e2e_artifacts"
+
+  All 50 models (force rebuild bundles from HF):
+  docker exec trtf-dev-gb300 bash -c "cd /workspace/trt-transformers-cpp && \
+    source .venv/bin/activate && \
+    python -m pytest tests/test_e2e.py -v \
+    --engine-dir /mnt/storage/trt-transformers/engines \
+    --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+    --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts"
+
+  Filter by modality:
+  # Text generation only (~26 models, fastest):
+  --e2e-task-strategy text_generation_causal
+
+  # Diffusion only (Wan, FLUX, Z-Image — ~35 min):
+  --e2e-task-strategy diffusion_media_generation
+
+  # Vision-language only:
+  --e2e-task-strategy vision_language_generation
+
+  # Audio only (Bark, Whisper, PersonaPlex):
+  --e2e-task-strategy text_to_audio
+  --e2e-task-strategy speech_to_text
+
+  Multiple specific models:
+  docker exec trtf-dev-gb300 bash -c "cd /workspace/trt-transformers-cpp && \
+    source .venv/bin/activate && \
+    python -m pytest \
+    tests/test_e2e.py::test_e2e[bark-large] \
+    tests/test_e2e.py::test_e2e[flux-schnell] \
+    tests/test_e2e.py::test_e2e[qwen3-vl-2b] \
+    -v --engine-dir /mnt/storage/trt-transformers/engines \
+    --trtf-binary ./build/trtf --hf-python .venv/bin/python"
+    
 ## 2026-02-26 — E2E harness round 2: rich artifacts, bug fixes, 41/50 passing
 
 Took the unified E2E harness from 36/48 passing to 41/50 passing (2 new

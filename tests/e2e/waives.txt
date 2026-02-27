@@ -1,0 +1,11 @@
+# Waived E2E tests — centralized skip/xfail tracking.
+# Format: model-name  SKIP|XFAIL  (reason)
+# Platform-specific: GB300/model-name  XFAIL  (reason)
+
+falcon-rw-1b             XFAIL  (ALiBi attention numerical divergence — TRT logit rel_l2 1.7x, needs investigation)
+gemma-2-2b               SKIP   (gated model, needs HF_TOKEN)
+internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in transformers 5.x)
+nemotron-h-nano-9b       SKIP   (requires mamba-ssm package)
+phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
+eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
+eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)

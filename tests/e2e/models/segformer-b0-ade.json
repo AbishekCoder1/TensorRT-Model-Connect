@@ -11,5 +11,6 @@
   "logit_atol": 0.5,
   "trust_remote_code": false,
   "test_image": "data/test_img.jpeg",
-  "min_pixel_agreement": 0.85
+  "min_pixel_agreement": 0.85,
+  "core": true
 }

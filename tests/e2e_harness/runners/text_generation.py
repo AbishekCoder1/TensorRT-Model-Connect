@@ -23,6 +23,7 @@ import textwrap
 import time
 from pathlib import Path
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -189,7 +190,11 @@ class TextGenerationCausalRunner:
             "command": cmd,
         }
         if result.returncode != 0:
-            meta["stderr"] = result.stderr[-2000:]
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "", "cpp_binary")
+            meta["stderr"] = truncated
+            if log_path:
+                meta["stderr_log"] = log_path
 
         text = result.stdout.strip()
         return text, elapsed, meta
@@ -290,7 +295,12 @@ class TextGenerationCausalRunner:
             "phase": phase,
         }
         if result.returncode != 0:
-            meta["stderr"] = result.stderr[-2000:]
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                f"debug_runner_{phase}", case.name)
+            meta["stderr"] = truncated
+            if log_path:
+                meta["stderr_log"] = log_path
             logger.warning(
                 "Debug runner (%s) failed for %s (rc=%d): %s",
                 phase, case.name, result.returncode, result.stderr[-500:]

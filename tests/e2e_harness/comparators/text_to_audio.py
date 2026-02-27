@@ -139,6 +139,9 @@ class TextToAudioComparator:
             return CompareResult(
                 stage_name=stage.name,
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[f"early return: TRT audio generation failed (rc={trt.data.get('returncode')})"],
                 message=f"TRT audio generation failed (rc={trt.data.get('returncode')})",
             )
 
@@ -147,6 +150,9 @@ class TextToAudioComparator:
             return CompareResult(
                 stage_name=stage.name,
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=["early return: TRT did not produce a WAV output file"],
                 message="TRT did not produce a WAV output file",
             )
 

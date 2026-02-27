@@ -197,26 +197,85 @@ See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full gui
 
 ## Testing
 
+The test suite has six layers, from fast unit tests to full E2E GPU validation.
+See [Testing and Validation](docs/wiki/Testing-and-Validation.md) for the
+comprehensive manual (every file, every abstraction layer, every pytest marker).
+
+### Quick reference: run everything
+
 ```bash
-# Unit tests (no GPU)
-pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
-pytest tests/tools/ -v
+# === Tier 1: Unit tests (no GPU, ~10 min) ===
+
+# Python builder (50 modules, ~940 tests — config, weights, plugins, bundles)
+.venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
+
+# Tools self-tests (11 modules, ~160 tests — diff framework, comparison utilities)
+.venv/bin/python -m pytest tests/tools/ -v
+
+# C++ runtime (19 executables, 20 tests — bundle format, tokenizers, CUDA, KV cache)
 ctest --test-dir build --output-on-failure
 
-# E2E tests (GPU required; --rebuild-engines forces fresh bundle builds)
-pytest tests/e2e/ -v \
+# === Tier 2: Graph-op GPU tests (~2 min, needs TRT) ===
+
+.venv/bin/python -m pytest tests/builder/test_graph_ops.py \
+  tests/builder/test_graph_ops_extended.py \
+  tests/builder/test_graph_blocks.py -v -m trt
+
+# === Tier 3: E2E single-model smoke test (~5 min, needs GPU) ===
+
+.venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
   --engine-dir /mnt/storage/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python .venv/bin/python \
   --rebuild-engines
 
-# Performance comparison (serial GPU — supports large models on 24GB)
+# === Tier 4: Full E2E suite (50 models, ~2-3 hours, needs GPU) ===
+
+.venv/bin/python -m pytest tests/test_e2e.py -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
+
+# === Tier 5: Performance regression (manual, per model) ===
+
 python3 tools/perf_compare.py \
   --model Qwen/Qwen3-0.6B \
-  --bundle /path/to/qwen3.trtfb \
-  --prompt "Hello" --max-new-tokens 20
+  --bundle /mnt/storage/trt-transformers/engines/qwen3-0.6b.trtfb \
+  --prompt "The capital of France is" --max-new-tokens 20 --json results.json
 ```
 
-See [CLAUDE.md](CLAUDE.md) for the full regression test plan.
+### What to run when
+
+| Change type | What to run |
+|-------------|------------|
+| Python builder logic | Tier 1 + Tier 2 |
+| Family plugin | Tier 1, Tier 2, Tier 3 (specific model) |
+| C++ runtime | Tier 1 (ctest), Tier 3 |
+| Graph ops | Tier 1, Tier 2 |
+| KV cache / position logic | Tier 1, Tier 3, Tier 4 |
+| New model (existing family) | Add JSON manifest to `tests/e2e/models/`, run Tier 3 |
+| New model family | Tier 1, Tier 2, `validate_family.sh`, add manifest, Tier 4 |
+
+### Filtering with pytest markers
+
+```bash
+# Only unit tests (no GPU)
+pytest tests/builder/ -m unit -v
+
+# Only GPU/TRT tests
+pytest tests/builder/ -m gpu -v
+
+# E2E by modality
+pytest tests/test_e2e.py --e2e-task-strategy text_generation_causal -v ...
+pytest tests/test_e2e.py --e2e-task-strategy diffusion_media_generation -v ...
+pytest tests/test_e2e.py --e2e-task-strategy vision_language_generation -v ...
+```
+
+### Coverage
+
+```bash
+.venv/bin/python -m pytest tests/builder/ tests/tools/ -v \
+  --ignore=tests/builder/test_cli.py --cov --cov-report=term-missing
+```
 
 ## Documentation
 
@@ -226,6 +285,7 @@ See [CLAUDE.md](CLAUDE.md) for the full regression test plan.
 | [Pipeline Deep Dive](docs/wiki/Pipeline-Deep-Dive.md) | Full call chain, data structures |
 | [TRT Internals](docs/wiki/TRT-Internals.md) | Decoder layer anatomy, graph ops |
 | [HF vs TRT Comparison](docs/wiki/HF-vs-TRT-Comparison.md) | Side-by-side comparison |
+| [Testing and Validation](docs/wiki/Testing-and-Validation.md) | Complete test manual: 6 layers, every file, every marker |
 | [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) | Step-by-step guide |
 | [Static Design](docs/wiki/Static-Design.md) | Class-level UML diagrams and descriptions |
 | [Source Layout](docs/wiki/Source-Layout.md) | File-by-file guide |

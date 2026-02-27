@@ -101,7 +101,7 @@ class TestQwen3MoePlugin:
                 t[f"{p}.mlp.down_proj.weight"] = _rand(
                     cls.HIDDEN, cls.DENSE_INTER)
             else:
-                # MoE layer
+                # MoE layer (Qwen3-MoE: no shared experts)
                 t[f"{p}.mlp.gate.weight"] = _rand(
                     cls.NUM_EXPERTS, cls.HIDDEN)
                 for e in range(cls.NUM_EXPERTS):
@@ -112,16 +112,6 @@ class TestQwen3MoePlugin:
                         cls.MOE_INTER, cls.HIDDEN)
                     t[f"{ep}.down_proj.weight"] = _rand(
                         cls.HIDDEN, cls.MOE_INTER)
-                # Shared expert
-                sp = f"{p}.mlp.shared_expert"
-                t[f"{sp}.gate_proj.weight"] = _rand(
-                    cls.SHARED_INTER, cls.HIDDEN)
-                t[f"{sp}.up_proj.weight"] = _rand(
-                    cls.SHARED_INTER, cls.HIDDEN)
-                t[f"{sp}.down_proj.weight"] = _rand(
-                    cls.HIDDEN, cls.SHARED_INTER)
-                # Shared expert gate
-                t[f"{p}.mlp.shared_expert_gate.weight"] = _rand(1, cls.HIDDEN)
 
         t["model.norm.weight"] = _rand(cls.HIDDEN)
         t["lm_head.weight"] = _rand(cls.VOCAB, cls.HIDDEN)
@@ -163,7 +153,7 @@ class TestQwen3MoePlugin:
         assert "layer.0.expert.0.w_gate" not in weights
 
     def test_load_weights_moe_layer_keys(self, tmp_path):
-        """MoE layer (layer 1) should have router, expert, and shared expert keys."""
+        """MoE layer (layer 1) should have router and expert keys but no shared expert (Qwen3-MoE)."""
         from trtf_build.families.qwen_moe import plugin
 
         _write_config(tmp_path, self._make_config())
@@ -178,12 +168,11 @@ class TestQwen3MoePlugin:
             assert f"layer.1.expert.{e}.w_gate" in weights
             assert f"layer.1.expert.{e}.w_up" in weights
             assert f"layer.1.expert.{e}.w_down" in weights
-        # Shared expert
-        assert "layer.1.shared_expert.w_gate" in weights
-        assert "layer.1.shared_expert.w_up" in weights
-        assert "layer.1.shared_expert.w_down" in weights
-        # Shared expert gate
-        assert "layer.1.shared_expert_gate" in weights
+        # Qwen3-MoE: no shared experts
+        assert "layer.1.shared_expert.w_gate" not in weights
+        assert "layer.1.shared_expert.w_up" not in weights
+        assert "layer.1.shared_expert.w_down" not in weights
+        assert "layer.1.shared_expert_gate" not in weights
         # Should NOT have dense MLP keys
         assert "layer.1.w_gate" not in weights
 
@@ -237,10 +226,6 @@ class TestQwen3MoePlugin:
         # Expert down: [hidden, moe_inter] -> [moe_inter, hidden]
         assert weights["layer.1.expert.0.w_down"].shape == (
             self.MOE_INTER, self.HIDDEN)
-
-        # Shared expert gate proj: [shared_inter, hidden] -> [hidden, shared_inter]
-        assert weights["layer.1.shared_expert.w_gate"].shape == (
-            self.HIDDEN, self.SHARED_INTER)
 
         # Dense layer gate: [dense_inter, hidden] -> [hidden, dense_inter]
         assert weights["layer.0.w_gate"].shape == (
@@ -301,15 +286,15 @@ class TestQwen3MoePlugin:
             weights["layer.1.expert.0.w_gate"],
             gate_raw.T.astype(np.float32), atol=1e-6)
 
-        # Check shared expert up weight (layer 1)
-        shared_up_raw = tensors[
-            "model.layers.1.mlp.shared_expert.up_proj.weight"]
+        # Check expert 2 down weight (layer 1)
+        down_raw = tensors[
+            "model.layers.1.mlp.experts.2.down_proj.weight"]
         np.testing.assert_allclose(
-            weights["layer.1.shared_expert.w_up"],
-            shared_up_raw.T.astype(np.float32), atol=1e-6)
+            weights["layer.1.expert.2.w_down"],
+            down_raw.T.astype(np.float32), atol=1e-6)
 
-    def test_shared_expert_gate_shape(self, tmp_path):
-        """Shared expert gate weight should have shape [1, hidden]."""
+    def test_no_shared_expert_keys_for_qwen3_moe(self, tmp_path):
+        """Qwen3-MoE should NOT have shared expert keys in the weight dict."""
         from trtf_build.families.qwen_moe import plugin
 
         tensors = self._make_tensors()
@@ -319,8 +304,11 @@ class TestQwen3MoePlugin:
         cfg = ModelConfig.from_dir(tmp_path)
         weights = plugin.load_weights(str(tmp_path), cfg)
 
-        assert weights["layer.1.shared_expert_gate"].shape == (
-            1, self.HIDDEN)
+        assert "layer.1.shared_expert_gate" not in weights
+        assert "layer.1.shared_expert.w_gate" not in weights
+        assert "layer.1.shared_expert.w_up" not in weights
+        assert "layer.1.shared_expert.w_down" not in weights
+        assert weights["_has_shared_expert"] is False
 
     def test_tied_embeddings(self, tmp_path):
         """When lm_head.weight is missing, w_out = transposed embedding."""
@@ -343,12 +331,12 @@ class TestQwen3MoePlugin:
             weights["w_out"], embedding.T, atol=1e-6)
 
     def test_all_moe_no_dense(self, tmp_path):
-        """With mlp_only_layers=[], all layers should be MoE."""
+        """With mlp_only_layers=[], all layers should be MoE (Qwen3-MoE, no shared experts)."""
         from trtf_build.families.qwen_moe import plugin
 
         config = self._make_config()
         config["mlp_only_layers"] = []
-        # Rebuild tensors with all MoE layers
+        # Rebuild tensors with all MoE layers (no shared experts)
         t = {}
         t["model.embed_tokens.weight"] = _rand(self.VOCAB, self.HIDDEN)
         for i in range(self.LAYERS):
@@ -363,7 +351,7 @@ class TestQwen3MoePlugin:
                 self.KV_DIM, self.HIDDEN)
             t[f"{p}.self_attn.o_proj.weight"] = _rand(
                 self.HIDDEN, self.HIDDEN)
-            # MoE for all layers
+            # MoE for all layers (no shared experts)
             t[f"{p}.mlp.gate.weight"] = _rand(
                 self.NUM_EXPERTS, self.HIDDEN)
             for e in range(self.NUM_EXPERTS):
@@ -374,14 +362,6 @@ class TestQwen3MoePlugin:
                     self.MOE_INTER, self.HIDDEN)
                 t[f"{ep}.down_proj.weight"] = _rand(
                     self.HIDDEN, self.MOE_INTER)
-            sp = f"{p}.mlp.shared_expert"
-            t[f"{sp}.gate_proj.weight"] = _rand(
-                self.SHARED_INTER, self.HIDDEN)
-            t[f"{sp}.up_proj.weight"] = _rand(
-                self.SHARED_INTER, self.HIDDEN)
-            t[f"{sp}.down_proj.weight"] = _rand(
-                self.HIDDEN, self.SHARED_INTER)
-            t[f"{p}.mlp.shared_expert_gate.weight"] = _rand(1, self.HIDDEN)
         t["model.norm.weight"] = _rand(self.HIDDEN)
         t["lm_head.weight"] = _rand(self.VOCAB, self.HIDDEN)
 
@@ -393,7 +373,7 @@ class TestQwen3MoePlugin:
 
         for i in range(self.LAYERS):
             assert f"layer.{i}.router" in weights
-            assert f"layer.{i}.shared_expert.w_gate" in weights
+            assert f"layer.{i}.shared_expert.w_gate" not in weights
             assert f"layer.{i}.w_gate" not in weights
 
     def test_plugin_discovery(self):

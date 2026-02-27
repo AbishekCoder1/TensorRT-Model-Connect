@@ -61,6 +61,12 @@ class EncoderOnlyComparator:
                 return CompareResult(
                     stage_name=stage.name,
                     passed=False,
+                    metrics={},
+                    per_metric_pass={},
+                    gate_details=[
+                        f"early return: CLS embedding dimension mismatch: "
+                        f"TRT={len(trt_cls)}, ref={len(ref_cls)}"
+                    ],
                     message=(
                         f"CLS embedding dimension mismatch: TRT={len(trt_cls)}, "
                         f"ref={len(ref_cls)}"
@@ -95,6 +101,12 @@ class EncoderOnlyComparator:
                 return CompareResult(
                     stage_name=stage.name,
                     passed=False,
+                    metrics={},
+                    per_metric_pass={},
+                    gate_details=[
+                        f"early return: hidden state dimension mismatch: "
+                        f"TRT={len(trt_hidden)}, ref={len(ref_hidden)}"
+                    ],
                     message=(
                         f"Hidden state dimension mismatch: TRT={len(trt_hidden)}, "
                         f"ref={len(ref_hidden)}"
@@ -141,6 +153,9 @@ class EncoderOnlyComparator:
             return CompareResult(
                 stage_name=stage.name,
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=["early return: no comparable outputs (missing cls_embedding and hidden_states)"],
                 message="No comparable outputs found (missing cls_embedding and hidden_states)",
             )
 

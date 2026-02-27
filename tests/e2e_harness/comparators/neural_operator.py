@@ -102,9 +102,17 @@ class NeuralOperatorComparator:
         ref_field = _load_field(ref.data)
 
         if trt_field is None or ref_field is None:
+            missing = []
+            if trt_field is None:
+                missing.append("TRT")
+            if ref_field is None:
+                missing.append("ref")
             return CompareResult(
                 stage_name=stage.name,
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[f"early return: missing field data from {', '.join(missing)}"],
                 message="Missing field data in TRT or reference output",
             )
 

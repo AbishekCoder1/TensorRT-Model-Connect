@@ -1572,7 +1572,7 @@ class TestInternVLPlugin:
         assert vl_cfg["interpolation"] == "bicubic"
         assert vl_cfg["fixed_image_size"] == 448
         # num_patches = (448/14)^2 = 1024
-        assert vl_cfg["num_image_pad_tokens"] == 1024
+        assert vl_cfg["num_image_pad_tokens"] == 256
         assert vl_cfg["vision_output_dim"] == self.HIDDEN
         assert "image_token_id" in vl_cfg
         assert "vl_prompt_template" in vl_cfg

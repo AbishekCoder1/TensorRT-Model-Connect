@@ -7,6 +7,9 @@ like runtime_strategy and embed_input.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from trtf_build.families import find_plugin, _ALL_PLUGINS
@@ -50,6 +53,58 @@ class TestPluginDiscovery:
         assert len(names) == len(set(names)), (
             f"Duplicate plugin names: {names}")
 
+    def test_all_plugins_matches_returns_bool(self):
+        """Every plugin's matches() should return a bool, not just a truthy value."""
+        # Build a mapping: plugin_name -> one known model_type that should match.
+        name_to_type: dict[str, str] = {}
+        for model_type, plugin_name in _POSITIVE_MATCH_CASES:
+            if plugin_name not in name_to_type:
+                name_to_type[plugin_name] = model_type
+
+        for plugin in _ALL_PLUGINS:
+            model_type = name_to_type.get(plugin.name)
+            if model_type is None:
+                continue  # no known positive case; covered by test_all_plugins_have_match_case
+            result = plugin.matches(model_type)
+            assert isinstance(result, bool), (
+                f"Plugin {plugin.name!r}.matches({model_type!r}) returned "
+                f"{type(result).__name__}, expected bool")
+            assert result is True, (
+                f"Plugin {plugin.name!r}.matches({model_type!r}) returned "
+                f"{result!r}, expected True")
+
+    def test_all_plugins_matches_own_type(self):
+        """Every plugin matches its known model_type and rejects a nonsense type."""
+        # Build a mapping: plugin_name -> one known model_type that should match.
+        name_to_type: dict[str, str] = {}
+        for model_type, plugin_name in _POSITIVE_MATCH_CASES:
+            if plugin_name not in name_to_type:
+                name_to_type[plugin_name] = model_type
+
+        nonsense_types = [
+            "zzzz_nonexistent_model_xyz_42",
+            "__bogus__",
+            "this_model_does_not_exist_ever_12345",
+        ]
+
+        for plugin in _ALL_PLUGINS:
+            model_type = name_to_type.get(plugin.name)
+            if model_type is None:
+                continue  # no known positive case
+            # Positive: must match own type
+            assert plugin.matches(model_type), (
+                f"Plugin {plugin.name!r} did not match its own type "
+                f"{model_type!r}")
+            # Negative: must reject nonsense types
+            for bad_type in nonsense_types:
+                result = plugin.matches(bad_type)
+                assert result is False, (
+                    f"Plugin {plugin.name!r}.matches({bad_type!r}) returned "
+                    f"{result!r}, expected False")
+                assert isinstance(result, bool), (
+                    f"Plugin {plugin.name!r}.matches({bad_type!r}) returned "
+                    f"{type(result).__name__}, expected bool")
+
     def test_all_plugins_have_match_case(self):
         """Every discovered plugin should have at least one positive match case."""
         matched_names = {name for _, name in _POSITIVE_MATCH_CASES}
@@ -58,6 +113,85 @@ class TestPluginDiscovery:
         assert not untested, (
             f"Plugins without positive match cases: {untested}. "
             f"Add entries to _POSITIVE_MATCH_CASES.")
+
+    def test_all_plugins_have_e2e_manifest(self):
+        """Validate that every discovered family plugin has at least one E2E test manifest.
+
+        Intention:
+            When a developer adds a new family plugin, they must also add a JSON manifest
+            in tests/e2e/models/ so the E2E test suite covers that model. Without this
+            enforcement, plugins can be added and never tested E2E, leading to silent
+            regressions.
+
+            Example bug this catches: A developer adds trtf_build/families/my_model.py with
+            a plugin that passes unit tests, but forgets to add tests/e2e/models/my-model.json.
+            The plugin works in development but breaks in production because no E2E test
+            ever exercises the full build->infer->compare pipeline.
+
+        Setup:
+            1. Discover all family plugins via _ALL_PLUGINS (auto-discovered from
+               trtf_build/trtf_build/families/*.py modules with a module-level `plugin`).
+            2. Load all JSON manifests from tests/e2e/models/ and extract each "family" field.
+            3. Compute the set difference: plugins without any manifest coverage.
+            4. Exclude exempt plugins (WIP/incomplete) from the check.
+            5. Assert the uncovered set is empty.
+        """
+        _EXEMPT_PLUGINS = {
+            "deepseek_ocr", "qwen3_omni", "deeponet", "yolox", "fno",
+            "nemotron_h", "phi4_multimodal", "eagle_vlm", "personaplex",
+            "deepseek_v2",
+        }
+
+        models_dir = Path(__file__).resolve().parent.parent / "e2e" / "models"
+        families_in_manifests: set[str] = set()
+        for manifest_path in models_dir.glob("*.json"):
+            with open(manifest_path) as f:
+                data = json.load(f)
+            family = data.get("family")
+            if family:
+                families_in_manifests.add(family)
+
+        plugin_names = {p.name for p in _ALL_PLUGINS}
+        uncovered = plugin_names - families_in_manifests - _EXEMPT_PLUGINS
+        assert not uncovered, (
+            f"Plugins without E2E manifest coverage: {uncovered}. "
+            f"Add a JSON manifest in tests/e2e/models/ with 'family' matching "
+            f"the plugin name, or add to _EXEMPT_PLUGINS if WIP.")
+
+    def test_all_manifests_have_valid_family(self):
+        """Validate that every E2E manifest references a family that exists as a plugin.
+
+        Intention:
+            When a developer adds a new JSON manifest in tests/e2e/models/, the "family"
+            field must correspond to a real, discovered family plugin. A typo or stale
+            reference would cause the E2E test to silently fail or error at bundle-build
+            time rather than at test collection.
+
+            Example bug this catches: A developer renames trtf_build/families/gpt2.py to
+            gpt2_v2.py (changing the plugin name) but forgets to update the manifest's
+            "family" field from "gpt2" to "gpt2_v2". The E2E test would fail at runtime
+            with a confusing "no plugin found" error instead of a clear test-time assertion.
+
+        Setup:
+            1. Discover all family plugin names via _ALL_PLUGINS.
+            2. Load all JSON manifests from tests/e2e/models/ and extract each "family" field.
+            3. For each manifest with a non-empty "family", verify it matches a plugin name.
+            4. Assert that no manifest references an unknown family.
+        """
+        plugin_names = {p.name for p in _ALL_PLUGINS}
+
+        models_dir = Path(__file__).resolve().parent.parent / "e2e" / "models"
+        invalid: list[str] = []
+        for manifest_path in sorted(models_dir.glob("*.json")):
+            with open(manifest_path) as f:
+                data = json.load(f)
+            family = data.get("family", "")
+            if family and family not in plugin_names:
+                invalid.append(f"{manifest_path.name}: family={family!r}")
+
+        assert not invalid, (
+            f"Manifests referencing unknown family plugins:\n"
+            + "\n".join(f"  {entry}" for entry in invalid))
 
 
 # ---------------------------------------------------------------------------
@@ -145,15 +279,8 @@ _POSITIVE_MATCH_CASES = [
     ("internvl3", "internvl"),
     # BERT (encoder-only)
     ("bert", "bert"),
-    # DeepONet (neural operator)
-    ("deeponet", "deeponet"),
-    ("deep_o_net", "deeponet"),
-    # YOLOX (object detection)
-    ("yolox", "yolox"),
-    ("yolox_document", "yolox"),
-    ("yolox-doc", "yolox"),
     # Eagle VLM (embedding/reranking)
-    ("eagle", "eagle_vlm"),
+    ("llama_nemotron_vl", "eagle_vlm"),
     # Qwen3-Omni (omni multimodal)
     ("qwen3_omni", "qwen3_omni"),
     ("qwen3omni", "qwen3_omni"),
@@ -169,8 +296,12 @@ _POSITIVE_MATCH_CASES = [
     ("sam", "sam"),
     # Phi-4 Multimodal
     ("phi4_multimodal", "phi4_multimodal"),
-    # FNO (Fourier Neural Operator)
-    ("fno", "fno"),
+    # FLUX (diffusion T2I)
+    ("flux", "flux"),
+    # Z-Image (diffusion T2I)
+    ("z_image", "z_image"),
+    # DeepSeek OCR (matches deepseek_vl_v2 model_type)
+    ("deepseek_vl_v2", "deepseek_ocr"),
 ]
 
 

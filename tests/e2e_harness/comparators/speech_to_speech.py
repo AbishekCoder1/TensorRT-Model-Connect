@@ -44,6 +44,9 @@ class SpeechToSpeechComparator:
             return CompareResult(
                 stage_name=stage.name,
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[f"early return: TRT speech-to-speech failed (rc={trt.data.get('returncode')})"],
                 message=f"TRT speech-to-speech failed (rc={trt.data.get('returncode')})",
             )
 
@@ -61,6 +64,9 @@ class SpeechToSpeechComparator:
                 return CompareResult(
                     stage_name=stage.name,
                     passed=False,
+                    metrics={},
+                    per_metric_pass={},
+                    gate_details=["early return: no frames to compare (empty token arrays)"],
                     message="No frames to compare (empty token arrays)",
                 )
 

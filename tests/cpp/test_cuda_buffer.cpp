@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #if TRTF_HAS_TRT
@@ -187,6 +188,8 @@ static void test_large_buffer_roundtrip()
         if (readback[i] != host_data[i])
         {
             all_match = false;
+            std::cerr << "large_roundtrip: mismatch at index " << i
+                      << ": expected " << host_data[i] << " got " << readback[i] << '\n';
             break;
         }
     }

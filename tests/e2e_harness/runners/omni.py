@@ -16,6 +16,7 @@ import subprocess
 import time
 from typing import Any
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 from ..registry import register_runner
 
@@ -74,10 +75,14 @@ class OmniMultimodalRunner:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Omni stage {stage_name} failed (rc={result.returncode}): "
-                f"{result.stderr[-2000:]}"
-            )
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                f"omni_{stage_name}", case.name)
+            msg = (f"Omni stage {stage_name} failed (rc={result.returncode}): "
+                   f"{truncated}")
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         data = _parse_stage_output(result.stdout.strip(), stage_name)
 
@@ -139,10 +144,14 @@ class CompositePipelineRunner:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Composite stage {stage_name} failed (rc={result.returncode}): "
-                f"{result.stderr[-2000:]}"
-            )
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                f"composite_{stage_name}", case.name)
+            msg = (f"Composite stage {stage_name} failed (rc={result.returncode}): "
+                   f"{truncated}")
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         data = _parse_stage_output(result.stdout.strip(), stage_name)
 

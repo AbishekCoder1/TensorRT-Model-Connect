@@ -24,6 +24,7 @@ import textwrap
 import time
 from pathlib import Path
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -122,14 +123,21 @@ class DiffusionMediaRunner:
             cmd, capture_output=True, text=True, timeout=3600)
         elapsed = time.monotonic() - t0
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "debug_pipeline", case.name)
+        dbg_data: dict = {
+            "passed": result.returncode == 0,
+            "returncode": result.returncode,
+            "output": result.stdout,
+            "stderr": stderr_truncated,
+        }
+        if stderr_log:
+            dbg_data["stderr_log"] = stderr_log
+
         return StageOutput(
             stage_name=stage.name,
-            data={
-                "passed": result.returncode == 0,
-                "returncode": result.returncode,
-                "output": result.stdout,
-                "stderr": result.stderr[-2000:] if result.stderr else "",
-            },
+            data=dbg_data,
             text=result.stdout,
             timing_s=elapsed,
             metadata={"command": cmd},
@@ -178,11 +186,16 @@ class DiffusionMediaRunner:
         )
         elapsed = time.monotonic() - t0
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "t5_encode", case.name)
         data: dict = {
             "returncode": result.returncode,
             "stdout": result.stdout,
-            "stderr": result.stderr[-2000:] if result.stderr else "",
+            "stderr": stderr_truncated,
         }
+        if stderr_log:
+            data["stderr_log"] = stderr_log
         # Parse output_path from stdout (printed by the subprocess)
         for line in (result.stdout or "").splitlines():
             if line.startswith("output_path="):
@@ -265,17 +278,24 @@ class DiffusionMediaRunner:
                     for fp in frame_files
                 ]
 
+            stderr_truncated, stderr_log = save_full_stderr(
+                result.stderr or "", ctx.artifacts_dir or "",
+                "end_to_end", case.name)
+            e2e_data: dict = {
+                "returncode": result.returncode,
+                "num_frames": num_frames,
+                "frame_stats": frame_stats,
+                "frames_dir": artifact_frames_dir or frame_dir,
+                "frame_paths": frame_paths,
+                "stdout": result.stdout,
+                "stderr": stderr_truncated,
+            }
+            if stderr_log:
+                e2e_data["stderr_log"] = stderr_log
+
             return StageOutput(
                 stage_name=stage.name,
-                data={
-                    "returncode": result.returncode,
-                    "num_frames": num_frames,
-                    "frame_stats": frame_stats,
-                    "frames_dir": artifact_frames_dir or frame_dir,
-                    "frame_paths": frame_paths,
-                    "stdout": result.stdout,
-                    "stderr": result.stderr[-2000:] if result.stderr else "",
-                },
+                data=e2e_data,
                 text=result.stdout,
                 timing_s=elapsed,
                 metadata={"command": cmd},
@@ -369,12 +389,17 @@ np.save("/tmp/crossover_ref_t5_trt_dit.npy", dit_out)
         )
         elapsed = time.monotonic() - t0
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "crossover_ref_t5_trt_dit", case.name)
         data: dict = {
             "returncode": result.returncode,
             "stdout": result.stdout,
-            "stderr": result.stderr[-2000:] if result.stderr else "",
+            "stderr": stderr_truncated,
             "crossover_type": "ref_t5_trt_dit",
         }
+        if stderr_log:
+            data["stderr_log"] = stderr_log
         try:
             import json as json_mod
             parsed = json_mod.loads(result.stdout.strip())
@@ -468,12 +493,17 @@ np.save("/tmp/crossover_trt_t5_ref_dit.npy", hf_out)
         )
         elapsed = time.monotonic() - t0
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "crossover_trt_t5_ref_dit", case.name)
         data: dict = {
             "returncode": result.returncode,
             "stdout": result.stdout,
-            "stderr": result.stderr[-2000:] if result.stderr else "",
+            "stderr": stderr_truncated,
             "crossover_type": "trt_t5_ref_dit",
         }
+        if stderr_log:
+            data["stderr_log"] = stderr_log
         try:
             import json as json_mod
             parsed = json_mod.loads(result.stdout.strip())

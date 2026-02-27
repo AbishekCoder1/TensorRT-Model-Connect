@@ -31,6 +31,7 @@
 // =============================================================================
 
 #include "utils/data_dir.h"
+#include "test_helpers.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -57,7 +58,7 @@ static void check(bool condition, const char* test_name)
 static void test_default_resolves_to_source_dir()
 {
     // Without TRTF_DATA_DIR set, should return the compiled-in TRTF_SOURCE_DIR.
-    unsetenv("TRTF_DATA_DIR");
+    trtf_test::EnvVarGuard guard("TRTF_DATA_DIR");  // unsets the var
     const std::string dir = trtf::source_dir();
     check(!dir.empty(), "source_dir not empty");
     check(dir != ".", "source_dir is not fallback dot");
@@ -70,10 +71,9 @@ static void test_default_resolves_to_source_dir()
 //            var value "/tmp/claude/fake_trtf_root".
 static void test_env_override()
 {
-    setenv("TRTF_DATA_DIR", "/tmp/claude/fake_trtf_root", 1);
+    trtf_test::EnvVarGuard guard("TRTF_DATA_DIR", "/tmp/claude/fake_trtf_root");
     const std::string dir = trtf::source_dir();
     check(dir == "/tmp/claude/fake_trtf_root", "source_dir matches env override");
-    unsetenv("TRTF_DATA_DIR");
 }
 
 // Intention: Verify that scripts_dir() returns a path ending in "/scripts".
@@ -82,7 +82,7 @@ static void test_env_override()
 //            suffix "/scripts".
 static void test_scripts_dir_suffix()
 {
-    unsetenv("TRTF_DATA_DIR");
+    trtf_test::EnvVarGuard guard("TRTF_DATA_DIR");
     const std::string dir = trtf::scripts_dir();
     const std::string suffix = "/scripts";
     check(dir.size() >= suffix.size() && dir.compare(dir.size() - suffix.size(), suffix.size(), suffix) == 0,
@@ -95,7 +95,7 @@ static void test_scripts_dir_suffix()
 //            suffix "/models".
 static void test_models_dir_suffix()
 {
-    unsetenv("TRTF_DATA_DIR");
+    trtf_test::EnvVarGuard guard("TRTF_DATA_DIR");
     const std::string dir = trtf::models_dir();
     const std::string suffix = "/models";
     check(dir.size() >= suffix.size() && dir.compare(dir.size() - suffix.size(), suffix.size(), suffix) == 0,
@@ -110,7 +110,7 @@ static void test_models_dir_suffix()
 //            path exists on the filesystem using std::filesystem::exists().
 static void test_script_file_exists()
 {
-    unsetenv("TRTF_DATA_DIR");
+    trtf_test::EnvVarGuard guard("TRTF_DATA_DIR");
     const std::string path = trtf::script_path("hf_tokenizer.py");
     check(std::filesystem::exists(path), "hf_tokenizer.py exists at resolved path");
 }
@@ -121,7 +121,7 @@ static void test_script_file_exists()
 // Mechanism: Calls model_path("hf"), checks the result is non-empty.
 static void test_model_path_resolution()
 {
-    unsetenv("TRTF_DATA_DIR");
+    trtf_test::EnvVarGuard guard("TRTF_DATA_DIR");
     const std::string path = trtf::model_path("hf");
     check(!path.empty(), "model_path returns non-empty path");
 }
@@ -134,10 +134,9 @@ static void test_model_path_resolution()
 //            empty env var was ignored in favor of the compiled-in path).
 static void test_env_empty_string_ignored()
 {
-    setenv("TRTF_DATA_DIR", "", 1);
+    trtf_test::EnvVarGuard guard("TRTF_DATA_DIR", "");
     const std::string dir = trtf::source_dir();
     check(dir != "", "empty TRTF_DATA_DIR is ignored, returns compiled-in path");
-    unsetenv("TRTF_DATA_DIR");
 }
 
 int main()

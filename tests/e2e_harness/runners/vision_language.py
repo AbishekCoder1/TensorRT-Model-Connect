@@ -22,6 +22,7 @@ import sys
 import time
 from pathlib import Path
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,18 @@ class VisionLanguageRunner:
         # Parse metrics from stderr output
         metrics = _parse_diff_vl_metrics(result.stderr)
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "vision_encode", case.name)
+        meta: dict = {
+            "command": cmd,
+            "returncode": result.returncode,
+            "stdout": result.stdout[-2000:] if result.stdout else "",
+            "stderr": stderr_truncated,
+        }
+        if stderr_log:
+            meta["stderr_log"] = stderr_log
+
         return StageOutput(
             stage_name="vision_encode",
             data={
@@ -129,12 +142,7 @@ class VisionLanguageRunner:
                 "metrics": metrics,
             },
             timing_s=elapsed,
-            metadata={
-                "command": cmd,
-                "returncode": result.returncode,
-                "stdout": result.stdout[-2000:] if result.stdout else "",
-                "stderr": result.stderr[-2000:] if result.stderr else "",
-            },
+            metadata=meta,
         )
 
     def _run_text_decode(
@@ -217,17 +225,24 @@ class VisionLanguageRunner:
                         pass
             data["parsed_metrics"] = metrics
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "text_decode", case.name)
+        meta_td: dict = {
+            "returncode": result.returncode,
+            "stdout": result.stdout[-2000:] if result.stdout else "",
+            "stderr": stderr_truncated,
+        }
+        if stderr_log:
+            meta_td["stderr_log"] = stderr_log
+
         return StageOutput(
             stage_name="text_decode",
             text=generated_text,
             logits=logits_path if os.path.isfile(logits_path) else None,
             data=data,
             timing_s=elapsed,
-            metadata={
-                "returncode": result.returncode,
-                "stdout": result.stdout[-2000:] if result.stdout else "",
-                "stderr": result.stderr[-2000:] if result.stderr else "",
-            },
+            metadata=meta_td,
         )
 
     def _run_full_generation(
@@ -302,6 +317,17 @@ class VisionLanguageRunner:
             txt_path = art_dir / f"{case.name}_vl_output.txt"
             txt_path.write_text(generated_text, encoding="utf-8")
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "vl_full_generation", case.name)
+        meta_fg: dict = {
+            "command": cmd,
+            "returncode": result.returncode,
+            "stderr": stderr_truncated,
+        }
+        if stderr_log:
+            meta_fg["stderr_log"] = stderr_log
+
         return StageOutput(
             stage_name="full_generation",
             text=generated_text,
@@ -311,11 +337,7 @@ class VisionLanguageRunner:
                 "image_path": str(image_path),
             },
             timing_s=elapsed,
-            metadata={
-                "command": cmd,
-                "returncode": result.returncode,
-                "stderr": result.stderr[-2000:] if result.stderr else "",
-            },
+            metadata=meta_fg,
         )
 
 

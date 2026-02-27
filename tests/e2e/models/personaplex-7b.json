@@ -14,6 +14,6 @@
   "speech_min_rms": 0.001,
   "prompt": "",
   "max_new_tokens": 0,
-  "logit_atol": 1e-2,
+  "logit_atol": 0.01,
   "trust_remote_code": true
 }

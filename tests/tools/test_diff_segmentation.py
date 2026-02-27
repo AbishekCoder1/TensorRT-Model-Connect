@@ -106,8 +106,9 @@ class TestSegmentationMetrics:
 
     def test_pixel_agreement_identical(self):
         """Identical predictions should give 100% agreement."""
-        preds = np.array([[0, 1, 2], [1, 0, 2]])
-        agreement = float(np.mean(preds == preds))
+        preds_a = np.array([[0, 1, 2], [1, 0, 2]])
+        preds_b = np.array([[0, 1, 2], [1, 0, 2]])
+        agreement = float(np.mean(preds_a == preds_b))
         assert agreement == 1.0
 
     def test_pixel_agreement_half_mismatch(self):
@@ -125,8 +126,10 @@ class TestSegmentationMetrics:
         assert agreement == 0.0
 
     def test_max_logit_diff_identical(self):
-        logits = np.random.randn(1, 10, 32, 32).astype(np.float32)
-        max_diff = float(np.max(np.abs(logits - logits)))
+        rng = np.random.RandomState(42)
+        logits_a = rng.randn(1, 10, 32, 32).astype(np.float32)
+        logits_b = logits_a.copy()
+        max_diff = float(np.max(np.abs(logits_a - logits_b)))
         assert max_diff == 0.0
 
     def test_max_logit_diff_known(self):

@@ -70,9 +70,17 @@ class EmbeddingComparator:
         ref_emb = ref.data.get("embedding", [])
 
         if not trt_emb or not ref_emb:
+            missing = []
+            if not trt_emb:
+                missing.append("TRT")
+            if not ref_emb:
+                missing.append("ref")
             return CompareResult(
                 stage_name=stage.name,
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[f"early return: missing embedding data from {', '.join(missing)}"],
                 message="Missing embedding data in TRT or reference output",
             )
 
@@ -80,6 +88,12 @@ class EmbeddingComparator:
             return CompareResult(
                 stage_name=stage.name,
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[
+                    f"early return: embedding dimension mismatch: "
+                    f"TRT={len(trt_emb)}, ref={len(ref_emb)}"
+                ],
                 message=(
                     f"Embedding dimension mismatch: TRT={len(trt_emb)}, "
                     f"ref={len(ref_emb)}"

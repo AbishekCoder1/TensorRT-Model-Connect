@@ -11,6 +11,7 @@ import os
 import subprocess
 import time
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -46,10 +47,14 @@ class EmbeddingRunner:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Embedding inference failed (rc={result.returncode}): "
-                f"{result.stderr[-2000:]}"
-            )
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "embedding", case.name)
+            msg = (f"Embedding inference failed (rc={result.returncode}): "
+                   f"{truncated}")
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         # Parse embedding vector from stdout (JSON array or whitespace-separated floats)
         stdout = result.stdout.strip()

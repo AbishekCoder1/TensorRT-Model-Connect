@@ -7,8 +7,9 @@
   "max_cache_length": 384,
   "prompt": "Describe this image in detail.",
   "max_new_tokens": 30,
-  "logit_atol": 1e-3,
+  "logit_atol": 0.001,
   "layer_atol": 0.05,
   "test_image": "/workspace/users/yifeif/trt-transformers/engines/test_image.jpg",
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "core": true
 }

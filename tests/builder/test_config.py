@@ -420,3 +420,100 @@ class TestModelConfigExtended:
             "num_attention_heads": 16,
         }))
         assert cfg.num_key_value_heads == 16
+
+
+class TestModelConfigEdgeCases:
+    """Negative and edge-case tests documenting ModelConfig behavior with bad input.
+
+    ModelConfig is a plain dataclass with no validation — it stores whatever
+    values are passed. These tests document that behavior explicitly.
+    """
+
+    @pytest.mark.parametrize("field_name,value", [
+        ("hidden_size", -1),
+        ("hidden_size", -1024),
+        ("num_attention_heads", -1),
+        ("num_attention_heads", -16),
+        ("num_hidden_layers", -1),
+        ("num_hidden_layers", -28),
+    ])
+    def test_negative_dimensions_stored_as_is(self, field_name, value):
+        """ModelConfig stores negative dimensions without validation."""
+        cfg = ModelConfig(**{field_name: value})
+        assert getattr(cfg, field_name) == value
+
+    @pytest.mark.parametrize("field_name,value", [
+        ("hidden_size", -512),
+        ("num_attention_heads", -8),
+        ("num_hidden_layers", -4),
+    ])
+    def test_negative_dimensions_via_from_json(self, field_name, value):
+        """from_json stores negative dimensions from JSON without validation."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "test",
+            field_name: value,
+        }))
+        assert getattr(cfg, field_name) == value
+
+    def test_zero_layers(self):
+        """num_hidden_layers=0 is stored and produces a valid config."""
+        cfg = ModelConfig(
+            hidden_size=1024, num_attention_heads=16, num_hidden_layers=0)
+        assert cfg.num_hidden_layers == 0
+        # head_dim and attention_size still compute correctly
+        assert cfg.head_dim == 64
+        assert cfg.attention_size == 1024
+
+    def test_zero_layers_via_from_json(self):
+        """from_json with num_hidden_layers=0 produces a zero-layer config."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "test",
+            "hidden_size": 512,
+            "num_attention_heads": 8,
+            "num_hidden_layers": 0,
+        }))
+        assert cfg.num_hidden_layers == 0
+
+    def test_head_dim_with_negative_num_heads(self):
+        """head_dim returns 0 when num_attention_heads is negative (<=0 guard)."""
+        cfg = ModelConfig(hidden_size=1024, num_attention_heads=-4)
+        assert cfg.head_dim == 0
+        assert cfg.attention_size == 0
+
+    def test_string_hidden_size_via_constructor(self):
+        """Passing string where int expected — dataclass stores it without type check."""
+        cfg = ModelConfig(hidden_size="abc")  # type: ignore[arg-type]
+        assert cfg.hidden_size == "abc"
+
+    def test_float_num_hidden_layers_via_constructor(self):
+        """Passing float where int expected — dataclass stores it without type check."""
+        cfg = ModelConfig(num_hidden_layers=2.5)  # type: ignore[arg-type]
+        assert cfg.num_hidden_layers == 2.5
+
+    def test_string_hidden_size_from_json(self):
+        """JSON string value for hidden_size — from_json stores it (no int coercion)."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "hidden_size": "abc",
+            "num_attention_heads": 12,
+        }))
+        # The `or` chain in from_json: d.get("hidden_size", 0) returns "abc"
+        # (truthy string), so hidden_size = "abc"
+        assert cfg.hidden_size == "abc"
+
+    def test_float_num_hidden_layers_from_json(self):
+        """JSON float value for num_hidden_layers — from_json stores it as float."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "hidden_size": 768,
+            "num_attention_heads": 12,
+            "num_hidden_layers": 2.5,
+        }))
+        assert cfg.num_hidden_layers == 2.5
+
+    def test_none_hidden_size_from_json(self):
+        """JSON null for hidden_size — falls through or-chain to 0."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "hidden_size": None,
+            "num_attention_heads": 12,
+        }))
+        # None is falsy, so the `or` chain falls through: 0 or 0 or ... = 0
+        assert cfg.hidden_size == 0

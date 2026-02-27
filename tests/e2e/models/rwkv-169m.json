@@ -7,7 +7,7 @@
   "max_cache_length": 32,
   "prompt": "The capital of France is",
   "max_new_tokens": 10,
-  "logit_atol": 2e-3,
+  "logit_atol": 0.002,
   "layer_atol": 0.05,
   "trust_remote_code": false
 }

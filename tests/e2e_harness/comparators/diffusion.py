@@ -127,6 +127,9 @@ class DiffusionComparator:
         return CompareResult(
             stage_name=stage.name,
             passed=True,
+            metrics={},
+            per_metric_pass={},
+            gate_details=[f"No comparison logic for diffusion stage: {stage.name}"],
             message=f"No comparison logic for diffusion stage: {stage.name}",
         )
 
@@ -180,6 +183,9 @@ class DiffusionComparator:
             return CompareResult(
                 stage_name="end_to_end",
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[f"early return: TRT generation failed (rc={trt.data.get('returncode')})"],
                 message=f"TRT generation failed (rc={trt.data.get('returncode')})",
             )
 
@@ -282,6 +288,9 @@ class DiffusionComparator:
             return CompareResult(
                 stage_name="t5_encode",
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=["early return: missing output paths for T5 comparison"],
                 message="Missing output paths for T5 comparison",
             )
 
@@ -292,6 +301,9 @@ class DiffusionComparator:
             return CompareResult(
                 stage_name="t5_encode",
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[f"early return: failed to load T5 outputs: {e}"],
                 message=f"Failed to load T5 outputs: {e}",
             )
 
@@ -329,6 +341,9 @@ class DiffusionComparator:
             return CompareResult(
                 stage_name=stage.name,
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[f"early return: crossover subprocess failed (rc={rc})"],
                 message=f"Crossover stage failed (rc={rc}): "
                         f"{trt.data.get('stderr', '')[:500]}",
             )

@@ -7,7 +7,7 @@
   "max_cache_length": 64,
   "prompt": "The capital of France is",
   "max_new_tokens": 10,
-  "logit_atol": 1e-2,
+  "logit_atol": 0.01,
   "layer_atol": 0.1,
   "trust_remote_code": false,
   "notes": "Tiny random-weight model for CI. Adapted from deepseek-v3-tiny-random which shares the deepseek_v2 model_type."

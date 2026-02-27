@@ -1491,8 +1491,10 @@ def preprocess_image_for_trt(
     """
     temporal = kwargs.get("temporal_patch_size", 1)
     if preprocessor_type == "simple_chw":
-        # Standard RGB ViT models (InternVL, etc.) — no temporal tiling.
-        return _preprocess_simple_chw(image_path, **kwargs)
+        result = _preprocess_simple_chw(image_path, **kwargs)
+        if temporal > 1 and result.shape[0] < temporal * 3:
+            result = np.tile(result, (temporal, 1, 1))
+        return result
     if preprocessor_type == "center_crop_chw":
         result = _preprocess_center_crop_chw(image_path, **kwargs)
         if temporal > 1 and result.shape[0] < temporal * 3:

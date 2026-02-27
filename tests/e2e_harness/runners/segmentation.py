@@ -22,6 +22,7 @@ import sys
 import time
 from pathlib import Path
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -130,6 +131,17 @@ class SegmentationRunner:
             except Exception as e:
                 logger.warning("Failed to load segmentation output: %s", e)
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "segmentation", case.name)
+        seg_meta: dict = {
+            "command": cmd,
+            "returncode": result.returncode,
+            "stderr": stderr_truncated,
+        }
+        if stderr_log:
+            seg_meta["stderr_log"] = stderr_log
+
         return StageOutput(
             stage_name="full_inference",
             data={
@@ -138,11 +150,7 @@ class SegmentationRunner:
                 "image_path": str(image_path),
             },
             timing_s=elapsed,
-            metadata={
-                "command": cmd,
-                "returncode": result.returncode,
-                "stderr": result.stderr[-2000:] if result.stderr else "",
-            },
+            metadata=seg_meta,
         )
 
 
@@ -248,6 +256,18 @@ class PromptedSegmentationRunner:
         if result.returncode == 0:
             masks, mask_scores = _load_mask_outputs(output_dir, result.stdout)
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "prompted_segmentation", case.name)
+        pseg_meta: dict = {
+            "command": cmd,
+            "returncode": result.returncode,
+            "stdout": result.stdout[-2000:] if result.stdout else "",
+            "stderr": stderr_truncated,
+        }
+        if stderr_log:
+            pseg_meta["stderr_log"] = stderr_log
+
         return StageOutput(
             stage_name="full_inference",
             data={
@@ -260,12 +280,7 @@ class PromptedSegmentationRunner:
                 "image_path": str(image_path),
             },
             timing_s=elapsed,
-            metadata={
-                "command": cmd,
-                "returncode": result.returncode,
-                "stdout": result.stdout[-2000:] if result.stdout else "",
-                "stderr": result.stderr[-2000:] if result.stderr else "",
-            },
+            metadata=pseg_meta,
         )
 
 

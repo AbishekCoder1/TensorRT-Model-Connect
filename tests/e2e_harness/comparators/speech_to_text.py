@@ -92,6 +92,9 @@ class SpeechToTextComparator:
             return CompareResult(
                 stage_name=stage.name,
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[f"early return: TRT transcription failed (rc={trt.data.get('returncode')})"],
                 message=f"TRT transcription failed (rc={trt.data.get('returncode')})",
             )
 

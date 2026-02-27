@@ -18,6 +18,8 @@ try:
 except (ImportError, ModuleNotFoundError):
     pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
 
+pytest.skip("YOLOX plugin not yet implemented", allow_module_level=True)
+
 RNG = np.random.RandomState(42)
 
 

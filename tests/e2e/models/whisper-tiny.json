@@ -8,8 +8,9 @@
   "max_cache_length": 64,
   "prompt": "test",
   "max_new_tokens": 10,
-  "logit_atol": 1e-2,
+  "logit_atol": 0.01,
   "layer_atol": 0.1,
   "trust_remote_code": false,
-  "test_input_audio": "/workspace/trt-transformers-cpp/tests/e2e/data/Recording.wav"
+  "test_input_audio": "/workspace/trt-transformers-cpp/tests/e2e/data/Recording.wav",
+  "core": true
 }

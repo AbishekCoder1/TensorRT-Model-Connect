@@ -130,6 +130,9 @@ class VisionLanguageComparator:
             return CompareResult(
                 stage_name=stage.name,
                 passed=False,
+                metrics={},
+                per_metric_pass={},
+                gate_details=[f"early return: unknown stage for VL comparator: {stage.name}"],
                 message=f"Unknown stage for VL comparator: {stage.name}",
             )
 

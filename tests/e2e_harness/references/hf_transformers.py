@@ -16,6 +16,7 @@ import textwrap
 import time
 from pathlib import Path
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -154,10 +155,13 @@ class HfTransformersReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"HF reference failed for {case.name} (rc={result.returncode}):\n"
-                f"{result.stderr[-2000:]}"
-            )
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_full_generation", case.name)
+            msg = f"HF reference failed for {case.name} (rc={result.returncode}):\n{truncated}"
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         # Read generated text
         text = ""
@@ -261,9 +265,13 @@ class HfTransformersReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"HF encoder-only failed for {case.name} (rc={result.returncode}):\n"
-                f"{result.stderr[-2000:]}")
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_encoder_only", case.name)
+            msg = f"HF encoder-only failed for {case.name} (rc={result.returncode}):\n{truncated}"
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         data = {}
         if Path(output_path).is_file():
@@ -343,9 +351,13 @@ class HfTransformersReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"HF segmentation failed for {case.name} (rc={result.returncode}):\n"
-                f"{result.stderr[-2000:]}")
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_segmentation", case.name)
+            msg = f"HF segmentation failed for {case.name} (rc={result.returncode}):\n{truncated}"
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         data = {}
         if Path(output_path).is_file():
@@ -434,9 +446,13 @@ class HfTransformersReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"HF embedding failed for {case.name} (rc={result.returncode}):\n"
-                f"{result.stderr[-2000:]}")
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_embedding", case.name)
+            msg = f"HF embedding failed for {case.name} (rc={result.returncode}):\n{truncated}"
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         data = {}
         if Path(output_path).is_file():
@@ -497,9 +513,13 @@ class HfTransformersReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"HF reranking failed for {case.name} (rc={result.returncode}):\n"
-                f"{result.stderr[-2000:]}")
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_reranking", case.name)
+            msg = f"HF reranking failed for {case.name} (rc={result.returncode}):\n{truncated}"
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         data = {}
         if Path(output_path).is_file():
@@ -578,9 +598,13 @@ class HfTransformersReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"HF speech-to-text failed for {case.name} (rc={result.returncode}):\n"
-                f"{result.stderr[-2000:]}")
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_speech_to_text", case.name)
+            msg = f"HF speech-to-text failed for {case.name} (rc={result.returncode}):\n{truncated}"
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         data = {}
         text = ""
@@ -655,9 +679,13 @@ class HfTransformersReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"HF object detection failed for {case.name} (rc={result.returncode}):\n"
-                f"{result.stderr[-2000:]}")
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_object_detection", case.name)
+            msg = f"HF object detection failed for {case.name} (rc={result.returncode}):\n{truncated}"
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         data = {}
         if Path(output_path).is_file():
@@ -740,9 +768,14 @@ class HfTransformersReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"HF text-to-audio failed for {case.name} "
-                f"(rc={result.returncode}):\n{result.stderr[-2000:]}")
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_text_to_audio", case.name)
+            msg = (f"HF text-to-audio failed for {case.name} "
+                   f"(rc={result.returncode}):\n{truncated}")
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         data = {}
         if Path(output_path).is_file():
@@ -849,9 +882,14 @@ class HfTransformersReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"HF VL generation failed for {case.name} "
-                f"(rc={result.returncode}):\n{result.stderr[-2000:]}")
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_vl_generation", case.name)
+            msg = (f"HF VL generation failed for {case.name} "
+                   f"(rc={result.returncode}):\n{truncated}")
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         text = ""
         if Path(text_path).is_file():
@@ -945,9 +983,14 @@ class HfTransformersReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"HF prompted segmentation failed for {case.name} "
-                f"(rc={result.returncode}):\n{result.stderr[-2000:]}")
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_prompted_segmentation", case.name)
+            msg = (f"HF prompted segmentation failed for {case.name} "
+                   f"(rc={result.returncode}):\n{truncated}")
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         data = {}
         if Path(output_path).is_file():

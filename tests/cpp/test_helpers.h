@@ -5,6 +5,7 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -13,9 +14,73 @@
 #include <utility>
 #include <vector>
 
-#include <stdlib.h>
-
 namespace trtf_test {
+
+// RAII guard that saves an environment variable on construction and restores it
+// on destruction. Prevents env var state leaks between tests if a test fails
+// early or throws.
+class EnvVarGuard {
+public:
+    // If value is non-null, setenv to that value; if null, unsetenv.
+    explicit EnvVarGuard(const std::string& name, const char* value = nullptr)
+        : name_(name)
+    {
+        const char* old = std::getenv(name.c_str());
+        had_value_ = (old != nullptr);
+        if (had_value_) old_value_ = old;
+        if (value)
+        {
+            setenv(name.c_str(), value, 1);
+        }
+        else
+        {
+            unsetenv(name.c_str());
+        }
+    }
+    ~EnvVarGuard()
+    {
+        if (had_value_)
+        {
+            setenv(name_.c_str(), old_value_.c_str(), 1);
+        }
+        else
+        {
+            unsetenv(name_.c_str());
+        }
+    }
+    EnvVarGuard(const EnvVarGuard&) = delete;
+    EnvVarGuard& operator=(const EnvVarGuard&) = delete;
+private:
+    std::string name_;
+    std::string old_value_;
+    bool had_value_;
+};
+
+// RAII guard that creates a temporary directory on construction and removes it
+// recursively on destruction. Prevents temp directory leaks if a test fails
+// early or throws.
+class TempDirGuard {
+public:
+    TempDirGuard()
+    {
+        char tmpl[] = "/tmp/trtf_test_XXXXXX";
+        char* result = mkdtemp(tmpl);
+        if (!result) throw std::runtime_error("mkdtemp failed");
+        path_ = result;
+    }
+    ~TempDirGuard()
+    {
+        if (!path_.empty())
+        {
+            std::filesystem::remove_all(path_);
+        }
+    }
+    const std::string& path() const { return path_; }
+    TempDirGuard(const TempDirGuard&) = delete;
+    TempDirGuard& operator=(const TempDirGuard&) = delete;
+private:
+    std::string path_;
+};
 
 struct TensorSpec {
     std::string name;

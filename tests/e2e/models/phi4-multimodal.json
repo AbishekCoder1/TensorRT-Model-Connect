@@ -7,9 +7,8 @@
   "max_cache_length": 384,
   "prompt": "Describe this image.",
   "max_new_tokens": 30,
-  "logit_atol": 1e-2,
+  "logit_atol": 0.01,
   "layer_atol": 0.1,
   "trust_remote_code": true,
-  "test_image": "/workspace/users/yifeif/trt-transformers/engines/test_image.jpg",
-  "skip": "phi4-multimodal remote code incompatible with transformers 5.x"
+  "test_image": "/workspace/users/yifeif/trt-transformers/engines/test_image.jpg"
 }

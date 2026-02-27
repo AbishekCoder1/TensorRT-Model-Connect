@@ -22,6 +22,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -180,14 +181,21 @@ class SpeechToTextRunner:
             txt_path = art_dir / f"{case.name}_trt_transcript.txt"
             txt_path.write_text(transcript, encoding="utf-8")
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "speech_to_text", case.name)
+        stt_data: dict = {
+            "returncode": result.returncode,
+            "transcript": transcript,
+            "token_ids": token_ids,
+            "stderr": stderr_truncated,
+        }
+        if stderr_log:
+            stt_data["stderr_log"] = stderr_log
+
         return StageOutput(
             stage_name=stage.name,
-            data={
-                "returncode": result.returncode,
-                "transcript": transcript,
-                "token_ids": token_ids,
-                "stderr": result.stderr[-2000:] if result.stderr else "",
-            },
+            data=stt_data,
             text=transcript,
             timing_s=elapsed,
             metadata={"command": cmd},
@@ -249,11 +257,16 @@ class TextToAudioRunner:
                 cmd, capture_output=True, text=True, timeout=600, env=env)
             elapsed = time.monotonic() - t0
 
+            stderr_truncated, stderr_log = save_full_stderr(
+                result.stderr or "", ctx.artifacts_dir or "",
+                "text_to_audio", case.name)
             data: dict = {
                 "returncode": result.returncode,
                 "stdout": result.stdout,
-                "stderr": result.stderr[-2000:] if result.stderr else "",
+                "stderr": stderr_truncated,
             }
+            if stderr_log:
+                data["stderr_log"] = stderr_log
 
             if os.path.exists(wav_path):
                 rms = _read_wav_rms(wav_path)
@@ -389,11 +402,16 @@ class SpeechToSpeechRunner:
                 cmd, capture_output=True, text=True, timeout=600, env=env)
             elapsed = time.monotonic() - t0
 
+            stderr_truncated, stderr_log = save_full_stderr(
+                result.stderr or "", ctx.artifacts_dir or "",
+                "speech_to_speech", case.name)
             data: dict = {
                 "returncode": result.returncode,
                 "stdout": result.stdout,
-                "stderr": result.stderr[-2000:] if result.stderr else "",
+                "stderr": stderr_truncated,
             }
+            if stderr_log:
+                data["stderr_log"] = stderr_log
 
             # Load output tokens if dumped
             if os.path.exists(tokens_path):

@@ -625,3 +625,66 @@ class TestLoadStandardWeightsExtended:
         cfg = ModelConfig.from_dir(tmp_path)
         with pytest.raises(FileNotFoundError):
             load_standard_weights(tmp_path, cfg)
+
+    def test_single_kv_head_expansion(self, tmp_path):
+        """GQA with num_heads=8, num_kv_heads=1: KV weights repeated 8x.
+
+        This is the extreme MQA (multi-query attention) case where a single
+        KV head is shared across all query heads. The expansion should
+        produce output where every query head slice is identical to the
+        single source KV head.
+        """
+        hidden = 16
+        num_heads = 8
+        num_kv_heads = 1
+        head_dim = hidden // num_heads  # 2
+        kv_hidden = num_kv_heads * head_dim  # 2
+
+        config = {
+            "model_type": "qwen3",
+            "vocab_size": 32,
+            "hidden_size": hidden,
+            "num_hidden_layers": 1,
+            "num_attention_heads": num_heads,
+            "num_key_value_heads": num_kv_heads,
+        }
+        tensors = self._make_standard_tensors(
+            num_layers=1, hidden=hidden, vocab=32,
+            num_heads=num_heads, num_kv_heads=num_kv_heads, mlp_size=32)
+
+        model_dir = self._create_model_dir(tmp_path, config, tensors)
+        cfg = ModelConfig.from_dir(model_dir)
+        weights = load_standard_weights(model_dir, cfg)
+
+        # K and V should be expanded from [hidden, kv_hidden=2] to [hidden, hidden=16]
+        assert weights["layer.0.w_k"].shape == (hidden, hidden)
+        assert weights["layer.0.w_v"].shape == (hidden, hidden)
+
+        # Verify the expansion pattern: all 8 query head slices must be
+        # identical to the single source KV head.
+        k_weight = weights["layer.0.w_k"]
+
+        # Get the raw K projection before expansion.
+        # Raw shape in safetensors is [kv_hidden, hidden] = [2, 16];
+        # after transpose it's [hidden, kv_hidden] = [16, 2].
+        k_raw_transposed = tensors[
+            "model.layers.0.self_attn.k_proj.weight"].T.astype(np.float32)
+        assert k_raw_transposed.shape == (hidden, kv_hidden)
+
+        # Each of the 8 head slices (columns [qh*2 : qh*2+2]) should equal
+        # the single source head (columns [0:2] of the raw transposed weight).
+        for qh in range(num_heads):
+            head_slice = k_weight[:, qh * head_dim:(qh + 1) * head_dim]
+            np.testing.assert_array_equal(
+                head_slice, k_raw_transposed,
+                err_msg=f"Query head {qh} K slice differs from source KV head")
+
+        # Same check for V weights.
+        v_weight = weights["layer.0.w_v"]
+        v_raw_transposed = tensors[
+            "model.layers.0.self_attn.v_proj.weight"].T.astype(np.float32)
+        for qh in range(num_heads):
+            head_slice = v_weight[:, qh * head_dim:(qh + 1) * head_dim]
+            np.testing.assert_array_equal(
+                head_slice, v_raw_transposed,
+                err_msg=f"Query head {qh} V slice differs from source KV head")

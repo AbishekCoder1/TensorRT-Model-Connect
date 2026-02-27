@@ -1,380 +1,365 @@
 # Testing and Validation
 
-Comprehensive guide to testing TRT-Transformers-CPP. Organized by model category with specific checks, tolerances, and workflows for each `runtime_strategy`.
-
-## Test Architecture Overview
-
-### Philosophy
-
-Every TRT engine must produce output matching HuggingFace Transformers (the ground truth). Testing validates this at multiple granularities: per-layer hidden states, per-step logits, full generation text, and (for diffusion) component-by-component pipeline fidelity.
-
-### Three Pillars
-
-1. **Unit tests** -- Fast, deterministic, no GPU. Validate config parsing, checkpoint mapping, bundle I/O, CLI args, diff framework mechanics, and C++ decode runtime logic.
-2. **Diff framework** -- GPU-accelerated TRT-vs-HF comparison. The unified `tools/diff.py` CLI auto-detects model type and runs applicable checks. Six registered checks currently cover five core runtime strategies (`decoder_kv_cache`, `decoder_moe`, `ssm_recurrent`, `vision_language`, `diffusion`); other strategies are covered primarily by unit and E2E tests.
-3. **E2E suite** -- Full pipeline tests: build bundle from HF, run C++ inference, compare against HF reference. 28 model manifests in `tests/e2e/models/` drive parametrized pytest tests.
-
-### Test Applicability Matrix
-
-Which checks apply to which `runtime_strategy` (for strategies currently supported by `tools/diff.py` checks):
-
-| Check | `decoder_kv_cache` | `decoder_moe` | `ssm_recurrent` | `vision_language` | `diffusion` |
-|-------|:--:|:--:|:--:|:--:|:--:|
-| `logit_diff` | Y | Y | Y | -- | -- |
-| `layer_diff` | Y | Y | -- | -- | -- |
-| `runner_parity` | Y | Y | Y | -- | -- |
-| `vl_pipeline` | -- | -- | -- | Y | -- |
-| `diffusion_components` | -- | -- | -- | -- | Y |
-| `perf_benchmark` | Y | Y | Y | -- | -- |
-
-Additional runtime strategies in the C++ dispatcher (for example `segmentation`, `object_detection`, `prompted_segmentation`, `speech_to_text`, `text_to_audio`, `speech_to_speech`, `embedding`, `reranking`, `neural_operator`, `omni_multimodal`, `rwkv_recurrent`, `hybrid_mamba_attention`) are validated through dedicated unit/E2E suites rather than the unified diff checks above.
+Comprehensive manual for the trt-transformers-cpp test infrastructure. Covers every abstraction layer, source file locations, intentions, pytest markers, and commands for running each suite.
 
 ---
 
-## Regression Tiers
+## Test Architecture at a Glance
 
-Standard regression gate before merging. Run in order; each tier catches progressively harder issues.
+The test suite is organized into **six abstraction layers**, each with a distinct
+purpose, dependency profile, and speed:
 
-### Tier 1: Unit tests (no GPU, ~60s)
+| Layer | Directory | Files | Tests | GPU? | Time | Purpose |
+|-------|-----------|:--:|:--:|:--:|------|---------|
+| 1. Builder unit | `tests/builder/` | 50 | ~940 | No | ~10 min | Python build logic in isolation |
+| 2. C++ runtime unit | `tests/cpp/` | 19 | 20 | Mix | ~8 s | C++ runtime correctness |
+| 3. Tools self-tests | `tests/tools/` | 11 | ~160 | No | ~35 s | Diff framework + comparison utilities |
+| 4. Graph-op GPU | `tests/builder/test_graph_*.py` | 3 | ~70 | TRT | ~2 min | TRT graph operations on real GPU |
+| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 50 manifests | 50 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
+| 6. Diff framework | `tools/diff.py` + `tools/diff_framework/` | 6 checks | -- | GPU | varies | Ad-hoc TRT-vs-HF model comparison |
 
-Fast, deterministic tests for logic correctness. Always run first.
+**Philosophy**: Every TRT engine must produce output matching HuggingFace
+Transformers (the ground truth). Testing validates this at multiple
+granularities: per-layer hidden states, per-step logits, full generation text,
+and (for non-text modalities) modality-specific quality metrics.
+
+---
+
+## Layer 1: Python Builder Unit Tests
+
+**Directory**: `tests/builder/`
+
+**Intent**: Verify Python build logic in isolation -- config parsing, weight
+loading, checkpoint mapping, bundle writing, engine orchestration, family
+plugin dispatch, graph ops, and debug runner infrastructure. No GPU required
+for the majority of tests.
+
+**How to run**:
 
 ```bash
-# Python builder unit tests (config, checkpoint_mapper, bundle_writer, etc.)
+# All builder tests (no GPU needed for most; TRT tests auto-skip when unavailable)
 .venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
 
-# Tools self-tests (diff framework, perf_compare stats/formatting/serial ordering)
-.venv/bin/python -m pytest tests/tools/ -v
+# Only unit-tier tests (Tier 0 + Tier 1, never needs GPU)
+.venv/bin/python -m pytest tests/builder/ -v -m unit --ignore=tests/builder/test_cli.py
 
-# C++ unit tests (bundle format, decode runtime, image preprocessor)
+# Only GPU/TRT tests
+.venv/bin/python -m pytest tests/builder/ -v -m gpu --ignore=tests/builder/test_cli.py
+```
+
+**Pytest markers used**: `@pytest.mark.unit` (no GPU), `@pytest.mark.trt` (needs TRT), `@pytest.mark.gpu` (needs GPU).
+
+**Skip markers**: All files use `try/except` with `pytest.skip(allow_module_level=True)` so they skip cleanly when TRT or `trtf_build` is not installed. GPU tests also use a `@requires_trt` skipif decorator.
+
+### Sub-categories
+
+#### Configuration & data parsing (no GPU)
+
+| File | What it tests |
+|------|---------------|
+| `test_config.py` | `ModelConfig` parsing, VL `text_config` merge, edge cases, negative dimensions, type mismatches |
+| `test_checkpoint_mapper.py` | Weight loading, GQA expansion (including 8x single-head), tied embeddings, biases |
+| `test_bundle_writer.py` | Bundle format round-trip, section integrity, corrupted bundle detection (bad magic, truncated header/file) |
+| `test_cache_state_machine.py` | Position, mask, cache append/shift logic, edge cases (max_cache_length=0, max_cache_length=1) |
+| `test_manifest_validation.py` | E2E manifest schema validation (required fields, type checks, unknown runtime_strategy warnings) |
+
+#### Family plugins (no GPU)
+
+| File | What it tests |
+|------|---------------|
+| `test_families.py` | Plugin match/dispatch, runtime_strategy, embed_input, `matches()` returns bool |
+| `test_family_plugins.py` | 10 family plugins: `load_weights()` correctness |
+| `test_family_bert.py` | BERT-specific plugin tests |
+| `test_family_phi4mm.py` | Phi-4 multimodal plugin |
+| `test_family_qwen_moe.py` | Qwen MoE plugin |
+| `test_family_sam.py` | SAM prompted segmentation plugin |
+| `test_family_yolox.py` | YOLOX object detection plugin |
+
+#### Per-family engine tests (mixin-based, 3-tier)
+
+These files inherit from `FamilyPluginTestMixin` in `family_plugin_test_mixin.py` and follow a standardized 3-tier pattern:
+
+- **Tier 0** (`@pytest.mark.unit`): Plugin discovery, matching, required methods
+- **Tier 1** (`@pytest.mark.unit`): Weight loading from synthetic safetensors -- correct keys, shapes, dtypes, determinism
+- **Tier 2** (`@pytest.mark.trt`, `@pytest.mark.gpu`): Build real TRT engine, validate I/O tensor names and logits output shape
+
+| File | Family | model_type | Tier 2 |
+|------|--------|------------|:--:|
+| `test_engine_bark.py` | bark | `bark` | skip (custom builder) |
+| `test_engine_bloom.py` | bloom | `bloom` | yes |
+| `test_engine_codegen.py` | codegen | `codegen` | yes |
+| `test_engine_falcon.py` | falcon | `falcon` | yes |
+| `test_engine_gemma.py` | gemma | `gemma2` | yes |
+| `test_engine_gpt2.py` | gpt2 | `gpt2` | yes |
+| `test_engine_gpt_neo.py` | gpt_neo | `gpt_neo` | yes |
+| `test_engine_gpt_neox.py` | gpt_neox | `gpt_neox` | yes |
+| `test_engine_granite.py` | granite | `granite` | yes |
+| `test_engine_internlm.py` | internlm | `internlm2` | yes |
+| `test_engine_llama.py` | llama | `llama` | yes |
+| `test_engine_mamba.py` | mamba | `mamba` | skip (custom builder) |
+| `test_engine_mistral.py` | mistral | `mistral` | yes |
+| `test_engine_mixtral.py` | mixtral | `mixtral` | yes |
+| `test_engine_nemotron.py` | nemotron | `nemotron` | yes |
+| `test_engine_olmo.py` | olmo | `olmo` | yes |
+| `test_engine_opt.py` | opt | `opt` | yes |
+| `test_engine_phi.py` | phi | `phi3` | yes |
+| `test_engine_phi_moe.py` | phi_moe | `phimoe` | skip (custom builder) |
+| `test_engine_qwen.py` | qwen | `qwen3` | yes |
+| `test_engine_rwkv.py` | rwkv | `rwkv6` | skip (custom builder) |
+| `test_engine_segformer.py` | segformer | `segformer` | skip (custom builder) |
+| `test_engine_stablelm.py` | stablelm | `stablelm` | yes |
+| `test_engine_starcoder2.py` | starcoder2 | `starcoder2` | yes |
+| `test_engine_whisper.py` | whisper | `whisper` | skip (custom builder) |
+| `test_engine_xglm.py` | xglm | `xglm` | yes |
+
+#### Graph operations (needs TRT/GPU)
+
+| File | What it tests |
+|------|---------------|
+| `test_graph_ops.py` | 18 atomic graph ops: RoPE, ALiBi, RMSNorm, LayerNorm, attention, etc. |
+| `test_graph_ops_extended.py` | YaRN RoPE, T5 relative bias, extended ALiBi, conv/norm/ELU/pad ops |
+| `test_graph_blocks.py` | Composable blocks: `apply_norm`, SwiGLU MLP, GELU FC MLP |
+
+Graph-op tests use the `trt_runner` fixture from `conftest.py`: a `build_fn(network, inputs)` closure constructs a small TRT graph, the fixture builds an engine, runs inference, and returns NumPy outputs for comparison against PyTorch/NumPy references via `np.testing.assert_allclose`.
+
+#### Builder orchestration (mock-based, no GPU)
+
+| File | What it tests |
+|------|---------------|
+| `test_engine_builder.py` | Engine builder mock tests |
+| `test_engine_builder_extended.py` | `build_bundle` orchestration, GPU name, TRT version |
+| `test_pipeline.py` | Pipeline subprocess wrapper, binary detection |
+| `test_debug_runner.py` | Debug runner mock tests |
+| `test_debug_runner_extended.py` | Bundle section loading, runner cleanup, generate sequencing |
+| `test_cli.py` | CLI inspect/build command dispatch (excluded from default run) |
+
+#### Standard decoder & vision (needs TRT)
+
+| File | What it tests |
+|------|---------------|
+| `test_standard_decoder.py` | Tensor naming contract, debug outputs |
+| `test_vision_compute.py` | Vision encoder tests |
+| `test_vision_compute_extended.py` | Vision RoPE, DeepStack config, patch embed, spatial merge |
+
+---
+
+## Layer 2: C++ Runtime Unit Tests
+
+**Directory**: `tests/cpp/`
+
+**Intent**: Verify C++ runtime correctness -- bundle parsing, tokenizers,
+CUDA RAII wrappers, KV cache device operations, TRT engine lifecycle, image
+preprocessing, CLI argument parsing, and helper utilities.
+
+**How to run**:
+
+```bash
+# All C++ tests
 ctest --test-dir build --output-on-failure
+
+# Specific test
+ctest --test-dir build -R test_bundle_format --output-on-failure
 ```
 
-**What's covered**:
-- Python: `tests/builder/` (11 modules) -- config parsing, checkpoint mapping, bundle writing, graph ops
-- Tools: `tests/tools/` (7 modules) -- diff framework protocol/registry/runner, diff_logits, diff_layers, diff_vl, parity, perf_compare
-- C++: 11 test executables -- bundle format, C ABI, CLI args, decode runtime, image preprocessor, JSON helpers, text parsers, fast_path_config
+**Implementation**: Plain `main()` executables with no test framework. A
+`check(condition, name)` helper accumulates `failures`; `main()` returns
+non-zero if any failed. TRT-dependent tests guard with `#if TRTF_HAS_TRT`
+and skip gracefully (exit 0).
 
-### Tier 2: Graph-op GPU tests (~2 min, needs TRT)
+**RAII guards** (`test_helpers.h`):
+- `EnvVarGuard` -- saves/restores environment variables (prevents env leakage between tests)
+- `TempDirGuard` -- creates temp directory on construction, `remove_all` on destruction
 
-Validates TRT graph operations (RMSNorm, RoPE, attention, etc.) on real GPU.
+### File inventory
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
+| `test_bundle_format.cpp` | Bundle magic, section parsing, round-trip | No |
+| `test_bundle_e2e.cpp` | Bundle build + load round-trip | TRT |
+| `test_bundle_helpers.cpp` | `find_bundle_sections` for all bundle types | TRT |
+| `test_c_abi_entry.cpp` | C ABI entry point | TRT |
+| `test_cli_args.cpp` | CLI argument parsing | No |
+| `test_cuda_buffer.cpp` | RAII alloc, move semantics, data round-trip (with index on mismatch) | GPU |
+| `test_cuda_stream.cpp` | RAII stream, move semantics | GPU |
+| `test_data_dir.cpp` | Source/scripts dir resolution, env overrides (via `EnvVarGuard`) | No |
+| `test_decode_runtime.cpp` | Argmax, mask building | TRT |
+| `test_device_kv_cache.cpp` | Cache construction, mask progression, position clamping, reset | GPU |
+| `test_fast_path_config.cpp` | Config JSON parsing | TRT |
+| `test_hf_python_tokenizer.cpp` | Shell quoting, int parsing, HF output sanitization | No |
+| `test_image_preprocessor.cpp` | All 4 strategies, config parsing, prompt formatting (via `TempDirGuard`) | No |
+| `test_json_helpers.cpp` | JSON extraction helpers | No |
+| `test_pipeline_api.cpp` | C API pipeline creation | TRT |
+| `test_text_parsers.cpp` | String/file parsing helpers | No |
+| `test_trt_engine_lifecycle.cpp` | `layer_tensor_name`, constants | TRT |
+| `test_trt_logger.cpp` | Severity names, error storage, env-var controls | TRT |
+| `test_vocab_tokenizer.cpp` | Encode/decode, round-trip, case insensitivity | No |
+
+---
+
+## Layer 3: Tools Self-Tests
+
+**Directory**: `tests/tools/`
+
+**Intent**: Verify diff framework and comparison utilities in isolation --
+logit comparison, layer diffing, perf benchmarking, audio/segmentation metrics
+-- without needing models or GPU.
+
+**How to run**:
 
 ```bash
-.venv/bin/python -m pytest tests/builder/test_graph_ops.py -v -m trt
+.venv/bin/python -m pytest tests/tools/ -v
 ```
 
-### Tier 3: E2E single-model smoke test (~5 min, needs GPU)
+**Implementation**: Pure Python tests, no TRT/GPU needed. `conftest.py` adds
+`tools/` to import path. Tests use `importlib.import_module` for lazy
+importing. Comparison logic tested with synthetic NumPy arrays.
 
-Quick sanity with one small model. Always use `--rebuild-engines` to build the bundle from scratch -- avoids testing against stale cached bundles.
+### File inventory
+
+| File | What it tests |
+|------|---------------|
+| `test_tool_helpers.py` | `cosine_sim`, `compare_arrays` |
+| `test_diff_logits.py` | Logit comparison, argmax match, top-k overlap |
+| `test_diff_layers.py` | Layer-wise hidden state comparison |
+| `test_diff_vl.py` | Vision-language diff utilities |
+| `test_diff_audio.py` | Energy computation, WAV I/O round-trip, token stats |
+| `test_diff_segmentation.py` | Pixel agreement (non-tautological), logit diff, argument parsing |
+| `test_diff_framework.py` | `DiffResult`, registry, runner, CLI parsing |
+| `test_diffusion_helpers.py` | silu, gelu_tanh, bundle config/weights, timestep embedding |
+| `test_parity.py` | Text/token comparison for runner parity |
+| `test_perf_compare.py` | Stats, formatting, JSON output, serial GPU execution |
+| `test_perf_parity.py` | Performance parity validation |
+
+---
+
+## Layer 4: Graph-Op GPU Tests
+
+**Directory**: `tests/builder/test_graph_ops.py`, `test_graph_ops_extended.py`, `test_graph_blocks.py`
+
+**Intent**: Validate TRT graph operations (RMSNorm, RoPE, attention, conv, etc.)
+and composable graph blocks (SwiGLU MLP, GELU MLP, attention block) on real GPU
+with real TRT engine execution.
+
+**How to run**:
 
 ```bash
-.venv/bin/python -m pytest tests/e2e/test_full_pipeline.py -v -k qwen3-0.6b \
+# All graph-op GPU tests
+.venv/bin/python -m pytest tests/builder/test_graph_ops.py \
+  tests/builder/test_graph_ops_extended.py \
+  tests/builder/test_graph_blocks.py -v -m trt
+
+# A single op
+.venv/bin/python -m pytest tests/builder/test_graph_ops.py::TestRMSNorm -v
+```
+
+**Dependency**: Requires TRT + GPU. Uses `trt_runner` conftest fixture for
+engine build + execution.
+
+---
+
+## Layer 5: Unified E2E Tests
+
+**Directory**: `tests/test_e2e.py` + `tests/e2e_harness/`
+
+**Intent**: Validate the full pipeline end-to-end -- build bundle from HF,
+run C++ inference, compare output against HuggingFace reference. This is the
+gold-standard correctness gate. All modalities use the same harness.
+
+**How to run**:
+
+```bash
+# Single model (auto-builds bundle if missing)
+.venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+
+# Force rebuild bundle from HF
+.venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
   --engine-dir /mnt/storage/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python .venv/bin/python \
   --rebuild-engines
-```
 
-### Tier 4: Full E2E suite (~90 min, needs GPU)
-
-All models in `tests/e2e/models/`: force-rebuild every bundle, then infer/compare for each. This is the gold-standard regression gate.
-
-```bash
-.venv/bin/python -m pytest tests/e2e/ -v \
+# All 50 models with artifact output
+.venv/bin/python -m pytest tests/test_e2e.py -v \
   --engine-dir /mnt/storage/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python .venv/bin/python \
-  --rebuild-engines
+  --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
+
+# Filter by modality
+.venv/bin/python -m pytest tests/test_e2e.py -v \
+  --e2e-task-strategy text_generation_causal \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python
 ```
 
-### Tier 5: Performance regression (~10 min per model, needs GPU + bundle)
+**Available `--e2e-task-strategy` values**:
 
-Spot-check inference speed for key models. Not in CI; run manually for perf-sensitive changes.
+| Strategy | Models | Runner |
+|----------|:--:|--------|
+| `text_generation_causal` | 26 | `text_generation.py` |
+| `vision_language_generation` | 5 | `vision_language.py` |
+| `diffusion_media_generation` | 3 | `diffusion.py` |
+| `text_to_audio` | 2 | `audio_speech.py` |
+| `speech_to_text` | 1 | `audio_speech.py` |
+| `speech_to_speech` | 1 | `audio_speech.py` |
+| `segmentation` | 1 | `segmentation.py` |
+| `prompted_segmentation` | 1 | `segmentation.py` |
+| `encoder_only_nlp` | 1 | `encoder_only.py` |
+| `embedding` | 1 (skip) | `embedding.py` |
+| `reranking` | 1 (skip) | `reranking.py` |
 
-```bash
-source .venv/bin/activate
-python3 tools/perf_compare.py \
-  --model Qwen/Qwen3-0.6B \
-  --bundle /mnt/storage/trt-transformers/engines/qwen3-0.6b.trtfb \
-  --prompt "The capital of France is" --max-new-tokens 20 --json results.json
-```
-
-### What to Run When
-
-| Change type | Tiers to run |
-|-------------|-------------|
-| Python builder logic | 1, 2 |
-| Family plugin | 1, 2, 3 (the specific model) |
-| C++ runtime | 1 (ctest), 3 |
-| Graph ops | 1, 2 |
-| KV cache / mask / position logic | 1, 3, 4 |
-| debug_runner.py | 1, 3 |
-| perf_compare.py | 1 (tools tests), 5 |
-| New model family | 1, 2, `validate_family.sh`, then add to `tests/e2e/models/` + tier 4 |
-| Diffusion pipeline (Python or C++) | 1, `test_diffusion_pipeline.py` with `--rebuild-engines` |
-| VL pipeline (Python or C++) | 1, `test_vl_pipeline.py` with `--rebuild-engines` |
-| Diff framework changes | 1 (`tests/tools/test_diff_framework.py`) |
-
----
-
-## Unified Diff Framework
-
-### Architecture
-
-The diff framework (`tools/diff_framework/`) is a plugin-based test orchestration layer with a unified CLI (`tools/diff.py`).
+### E2E harness architecture (DIP-first)
 
 ```
-tools/diff.py                          # CLI: list | run
-tools/diff_framework/
-  __init__.py                          # Public API exports, auto-discovers checks
-  protocol.py                          # DiffResult, TestContext, DiffTest protocol
-  registry.py                          # register() decorator, get_all_tests(), get_tests_for_strategy()
-  runner.py                            # detect_runtime_strategy(), list_tests(), run_tests()
-  checks/
-    __init__.py                        # Auto-discovers all check modules via pkgutil
-    logit_diff.py                      # LogitDiffTest
-    layer_diff.py                      # LayerDiffTest
-    runner_parity.py                   # RunnerParityTest
-    vl_pipeline.py                     # VLPipelineTest
-    perf_benchmark.py                  # PerfBenchmarkTest
-    diffusion_components.py            # DiffusionComponentsTest
+tests/test_e2e.py                    # Single parametrized pytest entrypoint
+tests/e2e/models/*.json              # 50 per-model JSON manifests
+tests/e2e_harness/
+  __init__.py                        # save_full_stderr() helper
+  contracts.py                       # E2ECase, StageOutput, CompareResult, protocols
+  orchestrator.py                    # Lifecycle: preflight -> build -> run -> compare
+  manifest_loader.py                 # JSON -> E2ECase (with schema validation)
+  registry.py                        # Auto-discover runners/references/comparators
+  artifact_sink.py                   # Persist artifacts (JSON, logits, audio, images)
+  runners/                           # TRT strategy runners (one per task_strategy)
+    text_generation.py               # Causal LM (decoder, MoE, SSM, RWKV)
+    vision_language.py               # VL models (Qwen VL, InternVL)
+    audio_speech.py                  # Whisper, Bark, PersonaPlex
+    diffusion.py                     # Wan T2V, FLUX, Z-Image
+    segmentation.py                  # SegFormer, SAM
+    embedding.py                     # Eagle-embed
+    reranking.py                     # Eagle-rerank
+    encoder_only.py                  # BERT
+    omni.py                          # Qwen3-Omni
+    object_detection.py              # YOLOX
+    neural_operator.py               # DeepONet / FNO
+  references/                        # Gold-standard reference backends
+    hf_transformers.py               # HF Transformers (text, VL, audio, seg)
+    hf_diffusers.py                  # HF Diffusers (Wan, FLUX, Z-Image)
+    torch_reference.py               # PyTorch (speech-to-speech)
+    custom_python.py                 # Custom Python scripts
+    golden_snapshot.py               # Pre-saved reference data
+    invariant_only.py                # No external reference (self-consistency)
+  comparators/                       # Metric computation + threshold gating
+    text.py                          # 6-metric composite: logit cosine, top1 match, NED
+    vision_language.py               # Vision cosine + text NED/agreement
+    text_to_audio.py                 # RMS, duration ratio, mel/spectral distance
+    speech_to_text.py                # Transcript text similarity
+    speech_to_speech.py              # Audio quality metrics
+    diffusion.py                     # Pixel stats, temporal consistency, PSNR/SSIM
+    segmentation.py                  # mIoU, pixel accuracy, boundary F-score
+    encoder_only.py                  # Hidden state / CLS cosine similarity
+    embedding.py                     # Embedding cosine distance
+    reranking.py                     # Score correlation
+    omni.py                          # Multi-modal composite
+    neural_operator.py               # Field comparison
+    audio.py                         # Re-export umbrella
+  thresholds/                        # Default + per-model threshold profiles
+    defaults/                        # Per-strategy JSON threshold files
 ```
 
-### Core Contracts
+### Manifest schema
 
-**`DiffResult`** (`protocol.py`): Result container returned by every check.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `test_name` | `str` | Check name (e.g., `"logit_diff"`) |
-| `model` | `str` | HF model ID or path |
-| `runtime_strategy` | `str` | Detected or specified strategy |
-| `passed` | `bool` | Whether the check passed |
-| `status` | `str` | `"PASS"`, `"FAIL"`, `"SKIP"`, or `"ERROR"` |
-| `message` | `str` | Human-readable summary |
-| `metrics` | `dict` | Check-specific numeric results |
-| `duration_s` | `float` | Wall-clock time in seconds |
-| `details` | `str` | Extended diagnostic info |
-
-Static constructors: `DiffResult.skip(...)` for missing prerequisites, `DiffResult.error(...)` for exceptions.
-
-**`TestContext`** (`protocol.py`): Shared context passed to all checks.
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `model` | required | HF model ID or local path |
-| `runtime_strategy` | required | Auto-detected or user-specified |
-| `bundle_path` | `None` | Path to `.trtfb` bundle (required by some checks) |
-| `binary_path` | `None` | Path to `trtf` C++ binary |
-| `hf_python` | `None` | Python interpreter with HF deps |
-| `image_path` | `None` | Test image for VL models |
-| `max_cache_length` | `256` | Engine cache length |
-| `max_new_tokens` | `20` | Generation length for comparison |
-| `atol` | `1e-3` | Logit absolute tolerance |
-| `layer_atol` | `0.05` | Layer hidden state tolerance |
-| `trust_remote_code` | `False` | HF trust_remote_code flag |
-| `num_inference_steps` | `30` | Diffusion denoising steps |
-
-**`DiffTest`** (Protocol): Interface for checks.
-
-```python
-class DiffTest(Protocol):
-    name: str
-    description: str
-    runtime_strategies: list[str]
-    requires_bundle: bool
-    requires_gpu: bool
-    def run(self, ctx: TestContext) -> DiffResult: ...
-```
-
-### The 6 Registered Checks
-
-| Check | Strategies | Requires Bundle | What It Validates |
-|-------|-----------|:-:|---|
-| **`logit_diff`** | `decoder_kv_cache`, `decoder_moe`, `ssm_recurrent` | No | Per-step logit comparison via `diff_logits.py`. Battery of 4 prompts, absolute tolerance check. |
-| **`layer_diff`** | `decoder_kv_cache`, `decoder_moe` | No | Per-layer hidden state comparison via `diff_layers.py`. Builds debug engine with `debug_layer_outputs=True`. |
-| **`runner_parity`** | `decoder_kv_cache`, `decoder_moe`, `ssm_recurrent` | Yes | Token-for-token comparison: Python `TrtRunner` vs C++ `trtf` binary. |
-| **`vl_pipeline`** | `vision_language` | Yes | 4-stage VL validation via `diff_vl.py`: vision features, embed_input, text generation, C++ binary parity. |
-| **`perf_benchmark`** | `decoder_kv_cache`, `decoder_moe`, `ssm_recurrent` | No | TRT vs HF latency/throughput comparison via `perf_compare.py`. |
-| **`diffusion_components`** | `diffusion` | Yes | 9-step component comparison via `debug_diffusion_pipeline.py`. See [Diffusion testing](#diffusion-diffusion) below. |
-
-### Auto-Detection
-
-The runner auto-detects `runtime_strategy` from:
-1. **HF config** (`detect_runtime_strategy()`): Loads `config.json`, finds the family plugin, reads its `runtime_strategy` attribute.
-2. **Bundle header** (`detect_runtime_strategy_from_bundle()`): Parses the bundle's embedded `config.json` for the `runtime_strategy` field.
-
-Falls back to `"decoder_kv_cache"` if detection fails.
-
-### CLI Usage
-
-```bash
-# List all registered checks
-python tools/diff.py list
-
-# List checks applicable to a specific model (strategy auto-detected)
-python tools/diff.py list --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-
-# Run all applicable checks for a model
-python tools/diff.py run --model Qwen/Qwen3-0.6B
-
-# Run specific checks with a bundle
-python tools/diff.py run --model Qwen/Qwen3-0.6B \
-  --bundle qwen3.trtfb --binary ./build/trtf \
-  --test logit_diff --test runner_parity
-
-# Run with JSON output
-python tools/diff.py run --model Qwen/Qwen3-0.6B --json results.json
-
-# Diffusion model (run only diffusion component check)
-python tools/diff.py run --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
-  --bundle wan21.trtfb --test diffusion_components
-
-# VL model with test image
-python tools/diff.py run --model Qwen/Qwen2.5-VL-3B-Instruct \
-  --bundle qwen25vl.trtfb --image test.jpg --binary ./build/trtf
-```
-
-### Self-Tests
-
-The framework itself is tested in `tests/tools/test_diff_framework.py` (no GPU required):
-
-- `TestDiffResult`: Serialization, `skip()`/`error()` constructors, default fields
-- `TestRegistry`: Check registration, strategy filtering, unknown test lookup
-- `TestRunner`: Test listing, bundle-skip logic, unknown name error
-- `TestCLI`: Module imports, subcommand existence
-
----
-
-## Testing by Model Category
-
-### Transformer-Based (`decoder_kv_cache` / `decoder_moe`)
-
-**Coverage**: 25 models (23 standard decoder + 2 MoE) in `tests/e2e/models/`.
-
-**Standard decoder models** (23): qwen3-0.6b, qwen3-4b-instruct-2507, phi3-mini, tinyllama-1.1b, nemotron-hindi-4b, nemotron-mini-4b, nemotron-nano-4b, minitron-4b-depth, minitron-4b-width, gpt2-125m, opt-125m, bloom-560m, gpt-neo-125m, codegen-350m, falcon3-1b, granite-3.1-2b, internlm2-1.8b (skipped), olmo-1b, pythia-70m, riva-translate-4b, stablelm2-1.6b, starcoder2-3b, xglm-564m.
-
-**MoE models** (2): phi-moe (`decoder_kv_cache`), mixtral-stories-15m (`decoder_moe`).
-
-**Applicable checks**:
-- **`logit_diff`**: Battery of 4 prompts, per-step logit comparison. Default `atol=1e-3`.
-- **`layer_diff`**: Builds a debug engine with per-layer hidden state outputs (`debug_layer_outputs=True`). Compares embedding, all decoder layers, and final logits. Default `layer_atol=0.05`.
-- **`runner_parity`**: Token-for-token comparison between Python `TrtRunner` and C++ `trtf` binary. Verifies the C++ runtime reproduces Python TRT inference exactly.
-- **`perf_benchmark`**: Latency and throughput comparison. Serial GPU execution to avoid OOM on 24GB GPUs.
-
-**MoE note**: Routing is handled entirely in the TRT graph. The C++ runtime uses the same `TrtBackendFastPath` backend as standard decoders. The `decoder_moe` strategy is identical to `decoder_kv_cache` at runtime -- the distinction exists for test selection and documentation.
-
-**E2E test files**:
-- `test_full_pipeline.py` -- Build + C++ inference + diff_logits + perf_compare
-- `test_inference.py` -- Basic inference sanity (non-empty output, determinism)
-- `test_bundle_inspect.py` -- `trtf inspect` output validation
-- `test_logit_parity.py` -- `diff_logits.py --battery` wrapper
-- `test_runner_parity.py` -- `test_runner_parity.py` wrapper
-
-### SSM / Mamba (`ssm_recurrent`)
-
-**Coverage**: 1 model -- mamba-130m (`state-spaces/mamba-130m-hf`).
-
-**Applicable checks**:
-- **`logit_diff`**: Uses `MambaTrtRunner` for pure-Python TRT inference with device-resident recurrent state. `logit_atol=2e-3` (higher than standard because recurrent state accumulates floating-point drift).
-- **`runner_parity`**: Python `MambaTrtRunner` vs C++ `MambaBackend`. Same token-for-token parity check.
-- **`perf_benchmark`**: TRT vs HF latency comparison.
-
-**Not applicable**: `layer_diff` (no debug engine support for SSM -- Mamba has no standard decoder layer structure).
-
-**Key differences from transformer testing**:
-- No prefill phase in C++ (Mamba processes tokens one at a time)
-- Recurrent state (conv_state + ssm_state) is constant-size per layer, not growing like KV cache
-- Higher logit tolerance due to cumulative FP32 drift in recurrent computations
-
-### Vision-Language (`vision_language`)
-
-**Coverage**: 2 models -- qwen25vl-3b (`Qwen/Qwen2.5-VL-3B-Instruct`), qwen3-vl-2b (`Qwen/Qwen3-VL-2B-Instruct`).
-
-**Applicable checks**:
-- **`vl_pipeline`**: 4-stage validation via `diff_vl.py`:
-  1. **Vision features**: Run TRT vision encoder on a test image, compare against HF reference features. `atol=0.1`.
-  2. **Embed input**: Verify image features are correctly injected into the text decoder's embedding space.
-  3. **Text generation**: Compare VL-conditioned text generation output (token match).
-  4. **C++ parity**: Compare C++ `trtf` binary VL output against Python `VLTrtRunner`.
-
-**Qwen3-VL specifics**: Additional DeepStack feature validation -- multi-level vision features injected at early text decoder layers. The vision encoder outputs per-level features that are stored and fed to different decoder layers during image token prefill.
-
-**E2E test files**:
-- `test_vl_pipeline.py` -- Vision-only smoke test (`diff_vl.py --vision-only`) + VL generation via C++ binary
-- `test_full_pipeline.py::test_full_pipeline_vlm` -- Full VL E2E: build, diff_vl, perf
-
-### Diffusion (`diffusion`)
-
-**Coverage**: 1 model -- wan21-t2v-1.3b (`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`).
-
-**Why tested differently**: Diffusion models produce video frames, not text tokens. The output is a multi-component pipeline (T5 text encoder, DiT denoiser, VAE decoder) where noise drift accumulates over 30 denoising steps. Absolute logit comparison is meaningless -- instead, validation is component-by-component with cosine similarity thresholds.
-
-**Applicable checks**:
-- **`diffusion_components`**: Delegates to `tools/debug_diffusion_pipeline.py`, which runs 9 component-by-component TRT-vs-HF comparisons:
-
-| Step | What It Validates | Pass Criterion |
-|------|-------------------|----------------|
-| 1. Bundle config | Config fields match HF pipeline | Exact match |
-| 2. Text projection | DiT preprocessor weight activation | Exact match |
-| 3. T5 encoding | TRT T5 encoder vs HF UMT5EncoderModel | `atol` threshold |
-| 4. Timestep embedding | Sinusoidal + MLP timestep computation | Exact match |
-| 5. Patch embedding | Patchify vs Conv3D equivalence | Exact match |
-| 6. 3D RoPE | Rotary position embeddings (temporal + spatial) | Exact match |
-| 7. Single DiT step | One denoiser forward pass | `cosine_sim > 0.95` |
-| 8. Scheduler sigmas | Flow-match Euler sigma schedule | Exact match |
-| 9. Full denoising | Complete 30-step denoising loop | `cosine_sim > 0.8` at final step |
-
-**Frame quality checks** (E2E test):
-- Pixel mean in `[0.15, 0.85]` -- catches all-black or all-white output
-- Pixel std >= `0.05` -- catches washed-out or flat-color output
-- Correct frame count (17 for Wan2.1-T2V-1.3B)
-- PNG files exist on disk
-
-**C++ generate-video check**:
-- Runs `trtf generate-video` command
-- Verifies correct number of PNG frames produced
-- Sample frames (first/middle/last) saved alongside bundle for visual inspection
-
-**E2E test file**: `test_diffusion_pipeline.py` with 4 test functions:
-1. `test_diffusion_build` -- Bundle builds successfully
-2. `test_diffusion_debug_pipeline` -- All 9 component checks pass
-3. `test_diffusion_cpp_generate` -- C++ binary produces correct frame count
-4. `test_diffusion_frame_quality` -- Pixel statistics within bounds
-
----
-
-## Accuracy Tolerances Reference
-
-Default tolerances by model and check type. Models with non-default tolerances are listed explicitly.
-
-| Model | Strategy | `logit_atol` | `layer_atol` | Rationale |
-|-------|----------|:--:|:--:|---|
-| Most standard decoders | `decoder_kv_cache` | `1e-3` | `0.05` | Baseline FP32 precision |
-| mamba-130m | `ssm_recurrent` | `2e-3` | -- | Recurrent state drift |
-| mixtral-stories-15m | `decoder_moe` | `2e-3` | `0.05` | Expert routing precision |
-| phi-moe | `decoder_kv_cache` | `1e-3` | `0.05` | Standard (SparseMixer is deterministic) |
-| pythia-70m | `decoder_kv_cache` | `0.05` | `0.05` | Older architecture, higher numeric variance |
-| xglm-564m | `decoder_kv_cache` | `0.1` | `0.05` | Cross-lingual model, higher variance |
-| minitron-4b-depth | `decoder_kv_cache` | `0.4` | `0.05` | Distilled model, known high variance |
-| minitron-4b-width | `decoder_kv_cache` | `0.5` | `0.05` | Distilled model, known high variance |
-| qwen25vl-3b | `vision_language` | `1e-3` | `0.05` | Vision features `atol=0.1` |
-| qwen3-vl-2b | `vision_language` | `1e-3` | `0.05` | Vision features `atol=0.1` |
-| wan21-t2v-1.3b | `diffusion` | -- | -- | Cosine sim thresholds (0.95 single step, 0.8 full pipeline) |
-
-**Why some models need looser tolerances**:
-- **Distilled models** (minitron): Pruning creates sharper weight distributions where small TRT kernel differences amplify
-- **Recurrent models** (mamba): FP32 drift accumulates across the recurrence chain
-- **MoE models** (mixtral): Expert routing softmax is sensitive to small logit differences
-- **Cross-lingual** (xglm): Multi-language vocabulary increases numerical sensitivity
-
----
-
-## E2E Model Manifests
-
-Each model is defined by a JSON manifest in `tests/e2e/models/`. The conftest.py loads all manifests and parametrizes tests.
-
-### Schema
-
-**Standard decoder fields**:
+Each model is defined by a JSON manifest in `tests/e2e/models/<model-name>.json`:
 
 ```json
 {
@@ -387,49 +372,234 @@ Each model is defined by a JSON manifest in `tests/e2e/models/`. The conftest.py
   "prompt": "The capital of France is",
   "max_new_tokens": 20,
   "logit_atol": 1e-3,
-  "layer_atol": 0.05,
   "trust_remote_code": false
 }
 ```
 
-**Additional VL fields**: `test_image` (path to test image).
+**Required fields**: `name` (always); `hf_id` and `family` (when not skipped).
 
-**Additional diffusion fields**:
+**Type-checked fields**: `max_new_tokens` and `max_cache_length` must be `int`.
 
-```json
-{
-  "test_type": "diffusion",
-  "test_prompt": "A cat sitting on a beach watching the sunset",
-  "video_num_frames": 17,
-  "video_height": 480,
-  "video_width": 832,
-  "num_inference_steps": 30,
-  "min_pixel_mean": 0.15,
-  "max_pixel_mean": 0.85,
-  "min_pixel_std": 0.05,
-  "build_args": { "max_cache_length": 256 }
-}
+**Schema validation**: `manifest_loader._validate_manifest()` runs automatically on load. Unknown `runtime_strategy` values emit a warning.
+
+**Optional**: `skip` (string reason to skip), `threshold_overrides` (per-metric), `test_image` (VL), diffusion-specific fields.
+
+### Comparator diagnostics
+
+Every `CompareResult` returned by any comparator includes:
+- `passed` (bool) -- overall pass/fail
+- `metrics` (dict) -- raw metric values
+- `per_metric_pass` (dict) -- per-metric bool (which individual metrics passed)
+- `gate_details` (list of str) -- human-readable explanation of each gate decision
+- `message` (str) -- summary including full traceback on exception
+
+### Error diagnostics
+
+- **Full stderr**: When a subprocess fails, `save_full_stderr()` writes the
+  complete stderr to `{artifacts_dir}/{case}_{stage}_stderr.log` and includes
+  the path in the error message. The inline message shows only the last 2000
+  chars.
+- **Full tracebacks**: Exception blocks in the orchestrator capture
+  `traceback.format_exc()` and include it in the `CompareResult.message`.
+
+### 50 model manifests by category
+
+| Category | Count | Models |
+|----------|:--:|---------|
+| Standard decoder | 24 | Qwen3, LLaMA, Mistral, Phi, GPT-2, OPT, Bloom, Nemotron, etc. |
+| MoE decoder | 3 | Mixtral, Phi-MoE, DeepSeek-V2 |
+| SSM | 2 | Mamba, RWKV |
+| Encoder-only | 1 | BERT |
+| Speech-to-text | 1 | Whisper |
+| Text-to-audio | 2 | Bark-small, Bark-large |
+| Speech-to-speech | 1 | PersonaPlex |
+| Segmentation | 1 | SegFormer |
+| Vision-language | 3+2 skip | Qwen2.5-VL, Qwen3-VL, InternVL3 |
+| Diffusion (T2V/T2I) | 3 | Wan2.1-T2V, FLUX.1-schnell, Z-Image-Turbo |
+| Embedding/Reranking | 2 skip | Eagle-embed, Eagle-rerank |
+| Hybrid | 1 skip | Nemotron-H |
+
+---
+
+## Layer 6: Diff Framework
+
+**Directory**: `tools/diff.py` + `tools/diff_framework/`
+
+**Intent**: Ad-hoc GPU-accelerated TRT-vs-HF comparison for development and
+debugging. Auto-detects `runtime_strategy` from HF config or bundle header
+and runs applicable checks.
+
+**How to run**:
+
+```bash
+# List all registered checks
+python tools/diff.py list
+
+# Run all applicable checks for a model
+python tools/diff.py run --model Qwen/Qwen3-0.6B
+
+# Specific checks with a bundle
+python tools/diff.py run --model Qwen/Qwen3-0.6B \
+  --bundle qwen3.trtfb --binary ./build/trtf \
+  --test logit_diff --test runner_parity
+
+# VL model with test image
+python tools/diff.py run --model Qwen/Qwen2.5-VL-3B-Instruct \
+  --bundle qwen25vl.trtfb --image test.jpg --binary ./build/trtf
 ```
 
-**Optional fields**: `skip` (string reason to skip), `notes` (documentation).
+### 6 registered checks
 
-### Current Model Count
+| Check | Strategies | Bundle? | What it validates |
+|-------|-----------|:--:|---|
+| `logit_diff` | decoder_kv_cache, decoder_moe, ssm_recurrent | No | Per-step logit comparison (4-prompt battery) |
+| `layer_diff` | decoder_kv_cache, decoder_moe | No | Per-layer hidden state comparison (debug engine) |
+| `runner_parity` | decoder_kv_cache, decoder_moe, ssm_recurrent | Yes | Python TrtRunner vs C++ binary (token-for-token) |
+| `vl_pipeline` | vision_language | Yes | 4-stage VL: vision features, embed_input, generation, C++ parity |
+| `perf_benchmark` | decoder_kv_cache, decoder_moe, ssm_recurrent | No | TRT vs HF latency/throughput |
+| `diffusion_components` | diffusion | Yes | 9-step component comparison |
 
-28 manifests across 4 strategies (the `wan21-t2v-1.3b` diffusion manifest is in the main branch):
+---
 
-| Strategy | Count | Models |
-|----------|:--:|---|
-| `decoder_kv_cache` | 23 | qwen3-0.6b, qwen3-4b-instruct-2507, phi3-mini, phi-moe, tinyllama-1.1b, nemotron-hindi-4b, nemotron-mini-4b, nemotron-nano-4b, minitron-4b-depth, minitron-4b-width, gpt2-125m, opt-125m, bloom-560m, gpt-neo-125m, codegen-350m, falcon3-1b, granite-3.1-2b, internlm2-1.8b, olmo-1b, pythia-70m, riva-translate-4b, stablelm2-1.6b, starcoder2-3b, xglm-564m |
-| `decoder_moe` | 1 | mixtral-stories-15m |
-| `ssm_recurrent` | 1 | mamba-130m |
-| `vision_language` | 2 | qwen25vl-3b, qwen3-vl-2b |
-| `diffusion` | 1 | wan21-t2v-1.3b |
+## Regression Tiers
+
+Standard regression gate before merging changes. Run in order; each tier
+catches progressively harder issues.
+
+### Tier 1: Unit tests (no GPU, ~10 min)
+
+Fast, deterministic tests for logic correctness. Always run first.
+
+```bash
+# Python builder unit tests
+.venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
+
+# Tools self-tests
+.venv/bin/python -m pytest tests/tools/ -v
+
+# C++ unit tests
+ctest --test-dir build --output-on-failure
+```
+
+**What's covered**:
+- Python: 50 test modules -- config, checkpoint_mapper, bundle_writer, family plugins, 27 per-family engine tests, manifest validation, debug runner, cache state machine
+- Tools: 11 modules -- diff framework, logits, layers, audio, segmentation, diffusion helpers, perf_compare
+- C++: 19 test executables -- bundle format, tokenizers, CUDA RAII, KV cache, image preprocessor, CLI args
+
+### Tier 2: Graph-op GPU tests (~2 min, needs TRT)
+
+```bash
+.venv/bin/python -m pytest tests/builder/test_graph_ops.py \
+  tests/builder/test_graph_ops_extended.py \
+  tests/builder/test_graph_blocks.py -v -m trt
+```
+
+### Tier 3: E2E single-model smoke test (~5 min, needs GPU)
+
+```bash
+.venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --rebuild-engines
+```
+
+### Tier 4: Full E2E suite (~2-3 hours, needs GPU)
+
+All 50 models, force-rebuild every bundle. Gold-standard regression gate.
+
+```bash
+.venv/bin/python -m pytest tests/test_e2e.py -v \
+  --engine-dir /mnt/storage/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
+```
+
+### Tier 5: Performance regression (~10 min per model)
+
+```bash
+python3 tools/perf_compare.py \
+  --model Qwen/Qwen3-0.6B \
+  --bundle /mnt/storage/trt-transformers/engines/qwen3-0.6b.trtfb \
+  --prompt "The capital of France is" --max-new-tokens 20 --json results.json
+```
+
+### What to Run When
+
+| Change type | Tiers to run |
+|-------------|-------------|
+| Python builder logic | 1, 2 |
+| Family plugin | 1 (includes per-family engine tests), 2, 3 (the specific model) |
+| C++ runtime | 1 (ctest), 3 |
+| Graph ops / graph blocks | 1, 2 |
+| KV cache / mask / position logic | 1 (ctest + cache_state_machine), 3, 4 |
+| debug_runner.py | 1 (debug_runner_extended), 3 |
+| Image preprocessor | 1 (ctest test_image_preprocessor) |
+| Tokenizer (vocab or HF) | 1 (ctest test_vocab_tokenizer / test_hf_python_tokenizer) |
+| perf_compare.py | 1 (tools tests), 5 |
+| Diff tools (audio/seg/diffusion) | 1 (tools tests) |
+| Vision encoder / VL pipeline | 1 (vision_compute_extended), 2, 3 |
+| New model family | 1, 2, `validate_family.sh`, then add manifest + tier 4 |
+| New model (existing family) | Add JSON manifest, run tier 3 with that model |
+| E2E harness (runners/comparators) | Tier 3 or 4 (run affected models) |
+| Manifest loader changes | 1 (test_manifest_validation.py), tier 3 |
+
+---
+
+## Pytest Markers Reference
+
+Registered in `pyproject.toml`:
+
+| Marker | Description |
+|--------|-------------|
+| `unit` | Unit tests -- no GPU, no TRT |
+| `gpu` | Requires NVIDIA GPU |
+| `trt` | Requires TensorRT |
+| `slow` | Slow tests (>30s) |
+| `e2e` | End-to-end tests |
+| `text` | Text generation models |
+| `vision` | Vision/VL models |
+| `audio` | Audio models (Whisper, Bark, PersonaPlex) |
+| `diffusion` | Diffusion models (Wan, FLUX, Z-Image) |
+
+Usage:
+
+```bash
+# Run only unit tests (fast, no GPU)
+pytest tests/builder/ -m unit -v
+
+# Exclude GPU tests
+pytest tests/builder/ -m "not gpu" -v
+
+# Only TRT graph tests
+pytest tests/builder/ -m trt -v
+```
+
+---
+
+## Coverage
+
+Coverage is configured in `pyproject.toml`:
+
+```bash
+# Run with coverage
+.venv/bin/python -m pytest tests/builder/ tests/tools/ -v \
+  --ignore=tests/builder/test_cli.py --cov --cov-report=term-missing
+
+# HTML report
+.venv/bin/python -m pytest tests/builder/ tests/tools/ -v \
+  --ignore=tests/builder/test_cli.py --cov --cov-report=html
+```
+
+Configuration:
+- **Source**: `trtf_build/trtf_build` (the build package)
+- **Omit**: `*/tests/*`, `*/__pycache__/*`
+- **Excluded lines**: `pragma: no cover`, `if __name__ == "__main__"`, `raise NotImplementedError`
 
 ---
 
 ## `validate_family.sh` Workflow
 
-The primary validation gate for new model families. Runs 4 steps sequentially:
+The primary validation gate for new model families:
 
 ```
 validate_family.sh <hf-repo-or-path> [options]
@@ -439,32 +609,14 @@ validate_family.sh <hf-repo-or-path> [options]
   |
   +-- Step 2: diff_logits battery
   |     python tools/diff_logits.py --model <model> --atol 1e-3 --battery
-  |     (4 prompts, per-step logit comparison)
   |
   +-- Step 3: diff_layers
   |     python tools/diff_layers.py --model <model> --atol 0.05
-  |     (per-layer hidden state comparison)
   |
   +-- Step 4: runner_parity (if binary exists)
         python tools/test_runner_parity.py --bundle /tmp/<name>.trtfb \
           --binary ./build/trtf --hf-python .venv/bin/python --max-new-tokens 20
-        (Python TrtRunner vs C++ trtf binary)
 ```
-
-### Usage
-
-```bash
-# Validate from HF repo ID
-./scripts/validate_family.sh Qwen/Qwen3-0.6B
-
-# With trust-remote-code for models that need it
-./scripts/validate_family.sh microsoft/Phi-3-mini-4k-instruct --trust-remote-code
-
-# From a local model directory
-./scripts/validate_family.sh /mnt/models/my-model
-```
-
-### Pass criteria
 
 All 4 steps must pass. Step 4 is skipped if `./build/trtf` is not found.
 
@@ -472,41 +624,35 @@ All 4 steps must pass. Step 4 is skipped if `./build/trtf` is not found.
 
 ## Adding a Model to the Test Suite
 
-After a model family is validated, add it to the E2E test suite:
+1. **Run `validate_family.sh`** to confirm the model builds and passes diff checks.
 
-1. **Run `validate_family.sh`** -- Confirms the model builds and passes all diff checks.
+2. **Create a manifest JSON** in `tests/e2e/models/<model-name>.json`.
 
-2. **Create a manifest JSON** in `tests/e2e/models/<model-name>.json`:
-   ```json
-   {
-     "name": "my-model-1b",
-     "hf_id": "org/My-Model-1B",
-     "bundle": "my-model-1b.trtfb",
-     "family": "my_family",
-     "runtime_strategy": "decoder_kv_cache",
-     "max_cache_length": 256,
-     "prompt": "The capital of France is",
-     "max_new_tokens": 20,
-     "logit_atol": 1e-3,
-     "layer_atol": 0.05,
-     "trust_remote_code": false
-   }
-   ```
-
-3. **Run Tier 3 smoke test** with the specific model:
+3. **Run Tier 3 smoke test**:
    ```bash
-   .venv/bin/python -m pytest tests/e2e/test_full_pipeline.py -v -k my-model-1b \
+   .venv/bin/python -m pytest tests/test_e2e.py::test_e2e[my-model] -v \
      --engine-dir /mnt/storage/trt-transformers/engines \
      --trtf-binary ./build/trtf --hf-python .venv/bin/python \
      --rebuild-engines
    ```
 
-4. **Run Tier 4 full suite** to confirm no regressions:
-   ```bash
-   .venv/bin/python -m pytest tests/e2e/ -v \
-     --engine-dir /mnt/storage/trt-transformers/engines \
-     --trtf-binary ./build/trtf --hf-python .venv/bin/python \
-     --rebuild-engines
-   ```
+4. **Run Tier 4 full suite** to confirm no regressions.
 
-For VL models, add a `test_image` field pointing to a test image. For diffusion models, set `test_type: "diffusion"` and add the diffusion-specific fields (see [schema](#schema) above).
+---
+
+## Accuracy Tolerances Reference
+
+| Model | Strategy | `logit_atol` | `layer_atol` | Rationale |
+|-------|----------|:--:|:--:|---|
+| Most standard decoders | `decoder_kv_cache` | `1e-3` | `0.05` | Baseline FP32 precision |
+| mamba-130m | `ssm_recurrent` | `2e-3` | -- | Recurrent state drift |
+| mixtral-stories-15m | `decoder_moe` | `2e-3` | `0.05` | Expert routing precision |
+| phi-moe | `decoder_kv_cache` | `1e-3` | `0.05` | SparseMixer is deterministic |
+| VL models | `vision_language` | `1e-3` | `0.05` | Vision features `atol=0.1` |
+| wan21-t2v-1.3b | `diffusion` | -- | -- | Cosine sim (0.95 single step, 0.8 full) |
+
+**Why some models need looser tolerances**:
+- **Distilled models** (minitron): Pruning amplifies kernel differences
+- **Recurrent models** (mamba): FP32 drift accumulates across recurrence
+- **MoE models** (mixtral): Expert routing softmax is precision-sensitive
+- **Cross-lingual** (xglm): Multi-language vocabulary increases variance

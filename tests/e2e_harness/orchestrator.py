@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ from .contracts import (
     StageSpec,
     ThresholdProfile,
 )
+from . import save_full_stderr
 from .registry import get_comparator, get_reference, get_runner
 
 logger = logging.getLogger(__name__)
@@ -204,10 +206,12 @@ def _resolve_bundle(
         return None, None, f"Bundle build failed for {hf_id}: {e}"
 
     if result.returncode != 0:
-        return None, elapsed, (
-            f"Bundle build failed for {hf_id} (rc={result.returncode}):\n"
-            f"{result.stderr[-2000:]}"
-        )
+        truncated, log_path = save_full_stderr(
+            result.stderr, ctx.artifacts_dir or "", "bundle_build", case.name)
+        msg = f"Bundle build failed for {hf_id} (rc={result.returncode}):\n{truncated}"
+        if log_path:
+            msg += f" (full stderr: {log_path})"
+        return None, elapsed, msg
 
     return str(bundle_path), elapsed, ""
 
@@ -378,11 +382,12 @@ class E2EOrchestrator:
                     sink.write_stage_output(stage_name, trt_output, prefix="trt")
                 except Exception as e:
                     timing[f"trt_{stage_name}_s"] = time.monotonic() - t0
-                    logger.error("TRT run failed for stage %s: %s", stage_name, e)
+                    tb = traceback.format_exc()
+                    logger.error("TRT run failed for stage %s: %s\n%s", stage_name, e, tb)
                     stage_results[stage_name] = CompareResult(
                         stage_name=stage_name,
                         passed=False,
-                        message=f"TRT run failed: {e}",
+                        message=f"TRT run failed: {e}\n{tb}",
                     )
                     if stage.required:
                         all_stages_pass = False
@@ -410,11 +415,12 @@ class E2EOrchestrator:
                     sink.write_stage_output(stage_name, ref_output, prefix="ref")
                 except Exception as e:
                     timing[f"ref_{stage_name}_s"] = time.monotonic() - t0
-                    logger.error("Reference run failed for stage %s: %s", stage_name, e)
+                    tb = traceback.format_exc()
+                    logger.error("Reference run failed for stage %s: %s\n%s", stage_name, e, tb)
                     stage_results[stage_name] = CompareResult(
                         stage_name=stage_name,
                         passed=False,
-                        message=f"Reference run failed: {e}",
+                        message=f"Reference run failed: {e}\n{tb}",
                     )
                     if stage.required:
                         all_stages_pass = False
@@ -434,10 +440,11 @@ class E2EOrchestrator:
                     timing[f"compare_{stage_name}_s"] = time.monotonic() - t0
                 except Exception as e:
                     timing[f"compare_{stage_name}_s"] = time.monotonic() - t0
+                    tb = traceback.format_exc()
                     compare_result = CompareResult(
                         stage_name=stage_name,
                         passed=False,
-                        message=f"Comparison failed: {e}",
+                        message=f"Comparison failed: {e}\n{tb}",
                     )
                 stage_results[stage_name] = compare_result
                 sink.write_compare(stage_name, compare_result)

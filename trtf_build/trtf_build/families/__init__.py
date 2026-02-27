@@ -21,7 +21,11 @@ for _finder, _name, _ispkg in pkgutil.iter_modules([_pkg_dir]):
     # Skip private modules and the base protocol definition.
     if _name.startswith("_") or _name == "base":
         continue
-    _mod = importlib.import_module(f"{__name__}.{_name}")
+    try:
+        _mod = importlib.import_module(f"{__name__}.{_name}")
+    except ImportError:
+        # Skip plugins whose dependencies (e.g. tensorrt) are not installed.
+        continue
     _plugin = getattr(_mod, "plugin", None)
     if _plugin is not None:
         _ALL_PLUGINS.append(_plugin)

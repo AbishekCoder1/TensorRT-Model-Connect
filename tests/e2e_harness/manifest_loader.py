@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -349,6 +350,78 @@ def _convert_skip_to_known_limitation(manifest: dict) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Manifest schema validation
+# ---------------------------------------------------------------------------
+
+_KNOWN_RUNTIME_STRATEGIES = frozenset({
+    "decoder_kv_cache",
+    "decoder_moe",
+    "ssm_recurrent",
+    "rwkv_recurrent",
+    "hybrid_mamba_attention",
+    "vision_language",
+    "speech_to_text",
+    "text_to_audio",
+    "speech_to_speech",
+    "diffusion",
+    "segmentation",
+    "prompted_segmentation",
+    "encoder_only",
+    "embedding",
+    "reranking",
+})
+
+
+def _validate_manifest(raw: dict, path: str) -> None:
+    """Validate manifest schema before loading.
+
+    Raises:
+        ValueError: If required fields are missing.
+        TypeError: If typed fields have wrong types.
+
+    Warns on unknown runtime_strategy values.
+    """
+    # 1. 'name' is always required
+    if "name" not in raw:
+        raise ValueError(
+            f"Manifest {path!r} is missing required field 'name'"
+        )
+
+    # 2. When not skipped, hf_id and family are required
+    if not raw.get("skip"):
+        if "hf_id" not in raw and "model_id" not in raw:
+            raise ValueError(
+                f"Manifest {path!r} (name={raw['name']!r}) is missing "
+                f"required field 'hf_id' (and no 'skip' is set)"
+            )
+        if "family" not in raw:
+            raise ValueError(
+                f"Manifest {path!r} (name={raw['name']!r}) is missing "
+                f"required field 'family' (and no 'skip' is set)"
+            )
+
+    # 3. Type checks for int fields
+    for field_name in ("max_new_tokens", "max_cache_length"):
+        if field_name in raw:
+            val = raw[field_name]
+            if not isinstance(val, int) or isinstance(val, bool):
+                raise TypeError(
+                    f"Manifest {path!r}: '{field_name}' must be int, "
+                    f"got {type(val).__name__} ({val!r})"
+                )
+
+    # 4. Warn on unknown runtime_strategy
+    rs = raw.get("runtime_strategy")
+    if rs is not None and rs not in _KNOWN_RUNTIME_STRATEGIES:
+        warnings.warn(
+            f"Manifest {path!r} (name={raw.get('name')!r}): unknown "
+            f"runtime_strategy {rs!r}. Known values: "
+            f"{sorted(_KNOWN_RUNTIME_STRATEGIES)}",
+            stacklevel=2,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -363,6 +436,8 @@ def load_manifest(
     path = Path(manifest_path)
     with open(path) as f:
         raw = json.load(f)
+
+    _validate_manifest(raw, str(path))
 
     task_strategy = _infer_task_strategy(raw)
     reference_backend = _infer_reference_backend(raw, task_strategy)

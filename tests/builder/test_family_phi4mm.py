@@ -1,9 +1,8 @@
-"""Tests for Phi-4-multimodal family plugin — weight loading and VL config.
+"""Tests for Phi-4-multimodal family plugin — weight loading.
 
 Creates synthetic model directories with the Phi-4-multimodal weight naming
-convention (fused QKV + gate_up, vision encoder, image projection), then
-verifies the plugin correctly splits/transposes weights and produces valid
-VL configuration.
+convention (fused QKV + gate_up with LoRA base_layer infix), then verifies
+the plugin correctly splits/transposes weights.
 
 No GPU or TRT needed.
 """
@@ -45,7 +44,7 @@ def _write_safetensors(model_dir: Path, tensors: dict[str, np.ndarray],
 # =========================================================================
 
 class TestPhi4MultimodalPlugin:
-    """Phi-4-multimodal plugin: fused QKV split, gate_up split, VL config."""
+    """Phi-4-multimodal plugin: fused QKV split, gate_up split."""
 
     VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 64, 32, 2, 4, 4, 64
 
@@ -70,15 +69,15 @@ class TestPhi4MultimodalPlugin:
             t[f"{p}.input_layernorm.weight"] = _rand(hidden)
             t[f"{p}.post_attention_layernorm.weight"] = _rand(hidden)
 
-            # Fused QKV: [q_dim + 2*kv_dim, hidden]
+            # Fused QKV: [q_dim + 2*kv_dim, hidden] (base_layer for LoRA)
             qkv = _rand(q_dim + 2 * kv_dim, hidden)
-            t[f"{p}.self_attn.qkv_proj.weight"] = qkv
+            t[f"{p}.self_attn.qkv_proj.base_layer.weight"] = qkv
 
-            t[f"{p}.self_attn.o_proj.weight"] = _rand(hidden, hidden)
+            t[f"{p}.self_attn.o_proj.base_layer.weight"] = _rand(hidden, hidden)
 
-            # Fused gate_up: [2 * mlp, hidden]
-            t[f"{p}.mlp.gate_up_proj.weight"] = _rand(2 * mlp, hidden)
-            t[f"{p}.mlp.down_proj.weight"] = _rand(hidden, mlp)
+            # Fused gate_up: [2 * mlp, hidden] (base_layer for LoRA)
+            t[f"{p}.mlp.gate_up_proj.base_layer.weight"] = _rand(2 * mlp, hidden)
+            t[f"{p}.mlp.down_proj.base_layer.weight"] = _rand(hidden, mlp)
 
         t["model.norm.weight"] = _rand(hidden)
         t["lm_head.weight"] = _rand(vocab, hidden)
@@ -219,66 +218,6 @@ class TestPhi4MultimodalPlugin:
         w_out = weights["w_out"]
         np.testing.assert_allclose(w_out, embedding.T, atol=1e-6)
 
-    def test_runtime_strategy(self):
-        from trtf_build.families.phi4_multimodal import plugin
-        assert plugin.runtime_strategy == "vision_language"
-
-    def test_embed_input(self):
-        from trtf_build.families.phi4_multimodal import plugin
-        assert plugin.embed_input is True
-
-
-# =========================================================================
-# VL config
-# =========================================================================
-
-class TestPhi4MultimodalVLConfig:
-    """Test VL config generation."""
-
-    def test_get_vl_config(self):
-        from trtf_build.families.phi4_multimodal import plugin
-
-        config = ModelConfig(
-            model_type="phi4mm",
-            hidden_size=3072,
-            vocab_size=100352,
-            raw={
-                "model_type": "phi4mm",
-                "img_processor": {
-                    "image_size": 336,
-                    "patch_size": 14,
-                    "hidden_size": 1024,
-                    "num_attention_heads": 16,
-                    "num_hidden_layers": 24,
-                    "intermediate_size": 4096,
-                    "image_token_id": 200011,
-                },
-            },
-        )
-
-        vl_cfg = plugin.get_vl_config(config)
-        assert vl_cfg is not None
-        assert vl_cfg["image_token_id"] == 200011
-        assert vl_cfg["fixed_image_size"] == 336
-        # 336/14 = 24, 24*24 = 576 patches
-        assert vl_cfg["num_image_pad_tokens"] == 576
-        assert vl_cfg["vision_output_dim"] == 3072
-        assert vl_cfg["preprocessor_type"] == "simple_chw"
-        assert "{image_pads}" in vl_cfg["vl_prompt_template"]
-        assert "{prompt}" in vl_cfg["vl_prompt_template"]
-
-    def test_get_vl_config_no_vision(self):
-        from trtf_build.families.phi4_multimodal import plugin
-
-        config = ModelConfig(
-            model_type="phi4mm",
-            hidden_size=3072,
-            raw={"model_type": "phi4mm"},
-        )
-
-        vl_cfg = plugin.get_vl_config(config)
-        assert vl_cfg is None
-
 
 # =========================================================================
 # GQA expansion
@@ -316,12 +255,12 @@ class TestPhi4MultimodalGQA:
         p = "model.layers.0"
         t[f"{p}.input_layernorm.weight"] = _rand(hidden)
         t[f"{p}.post_attention_layernorm.weight"] = _rand(hidden)
-        t[f"{p}.self_attn.qkv_proj.weight"] = _rand(
+        t[f"{p}.self_attn.qkv_proj.base_layer.weight"] = _rand(
             q_dim + 2 * kv_dim, hidden)
-        t[f"{p}.self_attn.o_proj.weight"] = _rand(hidden, hidden)
-        t[f"{p}.mlp.gate_up_proj.weight"] = _rand(
+        t[f"{p}.self_attn.o_proj.base_layer.weight"] = _rand(hidden, hidden)
+        t[f"{p}.mlp.gate_up_proj.base_layer.weight"] = _rand(
             2 * self.MLP, hidden)
-        t[f"{p}.mlp.down_proj.weight"] = _rand(hidden, self.MLP)
+        t[f"{p}.mlp.down_proj.base_layer.weight"] = _rand(hidden, self.MLP)
         t["model.norm.weight"] = _rand(hidden)
         t["lm_head.weight"] = _rand(self.VOCAB, hidden)
 

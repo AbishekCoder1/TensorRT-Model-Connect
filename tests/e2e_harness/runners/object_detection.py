@@ -18,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,18 @@ class ObjectDetectionRunner:
         boxes, scores, class_ids = _parse_detection_output(
             json_output_path, result.stdout)
 
+        stderr_truncated, stderr_log = save_full_stderr(
+            result.stderr or "", ctx.artifacts_dir or "",
+            "object_detection", case.name)
+        det_meta: dict = {
+            "command": cmd,
+            "returncode": result.returncode,
+            "stdout": result.stdout[-2000:] if result.stdout else "",
+            "stderr": stderr_truncated,
+        }
+        if stderr_log:
+            det_meta["stderr_log"] = stderr_log
+
         return StageOutput(
             stage_name="full_inference",
             data={
@@ -134,12 +147,7 @@ class ObjectDetectionRunner:
                 "output_json": json_output_path,
             },
             timing_s=elapsed,
-            metadata={
-                "command": cmd,
-                "returncode": result.returncode,
-                "stdout": result.stdout[-2000:] if result.stdout else "",
-                "stderr": result.stderr[-2000:] if result.stderr else "",
-            },
+            metadata=det_meta,
         )
 
 

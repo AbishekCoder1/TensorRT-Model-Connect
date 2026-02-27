@@ -179,6 +179,19 @@ class ModelConfig:
             raw=original_raw,
         )
 
+    @classmethod
+    def create_tiny(cls, model_type: str, **overrides) -> "ModelConfig":
+        """Create a minimal ModelConfig for testing (2 layers, hidden=16, vocab=32)."""
+        defaults = {
+            "model_type": model_type,
+            "vocab_size": 32, "hidden_size": 16, "intermediate_size": 32,
+            "num_hidden_layers": 2, "num_attention_heads": 4,
+            "num_key_value_heads": 4, "rms_norm_eps": 1e-6,
+            "rope_theta": 10000.0, "max_position_embeddings": 128,
+        }
+        defaults.update(overrides)
+        return cls.from_json(json.dumps(defaults))
+
     @staticmethod
     def from_dir(model_dir: str | Path) -> ModelConfig:
         config_path = Path(model_dir) / "config.json"

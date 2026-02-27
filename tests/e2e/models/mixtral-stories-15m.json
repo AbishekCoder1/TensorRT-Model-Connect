@@ -7,7 +7,8 @@
   "max_cache_length": 256,
   "prompt": "Once upon a time there was a little",
   "max_new_tokens": 20,
-  "logit_atol": 2e-3,
+  "logit_atol": 0.002,
   "layer_atol": 0.05,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "core": true
 }

@@ -12,6 +12,7 @@ import os
 import subprocess
 import time
 
+from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -87,10 +88,14 @@ class CustomPythonReference:
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Custom Python reference failed (rc={result.returncode}): "
-                f"{result.stderr[-2000:]}"
-            )
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "custom_python", case.name)
+            msg = (f"Custom Python reference failed (rc={result.returncode}): "
+                   f"{truncated}")
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
 
         # Parse output: expect JSON on stdout
         data = _parse_output(result.stdout.strip())

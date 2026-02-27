@@ -163,3 +163,143 @@ class TestWriteBundle:
         assert header["created_at"] == "2026-02-16T12:00:00Z"
         assert header["num_attention_heads"] == 32
         assert header["num_key_value_heads"] == 8
+
+
+def _read_bundle_from_bytes(data: bytes) -> tuple[dict, dict[str, bytes]]:
+    """Parse a .trtfb bundle from raw bytes. Raises on any format error."""
+    if len(data) < 8:
+        raise ValueError("File too short to contain magic bytes")
+    magic = data[:8]
+    if magic != BUNDLE_MAGIC:
+        raise ValueError(
+            f"Bad magic bytes: {magic!r}, expected {BUNDLE_MAGIC!r}")
+    if len(data) < 16:
+        raise ValueError("File too short to contain header length")
+    header_len = struct.unpack("<Q", data[8:16])[0]
+    if len(data) < 16 + header_len:
+        raise ValueError(
+            f"File truncated: header declares {header_len} bytes but only "
+            f"{len(data) - 16} bytes remain after the 16-byte preamble")
+    header = json.loads(data[16:16 + header_len].decode("utf-8"))
+
+    sections_data: dict[str, bytes] = {}
+    data_start = 16 + header_len
+    for name, meta in header.get("sections", {}).items():
+        sec_start = data_start + meta["offset"]
+        sec_end = sec_start + meta["size"]
+        if sec_end > len(data):
+            raise ValueError(
+                f"Section {name!r} extends beyond file: needs byte "
+                f"{sec_end} but file is {len(data)} bytes")
+        sections_data[name] = data[sec_start:sec_end]
+
+    return header, sections_data
+
+
+class TestCorruptedBundles:
+    """Verify that corrupted bundle data raises clear errors during parsing."""
+
+    def _make_valid_bundle_bytes(self) -> bytes:
+        """Build a minimal valid bundle in memory and return its bytes."""
+        header = {
+            "model_id": "corrupt-test",
+            "model_type": "qwen3",
+            "family": "qwen",
+            "vocab_size": 100,
+            "hidden_size": 64,
+            "num_layers": 1,
+            "sections": {
+                "engine_plan": {"offset": 0, "size": 16},
+            },
+        }
+        header_json = json.dumps(header).encode("utf-8")
+        section_data = b"ENGINEPLANDATA!!"  # exactly 16 bytes
+        buf = bytearray()
+        buf += BUNDLE_MAGIC
+        buf += struct.pack("<Q", len(header_json))
+        buf += header_json
+        buf += section_data
+        return bytes(buf)
+
+    def test_bad_magic_bytes(self):
+        """Wrong magic bytes should raise ValueError."""
+        data = self._make_valid_bundle_bytes()
+        # Corrupt the first byte of the magic
+        corrupted = b"XRTFB\x00\x01\x00" + data[8:]
+        with pytest.raises(ValueError, match="Bad magic bytes"):
+            _read_bundle_from_bytes(corrupted)
+
+    def test_zeroed_magic_bytes(self):
+        """All-zero magic bytes should raise ValueError."""
+        data = self._make_valid_bundle_bytes()
+        corrupted = b"\x00" * 8 + data[8:]
+        with pytest.raises(ValueError, match="Bad magic bytes"):
+            _read_bundle_from_bytes(corrupted)
+
+    def test_truncated_before_magic(self):
+        """File shorter than 8 bytes cannot contain valid magic."""
+        with pytest.raises(ValueError, match="too short to contain magic"):
+            _read_bundle_from_bytes(b"TRTFB")
+
+    def test_empty_file(self):
+        """Empty file should raise ValueError."""
+        with pytest.raises(ValueError, match="too short to contain magic"):
+            _read_bundle_from_bytes(b"")
+
+    def test_truncated_header_length(self):
+        """File with valid magic but truncated before header length completes."""
+        # Only 8 magic bytes + 4 bytes of header length (need 8)
+        truncated = BUNDLE_MAGIC + b"\x10\x00\x00\x00"
+        with pytest.raises(ValueError, match="too short to contain header length"):
+            _read_bundle_from_bytes(truncated)
+
+    def test_truncated_header_json(self):
+        """Header length declares more JSON bytes than available in the file."""
+        # Declare a 1000-byte header but only provide 10 bytes
+        header_len = struct.pack("<Q", 1000)
+        truncated = BUNDLE_MAGIC + header_len + b'{"a": "b"}'
+        with pytest.raises(ValueError, match="File truncated.*header declares"):
+            _read_bundle_from_bytes(truncated)
+
+    def test_invalid_header_json(self):
+        """Valid preamble but invalid JSON in the header region."""
+        bad_json = b"this is not valid json {{{{"
+        header_len = struct.pack("<Q", len(bad_json))
+        data = BUNDLE_MAGIC + header_len + bad_json
+        with pytest.raises(json.JSONDecodeError):
+            _read_bundle_from_bytes(data)
+
+    def test_truncated_section_data(self):
+        """Header declares a section larger than remaining file bytes."""
+        header = {
+            "model_id": "truncated",
+            "sections": {
+                "engine_plan": {"offset": 0, "size": 9999},
+            },
+        }
+        header_json = json.dumps(header).encode("utf-8")
+        # Only provide 10 bytes of section data (header says 9999)
+        data = BUNDLE_MAGIC + struct.pack("<Q", len(header_json)) + header_json + b"x" * 10
+        with pytest.raises(ValueError, match="extends beyond file"):
+            _read_bundle_from_bytes(data)
+
+    def test_section_offset_past_eof(self):
+        """Section offset points beyond the file boundary."""
+        header = {
+            "model_id": "bad-offset",
+            "sections": {
+                "engine_plan": {"offset": 50000, "size": 16},
+            },
+        }
+        header_json = json.dumps(header).encode("utf-8")
+        data = BUNDLE_MAGIC + struct.pack("<Q", len(header_json)) + header_json + b"x" * 16
+        with pytest.raises(ValueError, match="extends beyond file"):
+            _read_bundle_from_bytes(data)
+
+    def test_valid_bundle_parses_successfully(self):
+        """Sanity check: a valid bundle should parse without error."""
+        data = self._make_valid_bundle_bytes()
+        header, sections = _read_bundle_from_bytes(data)
+        assert header["model_id"] == "corrupt-test"
+        assert header["family"] == "qwen"
+        assert len(sections["engine_plan"]) == 16
