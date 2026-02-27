@@ -2016,7 +2016,14 @@ PipelineImpl* create_decoder_pipeline(
         throw std::runtime_error("Bundle engine missing required tensors: " + bundle_path);
     }
 
-    auto tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+    // Use tokenizer_add_special_tokens from bundle config if present,
+    // otherwise default to true to match HF's tokenizer.encode() default.
+    // This ensures the C++ binary tokenizes prompts the same way as the
+    // HF reference and debug runner.
+    const bool add_special = fp_cfg.tokenizer_add_special_tokens_present
+        ? fp_cfg.tokenizer_add_special_tokens
+        : true;
+    auto tok = trtf::extract_tokenizer_from_bundle(sections, hf_python, add_special);
 
     const auto& strategy = fp_cfg.runtime_strategy;
     if (strategy != "decoder_kv_cache" && strategy != "decoder_moe")

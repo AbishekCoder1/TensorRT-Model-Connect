@@ -448,7 +448,9 @@ The system is split into two stages:
 
 Tokenizer implementations (`ITokenizer`):
 - `VocabTokenizer` — vocab.txt-based lookup.
-- `HfPythonTokenizer` — bridges to HuggingFace tokenizers via Python subprocess.
+- `HfPythonTokenizer` — bridges to HuggingFace tokenizers via Python subprocess. The `add_special_tokens` flag is controlled by the bundle's `tokenizer_add_special_tokens` config field (detected at build time from HF tokenizer config). When the field is absent (old bundles), defaults to `true` to match HF's `tokenizer.encode()` default.
+
+Bundle self-describing config: The `.trtfb` bundle header contains JSON metadata that captures all build-time decisions (runtime_strategy, max_cache_length, tokenizer_add_special_tokens, etc.). The C++ runtime reads these fields to configure backends, cache sizes, and tokenizer behavior — no external configuration needed. See `src/cabi/fast_path_config.h` for all fields.
 
 ## Source layout
 

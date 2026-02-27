@@ -640,6 +640,63 @@ All 4 steps must pass. Step 4 is skipped if `./build/trtf` is not found.
 
 ---
 
+## Text Generation Comparator: Composite Gating
+
+The text comparator (`tests/e2e_harness/comparators/text.py`) uses 6 metrics
+with composite gating. Understanding the gating logic is important for
+diagnosing test failures.
+
+### Metrics
+
+| Metric | Compares | Pass criterion |
+|--------|----------|----------------|
+| `logit_cosine_p5` | TRT debug runner logits vs HF logits | >= 0.99 (5th percentile) |
+| `logit_rel_l2_p95` | TRT debug runner logits vs HF logits | <= 0.05 (95th percentile) |
+| `stable_top1_match_rate` | Argmax agreement on confident tokens | >= 0.9 |
+| `unstable_topk_hit_rate` | Top-k overlap on ambiguous tokens | >= 0.8 |
+| `token_agreement_rate` | Raw argmax token-for-token match | >= 0.8 |
+| `normalized_text_edit_distance` | C++ binary text vs HF text | <= 0.2 |
+
+### Composite gating rule
+
+```
+passed = logit_quality_ok AND token_level_ok AND text_ok
+```
+
+Where:
+- `logit_quality_ok` = cosine_p5 passes OR rel_l2_p95 passes
+- `token_level_ok` = agreement passes OR (stable_top1 passes AND unstable_topk passes)
+- `text_ok` = NED passes (with two adjustments below)
+
+### Prompt-echo stripping
+
+The C++ binary outputs `prompt + generation` while HF returns only
+`generation`. Before computing NED, the comparator strips the prompt prefix
+from the C++ text (using the known prompt from `trt.data["prompt"]`). This
+prevents inflated NED from the echo.
+
+### NED hard-fail threshold
+
+When NED >= 0.65, the test fails **regardless** of logit/token metrics. This
+catches genuinely broken C++ text (repetition loops, empty output, chat
+template bugs) that would otherwise be masked by good debug runner logits.
+
+For NED < 0.65 with good token metrics, the NED failure is treated as
+acceptable divergence (minor sampling differences, max_new_tokens budget
+differences, etc.).
+
+### Why logits can match but text differs
+
+The comparator compares **debug runner logits** (Python TRT) against **HF logits**.
+Both use the same tokenization (`tokenizer.encode(prompt)` with defaults).
+The C++ binary uses a separate tokenizer path (`hf_python_tokenizer.py`).
+If the C++ tokenizer uses different `add_special_tokens` settings, the input
+tokens differ, causing completely different generated text despite "perfect"
+logit match. This is why the `tokenizer_add_special_tokens` bundle field
+exists — see [Architecture Overview](Architecture-Overview.md#bundle-config-self-describing-runtime-behavior).
+
+---
+
 ## Accuracy Tolerances Reference
 
 | Model | Strategy | `logit_atol` | `layer_atol` | Rationale |

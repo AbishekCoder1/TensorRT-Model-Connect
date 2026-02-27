@@ -72,6 +72,18 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
     // MoE models use the same KV cache strategy (routing is in the TRT graph).
     cfg.runtime_strategy = extract_json_string(config_text, "runtime_strategy", "decoder_kv_cache");
 
+    // Tokenizer: whether to add BOS/EOS special tokens during prompt encoding.
+    // Determined at bundle build time and stored in the bundle's config.json.
+    // When not present (old bundles), the C++ runtime defaults to true to
+    // match HF's tokenizer.encode() default behavior.
+    {
+        int32_t raw = extract_json_int(config_text, "tokenizer_add_special_tokens", -1);
+        if (raw >= 0) {
+            cfg.tokenizer_add_special_tokens = (raw != 0);
+            cfg.tokenizer_add_special_tokens_present = true;
+        }
+    }
+
     // Mamba/SSM-specific fields
     if (cfg.runtime_strategy == "ssm_recurrent")
     {
@@ -117,7 +129,6 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.num_image_pad_tokens = extract_json_int(config_text, "num_image_pad_tokens", 0);
         cfg.vl_prompt_template = extract_json_string(config_text, "vl_prompt_template", "");
         cfg.image_token_str = extract_json_string(config_text, "image_token_str", "");
-        cfg.tokenizer_add_special_tokens = extract_json_int(config_text, "tokenizer_add_special_tokens", 0) != 0;
     }
 
     // Segmentation fields

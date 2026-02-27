@@ -1,5 +1,64 @@
 # Worklog
 
+## 2026-02-27 — Fix C++ tokenizer parity, NED comparator, artifact layout
+
+Fixed the root cause of C++ binary text divergence from HF reference for
+decoder models, improved the E2E comparator to detect genuine failures, and
+fixed artifact file layout.
+
+### C++ tokenizer `add_special_tokens` fix
+
+**Root cause**: The C++ decoder pipeline called the HF tokenizer bridge with
+`add_special_tokens=false`, while the HF reference and debug runner use the
+tokenizer's default (`true`). For models like OLMo (adds EOS by default) and
+Nemotron (chat template effects), this produced different input token
+sequences, causing completely different generated text despite perfect logit
+match from the TRT engine.
+
+**Fix**: Three-part change:
+1. **`fast_path_config.cpp`**: Parse `tokenizer_add_special_tokens` from bundle
+   config JSON for all strategies (was previously VL-only). Track whether the
+   field was explicitly present via `tokenizer_add_special_tokens_present`.
+2. **`trtf_c.cpp`**: Decoder pipeline uses bundle value if present, otherwise
+   defaults to `true` (matching HF's `tokenizer.encode()` default).
+3. **`engine_builder.py`**: At build time, detect whether the HF tokenizer adds
+   special tokens (checks `tokenizer_config.json` for `add_bos_token`, falls
+   back to comparing `encode()` with/without). Write result to bundle as
+   `tokenizer_add_special_tokens: 0|1`.
+
+**Bundle backward compat**: Old bundles without the field get the default
+(`true`), which matches HF behavior and fixes all 4 previously-failing models.
+New bundles record the value explicitly for per-model control.
+
+**Models fixed**: nemotron-nano-4b, olmo-1b, minitron-4b-depth, qwen3-moe-30b-a3b
+
+### NED comparator improvements
+
+**Prompt-echo stripping**: C++ binary outputs `prompt + generation` while HF
+returns only `generation`. The text comparator now strips the prompt prefix
+(available in `trt.data["prompt"]`) before computing NED. Fixed inflated NED
+for 18+ models.
+
+**Hard-fail threshold**: NED >= 0.65 now causes test failure even when
+token-level logit metrics pass. Previously, NED was unconditionally overridden
+when token_agreement was good, masking genuinely broken C++ text output.
+
+### Artifact layout fix
+
+All runner/reference artifacts now write to per-model subdirectories
+(`{artifacts_dir}/{model_name}/`) instead of the artifacts root. Added
+`_case_artifact_dir()` helper. Fixed across 16 files.
+
+### Other fixes
+- `--e2e-task-strategy` filter: replaced module-level parametrize (ignored CLI)
+  with `pytest_generate_tests` hook
+- VL manifest `test_image` paths: use relative `tests/e2e/data/test_img.jpeg`
+- Preflight `_check_asset_exists`: resolve relative paths against project root
+- Full subprocess logs saved to `{model}/logs/`
+- Repro commands in `result.json`
+- `scripts/run_e2e_parallel.sh` for 4-GPU parallel E2E
+- Stub headers for detection/neural_operator backends (unblocked C++ build)
+
 ## 2026-02-26 — Test infrastructure hardening (11 issues fixed)
 
 Audited the testing infrastructure after the model-onboarding upgrade (299

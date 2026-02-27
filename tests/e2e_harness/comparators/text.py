@@ -259,8 +259,17 @@ class TextComparator:
         # --- Metric 6: normalized_text_edit_distance ---
         trt_text = (trt.text or "").strip()
         ref_text = (ref.text or "").strip()
-        if trt_text or ref_text:
-            ned = _normalized_edit_distance(trt_text, ref_text)
+
+        # Strip prompt echo: C++ binary outputs "prompt + generation" while
+        # HF returns only "generation". Use the known prompt from the runner
+        # to strip the prefix before computing NED.
+        prompt = (trt.data or {}).get("prompt", "")
+        trt_text_for_ned = trt_text
+        if prompt and trt_text.startswith(prompt):
+            trt_text_for_ned = trt_text[len(prompt):].lstrip()
+
+        if trt_text_for_ned or ref_text:
+            ned = _normalized_edit_distance(trt_text_for_ned, ref_text)
         else:
             ned = 0.0
         metrics["normalized_text_edit_distance"] = ned
@@ -314,10 +323,13 @@ class TextComparator:
 
         text_ok = per_metric_pass.get("normalized_text_edit_distance", True)
 
-        # When token-level agreement is perfect, text formatting differences
-        # (C++ binary output vs HF tokenizer.decode) are non-blocking.
-        # NED only gates when token-level metrics are insufficient.
-        if token_level_ok:
+        # When token-level agreement is good AND the text mismatch is moderate,
+        # treat NED failure as an acceptable divergence (prompt echo,
+        # max_new_tokens budget difference, minor sampling divergence).
+        # But when NED >= 0.65, the C++ text is fundamentally wrong (e.g.,
+        # repetition loops, empty output, chat template bugs) and must gate.
+        ned_hard_fail_threshold = 0.65
+        if token_level_ok and ned < ned_hard_fail_threshold:
             text_ok = True
 
         passed = logit_quality_ok and token_level_ok and text_ok

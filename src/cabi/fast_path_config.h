@@ -58,6 +58,7 @@ struct FastPathModelConfig {
     std::string vl_prompt_template; // prompt template with {image_pads} and {prompt}
     std::string image_token_str;    // string for one image pad token (e.g. "<|image_pad|>")
     bool tokenizer_add_special_tokens{false}; // whether tokenizer should add BOS/EOS
+    bool tokenizer_add_special_tokens_present{false}; // true if bundle explicitly sets the field
 
     // Segmentation fields (used when runtime_strategy == "segmentation")
     int32_t num_classes{150};

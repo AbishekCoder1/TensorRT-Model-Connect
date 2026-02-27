@@ -77,6 +77,7 @@ class TextGenerationCausalRunner:
         data = {
             "cpp_text": cpp_text,
             "cpp_returncode": cpp_meta.get("returncode", -1),
+            "prompt": prompt,
         }
         if logits_path:
             data["logits_path"] = logits_path

@@ -91,6 +91,35 @@ def _get_gpu_name() -> str:
     return ""
 
 
+def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
+    """Detect whether the HF tokenizer adds special tokens (BOS/EOS) by default.
+
+    Reads tokenizer_config.json to check add_bos_token / add_special_tokens.
+    Falls back to checking if the tokenizer's encode() adds a BOS token.
+    """
+    # Check tokenizer_config.json for explicit add_bos_token
+    tok_config_path = model_dir / "tokenizer_config.json"
+    if tok_config_path.exists():
+        try:
+            tok_cfg = json.load(open(tok_config_path))
+            # Explicit add_bos_token field (used by Llama, Nemotron, etc.)
+            if "add_bos_token" in tok_cfg:
+                return bool(tok_cfg["add_bos_token"])
+        except Exception:
+            pass
+
+    # Fallback: instantiate the tokenizer and check if encode adds BOS
+    try:
+        from transformers import AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+        # Encode with and without special tokens, compare
+        ids_with = tok.encode("hello", add_special_tokens=True)
+        ids_without = tok.encode("hello", add_special_tokens=False)
+        return ids_with != ids_without
+    except Exception:
+        return False
+
+
 def _ensure_tokenizer_json(model_dir: Path) -> None:
     """If the model directory lacks tokenizer.json, generate it from the
     slow tokenizer using HF transformers. This ensures the C++ runtime can
@@ -196,7 +225,11 @@ def build_bundle(
             print(f"[trtf-build]   {ename}: {len(eplan) / (1024 * 1024):.1f} MB",
                   file=sys.stderr)
 
-    # 5. Write bundle
+    # 5. Detect tokenizer special-tokens behavior from HF config
+    tokenizer_add_special_tokens = _detect_tokenizer_add_special_tokens(
+        model_dir_path)
+
+    # 6. Write bundle
     info = BundleInfo(
         model_id=model_dir_path.name,
         model_type=config.model_type,
@@ -211,6 +244,7 @@ def build_bundle(
         num_key_value_heads=config.num_key_value_heads,
         max_cache_length=max_cache_length,
         runtime_strategy=getattr(plugin, "runtime_strategy", ""),
+        tokenizer_add_special_tokens=tokenizer_add_special_tokens,
     )
 
     sections = [BundleSection("engine_plan", engine_plan)]

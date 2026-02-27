@@ -312,4 +312,48 @@ ONNX export introduces an intermediate representation that limits control over t
 - **Build once, run anywhere** (same GPU architecture): no Python needed at runtime
 - **Instant startup**: engine deserialization (~5s) vs. full build (~60-300s)
 - **Deployment simplicity**: single file, no model directory needed
+- **Self-describing**: all runtime behavior is determined by the bundle's JSON header — the C++ runtime needs no external configuration
+
+### Bundle Config: Self-Describing Runtime Behavior
+
+The `.trtfb` bundle embeds a JSON header that captures all build-time decisions
+the C++ runtime needs. This ensures the runtime always behaves consistently
+with how the engine was built, without guessing or relying on external state.
+
+**Format**: 8-byte magic (`TRTFB\x00\x01\x00`) + 8-byte header length + JSON + binary sections.
+
+**Key config fields** (written at build time, consumed at runtime):
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `runtime_strategy` | string | `"decoder_kv_cache"` | Selects C++ backend (decoder, mamba, VL, diffusion, etc.) |
+| `max_cache_length` | int | 256 | KV cache size baked into TRT engine tensor shapes |
+| `vocab_size` | int | — | Output logits dimension |
+| `hidden_size` | int | — | Attention hidden dimension |
+| `num_layers` | int | — | Number of decoder/encoder layers |
+| `num_attention_heads` | int | — | Number of query heads |
+| `num_key_value_heads` | int | — | Number of KV heads (GQA) |
+| `tokenizer_add_special_tokens` | int (0/1) | absent | Whether the tokenizer should add BOS/EOS when encoding prompts |
+
+**Tokenizer special tokens**: At build time, the Python builder detects
+whether the HF tokenizer adds special tokens by default (checks
+`tokenizer_config.json` for `add_bos_token`, falls back to comparing
+`encode()` output with and without special tokens). The result is stored as
+`tokenizer_add_special_tokens: 0` or `1` in the bundle. At runtime, the C++
+binary reads this field and passes it to the HF tokenizer bridge. If the field
+is absent (old bundles), the runtime defaults to `true` to match HF's
+`tokenizer.encode()` default behavior.
+
+This design ensures:
+- **Parity**: C++ binary tokenizes prompts the same way as HF Transformers
+- **Per-model control**: Models that explicitly don't want BOS (e.g., GPT-2) set `0`
+- **Backward compat**: Old bundles without the field use the safe default (`true`)
+
+**Strategy-specific fields** are parsed conditionally based on `runtime_strategy`:
+- SSM: `d_inner`, `conv_kernel`, `state_size`, `n_ssm_layers`
+- VL: `vision_output_dim`, `fixed_image_size`, `preprocessor_type`, `vl_prompt_template`
+- Speech: `num_mel_bins`, `max_source_positions`, `max_target_positions`
+- Bark: `semantic_vocab_size`, `coarse_max_cache_length`, `sample_rate`
+- Diffusion: `scheduler`, `num_inference_steps`, `guidance_scale`, `video_*` dimensions
+- Segmentation: `num_classes`, `input_image_h/w`, `seg_image_mean/std`
 - **Clean separation**: Python handles the complex build, C++ handles the fast runtime
