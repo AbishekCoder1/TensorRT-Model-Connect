@@ -26,6 +26,25 @@ logger = logging.getLogger(__name__)
 PROJECT_DIR = Path(__file__).resolve().parents[3]
 
 
+def _ref_subprocess_env() -> dict:
+    """Build env for HF reference subprocesses.
+
+    On GB300, torch's bundled cuBLAS is incompatible with the driver,
+    causing CUBLAS_STATUS_INVALID_VALUE on every matmul. We LD_PRELOAD
+    the system cuBLAS to fix this.
+    """
+    env = os.environ.copy()
+    sys_cublas = "/usr/local/cuda/lib64/libcublas.so.13"
+    sys_cublaslt = "/usr/local/cuda/lib64/libcublasLt.so.13"
+    if os.path.exists(sys_cublas) and os.path.exists(sys_cublaslt):
+        existing = env.get("LD_PRELOAD", "")
+        preload = f"{sys_cublas}:{sys_cublaslt}"
+        env["LD_PRELOAD"] = f"{preload}:{existing}" if existing else preload
+    return env
+
+
+
+
 class HfDiffusersReference:
     """Reference backend using HuggingFace diffusers pipelines."""
 
@@ -127,7 +146,8 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         t0 = time.monotonic()
         result = subprocess.run(
             [python, "-c", script],
-            capture_output=True, text=True, timeout=600)
+            capture_output=True, text=True, timeout=600,
+            env=_ref_subprocess_env())
         elapsed = time.monotonic() - t0
 
         data: dict = {
@@ -221,9 +241,10 @@ num_steps = {num_steps}
 frames_dir = {frames_dir!r}
 seed = 42
 
+# Use float32 for reference (avoids CUBLAS errors on GB300 with bf16/fp16)
 if family in ("flux",):
     from diffusers import FluxPipeline
-    pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+    pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
     pipe.to("cuda")
     output = pipe(
         prompt=prompt,
@@ -234,7 +255,7 @@ if family in ("flux",):
     frames = output.images
 elif family in ("z_image",):
     from diffusers import DiffusionPipeline
-    pipe = DiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+    pipe = DiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
     pipe.to("cuda")
     output = pipe(
         prompt=prompt,
@@ -245,8 +266,9 @@ elif family in ("z_image",):
     frames = output.images
 else:
     # Default: Wan-style text-to-video
+    import ftfy  # noqa: F401 — required by WanPipeline prompt cleaning
     from diffusers import WanPipeline
-    pipe = WanPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
+    pipe = WanPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
     pipe.to("cuda")
     output = pipe(
         prompt=prompt,
@@ -269,7 +291,8 @@ print(f"Generated {{len(frames)}} frames")
         t0 = time.monotonic()
         result = subprocess.run(
             [python, "-c", script],
-            capture_output=True, text=True, timeout=3600)
+            capture_output=True, text=True, timeout=3600,
+            env=_ref_subprocess_env())
         elapsed = time.monotonic() - t0
 
         frame_files = sorted(Path(frames_dir).glob("frame_*.png"))

@@ -53,7 +53,8 @@ RUN pip install \
     scipy \
     librosa \
     soundfile \
-    sentencepiece
+    sentencepiece \
+    ftfy
 
 # Create libnvinfer.so symlink (pip ships libnvinfer.so.10 only)
 RUN TRT_LIB=$(python3 -c \
