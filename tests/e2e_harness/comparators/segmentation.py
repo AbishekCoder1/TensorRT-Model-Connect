@@ -20,12 +20,13 @@ registry calls.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
 
 from ..contracts import (
     CompareResult,
+    MetricResult,
     StageOutput,
     StageSpec,
+    StageStatus,
     ThresholdProfile,
 )
 
@@ -196,27 +197,23 @@ class SegmentationComparator:
     ) -> CompareResult:
         np = _safe_import_numpy()
 
-        metrics: Dict[str, float] = {}
-        per_metric_pass: Dict[str, bool] = {}
-        gate_details: list[str] = []
+        metrics: dict[str, MetricResult] = {}
 
         trt_map = trt.data.get("class_map")
         ref_map = ref.data.get("class_map")
 
         if trt_map is None:
-            gate_details.append("TRT class_map is None")
             return CompareResult(
-                stage_name=stage.name, passed=False,
-                metrics=metrics, per_metric_pass=per_metric_pass,
-                gate_details=gate_details,
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                metrics=metrics,
                 message="No TRT segmentation output",
             )
         if ref_map is None:
-            gate_details.append("Reference class_map is None")
             return CompareResult(
-                stage_name=stage.name, passed=False,
-                metrics=metrics, per_metric_pass=per_metric_pass,
-                gate_details=gate_details,
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                metrics=metrics,
                 message="No reference segmentation output",
             )
 
@@ -225,60 +222,53 @@ class SegmentationComparator:
 
         # Pixel accuracy
         pixel_acc = _compute_pixel_accuracy(trt_map, ref_map)
-        metrics["pixel_accuracy"] = pixel_acc
-
         pixel_acc_thresh = threshold.metrics.get("pixel_accuracy", 0.85)
-        passed_pa = pixel_acc >= pixel_acc_thresh
-        per_metric_pass["pixel_accuracy"] = passed_pa
-        gate_details.append(
-            f"pixel_accuracy: {pixel_acc:.4f} >= {pixel_acc_thresh} "
-            f"-> {'PASS' if passed_pa else 'FAIL'}"
+        metrics["pixel_accuracy"] = MetricResult(
+            value=pixel_acc, threshold=pixel_acc_thresh,
+            operator=">=", passed=pixel_acc >= pixel_acc_thresh,
         )
 
         # mIoU
         miou = _compute_miou(trt_map, ref_map)
-        metrics["mIoU"] = miou
-
         miou_thresh = threshold.metrics.get("mIoU", 0.5)
-        passed_miou = miou >= miou_thresh
-        per_metric_pass["mIoU"] = passed_miou
-        gate_details.append(
-            f"mIoU: {miou:.4f} >= {miou_thresh} "
-            f"-> {'PASS' if passed_miou else 'FAIL'}"
+        metrics["mIoU"] = MetricResult(
+            value=miou, threshold=miou_thresh,
+            operator=">=", passed=miou >= miou_thresh,
         )
 
         # Boundary F-score (optional, graceful fallback if scipy unavailable)
         try:
             bf = _compute_boundary_f_score(trt_map, ref_map)
-            metrics["boundary_f_score"] = bf
-
             bf_thresh = threshold.metrics.get("boundary_f_score")
             if bf_thresh is not None:
-                passed_bf = bf >= bf_thresh
-                per_metric_pass["boundary_f_score"] = passed_bf
-                gate_details.append(
-                    f"boundary_f_score: {bf:.4f} >= {bf_thresh} "
-                    f"-> {'PASS' if passed_bf else 'FAIL'}"
+                metrics["boundary_f_score"] = MetricResult(
+                    value=bf, threshold=bf_thresh,
+                    operator=">=", passed=bf >= bf_thresh,
+                )
+            else:
+                metrics["boundary_f_score"] = MetricResult(
+                    value=bf, threshold=None, operator=">=", passed=True,
+                    note="informational (no threshold configured)",
                 )
         except ImportError:
-            gate_details.append("scipy not available; skipping boundary_f_score")
+            pass  # scipy not available; skip boundary_f_score entirely
 
-        # Class distribution summary
+        # Class distribution summary (informational)
         trt_classes = int(len(np.unique(trt_map)))
         ref_classes = int(len(np.unique(ref_map)))
-        metrics["trt_num_classes"] = float(trt_classes)
-        metrics["ref_num_classes"] = float(ref_classes)
-        gate_details.append(
-            f"Unique classes: TRT={trt_classes}, Ref={ref_classes}"
+        metrics["trt_num_classes"] = MetricResult(
+            value=float(trt_classes), threshold=None, operator=">=", passed=True,
+        )
+        metrics["ref_num_classes"] = MetricResult(
+            value=float(ref_classes), threshold=None, operator=">=", passed=True,
         )
 
-        overall = all(per_metric_pass.values())
+        overall = all(m.passed for m in metrics.values() if m.threshold is not None)
         return CompareResult(
             stage_name=stage.name,
-            passed=overall,
+            status=StageStatus.PASSED.value if overall else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all metrics must pass",
             message=f"Segmentation: {'PASS' if overall else 'FAIL'} "
                     f"(pixel_acc={pixel_acc:.4f}, mIoU={miou:.4f})",
         )
@@ -305,34 +295,34 @@ class PromptedSegmentationComparator:
     ) -> CompareResult:
         np = _safe_import_numpy()
 
-        metrics: Dict[str, float] = {}
-        per_metric_pass: Dict[str, bool] = {}
-        gate_details: list[str] = []
+        metrics: dict[str, MetricResult] = {}
 
         trt_masks = trt.data.get("masks", [])
         ref_masks = ref.data.get("masks", [])
         trt_scores = trt.data.get("mask_scores", [])
         ref_scores = ref.data.get("mask_scores", [])
 
-        # Number of masks consistency
-        metrics["trt_num_masks"] = float(len(trt_masks))
-        metrics["ref_num_masks"] = float(len(ref_masks))
+        # Number of masks (informational)
+        metrics["trt_num_masks"] = MetricResult(
+            value=float(len(trt_masks)), threshold=None, operator=">=", passed=True,
+        )
+        metrics["ref_num_masks"] = MetricResult(
+            value=float(len(ref_masks)), threshold=None, operator=">=", passed=True,
+        )
 
         num_expected = trt.data.get("num_expected_masks") or ref.data.get("num_expected_masks")
         if num_expected is not None:
-            metrics["expected_num_masks"] = float(num_expected)
+            metrics["expected_num_masks"] = MetricResult(
+                value=float(num_expected), threshold=None, operator=">=", passed=True,
+            )
 
+        # Number of masks consistency (gated only if threshold present)
         num_masks_thresh = threshold.metrics.get("num_masks_consistency")
         if num_masks_thresh is not None:
             passed_nm = len(trt_masks) == len(ref_masks)
-            per_metric_pass["num_masks_consistency"] = passed_nm
-            gate_details.append(
-                f"num_masks: TRT={len(trt_masks)} vs Ref={len(ref_masks)} "
-                f"-> {'MATCH' if passed_nm else 'MISMATCH'}"
-            )
-        else:
-            gate_details.append(
-                f"num_masks: TRT={len(trt_masks)}, Ref={len(ref_masks)}"
+            metrics["num_masks_consistency"] = MetricResult(
+                value=1.0 if passed_nm else 0.0, threshold=1.0,
+                operator="==", passed=passed_nm,
             )
 
         # Per-mask IoU (matched by rank/index)
@@ -351,27 +341,22 @@ class PromptedSegmentationComparator:
                         (ref_m.shape[1], ref_m.shape[0]), Image.NEAREST)
                     trt_m = np.array(trt_resized).astype(bool)
                 except ImportError:
-                    gate_details.append(f"Mask {i}: shape mismatch, PIL unavailable")
                     continue
 
             iou = _compute_iou(trt_m, ref_m)
             iou_values.append(iou)
-            metrics[f"mask_{i}_iou"] = iou
+            metrics[f"mask_{i}_iou"] = MetricResult(
+                value=iou, threshold=None, operator=">=", passed=True,
+                note="per-mask informational",
+            )
 
         if iou_values:
             mean_iou = sum(iou_values) / len(iou_values)
-            # "iou_per_prompt" matches threshold key from prompted_segmentation.json
-            metrics["iou_per_prompt"] = mean_iou
-
             iou_thresh = threshold.metrics.get("iou_per_prompt", 0.5)
-            passed_iou = mean_iou >= iou_thresh
-            per_metric_pass["iou_per_prompt"] = passed_iou
-            gate_details.append(
-                f"iou_per_prompt: {mean_iou:.4f} >= {iou_thresh} "
-                f"-> {'PASS' if passed_iou else 'FAIL'}"
+            metrics["iou_per_prompt"] = MetricResult(
+                value=mean_iou, threshold=iou_thresh,
+                operator=">=", passed=mean_iou >= iou_thresh,
             )
-        elif n_compare == 0:
-            gate_details.append("No masks to compare")
 
         # Mask rank consistency: top-scoring masks should match
         if trt_scores and ref_scores and len(trt_scores) >= 2 and len(ref_scores) >= 2:
@@ -386,24 +371,27 @@ class PromptedSegmentationComparator:
                 and trt_rank[i] == ref_rank[i]
             )
             rank_consistency = rank_matches / n_rank if n_rank > 0 else 0.0
-            metrics["mask_rank_consistency"] = rank_consistency
 
             rank_thresh = threshold.metrics.get("mask_rank_consistency")
             if rank_thresh is not None:
-                passed_rank = rank_consistency >= rank_thresh
-                per_metric_pass["mask_rank_consistency"] = passed_rank
-                gate_details.append(
-                    f"mask_rank_consistency: {rank_consistency:.4f} >= "
-                    f"{rank_thresh} -> {'PASS' if passed_rank else 'FAIL'}"
+                metrics["mask_rank_consistency"] = MetricResult(
+                    value=rank_consistency, threshold=rank_thresh,
+                    operator=">=", passed=rank_consistency >= rank_thresh,
+                )
+            else:
+                metrics["mask_rank_consistency"] = MetricResult(
+                    value=rank_consistency, threshold=None,
+                    operator=">=", passed=True,
+                    note="informational (no threshold configured)",
                 )
 
-        overall = all(per_metric_pass.values()) if per_metric_pass else (n_compare > 0)
+        gated = [m for m in metrics.values() if m.threshold is not None]
+        overall = all(m.passed for m in gated) if gated else (n_compare > 0)
         return CompareResult(
             stage_name=stage.name,
-            passed=overall,
+            status=StageStatus.PASSED.value if overall else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all metrics must pass",
             message=f"Prompted segmentation: {'PASS' if overall else 'FAIL'}",
         )
 
@@ -437,9 +425,7 @@ class ObjectDetectionComparator:
         threshold: ThresholdProfile,
         stage: StageSpec,
     ) -> CompareResult:
-        metrics: Dict[str, float] = {}
-        per_metric_pass: Dict[str, bool] = {}
-        gate_details: list[str] = []
+        metrics: dict[str, MetricResult] = {}
 
         # Extract and canonicalize detections
         trt_dets = self._canonicalize(
@@ -456,40 +442,39 @@ class ObjectDetectionComparator:
         trt_boxes, trt_scores, trt_classes = trt_dets
         ref_boxes, ref_scores, ref_classes = ref_dets
 
-        metrics["trt_num_detections"] = float(len(trt_boxes))
-        metrics["ref_num_detections"] = float(len(ref_boxes))
-
-        gate_details.append(
-            f"Detections (post-NMS): TRT={len(trt_boxes)}, Ref={len(ref_boxes)}"
+        metrics["trt_num_detections"] = MetricResult(
+            value=float(len(trt_boxes)), threshold=None, operator=">=", passed=True,
+        )
+        metrics["ref_num_detections"] = MetricResult(
+            value=float(len(ref_boxes)), threshold=None, operator=">=", passed=True,
         )
 
         if not ref_boxes:
-            gate_details.append("No reference detections to compare against")
+            no_ref_pass = len(trt_boxes) == 0
             return CompareResult(
                 stage_name=stage.name,
-                passed=len(trt_boxes) == 0,
+                status=StageStatus.PASSED.value if no_ref_pass else StageStatus.FAILED.value,
                 metrics=metrics,
-                per_metric_pass=per_metric_pass,
-                gate_details=gate_details,
                 message="No reference detections",
             )
 
-        # mAP at standard IoU thresholds — keys match threshold file
+        # mAP at standard IoU thresholds -- keys match threshold file
         for iou_thresh, key in [(0.5, "mAP_50"), (0.75, "mAP_75")]:
             ap = self._compute_ap(
                 trt_boxes, trt_scores, trt_classes,
                 ref_boxes, ref_classes,
                 iou_threshold=iou_thresh,
             )
-            metrics[key] = ap
-
             ap_gate = threshold.metrics.get(key)
             if ap_gate is not None:
-                passed_ap = ap >= ap_gate
-                per_metric_pass[key] = passed_ap
-                gate_details.append(
-                    f"{key}: {ap:.4f} >= {ap_gate} "
-                    f"-> {'PASS' if passed_ap else 'FAIL'}"
+                metrics[key] = MetricResult(
+                    value=ap, threshold=ap_gate,
+                    operator=">=", passed=ap >= ap_gate,
+                )
+            else:
+                metrics[key] = MetricResult(
+                    value=ap, threshold=None, operator=">=", passed=True,
+                    note="informational (no threshold configured)",
                 )
 
         # Class precision and recall
@@ -501,17 +486,19 @@ class ObjectDetectionComparator:
                 if trt_cls_set else 0.0
             )
             cls_recall = len(trt_cls_set & ref_cls_set) / len(ref_cls_set)
-            metrics["class_precision"] = cls_precision
-            metrics["class_recall"] = cls_recall
 
-            for mkey in ["class_precision", "class_recall"]:
+            for mkey, mval in [("class_precision", cls_precision),
+                               ("class_recall", cls_recall)]:
                 mthresh = threshold.metrics.get(mkey)
                 if mthresh is not None:
-                    passed_m = metrics[mkey] >= mthresh
-                    per_metric_pass[mkey] = passed_m
-                    gate_details.append(
-                        f"{mkey}: {metrics[mkey]:.4f} >= {mthresh} "
-                        f"-> {'PASS' if passed_m else 'FAIL'}"
+                    metrics[mkey] = MetricResult(
+                        value=mval, threshold=mthresh,
+                        operator=">=", passed=mval >= mthresh,
+                    )
+                else:
+                    metrics[mkey] = MetricResult(
+                        value=mval, threshold=None, operator=">=", passed=True,
+                        note="informational (no threshold configured)",
                     )
 
         # Box IoU distribution (match each TRT box to closest ref box)
@@ -523,27 +510,38 @@ class ObjectDetectionComparator:
                 )
                 box_ious.append(best_iou)
             import statistics
-            metrics["box_iou_mean"] = statistics.mean(box_ious)
-            metrics["box_iou_median"] = statistics.median(box_ious)
-            if len(box_ious) > 1:
-                metrics["box_iou_min"] = min(box_ious)
+            box_iou_mean_val = statistics.mean(box_ious)
+            box_iou_median_val = statistics.median(box_ious)
 
             box_iou_thresh = threshold.metrics.get("box_iou_mean")
             if box_iou_thresh is not None:
-                passed_bi = metrics["box_iou_mean"] >= box_iou_thresh
-                per_metric_pass["box_iou_mean"] = passed_bi
-                gate_details.append(
-                    f"box_iou_mean: {metrics['box_iou_mean']:.4f} >= "
-                    f"{box_iou_thresh} -> {'PASS' if passed_bi else 'FAIL'}"
+                metrics["box_iou_mean"] = MetricResult(
+                    value=box_iou_mean_val, threshold=box_iou_thresh,
+                    operator=">=", passed=box_iou_mean_val >= box_iou_thresh,
+                )
+            else:
+                metrics["box_iou_mean"] = MetricResult(
+                    value=box_iou_mean_val, threshold=None,
+                    operator=">=", passed=True,
+                    note="informational (no threshold configured)",
+                )
+            metrics["box_iou_median"] = MetricResult(
+                value=box_iou_median_val, threshold=None,
+                operator=">=", passed=True,
+            )
+            if len(box_ious) > 1:
+                metrics["box_iou_min"] = MetricResult(
+                    value=min(box_ious), threshold=None,
+                    operator=">=", passed=True,
                 )
 
-        overall = all(per_metric_pass.values()) if per_metric_pass else (len(trt_boxes) > 0)
+        gated = [m for m in metrics.values() if m.threshold is not None]
+        overall = all(m.passed for m in gated) if gated else (len(trt_boxes) > 0)
         return CompareResult(
             stage_name=stage.name,
-            passed=overall,
+            status=StageStatus.PASSED.value if overall else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all metrics must pass",
             message=f"Object detection: {'PASS' if overall else 'FAIL'}",
         )
 

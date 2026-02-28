@@ -1,7 +1,13 @@
 """Artifact sink — persist E2E outputs, commands, and results.
 
-Implements the ArtifactSink protocol from contracts.py. Creates a
-structured directory layout for each model case with all test artifacts.
+Implements the ArtifactSink protocol from contracts.py.  All per-model
+test information is written to a single ``result.json`` plus a single
+``e2e_run.log`` for subprocess output.  Modality artifacts (PNG, WAV,
+NPY) are written directly into the model directory.
+
+Eliminated files (compared to the previous layout):
+    case.json, env_fingerprint.json, commands.json,
+    stages/ directory, logs/ directory.
 """
 
 from __future__ import annotations
@@ -12,13 +18,11 @@ import os
 import platform
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .contracts import (
-    ArtifactSink as ArtifactSinkProtocol,
     CompareResult,
     E2ECase,
     E2EResult,
@@ -103,153 +107,6 @@ def _collect_env_fingerprint() -> dict[str, Any]:
     return fp
 
 
-class FileArtifactSink:
-    """File-based artifact sink that persists all E2E test outputs.
-
-    Directory layout:
-        <artifacts_dir>/<model_name>/
-            result.json         — final E2E result
-            case.json           — input case snapshot
-            env_fingerprint.json — environment info
-            commands.json       — all subprocess commands executed
-            stages/
-                <stage_name>/
-                    trt_output.json
-                    ref_output.json
-                    compare.json
-            logs/
-                <label>.stdout
-                <label>.stderr
-    """
-
-    def __init__(self, artifacts_dir: str | Path, case: E2ECase) -> None:
-        self._base = Path(artifacts_dir) / case.name
-        self._base.mkdir(parents=True, exist_ok=True)
-        (self._base / "stages").mkdir(exist_ok=True)
-        (self._base / "logs").mkdir(exist_ok=True)
-
-        self._commands: list[dict[str, Any]] = []
-        self._case = case
-        self._env_fp: dict[str, Any] | None = None
-
-        # Write case snapshot
-        self._write_json("case.json", _case_to_dict(case))
-
-    @property
-    def base_dir(self) -> Path:
-        """Root directory for this model's artifacts."""
-        return self._base
-
-    def ensure_env_fingerprint(self) -> dict[str, Any]:
-        """Collect and cache environment fingerprint."""
-        if self._env_fp is None:
-            self._env_fp = _collect_env_fingerprint()
-            self._write_json("env_fingerprint.json", self._env_fp)
-        return self._env_fp
-
-    def log_command(
-        self,
-        command: list[str],
-        rc: int,
-        stdout: str,
-        stderr: str,
-        label: str = "",
-    ) -> None:
-        """Log a subprocess command execution."""
-        entry = {
-            "command": command,
-            "returncode": rc,
-            "stdout_len": len(stdout),
-            "stderr_len": len(stderr),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        self._commands.append(entry)
-
-        # Write stdout/stderr to log files
-        if label:
-            safe_label = label.replace("/", "_").replace(" ", "_")
-        else:
-            safe_label = f"cmd_{len(self._commands)}"
-
-        if stdout:
-            log_path = self._base / "logs" / f"{safe_label}.stdout"
-            log_path.write_text(stdout, encoding="utf-8")
-
-        if stderr:
-            log_path = self._base / "logs" / f"{safe_label}.stderr"
-            log_path.write_text(stderr, encoding="utf-8")
-
-        # Update commands.json
-        self._write_json("commands.json", self._commands)
-
-    def write_stage_output(
-        self,
-        stage_name: str,
-        output: StageOutput,
-        prefix: str = "trt",
-    ) -> None:
-        """Persist a stage output (TRT or reference)."""
-        stage_dir = self._base / "stages" / stage_name
-        stage_dir.mkdir(parents=True, exist_ok=True)
-
-        data: dict[str, Any] = {
-            "stage_name": output.stage_name,
-            "timing_s": output.timing_s,
-            "metadata": output.metadata,
-        }
-
-        if output.text is not None:
-            data["text"] = output.text
-
-        # Serialize data dict (skip numpy/large binary)
-        serializable_data: dict[str, Any] = {}
-        for k, v in output.data.items():
-            try:
-                json.dumps(v)
-                serializable_data[k] = v
-            except (TypeError, ValueError):
-                serializable_data[k] = f"<non-serializable: {type(v).__name__}>"
-
-        data["data"] = serializable_data
-
-        self._write_json(
-            f"stages/{stage_name}/{prefix}_output.json",
-            data,
-        )
-
-    def write_compare(
-        self,
-        stage_name: str,
-        result: CompareResult,
-    ) -> None:
-        """Persist comparison result for a stage."""
-        stage_dir = self._base / "stages" / stage_name
-        stage_dir.mkdir(parents=True, exist_ok=True)
-
-        data = {
-            "stage_name": result.stage_name,
-            "passed": result.passed,
-            "metrics": result.metrics,
-            "per_metric_pass": result.per_metric_pass,
-            "gate_details": result.gate_details,
-            "message": result.message,
-        }
-        self._write_json(f"stages/{stage_name}/compare.json", data)
-
-    def finalize(self, result: E2EResult) -> str:
-        """Write final result.json and return path."""
-        from .result_schema import serialize_result
-        self._write_json("result.json", serialize_result(result))
-        return str(self._base / "result.json")
-
-    def _write_json(self, rel_path: str, data: Any) -> None:
-        """Write a JSON file relative to base dir."""
-        path = self._base / rel_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=str)
-
-
 def _case_to_dict(case: E2ECase) -> dict[str, Any]:
     """Serialize an E2ECase to a plain dict for JSON storage."""
     return {
@@ -280,3 +137,160 @@ def _case_to_dict(case: E2ECase) -> dict[str, Any]:
         "determinism": case.determinism,
         "metadata": case.metadata,
     }
+
+
+def _serialize_stage_output(output: StageOutput) -> dict[str, Any]:
+    """Serialize a StageOutput to a JSON-safe dict (skip non-serializable)."""
+    data: dict[str, Any] = {
+        "stage_name": output.stage_name,
+        "timing_s": output.timing_s,
+        "metadata": output.metadata,
+    }
+    if output.text is not None:
+        data["text"] = output.text
+
+    serializable_data: dict[str, Any] = {}
+    for k, v in output.data.items():
+        try:
+            json.dumps(v)
+            serializable_data[k] = v
+        except (TypeError, ValueError):
+            serializable_data[k] = f"<non-serializable: {type(v).__name__}>"
+    data["data"] = serializable_data
+    return data
+
+
+class FileArtifactSink:
+    """File-based artifact sink — consolidated single-file output.
+
+    Directory layout:
+        <artifacts_dir>/<model_name>/
+            result.json         — single consolidated result with ALL info
+            e2e_run.log         — merged subprocess output
+            frames/frame_*.png  — modality artifacts (unchanged)
+            *.wav               — modality artifacts (unchanged)
+            *_logits.npy        — modality artifacts (unchanged)
+    """
+
+    def __init__(self, artifacts_dir: str | Path, case: E2ECase) -> None:
+        self._base = Path(artifacts_dir) / case.name
+        self._base.mkdir(parents=True, exist_ok=True)
+
+        self._commands: list[dict[str, Any]] = []
+        self._stage_outputs: dict[str, dict[str, Any]] = {}
+        self._artifacts: dict[str, Any] = {}
+        self._case = case
+        self._env_fp: dict[str, Any] | None = None
+        self._log_path = self._base / "e2e_run.log"
+
+        # Truncate log file at start of run
+        self._log_path.write_text("", encoding="utf-8")
+
+    @property
+    def base_dir(self) -> Path:
+        """Root directory for this model's artifacts."""
+        return self._base
+
+    def ensure_env_fingerprint(self) -> dict[str, Any]:
+        """Collect and cache environment fingerprint (in memory only)."""
+        if self._env_fp is None:
+            self._env_fp = _collect_env_fingerprint()
+        return self._env_fp
+
+    def log_command(
+        self,
+        command: list[str],
+        rc: int,
+        stdout: str,
+        stderr: str,
+        label: str = "",
+    ) -> None:
+        """Append subprocess output to e2e_run.log with section headers."""
+        if label:
+            safe_label = label.replace("/", "_").replace(" ", "_")
+        else:
+            safe_label = f"cmd_{len(self._commands) + 1}"
+
+        entry = {
+            "command": command,
+            "returncode": rc,
+            "stdout_len": len(stdout),
+            "stderr_len": len(stderr),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._commands.append(entry)
+
+        # Append to single merged log file
+        with open(self._log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{'=' * 72}\n")
+            f.write(f"[{safe_label}] rc={rc}\n")
+            cmd_str = " ".join(command) if command else "(no command)"
+            f.write(f"$ {cmd_str}\n")
+            f.write(f"{'=' * 72}\n")
+            if stdout:
+                f.write("--- stdout ---\n")
+                f.write(stdout)
+                if not stdout.endswith("\n"):
+                    f.write("\n")
+            if stderr:
+                f.write("--- stderr ---\n")
+                f.write(stderr)
+                if not stderr.endswith("\n"):
+                    f.write("\n")
+
+    def write_stage_output(
+        self,
+        stage_name: str,
+        output: StageOutput,
+        prefix: str = "trt",
+    ) -> None:
+        """Accumulate stage output in memory (written in finalize)."""
+        key = f"{prefix}_{stage_name}"
+        self._stage_outputs[key] = _serialize_stage_output(output)
+
+    def write_compare(
+        self,
+        stage_name: str,
+        result: CompareResult,
+    ) -> None:
+        """No-op — comparison data is already in E2EResult.stages."""
+        pass
+
+    def register_artifact(self, key: str, rel_path: str) -> None:
+        """Register a modality artifact by key and relative path."""
+        if key in self._artifacts:
+            existing = self._artifacts[key]
+            if isinstance(existing, list):
+                existing.append(rel_path)
+            else:
+                self._artifacts[key] = [existing, rel_path]
+        else:
+            self._artifacts[key] = rel_path
+
+    def finalize(self, result: E2EResult) -> str:
+        """Inject accumulated data into E2EResult and write result.json."""
+        from .result_schema import serialize_result
+
+        # Inject case config
+        result.case_config = _case_to_dict(self._case)
+
+        # Inject environment fingerprint
+        if self._env_fp:
+            result.env_fingerprint = self._env_fp
+
+        # Inject commands log
+        result.commands = self._commands
+
+        # Inject stage outputs
+        result.stage_outputs = self._stage_outputs
+
+        # Inject artifact references
+        result.artifacts = self._artifacts
+
+        # Inject log file reference (relative to model dir)
+        result.log_file = "e2e_run.log"
+
+        path = self._base / "result.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(serialize_result(result), f, indent=2, default=str)
+        return str(path)

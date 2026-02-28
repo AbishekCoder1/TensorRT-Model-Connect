@@ -10,7 +10,7 @@ import logging
 import math
 from typing import List
 
-from ..contracts import CompareResult, StageOutput, StageSpec, ThresholdProfile
+from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
 
 logger = logging.getLogger(__name__)
 
@@ -132,23 +132,16 @@ class RerankingComparator:
                 missing.append("ref")
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[f"early return: missing scores from {', '.join(missing)}"],
-                message="Missing scores in TRT or reference output",
+                message=f"Missing scores from {', '.join(missing)}",
             )
 
         if len(trt_scores) != len(ref_scores):
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[
-                    f"early return: score count mismatch: "
-                    f"TRT={len(trt_scores)}, ref={len(ref_scores)}"
-                ],
                 message=(
                     f"Score count mismatch: TRT={len(trt_scores)}, "
                     f"ref={len(ref_scores)}"
@@ -160,53 +153,39 @@ class RerankingComparator:
         rho = _spearman_rho(trt_scores, ref_scores)
         corr = _score_correlation(trt_scores, ref_scores)
 
-        metrics = {
-            "pairwise_ordering_agreement": pairwise,
-            "kendall_tau": tau,
-            "spearman_rho": rho,
-            "score_correlation": corr,
-        }
-
         th = threshold.metrics
-        per_metric_pass = {}
-        gate_details = []
 
         pairwise_thresh = th.get("pairwise_ordering_agreement", 0.9)
-        per_metric_pass["pairwise_ordering_agreement"] = pairwise >= pairwise_thresh
-        gate_details.append(
-            f"pairwise_ordering_agreement: {pairwise:.4f} >= {pairwise_thresh} -> "
-            f"{'PASS' if per_metric_pass['pairwise_ordering_agreement'] else 'FAIL'}"
-        )
-
         tau_thresh = th.get("kendall_tau", 0.8)
-        per_metric_pass["kendall_tau"] = tau >= tau_thresh
-        gate_details.append(
-            f"kendall_tau: {tau:.4f} >= {tau_thresh} -> "
-            f"{'PASS' if per_metric_pass['kendall_tau'] else 'FAIL'}"
-        )
-
         rho_thresh = th.get("spearman_rho", 0.8)
-        per_metric_pass["spearman_rho"] = rho >= rho_thresh
-        gate_details.append(
-            f"spearman_rho: {rho:.4f} >= {rho_thresh} -> "
-            f"{'PASS' if per_metric_pass['spearman_rho'] else 'FAIL'}"
-        )
-
         corr_thresh = th.get("score_correlation", 0.9)
-        per_metric_pass["score_correlation"] = corr >= corr_thresh
-        gate_details.append(
-            f"score_correlation: {corr:.4f} >= {corr_thresh} -> "
-            f"{'PASS' if per_metric_pass['score_correlation'] else 'FAIL'}"
-        )
 
-        passed = all(per_metric_pass.values())
+        metrics: dict[str, MetricResult] = {
+            "pairwise_ordering_agreement": MetricResult(
+                value=pairwise, threshold=pairwise_thresh, operator=">=",
+                passed=pairwise >= pairwise_thresh,
+            ),
+            "kendall_tau": MetricResult(
+                value=tau, threshold=tau_thresh, operator=">=",
+                passed=tau >= tau_thresh,
+            ),
+            "spearman_rho": MetricResult(
+                value=rho, threshold=rho_thresh, operator=">=",
+                passed=rho >= rho_thresh,
+            ),
+            "score_correlation": MetricResult(
+                value=corr, threshold=corr_thresh, operator=">=",
+                passed=corr >= corr_thresh,
+            ),
+        }
+
+        passed = all(m.passed for m in metrics.values())
 
         return CompareResult(
             stage_name=stage.name,
-            passed=passed,
+            status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all metrics must pass",
             message=(
                 f"Reranking comparison: pairwise={pairwise:.4f}, "
                 f"tau={tau:.4f}, rho={rho:.4f}, corr={corr:.4f}"

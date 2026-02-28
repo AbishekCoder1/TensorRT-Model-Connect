@@ -13,7 +13,14 @@ import logging
 import math
 from typing import Any
 
-from ..contracts import CompareResult, StageOutput, StageSpec, ThresholdProfile
+from ..contracts import (
+    CompareResult,
+    MetricResult,
+    StageOutput,
+    StageSpec,
+    StageStatus,
+    ThresholdProfile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,33 +110,24 @@ class DiffusionComparator:
         threshold: ThresholdProfile,
         stage: StageSpec,
     ) -> CompareResult:
-        metrics: dict[str, float] = {}
-        per_metric_pass: dict[str, bool] = {}
-        gate_details: list[str] = []
         thresholds = threshold.metrics
 
-        # Handle debug_pipeline stage: comparison is embedded in TRT output
         if stage.name == "debug_pipeline":
             return self._compare_debug_pipeline(trt, thresholds)
 
-        # Handle end_to_end / generate: compare frame stats
         if stage.name in ("end_to_end", "end_to_end_video", "generate", "frame_quality"):
             return self._compare_frames(trt, ref, thresholds)
 
-        # Handle t5_encode: compare T5 embeddings
         if stage.name == "t5_encode":
             return self._compare_embeddings(trt, ref, thresholds)
 
-        # Handle crossover stages: validate subprocess succeeded and output is sane
         if stage.name.startswith("crossover_"):
             return self._compare_crossover(trt, stage, thresholds)
 
         return CompareResult(
             stage_name=stage.name,
-            passed=True,
+            status=StageStatus.SKIPPED.value,
             metrics={},
-            per_metric_pass={},
-            gate_details=[f"No comparison logic for diffusion stage: {stage.name}"],
             message=f"No comparison logic for diffusion stage: {stage.name}",
         )
 
@@ -137,31 +135,28 @@ class DiffusionComparator:
         self, trt: StageOutput, thresholds: dict[str, float]
     ) -> CompareResult:
         """Extract pass/fail from the debug_diffusion_pipeline output."""
-        metrics: dict[str, float] = {}
-        per_metric_pass: dict[str, bool] = {}
-        gate_details: list[str] = []
+        metrics: dict[str, MetricResult] = {}
 
         passed = trt.data.get("passed", False)
         output_text = trt.data.get("output", "")
 
-        # Parse step results from output
         for line in output_text.splitlines():
             line = line.strip()
             if line.startswith("PASS") or line.startswith("FAIL"):
                 parts = line.split(None, 1)
                 if len(parts) == 2:
-                    status = parts[0] == "PASS"
+                    step_pass = parts[0] == "PASS"
                     name = parts[1]
-                    metrics[name] = 1.0 if status else 0.0
-                    per_metric_pass[name] = status
-                    gate_details.append(f"{parts[0]} {name}")
+                    metrics[name] = MetricResult(
+                        value=1.0 if step_pass else 0.0,
+                        threshold=1.0, operator=">=", passed=step_pass,
+                    )
 
         return CompareResult(
             stage_name="debug_pipeline",
-            passed=passed,
+            status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all debug pipeline steps must pass",
             message=f"debug_pipeline: {'PASS' if passed else 'FAIL'} "
                     f"(rc={trt.data.get('returncode', -1)})",
         )
@@ -173,103 +168,89 @@ class DiffusionComparator:
         thresholds: dict[str, float],
     ) -> CompareResult:
         """Compare generated frames: pixel stats, PSNR, SSIM, temporal consistency."""
-        metrics: dict[str, float] = {}
-        per_metric_pass: dict[str, bool] = {}
-        gate_details: list[str] = []
+        metrics: dict[str, MetricResult] = {}
         all_pass = True
 
-        # Check TRT returncode
         if trt.data.get("returncode", -1) != 0:
             return CompareResult(
                 stage_name="end_to_end",
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[f"early return: TRT generation failed (rc={trt.data.get('returncode')})"],
                 message=f"TRT generation failed (rc={trt.data.get('returncode')})",
             )
 
-        # Frame count
         num_frames = trt.data.get("num_frames", 0)
-        metrics["num_frames"] = float(num_frames)
+        metrics["num_frames"] = MetricResult(
+            value=float(num_frames), threshold=None, operator=">=", passed=True,
+        )
 
-        # Frame pixel statistics
         frame_stats = trt.data.get("frame_stats", {})
         if frame_stats:
             pixel_mean = frame_stats.get("mean", 0.5)
             pixel_std = frame_stats.get("std", 0.0)
-            metrics["pixel_mean"] = pixel_mean
-            metrics["pixel_std"] = pixel_std
 
             min_mean = thresholds.get("min_pixel_mean", 0.15)
             max_mean = thresholds.get("max_pixel_mean", 0.85)
-            min_std = thresholds.get("min_pixel_std", 0.05)
-
             mean_ok = min_mean <= pixel_mean <= max_mean
-            per_metric_pass["pixel_mean_range"] = mean_ok
+            metrics["pixel_mean_range"] = MetricResult(
+                value=pixel_mean, threshold=None, operator="in_range",
+                passed=mean_ok, note=f"[{min_mean}, {max_mean}]",
+            )
             if not mean_ok:
-                gate_details.append(
-                    f"FAIL pixel_mean={pixel_mean:.3f} not in [{min_mean}, {max_mean}]")
                 all_pass = False
-            else:
-                gate_details.append(f"PASS pixel_mean={pixel_mean:.3f}")
 
+            min_std = thresholds.get("min_pixel_std", 0.05)
             std_ok = pixel_std >= min_std
-            per_metric_pass["pixel_std_min"] = std_ok
+            metrics["pixel_std_min"] = MetricResult(
+                value=pixel_std, threshold=min_std,
+                operator=">=", passed=std_ok,
+            )
             if not std_ok:
-                gate_details.append(
-                    f"FAIL pixel_std={pixel_std:.3f} < {min_std}")
                 all_pass = False
-            else:
-                gate_details.append(f"PASS pixel_std={pixel_std:.3f}")
 
-        # Temporal consistency (if frames directory available)
         frames_dir = trt.data.get("frames_dir", "")
         if frames_dir:
             temporal_cs = _compute_temporal_consistency(frames_dir)
-            metrics["temporal_consistency"] = temporal_cs
             tc_thresh = thresholds.get("temporal_consistency", 0.6)
             tc_ok = temporal_cs >= tc_thresh
-            per_metric_pass["temporal_consistency"] = tc_ok
+            metrics["temporal_consistency"] = MetricResult(
+                value=temporal_cs, threshold=tc_thresh,
+                operator=">=", passed=tc_ok,
+            )
             if not tc_ok:
-                gate_details.append(
-                    f"FAIL temporal_consistency={temporal_cs:.4f} < {tc_thresh}")
                 all_pass = False
-            else:
-                gate_details.append(f"PASS temporal_consistency={temporal_cs:.4f}")
 
-        # Cross-reference PSNR/SSIM if we have both TRT and ref frames
         ref_frames_dir = ref.data.get("frames_dir", "")
         if frames_dir and ref_frames_dir:
             psnr, ssim = self._cross_compare_frames(frames_dir, ref_frames_dir)
             if psnr is not None:
-                metrics["psnr"] = psnr
                 psnr_thresh = thresholds.get("psnr", 20.0)
                 psnr_ok = psnr >= psnr_thresh
-                per_metric_pass["psnr"] = psnr_ok
-                gate_details.append(
-                    f"{'PASS' if psnr_ok else 'FAIL'} psnr={psnr:.2f} (>= {psnr_thresh})")
+                metrics["psnr"] = MetricResult(
+                    value=psnr, threshold=psnr_thresh,
+                    operator=">=", passed=psnr_ok,
+                )
                 if not psnr_ok:
                     all_pass = False
 
             if ssim is not None:
-                metrics["ssim"] = ssim
                 ssim_thresh = thresholds.get("ssim", 0.7)
                 ssim_ok = ssim >= ssim_thresh
-                per_metric_pass["ssim"] = ssim_ok
-                gate_details.append(
-                    f"{'PASS' if ssim_ok else 'FAIL'} ssim={ssim:.4f} (>= {ssim_thresh})")
+                metrics["ssim"] = MetricResult(
+                    value=ssim, threshold=ssim_thresh,
+                    operator=">=", passed=ssim_ok,
+                )
                 if not ssim_ok:
                     all_pass = False
 
+        n_gated = sum(1 for m in metrics.values() if m.threshold is not None)
+        n_passed = sum(1 for m in metrics.values() if m.threshold is not None and m.passed)
         return CompareResult(
             stage_name="end_to_end",
-            passed=all_pass,
+            status=StageStatus.PASSED.value if all_pass else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
-            message=f"{'PASS' if all_pass else 'FAIL'}: "
-                    f"{sum(per_metric_pass.values())}/{len(per_metric_pass)} metrics passed",
+            composite_rule="all metrics must pass",
+            message=f"{'PASS' if all_pass else 'FAIL'}: {n_passed}/{n_gated} metrics passed",
         )
 
     def _compare_embeddings(
@@ -287,10 +268,8 @@ class DiffusionComparator:
         if not trt_path or not ref_path:
             return CompareResult(
                 stage_name="t5_encode",
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=["early return: missing output paths for T5 comparison"],
                 message="Missing output paths for T5 comparison",
             )
 
@@ -300,22 +279,21 @@ class DiffusionComparator:
         except Exception as e:
             return CompareResult(
                 stage_name="t5_encode",
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[f"early return: failed to load T5 outputs: {e}"],
                 message=f"Failed to load T5 outputs: {e}",
             )
 
         cs = _cosine_sim(trt_arr, ref_arr)
         thresh = thresholds.get("latent_cosine_per_step", 0.95)
+        passed = cs >= thresh
 
         return CompareResult(
             stage_name="t5_encode",
-            passed=cs >= thresh,
-            metrics={"cosine_similarity": cs},
-            per_metric_pass={"cosine_similarity": cs >= thresh},
-            gate_details=[f"{'PASS' if cs >= thresh else 'FAIL'} cosine_sim={cs:.6f} (>= {thresh})"],
+            status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
+            metrics={"cosine_similarity": MetricResult(
+                value=cs, threshold=thresh, operator=">=", passed=passed,
+            )},
             message=f"T5 cosine_sim={cs:.6f}",
         )
 
@@ -325,61 +303,49 @@ class DiffusionComparator:
         stage: StageSpec,
         thresholds: dict[str, float],
     ) -> CompareResult:
-        """Validate crossover stage output: subprocess succeeded and output is sane.
-
-        Crossover stages mix TRT and HF components in one subprocess, so there
-        is no separate reference output. We validate that the subprocess ran
-        successfully and the output tensor has reasonable statistics.
-        """
-        metrics: dict[str, float] = {}
-        per_metric_pass: dict[str, bool] = {}
-        gate_details: list[str] = []
+        """Validate crossover stage output: subprocess succeeded and output is sane."""
+        metrics: dict[str, MetricResult] = {}
         all_pass = True
 
         rc = trt.data.get("returncode", -1)
         if rc != 0:
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[f"early return: crossover subprocess failed (rc={rc})"],
                 message=f"Crossover stage failed (rc={rc}): "
                         f"{trt.data.get('stderr', '')[:500]}",
             )
 
-        per_metric_pass["subprocess_ok"] = True
-        gate_details.append("PASS subprocess_ok")
+        metrics["subprocess_ok"] = MetricResult(
+            value=1.0, threshold=1.0, operator=">=", passed=True,
+        )
 
-        # Check output tensor stats (non-zero, finite)
         out_mean = trt.data.get("dit_output_mean")
         out_std = trt.data.get("dit_output_std")
         if out_mean is not None and out_std is not None:
-            import math
-            metrics["output_mean"] = out_mean
-            metrics["output_std"] = out_std
-
             finite_ok = math.isfinite(out_mean) and math.isfinite(out_std)
-            per_metric_pass["output_finite"] = finite_ok
-            gate_details.append(
-                f"{'PASS' if finite_ok else 'FAIL'} output_finite "
-                f"(mean={out_mean:.4f}, std={out_std:.4f})")
+            metrics["output_finite"] = MetricResult(
+                value=1.0 if finite_ok else 0.0, threshold=1.0,
+                operator=">=", passed=finite_ok,
+                note=f"mean={out_mean:.4f}, std={out_std:.4f}",
+            )
             if not finite_ok:
                 all_pass = False
 
             nonzero_ok = out_std > 1e-6
-            per_metric_pass["output_nonzero"] = nonzero_ok
-            gate_details.append(
-                f"{'PASS' if nonzero_ok else 'FAIL'} output_nonzero (std={out_std:.6f})")
+            metrics["output_nonzero"] = MetricResult(
+                value=out_std, threshold=1e-6,
+                operator=">", passed=nonzero_ok,
+            )
             if not nonzero_ok:
                 all_pass = False
 
         return CompareResult(
             stage_name=stage.name,
-            passed=all_pass,
+            status=StageStatus.PASSED.value if all_pass else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all metrics must pass",
             message=f"{'PASS' if all_pass else 'FAIL'} crossover {stage.name}",
         )
 

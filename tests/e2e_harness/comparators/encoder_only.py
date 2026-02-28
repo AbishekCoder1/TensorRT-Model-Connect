@@ -9,7 +9,7 @@ import logging
 import math
 from typing import List
 
-from ..contracts import CompareResult, StageOutput, StageSpec, ThresholdProfile
+from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +47,7 @@ class EncoderOnlyComparator:
         threshold: ThresholdProfile,
         stage: StageSpec,
     ) -> CompareResult:
-        metrics = {}
-        per_metric_pass = {}
-        gate_details = []
+        metrics: dict[str, MetricResult] = {}
         th = threshold.metrics
 
         # Compare CLS embeddings if available
@@ -60,13 +58,8 @@ class EncoderOnlyComparator:
             if len(trt_cls) != len(ref_cls):
                 return CompareResult(
                     stage_name=stage.name,
-                    passed=False,
+                    status=StageStatus.ERROR.value,
                     metrics={},
-                    per_metric_pass={},
-                    gate_details=[
-                        f"early return: CLS embedding dimension mismatch: "
-                        f"TRT={len(trt_cls)}, ref={len(ref_cls)}"
-                    ],
                     message=(
                         f"CLS embedding dimension mismatch: TRT={len(trt_cls)}, "
                         f"ref={len(ref_cls)}"
@@ -75,21 +68,17 @@ class EncoderOnlyComparator:
 
             cls_cosine = _cosine_similarity(trt_cls, ref_cls)
             cls_l2 = _l2_distance(trt_cls, ref_cls)
-            metrics["cls_embedding_cosine"] = cls_cosine
-            metrics["cls_embedding_l2"] = cls_l2
 
             cls_cosine_thresh = th.get("cls_embedding_cosine", 0.99)
-            per_metric_pass["cls_embedding_cosine"] = cls_cosine >= cls_cosine_thresh
-            gate_details.append(
-                f"cls_embedding_cosine: {cls_cosine:.6f} >= {cls_cosine_thresh} -> "
-                f"{'PASS' if per_metric_pass['cls_embedding_cosine'] else 'FAIL'}"
-            )
-
             cls_l2_thresh = th.get("cls_embedding_l2", 0.1)
-            per_metric_pass["cls_embedding_l2"] = cls_l2 <= cls_l2_thresh
-            gate_details.append(
-                f"cls_embedding_l2: {cls_l2:.6f} <= {cls_l2_thresh} -> "
-                f"{'PASS' if per_metric_pass['cls_embedding_l2'] else 'FAIL'}"
+
+            metrics["cls_embedding_cosine"] = MetricResult(
+                value=cls_cosine, threshold=cls_cosine_thresh, operator=">=",
+                passed=cls_cosine >= cls_cosine_thresh,
+            )
+            metrics["cls_embedding_l2"] = MetricResult(
+                value=cls_l2, threshold=cls_l2_thresh, operator="<=",
+                passed=cls_l2 <= cls_l2_thresh,
             )
 
         # Compare hidden states if available (flattened vectors)
@@ -100,13 +89,8 @@ class EncoderOnlyComparator:
             if len(trt_hidden) != len(ref_hidden):
                 return CompareResult(
                     stage_name=stage.name,
-                    passed=False,
+                    status=StageStatus.ERROR.value,
                     metrics={},
-                    per_metric_pass={},
-                    gate_details=[
-                        f"early return: hidden state dimension mismatch: "
-                        f"TRT={len(trt_hidden)}, ref={len(ref_hidden)}"
-                    ],
                     message=(
                         f"Hidden state dimension mismatch: TRT={len(trt_hidden)}, "
                         f"ref={len(ref_hidden)}"
@@ -115,21 +99,17 @@ class EncoderOnlyComparator:
 
             hidden_cosine = _cosine_similarity(trt_hidden, ref_hidden)
             hidden_l2 = _l2_distance(trt_hidden, ref_hidden)
-            metrics["hidden_state_cosine"] = hidden_cosine
-            metrics["hidden_state_l2"] = hidden_l2
 
             hidden_cosine_thresh = th.get("hidden_state_cosine", 0.99)
-            per_metric_pass["hidden_state_cosine"] = hidden_cosine >= hidden_cosine_thresh
-            gate_details.append(
-                f"hidden_state_cosine: {hidden_cosine:.6f} >= {hidden_cosine_thresh} -> "
-                f"{'PASS' if per_metric_pass['hidden_state_cosine'] else 'FAIL'}"
-            )
-
             hidden_l2_thresh = th.get("hidden_state_l2", 0.5)
-            per_metric_pass["hidden_state_l2"] = hidden_l2 <= hidden_l2_thresh
-            gate_details.append(
-                f"hidden_state_l2: {hidden_l2:.6f} <= {hidden_l2_thresh} -> "
-                f"{'PASS' if per_metric_pass['hidden_state_l2'] else 'FAIL'}"
+
+            metrics["hidden_state_cosine"] = MetricResult(
+                value=hidden_cosine, threshold=hidden_cosine_thresh, operator=">=",
+                passed=hidden_cosine >= hidden_cosine_thresh,
+            )
+            metrics["hidden_state_l2"] = MetricResult(
+                value=hidden_l2, threshold=hidden_l2_thresh, operator="<=",
+                passed=hidden_l2 <= hidden_l2_thresh,
             )
 
         if not metrics:
@@ -140,33 +120,31 @@ class EncoderOnlyComparator:
             if trt_has_data and ref_has_data:
                 return CompareResult(
                     stage_name=stage.name,
-                    passed=True,
-                    metrics={"invariant_only": 1.0},
-                    per_metric_pass={"invariant_only": True},
-                    gate_details=[
-                        "L4 invariant-only: TRT + HF both produced output, "
-                        f"but no shared keys (TRT: {list(trt.data.keys())}, "
-                        f"ref: {list(ref.data.keys())})"
-                    ],
+                    status=StageStatus.PASSED.value,
+                    metrics={"invariant_only": MetricResult(
+                        value=1.0, threshold=None, operator=">=", passed=True,
+                        note=(
+                            f"L4 invariant-only: TRT + HF both produced output, "
+                            f"but no shared keys (TRT: {list(trt.data.keys())}, "
+                            f"ref: {list(ref.data.keys())})"
+                        ),
+                    )},
                     message="Invariant-only pass: both ran successfully",
                 )
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=["early return: no comparable outputs (missing cls_embedding and hidden_states)"],
                 message="No comparable outputs found (missing cls_embedding and hidden_states)",
             )
 
-        passed = all(per_metric_pass.values())
+        passed = all(m.passed for m in metrics.values())
 
         return CompareResult(
             stage_name=stage.name,
-            passed=passed,
+            status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all metrics must pass",
             message=f"Encoder-only comparison: {len(metrics)} metrics evaluated",
         )
 

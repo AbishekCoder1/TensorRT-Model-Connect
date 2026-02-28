@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e_harness.contracts import E2EStatus, RunContext
+from tests.e2e_harness.contracts import E2EStatus, RunContext, StageStatus
 from tests.e2e_harness.manifest_loader import get_case_by_name, load_all_manifests
 from tests.e2e_harness.orchestrator import E2EOrchestrator
 
@@ -328,9 +328,9 @@ def test_e2e(case_name: str, request) -> None:
     else:
         # Collect failure details for the assertion message
         failed_stages = [
-            f"  {name}: {cr.message}"
+            f"  {name} [{cr.status}]: {cr.message}"
             for name, cr in result.stages.items()
-            if not cr.passed
+            if cr.status in (StageStatus.FAILED.value, StageStatus.ERROR.value)
         ]
         failure_msg = (
             f"E2E failed for {case_name} "

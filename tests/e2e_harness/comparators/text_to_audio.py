@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import math
 
-from ..contracts import CompareResult, StageOutput, StageSpec, ThresholdProfile
+from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
 
 logger = logging.getLogger(__name__)
 
@@ -128,9 +128,7 @@ class TextToAudioComparator:
         threshold: ThresholdProfile,
         stage: StageSpec,
     ) -> CompareResult:
-        metrics: dict[str, float] = {}
-        per_metric_pass: dict[str, bool] = {}
-        gate_details: list[str] = []
+        metrics: dict[str, MetricResult] = {}
         thresholds = threshold.metrics
         all_pass = True
 
@@ -138,10 +136,8 @@ class TextToAudioComparator:
         if trt.data.get("returncode", -1) != 0:
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[f"early return: TRT audio generation failed (rc={trt.data.get('returncode')})"],
                 message=f"TRT audio generation failed (rc={trt.data.get('returncode')})",
             )
 
@@ -149,23 +145,19 @@ class TextToAudioComparator:
         if not trt.data.get("wav_exists", False):
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=["early return: TRT did not produce a WAV output file"],
                 message="TRT did not produce a WAV output file",
             )
 
         # RMS energy check
         rms = trt.data.get("rms", 0.0)
-        metrics["rms"] = rms
         rms_min = thresholds.get("rms_min", 0.001)
         rms_max = thresholds.get("rms_max", 1.0)
         rms_ok = rms_min <= rms <= rms_max
-        per_metric_pass["rms"] = rms_ok
-        gate_details.append(
-            f"{'PASS' if rms_ok else 'FAIL'} rms={rms:.6f} "
-            f"(in [{rms_min}, {rms_max}])")
+        metrics["rms"] = MetricResult(
+            value=rms, threshold=rms_min, operator=">=", passed=rms_ok,
+            note=f"range [{rms_min}, {rms_max}]")
         if not rms_ok:
             all_pass = False
 
@@ -174,14 +166,12 @@ class TextToAudioComparator:
         ref_duration = ref.data.get("duration_s", 0.0)
         if duration > 0 and ref_duration > 0:
             ratio = duration / ref_duration
-            metrics["duration_ratio"] = ratio
             ratio_min = thresholds.get("duration_ratio_min", 0.5)
             ratio_max = thresholds.get("duration_ratio_max", 2.0)
             ratio_ok = ratio_min <= ratio <= ratio_max
-            per_metric_pass["duration_ratio"] = ratio_ok
-            gate_details.append(
-                f"{'PASS' if ratio_ok else 'FAIL'} duration_ratio={ratio:.3f} "
-                f"(in [{ratio_min}, {ratio_max}])")
+            metrics["duration_ratio"] = MetricResult(
+                value=ratio, threshold=ratio_min, operator=">=", passed=ratio_ok,
+                note=f"range [{ratio_min}, {ratio_max}]")
             if not ratio_ok:
                 all_pass = False
 
@@ -200,29 +190,23 @@ class TextToAudioComparator:
                 if trt_samples is not None and len(trt_samples) > 0:
                     mel_dist = _mel_spectrogram_distance(
                         trt_samples, ref_samples, sample_rate)
-                    metrics["mel_spectrogram_distance"] = mel_dist
                     mel_thresh = thresholds.get("mel_spectrogram_distance", 5.0)
                     mel_ok = mel_dist <= mel_thresh
-                    per_metric_pass["mel_spectrogram_distance"] = mel_ok
-                    gate_details.append(
-                        f"{'PASS' if mel_ok else 'FAIL'} mel_dist={mel_dist:.3f} "
-                        f"(<= {mel_thresh})")
+                    metrics["mel_spectrogram_distance"] = MetricResult(
+                        value=mel_dist, threshold=mel_thresh, operator="<=", passed=mel_ok)
                     if not mel_ok:
                         all_pass = False
 
                     lsd = _log_spectral_distance(
                         trt_samples, ref_samples, sample_rate)
-                    metrics["log_spectral_distance"] = lsd
                     lsd_thresh = thresholds.get("log_spectral_distance", 3.0)
                     lsd_ok = lsd <= lsd_thresh
-                    per_metric_pass["log_spectral_distance"] = lsd_ok
-                    gate_details.append(
-                        f"{'PASS' if lsd_ok else 'FAIL'} lsd={lsd:.3f} "
-                        f"(<= {lsd_thresh})")
+                    metrics["log_spectral_distance"] = MetricResult(
+                        value=lsd, threshold=lsd_thresh, operator="<=", passed=lsd_ok)
                     if not lsd_ok:
                         all_pass = False
             except Exception as e:
-                gate_details.append(f"WARN spectral comparison failed: {e}")
+                logger.warning("spectral comparison failed: %s", e)
 
         # Codec token match (if token data is available from both sides)
         trt_tokens = trt.data.get("codec_tokens")
@@ -234,24 +218,21 @@ class TextToAudioComparator:
             n = min(len(trt_t), len(ref_t))
             if n > 0:
                 match_rate = float(np.sum(trt_t[:n] == ref_t[:n])) / n
-                metrics["codec_token_match"] = match_rate
                 ct_thresh = thresholds.get("codec_token_match", 0.7)
                 ct_ok = match_rate >= ct_thresh
-                per_metric_pass["codec_token_match"] = ct_ok
-                gate_details.append(
-                    f"{'PASS' if ct_ok else 'FAIL'} codec_token_match={match_rate:.4f} "
-                    f"(>= {ct_thresh})")
+                metrics["codec_token_match"] = MetricResult(
+                    value=match_rate, threshold=ct_thresh, operator=">=", passed=ct_ok)
                 if not ct_ok:
                     all_pass = False
 
+        n_passed = sum(1 for m in metrics.values() if m.passed)
         return CompareResult(
             stage_name=stage.name,
-            passed=all_pass,
+            status=StageStatus.PASSED.value if all_pass else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all metrics must pass",
             message=f"{'PASS' if all_pass else 'FAIL'}: "
-                    f"{sum(per_metric_pass.values())}/{len(per_metric_pass)} metrics passed",
+                    f"{n_passed}/{len(metrics)} metrics passed",
         )
 
     @staticmethod

@@ -19,14 +19,15 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict
 
 import numpy as np
 
 from ..contracts import (
     CompareResult,
+    MetricResult,
     StageOutput,
     StageSpec,
+    StageStatus,
     ThresholdProfile,
 )
 
@@ -129,10 +130,8 @@ class VisionLanguageComparator:
         else:
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[f"early return: unknown stage for VL comparator: {stage.name}"],
                 message=f"Unknown stage for VL comparator: {stage.name}",
             )
 
@@ -148,9 +147,7 @@ class VisionLanguageComparator:
         stage: StageSpec,
     ) -> CompareResult:
         """Compare vision encoder features between TRT and reference."""
-        metrics: Dict[str, float] = {}
-        per_metric_pass: Dict[str, bool] = {}
-        gate_details: list[str] = []
+        metrics: dict[str, MetricResult] = {}
 
         trt_features = _load_features(trt)
         ref_features = _load_features(ref)
@@ -162,13 +159,18 @@ class VisionLanguageComparator:
         # trust the result directly — the tool already did full TRT vs HF
         # comparison internally.
         if trt.data.get("passed") and trt_sub_metrics.get("vision_pass"):
-            gate_details.append("diff_vl.py subprocess PASS (internal comparison)")
             return CompareResult(
                 stage_name=stage.name,
-                passed=True,
-                metrics={"vision_subprocess_pass": 1.0},
-                per_metric_pass={"vision_subprocess_pass": True},
-                gate_details=gate_details,
+                status=StageStatus.PASSED.value,
+                metrics={
+                    "vision_subprocess_pass": MetricResult(
+                        value=1.0,
+                        threshold=None,
+                        operator=">=",
+                        passed=True,
+                        note="diff_vl.py subprocess PASS (internal comparison)",
+                    ),
+                },
                 message="Vision compare: PASS (diff_vl.py)",
             )
 
@@ -176,6 +178,7 @@ class VisionLanguageComparator:
             trt_f = trt_features
             ref_f = ref_features
 
+            shape_note = ""
             # Handle shape mismatch by comparing overlapping region
             if trt_f.shape != ref_f.shape:
                 min_shape = tuple(
@@ -184,7 +187,7 @@ class VisionLanguageComparator:
                 slices = tuple(slice(0, s) for s in min_shape)
                 trt_f = trt_f[slices]
                 ref_f = ref_f[slices]
-                gate_details.append(
+                shape_note = (
                     f"Shape mismatch: TRT={trt_features.shape} "
                     f"vs Ref={ref_features.shape}; "
                     f"compared overlap region {min_shape}"
@@ -192,63 +195,86 @@ class VisionLanguageComparator:
 
             # Cosine similarity — matches threshold key "vision_embedding_cosine"
             cosine = _cosine_similarity(trt_f.flatten(), ref_f.flatten())
-            metrics["vision_embedding_cosine"] = cosine
+            cos_thresh = threshold.metrics.get("vision_embedding_cosine", 0.5)
+            metrics["vision_embedding_cosine"] = MetricResult(
+                value=cosine,
+                threshold=cos_thresh,
+                operator=">=",
+                passed=cosine >= cos_thresh,
+                note=shape_note,
+            )
 
             # L2 distance — matches threshold key "vision_embedding_l2"
             l2 = float(np.sqrt(np.mean((trt_f - ref_f) ** 2)))
-            metrics["vision_embedding_l2"] = l2
+            l2_thresh = threshold.metrics.get("vision_embedding_l2")
+            if l2_thresh is not None:
+                metrics["vision_embedding_l2"] = MetricResult(
+                    value=l2,
+                    threshold=l2_thresh,
+                    operator="<=",
+                    passed=l2 <= l2_thresh,
+                )
+            else:
+                metrics["vision_embedding_l2"] = MetricResult(
+                    value=l2, threshold=None, operator="<=", passed=True,
+                )
 
             # Max absolute difference (diagnostic, not gated)
-            metrics["vision_max_diff"] = float(np.max(np.abs(trt_f - ref_f)))
+            metrics["vision_max_diff"] = MetricResult(
+                value=float(np.max(np.abs(trt_f - ref_f))),
+                threshold=None,
+                operator=">=",
+                passed=True,
+            )
 
         elif trt_sub_metrics:
             # Use metrics parsed from diff_vl.py subprocess output
+            cos_thresh = threshold.metrics.get("vision_embedding_cosine", 0.5)
             if "cosine_sim" in trt_sub_metrics:
-                metrics["vision_embedding_cosine"] = trt_sub_metrics["cosine_sim"]
+                cosine = trt_sub_metrics["cosine_sim"]
+                metrics["vision_embedding_cosine"] = MetricResult(
+                    value=cosine,
+                    threshold=cos_thresh,
+                    operator=">=",
+                    passed=cosine >= cos_thresh,
+                )
             if "max_diff" in trt_sub_metrics:
-                metrics["vision_max_diff"] = trt_sub_metrics["max_diff"]
+                metrics["vision_max_diff"] = MetricResult(
+                    value=trt_sub_metrics["max_diff"],
+                    threshold=None,
+                    operator=">=",
+                    passed=True,
+                )
             if "mean_diff" in trt_sub_metrics:
-                metrics["vision_embedding_l2"] = trt_sub_metrics["mean_diff"]
+                l2_thresh = threshold.metrics.get("vision_embedding_l2")
+                mean_diff = trt_sub_metrics["mean_diff"]
+                if l2_thresh is not None:
+                    metrics["vision_embedding_l2"] = MetricResult(
+                        value=mean_diff,
+                        threshold=l2_thresh,
+                        operator="<=",
+                        passed=mean_diff <= l2_thresh,
+                    )
+                else:
+                    metrics["vision_embedding_l2"] = MetricResult(
+                        value=mean_diff,
+                        threshold=None,
+                        operator="<=",
+                        passed=True,
+                    )
         else:
-            gate_details.append("No vision features available for comparison")
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.FAILED.value,
                 metrics=metrics,
-                per_metric_pass=per_metric_pass,
-                gate_details=gate_details,
                 message="No vision features available",
             )
 
-        # Gate: vision_embedding_cosine
-        cos_thresh = threshold.metrics.get("vision_embedding_cosine", 0.5)
-        if "vision_embedding_cosine" in metrics:
-            passed_cos = metrics["vision_embedding_cosine"] >= cos_thresh
-            per_metric_pass["vision_embedding_cosine"] = passed_cos
-            gate_details.append(
-                f"vision_embedding_cosine: "
-                f"{metrics['vision_embedding_cosine']:.6f} >= {cos_thresh} "
-                f"-> {'PASS' if passed_cos else 'FAIL'}"
-            )
-
-        # Gate: vision_embedding_l2
-        l2_thresh = threshold.metrics.get("vision_embedding_l2")
-        if l2_thresh is not None and "vision_embedding_l2" in metrics:
-            passed_l2 = metrics["vision_embedding_l2"] <= l2_thresh
-            per_metric_pass["vision_embedding_l2"] = passed_l2
-            gate_details.append(
-                f"vision_embedding_l2: "
-                f"{metrics['vision_embedding_l2']:.6f} <= {l2_thresh} "
-                f"-> {'PASS' if passed_l2 else 'FAIL'}"
-            )
-
-        overall = all(per_metric_pass.values()) if per_metric_pass else False
+        overall = all(m.passed for m in metrics.values()) if metrics else False
         return CompareResult(
             stage_name=stage.name,
-            passed=overall,
+            status=StageStatus.PASSED.value if overall else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
             message=f"Vision compare: {'PASS' if overall else 'FAIL'}",
         )
 
@@ -269,9 +295,7 @@ class VisionLanguageComparator:
         token_agreement_rate, normalized_text_edit_distance, and
         logit-level cosine similarity.
         """
-        metrics: Dict[str, float] = {}
-        per_metric_pass: Dict[str, bool] = {}
-        gate_details: list[str] = []
+        metrics: dict[str, MetricResult] = {}
 
         trt_logits = _load_logits(trt)
         ref_logits = _load_logits(ref)
@@ -280,11 +304,11 @@ class VisionLanguageComparator:
             # Truncate to common step/vocab
             n_steps = min(trt_logits.shape[0], ref_logits.shape[0])
             if n_steps == 0:
-                gate_details.append("Zero steps to compare")
                 return CompareResult(
-                    stage_name=stage.name, passed=False,
-                    metrics=metrics, per_metric_pass=per_metric_pass,
-                    gate_details=gate_details, message="No steps",
+                    stage_name=stage.name,
+                    status=StageStatus.FAILED.value,
+                    metrics=metrics,
+                    message="No steps",
                 )
             trt_l = trt_logits[:n_steps]
             ref_l = ref_logits[:n_steps]
@@ -301,31 +325,34 @@ class VisionLanguageComparator:
                 _cosine_similarity(trt_l[i], ref_l[i])
                 for i in range(n_steps)
             ])
-            metrics["logit_cosine_p5"] = float(np.percentile(cosines, 5))
+            metrics["logit_cosine_p5"] = MetricResult(
+                value=float(np.percentile(cosines, 5)),
+                threshold=None,
+                operator=">=",
+                passed=True,
+                note=f"logit steps={n_steps}",
+            )
 
             # Token agreement rate
             trt_argmax = trt_l.argmax(axis=1)
             ref_argmax = ref_l.argmax(axis=1)
             token_agreement = float((trt_argmax == ref_argmax).mean())
-            metrics["token_agreement_rate"] = token_agreement
 
-            gate_details.append(
-                f"logit steps={n_steps}, "
-                f"cosine_p5={metrics['logit_cosine_p5']:.6f}, "
-                f"token_agreement={token_agreement:.4f}"
-            )
-
-            # Gate: token_agreement_rate
             ta_thresh = threshold.metrics.get("token_agreement_rate")
             if ta_thresh is not None:
-                passed_ta = token_agreement >= ta_thresh
-                per_metric_pass["token_agreement_rate"] = passed_ta
-                gate_details.append(
-                    f"token_agreement_rate: {token_agreement:.4f} >= "
-                    f"{ta_thresh} -> {'PASS' if passed_ta else 'FAIL'}"
+                metrics["token_agreement_rate"] = MetricResult(
+                    value=token_agreement,
+                    threshold=ta_thresh,
+                    operator=">=",
+                    passed=token_agreement >= ta_thresh,
                 )
-        else:
-            gate_details.append("Logits not available; using text-only comparison")
+            else:
+                metrics["token_agreement_rate"] = MetricResult(
+                    value=token_agreement,
+                    threshold=None,
+                    operator=">=",
+                    passed=True,
+                )
 
         # Text comparison (always available from text_decode stage)
         trt_text = (trt.text or trt.data.get("generated_text") or "").strip()
@@ -333,24 +360,27 @@ class VisionLanguageComparator:
 
         if trt_text or ref_text:
             ned = _normalized_edit_distance(trt_text, ref_text)
-            metrics["normalized_text_edit_distance"] = ned
-
             ned_thresh = threshold.metrics.get("normalized_text_edit_distance")
             if ned_thresh is not None:
-                passed_ned = ned <= ned_thresh
-                per_metric_pass["normalized_text_edit_distance"] = passed_ned
-                gate_details.append(
-                    f"normalized_text_edit_distance: {ned:.4f} <= "
-                    f"{ned_thresh} -> {'PASS' if passed_ned else 'FAIL'}"
+                metrics["normalized_text_edit_distance"] = MetricResult(
+                    value=ned,
+                    threshold=ned_thresh,
+                    operator="<=",
+                    passed=ned <= ned_thresh,
+                )
+            else:
+                metrics["normalized_text_edit_distance"] = MetricResult(
+                    value=ned,
+                    threshold=None,
+                    operator="<=",
+                    passed=True,
                 )
 
-        overall = all(per_metric_pass.values()) if per_metric_pass else True
+        overall = all(m.passed for m in metrics.values()) if metrics else True
         return CompareResult(
             stage_name=stage.name,
-            passed=overall,
+            status=StageStatus.PASSED.value if overall else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
             message=f"VL text decode: {'PASS' if overall else 'FAIL'}",
         )
 
@@ -370,39 +400,60 @@ class VisionLanguageComparator:
         Computes normalized_text_edit_distance, token_agreement_rate (on
         decoded text words), and optional semantic_similarity.
         """
-        metrics: Dict[str, float] = {}
-        per_metric_pass: Dict[str, bool] = {}
-        gate_details: list[str] = []
+        metrics: dict[str, MetricResult] = {}
 
         trt_text = (trt.text or trt.data.get("generated_text") or "").strip()
         ref_text = (ref.text or ref.data.get("generated_text") or "").strip()
 
-        metrics["trt_generated_length"] = float(len(trt_text))
-        metrics["ref_generated_length"] = float(len(ref_text))
+        metrics["trt_generated_length"] = MetricResult(
+            value=float(len(trt_text)),
+            threshold=None,
+            operator=">=",
+            passed=True,
+        )
+        metrics["ref_generated_length"] = MetricResult(
+            value=float(len(ref_text)),
+            threshold=None,
+            operator=">=",
+            passed=True,
+        )
 
         if not trt_text:
-            gate_details.append("TRT produced empty output")
+            metrics["non_empty_output"] = MetricResult(
+                value=0.0,
+                threshold=1.0,
+                operator=">=",
+                passed=False,
+            )
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.FAILED.value,
                 metrics=metrics,
-                per_metric_pass={"non_empty_output": False},
-                gate_details=gate_details,
                 message="TRT produced empty VL generation output",
             )
-        per_metric_pass["non_empty_output"] = True
+        metrics["non_empty_output"] = MetricResult(
+            value=1.0,
+            threshold=1.0,
+            operator=">=",
+            passed=True,
+        )
 
         # Normalized text edit distance
         ned = _normalized_edit_distance(trt_text, ref_text) if ref_text else 0.0
-        metrics["normalized_text_edit_distance"] = ned
-
         ned_thresh = threshold.metrics.get("normalized_text_edit_distance")
         if ned_thresh is not None:
-            passed_ned = ned <= ned_thresh
-            per_metric_pass["normalized_text_edit_distance"] = passed_ned
-            gate_details.append(
-                f"normalized_text_edit_distance: {ned:.4f} <= "
-                f"{ned_thresh} -> {'PASS' if passed_ned else 'FAIL'}"
+            metrics["normalized_text_edit_distance"] = MetricResult(
+                value=ned,
+                threshold=ned_thresh,
+                operator="<=",
+                passed=ned <= ned_thresh,
+            )
+        else:
+            metrics["normalized_text_edit_distance"] = MetricResult(
+                value=ned,
+                threshold=None,
+                operator="<=",
+                passed=True,
             )
 
         # Word-level token agreement (approximate token_agreement_rate on text)
@@ -415,15 +466,21 @@ class VisionLanguageComparator:
                 if a == b
             )
             word_agreement = matches / n_compare
-            metrics["token_agreement_rate"] = word_agreement
 
             ta_thresh = threshold.metrics.get("token_agreement_rate")
             if ta_thresh is not None:
-                passed_ta = word_agreement >= ta_thresh
-                per_metric_pass["token_agreement_rate"] = passed_ta
-                gate_details.append(
-                    f"token_agreement_rate (word-level): {word_agreement:.4f} >= "
-                    f"{ta_thresh} -> {'PASS' if passed_ta else 'FAIL'}"
+                metrics["token_agreement_rate"] = MetricResult(
+                    value=word_agreement,
+                    threshold=ta_thresh,
+                    operator=">=",
+                    passed=word_agreement >= ta_thresh,
+                )
+            else:
+                metrics["token_agreement_rate"] = MetricResult(
+                    value=word_agreement,
+                    threshold=None,
+                    operator=">=",
+                    passed=True,
                 )
 
         # Optional semantic similarity (requires sentence-transformers)
@@ -431,34 +488,42 @@ class VisionLanguageComparator:
         if sem_thresh is not None and trt_text and ref_text:
             sem_sim = _compute_semantic_similarity(trt_text, ref_text)
             if sem_sim is not None:
-                metrics["semantic_similarity"] = sem_sim
-                passed_sem = sem_sim >= sem_thresh
-                per_metric_pass["semantic_similarity"] = passed_sem
-                gate_details.append(
-                    f"semantic_similarity: {sem_sim:.4f} >= "
-                    f"{sem_thresh} -> {'PASS' if passed_sem else 'FAIL'}"
+                metrics["semantic_similarity"] = MetricResult(
+                    value=sem_sim,
+                    threshold=sem_thresh,
+                    operator=">=",
+                    passed=sem_sim >= sem_thresh,
                 )
             else:
-                gate_details.append(
-                    "semantic_similarity: skipped (sentence-transformers not available)"
+                metrics["semantic_similarity"] = MetricResult(
+                    value=0.0,
+                    threshold=sem_thresh,
+                    operator=">=",
+                    passed=True,
+                    note="skipped (sentence-transformers not available)",
                 )
-
-        gate_details.append(f"TRT: {trt_text[:100]!r}")
-        gate_details.append(f"Ref: {ref_text[:100]!r}")
 
         # Composite rule: NED alone is sufficient for VL generation.
         # Word-level agreement is unreliable for VL since the same scene
         # can be described with different words that are equally valid.
-        ned_ok = per_metric_pass.get("normalized_text_edit_distance", True)
-        ta_ok = per_metric_pass.get("token_agreement_rate", True)
-        non_empty = per_metric_pass.get("non_empty_output", True)
+        ned_ok = metrics.get(
+            "normalized_text_edit_distance",
+            MetricResult(value=0, passed=True),
+        ).passed
+        ta_ok = metrics.get(
+            "token_agreement_rate",
+            MetricResult(value=0, passed=True),
+        ).passed
+        non_empty = metrics.get(
+            "non_empty_output",
+            MetricResult(value=0, passed=True),
+        ).passed
         overall = non_empty and (ned_ok or ta_ok)
         return CompareResult(
             stage_name=stage.name,
-            passed=overall,
+            status=StageStatus.PASSED.value if overall else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="non_empty_output AND (normalized_text_edit_distance OR token_agreement_rate)",
             message=f"VL generation compare: {'PASS' if overall else 'FAIL'}",
         )
 

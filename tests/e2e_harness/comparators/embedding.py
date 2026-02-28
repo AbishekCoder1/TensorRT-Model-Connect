@@ -9,7 +9,7 @@ import logging
 import math
 from typing import List
 
-from ..contracts import CompareResult, StageOutput, StageSpec, ThresholdProfile
+from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
 
 logger = logging.getLogger(__name__)
 
@@ -77,23 +77,16 @@ class EmbeddingComparator:
                 missing.append("ref")
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[f"early return: missing embedding data from {', '.join(missing)}"],
-                message="Missing embedding data in TRT or reference output",
+                message=f"Missing embedding data from {', '.join(missing)}",
             )
 
         if len(trt_emb) != len(ref_emb):
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[
-                    f"early return: embedding dimension mismatch: "
-                    f"TRT={len(trt_emb)}, ref={len(ref_emb)}"
-                ],
                 message=(
                     f"Embedding dimension mismatch: TRT={len(trt_emb)}, "
                     f"ref={len(ref_emb)}"
@@ -105,54 +98,40 @@ class EmbeddingComparator:
         topk_10 = _topk_overlap(trt_emb, ref_emb, k=10)
         topk_100 = _topk_overlap(trt_emb, ref_emb, k=100)
 
-        metrics = {
-            "cosine_similarity": cosine,
-            "l2_distance": l2,
-            "topk_neighborhood_overlap_10": topk_10,
-            "topk_neighborhood_overlap_100": topk_100,
-        }
-
         # Gate on thresholds
         th = threshold.metrics
-        per_metric_pass = {}
-        gate_details = []
 
         cosine_thresh = th.get("cosine_similarity", 0.99)
-        per_metric_pass["cosine_similarity"] = cosine >= cosine_thresh
-        gate_details.append(
-            f"cosine_similarity: {cosine:.6f} >= {cosine_thresh} -> "
-            f"{'PASS' if per_metric_pass['cosine_similarity'] else 'FAIL'}"
-        )
-
         l2_thresh = th.get("l2_distance", 0.1)
-        per_metric_pass["l2_distance"] = l2 <= l2_thresh
-        gate_details.append(
-            f"l2_distance: {l2:.6f} <= {l2_thresh} -> "
-            f"{'PASS' if per_metric_pass['l2_distance'] else 'FAIL'}"
-        )
-
         topk10_thresh = th.get("topk_neighborhood_overlap_10", 0.8)
-        per_metric_pass["topk_neighborhood_overlap_10"] = topk_10 >= topk10_thresh
-        gate_details.append(
-            f"topk_neighborhood_overlap_10: {topk_10:.4f} >= {topk10_thresh} -> "
-            f"{'PASS' if per_metric_pass['topk_neighborhood_overlap_10'] else 'FAIL'}"
-        )
-
         topk100_thresh = th.get("topk_neighborhood_overlap_100", 0.7)
-        per_metric_pass["topk_neighborhood_overlap_100"] = topk_100 >= topk100_thresh
-        gate_details.append(
-            f"topk_neighborhood_overlap_100: {topk_100:.4f} >= {topk100_thresh} -> "
-            f"{'PASS' if per_metric_pass['topk_neighborhood_overlap_100'] else 'FAIL'}"
-        )
 
-        passed = all(per_metric_pass.values())
+        metrics: dict[str, MetricResult] = {
+            "cosine_similarity": MetricResult(
+                value=cosine, threshold=cosine_thresh, operator=">=",
+                passed=cosine >= cosine_thresh,
+            ),
+            "l2_distance": MetricResult(
+                value=l2, threshold=l2_thresh, operator="<=",
+                passed=l2 <= l2_thresh,
+            ),
+            "topk_neighborhood_overlap_10": MetricResult(
+                value=topk_10, threshold=topk10_thresh, operator=">=",
+                passed=topk_10 >= topk10_thresh,
+            ),
+            "topk_neighborhood_overlap_100": MetricResult(
+                value=topk_100, threshold=topk100_thresh, operator=">=",
+                passed=topk_100 >= topk100_thresh,
+            ),
+        }
+
+        passed = all(m.passed for m in metrics.values())
 
         return CompareResult(
             stage_name=stage.name,
-            passed=passed,
+            status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all metrics must pass",
             message=f"Embedding comparison: cosine={cosine:.6f}, L2={l2:.6f}",
         )
 

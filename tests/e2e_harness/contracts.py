@@ -69,6 +69,21 @@ class E2EStatus(enum.Enum):
     ERROR = "error"
 
 
+class StageStatus(enum.Enum):
+    """Status of a single stage comparison.
+
+    PASSED: All metrics met their thresholds.
+    FAILED: One or more gated metrics failed.
+    SKIPPED: Stage was not compared (no reference/comparator available).
+    ERROR: Stage comparison raised an exception.
+    """
+
+    PASSED = "passed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    ERROR = "error"
+
+
 # ---------------------------------------------------------------------------
 # Domain dataclasses
 # ---------------------------------------------------------------------------
@@ -139,6 +154,28 @@ class ThresholdProfile:
     metrics: Dict[str, float] = field(default_factory=dict)
     percentile_gates: Dict[str, float] = field(default_factory=dict)
     composite_rules: List[str] = field(default_factory=list)
+
+
+@dataclass
+class MetricResult:
+    """Self-describing result for a single comparison metric.
+
+    Combines the metric value, its threshold, the comparison operator,
+    and the pass/fail outcome into one structure.
+
+    Attributes:
+        value: Computed metric value.
+        threshold: Threshold the value was compared against (None if informational).
+        operator: Comparison operator as a string (e.g. ">=", "<=", "==").
+        passed: Whether this metric met its threshold.
+        note: Optional human-readable annotation.
+    """
+
+    value: float
+    threshold: Optional[float] = None
+    operator: str = ">="
+    passed: bool = True
+    note: str = ""
 
 
 @dataclass
@@ -227,28 +264,37 @@ class StageOutput:
 class CompareResult:
     """Outcome of comparing TRT output to reference output for one stage.
 
+    Each metric is self-describing via :class:`MetricResult`, carrying its
+    value, threshold, operator, and pass/fail in a single object.
+
     Attributes:
         stage_name: Which stage was compared.
-        passed: Overall pass/fail for this stage comparison.
-        metrics: Computed metric values (e.g. {"cosine_sim": 0.9998}).
-        per_metric_pass: Per-metric pass/fail (e.g. {"cosine_sim": True}).
-        gate_details: Human-readable explanations of gating decisions.
+        status: Stage-level status string (see :class:`StageStatus`).
+        metrics: Per-metric results keyed by metric name.
+        composite_rule: Human-readable description of the composite gating
+            logic (e.g. "(cosine >= T OR rel_l2 <= T) AND agreement >= T").
         message: Summary message for display.
     """
 
     stage_name: str
-    passed: bool = False
-    metrics: Dict[str, float] = field(default_factory=dict)
-    per_metric_pass: Dict[str, bool] = field(default_factory=dict)
-    gate_details: List[str] = field(default_factory=list)
+    status: str = StageStatus.FAILED.value
+    metrics: Dict[str, "MetricResult"] = field(default_factory=dict)
+    composite_rule: str = ""
     message: str = ""
+
+    @property
+    def passed(self) -> bool:
+        """Backward-compatible boolean: True when status is 'passed'."""
+        return self.status == StageStatus.PASSED.value
 
 
 @dataclass
 class E2EResult:
     """Final structured result of an E2E test run for one model case.
 
-    Serialized to result.json in the artifacts directory.
+    Serialized to a single consolidated ``result.json`` in the artifacts
+    directory.  Contains everything previously spread across case.json,
+    env_fingerprint.json, commands.json, and per-stage files.
 
     Attributes:
         case_name: The E2ECase.name this result belongs to.
@@ -260,9 +306,12 @@ class E2EResult:
         timing: Phase-level timing (build_s, trt_run_s, ref_run_s, etc.).
         env_fingerprint: Environment info (GPU, driver, TRT version, etc.).
         timestamp: ISO 8601 timestamp of when this result was produced.
-        repro_commands: Shell commands to reproduce each phase of the test
-            (build_bundle, trt_inference, rerun_test). Enables one-command
-            local reproduction of failures.
+        repro_commands: Shell commands to reproduce each phase of the test.
+        case_config: Snapshot of the E2ECase configuration (was case.json).
+        commands: Subprocess command log (was commands.json).
+        stage_outputs: Per-stage TRT/ref output summaries (was stages/ dir).
+        artifacts: Map of artifact type to relative path(s) within model dir.
+        log_file: Relative path to the merged log file (e2e_run.log).
     """
 
     case_name: str
@@ -275,6 +324,11 @@ class E2EResult:
     env_fingerprint: Dict[str, str] = field(default_factory=dict)
     timestamp: str = ""
     repro_commands: Dict[str, str] = field(default_factory=dict)
+    case_config: Dict[str, Any] = field(default_factory=dict)
+    commands: List[Dict[str, Any]] = field(default_factory=list)
+    stage_outputs: Dict[str, Any] = field(default_factory=dict)
+    artifacts: Dict[str, Any] = field(default_factory=dict)
+    log_file: str = ""
 
 
 @dataclass
@@ -395,6 +449,10 @@ class ArtifactSink(Protocol):
 
     def write_compare(self, name: str, result: CompareResult) -> None:
         """Persist one stage's comparison result."""
+        ...
+
+    def register_artifact(self, key: str, rel_path: str) -> None:
+        """Register a modality artifact (PNG, WAV, NPY) by key and path."""
         ...
 
     def finalize(self, result: E2EResult) -> str:

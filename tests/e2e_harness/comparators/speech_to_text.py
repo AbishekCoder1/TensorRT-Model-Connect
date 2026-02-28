@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from ..contracts import CompareResult, StageOutput, StageSpec, ThresholdProfile
+from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +81,7 @@ class SpeechToTextComparator:
         threshold: ThresholdProfile,
         stage: StageSpec,
     ) -> CompareResult:
-        metrics: dict[str, float] = {}
-        per_metric_pass: dict[str, bool] = {}
-        gate_details: list[str] = []
+        metrics: dict[str, MetricResult] = {}
         thresholds = threshold.metrics
         all_pass = True
 
@@ -91,10 +89,8 @@ class SpeechToTextComparator:
         if trt.data.get("returncode", -1) != 0:
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[f"early return: TRT transcription failed (rc={trt.data.get('returncode')})"],
                 message=f"TRT transcription failed (rc={trt.data.get('returncode')})",
             )
 
@@ -106,35 +102,29 @@ class SpeechToTextComparator:
         ref_tokens = ref.data.get("token_ids", [])
         if trt_tokens and ref_tokens:
             agreement = _token_agreement_rate(trt_tokens, ref_tokens)
-            metrics["token_agreement_rate"] = agreement
             thresh = thresholds.get("token_agreement_rate", 0.8)
             ok = agreement >= thresh
-            per_metric_pass["token_agreement_rate"] = ok
-            gate_details.append(
-                f"{'PASS' if ok else 'FAIL'} token_agreement={agreement:.4f} (>= {thresh})")
+            metrics["token_agreement_rate"] = MetricResult(
+                value=agreement, threshold=thresh, operator=">=", passed=ok)
             if not ok:
                 all_pass = False
 
         # Word Error Rate
         if trt_transcript and ref_transcript:
             wer = _compute_wer(ref_transcript, trt_transcript)
-            metrics["wer"] = wer
             wer_thresh = thresholds.get("wer", 0.1)
             wer_ok = wer <= wer_thresh
-            per_metric_pass["wer"] = wer_ok
-            gate_details.append(
-                f"{'PASS' if wer_ok else 'FAIL'} wer={wer:.4f} (<= {wer_thresh})")
+            metrics["wer"] = MetricResult(
+                value=wer, threshold=wer_thresh, operator="<=", passed=wer_ok)
             if not wer_ok:
                 all_pass = False
 
             # Character Error Rate
             cer = _compute_cer(ref_transcript, trt_transcript)
-            metrics["cer"] = cer
             cer_thresh = thresholds.get("cer", 0.05)
             cer_ok = cer <= cer_thresh
-            per_metric_pass["cer"] = cer_ok
-            gate_details.append(
-                f"{'PASS' if cer_ok else 'FAIL'} cer={cer:.4f} (<= {cer_thresh})")
+            metrics["cer"] = MetricResult(
+                value=cer, threshold=cer_thresh, operator="<=", passed=cer_ok)
             if not cer_ok:
                 all_pass = False
 
@@ -145,19 +135,16 @@ class SpeechToTextComparator:
                 trt_timestamps,
                 thresholds.get("timestamp_tolerance_s", 0.5),
             )
-            metrics["timestamp_sanity"] = 1.0 if ts_sane else 0.0
-            per_metric_pass["timestamp_sanity"] = ts_sane
-            gate_details.append(
-                f"{'PASS' if ts_sane else 'FAIL'} timestamp_sanity")
+            metrics["timestamp_sanity"] = MetricResult(
+                value=1.0 if ts_sane else 0.0, threshold=1.0, operator=">=", passed=ts_sane)
             if not ts_sane:
                 all_pass = False
 
         return CompareResult(
             stage_name=stage.name,
-            passed=all_pass,
+            status=StageStatus.PASSED.value if all_pass else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all metrics must pass",
             message=f"{'PASS' if all_pass else 'FAIL'}: "
                     f"trt='{trt_transcript[:80]}' ref='{ref_transcript[:80]}'",
         )

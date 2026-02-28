@@ -10,7 +10,7 @@ import logging
 import math
 from typing import Any, Dict, List
 
-from ..contracts import CompareResult, StageOutput, StageSpec, ThresholdProfile
+from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
 
 logger = logging.getLogger(__name__)
 
@@ -109,59 +109,47 @@ class NeuralOperatorComparator:
                 missing.append("ref")
             return CompareResult(
                 stage_name=stage.name,
-                passed=False,
+                status=StageStatus.ERROR.value,
                 metrics={},
-                per_metric_pass={},
-                gate_details=[f"early return: missing field data from {', '.join(missing)}"],
-                message="Missing field data in TRT or reference output",
+                message=f"Missing field data from {', '.join(missing)}",
             )
 
         rel_l2 = _relative_l2(trt_field, ref_field)
         max_error = _max_pointwise_error(trt_field, ref_field)
 
-        metrics: Dict[str, float] = {
-            "relative_l2": rel_l2,
-            "max_pointwise_error": max_error,
-        }
-
         th = threshold.metrics
-        per_metric_pass = {}
-        gate_details = []
 
         rel_l2_thresh = th.get("relative_l2", 0.01)
-        per_metric_pass["relative_l2"] = rel_l2 <= rel_l2_thresh
-        gate_details.append(
-            f"relative_l2: {rel_l2:.6e} <= {rel_l2_thresh} -> "
-            f"{'PASS' if per_metric_pass['relative_l2'] else 'FAIL'}"
-        )
-
         max_err_thresh = th.get("max_pointwise_error", 0.1)
-        per_metric_pass["max_pointwise_error"] = max_error <= max_err_thresh
-        gate_details.append(
-            f"max_pointwise_error: {max_error:.6e} <= {max_err_thresh} -> "
-            f"{'PASS' if per_metric_pass['max_pointwise_error'] else 'FAIL'}"
-        )
+
+        metrics: dict[str, MetricResult] = {
+            "relative_l2": MetricResult(
+                value=rel_l2, threshold=rel_l2_thresh, operator="<=",
+                passed=rel_l2 <= rel_l2_thresh,
+            ),
+            "max_pointwise_error": MetricResult(
+                value=max_error, threshold=max_err_thresh, operator="<=",
+                passed=max_error <= max_err_thresh,
+            ),
+        }
 
         # Optional PDE residual constraint (if provided in threshold)
         pde_residual_thresh = th.get("pde_residual")
         if pde_residual_thresh is not None:
             pde_residual = trt.data.get("pde_residual")
             if pde_residual is not None:
-                metrics["pde_residual"] = float(pde_residual)
-                per_metric_pass["pde_residual"] = float(pde_residual) <= pde_residual_thresh
-                gate_details.append(
-                    f"pde_residual: {pde_residual:.6e} <= {pde_residual_thresh} -> "
-                    f"{'PASS' if per_metric_pass['pde_residual'] else 'FAIL'}"
+                metrics["pde_residual"] = MetricResult(
+                    value=float(pde_residual), threshold=pde_residual_thresh,
+                    operator="<=", passed=float(pde_residual) <= pde_residual_thresh,
                 )
 
-        passed = all(per_metric_pass.values())
+        passed = all(m.passed for m in metrics.values())
 
         return CompareResult(
             stage_name=stage.name,
-            passed=passed,
+            status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
             metrics=metrics,
-            per_metric_pass=per_metric_pass,
-            gate_details=gate_details,
+            composite_rule="all metrics must pass",
             message=(
                 f"Neural operator comparison: relative_l2={rel_l2:.6e}, "
                 f"max_pointwise_error={max_error:.6e}"

@@ -42,6 +42,7 @@ from .contracts import (
     RunContext,
     StageOutput,
     StageSpec,
+    StageStatus,
     ThresholdProfile,
 )
 from . import save_full_stderr
@@ -346,6 +347,27 @@ def _log_stage_subprocess(
         )
 
 
+def _auto_register_artifacts(sink: Any, output: StageOutput, prefix: str) -> None:
+    """Scan StageOutput.data for known artifact keys and register on sink."""
+    _ARTIFACT_KEYS = {
+        "wav_path": "wav",
+        "frames_dir": "frames",
+        "logits_path": "logits",
+        "features_path": "features",
+        "output_path": "output",
+        "segmentation_map_path": "segmentation_map",
+    }
+    for data_key, artifact_key in _ARTIFACT_KEYS.items():
+        value = output.data.get(data_key)
+        if value and isinstance(value, str):
+            # Store relative to artifacts dir if possible
+            base = str(sink.base_dir)
+            rel = value
+            if value.startswith(base):
+                rel = value[len(base):].lstrip("/")
+            sink.register_artifact(f"{prefix}_{artifact_key}", rel)
+
+
 def _build_repro_commands(
     case: E2ECase,
     ctx: RunContext,
@@ -544,13 +566,14 @@ class E2EOrchestrator:
                     timing[f"trt_{stage_name}_s"] = time.monotonic() - t0
                     sink.write_stage_output(stage_name, trt_output, prefix="trt")
                     _log_stage_subprocess(sink, stage_name, trt_output, "trt")
+                    _auto_register_artifacts(sink, trt_output, "trt")
                 except Exception as e:
                     timing[f"trt_{stage_name}_s"] = time.monotonic() - t0
                     tb = traceback.format_exc()
                     logger.error("TRT run failed for stage %s: %s\n%s", stage_name, e, tb)
                     stage_results[stage_name] = CompareResult(
                         stage_name=stage_name,
-                        passed=False,
+                        status=StageStatus.ERROR.value,
                         message=f"TRT run failed: {e}\n{tb}",
                     )
                     if stage.required:
@@ -578,13 +601,14 @@ class E2EOrchestrator:
                     timing[f"ref_{stage_name}_s"] = time.monotonic() - t0
                     sink.write_stage_output(stage_name, ref_output, prefix="ref")
                     _log_stage_subprocess(sink, stage_name, ref_output, "ref")
+                    _auto_register_artifacts(sink, ref_output, "ref")
                 except Exception as e:
                     timing[f"ref_{stage_name}_s"] = time.monotonic() - t0
                     tb = traceback.format_exc()
                     logger.error("Reference run failed for stage %s: %s\n%s", stage_name, e, tb)
                     stage_results[stage_name] = CompareResult(
                         stage_name=stage_name,
-                        passed=False,
+                        status=StageStatus.ERROR.value,
                         message=f"Reference run failed: {e}\n{tb}",
                     )
                     if stage.required:
@@ -608,7 +632,7 @@ class E2EOrchestrator:
                     tb = traceback.format_exc()
                     compare_result = CompareResult(
                         stage_name=stage_name,
-                        passed=False,
+                        status=StageStatus.ERROR.value,
                         message=f"Comparison failed: {e}\n{tb}",
                     )
                 stage_results[stage_name] = compare_result
@@ -617,12 +641,11 @@ class E2EOrchestrator:
                 if not compare_result.passed and stage.required:
                     all_stages_pass = False
             elif trt_output is not None and (ref_output is None or comparator is None):
-                # No reference or comparator — record TRT-only result
+                # No reference or comparator — record as skipped
                 stage_results[stage_name] = CompareResult(
                     stage_name=stage_name,
-                    passed=True,
+                    status=StageStatus.SKIPPED.value,
                     message="TRT run succeeded (no reference/comparator available)",
-                    metrics={},
                 )
 
         # 4. Determinism reruns (if configured)
