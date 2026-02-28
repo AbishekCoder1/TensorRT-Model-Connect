@@ -469,7 +469,8 @@ class PersonaPlexPlugin:
         # i.e., the moshi stream).
         mimi_dec_codebooks = 8  # Mimi native: 1 semantic + 7 acoustic
         mimi_dec_plan = _build_mimi_decoder_engine(
-            weights, verbose=verbose, num_input_codebooks=mimi_dec_codebooks)
+            weights, verbose=verbose, num_input_codebooks=mimi_dec_codebooks,
+            num_frames=320)
         if mimi_dec_plan is not None:
             extras["mimi_decoder_plan"] = mimi_dec_plan
 

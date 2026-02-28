@@ -8,12 +8,12 @@
   "max_cache_length": 512,
   "test_input_audio": "data/Recording.wav",
   "speech_reference_tokens": "data/personaplex_recording_official_tokens_greedy.npy",
-  "speech_test_max_frames": 50,
+  "speech_test_max_frames": 300,
   "speech_min_token_match": 0.8,
   "speech_min_frame_exact": 0.7,
   "speech_min_rms": 0.001,
   "prompt": "",
-  "max_new_tokens": 0,
+  "max_new_tokens": 1000,
   "logit_atol": 0.01,
   "trust_remote_code": true
 }
