@@ -1,6 +1,6 @@
 {
   "name": "deepseek-ocr",
-  "hf_id": "deepseek-ai/DeepSeek-OCR",
+  "hf_id": "deepseek-ai/DeepSeek-OCR-2",
   "bundle": "deepseek-ocr.trtfb",
   "family": "deepseek_ocr",
   "runtime_strategy": "vision_language",
@@ -9,6 +9,6 @@
   "max_new_tokens": 30,
   "logit_atol": 0.001,
   "test_image": "tests/e2e/data/orc_test_img.jpeg",
-  "trust_remote_code": false,
-  "skip": "bundle build fails (deepseek_ocr family plugin incomplete)"
+  "trust_remote_code": true,
+  "skip": "HF reference runner cannot load DeepseekOCR2 custom model class via AutoModel"
 }
