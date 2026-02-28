@@ -1,0 +1,13 @@
+{
+  "name": "deepseek-ocr",
+  "hf_id": "deepseek-ai/DeepSeek-OCR",
+  "bundle": "deepseek-ocr.trtfb",
+  "family": "deepseek_ocr",
+  "runtime_strategy": "vision_language",
+  "max_cache_length": 4096,
+  "prompt": "Extract the text from this image.",
+  "max_new_tokens": 30,
+  "logit_atol": 0.001,
+  "test_image": "tests/e2e/data/ocr_test_img.jpeg",
+  "trust_remote_code": false
+}

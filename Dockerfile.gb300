@@ -50,7 +50,9 @@ RUN pip install \
     accelerate \
     diffusers \
     protobuf \
-    scipy
+    scipy \
+    librosa \
+    soundfile
 
 # Create libnvinfer.so symlink (pip ships libnvinfer.so.10 only)
 RUN TRT_LIB=$(python3 -c \
