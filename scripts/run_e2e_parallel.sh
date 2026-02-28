@@ -117,14 +117,15 @@ for GPU in $(seq 0 $((NUM_GPUS - 1))); do
             --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
             --junitxml="$RESULT_DIR/junit-gpu${GPU}.xml" \
             "${EXTRA_ARGS[@]}" \
-            2>&1 | tee "$RESULT_DIR/console-gpu${GPU}.log"
+            > "$RESULT_DIR/console-gpu${GPU}.log" 2>&1
     ) &
     PIDS+=($!)
 done
 
 echo ""
 echo "Workers launched: ${PIDS[*]}"
-echo "Logs: $RESULT_DIR/console-gpu{0..$((NUM_GPUS-1))}.log"
+echo "Logs: $RESULT_DIR/console-gpu*.log"
+echo "  (live output suppressed to avoid interleaving — tail -f a log to watch)"
 echo "Waiting for all workers..."
 echo ""
 
@@ -180,12 +181,20 @@ echo "  JUnit XML:     $RESULT_DIR/junit-gpu*.xml (merged: $RESULT_DIR/junit.xml
 echo "  Artifacts:     $RESULT_DIR/artifacts/"
 echo ""
 
-# Quick pass/fail summary from each log
+# Per-test results from each worker (PASSED / FAILED / SKIPPED / ERROR)
+echo "--- Per-test results ---"
 for GPU in $(seq 0 $((NUM_GPUS - 1))); do
     LOG="$RESULT_DIR/console-gpu${GPU}.log"
     [ -f "$LOG" ] || continue
-    SUMMARY=$(grep -E "^(PASSED|FAILED|ERROR|=)" "$LOG" | tail -1)
-    echo "  GPU $GPU: $SUMMARY"
+    echo ""
+    echo "  [GPU $GPU]"
+    grep -E "PASSED|FAILED|SKIPPED|ERROR" "$LOG" \
+        | grep -E "^tests/" \
+        | sed 's/^/    /' || echo "    (no test results found)"
+    # Pytest summary line (e.g., "=== 5 passed, 1 failed in 120s ===")
+    SUMMARY=$(grep -E "^=" "$LOG" | tail -1)
+    [ -n "$SUMMARY" ] && echo "    $SUMMARY"
 done
 
+echo ""
 exit "$FAILURES"
