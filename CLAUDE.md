@@ -27,6 +27,8 @@ docker exec trtf-dev-gb300-<team-id> <command>
 
 **IMPORTANT**: Never use `docker exec trtf-dev-gb300` (the bare name). Always use your team's container name `trtf-dev-gb300-<team-id>`. Never modify another team's repo clone or container.
 
+**Discovering your workspace ID**: Read `.workspace_id` in the repo root. It contains your workspace ID (e.g., `agent-1`). Your container name is `trtf-dev-gb300-<contents of .workspace_id>`. If `.workspace_id` does not exist, you are in the primary shared repo — ask the user for your workspace ID before running any docker commands.
+
 Rely on CI (GitLab pipeline) as the quality gate — push your branch and let CI validate. Do NOT run the full E2E suite locally unless specifically asked.
 
 ## Build commands

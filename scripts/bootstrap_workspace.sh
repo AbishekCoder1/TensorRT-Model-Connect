@@ -94,6 +94,10 @@ else
     git clone --branch "$BRANCH" "$GIT_REMOTE" "$REPO_DIR"
 fi
 
+# --- Write workspace ID so agents can self-discover -------------------------
+
+echo "$WORKSPACE_ID" > "${REPO_DIR}/.workspace_id"
+
 # --- Create shared dirs -----------------------------------------------------
 
 mkdir -p "$ENGINE_DIR" 2>/dev/null || true
