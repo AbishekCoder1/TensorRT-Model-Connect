@@ -2,20 +2,25 @@
 # Run all E2E tests in parallel across available GPUs.
 #
 # Usage (inside container):
-#   ./scripts/run_e2e_parallel.sh
 #   ./scripts/run_e2e_parallel.sh --rebuild-engines
-#   ./scripts/run_e2e_parallel.sh --task-strategy text_generation_causal
+#   ./scripts/run_e2e_parallel.sh --engine-dir /path/to/engines --hf-python /opt/venv/bin/python
+#   ./scripts/run_e2e_parallel.sh --task-strategy text_generation_causal --rebuild-engines
 #
 # Usage (from host):
 #   docker exec trtf-dev-gb300 bash -c \
-#     "cd /workspace/trt-transformers-cpp && ./scripts/run_e2e_parallel.sh"
+#     "cd /workspace/trt-transformers-cpp && ./scripts/run_e2e_parallel.sh --rebuild-engines"
 #
-# Environment variables:
-#   ENGINE_DIR      Engine/bundle storage  (default: /workspace/users/yifeif/trt-transformers/engines)
-#   RESULT_DIR      Test output directory  (default: /workspace/users/yifeif/trt-transformers/test-result)
-#   NUM_GPUS        Number of GPUs to use  (default: auto-detect)
-#   TRTF_BINARY     Path to trtf binary    (default: ./build/trtf)
-#   HF_PYTHON       Python with HF deps    (default: .venv/bin/python)
+# CLI options (override defaults):
+#   --engine-dir PATH    Engine/bundle storage  (default: /workspace/users/yifeif/trt-transformers/engines)
+#   --result-dir PATH    Test output directory  (default: /workspace/users/yifeif/trt-transformers/test-result)
+#   --trtf-binary PATH   Path to trtf binary    (default: ./build/trtf)
+#   --hf-python PATH     Python with HF deps    (default: .venv/bin/python)
+#   --num-gpus N         Number of GPUs to use  (default: auto-detect)
+#   --task-strategy STR  Filter by task strategy
+#   All other args are passed through to pytest (e.g., --rebuild-engines)
+#
+# Environment variables (lower priority than CLI):
+#   ENGINE_DIR, RESULT_DIR, NUM_GPUS, TRTF_BINARY, HF_PYTHON
 
 set -euo pipefail
 
@@ -40,6 +45,11 @@ EXTRA_ARGS=()
 FILTER_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
+        --engine-dir)      ENGINE_DIR="$2"; shift 2 ;;
+        --result-dir)      RESULT_DIR="$2"; shift 2 ;;
+        --trtf-binary)     TRTF_BINARY="$2"; shift 2 ;;
+        --hf-python)       HF_PYTHON="$2"; shift 2 ;;
+        --num-gpus)        NUM_GPUS="$2"; shift 2 ;;
         --task-strategy)
             FILTER_ARGS+=(--e2e-task-strategy "$2")
             shift 2

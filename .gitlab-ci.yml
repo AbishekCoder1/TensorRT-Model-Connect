@@ -44,14 +44,14 @@ test-python-builder:
   stage: tier1-unit
   needs: [build-all]
   script:
-    - python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
+    - python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py -n auto
   timeout: 15m
 
 test-tools:
   stage: tier1-unit
   needs: [build-all]
   script:
-    - python -m pytest tests/tools/ -v
+    - python -m pytest tests/tools/ -v -n auto
   timeout: 5m
 
 test-cpp-unit:
@@ -70,7 +70,7 @@ test-graph-ops:
     - nvidia-smi
     - python -m pytest tests/builder/test_graph_ops.py
       tests/builder/test_graph_ops_extended.py
-      tests/builder/test_graph_blocks.py -v
+      tests/builder/test_graph_blocks.py -v -n auto
   timeout: 10m
 
 # ── Tier 3: E2E Smoke Test (~3 min) ─────────────────────────────────────────
@@ -92,12 +92,12 @@ test-e2e-full:
   stage: tier4-full-e2e
   needs: [test-e2e-smoke]
   script:
-    - python -m pytest tests/test_e2e.py -v
+    - ./scripts/run_e2e_parallel.sh
       --engine-dir $ENGINE_DIR
+      --result-dir /tmp/e2e_artifacts
       --trtf-binary ./build/trtf
       --hf-python /opt/venv/bin/python
       --rebuild-engines
-      --e2e-artifacts-dir /tmp/e2e_artifacts
   artifacts:
     paths:
       - /tmp/e2e_artifacts/
