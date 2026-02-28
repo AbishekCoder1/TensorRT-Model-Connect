@@ -150,7 +150,7 @@ class DiffusionMediaRunner:
         bundle_path = _resolve_bundle_path(case, ctx)
 
         # Run as a subprocess that loads the TRT T5 engine and encodes text
-        prompt_text = case.inputs.get("test_prompt", "A cat sitting on a beach")
+        prompt_text = case.inputs.get("prompt", "A cat sitting on a beach")
         script_code = textwrap.dedent(f"""\
             import sys
             sys.path.insert(0, {str(TOOLS_DIR)!r})
@@ -232,7 +232,7 @@ class DiffusionMediaRunner:
         """Run full generation via C++ binary (trtf generate-video)."""
         bundle_path = _resolve_bundle_path(case, ctx)
         binary = ctx.binary_path
-        prompt = case.inputs.get("test_prompt", "A cat sitting on a beach")
+        prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
         ld_path = _build_ld_library_path(ctx)
 
@@ -318,7 +318,7 @@ class DiffusionMediaRunner:
         """
         bundle_path = _resolve_bundle_path(case, ctx)
         model_id = case.hf_id
-        prompt = case.inputs.get("test_prompt", "A cat sitting on a beach")
+        prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 10)
         python = ctx.hf_python or sys.executable
 
@@ -429,7 +429,7 @@ np.save("/tmp/crossover_ref_t5_trt_dit.npy", dit_out)
         """
         bundle_path = _resolve_bundle_path(case, ctx)
         model_id = case.hf_id
-        prompt = case.inputs.get("test_prompt", "A cat sitting on a beach")
+        prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         python = ctx.hf_python or sys.executable
 
         script_code = f"""

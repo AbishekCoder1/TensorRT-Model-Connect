@@ -66,7 +66,7 @@ class HfDiffusersReference:
         is not available.
         """
         model_id = case.hf_id
-        prompt = case.inputs.get("test_prompt", "A cat sitting on a beach")
+        prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         python = ctx.hf_python or sys.executable
 
         # Save to artifacts_dir so the file persists for comparator access
@@ -197,7 +197,7 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
     ) -> StageOutput:
         """Run full HF diffusers pipeline to generate reference frames."""
         model_id = case.hf_id
-        prompt = case.inputs.get("test_prompt", "A cat sitting on a beach")
+        prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
         python = ctx.hf_python or sys.executable
 
