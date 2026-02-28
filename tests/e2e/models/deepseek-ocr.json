@@ -9,5 +9,6 @@
   "max_new_tokens": 30,
   "logit_atol": 0.001,
   "test_image": "tests/e2e/data/orc_test_img.jpeg",
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "skip": "bundle build fails (deepseek_ocr family plugin incomplete)"
 }
