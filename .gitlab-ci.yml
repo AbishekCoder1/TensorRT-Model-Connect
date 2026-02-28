@@ -20,6 +20,7 @@ default:
   tags: [gpu-gb300]
   before_script:
     - pip install --no-deps -e trtf_build/
+    - chmod +x ./build/trtf 2>/dev/null || true
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -77,7 +78,7 @@ test-graph-ops:
 
 test-e2e-smoke:
   stage: tier3-smoke
-  needs: [test-graph-ops]
+  needs: [test-graph-ops, build-all]
   script:
     - python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v
       --engine-dir $ENGINE_DIR
@@ -90,7 +91,7 @@ test-e2e-smoke:
 
 test-e2e-full:
   stage: tier4-full-e2e
-  needs: [test-e2e-smoke]
+  needs: [test-e2e-smoke, build-all]
   script:
     - ./scripts/run_e2e_parallel.sh
       --engine-dir $ENGINE_DIR
