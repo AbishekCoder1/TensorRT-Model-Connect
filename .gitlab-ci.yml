@@ -1,0 +1,110 @@
+# .gitlab-ci.yml — GB300 GPU CI pipeline for trt-transformers
+#
+# Fat image (trtf-dev-gb300:latest) has all Python deps baked in at /opt/venv.
+# ENV PATH includes /opt/venv/bin, so python/pip/pytest work without activation.
+# ENV vars TRT_LIB_DIR, TRT_INC_DIR, LD_LIBRARY_PATH are pre-set.
+
+stages:
+  - build
+  - tier1-unit
+  - tier2-graph-ops
+  - tier3-smoke
+  - tier4-full-e2e
+
+variables:
+  ENGINE_DIR: /workspace/users/yifeif/trt-transformers/engines
+  GIT_STRATEGY: fetch
+
+default:
+  image: trtf-dev-gb300:latest
+  tags: [gpu-gb300]
+
+# ── Build ──────────────────────────────────────────────────────────────────────
+
+build-all:
+  stage: build
+  script:
+    - pip install --no-deps -e trtf_build/
+    - cmake -S . -B build -G Ninja
+      -DTRTF_TRT_INCLUDE_DIR=$TRT_INC_DIR
+      -DTRTF_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so
+      -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include
+      -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+    - cmake --build build -j
+  artifacts:
+    paths:
+      - build/
+    expire_in: 1 day
+  timeout: 15m
+
+# ── Tier 1: Unit Tests ────────────────────────────────────────────────────────
+
+test-python-builder:
+  stage: tier1-unit
+  needs: [build-all]
+  script:
+    - python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
+  timeout: 15m
+
+test-tools:
+  stage: tier1-unit
+  needs: [build-all]
+  script:
+    - python -m pytest tests/tools/ -v
+  timeout: 5m
+
+test-cpp-unit:
+  stage: tier1-unit
+  needs: [build-all]
+  script:
+    - ctest --test-dir build --output-on-failure
+  timeout: 5m
+
+# ── Tier 2: Graph-Op GPU Tests (~3 min) ──────────────────────────────────────
+
+test-graph-ops:
+  stage: tier2-graph-ops
+  needs: [test-python-builder, test-cpp-unit]
+  script:
+    - nvidia-smi
+    - python -m pytest tests/builder/test_graph_ops.py
+      tests/builder/test_graph_ops_extended.py
+      tests/builder/test_graph_blocks.py -v
+  timeout: 10m
+
+# ── Tier 3: E2E Smoke Test (~3 min) ─────────────────────────────────────────
+
+test-e2e-smoke:
+  stage: tier3-smoke
+  needs: [test-graph-ops]
+  script:
+    - python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v
+      --engine-dir $ENGINE_DIR
+      --trtf-binary ./build/trtf
+      --hf-python /opt/venv/bin/python
+      --rebuild-engines
+  timeout: 30m
+
+# ── Tier 4: Full E2E (~2h, master only or manual on MRs) ────────────────────
+
+test-e2e-full:
+  stage: tier4-full-e2e
+  needs: [test-e2e-smoke]
+  script:
+    - python -m pytest tests/test_e2e.py -v
+      --engine-dir $ENGINE_DIR
+      --trtf-binary ./build/trtf
+      --hf-python /opt/venv/bin/python
+      --rebuild-engines
+      --e2e-artifacts-dir /tmp/e2e_artifacts
+  artifacts:
+    paths:
+      - /tmp/e2e_artifacts/
+    when: always
+    expire_in: 7 days
+  timeout: 3h
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true

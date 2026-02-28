@@ -74,6 +74,9 @@ models/hf/trl-internal-testing__*/
 models/hf/*/.cache/
 
 .*
+!.gitignore
+!.gitlab-ci.yml
+!.dockerignore
 config
 HEAD
 hooks
