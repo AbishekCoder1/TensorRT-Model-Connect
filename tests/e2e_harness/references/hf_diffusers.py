@@ -207,32 +207,62 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         frames_dir = os.path.join(model_dir, "hf_frames")
         os.makedirs(frames_dir, exist_ok=True)
 
+        family = case.family
         script = f"""
 import torch
 import numpy as np
-from diffusers import WanPipeline
 from PIL import Image
 import os
 
-pipe = WanPipeline.from_pretrained(
-    {model_id!r}, torch_dtype=torch.float16)
-pipe.to("cuda")
+family = {family!r}
+model_id = {model_id!r}
+prompt = {prompt!r}
+num_steps = {num_steps}
+frames_dir = {frames_dir!r}
+seed = 42
 
-output = pipe(
-    prompt={prompt!r},
-    num_inference_steps={num_steps},
-    num_frames=17,
-    guidance_scale=5.0,
-    generator=torch.Generator("cuda").manual_seed(42),
-)
+if family in ("flux",):
+    from diffusers import FluxPipeline
+    pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+    pipe.to("cuda")
+    output = pipe(
+        prompt=prompt,
+        num_inference_steps=num_steps,
+        height=1024, width=1024,
+        generator=torch.Generator("cuda").manual_seed(seed),
+    )
+    frames = output.images
+elif family in ("z_image",):
+    from diffusers import DiffusionPipeline
+    pipe = DiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+    pipe.to("cuda")
+    output = pipe(
+        prompt=prompt,
+        num_inference_steps=num_steps,
+        height=1024, width=1024,
+        generator=torch.Generator("cuda").manual_seed(seed),
+    )
+    frames = output.images
+else:
+    # Default: Wan-style text-to-video
+    from diffusers import WanPipeline
+    pipe = WanPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
+    pipe.to("cuda")
+    output = pipe(
+        prompt=prompt,
+        num_inference_steps=num_steps,
+        num_frames=17,
+        guidance_scale=5.0,
+        generator=torch.Generator("cuda").manual_seed(seed),
+    )
+    frames = output.frames[0]
 
-frames = output.frames[0]
 for i, frame in enumerate(frames):
     if isinstance(frame, Image.Image):
-        frame.save(os.path.join({frames_dir!r}, f"frame_{{i:04d}}.png"))
+        frame.save(os.path.join(frames_dir, f"frame_{{i:04d}}.png"))
     else:
         img = Image.fromarray(np.uint8(frame * 255) if frame.max() <= 1.0 else np.uint8(frame))
-        img.save(os.path.join({frames_dir!r}, f"frame_{{i:04d}}.png"))
+        img.save(os.path.join(frames_dir, f"frame_{{i:04d}}.png"))
 
 print(f"Generated {{len(frames)}} frames")
 """
@@ -244,11 +274,24 @@ print(f"Generated {{len(frames)}} frames")
 
         frame_files = sorted(Path(frames_dir).glob("frame_*.png"))
 
+        # Persist stderr for debugging
+        if result.stderr:
+            stderr_path = os.path.join(model_dir, "hf_diffusion_full_pipeline_stderr.log")
+            try:
+                with open(stderr_path, "w") as f:
+                    f.write(result.stderr)
+            except OSError:
+                pass
+            if result.returncode != 0:
+                logger.error("HF diffusers full pipeline failed (rc=%d): %s",
+                             result.returncode, result.stderr[-500:])
+
         data: dict = {
             "returncode": result.returncode,
             "num_frames": len(frame_files),
             "frames_dir": frames_dir,
             "stdout": result.stdout,
+            "stderr": result.stderr,
         }
 
         # Compute frame statistics for reference
