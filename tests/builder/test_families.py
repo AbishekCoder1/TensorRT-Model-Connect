@@ -427,15 +427,12 @@ class TestRuntimeStrategy:
         from trtf_build.config import ModelConfig
 
         plugin = find_plugin("personaplex")
-        # Exercise the override path without requiring local tokenizer files.
-        if hasattr(plugin, "_model_dir"):
-            plugin._model_dir = None
         overrides = plugin.get_bundle_config_overrides(
             ModelConfig(model_type="personaplex"))
-        assert overrides["speech_depth_temperature"] == pytest.approx(0.8)
-        assert overrides["speech_depth_top_k"] == 250
-        assert overrides["speech_system_prompt"] == "You are a helpful AI assistant."
-        assert isinstance(overrides["speech_text_prompt_ids"], list)
+        assert overrides["speech_depth_temperature"] == pytest.approx(0.0)
+        assert overrides["speech_depth_top_k"] == 0
+        assert overrides["speech_system_prompt"] == ""
+        assert overrides["speech_text_prompt_ids"] == []
 
     def test_nemotron_h_strategy(self):
         plugin = find_plugin("nemotron_h")

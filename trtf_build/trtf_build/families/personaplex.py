@@ -189,10 +189,6 @@ class PersonaPlexPlugin:
     name = "personaplex"
     runtime_strategy = "speech_to_speech"
 
-    def __init__(self) -> None:
-        # Captured during load_weights(); used for build-time prompt tokenization.
-        self._model_dir: str | None = None
-
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         return mt in {"moshi", "personaplex", "personaplex_7b"}
@@ -209,7 +205,6 @@ class PersonaPlexPlugin:
           - Various embedding and projection weights
         """
         model_dir_path = Path(model_dir)
-        self._model_dir = str(model_dir_path)
         readers = _open_safetensors(model_dir_path)
 
         # Infer config from weight shapes
@@ -481,7 +476,10 @@ class PersonaPlexPlugin:
         # These will be overridden with real values from inferred config
         # since config.json is minimal. The engine_builder passes config
         # which is parsed from config.json. We use safe defaults here.
-        prompt = "You are a helpful AI assistant."
+        # ropefix2 default (validated during bring-up):
+        # - deterministic depth decoding (greedy)
+        # - no injected text/system prompt
+        prompt = ""
         return {
             "num_codebooks": 16,
             "codebook_size": 2048,
@@ -502,33 +500,13 @@ class PersonaPlexPlugin:
             "text_initial_token_id": 32000,
             "audio_initial_token_id": 2048,
             "text_padding_id": 3,
-            # Depth decoder sampling: official PersonaPlex uses temp=0.8, top_k=250
-            "speech_depth_temperature": 0.8,
-            "speech_depth_top_k": 250,
-            # Default system prompt (matches official PersonaPlex)
+            # ropefix2 decode policy: greedy + no sampling.
+            "speech_depth_temperature": 0.0,
+            "speech_depth_top_k": 0,
+            # ropefix2 prompt policy: no prompt injection by default.
             "speech_system_prompt": prompt,
-            # Pre-tokenized system prompt IDs (SPM tokenizer can't load via
-            # HF AutoTokenizer, so we tokenize at build time)
-            "speech_text_prompt_ids": self._tokenize_system_prompt(
-                prompt, model_dir=self._model_dir),
+            "speech_text_prompt_ids": [],
         }
-
-    def _tokenize_system_prompt(self, prompt: str, model_dir: str | None = None) -> list[int]:
-        """Pre-tokenize system prompt with the SPM tokenizer."""
-        try:
-            import sentencepiece as spm
-            if model_dir is None:
-                return []
-            spm_path = Path(model_dir) / "tokenizer_spm_32k_3.model"
-            if not spm_path.exists():
-                return []
-            sp = spm.SentencePieceProcessor()
-            sp.Load(str(spm_path))
-            return sp.EncodeAsIds(prompt)
-        except Exception:
-            # Fallback: return empty (no text prompt injection)
-            return []
-
 
 def _load_temporal_weights(
     weights: WeightDict,
