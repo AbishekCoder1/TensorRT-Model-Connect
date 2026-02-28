@@ -261,10 +261,13 @@ bool run_decoder_step_device(
             cudaMemsetAsync(resources.d_input_embed.data(), 0, resources.d_input_embed.size(), stream);
             use_input_embed = 0.0F;
         }
-        if (cudaMemcpyAsync(resources.d_use_input_embed.data(), &use_input_embed, sizeof(float),
-                cudaMemcpyHostToDevice, stream) != cudaSuccess)
+        if (resources.d_use_input_embed.size() > 0)
         {
-            return fail("H2D use_input_embed failed");
+            if (cudaMemcpyAsync(resources.d_use_input_embed.data(), &use_input_embed, sizeof(float),
+                    cudaMemcpyHostToDevice, stream) != cudaSuccess)
+            {
+                return fail("H2D use_input_embed failed");
+            }
         }
     }
 
@@ -299,7 +302,9 @@ bool run_decoder_step_device(
     }
 
     // 3. Bind tensor addresses
-    if (!engine.context->setTensorAddress(engine.token_input_name.c_str(), resources.d_token_id.data()))
+    // token_id may be absent in embed-only models (e.g. MagpieTTS) that only use input_embed.
+    if (has_io_tensor(*engine.engine, engine.token_input_name)
+        && !engine.context->setTensorAddress(engine.token_input_name.c_str(), resources.d_token_id.data()))
     {
         return fail("bind token_id failed");
     }
@@ -323,7 +328,8 @@ bool run_decoder_step_device(
         {
             return fail("bind input_embed failed");
         }
-        if (!engine.context->setTensorAddress("use_input_embed", resources.d_use_input_embed.data()))
+        if (has_io_tensor(*engine.engine, "use_input_embed")
+            && !engine.context->setTensorAddress("use_input_embed", resources.d_use_input_embed.data()))
         {
             return fail("bind use_input_embed failed");
         }

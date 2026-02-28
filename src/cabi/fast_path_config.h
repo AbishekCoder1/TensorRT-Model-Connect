@@ -112,6 +112,21 @@ struct FastPathModelConfig {
     int32_t fine_n_lm_heads{7};
     int32_t fine_seq_length{0};        // 0 = no fine engine
 
+    // MagpieTTS fields (used when runtime_strategy == "text_to_audio" && is_magpie_tts)
+    bool is_magpie_tts{false};
+    int32_t magpie_num_codebooks{8};
+    int32_t magpie_codebook_size{2024};
+    float magpie_fps{21.5F};
+    int32_t magpie_num_speakers{5};
+    int32_t magpie_encoder_layers{6};
+    int32_t magpie_decoder_layers{12};
+    int32_t magpie_hidden_size{0};
+    int32_t magpie_text_vocab_size{0};
+    int32_t magpie_max_source_positions{2048};
+    int32_t magpie_xa_n_heads{1};
+    int32_t magpie_xa_d_head{128};
+    std::string magpie_nemo_path;  // .nemo archive path for IPA tokenizer
+
     // Object detection fields (used when runtime_strategy == "object_detection")
     int32_t det_num_classes{80};
     int32_t det_input_h{640};

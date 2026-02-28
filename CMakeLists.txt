@@ -88,6 +88,7 @@ add_library(trtf_core
   src/runtime/trt/neural_operator_backend.cpp
   src/runtime/trt/hybrid_backend.cpp
   src/runtime/trt/bark_backend.cpp
+  src/runtime/trt/magpie_tts_backend.cpp
   src/runtime/trt/omni_backend.cpp
   src/runtime/trt/speech_backend.cpp
   src/runtime/trt/diffusion_backend.cpp

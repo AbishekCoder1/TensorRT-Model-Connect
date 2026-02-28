@@ -22,5 +22,7 @@ public:
 std::unique_ptr<ITokenizer> CreateVocabTokenizer(std::vector<std::string> vocab);
 std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir, std::string python_path = "",
                                                     bool add_special_tokens = false);
+std::unique_ptr<ITokenizer> CreateMagpiePythonTokenizer(std::string nemo_path,
+                                                        std::string python_path = "");
 
 } // namespace trtf

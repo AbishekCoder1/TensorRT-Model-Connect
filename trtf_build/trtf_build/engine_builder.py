@@ -46,11 +46,22 @@ def _resolve_model(model_id_or_path: str) -> str:
 
     If model_id_or_path is an existing directory with config.json, returns it
     directly. Otherwise, downloads via huggingface_hub.snapshot_download().
+    Handles .nemo archives by extracting config and creating a synthetic dir.
     """
     local = Path(model_id_or_path)
     if local.is_dir() and ((local / "config.json").exists()
                            or (local / "model_index.json").exists()):
         return str(local)
+
+    # Handle .nemo archives (NeMo models like MagpieTTS)
+    if local.is_file() and local.suffix == ".nemo":
+        return _resolve_nemo_archive(local)
+
+    # Handle HF directories that contain .nemo files
+    if local.is_dir():
+        nemo_files = list(local.glob("*.nemo"))
+        if nemo_files:
+            return _resolve_nemo_archive(nemo_files[0])
 
     # Treat as HuggingFace repo ID — download to HF cache.
     try:
@@ -64,10 +75,82 @@ def _resolve_model(model_id_or_path: str) -> str:
     print(f"[trtf-build] Downloading {model_id_or_path} ...", file=sys.stderr)
     local_dir = snapshot_download(
         repo_id=model_id_or_path,
-        allow_patterns=_HF_ALLOW_PATTERNS,
+        allow_patterns=_HF_ALLOW_PATTERNS + ["*.nemo"],
     )
+
+    # Check if download contains .nemo files
+    dl_path = Path(local_dir)
+    nemo_files = list(dl_path.glob("*.nemo"))
+    if nemo_files:
+        return _resolve_nemo_archive(nemo_files[0])
+
     print(f"[trtf-build] Downloaded to {local_dir}", file=sys.stderr)
     return local_dir
+
+
+def _resolve_nemo_archive(nemo_path: Path) -> str:
+    """Extract a .nemo archive and create a synthetic HF-compatible directory.
+
+    NeMo .nemo files are tar archives containing model_config.yaml and
+    model_weights.ckpt. We extract the YAML config, generate a synthetic
+    config.json with model_type for plugin dispatch, and store the .nemo
+    path for the plugin's load_weights() to use.
+    """
+    import json
+    import tempfile
+
+    print(f"[trtf-build] Resolving NeMo archive: {nemo_path}", file=sys.stderr)
+
+    # Extract model_config.yaml from the tar
+    import tarfile
+    cfg = {}
+    with tarfile.open(str(nemo_path), "r") as tar:
+        for member in tar.getmembers():
+            if member.name.endswith("model_config.yaml"):
+                import yaml
+                f = tar.extractfile(member)
+                if f is not None:
+                    cfg = yaml.safe_load(f)
+                break
+
+    # Determine model_type from NeMo config
+    target = cfg.get("target", "")
+    model_type = "unknown"
+    if "MagpieTTS" in target or "magpietts" in target.lower():
+        model_type = "magpie_tts"
+    elif cfg.get("model_type", ""):
+        model_type = cfg["model_type"]
+
+    # Create a temp dir that looks like an HF model dir
+    tmp_dir = tempfile.mkdtemp(prefix="trtf_nemo_")
+    tmp_path = Path(tmp_dir)
+
+    # Write synthetic config.json for ModelConfig.from_dir()
+    enc_cfg = cfg.get("encoder", {})
+    dec_cfg = cfg.get("decoder", {})
+    hidden = enc_cfg.get("d_model", 768)
+    synthetic_config = {
+        "model_type": model_type,
+        "hidden_size": hidden,
+        "num_hidden_layers": dec_cfg.get("n_layers", 12),
+        "num_attention_heads": dec_cfg.get("sa_n_heads", 12),
+        "intermediate_size": dec_cfg.get("d_ffn", 3072),
+        "vocab_size": 2380,  # Will be overridden from weights
+        "rms_norm_eps": 1e-5,
+        "_nemo_archive_path": str(nemo_path),
+    }
+    with open(tmp_path / "config.json", "w") as f:
+        json.dump(synthetic_config, f, indent=2)
+
+    # Symlink the .nemo file into the temp dir for easy access
+    nemo_link = tmp_path / nemo_path.name
+    if not nemo_link.exists():
+        import os
+        os.symlink(str(nemo_path.resolve()), str(nemo_link))
+
+    print(f"[trtf-build] NeMo resolved: model_type={model_type}, "
+          f"tmp_dir={tmp_dir}", file=sys.stderr)
+    return tmp_dir
 
 
 def _get_trt_version() -> str:

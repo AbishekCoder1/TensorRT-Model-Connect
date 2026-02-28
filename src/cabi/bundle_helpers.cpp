@@ -33,6 +33,11 @@ BundleSections find_bundle_sections(const BundleFile& bundle)
         else if (section.name == "coarse_embed") s.coarse_embed_data = &section.data;
         else if (section.name == "fine_embed") s.fine_embed_data = &section.data;
         else if (section.name == "fine_position_embed") s.fine_position_embed_data = &section.data;
+        // MagpieTTS sections
+        else if (section.name == "magpie_audio_embed") s.magpie_audio_embed_data = &section.data;
+        else if (section.name == "magpie_text_embed") s.magpie_text_embed_data = &section.data;
+        else if (section.name == "magpie_context_embed") s.magpie_context_embed_data = &section.data;
+        else if (section.name == "magpie_context_lengths") s.magpie_context_lengths_data = &section.data;
         // Speech-to-speech (PersonaPlex/Moshi) sections
         else if (section.name == "depth_engine_plan") s.depth_engine_plan_data = &section.data;
         else if (section.name == "mimi_encoder_plan") s.mimi_encoder_plan_data = &section.data;

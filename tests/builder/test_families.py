@@ -302,6 +302,9 @@ _POSITIVE_MATCH_CASES = [
     ("z_image", "z_image"),
     # DeepSeek OCR (matches deepseek_vl_v2 model_type)
     ("deepseek_vl_v2", "deepseek_ocr"),
+    # MagpieTTS (encoder-decoder TTS)
+    ("magpie_tts", "magpie_tts"),
+    ("decoder_ce", "magpie_tts"),
 ]
 
 

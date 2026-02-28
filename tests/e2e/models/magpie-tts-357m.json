@@ -1,0 +1,13 @@
+{
+  "name": "magpie-tts-357m",
+  "hf_id": "nvidia/magpie_tts_multilingual_357m",
+  "bundle": "magpie-tts-357m.trtfb",
+  "family": "magpie_tts",
+  "runtime_strategy": "text_to_audio",
+  "test_type": "audio",
+  "max_cache_length": 1024,
+  "prompt": "Hello, this is a test of text to speech.",
+  "max_new_tokens": 200,
+  "logit_atol": 1e-2,
+  "trust_remote_code": false
+}

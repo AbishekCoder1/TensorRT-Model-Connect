@@ -26,6 +26,7 @@
 #include "runtime/trt/neural_operator_backend.h"
 #include "runtime/trt/hybrid_backend.h"
 #include "runtime/trt/bark_backend.h"
+#include "runtime/trt/magpie_tts_backend.h"
 #include "runtime/trt/omni_backend.h"
 #include "runtime/trt/speech_backend.h"
 #include "runtime/trt/trt_common.h"
@@ -396,7 +397,7 @@ public:
     bool supports_audio() const override
     {
 #if TRTF_HAS_TRT
-        return mBarkBackend != nullptr || mOmniBackend != nullptr;
+        return mBarkBackend != nullptr || mOmniBackend != nullptr || mMagpieTTSBackend != nullptr;
 #else
         return false;
 #endif
@@ -434,6 +435,38 @@ public:
             catch (const std::exception& e)
             {
                 std::cerr << "[trtf] Omni audio error: " << e.what() << std::endl;
+                return -1;
+            }
+        }
+
+        // Try MagpieTTS backend
+        if (mMagpieTTSBackend != nullptr && prompt != nullptr && output_path != nullptr)
+        {
+            try
+            {
+                std::vector<int32_t> input_ids;
+                if (mTokenizer)
+                {
+                    input_ids = mTokenizer->encode(prompt);
+                }
+
+                auto result = mMagpieTTSBackend->generate_audio(
+                    input_ids, max_tokens > 0 ? max_tokens : 500);
+
+                if (result.num_samples <= 0)
+                    return -1;
+
+                trtf::write_wav(std::string(output_path),
+                    result.waveform.data(), result.num_samples, result.sample_rate);
+
+                std::cerr << "[trtf] MagpieTTS audio saved: " << output_path
+                          << " (" << result.num_samples << " samples @ "
+                          << result.sample_rate << " Hz)" << std::endl;
+                return result.num_samples;
+            }
+            catch (const std::exception& e)
+            {
+                std::cerr << "[trtf] MagpieTTS audio error: " << e.what() << std::endl;
                 return -1;
             }
         }
@@ -577,6 +610,10 @@ public:
     void set_bark_backend(std::unique_ptr<trtf::BarkBackend> backend)
     {
         mBarkBackend = std::move(backend);
+    }
+    void set_magpie_tts_backend(std::unique_ptr<trtf::MagpieTTSBackend> backend)
+    {
+        mMagpieTTSBackend = std::move(backend);
     }
     void set_omni_backend(std::unique_ptr<trtf::OmniBackend> backend)
     {
@@ -1112,6 +1149,7 @@ private:
 #if TRTF_HAS_TRT
     std::unique_ptr<trtf::SegmentationBackend> mSegBackend;
     std::unique_ptr<trtf::BarkBackend> mBarkBackend;
+    std::unique_ptr<trtf::MagpieTTSBackend> mMagpieTTSBackend;
     std::unique_ptr<trtf::OmniBackend> mOmniBackend;
     std::unique_ptr<trtf::EncoderBackend> mEncoderBackend;
     trtf::EncoderResult mLastEncoderResult;
@@ -1502,6 +1540,159 @@ PipelineImpl* create_neural_operator_pipeline(
     pipeline->set_neural_operator_backend(std::move(no_backend));
 
     std::cerr << "[trtf] Runtime ready (backend=trt_neural_operator, strategy=neural_operator)" << std::endl;
+    return pipeline;
+}
+
+PipelineImpl* create_magpie_tts_pipeline(
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> trt_engine,
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
+    const trtf::FastPathModelConfig& fp_cfg,
+    const trtf::BundleSections& sections,
+    trtf::TrtUniquePtr<nvinfer1::IRuntime>& runtime_ptr,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& bundle_path)
+{
+    // Build decoder engine from primary plan_data
+    // MagpieTTS uses embed_input mode (input_embed instead of token_id),
+    // so skip the standard tensor check.
+    auto decoder_engine = trtf::make_decoder_engine(
+        std::move(trt_engine), std::move(exec_ctx), fp_cfg);
+
+    // Override vocab_size: MagpieTTS decoder outputs [num_codebooks * codebook_size]
+    // logits, not [text_vocab_size]. The engine's logits tensor has the correct shape.
+    {
+        auto logits_shape = decoder_engine->engine->getTensorShape("logits");
+        if (logits_shape.nbDims >= 2)
+        {
+            decoder_engine->vocab_size = logits_shape.d[logits_shape.nbDims - 1];
+        }
+        else if (logits_shape.nbDims == 1)
+        {
+            decoder_engine->vocab_size = logits_shape.d[0];
+        }
+    }
+
+    // Deserialize encoder from vision_plan_data (reused for encoder-decoder pattern)
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> encoder_engine;
+    trtf::TrtUniquePtr<nvinfer1::IExecutionContext> encoder_ctx;
+    if (sections.vision_plan_data != nullptr && !sections.vision_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing MagpieTTS encoder TRT engine ("
+                  << sections.vision_plan_data->size() / (1024 * 1024)
+                  << " MB) ..." << std::endl;
+
+        encoder_engine = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.vision_plan_data->data(),
+                sections.vision_plan_data->size()));
+        if (!encoder_engine)
+        {
+            throw std::runtime_error("Failed to deserialize MagpieTTS encoder engine: " + bundle_path);
+        }
+        encoder_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+            encoder_engine->createExecutionContext());
+        if (!encoder_ctx)
+        {
+            throw std::runtime_error("Failed to create MagpieTTS encoder execution context");
+        }
+    }
+    else
+    {
+        throw std::runtime_error("Bundle missing encoder engine (vision_engine_plan) for MagpieTTS: " + bundle_path);
+    }
+
+    // Load 4 embedding tables from bundle sections
+    auto load_embed = [&](const std::vector<char>* data, const char* name) -> std::vector<float> {
+        if (data == nullptr || data->empty())
+        {
+            throw std::runtime_error(std::string("Bundle missing ") + name + " section: " + bundle_path);
+        }
+        const auto n_floats = data->size() / sizeof(float);
+        std::vector<float> embed(n_floats);
+        std::memcpy(embed.data(), data->data(), data->size());
+        std::cerr << "[trtf] Loaded " << name << " (" << n_floats << " floats)" << std::endl;
+        return embed;
+    };
+
+    auto audio_embed = load_embed(sections.magpie_audio_embed_data, "magpie_audio_embed");
+    auto text_embed = load_embed(sections.magpie_text_embed_data, "magpie_text_embed");
+    auto context_embed = load_embed(sections.magpie_context_embed_data, "magpie_context_embed");
+
+    // Load context lengths (int32 array)
+    std::vector<int32_t> context_lengths;
+    if (sections.magpie_context_lengths_data != nullptr &&
+        !sections.magpie_context_lengths_data->empty())
+    {
+        const auto n = sections.magpie_context_lengths_data->size() / sizeof(int32_t);
+        context_lengths.resize(n);
+        std::memcpy(context_lengths.data(), sections.magpie_context_lengths_data->data(),
+                     sections.magpie_context_lengths_data->size());
+    }
+
+    // Create MagpieTTSBackend
+    auto magpie_backend = trtf::CreateMagpieTTSBackend(
+        std::move(decoder_engine), std::move(encoder_engine), std::move(encoder_ctx),
+        std::move(audio_embed), std::move(text_embed),
+        std::move(context_embed), std::move(context_lengths), fp_cfg);
+    if (!magpie_backend || !magpie_backend->is_available())
+    {
+        throw std::runtime_error("Failed to create MagpieTTS backend from bundle engines");
+    }
+
+    // Deserialize optional codec engine
+    if (sections.codec_engine_plan_data != nullptr && !sections.codec_engine_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing MagpieTTS codec engine ("
+                  << sections.codec_engine_plan_data->size() / (1024 * 1024)
+                  << " MB) ..." << std::endl;
+
+        auto codec_trt = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.codec_engine_plan_data->data(),
+                sections.codec_engine_plan_data->size()));
+        if (codec_trt)
+        {
+            auto codec_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                codec_trt->createExecutionContext());
+            magpie_backend->set_codec_engine(std::move(codec_trt), std::move(codec_ctx));
+        }
+    }
+
+    // Tokenizer: MagpieTTS uses NeMo IPA tokenizer via Python bridge
+    trtf::TokenizerResult tok = {nullptr, ""};
+    if (!fp_cfg.magpie_nemo_path.empty())
+    {
+        try
+        {
+            tok.tokenizer = trtf::CreateMagpiePythonTokenizer(
+                fp_cfg.magpie_nemo_path, hf_python);
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] Warning: MagpieTTS tokenizer: " << e.what() << std::endl;
+        }
+    }
+    if (!tok.tokenizer)
+    {
+        // Fallback: try HF tokenizer from bundle (unlikely for MagpieTTS)
+        try
+        {
+            tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[trtf] Warning: no tokenizer for MagpieTTS (" << e.what() << ")" << std::endl;
+        }
+    }
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_magpie_tts, strategy=text_to_audio)" << std::endl;
+
+    auto* pipeline = new PipelineImpl(
+        model_id, std::move(tok.tokenizer), nullptr, "trt_magpie_tts", trtf::GenerationConfig{});
+    if (!tok.temp_dir.empty())
+        pipeline->set_bundle_temp_dir(std::move(tok.temp_dir));
+    pipeline->set_magpie_tts_backend(std::move(magpie_backend));
     return pipeline;
 }
 
@@ -2595,6 +2786,12 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
 
     if (strategy == "text_to_audio")
     {
+        if (fp_cfg.is_magpie_tts)
+        {
+            return create_magpie_tts_pipeline(
+                std::move(trt_engine), std::move(exec_ctx), fp_cfg,
+                sections, runtime_ptr, bundle.info.model_id, hf_python, bundle_path);
+        }
         return create_bark_pipeline(
             std::move(trt_engine), std::move(exec_ctx), fp_cfg,
             sections, runtime_ptr, bundle.info.model_id, hf_python, bundle_path);

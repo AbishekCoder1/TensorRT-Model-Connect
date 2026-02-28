@@ -41,6 +41,12 @@ struct BundleSections {
     const std::vector<char>* fine_embed_data{nullptr};
     const std::vector<char>* fine_position_embed_data{nullptr};
 
+    // MagpieTTS sections
+    const std::vector<char>* magpie_audio_embed_data{nullptr};
+    const std::vector<char>* magpie_text_embed_data{nullptr};
+    const std::vector<char>* magpie_context_embed_data{nullptr};
+    const std::vector<char>* magpie_context_lengths_data{nullptr};
+
     // Omni multimodal sections
     const std::vector<char>* audio_encoder_plan_data{nullptr};
     const std::vector<char>* talker_engine_plan_data{nullptr};

@@ -357,4 +357,115 @@ std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir, std::
     return std::make_unique<HfPythonTokenizer>(std::move(model_dir), std::move(python_path), add_special_tokens);
 }
 
+namespace {
+
+std::filesystem::path magpie_tokenizer_script_path()
+{
+    return std::filesystem::path(script_path("magpie_tokenizer.py"));
+}
+
+class MagpiePythonTokenizer final : public ITokenizer {
+public:
+    MagpiePythonTokenizer(std::string nemo_path, std::string python_path)
+        : mNemoPath(std::move(nemo_path))
+    {
+        mPythonCommand = find_python_command(python_path);
+        mScript = magpie_tokenizer_script_path();
+
+        if (!std::filesystem::exists(mScript))
+        {
+            throw std::runtime_error("Missing MagpieTTS tokenizer script: " + mScript.string());
+        }
+
+        const std::string check_cmd = hf_tok_detail::shell_quote(mPythonCommand) + " "
+            + hf_tok_detail::shell_quote(mScript.string())
+            + " --check --nemo-path " + hf_tok_detail::shell_quote(mNemoPath);
+        const CommandResult check = run_command_capture(check_cmd);
+        if (check.exit_code != 0)
+        {
+            throw std::runtime_error("MagpieTTS tokenizer check failed: "
+                + hf_tok_detail::trim_trailing_newlines(check.output));
+        }
+    }
+
+    std::vector<int32_t> encode(const std::string& text) const override
+    {
+        char temp_path[] = "/tmp/trtf_magpie_tokenizer_encode_XXXXXX";
+        const int fd = mkstemp(temp_path);
+        if (fd < 0)
+        {
+            throw std::runtime_error("mkstemp failed with errno=" + std::to_string(errno));
+        }
+
+        {
+            std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+            if (!out)
+            {
+                close(fd);
+                std::filesystem::remove(temp_path);
+                throw std::runtime_error("Failed to write temporary tokenizer input file.");
+            }
+            out << text;
+        }
+        close(fd);
+
+        const std::string cmd = hf_tok_detail::shell_quote(mPythonCommand) + " "
+            + hf_tok_detail::shell_quote(mScript.string())
+            + " --nemo-path " + hf_tok_detail::shell_quote(mNemoPath)
+            + " --op encode"
+            + " --text-file " + hf_tok_detail::shell_quote(temp_path);
+
+        const CommandResult result = run_command_capture(cmd);
+        std::error_code remove_ec;
+        std::filesystem::remove(temp_path, remove_ec);
+
+        if (result.exit_code != 0)
+        {
+            throw std::runtime_error("MagpieTTS tokenizer encode failed: "
+                + hf_tok_detail::trim_trailing_newlines(result.output));
+        }
+
+        return hf_tok_detail::parse_int_list(hf_tok_detail::sanitize_hf_output(result.output));
+    }
+
+    std::string decode(const std::vector<int32_t>& ids) const override
+    {
+        const std::string cmd = hf_tok_detail::shell_quote(mPythonCommand) + " "
+            + hf_tok_detail::shell_quote(mScript.string())
+            + " --nemo-path " + hf_tok_detail::shell_quote(mNemoPath)
+            + " --op decode"
+            + " --ids " + hf_tok_detail::shell_quote(hf_tok_detail::join_ids_csv(ids));
+
+        const CommandResult result = run_command_capture(cmd);
+        if (result.exit_code != 0)
+        {
+            throw std::runtime_error("MagpieTTS tokenizer decode failed: "
+                + hf_tok_detail::trim_trailing_newlines(result.output));
+        }
+        return hf_tok_detail::sanitize_hf_output(result.output);
+    }
+
+    int32_t id_for_token(std::string_view /*token*/) const override
+    {
+        return -1; // Not needed for TTS
+    }
+
+    std::string token_for_id(int32_t /*id*/) const override
+    {
+        return ""; // Not needed for TTS
+    }
+
+private:
+    std::string mNemoPath;
+    std::string mPythonCommand;
+    std::filesystem::path mScript;
+};
+
+} // namespace
+
+std::unique_ptr<ITokenizer> CreateMagpiePythonTokenizer(std::string nemo_path, std::string python_path)
+{
+    return std::make_unique<MagpiePythonTokenizer>(std::move(nemo_path), std::move(python_path));
+}
+
 } // namespace trtf

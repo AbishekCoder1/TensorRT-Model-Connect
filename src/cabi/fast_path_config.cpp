@@ -194,6 +194,25 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.fine_codebook_size = extract_json_int(config_text, "fine_codebook_size", 1056);
         cfg.fine_n_lm_heads = extract_json_int(config_text, "fine_n_lm_heads", 7);
         cfg.fine_seq_length = extract_json_int(config_text, "fine_seq_length", 0);
+
+        // MagpieTTS fields (detected by "magpie_tts": true in config)
+        cfg.is_magpie_tts = extract_json_int(config_text, "magpie_tts", 0) != 0;
+        if (cfg.is_magpie_tts)
+        {
+            cfg.magpie_num_codebooks = extract_json_int(config_text, "magpie_num_codebooks", 8);
+            cfg.magpie_codebook_size = extract_json_int(config_text, "magpie_codebook_size", 2024);
+            cfg.magpie_fps = extract_json_float(config_text, "magpie_fps", 21.5F);
+            cfg.magpie_num_speakers = extract_json_int(config_text, "magpie_num_speakers", 5);
+            cfg.magpie_encoder_layers = extract_json_int(config_text, "magpie_encoder_layers", 6);
+            cfg.magpie_decoder_layers = extract_json_int(config_text, "magpie_decoder_layers", 12);
+            cfg.magpie_hidden_size = extract_json_int(config_text, "magpie_hidden_size", cfg.hidden_size);
+            cfg.magpie_text_vocab_size = extract_json_int(config_text, "magpie_text_vocab_size", 0);
+            cfg.magpie_max_source_positions = extract_json_int(config_text, "magpie_max_source_positions", 2048);
+            cfg.magpie_xa_n_heads = extract_json_int(config_text, "magpie_xa_n_heads", 1);
+            cfg.magpie_xa_d_head = extract_json_int(config_text, "magpie_xa_d_head", 128);
+            cfg.magpie_nemo_path = extract_json_string(config_text, "magpie_nemo_path", "");
+            cfg.audio_sample_rate = extract_json_int(config_text, "sample_rate", 22050);
+        }
     }
 
     // Object detection fields
