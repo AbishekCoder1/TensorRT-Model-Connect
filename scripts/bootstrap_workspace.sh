@@ -86,12 +86,15 @@ echo ""
 if [ -d "${REPO_DIR}/.git" ]; then
     echo "Repo already exists, fetching latest..."
     git -C "$REPO_DIR" fetch origin
-    git -C "$REPO_DIR" checkout "$BRANCH"
-    git -C "$REPO_DIR" pull --rebase origin "$BRANCH" || true
+    git -C "$REPO_DIR" checkout "$BRANCH" 2>/dev/null \
+        || git -C "$REPO_DIR" checkout -b "$BRANCH" origin/master
 else
     echo "Cloning repo..."
     mkdir -p "$(dirname "$REPO_DIR")"
-    git clone --branch "$BRANCH" "$GIT_REMOTE" "$REPO_DIR"
+    git clone "$GIT_REMOTE" "$REPO_DIR"
+    if [ "$BRANCH" != "master" ]; then
+        git -C "$REPO_DIR" checkout -b "$BRANCH"
+    fi
 fi
 
 # --- Write workspace ID so agents can self-discover -------------------------
