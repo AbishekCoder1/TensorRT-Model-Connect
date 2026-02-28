@@ -92,7 +92,7 @@ test-e2e-smoke:
       --rebuild-engines
   timeout: 30m
 
-# ── Tier 4: Full E2E (~2h, master only or manual on MRs) ────────────────────
+# ── Tier 4: Full E2E (~2h, auto on master and MRs) ───────────────────────────
 
 test-e2e-full:
   stage: tier4-full-e2e
@@ -112,5 +112,6 @@ test-e2e-full:
   timeout: 4h
   rules:
     - if: $CI_COMMIT_BRANCH == "master"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - when: manual
       allow_failure: true
