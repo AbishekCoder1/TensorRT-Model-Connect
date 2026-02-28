@@ -394,6 +394,7 @@ static void test_speech_to_speech_config()
         "depth_num_layers": 6,
         "depth_num_attention_heads": 16,
         "depth_num_key_value_heads": 4,
+        "eos_token_id": 2,
         "speech_depth_temperature": 0.0,
         "speech_depth_top_k": 0,
         "speech_system_prompt": "",
@@ -410,6 +411,7 @@ static void test_speech_to_speech_config()
     check(cfg.speech_depth_num_layers == 6, "speech: depth_num_layers");
     check(cfg.speech_depth_num_heads == 16, "speech: depth_num_heads");
     check(cfg.speech_depth_num_kv_heads == 4, "speech: depth_num_kv_heads");
+    check(cfg.id_eos == 2, "speech: eos_token_id");
     check(cfg.speech_depth_temperature == 0.0F, "speech: depth_temperature");
     check(cfg.speech_depth_top_k == 0, "speech: depth_top_k");
     check(cfg.speech_system_prompt.empty(), "speech: system_prompt");

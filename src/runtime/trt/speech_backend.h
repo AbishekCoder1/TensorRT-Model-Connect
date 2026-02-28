@@ -79,6 +79,10 @@ struct SpeechConfig {
     float depth_temperature{0.0F};  // 0 = greedy, 0.8 = official PersonaPlex
     int32_t depth_top_k{0};         // 0 = greedy, 250 = official PersonaPlex
 
+    // Optional text EOS token used to stop long-form speech generation early.
+    // -1 disables EOS-based early stop.
+    int32_t text_eos_token_id{-1};
+
     // System prompt for text prompt injection (primes temporal KV cache)
     std::string system_prompt;
     // Pre-tokenized system prompt IDs (avoids runtime tokenization)

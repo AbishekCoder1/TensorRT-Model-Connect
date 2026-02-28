@@ -1234,6 +1234,30 @@ AudioResult SpeechToSpeechBackend::process_audio(
               << ", tail_frames=" << extra_tail << ")"
               << std::endl;
 
+    const int32_t text_eos_id = mConfig.text_eos_token_id;
+    constexpr int32_t kMinConsecutiveTextEos = 2;
+    constexpr int32_t kMinConsecutiveTextPadAfterInput = 16;
+    constexpr int32_t kMaxContinuationFramesAfterInput = 16;
+    int32_t text_eos_streak = 0;
+    int32_t text_pad_streak = 0;
+    bool eos_stop_requested = false;
+    int32_t eos_stop_collect_until_offset = -1;
+    if (text_eos_id >= 0)
+    {
+        std::cerr << "[speech] Text EOS early-stop enabled: eos_token_id="
+                  << text_eos_id << " (min_streak=" << kMinConsecutiveTextEos
+                  << ")" << std::endl;
+    }
+    if (extra_tail > 0)
+    {
+        std::cerr << "[speech] Text PAD fallback stop enabled after input "
+                     "(pad_id="
+                  << text_pad_id << ", min_streak="
+                  << kMinConsecutiveTextPadAfterInput << ")" << std::endl;
+        std::cerr << "[speech] Post-input continuation cap: "
+                  << kMaxContinuationFramesAfterInput << " frames" << std::endl;
+    }
+
     int32_t frames_collected = 0;
 
     for (int32_t offset = 0; offset < total_iters && frames_collected < output_frames; ++offset)
@@ -1390,6 +1414,46 @@ AudioResult SpeechToSpeechBackend::process_audio(
             frames_collected++;
         }
 
+        if (text_eos_id >= 0 && !text_provided &&
+            target_pos >= effective_frames &&
+            sampled_text_token == text_eos_id)
+        {
+            text_eos_streak++;
+            if (!eos_stop_requested && text_eos_streak >= kMinConsecutiveTextEos)
+            {
+                eos_stop_requested = true;
+                eos_stop_collect_until_offset = offset + max_delay;
+                std::cerr << "[speech] Text EOS detected at offset " << offset
+                          << " (streak=" << text_eos_streak
+                          << "), draining delayed frames until offset "
+                          << eos_stop_collect_until_offset << std::endl;
+            }
+        }
+        else
+        {
+            text_eos_streak = 0;
+        }
+
+        if (!eos_stop_requested && extra_tail > 0 && !text_provided &&
+            target_pos >= effective_frames &&
+            sampled_text_token == text_pad_id)
+        {
+            text_pad_streak++;
+            if (text_pad_streak >= kMinConsecutiveTextPadAfterInput)
+            {
+                eos_stop_requested = true;
+                eos_stop_collect_until_offset = offset + max_delay;
+                std::cerr << "[speech] Text PAD fallback stop at offset " << offset
+                          << " (streak=" << text_pad_streak
+                          << "), draining delayed frames until offset "
+                          << eos_stop_collect_until_offset << std::endl;
+            }
+        }
+        else
+        {
+            text_pad_streak = 0;
+        }
+
         // Debug: print first 5 active frames
         if (offset > 0 && offset <= 5)
         {
@@ -1405,14 +1469,30 @@ AudioResult SpeechToSpeechBackend::process_audio(
                 std::cerr << " " << frame_codes[cb];
             std::cerr << "..." << std::endl;
         }
+
+        if (eos_stop_requested && offset >= eos_stop_collect_until_offset)
+        {
+            break;
+        }
+
+        if (!eos_stop_requested && extra_tail > 0 &&
+            target_pos >= (effective_frames + kMaxContinuationFramesAfterInput))
+        {
+            eos_stop_requested = true;
+            eos_stop_collect_until_offset = offset + max_delay;
+            std::cerr << "[speech] Continuation cap reached at offset " << offset
+                      << ", draining delayed frames until offset "
+                      << eos_stop_collect_until_offset << std::endl;
+        }
     }
 
-    std::cerr << "[speech] Depth: generated " << output_frames
+    const int32_t generated_frames = frames_collected;
+    std::cerr << "[speech] Depth: generated " << generated_frames
               << " frames x " << num_cb << " codebooks (decoding first "
               << mimi_cb << ")" << std::endl;
     if (!output_codes.empty())
     {
-        const int32_t dbg_frames = output_frames;
+        const int32_t dbg_frames = generated_frames;
         for (int32_t f = 0; f < dbg_frames; ++f)
         {
             std::cerr << "[speech] Output frame " << f << ":";
@@ -1429,7 +1509,27 @@ AudioResult SpeechToSpeechBackend::process_audio(
     // ---------------------------------------------------------------
     // Stage 4: Decode first mimi_cb codebook tokens to audio via Mimi decoder
     // ---------------------------------------------------------------
-    auto waveform = run_mimi_decode(output_codes, output_frames);
+    auto waveform = run_mimi_decode(output_codes, generated_frames);
+    // Mimi decoder engine uses a fixed frame shape (e.g. 320). Trim decoded
+    // output to the actual generated frame count so early-stop shortens WAV.
+    if (!waveform.empty() && generated_frames > 0 && mConfig.frame_rate > 0.0F)
+    {
+        const int32_t samples_per_frame = static_cast<int32_t>(
+            std::lround(static_cast<float>(mConfig.sample_rate) / mConfig.frame_rate));
+        if (samples_per_frame > 0)
+        {
+            const auto expected_samples =
+                static_cast<std::size_t>(generated_frames) *
+                static_cast<std::size_t>(samples_per_frame);
+            if (expected_samples > 0 && expected_samples < waveform.size())
+            {
+                waveform.resize(expected_samples);
+                std::cerr << "[speech] Trimmed decoded waveform to "
+                          << expected_samples << " samples (" << generated_frames
+                          << " generated frames)" << std::endl;
+            }
+        }
+    }
 
     // Peak-normalize to [-1, 1] to avoid clipping in WAV output
     if (!waveform.empty())
@@ -1486,6 +1586,7 @@ std::unique_ptr<SpeechToSpeechBackend> CreateSpeechBackend(
     // Sampling parameters
     speech_cfg.depth_temperature = cfg.speech_depth_temperature;
     speech_cfg.depth_top_k = cfg.speech_depth_top_k;
+    speech_cfg.text_eos_token_id = cfg.id_eos;
 
     // System prompt
     speech_cfg.system_prompt = cfg.speech_system_prompt;

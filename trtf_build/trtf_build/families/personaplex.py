@@ -494,6 +494,7 @@ class PersonaPlexPlugin:
             "num_hidden_layers": 32,
             "num_attention_heads": 32,
             "vocab_size": 32000,
+            "eos_token_id": 2,
             # Delay pattern: delays[k] for k=0..16 (1 text + 16 audio)
             # Official Moshi: [0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1]
             "delays": [0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1],

@@ -432,6 +432,7 @@ class TestRuntimeStrategy:
         plugin = find_plugin("personaplex")
         overrides = plugin.get_bundle_config_overrides(
             ModelConfig(model_type="personaplex"))
+        assert overrides["eos_token_id"] == 2
         assert overrides["speech_depth_temperature"] == pytest.approx(0.0)
         assert overrides["speech_depth_top_k"] == 0
         assert overrides["speech_system_prompt"] == ""
