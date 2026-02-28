@@ -86,3 +86,4 @@ engines
 *.png
 *.wav
 *.trtfb
+!Recording.wav
