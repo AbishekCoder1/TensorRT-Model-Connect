@@ -6,9 +6,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 C++ bundle-only runtime for TensorRT inference, paired with a Python build package (`trtf_build/`) that converts HuggingFace models into `.trtfb` bundles. The Python package handles model loading, TRT engine building, and bundle packaging. The C++ runtime loads `.trtfb` bundles, deserializes TRT engines, and runs autoregressive inference. Public C++ API lives in `include/trtf/`. Everything is in the `trtf` namespace. C++17, compiled with `-Wall -Wextra -Wpedantic`.
 
+## Workspace isolation
+
+Multiple agent teams may work on this repo simultaneously on the same GB300 machine. Each team MUST operate in its own isolated workspace:
+
+- **Each team gets its own repo clone** at `/workspace/users/yifeif/workspaces/<id>/trt-transformers-cpp`
+- **Each team gets its own container** named `trtf-dev-gb300-<id>` (NEVER use the shared `trtf-dev-gb300` container)
+- **Shared read-only resources**: HF model cache (`/mnt/storage/trt-transformers/model-weights`) and engine storage (`/workspace/users/yifeif/trt-transformers/engines`) are safe to share
+- **Isolated per-team**: git state, `build/` directory, Python editable installs, branches
+
+To bootstrap a new isolated workspace:
+```bash
+./scripts/bootstrap_workspace.sh --id <team-id> --branch <branch> --detach
+```
+
+To run commands in your workspace container:
+```bash
+docker exec trtf-dev-gb300-<team-id> <command>
+```
+
+**IMPORTANT**: Never use `docker exec trtf-dev-gb300` (the bare name). Always use your team's container name `trtf-dev-gb300-<team-id>`. Never modify another team's repo clone or container.
+
+Rely on CI (GitLab pipeline) as the quality gate — push your branch and let CI validate. Do NOT run the full E2E suite locally unless specifically asked.
+
 ## Build commands
 
-ALWAYS DO EVERYTHING IN CONTAINER. Run command with docker exec
+ALWAYS DO EVERYTHING IN CONTAINER. Run command with `docker exec trtf-dev-gb300-<your-team-id>`
 
 ### C++ runtime
 
