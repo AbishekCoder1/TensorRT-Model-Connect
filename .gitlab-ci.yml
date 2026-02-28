@@ -18,13 +18,14 @@ variables:
 default:
   image: trtf-dev-gb300:latest
   tags: [gpu-gb300]
+  before_script:
+    - pip install --no-deps -e trtf_build/
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
 build-all:
   stage: build
   script:
-    - pip install --no-deps -e trtf_build/
     - cmake -S . -B build -G Ninja
       -DTRTF_TRT_INCLUDE_DIR=$TRT_INC_DIR
       -DTRTF_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so
