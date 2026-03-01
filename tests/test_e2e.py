@@ -297,9 +297,8 @@ def test_e2e(case_name: str, request) -> None:
     if case is None:
         pytest.fail(f"Case not found: {case_name}")
 
-    # Handle skip cases (v1 compat — models with skip field)
-    if case.metadata.get("skip_reason"):
-        pytest.skip(case.metadata["skip_reason"])
+    # Models with skip_reason still run TRT inference; only comparison is skipped.
+    # The orchestrator handles this by skipping the reference run.
 
     # Build run context
     config = request.config

@@ -461,20 +461,8 @@ class E2EOrchestrator:
         # Collect environment fingerprint
         env_fp = sink.ensure_env_fingerprint()
 
-        # Handle skip cases (v1 compat)
-        if case.metadata.get("skip_reason"):
-            result = E2EResult(
-                case_name=case.name,
-                status=E2EStatus.SKIP.value,
-                failure_type=None,
-                oracle_level=case.oracle_level,
-                stages={},
-                timing=timing,
-                env_fingerprint=env_fp,
-                timestamp=timestamp,
-            )
-            sink.finalize(result)
-            return result
+        # skip_reason: TRT inference still runs; only reference/comparison is skipped.
+        skip_reason = case.metadata.get("skip_reason")
 
         # 1. Preflight
         t0 = time.monotonic()
@@ -592,9 +580,14 @@ class E2EOrchestrator:
                     case.task_strategy, stage_name,
                 )
 
-            # Reference run
+            # Reference run (skipped when skip_reason is set)
             ref_output: StageOutput | None = None
-            if reference is not None:
+            if skip_reason:
+                logger.info(
+                    "Skipping reference for %s stage %s: %s",
+                    case.name, stage_name, skip_reason,
+                )
+            elif reference is not None:
                 t0 = time.monotonic()
                 try:
                     ref_output = reference.run_stage(case, stage, ctx_with_bundle)
