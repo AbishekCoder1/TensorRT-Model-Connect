@@ -9,6 +9,7 @@ Skips if any prerequisite is missing.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -71,27 +72,55 @@ def _get_paths(request):
 
 def _run_cpp(binary: Path, bundle: Path, hf_python: Path) -> tuple[str, float]:
     """Run C++ binary and return (output_text, wall_clock_seconds)."""
-    # Set up LD_LIBRARY_PATH for TRT libs
-    setup = (
-        'TRT_LIB_DIR=$(python3 -c '
-        '"import importlib.util; s=importlib.util.find_spec(\'tensorrt_libs\'); '
-        'print(s.submodule_search_locations[0])") && '
-        'export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"'
+    env = os.environ.copy()
+    # Resolve TRT libs using the same interpreter passed to --hf-python.
+    trt_probe = (
+        "import importlib.util; "
+        "s=importlib.util.find_spec('tensorrt_libs'); "
+        "print(s.submodule_search_locations[0] if s and s.submodule_search_locations else '')"
     )
-    cmd = (
-        f"{setup} && {binary} run {bundle} "
-        f'--prompt "{PROMPT}" '
-        f"--max-new-tokens {MAX_NEW_TOKENS} "
-        f"--hf-python {hf_python}"
+    probe = subprocess.run(
+        [str(hf_python), "-c", trt_probe],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
+    trt_lib_dir = probe.stdout.strip()
+
+    base = env.get("LD_LIBRARY_PATH", "")
+    parts = [p for p in [trt_lib_dir, "/usr/local/cuda/lib64", base] if p]
+    if parts:
+        env["LD_LIBRARY_PATH"] = ":".join(parts)
+
+    cmd = [
+        str(binary),
+        "run",
+        str(bundle),
+        "--prompt",
+        PROMPT,
+        "--max-new-tokens",
+        str(MAX_NEW_TOKENS),
+        "--hf-python",
+        str(hf_python),
+    ]
 
     t0 = time.perf_counter()
     result = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, timeout=120)
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(PROJECT_DIR),
+        env=env,
+    )
     elapsed = time.perf_counter() - t0
 
     if result.returncode != 0:
-        pytest.fail(f"C++ binary failed:\nstderr: {result.stderr}")
+        pytest.fail(
+            f"C++ binary failed with rc={result.returncode}\n"
+            f"cmd: {' '.join(cmd)}\n"
+            f"stderr: {result.stderr}"
+        )
 
     return result.stdout.strip(), elapsed
 
