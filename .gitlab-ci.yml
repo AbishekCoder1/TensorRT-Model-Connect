@@ -115,9 +115,10 @@ test-e2e-full:
       --hf-python /opt/venv/bin/python
       --workers-per-gpu 4
       --rebuild-engines
+  after_script:
     - python scripts/generate_e2e_report.py
-      --artifacts-dir /tmp/e2e_artifacts/artifacts
-      -o /tmp/e2e_artifacts/e2e_report.html
+      --artifacts-dir e2e_artifacts/artifacts
+      -o e2e_artifacts/e2e_report.html
       --project-dir .
       --title "E2E Report - MR !${CI_MERGE_REQUEST_IID:-manual}"
       || true
@@ -125,7 +126,7 @@ test-e2e-full:
     paths:
       - e2e_artifacts/
     when: always
-    expire_in: 7 days
+    expire_in: 2 days
   timeout: 4h
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
