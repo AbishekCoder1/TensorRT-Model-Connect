@@ -20,7 +20,6 @@ workflow:
     on_new_commit: conservative
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == "master"
 
 default:
   image: trtf-dev-gb300:latest
@@ -121,7 +120,4 @@ test-e2e-full:
     expire_in: 7 days
   timeout: 4h
   rules:
-    - if: $CI_COMMIT_BRANCH == "master"
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - when: manual
-      allow_failure: true
