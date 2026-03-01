@@ -115,6 +115,12 @@ test-e2e-full:
       --hf-python /opt/venv/bin/python
       --workers-per-gpu 4
       --rebuild-engines
+    - python scripts/generate_e2e_report.py
+      --artifacts-dir /tmp/e2e_artifacts/artifacts
+      -o /tmp/e2e_artifacts/e2e_report.html
+      --project-dir .
+      --title "E2E Report - MR !${CI_MERGE_REQUEST_IID:-manual}"
+      || true
   artifacts:
     paths:
       - e2e_artifacts/

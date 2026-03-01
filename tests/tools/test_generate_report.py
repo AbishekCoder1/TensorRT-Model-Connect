@@ -1,0 +1,637 @@
+"""Unit tests for scripts/generate_e2e_report.py — HTML E2E report generator.
+
+Tests cover data loading, modality classification, rendering, file encoding,
+and graceful handling of missing/corrupt data.  All tests are pure-Python
+with no GPU or TRT dependency.
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+import struct
+import sys
+from pathlib import Path
+from typing import Any, Dict, List
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# Lazy import (follows the repo convention for tools tests)
+# ---------------------------------------------------------------------------
+
+def _import_report():
+    """Import generate_e2e_report from scripts/."""
+    scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    return importlib.import_module("generate_e2e_report")
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+def _make_result(
+    name: str = "test-model",
+    status: str = "pass",
+    task_strategy: str = "text_generation_causal",
+    family: str = "qwen",
+    hf_id: str = "Qwen/Qwen3-0.6B",
+    prompt: str = "Hello world",
+    trt_text: str = "Hello world! The",
+    ref_text: str = "Hello world! The",
+    metrics: Dict[str, Any] | None = None,
+    timing: Dict[str, float] | None = None,
+    failure_type: str | None = None,
+    repro_commands: Dict[str, str] | None = None,
+    artifacts: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build a synthetic result.json dict."""
+    if metrics is None:
+        metrics = {
+            "logit_cosine_p5": {
+                "value": 0.998,
+                "threshold": 0.99,
+                "operator": ">=",
+                "passed": True,
+            },
+            "token_agreement_rate": {
+                "value": 0.95,
+                "threshold": 0.8,
+                "operator": ">=",
+                "passed": True,
+            },
+        }
+    if timing is None:
+        timing = {"build_s": 1.0, "trt_generate_s": 2.5, "ref_generate_s": 3.0}
+    return {
+        "case_name": name,
+        "status": status,
+        "failure_type": failure_type,
+        "oracle_level": "L1_external_reference",
+        "timestamp": "2026-02-28T10:00:00Z",
+        "case_config": {
+            "name": name,
+            "hf_id": hf_id,
+            "family": family,
+            "runtime_strategy": "decoder_kv_cache",
+            "task_strategy": task_strategy,
+            "reference_backend": "hf_transformers",
+            "inputs": {"prompt": prompt},
+        },
+        "env_fingerprint": {
+            "gpu_name": "NVIDIA GB300",
+            "cuda_version": "CUDA 12.8",
+            "tensorrt_version": "10.8.0",
+            "python_version": "3.10.12",
+        },
+        "stages": {
+            "generate": {
+                "status": "passed",
+                "metrics": metrics,
+                "message": "All metrics passed",
+            }
+        },
+        "stage_outputs": {
+            "trt_generate": {
+                "stage_name": "generate",
+                "timing_s": 2.5,
+                "text": trt_text,
+                "data": {},
+                "metadata": {},
+            },
+            "ref_generate": {
+                "stage_name": "generate",
+                "timing_s": 3.0,
+                "text": ref_text,
+                "data": {},
+                "metadata": {},
+            },
+        },
+        "timing": timing,
+        "repro_commands": repro_commands or {},
+        "artifacts": artifacts or {},
+    }
+
+
+def _write_result(tmp_path: Path, name: str, result: Dict[str, Any]) -> Path:
+    """Write a result.json into a model subdirectory."""
+    model_dir = tmp_path / name
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "result.json").write_text(
+        json.dumps(result, indent=2), encoding="utf-8"
+    )
+    return model_dir
+
+
+def _make_tiny_png(path: Path) -> None:
+    """Write a minimal valid 1x1 red PNG file."""
+    # Minimal PNG: 8-byte sig + IHDR + IDAT + IEND
+    import zlib
+
+    sig = b"\x89PNG\r\n\x1a\n"
+
+    def _chunk(ctype: bytes, data: bytes) -> bytes:
+        raw = ctype + data
+        crc = struct.pack(">I", zlib.crc32(raw) & 0xFFFFFFFF)
+        return struct.pack(">I", len(data)) + raw + crc
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)  # 1x1, 8-bit RGB
+    raw_data = zlib.compress(b"\x00\xff\x00\x00")  # filter=None, R=255,G=0,B=0
+    png = sig + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", raw_data) + _chunk(b"IEND", b"")
+    path.write_bytes(png)
+
+
+def _make_tiny_wav(path: Path) -> None:
+    """Write a minimal valid WAV file (1 sample, 16-bit mono)."""
+    import struct as st
+
+    # RIFF header
+    sample = st.pack("<h", 1000)  # one 16-bit sample
+    data_chunk = b"data" + st.pack("<I", len(sample)) + sample
+    fmt_chunk = (
+        b"fmt "
+        + st.pack("<I", 16)
+        + st.pack("<HHIIHH", 1, 1, 8000, 16000, 2, 16)
+    )
+    riff_size = 4 + len(fmt_chunk) + len(data_chunk)
+    wav = b"RIFF" + st.pack("<I", riff_size) + b"WAVE" + fmt_chunk + data_chunk
+    path.write_bytes(wav)
+
+
+# ---------------------------------------------------------------------------
+# Tests: classify_modality
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyModality:
+    """Tests for classify_modality()."""
+
+    def test_text_generation(self):
+        mod = _import_report()
+        r = _make_result(task_strategy="text_generation_causal")
+        assert mod.classify_modality(r) == "text"
+
+    def test_vision_language(self):
+        mod = _import_report()
+        r = _make_result(task_strategy="vision_language_generation")
+        assert mod.classify_modality(r) == "vl"
+
+    def test_diffusion(self):
+        mod = _import_report()
+        r = _make_result(task_strategy="diffusion_media_generation")
+        assert mod.classify_modality(r) == "diffusion"
+
+    def test_audio_strategies(self):
+        mod = _import_report()
+        for ts in ("text_to_audio", "speech_to_text", "speech_to_speech"):
+            r = _make_result(task_strategy=ts)
+            assert mod.classify_modality(r) == "audio", f"Failed for {ts}"
+
+    def test_segmentation_strategies(self):
+        mod = _import_report()
+        for ts in ("segmentation", "prompted_segmentation"):
+            r = _make_result(task_strategy=ts)
+            assert mod.classify_modality(r) == "segmentation", f"Failed for {ts}"
+
+    def test_generic_strategies(self):
+        mod = _import_report()
+        for ts in ("encoder_only_nlp", "embedding", "reranking"):
+            r = _make_result(task_strategy=ts)
+            assert mod.classify_modality(r) == "generic", f"Failed for {ts}"
+
+    def test_unknown_strategy_defaults_generic(self):
+        mod = _import_report()
+        r = _make_result(task_strategy="some_future_strategy")
+        assert mod.classify_modality(r) == "generic"
+
+    def test_missing_case_config(self):
+        mod = _import_report()
+        r = {"case_name": "x"}
+        assert mod.classify_modality(r) == "generic"
+
+
+# ---------------------------------------------------------------------------
+# Tests: load_all_results
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAllResults:
+    """Tests for load_all_results()."""
+
+    def test_loads_valid_results(self, tmp_path):
+        mod = _import_report()
+        r1 = _make_result(name="model-a")
+        r2 = _make_result(name="model-b", status="fail")
+        _write_result(tmp_path, "model-a", r1)
+        _write_result(tmp_path, "model-b", r2)
+        results = mod.load_all_results(tmp_path)
+        assert len(results) == 2
+        names = {r["case_name"] for r in results}
+        assert names == {"model-a", "model-b"}
+
+    def test_skips_corrupt_json(self, tmp_path):
+        mod = _import_report()
+        _write_result(tmp_path, "good", _make_result(name="good"))
+        bad_dir = tmp_path / "bad"
+        bad_dir.mkdir()
+        (bad_dir / "result.json").write_text("{invalid json", encoding="utf-8")
+        results = mod.load_all_results(tmp_path)
+        assert len(results) == 1
+        assert results[0]["case_name"] == "good"
+
+    def test_empty_dir(self, tmp_path):
+        mod = _import_report()
+        assert mod.load_all_results(tmp_path) == []
+
+    def test_nonexistent_dir(self, tmp_path):
+        mod = _import_report()
+        assert mod.load_all_results(tmp_path / "does_not_exist") == []
+
+    def test_stashes_artifact_dir(self, tmp_path):
+        mod = _import_report()
+        _write_result(tmp_path, "m1", _make_result(name="m1"))
+        results = mod.load_all_results(tmp_path)
+        assert results[0]["_artifact_dir"] == str(tmp_path / "m1")
+
+
+# ---------------------------------------------------------------------------
+# Tests: encode_file_base64
+# ---------------------------------------------------------------------------
+
+
+class TestEncodeFileBase64:
+    """Tests for encode_file_base64()."""
+
+    def test_encodes_small_file(self, tmp_path):
+        mod = _import_report()
+        p = tmp_path / "test.png"
+        _make_tiny_png(p)
+        uri = mod.encode_file_base64(p, "image/png")
+        assert uri is not None
+        assert uri.startswith("data:image/png;base64,")
+
+    def test_returns_none_for_missing(self, tmp_path):
+        mod = _import_report()
+        assert mod.encode_file_base64(tmp_path / "nope.png", "image/png") is None
+
+    def test_returns_none_for_oversized(self, tmp_path):
+        mod = _import_report()
+        p = tmp_path / "big.bin"
+        # Write a file just over the limit
+        p.write_bytes(b"\x00" * (mod._MAX_EMBED_BYTES + 1))
+        assert mod.encode_file_base64(p, "application/octet-stream") is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: render_report (integration)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderReport:
+    """Integration tests for the full render_report pipeline."""
+
+    def test_empty_results(self):
+        mod = _import_report()
+        html = mod.render_report([], title="Empty Report")
+        assert "<!DOCTYPE html>" in html
+        assert "Empty Report" in html
+        assert "0 Total" in html
+
+    def test_single_text_model(self):
+        mod = _import_report()
+        r = _make_result(name="qwen3-0.6b", prompt="Test prompt")
+        html = mod.render_report([r], title="Test Report")
+        assert "qwen3-0.6b" in html
+        assert "Test prompt" in html
+        assert "PASS" in html
+        assert "logit_cosine_p5" in html
+        assert "1 Passed" in html
+
+    def test_failed_model_shows_failure_type(self):
+        mod = _import_report()
+        r = _make_result(
+            name="bad-model", status="fail", failure_type="compare_fail"
+        )
+        html = mod.render_report([r])
+        assert "compare_fail" in html
+        assert "FAIL" in html
+        assert "1 Failed" in html
+
+    def test_multiple_models_all_present(self):
+        mod = _import_report()
+        results = [
+            _make_result(name=f"model-{i}", status="pass" if i % 2 == 0 else "fail")
+            for i in range(5)
+        ]
+        html = mod.render_report(results)
+        for i in range(5):
+            assert f"model-{i}" in html
+        assert "3 Passed" in html
+        assert "2 Failed" in html
+
+    def test_repro_commands_rendered(self):
+        mod = _import_report()
+        r = _make_result(
+            repro_commands={
+                "build_bundle": "trtf-build build X -o y.trtfb",
+                "trt_inference": "./trtf run y.trtfb --prompt 'Hi'",
+            }
+        )
+        html = mod.render_report([r])
+        assert "trtf-build build X" in html
+        assert "Copy" in html
+
+    def test_timing_rendered(self):
+        mod = _import_report()
+        r = _make_result(timing={"build_s": 10.0, "trt_generate_s": 5.5})
+        html = mod.render_report([r])
+        assert "10.00s" in html
+        assert "5.50s" in html
+        assert "15.50s" in html  # total
+
+    def test_env_section_rendered(self):
+        mod = _import_report()
+        r = _make_result()
+        html = mod.render_report([r])
+        assert "NVIDIA GB300" in html
+        assert "CUDA 12.8" in html
+
+    def test_html_escaping(self):
+        mod = _import_report()
+        r = _make_result(
+            name="xss<test>",
+            prompt='<script>alert("xss")</script>',
+            trt_text="a < b && c > d",
+        )
+        html = mod.render_report([r])
+        # User-supplied XSS payload must be escaped (the report's own
+        # inline <script> for copyCmd/filterModels is expected).
+        assert "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;" in html
+        assert "a &lt; b" in html
+
+
+# ---------------------------------------------------------------------------
+# Tests: modality-specific renderers
+# ---------------------------------------------------------------------------
+
+
+class TestRenderTextModel:
+    """Tests for render_text_model()."""
+
+    def test_shows_prompt_and_comparison(self):
+        mod = _import_report()
+        r = _make_result(prompt="Capital of France", trt_text="Paris", ref_text="Paris")
+        html = mod.render_text_model(r)
+        assert "Capital of France" in html
+        assert "TRT Output" in html
+        assert "Reference Output" in html
+        assert "Paris" in html
+
+
+class TestRenderVlModel:
+    """Tests for render_vl_model()."""
+
+    def test_embeds_image(self, tmp_path):
+        mod = _import_report()
+        img = tmp_path / "test.png"
+        _make_tiny_png(img)
+        r = _make_result(task_strategy="vision_language_generation")
+        r["case_config"]["inputs"]["image"] = str(img.relative_to(tmp_path))
+        html = mod.render_vl_model(r, project_dir=tmp_path)
+        assert "data:image/png;base64," in html
+
+    def test_missing_image_graceful(self):
+        mod = _import_report()
+        r = _make_result(task_strategy="vision_language_generation")
+        r["case_config"]["inputs"]["image"] = "nonexistent.jpg"
+        html = mod.render_vl_model(r, project_dir=Path("/tmp"))
+        assert "not found" in html.lower() or "Image" in html
+
+
+class TestRenderDiffusionModel:
+    """Tests for render_diffusion_model()."""
+
+    def test_frame_gallery(self, tmp_path):
+        mod = _import_report()
+        frames_dir = tmp_path / "model-diff" / "frames"
+        frames_dir.mkdir(parents=True)
+        for i in range(8):
+            _make_tiny_png(frames_dir / f"frame_{i:03d}.png")
+        r = _make_result(
+            name="model-diff",
+            task_strategy="diffusion_media_generation",
+        )
+        r["_artifact_dir"] = str(tmp_path / "model-diff")
+        html = mod.render_diffusion_model(r)
+        assert "data:image/png;base64," in html
+        # Should have at most _MAX_DIFFUSION_FRAMES images
+        count = html.count("data:image/png;base64,")
+        assert count <= mod._MAX_DIFFUSION_FRAMES
+
+    def test_no_frames_no_crash(self):
+        mod = _import_report()
+        r = _make_result(task_strategy="diffusion_media_generation")
+        r["_artifact_dir"] = "/nonexistent"
+        html = mod.render_diffusion_model(r)
+        assert isinstance(html, str)
+
+
+class TestRenderAudioModel:
+    """Tests for render_audio_model()."""
+
+    def test_embeds_wav(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "bark"
+        model_dir.mkdir()
+        wav_path = model_dir / "trt_output.wav"
+        _make_tiny_wav(wav_path)
+        r = _make_result(
+            name="bark",
+            task_strategy="text_to_audio",
+            artifacts={"trt_wav": "trt_output.wav"},
+        )
+        r["_artifact_dir"] = str(model_dir)
+        html = mod.render_audio_model(r)
+        assert "<audio" in html
+        assert "data:audio/wav;base64," in html
+
+    def test_speech_to_text_shows_transcript(self):
+        mod = _import_report()
+        r = _make_result(
+            task_strategy="speech_to_text",
+            trt_text="Hello from Whisper",
+            ref_text="Hello from Whisper",
+        )
+        html = mod.render_audio_model(r)
+        assert "Transcript Comparison" in html
+        assert "Hello from Whisper" in html
+
+
+class TestRenderSegmentationModel:
+    """Tests for render_segmentation_model()."""
+
+    def test_embeds_seg_map(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "segformer"
+        model_dir.mkdir()
+        seg_png = model_dir / "trt_seg.png"
+        _make_tiny_png(seg_png)
+        r = _make_result(
+            name="segformer",
+            task_strategy="segmentation",
+            artifacts={"trt_segmentation_map": "trt_seg.png"},
+        )
+        r["_artifact_dir"] = str(model_dir)
+        html = mod.render_segmentation_model(r, project_dir=None)
+        assert "TRT Segmentation Map" in html
+        assert "data:image/png;base64," in html
+
+
+# ---------------------------------------------------------------------------
+# Tests: select_frames
+# ---------------------------------------------------------------------------
+
+
+class TestSelectFrames:
+    """Tests for _select_frames()."""
+
+    def test_all_returned_if_under_limit(self, tmp_path):
+        mod = _import_report()
+        paths = [tmp_path / f"f{i}.png" for i in range(3)]
+        assert mod._select_frames(paths, 6) == paths
+
+    def test_evenly_spaced(self, tmp_path):
+        mod = _import_report()
+        paths = [tmp_path / f"f{i}.png" for i in range(17)]
+        selected = mod._select_frames(paths, 6)
+        assert len(selected) == 6
+        # First and last should always be included
+        assert selected[0] == paths[0]
+        assert selected[-1] == paths[-1]
+
+
+# ---------------------------------------------------------------------------
+# Tests: key_metric and total_time
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardHelpers:
+    """Tests for _key_metric and _total_time."""
+
+    def test_key_metric_extracts_cosine(self):
+        mod = _import_report()
+        r = _make_result()
+        km = mod._key_metric(r)
+        assert "logit_cosine_p5" in km
+        assert "0.998" in km
+
+    def test_key_metric_empty_stages(self):
+        mod = _import_report()
+        r = _make_result()
+        r["stages"] = {}
+        assert mod._key_metric(r) == ""
+
+    def test_total_time(self):
+        mod = _import_report()
+        r = _make_result(timing={"a": 1.0, "b": 2.5})
+        assert mod._total_time(r) == "3.5s"
+
+    def test_total_time_empty(self):
+        mod = _import_report()
+        r = _make_result(timing={})
+        assert mod._total_time(r) == ""
+
+
+# ---------------------------------------------------------------------------
+# Tests: CLI (parse_args)
+# ---------------------------------------------------------------------------
+
+
+class TestCLI:
+    """Tests for CLI argument parsing."""
+
+    def test_required_args(self):
+        mod = _import_report()
+        args = mod.parse_args([
+            "--artifacts-dir", "/tmp/arts",
+            "-o", "/tmp/report.html",
+        ])
+        assert args.artifacts_dir == Path("/tmp/arts")
+        assert args.output == Path("/tmp/report.html")
+        assert args.title == "E2E Test Report"
+
+    def test_all_args(self):
+        mod = _import_report()
+        args = mod.parse_args([
+            "--artifacts-dir", "/a",
+            "-o", "/b.html",
+            "--project-dir", "/proj",
+            "--title", "Custom Title",
+        ])
+        assert args.project_dir == Path("/proj")
+        assert args.title == "Custom Title"
+
+    def test_main_writes_output(self, tmp_path):
+        mod = _import_report()
+        arts = tmp_path / "artifacts"
+        arts.mkdir()
+        _write_result(arts, "m1", _make_result(name="m1"))
+        out = tmp_path / "report.html"
+        rc = mod.main([
+            "--artifacts-dir", str(arts),
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+        content = out.read_text(encoding="utf-8")
+        assert "m1" in content
+        assert "<!DOCTYPE html>" in content
+
+    def test_main_empty_dir(self, tmp_path):
+        mod = _import_report()
+        arts = tmp_path / "empty"
+        arts.mkdir()
+        out = tmp_path / "report.html"
+        rc = mod.main([
+            "--artifacts-dir", str(arts),
+            "-o", str(out),
+        ])
+        assert rc == 0
+        assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# Tests: render_summary_dashboard
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryDashboard:
+    """Tests for the summary dashboard."""
+
+    def test_filter_controls_present(self):
+        mod = _import_report()
+        html = mod.render_summary_dashboard([_make_result()])
+        assert 'id="search-box"' in html
+        assert 'id="status-filter"' in html
+
+    def test_anchor_links(self):
+        mod = _import_report()
+        r = _make_result(name="my-model")
+        html = mod.render_summary_dashboard([r])
+        assert 'href="#model-my-model"' in html
+
+    def test_counters(self):
+        mod = _import_report()
+        results = [
+            _make_result(name="a", status="pass"),
+            _make_result(name="b", status="fail"),
+            _make_result(name="c", status="skip"),
+        ]
+        html = mod.render_summary_dashboard(results)
+        assert "1 Passed" in html
+        assert "1 Failed" in html
+        assert "1 Skipped" in html
+        assert "3 Total" in html
