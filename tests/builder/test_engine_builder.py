@@ -6,6 +6,9 @@ Tests plugin discovery and model resolution without requiring TRT.
 from __future__ import annotations
 
 import json
+import importlib
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -13,6 +16,8 @@ import pytest
 pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
 from trtf_build.engine_builder import _resolve_model
 from trtf_build.families import find_plugin, _ALL_PLUGINS
+
+engine_builder = importlib.import_module(_resolve_model.__module__)
 
 
 class TestResolveModel:
@@ -39,6 +44,50 @@ class TestResolveModel:
             _resolve_model("nonexistent/model-that-does-not-exist-12345")
         except (ImportError, Exception):
             pass
+
+    def test_download_prefers_hf_config_over_nemo(self, tmp_path, monkeypatch):
+        """When both HF config and .nemo exist, keep HF path behavior."""
+        dl_dir = tmp_path / "dl"
+        dl_dir.mkdir()
+        (dl_dir / "config.json").write_text('{"model_type": "nemotron"}')
+        (dl_dir / "model.nemo").write_text("placeholder")
+
+        fake_hf = types.ModuleType("huggingface_hub")
+        fake_hf.snapshot_download = lambda **kwargs: str(dl_dir)
+        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+        called = {"nemo": False}
+
+        def fake_resolve_nemo_archive(_):
+            called["nemo"] = True
+            return "/tmp/nemo"
+
+        monkeypatch.setattr(
+            engine_builder, "_resolve_nemo_archive", fake_resolve_nemo_archive)
+
+        result = _resolve_model("nvidia/Nemotron-4-Mini-Hindi-4B-Base")
+        assert result == str(dl_dir)
+        assert called["nemo"] is False
+
+    def test_download_uses_nemo_when_no_hf_config(self, tmp_path, monkeypatch):
+        """NeMo fallback remains active for snapshots that are .nemo-only."""
+        dl_dir = tmp_path / "dl"
+        dl_dir.mkdir()
+        nemo_path = dl_dir / "model.nemo"
+        nemo_path.write_text("placeholder")
+
+        fake_hf = types.ModuleType("huggingface_hub")
+        fake_hf.snapshot_download = lambda **kwargs: str(dl_dir)
+        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+        def fake_resolve_nemo_archive(path):
+            return f"resolved:{path}"
+
+        monkeypatch.setattr(
+            engine_builder, "_resolve_nemo_archive", fake_resolve_nemo_archive)
+
+        result = _resolve_model("nvidia/Magpie-TTS")
+        assert result == f"resolved:{nemo_path}"
 
 
 class TestFindPlugin:

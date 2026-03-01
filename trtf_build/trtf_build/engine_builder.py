@@ -41,6 +41,11 @@ _HF_ALLOW_PATTERNS = [
 ]
 
 
+def _is_hf_model_dir(path: Path) -> bool:
+    """Return True if path contains a standard HF model entrypoint config."""
+    return (path / "config.json").exists() or (path / "model_index.json").exists()
+
+
 def _resolve_model(model_id_or_path: str) -> str:
     """Resolve a HuggingFace repo ID or local path to a local directory.
 
@@ -49,8 +54,7 @@ def _resolve_model(model_id_or_path: str) -> str:
     Handles .nemo archives by extracting config and creating a synthetic dir.
     """
     local = Path(model_id_or_path)
-    if local.is_dir() and ((local / "config.json").exists()
-                           or (local / "model_index.json").exists()):
+    if local.is_dir() and _is_hf_model_dir(local):
         return str(local)
 
     # Handle .nemo archives (NeMo models like MagpieTTS)
@@ -78,9 +82,14 @@ def _resolve_model(model_id_or_path: str) -> str:
         allow_patterns=_HF_ALLOW_PATTERNS + ["*.nemo"],
     )
 
-    # Check if download contains .nemo files
+    # Prefer HF config when both HF files and .nemo are present.
     dl_path = Path(local_dir)
-    nemo_files = list(dl_path.glob("*.nemo"))
+    if _is_hf_model_dir(dl_path):
+        print(f"[trtf-build] Downloaded to {local_dir}", file=sys.stderr)
+        return local_dir
+
+    # Fallback for NeMo-only snapshots.
+    nemo_files = sorted(dl_path.glob("*.nemo"))
     if nemo_files:
         return _resolve_nemo_archive(nemo_files[0])
 
