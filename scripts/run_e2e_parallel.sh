@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Run all E2E tests in parallel across available GPUs.
 #
+# Each GPU runs multiple concurrent pytest workers (default 4) to maximize
+# throughput.  Models are distributed using a size-aware scheduler that
+# interleaves large and small models so each GPU runs a balanced mix.
+#
 # Usage (inside container):
 #   ./scripts/run_e2e_parallel.sh --rebuild-engines
 #   ./scripts/run_e2e_parallel.sh --engine-dir /path/to/engines --hf-python /opt/venv/bin/python
@@ -11,16 +15,17 @@
 #     "cd /workspace/trt-transformers-cpp && ./scripts/run_e2e_parallel.sh --rebuild-engines"
 #
 # CLI options (override defaults):
-#   --engine-dir PATH    Engine/bundle storage  (default: /workspace/users/yifeif/trt-transformers/engines)
-#   --result-dir PATH    Test output directory  (default: /workspace/users/yifeif/trt-transformers/test-result)
-#   --trtf-binary PATH   Path to trtf binary    (default: ./build/trtf)
-#   --hf-python PATH     Python with HF deps    (default: .venv/bin/python)
-#   --num-gpus N         Number of GPUs to use  (default: auto-detect)
-#   --task-strategy STR  Filter by task strategy
+#   --engine-dir PATH        Engine/bundle storage  (default: /workspace/users/yifeif/trt-transformers/engines)
+#   --result-dir PATH        Test output directory  (default: /workspace/users/yifeif/trt-transformers/test-result)
+#   --trtf-binary PATH       Path to trtf binary    (default: ./build/trtf)
+#   --hf-python PATH         Python with HF deps    (default: .venv/bin/python)
+#   --num-gpus N             Number of GPUs to use  (default: auto-detect)
+#   --workers-per-gpu N      Concurrent workers per GPU (default: 4)
+#   --task-strategy STR      Filter by task strategy
 #   All other args are passed through to pytest (e.g., --rebuild-engines)
 #
 # Environment variables (lower priority than CLI):
-#   ENGINE_DIR, RESULT_DIR, NUM_GPUS, TRTF_BINARY, HF_PYTHON
+#   ENGINE_DIR, RESULT_DIR, NUM_GPUS, WORKERS_PER_GPU, TRTF_BINARY, HF_PYTHON
 
 set -euo pipefail
 
@@ -30,6 +35,7 @@ ENGINE_DIR="${ENGINE_DIR:-/workspace/users/yifeif/trt-transformers/engines}"
 RESULT_DIR="${RESULT_DIR:-/workspace/users/yifeif/trt-transformers/test-result}"
 TRTF_BINARY="${TRTF_BINARY:-./build/trtf}"
 HF_PYTHON="${HF_PYTHON:-.venv/bin/python}"
+WORKERS_PER_GPU="${WORKERS_PER_GPU:-4}"
 
 # Auto-detect GPUs if not specified
 if [ -z "${NUM_GPUS:-}" ]; then
@@ -45,11 +51,12 @@ EXTRA_ARGS=()
 FILTER_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --engine-dir)      ENGINE_DIR="$2"; shift 2 ;;
-        --result-dir)      RESULT_DIR="$2"; shift 2 ;;
-        --trtf-binary)     TRTF_BINARY="$2"; shift 2 ;;
-        --hf-python)       HF_PYTHON="$2"; shift 2 ;;
-        --num-gpus)        NUM_GPUS="$2"; shift 2 ;;
+        --engine-dir)         ENGINE_DIR="$2"; shift 2 ;;
+        --result-dir)         RESULT_DIR="$2"; shift 2 ;;
+        --trtf-binary)        TRTF_BINARY="$2"; shift 2 ;;
+        --hf-python)          HF_PYTHON="$2"; shift 2 ;;
+        --num-gpus)           NUM_GPUS="$2"; shift 2 ;;
+        --workers-per-gpu)    WORKERS_PER_GPU="$2"; shift 2 ;;
         --task-strategy)
             FILTER_ARGS+=(--e2e-task-strategy "$2")
             shift 2
@@ -63,19 +70,21 @@ done
 
 # --- Setup --------------------------------------------------------------------
 
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
 source .venv/bin/activate 2>/dev/null || true
 
 mkdir -p "$RESULT_DIR" "$ENGINE_DIR"
 
 echo "=== E2E Parallel Test Runner ==="
-echo "  GPUs:       $NUM_GPUS"
-echo "  Engines:    $ENGINE_DIR"
-echo "  Results:    $RESULT_DIR"
-echo "  Binary:     $TRTF_BINARY"
-echo "  HF Python:  $HF_PYTHON"
-echo "  Extra args: ${EXTRA_ARGS[*]:-none}"
-echo "  Filter:     ${FILTER_ARGS[*]:-all models}"
+echo "  GPUs:            $NUM_GPUS"
+echo "  Workers/GPU:     $WORKERS_PER_GPU"
+echo "  Engines:         $ENGINE_DIR"
+echo "  Results:         $RESULT_DIR"
+echo "  Binary:          $TRTF_BINARY"
+echo "  HF Python:       $HF_PYTHON"
+echo "  Extra args:      ${EXTRA_ARGS[*]:-none}"
+echo "  Filter:          ${FILTER_ARGS[*]:-all models}"
 echo ""
 
 # --- Collect test IDs ---------------------------------------------------------
@@ -89,42 +98,65 @@ if [ "$TOTAL" -eq 0 ]; then
     exit 1
 fi
 
-CHUNK=$(( (TOTAL + NUM_GPUS - 1) / NUM_GPUS ))
-echo "Collected $TOTAL tests, $CHUNK per GPU ($NUM_GPUS workers)"
+echo "Collected $TOTAL tests"
+
+# --- Schedule tests across GPUs × workers ------------------------------------
+
+SCHEDULE_JSON="$RESULT_DIR/schedule.json"
+echo "$TESTS" | python "$SCRIPT_DIR/schedule_e2e.py" \
+    --num-gpus "$NUM_GPUS" \
+    --workers-per-gpu "$WORKERS_PER_GPU" \
+    > "$SCHEDULE_JSON"
+
 echo ""
 
 # --- Launch workers -----------------------------------------------------------
 
 PIDS=()
+WORKER_LABELS=()
 START_TIME=$(date +%s)
 
-for GPU in $(seq 0 $((NUM_GPUS - 1))); do
-    SUBSET=$(echo "$TESTS" | sed -n "$(( GPU * CHUNK + 1 )),$(( (GPU + 1) * CHUNK ))p")
-    [ -z "$SUBSET" ] && continue
+# Parse schedule JSON and launch one pytest per worker slot.
+# jq-free: use Python to emit "gpu_id worker_idx test1 test2 ..." lines.
+while IFS= read -r line; do
+    GPU_ID=$(echo "$line" | cut -d' ' -f1)
+    WORKER_IDX=$(echo "$line" | cut -d' ' -f2)
+    WORKER_TESTS=$(echo "$line" | cut -d' ' -f3-)
+    WORKER_COUNT=$(echo "$WORKER_TESTS" | wc -w)
 
-    COUNT=$(echo "$SUBSET" | wc -l)
-    FIRST=$(echo "$SUBSET" | head -1 | sed 's/.*\[//;s/\].*//')
-    LAST=$(echo "$SUBSET" | tail -1 | sed 's/.*\[//;s/\].*//')
-    echo "GPU $GPU: $COUNT tests ($FIRST ... $LAST)"
+    [ "$WORKER_COUNT" -eq 0 ] && continue
+
+    LABEL="gpu${GPU_ID}-w${WORKER_IDX}"
+    echo "  $LABEL: $WORKER_COUNT tests"
 
     (
-        export CUDA_VISIBLE_DEVICES=$GPU
-        echo "$SUBSET" | tr "\n" " " | xargs \
-            python -m pytest -v \
+        export CUDA_VISIBLE_DEVICES=$GPU_ID
+        # shellcheck disable=SC2086
+        python -m pytest $WORKER_TESTS -v \
             --engine-dir "$ENGINE_DIR" \
             --trtf-binary "$TRTF_BINARY" \
             --hf-python "$HF_PYTHON" \
             --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
-            --junitxml="$RESULT_DIR/junit-gpu${GPU}.xml" \
+            --junitxml="$RESULT_DIR/junit-${LABEL}.xml" \
             "${EXTRA_ARGS[@]}" \
-            > "$RESULT_DIR/console-gpu${GPU}.log" 2>&1
+            > "$RESULT_DIR/console-${LABEL}.log" 2>&1
     ) &
     PIDS+=($!)
-done
+    WORKER_LABELS+=("$LABEL")
+
+done < <(python -c "
+import json, sys
+schedule = json.load(open('$SCHEDULE_JSON'))
+for gpu_id in sorted(schedule, key=int):
+    for w_idx, tests in enumerate(schedule[gpu_id]):
+        print(f'{gpu_id} {w_idx} {\" \".join(tests)}')
+")
+
+TOTAL_WORKERS=${#PIDS[@]}
 
 echo ""
-echo "Workers launched: ${PIDS[*]}"
-echo "Logs: $RESULT_DIR/console-gpu*.log"
+echo "Workers launched: $TOTAL_WORKERS (PIDs: ${PIDS[*]})"
+echo "Logs: $RESULT_DIR/console-gpu*-w*.log"
 echo "  (live output suppressed to avoid interleaving — tail -f a log to watch)"
 echo "Waiting for all workers..."
 echo ""
@@ -135,26 +167,26 @@ FAILURES=0
 for i in "${!PIDS[@]}"; do
     if ! wait "${PIDS[$i]}"; then
         FAILURES=$((FAILURES + 1))
-        echo "  GPU $i: FAILED (exit code $?)"
+        echo "  ${WORKER_LABELS[$i]}: FAILED (exit code $?)"
     else
-        echo "  GPU $i: OK"
+        echo "  ${WORKER_LABELS[$i]}: OK"
     fi
 done
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
 MINUTES=$(( ELAPSED / 60 ))
-SECONDS=$(( ELAPSED % 60 ))
+SECONDS_REM=$(( ELAPSED % 60 ))
 
 echo ""
-echo "=== All workers finished in ${MINUTES}m ${SECONDS}s ==="
+echo "=== All $TOTAL_WORKERS workers finished in ${MINUTES}m ${SECONDS_REM}s ==="
 
 # --- Merge JUnit XMLs --------------------------------------------------------
 
 python -c "
 from junitparser import JUnitXml
 import glob, sys
-files = sorted(glob.glob('$RESULT_DIR/junit-gpu*.xml'))
+files = sorted(glob.glob('$RESULT_DIR/junit-gpu*-w*.xml'))
 if not files:
     print('No JUnit XML files found to merge.')
     sys.exit(0)
@@ -166,8 +198,6 @@ for f in files:
         print(f'Warning: could not parse {f}: {e}')
 merged.write('$RESULT_DIR/junit.xml')
 t = sum(1 for _ in merged)
-f = sum(1 for tc in merged if any(True for _ in tc.iterchildren()) and not tc.is_skipped)
-s = sum(1 for tc in merged if tc.is_skipped)
 print(f'Merged {len(files)} files -> $RESULT_DIR/junit.xml')
 print(f'Total: {t} tests')
 " 2>/dev/null || echo "(install junitparser to auto-merge: pip install junitparser)"
@@ -176,22 +206,22 @@ print(f'Total: {t} tests')
 
 echo ""
 echo "Output files:"
-echo "  Console logs:  $RESULT_DIR/console-gpu*.log"
-echo "  JUnit XML:     $RESULT_DIR/junit-gpu*.xml (merged: $RESULT_DIR/junit.xml)"
+echo "  Schedule:      $RESULT_DIR/schedule.json"
+echo "  Console logs:  $RESULT_DIR/console-gpu*-w*.log"
+echo "  JUnit XML:     $RESULT_DIR/junit-gpu*-w*.xml (merged: $RESULT_DIR/junit.xml)"
 echo "  Artifacts:     $RESULT_DIR/artifacts/"
 echo ""
 
-# Per-test results from each worker (PASSED / FAILED / SKIPPED / ERROR)
+# Per-test results from each worker
 echo "--- Per-test results ---"
-for GPU in $(seq 0 $((NUM_GPUS - 1))); do
-    LOG="$RESULT_DIR/console-gpu${GPU}.log"
+for LABEL in "${WORKER_LABELS[@]}"; do
+    LOG="$RESULT_DIR/console-${LABEL}.log"
     [ -f "$LOG" ] || continue
     echo ""
-    echo "  [GPU $GPU]"
+    echo "  [$LABEL]"
     grep -E "PASSED|FAILED|SKIPPED|ERROR" "$LOG" \
         | grep -E "^tests/" \
         | sed 's/^/    /' || echo "    (no test results found)"
-    # Pytest summary line (e.g., "=== 5 passed, 1 failed in 120s ===")
     SUMMARY=$(grep -E "^=" "$LOG" | tail -1)
     [ -n "$SUMMARY" ] && echo "    $SUMMARY"
 done
