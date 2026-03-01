@@ -7,12 +7,73 @@ like runtime_strategy and embed_input.
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
 import pytest
 
 from trtf_build.families import find_plugin, _ALL_PLUGINS
+
+
+def _discover_plugin_names_from_filesystem() -> set[str]:
+    """Scan family plugin .py files with AST to extract plugin name attrs.
+
+    This works even when TRT/torch are not installed, because it only parses
+    the Python source — it never imports the modules.  The convention is:
+
+        class FooPlugin:
+            name = "foo"
+        ...
+        plugin = FooPlugin()
+
+    We find every class that has a ``name = "<literal>"`` assignment in its
+    body and whose class name is referenced in a module-level
+    ``plugin = ClassName()`` assignment.
+    """
+    families_dir = Path(__file__).resolve().parent.parent.parent / (
+        "trtf_build" / Path("trtf_build") / "families"
+    )
+    names: set[str] = set()
+    for py_file in sorted(families_dir.glob("*.py")):
+        if py_file.name.startswith("_") or py_file.stem == "base":
+            continue
+        try:
+            tree = ast.parse(py_file.read_text(), filename=str(py_file))
+        except SyntaxError:
+            continue
+
+        # 1) Find the class name referenced in  ``plugin = ClassName(...)``
+        plugin_class_name: str | None = None
+        for node in ast.iter_child_nodes(tree):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "plugin"
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+            ):
+                plugin_class_name = node.value.func.id
+                break
+        if plugin_class_name is None:
+            continue
+
+        # 2) Find that class and extract its ``name`` string attribute.
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.ClassDef) and node.name == plugin_class_name:
+                for item in node.body:
+                    if (
+                        isinstance(item, ast.Assign)
+                        and len(item.targets) == 1
+                        and isinstance(item.targets[0], ast.Name)
+                        and item.targets[0].id == "name"
+                        and isinstance(item.value, ast.Constant)
+                        and isinstance(item.value.value, str)
+                    ):
+                        names.add(item.value.value)
+                break
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -115,31 +176,15 @@ class TestPluginDiscovery:
             f"Add entries to _POSITIVE_MATCH_CASES.")
 
     def test_all_plugins_have_e2e_manifest(self):
-        """Validate that every discovered family plugin has at least one E2E test manifest.
+        """Validate that every family plugin has at least one E2E test manifest.
 
-        Intention:
-            When a developer adds a new family plugin, they must also add a JSON manifest
-            in tests/e2e/models/ so the E2E test suite covers that model. Without this
-            enforcement, plugins can be added and never tested E2E, leading to silent
-            regressions.
-
-            Example bug this catches: A developer adds trtf_build/families/my_model.py with
-            a plugin that passes unit tests, but forgets to add tests/e2e/models/my-model.json.
-            The plugin works in development but breaks in production because no E2E test
-            ever exercises the full build->infer->compare pipeline.
-
-        Setup:
-            1. Discover all family plugins via _ALL_PLUGINS (auto-discovered from
-               trtf_build/trtf_build/families/*.py modules with a module-level `plugin`).
-            2. Load all JSON manifests from tests/e2e/models/ and extract each "family" field.
-            3. Compute the set difference: plugins without any manifest coverage.
-            4. Exclude exempt plugins (WIP/incomplete) from the check.
-            5. Assert the uncovered set is empty.
+        Uses AST-based filesystem scanning so this test works even without
+        TRT/torch installed (pure Python, no GPU). When a developer adds a
+        new family plugin, they must also add a JSON manifest in
+        tests/e2e/models/ so the E2E test suite covers that model.
         """
         _EXEMPT_PLUGINS = {
-            "deepseek_ocr", "qwen3_omni", "deeponet", "yolox", "fno",
-            "nemotron_h", "phi4_multimodal", "eagle_vlm", "personaplex",
-            "deepseek_v2",
+            "qwen3_omni",  # omni_multimodal strategy not yet wired in E2E harness
         }
 
         models_dir = Path(__file__).resolve().parent.parent / "e2e" / "models"
@@ -151,7 +196,8 @@ class TestPluginDiscovery:
             if family:
                 families_in_manifests.add(family)
 
-        plugin_names = {p.name for p in _ALL_PLUGINS}
+        plugin_names = _discover_plugin_names_from_filesystem()
+        assert plugin_names, "No plugin names discovered — AST scan may be broken"
         uncovered = plugin_names - families_in_manifests - _EXEMPT_PLUGINS
         assert not uncovered, (
             f"Plugins without E2E manifest coverage: {uncovered}. "
@@ -161,24 +207,12 @@ class TestPluginDiscovery:
     def test_all_manifests_have_valid_family(self):
         """Validate that every E2E manifest references a family that exists as a plugin.
 
-        Intention:
-            When a developer adds a new JSON manifest in tests/e2e/models/, the "family"
-            field must correspond to a real, discovered family plugin. A typo or stale
-            reference would cause the E2E test to silently fail or error at bundle-build
-            time rather than at test collection.
-
-            Example bug this catches: A developer renames trtf_build/families/gpt2.py to
-            gpt2_v2.py (changing the plugin name) but forgets to update the manifest's
-            "family" field from "gpt2" to "gpt2_v2". The E2E test would fail at runtime
-            with a confusing "no plugin found" error instead of a clear test-time assertion.
-
-        Setup:
-            1. Discover all family plugin names via _ALL_PLUGINS.
-            2. Load all JSON manifests from tests/e2e/models/ and extract each "family" field.
-            3. For each manifest with a non-empty "family", verify it matches a plugin name.
-            4. Assert that no manifest references an unknown family.
+        Uses AST-based filesystem scanning so this test works without
+        TRT/torch installed. A typo or stale reference in a manifest's
+        "family" field is caught here rather than at E2E runtime.
         """
-        plugin_names = {p.name for p in _ALL_PLUGINS}
+        plugin_names = _discover_plugin_names_from_filesystem()
+        assert plugin_names, "No plugin names discovered — AST scan may be broken"
 
         models_dir = Path(__file__).resolve().parent.parent / "e2e" / "models"
         invalid: list[str] = []

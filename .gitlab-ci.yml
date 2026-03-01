@@ -46,6 +46,13 @@ build-all:
 
 # ── Tier 1: Unit Tests ────────────────────────────────────────────────────────
 
+check-family-coverage:
+  stage: tier1-unit
+  needs: [build-all]
+  script:
+    - python scripts/check_family_coverage.py
+  timeout: 15m
+
 test-python-builder:
   stage: tier1-unit
   needs: [build-all]
