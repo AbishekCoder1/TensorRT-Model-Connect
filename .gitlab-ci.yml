@@ -20,6 +20,7 @@ workflow:
     on_new_commit: conservative
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "web"
 
 default:
   image: trtf-dev-gb300:latest
