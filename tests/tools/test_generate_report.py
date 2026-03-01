@@ -438,6 +438,40 @@ class TestRenderDiffusionModel:
         html = mod.render_diffusion_model(r)
         assert isinstance(html, str)
 
+    def test_trt_frames_dir_artifact_is_expanded(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "model-diff"
+        frames_dir = model_dir / "frames"
+        frames_dir.mkdir(parents=True)
+        for i in range(3):
+            _make_tiny_png(frames_dir / f"frame_{i:03d}.png")
+        r = _make_result(
+            name="model-diff",
+            task_strategy="diffusion_media_generation",
+            artifacts={"trt_frames": "frames"},
+        )
+        r["_artifact_dir"] = str(model_dir)
+        html = mod.render_diffusion_model(r)
+        assert "data:image/png;base64," in html
+        assert "Frame too large" not in html
+
+    def test_ref_frames_dir_artifact_is_expanded(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "model-diff"
+        ref_frames_dir = model_dir / "ref_frames"
+        ref_frames_dir.mkdir(parents=True)
+        for i in range(2):
+            _make_tiny_png(ref_frames_dir / f"frame_{i:03d}.png")
+        r = _make_result(
+            name="model-diff",
+            task_strategy="diffusion_media_generation",
+            artifacts={"ref_frames": "ref_frames"},
+        )
+        r["_artifact_dir"] = str(model_dir)
+        html = mod.render_diffusion_model(r)
+        assert "Reference Frames" in html
+        assert "data:image/png;base64," in html
+
 
 class TestRenderAudioModel:
     """Tests for render_audio_model()."""

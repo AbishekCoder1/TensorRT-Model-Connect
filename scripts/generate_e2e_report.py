@@ -149,6 +149,57 @@ def _select_frames(frame_paths: List[Path], max_frames: int) -> List[Path]:
     return [frame_paths[i] for i in indices]
 
 
+def _list_frames_in_dir(dir_path: Path) -> List[Path]:
+    """Return sorted frame/image files from *dir_path*."""
+    frame_paths = sorted(dir_path.glob("frame_*.png"))
+    if frame_paths:
+        return frame_paths
+    # Backward compatibility for runs that save a single non-frame_*.png image.
+    ext_globs = ("*.png", "*.jpg", "*.jpeg")
+    files: List[Path] = []
+    for pattern in ext_globs:
+        files.extend(sorted(dir_path.glob(pattern)))
+    return files
+
+
+def _resolve_frame_paths(
+    frame_refs: Any,
+    art_dir: Path,
+    fallback_dir_name: str,
+) -> List[Path]:
+    """Resolve frame refs (file(s) or directory path(s)) into concrete files."""
+    refs: List[str] = []
+    if isinstance(frame_refs, str):
+        refs = [frame_refs]
+    elif isinstance(frame_refs, list):
+        refs = [str(ref) for ref in frame_refs if ref]
+
+    frame_paths: List[Path] = []
+    for ref in refs:
+        p = Path(ref)
+        if not p.is_absolute():
+            p = art_dir / ref
+        if p.is_dir():
+            frame_paths.extend(_list_frames_in_dir(p))
+        elif p.is_file():
+            frame_paths.append(p)
+
+    if not frame_paths:
+        fallback_dir = art_dir / fallback_dir_name
+        if fallback_dir.is_dir():
+            frame_paths = _list_frames_in_dir(fallback_dir)
+
+    # De-duplicate while preserving order.
+    deduped: List[Path] = []
+    seen: set[str] = set()
+    for fp in frame_paths:
+        key = str(fp)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(fp)
+    return deduped
+
+
 # ---------------------------------------------------------------------------
 # Metrics table
 # ---------------------------------------------------------------------------
@@ -354,14 +405,11 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
     parts = []
 
     # TRT frames gallery
-    trt_frame_refs = artifacts.get("trt_frames", [])
-    if isinstance(trt_frame_refs, str):
-        trt_frame_refs = [trt_frame_refs]
-    trt_frame_paths = [art_dir / f for f in trt_frame_refs if f]
-    # Also look for frames/ directory
-    frames_dir = art_dir / "frames"
-    if not trt_frame_paths and frames_dir.is_dir():
-        trt_frame_paths = sorted(frames_dir.glob("frame_*.png"))
+    trt_frame_paths = _resolve_frame_paths(
+        artifacts.get("trt_frames", []),
+        art_dir=art_dir,
+        fallback_dir_name="frames",
+    )
 
     if trt_frame_paths:
         selected = _select_frames(trt_frame_paths, _MAX_DIFFUSION_FRAMES)
@@ -376,13 +424,11 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
         parts.append("</div>")
 
     # Reference frames (side-by-side if available)
-    ref_frame_refs = artifacts.get("ref_frames", [])
-    if isinstance(ref_frame_refs, str):
-        ref_frame_refs = [ref_frame_refs]
-    ref_frame_paths = [art_dir / f for f in ref_frame_refs if f]
-    ref_frames_dir = art_dir / "ref_frames"
-    if not ref_frame_paths and ref_frames_dir.is_dir():
-        ref_frame_paths = sorted(ref_frames_dir.glob("frame_*.png"))
+    ref_frame_paths = _resolve_frame_paths(
+        artifacts.get("ref_frames", []),
+        art_dir=art_dir,
+        fallback_dir_name="ref_frames",
+    )
 
     if ref_frame_paths:
         selected_ref = _select_frames(ref_frame_paths, _MAX_DIFFUSION_FRAMES)

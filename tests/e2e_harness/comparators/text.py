@@ -43,6 +43,11 @@ _COMPOSITE_RULE = (
     "AND ned <= hard_fail"
 )
 
+# If the model echoes the prompt, allow a modest amount of non-text preamble
+# (warnings/logs) before the prompt appears in stdout.
+_PROMPT_SEARCH_MAX_PREFIX_CHARS = 2048
+_MIN_PREFIX_FALLBACK_CHARS = 24
+
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     """Cosine similarity between two 1-D vectors. Returns 0.0 on degenerate input."""
@@ -85,6 +90,32 @@ def _normalized_edit_distance(s1: str, s2: str) -> float:
     if max_len == 0:
         return 0.0
     return _levenshtein_distance(s1, s2) / max_len
+
+
+def _strip_prompt_echo(text: str, prompt: str) -> str:
+    """Drop echoed prompt from generated text, tolerating warning preambles.
+
+    Some C++ runs can include tokenizer warnings/log lines before the actual
+    generated text. If the prompt appears near the beginning of the output,
+    treat everything before/including it as preamble and compare only the
+    continuation text.
+    """
+    if not text or not prompt:
+        return text
+
+    idx = text.find(prompt)
+    if 0 <= idx <= _PROMPT_SEARCH_MAX_PREFIX_CHARS:
+        return text[idx + len(prompt):].lstrip()
+
+    return text
+
+
+def _normalize_for_ned(text: str) -> str:
+    """Lightweight text normalization before edit-distance comparison."""
+    if not text:
+        return ""
+    # Collapse whitespace and case-fold to reduce cosmetic diffs.
+    return " ".join(text.split()).strip().lower()
 
 
 def _load_logits(stage_output: StageOutput) -> np.ndarray | None:
@@ -285,12 +316,29 @@ class TextComparator:
         ref_text = (ref.text or "").strip()
 
         prompt = (trt.data or {}).get("prompt", "")
-        trt_text_for_ned = trt_text
-        if prompt and trt_text.startswith(prompt):
-            trt_text_for_ned = trt_text[len(prompt):].lstrip()
+        trt_text_for_ned = _normalize_for_ned(_strip_prompt_echo(trt_text, prompt))
+        ref_text_for_ned = _normalize_for_ned(_strip_prompt_echo(ref_text, prompt))
 
-        if trt_text_for_ned or ref_text:
-            ned = _normalized_edit_distance(trt_text_for_ned, ref_text)
+        if trt_text_for_ned or ref_text_for_ned:
+            ned = _normalized_edit_distance(trt_text_for_ned, ref_text_for_ned)
+            # Some TRT CLI paths stop decoding early on EOS while the debug/HF
+            # text path keeps fixed-length continuation tokens. If token/logit
+            # metrics already agree, compare on the common prefix to avoid
+            # false NED hard-fails caused purely by suffix length mismatch.
+            ta_thresh = thresh.get("token_agreement_rate", 0.8)
+            if token_agreement_rate >= ta_thresh:
+                if len(trt_text_for_ned) <= len(ref_text_for_ned):
+                    short, long = trt_text_for_ned, ref_text_for_ned
+                else:
+                    short, long = ref_text_for_ned, trt_text_for_ned
+                if len(short) >= _MIN_PREFIX_FALLBACK_CHARS and long.startswith(short):
+                    prefix_ned = _normalized_edit_distance(short, long[:len(short)])
+                    if prefix_ned < ned:
+                        notes.append(
+                            "NED prefix fallback applied (matching continuation prefix; "
+                            "suffix length mismatch likely due EOS stopping behavior)"
+                        )
+                        ned = prefix_ned
         else:
             ned = 0.0
         ned_thresh = thresh.get("normalized_text_edit_distance", 0.2)

@@ -88,15 +88,17 @@ class HfTransformersReference:
                 hf_id, trust_remote_code=trust_remote_code)
             input_ids = tokenizer.encode(prompt)
 
+            load_kwargs = {{
+                "trust_remote_code": trust_remote_code,
+                "dtype": torch.float32,
+            }}
             try:
-                model = AutoModelForCausalLM.from_pretrained(
-                    hf_id, trust_remote_code=False, torch_dtype=torch.float32)
-            except (ValueError, KeyError, ImportError) as e:
-                if trust_remote_code:
-                    model = AutoModelForCausalLM.from_pretrained(
-                        hf_id, trust_remote_code=True, torch_dtype=torch.float32)
-                else:
-                    raise
+                model = AutoModelForCausalLM.from_pretrained(hf_id, **load_kwargs)
+            except TypeError:
+                # Backward compatibility for older transformers versions.
+                load_kwargs.pop("dtype", None)
+                load_kwargs["torch_dtype"] = torch.float32
+                model = AutoModelForCausalLM.from_pretrained(hf_id, **load_kwargs)
             model.eval()
 
             ids_tensor = torch.tensor([input_ids], dtype=torch.long)
@@ -111,16 +113,17 @@ class HfTransformersReference:
 
                 # Autoregressive generation
                 gen_ids = list(input_ids)
+                generated_token_ids = []
                 for _ in range(max_new_tokens):
                     next_token = int(np.argmax(all_logits[-1]))
+                    generated_token_ids.append(next_token)
                     gen_ids.append(next_token)
                     ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
                     outputs = model(ids_tensor)
                     all_logits.append(outputs.logits[0, -1].numpy())
 
-            # Decode generated text (tokens after prefill)
-            gen_token_ids = [int(np.argmax(l)) for l in all_logits[len(input_ids) - 1:]]
-            text = tokenizer.decode(gen_token_ids, skip_special_tokens=True)
+            # Decode only tokens actually generated in the autoregressive loop.
+            text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
             with open(text_path, "w") as f:
                 f.write(text)
 
@@ -717,15 +720,34 @@ class HfTransformersReference:
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
 
+        seed = int(case.determinism.get("seed", 42))
+        voice_preset = case.inputs.get("voice_preset", "")
+
         script = textwrap.dedent(f"""\
-            import json, torch, numpy as np, struct
-            from transformers import AutoProcessor, BarkModel
+            import json, random, struct
+            import numpy as np
+            import torch
+            from transformers import AutoProcessor, BarkModel, set_seed
 
             hf_id = {hf_id!r}
             prompt = {prompt!r}
             trust_remote_code = {trust_remote_code!r}
+            seed = {seed!r}
+            voice_preset = {voice_preset!r}
             output_path = {output_path!r}
             wav_path = {wav_path!r}
+
+            # Make Bark reference generation deterministic across runs.
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+            set_seed(seed)
+            try:
+                torch.use_deterministic_algorithms(True, warn_only=True)
+            except Exception:
+                pass
 
             processor = AutoProcessor.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code)
@@ -734,7 +756,11 @@ class HfTransformersReference:
                 torch_dtype=torch.float32)
             model.eval()
 
-            inputs = processor(prompt, return_tensors="pt")
+            if voice_preset:
+                inputs = processor(
+                    prompt, voice_preset=voice_preset, return_tensors="pt")
+            else:
+                inputs = processor(prompt, return_tensors="pt")
             with torch.no_grad():
                 audio_values = model.generate(**inputs)
 
@@ -758,10 +784,11 @@ class HfTransformersReference:
             rms = float(np.sqrt(np.mean(audio_f32 ** 2)))
             duration = len(audio_f32) / sample_rate
             result = {{"rms": rms, "duration_s": duration,
-                      "sample_rate": sample_rate, "num_samples": len(audio_f32)}}
+                      "sample_rate": sample_rate, "num_samples": len(audio_f32),
+                      "seed": seed, "voice_preset": voice_preset}}
             with open(output_path, "w") as f:
                 json.dump(result, f)
-            print(f"OK rms={{rms:.4f}} duration={{duration:.2f}}s")
+            print(f"OK seed={{seed}} rms={{rms:.4f}} duration={{duration:.2f}}s")
         """)
 
         python = ctx.hf_python or sys.executable

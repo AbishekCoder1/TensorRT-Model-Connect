@@ -5,6 +5,7 @@
 #include "runtime/trt/trt_decode_runtime.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -939,6 +940,27 @@ AudioResult BarkBackend::generate_audio(
         if (env != nullptr && std::string(env) == "1")
         {
             mConfig.greedy = true;
+        }
+    }
+    // Optional deterministic seed for Bark sampler.
+    {
+        const char* env = std::getenv("TRTF_BARK_SEED");
+        if (env != nullptr && *env != '\0')
+        {
+            errno = 0;
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(env, &end, 10);
+            if (errno == 0 && end != env && *end == '\0')
+            {
+                const auto seed = static_cast<std::mt19937::result_type>(parsed);
+                mRng.seed(seed);
+                std::cerr << "[trtf] Bark: sampler seed=" << seed << std::endl;
+            }
+            else
+            {
+                std::cerr << "[trtf] Bark: ignoring invalid TRTF_BARK_SEED='"
+                          << env << "'" << std::endl;
+            }
         }
     }
 

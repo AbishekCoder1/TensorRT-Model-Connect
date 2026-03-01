@@ -253,6 +253,11 @@ class TextToAudioRunner:
             # Merge per-model env vars from manifest (e.g. TRTF_MAGPIE_GREEDY)
             manifest_env = case.inputs.get("env") or case.metadata.get("env") or {}
             env.update(manifest_env)
+            # Keep Bark TRT sampling reproducible in CI unless explicitly overridden.
+            if case.family == "bark" and "TRTF_BARK_SEED" not in env:
+                seed = case.determinism.get("seed")
+                if seed is not None:
+                    env["TRTF_BARK_SEED"] = str(int(seed))
 
             t0 = time.monotonic()
             result = subprocess.run(
@@ -267,6 +272,8 @@ class TextToAudioRunner:
                 "stdout": result.stdout,
                 "stderr": stderr_truncated,
             }
+            if case.family == "bark" and "TRTF_BARK_SEED" in env:
+                data["trt_seed"] = env["TRTF_BARK_SEED"]
             if stderr_log:
                 data["stderr_log"] = stderr_log
 
