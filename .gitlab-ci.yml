@@ -46,64 +46,41 @@ build-all:
     expire_in: 1 day
   timeout: 15m
 
-# ── Tier 1: Unit Tests (all 4 suites in parallel) ────────────────────────────
+# ── Tier 1: Unit Tests (4 parallel jobs) ─────────────────────────────────────
 
-test-tier1-unit:
+check-family-coverage:
   stage: tier1-unit
   needs: [build-all]
   script:
-    - mkdir -p /tmp/tier1-logs
-    # Launch all 4 test suites in parallel
     - python scripts/check_family_coverage.py
-        > /tmp/tier1-logs/family-coverage.log 2>&1 &
+  timeout: 15m
+
+test-python-builder:
+  stage: tier1-unit
+  needs: [build-all]
+  script:
     - python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py -n auto
-        > /tmp/tier1-logs/python-builder.log 2>&1 &
+  timeout: 20m
+
+test-tools:
+  stage: tier1-unit
+  needs: [build-all]
+  script:
     - python -m pytest tests/tools/ -v -n auto
-        > /tmp/tier1-logs/tools.log 2>&1 &
+  timeout: 20m
+
+test-cpp-unit:
+  stage: tier1-unit
+  needs: [build-all]
+  script:
     - ctest --test-dir build --output-on-failure
-        > /tmp/tier1-logs/cpp-unit.log 2>&1 &
-    # Wait for all and collect exit codes
-    - |
-      FAIL=0
-      for job in $(jobs -p); do
-        if ! wait "$job"; then
-          FAIL=$((FAIL + 1))
-        fi
-      done
-      echo "=== Tier 1 Results ==="
-      for f in /tmp/tier1-logs/*.log; do
-        NAME=$(basename "$f" .log)
-        if tail -5 "$f" | grep -qiE "FAILED|ERRORS|error|failure"; then
-          echo "  FAIL: $NAME"
-        else
-          echo "  PASS: $NAME"
-        fi
-      done
-      echo ""
-      echo "--- family-coverage ---"
-      cat /tmp/tier1-logs/family-coverage.log
-      echo ""
-      echo "--- python-builder (last 30 lines) ---"
-      tail -30 /tmp/tier1-logs/python-builder.log
-      echo ""
-      echo "--- tools (last 30 lines) ---"
-      tail -30 /tmp/tier1-logs/tools.log
-      echo ""
-      echo "--- cpp-unit (last 30 lines) ---"
-      tail -30 /tmp/tier1-logs/cpp-unit.log
-      exit "$FAIL"
-  artifacts:
-    paths:
-      - /tmp/tier1-logs/
-    when: always
-    expire_in: 3 days
   timeout: 20m
 
 # ── Tier 2: Graph-Op GPU Tests (~3 min) ──────────────────────────────────────
 
 test-graph-ops:
   stage: tier2-graph-ops
-  needs: [test-tier1-unit]
+  needs: [test-python-builder, test-cpp-unit]
   script:
     - nvidia-smi
     - python -m pytest tests/builder/test_graph_ops.py
