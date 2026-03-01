@@ -16,6 +16,8 @@ variables:
   GIT_STRATEGY: fetch
 
 workflow:
+  auto_cancel:
+    on_new_commit: conservative
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == "master"
@@ -23,6 +25,7 @@ workflow:
 default:
   image: trtf-dev-gb300:latest
   tags: [gpu-gb300]
+  interruptible: true
   before_script:
     - pip install --no-deps -e trtf_build/
     - chmod +x ./build/trtf 2>/dev/null || true
