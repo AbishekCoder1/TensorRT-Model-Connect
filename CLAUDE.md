@@ -37,17 +37,11 @@ ALWAYS DO EVERYTHING IN CONTAINER. Run command with `docker exec trtf-dev-gb300-
 
 ### C++ runtime
 
-Native host build (works without TRT/CUDA; TRT backend auto-disables if deps not found):
-```bash
-cmake -S . -B build -G Ninja
-cmake --build build -j
-```
-
-With explicit TRT/CUDA paths:
+Use the container-baked TRT/CUDA paths:
 ```bash
 cmake -S . -B build -G Ninja \
-  -DTRTF_TRT_INCLUDE_DIR=<path>/include/zapped_headers \
-  -DTRTF_TRT_LIBRARY=<path>/lib/libnvinfer.so \
+  -DTRTF_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+  -DTRTF_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
   -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
   -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
 cmake --build build -j
@@ -91,28 +85,28 @@ Unified E2E tests (requires GPU + engine bundles):
 ```bash
 # All models (50 models — auto-builds missing bundles):
 pytest tests/test_e2e.py -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
 
 # Single model:
 pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
 
 # Force rebuild all bundles from HF:
 pytest tests/test_e2e.py -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python --rebuild-engines
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python --rebuild-engines
 
 # Filter by task strategy:
 pytest tests/test_e2e.py -v --e2e-task-strategy text_generation_causal \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
 
 # With artifact output (WAV, PNG, frames, logits):
 pytest tests/test_e2e.py -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
   --e2e-artifacts-dir /tmp/e2e_artifacts
 ```
 
@@ -350,10 +344,10 @@ Fast, deterministic tests for logic correctness. Always run first.
 
 ```bash
 # Python builder unit tests (config, checkpoint_mapper, bundle_writer, family plugins, etc.)
-.venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
+/opt/venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
 
 # Tools self-tests (diff framework, perf_compare, audio/segmentation/diffusion helpers)
-.venv/bin/python -m pytest tests/tools/ -v
+/opt/venv/bin/python -m pytest tests/tools/ -v
 
 # C++ unit tests (bundle format, tokenizers, CUDA wrappers, KV cache, image preprocessor)
 ctest --test-dir build --output-on-failure
@@ -365,7 +359,7 @@ Validates TRT graph operations (RMSNorm, RoPE, attention, conv, norm, etc.) and
 composable graph blocks (SwiGLU MLP, GELU MLP, attention block) on real GPU.
 
 ```bash
-.venv/bin/python -m pytest tests/builder/test_graph_ops.py tests/builder/test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -m trt
+/opt/venv/bin/python -m pytest tests/builder/test_graph_ops.py tests/builder/test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -m trt
 ```
 
 ### Tier 3: E2E single-model smoke test (~5 min, needs GPU)
@@ -374,9 +368,9 @@ Quick sanity with one small model. Always use `--rebuild-engines` to build
 the bundle from scratch — avoids testing against stale cached bundles.
 
 ```bash
-.venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+/opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
   --rebuild-engines
 ```
 
@@ -387,16 +381,16 @@ infer/compare. This is the gold-standard regression gate.
 
 ```bash
 # All models:
-.venv/bin/python -m pytest tests/test_e2e.py -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+/opt/venv/bin/python -m pytest tests/test_e2e.py -v \
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
   --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
 
 # By modality (faster targeted runs):
-.venv/bin/python -m pytest tests/test_e2e.py -v \
+/opt/venv/bin/python -m pytest tests/test_e2e.py -v \
   --e2e-task-strategy text_generation_causal \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
 
 # Available task strategies for filtering:
 #   text_generation_causal    (26 models — decoders, MoE, SSM, RWKV)
@@ -418,10 +412,9 @@ Spot-check inference speed for key models. Not in CI; run manually for
 perf-sensitive changes.
 
 ```bash
-source .venv/bin/activate
 python3 tools/perf_compare.py \
   --model Qwen/Qwen3-0.6B \
-  --bundle /mnt/storage/trt-transformers/engines/qwen3-0.6b.trtfb \
+  --bundle /workspace/users/yifeif/trt-transformers/engines/qwen3-0.6b.trtfb \
   --prompt "The capital of France is" --max-new-tokens 20 --json results.json
 ```
 
@@ -538,7 +531,7 @@ tools/                               # Diff test framework (TRT vs HF comparison
   test_runner_parity.py              # Python vs C++ runtime parity
   test_graph_ops.py                  # TRT graph operation testing
 scripts/                             # Infrastructure & utility scripts
-  setup_container.sh                 # One-shot container setup (venv, deps, build, test)
+  setup_container.sh                 # One-shot container repo setup (editable install + build + tests)
   new_family.py                      # Scaffold a new family plugin from HF repo
   validate_family.sh                 # One-command validation gate (build + diff + parity)
 tests/
@@ -634,8 +627,8 @@ $EDITOR trtf_build/trtf_build/families/phi.py
    stages, and thresholds. No code changes needed. Run:
    ```bash
    pytest tests/test_e2e.py::test_e2e[my-model] -v \
-     --engine-dir /mnt/storage/trt-transformers/engines \
-     --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+     --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+     --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
      --rebuild-engines
    ```
 
@@ -661,8 +654,8 @@ EOF
 
 # 2. Run E2E (auto-builds bundle, runs TRT, compares against HF)
 pytest tests/test_e2e.py::test_e2e[my-new-model] -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
   --rebuild-engines
 ```
 
@@ -729,37 +722,35 @@ python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
 
 # Full VL generation + C++ binary parity
 python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
-  --binary ./build/trtf --hf-python .venv/bin/python
+  --binary ./build/trtf --hf-python /opt/venv/bin/python
 ```
 
 **Runner parity guarantee**: If you change the C++ mask/cache/position logic (`trt_decode_runtime.cpp`, `device_kv_cache.cpp`), you MUST also update `debug_runner.py` and verify with:
 ```bash
 python3 tools/test_runner_parity.py \
   --bundle /tmp/qwen3.trtfb --binary ./build/trtf \
-  --hf-python .venv/bin/python --max-new-tokens 20
+  --hf-python /opt/venv/bin/python --max-new-tokens 20
 ```
 
 ## Container workflow (TRT GPU)
 
-Prerequisites: Docker + NVIDIA Container Toolkit. The container is fully self-contained — no host TRT artifacts needed. TRT headers come from apt (`libnvinfer-headers-dev` baked into the Dockerfile), TRT libs come from pip (`tensorrt_cu12`).
+Prerequisites: Docker + NVIDIA Container Toolkit. The container is fully self-contained. TRT headers come from apt (`libnvinfer-headers-dev`), TRT libs come from pip (`tensorrt_cu13`), and `LD_LIBRARY_PATH` is preconfigured in the image.
 
 ### 1) Build and launch the dev container
 ```bash
-./scripts/docker_build.sh
-./scripts/docker_run.sh
+./scripts/docker_build_gb300.sh
+./scripts/docker_run_gb300.sh
 ```
 
-### 2) One-shot setup (inside container)
+### 2) One-shot repo setup (inside container)
 ```bash
 ./scripts/setup_container.sh
-source .venv/bin/activate
 ```
 
-This creates `.venv`, installs TRT + Python deps, builds the C++ runtime into `build/`, and runs tests.
+This installs local `trtf_build` in editable mode, configures/builds C++ runtime into `build/`, and runs C++ unit tests.
 
 ### 3) Build bundle + validate Qwen3 TRT E2E (inside container)
 ```bash
-source .venv/bin/activate
 
 # Build a bundle (auto-downloads from HuggingFace)
 trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
@@ -768,72 +759,63 @@ trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
 trtf-build inspect /tmp/qwen3.trtfb
 
 # Run from bundle using the C++ runtime
-TRT_LIB_DIR=$(python3 -c "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])")
-export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 ./build/trtf run /tmp/qwen3.trtfb --prompt "Hello" --max-new-tokens 5 \
-  --hf-python $PWD/.venv/bin/python
+  --hf-python /opt/venv/bin/python
 ```
 
 ### 4) Build + run a vision-language model (inside container)
 ```bash
-source .venv/bin/activate
 
 # Build a VL bundle (text decoder + vision encoder)
 trtf-build build Qwen/Qwen2.5-VL-3B-Instruct -o /tmp/qwen25vl.trtfb --max-cache-length 384
 
 # Run with an image
-TRT_LIB_DIR=$(python3 -c "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])")
-export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 ./build/trtf run /tmp/qwen25vl.trtfb --prompt "Describe this image." \
   --image /path/to/image.jpg --max-new-tokens 30 \
-  --hf-python $PWD/.venv/bin/python
+  --hf-python /opt/venv/bin/python
 ```
 
 ### 5) Build + run Qwen3-VL with DeepStack (inside container)
 ```bash
-source .venv/bin/activate
 
 # Build a Qwen3-VL bundle (text decoder with DeepStack + vision encoder with multi-level outputs)
 trtf-build build Qwen/Qwen3-VL-2B-Instruct -o /tmp/qwen3vl.trtfb --max-cache-length 256
 
 # Text-only inference (DeepStack inactive during text-only)
-TRT_LIB_DIR=$(python3 -c "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])")
-export LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 ./build/trtf run /tmp/qwen3vl.trtfb --prompt "The capital of France is" \
-  --max-new-tokens 20 --hf-python $PWD/.venv/bin/python
+  --max-new-tokens 20 --hf-python /opt/venv/bin/python
 
 # VL inference with image (DeepStack active during image token prefill)
 ./build/trtf run /tmp/qwen3vl.trtfb --prompt "Describe this image." \
   --image /path/to/image.jpg --max-new-tokens 30 \
-  --hf-python $PWD/.venv/bin/python
+  --hf-python /opt/venv/bin/python
 ```
 
 ### 6) Run unified E2E suite (inside container)
 ```bash
-source .venv/bin/activate
 
 # Single model (auto-builds bundle if missing):
 python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
 
 # All 50 models (force rebuild):
 python -m pytest tests/test_e2e.py -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
   --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
 
 # Text-gen models only (~30 min):
 python -m pytest tests/test_e2e.py -v \
   --e2e-task-strategy text_generation_causal \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
 
 # Diffusion models (Wan T2V, FLUX, Z-Image — ~45 min):
 python -m pytest tests/test_e2e.py -v \
   --e2e-task-strategy diffusion_media_generation \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
 ```
 
 Artifacts (WAV audio, PNG frames/images, logits, transcripts) are saved to
@@ -841,7 +823,7 @@ Artifacts (WAV audio, PNG frames/images, logits, transcripts) are saved to
 
 ### 7) MMLU sanity check (inside container)
 ```bash
-$PWD/.venv/bin/python scripts/eval_mmlu.py \
+/opt/venv/bin/python scripts/eval_mmlu.py \
   --backend trtf --model /tmp/qwen3.trtfb \
   --trtf-binary ./build/trtf \
   --subject all --split test \

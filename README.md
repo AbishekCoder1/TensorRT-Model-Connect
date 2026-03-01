@@ -11,24 +11,22 @@ The system is split into two stages:
 Prerequisites: Docker + NVIDIA Container Toolkit.
 
 ```bash
-# 1. Build and launch the dev container
-./scripts/docker_build.sh
-./scripts/docker_run.sh
+# 1. Build and launch the GB300 dev container
+./scripts/docker_build_gb300.sh
+./scripts/docker_run_gb300.sh
 
-# 2. Inside the container: install deps + build C++ runtime
+# 2. Inside the container: install local package + build C++ runtime
 ./scripts/setup_container.sh
-source .venv/bin/activate
 
 # 3. Build a bundle from a HuggingFace model (auto-downloads)
 #    Bundles are stored on persistent storage so they survive container restarts.
-trtf-build build Qwen/Qwen3-0.6B -o /mnt/storage/trt-transformers/engines/qwen3.trtfb
+trtf-build build Qwen/Qwen3-0.6B -o /workspace/users/yifeif/trt-transformers/engines/qwen3.trtfb
 
 # 4. Run inference
-export LD_LIBRARY_PATH="$(python3 -c 'import importlib.util; s=importlib.util.find_spec(\"tensorrt_libs\"); print(s.submodule_search_locations[0])'):/usr/local/cuda/lib64"
-./build/trtf run /mnt/storage/trt-transformers/engines/qwen3.trtfb \
+./build/trtf run /workspace/users/yifeif/trt-transformers/engines/qwen3.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
-  --hf-python .venv/bin/python
+  --hf-python /opt/venv/bin/python
 ```
 
 ## Python API
@@ -52,7 +50,7 @@ Install the package:
 pip install --no-deps -e trtf_build/
 ```
 
-For non-Docker environments, also install the matching TensorRT wheel (`tensorrt_cu12` or `tensorrt`) and ensure TensorRT/CUDA libraries are on `LD_LIBRARY_PATH` before running `./build/trtf`.
+All commands in this repo are expected to run inside the dev container image.
 
 ## CLI
 
@@ -80,10 +78,10 @@ trtf-build version
 ```bash
 # Text generation (and VLM generation with --image when supported)
 ./build/trtf run qwen3.trtfb --prompt "Hello" --max-new-tokens 50 \
-  --hf-python .venv/bin/python
+  --hf-python /opt/venv/bin/python
 
 # Encoder-only hidden states
-./build/trtf encode qwen3.trtfb --prompt "Hello" --hf-python .venv/bin/python
+./build/trtf encode qwen3.trtfb --prompt "Hello" --hf-python /opt/venv/bin/python
 
 # Segmentation / prompted segmentation / detection
 ./build/trtf segment segformer.trtfb --image input.png --output mask.png
@@ -168,7 +166,7 @@ These map to runtime strategies in `src/cabi/trtf_c.cpp`, including:
 - `encoder_only`, `embedding`, `reranking`, `neural_operator`
 - `omni_multimodal`, `diffusion`
 
-Store bundles on persistent storage with `-o /mnt/storage/trt-transformers/engines/model.trtfb`.
+Store bundles on persistent storage with `-o /workspace/users/yifeif/trt-transformers/engines/model.trtfb`.
 
 ## Adding a model family
 
@@ -207,39 +205,39 @@ comprehensive manual (every file, every abstraction layer, every pytest marker).
 # === Tier 1: Unit tests (no GPU, ~10 min) ===
 
 # Python builder (50 modules, ~940 tests — config, weights, plugins, bundles)
-.venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
+/opt/venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
 
 # Tools self-tests (11 modules, ~160 tests — diff framework, comparison utilities)
-.venv/bin/python -m pytest tests/tools/ -v
+/opt/venv/bin/python -m pytest tests/tools/ -v
 
 # C++ runtime (19 executables, 20 tests — bundle format, tokenizers, CUDA, KV cache)
 ctest --test-dir build --output-on-failure
 
 # === Tier 2: Graph-op GPU tests (~2 min, needs TRT) ===
 
-.venv/bin/python -m pytest tests/builder/test_graph_ops.py \
+/opt/venv/bin/python -m pytest tests/builder/test_graph_ops.py \
   tests/builder/test_graph_ops_extended.py \
   tests/builder/test_graph_blocks.py -v -m trt
 
 # === Tier 3: E2E single-model smoke test (~5 min, needs GPU) ===
 
-.venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+/opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
   --rebuild-engines
 
 # === Tier 4: Full E2E suite (50 models, ~2-3 hours, needs GPU) ===
 
-.venv/bin/python -m pytest tests/test_e2e.py -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+/opt/venv/bin/python -m pytest tests/test_e2e.py -v \
+  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
   --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
 
 # === Tier 5: Performance regression (manual, per model) ===
 
 python3 tools/perf_compare.py \
   --model Qwen/Qwen3-0.6B \
-  --bundle /mnt/storage/trt-transformers/engines/qwen3-0.6b.trtfb \
+  --bundle /workspace/users/yifeif/trt-transformers/engines/qwen3-0.6b.trtfb \
   --prompt "The capital of France is" --max-new-tokens 20 --json results.json
 ```
 
@@ -273,7 +271,7 @@ pytest tests/test_e2e.py --e2e-task-strategy vision_language_generation -v ...
 ### Coverage
 
 ```bash
-.venv/bin/python -m pytest tests/builder/ tests/tools/ -v \
+/opt/venv/bin/python -m pytest tests/builder/ tests/tools/ -v \
   --ignore=tests/builder/test_cli.py --cov --cov-report=term-missing
 ```
 

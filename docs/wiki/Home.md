@@ -49,6 +49,35 @@ The system has two phases:
    - Creates tokenizer and task-specific runtime loop(s)
    - Runs GPU-accelerated inference
 
+## Container Setup and Usage
+
+All development and testing workflows are container-only.
+
+```bash
+# Build and start the GB300 dev container
+./scripts/docker_build_gb300.sh
+./scripts/docker_run_gb300.sh
+```
+
+Inside the container:
+
+```bash
+# Install local package in editable mode, configure/build C++, run C++ tests
+./scripts/setup_container.sh
+
+# Build a bundle
+trtf-build build Qwen/Qwen3-0.6B \
+  -o /workspace/users/yifeif/trt-transformers/engines/qwen3.trtfb
+
+# Run inference with TRT C++ runtime
+./build/trtf run /workspace/users/yifeif/trt-transformers/engines/qwen3.trtfb \
+  --prompt "The capital of France is" \
+  --max-new-tokens 20 \
+  --hf-python /opt/venv/bin/python
+```
+
+The container image already includes CUDA/TensorRT/PyTorch/NeMo dependencies and `LD_LIBRARY_PATH` defaults.
+
 ## Minimum Viable Example
 
 ```bash

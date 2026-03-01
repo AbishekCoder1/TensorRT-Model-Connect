@@ -1,7 +1,8 @@
-FROM nvidia/cuda:12.6.3-devel-ubuntu22.04
+FROM nvidia/cuda:13.0.0-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# ── System packages ──────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -10,10 +11,65 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     pkg-config \
     python3 \
+    python3-dev \
     python3-venv \
     python3-pip \
     libnvinfer-headers-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Python venv with all deps ───────────────────────────────────────────────
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# TensorRT (auto-selects cu13 wheels for CUDA 13.x)
+RUN pip install -U pip && \
+    pip install tensorrt_cu13 && \
+    pip install tensorrt --no-deps
+
+# CUDA Python bindings (needed by debug_runner.py / diff tools)
+RUN pip install cuda-python
+
+# Core Python deps
+RUN pip install \
+    "transformers>=4.57.0" \
+    tokenizers \
+    safetensors \
+    sentencepiece \
+    huggingface_hub \
+    ml_dtypes \
+    datasets
+
+# PyTorch ecosystem (cu130 wheels for aarch64)
+RUN pip install torch torchaudio torchvision \
+    --index-url https://download.pytorch.org/whl/cu130
+
+# ML / testing / utilities
+RUN pip install \
+    pytest \
+    pytest-xdist \
+    accelerate \
+    diffusers \
+    "nemo_toolkit[tts]==2.7.0" \
+    protobuf \
+    scipy \
+    librosa \
+    soundfile \
+    sentencepiece \
+    ftfy
+
+# Create libnvinfer.so symlink (pip ships libnvinfer.so.10 only)
+RUN TRT_LIB=$(python3 -c \
+      "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])") && \
+    [ ! -f "$TRT_LIB/libnvinfer.so" ] && ln -sf libnvinfer.so.10 "$TRT_LIB/libnvinfer.so" || true && \
+    echo "$TRT_LIB" > /etc/ld.so.conf.d/tensorrt.conf && \
+    ldconfig
+
+# ── Environment ─────────────────────────────────────────────────────────────
+# Pre-compute paths so cmake / runtime find TRT without manual exports
+ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
+ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
+ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
 
 WORKDIR /workspace/trt-transformers-cpp
 
