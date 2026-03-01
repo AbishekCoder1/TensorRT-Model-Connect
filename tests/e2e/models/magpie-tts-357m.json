@@ -13,5 +13,6 @@
   "trust_remote_code": false,
   "env": {
     "TRTF_MAGPIE_GREEDY": "1"
-  }
+  },
+  "skip": "HF reference requires nemo_toolkit not available in test environment"
 }

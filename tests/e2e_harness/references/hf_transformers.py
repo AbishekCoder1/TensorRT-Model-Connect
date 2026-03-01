@@ -543,7 +543,7 @@ class HfTransformersReference:
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         output_path = str(Path(model_dir) / "hf_stt.json")
 
-        audio_path = case.inputs.get("audio", "")
+        audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
 

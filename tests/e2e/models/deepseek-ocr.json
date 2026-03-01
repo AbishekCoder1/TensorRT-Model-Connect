@@ -8,6 +8,6 @@
   "prompt": "Extract the text from this image.",
   "max_new_tokens": 30,
   "logit_atol": 0.001,
-  "test_image": "tests/e2e/data/ocr_test_img.jpeg",
+  "test_image": "tests/e2e/data/orc_test_img.jpeg",
   "trust_remote_code": false
 }
