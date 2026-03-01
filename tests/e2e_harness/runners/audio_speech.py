@@ -250,6 +250,9 @@ class TextToAudioRunner:
                 cmd.extend(["--max-new-tokens", str(max_tokens)])
 
             env = {**os.environ, "LD_LIBRARY_PATH": ld_path}
+            # Merge per-model env vars from manifest (e.g. TRTF_MAGPIE_GREEDY)
+            manifest_env = case.inputs.get("env") or case.metadata.get("env") or {}
+            env.update(manifest_env)
 
             t0 = time.monotonic()
             result = subprocess.run(

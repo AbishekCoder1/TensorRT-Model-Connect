@@ -4,10 +4,14 @@
   "bundle": "magpie-tts-357m.trtfb",
   "family": "magpie_tts",
   "runtime_strategy": "text_to_audio",
+  "reference_backend": "invariant_only",
   "test_type": "audio",
-  "max_cache_length": 1024,
+  "max_cache_length": 512,
   "prompt": "Hello, this is a test of text to speech.",
   "max_new_tokens": 200,
   "logit_atol": 1e-2,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "env": {
+    "TRTF_MAGPIE_GREEDY": "1"
+  }
 }

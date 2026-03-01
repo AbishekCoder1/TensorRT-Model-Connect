@@ -55,50 +55,63 @@ def _resolve_nemo_path(path: str) -> pathlib.Path:
     return p
 
 
-def _find_cached_nemo_file(filename: str) -> str | None:
-    """Search /tmp for a cached NeMo asset file (from previous model restores)."""
-    import glob
-    # NeMo caches files in /tmp/tmp*/<filename>
-    matches = glob.glob(f"/tmp/tmp*/{filename}")
-    if matches:
-        return matches[0]
-    # Also check NeMo cache dir
-    nemo_cache = os.path.expanduser("~/.cache/nemo")
-    matches = glob.glob(f"{nemo_cache}/**/{filename}", recursive=True)
-    if matches:
-        return matches[0]
-    return None
+def _extract_nemo_assets(nemo_path: pathlib.Path, extract_dir: pathlib.Path) -> None:
+    """Extract phoneme dict / heteronym files from .nemo archive.
+
+    The .nemo archive contains the phoneme dict and heteronym files that
+    IpaG2p needs (e.g. ipa_cmudict-0.7b_nv23.01.txt, heteronyms-052722).
+    We extract all non-checkpoint, non-config files to a persistent cache dir.
+    """
+    import tarfile
+    with tarfile.open(str(nemo_path), "r") as tar:
+        for member in tar.getmembers():
+            basename = pathlib.Path(member.name).name
+            # Skip model weights and config (we only want asset files)
+            if basename in ("model_weights.ckpt", "model_config.yaml"):
+                continue
+            if member.isfile():
+                dest = extract_dir / basename
+                if not dest.exists():
+                    f = tar.extractfile(member)
+                    if f is not None:
+                        dest.write_bytes(f.read())
 
 
 def load_tokenizer(nemo_path: pathlib.Path, lang_key: str = "english_phoneme"):
     """Load NeMo IPATokenizer from .nemo archive config.
 
-    Instead of restoring the full MagpieTTS model (which tries to download
-    a speaker encoder from HuggingFace), we extract model_config.yaml,
-    read the text_tokenizers config, and instantiate just the IPA tokenizer
-    using Hydra. The nemo: URI phoneme dicts are resolved by pre-downloading
-    them via NeMo's get_nemo_file_from_cloud.
+    Extracts the text_tokenizers config from model_config.yaml and
+    instantiates the IPA tokenizer via Hydra. Phoneme dict / heteronym
+    files referenced by nemo: URIs are extracted directly from the .nemo
+    archive (they are bundled inside it as registered NeMo artifacts).
 
     Returns (sub_tokenizer, text_vocab_size).
     """
     import logging
     import tarfile
-    import tempfile
     logging.disable(logging.WARNING)
 
     import yaml
     from omegaconf import OmegaConf
 
-    # Extract model_config.yaml
+    # Persistent cache dir for extracted assets (survives across calls)
+    asset_dir = pathlib.Path.home() / ".cache" / "trtf_nemo_assets"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+
+    # Extract model_config.yaml and asset files from the archive
+    nemo_cfg = None
     with tarfile.open(str(nemo_path), "r") as tar:
         for member in tar.getmembers():
             if pathlib.Path(member.name).name == "model_config.yaml":
                 f = tar.extractfile(member)
                 if f is not None:
                     nemo_cfg = yaml.safe_load(f.read())
-                    break
-        else:
-            raise FileNotFoundError(f"model_config.yaml not found in {nemo_path}")
+                break
+    if nemo_cfg is None:
+        raise FileNotFoundError(f"model_config.yaml not found in {nemo_path}")
+
+    # Extract phoneme dict / heteronym asset files
+    _extract_nemo_assets(nemo_path, asset_dir)
 
     text_vocab_size = int(nemo_cfg.get("text_vocab_size", 2378))
     text_tokenizers = nemo_cfg.get("text_tokenizers", {})
@@ -114,26 +127,16 @@ def load_tokenizer(nemo_path: pathlib.Path, lang_key: str = "english_phoneme"):
     if "g2p" in tok_cfg and "phoneme_probability" in tok_cfg["g2p"]:
         tok_cfg["g2p"]["phoneme_probability"] = 1.0
 
-    # Resolve nemo: URIs to local paths before instantiation.
-    # NeMo caches downloaded files in /tmp/tmp*/. Search for cached copies
-    # first, then try cloud download as fallback.
+    # Resolve nemo: URIs to local paths extracted from the archive
     if "g2p" in tok_cfg:
         g2p_cfg = tok_cfg["g2p"]
         for key in ("phoneme_dict", "heteronyms"):
             val = g2p_cfg.get(key)
             if isinstance(val, str) and val.startswith("nemo:"):
                 filename = val.split(":")[-1]
-                resolved = _find_cached_nemo_file(filename)
-                if resolved:
-                    g2p_cfg[key] = resolved
-                else:
-                    # Try cloud download
-                    try:
-                        from nemo.utils.cloud import maybe_download_from_cloud
-                        resolved = maybe_download_from_cloud(val, filename)
-                        g2p_cfg[key] = resolved
-                    except Exception:
-                        pass  # Will fail at instantiation
+                local_path = asset_dir / filename
+                if local_path.exists():
+                    g2p_cfg[key] = str(local_path)
 
     # Instantiate via Hydra
     from hydra.utils import instantiate
