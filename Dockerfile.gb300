@@ -60,7 +60,8 @@ RUN pip install \
 # NeMo currently declares transformers~=4.57; force the runtime pin we need.
 RUN pip install "nemo_toolkit[tts]==2.7.0" && \
     pip install --upgrade "transformers==5.2.0" && \
-    python3 -c "import transformers; assert transformers.__version__ == '5.2.0', transformers.__version__"
+    python3 -c "import transformers; assert transformers.__version__ == '5.2.0', transformers.__version__" && \
+    python3 -c "import diffusers, ftfy; print('deps_ok', diffusers.__version__)"
 
 # Create libnvinfer.so symlink (pip ships libnvinfer.so.10 only)
 RUN TRT_LIB=$(python3 -c \
