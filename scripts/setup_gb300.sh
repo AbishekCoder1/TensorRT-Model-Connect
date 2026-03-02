@@ -20,8 +20,10 @@ pip install tensorrt && pip install tensorrt --no-deps
 pip install cuda-python
 
 # Python deps
-pip install "transformers>=4.57.0" tokenizers safetensors sentencepiece huggingface_hub ml_dtypes datasets
-pip install pytest torch accelerate diffusers
+pip install "transformers==5.2.0" tokenizers safetensors sentencepiece huggingface_hub ml_dtypes datasets
+pip install pytest torch accelerate diffusers "nemo_toolkit[tts]==2.7.0"
+pip install --upgrade "transformers==5.2.0"
+python3 -c "import transformers; assert transformers.__version__ == '5.2.0', transformers.__version__"
 
 # Install trtf_build
 pip install --no-deps -e trtf_build/

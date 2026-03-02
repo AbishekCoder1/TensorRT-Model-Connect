@@ -27,6 +27,7 @@ default:
   tags: [gpu-gb300]
   interruptible: true
   before_script:
+    - python -c "import transformers, sys; print(f'python={sys.executable} transformers={transformers.__version__}'); assert transformers.__version__ == '5.2.0', transformers.__version__"
     - pip install --no-deps -e trtf_build/
     - chmod +x ./build/trtf 2>/dev/null || true
 
