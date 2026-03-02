@@ -32,7 +32,7 @@ RUN pip install cuda-python
 
 # Core Python deps
 RUN pip install \
-    "transformers>=4.57.0" \
+    "transformers==5.2.0" \
     tokenizers \
     safetensors \
     sentencepiece \

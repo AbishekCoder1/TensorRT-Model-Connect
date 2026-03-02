@@ -16,6 +16,7 @@ Metrics computed:
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,25 @@ _COMPOSITE_RULE = (
 # (warnings/logs) before the prompt appears in stdout.
 _PROMPT_SEARCH_MAX_PREFIX_CHARS = 2048
 _MIN_PREFIX_FALLBACK_CHARS = 24
+
+# Common multi-turn/chat markers that can appear in decoded text and cause
+# cosmetic NED mismatches even when token/logit agreement is strong.
+_CHAT_ROLE_PREFIXES = (
+    "### response:",
+    "### assistant:",
+    "assistant:",
+    "<|assistant|>",
+)
+_CHAT_TURN_MARKERS = (
+    "### response:",
+    "### instruction:",
+    "### assistant:",
+    "### user:",
+    "<|assistant|>",
+    "<|user|>",
+    "<|im_start|>",
+    "<|im_end|>",
+)
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -116,6 +136,41 @@ def _normalize_for_ned(text: str) -> str:
         return ""
     # Collapse whitespace and case-fold to reduce cosmetic diffs.
     return " ".join(text.split()).strip().lower()
+
+
+def _strip_leading_role_prefix(text: str) -> str:
+    """Remove leading chat role prefixes (if present)."""
+    if not text:
+        return ""
+    out = text.lstrip()
+    while True:
+        lowered = out.lower()
+        matched = False
+        for prefix in _CHAT_ROLE_PREFIXES:
+            if lowered.startswith(prefix):
+                out = out[len(prefix):].lstrip()
+                matched = True
+                break
+        if not matched:
+            return out
+
+
+def _truncate_after_first_turn(text: str) -> str:
+    """Keep only first assistant turn content and trim trailing markdown stubs."""
+    if not text:
+        return ""
+
+    lowered = text.lower()
+    cut = len(text)
+    for marker in _CHAT_TURN_MARKERS:
+        idx = lowered.find(marker)
+        if idx > 0:
+            cut = min(cut, idx)
+
+    out = text[:cut] if cut < len(text) else text
+    # Some models emit dangling markdown headers (e.g. "##") at the end.
+    out = re.sub(r"(?:\s*#{2,}\s*)+$", "", out).strip()
+    return out
 
 
 def _load_logits(stage_output: StageOutput) -> np.ndarray | None:
@@ -316,8 +371,16 @@ class TextComparator:
         ref_text = (ref.text or "").strip()
 
         prompt = (trt.data or {}).get("prompt", "")
-        trt_text_for_ned = _normalize_for_ned(_strip_prompt_echo(trt_text, prompt))
-        ref_text_for_ned = _normalize_for_ned(_strip_prompt_echo(ref_text, prompt))
+        trt_text_for_ned = _normalize_for_ned(
+            _truncate_after_first_turn(
+                _strip_leading_role_prefix(_strip_prompt_echo(trt_text, prompt))
+            )
+        )
+        ref_text_for_ned = _normalize_for_ned(
+            _truncate_after_first_turn(
+                _strip_leading_role_prefix(_strip_prompt_echo(ref_text, prompt))
+            )
+        )
 
         if trt_text_for_ned or ref_text_for_ned:
             ned = _normalized_edit_distance(trt_text_for_ned, ref_text_for_ned)
