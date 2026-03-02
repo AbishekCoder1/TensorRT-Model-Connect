@@ -8,26 +8,22 @@ C++ bundle-only runtime for TensorRT inference, paired with a Python build packa
 
 ## Workspace isolation
 
-Multiple agent teams may work on this repo simultaneously on the same GB300 machine. Each team MUST operate in its own isolated workspace:
+Use isolated repo clones and containers per team on shared GB300 hosts.
 
-- **Each team gets its own repo clone** at `/workspace/users/yifeif/workspaces/<id>/trt-transformers-cpp`
-- **Each team gets its own container** named `trtf-dev-gb300-<id>` (NEVER use the shared `trtf-dev-gb300` container)
-- **Shared read-only resources**: HF model cache (`/mnt/storage/trt-transformers/model-weights`) and engine storage (`/workspace/users/yifeif/trt-transformers/engines`) are safe to share
-- **Isolated per-team**: git state, `build/` directory, Python editable installs, branches
+- **Repo clone per team**: `/workspace/users/yifeif/workspaces/<id>/trt-transformers-cpp`
+- **Container per team**: `trtf-dev-gb300-<id>` (do not use shared `trtf-dev-gb300`)
+- **Shared read-only resources**: HF cache (`/mnt/storage/trt-transformers/model-weights`), engines (`/workspace/users/yifeif/trt-transformers/engines`)
+- **Isolated per team**: git state, `build/`, editable installs, branches
 
-To bootstrap a new isolated workspace:
+Bootstrap a new isolated workspace:
 ```bash
 ./scripts/bootstrap_workspace.sh --id <team-id> --branch <branch> --detach
 ```
 
-To run commands in your workspace container:
+Run commands in your team container:
 ```bash
 docker exec trtf-dev-gb300-<team-id> <command>
 ```
-
-**IMPORTANT**: Never use `docker exec trtf-dev-gb300` (the bare name). Always use your team's container name `trtf-dev-gb300-<team-id>`. Never modify another team's repo clone or container.
-
-**Discovering your workspace ID**: Read `.workspace_id` in the repo root. It contains your workspace ID (e.g., `agent-1`). Your container name is `trtf-dev-gb300-<contents of .workspace_id>`. If `.workspace_id` does not exist, you are in the primary shared repo — ask the user for your workspace ID before running any docker commands.
 
 Rely on CI (GitLab pipeline) as the quality gate — push your branch and let CI validate. Do NOT run the full E2E suite locally unless specifically asked.
 

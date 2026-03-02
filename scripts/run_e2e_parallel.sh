@@ -18,7 +18,7 @@
 #   --engine-dir PATH        Engine/bundle storage  (default: /workspace/users/yifeif/trt-transformers/engines)
 #   --result-dir PATH        Test output directory  (default: /workspace/users/yifeif/trt-transformers/test-result)
 #   --trtf-binary PATH       Path to trtf binary    (default: ./build/trtf)
-#   --hf-python PATH         Python with HF deps    (default: .venv/bin/python)
+#   --hf-python PATH         Python with HF deps    (default: /opt/venv/bin/python)
 #   --num-gpus N             Number of GPUs to use  (default: auto-detect)
 #   --workers-per-gpu N      Concurrent workers per GPU (default: 4)
 #   --task-strategy STR      Filter by task strategy
@@ -34,7 +34,7 @@ set -euo pipefail
 ENGINE_DIR="${ENGINE_DIR:-/workspace/users/yifeif/trt-transformers/engines}"
 RESULT_DIR="${RESULT_DIR:-/workspace/users/yifeif/trt-transformers/test-result}"
 TRTF_BINARY="${TRTF_BINARY:-./build/trtf}"
-HF_PYTHON="${HF_PYTHON:-.venv/bin/python}"
+HF_PYTHON="${HF_PYTHON:-/opt/venv/bin/python}"
 WORKERS_PER_GPU="${WORKERS_PER_GPU:-4}"
 
 # Auto-detect GPUs if not specified
@@ -72,7 +72,6 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
-source .venv/bin/activate 2>/dev/null || true
 
 mkdir -p "$RESULT_DIR" "$ENGINE_DIR"
 
@@ -89,7 +88,7 @@ echo ""
 
 # --- Collect test IDs ---------------------------------------------------------
 
-TESTS=$(python -m pytest tests/test_e2e.py --co -q "${FILTER_ARGS[@]}" 2>/dev/null \
+TESTS=$("$HF_PYTHON" -m pytest tests/test_e2e.py --co -q "${FILTER_ARGS[@]}" 2>/dev/null \
     | grep "test_e2e\[" | sort)
 TOTAL=$(echo "$TESTS" | wc -l)
 
@@ -132,7 +131,7 @@ while IFS= read -r line; do
     (
         export CUDA_VISIBLE_DEVICES=$GPU_ID
         # shellcheck disable=SC2086
-        python -m pytest $WORKER_TESTS -v \
+        "$HF_PYTHON" -m pytest $WORKER_TESTS -v \
             --engine-dir "$ENGINE_DIR" \
             --trtf-binary "$TRTF_BINARY" \
             --hf-python "$HF_PYTHON" \

@@ -47,7 +47,7 @@ dist/
 # Claude Code
 .claude/
 
-# Generated agent prompts (from launch_model_agents.py)
+# Generated agent prompts
 scripts/agents/prompts/
 
 # Logs and editor swap files

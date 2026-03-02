@@ -214,26 +214,22 @@ The following C++ files were removed as part of the Python build migration (~350
 
 | File | Purpose |
 |------|---------|
-| `setup_container.sh` | One-shot container setup: venv, pip deps, cmake build, tests |
-| `docker_build.sh` | Build the self-contained dev container image |
-| `docker_run.sh` | Launch the dev container |
+| `setup_container.sh` | One-shot repo setup in container: editable install, cmake build, C++ tests |
 | `docker_build_gb300.sh` | Build the GB300 (aarch64) container image |
 | `docker_run_gb300.sh` | Launch the GB300 container |
-| `setup_gb300.sh` | GB300 container setup (cuda-python, deps, build) |
-| `setup_host_gb300.sh` | GB300 host-side setup |
+| `bootstrap_workspace.sh` | Create per-team isolated workspace clone + container on shared GB300 hosts |
+| `run_e2e_parallel.sh` | Multi-GPU E2E dispatcher (used by CI) |
+| `schedule_e2e.py` | Scheduler helper for `run_e2e_parallel.sh` |
+| `check_family_coverage.py` | CI guard for family/test coverage alignment |
 | `eval_mmlu.py` | MMLU benchmark evaluation |
 | `new_family.py` | Scaffold a new family plugin from HF repo |
 | `validate_family.sh` | One-command validation gate (build + diff + parity) |
 | `hf_tokenizer.py` | HuggingFace tokenizer bridge for C++ subprocess calls |
+| `hf_mel_extract.py` | HF mel extraction subprocess for audio pipelines |
 | `hf_generate.py` | HuggingFace reference generation for parity testing |
+| `magpie_tokenizer.py` | Magpie tokenizer subprocess bridge for TRT runtime |
+| `magpie_codec_bridge.py` | Magpie codec decode bridge for audio generation |
 | `build_wan14b.py` | Build Wan2.1-T2V-14B bundle with configurable frame count and video dimensions |
-| `vae_decode.py` | VAE decode subprocess: loads `AutoencoderKLWan` from HF, decodes binary latents to video frames. Called by C++ `DiffusionBackend`. |
-| `families_manifest.json` | Parallel family setup manifest (model slots, GPU assignments) |
-| `parallel_dispatch.sh` | Dispatch mechanism for parallel family setup |
-| `parallel_family_setup.sh` | Set up multiple families in parallel across GPUs |
-| `parallel_family_teardown.sh` | Clean up parallel family setup |
-| `launch_model_agents.py` | Launch parallel model implementation agents |
-| `agents/` | Agent templates (e.g., `implement-model-family.md`) |
 
 ## Tools (`tools/`)
 

@@ -986,7 +986,7 @@ Added two models to E2E test suite:
 - Added raw Hugging Face checkpoint run path and parity validation:
   - Downloaded `hf-internal-testing/tiny-random-gpt2` with `model.safetensors` into `models/hf/`.
   - Added `hf-transformers` backend in pipeline for model dirs containing `config.json` + `model.safetensors`.
-  - Added Python runner script `scripts/hf_generate.py` and parity script `scripts/compare_hf_pipeline_vs_transformers.py`.
+  - Added Python runner script `scripts/hf_generate.py` and a temporary parity helper script (later removed).
   - Installed Python deps in GPU container (`torch`, `transformers`, `safetensors`, etc.) and validated exact output match against direct transformers generation.
 - Decoupled pipeline orchestration from model/backend specifics:
   - Added model resolver seam (`include/trtf/model_resolver.h`, `src/model/model_resolver.cpp`).
@@ -1056,7 +1056,7 @@ Implementation progress started:
   - Added native C++ safetensors reader (`src/model/safetensors_loader.cpp`) with F32/F16/BF16 decode support.
   - Extended model loader to accept `.safetensors` in `weights_file` and to auto-build placeholder vocab/transitions when checkpoint-backed models omit `vocab.txt`/`transitions.txt`.
   - Added initial Qwen bridge mapping (`architecture_family=qwen3`) from upstream tensor keys (`model.layers.0.*`, `model.embed_tokens.weight`, `lm_head.weight`) into shared decoder checkpoint tensors.
-  - Added prep script `scripts/prepare_qwen3_trtf_decoder.py` to scaffold `trtf_decoder/` for local upstream Qwen3 model dirs.
+  - Added a temporary prep script to scaffold `trtf_decoder/` for local upstream Qwen3 model dirs (later removed).
   - Added safetensors coverage in `tests/test_model_loader.cpp` by generating a synthetic safetensors checkpoint and loading it through `LoadDecoderModel`.
 - Extended Qwen family resolver for direct upstream root loading:
   - Qwen family now accepts either `trtf_decoder/` assets or direct HF root `config.json + model.safetensors`.
@@ -1087,7 +1087,7 @@ Further implementation completed (Qwen full-stack iteration):
   - `tests/test_qwen_family.cpp` now writes a 2-layer upstream-style Qwen safetensors checkpoint including all required keys.
   - Added assertions for `has_qwen_layers`, expected layer count, and `final_norm`.
 - Updated onboarding script/docs:
-  - `scripts/prepare_qwen3_trtf_decoder.py` mapping mode updated to `qwen3-full-stack-v2`.
+  - Temporary Qwen3 prep-script mapping mode updated to `qwen3-full-stack-v2` (script later removed).
   - `README.md` updated to describe full Qwen layer-stack safetensors mapping and shared TRT runtime path.
 
 Validation run results after full-stack iteration:
@@ -1231,7 +1231,7 @@ Repo scrub findings captured for cleanup decisions:
 - `src/runtime/trt_backend.cpp` was dead (not compiled by `CMakeLists.txt`) and duplicated TRT backend symbols.
 - `src/runtime/trt_backend_qwen.cpp` (now deleted) remained monolithic (builder utils + graph construction + decode runtime).
 - `src/model/model_loader.cpp` was multi-responsibility and needs extraction in later phases.
-- Qwen HF diff tooling existed (`scripts/qwen_layer_diff.py`) but was not yet a ctest gate.
+- Qwen HF diff tooling existed as a temporary local helper but was not yet a ctest gate.
 
 Phase 1 implementation completed in this iteration:
 - Removed dead legacy TRT file:
@@ -1728,7 +1728,7 @@ Extended `tests/test_trt_graph_ops_gold.cpp` from 2 to 6 op tests:
 
 ### Group 3: Gold tensor generator
 
-Updated `scripts/generate_op_gold_tensors.py`:
+Updated a temporary op-gold tensor generator script (later removed):
 - Added `generate_bias_sum()` (seed=47)
 - Changed rope/rms_norm_per_head metadata to F32 for SafetensorReader compatibility
 - Updated rope reference implementation to match trtf's make_rope_table + rotate_half_matrix formula
@@ -1774,7 +1774,7 @@ All source modules now have dedicated test coverage:
 | Create | `tests/test_kv_cache_step_state.cpp` |
 | Create | `tests/test_extra_fields.cpp` |
 | Edit | `tests/test_trt_graph_ops_gold.cpp` |
-| Edit | `scripts/generate_op_gold_tensors.py` |
+| Edit | temporary op-gold tensor generator script (removed) |
 | Edit | `CMakeLists.txt` |
 | Edit | `docs/wiki/Source-Layout.md` |
 | Edit | `docs/WORKLOG.md` |

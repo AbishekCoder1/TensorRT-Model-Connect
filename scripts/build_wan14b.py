@@ -2,9 +2,8 @@
 """Build Wan2.1-T2V-14B bundle with configurable frame count.
 
 Usage (inside container):
-    source .venv/bin/activate
-    python scripts/build_wan14b.py --frames 33 \
-        -o /mnt/storage/trt-transformers/engines/wan21-14b-33fr.trtfb
+    /opt/venv/bin/python scripts/build_wan14b.py --frames 33 \
+        -o /workspace/users/yifeif/trt-transformers/engines/wan21-14b-33fr.trtfb
 """
 import argparse
 import json
@@ -62,7 +61,7 @@ def main():
     print(f"\n[14b] Done! Run with:", file=sys.stderr)
     print(f"  ./build/trtf generate-video {args.output} "
           f"--prompt 'A cat walking in the garden' "
-          f"--num-steps 30 --hf-python $PWD/.venv/bin/python",
+          f"--num-steps 30 --hf-python /opt/venv/bin/python",
           file=sys.stderr)
 
 
