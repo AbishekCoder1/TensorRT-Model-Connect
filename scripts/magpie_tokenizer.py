@@ -19,10 +19,8 @@ import pathlib
 import sys
 import warnings
 
-# Suppress noisy NeMo/PyTorch logs and avoid network requests
+# Suppress noisy NeMo/PyTorch logs.
 os.environ.setdefault("NEMO_LOG_LEVEL", "ERROR")
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 warnings.filterwarnings("ignore")
 
 
@@ -44,15 +42,83 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _repo_id_from_hf_cache_path(path: pathlib.Path) -> str | None:
+    """Extract repo id from HF cache paths like models--org--repo/blobs/..."""
+    for part in path.parts:
+        if part.startswith("models--"):
+            encoded = part[len("models--"):]
+            if "--" in encoded:
+                return encoded.replace("--", "/")
+    return None
+
+
+def _looks_like_repo_id(text: str) -> bool:
+    if text.startswith("/") or text.startswith(".") or "://" in text:
+        return False
+    parts = text.split("/")
+    return len(parts) == 2 and all(parts)
+
+
+def _download_nemo_for_repo(repo_id: str) -> pathlib.Path:
+    """Resolve a .nemo archive from HF cache (and network if permitted)."""
+    from huggingface_hub import snapshot_download
+
+    offline = os.environ.get("HF_HUB_OFFLINE", "").lower() in ("1", "true", "yes")
+    attempts = (True,) if offline else (True, False)
+
+    last_exc: Exception | None = None
+    for local_only in attempts:
+        try:
+            snapshot_dir = snapshot_download(
+                repo_id=repo_id,
+                allow_patterns=["*.nemo"],
+                local_files_only=local_only,
+            )
+            nemo_files = sorted(pathlib.Path(snapshot_dir).glob("*.nemo"))
+            if nemo_files:
+                return nemo_files[0]
+            raise FileNotFoundError(f"No .nemo files found in snapshot: {snapshot_dir}")
+        except Exception as exc:  # pragma: no cover - exercised in integration
+            last_exc = exc
+
+    detail = f"{last_exc}" if last_exc is not None else "unknown error"
+    raise FileNotFoundError(
+        f"Could not resolve .nemo for repo '{repo_id}' from cache or hub: {detail}"
+    )
+
+
 def _resolve_nemo_path(path: str) -> pathlib.Path:
-    """Resolve .nemo archive path (file or directory containing .nemo)."""
+    """Resolve .nemo archive from file/dir, HF cache blob path, or repo id."""
     p = pathlib.Path(path)
-    if p.is_dir():
-        nemo_files = sorted(p.glob("*.nemo"))
-        if nemo_files:
-            return nemo_files[0]
-        raise FileNotFoundError(f"No .nemo file found in {path}")
-    return p
+
+    try:
+        if p.is_dir():
+            nemo_files = sorted(p.glob("*.nemo"))
+            if nemo_files:
+                return nemo_files[0]
+            raise FileNotFoundError(f"No .nemo file found in directory: {path}")
+        if p.is_file():
+            return p
+    except PermissionError as exc:
+        # Common when bundle stores a root-owned HF blob path.
+        # Try deriving repo id and resolving under current user's cache.
+        repo_id = _repo_id_from_hf_cache_path(p)
+        if repo_id:
+            return _download_nemo_for_repo(repo_id)
+        raise FileNotFoundError(
+            f"NeMo path exists but is not accessible: {path} ({exc})"
+        ) from exc
+
+    # If input already looks like "org/repo", resolve via HF cache/hub.
+    if _looks_like_repo_id(path):
+        return _download_nemo_for_repo(path)
+
+    # Fallback for stale HF cache blob paths, even if stat() did not raise.
+    repo_id = _repo_id_from_hf_cache_path(p)
+    if repo_id:
+        return _download_nemo_for_repo(repo_id)
+
+    raise FileNotFoundError(f".nemo archive does not exist or is invalid: {path}")
 
 
 def _extract_nemo_assets(nemo_path: pathlib.Path, extract_dir: pathlib.Path) -> None:
@@ -77,6 +143,33 @@ def _extract_nemo_assets(nemo_path: pathlib.Path, extract_dir: pathlib.Path) -> 
                         dest.write_bytes(f.read())
 
 
+def _resolve_asset_dir() -> pathlib.Path:
+    override = os.environ.get("TRTF_MAGPIE_ASSET_DIR", "").strip()
+    if override:
+        candidate = pathlib.Path(override)
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
+
+    candidates = [
+        pathlib.Path(os.environ.get("XDG_CACHE_HOME", "")).expanduser() / "trtf_nemo_assets"
+        if os.environ.get("XDG_CACHE_HOME", "").strip()
+        else None,
+        pathlib.Path.home() / ".cache" / "trtf_nemo_assets",
+        pathlib.Path("/tmp/trtf_nemo_assets"),
+    ]
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        except PermissionError:
+            continue
+
+    raise PermissionError("Could not create writable cache dir for Magpie tokenizer assets")
+
+
 def load_tokenizer(nemo_path: pathlib.Path, lang_key: str = "english_phoneme"):
     """Load NeMo IPATokenizer from .nemo archive config.
 
@@ -92,13 +185,8 @@ def load_tokenizer(nemo_path: pathlib.Path, lang_key: str = "english_phoneme"):
     logging.disable(logging.WARNING)
 
     import yaml
-    from omegaconf import OmegaConf
 
-    # Persistent cache dir for extracted assets (survives across calls)
-    asset_dir = pathlib.Path.home() / ".cache" / "trtf_nemo_assets"
-    asset_dir.mkdir(parents=True, exist_ok=True)
-
-    # Extract model_config.yaml and asset files from the archive
+    # Extract model_config.yaml from the archive.
     nemo_cfg = None
     with tarfile.open(str(nemo_path), "r") as tar:
         for member in tar.getmembers():
@@ -110,9 +198,6 @@ def load_tokenizer(nemo_path: pathlib.Path, lang_key: str = "english_phoneme"):
     if nemo_cfg is None:
         raise FileNotFoundError(f"model_config.yaml not found in {nemo_path}")
 
-    # Extract phoneme dict / heteronym asset files
-    _extract_nemo_assets(nemo_path, asset_dir)
-
     text_vocab_size = int(nemo_cfg.get("text_vocab_size", 2378))
     text_tokenizers = nemo_cfg.get("text_tokenizers", {})
 
@@ -122,6 +207,26 @@ def load_tokenizer(nemo_path: pathlib.Path, lang_key: str = "english_phoneme"):
             f"Language '{lang_key}' not found. Available: {available}")
 
     tok_cfg = dict(text_tokenizers[lang_key])
+    target = str(tok_cfg.get("_target_", ""))
+
+    if target == "AutoTokenizer":
+        raise RuntimeError(
+            f"Magpie tokenizer '{lang_key}' requires HF AutoTokenizer path, "
+            "which is not supported in trtf runtime yet. Use english_phoneme."
+        )
+
+    try:
+        from omegaconf import OmegaConf
+        from hydra.utils import instantiate
+    except Exception as exc:
+        raise RuntimeError(
+            "Missing Magpie tokenizer dependencies. Install: "
+            "nemo_toolkit[tts]==2.7.0"
+        ) from exc
+
+    # NeMo path: extract phoneme dict / heteronym assets for IPA G2P.
+    asset_dir = _resolve_asset_dir()
+    _extract_nemo_assets(nemo_path, asset_dir)
 
     # Override phoneme_probability for deterministic inference
     if "g2p" in tok_cfg and "phoneme_probability" in tok_cfg["g2p"]:
@@ -139,7 +244,6 @@ def load_tokenizer(nemo_path: pathlib.Path, lang_key: str = "english_phoneme"):
                     g2p_cfg[key] = str(local_path)
 
     # Instantiate via Hydra
-    from hydra.utils import instantiate
     oc = OmegaConf.create(tok_cfg)
     sub_tok = instantiate(oc)
 

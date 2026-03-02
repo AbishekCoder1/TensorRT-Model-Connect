@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+
+def _load_magpie_script():
+    root = Path(__file__).resolve().parents[2]
+    script_path = root / "scripts" / "magpie_tokenizer.py"
+    spec = importlib.util.spec_from_file_location("magpie_tokenizer_script", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_repo_id_from_hf_cache_path() -> None:
+    mod = _load_magpie_script()
+    p = Path("/root/.cache/huggingface/hub/models--nvidia--magpie_tts_multilingual_357m/blobs/abc")
+    assert mod._repo_id_from_hf_cache_path(p) == "nvidia/magpie_tts_multilingual_357m"
+
+
+def test_resolve_nemo_path_falls_back_to_repo_download(monkeypatch, tmp_path: Path) -> None:
+    mod = _load_magpie_script()
+
+    nemo_file = tmp_path / "magpie.nemo"
+    nemo_file.write_bytes(b"dummy")
+
+    calls: list[tuple[str, bool]] = []
+
+    def fake_snapshot_download(*, repo_id: str, allow_patterns, local_files_only: bool):
+        assert allow_patterns == ["*.nemo"]
+        calls.append((repo_id, local_files_only))
+        return str(tmp_path)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_snapshot_download)
+
+    resolved = mod._resolve_nemo_path(
+        "/root/.cache/huggingface/hub/models--nvidia--magpie_tts_multilingual_357m/blobs/hash"
+    )
+
+    assert resolved == nemo_file
+    assert calls
+    assert calls[0][0] == "nvidia/magpie_tts_multilingual_357m"

@@ -14,5 +14,19 @@
   "env": {
     "TRTF_MAGPIE_GREEDY": "1"
   },
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "nemo.collections.tts.g2p.models.i18n_ipa"
+      },
+      "gating": true
+    }
+  ],
   "skip": "HF reference requires nemo_toolkit not available in test environment"
 }

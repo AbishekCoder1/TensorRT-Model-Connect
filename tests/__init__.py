@@ -1,6 +1,6 @@
 """Project test package.
 
-Ensures imports like `tests.builder` resolve to this repository's test tree
-instead of any third-party `tests` package installed in site-packages.
+This file ensures local `tests` imports resolve to this repository rather than
+third-party packages that also ship a top-level `tests` module.
 """
 
