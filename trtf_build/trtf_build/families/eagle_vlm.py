@@ -97,12 +97,17 @@ class EagleVLMPlugin:
         patch_size = vc.get("patch_size", 14)
         num_patches = (image_size // patch_size) ** 2
 
+        # After 2x2 pixel_shuffle merge, the num_vision_tokens is reduced by 4
+        merge_size = 2
+        num_merged = (image_size // patch_size // merge_size) ** 2
+
         cfg = {
             "is_reranker": is_rerank,
             "embedding_dim": config.hidden_size,
             "vision_image_size": image_size,
             "vision_patch_size": patch_size,
-            "num_vision_tokens": num_patches,
+            "num_vision_tokens": num_merged,
+            "vision_output_dim": config.hidden_size,  # MLP projector output = text hidden
             "preprocessor_type": "simple_chw",
         }
         return cfg
@@ -321,13 +326,37 @@ def _build_eagle_engine(
     # attention_mask: [seq_length] — 1 for real tokens, 0 for padding.
     # Used to mask out padding positions in bidirectional attention.
     attention_mask_input = network.add_input("attention_mask", trt.int32, (seq_length,))
+    # input_embed: [seq_length, hidden] — pre-computed features for image tokens
+    input_embed = network.add_input("input_embed", trt.float32, (seq_length, hidden))
+    # use_input_embed: [seq_length] — per-position flag (0.0=use token lookup, 1.0=use input_embed)
+    use_input_embed = network.add_input("use_input_embed", trt.float32, (seq_length,))
 
-    # --- Embedding ---
+    # --- Embedding with input_embed bypass ---
     embedding_table = graph_ops.add_constant(
         network, (vocab, hidden), weights["embedding"])
     # Gather: [seq_length] -> [seq_length, hidden]
     gather = network.add_gather(embedding_table, input_ids, 0)
-    hidden_state = gather.get_output(0)
+    token_embed = gather.get_output(0)
+
+    # Select: hidden[i] = input_embed[i] * use[i] + token_embed[i] * (1 - use[i])
+    # Reshape use_input_embed [seq_length] -> [seq_length, 1] for broadcasting
+    use_reshape = network.add_shuffle(use_input_embed)
+    use_reshape.reshape_dims = (seq_length, 1)
+    ones_bcast = graph_ops.add_constant(
+        network, (1, 1), np.array([1.0], dtype=np.float32))
+    inv_use = network.add_elementwise(
+        ones_bcast, use_reshape.get_output(0),
+        trt.ElementWiseOperation.SUB)  # [seq_length, 1]: 1 where token, 0 where embed
+    embed_part = network.add_elementwise(
+        input_embed, use_reshape.get_output(0),
+        trt.ElementWiseOperation.PROD)  # input_embed * use
+    token_part = network.add_elementwise(
+        token_embed, inv_use.get_output(0),
+        trt.ElementWiseOperation.PROD)  # token_embed * (1 - use)
+    merged = network.add_elementwise(
+        embed_part.get_output(0), token_part.get_output(0),
+        trt.ElementWiseOperation.SUM)
+    hidden_state = merged.get_output(0)
 
     # --- RoPE tables ---
     # Check for Llama3 RoPE scaling (from rope_parameters in llm_config)
@@ -875,7 +904,103 @@ def _build_siglip_vision_engine(
             res1.get_output(0), fc2_out, trt.ElementWiseOperation.SUM)
         hidden_state = res2.get_output(0)
 
-    # Output: vision_features [num_patches, vision_hidden]
+    # --- Pixel shuffle (2x2 merge) + MLP projector (mlp1) ---
+    # Eagle VLM merges 2x2 adjacent patches before the MLP projector:
+    # [num_patches, vision_hidden] -> [num_patches/4, 4*vision_hidden] -> MLP -> [num_patches/4, text_hidden]
+    mlp1_ln_w = weights.get("mlp1.0.weight")
+    mlp1_fc1_w = weights.get("mlp1.1.weight")
+    mlp1_fc2_w = weights.get("mlp1.3.weight")
+
+    if mlp1_ln_w is not None and mlp1_fc1_w is not None and mlp1_fc2_w is not None:
+        mlp1_ln_b = weights.get("mlp1.0.bias")
+        mlp1_fc1_b = weights.get("mlp1.1.bias")
+        mlp1_fc2_b = weights.get("mlp1.3.bias")
+
+        text_hidden_size = mlp1_fc2_w.shape[0]  # output dim of projector
+        mlp1_in_dim = mlp1_ln_w.shape[0]  # typically 4*vision_hidden (4608 = 4*1152)
+        merge_factor = mlp1_in_dim // vision_hidden  # e.g. 4 for 2x2 merge
+
+        if merge_factor > 1:
+            # Pixel shuffle: reshape [H*W, C] -> [H, W, C] -> [H//m, m, W//m, m, C] -> [H//m * W//m, m*m*C]
+            m = int(np.sqrt(merge_factor))  # merge_size per spatial dim
+            # Truncate spatial dims to be divisible by m
+            h_trunc = (num_patches_h // m) * m
+            w_trunc = (num_patches_w // m) * m
+            out_h = num_patches_h // m
+            out_w = num_patches_w // m
+            num_merged = out_h * out_w
+
+            # Reshape: [num_patches, vision_hidden] -> [num_patches_h, num_patches_w, vision_hidden]
+            reshape_hw = network.add_shuffle(hidden_state)
+            reshape_hw.reshape_dims = (num_patches_h, num_patches_w, vision_hidden)
+
+            # Slice to truncated size if needed (discard edge patches)
+            if h_trunc != num_patches_h or w_trunc != num_patches_w:
+                slice_layer = network.add_slice(
+                    reshape_hw.get_output(0),
+                    (0, 0, 0), (h_trunc, w_trunc, vision_hidden), (1, 1, 1))
+                truncated = slice_layer.get_output(0)
+            else:
+                truncated = reshape_hw.get_output(0)
+
+            # Reshape: [h_trunc, w_trunc, C] -> [out_h, m, out_w, m, C]
+            reshape_merge = network.add_shuffle(truncated)
+            reshape_merge.reshape_dims = (out_h, m, out_w, m, vision_hidden)
+            # Transpose to [out_h, out_w, m, m, C]
+            reshape_merge.second_transpose = (0, 2, 1, 3, 4)
+
+            # Flatten: [out_h, out_w, m, m, C] -> [out_h*out_w, m*m*C]
+            flatten = network.add_shuffle(reshape_merge.get_output(0))
+            flatten.reshape_dims = (num_merged, mlp1_in_dim)
+            hidden_state = flatten.get_output(0)
+
+            if verbose:
+                print(f"[trtf-build] Pixel shuffle: [{num_patches_h}x{num_patches_w}, {vision_hidden}] -> "
+                      f"[{num_merged}, {mlp1_in_dim}]", file=sys.stderr)
+        else:
+            num_merged = num_patches
+
+        # LayerNorm over mlp1_in_dim
+        ln_eps = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([layer_norm_eps], dtype=np.float32))
+        hidden_state = _add_layer_norm_vision(
+            network, hidden_state, mlp1_in_dim,
+            mlp1_ln_w.astype(np.float32),
+            mlp1_ln_b.astype(np.float32) if mlp1_ln_b is not None
+                else np.zeros(mlp1_in_dim, dtype=np.float32),
+            ln_eps)
+
+        # FC1: mlp1_in_dim -> intermediate
+        mlp1_inter = mlp1_fc1_w.shape[0]
+        fc1 = graph_ops.add_matmul_rhs_constant(
+            network, hidden_state, mlp1_in_dim, mlp1_inter,
+            np.ascontiguousarray(mlp1_fc1_w.astype(np.float32).T))
+        if mlp1_fc1_b is not None:
+            fc1 = graph_ops.add_bias_sum(
+                network, fc1, mlp1_inter,
+                mlp1_fc1_b.astype(np.float32))
+
+        # GELU activation
+        gelu = network.add_activation(fc1, trt.ActivationType.GELU_ERF)
+
+        # FC2: intermediate -> text_hidden_size
+        fc2 = graph_ops.add_matmul_rhs_constant(
+            network, gelu.get_output(0), mlp1_inter, text_hidden_size,
+            np.ascontiguousarray(mlp1_fc2_w.astype(np.float32).T))
+        if mlp1_fc2_b is not None:
+            fc2 = graph_ops.add_bias_sum(
+                network, fc2, text_hidden_size,
+                mlp1_fc2_b.astype(np.float32))
+
+        hidden_state = fc2
+        # Update num_patches for output annotation
+        num_patches = num_merged if merge_factor > 1 else num_patches
+        if verbose:
+            print(f"[trtf-build] Added MLP projector: {mlp1_in_dim} -> "
+                  f"{mlp1_inter} -> {text_hidden_size}", file=sys.stderr)
+
+    # Output: vision_features [num_patches, output_dim]
     hidden_state.name = "vision_features"
     network.mark_output(hidden_state)
 

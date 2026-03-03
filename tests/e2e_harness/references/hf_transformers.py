@@ -306,6 +306,89 @@ class HfTransformersReference:
             return str(resolved2)
         return image_path
 
+    def _run_embedding_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run HF embedding model as reference — mean pool + L2 normalize."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_embedding.json")
+
+        prompt = case.inputs.get("prompt", "What is machine learning?")
+        trust_remote_code = case.metadata.get("trust_remote_code", False)
+        hf_id = case.hf_id
+
+        script = textwrap.dedent(f"""\
+            import json, torch, numpy as np
+            from transformers import AutoModel, AutoTokenizer
+
+            hf_id = {hf_id!r}
+            prompt = {prompt!r}
+            trust_remote_code = {trust_remote_code!r}
+            output_path = {output_path!r}
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code)
+            model = AutoModel.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code,
+                torch_dtype=torch.float32)
+            model.eval()
+
+            # Generic forward pass: tokenize -> forward -> mean pool -> L2 norm
+            # (We use the raw forward pass to match TRT, not encode_queries()
+            # which adds an instruction prefix that TRT doesn't replicate.)
+            inputs = tokenizer(prompt, return_tensors="pt", padding=True,
+                               truncation=True)
+            with torch.no_grad():
+                outputs = model(**inputs, output_hidden_states=True)
+            # Try last_hidden_state first, then fall back to hidden_states[-1]
+            if hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
+                hidden = outputs.last_hidden_state
+            elif hasattr(outputs, "hidden_states") and outputs.hidden_states:
+                hidden = outputs.hidden_states[-1]
+            else:
+                raise RuntimeError("Model output has no hidden states")
+            mask = inputs["attention_mask"].unsqueeze(-1).float()
+            pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+            pooled = torch.nn.functional.normalize(pooled, p=2, dim=-1)
+            embedding = pooled[0].numpy().tolist()
+
+            result = {{"embedding": embedding}}
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print("OK")
+        """)
+
+        python = ctx.hf_python or sys.executable
+        env = dict(os.environ)
+        if ctx.ld_library_path:
+            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+
+        t0 = time.monotonic()
+        result = subprocess.run(
+            [python, "-c", script],
+            capture_output=True, text=True, timeout=600, env=env,
+        )
+        elapsed = time.monotonic() - t0
+
+        if result.returncode != 0:
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "hf_embedding", case.name)
+            msg = (f"HF embedding ref failed for {case.name} "
+                   f"(rc={result.returncode}):\n{truncated}")
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
+
+        data = {}
+        if Path(output_path).is_file():
+            data = json.loads(Path(output_path).read_text())
+
+        return StageOutput(
+            stage_name=stage.name, data=data, timing_s=elapsed,
+            metadata={"returncode": result.returncode})
+
     def _run_segmentation_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
@@ -395,76 +478,6 @@ class HfTransformersReference:
                 data["viz_path"] = viz_path
             except Exception as e:
                 logger.warning("Failed to save segmentation viz: %s", e)
-
-        return StageOutput(
-            stage_name=stage.name, data=data, timing_s=elapsed,
-            metadata={"returncode": result.returncode})
-
-    def _run_embedding_ref(
-        self, case: E2ECase, stage: StageSpec, ctx: RunContext
-    ) -> StageOutput:
-        """Run HF model for embedding and return normalized vector."""
-        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
-        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
-        output_path = str(Path(model_dir) / "hf_embed.json")
-
-        prompt = case.inputs.get("prompt", "Hello world")
-        trust_remote_code = case.metadata.get("trust_remote_code", False)
-        hf_id = case.hf_id
-
-        script = textwrap.dedent(f"""\
-            import json, torch, numpy as np
-            from transformers import AutoModel, AutoTokenizer
-
-            hf_id = {hf_id!r}
-            prompt = {prompt!r}
-            trust_remote_code = {trust_remote_code!r}
-            output_path = {output_path!r}
-
-            tokenizer = AutoTokenizer.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
-            model = AutoModel.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype=torch.float32)
-            model.eval()
-
-            inputs = tokenizer(prompt, return_tensors="pt", padding=True,
-                               truncation=True)
-            with torch.no_grad():
-                outputs = model(**inputs)
-            # Mean pooling + L2 normalize
-            emb = outputs.last_hidden_state.mean(dim=1)[0]
-            emb = emb / emb.norm()
-            result = {{"embedding": emb.numpy().tolist()}}
-            with open(output_path, "w") as f:
-                json.dump(result, f)
-            print("OK")
-        """)
-
-        python = ctx.hf_python or sys.executable
-        env = dict(os.environ)
-        if ctx.ld_library_path:
-            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
-
-        t0 = time.monotonic()
-        result = subprocess.run(
-            [python, "-c", script],
-            capture_output=True, text=True, timeout=600, env=env,
-        )
-        elapsed = time.monotonic() - t0
-
-        if result.returncode != 0:
-            truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                "hf_embedding", case.name)
-            msg = f"HF embedding failed for {case.name} (rc={result.returncode}):\n{truncated}"
-            if log_path:
-                msg += f" (full stderr: {log_path})"
-            raise RuntimeError(msg)
-
-        data = {}
-        if Path(output_path).is_file():
-            data = json.loads(Path(output_path).read_text())
 
         return StageOutput(
             stage_name=stage.name, data=data, timing_s=elapsed,

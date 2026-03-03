@@ -712,14 +712,15 @@ int cmd_embed(const CliArgs& args)
         return EXIT_FAILURE;
     }
 
-    if (args.prompt.empty())
+    if (args.prompt.empty() && args.image_path.empty())
     {
-        std::cerr << "Error: embed requires --prompt\n";
+        std::cerr << "Error: embed requires --prompt and/or --image\n";
         return EXIT_FAILURE;
     }
 
     TrtfPipelineOptions opts{};
     opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
+    opts.image_path = args.image_path.empty() ? nullptr : args.image_path.c_str();
     auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
     if (pipeline == nullptr)
     {
@@ -735,7 +736,24 @@ int cmd_embed(const CliArgs& args)
     }
 
     int32_t emb_dim = 0;
-    const float* embedding = pipeline->embed(args.prompt.c_str(), &emb_dim);
+    const float* embedding = nullptr;
+
+    if (!args.image_path.empty())
+    {
+        if (!args.prompt.empty())
+        {
+            embedding = pipeline->embed_image_text(
+                args.prompt.c_str(), args.image_path.c_str(), &emb_dim);
+        }
+        else
+        {
+            embedding = pipeline->embed_image(args.image_path.c_str(), &emb_dim);
+        }
+    }
+    else
+    {
+        embedding = pipeline->embed(args.prompt.c_str(), &emb_dim);
+    }
 
     if (embedding == nullptr)
     {
@@ -744,15 +762,15 @@ int cmd_embed(const CliArgs& args)
         return EXIT_FAILURE;
     }
 
-    std::cout << "Embedding dim: " << emb_dim << '\n';
-    std::cout << "Values (first 8 dims):";
-    const int show = std::min(emb_dim, static_cast<int32_t>(8));
-    for (int i = 0; i < show; ++i)
+    // Output as JSON object for programmatic parsing by E2E runner
+    std::cerr << "Embedding dim: " << emb_dim << std::endl;
+    std::cout << "{\"embedding\": [";
+    for (int i = 0; i < emb_dim; ++i)
     {
-        std::cout << " " << embedding[i];
+        if (i > 0) std::cout << ", ";
+        std::cout << embedding[i];
     }
-    if (emb_dim > show) std::cout << " ...";
-    std::cout << '\n';
+    std::cout << "], \"dim\": " << emb_dim << "}\n";
 
     delete pipeline;
     return EXIT_SUCCESS;

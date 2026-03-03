@@ -683,6 +683,52 @@ public:
 #endif
     }
 
+    const float* embed_image(const char* image_path, int32_t* out_dim) override
+    {
+#if TRTF_HAS_TRT
+        if (mEmbeddingBackend == nullptr || !mEmbeddingBackend->has_vision() ||
+            image_path == nullptr) return nullptr;
+        try {
+            // For image-only embedding, create token sequence with image placeholders
+            const auto& vl_cfg = mEmbeddingBackend->vl_config();
+            std::string vl_prompt = trtf::format_vl_prompt("", vl_cfg);
+            std::vector<int32_t> ids;
+            if (mTokenizer) ids = mTokenizer->encode(vl_prompt.c_str());
+            mLastEmbResult = mEmbeddingBackend->embed_with_image(ids, std::string(image_path));
+            if (out_dim) *out_dim = mLastEmbResult.embedding_dim;
+            return mLastEmbResult.embedding.data();
+        } catch (const std::exception& e) {
+            std::cerr << "[trtf] Embed image error: " << e.what() << std::endl;
+            return nullptr;
+        }
+#else
+        (void) image_path; (void) out_dim; return nullptr;
+#endif
+    }
+
+    const float* embed_image_text(const char* text, const char* image_path,
+                                   int32_t* out_dim) override
+    {
+#if TRTF_HAS_TRT
+        if (mEmbeddingBackend == nullptr || !mEmbeddingBackend->has_vision() ||
+            text == nullptr || image_path == nullptr) return nullptr;
+        try {
+            const auto& vl_cfg = mEmbeddingBackend->vl_config();
+            std::string vl_prompt = trtf::format_vl_prompt(std::string(text), vl_cfg);
+            std::vector<int32_t> ids;
+            if (mTokenizer) ids = mTokenizer->encode(vl_prompt.c_str());
+            mLastEmbResult = mEmbeddingBackend->embed_with_image(ids, std::string(image_path));
+            if (out_dim) *out_dim = mLastEmbResult.embedding_dim;
+            return mLastEmbResult.embedding.data();
+        } catch (const std::exception& e) {
+            std::cerr << "[trtf] Embed image+text error: " << e.what() << std::endl;
+            return nullptr;
+        }
+#else
+        (void) text; (void) image_path; (void) out_dim; return nullptr;
+#endif
+    }
+
     bool supports_reranking() const override
     {
 #if TRTF_HAS_TRT
@@ -1946,15 +1992,67 @@ PipelineImpl* create_embedding_pipeline(
     trtf::TrtUniquePtr<nvinfer1::IExecutionContext> exec_ctx,
     const trtf::FastPathModelConfig& fp_cfg,
     const trtf::BundleSections& sections,
+    trtf::TrtUniquePtr<nvinfer1::IRuntime>& runtime_ptr,
     const std::string& model_id,
     const std::string& hf_python,
-    const std::string& /* bundle_path */)
+    const std::string& bundle_path)
 {
     auto emb_backend = trtf::CreateEmbeddingBackend(
         std::move(trt_engine), std::move(exec_ctx), fp_cfg);
     if (!emb_backend || !emb_backend->is_available())
     {
         throw std::runtime_error("Failed to create embedding backend from bundle engine");
+    }
+
+    // Deserialize optional vision engine for VL embedding
+    if (sections.vision_plan_data != nullptr && !sections.vision_plan_data->empty())
+    {
+        std::cerr << "[trtf] Deserializing vision TRT engine for embedding ("
+                  << sections.vision_plan_data->size() / (1024 * 1024) << " MB) ..." << std::endl;
+
+        auto vision_trt_engine = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+            runtime_ptr->deserializeCudaEngine(
+                sections.vision_plan_data->data(), sections.vision_plan_data->size()));
+        if (vision_trt_engine)
+        {
+            auto vision_exec_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(
+                vision_trt_engine->createExecutionContext());
+            if (vision_exec_ctx)
+            {
+                auto vision_step_engine = std::make_unique<trtf::VisionStepEngine>();
+                vision_step_engine->engine = std::move(vision_trt_engine);
+                vision_step_engine->context = std::move(vision_exec_ctx);
+                vision_step_engine->pixel_input_name = "pixel_values";
+                vision_step_engine->features_output_name = "vision_features";
+                vision_step_engine->num_output_features = fp_cfg.num_image_pad_tokens;
+                vision_step_engine->feature_dim = (fp_cfg.vision_output_dim > 0)
+                    ? fp_cfg.vision_output_dim : fp_cfg.hidden_size;
+
+                // Parse VL preprocessing config from bundle config
+                std::string config_text_vl;
+                if (sections.config_json_data != nullptr && !sections.config_json_data->empty())
+                {
+                    config_text_vl.assign(sections.config_json_data->begin(),
+                                          sections.config_json_data->end());
+                }
+                std::string preproc_text;
+                if (sections.preprocessor_config_data != nullptr &&
+                    !sections.preprocessor_config_data->empty())
+                {
+                    preproc_text.assign(sections.preprocessor_config_data->begin(),
+                                        sections.preprocessor_config_data->end());
+                }
+                auto vl_config = trtf::parse_vl_preprocess_config(config_text_vl, preproc_text);
+
+                emb_backend->set_vision_engine(std::move(vision_step_engine), std::move(vl_config));
+                std::cerr << "[trtf] VL vision engine loaded for embedding" << std::endl;
+            }
+        }
+        else
+        {
+            std::cerr << "[trtf] Warning: failed to deserialize vision engine for embedding: "
+                      << bundle_path << std::endl;
+        }
     }
 
     trtf::TokenizerResult tok = {nullptr, ""};
@@ -2774,7 +2872,7 @@ PipelineImpl* try_create_from_bundle(const std::string& bundle_path, const std::
     {
         return create_embedding_pipeline(
             std::move(trt_engine), std::move(exec_ctx), fp_cfg,
-            sections, bundle.info.model_id, hf_python, bundle_path);
+            sections, runtime_ptr, bundle.info.model_id, hf_python, bundle_path);
     }
 
     if (strategy == "reranking")

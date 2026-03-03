@@ -132,6 +132,20 @@ public:
         return nullptr;
     }
 
+    // Embed an image into a float vector. Returns pointer valid until next call or destruction.
+    virtual const float* embed_image(const char* image_path, int32_t* out_dim)
+    {
+        (void) image_path; (void) out_dim;
+        return nullptr;
+    }
+
+    // Embed text + image into a float vector. Returns pointer valid until next call or destruction.
+    virtual const float* embed_image_text(const char* text, const char* image_path, int32_t* out_dim)
+    {
+        (void) text; (void) image_path; (void) out_dim;
+        return nullptr;
+    }
+
     // Returns true if this pipeline supports reranking.
     virtual bool supports_reranking() const { return false; }
 

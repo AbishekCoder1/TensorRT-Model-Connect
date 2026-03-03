@@ -29,8 +29,14 @@ class EmbeddingRunner:
     ) -> StageOutput:
         bundle_path = os.path.join(ctx.engine_dir, case.bundle)
         prompt = case.inputs.get("prompt", "")
+        image_path = case.inputs.get("image", "")
 
-        cmd = [ctx.binary_path, "embed", bundle_path, "--prompt", prompt]
+        cmd = [ctx.binary_path, "embed", bundle_path]
+
+        if prompt:
+            cmd.extend(["--prompt", prompt])
+        if image_path:
+            cmd.extend(["--image", image_path])
 
         if ctx.hf_python:
             cmd.extend(["--hf-python", ctx.hf_python])

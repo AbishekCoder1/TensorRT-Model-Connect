@@ -1717,8 +1717,8 @@ class TestEagleVLMPlugin:
         assert vl_cfg is not None
         assert vl_cfg["embedding_dim"] == self.HIDDEN
         assert vl_cfg["preprocessor_type"] == "simple_chw"
-        # (384/14)^2 = 27^2 = 729
-        assert vl_cfg["num_vision_tokens"] == (384 // 14) ** 2
+        # After 2x2 pixel_shuffle merge: (384//14//2)^2 = 13^2 = 169
+        assert vl_cfg["num_vision_tokens"] == (384 // 14 // 2) ** 2
 
     def test_bundle_config_overrides_embedding(self, tmp_path):
         """Bundle config overrides: embedding mode."""
