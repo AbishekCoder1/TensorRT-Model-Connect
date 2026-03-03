@@ -48,6 +48,7 @@ def build_standard_dit_engine(
     qk_norm: bool = True,
     cross_attn_norm: bool = True,
     ffn_activation: str = "gelu_new",
+    use_rope: bool = True,
     eps: float = 1e-6,
     verbose: bool = False,
 ) -> bytes:
@@ -82,6 +83,9 @@ def build_standard_dit_engine(
         qk_norm: Apply RMSNorm to Q and K.
         cross_attn_norm: Apply LayerNorm before cross-attention.
         ffn_activation: Activation for FFN.
+        use_rope: Apply RoPE to self-attention Q/K. When False, the engine
+            omits rotary_cos/rotary_sin inputs (suitable for models that use
+            fixed position embeddings, e.g. PixArt).
         eps: LayerNorm epsilon.
         verbose: Enable TRT builder verbose logging.
 
@@ -110,10 +114,15 @@ def build_standard_dit_engine(
         "time_embed", trt.float32, (1, dim))
     encoder_hidden = network.add_input(
         "encoder_hidden_states", trt.float32, (text_seq_len, context_dim))
-    rotary_cos = network.add_input(
-        "rotary_cos", trt.float32, (num_patches, head_dim))
-    rotary_sin = network.add_input(
-        "rotary_sin", trt.float32, (num_patches, head_dim))
+
+    # Optional cross-attention mask: [1, 1, text_seq_len] float32.
+    # 0.0 for valid tokens, -10000.0 for padding.
+    # Only added when use_rope=False (PixArt, etc.) since Wan models
+    # don't need it (fixed-length text with no padding).
+    cross_attn_mask = None
+    if not use_rope:
+        cross_attn_mask = network.add_input(
+            "encoder_attention_mask", trt.float32, (1, 1, text_seq_len))
 
     # Constants
     eps_t = graph_ops.add_constant(
@@ -121,15 +130,20 @@ def build_standard_dit_engine(
     scale_const = graph_ops.add_constant(
         network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
 
-    # Build rotate-half matrix for RoPE
-    rot_half_np = graph_ops.make_rotate_half_matrix(head_dim * num_heads, num_heads, interleaved=True)
-    rot_half_const = graph_ops.add_constant(
-        network, (head_dim * num_heads, head_dim * num_heads), rot_half_np)
+    # RoPE inputs and precomputation (only when use_rope=True)
+    cos_expand = sin_expand = rot_half_const = None
+    if use_rope:
+        rotary_cos = network.add_input(
+            "rotary_cos", trt.float32, (num_patches, head_dim))
+        rotary_sin = network.add_input(
+            "rotary_sin", trt.float32, (num_patches, head_dim))
 
-    # Expand RoPE to full hidden size: [num_patches, head_dim] -> [num_patches, dim]
-    # Each head gets the same cos/sin (head_dim freqs repeated num_heads times)
-    cos_expand = _tile_rope_for_heads(network, rotary_cos, num_heads, num_patches, head_dim)
-    sin_expand = _tile_rope_for_heads(network, rotary_sin, num_heads, num_patches, head_dim)
+        rot_half_np = graph_ops.make_rotate_half_matrix(head_dim * num_heads, num_heads, interleaved=True)
+        rot_half_const = graph_ops.add_constant(
+            network, (head_dim * num_heads, head_dim * num_heads), rot_half_np)
+
+        cos_expand = _tile_rope_for_heads(network, rotary_cos, num_heads, num_patches, head_dim)
+        sin_expand = _tile_rope_for_heads(network, rotary_sin, num_heads, num_patches, head_dim)
 
     hidden = hidden_inp
 
@@ -195,31 +209,31 @@ def build_standard_dit_engine(
                 k = graph_ops.add_rms_norm(
                     network, k, dim, k_norm_w, eps_t)
 
-        # Apply RoPE to Q and K
-        # q, k: [num_patches, dim]
-        q_rot = network.add_matrix_multiply(
-            q, trt.MatrixOperation.NONE,
-            rot_half_const, trt.MatrixOperation.NONE)
-        q_cos = network.add_elementwise(
-            q, cos_expand, trt.ElementWiseOperation.PROD)
-        q_sin = network.add_elementwise(
-            q_rot.get_output(0), sin_expand,
-            trt.ElementWiseOperation.PROD)
-        q = network.add_elementwise(
-            q_cos.get_output(0), q_sin.get_output(0),
-            trt.ElementWiseOperation.SUM).get_output(0)
+        # Apply RoPE to Q and K (skip when use_rope=False)
+        if use_rope:
+            q_rot = network.add_matrix_multiply(
+                q, trt.MatrixOperation.NONE,
+                rot_half_const, trt.MatrixOperation.NONE)
+            q_cos = network.add_elementwise(
+                q, cos_expand, trt.ElementWiseOperation.PROD)
+            q_sin = network.add_elementwise(
+                q_rot.get_output(0), sin_expand,
+                trt.ElementWiseOperation.PROD)
+            q = network.add_elementwise(
+                q_cos.get_output(0), q_sin.get_output(0),
+                trt.ElementWiseOperation.SUM).get_output(0)
 
-        k_rot = network.add_matrix_multiply(
-            k, trt.MatrixOperation.NONE,
-            rot_half_const, trt.MatrixOperation.NONE)
-        k_cos = network.add_elementwise(
-            k, cos_expand, trt.ElementWiseOperation.PROD)
-        k_sin = network.add_elementwise(
-            k_rot.get_output(0), sin_expand,
-            trt.ElementWiseOperation.PROD)
-        k = network.add_elementwise(
-            k_cos.get_output(0), k_sin.get_output(0),
-            trt.ElementWiseOperation.SUM).get_output(0)
+            k_rot = network.add_matrix_multiply(
+                k, trt.MatrixOperation.NONE,
+                rot_half_const, trt.MatrixOperation.NONE)
+            k_cos = network.add_elementwise(
+                k, cos_expand, trt.ElementWiseOperation.PROD)
+            k_sin = network.add_elementwise(
+                k_rot.get_output(0), sin_expand,
+                trt.ElementWiseOperation.PROD)
+            k = network.add_elementwise(
+                k_cos.get_output(0), k_sin.get_output(0),
+                trt.ElementWiseOperation.SUM).get_output(0)
 
         # Multi-head attention
         q_heads = network.add_shuffle(q)
@@ -353,6 +367,11 @@ def build_standard_dit_engine(
         c_scaled = network.add_elementwise(
             c_score.get_output(0), scale_const,
             trt.ElementWiseOperation.PROD)
+        # Apply cross-attention mask if available (mask padding tokens)
+        if cross_attn_mask is not None:
+            c_scaled = network.add_elementwise(
+                c_scaled.get_output(0), cross_attn_mask,
+                trt.ElementWiseOperation.SUM)
         c_softmax = network.add_softmax(c_scaled.get_output(0))
         c_softmax.axes = 1 << 2
         c_context = network.add_matrix_multiply(

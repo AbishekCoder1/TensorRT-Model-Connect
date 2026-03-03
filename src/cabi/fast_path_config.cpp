@@ -368,6 +368,8 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.patch_size = extract_json_int_array(config_text, "patch_size");
         cfg.vae_model_id = extract_json_string(config_text, "vae_model_id", "");
         cfg.guidance_embeds = extract_json_int(config_text, "guidance_embeds", 0) != 0;
+        cfg.use_rope = extract_json_int(config_text, "use_rope", 1) != 0;
+        cfg.vae_scaling_factor = extract_json_float(config_text, "vae_scaling_factor", 0.0F);
         cfg.diffusion_backend_type = extract_json_string(config_text, "diffusion_backend_type", "wan_3d");
     }
 

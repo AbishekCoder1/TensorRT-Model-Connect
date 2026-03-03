@@ -305,6 +305,17 @@ elif family in ("z_image",):
         generator=torch.Generator("cuda").manual_seed(seed),
     )
     frames = output.images
+elif family in ("pixart",):
+    from diffusers import PixArtSigmaPipeline
+    pipe = PixArtSigmaPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
+    pipe.to("cuda")
+    output = pipe(
+        prompt=prompt,
+        num_inference_steps=num_steps,
+        height=1024, width=1024,
+        generator=torch.Generator("cuda").manual_seed(seed),
+    )
+    frames = output.images
 else:
     # Default: Wan-style text-to-video
     import ftfy  # noqa: F401 — required by WanPipeline prompt cleaning

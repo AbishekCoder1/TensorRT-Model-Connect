@@ -216,6 +216,8 @@ struct FastPathModelConfig {
     std::vector<int32_t> patch_size;    // [pt, ph, pw]
     std::string vae_model_id;
     bool guidance_embeds{false};
+    bool use_rope{true};
+    float vae_scaling_factor{0.0F};
     std::string diffusion_backend_type{"wan_3d"};
 };
 

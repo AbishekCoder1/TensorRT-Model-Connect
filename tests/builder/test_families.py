@@ -334,6 +334,10 @@ _POSITIVE_MATCH_CASES = [
     ("flux", "flux"),
     # Z-Image (diffusion T2I)
     ("z_image", "z_image"),
+    # PixArt (diffusion T2I)
+    ("pixart", "pixart"),
+    ("pixart_sigma", "pixart"),
+    ("pixart_alpha", "pixart"),
     # DeepSeek OCR (matches deepseek_vl_v2 model_type)
     ("deepseek_vl_v2", "deepseek_ocr"),
     # MagpieTTS (encoder-decoder TTS)

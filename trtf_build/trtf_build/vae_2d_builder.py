@@ -377,9 +377,22 @@ def build_vae_2d_decoder_engine(
     inp = network.add_input("latent_input", trt.float32,
                             (1, latent_channels, h_lat, w_lat))
 
+    # post_quant_conv: Conv2d(latent_channels, latent_channels, 1x1)
+    # Applied before the decoder in AutoencoderKL.decode().
+    try:
+        pqc_w = _get_weight(readers, "post_quant_conv.weight")
+        pqc_b = _get_weight(readers, "post_quant_conv.bias")
+        x = add_conv2d(
+            network, inp,
+            weight=pqc_w, bias=pqc_b,
+            out_channels=latent_channels,
+            kernel_size=(1, 1))
+    except KeyError:
+        x = inp  # No post_quant_conv (some VAEs omit it)
+
     # decoder.conv_in: Conv2d(latent_channels, 512, 3x3, pad=1)
     x = add_conv2d(
-        network, inp,
+        network, x,
         weight=_get_weight(readers, "decoder.conv_in.weight"),
         bias=_get_weight(readers, "decoder.conv_in.bias"),
         out_channels=ch_last,

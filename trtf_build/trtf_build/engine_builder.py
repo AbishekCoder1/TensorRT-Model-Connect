@@ -538,6 +538,14 @@ def _build_diffusion_bundle(
     cfg_data = json.dumps(cfg_dict, indent=2).encode("utf-8")
     sections.append(BundleSection("config.json", cfg_data))
 
+    # Ensure tokenizer.json exists for diffusion tokenizer directories.
+    # SentencePiece-only tokenizers (T5, PixArt) may lack tokenizer.json
+    # which the C++ HfPythonTokenizer needs.
+    for tok_subdir in ("tokenizer_2", "tokenizer"):
+        tok_dir = model_dir_path / tok_subdir
+        if tok_dir.is_dir() and not (tok_dir / "tokenizer.json").exists():
+            _ensure_tokenizer_json(tok_dir)
+
     # Embed tokenizer files from tokenizer subdirectories.
     # Multi-encoder models (FLUX, SD3) have tokenizer/ (CLIP) and
     # tokenizer_2/ (T5).  Prefer tokenizer_2/ if it has tokenizer.json

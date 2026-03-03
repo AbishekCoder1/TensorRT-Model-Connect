@@ -208,6 +208,7 @@ DiffusionBackendBase::DiffusionBackendBase(
     , mD_EncoderHidden(0)
     , mD_RotaryCos(0)
     , mD_RotarySin(0)
+    , mD_EncoderAttnMask(0)
     , mD_Output(0)
 {
     mOk = mStream.ok();
@@ -233,7 +234,15 @@ DiffusionBackendBase::DiffusionBackendBase(
         pw = mConfig.patch_size[2];
     }
     const int32_t num_patches = (t_lat / pt) * (h_lat / ph) * (w_lat / pw);
-    const int32_t out_dim = mConfig.z_dim * pt * ph * pw;
+    // Query the actual output dimension from the denoiser engine.
+    // PixArt outputs out_channels=8 (2*z_dim) while Wan outputs z_dim.
+    int32_t out_dim = mConfig.z_dim * pt * ph * pw;
+    if (mDenoiser.engine) {
+        const auto out_shape = mDenoiser.engine->getTensorShape("output");
+        if (out_shape.nbDims >= 2) {
+            out_dim = out_shape.d[out_shape.nbDims - 1];
+        }
+    }
 
     mD_InputIds = CudaBuffer(
         static_cast<std::size_t>(seq_len) * sizeof(int32_t));
@@ -254,6 +263,11 @@ DiffusionBackendBase::DiffusionBackendBase(
         static_cast<std::size_t>(num_patches) * static_cast<std::size_t>(head_dim) * sizeof(float));
     mD_RotarySin = CudaBuffer(
         static_cast<std::size_t>(num_patches) * static_cast<std::size_t>(head_dim) * sizeof(float));
+    if (!mConfig.use_rope) {
+        // Encoder attention mask: [1, 1, text_seq_len] for cross-attention masking
+        mD_EncoderAttnMask = CudaBuffer(
+            static_cast<std::size_t>(seq_len) * sizeof(float));
+    }
     mD_Output = CudaBuffer(
         static_cast<std::size_t>(num_patches) * static_cast<std::size_t>(out_dim) * sizeof(float));
 
@@ -361,7 +375,8 @@ bool DiffusionBackendBase::run_denoiser(
     const std::vector<float>& cos_vals,
     const std::vector<float>& sin_vals,
     std::vector<float>& output,
-    std::string& error)
+    std::string& error,
+    const std::vector<float>& encoder_attn_mask)
 {
     auto& ctx = mDenoiser.context;
 
@@ -377,19 +392,29 @@ bool DiffusionBackendBase::run_denoiser(
     cudaMemcpyAsync(mD_EncoderHidden.data(), encoder_hidden.data(),
         encoder_hidden.size() * sizeof(float),
         cudaMemcpyHostToDevice, mStream.get());
-    cudaMemcpyAsync(mD_RotaryCos.data(), cos_vals.data(),
-        cos_vals.size() * sizeof(float),
-        cudaMemcpyHostToDevice, mStream.get());
-    cudaMemcpyAsync(mD_RotarySin.data(), sin_vals.data(),
-        sin_vals.size() * sizeof(float),
-        cudaMemcpyHostToDevice, mStream.get());
+    if (mConfig.use_rope && !cos_vals.empty()) {
+        cudaMemcpyAsync(mD_RotaryCos.data(), cos_vals.data(),
+            cos_vals.size() * sizeof(float),
+            cudaMemcpyHostToDevice, mStream.get());
+        cudaMemcpyAsync(mD_RotarySin.data(), sin_vals.data(),
+            sin_vals.size() * sizeof(float),
+            cudaMemcpyHostToDevice, mStream.get());
+    }
 
     ctx->setTensorAddress("hidden_states", mD_Hidden.data());
     ctx->setTensorAddress("timestep_embedding", mD_Temb.data());
     ctx->setTensorAddress("time_embed", mD_TimeEmbed.data());
     ctx->setTensorAddress("encoder_hidden_states", mD_EncoderHidden.data());
-    ctx->setTensorAddress("rotary_cos", mD_RotaryCos.data());
-    ctx->setTensorAddress("rotary_sin", mD_RotarySin.data());
+    if (mConfig.use_rope) {
+        ctx->setTensorAddress("rotary_cos", mD_RotaryCos.data());
+        ctx->setTensorAddress("rotary_sin", mD_RotarySin.data());
+    }
+    if (!encoder_attn_mask.empty() && mD_EncoderAttnMask.size() > 0) {
+        cudaMemcpyAsync(mD_EncoderAttnMask.data(), encoder_attn_mask.data(),
+            encoder_attn_mask.size() * sizeof(float),
+            cudaMemcpyHostToDevice, mStream.get());
+        ctx->setTensorAddress("encoder_attention_mask", mD_EncoderAttnMask.data());
+    }
     ctx->setTensorAddress("output", mD_Output.data());
 
     if (!ctx->enqueueV3(mStream.get())) {

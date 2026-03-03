@@ -44,6 +44,8 @@ struct DiffusionConfig {
     std::string vae_model_id;
 
     bool guidance_embeds{false};
+    bool use_rope{true};
+    float vae_scaling_factor{0.0F};  // latent / sf before VAE (0 = no scaling)
 
     std::string diffusion_backend_type{"wan_3d"};
 };
@@ -172,7 +174,8 @@ protected:
                       const std::vector<float>& cos_vals,
                       const std::vector<float>& sin_vals,
                       std::vector<float>& output,
-                      std::string& error);
+                      std::string& error,
+                      const std::vector<float>& encoder_attn_mask = {});
 
     std::vector<DiffusionEngine> mTextEncoders;
     DiffusionEngine mDenoiser;
@@ -194,6 +197,7 @@ protected:
     CudaBuffer mD_EncoderHidden;
     CudaBuffer mD_RotaryCos;
     CudaBuffer mD_RotarySin;
+    CudaBuffer mD_EncoderAttnMask;
     CudaBuffer mD_Output;
 
     std::string mHfPython;
