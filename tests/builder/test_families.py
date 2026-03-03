@@ -343,6 +343,9 @@ _POSITIVE_MATCH_CASES = [
     # MagpieTTS (encoder-decoder TTS)
     ("magpie_tts", "magpie_tts"),
     ("decoder_ce", "magpie_tts"),
+    # Qwen3.5 (hybrid DeltaNet + Attention)
+    ("qwen3_5", "qwen3_5"),
+    ("qwen3.5", "qwen3_5"),
     # GPT-OSS (OpenAI MoE)
     ("gpt_oss", "gpt_oss"),
     # GLM-4

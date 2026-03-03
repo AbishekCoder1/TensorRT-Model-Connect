@@ -19,6 +19,7 @@ _HF_ALLOW_PATTERNS = [
     "preprocessor_config.json",
     "model.safetensors",
     "model-*.safetensors",
+    "model.safetensors-*.safetensors",
     "model.safetensors.index.json",
     "pytorch_model.bin",
     "tokenizer.json",

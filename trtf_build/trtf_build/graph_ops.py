@@ -111,6 +111,33 @@ def add_rms_norm_per_head(
     return reshape_out.get_output(0)
 
 
+def add_l2_norm(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    reduce_axis: int,
+    eps: float = 1e-12,
+) -> trt.ITensor:
+    """L2 normalize: x / max(||x||_2, eps) along reduce_axis.
+
+    Used for DeltaNet Q/K normalization (Gated DeltaNet architecture).
+    """
+    sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
+    sum_sq = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.SUM,
+        1 << reduce_axis, keep_dims=True)
+    norm = network.add_unary(sum_sq.get_output(0), trt.UnaryOperation.SQRT)
+    # max(norm, eps) to avoid division by zero
+    eps_const = add_constant(
+        network, (1,) * (reduce_axis + 1),
+        np.array([eps], dtype=np.float32))
+    safe_norm = network.add_elementwise(
+        norm.get_output(0), eps_const, trt.ElementWiseOperation.MAX)
+    recip = network.add_unary(safe_norm.get_output(0), trt.UnaryOperation.RECIP)
+    normalized = network.add_elementwise(
+        inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
+    return normalized.get_output(0)
+
+
 # ---------------------------------------------------------------------------
 # RoPE tables — pure NumPy, no TRT dependency
 # ---------------------------------------------------------------------------

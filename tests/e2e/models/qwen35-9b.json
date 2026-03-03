@@ -1,0 +1,12 @@
+{
+  "name": "qwen35-9b",
+  "hf_id": "Qwen/Qwen3.5-9B",
+  "bundle": "qwen35-9b.trtfb",
+  "family": "qwen3_5",
+  "runtime_strategy": "hybrid_mamba_attention",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 20,
+  "logit_atol": 0.005,
+  "trust_remote_code": true
+}

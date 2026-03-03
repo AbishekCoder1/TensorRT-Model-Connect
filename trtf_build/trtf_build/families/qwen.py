@@ -13,9 +13,12 @@ class QwenPlugin:
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         # Exclude vision-language variants (handled by qwen_vl plugin),
-        # MoE variants (handled by qwen_moe plugin), and
-        # omni variants (handled by qwen3_omni plugin).
+        # MoE variants (handled by qwen_moe plugin),
+        # omni variants (handled by qwen3_omni plugin), and
+        # Qwen3.5 hybrid variants (handled by qwen3_5 plugin).
         if "vl" in mt or "moe" in mt or "omni" in mt:
+            return False
+        if mt in {"qwen3_5", "qwen3.5"}:
             return False
         return mt.startswith("qwen") or mt.startswith("qwq")
 
