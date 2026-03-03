@@ -1,0 +1,15 @@
+{
+  "name": "whisper-large-v3-turbo",
+  "hf_id": "openai/whisper-large-v3-turbo",
+  "bundle": "whisper-large-v3-turbo.trtfb",
+  "family": "whisper",
+  "runtime_strategy": "speech_to_text",
+  "test_type": "transcription",
+  "max_cache_length": 64,
+  "prompt": "test",
+  "max_new_tokens": 20,
+  "logit_atol": 0.01,
+  "layer_atol": 0.1,
+  "trust_remote_code": false,
+  "test_input_audio": "data/Recording.wav"
+}

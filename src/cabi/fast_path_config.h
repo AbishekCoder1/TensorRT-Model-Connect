@@ -47,6 +47,10 @@ struct FastPathModelConfig {
     int32_t max_target_positions{448};
     int32_t encoder_layers{0};
     int32_t decoder_layers{0};
+    int32_t mel_n_fft{400};
+    int32_t mel_hop_length{160};
+    int32_t mel_chunk_length{30};
+    int32_t mel_sampling_rate{16000};
 
     // Vision-Language fields (used when runtime_strategy == "vision_language")
     bool has_vision_engine{false};  // bundle contains vision_engine_plan

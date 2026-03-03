@@ -30,10 +30,12 @@
 #include "runtime/trt/omni_backend.h"
 #include "runtime/trt/speech_backend.h"
 #include "runtime/trt/trt_common.h"
+#include "runtime/trt/mel_spectrogram.h"
 
 #include "stb_image_write.h"
 
 #include "utils/data_dir.h"
+#include "utils/wav_reader.h"
 
 #include <array>
 #include <chrono>
@@ -522,63 +524,47 @@ public:
         if (mWhisperBackend == nullptr || audio_path == nullptr)
             return nullptr;
 
+        if (mMelFilterbank.data.empty())
+        {
+            std::cerr << "[trtf] Bundle missing mel_filterbank section; "
+                         "rebuild with latest trtf-build" << std::endl;
+            return nullptr;
+        }
+
         try
         {
-            char mel_temp[] = "/tmp/trtf_mel_XXXXXX";
-            const int fd = mkstemp(mel_temp);
-            if (fd < 0)
-            {
-                std::cerr << "[trtf] Failed to create temp file for mel" << std::endl;
-                return nullptr;
-            }
-            close(fd);
+            auto wav = trtf::read_wav(std::string(audio_path));
+            std::cerr << "[trtf] WAV: " << wav.samples.size()
+                      << " samples @ " << wav.sample_rate << " Hz" << std::endl;
 
-            const std::string script = trtf::script_path("hf_mel_extract.py");
-            const std::string python = mHfPython.empty() ? "python3" : mHfPython;
-            const std::string cmd = shell_quote(python) + " " + shell_quote(script)
-                + " --audio " + shell_quote(std::string(audio_path))
-                + " --output " + shell_quote(std::string(mel_temp));
-
-            const auto sub = run_subprocess(cmd);
-            if (sub.exit_code != 0)
+            // Resample to target rate if needed
+            const float* audio_ptr = wav.samples.data();
+            auto audio_len = static_cast<int32_t>(wav.samples.size());
+            std::vector<float> resampled;
+            if (wav.sample_rate != mMelSamplingRate && wav.sample_rate > 0)
             {
-                std::cerr << "[trtf] Mel extraction failed: " << sub.output << std::endl;
-                std::error_code ec;
-                std::filesystem::remove(mel_temp, ec);
-                return nullptr;
+                resampled = trtf::resample_linear(
+                    wav.samples.data(), audio_len,
+                    wav.sample_rate, mMelSamplingRate);
+                audio_ptr = resampled.data();
+                audio_len = static_cast<int32_t>(resampled.size());
+                std::cerr << "[trtf] Resampled " << wav.sample_rate
+                          << " -> " << mMelSamplingRate << " Hz ("
+                          << wav.samples.size() << " -> " << audio_len
+                          << " samples)" << std::endl;
             }
 
-            std::ifstream in(mel_temp, std::ios::binary);
-            if (!in)
-            {
-                std::cerr << "[trtf] Failed to read mel temp file" << std::endl;
-                std::error_code ec;
-                std::filesystem::remove(mel_temp, ec);
-                return nullptr;
-            }
+            auto mel = trtf::extract_mel_spectrogram(
+                audio_ptr, audio_len,
+                mMelFilterbank.data.data(),
+                mMelFilterbank.n_freq_bins, mMelFilterbank.n_mel_bins,
+                mMelNfft, mMelHopLength, mMelChunkLength, mMelSamplingRate);
 
-            int32_t shape[2] = {0, 0};
-            in.read(reinterpret_cast<char*>(shape), sizeof(shape));
-            if (!in || shape[0] <= 0 || shape[1] <= 0)
-            {
-                std::cerr << "[trtf] Invalid mel shape" << std::endl;
-                std::error_code ec;
-                std::filesystem::remove(mel_temp, ec);
-                return nullptr;
-            }
-
-            const auto nf = static_cast<std::size_t>(shape[0]) * static_cast<std::size_t>(shape[1]);
-            std::vector<float> mel_data(nf);
-            in.read(reinterpret_cast<char*>(mel_data.data()),
-                static_cast<std::streamsize>(nf * sizeof(float)));
-            in.close();
-            { std::error_code ec; std::filesystem::remove(mel_temp, ec); }
-
-            std::cerr << "[trtf] Mel spectrogram: " << shape[0] << " bins x "
-                      << shape[1] << " frames" << std::endl;
+            std::cerr << "[trtf] Mel spectrogram: " << mel.n_mels << " bins x "
+                      << mel.n_frames << " frames" << std::endl;
 
             auto tr = mWhisperBackend->transcribe(
-                mel_data.data(), shape[0], shape[1],
+                mel.data.data(), mel.n_mels, mel.n_frames,
                 max_new_tokens > 0 ? max_new_tokens : 224);
 
             if (mTokenizer && !tr.output_ids.empty())
@@ -643,9 +629,19 @@ public:
     {
         mRerankBackend = std::move(backend);
     }
-    void set_whisper_backend(std::unique_ptr<trtf::WhisperBackend> backend)
+    void set_whisper_backend(std::unique_ptr<trtf::WhisperBackend> backend,
+                             trtf::MelFilterbank mel_fb = {},
+                             const trtf::FastPathModelConfig* fp_cfg = nullptr)
     {
         mWhisperBackend = std::move(backend);
+        mMelFilterbank = std::move(mel_fb);
+        if (fp_cfg)
+        {
+            mMelNfft = fp_cfg->mel_n_fft;
+            mMelHopLength = fp_cfg->mel_hop_length;
+            mMelChunkLength = fp_cfg->mel_chunk_length;
+            mMelSamplingRate = fp_cfg->mel_sampling_rate;
+        }
     }
     void set_sam_backend(std::unique_ptr<trtf::SamBackend> backend)
     {
@@ -948,119 +944,15 @@ public:
 #if TRTF_HAS_TRT
         if (!mSpeechBackend || !audio_in || !audio_out) return -1;
         try {
-            std::ifstream infile(audio_in, std::ios::binary);
-            if (!infile) return -1;
+            auto wav = trtf::read_wav(std::string(audio_in));
+            auto samples = std::move(wav.samples);
+            auto sample_rate = wav.sample_rate;
 
-            // Read full WAV file and parse chunks (do not assume 44-byte header).
-            std::vector<char> wav_bytes((std::istreambuf_iterator<char>(infile)),
-                                        std::istreambuf_iterator<char>());
-            if (wav_bytes.size() < 44) return -1;
-            if (std::memcmp(wav_bytes.data(), "RIFF", 4) != 0 ||
-                std::memcmp(wav_bytes.data() + 8, "WAVE", 4) != 0)
-            {
-                std::cerr << "[trtf] Invalid WAV container" << std::endl;
-                return -1;
-            }
-
-            uint16_t fmt_tag = 0;
-            uint16_t channels = 0;
-            uint32_t sample_rate = 0;
-            uint16_t bits_per_sample = 0;
-            const char* raw_ptr = nullptr;
-            std::size_t raw_size = 0;
-            bool have_fmt = false;
-            bool have_data = false;
-
-            std::size_t pos = 12;
-            while (pos + 8 <= wav_bytes.size())
-            {
-                const char* chunk = wav_bytes.data() + pos;
-                const char* chunk_data = chunk + 8;
-                auto chunk_size = *reinterpret_cast<const uint32_t*>(chunk + 4);
-                if (pos + 8 + static_cast<std::size_t>(chunk_size) > wav_bytes.size())
-                    break;
-
-                if (std::memcmp(chunk, "fmt ", 4) == 0)
-                {
-                    if (chunk_size < 16)
-                    {
-                        std::cerr << "[trtf] WAV fmt chunk too small" << std::endl;
-                        return -1;
-                    }
-                    fmt_tag = *reinterpret_cast<const uint16_t*>(chunk_data + 0);
-                    channels = *reinterpret_cast<const uint16_t*>(chunk_data + 2);
-                    sample_rate = *reinterpret_cast<const uint32_t*>(chunk_data + 4);
-                    bits_per_sample = *reinterpret_cast<const uint16_t*>(chunk_data + 14);
-                    have_fmt = true;
-                }
-                else if (std::memcmp(chunk, "data", 4) == 0)
-                {
-                    raw_ptr = chunk_data;
-                    raw_size = static_cast<std::size_t>(chunk_size);
-                    have_data = true;
-                    // Keep parsing in case fmt appears later, but first data is enough.
-                }
-
-                pos += 8 + static_cast<std::size_t>(chunk_size);
-                if ((chunk_size & 1U) != 0)
-                    ++pos;  // RIFF chunks are word-aligned.
-            }
-
-            if (!have_fmt || !have_data || raw_ptr == nullptr || raw_size == 0)
-            {
-                std::cerr << "[trtf] WAV missing fmt/data chunk" << std::endl;
-                return -1;
-            }
-
-            // Convert to float32 mono samples
-            std::vector<float> samples;
-            if (fmt_tag == 3 && bits_per_sample == 32)
-            {
-                // IEEE float32
-                auto ns = static_cast<int32_t>(raw_size / sizeof(float));
-                samples.resize(ns);
-                std::memcpy(samples.data(), raw_ptr, ns * sizeof(float));
-            }
-            else if (fmt_tag == 1 && bits_per_sample == 16)
-            {
-                // PCM int16
-                auto ns = static_cast<int32_t>(raw_size / sizeof(int16_t));
-                samples.resize(ns);
-                const auto* pcm = reinterpret_cast<const int16_t*>(raw_ptr);
-                for (int32_t i = 0; i < ns; ++i)
-                    samples[i] = static_cast<float>(pcm[i]) / 32768.0F;
-            }
-            else
-            {
-                std::cerr << "[trtf] Unsupported WAV format: tag="
-                          << fmt_tag << " bits=" << bits_per_sample << std::endl;
-                return -1;
-            }
-
-            // Convert stereo to mono (average channels)
-            if (channels == 2)
-            {
-                auto mono_len = static_cast<int32_t>(samples.size()) / 2;
-                std::vector<float> mono(mono_len);
-                for (int32_t i = 0; i < mono_len; ++i)
-                    mono[i] = (samples[2 * i] + samples[2 * i + 1]) * 0.5F;
-                samples = std::move(mono);
-            }
-            else if (channels > 2)
-            {
-                // Take first channel
-                auto mono_len = static_cast<int32_t>(samples.size()) / channels;
-                std::vector<float> mono(mono_len);
-                for (int32_t i = 0; i < mono_len; ++i)
-                    mono[i] = samples[i * channels];
-                samples = std::move(mono);
-            }
-
-            // Simple resample to 24kHz if needed (Mimi codec rate)
+            // Simple resample to target rate if needed (Mimi codec rate)
             const int32_t target_rate = mSpeechBackend->config().sample_rate;
             const bool prefer_python_codec =
                 !mSpeechBackend->config().hf_python.empty();
-            if (static_cast<int32_t>(sample_rate) != target_rate && sample_rate > 0)
+            if (sample_rate != target_rate && sample_rate > 0)
             {
                 if (prefer_python_codec)
                 {
@@ -1071,27 +963,12 @@ public:
                 else
                 {
                     auto in_len = static_cast<int32_t>(samples.size());
-                    auto out_len = static_cast<int32_t>(
-                        static_cast<int64_t>(in_len) * target_rate / sample_rate);
-                    std::vector<float> resampled(out_len);
-                    for (int32_t i = 0; i < out_len; ++i)
-                    {
-                        float src_pos = static_cast<float>(i) *
-                            static_cast<float>(sample_rate) /
-                            static_cast<float>(target_rate);
-                        auto idx = static_cast<int32_t>(src_pos);
-                        float frac = src_pos - static_cast<float>(idx);
-                        if (idx + 1 < in_len)
-                            resampled[i] = samples[idx] * (1.0F - frac)
-                                          + samples[idx + 1] * frac;
-                        else if (idx < in_len)
-                            resampled[i] = samples[idx];
-                    }
-                    samples = std::move(resampled);
+                    samples = trtf::resample_linear(
+                        samples.data(), in_len, sample_rate, target_rate);
                     std::cerr << "[trtf] Resampled " << sample_rate << " -> "
                               << target_rate << " Hz (" << in_len << " -> "
-                              << out_len << " samples)" << std::endl;
-                    sample_rate = static_cast<uint32_t>(target_rate);
+                              << samples.size() << " samples)" << std::endl;
+                    sample_rate = target_rate;
                 }
             }
 
@@ -1100,7 +977,7 @@ public:
             auto r = mSpeechBackend->process_audio(
                 samples.data(), ns,
                 max_output_frames > 0 ? max_output_frames : 375,
-                static_cast<int32_t>(sample_rate),
+                sample_rate,
                 std::max(0, tail_frames));
             if (r.num_samples <= 0) return -1;
             trtf::write_wav(std::string(audio_out),
@@ -1208,6 +1085,11 @@ private:
     std::unique_ptr<trtf::RerankingBackend> mRerankBackend;
     std::unique_ptr<trtf::SamBackend> mSamBackend;
     std::unique_ptr<trtf::WhisperBackend> mWhisperBackend;
+    trtf::MelFilterbank mMelFilterbank;
+    int32_t mMelNfft{400};
+    int32_t mMelHopLength{160};
+    int32_t mMelChunkLength{30};
+    int32_t mMelSamplingRate{16000};
 #endif
     std::string mHfPython;
 };
@@ -1378,13 +1260,22 @@ PipelineImpl* create_whisper_pipeline(
         throw std::runtime_error("Failed to create Whisper TRT backend from bundle engine");
     }
 
+    // Load mel filterbank from bundle (for native C++ mel extraction)
+    auto mel_fb = trtf::load_mel_filterbank(sections);
+    if (!mel_fb.data.empty())
+    {
+        std::cerr << "[trtf] Loaded mel filterbank from bundle: "
+                  << mel_fb.n_freq_bins << "x" << mel_fb.n_mel_bins << std::endl;
+    }
+
     std::cerr << "[trtf] Runtime ready (backend=trt_whisper, strategy=speech_to_text)" << std::endl;
 
     auto* pipeline = new PipelineImpl(
         model_id, std::move(tok.tokenizer), nullptr, "trt_whisper", trtf::GenerationConfig{});
     if (!tok.temp_dir.empty())
         pipeline->set_bundle_temp_dir(std::move(tok.temp_dir));
-    pipeline->set_whisper_backend(std::move(backend));
+    pipeline->set_whisper_backend(std::move(backend),
+                                  std::move(mel_fb), &fp_cfg);
     pipeline->set_hf_python(hf_python);
     return pipeline;
 }

@@ -74,10 +74,24 @@ struct BundleSections {
     const std::vector<char>* clip_vocab_json_data{nullptr};
     const std::vector<char>* clip_merges_txt_data{nullptr};
     const std::vector<char>* clip_special_tokens_data{nullptr};
+
+    // Whisper mel filterbank (baked at build time)
+    const std::vector<char>* mel_filterbank_data{nullptr};
 };
 
 // Scan bundle sections and populate pointers by name.
 BundleSections find_bundle_sections(const BundleFile& bundle);
+
+// Mel filterbank loaded from bundle (for Whisper native mel extraction).
+struct MelFilterbank {
+    std::vector<float> data;  // [n_freq_bins * n_mel_bins] row-major
+    int32_t n_freq_bins{0};
+    int32_t n_mel_bins{0};
+};
+
+// Load mel filterbank from the "mel_filterbank" bundle section.
+// Returns empty MelFilterbank if section is not present (old bundles).
+MelFilterbank load_mel_filterbank(const BundleSections& sections);
 
 // Result of extracting a tokenizer from a bundle.
 struct TokenizerResult {

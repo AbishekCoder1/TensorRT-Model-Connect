@@ -247,6 +247,55 @@ class WhisperPlugin:
             "has_vision_engine": True,
         }
 
+    def get_audio_config(self, config: ModelConfig) -> dict | None:
+        raw = config.raw
+        return {
+            "mel_n_fft": raw.get("n_fft", 400),
+            "mel_hop_length": raw.get("hop_length", 160),
+            "mel_chunk_length": raw.get("chunk_length", 30),
+            "mel_sampling_rate": raw.get("sampling_rate", 16000),
+        }
+
+    def build_extra_engines(self, config: ModelConfig, weights, max_cache_length: int, *, verbose: bool = False) -> dict | None:
+        """Bake the mel filterbank matrix into the bundle as a binary section."""
+        raw = config.raw
+        num_mel_bins = raw.get("num_mel_bins", 80)
+        n_fft = raw.get("n_fft", 400)
+        sampling_rate = raw.get("sampling_rate", 16000)
+        n_freq_bins = 1 + n_fft // 2  # 201 for n_fft=400
+
+        try:
+            from transformers.audio_utils import mel_filter_bank
+        except ImportError:
+            print("[trtf-build] Warning: transformers.audio_utils not available, "
+                  "skipping mel filterbank embedding", file=sys.stderr)
+            return None
+
+        # Compute the Slaney mel filterbank (matches WhisperFeatureExtractor)
+        # Returns shape [num_frequency_bins, num_mel_filters] = [201, 80]
+        filters = mel_filter_bank(
+            num_frequency_bins=n_freq_bins,
+            num_mel_filters=num_mel_bins,
+            min_frequency=0.0,
+            max_frequency=8000.0,
+            sampling_rate=sampling_rate,
+            norm="slaney",
+            mel_scale="slaney",
+        )
+        # filters shape: [num_frequency_bins, num_mel_filters] = [n_freq_bins, n_mel_bins]
+        # C++ expects: [n_freq_bins, n_mel_bins] (rows=freq, cols=mel) — same layout
+        filters_flat = np.ascontiguousarray(filters, dtype=np.float32)
+
+        # Pack as binary: [n_freq_bins(int32), n_mel_bins(int32), float32 data...]
+        header = np.array([n_freq_bins, num_mel_bins], dtype=np.int32)
+        mel_fb_bytes = header.tobytes() + filters_flat.tobytes()
+
+        if verbose:
+            print(f"[trtf-build] Mel filterbank: {n_freq_bins}x{num_mel_bins} "
+                  f"({len(mel_fb_bytes)} bytes)", file=sys.stderr)
+
+        return {"mel_filterbank": mel_fb_bytes}
+
 
 def _build_whisper_encoder(config, weights, *, verbose=False):
     enc_layers = weights["_enc_layers"]; enc_heads = weights["_enc_heads"]

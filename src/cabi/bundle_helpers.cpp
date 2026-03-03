@@ -1,6 +1,7 @@
 #include "cabi/bundle_helpers.h"
 
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -79,8 +80,45 @@ BundleSections find_bundle_sections(const BundleFile& bundle)
         else if (section.name == "clip_vocab.json") s.clip_vocab_json_data = &section.data;
         else if (section.name == "clip_merges.txt") s.clip_merges_txt_data = &section.data;
         else if (section.name == "clip_special_tokens_map.json") s.clip_special_tokens_data = &section.data;
+        // Whisper mel filterbank
+        else if (section.name == "mel_filterbank") s.mel_filterbank_data = &section.data;
     }
     return s;
+}
+
+MelFilterbank load_mel_filterbank(const BundleSections& sections)
+{
+    MelFilterbank fb;
+    if (sections.mel_filterbank_data == nullptr || sections.mel_filterbank_data->empty())
+        return fb;
+
+    const auto* data = sections.mel_filterbank_data;
+    // Format: [n_freq_bins(int32), n_mel_bins(int32), float32 data...]
+    if (data->size() < 2 * sizeof(int32_t))
+        return fb;
+
+    int32_t header[2] = {0, 0};
+    std::memcpy(header, data->data(), sizeof(header));
+    fb.n_freq_bins = header[0];
+    fb.n_mel_bins = header[1];
+
+    if (fb.n_freq_bins <= 0 || fb.n_mel_bins <= 0)
+        return fb;
+
+    const auto expected_data_size = static_cast<std::size_t>(fb.n_freq_bins) *
+        static_cast<std::size_t>(fb.n_mel_bins) * sizeof(float);
+    const auto payload_offset = 2 * sizeof(int32_t);
+    if (data->size() < payload_offset + expected_data_size)
+    {
+        fb.n_freq_bins = 0;
+        fb.n_mel_bins = 0;
+        return fb;
+    }
+
+    fb.data.resize(static_cast<std::size_t>(fb.n_freq_bins) * fb.n_mel_bins);
+    std::memcpy(fb.data.data(), data->data() + payload_offset,
+                expected_data_size);
+    return fb;
 }
 
 TokenizerResult extract_tokenizer_from_bundle(

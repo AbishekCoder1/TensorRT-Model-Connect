@@ -102,6 +102,8 @@ add_library(trtf_core
   src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
+  src/utils/wav_reader.cpp
+  src/runtime/trt/mel_spectrogram.cpp
 )
 
 target_include_directories(trtf_core
@@ -269,6 +271,16 @@ add_executable(test_neural_operator_config tests/cpp/test_neural_operator_config
 target_link_libraries(test_neural_operator_config PRIVATE trtf_core)
 target_include_directories(test_neural_operator_config PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_neural_operator_config COMMAND test_neural_operator_config)
+
+add_executable(test_wav_reader tests/cpp/test_wav_reader.cpp)
+target_link_libraries(test_wav_reader PRIVATE trtf_core)
+target_include_directories(test_wav_reader PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_wav_reader COMMAND test_wav_reader)
+
+add_executable(test_mel_spectrogram tests/cpp/test_mel_spectrogram.cpp)
+target_link_libraries(test_mel_spectrogram PRIVATE trtf_core)
+target_include_directories(test_mel_spectrogram PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_mel_spectrogram COMMAND test_mel_spectrogram)
 
 # --- Install ---
 include(CMakePackageConfigHelpers)

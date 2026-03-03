@@ -41,8 +41,9 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         raw_heads = extract_json_int(config_text, "decoder_attention_heads", 0);
     cfg.num_heads = std::max(raw_heads, 1);
 
-    // Whisper uses decoder_layers for layer count
-    if (raw_layers == 0)
+    // Whisper/encoder-decoder models: decoder_layers overrides num_hidden_layers
+    // because num_hidden_layers may reflect encoder depth (e.g., whisper-large-v3-turbo
+    // has 32 encoder layers but only 4 decoder layers for KV cache).
     {
         int32_t dl = extract_json_int(config_text, "decoder_layers", 0);
         if (dl > 0) cfg.num_layers = dl;
@@ -116,6 +117,10 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.max_target_positions = extract_json_int(config_text, "max_target_positions", 448);
         cfg.encoder_layers = extract_json_int(config_text, "encoder_layers", cfg.num_layers);
         cfg.decoder_layers = extract_json_int(config_text, "decoder_layers", cfg.num_layers);
+        cfg.mel_n_fft = extract_json_int(config_text, "mel_n_fft", 400);
+        cfg.mel_hop_length = extract_json_int(config_text, "mel_hop_length", 160);
+        cfg.mel_chunk_length = extract_json_int(config_text, "mel_chunk_length", 30);
+        cfg.mel_sampling_rate = extract_json_int(config_text, "mel_sampling_rate", 16000);
     }
 
     // Vision-Language fields
