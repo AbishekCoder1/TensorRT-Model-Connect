@@ -343,6 +343,8 @@ _POSITIVE_MATCH_CASES = [
     # MagpieTTS (encoder-decoder TTS)
     ("magpie_tts", "magpie_tts"),
     ("decoder_ce", "magpie_tts"),
+    # GPT-OSS (OpenAI MoE)
+    ("gpt_oss", "gpt_oss"),
     # GLM-4
     ("glm", "glm"),
 ]
@@ -448,6 +450,10 @@ class TestRuntimeStrategy:
 
     def test_mixtral_strategy(self):
         plugin = find_plugin("mixtral")
+        assert getattr(plugin, "runtime_strategy", None) == "decoder_moe"
+
+    def test_gpt_oss_strategy(self):
+        plugin = find_plugin("gpt_oss")
         assert getattr(plugin, "runtime_strategy", None) == "decoder_moe"
 
     def test_qwen_vl_strategy(self):

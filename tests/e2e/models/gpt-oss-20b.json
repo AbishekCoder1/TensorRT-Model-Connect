@@ -1,0 +1,20 @@
+{
+  "name": "gpt-oss-20b",
+  "hf_id": "openai/gpt-oss-20b",
+  "bundle": "gpt-oss-20b.trtfb",
+  "family": "gpt_oss",
+  "runtime_strategy": "decoder_moe",
+  "max_cache_length": 256,
+  "prompt": "<|start|>system<|message|>You are a helpful assistant.<|end|><|start|>user<|message|>What is the capital of France?<|end|><|start|>assistant",
+  "max_new_tokens": 20,
+  "logit_atol": 0.5,
+  "trust_remote_code": false,
+  "threshold_overrides": {
+    "logit_cosine_p5": 0.20,
+    "logit_rel_l2_p95": 1.50,
+    "stable_top1_match_rate": 0.20,
+    "unstable_topk_hit_rate": 0.75,
+    "token_agreement_rate": 0.25,
+    "normalized_text_edit_distance": 0.80
+  }
+}
