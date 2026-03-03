@@ -1,0 +1,13 @@
+{
+  "name": "glm-4-9b",
+  "hf_id": "THUDM/glm-4-9b-hf",
+  "bundle": "glm-4-9b.trtfb",
+  "family": "glm",
+  "runtime_strategy": "decoder_kv_cache",
+  "max_cache_length": 256,
+  "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+  "max_new_tokens": 20,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05,
+  "trust_remote_code": false
+}

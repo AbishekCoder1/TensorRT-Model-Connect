@@ -1756,3 +1756,126 @@ class TestEagleVLMPlugin:
         cfg = ModelConfig.from_dir(tmp_path)
         overrides = plugin.get_bundle_config_overrides(cfg)
         assert overrides["runtime_strategy"] == "reranking"
+
+
+# =========================================================================
+# GLM-4 — fused gate_up_proj split, Q/K/V biases with GQA expansion
+# =========================================================================
+
+class TestGlmPlugin:
+    VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS = 32, 16, 2, 4, 2
+    HEAD_DIM = HIDDEN // HEADS  # 4
+    Q_DIM = HEADS * HEAD_DIM    # 16
+    KV_DIM = KV_HEADS * HEAD_DIM  # 8
+    MLP_INTER = 24
+
+    def _make_tensors(self):
+        t = {}
+        t["model.embed_tokens.weight"] = _rand(self.VOCAB, self.HIDDEN)
+        for i in range(self.LAYERS):
+            p = f"model.layers.{i}"
+            t[f"{p}.input_layernorm.weight"] = _rand(self.HIDDEN)
+            t[f"{p}.post_attention_layernorm.weight"] = _rand(self.HIDDEN)
+            # Separate Q/K/V with biases
+            t[f"{p}.self_attn.q_proj.weight"] = _rand(self.Q_DIM, self.HIDDEN)
+            t[f"{p}.self_attn.q_proj.bias"] = _rand(self.Q_DIM)
+            t[f"{p}.self_attn.k_proj.weight"] = _rand(self.KV_DIM, self.HIDDEN)
+            t[f"{p}.self_attn.k_proj.bias"] = _rand(self.KV_DIM)
+            t[f"{p}.self_attn.v_proj.weight"] = _rand(self.KV_DIM, self.HIDDEN)
+            t[f"{p}.self_attn.v_proj.bias"] = _rand(self.KV_DIM)
+            t[f"{p}.self_attn.o_proj.weight"] = _rand(self.HIDDEN, self.HIDDEN)
+            # Fused gate_up: [2*intermediate, hidden]
+            fused_gate_up = _rand(2 * self.MLP_INTER, self.HIDDEN)
+            t[f"{p}.mlp.gate_up_proj.weight"] = fused_gate_up
+            t[f"{p}.mlp.down_proj.weight"] = _rand(self.HIDDEN, self.MLP_INTER)
+        t["model.norm.weight"] = _rand(self.HIDDEN)
+        t["lm_head.weight"] = _rand(self.VOCAB, self.HIDDEN)
+        return t
+
+    def test_gate_up_split(self, tmp_path):
+        """Fused gate_up should be correctly split into gate and up."""
+        from trtf_build.families.glm import plugin
+
+        config = {
+            "model_type": "glm",
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": 1,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+        }
+        tensors = self._make_tensors()
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg)
+
+        fused = tensors["model.layers.0.mlp.gate_up_proj.weight"]
+        gate_raw = fused[:self.MLP_INTER, :]
+        up_raw = fused[self.MLP_INTER:, :]
+
+        np.testing.assert_allclose(
+            weights["layer.0.w_gate"],
+            gate_raw.T.astype(np.float32), atol=1e-6)
+        np.testing.assert_allclose(
+            weights["layer.0.w_up"],
+            up_raw.T.astype(np.float32), atol=1e-6)
+
+    def test_qkv_biases_with_gqa_expansion(self, tmp_path):
+        """Q/K/V biases should be loaded; K/V biases GQA-expanded."""
+        from trtf_build.families.glm import plugin
+
+        config = {
+            "model_type": "glm",
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": 1,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+        }
+        tensors = self._make_tensors()
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg)
+
+        # Q bias: same size as q_dim (no expansion needed)
+        np.testing.assert_allclose(
+            weights["layer.0.q_bias"],
+            tensors["model.layers.0.self_attn.q_proj.bias"].astype(np.float32),
+            atol=1e-6)
+
+        # K/V biases: GQA-expanded from kv_dim to q_dim
+        assert weights["layer.0.k_bias"].shape == (self.Q_DIM,)
+        assert weights["layer.0.v_bias"].shape == (self.Q_DIM,)
+
+    def test_all_keys_present(self, tmp_path):
+        from trtf_build.families.glm import plugin
+
+        config = {
+            "model_type": "glm",
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": self.LAYERS,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+        }
+        tensors = self._make_tensors()
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg)
+
+        assert "embedding" in weights
+        for i in range(self.LAYERS):
+            for key in ("input_norm", "post_attn_norm", "w_q", "w_k", "w_v",
+                        "w_o", "w_gate", "w_up", "w_down",
+                        "q_bias", "k_bias", "v_bias"):
+                assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
+        assert "final_norm" in weights
+        assert "w_out" in weights
+        assert weights["_attention_size"] == self.Q_DIM
+        assert weights["_mlp_size"] == self.MLP_INTER

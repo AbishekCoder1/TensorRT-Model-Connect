@@ -343,6 +343,8 @@ _POSITIVE_MATCH_CASES = [
     # MagpieTTS (encoder-decoder TTS)
     ("magpie_tts", "magpie_tts"),
     ("decoder_ce", "magpie_tts"),
+    # GLM-4
+    ("glm", "glm"),
 ]
 
 
