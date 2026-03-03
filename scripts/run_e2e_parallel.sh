@@ -22,6 +22,7 @@
 #   --num-gpus N             Number of GPUs to use  (default: auto-detect)
 #   --workers-per-gpu N      Concurrent workers per GPU (default: 4)
 #   --task-strategy STR      Filter by task strategy
+#   --progress-interval N    Progress print interval in seconds (default: 30)
 #   All other args are passed through to pytest (e.g., --rebuild-engines)
 #
 # Environment variables (lower priority than CLI):
@@ -36,6 +37,7 @@ RESULT_DIR="${RESULT_DIR:-/workspace/users/yifeif/trt-transformers/test-result}"
 TRTF_BINARY="${TRTF_BINARY:-./build/trtf}"
 HF_PYTHON="${HF_PYTHON:-/opt/venv/bin/python}"
 WORKERS_PER_GPU="${WORKERS_PER_GPU:-4}"
+PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
 
 # Auto-detect GPUs if not specified
 if [ -z "${NUM_GPUS:-}" ]; then
@@ -57,6 +59,7 @@ while [ $# -gt 0 ]; do
         --hf-python)          HF_PYTHON="$2"; shift 2 ;;
         --num-gpus)           NUM_GPUS="$2"; shift 2 ;;
         --workers-per-gpu)    WORKERS_PER_GPU="$2"; shift 2 ;;
+        --progress-interval)  PROGRESS_INTERVAL="$2"; shift 2 ;;
         --task-strategy)
             FILTER_ARGS+=(--e2e-task-strategy "$2")
             shift 2
@@ -82,6 +85,7 @@ echo "  Engines:         $ENGINE_DIR"
 echo "  Results:         $RESULT_DIR"
 echo "  Binary:          $TRTF_BINARY"
 echo "  HF Python:       $HF_PYTHON"
+echo "  Progress every:  ${PROGRESS_INTERVAL}s"
 echo "  Extra args:      ${EXTRA_ARGS[*]:-none}"
 echo "  Filter:          ${FILTER_ARGS[*]:-all models}"
 echo ""
@@ -160,16 +164,128 @@ echo "  (live output suppressed to avoid interleaving — tail -f a log to watch
 echo "Waiting for all workers..."
 echo ""
 
+# --- Helpers ------------------------------------------------------------------
+
+format_duration() {
+    local total="$1"
+    local h=$(( total / 3600 ))
+    local m=$(( (total % 3600) / 60 ))
+    local s=$(( total % 60 ))
+    if [ "$h" -gt 0 ]; then
+        printf "%dh %02dm %02ds" "$h" "$m" "$s"
+    else
+        printf "%dm %02ds" "$m" "$s"
+    fi
+}
+
+collect_test_progress() {
+    local done=0 pass=0 fail=0 skip=0 xfail=0
+    local files=()
+    local f status
+
+    for f in "$RESULT_DIR"/console-gpu*-w*.log; do
+        [ -f "$f" ] && files+=("$f")
+    done
+
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "0 0 0 0 0"
+        return
+    fi
+
+    while IFS= read -r status; do
+        [ -z "$status" ] && continue
+        done=$((done + 1))
+        case "$status" in
+            PASSED) pass=$((pass + 1)) ;;
+            SKIPPED) skip=$((skip + 1)) ;;
+            XFAIL) xfail=$((xfail + 1)) ;;
+            FAILED|ERROR|XPASS) fail=$((fail + 1)) ;;
+        esac
+    done < <(
+        awk '
+            /test_e2e\[/ {
+                for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)$/) {
+                        print $i
+                        break
+                    }
+                }
+            }
+        ' "${files[@]}" 2>/dev/null || true
+    )
+
+    echo "$done $pass $fail $skip $xfail"
+}
+
+print_progress() {
+    local workers_done="$1"
+    local workers_running="$2"
+    local elapsed now done pass fail skip xfail pct eta
+    local eta_str=""
+
+    now=$(date +%s)
+    elapsed=$(( now - START_TIME ))
+    read -r done pass fail skip xfail < <(collect_test_progress)
+    pct=$(awk -v d="$done" -v t="$TOTAL" 'BEGIN { if (t == 0) printf "0.0"; else printf "%.1f", (100.0 * d / t) }')
+
+    if [ "$done" -gt 0 ] && [ "$done" -lt "$TOTAL" ]; then
+        eta=$(( elapsed * (TOTAL - done) / done ))
+        eta_str=" | ETA $(format_duration "$eta")"
+    fi
+
+    echo "[progress $(date +%H:%M:%S)] tests ${done}/${TOTAL} (${pct}%) pass=${pass} fail=${fail} skip=${skip} xfail=${xfail} | workers ${workers_done}/${TOTAL_WORKERS} done, ${workers_running} running | elapsed $(format_duration "$elapsed")${eta_str}"
+}
+
 # --- Wait and collect exit codes ----------------------------------------------
 
 FAILURES=0
+WORKERS_DONE=0
+LAST_PROGRESS_TS=0
+declare -a WORKER_FINISHED
 for i in "${!PIDS[@]}"; do
-    if ! wait "${PIDS[$i]}"; then
-        FAILURES=$((FAILURES + 1))
-        echo "  ${WORKER_LABELS[$i]}: FAILED (exit code $?)"
-    else
-        echo "  ${WORKER_LABELS[$i]}: OK"
+    WORKER_FINISHED[$i]=0
+done
+
+while [ "$WORKERS_DONE" -lt "$TOTAL_WORKERS" ]; do
+    RUNNING_NOW=0
+    for i in "${!PIDS[@]}"; do
+        if [ "${WORKER_FINISHED[$i]}" -eq 1 ]; then
+            continue
+        fi
+
+        pid="${PIDS[$i]}"
+        if kill -0 "$pid" 2>/dev/null; then
+            RUNNING_NOW=$((RUNNING_NOW + 1))
+            continue
+        fi
+
+        if wait "$pid"; then
+            rc=0
+        else
+            rc=$?
+        fi
+
+        WORKER_FINISHED[$i]=1
+        WORKERS_DONE=$((WORKERS_DONE + 1))
+        if [ "$rc" -ne 0 ]; then
+            FAILURES=$((FAILURES + 1))
+            echo "  ${WORKER_LABELS[$i]}: FAILED (exit code $rc)"
+        else
+            echo "  ${WORKER_LABELS[$i]}: OK"
+        fi
+
+        LOG="$RESULT_DIR/console-${WORKER_LABELS[$i]}.log"
+        SUMMARY=$(grep -E "^=+ .* in .* =+$" "$LOG" | tail -1 || true)
+        [ -n "$SUMMARY" ] && echo "    $SUMMARY"
+    done
+
+    NOW_TS=$(date +%s)
+    if [ "$LAST_PROGRESS_TS" -eq 0 ] || [ $(( NOW_TS - LAST_PROGRESS_TS )) -ge "$PROGRESS_INTERVAL" ] || [ "$RUNNING_NOW" -eq 0 ]; then
+        print_progress "$WORKERS_DONE" "$RUNNING_NOW"
+        LAST_PROGRESS_TS="$NOW_TS"
     fi
+
+    [ "$WORKERS_DONE" -lt "$TOTAL_WORKERS" ] && sleep 5
 done
 
 END_TIME=$(date +%s)

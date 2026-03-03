@@ -194,6 +194,11 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             args={"module": "diffusers"},
             gating=True,
         ))
+        reqs.append(PreflightRequirement(
+            kind="python_module_available",
+            args={"module": "ftfy"},
+            gating=True,
+        ))
 
     # HF auth for gated models
     if manifest.get("trust_remote_code"):

@@ -96,21 +96,59 @@ class HfDiffusersReference:
 
         script = f"""
 import torch, numpy as np, sys
+import transformers
 
 model_id = {model_id!r}
 prompt = {prompt!r}
 output_path = {output_path!r}
+
+transformers.logging.set_verbosity_error()
+
+
+def _retie_wan_text_encoder(pipe):
+    text_encoder = getattr(pipe, "text_encoder", None)
+    if text_encoder is None:
+        return
+    shared = getattr(text_encoder, "shared", None)
+    encoder = getattr(text_encoder, "encoder", None)
+    embed_tokens = getattr(encoder, "embed_tokens", None) if encoder is not None else None
+    if shared is None or embed_tokens is None:
+        return
+    if hasattr(text_encoder, "tie_weights"):
+        text_encoder.tie_weights()
+    if shared.weight.shape == embed_tokens.weight.shape and shared.weight.data_ptr() != embed_tokens.weight.data_ptr():
+        # Some transformers versions report embed_tokens as missing even though
+        # it should be tied to shared; enforce tying explicitly.
+        text_encoder.encoder.embed_tokens = text_encoder.shared
+    if shared.weight.data_ptr() != text_encoder.encoder.embed_tokens.weight.data_ptr():
+        raise RuntimeError("Wan text_encoder embeddings are not tied after load")
+
 
 # Try pipeline classes in order: Wan, Flux, generic DiffusionPipeline
 pipe = None
 for cls_name in ["WanPipeline", "FluxPipeline", "DiffusionPipeline"]:
     try:
         import diffusers
+        diffusers.logging.set_verbosity_error()
         cls = getattr(diffusers, cls_name, None)
         if cls is None:
             continue
-        pipe = cls.from_pretrained(
-            model_id, torch_dtype=torch.float32, low_cpu_mem_usage=True)
+        load_kwargs = dict(torch_dtype=torch.float32, low_cpu_mem_usage=True)
+        if cls_name == "WanPipeline":
+            # Prefer full materialization for robust tied-embedding loading.
+            # Newer diffusers can reject this for models with keep_in_fp32_modules,
+            # so we fall back to low_cpu_mem_usage=True.
+            try:
+                pipe = cls.from_pretrained(
+                    model_id, torch_dtype=torch.float32, low_cpu_mem_usage=False)
+            except ValueError as e:
+                if "keep_in_fp32_modules" not in str(e):
+                    raise
+                pipe = cls.from_pretrained(model_id, **load_kwargs)
+        else:
+            pipe = cls.from_pretrained(model_id, **load_kwargs)
+        if cls_name == "WanPipeline":
+            _retie_wan_text_encoder(pipe)
         print(f"Loaded {{cls_name}}", file=sys.stderr)
         break
     except Exception as e:
@@ -233,6 +271,9 @@ import torch
 import numpy as np
 from PIL import Image
 import os
+import transformers
+
+transformers.logging.set_verbosity_error()
 
 family = {family!r}
 model_id = {model_id!r}
@@ -268,7 +309,23 @@ else:
     # Default: Wan-style text-to-video
     import ftfy  # noqa: F401 — required by WanPipeline prompt cleaning
     from diffusers import WanPipeline
-    pipe = WanPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
+    try:
+        pipe = WanPipeline.from_pretrained(
+            model_id, torch_dtype=torch.float32, low_cpu_mem_usage=False)
+    except ValueError as e:
+        if "keep_in_fp32_modules" not in str(e):
+            raise
+        pipe = WanPipeline.from_pretrained(
+            model_id, torch_dtype=torch.float32, low_cpu_mem_usage=True)
+    if hasattr(pipe, "text_encoder"):
+        te = pipe.text_encoder
+        if hasattr(te, "tie_weights"):
+            te.tie_weights()
+        shared = getattr(te, "shared", None)
+        embed = getattr(getattr(te, "encoder", None), "embed_tokens", None)
+        if shared is not None and embed is not None and shared.weight.shape == embed.weight.shape:
+            if shared.weight.data_ptr() != embed.weight.data_ptr():
+                te.encoder.embed_tokens = te.shared
     pipe.to("cuda")
     output = pipe(
         prompt=prompt,

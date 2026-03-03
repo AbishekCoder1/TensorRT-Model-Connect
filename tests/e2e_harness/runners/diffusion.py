@@ -327,11 +327,29 @@ import sys, json, time
 sys.path.insert(0, {str(TOOLS_DIR)!r})
 import numpy as np
 import torch
+import transformers
+
+transformers.logging.set_verbosity_error()
 
 # Step 1: HF T5 encoding
 from diffusers import WanPipeline
-pipe = WanPipeline.from_pretrained(
-    {model_id!r}, torch_dtype=torch.float32, low_cpu_mem_usage=True)
+try:
+    pipe = WanPipeline.from_pretrained(
+        {model_id!r}, torch_dtype=torch.float32, low_cpu_mem_usage=False)
+except ValueError as e:
+    if "keep_in_fp32_modules" not in str(e):
+        raise
+    pipe = WanPipeline.from_pretrained(
+        {model_id!r}, torch_dtype=torch.float32, low_cpu_mem_usage=True)
+if hasattr(pipe, "text_encoder"):
+    te = pipe.text_encoder
+    if hasattr(te, "tie_weights"):
+        te.tie_weights()
+    shared = getattr(te, "shared", None)
+    embed = getattr(getattr(te, "encoder", None), "embed_tokens", None)
+    if shared is not None and embed is not None and shared.weight.shape == embed.weight.shape:
+        if shared.weight.data_ptr() != embed.weight.data_ptr():
+            te.encoder.embed_tokens = te.shared
 tokens = pipe.tokenizer(
     {prompt!r}, return_tensors="pt", padding="max_length",
     max_length=512, truncation=True)
@@ -437,6 +455,9 @@ import sys, json
 sys.path.insert(0, {str(TOOLS_DIR)!r})
 import numpy as np
 import torch
+import transformers
+
+transformers.logging.set_verbosity_error()
 
 # Step 1: TRT T5 encoding
 from trtf_build.diffusion_runner import DiffusionRunner
@@ -455,8 +476,23 @@ trt_t5_out = runner.encode_text(input_ids)
 
 # Step 2: HF DiT with TRT text embeddings
 from diffusers import WanPipeline
-pipe = WanPipeline.from_pretrained(
-    {model_id!r}, torch_dtype=torch.float32, low_cpu_mem_usage=True)
+try:
+    pipe = WanPipeline.from_pretrained(
+        {model_id!r}, torch_dtype=torch.float32, low_cpu_mem_usage=False)
+except ValueError as e:
+    if "keep_in_fp32_modules" not in str(e):
+        raise
+    pipe = WanPipeline.from_pretrained(
+        {model_id!r}, torch_dtype=torch.float32, low_cpu_mem_usage=True)
+if hasattr(pipe, "text_encoder"):
+    te = pipe.text_encoder
+    if hasattr(te, "tie_weights"):
+        te.tie_weights()
+    shared = getattr(te, "shared", None)
+    embed = getattr(getattr(te, "encoder", None), "embed_tokens", None)
+    if shared is not None and embed is not None and shared.weight.shape == embed.weight.shape:
+        if shared.weight.data_ptr() != embed.weight.data_ptr():
+            te.encoder.embed_tokens = te.shared
 
 z_dim = cfg.get("z_dim", 16)
 vh, vw, vf = cfg.get("video_height", 480), cfg.get("video_width", 832), cfg.get("video_num_frames", 17)
