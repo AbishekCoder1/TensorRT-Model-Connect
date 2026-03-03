@@ -1596,31 +1596,38 @@ PipelineImpl* create_magpie_tts_pipeline(
         }
     }
 
-    // Tokenizer: MagpieTTS uses NeMo IPA tokenizer via Python bridge
+    // Tokenizer: prefer native IPA tokenizer from bundle sections (no Python needed),
+    // fall back to Python bridge for old bundles with magpie_nemo_path.
     trtf::TokenizerResult tok = {nullptr, ""};
-    if (!fp_cfg.magpie_nemo_path.empty())
+    if (sections.magpie_ipa_phoneme_dict_data != nullptr &&
+        !sections.magpie_ipa_phoneme_dict_data->empty() &&
+        sections.magpie_ipa_vocab_data != nullptr &&
+        !sections.magpie_ipa_vocab_data->empty())
     {
         try
         {
-            tok.tokenizer = trtf::CreateMagpiePythonTokenizer(
-                fp_cfg.magpie_nemo_path, hf_python);
+            const auto* dict = sections.magpie_ipa_phoneme_dict_data;
+            const auto* het = sections.magpie_ipa_heteronyms_data;
+            const auto* voc = sections.magpie_ipa_vocab_data;
+            const auto* cfg = sections.magpie_ipa_config_data;
+            tok.tokenizer = trtf::CreateIpaTokenizer(
+                dict->data(), dict->size(),
+                (het != nullptr && !het->empty()) ? het->data() : nullptr,
+                (het != nullptr) ? het->size() : 0,
+                voc->data(), voc->size(),
+                (cfg != nullptr && !cfg->empty()) ? cfg->data() : nullptr,
+                (cfg != nullptr) ? cfg->size() : 0);
+            std::cerr << "[trtf] Using native IPA tokenizer from bundle" << std::endl;
         }
         catch (const std::exception& e)
         {
-            std::cerr << "[trtf] Warning: MagpieTTS tokenizer: " << e.what() << std::endl;
+            std::cerr << "[trtf] Warning: native IPA tokenizer failed: " << e.what() << std::endl;
         }
     }
     if (!tok.tokenizer)
     {
-        // Fallback: try HF tokenizer from bundle (unlikely for MagpieTTS)
-        try
-        {
-            tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
-        }
-        catch (const std::exception& e)
-        {
-            std::cerr << "[trtf] Warning: no tokenizer for MagpieTTS (" << e.what() << ")" << std::endl;
-        }
+        throw std::runtime_error("Bundle missing IPA tokenizer sections (magpie_ipa_phoneme_dict, "
+            "magpie_ipa_vocab). Rebuild the bundle with the latest trtf-build.");
     }
 
     std::cerr << "[trtf] Runtime ready (backend=trt_magpie_tts, strategy=text_to_audio)" << std::endl;

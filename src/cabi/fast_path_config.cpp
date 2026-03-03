@@ -215,7 +215,6 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
             cfg.magpie_max_source_positions = extract_json_int(config_text, "magpie_max_source_positions", 2048);
             cfg.magpie_xa_n_heads = extract_json_int(config_text, "magpie_xa_n_heads", 1);
             cfg.magpie_xa_d_head = extract_json_int(config_text, "magpie_xa_d_head", 128);
-            cfg.magpie_nemo_path = extract_json_string(config_text, "magpie_nemo_path", "");
             cfg.audio_sample_rate = extract_json_int(config_text, "sample_rate", 22050);
         }
     }

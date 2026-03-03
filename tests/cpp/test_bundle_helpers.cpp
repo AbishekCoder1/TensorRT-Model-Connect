@@ -190,6 +190,29 @@ static void test_find_sections_omni()
     check((*sections.code2wav_engine_plan_data)[0] == 'C', "find_sections omni: code2wav data[0]");
 }
 
+static void test_find_sections_magpie_ipa()
+{
+    trtf::BundleFile bundle;
+    bundle.sections.push_back({"engine_plan", {'P'}});
+    bundle.sections.push_back({"magpie_audio_embed", {'A', 'E'}});
+    bundle.sections.push_back({"magpie_ipa_phoneme_dict", {'D', 'I', 'C', 'T'}});
+    bundle.sections.push_back({"magpie_ipa_heteronyms", {'H', 'E', 'T'}});
+    bundle.sections.push_back({"magpie_ipa_vocab", {'V', 'O', 'C'}});
+    bundle.sections.push_back({"magpie_ipa_config", {'C', 'F', 'G'}});
+
+    const auto sections = trtf::find_bundle_sections(bundle);
+    check(sections.plan_data != nullptr, "find_sections magpie_ipa: engine_plan not null");
+    check(sections.magpie_audio_embed_data != nullptr, "find_sections magpie_ipa: audio_embed not null");
+    check(sections.magpie_ipa_phoneme_dict_data != nullptr, "find_sections magpie_ipa: phoneme_dict not null");
+    check(sections.magpie_ipa_heteronyms_data != nullptr, "find_sections magpie_ipa: heteronyms not null");
+    check(sections.magpie_ipa_vocab_data != nullptr, "find_sections magpie_ipa: vocab not null");
+    check(sections.magpie_ipa_config_data != nullptr, "find_sections magpie_ipa: config not null");
+    check(sections.magpie_ipa_phoneme_dict_data->size() == 4, "find_sections magpie_ipa: dict size");
+    check(sections.magpie_ipa_heteronyms_data->size() == 3, "find_sections magpie_ipa: het size");
+    check(sections.magpie_ipa_vocab_data->size() == 3, "find_sections magpie_ipa: vocab size");
+    check(sections.magpie_ipa_config_data->size() == 3, "find_sections magpie_ipa: config size");
+}
+
 #endif // TRTF_HAS_TRT
 
 int main()
@@ -205,6 +228,7 @@ int main()
     test_find_sections_diffusion();
     test_find_sections_speech();
     test_find_sections_omni();
+    test_find_sections_magpie_ipa();
 
     if (failures > 0)
     {

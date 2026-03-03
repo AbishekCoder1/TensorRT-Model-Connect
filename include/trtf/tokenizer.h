@@ -22,7 +22,10 @@ public:
 std::unique_ptr<ITokenizer> CreateVocabTokenizer(std::vector<std::string> vocab);
 std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir, std::string python_path = "",
                                                     bool add_special_tokens = false);
-std::unique_ptr<ITokenizer> CreateMagpiePythonTokenizer(std::string nemo_path,
-                                                        std::string python_path = "");
+std::unique_ptr<ITokenizer> CreateIpaTokenizer(
+    const char* phoneme_dict_data, std::size_t phoneme_dict_size,
+    const char* heteronyms_data, std::size_t heteronyms_size,
+    const char* vocab_data, std::size_t vocab_size,
+    const char* config_data, std::size_t config_size);
 
 } // namespace trtf

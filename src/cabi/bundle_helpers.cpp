@@ -39,6 +39,11 @@ BundleSections find_bundle_sections(const BundleFile& bundle)
         else if (section.name == "magpie_text_embed") s.magpie_text_embed_data = &section.data;
         else if (section.name == "magpie_context_embed") s.magpie_context_embed_data = &section.data;
         else if (section.name == "magpie_context_lengths") s.magpie_context_lengths_data = &section.data;
+        // MagpieTTS native IPA tokenizer sections
+        else if (section.name == "magpie_ipa_phoneme_dict") s.magpie_ipa_phoneme_dict_data = &section.data;
+        else if (section.name == "magpie_ipa_heteronyms") s.magpie_ipa_heteronyms_data = &section.data;
+        else if (section.name == "magpie_ipa_vocab") s.magpie_ipa_vocab_data = &section.data;
+        else if (section.name == "magpie_ipa_config") s.magpie_ipa_config_data = &section.data;
         // Speech-to-speech (PersonaPlex/Moshi) sections
         else if (section.name == "depth_engine_plan") s.depth_engine_plan_data = &section.data;
         else if (section.name == "mimi_encoder_plan") s.mimi_encoder_plan_data = &section.data;

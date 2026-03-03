@@ -129,7 +129,6 @@ struct FastPathModelConfig {
     int32_t magpie_max_source_positions{2048};
     int32_t magpie_xa_n_heads{1};
     int32_t magpie_xa_d_head{128};
-    std::string magpie_nemo_path;  // .nemo archive path for IPA tokenizer
 
     // Object detection fields (used when runtime_strategy == "object_detection")
     int32_t det_num_classes{80};

@@ -109,6 +109,194 @@ def _squeeze_conv1d_to_linear(conv_weight):
 
 
 # ---------------------------------------------------------------------------
+# IPA asset extraction for native C++ tokenizer
+# ---------------------------------------------------------------------------
+
+def _extract_ipa_assets(nemo_path: str) -> dict[str, bytes] | None:
+    """Extract IPA tokenizer assets from a NeMo archive for bundle baking.
+
+    Returns a dict with 4 keys ready for bundle sections:
+      - magpie_ipa_phoneme_dict: TSV (word<TAB>ph1 ph2 ph3) per line
+      - magpie_ipa_heteronyms: one word per line
+      - magpie_ipa_vocab: one token per line (line index = token ID)
+      - magpie_ipa_config: JSON config
+
+    Returns None if NeMo/IPATokenizer is not available (graceful degradation).
+    """
+    import json
+
+    # --- Step 1: Extract raw text files from the .nemo archive ---
+    phoneme_dict_text = None
+    heteronyms_text = None
+    model_config_yaml = None
+
+    path = Path(nemo_path)
+    if path.is_dir():
+        nemo_files = sorted(path.glob("*.nemo"))
+        if nemo_files:
+            path = nemo_files[0]
+
+    try:
+        import yaml
+        with tarfile.open(str(path), 'r') as tar:
+            for member in tar.getmembers():
+                basename = Path(member.name).name
+                if basename == "model_config.yaml":
+                    f = tar.extractfile(member)
+                    if f is not None:
+                        model_config_yaml = yaml.safe_load(f.read())
+                # The phoneme dict and heteronyms files are referenced in
+                # model_config.yaml but also bundled in the archive
+                if "ipa_cmudict" in basename and basename.endswith(".txt"):
+                    f = tar.extractfile(member)
+                    if f is not None:
+                        phoneme_dict_text = f.read().decode("utf-8")
+                if "heteronyms" in basename:
+                    f = tar.extractfile(member)
+                    if f is not None:
+                        heteronyms_text = f.read().decode("utf-8")
+    except Exception as e:
+        print(f"[trtf-build]   Warning: failed to read .nemo for IPA: {e}",
+              file=sys.stderr)
+        return None
+
+    # --- Step 2: If dict files not in archive, try filesystem paths from config ---
+    if phoneme_dict_text is None and model_config_yaml is not None:
+        text_tokenizer_cfg = model_config_yaml.get("text_tokenizer", {})
+        dict_path = text_tokenizer_cfg.get("phoneme_dict", None)
+        if dict_path and Path(dict_path).exists():
+            phoneme_dict_text = Path(dict_path).read_text(encoding="utf-8")
+        het_path = text_tokenizer_cfg.get("heteronyms", None)
+        if het_path and Path(het_path).exists():
+            heteronyms_text = Path(het_path).read_text(encoding="utf-8")
+
+    if phoneme_dict_text is None:
+        print("[trtf-build]   Warning: could not find IPA phoneme dict",
+              file=sys.stderr)
+        return None
+
+    # --- Step 3: Parse the phoneme dict into TSV format ---
+    # NeMo IPA dict format: "WORD  ɪpɑprənʌnsɪeɪʃən" or "WORD(N)  ..."
+    # Each pronunciation is a single IPA string (characters are individual tokens).
+    # We normalize to: "word<TAB>pronunciation_string\n"
+    # Multiple lines for the same word = multiple pronunciations.
+    tsv_lines = []
+    for line in phoneme_dict_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(";;;"):
+            continue
+        # Split on two-or-more spaces (NeMo format) or first whitespace block
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        word_raw = parts[0].strip()
+        pronunciation = parts[1].strip()
+        # Strip variant number: "WORD(2)" -> "word"
+        if "(" in word_raw:
+            word_raw = word_raw[:word_raw.index("(")]
+        word = word_raw.lower()
+        if word and pronunciation:
+            tsv_lines.append(f"{word}\t{pronunciation}")
+    phoneme_dict_tsv = "\n".join(tsv_lines) + "\n"
+
+    # --- Step 4: Get authoritative vocab from NeMo IPATokenizer ---
+    vocab_text = None
+    grapheme_prefix = "#"
+    eos_id = -1
+    ignore_ambiguous = True
+
+    try:
+        # Import the NeMo tokenizer loader from our scripts
+        from importlib.util import spec_from_file_location, module_from_spec
+        scripts_dir = Path(__file__).resolve().parent.parent.parent.parent / "scripts"
+        spec = spec_from_file_location(
+            "magpie_tokenizer", str(scripts_dir / "magpie_tokenizer.py"))
+        if spec and spec.loader:
+            mod = module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            tokenizer, text_vocab_size = mod.load_tokenizer(str(path))
+            # Extract vocab: _id2token is the authoritative mapping
+            if hasattr(tokenizer, '_id2token'):
+                id2token = tokenizer._id2token
+                vocab_lines = []
+                for i in range(len(id2token)):
+                    vocab_lines.append(str(id2token[i]))
+                vocab_text = "\n".join(vocab_lines) + "\n"
+
+            # Extract config from tokenizer / g2p attributes
+            g2p = getattr(tokenizer, 'g2p', None)
+            if g2p and hasattr(g2p, 'grapheme_prefix'):
+                gp = getattr(g2p, 'grapheme_prefix', '')
+                if gp:
+                    grapheme_prefix = str(gp)
+                else:
+                    grapheme_prefix = ""  # NeMo uses no prefix
+            else:
+                grapheme_prefix = ""  # NeMo default: no grapheme prefix
+            if g2p and hasattr(g2p, 'ignore_ambiguous_words'):
+                ignore_ambiguous = bool(g2p.ignore_ambiguous_words)
+            # EOS is text_vocab_size + 1 (NeMo convention, set by caller)
+            eos_id = text_vocab_size + 1 if text_vocab_size else -1
+    except Exception as e:
+        print(f"[trtf-build]   Warning: NeMo IPATokenizer not available "
+              f"for vocab extraction: {e}", file=sys.stderr)
+
+    # Fallback: build vocab from dict + known tokens if NeMo unavailable
+    if vocab_text is None:
+        print("[trtf-build]   Warning: building IPA vocab from dict "
+              "(NeMo tokenizer not available for exact vocab)", file=sys.stderr)
+        # Collect all unique tokens from the dict
+        tokens = set()
+        tokens.add("<pad>")
+        tokens.add("<eos>")
+        tokens.add(" ")  # space
+        # Punctuation
+        for p in ".,!?;:-":
+            tokens.add(p)
+        for line in tsv_lines:
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                for ph in parts[1].split():
+                    tokens.add(ph)
+                # Add grapheme tokens for the word
+                for ch in parts[0]:
+                    if ch.isalpha():
+                        tokens.add(f"{grapheme_prefix}{ch}")
+        vocab_list = sorted(tokens)
+        # Ensure <pad> is 0 and <eos> is 1
+        vocab_list = ["<pad>", "<eos>"] + [
+            t for t in vocab_list if t not in ("<pad>", "<eos>")]
+        eos_id = 1
+        vocab_text = "\n".join(vocab_list) + "\n"
+
+    # --- Step 5: Build config JSON ---
+    config_json = json.dumps({
+        "grapheme_prefix": grapheme_prefix,
+        "eos_id": eos_id,
+        "ignore_ambiguous_words": 1 if ignore_ambiguous else 0,
+    })
+
+    # --- Step 6: Build heteronyms text ---
+    if heteronyms_text is None:
+        heteronyms_text = ""
+    else:
+        # Normalize: one word per line, lowercase
+        het_lines = []
+        for line in heteronyms_text.splitlines():
+            word = line.strip().lower()
+            if word:
+                het_lines.append(word)
+        heteronyms_text = "\n".join(het_lines) + "\n" if het_lines else ""
+
+    return {
+        "magpie_ipa_phoneme_dict": phoneme_dict_tsv.encode("utf-8"),
+        "magpie_ipa_heteronyms": heteronyms_text.encode("utf-8"),
+        "magpie_ipa_vocab": vocab_text.encode("utf-8"),
+        "magpie_ipa_config": config_json.encode("utf-8"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # NeMo archive loading
 # ---------------------------------------------------------------------------
 
@@ -415,7 +603,6 @@ class MagpieTTSPlugin:
             "magpie_xa_n_heads": xa_n_heads,
             "magpie_xa_d_head": xa_d_head,
             "magpie_enc_kernel_size": enc_kernel_size,
-            "magpie_nemo_path": str(self._nemo_path),
         }
 
         return weights
@@ -617,6 +804,22 @@ class MagpieTTSPlugin:
             codec_plan = build_nanocodec_decoder_engine(
                 codec_sd, max_frames=max_codec_frames, verbose=verbose)
             result["codec_engine_plan"] = codec_plan
+
+        # Extract and bake IPA tokenizer assets (native C++ tokenizer)
+        if hasattr(self, '_nemo_path') and self._nemo_path:
+            try:
+                ipa_assets = _extract_ipa_assets(self._nemo_path)
+                if ipa_assets is not None:
+                    for key, data in ipa_assets.items():
+                        result[key] = data
+                    if verbose:
+                        for key, data in ipa_assets.items():
+                            print(f"[trtf-build]   Baked {key} "
+                                  f"({len(data)} bytes)", file=sys.stderr)
+            except Exception as e:
+                print(f"[trtf-build]   Warning: IPA extraction failed, "
+                      f"Python bridge will be needed at runtime: {e}",
+                      file=sys.stderr)
 
         return result
 

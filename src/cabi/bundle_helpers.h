@@ -47,6 +47,12 @@ struct BundleSections {
     const std::vector<char>* magpie_context_embed_data{nullptr};
     const std::vector<char>* magpie_context_lengths_data{nullptr};
 
+    // MagpieTTS native IPA tokenizer sections
+    const std::vector<char>* magpie_ipa_phoneme_dict_data{nullptr};
+    const std::vector<char>* magpie_ipa_heteronyms_data{nullptr};
+    const std::vector<char>* magpie_ipa_vocab_data{nullptr};
+    const std::vector<char>* magpie_ipa_config_data{nullptr};
+
     // Omni multimodal sections
     const std::vector<char>* audio_encoder_plan_data{nullptr};
     const std::vector<char>* talker_engine_plan_data{nullptr};

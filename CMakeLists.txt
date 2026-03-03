@@ -99,6 +99,7 @@ add_library(trtf_core
   src/runtime/trt/stb_impl.cpp
   src/tokenizer/hf_python_tokenizer.cpp
   src/tokenizer/vocab_tokenizer.cpp
+  src/tokenizer/ipa_tokenizer.cpp
   src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
@@ -257,6 +258,11 @@ add_executable(test_hf_python_tokenizer tests/cpp/test_hf_python_tokenizer.cpp)
 target_link_libraries(test_hf_python_tokenizer PRIVATE trtf_core)
 target_include_directories(test_hf_python_tokenizer PRIVATE ${PROJECT_SOURCE_DIR}/src)
 add_test(NAME test_hf_python_tokenizer COMMAND test_hf_python_tokenizer)
+
+add_executable(test_ipa_tokenizer tests/cpp/test_ipa_tokenizer.cpp)
+target_link_libraries(test_ipa_tokenizer PRIVATE trtf_core)
+target_include_directories(test_ipa_tokenizer PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_ipa_tokenizer COMMAND test_ipa_tokenizer)
 
 add_executable(test_bundle_helpers tests/cpp/test_bundle_helpers.cpp)
 target_link_libraries(test_bundle_helpers PRIVATE trtf_core)
