@@ -12,9 +12,10 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
     cfg.vocab_size = extract_json_int(config_text, "vocab_size", 0);
 
     // Support config aliases from various model families:
-    //   GPT-2:  n_embd, n_layer, n_head
-    //   XGLM:   d_model, num_layers, attention_heads
-    //   Bloom:   n_embed, n_layer, num_attention_heads (standard)
+    //   GPT-2:      n_embd, n_layer, n_head
+    //   XGLM:       d_model, num_layers, attention_heads
+    //   Bloom:       n_embed, n_layer, num_attention_heads (standard)
+    //   DistilBERT:  dim, n_layers, n_heads
     cfg.hidden_size = extract_json_int(config_text, "hidden_size", 0);
     if (cfg.hidden_size == 0)
         cfg.hidden_size = extract_json_int(config_text, "n_embd", 0);
@@ -22,12 +23,16 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.hidden_size = extract_json_int(config_text, "d_model", 0);
     if (cfg.hidden_size == 0)
         cfg.hidden_size = extract_json_int(config_text, "n_embed", 0);
+    if (cfg.hidden_size == 0)
+        cfg.hidden_size = extract_json_int(config_text, "dim", 0);
 
     int32_t raw_layers = extract_json_int(config_text, "num_hidden_layers", 0);
     if (raw_layers == 0)
         raw_layers = extract_json_int(config_text, "n_layer", 0);
     if (raw_layers == 0)
         raw_layers = extract_json_int(config_text, "num_layers", 0);
+    if (raw_layers == 0)
+        raw_layers = extract_json_int(config_text, "n_layers", 0);
     cfg.num_layers = std::max(raw_layers, 1);
 
     int32_t raw_heads = extract_json_int(config_text, "num_attention_heads", 0);
@@ -37,6 +42,8 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         raw_heads = extract_json_int(config_text, "attention_heads", 0);
     if (raw_heads == 0)
         raw_heads = extract_json_int(config_text, "num_heads", 0);
+    if (raw_heads == 0)
+        raw_heads = extract_json_int(config_text, "n_heads", 0);
     if (raw_heads == 0)
         raw_heads = extract_json_int(config_text, "decoder_attention_heads", 0);
     cfg.num_heads = std::max(raw_heads, 1);

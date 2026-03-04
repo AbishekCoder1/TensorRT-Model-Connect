@@ -58,12 +58,18 @@ EncoderResult EncoderBackend::encode(
     std::memcpy(padded_tt.data(), token_type_ids.data(),
                 tt_copy_len * sizeof(int32_t));
 
+    // Build attention mask: 1 for real tokens, 0 for padding
+    std::vector<int32_t> attn_mask(seq_len, 0);
+    for (std::size_t i = 0; i < copy_len; ++i)
+        attn_mask[i] = 1;
+
     // Allocate GPU buffers
     const auto ids_bytes = seq_len * sizeof(int32_t);
     CudaBuffer input_ids_buf(ids_bytes);
     CudaBuffer token_type_buf(ids_bytes);
+    CudaBuffer attn_mask_buf(ids_bytes);
 
-    if (!input_ids_buf.ok() || !token_type_buf.ok())
+    if (!input_ids_buf.ok() || !token_type_buf.ok() || !attn_mask_buf.ok())
         throw std::runtime_error("Failed to allocate GPU input buffers for encoder");
 
     const auto output_size = seq_len * hidden;
@@ -76,10 +82,13 @@ EncoderResult EncoderBackend::encode(
         cudaMemcpyHostToDevice, mStream.get());
     cudaMemcpyAsync(token_type_buf.data(), padded_tt.data(), ids_bytes,
         cudaMemcpyHostToDevice, mStream.get());
+    cudaMemcpyAsync(attn_mask_buf.data(), attn_mask.data(), ids_bytes,
+        cudaMemcpyHostToDevice, mStream.get());
 
     // Run TRT
     mContext->setTensorAddress("input_ids", input_ids_buf.data());
     mContext->setTensorAddress("token_type_ids", token_type_buf.data());
+    mContext->setTensorAddress("attention_mask", attn_mask_buf.data());
     mContext->setTensorAddress("hidden_states", output_buf.data());
     mContext->enqueueV3(mStream.get());
 

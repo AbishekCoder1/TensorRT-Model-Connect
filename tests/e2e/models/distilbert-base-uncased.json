@@ -1,0 +1,11 @@
+{
+  "name": "distilbert-base-uncased",
+  "hf_id": "distilbert/distilbert-base-uncased",
+  "bundle": "distilbert-base-uncased.trtfb",
+  "family": "distilbert",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 512,
+  "prompt": "The capital of France is Paris.",
+  "max_new_tokens": 0,
+  "trust_remote_code": false
+}

@@ -63,11 +63,15 @@ def build_encoder_engine(
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     trt_config.clear_flag(trt.BuilderFlag.TF32)
 
+    # Resolve GELU variant from config
+    hidden_act = config.hidden_act or config.raw.get("activation", "") or "gelu"
+
     # -------------------------------------------------------------------
     # Inputs
     # -------------------------------------------------------------------
     input_ids = network.add_input("input_ids", trt.int32, (max_seq_length,))
     token_type_ids = network.add_input("token_type_ids", trt.int32, (max_seq_length,))
+    attention_mask_input = network.add_input("attention_mask", trt.int32, (max_seq_length,))
 
     # -------------------------------------------------------------------
     # Shared constants
@@ -83,6 +87,24 @@ def build_encoder_engine(
         network, (1, 1), np.array([eps], dtype=np.float32))
     attn_scale_tensor = graph_ops.add_constant(
         network, (1, 1, 1), np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=np.float32))
+
+    # Build additive attention mask from attention_mask input:
+    # attention_mask is [seq_len] with 1=real, 0=padding.
+    # Convert to [1, 1, seq_len] additive mask: 0.0 for real, -1e10 for padding.
+    mask_float = network.add_cast(attention_mask_input, trt.float32)
+    ones_mask = graph_ops.add_constant(
+        network, (1,), np.array([1.0], dtype=np.float32))
+    neg_large = graph_ops.add_constant(
+        network, (1,), np.array([-1e10], dtype=np.float32))
+    inv_mask = network.add_elementwise(
+        ones_mask, mask_float.get_output(0),
+        trt.ElementWiseOperation.SUB)  # 0 for real, 1 for pad
+    pad_penalty = network.add_elementwise(
+        inv_mask.get_output(0), neg_large,
+        trt.ElementWiseOperation.PROD)  # 0.0 for real, -1e10 for pad
+    # Reshape to [1, 1, seq_len] for broadcasting: [num_heads, seq_len, seq_len]
+    pad_mask_reshape = network.add_shuffle(pad_penalty.get_output(0))
+    pad_mask_reshape.reshape_dims = (1, 1, max_seq_length)
 
     # Position indices: [0, 1, 2, ..., max_seq_length-1]
     position_indices = graph_ops.add_constant(
@@ -113,6 +135,16 @@ def build_encoder_engine(
         weights["embed_norm"], weights["embed_norm_beta"], eps)
 
     # -------------------------------------------------------------------
+    # Optional relative position bias (MPNet, T5-style)
+    # -------------------------------------------------------------------
+    rel_pos_bias_tensor = None
+    if "relative_position_bias" in weights:
+        # Pre-computed [num_heads, seq_len, seq_len] bias matrix
+        rpb = weights["relative_position_bias"]
+        rel_pos_bias_tensor = graph_ops.add_constant(
+            network, rpb.shape, rpb)
+
+    # -------------------------------------------------------------------
     # Encoder layers
     # -------------------------------------------------------------------
     for layer_idx in range(num_layers):
@@ -129,6 +161,9 @@ def build_encoder_engine(
             head_dim=head_dim,
             seq_length=max_seq_length,
             attn_scale_tensor=attn_scale_tensor,
+            attn_mask=pad_mask_reshape.get_output(0),
+            rel_pos_bias=rel_pos_bias_tensor,
+            hidden_act=hidden_act,
             eps=eps,
         )
 
@@ -212,6 +247,9 @@ def _add_encoder_layer(
     head_dim: int,
     seq_length: int,
     attn_scale_tensor: trt.ITensor,
+    attn_mask: trt.ITensor,
+    rel_pos_bias: trt.ITensor | None = None,
+    hidden_act: str = "gelu",
     eps: float,
 ) -> trt.ITensor:
     """Add one BERT encoder layer with POST-norm.
@@ -264,9 +302,21 @@ def _add_encoder_layer(
         score.get_output(0), attn_scale_tensor,
         trt.ElementWiseOperation.PROD)
 
-    # No causal mask for BERT — full bidirectional attention
-    # Softmax over last dimension
-    softmax = network.add_softmax(scaled.get_output(0))
+    # Add relative position bias if present (MPNet/T5-style)
+    scores_with_bias = scaled.get_output(0)
+    if rel_pos_bias is not None:
+        scores_with_bias = network.add_elementwise(
+            scores_with_bias, rel_pos_bias,
+            trt.ElementWiseOperation.SUM).get_output(0)
+
+    # Apply attention mask: add -1e10 penalty for padding positions
+    # attn_mask shape [1, 1, seq_len] broadcasts over [num_heads, seq_len, seq_len]
+    masked = network.add_elementwise(
+        scores_with_bias, attn_mask,
+        trt.ElementWiseOperation.SUM)
+
+    # Softmax over last dimension (bidirectional, masked)
+    softmax = network.add_softmax(masked.get_output(0))
     softmax.axes = 1 << 2  # last dim (seq_len)
 
     # Context: softmax @ V -> [num_heads, seq_len, head_dim]
@@ -301,7 +351,7 @@ def _add_encoder_layer(
         weights[f"{prefix}.w_fc1"])
     fc1 = graph_ops.add_bias_sum(network, fc1, intermediate_size,
                                   weights[f"{prefix}.fc1_bias"])
-    activated = graph_ops.add_activation(network, fc1, "gelu_new")
+    activated = graph_ops.add_activation(network, fc1, hidden_act)
     fc2 = graph_ops.add_matmul_rhs_constant(
         network, activated, intermediate_size, hidden_size,
         weights[f"{prefix}.w_fc2"])

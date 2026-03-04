@@ -31,11 +31,10 @@ class EncoderOnlyRunner:
         bundle_path = os.path.join(ctx.engine_dir, case.bundle)
         prompt = case.inputs.get("prompt", "")
 
-        # encoder-only models use 'run' with the bundle; output is hidden states
+        # encoder-only models use 'encode' to get hidden states / CLS embedding
         cmd = [
-            ctx.binary_path, "run", bundle_path,
+            ctx.binary_path, "encode", bundle_path,
             "--prompt", prompt,
-            "--max-new-tokens", "1",
         ]
 
         if ctx.hf_python:
@@ -76,8 +75,13 @@ class EncoderOnlyRunner:
 
 
 def _parse_encoder_output(stdout: str) -> dict:
-    """Parse encoder-only output (hidden states / CLS embedding)."""
-    # Try JSON
+    """Parse encoder-only output (hidden states / CLS embedding).
+
+    trtf encode outputs:
+        Hidden states shape: [512, 768]
+        [CLS] embedding (first 8 dims): -0.0522 0.0800 ...
+    """
+    # Try JSON first
     try:
         data = json.loads(stdout)
         if isinstance(data, dict):
@@ -85,7 +89,24 @@ def _parse_encoder_output(stdout: str) -> dict:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Try to extract CLS embedding from last non-empty line
+    # Parse "trtf encode" text format
+    cls_embedding = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        # "[CLS] embedding (first N dims): 0.1 0.2 0.3 ..."
+        if line.startswith("[CLS] embedding"):
+            colon_idx = line.find(":")
+            if colon_idx >= 0:
+                values_str = line[colon_idx + 1:].replace("...", "").strip()
+                try:
+                    cls_embedding = [float(x) for x in values_str.split() if x]
+                except ValueError:
+                    pass
+
+    if cls_embedding:
+        return {"cls_embedding": cls_embedding}
+
+    # Fall back: try last line as whitespace-separated floats
     for line in reversed(stdout.splitlines()):
         line = line.strip()
         if not line:
@@ -97,7 +118,6 @@ def _parse_encoder_output(stdout: str) -> dict:
         except ValueError:
             continue
 
-    # Fall back: store raw output for downstream comparator to handle
     return {"raw_output": stdout}
 
 

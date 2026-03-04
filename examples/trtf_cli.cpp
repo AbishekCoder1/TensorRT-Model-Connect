@@ -690,15 +690,16 @@ int cmd_encode(const CliArgs& args)
         return EXIT_FAILURE;
     }
 
-    // Print summary: shape and first few values of [CLS] token embedding
-    std::cout << "Hidden states shape: [" << seq_len << ", " << hidden_size << "]\n";
-    std::cout << "[CLS] embedding (first 8 dims):";
-    const int show = std::min(hidden_size, static_cast<int32_t>(8));
-    for (int i = 0; i < show; ++i)
+    // Output as JSON for programmatic parsing by E2E runner
+    std::cerr << "Hidden states shape: [" << seq_len << ", " << hidden_size << "]" << std::endl;
+    std::cout << "{\"cls_embedding\": [";
+    for (int i = 0; i < hidden_size; ++i)
     {
-        std::cout << " " << hidden_states[i];
+        if (i > 0) std::cout << ", ";
+        std::cout << hidden_states[i];
     }
-    std::cout << " ...\n";
+    std::cout << "], \"seq_len\": " << seq_len
+              << ", \"hidden_size\": " << hidden_size << "}\n";
 
     delete pipeline;
     return EXIT_SUCCESS;

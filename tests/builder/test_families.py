@@ -313,6 +313,13 @@ _POSITIVE_MATCH_CASES = [
     ("internvl3", "internvl"),
     # BERT (encoder-only)
     ("bert", "bert"),
+    # RoBERTa / XLM-RoBERTa (encoder-only)
+    ("roberta", "roberta"),
+    ("xlm-roberta", "roberta"),
+    # DistilBERT (encoder-only)
+    ("distilbert", "distilbert"),
+    # MPNet (encoder-only)
+    ("mpnet", "mpnet"),
     # Eagle VLM (embedding/reranking)
     ("llama_nemotron_vl", "eagle_vlm"),
     # Qwen3-Omni (omni multimodal)

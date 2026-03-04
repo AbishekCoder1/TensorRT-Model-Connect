@@ -1,0 +1,11 @@
+{
+  "name": "xlm-roberta-base",
+  "hf_id": "FacebookAI/xlm-roberta-base",
+  "bundle": "xlm-roberta-base.trtfb",
+  "family": "roberta",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 512,
+  "prompt": "The capital of France is Paris.",
+  "max_new_tokens": 0,
+  "trust_remote_code": false
+}

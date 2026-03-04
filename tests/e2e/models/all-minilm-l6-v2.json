@@ -1,0 +1,11 @@
+{
+  "name": "all-minilm-l6-v2",
+  "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
+  "bundle": "all-minilm-l6-v2.trtfb",
+  "family": "bert",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 512,
+  "prompt": "The capital of France is Paris.",
+  "max_new_tokens": 0,
+  "trust_remote_code": false
+}

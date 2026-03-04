@@ -1,0 +1,11 @@
+{
+  "name": "all-mpnet-base-v2",
+  "hf_id": "sentence-transformers/all-mpnet-base-v2",
+  "bundle": "all-mpnet-base-v2.trtfb",
+  "family": "mpnet",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 384,
+  "prompt": "This is an example sentence for embedding.",
+  "max_new_tokens": 0,
+  "trust_remote_code": false
+}
