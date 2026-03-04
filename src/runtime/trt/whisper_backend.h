@@ -33,6 +33,13 @@ struct WhisperConfig {
     int32_t notimestamps_token_id{50363};
     int32_t eot_token_id{50257};  // <|endoftext|>
     std::string language{"en"};
+
+    int32_t mel_length{0};  // expected mel input length; 0 = auto (max_source_positions * 2)
+
+    // Custom decoder start sequence (overrides individual token fields above).
+    // When non-empty, transcribe() uses this instead of building from individual fields.
+    // Set from bundle config.json "decoder_start_token_ids" for non-Whisper models (e.g. Canary).
+    std::vector<int32_t> decoder_start_token_ids;
 };
 
 #if TRTF_HAS_TRT
@@ -90,6 +97,7 @@ private:
 
     WhisperConfig mWhisperConfig;
     FastPathModelConfig mFpCfg;
+    int32_t mActualEncSeqLen{0};  // valid encoder output length (0 = full)
 };
 
 std::unique_ptr<WhisperBackend> CreateWhisperBackend(

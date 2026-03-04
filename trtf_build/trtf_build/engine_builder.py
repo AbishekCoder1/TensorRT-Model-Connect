@@ -128,6 +128,8 @@ def _resolve_nemo_archive(nemo_path: Path) -> str:
     model_type = "unknown"
     if "MagpieTTS" in target or "magpietts" in target.lower():
         model_type = "magpie_tts"
+    elif "EncDecMultiTaskModel" in target or "canary" in target.lower():
+        model_type = "canary"
     elif cfg.get("model_type", ""):
         model_type = cfg["model_type"]
 
@@ -137,14 +139,21 @@ def _resolve_nemo_archive(nemo_path: Path) -> str:
 
     # Write synthetic config.json for ModelConfig.from_dir()
     enc_cfg = cfg.get("encoder", {})
-    dec_cfg = cfg.get("decoder", {})
+    dec_cfg = cfg.get("decoder", cfg.get("transf_decoder", {}))
     hidden = enc_cfg.get("d_model", 768)
+    # Decoder fields vary by NeMo model type
+    dec_layers = dec_cfg.get("n_layers",
+                             dec_cfg.get("num_layers", 12))
+    dec_heads = dec_cfg.get("sa_n_heads",
+                            dec_cfg.get("num_attention_heads", 12))
+    dec_ffn = dec_cfg.get("d_ffn",
+                          dec_cfg.get("inner_size", 3072))
     synthetic_config = {
         "model_type": model_type,
         "hidden_size": hidden,
-        "num_hidden_layers": dec_cfg.get("n_layers", 12),
-        "num_attention_heads": dec_cfg.get("sa_n_heads", 12),
-        "intermediate_size": dec_cfg.get("d_ffn", 3072),
+        "num_hidden_layers": dec_layers,
+        "num_attention_heads": dec_heads,
+        "intermediate_size": dec_ffn,
         "vocab_size": 2380,  # Will be overridden from weights
         "rms_norm_eps": 1e-5,
         "_nemo_archive_path": str(nemo_path),

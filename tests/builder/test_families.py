@@ -350,6 +350,10 @@ _POSITIVE_MATCH_CASES = [
     ("gpt_oss", "gpt_oss"),
     # GLM-4
     ("glm", "glm"),
+    # Canary (FastConformer ASR)
+    ("canary", "canary"),
+    ("canary_asr", "canary"),
+    ("enc_dec_multi_task", "canary"),
 ]
 
 
@@ -490,6 +494,10 @@ class TestRuntimeStrategy:
     def test_nemotron_h_strategy(self):
         plugin = find_plugin("nemotron_h")
         assert getattr(plugin, "runtime_strategy", None) == "hybrid_mamba_attention"
+
+    def test_canary_strategy(self):
+        plugin = find_plugin("canary")
+        assert getattr(plugin, "runtime_strategy", None) == "speech_to_text"
 
     def test_standard_decoder_no_strategy(self):
         """Standard decoder plugins have no runtime_strategy (defaults to decoder_kv_cache)."""

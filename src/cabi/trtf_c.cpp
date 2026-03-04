@@ -1250,6 +1250,9 @@ PipelineImpl* create_whisper_pipeline(
     whisper_cfg.max_target_positions = fp_cfg.max_target_positions;
     whisper_cfg.encoder_layers = fp_cfg.encoder_layers;
     whisper_cfg.decoder_layers = fp_cfg.decoder_layers;
+    whisper_cfg.mel_length = fp_cfg.mel_length;
+    whisper_cfg.decoder_start_token_ids = fp_cfg.decoder_start_token_ids;
+    if (fp_cfg.eot_token_id >= 0) whisper_cfg.eot_token_id = fp_cfg.eot_token_id;
 
     auto tok = trtf::extract_tokenizer_from_bundle(sections, hf_python);
     auto backend = trtf::CreateWhisperBackend(

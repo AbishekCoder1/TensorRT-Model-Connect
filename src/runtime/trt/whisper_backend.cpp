@@ -79,15 +79,50 @@ TranscriptionResult WhisperBackend::transcribe(
     std::cerr << "[whisper] Running encoder ..." << std::endl;
     run_encoder(mel_data, mel_bins, mel_length);
 
+    // Compute actual encoder output length from mel input length.
+    // The encoder subsamples via strided convolutions. We compute the
+    // subsampling factor from the configured mel_length / max_source_positions
+    // and apply the same integer-division formula for each stride-2 stage.
+    const int32_t mel_full = mWhisperConfig.mel_length > 0
+        ? mWhisperConfig.mel_length
+        : mWhisperConfig.max_source_positions * 2;
+    if (mel_full > 0 && mel_length < mel_full)
+    {
+        const int32_t enc_full = mWhisperConfig.max_source_positions;
+        // Determine number of stride-2 stages: mel_full / enc_full ≈ 2^stages
+        int32_t ratio = (enc_full > 0) ? mel_full / enc_full : 2;
+        int32_t stages = 0;
+        while (ratio > 1) { ratio /= 2; ++stages; }
+        // Apply stride-2 subsampling formula for each stage
+        int32_t t = mel_length;
+        for (int32_t s = 0; s < stages; ++s)
+            t = (t + 2 - 3) / 2 + 1;
+        mActualEncSeqLen = t;
+        std::cerr << "[whisper] Actual encoder seq len: " << mActualEncSeqLen
+                  << " / " << enc_full << std::endl;
+    }
+    else
+    {
+        mActualEncSeqLen = 0;  // use full
+    }
+
     std::cerr << "[whisper] Computing cross-attention K/V ..." << std::endl;
     compute_cross_kv();
 
-    // Initial decoder tokens: <|startoftranscript|> <|en|> <|transcribe|> <|notimestamps|>
+    // Initial decoder tokens: use custom sequence if provided (e.g. Canary),
+    // otherwise Whisper default: <|startoftranscript|> <|en|> <|transcribe|> <|notimestamps|>
     std::vector<int32_t> initial_tokens;
-    initial_tokens.push_back(mWhisperConfig.decoder_start_token_id);
-    initial_tokens.push_back(mWhisperConfig.language_token_id);
-    initial_tokens.push_back(mWhisperConfig.transcribe_token_id);
-    initial_tokens.push_back(mWhisperConfig.notimestamps_token_id);
+    if (!mWhisperConfig.decoder_start_token_ids.empty())
+    {
+        initial_tokens = mWhisperConfig.decoder_start_token_ids;
+    }
+    else
+    {
+        initial_tokens.push_back(mWhisperConfig.decoder_start_token_id);
+        initial_tokens.push_back(mWhisperConfig.language_token_id);
+        initial_tokens.push_back(mWhisperConfig.transcribe_token_id);
+        initial_tokens.push_back(mWhisperConfig.notimestamps_token_id);
+    }
 
     std::cerr << "[whisper] Running decoder ..." << std::endl;
     auto output_ids = run_decoder(initial_tokens, max_new_tokens);
@@ -107,7 +142,9 @@ void WhisperBackend::run_encoder(
 {
     if (!mEncoderEngine || !mEncoderContext) return;
 
-    const int32_t expected_mel_length = mWhisperConfig.max_source_positions * 2;
+    const int32_t expected_mel_length = mWhisperConfig.mel_length > 0
+        ? mWhisperConfig.mel_length
+        : mWhisperConfig.max_source_positions * 2;
     const std::size_t mel_size = static_cast<std::size_t>(mel_bins) *
                                  static_cast<std::size_t>(expected_mel_length) * sizeof(float);
 
@@ -119,13 +156,56 @@ void WhisperBackend::run_encoder(
     }
     else
     {
-        // Pad or truncate
+        // Pad or truncate: copy row-by-row since source [mel_bins, mel_length]
+        // and destination [mel_bins, expected_mel_length] have different strides.
         std::vector<float> padded(mel_bins * expected_mel_length, 0.0F);
         const int32_t copy_len = std::min(mel_length, expected_mel_length);
-        std::memcpy(padded.data(), mel_data,
-                     static_cast<std::size_t>(mel_bins) *
-                     static_cast<std::size_t>(copy_len) * sizeof(float));
+        for (int32_t bin = 0; bin < mel_bins; ++bin)
+        {
+            std::memcpy(
+                padded.data() + static_cast<std::size_t>(bin) * expected_mel_length,
+                mel_data + static_cast<std::size_t>(bin) * mel_length,
+                static_cast<std::size_t>(copy_len) * sizeof(float));
+        }
         cudaMemcpy(mel_device.data(), padded.data(), mel_size, cudaMemcpyHostToDevice);
+    }
+
+    // Compute encoder attention mask if the engine has an encoder_mask input.
+    // Mask shape: [1, 1, enc_seq]. 0.0 for valid, -10000.0 for padded.
+    const int32_t enc_seq = mWhisperConfig.max_source_positions;
+    CudaBuffer mask_device(0);
+    bool has_mask_input = false;
+    {
+        const int32_t nt = mEncoderEngine->getNbIOTensors();
+        for (int32_t i = 0; i < nt; ++i)
+        {
+            if (std::string(mEncoderEngine->getIOTensorName(i)) == "encoder_mask")
+            {
+                has_mask_input = true;
+                break;
+            }
+        }
+    }
+    if (has_mask_input)
+    {
+        // Compute actual encoder seq len from mel_length
+        int32_t actual_enc = enc_seq;
+        if (mel_length < expected_mel_length)
+        {
+            int32_t ratio = (enc_seq > 0) ? expected_mel_length / enc_seq : 2;
+            int32_t stages = 0;
+            while (ratio > 1) { ratio /= 2; ++stages; }
+            int32_t t = mel_length;
+            for (int32_t s = 0; s < stages; ++s)
+                t = (t + 2 - 3) / 2 + 1;
+            actual_enc = t;
+        }
+        std::vector<float> mask(enc_seq, 0.0F);
+        for (int32_t i = actual_enc; i < enc_seq; ++i)
+            mask[i] = -10000.0F;
+        mask_device = CudaBuffer(enc_seq * sizeof(float));
+        cudaMemcpy(mask_device.data(), mask.data(),
+                    enc_seq * sizeof(float), cudaMemcpyHostToDevice);
     }
 
     // Set up encoder bindings
@@ -140,6 +220,10 @@ void WhisperBackend::run_encoder(
         else if (std::string(tensor_name) == "encoder_output")
         {
             mEncoderContext->setTensorAddress(tensor_name, mEncoderOutput.data());
+        }
+        else if (std::string(tensor_name) == "encoder_mask" && has_mask_input)
+        {
+            mEncoderContext->setTensorAddress(tensor_name, mask_device.data());
         }
     }
 
@@ -165,6 +249,19 @@ void WhisperBackend::compute_cross_kv()
     const int32_t hidden = mFpCfg.hidden_size;
     const std::size_t buf_size = static_cast<std::size_t>(enc_seq) *
                                  static_cast<std::size_t>(hidden) * sizeof(float);
+
+    // Zero-mask encoder output beyond valid positions so the decoder's
+    // cross-attention effectively ignores padded positions.
+    if (mActualEncSeqLen > 0 && mActualEncSeqLen < enc_seq)
+    {
+        const std::size_t valid_bytes = static_cast<std::size_t>(mActualEncSeqLen) *
+                                        static_cast<std::size_t>(hidden) * sizeof(float);
+        const std::size_t pad_bytes = buf_size - valid_bytes;
+        // Zero the padded region of encoder output on device
+        cudaMemset(
+            static_cast<char*>(mEncoderOutput.data()) + valid_bytes,
+            0, pad_bytes);
+    }
 
     for (std::size_t i = 0; i < mCrossK.size(); ++i)
     {

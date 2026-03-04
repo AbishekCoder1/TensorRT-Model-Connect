@@ -162,8 +162,10 @@ class SpeechToTextRunner:
             cmd, capture_output=True, text=True, timeout=600, env=env)
         elapsed = time.monotonic() - t0
 
-        # Parse output: expect transcript text on stdout
-        transcript = result.stdout.strip()
+        # Parse output: expect transcript text on stdout.
+        # Strip special tokens like <|notimestamp|>, <|endoftext|>, etc.
+        import re
+        transcript = re.sub(r'<\|[^|]+\|>', '', result.stdout).strip()
 
         # Try to extract token IDs if the binary outputs them
         token_ids = []

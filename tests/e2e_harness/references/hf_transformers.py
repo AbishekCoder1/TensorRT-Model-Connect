@@ -554,7 +554,11 @@ class HfTransformersReference:
     def _run_speech_to_text_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
-        """Run HF Whisper model for speech-to-text reference."""
+        """Run speech-to-text reference (Whisper via HF, Canary via NeMo)."""
+        family = case.metadata.get("family", case.family)
+        if family == "canary":
+            return self._run_canary_ref(case, stage, ctx)
+
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         output_path = str(Path(model_dir) / "hf_stt.json")
@@ -625,6 +629,110 @@ class HfTransformersReference:
                 result.stderr, ctx.artifacts_dir or "",
                 "hf_speech_to_text", case.name)
             msg = f"HF speech-to-text failed for {case.name} (rc={result.returncode}):\n{truncated}"
+            if log_path:
+                msg += f" (full stderr: {log_path})"
+            raise RuntimeError(msg)
+
+        data = {}
+        text = ""
+        if Path(output_path).is_file():
+            data = json.loads(Path(output_path).read_text())
+            text = data.get("text", "")
+
+        return StageOutput(
+            stage_name=stage.name, data=data, text=text, timing_s=elapsed,
+            metadata={"returncode": result.returncode})
+
+    def _run_canary_ref(
+        self, case: E2ECase, stage: StageSpec, ctx: RunContext
+    ) -> StageOutput:
+        """Run NeMo Canary model for speech-to-text reference."""
+        artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
+        model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
+        output_path = str(Path(model_dir) / "hf_stt.json")
+
+        audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
+        hf_id = case.hf_id
+
+        script = textwrap.dedent(f"""\
+            import json, numpy as np
+            import scipy.io.wavfile as wav
+
+            hf_id = {hf_id!r}
+            audio_path = {audio_path!r}
+            output_path = {output_path!r}
+
+            # Try NeMo ASR model
+            try:
+                import nemo.collections.asr as nemo_asr
+                import tempfile, struct
+                # Convert to mono WAV if needed (Canary requires mono)
+                sr_raw, audio_raw = wav.read(audio_path)
+                if audio_raw.dtype == np.int16:
+                    audio_f = audio_raw.astype(np.float32) / 32768.0
+                elif audio_raw.dtype == np.int32:
+                    audio_f = audio_raw.astype(np.float32) / 2147483648.0
+                else:
+                    audio_f = audio_raw.astype(np.float32)
+                if len(audio_f.shape) > 1:
+                    audio_f = audio_f.mean(axis=1)
+                # Write mono 16kHz WAV
+                target_sr = 16000
+                if sr_raw != target_sr:
+                    from scipy.signal import resample
+                    audio_f = resample(audio_f, int(len(audio_f)*target_sr/sr_raw)).astype(np.float32)
+                mono_path = audio_path + ".mono.wav"
+                audio_i16 = np.clip(audio_f * 32768, -32768, 32767).astype(np.int16)
+                wav.write(mono_path, target_sr, audio_i16)
+                model = nemo_asr.models.ASRModel.from_pretrained(hf_id, map_location="cpu")
+                model = model.cpu()
+                model.eval()
+                transcriptions = model.transcribe([mono_path], batch_size=1)
+                if isinstance(transcriptions, list):
+                    if hasattr(transcriptions[0], 'text'):
+                        text = transcriptions[0].text
+                    else:
+                        text = str(transcriptions[0])
+                else:
+                    text = str(transcriptions)
+            except ImportError:
+                # Fallback: try HF pipeline
+                import torch
+                from transformers import pipeline
+                sr, audio = wav.read(audio_path)
+                if audio.dtype == np.int16:
+                    audio = audio.astype(np.float32) / 32768.0
+                pipe = pipeline(
+                    "automatic-speech-recognition",
+                    model=hf_id,
+                    torch_dtype=torch.float32)
+                result = pipe(audio)
+                text = result.get("text", "")
+
+            result = {{"text": text}}
+            with open(output_path, "w") as f:
+                json.dump(result, f)
+            print(f"OK text={{text[:100]!r}}")
+        """)
+
+        python = ctx.hf_python or sys.executable
+        env = dict(os.environ)
+        if ctx.ld_library_path:
+            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+
+        t0 = time.monotonic()
+        result = subprocess.run(
+            [python, "-c", script],
+            capture_output=True, text=True, timeout=600, env=env,
+        )
+        elapsed = time.monotonic() - t0
+
+        if result.returncode != 0:
+            truncated, log_path = save_full_stderr(
+                result.stderr, ctx.artifacts_dir or "",
+                "nemo_canary_stt", case.name)
+            msg = (f"NeMo Canary reference failed for {case.name} "
+                   f"(rc={result.returncode}):\n{truncated}")
             if log_path:
                 msg += f" (full stderr: {log_path})"
             raise RuntimeError(msg)

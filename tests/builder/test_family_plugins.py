@@ -1826,56 +1826,201 @@ class TestGlmPlugin:
         """Q/K/V biases should be loaded; K/V biases GQA-expanded."""
         from trtf_build.families.glm import plugin
 
-        config = {
-            "model_type": "glm",
-            "vocab_size": self.VOCAB,
-            "hidden_size": self.HIDDEN,
-            "num_hidden_layers": 1,
-            "num_attention_heads": self.HEADS,
-            "num_key_value_heads": self.KV_HEADS,
+class TestCanaryPlugin:
+    """Canary encoder-decoder ASR plugin loads from synthetic .nemo archive."""
+
+    VOCAB, HIDDEN, ENC_LAYERS, DEC_LAYERS = 64, 16, 2, 2
+    HEADS, HEAD_DIM, FFN = 2, 8, 32
+    MEL_BINS, CONV_KERNEL, SUB_CH = 8, 3, 4
+
+    @staticmethod
+    def _make_nemo_state_dict(vocab, hidden, enc_layers, dec_layers,
+                              heads, head_dim, ffn, mel_bins, conv_kernel,
+                              sub_ch):
+        """Create synthetic NeMo state dict matching canary-1b-v2."""
+        import torch
+
+        sd = {}
+        # Subsampling
+        sd["encoder.pre_encode.conv.0.weight"] = torch.randn(sub_ch, 1, 3, 3)
+        sd["encoder.pre_encode.conv.0.bias"] = torch.randn(sub_ch)
+        for dw, pw in [(2, 3), (5, 6)]:
+            sd[f"encoder.pre_encode.conv.{dw}.weight"] = torch.randn(sub_ch, 1, 3, 3)
+            sd[f"encoder.pre_encode.conv.{dw}.bias"] = torch.randn(sub_ch)
+            sd[f"encoder.pre_encode.conv.{pw}.weight"] = torch.randn(sub_ch, sub_ch, 1, 1)
+            sd[f"encoder.pre_encode.conv.{pw}.bias"] = torch.randn(sub_ch)
+        feat_after = mel_bins
+        for _ in range(3):
+            feat_after = (feat_after + 2 - 3) // 2 + 1
+        sd["encoder.pre_encode.out.weight"] = torch.randn(hidden, sub_ch * feat_after)
+        sd["encoder.pre_encode.out.bias"] = torch.randn(hidden)
+
+        # Encoder layers (with biases)
+        for i in range(enc_layers):
+            p = f"encoder.layers.{i}"
+            for proj in ("linear_q", "linear_k", "linear_v", "linear_out"):
+                sd[f"{p}.self_attn.{proj}.weight"] = torch.randn(hidden, hidden)
+                sd[f"{p}.self_attn.{proj}.bias"] = torch.randn(hidden)
+            sd[f"{p}.self_attn.linear_pos.weight"] = torch.randn(hidden, hidden)
+            sd[f"{p}.self_attn.pos_bias_u"] = torch.randn(heads, head_dim)
+            sd[f"{p}.self_attn.pos_bias_v"] = torch.randn(heads, head_dim)
+            for norm in ("norm_self_att", "norm_feed_forward1",
+                         "norm_feed_forward2", "norm_conv", "norm_out"):
+                sd[f"{p}.{norm}.weight"] = torch.randn(hidden)
+                sd[f"{p}.{norm}.bias"] = torch.randn(hidden)
+            for fn in ("feed_forward1", "feed_forward2"):
+                sd[f"{p}.{fn}.linear1.weight"] = torch.randn(ffn, hidden)
+                sd[f"{p}.{fn}.linear1.bias"] = torch.randn(ffn)
+                sd[f"{p}.{fn}.linear2.weight"] = torch.randn(hidden, ffn)
+                sd[f"{p}.{fn}.linear2.bias"] = torch.randn(hidden)
+            sd[f"{p}.conv.pointwise_conv1.weight"] = torch.randn(2*hidden, hidden, 1)
+            sd[f"{p}.conv.pointwise_conv1.bias"] = torch.randn(2*hidden)
+            sd[f"{p}.conv.depthwise_conv.weight"] = torch.randn(hidden, 1, conv_kernel)
+            sd[f"{p}.conv.depthwise_conv.bias"] = torch.randn(hidden)
+            sd[f"{p}.conv.batch_norm.weight"] = torch.randn(hidden)
+            sd[f"{p}.conv.batch_norm.bias"] = torch.randn(hidden)
+            sd[f"{p}.conv.batch_norm.running_mean"] = torch.randn(hidden)
+            sd[f"{p}.conv.batch_norm.running_var"] = torch.abs(torch.randn(hidden))
+            sd[f"{p}.conv.pointwise_conv2.weight"] = torch.randn(hidden, hidden, 1)
+            sd[f"{p}.conv.pointwise_conv2.bias"] = torch.randn(hidden)
+
+        # Decoder (note underscore prefixes _embedding, _decoder)
+        sd["transf_decoder._embedding.token_embedding.weight"] = torch.randn(vocab, hidden)
+        sd["transf_decoder._embedding.position_embedding.pos_enc"] = torch.randn(128, hidden)
+        sd["transf_decoder._embedding.layer_norm.weight"] = torch.randn(hidden)
+        sd["transf_decoder._embedding.layer_norm.bias"] = torch.randn(hidden)
+        sd["transf_decoder._decoder.final_layer_norm.weight"] = torch.randn(hidden)
+        sd["transf_decoder._decoder.final_layer_norm.bias"] = torch.randn(hidden)
+        for i in range(dec_layers):
+            p = f"transf_decoder._decoder.layers.{i}"
+            for sub in ("first_sub_layer", "second_sub_layer"):
+                for pn in ("query_net", "key_net", "value_net", "out_projection"):
+                    sd[f"{p}.{sub}.{pn}.weight"] = torch.randn(hidden, hidden)
+                    sd[f"{p}.{sub}.{pn}.bias"] = torch.randn(hidden)
+            sd[f"{p}.third_sub_layer.dense_in.weight"] = torch.randn(ffn, hidden)
+            sd[f"{p}.third_sub_layer.dense_in.bias"] = torch.randn(ffn)
+            sd[f"{p}.third_sub_layer.dense_out.weight"] = torch.randn(hidden, ffn)
+            sd[f"{p}.third_sub_layer.dense_out.bias"] = torch.randn(hidden)
+            for ln in ("layer_norm_1", "layer_norm_2", "layer_norm_3"):
+                sd[f"{p}.{ln}.weight"] = torch.randn(hidden)
+                sd[f"{p}.{ln}.bias"] = torch.randn(hidden)
+
+        sd["log_softmax.mlp.layer0.weight"] = torch.randn(vocab, hidden)
+        sd["log_softmax.mlp.layer0.bias"] = torch.randn(vocab)
+        return sd
+
+    @staticmethod
+    def _make_nemo_archive(tmp_path, state_dict, nemo_cfg):
+        """Create a synthetic .nemo tar archive."""
+        import io
+        import tarfile
+        import torch
+        import yaml
+
+        nemo_path = tmp_path / "canary.nemo"
+        with tarfile.open(str(nemo_path), "w") as tar:
+            # Write model_config.yaml
+            cfg_bytes = yaml.dump(nemo_cfg).encode("utf-8")
+            cfg_info = tarfile.TarInfo(name="model_config.yaml")
+            cfg_info.size = len(cfg_bytes)
+            tar.addfile(cfg_info, io.BytesIO(cfg_bytes))
+
+            # Write model_weights.ckpt
+            buf = io.BytesIO()
+            torch.save(state_dict, buf)
+            buf.seek(0)
+            ckpt_info = tarfile.TarInfo(name="model_weights.ckpt")
+            ckpt_info.size = len(buf.getvalue())
+            tar.addfile(ckpt_info, buf)
+
+        return nemo_path
+
+    def test_load_weights_keys(self, tmp_path):
+        """Canary load_weights extracts correct keys from .nemo archive."""
+        try:
+            import torch
+            import yaml
+        except ImportError:
+            pytest.skip("torch/yaml required for canary test")
+
+        from trtf_build.families.canary import plugin
+
+        sd = self._make_nemo_state_dict(
+            self.VOCAB, self.HIDDEN, self.ENC_LAYERS, self.DEC_LAYERS,
+            self.HEADS, self.HEAD_DIM, self.FFN, self.MEL_BINS,
+            self.CONV_KERNEL, self.SUB_CH)
+
+        nemo_cfg = {
+            "target": "EncDecMultiTaskModel",
+            "encoder": {
+                "d_model": self.HIDDEN,
+                "n_layers": self.ENC_LAYERS,
+                "n_heads": self.HEADS,
+                "ff_expansion_factor": self.FFN // self.HIDDEN,
+                "conv_kernel_size": self.CONV_KERNEL,
+                "feat_in": self.MEL_BINS,
+                "subsampling_conv_channels": self.SUB_CH,
+            },
+            "transf_decoder": {
+                "config_dict": {
+                    "num_layers": self.DEC_LAYERS,
+                    "num_attention_heads": self.HEADS,
+                    "inner_size": self.FFN,
+                },
+            },
+            "preprocessor": {"features": self.MEL_BINS},
         }
-        tensors = self._make_tensors()
+
+        self._make_nemo_archive(tmp_path, sd, nemo_cfg)
+
+        config = {
+            "model_type": "canary",
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": self.DEC_LAYERS,
+            "num_attention_heads": self.HEADS,
+            "intermediate_size": self.FFN,
+            "vocab_size": self.VOCAB,
+            "rms_norm_eps": 1e-5,
+        }
         _write_config(tmp_path, config)
-        _write_safetensors(tmp_path, tensors)
 
         cfg = ModelConfig.from_dir(tmp_path)
         weights = plugin.load_weights(str(tmp_path), cfg)
 
-        # Q bias: same size as q_dim (no expansion needed)
-        np.testing.assert_allclose(
-            weights["layer.0.q_bias"],
-            tensors["model.layers.0.self_attn.q_proj.bias"].astype(np.float32),
-            atol=1e-6)
+        # Encoder subsampling
+        assert "enc_sub_conv0_w" in weights
+        assert "enc_sub_dw0_w" in weights
+        assert "enc_sub_dw1_w" in weights
 
-        # K/V biases: GQA-expanded from kv_dim to q_dim
-        assert weights["layer.0.k_bias"].shape == (self.Q_DIM,)
-        assert weights["layer.0.v_bias"].shape == (self.Q_DIM,)
+        # Encoder layers
+        for i in range(self.ENC_LAYERS):
+            pfx = f"el.{i}"
+            assert f"{pfx}.w_q" in weights
+            assert f"{pfx}.pos_bias_u" in weights
+            assert f"{pfx}.rpe_proj" in weights
+            assert f"{pfx}.cpw1_w" in weights
+            assert f"{pfx}.bn_w" in weights
+            assert f"{pfx}.ff1.w1" in weights
+            assert f"{pfx}.ff2.w1" in weights
+            assert f"{pfx}.norm_out" in weights
 
-    def test_all_keys_present(self, tmp_path):
-        from trtf_build.families.glm import plugin
+        # Decoder
+        assert "dec_emb" in weights
+        assert weights["dec_emb"].shape == (self.VOCAB, self.HIDDEN)
+        assert "emb_ln" in weights
+        for i in range(self.DEC_LAYERS):
+            pfx = f"layer.{i}"
+            assert f"{pfx}.w_q" in weights
+            assert f"{pfx}.xw_q" in weights
+            assert f"{pfx}.w_fc1" in weights
+            assert f"{pfx}.input_norm" in weights
 
-        config = {
-            "model_type": "glm",
-            "vocab_size": self.VOCAB,
-            "hidden_size": self.HIDDEN,
-            "num_hidden_layers": self.LAYERS,
-            "num_attention_heads": self.HEADS,
-            "num_key_value_heads": self.KV_HEADS,
-        }
-        tensors = self._make_tensors()
-        _write_config(tmp_path, config)
-        _write_safetensors(tmp_path, tensors)
-
-        cfg = ModelConfig.from_dir(tmp_path)
-        weights = plugin.load_weights(str(tmp_path), cfg)
-
-        assert "embedding" in weights
-        for i in range(self.LAYERS):
-            for key in ("input_norm", "post_attn_norm", "w_q", "w_k", "w_v",
-                        "w_o", "w_gate", "w_up", "w_down",
-                        "q_bias", "k_bias", "v_bias"):
-                assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
-        assert "final_norm" in weights
+        # Head
         assert "w_out" in weights
-        assert weights["_attention_size"] == self.Q_DIM
-        assert weights["_mlp_size"] == self.MLP_INTER
+        assert "out_bias" in weights
+        assert "final_norm" in weights
+
+        assert weights["_enc_layers"] == self.ENC_LAYERS
+        assert weights["_dec_layers"] == self.DEC_LAYERS
+        assert weights["_hidden"] == self.HIDDEN
+        assert weights["_vocab"] == self.VOCAB

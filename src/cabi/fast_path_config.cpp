@@ -121,6 +121,9 @@ FastPathModelConfig parse_fast_path_config(const std::string& config_text, int32
         cfg.mel_hop_length = extract_json_int(config_text, "mel_hop_length", 160);
         cfg.mel_chunk_length = extract_json_int(config_text, "mel_chunk_length", 30);
         cfg.mel_sampling_rate = extract_json_int(config_text, "mel_sampling_rate", 16000);
+        cfg.mel_length = extract_json_int(config_text, "mel_length", 0);
+        cfg.eot_token_id = extract_json_int(config_text, "eot_token_id", -1);
+        cfg.decoder_start_token_ids = extract_json_int_array(config_text, "decoder_start_token_ids");
     }
 
     // Vision-Language fields

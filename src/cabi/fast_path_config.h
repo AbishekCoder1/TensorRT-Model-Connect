@@ -51,6 +51,9 @@ struct FastPathModelConfig {
     int32_t mel_hop_length{160};
     int32_t mel_chunk_length{30};
     int32_t mel_sampling_rate{16000};
+    int32_t mel_length{0};      // encoder mel input length; 0 = auto
+    int32_t eot_token_id{-1};   // end-of-text token; -1 = use model default
+    std::vector<int32_t> decoder_start_token_ids;  // custom decoder prompt tokens
 
     // Vision-Language fields (used when runtime_strategy == "vision_language")
     bool has_vision_engine{false};  // bundle contains vision_engine_plan
