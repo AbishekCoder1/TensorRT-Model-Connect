@@ -162,7 +162,8 @@ static void test_last_error_cleared_on_success()
 //   initialization) produces safe default values for every field, ensuring
 //   backward compatibility when new fields are added to the struct.
 // Setup: A brace-initialized TrtfPipelineOptions{}.
-// Mechanism: Checks each field: max_new_tokens==0, hf_python==nullptr. Also
+// Mechanism: Checks each field: max_new_tokens==0, hf_python==nullptr,
+//   image_path==nullptr. Also
 //   verifies that trtf_create_pipeline_ex with null options and a bad path
 //   returns nullptr (null options should use defaults).
 // -----------------------------------------------------------------------------
@@ -172,6 +173,7 @@ static void test_pipeline_options_zero_init()
     TrtfPipelineOptions opts{};
     check(opts.max_new_tokens == 0, "zero-init max_new_tokens == 0");
     check(opts.hf_python == nullptr, "zero-init hf_python == nullptr");
+    check(opts.image_path == nullptr, "zero-init image_path == nullptr");
 
     // Should work with null options (uses defaults)
     auto* p = trtf_create_pipeline_ex("/nonexistent", nullptr);
@@ -183,7 +185,7 @@ static void test_pipeline_options_zero_init()
 //   populated TrtfPipelineOptions struct and propagates the error when the
 //   bundle path is invalid.
 // Setup: Creates a TrtfPipelineOptions with all fields set: max_new_tokens=5,
-//   hf_python="/nonexistent/python".
+//   hf_python="/nonexistent/python", image_path="/nonexistent/image.png".
 // Mechanism: Calls trtf_create_pipeline_ex with a nonexistent bundle path and
 //   the options struct. Asserts nullptr return and a non-empty error message.
 //   This ensures the extended API processes all option fields without crashing.
@@ -193,6 +195,7 @@ static void test_create_ex_with_options()
     TrtfPipelineOptions opts{};
     opts.max_new_tokens = 5;
     opts.hf_python = "/nonexistent/python";
+    opts.image_path = "/nonexistent/image.png";
 
     auto* p = trtf_create_pipeline_ex("/nonexistent/bundle.trtfb", &opts);
     check(p == nullptr, "bad bundle with options returns null");

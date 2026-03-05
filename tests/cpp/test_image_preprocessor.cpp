@@ -9,7 +9,7 @@
 // a small in-memory PPM image written to a temp file.
 // =============================================================================
 
-#include "runtime/trt/image_preprocessor.h"
+#include "runtime/trt/multimodal/image_preprocessor.h"
 #include "test_helpers.h"
 
 #include <cmath>

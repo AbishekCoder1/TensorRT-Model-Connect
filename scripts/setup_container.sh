@@ -5,6 +5,8 @@ set -euo pipefail
 
 echo "=== Verifying container runtime deps ==="
 python3 -c "import tensorrt, torch, transformers; print('ok: tensorrt/torch/transformers')"
+lizard --version >/dev/null
+echo "ok: lizard"
 
 echo "=== Installing local trtf_build package (editable) ==="
 pip install --no-deps -e trtf_build/

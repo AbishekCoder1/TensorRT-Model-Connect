@@ -9,7 +9,7 @@
 //   gracefully (exit 0).
 //
 // Dependencies:
-//   - cabi/bundle_helpers.h (find_bundle_sections, BundleSections)
+//   - cabi/bundle/bundle_helpers.h (find_bundle_sections, BundleSections)
 //   - bundle/bundle_format.h (BundleFile, BundleSection)
 //
 // Environment:
@@ -17,7 +17,7 @@
 //   The function itself only iterates sections and assigns pointers.
 // =============================================================================
 
-#include "cabi/bundle_helpers.h"
+#include "cabi/bundle/bundle_helpers.h"
 #include "bundle/bundle_format.h"
 
 #include <iostream>

@@ -339,8 +339,8 @@ mismatch, not an engine bug.
 
 - `src/runtime/trt/diffusion_backend.cpp` — unpatchify loop order, scheduler, T5 mask + zeroing, CFG null text encoding, text_seq_len wiring
 - `src/runtime/trt/diffusion_backend.h` — (unchanged, text_seq_len already had default 512)
-- `src/cabi/fast_path_config.h` — added `text_seq_len` field
-- `src/cabi/fast_path_config.cpp` — parse `text_seq_len` from config JSON
+- `src/cabi/config/fast_path_config.h` — added `text_seq_len` field
+- `src/cabi/config/fast_path_config.cpp` — parse `text_seq_len` from config JSON
 - `trtf_build/trtf_build/diffusion_runner.py` — encode_text mask + zeroing, unpatchify ordering
 - `trtf_build/trtf_build/families/wan_t2v.py` — `_T5_MAX_SEQ_LEN=226`, `text_seq_len` in config
 - `trtf_build/trtf_build/schedulers/flow_match_euler.py` — match HF sigma schedule
@@ -508,7 +508,7 @@ Added two models to E2E test suite:
 **Problem**: `trtf_c.cpp` had a 470-line `try_create_from_bundle()` with tokenizer extraction duplicated 3x and DecoderStepEngine init duplicated 2x.
 
 **Solution**:
-- New `src/cabi/bundle_helpers.{h,cpp}`: `BundleSections` (section discovery), `extract_tokenizer_from_bundle()` (write to temp dir + create tokenizer), `make_decoder_engine()` (fill DecoderStepEngine from config).
+- New `src/cabi/bundle/bundle_helpers.{h,cpp}`: `BundleSections` (section discovery), `extract_tokenizer_from_bundle()` (write to temp dir + create tokenizer), `make_decoder_engine()` (fill DecoderStepEngine from config).
 - Per-strategy factory functions in `trtf_c.cpp`: `create_mamba_pipeline()`, `create_vl_pipeline()`, `create_decoder_pipeline()`.
 - `try_create_from_bundle()` shrunk to ~50 lines of dispatch.
 
@@ -1925,7 +1925,7 @@ Updated 4 sites: `hf_python_tokenizer.cpp`, `hf_python_backend.cpp`, `model_load
 - `src/bundle/bundle_format.h/cpp`: `WriteBundleFile()`, `ReadBundleFile()`, `HasBundleMagic()`
 - `include/trtf/bundle.h`: Public API: `BuildBundle()`, `InspectBundle()`, `IsBundle()`
 
-**C ABI implementation** (`src/cabi/trtf_c.cpp`):
+**C ABI implementation** (`src/cabi/api/trtf_c.cpp`):
 - `PipelineImpl` concrete class implementing `IPipeline`
 - Thread-local error storage
 - Auto-detects `.trtfb` bundles vs model directories
@@ -1962,7 +1962,7 @@ trtf version
 | `include/trtf/bundle.h` | Bundle public API |
 | `src/bundle/bundle_format.h/cpp` | .trtfb binary format read/write |
 | `src/bundle/bundle_api.cpp` | BuildBundle() stub |
-| `src/cabi/trtf_c.cpp` | C ABI factory implementation |
+| `src/cabi/api/trtf_c.cpp` | C ABI factory implementation |
 | `examples/trtf_cli.cpp` | CLI with build/run/inspect/version |
 | `cmake/trtfConfig.cmake.in` | CMake package config template |
 | `tests/test_data_dir.cpp` | 7 tests |
@@ -2026,7 +2026,7 @@ Container tests: **30/30 pass**.
   - `test_engine_cache_index.cpp` (10 tests): BuildModelDirIndexKey determinism, cache-length/config variation, save/lookup roundtrip, stale plan detection, auto-directory creation, cache-disable behavior, overwrite semantics.
   - `test_engine_cache_io.cpp` (6 tests): SaveTrtEnginePlanToCache/LoadTrtEnginePlanFromCache roundtrip, missing/empty file handling, 10MB large file mmap, cache-disable behavior.
   - `test_fast_path_config.cpp` (7 tests): parse_fast_path_config with explicit vs computed head_dim, GQA attention_size, TRTF_MAX_CACHE_LENGTH override, 4096 cap, eos/bos from JSON array vs scalar.
-- **Extracted `FastPathModelConfig` struct** from `trtf_c.cpp` into `src/cabi/fast_path_config.h/cpp` for testability. Refactored `try_create_from_cached_engine()` to use it.
+- **Extracted `FastPathModelConfig` struct** from `trtf_c.cpp` into `src/cabi/config/fast_path_config.h/cpp` for testability. Refactored `try_create_from_cached_engine()` to use it.
 - **Added 2 fast-path integration tests** to `test_c_abi_entry.cpp`: fast-path miss falls through to slow path, fast-path skip for models without config.json.
 - **Documentation updates**: Dynamic-Design.md (fast-path sequence diagram, section 2), Static-Design.md (FastPathModelConfig class + CreateTrtBackendFromEngine), TRT-Internals.md (model-dir index description), Source-Layout.md (new files + test descriptions).
 - Container tests: **33/33 pass**. Qwen3 E2E parity confirmed.

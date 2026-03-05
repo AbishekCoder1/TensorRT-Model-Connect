@@ -96,8 +96,8 @@ Each family is a single Python file implementing the `FamilyPlugin` protocol (se
 
 | File | Purpose |
 |------|---------|
-| `trtf_c.cpp` | Thin dispatch: `PipelineImpl`, per-strategy factory functions, `extern "C"` API. ~200 lines. |
-| `fast_path_config.h/cpp` | `FastPathModelConfig`: parses config.json for runtime parameters including `runtime_strategy`, SSM dimensions. |
+| `trtf_c.cpp` | Main C ABI/runtime assembly unit (`src/cabi/api/trtf_c.cpp`, >3k lines in this checkout): `extern "C"` entrypoints, `PipelineImpl`, bundle load path, backend-factory registration/lookup, and strategy-specific pipeline factories. |
+| `fast_path_config.h/cpp` | `FastPathModelConfig` definition + parser (`src/cabi/config/fast_path_config.h/cpp`): reads `config.json` `runtime_strategy` and strategy-specific fields consumed by `trtf_c.cpp`, `bundle_helpers.cpp`, and runtime backends in `src/runtime/trt/`. |
 | `bundle_helpers.h/cpp` | Shared plumbing: `BundleSections`, `extract_tokenizer_from_bundle()`, `make_decoder_engine()`. Eliminates tokenizer/engine-init duplication across strategies. |
 
 ### TRT Infrastructure (`src/runtime/trt/`)

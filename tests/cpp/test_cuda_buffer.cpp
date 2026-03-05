@@ -8,7 +8,7 @@
 //   data round-trip via cudaMemcpy.
 //
 // Dependencies:
-//   - runtime/trt/trt_common.h (CudaBuffer)
+//   - runtime/trt/core/trt_common.h (CudaBuffer)
 //   - CUDA runtime (cudaMalloc, cudaMemcpy)
 //
 // Environment:
@@ -16,7 +16,7 @@
 //   headers are not available. Requires a CUDA-capable GPU at runtime.
 // =============================================================================
 
-#include "runtime/trt/trt_common.h"
+#include "runtime/trt/core/trt_common.h"
 
 #include <cstdint>
 #include <cstring>

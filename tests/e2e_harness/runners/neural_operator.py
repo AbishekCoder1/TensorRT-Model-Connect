@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 
@@ -28,23 +29,22 @@ class NeuralOperatorRunner:
     def run_stage(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
-        bundle_path = os.path.join(ctx.engine_dir, case.bundle)
+        if stage.name != "full_inference":
+            return StageOutput(
+                stage_name=stage.name,
+                metadata={"error": f"Unknown stage: {stage.name}"},
+            )
 
-        cmd = [ctx.binary_path, "run", bundle_path]
+        bundle_path = _resolve_bundle_path(case, ctx)
+        solve_args, input_mode, input_error = _build_solve_input_args(case.inputs)
+        if solve_args is None:
+            return StageOutput(
+                stage_name=stage.name,
+                metadata={"error": input_error, "skipped": True},
+            )
 
-        # Neural operators take field inputs (e.g. --input-field <path>)
-        input_field = case.inputs.get("input_field")
-        if input_field:
-            cmd.extend(["--input-field", input_field])
-
-        input_fields = case.inputs.get("input_fields", [])
-        for field_path in input_fields:
-            cmd.extend(["--input-field", field_path])
-
-        # Output path for field arrays
+        cmd = [ctx.binary_path, "solve", bundle_path, *solve_args]
         output_path = case.inputs.get("output_field")
-        if output_path:
-            cmd.extend(["--output-field", output_path])
 
         if ctx.hf_python:
             cmd.extend(["--hf-python", ctx.hf_python])
@@ -79,8 +79,79 @@ class NeuralOperatorRunner:
             metadata={
                 "command": cmd,
                 "returncode": result.returncode,
+                "input_mode": input_mode,
             },
         )
+
+
+def _resolve_bundle_path(case: E2ECase, ctx: RunContext) -> str:
+    bundle = case.bundle or f"{case.name}.trtfb"
+    if os.path.isabs(bundle):
+        return bundle
+    return os.path.join(ctx.engine_dir, bundle)
+
+
+def _normalize_numeric_values(raw: object) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(v) for v in raw)
+    if isinstance(raw, (int, float)):
+        return str(raw)
+    if isinstance(raw, str):
+        value = raw.strip()
+        if value and os.path.isfile(value):
+            try:
+                with open(value, encoding="utf-8") as f:
+                    payload = f.read().strip()
+            except OSError:
+                return value
+            if not payload:
+                return ""
+            try:
+                parsed = json.loads(payload)
+                if isinstance(parsed, list):
+                    return _normalize_numeric_values(parsed)
+            except json.JSONDecodeError:
+                pass
+            return payload
+        return value
+    return str(raw).strip()
+
+
+def _build_solve_input_args(inputs: dict) -> tuple[list[str] | None, str, str]:
+    branch_input = inputs.get("branch_input")
+    trunk_input = inputs.get("trunk_input")
+    if branch_input is not None or trunk_input is not None:
+        if branch_input is None or trunk_input is None:
+            return None, "branch_trunk", (
+                "Neural operator requires both branch_input and trunk_input "
+                "when using DeepONet mode"
+            )
+        branch_csv = _normalize_numeric_values(branch_input)
+        trunk_csv = _normalize_numeric_values(trunk_input)
+        if not branch_csv or not trunk_csv:
+            return None, "branch_trunk", (
+                "Neural operator branch/trunk inputs must be non-empty"
+            )
+        return [
+            "--branch-input", branch_csv,
+            "--trunk-input", trunk_csv,
+        ], "branch_trunk", ""
+
+    field_input = inputs.get("field_input")
+    if field_input is None:
+        field_input = inputs.get("input_field")
+    if field_input is None:
+        input_fields = inputs.get("input_fields")
+        if isinstance(input_fields, list) and input_fields:
+            field_input = input_fields[0]
+    field_csv = _normalize_numeric_values(field_input)
+    if not field_csv:
+        return None, "field", (
+            "Neural operator requires field_input (or legacy input_field/input_fields)"
+        )
+    return ["--field-input", field_csv], "field", ""
 
 
 def _parse_field_output(stdout: str, output_path: str | None) -> dict:
@@ -99,6 +170,38 @@ def _parse_field_output(stdout: str, output_path: str | None) -> dict:
             return data
     except (json.JSONDecodeError, ValueError):
         pass
+
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        match = re.match(r"^Output \[(\d+)\]:\s*(.*)$", line)
+        if match:
+            values = match.group(2).strip()
+            if values:
+                data["output_dim"] = int(match.group(1))
+                data["output_field"] = [
+                    float(x) for x in values.split() if x.strip()
+                ]
+            continue
+
+        match = re.match(r"^Output shape:\s*\[(\d+),\s*(\d+),\s*(\d+)\]$", line)
+        if match:
+            data["output_shape"] = [
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3)),
+            ]
+            continue
+
+        match = re.match(r"^First \d+ values:\s*(.*)$", line)
+        if match:
+            preview_str = match.group(1).replace("...", "").strip()
+            if preview_str:
+                data["output_field_preview"] = [
+                    float(x) for x in preview_str.split() if x.strip()
+                ]
 
     data["raw_output"] = stdout
     return data

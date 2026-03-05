@@ -3,9 +3,9 @@
 //
 // Purpose:
 //   Validates the CLI argument parser that powers the `trtf` executable. The
-//   parser handles subcommands (run, inspect, version, help), positional
-//   arguments (bundle path), and option flags (--prompt, --max-new-tokens,
-//   --hf-python).
+//   parser handles subcommands (run, detect, inspect, version, help),
+//   positional arguments (bundle path), and option flags (--prompt,
+//   --max-new-tokens, --hf-python, detection aliases).
 //
 // Dependencies:
 //   - trtf/pipeline.h: only for basic type references. No GPU, TRT, or
@@ -22,14 +22,15 @@
 //   and asserts that the resulting CliArgs fields match expected values.
 //
 // Test categories:
-//   - Subcommand parsing: run, inspect, version, help
-//   - Flag handling: --prompt, --max-new-tokens, --hf-python
+//   - Subcommand parsing: run, detect, inspect, version, help
+//   - Flag handling: --prompt, --max-new-tokens, --hf-python, detection aliases
 //   - Error handling: unknown flags, unknown commands
 //   - No-args: bare invocation shows help
 // =============================================================================
 
 #include "trtf/pipeline.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -53,7 +54,10 @@ struct CliArgs {
     std::string model_or_bundle;
     std::string prompt;
     std::string hf_python;
+    std::string image_path;
+    std::string output_path;
     int max_new_tokens{0};
+    float conf_threshold{-1.0F};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -83,7 +87,7 @@ CliArgs parse_args(int argc, const char** argv)
         return args;
     }
 
-    if (args.command != "run" && args.command != "inspect")
+    if (args.command != "run" && args.command != "inspect" && args.command != "detect")
     {
         args.parse_error = true;
         args.error_message = "Unknown command: " + args.command;
@@ -110,6 +114,24 @@ CliArgs parse_args(int argc, const char** argv)
         {
             if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
             args.hf_python = argv[++i];
+            continue;
+        }
+        if (arg == "--image")
+        {
+            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+            args.image_path = argv[++i];
+            continue;
+        }
+        if (arg == "--output" || arg == "--output-json" || arg == "-o")
+        {
+            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+            args.output_path = argv[++i];
+            continue;
+        }
+        if (arg == "--threshold" || arg == "--score-threshold")
+        {
+            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+            args.conf_threshold = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
         if (arg[0] == '-') { args.parse_error = true; args.error_message = "Unknown flag: " + arg; return args; }
@@ -263,6 +285,42 @@ static void test_all_run_flags_combined()
     check(args.hf_python == "/usr/bin/python3", "combined hf-python");
 }
 
+// -----------------------------------------------------------------------------
+// Intention: Verify detect alias flags parse exactly like canonical names.
+// Setup: Simulated argv with detect + --output-json + --score-threshold.
+// Mechanism: Calls parse(), checks parsed command and values.
+// -----------------------------------------------------------------------------
+static void test_detect_alias_flags()
+{
+    auto args = parse({"trtf", "detect", "bundle.trtfb",
+        "--image", "img.jpg",
+        "--output-json", "det.json",
+        "--score-threshold", "0.25"});
+    check(!args.parse_error, "detect aliases no parse error");
+    check(args.command == "detect", "detect command");
+    check(args.image_path == "img.jpg", "detect image path");
+    check(args.output_path == "det.json", "detect output path");
+    check(args.conf_threshold == 0.25F, "detect threshold");
+}
+
+// -----------------------------------------------------------------------------
+// Intention: Verify strict unknown-flag behavior is preserved after adding
+//   alias support for known detection flags.
+// Setup: Simulated argv with detect + aliases + unknown flag.
+// Mechanism: Calls parse(), checks parse_error and unknown flag message.
+// -----------------------------------------------------------------------------
+static void test_detect_unknown_flag_still_errors()
+{
+    auto args = parse({"trtf", "detect", "bundle.trtfb",
+        "--image", "img.jpg",
+        "--output-json", "det.json",
+        "--score-threshold", "0.25",
+        "--not-a-real-flag"});
+    check(args.parse_error, "detect unknown flag causes error");
+    check(args.error_message.find("--not-a-real-flag") != std::string::npos,
+          "detect unknown flag message mentions flag");
+}
+
 int main()
 {
     test_run_with_prompt();
@@ -275,6 +333,8 @@ int main()
     test_unknown_flag_errors();
     test_unknown_command_errors();
     test_all_run_flags_combined();
+    test_detect_alias_flags();
+    test_detect_unknown_flag_still_errors();
 
     if (failures > 0)
     {

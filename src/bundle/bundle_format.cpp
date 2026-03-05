@@ -11,6 +11,10 @@ namespace trtf {
 
 namespace {
 
+using BundleSectionLocation = std::pair<std::size_t, std::size_t>;
+using BundleSectionEntry = std::pair<std::string, BundleSectionLocation>;
+using BundleSectionTable = std::vector<BundleSectionEntry>;
+
 uint64_t read_u64_le(std::ifstream& in)
 {
     unsigned char bytes[8];
@@ -27,8 +31,120 @@ uint64_t read_u64_le(std::ifstream& in)
     return value;
 }
 
-BundleInfo BundleInfoFromJson(const std::string& json,
-    std::vector<std::pair<std::string, std::pair<std::size_t, std::size_t>>>& sections_out)
+std::size_t find_matching_object_end(const std::string& json, std::size_t brace_start)
+{
+    int depth = 1;
+    std::size_t pos = brace_start + 1;
+    while (pos < json.size() && depth > 0)
+    {
+        if (json[pos] == '{')
+        {
+            ++depth;
+        }
+        else if (json[pos] == '}')
+        {
+            --depth;
+        }
+        ++pos;
+    }
+    return pos;
+}
+
+int64_t parse_int64_field(const std::string& inner, const std::string& key)
+{
+    const std::string needle = "\"" + key + "\"";
+    const auto key_pos = inner.find(needle);
+    if (key_pos == std::string::npos)
+    {
+        return 0;
+    }
+
+    const auto colon = inner.find(':', key_pos + needle.size());
+    if (colon == std::string::npos)
+    {
+        return 0;
+    }
+
+    const auto start = inner.find_first_of("-0123456789", colon + 1);
+    if (start == std::string::npos)
+    {
+        return 0;
+    }
+
+    try
+    {
+        return std::stoll(inner.substr(start));
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+bool parse_section_entry(const std::string& sections_json, std::size_t& search_pos, BundleSectionEntry& entry)
+{
+    const auto quote_start = sections_json.find('"', search_pos);
+    if (quote_start == std::string::npos)
+    {
+        return false;
+    }
+    const auto quote_end = sections_json.find('"', quote_start + 1);
+    if (quote_end == std::string::npos)
+    {
+        return false;
+    }
+
+    const auto inner_brace = sections_json.find('{', quote_end + 1);
+    if (inner_brace == std::string::npos)
+    {
+        return false;
+    }
+    const auto inner_brace_end = sections_json.find('}', inner_brace + 1);
+    if (inner_brace_end == std::string::npos)
+    {
+        return false;
+    }
+
+    const std::string section_name = sections_json.substr(quote_start + 1, quote_end - quote_start - 1);
+    const std::string inner = sections_json.substr(inner_brace, inner_brace_end - inner_brace + 1);
+    const int64_t offset_val = parse_int64_field(inner, "offset");
+    const int64_t size_val = parse_int64_field(inner, "size");
+    entry = {section_name, {static_cast<std::size_t>(offset_val), static_cast<std::size_t>(size_val)}};
+
+    search_pos = inner_brace_end + 1;
+    return true;
+}
+
+void parse_sections_table(const std::string& json, BundleSectionTable& sections_out)
+{
+    const std::string sections_key = "\"sections\"";
+    const auto sections_pos = json.find(sections_key);
+    if (sections_pos == std::string::npos)
+    {
+        return;
+    }
+
+    const auto brace_start = json.find('{', sections_pos + sections_key.size());
+    if (brace_start == std::string::npos)
+    {
+        return;
+    }
+
+    const std::size_t brace_end = find_matching_object_end(json, brace_start);
+    const std::string sections_json = json.substr(brace_start, brace_end - brace_start);
+    std::size_t search_pos = 0;
+    while (search_pos < sections_json.size())
+    {
+        BundleSectionEntry entry;
+        if (!parse_section_entry(sections_json, search_pos, entry))
+        {
+            break;
+        }
+        sections_out.push_back(std::move(entry));
+    }
+}
+
+BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& sections_out)
 {
     BundleInfo info;
     info.model_id = extract_json_string(json, "model_id", "");
@@ -45,63 +161,8 @@ BundleInfo BundleInfoFromJson(const std::string& json,
     info.max_cache_length = extract_json_int(json, "max_cache_length", 32);
     info.runtime_strategy = extract_json_string(json, "runtime_strategy", "decoder_kv_cache");
 
-    // Parse sections block: look for "sections": { ... }
     sections_out.clear();
-    const std::string sections_key = "\"sections\"";
-    auto sections_pos = json.find(sections_key);
-    if (sections_pos != std::string::npos)
-    {
-        auto brace_start = json.find('{', sections_pos + sections_key.size());
-        if (brace_start != std::string::npos)
-        {
-            // Find matching closing brace
-            int depth = 1;
-            auto pos = brace_start + 1;
-            while (pos < json.size() && depth > 0)
-            {
-                if (json[pos] == '{') ++depth;
-                else if (json[pos] == '}') --depth;
-                ++pos;
-            }
-            const std::string sections_json = json.substr(brace_start, pos - brace_start);
-
-            // Parse each section entry: "name": {"offset": N, "size": M}
-            std::size_t search_pos = 0;
-            while (search_pos < sections_json.size())
-            {
-                auto quote_start = sections_json.find('"', search_pos);
-                if (quote_start == std::string::npos) break;
-                auto quote_end = sections_json.find('"', quote_start + 1);
-                if (quote_end == std::string::npos) break;
-
-                const std::string section_name = sections_json.substr(quote_start + 1, quote_end - quote_start - 1);
-
-                auto inner_brace = sections_json.find('{', quote_end + 1);
-                if (inner_brace == std::string::npos) break;
-                auto inner_brace_end = sections_json.find('}', inner_brace + 1);
-                if (inner_brace_end == std::string::npos) break;
-
-                const std::string inner = sections_json.substr(inner_brace, inner_brace_end - inner_brace + 1);
-
-                // Parse offset/size as int64 (stoll) since engine plans can exceed 2 GB.
-                const auto parse_int64 = [&](const std::string& key) -> int64_t {
-                    const std::string needle = "\"" + key + "\"";
-                    auto kpos = inner.find(needle);
-                    if (kpos == std::string::npos) return 0;
-                    auto colon = inner.find(':', kpos + needle.size());
-                    if (colon == std::string::npos) return 0;
-                    auto start = inner.find_first_of("-0123456789", colon + 1);
-                    if (start == std::string::npos) return 0;
-                    try { return std::stoll(inner.substr(start)); } catch (...) { return 0; }
-                };
-                const int64_t offset_val = parse_int64("offset");
-                const int64_t size_val = parse_int64("size");
-                sections_out.push_back({section_name, {static_cast<std::size_t>(offset_val), static_cast<std::size_t>(size_val)}});
-
-                search_pos = inner_brace_end + 1;
-            }
-        }
-    }
+    parse_sections_table(json, sections_out);
 
     return info;
 }

@@ -1,6 +1,6 @@
 # Adding a New Model Family
 
-Adding support for a new HuggingFace model family is a **Python-only task** in the `trtf_build/` package. No C++ changes are needed — the C++ runtime is family-agnostic and only loads pre-built `.trtfb` bundles.
+Adding support for a new HuggingFace model family is usually a Python task in `trtf_build/` **when the model reuses an existing runtime strategy** already handled by C++ (`src/cabi/api/trtf_c.cpp`, `src/runtime/trt/*`). C++ edits are needed only when introducing a new `runtime_strategy`/backend/state type.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ build_standard_decoder_engine(config, weights, max_cache_length,
 
 If your model uses one of these combinations, you only need a plugin file with weight mapping.
 
-If your model diverges further (MoE routing, SSM/Mamba, parallel attention), you will need a custom `build_engine()` — see [Advanced: Custom Build Engine](#advanced-custom-build-engine) below. For SSM models, you also need C++ state management changes.
+If your model diverges further (MoE routing, SSM/Mamba, parallel attention), you will need a custom `build_engine()` — see [Advanced: Custom Build Engine](#advanced-custom-build-engine) below. For existing strategies such as `decoder_moe`, `ssm_recurrent`, and `vision_language`, this is still Python-only; add C++ only for new strategy/state semantics.
 
 ## Quick Path: Scaffolding Script
 
@@ -186,7 +186,7 @@ If your model has an architecture not covered by the parameterized standard buil
 ### Already implemented custom architectures
 
 - **MoE (Phi-MoE)**: SparseMixer routing + per-expert SwiGLU MLPs. See `families/phi_moe.py`. Uses `runtime_strategy="decoder_moe"` (same KV-cache C++ backend).
-- **Mamba/SSM**: Selective state space model with conv1d + selective scan. See `families/mamba.py`. Uses `runtime_strategy="ssm_recurrent"` and requires the C++ `MambaBackend`.
+- **Mamba/SSM**: Selective state space model with conv1d + selective scan. See `families/mamba.py`. Uses `runtime_strategy="ssm_recurrent"` and reuses the existing C++ `MambaBackend` (`src/runtime/trt/mamba_backend.cpp`).
 - **Vision-Language (Qwen-VL)**: Vision encoder (ViT + 3D RoPE + spatial merge) + text decoder with embed_input. See `families/qwen_vl.py`. Uses `runtime_strategy="vision_language"`. Requires `build_vision_engine()` and `get_vl_config()` methods.
 
 ### Adding a Vision-Language Family

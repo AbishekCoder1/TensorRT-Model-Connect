@@ -130,6 +130,45 @@ def _strip_prompt_echo(text: str, prompt: str) -> str:
     return text
 
 
+def _strip_prompt_echo_normalized(text: str, prompt: str) -> str:
+    """Prompt-echo stripping on normalized text for tokenization-format drift.
+
+    This pass runs after normalization and catches cases where decoded prompt
+    formatting differs slightly (e.g., whitespace around punctuation), so raw
+    substring matching misses obvious prompt echoes.
+    """
+    if not text or not prompt:
+        return text
+
+    norm_prompt = _normalize_for_ned(prompt)
+    if not norm_prompt:
+        return text
+
+    if text.startswith(norm_prompt):
+        return text[len(norm_prompt):].lstrip()
+
+    # Fallback: compare after removing whitespace to handle punctuation-spacing
+    # drift from tokenizer decode (e.g., "dog. once" vs "dog.once").
+    compact_text = "".join(ch for ch in text if not ch.isspace())
+    compact_prompt = "".join(ch for ch in norm_prompt if not ch.isspace())
+    if compact_prompt and compact_text.startswith(compact_prompt):
+        remaining = len(compact_prompt)
+        i = 0
+        while i < len(text) and remaining > 0:
+            if not text[i].isspace():
+                remaining -= 1
+            i += 1
+        return text[i:].lstrip()
+
+    # Keep search window small in normalized space to avoid stripping
+    # naturally generated prompt repeats that happen later in output.
+    search_limit = min(_PROMPT_SEARCH_MAX_PREFIX_CHARS, max(256, len(norm_prompt) * 3))
+    idx = text.find(norm_prompt)
+    if 0 <= idx <= search_limit:
+        return text[idx + len(norm_prompt):].lstrip()
+    return text
+
+
 def _normalize_for_ned(text: str) -> str:
     """Lightweight text normalization before edit-distance comparison."""
     if not text:
@@ -225,6 +264,18 @@ class TextComparator:
         stage: StageSpec,
     ) -> CompareResult:
         metrics: dict[str, MetricResult] = {}
+
+        # full_generation runs provide C++ return code from the CLI path.
+        # If C++ generation failed, surface that explicitly instead of
+        # allowing debug-runner logits to hide the failure.
+        cpp_rc = (trt.data or {}).get("cpp_returncode")
+        if cpp_rc not in (None, 0):
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                metrics=metrics,
+                message=f"TRT C++ run failed (cpp_returncode={cpp_rc})",
+            )
 
         # Load logits
         trt_logits = _load_logits(trt)
@@ -371,6 +422,10 @@ class TextComparator:
         ref_text = (ref.text or "").strip()
 
         prompt = (trt.data or {}).get("prompt", "")
+        # Prompt echo handling is TRT-side only. HF reference text is decoded
+        # from generated tokens and should not include prompt prefill; stripping
+        # prompt from reference can incorrectly remove legitimate generated text
+        # if the model naturally repeats the prompt phrase later.
         trt_text_for_ned = _normalize_for_ned(
             _truncate_after_first_turn(
                 _strip_leading_role_prefix(_strip_prompt_echo(trt_text, prompt))
@@ -378,9 +433,10 @@ class TextComparator:
         )
         ref_text_for_ned = _normalize_for_ned(
             _truncate_after_first_turn(
-                _strip_leading_role_prefix(_strip_prompt_echo(ref_text, prompt))
+                _strip_leading_role_prefix(ref_text)
             )
         )
+        trt_text_for_ned = _strip_prompt_echo_normalized(trt_text_for_ned, prompt)
 
         if trt_text_for_ned or ref_text_for_ned:
             ned = _normalized_edit_distance(trt_text_for_ned, ref_text_for_ned)

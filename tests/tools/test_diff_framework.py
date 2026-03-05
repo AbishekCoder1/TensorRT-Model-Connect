@@ -7,8 +7,10 @@ mechanics. Runs as part of Tier 1 (`pytest tests/tools/ -v`).
 from __future__ import annotations
 
 import json
+import struct
 import subprocess
 import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -33,6 +35,59 @@ def _import_registry():
 def _import_runner():
     import importlib
     return importlib.import_module("diff_framework.runner")
+
+
+def _mock_model_strategy_detection(
+    monkeypatch,
+    *,
+    runtime_strategy: str | None = "decoder_kv_cache",
+    plugin_found: bool = True,
+):
+    """Install fake trtf_build modules consumed by detect_runtime_strategy()."""
+    fake_pkg = types.ModuleType("trtf_build")
+
+    fake_engine_builder = types.ModuleType("trtf_build.engine_builder")
+    fake_engine_builder._resolve_model = lambda _model: "/tmp/fake-model-dir"
+
+    fake_config = types.ModuleType("trtf_build.config")
+
+    class _FakeModelConfig:
+        @staticmethod
+        def from_dir(_model_dir):
+            return types.SimpleNamespace(model_type="fake-model-type")
+
+    fake_config.ModelConfig = _FakeModelConfig
+
+    fake_families = types.ModuleType("trtf_build.families")
+    if plugin_found:
+        plugin = types.SimpleNamespace()
+        if runtime_strategy is not None:
+            plugin.runtime_strategy = runtime_strategy
+        fake_families.find_plugin = lambda _model_type: plugin
+    else:
+        fake_families.find_plugin = lambda _model_type: None
+
+    fake_pkg.engine_builder = fake_engine_builder
+    fake_pkg.config = fake_config
+    fake_pkg.families = fake_families
+
+    monkeypatch.setitem(sys.modules, "trtf_build", fake_pkg)
+    monkeypatch.setitem(sys.modules, "trtf_build.engine_builder", fake_engine_builder)
+    monkeypatch.setitem(sys.modules, "trtf_build.config", fake_config)
+    monkeypatch.setitem(sys.modules, "trtf_build.families", fake_families)
+
+
+def _write_synthetic_bundle(path: Path, config: dict):
+    """Create a tiny .trtfb with a config.json section."""
+    config_blob = json.dumps(config).encode("utf-8")
+    sections = {"config.json": {"offset": 0, "size": len(config_blob)}}
+    header_blob = json.dumps({"sections": sections}).encode("utf-8")
+
+    with open(path, "wb") as f:
+        f.write(b"TRTFB\x00\x01\x00")
+        f.write(struct.pack("<Q", len(header_blob)))
+        f.write(header_blob)
+        f.write(config_blob)
 
 
 # -----------------------------------------------------------------------
@@ -192,6 +247,88 @@ class TestRunner:
         )
         with pytest.raises(ValueError, match="Unknown test"):
             runner.run_tests(ctx, test_names=["nonexistent_test_xyz"])
+
+    def test_detect_runtime_strategy_unknown_reports_skip(self, monkeypatch):
+        runner = _import_runner()
+        _mock_model_strategy_detection(
+            monkeypatch, runtime_strategy="future_runtime_strategy")
+
+        result = runner.detect_runtime_strategy(
+            "test/model", with_status=True)
+        assert result.status == "skip"
+        assert result.runtime_strategy == "future_runtime_strategy"
+        assert "no diff tests are registered" in result.message
+
+    def test_detect_runtime_strategy_unknown_warns_without_fallback(
+        self, monkeypatch
+    ):
+        runner = _import_runner()
+        _mock_model_strategy_detection(
+            monkeypatch, runtime_strategy="future_runtime_strategy")
+
+        with pytest.warns(RuntimeWarning, match="no diff tests are registered"):
+            strategy = runner.detect_runtime_strategy("test/model")
+        assert strategy == "future_runtime_strategy"
+
+    def test_detect_runtime_strategy_missing_plugin_warns_legacy_fallback(
+        self, monkeypatch
+    ):
+        runner = _import_runner()
+        _mock_model_strategy_detection(monkeypatch, plugin_found=False)
+
+        result = runner.detect_runtime_strategy(
+            "test/model", with_status=True)
+        assert result.status == "warning"
+        assert result.runtime_strategy == "decoder_kv_cache"
+
+        with pytest.warns(RuntimeWarning, match="No family plugin resolved"):
+            strategy = runner.detect_runtime_strategy("test/model")
+        assert strategy == "decoder_kv_cache"
+
+    def test_detect_bundle_unknown_strategy_reports_skip(self, tmp_path):
+        runner = _import_runner()
+        bundle = tmp_path / "unknown_strategy.trtfb"
+        _write_synthetic_bundle(
+            bundle, {"runtime_strategy": "future_runtime_strategy"})
+
+        result = runner.detect_runtime_strategy_from_bundle(
+            str(bundle), with_status=True)
+        assert result.status == "skip"
+        assert result.runtime_strategy == "future_runtime_strategy"
+        assert "no diff tests are registered" in result.message
+
+        with pytest.warns(RuntimeWarning, match="no diff tests are registered"):
+            strategy = runner.detect_runtime_strategy_from_bundle(str(bundle))
+        assert strategy == "future_runtime_strategy"
+
+    def test_detect_bundle_missing_runtime_strategy_warns_fallback(
+        self, tmp_path
+    ):
+        runner = _import_runner()
+        bundle = tmp_path / "missing_runtime_strategy.trtfb"
+        _write_synthetic_bundle(bundle, {"model_type": "fake"})
+
+        result = runner.detect_runtime_strategy_from_bundle(
+            str(bundle), with_status=True)
+        assert result.status == "warning"
+        assert result.runtime_strategy == "decoder_kv_cache"
+
+        with pytest.warns(RuntimeWarning, match="has no runtime_strategy"):
+            strategy = runner.detect_runtime_strategy_from_bundle(str(bundle))
+        assert strategy == "decoder_kv_cache"
+
+    def test_detect_bundle_read_failure_reports_error(self, tmp_path):
+        runner = _import_runner()
+        missing_bundle = tmp_path / "missing.trtfb"
+
+        result = runner.detect_runtime_strategy_from_bundle(
+            str(missing_bundle), with_status=True)
+        assert result.status == "error"
+        assert result.runtime_strategy is None
+        assert "Failed to read runtime_strategy" in result.message
+
+        with pytest.raises(FileNotFoundError):
+            runner.detect_runtime_strategy_from_bundle(str(missing_bundle))
 
 
 # -----------------------------------------------------------------------

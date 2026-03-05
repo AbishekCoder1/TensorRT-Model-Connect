@@ -119,35 +119,83 @@ Available blocks:
 
 ---
 
-### C++ Runtime: Dispatch Architecture
+### C++ Runtime: Modular C ABI Layout
 
-The C++ runtime uses a thin dispatch pattern with shared helpers and per-strategy factory functions:
+The runtime path is now split across focused `src/cabi/*.cpp` units instead of one monolithic file:
 
-```
-trtf_c.cpp              Thin dispatch on runtime_strategy
-    |
-bundle_helpers.{h,cpp}  Shared plumbing (tokenizer extraction, engine init)
-    |
-Per-backend factories    create_decoder_pipeline / create_mamba_pipeline / create_rwkv_pipeline / ...
-    |
-Backend implementations  trt / trt_mamba / trt_rwkv / trt_vl / trt_segmentation / trt_detection /
-                         trt_sam / trt_whisper / trt_bark / trt_speech / trt_encoder / trt_embedding /
-                         trt_reranking / trt_neural_operator / trt_omni / trt_diffusion / trt_hybrid
-```
+| File(s) | Responsibility |
+|---------|----------------|
+| `src/cabi/api/trtf_c.cpp` | C ABI entrypoints (`trtf_create_pipeline*`, `trtf_last_error`, version/capability), bundle-load orchestration, early `diffusion` branch, registry dispatch call, decoder fallback, and top-level error handling. |
+| `src/cabi/pipeline/pipeline_impl.cpp` | Concrete `PipelineImpl` implementation of `IPipeline`: lifecycle ownership, temp-dir cleanup, and method dispatch across generation/vision/audio/encoder/diffusion capabilities. |
+| `src/cabi/bundle/bundle_helpers.{h,cpp}` | Shared bundle plumbing (`find_bundle_sections`, tokenizer extraction, `make_decoder_engine`, mel/CLIP helpers). |
+| `src/cabi/registry/backend_registry.{h,cpp}` | Thread-safe strategy registry API: `register_backend_factory`, `find_backend_factory`, `try_create_pipeline_from_registry`, unregister/count helpers. |
+| `src/cabi/registry/backend_registry_dispatch.{h,cpp}` | Built-in strategy registration orchestration (`register_builtin_backend_factories_once`) and `BackendRegistryDispatchContext` contract. |
+| `src/cabi/registry/backend_registry_strategy_plugins_*.cpp` | Per-domain built-in registration plugins (`register_backend_factory("...", &wrapper)`) for text/vision/encoder/audio/misc strategies. |
+| `src/cabi/registry/backend_registry_strategy_wrappers.{h,cpp}` | Typed `*_via_registry(void*)` wrappers and dispatch-context validation for registry construction. |
+| `src/cabi/factories/factories_*.{h,cpp}` | Strategy-specific pipeline assembly modules (text, multimodal, audio, vision, encoder, diffusion). |
 
-**`bundle_helpers.{h,cpp}`**: Shared plumbing — bundle section discovery (`find_bundle_sections`), tokenizer file extraction to temp dir (`extract_tokenizer_from_bundle`), and `DecoderStepEngine` initialization from config (`make_decoder_engine`). Backend-agnostic.
+Factory modules are split by domain:
 
-**Per-strategy factory functions**: Live in `trtf_c.cpp`. Each factory takes the shared components (TRT engine, config, sections) and returns a fully assembled `PipelineImpl`. The strategy-specific setup (Mamba state tensors, VL vision engine, etc.) is encapsulated in each factory.
+| Factory module | Strategies assembled there |
+|----------------|----------------------------|
+| `factories_text.cpp` | `decoder_kv_cache`, `decoder_moe`, `ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` |
+| `factories_multimodal.cpp` | `speech_to_text`, `vision_language` |
+| `factories_audio.cpp` | `text_to_audio`, `omni_multimodal`, `speech_to_speech` |
+| `factories_vision.cpp` | `segmentation`, `object_detection`, `prompted_segmentation`, `neural_operator` |
+| `factories_encoder.cpp` | `encoder_only`, `embedding`, `reranking` |
+| `factories_diffusion.cpp` | `diffusion` |
 
-**`trtf_c.cpp`**: Thin dispatch on `runtime_strategy` string (~200 lines). Adding a new strategy = one new factory function + one new `if` line in the dispatch.
+Built-in strategy plugin registration is modular:
+1. `backend_registry_dispatch.cpp` runs one-time orchestration (`std::call_once`) and invokes per-domain plugin registration functions.
+2. `backend_registry_strategy_plugins_*.cpp` binds each `runtime_strategy` with literal `register_backend_factory("...", &wrapper)` calls.
+3. `backend_registry_strategy_wrappers.cpp` validates `BackendRegistryDispatchContext` and forwards to the relevant modular factory.
+
+Current dispatch behavior in `try_create_from_bundle()`:
+1. Parse config early and route `runtime_strategy == "diffusion"` directly to `create_diffusion_pipeline(...)` (diffusion bundles do not require primary `engine_plan`).
+2. For non-diffusion paths, deserialize primary TRT engine and execution context.
+3. Register built-ins, build `BackendRegistryDispatchContext`, and call `try_create_pipeline_from_registry(...)`.
+4. If registry lookup misses, fall back to `create_decoder_pipeline(...)` (which accepts decoder strategies only).
 
 **How to add a new runtime strategy:**
-1. Create `new_backend.{h,cpp}` implementing the required backend interface(s) (`IGenerationBackend` for decoder-style text paths, or task-specific pipeline adapters for non-text strategies)
-2. Add a `create_new_pipeline()` factory in `trtf_c.cpp`
-3. Add one `if (strategy == "new_strategy")` line in `try_create_from_bundle()`
-4. Add config fields to `FastPathModelConfig` if needed
+1. Add backend implementation(s) under `src/runtime/trt/` and a matching factory in the appropriate `src/cabi/factories/factories_*.cpp` module.
+2. Add a `*_via_registry` wrapper in `src/cabi/registry/backend_registry_strategy_wrappers.cpp` and register it via `register_backend_factory("new_strategy", &wrapper)` in the appropriate `src/cabi/registry/backend_registry_strategy_plugins_*.cpp` module.
+3. Extend `FastPathModelConfig` parsing in `src/cabi/config/fast_path_config.{h,cpp}` when new config fields are required.
+4. Update strategy governance files (`tests/runtime_strategy_matrix.yaml`, `tests/e2e_harness/contracts.py`, and related runner/comparator/diff-check coverage).
 
-Design rationale: factory functions instead of a full registry (explicit strategy-to-factory mapping in one place, no self-registration macro overhead, easier review/debug as strategy coverage grows).
+### Runtime Strategy Governance Matrix
+
+Strategy governance is enforced by `tools/check_runtime_strategy_matrix.py` across all `src/cabi/*.cpp` files:
+
+1. Discovers strategy keys from:
+   - `register_backend_factory("...")` registrations
+   - direct strategy comparisons (`strategy == "..."`, `strategy != "..."`, and early `fp_cfg_early.runtime_strategy == "..."`)
+2. Validates parity between:
+   - discovered `src/cabi/*.cpp` strategy keys
+   - `tests/runtime_strategy_matrix.yaml`
+   - `tests/e2e_harness/contracts.py` (`RUNTIME_TO_TASK_STRATEGY`)
+3. Enforces matrix coverage requirements:
+   - non-empty CLI command list
+   - runner/comparator class mapping consistency
+   - diff-framework check-class parity or explicit exemption
+4. Validates registry wrapper hygiene:
+   - every `register_backend_factory` wrapper symbol has a definition
+   - no orphan `*_via_registry` wrappers
+   - extraction-boundary check for lingering wrappers in `trtf_c.cpp`
+
+Unit tests for the checker are in `tests/tools/test_runtime_strategy_matrix_checker.py`.
+
+### Cyclomatic Complexity Governance
+
+In addition to strategy-governance checks, the repository enforces a C++ complexity budget:
+
+1. Tooling: `tools/check_cyclomatic_complexity.py` (wrapper around `lizard`).
+2. Scope: scans C++ runtime sources under `src/`.
+3. CI policy: `check-cyclomatic-complexity` in `.gitlab-ci.yml` fails if any function exceeds `CCN > 10` (default `CCM_MAX_CCN=10`).
+4. Local parity command:
+
+```bash
+python tools/check_cyclomatic_complexity.py src --max-ccn 10
+```
 
 ---
 
@@ -166,8 +214,9 @@ The following C++ code (~3500 lines) was removed and replaced by Python equivale
 | `ResolveTextGenerationModel`, `ResolveHfModelViaFamilyRegistry` | Python model resolution |
 | `RegisterHfModelFamily`, `RegisterBuiltinHfModelFamilies` | Python family registry |
 | Engine cache system | Bundle-based caching (build once, run many times) |
-| `FastPathModelConfig` | Not needed (Python builds, C++ only loads bundles) |
 | `tensor_math.h/cpp` | NumPy operations in Python |
+
+`FastPathModelConfig` was not removed. It is parsed from bundle `config.json` in `src/cabi/config/fast_path_config.cpp` and consumed by `src/cabi/api/trtf_c.cpp`, `src/cabi/bundle/bundle_helpers.cpp`, and multiple runtime backends under `src/runtime/trt/`.
 
 ---
 
@@ -175,7 +224,7 @@ The following C++ code (~3500 lines) was removed and replaced by Python equivale
 
 ### C ABI Entry Point (`trtf_c.cpp`)
 
-Users access the library through `extern "C"` factory functions `trtf_create_pipeline()` and `trtf_create_pipeline_ex()` which return an `IPipeline*`. These functions accept `.trtfb` bundle paths. The factory loads the pre-compiled engine plan, creates a tokenizer, and returns a ready-to-use pipeline.
+Users access the library through `extern "C"` factory functions `trtf_create_pipeline()` and `trtf_create_pipeline_ex()` which return an `IPipeline*`. `trtf_c.cpp` is the orchestration layer (input validation, bundle loading, dispatch context creation, error handling), while `pipeline_impl.cpp` provides the concrete `IPipeline` behavior after a strategy factory assembles backend components.
 
 `trtf_create_pipeline_ex()` accepts a `TrtfPipelineOptions` struct:
 
@@ -190,28 +239,28 @@ struct TrtfPipelineOptions {
 ### Bundle Loading Flow
 
 ```
-trtf_create_pipeline("model.trtfb", TRTF_FORCE_TRT)
+trtf_create_pipeline_ex("model.trtfb", &options)
   |
-  +-- Detect bundle magic bytes
-  +-- ReadBundleFile() -> engine plan bytes + tokenizer files
-  +-- TRT deserializeCudaEngine(plan)
-  +-- Parse runtime_strategy from config.json
-  +-- Dispatch based on strategy:
-  |     "decoder_kv_cache" / "decoder_moe" -> trt
-  |     "ssm_recurrent" -> trt_mamba
-  |     "rwkv_recurrent" -> trt_rwkv
-  |     "vision_language" / "segmentation" / "object_detection" / "prompted_segmentation" -> vision task pipelines
-  |     "speech_to_text" / "text_to_audio" / "speech_to_speech" -> speech/audio pipelines
-  |     "encoder_only" / "embedding" / "reranking" / "neural_operator" / "omni_multimodal" / "diffusion" / "hybrid_mamba_attention"
-  +-- For vision bundles: parse image preprocess config (preprocessor_type, interpolation, etc.)
-  +-- Extract tokenizer files to temp dir
-  +-- Create HfPythonTokenizer or VocabTokenizer
-  +-- Return PipelineImpl
+  +-- IsBundle() validation
+  +-- try_create_from_bundle():
+  |     +-- ReadBundleFile() + find_bundle_sections()
+  |     +-- Parse config early for runtime_strategy
+  |     +-- if runtime_strategy == "diffusion":
+  |     |     create_diffusion_pipeline(...)
+  |     +-- else:
+  |           deserialize primary engine_plan + create execution context
+  |           parse FastPathModelConfig
+  |           register_builtin_backend_factories_once()
+  |           build BackendRegistryDispatchContext
+  |           try_create_pipeline_from_registry(strategy, &ctx)
+  |           fallback -> create_decoder_pipeline(...)
+  +-- apply options.max_new_tokens via set_default_max_new_tokens()
+  +-- return assembled PipelineImpl-backed IPipeline*
 ```
 
 ### Runtime Strategy Dispatch
 
-The C++ runtime dispatches to the correct backend based on `runtime_strategy` in bundle `config.json`. Decoder-style text backends implement `IGenerationBackend`; other strategies are exposed through specialized `IPipeline` methods (segment, detect, transcribe, generate_audio, embed, rerank, solve, generate_video, etc.).
+For non-diffusion strategies, dispatch is registry-driven (`backend_registry.cpp`, `backend_registry_dispatch.cpp`, `backend_registry_strategy_plugins_*.cpp`, and `backend_registry_strategy_wrappers.cpp`). Decoder-style text backends implement `IGenerationBackend`; non-text strategies are exposed through task-specific `IPipeline` methods (`segment`, `detect`, `transcribe`, `generate_audio`, `embed`, `rerank`, `solve`, `generate_video`, etc.).
 
 ```cpp
 class IGenerationBackend {
@@ -222,23 +271,22 @@ class IGenerationBackend {
 };
 ```
 
-**TRT Backend (KV Cache)** (`trt_backend_shared.cpp`):
-- **Strategies**: `decoder_kv_cache`, `decoder_moe`
-- **Name**: `"trt"`
-- **How it works**: Deserializes a pre-compiled TRT engine from a `.trtfb` bundle, then runs an autoregressive generation loop on GPU with KV-cache management, CUDA memory allocation, and greedy argmax sampling. MoE routing is handled entirely within the TRT graph, so both strategies use the same C++ backend.
+| Runtime strategy | Factory module | Backend name(s) |
+|------------------|----------------|-----------------|
+| `decoder_kv_cache`, `decoder_moe` | `factories_text.cpp` | `trt` |
+| `ssm_recurrent` | `factories_text.cpp` | `trt_mamba` |
+| `rwkv_recurrent` | `factories_text.cpp` | `trt_rwkv` |
+| `hybrid_mamba_attention` | `factories_text.cpp` | `trt_hybrid` |
+| `vision_language` | `factories_multimodal.cpp` | `trt_vl` |
+| `speech_to_text` | `factories_multimodal.cpp` | `trt_whisper` |
+| `text_to_audio` | `factories_audio.cpp` | `trt_bark` or `trt_magpie_tts` |
+| `speech_to_speech` | `factories_audio.cpp` | `trt_speech` |
+| `omni_multimodal` | `factories_audio.cpp` | `trt_omni` |
+| `segmentation`, `object_detection`, `prompted_segmentation`, `neural_operator` | `factories_vision.cpp` | `trt_segmentation`, `trt_detection`, `trt_sam`, `trt_neural_operator` |
+| `encoder_only`, `embedding`, `reranking` | `factories_encoder.cpp` | `trt_encoder`, `trt_embedding`, `trt_reranking` |
+| `diffusion` | `factories_diffusion.cpp` | `trt_diffusion` |
 
-**Mamba Backend (SSM)** (`mamba_backend.cpp`):
-- **Strategy**: `ssm_recurrent`
-- **Name**: `"trt_mamba"`
-- **How it works**: Loads a Mamba TRT engine from a `.trtfb` bundle, then runs an autoregressive loop with conv_state and ssm_state per layer (constant memory, no cache growth). Uses `MambaStepState` instead of `DeviceKvCache`.
-
-**Additional runtime backends** (`trtf_c.cpp` dispatch):
-- **RWKV**: `rwkv_recurrent` (`trt_rwkv`)
-- **Vision-language**: `vision_language` (`trt_vl`)
-- **Segmentation / detection / prompted segmentation**: `segmentation` (`trt_segmentation`), `object_detection` (`trt_detection`), `prompted_segmentation` (`trt_sam`)
-- **Speech/audio**: `speech_to_text` (`trt_whisper`), `text_to_audio` (`trt_bark`), `speech_to_speech` (`trt_speech`)
-- **Encoder/ranking**: `encoder_only` (`trt_encoder`), `embedding` (`trt_embedding`), `reranking` (`trt_reranking`)
-- **Specialized**: `neural_operator` (`trt_neural_operator`), `omni_multimodal` (`trt_omni`), `diffusion` (`trt_diffusion`), `hybrid_mamba_attention` (`trt_hybrid`)
+`diffusion` is handled as a direct early branch before primary engine-plan deserialization; the rest go through registry dispatch.
 
 ### VL Image Preprocessing (`image_preprocessor.cpp`)
 

@@ -37,28 +37,15 @@ class OmniMultimodalRunner:
     def run_stage(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
-        bundle_path = os.path.join(ctx.engine_dir, case.bundle)
         stage_name = stage.name
 
-        # Map stage names to CLI subcommands/flags
-        cmd = [ctx.binary_path, "run", bundle_path]
-        cmd.extend(["--stage", stage_name])
-
-        prompt = case.inputs.get("prompt", "")
-        if prompt:
-            cmd.extend(["--prompt", prompt])
-
-        image = case.inputs.get("image")
-        if image and stage_name in ("vision_encode", "end_to_end"):
-            cmd.extend(["--image", image])
-
-        audio = case.inputs.get("audio")
-        if audio and stage_name in ("audio_encode", "end_to_end"):
-            cmd.extend(["--audio", audio])
-
-        max_new_tokens = case.inputs.get("max_new_tokens", 30)
-        if stage_name in ("thinker_decode", "talker_decode", "end_to_end"):
-            cmd.extend(["--max-new-tokens", str(max_new_tokens)])
+        cmd, stage_meta = _build_omni_command(case, stage, ctx)
+        if cmd is None:
+            return StageOutput(
+                stage_name=stage_name,
+                metadata={"error": stage_meta.get("error", "Unsupported stage"),
+                          "skipped": True, **stage_meta},
+            )
 
         if ctx.hf_python:
             cmd.extend(["--hf-python", ctx.hf_python])
@@ -94,6 +81,7 @@ class OmniMultimodalRunner:
             metadata={
                 "command": cmd,
                 "returncode": result.returncode,
+                **stage_meta,
             },
         )
 
@@ -101,8 +89,8 @@ class OmniMultimodalRunner:
 class CompositePipelineRunner:
     """Execute a generic composite pipeline following stage graph from manifest.
 
-    Each stage is run sequentially via the C++ binary with ``--stage`` flag.
-    Intermediate outputs from prior stages are passed forward.
+    The CLI has no stage selector, so stages are mapped to supported
+    entrypoints (currently ``run``) with explicit metadata.
     """
 
     @property
@@ -112,22 +100,9 @@ class CompositePipelineRunner:
     def run_stage(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
-        bundle_path = os.path.join(ctx.engine_dir, case.bundle)
         stage_name = stage.name
 
-        cmd = [ctx.binary_path, "run", bundle_path]
-        cmd.extend(["--stage", stage_name])
-
-        prompt = case.inputs.get("prompt", "")
-        if prompt:
-            cmd.extend(["--prompt", prompt])
-
-        image = case.inputs.get("image")
-        if image:
-            cmd.extend(["--image", image])
-
-        max_new_tokens = case.inputs.get("max_new_tokens", 30)
-        cmd.extend(["--max-new-tokens", str(max_new_tokens)])
+        cmd, stage_meta = _build_composite_command(case, stage, ctx)
 
         if ctx.hf_python:
             cmd.extend(["--hf-python", ctx.hf_python])
@@ -163,8 +138,140 @@ class CompositePipelineRunner:
             metadata={
                 "command": cmd,
                 "returncode": result.returncode,
+                **stage_meta,
             },
         )
+
+
+def _resolve_bundle_path(case: E2ECase, ctx: RunContext) -> str:
+    bundle = case.bundle or f"{case.name}.trtfb"
+    if os.path.isabs(bundle):
+        return bundle
+    return os.path.join(ctx.engine_dir, bundle)
+
+
+def _build_omni_command(
+    case: E2ECase, stage: StageSpec, ctx: RunContext
+) -> tuple[list[str] | None, dict[str, Any]]:
+    stage_name = stage.name
+    bundle_path = _resolve_bundle_path(case, ctx)
+    prompt = case.inputs.get("prompt", "")
+    image = case.inputs.get("image")
+    audio = case.inputs.get("audio") or case.inputs.get("audio_path")
+    max_new_tokens = _safe_int(case.inputs.get("max_new_tokens", 30), default=30)
+
+    stage_meta: dict[str, Any] = {
+        "requested_stage": stage_name,
+        "cli_stage_supported": False,
+        "stage_resolution": "mapped_without_stage_flag",
+    }
+
+    if stage_name == "vision_encode":
+        if not image:
+            stage_meta.update({
+                "error": "vision_encode requires image input",
+                "stage_resolution": "unsupported_missing_image",
+            })
+            return None, stage_meta
+        cmd = [ctx.binary_path, "embed", bundle_path, "--image", str(image)]
+        if prompt:
+            cmd.extend(["--prompt", str(prompt)])
+        stage_meta["entrypoint"] = "embed"
+        return cmd, stage_meta
+
+    if stage_name == "audio_encode":
+        if not audio:
+            stage_meta.update({
+                "error": "audio_encode requires audio input",
+                "stage_resolution": "unsupported_missing_audio",
+            })
+            return None, stage_meta
+        cmd = [ctx.binary_path, "transcribe", bundle_path, "--audio", str(audio)]
+        if max_new_tokens > 0:
+            cmd.extend(["--max-new-tokens", str(max_new_tokens)])
+        stage_meta["entrypoint"] = "transcribe"
+        stage_meta["note"] = "audio_encode mapped to transcribe (no embedding CLI)"
+        return cmd, stage_meta
+
+    if stage_name == "talker_decode" and prompt:
+        out_audio = os.path.join(
+            ctx.artifacts_dir or "/tmp/claude",
+            f"{case.name}_talker_decode.wav",
+        )
+        cmd = [
+            ctx.binary_path, "generate-audio", bundle_path,
+            "--prompt", str(prompt),
+            "--output", out_audio,
+        ]
+        if max_new_tokens > 0:
+            cmd.extend(["--max-new-tokens", str(max_new_tokens)])
+        stage_meta["entrypoint"] = "generate-audio"
+        stage_meta["audio_output_path"] = out_audio
+        return cmd, stage_meta
+
+    if stage_name == "talker_decode" and audio:
+        out_audio = os.path.join(
+            ctx.artifacts_dir or "/tmp/claude",
+            f"{case.name}_talker_decode.wav",
+        )
+        cmd = [
+            ctx.binary_path, "speak", bundle_path,
+            "--audio-in", str(audio),
+            "--audio-out", out_audio,
+        ]
+        if max_new_tokens > 0:
+            cmd.extend(["--max-new-tokens", str(max_new_tokens)])
+        stage_meta["entrypoint"] = "speak"
+        stage_meta["audio_output_path"] = out_audio
+        return cmd, stage_meta
+
+    cmd = [ctx.binary_path, "run", bundle_path]
+    if prompt:
+        cmd.extend(["--prompt", str(prompt)])
+    if image and stage_name == "end_to_end":
+        cmd.extend(["--image", str(image)])
+    if max_new_tokens > 0 and stage_name in (
+        "thinker_decode", "talker_decode", "end_to_end"
+    ):
+        cmd.extend(["--max-new-tokens", str(max_new_tokens)])
+    stage_meta["entrypoint"] = "run"
+    if stage_name not in ("thinker_decode", "talker_decode", "end_to_end"):
+        stage_meta["stage_resolution"] = "fallback_run_no_direct_entrypoint"
+    return cmd, stage_meta
+
+
+def _build_composite_command(
+    case: E2ECase, stage: StageSpec, ctx: RunContext
+) -> tuple[list[str], dict[str, Any]]:
+    bundle_path = _resolve_bundle_path(case, ctx)
+    prompt = case.inputs.get("prompt", "")
+    image = case.inputs.get("image")
+    max_new_tokens = _safe_int(case.inputs.get("max_new_tokens", 30), default=30)
+
+    cmd = [ctx.binary_path, "run", bundle_path]
+    if prompt:
+        cmd.extend(["--prompt", str(prompt)])
+    if image:
+        cmd.extend(["--image", str(image)])
+    if max_new_tokens > 0:
+        cmd.extend(["--max-new-tokens", str(max_new_tokens)])
+
+    stage_meta: dict[str, Any] = {
+        "requested_stage": stage.name,
+        "entrypoint": "run",
+        "cli_stage_supported": False,
+        "stage_resolution": "mapped_without_stage_flag",
+    }
+    if stage.name != "end_to_end":
+        stage_meta["stage_resolution"] = "fallback_run_no_direct_entrypoint"
+    return cmd, stage_meta
+
+
+def _safe_int(raw: object, default: int) -> int:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
 
 
 def _parse_stage_output(stdout: str, stage_name: str) -> dict[str, Any]:

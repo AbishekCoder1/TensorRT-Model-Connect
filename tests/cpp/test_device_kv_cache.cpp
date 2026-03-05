@@ -8,9 +8,9 @@
 //   max_cache_length, and reset() behavior.
 //
 // Dependencies:
-//   - runtime/trt/device_kv_cache.h (DeviceKvCache)
-//   - runtime/trt/trt_engine_lifecycle.h (DecoderStepEngine)
-//   - runtime/trt/trt_common.h (CudaBuffer, CudaStream)
+//   - runtime/trt/core/device_kv_cache.h (DeviceKvCache)
+//   - runtime/trt/core/trt_engine_lifecycle.h (DecoderStepEngine)
+//   - runtime/trt/core/trt_common.h (CudaBuffer, CudaStream)
 //   - CUDA runtime
 //
 // Approach:
@@ -24,8 +24,8 @@
 //   headers are not available. Requires a CUDA-capable GPU at runtime.
 // =============================================================================
 
-#include "runtime/trt/device_kv_cache.h"
-#include "runtime/trt/trt_decode_runtime.h"
+#include "runtime/trt/core/device_kv_cache.h"
+#include "runtime/trt/core/trt_decode_runtime.h"
 
 #include <cstdint>
 #include <iostream>

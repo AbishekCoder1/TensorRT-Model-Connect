@@ -3,15 +3,70 @@
 from __future__ import annotations
 
 import time
+import warnings
+from dataclasses import dataclass
+from typing import Literal
 
 from .protocol import DiffResult, TestContext
 from .registry import get_all_tests, get_tests_for_strategy, get_test_by_name
 
+DEFAULT_RUNTIME_STRATEGY = "decoder_kv_cache"
 
-def detect_runtime_strategy(model: str) -> str:
+
+@dataclass(frozen=True)
+class StrategyDetection:
+    """Outcome of runtime strategy detection."""
+
+    runtime_strategy: str | None
+    status: Literal["ok", "warning", "skip", "error"]
+    message: str = ""
+    error: Exception | None = None
+
+
+def _finalize_detection(
+    detection: StrategyDetection,
+    *,
+    raise_on_error: bool,
+) -> str:
+    """Compatibility bridge for legacy string-return callers."""
+    if detection.status == "error":
+        if raise_on_error:
+            if detection.error is not None:
+                raise detection.error
+            raise ValueError(detection.message)
+        warnings.warn(detection.message, RuntimeWarning, stacklevel=3)
+        return DEFAULT_RUNTIME_STRATEGY
+
+    if detection.status in {"warning", "skip"} and detection.message:
+        warnings.warn(detection.message, RuntimeWarning, stacklevel=3)
+
+    return detection.runtime_strategy or DEFAULT_RUNTIME_STRATEGY
+
+
+def _classify_detected_strategy(strategy: str, source: str) -> StrategyDetection:
+    if get_tests_for_strategy(strategy):
+        return StrategyDetection(runtime_strategy=strategy, status="ok")
+    return StrategyDetection(
+        runtime_strategy=strategy,
+        status="skip",
+        message=(
+            f"Detected runtime_strategy {strategy!r} from {source}, but no diff "
+            "tests are registered for it. Skip auto-discovery or pass explicit "
+            "--test selections."
+        ),
+    )
+
+
+def detect_runtime_strategy(
+    model: str,
+    *,
+    with_status: bool = False,
+) -> str | StrategyDetection:
     """Auto-detect runtime_strategy from HF config via family plugin.
 
-    Falls back to "decoder_kv_cache" if detection fails.
+    Default return type is `str` for backward compatibility.
+    Set `with_status=True` to receive a StrategyDetection object with explicit
+    warning/skip/error semantics.
     """
     try:
         from trtf_build.engine_builder import _resolve_model
@@ -21,32 +76,112 @@ def detect_runtime_strategy(model: str) -> str:
         model_dir = _resolve_model(model)
         config = ModelConfig.from_dir(model_dir)
         plugin = find_plugin(config.model_type)
-        if plugin is not None:
-            return getattr(plugin, "runtime_strategy", "decoder_kv_cache")
-    except Exception:
-        pass
-    return "decoder_kv_cache"
+    except Exception as exc:
+        detection = StrategyDetection(
+            runtime_strategy=DEFAULT_RUNTIME_STRATEGY,
+            status="warning",
+            message=(
+                f"Could not detect runtime_strategy for model {model!r}; "
+                f"falling back to {DEFAULT_RUNTIME_STRATEGY!r}. "
+                f"Details: {type(exc).__name__}: {exc}"
+            ),
+        )
+    else:
+        if plugin is None:
+            detection = StrategyDetection(
+                runtime_strategy=DEFAULT_RUNTIME_STRATEGY,
+                status="warning",
+                message=(
+                    f"No family plugin resolved for model {model!r}; falling "
+                    f"back to {DEFAULT_RUNTIME_STRATEGY!r}."
+                ),
+            )
+        else:
+            strategy = getattr(plugin, "runtime_strategy", None)
+            if not strategy:
+                detection = StrategyDetection(
+                    runtime_strategy=DEFAULT_RUNTIME_STRATEGY,
+                    status="warning",
+                    message=(
+                        f"Family plugin for model {model!r} did not provide "
+                        f"runtime_strategy; falling back to "
+                        f"{DEFAULT_RUNTIME_STRATEGY!r}."
+                    ),
+                )
+            else:
+                detection = _classify_detected_strategy(
+                    strategy=strategy, source=f"model {model!r}")
+
+    if with_status:
+        return detection
+    return _finalize_detection(detection, raise_on_error=False)
 
 
-def detect_runtime_strategy_from_bundle(bundle_path: str) -> str:
-    """Read runtime_strategy from a bundle's config.json."""
+def detect_runtime_strategy_from_bundle(
+    bundle_path: str,
+    *,
+    with_status: bool = False,
+) -> str | StrategyDetection:
+    """Read runtime_strategy from a bundle's config.json.
+
+    Default return type is `str` for backward compatibility.
+    Set `with_status=True` to receive a StrategyDetection object with explicit
+    warning/skip/error semantics.
+    """
     import json
     import struct
 
-    with open(bundle_path, "rb") as f:
-        _magic = f.read(8)
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_len).decode("utf-8"))
-        sections = header.get("sections", {})
-        data_start = 16 + header_len
+    try:
+        with open(bundle_path, "rb") as f:
+            _magic = f.read(8)
+            header_len = struct.unpack("<Q", f.read(8))[0]
+            header = json.loads(f.read(header_len).decode("utf-8"))
+            sections = header.get("sections", {})
+            data_start = 16 + header_len
 
-        if "config.json" in sections:
-            meta = sections["config.json"]
-            f.seek(data_start + meta["offset"])
-            cfg = json.loads(f.read(meta["size"]).decode("utf-8"))
-            return cfg.get("runtime_strategy", "decoder_kv_cache")
+            if "config.json" not in sections:
+                detection = StrategyDetection(
+                    runtime_strategy=DEFAULT_RUNTIME_STRATEGY,
+                    status="warning",
+                    message=(
+                        f"Bundle {bundle_path!r} has no config.json; falling "
+                        f"back to {DEFAULT_RUNTIME_STRATEGY!r}."
+                    ),
+                )
+            else:
+                meta = sections["config.json"]
+                f.seek(data_start + meta["offset"])
+                cfg = json.loads(f.read(meta["size"]).decode("utf-8"))
+                strategy = cfg.get("runtime_strategy")
+                if not strategy:
+                    detection = StrategyDetection(
+                        runtime_strategy=DEFAULT_RUNTIME_STRATEGY,
+                        status="warning",
+                        message=(
+                            f"Bundle {bundle_path!r} config.json has no "
+                            f"runtime_strategy; falling back to "
+                            f"{DEFAULT_RUNTIME_STRATEGY!r}."
+                        ),
+                    )
+                else:
+                    detection = _classify_detected_strategy(
+                        strategy=strategy,
+                        source=f"bundle {bundle_path!r}",
+                    )
+    except Exception as exc:
+        detection = StrategyDetection(
+            runtime_strategy=None,
+            status="error",
+            message=(
+                f"Failed to read runtime_strategy from bundle {bundle_path!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+            error=exc,
+        )
 
-    return "decoder_kv_cache"
+    if with_status:
+        return detection
+    return _finalize_detection(detection, raise_on_error=True)
 
 
 def list_tests(runtime_strategy: str | None = None) -> list[dict]:

@@ -9,7 +9,7 @@
 //   without a GPU — they operate on CPU vectors and return CPU results.
 //
 // Dependencies:
-//   - runtime/trt/trt_decode_runtime.h (select_argmax_token, select_topk_tokens,
+//   - runtime/trt/core/trt_decode_runtime.h (select_argmax_token, select_topk_tokens,
 //                                        build_attention_mask)
 //
 // Approach:
@@ -33,7 +33,7 @@
 //   are not available. No GPU execution — tests only exercise CPU logic.
 // =============================================================================
 
-#include "runtime/trt/trt_decode_runtime.h"
+#include "runtime/trt/core/trt_decode_runtime.h"
 
 #include <algorithm>
 #include <cmath>

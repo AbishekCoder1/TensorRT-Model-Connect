@@ -3,14 +3,14 @@
 // =============================================================================
 //
 // Purpose:
-//   Validates parse_fast_path_config() from cabi/fast_path_config.h — the
+//   Validates parse_fast_path_config() from cabi/config/fast_path_config.h — the
 //   function that extracts model architecture parameters (head dimensions,
 //   attention size, cache length, special token IDs) from a raw config.json
 //   string. This parser is used by the zero-weight fast path (C ABI) to
 //   determine engine shape parameters without loading the full DecoderModel.
 //
 // Dependencies:
-//   - cabi/fast_path_config.h (parse_fast_path_config, FastPathModelConfig)
+//   - cabi/config/fast_path_config.h (parse_fast_path_config, FastPathModelConfig)
 //
 // Approach:
 //   CPU-only, pure in-memory tests. Each test constructs a JSON string
@@ -26,7 +26,7 @@
 //   No disk I/O, no GPU, no TensorRT required.
 // =============================================================================
 
-#include "cabi/fast_path_config.h"
+#include "cabi/config/fast_path_config.h"
 
 #include <cstdlib>
 #include <iostream>

@@ -22,6 +22,9 @@ public:
 
         const auto it = mTokenToId.find("<unk>");
         mUnkId = (it == mTokenToId.end()) ? 0 : it->second;
+        mBosId = id_for_token("<bos>");
+        mEosId = id_for_token("<eos>");
+        mPadId = id_for_token("<pad>");
     }
 
     std::vector<int32_t> encode(const std::string& text) const override
@@ -31,8 +34,7 @@ public:
 
         for (const auto& token : split_tokens(text))
         {
-            const auto it = mTokenToId.find(token);
-            ids.push_back(it == mTokenToId.end() ? mUnkId : it->second);
+            ids.push_back(lookup_or_unk_id(token));
         }
         return ids;
     }
@@ -43,20 +45,11 @@ public:
         bool first = true;
         for (const int32_t id : ids)
         {
-            if (id == id_for_token("<bos>") || id == id_for_token("<eos>") || id == id_for_token("<pad>"))
+            if (is_special_id(id))
             {
                 continue;
             }
-
-            const auto token = token_for_id(id);
-            const bool punctuation = token == "." || token == "," || token == "?" || token == "!";
-
-            if (!first && !punctuation)
-            {
-                oss << ' ';
-            }
-            oss << token;
-            first = false;
+            append_decoded_token(oss, token_for_id(id), first);
         }
         return oss.str();
     }
@@ -89,41 +82,88 @@ private:
         return out;
     }
 
+    static bool is_word_piece_char(unsigned char ch)
+    {
+        return std::isalnum(ch) != 0 || ch == '\'';
+    }
+
+    static bool is_punctuation_char(unsigned char ch)
+    {
+        return ch == '.' || ch == ',' || ch == '?' || ch == '!';
+    }
+
+    static void flush_current_token(std::string& current, std::vector<std::string>& tokens)
+    {
+        if (current.empty())
+        {
+            return;
+        }
+
+        tokens.push_back(normalize(current));
+        current.clear();
+    }
+
+    int32_t lookup_or_unk_id(const std::string& token) const
+    {
+        const auto it = mTokenToId.find(token);
+        if (it == mTokenToId.end())
+        {
+            return mUnkId;
+        }
+        return it->second;
+    }
+
+    bool is_special_id(int32_t id) const
+    {
+        return id == mBosId || id == mEosId || id == mPadId;
+    }
+
+    static bool is_punctuation_token(std::string_view token)
+    {
+        return token.size() == 1
+            && is_punctuation_char(static_cast<unsigned char>(token.front()));
+    }
+
+    static void append_decoded_token(std::ostringstream& oss, const std::string& token, bool& first)
+    {
+        if (!first && !is_punctuation_token(token))
+        {
+            oss << ' ';
+        }
+        oss << token;
+        first = false;
+    }
+
     static std::vector<std::string> split_tokens(const std::string& text)
     {
         std::vector<std::string> tokens;
         std::string current;
 
-        auto flush_current = [&]() {
-            if (!current.empty())
-            {
-                tokens.push_back(normalize(current));
-                current.clear();
-            }
-        };
-
         for (const unsigned char ch : text)
         {
-            if (std::isalnum(ch) || ch == '\'')
+            if (is_word_piece_char(ch))
             {
                 current.push_back(static_cast<char>(ch));
                 continue;
             }
 
-            flush_current();
-            if (ch == '.' || ch == ',' || ch == '?' || ch == '!')
+            flush_current_token(current, tokens);
+            if (is_punctuation_char(ch))
             {
                 tokens.emplace_back(1, static_cast<char>(ch));
             }
         }
 
-        flush_current();
+        flush_current_token(current, tokens);
         return tokens;
     }
 
     std::vector<std::string> mVocab;
     std::unordered_map<std::string, int32_t> mTokenToId;
     int32_t mUnkId{0};
+    int32_t mBosId{0};
+    int32_t mEosId{0};
+    int32_t mPadId{0};
 };
 
 } // namespace

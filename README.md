@@ -213,6 +213,13 @@ comprehensive manual (every file, every abstraction layer, every pytest marker).
 # C++ runtime (19 executables, 20 tests — bundle format, tokenizers, CUDA, KV cache)
 ctest --test-dir build --output-on-failure
 
+# C++ cyclomatic complexity report + gate (lizard-based CCM)
+python tools/check_cyclomatic_complexity.py src
+python tools/check_cyclomatic_complexity.py src --max-ccn 10
+
+# CI parity check (same policy as check-cyclomatic-complexity job)
+CCM_MAX_CCN=10 python tools/check_cyclomatic_complexity.py src --max-ccn ${CCM_MAX_CCN}
+
 # === Tier 2: Graph-op GPU tests (~2 min, needs TRT) ===
 
 /opt/venv/bin/python -m pytest tests/builder/test_graph_ops.py \

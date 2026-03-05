@@ -48,6 +48,7 @@ RUN pip install torch torchaudio torchvision \
 RUN pip install \
     pytest \
     pytest-xdist \
+    lizard \
     accelerate \
     diffusers \
     protobuf \

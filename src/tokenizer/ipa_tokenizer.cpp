@@ -22,6 +22,7 @@
 #include "utils/json_helpers.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <sstream>
@@ -72,6 +73,125 @@ std::vector<std::string> utf8_chars(const std::string& s)
 // Text preprocessing: curly quote replacement + minimal accent stripping
 // ---------------------------------------------------------------------------
 
+struct AccentRange {
+    uint32_t first;
+    uint32_t last;
+    char replacement;
+};
+
+constexpr std::array<AccentRange, 16> kLatin1AccentRanges{{
+    {0xC0, 0xC5, 'A'},
+    {0xC7, 0xC7, 'C'},
+    {0xC8, 0xCB, 'E'},
+    {0xCC, 0xCF, 'I'},
+    {0xD1, 0xD1, 'N'},
+    {0xD2, 0xD6, 'O'},
+    {0xD9, 0xDC, 'U'},
+    {0xDD, 0xDD, 'Y'},
+    {0xE0, 0xE5, 'a'},
+    {0xE7, 0xE7, 'c'},
+    {0xE8, 0xEB, 'e'},
+    {0xEC, 0xEF, 'i'},
+    {0xF1, 0xF1, 'n'},
+    {0xF2, 0xF6, 'o'},
+    {0xF9, 0xFC, 'u'},
+    {0xFD, 0xFF, 'y'},
+}};
+
+char latin1_accent_base(uint32_t codepoint)
+{
+    for (const auto& range : kLatin1AccentRanges)
+    {
+        if (codepoint >= range.first && codepoint <= range.last)
+        {
+            return range.replacement;
+        }
+    }
+    return '\0';
+}
+
+uint32_t decode_two_byte_utf8(unsigned char first, unsigned char second)
+{
+    return (static_cast<uint32_t>(first & 0x1F) << 6)
+        | static_cast<uint32_t>(second & 0x3F);
+}
+
+bool try_append_latin1_accent_replacement(
+    const std::string& text, std::size_t pos, std::string& out, std::size_t& consumed)
+{
+    if (pos + 1 >= text.size())
+    {
+        return false;
+    }
+
+    const auto first = static_cast<unsigned char>(text[pos]);
+    if (first < 0xC0 || first > 0xC3)
+    {
+        return false;
+    }
+
+    const auto second = static_cast<unsigned char>(text[pos + 1]);
+    const char base = latin1_accent_base(decode_two_byte_utf8(first, second));
+    if (base == '\0')
+    {
+        return false;
+    }
+
+    out.push_back(base);
+    consumed = 2;
+    return true;
+}
+
+char curly_quote_replacement(unsigned char first, unsigned char second, unsigned char third)
+{
+    if (first != 0xE2 || second != 0x80)
+    {
+        return '\0';
+    }
+    if (third == 0x98 || third == 0x99)
+    {
+        return '\'';
+    }
+    if (third == 0x9C || third == 0x9D)
+    {
+        return '"';
+    }
+    return '\0';
+}
+
+bool try_append_curly_quote_replacement(
+    const std::string& text, std::size_t pos, std::string& out, std::size_t& consumed)
+{
+    if (pos + 2 >= text.size())
+    {
+        return false;
+    }
+
+    const auto first = static_cast<unsigned char>(text[pos]);
+    const auto second = static_cast<unsigned char>(text[pos + 1]);
+    const auto third = static_cast<unsigned char>(text[pos + 2]);
+    const char replacement = curly_quote_replacement(first, second, third);
+    if (replacement == '\0')
+    {
+        return false;
+    }
+
+    out.push_back(replacement);
+    consumed = 3;
+    return true;
+}
+
+std::string to_lower_ascii(std::string_view text)
+{
+    std::string out;
+    out.reserve(text.size());
+    for (char c : text)
+    {
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return out;
+}
+
 std::string preprocess_text(const std::string& text)
 {
     std::string out;
@@ -79,49 +199,15 @@ std::string preprocess_text(const std::string& text)
 
     for (std::size_t i = 0; i < text.size(); )
     {
-        const auto ch = static_cast<unsigned char>(text[i]);
-
-        if (ch >= 0xC0 && i + 1 < text.size())
+        std::size_t consumed = 0;
+        if (try_append_latin1_accent_replacement(text, i, out, consumed)
+            || try_append_curly_quote_replacement(text, i, out, consumed))
         {
-            const auto ch2 = static_cast<unsigned char>(text[i + 1]);
-
-            // 2-byte: accent stripping for Latin-1 Supplement
-            if (ch >= 0xC0 && ch <= 0xC3)
-            {
-                const uint32_t cp = (static_cast<uint32_t>(ch & 0x1F) << 6)
-                    | static_cast<uint32_t>(ch2 & 0x3F);
-                char base = '\0';
-                if (cp >= 0xC0 && cp <= 0xC5) base = 'A';
-                else if (cp == 0xC7) base = 'C';
-                else if (cp >= 0xC8 && cp <= 0xCB) base = 'E';
-                else if (cp >= 0xCC && cp <= 0xCF) base = 'I';
-                else if (cp == 0xD1) base = 'N';
-                else if (cp >= 0xD2 && cp <= 0xD6) base = 'O';
-                else if (cp >= 0xD9 && cp <= 0xDC) base = 'U';
-                else if (cp == 0xDD) base = 'Y';
-                else if (cp >= 0xE0 && cp <= 0xE5) base = 'a';
-                else if (cp == 0xE7) base = 'c';
-                else if (cp >= 0xE8 && cp <= 0xEB) base = 'e';
-                else if (cp >= 0xEC && cp <= 0xEF) base = 'i';
-                else if (cp == 0xF1) base = 'n';
-                else if (cp >= 0xF2 && cp <= 0xF6) base = 'o';
-                else if (cp >= 0xF9 && cp <= 0xFC) base = 'u';
-                else if (cp == 0xFD || cp == 0xFF) base = 'y';
-                if (base != '\0') { out.push_back(base); i += 2; continue; }
-            }
-
-            // 3-byte: curly quotes
-            if (ch == 0xE2 && i + 2 < text.size())
-            {
-                const auto ch3 = static_cast<unsigned char>(text[i + 2]);
-                if (ch2 == 0x80 && (ch3 == 0x98 || ch3 == 0x99))
-                    { out.push_back('\''); i += 3; continue; }
-                if (ch2 == 0x80 && (ch3 == 0x9C || ch3 == 0x9D))
-                    { out.push_back('"'); i += 3; continue; }
-            }
+            i += consumed;
+            continue;
         }
 
-        out.push_back(static_cast<char>(ch));
+        out.push_back(text[i]);
         ++i;
     }
     return out;
@@ -223,70 +309,10 @@ public:
     {
         const std::string preprocessed = preprocess_text(text);
         const auto text_tokens = tokenize_text(preprocessed);
-
-        // G2P: convert each text token to IPA character tokens
-        std::vector<std::string> ipa_tokens;
-        for (const auto& tok : text_tokens)
-        {
-            if (tok.type == TokenType::WORD)
-            {
-                g2p_word(tok.text, ipa_tokens);
-            }
-            else if (tok.type == TokenType::PIPE_DELIMITED)
-            {
-                // Pipe-delimited: emit each UTF-8 char as a token
-                emit_ipa_chars(tok.text, ipa_tokens);
-            }
-            else
-            {
-                // OTHER: pass through each character
-                for (char c : tok.text)
-                {
-                    ipa_tokens.emplace_back(1, c);
-                }
-            }
-        }
-
-        // Filter to known tokens
-        std::vector<std::string> filtered;
-        filtered.reserve(ipa_tokens.size());
-        for (const auto& t : ipa_tokens)
-        {
-            if (mKnownTokens.count(t) != 0)
-            {
-                filtered.push_back(t);
-            }
-        }
-
-        // Deduplicate consecutive spaces
-        std::vector<std::string> deduped;
-        deduped.reserve(filtered.size());
-        for (const auto& t : filtered)
-        {
-            if (t == " " && !deduped.empty() && deduped.back() == " ")
-            {
-                continue;
-            }
-            deduped.push_back(t);
-        }
-        if (!deduped.empty() && deduped.back() == " ")
-        {
-            deduped.pop_back();
-        }
-
-        // Map to IDs + append EOS
-        std::vector<int32_t> ids;
-        ids.reserve(deduped.size() + 1);
-        for (const auto& t : deduped)
-        {
-            auto it = mToken2Id.find(t);
-            if (it != mToken2Id.end())
-            {
-                ids.push_back(it->second);
-            }
-        }
-        ids.push_back(mEosId);
-        return ids;
+        auto ipa_tokens = text_tokens_to_ipa_tokens(text_tokens);
+        auto filtered = filter_known_tokens(ipa_tokens);
+        auto deduped = dedupe_consecutive_spaces(filtered);
+        return tokens_to_ids_with_eos(deduped);
     }
 
     std::string decode(const std::vector<int32_t>& ids) const override
@@ -319,6 +345,162 @@ public:
     }
 
 private:
+    std::vector<std::string> text_tokens_to_ipa_tokens(const std::vector<TextToken>& text_tokens) const
+    {
+        std::vector<std::string> ipa_tokens;
+        for (const auto& tok : text_tokens)
+        {
+            emit_token_as_ipa(tok, ipa_tokens);
+        }
+        return ipa_tokens;
+    }
+
+    void emit_token_as_ipa(const TextToken& tok, std::vector<std::string>& out) const
+    {
+        if (tok.type == TokenType::WORD)
+        {
+            g2p_word(tok.text, out);
+            return;
+        }
+
+        if (tok.type == TokenType::PIPE_DELIMITED)
+        {
+            emit_ipa_chars(tok.text, out);
+            return;
+        }
+
+        for (char c : tok.text)
+        {
+            out.emplace_back(1, c);
+        }
+    }
+
+    std::vector<std::string> filter_known_tokens(const std::vector<std::string>& ipa_tokens) const
+    {
+        std::vector<std::string> filtered;
+        filtered.reserve(ipa_tokens.size());
+        for (const auto& token : ipa_tokens)
+        {
+            if (mKnownTokens.count(token) != 0)
+            {
+                filtered.push_back(token);
+            }
+        }
+        return filtered;
+    }
+
+    static std::vector<std::string> dedupe_consecutive_spaces(const std::vector<std::string>& tokens)
+    {
+        std::vector<std::string> deduped;
+        deduped.reserve(tokens.size());
+        for (const auto& token : tokens)
+        {
+            if (token == " " && !deduped.empty() && deduped.back() == " ")
+            {
+                continue;
+            }
+            deduped.push_back(token);
+        }
+        if (!deduped.empty() && deduped.back() == " ")
+        {
+            deduped.pop_back();
+        }
+        return deduped;
+    }
+
+    std::vector<int32_t> tokens_to_ids_with_eos(const std::vector<std::string>& tokens) const
+    {
+        std::vector<int32_t> ids;
+        ids.reserve(tokens.size() + 1);
+        for (const auto& token : tokens)
+        {
+            const auto it = mToken2Id.find(token);
+            if (it != mToken2Id.end())
+            {
+                ids.push_back(it->second);
+            }
+        }
+        ids.push_back(mEosId);
+        return ids;
+    }
+
+    const std::vector<std::string>* find_pronunciations(const std::string& lower_word) const
+    {
+        const auto it = mPhonemeDict.find(lower_word);
+        if (it == mPhonemeDict.end())
+        {
+            return nullptr;
+        }
+        return &it->second;
+    }
+
+    bool try_emit_direct_lookup(
+        const std::string& word, const std::string& lower_word, std::vector<std::string>& out) const
+    {
+        if (mHeteronyms.count(lower_word) != 0)
+        {
+            emit_graphemes(word, out);
+            return true;
+        }
+
+        const auto* pronunciations = find_pronunciations(lower_word);
+        if (pronunciations == nullptr)
+        {
+            return false;
+        }
+
+        if (pronunciations->size() == 1)
+        {
+            emit_ipa_chars((*pronunciations)[0], out);
+            return true;
+        }
+
+        if (mIgnoreAmbiguous)
+        {
+            emit_graphemes(word, out);
+            return true;
+        }
+
+        emit_ipa_chars((*pronunciations)[0], out);
+        return true;
+    }
+
+    static bool try_possessive_base(std::string_view lower_word, std::string& base)
+    {
+        if (lower_word.size() <= 2 || lower_word.back() != 's')
+        {
+            return false;
+        }
+
+        if (lower_word[lower_word.size() - 2] == '\'')
+        {
+            base.assign(lower_word.data(), lower_word.size() - 2);
+            return true;
+        }
+
+        base.assign(lower_word.data(), lower_word.size() - 1);
+        return true;
+    }
+
+    bool try_emit_possessive_fallback(std::string_view lower_word, std::vector<std::string>& out) const
+    {
+        std::string base;
+        if (!try_possessive_base(lower_word, base))
+        {
+            return false;
+        }
+
+        const auto* pronunciations = find_pronunciations(base);
+        if (pronunciations == nullptr || pronunciations->empty())
+        {
+            return false;
+        }
+
+        emit_ipa_chars((*pronunciations)[0], out);
+        out.emplace_back("z");
+        return true;
+    }
+
     // Emit individual UTF-8 characters from an IPA pronunciation string.
     // Each character becomes a separate token (may be multi-byte).
     void emit_ipa_chars(const std::string& pronunciation, std::vector<std::string>& out) const
@@ -333,67 +515,15 @@ private:
     // G2P for a word token
     void g2p_word(const std::string& word, std::vector<std::string>& out) const
     {
-        std::string lower;
-        lower.reserve(word.size());
-        for (char c : word)
+        const std::string lower = to_lower_ascii(word);
+        if (try_emit_direct_lookup(word, lower, out))
         {
-            lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-        }
-
-        // Heteronym → emit as graphemes (uppercase chars)
-        if (mHeteronyms.count(lower) != 0)
-        {
-            emit_graphemes(word, out);
             return;
         }
-
-        // Dictionary lookup
-        auto it = mPhonemeDict.find(lower);
-        if (it != mPhonemeDict.end())
+        if (try_emit_possessive_fallback(lower, out))
         {
-            const auto& pronunciations = it->second;
-            if (pronunciations.size() == 1)
-            {
-                // Unique pronunciation → emit IPA characters
-                emit_ipa_chars(pronunciations[0], out);
-                return;
-            }
-
-            // Multiple pronunciations (ambiguous)
-            if (mIgnoreAmbiguous)
-            {
-                emit_graphemes(word, out);
-                return;
-            }
-
-            // Use first pronunciation
-            emit_ipa_chars(pronunciations[0], out);
             return;
         }
-
-        // Try possessive stripping: word ending in 's or s
-        if (lower.size() > 2 && lower.back() == 's')
-        {
-            std::string base;
-            if (lower.size() > 2 && lower[lower.size() - 2] == '\'')
-            {
-                base = lower.substr(0, lower.size() - 2);
-            }
-            else
-            {
-                base = lower.substr(0, lower.size() - 1);
-            }
-
-            auto base_it = mPhonemeDict.find(base);
-            if (base_it != mPhonemeDict.end() && !base_it->second.empty())
-            {
-                emit_ipa_chars(base_it->second[0], out);
-                out.emplace_back("z");
-                return;
-            }
-        }
-
-        // OOV → emit as graphemes
         emit_graphemes(word, out);
     }
 
@@ -495,13 +625,9 @@ std::vector<std::string> parse_vocab(const char* data, std::size_t size)
     return vocab;
 }
 
-} // namespace
-
-std::unique_ptr<ITokenizer> CreateIpaTokenizer(
+void validate_ipa_tokenizer_inputs(
     const char* phoneme_dict_data, std::size_t phoneme_dict_size,
-    const char* heteronyms_data, std::size_t heteronyms_size,
-    const char* vocab_data, std::size_t vocab_size,
-    const char* config_data, std::size_t config_size)
+    const char* vocab_data, std::size_t vocab_size)
 {
     if (phoneme_dict_data == nullptr || phoneme_dict_size == 0)
     {
@@ -511,46 +637,93 @@ std::unique_ptr<ITokenizer> CreateIpaTokenizer(
     {
         throw std::invalid_argument("IPA vocabulary data must not be empty");
     }
+}
 
-    auto phoneme_dict = parse_phoneme_dict(phoneme_dict_data, phoneme_dict_size);
-    auto heteronyms = (heteronyms_data != nullptr && heteronyms_size > 0)
-        ? parse_heteronyms(heteronyms_data, heteronyms_size)
-        : std::unordered_set<std::string>{};
-    auto vocab = parse_vocab(vocab_data, vocab_size);
-
-    // Parse config JSON
-    std::string config_text;
-    if (config_data != nullptr && config_size > 0)
+std::unordered_set<std::string> parse_optional_heteronyms(
+    const char* heteronyms_data,
+    std::size_t heteronyms_size)
+{
+    if (heteronyms_data == nullptr || heteronyms_size == 0)
     {
-        config_text.assign(config_data, config_size);
+        return {};
     }
-    std::string grapheme_prefix = extract_json_string(config_text, "grapheme_prefix", "");
-    int32_t eos_id = extract_json_int(config_text, "eos_id", -1);
-    int32_t ignore_ambiguous = extract_json_int(config_text, "ignore_ambiguous_words", 0);
+    return parse_heteronyms(heteronyms_data, heteronyms_size);
+}
 
-    if (eos_id < 0)
+std::string parse_optional_config_text(const char* config_data, std::size_t config_size)
+{
+    if (config_data == nullptr || config_size == 0)
     {
-        eos_id = static_cast<int32_t>(vocab.size()) - 1;
+        return {};
     }
+    return std::string(config_data, config_size);
+}
 
-    // Build token2id and known_tokens from vocab
+struct ParsedIpaTokenizerConfig {
+    std::string grapheme_prefix;
+    int32_t eos_id{-1};
+    bool ignore_ambiguous{false};
+};
+
+ParsedIpaTokenizerConfig parse_ipa_tokenizer_config(
+    const std::string& config_text,
+    std::size_t vocab_size)
+{
+    ParsedIpaTokenizerConfig parsed;
+    parsed.grapheme_prefix = extract_json_string(config_text, "grapheme_prefix", "");
+    parsed.eos_id = extract_json_int(config_text, "eos_id", -1);
+    if (parsed.eos_id < 0)
+    {
+        parsed.eos_id = static_cast<int32_t>(vocab_size) - 1;
+    }
+    parsed.ignore_ambiguous = extract_json_int(config_text, "ignore_ambiguous_words", 0) != 0;
+    return parsed;
+}
+
+struct IpaTokenLookup {
     std::unordered_map<std::string, int32_t> token2id;
     std::unordered_set<std::string> known_tokens;
+};
+
+IpaTokenLookup build_ipa_token_lookup(const std::vector<std::string>& vocab)
+{
+    IpaTokenLookup lookup;
     for (std::size_t i = 0; i < vocab.size(); ++i)
     {
-        token2id.emplace(vocab[i], static_cast<int32_t>(i));
-        known_tokens.insert(vocab[i]);
+        lookup.token2id.emplace(vocab[i], static_cast<int32_t>(i));
+        lookup.known_tokens.insert(vocab[i]);
     }
+    return lookup;
+}
+
+} // namespace
+
+std::unique_ptr<ITokenizer> CreateIpaTokenizer(
+    const char* phoneme_dict_data, std::size_t phoneme_dict_size,
+    const char* heteronyms_data, std::size_t heteronyms_size,
+    const char* vocab_data, std::size_t vocab_size,
+    const char* config_data, std::size_t config_size)
+{
+    validate_ipa_tokenizer_inputs(
+        phoneme_dict_data, phoneme_dict_size, vocab_data, vocab_size);
+
+    auto phoneme_dict = parse_phoneme_dict(phoneme_dict_data, phoneme_dict_size);
+    auto heteronyms = parse_optional_heteronyms(heteronyms_data, heteronyms_size);
+    auto vocab = parse_vocab(vocab_data, vocab_size);
+
+    const std::string config_text = parse_optional_config_text(config_data, config_size);
+    auto parsed_config = parse_ipa_tokenizer_config(config_text, vocab.size());
+    auto token_lookup = build_ipa_token_lookup(vocab);
 
     return std::make_unique<IpaTokenizer>(
         std::move(phoneme_dict),
         std::move(heteronyms),
         std::move(vocab),
-        std::move(token2id),
-        std::move(known_tokens),
-        std::move(grapheme_prefix),
-        eos_id,
-        ignore_ambiguous != 0);
+        std::move(token_lookup.token2id),
+        std::move(token_lookup.known_tokens),
+        std::move(parsed_config.grapheme_prefix),
+        parsed_config.eos_id,
+        parsed_config.ignore_ambiguous);
 }
 
 } // namespace trtf

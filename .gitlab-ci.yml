@@ -48,13 +48,23 @@ build-all:
     expire_in: 1 day
   timeout: 15m
 
-# ── Tier 1: Unit Tests (4 parallel jobs) ─────────────────────────────────────
+# ── Tier 1: Unit Tests + Static Gates (5 parallel jobs) ─────────────────────
 
 check-family-coverage:
   stage: tier1-unit
   needs: [build-all]
   script:
     - python scripts/check_family_coverage.py
+  timeout: 15m
+
+check-cyclomatic-complexity:
+  stage: tier1-unit
+  needs: [build-all]
+  script:
+    - lizard --version
+    - python tools/check_cyclomatic_complexity.py src
+      --max-ccn ${CCM_MAX_CCN:-10}
+      --top 20
   timeout: 15m
 
 test-python-builder:
@@ -94,7 +104,12 @@ test-graph-ops:
 
 test-e2e-smoke:
   stage: tier3-smoke
-  needs: [test-graph-ops, build-all]
+  needs:
+    - build-all
+    - check-family-coverage
+    - check-cyclomatic-complexity
+    - test-tools
+    - test-graph-ops
   script:
     - python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v
       --engine-dir $ENGINE_DIR

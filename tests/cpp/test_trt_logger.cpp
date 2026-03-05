@@ -9,7 +9,7 @@
 //   headers are unavailable, the test reports a skip (exit 0).
 //
 // Dependencies:
-//   - runtime/trt/trt_common.h (trt_log_to_stderr_enabled,
+//   - runtime/trt/core/trt_common.h (trt_log_to_stderr_enabled,
 //     trt_log_stderr_min_severity, trt_severity_name)
 //
 // Environment:
@@ -25,7 +25,7 @@
 //   env settings if needed.
 // =============================================================================
 
-#include "runtime/trt/trt_common.h"
+#include "runtime/trt/core/trt_common.h"
 
 #include <cstdlib>
 #include <iostream>

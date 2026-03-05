@@ -105,7 +105,7 @@ The C++ runtime loads a `.trtfb` bundle and runs inference. This is the only pat
 
 ```
 User: trtf_create_pipeline("qwen3.trtfb", TRTF_FORCE_TRT)
-  |     src/cabi/trtf_c.cpp
+  |     src/cabi/api/trtf_c.cpp
   |
   +-- Detect bundle (HasBundleMagic)
   |

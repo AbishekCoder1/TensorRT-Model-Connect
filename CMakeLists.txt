@@ -61,42 +61,57 @@ endif()
 # --- Bundle-only runtime library ---
 add_library(trtf_core
   src/bundle/bundle_format.cpp
-  src/cabi/trtf_c.cpp
-  src/cabi/fast_path_config.cpp
-  src/cabi/bundle_helpers.cpp
-  src/runtime/trt/trt_common.cpp
-  src/runtime/trt/trt_engine_lifecycle.cpp
-  src/runtime/trt/trt_decode_runtime.cpp
-  src/runtime/trt/trt_backend_shared.cpp
-  src/runtime/trt/device_kv_cache.cpp
-  src/runtime/trt/mamba_step_state.cpp
-  src/runtime/trt/mamba_decode_runtime.cpp
-  src/runtime/trt/mamba_backend.cpp
-  src/runtime/trt/rwkv_step_state.cpp
-  src/runtime/trt/rwkv_decode_runtime.cpp
-  src/runtime/trt/rwkv_backend.cpp
-  src/runtime/trt/whisper_backend.cpp
-  src/runtime/trt/vl_backend.cpp
-  src/runtime/trt/image_preprocessor.cpp
-  src/runtime/trt/vision_engine.cpp
-  src/runtime/trt/encoder_backend.cpp
-  src/runtime/trt/embedding_backend.cpp
-  src/runtime/trt/reranking_backend.cpp
-  src/runtime/trt/segmentation_backend.cpp
-  src/runtime/trt/sam_backend.cpp
-  src/runtime/trt/detection_backend.cpp
-  src/runtime/trt/neural_operator_backend.cpp
-  src/runtime/trt/hybrid_backend.cpp
-  src/runtime/trt/bark_backend.cpp
-  src/runtime/trt/magpie_tts_backend.cpp
-  src/runtime/trt/omni_backend.cpp
-  src/runtime/trt/speech_backend.cpp
-  src/runtime/trt/diffusion_backend.cpp
-  src/runtime/trt/diffusion_backend_base.cpp
-  src/runtime/trt/wan_diffusion_backend.cpp
-  src/runtime/trt/flux_diffusion_backend.cpp
-  src/runtime/trt/z_image_diffusion_backend.cpp
-  src/runtime/trt/stb_impl.cpp
+  src/cabi/api/trtf_c.cpp
+  src/cabi/pipeline/pipeline_impl.cpp
+  src/cabi/factories/factories_vision.cpp
+  src/cabi/factories/factories_audio.cpp
+  src/cabi/factories/factories_multimodal.cpp
+  src/cabi/factories/factories_diffusion.cpp
+  src/cabi/factories/factories_text.cpp
+  src/cabi/factories/factories_encoder.cpp
+  src/cabi/config/fast_path_config.cpp
+  src/cabi/bundle/bundle_helpers.cpp
+  src/cabi/registry/backend_registry.cpp
+  src/cabi/registry/backend_registry_dispatch.cpp
+  src/cabi/registry/backend_registry_strategy_wrappers.cpp
+  src/cabi/registry/backend_registry_strategy_plugins_text.cpp
+  src/cabi/registry/backend_registry_strategy_plugins_vision.cpp
+  src/cabi/registry/backend_registry_strategy_plugins_encoder.cpp
+  src/cabi/registry/backend_registry_strategy_plugins_audio.cpp
+  src/cabi/registry/backend_registry_strategy_plugins_misc.cpp
+  src/runtime/trt/core/trt_common.cpp
+  src/runtime/trt/core/trt_engine_lifecycle.cpp
+  src/runtime/trt/core/trt_decode_runtime.cpp
+  src/runtime/trt/core/trt_backend_shared.cpp
+  src/runtime/trt/core/device_kv_cache.cpp
+  src/runtime/trt/recurrent/mamba_step_state.cpp
+  src/runtime/trt/recurrent/mamba_decode_runtime.cpp
+  src/runtime/trt/recurrent/mamba_backend.cpp
+  src/runtime/trt/recurrent/rwkv_step_state.cpp
+  src/runtime/trt/recurrent/rwkv_decode_runtime.cpp
+  src/runtime/trt/recurrent/rwkv_backend.cpp
+  src/runtime/trt/audio/whisper_backend.cpp
+  src/runtime/trt/multimodal/vl_backend.cpp
+  src/runtime/trt/multimodal/image_preprocessor.cpp
+  src/runtime/trt/multimodal/vision_engine.cpp
+  src/runtime/trt/encoder/encoder_backend.cpp
+  src/runtime/trt/encoder/embedding_backend.cpp
+  src/runtime/trt/encoder/reranking_backend.cpp
+  src/runtime/trt/perception/segmentation_backend.cpp
+  src/runtime/trt/perception/sam_backend.cpp
+  src/runtime/trt/perception/detection_backend.cpp
+  src/runtime/trt/perception/neural_operator_backend.cpp
+  src/runtime/trt/recurrent/hybrid_backend.cpp
+  src/runtime/trt/audio/bark_backend.cpp
+  src/runtime/trt/audio/magpie_tts_backend.cpp
+  src/runtime/trt/audio/omni_backend.cpp
+  src/runtime/trt/audio/speech_backend.cpp
+  src/runtime/trt/diffusion/diffusion_backend.cpp
+  src/runtime/trt/diffusion/diffusion_backend_base.cpp
+  src/runtime/trt/diffusion/wan_diffusion_backend.cpp
+  src/runtime/trt/diffusion/flux_diffusion_backend.cpp
+  src/runtime/trt/diffusion/z_image_diffusion_backend.cpp
+  src/runtime/trt/core/stb_impl.cpp
   src/tokenizer/hf_python_tokenizer.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
@@ -104,7 +119,7 @@ add_library(trtf_core
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
   src/utils/wav_reader.cpp
-  src/runtime/trt/mel_spectrogram.cpp
+  src/runtime/trt/audio/mel_spectrogram.cpp
 )
 
 target_include_directories(trtf_core
@@ -158,6 +173,10 @@ add_test(NAME test_bundle_format COMMAND test_bundle_format)
 add_executable(test_c_abi_entry tests/cpp/test_c_abi_entry.cpp)
 target_link_libraries(test_c_abi_entry PRIVATE trtf_core)
 add_test(NAME test_c_abi_entry COMMAND test_c_abi_entry)
+
+add_executable(test_c_abi_runtime_regression tests/cpp/test_c_abi_runtime_regression.cpp)
+target_link_libraries(test_c_abi_runtime_regression PRIVATE trtf_core)
+add_test(NAME test_c_abi_runtime_regression COMMAND test_c_abi_runtime_regression)
 
 add_executable(test_fast_path_config tests/cpp/test_fast_path_config.cpp)
 target_link_libraries(test_fast_path_config PRIVATE trtf_core)
@@ -241,6 +260,15 @@ if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_I
 endif()
 add_test(NAME test_trt_logger COMMAND test_trt_logger)
 
+add_executable(test_trt_runtime_lifetime tests/cpp/test_trt_runtime_lifetime.cpp)
+target_link_libraries(test_trt_runtime_lifetime PRIVATE trtf_core)
+target_include_directories(test_trt_runtime_lifetime PRIVATE ${PROJECT_SOURCE_DIR}/src)
+if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
+  target_include_directories(test_trt_runtime_lifetime SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_trt_runtime_lifetime PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
+endif()
+add_test(NAME test_trt_runtime_lifetime COMMAND test_trt_runtime_lifetime)
+
 add_executable(test_trt_engine_lifecycle tests/cpp/test_trt_engine_lifecycle.cpp)
 target_link_libraries(test_trt_engine_lifecycle PRIVATE trtf_core)
 target_include_directories(test_trt_engine_lifecycle PRIVATE ${PROJECT_SOURCE_DIR}/src)
@@ -272,6 +300,11 @@ if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_I
   target_link_libraries(test_bundle_helpers PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
 endif()
 add_test(NAME test_bundle_helpers COMMAND test_bundle_helpers)
+
+add_executable(test_backend_registry tests/cpp/test_backend_registry.cpp)
+target_link_libraries(test_backend_registry PRIVATE trtf_core)
+target_include_directories(test_backend_registry PRIVATE ${PROJECT_SOURCE_DIR}/src)
+add_test(NAME test_backend_registry COMMAND test_backend_registry)
 
 add_executable(test_neural_operator_config tests/cpp/test_neural_operator_config.cpp)
 target_link_libraries(test_neural_operator_config PRIVATE trtf_core)

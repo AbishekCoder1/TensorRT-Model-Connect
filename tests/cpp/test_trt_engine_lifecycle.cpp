@@ -8,7 +8,7 @@
 //   When TRTF_HAS_TRT is disabled, the test skips gracefully (exit 0).
 //
 // Dependencies:
-//   - runtime/trt/trt_engine_lifecycle.h (layer_tensor_name)
+//   - runtime/trt/core/trt_engine_lifecycle.h (layer_tensor_name)
 //
 // Environment:
 //   CPU-only. No GPU, CUDA, or TRT runtime required.
@@ -16,7 +16,7 @@
 //   behind TRTF_HAS_TRT in the header.
 // =============================================================================
 
-#include "runtime/trt/trt_engine_lifecycle.h"
+#include "runtime/trt/core/trt_engine_lifecycle.h"
 
 #include <iostream>
 #include <string>

@@ -486,6 +486,30 @@ ctest --test-dir build --output-on-failure
 - Tools: 11 modules -- diff framework, logits, layers, audio, segmentation, diffusion helpers, perf_compare
 - C++: 19 test executables -- bundle format, tokenizers, CUDA RAII, KV cache, image preprocessor, CLI args
 
+### Tier 1.5: C++ Cyclomatic Complexity Gate (no GPU, <1 min)
+
+Cyclomatic complexity is measured with `lizard`, which is baked into both
+container images (`Dockerfile`, `Dockerfile.gb300`) and verified in
+`scripts/setup_container.sh`.
+
+Use the repository checker:
+
+```bash
+# Report-only scan for C++ runtime sources
+python tools/check_cyclomatic_complexity.py src
+
+# Gate: fail if any function is above CCN 10
+python tools/check_cyclomatic_complexity.py src --max-ccn 10
+```
+
+CI gate job: `check-cyclomatic-complexity` in `.gitlab-ci.yml`.
+Threshold can be tuned via:
+- `CCM_MAX_CCN`
+
+Current policy and status:
+- CI default is strict: fail on any function with `CCN > 10`.
+- As of March 4, 2026, repository scan reports `CCN max: 9` and `CCN >= 10: 0`.
+
 ### Tier 2: Graph-op GPU tests (~2 min, needs TRT)
 
 ```bash

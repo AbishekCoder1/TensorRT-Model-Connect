@@ -6,14 +6,14 @@ A split-language system for TensorRT inference: **Python builds** optimized TRT 
 
 | Page | Description |
 |------|-------------|
-| **[Architecture Overview](Architecture-Overview.md)** | Python-builds-C++-runs architecture, bundle-only runtime, two CLIs |
+| **[Architecture Overview](Architecture-Overview.md)** | Python-builds-C++-runs architecture, modular `src/cabi` runtime layout, strategy governance checks |
 | **[Static Design](Static-Design.md)** | Class-level UML diagrams and logical descriptions for every software unit |
 | **[Dynamic Design](Dynamic-Design.md)** | Sequence diagrams (Mermaid) and data flow for bundle creation and generation |
 | **[Pipeline Deep Dive](Pipeline-Deep-Dive.md)** | Detailed walkthrough of bundle loading and runtime assembly |
 | **[TRT Internals](TRT-Internals.md)** | How TensorRT graph building works (now in Python), decoder layer anatomy, engine lifecycle |
 | **[HF vs TRT Comparison](HF-vs-TRT-Comparison.md)** | Side-by-side comparison of HuggingFace Transformers and this library |
 | **[Adding a Model Family](Adding-a-Model-Family.md)** | Step-by-step guide for adding a new model family in Python |
-| **[Testing and Validation](Testing-and-Validation.md)** | Regression tiers, unified diff framework, per-category test strategies |
+| **[Testing and Validation](Testing-and-Validation.md)** | Regression tiers, unified diff framework, and strict C++ cyclomatic gate (CCN <= 10) |
 | **[Agent Orchestration](../AGENT_ORCHESTRATION.md)** | Autonomous multi-agent HF onboarding flow, validation, and merge gating |
 | **[Extensibility Assessment](Architecture-Extensibility-Assessment.md)** | MoE, Mamba/SSM, diffusion support status; MLA roadmap |
 | **[Source Layout](Source-Layout.md)** | File-by-file guide to the codebase (Python + C++) |
@@ -26,6 +26,7 @@ A split-language system for TensorRT inference: **Python builds** optimized TRT 
 4. **Plug-and-play families**: Adding a new model family is a Python-only task -- create a plugin in `trtf_build/` with a checkpoint mapper and graph builder.
 5. **No ONNX**: TRT networks are built directly using the TensorRT Python API. No intermediate representation.
 6. **Distributable bundles**: `.trtfb` files package compiled TRT engines + tokenizer into a single artifact for instant C++ loading.
+7. **Complexity budget enforced**: C++ code is gated in CI with `tools/check_cyclomatic_complexity.py` (`CCN <= 10` by default).
 
 ## Architecture at a Glance
 
@@ -38,7 +39,13 @@ The system has two phases:
    - Packages engine plan + tokenizer files into a `.trtfb` bundle
 
 2. **Run phase (C++)** -- `trtf <command> model.trtfb ...`
-   - Loads `.trtfb` bundle, deserializes TRT engine
+   - Loads `.trtfb` bundle, parses config, and deserializes TRT engines as required by strategy
+   - Runtime C ABI is split by ownership:
+     - `src/cabi/api/trtf_c.cpp`: entrypoint + orchestration
+     - `src/cabi/pipeline/pipeline_impl.cpp`: concrete `IPipeline` implementation/lifecycle
+     - `src/cabi/factories/factories_*.cpp`: modular strategy-specific pipeline assembly
+     - `src/cabi/registry/backend_registry_dispatch.cpp`: one-time built-in registration orchestration
+     - `src/cabi/registry/backend_registry_strategy_plugins_*.cpp` + `src/cabi/registry/backend_registry_strategy_wrappers.cpp`: modular strategy registration plugins and dispatch wrappers
    - Dispatches to the correct backend based on `runtime_strategy` in config.json:
      - Decoder paths: `decoder_kv_cache`, `decoder_moe` (`trt` backend family)
      - Recurrent/hybrid: `ssm_recurrent` (`trt_mamba`), `rwkv_recurrent` (`trt_rwkv`), `hybrid_mamba_attention` (`trt_hybrid`)
@@ -46,6 +53,8 @@ The system has two phases:
      - Speech/audio: `speech_to_text` (`trt_whisper`), `text_to_audio` (`trt_bark`), `speech_to_speech` (`trt_speech`)
      - Encoder/ranking: `encoder_only` (`trt_encoder`), `embedding` (`trt_embedding`), `reranking` (`trt_reranking`)
      - Other specialized paths: `neural_operator` (`trt_neural_operator`), `omni_multimodal` (`trt_omni`), `diffusion` (`trt_diffusion`)
+   - Dispatch mechanics: `diffusion` is handled as an early direct branch; all other strategies go through backend registry dispatch wrappers
+   - Governance gate: `tools/check_runtime_strategy_matrix.py` validates strategy parity and coverage across `src/cabi/*.cpp`, `tests/runtime_strategy_matrix.yaml`, and E2E contracts/check registrations
    - Creates tokenizer and task-specific runtime loop(s)
    - Runs GPU-accelerated inference
 

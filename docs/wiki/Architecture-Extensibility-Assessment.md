@@ -4,7 +4,7 @@ Status of non-standard architecture support. MoE, Mamba/SSM, vision-language (Qw
 
 ## Executive Summary
 
-With the Python build / C++ runtime split, adding new model families is a **Python-only task** for most architectures. The Python `trtf_build/` package provides a plugin system for family-specific checkpoint mappers and graph builders, while the C++ runtime handles bundle loading and inference with strategy-based dispatch.
+With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by C++ (`src/cabi/api/trtf_c.cpp` + `src/runtime/trt/*`). New strategy/state types still require C++ backend + dispatch changes.
 
 As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support are **fully implemented**. The standard decoder builder is parameterized to support LayerNorm, GELU, learned positions, and multiple activations. The VL image preprocessor supports 4 strategies with configurable interpolation. The diffusion pipeline supports text-to-video with T5 encoding, DiT denoising, and causal 3D VAE decoding.
 
@@ -21,7 +21,7 @@ As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support a
 
 ---
 
-## What Is Easy (Python-Only Changes)
+## What Is Easy (Python-Only When Reusing Existing `runtime_strategy`)
 
 ### Adding a standard dense decoder family
 
@@ -37,7 +37,7 @@ Write a Python graph builder for the expert routing logic. The C++ runtime uses 
 
 ### Adding a new Mamba/SSM family
 
-Write a Python graph builder for the SSM architecture. The C++ `MambaBackend` and `MambaStepState` are already implemented for the `ssm_recurrent` runtime strategy. ~400 LOC Python.
+Write a Python graph builder for the SSM architecture. The C++ `MambaBackend` and `MambaStepState` are already implemented for `runtime_strategy="ssm_recurrent"` (`src/runtime/trt/mamba_backend.cpp`, `src/runtime/trt/mamba_step_state.cpp`). ~400 LOC Python.
 
 **Implemented**: Mamba (130M-2.8B, selective scan + conv1d).
 
@@ -59,16 +59,16 @@ Write a Python family plugin that composes the shared builders (`t5_encoder_buil
 
 ### Different state management (done for Mamba/SSM)
 
-The C++ runtime now supports multiple state backends via `runtime_strategy` dispatch in `trtf_c.cpp`:
+The C++ runtime now supports multiple state backends via `runtime_strategy` dispatch in `src/cabi/api/trtf_c.cpp`:
 - `decoder_kv_cache` / `decoder_moe` -> `TrtBackendFastPath` + `DeviceKvCache`
 - `ssm_recurrent` -> `MambaBackend` + `MambaStepState`
 - `vision_language` -> `VLBackendFastPath` + vision encoder + decoder
-- `diffusion` -> `WanDiffusionBackend` (T5 + DiT + VAE engines)
+- `diffusion` -> `CreateDiffusionBackend(...)` dispatch (Wan/FLUX/Z-Image backends in `src/runtime/trt/`)
 
 New state types (e.g., for hybrid architectures) would need:
 1. A new `IStepState` implementation in C++
 2. A new backend class implementing `IGenerationBackend`
-3. A new `runtime_strategy` value and dispatch branch in `trtf_c.cpp`
+3. A new `runtime_strategy` value wired into `src/cabi/api/trtf_c.cpp` (factory registration and/or explicit branch in `try_create_from_bundle()`)
 
 ### Different KV cache shapes (DeepSeek MLA)
 
@@ -102,7 +102,7 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 - `MambaStepState` (`mamba_step_state.h/cpp`): conv_state + ssm_state per layer (constant memory)
 - `MambaStepEngine` + `run_mamba_step()` (`mamba_decode_runtime.h/cpp`)
 - `MambaBackend` (`mamba_backend.h/cpp`): autoregressive loop without prefill
-- `runtime_strategy="ssm_recurrent"` dispatch in `trtf_c.cpp`
+- `runtime_strategy="ssm_recurrent"` dispatch in `src/cabi/api/trtf_c.cpp`
 
 **Debug runner**: `MambaTrtRunner` in `debug_runner.py` for pure-Python Mamba TRT inference.
 
@@ -188,13 +188,13 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 
 ## Recommended Approach for New Families
 
-### Tier 1: Python-only, standard builder (implemented for 19 families)
+### Tier 1: Python-only (existing runtime strategy), standard builder (implemented for 19 families)
 Standard and extended decoders using the parameterized graph builder:
 - Already done: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Nemotron
 - Candidates: Yi (use llama), Baichuan, DeepSeek-dense, CodeLlama (use llama), Vicuna (use llama)
 - ~30-60 LOC each, fully parallelizable
 
-### Tier 2: Python custom graph builder (implemented for 6 families)
+### Tier 2: Python custom graph builder (existing C++ backend), implemented for 6 families
 Non-standard graph topologies with existing C++ backends:
 - Already done: Phi-MoE (MoE, Python only), Mixtral (MoE, Python only), Mamba (SSM, Python + existing C++ backend), Qwen-VL (VL, Python + existing C++ image preprocessor), Wan2.1-T2V (diffusion, Python builders + C++ diffusion backend)
 - Candidates: Other Mamba variants, LLaVA/InternVL (can reuse simple_chw/aspect_preserve_chw preprocessor), other DiT-based diffusion models (can reuse shared builders)

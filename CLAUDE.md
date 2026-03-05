@@ -77,6 +77,15 @@ Diff framework self-tests:
 pytest tests/tools/ -v
 ```
 
+Cyclomatic complexity gate (required for C++ runtime changes):
+```bash
+# Report
+python tools/check_cyclomatic_complexity.py src
+
+# Gate (must pass before merge; CI uses the same default threshold)
+python tools/check_cyclomatic_complexity.py src --max-ccn 10
+```
+
 Unified E2E tests (requires GPU + engine bundles):
 ```bash
 # All models (50 models — auto-builds missing bundles):

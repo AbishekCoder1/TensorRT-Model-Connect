@@ -1,15 +1,15 @@
 // Test suite: Mel spectrogram extraction.
 //
 // Purpose:
-//   Validates extract_mel_spectrogram() from runtime/trt/mel_spectrogram.h.
+//   Validates extract_mel_spectrogram() from runtime/trt/audio/mel_spectrogram.h.
 //   Uses a synthetic sine wave and a known filterbank to verify output shape,
 //   energy concentration, and normalization properties.
 //
 // Dependencies:
-//   - runtime/trt/mel_spectrogram.h: extract_mel_spectrogram
+//   - runtime/trt/audio/mel_spectrogram.h: extract_mel_spectrogram
 //   - No TRT, GPU, or CUDA required.
 
-#include "runtime/trt/mel_spectrogram.h"
+#include "runtime/trt/audio/mel_spectrogram.h"
 
 #include <cmath>
 #include <cstdint>

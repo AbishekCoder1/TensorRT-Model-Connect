@@ -57,7 +57,8 @@ void print_usage()
         "  trtf segment-sam     <bundle.trtfb> --image PATH --output DIR [--point-x 0.5] [--point-y 0.5] [--background]\n"
         "  trtf generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH [--max-new-tokens N] [--hf-python PATH]\n"
         "  trtf generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] [--guidance-scale S] [--hf-python PATH]\n"
-        "  trtf detect          <bundle.trtfb> --image PATH --output PATH [--threshold 0.5] [--hf-python PATH]\n"
+        "  trtf detect          <bundle.trtfb> --image PATH "
+        "[--output PATH|--output-json PATH] [--threshold 0.5|--score-threshold 0.5] [--hf-python PATH]\n"
         "  trtf embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
         "  trtf rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" [--hf-python PATH]\n"
         "  trtf transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]\n"
@@ -170,7 +171,7 @@ CliArgs parse_args(int argc, char** argv)
             continue;
         }
 
-        if (arg == "--output" || arg == "-o")
+        if (arg == "--output" || arg == "--output-json" || arg == "-o")
         {
             if (i + 1 >= argc)
             {
@@ -206,7 +207,7 @@ CliArgs parse_args(int argc, char** argv)
             continue;
         }
 
-        if (arg == "--threshold")
+        if (arg == "--threshold" || arg == "--score-threshold")
         {
             if (i + 1 >= argc)
             {
