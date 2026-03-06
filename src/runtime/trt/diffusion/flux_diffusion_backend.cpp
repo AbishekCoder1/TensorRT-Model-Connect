@@ -28,23 +28,41 @@ struct FlowMatchEulerState {
     float base_shift{0.5F};
     float max_shift{1.15F};
     int32_t image_seq_len{4096};
+    bool use_empirical_mu{false};  // FLUX.2 empirical mu formula
 
     void set_timesteps(int32_t num_steps) {
         const double N = static_cast<double>(num_train_timesteps);
 
         if (use_dynamic_shifting) {
-            // HF FLUX scheduler:
-            // 1) base sigmas = linspace(1.0, 1.0/num_steps, num_steps)
-            //    (current FluxPipeline path when scheduler.use_flow_sigmas is false)
-            // 2) apply exponential dynamic shifting with mu
-            const double base_seq = 256.0;
-            const double max_seq = 4096.0;
-            const double m = (static_cast<double>(max_shift) -
-                              static_cast<double>(base_shift)) /
-                             (max_seq - base_seq);
-            const double b = static_cast<double>(base_shift) -
-                             m * base_seq;
-            const double mu = static_cast<double>(image_seq_len) * m + b;
+            double mu;
+
+            if (use_empirical_mu) {
+                // FLUX.2 empirical mu formula (compute_empirical_mu in diffusers)
+                const double a1 = 8.73809524e-05, b1 = 1.89833333;
+                const double a2 = 0.00016927, b2 = 0.45666666;
+                const double seq = static_cast<double>(image_seq_len);
+                const double nsteps = static_cast<double>(num_steps);
+
+                if (seq > 4300.0) {
+                    mu = a2 * seq + b2;
+                } else {
+                    const double m_200 = a2 * seq + b2;
+                    const double m_10 = a1 * seq + b1;
+                    const double a = (m_200 - m_10) / 190.0;
+                    const double b = m_200 - 200.0 * a;
+                    mu = a * nsteps + b;
+                }
+            } else {
+                // FLUX.1 linear mu formula
+                const double base_seq = 256.0;
+                const double max_seq = 4096.0;
+                const double m = (static_cast<double>(max_shift) -
+                                  static_cast<double>(base_shift)) /
+                                 (max_seq - base_seq);
+                const double b = static_cast<double>(base_shift) -
+                                 m * base_seq;
+                mu = static_cast<double>(image_seq_len) * m + b;
+            }
 
             // Generate raw sigmas in scheduler sigma-space (not inference-step space).
             const double sigma_max = 1.0;
@@ -336,6 +354,62 @@ void log_flux_temb_stats(
               << ",mean=" << (tsum / static_cast<double>(temb.size())) << "]\n";
 }
 
+void pack_flux2_latents(
+    const std::vector<float>& latents,
+    int32_t packed_channels,
+    int32_t h_packed,
+    int32_t w_packed,
+    std::vector<float>& packed)
+{
+    // FLUX.2: latents are [packed_channels, h_packed, w_packed] in CHW
+    // Pack = CHW -> HWC: tokens[h*W+w, c] = latents[c, h, w]
+    const auto num_tokens = static_cast<std::size_t>(h_packed) *
+        static_cast<std::size_t>(w_packed);
+    packed.resize(num_tokens * static_cast<std::size_t>(packed_channels));
+    for (int32_t h = 0; h < h_packed; ++h) {
+        for (int32_t w = 0; w < w_packed; ++w) {
+            const int32_t tok = h * w_packed + w;
+            for (int32_t c = 0; c < packed_channels; ++c) {
+                const auto src = static_cast<std::size_t>(c) *
+                    static_cast<std::size_t>(h_packed * w_packed) +
+                    static_cast<std::size_t>(h * w_packed + w);
+                const auto dst = static_cast<std::size_t>(tok) *
+                    static_cast<std::size_t>(packed_channels) +
+                    static_cast<std::size_t>(c);
+                packed[dst] = latents[src];
+            }
+        }
+    }
+}
+
+void unpack_flux2_velocity(
+    const std::vector<float>& denoiser_output,
+    int32_t packed_channels,
+    int32_t h_packed,
+    int32_t w_packed,
+    std::vector<float>& velocity)
+{
+    // FLUX.2: HWC -> CHW: velocity[c, h, w] = tokens[h*W+w, c]
+    const auto total = static_cast<std::size_t>(packed_channels) *
+        static_cast<std::size_t>(h_packed) *
+        static_cast<std::size_t>(w_packed);
+    velocity.resize(total);
+    for (int32_t h = 0; h < h_packed; ++h) {
+        for (int32_t w = 0; w < w_packed; ++w) {
+            const int32_t tok = h * w_packed + w;
+            for (int32_t c = 0; c < packed_channels; ++c) {
+                const auto src_i = static_cast<std::size_t>(tok) *
+                    static_cast<std::size_t>(packed_channels) +
+                    static_cast<std::size_t>(c);
+                const auto dst_i = static_cast<std::size_t>(c) *
+                    static_cast<std::size_t>(h_packed * w_packed) +
+                    static_cast<std::size_t>(h * w_packed + w);
+                velocity[dst_i] = denoiser_output[src_i];
+            }
+        }
+    }
+}
+
 void pack_flux_latents(
     const std::vector<float>& latents,
     int32_t z_dim,
@@ -456,6 +530,111 @@ void log_flux_step_stats(
               << "]\n";
 }
 
+void apply_bn_denorm_inplace(
+    std::vector<float>& data,
+    int32_t num_channels,
+    int32_t spatial_size,
+    const std::vector<float>& bn_mean,
+    const std::vector<float>& bn_var,
+    float eps)
+{
+    const int32_t bn_ch = static_cast<int32_t>(bn_mean.size());
+    const auto spatial = static_cast<std::size_t>(spatial_size);
+    for (int32_t c = 0; c < bn_ch && c < num_channels; ++c) {
+        const float s = std::sqrt(bn_var[static_cast<std::size_t>(c)] + eps);
+        const float m = bn_mean[static_cast<std::size_t>(c)];
+        for (std::size_t i = 0; i < spatial; ++i) {
+            const auto idx = static_cast<std::size_t>(c) * spatial + i;
+            data[idx] = data[idx] * s + m;
+        }
+    }
+}
+
+void unpatchify_latents(
+    const std::vector<float>& packed,
+    const FluxPackLayout& layout,
+    int32_t z_dim,
+    int32_t h_lat, int32_t w_lat,
+    std::vector<float>& out)
+{
+    const auto spatial = static_cast<std::size_t>(layout.h_packed * layout.w_packed);
+    out.resize(static_cast<std::size_t>(z_dim) *
+               static_cast<std::size_t>(h_lat) * static_cast<std::size_t>(w_lat));
+    for (int32_t c = 0; c < z_dim; ++c) {
+        for (int32_t py = 0; py < layout.h_packed; ++py) {
+            for (int32_t px = 0; px < layout.w_packed; ++px) {
+                for (int32_t dy = 0; dy < layout.ph; ++dy) {
+                    for (int32_t dx = 0; dx < layout.pw; ++dx) {
+                        const int32_t src_ch = c * layout.ph * layout.pw + dy * layout.pw + dx;
+                        const auto si = static_cast<std::size_t>(src_ch) * spatial +
+                                        static_cast<std::size_t>(py * layout.w_packed + px);
+                        const auto di = static_cast<std::size_t>(c) *
+                                        static_cast<std::size_t>(h_lat * w_lat) +
+                                        static_cast<std::size_t>((py * layout.ph + dy) * w_lat +
+                                                                  px * layout.pw + dx);
+                        out[di] = packed[si];
+                    }
+                }
+            }
+        }
+    }
+}
+
+std::function<void(const std::vector<float>&, std::vector<float>&)>
+make_flux_pack_fn(bool is_flux2, int32_t z_dim, int32_t h_lat, int32_t w_lat,
+                  const FluxPackLayout& layout)
+{
+    if (is_flux2) {
+        return [&layout](const std::vector<float>& lat, std::vector<float>& packed) {
+            pack_flux2_latents(lat, layout.packed_channels,
+                               layout.h_packed, layout.w_packed, packed);
+        };
+    }
+    return [z_dim, h_lat, w_lat, &layout](const std::vector<float>& lat,
+                                           std::vector<float>& packed) {
+        pack_flux_latents(lat, z_dim, h_lat, w_lat, layout, packed);
+    };
+}
+
+std::function<void(const std::vector<float>&, std::vector<float>&)>
+make_flux_unpack_fn(bool is_flux2, int32_t z_dim, int32_t h_lat, int32_t w_lat,
+                    const FluxPackLayout& layout)
+{
+    if (is_flux2) {
+        return [&layout](const std::vector<float>& out, std::vector<float>& vel) {
+            unpack_flux2_velocity(out, layout.packed_channels,
+                                  layout.h_packed, layout.w_packed, vel);
+        };
+    }
+    return [z_dim, h_lat, w_lat, &layout](const std::vector<float>& out,
+                                           std::vector<float>& vel) {
+        unpack_flux_velocity(out, z_dim, h_lat, w_lat, layout, vel);
+    };
+}
+
+void prepare_flux2_vae_input(
+    std::vector<float>& latents,
+    const FluxPackLayout& layout,
+    int32_t z_dim,
+    int32_t h_lat, int32_t w_lat,
+    const std::vector<float>& bn_mean,
+    const std::vector<float>& bn_var,
+    bool is_flux2,
+    std::vector<float>& vae_latents)
+{
+    if (!is_flux2 || bn_mean.empty()) {
+        vae_latents = latents;
+        return;
+    }
+
+    apply_bn_denorm_inplace(latents, layout.packed_channels,
+                            layout.h_packed * layout.w_packed,
+                            bn_mean, bn_var, 0.0001F);
+    unpatchify_latents(latents, layout, z_dim, h_lat, w_lat, vae_latents);
+    std::cerr << "[flux] Applied BN denorm + unpatchify ("
+              << bn_mean.size() << " -> " << z_dim << " ch)\n";
+}
+
 void maybe_dump_flux_latents(const std::vector<float>& latents)
 {
     const std::string dump_path = "/tmp/flux_final_latents.raw";
@@ -530,18 +709,17 @@ bool decode_flux_vae(
     return true;
 }
 
-template <typename ComputeTembFn, typename EmbedHiddenFn, typename RunDenoiserFn>
+template <typename PackFn, typename UnpackFn, typename ComputeTembFn,
+          typename EmbedHiddenFn, typename RunDenoiserFn>
 bool run_flux_denoising_loop(
     FlowMatchEulerState& scheduler,
     int32_t num_inference_steps,
-    int32_t z_dim,
-    int32_t h_lat,
-    int32_t w_lat,
-    const FluxPackLayout& layout,
     std::vector<float>& latents,
     std::vector<float>& hidden,
     std::vector<float>& denoiser_output,
     std::string& error,
+    PackFn&& pack_latents,
+    UnpackFn&& unpack_velocity,
     ComputeTembFn&& compute_temb,
     EmbedHiddenFn&& embed_hidden,
     RunDenoiserFn&& run_denoiser)
@@ -554,13 +732,13 @@ bool run_flux_denoising_loop(
     for (int32_t step = 0; step < num_inference_steps; ++step) {
         const float t = scheduler.timesteps[static_cast<std::size_t>(step)] / 1000.0F;
         compute_temb(t, temb);
-        pack_flux_latents(latents, z_dim, h_lat, w_lat, layout, packed);
+        pack_latents(latents, packed);
         embed_hidden(packed, hidden);
         if (!run_denoiser(hidden, temb, denoiser_output, error)) {
             std::cerr << "[flux] Denoiser step " << step << " failed: " << error << "\n";
             return false;
         }
-        unpack_flux_velocity(denoiser_output, z_dim, h_lat, w_lat, layout, velocity);
+        unpack_velocity(denoiser_output, velocity);
         scheduler.step(velocity.data(), latents.data(), next_latents.data(),
             latents.size(), step);
         latents = next_latents;
@@ -657,17 +835,23 @@ void FluxDiffusionBackend::compute_flux_timestep_embedding(
     std::vector<float> t_emb;
     fill_flux_sinusoidal_embedding(timestep * 1000.0F, freq_dim, t_emb);
 
+    // Helper: return nullptr for empty bias vectors, valid pointer otherwise
+    auto bias_or_null = [](const std::vector<float>& v) -> const float* {
+        return v.empty() ? nullptr : v.data();
+    };
+
+    // timestep_embedder MLP: sinusoidal -> Linear -> SiLU -> Linear
     std::vector<float> t_proj(static_cast<std::size_t>(dim));
     cpu_matmul_bias(t_emb.data(),
         mWeights.time_emb_0_weight.data(),
-        mWeights.time_emb_0_bias.data(),
+        bias_or_null(mWeights.time_emb_0_bias),
         t_proj.data(), 1, freq_dim, dim);
     cpu_silu_inplace(t_proj.data(), static_cast<std::size_t>(dim));
 
     std::vector<float> t_proj2(static_cast<std::size_t>(dim));
     cpu_matmul_bias(t_proj.data(),
         mWeights.time_emb_2_weight.data(),
-        mWeights.time_emb_2_bias.data(),
+        bias_or_null(mWeights.time_emb_2_bias),
         t_proj2.data(), 1, dim, dim);
 
     // text_embedder MLP: pooled -> Linear -> SiLU -> Linear
@@ -676,7 +860,7 @@ void FluxDiffusionBackend::compute_flux_timestep_embedding(
         const int32_t text_in_dim = static_cast<int32_t>(pooled_text.size());
         cpu_matmul_bias(pooled_text.data(),
             mWeights.text_proj_weight.data(),
-            mWeights.text_proj_bias.data(),
+            bias_or_null(mWeights.text_proj_bias),
             text_proj.data(), 1, text_in_dim, dim);
         cpu_silu_inplace(text_proj.data(), static_cast<std::size_t>(dim));
 
@@ -684,7 +868,7 @@ void FluxDiffusionBackend::compute_flux_timestep_embedding(
             std::vector<float> text_proj2(static_cast<std::size_t>(dim));
             cpu_matmul_bias(text_proj.data(),
                 mWeights.text_proj_2_weight.data(),
-                mWeights.text_proj_2_bias.data(),
+                bias_or_null(mWeights.text_proj_2_bias),
                 text_proj2.data(), 1, dim, dim);
             text_proj = std::move(text_proj2);
         }
@@ -692,6 +876,12 @@ void FluxDiffusionBackend::compute_flux_timestep_embedding(
 
     // Guidance embedding MLP (if guidance_embeds is enabled)
     std::vector<float> guidance_proj(static_cast<std::size_t>(dim), 0.0F);
+    if (timestep > 0.99F) {
+        std::cerr << "[flux-temb] guidance_embeds=" << mConfig.guidance_embeds
+                  << " g_w0=" << mWeights.guidance_emb_0_weight.size()
+                  << " g_w2=" << mWeights.guidance_emb_2_weight.size()
+                  << "\n";
+    }
     if (mConfig.guidance_embeds &&
         !mWeights.guidance_emb_0_weight.empty()) {
         // Diffusers FLUX forward currently scales guidance by 1000 before
@@ -703,14 +893,26 @@ void FluxDiffusionBackend::compute_flux_timestep_embedding(
         std::vector<float> g_proj(static_cast<std::size_t>(dim));
         cpu_matmul_bias(g_emb.data(),
             mWeights.guidance_emb_0_weight.data(),
-            mWeights.guidance_emb_0_bias.data(),
+            bias_or_null(mWeights.guidance_emb_0_bias),
             g_proj.data(), 1, freq_dim, dim);
         cpu_silu_inplace(g_proj.data(), static_cast<std::size_t>(dim));
 
         cpu_matmul_bias(g_proj.data(),
             mWeights.guidance_emb_2_weight.data(),
-            mWeights.guidance_emb_2_bias.data(),
+            bias_or_null(mWeights.guidance_emb_2_bias),
             guidance_proj.data(), 1, dim, dim);
+
+        if (timestep > 0.99F) {
+            float gmin = guidance_proj[0], gmax = guidance_proj[0];
+            double gsum = 0.0;
+            for (auto v : guidance_proj) {
+                gmin = std::min(gmin, v);
+                gmax = std::max(gmax, v);
+                gsum += static_cast<double>(v);
+            }
+            std::cerr << "[flux-temb] guidance_proj=[" << gmin << "," << gmax
+                      << ",mean=" << (gsum / static_cast<double>(dim)) << "]\n";
+        }
     }
 
     combine_flux_embeddings(t_proj2, text_proj, guidance_proj, temb);
@@ -733,51 +935,41 @@ void FluxDiffusionBackend::compute_flux_rope(
     cos_out.resize(static_cast<std::size_t>(total_seq) * static_cast<std::size_t>(head_dim), 1.0F);
     sin_out.resize(static_cast<std::size_t>(total_seq) * static_cast<std::size_t>(head_dim), 0.0F);
 
-    // FLUX uses 3-axis RoPE: (text_pos, h_pos, w_pos)
-    // axes_dims_rope default = (16, 56, 56) => total = 128 = head_dim
-    // For text tokens: only text_pos dimension is used
-    // For image tokens: h and w dimensions are used
+    // FLUX uses multi-axis RoPE: (text_pos, h_pos, w_pos [, extra_pos])
+    // FLUX.1 default axes = (16, 56, 56) => 3D, total = 128 = head_dim
+    // FLUX.2 default axes = (32, 32, 32, 32) => 4D, total = 128 = head_dim
+    // For text tokens: ALL positions are 0 on ALL axes (identity rotation)
+    // For image tokens: position 0 on axis 0, h on axis 1, w on axis 2, 0 on axis 3+
 
-    // HF FLUX RoPE: text_ids = zeros(text_seq, 3), image_ids[:,0]=0, [:,1]=h, [:,2]=w
-    // ALL text tokens have position 0 on ALL axes (identity rotation).
-    // Image tokens have position 0 on axis 0 (text), h on axis 1, w on axis 2.
+    const float theta = mConfig.rope_theta;
 
-    const float theta = 10000.0F;
-    const int32_t text_dim = 16;    // First axis
-    const int32_t h_dim = 56;       // Second axis
-    const int32_t w_dim = 56;       // Third axis
+    // Read axis dimensions from config, fall back to FLUX.1 default
+    std::vector<int32_t> axes = mConfig.axes_dims_rope;
+    if (axes.empty()) {
+        axes = {16, 56, 56};  // FLUX.1 default
+    }
 
     auto encode_pos = [&](float* cos_row, float* sin_row,
                           int32_t text_pos, int32_t h_pos, int32_t w_pos) {
         int32_t offset = 0;
-        // Text dimension
-        for (int32_t i = 0; i < text_dim / 2; ++i) {
-            const float freq = 1.0F / std::pow(theta, 2.0F * static_cast<float>(i) / static_cast<float>(text_dim));
-            const float angle = static_cast<float>(text_pos) * freq;
-            cos_row[offset + 2 * i] = std::cos(angle);
-            cos_row[offset + 2 * i + 1] = std::cos(angle);
-            sin_row[offset + 2 * i] = std::sin(angle);
-            sin_row[offset + 2 * i + 1] = std::sin(angle);
-        }
-        offset += text_dim;
-        // Height dimension
-        for (int32_t i = 0; i < h_dim / 2; ++i) {
-            const float freq = 1.0F / std::pow(theta, 2.0F * static_cast<float>(i) / static_cast<float>(h_dim));
-            const float angle = static_cast<float>(h_pos) * freq;
-            cos_row[offset + 2 * i] = std::cos(angle);
-            cos_row[offset + 2 * i + 1] = std::cos(angle);
-            sin_row[offset + 2 * i] = std::sin(angle);
-            sin_row[offset + 2 * i + 1] = std::sin(angle);
-        }
-        offset += h_dim;
-        // Width dimension
-        for (int32_t i = 0; i < w_dim / 2; ++i) {
-            const float freq = 1.0F / std::pow(theta, 2.0F * static_cast<float>(i) / static_cast<float>(w_dim));
-            const float angle = static_cast<float>(w_pos) * freq;
-            cos_row[offset + 2 * i] = std::cos(angle);
-            cos_row[offset + 2 * i + 1] = std::cos(angle);
-            sin_row[offset + 2 * i] = std::sin(angle);
-            sin_row[offset + 2 * i + 1] = std::sin(angle);
+        for (std::size_t ax = 0; ax < axes.size(); ++ax) {
+            const int32_t ax_dim = axes[ax];
+            // Determine position value for this axis
+            int32_t pos = 0;
+            if (ax == 0) pos = text_pos;
+            else if (ax == 1) pos = h_pos;
+            else if (ax == 2) pos = w_pos;
+            // axes[3+] default to position 0 (identity rotation for image tokens)
+
+            for (int32_t i = 0; i < ax_dim / 2; ++i) {
+                const float freq = 1.0F / std::pow(theta, 2.0F * static_cast<float>(i) / static_cast<float>(ax_dim));
+                const float angle = static_cast<float>(pos) * freq;
+                cos_row[offset + 2 * i] = std::cos(angle);
+                cos_row[offset + 2 * i + 1] = std::cos(angle);
+                sin_row[offset + 2 * i] = std::sin(angle);
+                sin_row[offset + 2 * i + 1] = std::sin(angle);
+            }
+            offset += ax_dim;
         }
     };
 
@@ -1070,6 +1262,21 @@ void FluxDiffusionBackend::set_prompt(std::string prompt)
     mRawPrompt = std::move(prompt);
 }
 
+std::string FluxDiffusionBackend::prepare_prompt(const std::string& prompt) const
+{
+    // FLUX.2 uses Mistral chat template with system message
+    // Detect FLUX.2 via VAE BN weights presence
+    if (!mWeights.vae_bn_mean.empty()) {
+        static const char* kSystemMsg =
+            "You are an AI that reasons about image descriptions. "
+            "You give structured responses focusing on object relationships, object\n"
+            "attribution and actions without speculation.";
+        return std::string("<s>[SYSTEM_PROMPT]") + kSystemMsg +
+               "[/SYSTEM_PROMPT][INST]" + prompt + "[/INST]";
+    }
+    return prompt;
+}
+
 // ---------------------------------------------------------------------------
 // Generate image (full pipeline)
 // ---------------------------------------------------------------------------
@@ -1128,7 +1335,6 @@ VideoResult FluxDiffusionBackend::generate_video(
         std::cerr << "[flux] T5 encoder failed: " << error << "\n";
         return result;
     }
-
     const int32_t t5_dim = mConfig.text_encoder_dim;
     std::vector<float> encoder_hidden(
         static_cast<std::size_t>(text_seq) * static_cast<std::size_t>(dit_dim), 0.0F);
@@ -1141,15 +1347,25 @@ VideoResult FluxDiffusionBackend::generate_video(
             text_seq, t5_dim, dit_dim);
         std::cerr << "[flux] Context embedder projection done\n";
     } else {
-        std::cerr << "[flux] Warning: No context_embedder weights, encoder_hidden is zero\n";
+        std::cerr << "[flux] Warning: No context_embedder weights\n";
     }
 
     std::vector<float> cos_vals, sin_vals;
     compute_flux_rope(layout.h_packed, layout.w_packed, text_seq, cos_vals, sin_vals);
 
-    const auto latent_size = static_cast<std::size_t>(z_dim) *
-                             static_cast<std::size_t>(mHLatent) *
-                             static_cast<std::size_t>(mWLatent);
+    // 5. Initialize random latents
+    // FLUX.2: sample as [packed_channels, h_packed, w_packed] = [128, 64, 64]
+    //   then simple flatten to [4096, 128] tokens (channels-last)
+    // FLUX.1: sample as [z_dim, h_lat, w_lat] = [16, 128, 128]
+    //   then 2x2 spatial pack to [4096, 64] tokens
+    const bool is_flux2 = !mWeights.vae_bn_mean.empty();
+    const auto latent_size = is_flux2
+        ? (static_cast<std::size_t>(layout.packed_channels) *
+           static_cast<std::size_t>(layout.h_packed) *
+           static_cast<std::size_t>(layout.w_packed))
+        : (static_cast<std::size_t>(z_dim) *
+           static_cast<std::size_t>(mHLatent) *
+           static_cast<std::size_t>(mWLatent));
     std::vector<float> latents(latent_size);
     initialize_flux_latents(latents);
 
@@ -1159,6 +1375,8 @@ VideoResult FluxDiffusionBackend::generate_video(
     scheduler.base_shift = mConfig.base_shift;
     scheduler.max_shift = mConfig.max_shift;
     scheduler.image_seq_len = mNumImgTokens;
+    // FLUX.2 uses empirical mu formula (detected via VAE BN presence)
+    scheduler.use_empirical_mu = !mWeights.vae_bn_mean.empty();
     scheduler.set_timesteps(num_inference_steps);
 
     std::cerr << "[flux] Starting denoising loop (" << num_inference_steps << " steps)"
@@ -1183,6 +1401,11 @@ VideoResult FluxDiffusionBackend::generate_video(
             hidden_in, encoder_hidden, temb_in, cos_vals, sin_vals, output, err);
     };
 
+    // Pack/unpack: FLUX.2 uses simple CHW->HWC, FLUX.1 uses 2x2 spatial packing
+    auto pack_latents_fn = make_flux_pack_fn(is_flux2, z_dim, mHLatent, mWLatent, layout);
+    auto unpack_velocity_fn = make_flux_unpack_fn(is_flux2, z_dim, mHLatent, mWLatent, layout);
+
+    // Embed hidden states: pack -> x_embedder matmul
     std::function<void(const std::vector<float>&, std::vector<float>&)> embed_hidden;
     if (!mFluxXEmbedW.empty()) {
         embed_hidden = [this, &layout, dit_dim](
@@ -1209,14 +1432,12 @@ VideoResult FluxDiffusionBackend::generate_video(
     if (!run_flux_denoising_loop(
             scheduler,
             num_inference_steps,
-            z_dim,
-            mHLatent,
-            mWLatent,
-            layout,
             latents,
             hidden,
             denoiser_output,
             error,
+            pack_latents_fn,
+            unpack_velocity_fn,
             compute_temb,
             embed_hidden,
             run_denoiser)) {
@@ -1224,10 +1445,18 @@ VideoResult FluxDiffusionBackend::generate_video(
     }
 
     maybe_dump_flux_latents(latents);
+
+    // Prepare VAE input: BN denorm + unpatchify for FLUX.2, identity for FLUX.1
+    std::vector<float> vae_latents;
+    prepare_flux2_vae_input(
+        latents, layout, z_dim, mHLatent, mWLatent,
+        mWeights.vae_bn_mean, mWeights.vae_bn_var,
+        is_flux2, vae_latents);
+
     std::cerr << "[flux] Decoding latents via native TRT VAE engine ...\n";
     if (!decode_flux_vae(
             mVaeDecoder, mStream, mConfig, mHLatent, mWLatent, z_dim,
-            latents, result)) {
+            vae_latents, result)) {
         std::cerr << "[flux] VAE TRT enqueueV3 failed\n";
         return result;
     }

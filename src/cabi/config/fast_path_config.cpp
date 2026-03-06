@@ -354,6 +354,8 @@ void parse_diffusion_config(const std::string& config_text, FastPathModelConfig&
     cfg.latents_mean = extract_json_float_array(config_text, "latents_mean");
     cfg.latents_std = extract_json_float_array(config_text, "latents_std");
     cfg.patch_size = extract_json_int_array(config_text, "patch_size");
+    cfg.axes_dims_rope = extract_json_int_array(config_text, "axes_dims_rope");
+    cfg.rope_theta = extract_json_float(config_text, "rope_theta", 10000.0F);
     cfg.vae_model_id = extract_json_string(config_text, "vae_model_id", "");
     cfg.guidance_embeds = extract_json_int(config_text, "guidance_embeds", 0) != 0;
     cfg.use_rope = extract_json_int(config_text, "use_rope", 1) != 0;

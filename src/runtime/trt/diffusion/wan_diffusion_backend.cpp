@@ -1442,6 +1442,8 @@ std::unique_ptr<IDiffusionBackend> CreateDiffusionBackend(
     config.latents_mean = fp_cfg.latents_mean;
     config.latents_std = fp_cfg.latents_std;
     config.patch_size = fp_cfg.patch_size;
+    config.axes_dims_rope = fp_cfg.axes_dims_rope;
+    config.rope_theta = fp_cfg.rope_theta;
     config.vae_model_id = fp_cfg.vae_model_id;
     config.guidance_embeds = fp_cfg.guidance_embeds;
     config.use_rope = fp_cfg.use_rope;

@@ -41,6 +41,8 @@ struct DiffusionConfig {
     std::vector<float> latents_mean;
     std::vector<float> latents_std;
     std::vector<int32_t> patch_size;  // [pt, ph, pw]
+    std::vector<int32_t> axes_dims_rope;  // RoPE axis dimensions
+    float rope_theta{10000.0F};  // RoPE base frequency
     std::string vae_model_id;
 
     bool guidance_embeds{false};
@@ -82,6 +84,10 @@ struct PreprocessorWeights {
     std::vector<float> guidance_emb_0_bias;    // [dim]
     std::vector<float> guidance_emb_2_weight;  // [dim, dim]
     std::vector<float> guidance_emb_2_bias;    // [dim]
+
+    // VAE BN denormalization (FLUX.2): latents * sqrt(var+eps) + mean
+    std::vector<float> vae_bn_mean;  // [packed_channels] e.g. [128]
+    std::vector<float> vae_bn_var;   // [packed_channels]
 
     bool valid{false};
 };

@@ -1,13 +1,18 @@
 """FLUX family plugin.
 
-Supports FLUX.1-dev, FLUX.1-schnell, FLUX.2-klein, and similar models
-using the FluxPipeline from diffusers.
+Supports FLUX.1-dev, FLUX.1-schnell, FLUX.2-dev, FLUX.2-klein, and similar
+models using the FluxPipeline / Flux2Pipeline from diffusers.
 
-Components:
+FLUX.1 components:
     - CLIP text encoder (pooled output for conditioning)
     - T5 text encoder (sequence output for cross-attention)
     - FLUX DiT denoiser (joint + single transformer blocks)
-    - AutoencoderKL VAE decoder (2D, via subprocess)
+    - AutoencoderKL VAE decoder (16 latent ch)
+
+FLUX.2 components:
+    - Mistral 3 text encoder (multi-layer hidden state extraction -> 15360d)
+    - FLUX.2 DiT denoiser (8 joint + 48 single, 6144-dim, global modulation)
+    - AutoencoderKLFlux2 VAE decoder (32 latent ch, patch=[2,2])
 """
 
 from __future__ import annotations
@@ -56,6 +61,27 @@ class FluxPlugin:
     _VAE_SCALING_FACTOR = 0.3611
     _VAE_SHIFT_FACTOR = 0.1159
 
+    # FLUX.2-dev defaults (overridden by config.json when present)
+    _FLUX2_DIT_DIM = 6144  # 48 heads * 128 head_dim
+    _FLUX2_DIT_NUM_HEADS = 48
+    _FLUX2_DIT_NUM_LAYERS = 8
+    _FLUX2_DIT_NUM_SINGLE_LAYERS = 48
+    _FLUX2_DIT_MLP_RATIO = 3.0
+    _FLUX2_DIT_IN_CHANNELS = 128  # 32 latent ch * pack 2x2
+    _FLUX2_AXES_DIMS_ROPE = (32, 32, 32, 32)
+    _FLUX2_VAE_LATENT_CHANNELS = 32
+    _FLUX2_VAE_PATCH_SIZE = (2, 2)
+    _FLUX2_TEXT_SEQ_LEN = 512
+
+    # Mistral 3 text encoder defaults for FLUX.2
+    _MISTRAL_HIDDEN = 5120
+    _MISTRAL_NUM_HEADS = 32
+    _MISTRAL_NUM_KV_HEADS = 8
+    _MISTRAL_HEAD_DIM = 128  # explicit head_dim from config
+    _MISTRAL_INTERMEDIATE = 32768
+    _MISTRAL_NUM_LAYERS = 40
+    _MISTRAL_EXTRACT_LAYERS = (10, 20, 30)
+
     _IMAGE_HEIGHT = 1024
     _IMAGE_WIDTH = 1024
 
@@ -91,6 +117,18 @@ class FluxPlugin:
             tc = json.loads(transformer_config_path.read_text())
             weights["_transformer_config"] = tc
 
+        # Read VAE config for latent_channels and patch_size
+        vae_config_path = model_path / "vae" / "config.json"
+        if vae_config_path.exists():
+            vc = json.loads(vae_config_path.read_text())
+            weights["_vae_config"] = vc
+
+        # Read text_encoder config for Mistral detection
+        te_config_path = model_path / "text_encoder" / "config.json"
+        if te_config_path.exists():
+            tec = json.loads(te_config_path.read_text())
+            weights["_text_encoder_config"] = tec
+
         return weights
 
     def build_engine(
@@ -104,7 +142,33 @@ class FluxPlugin:
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, verbose: bool = False,
     ) -> dict:
-        """Build all component engines."""
+        """Build all component engines.
+
+        Detects FLUX.1 vs FLUX.2 from the transformer config and dispatches
+        to the appropriate builders.
+        """
+        import json
+        from pathlib import Path
+
+        transformer_dir = weights["_transformer_dir"]
+        vae_dir = weights["_vae_dir"]
+
+        # Read transformer config for exact params
+        tc = weights.get("_transformer_config", {})
+
+        # Detect FLUX.2 via transformer config
+        if _is_flux2(tc):
+            return self._build_flux2_components(
+                model_dir, config, weights, tc=tc, verbose=verbose)
+
+        return self._build_flux1_components(
+            model_dir, config, weights, tc=tc, verbose=verbose)
+
+    def _build_flux1_components(
+        self, model_dir: str, config: ModelConfig, weights: WeightDict,
+        *, tc: dict, verbose: bool = False,
+    ) -> dict:
+        """Build FLUX.1 component engines (CLIP + T5 + DiT + VAE)."""
         from ..t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
         from ..clip_encoder_builder import build_clip_encoder_engine, load_clip_weights
         from ..flux_dit_builder import build_flux_dit_engine, load_flux_dit_weights
@@ -114,8 +178,6 @@ class FluxPlugin:
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
 
-        # Read transformer config for exact params
-        tc = weights.get("_transformer_config", {})
         dit_dim = tc.get("num_attention_heads", self._DIT_NUM_HEADS) * \
                   tc.get("attention_head_dim", self._DIT_HEAD_DIM)
         num_heads = tc.get("num_attention_heads", self._DIT_NUM_HEADS)
@@ -251,7 +313,7 @@ class FluxPlugin:
             verbose=verbose,
         )
 
-        # 4. VAE decoder - native TRT engine via ONNX export
+        # 4. VAE decoder - native TRT engine
         from ..flux_vae_builder import build_flux_vae_decoder_engine
         vae_plan = build_flux_vae_decoder_engine(
             vae_dir,
@@ -273,9 +335,176 @@ class FluxPlugin:
             "preprocessor_weights": preprocessor_weights,
         }
 
+    def _build_flux2_components(
+        self, model_dir: str, config: ModelConfig, weights: WeightDict,
+        *, tc: dict, verbose: bool = False,
+    ) -> dict:
+        """Build FLUX.2 component engines (Mistral + Flux2 DiT + VAE32)."""
+        from ..mistral_encoder_builder import (
+            build_mistral_encoder_engine, load_mistral_encoder_weights)
+        from ..flux2_dit_builder import build_flux2_dit_engine, load_flux2_dit_weights
+        from ..flux_vae_builder import build_flux_vae_decoder_engine
+        import json
+        from pathlib import Path
+
+        transformer_dir = weights["_transformer_dir"]
+        vae_dir = weights["_vae_dir"]
+
+        print("[flux] Detected FLUX.2 architecture", file=sys.stderr)
+
+        # DiT params from transformer config
+        dit_dim = tc.get("num_attention_heads", self._FLUX2_DIT_NUM_HEADS) * \
+                  tc.get("attention_head_dim", self._DIT_HEAD_DIM)
+        num_heads = tc.get("num_attention_heads", self._FLUX2_DIT_NUM_HEADS)
+        num_layers = tc.get("num_layers", self._FLUX2_DIT_NUM_LAYERS)
+        num_single_layers = tc.get("num_single_layers", self._FLUX2_DIT_NUM_SINGLE_LAYERS)
+        mlp_ratio = tc.get("mlp_ratio", self._FLUX2_DIT_MLP_RATIO)
+        axes_dims_rope = tuple(tc.get("axes_dims_rope", self._FLUX2_AXES_DIMS_ROPE))
+
+        # VAE params
+        vc = weights.get("_vae_config", {})
+        vae_latent_channels = vc.get("latent_channels", self._FLUX2_VAE_LATENT_CHANNELS)
+        vae_scaling = vc.get("scaling_factor", self._VAE_SCALING_FACTOR)
+        vae_shift = vc.get("shift_factor", self._VAE_SHIFT_FACTOR)
+
+        # Image dimensions
+        # FLUX.2 pipeline: noise is [z_dim, h_lat, w_lat], packed 2x2 for DiT.
+        # The VAE patch_size=[2,2] means the latent-to-image conversion includes
+        # an unpatchify step:
+        #   DiT output: [num_tokens, z_dim*4] → unpack to [z_dim, h_lat, w_lat]
+        #   VAE decode: [z_dim, h_lat, w_lat] → [3, h_lat*8, w_lat*8]
+        # For 1024x1024: h_lat=128, num_tokens=64*64=4096
+        img_h = config.raw.get("image_height", self._IMAGE_HEIGHT)
+        img_w = config.raw.get("image_width", self._IMAGE_WIDTH)
+        h_lat = img_h // 8  # Standard 8x spatial downsampling
+        w_lat = img_w // 8
+        pack_size = 2
+        num_img_tokens = (h_lat // pack_size) * (w_lat // pack_size)
+        text_seq_len = self._FLUX2_TEXT_SEQ_LEN
+
+        print(f"[flux] FLUX.2 spatial: img={img_h}x{img_w}, "
+              f"h_lat={h_lat}x{w_lat}, img_tokens={num_img_tokens}",
+              file=sys.stderr)
+
+        text_encoders = []
+
+        # 1. Mistral 3 text encoder
+        te_dir = weights.get("_text_encoder_dir")
+        if te_dir:
+            tec = weights.get("_text_encoder_config", {})
+            # Mistral3ForConditionalGeneration nests text model params under text_config
+            tc_text = tec.get("text_config", tec)
+            # Read architecture from text_encoder config.json
+            m_hidden = tc_text.get("hidden_size", self._MISTRAL_HIDDEN)
+            m_heads = tc_text.get("num_attention_heads", self._MISTRAL_NUM_HEADS)
+            m_kv_heads = tc_text.get("num_key_value_heads", self._MISTRAL_NUM_KV_HEADS)
+            m_head_dim = tc_text.get("head_dim", m_hidden // m_heads)
+            m_intermediate = tc_text.get("intermediate_size", self._MISTRAL_INTERMEDIATE)
+            m_num_layers = tc_text.get("num_hidden_layers", self._MISTRAL_NUM_LAYERS)
+            m_vocab = tc_text.get("vocab_size", 131072)
+            m_extract = self._MISTRAL_EXTRACT_LAYERS
+
+            print(f"[flux] Loading Mistral 3 encoder ({m_hidden}d, {m_num_layers}L) ...",
+                  file=sys.stderr)
+            mistral_weights = load_mistral_encoder_weights(
+                te_dir,
+                hidden_size=m_hidden,
+                num_heads=m_heads,
+                num_kv_heads=m_kv_heads,
+                head_dim=m_head_dim,
+                intermediate_size=m_intermediate,
+                num_layers=m_num_layers,
+                vocab_size=m_vocab,
+            )
+            m_rope_theta = tc_text.get("rope_theta", 1000000000.0)
+            mistral_plan = build_mistral_encoder_engine(
+                mistral_weights,
+                hidden_size=m_hidden,
+                num_heads=m_heads,
+                num_kv_heads=m_kv_heads,
+                head_dim=m_head_dim,
+                intermediate_size=m_intermediate,
+                num_layers=m_num_layers,
+                vocab_size=m_vocab,
+                max_seq_len=text_seq_len,
+                extract_layers=m_extract,
+                rope_theta=m_rope_theta,
+                verbose=verbose,
+            )
+            text_encoders.append(("mistral", mistral_plan))
+
+        # 2. FLUX.2 DiT denoiser
+        print("[flux] Loading FLUX.2 DiT weights ...", file=sys.stderr)
+        dit_weights = load_flux2_dit_weights(
+            transformer_dir,
+            dim=dit_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            num_single_layers=num_single_layers,
+        )
+
+        dit_plan = build_flux2_dit_engine(
+            dit_weights,
+            dim=dit_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            num_single_layers=num_single_layers,
+            num_img_tokens=num_img_tokens,
+            text_seq_len=text_seq_len,
+            mlp_ratio=mlp_ratio,
+            verbose=verbose,
+        )
+
+        # 3. VAE decoder (32 latent ch → 3ch image at 8x upsampling)
+        # Use identity scaling (1.0/0.0) since BN denorm is handled in C++ runtime
+        vae_plan = build_flux_vae_decoder_engine(
+            vae_dir,
+            latent_channels=vae_latent_channels,
+            h_lat=h_lat,
+            w_lat=w_lat,
+            scaling_factor=1.0,
+            shift_factor=0.0,
+            verbose=verbose,
+        )
+
+        # 4. Load VAE BN stats (FLUX.2 uses BN denorm instead of scaling)
+        import numpy as _np
+        from pathlib import Path as _Path
+        _vae_weights = {}
+        _vae_st_files = sorted(_Path(vae_dir).glob("*.safetensors"))
+        if _vae_st_files:
+            from safetensors import safe_open as _safe_open
+            for _f in _vae_st_files:
+                with _safe_open(str(_f), framework="numpy") as _r:
+                    if "bn.running_mean" in _r.keys():
+                        _vae_weights["bn.running_mean"] = _r.get_tensor(
+                            "bn.running_mean").astype(_np.float32)
+                    if "bn.running_var" in _r.keys():
+                        _vae_weights["bn.running_var"] = _r.get_tensor(
+                            "bn.running_var").astype(_np.float32)
+
+        # 5. Serialize preprocessor weights
+        preprocessor_weights = _serialize_flux2_preprocessor(
+            dit_weights, vae_bn_weights=_vae_weights)
+
+        return {
+            "text_encoders": text_encoders,
+            "denoiser": dit_plan,
+            "vae_decoder": vae_plan,
+            "preprocessor_weights": preprocessor_weights,
+        }
+
     def get_diffusion_config(self, config: ModelConfig) -> dict:
         """Return diffusion pipeline configuration."""
         tc = config.raw.get("_transformer_config", {})
+
+        if _is_flux2(tc):
+            return self._get_flux2_diffusion_config(config, tc)
+
+        return self._get_flux1_diffusion_config(config, tc)
+
+    def _get_flux1_diffusion_config(self, config: ModelConfig, tc: dict) -> dict:
+        """Diffusion config for FLUX.1 variants."""
         guidance_embeds = tc.get("guidance_embeds", False)
 
         img_h = config.raw.get("image_height", self._IMAGE_HEIGHT)
@@ -313,6 +542,146 @@ class FluxPlugin:
             "num_vae_caches": 0,
             "vae_model_id": "sayakpaul/FLUX.1-merged",
         }
+
+    def _get_flux2_diffusion_config(self, config: ModelConfig, tc: dict) -> dict:
+        """Diffusion config for FLUX.2 variants."""
+        img_h = config.raw.get("image_height", self._IMAGE_HEIGHT)
+        img_w = config.raw.get("image_width", self._IMAGE_WIDTH)
+
+        vc = config.raw.get("_vae_config", {})
+        vae_latent_ch = vc.get("latent_channels", self._FLUX2_VAE_LATENT_CHANNELS)
+        vae_scaling = vc.get("scaling_factor", self._VAE_SCALING_FACTOR)
+        vae_shift = vc.get("shift_factor", self._VAE_SHIFT_FACTOR)
+
+        # Mistral encoder output dimension: extract_layers * hidden_size
+        text_encoder_dim = len(self._MISTRAL_EXTRACT_LAYERS) * self._MISTRAL_HIDDEN
+
+        return {
+            "diffusion_backend_type": "flux_2d",
+            "scheduler": "flow_match_euler",
+            "num_inference_steps": 28,
+            "guidance_scale": 3.5,
+            "flow_shift": 3.0,
+            "use_dynamic_shifting": 1,
+            "base_shift": 0.5,
+            "max_shift": 1.15,
+            "image_height": img_h,
+            "image_width": img_w,
+            "video_height": img_h,
+            "video_width": img_w,
+            "video_num_frames": 1,
+            "dit_dim": tc.get("num_attention_heads", self._FLUX2_DIT_NUM_HEADS) * \
+                       tc.get("attention_head_dim", self._DIT_HEAD_DIM),
+            "dit_num_heads": tc.get("num_attention_heads", self._FLUX2_DIT_NUM_HEADS),
+            "dit_num_layers": tc.get("num_layers", self._FLUX2_DIT_NUM_LAYERS),
+            "patch_size": [1, 2, 2],
+            "z_dim": vae_latent_ch,
+            "scale_factor_temporal": 1,
+            "scale_factor_spatial": 8,
+            "freq_dim": tc.get("timestep_guidance_channels", 256),
+            "text_seq_len": self._FLUX2_TEXT_SEQ_LEN,
+            "text_encoder_dim": text_encoder_dim,
+            "vae_scaling_factor": vae_scaling,
+            "vae_shift_factor": vae_shift,
+            "guidance_embeds": 1,
+            "flux2_global_modulation": 1,
+            "axes_dims_rope": list(tc.get("axes_dims_rope", self._FLUX2_AXES_DIMS_ROPE)),
+            "rope_theta": tc.get("rope_theta", 2000.0),
+            "num_vae_caches": 0,
+        }
+
+
+def _is_flux2(tc: dict) -> bool:
+    """Detect FLUX.2 from transformer config.json.
+
+    FLUX.2 is identified by:
+    - _class_name == "Flux2Transformer2DModel", or
+    - presence of timestep_guidance_channels (FLUX.2 uses global modulation), or
+    - num_attention_heads >= 48 with num_layers <= 8 (heuristic)
+    """
+    class_name = tc.get("_class_name", "")
+    if "Flux2" in class_name:
+        return True
+    if "timestep_guidance_channels" in tc:
+        return True
+    # Heuristic: FLUX.2 has 48 heads and 8 joint layers (vs FLUX.1's 24/19)
+    heads = tc.get("num_attention_heads", 0)
+    layers = tc.get("num_layers", 999)
+    if heads >= 48 and layers <= 8:
+        return True
+    return False
+
+
+def _serialize_flux2_preprocessor(
+    dit_weights: dict,
+    vae_bn_weights: dict | None = None,
+) -> bytes:
+    """Serialize FLUX.2 preprocessor weights.
+
+    Similar to FLUX.1 but with guidance embedder and global modulation
+    tables for the C++ runtime. Also includes VAE BN stats for latent
+    denormalization.
+    """
+    import json
+    import struct
+    import numpy as np
+
+    key_map = {
+        # x_embedder -> patch_embedding
+        "x_embedder.weight": "patch_embedding.weight",
+        "x_embedder.bias": "patch_embedding.bias",
+        # context_embedder
+        "context_embedder.weight": "context_embedder.weight",
+        "context_embedder.bias": "context_embedder.bias",
+        # timestep embedder
+        "time_text_embed.timestep_embedder.linear_1.weight": "condition_embedder.time_embedding.0.weight",
+        "time_text_embed.timestep_embedder.linear_1.bias": "condition_embedder.time_embedding.0.bias",
+        "time_text_embed.timestep_embedder.linear_2.weight": "condition_embedder.time_embedding.2.weight",
+        "time_text_embed.timestep_embedder.linear_2.bias": "condition_embedder.time_embedding.2.bias",
+        # guidance embedder (FLUX.2 uses guidance_embedder in place of text_embedder)
+        "time_text_embed.guidance_embedder.linear_1.weight": "condition_embedder.guidance_embedding.0.weight",
+        "time_text_embed.guidance_embedder.linear_1.bias": "condition_embedder.guidance_embedding.0.bias",
+        "time_text_embed.guidance_embedder.linear_2.weight": "condition_embedder.guidance_embedding.2.weight",
+        "time_text_embed.guidance_embedder.linear_2.bias": "condition_embedder.guidance_embedding.2.bias",
+        # Global modulation tables (FLUX.2-specific)
+        "double_stream_modulation_img": "double_stream_modulation_img",
+        "double_stream_modulation_txt": "double_stream_modulation_txt",
+        "single_stream_modulation": "single_stream_modulation",
+    }
+
+    index = {}
+    data_parts = []
+    offset = 0
+
+    for src_key, dst_key in key_map.items():
+        if src_key not in dit_weights:
+            continue
+        w = dit_weights[src_key].astype(np.float32)
+        w = np.ascontiguousarray(w)
+        nbytes = w.nbytes
+        index[dst_key] = {"offset": offset, "shape": list(w.shape)}
+        data_parts.append(w.tobytes())
+        offset += nbytes
+
+    # Add VAE BN statistics for latent denormalization (FLUX.2)
+    if vae_bn_weights:
+        for bn_key in ("bn.running_mean", "bn.running_var"):
+            if bn_key in vae_bn_weights:
+                w = vae_bn_weights[bn_key].astype(np.float32)
+                w = np.ascontiguousarray(w)
+                nbytes = w.nbytes
+                # Store with vae_ prefix to distinguish from DiT weights
+                dst = f"vae_{bn_key}"
+                index[dst] = {"offset": offset, "shape": list(w.shape)}
+                data_parts.append(w.tobytes())
+                offset += nbytes
+
+    index_json = json.dumps(index).encode("utf-8")
+    result = struct.pack("<I", len(index_json)) + index_json
+    for part in data_parts:
+        result += part
+
+    return result
 
 
 def _build_vae_placeholder(latent_channels, h_lat, w_lat, verbose):

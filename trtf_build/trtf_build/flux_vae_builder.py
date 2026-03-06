@@ -3,19 +3,26 @@
 Builds a TensorRT engine for the FLUX AutoencoderKL decoder using the
 TensorRT Python API directly (no ONNX).
 
+Supports both FLUX.1 (AutoencoderKL, 16 latent channels, patch_size=(1,1))
+and FLUX.2 (AutoencoderKLFlux2, 32 latent channels, patch_size=(2,2)).
+
 Engine I/O:
-    Input:  latents [1, 16, H_lat, W_lat] float32 (raw DiT output, pre-scaled)
-    Output: image   [1, 3, H_out, W_out]  float32 (pixel values in [-1, 1])
+    Input:  latents [1, latent_channels, H_lat, W_lat] float32
+    Output: image   [1, 3, H_out, W_out] float32 (pixel values in [-1, 1])
+
+    For patch_size=(1,1): H_out = H_lat * 8,  W_out = W_lat * 8
+    For patch_size=(2,2): H_out = H_lat * 16, W_out = W_lat * 16
 
 The engine includes the scaling transform: latents / scale_factor + shift_factor.
 
-AutoencoderKL Decoder Architecture (FLUX style, 16 latent channels):
-    post_quant_conv: Conv2d(16, 512, 1x1)
-    mid_block: ResNetBlock2D(512,512) + SelfAttention2D(512) + ResNetBlock2D(512,512)
-    up_blocks (4 blocks, reversed channels 512->512->256->128):
-        Each: (layers_per_block+1) ResNetBlock2D, last 3 have 2x upsample
-    conv_norm_out: GroupNorm(32, 128) + SiLU
-    conv_out: Conv2d(128, 3, 3x3, pad=1)
+AutoencoderKL Decoder Architecture (FLUX style):
+    post_quant_conv: Conv2d(latent_ch, last_block_ch, 1x1)  [optional]
+    mid_block: ResNetBlock2D + SelfAttention2D + ResNetBlock2D
+    up_blocks (N blocks, reversed channels):
+        Each: (layers_per_block+1) ResNetBlock2D, last N-1 have 2x upsample
+    conv_norm_out: GroupNorm + SiLU
+    conv_out: Conv2d(first_block_ch, out_ch, 3x3, pad=1)
+    unpatchify (if patch_size != (1,1)): pixel-shuffle [B, C*ph*pw, H, W] -> [B, C, H*ph, W*pw]
 """
 
 from __future__ import annotations
@@ -493,16 +500,22 @@ def build_flux_vae_decoder_engine(
     w_lat: int = 128,
     scaling_factor: float = 0.3611,
     shift_factor: float = 0.1159,
+    patch_size: tuple[int, int] = (1, 1),
     verbose: bool = False,
 ) -> bytes:
     """Build FLUX AutoencoderKL decoder TRT engine using TRT Python API.
 
     Input:  latents [1, latent_channels, h_lat, w_lat] float32
-    Output: image   [1, 3, h_lat*8, w_lat*8] float32
+    Output: image   [1, 3, h_lat*8*patch_h, w_lat*8*patch_w] float32
+
+    For patch_size=(1,1) (FLUX.1): standard 8x spatial upsampling.
+    For patch_size=(2,2) (FLUX.2): decoder conv_out produces C*ph*pw channels,
+    then pixel-shuffle unpatchify yields 3-channel output at 16x resolution.
 
     The engine applies: x = latents / scaling_factor + shift_factor,
     then runs through the full decoder network.
     """
+    patch_h, patch_w = patch_size
     print(f"[flux-vae] Loading VAE weights from {vae_dir} ...", file=sys.stderr)
     weights = _load_flux_vae_weights(vae_dir)
 
@@ -517,11 +530,12 @@ def build_flux_vae_decoder_engine(
     first_ch = block_out_channels[0]
     eps = 1e-6
 
-    h_out = h_lat * 8
-    w_out = w_lat * 8
+    h_out = h_lat * 8 * patch_h
+    w_out = w_lat * 8 * patch_w
 
     print(f"[flux-vae] Architecture: block_out_channels={block_out_channels}, "
-          f"layers_per_block={layers_per_block}, groups={num_groups}",
+          f"layers_per_block={layers_per_block}, groups={num_groups}, "
+          f"patch_size=({patch_h},{patch_w})",
           file=sys.stderr)
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -551,12 +565,13 @@ def build_flux_vae_decoder_engine(
 
     # --- post_quant_conv (optional) + conv_in ---
     if use_post_quant_conv:
+        pqc_out_ch = weights["post_quant_conv.weight"].shape[0]
         x = _add_conv2d(
             network, x,
             weights["post_quant_conv.weight"],
             weights["post_quant_conv.bias"],
-            last_ch, kernel_size=1)
-        print(f"[flux-vae] post_quant_conv: {latent_channels}->{last_ch}",
+            pqc_out_ch, kernel_size=1)
+        print(f"[flux-vae] post_quant_conv: {latent_channels}->{pqc_out_ch}",
               file=sys.stderr)
 
     # conv_in: Conv2d(latent_channels or last_ch, last_ch, 3x3, pad=1)
@@ -619,18 +634,46 @@ def build_flux_vae_decoder_engine(
         weights["decoder.conv_norm_out.weight"],
         weights["decoder.conv_norm_out.bias"], eps)
     x = _add_silu(network, x)
+
+    # conv_out output channels: 3 for patch_size=(1,1), 3*ph*pw for patched VAEs
+    conv_out_weight = weights["decoder.conv_out.weight"]
+    conv_out_channels = conv_out_weight.shape[0]
     x = _add_conv2d(
         network, x,
-        weights["decoder.conv_out.weight"],
+        conv_out_weight,
         weights["decoder.conv_out.bias"],
-        3, kernel_size=3, padding=1)
+        conv_out_channels, kernel_size=3, padding=1)
+
+    print(f"[flux-vae] conv_out: {prev_ch}->{conv_out_channels}, "
+          f"spatial {cur_h}x{cur_w}", file=sys.stderr)
+
+    # --- Unpatchify (pixel shuffle) for patched VAEs ---
+    if patch_h > 1 or patch_w > 1:
+        # conv_out produces [1, out_ch * ph * pw, H, W]
+        # Unpatchify to [1, out_ch, H * ph, W * pw]
+        out_ch = conv_out_channels // (patch_h * patch_w)
+
+        # Reshape: [1, out_ch, ph, pw, H, W]
+        reshape1 = network.add_shuffle(x)
+        reshape1.reshape_dims = (1, out_ch, patch_h, patch_w, cur_h, cur_w)
+
+        # Transpose: [1, out_ch, H, ph, W, pw]
+        reshape1.second_transpose = trt.Permutation([0, 1, 4, 2, 5, 3])
+
+        # Reshape: [1, out_ch, H * ph, W * pw]
+        reshape2 = network.add_shuffle(reshape1.get_output(0))
+        reshape2.reshape_dims = (1, out_ch, cur_h * patch_h, cur_w * patch_w)
+        x = reshape2.get_output(0)
+
+        print(f"[flux-vae] unpatchify: [{conv_out_channels},{cur_h},{cur_w}] -> "
+              f"[{out_ch},{cur_h * patch_h},{cur_w * patch_w}]", file=sys.stderr)
 
     # --- Mark output ---
     x.name = "image"
     network.mark_output(x)
     x.dtype = trt.float32
 
-    print(f"[flux-vae] Building TRT engine: output [1, 3, {cur_h}, {cur_w}] ...",
+    print(f"[flux-vae] Building TRT engine: output [1, 3, {h_out}, {w_out}] ...",
           file=sys.stderr)
 
     plan = builder.build_serialized_network(network, config)

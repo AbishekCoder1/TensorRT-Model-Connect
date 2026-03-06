@@ -220,6 +220,8 @@ struct FastPathModelConfig {
     std::vector<float> latents_mean;
     std::vector<float> latents_std;
     std::vector<int32_t> patch_size;    // [pt, ph, pw]
+    std::vector<int32_t> axes_dims_rope;  // RoPE axis dimensions, e.g. [16,56,56] or [32,32,32,32]
+    float rope_theta{10000.0F};  // RoPE base frequency (FLUX.1: 10000, FLUX.2: 2000)
     std::string vae_model_id;
     bool guidance_embeds{false};
     bool use_rope{true};

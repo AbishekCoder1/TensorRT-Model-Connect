@@ -211,6 +211,12 @@ void load_preprocessor_weights(
         "condition_embedder.guidance_embedding.2.weight", w.guidance_emb_2_weight);
     load_preprocessor_floats(index_json, blob, blob_size,
         "condition_embedder.guidance_embedding.2.bias", w.guidance_emb_2_bias);
+
+    // VAE BN denormalization stats (FLUX.2)
+    load_preprocessor_floats(index_json, blob, blob_size,
+        "vae_bn.running_mean", w.vae_bn_mean);
+    load_preprocessor_floats(index_json, blob, blob_size,
+        "vae_bn.running_var", w.vae_bn_var);
 }
 
 void finalize_preprocessor_weights(PreprocessorWeights& w)

@@ -20,6 +20,7 @@ public:
     void set_preprocessor_weights(PreprocessorWeights weights) override;
     void set_clip_tokenizer(std::unique_ptr<ITokenizer> tok) override;
     void set_prompt(std::string prompt) override;
+    std::string prepare_prompt(const std::string& prompt) const override;
 
     VideoResult generate_video(
         const std::vector<int32_t>& input_ids,

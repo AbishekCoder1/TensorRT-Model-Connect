@@ -339,6 +339,7 @@ _POSITIVE_MATCH_CASES = [
     ("phi4_multimodal", "phi4_multimodal"),
     # FLUX (diffusion T2I)
     ("flux", "flux"),
+    ("flux.2", "flux"),
     # Z-Image (diffusion T2I)
     ("z_image", "z_image"),
     # PixArt (diffusion T2I)
