@@ -7,12 +7,13 @@
   "reference_backend": "invariant_only",
   "test_type": "audio",
   "max_cache_length": 512,
-  "prompt": "Hello, this is a test of text to speech.",
-  "max_new_tokens": 200,
+  "prompt": "Ladies and gentlemen, welcome to the annual conference on artificial intelligence and machine learning. Today we will explore the latest advances in natural language processing, computer vision, and reinforcement learning.",
+  "max_new_tokens": 750,
   "logit_atol": 1e-2,
   "trust_remote_code": false,
   "env": {
-    "TRTF_MAGPIE_GREEDY": "1"
+    "TRTF_MAGPIE_CFG_SCALE": "1.5",
+    "TRTF_MAGPIE_SEED": "42"
   },
   "preflight_requirements": [
     {
@@ -27,6 +28,5 @@
       },
       "gating": true
     }
-  ],
-  "skip": "HF reference requires nemo_toolkit not available in test environment"
+  ]
 }

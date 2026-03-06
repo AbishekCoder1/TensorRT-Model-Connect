@@ -29,6 +29,21 @@ Cross-attention design:
 
 Encoder uses embed_input=False (token IDs), decoder uses embed_input=True
 (the C++ runtime sums 8 codebook embeddings on host, then copies to device).
+
+Classifier-Free Guidance (CFG):
+  The bundle bakes two config fields that control inference-time CFG:
+    - magpie_cfg_scale (default 1.5): strength of text-conditioning amplification.
+      Each decoder frame runs two forward passes — conditioned (real encoder output)
+      and unconditional (null-text encoder output). Logits are blended:
+        logits = uncond + cfg_scale * (cond - uncond)
+      Scale 1.0 disables CFG (single pass). Scale 1.5 is the recommended default.
+    - magpie_finished_limit_with_eot (default 10): hard-stop safety net. After an
+      estimated number of audio frames (text_tokens * 3.0), stop generation after
+      this many extra frames even if EOS never fires.
+  Both can be overridden at runtime via env vars:
+    TRTF_MAGPIE_CFG_SCALE=1.5  TRTF_MAGPIE_FINISHED_LIMIT=10
+  Or via CLI flags:
+    ./build/trtf generate-audio bundle.trtfb --prompt "text" --output out.wav --cfg-scale 1.5 --greedy
 """
 
 from __future__ import annotations
@@ -238,36 +253,18 @@ def _extract_ipa_assets(nemo_path: str) -> dict[str, bytes] | None:
             # EOS is text_vocab_size + 1 (NeMo convention, set by caller)
             eos_id = text_vocab_size + 1 if text_vocab_size else -1
     except Exception as e:
-        print(f"[trtf-build]   Warning: NeMo IPATokenizer not available "
-              f"for vocab extraction: {e}", file=sys.stderr)
+        raise RuntimeError(
+            f"NeMo IPATokenizer failed to load — this is required for MagpieTTS "
+            f"bundle builds. Install NeMo toolkit: pip install nemo_toolkit[tts]\n"
+            f"Error: {e}"
+        ) from e
 
-    # Fallback: build vocab from dict + known tokens if NeMo unavailable
     if vocab_text is None:
-        print("[trtf-build]   Warning: building IPA vocab from dict "
-              "(NeMo tokenizer not available for exact vocab)", file=sys.stderr)
-        # Collect all unique tokens from the dict
-        tokens = set()
-        tokens.add("<pad>")
-        tokens.add("<eos>")
-        tokens.add(" ")  # space
-        # Punctuation
-        for p in ".,!?;:-":
-            tokens.add(p)
-        for line in tsv_lines:
-            parts = line.split("\t", 1)
-            if len(parts) == 2:
-                for ph in parts[1].split():
-                    tokens.add(ph)
-                # Add grapheme tokens for the word
-                for ch in parts[0]:
-                    if ch.isalpha():
-                        tokens.add(f"{grapheme_prefix}{ch}")
-        vocab_list = sorted(tokens)
-        # Ensure <pad> is 0 and <eos> is 1
-        vocab_list = ["<pad>", "<eos>"] + [
-            t for t in vocab_list if t not in ("<pad>", "<eos>")]
-        eos_id = 1
-        vocab_text = "\n".join(vocab_list) + "\n"
+        raise RuntimeError(
+            "NeMo IPATokenizer loaded but _id2token vocab is missing. "
+            "The NeMo installation may be incomplete or incompatible. "
+            "Install NeMo toolkit: pip install nemo_toolkit[tts]"
+        )
 
     # --- Step 5: Build config JSON ---
     config_json = json.dumps({
@@ -603,6 +600,8 @@ class MagpieTTSPlugin:
             "magpie_xa_n_heads": xa_n_heads,
             "magpie_xa_d_head": xa_d_head,
             "magpie_enc_kernel_size": enc_kernel_size,
+            "magpie_cfg_scale": 1.5,
+            "magpie_finished_limit_with_eot": 10,
         }
 
         return weights
@@ -631,7 +630,10 @@ class MagpieTTSPlugin:
         network = builder.create_network()
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-        trt_config.clear_flag(trt.BuilderFlag.TF32)
+        # NOTE: FP16 disabled — causes audio degradation due to out-of-range
+        # weights and LayerNorm overflow. TF32 is enabled by default (TRT default).
+        # TODO: re-enable with per-layer precision constraints (keep LN/softmax FP32).
+        pass
 
         # Decoder uses embed_input mode: C++ runtime sums 8 codebook embeddings
         # on host and passes the result as input_embed [1, hidden].
@@ -703,6 +705,11 @@ class MagpieTTSPlugin:
             hidden_state = result["hidden"]
             present_k_outputs.append(result["present_k"])
             present_v_outputs.append(result["present_v"])
+            # Mark cross-attention weights from the last decoder layer as output
+            # for runtime text-completion tracking (shape [1, 1, max_source_positions])
+            if layer_idx == dec_layers - 1:
+                _mark_debug_output(network, result["cross_attn_weights"],
+                                   "cross_attn_weights")
             if debug_layer_outputs:
                 _mark_debug_output(network, hidden_state,
                                    f"debug_hidden_{layer_idx}")
@@ -858,7 +865,7 @@ def _build_magpie_encoder(weights: WeightDict, *, verbose: bool = False) -> byte
     network = builder.create_network()
     tc = builder.create_builder_config()
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    tc.clear_flag(trt.BuilderFlag.TF32)
+    pass  # FP16 disabled for test
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([1e-5], dtype=np.float32))
@@ -1273,7 +1280,8 @@ def _add_magpie_decoder_layer(
     out = network.add_elementwise(
         pca, fc2, trt.ElementWiseOperation.SUM).get_output(0)
 
-    return {"hidden": out, "present_k": present_k, "present_v": present_v}
+    return {"hidden": out, "present_k": present_k, "present_v": present_v,
+            "cross_attn_weights": csm.get_output(0)}
 
 
 # ---------------------------------------------------------------------------

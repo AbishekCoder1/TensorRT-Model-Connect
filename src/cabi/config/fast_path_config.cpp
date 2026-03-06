@@ -170,6 +170,8 @@ void parse_magpie_tts_config(const std::string& config_text, FastPathModelConfig
     cfg.magpie_max_source_positions = extract_json_int(config_text, "magpie_max_source_positions", 2048);
     cfg.magpie_xa_n_heads = extract_json_int(config_text, "magpie_xa_n_heads", 1);
     cfg.magpie_xa_d_head = extract_json_int(config_text, "magpie_xa_d_head", 128);
+    cfg.magpie_cfg_scale = extract_json_float(config_text, "magpie_cfg_scale", 1.0F);
+    cfg.magpie_finished_limit_with_eot = extract_json_int(config_text, "magpie_finished_limit_with_eot", 0);
     cfg.audio_sample_rate = extract_json_int(config_text, "sample_rate", 22050);
 }
 

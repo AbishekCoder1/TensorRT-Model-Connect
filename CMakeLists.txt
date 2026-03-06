@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
 project(trt_transformers_cpp VERSION 0.1.0 LANGUAGES CXX)
 
+# Enable CUDA for GPU kernels (magpie_kernels.cu)
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+  enable_language(CUDA)
+  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -121,6 +130,16 @@ add_library(trtf_core
   src/utils/wav_reader.cpp
   src/runtime/trt/audio/mel_spectrogram.cpp
 )
+
+# Add CUDA kernel sources when CUDA compiler is available
+if(CMAKE_CUDA_COMPILER)
+  target_sources(trtf_core PRIVATE src/runtime/trt/audio/magpie_kernels.cu)
+  set_source_files_properties(src/runtime/trt/audio/magpie_kernels.cu PROPERTIES
+    LANGUAGE CUDA
+  )
+  target_include_directories(trtf_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_compile_definitions(trtf_core PRIVATE TRTF_HAS_CUDA_KERNELS=1)
+endif()
 
 target_include_directories(trtf_core
   PUBLIC

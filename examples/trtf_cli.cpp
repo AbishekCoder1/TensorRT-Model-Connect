@@ -42,6 +42,8 @@ struct CliArgs {
     int num_steps{-1};
     float guidance_scale{-1.0F};
     float conf_threshold{-1.0F};
+    float cfg_scale{-1.0F};      // MagpieTTS CFG scale (--cfg-scale)
+    bool greedy{false};           // MagpieTTS greedy decoding (--greedy)
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -55,7 +57,7 @@ void print_usage()
         "  trtf encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
         "  trtf segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
         "  trtf segment-sam     <bundle.trtfb> --image PATH --output DIR [--point-x 0.5] [--point-y 0.5] [--background]\n"
-        "  trtf generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH [--max-new-tokens N] [--hf-python PATH]\n"
+        "  trtf generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH [--max-new-tokens N] [--cfg-scale S] [--greedy] [--hf-python PATH]\n"
         "  trtf generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] [--guidance-scale S] [--hf-python PATH]\n"
         "  trtf detect          <bundle.trtfb> --image PATH "
         "[--output PATH|--output-json PATH] [--threshold 0.5|--score-threshold 0.5] [--hf-python PATH]\n"
@@ -66,7 +68,12 @@ void print_usage()
         "  trtf solve           <bundle.trtfb> --branch-input \"0.1,0.2,...\" --trunk-input \"0.5,0.5\"  (DeepONet)\n"
         "  trtf solve           <bundle.trtfb> --field-input \"0.1,0.2,...\"                          (FNO)\n"
         "  trtf inspect         <bundle.trtfb>\n"
-        "  trtf version\n";
+        "  trtf version\n"
+        "\n"
+        "generate-audio options:\n"
+        "  --cfg-scale S   Classifier-Free Guidance scale (default: from bundle, typically 1.5).\n"
+        "                  1.0 = disabled, 1.5 = recommended. Higher values amplify text conditioning.\n"
+        "  --greedy        Use greedy (argmax) decoding instead of top-k sampling.\n";
 }
 
 CliArgs parse_args(int argc, char** argv)
@@ -216,6 +223,24 @@ CliArgs parse_args(int argc, char** argv)
                 return args;
             }
             args.conf_threshold = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+
+        if (arg == "--cfg-scale")
+        {
+            if (i + 1 >= argc)
+            {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
+            args.cfg_scale = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+
+        if (arg == "--greedy")
+        {
+            args.greedy = true;
             continue;
         }
 
@@ -617,6 +642,17 @@ int cmd_generate_audio(const CliArgs& args)
 
     const std::string out_path = args.output_dir.empty()
         ? "/tmp/generated_audio.wav" : args.output_dir;
+
+    // Propagate CLI flags to MagpieTTS backend via env vars
+    if (args.cfg_scale >= 0.0F)
+    {
+        setenv("TRTF_MAGPIE_CFG_SCALE",
+               std::to_string(args.cfg_scale).c_str(), 1);
+    }
+    if (args.greedy)
+    {
+        setenv("TRTF_MAGPIE_GREEDY", "1", 1);
+    }
 
     TrtfPipelineOptions opts{};
     opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();

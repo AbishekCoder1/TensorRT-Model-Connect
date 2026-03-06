@@ -77,7 +77,11 @@ bool run_decoder_step_device(
     int32_t embed_dim = 0,
     float use_input_embed = 0.0F,
     const std::vector<const float*>& deepstack_embeds_host = {},
-    float deepstack_active = 0.0F);
+    float deepstack_active = 0.0F,
+    bool input_embed_device_ready = false,
+    bool skip_logits_d2h = false,
+    bool skip_sync = false,
+    bool skip_bind = false);
 
 #endif // TRTF_HAS_TRT
 

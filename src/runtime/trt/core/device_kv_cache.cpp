@@ -147,6 +147,7 @@ bool transfer_input_embed_inputs(
     const float* input_embed_host,
     int32_t embed_dim,
     float& use_input_embed,
+    bool input_embed_device_ready,
     cudaStream_t stream,
     const FailFn& fail)
 {
@@ -155,7 +156,11 @@ bool transfer_input_embed_inputs(
         return true;
     }
 
-    if (input_embed_host != nullptr && embed_dim > 0 && use_input_embed > 0.5F)
+    if (input_embed_device_ready && use_input_embed > 0.5F)
+    {
+        // Caller already wrote to resources.d_input_embed on device -- skip H2D.
+    }
+    else if (input_embed_host != nullptr && embed_dim > 0 && use_input_embed > 0.5F)
     {
         const std::size_t embed_bytes = static_cast<std::size_t>(embed_dim) * sizeof(float);
         if (!copy_async_or_fail(
@@ -257,6 +262,7 @@ bool transfer_decoder_inputs(
     float& use_input_embed,
     const std::vector<const float*>& deepstack_embeds_host,
     float deepstack_active,
+    bool input_embed_device_ready,
     cudaStream_t stream,
     const FailFn& fail)
 {
@@ -270,6 +276,7 @@ bool transfer_decoder_inputs(
             input_embed_host,
             embed_dim,
             use_input_embed,
+            input_embed_device_ready,
             stream,
             fail))
     {
@@ -483,6 +490,8 @@ bool execute_and_collect_logits(
     DeviceResources& resources,
     std::vector<float>& logits,
     cudaStream_t stream,
+    bool skip_logits_d2h,
+    bool skip_sync,
     const FailFn& fail)
 {
     if (!engine.context->enqueueV3(stream))
@@ -492,23 +501,31 @@ bool execute_and_collect_logits(
 
     cache.update_after_step(resources.d_present_k, resources.d_present_v, stream);
 
-    logits.assign(static_cast<std::size_t>(engine.vocab_size), 0.0F);
-    const std::size_t logits_bytes = logits.size() * sizeof(float);
-    if (!copy_async_or_fail(
-            logits.data(),
-            resources.d_logits.data(),
-            logits_bytes,
-            cudaMemcpyDeviceToHost,
-            stream,
-            "D2H logits failed",
-            fail))
+    // D2H logits (skip when caller will consume logits on device, e.g. GPU argmax)
+    if (!skip_logits_d2h)
     {
-        return false;
+        logits.assign(static_cast<std::size_t>(engine.vocab_size), 0.0F);
+        const std::size_t logits_bytes = logits.size() * sizeof(float);
+        if (!copy_async_or_fail(
+                logits.data(),
+                resources.d_logits.data(),
+                logits_bytes,
+                cudaMemcpyDeviceToHost,
+                stream,
+                "D2H logits failed",
+                fail))
+        {
+            return false;
+        }
     }
 
-    if (cudaStreamSynchronize(stream) != cudaSuccess)
+    // Sync (skip when caller will sync later, e.g. batched prefill)
+    if (!skip_sync)
     {
-        return fail("cudaStreamSynchronize failed");
+        if (cudaStreamSynchronize(stream) != cudaSuccess)
+        {
+            return fail("cudaStreamSynchronize failed");
+        }
     }
     return true;
 }
@@ -717,7 +734,11 @@ bool run_decoder_step_device(
     int32_t embed_dim,
     float use_input_embed,
     const std::vector<const float*>& deepstack_embeds_host,
-    float deepstack_active)
+    float deepstack_active,
+    bool input_embed_device_ready,
+    bool skip_logits_d2h,
+    bool skip_sync,
+    bool skip_bind)
 {
     auto fail = [&error](std::string_view stage) {
         error = std::string(stage);
@@ -740,20 +761,25 @@ bool run_decoder_step_device(
             use_input_embed,
             deepstack_embeds_host,
             deepstack_active,
+            input_embed_device_ready,
             stream,
             fail))
     {
         return false;
     }
 
-    // 3. Bind tensor addresses
-    if (!bind_decoder_tensors(engine, cache, resources, fail))
+    // 3. Bind tensor addresses (skip when addresses haven't changed since last call)
+    if (!skip_bind)
     {
-        return false;
+        if (!bind_decoder_tensors(engine, cache, resources, fail))
+        {
+            return false;
+        }
     }
 
     // 4-7. Execute, cache update, logits readback, and stream sync
-    return execute_and_collect_logits(engine, cache, resources, logits, stream, fail);
+    return execute_and_collect_logits(engine, cache, resources, logits, stream,
+                                      skip_logits_d2h, skip_sync, fail);
 }
 
 #endif // TRTF_HAS_TRT

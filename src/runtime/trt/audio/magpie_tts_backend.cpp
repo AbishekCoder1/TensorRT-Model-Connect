@@ -4,7 +4,16 @@
 
 #include "runtime/trt/core/trt_decode_runtime.h"
 
+#ifndef TRTF_HAS_CUDA_KERNELS
+#define TRTF_HAS_CUDA_KERNELS 0
+#endif
+
+#if TRTF_HAS_CUDA_KERNELS
+#include "runtime/trt/audio/magpie_kernels.h"
+#endif
+
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +22,14 @@
 #include <numeric>
 #include <stdexcept>
 #include <utility>
+
+namespace {
+using SteadyClock = std::chrono::steady_clock;
+using TimePoint = SteadyClock::time_point;
+inline double elapsed_ms(TimePoint start, TimePoint end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+} // anonymous namespace
 
 namespace trtf {
 
@@ -291,28 +308,117 @@ MagpieTTSBackend::MagpieTTSBackend(
     , mEncoderContext(std::move(encoder_context))
     , mEncoderOutput(static_cast<std::size_t>(config.max_source_positions) *
                      static_cast<std::size_t>(config.hidden_size) * sizeof(float))
+    , mEncoderOutputUncond(config.cfg_scale > 1.0F
+        ? static_cast<std::size_t>(config.max_source_positions) *
+          static_cast<std::size_t>(config.hidden_size) * sizeof(float)
+        : 0)
     , mAudioEmbed(std::move(audio_embed))
     , mTextEmbed(std::move(text_embed))
     , mContextEmbed(std::move(context_embed))
     , mContextLengths(std::move(context_lengths))
+    , mDeviceCodes(static_cast<std::size_t>(config.num_codebooks) * sizeof(int32_t))
+    , mDeviceFullArgmax(static_cast<std::size_t>(config.num_codebooks) * sizeof(int32_t))
+    , mAudioEmbedDevice(mAudioEmbed.size() * sizeof(float))
+    , mContextEmbedDevice(mContextEmbed.size() * sizeof(float))
+    , mDevicePrevCodes(static_cast<std::size_t>(config.num_codebooks) * sizeof(int32_t))
+    , mDeviceAllCodes(static_cast<std::size_t>(512) * config.num_codebooks * sizeof(int32_t))
+    , mDeviceLogitsCond(0)
+    , mDeviceLogitsUncond(0)
+    , mDeviceCrossAttnWeights(0)
+    , mDeviceCrossAttnWeightsScratch(0)
     , mConfig(config)
 {
     if (mDecoderEngine)
     {
         mCache = std::make_unique<DeviceKvCache>(*mDecoderEngine);
         mResources = std::make_unique<DeviceResources>(*mDecoderEngine);
+
+        // CFG: allocate second KV cache + resources when cfg_scale > 1
+        if (config.cfg_scale > 1.0F)
+        {
+            mCacheUncond = std::make_unique<DeviceKvCache>(*mDecoderEngine);
+            mResourcesUncond = std::make_unique<DeviceResources>(*mDecoderEngine);
+        }
     }
 
-    // Cross-attention K/V: one buffer per decoder layer, same size as encoder output
+    allocate_cross_kv_buffers();
+    allocate_cfg_buffers_ctor();
+    detect_cross_attn_output();
+    upload_embed_tables_to_device();
+}
+
+void MagpieTTSBackend::allocate_cross_kv_buffers()
+{
+    // Allocate per-layer cross-attention K/V buffers (separate copies needed --
+    // TRT may use input tensor memory as workspace during layer execution)
     const std::size_t enc_buf_size = mEncoderOutput.size();
-    const int32_t dec_layers = config.decoder_layers > 0
-        ? config.decoder_layers : (mDecoderEngine ? mDecoderEngine->num_layers : 1);
+    const int32_t dec_layers = mConfig.decoder_layers > 0
+        ? mConfig.decoder_layers : (mDecoderEngine ? mDecoderEngine->num_layers : 1);
     mCrossK.reserve(static_cast<std::size_t>(dec_layers));
     mCrossV.reserve(static_cast<std::size_t>(dec_layers));
     for (int32_t i = 0; i < dec_layers; ++i)
     {
         mCrossK.emplace_back(enc_buf_size);
         mCrossV.emplace_back(enc_buf_size);
+    }
+}
+
+void MagpieTTSBackend::allocate_cfg_buffers_ctor()
+{
+    if (mConfig.cfg_scale <= 1.0F)
+    {
+        return;
+    }
+
+    const std::size_t enc_buf_size = mEncoderOutput.size();
+    const int32_t dec_layers = mConfig.decoder_layers > 0
+        ? mConfig.decoder_layers : (mDecoderEngine ? mDecoderEngine->num_layers : 1);
+
+    // CFG: allocate unconditional cross-KV buffers (filled at runtime from null-text encoder)
+    mCrossKUncond.reserve(static_cast<std::size_t>(dec_layers));
+    mCrossVUncond.reserve(static_cast<std::size_t>(dec_layers));
+    for (int32_t i = 0; i < dec_layers; ++i)
+    {
+        mCrossKUncond.emplace_back(enc_buf_size);
+        mCrossVUncond.emplace_back(enc_buf_size);
+    }
+
+    // Allocate device logit buffers for CFG blending
+    const auto logits_bytes = static_cast<std::size_t>(mConfig.num_codebooks) *
+        static_cast<std::size_t>(mConfig.codebook_size) * sizeof(float);
+    mDeviceLogitsCond = CudaBuffer(logits_bytes);
+    mDeviceLogitsUncond = CudaBuffer(logits_bytes);
+}
+
+void MagpieTTSBackend::detect_cross_attn_output()
+{
+    // Detect cross_attn_weights output tensor for text-completion tracking
+    if (mDecoderEngine && mDecoderEngine->engine
+        && has_io_tensor(*mDecoderEngine->engine, "cross_attn_weights"))
+    {
+        mHasCrossAttnOutput = true;
+        const auto xattn_bytes = static_cast<std::size_t>(mConfig.max_source_positions) * sizeof(float);
+        mDeviceCrossAttnWeights = CudaBuffer(xattn_bytes);
+        // CFG: scratch buffer so uncond pass doesn't overwrite conditioned weights
+        if (mConfig.cfg_scale > 1.0F)
+        {
+            mDeviceCrossAttnWeightsScratch = CudaBuffer(xattn_bytes);
+        }
+    }
+}
+
+void MagpieTTSBackend::upload_embed_tables_to_device()
+{
+    // Copy embedding tables to GPU for device-side lookup
+    if (!mAudioEmbed.empty() && mAudioEmbedDevice.ok())
+    {
+        cudaMemcpy(mAudioEmbedDevice.data(), mAudioEmbed.data(),
+                   mAudioEmbed.size() * sizeof(float), cudaMemcpyHostToDevice);
+    }
+    if (!mContextEmbed.empty() && mContextEmbedDevice.ok())
+    {
+        cudaMemcpy(mContextEmbedDevice.data(), mContextEmbed.data(),
+                   mContextEmbed.size() * sizeof(float), cudaMemcpyHostToDevice);
     }
 }
 
@@ -474,13 +580,15 @@ void MagpieTTSBackend::run_encoder(
 }
 
 // ---------------------------------------------------------------------------
-// compute_cross_kv() -- copy encoder output to per-layer cross K/V buffers
+// compute_cross_kv() -- copy encoder output to per-layer cross K/V buffers.
+// Each layer needs its own buffer because TRT may use input tensor memory
+// as workspace during layer execution.
 // ---------------------------------------------------------------------------
 
 void MagpieTTSBackend::compute_cross_kv()
 {
-    const int32_t enc_seq = mConfig.max_source_positions;
     const int32_t hidden = mConfig.hidden_size;
+    const int32_t enc_seq = mConfig.max_source_positions;
     const std::size_t buf_size = static_cast<std::size_t>(enc_seq) *
                                  static_cast<std::size_t>(hidden) * sizeof(float);
 
@@ -507,177 +615,967 @@ void MagpieTTSBackend::bind_cross_kv()
         mDecoderEngine->context->setTensorAddress(cross_k_name.c_str(), mCrossK[i].data());
         mDecoderEngine->context->setTensorAddress(cross_v_name.c_str(), mCrossV[i].data());
     }
+
+    // Bind cross-attention weights output if available
+    if (mHasCrossAttnOutput && mDeviceCrossAttnWeights.ok())
+    {
+        mDecoderEngine->context->setTensorAddress(
+            "cross_attn_weights", mDeviceCrossAttnWeights.data());
+    }
 }
 
-namespace {
+// ---------------------------------------------------------------------------
+// compute_cross_kv_uncond() -- copy null-text encoder output to uncond cross-KV
+// ---------------------------------------------------------------------------
 
-bool prefill_magpie_context_frames(
-    DecoderStepEngine& engine,
-    DeviceKvCache& cache,
-    DeviceResources& resources,
-    const std::vector<float>& context_embed,
-    const std::vector<int32_t>& context_lengths,
-    int32_t hidden,
-    std::vector<float>& logits)
+void MagpieTTSBackend::compute_cross_kv_uncond()
 {
-    if (context_embed.empty() || context_lengths.empty())
+    const int32_t hidden = mConfig.hidden_size;
+    const int32_t enc_seq = mConfig.max_source_positions;
+    const std::size_t buf_size = static_cast<std::size_t>(enc_seq) *
+                                 static_cast<std::size_t>(hidden) * sizeof(float);
+
+    for (std::size_t i = 0; i < mCrossKUncond.size(); ++i)
     {
-        return true;
+        cudaMemcpy(mCrossKUncond[i].data(), mEncoderOutputUncond.data(),
+                    buf_size, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(mCrossVUncond[i].data(), mEncoderOutputUncond.data(),
+                    buf_size, cudaMemcpyDeviceToDevice);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bind_cross_kv_uncond() -- bind zeroed cross_k/cross_v on decoder context
+// ---------------------------------------------------------------------------
+
+void MagpieTTSBackend::bind_cross_kv_uncond()
+{
+    const int32_t dec_layers = static_cast<int32_t>(mCrossKUncond.size());
+    for (int32_t i = 0; i < dec_layers; ++i)
+    {
+        const std::string cross_k_name = layer_tensor_name("cross_k", i);
+        const std::string cross_v_name = layer_tensor_name("cross_v", i);
+        mDecoderEngine->context->setTensorAddress(cross_k_name.c_str(), mCrossKUncond[i].data());
+        mDecoderEngine->context->setTensorAddress(cross_v_name.c_str(), mCrossVUncond[i].data());
     }
 
-    const int32_t ctx_frames = context_lengths[0];
-    const float* ctx_ptr = context_embed.data();
-    std::cerr << "[magpie-tts] Prefilling " << ctx_frames
-              << " context frames ..." << std::endl;
+    // Redirect cross_attn_weights to scratch buffer so uncond pass
+    // doesn't overwrite the conditioned weights we need for tracking
+    if (mHasCrossAttnOutput && mDeviceCrossAttnWeightsScratch.ok())
+    {
+        mDecoderEngine->context->setTensorAddress(
+            "cross_attn_weights", mDeviceCrossAttnWeightsScratch.data());
+    }
+}
 
-    std::string error;
+// ---------------------------------------------------------------------------
+// Decoder loop state initialization
+// ---------------------------------------------------------------------------
+
+namespace {
+bool check_gpu_kernels_available(
+    [[maybe_unused]] const CudaBuffer& audio_embed,
+    [[maybe_unused]] const CudaBuffer& codes,
+    [[maybe_unused]] const CudaBuffer& full_argmax,
+    [[maybe_unused]] const CudaBuffer& prev_codes)
+{
+#if TRTF_HAS_CUDA_KERNELS
+    return audio_embed.ok() && codes.ok() && full_argmax.ok() && prev_codes.ok();
+#else
+    return false;
+#endif
+}
+
+// Scan cross-attention weights for peak position and update high-water mark.
+// Returns true if text_consumed was triggered.
+bool scan_xattn_peak(const float* xattn, int32_t text_length,
+                     int32_t threshold, int32_t& max_peak_pos)
+{
+    int32_t peak_pos = 0;
+    float peak_val = xattn[0];
+    for (int32_t p = 1; p < text_length; ++p)
+    {
+        if (xattn[p] > peak_val) { peak_val = xattn[p]; peak_pos = p; }
+    }
+    if (peak_pos > max_peak_pos) max_peak_pos = peak_pos;
+    return max_peak_pos >= threshold;
+}
+
+void upload_prev_codes_to_device(
+    [[maybe_unused]] CudaBuffer& d_prev,
+    [[maybe_unused]] const int32_t* host_codes,
+    [[maybe_unused]] int32_t num_cb,
+    [[maybe_unused]] bool use_gpu,
+    [[maybe_unused]] bool use_gpu_greedy)
+{
+#if TRTF_HAS_CUDA_KERNELS
+    if (use_gpu && !use_gpu_greedy)
+    {
+        cudaMemcpy(d_prev.data(), host_codes,
+                   static_cast<std::size_t>(num_cb) * sizeof(int32_t),
+                   cudaMemcpyHostToDevice);
+    }
+#endif
+}
+} // anonymous namespace
+
+MagpieTTSBackend::DecoderLoopState MagpieTTSBackend::init_decoder_state() const
+{
+    DecoderLoopState s;
+    s.hidden = mConfig.hidden_size;
+    s.num_cb = mConfig.num_codebooks;
+    s.cb_size = mConfig.codebook_size;
+    s.total_logits = s.num_cb * s.cb_size;
+
+    s.use_cfg = mConfig.cfg_scale > 1.0F
+        && mCacheUncond && mResourcesUncond
+        && !mCrossKUncond.empty();
+    s.use_gpu_kernels = check_gpu_kernels_available(
+        mAudioEmbedDevice, mDeviceCodes, mDeviceFullArgmax, mDevicePrevCodes);
+    s.use_gpu_greedy = s.use_gpu_kernels && mConfig.greedy;
+
+    // Text-completion tracking
+    s.finished_limit = mConfig.finished_limit_with_eot;
+    s.max_source_positions = mConfig.max_source_positions;
+    s.use_cross_attn_tracking = mHasCrossAttnOutput
+        && mDeviceCrossAttnWeights.ok() && mTextLength > 0;
+    s.estimated_frames = (!s.use_cross_attn_tracking && mTextLength > 0)
+        ? static_cast<int32_t>(static_cast<float>(mTextLength) * 3.0F) : 0;
+    s.text_consumed_threshold = std::max(
+        static_cast<int32_t>(static_cast<float>(mTextLength) * 0.9F), 1);
+
+    // Working buffers
+    s.embed_buf.resize(static_cast<std::size_t>(s.hidden));
+    s.cb_embed.resize(static_cast<std::size_t>(s.hidden));
+
+    return s;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: Context prefill
+// ---------------------------------------------------------------------------
+
+bool MagpieTTSBackend::prefill_context_gpu(
+    DecoderLoopState& state, DeviceKvCache& cache, DeviceResources& resources,
+    int32_t ctx_frames, const char* label)
+{
+#if TRTF_HAS_CUDA_KERNELS
+    const int32_t hidden = state.hidden;
+    const std::size_t frame_bytes = static_cast<std::size_t>(hidden) * sizeof(float);
+    for (int32_t pos = 0; pos < ctx_frames; ++pos)
+    {
+        const auto frame_offset = static_cast<std::size_t>(pos) * hidden * sizeof(float);
+        const auto* src = static_cast<const char*>(mContextEmbedDevice.data()) + frame_offset;
+
+        cudaMemcpyAsync(resources.d_input_embed.data(), src, frame_bytes,
+                        cudaMemcpyDeviceToDevice, resources.stream.get());
+
+        if (!run_decoder_step_device(*mDecoderEngine, cache, resources,
+                0, state.logits, state.error,
+                nullptr, hidden, 1.0F,
+                {}, 0.0F,
+                /*input_embed_device_ready=*/true,
+                /*skip_logits_d2h=*/true,
+                /*skip_sync=*/true,
+                /*skip_bind=*/(pos > 0)))
+        {
+            std::cerr << "[magpie-tts] " << label << " step " << pos
+                      << " failed: " << state.error << std::endl;
+            return false;
+        }
+    }
+    cudaStreamSynchronize(resources.stream.get());
+    return true;
+#else
+    (void)state; (void)cache; (void)resources; (void)ctx_frames; (void)label;
+    return false;
+#endif
+}
+
+bool MagpieTTSBackend::prefill_context_cpu(
+    DecoderLoopState& state, DeviceKvCache& cache, DeviceResources& resources,
+    int32_t ctx_frames, const char* label)
+{
+    const int32_t hidden = state.hidden;
+    const float* ctx_ptr = mContextEmbed.data();
     for (int32_t pos = 0; pos < ctx_frames; ++pos)
     {
         const float* frame_embed = ctx_ptr +
             static_cast<std::size_t>(pos) * hidden;
-        if (!run_decoder_step_device(engine, cache, resources,
-                0, logits, error,
+
+        if (!run_decoder_step_device(*mDecoderEngine, cache, resources,
+                0, state.logits, state.error,
                 frame_embed, hidden, 1.0F))
         {
-            std::cerr << "[magpie-tts] Context step " << pos
-                      << " failed: " << error << std::endl;
+            std::cerr << "[magpie-tts] " << label << " step " << pos
+                      << " failed: " << state.error << std::endl;
             return false;
         }
     }
     return true;
 }
 
-bool run_magpie_decode_frame(
-    DecoderStepEngine& engine,
-    DeviceKvCache& cache,
-    DeviceResources& resources,
-    int32_t frame,
-    int32_t hidden,
-    int32_t num_cb,
-    int32_t cb_size,
-    const float* audio_embed,
-    bool greedy,
-    float temperature,
-    int32_t top_k,
-    const std::function<int32_t(const float*, int32_t, float, int32_t)>& sampler,
-    std::vector<int32_t>& prev_codes,
-    std::vector<float>& embed_buf,
-    std::vector<float>& cb_embed,
-    std::vector<float>& logits,
-    std::vector<int32_t>& all_codes,
-    std::string& error)
+bool MagpieTTSBackend::prefill_context_cfg(
+    DecoderLoopState& state, int32_t ctx_frames)
 {
-    build_frame_input_embed(
-        prev_codes,
-        audio_embed,
-        num_cb,
-        cb_size,
-        hidden,
-        embed_buf,
-        cb_embed);
-    if (!run_decoder_step_device(engine, cache, resources,
-            0, logits, error,
-            embed_buf.data(), hidden, 1.0F))
+    std::cerr << "[magpie-tts] CFG: prefilling unconditional cache ("
+              << ctx_frames << " frames) ..." << std::endl;
+    bind_cross_kv_uncond();
+    auto& uncond_cache = *mCacheUncond;
+    auto& uncond_res = *mResourcesUncond;
+
+    bool ok = false;
+#if TRTF_HAS_CUDA_KERNELS
+    if (state.use_gpu_kernels && mContextEmbedDevice.ok())
     {
+        ok = prefill_context_gpu(state, uncond_cache, uncond_res,
+                                 ctx_frames, "CFG uncond context");
+    }
+    else
+#endif
+    {
+        ok = prefill_context_cpu(state, uncond_cache, uncond_res,
+                                 ctx_frames, "CFG uncond context");
+    }
+
+    // Rebind conditioned cross-KV for generation phase
+    if (ok) bind_cross_kv();
+    return ok;
+}
+
+int32_t MagpieTTSBackend::prefill_context(DecoderLoopState& state)
+{
+    if (mContextEmbed.empty() || mContextLengths.empty())
+    {
+        return 0;
+    }
+
+    auto& cache = *mCache;
+    auto& resources = *mResources;
+    const int32_t ctx_frames = mContextLengths[0];
+
+    std::cerr << "[magpie-tts] Prefilling " << ctx_frames
+              << " context frames ..." << std::endl;
+    const auto t_prefill_start = SteadyClock::now();
+
+    bool ok = false;
+#if TRTF_HAS_CUDA_KERNELS
+    if (state.use_gpu_kernels && mContextEmbedDevice.ok())
+    {
+        ok = prefill_context_gpu(state, cache, resources, ctx_frames, "Context");
+    }
+    else
+#endif
+    {
+        ok = prefill_context_cpu(state, cache, resources, ctx_frames, "Context");
+    }
+
+    if (!ok) return -1;
+
+    const auto t_prefill_end = SteadyClock::now();
+    state.prof_prefill_ms = elapsed_ms(t_prefill_start, t_prefill_end);
+
+    // CFG: prefill unconditional cache with same speaker context but zeroed cross-KV
+    if (state.use_cfg)
+    {
+        if (!prefill_context_cfg(state, ctx_frames)) return -1;
+    }
+
+    return ctx_frames;
+}
+
+// ---------------------------------------------------------------------------
+// CFG unconditional pass (GPU greedy path -- device-side blend)
+// ---------------------------------------------------------------------------
+
+bool MagpieTTSBackend::run_cfg_uncond_pass_gpu(DecoderLoopState& state,
+                                                 int32_t frame)
+{
+#if TRTF_HAS_CUDA_KERNELS
+    auto& resources = *mResources;
+    auto& uncond_res = *mResourcesUncond;
+    auto& uncond_cache = *mCacheUncond;
+
+    // Copy conditioned logits to staging buffer
+    cudaMemcpyAsync(mDeviceLogitsCond.data(), resources.d_logits.data(),
+        static_cast<std::size_t>(state.total_logits) * sizeof(float),
+        cudaMemcpyDeviceToDevice, resources.stream.get());
+
+    // Run unconditional pass with same embedding
+    cudaMemcpyAsync(uncond_res.d_input_embed.data(),
+        resources.d_input_embed.data(),
+        static_cast<std::size_t>(state.hidden) * sizeof(float),
+        cudaMemcpyDeviceToDevice, uncond_res.stream.get());
+
+    bind_cross_kv_uncond();
+    if (!run_decoder_step_device(*mDecoderEngine, uncond_cache, uncond_res,
+            0, state.logits, state.error,
+            nullptr, state.hidden, 1.0F,
+            {}, 0.0F,
+            /*input_embed_device_ready=*/true,
+            /*skip_logits_d2h=*/true,
+            /*skip_sync=*/true,
+            /*skip_bind=*/false))
+    {
+        cudaStreamSynchronize(resources.stream.get());
+        std::cerr << "[magpie-tts] CFG uncond step " << frame
+                  << " failed: " << state.error << std::endl;
+        return false;
+    }
+    // Sync uncond stream before blending
+    cudaStreamSynchronize(uncond_res.stream.get());
+
+    // CFG interpolation: out = uncond + scale * (cond - uncond)
+    magpie_cfg_interpolate_device(
+        static_cast<const float*>(mDeviceLogitsCond.data()),
+        static_cast<const float*>(uncond_res.d_logits.data()),
+        static_cast<float*>(resources.d_logits.data()),
+        mConfig.cfg_scale, state.total_logits,
+        resources.stream.get());
+    return true;
+#else
+    (void)state; (void)frame;
+    return false;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// CFG unconditional pass (CPU path -- host-side blend into state.logits)
+// ---------------------------------------------------------------------------
+
+bool MagpieTTSBackend::run_cfg_uncond_pass_cpu(DecoderLoopState& state,
+                                                 int32_t frame)
+{
+    std::vector<float> cond_logits = state.logits;
+    std::vector<float> uncond_logits;
+    std::string uncond_error;
+
+    bind_cross_kv_uncond();
+    auto& uncond_cache = *mCacheUncond;
+    auto& uncond_res = *mResourcesUncond;
+
+#if TRTF_HAS_CUDA_KERNELS
+    if (state.use_gpu_kernels)
+    {
+        auto& resources = *mResources;
+        cudaMemcpyAsync(uncond_res.d_input_embed.data(),
+            resources.d_input_embed.data(),
+            static_cast<std::size_t>(state.hidden) * sizeof(float),
+            cudaMemcpyDeviceToDevice, uncond_res.stream.get());
+        if (!run_decoder_step_device(*mDecoderEngine, uncond_cache, uncond_res,
+                0, uncond_logits, uncond_error,
+                nullptr, state.hidden, 1.0F,
+                {}, 0.0F,
+                /*input_embed_device_ready=*/true))
+        {
+            std::cerr << "[magpie-tts] CFG uncond step " << frame
+                      << " failed: " << uncond_error << std::endl;
+            return false;
+        }
+    }
+    else
+#endif
+    {
+        if (!run_decoder_step_device(*mDecoderEngine, uncond_cache, uncond_res,
+                0, uncond_logits, uncond_error,
+                state.embed_buf.data(), state.hidden, 1.0F))
+        {
+            std::cerr << "[magpie-tts] CFG uncond step " << frame
+                      << " failed: " << uncond_error << std::endl;
+            return false;
+        }
+    }
+
+    // CPU-side CFG blend: logits = uncond + scale * (cond - uncond)
+    const auto n = std::min(cond_logits.size(), uncond_logits.size());
+    state.logits.resize(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        state.logits[i] = uncond_logits[i] + mConfig.cfg_scale *
+            (cond_logits[i] - uncond_logits[i]);
+    }
+
+    // Rebind conditioned cross-KV for next frame
+    bind_cross_kv();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Text-completion tracking via cross-attention weights
+// ---------------------------------------------------------------------------
+
+void MagpieTTSBackend::update_text_completion(DecoderLoopState& state,
+                                               int32_t frame)
+{
+    if (state.use_cross_attn_tracking && !state.text_consumed)
+    {
+        std::vector<float> xattn(static_cast<std::size_t>(state.max_source_positions));
+        cudaMemcpy(xattn.data(), mDeviceCrossAttnWeights.data(),
+            static_cast<std::size_t>(state.max_source_positions) * sizeof(float),
+            cudaMemcpyDeviceToHost);
+
+        if (scan_xattn_peak(xattn.data(), state.max_source_positions,
+                            state.text_consumed_threshold, state.max_peak_pos))
+        {
+            state.text_consumed = true;
+            std::cerr << "[magpie-tts] Text consumed at frame " << frame
+                      << " (max_peak_pos=" << state.max_peak_pos
+                      << ", threshold=" << state.text_consumed_threshold
+                      << ", text_len=" << mTextLength << ")" << std::endl;
+        }
+    }
+
+    // Heuristic fallback
+    if (!state.use_cross_attn_tracking && !state.text_consumed
+        && state.estimated_frames > 0 && frame >= state.estimated_frames)
+    {
+        state.text_consumed = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Check finished_limit_with_eot -- returns true if generation should stop
+// ---------------------------------------------------------------------------
+
+bool MagpieTTSBackend::check_finished_limit(DecoderLoopState& state,
+                                              int32_t frame)
+{
+    if (!state.text_consumed) return false;
+
+    ++state.frames_past_text_consumed;
+    if (state.finished_limit > 0
+        && state.frames_past_text_consumed >= state.finished_limit)
+    {
+        std::cerr << "[magpie-tts] finished_limit_with_eot: stopping at frame "
+                  << frame << " (" << state.frames_past_text_consumed
+                  << " frames past text consumed)" << std::endl;
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Decoder profiling log
+// ---------------------------------------------------------------------------
+
+void MagpieTTSBackend::log_decoder_profiling(const DecoderLoopState& state,
+                                              int32_t ctx_frames,
+                                              int32_t gen_frames) const
+{
+    std::cerr << "\n[magpie-tts] --- Decoder Profiling Breakdown ---\n"
+              << "[magpie-tts]   Context prefill:   " << state.prof_prefill_ms << " ms ("
+              << ctx_frames << " frames, "
+              << (ctx_frames > 0 ? state.prof_prefill_ms / ctx_frames : 0.0) << " ms/frame)\n"
+              << "[magpie-tts]   Embed computation: " << state.prof_embed_ms << " ms ("
+              << (gen_frames > 0 ? state.prof_embed_ms / gen_frames : 0.0) << " ms/frame)\n"
+              << "[magpie-tts]   TRT decoder steps: " << state.prof_trt_step_ms << " ms ("
+              << (gen_frames > 0 ? state.prof_trt_step_ms / gen_frames : 0.0) << " ms/frame)\n"
+              << "[magpie-tts]   Sampling:          " << state.prof_sample_ms << " ms ("
+              << (gen_frames > 0 ? state.prof_sample_ms / gen_frames : 0.0) << " ms/frame)\n"
+              << "[magpie-tts]   Stop method:       "
+              << (state.use_cross_attn_tracking ? "cross-attn tracking" : "heuristic (text_len*3)")
+              << "\n"
+              << "[magpie-tts] ---------------------------------\n";
+}
+
+// ---------------------------------------------------------------------------
+// GPU greedy decode loop
+// ---------------------------------------------------------------------------
+
+bool MagpieTTSBackend::gpu_greedy_frame_step(
+    DecoderLoopState& state, int32_t frame, CudaBuffer& d_eos_flag)
+{
+#if TRTF_HAS_CUDA_KERNELS
+    constexpr int32_t EOS_TOKEN = 2017;
+    constexpr int32_t AUDIO_RANGE = 2016;
+
+    auto& engine = *mDecoderEngine;
+    auto& cache = *mCache;
+    auto& resources = *mResources;
+    const int32_t num_cb = state.num_cb;
+    const int32_t cb_size = state.cb_size;
+    const int32_t hidden = state.hidden;
+
+    // Embed
+    const auto t_embed_start = SteadyClock::now();
+    magpie_gather_average_embed_device(
+        static_cast<const float*>(mAudioEmbedDevice.data()),
+        static_cast<const int32_t*>(mDevicePrevCodes.data()),
+        num_cb, cb_size, hidden,
+        static_cast<float*>(resources.d_input_embed.data()),
+        resources.stream.get());
+    const auto t_embed_end = SteadyClock::now();
+    state.prof_embed_ms += elapsed_ms(t_embed_start, t_embed_end);
+
+    // Conditioned pass (rebind cross-KV when CFG is active or first frame)
+    const auto t_step_start = SteadyClock::now();
+    if (state.use_cfg || frame == 0) bind_cross_kv();
+    if (!run_decoder_step_device(engine, cache, resources,
+            0, state.logits, state.error,
+            nullptr, hidden, 1.0F,
+            {}, 0.0F,
+            /*input_embed_device_ready=*/true,
+            /*skip_logits_d2h=*/true,
+            /*skip_sync=*/true,
+            /*skip_bind=*/(!state.use_cfg && frame > 0)))
+    {
+        cudaStreamSynchronize(resources.stream.get());
         std::cerr << "[magpie-tts] Decode step " << frame << " failed: "
-                  << error << std::endl;
+                  << state.error << std::endl;
         return false;
     }
 
-    const FrameDecodeResult frame_result = decode_frame_codes(
-        logits,
-        num_cb,
-        cb_size,
-        greedy,
-        temperature,
-        top_k,
-        sampler);
+    // CFG: unconditional pass + device-side blend
+    if (state.use_cfg && !run_cfg_uncond_pass_gpu(state, frame))
+    {
+        return false;
+    }
+    const auto t_step_end = SteadyClock::now();
+    state.prof_trt_step_ms += elapsed_ms(t_step_start, t_step_end);
 
-    all_codes.insert(
-        all_codes.end(), frame_result.frame_codes.begin(), frame_result.frame_codes.end());
-    prev_codes = frame_result.frame_codes;
-    return !(frame_result.eos && frame >= kMagpieMinFrames);
+    // Sample + scatter
+    const auto t_sample_start = SteadyClock::now();
+    magpie_greedy_sample_device(
+        static_cast<const float*>(resources.d_logits.data()),
+        num_cb, cb_size, AUDIO_RANGE,
+        static_cast<int32_t*>(mDeviceCodes.data()),
+        static_cast<int32_t*>(mDeviceFullArgmax.data()),
+        resources.stream.get());
+
+    magpie_scatter_codes_device(
+        static_cast<const int32_t*>(mDeviceCodes.data()),
+        static_cast<int32_t*>(mDeviceAllCodes.data()),
+        static_cast<int32_t*>(mDevicePrevCodes.data()),
+        static_cast<const int32_t*>(mDeviceFullArgmax.data()),
+        static_cast<int32_t*>(d_eos_flag.data()),
+        frame, num_cb, EOS_TOKEN,
+        resources.stream.get());
+    const auto t_sample_end = SteadyClock::now();
+    state.prof_sample_ms += elapsed_ms(t_sample_start, t_sample_end);
+    return true;
+#else
+    (void)state; (void)frame; (void)d_eos_flag;
+    return false;
+#endif
 }
 
-} // namespace
+bool MagpieTTSBackend::gpu_check_stop_conditions(
+    DecoderLoopState& state, int32_t frame, CudaBuffer& d_eos_flag,
+    int32_t& h_eos_flag, int32_t& gen_frames_actual)
+{
+#if TRTF_HAS_CUDA_KERNELS
+    constexpr int32_t REPEAT_STOP_THRESHOLD = 3;
+    auto& resources = *mResources;
+    const int32_t num_cb = state.num_cb;
+
+    cudaMemcpyAsync(&h_eos_flag, d_eos_flag.data(), sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, resources.stream.get());
+
+    bool repeated = false;
+    if (frame >= REPEAT_STOP_THRESHOLD)
+    {
+        const int32_t check_start = frame + 1 - REPEAT_STOP_THRESHOLD;
+        const std::size_t check_bytes = static_cast<std::size_t>(REPEAT_STOP_THRESHOLD)
+            * num_cb * sizeof(int32_t);
+        std::vector<int32_t> recent(static_cast<std::size_t>(REPEAT_STOP_THRESHOLD) * num_cb);
+        cudaMemcpyAsync(recent.data(),
+            static_cast<const int32_t*>(mDeviceAllCodes.data()) + check_start * num_cb,
+            check_bytes, cudaMemcpyDeviceToHost, resources.stream.get());
+        cudaStreamSynchronize(resources.stream.get());
+
+        repeated = true;
+        for (int32_t r = 1; r < REPEAT_STOP_THRESHOLD && repeated; ++r)
+        {
+            for (int32_t cb = 0; cb < num_cb; ++cb)
+            {
+                if (recent[r * num_cb + cb] != recent[cb])
+                {
+                    repeated = false;
+                    break;
+                }
+            }
+        }
+        if (repeated)
+        {
+            gen_frames_actual = check_start + 1;
+            std::cerr << "[magpie-tts] Repetition detected at frame "
+                      << frame << ", trimming to " << gen_frames_actual
+                      << " frames" << std::endl;
+        }
+    }
+    else
+    {
+        cudaStreamSynchronize(resources.stream.get());
+    }
+
+    return (h_eos_flag != 0 || repeated);
+#else
+    (void)state; (void)frame; (void)d_eos_flag;
+    (void)h_eos_flag; (void)gen_frames_actual;
+    return false;
+#endif
+}
+
+void MagpieTTSBackend::gpu_update_text_completion(
+    DecoderLoopState& state, int32_t frame)
+{
+    if (state.use_cross_attn_tracking)
+    {
+        auto& resources = *mResources;
+        std::vector<float> xattn(static_cast<std::size_t>(state.max_source_positions));
+        cudaMemcpyAsync(xattn.data(), mDeviceCrossAttnWeights.data(),
+            static_cast<std::size_t>(state.max_source_positions) * sizeof(float),
+            cudaMemcpyDeviceToHost, resources.stream.get());
+        cudaStreamSynchronize(resources.stream.get());
+
+        if (scan_xattn_peak(xattn.data(), state.max_source_positions,
+                            state.text_consumed_threshold, state.max_peak_pos))
+        {
+            state.text_consumed = true;
+            std::cerr << "[magpie-tts] Text consumed at frame " << frame
+                      << " (max_peak_pos=" << state.max_peak_pos
+                      << ", threshold=" << state.text_consumed_threshold
+                      << ", text_len=" << mTextLength << ")" << std::endl;
+        }
+    }
+
+    if (!state.use_cross_attn_tracking && !state.text_consumed
+        && state.estimated_frames > 0 && frame >= state.estimated_frames)
+    {
+        state.text_consumed = true;
+    }
+}
+
+std::vector<int32_t> MagpieTTSBackend::run_gpu_greedy_loop(
+    DecoderLoopState& state, int32_t max_frames)
+{
+#if TRTF_HAS_CUDA_KERNELS
+    constexpr int32_t EOS_CHECK_INTERVAL = 16;
+    constexpr int32_t MIN_FRAMES = 4;
+
+    auto& resources = *mResources;
+    const int32_t num_cb = state.num_cb;
+
+    // Allocate device EOS flag (1 int32)
+    CudaBuffer d_eos_flag(sizeof(int32_t));
+    int32_t h_eos_flag = 0;
+    cudaMemsetAsync(d_eos_flag.data(), 0, sizeof(int32_t), resources.stream.get());
+
+    int32_t gen_frames_actual = 0;
+
+    for (int32_t frame = 0; frame < max_frames; ++frame)
+    {
+        if (!gpu_greedy_frame_step(state, frame, d_eos_flag))
+        {
+            break;
+        }
+
+        gen_frames_actual = frame + 1;
+
+        // Periodic checks (EOS, repetition, text-completion) every N frames
+        const bool periodic = frame >= MIN_FRAMES
+            && ((frame + 1) % EOS_CHECK_INTERVAL == 0);
+        if (periodic && gpu_check_stop_conditions(state, frame, d_eos_flag,
+                                                  h_eos_flag, gen_frames_actual))
+        {
+            break;
+        }
+        if (periodic && !state.text_consumed)
+        {
+            gpu_update_text_completion(state, frame);
+        }
+        if (check_finished_limit(state, frame))
+        {
+            gen_frames_actual = frame + 1;
+            break;
+        }
+    }
+
+    // Final sync and bulk D2H of all accumulated codes
+    cudaStreamSynchronize(resources.stream.get());
+    const std::size_t total_codes_bytes = static_cast<std::size_t>(gen_frames_actual) *
+        num_cb * sizeof(int32_t);
+    std::vector<int32_t> all_codes(static_cast<std::size_t>(gen_frames_actual) * num_cb);
+    cudaMemcpy(all_codes.data(), mDeviceAllCodes.data(), total_codes_bytes,
+               cudaMemcpyDeviceToHost);
+    return all_codes;
+#else
+    (void)state; (void)max_frames;
+    return {};
+#endif
+}
 
 // ---------------------------------------------------------------------------
-// run_decoder() -- multi-codebook autoregressive decode
+// CPU / non-greedy decode loop
+// ---------------------------------------------------------------------------
+
+void MagpieTTSBackend::cpu_compute_frame_embed(
+    DecoderLoopState& state, const std::vector<int32_t>& prev_codes)
+{
+    const int32_t num_cb = state.num_cb;
+    const int32_t cb_size = state.cb_size;
+    const int32_t hidden = state.hidden;
+
+#if TRTF_HAS_CUDA_KERNELS
+    if (state.use_gpu_kernels)
+    {
+        auto& resources = *mResources;
+        magpie_gather_average_embed_device(
+            static_cast<const float*>(mAudioEmbedDevice.data()),
+            static_cast<const int32_t*>(mDevicePrevCodes.data()),
+            num_cb, cb_size, hidden,
+            static_cast<float*>(resources.d_input_embed.data()),
+            resources.stream.get());
+        return;
+    }
+#endif
+
+    std::fill(state.embed_buf.begin(), state.embed_buf.end(), 0.0F);
+    for (int32_t cb = 0; cb < num_cb; ++cb)
+    {
+        const float* table = mAudioEmbed.data() +
+            static_cast<std::size_t>(cb) * cb_size * hidden;
+        lookup_embed(table, prev_codes[cb], state.cb_embed.data());
+        sum_embeds(state.embed_buf.data(), state.cb_embed.data(), state.embed_buf.data());
+    }
+    const float inv_cb = 1.0F / static_cast<float>(num_cb);
+    for (int32_t i = 0; i < hidden; ++i)
+    {
+        state.embed_buf[i] *= inv_cb;
+    }
+}
+
+bool MagpieTTSBackend::cpu_run_conditioned_step(
+    DecoderLoopState& state, int32_t frame)
+{
+    auto& engine = *mDecoderEngine;
+    auto& cache = *mCache;
+    auto& resources = *mResources;
+    const int32_t hidden = state.hidden;
+
+    if (state.use_cfg || frame == 0) bind_cross_kv();
+
+#if TRTF_HAS_CUDA_KERNELS
+    if (state.use_gpu_kernels)
+    {
+        if (!run_decoder_step_device(engine, cache, resources,
+                0, state.logits, state.error,
+                nullptr, hidden, 1.0F,
+                {}, 0.0F,
+                /*input_embed_device_ready=*/true))
+        {
+            std::cerr << "[magpie-tts] Decode step " << frame << " failed: "
+                      << state.error << std::endl;
+            return false;
+        }
+        return true;
+    }
+#endif
+
+    if (!run_decoder_step_device(engine, cache, resources,
+            0, state.logits, state.error,
+            state.embed_buf.data(), hidden, 1.0F))
+    {
+        std::cerr << "[magpie-tts] Decode step " << frame << " failed: "
+                  << state.error << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool MagpieTTSBackend::cpu_sample_frame_codes(
+    DecoderLoopState& state,
+    std::vector<int32_t>& frame_codes, bool& eos)
+{
+    constexpr int32_t EOS_TOKEN = 2017;
+    constexpr int32_t AUDIO_RANGE = 2016;
+    const int32_t num_cb = state.num_cb;
+    const int32_t cb_size = state.cb_size;
+
+    frame_codes.assign(static_cast<std::size_t>(num_cb), 0);
+    eos = false;
+
+    for (int32_t cb = 0; cb < num_cb; ++cb)
+    {
+        const int32_t offset = cb * cb_size;
+        if (offset + cb_size > static_cast<int32_t>(state.logits.size()))
+        {
+            continue;
+        }
+
+        const float* cb_logits = state.logits.data() + offset;
+
+        // Check EOS via full-range argmax
+        int32_t full_argmax = 0;
+        float best = cb_logits[0];
+        for (int32_t i = 1; i < cb_size; ++i)
+        {
+            if (cb_logits[i] > best)
+            {
+                best = cb_logits[i];
+                full_argmax = i;
+            }
+        }
+        if (full_argmax == EOS_TOKEN) eos = true;
+
+        // Sample within audio range
+        if (mConfig.greedy)
+        {
+            int32_t best_id = 0;
+            float best_val = cb_logits[0];
+            for (int32_t i = 1; i < AUDIO_RANGE; ++i)
+            {
+                if (cb_logits[i] > best_val)
+                {
+                    best_val = cb_logits[i];
+                    best_id = i;
+                }
+            }
+            frame_codes[cb] = best_id;
+        }
+        else
+        {
+            frame_codes[cb] = sample_top_k(
+                cb_logits, AUDIO_RANGE,
+                mConfig.temperature, mConfig.top_k);
+        }
+    }
+    return true;
+}
+
+bool MagpieTTSBackend::cpu_check_repetition(
+    const std::vector<int32_t>& all_codes, int32_t frame,
+    int32_t num_cb, int32_t threshold)
+{
+    if (frame < threshold) return false;
+
+    const auto base = all_codes.size() - static_cast<std::size_t>(num_cb);
+    for (int32_t r = 1; r < threshold; ++r)
+    {
+        const auto prev_offset = base - static_cast<std::size_t>(r) * num_cb;
+        for (int32_t cb = 0; cb < num_cb; ++cb)
+        {
+            if (all_codes[base + cb] != all_codes[prev_offset + cb])
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+std::vector<int32_t> MagpieTTSBackend::run_cpu_sampling_loop(
+    DecoderLoopState& state, int32_t max_frames)
+{
+    constexpr int32_t MIN_FRAMES = 4;
+    constexpr int32_t REPEAT_STOP_THRESHOLD = 3;
+
+    const int32_t num_cb = state.num_cb;
+
+    std::vector<int32_t> all_codes;
+    all_codes.reserve(static_cast<std::size_t>(max_frames) * num_cb);
+
+    std::vector<int32_t> prev_codes(static_cast<std::size_t>(num_cb), kMagpieBosToken);
+
+    for (int32_t frame = 0; frame < max_frames; ++frame)
+    {
+        // Embed computation
+        const auto t_embed_start = SteadyClock::now();
+        cpu_compute_frame_embed(state, prev_codes);
+        const auto t_embed_end = SteadyClock::now();
+        state.prof_embed_ms += elapsed_ms(t_embed_start, t_embed_end);
+
+        // Conditioned decoder step
+        const auto t_step_start = SteadyClock::now();
+        if (!cpu_run_conditioned_step(state, frame)) break;
+
+        // CFG: unconditional pass + blend
+        if (state.use_cfg && !run_cfg_uncond_pass_cpu(state, frame)) break;
+        const auto t_step_end = SteadyClock::now();
+        state.prof_trt_step_ms += elapsed_ms(t_step_start, t_step_end);
+
+        // Sample frame codes
+        const auto t_sample_start = SteadyClock::now();
+        std::vector<int32_t> frame_codes;
+        bool eos = false;
+        cpu_sample_frame_codes(state, frame_codes, eos);
+        const auto t_sample_end = SteadyClock::now();
+        state.prof_sample_ms += elapsed_ms(t_sample_start, t_sample_end);
+
+        for (int32_t cb = 0; cb < num_cb; ++cb)
+        {
+            all_codes.push_back(frame_codes[cb]);
+        }
+        prev_codes = frame_codes;
+        upload_prev_codes_to_device(mDevicePrevCodes, prev_codes.data(), num_cb,
+                                    state.use_gpu_kernels, state.use_gpu_greedy);
+
+        // Repetition-based early stopping
+        if (cpu_check_repetition(all_codes, frame, num_cb, REPEAT_STOP_THRESHOLD))
+        {
+            const int32_t trim_to = frame + 1 - REPEAT_STOP_THRESHOLD + 1;
+            all_codes.resize(static_cast<std::size_t>(trim_to) * num_cb);
+            std::cerr << "[magpie-tts] Repetition detected at frame "
+                      << frame << ", trimming to " << trim_to
+                      << " frames" << std::endl;
+            break;
+        }
+
+        if (eos && frame >= MIN_FRAMES) break;
+
+        update_text_completion(state, frame);
+
+        if (check_finished_limit(state, frame)) break;
+    }
+
+    return all_codes;
+}
+
+// ---------------------------------------------------------------------------
+// run_decoder() -- multi-codebook autoregressive decode (orchestrator)
 // ---------------------------------------------------------------------------
 
 std::vector<int32_t> MagpieTTSBackend::run_decoder(int32_t max_frames)
 {
     if (!mDecoderEngine || !mCache || !mResources) return {};
 
-    auto& engine = *mDecoderEngine;
-    auto& cache = *mCache;
-    auto& resources = *mResources;
-    const int32_t hidden = mConfig.hidden_size;
-    const int32_t num_cb = mConfig.num_codebooks;
-    const int32_t cb_size = mConfig.codebook_size;
+    DecoderLoopState state = init_decoder_state();
 
     // Reset KV cache
-    cache.reset(resources.stream.get());
-    cudaStreamSynchronize(resources.stream.get());
+    mCache->reset(mResources->stream.get());
+    cudaStreamSynchronize(mResources->stream.get());
+
+    // CFG: reset unconditional KV cache
+    if (state.use_cfg)
+    {
+        mCacheUncond->reset(mResourcesUncond->stream.get());
+        cudaStreamSynchronize(mResourcesUncond->stream.get());
+    }
 
     // Bind cross-attention K/V
     bind_cross_kv();
 
-    std::vector<float> logits;
-    std::vector<float> embed_buf(static_cast<std::size_t>(hidden));
-    std::vector<float> cb_embed(static_cast<std::size_t>(hidden));
+    // Phase 1: Context prefill
+    const int32_t ctx_frames = prefill_context(state);
+    if (ctx_frames < 0) return {};
 
-    if (!prefill_magpie_context_frames(
-            engine,
-            cache,
-            resources,
-            mContextEmbed,
-            mContextLengths,
-            hidden,
-            logits))
-    {
-        return {};
-    }
+    // Phase 2: Autoregressive decode — upload BOS codes and dispatch to loop
+    std::vector<int32_t> bos(static_cast<std::size_t>(state.num_cb), kMagpieBosToken);
+    upload_prev_codes_to_device(mDevicePrevCodes, bos.data(), state.num_cb,
+                                state.use_gpu_kernels, false);
 
-    std::vector<int32_t> all_codes;
-    all_codes.reserve(static_cast<std::size_t>(max_frames) * num_cb);
+    std::vector<int32_t> all_codes =
+        (state.use_gpu_greedy && mDeviceAllCodes.ok())
+        ? run_gpu_greedy_loop(state, max_frames)
+        : run_cpu_sampling_loop(state, max_frames);
 
-    std::vector<int32_t> prev_codes(static_cast<std::size_t>(num_cb), kMagpieBosToken);
-    auto sampler = [this](const float* values, int32_t vocab_size, float temp, int32_t top_k) {
-        return sample_top_k(values, vocab_size, temp, top_k);
-    };
-    std::string error;
-
-    for (int32_t frame = 0; frame < max_frames; ++frame)
-    {
-        if (!run_magpie_decode_frame(
-                engine,
-                cache,
-                resources,
-                frame,
-                hidden,
-                num_cb,
-                cb_size,
-                mAudioEmbed.data(),
-                mConfig.greedy,
-                mConfig.temperature,
-                mConfig.top_k,
-                sampler,
-                prev_codes,
-                embed_buf,
-                cb_embed,
-                logits,
-                all_codes,
-                error))
-        {
-            break;
-        }
-    }
-
-    const int32_t gen_frames = static_cast<int32_t>(all_codes.size()) / std::max(num_cb, 1);
+    const int32_t gen_frames = static_cast<int32_t>(all_codes.size()) /
+        std::max(state.num_cb, 1);
     std::cerr << "[magpie-tts] Generated " << gen_frames
               << " frames (" << all_codes.size() << " codes)" << std::endl;
-    log_frame_preview(all_codes, num_cb);
+
+    log_decoder_profiling(state, ctx_frames, gen_frames);
+    log_frame_preview(all_codes, state.num_cb);
     return all_codes;
 }
 
@@ -713,6 +1611,113 @@ std::vector<float> MagpieTTSBackend::run_codec(
 }
 
 // ---------------------------------------------------------------------------
+// generate_audio() helpers
+// ---------------------------------------------------------------------------
+
+void MagpieTTSBackend::apply_env_overrides()
+{
+    maybe_enable_magpie_greedy(mConfig);
+
+    const char* env_cfg = std::getenv("TRTF_MAGPIE_CFG_SCALE");
+    if (env_cfg != nullptr)
+    {
+        float val = std::atof(env_cfg);
+        if (val > 0.0F) mConfig.cfg_scale = val;
+    }
+    const char* env_limit = std::getenv("TRTF_MAGPIE_FINISHED_LIMIT");
+    if (env_limit != nullptr)
+    {
+        int32_t val = std::atoi(env_limit);
+        if (val >= 0) mConfig.finished_limit_with_eot = val;
+    }
+    const char* env_seed = std::getenv("TRTF_MAGPIE_SEED");
+    if (env_seed != nullptr)
+    {
+        mRng.seed(static_cast<std::mt19937::result_type>(std::atol(env_seed)));
+    }
+}
+
+void MagpieTTSBackend::ensure_cfg_resources()
+{
+    if (mConfig.cfg_scale <= 1.0F || mCacheUncond || !mDecoderEngine)
+    {
+        return;
+    }
+
+    mCacheUncond = std::make_unique<DeviceKvCache>(*mDecoderEngine);
+    mResourcesUncond = std::make_unique<DeviceResources>(*mDecoderEngine);
+
+    const int32_t dec_layers = mConfig.decoder_layers > 0
+        ? mConfig.decoder_layers : (mDecoderEngine ? mDecoderEngine->num_layers : 1);
+    const std::size_t enc_buf_size = static_cast<std::size_t>(mConfig.max_source_positions) *
+        static_cast<std::size_t>(mConfig.hidden_size) * sizeof(float);
+    mCrossKUncond.reserve(static_cast<std::size_t>(dec_layers));
+    mCrossVUncond.reserve(static_cast<std::size_t>(dec_layers));
+    for (int32_t i = 0; i < dec_layers; ++i)
+    {
+        mCrossKUncond.emplace_back(enc_buf_size);
+        mCrossVUncond.emplace_back(enc_buf_size);
+    }
+    mEncoderOutputUncond = CudaBuffer(enc_buf_size);
+    const auto logits_bytes = static_cast<std::size_t>(mConfig.num_codebooks) *
+        static_cast<std::size_t>(mConfig.codebook_size) * sizeof(float);
+    mDeviceLogitsCond = CudaBuffer(logits_bytes);
+    mDeviceLogitsUncond = CudaBuffer(logits_bytes);
+}
+
+void MagpieTTSBackend::run_cfg_encoder(const std::vector<int32_t>& text_ids)
+{
+    if (mConfig.cfg_scale <= 1.0F || !mEncoderOutputUncond.ok() || mCrossKUncond.empty())
+    {
+        return;
+    }
+
+    std::cerr << "[magpie-tts] CFG: encoding null text for unconditional path ..."
+              << std::endl;
+
+    const auto enc_bytes = mEncoderOutput.size();
+
+    std::vector<int32_t> empty_ids;
+    run_encoder(empty_ids, /*speaker_id=*/0, /*language_id=*/0);
+
+    cudaMemcpy(mEncoderOutputUncond.data(), mEncoderOutput.data(),
+               enc_bytes, cudaMemcpyDeviceToDevice);
+
+    run_encoder(text_ids, /*speaker_id=*/0, /*language_id=*/0);
+
+    compute_cross_kv_uncond();
+}
+
+void MagpieTTSBackend::log_pipeline_profiling(
+    int32_t num_frames, int32_t num_samples,
+    double ms_encoder, double ms_decoder,
+    double ms_codec, double ms_total) const
+{
+    const double ms_per_frame = (num_frames > 0) ? ms_decoder / num_frames : 0.0;
+    const double audio_duration = static_cast<double>(num_samples) / mConfig.sample_rate;
+    const double rtf = (audio_duration > 0.0) ? (ms_total / 1000.0) / audio_duration : 0.0;
+
+    std::cerr << "\n[magpie-tts] ===== PROFILING REPORT =====\n"
+              << "[magpie-tts]   Encoder:        " << ms_encoder << " ms\n"
+              << "[magpie-tts]   Cross-KV:       D2D copies (per-layer buffers)\n"
+              << "[magpie-tts]   Decoder:        " << ms_decoder << " ms ("
+              << num_frames << " frames, " << ms_per_frame << " ms/frame)\n"
+              << "[magpie-tts]   Codec:          " << ms_codec << " ms\n"
+              << "[magpie-tts]   Total pipeline: " << ms_total << " ms\n"
+              << "[magpie-tts]   Audio duration: " << audio_duration << " s ("
+              << num_samples << " samples @ " << mConfig.sample_rate << " Hz)\n"
+              << "[magpie-tts]   RTF (real-time factor): " << rtf
+              << " (< 1.0 = faster than real-time)\n"
+              << "[magpie-tts]   CFG scale:      " << mConfig.cfg_scale
+              << (mConfig.cfg_scale > 1.0F ? " (enabled, 2x decoder steps)" : " (disabled)")
+              << "\n"
+              << "[magpie-tts]   finished_limit: " << mConfig.finished_limit_with_eot
+              << " (text_len=" << mTextLength << ", est_frames="
+              << static_cast<int32_t>(static_cast<float>(mTextLength) * 3.0F) << ")\n"
+              << "[magpie-tts] =============================\n" << std::endl;
+}
+
+// ---------------------------------------------------------------------------
 // generate_audio() -- full pipeline orchestration
 // ---------------------------------------------------------------------------
 
@@ -729,23 +1734,37 @@ AudioResult MagpieTTSBackend::generate_audio(
         return result;
     }
 
-    maybe_enable_magpie_greedy(mConfig);
+    apply_env_overrides();
+    ensure_cfg_resources();
+
+    mTextLength = static_cast<int32_t>(text_ids.size());
 
     std::cerr << "[magpie-tts] Starting pipeline with " << text_ids.size()
               << " text tokens, max_frames=" << max_frames
-              << (mConfig.greedy ? " (greedy)" : "") << std::endl;
+              << (mConfig.greedy ? " (greedy)" : "")
+              << ", cfg_scale=" << mConfig.cfg_scale
+              << ", finished_limit=" << mConfig.finished_limit_with_eot
+              << std::endl;
+
+    const auto t_pipeline_start = SteadyClock::now();
 
     // Stage 1: Encode text + speaker/language
     std::cerr << "[magpie-tts] Running encoder ..." << std::endl;
+    const auto t_enc_start = SteadyClock::now();
     run_encoder(text_ids, /*speaker_id=*/0, /*language_id=*/0);
+    const auto t_enc_end = SteadyClock::now();
 
-    // Stage 2: Compute cross-attention K/V
-    std::cerr << "[magpie-tts] Computing cross-attention K/V ..." << std::endl;
+    // Stage 2: Copy encoder output to per-layer cross-attention buffers
     compute_cross_kv();
+
+    // Stage 2b (CFG): Run encoder with empty text for unconditional cross-KV
+    run_cfg_encoder(text_ids);
 
     // Stage 3: Autoregressive decode -> multi-codebook codes
     std::cerr << "[magpie-tts] Running decoder ..." << std::endl;
+    const auto t_dec_start = SteadyClock::now();
     auto codes = run_decoder(max_frames);
+    const auto t_dec_end = SteadyClock::now();
     if (codes.empty())
     {
         std::cerr << "[magpie-tts] Decoder produced no codes" << std::endl;
@@ -756,7 +1775,9 @@ AudioResult MagpieTTSBackend::generate_audio(
 
     // Stage 4: Codec -> waveform
     std::cerr << "[magpie-tts] Running codec ..." << std::endl;
+    const auto t_codec_start = SteadyClock::now();
     auto waveform = run_codec(codes, num_frames);
+    const auto t_codec_end = SteadyClock::now();
     if (waveform.empty())
     {
         std::cerr << "[magpie-tts] Codec produced no audio" << std::endl;
@@ -765,9 +1786,15 @@ AudioResult MagpieTTSBackend::generate_audio(
 
     result.waveform = std::move(waveform);
     result.num_samples = static_cast<int32_t>(result.waveform.size());
-    std::cerr << "[magpie-tts] Generated " << result.num_samples << " samples ("
-              << static_cast<float>(result.num_samples) / result.sample_rate
-              << "s @ " << result.sample_rate << " Hz)" << std::endl;
+
+    const auto t_pipeline_end = SteadyClock::now();
+
+    log_pipeline_profiling(
+        num_frames, result.num_samples,
+        elapsed_ms(t_enc_start, t_enc_end),
+        elapsed_ms(t_dec_start, t_dec_end),
+        elapsed_ms(t_codec_start, t_codec_end),
+        elapsed_ms(t_pipeline_start, t_pipeline_end));
 
     return result;
 }
@@ -800,6 +1827,8 @@ std::unique_ptr<MagpieTTSBackend> CreateMagpieTTSBackend(
     magpie_cfg.max_source_positions = cfg.magpie_max_source_positions;
     magpie_cfg.xa_n_heads = cfg.magpie_xa_n_heads;
     magpie_cfg.xa_d_head = cfg.magpie_xa_d_head;
+    magpie_cfg.cfg_scale = cfg.magpie_cfg_scale;
+    magpie_cfg.finished_limit_with_eot = cfg.magpie_finished_limit_with_eot;
 
     auto backend = std::make_unique<MagpieTTSBackend>(
         std::move(decoder_engine), std::move(encoder_engine),
