@@ -1,4 +1,5 @@
 #include "runtime/trt/multimodal/image_preprocessor.h"
+#include "trtf/runtime/trt/multimodal/image_transform_helper.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -58,36 +59,22 @@ static std::vector<unsigned char> resize_raw(
 }
 
 // Convert resized uint8 HWC buffer to float32 CHW, normalizing per channel.
-static void normalize_to_chw(
+static bool normalize_to_chw(
     const std::vector<unsigned char>& resized,
     int target_size, const VLPreprocessConfig& config,
     std::vector<float>& out_chw)
 {
-    const int C = config.in_channels;
-    const std::size_t pixel_count = static_cast<std::size_t>(target_size) * target_size;
-    out_chw.resize(static_cast<std::size_t>(C) * pixel_count);
-
-    for (int c = 0; c < C; ++c)
-    {
-        const float mean = config.image_mean[c];
-        const float inv_std =
-            (config.image_std[c] > 1e-8F) ? (1.0F / config.image_std[c]) : 1.0F;
-
-        for (int y = 0; y < target_size; ++y)
-        {
-            for (int x = 0; x < target_size; ++x)
-            {
-                const std::size_t src_idx =
-                    (static_cast<std::size_t>(y) * target_size + x) * 3 + c;
-                const float pixel = static_cast<float>(resized[src_idx]) / 255.0F;
-
-                const std::size_t dst_idx =
-                    static_cast<std::size_t>(c) * pixel_count
-                    + static_cast<std::size_t>(y) * target_size + x;
-                out_chw[dst_idx] = (pixel - mean) * inv_std;
-            }
-        }
-    }
+    ImageNormalizationParams params;
+    params.width = target_size;
+    params.height = target_size;
+    params.channels = config.in_channels;
+    params.image_mean[0] = config.image_mean[0];
+    params.image_mean[1] = config.image_mean[1];
+    params.image_mean[2] = config.image_mean[2];
+    params.image_std[0] = config.image_std[0];
+    params.image_std[1] = config.image_std[1];
+    params.image_std[2] = config.image_std[2];
+    return normalize_hwc_u8_to_chw(resized, params, out_chw);
 }
 
 // ---------------------------------------------------------------------------
@@ -95,29 +82,22 @@ static void normalize_to_chw(
 // ---------------------------------------------------------------------------
 
 static LoadedImage load_resize_normalize(
-    const std::string& image_path,
+    const runtime::adapters::io::DecodedImage& image,
     const VLPreprocessConfig& config)
 {
     LoadedImage loaded;
 
-    // 1. Load image with stb_image (always request 3 channels = RGB)
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    unsigned char* raw = stbi_load(image_path.c_str(), &width, &height, &channels, 3);
-    if (raw == nullptr)
+    if (image.empty())
     {
-        std::cerr << "[trtf] Failed to load image: " << image_path
-                  << " (" << stbi_failure_reason() << ")" << std::endl;
+        std::cerr << "[trtf] Failed to preprocess image: decoded image missing" << std::endl;
         return loaded;
     }
 
     const int target_size = config.fixed_image_size;
 
     // 2. Resize to fixed_image_size x fixed_image_size
-    auto resized = resize_raw(raw, width, height, target_size,
+    auto resized = resize_raw(image.pixels.data(), image.width, image.height, target_size,
                               resolve_stbir_filter(config.interpolation));
-    stbi_image_free(raw);
 
     if (resized.empty())
     {
@@ -126,7 +106,11 @@ static LoadedImage load_resize_normalize(
     }
 
     // 3. Normalize to [C, H, W]
-    normalize_to_chw(resized, target_size, config, loaded.img_chw);
+    if (!normalize_to_chw(resized, target_size, config, loaded.img_chw))
+    {
+        std::cerr << "[trtf] Failed to normalize image" << std::endl;
+        return loaded;
+    }
     loaded.target_size = target_size;
     loaded.channels = config.in_channels;
     loaded.ok = true;
@@ -135,36 +119,31 @@ static LoadedImage load_resize_normalize(
 
 // Center-crop to square, then resize + normalize.
 static LoadedImage load_crop_resize_normalize(
-    const std::string& image_path,
+    const runtime::adapters::io::DecodedImage& image,
     const VLPreprocessConfig& config)
 {
     LoadedImage loaded;
 
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    unsigned char* raw = stbi_load(image_path.c_str(), &width, &height, &channels, 3);
-    if (raw == nullptr)
+    if (image.empty())
     {
-        std::cerr << "[trtf] Failed to load image: " << image_path
-                  << " (" << stbi_failure_reason() << ")" << std::endl;
+        std::cerr << "[trtf] Failed to preprocess cropped image: decoded image missing" << std::endl;
         return loaded;
     }
 
     // Center-crop to square
-    const int crop_size = std::min(width, height);
-    const int x_off = (width - crop_size) / 2;
-    const int y_off = (height - crop_size) / 2;
+    const int crop_size = std::min(image.width, image.height);
+    const int x_off = (image.width - crop_size) / 2;
+    const int y_off = (image.height - crop_size) / 2;
 
     std::vector<unsigned char> cropped(
         static_cast<std::size_t>(crop_size) * crop_size * 3);
     for (int y = 0; y < crop_size; ++y)
     {
-        const unsigned char* src_row = raw + (static_cast<std::size_t>(y + y_off) * width + x_off) * 3;
+        const unsigned char* src_row = image.pixels.data()
+            + (static_cast<std::size_t>(y + y_off) * image.width + x_off) * 3;
         unsigned char* dst_row = cropped.data() + static_cast<std::size_t>(y) * crop_size * 3;
         std::memcpy(dst_row, src_row, static_cast<std::size_t>(crop_size) * 3);
     }
-    stbi_image_free(raw);
 
     const int target_size = config.fixed_image_size;
     auto resized = resize_raw(cropped.data(), crop_size, crop_size, target_size,
@@ -175,7 +154,11 @@ static LoadedImage load_crop_resize_normalize(
         return loaded;
     }
 
-    normalize_to_chw(resized, target_size, config, loaded.img_chw);
+    if (!normalize_to_chw(resized, target_size, config, loaded.img_chw))
+    {
+        std::cerr << "[trtf] Failed to normalize cropped image" << std::endl;
+        return loaded;
+    }
     loaded.target_size = target_size;
     loaded.channels = config.in_channels;
     loaded.ok = true;
@@ -184,19 +167,14 @@ static LoadedImage load_crop_resize_normalize(
 
 // Aspect-ratio-preserving resize + zero-pad to square, then normalize.
 static LoadedImage load_aspect_preserve_resize_normalize(
-    const std::string& image_path,
+    const runtime::adapters::io::DecodedImage& image,
     const VLPreprocessConfig& config)
 {
     LoadedImage loaded;
 
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    unsigned char* raw = stbi_load(image_path.c_str(), &width, &height, &channels, 3);
-    if (raw == nullptr)
+    if (image.empty())
     {
-        std::cerr << "[trtf] Failed to load image: " << image_path
-                  << " (" << stbi_failure_reason() << ")" << std::endl;
+        std::cerr << "[trtf] Failed to preprocess aspect-preserve image: decoded image missing" << std::endl;
         return loaded;
     }
 
@@ -205,21 +183,19 @@ static LoadedImage load_aspect_preserve_resize_normalize(
 
     // Compute scaled dimensions that fit inside target_size x target_size
     const float scale = static_cast<float>(target_size) /
-                        static_cast<float>(std::max(width, height));
-    const int new_w = std::max(1, static_cast<int>(width * scale));
-    const int new_h = std::max(1, static_cast<int>(height * scale));
+                        static_cast<float>(std::max(image.width, image.height));
+    const int new_w = std::max(1, static_cast<int>(image.width * scale));
+    const int new_h = std::max(1, static_cast<int>(image.height * scale));
 
     // Resize preserving aspect ratio
     std::vector<unsigned char> resized_small(
         static_cast<std::size_t>(new_w) * new_h * 3);
 
     void* resize_result = stbir_resize(
-        raw, width, height, width * 3,
+        image.pixels.data(), image.width, image.height, image.width * 3,
         resized_small.data(), new_w, new_h, new_w * 3,
         STBIR_RGB, STBIR_TYPE_UINT8,
         STBIR_EDGE_CLAMP, filter);
-
-    stbi_image_free(raw);
 
     if (resize_result == nullptr)
     {
@@ -237,7 +213,11 @@ static LoadedImage load_aspect_preserve_resize_normalize(
         std::memcpy(dst_row, src_row, static_cast<std::size_t>(new_w) * 3);
     }
 
-    normalize_to_chw(padded, target_size, config, loaded.img_chw);
+    if (!normalize_to_chw(padded, target_size, config, loaded.img_chw))
+    {
+        std::cerr << "[trtf] Failed to normalize aspect-preserve image" << std::endl;
+        return loaded;
+    }
     loaded.target_size = target_size;
     loaded.channels = config.in_channels;
     loaded.ok = true;
@@ -247,19 +227,14 @@ static LoadedImage load_aspect_preserve_resize_normalize(
 // Aspect-ratio-preserving resize + center-pad with mean color, then normalize.
 // Matches PIL ImageOps.pad(image, (size, size), color=mean*255).
 static LoadedImage load_pad_center_resize_normalize(
-    const std::string& image_path,
+    const runtime::adapters::io::DecodedImage& image,
     const VLPreprocessConfig& config)
 {
     LoadedImage loaded;
 
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    unsigned char* raw = stbi_load(image_path.c_str(), &width, &height, &channels, 3);
-    if (raw == nullptr)
+    if (image.empty())
     {
-        std::cerr << "[trtf] Failed to load image: " << image_path
-                  << " (" << stbi_failure_reason() << ")" << std::endl;
+        std::cerr << "[trtf] Failed to preprocess pad-center image: decoded image missing" << std::endl;
         return loaded;
     }
 
@@ -268,23 +243,21 @@ static LoadedImage load_pad_center_resize_normalize(
 
     // Compute scaled dimensions that fit inside target_size x target_size
     // This matches PIL ImageOps.pad behavior: scale to fit, then center.
-    const float scale_w = static_cast<float>(target_size) / static_cast<float>(width);
-    const float scale_h = static_cast<float>(target_size) / static_cast<float>(height);
+    const float scale_w = static_cast<float>(target_size) / static_cast<float>(image.width);
+    const float scale_h = static_cast<float>(target_size) / static_cast<float>(image.height);
     const float scale = std::min(scale_w, scale_h);
-    const int new_w = std::max(1, static_cast<int>(width * scale));
-    const int new_h = std::max(1, static_cast<int>(height * scale));
+    const int new_w = std::max(1, static_cast<int>(image.width * scale));
+    const int new_h = std::max(1, static_cast<int>(image.height * scale));
 
     // Resize preserving aspect ratio
     std::vector<unsigned char> resized_small(
         static_cast<std::size_t>(new_w) * new_h * 3);
 
     void* resize_result = stbir_resize(
-        raw, width, height, width * 3,
+        image.pixels.data(), image.width, image.height, image.width * 3,
         resized_small.data(), new_w, new_h, new_w * 3,
         STBIR_RGB, STBIR_TYPE_UINT8,
         STBIR_EDGE_CLAMP, filter);
-
-    stbi_image_free(raw);
 
     if (resize_result == nullptr)
     {
@@ -318,7 +291,11 @@ static LoadedImage load_pad_center_resize_normalize(
         std::memcpy(dst_row, src_row, static_cast<std::size_t>(new_w) * 3);
     }
 
-    normalize_to_chw(padded, target_size, config, loaded.img_chw);
+    if (!normalize_to_chw(padded, target_size, config, loaded.img_chw))
+    {
+        std::cerr << "[trtf] Failed to normalize pad-center image" << std::endl;
+        return loaded;
+    }
     loaded.target_size = target_size;
     loaded.channels = config.in_channels;
     loaded.ok = true;
@@ -334,88 +311,18 @@ static PreprocessedImage preprocess_qwen_merge_group(
     const VLPreprocessConfig& config)
 {
     PreprocessedImage result;
+    ImageTransformParams params;
+    params.layout = ImageTransformLayout::kQwenMergeGroup;
+    params.target_size = loaded.target_size;
+    params.channels = loaded.channels;
+    params.patch_size = config.patch_size;
+    params.merge_size = config.merge_size;
+    params.temporal_patch_size = config.temporal_patch_size;
 
-    const int target_size = loaded.target_size;
-    const int C = loaded.channels;
-    const int T = config.temporal_patch_size;
-    const int total_channels = C * T;
-    const std::size_t pixel_count = static_cast<std::size_t>(target_size) * target_size;
-
-    // Merge-group patch permutation (matches HF Qwen2VLImageProcessor._preprocess).
-    //
-    // The TRT vision encoder's Conv2D produces patches in raster order.
-    // HF's processor rearranges pixels so patches come out in merge-group order:
-    //   for (mh, mw, dh, dw): original patch = (mh*merge+dh, mw*merge+dw)
-    // We replicate this by placing each merge-group-ordered patch at the
-    // corresponding raster position in a pseudo-image.
-    const int pH = config.patch_size;
-    const int pW = config.patch_size;
-    const int grid_h = target_size / pH;
-    const int grid_w = target_size / pW;
-    const int merge = config.merge_size;
-    const int merge_h = grid_h / merge;
-    const int merge_w = grid_w / merge;
-
-    // Build merge-group -> original-patch mapping and write the pseudo-image
-    // directly in [C*T, H, W] layout with channel order [C, T]:
-    //   out_channel = c * T + t  ->  [R_t0, R_t1, G_t0, G_t1, B_t0, B_t1]
-    result.pixel_values.resize(static_cast<std::size_t>(total_channels) * pixel_count);
-    result.channels = total_channels;
-    result.height = target_size;
-    result.width = target_size;
-
-    int dst_patch_idx = 0;
-    for (int mh = 0; mh < merge_h; ++mh)
-    {
-        for (int mw = 0; mw < merge_w; ++mw)
-        {
-            for (int dh = 0; dh < merge; ++dh)
-            {
-                for (int dw = 0; dw < merge; ++dw)
-                {
-                    // Source: original patch at (orig_h, orig_w) in the grid
-                    const int orig_h = mh * merge + dh;
-                    const int orig_w = mw * merge + dw;
-
-                    // Destination: raster position dst_patch_idx in pseudo-image
-                    const int dst_h = dst_patch_idx / grid_w;
-                    const int dst_w = dst_patch_idx % grid_w;
-
-                    // Copy patch pixels for each (c, t) channel
-                    for (int c = 0; c < C; ++c)
-                    {
-                        for (int t = 0; t < T; ++t)
-                        {
-                            const int out_ch = c * T + t;
-                            for (int py = 0; py < pH; ++py)
-                            {
-                                for (int px = 0; px < pW; ++px)
-                                {
-                                    // Source pixel from original image [C, H, W]
-                                    const std::size_t src =
-                                        static_cast<std::size_t>(c) * pixel_count
-                                        + static_cast<std::size_t>(orig_h * pH + py) * target_size
-                                        + (orig_w * pW + px);
-
-                                    // Destination in pseudo-image [C*T, H, W]
-                                    const std::size_t dst =
-                                        static_cast<std::size_t>(out_ch) * pixel_count
-                                        + static_cast<std::size_t>(dst_h * pH + py) * target_size
-                                        + (dst_w * pW + px);
-
-                                    result.pixel_values[dst] = loaded.img_chw[src];
-                                }
-                            }
-                        }
-                    }
-
-                    ++dst_patch_idx;
-                }
-            }
-        }
-    }
-
-    result.ok = true;
+    result.height = loaded.target_size;
+    result.width = loaded.target_size;
+    result.ok = transform_chw_layout(
+        loaded.img_chw, params, result.pixel_values, result.channels);
     return result;
 }
 
@@ -428,16 +335,17 @@ static PreprocessedImage preprocess_simple_chw(
     const VLPreprocessConfig& config)
 {
     PreprocessedImage result;
+    ImageTransformParams params;
+    params.layout = ImageTransformLayout::kSimpleChw;
+    params.target_size = loaded.target_size;
+    params.channels = loaded.channels;
 
-    // Standard [C, H, W] — already produced by load_resize_normalize.
-    // No patch permutation, no temporal duplication.
-    result.pixel_values = loaded.img_chw;
-    result.channels = loaded.channels;
     result.height = loaded.target_size;
     result.width = loaded.target_size;
-    result.ok = true;
+    result.ok = transform_chw_layout(
+        loaded.img_chw, params, result.pixel_values, result.channels);
 
-    (void)config;  // only image_mean/std/fixed_image_size used (already in loaded)
+    (void)config;
     return result;
 }
 
@@ -446,7 +354,7 @@ static PreprocessedImage preprocess_simple_chw(
 // ---------------------------------------------------------------------------
 
 using LoadImageFn = LoadedImage (*)(
-    const std::string& image_path,
+    const runtime::adapters::io::DecodedImage& image,
     const VLPreprocessConfig& config);
 
 using PreprocessImageFn = PreprocessedImage (*)(
@@ -475,11 +383,11 @@ static PreprocessDispatch resolve_preprocess_dispatch(const std::string& preproc
 }
 
 static PreprocessedImage run_preprocess_dispatch(
-    const std::string& image_path,
+    const runtime::adapters::io::DecodedImage& image,
     const VLPreprocessConfig& config,
     const PreprocessDispatch& dispatch)
 {
-    LoadedImage loaded = dispatch.load_fn(image_path, config);
+    LoadedImage loaded = dispatch.load_fn(image, config);
     if (!loaded.ok)
     {
         return PreprocessedImage{};
@@ -487,8 +395,35 @@ static PreprocessedImage run_preprocess_dispatch(
     return dispatch.preprocess_fn(loaded, config);
 }
 
-PreprocessedImage load_and_preprocess_image(
-    const std::string& image_path,
+runtime::adapters::io::DecodedImage decode_image_rgb(const std::string& image_path)
+{
+    runtime::adapters::io::DecodedImage image;
+    if (image_path.empty())
+    {
+        return image;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* raw = stbi_load(image_path.c_str(), &width, &height, &channels, 3);
+    if (raw == nullptr)
+    {
+        std::cerr << "[trtf] Failed to load image: " << image_path
+                  << " (" << stbi_failure_reason() << ")" << std::endl;
+        return image;
+    }
+
+    image.width = width;
+    image.height = height;
+    image.channels = 3;
+    image.pixels.assign(raw, raw + static_cast<std::size_t>(width) * height * 3);
+    stbi_image_free(raw);
+    return image;
+}
+
+PreprocessedImage preprocess_decoded_image(
+    const runtime::adapters::io::DecodedImage& image,
     const VLPreprocessConfig& config)
 {
     const auto dispatch = resolve_preprocess_dispatch(config.preprocessor_type);
@@ -499,7 +434,14 @@ PreprocessedImage load_and_preprocess_image(
                   << std::endl;
     }
 
-    return run_preprocess_dispatch(image_path, config, dispatch);
+    return run_preprocess_dispatch(image, config, dispatch);
+}
+
+PreprocessedImage load_and_preprocess_image(
+    const std::string& image_path,
+    const VLPreprocessConfig& config)
+{
+    return preprocess_decoded_image(decode_image_rgb(image_path), config);
 }
 
 std::string format_vl_prompt(

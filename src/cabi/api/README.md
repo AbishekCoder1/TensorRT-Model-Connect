@@ -6,4 +6,4 @@ Focus areas:
 - Handle validation and error mapping
 - Bundle open/close lifecycle
 - Pipeline creation and command dispatch
-- Registry bootstrap (`register_builtin_backend_factories_once`)
+- Builder-based runtime composition into `PipelineRouter`

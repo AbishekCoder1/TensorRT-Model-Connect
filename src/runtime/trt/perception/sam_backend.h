@@ -2,6 +2,7 @@
 
 #include "runtime/trt/core/trt_common.h"
 #include "cabi/config/fast_path_config.h"
+#include "trtf/runtime/adapters/io/media_io_adapter.h"
 
 #if TRTF_HAS_TRT
 
@@ -49,8 +50,8 @@ public:
 
     bool is_available() const;
 
-    // Encode an image. Stores embeddings in GPU memory.
-    bool encode_image(const std::string& image_path);
+    // Encode a decoded image. Stores embeddings in GPU memory.
+    bool encode_image(const runtime::adapters::io::DecodedImage& image);
 
     // Segment with a single point prompt. Returns masks + IoU scores.
     // point_x, point_y: normalized coordinates [0, 1]
@@ -87,6 +88,8 @@ private:
     // Rescaled image dimensions (for point coordinate transformation)
     int32_t mRescaledW{0};
     int32_t mRescaledH{0};
+    int32_t mOriginalW{0};
+    int32_t mOriginalH{0};
 };
 
 // Create from engines + config

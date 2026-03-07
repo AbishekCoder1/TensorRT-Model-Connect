@@ -1,4 +1,5 @@
 #include "runtime/trt/audio/omni_backend.h"
+#include "runtime/trt/audio/omni_audio_plan.h"
 
 #if TRTF_HAS_TRT
 
@@ -141,40 +142,6 @@ std::vector<int32_t> decode_thinker_tokens_or_throw(
     return output_ids;
 }
 
-int32_t select_codebook_argmax(
-    const std::vector<float>& logits,
-    int32_t offset,
-    int32_t codebook_size)
-{
-    if (offset + codebook_size > static_cast<int32_t>(logits.size()))
-    {
-        return 0;
-    }
-
-    int32_t best = 0;
-    for (int32_t i = 1; i < codebook_size; ++i)
-    {
-        if (logits[offset + i] > logits[offset + best])
-        {
-            best = i;
-        }
-    }
-    return best;
-}
-
-void append_talker_codes_from_logits(
-    const std::vector<float>& logits,
-    int32_t n_codebooks,
-    int32_t codebook_size,
-    std::vector<int32_t>& all_codes)
-{
-    for (int32_t cb = 0; cb < n_codebooks; ++cb)
-    {
-        const int32_t offset = cb * codebook_size;
-        all_codes.push_back(select_codebook_argmax(logits, offset, codebook_size));
-    }
-}
-
 void prefill_talker_codes_or_throw(
     DecoderStepEngine& engine,
     const std::vector<float>& hidden_states,
@@ -186,6 +153,10 @@ void prefill_talker_codes_or_throw(
     DeviceResources& resources,
     std::vector<int32_t>& all_codes)
 {
+    const OmniTalkerDecodePlan decode_plan = make_omni_talker_decode_plan(
+        n_codebooks,
+        codebook_size,
+        num_tokens);
     std::vector<float> logits;
     std::string error;
 
@@ -202,7 +173,7 @@ void prefill_talker_codes_or_throw(
             logits,
             error,
             "Omni Talker prefill failed: ");
-        append_talker_codes_from_logits(logits, n_codebooks, codebook_size, all_codes);
+        append_omni_talker_codes_from_logits(logits, decode_plan, all_codes);
     }
 }
 
@@ -234,25 +205,6 @@ std::vector<float> generate_fallback_waveform(
     return waveform;
 }
 
-std::vector<int32_t> build_code2wav_input_codes(
-    const std::vector<int32_t>& codec_tokens,
-    int32_t n_codebooks,
-    int32_t max_frames,
-    int32_t actual_frames)
-{
-    const auto input_size = static_cast<std::size_t>(n_codebooks) * max_frames;
-    std::vector<int32_t> input_codes(input_size, 0);
-    for (int32_t cb = 0; cb < n_codebooks; ++cb)
-    {
-        for (int32_t f = 0; f < actual_frames; ++f)
-        {
-            input_codes[static_cast<std::size_t>(cb) * max_frames + f] =
-                codec_tokens[static_cast<std::size_t>(f) * n_codebooks + cb];
-        }
-    }
-    return input_codes;
-}
-
 std::vector<float> run_code2wav_trt(
     const std::vector<int32_t>& codec_tokens,
     int32_t n_codebooks,
@@ -264,7 +216,7 @@ std::vector<float> run_code2wav_trt(
     const int32_t actual_frames = std::min(n_frames, max_frames);
     const int32_t upsample = config.code2wav_upsample_factor;
 
-    std::vector<int32_t> input_codes = build_code2wav_input_codes(
+    std::vector<int32_t> input_codes = build_omni_code2wav_input_codes(
         codec_tokens, n_codebooks, max_frames, actual_frames);
     const auto input_size = static_cast<std::size_t>(n_codebooks) * max_frames;
     const auto output_elems = static_cast<std::size_t>(max_frames) * upsample;
@@ -429,21 +381,17 @@ std::vector<float> OmniBackend::encode_audio(
         return {};
     }
 
-    const int32_t embed_dim = mConfig.audio_embed_dim;
-    const int32_t max_audio_frames = mConfig.audio_num_frames;
-    const int32_t actual_frames = std::min(num_frames, max_audio_frames);
-    const int32_t output_frames = actual_frames / 2;  // conv2 stride 2
-
-    // Input buffer: [1, num_mel, max_audio_len]
-    const auto input_size = static_cast<std::size_t>(1) * num_mel_bins * max_audio_frames;
-    std::vector<float> input_padded(input_size, 0.0F);
-    const auto copy_size = static_cast<std::size_t>(num_mel_bins) * actual_frames;
-    std::memcpy(input_padded.data(), mel_features,
-                copy_size * sizeof(float));
+    const OmniAudioEncodePlan plan = make_omni_audio_encode_plan(
+        mConfig,
+        num_mel_bins,
+        num_frames);
+    std::vector<float> input_padded = build_omni_audio_encoder_input(
+        mel_features,
+        plan);
 
     // Allocate device buffers
-    CudaBuffer d_input(input_size * sizeof(float));
-    CudaBuffer d_output(static_cast<std::size_t>(output_frames) * embed_dim * sizeof(float));
+    CudaBuffer d_input(plan.input_size * sizeof(float));
+    CudaBuffer d_output(plan.output_elements * sizeof(float));
     CudaStream stream;
 
     if (!d_input.ok() || !d_output.ok() || !stream.ok())
@@ -453,7 +401,7 @@ std::vector<float> OmniBackend::encode_audio(
     }
 
     cudaMemcpyAsync(d_input.data(), input_padded.data(),
-                    input_size * sizeof(float),
+                    plan.input_size * sizeof(float),
                     cudaMemcpyHostToDevice, stream.get());
 
     if (!mAudioEncoderCtx->setTensorAddress("mel_features", d_input.data()) ||
@@ -469,14 +417,14 @@ std::vector<float> OmniBackend::encode_audio(
         return {};
     }
 
-    std::vector<float> features(static_cast<std::size_t>(output_frames) * embed_dim);
+    std::vector<float> features(plan.output_elements);
     cudaMemcpyAsync(features.data(), d_output.data(),
                     features.size() * sizeof(float),
                     cudaMemcpyDeviceToHost, stream.get());
     cudaStreamSynchronize(stream.get());
 
-    std::cerr << "[trtf] Omni audio encoder: " << output_frames
-              << " frames, dim=" << embed_dim << std::endl;
+    std::cerr << "[trtf] Omni audio encoder: " << plan.output_frames
+              << " frames, dim=" << plan.embed_dim << std::endl;
 
     return features;
 }
@@ -580,19 +528,24 @@ AudioResult OmniBackend::generate_audio(
     }
 
     // Stage 1: Talker converts hidden states to RVQ codec tokens
-    if (mTalkerEngine && !hidden_states.empty())
+    const OmniTalkerPlan talker_plan = make_omni_talker_plan(
+        text_tokens.size(),
+        hidden_states.size(),
+        static_cast<bool>(mTalkerEngine));
+    if (talker_plan.should_run_talker)
     {
         auto codec_tokens = run_talker(
-            hidden_states, static_cast<int32_t>(text_tokens.size()));
+            hidden_states,
+            talker_plan.num_tokens);
 
-        if (!codec_tokens.empty())
+        const OmniCodecPlan codec_plan = make_omni_codec_plan(mConfig, codec_tokens.size());
+        if (codec_plan.should_run_codec)
         {
-            const int32_t n_codebooks = mConfig.talker_n_codebooks;
-            const int32_t n_frames = static_cast<int32_t>(
-                codec_tokens.size()) / n_codebooks;
-
             // Stage 2: Code2Wav synthesizes waveform
-            auto waveform = run_code2wav(codec_tokens, n_codebooks, n_frames);
+            auto waveform = run_code2wav(
+                codec_tokens,
+                codec_plan.n_codebooks,
+                codec_plan.n_frames);
             if (!waveform.empty())
             {
                 result.waveform = std::move(waveform);

@@ -34,11 +34,13 @@
 // =============================================================================
 
 #include "runtime/trt/core/trt_decode_runtime.h"
+#include "runtime/trt/core/trt_backend_shared.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 #if TRTF_HAS_TRT
@@ -220,6 +222,251 @@ bool test_topk_empty()
 }
 
 // -----------------------------------------------------------------------------
+// Intention:  Verify sample_token_topk returns 0 for empty logits and exits
+//             without touching RNG state.
+// Setup:      Empty logits, any temperature/top_k, seeded rng_state.
+// Mechanism:  Calls sample_token_topk and checks result=0 and unchanged RNG.
+// -----------------------------------------------------------------------------
+bool test_sample_topk_empty_logits_returns_zero()
+{
+    const std::vector<float> logits;
+    uint64_t rng_state = 0x123456789ABCDEF0ULL;
+    const uint64_t rng_before = rng_state;
+    const int32_t result = trtf::sample_token_topk(logits, 1.0F, 4, rng_state);
+    if (result != 0)
+    {
+        std::cerr << "sample_topk_empty: got " << result << std::endl;
+        return false;
+    }
+    if (rng_state != rng_before)
+    {
+        std::cerr << "sample_topk_empty: rng mutated from " << rng_before
+                  << " to " << rng_state << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify near-zero temperature takes the argmax fallback path.
+// Setup:      Non-empty logits, temperature < 1e-6, top_k > 1, seeded RNG.
+// Mechanism:  Calls sample_token_topk and checks argmax index with unchanged
+//             RNG state.
+// -----------------------------------------------------------------------------
+bool test_sample_topk_near_zero_temperature_uses_argmax()
+{
+    const std::vector<float> logits = {0.2F, 2.7F, 1.5F, 2.1F};
+    uint64_t rng_state = 0x0FEDCBA987654321ULL;
+    const uint64_t rng_before = rng_state;
+    const int32_t result = trtf::sample_token_topk(logits, 1.0e-8F, 4, rng_state);
+    if (result != 1)
+    {
+        std::cerr << "sample_topk_near_zero_temp: got " << result << std::endl;
+        return false;
+    }
+    if (rng_state != rng_before)
+    {
+        std::cerr << "sample_topk_near_zero_temp: rng mutated from " << rng_before
+                  << " to " << rng_state << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify top_k=1 is deterministic argmax, independent of RNG seed.
+// Setup:      Same logits sampled twice with different rng_state values.
+// Mechanism:  Calls sample_token_topk(top_k=1) and checks both results are the
+//             argmax index.
+// -----------------------------------------------------------------------------
+bool test_sample_topk_k_one_is_deterministic_argmax()
+{
+    const std::vector<float> logits = {0.4F, 0.9F, 1.8F, -0.1F};
+    uint64_t rng_a = 0x1111111111111111ULL;
+    uint64_t rng_b = 0x2222222222222222ULL;
+    const int32_t result_a = trtf::sample_token_topk(logits, 0.7F, 1, rng_a);
+    const int32_t result_b = trtf::sample_token_topk(logits, 0.7F, 1, rng_b);
+    if (result_a != 2 || result_b != 2)
+    {
+        std::cerr << "sample_topk_k1: got [" << result_a << ", " << result_b << "]"
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify top_k<=0 is clamped to 1, so sampling reduces to argmax.
+// Setup:      Non-empty logits, temperature > 0, top_k is negative.
+// Mechanism:  Calls sample_token_topk(top_k=-7) and checks argmax index.
+// -----------------------------------------------------------------------------
+bool test_sample_topk_non_positive_k_clamps_to_one()
+{
+    const std::vector<float> logits = {-1.0F, 3.0F, 0.5F};
+    uint64_t rng_state = 0xABCDEF0011223344ULL;
+    const int32_t result = trtf::sample_token_topk(logits, 1.0F, -7, rng_state);
+    if (result != 1)
+    {
+        std::cerr << "sample_topk_k_non_positive: got " << result << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify the sampling path mutates rng_state via xorshift updates.
+// Setup:      Non-empty logits, temperature > 0, top_k > 1, non-zero seed.
+// Mechanism:  Calls sample_token_topk and checks rng_state changed.
+// -----------------------------------------------------------------------------
+bool test_sample_topk_mutates_rng_state()
+{
+    const std::vector<float> logits = {0.1F, 0.8F, 1.6F, -0.5F};
+    uint64_t rng_state = 0x0123456789ABCDEFULL;
+    const uint64_t rng_before = rng_state;
+    const int32_t sampled = trtf::sample_token_topk(logits, 0.8F, 2, rng_state);
+    if (sampled != 1 && sampled != 2)
+    {
+        std::cerr << "sample_topk_rng_mutates: sampled=" << sampled << std::endl;
+        return false;
+    }
+    if (rng_state == rng_before)
+    {
+        std::cerr << "sample_topk_rng_mutates: rng unchanged=" << rng_state << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify non-positive attention-mask width returns an empty vector.
+// Setup:      Cases where width=max_cache_length+(include_current?1:0) <= 0.
+// Mechanism:  Calls build_attention_mask and checks both results are empty.
+// -----------------------------------------------------------------------------
+bool test_mask_non_positive_width_returns_empty()
+{
+    const auto zero_width = trtf::build_attention_mask(0, 0, false);
+    if (!zero_width.empty())
+    {
+        std::cerr << "mask_non_positive_width: zero_width size=" << zero_width.size() << std::endl;
+        return false;
+    }
+
+    const auto negative_width = trtf::build_attention_mask(2, -1, true);
+    if (!negative_width.empty())
+    {
+        std::cerr << "mask_non_positive_width: negative_width size=" << negative_width.size()
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify negative cache_length with include_current=true keeps only
+//             the appended current-token slot visible.
+// Setup:      cache_length=-3, max_cache=3, include_current=true.
+// Mechanism:  Calls build_attention_mask and checks mask[0..2] masked, mask[3]
+//             (current slot) visible.
+// -----------------------------------------------------------------------------
+bool test_mask_negative_cache_with_current_slot()
+{
+    const auto mask = trtf::build_attention_mask(-3, 3, true);
+    if (mask.size() != 4)
+    {
+        std::cerr << "mask_negative_cache_current: size=" << mask.size() << std::endl;
+        return false;
+    }
+    for (int32_t i = 0; i < 3; ++i)
+    {
+        if (mask[static_cast<std::size_t>(i)] >= 0.0F)
+        {
+            std::cerr << "mask_negative_cache_current: [" << i << "]="
+                      << mask[static_cast<std::size_t>(i)] << std::endl;
+            return false;
+        }
+    }
+    if (mask[3] != 0.0F)
+    {
+        std::cerr << "mask_negative_cache_current: [3]=" << mask[3] << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify CreateTrtBackendFromEngine reports unavailable and throws
+//             a deterministic error when constructed with a null step-engine.
+// Setup:      Backend created from empty std::unique_ptr<DecoderStepEngine>.
+// Mechanism:  Checks is_available()==false and generate() throws runtime_error.
+// -----------------------------------------------------------------------------
+bool test_trt_backend_null_engine_reports_unavailable_and_throws()
+{
+    std::unique_ptr<trtf::DecoderStepEngine> null_engine;
+    auto backend = trtf::CreateTrtBackendFromEngine(std::move(null_engine));
+    if (backend == nullptr)
+    {
+        std::cerr << "trt_backend_null_engine: backend is null" << std::endl;
+        return false;
+    }
+    if (backend->is_available())
+    {
+        std::cerr << "trt_backend_null_engine: backend unexpectedly available" << std::endl;
+        return false;
+    }
+
+    trtf::GenerationConfig cfg{};
+    cfg.max_new_tokens = 1;
+    bool threw = false;
+    try
+    {
+        (void) backend->generate({}, cfg);
+    }
+    catch (const std::runtime_error& e)
+    {
+        threw = (std::string(e.what()).find("TRT backend not initialized")
+            != std::string::npos);
+    }
+    catch (...)
+    {
+        threw = false;
+    }
+    if (!threw)
+    {
+        std::cerr << "trt_backend_null_engine: expected runtime_error" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Intention:  Verify zero-token generation short-circuits before GPU resource
+//             allocation and simply returns the input prompt IDs unchanged.
+// Setup:      Backend created with a DecoderStepEngine shell; max_new_tokens=0.
+// Mechanism:  Calls generate() and checks output equals input ids.
+// -----------------------------------------------------------------------------
+bool test_trt_backend_zero_new_tokens_returns_input()
+{
+    auto engine = std::make_unique<trtf::DecoderStepEngine>();
+    auto backend = trtf::CreateTrtBackendFromEngine(std::move(engine));
+    if (backend == nullptr || !backend->is_available())
+    {
+        std::cerr << "trt_backend_zero_new_tokens: backend unavailable" << std::endl;
+        return false;
+    }
+
+    trtf::GenerationConfig cfg{};
+    cfg.max_new_tokens = 0;
+    const std::vector<int32_t> input = {11, 22, 33};
+    const auto output = backend->generate(input, cfg);
+    if (output != input)
+    {
+        std::cerr << "trt_backend_zero_new_tokens: output mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
 // Intention:  Verify the causal attention mask when the cache is empty
 //             (cache_length=0) and include_current is false. Only the first
 //             position should be visible (0.0); the rest should be masked
@@ -366,6 +613,15 @@ int main()
     run("topk_k_greater", test_topk_k_greater_than_size);
     run("topk_k_zero", test_topk_k_zero);
     run("topk_empty", test_topk_empty);
+    run("sample_topk_empty_logits_zero", test_sample_topk_empty_logits_returns_zero);
+    run("sample_topk_near_zero_temp_argmax", test_sample_topk_near_zero_temperature_uses_argmax);
+    run("sample_topk_k_one_argmax", test_sample_topk_k_one_is_deterministic_argmax);
+    run("sample_topk_non_positive_k_clamps", test_sample_topk_non_positive_k_clamps_to_one);
+    run("sample_topk_rng_mutates", test_sample_topk_mutates_rng_state);
+    run("mask_non_positive_width_empty", test_mask_non_positive_width_returns_empty);
+    run("mask_negative_cache_current_slot", test_mask_negative_cache_with_current_slot);
+    run("trt_backend_null_engine_unavailable", test_trt_backend_null_engine_reports_unavailable_and_throws);
+    run("trt_backend_zero_new_tokens_input", test_trt_backend_zero_new_tokens_returns_input);
     run("mask_cache0_no_current", test_mask_cache0_no_current);
     run("mask_cache3_no_current", test_mask_cache3_no_current);
     run("mask_with_current_slot", test_mask_with_current_slot);

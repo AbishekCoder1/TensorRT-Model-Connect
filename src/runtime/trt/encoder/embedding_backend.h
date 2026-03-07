@@ -9,7 +9,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <string>
 #include <vector>
 
 namespace trtf {
@@ -44,7 +43,7 @@ public:
 
     // Embed with an image: preprocess -> vision encode -> inject features -> text backbone.
     EmbeddingResult embed_with_image(const std::vector<int32_t>& input_ids,
-                                     const std::string& image_path);
+                                     const runtime::adapters::io::DecodedImage& image);
 
     // Set optional vision engine for VL embedding.
     void set_vision_engine(std::unique_ptr<VisionStepEngine> vision_engine,

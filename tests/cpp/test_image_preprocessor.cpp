@@ -11,6 +11,7 @@
 
 #include "runtime/trt/multimodal/image_preprocessor.h"
 #include "test_helpers.h"
+#include "trtf/runtime/trt/multimodal/image_transform_helper.h"
 
 #include <cmath>
 #include <cstdio>
@@ -30,6 +31,149 @@ static void check(bool condition, const char* test_name)
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
+}
+
+static void check_near(float actual, float expected, float tol, const char* test_name)
+{
+    check(std::abs(actual - expected) <= tol, test_name);
+}
+
+// Pure helper test: HWC uint8 -> CHW float normalization in-memory.
+static void test_helper_normalize_hwc_to_chw()
+{
+    const std::vector<unsigned char> image_hwc = {
+        // Pixel 0 (x=0): R, G, B
+        0, 64, 255,
+        // Pixel 1 (x=1): R, G, B
+        255, 128, 0
+    };
+
+    trtf::ImageNormalizationParams params;
+    params.width = 2;
+    params.height = 1;
+    params.channels = 3;
+    params.image_mean[0] = 0.0F;
+    params.image_mean[1] = 0.0F;
+    params.image_mean[2] = 0.0F;
+    params.image_std[0] = 1.0F;
+    params.image_std[1] = 1.0F;
+    params.image_std[2] = 1.0F;
+
+    std::vector<float> out_chw;
+    const bool ok = trtf::normalize_hwc_u8_to_chw(image_hwc, params, out_chw);
+    check(ok, "helper normalize: returns true");
+    check(out_chw.size() == 6, "helper normalize: output size is C*H*W");
+
+    check_near(out_chw[0], 0.0F / 255.0F, 1e-6F, "helper normalize: R(0,0)");
+    check_near(out_chw[1], 255.0F / 255.0F, 1e-6F, "helper normalize: R(0,1)");
+    check_near(out_chw[2], 64.0F / 255.0F, 1e-6F, "helper normalize: G(0,0)");
+    check_near(out_chw[3], 128.0F / 255.0F, 1e-6F, "helper normalize: G(0,1)");
+    check_near(out_chw[4], 255.0F / 255.0F, 1e-6F, "helper normalize: B(0,0)");
+    check_near(out_chw[5], 0.0F / 255.0F, 1e-6F, "helper normalize: B(0,1)");
+}
+
+// Pure helper test: std <= 1e-8 uses inv_std=1 branch (no division by near-zero).
+static void test_helper_normalize_std_floor_branch()
+{
+    const std::vector<unsigned char> image_hwc = {128, 10, 20};
+
+    trtf::ImageNormalizationParams params;
+    params.width = 1;
+    params.height = 1;
+    params.channels = 3;
+    params.image_mean[0] = 0.5F;
+    params.image_mean[1] = 0.0F;
+    params.image_mean[2] = 0.0F;
+    params.image_std[0] = 0.0F;   // hits fallback branch
+    params.image_std[1] = 0.5F;
+    params.image_std[2] = 1.0F;
+
+    std::vector<float> out_chw;
+    const bool ok = trtf::normalize_hwc_u8_to_chw(image_hwc, params, out_chw);
+    check(ok, "helper normalize std floor: returns true");
+    check(out_chw.size() == 3, "helper normalize std floor: output size is 3");
+
+    const float expected_c0 = 128.0F / 255.0F - 0.5F;
+    check_near(out_chw[0], expected_c0, 1e-6F, "helper normalize std floor: C0 fallback");
+}
+
+// Pure helper test: simple CHW layout branch keeps data unchanged.
+static void test_helper_transform_simple_chw_branch()
+{
+    const std::vector<float> input_chw = {
+        // Channel 0 (2x2)
+        1.0F, 2.0F, 3.0F, 4.0F,
+        // Channel 1 (2x2)
+        5.0F, 6.0F, 7.0F, 8.0F
+    };
+
+    trtf::ImageTransformParams params;
+    params.layout = trtf::ImageTransformLayout::kSimpleChw;
+    params.target_size = 2;
+    params.channels = 2;
+
+    std::vector<float> out_values;
+    int32_t out_channels = 0;
+    const bool ok = trtf::transform_chw_layout(input_chw, params, out_values, out_channels);
+
+    check(ok, "helper simple transform: returns true");
+    check(out_channels == 2, "helper simple transform: out_channels=2");
+    check(out_values == input_chw, "helper simple transform: values unchanged");
+}
+
+// Pure helper test: qwen merge-group branch reorders patch positions and duplicates T channels.
+static void test_helper_transform_qwen_merge_group_branch()
+{
+    std::vector<float> input_chw(16);
+    for (int i = 0; i < 16; ++i)
+    {
+        input_chw[static_cast<std::size_t>(i)] = static_cast<float>(i);
+    }
+
+    trtf::ImageTransformParams params;
+    params.layout = trtf::ImageTransformLayout::kQwenMergeGroup;
+    params.target_size = 4;
+    params.channels = 1;
+    params.patch_size = 1;
+    params.merge_size = 2;
+    params.temporal_patch_size = 2;
+
+    std::vector<float> out_values;
+    int32_t out_channels = 0;
+    const bool ok = trtf::transform_chw_layout(input_chw, params, out_values, out_channels);
+    check(ok, "helper qwen transform: returns true");
+    check(out_channels == 2, "helper qwen transform: out_channels=C*T=2");
+    check(out_values.size() == 32, "helper qwen transform: output size=2*4*4");
+
+    const std::vector<float> expected_channel = {
+        0.0F, 1.0F, 4.0F, 5.0F,
+        2.0F, 3.0F, 6.0F, 7.0F,
+        8.0F, 9.0F, 12.0F, 13.0F,
+        10.0F, 11.0F, 14.0F, 15.0F
+    };
+
+    bool first_channel_ok = true;
+    for (std::size_t i = 0; i < expected_channel.size(); ++i)
+    {
+        if (std::abs(out_values[i] - expected_channel[i]) > 1e-6F)
+        {
+            first_channel_ok = false;
+            break;
+        }
+    }
+    check(first_channel_ok, "helper qwen transform: merge-group reorder matches expected");
+
+    bool second_channel_ok = true;
+    const std::size_t offset = 16;
+    for (std::size_t i = 0; i < expected_channel.size(); ++i)
+    {
+        if (std::abs(out_values[offset + i] - expected_channel[i]) > 1e-6F)
+        {
+            second_channel_ok = false;
+            break;
+        }
+    }
+    check(second_channel_ok, "helper qwen transform: temporal channel duplicated");
 }
 
 // Write a tiny 4x4 PPM image (binary format) to a file.
@@ -664,6 +808,11 @@ static void test_parse_vl_prompt_template_newline_unescape()
 
 int main()
 {
+    test_helper_normalize_hwc_to_chw();
+    test_helper_normalize_std_floor_branch();
+    test_helper_transform_simple_chw_branch();
+    test_helper_transform_qwen_merge_group_branch();
+
     test_qwen_merge_group_strategy();
     test_simple_chw_strategy();
     test_load_missing_image();

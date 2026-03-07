@@ -1,5 +1,9 @@
 #include "runtime/trt/diffusion/wan_diffusion_backend.h"
+#include "runtime/trt/diffusion/diffusion_denoising_step_seam.h"
+#include "runtime/trt/diffusion/diffusion_generation_plan.h"
+#include "runtime/trt/diffusion/diffusion_scheduler_helpers.h"
 #include "runtime/trt/diffusion/flux_diffusion_backend.h"
+#include "runtime/trt/diffusion/wan_generation_conditioning.h"
 #include "runtime/trt/diffusion/z_image_diffusion_backend.h"
 
 #if TRTF_HAS_TRT
@@ -13,63 +17,10 @@
 
 namespace trtf {
 
-// ---------------------------------------------------------------------------
-// Flow Match Euler Scheduler (Wan-specific)
-// ---------------------------------------------------------------------------
 namespace {
 
-struct FlowMatchEulerState {
-    std::vector<double> sigmas;
-    std::vector<float> timesteps;
-    int32_t num_train_timesteps{1000};
-    float shift{1.0F};
-
-    void set_timesteps(int32_t num_steps) {
-        const double N = static_cast<double>(num_train_timesteps);
-        const double s = static_cast<double>(shift);
-
-        const double raw_sigma_min = 1.0 / N;
-        const double sigma_min = s * raw_sigma_min /
-            (1.0 + (s - 1.0) * raw_sigma_min);
-
-        const double t_max = 1.0 * N;
-        const double t_min = sigma_min * N;
-
-        sigmas.resize(static_cast<std::size_t>(num_steps) + 1);
-        for (int32_t i = 0; i < num_steps; ++i) {
-            const double frac = static_cast<double>(i) /
-                static_cast<double>(std::max(num_steps - 1, 1));
-            const double t_val = t_max + frac * (t_min - t_max);
-            double sigma = t_val / N;
-
-            if (std::abs(shift - 1.0F) > 1e-6F) {
-                sigma = s * sigma / (1.0 + (s - 1.0) * sigma);
-            }
-            sigmas[static_cast<std::size_t>(i)] = sigma;
-        }
-        sigmas[static_cast<std::size_t>(num_steps)] = 0.0;
-
-        timesteps.resize(static_cast<std::size_t>(num_steps));
-        for (int32_t i = 0; i < num_steps; ++i) {
-            timesteps[static_cast<std::size_t>(i)] =
-                static_cast<float>(sigmas[static_cast<std::size_t>(i)] *
-                                   num_train_timesteps);
-        }
-    }
-
-    void step(const float* velocity, const float* sample, float* output,
-              std::size_t count, int32_t step_index) const {
-        const double sigma = sigmas[static_cast<std::size_t>(step_index)];
-        const double sigma_next = sigmas[static_cast<std::size_t>(step_index) + 1];
-        const double dt = sigma_next - sigma;
-
-        for (std::size_t i = 0; i < count; ++i) {
-            output[i] = static_cast<float>(
-                static_cast<double>(sample[i]) +
-                dt * static_cast<double>(velocity[i]));
-        }
-    }
-};
+using diffusion::FlowMatchEulerState;
+using diffusion::WanLayout;
 
 // ---------------------------------------------------------------------------
 // DDIM Scheduler (epsilon-prediction models like PixArt)
@@ -451,74 +402,12 @@ bool decode_wan_vae_3d(
     return true;
 }
 
-struct WanLayout {
-    int32_t t_lat{0};
-    int32_t h_lat{0};
-    int32_t w_lat{0};
-    int32_t z_dim{0};
-    int32_t dim{0};
-    int32_t seq_len{0};
-    int32_t pt{1};
-    int32_t ph{2};
-    int32_t pw{2};
-    int32_t nt{0};
-    int32_t nh_p{0};
-    int32_t nw_p{0};
-    int32_t num_patches{0};
-    int32_t patch_dim{0};
-};
-
-WanLayout make_wan_layout(const DiffusionConfig& config)
-{
-    WanLayout layout;
-    layout.t_lat = (config.video_num_frames - 1) / config.scale_factor_temporal + 1;
-    layout.h_lat = config.video_height / config.scale_factor_spatial;
-    layout.w_lat = config.video_width / config.scale_factor_spatial;
-    layout.z_dim = config.z_dim;
-    layout.dim = config.dit_dim;
-    layout.seq_len = config.text_seq_len;
-    if (config.patch_size.size() >= 3) {
-        layout.pt = config.patch_size[0];
-        layout.ph = config.patch_size[1];
-        layout.pw = config.patch_size[2];
-    }
-    layout.nt = layout.t_lat / layout.pt;
-    layout.nh_p = layout.h_lat / layout.ph;
-    layout.nw_p = layout.w_lat / layout.pw;
-    layout.num_patches = layout.nt * layout.nh_p * layout.nw_p;
-    layout.patch_dim = layout.z_dim * layout.pt * layout.ph * layout.pw;
-    return layout;
-}
-
 void log_wan_layout(const WanLayout& layout)
 {
     std::cerr << "[diffusion] Latent shape: "
               << layout.z_dim << "x" << layout.t_lat << "x"
               << layout.h_lat << "x" << layout.w_lat
               << " (patches=" << layout.num_patches << ")\n";
-}
-
-std::vector<float> build_wan_encoder_attn_mask(
-    const std::vector<int32_t>& input_ids,
-    int32_t seq_len)
-{
-    std::vector<float> mask(static_cast<std::size_t>(seq_len), -10000.0F);
-    for (std::size_t i = 0; i < input_ids.size() && i < static_cast<std::size_t>(seq_len); ++i) {
-        if (input_ids[i] != 0) {
-            mask[i] = 0.0F;
-        }
-    }
-    if (!input_ids.empty()) {
-        mask[0] = 0.0F;
-    }
-    return mask;
-}
-
-std::vector<int32_t> build_wan_null_ids(int32_t seq_len)
-{
-    std::vector<int32_t> empty_ids(static_cast<std::size_t>(seq_len), 0);
-    empty_ids[0] = 1;
-    return empty_ids;
 }
 
 void compute_wan_pos_embed_2d(
@@ -559,62 +448,6 @@ void compute_wan_pos_embed_2d(
             }
         }
     }
-}
-
-void initialize_wan_latents(std::vector<float>& latents)
-{
-    std::mt19937 rng(42);
-    std::uniform_real_distribution<double> udist(0.0, 1.0);
-    for (std::size_t i = 0; i < latents.size(); i += 2) {
-        double u1 = udist(rng);
-        double u2 = udist(rng);
-        if (u1 < 1e-12) {
-            u1 = 1e-12;
-        }
-        const double r = std::sqrt(-2.0 * std::log(u1));
-        const double theta = 2.0 * M_PI * u2;
-        latents[i] = static_cast<float>(r * std::cos(theta));
-        if (i + 1 < latents.size()) {
-            latents[i + 1] = static_cast<float>(r * std::sin(theta));
-        }
-    }
-}
-
-bool should_use_wan_ddim(const std::string& scheduler)
-{
-    return scheduler == "dpmsolver_multistep" ||
-           scheduler == "ddim" ||
-           scheduler == "ddpm";
-}
-
-int32_t resolve_wan_num_steps(int32_t requested, int32_t fallback)
-{
-    return requested < 0 ? fallback : requested;
-}
-
-float resolve_wan_guidance(float requested, float fallback)
-{
-    return requested < 0.0F ? fallback : requested;
-}
-
-void setup_wan_timesteps(
-    bool use_ddim,
-    int32_t num_inference_steps,
-    const DiffusionConfig& config,
-    FlowMatchEulerState& fm_scheduler,
-    DDIMState& ddim_scheduler,
-    std::vector<float>& step_timesteps)
-{
-    if (use_ddim) {
-        ddim_scheduler.num_train_timesteps = 1000;
-        ddim_scheduler.set_timesteps(num_inference_steps);
-        step_timesteps = ddim_scheduler.timesteps;
-        return;
-    }
-    fm_scheduler.num_train_timesteps = 1000;
-    fm_scheduler.shift = config.flow_shift;
-    fm_scheduler.set_timesteps(num_inference_steps);
-    step_timesteps = fm_scheduler.timesteps;
 }
 
 void add_wan_positional_embedding(
@@ -768,44 +601,46 @@ bool run_wan_denoising_loop(
     UnpatchifyFn&& unpatchify,
     RunDenoiserFn&& run_denoiser)
 {
-    std::vector<float> noise_pred_spatial(latents.size());
-    std::vector<float> temb_6d;
-    std::vector<float> time_embed;
     std::vector<float> patches;
-    std::vector<float> hidden;
-    std::vector<float> denoiser_output;
-
-    for (int32_t step = 0; step < num_inference_steps; ++step) {
-        const float timestep = step_timesteps[static_cast<std::size_t>(step)];
-        compute_temb(timestep, temb_6d, time_embed);
-        patchify(latents, patches);
-
-        hidden.resize(
-            static_cast<std::size_t>(layout.num_patches) *
-            static_cast<std::size_t>(layout.dim));
-        embed_hidden(patches, hidden);
-        add_wan_positional_embedding(hidden, pos_embed_2d);
-
-        if (!predict_wan_noise(
+    return diffusion::run_wan_denoising_steps(
+        num_inference_steps,
+        step_timesteps,
+        latents,
+        error,
+        compute_temb,
+        [&](const std::vector<float>& current_latents, std::vector<float>& hidden) {
+            patchify(current_latents, patches);
+            hidden.resize(
+                static_cast<std::size_t>(layout.num_patches) *
+                static_cast<std::size_t>(layout.dim));
+            embed_hidden(patches, hidden);
+            add_wan_positional_embedding(hidden, pos_embed_2d);
+        },
+        [&](const std::vector<float>& hidden, const std::vector<float>& temb_6d,
+            const std::vector<float>& time_embed, std::vector<float>& denoiser_output,
+            std::string& err) {
+            return predict_wan_noise(
                 hidden, temb_6d, time_embed, text_projected, null_text,
-                encoder_attn_mask, guidance_scale, denoiser_output, error, run_denoiser)) {
-            return false;
-        }
-
-        maybe_truncate_wan_output(
-            denoiser_output,
-            layout.num_patches,
-            layout.z_dim,
-            layout.pt,
-            layout.ph,
-            layout.pw);
-        unpatchify(denoiser_output, noise_pred_spatial);
-        apply_wan_scheduler_step(
-            use_ddim, ddim_scheduler, fm_scheduler, noise_pred_spatial,
-            latents, latents.size(), step);
-        maybe_log_wan_step(step, num_inference_steps, timestep, latents);
-    }
-    return true;
+                encoder_attn_mask, guidance_scale, denoiser_output, err, run_denoiser);
+        },
+        [&](std::vector<float>& denoiser_output, std::vector<float>& noise_pred_spatial) {
+            maybe_truncate_wan_output(
+                denoiser_output,
+                layout.num_patches,
+                layout.z_dim,
+                layout.pt,
+                layout.ph,
+                layout.pw);
+            unpatchify(denoiser_output, noise_pred_spatial);
+        },
+        [&](const std::vector<float>& noise_pred_spatial, std::vector<float>& current_latents, int32_t step) {
+            apply_wan_scheduler_step(
+                use_ddim, ddim_scheduler, fm_scheduler, noise_pred_spatial,
+                current_latents, current_latents.size(), step);
+        },
+        [&](int32_t step, float timestep, const std::vector<float>& current_latents) {
+            maybe_log_wan_step(step, num_inference_steps, timestep, current_latents);
+        });
 }
 
 void denormalize_wan_latents(
@@ -1252,10 +1087,10 @@ VideoResult WanDiffusionBackend::generate_video(
     int32_t num_inference_steps,
     float guidance_scale)
 {
-    num_inference_steps = resolve_wan_num_steps(
-        num_inference_steps, mConfig.num_inference_steps);
-    guidance_scale = resolve_wan_guidance(
-        guidance_scale, mConfig.guidance_scale);
+    const auto plan = diffusion::make_wan_generation_plan(
+        mConfig, num_inference_steps, guidance_scale);
+    num_inference_steps = plan.num_inference_steps;
+    guidance_scale = plan.guidance_scale;
 
     VideoResult result;
     result.height = mConfig.video_height;
@@ -1266,36 +1101,38 @@ VideoResult WanDiffusionBackend::generate_video(
         return result;
     }
 
-    const WanLayout layout = make_wan_layout(mConfig);
+    const WanLayout& layout = plan.layout;
     log_wan_layout(layout);
+    const diffusion::WanConditioningInputs conditioning_inputs
+        = diffusion::make_wan_conditioning_inputs(mConfig, layout, input_ids);
 
     std::cerr << "[diffusion] Encoding text ("
               << input_ids.size() << " tokens) ...\n";
-    std::vector<float> text_embeddings;
     std::string error;
-    if (!run_t5_encoder(input_ids, text_embeddings, error)) {
-        std::cerr << "[diffusion] T5 encoding failed: " << error << "\n";
+    diffusion::WanTextConditioning text_conditioning;
+    if (!diffusion::build_wan_text_conditioning(
+            input_ids,
+            conditioning_inputs,
+            layout.seq_len,
+            error,
+            [this](
+                const std::vector<int32_t>& ids,
+                std::vector<float>& embeddings,
+                std::string& encoder_error) {
+                return run_t5_encoder(ids, embeddings, encoder_error);
+            },
+            [this](
+                const std::vector<float>& embeddings,
+                int32_t seq_len,
+                std::vector<float>& projected) {
+                project_text(embeddings, seq_len, projected);
+            },
+            text_conditioning)) {
+        std::cerr << "[diffusion] T5 conditioning failed: " << error << "\n";
         return result;
     }
-    std::cerr << "[diffusion] T5 encoding done ("
-              << text_embeddings.size() << " floats)\n";
-
-    std::vector<float> text_projected;
-    project_text(text_embeddings, layout.seq_len, text_projected);
-
-    std::vector<float> encoder_attn_mask;
-    if (!mConfig.use_rope) {
-        encoder_attn_mask = build_wan_encoder_attn_mask(input_ids, layout.seq_len);
-    }
-
-    const std::vector<int32_t> empty_ids = build_wan_null_ids(layout.seq_len);
-    std::vector<float> null_embeddings;
-    if (!run_t5_encoder(empty_ids, null_embeddings, error)) {
-        std::cerr << "[diffusion] T5 null encoding failed: " << error << "\n";
-        return result;
-    }
-    std::vector<float> null_text;
-    project_text(null_embeddings, layout.seq_len, null_text);
+    std::cerr << "[diffusion] T5 conditioning done ("
+              << text_conditioning.text_projected.size() << " floats)\n";
 
     std::vector<float> rope_cos, rope_sin;
     if (mConfig.use_rope) {
@@ -1307,20 +1144,20 @@ VideoResult WanDiffusionBackend::generate_video(
         compute_wan_pos_embed_2d(layout.nh_p, layout.nw_p, layout.dim, pos_embed_2d);
     }
 
-    const std::size_t latent_count = static_cast<std::size_t>(layout.z_dim) *
-        static_cast<std::size_t>(layout.t_lat) *
-        static_cast<std::size_t>(layout.h_lat) *
-        static_cast<std::size_t>(layout.w_lat);
-    std::vector<float> latents(latent_count);
-    initialize_wan_latents(latents);
+    std::vector<float> latents = diffusion::make_wan_initial_latents(plan.latent_count);
 
-    const bool use_ddim = should_use_wan_ddim(mConfig.scheduler);
+    const bool use_ddim = plan.use_ddim;
     FlowMatchEulerState fm_scheduler;
     DDIMState ddim_scheduler;
     std::vector<float> step_timesteps;
-    setup_wan_timesteps(
-        use_ddim, num_inference_steps, mConfig,
-        fm_scheduler, ddim_scheduler, step_timesteps);
+    if (use_ddim) {
+        ddim_scheduler.num_train_timesteps = 1000;
+        ddim_scheduler.set_timesteps(num_inference_steps);
+        step_timesteps = ddim_scheduler.timesteps;
+    } else {
+        fm_scheduler = diffusion::make_wan_flow_match_scheduler(plan);
+        step_timesteps = fm_scheduler.timesteps;
+    }
 
     const auto compute_temb = [this](
         float timestep,
@@ -1370,9 +1207,9 @@ VideoResult WanDiffusionBackend::generate_video(
             layout,
             step_timesteps,
             pos_embed_2d,
-            text_projected,
-            null_text,
-            encoder_attn_mask,
+            text_conditioning.text_projected,
+            text_conditioning.null_text,
+            conditioning_inputs.encoder_attn_mask,
             ddim_scheduler,
             fm_scheduler,
             latents,

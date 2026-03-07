@@ -1,4 +1,8 @@
 #include "runtime/trt/audio/magpie_tts_backend.h"
+#include "runtime/trt/audio/magpie_codec_plan.h"
+#include "runtime/trt/audio/magpie_decode_policy.h"
+#include "runtime/trt/audio/magpie_decoder_plan.h"
+#include "runtime/trt/audio/magpie_text_completion_policy.h"
 
 #if TRTF_HAS_TRT
 
@@ -34,104 +38,6 @@ inline double elapsed_ms(TimePoint start, TimePoint end) {
 namespace trtf {
 
 namespace {
-
-constexpr int32_t kMagpieBosToken = 2016;
-constexpr int32_t kMagpieEosToken = 2017;
-constexpr int32_t kMagpieAudioRange = 2016;
-constexpr int32_t kMagpieMinFrames = 4;
-constexpr int32_t kFsqTotalCodes = 2016;
-
-struct FrameDecodeResult {
-    std::vector<int32_t> frame_codes;
-    bool eos{false};
-};
-
-void copy_embed_row(const float* table, int32_t token_id, int32_t hidden, float* out)
-{
-    const auto offset = static_cast<std::size_t>(token_id) * static_cast<std::size_t>(hidden);
-    std::memcpy(out, table + offset, static_cast<std::size_t>(hidden) * sizeof(float));
-}
-
-void build_frame_input_embed(
-    const std::vector<int32_t>& prev_codes,
-    const float* audio_embed,
-    int32_t num_cb,
-    int32_t cb_size,
-    int32_t hidden,
-    std::vector<float>& embed_buf,
-    std::vector<float>& cb_embed)
-{
-    std::fill(embed_buf.begin(), embed_buf.end(), 0.0F);
-    for (int32_t cb = 0; cb < num_cb; ++cb)
-    {
-        const float* table = audio_embed +
-            static_cast<std::size_t>(cb) * cb_size * hidden;
-        copy_embed_row(table, prev_codes[cb], hidden, cb_embed.data());
-        for (int32_t i = 0; i < hidden; ++i)
-        {
-            embed_buf[i] += cb_embed[i];
-        }
-    }
-
-    const float inv_cb = 1.0F / static_cast<float>(num_cb);
-    for (float& value : embed_buf)
-    {
-        value *= inv_cb;
-    }
-}
-
-int32_t argmax_index(const float* values, int32_t count)
-{
-    int32_t best_id = 0;
-    float best_val = values[0];
-    for (int32_t i = 1; i < count; ++i)
-    {
-        if (values[i] > best_val)
-        {
-            best_val = values[i];
-            best_id = i;
-        }
-    }
-    return best_id;
-}
-
-FrameDecodeResult decode_frame_codes(
-    const std::vector<float>& logits,
-    int32_t num_cb,
-    int32_t cb_size,
-    bool greedy,
-    float temperature,
-    int32_t top_k,
-    const std::function<int32_t(const float*, int32_t, float, int32_t)>& sampler)
-{
-    FrameDecodeResult result;
-    result.frame_codes.assign(static_cast<std::size_t>(num_cb), 0);
-
-    for (int32_t cb = 0; cb < num_cb; ++cb)
-    {
-        const int32_t offset = cb * cb_size;
-        if (offset + cb_size > static_cast<int32_t>(logits.size()))
-        {
-            continue;
-        }
-
-        const float* cb_logits = logits.data() + offset;
-        if (argmax_index(cb_logits, cb_size) == kMagpieEosToken)
-        {
-            result.eos = true;
-        }
-
-        if (greedy)
-        {
-            result.frame_codes[cb] = argmax_index(cb_logits, kMagpieAudioRange);
-            continue;
-        }
-
-        result.frame_codes[cb] = sampler(cb_logits, kMagpieAudioRange, temperature, top_k);
-    }
-
-    return result;
-}
 
 void log_frame_preview(const std::vector<int32_t>& all_codes, int32_t num_cb)
 {
@@ -171,35 +77,6 @@ void log_frame_preview(const std::vector<int32_t>& all_codes, int32_t num_cb)
     }
 }
 
-std::vector<int32_t> build_codec_input(
-    const std::vector<int32_t>& codes,
-    int32_t num_cb,
-    int32_t max_codec_frames,
-    int32_t padded_frames)
-{
-    std::vector<int32_t> codec_input(
-        static_cast<std::size_t>(num_cb) * max_codec_frames, 0);
-    for (int32_t f = 0; f < padded_frames; ++f)
-    {
-        for (int32_t cb = 0; cb < num_cb; ++cb)
-        {
-            const auto src_idx = static_cast<std::size_t>(f) * num_cb + cb;
-            if (src_idx >= codes.size())
-            {
-                continue;
-            }
-
-            int32_t code = codes[src_idx];
-            if (code >= kFsqTotalCodes)
-            {
-                code = 0;
-            }
-            codec_input[static_cast<std::size_t>(cb) * max_codec_frames + f] = code;
-        }
-    }
-    return codec_input;
-}
-
 bool bind_magpie_codec_tensors(
     nvinfer1::IExecutionContext& codec_ctx,
     CudaBuffer& d_input,
@@ -234,18 +111,12 @@ std::vector<float> run_codec_engine(
     const auto codec_tokens_shape = codec_engine.getTensorShape("codec_tokens");
     const int32_t max_codec_frames = (codec_tokens_shape.nbDims >= 2)
         ? codec_tokens_shape.d[1] : num_frames;
-    const int32_t padded_frames = std::min(num_frames, max_codec_frames);
-    std::vector<int32_t> codec_input = build_codec_input(
-        codes, num_cb, max_codec_frames, padded_frames);
+    const auto plan = make_magpie_codec_plan(num_frames, num_cb, max_codec_frames);
+    std::vector<int32_t> codec_input = build_magpie_codec_input(codes, num_cb, plan);
 
-    const int32_t input_len_val = padded_frames;
-    const auto output_elems = static_cast<std::size_t>(max_codec_frames) * 1024;
-    const auto input_bytes = codec_input.size() * sizeof(int32_t);
-    const auto len_bytes = sizeof(int32_t);
-    const auto output_bytes = output_elems * sizeof(float);
-    CudaBuffer d_input(input_bytes);
-    CudaBuffer d_len(len_bytes);
-    CudaBuffer d_output(output_bytes);
+    CudaBuffer d_input(plan.input_bytes);
+    CudaBuffer d_len(plan.len_bytes);
+    CudaBuffer d_output(plan.output_bytes);
     CudaStream stream;
     if (!d_input.ok() || !d_len.ok() || !d_output.ok() || !stream.ok())
     {
@@ -254,9 +125,9 @@ std::vector<float> run_codec_engine(
     }
 
     cudaMemcpyAsync(
-        d_input.data(), codec_input.data(), input_bytes, cudaMemcpyHostToDevice, stream.get());
+        d_input.data(), codec_input.data(), plan.input_bytes, cudaMemcpyHostToDevice, stream.get());
     cudaMemcpyAsync(
-        d_len.data(), &input_len_val, len_bytes, cudaMemcpyHostToDevice, stream.get());
+        d_len.data(), &plan.input_len, plan.len_bytes, cudaMemcpyHostToDevice, stream.get());
     if (!bind_magpie_codec_tensors(codec_ctx, d_input, d_len, d_output))
     {
         return {};
@@ -267,12 +138,11 @@ std::vector<float> run_codec_engine(
         return {};
     }
 
-    const auto valid_samples = static_cast<std::size_t>(padded_frames) * 1024;
-    std::vector<float> waveform(valid_samples);
+    std::vector<float> waveform(plan.valid_samples);
     cudaMemcpyAsync(
         waveform.data(),
         d_output.data(),
-        valid_samples * sizeof(float),
+        plan.valid_samples * sizeof(float),
         cudaMemcpyDeviceToHost,
         stream.get());
     cudaStreamSynchronize(stream.get());
@@ -686,21 +556,6 @@ bool check_gpu_kernels_available(
 #endif
 }
 
-// Scan cross-attention weights for peak position and update high-water mark.
-// Returns true if text_consumed was triggered.
-bool scan_xattn_peak(const float* xattn, int32_t text_length,
-                     int32_t threshold, int32_t& max_peak_pos)
-{
-    int32_t peak_pos = 0;
-    float peak_val = xattn[0];
-    for (int32_t p = 1; p < text_length; ++p)
-    {
-        if (xattn[p] > peak_val) { peak_val = xattn[p]; peak_pos = p; }
-    }
-    if (peak_pos > max_peak_pos) max_peak_pos = peak_pos;
-    return max_peak_pos >= threshold;
-}
-
 void upload_prev_codes_to_device(
     [[maybe_unused]] CudaBuffer& d_prev,
     [[maybe_unused]] const int32_t* host_codes,
@@ -722,27 +577,28 @@ void upload_prev_codes_to_device(
 MagpieTTSBackend::DecoderLoopState MagpieTTSBackend::init_decoder_state() const
 {
     DecoderLoopState s;
-    s.hidden = mConfig.hidden_size;
-    s.num_cb = mConfig.num_codebooks;
-    s.cb_size = mConfig.codebook_size;
-    s.total_logits = s.num_cb * s.cb_size;
-
-    s.use_cfg = mConfig.cfg_scale > 1.0F
-        && mCacheUncond && mResourcesUncond
-        && !mCrossKUncond.empty();
-    s.use_gpu_kernels = check_gpu_kernels_available(
-        mAudioEmbedDevice, mDeviceCodes, mDeviceFullArgmax, mDevicePrevCodes);
-    s.use_gpu_greedy = s.use_gpu_kernels && mConfig.greedy;
-
-    // Text-completion tracking
-    s.finished_limit = mConfig.finished_limit_with_eot;
-    s.max_source_positions = mConfig.max_source_positions;
-    s.use_cross_attn_tracking = mHasCrossAttnOutput
-        && mDeviceCrossAttnWeights.ok() && mTextLength > 0;
-    s.estimated_frames = (!s.use_cross_attn_tracking && mTextLength > 0)
-        ? static_cast<int32_t>(static_cast<float>(mTextLength) * 3.0F) : 0;
-    s.text_consumed_threshold = std::max(
-        static_cast<int32_t>(static_cast<float>(mTextLength) * 0.9F), 1);
+    const auto plan = make_magpie_decoder_plan(
+        mConfig,
+        static_cast<bool>(mCacheUncond),
+        static_cast<bool>(mResourcesUncond),
+        !mCrossKUncond.empty(),
+        check_gpu_kernels_available(
+            mAudioEmbedDevice, mDeviceCodes, mDeviceFullArgmax, mDevicePrevCodes),
+        mHasCrossAttnOutput,
+        mDeviceCrossAttnWeights.ok(),
+        mTextLength);
+    s.hidden = plan.hidden;
+    s.num_cb = plan.num_cb;
+    s.cb_size = plan.cb_size;
+    s.total_logits = plan.total_logits;
+    s.use_cfg = plan.use_cfg;
+    s.use_gpu_kernels = plan.use_gpu_kernels;
+    s.use_gpu_greedy = plan.use_gpu_greedy;
+    s.finished_limit = plan.finished_limit;
+    s.max_source_positions = plan.max_source_positions;
+    s.use_cross_attn_tracking = plan.use_cross_attn_tracking;
+    s.estimated_frames = plan.estimated_frames;
+    s.text_consumed_threshold = plan.text_consumed_threshold;
 
     // Working buffers
     s.embed_buf.resize(static_cast<std::size_t>(s.hidden));
@@ -1014,10 +870,13 @@ void MagpieTTSBackend::update_text_completion(DecoderLoopState& state,
             static_cast<std::size_t>(state.max_source_positions) * sizeof(float),
             cudaMemcpyDeviceToHost);
 
-        if (scan_xattn_peak(xattn.data(), state.max_source_positions,
-                            state.text_consumed_threshold, state.max_peak_pos))
+        if (update_magpie_text_consumed_from_cross_attn(
+                xattn.data(),
+                state.max_source_positions,
+                state.text_consumed_threshold,
+                state.max_peak_pos,
+                state.text_consumed))
         {
-            state.text_consumed = true;
             std::cerr << "[magpie-tts] Text consumed at frame " << frame
                       << " (max_peak_pos=" << state.max_peak_pos
                       << ", threshold=" << state.text_consumed_threshold
@@ -1026,10 +885,12 @@ void MagpieTTSBackend::update_text_completion(DecoderLoopState& state,
     }
 
     // Heuristic fallback
-    if (!state.use_cross_attn_tracking && !state.text_consumed
-        && state.estimated_frames > 0 && frame >= state.estimated_frames)
+    if (!state.use_cross_attn_tracking)
     {
-        state.text_consumed = true;
+        update_magpie_text_consumed_from_heuristic(
+            state.estimated_frames,
+            frame,
+            state.text_consumed);
     }
 }
 
@@ -1040,11 +901,10 @@ void MagpieTTSBackend::update_text_completion(DecoderLoopState& state,
 bool MagpieTTSBackend::check_finished_limit(DecoderLoopState& state,
                                               int32_t frame)
 {
-    if (!state.text_consumed) return false;
-
-    ++state.frames_past_text_consumed;
-    if (state.finished_limit > 0
-        && state.frames_past_text_consumed >= state.finished_limit)
+    if (advance_magpie_finished_limit(
+            state.text_consumed,
+            state.finished_limit,
+            state.frames_past_text_consumed))
     {
         std::cerr << "[magpie-tts] finished_limit_with_eot: stopping at frame "
                   << frame << " (" << state.frames_past_text_consumed
@@ -1183,21 +1043,12 @@ bool MagpieTTSBackend::gpu_check_stop_conditions(
             check_bytes, cudaMemcpyDeviceToHost, resources.stream.get());
         cudaStreamSynchronize(resources.stream.get());
 
-        repeated = true;
-        for (int32_t r = 1; r < REPEAT_STOP_THRESHOLD && repeated; ++r)
-        {
-            for (int32_t cb = 0; cb < num_cb; ++cb)
-            {
-                if (recent[r * num_cb + cb] != recent[cb])
-                {
-                    repeated = false;
-                    break;
-                }
-            }
-        }
+        repeated = magpie_has_repeated_tail_frames(
+            recent, num_cb, REPEAT_STOP_THRESHOLD);
         if (repeated)
         {
-            gen_frames_actual = check_start + 1;
+            gen_frames_actual = magpie_trimmed_frame_count_for_repetition(
+                frame + 1, REPEAT_STOP_THRESHOLD);
             std::cerr << "[magpie-tts] Repetition detected at frame "
                       << frame << ", trimming to " << gen_frames_actual
                       << " frames" << std::endl;
@@ -1228,10 +1079,13 @@ void MagpieTTSBackend::gpu_update_text_completion(
             cudaMemcpyDeviceToHost, resources.stream.get());
         cudaStreamSynchronize(resources.stream.get());
 
-        if (scan_xattn_peak(xattn.data(), state.max_source_positions,
-                            state.text_consumed_threshold, state.max_peak_pos))
+        if (update_magpie_text_consumed_from_cross_attn(
+                xattn.data(),
+                state.max_source_positions,
+                state.text_consumed_threshold,
+                state.max_peak_pos,
+                state.text_consumed))
         {
-            state.text_consumed = true;
             std::cerr << "[magpie-tts] Text consumed at frame " << frame
                       << " (max_peak_pos=" << state.max_peak_pos
                       << ", threshold=" << state.text_consumed_threshold
@@ -1239,10 +1093,12 @@ void MagpieTTSBackend::gpu_update_text_completion(
         }
     }
 
-    if (!state.use_cross_attn_tracking && !state.text_consumed
-        && state.estimated_frames > 0 && frame >= state.estimated_frames)
+    if (!state.use_cross_attn_tracking)
     {
-        state.text_consumed = true;
+        update_magpie_text_consumed_from_heuristic(
+            state.estimated_frames,
+            frame,
+            state.text_consumed);
     }
 }
 
@@ -1273,8 +1129,8 @@ std::vector<int32_t> MagpieTTSBackend::run_gpu_greedy_loop(
         gen_frames_actual = frame + 1;
 
         // Periodic checks (EOS, repetition, text-completion) every N frames
-        const bool periodic = frame >= MIN_FRAMES
-            && ((frame + 1) % EOS_CHECK_INTERVAL == 0);
+        const bool periodic = should_run_magpie_periodic_check(
+            frame, MIN_FRAMES, EOS_CHECK_INTERVAL);
         if (periodic && gpu_check_stop_conditions(state, frame, d_eos_flag,
                                                   h_eos_flag, gen_frames_actual))
         {
@@ -1387,80 +1243,19 @@ bool MagpieTTSBackend::cpu_sample_frame_codes(
     DecoderLoopState& state,
     std::vector<int32_t>& frame_codes, bool& eos)
 {
-    constexpr int32_t EOS_TOKEN = 2017;
-    constexpr int32_t AUDIO_RANGE = 2016;
-    const int32_t num_cb = state.num_cb;
-    const int32_t cb_size = state.cb_size;
-
-    frame_codes.assign(static_cast<std::size_t>(num_cb), 0);
-    eos = false;
-
-    for (int32_t cb = 0; cb < num_cb; ++cb)
-    {
-        const int32_t offset = cb * cb_size;
-        if (offset + cb_size > static_cast<int32_t>(state.logits.size()))
+    const auto decoded = decode_magpie_frame_codes(
+        state.logits,
+        state.num_cb,
+        state.cb_size,
+        mConfig.greedy,
+        mConfig.temperature,
+        mConfig.top_k,
+        [this](const float* cb_logits, int32_t vocab_size, float temperature, int32_t top_k)
         {
-            continue;
-        }
-
-        const float* cb_logits = state.logits.data() + offset;
-
-        // Check EOS via full-range argmax
-        int32_t full_argmax = 0;
-        float best = cb_logits[0];
-        for (int32_t i = 1; i < cb_size; ++i)
-        {
-            if (cb_logits[i] > best)
-            {
-                best = cb_logits[i];
-                full_argmax = i;
-            }
-        }
-        if (full_argmax == EOS_TOKEN) eos = true;
-
-        // Sample within audio range
-        if (mConfig.greedy)
-        {
-            int32_t best_id = 0;
-            float best_val = cb_logits[0];
-            for (int32_t i = 1; i < AUDIO_RANGE; ++i)
-            {
-                if (cb_logits[i] > best_val)
-                {
-                    best_val = cb_logits[i];
-                    best_id = i;
-                }
-            }
-            frame_codes[cb] = best_id;
-        }
-        else
-        {
-            frame_codes[cb] = sample_top_k(
-                cb_logits, AUDIO_RANGE,
-                mConfig.temperature, mConfig.top_k);
-        }
-    }
-    return true;
-}
-
-bool MagpieTTSBackend::cpu_check_repetition(
-    const std::vector<int32_t>& all_codes, int32_t frame,
-    int32_t num_cb, int32_t threshold)
-{
-    if (frame < threshold) return false;
-
-    const auto base = all_codes.size() - static_cast<std::size_t>(num_cb);
-    for (int32_t r = 1; r < threshold; ++r)
-    {
-        const auto prev_offset = base - static_cast<std::size_t>(r) * num_cb;
-        for (int32_t cb = 0; cb < num_cb; ++cb)
-        {
-            if (all_codes[base + cb] != all_codes[prev_offset + cb])
-            {
-                return false;
-            }
-        }
-    }
+            return sample_top_k(cb_logits, vocab_size, temperature, top_k);
+        });
+    frame_codes = decoded.frame_codes;
+    eos = decoded.eos;
     return true;
 }
 
@@ -1511,9 +1306,11 @@ std::vector<int32_t> MagpieTTSBackend::run_cpu_sampling_loop(
                                     state.use_gpu_kernels, state.use_gpu_greedy);
 
         // Repetition-based early stopping
-        if (cpu_check_repetition(all_codes, frame, num_cb, REPEAT_STOP_THRESHOLD))
+        if (magpie_has_repeated_tail_frames(
+                all_codes, num_cb, REPEAT_STOP_THRESHOLD))
         {
-            const int32_t trim_to = frame + 1 - REPEAT_STOP_THRESHOLD + 1;
+            const int32_t trim_to = magpie_trimmed_frame_count_for_repetition(
+                frame + 1, REPEAT_STOP_THRESHOLD);
             all_codes.resize(static_cast<std::size_t>(trim_to) * num_cb);
             std::cerr << "[magpie-tts] Repetition detected at frame "
                       << frame << ", trimming to " << trim_to
@@ -1521,7 +1318,7 @@ std::vector<int32_t> MagpieTTSBackend::run_cpu_sampling_loop(
             break;
         }
 
-        if (eos && frame >= MIN_FRAMES) break;
+        if (should_stop_magpie_on_eos(eos, frame, MIN_FRAMES)) break;
 
         update_text_completion(state, frame);
 

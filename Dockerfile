@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     python3-venv \
     python3-pip \
+    lcov \
     libnvinfer-headers-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -47,6 +48,9 @@ RUN pip install torch torchaudio torchvision \
 # ML / testing / utilities
 RUN pip install \
     pytest \
+    pytest-cov \
+    coverage \
+    gcovr \
     pytest-xdist \
     lizard \
     accelerate \
@@ -76,6 +80,11 @@ RUN TRT_LIB=$(python3 -c \
 ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
 ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
 ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
+
+# Coverage tooling verification (run inside container):
+#   python3 -m coverage --version && pytest --version && \
+#   python3 -m pytest --help | grep -- '--cov' && \
+#   gcovr --version && lcov --version && genhtml --version
 
 WORKDIR /workspace/trt-transformers-cpp
 

@@ -1,4 +1,5 @@
 #include "runtime/trt/diffusion/diffusion_backend.h"
+#include "runtime/trt/diffusion/diffusion_preprocessor_weights_helpers.h"
 
 #if TRTF_HAS_TRT
 
@@ -6,156 +7,13 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
-#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <sstream>
 
 namespace trtf {
 
 namespace {
-
-bool extract_preprocessor_index(
-    const std::vector<char>& data,
-    std::string& index_json,
-    const char*& blob,
-    std::size_t& blob_size)
-{
-    if (data.size() < 4) {
-        std::cerr << "[diffusion] preprocessor_weights section too small\n";
-        return false;
-    }
-
-    uint32_t index_len = 0;
-    std::memcpy(&index_len, data.data(), 4);
-    if (4 + index_len > data.size()) {
-        std::cerr << "[diffusion] preprocessor_weights index length overflow\n";
-        return false;
-    }
-
-    index_json.assign(data.data() + 4, data.data() + 4 + index_len);
-    blob = data.data() + 4 + index_len;
-    blob_size = data.size() - 4 - index_len;
-    return true;
-}
-
-bool parse_shape_csv(
-    const std::string& csv,
-    std::vector<int32_t>& shape)
-{
-    shape.clear();
-    std::istringstream ss(csv);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-        const auto begin = token.find_first_not_of(" \t");
-        if (begin == std::string::npos) {
-            continue;
-        }
-        const auto end = token.find_last_not_of(" \t");
-        try {
-            shape.push_back(std::stoi(token.substr(begin, end - begin + 1)));
-        } catch (const std::exception&) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool parse_offset_after(
-    const std::string& index_json,
-    std::size_t offset_pos,
-    std::size_t& offset)
-{
-    const auto colon = index_json.find(':', offset_pos + 8);
-    if (colon == std::string::npos) {
-        return false;
-    }
-    try {
-        offset = static_cast<std::size_t>(std::stoul(index_json.substr(colon + 1)));
-    } catch (const std::exception&) {
-        return false;
-    }
-    return true;
-}
-
-bool find_preprocessor_entry(
-    const std::string& index_json,
-    const std::string& key,
-    std::size_t& offset,
-    std::vector<int32_t>& shape)
-{
-    const std::string search = "\"" + key + "\"";
-    const auto pos = index_json.find(search);
-    if (pos == std::string::npos) {
-        return false;
-    }
-
-    const auto off_pos = index_json.find("\"offset\"", pos);
-    if (off_pos == std::string::npos || !parse_offset_after(index_json, off_pos, offset)) {
-        return false;
-    }
-
-    const auto shape_pos = index_json.find("\"shape\"", pos);
-    if (shape_pos == std::string::npos) {
-        return false;
-    }
-    const auto bracket = index_json.find('[', shape_pos);
-    const auto end_bracket = index_json.find(']', bracket);
-    if (bracket == std::string::npos || end_bracket == std::string::npos) {
-        return false;
-    }
-
-    return parse_shape_csv(
-        index_json.substr(bracket + 1, end_bracket - bracket - 1),
-        shape);
-}
-
-bool load_preprocessor_floats(
-    const std::string& index_json,
-    const char* blob,
-    std::size_t blob_size,
-    const std::string& key,
-    std::vector<float>& dst)
-{
-    std::size_t offset = 0;
-    std::vector<int32_t> shape;
-    if (!find_preprocessor_entry(index_json, key, offset, shape)) {
-        return false;
-    }
-
-    std::size_t count = 1;
-    for (const auto s : shape) {
-        count *= static_cast<std::size_t>(s);
-    }
-    const std::size_t nbytes = count * sizeof(float);
-    if (offset + nbytes > blob_size) {
-        std::cerr << "[diffusion] weight " << key << " overflows blob\n";
-        return false;
-    }
-
-    dst.resize(count);
-    std::memcpy(dst.data(), blob + offset, nbytes);
-    return true;
-}
-
-bool load_with_fallback(
-    const std::string& index_json,
-    const char* blob,
-    std::size_t blob_size,
-    const std::string& primary,
-    const std::string& fallback,
-    std::vector<float>& dst)
-{
-    if (load_preprocessor_floats(index_json, blob, blob_size, primary, dst)) {
-        return true;
-    }
-    if (fallback.empty()) {
-        return false;
-    }
-    return load_preprocessor_floats(index_json, blob, blob_size, fallback, dst);
-}
 
 void load_preprocessor_weights(
     const std::string& index_json,
@@ -163,59 +21,59 @@ void load_preprocessor_weights(
     std::size_t blob_size,
     PreprocessorWeights& w)
 {
-    load_with_fallback(index_json, blob, blob_size,
+    diffusion::load_with_fallback(index_json, blob, blob_size,
         "patch_embedding.weight", "x_embedder.weight", w.patch_embed_weight);
-    load_with_fallback(index_json, blob, blob_size,
+    diffusion::load_with_fallback(index_json, blob, blob_size,
         "patch_embedding.bias", "x_embedder.bias", w.patch_embed_bias);
-    load_with_fallback(index_json, blob, blob_size,
+    diffusion::load_with_fallback(index_json, blob, blob_size,
         "condition_embedder.time_embedding.0.weight",
         "time_text_embed.timestep_embedder.linear_1.weight", w.time_emb_0_weight);
-    load_with_fallback(index_json, blob, blob_size,
+    diffusion::load_with_fallback(index_json, blob, blob_size,
         "condition_embedder.time_embedding.0.bias",
         "time_text_embed.timestep_embedder.linear_1.bias", w.time_emb_0_bias);
-    load_with_fallback(index_json, blob, blob_size,
+    diffusion::load_with_fallback(index_json, blob, blob_size,
         "condition_embedder.time_embedding.2.weight",
         "time_text_embed.timestep_embedder.linear_2.weight", w.time_emb_2_weight);
-    load_with_fallback(index_json, blob, blob_size,
+    diffusion::load_with_fallback(index_json, blob, blob_size,
         "condition_embedder.time_embedding.2.bias",
         "time_text_embed.timestep_embedder.linear_2.bias", w.time_emb_2_bias);
 
-    load_preprocessor_floats(index_json, blob, blob_size,
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
         "condition_embedder.time_proj.weight", w.time_proj_weight);
-    load_preprocessor_floats(index_json, blob, blob_size,
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
         "condition_embedder.time_proj.bias", w.time_proj_bias);
 
-    load_with_fallback(index_json, blob, blob_size,
+    diffusion::load_with_fallback(index_json, blob, blob_size,
         "condition_embedder.text_embedding.weight",
         "time_text_embed.text_embedder.linear_1.weight", w.text_proj_weight);
-    load_with_fallback(index_json, blob, blob_size,
+    diffusion::load_with_fallback(index_json, blob, blob_size,
         "condition_embedder.text_embedding.bias",
         "time_text_embed.text_embedder.linear_1.bias", w.text_proj_bias);
-    load_with_fallback(index_json, blob, blob_size,
+    diffusion::load_with_fallback(index_json, blob, blob_size,
         "condition_embedder.text_embedding_2.weight",
         "time_text_embed.text_embedder.linear_2.weight", w.text_proj_2_weight);
-    load_with_fallback(index_json, blob, blob_size,
+    diffusion::load_with_fallback(index_json, blob, blob_size,
         "condition_embedder.text_embedding_2.bias",
         "time_text_embed.text_embedder.linear_2.bias", w.text_proj_2_bias);
 
-    load_preprocessor_floats(index_json, blob, blob_size,
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
         "context_embedder.weight", w.context_embed_weight);
-    load_preprocessor_floats(index_json, blob, blob_size,
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
         "context_embedder.bias", w.context_embed_bias);
 
-    load_preprocessor_floats(index_json, blob, blob_size,
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
         "condition_embedder.guidance_embedding.0.weight", w.guidance_emb_0_weight);
-    load_preprocessor_floats(index_json, blob, blob_size,
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
         "condition_embedder.guidance_embedding.0.bias", w.guidance_emb_0_bias);
-    load_preprocessor_floats(index_json, blob, blob_size,
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
         "condition_embedder.guidance_embedding.2.weight", w.guidance_emb_2_weight);
-    load_preprocessor_floats(index_json, blob, blob_size,
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
         "condition_embedder.guidance_embedding.2.bias", w.guidance_emb_2_bias);
 
     // VAE BN denormalization stats (FLUX.2)
-    load_preprocessor_floats(index_json, blob, blob_size,
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
         "vae_bn.running_mean", w.vae_bn_mean);
-    load_preprocessor_floats(index_json, blob, blob_size,
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
         "vae_bn.running_var", w.vae_bn_var);
 }
 
@@ -282,7 +140,7 @@ PreprocessorWeights parse_preprocessor_weights(const std::vector<char>& data)
     std::string index_json;
     const char* blob = nullptr;
     std::size_t blob_size = 0;
-    if (!extract_preprocessor_index(data, index_json, blob, blob_size)) {
+    if (!diffusion::extract_preprocessor_index(data, index_json, blob, blob_size)) {
         return w;
     }
 

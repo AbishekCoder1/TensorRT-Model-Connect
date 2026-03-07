@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate runtime strategy governance matrix against source-of-truth files."""
+"""Validate runtime strategy governance against the new builder-based runtime."""
 
 from __future__ import annotations
 
@@ -15,28 +15,14 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX_PATH = PROJECT_ROOT / "tests" / "runtime_strategy_matrix.yaml"
 DEFAULT_CPP_PATH = PROJECT_ROOT / "src" / "cabi" / "api" / "trtf_c.cpp"
+DEFAULT_BUILDERS_DIR = PROJECT_ROOT / "src" / "runtime" / "builders"
 DEFAULT_CONTRACTS_PATH = PROJECT_ROOT / "tests" / "e2e_harness" / "contracts.py"
 DEFAULT_DIFF_CHECKS_DIR = PROJECT_ROOT / "tools" / "diff_framework" / "checks"
 DEFAULT_RUNNERS_DIR = PROJECT_ROOT / "tests" / "e2e_harness" / "runners"
 DEFAULT_COMPARATORS_DIR = PROJECT_ROOT / "tests" / "e2e_harness" / "comparators"
-DEFAULT_CABI_DIR = PROJECT_ROOT / "src" / "cabi"
 
-_REGISTER_FACTORY_RE = re.compile(r'register_backend_factory\(\s*"([^"]+)"')
-_REGISTER_FACTORY_BINDING_RE = re.compile(
-    r'register_backend_factory\(\s*"([^"]+)"\s*,\s*&([A-Za-z_]\w*)\s*\)'
-)
-_STRATEGY_EQ_RE = re.compile(
-    r'\b(?:strategy|fp_cfg_early\.runtime_strategy)\s*==\s*"([^"]+)"'
-)
-_STRATEGY_NE_RE = re.compile(r'\bstrategy\s*!=\s*"([^"]+)"')
-_DIRECT_RUNTIME_STRATEGY_RE = re.compile(
-    r'\bfp_cfg_early\.runtime_strategy\s*==\s*"([^"]+)"'
-)
-_WRAPPER_DEFINITION_RE = re.compile(
-    r"\b(?:static\s+)?trtf::IPipeline\*\s+([A-Za-z_]\w*_via_registry)\s*"
-    r"\(\s*void\s*\*\s*(?:[A-Za-z_]\w*)?\s*\)\s*\{",
-    re.MULTILINE,
-)
+_STRING_LITERAL_RE = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+_RUNTIME_LIKE_RE = re.compile(r"[a-z]+(?:_[a-z0-9]+)+")
 
 
 def _is_nonempty_str(value: Any) -> bool:
@@ -89,123 +75,56 @@ def load_runtime_strategy_matrix(path: Path) -> dict[str, dict[str, Any]]:
     return matrix
 
 
-def extract_runtime_strategies_from_cpp(path: Path) -> set[str]:
-    """Extract runtime_strategy keys from C++ registry + dispatch comparisons."""
+def _extract_string_literals(text: str) -> set[str]:
+    values: set[str] = set()
+    for raw in _STRING_LITERAL_RE.findall(text):
+        values.add(bytes(raw, "utf-8").decode("unicode_escape"))
+    return values
+
+
+def extract_runtime_strategies_from_cpp(
+    path: Path,
+    candidate_strategies: Iterable[str] | None = None,
+) -> set[str]:
+    """Extract runtime strategy keys from a C++ source file.
+
+    The new runtime expresses strategy coverage through `resolve_strategy_family(...)`
+    in `trtf_c.cpp` and the `kStrategies` / comparison literals inside
+    `src/runtime/builders/**/*.cpp`. To avoid false positives from unrelated string
+    literals like section names, callers should usually pass the expected strategy
+    candidate set derived from the contracts or matrix.
+    """
     text = path.read_text(encoding="utf-8")
-    strategies: set[str] = set()
-    strategies.update(_REGISTER_FACTORY_RE.findall(text))
-    strategies.update(_STRATEGY_EQ_RE.findall(text))
-    strategies.update(_STRATEGY_NE_RE.findall(text))
-    return strategies
+    strings = _extract_string_literals(text)
+
+    if candidate_strategies is not None:
+        candidates = set(candidate_strategies)
+        return {value for value in strings if value in candidates}
+
+    return {value for value in strings if _RUNTIME_LIKE_RE.fullmatch(value)}
 
 
-def extract_runtime_strategies_from_cpp_files(cpp_paths: Iterable[Path]) -> set[str]:
+def extract_runtime_strategies_from_cpp_files(
+    cpp_paths: Iterable[Path],
+    candidate_strategies: Iterable[str] | None = None,
+) -> set[str]:
     """Extract runtime_strategy keys from multiple C++ files."""
     strategies: set[str] = set()
     for file_path in cpp_paths:
-        strategies.update(extract_runtime_strategies_from_cpp(file_path))
+        strategies.update(
+            extract_runtime_strategies_from_cpp(file_path, candidate_strategies)
+        )
     return strategies
 
 
-def extract_registry_strategy_wrapper_bindings_from_cpp(path: Path) -> dict[str, str]:
-    """Extract runtime_strategy -> wrapper symbol bindings from registry registration."""
-    text = path.read_text(encoding="utf-8")
-    bindings: dict[str, str] = {}
-    for strategy, wrapper_symbol in _REGISTER_FACTORY_BINDING_RE.findall(text):
-        existing = bindings.get(strategy)
-        if existing is not None and existing != wrapper_symbol:
-            raise ValueError(
-                f"{path}: strategy '{strategy}' registered with multiple wrappers "
-                f"('{existing}' vs '{wrapper_symbol}')."
-            )
-        bindings[strategy] = wrapper_symbol
-    return bindings
-
-
-def extract_registry_strategy_wrapper_bindings_from_cpp_files(
-    cpp_paths: Iterable[Path],
-) -> dict[str, str]:
-    """Extract runtime_strategy -> wrapper symbol bindings from multiple C++ files."""
-    bindings: dict[str, str] = {}
-    binding_sources: dict[str, Path] = {}
-    for file_path in cpp_paths:
-        file_bindings = extract_registry_strategy_wrapper_bindings_from_cpp(file_path)
-        for strategy, wrapper_symbol in file_bindings.items():
-            existing = bindings.get(strategy)
-            if existing is not None and existing != wrapper_symbol:
-                first_source = binding_sources[strategy]
-                raise ValueError(
-                    f"{file_path}: strategy '{strategy}' registered with wrapper "
-                    f"'{wrapper_symbol}' but already mapped to '{existing}' in "
-                    f"{first_source}."
-                )
-            bindings[strategy] = wrapper_symbol
-            binding_sources[strategy] = file_path
-    return bindings
-
-
-def extract_direct_runtime_strategies_from_cpp(path: Path) -> set[str]:
-    """Extract runtime strategies that bypass registry dispatch directly."""
-    text = path.read_text(encoding="utf-8")
-    return set(_DIRECT_RUNTIME_STRATEGY_RE.findall(text))
-
-
-def extract_direct_runtime_strategies_from_cpp_files(cpp_paths: Iterable[Path]) -> set[str]:
-    """Extract direct runtime_strategy dispatch keys from multiple C++ files."""
-    direct_strategies: set[str] = set()
-    for file_path in cpp_paths:
-        direct_strategies.update(extract_direct_runtime_strategies_from_cpp(file_path))
-    return direct_strategies
-
-
-def extract_registry_wrapper_definitions_from_cpp(path: Path) -> set[str]:
-    """Extract registry wrapper symbol definitions from a C++ source file."""
-    text = path.read_text(encoding="utf-8")
-    return set(_WRAPPER_DEFINITION_RE.findall(text))
-
-
-def extract_registry_wrapper_definitions_by_cpp_file(
-    cabi_dir: Path,
-) -> dict[Path, set[str]]:
-    """Collect registry wrapper definitions from src/cabi/**/*.cpp files."""
-    return extract_registry_wrapper_definitions_by_cpp_files(
-        cabi_dir.rglob("*.cpp")
-    )
-
-
-def extract_registry_wrapper_definitions_by_cpp_files(
-    cpp_paths: Iterable[Path],
-) -> dict[Path, set[str]]:
-    """Collect registry wrapper definitions keyed by C++ file path."""
-    definitions_by_file: dict[Path, set[str]] = {}
-    for file_path in sorted({Path(path).resolve() for path in cpp_paths}):
-        symbols = extract_registry_wrapper_definitions_from_cpp(file_path)
-        if symbols:
-            definitions_by_file[file_path] = symbols
-    return definitions_by_file
-
-
-def discover_cabi_cpp_files(*, cpp_path: Path, cabi_dir: Path) -> list[Path]:
-    """Discover C++ files participating in runtime-strategy dispatch checks."""
+def discover_runtime_cpp_files(*, cpp_path: Path, builders_dir: Path) -> list[Path]:
+    """Discover runtime sources that define strategy coverage in the new runtime."""
     discovered: list[Path] = []
-    if cabi_dir.exists():
-        discovered.extend(path.resolve() for path in sorted(cabi_dir.rglob("*.cpp")))
-
     if cpp_path.exists():
-        resolved_cpp_path = cpp_path.resolve()
-        if resolved_cpp_path not in discovered:
-            discovered.append(resolved_cpp_path)
-
+        discovered.append(cpp_path.resolve())
+    if builders_dir.exists():
+        discovered.extend(path.resolve() for path in sorted(builders_dir.rglob("*.cpp")))
     return discovered
-
-
-def infer_cabi_dir_from_cpp_path(*, cpp_path: Path, default_cabi_dir: Path) -> Path:
-    """Infer src/cabi root from cpp path (handles nested paths like api/trtf_c.cpp)."""
-    resolved_cpp = cpp_path.resolve()
-    for parent in resolved_cpp.parents:
-        if parent.name == "cabi":
-            return parent
-    return default_cabi_dir.resolve()
 
 
 def extract_runtime_to_task_strategy(path: Path) -> dict[str, str]:
@@ -270,19 +189,16 @@ def _extract_class_map_by_method(directory: Path, method_name: str) -> dict[str,
 
 
 def extract_runner_classes_by_task_strategy(runners_dir: Path) -> dict[str, set[str]]:
-    """Map task_strategy -> runner classes that advertise it."""
     return _extract_class_map_by_method(runners_dir, "strategy_name")
 
 
 def extract_comparator_classes_by_task_strategy(
     comparators_dir: Path,
 ) -> dict[str, set[str]]:
-    """Map task_strategy -> comparator classes that advertise it."""
     return _extract_class_map_by_method(comparators_dir, "task_strategy")
 
 
 def extract_diff_framework_checks(checks_dir: Path) -> dict[str, set[str]]:
-    """Map runtime_strategy -> diff-framework check class names."""
     mapping: dict[str, set[str]] = {}
     for file_path in sorted(checks_dir.glob("*.py")):
         if file_path.name.startswith("_"):
@@ -354,12 +270,12 @@ def validate_matrix_data(
         errors,
         left_name="contracts.py RUNTIME_TO_TASK_STRATEGY",
         left_values=contracts_strategies,
-        right_name="src/cabi/**/*.cpp strategy keys",
+        right_name="runtime builder sources strategy keys",
         right_values=cpp_runtime_strategies,
     )
     _append_set_mismatch(
         errors,
-        left_name="src/cabi/**/*.cpp strategy keys",
+        left_name="runtime builder sources strategy keys",
         left_values=cpp_runtime_strategies,
         right_name="tests/runtime_strategy_matrix.yaml",
         right_values=matrix_strategies,
@@ -479,85 +395,35 @@ def validate_matrix_data(
     return errors
 
 
-def validate_registry_wrapper_coverage(
-    *,
-    matrix_strategies: set[str],
-    registry_wrapper_bindings: dict[str, str],
-    direct_runtime_strategies: set[str],
-    wrapper_definitions: set[str],
-) -> list[str]:
-    """Validate that matrix registry strategies are covered by wrapper bindings."""
-    errors: list[str] = []
-    expected_registry_strategies = matrix_strategies - direct_runtime_strategies
-    bound_strategies = set(registry_wrapper_bindings.keys())
-
-    _append_set_mismatch(
-        errors,
-        left_name="tests/runtime_strategy_matrix.yaml strategies requiring registry dispatch",
-        left_values=expected_registry_strategies,
-        right_name="register_backend_factory strategy keys",
-        right_values=bound_strategies,
-    )
-
-    bound_wrapper_symbols = set(registry_wrapper_bindings.values())
-    missing_definitions = sorted(bound_wrapper_symbols - wrapper_definitions)
-    if missing_definitions:
-        errors.append(
-            "register_backend_factory references wrapper symbols without definitions: "
-            f"{missing_definitions}"
-        )
-
-    extra_definitions = sorted(wrapper_definitions - bound_wrapper_symbols)
-    if extra_definitions:
-        errors.append(
-            "Found *_via_registry wrapper definitions not referenced by "
-            f"register_backend_factory: {extra_definitions}"
-        )
-
-    return errors
-
-
-def validate_trtf_c_wrapper_extraction_boundary(
-    *,
-    trtf_c_wrapper_definitions: set[str],
-    extracted_wrapper_definitions: set[str],
-) -> list[str]:
-    """Ensure trtf_c.cpp no longer carries wrappers once extraction starts."""
-    if extracted_wrapper_definitions and trtf_c_wrapper_definitions:
-        lingering = sorted(trtf_c_wrapper_definitions)
-        return [
-            "src/cabi/trtf_c.cpp still defines *_via_registry wrappers after extraction: "
-            f"{lingering}"
-        ]
-    return []
-
-
 def validate_matrix_paths(
     *,
     matrix_path: Path = DEFAULT_MATRIX_PATH,
     cpp_path: Path = DEFAULT_CPP_PATH,
+    builders_dir: Path = DEFAULT_BUILDERS_DIR,
     contracts_path: Path = DEFAULT_CONTRACTS_PATH,
     diff_checks_dir: Path = DEFAULT_DIFF_CHECKS_DIR,
     runners_dir: Path = DEFAULT_RUNNERS_DIR,
     comparators_dir: Path = DEFAULT_COMPARATORS_DIR,
 ) -> list[str]:
     """Load all sources and validate the runtime strategy matrix."""
-    cpp_path = cpp_path.resolve()
-    cabi_dir = infer_cabi_dir_from_cpp_path(
-        cpp_path=cpp_path,
-        default_cabi_dir=DEFAULT_CABI_DIR,
-    )
-    cabi_cpp_files = discover_cabi_cpp_files(cpp_path=cpp_path, cabi_dir=cabi_dir)
-
     matrix = load_runtime_strategy_matrix(matrix_path)
-    cpp_runtime_strategies = extract_runtime_strategies_from_cpp_files(cabi_cpp_files)
     runtime_to_task_strategy = extract_runtime_to_task_strategy(contracts_path)
+    candidate_strategies = set(matrix.keys()) | set(runtime_to_task_strategy.keys())
+
+    runtime_cpp_files = discover_runtime_cpp_files(
+        cpp_path=cpp_path.resolve(),
+        builders_dir=builders_dir.resolve(),
+    )
+    cpp_runtime_strategies = extract_runtime_strategies_from_cpp_files(
+        runtime_cpp_files,
+        candidate_strategies,
+    )
     diff_checks_by_strategy = extract_diff_framework_checks(diff_checks_dir)
     runner_classes_by_task = extract_runner_classes_by_task_strategy(runners_dir)
     comparator_classes_by_task = extract_comparator_classes_by_task_strategy(
         comparators_dir
     )
-    errors = validate_matrix_data(
+    return validate_matrix_data(
         matrix=matrix,
         cpp_runtime_strategies=cpp_runtime_strategies,
         runtime_to_task_strategy=runtime_to_task_strategy,
@@ -565,43 +431,6 @@ def validate_matrix_paths(
         runner_classes_by_task=runner_classes_by_task,
         comparator_classes_by_task=comparator_classes_by_task,
     )
-
-    registry_wrapper_bindings = extract_registry_strategy_wrapper_bindings_from_cpp_files(
-        cabi_cpp_files
-    )
-    direct_runtime_strategies = extract_direct_runtime_strategies_from_cpp_files(
-        cabi_cpp_files
-    )
-    wrapper_definitions_by_file = extract_registry_wrapper_definitions_by_cpp_files(
-        cabi_cpp_files
-    )
-
-    all_wrapper_definitions: set[str] = set()
-    for symbols in wrapper_definitions_by_file.values():
-        all_wrapper_definitions.update(symbols)
-
-    trtf_c_wrapper_definitions = wrapper_definitions_by_file.get(cpp_path, set())
-    extracted_wrapper_definitions: set[str] = set()
-    for file_path, symbols in wrapper_definitions_by_file.items():
-        if file_path == cpp_path:
-            continue
-        extracted_wrapper_definitions.update(symbols)
-
-    errors.extend(
-        validate_registry_wrapper_coverage(
-            matrix_strategies=set(matrix.keys()),
-            registry_wrapper_bindings=registry_wrapper_bindings,
-            direct_runtime_strategies=direct_runtime_strategies,
-            wrapper_definitions=all_wrapper_definitions,
-        )
-    )
-    errors.extend(
-        validate_trtf_c_wrapper_extraction_boundary(
-            trtf_c_wrapper_definitions=trtf_c_wrapper_definitions,
-            extracted_wrapper_definitions=extracted_wrapper_definitions,
-        )
-    )
-    return errors
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -619,6 +448,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_CPP_PATH,
         help="Path to src/cabi/api/trtf_c.cpp.",
+    )
+    parser.add_argument(
+        "--builders-dir",
+        type=Path,
+        default=DEFAULT_BUILDERS_DIR,
+        help="Path to src/runtime/builders directory.",
     )
     parser.add_argument(
         "--contracts",
@@ -654,6 +489,7 @@ def main(argv: list[str] | None = None) -> int:
         errors = validate_matrix_paths(
             matrix_path=args.matrix,
             cpp_path=args.cpp,
+            builders_dir=args.builders_dir,
             contracts_path=args.contracts,
             diff_checks_dir=args.diff_checks_dir,
             runners_dir=args.runners_dir,
@@ -670,8 +506,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(
-        "[runtime-strategy-matrix] PASS: matrix is consistent with C++ dispatch, "
-        "contracts mapping, and diff-framework checks."
+        "[runtime-strategy-matrix] PASS: matrix is consistent with the new runtime "
+        "entrypoint, builder strategy coverage, contracts mapping, and diff-framework checks."
     )
     return 0
 

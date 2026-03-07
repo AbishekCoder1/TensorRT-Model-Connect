@@ -58,10 +58,36 @@ static void test_layer_tensor_name_single_digit()
     check(result == "state_7", "layer_tensor_name state_7");
 }
 
+// Intent: negative layer indices should preserve sign in formatted names.
+static void test_layer_tensor_name_negative_index()
+{
+    const std::string result = trtf::layer_tensor_name("cache_v", -3);
+    check(result == "cache_v_-3", "layer_tensor_name cache_v_-3");
+}
+
 static void test_layer_tensor_name_empty_stem()
 {
     const std::string result = trtf::layer_tensor_name("", 5);
     check(result == "_5", "layer_tensor_name empty_stem _5");
+}
+
+// Intent: validate deterministic default fields on DecoderStepEngine.
+static void test_decoder_step_engine_defaults()
+{
+    trtf::DecoderStepEngine engine;
+    check(engine.token_input_name == "token_id", "default token_input_name");
+    check(engine.position_input_name == "position_id", "default position_input_name");
+    check(engine.mask_input_name == "attention_mask", "default mask_input_name");
+    check(engine.logits_output_name == "logits", "default logits_output_name");
+    check(engine.cache_k_input_names.empty(), "default cache_k_input_names empty");
+    check(engine.cache_v_input_names.empty(), "default cache_v_input_names empty");
+    check(engine.present_k_output_names.empty(), "default present_k_output_names empty");
+    check(engine.present_v_output_names.empty(), "default present_v_output_names empty");
+    check(engine.num_layers == 1, "default num_layers == 1");
+    check(!engine.requires_position_input, "default requires_position_input false");
+    check(engine.max_cache_length == trtf::kDefaultMaxCacheLength, "default max_cache_length");
+    check(engine.id_bos == 0, "default id_bos == 0");
+    check(engine.id_eos == 0, "default id_eos == 0");
 }
 
 static void test_constants()
@@ -79,7 +105,9 @@ int main()
     test_layer_tensor_name_mid();
     test_layer_tensor_name_large();
     test_layer_tensor_name_single_digit();
+    test_layer_tensor_name_negative_index();
     test_layer_tensor_name_empty_stem();
+    test_decoder_step_engine_defaults();
     test_constants();
 
     if (failures > 0)

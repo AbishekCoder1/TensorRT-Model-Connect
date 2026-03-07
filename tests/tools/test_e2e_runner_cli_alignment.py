@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
-from tests.e2e_harness.runners import neural_operator, object_detection, omni
+from tests.e2e_harness.runners import neural_operator, object_detection, omni, segmentation
 
 
 def _make_case(task_strategy: str, inputs: dict | None = None) -> E2ECase:
@@ -159,3 +159,33 @@ def test_composite_runner_uses_run_without_stage_flag(monkeypatch, tmp_path):
     assert cmd[1] == "run"
     assert "--stage" not in cmd
     assert out.metadata["entrypoint"] == "run"
+
+
+def test_prompted_segmentation_runner_uses_segment_sam_cli(monkeypatch, tmp_path):
+    image_path = tmp_path / "img.jpg"
+    image_path.write_text("img", encoding="utf-8")
+    case = _make_case(
+        "prompted_segmentation",
+        inputs={"image": str(image_path), "point_x": 0.25, "point_y": 0.75},
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(segmentation.subprocess, "run", _fake_run)
+
+    out = segmentation.PromptedSegmentationRunner().run_stage(
+        case, StageSpec(name="full_inference"), ctx)
+
+    cmd = captured["cmd"]
+    assert cmd[1] == "segment-sam"
+    assert "--output" in cmd
+    assert "--point-x" in cmd
+    assert "--point-y" in cmd
+    assert "--output-dir" not in cmd
+    assert "--point" not in cmd
+    assert out.metadata["command"] == cmd

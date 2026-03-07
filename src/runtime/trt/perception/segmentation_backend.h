@@ -2,6 +2,7 @@
 
 #include "runtime/trt/core/trt_common.h"
 #include "cabi/config/fast_path_config.h"
+#include "trtf/runtime/adapters/io/media_io_adapter.h"
 
 #if TRTF_HAS_TRT
 
@@ -40,8 +41,8 @@ public:
 
     bool is_available() const;
 
-    // Segment an image file. Returns per-pixel class indices.
-    SegmentationResult segment_image(const std::string& image_path);
+    // Segment a decoded image. Returns per-pixel class indices.
+    SegmentationResult segment_image(const runtime::adapters::io::DecodedImage& image);
 
     const SegmentationConfig& config() const { return mConfig; }
 

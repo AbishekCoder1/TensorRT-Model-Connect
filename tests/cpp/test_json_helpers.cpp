@@ -27,6 +27,7 @@
 // =============================================================================
 
 #include "utils/json_helpers.h"
+#include "test_helpers.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -339,6 +340,176 @@ bool test_extract_json_string_array_missing()
     return true;
 }
 
+// Intention: Verify empty-string JSON values are treated as malformed by
+//            the lightweight extractor and return fallback.
+// Setup:     JSON with "name": "".
+// Mechanism: Calls extract_json_string and checks fallback is returned.
+bool test_extract_json_string_empty_value_returns_fallback()
+{
+    const std::string json = R"({"name": ""})";
+    const std::string result = trtf::extract_json_string(json, "name", "fallback");
+    if (result != "fallback")
+    {
+        std::cerr << "extract_json_string_empty_value: got '" << result << "'" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify malformed float tokens still parse numeric prefix.
+// Setup:     JSON with "eps": 1e.
+// Mechanism: Calls extract_json_float and checks parsed prefix value is returned.
+bool test_extract_json_float_invalid_token_returns_fallback()
+{
+    const std::string json = R"({"eps": 1e})";
+    const float result = trtf::extract_json_float(json, "eps", 9.5F);
+    if (std::abs(result - 1.0F) > 1e-6F)
+    {
+        std::cerr << "extract_json_float_invalid_token: got " << result << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify float-array extraction parses signed and decimal values.
+// Setup:     JSON with mixed float array.
+// Mechanism: Calls extract_json_float_array and checks parsed values.
+bool test_extract_json_float_array_basic()
+{
+    const std::string json = R"({"image_mean": [0.5, -1.25, 2.0]})";
+    const auto values = trtf::extract_json_float_array(json, "image_mean", 8);
+    if (values.size() != 3)
+    {
+        std::cerr << "extract_json_float_array_basic: size=" << values.size() << std::endl;
+        return false;
+    }
+    if (std::abs(values[0] - 0.5F) > 1e-6F
+        || std::abs(values[1] + 1.25F) > 1e-6F
+        || std::abs(values[2] - 2.0F) > 1e-6F)
+    {
+        std::cerr << "extract_json_float_array_basic: value mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify float-array extraction respects max_count limit.
+// Setup:     Array with four values and max_count=2.
+// Mechanism: Calls extract_json_float_array and checks only first two are kept.
+bool test_extract_json_float_array_max_count()
+{
+    const std::string json = R"({"vals": [1.0, 2.0, 3.0, 4.0]})";
+    const auto values = trtf::extract_json_float_array(json, "vals", 2);
+    if (values.size() != 2 || std::abs(values[0] - 1.0F) > 1e-6F || std::abs(values[1] - 2.0F) > 1e-6F)
+    {
+        std::cerr << "extract_json_float_array_max_count: unexpected values" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify invalid tokens stop numeric-array parsing gracefully.
+// Setup:     Array with an invalid middle token.
+// Mechanism: Calls extract_json_float_array and expects only prefix values.
+bool test_extract_json_float_array_stops_on_invalid_token()
+{
+    const std::string json = R"({"vals": [1.0, bad, 3.0]})";
+    const auto values = trtf::extract_json_float_array(json, "vals", 8);
+    if (values.size() != 1 || std::abs(values[0] - 1.0F) > 1e-6F)
+    {
+        std::cerr << "extract_json_float_array_stops_on_invalid_token: unexpected parse" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify int-array extraction parses negatives and positives.
+// Setup:     JSON with integer array.
+// Mechanism: Calls extract_json_int_array and checks values.
+bool test_extract_json_int_array_basic()
+{
+    const std::string json = R"({"ids": [-3, 0, 9]})";
+    const auto values = trtf::extract_json_int_array(json, "ids", 8);
+    if (values.size() != 3 || values[0] != -3 || values[1] != 0 || values[2] != 9)
+    {
+        std::cerr << "extract_json_int_array_basic: unexpected values" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify invalid int token stops array parsing.
+// Setup:     JSON with malformed middle element.
+// Mechanism: Calls extract_json_int_array and checks prefix-only behavior.
+bool test_extract_json_int_array_stops_on_invalid_token()
+{
+    const std::string json = R"({"ids": [10, --5, 7]})";
+    const auto values = trtf::extract_json_int_array(json, "ids", 8);
+    if (values.size() != 1 || values[0] != 10)
+    {
+        std::cerr << "extract_json_int_array_stops_on_invalid_token: unexpected values" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify mixed string-array values stop parsing at first non-string token.
+// Setup:     Array with one valid string followed by an integer.
+// Mechanism: Calls extract_json_string_array and checks prefix-only result.
+bool test_extract_json_string_array_stops_on_non_string()
+{
+    const std::string json = R"({"architectures": ["A", 7, "B"]})";
+    const auto values = trtf::extract_json_string_array(json, "architectures");
+    if (values.size() != 1 || values[0] != "A")
+    {
+        std::cerr << "extract_json_string_array_stops_on_non_string: unexpected values" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify parse_positive_env_int fallback behavior for missing env var.
+// Setup:     Env var unset via guard.
+// Mechanism: Calls parse_positive_env_int and checks fallback.
+bool test_parse_positive_env_int_unset()
+{
+    trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", nullptr);
+    return trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) == 7;
+}
+
+// Intention: Verify parse_positive_env_int parses valid positive integer.
+// Setup:     Env var set to "123".
+// Mechanism: Calls parse_positive_env_int and checks parsed value.
+bool test_parse_positive_env_int_valid()
+{
+    trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", "123");
+    return trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) == 123;
+}
+
+// Intention: Verify parse_positive_env_int rejects non-positive/invalid values.
+// Setup:     Env var set to values that should fail parsing.
+// Mechanism: Calls parse_positive_env_int for each value and expects fallback.
+bool test_parse_positive_env_int_invalid_values()
+{
+    {
+        trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", "");
+        if (trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) != 7) return false;
+    }
+    {
+        trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", "0");
+        if (trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) != 7) return false;
+    }
+    {
+        trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", "-5");
+        if (trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) != 7) return false;
+    }
+    {
+        trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", "12x");
+        if (trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) != 7) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main()
@@ -355,6 +526,7 @@ int main()
     run("extract_json_string_present", test_extract_json_string_present);
     run("extract_json_string_absent", test_extract_json_string_absent);
     run("extract_json_string_nested", test_extract_json_string_nested_braces);
+    run("extract_json_string_empty_value", test_extract_json_string_empty_value_returns_fallback);
     run("extract_json_int_positive", test_extract_json_int_positive);
     run("extract_json_int_negative", test_extract_json_int_negative);
     run("extract_json_int_missing", test_extract_json_int_missing);
@@ -366,9 +538,19 @@ int main()
     run("extract_json_float_basic", test_extract_json_float_basic);
     run("extract_json_float_scientific", test_extract_json_float_scientific);
     run("extract_json_float_missing", test_extract_json_float_missing);
+    run("extract_json_float_invalid_token", test_extract_json_float_invalid_token_returns_fallback);
+    run("extract_json_float_array_basic", test_extract_json_float_array_basic);
+    run("extract_json_float_array_max_count", test_extract_json_float_array_max_count);
+    run("extract_json_float_array_invalid", test_extract_json_float_array_stops_on_invalid_token);
+    run("extract_json_int_array_basic", test_extract_json_int_array_basic);
+    run("extract_json_int_array_invalid", test_extract_json_int_array_stops_on_invalid_token);
     run("string_array_basic", test_extract_json_string_array_basic);
     run("string_array_empty", test_extract_json_string_array_empty);
     run("string_array_missing", test_extract_json_string_array_missing);
+    run("string_array_non_string", test_extract_json_string_array_stops_on_non_string);
+    run("parse_positive_env_int_unset", test_parse_positive_env_int_unset);
+    run("parse_positive_env_int_valid", test_parse_positive_env_int_valid);
+    run("parse_positive_env_int_invalid", test_parse_positive_env_int_invalid_values);
 
     if (all_passed)
     {

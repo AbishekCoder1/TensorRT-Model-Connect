@@ -1,61 +1,24 @@
 #include "trtf/pipeline.h"
 #include "trtf/bundle.h"
-#include "trtf/tokenizer.h"
 #include "bundle/bundle_format.h"
 #include "cabi/config/fast_path_config.h"
 #include "cabi/bundle/bundle_helpers.h"
-#include "cabi/registry/backend_registry.h"
-#include "cabi/registry/backend_registry_dispatch.h"
-#include "cabi/factories/factory_decls.h"
-#include "cabi/pipeline/pipeline_impl.h"
-#include "cabi/factories/factories_audio.h"
-#include "cabi/factories/factories_diffusion.h"
-#include "cabi/factories/factories_vision.h"
-#include "cabi/factories/factories_text.h"
-#include "cabi/factories/factories_encoder.h"
+#include "runtime/adapters/bundle/bundle_port_adapter.h"
+#include "runtime/adapters/trt/trt_port_adapter.h"
+#include "trtf/runtime/builders/audio/audio_strategy_builder.h"
+#include "trtf/runtime/builders/diffusion/diffusion_strategy_builder.h"
+#include "trtf/runtime/builders/encoder/encoder_strategy_builder.h"
+#include "trtf/runtime/builders/text/text_strategy_builder.h"
+#include "trtf/runtime/builders/vision/vision_strategy_builder.h"
+#include "trtf/runtime/pipeline/router.h"
 #include "runtime/trt/core/trt_engine_lifecycle.h"
-#include "runtime/trt/core/trt_backend_shared.h"
-#include "runtime/trt/recurrent/mamba_backend.h"
-#include "runtime/trt/recurrent/mamba_decode_runtime.h"
-#include "runtime/trt/recurrent/rwkv_backend.h"
-#include "runtime/trt/recurrent/rwkv_decode_runtime.h"
-#include "runtime/trt/audio/whisper_backend.h"
-#include "runtime/trt/multimodal/vl_backend.h"
-#include "runtime/trt/multimodal/vision_engine.h"
-#include "runtime/trt/multimodal/image_preprocessor.h"
-#include "runtime/trt/diffusion/diffusion_backend.h"
-#include "runtime/trt/diffusion/wan_diffusion_backend.h"
-#include "runtime/trt/diffusion/z_image_diffusion_backend.h"
-#include "runtime/trt/encoder/encoder_backend.h"
-#include "runtime/trt/encoder/embedding_backend.h"
-#include "runtime/trt/encoder/reranking_backend.h"
-#include "runtime/trt/perception/segmentation_backend.h"
-#include "runtime/trt/perception/detection_backend.h"
-#include "runtime/trt/perception/sam_backend.h"
-#include "runtime/trt/perception/neural_operator_backend.h"
-#include "runtime/trt/recurrent/hybrid_backend.h"
-#include "runtime/trt/audio/bark_backend.h"
-#include "runtime/trt/audio/magpie_tts_backend.h"
-#include "runtime/trt/audio/omni_backend.h"
-#include "runtime/trt/audio/speech_backend.h"
-#include "runtime/trt/core/trt_common.h"
-#include "runtime/trt/audio/mel_spectrogram.h"
-
-#include "stb_image_write.h"
-
-#include "utils/data_dir.h"
-#include "utils/wav_reader.h"
 
 #include <chrono>
-#include <cstdio>
-#include <cstring>
+#include <cstdlib>
 #include <exception>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <memory>
 #include <string>
-#include <utility>
+#include <unordered_map>
 
 #ifndef TRTF_VERSION_STRING
 #define TRTF_VERSION_STRING "0.1.0"
@@ -181,14 +144,6 @@ trtf::FastPathModelConfig parse_or_build_fast_path_config(
     return fp_cfg;
 }
 
-void ensure_bundle_has_plan_data(const trtf::BundleSections& sections, const std::string& bundle_path)
-{
-    if (sections.plan_data == nullptr || sections.plan_data->empty())
-    {
-        throw std::runtime_error("Bundle has no engine_plan section: " + bundle_path);
-    }
-}
-
 trtf::TrtUniquePtr<nvinfer1::IRuntime> create_runtime_or_throw()
 {
     auto runtime_ptr = trtf::create_trt_runtime();
@@ -199,53 +154,6 @@ trtf::TrtUniquePtr<nvinfer1::IRuntime> create_runtime_or_throw()
     return runtime_ptr;
 }
 
-trtf::TrtUniquePtr<nvinfer1::ICudaEngine> deserialize_engine_or_throw(
-    trtf::TrtUniquePtr<nvinfer1::IRuntime>& runtime_ptr,
-    const trtf::BundleSections& sections,
-    const std::string& bundle_path)
-{
-    auto trt_engine = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
-        runtime_ptr->deserializeCudaEngine(sections.plan_data->data(), sections.plan_data->size()));
-    if (!trt_engine)
-    {
-        throw std::runtime_error("Failed to deserialize engine from bundle: " + bundle_path);
-    }
-    return trt_engine;
-}
-
-trtf::TrtUniquePtr<nvinfer1::IExecutionContext> create_execution_context_or_throw(
-    trtf::TrtUniquePtr<nvinfer1::ICudaEngine>& trt_engine)
-{
-    auto exec_ctx = trtf::TrtUniquePtr<nvinfer1::IExecutionContext>(trt_engine->createExecutionContext());
-    if (!exec_ctx)
-    {
-        throw std::runtime_error("Failed to create execution context from bundle engine");
-    }
-    return exec_ctx;
-}
-
-trtf::cabi::BackendRegistryDispatchContext build_registry_dispatch_context(
-    trtf::TrtUniquePtr<nvinfer1::IRuntime>* runtime_ptr,
-    trtf::TrtUniquePtr<nvinfer1::ICudaEngine>* trt_engine,
-    trtf::TrtUniquePtr<nvinfer1::IExecutionContext>* exec_ctx,
-    trtf::FastPathModelConfig* fp_cfg,
-    trtf::BundleSections* sections,
-    const std::string* model_id,
-    const std::string* hf_python,
-    const std::string* bundle_path)
-{
-    trtf::cabi::BackendRegistryDispatchContext registry_ctx;
-    registry_ctx.runtime_ptr = runtime_ptr;
-    registry_ctx.trt_engine = trt_engine;
-    registry_ctx.exec_ctx = exec_ctx;
-    registry_ctx.fp_cfg = fp_cfg;
-    registry_ctx.sections = sections;
-    registry_ctx.model_id = model_id;
-    registry_ctx.hf_python = hf_python;
-    registry_ctx.bundle_path = bundle_path;
-    return registry_ctx;
-}
-
 std::size_t resolve_default_max_new_tokens(const TrtfPipelineOptions* options)
 {
     if (options == nullptr || options->max_new_tokens <= 0)
@@ -253,6 +161,127 @@ std::size_t resolve_default_max_new_tokens(const TrtfPipelineOptions* options)
         return 0;
     }
     return static_cast<std::size_t>(options->max_new_tokens);
+}
+
+enum class StrategyFamily {
+    kUnknown = 0,
+    kText,
+    kEncoder,
+    kVision,
+    kAudio,
+    kDiffusion,
+};
+
+StrategyFamily resolve_strategy_family(const std::string& strategy)
+{
+    using Family = StrategyFamily;
+    static const std::unordered_map<std::string, Family> kStrategyFamilies = {
+        {"decoder_kv_cache", Family::kText},
+        {"decoder_moe", Family::kText},
+        {"ssm_recurrent", Family::kText},
+        {"rwkv_recurrent", Family::kText},
+        {"hybrid_mamba_attention", Family::kText},
+        {"encoder_only", Family::kEncoder},
+        {"embedding", Family::kEncoder},
+        {"reranking", Family::kEncoder},
+        {"vision_language", Family::kVision},
+        {"segmentation", Family::kVision},
+        {"prompted_segmentation", Family::kVision},
+        {"object_detection", Family::kVision},
+        {"neural_operator", Family::kVision},
+        {"text_to_audio", Family::kAudio},
+        {"speech_to_text", Family::kAudio},
+        {"speech_to_speech", Family::kAudio},
+        {"omni_multimodal", Family::kAudio},
+        {"diffusion", Family::kDiffusion},
+    };
+
+    const auto it = kStrategyFamilies.find(strategy);
+    return (it == kStrategyFamilies.end()) ? Family::kUnknown : it->second;
+}
+
+trtf::runtime::BuildResult build_services_with_new_runtime(
+    const trtf::runtime::BuildContext& context,
+    const trtf::runtime::IBundlePort& bundle_port,
+    const trtf::runtime::ITrtPort& trt_port,
+    nvinfer1::IRuntime* runtime)
+{
+    using trtf::runtime::BuildResult;
+    using trtf::runtime::BuildStatus;
+
+    switch (resolve_strategy_family(context.strategy))
+    {
+    case StrategyFamily::kText:
+    {
+        trtf::runtime::builders::text::TextStrategyBuilder builder(bundle_port, trt_port, runtime);
+        return builder.build(context);
+    }
+    case StrategyFamily::kEncoder:
+    {
+        trtf::runtime::builders::encoder::EncoderStrategyBuilder builder(bundle_port, trt_port, runtime);
+        return builder.build(context);
+    }
+    case StrategyFamily::kVision:
+    {
+        trtf::runtime::builders::vision::VisionStrategyBuilder builder(bundle_port, trt_port, runtime);
+        return builder.build(context);
+    }
+    case StrategyFamily::kAudio:
+    {
+        trtf::runtime::builders::audio::AudioStrategyBuilder builder(bundle_port, trt_port, runtime);
+        return builder.build(context);
+    }
+    case StrategyFamily::kDiffusion:
+    {
+        trtf::runtime::builders::diffusion::DiffusionStrategyBuilder builder(bundle_port, trt_port, runtime);
+        return builder.build(context);
+    }
+    case StrategyFamily::kUnknown:
+    default:
+        return BuildResult::Failure(
+            BuildStatus::kUnsupportedStrategy,
+            "Unsupported runtime_strategy for new runtime path: " + context.strategy);
+    }
+}
+
+trtf::IPipeline* try_create_with_new_runtime(
+    const trtf::BundleFile& bundle,
+    const trtf::BundleSections& sections,
+    const std::string& bundle_path,
+    const std::string& hf_python)
+{
+    auto fp_cfg = parse_or_build_fast_path_config(sections, bundle.info);
+    if (fp_cfg.runtime_strategy.empty())
+    {
+        fp_cfg.runtime_strategy = "decoder_kv_cache";
+    }
+
+    auto runtime_ptr = create_runtime_or_throw();
+
+    trtf::runtime::BundlePortAdapter bundle_port(bundle);
+    trtf::runtime::adapters::trt::TrtPortAdapter trt_port;
+
+    trtf::runtime::BuildContext build_context;
+    build_context.model_id = bundle.info.model_id;
+    build_context.strategy = fp_cfg.runtime_strategy;
+    build_context.hf_python = hf_python;
+    build_context.bundle_path = bundle_path;
+    build_context.config = &fp_cfg;
+    build_context.sections = &sections;
+
+    auto result = build_services_with_new_runtime(
+        build_context, bundle_port, trt_port, runtime_ptr.get());
+    if (!result.ok())
+    {
+        throw std::runtime_error(
+            "New runtime build failed for strategy '" + build_context.strategy
+            + "' from bundle '" + bundle_path + "': " + result.message);
+    }
+
+    std::cerr << "[trtf] Runtime ready (backend=trt_new_runtime, strategy="
+              << build_context.strategy << ")" << std::endl;
+    return new trtf::runtime::PipelineRouter(
+        std::move(result.services), bundle.info.model_id, "trt_new_runtime");
 }
 
 trtf::IPipeline* try_create_pipeline_with_options(
@@ -270,7 +299,11 @@ trtf::IPipeline* try_create_pipeline_with_options(
 
     if (default_max_new_tokens > 0)
     {
-        trtf::cabi::detail::set_default_max_new_tokens(pipeline, default_max_new_tokens);
+        auto* router = dynamic_cast<trtf::runtime::PipelineRouter*>(pipeline);
+        if (router != nullptr)
+        {
+            router->set_default_max_new_tokens(default_max_new_tokens);
+        }
     }
 
     auto t1 = std::chrono::steady_clock::now();
@@ -284,55 +317,7 @@ trtf::IPipeline* try_create_from_bundle(const std::string& bundle_path, const st
 {
     trtf::BundleFile bundle = trtf::ReadBundleFile(bundle_path);
     auto sections = trtf::find_bundle_sections(bundle);
-
-    // Check for diffusion bundle early (no engine_plan needed)
-    // Parse config to detect strategy before engine deserialization
-    auto fp_cfg_early = parse_fast_path_config_or_empty(sections, bundle.info.max_cache_length);
-
-    if (fp_cfg_early.runtime_strategy == "diffusion")
-    {
-        auto runtime_ptr = create_runtime_or_throw();
-        return trtf::cabi::create_diffusion_pipeline(
-            fp_cfg_early, sections, runtime_ptr,
-            bundle.info.model_id, hf_python, bundle_path);
-    }
-
-    ensure_bundle_has_plan_data(sections, bundle_path);
-
-    // Deserialize TRT engine
-    std::cerr << "[trtf] Deserializing TRT engine from bundle ("
-              << sections.plan_data->size() / (1024 * 1024) << " MB) ..." << std::endl;
-
-    auto runtime_ptr = create_runtime_or_throw();
-
-    auto tdeser0 = std::chrono::steady_clock::now();
-    auto trt_engine = deserialize_engine_or_throw(runtime_ptr, sections, bundle_path);
-    auto tdeser1 = std::chrono::steady_clock::now();
-    std::cerr << "[trtf] Engine deserialized ["
-              << std::chrono::duration_cast<std::chrono::milliseconds>(tdeser1 - tdeser0).count()
-              << " ms]" << std::endl;
-
-    auto exec_ctx = create_execution_context_or_throw(trt_engine);
-
-    // Parse config.json for model metadata
-    auto fp_cfg = parse_or_build_fast_path_config(sections, bundle.info);
-
-    // Dispatch to per-strategy factory
-    const auto& strategy = fp_cfg.runtime_strategy;
-    trtf::cabi::register_builtin_backend_factories_once();
-
-    auto registry_ctx = build_registry_dispatch_context(
-        &runtime_ptr, &trt_engine, &exec_ctx, &fp_cfg, &sections,
-        &bundle.info.model_id, &hf_python, &bundle_path);
-
-    if (auto* pipeline = trtf::cabi::try_create_pipeline_from_registry(strategy, &registry_ctx))
-    {
-        return pipeline;
-    }
-
-    return trtf::cabi::create_decoder_pipeline(
-        std::move(trt_engine), std::move(exec_ctx), fp_cfg,
-        sections, bundle.info.model_id, hf_python, bundle_path);
+    return try_create_with_new_runtime(bundle, sections, bundle_path, hf_python);
 }
 #endif
 

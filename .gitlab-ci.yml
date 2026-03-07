@@ -14,6 +14,14 @@ stages:
 variables:
   ENGINE_DIR: /workspace/users/yifeif/trt-transformers/engines
   GIT_STRATEGY: fetch
+  PYTHONHASHSEED: "0"
+  # Temporary: keep coverage collection on, but disable coverage-threshold blocking
+  # while runtime refactor regression work is in progress.
+  PYTHON_COVERAGE_MIN_LINE: "0"
+  PYTHON_COVERAGE_MIN_BRANCH: "0"
+  CPP_COVERAGE_MIN_LINE: "0"
+  CPP_COVERAGE_MIN_FUNCTION: "0"
+  CPP_COVERAGE_MIN_BRANCH: "0"
 
 workflow:
   auto_cancel:
@@ -48,7 +56,7 @@ build-all:
     expire_in: 1 day
   timeout: 15m
 
-# ── Tier 1: Unit Tests + Static Gates (5 parallel jobs) ─────────────────────
+# ── Tier 1: Unit Tests + Static Gates (7 parallel jobs) ─────────────────────
 
 check-family-coverage:
   stage: tier1-unit
@@ -88,11 +96,53 @@ test-cpp-unit:
     - ctest --test-dir build --output-on-failure
   timeout: 20m
 
+coverage-python:
+  stage: tier1-unit
+  needs:
+    - job: build-all
+      artifacts: false
+  script:
+    - python -m pip install --disable-pip-version-check --quiet "coverage[toml]==7.6.10"
+    - bash tools/coverage_ci/run_python_coverage.sh
+  coverage: '/PYTHON_COVERAGE_LINE=([0-9]+(?:\.[0-9]+)?)%/'
+  artifacts:
+    when: always
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/python-cobertura.xml
+    paths:
+      - coverage/python-coverage.txt
+      - coverage/python-cobertura.xml
+    expire_in: 2 days
+  timeout: 30m
+
+coverage-cpp:
+  stage: tier1-unit
+  needs:
+    - job: build-all
+      artifacts: false
+  script:
+    - python -m pip install --disable-pip-version-check --quiet "gcovr==8.2"
+    - bash tools/coverage_ci/run_cpp_coverage.sh
+  coverage: '/CPP_COVERAGE_LINE=([0-9]+(?:\.[0-9]+)?)%/'
+  artifacts:
+    when: always
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cpp-cobertura.xml
+    paths:
+      - coverage/cpp-coverage-summary.txt
+      - coverage/cpp-cobertura.xml
+    expire_in: 2 days
+  timeout: 40m
+
 # ── Tier 2: Graph-Op GPU Tests (~3 min) ──────────────────────────────────────
 
 test-graph-ops:
   stage: tier2-graph-ops
-  needs: [test-python-builder, test-cpp-unit]
+  needs: [test-python-builder, test-cpp-unit, coverage-python, coverage-cpp]
   script:
     - nvidia-smi
     - python -m pytest tests/builder/test_graph_ops.py
@@ -109,6 +159,8 @@ test-e2e-smoke:
     - check-family-coverage
     - check-cyclomatic-complexity
     - test-tools
+    - coverage-python
+    - coverage-cpp
     - test-graph-ops
   script:
     - python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v

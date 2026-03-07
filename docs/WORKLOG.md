@@ -1,5 +1,10 @@
 # Worklog
 
+This file is an archival engineering log. Runtime architecture references in
+older entries may describe deleted implementations and should not be treated as
+the current design source of truth. Use `docs/wiki/` for the live runtime
+architecture.
+
 ## 2026-02-27 — Fix C++ tokenizer parity, NED comparator, artifact layout
 
 Fixed the root cause of C++ binary text divergence from HF reference for

@@ -1,5 +1,7 @@
 #pragma once
 // Stub: detection backend (not yet implemented)
+#include "trtf/runtime/adapters/io/media_io_adapter.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -27,7 +29,7 @@ class DetectionBackend {
 public:
     virtual ~DetectionBackend() = default;
     virtual bool is_available() const { return false; }
-    virtual DetectionResult detect_image(const std::string& /*path*/) { return {}; }
+    virtual DetectionResult detect_image(const runtime::adapters::io::DecodedImage& /*image*/) { return {}; }
 };
 
 #if TRTF_HAS_TRT

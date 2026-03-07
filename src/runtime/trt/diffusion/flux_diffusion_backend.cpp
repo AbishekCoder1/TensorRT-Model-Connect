@@ -1,4 +1,7 @@
 #include "runtime/trt/diffusion/flux_diffusion_backend.h"
+#include "runtime/trt/diffusion/diffusion_denoising_step_seam.h"
+#include "runtime/trt/diffusion/diffusion_generation_plan.h"
+#include "runtime/trt/diffusion/diffusion_scheduler_helpers.h"
 
 #if TRTF_HAS_TRT
 
@@ -14,170 +17,13 @@
 
 namespace trtf {
 
-// ---------------------------------------------------------------------------
-// Flow Match Euler Scheduler (same as Wan, shared logic)
-// ---------------------------------------------------------------------------
 namespace {
 
-struct FlowMatchEulerState {
-    std::vector<double> sigmas;
-    std::vector<float> timesteps;
-    int32_t num_train_timesteps{1000};
-    float shift{1.0F};
-    bool use_dynamic_shifting{false};
-    float base_shift{0.5F};
-    float max_shift{1.15F};
-    int32_t image_seq_len{4096};
-    bool use_empirical_mu{false};  // FLUX.2 empirical mu formula
-
-    void set_timesteps(int32_t num_steps) {
-        const double N = static_cast<double>(num_train_timesteps);
-
-        if (use_dynamic_shifting) {
-            double mu;
-
-            if (use_empirical_mu) {
-                // FLUX.2 empirical mu formula (compute_empirical_mu in diffusers)
-                const double a1 = 8.73809524e-05, b1 = 1.89833333;
-                const double a2 = 0.00016927, b2 = 0.45666666;
-                const double seq = static_cast<double>(image_seq_len);
-                const double nsteps = static_cast<double>(num_steps);
-
-                if (seq > 4300.0) {
-                    mu = a2 * seq + b2;
-                } else {
-                    const double m_200 = a2 * seq + b2;
-                    const double m_10 = a1 * seq + b1;
-                    const double a = (m_200 - m_10) / 190.0;
-                    const double b = m_200 - 200.0 * a;
-                    mu = a * nsteps + b;
-                }
-            } else {
-                // FLUX.1 linear mu formula
-                const double base_seq = 256.0;
-                const double max_seq = 4096.0;
-                const double m = (static_cast<double>(max_shift) -
-                                  static_cast<double>(base_shift)) /
-                                 (max_seq - base_seq);
-                const double b = static_cast<double>(base_shift) -
-                                 m * base_seq;
-                mu = static_cast<double>(image_seq_len) * m + b;
-            }
-
-            // Generate raw sigmas in scheduler sigma-space (not inference-step space).
-            const double sigma_max = 1.0;
-            const double sigma_min = 1.0 / static_cast<double>(std::max(num_steps, 1));
-            std::vector<double> raw_sigmas(static_cast<std::size_t>(num_steps));
-            for (int32_t i = 0; i < num_steps; ++i) {
-                const double frac = static_cast<double>(i) /
-                    static_cast<double>(std::max(num_steps - 1, 1));
-                raw_sigmas[static_cast<std::size_t>(i)] =
-                    sigma_max + frac * (sigma_min - sigma_max);
-            }
-
-            // Apply exponential time shift: sigma = exp(mu)/(exp(mu)+(1/t-1))
-            const double exp_mu = std::exp(mu);
-            sigmas.resize(static_cast<std::size_t>(num_steps) + 1);
-            for (int32_t i = 0; i < num_steps; ++i) {
-                const double t = raw_sigmas[static_cast<std::size_t>(i)];
-                // Clamp to avoid division by zero
-                const double t_clamped = std::max(t, 1e-10);
-                const double shifted = exp_mu /
-                    (exp_mu + (1.0 / t_clamped - 1.0));
-                sigmas[static_cast<std::size_t>(i)] = shifted;
-            }
-            sigmas[static_cast<std::size_t>(num_steps)] = 0.0;
-
-            timesteps.resize(static_cast<std::size_t>(num_steps));
-            for (int32_t i = 0; i < num_steps; ++i) {
-                timesteps[static_cast<std::size_t>(i)] =
-                    static_cast<float>(sigmas[static_cast<std::size_t>(i)] * N);
-            }
-
-            std::cerr << "[flux-scheduler] Dynamic shifting: mu=" << mu
-                      << ", exp_mu=" << exp_mu
-                      << ", image_seq_len=" << image_seq_len << "\n";
-        } else {
-            // Original linear shift (for non-FLUX models)
-            const double s = static_cast<double>(shift);
-            const double raw_sigma_min = 1.0 / N;
-            const double sigma_min = s * raw_sigma_min /
-                (1.0 + (s - 1.0) * raw_sigma_min);
-            const double t_max = 1.0 * N;
-            const double t_min = sigma_min * N;
-
-            sigmas.resize(static_cast<std::size_t>(num_steps) + 1);
-            for (int32_t i = 0; i < num_steps; ++i) {
-                const double frac = static_cast<double>(i) /
-                    static_cast<double>(std::max(num_steps - 1, 1));
-                const double t_val = t_max + frac * (t_min - t_max);
-                double sigma = t_val / N;
-                if (std::abs(shift - 1.0F) > 1e-6F) {
-                    sigma = s * sigma / (1.0 + (s - 1.0) * sigma);
-                }
-                sigmas[static_cast<std::size_t>(i)] = sigma;
-            }
-            sigmas[static_cast<std::size_t>(num_steps)] = 0.0;
-
-            timesteps.resize(static_cast<std::size_t>(num_steps));
-            for (int32_t i = 0; i < num_steps; ++i) {
-                timesteps[static_cast<std::size_t>(i)] =
-                    static_cast<float>(sigmas[static_cast<std::size_t>(i)] *
-                                       num_train_timesteps);
-            }
-        }
-    }
-
-    void step(const float* velocity, const float* sample, float* output,
-              std::size_t count, int32_t step_index) const {
-        const double sigma = sigmas[static_cast<std::size_t>(step_index)];
-        const double sigma_next = sigmas[static_cast<std::size_t>(step_index) + 1];
-        const double dt = sigma_next - sigma;
-        for (std::size_t i = 0; i < count; ++i) {
-            output[i] = static_cast<float>(
-                static_cast<double>(sample[i]) +
-                dt * static_cast<double>(velocity[i]));
-        }
-    }
-};
+using diffusion::FlowMatchEulerState;
+using diffusion::FluxPackLayout;
 
 constexpr int32_t kFluxClipSeqLen = 77;
 constexpr int32_t kFluxClipDim = 768;
-
-int32_t resolve_flux_steps(int32_t requested, int32_t fallback)
-{
-    return requested <= 0 ? fallback : requested;
-}
-
-float resolve_flux_guidance(float requested, float fallback)
-{
-    return requested < 0.0F ? fallback : requested;
-}
-
-struct FluxPackLayout {
-    int32_t ph{2};
-    int32_t pw{2};
-    int32_t packed_channels{0};
-    int32_t h_packed{0};
-    int32_t w_packed{0};
-};
-
-FluxPackLayout make_flux_pack_layout(
-    const DiffusionConfig& config,
-    int32_t z_dim,
-    int32_t h_lat,
-    int32_t w_lat)
-{
-    FluxPackLayout layout;
-    if (config.patch_size.size() >= 3) {
-        layout.ph = config.patch_size[1];
-        layout.pw = config.patch_size[2];
-    }
-    layout.packed_channels = z_dim * layout.ph * layout.pw;
-    layout.h_packed = h_lat / layout.ph;
-    layout.w_packed = w_lat / layout.pw;
-    return layout;
-}
 
 std::vector<int32_t> make_clip_padded_ids(
     const std::vector<int32_t>& input_ids,
@@ -612,6 +458,78 @@ make_flux_unpack_fn(bool is_flux2, int32_t z_dim, int32_t h_lat, int32_t w_lat,
     };
 }
 
+void project_flux_encoder_hidden(
+    const std::vector<float>& text_embeddings,
+    const std::vector<float>& ctx_embed_w,
+    const std::vector<float>& ctx_embed_b,
+    int32_t text_seq,
+    int32_t t5_dim,
+    int32_t dit_dim,
+    std::vector<float>& encoder_hidden,
+    const std::function<void(const float*, const float*, const float*, float*, int32_t, int32_t, int32_t)>&
+        matmul_bias)
+{
+    if (ctx_embed_w.empty()) {
+        std::cerr << "[flux] Warning: No context_embedder weights\n";
+        return;
+    }
+
+    matmul_bias(
+        text_embeddings.data(),
+        ctx_embed_w.data(),
+        ctx_embed_b.empty() ? nullptr : ctx_embed_b.data(),
+        encoder_hidden.data(),
+        text_seq, t5_dim, dit_dim);
+    std::cerr << "[flux] Context embedder projection done\n";
+}
+
+void log_flux_dynamic_shift(const FlowMatchEulerState& scheduler)
+{
+    if (!scheduler.last_used_dynamic_shifting) {
+        return;
+    }
+
+    std::cerr << "[flux-scheduler] Dynamic shifting: mu="
+              << scheduler.last_dynamic_mu
+              << ", exp_mu=" << std::exp(scheduler.last_dynamic_mu)
+              << ", image_seq_len=" << scheduler.image_seq_len << "\n";
+}
+
+std::function<void(const std::vector<float>&, std::vector<float>&)>
+make_flux_hidden_embedder(
+    const std::vector<float>& x_embed_w,
+    const std::vector<float>& x_embed_b,
+    int32_t num_img_tokens,
+    const FluxPackLayout& layout,
+    int32_t dit_dim,
+    const std::function<void(const float*, const float*, const float*, float*, int32_t, int32_t, int32_t)>&
+        matmul_bias)
+{
+    if (x_embed_w.empty()) {
+        std::cerr << "[flux] Warning: No x_embedder weights, hidden_states are zero\n";
+        return [](
+                   const std::vector<float>& /*packed*/,
+                   std::vector<float>& hidden_out) {
+            std::fill(hidden_out.begin(), hidden_out.end(), 0.0F);
+        };
+    }
+
+    const auto* x_embed_w_ptr = &x_embed_w;
+    const auto* x_embed_b_ptr = &x_embed_b;
+    return [x_embed_w_ptr, x_embed_b_ptr, num_img_tokens, layout, dit_dim, matmul_bias](
+               const std::vector<float>& packed,
+               std::vector<float>& hidden_out) {
+        matmul_bias(
+            packed.data(),
+            x_embed_w_ptr->data(),
+            x_embed_b_ptr->empty() ? nullptr : x_embed_b_ptr->data(),
+            hidden_out.data(),
+            num_img_tokens,
+            layout.packed_channels,
+            dit_dim);
+    };
+}
+
 void prepare_flux2_vae_input(
     std::vector<float>& latents,
     const FluxPackLayout& layout,
@@ -724,26 +642,46 @@ bool run_flux_denoising_loop(
     EmbedHiddenFn&& embed_hidden,
     RunDenoiserFn&& run_denoiser)
 {
-    std::vector<float> temb;
     std::vector<float> packed;
-    std::vector<float> velocity;
     std::vector<float> next_latents(latents.size());
-
-    for (int32_t step = 0; step < num_inference_steps; ++step) {
-        const float t = scheduler.timesteps[static_cast<std::size_t>(step)] / 1000.0F;
-        compute_temb(t, temb);
-        pack_latents(latents, packed);
-        embed_hidden(packed, hidden);
-        if (!run_denoiser(hidden, temb, denoiser_output, error)) {
-            std::cerr << "[flux] Denoiser step " << step << " failed: " << error << "\n";
-            return false;
-        }
-        unpack_velocity(denoiser_output, velocity);
-        scheduler.step(velocity.data(), latents.data(), next_latents.data(),
-            latents.size(), step);
-        latents = next_latents;
+    const auto prepare_hidden = [&](const std::vector<float>& current_latents, std::vector<float>& hidden_out) {
+        pack_latents(current_latents, packed);
+        embed_hidden(packed, hidden_out);
+    };
+    const auto apply_scheduler = [&](std::vector<float>& current_latents, const std::vector<float>& velocity, int32_t step) {
+        scheduler.step(
+            velocity.data(), current_latents.data(), next_latents.data(),
+            current_latents.size(), step);
+        current_latents = next_latents;
+    };
+    const auto log_step = [&](int32_t step, const std::vector<float>& current_latents,
+                              const std::vector<float>& velocity, const std::vector<float>& current_hidden) {
         log_flux_step_stats(
-            step, num_inference_steps, scheduler, latents, velocity, hidden);
+            step, num_inference_steps, scheduler, current_latents, velocity, current_hidden);
+    };
+    if (!diffusion::run_flux_denoising_steps(
+            num_inference_steps,
+            scheduler.timesteps,
+            latents,
+            hidden,
+            denoiser_output,
+            error,
+            [&](float raw_timestep, std::vector<float>& temb) {
+                compute_temb(raw_timestep / 1000.0F, temb);
+            },
+            prepare_hidden,
+            [&](const std::vector<float>& hidden_in, const std::vector<float>& temb_in,
+                std::vector<float>& output, std::string& err) {
+                if (!run_denoiser(hidden_in, temb_in, output, err)) {
+                    std::cerr << "[flux] Denoiser step failed: " << err << "\n";
+                    return false;
+                }
+                return true;
+            },
+            unpack_velocity,
+            apply_scheduler,
+            log_step)) {
+        return false;
     }
     return true;
 }
@@ -1289,15 +1227,21 @@ VideoResult FluxDiffusionBackend::generate_video(
     VideoResult result;
     std::string error;
 
-    num_inference_steps = resolve_flux_steps(
-        num_inference_steps, mConfig.num_inference_steps);
-    guidance_scale = resolve_flux_guidance(
-        guidance_scale, mConfig.guidance_scale);
+    const auto plan = diffusion::make_flux_generation_plan(
+        mConfig,
+        mWeights,
+        num_inference_steps,
+        guidance_scale,
+        mHLatent,
+        mWLatent,
+        mNumImgTokens);
+    num_inference_steps = plan.num_inference_steps;
+    guidance_scale = plan.guidance_scale;
 
-    const int32_t dit_dim = mConfig.dit_dim;
-    const int32_t text_seq = mConfig.text_seq_len;
-    const int32_t z_dim = mConfig.z_dim;
-    const auto layout = make_flux_pack_layout(mConfig, z_dim, mHLatent, mWLatent);
+    const int32_t dit_dim = plan.dit_dim;
+    const int32_t text_seq = plan.text_seq;
+    const int32_t z_dim = plan.z_dim;
+    const auto& layout = plan.layout;
 
     std::vector<float> pooled_output;
     auto run_clip = [this](
@@ -1338,17 +1282,25 @@ VideoResult FluxDiffusionBackend::generate_video(
     const int32_t t5_dim = mConfig.text_encoder_dim;
     std::vector<float> encoder_hidden(
         static_cast<std::size_t>(text_seq) * static_cast<std::size_t>(dit_dim), 0.0F);
-    if (!mFluxCtxEmbedW.empty()) {
-        cpu_matmul_bias(
-            text_embeddings.data(),
-            mFluxCtxEmbedW.data(),
-            mFluxCtxEmbedB.empty() ? nullptr : mFluxCtxEmbedB.data(),
-            encoder_hidden.data(),
-            text_seq, t5_dim, dit_dim);
-        std::cerr << "[flux] Context embedder projection done\n";
-    } else {
-        std::cerr << "[flux] Warning: No context_embedder weights\n";
-    }
+    const auto matmul_bias = [this](
+                                 const float* a,
+                                 const float* b,
+                                 const float* bias,
+                                 float* out,
+                                 int32_t m,
+                                 int32_t k,
+                                 int32_t n) {
+        cpu_matmul_bias(a, b, bias, out, m, k, n);
+    };
+    project_flux_encoder_hidden(
+        text_embeddings,
+        mFluxCtxEmbedW,
+        mFluxCtxEmbedB,
+        text_seq,
+        t5_dim,
+        dit_dim,
+        encoder_hidden,
+        matmul_bias);
 
     std::vector<float> cos_vals, sin_vals;
     compute_flux_rope(layout.h_packed, layout.w_packed, text_seq, cos_vals, sin_vals);
@@ -1358,26 +1310,12 @@ VideoResult FluxDiffusionBackend::generate_video(
     //   then simple flatten to [4096, 128] tokens (channels-last)
     // FLUX.1: sample as [z_dim, h_lat, w_lat] = [16, 128, 128]
     //   then 2x2 spatial pack to [4096, 64] tokens
-    const bool is_flux2 = !mWeights.vae_bn_mean.empty();
-    const auto latent_size = is_flux2
-        ? (static_cast<std::size_t>(layout.packed_channels) *
-           static_cast<std::size_t>(layout.h_packed) *
-           static_cast<std::size_t>(layout.w_packed))
-        : (static_cast<std::size_t>(z_dim) *
-           static_cast<std::size_t>(mHLatent) *
-           static_cast<std::size_t>(mWLatent));
-    std::vector<float> latents(latent_size);
+    const bool is_flux2 = plan.is_flux2;
+    std::vector<float> latents(plan.latent_size);
     initialize_flux_latents(latents);
 
-    FlowMatchEulerState scheduler;
-    scheduler.shift = mConfig.flow_shift;
-    scheduler.use_dynamic_shifting = mConfig.use_dynamic_shifting;
-    scheduler.base_shift = mConfig.base_shift;
-    scheduler.max_shift = mConfig.max_shift;
-    scheduler.image_seq_len = mNumImgTokens;
-    // FLUX.2 uses empirical mu formula (detected via VAE BN presence)
-    scheduler.use_empirical_mu = !mWeights.vae_bn_mean.empty();
-    scheduler.set_timesteps(num_inference_steps);
+    FlowMatchEulerState scheduler = diffusion::make_flux_scheduler_state(plan);
+    log_flux_dynamic_shift(scheduler);
 
     std::cerr << "[flux] Starting denoising loop (" << num_inference_steps << " steps)"
               << " latents=[" << z_dim << "," << mHLatent << "," << mWLatent << "]"
@@ -1406,28 +1344,8 @@ VideoResult FluxDiffusionBackend::generate_video(
     auto unpack_velocity_fn = make_flux_unpack_fn(is_flux2, z_dim, mHLatent, mWLatent, layout);
 
     // Embed hidden states: pack -> x_embedder matmul
-    std::function<void(const std::vector<float>&, std::vector<float>&)> embed_hidden;
-    if (!mFluxXEmbedW.empty()) {
-        embed_hidden = [this, &layout, dit_dim](
-            const std::vector<float>& packed,
-            std::vector<float>& hidden_out) {
-            cpu_matmul_bias(
-                packed.data(),
-                mFluxXEmbedW.data(),
-                mFluxXEmbedB.empty() ? nullptr : mFluxXEmbedB.data(),
-                hidden_out.data(),
-                mNumImgTokens,
-                layout.packed_channels,
-                dit_dim);
-        };
-    } else {
-        std::cerr << "[flux] Warning: No x_embedder weights, hidden_states are zero\n";
-        embed_hidden = [](
-            const std::vector<float>& /*packed*/,
-            std::vector<float>& hidden_out) {
-            std::fill(hidden_out.begin(), hidden_out.end(), 0.0F);
-        };
-    }
+    auto embed_hidden = make_flux_hidden_embedder(
+        mFluxXEmbedW, mFluxXEmbedB, mNumImgTokens, layout, dit_dim, matmul_bias);
 
     if (!run_flux_denoising_loop(
             scheduler,

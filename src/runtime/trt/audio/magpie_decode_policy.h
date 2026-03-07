@@ -1,0 +1,132 @@
+#pragma once
+
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <vector>
+
+namespace trtf {
+
+constexpr int32_t kMagpieBosToken = 2016;
+constexpr int32_t kMagpieEosToken = 2017;
+constexpr int32_t kMagpieAudioRange = 2016;
+constexpr int32_t kMagpieMinFrames = 4;
+
+struct FrameDecodeResult
+{
+    std::vector<int32_t> frame_codes;
+    bool eos{false};
+};
+
+inline int32_t magpie_argmax_index(const float* values, int32_t count)
+{
+    int32_t best_id = 0;
+    float best_val = values[0];
+    for (int32_t i = 1; i < count; ++i)
+    {
+        if (values[i] > best_val)
+        {
+            best_val = values[i];
+            best_id = i;
+        }
+    }
+    return best_id;
+}
+
+inline FrameDecodeResult decode_magpie_frame_codes(
+    const std::vector<float>& logits,
+    int32_t num_cb,
+    int32_t cb_size,
+    bool greedy,
+    float temperature,
+    int32_t top_k,
+    const std::function<int32_t(const float*, int32_t, float, int32_t)>& sampler)
+{
+    FrameDecodeResult result;
+    result.frame_codes.assign(static_cast<std::size_t>(num_cb), 0);
+
+    for (int32_t cb = 0; cb < num_cb; ++cb)
+    {
+        const int32_t offset = cb * cb_size;
+        if (offset + cb_size > static_cast<int32_t>(logits.size()))
+        {
+            continue;
+        }
+
+        const float* cb_logits = logits.data() + offset;
+        if (magpie_argmax_index(cb_logits, cb_size) == kMagpieEosToken)
+        {
+            result.eos = true;
+        }
+
+        if (greedy)
+        {
+            result.frame_codes[static_cast<std::size_t>(cb)] =
+                magpie_argmax_index(cb_logits, kMagpieAudioRange);
+            continue;
+        }
+
+        result.frame_codes[static_cast<std::size_t>(cb)] =
+            sampler(cb_logits, kMagpieAudioRange, temperature, top_k);
+    }
+
+    return result;
+}
+
+inline bool magpie_has_repeated_tail_frames(
+    const std::vector<int32_t>& all_codes,
+    int32_t num_cb,
+    int32_t repeat_threshold)
+{
+    if (num_cb <= 0 || repeat_threshold <= 1)
+    {
+        return false;
+    }
+
+    const auto required = static_cast<std::size_t>(num_cb)
+        * static_cast<std::size_t>(repeat_threshold);
+    if (all_codes.size() < required)
+    {
+        return false;
+    }
+
+    const auto base = all_codes.size() - static_cast<std::size_t>(num_cb);
+    for (int32_t r = 1; r < repeat_threshold; ++r)
+    {
+        const auto prev_offset = base - static_cast<std::size_t>(r) * num_cb;
+        for (int32_t cb = 0; cb < num_cb; ++cb)
+        {
+            if (all_codes[base + static_cast<std::size_t>(cb)]
+                != all_codes[prev_offset + static_cast<std::size_t>(cb)])
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+inline int32_t magpie_trimmed_frame_count_for_repetition(
+    int32_t total_frames,
+    int32_t repeat_threshold)
+{
+    return std::max(total_frames - repeat_threshold + 1, 0);
+}
+
+inline bool should_run_magpie_periodic_check(
+    int32_t frame,
+    int32_t min_frames,
+    int32_t interval)
+{
+    return frame >= min_frames && interval > 0 && ((frame + 1) % interval == 0);
+}
+
+inline bool should_stop_magpie_on_eos(
+    bool eos,
+    int32_t frame,
+    int32_t min_frames)
+{
+    return eos && frame >= min_frames;
+}
+
+} // namespace trtf

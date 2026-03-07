@@ -122,6 +122,19 @@ pytest tests/ -v --ignore=tests/cpp
 
 C++ tests are plain executables (no framework) in `tests/cpp/`. They use `main()`, print to stderr on failure, and return 0 on success / non-zero on failure. Test names in CMake match their source files.
 
+## Traceability requirements
+
+Every new or modified test must document:
+- Intent
+- Preconditions
+- Postconditions
+
+And must include trace IDs linking to architecture and design contracts (`ARCH-*`, `UD-*`, `UT-*`/`IT-*`).
+
+Reference:
+- `docs/wiki/Traceability-Matrix.md` (bi-directional architecture -> unit design -> test process)
+- `docs/wiki/Testing-and-Validation.md` (test intent field requirements and examples)
+
 ## Test architecture
 
 Tests are organized in four layers, each with different scope, dependencies,

@@ -24,8 +24,10 @@
 #include "trtf/pipeline.h"
 
 #include <cstring>
+#include <cstdint>
 #include <iostream>
 #include <string>
+#include <vector>
 
 static int failures = 0;
 
@@ -42,6 +44,31 @@ static void check(bool condition, const char* test_name)
         ++failures;
     }
 }
+
+class DummyPipeline final : public trtf::IPipeline {
+public:
+    using trtf::IPipeline::generate;
+
+    const char* generate(const char* prompt, std::size_t max_new_tokens = 0) override
+    {
+        last_prompt = (prompt != nullptr) ? prompt : "";
+        last_max_new_tokens = max_new_tokens;
+        return "dummy-generate";
+    }
+
+    const char* model_id() const override
+    {
+        return "dummy-model";
+    }
+
+    const char* backend_name() const override
+    {
+        return "dummy-backend";
+    }
+
+    std::string last_prompt;
+    std::size_t last_max_new_tokens{0};
+};
 
 // -----------------------------------------------------------------------------
 // Test: null input returns nullptr with error message
@@ -159,6 +186,78 @@ static void test_delete_null_safe()
     check(true, "delete null IPipeline is safe");
 }
 
+// -----------------------------------------------------------------------------
+// Test: IPipeline default virtual methods return documented fallback values
+//
+// Intention:
+//   Exercise inline default virtual implementations in include/trtf/pipeline.h
+//   so ABI callers can rely on stable fallback behavior when a backend does not
+//   implement optional capabilities.
+//
+// Setup:
+//   A minimal concrete DummyPipeline that only overrides required pure virtuals.
+//
+// Mechanism:
+//   Calls each default method and checks return values (false/-1/null/0), plus
+//   validates that generate(prompt,image,max) forwards to generate(prompt,max).
+// -----------------------------------------------------------------------------
+static void test_ipipeline_default_virtuals()
+{
+    DummyPipeline pipeline;
+
+    const char* generated = pipeline.generate("hello", "image.png", 7);
+    check(generated != nullptr && std::string(generated) == "dummy-generate",
+        "generate(prompt,image,max) forwards to text generate");
+    check(pipeline.last_prompt == "hello", "generate forwarding preserves prompt");
+    check(pipeline.last_max_new_tokens == 7, "generate forwarding preserves max_new_tokens");
+
+    check(!pipeline.supports_vision(), "default supports_vision is false");
+    check(!pipeline.supports_video(), "default supports_video is false");
+    check(pipeline.generate_video("p", "/tmp/out") == -1, "default generate_video returns -1");
+
+    check(!pipeline.supports_segmentation(), "default supports_segmentation is false");
+    check(pipeline.segment("img.png", "mask.png") == -1, "default segment returns -1");
+
+    check(!pipeline.supports_encoding(), "default supports_encoding is false");
+    int32_t seq_len = -1;
+    int32_t hidden = -1;
+    check(pipeline.encode("text", &seq_len, &hidden) == nullptr, "default encode returns nullptr");
+
+    check(!pipeline.supports_solve(), "default supports_solve is false");
+    int32_t out_dim = -1;
+    check(pipeline.solve(nullptr, 0, nullptr, 0, &out_dim) == nullptr, "default solve returns nullptr");
+    int32_t out_c = -1;
+    int32_t out_h = -1;
+    int32_t out_w = -1;
+    check(pipeline.solve_field(nullptr, 0, &out_c, &out_h, &out_w) == nullptr,
+        "default solve_field returns nullptr");
+
+    check(!pipeline.supports_detection(), "default supports_detection is false");
+    check(pipeline.detect("img.png", "detections.json") == -1, "default detect returns -1");
+
+    check(!pipeline.supports_transcription(), "default supports_transcription is false");
+    check(pipeline.transcribe("audio.wav") == nullptr, "default transcribe returns nullptr");
+
+    check(!pipeline.supports_audio(), "default supports_audio is false");
+    check(pipeline.generate_audio("hello", "audio.wav") == -1, "default generate_audio returns -1");
+
+    check(!pipeline.supports_embedding(), "default supports_embedding is false");
+    check(pipeline.embed("hello", &out_dim) == nullptr, "default embed returns nullptr");
+    check(pipeline.embed_image("image.png", &out_dim) == nullptr, "default embed_image returns nullptr");
+    check(pipeline.embed_image_text("hello", "image.png", &out_dim) == nullptr,
+        "default embed_image_text returns nullptr");
+
+    check(!pipeline.supports_reranking(), "default supports_reranking is false");
+    check(pipeline.rerank("q", "doc") == 0.0F, "default rerank returns 0.0");
+
+    check(!pipeline.supports_prompted_segmentation(), "default supports_prompted_segmentation is false");
+    check(pipeline.segment_sam("image.png", "/tmp", 0.5F, 0.5F, true) == -1,
+        "default segment_sam returns -1");
+
+    check(!pipeline.supports_speech(), "default supports_speech is false");
+    check(pipeline.speak("in.wav", "out.wav") == -1, "default speak returns -1");
+}
+
 int main()
 {
     test_null_input_returns_null();
@@ -167,6 +266,7 @@ int main()
     test_has_trt_returns_bool();
     test_sizeof_ipipeline_is_vtable();
     test_delete_null_safe();
+    test_ipipeline_default_virtuals();
 
     if (failures > 0)
     {

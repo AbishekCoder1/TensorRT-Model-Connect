@@ -8,6 +8,10 @@
 /build-gpu-*/
 cmake-build-*/
 
+# Local coverage and investigation output
+/coverage/
+/artifacts/
+
 # CMake/Ninja generated files
 CMakeFiles/
 CMakeCache.txt

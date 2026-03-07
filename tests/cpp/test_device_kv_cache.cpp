@@ -25,6 +25,7 @@
 // =============================================================================
 
 #include "runtime/trt/core/device_kv_cache.h"
+#include "runtime/trt/core/device_kv_cache_update_plan.h"
 #include "runtime/trt/core/trt_decode_runtime.h"
 
 #include <cstdint>
@@ -44,6 +45,43 @@ static void check(bool condition, const char* test_name)
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
+}
+
+static void test_cache_row_update_plan_append_mode()
+{
+    constexpr std::size_t row_bytes = 16;
+    const trtf::detail::CacheRowUpdatePlan plan = trtf::detail::plan_cache_row_update(2, 4, row_bytes);
+
+    check(!plan.shift_existing_rows, "plan_append: append mode");
+    check(plan.append_offset_bytes == 2 * row_bytes, "plan_append: append offset");
+    check(plan.next_cache_length == 3, "plan_append: next length");
+}
+
+static void test_cache_row_update_plan_shift_mode()
+{
+    constexpr std::size_t row_bytes = 16;
+    const trtf::detail::CacheRowUpdatePlan plan = trtf::detail::plan_cache_row_update(4, 4, row_bytes);
+
+    check(plan.shift_existing_rows, "plan_shift: shift mode");
+    check(plan.shift_source_offset_bytes == row_bytes, "plan_shift: shift source offset");
+    check(plan.shift_copy_bytes == 3 * row_bytes, "plan_shift: shift copy bytes");
+    check(plan.tail_offset_bytes == 3 * row_bytes, "plan_shift: tail offset");
+    check(plan.next_cache_length == 4, "plan_shift: next length");
+}
+
+static void test_cache_row_update_plan_edge_cases()
+{
+    constexpr std::size_t row_bytes = 32;
+
+    const trtf::detail::CacheRowUpdatePlan overflow_plan = trtf::detail::plan_cache_row_update(9, 4, row_bytes);
+    check(overflow_plan.shift_existing_rows, "plan_edge_overflow: uses shift mode");
+    check(overflow_plan.next_cache_length == 4, "plan_edge_overflow: next length clamped");
+
+    const trtf::detail::CacheRowUpdatePlan single_slot_plan = trtf::detail::plan_cache_row_update(1, 1, row_bytes);
+    check(single_slot_plan.shift_existing_rows, "plan_edge_single_slot: uses shift mode");
+    check(single_slot_plan.shift_copy_bytes == 0, "plan_edge_single_slot: zero shift bytes");
+    check(single_slot_plan.tail_offset_bytes == 0, "plan_edge_single_slot: zero tail offset");
+    check(single_slot_plan.next_cache_length == 1, "plan_edge_single_slot: next length");
 }
 
 #if TRTF_HAS_TRT
@@ -311,6 +349,10 @@ static void test_multi_layer_distinct_pointers()
 
 int main()
 {
+    test_cache_row_update_plan_append_mode();
+    test_cache_row_update_plan_shift_mode();
+    test_cache_row_update_plan_edge_cases();
+
 #if TRTF_HAS_TRT
     test_construction();
     test_prepare_step_progression();
@@ -327,7 +369,12 @@ int main()
     std::cerr << "All DeviceKvCache tests passed.\n";
     return 0;
 #else
-    std::cout << "test_device_kv_cache: SKIPPED (TRTF_HAS_TRT=0)" << std::endl;
+    if (failures > 0)
+    {
+        std::cerr << failures << " test(s) FAILED\n";
+        return 1;
+    }
+    std::cout << "test_device_kv_cache: partial run (TRTF_HAS_TRT=0; GPU-path tests skipped)" << std::endl;
     return 0;
 #endif
 }

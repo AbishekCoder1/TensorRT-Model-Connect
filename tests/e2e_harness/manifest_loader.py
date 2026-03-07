@@ -252,6 +252,8 @@ def _build_inputs(manifest: dict) -> dict:
     if "point_x" in manifest:
         inputs["point_x"] = manifest["point_x"]
         inputs["point_y"] = manifest["point_y"]
+    if "num_expected_masks" in manifest:
+        inputs["num_expected_masks"] = manifest["num_expected_masks"]
 
     # Max new tokens
     inputs["max_new_tokens"] = manifest.get("max_new_tokens", 30)

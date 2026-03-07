@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -49,6 +50,29 @@ from . import save_full_stderr
 from .registry import get_comparator, get_reference, get_runner
 
 logger = logging.getLogger(__name__)
+
+_MIGRATED_RUNTIME_STRATEGIES = frozenset({
+    "decoder_kv_cache",
+    "decoder_moe",
+    "ssm_recurrent",
+    "rwkv_recurrent",
+    "hybrid_mamba_attention",
+    "encoder_only",
+    "embedding",
+    "reranking",
+    "vision_language",
+    "segmentation",
+    "prompted_segmentation",
+    "object_detection",
+    "neural_operator",
+    "text_to_audio",
+    "speech_to_text",
+    "speech_to_speech",
+    "omni_multimodal",
+    "diffusion",
+})
+_NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
+_LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +392,104 @@ def _auto_register_artifacts(sink: Any, output: StageOutput, prefix: str) -> Non
             sink.register_artifact(f"{prefix}_{artifact_key}", rel)
 
 
+def _collect_runtime_guard_payloads(value: Any) -> list[tuple[list[str], list[str], int | None]]:
+    """Collect (command argv, stderr payloads, returncode) tuples from nested output structures."""
+    payloads: list[tuple[list[str], list[str], int | None]] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            command = node.get("command")
+            command_argv: list[str] = []
+            if isinstance(command, list):
+                command_argv = [str(part) for part in command]
+            elif isinstance(command, str) and command:
+                try:
+                    command_argv = shlex.split(command)
+                except ValueError:
+                    command_argv = [command]
+
+            stderr_texts: list[str] = []
+
+            for key in ("stderr", "stderr_truncated"):
+                text = node.get(key)
+                if isinstance(text, str) and text:
+                    stderr_texts.append(text)
+
+            stderr_log = node.get("stderr_log")
+            if isinstance(stderr_log, str) and stderr_log:
+                try:
+                    stderr_texts.append(Path(stderr_log).read_text(encoding="utf-8"))
+                except OSError:
+                    pass
+
+            returncode = node.get("returncode")
+            if not isinstance(returncode, int):
+                returncode = None
+
+            if command_argv:
+                payloads.append((command_argv, stderr_texts, returncode))
+
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return payloads
+
+
+def _validate_trt_runtime_path(
+    case: E2ECase,
+    ctx: RunContext,
+    output: StageOutput,
+) -> str | None:
+    """Ensure TRT E2E subprocesses for migrated strategies use the new runtime path."""
+    if case.runtime_strategy not in _MIGRATED_RUNTIME_STRATEGIES:
+        return None
+
+    payloads = _collect_runtime_guard_payloads({
+        "metadata": output.metadata,
+        "data": output.data,
+    })
+    if not payloads:
+        return None
+
+    binary_name = Path(ctx.binary_path).name if ctx.binary_path else ""
+    relevant_stderr: list[str] = []
+    for command_argv, stderr_texts, returncode in payloads:
+        executable = command_argv[0] if command_argv else ""
+        executable_name = Path(executable).name if executable else ""
+        if ctx.binary_path and executable == ctx.binary_path:
+            combined_payload_stderr = "\n".join(stderr_texts)
+            if returncode not in (None, 0) and _NEW_RUNTIME_MARKER not in combined_payload_stderr \
+                    and _LEGACY_RUNTIME_MARKER not in combined_payload_stderr:
+                continue
+            relevant_stderr.extend(stderr_texts)
+            continue
+        if binary_name and executable_name == binary_name:
+            combined_payload_stderr = "\n".join(stderr_texts)
+            if returncode not in (None, 0) and _NEW_RUNTIME_MARKER not in combined_payload_stderr \
+                    and _LEGACY_RUNTIME_MARKER not in combined_payload_stderr:
+                continue
+            relevant_stderr.extend(stderr_texts)
+    if not relevant_stderr:
+        return None
+
+    combined_stderr = "\n".join(relevant_stderr)
+    if _LEGACY_RUNTIME_MARKER in combined_stderr:
+        return (
+            f"E2E runtime guard failed for strategy {case.runtime_strategy}: "
+            "TRT subprocess used legacy compatibility factory mode"
+        )
+    if _NEW_RUNTIME_MARKER not in combined_stderr:
+        return (
+            f"E2E runtime guard failed for strategy {case.runtime_strategy}: "
+            "TRT subprocess did not confirm the new runtime path"
+        )
+    return None
+
+
 def _build_repro_commands(
     case: E2ECase,
     ctx: RunContext,
@@ -393,20 +515,44 @@ def _build_repro_commands(
         build_parts.append("--trust-remote-code")
     repro["build_bundle"] = " ".join(build_parts)
 
-    # TRT inference command (text-gen models via C++ binary)
+    # TRT inference command (task-specific C++ binary entrypoint)
     if bundle_path and ctx.binary_path:
-        infer_parts = [
-            ctx.binary_path, "run", bundle_path,
-            "--prompt", _shell_quote(case.inputs.get("prompt", "")),
-            "--max-new-tokens", str(case.inputs.get("max_new_tokens", 20)),
-        ]
-        if ctx.hf_python:
-            infer_parts.extend(["--hf-python", ctx.hf_python])
-        # Add image flag for VL models
         image = (case.inputs.get("image") or case.inputs.get("test_image")
                  or case.inputs.get("image_path"))
-        if image:
-            infer_parts.extend(["--image", str(image)])
+        task_strategy = case.task_strategy or ""
+        if task_strategy == "diffusion_media_generation":
+            infer_parts = [
+                ctx.binary_path, "generate-video", bundle_path,
+                "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
+                "--output", "/tmp/trtf_frames",
+                "--num-steps", str(case.inputs.get("num_inference_steps", 30)),
+            ]
+        elif task_strategy == "prompted_segmentation":
+            infer_parts = [
+                ctx.binary_path, "segment-sam", bundle_path,
+                "--image", str(image or ""),
+                "--output", "/tmp/trtf_masks",
+                "--point-x", str(case.inputs.get("point_x", 0.5)),
+                "--point-y", str(case.inputs.get("point_y", 0.5)),
+            ]
+            if not case.inputs.get("is_foreground", True):
+                infer_parts.append("--background")
+        elif task_strategy == "segmentation":
+            infer_parts = [
+                ctx.binary_path, "segment", bundle_path,
+                "--image", str(image or ""),
+                "--output", "/tmp/trtf_segmentation.png",
+            ]
+        else:
+            infer_parts = [
+                ctx.binary_path, "run", bundle_path,
+                "--prompt", _shell_quote(case.inputs.get("prompt", "")),
+                "--max-new-tokens", str(case.inputs.get("max_new_tokens", 20)),
+            ]
+            if image:
+                infer_parts.extend(["--image", str(image)])
+        if ctx.hf_python:
+            infer_parts.extend(["--hf-python", ctx.hf_python])
         repro["trt_inference"] = " ".join(infer_parts)
 
     # Rerun this exact test case
@@ -555,6 +701,17 @@ class E2EOrchestrator:
                     sink.write_stage_output(stage_name, trt_output, prefix="trt")
                     _log_stage_subprocess(sink, stage_name, trt_output, "trt")
                     _auto_register_artifacts(sink, trt_output, "trt")
+                    runtime_path_error = _validate_trt_runtime_path(
+                        case, ctx_with_bundle, trt_output)
+                    if runtime_path_error is not None:
+                        stage_results[stage_name] = CompareResult(
+                            stage_name=stage_name,
+                            status=StageStatus.ERROR.value,
+                            message=f"TRT run failed: {runtime_path_error}",
+                        )
+                        if stage.required:
+                            all_stages_pass = False
+                        continue
                 except Exception as e:
                     timing[f"trt_{stage_name}_s"] = time.monotonic() - t0
                     tb = traceback.format_exc()

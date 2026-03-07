@@ -2,6 +2,7 @@
 #include "runtime/trt/core/device_kv_cache.h"
 #include "runtime/trt/core/trt_decode_runtime.h"
 #include "runtime/trt/multimodal/image_preprocessor.h"
+#include "runtime/trt/multimodal/vl_decode_policy.h"
 #include "runtime/trt/multimodal/vision_engine.h"
 
 #include <cstdint>
@@ -51,11 +52,6 @@ void run_text_prefill_steps(
     }
 }
 
-int32_t get_current_token(const std::vector<int32_t>& input_ids, int32_t bos_token_id)
-{
-    return input_ids.empty() ? bos_token_id : input_ids.back();
-}
-
 void run_text_decode_steps(
     const DecoderStepEngine& engine,
     DeviceKvCache& cache,
@@ -66,67 +62,34 @@ void run_text_decode_steps(
     int32_t current_token,
     const char* error_prefix)
 {
-    for (std::size_t step = 0; step < config.max_new_tokens; ++step)
+    std::string error;
+    run_decoder_step_or_throw(engine, cache, resources, current_token, logits, error_prefix);
+    if (!run_vl_decode_loop(
+            config.max_new_tokens,
+            engine.id_eos,
+            logits,
+            output,
+            error,
+            [&engine, &cache, &resources, error_prefix](
+                int32_t next_token,
+                std::vector<float>& next_logits,
+                std::string& step_error)
+            {
+                if (run_decoder_step_device(
+                        engine, cache, resources, next_token, next_logits, step_error))
+                {
+                    return true;
+                }
+                step_error = std::string(error_prefix) + step_error;
+                return false;
+            },
+            [](const std::vector<float>& next_logits)
+            {
+                return select_argmax_token(next_logits);
+            }))
     {
-        run_decoder_step_or_throw(engine, cache, resources, current_token, logits, error_prefix);
-        const int32_t next_token = select_argmax_token(logits);
-        output.push_back(next_token);
-        current_token = next_token;
-        if (next_token == engine.id_eos)
-        {
-            break;
-        }
+        throw std::runtime_error(error);
     }
-}
-
-struct VlTokenEmbedding {
-    const float* input_embed{nullptr};
-    float use_input_embed{0.0F};
-    std::vector<const float*> deepstack_embeds;
-    float deepstack_active{0.0F};
-};
-
-VlTokenEmbedding build_vl_token_embedding(
-    int32_t token_id,
-    int32_t image_token_id,
-    const float* image_features,
-    int32_t num_features,
-    int32_t feature_dim,
-    int32_t& feature_index,
-    const std::vector<std::vector<float>>& deepstack_features)
-{
-    VlTokenEmbedding embedding;
-    if (token_id != image_token_id || feature_index >= num_features)
-    {
-        return embedding;
-    }
-
-    const int32_t used_feature_index = feature_index;
-    embedding.input_embed = image_features + static_cast<std::size_t>(feature_index) * feature_dim;
-    embedding.use_input_embed = 1.0F;
-    ++feature_index;
-
-    if (deepstack_features.empty())
-    {
-        return embedding;
-    }
-
-    embedding.deepstack_embeds.reserve(deepstack_features.size());
-    for (const auto& ds : deepstack_features)
-    {
-        const int32_t ds_feature_count = static_cast<int32_t>(ds.size() / feature_dim);
-        if (used_feature_index < ds_feature_count)
-        {
-            embedding.deepstack_embeds.push_back(
-                ds.data() + static_cast<std::size_t>(used_feature_index) * feature_dim);
-        }
-        else
-        {
-            embedding.deepstack_embeds.push_back(nullptr);
-        }
-    }
-    embedding.deepstack_active = 1.0F;
-    return embedding;
 }
 
 void run_decoder_step_with_embedding_or_throw(
@@ -207,16 +170,32 @@ void run_vl_decode_steps(
     std::vector<float>& logits,
     std::vector<int32_t>& output)
 {
-    for (std::size_t step = 0; step < config.max_new_tokens; ++step)
+    std::string error;
+    if (!run_vl_decode_loop(
+            config.max_new_tokens,
+            engine.id_eos,
+            logits,
+            output,
+            error,
+            [&engine, &cache, &resources](
+                int32_t next_token,
+                std::vector<float>& next_logits,
+                std::string& step_error)
+            {
+                if (run_decoder_step_device(
+                        engine, cache, resources, next_token, next_logits, step_error))
+                {
+                    return true;
+                }
+                step_error = "VL decode step failed: " + step_error;
+                return false;
+            },
+            [](const std::vector<float>& next_logits)
+            {
+                return select_argmax_token(next_logits);
+            }))
     {
-        const int32_t next_token = select_argmax_token(logits);
-        output.push_back(next_token);
-        if (next_token == engine.id_eos)
-        {
-            break;
-        }
-        run_decoder_step_or_throw(
-            engine, cache, resources, next_token, logits, "VL decode step failed: ");
+        throw std::runtime_error(error);
     }
 }
 
@@ -275,7 +254,7 @@ std::vector<int32_t> VLBackendFastPath::generate(
         *mDecoderEngine, cache, resources, input_ids, logits, "VL prefill step failed: ");
     run_text_decode_steps(
         *mDecoderEngine, cache, resources, config, logits, output,
-        get_current_token(input_ids, mDecoderEngine->id_bos),
+        current_vl_token(input_ids, mDecoderEngine->id_bos),
         "VL decode step failed: ");
     return output;
 }
@@ -317,7 +296,7 @@ std::vector<int32_t> VLBackendFastPath::generate_vl(
         feat_idx, deepstack_features, logits);
     run_vl_last_prefill_step(
         *mDecoderEngine, cache, resources,
-        get_current_token(input_ids, mDecoderEngine->id_bos),
+        current_vl_token(input_ids, mDecoderEngine->id_bos),
         image_features, num_features, feature_dim, mConfig.image_token_id,
         feat_idx, deepstack_features, logits);
     run_vl_decode_steps(*mDecoderEngine, cache, resources, config, logits, output);
@@ -325,7 +304,7 @@ std::vector<int32_t> VLBackendFastPath::generate_vl(
 }
 
 bool VLBackendFastPath::prepare_image(
-    const std::string& image_path,
+    const runtime::adapters::io::DecodedImage& image,
     std::vector<float>& image_features,
     int32_t& num_features,
     int32_t& feature_dim,
@@ -339,7 +318,7 @@ bool VLBackendFastPath::prepare_image(
 
     // Step 1: Load and preprocess image (C++ stb)
     std::cerr << "[trtf] Loading and preprocessing image ..." << std::endl;
-    auto preprocessed = load_and_preprocess_image(image_path, mVLConfig);
+    auto preprocessed = preprocess_decoded_image(image, mVLConfig);
     if (!preprocessed.ok)
     {
         error = "Image preprocessing failed";

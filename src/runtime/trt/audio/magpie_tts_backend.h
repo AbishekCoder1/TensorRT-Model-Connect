@@ -181,9 +181,6 @@ private:
     bool cpu_run_conditioned_step(DecoderLoopState& state, int32_t frame);
     bool cpu_sample_frame_codes(DecoderLoopState& state,
                                 std::vector<int32_t>& frame_codes, bool& eos);
-    static bool cpu_check_repetition(const std::vector<int32_t>& all_codes,
-                                     int32_t frame, int32_t num_cb,
-                                     int32_t threshold);
 
     // generate_audio() helpers
     void apply_env_overrides();

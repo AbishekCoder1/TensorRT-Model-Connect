@@ -11,11 +11,15 @@
 #include "test_helpers.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -40,13 +44,33 @@ void write_u64_le(std::ofstream& out, uint64_t value)
     out.write(reinterpret_cast<const char*>(bytes), 8);
 }
 
-void write_invalid_engine_bundle(const std::filesystem::path& path)
-{
-    // Internal .trtfb magic: "TRTFB\0\1\0"
-    static constexpr unsigned char kBundleMagic[8] = {'T', 'R', 'T', 'F', 'B', '\0', '\x01', '\0'};
+struct BundleSectionSpec {
+    std::string name;
+    std::string data;
+};
 
-    const std::string header = R"({
-  "model_id": "runtime-regression-test",
+std::string build_bundle_header_json(
+    const std::vector<BundleSectionSpec>& sections,
+    const std::string& model_id)
+{
+    std::string sections_json;
+    std::size_t offset = 0;
+    for (std::size_t i = 0; i < sections.size(); ++i)
+    {
+        const auto& section = sections[i];
+        if (i != 0)
+        {
+            sections_json += ",\n";
+        }
+        sections_json += "    \"" + section.name + "\": {\"offset\": "
+            + std::to_string(offset) + ", \"size\": "
+            + std::to_string(section.data.size()) + "}";
+        offset += section.data.size();
+    }
+
+    return std::string(R"({
+  "model_id": ")")
+        + model_id + R"(",
   "model_type": "unit-test",
   "family": "unit",
   "hidden_size": 64,
@@ -55,26 +79,58 @@ void write_invalid_engine_bundle(const std::filesystem::path& path)
   "num_key_value_heads": 1,
   "max_cache_length": 32,
   "sections": {
-    "engine_plan": {"offset": 0, "size": 16}
+)"
+        + sections_json + R"(
   }
 })";
+}
 
+void write_bundle_with_sections(
+    const std::filesystem::path& path,
+    const std::vector<BundleSectionSpec>& sections,
+    const std::string& model_id = "runtime-regression-test")
+{
+    // Internal .trtfb magic: "TRTFB\0\1\0"
+    static constexpr unsigned char kBundleMagic[8] = {'T', 'R', 'T', 'F', 'B', '\0', '\x01', '\0'};
+
+    const std::string header = build_bundle_header_json(sections, model_id);
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out.write(reinterpret_cast<const char*>(kBundleMagic), sizeof(kBundleMagic));
     write_u64_le(out, static_cast<uint64_t>(header.size()));
     out.write(header.data(), static_cast<std::streamsize>(header.size()));
+    for (const auto& section : sections)
+    {
+        out.write(section.data.data(), static_cast<std::streamsize>(section.data.size()));
+    }
+}
 
+void write_invalid_engine_bundle(const std::filesystem::path& path)
+{
     // Intentionally invalid TensorRT plan payload.
     static constexpr char kInvalidPlan[16] = {
         'N', 'O', 'T', '_', 'A', '_', 'P', 'L', 'A', 'N', '_', 'B', 'L', 'O', 'B', '!'};
-    out.write(kInvalidPlan, sizeof(kInvalidPlan));
+    write_bundle_with_sections(
+        path,
+        {BundleSectionSpec{"engine_plan", std::string(kInvalidPlan, sizeof(kInvalidPlan))}});
+}
+
+bool message_contains_any(const std::string& msg, std::initializer_list<const char*> needles)
+{
+    for (const char* needle : needles)
+    {
+        if (msg.find(needle) != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool message_contains_any_expected_failure(const std::string& msg)
 {
-    return msg.find("deserialize engine") != std::string::npos
-        || msg.find("execution context") != std::string::npos
-        || msg.find("Failed to load bundle") != std::string::npos;
+    return message_contains_any(
+        msg, {"deserialize engine", "deserialize failed", "execution context",
+                 "Failed to load bundle", "New runtime build failed"});
 }
 
 void expect_invalid_bundle_creation_fails(const std::string& bundle_path, const char* test_name)
@@ -102,6 +158,99 @@ void test_invalid_plan_bundle_reports_error()
 #endif
 }
 
+void test_missing_engine_plan_bundle_reports_error()
+{
+#if TRTF_HAS_TRT
+    trtf_test::TempDirGuard dir;
+    const std::filesystem::path bundle_path = std::filesystem::path(dir.path()) / "missing_engine_plan.trtfb";
+
+    // Preconditions: valid bundle + config.json section, but no engine_plan section.
+    const std::string config = R"({
+  "runtime_strategy": "decoder_kv_cache",
+  "hidden_size": 64,
+  "num_attention_heads": 1,
+  "num_key_value_heads": 1
+})";
+    write_bundle_with_sections(bundle_path, {BundleSectionSpec{"config.json", config}});
+
+    auto* pipeline = trtf_create_pipeline(bundle_path.string().c_str(), 0);
+    check(pipeline == nullptr, "bundle missing engine_plan returns nullptr");
+
+    const char* err = trtf_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "trtf_last_error set for missing engine_plan");
+    if (err != nullptr)
+    {
+        check(
+            message_contains_any(err, {"New runtime build failed", "engine_plan"}),
+            "migrated strategy defaults to new runtime and reports engine_plan guard");
+    }
+#else
+    std::cerr << "SKIP: TRTF_HAS_TRT=0\n";
+#endif
+}
+
+void test_diffusion_bundle_missing_required_section_reports_error()
+{
+#if TRTF_HAS_TRT
+    trtf_test::TempDirGuard dir;
+    const std::filesystem::path bundle_path = std::filesystem::path(dir.path()) / "diffusion_missing_sections.trtfb";
+
+    // Preconditions: diffusion strategy selected, but required diffusion plans omitted.
+    const std::string config = R"({
+  "runtime_strategy": "diffusion",
+  "num_text_encoders": 1,
+  "scheduler": "flow_match_euler"
+})";
+    write_bundle_with_sections(bundle_path, {BundleSectionSpec{"config.json", config}});
+
+    auto* pipeline = trtf_create_pipeline(bundle_path.string().c_str(), 0);
+    check(pipeline == nullptr, "diffusion bundle without required plans returns nullptr");
+
+    const char* err = trtf_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "trtf_last_error set for diffusion guard path");
+    if (err != nullptr)
+    {
+        check(
+            message_contains_any(err, {"New runtime build failed", "denoiser_plan"}),
+            "migrated diffusion strategy defaults to new runtime and reports denoiser guard");
+    }
+#else
+    std::cerr << "SKIP: TRTF_HAS_TRT=0\n";
+#endif
+}
+
+void test_unknown_strategy_reports_new_runtime_unsupported_strategy_error()
+{
+#if TRTF_HAS_TRT
+    trtf_test::TempDirGuard dir;
+    const std::filesystem::path bundle_path = std::filesystem::path(dir.path()) / "unknown_strategy_missing_engine_plan.trtfb";
+
+    const std::string config = R"({
+  "runtime_strategy": "future_unknown_strategy",
+  "hidden_size": 64,
+  "num_attention_heads": 1,
+  "num_key_value_heads": 1
+})";
+    write_bundle_with_sections(bundle_path, {BundleSectionSpec{"config.json", config}});
+
+    auto* pipeline = trtf_create_pipeline(bundle_path.string().c_str(), 0);
+    check(pipeline == nullptr, "unknown strategy without engine_plan returns nullptr");
+
+    const char* err = trtf_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "trtf_last_error set for unknown strategy");
+    if (err != nullptr)
+    {
+        check(
+            message_contains_any(err, {"Unsupported runtime_strategy for new runtime path", "Unsupported audio strategy",
+                                          "Unsupported text strategy", "Unsupported vision strategy",
+                                          "Unsupported encoder strategy", "Unsupported diffusion strategy"}),
+            "unknown strategy fails through the new runtime unsupported-strategy guard");
+    }
+#else
+    std::cerr << "SKIP: TRTF_HAS_TRT=0\n";
+#endif
+}
+
 void test_invalid_plan_bundle_repeatable()
 {
 #if TRTF_HAS_TRT
@@ -123,6 +272,9 @@ void test_invalid_plan_bundle_repeatable()
 int main()
 {
     test_invalid_plan_bundle_reports_error();
+    test_missing_engine_plan_bundle_reports_error();
+    test_diffusion_bundle_missing_required_section_reports_error();
+    test_unknown_strategy_reports_new_runtime_unsupported_strategy_error();
     test_invalid_plan_bundle_repeatable();
 
     if (failures > 0)

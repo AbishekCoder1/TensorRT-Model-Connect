@@ -25,6 +25,66 @@ and (for non-text modalities) modality-specific quality metrics.
 
 ---
 
+## Test Intent Contract (Required for Every Test)
+
+Every test added or modified in this repository must document:
+
+| Field | Requirement |
+|------|-------------|
+| Intent | What behavior/contract the test proves (not implementation details) |
+| Preconditions | Required setup assumptions: fixtures, runtime strategy, input shape/model capabilities, environment toggles |
+| Postconditions | Observable outcomes that must hold after test execution (assertions/invariants) |
+
+Required placement:
+- Python tests: docstring on the test function/class.
+- C++ tests: comment block directly above the `check(...)` sequence for that scenario.
+
+Every documented test must also carry trace IDs (`ARCH-*`, `UD-*`, and test ID such as `UT-*`/`IT-*`) and map into [Traceability Matrix](Traceability-Matrix.md).
+
+Python example:
+
+```python
+def test_runtime_strategy_matrix_includes_vision_language():
+    """
+    Intent: Validate that `vision_language` remains connected to the VL runner/comparator contract.
+    Preconditions:
+      - tests/runtime_strategy_matrix.yaml defines runtime_strategies.vision_language.
+      - Registry modules for runner/comparator classes are importable.
+    Postconditions:
+      - runner_class resolves to VisionLanguageRunner.
+      - comparator_class resolves to VisionLanguageComparator.
+    Trace: ARCH-RT-002, UD-REG-VISION-001, UT-TOOLS-STRATEGY-MATRIX-002
+    """
+```
+
+C++ example:
+
+```cpp
+// Intent: Validate FastPathModelConfig preserves diffusion runtime strategy from bundle config.
+// Preconditions:
+//   - Input config JSON includes "runtime_strategy": "diffusion".
+//   - Parser is called through fast-path config load flow used by trtf_c.cpp.
+// Postconditions:
+//   - Parsed runtime strategy equals "diffusion".
+//   - Downstream dispatch can branch to create_diffusion_pipeline(...).
+// Trace: ARCH-RT-003, UD-CFG-FASTPATH-001, UT-CPP-FASTPATH-CONFIG-001
+```
+
+### Bi-Directional Traceability Workflow
+
+Use [Traceability Matrix](Traceability-Matrix.md) as the repository-level index from architecture to tests and back:
+
+1. Add/update an `ARCH-*` contract row for the behavior being changed.
+2. Link all affected design units (`UD-*`) such as strategy plugins, factories, runners, and comparators.
+3. Link unit tests (`UT-*`) and integration tests (`IT-*`) that prove the contract.
+4. Record verification evidence (command/artifacts/date).
+5. Perform reverse check: from each changed test, confirm a valid `UD-*` and `ARCH-*` target exists.
+
+Rows are incomplete until all four links are present:
+`ARCH -> UD -> {UT, IT}` and `{UT, IT} -> UD -> ARCH`.
+
+---
+
 ## Layer 1: Python Builder Unit Tests
 
 **Directory**: `tests/builder/`
@@ -602,22 +662,38 @@ pytest tests/builder/ -m trt -v
 
 ## Coverage
 
-Coverage is configured in `pyproject.toml`:
+Coverage is configured in `pyproject.toml` and enforced by dedicated scripts.
 
 ```bash
-# Run with coverage
-.venv/bin/python -m pytest tests/builder/ tests/tools/ -v \
-  --ignore=tests/builder/test_cli.py --cov --cov-report=term-missing
+# Python gates (line and branch coverage must be 100%)
+tools/coverage/python_coverage.sh -v --ignore=tests/builder/test_cli.py
 
-# HTML report
-.venv/bin/python -m pytest tests/builder/ tests/tools/ -v \
-  --ignore=tests/builder/test_cli.py --cov --cov-report=html
+# C++ gate (line/function/branch coverage must each be 100%)
+tools/coverage/cpp_coverage.sh
+
+# Combined local run
+tools/coverage/run_coverage_all.sh
 ```
 
 Configuration:
 - **Source**: `trtf_build/trtf_build` (the build package)
 - **Omit**: `*/tests/*`, `*/__pycache__/*`
 - **Excluded lines**: `pragma: no cover`, `if __name__ == "__main__"`, `raise NotImplementedError`
+
+CI integration (`.gitlab-ci.yml`):
+- `coverage-python` runs `tools/coverage_ci/run_python_coverage.sh`
+  - Emits `coverage/python-cobertura.xml`
+  - Enforces line=100% and branch=100%
+  - Publishes GitLab `coverage_report` (Cobertura)
+- `coverage-cpp` runs `tools/coverage_ci/run_cpp_coverage.sh`
+  - Emits `coverage/cpp-cobertura.xml`
+  - Publishes GitLab `coverage_report` (Cobertura)
+- Both jobs are hard gates in the test DAG before smoke/E2E jobs.
+
+Note:
+- Python function coverage is not natively reported by `coverage.py`; Python gates therefore enforce line + branch.
+- C++ gates enforce line + function + branch via `gcovr`.
+- Detailed GitLab setup and local reproduction commands are in `docs/coverage/gitlab_coverage_report.md`.
 
 ---
 

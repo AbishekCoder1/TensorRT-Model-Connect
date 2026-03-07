@@ -1,8 +1,10 @@
 #include "runtime/trt/audio/whisper_backend.h"
+#include "runtime/trt/audio/whisper_cross_kv_apply.h"
+#include "runtime/trt/audio/whisper_cross_kv_plan.h"
+#include "runtime/trt/audio/whisper_decode_policy.h"
+#include "runtime/trt/audio/whisper_host_plan.h"
 #include "runtime/trt/core/trt_decode_runtime.h"
 
-#include <algorithm>
-#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -12,71 +14,6 @@ namespace trtf {
 #if TRTF_HAS_TRT
 
 namespace {
-
-int32_t expected_mel_length(const WhisperConfig& cfg)
-{
-    return cfg.mel_length > 0 ? cfg.mel_length : cfg.max_source_positions * 2;
-}
-
-int32_t stride_stage_count(int32_t mel_full, int32_t enc_full)
-{
-    int32_t ratio = enc_full > 0 ? mel_full / enc_full : 2;
-    int32_t stages = 0;
-    while (ratio > 1)
-    {
-        ratio /= 2;
-        ++stages;
-    }
-    return stages;
-}
-
-int32_t apply_stride2_subsampling(int32_t length, int32_t stages)
-{
-    int32_t t = length;
-    for (int32_t s = 0; s < stages; ++s)
-    {
-        t = (t + 2 - 3) / 2 + 1;
-    }
-    return t;
-}
-
-int32_t compute_actual_encoder_length(int32_t mel_length, int32_t mel_full, int32_t enc_full)
-{
-    if (mel_full <= 0 || mel_length >= mel_full)
-    {
-        return 0;
-    }
-
-    const int32_t stages = stride_stage_count(mel_full, enc_full);
-    return apply_stride2_subsampling(mel_length, stages);
-}
-
-void copy_mel_to_device(
-    CudaBuffer& mel_device,
-    const float* mel_data,
-    int32_t mel_bins,
-    int32_t mel_length,
-    int32_t expected_length,
-    std::size_t mel_size)
-{
-    if (mel_length == expected_length)
-    {
-        cudaMemcpy(mel_device.data(), mel_data, mel_size, cudaMemcpyHostToDevice);
-        return;
-    }
-
-    // Pad or truncate row-by-row because input and target lengths differ.
-    std::vector<float> padded(static_cast<std::size_t>(mel_bins) * expected_length, 0.0F);
-    const int32_t copy_len = std::min(mel_length, expected_length);
-    for (int32_t bin = 0; bin < mel_bins; ++bin)
-    {
-        std::memcpy(
-            padded.data() + static_cast<std::size_t>(bin) * expected_length,
-            mel_data + static_cast<std::size_t>(bin) * mel_length,
-            static_cast<std::size_t>(copy_len) * sizeof(float));
-    }
-    cudaMemcpy(mel_device.data(), padded.data(), mel_size, cudaMemcpyHostToDevice);
-}
 
 bool has_encoder_mask_input(const nvinfer1::ICudaEngine& encoder_engine)
 {
@@ -89,23 +26,6 @@ bool has_encoder_mask_input(const nvinfer1::ICudaEngine& encoder_engine)
         }
     }
     return false;
-}
-
-void upload_encoder_mask(
-    CudaBuffer& mask_device,
-    int32_t enc_seq,
-    int32_t actual_enc)
-{
-    std::vector<float> mask(static_cast<std::size_t>(enc_seq), 0.0F);
-    for (int32_t i = actual_enc; i < enc_seq; ++i)
-    {
-        mask[i] = -10000.0F;
-    }
-    cudaMemcpy(
-        mask_device.data(),
-        mask.data(),
-        static_cast<std::size_t>(enc_seq) * sizeof(float),
-        cudaMemcpyHostToDevice);
 }
 
 void bind_encoder_tensors(
@@ -136,21 +56,6 @@ void bind_encoder_tensors(
             encoder_context.setTensorAddress(tensor_name, mask_device->data());
         }
     }
-}
-
-std::vector<int32_t> make_initial_decoder_tokens(const WhisperConfig& cfg)
-{
-    if (!cfg.decoder_start_token_ids.empty())
-    {
-        return cfg.decoder_start_token_ids;
-    }
-
-    return {
-        cfg.decoder_start_token_id,
-        cfg.language_token_id,
-        cfg.transcribe_token_id,
-        cfg.notimestamps_token_id,
-    };
 }
 
 } // namespace
@@ -223,8 +128,8 @@ TranscriptionResult WhisperBackend::transcribe(
     std::cerr << "[whisper] Running encoder ..." << std::endl;
     run_encoder(mel_data, mel_bins, mel_length);
 
-    const int32_t mel_full = expected_mel_length(mWhisperConfig);
-    mActualEncSeqLen = compute_actual_encoder_length(
+    const int32_t mel_full = resolve_whisper_expected_mel_length(mWhisperConfig);
+    mActualEncSeqLen = compute_whisper_actual_encoder_length(
         mel_length,
         mel_full,
         mWhisperConfig.max_source_positions);
@@ -237,7 +142,7 @@ TranscriptionResult WhisperBackend::transcribe(
     std::cerr << "[whisper] Computing cross-attention K/V ..." << std::endl;
     compute_cross_kv();
 
-    std::vector<int32_t> initial_tokens = make_initial_decoder_tokens(mWhisperConfig);
+    std::vector<int32_t> initial_tokens = make_whisper_initial_decoder_tokens(mWhisperConfig);
 
     std::cerr << "[whisper] Running decoder ..." << std::endl;
     auto output_ids = run_decoder(initial_tokens, max_new_tokens);
@@ -260,30 +165,41 @@ void WhisperBackend::run_encoder(
         return;
     }
 
-    const int32_t expected_length = expected_mel_length(mWhisperConfig);
+    const int32_t expected_length = resolve_whisper_expected_mel_length(mWhisperConfig);
     const std::size_t mel_size = static_cast<std::size_t>(mel_bins) *
                                  static_cast<std::size_t>(expected_length) * sizeof(float);
 
     CudaBuffer mel_device(mel_size);
-    copy_mel_to_device(
-        mel_device,
-        mel_data,
-        mel_bins,
-        mel_length,
-        expected_length,
-        mel_size);
+    if (mel_length == expected_length)
+    {
+        cudaMemcpy(mel_device.data(), mel_data, mel_size, cudaMemcpyHostToDevice);
+    }
+    else
+    {
+        const auto padded = build_whisper_padded_mel_input(
+            mel_data,
+            mel_bins,
+            mel_length,
+            expected_length);
+        cudaMemcpy(mel_device.data(), padded.data(), mel_size, cudaMemcpyHostToDevice);
+    }
 
     const int32_t enc_seq = mWhisperConfig.max_source_positions;
     const bool mask_input = has_encoder_mask_input(*mEncoderEngine);
     CudaBuffer mask_device(mask_input ? static_cast<std::size_t>(enc_seq) * sizeof(float) : 0);
     if (mask_input)
     {
-        int32_t actual_enc = compute_actual_encoder_length(mel_length, expected_length, enc_seq);
+        int32_t actual_enc = compute_whisper_actual_encoder_length(mel_length, expected_length, enc_seq);
         if (actual_enc <= 0)
         {
             actual_enc = enc_seq;
         }
-        upload_encoder_mask(mask_device, enc_seq, actual_enc);
+        const auto mask = build_whisper_encoder_mask_values(enc_seq, actual_enc);
+        cudaMemcpy(
+            mask_device.data(),
+            mask.data(),
+            static_cast<std::size_t>(enc_seq) * sizeof(float),
+            cudaMemcpyHostToDevice);
     }
 
     bind_encoder_tensors(
@@ -311,30 +227,34 @@ void WhisperBackend::compute_cross_kv()
     // The decoder engine bakes per-layer K/V projections into the graph.
     // Cross_k/cross_v inputs ARE the raw encoder output — the graph
     // applies the projection weights internally.
-    const int32_t enc_seq = mWhisperConfig.max_source_positions;
-    const int32_t hidden = mFpCfg.hidden_size;
-    const std::size_t buf_size = static_cast<std::size_t>(enc_seq) *
-                                 static_cast<std::size_t>(hidden) * sizeof(float);
-
-    // Zero-mask encoder output beyond valid positions so the decoder's
-    // cross-attention effectively ignores padded positions.
-    if (mActualEncSeqLen > 0 && mActualEncSeqLen < enc_seq)
+    const auto plan = make_whisper_cross_kv_plan(
+        mWhisperConfig.max_source_positions,
+        mFpCfg.hidden_size,
+        mActualEncSeqLen);
+    std::string error;
+    const bool ok = apply_whisper_cross_kv_plan(
+        plan,
+        mCrossK.size(),
+        [this](std::size_t valid_bytes, std::size_t pad_bytes)
+        {
+            return cudaMemset(
+                       static_cast<char*>(mEncoderOutput.data()) + valid_bytes,
+                       0,
+                       pad_bytes)
+                == cudaSuccess;
+        },
+        [this](std::size_t layer, WhisperCrossKvBufferKind kind, std::size_t bytes)
+        {
+            void* dst = kind == WhisperCrossKvBufferKind::K
+                ? mCrossK[layer].data()
+                : mCrossV[layer].data();
+            return cudaMemcpy(dst, mEncoderOutput.data(), bytes, cudaMemcpyDeviceToDevice)
+                == cudaSuccess;
+        },
+        error);
+    if (!ok)
     {
-        const std::size_t valid_bytes = static_cast<std::size_t>(mActualEncSeqLen) *
-                                        static_cast<std::size_t>(hidden) * sizeof(float);
-        const std::size_t pad_bytes = buf_size - valid_bytes;
-        // Zero the padded region of encoder output on device
-        cudaMemset(
-            static_cast<char*>(mEncoderOutput.data()) + valid_bytes,
-            0, pad_bytes);
-    }
-
-    for (std::size_t i = 0; i < mCrossK.size(); ++i)
-    {
-        cudaMemcpy(mCrossK[i].data(), mEncoderOutput.data(),
-                    buf_size, cudaMemcpyDeviceToDevice);
-        cudaMemcpy(mCrossV[i].data(), mEncoderOutput.data(),
-                    buf_size, cudaMemcpyDeviceToDevice);
+        throw std::runtime_error(error);
     }
 }
 
@@ -376,38 +296,29 @@ std::vector<int32_t> WhisperBackend::run_decoder(
     // Bind cross-attention K/V (persistent until changed)
     bind_cross_kv();
 
-    std::vector<int32_t> output_ids;
-    std::vector<float> logits;
-    std::string error;
-
-    // Prefill: feed initial tokens one by one
-    for (std::size_t t = 0; t < initial_tokens.size(); ++t)
-    {
-        if (!run_decoder_step_device(engine, cache, resources,
-                initial_tokens[t], logits, error))
+    const auto result = run_whisper_decode_loop(
+        initial_tokens,
+        max_new_tokens,
+        eot_id,
+        [&engine, &cache, &resources](int32_t token, std::vector<float>& logits, std::string& error)
         {
-            std::cerr << "[whisper] Prefill step failed: " << error << std::endl;
-            return output_ids;
-        }
+            return run_decoder_step_device(engine, cache, resources, token, logits, error);
+        },
+        [](const std::vector<float>& logits)
+        {
+            return select_argmax_token(logits);
+        });
+
+    if (result.prefill_failed)
+    {
+        std::cerr << "[whisper] Prefill step failed: " << result.error << std::endl;
+    }
+    else if (result.decode_failed)
+    {
+        std::cerr << "[whisper] Decode step failed: " << result.error << std::endl;
     }
 
-    // Autoregressive generation
-    for (int32_t step = 0; step < max_new_tokens; ++step)
-    {
-        const int32_t next_token = select_argmax_token(logits);
-        output_ids.push_back(next_token);
-
-        if (next_token == eot_id) break;
-
-        if (!run_decoder_step_device(engine, cache, resources,
-                next_token, logits, error))
-        {
-            std::cerr << "[whisper] Decode step failed: " << error << std::endl;
-            break;
-        }
-    }
-
-    return output_ids;
+    return result.output_ids;
 }
 
 // ---------------------------------------------------------------------------

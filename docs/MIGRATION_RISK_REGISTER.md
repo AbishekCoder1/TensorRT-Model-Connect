@@ -1,5 +1,9 @@
 # Runtime Modularity Investigation and Migration Risk Register
 
+This file is a historical migration record. References to legacy runtime
+components describe risks that existed during the refactor and are not the live
+architecture. Use `docs/wiki/` for the current runtime design.
+
 Date: 2026-03-04  
 Scope: C++ runtime modularity/scalability audit, with focus on strategy plugin architecture and migration risk.  
 Method: parallel multi-agent repo investigation + direct source validation.

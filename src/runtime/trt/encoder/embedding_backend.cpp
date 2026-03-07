@@ -191,13 +191,13 @@ void inject_vision_features(
 
 std::vector<float> run_vision_or_throw(
     const VisionStepEngine& vision_engine,
-    const std::string& image_path,
+    const runtime::adapters::io::DecodedImage& image,
     const VLPreprocessConfig& vl_config)
 {
-    auto preprocessed = load_and_preprocess_image(image_path, vl_config);
+    auto preprocessed = preprocess_decoded_image(image, vl_config);
     if (!preprocessed.ok)
     {
-        throw std::runtime_error("Failed to preprocess image: " + image_path);
+        throw std::runtime_error("Failed to preprocess decoded image");
     }
 
     std::vector<float> image_features;
@@ -298,7 +298,7 @@ bool EmbeddingBackend::has_vision() const
 
 EmbeddingResult EmbeddingBackend::embed_with_image(
     const std::vector<int32_t>& input_ids,
-    const std::string& image_path)
+    const runtime::adapters::io::DecodedImage& image)
 {
     if (!mVisionEngine)
     {
@@ -318,7 +318,7 @@ EmbeddingResult EmbeddingBackend::embed_with_image(
     const auto ids_bytes = seq_len * sizeof(int32_t);
 
     const std::vector<float> image_features =
-        run_vision_or_throw(*mVisionEngine, image_path, mVLConfig);
+        run_vision_or_throw(*mVisionEngine, image, mVLConfig);
     const auto feat_dim = static_cast<std::size_t>(mVisionEngine->feature_dim);
     const auto num_patches = static_cast<std::size_t>(mVisionEngine->num_output_features);
 

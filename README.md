@@ -6,6 +6,8 @@ The system is split into two stages:
 - **`trtf_build`** (Python) — downloads an HF model, builds a TRT engine, and packages it into a `.trtfb` bundle.
 - **`trtf`** (C++) — loads a `.trtfb` bundle and runs task-specific GPU inference (text, vision, audio, diffusion, neural operators, etc.).
 
+The live C++ runtime has one composition path: `trtf_c.cpp -> strategy builder -> PipelineServices -> PipelineRouter -> ports/adapters -> TRT executors`. Core services operate on in-memory request/result DTOs; file and artifact IO stays at the router and adapter edge.
+
 ## Quick start
 
 Prerequisites: Docker + NVIDIA Container Toolkit.
@@ -158,7 +160,7 @@ As of **February 26, 2026**, this repository contains 44 family modules:
 
 `bark`, `bert`, `bloom`, `codegen`, `deeponet`, `deepseek_ocr`, `deepseek_v2`, `eagle_vlm`, `falcon`, `flux`, `fno`, `gemma`, `gpt2`, `gpt_neo`, `gpt_neox`, `granite`, `internlm`, `internvl`, `llama`, `mamba`, `mistral`, `mixtral`, `nemotron`, `nemotron_h`, `olmo`, `opt`, `personaplex`, `phi`, `phi4_multimodal`, `phi_moe`, `qwen`, `qwen3_omni`, `qwen_moe`, `qwen_vl`, `rwkv`, `sam`, `segformer`, `stablelm`, `starcoder2`, `wan_t2v`, `whisper`, `xglm`, `yolox`, `z_image`.
 
-These map to runtime strategies in `src/cabi/trtf_c.cpp`, including:
+These are composed at runtime by the strategy builders selected from `src/cabi/api/trtf_c.cpp`, including:
 - `decoder_kv_cache`, `decoder_moe`
 - `ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention`
 - `vision_language`, `segmentation`, `prompted_segmentation`, `object_detection`
@@ -198,6 +200,9 @@ See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full gui
 The test suite has six layers, from fast unit tests to full E2E GPU validation.
 See [Testing and Validation](docs/wiki/Testing-and-Validation.md) for the
 comprehensive manual (every file, every abstraction layer, every pytest marker).
+Traceability policy is documented in
+[Traceability Matrix](docs/wiki/Traceability-Matrix.md): every test must
+state intent, preconditions, and postconditions, and map to architecture/design IDs.
 
 ### Quick reference: run everything
 
@@ -219,6 +224,11 @@ python tools/check_cyclomatic_complexity.py src --max-ccn 10
 
 # CI parity check (same policy as check-cyclomatic-complexity job)
 CCM_MAX_CCN=10 python tools/check_cyclomatic_complexity.py src --max-ccn ${CCM_MAX_CCN}
+
+# Coverage gates (strict 100% thresholds)
+tools/coverage/python_coverage.sh -v --ignore=tests/builder/test_cli.py
+tools/coverage/cpp_coverage.sh
+tools/coverage/run_coverage_all.sh
 
 # === Tier 2: Graph-op GPU tests (~2 min, needs TRT) ===
 
@@ -291,6 +301,8 @@ pytest tests/test_e2e.py --e2e-task-strategy vision_language_generation -v ...
 | [TRT Internals](docs/wiki/TRT-Internals.md) | Decoder layer anatomy, graph ops |
 | [HF vs TRT Comparison](docs/wiki/HF-vs-TRT-Comparison.md) | Side-by-side comparison |
 | [Testing and Validation](docs/wiki/Testing-and-Validation.md) | Complete test manual: 6 layers, every file, every marker |
+| [Coverage in GitLab](docs/coverage/gitlab_coverage_report.md) | Cobertura setup, strict gates, local/CI commands |
+| [Traceability Matrix](docs/wiki/Traceability-Matrix.md) | Bi-directional architecture -> unit design -> test mapping and maintenance process |
 | [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) | Step-by-step guide |
 | [Static Design](docs/wiki/Static-Design.md) | Class-level UML diagrams and descriptions |
 | [Source Layout](docs/wiki/Source-Layout.md) | File-by-file guide |

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "trtf/runtime/adapters/io/media_io_adapter.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -46,6 +48,12 @@ struct PreprocessedImage {
 //
 // NOTE: Only single-image input is supported. Multi-image batching
 // is not yet implemented; callers must process one image at a time.
+runtime::adapters::io::DecodedImage decode_image_rgb(const std::string& image_path);
+
+PreprocessedImage preprocess_decoded_image(
+    const runtime::adapters::io::DecodedImage& image,
+    const VLPreprocessConfig& config);
+
 PreprocessedImage load_and_preprocess_image(
     const std::string& image_path,
     const VLPreprocessConfig& config);

@@ -1,4 +1,5 @@
 #include "runtime/trt/diffusion/z_image_diffusion_backend.h"
+#include "runtime/trt/diffusion/diffusion_scheduler_helpers.h"
 
 #if TRTF_HAS_TRT
 
@@ -11,60 +12,9 @@
 
 namespace trtf {
 
-// ---------------------------------------------------------------------------
-// Flow Match Euler Scheduler (mu-based shifting for Z-Image)
-// ---------------------------------------------------------------------------
 namespace {
 
-struct FlowMatchEulerState {
-    std::vector<double> sigmas;
-    std::vector<float> timesteps;
-    int32_t num_train_timesteps{1000};
-    float shift{3.0F};
-
-    void set_timesteps(int32_t num_steps) {
-        // Match HF FlowMatchEulerDiscreteScheduler exactly:
-        // 1. HF pipeline sets scheduler.sigma_min = 0.0 before calling set_timesteps
-        // 2. linspace(sigma_max*N, sigma_min*N, num_steps) to get timesteps
-        // 3. sigmas = timesteps / N
-        // 4. sigmas = shift * sigmas / (1 + (shift-1) * sigmas)
-        const double s = static_cast<double>(shift);
-        const double N = static_cast<double>(num_train_timesteps);
-        const double t_max = 1.0 * N;           // = 1000.0
-        const double t_min = 0.0;               // sigma_min = 0.0 (pipeline override)
-
-        sigmas.resize(static_cast<std::size_t>(num_steps) + 1);
-        for (int32_t i = 0; i < num_steps; ++i) {
-            // linspace from t_max to t_min with num_steps points
-            double t = t_max + static_cast<double>(i) /
-                static_cast<double>(std::max(num_steps - 1, 1)) * (t_min - t_max);
-            double base_sigma = t / N;
-            double sigma = s * base_sigma / (1.0 + (s - 1.0) * base_sigma);
-            sigmas[static_cast<std::size_t>(i)] = sigma;
-        }
-        sigmas[static_cast<std::size_t>(num_steps)] = 0.0;
-
-        // Timesteps = sigmas * N
-        timesteps.resize(static_cast<std::size_t>(num_steps));
-        for (int32_t i = 0; i < num_steps; ++i) {
-            timesteps[static_cast<std::size_t>(i)] =
-                static_cast<float>(sigmas[static_cast<std::size_t>(i)] *
-                                   static_cast<double>(num_train_timesteps));
-        }
-    }
-
-    void step(const float* velocity, const float* sample, float* output,
-              std::size_t count, int32_t step_index) const {
-        const double sigma = sigmas[static_cast<std::size_t>(step_index)];
-        const double sigma_next = sigmas[static_cast<std::size_t>(step_index) + 1];
-        const double dt = sigma_next - sigma;
-        for (std::size_t i = 0; i < count; ++i) {
-            output[i] = static_cast<float>(
-                static_cast<double>(sample[i]) +
-                dt * static_cast<double>(velocity[i]));
-        }
-    }
-};
+using diffusion::FlowMatchEulerState;
 
 } // anonymous namespace
 
@@ -781,16 +731,6 @@ namespace {
 constexpr int32_t kZImagePadTokenId = 151643;
 constexpr int32_t kZImageSeqMultiple = 32;
 
-int32_t resolve_z_image_steps(int32_t requested, int32_t fallback)
-{
-    return requested <= 0 ? fallback : requested;
-}
-
-float resolve_z_image_guidance(float requested, float fallback)
-{
-    return requested < 0.0F ? fallback : requested;
-}
-
 struct ZImageLayout {
     int32_t dit_dim{0};
     int32_t text_seq{0};
@@ -981,9 +921,9 @@ VideoResult ZImageDiffusionBackend::generate_video(
     VideoResult result;
     std::string error;
 
-    num_inference_steps = resolve_z_image_steps(
-        num_inference_steps, mConfig.num_inference_steps);
-    guidance_scale = resolve_z_image_guidance(
+    num_inference_steps = diffusion::resolve_requested_steps(
+        num_inference_steps, mConfig.num_inference_steps, true);
+    guidance_scale = diffusion::resolve_requested_guidance(
         guidance_scale, mConfig.guidance_scale);
     (void)guidance_scale;
 
@@ -1037,6 +977,7 @@ VideoResult ZImageDiffusionBackend::generate_video(
 
     FlowMatchEulerState scheduler;
     scheduler.shift = mConfig.flow_shift;
+    scheduler.use_zero_sigma_min = true;
     scheduler.set_timesteps(num_inference_steps);
     log_z_scheduler(scheduler, num_inference_steps);
 

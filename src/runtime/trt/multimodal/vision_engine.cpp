@@ -1,6 +1,7 @@
 #include "runtime/trt/multimodal/vision_engine.h"
 #include "runtime/trt/core/trt_common.h"
 #include "runtime/trt/core/trt_engine_lifecycle.h"
+#include "runtime/trt/multimodal/vision_execution_plan.h"
 
 #include <cstring>
 #include <memory>
@@ -12,15 +13,9 @@ namespace trtf {
 
 namespace {
 
-struct PendingCopy {
-    void* host_ptr{nullptr};
-    void* device_ptr{nullptr};
-    std::size_t bytes{0};
-};
-
 struct VisionRunState {
     std::vector<std::unique_ptr<CudaBuffer>> device_buffers;
-    std::vector<PendingCopy> output_copies;
+    std::vector<VisionPendingCopy> output_copies;
 };
 
 bool fail_with(std::string& error, std::string_view stage)
@@ -36,11 +31,6 @@ bool validate_engine(const VisionStepEngine& engine, std::string& error)
         return true;
     }
     return fail_with(error, "vision engine not initialized");
-}
-
-std::size_t feature_count(const VisionStepEngine& engine)
-{
-    return static_cast<std::size_t>(engine.num_output_features) * engine.feature_dim;
 }
 
 bool bind_input_tensor(
@@ -99,7 +89,7 @@ bool bind_output_tensor(
     {
         return false;
     }
-    state.output_copies.push_back(PendingCopy{host_ptr, buffer->data(), bytes});
+    state.output_copies.push_back(VisionPendingCopy{host_ptr, buffer->data(), bytes});
     state.device_buffers.push_back(std::move(buffer));
     return true;
 }
@@ -107,33 +97,30 @@ bool bind_output_tensor(
 bool run_and_copy_outputs(
     const VisionStepEngine& engine,
     CudaStream& stream,
-    const std::vector<PendingCopy>& output_copies,
+    const std::vector<VisionPendingCopy>& output_copies,
     std::string& error)
 {
-    if (!engine.context->enqueueV3(stream.get()))
-    {
-        return fail_with(error, "vision enqueueV3 failed");
-    }
-
-    for (const PendingCopy& copy : output_copies)
-    {
-        if (cudaMemcpyAsync(
-                copy.host_ptr,
-                copy.device_ptr,
-                copy.bytes,
-                cudaMemcpyDeviceToHost,
-                stream.get())
-            != cudaSuccess)
+    return run_vision_copy_plan(
+        output_copies,
+        error,
+        [&engine, &stream]()
         {
-            return fail_with(error, "vision cudaMemcpyAsync output failed");
-        }
-    }
-
-    if (cudaStreamSynchronize(stream.get()) != cudaSuccess)
-    {
-        return fail_with(error, "vision cudaStreamSynchronize failed");
-    }
-    return true;
+            return engine.context->enqueueV3(stream.get());
+        },
+        [&stream](const VisionPendingCopy& copy)
+        {
+            return cudaMemcpyAsync(
+                       copy.host_ptr,
+                       copy.device_ptr,
+                       copy.bytes,
+                       cudaMemcpyDeviceToHost,
+                       stream.get())
+                == cudaSuccess;
+        },
+        [&stream]()
+        {
+            return cudaStreamSynchronize(stream.get()) == cudaSuccess;
+        });
 }
 
 bool bind_main_outputs(
@@ -189,14 +176,12 @@ bool bind_deepstack_outputs(
     std::string& error)
 {
     deepstack_features.clear();
-    for (int32_t i = 0;; ++i)
+    for (const std::string& ds_name : collect_vision_deepstack_output_names(
+             [&engine](const std::string& name)
+             {
+                 return has_io_tensor(*engine.engine, name);
+             }))
     {
-        std::string ds_name = "deepstack_features_" + std::to_string(i);
-        if (!has_io_tensor(*engine.engine, ds_name))
-        {
-            break;
-        }
-
         deepstack_features.emplace_back(output_count, 0.0F);
         if (bind_output_tensor(
                 engine,
@@ -237,7 +222,9 @@ bool run_vision_encoder(
         return false;
     }
 
-    const std::size_t output_count = feature_count(engine);
+    const std::size_t output_count = vision_output_feature_count(
+        engine.num_output_features,
+        engine.feature_dim);
     const std::size_t output_bytes = output_count * sizeof(float);
     image_features.assign(output_count, 0.0F);
 
@@ -281,7 +268,9 @@ bool run_vision_encoder_with_deepstack(
         return false;
     }
 
-    const std::size_t output_count = feature_count(engine);
+    const std::size_t output_count = vision_output_feature_count(
+        engine.num_output_features,
+        engine.feature_dim);
     const std::size_t output_bytes = output_count * sizeof(float);
     image_features.assign(output_count, 0.0F);
 

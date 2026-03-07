@@ -1,4 +1,12 @@
 #include "runtime/trt/audio/speech_backend.h"
+#include "runtime/trt/audio/speech_depth_plan.h"
+#include "runtime/trt/audio/speech_delay_cache.h"
+#include "runtime/trt/audio/speech_generation_policy.h"
+#include "runtime/trt/audio/speech_mimi_decode_plan.h"
+#include "runtime/trt/audio/speech_runtime_plan.h"
+#include "runtime/trt/audio/speech_temporal_embed_plan.h"
+#include "runtime/trt/audio/speech_waveform_postprocess.h"
+#include "trtf/runtime/trt/audio/speech_decode_stop_policy.h"
 
 #if TRTF_HAS_TRT
 
@@ -13,7 +21,6 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
-#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -30,10 +37,17 @@ namespace trtf {
 
 SpeechToSpeechBackend::SpeechToSpeechBackend(
     std::unique_ptr<DecoderStepEngine> temporal_engine,
-    SpeechConfig config)
+    SpeechConfig config,
+    std::shared_ptr<ISubprocessRunner> subprocess_runner)
     : mTemporalEngine(std::move(temporal_engine))
     , mConfig(std::move(config))
+    , mSubprocessRunner(std::move(subprocess_runner))
 {
+    if (!mSubprocessRunner)
+    {
+        mSubprocessRunner = CreateDefaultSubprocessRunner();
+    }
+
     // Seed RNG from system clock (non-deterministic but good enough)
     auto now = std::chrono::high_resolution_clock::now();
     mRngState = static_cast<uint64_t>(now.time_since_epoch().count());
@@ -171,61 +185,7 @@ void read_fd_to_string(int fd, std::string& out)
 
 int32_t clamp_token(int32_t token, int32_t vocab_size)
 {
-    if (vocab_size <= 0)
-        return 0;
-    return std::max(0, std::min(token, vocab_size - 1));
-}
-
-void add_embedding_row(
-    const std::vector<float>& table, std::size_t offset,
-    int32_t hidden_size, float* out_embed)
-{
-    if (offset + hidden_size > table.size())
-        return;
-    const float* row = table.data() + offset;
-    for (int32_t d = 0; d < hidden_size; ++d)
-        out_embed[d] += row[d];
-}
-
-void copy_embedding_row(
-    const std::vector<float>& table, std::size_t offset,
-    int32_t hidden_size, float* out_embed)
-{
-    if (offset + hidden_size > table.size())
-        return;
-    const float* row = table.data() + offset;
-    for (int32_t d = 0; d < hidden_size; ++d)
-        out_embed[d] = row[d];
-}
-
-void append_hidden_from_logits(
-    std::vector<float>& all_hidden,
-    const std::vector<float>& logits,
-    int32_t hidden_size)
-{
-    const auto available = static_cast<int32_t>(logits.size());
-    all_hidden.insert(
-        all_hidden.end(),
-        logits.begin(),
-        logits.begin() + std::min(available, hidden_size));
-    if (available < hidden_size)
-    {
-        all_hidden.resize(
-            all_hidden.size() + (hidden_size - available),
-            0.0F);
-    }
-}
-
-void fill_hidden_from_logits(
-    std::vector<float>& frame_hidden,
-    const std::vector<float>& logits,
-    int32_t hidden_size)
-{
-    for (int32_t d = 0; d < hidden_size; ++d)
-    {
-        frame_hidden[static_cast<std::size_t>(d)] =
-            (d < static_cast<int32_t>(logits.size())) ? logits[d] : 0.0F;
-    }
+    return clamp_speech_depth_token(token, vocab_size);
 }
 
 void read_hidden_from_device(
@@ -326,80 +286,87 @@ void maybe_log_depth_debug(
 
 } // namespace
 
-/// Run a subprocess: write input_data to stdin, read stdout/stderr.
-/// Returns exit code. Populates out_stdout and out_stderr.
-static int run_subprocess(
-    const std::vector<std::string>& argv,
-    const void* input_data, std::size_t input_size,
-    std::vector<char>& out_stdout,
-    std::string& out_stderr)
+namespace {
+
+class PosixSubprocessRunner final : public ISubprocessRunner {
+public:
+    int run(
+        const std::vector<std::string>& argv,
+        const void* input_data,
+        std::size_t input_size,
+        std::vector<char>& out_stdout,
+        std::string& out_stderr) override
+    {
+        // Build argv for execvp
+        std::vector<const char*> c_argv;
+        for (const auto& arg : argv)
+            c_argv.push_back(arg.c_str());
+        c_argv.push_back(nullptr);
+
+        int stdin_pipe[2] = {-1, -1};
+        int stdout_pipe[2] = {-1, -1};
+        int stderr_pipe[2] = {-1, -1};
+
+        if (!create_subprocess_pipes(stdin_pipe, stdout_pipe, stderr_pipe, out_stderr))
+            return -1;
+
+        pid_t pid = fork();
+        if (pid < 0)
+        {
+            out_stderr = "fork() failed";
+            close_pipe_pair(stdin_pipe);
+            close_pipe_pair(stdout_pipe);
+            close_pipe_pair(stderr_pipe);
+            return -1;
+        }
+
+        if (pid == 0)
+        {
+            // Child: redirect stdin/stdout/stderr
+            dup2(stdin_pipe[0], STDIN_FILENO);
+            dup2(stdout_pipe[1], STDOUT_FILENO);
+            dup2(stderr_pipe[1], STDERR_FILENO);
+            close(stdin_pipe[0]); close(stdin_pipe[1]);
+            close(stdout_pipe[0]); close(stdout_pipe[1]);
+            close(stderr_pipe[0]); close(stderr_pipe[1]);
+
+            execvp(c_argv[0], const_cast<char* const*>(c_argv.data()));
+            _exit(127);
+        }
+
+        // Parent
+        close(stdin_pipe[0]);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+
+        // Write input to stdin
+        write_fd_all(stdin_pipe[1], input_data, input_size);
+        close(stdin_pipe[1]);
+
+        // Read stdout
+        read_fd_to_vector(stdout_pipe[0], out_stdout);
+        close(stdout_pipe[0]);
+
+        // Read stderr
+        read_fd_to_string(stderr_pipe[0], out_stderr);
+        close(stderr_pipe[0]);
+
+        int status = 0;
+        waitpid(pid, &status, 0);
+        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+};
+
+} // namespace
+
+std::shared_ptr<ISubprocessRunner> CreateDefaultSubprocessRunner()
 {
-    // Build argv for execvp
-    std::vector<const char*> c_argv;
-    for (const auto& a : argv) c_argv.push_back(a.c_str());
-    c_argv.push_back(nullptr);
-
-    int stdin_pipe[2] = {-1, -1};
-    int stdout_pipe[2] = {-1, -1};
-    int stderr_pipe[2] = {-1, -1};
-
-    if (!create_subprocess_pipes(stdin_pipe, stdout_pipe, stderr_pipe, out_stderr))
-        return -1;
-
-    pid_t pid = fork();
-    if (pid < 0)
-    {
-        out_stderr = "fork() failed";
-        close_pipe_pair(stdin_pipe);
-        close_pipe_pair(stdout_pipe);
-        close_pipe_pair(stderr_pipe);
-        return -1;
-    }
-
-    if (pid == 0)
-    {
-        // Child: redirect stdin/stdout/stderr
-        dup2(stdin_pipe[0], STDIN_FILENO);
-        dup2(stdout_pipe[1], STDOUT_FILENO);
-        dup2(stderr_pipe[1], STDERR_FILENO);
-        close(stdin_pipe[0]); close(stdin_pipe[1]);
-        close(stdout_pipe[0]); close(stdout_pipe[1]);
-        close(stderr_pipe[0]); close(stderr_pipe[1]);
-
-        execvp(c_argv[0], const_cast<char* const*>(c_argv.data()));
-        _exit(127);
-    }
-
-    // Parent
-    close(stdin_pipe[0]);
-    close(stdout_pipe[1]);
-    close(stderr_pipe[1]);
-
-    // Write input to stdin
-    write_fd_all(stdin_pipe[1], input_data, input_size);
-    close(stdin_pipe[1]);
-
-    // Read stdout
-    read_fd_to_vector(stdout_pipe[0], out_stdout);
-    close(stdout_pipe[0]);
-
-    // Read stderr
-    read_fd_to_string(stderr_pipe[0], out_stderr);
-    close(stderr_pipe[0]);
-
-    int status = 0;
-    waitpid(pid, &status, 0);
-    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    static std::shared_ptr<ISubprocessRunner> runner =
+        std::make_shared<PosixSubprocessRunner>();
+    return runner;
 }
 
 namespace {
-
-struct RuntimePromptTokenization
-{
-    int rc{0};
-    std::vector<int32_t> tokens;
-    std::string stderr_data;
-};
 
 bool can_inject_text_prompt(
     const SpeechConfig& cfg,
@@ -408,33 +375,6 @@ bool can_inject_text_prompt(
     return !cfg.temporal_text_embedding.empty()
         && cfg.temporal_text_vocab > 0
         && has_io_tensor(*temporal_engine.engine, "input_embed");
-}
-
-RuntimePromptTokenization tokenize_system_prompt_runtime(const SpeechConfig& cfg)
-{
-    RuntimePromptTokenization result;
-    std::string cmd = cfg.hf_python + " -c \""
-        "from transformers import AutoTokenizer; "
-        "tok = AutoTokenizer.from_pretrained('kyutai/moshiko-pytorch-bf16'); "
-        "ids = tok.encode('" + cfg.system_prompt + "', add_special_tokens=False); "
-        "import sys; sys.stdout.buffer.write(b''.join(i.to_bytes(4, 'little') for i in ids))\"";
-
-    std::vector<std::string> argv = {
-        "/bin/sh", "-c", cmd
-    };
-
-    std::vector<char> stdout_data;
-    result.rc = run_subprocess(argv, nullptr, 0, stdout_data, result.stderr_data);
-    if (result.rc != 0 || stdout_data.empty())
-        return result;
-
-    const auto num_tokens = stdout_data.size() / sizeof(int32_t);
-    result.tokens.resize(num_tokens);
-    std::memcpy(
-        result.tokens.data(),
-        stdout_data.data(),
-        num_tokens * sizeof(int32_t));
-    return result;
 }
 
 void build_text_prompt_step_embedding(
@@ -449,7 +389,7 @@ void build_text_prompt_step_embedding(
 
     const int32_t text_tok = clamp_token(text_token, cfg.temporal_text_vocab);
     const auto text_offset = static_cast<std::size_t>(text_tok) * hidden_size;
-    add_embedding_row(
+    add_speech_embedding_row(
         cfg.temporal_text_embedding,
         text_offset,
         hidden_size,
@@ -462,7 +402,7 @@ void build_text_prompt_step_embedding(
     {
         const auto emb_offset = static_cast<std::size_t>(cb) * emb_stride_cb
             + static_cast<std::size_t>(bos) * hidden_size;
-        add_embedding_row(
+        add_speech_embedding_row(
             cfg.audio_embeddings,
             emb_offset,
             hidden_size,
@@ -506,7 +446,8 @@ void SpeechToSpeechBackend::run_text_prompt(
     }
     else if (should_tokenize_text_prompt_runtime(cfg))
     {
-        auto tokenization = tokenize_system_prompt_runtime(cfg);
+        auto tokenization = TokenizeSpeechPromptRuntime(
+            cfg.hf_python, cfg.system_prompt, *mSubprocessRunner);
         if (tokenization.rc != 0 || tokenization.tokens.empty())
         {
             std::cerr << "[speech] Text prompt tokenization failed (rc="
@@ -798,7 +739,7 @@ void build_temporal_frame_embedding(
             audio_vocab);
         const auto emb_offset = static_cast<std::size_t>(cb) * emb_stride_cb
             + static_cast<std::size_t>(token) * hidden_size;
-        add_embedding_row(
+        add_speech_embedding_row(
             cfg.audio_embeddings,
             emb_offset,
             hidden_size,
@@ -981,34 +922,6 @@ std::vector<float> SpeechToSpeechBackend::run_temporal(
 
 namespace {
 
-struct DepthProjectionView
-{
-    bool has_projection{false};
-    const float* temporal_hidden{nullptr};
-    int32_t depth_hidden{0};
-    int32_t temporal_hidden_dim{0};
-    std::size_t proj_size_per_cb{0};
-    const std::vector<float>* projection{nullptr};
-};
-
-DepthProjectionView make_depth_projection_view(
-    const SpeechConfig& cfg,
-    const float* temporal_hidden)
-{
-    DepthProjectionView view;
-    view.depth_hidden = cfg.depth_hidden_size;
-    view.temporal_hidden_dim = cfg.temporal_hidden_size;
-    view.proj_size_per_cb =
-        static_cast<std::size_t>(view.depth_hidden) * view.temporal_hidden_dim;
-    view.temporal_hidden = temporal_hidden;
-    view.projection = &cfg.depth_projection;
-    view.has_projection = !cfg.depth_projection.empty()
-        && temporal_hidden != nullptr
-        && view.temporal_hidden_dim > 0
-        && view.depth_hidden > 0;
-    return view;
-}
-
 bool resolve_depth_engines(
     int32_t num_cb,
     const std::vector<std::unique_ptr<DecoderStepEngine>>& per_codebook_engines,
@@ -1035,92 +948,6 @@ bool resolve_depth_engines(
         }
     }
     return true;
-}
-
-void apply_depth_projection(
-    const DepthProjectionView& proj_view,
-    int32_t proj_idx,
-    float* out_embed)
-{
-    if (!proj_view.has_projection || proj_view.projection == nullptr)
-        return;
-    const auto proj_offset =
-        static_cast<std::size_t>(proj_idx) * proj_view.proj_size_per_cb;
-    if (proj_offset + proj_view.proj_size_per_cb > proj_view.projection->size())
-        return;
-    const float* proj = proj_view.projection->data() + proj_offset;
-    for (int32_t i = 0; i < proj_view.depth_hidden; ++i)
-    {
-        float sum = 0.0F;
-        const float* row = proj + static_cast<std::size_t>(i) * proj_view.temporal_hidden_dim;
-        for (int32_t j = 0; j < proj_view.temporal_hidden_dim; ++j)
-            sum += row[j] * proj_view.temporal_hidden[j];
-        out_embed[i] += sum;
-    }
-}
-
-void seed_depth_text_embedding(
-    const SpeechConfig& cfg,
-    int32_t text_token,
-    int32_t depth_hidden,
-    float* depth_embed)
-{
-    if (cfg.depth_text_embedding.empty() || cfg.depth_text_vocab <= 0)
-        return;
-    const int32_t ttok = clamp_token(text_token, cfg.depth_text_vocab);
-    const auto emb_offset = static_cast<std::size_t>(ttok) * depth_hidden;
-    copy_embedding_row(cfg.depth_text_embedding, emb_offset, depth_hidden, depth_embed);
-}
-
-void seed_depth_audio_embedding(
-    const SpeechConfig& cfg,
-    int32_t cb,
-    int32_t prev_token,
-    int32_t depth_hidden,
-    float* depth_embed)
-{
-    if (cfg.depth_audio_embeddings.empty() || cfg.num_depformer_emb <= 0)
-        return;
-    if ((cb - 1) >= cfg.num_depformer_emb)
-        return;
-    const int32_t tok = clamp_token(prev_token, cfg.audio_vocab_size);
-    const auto depth_audio_emb_stride =
-        static_cast<std::size_t>(cfg.audio_vocab_size) * depth_hidden;
-    const auto emb_idx = static_cast<std::size_t>(cb - 1);
-    const auto emb_offset = emb_idx * depth_audio_emb_stride
-        + static_cast<std::size_t>(tok) * depth_hidden;
-    copy_embedding_row(cfg.depth_audio_embeddings, emb_offset, depth_hidden, depth_embed);
-}
-
-void build_depth_input_embedding(
-    const SpeechConfig& cfg,
-    const DepthProjectionView& proj_view,
-    int32_t cb,
-    int32_t text_token,
-    int32_t prev_token,
-    int32_t depth_hidden,
-    std::vector<float>& depth_embed)
-{
-    std::fill(depth_embed.begin(), depth_embed.end(), 0.0F);
-    if (cb == 0)
-        seed_depth_text_embedding(cfg, text_token, depth_hidden, depth_embed.data());
-    else
-        seed_depth_audio_embedding(cfg, cb, prev_token, depth_hidden, depth_embed.data());
-    apply_depth_projection(proj_view, cb, depth_embed.data());
-}
-
-int32_t resolve_depth_prev_token(
-    int32_t cb,
-    int32_t sampled_token,
-    const SpeechConfig& cfg,
-    const int32_t* forced_audio_tokens,
-    const uint8_t* forced_audio_provided)
-{
-    if (forced_audio_tokens == nullptr || forced_audio_provided == nullptr)
-        return sampled_token;
-    if (!forced_audio_provided[cb])
-        return sampled_token;
-    return clamp_token(forced_audio_tokens[cb], cfg.audio_vocab_size);
 }
 
 } // namespace
@@ -1228,56 +1055,17 @@ std::vector<int32_t> SpeechToSpeechBackend::run_depth(
 
 namespace {
 
-struct MimiDecodeLayout
-{
-    int32_t dec_codebooks{0};
-    int32_t dec_frames{0};
-    int32_t total_output_elems{0};
-    std::size_t input_elems{0};
-    std::size_t input_bytes{0};
-    std::size_t output_bytes{0};
-};
-
 MimiDecodeLayout get_mimi_decode_layout(const nvinfer1::ICudaEngine& engine)
 {
-    MimiDecodeLayout layout;
     const auto in_dims = engine.getTensorShape("codec_tokens");
     const auto out_dims = engine.getTensorShape("audio_output");
-    layout.dec_codebooks = in_dims.d[0];
-    layout.dec_frames = in_dims.d[1];
-    layout.total_output_elems = 1;
+    std::vector<int32_t> output_dims;
+    output_dims.reserve(static_cast<std::size_t>(out_dims.nbDims));
     for (int32_t d = 0; d < out_dims.nbDims; ++d)
-        layout.total_output_elems *= out_dims.d[d];
-    layout.input_elems =
-        static_cast<std::size_t>(layout.dec_codebooks) * layout.dec_frames;
-    layout.input_bytes = layout.input_elems * sizeof(float);
-    layout.output_bytes =
-        static_cast<std::size_t>(layout.total_output_elems) * sizeof(float);
-    return layout;
-}
-
-std::vector<float> build_mimi_decoder_input(
-    const std::vector<int32_t>& codec_tokens,
-    int32_t num_frames,
-    int32_t actual_codebooks,
-    int32_t dec_frames,
-    int32_t dec_codebooks)
-{
-    const auto input_elems = static_cast<std::size_t>(dec_codebooks) * dec_frames;
-    std::vector<float> input_tokens(input_elems, 0.0F);
-    const int32_t frames_to_copy = std::min(num_frames, dec_frames);
-    const int32_t cbs_to_copy = std::min(actual_codebooks, dec_codebooks);
-    for (int32_t frame = 0; frame < frames_to_copy; ++frame)
     {
-        for (int32_t cb = 0; cb < cbs_to_copy; ++cb)
-        {
-            const auto src_idx = static_cast<std::size_t>(frame) * actual_codebooks + cb;
-            const auto dst_idx = static_cast<std::size_t>(cb) * dec_frames + frame;
-            if (src_idx < codec_tokens.size())
-                input_tokens[dst_idx] = static_cast<float>(codec_tokens[src_idx]);
-        }
+        output_dims.push_back(out_dims.d[d]);
     }
-    return input_tokens;
+    return build_mimi_decode_layout(in_dims.d[0], in_dims.d[1], output_dims);
 }
 
 MimiTrtRunStatus run_mimi_decoder_trt(
@@ -1313,22 +1101,6 @@ MimiTrtRunStatus run_mimi_decoder_trt(
         stream.get());
     cudaStreamSynchronize(stream.get());
     return MimiTrtRunStatus::kOk;
-}
-
-void waveform_stats(
-    const std::vector<float>& waveform,
-    int32_t total_output_elems,
-    float& rms,
-    float& mx)
-{
-    rms = 0.0F;
-    mx = 0.0F;
-    for (auto sample : waveform)
-    {
-        rms += sample * sample;
-        mx = std::max(mx, std::abs(sample));
-    }
-    rms = std::sqrt(rms / std::max(1, total_output_elems));
 }
 
 } // namespace
@@ -1409,12 +1181,6 @@ std::vector<float> SpeechToSpeechBackend::run_mimi_decode(
 
 namespace {
 
-struct EncoderShapeInfo
-{
-    int32_t encode_codebooks{0};
-    int32_t num_frames{0};
-};
-
 EncoderShapeInfo resolve_encoder_shape(
     nvinfer1::ICudaEngine* encoder_engine,
     const SpeechConfig& cfg,
@@ -1422,30 +1188,15 @@ EncoderShapeInfo resolve_encoder_shape(
     int32_t last_encode_frames,
     const std::vector<int32_t>& codec_tokens)
 {
-    EncoderShapeInfo info;
-    info.encode_codebooks = last_encode_codebooks;
-    info.num_frames = last_encode_frames;
-    const bool has_valid_shape = info.encode_codebooks > 0
-        && info.num_frames > 0
-        && static_cast<std::size_t>(info.encode_codebooks)
-            * static_cast<std::size_t>(info.num_frames) == codec_tokens.size();
-    if (has_valid_shape)
-        return info;
-
-    if (encoder_engine != nullptr)
-    {
-        const auto enc_out_dims = encoder_engine->getTensorShape("codec_tokens");
-        info.encode_codebooks = enc_out_dims.d[0];
-    }
-    else
-    {
-        info.encode_codebooks = cfg.num_codebooks;
-    }
-
-    info.num_frames = (info.encode_codebooks > 0 && !codec_tokens.empty())
-        ? static_cast<int32_t>(codec_tokens.size()) / info.encode_codebooks
-        : 0;
-    return info;
+    const int32_t fallback_codebooks = encoder_engine != nullptr
+        ? encoder_engine->getTensorShape("codec_tokens").d[0]
+        : cfg.num_codebooks;
+    return resolve_encoder_shape_with_fallback_codebooks(
+        cfg,
+        last_encode_codebooks,
+        last_encode_frames,
+        codec_tokens.size(),
+        fallback_codebooks);
 }
 
 void log_depth_mode(const SpeechConfig& cfg)
@@ -1460,311 +1211,7 @@ void log_depth_mode(const SpeechConfig& cfg)
     std::cerr << "[speech] Depth decoding: greedy (argmax)" << std::endl;
 }
 
-bool should_run_text_prompt_injection(const SpeechConfig& cfg)
-{
-    return !cfg.text_prompt_ids.empty()
-        || (!cfg.system_prompt.empty() && !cfg.hf_python.empty());
-}
-
-void add_temporal_text_embedding(
-    const SpeechConfig& cfg,
-    int32_t hidden_size,
-    int32_t text_token,
-    float* out_embed)
-{
-    if (cfg.temporal_text_embedding.empty() || cfg.temporal_text_vocab <= 0)
-        return;
-    const int32_t ttok = clamp_token(text_token, cfg.temporal_text_vocab);
-    const auto text_offset = static_cast<std::size_t>(ttok) * hidden_size;
-    add_embedding_row(cfg.temporal_text_embedding, text_offset, hidden_size, out_embed);
-}
-
-void add_temporal_audio_embedding(
-    const SpeechConfig& cfg,
-    int32_t hidden_size,
-    int32_t emb_codebook_idx,
-    int32_t token,
-    float* out_embed)
-{
-    const int32_t vocab = cfg.audio_vocab_size;
-    const int32_t tok = clamp_token(token, vocab);
-    const auto emb_stride_cb = static_cast<std::size_t>(vocab) * hidden_size;
-    const auto emb_offset = static_cast<std::size_t>(emb_codebook_idx) * emb_stride_cb
-        + static_cast<std::size_t>(tok) * hidden_size;
-    add_embedding_row(cfg.audio_embeddings, emb_offset, hidden_size, out_embed);
-}
-
-void compute_dual_stream_summed_embed(
-    const SpeechConfig& cfg,
-    int32_t hidden_size,
-    int32_t stream_cb,
-    const int32_t* moshi_tokens,
-    const int32_t* user_tokens,
-    int32_t text_token,
-    float* out_embed)
-{
-    std::fill(out_embed, out_embed + hidden_size, 0.0F);
-    add_temporal_text_embedding(cfg, hidden_size, text_token, out_embed);
-    for (int32_t cb = 0; cb < stream_cb; ++cb)
-        add_temporal_audio_embedding(cfg, hidden_size, cb, moshi_tokens[cb], out_embed);
-    for (int32_t cb = 0; cb < stream_cb; ++cb)
-        add_temporal_audio_embedding(
-            cfg, hidden_size, cb + stream_cb, user_tokens[cb], out_embed);
-}
-
-struct DelayCacheState
-{
-    int32_t total_k{0};
-    int32_t cache_size{0};
-    int32_t max_delay{0};
-    std::vector<int32_t> delays;
-    std::vector<int32_t> cache;
-    std::vector<uint8_t> provided;
-};
-
-std::size_t delay_cache_index(
-    const DelayCacheState& state,
-    int32_t k,
-    int32_t pos)
-{
-    return static_cast<std::size_t>(k) * state.cache_size + (pos % state.cache_size);
-}
-
-DelayCacheState make_delay_cache_state(
-    const SpeechConfig& cfg,
-    int32_t num_cb)
-{
-    DelayCacheState state;
-    state.total_k = num_cb + 1;
-    state.delays.resize(static_cast<std::size_t>(state.total_k));
-    if (!cfg.delays.empty() && static_cast<int32_t>(cfg.delays.size()) >= state.total_k)
-    {
-        for (int32_t k = 0; k < state.total_k; ++k)
-            state.delays[static_cast<std::size_t>(k)] = cfg.delays[static_cast<std::size_t>(k)];
-    }
-    else
-    {
-        state.delays = {0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1};
-    }
-
-    state.max_delay = 0;
-    for (auto delay : state.delays)
-        state.max_delay = std::max(state.max_delay, delay);
-
-    state.cache_size = state.max_delay + 3;
-    constexpr int32_t kUngenerated = -2;
-    state.cache.assign(
-        static_cast<std::size_t>(state.total_k) * state.cache_size,
-        kUngenerated);
-    state.provided.assign(
-        static_cast<std::size_t>(state.total_k) * state.cache_size,
-        0);
-    return state;
-}
-
-struct OutputPlan
-{
-    int32_t effective_frames{0};
-    int32_t extra_tail{0};
-    int32_t output_frames{0};
-    int32_t total_iters{0};
-};
-
-OutputPlan compute_output_plan(
-    const SpeechConfig& cfg,
-    int32_t num_frames,
-    int32_t num_input_samples,
-    int32_t input_sample_rate,
-    int32_t tail_frames,
-    int32_t max_output_frames,
-    int32_t max_delay)
-{
-    const int32_t nominal_frame_size = (cfg.frame_rate > 0.0F)
-        ? static_cast<int32_t>(std::lround(
-            static_cast<float>(cfg.sample_rate) / cfg.frame_rate))
-        : 0;
-    int32_t nominal_input_frames = num_frames;
-    if (nominal_frame_size > 0)
-    {
-        int64_t effective_input_samples = num_input_samples;
-        if (input_sample_rate > 0 && input_sample_rate != cfg.sample_rate)
-        {
-            effective_input_samples =
-                (effective_input_samples * cfg.sample_rate) / input_sample_rate;
-        }
-        nominal_input_frames = static_cast<int32_t>(
-            effective_input_samples / nominal_frame_size);
-    }
-
-    OutputPlan plan;
-    plan.effective_frames = std::min(num_frames, nominal_input_frames);
-    plan.effective_frames = std::max(0, plan.effective_frames - 2);
-    plan.extra_tail = std::max(0, tail_frames);
-
-    int64_t target_frames = static_cast<int64_t>(plan.effective_frames)
-        + static_cast<int64_t>(plan.extra_tail);
-    target_frames = std::max<int64_t>(0, target_frames);
-    plan.output_frames = std::min(
-        static_cast<int32_t>(std::min<int64_t>(
-            target_frames,
-            static_cast<int64_t>(std::numeric_limits<int32_t>::max()))),
-        max_output_frames);
-    plan.total_iters = plan.output_frames + max_delay + 1;
-    return plan;
-}
-
-void write_user_tokens_to_delay_cache(
-    DelayCacheState& delay_state,
-    const std::vector<int32_t>& codec_tokens,
-    int32_t offset,
-    int32_t stream_cb,
-    int32_t num_frames,
-    int32_t encode_codebooks,
-    int32_t audio_bos)
-{
-    for (int32_t cb = 0; cb < stream_cb; ++cb)
-    {
-        const int32_t k = stream_cb + 1 + cb;
-        int32_t user_tok = audio_bos;
-        if (offset < num_frames)
-        {
-            const auto tok_idx = static_cast<std::size_t>(offset) * encode_codebooks + cb;
-            if (tok_idx < codec_tokens.size())
-                user_tok = codec_tokens[tok_idx];
-        }
-        const auto widx = delay_cache_index(
-            delay_state, k, offset + delay_state.delays[static_cast<std::size_t>(k)]);
-        delay_state.cache[widx] = user_tok;
-        delay_state.provided[widx] = 1;
-    }
-}
-
-void fill_initial_delay_tokens(
-    DelayCacheState& delay_state,
-    int32_t offset,
-    int32_t text_bos,
-    int32_t audio_bos)
-{
-    for (int32_t k = 0; k < delay_state.total_k; ++k)
-    {
-        if (offset > delay_state.delays[static_cast<std::size_t>(k)])
-            continue;
-        const int32_t init_tok = (k == 0) ? text_bos : audio_bos;
-        const auto idx = delay_cache_index(delay_state, k, offset);
-        delay_state.cache[idx] = init_tok;
-        delay_state.provided[idx] = 1;
-    }
-}
-
-void seed_delay_offset_zero(
-    DelayCacheState& delay_state,
-    int32_t text_bos,
-    int32_t audio_bos)
-{
-    for (int32_t k = 0; k < delay_state.total_k; ++k)
-    {
-        delay_state.cache[delay_cache_index(delay_state, k, 0)] =
-            (k == 0) ? text_bos : audio_bos;
-    }
-}
-
-void read_model_inputs_from_delay_cache(
-    const DelayCacheState& delay_state,
-    int32_t model_input_pos,
-    int32_t stream_cb,
-    int32_t& text_input,
-    std::vector<int32_t>& moshi_input,
-    std::vector<int32_t>& user_input)
-{
-    text_input = delay_state.cache[delay_cache_index(delay_state, 0, model_input_pos)];
-    for (int32_t cb = 0; cb < stream_cb; ++cb)
-    {
-        moshi_input[static_cast<std::size_t>(cb)] =
-            delay_state.cache[delay_cache_index(delay_state, 1 + cb, model_input_pos)];
-        user_input[static_cast<std::size_t>(cb)] = delay_state.cache[
-            delay_cache_index(delay_state, stream_cb + 1 + cb, model_input_pos)];
-    }
-}
-
-void build_target_audio_arrays(
-    const DelayCacheState& delay_state,
-    int32_t target_pos,
-    int32_t num_cb,
-    int32_t audio_bos,
-    std::vector<int32_t>& target_audio_tokens,
-    std::vector<uint8_t>& target_audio_provided)
-{
-    std::fill(target_audio_tokens.begin(), target_audio_tokens.end(), audio_bos);
-    std::fill(target_audio_provided.begin(), target_audio_provided.end(), 0);
-    for (int32_t cb = 0; cb < num_cb; ++cb)
-    {
-        const auto idx = delay_cache_index(delay_state, 1 + cb, target_pos);
-        target_audio_tokens[static_cast<std::size_t>(cb)] = delay_state.cache[idx];
-        target_audio_provided[static_cast<std::size_t>(cb)] =
-            static_cast<uint8_t>(delay_state.provided[idx] != 0);
-    }
-}
-
-void clear_provided_flags_at_pos(
-    DelayCacheState& delay_state,
-    int32_t pos)
-{
-    for (int32_t k = 0; k < delay_state.total_k; ++k)
-        delay_state.provided[delay_cache_index(delay_state, k, pos)] = 0;
-}
-
-void write_generated_tokens_to_delay_cache(
-    DelayCacheState& delay_state,
-    int32_t target_pos,
-    int32_t sampled_text_token,
-    bool text_provided,
-    const std::vector<int32_t>& frame_codes,
-    int32_t num_cb)
-{
-    const auto text_target_idx = delay_cache_index(delay_state, 0, target_pos);
-    if (!text_provided)
-        delay_state.cache[text_target_idx] = sampled_text_token;
-
-    for (int32_t cb = 0; cb < std::min(static_cast<int32_t>(frame_codes.size()), num_cb); ++cb)
-    {
-        const auto idx = delay_cache_index(delay_state, 1 + cb, target_pos);
-        if (delay_state.provided[idx] == 0)
-            delay_state.cache[idx] = frame_codes[static_cast<std::size_t>(cb)];
-    }
-}
-
-bool collect_output_codes_from_delay_cache(
-    const DelayCacheState& delay_state,
-    int32_t offset,
-    int32_t max_delay,
-    int32_t mimi_cb,
-    std::vector<int32_t>& output_codes)
-{
-    if (offset <= max_delay)
-        return false;
-    const int32_t out_pos = offset - max_delay;
-    for (int32_t cb = 0; cb < mimi_cb; ++cb)
-    {
-        const int32_t k = 1 + cb;
-        const int32_t gather_pos = out_pos + delay_state.delays[static_cast<std::size_t>(k)];
-        const int32_t tok =
-            delay_state.cache[delay_cache_index(delay_state, k, gather_pos)];
-        output_codes.push_back(tok);
-    }
-    return true;
-}
-
-struct StopState
-{
-    int32_t text_eos_streak{0};
-    int32_t text_pad_streak{0};
-    bool stop_requested{false};
-    int32_t stop_collect_until_offset{-1};
-};
-
-constexpr int32_t kMinConsecutiveTextEos = 2;
-constexpr int32_t kMinConsecutiveTextPadAfterInput = 16;
-constexpr int32_t kMaxContinuationFramesAfterInput = 16;
+using OutputPlan = SpeechOutputPlan;
 
 void log_stop_configuration(
     const SpeechConfig& cfg,
@@ -1774,100 +1221,45 @@ void log_stop_configuration(
     {
         std::cerr << "[speech] Text EOS early-stop enabled: eos_token_id="
                   << cfg.text_eos_token_id << " (min_streak="
-                  << kMinConsecutiveTextEos << ")" << std::endl;
+                  << kSpeechMinConsecutiveTextEos << ")" << std::endl;
     }
     if (extra_tail <= 0)
         return;
     std::cerr << "[speech] Text PAD fallback stop enabled after input "
                  "(pad_id="
               << cfg.text_padding_id << ", min_streak="
-              << kMinConsecutiveTextPadAfterInput << ")" << std::endl;
+              << kSpeechMinConsecutiveTextPadAfterInput << ")" << std::endl;
     std::cerr << "[speech] Post-input continuation cap: "
-              << kMaxContinuationFramesAfterInput << " frames" << std::endl;
+              << kSpeechMaxContinuationFramesAfterInput << " frames" << std::endl;
 }
 
-void update_eos_stop_state(
-    StopState& stop_state,
-    const SpeechConfig& cfg,
-    bool text_provided,
-    int32_t target_pos,
-    int32_t effective_frames,
-    int32_t sampled_text_token,
-    int32_t offset,
-    int32_t max_delay)
+void maybe_log_stop_decision(
+    SpeechDecodeStopReason reason,
+    const SpeechDecodeStopState& stop_state,
+    int32_t offset)
 {
-    if (cfg.text_eos_token_id < 0 || text_provided
-        || target_pos < effective_frames
-        || sampled_text_token != cfg.text_eos_token_id)
+    switch (reason)
     {
-        stop_state.text_eos_streak = 0;
+    case SpeechDecodeStopReason::kNone:
+        return;
+    case SpeechDecodeStopReason::kTextEos:
+        std::cerr << "[speech] Text EOS detected at offset " << offset
+                  << " (streak=" << stop_state.text_eos_streak
+                  << "), draining delayed frames until offset "
+                  << stop_state.stop_collect_until_offset << std::endl;
+        return;
+    case SpeechDecodeStopReason::kTextPadFallback:
+        std::cerr << "[speech] Text PAD fallback stop at offset " << offset
+                  << " (streak=" << stop_state.text_pad_streak
+                  << "), draining delayed frames until offset "
+                  << stop_state.stop_collect_until_offset << std::endl;
+        return;
+    case SpeechDecodeStopReason::kContinuationCap:
+        std::cerr << "[speech] Continuation cap reached at offset " << offset
+                  << ", draining delayed frames until offset "
+                  << stop_state.stop_collect_until_offset << std::endl;
         return;
     }
-
-    stop_state.text_eos_streak++;
-    if (stop_state.stop_requested || stop_state.text_eos_streak < kMinConsecutiveTextEos)
-        return;
-    stop_state.stop_requested = true;
-    stop_state.stop_collect_until_offset = offset + max_delay;
-    std::cerr << "[speech] Text EOS detected at offset " << offset
-              << " (streak=" << stop_state.text_eos_streak
-              << "), draining delayed frames until offset "
-              << stop_state.stop_collect_until_offset << std::endl;
-}
-
-void update_pad_stop_state(
-    StopState& stop_state,
-    const SpeechConfig& cfg,
-    int32_t extra_tail,
-    bool text_provided,
-    int32_t target_pos,
-    int32_t effective_frames,
-    int32_t sampled_text_token,
-    int32_t offset,
-    int32_t max_delay)
-{
-    if (stop_state.stop_requested || extra_tail <= 0 || text_provided
-        || target_pos < effective_frames
-        || sampled_text_token != cfg.text_padding_id)
-    {
-        stop_state.text_pad_streak = 0;
-        return;
-    }
-
-    stop_state.text_pad_streak++;
-    if (stop_state.text_pad_streak < kMinConsecutiveTextPadAfterInput)
-        return;
-    stop_state.stop_requested = true;
-    stop_state.stop_collect_until_offset = offset + max_delay;
-    std::cerr << "[speech] Text PAD fallback stop at offset " << offset
-              << " (streak=" << stop_state.text_pad_streak
-              << "), draining delayed frames until offset "
-              << stop_state.stop_collect_until_offset << std::endl;
-}
-
-void maybe_apply_continuation_cap(
-    StopState& stop_state,
-    int32_t extra_tail,
-    int32_t target_pos,
-    int32_t effective_frames,
-    int32_t offset,
-    int32_t max_delay)
-{
-    if (stop_state.stop_requested || extra_tail <= 0)
-        return;
-    if (target_pos < (effective_frames + kMaxContinuationFramesAfterInput))
-        return;
-    stop_state.stop_requested = true;
-    stop_state.stop_collect_until_offset = offset + max_delay;
-    std::cerr << "[speech] Continuation cap reached at offset " << offset
-              << ", draining delayed frames until offset "
-              << stop_state.stop_collect_until_offset << std::endl;
-}
-
-bool should_break_for_stop(const StopState& stop_state, int32_t offset)
-{
-    return stop_state.stop_requested
-        && offset >= stop_state.stop_collect_until_offset;
 }
 
 void maybe_log_interleaved_debug(
@@ -1900,19 +1292,6 @@ using DepthRunnerFn = std::function<std::vector<int32_t>(
     const int32_t*,
     const uint8_t*)>;
 
-struct GenerationSettings
-{
-    int32_t hidden{0};
-    int32_t num_cb{0};
-    int32_t stream_cb{0};
-    int32_t encode_codebooks{0};
-    int32_t num_frames{0};
-    int32_t audio_bos{0};
-    int32_t text_bos{0};
-    int32_t text_pad_id{0};
-    int32_t mimi_cb{0};
-};
-
 bool run_generation_iteration(
     DecoderStepEngine& temporal_engine,
     DeviceKvCache& temporal_cache,
@@ -1920,7 +1299,7 @@ bool run_generation_iteration(
     CudaBuffer& d_hidden_state,
     bool has_hidden_output,
     const SpeechConfig& cfg,
-    const GenerationSettings& settings,
+    const SpeechGenerationSettings& settings,
     const std::vector<int32_t>& codec_tokens,
     DelayCacheState& delay_state,
     int32_t offset,
@@ -1935,7 +1314,7 @@ bool run_generation_iteration(
     std::vector<int32_t>& user_input,
     std::vector<int32_t>& target_audio_tokens,
     std::vector<uint8_t>& target_audio_provided,
-    StopState& stop_state,
+    SpeechDecodeStopState& stop_state,
     int32_t& frames_collected,
     std::vector<int32_t>& output_codes)
 {
@@ -2028,38 +1407,22 @@ bool run_generation_iteration(
         ++frames_collected;
     }
 
-    update_eos_stop_state(
-        stop_state,
-        cfg,
-        text_provided,
-        target_pos,
-        plan.effective_frames,
-        sampled_text_token,
-        offset,
-        delay_state.max_delay);
-    update_pad_stop_state(
-        stop_state,
-        cfg,
-        plan.extra_tail,
-        text_provided,
-        target_pos,
-        plan.effective_frames,
-        sampled_text_token,
-        offset,
-        delay_state.max_delay);
+    SpeechDecodeStopInput stop_input;
+    stop_input.text_eos_token_id = cfg.text_eos_token_id;
+    stop_input.text_padding_id = cfg.text_padding_id;
+    stop_input.effective_frames = plan.effective_frames;
+    stop_input.extra_tail = plan.extra_tail;
+    stop_input.target_pos = target_pos;
+    stop_input.sampled_text_token = sampled_text_token;
+    stop_input.offset = offset;
+    stop_input.max_delay = delay_state.max_delay;
+    stop_input.text_provided = text_provided;
+    const auto stop_decision = UpdateSpeechDecodeStopState(stop_state, stop_input);
+    stop_state = stop_decision.state;
+    maybe_log_stop_decision(stop_decision.reason, stop_state, offset);
     maybe_log_interleaved_debug(
         offset, settings.hidden, frame_hidden, text_input, sampled_text_token, frame_codes);
-    if (should_break_for_stop(stop_state, offset))
-        return false;
-
-    maybe_apply_continuation_cap(
-        stop_state,
-        plan.extra_tail,
-        target_pos,
-        plan.effective_frames,
-        offset,
-        delay_state.max_delay);
-    return !should_break_for_stop(stop_state, offset);
+    return !stop_decision.should_break;
 }
 
 int32_t run_interleaved_generation(
@@ -2069,7 +1432,7 @@ int32_t run_interleaved_generation(
     CudaBuffer& d_hidden_state,
     bool has_hidden_output,
     const SpeechConfig& cfg,
-    const GenerationSettings& settings,
+    const SpeechGenerationSettings& settings,
     const OutputPlan& plan,
     const std::vector<int32_t>& codec_tokens,
     DelayCacheState& delay_state,
@@ -2077,7 +1440,7 @@ int32_t run_interleaved_generation(
     uint64_t& rng_state,
     std::vector<int32_t>& output_codes)
 {
-    StopState stop_state;
+    SpeechDecodeStopState stop_state;
     log_stop_configuration(cfg, plan.extra_tail);
 
     std::vector<float> summed_embed(static_cast<std::size_t>(settings.hidden));
@@ -2125,43 +1488,6 @@ int32_t run_interleaved_generation(
     return frames_collected;
 }
 
-void maybe_trim_waveform_to_generated_frames(
-    const SpeechConfig& cfg,
-    int32_t generated_frames,
-    std::vector<float>& waveform)
-{
-    if (waveform.empty() || generated_frames <= 0 || cfg.frame_rate <= 0.0F)
-        return;
-    const int32_t samples_per_frame = static_cast<int32_t>(
-        std::lround(static_cast<float>(cfg.sample_rate) / cfg.frame_rate));
-    if (samples_per_frame <= 0)
-        return;
-    const auto expected_samples = static_cast<std::size_t>(generated_frames)
-        * static_cast<std::size_t>(samples_per_frame);
-    if (expected_samples == 0 || expected_samples >= waveform.size())
-        return;
-    waveform.resize(expected_samples);
-    std::cerr << "[speech] Trimmed decoded waveform to "
-              << expected_samples << " samples (" << generated_frames
-              << " generated frames)" << std::endl;
-}
-
-void maybe_peak_normalize(std::vector<float>& waveform)
-{
-    if (waveform.empty())
-        return;
-    float peak = 0.0F;
-    for (auto sample : waveform)
-        peak = std::max(peak, std::abs(sample));
-    if (peak <= 1.0F)
-        return;
-    const float scale = 0.95F / peak;
-    for (auto& sample : waveform)
-        sample *= scale;
-    std::cerr << "[speech] Peak-normalized: peak=" << peak
-              << " scale=" << scale << std::endl;
-}
-
 void maybe_bind_hidden_output_for_process(
     DecoderStepEngine& temporal_engine,
     bool has_hidden_output,
@@ -2194,6 +1520,38 @@ void log_output_frames_debug(
         }
         std::cerr << std::endl;
     }
+}
+
+AudioResult finalize_speech_audio_result(
+    const SpeechConfig& config,
+    int32_t generated_frames,
+    std::vector<float> waveform)
+{
+    AudioResult result;
+    result.sample_rate = config.sample_rate;
+
+    const auto trim_result = trim_speech_waveform_to_generated_frames(
+        config.sample_rate, config.frame_rate, generated_frames, waveform);
+    if (trim_result.trimmed)
+    {
+        std::cerr << "[speech] Trimmed decoded waveform to "
+                  << trim_result.expected_samples << " samples (" << generated_frames
+                  << " generated frames)" << std::endl;
+    }
+
+    const auto normalize_result = peak_normalize_speech_waveform(waveform);
+    if (normalize_result.normalized)
+    {
+        std::cerr << "[speech] Peak-normalized: peak=" << normalize_result.peak
+                  << " scale=" << normalize_result.scale << std::endl;
+    }
+
+    result.waveform = std::move(waveform);
+    result.num_samples = static_cast<int32_t>(result.waveform.size());
+    std::cerr << "[speech] Generated " << result.num_samples << " samples ("
+              << static_cast<float>(result.num_samples) / result.sample_rate
+              << "s @ " << result.sample_rate << " Hz)" << std::endl;
+    return result;
 }
 
 } // namespace
@@ -2261,7 +1619,6 @@ AudioResult SpeechToSpeechBackend::process_audio(
     // Only the first 8 (moshi stream) are fed to the Mimi decoder.
     // ---------------------------------------------------------------
     const int32_t num_cb = mConfig.num_codebooks;  // 16
-    const int32_t stream_cb = num_cb / 2;           // 8 per stream
     const int32_t hidden = mTemporalEngine->hidden_size;
     const bool has_audio_emb = !mConfig.audio_embeddings.empty()
                                 && mConfig.audio_vocab_size > 0;
@@ -2299,15 +1656,17 @@ AudioResult SpeechToSpeechBackend::process_audio(
     // ---------------------------------------------------------------
     if (should_run_text_prompt_injection(mConfig))
         run_text_prompt(temporal_cache, temporal_resources, d_hidden_state);
-    auto delay_state = make_delay_cache_state(mConfig, num_cb);
-    const auto plan = compute_output_plan(
-        mConfig,
-        num_frames,
-        num_input_samples,
-        input_sample_rate,
-        tail_frames,
-        max_output_frames,
-        delay_state.max_delay);
+    auto delay_state = make_delay_cache_state(mConfig.delays, num_cb);
+    SpeechOutputPlanInput plan_input;
+    plan_input.sample_rate = mConfig.sample_rate;
+    plan_input.frame_rate = mConfig.frame_rate;
+    plan_input.num_frames = num_frames;
+    plan_input.num_input_samples = num_input_samples;
+    plan_input.input_sample_rate = input_sample_rate;
+    plan_input.tail_frames = tail_frames;
+    plan_input.max_output_frames = max_output_frames;
+    plan_input.max_delay = delay_state.max_delay;
+    const auto plan = ComputeSpeechOutputPlan(plan_input);
     const int32_t mimi_cb = mConfig.mimi_decode_codebooks;
     std::vector<int32_t> output_codes;
     output_codes.reserve(
@@ -2319,16 +1678,10 @@ AudioResult SpeechToSpeechBackend::process_audio(
               << ", tail_frames=" << plan.extra_tail << ")"
               << std::endl;
 
-    GenerationSettings settings;
-    settings.hidden = hidden;
-    settings.num_cb = num_cb;
-    settings.stream_cb = stream_cb;
-    settings.encode_codebooks = encode_codebooks;
-    settings.num_frames = num_frames;
-    settings.audio_bos = mConfig.audio_initial_token_id;
-    settings.text_bos = mConfig.text_initial_token_id;
-    settings.text_pad_id = mConfig.text_padding_id;
-    settings.mimi_cb = mimi_cb;
+    const SpeechGenerationSettings settings = make_speech_generation_settings(
+        mConfig,
+        hidden,
+        encoder_shape);
 
     const DepthRunnerFn depth_runner = [this](
                                           const float* hidden_data,
@@ -2363,21 +1716,8 @@ AudioResult SpeechToSpeechBackend::process_audio(
     // ---------------------------------------------------------------
     // Stage 4: Decode first mimi_cb codebook tokens to audio via Mimi decoder
     // ---------------------------------------------------------------
-    auto waveform = run_mimi_decode(output_codes, generated_frames);
-    // Mimi decoder engine uses a fixed frame shape (e.g. 320). Trim decoded
-    // output to the actual generated frame count so early-stop shortens WAV.
-    maybe_trim_waveform_to_generated_frames(mConfig, generated_frames, waveform);
-
-    // Peak-normalize to [-1, 1] to avoid clipping in WAV output
-    maybe_peak_normalize(waveform);
-
-    result.waveform = std::move(waveform);
-    result.num_samples = static_cast<int32_t>(result.waveform.size());
-    std::cerr << "[speech] Generated " << result.num_samples << " samples ("
-              << static_cast<float>(result.num_samples) / result.sample_rate
-              << "s @ " << result.sample_rate << " Hz)" << std::endl;
-
-    return result;
+    return finalize_speech_audio_result(
+        mConfig, generated_frames, run_mimi_decode(output_codes, generated_frames));
 }
 
 // ---------------------------------------------------------------------------

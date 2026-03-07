@@ -1,4 +1,5 @@
 #include "runtime/trt/audio/bark_backend.h"
+#include "runtime/trt/audio/bark_generation_plan.h"
 
 #if TRTF_HAS_TRT
 
@@ -89,72 +90,6 @@ void maybe_dump_tokens(const char* suffix, const std::vector<int32_t>& tokens)
     {
         dump << token << "\n";
     }
-}
-
-std::vector<int32_t> remap_semantic_tokens(
-    const std::vector<int32_t>& semantic_tokens,
-    const BarkConfig& cfg)
-{
-    std::vector<int32_t> x_semantic;
-    x_semantic.reserve(semantic_tokens.size());
-    for (int32_t tok : semantic_tokens)
-    {
-        x_semantic.push_back(
-            tok == cfg.semantic_pad_token ? cfg.coarse_semantic_pad_token : tok);
-    }
-    return x_semantic;
-}
-
-int32_t compute_coarse_steps(int32_t semantic_len, const BarkConfig& cfg)
-{
-    const float scaled = static_cast<float>(semantic_len) *
-        cfg.coarse_rate_hz / cfg.semantic_rate_hz;
-    const int32_t frames = static_cast<int32_t>(std::floor(scaled));
-    return std::max(frames * cfg.n_coarse_codebooks, 0);
-}
-
-std::vector<int32_t> build_coarse_input_tokens(
-    const std::vector<int32_t>& x_semantic,
-    const std::vector<int32_t>& x_coarse,
-    const BarkConfig& cfg)
-{
-    const int32_t sem_len = static_cast<int32_t>(x_semantic.size());
-    const int32_t total_generated = static_cast<int32_t>(x_coarse.size());
-    const int32_t max_semantic_history = static_cast<int32_t>(std::floor(
-        static_cast<float>(cfg.max_coarse_history) * cfg.semantic_rate_hz /
-        cfg.coarse_rate_hz));
-    const int32_t semantic_idx = static_cast<int32_t>(std::round(
-        static_cast<float>(total_generated) * cfg.semantic_rate_hz /
-        cfg.coarse_rate_hz));
-    const int32_t sem_start = std::max(0, semantic_idx - max_semantic_history);
-    const int32_t sem_context_len = std::min(
-        sem_len - sem_start,
-        cfg.max_coarse_input_length);
-
-    std::vector<int32_t> input_tokens;
-    input_tokens.reserve(
-        static_cast<std::size_t>(cfg.max_coarse_input_length) + 1 +
-        static_cast<std::size_t>(cfg.max_coarse_history));
-
-    for (int32_t i = sem_start; i < sem_start + sem_context_len; ++i)
-    {
-        input_tokens.push_back(x_semantic[i]);
-    }
-    for (int32_t i = sem_context_len; i < cfg.max_coarse_input_length; ++i)
-    {
-        input_tokens.push_back(cfg.coarse_semantic_pad_token);
-    }
-
-    input_tokens.push_back(cfg.coarse_infer_token);
-
-    const int32_t hist_start = std::max(
-        0,
-        static_cast<int32_t>(x_coarse.size()) - cfg.max_coarse_history);
-    for (int32_t i = hist_start; i < static_cast<int32_t>(x_coarse.size()); ++i)
-    {
-        input_tokens.push_back(x_coarse[i]);
-    }
-    return input_tokens;
 }
 
 void mask_coarse_logits_for_codebook(
@@ -276,23 +211,6 @@ bool sample_semantic_token_for_step(
         cfg.semantic_temperature,
         cfg.top_k);
     return token != cfg.semantic_pad_token;
-}
-
-std::vector<int32_t> initialize_fine_codes(
-    const std::vector<int32_t>& coarse_tokens,
-    int32_t n_frames,
-    const BarkConfig& cfg)
-{
-    std::vector<int32_t> codes(static_cast<std::size_t>(8) * n_frames, cfg.codebook_size);
-    for (int32_t t = 0; t < n_frames * cfg.n_coarse_codebooks; ++t)
-    {
-        const int32_t cb = t % cfg.n_coarse_codebooks;
-        const int32_t frame = t / cfg.n_coarse_codebooks;
-        int32_t raw = coarse_tokens[t] - cfg.semantic_vocab_size - cb * cfg.codebook_size;
-        raw = std::max(0, std::min(raw, cfg.codebook_size - 1));
-        codes[static_cast<std::size_t>(cb) * n_frames + frame] = raw;
-    }
-    return codes;
 }
 
 void build_fine_input_embeddings(
@@ -491,26 +409,6 @@ std::vector<float> synthesize_simple_waveform(
     return waveform;
 }
 
-std::vector<int32_t> build_codec_input_codes(
-    const std::vector<int32_t>& codes_flat,
-    int32_t source_codebooks,
-    int32_t n_frames,
-    int32_t n_cb,
-    int32_t max_T,
-    int32_t actual_frames)
-{
-    std::vector<int32_t> input_codes(static_cast<std::size_t>(n_cb) * max_T, 0);
-    for (int32_t cb = 0; cb < std::min(source_codebooks, n_cb); ++cb)
-    {
-        for (int32_t f = 0; f < actual_frames; ++f)
-        {
-            input_codes[static_cast<std::size_t>(cb) * max_T + f] =
-                codes_flat[static_cast<std::size_t>(cb) * n_frames + f];
-        }
-    }
-    return input_codes;
-}
-
 bool bind_codec_tensors(
     nvinfer1::IExecutionContext& codec_ctx,
     CudaBuffer& d_input,
@@ -548,7 +446,7 @@ std::vector<float> run_codec_trt(
                   << ", truncating" << std::endl;
     }
     const int32_t actual_frames = std::min(n_frames, max_T);
-    std::vector<int32_t> input_codes = build_codec_input_codes(
+    std::vector<int32_t> input_codes = make_bark_codec_input_codes(
         codes_flat, source_codebooks, n_frames, n_cb, max_T, actual_frames);
 
     const auto input_bytes = input_codes.size() * sizeof(int32_t);
@@ -820,17 +718,14 @@ std::vector<int32_t> BarkBackend::run_coarse(
     const std::vector<int32_t>& semantic_tokens)
 {
     const auto& cfg = mConfig;
-    std::vector<int32_t> x_semantic = remap_semantic_tokens(semantic_tokens, cfg);
-    const int32_t n_steps = compute_coarse_steps(static_cast<int32_t>(x_semantic.size()), cfg);
+    const BarkCoarsePlan coarse_plan = make_bark_coarse_plan(semantic_tokens, cfg);
+    const int32_t n_steps = coarse_plan.total_steps;
 
     if (n_steps == 0)
     {
         std::cerr << "[trtf] Bark coarse: no steps to generate" << std::endl;
         return {};
     }
-
-    const int32_t n_window_steps = static_cast<int32_t>(
-        std::ceil(static_cast<float>(n_steps) / cfg.sliding_window_len));
 
     std::vector<int32_t> x_coarse;  // accumulated coarse output tokens
     x_coarse.reserve(static_cast<std::size_t>(n_steps));
@@ -839,17 +734,16 @@ std::vector<int32_t> BarkBackend::run_coarse(
     std::vector<float> embed_buf(static_cast<std::size_t>(cfg.hidden_size));
     std::string error;
 
-    for (int32_t win = 0; win < n_window_steps; ++win)
+    for (int32_t win = 0; win < coarse_plan.num_windows; ++win)
     {
-        const int32_t gen_this_window = std::min(
-            cfg.sliding_window_len,
-            n_steps - static_cast<int32_t>(x_coarse.size()));
-        if (gen_this_window <= 0)
+        const BarkCoarseWindowPlan window_plan = make_bark_coarse_window_plan(
+            coarse_plan,
+            x_coarse,
+            cfg);
+        if (window_plan.generated_this_window <= 0)
         {
             break;
         }
-
-        std::vector<int32_t> input_tokens = build_coarse_input_tokens(x_semantic, x_coarse, cfg);
 
         DeviceKvCache cache(*mCoarseEngine);
         DeviceResources resources(*mCoarseEngine);
@@ -861,17 +755,16 @@ std::vector<int32_t> BarkBackend::run_coarse(
             *mCoarseEngine,
             cache,
             resources,
-            input_tokens,
+            window_plan.input_tokens,
             mCoarseEmbed.data(),
             cfg,
             embed_buf,
             logits);
 
-        const int32_t window_start_count = static_cast<int32_t>(x_coarse.size());
-        for (int32_t step = 0; step < gen_this_window; ++step)
+        for (int32_t step = 0; step < window_plan.generated_this_window; ++step)
         {
-            const int32_t total_generated = window_start_count + step;
-            const int32_t codebook_idx = total_generated % cfg.n_coarse_codebooks;
+            const int32_t total_generated = window_plan.start_generated_count + step;
+            const int32_t codebook_idx = bark_coarse_codebook_index(total_generated, cfg);
             mask_coarse_logits_for_codebook(logits, codebook_idx, cfg);
 
             const int32_t token = sample_top_k(logits.data(),
@@ -879,7 +772,7 @@ std::vector<int32_t> BarkBackend::run_coarse(
                 cfg.coarse_temperature, cfg.top_k);
             x_coarse.push_back(token);
 
-            if (step + 1 < gen_this_window)
+            if (step + 1 < window_plan.generated_this_window)
             {
                 copy_embed_row(mCoarseEmbed.data(), token, cfg.hidden_size, embed_buf.data());
                 if (!run_decoder_step_device(*mCoarseEngine, cache, resources,
@@ -905,14 +798,17 @@ std::vector<int32_t> BarkBackend::run_coarse(
 std::vector<int32_t> BarkBackend::run_fine(const std::vector<int32_t>& coarse_tokens)
 {
     const auto& cfg = mConfig;
-    const int32_t n_frames_raw = static_cast<int32_t>(coarse_tokens.size()) /
-                                  cfg.n_coarse_codebooks;
-    const int32_t n_frames = std::min(
-        n_frames_raw,
-        cfg.fine_seq_length > 0 ? cfg.fine_seq_length : n_frames_raw);
-    std::vector<int32_t> codes = initialize_fine_codes(coarse_tokens, n_frames, cfg);
+    const BarkFinePlan plan = make_bark_fine_plan(
+        cfg,
+        coarse_tokens.size(),
+        static_cast<bool>(mFineEngine),
+        static_cast<bool>(mFineCtx));
+    std::vector<int32_t> codes = initialize_bark_fine_codes(
+        coarse_tokens,
+        plan.n_frames,
+        cfg);
 
-    if (!mFineEngine || !mFineCtx || cfg.fine_seq_length <= 0)
+    if (!plan.should_run_trt)
     {
         std::cerr << "[trtf] Bark fine: no TRT fine engine, "
                   << "codebooks 2-7 will be zero" << std::endl;
@@ -938,8 +834,9 @@ std::vector<int32_t> BarkBackend::run_fine(const std::vector<int32_t>& coarse_to
     std::vector<float> host_logits(
         static_cast<std::size_t>(max_seq) * fine_cb_size);
 
-    const int32_t actual_frames = std::min(n_frames, max_seq);
-    for (int32_t cb_idx = 2; cb_idx < 8; ++cb_idx)
+    for (int32_t cb_idx = plan.first_predicted_codebook;
+         cb_idx < plan.last_predicted_codebook;
+         ++cb_idx)
     {
         if (!run_fine_codebook_step(
                 *mFineCtx,
@@ -948,8 +845,8 @@ std::vector<int32_t> BarkBackend::run_fine(const std::vector<int32_t>& coarse_to
                 stream,
                 cfg,
                 cb_idx,
-                n_frames,
-                actual_frames,
+                plan.n_frames,
+                plan.actual_frames,
                 max_seq,
                 fine_hidden,
                 fine_cb_size,
@@ -964,7 +861,7 @@ std::vector<int32_t> BarkBackend::run_fine(const std::vector<int32_t>& coarse_to
     }
 
     std::cerr << "[trtf] Bark fine: predicted codebooks 2-7 for "
-              << n_frames << " frames" << std::endl;
+              << plan.n_frames << " frames" << std::endl;
 
     return codes;
 }
@@ -1073,10 +970,14 @@ AudioResult BarkBackend::generate_audio(
 
     // Stage 2.5: Fine (coarse codes -> 8 codebook codes)
     auto fine_codes = run_fine(coarse_tokens);
-    const int32_t n_fine_frames = static_cast<int32_t>(fine_codes.size()) / 8;
+    const BarkCodecPlan codec_plan = make_bark_codec_plan(
+        fine_codes,
+        static_cast<bool>(mFineEngine),
+        coarse_tokens,
+        mConfig.n_coarse_codebooks);
 
-    std::vector<float> waveform = (n_fine_frames > 0 && mFineEngine)
-        ? run_codec(fine_codes, n_fine_frames)
+    std::vector<float> waveform = codec_plan.use_fine_codes
+        ? run_codec(fine_codes, codec_plan.frame_count)
         : run_codec(coarse_tokens);
     if (waveform.empty())
     {

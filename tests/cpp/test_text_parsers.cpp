@@ -25,7 +25,11 @@
 // =============================================================================
 
 #include "utils/text_parsers.h"
+#include "test_helpers.h"
 
+#include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -329,6 +333,223 @@ bool test_iequals_ascii_different_length()
     return !trtf::iequals_ascii("Hello", "Hell");
 }
 
+// ---------------------------------------------------------------------------
+// Filesystem parser tests
+// ---------------------------------------------------------------------------
+
+// Intention: Verify read_file reads full contents from an existing file.
+// Setup:     Temp file with multi-line content.
+// Mechanism: Calls read_file and compares exact output bytes.
+bool test_read_file_success()
+{
+    trtf_test::TempDirGuard dir;
+    const auto path = std::filesystem::path(dir.path()) / "sample.txt";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << "line1\nline2\n";
+    }
+    const std::string text = trtf::read_file(path);
+    if (text != "line1\nline2\n")
+    {
+        std::cerr << "read_file_success: got '" << text << "'" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify read_file throws for a missing path.
+// Setup:     Nonexistent file path.
+// Mechanism: Calls read_file in try/catch and expects runtime_error.
+bool test_read_file_missing_throws()
+{
+    const std::filesystem::path missing = "/tmp/trtf_missing_read_file.txt";
+    bool threw = false;
+    try
+    {
+        (void) trtf::read_file(missing);
+    }
+    catch (const std::runtime_error&) { threw = true; }
+    return threw;
+}
+
+// Intention: Verify read_clean_lines strips comments/blank lines and preserves
+//            original line numbers for remaining content.
+// Setup:     Temp file with comments, blanks, and inline comments.
+// Mechanism: Calls read_clean_lines and checks resulting SourceLine entries.
+bool test_read_clean_lines_success()
+{
+    trtf_test::TempDirGuard dir;
+    const auto path = std::filesystem::path(dir.path()) / "clean_lines.txt";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# comment\n";
+        out << "alpha   # inline\n";
+        out << "\n";
+        out << "beta\n";
+    }
+
+    const auto lines = trtf::read_clean_lines(path);
+    if (lines.size() != 2)
+    {
+        std::cerr << "read_clean_lines_success: size=" << lines.size() << std::endl;
+        return false;
+    }
+    if (lines[0].number != 2 || lines[0].text != "alpha")
+    {
+        std::cerr << "read_clean_lines_success: first line mismatch" << std::endl;
+        return false;
+    }
+    if (lines[1].number != 4 || lines[1].text != "beta")
+    {
+        std::cerr << "read_clean_lines_success: second line mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify load_vocab parses entries and strips comments.
+// Setup:     Temp vocab file with comments and blank lines.
+// Mechanism: Calls load_vocab and checks resulting token list.
+bool test_load_vocab_success()
+{
+    trtf_test::TempDirGuard dir;
+    const auto path = std::filesystem::path(dir.path()) / "vocab.txt";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# skip\n";
+        out << "foo\n";
+        out << "bar # inline\n";
+        out << "\n";
+    }
+
+    const auto vocab = trtf::load_vocab(path);
+    if (vocab.size() != 2 || vocab[0] != "foo" || vocab[1] != "bar")
+    {
+        std::cerr << "load_vocab_success: unexpected vocab size/content" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify load_vocab throws when all lines are filtered out.
+// Setup:     Temp vocab file containing only comments/blank lines.
+// Mechanism: Calls load_vocab and expects runtime_error.
+bool test_load_vocab_empty_throws()
+{
+    trtf_test::TempDirGuard dir;
+    const auto path = std::filesystem::path(dir.path()) / "empty_vocab.txt";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "# only comments\n";
+        out << "\n";
+    }
+
+    bool threw = false;
+    try
+    {
+        (void) trtf::load_vocab(path);
+    }
+    catch (const std::runtime_error&) { threw = true; }
+    return threw;
+}
+
+// Intention: Verify load_transitions parses valid transition pairs.
+// Setup:     Temp transitions file with comments and two valid mappings.
+// Mechanism: Calls load_transitions and validates parsed pairs.
+bool test_load_transitions_success()
+{
+    trtf_test::TempDirGuard dir;
+    const auto path = std::filesystem::path(dir.path()) / "transitions.txt";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "a b\n";
+        out << "x y # comment\n";
+        out << "# ignored\n";
+    }
+
+    const auto transitions = trtf::load_transitions(path);
+    if (transitions.size() != 2)
+    {
+        std::cerr << "load_transitions_success: size=" << transitions.size() << std::endl;
+        return false;
+    }
+    if (transitions[0].first != "a" || transitions[0].second != "b")
+    {
+        std::cerr << "load_transitions_success: first pair mismatch" << std::endl;
+        return false;
+    }
+    if (transitions[1].first != "x" || transitions[1].second != "y")
+    {
+        std::cerr << "load_transitions_success: second pair mismatch" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Intention: Verify load_transitions throws on malformed line with only one token.
+// Setup:     Temp transitions file with invalid entry.
+// Mechanism: Calls load_transitions and expects runtime_error.
+bool test_load_transitions_invalid_line_throws()
+{
+    trtf_test::TempDirGuard dir;
+    const auto path = std::filesystem::path(dir.path()) / "bad_transitions.txt";
+    {
+        std::ofstream out(path, std::ios::trunc);
+        out << "only_one_token\n";
+    }
+
+    bool threw = false;
+    try
+    {
+        (void) trtf::load_transitions(path);
+    }
+    catch (const std::runtime_error&) { threw = true; }
+    return threw;
+}
+
+// Intention: Verify parse_int accepts valid integer and rejects suffixes.
+// Setup:     Two calls with "42" and "42x".
+// Mechanism: Expects success for valid input and runtime_error for invalid suffix.
+bool test_parse_int_success_and_suffix_error()
+{
+    const std::filesystem::path path = "config.txt";
+    if (trtf::parse_int("42", path, 7, "field") != 42)
+    {
+        std::cerr << "parse_int_success: unexpected value" << std::endl;
+        return false;
+    }
+
+    bool threw = false;
+    try
+    {
+        (void) trtf::parse_int("42x", path, 7, "field");
+    }
+    catch (const std::runtime_error&) { threw = true; }
+    return threw;
+}
+
+// Intention: Verify parse_float accepts valid float and rejects suffixes.
+// Setup:     Two calls with "3.5" and "3.5x".
+// Mechanism: Expects success for valid input and runtime_error for invalid suffix.
+bool test_parse_float_success_and_suffix_error()
+{
+    const std::filesystem::path path = "config.txt";
+    const float value = trtf::parse_float("3.5", path, 9, "field");
+    if (std::abs(value - 3.5F) > 1e-6F)
+    {
+        std::cerr << "parse_float_success: unexpected value=" << value << std::endl;
+        return false;
+    }
+
+    bool threw = false;
+    try
+    {
+        (void) trtf::parse_float("3.5x", path, 9, "field");
+    }
+    catch (const std::runtime_error&) { threw = true; }
+    return threw;
+}
+
 } // namespace
 
 int main()
@@ -364,6 +585,15 @@ int main()
     run("iequals_match", test_iequals_ascii_match);
     run("iequals_no_match", test_iequals_ascii_no_match);
     run("iequals_diff_length", test_iequals_ascii_different_length);
+    run("read_file_success", test_read_file_success);
+    run("read_file_missing_throws", test_read_file_missing_throws);
+    run("read_clean_lines_success", test_read_clean_lines_success);
+    run("load_vocab_success", test_load_vocab_success);
+    run("load_vocab_empty_throws", test_load_vocab_empty_throws);
+    run("load_transitions_success", test_load_transitions_success);
+    run("load_transitions_invalid_line_throws", test_load_transitions_invalid_line_throws);
+    run("parse_int_success_and_suffix_error", test_parse_int_success_and_suffix_error);
+    run("parse_float_success_and_suffix_error", test_parse_float_success_and_suffix_error);
 
     if (all_passed)
     {

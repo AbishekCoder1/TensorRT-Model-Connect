@@ -1,10 +1,36 @@
 #include "runtime/trt/core/device_kv_cache.h"
+#include "runtime/trt/core/device_kv_cache_update_plan.h"
 #include "runtime/trt/core/trt_decode_runtime.h"
 
 #include <algorithm>
 #include <cstring>
 #include <initializer_list>
 #include <string_view>
+
+namespace trtf::detail {
+
+CacheRowUpdatePlan plan_cache_row_update(
+    int32_t cache_length,
+    int32_t max_cache_length,
+    std::size_t row_bytes)
+{
+    CacheRowUpdatePlan plan{};
+    plan.shift_existing_rows = cache_length >= max_cache_length;
+    if (!plan.shift_existing_rows)
+    {
+        plan.append_offset_bytes = static_cast<std::size_t>(cache_length) * row_bytes;
+    }
+    else
+    {
+        plan.shift_source_offset_bytes = row_bytes;
+        plan.shift_copy_bytes = static_cast<std::size_t>(max_cache_length - 1) * row_bytes;
+        plan.tail_offset_bytes = static_cast<std::size_t>(max_cache_length - 1) * row_bytes;
+    }
+    plan.next_cache_length = std::min(cache_length + 1, max_cache_length);
+    return plan;
+}
+
+} // namespace trtf::detail
 
 namespace trtf {
 
@@ -581,24 +607,23 @@ void DeviceKvCache::update_after_step(
     cudaStream_t stream)
 {
     const std::size_t row_bytes = static_cast<std::size_t>(mCacheStateSize) * sizeof(float);
+    const detail::CacheRowUpdatePlan plan = detail::plan_cache_row_update(mCacheLength, mMaxCacheLength, row_bytes);
 
     auto copy_one = [&](CudaBuffer& cache_buf, const CudaBuffer& present_buf) {
         auto* cache_ptr = static_cast<char*>(cache_buf.data());
         const auto* present_ptr = present_buf.data();
 
-        if (mCacheLength < mMaxCacheLength)
+        if (!plan.shift_existing_rows)
         {
-            const std::size_t offset = static_cast<std::size_t>(mCacheLength) * row_bytes;
-            cudaMemcpyAsync(cache_ptr + offset, present_ptr, row_bytes,
+            cudaMemcpyAsync(cache_ptr + plan.append_offset_bytes, present_ptr, row_bytes,
                 cudaMemcpyDeviceToDevice, stream);
         }
         else
         {
-            cudaMemcpyAsync(cache_ptr, cache_ptr + row_bytes,
-                static_cast<std::size_t>(mMaxCacheLength - 1) * row_bytes,
+            cudaMemcpyAsync(cache_ptr, cache_ptr + plan.shift_source_offset_bytes,
+                plan.shift_copy_bytes,
                 cudaMemcpyDeviceToDevice, stream);
-            const std::size_t tail_offset = static_cast<std::size_t>(mMaxCacheLength - 1) * row_bytes;
-            cudaMemcpyAsync(cache_ptr + tail_offset, present_ptr, row_bytes,
+            cudaMemcpyAsync(cache_ptr + plan.tail_offset_bytes, present_ptr, row_bytes,
                 cudaMemcpyDeviceToDevice, stream);
         }
     };
@@ -610,7 +635,7 @@ void DeviceKvCache::update_after_step(
         copy_one(mCacheV[idx], present_v[idx]);
     }
 
-    mCacheLength = std::min(mCacheLength + 1, mMaxCacheLength);
+    mCacheLength = plan.next_cache_length;
 }
 
 void DeviceKvCache::reset(cudaStream_t stream)

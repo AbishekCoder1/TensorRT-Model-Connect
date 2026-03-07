@@ -20,6 +20,7 @@ registry calls.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from ..contracts import (
     CompareResult,
@@ -40,6 +41,26 @@ logger = logging.getLogger(__name__)
 def _safe_import_numpy():
     import numpy as np
     return np
+
+
+def _resolve_mask_list(data: dict) -> list:
+    masks = data.get("masks", [])
+    if masks:
+        return masks
+
+    masks_path = data.get("masks_path")
+    if not masks_path:
+        return []
+
+    path = Path(masks_path)
+    if not path.is_file():
+        return []
+
+    np = _safe_import_numpy()
+    loaded = np.load(path, allow_pickle=False)
+    if loaded.ndim == 2:
+        return [loaded]
+    return [loaded[i] for i in range(loaded.shape[0])]
 
 
 def _compute_iou(mask_a, mask_b) -> float:
@@ -297,8 +318,8 @@ class PromptedSegmentationComparator:
 
         metrics: dict[str, MetricResult] = {}
 
-        trt_masks = trt.data.get("masks", [])
-        ref_masks = ref.data.get("masks", [])
+        trt_masks = _resolve_mask_list(trt.data)
+        ref_masks = _resolve_mask_list(ref.data)
         trt_scores = trt.data.get("mask_scores", [])
         ref_scores = ref.data.get("mask_scores", [])
 

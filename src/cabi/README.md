@@ -1,17 +1,13 @@
-# C ABI Runtime Assembly
+# C ABI Runtime Edge
 
-This directory contains pipeline assembly and strategy dispatch code behind the public C API.
+This directory now contains only the thin C ABI edge for the service-composed runtime.
 
 Subdirectories:
-- `api/`: C API entrypoint glue (`trtf_c.cpp`).
-- `pipeline/`: `PipelineImpl` orchestration and end-to-end API behavior.
-- `config/`: `FastPathModelConfig` parsing from bundle `config.json`.
-- `bundle/`: shared bundle extraction and TensorRT engine/tokenizer helpers.
-- `factories/`: strategy-specific backend construction modules.
-- `registry/`: backend factory registry, dispatch, and built-in plugin registration.
+- `api/`: exported C API entrypoint glue (`trtf_c.cpp`)
+- `config/`: `FastPathModelConfig` parsing from bundle `config.json`
+- `bundle/`: shared bundle extraction and tokenizer/bundle helpers reused by the runtime builders
 
 Suggested reading order:
-1. `api/trtf_c.cpp` (public API entry and lifecycle)
-2. `pipeline/pipeline_impl.*` (runtime pipeline behavior)
-3. `registry/` + `factories/` (strategy selection and backend construction)
-4. `bundle/` + `config/` (bundle parsing and config wiring)
+1. `api/trtf_c.cpp` (public API validation, bundle loading, builder composition entry)
+2. `bundle/` (bundle metadata and tokenizer extraction helpers)
+3. `config/` (config parsing consumed by builders and TRT executors)

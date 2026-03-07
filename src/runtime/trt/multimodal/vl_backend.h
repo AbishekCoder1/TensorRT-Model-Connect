@@ -49,7 +49,7 @@ public:
     // 4. tokenize (Python subprocess, via ITokenizer passed at call site)
     // Returns image features and formatted prompt for the caller to tokenize.
     bool prepare_image(
-        const std::string& image_path,
+        const runtime::adapters::io::DecodedImage& image,
         std::vector<float>& image_features,
         int32_t& num_features,
         int32_t& feature_dim,

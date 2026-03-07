@@ -6,6 +6,7 @@
 #include "runtime/trt/core/device_kv_cache.h"
 #include "runtime/trt/audio/bark_backend.h"  // for AudioResult, write_wav
 #include "cabi/config/fast_path_config.h"
+#include "trtf/runtime/trt/audio/subprocess_runner.h"
 
 #if TRTF_HAS_TRT
 
@@ -96,7 +97,9 @@ class SpeechToSpeechBackend {
 public:
     SpeechToSpeechBackend(
         std::unique_ptr<DecoderStepEngine> temporal_engine,
-        SpeechConfig config);
+        SpeechConfig config,
+        std::shared_ptr<ISubprocessRunner> subprocess_runner
+            = CreateDefaultSubprocessRunner());
 
     ~SpeechToSpeechBackend();
 
@@ -182,6 +185,7 @@ private:
     TrtUniquePtr<nvinfer1::IExecutionContext> mMimiDecoderCtx;
 
     SpeechConfig mConfig;
+    std::shared_ptr<ISubprocessRunner> mSubprocessRunner;
 
     // RNG state for sampling (xorshift64, seeded from time at construction)
     uint64_t mRngState{0};

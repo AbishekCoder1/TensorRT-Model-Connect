@@ -192,7 +192,7 @@ class PromptedSegmentationRunner:
     def _run_full_inference(
         self, case: E2ECase, ctx: RunContext
     ) -> StageOutput:
-        """Run prompted segmentation via C++ binary with point prompts."""
+        """Run prompted segmentation via `trtf segment-sam`."""
         bundle_path = self._resolve_bundle_path(case, ctx)
         image_path = self._resolve_image_path(case, ctx)
 
@@ -213,6 +213,7 @@ class PromptedSegmentationRunner:
         # Extract point prompts from case inputs
         point_x = case.inputs.get("point_x", 0.5)
         point_y = case.inputs.get("point_y", 0.5)
+        is_foreground = case.inputs.get("is_foreground", True)
         num_expected_masks = case.inputs.get("num_expected_masks", 4)
 
         output_dir = os.path.join(
@@ -221,11 +222,14 @@ class PromptedSegmentationRunner:
         )
 
         cmd = [
-            str(ctx.binary_path), "segment", str(bundle_path),
+            str(ctx.binary_path), "segment-sam", str(bundle_path),
             "--image", str(image_path),
-            "--point", f"{point_x},{point_y}",
-            "--output-dir", str(output_dir),
+            "--output", str(output_dir),
+            "--point-x", str(point_x),
+            "--point-y", str(point_y),
         ]
+        if not is_foreground:
+            cmd.append("--background")
         if ctx.hf_python:
             cmd.extend(["--hf-python", str(ctx.hf_python)])
 
