@@ -91,6 +91,24 @@ bool has_data(const std::vector<char>* data)
     return data != nullptr && !data->empty();
 }
 
+void set_decoder_vocab_from_logits(trtf::DecoderStepEngine& engine)
+{
+    auto logits_shape = engine.engine->getTensorShape("logits");
+    int32_t actual_vocab = -1;
+    if (logits_shape.nbDims >= 2)
+    {
+        actual_vocab = logits_shape.d[logits_shape.nbDims - 1];
+    }
+    else if (logits_shape.nbDims == 1)
+    {
+        actual_vocab = logits_shape.d[0];
+    }
+    if (actual_vocab > 0)
+    {
+        engine.vocab_size = actual_vocab;
+    }
+}
+
 std::string lowercase_ascii(std::string_view text)
 {
     std::string lower(text);
@@ -572,6 +590,7 @@ BuildResult build_magpie_audio_services(
 {
     auto decoder_engine = trtf::make_decoder_engine(
         std::move(primary.engine), std::move(primary.context), config);
+    set_decoder_vocab_from_logits(*decoder_engine);
     auto encoder = load_engine_context_for_section(bundle_port, trt_port, runtime, "vision_engine_plan");
     if (!encoder.ok())
     {
@@ -631,6 +650,7 @@ BuildResult build_bark_audio_services(
 {
     auto semantic_engine = trtf::make_decoder_engine(
         std::move(primary.engine), std::move(primary.context), config);
+    set_decoder_vocab_from_logits(*semantic_engine);
     if (!trtf::has_all_required_tensors(*semantic_engine))
     {
         throw std::runtime_error("Bundle engine missing required semantic tensors: " + bundle_source);
