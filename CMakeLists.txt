@@ -73,27 +73,9 @@ add_library(trtf_core
   src/cabi/api/trtf_c.cpp
   src/cabi/config/fast_path_config.cpp
   src/cabi/bundle/bundle_helpers.cpp
-  src/runtime/pipeline/router.cpp
-  src/runtime/adapters/io/audio_io_adapter.cpp
-  src/runtime/adapters/io/detection_io_adapter.cpp
-  src/runtime/adapters/io/image_io_adapter.cpp
-  src/runtime/adapters/io/media_io_adapter.cpp
-  src/runtime/adapters/bundle/bundle_port_adapter.cpp
-  src/runtime/adapters/trt/trt_port_adapter.cpp
-  src/runtime/builders/text/text_strategy_builder.cpp
-  src/runtime/builders/encoder/encoder_strategy_builder.cpp
-  src/runtime/builders/vision/vision_strategy_builder.cpp
-  src/runtime/builders/audio/audio_bundle_validation.cpp
-  src/runtime/builders/audio/audio_strategy_builder.cpp
-  src/runtime/builders/diffusion/diffusion_strategy_builder.cpp
-  src/runtime/services/common/runtime_service_ports.cpp
-  src/runtime/services/text/generation_text_service.cpp
-  src/runtime/services/vision/vision_runtime_services.cpp
-  src/runtime/services/audio/audio_runtime_services.cpp
   src/runtime/trt/core/trt_common.cpp
   src/runtime/trt/core/trt_engine_lifecycle.cpp
   src/runtime/trt/core/trt_decode_runtime.cpp
-  src/runtime/trt/core/trt_backend_shared.cpp
   src/runtime/trt/core/device_kv_cache.cpp
   src/runtime/trt/recurrent/mamba_step_state.cpp
   src/runtime/trt/recurrent/mamba_decode_runtime.cpp
@@ -130,7 +112,23 @@ add_library(trtf_core
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
   src/utils/wav_reader.cpp
+  src/utils/image_reader.cpp
   src/runtime/trt/audio/mel_spectrogram.cpp
+  src/runtime/trt/core/device_tensor.cpp
+  src/runtime/trt/core/trt_module.cpp
+  src/runtime/trt/core/kv_cache.cpp
+  src/runtime/trt/core/recurrent_state.cpp
+  src/runtime/trt/core/flow_match_euler_scheduler.cpp
+  src/runtime/pipeline_factory.cpp
+  src/runtime/pipelines/text_generation_pipeline.cpp
+  src/runtime/pipelines/recurrent_pipeline.cpp
+  src/runtime/pipelines/encoder_pipeline.cpp
+  src/runtime/pipelines/vl_pipeline.cpp
+  src/runtime/pipelines/diffusion_pipeline.cpp
+  src/runtime/pipelines/audio_pipeline.cpp
+  src/runtime/pipelines/audio_backend_factory.cpp
+  src/runtime/pipelines/diffusion_backend_factory.cpp
+  src/runtime/trt/audio/audio_bundle_validation.cpp
 )
 
 # Add CUDA kernel sources when CUDA compiler is available
@@ -181,443 +179,128 @@ endif()
 
 add_executable(trtf examples/trtf_cli.cpp)
 target_link_libraries(trtf PRIVATE trtf_core)
+target_include_directories(trtf PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
 
 enable_testing()
 
+# --- Test helper function ---
+# Usage:
+#   trtf_add_test(test_name)               -- links trtf_core, adds src/ include, adds TRT if available
+#   trtf_add_test(test_name NO_SRC_INCLUDE) -- links trtf_core, no src/ include, adds TRT if available
+function(trtf_add_test TEST_NAME)
+  cmake_parse_arguments(ARG "NO_SRC_INCLUDE" "" "EXTRA_INCLUDES" ${ARGN})
+  add_executable(${TEST_NAME} tests/cpp/${TEST_NAME}.cpp)
+  target_link_libraries(${TEST_NAME} PRIVATE trtf_core)
+  if(NOT ARG_NO_SRC_INCLUDE)
+    target_include_directories(${TEST_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  endif()
+  if(ARG_EXTRA_INCLUDES)
+    target_include_directories(${TEST_NAME} PRIVATE ${ARG_EXTRA_INCLUDES})
+  endif()
+  if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY
+     AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
+    target_include_directories(${TEST_NAME} SYSTEM PRIVATE
+      ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+    target_link_libraries(${TEST_NAME} PRIVATE
+      ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
+  endif()
+  add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+endfunction()
+
 # --- Tests ---
 
-add_executable(test_bundle_format tests/cpp/test_bundle_format.cpp)
-target_link_libraries(test_bundle_format PRIVATE trtf_core)
-target_include_directories(test_bundle_format PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_bundle_format COMMAND test_bundle_format)
+# Bundle / format
+trtf_add_test(test_bundle_format)
+trtf_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
+trtf_add_test(test_bundle_helpers)
 
-add_executable(test_runtime_contracts tests/cpp/test_runtime_contracts.cpp)
-target_include_directories(test_runtime_contracts PRIVATE ${PROJECT_SOURCE_DIR}/include)
-add_test(NAME test_runtime_contracts COMMAND test_runtime_contracts)
+# C ABI
+trtf_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
+trtf_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE)
 
-add_executable(test_c_abi_entry tests/cpp/test_c_abi_entry.cpp)
-target_link_libraries(test_c_abi_entry PRIVATE trtf_core)
-add_test(NAME test_c_abi_entry COMMAND test_c_abi_entry)
+# Config / parsing
+trtf_add_test(test_fast_path_config)
+trtf_add_test(test_text_parsers)
+trtf_add_test(test_json_helpers)
+trtf_add_test(test_data_dir)
+trtf_add_test(test_cli_args            NO_SRC_INCLUDE)
 
-add_executable(test_c_abi_runtime_regression tests/cpp/test_c_abi_runtime_regression.cpp)
-target_link_libraries(test_c_abi_runtime_regression PRIVATE trtf_core)
-add_test(NAME test_c_abi_runtime_regression COMMAND test_c_abi_runtime_regression)
+# TRT runtime core
+trtf_add_test(test_decode_runtime)
+trtf_add_test(test_trt_logger)
+trtf_add_test(test_trt_runtime_lifetime)
+trtf_add_test(test_trt_engine_lifecycle)
+trtf_add_test(test_trt_engine_lifecycle_fake_engine)
+trtf_add_test(test_trt_module)
 
-add_executable(test_fast_path_config tests/cpp/test_fast_path_config.cpp)
-target_link_libraries(test_fast_path_config PRIVATE trtf_core)
-target_include_directories(test_fast_path_config PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_fast_path_config COMMAND test_fast_path_config)
+# CUDA / device
+trtf_add_test(test_cuda_buffer)
+trtf_add_test(test_cuda_stream)
+trtf_add_test(test_device_kv_cache)
+trtf_add_test(test_device_tensor)
+trtf_add_test(test_kv_cache_new)
+trtf_add_test(test_recurrent_state)
 
-add_executable(test_text_parsers tests/cpp/test_text_parsers.cpp)
-target_link_libraries(test_text_parsers PRIVATE trtf_core)
-target_include_directories(test_text_parsers PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_text_parsers COMMAND test_text_parsers)
+# Pipelines (public API)
+trtf_add_test(test_pipeline_api                NO_SRC_INCLUDE)
+trtf_add_test(test_text_generation_pipeline)
+trtf_add_test(test_recurrent_pipeline)
+trtf_add_test(test_encoder_pipeline)
+trtf_add_test(test_vl_pipeline)
+trtf_add_test(test_diffusion_pipeline_new)
+trtf_add_test(test_audio_pipeline_new)
 
-add_executable(test_json_helpers tests/cpp/test_json_helpers.cpp)
-target_link_libraries(test_json_helpers PRIVATE trtf_core)
-target_include_directories(test_json_helpers PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_json_helpers COMMAND test_json_helpers)
+# Tokenizers
+trtf_add_test(test_vocab_tokenizer     NO_SRC_INCLUDE)
+trtf_add_test(test_hf_python_tokenizer)
+trtf_add_test(test_ipa_tokenizer)
 
-add_executable(test_data_dir tests/cpp/test_data_dir.cpp)
-target_link_libraries(test_data_dir PRIVATE trtf_core)
-target_include_directories(test_data_dir PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_data_dir COMMAND test_data_dir)
+# Vision / VL
+trtf_add_test(test_image_preprocessor)
+trtf_add_test(test_vl_decode_policy)
+trtf_add_test(test_vision_execution_plan)
 
-add_executable(test_decode_runtime tests/cpp/test_decode_runtime.cpp)
-target_link_libraries(test_decode_runtime PRIVATE trtf_core)
-target_include_directories(test_decode_runtime PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_decode_runtime SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_decode_runtime PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_decode_runtime COMMAND test_decode_runtime)
+# Diffusion
+trtf_add_test(test_diffusion_generation_plan)
+trtf_add_test(test_diffusion_denoising_step_seam)
+trtf_add_test(test_flow_match_scheduler)
 
-add_executable(test_pipeline_api tests/cpp/test_pipeline_api.cpp)
-target_link_libraries(test_pipeline_api PRIVATE trtf_core)
-add_test(NAME test_pipeline_api COMMAND test_pipeline_api)
+# Recurrent (Mamba / RWKV)
+trtf_add_test(test_recurrent_step_contracts)
 
-add_executable(test_pipeline_router
-  tests/cpp/test_pipeline_router.cpp
-)
-target_link_libraries(test_pipeline_router PRIVATE trtf_core)
-target_include_directories(test_pipeline_router PRIVATE ${PROJECT_SOURCE_DIR}/include)
-add_test(NAME test_pipeline_router COMMAND test_pipeline_router)
+# Audio — Whisper
+trtf_add_test(test_audio_bundle_validation)
+trtf_add_test(test_whisper_host_plan)
+trtf_add_test(test_whisper_decode_policy)
+trtf_add_test(test_wav_reader)
+trtf_add_test(test_mel_spectrogram)
 
-add_executable(test_runtime_io_adapters
-  tests/cpp/test_runtime_io_adapters.cpp
-)
-target_link_libraries(test_runtime_io_adapters PRIVATE trtf_core)
-target_include_directories(test_runtime_io_adapters PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_runtime_io_adapters COMMAND test_runtime_io_adapters)
+# Audio — Bark
+trtf_add_test(test_bark_generation_plan)
 
-add_executable(test_text_strategy_builder
-  tests/cpp/test_text_strategy_builder.cpp
-)
-target_link_libraries(test_text_strategy_builder PRIVATE trtf_core)
-target_include_directories(test_text_strategy_builder PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests/cpp ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_text_strategy_builder COMMAND test_text_strategy_builder)
+# Audio — Speech (PersonaPlex / Magpie)
+trtf_add_test(test_speech_subprocess_seam      NO_SRC_INCLUDE)
+trtf_add_test(test_speech_decode_stop_policy   NO_SRC_INCLUDE)
+trtf_add_test(test_speech_generation_helpers)
+trtf_add_test(test_speech_depth_plan)
+trtf_add_test(test_speech_runtime_plan)
+trtf_add_test(test_speech_temporal_embed_plan)
+trtf_add_test(test_speech_mimi_decode_plan)
+trtf_add_test(test_magpie_decode_policy)
+trtf_add_test(test_magpie_decoder_plan)
+trtf_add_test(test_magpie_text_completion_policy)
+trtf_add_test(test_magpie_codec_plan)
 
-add_executable(test_encoder_strategy_builder
-  tests/cpp/test_encoder_strategy_builder.cpp
-)
-target_link_libraries(test_encoder_strategy_builder PRIVATE trtf_core)
-target_include_directories(test_encoder_strategy_builder PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests/cpp ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_encoder_strategy_builder COMMAND test_encoder_strategy_builder)
+# Audio — Omni
+trtf_add_test(test_omni_audio_plan)
 
-add_executable(test_vision_strategy_builder
-  tests/cpp/test_vision_strategy_builder.cpp
-)
-target_link_libraries(test_vision_strategy_builder PRIVATE trtf_core)
-target_include_directories(test_vision_strategy_builder PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests/cpp ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_vision_strategy_builder COMMAND test_vision_strategy_builder)
+# Perception (segmentation, SAM, neural operator)
+trtf_add_test(test_neural_operator_config)
+trtf_add_test(test_sam_prompt_seam)
+trtf_add_test(test_perception_preprocess_seams)
 
-add_executable(test_audio_strategy_builder
-  tests/cpp/test_audio_strategy_builder.cpp
-)
-target_link_libraries(test_audio_strategy_builder PRIVATE trtf_core)
-target_include_directories(test_audio_strategy_builder PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests/cpp ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_audio_strategy_builder COMMAND test_audio_strategy_builder)
-
-add_executable(test_diffusion_strategy_builder
-  tests/cpp/test_diffusion_strategy_builder.cpp
-)
-target_link_libraries(test_diffusion_strategy_builder PRIVATE trtf_core)
-target_include_directories(test_diffusion_strategy_builder PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests/cpp ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_diffusion_strategy_builder COMMAND test_diffusion_strategy_builder)
-
-add_executable(test_diffusion_generation_plan tests/cpp/test_diffusion_generation_plan.cpp)
-target_link_libraries(test_diffusion_generation_plan PRIVATE trtf_core)
-target_include_directories(test_diffusion_generation_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_diffusion_generation_plan SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_diffusion_generation_plan PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_diffusion_generation_plan COMMAND test_diffusion_generation_plan)
-
-add_executable(test_diffusion_denoising_step_seam tests/cpp/test_diffusion_denoising_step_seam.cpp)
-target_link_libraries(test_diffusion_denoising_step_seam PRIVATE trtf_core)
-target_include_directories(test_diffusion_denoising_step_seam PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_diffusion_denoising_step_seam COMMAND test_diffusion_denoising_step_seam)
-
-add_executable(test_recurrent_step_contracts tests/cpp/test_recurrent_step_contracts.cpp)
-target_link_libraries(test_recurrent_step_contracts PRIVATE trtf_core)
-target_include_directories(test_recurrent_step_contracts PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_recurrent_step_contracts COMMAND test_recurrent_step_contracts)
-
-add_executable(test_audio_bundle_validation tests/cpp/test_audio_bundle_validation.cpp)
-target_link_libraries(test_audio_bundle_validation PRIVATE trtf_core)
-target_include_directories(test_audio_bundle_validation PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_audio_bundle_validation SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_audio_bundle_validation PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_audio_bundle_validation COMMAND test_audio_bundle_validation)
-
-add_executable(test_bundle_e2e tests/cpp/test_bundle_e2e.cpp)
-target_link_libraries(test_bundle_e2e PRIVATE trtf_core)
-add_test(NAME test_bundle_e2e COMMAND test_bundle_e2e)
-
-add_executable(test_cli_args tests/cpp/test_cli_args.cpp)
-target_link_libraries(test_cli_args PRIVATE trtf_core)
-add_test(NAME test_cli_args COMMAND test_cli_args)
-
-add_executable(test_image_preprocessor tests/cpp/test_image_preprocessor.cpp)
-target_link_libraries(test_image_preprocessor PRIVATE trtf_core)
-target_include_directories(test_image_preprocessor PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_image_preprocessor COMMAND test_image_preprocessor)
-
-add_executable(test_vl_decode_policy tests/cpp/test_vl_decode_policy.cpp)
-target_link_libraries(test_vl_decode_policy PRIVATE trtf_core)
-target_include_directories(test_vl_decode_policy PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_vl_decode_policy COMMAND test_vl_decode_policy)
-
-add_executable(test_vision_execution_plan tests/cpp/test_vision_execution_plan.cpp)
-target_link_libraries(test_vision_execution_plan PRIVATE trtf_core)
-target_include_directories(test_vision_execution_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_vision_execution_plan COMMAND test_vision_execution_plan)
-
-add_executable(test_cuda_buffer tests/cpp/test_cuda_buffer.cpp)
-target_link_libraries(test_cuda_buffer PRIVATE trtf_core)
-target_include_directories(test_cuda_buffer PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_cuda_buffer SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_cuda_buffer PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_cuda_buffer COMMAND test_cuda_buffer)
-
-add_executable(test_cuda_stream tests/cpp/test_cuda_stream.cpp)
-target_link_libraries(test_cuda_stream PRIVATE trtf_core)
-target_include_directories(test_cuda_stream PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_cuda_stream SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_cuda_stream PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_cuda_stream COMMAND test_cuda_stream)
-
-add_executable(test_device_kv_cache tests/cpp/test_device_kv_cache.cpp)
-target_link_libraries(test_device_kv_cache PRIVATE trtf_core)
-target_include_directories(test_device_kv_cache PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_device_kv_cache SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_device_kv_cache PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_device_kv_cache COMMAND test_device_kv_cache)
-
-add_executable(test_trt_logger tests/cpp/test_trt_logger.cpp)
-target_link_libraries(test_trt_logger PRIVATE trtf_core)
-target_include_directories(test_trt_logger PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_trt_logger SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_trt_logger PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_trt_logger COMMAND test_trt_logger)
-
-add_executable(test_trt_runtime_lifetime tests/cpp/test_trt_runtime_lifetime.cpp)
-target_link_libraries(test_trt_runtime_lifetime PRIVATE trtf_core)
-target_include_directories(test_trt_runtime_lifetime PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_trt_runtime_lifetime SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_trt_runtime_lifetime PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_trt_runtime_lifetime COMMAND test_trt_runtime_lifetime)
-
-add_executable(test_trt_engine_lifecycle tests/cpp/test_trt_engine_lifecycle.cpp)
-target_link_libraries(test_trt_engine_lifecycle PRIVATE trtf_core)
-target_include_directories(test_trt_engine_lifecycle PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_trt_engine_lifecycle SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_trt_engine_lifecycle PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_trt_engine_lifecycle COMMAND test_trt_engine_lifecycle)
-
-add_executable(test_trt_engine_lifecycle_fake_engine tests/cpp/test_trt_engine_lifecycle_fake_engine.cpp)
-target_link_libraries(test_trt_engine_lifecycle_fake_engine PRIVATE trtf_core)
-target_include_directories(test_trt_engine_lifecycle_fake_engine PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_trt_engine_lifecycle_fake_engine SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_trt_engine_lifecycle_fake_engine PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_trt_engine_lifecycle_fake_engine COMMAND test_trt_engine_lifecycle_fake_engine)
-
-add_executable(test_vocab_tokenizer tests/cpp/test_vocab_tokenizer.cpp)
-target_link_libraries(test_vocab_tokenizer PRIVATE trtf_core)
-add_test(NAME test_vocab_tokenizer COMMAND test_vocab_tokenizer)
-
-add_executable(test_hf_python_tokenizer tests/cpp/test_hf_python_tokenizer.cpp)
-target_link_libraries(test_hf_python_tokenizer PRIVATE trtf_core)
-target_include_directories(test_hf_python_tokenizer PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_hf_python_tokenizer COMMAND test_hf_python_tokenizer)
-
-add_executable(test_speech_subprocess_seam tests/cpp/test_speech_subprocess_seam.cpp)
-target_link_libraries(test_speech_subprocess_seam PRIVATE trtf_core)
-add_test(NAME test_speech_subprocess_seam COMMAND test_speech_subprocess_seam)
-
-add_executable(test_speech_decode_stop_policy tests/cpp/test_speech_decode_stop_policy.cpp)
-target_link_libraries(test_speech_decode_stop_policy PRIVATE trtf_core)
-add_test(NAME test_speech_decode_stop_policy COMMAND test_speech_decode_stop_policy)
-
-add_executable(test_speech_generation_helpers tests/cpp/test_speech_generation_helpers.cpp)
-target_link_libraries(test_speech_generation_helpers PRIVATE trtf_core)
-target_include_directories(test_speech_generation_helpers PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_speech_generation_helpers COMMAND test_speech_generation_helpers)
-
-add_executable(test_speech_depth_plan tests/cpp/test_speech_depth_plan.cpp)
-target_link_libraries(test_speech_depth_plan PRIVATE trtf_core)
-target_include_directories(test_speech_depth_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_speech_depth_plan SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_speech_depth_plan PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_speech_depth_plan COMMAND test_speech_depth_plan)
-
-add_executable(test_speech_runtime_plan tests/cpp/test_speech_runtime_plan.cpp)
-target_link_libraries(test_speech_runtime_plan PRIVATE trtf_core)
-target_include_directories(test_speech_runtime_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_speech_runtime_plan SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_speech_runtime_plan PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_speech_runtime_plan COMMAND test_speech_runtime_plan)
-
-add_executable(test_speech_temporal_embed_plan tests/cpp/test_speech_temporal_embed_plan.cpp)
-target_link_libraries(test_speech_temporal_embed_plan PRIVATE trtf_core)
-target_include_directories(test_speech_temporal_embed_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_speech_temporal_embed_plan SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_speech_temporal_embed_plan PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_speech_temporal_embed_plan COMMAND test_speech_temporal_embed_plan)
-
-add_executable(test_speech_mimi_decode_plan tests/cpp/test_speech_mimi_decode_plan.cpp)
-target_link_libraries(test_speech_mimi_decode_plan PRIVATE trtf_core)
-target_include_directories(test_speech_mimi_decode_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_speech_mimi_decode_plan SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_speech_mimi_decode_plan PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_speech_mimi_decode_plan COMMAND test_speech_mimi_decode_plan)
-
-add_executable(test_whisper_host_plan tests/cpp/test_whisper_host_plan.cpp)
-target_link_libraries(test_whisper_host_plan PRIVATE trtf_core)
-target_include_directories(test_whisper_host_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_whisper_host_plan SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_whisper_host_plan PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_whisper_host_plan COMMAND test_whisper_host_plan)
-
-add_executable(test_whisper_decode_policy tests/cpp/test_whisper_decode_policy.cpp)
-target_link_libraries(test_whisper_decode_policy PRIVATE trtf_core)
-target_include_directories(test_whisper_decode_policy PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_whisper_decode_policy COMMAND test_whisper_decode_policy)
-
-add_executable(test_bark_generation_plan tests/cpp/test_bark_generation_plan.cpp)
-target_link_libraries(test_bark_generation_plan PRIVATE trtf_core)
-target_include_directories(test_bark_generation_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_bark_generation_plan SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_bark_generation_plan PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_bark_generation_plan COMMAND test_bark_generation_plan)
-
-add_executable(test_magpie_decode_policy tests/cpp/test_magpie_decode_policy.cpp)
-target_link_libraries(test_magpie_decode_policy PRIVATE trtf_core)
-target_include_directories(test_magpie_decode_policy PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_magpie_decode_policy COMMAND test_magpie_decode_policy)
-
-add_executable(test_magpie_decoder_plan tests/cpp/test_magpie_decoder_plan.cpp)
-target_link_libraries(test_magpie_decoder_plan PRIVATE trtf_core)
-target_include_directories(test_magpie_decoder_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_magpie_decoder_plan SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_magpie_decoder_plan PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_magpie_decoder_plan COMMAND test_magpie_decoder_plan)
-
-add_executable(test_magpie_text_completion_policy tests/cpp/test_magpie_text_completion_policy.cpp)
-target_link_libraries(test_magpie_text_completion_policy PRIVATE trtf_core)
-target_include_directories(test_magpie_text_completion_policy PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_magpie_text_completion_policy SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_magpie_text_completion_policy PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_magpie_text_completion_policy COMMAND test_magpie_text_completion_policy)
-
-add_executable(test_magpie_codec_plan tests/cpp/test_magpie_codec_plan.cpp)
-target_link_libraries(test_magpie_codec_plan PRIVATE trtf_core)
-target_include_directories(test_magpie_codec_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_magpie_codec_plan SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_magpie_codec_plan PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_magpie_codec_plan COMMAND test_magpie_codec_plan)
-
-add_executable(test_omni_audio_plan tests/cpp/test_omni_audio_plan.cpp)
-target_link_libraries(test_omni_audio_plan PRIVATE trtf_core)
-target_include_directories(test_omni_audio_plan PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_omni_audio_plan SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_omni_audio_plan PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_omni_audio_plan COMMAND test_omni_audio_plan)
-
-add_executable(test_ipa_tokenizer tests/cpp/test_ipa_tokenizer.cpp)
-target_link_libraries(test_ipa_tokenizer PRIVATE trtf_core)
-target_include_directories(test_ipa_tokenizer PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_ipa_tokenizer COMMAND test_ipa_tokenizer)
-
-add_executable(test_bundle_helpers tests/cpp/test_bundle_helpers.cpp)
-target_link_libraries(test_bundle_helpers PRIVATE trtf_core)
-target_include_directories(test_bundle_helpers PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_bundle_helpers SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_bundle_helpers PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_bundle_helpers COMMAND test_bundle_helpers)
-
-add_executable(test_bundle_port_adapter tests/cpp/test_bundle_port_adapter.cpp)
-target_link_libraries(test_bundle_port_adapter PRIVATE trtf_core)
-target_include_directories(test_bundle_port_adapter PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_bundle_port_adapter SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_bundle_port_adapter PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_bundle_port_adapter COMMAND test_bundle_port_adapter)
-
-add_executable(test_trt_port_adapter tests/cpp/test_trt_port_adapter.cpp)
-target_link_libraries(test_trt_port_adapter PRIVATE trtf_core)
-target_include_directories(test_trt_port_adapter PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_trt_port_adapter SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_trt_port_adapter PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_trt_port_adapter COMMAND test_trt_port_adapter)
-
-add_executable(test_generation_text_service tests/cpp/test_generation_text_service.cpp)
-target_link_libraries(test_generation_text_service PRIVATE trtf_core)
-target_include_directories(test_generation_text_service PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_generation_text_service COMMAND test_generation_text_service)
-
-add_executable(test_audio_runtime_services tests/cpp/test_audio_runtime_services.cpp)
-target_link_libraries(test_audio_runtime_services PRIVATE trtf_core)
-target_include_directories(test_audio_runtime_services PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_audio_runtime_services COMMAND test_audio_runtime_services)
-
-add_executable(test_vision_runtime_services tests/cpp/test_vision_runtime_services.cpp)
-target_link_libraries(test_vision_runtime_services PRIVATE trtf_core)
-target_include_directories(test_vision_runtime_services PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_vision_runtime_services COMMAND test_vision_runtime_services)
-
-add_executable(test_runtime_service_ports tests/cpp/test_runtime_service_ports.cpp)
-target_link_libraries(test_runtime_service_ports PRIVATE trtf_core)
-target_include_directories(test_runtime_service_ports PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_runtime_service_ports SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_runtime_service_ports PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_runtime_service_ports COMMAND test_runtime_service_ports)
-
-add_executable(test_neural_operator_config tests/cpp/test_neural_operator_config.cpp)
-target_link_libraries(test_neural_operator_config PRIVATE trtf_core)
-target_include_directories(test_neural_operator_config PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_neural_operator_config COMMAND test_neural_operator_config)
-
-add_executable(test_sam_prompt_seam tests/cpp/test_sam_prompt_seam.cpp)
-target_link_libraries(test_sam_prompt_seam PRIVATE trtf_core)
-target_include_directories(test_sam_prompt_seam PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_sam_prompt_seam SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_sam_prompt_seam PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_sam_prompt_seam COMMAND test_sam_prompt_seam)
-
-add_executable(test_perception_preprocess_seams tests/cpp/test_perception_preprocess_seams.cpp)
-target_link_libraries(test_perception_preprocess_seams PRIVATE trtf_core)
-target_include_directories(test_perception_preprocess_seams PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_perception_preprocess_seams SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_perception_preprocess_seams PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_perception_preprocess_seams COMMAND test_perception_preprocess_seams)
-
-add_executable(test_wan_generation_conditioning tests/cpp/test_wan_generation_conditioning.cpp)
-target_link_libraries(test_wan_generation_conditioning PRIVATE trtf_core)
-target_include_directories(test_wan_generation_conditioning PRIVATE ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_include_directories(test_wan_generation_conditioning SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_wan_generation_conditioning PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-endif()
-add_test(NAME test_wan_generation_conditioning COMMAND test_wan_generation_conditioning)
-
-add_executable(test_wav_reader tests/cpp/test_wav_reader.cpp)
-target_link_libraries(test_wav_reader PRIVATE trtf_core)
-target_include_directories(test_wav_reader PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_wav_reader COMMAND test_wav_reader)
-
-add_executable(test_mel_spectrogram tests/cpp/test_mel_spectrogram.cpp)
-target_link_libraries(test_mel_spectrogram PRIVATE trtf_core)
-target_include_directories(test_mel_spectrogram PRIVATE ${PROJECT_SOURCE_DIR}/src)
-add_test(NAME test_mel_spectrogram COMMAND test_mel_spectrogram)
+# Diffusion — conditioning
+trtf_add_test(test_wan_generation_conditioning)
 
 # --- Install ---
 include(CMakePackageConfigHelpers)
@@ -633,7 +316,7 @@ install(TARGETS trtf_core
 # Install public headers
 install(DIRECTORY include/trtf/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/trtf
-  FILES_MATCHING PATTERN "*.h"
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
 )
 
 # Install CLI executable

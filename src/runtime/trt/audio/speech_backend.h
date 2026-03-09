@@ -1,10 +1,10 @@
 #pragma once
 
-#include "trtf/backend.h"
+#include "runtime/trt/core/generation_backend.h"
 #include "runtime/trt/core/trt_common.h"
 #include "runtime/trt/core/trt_engine_lifecycle.h"
 #include "runtime/trt/core/device_kv_cache.h"
-#include "runtime/trt/audio/bark_backend.h"  // for AudioResult, write_wav
+#include "runtime/trt/audio/bark_backend.h"  // for LegacyAudioResult, write_wav
 #include "cabi/config/fast_path_config.h"
 #include "trtf/runtime/trt/audio/subprocess_runner.h"
 
@@ -107,8 +107,8 @@ public:
 
     /// Full speech-to-speech pipeline: audio in -> audio out.
     /// Reads WAV from audio_in, processes through all stages, writes WAV to
-    /// audio_out. Returns AudioResult with the generated waveform.
-    AudioResult process_audio(
+    /// audio_out. Returns LegacyAudioResult with the generated waveform.
+    LegacyAudioResult process_audio(
         const float* input_samples, int32_t num_input_samples,
         int32_t max_output_frames = 375,
         int32_t input_sample_rate = 0,

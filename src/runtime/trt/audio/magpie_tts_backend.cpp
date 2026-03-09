@@ -1518,11 +1518,11 @@ void MagpieTTSBackend::log_pipeline_profiling(
 // generate_audio() -- full pipeline orchestration
 // ---------------------------------------------------------------------------
 
-AudioResult MagpieTTSBackend::generate_audio(
+LegacyAudioResult MagpieTTSBackend::generate_audio(
     const std::vector<int32_t>& text_ids,
     int32_t max_frames)
 {
-    AudioResult result;
+    LegacyAudioResult result;
     result.sample_rate = mConfig.sample_rate;
 
     if (!is_available())

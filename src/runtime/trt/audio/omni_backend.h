@@ -85,8 +85,8 @@ public:
         int32_t max_new_tokens);
 
     /// Full text-to-audio generation: Thinker -> Talker -> Code2Wav.
-    /// Returns AudioResult with waveform.
-    AudioResult generate_audio(
+    /// Returns LegacyAudioResult with waveform.
+    LegacyAudioResult generate_audio(
         const std::vector<int32_t>& input_ids,
         int32_t max_semantic_tokens = 768);
 

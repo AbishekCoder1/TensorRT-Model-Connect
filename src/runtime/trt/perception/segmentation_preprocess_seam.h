@@ -1,6 +1,6 @@
 #pragma once
 
-#include "trtf/runtime/adapters/io/media_io_adapter.h"
+#include "runtime/trt/core/decoded_image.h"
 #include "runtime/trt/perception/segmentation_backend.h"
 
 #include <algorithm>

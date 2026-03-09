@@ -1,6 +1,6 @@
 #pragma once
 
-#include "trtf/backend.h"
+#include "runtime/trt/core/generation_backend.h"
 #include "runtime/trt/core/trt_common.h"
 #include "runtime/trt/core/trt_engine_lifecycle.h"
 #include "runtime/trt/core/device_kv_cache.h"

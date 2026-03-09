@@ -1,7 +1,7 @@
 #pragma once
 
 #include "runtime/trt/perception/sam_backend.h"
-#include "trtf/runtime/adapters/io/media_io_adapter.h"
+#include "runtime/trt/core/decoded_image.h"
 
 #include <algorithm>
 #include <cmath>

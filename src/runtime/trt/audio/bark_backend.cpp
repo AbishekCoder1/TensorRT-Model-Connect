@@ -932,11 +932,11 @@ std::vector<float> BarkBackend::run_codec(const std::vector<int32_t>& codes_flat
 // Full pipeline: generate_audio
 // ---------------------------------------------------------------------------
 
-AudioResult BarkBackend::generate_audio(
+LegacyAudioResult BarkBackend::generate_audio(
     const std::vector<int32_t>& input_ids,
     int32_t max_semantic_tokens)
 {
-    AudioResult result;
+    LegacyAudioResult result;
     result.sample_rate = mConfig.sample_rate;
 
     if (!is_available())

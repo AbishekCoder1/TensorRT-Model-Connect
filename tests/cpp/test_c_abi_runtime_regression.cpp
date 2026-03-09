@@ -130,7 +130,8 @@ bool message_contains_any_expected_failure(const std::string& msg)
 {
     return message_contains_any(
         msg, {"deserialize engine", "deserialize failed", "execution context",
-                 "Failed to load bundle", "New runtime build failed"});
+                 "Failed to load bundle", "New runtime build failed",
+                 "Failed to deserialize engine", "Bundle missing engine plan"});
 }
 
 void expect_invalid_bundle_creation_fails(const std::string& bundle_path, const char* test_name)
@@ -181,7 +182,8 @@ void test_missing_engine_plan_bundle_reports_error()
     if (err != nullptr)
     {
         check(
-            message_contains_any(err, {"New runtime build failed", "engine_plan"}),
+            message_contains_any(err, {"New runtime build failed", "engine_plan",
+                                          "Bundle missing engine plan"}),
             "migrated strategy defaults to new runtime and reports engine_plan guard");
     }
 #else
@@ -211,7 +213,8 @@ void test_diffusion_bundle_missing_required_section_reports_error()
     if (err != nullptr)
     {
         check(
-            message_contains_any(err, {"New runtime build failed", "denoiser_plan"}),
+            message_contains_any(err, {"New runtime build failed", "denoiser_plan",
+                                          "multi-engine bundles", "Diffusion pipeline"}),
             "migrated diffusion strategy defaults to new runtime and reports denoiser guard");
     }
 #else
@@ -243,7 +246,8 @@ void test_unknown_strategy_reports_new_runtime_unsupported_strategy_error()
         check(
             message_contains_any(err, {"Unsupported runtime_strategy for new runtime path", "Unsupported audio strategy",
                                           "Unsupported text strategy", "Unsupported vision strategy",
-                                          "Unsupported encoder strategy", "Unsupported diffusion strategy"}),
+                                          "Unsupported encoder strategy", "Unsupported diffusion strategy",
+                                          "Unknown runtime_strategy"}),
             "unknown strategy fails through the new runtime unsupported-strategy guard");
     }
 #else

@@ -5,7 +5,7 @@
   "family": "qwen3_5",
   "runtime_strategy": "hybrid_mamba_attention",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
+  "prompt": "Once upon a time, in a land far away,",
   "max_new_tokens": 20,
   "logit_atol": 0.005,
   "trust_remote_code": true

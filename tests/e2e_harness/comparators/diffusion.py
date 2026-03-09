@@ -21,21 +21,9 @@ from ..contracts import (
     StageStatus,
     ThresholdProfile,
 )
+from ._helpers import cosine_similarity
 
 logger = logging.getLogger(__name__)
-
-
-def _cosine_sim(a: Any, b: Any) -> float:
-    """Compute cosine similarity between two arrays."""
-    import numpy as np
-    a_flat = np.asarray(a, dtype=np.float32).flatten()
-    b_flat = np.asarray(b, dtype=np.float32).flatten()
-    dot = np.dot(a_flat, b_flat)
-    norm_a = np.linalg.norm(a_flat)
-    norm_b = np.linalg.norm(b_flat)
-    if norm_a < 1e-12 or norm_b < 1e-12:
-        return 0.0
-    return float(dot / (norm_a * norm_b))
 
 
 def _compute_psnr(img1: Any, img2: Any) -> float:
@@ -90,7 +78,7 @@ def _compute_temporal_consistency(frames_dir: str) -> float:
         img = Image.open(fp).convert("RGB")
         arr = np.array(img, dtype=np.float32).flatten()
         if prev_arr is not None:
-            similarities.append(_cosine_sim(prev_arr, arr))
+            similarities.append(cosine_similarity(prev_arr, arr))
         prev_arr = arr
 
     return float(np.mean(similarities)) if similarities else 1.0
@@ -292,7 +280,7 @@ class DiffusionComparator:
                 message=f"Failed to load T5 outputs: {e}",
             )
 
-        cs = _cosine_sim(trt_arr, ref_arr)
+        cs = cosine_similarity(trt_arr.flatten(), ref_arr.flatten())
         thresh = thresholds.get("latent_cosine_per_step", 0.95)
         passed = cs >= thresh
 

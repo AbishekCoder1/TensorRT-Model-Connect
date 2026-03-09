@@ -12,28 +12,9 @@ from __future__ import annotations
 import logging
 
 from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
+from ._helpers import levenshtein_distance
 
 logger = logging.getLogger(__name__)
-
-
-def _levenshtein_distance(s1: list, s2: list) -> int:
-    """Compute Levenshtein (edit) distance between two sequences."""
-    if len(s1) < len(s2):
-        return _levenshtein_distance(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
-
-    prev_row = list(range(len(s2) + 1))
-    for i, c1 in enumerate(s1):
-        curr_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = prev_row[j + 1] + 1
-            deletions = curr_row[j] + 1
-            substitutions = prev_row[j] + (0 if c1 == c2 else 1)
-            curr_row.append(min(insertions, deletions, substitutions))
-        prev_row = curr_row
-
-    return prev_row[-1]
 
 
 def _compute_wer(reference: str, hypothesis: str) -> float:
@@ -42,7 +23,7 @@ def _compute_wer(reference: str, hypothesis: str) -> float:
     hyp_words = hypothesis.strip().lower().split()
     if not ref_words:
         return 0.0 if not hyp_words else 1.0
-    distance = _levenshtein_distance(ref_words, hyp_words)
+    distance = levenshtein_distance(ref_words, hyp_words)
     return distance / len(ref_words)
 
 
@@ -52,7 +33,7 @@ def _compute_cer(reference: str, hypothesis: str) -> float:
     hyp_chars = list(hypothesis.strip().lower())
     if not ref_chars:
         return 0.0 if not hyp_chars else 1.0
-    distance = _levenshtein_distance(ref_chars, hyp_chars)
+    distance = levenshtein_distance(ref_chars, hyp_chars)
     return distance / len(ref_chars)
 
 

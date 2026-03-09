@@ -1,6 +1,6 @@
 #pragma once
 
-#include "trtf/backend.h"
+#include "runtime/trt/core/generation_backend.h"
 #include "runtime/trt/recurrent/rwkv_decode_runtime.h"
 
 #include <memory>

@@ -3,7 +3,7 @@
 #include "runtime/trt/core/trt_common.h"
 #include "runtime/trt/core/trt_engine_lifecycle.h"
 #include "runtime/trt/core/device_kv_cache.h"
-#include "runtime/trt/audio/bark_backend.h"  // for AudioResult, write_wav
+#include "runtime/trt/audio/bark_backend.h"  // for LegacyAudioResult, write_wav
 #include "cabi/config/fast_path_config.h"
 
 #if TRTF_HAS_TRT
@@ -54,7 +54,7 @@ public:
 
     bool is_available() const;
 
-    AudioResult generate_audio(
+    LegacyAudioResult generate_audio(
         const std::vector<int32_t>& text_ids,
         int32_t max_frames = 500);
 

@@ -1,6 +1,6 @@
 #pragma once
 // Stub: detection backend (not yet implemented)
-#include "trtf/runtime/adapters/io/media_io_adapter.h"
+#include "runtime/trt/core/decoded_image.h"
 
 #include <cstdint>
 #include <memory>

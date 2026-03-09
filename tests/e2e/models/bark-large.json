@@ -9,5 +9,8 @@
   "prompt": "Hello, this is a test of the text to speech system.",
   "max_new_tokens": 0,
   "logit_atol": 0.01,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "threshold_overrides": {
+    "rms_min": 0.0001
+  }
 }

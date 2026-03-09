@@ -15,7 +15,7 @@
 
 namespace trtf {
 
-struct AudioResult {
+struct LegacyAudioResult {
     std::vector<float> waveform;  // [num_samples] float32
     int32_t sample_rate{24000};
     int32_t num_samples{0};
@@ -78,7 +78,7 @@ public:
 
     bool is_available() const;
 
-    AudioResult generate_audio(
+    LegacyAudioResult generate_audio(
         const std::vector<int32_t>& input_ids,
         int32_t max_semantic_tokens = 768);
 

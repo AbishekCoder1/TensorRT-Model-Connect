@@ -30,48 +30,9 @@ from ..contracts import (
     StageStatus,
     ThresholdProfile,
 )
+from ._helpers import cosine_similarity, normalized_edit_distance
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Text helpers (reused from text comparator module)
-# ---------------------------------------------------------------------------
-
-
-def _levenshtein_distance(s1: str, s2: str) -> int:
-    """Standard Levenshtein edit distance via dynamic programming."""
-    if len(s1) < len(s2):
-        return _levenshtein_distance(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
-    prev_row = list(range(len(s2) + 1))
-    for i, c1 in enumerate(s1):
-        curr_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = prev_row[j + 1] + 1
-            deletions = curr_row[j] + 1
-            substitutions = prev_row[j] + (0 if c1 == c2 else 1)
-            curr_row.append(min(insertions, deletions, substitutions))
-        prev_row = curr_row
-    return prev_row[-1]
-
-
-def _normalized_edit_distance(s1: str, s2: str) -> float:
-    """Levenshtein distance normalized by max string length. 0.0 = identical."""
-    max_len = max(len(s1), len(s2))
-    if max_len == 0:
-        return 0.0
-    return _levenshtein_distance(s1, s2) / max_len
-
-
-def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Cosine similarity between two 1-D vectors. Returns 0.0 on degenerate input."""
-    norm_a = float(np.linalg.norm(a))
-    norm_b = float(np.linalg.norm(b))
-    if norm_a < 1e-12 or norm_b < 1e-12:
-        return 0.0
-    return float(np.dot(a, b) / (norm_a * norm_b))
 
 
 def _load_logits(stage_output: StageOutput) -> np.ndarray | None:
@@ -194,7 +155,7 @@ class VisionLanguageComparator:
                 )
 
             # Cosine similarity — matches threshold key "vision_embedding_cosine"
-            cosine = _cosine_similarity(trt_f.flatten(), ref_f.flatten())
+            cosine = cosine_similarity(trt_f.flatten(), ref_f.flatten())
             cos_thresh = threshold.metrics.get("vision_embedding_cosine", 0.5)
             metrics["vision_embedding_cosine"] = MetricResult(
                 value=cosine,
@@ -322,7 +283,7 @@ class VisionLanguageComparator:
 
             # Per-step cosine similarity
             cosines = np.array([
-                _cosine_similarity(trt_l[i], ref_l[i])
+                cosine_similarity(trt_l[i], ref_l[i])
                 for i in range(n_steps)
             ])
             metrics["logit_cosine_p5"] = MetricResult(
@@ -359,7 +320,7 @@ class VisionLanguageComparator:
         ref_text = (ref.text or ref.data.get("generated_text") or "").strip()
 
         if trt_text or ref_text:
-            ned = _normalized_edit_distance(trt_text, ref_text)
+            ned = normalized_edit_distance(trt_text, ref_text)
             ned_thresh = threshold.metrics.get("normalized_text_edit_distance")
             if ned_thresh is not None:
                 metrics["normalized_text_edit_distance"] = MetricResult(
@@ -439,7 +400,7 @@ class VisionLanguageComparator:
         )
 
         # Normalized text edit distance
-        ned = _normalized_edit_distance(trt_text, ref_text) if ref_text else 0.0
+        ned = normalized_edit_distance(trt_text, ref_text) if ref_text else 0.0
         ned_thresh = threshold.metrics.get("normalized_text_edit_distance")
         if ned_thresh is not None:
             metrics["normalized_text_edit_distance"] = MetricResult(

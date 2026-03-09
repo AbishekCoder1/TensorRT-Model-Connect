@@ -1,20 +1,26 @@
-// trtf CLI -- command-line interface using the library API.
+// trtf CLI — command-line interface using the new C++ library API.
 //
 // Usage:
 //   trtf run             <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
 //   trtf transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]
-//   trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav [--max-new-tokens N] [--tail-frames N]
-//   trtf generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N] [--guidance-scale S] [--hf-python PATH]
+//   trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
+//   trtf generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
 //   trtf inspect         <bundle.trtfb>
 //   trtf version
 
 #include "trtf/pipeline.h"
+#include "trtf/trtf_io.hpp"
 #include "trtf/bundle.h"
+#include "stb_image_write.h"
 
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <iomanip>
 #include <iostream>
+#include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -27,23 +33,19 @@ struct CliArgs {
     std::string hf_python;
     std::string image_path;
     std::string output_dir;
-    std::string output_path;  // for segment/generate-audio
-    std::string branch_input; // comma-separated floats for solve (DeepONet)
-    std::string trunk_input;  // comma-separated floats for solve (DeepONet)
-    std::string field_input;  // comma-separated floats for solve (FNO field input)
-    std::string document;     // document text for rerank
-    std::string audio_in;     // input audio WAV for speak
-    std::string audio_out;    // output audio WAV for speak
-    int tail_frames{0};       // extra speech frames beyond input-derived length
-    float point_x{0.5F};     // SAM point prompt X (normalized 0-1)
-    float point_y{0.5F};     // SAM point prompt Y (normalized 0-1)
-    bool is_foreground{true}; // SAM point: foreground or background
+    std::string document;
+    std::string audio_in;
+    std::string audio_out;
+    int tail_frames{0};
+    float point_x{0.5F};
+    float point_y{0.5F};
+    bool is_foreground{true};
     int max_new_tokens{0};
     int num_steps{-1};
     float guidance_scale{-1.0F};
     float conf_threshold{-1.0F};
-    float cfg_scale{-1.0F};      // MagpieTTS CFG scale (--cfg-scale)
-    bool greedy{false};           // MagpieTTS greedy decoding (--greedy)
+    float cfg_scale{-1.0F};
+    bool greedy{false};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
@@ -56,35 +58,21 @@ void print_usage()
         "  trtf run             <bundle.trtfb> --prompt \"text\" [--image PATH] [--max-new-tokens N] [--hf-python PATH]\n"
         "  trtf encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
         "  trtf segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
-        "  trtf segment-sam     <bundle.trtfb> --image PATH --output DIR [--point-x 0.5] [--point-y 0.5] [--background]\n"
-        "  trtf generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH [--max-new-tokens N] [--cfg-scale S] [--greedy] [--hf-python PATH]\n"
-        "  trtf generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] [--guidance-scale S] [--hf-python PATH]\n"
-        "  trtf detect          <bundle.trtfb> --image PATH "
-        "[--output PATH|--output-json PATH] [--threshold 0.5|--score-threshold 0.5] [--hf-python PATH]\n"
+        "  trtf generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH [--max-new-tokens N] [--hf-python PATH]\n"
+        "  trtf generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] [--guidance-scale S]\n"
         "  trtf embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
         "  trtf rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" [--hf-python PATH]\n"
         "  trtf transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]\n"
-        "  trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav [--max-new-tokens N] [--tail-frames N]\n"
-        "  trtf solve           <bundle.trtfb> --branch-input \"0.1,0.2,...\" --trunk-input \"0.5,0.5\"  (DeepONet)\n"
-        "  trtf solve           <bundle.trtfb> --field-input \"0.1,0.2,...\"                          (FNO)\n"
+        "  trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
         "  trtf inspect         <bundle.trtfb>\n"
-        "  trtf version\n"
-        "\n"
-        "generate-audio options:\n"
-        "  --cfg-scale S   Classifier-Free Guidance scale (default: from bundle, typically 1.5).\n"
-        "                  1.0 = disabled, 1.5 = recommended. Higher values amplify text conditioning.\n"
-        "  --greedy        Use greedy (argmax) decoding instead of top-k sampling.\n";
+        "  trtf version\n";
 }
 
 CliArgs parse_args(int argc, char** argv)
 {
     CliArgs args;
 
-    if (argc < 2)
-    {
-        args.show_help = true;
-        return args;
-    }
+    if (argc < 2) { args.show_help = true; return args; }
 
     args.command = argv[1];
 
@@ -100,263 +88,53 @@ CliArgs parse_args(int argc, char** argv)
         return args;
     }
 
-    if (args.command != "run" && args.command != "inspect" &&
-        args.command != "generate-video" &&
-        args.command != "segment" && args.command != "generate-audio" &&
-        args.command != "encode" && args.command != "solve" &&
-        args.command != "detect" && args.command != "embed" &&
-        args.command != "rerank" && args.command != "speak" &&
-        args.command != "transcribe" && args.command != "segment-sam")
+    static const char* known_cmds[] = {
+        "run", "inspect", "generate-video", "segment", "generate-audio",
+        "encode", "embed", "rerank", "speak", "transcribe", nullptr
+    };
+    bool valid = false;
+    for (const char** p = known_cmds; *p; ++p)
+        if (args.command == *p) { valid = true; break; }
+    if (!valid)
     {
         args.parse_error = true;
         args.error_message = "Unknown command: " + args.command;
         return args;
     }
 
-    // Parse remaining arguments
     for (int i = 2; i < argc; ++i)
     {
         const std::string arg = argv[i];
 
-        if (arg == "--prompt" || arg == "-p")
-        {
-            if (i + 1 >= argc)
-            {
+        auto need_value = [&](const std::string& name) -> bool {
+            if (i + 1 >= argc) {
                 args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
+                args.error_message = name + " requires a value";
+                return false;
             }
-            args.prompt = argv[++i];
-            continue;
-        }
+            return true;
+        };
 
-        if (arg == "--max-new-tokens")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.max_new_tokens = std::atoi(argv[++i]);
-            continue;
-        }
+        if ((arg == "--prompt" || arg == "-p") && need_value(arg)) { args.prompt = argv[++i]; continue; }
+        if (arg == "--max-new-tokens" && need_value(arg)) { args.max_new_tokens = std::atoi(argv[++i]); continue; }
+        if (arg == "--tail-frames" && need_value(arg)) { args.tail_frames = std::max(0, std::atoi(argv[++i])); continue; }
+        if (arg == "--hf-python" && need_value(arg)) { args.hf_python = argv[++i]; continue; }
+        if (arg == "--image" && need_value(arg)) { args.image_path = argv[++i]; continue; }
+        if ((arg == "--output" || arg == "-o") && need_value(arg)) { args.output_dir = argv[++i]; continue; }
+        if (arg == "--num-steps" && need_value(arg)) { args.num_steps = std::atoi(argv[++i]); continue; }
+        if (arg == "--guidance-scale" && need_value(arg)) { args.guidance_scale = static_cast<float>(std::atof(argv[++i])); continue; }
+        if ((arg == "--threshold" || arg == "--score-threshold") && need_value(arg)) { args.conf_threshold = static_cast<float>(std::atof(argv[++i])); continue; }
+        if (arg == "--cfg-scale" && need_value(arg)) { args.cfg_scale = static_cast<float>(std::atof(argv[++i])); continue; }
+        if (arg == "--greedy") { args.greedy = true; continue; }
+        if (arg == "--document" && need_value(arg)) { args.document = argv[++i]; continue; }
+        if (arg == "--audio-in" && need_value(arg)) { args.audio_in = argv[++i]; continue; }
+        if (arg == "--audio-out" && need_value(arg)) { args.audio_out = argv[++i]; continue; }
+        if (arg == "--audio" && need_value(arg)) { args.audio_in = argv[++i]; continue; }
+        if (arg == "--point-x" && need_value(arg)) { args.point_x = static_cast<float>(std::atof(argv[++i])); continue; }
+        if (arg == "--point-y" && need_value(arg)) { args.point_y = static_cast<float>(std::atof(argv[++i])); continue; }
+        if (arg == "--background") { args.is_foreground = false; continue; }
 
-        if (arg == "--tail-frames")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.tail_frames = std::max(0, std::atoi(argv[++i]));
-            continue;
-        }
-
-        if (arg == "--hf-python")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.hf_python = argv[++i];
-            continue;
-        }
-
-        if (arg == "--image")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.image_path = argv[++i];
-            continue;
-        }
-
-        if (arg == "--output" || arg == "--output-json" || arg == "-o")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.output_dir = argv[++i];
-            continue;
-        }
-
-        if (arg == "--num-steps")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.num_steps = std::atoi(argv[++i]);
-            continue;
-        }
-
-        if (arg == "--guidance-scale")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-
-        if (arg == "--threshold" || arg == "--score-threshold")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.conf_threshold = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-
-        if (arg == "--cfg-scale")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.cfg_scale = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-
-        if (arg == "--greedy")
-        {
-            args.greedy = true;
-            continue;
-        }
-
-        if (arg == "--branch-input")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.branch_input = argv[++i];
-            continue;
-        }
-
-        if (arg == "--trunk-input")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.trunk_input = argv[++i];
-            continue;
-        }
-
-        if (arg == "--field-input")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.field_input = argv[++i];
-            continue;
-        }
-
-        if (arg == "--document")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.document = argv[++i];
-            continue;
-        }
-
-        if (arg == "--audio-in")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.audio_in = argv[++i];
-            continue;
-        }
-
-        if (arg == "--audio-out")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.audio_out = argv[++i];
-            continue;
-        }
-
-        if (arg == "--audio")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.audio_in = argv[++i];
-            continue;
-        }
-
-        if (arg == "--point-x")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.point_x = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-
-        if (arg == "--point-y")
-        {
-            if (i + 1 >= argc)
-            {
-                args.parse_error = true;
-                args.error_message = arg + " requires a value";
-                return args;
-            }
-            args.point_y = static_cast<float>(std::atof(argv[++i]));
-            continue;
-        }
-
-        if (arg == "--background")
-        {
-            args.is_foreground = false;
-            continue;
-        }
+        if (args.parse_error) return args;
 
         if (arg[0] == '-')
         {
@@ -365,11 +143,8 @@ CliArgs parse_args(int argc, char** argv)
             return args;
         }
 
-        // Positional argument
         if (args.bundle_path.empty())
-        {
             args.bundle_path = arg;
-        }
         else
         {
             args.parse_error = true;
@@ -396,678 +171,296 @@ int cmd_run(const CliArgs& args)
         return EXIT_FAILURE;
     }
 
-    TrtfPipelineOptions opts{};
-    opts.max_new_tokens = args.max_new_tokens;
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    opts.image_path = args.image_path.empty() ? nullptr : args.image_path.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
+    if (!pipeline)
     {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
+        std::cerr << "Error: failed to load bundle\n";
         return EXIT_FAILURE;
     }
 
     const std::string prompt = args.prompt.empty() ? "Hello" : args.prompt;
-    const std::size_t max_tokens = args.max_new_tokens > 0
-        ? static_cast<std::size_t>(args.max_new_tokens) : 0;
+    trtf::GenerateConfig cfg;
+    cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 20;
 
-    const char* output = nullptr;
-    if (!args.image_path.empty() && pipeline->supports_vision())
+    if (!args.image_path.empty())
     {
-        output = pipeline->generate(prompt.c_str(), args.image_path.c_str(), max_tokens);
+        // Load image using trtf_io
+        auto image = trtf::io::read_image(args.image_path);
+        if (image.pixels.empty())
+        {
+            std::cerr << "Error: failed to load image: " << args.image_path << '\n';
+            return EXIT_FAILURE;
+        }
+
+        auto result = pipeline->generate(prompt, image.pixels.data(),
+                                         image.height, image.width, cfg);
+        std::cout << result.text << '\n';
     }
     else
     {
-        output = pipeline->generate(prompt.c_str(), max_tokens);
+        auto result = pipeline->generate(prompt, cfg);
+        std::cout << result.text << '\n';
     }
-    if (output != nullptr)
-    {
-        std::cout << output << '\n';
-    }
-    else
-    {
-        std::cerr << "Error: generate returned null\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    delete pipeline;
     return EXIT_SUCCESS;
 }
 
 int cmd_generate_video(const CliArgs& args)
 {
-    if (args.bundle_path.empty())
+    if (args.bundle_path.empty() || args.prompt.empty())
     {
-        std::cerr << "Error: generate-video requires a .trtfb bundle file\n";
-        return EXIT_FAILURE;
-    }
-
-    if (args.prompt.empty())
-    {
-        std::cerr << "Error: generate-video requires --prompt\n";
-        return EXIT_FAILURE;
-    }
-
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
-
-    if (!pipeline->supports_video())
-    {
-        std::cerr << "Error: this bundle does not support video generation\n";
-        delete pipeline;
+        std::cerr << "Error: generate-video requires bundle + --prompt\n";
         return EXIT_FAILURE;
     }
 
     const std::string out_dir = args.output_dir.empty()
-        ? "/tmp/trtf_frames" : args.output_dir;
+        ? "/tmp/trtf_generate_video" : args.output_dir;
 
-    const int32_t num_frames = pipeline->generate_video(
-        args.prompt.c_str(), out_dir.c_str(),
-        args.num_steps, args.guidance_scale);
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
 
-    if (num_frames < 0)
+    trtf::GenerateConfig cfg;
+    cfg.num_steps = args.num_steps;
+    cfg.guidance_scale = args.guidance_scale;
+
+    auto result = pipeline->generate_image(args.prompt, cfg);
+    std::cout << "Generated image: " << result.width << "x" << result.height
+              << " (" << result.num_frames << " frames)\n";
+
+    // Create output directory (including parents) if it doesn't exist.
+    std::filesystem::create_directories(out_dir);
+
+    // Each frame in result.pixels is stored as [H, W, 3] float32 in [0,1],
+    // with frames stacked contiguously: total layout is [T, H, W, 3].
+    const auto frame_pixels = static_cast<std::size_t>(result.height)
+        * static_cast<std::size_t>(result.width) * 3;
+
+    for (int32_t f = 0; f < result.num_frames; ++f)
     {
-        std::cerr << "Error: video generation failed\n";
-        delete pipeline;
-        return EXIT_FAILURE;
+        // Convert float32 HWC [0,1] to uint8 HWC [0,255].
+        std::vector<unsigned char> rgb(frame_pixels);
+        const float* src = result.pixels.data()
+            + static_cast<std::size_t>(f) * frame_pixels;
+        for (std::size_t i = 0; i < frame_pixels; ++i)
+        {
+            const float v = std::max(0.0F, std::min(1.0F, src[i]));
+            rgb[i] = static_cast<unsigned char>(v * 255.0F + 0.5F);
+        }
+
+        // Build filename: frame_0000.png
+        std::ostringstream fname;
+        fname << out_dir << "/frame_"
+              << std::setw(4) << std::setfill('0') << f << ".png";
+
+        const int stride = result.width * 3;
+        if (!stbi_write_png(fname.str().c_str(),
+                            result.width, result.height,
+                            3, rgb.data(), stride))
+        {
+            std::cerr << "Error: failed to write " << fname.str() << '\n';
+            return EXIT_FAILURE;
+        }
+        std::cout << "Saved " << fname.str() << '\n';
     }
 
-    std::cout << "Generated " << num_frames << " frames in " << out_dir << '\n';
-    delete pipeline;
     return EXIT_SUCCESS;
 }
 
 int cmd_segment(const CliArgs& args)
 {
-    if (args.bundle_path.empty())
+    if (args.bundle_path.empty() || args.image_path.empty())
     {
-        std::cerr << "Error: segment requires a .trtfb bundle file\n";
+        std::cerr << "Error: segment requires bundle + --image\n";
         return EXIT_FAILURE;
     }
 
-    if (args.image_path.empty())
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
+
+    // Load image (HWC float32 in [0,1])
+    auto image = trtf::io::read_image(args.image_path);
+    if (image.empty())
     {
-        std::cerr << "Error: segment requires --image\n";
+        std::cerr << "Error: failed to load image: " << args.image_path << '\n';
         return EXIT_FAILURE;
     }
 
+    // Preprocess: resize to 512x512, normalize with ImageNet mean/std, convert to CHW
+    const int32_t target_h = 512;
+    const int32_t target_w = 512;
+    const float mean[3] = {0.485F, 0.456F, 0.406F};
+    const float stdv[3] = {0.229F, 0.224F, 0.225F};
+
+    std::vector<float> chw_pixels(static_cast<std::size_t>(3) * target_h * target_w);
+    for (int32_t y = 0; y < target_h; ++y)
+    {
+        for (int32_t x = 0; x < target_w; ++x)
+        {
+            // Bilinear-ish nearest-neighbor resize
+            const int32_t src_y = std::min(
+                static_cast<int32_t>(static_cast<float>(y) * image.height / target_h),
+                image.height - 1);
+            const int32_t src_x = std::min(
+                static_cast<int32_t>(static_cast<float>(x) * image.width / target_w),
+                image.width - 1);
+            const auto src_idx = static_cast<std::size_t>(
+                (src_y * image.width + src_x) * 3);
+            for (int32_t c = 0; c < 3; ++c)
+            {
+                const float val = (image.pixels[src_idx + c] - mean[c]) / stdv[c];
+                chw_pixels[static_cast<std::size_t>(c) * target_h * target_w
+                    + static_cast<std::size_t>(y) * target_w + x] = val;
+            }
+        }
+    }
+
+    auto result = pipeline->segment(chw_pixels.data(), target_h, target_w);
+
+    // Save class map as grayscale PNG (pixel value = class index)
     const std::string out_path = args.output_dir.empty()
-        ? "/tmp/segmentation_output.png" : args.output_dir;
+        ? "/tmp/seg_output.png" : args.output_dir;
+    const int32_t out_h = result.height > 0 ? result.height : target_h;
+    const int32_t out_w = result.width > 0 ? result.width : target_w;
+    const auto total_px = static_cast<std::size_t>(out_h) * out_w;
+    std::vector<unsigned char> gray(total_px);
+    for (std::size_t i = 0; i < total_px && i < result.mask.size(); ++i)
+        gray[i] = static_cast<unsigned char>(
+            std::max(0, std::min(255, result.mask[i])));
 
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
+    if (!stbi_write_png(out_path.c_str(), out_w, out_h, 1, gray.data(), out_w))
     {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
+        std::cerr << "Error: failed to write output PNG: " << out_path << '\n';
         return EXIT_FAILURE;
     }
 
-    if (!pipeline->supports_segmentation())
-    {
-        std::cerr << "Error: this bundle does not support segmentation\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    const int32_t rc = pipeline->segment(args.image_path.c_str(), out_path.c_str());
-    if (rc != 0)
-    {
-        std::cerr << "Error: segmentation failed\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    std::cout << "Segmentation saved to " << out_path << '\n';
-    delete pipeline;
-    return EXIT_SUCCESS;
-}
-
-int cmd_segment_sam(const CliArgs& args)
-{
-    if (args.bundle_path.empty())
-    {
-        std::cerr << "Error: segment-sam requires a .trtfb bundle file\n";
-        return EXIT_FAILURE;
-    }
-
-    if (args.image_path.empty())
-    {
-        std::cerr << "Error: segment-sam requires --image\n";
-        return EXIT_FAILURE;
-    }
-
-    const std::string out_dir = args.output_dir.empty()
-        ? "/tmp/sam_masks" : args.output_dir;
-
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
-
-    if (!pipeline->supports_prompted_segmentation())
-    {
-        std::cerr << "Error: this bundle does not support prompted segmentation (SAM)\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    const int32_t num_masks = pipeline->segment_sam(
-        args.image_path.c_str(), out_dir.c_str(),
-        args.point_x, args.point_y, args.is_foreground);
-
-    if (num_masks < 0)
-    {
-        std::cerr << "Error: SAM segmentation failed\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    std::cout << "Generated " << num_masks << " masks in " << out_dir << '\n';
-    delete pipeline;
-    return EXIT_SUCCESS;
-}
-
-int cmd_detect(const CliArgs& args)
-{
-    if (args.bundle_path.empty())
-    {
-        std::cerr << "Error: detect requires a .trtfb bundle file\n";
-        return EXIT_FAILURE;
-    }
-
-    if (args.image_path.empty())
-    {
-        std::cerr << "Error: detect requires --image\n";
-        return EXIT_FAILURE;
-    }
-
-    const std::string out_path = args.output_dir.empty()
-        ? "/tmp/detections.json" : args.output_dir;
-
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
-
-    if (!pipeline->supports_detection())
-    {
-        std::cerr << "Error: this bundle does not support object detection\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    const int32_t num_dets = pipeline->detect(
-        args.image_path.c_str(), out_path.c_str(), args.conf_threshold);
-    if (num_dets < 0)
-    {
-        std::cerr << "Error: detection failed\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    std::cout << "Detected " << num_dets << " objects -> " << out_path << '\n';
-    delete pipeline;
+    std::cout << "Segmentation saved: " << out_path
+              << " (" << out_w << "x" << out_h << ")\n";
     return EXIT_SUCCESS;
 }
 
 int cmd_generate_audio(const CliArgs& args)
 {
-    if (args.bundle_path.empty())
+    if (args.bundle_path.empty() || args.prompt.empty())
     {
-        std::cerr << "Error: generate-audio requires a .trtfb bundle file\n";
+        std::cerr << "Error: generate-audio requires bundle + --prompt\n";
         return EXIT_FAILURE;
     }
 
-    if (args.prompt.empty())
-    {
-        std::cerr << "Error: generate-audio requires --prompt\n";
-        return EXIT_FAILURE;
-    }
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
+
+    trtf::GenerateConfig cfg;
+    cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 0;
+
+    auto result = pipeline->generate_audio(args.prompt, cfg);
 
     const std::string out_path = args.output_dir.empty()
         ? "/tmp/generated_audio.wav" : args.output_dir;
+    trtf::io::write_wav(result, out_path);
 
-    // Propagate CLI flags to MagpieTTS backend via env vars
-    if (args.cfg_scale >= 0.0F)
-    {
-        setenv("TRTF_MAGPIE_CFG_SCALE",
-               std::to_string(args.cfg_scale).c_str(), 1);
-    }
-    if (args.greedy)
-    {
-        setenv("TRTF_MAGPIE_GREEDY", "1", 1);
-    }
-
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
-
-    if (!pipeline->supports_audio())
-    {
-        std::cerr << "Error: this bundle does not support audio generation\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    const int32_t num_samples = pipeline->generate_audio(
-        args.prompt.c_str(), out_path.c_str(), args.max_new_tokens);
-
-    if (num_samples < 0)
-    {
-        std::cerr << "Error: audio generation failed\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    std::cout << "Generated " << num_samples << " audio samples -> " << out_path << '\n';
-    delete pipeline;
+    std::cout << "Generated " << result.num_samples << " audio samples -> " << out_path << '\n';
     return EXIT_SUCCESS;
 }
 
 int cmd_encode(const CliArgs& args)
 {
-    if (args.bundle_path.empty())
+    if (args.bundle_path.empty() || args.prompt.empty())
     {
-        std::cerr << "Error: encode requires a .trtfb bundle file\n";
+        std::cerr << "Error: encode requires bundle + --prompt\n";
         return EXIT_FAILURE;
     }
 
-    if (args.prompt.empty())
-    {
-        std::cerr << "Error: encode requires --prompt\n";
-        return EXIT_FAILURE;
-    }
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
+    auto result = pipeline->encode(args.prompt);
 
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
-
-    if (!pipeline->supports_encoding())
-    {
-        std::cerr << "Error: this bundle does not support encoding\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    int32_t seq_len = 0;
-    int32_t hidden_size = 0;
-    const float* hidden_states = pipeline->encode(
-        args.prompt.c_str(), &seq_len, &hidden_size);
-
-    if (hidden_states == nullptr)
-    {
-        std::cerr << "Error: encoding failed\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    // Output as JSON for programmatic parsing by E2E runner
-    std::cerr << "Hidden states shape: [" << seq_len << ", " << hidden_size << "]" << std::endl;
+    std::cerr << "Hidden states dim: " << result.dim << std::endl;
     std::cout << "{\"cls_embedding\": [";
-    for (int i = 0; i < hidden_size; ++i)
+    for (int i = 0; i < result.dim; ++i)
     {
         if (i > 0) std::cout << ", ";
-        std::cout << hidden_states[i];
+        std::cout << result.data[static_cast<std::size_t>(i)];
     }
-    std::cout << "], \"seq_len\": " << seq_len
-              << ", \"hidden_size\": " << hidden_size << "}\n";
-
-    delete pipeline;
+    std::cout << "]}\n";
     return EXIT_SUCCESS;
 }
 
 int cmd_embed(const CliArgs& args)
 {
-    if (args.bundle_path.empty())
+    if (args.bundle_path.empty() || args.prompt.empty())
     {
-        std::cerr << "Error: embed requires a .trtfb bundle file\n";
+        std::cerr << "Error: embed requires bundle + --prompt\n";
         return EXIT_FAILURE;
     }
 
-    if (args.prompt.empty() && args.image_path.empty())
-    {
-        std::cerr << "Error: embed requires --prompt and/or --image\n";
-        return EXIT_FAILURE;
-    }
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
+    auto result = pipeline->embed(args.prompt);
 
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    opts.image_path = args.image_path.empty() ? nullptr : args.image_path.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
-
-    if (!pipeline->supports_embedding())
-    {
-        std::cerr << "Error: this bundle does not support embedding\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    int32_t emb_dim = 0;
-    const float* embedding = nullptr;
-
-    if (!args.image_path.empty())
-    {
-        if (!args.prompt.empty())
-        {
-            embedding = pipeline->embed_image_text(
-                args.prompt.c_str(), args.image_path.c_str(), &emb_dim);
-        }
-        else
-        {
-            embedding = pipeline->embed_image(args.image_path.c_str(), &emb_dim);
-        }
-    }
-    else
-    {
-        embedding = pipeline->embed(args.prompt.c_str(), &emb_dim);
-    }
-
-    if (embedding == nullptr)
-    {
-        std::cerr << "Error: embedding failed\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    // Output as JSON object for programmatic parsing by E2E runner
-    std::cerr << "Embedding dim: " << emb_dim << std::endl;
+    std::cerr << "Embedding dim: " << result.dim << std::endl;
     std::cout << "{\"embedding\": [";
-    for (int i = 0; i < emb_dim; ++i)
+    for (int i = 0; i < result.dim; ++i)
     {
         if (i > 0) std::cout << ", ";
-        std::cout << embedding[i];
+        std::cout << result.data[static_cast<std::size_t>(i)];
     }
-    std::cout << "], \"dim\": " << emb_dim << "}\n";
-
-    delete pipeline;
+    std::cout << "]}\n";
     return EXIT_SUCCESS;
 }
 
 int cmd_rerank(const CliArgs& args)
 {
-    if (args.bundle_path.empty())
+    if (args.bundle_path.empty() || args.prompt.empty() || args.document.empty())
     {
-        std::cerr << "Error: rerank requires a .trtfb bundle file\n";
+        std::cerr << "Error: rerank requires bundle + --prompt + --document\n";
         return EXIT_FAILURE;
     }
 
-    if (args.prompt.empty())
-    {
-        std::cerr << "Error: rerank requires --prompt (query)\n";
-        return EXIT_FAILURE;
-    }
-
-    if (args.document.empty())
-    {
-        std::cerr << "Error: rerank requires --document\n";
-        return EXIT_FAILURE;
-    }
-
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
-
-    if (!pipeline->supports_reranking())
-    {
-        std::cerr << "Error: this bundle does not support reranking\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    const float score = pipeline->rerank(args.prompt.c_str(), args.document.c_str());
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
+    float score = pipeline->rerank(args.prompt, args.document);
     std::cout << "Relevance score: " << score << '\n';
-
-    delete pipeline;
-    return EXIT_SUCCESS;
-}
-
-std::vector<float> parse_csv_floats(const std::string& csv)
-{
-    std::vector<float> result;
-    std::string token;
-    for (std::size_t i = 0; i <= csv.size(); ++i)
-    {
-        if (i == csv.size() || csv[i] == ',')
-        {
-            if (!token.empty())
-            {
-                result.push_back(static_cast<float>(std::atof(token.c_str())));
-                token.clear();
-            }
-        }
-        else if (csv[i] != ' ')
-        {
-            token += csv[i];
-        }
-    }
-    return result;
-}
-
-int cmd_solve(const CliArgs& args)
-{
-    if (args.bundle_path.empty())
-    {
-        std::cerr << "Error: solve requires a .trtfb bundle file\n";
-        return EXIT_FAILURE;
-    }
-
-    const bool has_branch_trunk = !args.branch_input.empty() && !args.trunk_input.empty();
-    const bool has_field = !args.field_input.empty();
-
-    if (!has_branch_trunk && !has_field)
-    {
-        std::cerr << "Error: solve requires either --branch-input + --trunk-input (DeepONet) "
-                     "or --field-input (FNO)\n";
-        return EXIT_FAILURE;
-    }
-
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
-
-    if (!pipeline->supports_solve())
-    {
-        std::cerr << "Error: this bundle does not support solve (neural operator)\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    if (has_field)
-    {
-        // FNO field-based solve
-        auto field_vals = parse_csv_floats(args.field_input);
-
-        int32_t out_channels = 0, out_h = 0, out_w = 0;
-        const float* output = pipeline->solve_field(
-            field_vals.data(), static_cast<int32_t>(field_vals.size()),
-            &out_channels, &out_h, &out_w);
-
-        if (output == nullptr)
-        {
-            std::cerr << "Error: solve_field failed\n";
-            delete pipeline;
-            return EXIT_FAILURE;
-        }
-
-        const int32_t total = out_channels * out_h * out_w;
-        std::cout << "Output shape: [" << out_channels << ", " << out_h << ", " << out_w << "]\n";
-        const int32_t show = std::min(total, static_cast<int32_t>(16));
-        std::cout << "First " << show << " values:";
-        for (int32_t i = 0; i < show; ++i)
-        {
-            std::cout << " " << output[i];
-        }
-        if (total > show)
-            std::cout << " ...";
-        std::cout << '\n';
-    }
-    else
-    {
-        // DeepONet branch/trunk solve
-        auto branch_vals = parse_csv_floats(args.branch_input);
-        auto trunk_vals = parse_csv_floats(args.trunk_input);
-
-        int32_t out_dim = 0;
-        const float* output = pipeline->solve(
-            branch_vals.data(), static_cast<int32_t>(branch_vals.size()),
-            trunk_vals.data(), static_cast<int32_t>(trunk_vals.size()),
-            &out_dim);
-
-        if (output == nullptr)
-        {
-            std::cerr << "Error: solve failed\n";
-            delete pipeline;
-            return EXIT_FAILURE;
-        }
-
-        std::cout << "Output [" << out_dim << "]:";
-        for (int32_t i = 0; i < out_dim; ++i)
-        {
-            std::cout << " " << output[i];
-        }
-        std::cout << '\n';
-    }
-
-    delete pipeline;
-    return EXIT_SUCCESS;
-}
-
-int cmd_speak(const CliArgs& args)
-{
-    if (args.bundle_path.empty())
-    {
-        std::cerr << "Error: speak requires a .trtfb bundle file\n";
-        return EXIT_FAILURE;
-    }
-
-    if (args.audio_in.empty())
-    {
-        std::cerr << "Error: speak requires --audio-in\n";
-        return EXIT_FAILURE;
-    }
-
-    const std::string out_path = args.audio_out.empty()
-        ? "/tmp/speech_output.wav" : args.audio_out;
-
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
-
-    if (!pipeline->supports_speech())
-    {
-        std::cerr << "Error: this bundle does not support speech-to-speech\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    const int32_t max_frames = args.max_new_tokens > 0
-        ? args.max_new_tokens : -1;
-
-    const int32_t num_samples = pipeline->speak(
-        args.audio_in.c_str(), out_path.c_str(), max_frames, args.tail_frames);
-
-    if (num_samples < 0)
-    {
-        std::cerr << "Error: speech-to-speech failed\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
-
-    std::cout << "Generated " << num_samples << " audio samples -> "
-              << out_path << '\n';
-    delete pipeline;
     return EXIT_SUCCESS;
 }
 
 int cmd_transcribe(const CliArgs& args)
 {
-    if (args.bundle_path.empty())
+    if (args.bundle_path.empty() || args.audio_in.empty())
     {
-        std::cerr << "Error: transcribe requires a .trtfb bundle file\n";
+        std::cerr << "Error: transcribe requires bundle + --audio\n";
         return EXIT_FAILURE;
     }
 
-    if (args.audio_in.empty())
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
+
+    auto audio = trtf::io::read_wav(args.audio_in);
+    int32_t max_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 224;
+
+    auto result = pipeline->transcribe(audio.samples.data(),
+                                       static_cast<int32_t>(audio.samples.size()),
+                                       max_tokens,
+                                       audio.sample_rate);
+    std::cout << result.text << '\n';
+    return EXIT_SUCCESS;
+}
+
+int cmd_speak(const CliArgs& args)
+{
+    if (args.bundle_path.empty() || args.audio_in.empty())
     {
-        std::cerr << "Error: transcribe requires --audio\n";
+        std::cerr << "Error: speak requires bundle + --audio-in\n";
         return EXIT_FAILURE;
     }
 
-    TrtfPipelineOptions opts{};
-    opts.hf_python = args.hf_python.empty() ? nullptr : args.hf_python.c_str();
-    auto* pipeline = trtf_create_pipeline_ex(args.bundle_path.c_str(), &opts);
-    if (pipeline == nullptr)
-    {
-        std::cerr << "Error: " << trtf_last_error() << '\n';
-        return EXIT_FAILURE;
-    }
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
 
-    if (!pipeline->supports_transcription())
-    {
-        std::cerr << "Error: this bundle does not support transcription\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
+    auto audio = trtf::io::read_wav(args.audio_in);
 
-    const int32_t max_tokens = args.max_new_tokens > 0
-        ? args.max_new_tokens : 224;
+    trtf::GenerateConfig cfg;
+    cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : -1;
 
-    const char* text = pipeline->transcribe(args.audio_in.c_str(), max_tokens);
-    if (text == nullptr)
-    {
-        std::cerr << "Error: transcription failed\n";
-        delete pipeline;
-        return EXIT_FAILURE;
-    }
+    auto result = pipeline->speak(audio.samples.data(),
+                                  static_cast<int32_t>(audio.samples.size()), cfg,
+                                  audio.sample_rate);
 
-    std::cout << text << '\n';
-    delete pipeline;
+    const std::string out_path = args.audio_out.empty()
+        ? "/tmp/speech_output.wav" : args.audio_out;
+    trtf::io::write_wav(result, out_path);
+
+    std::cout << "Generated " << result.num_samples << " audio samples -> " << out_path << '\n';
     return EXIT_SUCCESS;
 }
 
@@ -1101,9 +494,7 @@ int cmd_inspect(const CliArgs& args)
         std::cout << "KV heads:           " << info.num_key_value_heads << '\n';
         std::cout << "Max cache length:   " << info.max_cache_length << '\n';
         if (!info.runtime_strategy.empty())
-        {
             std::cout << "Runtime strategy:   " << info.runtime_strategy << '\n';
-        }
         return EXIT_SUCCESS;
     }
     catch (const std::exception& e)
@@ -1119,75 +510,20 @@ int main(int argc, char** argv)
 {
     const CliArgs args = parse_args(argc, argv);
 
-    if (args.show_help)
-    {
-        print_usage();
-        return EXIT_SUCCESS;
-    }
+    if (args.show_help) { print_usage(); return EXIT_SUCCESS; }
+    if (args.parse_error) { std::cerr << "Error: " << args.error_message << '\n'; print_usage(); return EXIT_FAILURE; }
 
-    if (args.parse_error)
-    {
-        std::cerr << "Error: " << args.error_message << '\n';
-        print_usage();
-        return EXIT_FAILURE;
-    }
-
-    if (args.command == "version")
-    {
-        return cmd_version();
-    }
-    if (args.command == "run")
-    {
-        return cmd_run(args);
-    }
-    if (args.command == "encode")
-    {
-        return cmd_encode(args);
-    }
-    if (args.command == "segment")
-    {
-        return cmd_segment(args);
-    }
-    if (args.command == "segment-sam")
-    {
-        return cmd_segment_sam(args);
-    }
-    if (args.command == "detect")
-    {
-        return cmd_detect(args);
-    }
-    if (args.command == "generate-audio")
-    {
-        return cmd_generate_audio(args);
-    }
-    if (args.command == "generate-video")
-    {
-        return cmd_generate_video(args);
-    }
-    if (args.command == "solve")
-    {
-        return cmd_solve(args);
-    }
-    if (args.command == "embed")
-    {
-        return cmd_embed(args);
-    }
-    if (args.command == "rerank")
-    {
-        return cmd_rerank(args);
-    }
-    if (args.command == "speak")
-    {
-        return cmd_speak(args);
-    }
-    if (args.command == "transcribe")
-    {
-        return cmd_transcribe(args);
-    }
-    if (args.command == "inspect")
-    {
-        return cmd_inspect(args);
-    }
+    if (args.command == "version") return cmd_version();
+    if (args.command == "run") return cmd_run(args);
+    if (args.command == "encode") return cmd_encode(args);
+    if (args.command == "segment") return cmd_segment(args);
+    if (args.command == "generate-audio") return cmd_generate_audio(args);
+    if (args.command == "generate-video") return cmd_generate_video(args);
+    if (args.command == "embed") return cmd_embed(args);
+    if (args.command == "rerank") return cmd_rerank(args);
+    if (args.command == "speak") return cmd_speak(args);
+    if (args.command == "transcribe") return cmd_transcribe(args);
+    if (args.command == "inspect") return cmd_inspect(args);
 
     print_usage();
     return EXIT_FAILURE;

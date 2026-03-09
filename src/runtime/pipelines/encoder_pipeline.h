@@ -1,0 +1,77 @@
+#pragma once
+
+// EncoderPipeline: single-pass encoder models (BERT, embedding, reranking).
+// SegmentPipeline: single-pass segmentation (SegFormer).
+// SamPipeline: two-stage segmentation (SAM — encoder + decoder).
+
+#include "trtf/pipeline.h"
+#include "trtf/tokenizer.h"
+#include "trtf/runtime/trt_module.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#if TRTF_HAS_TRT
+
+namespace trtf {
+
+class EncoderPipeline final : public IPipeline {
+public:
+    EncoderPipeline(std::unique_ptr<TrtModule> encoder, std::string mode,
+                    std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                    std::string model_id_str = "");
+
+    EmbeddingResult embed(const std::string& text) override;
+    EmbeddingResult encode(const std::string& text) override;
+    float rerank(const std::string& query, const std::string& document) override;
+
+    const char* model_id() const override { return model_id_.c_str(); }
+    const char* pipeline_type() const override { return "EncoderPipeline"; }
+
+    // Token-ID-based encoding (for unit tests and internal callers).
+    EmbeddingResult encode_ids(const std::vector<int32_t>& input_ids);
+
+private:
+    std::unique_ptr<TrtModule> encoder_;
+    std::string mode_;  // "encoder_only", "embedding", "reranking"
+    std::shared_ptr<ITokenizer> tokenizer_;
+    std::string model_id_;
+};
+
+class SegmentPipeline final : public IPipeline {
+public:
+    explicit SegmentPipeline(std::unique_ptr<TrtModule> model,
+                             std::string model_id_str = "");
+
+    SegmentResult segment(const float* pixels, int32_t height, int32_t width) override;
+
+    const char* model_id() const override { return model_id_.c_str(); }
+    const char* pipeline_type() const override { return "SegmentPipeline"; }
+
+private:
+    std::unique_ptr<TrtModule> model_;
+    std::string model_id_;
+};
+
+class SamPipeline final : public IPipeline {
+public:
+    SamPipeline(std::unique_ptr<TrtModule> image_encoder,
+                std::unique_ptr<TrtModule> mask_decoder,
+                std::string model_id_str = "");
+
+    SegmentResult segment(const float* pixels, int32_t height, int32_t width) override;
+
+    const char* model_id() const override { return model_id_.c_str(); }
+    const char* pipeline_type() const override { return "SamPipeline"; }
+
+private:
+    std::unique_ptr<TrtModule> image_encoder_;
+    std::unique_ptr<TrtModule> mask_decoder_;
+    std::string model_id_;
+};
+
+} // namespace trtf
+
+#endif // TRTF_HAS_TRT

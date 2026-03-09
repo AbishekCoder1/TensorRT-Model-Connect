@@ -9,21 +9,12 @@ import logging
 import math
 from typing import List
 
+import numpy as np
+
 from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
+from ._helpers import cosine_similarity
 
 logger = logging.getLogger(__name__)
-
-
-def _cosine_similarity(a: List[float], b: List[float]) -> float:
-    """Compute cosine similarity between two vectors."""
-    if len(a) != len(b) or len(a) == 0:
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a < 1e-12 or norm_b < 1e-12:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
 
 def _l2_distance(a: List[float], b: List[float]) -> float:
@@ -66,7 +57,7 @@ class EncoderOnlyComparator:
                     ),
                 )
 
-            cls_cosine = _cosine_similarity(trt_cls, ref_cls)
+            cls_cosine = cosine_similarity(np.asarray(trt_cls), np.asarray(ref_cls))
             cls_l2 = _l2_distance(trt_cls, ref_cls)
 
             cls_cosine_thresh = th.get("cls_embedding_cosine", 0.99)
@@ -97,7 +88,7 @@ class EncoderOnlyComparator:
                     ),
                 )
 
-            hidden_cosine = _cosine_similarity(trt_hidden, ref_hidden)
+            hidden_cosine = cosine_similarity(np.asarray(trt_hidden), np.asarray(ref_hidden))
             hidden_l2 = _l2_distance(trt_hidden, ref_hidden)
 
             hidden_cosine_thresh = th.get("hidden_state_cosine", 0.99)

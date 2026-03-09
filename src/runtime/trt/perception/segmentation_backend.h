@@ -2,7 +2,7 @@
 
 #include "runtime/trt/core/trt_common.h"
 #include "cabi/config/fast_path_config.h"
-#include "trtf/runtime/adapters/io/media_io_adapter.h"
+#include "runtime/trt/core/decoded_image.h"
 
 #if TRTF_HAS_TRT
 

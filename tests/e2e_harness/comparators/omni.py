@@ -7,24 +7,14 @@ talker token match, code2wav spectral distance, e2e text edit distance.
 from __future__ import annotations
 
 import logging
-import math
-from typing import Any, Dict, List
+from typing import Dict, List
+
+import numpy as np
 
 from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
+from ._helpers import cosine_similarity, normalized_edit_distance
 
 logger = logging.getLogger(__name__)
-
-
-def _cosine_similarity(a: List[float], b: List[float]) -> float:
-    """Compute cosine similarity between two vectors."""
-    if len(a) != len(b) or len(a) == 0:
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a < 1e-12 or norm_b < 1e-12:
-        return 0.0
-    return dot / (norm_a * norm_b)
 
 
 def _token_agreement(a: List[int], b: List[int]) -> float:
@@ -36,32 +26,6 @@ def _token_agreement(a: List[int], b: List[int]) -> float:
     min_len = min(len(a), len(b))
     matches = sum(1 for i in range(min_len) if a[i] == b[i])
     return matches / max(len(a), len(b))
-
-
-def _text_edit_distance(a: str, b: str) -> int:
-    """Levenshtein edit distance between two strings."""
-    if not a:
-        return len(b)
-    if not b:
-        return len(a)
-    m, n = len(a), len(b)
-    prev = list(range(n + 1))
-    curr = [0] * (n + 1)
-    for i in range(1, m + 1):
-        curr[0] = i
-        for j in range(1, n + 1):
-            cost = 0 if a[i - 1] == b[j - 1] else 1
-            curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
-        prev, curr = curr, prev
-    return prev[n]
-
-
-def _normalized_edit_distance(a: str, b: str) -> float:
-    """Edit distance normalized by max length."""
-    max_len = max(len(a), len(b))
-    if max_len == 0:
-        return 0.0
-    return _text_edit_distance(a, b) / max_len
 
 
 class OmniComparator:
@@ -115,7 +79,7 @@ class OmniComparator:
         trt_text = trt.text or ""
         ref_text = ref.text or ""
         if trt_text or ref_text:
-            ned = _normalized_edit_distance(trt_text, ref_text)
+            ned = normalized_edit_distance(trt_text, ref_text)
             thresh = th.get("thinker_text_edit_distance", 0.3)
             metrics["thinker_text_edit_distance"] = MetricResult(
                 value=ned, threshold=thresh, operator="<=", passed=ned <= thresh)
@@ -150,7 +114,7 @@ class OmniComparator:
                 message=f"Missing embedding for {stage.name} from {', '.join(missing)}",
             )
 
-        cosine = _cosine_similarity(trt_emb, ref_emb)
+        cosine = cosine_similarity(np.asarray(trt_emb), np.asarray(ref_emb))
         # Use canonical name from threshold defaults (e.g. "vision_embedding_cosine")
         branch = stage.name.replace("_encode", "")
         metric_name = f"{branch}_embedding_cosine"
@@ -204,7 +168,7 @@ class OmniComparator:
         trt_text = trt.text or ""
         ref_text = ref.text or ""
 
-        ned = _normalized_edit_distance(trt_text, ref_text)
+        ned = normalized_edit_distance(trt_text, ref_text)
         thresh = th.get("e2e_text_edit_distance", 0.3)
         metrics: Dict[str, MetricResult] = {
             "e2e_text_edit_distance": MetricResult(

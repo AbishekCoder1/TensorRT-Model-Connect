@@ -501,11 +501,11 @@ std::vector<float> OmniBackend::run_code2wav(
 // Full pipeline
 // ---------------------------------------------------------------------------
 
-AudioResult OmniBackend::generate_audio(
+LegacyAudioResult OmniBackend::generate_audio(
     const std::vector<int32_t>& input_ids,
     int32_t max_semantic_tokens)
 {
-    AudioResult result;
+    LegacyAudioResult result;
     result.sample_rate = mConfig.sample_rate;
 
     if (!is_available())

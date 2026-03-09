@@ -30,6 +30,7 @@ from ..contracts import (
     StageStatus,
     ThresholdProfile,
 )
+from ._helpers import cosine_similarity, normalized_edit_distance
 
 logger = logging.getLogger(__name__)
 
@@ -69,47 +70,11 @@ _CHAT_TURN_MARKERS = (
 )
 
 
-def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Cosine similarity between two 1-D vectors. Returns 0.0 on degenerate input."""
-    norm_a = np.linalg.norm(a)
-    norm_b = np.linalg.norm(b)
-    if norm_a < 1e-12 or norm_b < 1e-12:
-        return 0.0
-    return float(np.dot(a, b) / (norm_a * norm_b))
-
-
 def _relative_l2(a: np.ndarray, b: np.ndarray) -> float:
     """Relative L2 norm: ||a - b|| / max(||b||, eps)."""
     diff_norm = np.linalg.norm(a - b)
     ref_norm = np.linalg.norm(b)
     return float(diff_norm / max(ref_norm, 1e-12))
-
-
-def _levenshtein_distance(s1: str, s2: str) -> int:
-    """Standard Levenshtein edit distance via dynamic programming."""
-    if len(s1) < len(s2):
-        return _levenshtein_distance(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
-
-    prev_row = list(range(len(s2) + 1))
-    for i, c1 in enumerate(s1):
-        curr_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = prev_row[j + 1] + 1
-            deletions = curr_row[j] + 1
-            substitutions = prev_row[j] + (0 if c1 == c2 else 1)
-            curr_row.append(min(insertions, deletions, substitutions))
-        prev_row = curr_row
-    return prev_row[-1]
-
-
-def _normalized_edit_distance(s1: str, s2: str) -> float:
-    """Levenshtein distance normalized by max string length. 0.0 = identical."""
-    max_len = max(len(s1), len(s2))
-    if max_len == 0:
-        return 0.0
-    return _levenshtein_distance(s1, s2) / max_len
 
 
 def _strip_prompt_echo(text: str, prompt: str) -> str:
@@ -341,7 +306,7 @@ class TextComparator:
 
         # --- Metric 1: logit_cosine_p5 ---
         cosines = np.array([
-            _cosine_similarity(trt_clean[i], ref_clean[i])
+            cosine_similarity(trt_clean[i], ref_clean[i])
             for i in range(n_steps)
         ])
         logit_cosine_p5 = float(np.percentile(cosines, 5))
@@ -439,7 +404,7 @@ class TextComparator:
         trt_text_for_ned = _strip_prompt_echo_normalized(trt_text_for_ned, prompt)
 
         if trt_text_for_ned or ref_text_for_ned:
-            ned = _normalized_edit_distance(trt_text_for_ned, ref_text_for_ned)
+            ned = normalized_edit_distance(trt_text_for_ned, ref_text_for_ned)
             # Some TRT CLI paths stop decoding early on EOS while the debug/HF
             # text path keeps fixed-length continuation tokens. If token/logit
             # metrics already agree, compare on the common prefix to avoid
@@ -451,7 +416,7 @@ class TextComparator:
                 else:
                     short, long = ref_text_for_ned, trt_text_for_ned
                 if len(short) >= _MIN_PREFIX_FALLBACK_CHARS and long.startswith(short):
-                    prefix_ned = _normalized_edit_distance(short, long[:len(short)])
+                    prefix_ned = normalized_edit_distance(short, long[:len(short)])
                     if prefix_ned < ned:
                         notes.append(
                             "NED prefix fallback applied (matching continuation prefix; "

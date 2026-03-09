@@ -34,7 +34,6 @@
 // =============================================================================
 
 #include "runtime/trt/core/trt_decode_runtime.h"
-#include "runtime/trt/core/trt_backend_shared.h"
 
 #include <algorithm>
 #include <cmath>
@@ -394,79 +393,6 @@ bool test_mask_negative_cache_with_current_slot()
 }
 
 // -----------------------------------------------------------------------------
-// Intention:  Verify CreateTrtBackendFromEngine reports unavailable and throws
-//             a deterministic error when constructed with a null step-engine.
-// Setup:      Backend created from empty std::unique_ptr<DecoderStepEngine>.
-// Mechanism:  Checks is_available()==false and generate() throws runtime_error.
-// -----------------------------------------------------------------------------
-bool test_trt_backend_null_engine_reports_unavailable_and_throws()
-{
-    std::unique_ptr<trtf::DecoderStepEngine> null_engine;
-    auto backend = trtf::CreateTrtBackendFromEngine(std::move(null_engine));
-    if (backend == nullptr)
-    {
-        std::cerr << "trt_backend_null_engine: backend is null" << std::endl;
-        return false;
-    }
-    if (backend->is_available())
-    {
-        std::cerr << "trt_backend_null_engine: backend unexpectedly available" << std::endl;
-        return false;
-    }
-
-    trtf::GenerationConfig cfg{};
-    cfg.max_new_tokens = 1;
-    bool threw = false;
-    try
-    {
-        (void) backend->generate({}, cfg);
-    }
-    catch (const std::runtime_error& e)
-    {
-        threw = (std::string(e.what()).find("TRT backend not initialized")
-            != std::string::npos);
-    }
-    catch (...)
-    {
-        threw = false;
-    }
-    if (!threw)
-    {
-        std::cerr << "trt_backend_null_engine: expected runtime_error" << std::endl;
-        return false;
-    }
-    return true;
-}
-
-// -----------------------------------------------------------------------------
-// Intention:  Verify zero-token generation short-circuits before GPU resource
-//             allocation and simply returns the input prompt IDs unchanged.
-// Setup:      Backend created with a DecoderStepEngine shell; max_new_tokens=0.
-// Mechanism:  Calls generate() and checks output equals input ids.
-// -----------------------------------------------------------------------------
-bool test_trt_backend_zero_new_tokens_returns_input()
-{
-    auto engine = std::make_unique<trtf::DecoderStepEngine>();
-    auto backend = trtf::CreateTrtBackendFromEngine(std::move(engine));
-    if (backend == nullptr || !backend->is_available())
-    {
-        std::cerr << "trt_backend_zero_new_tokens: backend unavailable" << std::endl;
-        return false;
-    }
-
-    trtf::GenerationConfig cfg{};
-    cfg.max_new_tokens = 0;
-    const std::vector<int32_t> input = {11, 22, 33};
-    const auto output = backend->generate(input, cfg);
-    if (output != input)
-    {
-        std::cerr << "trt_backend_zero_new_tokens: output mismatch" << std::endl;
-        return false;
-    }
-    return true;
-}
-
-// -----------------------------------------------------------------------------
 // Intention:  Verify the causal attention mask when the cache is empty
 //             (cache_length=0) and include_current is false. Only the first
 //             position should be visible (0.0); the rest should be masked
@@ -620,8 +546,7 @@ int main()
     run("sample_topk_rng_mutates", test_sample_topk_mutates_rng_state);
     run("mask_non_positive_width_empty", test_mask_non_positive_width_returns_empty);
     run("mask_negative_cache_current_slot", test_mask_negative_cache_with_current_slot);
-    run("trt_backend_null_engine_unavailable", test_trt_backend_null_engine_reports_unavailable_and_throws);
-    run("trt_backend_zero_new_tokens_input", test_trt_backend_zero_new_tokens_returns_input);
+    // trt_backend_shared tests removed — TrtBackendFastPath deleted (replaced by TextGenerationPipeline)
     run("mask_cache0_no_current", test_mask_cache0_no_current);
     run("mask_cache3_no_current", test_mask_cache3_no_current);
     run("mask_with_current_slot", test_mask_with_current_slot);

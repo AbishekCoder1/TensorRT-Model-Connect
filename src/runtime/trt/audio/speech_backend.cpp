@@ -1522,12 +1522,12 @@ void log_output_frames_debug(
     }
 }
 
-AudioResult finalize_speech_audio_result(
+LegacyAudioResult finalize_speech_audio_result(
     const SpeechConfig& config,
     int32_t generated_frames,
     std::vector<float> waveform)
 {
-    AudioResult result;
+    LegacyAudioResult result;
     result.sample_rate = config.sample_rate;
 
     const auto trim_result = trim_speech_waveform_to_generated_frames(
@@ -1556,13 +1556,13 @@ AudioResult finalize_speech_audio_result(
 
 } // namespace
 
-AudioResult SpeechToSpeechBackend::process_audio(
+LegacyAudioResult SpeechToSpeechBackend::process_audio(
     const float* input_samples, int32_t num_input_samples,
     int32_t max_output_frames,
     int32_t input_sample_rate,
     int32_t tail_frames)
 {
-    AudioResult result;
+    LegacyAudioResult result;
     result.sample_rate = mConfig.sample_rate;
 
     if (!is_available())

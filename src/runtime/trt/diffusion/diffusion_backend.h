@@ -1,6 +1,6 @@
 #pragma once
 
-#include "trtf/backend.h"
+#include "runtime/trt/core/generation_backend.h"
 #include "trtf/tokenizer.h"
 #include "cabi/config/fast_path_config.h"
 #include "runtime/trt/core/trt_common.h"

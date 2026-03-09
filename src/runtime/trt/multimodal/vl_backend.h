@@ -1,6 +1,6 @@
 #pragma once
 
-#include "trtf/backend.h"
+#include "runtime/trt/core/generation_backend.h"
 #include "runtime/trt/core/trt_engine_lifecycle.h"
 #include "runtime/trt/multimodal/vision_engine.h"
 #include "runtime/trt/multimodal/image_preprocessor.h"
