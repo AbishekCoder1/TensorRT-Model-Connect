@@ -15,7 +15,6 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -48,10 +47,11 @@ SpeechToSpeechBackend::SpeechToSpeechBackend(
         mSubprocessRunner = CreateDefaultSubprocessRunner();
     }
 
-    // Seed RNG from system clock (non-deterministic but good enough)
-    auto now = std::chrono::high_resolution_clock::now();
-    mRngState = static_cast<uint64_t>(now.time_since_epoch().count());
-    if (mRngState == 0) mRngState = 0xDEADBEEF42ULL;  // avoid zero state
+    // Fixed deterministic seed for reproducible audio output.
+    // PersonaPlex depth sampling (temperature=0.8, top_k=250) is sensitive
+    // to the RNG sequence; a fixed seed ensures identical output across runs
+    // and between the old and new pipeline paths.
+    mRngState = 0x5EEDC0DECAFE1234ULL;
 }
 
 SpeechToSpeechBackend::~SpeechToSpeechBackend() = default;

@@ -210,7 +210,8 @@ AudioResult SpeechPipeline::speak(
     }
 
     auto speech_result = backend_->process_audio(
-        samples_ptr, samples_count, max_frames, input_sample_rate);
+        samples_ptr, samples_count, max_frames, input_sample_rate,
+        cfg.tail_frames);
 
     AudioResult out;
     out.samples = std::move(speech_result.waveform);

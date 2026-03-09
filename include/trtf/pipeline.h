@@ -61,6 +61,7 @@ struct GenerateConfig {
     float guidance_scale{-1.0f}; // diffusion
     int32_t num_steps{-1};       // diffusion
     int32_t eos_token_id{-1};
+    int32_t tail_frames{0};          // speech-to-speech: extra frames after input
 };
 
 // --- Pipeline interface ---

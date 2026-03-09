@@ -451,6 +451,7 @@ int cmd_speak(const CliArgs& args)
 
     trtf::GenerateConfig cfg;
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : -1;
+    cfg.tail_frames = args.tail_frames;
 
     auto result = pipeline->speak(audio.samples.data(),
                                   static_cast<int32_t>(audio.samples.size()), cfg,
