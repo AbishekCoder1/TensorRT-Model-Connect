@@ -294,6 +294,7 @@ class TextToAudioRunner:
                         f.read(4)  # WAVE
                         sample_rate = 24000
                         data_size = 0
+                        bits_per_sample = 32
                         while True:
                             chunk_id = f.read(4)
                             if len(chunk_id) < 4:
@@ -302,12 +303,15 @@ class TextToAudioRunner:
                             if chunk_id == b"fmt ":
                                 fmt_data = f.read(chunk_size)
                                 sample_rate = struct.unpack("<I", fmt_data[4:8])[0]
+                                if len(fmt_data) >= 16:
+                                    bits_per_sample = struct.unpack("<H", fmt_data[14:16])[0]
                             elif chunk_id == b"data":
                                 data_size = chunk_size
                                 f.read(chunk_size)
                             else:
                                 f.read(chunk_size)
-                        num_samples = data_size // 4  # float32
+                        bytes_per_sample = max(bits_per_sample // 8, 1)
+                        num_samples = data_size // bytes_per_sample
                         data["duration_s"] = num_samples / sample_rate if sample_rate else 0
                         data["sample_rate"] = sample_rate
                 except Exception as e:

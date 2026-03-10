@@ -100,10 +100,8 @@ bool detect_add_special(const BundleSections& s)
 std::shared_ptr<ITokenizer> make_tok(const BundleSections& s, const std::string& hf)
 {
     if (hf.empty()) return nullptr;
-    try {
-        auto r = extract_tokenizer_from_bundle(s, hf, detect_add_special(s));
-        if (r.tokenizer) return std::move(r.tokenizer);
-    } catch (...) {}
+    auto r = extract_tokenizer_from_bundle(s, hf, detect_add_special(s));
+    if (r.tokenizer) return std::move(r.tokenizer);
     return nullptr;
 }
 
@@ -264,11 +262,18 @@ std::unique_ptr<IPipeline> make_bark_pipeline_from_bundle(
 {
     auto sem = deser(sections.plan_data, "bark semantic");
     auto se = make_decoder_engine(std::move(sem.engine), std::move(sem.context), cfg);
+    set_decoder_vocab_from_logits(*se);
     auto coarse = deser(sections.coarse_engine_plan_data, "bark coarse");
     FastPathModelConfig cc = cfg;
     if (cfg.coarse_hidden_size > 0) cc.hidden_size = cfg.coarse_hidden_size;
     if (cfg.coarse_num_layers > 0) cc.num_layers = cfg.coarse_num_layers;
-    if (cfg.coarse_num_heads > 0) cc.num_heads = cfg.coarse_num_heads;
+    if (cfg.coarse_num_heads > 0) {
+        cc.num_heads = cfg.coarse_num_heads;
+        cc.num_kv_heads = cfg.coarse_num_heads;
+    }
+    cc.vocab_size = cfg.coarse_input_vocab;
+    cc.head_dim = cc.hidden_size / std::max(cc.num_heads, 1);
+    cc.attention_size = cc.num_heads * cc.head_dim;
     cc.max_cache_length = cfg.coarse_max_cache_length;
     auto ce = make_decoder_engine(std::move(coarse.engine), std::move(coarse.context), cc);
     auto be = CreateBarkBackend(std::move(se), std::move(ce),
@@ -282,7 +287,14 @@ std::unique_ptr<IPipeline> make_bark_pipeline_from_bundle(
         auto fp = to_floats(sections.fine_position_embed_data);
         if (!fe.empty()) be->set_fine_embeddings(std::move(fe), std::move(fp));
     }
-    auto tok = make_tok(sections, hf_python);
+    // Bark tokenizer must use add_special_tokens=false — bark prepends its
+    // own special tokens (text_encoding_offset, semantic_infer_token) in the
+    // semantic stage; HF BOS/EOS tokens would corrupt the input sequence.
+    std::shared_ptr<ITokenizer> tok;
+    if (!hf_python.empty()) {
+        auto r = extract_tokenizer_from_bundle(sections, hf_python, /*add_special_tokens=*/false);
+        if (r.tokenizer) tok = std::move(r.tokenizer);
+    }
     return std::make_unique<BarkPipeline>(std::move(be), std::move(tok), model_id);
 }
 

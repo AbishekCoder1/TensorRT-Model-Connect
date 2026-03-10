@@ -21,7 +21,7 @@
 
 namespace trtf::io {
 
-// Write a WAV file from AudioResult.
+// Write a WAV file from AudioResult (IEEE float32 mono).
 inline void write_wav(const AudioResult& audio, const std::string& path)
 {
     if (audio.samples.empty())
@@ -34,9 +34,9 @@ inline void write_wav(const AudioResult& audio, const std::string& path)
     const int32_t num_samples = static_cast<int32_t>(audio.samples.size());
     const int32_t sample_rate = audio.sample_rate;
     const int16_t num_channels = 1;
-    const int16_t bits_per_sample = 16;
-    const int32_t byte_rate = sample_rate * num_channels * bits_per_sample / 8;
-    const int16_t block_align = num_channels * bits_per_sample / 8;
+    const int16_t bits_per_sample = 32;
+    const int32_t byte_rate = sample_rate * num_channels * (bits_per_sample / 8);
+    const int16_t block_align = static_cast<int16_t>(num_channels * (bits_per_sample / 8));
     const int32_t data_size = num_samples * block_align;
     const int32_t chunk_size = 36 + data_size;
 
@@ -48,7 +48,7 @@ inline void write_wav(const AudioResult& audio, const std::string& path)
     // fmt chunk
     f.write("fmt ", 4);
     int32_t fmt_size = 16;
-    int16_t audio_format = 1; // PCM
+    int16_t audio_format = 3; // IEEE float
     f.write(reinterpret_cast<const char*>(&fmt_size), 4);
     f.write(reinterpret_cast<const char*>(&audio_format), 2);
     f.write(reinterpret_cast<const char*>(&num_channels), 2);
@@ -60,14 +60,8 @@ inline void write_wav(const AudioResult& audio, const std::string& path)
     // data chunk
     f.write("data", 4);
     f.write(reinterpret_cast<const char*>(&data_size), 4);
-
-    // Convert float [-1,1] to int16
-    for (float sample : audio.samples)
-    {
-        float clamped = std::max(-1.0f, std::min(1.0f, sample));
-        auto val = static_cast<int16_t>(clamped * 32767.0f);
-        f.write(reinterpret_cast<const char*>(&val), 2);
-    }
+    f.write(reinterpret_cast<const char*>(audio.samples.data()),
+            static_cast<std::streamsize>(data_size));
 }
 
 // Read a WAV file into an AudioResult (mono float32).
@@ -93,10 +87,11 @@ inline AudioResult read_wav(const std::string& path)
 
     int32_t sample_rate = 0;
     int16_t num_channels = 0;
+    int16_t audio_format = 0;
     int16_t bits_per_sample = 0;
 
     // Find fmt and data chunks
-    std::vector<int16_t> raw_samples;
+    std::vector<char> data_bytes;
     while (f)
     {
         char id[4];
@@ -106,18 +101,19 @@ inline AudioResult read_wav(const std::string& path)
 
         if (std::string(id, 4) == "fmt ")
         {
-            int16_t format = 0;
-            f.read(reinterpret_cast<char*>(&format), 2);
+            f.read(reinterpret_cast<char*>(&audio_format), 2);
             f.read(reinterpret_cast<char*>(&num_channels), 2);
             f.read(reinterpret_cast<char*>(&sample_rate), 4);
-            f.seekg(size - 8, std::ios::cur); // skip rest of fmt
+            f.seekg(4, std::ios::cur); // byte_rate
+            f.seekg(2, std::ios::cur); // block_align
+            f.read(reinterpret_cast<char*>(&bits_per_sample), 2);
+            if (size > 16)
+                f.seekg(size - 16, std::ios::cur);
         }
         else if (std::string(id, 4) == "data")
         {
-            bits_per_sample = 16; // assume 16-bit PCM
-            int32_t num = size / 2;
-            raw_samples.resize(static_cast<std::size_t>(num));
-            f.read(reinterpret_cast<char*>(raw_samples.data()), size);
+            data_bytes.resize(static_cast<std::size_t>(size));
+            f.read(data_bytes.data(), size);
         }
         else
         {
@@ -125,26 +121,42 @@ inline AudioResult read_wav(const std::string& path)
         }
     }
 
-    // Convert to mono float32
+    // Decode samples based on format
     AudioResult result;
     result.sample_rate = sample_rate;
-    if (num_channels <= 1)
+    const auto nc = std::max<int16_t>(num_channels, 1);
+    if (audio_format == 3 && bits_per_sample == 32)
     {
-        result.samples.resize(raw_samples.size());
-        for (std::size_t i = 0; i < raw_samples.size(); ++i)
-            result.samples[i] = static_cast<float>(raw_samples[i]) / 32768.0f;
+        // IEEE float32
+        std::size_t n = data_bytes.size() / (sizeof(float) * nc);
+        result.samples.resize(n);
+        const auto* fp = reinterpret_cast<const float*>(data_bytes.data());
+        if (nc <= 1) {
+            for (std::size_t i = 0; i < n; ++i) result.samples[i] = fp[i];
+        } else {
+            for (std::size_t i = 0; i < n; ++i) {
+                float sum = 0.0f;
+                for (int16_t ch = 0; ch < nc; ++ch) sum += fp[i * nc + ch];
+                result.samples[i] = sum / static_cast<float>(nc);
+            }
+        }
     }
     else
     {
-        // Downmix to mono
-        std::size_t frames = raw_samples.size() / static_cast<std::size_t>(num_channels);
-        result.samples.resize(frames);
-        for (std::size_t i = 0; i < frames; ++i)
-        {
-            float sum = 0.0f;
-            for (int16_t ch = 0; ch < num_channels; ++ch)
-                sum += static_cast<float>(raw_samples[i * num_channels + ch]);
-            result.samples[i] = sum / (32768.0f * num_channels);
+        // PCM int16
+        std::size_t n = data_bytes.size() / (2 * nc);
+        result.samples.resize(n);
+        const auto* sp = reinterpret_cast<const int16_t*>(data_bytes.data());
+        if (nc <= 1) {
+            for (std::size_t i = 0; i < n; ++i)
+                result.samples[i] = static_cast<float>(sp[i]) / 32768.0f;
+        } else {
+            for (std::size_t i = 0; i < n; ++i) {
+                float sum = 0.0f;
+                for (int16_t ch = 0; ch < nc; ++ch)
+                    sum += static_cast<float>(sp[i * nc + ch]);
+                result.samples[i] = sum / (32768.0f * static_cast<float>(nc));
+            }
         }
     }
     result.num_samples = static_cast<int32_t>(result.samples.size());

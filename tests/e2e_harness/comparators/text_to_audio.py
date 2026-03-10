@@ -177,6 +177,9 @@ class TextToAudioComparator:
 
         # Mel-spectrogram and log-spectral distance (if reference audio available)
         ref_samples = ref.data.get("audio_samples")
+        ref_wav_path = ref.data.get("wav_path", "")
+        if ref_samples is None and ref_wav_path:
+            ref_samples = self._read_wav_samples(ref_wav_path)
         trt_wav_path = trt.data.get("wav_path", "")
         if ref_samples is not None and trt_wav_path:
             try:
