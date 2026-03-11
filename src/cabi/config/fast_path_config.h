@@ -132,7 +132,8 @@ struct FastPathModelConfig {
     int32_t magpie_max_source_positions{2048};
     int32_t magpie_xa_n_heads{1};
     int32_t magpie_xa_d_head{128};
-    float magpie_cfg_scale{1.0F};
+    float magpie_temperature{0.6F};
+    float magpie_cfg_scale{2.5F};
     int32_t magpie_finished_limit_with_eot{0};
 
     // Object detection fields (used when runtime_strategy == "object_detection")

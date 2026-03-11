@@ -65,10 +65,10 @@ void test_sampling_decode_uses_sampler()
         false,
         0.6F,
         32,
-        [&sampler_calls](const float*, int32_t vocab_size, float temperature, int32_t top_k)
+        [&sampler_calls, cb_size](const float*, int32_t vocab_size, float temperature, int32_t top_k)
         {
             ++sampler_calls;
-            check(vocab_size == trtf::kMagpieAudioRange, "sampler path uses audio range vocab");
+            check(vocab_size == cb_size, "sampler path uses full vocab for eos detection");
             check(std::fabs(temperature - 0.6F) < 1e-6F, "sampler path forwards temperature");
             check(top_k == 32, "sampler path forwards top-k");
             return 40 + sampler_calls;
@@ -80,26 +80,36 @@ void test_sampling_decode_uses_sampler()
     check(sampler_calls == 2, "sampling decode invokes sampler per codebook");
 }
 
-void test_repetition_helpers_and_stop_rules()
+void test_sampling_decode_stops_on_sampled_eos()
 {
-    const std::vector<int32_t> repeated = {
-        1, 2,
-        3, 4,
-        3, 4,
-        3, 4,
-    };
-    const std::vector<int32_t> distinct = {
-        1, 2,
-        3, 4,
-        5, 6,
-    };
+    const int32_t num_cb = 2;
+    const int32_t cb_size = trtf::kMagpieEosToken + 1;
+    std::vector<float> logits(static_cast<std::size_t>(num_cb) * cb_size, -5.0F);
+    logits[11] = 3.0F;
+    logits[cb_size + 7] = 3.0F;
 
-    check(trtf::magpie_has_repeated_tail_frames(repeated, 2, 3),
-        "repetition helper detects repeated tail");
-    check(!trtf::magpie_has_repeated_tail_frames(distinct, 2, 3),
-        "repetition helper ignores distinct tail");
-    check(trtf::magpie_trimmed_frame_count_for_repetition(5, 3) == 3,
-        "trimmed frame count removes repeated suffix");
+    int sampler_calls = 0;
+    const auto result = trtf::decode_magpie_frame_codes(
+        logits,
+        num_cb,
+        cb_size,
+        false,
+        0.6F,
+        32,
+        [&sampler_calls](const float*, int32_t, float, int32_t)
+        {
+            ++sampler_calls;
+            return sampler_calls == 1 ? trtf::kMagpieEosToken : 17;
+        });
+
+    check(result.eos, "sampling decode treats sampled eos as stop");
+    check(result.frame_codes == std::vector<int32_t>({0, 17}),
+        "sampled eos frame is not emitted as audio");
+    check(sampler_calls == 2, "sampled eos still evaluates all codebooks");
+}
+
+void test_stop_rule_helpers()
+{
     check(trtf::should_run_magpie_periodic_check(15, 4, 16),
         "periodic helper triggers on configured interval");
     check(!trtf::should_run_magpie_periodic_check(3, 4, 16),
@@ -116,7 +126,8 @@ int main()
 {
     test_greedy_decode_uses_audio_range_but_still_detects_eos();
     test_sampling_decode_uses_sampler();
-    test_repetition_helpers_and_stop_rules();
+    test_sampling_decode_stops_on_sampled_eos();
+    test_stop_rule_helpers();
 
     if (g_failures != 0)
     {

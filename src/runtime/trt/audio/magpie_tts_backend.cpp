@@ -901,6 +901,10 @@ void MagpieTTSBackend::update_text_completion(DecoderLoopState& state,
 bool MagpieTTSBackend::check_finished_limit(DecoderLoopState& state,
                                               int32_t frame)
 {
+    if (!mConfig.enable_finished_limit_stop)
+    {
+        return false;
+    }
     if (advance_magpie_finished_limit(
             state.text_consumed,
             state.finished_limit,
@@ -932,8 +936,13 @@ void MagpieTTSBackend::log_decoder_profiling(const DecoderLoopState& state,
               << (gen_frames > 0 ? state.prof_trt_step_ms / gen_frames : 0.0) << " ms/frame)\n"
               << "[magpie-tts]   Sampling:          " << state.prof_sample_ms << " ms ("
               << (gen_frames > 0 ? state.prof_sample_ms / gen_frames : 0.0) << " ms/frame)\n"
-              << "[magpie-tts]   Stop method:       "
+              << "[magpie-tts]   Text tracking:     "
               << (state.use_cross_attn_tracking ? "cross-attn tracking" : "heuristic (text_len*3)")
+              << "\n"
+              << "[magpie-tts]   Stop guards:       "
+              << (mConfig.enable_finished_limit_stop
+                    ? "finished_limit"
+                    : "none (EOS/max_frames only)")
               << "\n"
               << "[magpie-tts] ---------------------------------\n";
 }
@@ -1024,42 +1033,15 @@ bool MagpieTTSBackend::gpu_check_stop_conditions(
     int32_t& h_eos_flag, int32_t& gen_frames_actual)
 {
 #if TRTF_HAS_CUDA_KERNELS
-    constexpr int32_t REPEAT_STOP_THRESHOLD = 3;
+    (void)state;
+    (void)frame;
+    (void)gen_frames_actual;
     auto& resources = *mResources;
-    const int32_t num_cb = state.num_cb;
 
     cudaMemcpyAsync(&h_eos_flag, d_eos_flag.data(), sizeof(int32_t),
                     cudaMemcpyDeviceToHost, resources.stream.get());
-
-    bool repeated = false;
-    if (frame >= REPEAT_STOP_THRESHOLD)
-    {
-        const int32_t check_start = frame + 1 - REPEAT_STOP_THRESHOLD;
-        const std::size_t check_bytes = static_cast<std::size_t>(REPEAT_STOP_THRESHOLD)
-            * num_cb * sizeof(int32_t);
-        std::vector<int32_t> recent(static_cast<std::size_t>(REPEAT_STOP_THRESHOLD) * num_cb);
-        cudaMemcpyAsync(recent.data(),
-            static_cast<const int32_t*>(mDeviceAllCodes.data()) + check_start * num_cb,
-            check_bytes, cudaMemcpyDeviceToHost, resources.stream.get());
-        cudaStreamSynchronize(resources.stream.get());
-
-        repeated = magpie_has_repeated_tail_frames(
-            recent, num_cb, REPEAT_STOP_THRESHOLD);
-        if (repeated)
-        {
-            gen_frames_actual = magpie_trimmed_frame_count_for_repetition(
-                frame + 1, REPEAT_STOP_THRESHOLD);
-            std::cerr << "[magpie-tts] Repetition detected at frame "
-                      << frame << ", trimming to " << gen_frames_actual
-                      << " frames" << std::endl;
-        }
-    }
-    else
-    {
-        cudaStreamSynchronize(resources.stream.get());
-    }
-
-    return (h_eos_flag != 0 || repeated);
+    cudaStreamSynchronize(resources.stream.get());
+    return h_eos_flag != 0;
 #else
     (void)state; (void)frame; (void)d_eos_flag;
     (void)h_eos_flag; (void)gen_frames_actual;
@@ -1263,7 +1245,6 @@ std::vector<int32_t> MagpieTTSBackend::run_cpu_sampling_loop(
     DecoderLoopState& state, int32_t max_frames)
 {
     constexpr int32_t MIN_FRAMES = 4;
-    constexpr int32_t REPEAT_STOP_THRESHOLD = 3;
 
     const int32_t num_cb = state.num_cb;
 
@@ -1297,6 +1278,13 @@ std::vector<int32_t> MagpieTTSBackend::run_cpu_sampling_loop(
         const auto t_sample_end = SteadyClock::now();
         state.prof_sample_ms += elapsed_ms(t_sample_start, t_sample_end);
 
+        if (should_stop_magpie_on_eos(eos, frame, MIN_FRAMES))
+        {
+            std::cerr << "[magpie-tts] EOS detected at frame " << frame
+                      << ", dropping terminal frame" << std::endl;
+            break;
+        }
+
         for (int32_t cb = 0; cb < num_cb; ++cb)
         {
             all_codes.push_back(frame_codes[cb]);
@@ -1304,21 +1292,6 @@ std::vector<int32_t> MagpieTTSBackend::run_cpu_sampling_loop(
         prev_codes = frame_codes;
         upload_prev_codes_to_device(mDevicePrevCodes, prev_codes.data(), num_cb,
                                     state.use_gpu_kernels, state.use_gpu_greedy);
-
-        // Repetition-based early stopping
-        if (magpie_has_repeated_tail_frames(
-                all_codes, num_cb, REPEAT_STOP_THRESHOLD))
-        {
-            const int32_t trim_to = magpie_trimmed_frame_count_for_repetition(
-                frame + 1, REPEAT_STOP_THRESHOLD);
-            all_codes.resize(static_cast<std::size_t>(trim_to) * num_cb);
-            std::cerr << "[magpie-tts] Repetition detected at frame "
-                      << frame << ", trimming to " << trim_to
-                      << " frames" << std::endl;
-            break;
-        }
-
-        if (should_stop_magpie_on_eos(eos, frame, MIN_FRAMES)) break;
 
         update_text_completion(state, frame);
 
@@ -1421,11 +1394,21 @@ void MagpieTTSBackend::apply_env_overrides()
         float val = std::atof(env_cfg);
         if (val > 0.0F) mConfig.cfg_scale = val;
     }
+    const char* env_temp = std::getenv("TRTF_MAGPIE_TEMPERATURE");
+    if (env_temp != nullptr)
+    {
+        float val = std::atof(env_temp);
+        if (val > 0.0F) mConfig.temperature = val;
+    }
     const char* env_limit = std::getenv("TRTF_MAGPIE_FINISHED_LIMIT");
     if (env_limit != nullptr)
     {
         int32_t val = std::atoi(env_limit);
-        if (val >= 0) mConfig.finished_limit_with_eot = val;
+        if (val >= 0)
+        {
+            mConfig.finished_limit_with_eot = val;
+            mConfig.enable_finished_limit_stop = (val > 0);
+        }
     }
     const char* env_seed = std::getenv("TRTF_MAGPIE_SEED");
     if (env_seed != nullptr)
@@ -1517,7 +1500,10 @@ void MagpieTTSBackend::log_pipeline_profiling(
               << "[magpie-tts]   CFG scale:      " << mConfig.cfg_scale
               << (mConfig.cfg_scale > 1.0F ? " (enabled, 2x decoder steps)" : " (disabled)")
               << "\n"
-              << "[magpie-tts]   finished_limit: " << mConfig.finished_limit_with_eot
+              << "[magpie-tts]   finished_limit: "
+              << (mConfig.enable_finished_limit_stop
+                    ? std::to_string(mConfig.finished_limit_with_eot)
+                    : std::string("disabled"))
               << " (text_len=" << mTextLength << ", est_frames="
               << static_cast<int32_t>(static_cast<float>(mTextLength) * 3.0F) << ")\n"
               << "[magpie-tts] =============================\n" << std::endl;
@@ -1549,7 +1535,10 @@ LegacyAudioResult MagpieTTSBackend::generate_audio(
               << " text tokens, max_frames=" << max_frames
               << (mConfig.greedy ? " (greedy)" : "")
               << ", cfg_scale=" << mConfig.cfg_scale
-              << ", finished_limit=" << mConfig.finished_limit_with_eot
+              << ", finished_limit="
+              << (mConfig.enable_finished_limit_stop
+                    ? std::to_string(mConfig.finished_limit_with_eot)
+                    : std::string("disabled"))
               << std::endl;
 
     const auto t_pipeline_start = SteadyClock::now();
@@ -1633,6 +1622,7 @@ std::unique_ptr<MagpieTTSBackend> CreateMagpieTTSBackend(
     magpie_cfg.max_source_positions = cfg.magpie_max_source_positions;
     magpie_cfg.xa_n_heads = cfg.magpie_xa_n_heads;
     magpie_cfg.xa_d_head = cfg.magpie_xa_d_head;
+    magpie_cfg.temperature = cfg.magpie_temperature;
     magpie_cfg.cfg_scale = cfg.magpie_cfg_scale;
     magpie_cfg.finished_limit_with_eot = cfg.magpie_finished_limit_with_eot;
 

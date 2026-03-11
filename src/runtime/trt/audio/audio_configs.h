@@ -26,12 +26,15 @@ struct MagpieTTSConfig {
     int32_t xa_n_heads{1};
     int32_t xa_d_head{128};
     // Sampling
-    float temperature{0.8F};
+    float temperature{0.6F};
     int32_t top_k{80};
     bool greedy{false};
     // CFG (Classifier-Free Guidance)
-    float cfg_scale{1.0F};
+    float cfg_scale{2.5F};
     int32_t finished_limit_with_eot{0};
+    // NeMo's standard do_tts() path does not hard-stop on text completion, so
+    // keep the finished-limit guard opt-in for parity/debugging only.
+    bool enable_finished_limit_stop{false};
 };
 
 /// Configuration for the SpeechToSpeech (PersonaPlex) pipeline.

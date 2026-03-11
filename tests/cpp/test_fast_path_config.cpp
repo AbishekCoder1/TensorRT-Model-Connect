@@ -718,7 +718,10 @@ static void test_text_to_audio_magpie_config()
         "magpie_text_vocab_size": 50000,
         "magpie_max_source_positions": 4096,
         "magpie_xa_n_heads": 2,
-        "magpie_xa_d_head": 256
+        "magpie_xa_d_head": 256,
+        "magpie_temperature": 0.6,
+        "magpie_cfg_scale": 2.5,
+        "magpie_finished_limit_with_eot": 0
     })";
 
     const auto cfg = trtf::parse_fast_path_config(config, -1);
@@ -734,6 +737,9 @@ static void test_text_to_audio_magpie_config()
     check(cfg.magpie_max_source_positions == 4096, "magpie: max_source_positions");
     check(cfg.magpie_xa_n_heads == 2, "magpie: xa_n_heads");
     check(cfg.magpie_xa_d_head == 256, "magpie: xa_d_head");
+    check(almost_equal(cfg.magpie_temperature, 0.6F), "magpie: temperature");
+    check(almost_equal(cfg.magpie_cfg_scale, 2.5F), "magpie: cfg_scale");
+    check(cfg.magpie_finished_limit_with_eot == 0, "magpie: finished_limit");
     check(cfg.audio_sample_rate == 22050, "magpie: sample_rate");
 }
 

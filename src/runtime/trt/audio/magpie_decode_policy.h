@@ -66,51 +66,26 @@ inline FrameDecodeResult decode_magpie_frame_codes(
             continue;
         }
 
+        const int32_t sampled_id = sampler(cb_logits, cb_size, temperature, top_k);
+        if (sampled_id == kMagpieEosToken)
+        {
+            result.eos = true;
+            continue;
+        }
+        if (sampled_id >= 0 && sampled_id < kMagpieAudioRange)
+        {
+            result.frame_codes[static_cast<std::size_t>(cb)] = sampled_id;
+            continue;
+        }
+
+        // BOS should not appear mid-generation, but if a sampled special token
+        // slips through we keep a valid audio code and let EOS handling decide
+        // whether to stop the loop.
         result.frame_codes[static_cast<std::size_t>(cb)] =
-            sampler(cb_logits, kMagpieAudioRange, temperature, top_k);
+            magpie_argmax_index(cb_logits, kMagpieAudioRange);
     }
 
     return result;
-}
-
-inline bool magpie_has_repeated_tail_frames(
-    const std::vector<int32_t>& all_codes,
-    int32_t num_cb,
-    int32_t repeat_threshold)
-{
-    if (num_cb <= 0 || repeat_threshold <= 1)
-    {
-        return false;
-    }
-
-    const auto required = static_cast<std::size_t>(num_cb)
-        * static_cast<std::size_t>(repeat_threshold);
-    if (all_codes.size() < required)
-    {
-        return false;
-    }
-
-    const auto base = all_codes.size() - static_cast<std::size_t>(num_cb);
-    for (int32_t r = 1; r < repeat_threshold; ++r)
-    {
-        const auto prev_offset = base - static_cast<std::size_t>(r) * num_cb;
-        for (int32_t cb = 0; cb < num_cb; ++cb)
-        {
-            if (all_codes[base + static_cast<std::size_t>(cb)]
-                != all_codes[prev_offset + static_cast<std::size_t>(cb)])
-            {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-inline int32_t magpie_trimmed_frame_count_for_repetition(
-    int32_t total_frames,
-    int32_t repeat_threshold)
-{
-    return std::max(total_frames - repeat_threshold + 1, 0);
 }
 
 inline bool should_run_magpie_periodic_check(

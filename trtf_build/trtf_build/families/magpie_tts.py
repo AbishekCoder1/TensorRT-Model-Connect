@@ -31,19 +31,22 @@ Encoder uses embed_input=False (token IDs), decoder uses embed_input=True
 (the C++ runtime sums 8 codebook embeddings on host, then copies to device).
 
 Classifier-Free Guidance (CFG):
-  The bundle bakes two config fields that control inference-time CFG:
-    - magpie_cfg_scale (default 1.5): strength of text-conditioning amplification.
+  The bundle bakes three config fields that control inference-time sampling:
+    - magpie_temperature (default 0.6): decoder sampling temperature.
+      This matches NeMo's short-form Magpie inference default.
+    - magpie_cfg_scale (default 2.5): strength of text-conditioning amplification.
       Each decoder frame runs two forward passes — conditioned (real encoder output)
       and unconditional (null-text encoder output). Logits are blended:
         logits = uncond + cfg_scale * (cond - uncond)
-      Scale 1.0 disables CFG (single pass). Scale 1.5 is the recommended default.
-    - magpie_finished_limit_with_eot (default 10): hard-stop safety net. After an
-      estimated number of audio frames (text_tokens * 3.0), stop generation after
-      this many extra frames even if EOS never fires.
-  Both can be overridden at runtime via env vars:
-    TRTF_MAGPIE_CFG_SCALE=1.5  TRTF_MAGPIE_FINISHED_LIMIT=10
+      Scale 1.0 disables CFG (single pass). Scale 2.5 matches NeMo.
+    - magpie_finished_limit_with_eot (default 0): optional hard-stop safety net.
+      The TRT runtime keeps this disabled by default so short-form generation
+      matches NeMo's standard do_tts() stop behavior. It can still be enabled
+      explicitly via environment override for debugging.
+  All can be overridden at runtime via env vars:
+    TRTF_MAGPIE_TEMPERATURE=0.6  TRTF_MAGPIE_CFG_SCALE=2.5  TRTF_MAGPIE_FINISHED_LIMIT=10
   Or via CLI flags:
-    ./build/trtf generate-audio bundle.trtfb --prompt "text" --output out.wav --cfg-scale 1.5 --greedy
+    ./build/trtf generate-audio bundle.trtfb --prompt "text" --output out.wav --cfg-scale 2.5 --greedy
 """
 
 from __future__ import annotations
@@ -600,8 +603,9 @@ class MagpieTTSPlugin:
             "magpie_xa_n_heads": xa_n_heads,
             "magpie_xa_d_head": xa_d_head,
             "magpie_enc_kernel_size": enc_kernel_size,
-            "magpie_cfg_scale": 1.5,
-            "magpie_finished_limit_with_eot": 10,
+            "magpie_temperature": 0.6,
+            "magpie_cfg_scale": 2.5,
+            "magpie_finished_limit_with_eot": 0,
         }
 
         return weights

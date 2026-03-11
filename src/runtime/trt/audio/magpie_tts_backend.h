@@ -124,7 +124,8 @@ private:
     // Check cross-attention text completion. Updates state.text_consumed.
     void update_text_completion(DecoderLoopState& state, int32_t frame);
 
-    // Check finished_limit_with_eot. Returns true if generation should stop.
+    // Check optional finished_limit_with_eot safety stop. Returns true if
+    // generation should stop.
     bool check_finished_limit(DecoderLoopState& state, int32_t frame);
 
     // Log decoder profiling breakdown to stderr.
