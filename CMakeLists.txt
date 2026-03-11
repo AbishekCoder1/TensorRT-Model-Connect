@@ -98,11 +98,7 @@ add_library(trtf_core
   src/runtime/trt/audio/bark_backend.cpp
   src/runtime/trt/audio/magpie_tts_backend.cpp
   src/runtime/trt/audio/speech_backend.cpp
-  src/runtime/trt/diffusion/diffusion_backend.cpp
-  src/runtime/trt/diffusion/diffusion_backend_base.cpp
-  src/runtime/trt/diffusion/wan_diffusion_backend.cpp
-  src/runtime/trt/diffusion/flux_diffusion_backend.cpp
-  src/runtime/trt/diffusion/z_image_diffusion_backend.cpp
+  src/runtime/trt/diffusion/diffusion_preprocessor.cpp
   src/runtime/trt/core/stb_impl.cpp
   src/tokenizer/hf_python_tokenizer.cpp
   src/tokenizer/vocab_tokenizer.cpp
@@ -123,10 +119,11 @@ add_library(trtf_core
   src/runtime/pipelines/recurrent_pipeline.cpp
   src/runtime/pipelines/encoder_pipeline.cpp
   src/runtime/pipelines/vl_pipeline.cpp
-  src/runtime/pipelines/diffusion_pipeline.cpp
+  src/runtime/pipelines/flux_pipeline.cpp
+  src/runtime/pipelines/wan_pipeline.cpp
+  src/runtime/pipelines/z_image_pipeline.cpp
   src/runtime/pipelines/audio_pipeline.cpp
   src/runtime/pipelines/audio_backend_factory.cpp
-  src/runtime/pipelines/diffusion_backend_factory.cpp
   src/runtime/trt/audio/audio_bundle_validation.cpp
 )
 

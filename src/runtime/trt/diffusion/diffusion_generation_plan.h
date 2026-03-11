@@ -1,6 +1,6 @@
 #pragma once
 
-#include "runtime/trt/diffusion/diffusion_backend.h"
+#include "runtime/trt/diffusion/diffusion_types.h"
 #include "runtime/trt/diffusion/diffusion_scheduler_helpers.h"
 
 #include <algorithm>

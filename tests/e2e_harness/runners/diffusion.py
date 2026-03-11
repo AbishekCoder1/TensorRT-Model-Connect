@@ -162,7 +162,10 @@ class DiffusionMediaRunner:
             prompt_text = {prompt_text!r}
 
             from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained({case.hf_id!r})
+            try:
+                tokenizer = AutoTokenizer.from_pretrained({case.hf_id!r})
+            except (ValueError, OSError):
+                tokenizer = AutoTokenizer.from_pretrained({case.hf_id!r}, subfolder="tokenizer")
             tokens = tokenizer(prompt_text, return_tensors="np", padding="max_length",
                                max_length=512, truncation=True)
             input_ids = tokens["input_ids"].astype(np.int32)
@@ -467,7 +470,10 @@ runner = DiffusionRunner({bundle_path!r})
 cfg = load_bundle_config({bundle_path!r})
 
 from transformers import AutoTokenizer
-tokenizer = AutoTokenizer.from_pretrained({model_id!r})
+try:
+    tokenizer = AutoTokenizer.from_pretrained({model_id!r})
+except (ValueError, OSError):
+    tokenizer = AutoTokenizer.from_pretrained({model_id!r}, subfolder="tokenizer")
 tokens = tokenizer(
     {prompt!r}, return_tensors="np", padding="max_length",
     max_length=512, truncation=True)

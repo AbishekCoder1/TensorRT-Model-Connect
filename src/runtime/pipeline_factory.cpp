@@ -15,6 +15,8 @@
 #include "cabi/config/fast_path_config.h"
 #include "cabi/bundle/bundle_helpers.h"
 #include "runtime/trt/multimodal/image_preprocessor.h"
+#include "runtime/trt/diffusion/diffusion_types.h"
+#include "runtime/trt/diffusion/diffusion_preprocessor_weights_helpers.h"
 
 #include <cstring>
 #include <iostream>
@@ -25,7 +27,6 @@
 #include "runtime/trt/core/trt_common.h"
 #include "runtime/trt/audio/audio_configs.h"
 #include "runtime/pipelines/audio_backend_factory.h"
-#include "runtime/pipelines/diffusion_backend_factory.h"
 #endif
 
 namespace trtf {
@@ -312,14 +313,234 @@ std::unique_ptr<IPipeline> create_vision_pipeline(
         vlc, vl_preprocess, stream, std::move(tokenizer), bundle.info.model_id);
 }
 
-// ─── Diffusion: delegate to old DiffusionBackendBase subclasses ───
+// ─── Diffusion: TrtModule-based pipelines ───
+
+DiffusionConfig make_diffusion_config(const FastPathModelConfig& cfg)
+{
+    DiffusionConfig dc;
+    dc.scheduler = cfg.scheduler.empty() ? "flow_match_euler" : cfg.scheduler;
+    dc.num_inference_steps = cfg.num_inference_steps;
+    dc.guidance_scale = cfg.guidance_scale;
+    dc.flow_shift = cfg.flow_shift;
+    dc.use_dynamic_shifting = cfg.use_dynamic_shifting;
+    dc.base_shift = cfg.base_shift;
+    dc.max_shift = cfg.max_shift;
+    dc.video_height = cfg.video_height;
+    dc.video_width = cfg.video_width;
+    dc.video_num_frames = cfg.video_num_frames;
+    dc.z_dim = cfg.z_dim;
+    dc.scale_factor_temporal = cfg.scale_factor_temporal;
+    dc.scale_factor_spatial = cfg.scale_factor_spatial;
+    dc.dit_dim = cfg.dit_dim;
+    dc.dit_num_heads = cfg.dit_num_heads;
+    dc.freq_dim = cfg.freq_dim;
+    dc.text_seq_len = cfg.text_seq_len;
+    dc.text_encoder_dim = cfg.text_encoder_dim;
+    dc.num_vae_caches = cfg.num_vae_caches;
+    dc.latents_mean = cfg.latents_mean;
+    dc.latents_std = cfg.latents_std;
+    dc.patch_size = cfg.patch_size;
+    dc.axes_dims_rope = cfg.axes_dims_rope;
+    dc.rope_theta = cfg.rope_theta;
+    dc.vae_model_id = cfg.vae_model_id;
+    dc.guidance_embeds = cfg.guidance_embeds;
+    dc.use_rope = cfg.use_rope;
+    dc.vae_scaling_factor = cfg.vae_scaling_factor;
+    dc.diffusion_backend_type = cfg.diffusion_backend_type;
+    return dc;
+}
+
+bool is_flux_type(const std::string& bt)
+{ return bt == "flux_2d" || bt.find("flux") != std::string::npos; }
+
+bool is_zimage_type(const std::string& bt)
+{ return bt == "z_image_2d" || bt.find("z_image") != std::string::npos; }
+
+// Shared diffusion resources loaded once, then dispatched to per-model factory.
+struct DiffusionParts {
+    LoadedModule denoiser;
+    LoadedModule vae;
+    std::vector<LoadedModule> text_encoders;
+    DiffusionConfig config;
+    PreprocessorWeights weights;
+    std::shared_ptr<ITokenizer> tokenizer;
+};
+
+DiffusionParts load_diffusion_parts(
+    const BundleSections& sections,
+    const FastPathModelConfig& cfg,
+    const std::string& hf_python)
+{
+    DiffusionParts parts;
+
+    auto shared_stream = std::make_shared<CudaStream>();
+    if (!shared_stream->ok())
+        throw std::runtime_error("Failed to create CUDA stream for diffusion");
+
+    parts.denoiser = load_trt_module_from_plan(
+        sections.denoiser_plan_data, "denoiser_plan", shared_stream);
+    parts.vae = load_trt_module_from_plan(
+        sections.vae_decoder_plan_data, "vae_decoder_plan", shared_stream);
+
+    for (std::size_t i = 0; i < sections.text_encoder_plans.size(); ++i) {
+        std::string label = "text_encoder_" + std::to_string(i);
+        parts.text_encoders.push_back(load_trt_module_from_plan(
+            sections.text_encoder_plans[i], label.c_str(), shared_stream));
+    }
+    if (parts.text_encoders.empty() && sections.plan_data && !sections.plan_data->empty()) {
+        parts.text_encoders.push_back(load_trt_module_from_plan(
+            sections.plan_data, "text_encoder_0", shared_stream));
+    }
+
+    parts.config = make_diffusion_config(cfg);
+
+    if (sections.preprocessor_weights_data && !sections.preprocessor_weights_data->empty())
+        parts.weights = parse_preprocessor_weights(*sections.preprocessor_weights_data);
+
+    parts.tokenizer = create_tokenizer_from_bundle(sections, hf_python);
+    return parts;
+}
+
+std::unique_ptr<IPipeline> create_flux_pipeline(
+    DiffusionParts& parts,
+    const BundleSections& sections,
+    const std::string& hf_python,
+    const std::string& model_id)
+{
+    std::vector<std::unique_ptr<TrtModule>> te_modules;
+    for (auto& te : parts.text_encoders)
+        te_modules.push_back(std::move(te.module));
+
+    // Try to load CLIP tokenizer
+    std::unique_ptr<ITokenizer> clip_tok;
+    try {
+        auto ct = extract_clip_tokenizer_from_bundle(sections, hf_python);
+        if (ct.tokenizer)
+            clip_tok = std::move(ct.tokenizer);
+    } catch (...) {}
+
+    return std::make_unique<FluxPipeline>(
+        std::move(te_modules),
+        std::move(parts.denoiser.module),
+        std::move(parts.vae.module),
+        std::move(parts.config),
+        std::move(parts.weights),
+        std::move(parts.tokenizer),
+        std::move(clip_tok),
+        model_id);
+}
+
+ZImagePreprocessorWeights parse_zimage_preprocessor_weights(
+    const std::vector<char>& data)
+{
+    ZImagePreprocessorWeights w;
+    std::string index_json;
+    const char* blob = nullptr;
+    std::size_t blob_size = 0;
+    if (!diffusion::extract_preprocessor_index(data, index_json, blob, blob_size))
+        return w;
+
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
+        "t_embedder.mlp.0.weight", w.t_embedder_mlp_0_weight);
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
+        "t_embedder.mlp.0.bias", w.t_embedder_mlp_0_bias);
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
+        "t_embedder.mlp.2.weight", w.t_embedder_mlp_2_weight);
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
+        "t_embedder.mlp.2.bias", w.t_embedder_mlp_2_bias);
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
+        "cap_embedder.proj.weight", w.cap_proj_weight);
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
+        "cap_embedder.proj.bias", w.cap_proj_bias);
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
+        "cap_embedder.norm.weight", w.cap_norm_weight);
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
+        "cap_pad_token", w.cap_pad_token);
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
+        "x_embedder.weight", w.x_embed_weight);
+    diffusion::load_preprocessor_floats(index_json, blob, blob_size,
+        "x_embedder.bias", w.x_embed_bias);
+
+    // Derive dimensions
+    if (!w.cap_proj_bias.empty())
+        w.dit_dim = static_cast<int32_t>(w.cap_proj_bias.size());
+    if (!w.cap_norm_weight.empty())
+        w.cap_dim = static_cast<int32_t>(w.cap_norm_weight.size());
+    if (!w.t_embedder_mlp_0_bias.empty())
+        w.freq_dim = static_cast<int32_t>(w.t_embedder_mlp_0_bias.size());
+
+    w.valid = !w.x_embed_weight.empty()
+           && !w.t_embedder_mlp_0_weight.empty()
+           && !w.cap_proj_weight.empty()
+           && !w.cap_norm_weight.empty();
+
+    std::cerr << "[z-image] Preprocessor weights: "
+              << (w.valid ? "OK" : "INCOMPLETE")
+              << " (dit_dim=" << w.dit_dim
+              << ", cap_dim=" << w.cap_dim << ")\n";
+    return w;
+}
+
+std::unique_ptr<IPipeline> create_zimage_pipeline(
+    DiffusionParts& parts,
+    const BundleSections& sections,
+    const std::string& model_id,
+    const std::string& hf_python,
+    const std::string& bundle_path)
+{
+    std::unique_ptr<TrtModule> te_module;
+    if (!parts.text_encoders.empty())
+        te_module = std::move(parts.text_encoders[0].module);
+
+    ZImagePreprocessorWeights z_pw;
+    if (sections.preprocessor_weights_data && !sections.preprocessor_weights_data->empty())
+        z_pw = parse_zimage_preprocessor_weights(*sections.preprocessor_weights_data);
+
+    return std::make_unique<ZImagePipeline>(
+        std::move(te_module),
+        std::move(parts.denoiser.module),
+        std::move(parts.vae.module),
+        std::move(parts.config),
+        std::move(parts.weights),
+        std::move(z_pw),
+        std::move(parts.tokenizer),
+        model_id,
+        hf_python,
+        bundle_path);
+}
+
+std::unique_ptr<IPipeline> create_wan_t2v_pipeline(
+    DiffusionParts& parts,
+    const std::string& model_id)
+{
+    std::unique_ptr<TrtModule> te_module;
+    if (!parts.text_encoders.empty())
+        te_module = std::move(parts.text_encoders[0].module);
+
+    return std::make_unique<WanPipeline>(
+        std::move(te_module),
+        std::move(parts.denoiser.module),
+        std::move(parts.vae.module),
+        std::move(parts.config),
+        std::move(parts.weights),
+        std::move(parts.tokenizer),
+        model_id);
+}
 
 std::unique_ptr<IPipeline> create_diffusion_pipeline(
     const BundleFile& bundle, const BundleSections& sections,
     const FastPathModelConfig& cfg, const std::string&,
     const std::string& bundle_path, const std::string& hf_python)
 {
-    return make_diffusion_pipeline_from_bundle(sections, cfg, bundle_path, hf_python, bundle.info.model_id);
+    auto parts = load_diffusion_parts(sections, cfg, hf_python);
+
+    if (is_flux_type(cfg.diffusion_backend_type))
+        return create_flux_pipeline(parts, sections, hf_python, bundle.info.model_id);
+
+    if (is_zimage_type(cfg.diffusion_backend_type))
+        return create_zimage_pipeline(parts, sections, bundle.info.model_id, hf_python, bundle_path);
+
+    return create_wan_t2v_pipeline(parts, bundle.info.model_id);
 }
 
 // ─── Audio: Omni uses TrtModule; Magpie/Speech delegate to old backends ───
