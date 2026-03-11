@@ -1460,6 +1460,15 @@ void MagpieTTSBackend::ensure_cfg_resources()
         static_cast<std::size_t>(mConfig.codebook_size) * sizeof(float);
     mDeviceLogitsCond = CudaBuffer(logits_bytes);
     mDeviceLogitsUncond = CudaBuffer(logits_bytes);
+
+    // Allocate cross_attn_weights scratch if the engine has that output
+    // and the scratch wasn't allocated at construction time (e.g. when
+    // cfg_scale was overridden from 1.0 to >1.0 via TRTF_MAGPIE_CFG_SCALE).
+    if (mHasCrossAttnOutput && !mDeviceCrossAttnWeightsScratch.ok())
+    {
+        const auto xattn_bytes = static_cast<std::size_t>(mConfig.max_source_positions) * sizeof(float);
+        mDeviceCrossAttnWeightsScratch = CudaBuffer(xattn_bytes);
+    }
 }
 
 void MagpieTTSBackend::run_cfg_encoder(const std::vector<int32_t>& text_ids)

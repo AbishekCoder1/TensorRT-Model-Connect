@@ -12,7 +12,6 @@
 #include "runtime/trt/audio/bark_backend.h"
 #include "runtime/trt/audio/magpie_tts_backend.h"
 #include "runtime/trt/audio/speech_backend.h"
-#include "runtime/trt/audio/omni_backend.h"
 #include "runtime/trt/audio/mel_spectrogram.h"
 #include "trtf/tokenizer.h"
 
@@ -333,26 +332,6 @@ std::unique_ptr<IPipeline> make_speech_pipeline_from_bundle(
     attach_depth_engines(*be, sections, make_depth_engine_config(cfg));
     attach_mimi_engines(*be, sections);
     return std::make_unique<SpeechPipeline>(std::move(be), model_id);
-}
-
-std::unique_ptr<IPipeline> make_omni_pipeline_from_bundle(
-    const BundleSections& sections, const FastPathModelConfig& cfg,
-    const std::string& hf_python, const std::string& model_id)
-{
-    auto th = deser(sections.plan_data, "omni thinker");
-    auto teng = make_decoder_engine(std::move(th.engine), std::move(th.context), cfg);
-    auto be = CreateOmniBackend(std::move(teng), cfg);
-    auto ae = try_deser(sections.audio_encoder_plan_data, "audio_enc");
-    if (ae.engine) be->set_audio_encoder(std::move(ae.engine), std::move(ae.context));
-    auto tk = try_deser(sections.talker_engine_plan_data, "talker");
-    if (tk.engine) {
-        auto te = make_decoder_engine(std::move(tk.engine), std::move(tk.context), cfg);
-        be->set_talker_engine(std::move(te));
-    }
-    auto cw = try_deser(sections.code2wav_engine_plan_data, "code2wav");
-    if (cw.engine) be->set_code2wav_engine(std::move(cw.engine), std::move(cw.context));
-    auto tok = make_tok(sections, hf_python);
-    return std::make_unique<OmniPipeline>(std::move(be), std::move(tok), model_id);
 }
 
 } // namespace trtf

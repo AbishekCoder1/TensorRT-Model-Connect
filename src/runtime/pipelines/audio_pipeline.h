@@ -3,10 +3,13 @@
 // Audio pipelines: WhisperPipeline, BarkPipeline, MagpiePipeline,
 // SpeechPipeline, OmniPipeline.
 //
-// Each pipeline owns an old-style backend and delegates inference to it.
+// Whisper, Bark, Magpie, and Speech own old-style backends and delegate to them.
+// OmniPipeline is migrated to TrtModule + KvCache (new runtime).
 
 #include "trtf/pipeline.h"
 #include "trtf/tokenizer.h"
+#include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/kv_cache.h"
 
 #include <cstdint>
 #include <memory>
@@ -21,8 +24,8 @@ class WhisperBackend;
 class BarkBackend;
 class MagpieTTSBackend;
 class SpeechToSpeechBackend;
-class OmniBackend;
 struct MelFilterbank;
+struct OmniConfig;
 } // namespace trtf
 
 namespace trtf {
@@ -125,10 +128,16 @@ private:
 
 class OmniPipeline final : public IPipeline {
 public:
-    /// Construct with a fully-initialized OmniBackend.
+    /// Construct with TrtModules + KvCaches (new runtime).
     OmniPipeline(
-        std::unique_ptr<OmniBackend> backend,
-        std::shared_ptr<ITokenizer> tokenizer,
+        std::unique_ptr<TrtModule> thinker,
+        std::unique_ptr<KvCache> thinker_cache,
+        std::unique_ptr<TrtModule> talker,
+        std::unique_ptr<KvCache> talker_cache,
+        std::unique_ptr<TrtModule> code2wav,
+        OmniConfig config,
+        cudaStream_t stream,
+        std::shared_ptr<ITokenizer> tokenizer = nullptr,
         std::string model_id_str = "");
 
     ~OmniPipeline() override;
@@ -139,7 +148,37 @@ public:
     const char* pipeline_type() const override { return "OmniPipeline"; }
 
 private:
-    std::unique_ptr<OmniBackend> backend_;
+    // Run one thinker decoder step: token_id -> logits. Updates cache.
+    void run_thinker_step(int32_t token_id, std::vector<float>& logits);
+
+    // Run one talker decoder step with input embedding. Updates cache.
+    void run_talker_embed_step(const float* embed_ptr, int32_t embed_size,
+                               std::vector<float>& logits);
+
+    // Stage 0: Thinker generates text tokens and hidden states.
+    std::vector<int32_t> run_thinker(
+        const std::vector<int32_t>& input_ids,
+        int32_t max_tokens,
+        std::vector<float>& hidden_states_out);
+
+    // Stage 1: Talker converts hidden states to RVQ codec tokens.
+    std::vector<int32_t> run_talker(
+        const std::vector<float>& hidden_states,
+        int32_t num_tokens);
+
+    // Stage 2: Code2Wav synthesizes waveform from RVQ tokens.
+    std::vector<float> run_code2wav(
+        const std::vector<int32_t>& codec_tokens,
+        int32_t n_codebooks,
+        int32_t n_frames);
+
+    std::unique_ptr<TrtModule> thinker_;
+    std::unique_ptr<KvCache> thinker_cache_;
+    std::unique_ptr<TrtModule> talker_;
+    std::unique_ptr<KvCache> talker_cache_;
+    std::unique_ptr<TrtModule> code2wav_;
+    std::unique_ptr<OmniConfig> config_;
+    cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
 };

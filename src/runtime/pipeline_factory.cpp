@@ -16,12 +16,14 @@
 #include "cabi/bundle/bundle_helpers.h"
 #include "runtime/trt/multimodal/image_preprocessor.h"
 
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <unordered_map>
 
 #if TRTF_HAS_TRT
 #include "runtime/trt/core/trt_common.h"
+#include "runtime/trt/audio/audio_configs.h"
 #include "runtime/pipelines/audio_backend_factory.h"
 #include "runtime/pipelines/diffusion_backend_factory.h"
 #endif
@@ -320,7 +322,70 @@ std::unique_ptr<IPipeline> create_diffusion_pipeline(
     return make_diffusion_pipeline_from_bundle(sections, cfg, bundle_path, hf_python, bundle.info.model_id);
 }
 
-// ─── Audio: delegate to backend factory ───
+// ─── Audio: Omni uses TrtModule; Magpie/Speech delegate to old backends ───
+
+std::unique_ptr<IPipeline> create_omni_pipeline(
+    const BundleSections& sections, const FastPathModelConfig& cfg,
+    const std::string& hf_python, const std::string& model_id)
+{
+    // Thinker (MoE decoder) — main engine plan
+    auto thinker_loaded = load_trt_module_from_plan(sections.plan_data, "omni thinker");
+    cudaStream_t stream = thinker_loaded.stream->get();
+    int32_t kv_dim = compute_kv_dim(cfg);
+    auto thinker_cache = std::make_unique<KvCache>(
+        cfg.num_layers, cfg.max_cache_length, kv_dim, stream);
+    if (!thinker_cache->ok())
+        throw std::runtime_error("OmniPipeline: failed to create thinker KvCache");
+
+    // Talker (optional)
+    std::unique_ptr<TrtModule> talker_module;
+    std::unique_ptr<KvCache> talker_cache;
+    auto talker_loaded = try_load_trt_module_from_plan(
+        sections.talker_engine_plan_data, "talker", thinker_loaded.stream);
+    if (talker_loaded.module && talker_loaded.module->ok())
+    {
+        talker_module = std::move(talker_loaded.module);
+        int32_t talker_kv_dim = cfg.omni_talker_hidden_size;
+        int32_t talker_cache_len = cfg.omni_talker_max_cache_length;
+        int32_t talker_layers = cfg.omni_talker_num_layers > 0
+            ? cfg.omni_talker_num_layers : cfg.num_layers;
+        talker_cache = std::make_unique<KvCache>(
+            talker_layers, talker_cache_len, talker_kv_dim, stream);
+    }
+
+    // Code2Wav (optional)
+    std::unique_ptr<TrtModule> code2wav_module;
+    auto code2wav_loaded = try_load_trt_module_from_plan(
+        sections.code2wav_engine_plan_data, "code2wav", thinker_loaded.stream);
+    if (code2wav_loaded.module && code2wav_loaded.module->ok())
+        code2wav_module = std::move(code2wav_loaded.module);
+
+    // Build OmniConfig
+    OmniConfig omni_cfg;
+    omni_cfg.sample_rate = cfg.omni_sample_rate;
+    omni_cfg.thinker_hidden_size = cfg.hidden_size;
+    omni_cfg.thinker_num_layers = cfg.num_layers;
+    omni_cfg.thinker_num_heads = cfg.num_heads;
+    omni_cfg.num_experts = cfg.omni_num_experts;
+    omni_cfg.num_experts_per_tok = cfg.omni_num_experts_per_tok;
+    omni_cfg.talker_hidden_size = cfg.omni_talker_hidden_size;
+    omni_cfg.talker_num_layers = cfg.omni_talker_num_layers;
+    omni_cfg.talker_n_codebooks = cfg.omni_n_codebooks;
+    omni_cfg.talker_codebook_size = cfg.omni_codebook_size;
+
+    auto tokenizer = create_tokenizer_from_bundle(sections, hf_python);
+
+    return std::make_unique<OmniPipeline>(
+        std::move(thinker_loaded.module),
+        std::move(thinker_cache),
+        std::move(talker_module),
+        std::move(talker_cache),
+        std::move(code2wav_module),
+        std::move(omni_cfg),
+        stream,
+        std::move(tokenizer),
+        model_id);
+}
 
 std::unique_ptr<IPipeline> create_audio_pipeline(
     const BundleFile& bundle, const BundleSections& sections,
@@ -337,7 +402,7 @@ std::unique_ptr<IPipeline> create_audio_pipeline(
     if (strategy == "speech_to_speech")
         return make_speech_pipeline_from_bundle(sections, cfg, hf_python, bundle.info.model_id);
     if (strategy == "omni_multimodal")
-        return make_omni_pipeline_from_bundle(sections, cfg, hf_python, bundle.info.model_id);
+        return create_omni_pipeline(sections, cfg, hf_python, bundle.info.model_id);
     throw std::runtime_error("Unsupported audio strategy: " + strategy + " (bundle: " + bundle.info.model_id + ")");
 }
 

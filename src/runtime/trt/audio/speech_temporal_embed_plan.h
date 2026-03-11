@@ -1,6 +1,6 @@
 #pragma once
 
-#include "runtime/trt/audio/speech_backend.h"
+#include "runtime/trt/audio/audio_configs.h"
 #include "runtime/trt/audio/speech_depth_plan.h"
 
 #include <algorithm>

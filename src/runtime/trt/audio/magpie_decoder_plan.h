@@ -1,6 +1,6 @@
 #pragma once
 
-#include "runtime/trt/audio/magpie_tts_backend.h"
+#include "runtime/trt/audio/audio_configs.h"
 
 #include <algorithm>
 #include <cstdint>

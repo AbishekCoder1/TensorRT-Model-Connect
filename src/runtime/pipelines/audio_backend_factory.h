@@ -30,10 +30,6 @@ std::unique_ptr<IPipeline> make_speech_pipeline_from_bundle(
     const BundleSections& sections, const FastPathModelConfig& cfg,
     const std::string& hf_python, const std::string& model_id);
 
-std::unique_ptr<IPipeline> make_omni_pipeline_from_bundle(
-    const BundleSections& sections, const FastPathModelConfig& cfg,
-    const std::string& hf_python, const std::string& model_id);
-
 #endif // TRTF_HAS_TRT
 
 } // namespace trtf
