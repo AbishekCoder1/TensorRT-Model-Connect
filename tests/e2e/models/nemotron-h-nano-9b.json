@@ -1,5 +1,6 @@
 {
   "name": "nemotron-h-nano-9b",
+  "trace_id": "IT-E2E-NMHN-01",
   "hf_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
   "bundle": "nemotron-h-nano-9b.trtfb",
   "family": "nemotron_h",

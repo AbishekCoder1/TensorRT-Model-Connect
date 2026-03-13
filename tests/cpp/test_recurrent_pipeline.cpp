@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-REC-CPP-02
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-REC-01
+// Intent:         RecurrentPipeline with Mamba, RWKV, and Hybrid state managers
+// Preconditions:  TRT + CUDA GPU available, mock engines
+// Postconditions: Pipeline generates tokens with correct state management per backend type
+// =============================================================================
+
+// =============================================================================
 // Test suite: RecurrentPipeline (Mamba, RWKV, Hybrid)
 // =============================================================================
 //

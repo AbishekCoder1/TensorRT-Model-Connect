@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-16
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Speech temporal embed plan: dual stream summation, vocab clamping, logit padding
+// Preconditions:  Temporal embed config with valid stream parameters
+// Postconditions: Dual streams summed correctly, tokens clamped to vocab, logits padded/truncated
+// =============================================================================
+
 #include "runtime/trt/audio/speech_temporal_embed_plan.h"
 
 #include <cmath>

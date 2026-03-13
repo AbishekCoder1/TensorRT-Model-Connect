@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-12
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Speech generation helpers: delay cache, waveform trim/normalize, postprocess safety
+// Preconditions:  Delay cache with known codebook delays, waveform samples
+// Postconditions: Delays generalize to num_codebooks, cache reads correct, waveform trimmed/normalized
+// =============================================================================
+
 #include "runtime/trt/audio/speech_delay_cache.h"
 #include "runtime/trt/audio/speech_waveform_postprocess.h"
 

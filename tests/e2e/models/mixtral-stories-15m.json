@@ -1,5 +1,6 @@
 {
   "name": "mixtral-stories-15m",
+  "trace_id": "IT-E2E-MXTRL-01",
   "hf_id": "ggml-org/stories15M_MOE",
   "bundle": "mixtral-stories-15m.trtfb",
   "family": "mixtral",

@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-09
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Omni audio plan: encode padding/trimming, generation gating, codec decode
+// Preconditions:  OmniConfig with valid audio parameters
+// Postconditions: Frames padded/trimmed correctly, talker/codec gates match config, codebook argmax correct
+// =============================================================================
+
 #include "runtime/trt/audio/omni_audio_plan.h"
 
 #include <cstdint>

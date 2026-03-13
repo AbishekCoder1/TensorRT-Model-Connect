@@ -1,5 +1,6 @@
 {
   "name": "starcoder2-3b",
+  "trace_id": "IT-E2E-SC2-01",
   "hf_id": "bigcode/starcoder2-3b",
   "bundle": "starcoder2-3b.trtfb",
   "family": "starcoder2",

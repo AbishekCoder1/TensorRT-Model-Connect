@@ -88,7 +88,7 @@ python tools/check_cyclomatic_complexity.py src --max-ccn 10
 
 Unified E2E tests (requires GPU + engine bundles):
 ```bash
-# All models (50 models — auto-builds missing bundles):
+# All models (68 models — auto-builds missing bundles):
 pytest tests/test_e2e.py -v \
   --engine-dir /workspace/users/yifeif/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
@@ -310,7 +310,7 @@ per-model overrides via manifest `threshold_overrides` or inline fields
 `--e2e-artifacts-dir`: WAV audio, PNG frames/images, transcript text,
 logits `.npy`, colorized segmentation maps.
 
-**Model manifests (50 models)** in `tests/e2e/models/*.json`:
+**Model manifests (68 models)** in `tests/e2e/models/*.json`:
 
 | Category | Count | Examples |
 |----------|-------|---------|
@@ -394,7 +394,7 @@ the bundle from scratch — avoids testing against stale cached bundles.
 
 ### Tier 4: Full E2E suite (~2-3 hours, needs GPU)
 
-All 50 models via the unified harness. Force-rebuild every bundle, then
+All 68 models via the unified harness. Force-rebuild every bundle, then
 infer/compare. This is the gold-standard regression gate.
 
 ```bash
@@ -515,6 +515,8 @@ trtf_build/                          # Python package (engine builder)
       bert.py sam.py segformer.py whisper.py bark.py personaplex.py
       internvl.py phi4_multimodal.py eagle_vlm.py nemotron_h.py rwkv.py
       deepseek_v2.py qwen_moe.py qwen3_omni.py deepseek_ocr.py
+      canary.py distilbert.py glm.py gpt_oss.py magpie_tts.py
+      mpnet.py pixart.py qwen3_5.py roberta.py
       wan_t2v.py flux.py z_image.py                # Diffusion T2V/T2I
   pyproject.toml
 src/                                 # C++ bundle-only runtime
@@ -557,15 +559,15 @@ tests/
   conftest.py                        # Shared CLI options (--engine-dir, --trtf-binary, etc.)
   cpp/                               # C++ runtime unit tests
     test_helpers.h                   # Shared helpers: temp dirs, safetensors writing
-    test_bundle_format.cpp ...       # 19 test executables (bundle, tokenizers, CUDA, KV cache, etc.)
+    test_bundle_format.cpp ...       # 61 test executables (bundle, tokenizers, CUDA, KV cache, etc.)
   builder/                           # Python builder unit tests
     conftest.py                      # TRT runner fixture, skip markers
-    test_config.py ...               # 19 test modules (config, weights, graph ops/blocks, plugins, etc.)
+    test_config.py ...               # 70 test modules (config, weights, graph ops/blocks, plugins, etc.)
   tools/                             # Diff framework self-tests
     conftest.py                      # Adds tools/ to import path
-    test_diff_logits.py ...          # 11 test modules (logits, audio, segmentation, diffusion, etc.)
+    test_diff_logits.py ...          # 18 test modules (logits, audio, segmentation, diffusion, etc.)
   e2e/                               # E2E model manifests
-    models/                          # 50 per-model JSON manifests (one file per model)
+    models/                          # 68 per-model JSON manifests (one file per model)
   e2e_harness/                       # Unified E2E test framework (DIP architecture)
     contracts.py                     # Dataclasses + protocols (E2ECase, StageOutput, CompareResult)
     orchestrator.py                  # Lifecycle coordinator (preflight -> build -> run -> compare)
@@ -817,7 +819,7 @@ python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
   --engine-dir /workspace/users/yifeif/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
 
-# All 50 models (force rebuild):
+# All 68 models (force rebuild):
 python -m pytest tests/test_e2e.py -v \
   --engine-dir /workspace/users/yifeif/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \

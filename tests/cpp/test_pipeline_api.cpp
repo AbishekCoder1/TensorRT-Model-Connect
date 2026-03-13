@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-PIP-CPP-01
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-FAC-01
+// Intent:         C API pipeline creation via trtf_create_pipeline_ex
+// Preconditions:  TRT runtime available
+// Postconditions: Pipeline created or appropriate error returned
+// =============================================================================
+
+// =============================================================================
 // Test suite: Pipeline C ABI -- IPipeline virtual interface via trtf_create_pipeline
 // =============================================================================
 //

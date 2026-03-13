@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-14
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Speech runtime plan: encoder shape fallback, prompt injection, generation settings
+// Preconditions:  Speech config with valid/invalid cached shapes
+// Postconditions: Encoder shape falls back correctly, prompt injected, generation settings applied
+// =============================================================================
+
 #include "runtime/trt/audio/speech_runtime_plan.h"
 
 #include <cstdint>

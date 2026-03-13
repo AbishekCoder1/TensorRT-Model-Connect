@@ -1,5 +1,6 @@
 {
   "name": "canary-1b-v2",
+  "trace_id": "IT-E2E-CANRY-01",
   "hf_id": "nvidia/canary-1b-v2",
   "bundle": "canary-1b-v2.trtfb",
   "family": "canary",

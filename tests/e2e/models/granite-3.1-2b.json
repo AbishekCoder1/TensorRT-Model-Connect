@@ -1,5 +1,6 @@
 {
   "name": "granite-3.1-2b",
+  "trace_id": "IT-E2E-GRN31-01",
   "hf_id": "ibm-granite/granite-3.1-2b-base",
   "bundle": "granite-3.1-2b.trtfb",
   "family": "granite",

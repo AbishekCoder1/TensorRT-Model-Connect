@@ -1,5 +1,6 @@
 {
   "name": "falcon-rw-1b",
+  "trace_id": "IT-E2E-FALRW-01",
   "hf_id": "tiiuae/falcon-rw-1b",
   "bundle": "falcon-rw-1b.trtfb",
   "family": "falcon",

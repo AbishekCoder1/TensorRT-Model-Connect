@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-CUDA-CPP-01
+// Architecture:   ARCH-MOD-001
+// Unit Design:    UD-TRT-CORE-01
+// Intent:         CudaBuffer RAII alloc, move semantics, data round-trip
+// Preconditions:  CUDA GPU available
+// Postconditions: Buffer allocates, moves correctly, data survives H2D->D2H
+// =============================================================================
+
+// =============================================================================
 // Test suite: CudaBuffer GPU memory wrapper
 // =============================================================================
 //

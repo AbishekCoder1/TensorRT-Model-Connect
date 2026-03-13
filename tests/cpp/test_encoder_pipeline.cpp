@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-SEG-CPP-01
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-FAC-01
+// Intent:         EncoderPipeline, SegmentPipeline, and SamPipeline construction and type checks
+// Preconditions:  TRT headers and CUDA available
+// Postconditions: Pipelines construct with mock engines and expose correct interfaces
+// =============================================================================
+
+// =============================================================================
 // Test suite: EncoderPipeline + SegmentPipeline + SamPipeline
 // =============================================================================
 

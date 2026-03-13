@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-DEC-CPP-02
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-TRT-DEC-01
+// Intent:         TextGenerationPipeline prefill/decode loop, argmax selection, EOS stopping
+// Preconditions:  TRT + CUDA GPU available, identity engine built in-process
+// Postconditions: Pipeline generates correct tokens, stops at EOS, respects max_new_tokens
+// =============================================================================
+
+// =============================================================================
 // Test suite: TextGenerationPipeline
 // =============================================================================
 //

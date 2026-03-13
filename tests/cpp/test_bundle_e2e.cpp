@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-BDL-CPP-03
+// Architecture:   ARCH-BDL-001
+// Unit Design:    UD-BDL-01
+// Intent:         Bundle build + load round-trip integrity
+// Preconditions:  TRT runtime available
+// Postconditions: Bundle written and re-read matches original
+// =============================================================================
+
+// =============================================================================
 // Test suite: Bundle validation -- loading non-bundle files and invalid paths.
 //
 // Purpose:

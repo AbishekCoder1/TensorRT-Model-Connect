@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-DEC-CPP-01
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-TRT-DEC-01
+// Intent:         Argmax token selection, attention mask building
+// Preconditions:  TRT headers available
+// Postconditions: Argmax selects correct token, mask shape and values correct
+// =============================================================================
+
+// =============================================================================
 // Test suite: TRT decode runtime CPU-side helper functions
 // =============================================================================
 //

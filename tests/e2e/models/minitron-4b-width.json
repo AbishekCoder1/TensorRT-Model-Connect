@@ -1,5 +1,6 @@
 {
   "name": "minitron-4b-width",
+  "trace_id": "IT-E2E-MNTRW-01",
   "hf_id": "nvidia/Llama-3.1-Minitron-4B-Width-Base",
   "bundle": "minitron-4b-width.trtfb",
   "family": "llama",

@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-01
+// Architecture:   ARCH-BDL-001
+// Unit Design:    UD-BDL-02
+// Intent:         Validate bundle section requirements for audio pipelines (Bark, Magpie)
+// Preconditions:  BundleFile with audio-specific sections constructed in memory
+// Postconditions: Validation accepts complete bundles and rejects incomplete ones
+// =============================================================================
+
 #include "runtime/trt/audio/audio_bundle_validation.h"
 
 #include <iostream>

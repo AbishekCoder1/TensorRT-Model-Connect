@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-15
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Speech subprocess seam: output plan resample, frame rate clamping, token parsing
+// Preconditions:  Output plan with various target/max output configurations
+// Postconditions: Resample path correct, frame rate clamped, tokens parsed from subprocess output
+// =============================================================================
+
 #include "trtf/runtime/trt/audio/subprocess_runner.h"
 #include "../../src/runtime/trt/audio/speech_generation_policy.h"
 

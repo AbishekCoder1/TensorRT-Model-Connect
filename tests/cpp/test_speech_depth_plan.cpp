@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-11
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Speech depth plan: projection view dimensions, input embedding, prev token resolution
+// Preconditions:  Depth plan config with valid projection and embedding parameters
+// Postconditions: Dimensions derived correctly, embeddings use text or audio seed, forced audio preferred
+// =============================================================================
+
 #include "runtime/trt/audio/speech_depth_plan.h"
 
 #include <cmath>

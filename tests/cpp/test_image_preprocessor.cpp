@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-IMG-CPP-01
+// Architecture:   ARCH-IMG-001
+// Unit Design:    UD-IMG-01
+// Intent:         All 4 preprocessing strategies, config parsing, prompt formatting
+// Preconditions:  Test image data available (via TempDirGuard)
+// Postconditions: Each strategy produces correctly shaped output
+// =============================================================================
+
+// =============================================================================
 // Test suite: VL image preprocessing (stb_image-based)
 // =============================================================================
 //

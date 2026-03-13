@@ -1,5 +1,6 @@
 {
   "name": "deepseek-v2-lite",
+  "trace_id": "IT-E2E-DSV2L-01",
   "hf_id": "deepseek-ai/DeepSeek-V2-Lite",
   "bundle": "deepseek-v2-lite.trtfb",
   "family": "deepseek_v2",

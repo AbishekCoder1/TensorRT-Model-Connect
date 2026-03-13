@@ -1,5 +1,6 @@
 {
   "name": "all-minilm-l6-v2",
+  "trace_id": "IT-E2E-MNLM6-01",
   "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
   "bundle": "all-minilm-l6-v2.trtfb",
   "family": "bert",

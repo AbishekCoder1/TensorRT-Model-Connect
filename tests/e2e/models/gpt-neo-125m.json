@@ -1,5 +1,6 @@
 {
   "name": "gpt-neo-125m",
+  "trace_id": "IT-E2E-GNEO-01",
   "hf_id": "EleutherAI/gpt-neo-125m",
   "bundle": "gpt-neo-125m.trtfb",
   "family": "gpt_neo",

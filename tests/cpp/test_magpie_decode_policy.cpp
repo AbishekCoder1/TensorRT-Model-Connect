@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-05
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Magpie decode policy: greedy/sampling decode with audio range and EOS detection
+// Preconditions:  Decode policy with configured audio token range and EOS token
+// Postconditions: Greedy uses audio range, sampling uses sampler, EOS stops generation
+// =============================================================================
+
 #include "runtime/trt/audio/magpie_decode_policy.h"
 
 #include <cmath>

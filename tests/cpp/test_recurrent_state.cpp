@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-REC-CPP-01
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-REC-01
+// Intent:         RecurrentState construction, reset, advance (D2D copy) for Mamba and RWKV specs
+// Preconditions:  CUDA GPU available
+// Postconditions: State tensors allocate, reset zeros them, advance copies D2D correctly
+// =============================================================================
+
+// =============================================================================
 // Test suite: RecurrentState — generic SSM/RWKV state manager
 // =============================================================================
 //

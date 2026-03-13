@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-KVC-CPP-02
+// Architecture:   ARCH-KVC-001
+// Unit Design:    UD-KVC-01
+// Intent:         KvCache construction, position tracking, attention mask building, advance/reset
+// Preconditions:  CUDA GPU available
+// Postconditions: Position advances correctly, mask is causal, reset zeros state
+// =============================================================================
+
+// =============================================================================
 // Test suite: KvCache — autoregressive KV state manager
 // =============================================================================
 //

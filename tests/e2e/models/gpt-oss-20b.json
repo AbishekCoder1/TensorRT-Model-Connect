@@ -1,5 +1,6 @@
 {
   "name": "gpt-oss-20b",
+  "trace_id": "IT-E2E-GOSS-01",
   "hf_id": "openai/gpt-oss-20b",
   "bundle": "gpt-oss-20b.trtfb",
   "family": "gpt_oss",

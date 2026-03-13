@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-ENG-CPP-03
+// Architecture:   ARCH-MOD-001
+// Unit Design:    UD-TRT-CORE-01
+// Intent:         TRT engine lifecycle with fake engine: IO tensor queries, required tensor validation
+// Preconditions:  TRT headers available, fake engine with known tensor names
+// Postconditions: has_io_tensor returns correct bool, has_all_required_tensors validates base+layer tensors
+// =============================================================================
+
 #include "runtime/trt/core/trt_engine_lifecycle.h"
 
 #include <algorithm>

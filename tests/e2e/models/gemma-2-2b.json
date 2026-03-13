@@ -1,5 +1,6 @@
 {
   "name": "gemma-2-2b",
+  "trace_id": "IT-E2E-GMA2-01",
   "hf_id": "google/gemma-2-2b-it",
   "bundle": "gemma-2-2b.trtfb",
   "family": "gemma",

@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-VL-CPP-01
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-FAC-01
+// Intent:         VLPipeline text-only generation with mock engines
+// Preconditions:  TRT + CUDA GPU available
+// Postconditions: Pipeline generates text tokens correctly in text-only mode
+// =============================================================================
+
+// =============================================================================
 // Test suite: VLPipeline — vision-language generation
 // =============================================================================
 

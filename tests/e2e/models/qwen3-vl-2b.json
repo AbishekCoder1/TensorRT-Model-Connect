@@ -1,5 +1,6 @@
 {
   "name": "qwen3-vl-2b",
+  "trace_id": "IT-E2E-Q3VL-01",
   "hf_id": "Qwen/Qwen3-VL-2B-Instruct",
   "bundle": "qwen3-vl-2b.trtfb",
   "family": "qwen_vl",

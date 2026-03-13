@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-04
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Magpie codec plan: size computation, sample validation, input transposition
+// Preconditions:  MagpieConfig with valid codec parameters
+// Postconditions: Sizes and transposed inputs match expected values
+// =============================================================================
+
 #include "runtime/trt/audio/magpie_codec_plan.h"
 
 #include <iostream>

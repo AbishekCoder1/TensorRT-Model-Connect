@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-08
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Mel spectrogram extraction: output shape, energy concentration, normalization
+// Preconditions:  Synthetic sine wave and filterbank data
+// Postconditions: Spectrogram shape matches expected, energy concentrated in correct bins
+// =============================================================================
+
 // Test suite: Mel spectrogram extraction.
 //
 // Purpose:

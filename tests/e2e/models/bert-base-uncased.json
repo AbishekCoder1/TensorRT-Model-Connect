@@ -1,5 +1,6 @@
 {
   "name": "bert-base-uncased",
+  "trace_id": "IT-E2E-BERT-01",
   "hf_id": "google-bert/bert-base-uncased",
   "bundle": "bert-base-uncased.trtfb",
   "family": "bert",

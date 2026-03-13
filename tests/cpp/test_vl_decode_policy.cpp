@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-VL-CPP-03
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-VL-01
+// Intent:         VL decode policy: token/embedding selection, decode loop EOS stopping
+// Preconditions:  VL decode policy with configured token and embedding sequences
+// Postconditions: Current token and embedding selected correctly, loop stops on EOS, failures reported
+// =============================================================================
+
 #include "runtime/trt/multimodal/vl_decode_policy.h"
 
 #include <cstdint>

@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-07
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Magpie text completion policy: cross-attention tracking, text consumed heuristic
+// Preconditions:  Policy with configured cross-attention and text consumption parameters
+// Postconditions: High-water mark updates, text consumed detected, finish limit advances correctly
+// =============================================================================
+
 #include "runtime/trt/audio/magpie_text_completion_policy.h"
 
 #include <cstdint>

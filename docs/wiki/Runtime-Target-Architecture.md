@@ -1,213 +1,266 @@
-# Runtime Architecture Standard
+# Runtime Target Architecture
 
-This document defines the authoritative architecture for the live C++ runtime. It describes the runtime as it should be implemented and maintained now, not as a migration target.
+| Field | Value |
+|-------|-------|
+| **Document ID** | ARCH-RT-001 |
+| **Status** | DRAFT / PLANNED |
+| **Applies to** | C++ runtime (`src/`) |
+| **Author** | Safety Architecture Team (yifeif@nvidia.com) |
+| **Reviewer** | Independent Review Required (TBD — assign before merge) |
+| **Review Status** | Pending independent review |
+| **Last updated** | 2026-03-12 |
+| **ISO 26262 relevance** | ASIL-QM (non-safety, design improvement) |
 
-## Design Goal
+---
 
-The runtime must be:
+> **STATUS: PLANNED -- NOT YET IMPLEMENTED**
+>
+> This document describes the **target** architecture for the C++ runtime.
+> It is **NOT** the current architecture. See [Architecture Overview](Architecture-Overview.md)
+> for the implemented system.
+>
+> Nothing described below exists in the codebase today. All sections describe
+> future work that has not been scheduled. Do not use this document as a
+> reference for how the runtime currently operates.
 
-- **modular**: new strategies and new backend families land as isolated units
-- **scalable**: adding many more models does not force edits to a central god object
-- **individually testable**: most runtime logic can be validated without real TRT engines or filesystem state
-- **operationally stable**: the public `IPipeline` API remains stable while internals evolve
+---
 
-## Architectural Contract
+## 1. Motivation
 
-The live runtime uses one composition path:
+The current C++ runtime uses a centralized dispatch model:
+
+- `PipelineFactory::from_bundle()` in `src/runtime/pipeline_factory.cpp` is the single assembly point for all strategies.
+- `FastPathModelConfig` in `src/cabi/config/fast_path_config.h` is a monolithic struct (~230 fields) that carries configuration for every strategy family (decoder, encoder, vision, audio, diffusion, segmentation, detection, neural operator, speech-to-speech, omni, etc.).
+- `resolve_family()` maps `runtime_strategy` strings to a `StrategyFamily` enum and dispatches to per-family factory functions within the same file.
+
+This works, but it has scaling limitations:
+
+1. **Adding a new runtime strategy requires editing shared files.** You must add fields to `FastPathModelConfig`, add a case to `resolve_family()`, and add a factory function in `pipeline_factory.cpp`.
+2. **The god struct grows with every strategy.** Fields for unrelated strategies share the same struct, making it hard to validate that a bundle provides exactly the config a strategy needs.
+3. **Unit testing factory logic requires including all strategy headers.** There is no way to test one strategy's assembly in isolation.
+
+## 2. Current State (As-Is)
 
 ```text
-trtf_c.cpp
-  -> BuildContext
-  -> strategy-family builder
-  -> PipelineServices
-  -> PipelineRouter
-  -> ports / adapters / TRT executors
+trtf_create_pipeline_ex(bundle_path)
+  -> ReadBundleFile()
+  -> parse_fast_path_config()          // populates ALL fields in FastPathModelConfig
+  -> resolve_family(runtime_strategy)  // returns StrategyFamily enum
+  -> switch on StrategyFamily:
+       kText      -> create_text_pipeline()
+       kEncoder   -> create_encoder_pipeline()
+       kVision    -> create_vision_pipeline()
+       kAudio     -> create_audio_pipeline()
+       kDiffusion -> create_diffusion_pipeline()
+  -> IPipeline*
 ```
 
-There is no co-equal alternate runtime architecture.
+Key files in the current implementation:
 
-## Layer Responsibilities
+| File | Role |
+|------|------|
+| `include/trtf/runtime/pipeline_factory.h` | `PipelineFactory::from_bundle()` declaration |
+| `src/runtime/pipeline_factory.cpp` | Central dispatch: `resolve_family()` + all `create_*_pipeline()` functions |
+| `src/cabi/config/fast_path_config.h` | `FastPathModelConfig` -- monolithic config struct |
+| `src/cabi/config/fast_path_config.cpp` | JSON parsing into `FastPathModelConfig` |
+| `src/cabi/api/trtf_c.cpp` | C ABI entry point, calls `PipelineFactory::from_bundle()` |
+| `src/runtime/pipelines/*.h/*.cpp` | Concrete `IPipeline` implementations per strategy |
 
-| Layer | Owns | Must not own |
-|------|------|---------------|
-| **C ABI / CLI edge** | input validation, bundle loading, top-level error handling, family dispatch | strategy-specific execution logic, artifact IO policy |
-| **Strategy builder** | bundle validation, dependency wiring, service composition, runtime defaults | request-time modality branching, direct file IO |
-| **Runtime contracts** | DTOs, service interfaces, build result/status contracts | side effects, concrete backend ownership |
-| **Pipeline router** | `IPipeline` compatibility surface, path-to-DTO translation, artifact writing | strategy selection, concrete TRT policy |
-| **IO adapters** | image/audio decode, JSON/PNG/WAV/frame persistence | strategy semantics, TRT state |
-| **Service layer** | task orchestration against ports, validation of request DTOs, typed results | direct filesystem writes, raw TRT runtime ownership |
-| **Ports** | abstract side effects: bundle access, TRT runtime access, media decode, artifact writing, subprocesses | task policy |
-| **TRT executors** | engine deserialization, tensor binding, CUDA copies, enqueue/sync, backend-local buffers | bundle composition, user-visible artifact policy |
-| **Pure seams** | planning, stop rules, scheduling, tensor-shape derivation, postprocess logic | CUDA state, file IO |
+## 3. Target State (To-Be)
 
-## Core Runtime Model
+The target architecture replaces centralized dispatch with a plugin registry.
 
-### `PipelineServices`
+```text
+trtf_create_pipeline_ex(bundle_path)
+  -> ReadBundleFile()
+  -> extract runtime_strategy string from config.json (lightweight parse)
+  -> StrategyRegistry::resolve(runtime_strategy)
+  -> IRuntimeStrategyPlugin::parse_config(config_json)   // per-strategy config
+  -> IRuntimeStrategyPlugin::create_pipeline(config, bundle, hf_python)
+  -> IPipeline*
+```
 
-`PipelineServices` is the internal capability model. A strategy builder fills only the services that the strategy supports. Examples include text generation, embeddings, reranking, segmentation, detection, video generation, audio generation, transcription, and speech.
+### 3.1 IRuntimeStrategyPlugin
 
-The service layer consumes canonical DTOs and returns typed results. That keeps the core runtime independent from path-based compatibility APIs.
+```cpp
+// PLANNED -- does not exist today
+class IRuntimeStrategyPlugin {
+public:
+    virtual ~IRuntimeStrategyPlugin() = default;
 
-### `PipelineRouter`
+    // Strategies this plugin handles (e.g., {"decoder_kv_cache", "decoder_moe"}).
+    virtual std::vector<std::string> supported_strategies() const = 0;
 
-`PipelineRouter` is the stable shell that implements `IPipeline`. It is responsible for:
+    // Parse only the config fields this strategy needs.
+    // Returns an opaque config object owned by the plugin.
+    virtual std::unique_ptr<IStrategyConfig> parse_config(
+        const std::string& config_json) const = 0;
 
-- adapting path-based `IPipeline` calls to decoded media DTOs
-- applying runtime defaults
-- writing artifacts through edge adapters
-- exposing stable `model_id()` and `backend_name()` information
+    // Validate that the bundle has the required sections.
+    virtual bool validate_bundle(
+        const BundleSections& sections,
+        const IStrategyConfig& config,
+        std::string& error_message) const = 0;
 
-`PipelineRouter` is not a strategy owner. It routes to services that were already composed during bundle load.
+    // Create the pipeline. This is the composition root for the strategy.
+    virtual std::unique_ptr<IPipeline> create_pipeline(
+        const IStrategyConfig& config,
+        const BundleSections& sections,
+        const std::string& hf_python) const = 0;
+};
+```
 
-### Strategy Builders
+### 3.2 StrategyRegistry
 
-A builder is the composition root for one strategy family. It must:
+```cpp
+// PLANNED -- does not exist today
+class StrategyRegistry {
+public:
+    static StrategyRegistry& instance();
 
-1. validate that the bundle contains the sections required by the strategy
-2. derive runtime defaults and config-dependent behavior
-3. create ports/adapters needed by the services
-4. construct the relevant `PipelineServices`
-5. return a typed build result with status and message on failure
+    void register_plugin(std::unique_ptr<IRuntimeStrategyPlugin> plugin);
 
-Builders must not perform request-time file IO or hide unrelated strategy logic.
+    // Returns the plugin that handles the given runtime_strategy,
+    // or nullptr if no plugin is registered for it.
+    const IRuntimeStrategyPlugin* resolve(const std::string& strategy) const;
 
-## The Required Backend Shape
+    // List all registered strategies (for diagnostics and testing).
+    std::vector<std::string> registered_strategies() const;
+};
+```
 
-Every backend family should converge on the same internal shape.
+### 3.3 Per-Strategy Config Structs
 
-### 1. Planner / Validator
+Each strategy plugin defines its own config struct instead of sharing `FastPathModelConfig`:
 
-Pure logic that derives:
+```cpp
+// PLANNED -- does not exist today
 
-- loop bounds
-- scheduler choices
-- stop criteria
-- input layout
-- tensor sizes and shape expectations
-- prompt or conditioning expansion
+struct DecoderKvConfig : IStrategyConfig {
+    int32_t vocab_size;
+    int32_t hidden_size;
+    int32_t num_layers;
+    int32_t num_heads;
+    int32_t num_kv_heads;
+    int32_t head_dim;
+    int32_t max_cache_length;
+    int32_t id_bos;
+    int32_t id_eos;
+    bool tokenizer_add_special_tokens;
+};
 
-These units should be header-only or otherwise direct unit-test targets.
+struct WhisperConfig : IStrategyConfig {
+    int32_t num_mel_bins;
+    int32_t max_source_positions;
+    int32_t encoder_layers;
+    int32_t decoder_layers;
+    // ... only Whisper-relevant fields
+};
 
-### 2. Tensor Mapper
+struct DiffusionConfig : IStrategyConfig {
+    std::string scheduler;
+    int32_t num_inference_steps;
+    float guidance_scale;
+    // ... only diffusion-relevant fields
+};
+```
 
-Pure or near-pure logic that maps canonical DTOs and planner output into the tensor views or host buffers expected by the executor.
+### 3.4 Self-Contained Plugins
 
-### 3. Executor Shell
+Each strategy becomes a self-contained plugin that owns:
 
-A thin unit that owns:
+- Its config parsing logic
+- Its bundle validation logic
+- Its pipeline construction logic (tokenizer, engine loading, state allocation)
+- Its own header dependencies (no need to include audio headers for text strategies)
 
-- tensor binding
-- device allocation and copies
-- enqueue/sync
-- device-to-host output retrieval
+```text
+src/runtime/strategies/
+  decoder_kv/
+    decoder_kv_plugin.h
+    decoder_kv_plugin.cpp
+    decoder_kv_config.h
+  ssm_recurrent/
+    ssm_plugin.h
+    ssm_plugin.cpp
+    ssm_config.h
+  diffusion/
+    diffusion_plugin.h
+    diffusion_plugin.cpp
+    diffusion_config.h
+  ...
+```
 
-Executor shells should be deliberately small. If they grow policy or branching, more seams must be extracted.
+## 4. Migration Phases
 
-### 4. Postprocessor / Result Assembler
+All phases below are **PLANNED and not yet started**.
 
-Pure logic that interprets executor outputs and produces typed runtime results.
+### Phase 1: Introduce IRuntimeStrategyPlugin + StrategyRegistry
 
-### 5. Service Adapter
+- Define the `IRuntimeStrategyPlugin` interface and `IStrategyConfig` base class.
+- Implement `StrategyRegistry` with `register_plugin()` and `resolve()`.
+- `PipelineFactory::from_bundle()` continues to work as before -- the registry exists alongside but is not yet the primary path.
+- **Risk:** Low. Purely additive, no existing code changes.
 
-The service layer ties together planners, mappers, ports, and executor shells to implement a user-facing capability.
+### Phase 2: Decompose FastPathModelConfig
 
-## Port Taxonomy
+- Extract per-strategy config structs (DecoderKvConfig, WhisperConfig, DiffusionConfig, etc.).
+- Implement `parse_config()` for each, reading only the fields the strategy needs.
+- `FastPathModelConfig` remains as a compatibility layer during transition.
+- **Risk:** Medium. Config parsing changes can cause subtle regressions. Each extraction needs E2E validation.
 
-The runtime should keep these port types explicit.
+### Phase 3: Migrate strategies one-by-one to plugins
 
-1. **Bundle ports**
-   - read named bundle sections
-   - extract tokenizer or engine blobs
-2. **TRT ports**
-   - create runtimes or engines
-   - expose testable wrappers for engine lifecycle work
-3. **Media input ports**
-   - decode image/audio inputs into canonical DTOs
-4. **Artifact writer ports**
-   - persist audio, masks, detections, or frame directories
-5. **Service execution ports**
-   - abstract backend capabilities used by the service layer
-6. **Executor ports**
-   - fakeable interfaces for tensor binding, memcpy, enqueue, and stream sync when executor shells need direct coverage
+- Convert each `create_*_pipeline()` function into an `IRuntimeStrategyPlugin` implementation.
+- Start with the simplest strategies (encoder_only, embedding, reranking) as proof-of-concept.
+- Move to higher-complexity strategies (decoder_kv_cache, vision_language, diffusion) once the pattern is validated.
+- Each migration is independently testable and deployable.
+- **Risk:** Medium-high for complex strategies. Each migration requires full E2E regression.
 
-## Repository Rules For A Fully Testable Runtime
+### Phase 4: Remove centralized dispatch from pipeline_factory.cpp
 
-1. **Core services operate on DTOs, not file paths**.
-2. **Every side effect must cross an interface or seam**.
-3. **Executor-heavy code must be split before it becomes hard to test**.
-4. **Service tests use fake ports, not real engines**.
-5. **Router tests validate edge behavior and artifact IO**.
-6. **Executor tests use focused harnesses and failure injection**.
-7. **Smoke and E2E tests validate real integrated behavior, not routine branch coverage**.
-8. **No new central dispatch objects**: add builders and services, not another god pipeline.
+- Once all strategies are migrated, `PipelineFactory::from_bundle()` becomes a thin wrapper: parse `runtime_strategy`, call `StrategyRegistry::resolve()`, call plugin's `create_pipeline()`.
+- Delete `resolve_family()` enum dispatch.
+- Delete `FastPathModelConfig` (all config parsing now lives in plugins).
+- **Risk:** Low if Phase 3 is complete. This is cleanup.
 
-## Recommended Test Pyramid
+### Phase 5: Plugin self-registration
 
-### Unit tests
+- Each plugin registers itself via static initialization or an explicit `register_all_plugins()` call.
+- External plugins (out-of-tree strategies) become possible.
+- **Risk:** Low. Static initialization order is the main concern, mitigated by explicit registration as a fallback.
 
-Cover:
+## 5. C ABI Stability Constraint
 
-- planners and validators
-- tensor mappers
-- postprocessors
-- service logic with fake ports
-- router edge behavior with fake loaders and writers
-- builder validation and composition outcomes
+The public C ABI defined in `include/trtf/pipeline.h` **must remain stable throughout the entire migration**:
 
-Each test should document:
+- `trtf_create_pipeline()` and `trtf_create_pipeline_ex()` continue to take a bundle path and return an `IPipeline*`.
+- `TrtfPipelineOptions` struct is not changed.
+- The `IPipeline` virtual interface (generate, embed, segment, transcribe, etc.) is not changed.
+- All changes are internal to the factory and strategy assembly layer.
 
-- **intent**: what behavior is being verified
-- **preconditions**: the target state or inputs
-- **postconditions**: the externally observable result
+Callers of the C ABI will not need any changes at any phase of the migration.
 
-### Harness tests
+## 6. Testing Strategy for Migration
 
-Cover:
+Each migration phase must maintain the existing test gates:
 
-- executor shells
-- bind/copy/enqueue/sync failure paths
-- shape mismatch handling
-- missing tensor guards
+| Gate | What it validates |
+|------|-------------------|
+| C++ unit tests (`ctest`) | Bundle parsing, tokenizers, CUDA wrappers, KV cache |
+| Python builder tests (`pytest tests/builder/`) | Config parsing, weight mapping, graph ops |
+| CCN gate (`tools/check_cyclomatic_complexity.py`) | No function exceeds CCN 10 |
+| E2E suite (`pytest tests/test_e2e.py`) | Full pipeline correctness for all 50+ models |
 
-### Smoke and E2E tests
+Additionally, each new plugin should have:
 
-Cover:
+- **Config parsing unit tests** -- verify that the plugin's `parse_config()` extracts the correct fields and rejects invalid configs.
+- **Bundle validation unit tests** -- verify that `validate_bundle()` catches missing sections.
+- **Construction unit tests** -- verify that `create_pipeline()` produces a working pipeline (may require TRT harness tests).
 
-- real engine bring-up
-- parity against reference implementations
-- model-family regression coverage
+## 7. What This Document Is NOT
 
-## Strategy Growth Model
-
-This architecture supports growth in two axes.
-
-### New model families
-
-Usually a Python-side concern:
-
-- add a plugin
-- add checkpoint mapping
-- add graph builder logic if needed
-- reuse an existing runtime strategy when possible
-
-### New runtime strategies
-
-A C++ runtime concern:
-
-- add builder validation and composition
-- add or reuse services
-- add planners/mappers/postprocessors
-- add executor shells only where TensorRT/CUDA ownership is required
-- add strategy governance and test coverage
-
-## What Good Runtime Code Looks Like
-
-A runtime module is in good shape when:
-
-- the builder composes it without special-case glue in `trtf_c.cpp`
-- the service can be tested with fake ports
-- the router can exercise it without real filesystem dependencies beyond the edge adapters
-- policy and shape logic are covered directly by unit tests
-- the executor shell is thin enough that harness tests can cover its error paths
-
-That is the standard the runtime should keep converging toward.
+- This is **not** the current architecture. See [Architecture Overview](Architecture-Overview.md).
+- This is **not** an approved migration plan with a schedule. It is a design target.
+- This does **not** describe PipelineRouter, PipelineServices, StrategyBuilder, or service-composed runtime patterns. Those concepts do not exist in the codebase and are not part of this target.
+- This does **not** imply that the current `PipelineFactory` approach is broken. It works correctly for all 50+ supported models. The target architecture addresses long-term maintainability as the strategy count grows.

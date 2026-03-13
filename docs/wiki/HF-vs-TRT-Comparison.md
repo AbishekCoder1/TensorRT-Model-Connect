@@ -11,7 +11,7 @@ This page provides a detailed comparison between HuggingFace's Python `transform
 | Programmatic API | `pipeline("text-generation", model=...)` | `trtf_create_pipeline("model.trtfb", flags)` (C ABI) |
 | Model loading | `AutoModelForCausalLM.from_pretrained()` | Python checkpoint mapper in `trtf_build/` |
 | Tokenizer | `AutoTokenizer.from_pretrained()` | `HfPythonTokenizer` (subprocess) or `VocabTokenizer` |
-| Config | `AutoConfig.from_pretrained()` | Python `config.json` parsing in `trtf_build/config.py` |
+| Config | `AutoConfig.from_pretrained()` | Python `config.json` parsing in `trtf_build/trtf_build/config.py` |
 
 ## Architectural Parallels
 

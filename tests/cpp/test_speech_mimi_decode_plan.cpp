@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-13
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Speech Mimi decode plan: layout byte computation, input transposition, waveform stats
+// Preconditions:  Mimi config with valid frame and codebook parameters
+// Postconditions: Layout bytes and output elems correct, transposition frame-major, RMS/peak reported
+// =============================================================================
+
 #include "runtime/trt/audio/speech_mimi_decode_plan.h"
 
 #include <cmath>

@@ -1,5 +1,6 @@
 {
   "name": "magpie-tts-357m",
+  "trace_id": "IT-E2E-MGPTTS-01",
   "hf_id": "nvidia/magpie_tts_multilingual_357m",
   "bundle": "magpie-tts-357m.trtfb",
   "family": "magpie_tts",

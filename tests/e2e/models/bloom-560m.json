@@ -1,5 +1,6 @@
 {
   "name": "bloom-560m",
+  "trace_id": "IT-E2E-BLOOM-01",
   "hf_id": "bigscience/bloom-560m",
   "bundle": "bloom-560m.trtfb",
   "family": "bloom",

@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-ENG-CPP-04
+// Architecture:   ARCH-MOD-001
+// Unit Design:    UD-TRT-CORE-01
+// Intent:         TRT runtime/logger lifetime: logger outlives runtime to prevent use-after-free
+// Preconditions:  TRT headers and runtime available
+// Postconditions: Runtime factory creates valid runtime, no crash from logger lifetime issues
+// =============================================================================
+
 // Regression test: TensorRT runtime/logger lifetime.
 //
 // This catches bugs where IRuntime is created with a short-lived logger.

@@ -1,5 +1,6 @@
 {
   "name": "deepseek-ocr",
+  "trace_id": "IT-E2E-DSOCR-01",
   "hf_id": "deepseek-ai/DeepSeek-OCR-2",
   "bundle": "deepseek-ocr.trtfb",
   "family": "deepseek_ocr",

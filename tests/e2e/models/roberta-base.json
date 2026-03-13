@@ -1,5 +1,6 @@
 {
   "name": "roberta-base",
+  "trace_id": "IT-E2E-ROBBS-01",
   "hf_id": "FacebookAI/roberta-base",
   "bundle": "roberta-base.trtfb",
   "family": "roberta",

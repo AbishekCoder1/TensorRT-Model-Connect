@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-06
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Magpie decoder plan: CFG enablement and GPU greedy fallback estimation
+// Preconditions:  MagpieConfig with valid decoder parameters
+// Postconditions: CFG flag set correctly, fallback estimate used without cross attention
+// =============================================================================
+
 #include "runtime/trt/audio/magpie_decoder_plan.h"
 
 #include <cstdint>

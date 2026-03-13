@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-CUDA-CPP-03
+// Architecture:   ARCH-MOD-001
+// Unit Design:    UD-TRT-CORE-01
+// Intent:         DeviceTensor allocation, H2D/D2H transfers, D2D copy, zeros factory, move semantics
+// Preconditions:  CUDA GPU available
+// Postconditions: Tensor allocates, transfers data correctly, moves without leak
+// =============================================================================
+
+// =============================================================================
 // Test suite: DeviceTensor GPU-resident tensor
 // =============================================================================
 //

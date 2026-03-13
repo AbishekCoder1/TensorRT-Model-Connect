@@ -1,5 +1,6 @@
 {
   "name": "qwen3-0.6b",
+  "trace_id": "IT-E2E-QWN3-01",
   "hf_id": "Qwen/Qwen3-0.6B",
   "bundle": "qwen3-0.6b.trtfb",
   "family": "qwen",

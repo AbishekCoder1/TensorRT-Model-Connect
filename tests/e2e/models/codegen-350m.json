@@ -1,5 +1,6 @@
 {
   "name": "codegen-350m",
+  "trace_id": "IT-E2E-CDGEN-01",
   "hf_id": "Salesforce/codegen-350M-mono",
   "bundle": "codegen-350m.trtfb",
   "family": "codegen",

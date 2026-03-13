@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-18
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Whisper decode policy: EOT stopping, prefill/decode failure reporting, zero budget handling
+// Preconditions:  Whisper decode policy with configured EOT token
+// Postconditions: Loop stops on EOT, failures reported at prefill and decode stages, zero budget handled
+// =============================================================================
+
 #include "runtime/trt/audio/whisper_decode_policy.h"
 
 #include <cstdint>

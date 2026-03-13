@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-CLI-CPP-01
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-CABI-01
+// Intent:         CLI argument parsing for run/inspect/version commands
+// Preconditions:  None
+// Postconditions: Parsed args match expected command and options
+// =============================================================================
+
+// =============================================================================
 // Test suite: CLI argument parsing for the `trtf` command-line interface.
 //
 // Purpose:

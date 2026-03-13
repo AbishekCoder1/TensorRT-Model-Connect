@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-17
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         WAV reader: read/write round-trip for PCM int16 and IEEE float32, linear resampling
+// Preconditions:  Synthetic WAV files written to temp directory
+// Postconditions: Read samples match written values, sample rate preserved, resample produces correct length
+// =============================================================================
+
 // Test suite: WAV reader utility.
 //
 // Purpose:

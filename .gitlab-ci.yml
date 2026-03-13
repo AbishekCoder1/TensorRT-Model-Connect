@@ -15,13 +15,20 @@ variables:
   ENGINE_DIR: /workspace/users/yifeif/trt-transformers/engines
   GIT_STRATEGY: fetch
   PYTHONHASHSEED: "0"
-  # Temporary: keep coverage collection on, but disable coverage-threshold blocking
-  # while runtime refactor regression work is in progress.
-  PYTHON_COVERAGE_MIN_LINE: "0"
-  PYTHON_COVERAGE_MIN_BRANCH: "0"
-  CPP_COVERAGE_MIN_LINE: "0"
-  CPP_COVERAGE_MIN_FUNCTION: "0"
-  CPP_COVERAGE_MIN_BRANCH: "0"
+  # Coverage gates: set to current measured levels as floor (measured 2026-03-12).
+  # Ratchet up as coverage improves. See docs/wiki/ISO-26262-Compliance.md §4.
+  #
+  # Measured 2026-03-12 (unit tests only, no GPU/TRT tests):
+  #   C++:    lines 40.1%, functions 54.3%, branches 23.4%
+  #   Python: lines 41.4% (builder unit), branches ~30%
+  #
+  # Thresholds set 2-5% below measured to avoid false failures from
+  # minor fluctuation while still catching real regressions.
+  PYTHON_COVERAGE_MIN_LINE: "38"
+  PYTHON_COVERAGE_MIN_BRANCH: "25"
+  CPP_COVERAGE_MIN_LINE: "36"
+  CPP_COVERAGE_MIN_FUNCTION: "46"
+  CPP_COVERAGE_MIN_BRANCH: "21"
 
 workflow:
   auto_cancel:

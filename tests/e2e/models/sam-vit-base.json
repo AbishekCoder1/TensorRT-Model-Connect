@@ -1,5 +1,6 @@
 {
   "name": "sam-vit-base",
+  "trace_id": "IT-E2E-SAM-01",
   "hf_id": "facebook/sam-vit-base",
   "bundle": "sam-vit-base.trtfb",
   "family": "sam",

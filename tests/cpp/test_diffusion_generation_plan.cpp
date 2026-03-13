@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-DIFF-CPP-02
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-DIFF-01
+// Intent:         Diffusion generation plan: FLUX/Wan layout derivation and scheduler mode selection
+// Preconditions:  Diffusion config with valid latent dimensions
+// Postconditions: Layout dimensions and scheduler parameters match expected values
+// =============================================================================
+
 #include "runtime/trt/diffusion/diffusion_generation_plan.h"
 
 #include <cmath>

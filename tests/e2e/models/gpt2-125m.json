@@ -1,5 +1,6 @@
 {
   "name": "gpt2-125m",
+  "trace_id": "IT-E2E-GPT2-01",
   "hf_id": "openai-community/gpt2",
   "bundle": "gpt2-125m.trtfb",
   "family": "gpt2",

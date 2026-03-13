@@ -1,5 +1,6 @@
 {
   "name": "whisper-tiny",
+  "trace_id": "IT-E2E-WHSPT-01",
   "hf_id": "openai/whisper-tiny",
   "bundle": "whisper-tiny.trtfb",
   "family": "whisper",

@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-UTIL-CPP-02
+// Architecture:   ARCH-BDL-001
+// Unit Design:    UD-UTIL-01
+// Intent:         String parsing helpers (starts_with, trim, read_file)
+// Preconditions:  None
+// Postconditions: String operations produce expected results
+// =============================================================================
+
+// =============================================================================
 // test_text_parsers.cpp — Unit tests for src/utils/text_parsers.cpp
 // =============================================================================
 //

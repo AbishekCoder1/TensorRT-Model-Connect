@@ -1,5 +1,6 @@
 {
   "name": "all-mpnet-base-v2",
+  "trace_id": "IT-E2E-MPNET-01",
   "hf_id": "sentence-transformers/all-mpnet-base-v2",
   "bundle": "all-mpnet-base-v2.trtfb",
   "family": "mpnet",

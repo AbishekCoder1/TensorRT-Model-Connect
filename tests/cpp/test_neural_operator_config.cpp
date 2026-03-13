@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-SEG-CPP-02
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-SEG-01
+// Intent:         Segmentation postprocess argmax: basic classification, tie-breaking, invalid shapes
+// Preconditions:  Logit tensors with known class distributions
+// Postconditions: Argmax selects correct class, ties select first, invalid shapes rejected
+// =============================================================================
+
 #include "runtime/trt/perception/segmentation_postprocess_seam.h"
 
 #include <cstdint>

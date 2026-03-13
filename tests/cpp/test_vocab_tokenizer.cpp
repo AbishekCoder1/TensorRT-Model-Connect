@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-TOK-CPP-01
+// Architecture:   ARCH-TOK-001
+// Unit Design:    UD-TOK-01
+// Intent:         VocabTokenizer encode/decode round-trip, case insensitivity
+// Preconditions:  Vocabulary list available
+// Postconditions: encode(decode(ids)) == ids
+// =============================================================================
+
+// =============================================================================
 // test_vocab_tokenizer.cpp — Unit tests for VocabTokenizer
 // =============================================================================
 //

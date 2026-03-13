@@ -1,5 +1,6 @@
 {
   "name": "z-image-turbo",
+  "trace_id": "IT-E2E-ZIMG-01",
   "hf_id": "Tongyi-MAI/Z-Image-Turbo",
   "bundle": "z-image-turbo.trtfb",
   "model_type": "z_image",

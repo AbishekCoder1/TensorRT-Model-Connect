@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-TOK-CPP-02
+// Architecture:   ARCH-TOK-001
+// Unit Design:    UD-TOK-01
+// Intent:         HfPythonTokenizer shell quoting, int parsing, output sanitization
+// Preconditions:  No Python subprocess required (tests parsing logic only)
+// Postconditions: Token IDs correctly parsed from subprocess output format
+// =============================================================================
+
+// =============================================================================
 // test_hf_python_tokenizer.cpp — Unit tests for HfPythonTokenizer
 // =============================================================================
 //

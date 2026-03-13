@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-10
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Speech decode stop policy: EOS detection, pad fallback, continuation cap
+// Preconditions:  SpeechDecodeStopInput with configured thresholds and token sequences
+// Postconditions: EOS requires consecutive tokens, pad fallback needs tail+threshold, cap breaks correctly
+// =============================================================================
+
 #include "trtf/runtime/trt/audio/speech_decode_stop_policy.h"
 
 #include <iostream>

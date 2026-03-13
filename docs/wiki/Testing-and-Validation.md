@@ -11,12 +11,12 @@ purpose, dependency profile, and speed:
 
 | Layer | Directory | Files | Tests | GPU? | Time | Purpose |
 |-------|-----------|:--:|:--:|:--:|------|---------|
-| 1. Builder unit | `tests/builder/` | 50 | ~940 | No | ~10 min | Python build logic in isolation |
-| 2. C++ runtime unit | `tests/cpp/` | 19 | 20 | Mix | ~8 s | C++ runtime correctness |
-| 3. Tools self-tests | `tests/tools/` | 11 | ~160 | No | ~35 s | Diff framework + comparison utilities |
+| 1. Builder unit | `tests/builder/` | 74 | ~940 | No | ~10 min | Python build logic in isolation |
+| 2. C++ runtime unit | `tests/cpp/` | 61 | 60+ | Mix | ~8 s | C++ runtime correctness |
+| 3. Tools self-tests | `tests/tools/` | 20 | ~160 | No | ~35 s | Diff framework + comparison utilities |
 | 4. Graph-op GPU | `tests/builder/test_graph_*.py` | 3 | ~70 | TRT | ~2 min | TRT graph operations on real GPU |
-| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 50 manifests | 50 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
-| 6. Diff framework | `tools/diff.py` + `tools/diff_framework/` | 6 checks | -- | GPU | varies | Ad-hoc TRT-vs-HF model comparison |
+| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 68 manifests | 68 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
+| 6. Diff framework | `tools/diff_logits.py`, `tools/diff_layers.py`, etc. | 6 checks | -- | GPU | varies | Ad-hoc TRT-vs-HF model comparison |
 
 **Philosophy**: Every TRT engine must produce output matching HuggingFace
 Transformers (the ground truth). Testing validates this at multiple
@@ -372,7 +372,7 @@ gold-standard correctness gate. All modalities use the same harness.
 
 ```
 tests/test_e2e.py                    # Single parametrized pytest entrypoint
-tests/e2e/models/*.json              # 50 per-model JSON manifests
+tests/e2e/models/*.json              # 68 per-model JSON manifests
 tests/e2e_harness/
   __init__.py                        # save_full_stderr() helper
   contracts.py                       # E2ECase, StageOutput, CompareResult, protocols
@@ -544,7 +544,7 @@ ctest --test-dir build --output-on-failure
 **What's covered**:
 - Python: 50 test modules -- config, checkpoint_mapper, bundle_writer, family plugins, 27 per-family engine tests, manifest validation, debug runner, cache state machine
 - Tools: 11 modules -- diff framework, logits, layers, audio, segmentation, diffusion helpers, perf_compare
-- C++: 19 test executables -- bundle format, tokenizers, CUDA RAII, KV cache, image preprocessor, CLI args
+- C++: 61 test executables -- bundle format, tokenizers, CUDA RAII, KV cache, image preprocessor, CLI args
 
 ### Tier 1.5: C++ Cyclomatic Complexity Gate (no GPU, <1 min)
 
@@ -589,7 +589,7 @@ Current policy and status:
 
 ### Tier 4: Full E2E suite (~2-3 hours, needs GPU)
 
-All 50 models, force-rebuild every bundle. Gold-standard regression gate.
+All 68 models, force-rebuild every bundle. Gold-standard regression gate.
 
 ```bash
 .venv/bin/python -m pytest tests/test_e2e.py -v \

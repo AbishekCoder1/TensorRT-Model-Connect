@@ -1,5 +1,6 @@
 {
   "name": "glm-4-9b",
+  "trace_id": "IT-E2E-GLM4-01",
   "hf_id": "THUDM/glm-4-9b-hf",
   "bundle": "glm-4-9b.trtfb",
   "family": "glm",

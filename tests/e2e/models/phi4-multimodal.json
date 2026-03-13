@@ -1,5 +1,6 @@
 {
   "name": "phi4-multimodal",
+  "trace_id": "IT-E2E-PHI4MM-01",
   "hf_id": "microsoft/Phi-4-multimodal-instruct",
   "bundle": "phi4-multimodal.trtfb",
   "family": "phi4_multimodal",

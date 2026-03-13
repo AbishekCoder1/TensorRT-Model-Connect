@@ -1,5 +1,6 @@
 {
   "name": "pythia-70m",
+  "trace_id": "IT-E2E-PYTH-01",
   "hf_id": "EleutherAI/pythia-70m",
   "bundle": "pythia-70m.trtfb",
   "family": "gpt_neox",

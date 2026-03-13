@@ -1,5 +1,6 @@
 {
   "name": "phi-moe",
+  "trace_id": "IT-E2E-PHIMOE-01",
   "hf_id": "microsoft/Phi-tiny-MoE-instruct",
   "bundle": "phi-moe.trtfb",
   "family": "phi_moe",

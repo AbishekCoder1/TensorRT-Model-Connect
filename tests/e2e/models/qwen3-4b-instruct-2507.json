@@ -1,5 +1,6 @@
 {
   "name": "qwen3-4b-instruct-2507",
+  "trace_id": "IT-E2E-QWN3I-01",
   "hf_id": "Qwen/Qwen3-4B-Instruct-2507",
   "bundle": "qwen3-4b-instruct-2507.trtfb",
   "family": "qwen",

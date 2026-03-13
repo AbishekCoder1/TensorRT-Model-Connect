@@ -1,5 +1,6 @@
 {
   "name": "paraphrase-multilingual-minilm-l12-v2",
+  "trace_id": "IT-E2E-PMLM-01",
   "hf_id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
   "bundle": "paraphrase-multilingual-minilm-l12-v2.trtfb",
   "family": "bert",

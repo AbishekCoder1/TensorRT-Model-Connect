@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-DIFF-CPP-03
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-FAC-01
+// Intent:         Diffusion pipeline type compilation and interface correctness
+// Preconditions:  TRT headers available for compile check
+// Postconditions: Diffusion pipeline types compile and match expected interfaces
+// =============================================================================
+
+// =============================================================================
 // Test suite: Diffusion pipeline headers compile and types are correct.
 // These pipelines now delegate to old-style IDiffusionBackend which requires
 // real TRT engines, so construction tests are limited to compile checks.

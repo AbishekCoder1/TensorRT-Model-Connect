@@ -1,5 +1,6 @@
 {
   "name": "bark-large",
+  "trace_id": "IT-E2E-BARKL-01",
   "hf_id": "suno/bark",
   "bundle": "bark-large.trtfb",
   "family": "bark",

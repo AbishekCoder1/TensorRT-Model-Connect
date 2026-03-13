@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-CFG-CPP-01
+// Architecture:   ARCH-CFG-001
+// Unit Design:    UD-CFG-01
+// Intent:         FastPathModelConfig parses all runtime strategies from JSON
+// Preconditions:  Valid config.json text for each strategy type
+// Postconditions: Parsed config fields match expected values
+// =============================================================================
+
+// =============================================================================
 // Test suite: FastPathModelConfig parsing from config.json
 // =============================================================================
 //

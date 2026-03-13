@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-UTIL-CPP-03
+// Architecture:   ARCH-BDL-001
+// Unit Design:    UD-UTIL-01
+// Intent:         Source/scripts dir resolution, env overrides
+// Preconditions:  EnvVarGuard for isolated env testing
+// Postconditions: GetSourceDir/GetScriptsDir return valid paths
+// =============================================================================
+
+// =============================================================================
 // test_data_dir.cpp — Unit tests for src/utils/data_dir.cpp
 // =============================================================================
 //

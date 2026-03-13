@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-TOK-CPP-03
+// Architecture:   ARCH-TOK-001
+// Unit Design:    UD-TOK-01
+// Intent:         IPA tokenizer: encode known words, heteronyms as graphemes, OOV fallback, punctuation
+// Preconditions:  Synthetic mini-data mimicking NeMo IPA format
+// Postconditions: Known words tokenized via IPA, OOV/heteronyms fall back to graphemes, punctuation handled
+// =============================================================================
+
+// =============================================================================
 // test_ipa_tokenizer.cpp — Unit tests for IPA tokenizer (CreateIpaTokenizer)
 // =============================================================================
 //

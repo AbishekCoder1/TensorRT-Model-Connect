@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-REC-CPP-03
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-REC-01
+// Intent:         Recurrent step contracts: state validation, RWKV/Mamba output initialization
+// Preconditions:  State specs with known layer counts and sizes
+// Postconditions: Validation rejects mismatched layers, outputs initialized to correct sizes
+// =============================================================================
+
 #include "runtime/trt/recurrent/recurrent_step_contracts.h"
 
 #include <cstdint>

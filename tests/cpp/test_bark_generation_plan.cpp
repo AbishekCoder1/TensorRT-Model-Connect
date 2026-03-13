@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-03
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Bark generation plan: coarse/fine step derivation, window context, codec input
+// Preconditions:  BarkConfig with valid codebook and token parameters
+// Postconditions: Step counts, window plans, and codec transposition are correct
+// =============================================================================
+
 #include "runtime/trt/audio/bark_generation_plan.h"
 
 #include <cstdint>

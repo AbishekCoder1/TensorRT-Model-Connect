@@ -1,5 +1,6 @@
 {
   "name": "olmo-1b",
+  "trace_id": "IT-E2E-OLMO-01",
   "hf_id": "allenai/OLMo-1B-hf",
   "bundle": "olmo-1b.trtfb",
   "family": "olmo",

@@ -1,5 +1,6 @@
 {
   "name": "falcon3-1b",
+  "trace_id": "IT-E2E-FAL3-01",
   "hf_id": "tiiuae/Falcon3-1B-Base",
   "bundle": "falcon3-1b.trtfb",
   "family": "llama",

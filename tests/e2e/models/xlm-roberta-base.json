@@ -1,5 +1,6 @@
 {
   "name": "xlm-roberta-base",
+  "trace_id": "IT-E2E-XLMRB-01",
   "hf_id": "FacebookAI/xlm-roberta-base",
   "bundle": "xlm-roberta-base.trtfb",
   "family": "roberta",

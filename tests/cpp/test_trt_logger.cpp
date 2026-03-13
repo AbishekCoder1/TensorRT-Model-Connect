@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-LOG-CPP-01
+// Architecture:   ARCH-MOD-001
+// Unit Design:    UD-TRT-CORE-01
+// Intent:         TRT logger severity names, error storage, env-var controls
+// Preconditions:  TRT headers available
+// Postconditions: Logger stores errors and respects severity settings
+// =============================================================================
+
+// =============================================================================
 // test_trt_logger.cpp — Unit tests for TRT logger env-var helpers
 // =============================================================================
 //

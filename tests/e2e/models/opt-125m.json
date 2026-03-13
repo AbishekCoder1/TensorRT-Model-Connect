@@ -1,5 +1,6 @@
 {
   "name": "opt-125m",
+  "trace_id": "IT-E2E-OPT-01",
   "hf_id": "facebook/opt-125m",
   "bundle": "opt-125m.trtfb",
   "family": "opt",

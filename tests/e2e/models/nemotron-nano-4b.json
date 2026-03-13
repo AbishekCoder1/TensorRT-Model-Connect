@@ -1,5 +1,6 @@
 {
   "name": "nemotron-nano-4b",
+  "trace_id": "IT-E2E-NMNN-01",
   "hf_id": "nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1",
   "bundle": "nemotron-nano-4b.trtfb",
   "family": "llama",

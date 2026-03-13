@@ -1,5 +1,6 @@
 {
   "name": "rwkv-169m",
+  "trace_id": "IT-E2E-RWKV-01",
   "hf_id": "RWKV/rwkv-4-169m-pile",
   "bundle": "rwkv-169m.trtfb",
   "family": "rwkv",

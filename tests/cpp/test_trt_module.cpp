@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-ENG-CPP-02
+// Architecture:   ARCH-MOD-001
+// Unit Design:    UD-TRT-CORE-01
+// Intent:         TrtModule forward, async forward, introspection, device_ptr, bind_external
+// Preconditions:  TRT + CUDA GPU available, identity engine built in-process
+// Postconditions: Forward produces correct output, introspection matches engine, bindings work
+// =============================================================================
+
+// =============================================================================
 // Test suite: TrtModule — model.forward() abstraction for TensorRT
 // =============================================================================
 //

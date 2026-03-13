@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-CUDA-CPP-02
+// Architecture:   ARCH-MOD-001
+// Unit Design:    UD-TRT-CORE-01
+// Intent:         CudaStream RAII creation and move semantics
+// Preconditions:  CUDA GPU available
+// Postconditions: Stream creates and destroys without leak
+// =============================================================================
+
+// =============================================================================
 // Test suite: CudaStream RAII wrapper
 // =============================================================================
 //

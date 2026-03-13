@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-DIFF-CPP-04
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-DIFF-01
+// Intent:         FlowMatchEulerScheduler timestep computation, sigma schedule, and Euler step
+// Preconditions:  None (CPU-only math)
+// Postconditions: Timesteps, sigmas, and step outputs match HF reference values
+// =============================================================================
+
+// =============================================================================
 // Test suite: FlowMatchEulerScheduler
 // =============================================================================
 //

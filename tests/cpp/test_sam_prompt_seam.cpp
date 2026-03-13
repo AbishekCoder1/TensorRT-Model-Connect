@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-SEG-CPP-04
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-SEG-01
+// Intent:         SAM prompt seam: point sparse prompt building, embedding encoding, multimask selection
+// Preconditions:  Point coordinates and embedding data available
+// Postconditions: Sparse prompts padded correctly, missing data returns zeros, multimask selection correct
+// =============================================================================
+
 #include "runtime/trt/perception/sam_prompt_seam.h"
 #include "runtime/trt/perception/sam_output_selection.h"
 #include "runtime/trt/perception/sam_postprocess_seam.h"

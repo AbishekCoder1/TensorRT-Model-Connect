@@ -4,7 +4,7 @@ Status of non-standard architecture support. MoE, Mamba/SSM, vision-language (Qw
 
 ## Executive Summary
 
-With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by C++ (`src/cabi/api/trtf_c.cpp` + `src/runtime/trt/*`). New strategy/state types still require C++ backend + dispatch changes.
+With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by C++ (`src/runtime/pipeline_factory.cpp` + `src/runtime/trt/*`). New strategy/state types still require C++ backend + dispatch changes in `src/runtime/pipeline_factory.cpp`.
 
 As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support are **fully implemented**. The standard decoder builder is parameterized to support LayerNorm, GELU, learned positions, and multiple activations. The VL image preprocessor supports 4 strategies with configurable interpolation. The diffusion pipeline supports text-to-video with T5 encoding, DiT denoising, and causal 3D VAE decoding.
 
@@ -17,7 +17,7 @@ As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support a
 | Vision-Language | **Works today** (Qwen-VL) | ~200 LOC Python | Python vision builder + plugin VL config |
 | Diffusion (T2V) | **Works today** (Wan2.1) | ~500 LOC Python | Python builders (T5+DiT+VAE) + family plugin |
 | Multi-Latent Attention -- MLA (DeepSeek-V2/V3) | **Not yet implemented** | ~400 LOC Python + C++ | Python graph builder + C++ KV cache shape |
-| Hybrid SSM+Attention (Jamba) | **Not yet implemented** | ~500 LOC Python + C++ | Python + C++ hybrid state |
+| Hybrid SSM+Attention (Jamba) | **Works today** (Nemotron-H) | ~500 LOC Python + C++ | Python + C++ hybrid state (implemented) |
 
 ---
 
@@ -37,7 +37,7 @@ Write a Python graph builder for the expert routing logic. The C++ runtime uses 
 
 ### Adding a new Mamba/SSM family
 
-Write a Python graph builder for the SSM architecture. The C++ `MambaBackend` and `MambaStepState` are already implemented for `runtime_strategy="ssm_recurrent"` (`src/runtime/trt/mamba_backend.cpp`, `src/runtime/trt/mamba_step_state.cpp`). ~400 LOC Python.
+Write a Python graph builder for the SSM architecture. The C++ `MambaBackend` and `MambaStepState` are already implemented for `runtime_strategy="ssm_recurrent"` (`src/runtime/trt/recurrent/mamba_backend.cpp`, `src/runtime/trt/recurrent/mamba_step_state.cpp`). ~400 LOC Python.
 
 **Implemented**: Mamba (130M-2.8B, selective scan + conv1d).
 

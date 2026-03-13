@@ -1,5 +1,6 @@
 {
   "name": "whisper-large-v3-turbo",
+  "trace_id": "IT-E2E-WHSPL-01",
   "hf_id": "openai/whisper-large-v3-turbo",
   "bundle": "whisper-large-v3-turbo.trtfb",
   "family": "whisper",

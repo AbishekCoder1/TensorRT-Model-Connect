@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-DIFF-CPP-01
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-DIFF-01
+// Intent:         Diffusion denoising step seam: FLUX and Wan step runners update latents correctly
+// Preconditions:  Step runner with mock forward function
+// Postconditions: Latents updated after each step, failures propagated, zero steps handled
+// =============================================================================
+
 #include "runtime/trt/diffusion/diffusion_denoising_step_seam.h"
 
 #include <cstdint>

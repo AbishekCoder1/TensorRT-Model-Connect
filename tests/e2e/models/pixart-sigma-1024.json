@@ -1,5 +1,6 @@
 {
   "name": "pixart-sigma-1024",
+  "trace_id": "IT-E2E-PXART-01",
   "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
   "bundle": "pixart-sigma-1024.trtfb",
   "model_type": "pixart",

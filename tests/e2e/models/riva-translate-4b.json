@@ -1,5 +1,6 @@
 {
   "name": "riva-translate-4b",
+  "trace_id": "IT-E2E-RIVA-01",
   "hf_id": "nvidia/Riva-Translate-4B-Instruct-v1.1",
   "bundle": "riva-translate-4b.trtfb",
   "family": "mistral",

@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-02
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-FAC-01
+// Intent:         Audio pipeline type compilation and interface correctness
+// Preconditions:  TRT headers available for compile check
+// Postconditions: Audio pipeline types compile and match expected interfaces
+// =============================================================================
+
+// =============================================================================
 // Test suite: Audio pipeline headers compile and types are correct.
 // These pipelines now delegate to old-style backends which require real TRT
 // engines, so construction tests are limited to compile checks and type

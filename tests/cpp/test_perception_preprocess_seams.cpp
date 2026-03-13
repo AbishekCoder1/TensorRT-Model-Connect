@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-SEG-CPP-03
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-SEG-01
+// Intent:         Perception preprocessing seams: segmentation normalization, SAM resize/padding
+// Preconditions:  Decoded image data (valid and empty)
+// Postconditions: Normalization produces correct float values, empty images rejected, SAM plan tracks resize
+// =============================================================================
+
 #include "runtime/trt/perception/sam_image_preprocess_seam.h"
 #include "runtime/trt/perception/segmentation_preprocess_seam.h"
 

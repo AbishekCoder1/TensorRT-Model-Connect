@@ -84,7 +84,7 @@ logits = hidden * W_lm_head
 
 ## Graph Building (Python)
 
-The Python `trtf_build/` package builds the TRT network graph using the TensorRT Python API. Shared ops in `trtf_build/graph_ops.py` provide reusable building blocks:
+The Python `trtf_build/` package builds the TRT network graph using the TensorRT Python API. Shared ops in `trtf_build/trtf_build/graph_ops.py` provide reusable building blocks:
 
 | Function | Description |
 |----------|-------------|

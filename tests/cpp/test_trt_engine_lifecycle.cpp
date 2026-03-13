@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-ENG-CPP-01
+// Architecture:   ARCH-MOD-001
+// Unit Design:    UD-TRT-CORE-01
+// Intent:         layer_tensor_name generation, TRT constants
+// Preconditions:  TRT headers available
+// Postconditions: Tensor names follow "stem_N" convention
+// =============================================================================
+
+// =============================================================================
 // test_trt_engine_lifecycle.cpp — Unit tests for layer_tensor_name()
 // =============================================================================
 //

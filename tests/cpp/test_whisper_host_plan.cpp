@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-AUD-CPP-19
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-AUD-01
+// Intent:         Whisper host plan: mel length, initial tokens, encoder planning, cross-KV apply
+// Preconditions:  Whisper config with valid mel/encoder parameters
+// Postconditions: Mel length and tokens correct, encoder mask planned, cross-KV copy operations tracked
+// =============================================================================
+
 #include "runtime/trt/audio/whisper_cross_kv_apply.h"
 #include "runtime/trt/audio/whisper_cross_kv_plan.h"
 #include "runtime/trt/audio/whisper_host_plan.h"

@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-BDL-CPP-01
+// Architecture:   ARCH-BDL-001
+// Unit Design:    UD-BDL-01
+// Intent:         Bundle magic validation, section parsing, read/write round-trip
+// Preconditions:  Valid and invalid .trtfb test data available
+// Postconditions: BundleFile correctly populated or error returned
+// =============================================================================
+
 // Test suite: .trtfb bundle format reading, magic validation, and error handling.
 //
 // Purpose:

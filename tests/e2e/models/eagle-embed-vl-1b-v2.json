@@ -1,5 +1,6 @@
 {
   "name": "eagle-embed-vl-1b-v2",
+  "trace_id": "IT-E2E-EGEMB-01",
   "hf_id": "NVIDIA/Eagle-embed-vl-1b-v2",
   "bundle": "eagle-embed-vl-1b-v2.trtfb",
   "family": "eagle_vlm",

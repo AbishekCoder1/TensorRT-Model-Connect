@@ -1,5 +1,6 @@
 {
   "name": "segformer-b0-ade",
+  "trace_id": "IT-E2E-SEGF-01",
   "hf_id": "nvidia/segformer-b0-finetuned-ade-512-512",
   "bundle": "segformer-b0-ade.trtfb",
   "family": "segformer",

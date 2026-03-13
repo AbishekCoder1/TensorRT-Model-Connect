@@ -1,5 +1,6 @@
 {
   "name": "distilbert-base-uncased",
+  "trace_id": "IT-E2E-DBERT-01",
   "hf_id": "distilbert/distilbert-base-uncased",
   "bundle": "distilbert-base-uncased.trtfb",
   "family": "distilbert",

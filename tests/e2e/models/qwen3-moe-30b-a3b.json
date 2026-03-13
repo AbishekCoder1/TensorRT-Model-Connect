@@ -1,5 +1,6 @@
 {
   "name": "qwen3-moe-30b-a3b",
+  "trace_id": "IT-E2E-Q3MOE-01",
   "hf_id": "Qwen/Qwen3-30B-A3B",
   "bundle": "qwen3-moe-30b-a3b.trtfb",
   "family": "qwen_moe",

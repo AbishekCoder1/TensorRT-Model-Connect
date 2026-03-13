@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-UTIL-CPP-01
+// Architecture:   ARCH-BDL-001
+// Unit Design:    UD-UTIL-01
+// Intent:         JSON extraction helpers (string, int, float, array)
+// Preconditions:  Valid and invalid JSON strings
+// Postconditions: Correct values extracted, fallbacks used for missing keys
+// =============================================================================
+
+// =============================================================================
 // test_json_helpers.cpp — Unit tests for src/utils/json_helpers.cpp
 // =============================================================================
 //

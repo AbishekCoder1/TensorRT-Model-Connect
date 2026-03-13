@@ -1,5 +1,6 @@
 {
   "name": "stablelm2-1.6b",
+  "trace_id": "IT-E2E-SLM2-01",
   "hf_id": "stabilityai/stablelm-2-1_6b",
   "bundle": "stablelm2-1.6b.trtfb",
   "family": "stablelm",

@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-ABI-CPP-02
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-CABI-01
+// Intent:         C ABI runtime regression: invalid engine plans report errors without crashing
+// Preconditions:  Syntactically valid .trtfb with invalid engine_plan payload
+// Postconditions: trtf_last_error() returns descriptive message, no crash on repeated calls
+// =============================================================================
+
+// =============================================================================
 // C ABI runtime regression tests for bundle -> TRT runtime -> deserialize path.
 //
 // These tests build a syntactically valid .trtfb file with an invalid

@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-VL-CPP-02
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-VL-01
+// Intent:         Vision execution plan: feature count, DeepStack name collection, copy plan
+// Preconditions:  Vision config with known feature levels
+// Postconditions: Feature counts match config, DeepStack names collected, copy plan succeeds/fails correctly
+// =============================================================================
+
 #include "runtime/trt/multimodal/vision_execution_plan.h"
 
 #include <cstdint>

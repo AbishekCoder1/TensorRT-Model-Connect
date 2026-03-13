@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-BDL-CPP-02
+// Architecture:   ARCH-BDL-001
+// Unit Design:    UD-BDL-02
+// Intent:         find_bundle_sections correctly identifies all section types
+// Preconditions:  BundleFile with known sections
+// Postconditions: BundleSections pointers correctly populated
+// =============================================================================
+
+// =============================================================================
 // test_bundle_helpers.cpp — Unit tests for bundle_helpers functions
 // =============================================================================
 //

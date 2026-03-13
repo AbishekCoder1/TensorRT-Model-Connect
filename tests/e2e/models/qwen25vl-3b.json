@@ -1,5 +1,6 @@
 {
   "name": "qwen25vl-3b",
+  "trace_id": "IT-E2E-Q25VL-01",
   "hf_id": "Qwen/Qwen2.5-VL-3B-Instruct",
   "bundle": "qwen25vl-3b-vl.trtfb",
   "family": "qwen_vl",

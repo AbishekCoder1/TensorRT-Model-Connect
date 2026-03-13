@@ -1,5 +1,6 @@
 {
   "name": "eagle-rerank-vl-1b-v2",
+  "trace_id": "IT-E2E-EGRK-01",
   "hf_id": "NVIDIA/Eagle-rerank-vl-1b-v2",
   "bundle": "eagle-rerank-vl-1b-v2.trtfb",
   "family": "eagle_vlm",

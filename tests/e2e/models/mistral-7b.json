@@ -1,5 +1,6 @@
 {
   "name": "mistral-7b",
+  "trace_id": "IT-E2E-MIST7B-01",
   "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
   "bundle": "mistral-7b.trtfb",
   "family": "mistral",

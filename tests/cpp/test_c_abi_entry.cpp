@@ -1,4 +1,15 @@
 // =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-ABI-CPP-01
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-CABI-01
+// Intent:         C ABI entry point validation and error handling
+// Preconditions:  TRT headers available
+// Postconditions: Null/empty paths produce errors, valid paths proceed
+// =============================================================================
+
+// =============================================================================
 // Test suite: C ABI entry points (trtf_create_pipeline, trtf_create_pipeline_ex,
 //   trtf_last_error, trtf_version, trtf_has_trt).
 //

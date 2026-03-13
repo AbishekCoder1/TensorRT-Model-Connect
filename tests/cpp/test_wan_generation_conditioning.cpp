@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-DIFF-CPP-05
+// Architecture:   ARCH-FAC-001
+// Unit Design:    UD-DIFF-01
+// Intent:         Wan generation conditioning: mask/null IDs, text conditioning, RoPE skip, deterministic latents
+// Preconditions:  Wan config with valid conditioning parameters
+// Postconditions: Mask and null IDs built correctly, encoder failures propagated, latents deterministic by seed
+// =============================================================================
+
 #include "runtime/trt/diffusion/wan_generation_conditioning.h"
 
 #include <cmath>
