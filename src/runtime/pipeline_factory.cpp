@@ -18,6 +18,7 @@
 #include "runtime/trt/diffusion/diffusion_types.h"
 #include "runtime/trt/diffusion/diffusion_preprocessor_weights_helpers.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -81,11 +82,73 @@ bool detect_add_special_tokens(const BundleSections& sections)
     return rest.find("false") == std::string::npos;
 }
 
+// Check if tokenizer.json describes a BPE model (vs WordPiece, Unigram, etc.)
+bool is_bpe_tokenizer_json(const BundleSections& sections)
+{
+    if (!sections.tokenizer_json_data || sections.tokenizer_json_data->empty())
+        return false;
+    // Quick string search — avoid full JSON parse just for type detection
+    std::string_view json(sections.tokenizer_json_data->data(),
+                          sections.tokenizer_json_data->size());
+    return json.find("\"type\":\"BPE\"") != std::string_view::npos
+        || json.find("\"type\": \"BPE\"") != std::string_view::npos;
+}
+
+std::shared_ptr<ITokenizer> try_create_native_bpe(
+    const BundleSections& sections, bool add_special, bool throw_on_failure)
+{
+    if (!sections.tokenizer_json_data
+        || sections.tokenizer_json_data->empty())
+        return nullptr;
+    try {
+        auto tok = CreateBpeTokenizer(
+            sections.tokenizer_json_data->data(),
+            sections.tokenizer_json_data->size(),
+            add_special);
+        if (tok) {
+            std::cerr << "[trtf] Using native BPE tokenizer" << std::endl;
+        }
+        return tok;
+    } catch (const std::exception& e) {
+        // "Not a BPE tokenizer" → non-BPE model (WordPiece, Unigram), allow fallback
+        std::string msg = e.what();
+        bool is_non_bpe = msg.find("Not a BPE") != std::string::npos;
+
+        if (throw_on_failure || (!is_non_bpe && is_bpe_tokenizer_json(sections))) {
+            // BPE model but native failed → error, no silent fallback
+            throw std::runtime_error(
+                std::string("Native BPE tokenizer failed for BPE model: ")
+                + e.what());
+        }
+        std::cerr << "[trtf] Native BPE unavailable (" << e.what()
+                  << "), falling back to HF Python" << std::endl;
+    }
+    return nullptr;
+}
+
 std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(
     const BundleSections& sections, const std::string& hf_python)
 {
-    if (hf_python.empty()) return nullptr;
     bool add_special = detect_add_special_tokens(sections);
+
+    // TRTF_NATIVE_TOKENIZER=1  → force native, throw on failure (no fallback)
+    // TRTF_NATIVE_TOKENIZER=0  → force HF Python, skip native entirely
+    // unset                    → try native first, fallback to HF Python
+    const char* env = std::getenv("TRTF_NATIVE_TOKENIZER");
+    bool native_disabled = false;
+    bool native_forced = false;
+    if (env) {
+        native_disabled = std::string(env) == "0";
+        native_forced = !native_disabled;
+    }
+
+    if (!native_disabled) {
+        auto tok = try_create_native_bpe(sections, add_special, native_forced);
+        if (tok) return tok;
+    }
+
+    // Fall back to HfPythonTokenizer
+    if (hf_python.empty()) return nullptr;
     try {
         auto result = extract_tokenizer_from_bundle(sections, hf_python, add_special);
         if (result.tokenizer) return std::move(result.tokenizer);

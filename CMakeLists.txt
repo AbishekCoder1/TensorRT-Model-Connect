@@ -67,6 +67,17 @@ if(TRTF_ENABLE_TRT)
   )
 endif()
 
+# --- nlohmann/json for BPE tokenizer JSON parsing ---
+include(FetchContent)
+set(JSON_Install OFF CACHE INTERNAL "")
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.11.3
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # --- Bundle-only runtime library ---
 add_library(trtf_core
   src/bundle/bundle_format.cpp
@@ -86,6 +97,7 @@ add_library(trtf_core
   src/tokenizer/hf_python_tokenizer.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
+  src/tokenizer/bpe_tokenizer.cpp
   src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
@@ -139,6 +151,11 @@ target_compile_options(trtf_core
     -Wall
     -Wextra
     -Wpedantic
+)
+
+# nlohmann/json: use include-only (header-only lib) to avoid export-set issues
+target_include_directories(trtf_core SYSTEM PRIVATE
+  ${nlohmann_json_SOURCE_DIR}/include
 )
 
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
@@ -232,6 +249,8 @@ trtf_add_test(test_audio_pipeline_new)
 trtf_add_test(test_vocab_tokenizer     NO_SRC_INCLUDE)
 trtf_add_test(test_hf_python_tokenizer)
 trtf_add_test(test_ipa_tokenizer)
+trtf_add_test(test_bpe_tokenizer)
+trtf_add_test(test_bpe_benchmark)
 
 # Vision / VL
 trtf_add_test(test_image_preprocessor)

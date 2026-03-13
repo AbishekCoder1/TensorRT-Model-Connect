@@ -28,4 +28,9 @@ std::unique_ptr<ITokenizer> CreateIpaTokenizer(
     const char* vocab_data, std::size_t vocab_size,
     const char* config_data, std::size_t config_size);
 
+std::unique_ptr<ITokenizer> CreateBpeTokenizer(
+    const char* tokenizer_json_data,
+    std::size_t tokenizer_json_size,
+    bool add_special_tokens = false);
+
 } // namespace trtf
