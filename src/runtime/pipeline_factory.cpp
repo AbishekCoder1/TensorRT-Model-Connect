@@ -23,10 +23,14 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include <algorithm>
+#include <cstring>
+
 #if TRTF_HAS_TRT
 #include "runtime/trt/core/trt_common.h"
 #include "runtime/trt/audio/audio_configs.h"
-#include "runtime/pipelines/audio_backend_factory.h"
+#include "runtime/trt/audio/mel_spectrogram.h"
+#include "trtf/runtime/trt/audio/subprocess_runner.h"
 #endif
 
 namespace trtf {
@@ -143,6 +147,18 @@ int32_t compute_kv_dim(const FastPathModelConfig& cfg)
     int32_t hd = (cfg.head_dim > 0) ? cfg.head_dim
         : ((cfg.num_heads > 0) ? cfg.hidden_size / cfg.num_heads : 128);
     return cfg.num_heads * hd;
+}
+
+std::unique_ptr<KvCache> make_coarse_kv_cache(
+    const FastPathModelConfig& cfg, cudaStream_t stream)
+{
+    int32_t hidden = (cfg.coarse_hidden_size > 0) ? cfg.coarse_hidden_size : cfg.hidden_size;
+    int32_t layers = (cfg.coarse_num_layers > 0) ? cfg.coarse_num_layers : cfg.num_layers;
+    int32_t heads  = (cfg.coarse_num_heads > 0)  ? cfg.coarse_num_heads  : cfg.num_heads;
+    int32_t hd     = (heads > 0) ? hidden / heads : 128;
+    int32_t max_cache = (cfg.coarse_max_cache_length > 0)
+        ? cfg.coarse_max_cache_length : cfg.max_cache_length;
+    return std::make_unique<KvCache>(layers, max_cache, heads * hd, stream);
 }
 
 RecurrentGenConfig make_recurrent_gen_config(const FastPathModelConfig& cfg)
@@ -543,7 +559,7 @@ std::unique_ptr<IPipeline> create_diffusion_pipeline(
     return create_wan_t2v_pipeline(parts, bundle.info.model_id);
 }
 
-// ─── Audio: Omni uses TrtModule; Magpie/Speech delegate to old backends ───
+// ─── Audio: Omni ───
 
 std::unique_ptr<IPipeline> create_omni_pipeline(
     const BundleSections& sections, const FastPathModelConfig& cfg,
@@ -608,20 +624,470 @@ std::unique_ptr<IPipeline> create_omni_pipeline(
         model_id);
 }
 
+// ─── Audio helpers ───
+
+std::vector<float> section_to_floats(const std::vector<char>* sec)
+{
+    if (!sec || sec->empty()) return {};
+    auto n = sec->size() / sizeof(float);
+    std::vector<float> out(n);
+    std::memcpy(out.data(), sec->data(), n * sizeof(float));
+    return out;
+}
+
+std::vector<int32_t> section_to_int32s(const std::vector<char>* sec)
+{
+    if (!sec || sec->empty()) return {};
+    auto n = sec->size() / sizeof(int32_t);
+    std::vector<int32_t> out(n);
+    std::memcpy(out.data(), sec->data(), n * sizeof(int32_t));
+    return out;
+}
+
+bool has_section_data(const std::vector<char>* d)
+{
+    return d && !d->empty();
+}
+
+std::shared_ptr<ITokenizer> make_ipa_tok(const BundleSections& s)
+{
+    if (!has_section_data(s.magpie_ipa_phoneme_dict_data) ||
+        !has_section_data(s.magpie_ipa_vocab_data))
+    {
+        throw std::runtime_error(
+            "Bundle missing IPA tokenizer sections (magpie_ipa_phoneme_dict, "
+            "magpie_ipa_vocab). Rebuild the bundle with the latest trtf-build.");
+    }
+    return CreateIpaTokenizer(
+        s.magpie_ipa_phoneme_dict_data->data(), s.magpie_ipa_phoneme_dict_data->size(),
+        has_section_data(s.magpie_ipa_heteronyms_data) ? s.magpie_ipa_heteronyms_data->data() : nullptr,
+        has_section_data(s.magpie_ipa_heteronyms_data) ? s.magpie_ipa_heteronyms_data->size() : 0,
+        s.magpie_ipa_vocab_data->data(), s.magpie_ipa_vocab_data->size(),
+        has_section_data(s.magpie_ipa_config_data) ? s.magpie_ipa_config_data->data() : nullptr,
+        has_section_data(s.magpie_ipa_config_data) ? s.magpie_ipa_config_data->size() : 0);
+}
+
+MagpieTTSConfig build_magpie_config(const FastPathModelConfig& cfg)
+{
+    MagpieTTSConfig magpie_cfg;
+    magpie_cfg.sample_rate = cfg.audio_sample_rate;
+    magpie_cfg.hidden_size = cfg.magpie_hidden_size > 0
+        ? cfg.magpie_hidden_size : cfg.hidden_size;
+    magpie_cfg.num_codebooks = cfg.magpie_num_codebooks;
+    magpie_cfg.codebook_size = cfg.magpie_codebook_size;
+    magpie_cfg.frames_per_second = cfg.magpie_fps;
+    magpie_cfg.num_speakers = cfg.magpie_num_speakers;
+    magpie_cfg.encoder_layers = cfg.magpie_encoder_layers;
+    magpie_cfg.decoder_layers = cfg.magpie_decoder_layers;
+    magpie_cfg.text_vocab_size = cfg.magpie_text_vocab_size;
+    magpie_cfg.max_source_positions = cfg.magpie_max_source_positions;
+    magpie_cfg.xa_n_heads = cfg.magpie_xa_n_heads;
+    magpie_cfg.xa_d_head = cfg.magpie_xa_d_head;
+    magpie_cfg.temperature = cfg.magpie_temperature;
+    magpie_cfg.cfg_scale = cfg.magpie_cfg_scale;
+    magpie_cfg.finished_limit_with_eot = cfg.magpie_finished_limit_with_eot;
+    return magpie_cfg;
+}
+
+int32_t compute_kv_dim_kv_heads(const FastPathModelConfig& cfg, int32_t default_dim)
+{
+    if (cfg.attention_size > 0) return cfg.attention_size;
+    if (cfg.num_kv_heads > 0 && cfg.head_dim > 0) return cfg.num_kv_heads * cfg.head_dim;
+    return default_dim;
+}
+
+void allocate_cross_kv_buffers(
+    int32_t num_layers, std::size_t buf_size,
+    std::vector<CudaBuffer>& cross_k, std::vector<CudaBuffer>& cross_v)
+{
+    cross_k.reserve(static_cast<std::size_t>(num_layers));
+    cross_v.reserve(static_cast<std::size_t>(num_layers));
+    for (int32_t i = 0; i < num_layers; ++i)
+    {
+        cross_k.emplace_back(buf_size);
+        cross_v.emplace_back(buf_size);
+    }
+}
+
+std::unique_ptr<TrtModule> extract_optional_module(
+    const std::vector<char>* plan, const char* label,
+    std::shared_ptr<CudaStream> shared_stream)
+{
+    auto loaded = try_load_trt_module_from_plan(plan, label, shared_stream);
+    if (loaded.module && loaded.module->ok())
+        return std::move(loaded.module);
+    return nullptr;
+}
+
+std::vector<std::unique_ptr<TrtModule>> load_depth_engines(
+    const BundleSections& sections,
+    std::shared_ptr<CudaStream> shared_stream)
+{
+    std::vector<std::unique_ptr<TrtModule>> depth_engines;
+    if (!sections.depth_engine_plans.empty())
+    {
+        for (std::size_t i = 0; i < sections.depth_engine_plans.size(); ++i)
+        {
+            auto m = extract_optional_module(
+                sections.depth_engine_plans[i],
+                ("speech depth_" + std::to_string(i)).c_str(),
+                shared_stream);
+            if (m) depth_engines.push_back(std::move(m));
+        }
+    }
+    if (depth_engines.empty())
+    {
+        auto m = extract_optional_module(
+            sections.depth_engine_plan_data, "speech depth", shared_stream);
+        if (m) depth_engines.push_back(std::move(m));
+    }
+    return depth_engines;
+}
+
+SpeechConfig build_speech_config_from_bundle(
+    const BundleSections& sections,
+    const FastPathModelConfig& cfg,
+    const std::string& hf_python)
+{
+    SpeechConfig sc;
+    sc.sample_rate = cfg.audio_sample_rate;
+    sc.temporal_hidden_size = cfg.hidden_size;
+    sc.temporal_num_layers = cfg.num_layers;
+    sc.num_codebooks = cfg.codec_n_codebooks;
+    sc.codebook_size = cfg.codebook_size;
+    sc.frame_rate = cfg.speech_frame_rate;
+    sc.depth_num_layers = cfg.fine_num_layers;
+    sc.depth_hidden_size = cfg.fine_hidden_size;
+    sc.depth_num_heads = cfg.fine_num_heads;
+    sc.depth_num_kv_heads = cfg.speech_depth_num_kv_heads;
+    sc.delays = cfg.speech_delays;
+    sc.text_initial_token_id = cfg.speech_text_initial_token_id;
+    sc.audio_initial_token_id = cfg.speech_audio_initial_token_id;
+    sc.text_padding_id = cfg.speech_text_padding_id;
+    sc.depth_temperature = cfg.speech_depth_temperature;
+    sc.depth_top_k = cfg.speech_depth_top_k;
+    sc.text_eos_token_id = cfg.id_eos;
+    sc.system_prompt = cfg.speech_system_prompt;
+    sc.text_prompt_ids = cfg.speech_text_prompt_ids;
+    sc.hf_python = hf_python;
+    sc.audio_embeddings = section_to_floats(sections.audio_embeddings_data);
+    sc.temporal_text_embedding = section_to_floats(sections.temporal_text_embedding_data);
+    sc.depth_text_embedding = section_to_floats(sections.depth_text_embedding_data);
+    sc.depth_audio_embeddings = section_to_floats(sections.depth_audio_embeddings_data);
+    sc.depth_projection = section_to_floats(sections.depth_projection_data);
+    return sc;
+}
+
+int32_t safe_embed_dim(const std::vector<float>& data, int32_t divisor)
+{
+    return (divisor > 0 && !data.empty())
+        ? static_cast<int32_t>(data.size()) / divisor : 0;
+}
+
+void infer_speech_vocab_sizes(SpeechConfig& sc, const FastPathModelConfig& cfg)
+{
+    const int32_t h = cfg.hidden_size;
+    const int32_t dh = cfg.fine_hidden_size;
+    sc.audio_vocab_size = safe_embed_dim(sc.audio_embeddings, cfg.codec_n_codebooks * h);
+    sc.temporal_text_vocab = safe_embed_dim(sc.temporal_text_embedding, h);
+    sc.depth_text_vocab = safe_embed_dim(sc.depth_text_embedding, dh);
+    sc.num_depformer_emb = safe_embed_dim(sc.depth_audio_embeddings,
+        sc.audio_vocab_size * dh);
+    sc.temporal_hidden_for_proj = (!sc.depth_projection.empty() && h > 0) ? h : 0;
+}
+
+FastPathModelConfig make_depth_engine_config(const FastPathModelConfig& cfg)
+{
+    FastPathModelConfig dc = cfg;
+    dc.num_layers = cfg.speech_depth_num_layers > 0 ? cfg.speech_depth_num_layers : cfg.fine_num_layers;
+    dc.hidden_size = cfg.speech_depth_hidden_size > 0 ? cfg.speech_depth_hidden_size : cfg.fine_hidden_size;
+    dc.num_heads = cfg.speech_depth_num_heads > 0 ? cfg.speech_depth_num_heads : cfg.fine_num_heads;
+    dc.num_kv_heads = cfg.speech_depth_num_kv_heads > 0
+        ? cfg.speech_depth_num_kv_heads : dc.num_heads;
+    dc.vocab_size = cfg.speech_codebook_size;
+    dc.head_dim = dc.hidden_size / std::max(dc.num_heads, 1);
+    dc.attention_size = dc.num_heads * dc.head_dim;
+    dc.max_cache_length = cfg.speech_num_codebooks + 2;
+    return dc;
+}
+
+// ─── Whisper: TrtModule(encoder) + TrtModule(decoder) + KvCache ───
+
+std::unique_ptr<IPipeline> create_whisper_pipeline(
+    const BundleSections& sections, const FastPathModelConfig& cfg,
+    const std::string& hf_python, const std::string& model_id)
+{
+    // Load encoder (stored as vision_engine_plan in Whisper bundles)
+    const auto* enc_plan = sections.vision_plan_data;
+    if (!enc_plan || enc_plan->empty()) enc_plan = sections.coarse_engine_plan_data;
+    auto enc_loaded = load_trt_module_from_plan(enc_plan, "whisper encoder");
+
+    // Load decoder (main engine_plan)
+    auto dec_loaded = load_trt_module_from_plan(
+        sections.plan_data, "whisper decoder", enc_loaded.stream);
+
+    // Build WhisperConfig
+    int32_t dl = (cfg.decoder_layers > 0) ? cfg.decoder_layers : cfg.num_layers;
+    WhisperConfig wc;
+    wc.num_mel_bins = cfg.num_mel_bins;
+    wc.max_source_positions = cfg.max_source_positions;
+    wc.max_target_positions = cfg.max_target_positions;
+    wc.encoder_layers = cfg.encoder_layers;
+    wc.decoder_layers = dl;
+    wc.eot_token_id = (cfg.eot_token_id >= 0) ? cfg.eot_token_id : cfg.id_eos;
+    wc.mel_length = cfg.mel_length;
+    wc.decoder_start_token_ids = cfg.decoder_start_token_ids;
+
+    // Create KvCache for decoder self-attention
+    cudaStream_t stream = dec_loaded.stream->get();
+    int32_t kv_dim = compute_kv_dim(cfg);
+    int32_t max_cache = cfg.max_cache_length;
+    auto cache = std::make_unique<KvCache>(dl, max_cache, kv_dim, stream);
+    if (!cache->ok()) throw std::runtime_error("Failed to create KvCache for Whisper decoder");
+
+    // Load mel filterbank + tokenizer
+    auto mel_fb = load_mel_filterbank(sections);
+    auto tok = create_tokenizer_from_bundle(sections, hf_python);
+
+    return std::make_unique<WhisperPipeline>(
+        std::move(enc_loaded.module), std::move(dec_loaded.module),
+        std::move(cache), std::move(wc), cfg.hidden_size, dl,
+        std::move(mel_fb),
+        cfg.mel_n_fft, cfg.mel_hop_length, cfg.mel_chunk_length, cfg.mel_sampling_rate,
+        stream, std::move(tok), model_id);
+}
+
+// ─── Bark: TrtModule(semantic) + TrtModule(coarse) + optional TrtModule(codec/fine) ───
+
+std::unique_ptr<IPipeline> create_bark_pipeline(
+    const BundleSections& sections, const FastPathModelConfig& cfg,
+    const std::string& hf_python, const std::string& model_id)
+{
+    // Load semantic engine (main plan)
+    auto sem_loaded = load_trt_module_from_plan(sections.plan_data, "bark semantic");
+
+    // Load coarse engine
+    auto coarse_loaded = load_trt_module_from_plan(
+        sections.coarse_engine_plan_data, "bark coarse", sem_loaded.stream);
+
+    cudaStream_t stream = sem_loaded.stream->get();
+
+    // Build BarkConfig
+    BarkConfig bark_cfg;
+    bark_cfg.sample_rate = cfg.audio_sample_rate;
+    bark_cfg.hidden_size = cfg.hidden_size;
+    bark_cfg.semantic_input_vocab = cfg.semantic_input_vocab;
+    bark_cfg.semantic_output_vocab = cfg.vocab_size;
+    bark_cfg.text_encoding_offset = cfg.text_encoding_offset;
+    bark_cfg.text_pad_token = cfg.text_pad_token;
+    bark_cfg.semantic_pad_token = cfg.semantic_pad_token;
+    bark_cfg.semantic_infer_token = cfg.semantic_infer_token;
+    bark_cfg.semantic_vocab_size = cfg.semantic_vocab_size;
+    bark_cfg.coarse_input_vocab = cfg.coarse_input_vocab;
+    bark_cfg.coarse_semantic_pad_token = cfg.coarse_semantic_pad_token;
+    bark_cfg.coarse_infer_token = cfg.coarse_infer_token;
+    bark_cfg.n_coarse_codebooks = cfg.n_coarse_codebooks;
+    bark_cfg.codebook_size = cfg.codebook_size;
+    bark_cfg.codec_seq_length = cfg.codec_seq_length;
+    bark_cfg.codec_upsample_factor = cfg.codec_upsample_factor;
+    bark_cfg.codec_n_codebooks = cfg.codec_n_codebooks;
+    bark_cfg.fine_hidden_size = cfg.fine_hidden_size;
+    bark_cfg.fine_n_lm_heads = cfg.fine_n_lm_heads;
+    bark_cfg.fine_codebook_size = cfg.fine_codebook_size;
+    bark_cfg.fine_seq_length = cfg.fine_seq_length;
+
+    // Create KvCaches for semantic and coarse stages
+    int32_t sem_kv_dim = compute_kv_dim(cfg);
+    auto sem_cache = std::make_unique<KvCache>(
+        cfg.num_layers, cfg.max_cache_length, sem_kv_dim, stream);
+
+    // Coarse engine may have different dimensions — resolve with semantic fallbacks
+    auto coarse_cache = make_coarse_kv_cache(cfg, stream);
+
+    // Load embeddings
+    auto sem_embed = section_to_floats(sections.semantic_embed_data);
+    auto coarse_embed = section_to_floats(sections.coarse_embed_data);
+
+    // Bark uses BertTokenizer WITHOUT special tokens ([CLS]/[SEP]).
+    // HF's BarkProcessor calls encode(text, add_special_tokens=False).
+    // The bundle's tokenizer_add_special_tokens field is unreliable here —
+    // always use false to match the HF Bark pipeline.
+    std::shared_ptr<ITokenizer> bark_tokenizer;
+    if (!hf_python.empty()) {
+        try {
+            auto tok_result = extract_tokenizer_from_bundle(
+                sections, hf_python, /*add_special_tokens=*/false);
+            if (tok_result.tokenizer)
+                bark_tokenizer = std::move(tok_result.tokenizer);
+        } catch (...) {}
+    }
+
+    auto pipeline = std::make_unique<BarkPipeline>(
+        std::move(sem_loaded.module), std::move(coarse_loaded.module),
+        std::move(sem_cache), std::move(coarse_cache),
+        std::move(sem_embed), std::move(coarse_embed),
+        std::move(bark_cfg), stream,
+        std::move(bark_tokenizer), model_id);
+
+    // Optional codec engine
+    auto codec_loaded = try_load_trt_module_from_plan(
+        sections.codec_engine_plan_data, "bark codec", sem_loaded.stream);
+    if (codec_loaded.module && codec_loaded.module->ok())
+        pipeline->set_codec_module(std::move(codec_loaded.module));
+
+    // Optional fine engine
+    auto fine_loaded = try_load_trt_module_from_plan(
+        sections.fine_engine_plan_data, "bark fine", sem_loaded.stream);
+    if (fine_loaded.module && fine_loaded.module->ok())
+    {
+        pipeline->set_fine_module(std::move(fine_loaded.module));
+        auto fe = section_to_floats(sections.fine_embed_data);
+        auto fp = section_to_floats(sections.fine_position_embed_data);
+        if (!fe.empty()) pipeline->set_fine_embeddings(std::move(fe), std::move(fp));
+    }
+
+    return pipeline;
+}
+
+// ─── Magpie: TrtModule(encoder) + TrtModule(decoder) + KvCache + IPA tokenizer ───
+
+std::unique_ptr<IPipeline> create_magpie_pipeline(
+    const BundleSections& sections, const FastPathModelConfig& cfg,
+    const std::string& model_id)
+{
+    auto shared_stream = std::make_shared<CudaStream>();
+
+    auto enc_loaded = load_trt_module_from_plan(
+        sections.vision_plan_data, "magpie encoder", shared_stream);
+    auto dec_loaded = load_trt_module_from_plan(
+        sections.plan_data, "magpie decoder", shared_stream);
+
+    cudaStream_t stream = shared_stream->get();
+
+    auto magpie_cfg = build_magpie_config(cfg);
+    int32_t kv_dim = (cfg.attention_size > 0) ? cfg.attention_size
+        : ((cfg.num_heads > 0 && cfg.head_dim > 0) ? cfg.num_heads * cfg.head_dim
+           : magpie_cfg.hidden_size);
+
+    auto decoder_cache = std::make_unique<KvCache>(
+        magpie_cfg.decoder_layers, cfg.max_cache_length, kv_dim, stream);
+    if (!decoder_cache->ok())
+        throw std::runtime_error("MagpiePipeline: failed to create decoder KvCache");
+
+    std::unique_ptr<KvCache> decoder_cache_uncond;
+    if (magpie_cfg.cfg_scale > 1.0F)
+    {
+        decoder_cache_uncond = std::make_unique<KvCache>(
+            magpie_cfg.decoder_layers, cfg.max_cache_length, kv_dim, stream);
+    }
+
+    const std::size_t enc_buf_size = static_cast<std::size_t>(magpie_cfg.max_source_positions) *
+        static_cast<std::size_t>(magpie_cfg.hidden_size) * sizeof(float);
+
+    std::vector<CudaBuffer> cross_k, cross_v;
+    allocate_cross_kv_buffers(magpie_cfg.decoder_layers, enc_buf_size, cross_k, cross_v);
+
+    std::vector<CudaBuffer> cross_k_uncond, cross_v_uncond;
+    if (magpie_cfg.cfg_scale > 1.0F)
+        allocate_cross_kv_buffers(magpie_cfg.decoder_layers, enc_buf_size,
+                                   cross_k_uncond, cross_v_uncond);
+
+    CudaBuffer encoder_output(enc_buf_size);
+    CudaBuffer encoder_output_uncond(magpie_cfg.cfg_scale > 1.0F ? enc_buf_size : 0);
+
+    auto codec_module = extract_optional_module(
+        sections.codec_engine_plan_data, "magpie codec", shared_stream);
+
+    auto tok = make_ipa_tok(sections);
+
+    return std::make_unique<MagpiePipeline>(
+        std::move(enc_loaded.module),
+        std::move(dec_loaded.module),
+        std::move(decoder_cache),
+        std::move(codec_module),
+        std::move(decoder_cache_uncond),
+        std::move(cross_k),
+        std::move(cross_v),
+        std::move(cross_k_uncond),
+        std::move(cross_v_uncond),
+        std::move(encoder_output),
+        std::move(encoder_output_uncond),
+        section_to_floats(sections.magpie_audio_embed_data),
+        section_to_floats(sections.magpie_text_embed_data),
+        section_to_floats(sections.magpie_context_embed_data),
+        section_to_int32s(sections.magpie_context_lengths_data),
+        std::move(magpie_cfg),
+        stream,
+        std::move(tok),
+        model_id);
+}
+
+// ─── Speech: TrtModule(temporal) + TrtModule(depth[]) + KvCache + mimi enc/dec ───
+
+std::unique_ptr<IPipeline> create_speech_pipeline(
+    const BundleSections& sections, const FastPathModelConfig& cfg,
+    const std::string& hf_python, const std::string& model_id)
+{
+    auto shared_stream = std::make_shared<CudaStream>();
+    cudaStream_t stream = shared_stream->get();
+
+    auto speech_cfg = build_speech_config_from_bundle(sections, cfg, hf_python);
+    infer_speech_vocab_sizes(speech_cfg, cfg);
+
+    auto temporal_loaded = load_trt_module_from_plan(
+        sections.plan_data, "speech temporal", shared_stream);
+
+    int32_t temporal_kv_dim = compute_kv_dim_kv_heads(cfg, cfg.hidden_size);
+
+    auto temporal_cache = std::make_unique<KvCache>(
+        cfg.num_layers, cfg.max_cache_length, temporal_kv_dim, stream);
+    if (!temporal_cache->ok())
+        throw std::runtime_error("SpeechPipeline: failed to create temporal KvCache");
+
+    auto depth_engines = load_depth_engines(sections, shared_stream);
+
+    const auto depth_cfg = make_depth_engine_config(cfg);
+    int32_t depth_kv_dim = compute_kv_dim_kv_heads(depth_cfg, depth_cfg.hidden_size);
+
+    auto depth_cache = std::make_unique<KvCache>(
+        depth_cfg.num_layers, depth_cfg.max_cache_length, depth_kv_dim, stream);
+    if (!depth_cache->ok())
+        throw std::runtime_error("SpeechPipeline: failed to create depth KvCache");
+
+    auto mimi_encoder = extract_optional_module(
+        sections.mimi_encoder_plan_data, "speech mimi_encoder", shared_stream);
+    auto mimi_decoder = extract_optional_module(
+        sections.mimi_decoder_plan_data, "speech mimi_decoder", shared_stream);
+
+    return std::make_unique<SpeechPipeline>(
+        std::move(mimi_encoder),
+        std::move(temporal_loaded.module),
+        std::move(temporal_cache),
+        std::move(depth_engines),
+        std::move(depth_cache),
+        std::move(mimi_decoder),
+        std::move(speech_cfg),
+        stream,
+        nullptr,  // subprocess_runner: default
+        model_id);
+}
+
+// ─── Audio strategy dispatch ───
+
 std::unique_ptr<IPipeline> create_audio_pipeline(
     const BundleFile& bundle, const BundleSections& sections,
     const FastPathModelConfig& cfg, const std::string& strategy,
     const std::string&, const std::string& hf_python)
 {
     if (strategy == "speech_to_text")
-        return make_whisper_pipeline_from_bundle(sections, cfg, hf_python, bundle.info.model_id);
+        return create_whisper_pipeline(sections, cfg, hf_python, bundle.info.model_id);
     if (strategy == "text_to_audio") {
         if (cfg.is_magpie_tts)
-            return make_magpie_pipeline_from_bundle(sections, cfg, hf_python, bundle.info.model_id);
-        return make_bark_pipeline_from_bundle(sections, cfg, hf_python, bundle.info.model_id);
+            return create_magpie_pipeline(sections, cfg, bundle.info.model_id);
+        return create_bark_pipeline(sections, cfg, hf_python, bundle.info.model_id);
     }
     if (strategy == "speech_to_speech")
-        return make_speech_pipeline_from_bundle(sections, cfg, hf_python, bundle.info.model_id);
+        return create_speech_pipeline(sections, cfg, hf_python, bundle.info.model_id);
     if (strategy == "omni_multimodal")
         return create_omni_pipeline(sections, cfg, hf_python, bundle.info.model_id);
     throw std::runtime_error("Unsupported audio strategy: " + strategy + " (bundle: " + bundle.info.model_id + ")");

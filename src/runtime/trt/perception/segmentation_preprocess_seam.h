@@ -1,7 +1,7 @@
 #pragma once
 
 #include "runtime/trt/core/decoded_image.h"
-#include "runtime/trt/perception/segmentation_backend.h"
+#include "runtime/trt/perception/perception_types.h"
 
 #include <algorithm>
 #include <cstdint>

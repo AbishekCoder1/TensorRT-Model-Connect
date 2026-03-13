@@ -175,22 +175,22 @@ class TextToAudioComparator:
             if not ratio_ok:
                 all_pass = False
 
-        # Mel-spectrogram and log-spectral distance (if reference audio available)
-        ref_samples = ref.data.get("audio_samples")
-        ref_wav_path = ref.data.get("wav_path", "")
-        if ref_samples is None and ref_wav_path:
-            ref_samples = self._read_wav_samples(ref_wav_path)
+        # Mel-spectrogram and log-spectral distance.
+        # Read samples from WAV files (both TRT and reference produce wav_path).
         trt_wav_path = trt.data.get("wav_path", "")
-        if ref_samples is not None and trt_wav_path:
+        ref_wav_path = ref.data.get("wav_path", "")
+        ref_samples = ref.data.get("audio_samples")
+        if trt_wav_path and (ref_wav_path or ref_samples is not None):
             try:
                 import numpy as np
-                import struct
 
-                # Read TRT WAV samples
                 trt_samples = self._read_wav_samples(trt_wav_path)
+                if ref_samples is None and ref_wav_path:
+                    ref_samples = self._read_wav_samples(ref_wav_path)
                 sample_rate = trt.data.get("sample_rate", 24000)
 
-                if trt_samples is not None and len(trt_samples) > 0:
+                if (trt_samples is not None and len(trt_samples) > 0
+                        and ref_samples is not None and len(ref_samples) > 0):
                     mel_dist = _mel_spectrogram_distance(
                         trt_samples, ref_samples, sample_rate)
                     mel_thresh = thresholds.get("mel_spectrogram_distance", 5.0)
@@ -210,6 +210,101 @@ class TextToAudioComparator:
                         all_pass = False
             except Exception as e:
                 logger.warning("spectral comparison failed: %s", e)
+
+        # Semantic token degeneration checks.
+        # Follows HF's pattern: verify intermediate token sequences are sane.
+        # HF checks exact golden token IDs; we check diversity + count since
+        # TRT uses different RNG and floating-point paths.
+        trt_stderr = trt.data.get("stderr", "")
+        if "Bark semantic: generated" in trt_stderr:
+            try:
+                import re
+                m = re.search(r"Bark semantic: generated (\d+) tokens", trt_stderr)
+                if m:
+                    n_sem = int(m.group(1))
+                    sem_min = thresholds.get("min_semantic_tokens", 10)
+                    sem_ok = n_sem >= sem_min
+                    metrics["semantic_token_count"] = MetricResult(
+                        value=n_sem, threshold=sem_min, operator=">=",
+                        passed=sem_ok,
+                        note="too few tokens suggests degenerate output")
+                    if not sem_ok:
+                        all_pass = False
+            except Exception:
+                pass
+
+        # Token diversity: if TRTF_BARK_DUMP produced a .sem_tokens file,
+        # verify the tokens aren't degenerate (>80% same value = stuck model).
+        sem_dump = trt.data.get("sem_tokens_path", "")
+        if sem_dump:
+            try:
+                import numpy as np
+                tokens = np.loadtxt(sem_dump, dtype=np.int32)
+                if len(tokens) > 10:
+                    # Count most frequent token
+                    values, counts = np.unique(tokens, return_counts=True)
+                    max_frac = float(counts.max()) / len(tokens)
+                    diversity_thresh = thresholds.get(
+                        "max_semantic_repeat_fraction", 0.5)
+                    div_ok = max_frac <= diversity_thresh
+                    metrics["semantic_diversity"] = MetricResult(
+                        value=1.0 - max_frac,
+                        threshold=1.0 - diversity_thresh,
+                        operator=">=",
+                        passed=div_ok,
+                        note=f"most common token is {max_frac*100:.0f}% of output")
+                    if not div_ok:
+                        all_pass = False
+            except Exception:
+                pass
+
+        # Golden token sequence matching (HF-style).
+        # If manifest provides golden_semantic_tokens or golden_coarse_tokens,
+        # compare first N TRT tokens against the golden reference (exact match).
+        # This is the strongest regression gate — catches any change in
+        # tokenization, embedding, attention, or sampling.
+        golden_sem = thresholds.get("golden_semantic_tokens")
+        if golden_sem and sem_dump:
+            try:
+                import numpy as np
+                trt_sem = np.loadtxt(sem_dump, dtype=np.int32)
+                golden = np.array(golden_sem, dtype=np.int32)
+                n = min(len(trt_sem), len(golden))
+                if n > 0:
+                    matches = int(np.sum(trt_sem[:n] == golden[:n]))
+                    match_rate = matches / n
+                    golden_ok = match_rate == 1.0
+                    metrics["golden_semantic_match"] = MetricResult(
+                        value=match_rate, threshold=1.0, operator=">=",
+                        passed=golden_ok,
+                        note=f"{matches}/{n} tokens match"
+                              + ("" if golden_ok else
+                                 f", first mismatch at pos {int(np.argmin(trt_sem[:n] == golden[:n]))}"))
+                    if not golden_ok:
+                        all_pass = False
+            except Exception as e:
+                logger.warning("golden semantic token check failed: %s", e)
+
+        coarse_dump = trt.data.get("coarse_tokens_path", "")
+        golden_coarse = thresholds.get("golden_coarse_tokens")
+        if golden_coarse and coarse_dump:
+            try:
+                import numpy as np
+                trt_coarse = np.loadtxt(coarse_dump, dtype=np.int32)
+                golden = np.array(golden_coarse, dtype=np.int32)
+                n = min(len(trt_coarse), len(golden))
+                if n > 0:
+                    matches = int(np.sum(trt_coarse[:n] == golden[:n]))
+                    match_rate = matches / n
+                    golden_ok = match_rate == 1.0
+                    metrics["golden_coarse_match"] = MetricResult(
+                        value=match_rate, threshold=1.0, operator=">=",
+                        passed=golden_ok,
+                        note=f"{matches}/{n} tokens match")
+                    if not golden_ok:
+                        all_pass = False
+            except Exception as e:
+                logger.warning("golden coarse token check failed: %s", e)
 
         # Codec token match (if token data is available from both sides)
         trt_tokens = trt.data.get("codec_tokens")

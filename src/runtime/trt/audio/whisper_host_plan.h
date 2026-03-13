@@ -1,6 +1,6 @@
 #pragma once
 
-#include "runtime/trt/audio/whisper_backend.h"
+#include "runtime/trt/audio/whisper_config.h"
 
 #include <algorithm>
 #include <cstddef>

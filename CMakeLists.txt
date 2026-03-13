@@ -77,26 +77,10 @@ add_library(trtf_core
   src/runtime/trt/core/trt_engine_lifecycle.cpp
   src/runtime/trt/core/trt_decode_runtime.cpp
   src/runtime/trt/core/device_kv_cache.cpp
-  src/runtime/trt/recurrent/mamba_step_state.cpp
-  src/runtime/trt/recurrent/mamba_decode_runtime.cpp
-  src/runtime/trt/recurrent/mamba_backend.cpp
-  src/runtime/trt/recurrent/rwkv_step_state.cpp
-  src/runtime/trt/recurrent/rwkv_decode_runtime.cpp
-  src/runtime/trt/recurrent/rwkv_backend.cpp
-  src/runtime/trt/audio/whisper_backend.cpp
-  src/runtime/trt/multimodal/vl_backend.cpp
+  # Legacy backends removed — all pipelines use TrtModule + KvCache directly
   src/runtime/trt/multimodal/image_preprocessor.cpp
   src/runtime/trt/multimodal/vision_engine.cpp
-  src/runtime/trt/encoder/encoder_backend.cpp
-  src/runtime/trt/encoder/embedding_backend.cpp
-  src/runtime/trt/encoder/reranking_backend.cpp
-  src/runtime/trt/perception/segmentation_backend.cpp
-  src/runtime/trt/perception/sam_backend.cpp
-  src/runtime/trt/perception/detection_backend.cpp
-  src/runtime/trt/perception/neural_operator_backend.cpp
-  src/runtime/trt/recurrent/hybrid_backend.cpp
-  src/runtime/trt/audio/bark_backend.cpp
-  # magpie_tts_backend.cpp and speech_backend.cpp removed — migrated to TrtModule in audio_pipeline.cpp
+  src/runtime/trt/audio/audio_types.cpp
   src/runtime/trt/diffusion/diffusion_preprocessor.cpp
   src/runtime/trt/core/stb_impl.cpp
   src/tokenizer/hf_python_tokenizer.cpp
@@ -122,7 +106,6 @@ add_library(trtf_core
   src/runtime/pipelines/wan_pipeline.cpp
   src/runtime/pipelines/z_image_pipeline.cpp
   src/runtime/pipelines/audio_pipeline.cpp
-  src/runtime/pipelines/audio_backend_factory.cpp
   src/runtime/trt/audio/audio_bundle_validation.cpp
 )
 

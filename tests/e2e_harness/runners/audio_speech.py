@@ -260,6 +260,10 @@ class TextToAudioRunner:
                 seed = case.determinism.get("seed")
                 if seed is not None:
                     env["TRTF_BARK_SEED"] = str(int(seed))
+            # Dump intermediate tokens for diversity/degeneration checks.
+            bark_dump_prefix = os.path.join(tmpdir, "bark_dump")
+            if case.family == "bark":
+                env["TRTF_BARK_DUMP"] = bark_dump_prefix
 
             t0 = time.monotonic()
             result = subprocess.run(
@@ -285,7 +289,7 @@ class TextToAudioRunner:
                 data["rms"] = rms
                 data["wav_exists"] = True
 
-                # Read WAV duration
+                # Read WAV duration (handles both float32 and int16 formats)
                 try:
                     import numpy as np
                     with open(wav_path, "rb") as f:
@@ -332,6 +336,20 @@ class TextToAudioRunner:
                 art_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
                 prompt_file = art_dir / "input_prompt.txt"
                 prompt_file.write_text(prompt, encoding="utf-8")
+
+            # Capture Bark token dump files for diversity and golden-token checks.
+            if case.family == "bark":
+                for suffix, key in [(".sem_tokens", "sem_tokens_path"),
+                                    (".coarse_tokens", "coarse_tokens_path")]:
+                    dump_file = bark_dump_prefix + suffix
+                    if os.path.exists(dump_file):
+                        if ctx.artifacts_dir:
+                            art_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+                            dst = str(art_dir / suffix.lstrip("."))
+                            shutil.copy2(dump_file, dst)
+                            data[key] = dst
+                        else:
+                            data[key] = dump_file
 
             return StageOutput(
                 stage_name=stage.name,

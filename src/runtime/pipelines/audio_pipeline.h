@@ -3,13 +3,15 @@
 // Audio pipelines: WhisperPipeline, BarkPipeline, MagpiePipeline,
 // SpeechPipeline, OmniPipeline.
 //
-// Whisper and Bark own old-style backends and delegate to them.
-// MagpiePipeline, SpeechPipeline, and OmniPipeline are migrated to TrtModule + KvCache (new runtime).
+// All audio pipelines use TrtModule + KvCache directly (fully migrated).
 
 #include "trtf/pipeline.h"
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/kv_cache.h"
+#include "cabi/bundle/bundle_helpers.h"
+#include "runtime/trt/audio/whisper_config.h"
+#include "runtime/trt/audio/bark_config.h"
 
 #include <cstdint>
 #include <memory>
@@ -25,10 +27,10 @@
 #include "runtime/trt/audio/speech_runtime_plan.h"
 #include "runtime/trt/core/trt_common.h"
 
-// Forward-declare old backends and interfaces to avoid pulling in heavy headers.
+#include <cuda_runtime_api.h>
+
+// Forward-declare interfaces to avoid pulling in heavy headers.
 namespace trtf {
-class WhisperBackend;
-class BarkBackend;
 class ISubprocessRunner;
 struct MelFilterbank;
 struct OmniConfig;
@@ -36,16 +38,25 @@ struct OmniConfig;
 
 namespace trtf {
 
+// ---------------------------------------------------------------------------
+// WhisperPipeline — uses TrtModule(encoder) + TrtModule(decoder) + KvCache
+// ---------------------------------------------------------------------------
+
 class WhisperPipeline final : public IPipeline {
 public:
-    /// Construct with a fully-initialized WhisperBackend.
     WhisperPipeline(
-        std::unique_ptr<WhisperBackend> backend,
+        std::unique_ptr<TrtModule> encoder,
+        std::unique_ptr<TrtModule> decoder,
+        std::unique_ptr<KvCache> cache,
+        WhisperConfig whisper_config,
+        int32_t hidden_size,
+        int32_t num_decoder_layers,
         MelFilterbank mel_fb,
         int32_t mel_n_fft,
         int32_t mel_hop_length,
         int32_t mel_chunk_length,
         int32_t mel_sampling_rate,
+        cudaStream_t stream,
         std::shared_ptr<ITokenizer> tokenizer = nullptr,
         std::string model_id_str = "");
 
@@ -59,22 +70,58 @@ public:
     const char* pipeline_type() const override { return "WhisperPipeline"; }
 
 private:
-    std::unique_ptr<WhisperBackend> backend_;
+    // Run encoder: mel -> encoder_output (on device)
+    void run_encoder(const float* mel_data, int32_t mel_bins, int32_t mel_length);
+
+    // Copy encoder output to per-layer cross-K/V buffers, bind to decoder
+    void setup_cross_attention(int32_t actual_enc_seq_len);
+
+    // Autoregressive decoder loop
+    std::vector<int32_t> run_decoder(
+        const std::vector<int32_t>& initial_tokens, int32_t max_new_tokens);
+
+    // Single decoder step: token -> logits, advances cache
+    void run_decoder_step(int32_t token_id, std::vector<float>& logits);
+
+    std::unique_ptr<TrtModule> encoder_;
+    std::unique_ptr<TrtModule> decoder_;
+    std::unique_ptr<KvCache> cache_;
+    WhisperConfig whisper_config_;
+    int32_t hidden_size_;
+    int32_t num_decoder_layers_;
     std::unique_ptr<MelFilterbank> mel_fb_;
-    std::shared_ptr<ITokenizer> tokenizer_;
     int32_t mel_n_fft_;
     int32_t mel_hop_length_;
     int32_t mel_chunk_length_;
     int32_t mel_sampling_rate_;
+    cudaStream_t stream_;
+    std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
+
+    // Cross-attention K/V device buffers (one per decoder layer)
+    std::vector<std::vector<uint8_t>> cross_k_host_;  // not used at runtime, just for sizing
+    std::vector<void*> cross_k_ptrs_;  // device pointers (allocated via cudaMalloc)
+    std::vector<void*> cross_v_ptrs_;
+    std::size_t cross_kv_bytes_{0};  // bytes per layer
 };
+
+// ---------------------------------------------------------------------------
+// BarkPipeline — uses TrtModule(semantic) + TrtModule(coarse) +
+//                TrtModule(codec) + TrtModule(fine) + KvCaches + embeddings
+// ---------------------------------------------------------------------------
 
 class BarkPipeline final : public IPipeline {
 public:
-    /// Construct with a fully-initialized BarkBackend.
     BarkPipeline(
-        std::unique_ptr<BarkBackend> backend,
-        std::shared_ptr<ITokenizer> tokenizer,
+        std::unique_ptr<TrtModule> semantic,
+        std::unique_ptr<TrtModule> coarse,
+        std::unique_ptr<KvCache> semantic_cache,
+        std::unique_ptr<KvCache> coarse_cache,
+        std::vector<float> semantic_embed,
+        std::vector<float> coarse_embed,
+        BarkConfig config,
+        cudaStream_t stream,
+        std::shared_ptr<ITokenizer> tokenizer = nullptr,
         std::string model_id_str = "");
 
     ~BarkPipeline() override;
@@ -84,15 +131,68 @@ public:
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "BarkPipeline"; }
 
+    // Set optional codec engine for waveform synthesis.
+    void set_codec_module(std::unique_ptr<TrtModule> codec);
+
+    // Set optional fine engine for codebook prediction.
+    void set_fine_module(std::unique_ptr<TrtModule> fine);
+
+    // Set fine embedding tables.
+    void set_fine_embeddings(std::vector<float> embed,
+                             std::vector<float> pos_embed);
+
 private:
-    std::unique_ptr<BarkBackend> backend_;
+    // Stage 1: text tokens -> semantic audio tokens
+    std::vector<int32_t> run_semantic(const std::vector<int32_t>& text_ids,
+                                       int32_t max_tokens);
+
+    // Stage 2: semantic tokens -> coarse acoustic codes
+    std::vector<int32_t> run_coarse(const std::vector<int32_t>& semantic_tokens);
+
+    // Stage 2.5: coarse codes -> fine codes (8 codebooks)
+    std::vector<int32_t> run_fine(const std::vector<int32_t>& coarse_tokens);
+
+    // Stage 3: codes -> waveform via codec
+    std::vector<float> run_codec(const std::vector<int32_t>& coarse_tokens);
+    std::vector<float> run_codec(const std::vector<int32_t>& codes_flat,
+                                  int32_t n_frames);
+
+    // One decoder step using TrtModule + KvCache
+    void run_step_with_embed(TrtModule& module, KvCache& cache,
+                              const float* embed, int32_t embed_dim,
+                              std::vector<float>& logits);
+
+    void run_step_with_token(TrtModule& module, KvCache& cache,
+                              int32_t token_id,
+                              std::vector<float>& logits);
+
+    // Top-k sampling with temperature
+    int32_t sample_top_k(const float* logits, int32_t vocab_size,
+                          float temperature, int32_t top_k);
+
+    std::unique_ptr<TrtModule> semantic_;
+    std::unique_ptr<TrtModule> coarse_;
+    std::unique_ptr<TrtModule> codec_;
+    std::unique_ptr<TrtModule> fine_;
+    std::unique_ptr<KvCache> semantic_cache_;
+    std::unique_ptr<KvCache> coarse_cache_;
+    std::vector<float> semantic_embed_;
+    std::vector<float> coarse_embed_;
+    std::vector<float> fine_embed_;
+    std::vector<float> fine_position_embed_;
+    BarkConfig config_;
+    cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
+    std::mt19937 rng_{std::random_device{}()};
 };
+
+// ---------------------------------------------------------------------------
+// Unchanged pipelines (still using old-style backends)
+// ---------------------------------------------------------------------------
 
 class MagpiePipeline final : public IPipeline {
 public:
-    /// Construct with TrtModules + KvCaches (new runtime).
     MagpiePipeline(
         std::unique_ptr<TrtModule> encoder,
         std::unique_ptr<TrtModule> decoder,
@@ -243,7 +343,6 @@ private:
 
 class SpeechPipeline final : public IPipeline {
 public:
-    /// Construct with TrtModules + KvCaches (new runtime).
     SpeechPipeline(
         std::unique_ptr<TrtModule> mimi_encoder,
         std::unique_ptr<TrtModule> temporal,
@@ -346,25 +445,16 @@ public:
     const char* pipeline_type() const override { return "OmniPipeline"; }
 
 private:
-    // Run one thinker decoder step: token_id -> logits. Updates cache.
     void run_thinker_step(int32_t token_id, std::vector<float>& logits);
-
-    // Run one talker decoder step with input embedding. Updates cache.
     void run_talker_embed_step(const float* embed_ptr, int32_t embed_size,
                                std::vector<float>& logits);
-
-    // Stage 0: Thinker generates text tokens and hidden states.
     std::vector<int32_t> run_thinker(
         const std::vector<int32_t>& input_ids,
         int32_t max_tokens,
         std::vector<float>& hidden_states_out);
-
-    // Stage 1: Talker converts hidden states to RVQ codec tokens.
     std::vector<int32_t> run_talker(
         const std::vector<float>& hidden_states,
         int32_t num_tokens);
-
-    // Stage 2: Code2Wav synthesizes waveform from RVQ tokens.
     std::vector<float> run_code2wav(
         const std::vector<int32_t>& codec_tokens,
         int32_t n_codebooks,

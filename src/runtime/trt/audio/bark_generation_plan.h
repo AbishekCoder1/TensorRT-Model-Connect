@@ -1,6 +1,6 @@
 #pragma once
 
-#include "runtime/trt/audio/bark_backend.h"
+#include "runtime/trt/audio/bark_config.h"
 
 #include <algorithm>
 #include <cmath>

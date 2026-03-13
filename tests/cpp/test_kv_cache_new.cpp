@@ -140,9 +140,19 @@ static void test_max_position_clamp()
     // Advance past max_length
     for (int i = 0; i < 10; ++i) cache.advance();
 
-    // Position should be clamped at max_length - 1
-    check(cache.position() <= cache.max_length() - 1,
-          "position clamped at max_length - 1");
+    // With sliding-window shift, position stays at max_length once full
+    // (all slots visible, new entries written at tail after shift)
+    check(cache.position() == cache.max_length(),
+          "position == max_length when cache full (sliding window)");
+
+    // Verify mask: all max_length slots + current slot should be visible
+    std::vector<float> mask;
+    cache.build_attention_mask(mask);
+    for (int i = 0; i < cache.max_length(); ++i)
+    {
+        check(mask[i] == 0.0f, "full cache: all cached slots visible");
+    }
+    check(mask.back() == 0.0f, "full cache: current slot visible");
 
     cudaStreamDestroy(stream);
 }

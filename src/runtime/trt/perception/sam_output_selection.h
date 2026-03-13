@@ -1,6 +1,6 @@
 #pragma once
 
-#include "runtime/trt/perception/sam_backend.h"
+#include "runtime/trt/perception/perception_types.h"
 
 #include <algorithm>
 #include <cstddef>

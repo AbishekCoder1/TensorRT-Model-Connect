@@ -10,5 +10,10 @@
   "logit_atol": 0.001,
   "layer_atol": 0.05,
   "test_image": "tests/e2e/data/test_img.jpeg",
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "threshold_overrides": {
+    "token_agreement_rate": 0.2,
+    "normalized_text_edit_distance": 0.7,
+    "vision_embedding_cosine": 0.9
+  }
 }

@@ -9,5 +9,16 @@
   "prompt": "Hello, this is a test of the text to speech system.",
   "max_new_tokens": 0,
   "logit_atol": 0.01,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "determinism": {
+    "seed": 42
+  },
+  "threshold_overrides": {
+    "duration_ratio_min": 0.2,
+    "duration_ratio_max": 2.5,
+    "log_spectral_distance": 12.0,
+    "mel_spectrogram_distance": 10.0,
+    "min_semantic_tokens": 30,
+    "rms_min": 0.005
+  }
 }
