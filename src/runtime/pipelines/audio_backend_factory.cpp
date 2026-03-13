@@ -1,6 +1,5 @@
 // Creates audio IPipeline instances from bundle sections.
-// Includes old backend headers (which define LegacyAudioResult) and
-// pipeline headers (which define AudioResult) without conflict.
+// Whisper and Bark use old-style backends; Magpie and Speech use TrtModule + KvCache.
 
 #include "runtime/pipelines/audio_backend_factory.h"
 #include "runtime/pipelines/audio_pipeline.h"
@@ -10,13 +9,16 @@
 #include "runtime/trt/core/trt_common.h"
 #include "runtime/trt/audio/whisper_backend.h"
 #include "runtime/trt/audio/bark_backend.h"
-#include "runtime/trt/audio/magpie_tts_backend.h"
-#include "runtime/trt/audio/speech_backend.h"
+#include "runtime/trt/audio/audio_configs.h"
 #include "runtime/trt/audio/mel_spectrogram.h"
+#include "trtf/runtime/trt/audio/subprocess_runner.h"
+#include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/kv_cache.h"
 #include "trtf/tokenizer.h"
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 
@@ -189,34 +191,10 @@ FastPathModelConfig make_depth_engine_config(const FastPathModelConfig& cfg)
     return dc;
 }
 
-void attach_depth_engines(
-    SpeechToSpeechBackend& be, const BundleSections& sections,
-    const FastPathModelConfig& depth_cfg)
-{
-    for (std::size_t i = 0; i < sections.depth_engine_plans.size(); ++i) {
-        auto d = try_deser(sections.depth_engine_plans[i],
-            ("depth_" + std::to_string(i)).c_str());
-        if (d.engine) {
-            auto de = make_decoder_engine(std::move(d.engine), std::move(d.context), depth_cfg);
-            be.set_depth_engine(static_cast<int32_t>(i), std::move(de));
-        }
-    }
-    if (sections.depth_engine_plans.empty()) {
-        auto d = try_deser(sections.depth_engine_plan_data, "depth");
-        if (d.engine) {
-            auto de = make_decoder_engine(std::move(d.engine), std::move(d.context), depth_cfg);
-            be.set_depth_engine(std::move(de));
-        }
-    }
-}
-
-void attach_mimi_engines(SpeechToSpeechBackend& be, const BundleSections& sections)
-{
-    auto me = try_deser(sections.mimi_encoder_plan_data, "mimi_enc");
-    if (me.engine) be.set_mimi_encoder(std::move(me.engine), std::move(me.context));
-    auto md = try_deser(sections.mimi_decoder_plan_data, "mimi_dec");
-    if (md.engine) be.set_mimi_decoder(std::move(md.engine), std::move(md.context));
-}
+// NOTE: attach_depth_engines() and attach_mimi_engines() were removed during
+// the TrtModule migration (Phase 2). The old SpeechToSpeechBackend is still
+// compiled for backward compatibility but the pipeline no longer uses it.
+// These helpers will be fully removed in Phase 3 cleanup.
 
 } // namespace
 
@@ -297,41 +275,255 @@ std::unique_ptr<IPipeline> make_bark_pipeline_from_bundle(
     return std::make_unique<BarkPipeline>(std::move(be), std::move(tok), model_id);
 }
 
+namespace {
+
+struct MagpieLoadedModule {
+    std::unique_ptr<TrtModule> module;
+    std::shared_ptr<CudaStream> stream;
+};
+
+MagpieLoadedModule load_magpie_trt_module(
+    const std::vector<char>* plan, const char* label,
+    std::shared_ptr<CudaStream> shared_stream = nullptr)
+{
+    if (!plan || plan->empty())
+        throw std::runtime_error(std::string("Bundle missing ") + label);
+    auto trt_runtime = create_trt_runtime();
+    if (!trt_runtime)
+        throw std::runtime_error(std::string("Failed to create TRT runtime for ") + label);
+    auto engine = TrtUniquePtr<nvinfer1::ICudaEngine>(
+        trt_runtime->deserializeCudaEngine(plan->data(), plan->size()));
+    if (!engine)
+        throw std::runtime_error(std::string("Failed to deserialize ") + label);
+    auto stream = shared_stream ? shared_stream : std::make_shared<CudaStream>();
+    if (!stream->ok())
+        throw std::runtime_error("Failed to create CUDA stream");
+    MagpieLoadedModule result;
+    result.stream = stream;
+    result.module = std::make_unique<TrtModule>(engine.get(), stream->get());
+    if (!result.module->ok())
+        throw std::runtime_error(std::string("Failed to create TrtModule for ") + label);
+    nvinfer1::ICudaEngine* raw_engine = engine.release();
+    result.module->keep_alive(std::shared_ptr<nvinfer1::ICudaEngine>(
+        raw_engine, [](nvinfer1::ICudaEngine* p) { delete p; }));
+    result.module->keep_alive(stream);
+    return result;
+}
+
+MagpieLoadedModule try_load_magpie_trt_module(
+    const std::vector<char>* plan, const char* label,
+    std::shared_ptr<CudaStream> shared_stream)
+{
+    if (!plan || plan->empty()) return MagpieLoadedModule{};
+    try { return load_magpie_trt_module(plan, label, shared_stream); }
+    catch (...) {
+        std::cerr << "[trtf] WARNING: failed to load optional engine: " << label << std::endl;
+        return MagpieLoadedModule{};
+    }
+}
+
+MagpieTTSConfig build_magpie_config(const FastPathModelConfig& cfg)
+{
+    MagpieTTSConfig magpie_cfg;
+    magpie_cfg.sample_rate = cfg.audio_sample_rate;
+    magpie_cfg.hidden_size = cfg.magpie_hidden_size > 0
+        ? cfg.magpie_hidden_size : cfg.hidden_size;
+    magpie_cfg.num_codebooks = cfg.magpie_num_codebooks;
+    magpie_cfg.codebook_size = cfg.magpie_codebook_size;
+    magpie_cfg.frames_per_second = cfg.magpie_fps;
+    magpie_cfg.num_speakers = cfg.magpie_num_speakers;
+    magpie_cfg.encoder_layers = cfg.magpie_encoder_layers;
+    magpie_cfg.decoder_layers = cfg.magpie_decoder_layers;
+    magpie_cfg.text_vocab_size = cfg.magpie_text_vocab_size;
+    magpie_cfg.max_source_positions = cfg.magpie_max_source_positions;
+    magpie_cfg.xa_n_heads = cfg.magpie_xa_n_heads;
+    magpie_cfg.xa_d_head = cfg.magpie_xa_d_head;
+    magpie_cfg.temperature = cfg.magpie_temperature;
+    magpie_cfg.cfg_scale = cfg.magpie_cfg_scale;
+    magpie_cfg.finished_limit_with_eot = cfg.magpie_finished_limit_with_eot;
+    return magpie_cfg;
+}
+
+int32_t compute_kv_dim(const FastPathModelConfig& cfg, int32_t default_dim)
+{
+    if (cfg.attention_size > 0) return cfg.attention_size;
+    if (cfg.num_heads > 0 && cfg.head_dim > 0) return cfg.num_heads * cfg.head_dim;
+    return default_dim;
+}
+
+int32_t compute_kv_dim_kv_heads(const FastPathModelConfig& cfg, int32_t default_dim)
+{
+    if (cfg.attention_size > 0) return cfg.attention_size;
+    if (cfg.num_kv_heads > 0 && cfg.head_dim > 0) return cfg.num_kv_heads * cfg.head_dim;
+    return default_dim;
+}
+
+void allocate_cross_kv_buffers(
+    int32_t num_layers, std::size_t buf_size,
+    std::vector<CudaBuffer>& cross_k, std::vector<CudaBuffer>& cross_v)
+{
+    cross_k.reserve(static_cast<std::size_t>(num_layers));
+    cross_v.reserve(static_cast<std::size_t>(num_layers));
+    for (int32_t i = 0; i < num_layers; ++i)
+    {
+        cross_k.emplace_back(buf_size);
+        cross_v.emplace_back(buf_size);
+    }
+}
+
+std::unique_ptr<TrtModule> extract_optional_module(
+    const std::vector<char>* plan, const char* label,
+    std::shared_ptr<CudaStream> shared_stream)
+{
+    auto loaded = try_load_magpie_trt_module(plan, label, shared_stream);
+    if (loaded.module && loaded.module->ok())
+        return std::move(loaded.module);
+    return nullptr;
+}
+
+std::vector<std::unique_ptr<TrtModule>> load_depth_engines(
+    const BundleSections& sections,
+    std::shared_ptr<CudaStream> shared_stream)
+{
+    std::vector<std::unique_ptr<TrtModule>> depth_engines;
+
+    if (!sections.depth_engine_plans.empty())
+    {
+        for (std::size_t i = 0; i < sections.depth_engine_plans.size(); ++i)
+        {
+            auto m = extract_optional_module(
+                sections.depth_engine_plans[i],
+                ("speech depth_" + std::to_string(i)).c_str(),
+                shared_stream);
+            if (m) depth_engines.push_back(std::move(m));
+        }
+    }
+    if (depth_engines.empty())
+    {
+        auto m = extract_optional_module(
+            sections.depth_engine_plan_data, "speech depth", shared_stream);
+        if (m) depth_engines.push_back(std::move(m));
+    }
+    return depth_engines;
+}
+
+} // anonymous namespace
+
 std::unique_ptr<IPipeline> make_magpie_pipeline_from_bundle(
     const BundleSections& sections, const FastPathModelConfig& cfg,
-    const std::string& hf_python, const std::string& model_id)
+    const std::string& /*hf_python*/, const std::string& model_id)
 {
-    // MagpieTTS bundles store the text encoder as vision_engine_plan and the
-    // autoregressive decoder as the main engine_plan.
-    auto enc = deser(sections.vision_plan_data, "magpie encoder");
-    auto dec = deser(sections.plan_data, "magpie decoder");
-    auto de = make_decoder_engine(std::move(dec.engine), std::move(dec.context), cfg);
-    set_decoder_vocab_from_logits(*de);
-    auto be = CreateMagpieTTSBackend(std::move(de), std::move(enc.engine), std::move(enc.context),
-        to_floats(sections.magpie_audio_embed_data), to_floats(sections.magpie_text_embed_data),
-        to_floats(sections.magpie_context_embed_data), to_int32s(sections.magpie_context_lengths_data), cfg);
-    auto codec = try_deser(sections.codec_engine_plan_data, "magpie codec");
-    if (codec.engine) be->set_codec_engine(std::move(codec.engine), std::move(codec.context));
+    auto shared_stream = std::make_shared<CudaStream>();
+
+    auto enc_loaded = load_magpie_trt_module(
+        sections.vision_plan_data, "magpie encoder", shared_stream);
+    auto dec_loaded = load_magpie_trt_module(
+        sections.plan_data, "magpie decoder", shared_stream);
+
+    cudaStream_t stream = shared_stream->get();
+
+    auto magpie_cfg = build_magpie_config(cfg);
+    int32_t kv_dim = compute_kv_dim(cfg, magpie_cfg.hidden_size);
+
+    auto decoder_cache = std::make_unique<KvCache>(
+        magpie_cfg.decoder_layers, cfg.max_cache_length, kv_dim, stream);
+    if (!decoder_cache->ok())
+        throw std::runtime_error("MagpiePipeline: failed to create decoder KvCache");
+
+    std::unique_ptr<KvCache> decoder_cache_uncond;
+    if (magpie_cfg.cfg_scale > 1.0F)
+    {
+        decoder_cache_uncond = std::make_unique<KvCache>(
+            magpie_cfg.decoder_layers, cfg.max_cache_length, kv_dim, stream);
+    }
+
+    const std::size_t enc_buf_size = static_cast<std::size_t>(magpie_cfg.max_source_positions) *
+        static_cast<std::size_t>(magpie_cfg.hidden_size) * sizeof(float);
+
+    std::vector<CudaBuffer> cross_k, cross_v;
+    allocate_cross_kv_buffers(magpie_cfg.decoder_layers, enc_buf_size, cross_k, cross_v);
+
+    std::vector<CudaBuffer> cross_k_uncond, cross_v_uncond;
+    if (magpie_cfg.cfg_scale > 1.0F)
+        allocate_cross_kv_buffers(magpie_cfg.decoder_layers, enc_buf_size,
+                                   cross_k_uncond, cross_v_uncond);
+
+    CudaBuffer encoder_output(enc_buf_size);
+    CudaBuffer encoder_output_uncond(magpie_cfg.cfg_scale > 1.0F ? enc_buf_size : 0);
+
+    auto codec_module = extract_optional_module(
+        sections.codec_engine_plan_data, "magpie codec", shared_stream);
+
     auto tok = make_ipa_tok(sections);
-    return std::make_unique<MagpiePipeline>(std::move(be), std::move(tok), model_id);
+
+    return std::make_unique<MagpiePipeline>(
+        std::move(enc_loaded.module),
+        std::move(dec_loaded.module),
+        std::move(decoder_cache),
+        std::move(codec_module),
+        std::move(decoder_cache_uncond),
+        std::move(cross_k),
+        std::move(cross_v),
+        std::move(cross_k_uncond),
+        std::move(cross_v_uncond),
+        std::move(encoder_output),
+        std::move(encoder_output_uncond),
+        to_floats(sections.magpie_audio_embed_data),
+        to_floats(sections.magpie_text_embed_data),
+        to_floats(sections.magpie_context_embed_data),
+        to_int32s(sections.magpie_context_lengths_data),
+        std::move(magpie_cfg),
+        stream,
+        std::move(tok),
+        model_id);
 }
 
 std::unique_ptr<IPipeline> make_speech_pipeline_from_bundle(
     const BundleSections& sections, const FastPathModelConfig& cfg,
     const std::string& hf_python, const std::string& model_id)
 {
-    auto te = deser(sections.plan_data, "temporal");
-    auto teng = make_decoder_engine(std::move(te.engine), std::move(te.context), cfg);
+    auto shared_stream = std::make_shared<CudaStream>();
+    cudaStream_t stream = shared_stream->get();
 
     auto speech_cfg = build_speech_config_from_bundle(sections, cfg, hf_python);
     infer_speech_vocab_sizes(speech_cfg, cfg);
 
-    auto be = std::make_unique<SpeechToSpeechBackend>(
-        std::move(teng), std::move(speech_cfg));
+    auto temporal_loaded = load_magpie_trt_module(
+        sections.plan_data, "speech temporal", shared_stream);
 
-    attach_depth_engines(*be, sections, make_depth_engine_config(cfg));
-    attach_mimi_engines(*be, sections);
-    return std::make_unique<SpeechPipeline>(std::move(be), model_id);
+    int32_t temporal_kv_dim = compute_kv_dim_kv_heads(cfg, cfg.hidden_size);
+
+    auto temporal_cache = std::make_unique<KvCache>(
+        cfg.num_layers, cfg.max_cache_length, temporal_kv_dim, stream);
+    if (!temporal_cache->ok())
+        throw std::runtime_error("SpeechPipeline: failed to create temporal KvCache");
+
+    auto depth_engines = load_depth_engines(sections, shared_stream);
+
+    const auto depth_cfg = make_depth_engine_config(cfg);
+    int32_t depth_kv_dim = compute_kv_dim_kv_heads(depth_cfg, depth_cfg.hidden_size);
+
+    auto depth_cache = std::make_unique<KvCache>(
+        depth_cfg.num_layers, depth_cfg.max_cache_length, depth_kv_dim, stream);
+    if (!depth_cache->ok())
+        throw std::runtime_error("SpeechPipeline: failed to create depth KvCache");
+
+    auto mimi_encoder = extract_optional_module(
+        sections.mimi_encoder_plan_data, "speech mimi_encoder", shared_stream);
+    auto mimi_decoder = extract_optional_module(
+        sections.mimi_decoder_plan_data, "speech mimi_decoder", shared_stream);
+
+    return std::make_unique<SpeechPipeline>(
+        std::move(mimi_encoder),
+        std::move(temporal_loaded.module),
+        std::move(temporal_cache),
+        std::move(depth_engines),
+        std::move(depth_cache),
+        std::move(mimi_decoder),
+        std::move(speech_cfg),
+        stream,
+        nullptr,  // subprocess_runner: default
+        model_id);
 }
 
 } // namespace trtf

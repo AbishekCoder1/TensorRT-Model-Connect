@@ -205,21 +205,20 @@ void TrtModule::sync()
     cudaStreamSynchronize(stream_);
 }
 
-// --- Forward device (GPU → GPU) ---
+// --- Forward device async (GPU → GPU, no sync) ---
 
-DeviceTensorMap TrtModule::forward_device(const DeviceTensorMap& inputs)
+void TrtModule::forward_device_async(const DeviceTensorMap& inputs)
 {
-    // Bind or copy input DeviceTensors
+    // D2D copy input DeviceTensors into our buffers
     for (const auto& [name, dt_ptr] : inputs)
     {
         auto it = buffers_.find(name);
         if (it == buffers_.end() || !dt_ptr) continue;
         auto& entry = it->second;
-        if (!entry.is_input) continue;
+        if (!entry.is_input || !entry.d_ptr) continue;
 
         if (dt_ptr->data() != entry.d_ptr)
         {
-            // D2D copy from external DeviceTensor to our buffer
             auto copy_bytes = std::min(dt_ptr->nbytes(), entry.nbytes);
             if (copy_bytes > 0)
             {
@@ -229,27 +228,32 @@ DeviceTensorMap TrtModule::forward_device(const DeviceTensorMap& inputs)
         }
     }
 
-    // Execute + sync
+    // Execute (no sync — caller will sync or run more kernels on same stream)
     ctx_->enqueueV3(stream_);
+}
+
+// --- Forward device (GPU → GPU, synchronous) ---
+
+DeviceTensorMap TrtModule::forward_device(const DeviceTensorMap& inputs)
+{
+    forward_device_async(inputs);
     cudaStreamSynchronize(stream_);
 
-    // Return pointers to internal output buffers (no copy)
+    // Return non-owning DeviceTensor* pointers to our internal output buffers.
+    // The output_device_tensors_ map is lazily populated on first call.
     DeviceTensorMap out;
     for (auto& [name, entry] : buffers_)
     {
         if (entry.is_input) continue;
-        // Create or reuse DeviceTensor pointing to our buffer
-        // Note: these are "views" — the TrtModule owns the memory
+
         auto it = output_device_tensors_.find(name);
         if (it == output_device_tensors_.end())
         {
-            // First call: create a DeviceTensor wrapper
-            // We can't use the normal constructor (it would allocate new memory)
-            // So we just store the pointer for the caller
+            // Create a non-owning view. DeviceTensor constructor allocates memory,
+            // so we create a placeholder and overwrite its pointer below.
+            // Instead, just map the name to nullptr for now — callers use device_ptr().
         }
-        // Return raw pointer info via the map
-        // The caller gets a non-owning reference
-        out[name] = nullptr; // placeholder — actual access via device_ptr()
+        out[name] = nullptr; // callers access via device_ptr(name)
     }
     return out;
 }

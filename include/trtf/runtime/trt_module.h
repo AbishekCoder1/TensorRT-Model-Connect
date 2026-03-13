@@ -52,9 +52,17 @@ public:
     // Returns pointers to the module's internal output buffers.
     DeviceTensorMap forward_device(const DeviceTensorMap& inputs);
 
+    // GPU → execute (no sync, no D2H). Caller calls sync() later.
+    // Enables GPU-resident decode loops: forward_device_async() → device
+    // kernels on same stream → periodic sync().
+    void forward_device_async(const DeviceTensorMap& inputs);
+
     // Async: upload + enqueue (no sync). Caller calls sync() later.
     void forward_async(const TensorMap& inputs);
     void sync();
+
+    // Access the CUDA stream used by this module.
+    cudaStream_t stream() const { return stream_; }
 
     // === Introspection ===
 

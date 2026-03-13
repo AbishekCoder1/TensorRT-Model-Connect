@@ -96,8 +96,7 @@ add_library(trtf_core
   src/runtime/trt/perception/neural_operator_backend.cpp
   src/runtime/trt/recurrent/hybrid_backend.cpp
   src/runtime/trt/audio/bark_backend.cpp
-  src/runtime/trt/audio/magpie_tts_backend.cpp
-  src/runtime/trt/audio/speech_backend.cpp
+  # magpie_tts_backend.cpp and speech_backend.cpp removed — migrated to TrtModule in audio_pipeline.cpp
   src/runtime/trt/diffusion/diffusion_preprocessor.cpp
   src/runtime/trt/core/stb_impl.cpp
   src/tokenizer/hf_python_tokenizer.cpp

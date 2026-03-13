@@ -240,3 +240,53 @@ void magpie_cfg_interpolate_device(
 }
 
 } // namespace trtf
+
+// ---------------------------------------------------------------------------
+// DeviceOps: public API wrapping the kernels above.
+// ---------------------------------------------------------------------------
+
+namespace trtf {
+namespace device_ops {
+
+void greedy_sample_codebooks(
+    const float* d_logits, int32_t num_codebooks, int32_t codebook_size,
+    int32_t audio_range, int32_t* d_codes, int32_t* d_full_argmax,
+    cudaStream_t stream)
+{
+    trtf::magpie_greedy_sample_device(
+        d_logits, num_codebooks, codebook_size, audio_range,
+        d_codes, d_full_argmax, stream);
+}
+
+void gather_average_embeddings(
+    const float* d_embed_table, const int32_t* d_token_ids,
+    int32_t num_entries, int32_t vocab_size, int32_t hidden_size,
+    float* d_output, cudaStream_t stream)
+{
+    trtf::magpie_gather_average_embed_device(
+        d_embed_table, d_token_ids,
+        num_entries, vocab_size, hidden_size,
+        d_output, stream);
+}
+
+void cfg_interpolate(
+    const float* d_cond, const float* d_uncond, float* d_out,
+    float scale, int32_t n, cudaStream_t stream)
+{
+    trtf::magpie_cfg_interpolate_device(
+        d_cond, d_uncond, d_out, scale, n, stream);
+}
+
+void scatter_codes_check_eos(
+    const int32_t* d_codes, int32_t* d_all_codes, int32_t* d_prev_codes,
+    const int32_t* d_full_argmax, int32_t* d_eos_flag,
+    int32_t frame, int32_t num_codebooks, int32_t eos_token,
+    cudaStream_t stream)
+{
+    trtf::magpie_scatter_codes_device(
+        d_codes, d_all_codes, d_prev_codes, d_full_argmax, d_eos_flag,
+        frame, num_codebooks, eos_token, stream);
+}
+
+} // namespace device_ops
+} // namespace trtf
