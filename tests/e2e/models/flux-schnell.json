@@ -5,7 +5,7 @@
   "bundle": "flux-schnell.trtfb",
   "model_type": "flux",
   "family": "flux",
-  "runtime_strategy": "diffusion",
+  "runtime_strategy": "diffusion_flux",
   "description": "FLUX.1-schnell text-to-image (4-step distilled, no guidance)",
   "build_args": {
     "max_cache_length": 256

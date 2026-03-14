@@ -30,7 +30,7 @@ from ..checkpoint_mapper import WeightDict
 
 class PixArtPlugin:
     name = "pixart"
-    runtime_strategy = "diffusion"
+    runtime_strategy = "diffusion_pixart"
     pipeline_classes = [
         "PixArtSigmaPipeline",
         "PixArtAlphaPipeline",

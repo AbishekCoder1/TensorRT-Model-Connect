@@ -11,7 +11,7 @@ from ..checkpoint_mapper import WeightDict
 
 class WanT2VPlugin:
     name = "wan_t2v"
-    runtime_strategy = "diffusion"
+    runtime_strategy = "diffusion_wan"
     pipeline_classes = ["WanPipeline", "WanVideoToVideoPipeline"]
 
     # Wan2.1-T2V-1.3B architecture params

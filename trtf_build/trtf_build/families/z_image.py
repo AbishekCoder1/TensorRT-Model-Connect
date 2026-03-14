@@ -33,7 +33,7 @@ from ..checkpoint_mapper import WeightDict
 
 class ZImagePlugin:
     name = "z_image"
-    runtime_strategy = "diffusion"
+    runtime_strategy = "diffusion_zimage"
     pipeline_classes = ["ZImagePipeline"]
 
     # Z-Image Turbo architecture params

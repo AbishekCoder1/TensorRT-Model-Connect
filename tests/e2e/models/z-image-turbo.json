@@ -5,7 +5,7 @@
   "bundle": "z-image-turbo.trtfb",
   "model_type": "z_image",
   "family": "z_image",
-  "runtime_strategy": "diffusion",
+  "runtime_strategy": "diffusion_zimage",
   "description": "Z-Image-Turbo text-to-image (Qwen3 encoder + ZImage DiT + VAE)",
   "build_args": {
     "max_cache_length": 256

@@ -24,7 +24,6 @@
 #include "trtf/runtime/trt/audio/speech_decode_stop_policy.h"
 #include "runtime/trt/core/trt_engine_lifecycle.h"
 #include "runtime/trt/core/trt_decode_runtime.h"
-#include "cabi/bundle/bundle_helpers.h"
 #include "utils/wav_reader.h"
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt/audio/subprocess_runner.h"

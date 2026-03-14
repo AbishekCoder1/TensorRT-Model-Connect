@@ -82,8 +82,6 @@ FetchContent_MakeAvailable(nlohmann_json)
 add_library(trtf_core
   src/bundle/bundle_format.cpp
   src/cabi/api/trtf_c.cpp
-  src/cabi/config/fast_path_config.cpp
-  src/cabi/bundle/bundle_helpers.cpp
   src/runtime/trt/core/trt_common.cpp
   src/runtime/trt/core/trt_engine_lifecycle.cpp
   src/runtime/trt/core/trt_decode_runtime.cpp
@@ -110,6 +108,32 @@ add_library(trtf_core
   src/runtime/trt/core/recurrent_state.cpp
   src/runtime/trt/core/flow_match_euler_scheduler.cpp
   src/runtime/pipeline_factory.cpp
+  src/runtime/pipeline_registry.cpp
+  src/runtime/pipeline_plugin.cpp
+  src/bundle/bundle_view.cpp
+  # Plugin shared helpers
+  src/runtime/plugins/shared/plugin_helpers.cpp
+  src/runtime/plugins/shared/diffusion_helpers.cpp
+  src/runtime/plugins/shared/audio_helpers.cpp
+  src/runtime/plugins/force_link_plugins.cpp
+  # Pipeline plugins (16 files — self-registering via REGISTER_PIPELINE_PLUGIN)
+  src/runtime/plugins/decoder_plugin.cpp
+  src/runtime/plugins/ssm_plugin.cpp
+  src/runtime/plugins/rwkv_plugin.cpp
+  src/runtime/plugins/hybrid_plugin.cpp
+  src/runtime/plugins/encoder_plugin.cpp
+  src/runtime/plugins/segmentation_plugin.cpp
+  src/runtime/plugins/object_detection_plugin.cpp
+  src/runtime/plugins/vl_plugin.cpp
+  src/runtime/plugins/whisper_plugin.cpp
+  src/runtime/plugins/bark_plugin.cpp
+  src/runtime/plugins/magpie_plugin.cpp
+  src/runtime/plugins/speech_plugin.cpp
+  src/runtime/plugins/omni_plugin.cpp
+  src/runtime/plugins/flux_plugin.cpp
+  src/runtime/plugins/wan_plugin.cpp
+  src/runtime/plugins/zimage_plugin.cpp
+  # Pipeline implementations
   src/runtime/pipelines/text_generation_pipeline.cpp
   src/runtime/pipelines/recurrent_pipeline.cpp
   src/runtime/pipelines/encoder_pipeline.cpp
@@ -207,14 +231,14 @@ endfunction()
 # Bundle / format
 trtf_add_test(test_bundle_format)
 trtf_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
-trtf_add_test(test_bundle_helpers)
+trtf_add_test(test_bundle_view)
+trtf_add_test(test_pipeline_registry)
 
 # C ABI
 trtf_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
 trtf_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE)
 
 # Config / parsing
-trtf_add_test(test_fast_path_config)
 trtf_add_test(test_text_parsers)
 trtf_add_test(test_json_helpers)
 trtf_add_test(test_data_dir)

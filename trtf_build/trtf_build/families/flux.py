@@ -25,7 +25,7 @@ from ..checkpoint_mapper import WeightDict
 
 class FluxPlugin:
     name = "flux"
-    runtime_strategy = "diffusion"
+    runtime_strategy = "diffusion_flux"
     pipeline_classes = ["FluxPipeline", "Flux2Pipeline"]
 
     # Default FLUX.1-dev architecture params

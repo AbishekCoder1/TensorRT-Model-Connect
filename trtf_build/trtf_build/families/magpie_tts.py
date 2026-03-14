@@ -356,7 +356,7 @@ def _load_nemo_archive(path: str):
 
 class MagpieTTSPlugin:
     name = "magpie_tts"
-    runtime_strategy = "text_to_audio"
+    runtime_strategy = "text_to_audio_magpie"
 
     def __init__(self):
         self._audio_config: dict = {}

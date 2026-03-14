@@ -9,7 +9,7 @@
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/kv_cache.h"
-#include "cabi/bundle/bundle_helpers.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/trt/audio/whisper_config.h"
 #include "runtime/trt/audio/bark_config.h"
 

@@ -487,7 +487,9 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "hybrid_mamba_attention": "text_generation_causal",
     "vision_language": "vision_language_generation",
     "speech_to_text": "speech_to_text",
-    "text_to_audio": "text_to_audio",
+    "text_to_audio": "text_to_audio",              # legacy alias
+    "text_to_audio_bark": "text_to_audio",
+    "text_to_audio_magpie": "text_to_audio",
     "speech_to_speech": "speech_to_speech",
     "segmentation": "segmentation",
     "prompted_segmentation": "prompted_segmentation",
@@ -496,6 +498,10 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "reranking": "reranking",
     "encoder_only": "encoder_only_nlp",
     "neural_operator": "neural_operator",
-    "diffusion": "diffusion_media_generation",
+    "diffusion": "diffusion_media_generation",      # legacy alias
+    "diffusion_flux": "diffusion_media_generation",
+    "diffusion_wan": "diffusion_media_generation",
+    "diffusion_zimage": "diffusion_media_generation",
+    "diffusion_pixart": "diffusion_media_generation",
     "omni_multimodal": "omni_multimodal",
 }

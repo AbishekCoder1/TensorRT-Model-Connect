@@ -5,7 +5,7 @@
   "bundle": "flux-2-dev.trtfb",
   "model_type": "flux.2",
   "family": "flux",
-  "runtime_strategy": "diffusion",
+  "runtime_strategy": "diffusion_flux",
   "description": "FLUX.2-dev text-to-image (Mistral 3 encoder, Flux2 DiT, 32ch VAE)",
   "build_args": {
     "max_cache_length": 256

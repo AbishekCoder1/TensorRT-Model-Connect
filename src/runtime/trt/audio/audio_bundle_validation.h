@@ -1,6 +1,7 @@
 #pragma once
 
-#include "cabi/bundle/bundle_helpers.h"
+#include "bundle/bundle_format.h"
+#include "bundle/bundle_view.h"
 
 #include <string>
 
@@ -13,7 +14,7 @@ enum class TextToAudioBundleKind {
 
 void validate_text_to_audio_bundle_sections(
     TextToAudioBundleKind kind,
-    const trtf::BundleSections& sections,
+    const trtf::BundleFile& bundle,
     const std::string& bundle_path);
 
 } // namespace trtf::runtime::builders::audio

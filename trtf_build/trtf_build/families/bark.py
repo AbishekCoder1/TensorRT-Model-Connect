@@ -392,7 +392,7 @@ def _map_bark_fine_weights(
 
 class BarkPlugin:
     name = "bark"
-    runtime_strategy = "text_to_audio"
+    runtime_strategy = "text_to_audio_bark"
 
     def __init__(self):
         self._semantic_cfg: dict = {}

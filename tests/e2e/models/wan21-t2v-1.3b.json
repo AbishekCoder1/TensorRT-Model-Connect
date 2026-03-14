@@ -5,7 +5,7 @@
   "bundle": "wan21-t2v-1.3b.trtfb",
   "model_type": "wan_t2v",
   "family": "wan_t2v",
-  "runtime_strategy": "diffusion",
+  "runtime_strategy": "diffusion_wan",
   "description": "Wan2.1 Text-to-Video 1.3B (diffusers format)",
   "build_args": {
     "max_cache_length": 256
