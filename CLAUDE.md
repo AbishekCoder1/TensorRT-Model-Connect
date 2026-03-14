@@ -476,17 +476,39 @@ The system is split into two stages:
 
 1. **Python build** (`trtf_build/`) — takes an HF model directory (with `config.json` + safetensors), builds a TRT engine via TensorRT's Python API, and packages it into a `.trtfb` bundle. Model family plugins in `trtf_build/trtf_build/families/` handle family-specific weight mapping and graph construction.
 
-2. **C++ runtime** — loads a `.trtfb` bundle, deserializes the TRT engine plan, and runs autoregressive inference. The runtime is bundle-only: it does not load HF model directories directly. The `runtime_strategy` field in the bundle's config.json selects the backend:
-   - `decoder_kv_cache` (default): standard attention with device-resident KV cache (`TrtBackendFastPath` + `DeviceKvCache`)
-   - `decoder_moe`: MoE decoder (same device-resident KV cache, routing handled in TRT graph)
-   - `ssm_recurrent`: Mamba/SSM with conv + SSM recurrent state (`MambaBackend`)
-   - `vision_language`: VL pipeline with vision encoder + text decoder + image preprocessing. Qwen3-VL adds DeepStack: multi-level vision features injected at early text decoder layers.
+2. **C++ runtime** — loads a `.trtfb` bundle, deserializes the TRT engine plan, and runs inference. The runtime is bundle-only: it does not load HF model directories directly.
+
+**Plugin registry dispatch:** The `runtime_strategy` field in the bundle's `config.json` selects the backend via `PipelineRegistry` — a singleton that maps strategy strings to self-registering `IPipelinePlugin` instances. Each plugin lives in its own `.cpp` file under `src/runtime/plugins/` and registers at static-init time via the `REGISTER_PIPELINE_PLUGIN` macro. `pipeline_factory.cpp` is ~124 LOC: it reads the bundle, extracts the strategy, normalizes legacy strategy strings (e.g. `"diffusion"` → `"diffusion_flux"`), looks up the plugin, and calls `plugin->create(ctx)`. No switch/case, no edits needed when adding new strategies.
+
+**Runtime strategies (16 registered):**
+| Strategy | Plugin | Pipeline |
+|----------|--------|----------|
+| `decoder_kv_cache` | DecoderPlugin | TextGenerationPipeline |
+| `decoder_moe` | DecoderPlugin | TextGenerationPipeline |
+| `ssm_recurrent` | SsmPlugin | RecurrentPipeline |
+| `rwkv_recurrent` | RwkvPlugin | RecurrentPipeline |
+| `hybrid_mamba_attention` | HybridPlugin | RecurrentPipeline |
+| `vision_language` | VLPlugin | VLPipeline |
+| `speech_to_text` | WhisperPlugin | WhisperPipeline |
+| `text_to_audio_bark` | BarkPlugin | BarkPipeline |
+| `text_to_audio_magpie` | MagpiePlugin | MagpiePipeline |
+| `omni_multimodal` | OmniPlugin | OmniPipeline |
+| `diffusion_flux` | FluxPlugin | FluxPipeline |
+| `diffusion_wan` | WanPlugin | WanPipeline |
+| `diffusion_zimage` | ZImagePlugin | ZImagePipeline |
+| `encoder_only_nlp` | EncoderPlugin | EncoderPipeline |
+| `segmentation` | SegmentationPlugin | SegmentationPipeline |
+| `object_detection` | ObjectDetectionPlugin | ObjectDetectionPipeline |
+
+**Legacy strategy normalization:** Old bundles may contain ambiguous strategy strings (`"text_to_audio"`, `"diffusion"`). `pipeline_factory.cpp` auto-rewrites these to their unambiguous equivalents using bundle config fields (`magpie_tts`, `diffusion_backend_type`).
+
+**BaseConfig:** Universal bundle metadata parsed by `parse_base_config()` in `pipeline_plugin.cpp` — vocab_size, hidden_size, num_layers, num_heads, num_kv_heads, head_dim, max_cache_length, bos/eos IDs, runtime_strategy, tokenizer flags. Each plugin parses additional strategy-specific fields from the raw config JSON. See `include/trtf/runtime/pipeline_plugin.h` for all fields.
 
 Tokenizer implementations (`ITokenizer`):
 - `VocabTokenizer` — vocab.txt-based lookup.
 - `HfPythonTokenizer` — bridges to HuggingFace tokenizers via Python subprocess. The `add_special_tokens` flag is controlled by the bundle's `tokenizer_add_special_tokens` config field (detected at build time from HF tokenizer config). When the field is absent (old bundles), defaults to `true` to match HF's `tokenizer.encode()` default.
 
-Bundle self-describing config: The `.trtfb` bundle header contains JSON metadata that captures all build-time decisions (runtime_strategy, max_cache_length, tokenizer_add_special_tokens, etc.). The C++ runtime reads these fields to configure backends, cache sizes, and tokenizer behavior — no external configuration needed. See `src/cabi/fast_path_config.h` for all fields.
+Bundle self-describing config: The `.trtfb` bundle header contains JSON metadata that captures all build-time decisions (runtime_strategy, max_cache_length, tokenizer_add_special_tokens, etc.). The C++ runtime reads these fields to configure backends, cache sizes, and tokenizer behavior — no external configuration needed.
 
 ## Source layout
 
@@ -519,24 +541,61 @@ trtf_build/                          # Python package (engine builder)
       mpnet.py pixart.py qwen3_5.py roberta.py
       wan_t2v.py flux.py z_image.py                # Diffusion T2V/T2I
   pyproject.toml
+include/trtf/runtime/                # Public C++ headers (plugin system)
+  pipeline_factory.h                 # PipelineFactory::from_bundle()
+  pipeline_plugin.h                  # IPipelinePlugin interface, BaseConfig, PipelineContext
+  pipeline_registry.h                # PipelineRegistry singleton, REGISTER_PIPELINE_PLUGIN macro
 src/                                 # C++ bundle-only runtime
   bundle/
     bundle_format.h/cpp              # Read .trtfb files
   cabi/
-    trtf_c.cpp                       # C ABI: trtf_create_pipeline_ex()
-    fast_path_config.h/cpp           # Parse config.json for bundle metadata
-    bundle_helpers.h/cpp             # Shared plumbing: tokenizer extraction, engine init
-  runtime/trt/
-    trt_common.h/cpp                 # TRT logger, CUDA helpers (CudaBuffer/CudaStream with move semantics)
-    trt_engine_lifecycle.h/cpp       # DecoderStepEngine, tensor validation
-    trt_decode_runtime.h/cpp         # select_argmax_token, build_attention_mask
-    device_kv_cache.h/cpp            # DeviceKvCache, DeviceResources, run_decoder_step_device
-    trt_backend_shared.h/cpp         # TrtBackendFastPath autoregressive loop (device-resident cache)
-    step_state.h                     # IStepState interface
-    mamba_backend.h/cpp              # MambaBackend: SSM autoregressive loop
-    mamba_decode_runtime.h/cpp       # MambaStepEngine, run_mamba_step
-    mamba_step_state.h/cpp           # MambaStepState: conv + SSM recurrent state
-    image_preprocessor.h/cpp         # VL image preprocessing: 4 strategies + configurable interpolation
+    api/trtf_c.cpp                   # C ABI: trtf_create_pipeline_ex()
+  runtime/
+    pipeline_factory.cpp             # Registry-based dispatch (~124 LOC, no switch/case)
+    pipeline_plugin.cpp              # BaseConfig parsing (parse_base_config)
+    pipeline_registry.cpp            # Singleton registry + force_link_all_plugins() call
+    plugins/                         # Self-registering pipeline plugins
+      shared/
+        plugin_helpers.h/cpp         # TrtModule loading, tokenizer, KV helpers
+        diffusion_helpers.h/cpp      # Shared diffusion config/loading
+        audio_helpers.h/cpp          # Audio config, mel, speech helpers
+      decoder_plugin.cpp             # decoder_kv_cache, decoder_moe
+      ssm_plugin.cpp                 # ssm_recurrent
+      rwkv_plugin.cpp                # rwkv_recurrent
+      hybrid_plugin.cpp              # hybrid_mamba_attention
+      encoder_plugin.cpp             # encoder_only_nlp, embedding, reranking
+      segmentation_plugin.cpp        # segmentation, prompted_segmentation
+      object_detection_plugin.cpp    # object_detection
+      vl_plugin.cpp                  # vision_language
+      whisper_plugin.cpp             # speech_to_text
+      bark_plugin.cpp                # text_to_audio_bark
+      magpie_plugin.cpp              # text_to_audio_magpie
+      speech_plugin.cpp              # speech_to_speech
+      omni_plugin.cpp                # omni_multimodal
+      flux_plugin.cpp                # diffusion_flux
+      wan_plugin.cpp                 # diffusion_wan, diffusion_pixart
+      zimage_plugin.cpp              # diffusion_zimage
+      force_link_plugins.cpp         # Linker anchors for static lib
+    pipelines/                       # Pipeline implementations (one per modality)
+      text_generation_pipeline.h/cpp # Standard decoder + MoE
+      recurrent_pipeline.h/cpp       # SSM, RWKV, hybrid
+      vl_pipeline.h/cpp              # Vision-language
+      encoder_pipeline.h/cpp         # Encoder-only, embedding, reranking
+      audio_pipeline.h/cpp           # Whisper, Bark, Magpie, speech
+      flux_pipeline.cpp              # FLUX diffusion
+      wan_pipeline.cpp               # Wan/PixArt diffusion
+      z_image_pipeline.cpp           # Z-Image diffusion
+    trt/
+      trt_common.h/cpp               # TRT logger, CUDA helpers (CudaBuffer/CudaStream with move semantics)
+      trt_engine_lifecycle.h/cpp     # DecoderStepEngine, tensor validation
+      trt_decode_runtime.h/cpp       # select_argmax_token, build_attention_mask
+      device_kv_cache.h/cpp          # DeviceKvCache, DeviceResources, run_decoder_step_device
+      trt_backend_shared.h/cpp       # TrtBackendFastPath autoregressive loop (device-resident cache)
+      step_state.h                   # IStepState interface
+      mamba_backend.h/cpp            # MambaBackend: SSM autoregressive loop
+      mamba_decode_runtime.h/cpp     # MambaStepEngine, run_mamba_step
+      mamba_step_state.h/cpp         # MambaStepState: conv + SSM recurrent state
+      image_preprocessor.h/cpp       # VL image preprocessing: 4 strategies + configurable interpolation
   tokenizer/
     vocab_tokenizer.cpp              # Word-to-id lookup from vocabulary list
     hf_python_tokenizer.cpp          # HF tokenizers bridge via Python subprocess
@@ -599,7 +658,7 @@ tests/
 
 ## Adding a new model family
 
-Adding a new model family is done in the Python build package. For standard decoder, MoE, and extended-decoder families, no C++ changes are needed. Families with fundamentally different state management (e.g., Mamba/SSM) require a new `IStepState` implementation and backend in C++.
+Adding a new model family is done in the Python build package. For standard decoder, MoE, and extended-decoder families, no C++ changes are needed. Families with fundamentally different state management (e.g., Mamba/SSM, diffusion, audio) require a new C++ runtime plugin — see "Adding a new C++ runtime plugin" below.
 
 ### Quick path (scaffolding script)
 
@@ -687,16 +746,26 @@ pytest tests/test_e2e.py::test_e2e[my-new-model] -v \
 | decoder_moe | text_generation_causal | text_generation | hf_transformers |
 | ssm_recurrent | text_generation_causal | text_generation | hf_transformers |
 | rwkv_recurrent | text_generation_causal | text_generation | hf_transformers |
+| hybrid_mamba_attention | text_generation_causal | text_generation | hf_transformers |
 | vision_language | vision_language_generation | vision_language | hf_transformers |
 | speech_to_text | speech_to_text | audio_speech | hf_transformers |
-| text_to_audio | text_to_audio | audio_speech | hf_transformers |
+| text_to_audio_bark | text_to_audio | audio_speech | hf_transformers |
+| text_to_audio_magpie | text_to_audio | audio_speech | hf_transformers |
 | speech_to_speech | speech_to_speech | audio_speech | torch_reference |
-| diffusion | diffusion_media_generation | diffusion | hf_diffusers |
+| omni_multimodal | omni_multimodal | omni | torch_reference |
+| diffusion_flux | diffusion_media_generation | diffusion | hf_diffusers |
+| diffusion_wan | diffusion_media_generation | diffusion | hf_diffusers |
+| diffusion_zimage | diffusion_media_generation | diffusion | hf_diffusers |
+| diffusion_pixart | diffusion_media_generation | diffusion | hf_diffusers |
 | segmentation | segmentation | segmentation | hf_transformers |
 | prompted_segmentation | prompted_segmentation | segmentation | hf_transformers |
+| object_detection | object_detection | segmentation | hf_transformers |
 | encoder_only | encoder_only_nlp | encoder_only | hf_transformers |
 | embedding | embedding | embedding | hf_transformers |
 | reranking | reranking | reranking | hf_transformers |
+| neural_operator | neural_operator | encoder_only | torch_reference |
+
+Legacy aliases (`text_to_audio`, `diffusion`) are auto-normalized by `pipeline_factory.cpp` — new bundles use the split strategy strings above.
 
 ### Example
 
@@ -706,6 +775,49 @@ See `trtf_build/trtf_build/families/phi_moe.py` for Phi-MoE (MoE with SparseMixe
 See `trtf_build/trtf_build/families/qwen_vl.py` for Qwen VL (Qwen2.5-VL standard + Qwen3-VL DeepStack via `graph_blocks` composition).
 See `trtf_build/trtf_build/families/mamba.py` for Mamba (SSM, custom graph + C++ backend).
 See `trtf_build/trtf_build/families/base.py` for the plugin protocol.
+
+### Adding a new C++ runtime plugin
+
+When a model family requires fundamentally different runtime behavior (new state management, multi-engine orchestration, non-autoregressive inference), add a new C++ pipeline plugin. **No edits to `pipeline_factory.cpp` are needed.**
+
+1. **Create `src/runtime/plugins/<name>_plugin.cpp`** — implement `IPipelinePlugin`:
+   ```cpp
+   #include "trtf/runtime/pipeline_registry.h"
+   #include "runtime/plugins/shared/plugin_helpers.h"
+
+   namespace trtf {
+   class MyPlugin final : public IPipelinePlugin {
+   public:
+       std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+           // Load engines, create tokenizer, build pipeline
+           auto loaded = load_trt_module_from_plan(
+               find_section(ctx.bundle, "engine_plan"), "engine_plan");
+           auto tokenizer = create_tokenizer_from_bundle(ctx.bundle, ctx.hf_python);
+           // ... construct and return pipeline
+       }
+   };
+   } // namespace trtf
+
+   // Self-register at static-init time (file scope):
+   REGISTER_PIPELINE_PLUGIN("my_strategy", trtf::MyPlugin);
+   // Or for multiple strategies:
+   // REGISTER_PIPELINE_PLUGIN_MULTI(trtf::MyPlugin, "strategy_a", "strategy_b");
+   ```
+
+2. **Add force-link anchor** in the plugin file and in `force_link_plugins.cpp`:
+   ```cpp
+   // In your plugin .cpp (file scope):
+   volatile int kForceLink_MyPlugin = 0;
+
+   // In force_link_plugins.cpp, add to the extern block and pointer array:
+   extern volatile int kForceLink_MyPlugin;
+   ```
+
+3. **Add the `.cpp` to CMakeLists.txt** in the runtime sources list.
+
+4. **Create or reuse a pipeline class** in `src/runtime/pipelines/` that implements `IPipeline`.
+
+5. **Set `runtime_strategy`** in the Python family plugin so bundles carry the new strategy string.
 
 ### Diff-test framework
 
