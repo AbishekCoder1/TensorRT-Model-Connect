@@ -149,7 +149,7 @@ static const ByteEncoderTables& byte_tables()
 
 namespace pretok {
 
-enum class Variant { kGpt2, kQwen3, kBloom };
+enum class Variant { kGpt2, kQwen3, kBloom, kDeepSeek };
 
 // ── Character classification ──
 
@@ -157,21 +157,30 @@ struct UnicodeRange { char32_t lo, hi; };
 
 constexpr UnicodeRange kLetterRanges[] = {
     {'A', 'Z'}, {'a', 'z'},
-    {0xC0, 0xD6}, {0xD8, 0xF6}, {0xF8, 0xFF},  // Latin-1 (skip multiply/divide signs)
-    {0x100, 0x2AF},   // Latin Extended A/B
-    {0x400, 0x4FF},   // Cyrillic
-    {0x600, 0x6FF},   // Arabic
-    {0x900, 0x97F},   // Devanagari
-    {0xE00, 0xE7F},   // Thai
-    {0x1E00, 0x1EFF}, // Latin Extended Additional
-    {0x2C00, 0x2C5F}, // Glagolitic
-    {0x3040, 0x309F}, // Hiragana
-    {0x30A0, 0x30FF}, // Katakana
-    {0x3400, 0x4DBF}, // CJK Extension A
-    {0x4E00, 0x9FFF}, // CJK Unified Ideographs
-    {0xAC00, 0xD7AF}, // Hangul Syllables
-    {0xFB00, 0xFDFF}, // Alphabetic Presentation Forms + Arabic Forms
-    {0x10000, 0x1007F}, // Linear B Syllabary
+    {0xB5, 0xB5},                    // µ (micro sign, treated as letter)
+    {0xC0, 0xD6}, {0xD8, 0xF6}, {0xF8, 0x1BA},  // Latin-1 + Extended A/B
+    {0x1BC, 0x1BF}, {0x1C4, 0x293}, {0x295, 0x2AF}, // Latin Extended B cont.
+    {0x370, 0x373}, {0x376, 0x377}, {0x37B, 0x37D}, {0x37F, 0x37F}, // Greek
+    {0x386, 0x386}, {0x388, 0x38A}, {0x38C, 0x38C}, {0x38E, 0x3A1},
+    {0x3A3, 0x3F5}, {0x3F7, 0x481}, {0x48A, 0x52F}, // Greek + Cyrillic
+    {0x531, 0x556}, {0x559, 0x559},  // Armenian
+    {0x560, 0x588},                   // Armenian lowercase
+    {0x600, 0x6FF},                   // Arabic
+    {0x900, 0x97F},                   // Devanagari
+    {0xE00, 0xE7F},                   // Thai
+    {0x10A0, 0x10C5},                 // Georgian
+    {0x13A0, 0x13F5},                 // Cherokee
+    {0x1C90, 0x1CBA}, {0x1CBD, 0x1CBF}, // Georgian Extended
+    {0x1D00, 0x1D2B}, {0x1D6B, 0x1D77}, {0x1D79, 0x1D9A}, // Phonetic Extensions
+    {0x1E00, 0x1F15}, {0x1F18, 0x1F1D}, {0x1F20, 0x1F45}, // Latin Ext. Additional + Greek Ext.
+    {0x2C00, 0x2C5F},                 // Glagolitic
+    {0x3040, 0x309F},                 // Hiragana
+    {0x30A0, 0x30FF},                 // Katakana
+    {0x3400, 0x4DBF},                 // CJK Extension A
+    {0x4E00, 0x9FFF},                 // CJK Unified Ideographs
+    {0xAC00, 0xD7AF},                 // Hangul Syllables
+    {0xFB00, 0xFDFF},                 // Alphabetic Presentation Forms + Arabic Forms
+    {0x10000, 0x1007F},               // Linear B Syllabary
 };
 
 inline bool is_letter(char32_t cp)
@@ -224,10 +233,14 @@ inline bool is_newline(char32_t cp)
 // Is this char a valid optional prefix before a word?
 // GPT-2/BLOOM: only space (0x20)
 // Qwen3: any char except CR, LF, letter, digit
+// DeepSeek: any whitespace (\s?)
 inline bool is_prefix(char32_t cp, Variant v)
 {
     if (v == Variant::kQwen3) {
         return !is_newline(cp) && !is_letter(cp) && !is_digit(cp);
+    }
+    if (v == Variant::kDeepSeek) {
+        return is_whitespace(cp);
     }
     return cp == ' ';
 }
@@ -522,6 +535,16 @@ std::vector<std::string> bloom_pre_tokenize(const std::string& text)
         }
 
         if (is_bloom_punct(cp)) {
+            // Keep consecutive non-word chars together (Split "Isolated" behavior:
+            // unmatched text stays as one segment for BPE to merge)
+            while (p < end) {
+                const char* next_start = p;
+                char32_t next_cp = read_utf8(p, end);
+                if (!is_bloom_punct(next_cp) || is_whitespace(next_cp)) {
+                    p = next_start;
+                    break;
+                }
+            }
             result.emplace_back(start, p);
             continue;
         }
@@ -551,38 +574,38 @@ public:
         return tokenizer;
     }
 
+    void encode_segment(const std::string& text, std::vector<int32_t>& result) const
+    {
+        if (mIsSentencePiece) {
+            encode_sentencepiece(text, result);
+        } else if (mIsMetaspace) {
+            encode_metaspace(text, result);
+        } else {
+            encode_bytelevel(text, result);
+        }
+    }
+
     std::vector<int32_t> encode(const std::string& text) const override
     {
         std::vector<int32_t> result;
         if (text.empty()) return result;
 
-        // add_special_tokens: prepend BOS token(s) if post_processor says so
         if (mAddSpecialTokens) {
-            for (int32_t bos_id : mPostBosIds) {
+            for (int32_t bos_id : mPostBosIds)
                 result.push_back(bos_id);
-            }
         }
 
         auto segments = split_added_tokens(text);
         for (const auto& seg : segments) {
-            if (seg.added_id >= 0) {
+            if (seg.added_id >= 0)
                 result.push_back(seg.added_id);
-                continue;
-            }
-            if (mIsSentencePiece) {
-                encode_sentencepiece(seg.text, result);
-            } else if (mIsMetaspace) {
-                encode_metaspace(seg.text, result);
-            } else {
-                encode_bytelevel(seg.text, result);
-            }
+            else
+                encode_segment(seg.text, result);
         }
 
-        // add_special_tokens: append EOS token(s) if post_processor says so
         if (mAddSpecialTokens) {
-            for (int32_t eos_id : mPostEosIds) {
+            for (int32_t eos_id : mPostEosIds)
                 result.push_back(eos_id);
-            }
         }
 
         return result;
@@ -1104,6 +1127,25 @@ private:
         return std::stoi(regex.substr(comma + 1, close - comma - 1));
     }
 
+    // Classify a single Split regex string into a pre-tokenizer variant.
+    static pretok::Variant classify_split_regex(
+        const std::string& regex, int& digit_group_out)
+    {
+        if (regex.find("[^\r\n") != std::string::npos
+            || regex.find("[^\\r\\n") != std::string::npos) {
+            digit_group_out = parse_digit_group(regex);
+            return pretok::Variant::kQwen3;
+        }
+        if (regex.find("[^(\\s") != std::string::npos
+            || regex.find("[^(\\\\s") != std::string::npos) {
+            return pretok::Variant::kBloom;
+        }
+        if (regex.find("\\s?[A-Za-z") != std::string::npos) {
+            return pretok::Variant::kDeepSeek;
+        }
+        return pretok::Variant::kGpt2;
+    }
+
     // Detect variant from the Split regex inside a Sequence pre_tokenizer.
     static pretok::Variant detect_split_variant(
         const nlohmann::json& pt, int& digit_group_out)
@@ -1113,17 +1155,8 @@ private:
         for (auto& sub : pt["pretokenizers"]) {
             if (sub.value("type", "") != "Split") continue;
             if (!sub.contains("pattern") || !sub["pattern"].contains("Regex")) continue;
-            std::string regex = sub["pattern"]["Regex"].get<std::string>();
-            if (regex.find("[^\r\n") != std::string::npos
-                || regex.find("[^\\r\\n") != std::string::npos) {
-                digit_group_out = parse_digit_group(regex);
-                return pretok::Variant::kQwen3;
-            }
-            if (regex.find("[^(\\s") != std::string::npos
-                || regex.find("[^(\\\\s") != std::string::npos) {
-                return pretok::Variant::kBloom;
-            }
-            return pretok::Variant::kGpt2;
+            return classify_split_regex(
+                sub["pattern"]["Regex"].get<std::string>(), digit_group_out);
         }
         return pretok::Variant::kGpt2;
     }
@@ -1172,9 +1205,10 @@ private:
             parse_sequence_decoder(j["decoder"]);
         }
         // SentencePiece encode: vocab uses ▁ (U+2581) for spaces.
-        // Detect by checking if ▁ is in the vocabulary.
+        // Detect by: (1) ▁ in vocabulary, or (2) normalizer prepends ▁.
         static const std::string spiece_marker = "\xe2\x96\x81"; // U+2581
-        mIsSentencePiece = mTokenToId.count(spiece_marker) > 0;
+        mIsSentencePiece = mTokenToId.count(spiece_marker) > 0
+                        || mSentencePiecePrependAlways;
     }
 
     void parse_seq_decoder_replace(const nlohmann::json& sub)
@@ -1216,11 +1250,20 @@ private:
             throw std::runtime_error(std::string("Failed to parse tokenizer.json: ") + e.what());
         }
 
-        if (!j.contains("model") || !j["model"].contains("type"))
-            throw std::runtime_error("Invalid tokenizer.json: missing model.type");
-        if (j["model"]["type"] != "BPE")
-            throw std::runtime_error("Not a BPE tokenizer");
-        if (!j["model"].contains("vocab"))
+        if (!j.contains("model"))
+            throw std::runtime_error("Invalid tokenizer.json: missing model");
+        auto& model = j["model"];
+        if (model.contains("type")) {
+            if (model["type"] != "BPE")
+                throw std::runtime_error("Not a BPE tokenizer");
+        } else {
+            // Auto-detect: BPE has merges array + vocab dict (no type field in old HF models)
+            if (!model.contains("merges") || !model["merges"].is_array())
+                throw std::runtime_error("Not a BPE tokenizer (no type, no merges)");
+            if (!model.contains("vocab") || !model["vocab"].is_object())
+                throw std::runtime_error("Not a BPE tokenizer (no type, vocab not dict)");
+        }
+        if (!model.contains("vocab"))
             throw std::runtime_error("Invalid tokenizer.json: missing model.vocab");
 
         mByteFallback = j["model"].value("byte_fallback", false);
@@ -1259,6 +1302,8 @@ private:
             parse_template_post_processor(pp);
         } else if (pp_type == "Sequence") {
             parse_sequence_post_processor(pp);
+        } else if (pp_type == "RobertaProcessing") {
+            parse_roberta_post_processor(pp);
         }
         // ByteLevel post_processor doesn't add tokens, nothing to do
     }
@@ -1272,6 +1317,19 @@ private:
                 parse_template_post_processor(sub);
                 return; // first TemplateProcessing wins
             }
+        }
+    }
+
+    // RobertaProcessing: {"type":"RobertaProcessing","cls":["<s>",0],"sep":["</s>",2],...}
+    void parse_roberta_post_processor(const nlohmann::json& pp)
+    {
+        if (pp.contains("cls") && pp["cls"].is_array() && pp["cls"].size() >= 2) {
+            int32_t cls_id = pp["cls"][1].get<int32_t>();
+            mPostBosIds.push_back(cls_id);
+        }
+        if (pp.contains("sep") && pp["sep"].is_array() && pp["sep"].size() >= 2) {
+            int32_t sep_id = pp["sep"][1].get<int32_t>();
+            mPostEosIds.push_back(sep_id);
         }
     }
 

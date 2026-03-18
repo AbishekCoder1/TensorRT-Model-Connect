@@ -78,7 +78,7 @@ ZImagePreprocessorWeights parse_zimage_preprocessor_weights(
 class ZImagePlugin final : public IPipelinePlugin {
 public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto parts = load_diffusion_parts(ctx.bundle, ctx.config_json, ctx.hf_python);
+        auto parts = load_diffusion_parts(ctx.bundle, ctx.config_json);
 
         // Extract first text encoder
         std::unique_ptr<TrtModule> te_module;
@@ -100,7 +100,6 @@ public:
             std::move(z_pw),
             std::move(parts.tokenizer),
             ctx.bundle.info.model_id,
-            ctx.hf_python,
             ctx.bundle_path);
     }
 };

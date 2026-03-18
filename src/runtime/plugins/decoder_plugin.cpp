@@ -13,7 +13,7 @@ class DecoderPlugin final : public IPipelinePlugin {
 public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         auto loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
-        auto tokenizer = create_tokenizer_from_bundle(ctx.bundle, ctx.hf_python);
+        auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         cudaStream_t stream = loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);

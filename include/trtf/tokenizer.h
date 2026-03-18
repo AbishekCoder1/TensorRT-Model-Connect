@@ -20,8 +20,6 @@ public:
 };
 
 std::unique_ptr<ITokenizer> CreateVocabTokenizer(std::vector<std::string> vocab);
-std::unique_ptr<ITokenizer> CreateHfPythonTokenizer(std::string model_dir, std::string python_path = "",
-                                                    bool add_special_tokens = false);
 std::unique_ptr<ITokenizer> CreateIpaTokenizer(
     const char* phoneme_dict_data, std::size_t phoneme_dict_size,
     const char* heteronyms_data, std::size_t heteronyms_size,
@@ -32,5 +30,15 @@ std::unique_ptr<ITokenizer> CreateBpeTokenizer(
     const char* tokenizer_json_data,
     std::size_t tokenizer_json_size,
     bool add_special_tokens = false);
+
+std::unique_ptr<ITokenizer> CreateWordPieceTokenizer(
+    const char* tokenizer_json_data,
+    std::size_t tokenizer_json_size,
+    bool add_special_tokens = true);
+
+std::unique_ptr<ITokenizer> CreateUnigramTokenizer(
+    const char* tokenizer_json_data,
+    std::size_t tokenizer_json_size,
+    bool add_special_tokens = true);
 
 } // namespace trtf

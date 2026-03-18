@@ -13,7 +13,7 @@ namespace trtf {
 class WanPlugin final : public IPipelinePlugin {
 public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto parts = load_diffusion_parts(ctx.bundle, ctx.config_json, ctx.hf_python);
+        auto parts = load_diffusion_parts(ctx.bundle, ctx.config_json);
 
         // Extract first text encoder
         std::unique_ptr<TrtModule> te_module;

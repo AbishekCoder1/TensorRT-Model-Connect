@@ -22,8 +22,7 @@ struct DiffusionParts {
 
 DiffusionParts load_diffusion_parts(
     const BundleFile& bundle,
-    const std::string& json,
-    const std::string& hf_python);
+    const std::string& json);
 
 } // namespace trtf
 

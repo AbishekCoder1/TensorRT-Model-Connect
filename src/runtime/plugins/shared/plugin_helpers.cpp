@@ -1,10 +1,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 
-#include <chrono>
-#include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string_view>
@@ -71,34 +67,51 @@ std::shared_ptr<ITokenizer> try_create_native_bpe(
     return nullptr;
 }
 
+std::shared_ptr<ITokenizer> try_create_native_tokenizer(
+    const BundleFile& bundle, bool add_special_tokens)
+{
+    auto* tok_data = find_section(bundle, "tokenizer.json");
+    if (!tok_data || tok_data->empty())
+        return nullptr;
+
+    const char* data = tok_data->data();
+    std::size_t size = tok_data->size();
+
+    // Try BPE
+    try {
+        auto tok = CreateBpeTokenizer(data, size, add_special_tokens);
+        if (tok) {
+            std::cerr << "[trtf] Using native BPE tokenizer" << std::endl;
+            return tok;
+        }
+    } catch (...) {}
+
+    // Try WordPiece
+    try {
+        auto tok = CreateWordPieceTokenizer(data, size, add_special_tokens);
+        if (tok) {
+            std::cerr << "[trtf] Using native WordPiece tokenizer" << std::endl;
+            return tok;
+        }
+    } catch (...) {}
+
+    // Try Unigram (SentencePiece)
+    try {
+        auto tok = CreateUnigramTokenizer(data, size, add_special_tokens);
+        if (tok) {
+            std::cerr << "[trtf] Using native Unigram tokenizer" << std::endl;
+            return tok;
+        }
+    } catch (...) {}
+
+    return nullptr;
+}
+
 std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(
-    const BundleFile& bundle, const std::string& hf_python)
+    const BundleFile& bundle)
 {
     bool add_special = detect_add_special_tokens(bundle);
-
-    // TRTF_NATIVE_TOKENIZER=1  → force native, throw on failure (no fallback)
-    // TRTF_NATIVE_TOKENIZER=0  → force HF Python, skip native entirely
-    // unset                    → try native first, fallback to HF Python
-    const char* env = std::getenv("TRTF_NATIVE_TOKENIZER");
-    bool native_disabled = false;
-    bool native_forced = false;
-    if (env) {
-        native_disabled = std::string(env) == "0";
-        native_forced = !native_disabled;
-    }
-
-    if (!native_disabled) {
-        auto tok = try_create_native_bpe(bundle, add_special, native_forced);
-        if (tok) return tok;
-    }
-
-    // Fall back to HfPythonTokenizer
-    if (hf_python.empty()) return nullptr;
-    try {
-        auto result = extract_tokenizer_from_bundle(bundle, hf_python, add_special);
-        if (result.tokenizer) return std::move(result.tokenizer);
-    } catch (...) {}
-    return nullptr;
+    return try_create_native_tokenizer(bundle, add_special);
 }
 
 // ─── TRT module loading ───
@@ -197,45 +210,6 @@ bool has_section_data(const std::vector<char>* d)
     return d && !d->empty();
 }
 
-// ─── Migrated from bundle_helpers (Phase A1: MR-3) ───
-
-namespace {
-
-bool has_non_empty_section(const std::vector<char>* data)
-{
-    return data != nullptr && !data->empty();
-}
-
-std::filesystem::path create_tokenizer_temp_dir(const char* pattern_template)
-{
-    // mkdtemp modifies the buffer in-place, so copy the template.
-    std::string temp_pattern(pattern_template);
-    char* created = mkdtemp(temp_pattern.data());
-    if (created == nullptr)
-    {
-        throw std::runtime_error(
-            std::string("Failed to create temp dir: ") + pattern_template);
-    }
-    return std::filesystem::path(created);
-}
-
-void write_optional_section(
-    const std::filesystem::path& dir,
-    const char* filename,
-    const std::vector<char>* data)
-{
-    if (!has_non_empty_section(data))
-        return;
-
-    std::ofstream out(dir / filename, std::ios::binary | std::ios::trunc);
-    if (!out)
-        return;
-
-    out.write(data->data(), static_cast<std::streamsize>(data->size()));
-}
-
-} // namespace
-
 MelFilterbank load_mel_filterbank(const BundleFile& bundle)
 {
     MelFilterbank fb;
@@ -271,83 +245,22 @@ MelFilterbank load_mel_filterbank(const BundleFile& bundle)
     return fb;
 }
 
-TokenizerResult extract_tokenizer_from_bundle(
-    const BundleFile& bundle,
-    const std::string& hf_python,
-    bool add_special_tokens)
+std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(
+    const BundleFile& bundle)
 {
-    const auto* tok_json = find_section(bundle, "tokenizer.json");
-    const auto* vocab_json = find_section(bundle, "vocab.json");
-    const auto* tok_model = find_section(bundle, "tokenizer.model");
-
-    bool has_tokenizer = has_non_empty_section(tok_json)
-        || has_non_empty_section(vocab_json)
-        || has_non_empty_section(tok_model);
-    if (!has_tokenizer)
-    {
-        throw std::runtime_error("Bundle has no tokenizer files");
+    auto* tok_data = find_section(bundle, "clip_tokenizer.json");
+    if (!tok_data || tok_data->empty())
+        return nullptr;
+    try {
+        auto tok = CreateBpeTokenizer(
+            tok_data->data(), tok_data->size(), /*add_special_tokens=*/true);
+        if (tok)
+            std::cerr << "[trtf] Using native BPE CLIP tokenizer" << std::endl;
+        return tok;
+    } catch (const std::exception& e) {
+        std::cerr << "[trtf] WARNING: CLIP tokenizer failed: " << e.what() << std::endl;
     }
-
-    const std::filesystem::path temp_dir =
-        create_tokenizer_temp_dir("/tmp/trtfb_tok_XXXXXX");
-    std::string temp_dir_str = temp_dir.string();
-
-    write_optional_section(temp_dir, "tokenizer.json", tok_json);
-    write_optional_section(temp_dir, "tokenizer_config.json",
-                           find_section(bundle, "tokenizer_config.json"));
-    write_optional_section(temp_dir, "vocab.json", vocab_json);
-    write_optional_section(temp_dir, "merges.txt",
-                           find_section(bundle, "merges.txt"));
-    write_optional_section(temp_dir, "special_tokens_map.json",
-                           find_section(bundle, "special_tokens_map.json"));
-    write_optional_section(temp_dir, "tokenizer.model", tok_model);
-    write_optional_section(temp_dir, "preprocessor_config.json",
-                           find_section(bundle, "preprocessor_config.json"));
-
-    std::cerr << "[trtf] Initializing HF tokenizer from bundle ..." << std::endl;
-    auto ttok0 = std::chrono::steady_clock::now();
-    auto tokenizer = CreateHfPythonTokenizer(temp_dir_str, hf_python, add_special_tokens);
-    auto ttok1 = std::chrono::steady_clock::now();
-    std::cerr << "[trtf] Tokenizer ready ["
-              << std::chrono::duration_cast<std::chrono::milliseconds>(ttok1 - ttok0).count()
-              << " ms]" << std::endl;
-
-    return TokenizerResult{std::move(tokenizer), std::move(temp_dir_str)};
-}
-
-TokenizerResult extract_clip_tokenizer_from_bundle(
-    const BundleFile& bundle,
-    const std::string& hf_python)
-{
-    const auto* clip_vocab = find_section(bundle, "clip_vocab.json");
-    bool has_clip = (clip_vocab != nullptr && !clip_vocab->empty());
-    if (!has_clip)
-    {
-        throw std::runtime_error("Bundle has no CLIP tokenizer files");
-    }
-
-    const std::filesystem::path temp_dir =
-        create_tokenizer_temp_dir("/tmp/trtfb_clip_XXXXXX");
-    std::string temp_dir_str = temp_dir.string();
-
-    // Write CLIP tokenizer files with standard names (HfPythonTokenizer expects them)
-    write_optional_section(temp_dir, "vocab.json", clip_vocab);
-    write_optional_section(temp_dir, "merges.txt",
-                           find_section(bundle, "clip_merges.txt"));
-    write_optional_section(temp_dir, "tokenizer_config.json",
-                           find_section(bundle, "clip_tokenizer_config.json"));
-    write_optional_section(temp_dir, "special_tokens_map.json",
-                           find_section(bundle, "clip_special_tokens_map.json"));
-
-    std::cerr << "[trtf] Initializing CLIP tokenizer from bundle ..." << std::endl;
-    auto t0 = std::chrono::steady_clock::now();
-    auto tokenizer = CreateHfPythonTokenizer(temp_dir_str, hf_python, /*add_special_tokens=*/true);
-    auto t1 = std::chrono::steady_clock::now();
-    std::cerr << "[trtf] CLIP tokenizer ready ["
-              << std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count()
-              << " ms]" << std::endl;
-
-    return TokenizerResult{std::move(tokenizer), std::move(temp_dir_str)};
+    return nullptr;
 }
 
 #endif // TRTF_HAS_TRT

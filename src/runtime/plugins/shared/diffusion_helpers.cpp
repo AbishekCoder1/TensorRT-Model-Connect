@@ -42,8 +42,7 @@ DiffusionConfig make_diffusion_config(const std::string& json)
 
 DiffusionParts load_diffusion_parts(
     const BundleFile& bundle,
-    const std::string& json,
-    const std::string& hf_python)
+    const std::string& json)
 {
     DiffusionParts parts;
 
@@ -76,7 +75,7 @@ DiffusionParts load_diffusion_parts(
     if (pw && !pw->empty())
         parts.weights = parse_preprocessor_weights(*pw);
 
-    parts.tokenizer = create_tokenizer_from_bundle(bundle, hf_python);
+    parts.tokenizer = create_tokenizer_from_bundle(bundle);
     return parts;
 }
 

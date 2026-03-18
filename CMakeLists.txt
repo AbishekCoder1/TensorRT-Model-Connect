@@ -92,10 +92,11 @@ add_library(trtf_core
   src/runtime/trt/audio/audio_types.cpp
   src/runtime/trt/diffusion/diffusion_preprocessor.cpp
   src/runtime/trt/core/stb_impl.cpp
-  src/tokenizer/hf_python_tokenizer.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
   src/tokenizer/bpe_tokenizer.cpp
+  src/tokenizer/wordpiece_tokenizer.cpp
+  src/tokenizer/unigram_tokenizer.cpp
   src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
@@ -272,10 +273,14 @@ trtf_add_test(test_audio_pipeline_new)
 
 # Tokenizers
 trtf_add_test(test_vocab_tokenizer     NO_SRC_INCLUDE)
-trtf_add_test(test_hf_python_tokenizer)
 trtf_add_test(test_ipa_tokenizer)
 trtf_add_test(test_bpe_tokenizer)
+trtf_add_test(test_bpe_golden)
 trtf_add_test(test_bpe_benchmark)
+trtf_add_test(test_wordpiece_tokenizer)
+trtf_add_test(test_wordpiece_golden)
+trtf_add_test(test_unigram_tokenizer)
+trtf_add_test(test_unigram_golden)
 
 # Image I/O
 trtf_add_test(test_image_reader        NO_SRC_INCLUDE)

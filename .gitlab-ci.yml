@@ -173,7 +173,6 @@ test-e2e-smoke:
     - python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v
       --engine-dir $ENGINE_DIR
       --trtf-binary ./build/trtf
-      --hf-python /opt/venv/bin/python
       --rebuild-engines
   timeout: 30m
 
@@ -187,7 +186,6 @@ test-e2e-full:
       --engine-dir $ENGINE_DIR
       --result-dir e2e_artifacts
       --trtf-binary ./build/trtf
-      --hf-python /opt/venv/bin/python
       --workers-per-gpu 4
       --rebuild-engines
   after_script:

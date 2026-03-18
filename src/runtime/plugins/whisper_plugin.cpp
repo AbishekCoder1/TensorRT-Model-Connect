@@ -50,7 +50,7 @@ public:
 
         // Load mel filterbank + tokenizer
         auto mel_fb = load_mel_filterbank(ctx.bundle);
-        auto tok = create_tokenizer_from_bundle(ctx.bundle, ctx.hf_python);
+        auto tok = create_tokenizer_from_bundle(ctx.bundle);
 
         int32_t mel_n_fft = extract_json_int(json, "mel_n_fft", 400);
         int32_t mel_hop_length = extract_json_int(json, "mel_hop_length", 160);

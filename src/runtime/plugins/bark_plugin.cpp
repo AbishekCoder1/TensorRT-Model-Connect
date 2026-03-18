@@ -63,17 +63,9 @@ public:
 
         // Bark uses BertTokenizer WITHOUT special tokens ([CLS]/[SEP]).
         // HF's BarkProcessor calls encode(text, add_special_tokens=False).
-        // The bundle's tokenizer_add_special_tokens field is unreliable here --
-        // always use false to match the HF Bark pipeline.
-        std::shared_ptr<ITokenizer> bark_tokenizer;
-        if (!ctx.hf_python.empty()) {
-            try {
-                auto tok_result = extract_tokenizer_from_bundle(
-                    ctx.bundle, ctx.hf_python, /*add_special_tokens=*/false);
-                if (tok_result.tokenizer)
-                    bark_tokenizer = std::move(tok_result.tokenizer);
-            } catch (...) {}
-        }
+        // Always use add_special_tokens=false to match the HF Bark pipeline.
+        auto bark_tokenizer = try_create_native_tokenizer(
+            ctx.bundle, /*add_special_tokens=*/false);
 
         auto pipeline = std::make_unique<BarkPipeline>(
             std::move(sem_loaded.module), std::move(coarse_loaded.module),

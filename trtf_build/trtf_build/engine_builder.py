@@ -550,7 +550,7 @@ def _build_diffusion_bundle(
 
     # Ensure tokenizer.json exists for diffusion tokenizer directories.
     # SentencePiece-only tokenizers (T5, PixArt) may lack tokenizer.json
-    # which the C++ HfPythonTokenizer needs.
+    # which the native C++ tokenizer needs.
     for tok_subdir in ("tokenizer_2", "tokenizer"):
         tok_dir = model_dir_path / tok_subdir
         if tok_dir.is_dir() and not (tok_dir / "tokenizer.json").exists():
@@ -582,6 +582,7 @@ def _build_diffusion_bundle(
     # under prefixed names so the C++ runtime can create a separate CLIP
     # tokenizer.  CLIP lives in tokenizer/ (BPE with vocab.json + merges.txt).
     _clip_file_map = {
+        "tokenizer.json": "clip_tokenizer.json",
         "vocab.json": "clip_vocab.json",
         "merges.txt": "clip_merges.txt",
         "tokenizer_config.json": "clip_tokenizer_config.json",

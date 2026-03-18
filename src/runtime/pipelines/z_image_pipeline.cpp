@@ -222,7 +222,6 @@ ZImagePipeline::ZImagePipeline(
     ZImagePreprocessorWeights z_weights,
     std::shared_ptr<ITokenizer> tokenizer,
     std::string model_id_str,
-    std::string hf_python,
     std::string bundle_path)
     : text_encoder_(std::move(text_encoder))
     , denoiser_(std::move(denoiser))
@@ -232,7 +231,6 @@ ZImagePipeline::ZImagePipeline(
     , z_weights_(std::move(z_weights))
     , tokenizer_(std::move(tokenizer))
     , model_id_(std::move(model_id_str))
-    , hf_python_(std::move(hf_python))
     , bundle_path_(std::move(bundle_path))
 {
     std::cerr << "[z-image] ZImagePipeline initialized"

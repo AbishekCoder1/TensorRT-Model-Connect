@@ -65,7 +65,7 @@ public:
         omni_cfg.talker_n_codebooks = extract_json_int(json, "omni_n_codebooks", 8);
         omni_cfg.talker_codebook_size = extract_json_int(json, "omni_codebook_size", 2048);
 
-        auto tokenizer = create_tokenizer_from_bundle(ctx.bundle, ctx.hf_python);
+        auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<OmniPipeline>(
             std::move(thinker_loaded.module),

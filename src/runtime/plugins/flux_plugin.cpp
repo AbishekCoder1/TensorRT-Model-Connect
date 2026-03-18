@@ -13,20 +13,15 @@ namespace trtf {
 class FluxPlugin final : public IPipelinePlugin {
 public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto parts = load_diffusion_parts(ctx.bundle, ctx.config_json, ctx.hf_python);
+        auto parts = load_diffusion_parts(ctx.bundle, ctx.config_json);
 
         // Move text encoder modules into vector
         std::vector<std::unique_ptr<TrtModule>> te_modules;
         for (auto& te : parts.text_encoders)
             te_modules.push_back(std::move(te.module));
 
-        // Try to extract CLIP tokenizer from bundle
-        std::unique_ptr<ITokenizer> clip_tok;
-        try {
-            auto ct = extract_clip_tokenizer_from_bundle(ctx.bundle, ctx.hf_python);
-            if (ct.tokenizer)
-                clip_tok = std::move(ct.tokenizer);
-        } catch (...) {}
+        // Create native BPE CLIP tokenizer from bundle
+        auto clip_tok = create_clip_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<FluxPipeline>(
             std::move(te_modules),

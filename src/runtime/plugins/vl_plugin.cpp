@@ -23,7 +23,7 @@ public:
         auto cache = std::make_unique<KvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream);
 
-        auto tokenizer = create_tokenizer_from_bundle(ctx.bundle, ctx.hf_python);
+        auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         VLConfig vlc;
         vlc.vocab_size = ctx.config.vocab_size;

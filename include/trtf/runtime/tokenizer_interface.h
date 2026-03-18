@@ -3,9 +3,9 @@
 // ITokenizer: shared tokenizer interface.
 // HF equivalent: AutoTokenizer / PreTrainedTokenizer.
 //
-// Existing VocabTokenizer and HfPythonTokenizer already implement these
-// operations — this interface formalizes the contract so pipelines can
-// use either without knowing the concrete type.
+// Native C++ tokenizers (BpeTokenizer, WordPieceTokenizer, UnigramTokenizer,
+// VocabTokenizer, IpaTokenizer) implement this interface. Pipelines use
+// ITokenizer without knowing the concrete type.
 
 #include <cstdint>
 #include <string>

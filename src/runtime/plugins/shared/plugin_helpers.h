@@ -58,9 +58,15 @@ bool is_bpe_tokenizer_json(const BundleFile& bundle);
 std::shared_ptr<ITokenizer> try_create_native_bpe(
     const BundleFile& bundle, bool add_special, bool throw_on_failure);
 
-// Create a tokenizer from bundle, trying native BPE first then HF Python fallback.
+// Try to create a native C++ tokenizer from the bundle's tokenizer.json.
+// Attempts: BPE → WordPiece → Unigram. Returns nullptr if none match.
+std::shared_ptr<ITokenizer> try_create_native_tokenizer(
+    const BundleFile& bundle, bool add_special_tokens);
+
+// Create a native tokenizer from bundle. Tries BPE → WordPiece → Unigram.
+// Returns nullptr if no native tokenizer matches.
 std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(
-    const BundleFile& bundle, const std::string& hf_python);
+    const BundleFile& bundle);
 
 // Compute the KV cache dimension from model config.
 int32_t compute_kv_dim(const BaseConfig& cfg);
@@ -86,29 +92,15 @@ struct MelFilterbank {
     int32_t n_mel_bins{0};
 };
 
-// Result of extracting a tokenizer from a bundle.
-struct TokenizerResult {
-    std::unique_ptr<ITokenizer> tokenizer;
-    std::string temp_dir;  // caller must transfer ownership to PipelineImpl
-};
-
 // Load mel filterbank from the "mel_filterbank" bundle section.
 // Returns empty MelFilterbank if section is not present (old bundles).
 MelFilterbank load_mel_filterbank(const BundleFile& bundle);
 
-// Write tokenizer files from bundle to a temp dir, then create
-// an HfPythonTokenizer. Throws on failure.
-TokenizerResult extract_tokenizer_from_bundle(
-    const BundleFile& bundle,
-    const std::string& hf_python,
-    bool add_special_tokens = false);
-
-// Extract a CLIP tokenizer from bundle (for dual-tokenizer models).
-// Writes clip_vocab.json, clip_merges.txt, clip_tokenizer_config.json,
-// clip_special_tokens_map.json to a temp dir and creates an HfPythonTokenizer.
-TokenizerResult extract_clip_tokenizer_from_bundle(
-    const BundleFile& bundle,
-    const std::string& hf_python);
+// Create a native BPE tokenizer from the CLIP tokenizer sections in the bundle.
+// Used for dual-tokenizer models (e.g., FLUX: CLIP + T5).
+// Returns nullptr if clip_tokenizer.json section is absent.
+std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(
+    const BundleFile& bundle);
 
 #endif // TRTF_HAS_TRT
 

@@ -202,7 +202,6 @@ public:
         ZImagePreprocessorWeights z_weights,
         std::shared_ptr<ITokenizer> tokenizer,
         std::string model_id_str,
-        std::string hf_python,
         std::string bundle_path);
 
     ~ZImagePipeline() override;
@@ -244,7 +243,6 @@ private:
     ZImagePreprocessorWeights z_weights_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
-    std::string hf_python_;
     std::string bundle_path_;
 };
 
