@@ -4,16 +4,25 @@
 // Trace ID:       UT-DIFF-CPP-03
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-FAC-01
-// Intent:         Diffusion pipeline type compilation and interface correctness
-// Preconditions:  TRT headers available for compile check
-// Postconditions: Diffusion pipeline types compile and match expected interfaces
+// Intent:         FluxPipeline, WanPipeline, and ZImagePipeline construction
+//                 with null modules; verifies trivial constructors execute
+//                 and pipeline_type() returns correct values
+// Preconditions:  TRT headers available for type and compile check
+// Postconditions: Diffusion pipeline types construct correctly with null
+//                 modules and report accurate pipeline type strings
 // =============================================================================
 
 // =============================================================================
-// Test suite: Diffusion pipeline headers compile and types are correct.
-// These pipelines now delegate to old-style IDiffusionBackend which requires
-// real TRT engines, so construction tests are limited to compile checks.
-// Full integration is validated by E2E tests.
+// Test suite: Diffusion pipeline construction tests
+//
+// FluxPipeline, WanPipeline, and ZImagePipeline all have trivial constructors
+// (no module validation), so they can be constructed with null modules for
+// testing the constructor body and pipeline_type() accessor.
+//
+// FluxPipeline constructor also computes h_latent_, w_latent_, and
+// num_img_tokens_ from DiffusionConfig defaults (480x832 / scale_factor=8).
+//
+// For full E2E validation with real models, see tests/test_e2e.py.
 // =============================================================================
 
 #include "runtime/pipelines/diffusion_pipeline.h"
@@ -21,28 +30,112 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <vector>
 
 static int failures = 0;
-static void check(bool c, const char* n) { if (!c) { std::cerr << "FAIL: " << n << '\n'; ++failures; } }
+static void check(bool c, const char* n)
+{
+    if (!c) { std::cerr << "FAIL: " << n << '\n'; ++failures; }
+}
 
 #if TRTF_HAS_TRT
 
-static void test_pipeline_types_compile()
+static void test_flux_construction()
 {
-    check(sizeof(trtf::FluxPipeline) > 0, "FluxPipeline defined");
-    check(sizeof(trtf::WanPipeline) > 0, "WanPipeline defined");
-    check(sizeof(trtf::ZImagePipeline) > 0, "ZImagePipeline defined");
+    // FluxPipeline constructor computes latent layout from DiffusionConfig defaults:
+    //   h_latent = video_height(480) / scale_factor_spatial(8) = 60
+    //   w_latent = video_width(832)  / scale_factor_spatial(8) = 104
+    //   num_img_tokens = (60/2) * (104/2) = 30 * 52 = 1560
+    trtf::DiffusionConfig cfg;
+    trtf::PreprocessorWeights weights;
+
+    trtf::FluxPipeline pipeline(
+        /*text_encoders=*/{},
+        /*denoiser=*/nullptr,
+        /*vae=*/nullptr,
+        cfg, weights,
+        /*tokenizer=*/nullptr,
+        /*clip_tokenizer=*/nullptr,
+        /*model_id_str=*/"test-flux");
+
+    check(std::string(pipeline.pipeline_type()) == "FluxPipeline",
+          "FluxPipeline pipeline_type");
+    check(std::string(pipeline.model_id()) == "test-flux",
+          "FluxPipeline model_id");
 }
 
-#endif
+static void test_wan_construction()
+{
+    trtf::DiffusionConfig cfg;
+    trtf::PreprocessorWeights weights;
+
+    trtf::WanPipeline pipeline(
+        /*text_encoder=*/nullptr,
+        /*denoiser=*/nullptr,
+        /*vae=*/nullptr,
+        cfg, weights,
+        /*tokenizer=*/nullptr,
+        /*model_id_str=*/"test-wan");
+
+    check(std::string(pipeline.pipeline_type()) == "WanPipeline",
+          "WanPipeline pipeline_type");
+    check(std::string(pipeline.model_id()) == "test-wan",
+          "WanPipeline model_id");
+}
+
+static void test_zimage_construction()
+{
+    trtf::DiffusionConfig cfg;
+    trtf::PreprocessorWeights weights;
+    trtf::ZImagePreprocessorWeights z_weights;
+
+    trtf::ZImagePipeline pipeline(
+        /*text_encoder=*/nullptr,
+        /*denoiser=*/nullptr,
+        /*vae=*/nullptr,
+        cfg, weights, z_weights,
+        /*tokenizer=*/nullptr,
+        /*model_id_str=*/"test-zimage",
+        /*hf_python=*/"/usr/bin/python3",
+        /*bundle_path=*/"/tmp/test.trtfb");
+
+    check(std::string(pipeline.pipeline_type()) == "ZImagePipeline",
+          "ZImagePipeline pipeline_type");
+    check(std::string(pipeline.model_id()) == "test-zimage",
+          "ZImagePipeline model_id");
+}
+
+static void test_flux_with_custom_config()
+{
+    // Test FluxPipeline with non-default config to exercise the latent layout
+    // computation path with patch_size override.
+    trtf::DiffusionConfig cfg;
+    cfg.video_height = 256;
+    cfg.video_width  = 256;
+    cfg.scale_factor_spatial = 8;
+    cfg.patch_size = {1, 2, 2};  // ph=2, pw=2
+
+    trtf::FluxPipeline pipeline(
+        {}, nullptr, nullptr,
+        cfg, trtf::PreprocessorWeights{},
+        nullptr, nullptr, "test-flux-custom");
+
+    check(std::string(pipeline.pipeline_type()) == "FluxPipeline",
+          "FluxPipeline custom config pipeline_type");
+}
+
+#endif // TRTF_HAS_TRT
 
 int main()
 {
 #if TRTF_HAS_TRT
-    test_pipeline_types_compile();
+    test_flux_construction();
+    test_wan_construction();
+    test_zimage_construction();
+    test_flux_with_custom_config();
 #else
-    std::cerr << "TRT not available, skipping\n";
+    std::cerr << "TRT not available, skipping diffusion pipeline tests\n";
 #endif
-    if (failures > 0) std::cerr << failures << " FAILED\n";
+    if (failures > 0) std::cerr << failures << " test(s) FAILED\n";
     return failures;
 }

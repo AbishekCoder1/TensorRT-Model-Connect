@@ -4,9 +4,12 @@
 // Trace ID:       UT-ENG-CPP-02
 // Architecture:   ARCH-MOD-001
 // Unit Design:    UD-TRT-CORE-01
-// Intent:         TrtModule forward, async forward, introspection, device_ptr, bind_external
+// Intent:         TrtModule forward, async forward, introspection, device_ptr, bind_external,
+//                 move assignment operator=, keep_alive, forward_device (CPU and D2D paths)
 // Preconditions:  TRT + CUDA GPU available, identity engine built in-process
-// Postconditions: Forward produces correct output, introspection matches engine, bindings work
+// Postconditions: Forward produces correct output, introspection matches engine, bindings work;
+//                 move assignment transfers ownership correctly; keep_alive stores shared_ptr;
+//                 forward_device returns DeviceTensorMap; D2D copy path exercised
 // =============================================================================
 
 // =============================================================================
@@ -285,6 +288,128 @@ static void test_move_semantics()
     cudaStreamDestroy(stream);
 }
 
+static void test_move_assignment()
+{
+    // Covers TrtModule::operator=(TrtModule&&) — move assignment operator
+    auto engine = build_identity_engine();
+    if (!engine) return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    trtf::TrtModule a(engine.get(), stream);
+    trtf::TrtModule b(engine.get(), stream);
+    check(a.ok(), "a ok before assignment");
+    check(b.ok(), "b ok before assignment");
+
+    // Move assign a into b (b releases its old context/buffers, acquires a's)
+    b = std::move(a);
+    check(b.ok(), "b ok after move assignment");
+    check(!a.ok(), "a empty after move assignment");
+
+    // b should produce correct output after move assignment
+    float data[4] = {3.0f, 4.0f, 5.0f, 6.0f};
+    trtf::Tensor t;
+    t.data = data;
+    t.shape = {4};
+    t.dtype = trtf::DType::kFloat32;
+    auto out = b.forward({{"x", t}});
+    check(out.count("y") == 1, "move-assigned module forward works");
+    if (out.count("y"))
+    {
+        auto* p = static_cast<float*>(out["y"].data);
+        check(p[0] == 3.0f, "move-assigned output[0] = 3.0");
+    }
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_keep_alive()
+{
+    // Covers TrtModule::keep_alive() — stores a shared_ptr to prevent resource release
+    auto engine = build_identity_engine();
+    if (!engine) return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    trtf::TrtModule module(engine.get(), stream);
+
+    // keep_alive with a trivial shared_ptr<void> resource
+    module.keep_alive(std::make_shared<int>(42));
+    check(module.ok(), "module ok after keep_alive");
+
+    // Module still functions correctly after keep_alive
+    float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    trtf::Tensor t;
+    t.data = data;
+    t.shape = {4};
+    t.dtype = trtf::DType::kFloat32;
+    auto out = module.forward({{"x", t}});
+    check(out.count("y") == 1, "keep_alive: forward still works");
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_forward_device()
+{
+    // Covers TrtModule::forward_device() with empty inputs
+    // Exercises: forward_device_async (enqueue only), sync, output DeviceTensorMap
+    auto engine = build_identity_engine();
+    if (!engine) return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    trtf::TrtModule module(engine.get(), stream);
+
+    // forward_device with empty inputs: runs inference on pre-zeroed buffers,
+    // returns a DeviceTensorMap of name->nullptr
+    trtf::DeviceTensorMap empty_inputs;
+    auto out = module.forward_device(empty_inputs);
+
+    // Should contain output "y" mapped to nullptr
+    check(out.count("y") == 1, "forward_device: 'y' in output map");
+    check(out["y"] == nullptr, "forward_device: output ptr is nullptr");
+
+    // device_ptr("y") is still a valid GPU buffer
+    check(module.device_ptr("y") != nullptr, "forward_device: device_ptr('y') valid");
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_forward_device_with_input()
+{
+    // Covers TrtModule::forward_device_async() body — D2D copy from DeviceTensor
+    auto engine = build_identity_engine();
+    if (!engine) return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    trtf::TrtModule module(engine.get(), stream);
+
+    // Create a DeviceTensor for input "x", upload data
+    trtf::DeviceTensor dt({4}, trtf::DType::kFloat32, stream);
+    check(dt.ok(), "DeviceTensor allocated");
+    float host_data[4] = {7.0f, 8.0f, 9.0f, 10.0f};
+    dt.copy_from_host(host_data);
+
+    // forward_device_async with DeviceTensor input covers D2D copy path (lines 220-228)
+    trtf::DeviceTensorMap inputs;
+    inputs["x"] = &dt;
+    module.forward_device_async(inputs);
+    module.sync();
+
+    // Read output back from device_ptr
+    float result[4] = {0};
+    cudaMemcpy(result, module.device_ptr("y"), 16, cudaMemcpyDeviceToHost);
+    check(result[0] == 7.0f, "forward_device_async D2D: output[0] = 7.0");
+    check(result[3] == 10.0f, "forward_device_async D2D: output[3] = 10.0");
+
+    cudaStreamDestroy(stream);
+}
+
 #endif // TRTF_HAS_TRT
 
 int main()
@@ -296,6 +421,10 @@ int main()
     test_device_ptr();
     test_bind_external();
     test_move_semantics();
+    test_move_assignment();
+    test_keep_alive();
+    test_forward_device();
+    test_forward_device_with_input();
 #else
     std::cerr << "TRT not available, skipping TrtModule tests\n";
 #endif

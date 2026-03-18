@@ -256,6 +256,7 @@ trtf_add_test(test_trt_module)
 trtf_add_test(test_cuda_buffer)
 trtf_add_test(test_cuda_stream)
 trtf_add_test(test_device_kv_cache)
+trtf_add_test(test_device_resources)
 trtf_add_test(test_device_tensor)
 trtf_add_test(test_kv_cache_new)
 trtf_add_test(test_recurrent_state)
@@ -276,6 +277,10 @@ trtf_add_test(test_ipa_tokenizer)
 trtf_add_test(test_bpe_tokenizer)
 trtf_add_test(test_bpe_benchmark)
 
+# Image I/O
+trtf_add_test(test_image_reader        NO_SRC_INCLUDE)
+trtf_add_test(test_trtf_io             NO_SRC_INCLUDE)
+
 # Vision / VL
 trtf_add_test(test_image_preprocessor)
 trtf_add_test(test_vl_decode_policy)
@@ -285,6 +290,7 @@ trtf_add_test(test_vision_execution_plan)
 trtf_add_test(test_diffusion_generation_plan)
 trtf_add_test(test_diffusion_denoising_step_seam)
 trtf_add_test(test_flow_match_scheduler)
+trtf_add_test(test_diffusion_math)
 
 # Recurrent (Mamba / RWKV)
 trtf_add_test(test_recurrent_step_contracts)
@@ -294,6 +300,7 @@ trtf_add_test(test_audio_bundle_validation)
 trtf_add_test(test_whisper_host_plan)
 trtf_add_test(test_whisper_decode_policy)
 trtf_add_test(test_wav_reader)
+trtf_add_test(test_audio_types)
 trtf_add_test(test_mel_spectrogram)
 
 # Audio — Bark
