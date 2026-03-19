@@ -20,5 +20,6 @@
   "max_pixel_mean": 0.85,
   "min_pixel_std": 0.05,
   "skip_text_comparison": true,
-  "notes": "FLUX.1-schnell: 4-step distilled T2I. Uses CLIP+T5 dual text encoders, FluxDiT denoiser, AutoencoderKL VAE."
+  "notes": "FLUX.1-schnell: 4-step distilled T2I. Uses CLIP+T5 dual text encoders, FluxDiT denoiser, AutoencoderKL VAE.",
+  "core": true
 }

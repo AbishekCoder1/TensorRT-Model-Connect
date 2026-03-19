@@ -3,13 +3,19 @@
 # Fat image (trtf-dev-gb300:latest) has all Python deps baked in at /opt/venv.
 # ENV PATH includes /opt/venv/bin, so python/pip/pytest work without activation.
 # ENV vars TRT_LIB_DIR, TRT_INC_DIR, LD_LIBRARY_PATH are pre-set.
+#
+# Test impact analysis (tools/test_impact.py) drives selective execution:
+#   - Only affected E2E models run (based on git diff vs target branch)
+#   - Unit test tiers run only when relevant source files change
+#   - Safety invariant: unknown files trigger ALL tests (zero false negatives)
 
 stages:
+  - analyze
   - build
   - tier1-unit
   - tier2-graph-ops
-  - tier3-smoke
-  - tier4-full-e2e
+  - tier3-e2e
+  - nightly-e2e
 
 variables:
   ENGINE_DIR: /workspace/users/yifeif/trt-transformers/engines
@@ -36,6 +42,7 @@ workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
 
 default:
   image: trtf-dev-gb300:latest
@@ -46,16 +53,34 @@ default:
     - pip install --no-deps -e trtf_build/
     - chmod +x ./build/trtf 2>/dev/null || true
 
+# ── Analyze: Test Impact Analysis (fast, no GPU) ────────────────────────────
+
+impact-analysis:
+  stage: analyze
+  before_script: []   # No deps needed — pure Python + git
+  script:
+    - python3 tools/test_impact.py --validate
+    - python3 tools/test_impact.py --base ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} --json > impact.json
+    - echo "--- Impact Analysis ---"
+    - cat impact.json
+    - python3 tools/test_impact.py --base ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} --verbose
+  artifacts:
+    paths:
+      - impact.json
+    expire_in: 1 day
+  timeout: 5m
+
 # ── Build ──────────────────────────────────────────────────────────────────────
 
 build-all:
   stage: build
   script:
-    - cmake -S . -B build -G Ninja
-      -DTRTF_TRT_INCLUDE_DIR=$TRT_INC_DIR
-      -DTRTF_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so
-      -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include
-      -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+    - |
+      cmake -S . -B build -G Ninja \
+        -DTRTF_TRT_INCLUDE_DIR=$TRT_INC_DIR \
+        -DTRTF_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so \
+        -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+        -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
     - cmake --build build -j
   artifacts:
     paths:
@@ -63,7 +88,9 @@ build-all:
     expire_in: 1 day
   timeout: 15m
 
-# ── Tier 1: Unit Tests + Static Gates (7 parallel jobs) ─────────────────────
+# ── Tier 1: Unit Tests + Static Gates ────────────────────────────────────────
+# Unit test jobs skip when their tier is not affected (per impact.json).
+# Coverage and static checks always run (cheap, important for tracking).
 
 check-family-coverage:
   stage: tier1-unit
@@ -77,29 +104,42 @@ check-cyclomatic-complexity:
   needs: [build-all]
   script:
     - lizard --version
-    - python tools/check_cyclomatic_complexity.py src
-      --max-ccn ${CCM_MAX_CCN:-10}
-      --top 20
+    - python tools/check_cyclomatic_complexity.py src --max-ccn ${CCM_MAX_CCN:-10} --top 20
   timeout: 15m
 
 test-python-builder:
   stage: tier1-unit
-  needs: [build-all]
+  needs: [build-all, impact-analysis]
   script:
+    - |
+      if ! python3 -c "import json; d=json.load(open('impact.json')); exit(0 if 'builder' in d['unit_tiers'] else 1)"; then
+        echo "Skipping: builder tier not affected by this change"
+        exit 0
+      fi
     - python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py -n auto
   timeout: 20m
 
 test-tools:
   stage: tier1-unit
-  needs: [build-all]
+  needs: [build-all, impact-analysis]
   script:
+    - |
+      if ! python3 -c "import json; d=json.load(open('impact.json')); exit(0 if 'tools' in d['unit_tiers'] else 1)"; then
+        echo "Skipping: tools tier not affected by this change"
+        exit 0
+      fi
     - python -m pytest tests/tools/ -v -n auto
   timeout: 20m
 
 test-cpp-unit:
   stage: tier1-unit
-  needs: [build-all]
+  needs: [build-all, impact-analysis]
   script:
+    - |
+      if ! python3 -c "import json; d=json.load(open('impact.json')); exit(0 if 'cpp' in d['unit_tiers'] else 1)"; then
+        echo "Skipping: cpp tier not affected by this change"
+        exit 0
+      fi
     - ctest --test-dir build --output-on-failure
   timeout: 20m
 
@@ -152,17 +192,21 @@ test-graph-ops:
   needs: [test-python-builder, test-cpp-unit, coverage-python, coverage-cpp]
   script:
     - nvidia-smi
-    - python -m pytest tests/builder/test_graph_ops.py
-      tests/builder/test_graph_ops_extended.py
-      tests/builder/test_graph_blocks.py -v -n auto
+    - python -m pytest tests/builder/test_graph_ops.py tests/builder/test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -n auto
   timeout: 20m
 
-# ── Tier 3: E2E Smoke Test (~3 min) ─────────────────────────────────────────
+# ── Tier 3: Selective E2E Tests (impact-driven) ─────────────────────────────
+# Replaces the old tier3-smoke + tier4-full-e2e pipeline.
+# Runs ONLY the E2E models affected by this MR's changes.
+# - Family plugin change: tests only that family's models (~5 min)
+# - Shared module change: tests all 68 models (~2-3 hours)
+# - Docs/tools-only change: skips entirely (0 min)
 
-test-e2e-smoke:
-  stage: tier3-smoke
+test-e2e-selective:
+  stage: tier3-e2e
   needs:
     - build-all
+    - impact-analysis
     - check-family-coverage
     - check-cyclomatic-complexity
     - test-tools
@@ -170,31 +214,55 @@ test-e2e-smoke:
     - coverage-cpp
     - test-graph-ops
   script:
-    - python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v
-      --engine-dir $ENGINE_DIR
-      --trtf-binary ./build/trtf
-      --rebuild-engines
-  timeout: 30m
-
-# ── Tier 4: Full E2E (~2h, auto on master and MRs) ───────────────────────────
-
-test-e2e-full:
-  stage: tier4-full-e2e
-  needs: [test-e2e-smoke, build-all]
-  script:
-    - ./scripts/run_e2e_parallel.sh
-      --engine-dir $ENGINE_DIR
-      --result-dir e2e_artifacts
-      --trtf-binary ./build/trtf
-      --workers-per-gpu 4
-      --rebuild-engines
+    - |
+      MODELS=$(python3 -c "
+      import json, sys
+      d = json.load(open('impact.json'))
+      models = d.get('e2e_models', [])
+      if not models:
+          sys.exit(0)
+      print(' or '.join(f'test_e2e[{m}]' for m in models))
+      ")
+      if [ -z "$MODELS" ]; then
+        echo "No E2E models affected by this change -- skipping E2E tests"
+        exit 0
+      fi
+      MODEL_COUNT=$(python3 -c "import json; print(len(json.load(open('impact.json'))['e2e_models']))")
+      echo "Running selective E2E: $MODEL_COUNT models"
+      echo "Filter: $MODELS"
+    - |
+      MODEL_COUNT=$(python3 -c "import json; print(len(json.load(open('impact.json'))['e2e_models']))")
+      MODELS=$(python3 -c "
+      import json
+      d = json.load(open('impact.json'))
+      print(' or '.join(f'test_e2e[{m}]' for m in d['e2e_models']))
+      ")
+      if [ "$MODEL_COUNT" -gt 20 ]; then
+        echo "Large model set ($MODEL_COUNT models) -- using parallel runner"
+        ./scripts/run_e2e_parallel.sh \
+          --engine-dir $ENGINE_DIR \
+          --result-dir e2e_artifacts \
+          --trtf-binary ./build/trtf \
+          --workers-per-gpu 4 \
+          --rebuild-engines
+      else
+        echo "Small model set ($MODEL_COUNT models) -- using direct pytest"
+        python -m pytest tests/test_e2e.py -k "$MODELS" -v \
+          --engine-dir $ENGINE_DIR \
+          --trtf-binary ./build/trtf \
+          --rebuild-engines \
+          --e2e-artifacts-dir e2e_artifacts
+      fi
   after_script:
-    - python scripts/generate_e2e_report.py
-      --artifacts-dir e2e_artifacts/artifacts
-      -o e2e_artifacts/e2e_report.html
-      --project-dir .
-      --title "E2E Report - MR !${CI_MERGE_REQUEST_IID:-manual}"
-      || true
+    - |
+      if [ -d e2e_artifacts ]; then
+        python scripts/generate_e2e_report.py \
+          --artifacts-dir e2e_artifacts/artifacts \
+          -o e2e_artifacts/e2e_report.html \
+          --project-dir . \
+          --title "E2E Report - MR !${CI_MERGE_REQUEST_IID:-manual}" \
+          || true
+      fi
   artifacts:
     paths:
       - e2e_artifacts/
@@ -203,3 +271,41 @@ test-e2e-full:
   timeout: 4h
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ── Nightly: Full E2E Suite (all 68 models, scheduled) ──────────────────────
+# Runs every night on master via GitLab CI schedule. Force-rebuilds all
+# bundles and tests all 68 models — the gold-standard regression gate.
+# Configure in GitLab: Settings > CI/CD > Pipeline schedules
+#   Branch: master, Cron: 0 2 * * * (2 AM daily)
+
+test-e2e-nightly:
+  stage: nightly-e2e
+  needs: [build-all]
+  script:
+    - "echo '=== Nightly Full E2E: all 68 models ==='"
+    - nvidia-smi
+    - |
+      ./scripts/run_e2e_parallel.sh \
+        --engine-dir $ENGINE_DIR \
+        --result-dir e2e_artifacts \
+        --trtf-binary ./build/trtf \
+        --workers-per-gpu 4 \
+        --rebuild-engines
+  after_script:
+    - |
+      if [ -d e2e_artifacts ]; then
+        python scripts/generate_e2e_report.py \
+          --artifacts-dir e2e_artifacts/artifacts \
+          -o e2e_artifacts/e2e_report.html \
+          --project-dir . \
+          --title "Nightly E2E Report - $(date +%Y-%m-%d)" \
+          || true
+      fi
+  artifacts:
+    paths:
+      - e2e_artifacts/
+    when: always
+    expire_in: 7 days
+  timeout: 6h
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"

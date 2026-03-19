@@ -96,7 +96,6 @@ static void test_zimage_construction()
         cfg, weights, z_weights,
         /*tokenizer=*/nullptr,
         /*model_id_str=*/"test-zimage",
-        /*hf_python=*/"/usr/bin/python3",
         /*bundle_path=*/"/tmp/test.trtfb");
 
     check(std::string(pipeline.pipeline_type()) == "ZImagePipeline",

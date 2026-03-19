@@ -14,5 +14,6 @@
   "test_image": "data/test_img.jpeg",
   "point_x": 0.5,
   "point_y": 0.5,
-  "num_expected_masks": 3
+  "num_expected_masks": 3,
+  "core": true
 }
