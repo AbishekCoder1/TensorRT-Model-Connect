@@ -618,8 +618,12 @@ def main():
                         help="HF model dtype (default: float16)")
     parser.add_argument("--trust-remote-code", action="store_true",
                         help="Allow custom code from the HF model repo")
+    parser.add_argument("--trt-only", action="store_true",
+                        help="Benchmark TRT only (skip HF reference)")
     parser.add_argument("--json", dest="json_path", metavar="PATH",
                         help="Save results to JSON file")
+    parser.add_argument("--perf-db", dest="perf_db_path", metavar="PATH",
+                        help="SQLite perf database path (enables perf tracking)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -673,6 +677,87 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
+    # -- Record TRT-only results to PerfDB early (before HF may crash) --
+    trt_prefill_early = _stats(trt_res["prefill_times"])
+    trt_decode_early = _stats(trt_res["decode_times"])
+    trt_avg_tokens_early = (statistics.mean(trt_res["decode_token_counts"])
+                            if trt_res["decode_token_counts"] else 0)
+    trt_tps_early = 0.0
+    trt_pt_early = 0.0
+    if trt_avg_tokens_early > 0 and trt_decode_early["mean"] > 0:
+        trt_tps_early = 1000.0 * trt_avg_tokens_early / trt_decode_early["mean"]
+        trt_pt_early = trt_decode_early["mean"] / trt_avg_tokens_early
+    trt_only_json = {
+        "metadata": {
+            "model": args.model,
+            "gpu": _get_gpu_name(),
+            "trt_version": _get_trt_version(),
+            "prompt": args.prompt,
+            "num_input_tokens": len(input_ids),
+            "max_new_tokens": args.max_new_tokens,
+            "warmup": args.warmup,
+            "iterations": args.iterations,
+            "hf_dtype": args.dtype,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+        "trt": {
+            "prefill_ms": trt_prefill_early,
+            "decode_ms": trt_decode_early,
+            "per_token_ms": {"mean": trt_pt_early, "std": 0.0},
+            "throughput_tps": {"mean": trt_tps_early, "std": 0.0},
+            "num_decode_tokens": int(trt_avg_tokens_early),
+        },
+        "hf": {},
+        "speedup": {},
+        "token_match": None,
+    }
+
+    if args.trt_only:
+        # -- TRT-only mode: report, save, and exit --
+        sep = "=" * 60
+        print(f"\n{sep}")
+        print(f"Perf (TRT only): {args.model}")
+        print(f"GPU: {trt_only_json['metadata']['gpu']}, "
+              f"TRT: {trt_only_json['metadata']['trt_version']}")
+        print(f'Prompt: "{args.prompt[:60]}" ({len(input_ids)} tokens)')
+        print(f"Throughput: {trt_tps_early:.1f} t/s")
+        print(f"Decode: {trt_decode_early['mean']:.1f} ms")
+        print(f"Prefill: {trt_prefill_early['mean']:.1f} ms")
+        print(sep)
+
+        if args.json_path:
+            with open(args.json_path, "w") as f:
+                json.dump(trt_only_json, f, indent=2)
+            print(f"\n[perf] Results saved to {args.json_path}",
+                  file=sys.stderr)
+
+        if args.perf_db_path:
+            try:
+                from perfdb import PerfDB
+                pdb = PerfDB(args.perf_db_path)
+                run_id = pdb.record_perf_compare(trt_only_json)
+                pdb.close()
+                print(f"[perf] Recorded to perf DB (run_id={run_id})",
+                      file=sys.stderr)
+            except Exception as e:
+                print(f"[perf] WARNING: PerfDB recording failed: {e}",
+                      file=sys.stderr)
+        return
+
+    # -- Record TRT results to PerfDB early (before HF may crash) --
+    trt_early_run_id = None
+    if args.perf_db_path:
+        try:
+            from perfdb import PerfDB
+            pdb = PerfDB(args.perf_db_path)
+            trt_early_run_id = pdb.record_perf_compare(trt_only_json)
+            pdb.close()
+            print(f"[perf] TRT results recorded to perf DB "
+                  f"(run_id={trt_early_run_id})", file=sys.stderr)
+        except Exception as e:
+            print(f"[perf] WARNING: PerfDB early recording failed: {e}",
+                  file=sys.stderr)
+
     # -- Bench HF (GPU-exclusive) --
     print(f"[perf] Loading HF model (dtype={args.dtype}) ...", file=sys.stderr)
     hf_model = load_hf_model(model_dir, args.dtype, args.trust_remote_code)
@@ -691,100 +776,40 @@ def main():
         args.max_new_tokens, args.iterations, args.warmup,
         args.dtype, trt_res, hf_res, is_mamba=is_mamba)
 
-    # -- JSON output --
+    # -- JSON output (full TRT+HF) --
+    json_output_data = build_json_output(
+        args.model, args.prompt, len(input_ids),
+        args.max_new_tokens, args.iterations, args.warmup,
+        args.dtype, trt_res, hf_res)
     if args.json_path:
-        data = build_json_output(
-            args.model, args.prompt, len(input_ids),
-            args.max_new_tokens, args.iterations, args.warmup,
-            args.dtype, trt_res, hf_res)
         with open(args.json_path, "w") as f:
-            json.dump(data, f, indent=2)
+            json.dump(json_output_data, f, indent=2)
         print(f"\n[perf] Results saved to {args.json_path}", file=sys.stderr)
+
+    # -- Perf DB: update with full TRT+HF results --
+    if args.perf_db_path:
+        try:
+            from perfdb import PerfDB
+            pdb = PerfDB(args.perf_db_path)
+            run_id = pdb.record_perf_compare(json_output_data)
+            # Remove the TRT-only early record (now superseded by full result)
+            if trt_early_run_id is not None:
+                pdb._conn.execute(
+                    "DELETE FROM perf_runs WHERE run_id = ?",
+                    (trt_early_run_id,))
+                pdb._conn.commit()
+            pdb.close()
+            print(f"[perf] Full results recorded to perf DB "
+                  f"(run_id={run_id})", file=sys.stderr)
+        except Exception as e:
+            print(f"[perf] WARNING: PerfDB recording failed: {e}",
+                  file=sys.stderr)
 
     # Warn if tokens differ
     if trt_res["gen_ids"] != hf_res["gen_ids"]:
         print("\nWARNING: TRT and HF generated different tokens. "
               "Per-token metrics may not be directly comparable.",
               file=sys.stderr)
-
-
-def run_as_diff_test(ctx):
-    """Framework entry point. Returns DiffResult."""
-    from diff_framework.protocol import DiffResult
-    import time as _time
-
-    t0 = _time.monotonic()
-    try:
-        from trtf_build.engine_builder import _resolve_model
-        from transformers import AutoTokenizer
-
-        model_dir = _resolve_model(ctx.model)
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_dir, trust_remote_code=ctx.trust_remote_code)
-        input_ids = tokenizer.encode("The capital of France is")
-        eos_token_id = tokenizer.eos_token_id
-
-        warmup, iterations = 1, 3
-
-        if ctx.bundle_path:
-            engine_plan, num_layers, max_cache_length, _, is_mamba = \
-                load_trt_from_bundle(ctx.bundle_path)
-        else:
-            engine_plan, config, _, is_mamba = build_trt_engine(
-                ctx.model, ctx.max_cache_length, ctx.verbose)
-            num_layers = config.num_hidden_layers
-            max_cache_length = ctx.max_cache_length
-
-        if is_mamba:
-            trt_res = bench_trt_mamba(
-                engine_plan, num_layers, input_ids, ctx.max_new_tokens,
-                warmup, iterations, eos_token_id, ctx.verbose)
-        else:
-            trt_res = bench_trt(
-                engine_plan, num_layers, max_cache_length,
-                input_ids, ctx.max_new_tokens,
-                warmup, iterations, eos_token_id, ctx.verbose)
-        del engine_plan
-
-        import gc, torch
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        hf_model = load_hf_model(model_dir, "float16", ctx.trust_remote_code)
-        hf_res = bench_hf(
-            hf_model, input_ids, ctx.max_new_tokens,
-            warmup, iterations, eos_token_id, ctx.verbose)
-        del hf_model
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        import statistics
-        trt_total = statistics.mean(
-            [p + d for p, d in zip(trt_res["prefill_times"],
-                                   trt_res["decode_times"])])
-        hf_total = statistics.mean(
-            [p + d for p, d in zip(hf_res["prefill_times"],
-                                   hf_res["decode_times"])])
-        speedup = hf_total / trt_total if trt_total > 0 else 0.0
-        token_match = trt_res["gen_ids"] == hf_res["gen_ids"]
-
-        return DiffResult(
-            test_name="perf_benchmark", model=ctx.model,
-            runtime_strategy=ctx.runtime_strategy,
-            passed=True,  # perf is informational, always passes
-            status="PASS",
-            message=f"TRT {trt_total:.1f}ms vs HF {hf_total:.1f}ms "
-                    f"({speedup:.2f}x speedup)",
-            metrics={
-                "trt_total_ms": round(trt_total, 1),
-                "hf_total_ms": round(hf_total, 1),
-                "speedup": round(speedup, 2),
-                "token_match": token_match,
-            },
-            duration_s=_time.monotonic() - t0)
-    except Exception as e:
-        return DiffResult.error(
-            "perf_benchmark", ctx.model, ctx.runtime_strategy, str(e))
 
 
 def run_as_diff_test(ctx):

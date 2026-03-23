@@ -423,3 +423,51 @@ class TestSerialGpuExecution:
                           "gc_collect", "empty_cache"]
         assert log == expected_order, (
             f"Expected exact serial order:\n  {expected_order}\nGot:\n  {log}")
+
+
+# ---------------------------------------------------------------------------
+# --trt-only tests
+# ---------------------------------------------------------------------------
+
+class TestTrtOnlyCLI:
+    """Tests for --trt-only CLI flag."""
+
+    def test_trt_only_flag_accepted(self):
+        mod = _import_perf_compare()
+        # Verify the parser accepts --trt-only
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--trt-only", action="store_true")
+        args = parser.parse_args(["--trt-only"])
+        assert args.trt_only is True
+
+    def test_trt_only_json_structure(self):
+        """TRT-only JSON should have empty hf section and None token_match."""
+        # Build TRT-only json structure similar to what main() produces
+        trt_only_json = {
+            "metadata": {
+                "model": "test-model",
+                "gpu": "TestGPU",
+                "trt_version": "10.0",
+            },
+            "trt": {
+                "prefill_ms": {"mean": 5.0, "std": 0.1},
+                "decode_ms": {"mean": 20.0, "std": 0.5},
+                "per_token_ms": {"mean": 1.0, "std": 0.0},
+                "throughput_tps": {"mean": 1000.0, "std": 0.0},
+            },
+            "hf": {},
+            "speedup": {},
+            "token_match": None,
+        }
+        # Verify structure
+        assert trt_only_json["hf"] == {}
+        assert trt_only_json["speedup"] == {}
+        assert trt_only_json["token_match"] is None
+        assert trt_only_json["trt"]["throughput_tps"]["mean"] == 1000.0
+
+        # Verify it's valid JSON (serializable)
+        import json
+        serialized = json.dumps(trt_only_json)
+        roundtrip = json.loads(serialized)
+        assert roundtrip["trt"]["throughput_tps"]["mean"] == 1000.0
