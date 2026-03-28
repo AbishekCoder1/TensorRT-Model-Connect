@@ -8,6 +8,7 @@
 #include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/device_tensor.h"
 #include "runtime/trt/diffusion/diffusion_types.h"
+#include "runtime/trt/diffusion/diffusion_generation_plan.h"
 
 #include <cstdint>
 #include <memory>
@@ -61,6 +62,32 @@ private:
     void compute_flux_rope(
         int32_t h_patches, int32_t w_patches, int32_t text_seq_len,
         std::vector<float>& cos_out, std::vector<float>& sin_out) const;
+
+    // generate_image helpers (extracted for cyclomatic complexity)
+    bool prepare_conditioning(
+        const std::string& prompt,
+        const GenerateConfig& cfg,
+        diffusion::FluxGenerationPlan& plan,
+        std::vector<float>& pooled_output,
+        std::vector<float>& text_embeddings);
+    void prepare_denoising_state(
+        const diffusion::FluxGenerationPlan& plan,
+        const std::vector<float>& text_embeddings,
+        std::vector<float>& encoder_hidden,
+        std::vector<float>& cos_vals,
+        std::vector<float>& sin_vals,
+        std::vector<float>& latents);
+    bool run_denoising(
+        const diffusion::FluxGenerationPlan& plan,
+        const std::vector<float>& pooled_output,
+        std::vector<float>& encoder_hidden,
+        std::vector<float>& cos_vals,
+        std::vector<float>& sin_vals,
+        std::vector<float>& latents);
+    bool decode_and_convert(
+        const diffusion::FluxGenerationPlan& plan,
+        std::vector<float>& latents,
+        ImageResult& result);
 
     std::vector<std::unique_ptr<TrtModule>> text_encoders_;
     std::unique_ptr<TrtModule> denoiser_;

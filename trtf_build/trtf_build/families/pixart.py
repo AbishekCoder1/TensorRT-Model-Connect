@@ -109,7 +109,7 @@ class PixArtPlugin:
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False,
+        *, verbose: bool = False, **_kwargs,
     ) -> dict:
         """Build all three component engines."""
         from ..t5_encoder_builder import build_t5_encoder_engine, load_t5_weights

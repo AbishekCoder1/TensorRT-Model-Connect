@@ -37,12 +37,27 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print("Error: -o / --output required", file=sys.stderr)
         return 1
 
+    # FP8 quantization: --fp8-scales (pre-computed) or --fp8 (auto-calibrate)
+    fp8_scales = None
+    fp8_auto = getattr(args, 'fp8', False)
+    if getattr(args, 'fp8_scales', None):
+        import json as _json
+        with open(args.fp8_scales) as _f:
+            fp8_scales = _json.load(_f)
+        print(f"[trtf-build] Loaded FP8 scales from {args.fp8_scales} "
+              f"({len(fp8_scales)} layers)", file=sys.stderr)
+    elif fp8_auto:
+        # Sentinel: engine_builder will call plugin.fp8_calibrate()
+        fp8_scales = "auto"
+        print("[trtf-build] FP8 auto-calibration enabled", file=sys.stderr)
+
     try:
         build(
             model_id_or_path=args.model,
             output_path=args.output,
             max_cache_length=args.max_cache_length,
             verbose=args.verbose,
+            fp8_scales=fp8_scales,
         )
         return 0
     except Exception as e:
@@ -124,6 +139,10 @@ def main() -> None:
                          help="KV cache length (default: 256)")
     build_p.add_argument("--verbose", action="store_true",
                          help="Verbose TRT builder output")
+    build_p.add_argument("--fp8", action="store_true",
+                         help="Enable FP8 quantization (auto-calibrate via ModelOpt)")
+    build_p.add_argument("--fp8-scales", default=None,
+                         help="Path to pre-computed FP8 scales JSON (skips calibration)")
 
     # trtf-build inspect <bundle.trtfb>
     inspect_p = subparsers.add_parser("inspect",

@@ -1210,15 +1210,17 @@ void FluxPipeline::compute_flux_rope(
 }
 
 // ===========================================================================
-// generate_image — Full FLUX pipeline
+// generate_image helpers (extracted for cyclomatic complexity)
 // ===========================================================================
 
-ImageResult FluxPipeline::generate_image(
+// Steps 1-5: Prompt prep, tokenize, plan, CLIP, T5
+bool FluxPipeline::prepare_conditioning(
     const std::string& prompt,
-    const GenerateConfig& cfg)
+    const GenerateConfig& cfg,
+    diffusion::FluxGenerationPlan& plan,
+    std::vector<float>& pooled_output,
+    std::vector<float>& text_embeddings)
 {
-    ImageResult result;
-
     // Detect FLUX.2 via VAE BN weights presence
     const bool is_flux2 = !weights_.vae_bn_mean.empty();
 
@@ -1233,7 +1235,7 @@ ImageResult FluxPipeline::generate_image(
     }
 
     // 3. Build generation plan
-    const auto plan = diffusion::make_flux_generation_plan(
+    plan = diffusion::make_flux_generation_plan(
         config_,
         weights_,
         cfg.num_steps,
@@ -1241,16 +1243,8 @@ ImageResult FluxPipeline::generate_image(
         h_latent_,
         w_latent_,
         num_img_tokens_);
-    const int32_t num_inference_steps = plan.num_inference_steps;
-    const float guidance_scale = plan.guidance_scale;
-
-    const int32_t dit_dim = plan.dit_dim;
-    const int32_t text_seq = plan.text_seq;
-    const int32_t z_dim = plan.z_dim;
-    const auto& layout = plan.layout;
 
     // 4. Run CLIP encoder (if available, index 0)
-    std::vector<float> pooled_output;
     auto run_clip = [this](
         const std::vector<int32_t>& ids,
         std::vector<float>& pooled) {
@@ -1264,11 +1258,10 @@ ImageResult FluxPipeline::generate_image(
             run_clip,
             pooled_output)) {
         std::cerr << "[flux] CLIP encoder failed\n";
-        return result;
+        return false;
     }
 
     // 5. Run T5 encoder
-    std::vector<float> text_embeddings;
     auto run_t5 = [this](
         int32_t idx,
         const std::vector<int32_t>& ids,
@@ -1281,12 +1274,28 @@ ImageResult FluxPipeline::generate_image(
             run_t5,
             text_embeddings)) {
         std::cerr << "[flux] T5 encoder failed\n";
-        return result;
+        return false;
     }
+
+    return true;
+}
+
+// Steps 6-8: Context projection, RoPE, latents
+void FluxPipeline::prepare_denoising_state(
+    const diffusion::FluxGenerationPlan& plan,
+    const std::vector<float>& text_embeddings,
+    std::vector<float>& encoder_hidden,
+    std::vector<float>& cos_vals,
+    std::vector<float>& sin_vals,
+    std::vector<float>& latents)
+{
+    const int32_t dit_dim = plan.dit_dim;
+    const int32_t text_seq = plan.text_seq;
+    const auto& layout = plan.layout;
 
     // 6. Project T5 embeddings via context_embedder
     const int32_t t5_dim = config_.text_encoder_dim;
-    std::vector<float> encoder_hidden(
+    encoder_hidden.assign(
         static_cast<std::size_t>(text_seq) * static_cast<std::size_t>(dit_dim), 0.0F);
     project_flux_encoder_hidden(
         text_embeddings,
@@ -1298,22 +1307,33 @@ ImageResult FluxPipeline::generate_image(
         encoder_hidden);
 
     // 7. Compute RoPE
-    std::vector<float> cos_vals, sin_vals;
     compute_flux_rope(layout.h_packed, layout.w_packed, text_seq, cos_vals, sin_vals);
 
     // 8. Initialize random latents
-    std::vector<float> latents(plan.latent_size);
+    latents.resize(plan.latent_size);
     initialize_flux_latents(latents);
+}
 
-    // 9. Create FlowMatchEulerState scheduler
-    FlowMatchEulerState scheduler = diffusion::make_flux_scheduler_state(plan);
-    log_flux_dynamic_shift(scheduler);
+// Step 10: Denoising loop setup + run
+bool FluxPipeline::run_denoising(
+    const diffusion::FluxGenerationPlan& plan,
+    const std::vector<float>& pooled_output,
+    std::vector<float>& encoder_hidden,
+    std::vector<float>& cos_vals,
+    std::vector<float>& sin_vals,
+    std::vector<float>& latents)
+{
+    const bool is_flux2 = plan.is_flux2;
+    const int32_t num_inference_steps = plan.num_inference_steps;
+    const float guidance_scale = plan.guidance_scale;
+    const int32_t dit_dim = plan.dit_dim;
+    const int32_t z_dim = plan.z_dim;
+    const auto& layout = plan.layout;
 
     std::cerr << "[flux] Starting denoising loop (" << num_inference_steps << " steps)"
               << " latents=[" << z_dim << "," << h_latent_ << "," << w_latent_ << "]"
               << " packed=[" << num_img_tokens_ << "," << layout.packed_channels << "] ...\n";
 
-    // 10. Run denoising loop
     std::vector<float> hidden(
         static_cast<std::size_t>(num_img_tokens_) * static_cast<std::size_t>(dit_dim));
     std::vector<float> denoiser_output;
@@ -1340,6 +1360,9 @@ ImageResult FluxPipeline::generate_image(
         weights_.patch_embed_weight, weights_.patch_embed_bias,
         num_img_tokens_, layout, dit_dim);
 
+    FlowMatchEulerState scheduler = diffusion::make_flux_scheduler_state(plan);
+    log_flux_dynamic_shift(scheduler);
+
     if (!run_flux_denoising_loop(
             scheduler,
             num_inference_steps,
@@ -1351,10 +1374,22 @@ ImageResult FluxPipeline::generate_image(
             compute_temb,
             embed_hidden,
             run_denoiser_fn)) {
-        return result;
+        return false;
     }
 
     maybe_dump_flux_latents(latents);
+    return true;
+}
+
+// Steps 11-13: VAE decode and convert to ImageResult
+bool FluxPipeline::decode_and_convert(
+    const diffusion::FluxGenerationPlan& plan,
+    std::vector<float>& latents,
+    ImageResult& result)
+{
+    const bool is_flux2 = plan.is_flux2;
+    const int32_t z_dim = plan.z_dim;
+    const auto& layout = plan.layout;
 
     // 11. Prepare VAE input: BN denorm + unpatchify for FLUX.2, identity for FLUX.1
     std::vector<float> vae_latents;
@@ -1387,6 +1422,42 @@ ImageResult FluxPipeline::generate_image(
     convert_flux_vae_output_to_image(vae_out_data, h_out, w_out, result);
 
     std::cerr << "[flux] Image generated: " << result.width << "x" << result.height << "\n";
+    return true;
+}
+
+// ===========================================================================
+// generate_image — Full FLUX pipeline
+// ===========================================================================
+
+ImageResult FluxPipeline::generate_image(
+    const std::string& prompt,
+    const GenerateConfig& cfg)
+{
+    ImageResult result;
+
+    // Steps 1-5: Prompt prep, tokenize, plan, CLIP, T5
+    diffusion::FluxGenerationPlan plan;
+    std::vector<float> pooled_output;
+    std::vector<float> text_embeddings;
+    if (!prepare_conditioning(prompt, cfg, plan, pooled_output, text_embeddings)) {
+        return result;
+    }
+
+    // Steps 6-8: Context projection, RoPE, latents
+    std::vector<float> encoder_hidden;
+    std::vector<float> cos_vals, sin_vals;
+    std::vector<float> latents;
+    prepare_denoising_state(
+        plan, text_embeddings, encoder_hidden, cos_vals, sin_vals, latents);
+
+    // Step 10: Denoising loop
+    if (!run_denoising(plan, pooled_output, encoder_hidden, cos_vals, sin_vals, latents)) {
+        return result;
+    }
+
+    // Steps 11-13: VAE decode and convert
+    decode_and_convert(plan, latents, result);
+
     return result;
 }
 

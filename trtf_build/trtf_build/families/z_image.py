@@ -102,7 +102,7 @@ class ZImagePlugin:
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False,
+        *, verbose: bool = False, **_kwargs,
     ) -> dict:
         """Build REAL TRT engines for all Z-Image components."""
         from ..qwen3_encoder_builder import (

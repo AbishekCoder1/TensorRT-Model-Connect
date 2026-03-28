@@ -332,9 +332,10 @@ def build_bundle(
     is_diffusers = (model_dir_path / "model_index.json").exists()
 
     if is_diffusers:
+        fp8_scales = getattr(build_bundle, '_fp8_scales', None)
         _build_diffusion_bundle(
             model_dir_path, output_path, max_cache_length,
-            verbose=verbose, t0=t0)
+            verbose=verbose, t0=t0, fp8_scales=fp8_scales)
         return
 
     # 1. Parse config
@@ -518,6 +519,7 @@ def _build_diffusion_bundle(
     *,
     verbose: bool = False,
     t0: float = 0.0,
+    fp8_scales: dict | None = None,
 ) -> None:
     """Build a diffusion model bundle from a diffusers-format directory."""
     import json as json_module
@@ -555,6 +557,19 @@ def _build_diffusion_bundle(
     if "_transformer_config" in weights:
         config.raw["_transformer_config"] = weights["_transformer_config"]
 
+    # Auto-calibrate FP8 if requested
+    if fp8_scales == "auto":
+        calibrate_fn = getattr(plugin, 'fp8_calibrate', None)
+        if calibrate_fn is None:
+            raise ValueError(
+                f"Plugin {plugin.name} does not support FP8 auto-calibration. "
+                f"Use --fp8-scales with a pre-computed scales JSON instead.")
+        print(f"[trtf-build] Running FP8 auto-calibration for {plugin.name} ...",
+              file=sys.stderr)
+        fp8_scales = calibrate_fn(str(model_dir_path), config)
+        print(f"[trtf-build] Calibrated {len(fp8_scales)} layers",
+              file=sys.stderr)
+
     # Build all component engines
     build_components = getattr(plugin, 'build_components', None)
     if build_components is None:
@@ -562,7 +577,8 @@ def _build_diffusion_bundle(
             f"Plugin {plugin.name} does not support build_components()")
 
     components = build_components(
-        str(model_dir_path), config, weights, verbose=verbose)
+        str(model_dir_path), config, weights, verbose=verbose,
+        fp8_scales=fp8_scales)
     if components is None:
         raise ValueError(
             f"Plugin {plugin.name}.build_components() returned None")
@@ -686,6 +702,7 @@ def build(
     max_cache_length: int = 256,
     *,
     verbose: bool = False,
+    fp8_scales: dict | str | None = None,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -698,7 +715,9 @@ def build(
         output_path: Where to write the .trtfb bundle.
         max_cache_length: KV cache length for the engine.
         verbose: Print detailed TRT builder logs.
+        fp8_scales: Per-layer FP8 scales dict, or ``"auto"`` for auto-calibration.
     """
     model_dir = _resolve_model(model_id_or_path)
     build_bundle._model_id_or_path_orig = model_id_or_path
+    build_bundle._fp8_scales = fp8_scales
     build_bundle(model_dir, output_path, max_cache_length, verbose=verbose)

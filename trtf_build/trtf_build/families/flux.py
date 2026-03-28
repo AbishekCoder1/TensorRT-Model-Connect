@@ -17,6 +17,7 @@ FLUX.2 components:
 
 from __future__ import annotations
 
+import re
 import sys
 
 from ..config import ModelConfig
@@ -140,7 +141,7 @@ class FluxPlugin:
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False,
+        *, verbose: bool = False, fp8_scales: dict | None = None,
     ) -> dict:
         """Build all component engines.
 
@@ -159,7 +160,8 @@ class FluxPlugin:
         # Detect FLUX.2 via transformer config
         if _is_flux2(tc):
             return self._build_flux2_components(
-                model_dir, config, weights, tc=tc, verbose=verbose)
+                model_dir, config, weights, tc=tc, verbose=verbose,
+                fp8_scales=fp8_scales)
 
         return self._build_flux1_components(
             model_dir, config, weights, tc=tc, verbose=verbose)
@@ -337,7 +339,7 @@ class FluxPlugin:
 
     def _build_flux2_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, tc: dict, verbose: bool = False,
+        *, tc: dict, verbose: bool = False, fp8_scales: dict | None = None,
     ) -> dict:
         """Build FLUX.2 component engines (Mistral + Flux2 DiT + VAE32)."""
         from ..mistral_encoder_builder import (
@@ -433,6 +435,26 @@ class FluxPlugin:
             )
             text_encoders.append(("mistral", mistral_plan))
 
+        # Free GPU memory from encoder build before DiT (monolithic Myelin
+        # compilation needs ~48 GB scratch).  Write the encoder plan to a temp
+        # file so Python can release the bytes object.
+        import gc, tempfile, os
+        _te_tmp = None
+        if text_encoders:
+            _te_tmp = tempfile.NamedTemporaryFile(suffix=".plan", delete=False)
+            _te_tmp.write(text_encoders[0][1])  # write plan bytes
+            _te_tmp.close()
+            text_encoders[0] = (text_encoders[0][0], None)  # release bytes
+        mistral_weights = None  # type: ignore[assignment]
+        mistral_plan = None  # type: ignore[assignment]
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+
         # 2. FLUX.2 DiT denoiser
         print("[flux] Loading FLUX.2 DiT weights ...", file=sys.stderr)
         dit_weights = load_flux2_dit_weights(
@@ -442,6 +464,10 @@ class FluxPlugin:
             num_layers=num_layers,
             num_single_layers=num_single_layers,
         )
+
+        # FP8 mode: use STRONGLY_TYPED + BF16 base when scales are provided
+        _strongly_typed = fp8_scales is not None
+        _cast_dtype = "bf16" if fp8_scales is not None else "fp16"
 
         dit_plan = build_flux2_dit_engine(
             dit_weights,
@@ -453,6 +479,9 @@ class FluxPlugin:
             text_seq_len=text_seq_len,
             mlp_ratio=mlp_ratio,
             verbose=verbose,
+            strongly_typed=_strongly_typed,
+            cast_dtype=_cast_dtype,
+            fp8_scales=fp8_scales,
         )
 
         # 3. VAE decoder (32 latent ch → 3ch image at 8x upsampling)
@@ -486,6 +515,12 @@ class FluxPlugin:
         # 5. Serialize preprocessor weights
         preprocessor_weights = _serialize_flux2_preprocessor(
             dit_weights, vae_bn_weights=_vae_weights)
+
+        # Reload encoder plan from temp file if spilled to save GPU memory
+        if _te_tmp is not None and text_encoders and text_encoders[0][1] is None:
+            with open(_te_tmp.name, "rb") as _f:
+                text_encoders[0] = (text_encoders[0][0], _f.read())
+            os.unlink(_te_tmp.name)
 
         return {
             "text_encoders": text_encoders,
@@ -589,6 +624,79 @@ class FluxPlugin:
             "rope_theta": tc.get("rope_theta", 2000.0),
             "num_vae_caches": 0,
         }
+
+
+    # ------------------------------------------------------------------
+    # FP8 quantization support
+    # ------------------------------------------------------------------
+
+    # Layers to exclude from FP8 (kept in BF16): embedders, norms, modulation.
+    _FP8_EXCLUDE = re.compile(
+        r"(proj_out.*|.*(time_text_embed|context_embedder|x_embedder"
+        r"|norm_out|time_guidance_embed|stream_modulation).*)")
+
+    def fp8_calibrate(
+        self, model_dir: str, config: ModelConfig,
+    ) -> dict[str, dict[str, float]]:
+        """Run FP8 E4M3 calibration for FLUX.2-dev.
+
+        Loads the transformer via diffusers, runs 32 forward passes with
+        diverse timesteps and random inputs, then extracts per-tensor scales
+        via ModelOpt max calibration.
+        """
+        import torch
+        from ..fp8_calibrate import run_fp8_calibration
+
+        print("[fp8-calibrate] Loading FLUX.2-dev transformer ...",
+              file=sys.stderr)
+        from diffusers import Flux2Pipeline
+        pipe = Flux2Pipeline.from_pretrained(
+            model_dir, torch_dtype=torch.bfloat16)
+        model = pipe.transformer.cpu().eval()
+        del pipe
+
+        tc = config.raw.get("_transformer_config", {})
+        img_h = config.raw.get("image_height", self._IMAGE_HEIGHT)
+        img_w = config.raw.get("image_width", self._IMAGE_WIDTH)
+        h_packed = (img_h // 8) // 2
+        w_packed = (img_w // 8) // 2
+        num_img = h_packed * w_packed
+        text_seq = self._FLUX2_TEXT_SEQ_LEN
+        packed_ch = 32 * 4  # z_dim * 2x2 patch
+        # Encoder dim = Mistral hidden * num_extract_layers (5120 * 3 = 15360)
+        encoder_dim = tc.get("joint_attention_dim",
+                             self._MISTRAL_HIDDEN * len(self._MISTRAL_EXTRACT_LAYERS))
+
+        def calibration_loop(m: torch.nn.Module) -> None:
+            timesteps = torch.linspace(50, 950, 8)
+            total = len(timesteps) * 4
+            done = 0
+            for t in timesteps:
+                for _ in range(4):
+                    inputs = {
+                        "hidden_states": torch.randn(
+                            1, num_img, packed_ch, dtype=torch.bfloat16),
+                        "encoder_hidden_states": torch.randn(
+                            1, text_seq, encoder_dim,
+                            dtype=torch.bfloat16),
+                        "timestep": torch.tensor(
+                            [t.item() / 1000.0], dtype=torch.float32),
+                        "guidance": torch.tensor(
+                            [3.5], dtype=torch.float32),
+                        "txt_ids": torch.zeros(
+                            text_seq, 4, dtype=torch.bfloat16),
+                        "img_ids": torch.zeros(
+                            num_img, 4, dtype=torch.bfloat16),
+                    }
+                    with torch.no_grad():
+                        m(**inputs)
+                    done += 1
+                    if done % 4 == 0:
+                        print(f"  [fp8-calibrate] {done}/{total} "
+                              f"(t={t.item():.0f})", file=sys.stderr)
+
+        return run_fp8_calibration(
+            model, calibration_loop, self._FP8_EXCLUDE)
 
 
 def _is_flux2(tc: dict) -> bool:

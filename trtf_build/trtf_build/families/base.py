@@ -114,3 +114,25 @@ class FamilyPlugin(Protocol):
             num_vae_caches.
         """
         return None
+
+    # ------------------------------------------------------------------
+    # Optional: FP8 quantization support
+    # ------------------------------------------------------------------
+
+    def fp8_calibrate(
+        self, model_dir: str, config: ModelConfig,
+    ) -> dict[str, dict[str, float]] | None:
+        """Run FP8 calibration and return per-layer scales.
+
+        Return None (default) if this family does not support FP8.
+        Plugins that support FP8 should override this to:
+          1. Load the model (via diffusers/transformers)
+          2. Define a calibration loop with representative inputs
+          3. Call ``fp8_calibrate.run_fp8_calibration()``
+          4. Return the scales dict
+
+        Returns:
+            ``{layer_name: {"input_scale": float, "weight_scale": float}}``
+            for each quantized layer, or None if unsupported.
+        """
+        return None
