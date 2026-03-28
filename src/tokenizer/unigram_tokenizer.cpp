@@ -466,11 +466,16 @@ private:
         std::string ntype = norm.value("type", "");
         if (ntype == "Precompiled") {
             mUsePrecompiled = true;
+        } else if (ntype == "Prepend") {
+            // Marian-style: prepend a string (e.g., "▁") to input
+            mAddPrefixSpace = true;
         } else if (ntype == "Sequence" && norm.contains("normalizers")) {
             for (auto& sub : norm["normalizers"]) {
-                if (sub.value("type", "") == "Precompiled") {
+                std::string stype = sub.value("type", "");
+                if (stype == "Precompiled") {
                     mUsePrecompiled = true;
-                    break;
+                } else if (stype == "Prepend") {
+                    mAddPrefixSpace = true;
                 }
             }
         }

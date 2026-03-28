@@ -288,11 +288,12 @@ class TestCppScope:
         assert "bert-base" not in match.models
 
     def test_cpp_force_link(self, imap):
-        """force_link_plugins.cpp -> ALL models."""
+        """force_link_plugins.cpp -> no E2E models (linker anchors only)."""
         match = test_impact.classify_file(
             "src/runtime/plugins/force_link_plugins.cpp", imap)
         assert match.rule == "cpp_force_link"
-        assert len(match.models) == len(imap.all_model_names)
+        assert match.models == []
+        assert match.rebuild_cpp is True
 
 
 # ---------------------------------------------------------------------------
@@ -315,11 +316,11 @@ class TestSafetyNet:
         assert match.rule == "manifest"
         assert match.models == ["qwen3-0.6b"]
 
-    def test_cmake_triggers_all(self, imap):
-        """CMakeLists.txt -> all models + rebuild flag."""
+    def test_cmake_no_e2e_models(self, imap):
+        """CMakeLists.txt -> no E2E models (build infra only) + rebuild flag."""
         match = test_impact.classify_file("CMakeLists.txt", imap)
         assert match.rule == "cmake"
-        assert len(match.models) == len(imap.all_model_names)
+        assert match.models == []
         assert match.rebuild_cpp is True
 
     def test_include_header(self, imap):
@@ -357,6 +358,12 @@ class TestNoImpact:
     def test_markdown_no_impact(self, imap):
         """*.md files -> no E2E tests."""
         match = test_impact.classify_file("CLAUDE.md", imap)
+        assert match.rule == "no_impact"
+        assert match.models == []
+
+    def test_gitlab_ci_no_impact(self, imap):
+        """.gitlab-ci.yml -> no E2E tests (CI infra)."""
+        match = test_impact.classify_file(".gitlab-ci.yml", imap)
         assert match.rule == "no_impact"
         assert match.models == []
 

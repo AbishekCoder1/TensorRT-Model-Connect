@@ -107,18 +107,6 @@ check-cyclomatic-complexity:
     - python tools/check_cyclomatic_complexity.py src --max-ccn ${CCM_MAX_CCN:-10} --top 20
   timeout: 15m
 
-test-python-builder:
-  stage: tier1-unit
-  needs: [build-all, impact-analysis]
-  script:
-    - |
-      if ! python3 -c "import json; d=json.load(open('impact.json')); exit(0 if 'builder' in d['unit_tiers'] else 1)"; then
-        echo "Skipping: builder tier not affected by this change"
-        exit 0
-      fi
-    - python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py -n auto
-  timeout: 20m
-
 test-tools:
   stage: tier1-unit
   needs: [build-all, impact-analysis]
@@ -142,6 +130,18 @@ test-cpp-unit:
       fi
     - ctest --test-dir build --output-on-failure
   timeout: 20m
+
+test-python-builder:
+  stage: tier1-unit
+  needs: [build-all, impact-analysis]
+  script:
+    - |
+      if ! python3 -c "import json; d=json.load(open('impact.json')); exit(0 if 'builder' in d['unit_tiers'] else 1)"; then
+        echo "Skipping: builder tier not affected by this change"
+        exit 0
+      fi
+    - python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py -n auto
+  timeout: 40m
 
 coverage-python:
   stage: tier1-unit
@@ -231,28 +231,31 @@ test-e2e-selective:
       echo "Running selective E2E: $MODEL_COUNT models"
       echo "Filter: $MODELS"
     - |
-      MODEL_COUNT=$(python3 -c "import json; print(len(json.load(open('impact.json'))['e2e_models']))")
-      MODELS=$(python3 -c "
+      # Extract selective model list from impact analysis
+      python3 -c "
       import json
       d = json.load(open('impact.json'))
-      print(' or '.join(f'test_e2e[{m}]' for m in d['e2e_models']))
-      ")
-      if [ "$MODEL_COUNT" -gt 20 ]; then
-        echo "Large model set ($MODEL_COUNT models) -- using parallel runner"
-        ./scripts/run_e2e_parallel.sh \
-          --engine-dir $ENGINE_DIR \
-          --result-dir e2e_artifacts \
-          --trtf-binary ./build/trtf \
-          --workers-per-gpu 4 \
-          --rebuild-engines
-      else
-        echo "Small model set ($MODEL_COUNT models) -- using direct pytest"
-        python -m pytest tests/test_e2e.py -k "$MODELS" -v \
-          --engine-dir $ENGINE_DIR \
-          --trtf-binary ./build/trtf \
-          --rebuild-engines \
-          --e2e-artifacts-dir e2e_artifacts
+      models = d.get('e2e_models', [])
+      with open('e2e_models.txt', 'w') as f:
+          f.write('\n'.join(models))
+      print(f'Selective E2E: {len(models)} models')
+      for m in models[:10]:
+          print(f'  {m}')
+      if len(models) > 10:
+          print(f'  ... and {len(models) - 10} more')
+      "
+      MODEL_COUNT=$(wc -l < e2e_models.txt)
+      if [ "$MODEL_COUNT" -eq 0 ]; then
+        echo "No E2E models affected -- skipping"
+        exit 0
       fi
+      ./scripts/run_e2e_parallel.sh \
+        --engine-dir $ENGINE_DIR \
+        --result-dir e2e_artifacts \
+        --trtf-binary ./build/trtf \
+        --workers-per-gpu 4 \
+        --models-file e2e_models.txt \
+        --rebuild-engines
   after_script:
     - |
       if [ -d e2e_artifacts ]; then

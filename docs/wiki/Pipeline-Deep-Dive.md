@@ -104,6 +104,7 @@ The `resolve_family()` function maps `runtime_strategy` strings to families:
 | `kVision` | `vision_language`, `segmentation`, `prompted_segmentation`, `object_detection` |
 | `kAudio` | `speech_to_text`, `text_to_audio`, `speech_to_speech`, `omni_multimodal` |
 | `kDiffusion` | `diffusion` |
+| `kText` | `text_to_text` |
 
 If `runtime_strategy` is empty (old bundles), it defaults to `"decoder_kv_cache"`.
 If the strategy string is not in the map, `resolve_family` returns `kUnknown`

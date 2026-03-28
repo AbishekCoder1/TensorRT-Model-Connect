@@ -24,6 +24,9 @@ extern volatile int kForceLink_OmniPlugin;
 extern volatile int kForceLink_FluxPlugin;
 extern volatile int kForceLink_WanPlugin;
 extern volatile int kForceLink_ZImagePlugin;
+extern volatile int kForceLink_T5Plugin;
+extern volatile int kForceLink_MarianPlugin;
+extern volatile int kForceLink_Seq2SeqPlugin;
 
 // Referenced from pipeline_registry.cpp to ensure this TU is linked.
 volatile int* force_link_all_plugins()
@@ -45,6 +48,9 @@ volatile int* force_link_all_plugins()
         &kForceLink_FluxPlugin,
         &kForceLink_WanPlugin,
         &kForceLink_ZImagePlugin,
+        &kForceLink_T5Plugin,
+        &kForceLink_MarianPlugin,
+        &kForceLink_Seq2SeqPlugin,
     };
     return kPluginAnchors[0];
 }

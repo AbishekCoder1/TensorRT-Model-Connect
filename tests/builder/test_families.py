@@ -362,6 +362,20 @@ _POSITIVE_MATCH_CASES = [
     ("canary", "canary"),
     ("canary_asr", "canary"),
     ("enc_dec_multi_task", "canary"),
+    # Autopilot-generated families
+    ("electra", "electra"),
+    ("modernbert", "modernbert"),
+    ("deberta", "deberta"),
+    ("t5", "t5"),
+    ("bart", "bart"),
+    ("mbart", "bart"),
+    ("marian", "marian"),
+    ("albert", "albert"),
+    ("olmo2", "olmo2"),
+    ("fnet", "fnet"),
+    ("xlnet", "xlnet"),
+    ("convbert", "convbert"),
+    ("dpr", "dpr"),
 ]
 
 
@@ -383,7 +397,6 @@ class TestMatchPositive:
 
 _NEGATIVE_MATCH_CASES = [
     "unknown_model",
-    "t5",
     "clip",
     "",
 ]

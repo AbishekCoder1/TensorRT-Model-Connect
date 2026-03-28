@@ -28,7 +28,7 @@ The scope covers:
 - The C++ runtime and its centralized factory-based pipeline dispatch.
 - The `.trtfb` bundle format that bridges the two phases.
 - Core runtime abstractions: `TrtModule`, `KvCache`, `RecurrentState`.
-- All 14 concrete pipeline implementations and 18 runtime strategies.
+- All 15 concrete pipeline implementations and 19 runtime strategies (including `text_to_text` for T5-style encoder-decoder models).
 
 ---
 
@@ -98,7 +98,7 @@ class FamilyPlugin(Protocol):
 
 ### 3.4 Plugin Auto-Discovery
 
-`trtf_build/trtf_build/families/__init__.py` uses `pkgutil.iter_modules()` to scan all `.py` files in the families directory. Any module exposing a `plugin` attribute is registered automatically. There are currently 52 Python files in the families directory (50 plugins + `base.py` protocol + `__init__.py` auto-discovery module).
+`trtf_build/trtf_build/families/__init__.py` uses `pkgutil.iter_modules()` to scan all `.py` files in the families directory. Any module exposing a `plugin` attribute is registered automatically. There are currently 56+ Python files in the families directory (54+ plugins + `base.py` protocol + `__init__.py` auto-discovery module). New plugins are added continuously via the autopilot system (`scripts/autopilot/autorun.py`).
 
 Key discovery functions:
 - `find_plugin(model_type)` -- matches standard models by HF `model_type`.
@@ -315,6 +315,7 @@ trtf::load(bundle_path)
 | `diffusion` (wan_3d) | kDiffusion | `WanPipeline` | None (iterative denoising) |
 | `diffusion` (flux_2d) | kDiffusion | `FluxPipeline` | None (iterative denoising) |
 | `diffusion` (z_image_2d) | kDiffusion | `ZImagePipeline` | None (iterative denoising) |
+| `text_to_text` | kText | `T5Pipeline` | `KvCache` + encoder `TrtModule` |
 | `speech_to_text` | kAudio | `WhisperPipeline` | Legacy `WhisperBackend` |
 | `text_to_audio` (bark) | kAudio | `BarkPipeline` | Legacy `BarkBackend` |
 | `text_to_audio` (magpie) | kAudio | `MagpiePipeline` | Legacy `MagpieTTSBackend` |

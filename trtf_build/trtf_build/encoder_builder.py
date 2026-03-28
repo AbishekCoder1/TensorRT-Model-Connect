@@ -9,8 +9,10 @@ decoder builder, this has:
   - Output: hidden_states [seq_len, hidden_size]
 
 Tensor names for the C++ runtime:
-  Inputs:  input_ids [seq_len], token_type_ids [seq_len]
+  Inputs:  input_ids [seq_len], attention_mask [seq_len]
   Outputs: hidden_states [seq_len, hidden_size]
+
+token_type_ids is baked as constant zeros (single-segment inference).
 """
 
 from __future__ import annotations
@@ -70,18 +72,25 @@ def build_encoder_engine(
     # Inputs
     # -------------------------------------------------------------------
     input_ids = network.add_input("input_ids", trt.int32, (max_seq_length,))
-    token_type_ids = network.add_input("token_type_ids", trt.int32, (max_seq_length,))
     attention_mask_input = network.add_input("attention_mask", trt.int32, (max_seq_length,))
 
+    # token_type_ids: constant zeros (all segment-0) — the C++ encoder
+    # pipeline doesn't provide this input, and inference is single-segment.
+    tt_zeros = network.add_constant(
+        (max_seq_length,), trt.Weights(np.zeros(max_seq_length, dtype=np.int32)))
+    tt_zeros.get_output(0).dtype = trt.int32
+    token_type_ids = tt_zeros.get_output(0)
+
     # -------------------------------------------------------------------
-    # Shared constants
+    # Shared constants (support embedding factorization: embedding_size != hidden)
     # -------------------------------------------------------------------
+    embedding_size = weights["embedding"].shape[1]  # may differ from hidden (e.g. ALBERT 128 vs 768)
     embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), weights["embedding"])
+        network, weights["embedding"].shape, weights["embedding"])
     position_embed_table = graph_ops.add_constant(
         network, weights["position_embedding"].shape, weights["position_embedding"])
     token_type_table = graph_ops.add_constant(
-        network, (type_vocab_size, hidden), weights["token_type_embedding"])
+        network, (type_vocab_size, embedding_size), weights["token_type_embedding"])
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([eps], dtype=np.float32))
@@ -129,10 +138,20 @@ def build_encoder_engine(
         embed_sum1.get_output(0), tt_embed.get_output(0),
         trt.ElementWiseOperation.SUM)
 
-    # Embedding LayerNorm
+    # Embedding LayerNorm (over embedding_size, which may differ from hidden)
     hidden_state = _add_seq_layer_norm(
-        network, embed_sum2.get_output(0), hidden, max_seq_length,
+        network, embed_sum2.get_output(0), embedding_size, max_seq_length,
         weights["embed_norm"], weights["embed_norm_beta"], eps)
+
+    # Optional embedding projection: embedding_size -> hidden_size (ALBERT, FNet)
+    if "embed_projection" in weights:
+        hidden_state = graph_ops.add_matmul_rhs_constant(
+            network, hidden_state, embedding_size, hidden,
+            weights["embed_projection"])
+        if "embed_projection_bias" in weights:
+            hidden_state = graph_ops.add_bias_sum(
+                network, hidden_state, hidden,
+                weights["embed_projection_bias"])
 
     # -------------------------------------------------------------------
     # Optional relative position bias (MPNet, T5-style)

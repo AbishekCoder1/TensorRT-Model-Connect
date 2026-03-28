@@ -382,6 +382,12 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "encoder_only",
     "embedding",
     "reranking",
+    "text_to_text",
+    "marian_translation",
+    "seq2seq_encoder_decoder",
+    "object_detection",
+    "omni_multimodal",
+    "neural_operator",
 })
 
 

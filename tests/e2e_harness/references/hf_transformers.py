@@ -75,7 +75,7 @@ class HfTransformersReference:
 
         script = textwrap.dedent(f"""\
             import sys, numpy as np, torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
 
             hf_id = {hf_id!r}
             prompt = {prompt!r}
@@ -90,14 +90,16 @@ class HfTransformersReference:
 
             load_kwargs = {{
                 "trust_remote_code": trust_remote_code,
-                "dtype": torch.float32,
+                "torch_dtype": torch.float32,
             }}
-            try:
-                model = AutoModelForCausalLM.from_pretrained(hf_id, **load_kwargs)
-            except TypeError:
-                # Backward compatibility for older transformers versions.
-                load_kwargs.pop("dtype", None)
-                load_kwargs["torch_dtype"] = torch.float32
+            # Detect encoder-decoder models by checking config
+            from transformers import AutoConfig
+            _cfg = AutoConfig.from_pretrained(hf_id, trust_remote_code=trust_remote_code)
+            is_seq2seq = getattr(_cfg, "is_encoder_decoder", False)
+
+            if is_seq2seq:
+                model = AutoModelForSeq2SeqLM.from_pretrained(hf_id, **load_kwargs)
+            else:
                 model = AutoModelForCausalLM.from_pretrained(hf_id, **load_kwargs)
             model.eval()
 
@@ -105,25 +107,36 @@ class HfTransformersReference:
             all_logits = []
 
             with torch.no_grad():
-                # Prefill
-                outputs = model(ids_tensor)
-                prefill_logits = outputs.logits[0].numpy()
-                for i in range(len(input_ids)):
-                    all_logits.append(prefill_logits[i])
-
-                # Autoregressive generation
-                gen_ids = list(input_ids)
-                generated_token_ids = []
-                for _ in range(max_new_tokens):
-                    next_token = int(np.argmax(all_logits[-1]))
-                    generated_token_ids.append(next_token)
-                    gen_ids.append(next_token)
-                    ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
+                if is_seq2seq:
+                    # Encoder-decoder: use model.generate() for greedy decoding
+                    output_ids = model.generate(
+                        ids_tensor, max_new_tokens=max_new_tokens,
+                        do_sample=False, num_beams=1)
+                    generated_token_ids = output_ids[0].tolist()
+                    # Re-run to get logits for each decoder step
+                    decoder_ids = torch.tensor([generated_token_ids], dtype=torch.long)
+                    outputs = model(ids_tensor, decoder_input_ids=decoder_ids)
+                    for i in range(outputs.logits.shape[1]):
+                        all_logits.append(outputs.logits[0, i].numpy())
+                    text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+                else:
+                    # Decoder-only: step-by-step autoregressive
                     outputs = model(ids_tensor)
-                    all_logits.append(outputs.logits[0, -1].numpy())
+                    prefill_logits = outputs.logits[0].numpy()
+                    for i in range(len(input_ids)):
+                        all_logits.append(prefill_logits[i])
 
-            # Decode only tokens actually generated in the autoregressive loop.
-            text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+                    gen_ids = list(input_ids)
+                    generated_token_ids = []
+                    for _ in range(max_new_tokens):
+                        next_token = int(np.argmax(all_logits[-1]))
+                        generated_token_ids.append(next_token)
+                        gen_ids.append(next_token)
+                        ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
+                        outputs = model(ids_tensor)
+                        all_logits.append(outputs.logits[0, -1].numpy())
+                    text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+
             with open(text_path, "w") as f:
                 f.write(text)
 
@@ -241,17 +254,43 @@ class HfTransformersReference:
 
             tokenizer = AutoTokenizer.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code)
-            model = AutoModel.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype=torch.float32)
+
+            # Load model — try AutoModel first, fall back to base model
+            # for specialized wrappers (DPR, etc.) that don't return
+            # last_hidden_state in the expected format.
+            from transformers import AutoConfig
+            config = AutoConfig.from_pretrained(
+                hf_id, trust_remote_code=trust_remote_code)
+            model_type = getattr(config, 'model_type', '')
+
+            if model_type == 'dpr':
+                # DPR wraps BERT — load the base BERT model directly
+                # to get raw hidden states matching TRT encoder output.
+                from transformers import BertModel
+                model = BertModel.from_pretrained(
+                    hf_id, trust_remote_code=trust_remote_code,
+                    torch_dtype=torch.float32)
+            else:
+                model = AutoModel.from_pretrained(
+                    hf_id, trust_remote_code=trust_remote_code,
+                    torch_dtype=torch.float32)
             model.eval()
 
             inputs = tokenizer(prompt, return_tensors="pt")
             with torch.no_grad():
                 outputs = model(**inputs)
 
-            # CLS token embedding (first token of last hidden state)
-            cls_embedding = outputs.last_hidden_state[0, 0].numpy().tolist()
+            # CLS token embedding from last_hidden_state
+            if hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
+                cls_embedding = outputs.last_hidden_state[0, 0].numpy().tolist()
+            else:
+                first_out = outputs[0]
+                if first_out.ndim == 3:
+                    cls_embedding = first_out[0, 0].numpy().tolist()
+                elif first_out.ndim == 2:
+                    cls_embedding = first_out[0].numpy().tolist()
+                else:
+                    cls_embedding = first_out.numpy().tolist()
             result = {{"cls_embedding": cls_embedding}}
             with open(output_path, "w") as f:
                 json.dump(result, f)

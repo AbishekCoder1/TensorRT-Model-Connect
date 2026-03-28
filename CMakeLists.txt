@@ -134,6 +134,9 @@ add_library(trtf_core
   src/runtime/plugins/flux_plugin.cpp
   src/runtime/plugins/wan_plugin.cpp
   src/runtime/plugins/zimage_plugin.cpp
+  src/runtime/plugins/t5_plugin.cpp
+  src/runtime/plugins/marian_plugin.cpp
+  src/runtime/plugins/seq2seq_plugin.cpp
   # Pipeline implementations
   src/runtime/pipelines/text_generation_pipeline.cpp
   src/runtime/pipelines/recurrent_pipeline.cpp

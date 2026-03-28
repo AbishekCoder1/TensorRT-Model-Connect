@@ -109,48 +109,58 @@ def generate_plugin(family_name: str, model_type: str, features: dict,
     )
 
     if needs_custom:
-        custom_warning = textwrap.dedent("""\
-            # WARNING: This model has non-standard architecture features.
-            # The generated plugin uses the standard decoder builder as a starting point,
-            # but you will likely need to customize load_weights() and/or build_engine().
-        """)
+        custom_warning = (
+            "# WARNING: This model has non-standard architecture features.\n"
+            "# The generated plugin uses the standard decoder builder as a starting point,\n"
+            "# but you will likely need to customize load_weights() and/or build_engine().\n"
+        )
     else:
         custom_warning = ""
 
     # Build matches() body
     match_expr = f'return model_type.lower().startswith("{model_type.lower()}")'
 
-    source = textwrap.dedent(f'''\
-        """{family_name.capitalize()} family plugin — scaffolded from {hf_repo}."""
-
-        from __future__ import annotations
-
-        from ..config import ModelConfig
-        from ..checkpoint_mapper import WeightDict, load_standard_weights
-        from ..standard_decoder_builder import build_standard_decoder_engine
-
-        {notes_block}{custom_warning}
-        class {class_name}:
-            name = "{family_name}"
-
-            def matches(self, model_type: str) -> bool:
-                {match_expr}
-
-            def load_weights(
-                self, model_dir: str, config: ModelConfig,
-            ) -> WeightDict:
-                return load_standard_weights(model_dir, config)
-
-            def build_engine(
-                self, config: ModelConfig, weights: WeightDict,
-                max_cache_length: int, *, verbose: bool = False,
-            ) -> bytes:
-                return build_standard_decoder_engine(
-                    config, weights, max_cache_length, verbose=verbose)
-
-
-        plugin = {class_name}()
-    ''')
+    # Build source directly — no textwrap.dedent to avoid indentation issues
+    # with interpolated multi-line blocks.
+    lines = [
+        f'"""{family_name.capitalize()} family plugin — scaffolded from {hf_repo}."""',
+        "",
+        "from __future__ import annotations",
+        "",
+        "from ..config import ModelConfig",
+        "from ..checkpoint_mapper import WeightDict, load_standard_weights",
+        "from ..standard_decoder_builder import build_standard_decoder_engine",
+        "",
+    ]
+    if notes_block:
+        lines.append(notes_block.rstrip())
+    if custom_warning:
+        lines.append(custom_warning.rstrip())
+    lines.append("")
+    lines += [
+        f"class {class_name}:",
+        f'    name = "{family_name}"',
+        "",
+        "    def matches(self, model_type: str) -> bool:",
+        f"        {match_expr}",
+        "",
+        "    def load_weights(",
+        "        self, model_dir: str, config: ModelConfig,",
+        "    ) -> WeightDict:",
+        "        return load_standard_weights(model_dir, config)",
+        "",
+        "    def build_engine(",
+        "        self, config: ModelConfig, weights: WeightDict,",
+        "        max_cache_length: int, *, verbose: bool = False,",
+        "    ) -> bytes:",
+        "        return build_standard_decoder_engine(",
+        "            config, weights, max_cache_length, verbose=verbose)",
+        "",
+        "",
+        f"plugin = {class_name}()",
+        "",
+    ]
+    source = "\n".join(lines)
 
     return source
 

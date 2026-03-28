@@ -1,6 +1,37 @@
 # Adding a New Model Family
 
-Adding support for a new HuggingFace model family is usually a Python task in `trtf_build/` **when the model reuses an existing runtime strategy** already handled by C++ (`src/cabi/api/trtf_c.cpp`, `src/runtime/trt/*`). C++ edits are needed only when introducing a new `runtime_strategy`/backend/state type.
+## Autopilot (Recommended)
+
+The fastest way to add new model families is the autopilot system, which autonomously discovers unsupported models from HuggingFace and implements them end-to-end — Python plugin, C++ runtime plugin (if needed), validation, and E2E manifest.
+
+```bash
+# One command — discovers gaps, implements, validates, reports
+python3 scripts/autopilot/autorun.py --auto
+
+# Interactive mode (shows candidates, asks Y/n)
+python3 scripts/autopilot/autorun.py
+
+# Limit scope
+python3 scripts/autopilot/autorun.py --auto --limit 4 --min-downloads 5000000
+```
+
+The autopilot dispatches parallel Claude Code agents across isolated workspaces. Each agent:
+1. Scaffolds a plugin via `scripts/new_family.py`
+2. Builds the TRT bundle
+3. Validates correctness (TRT vs HuggingFace comparison — agent picks the right metric per modality)
+4. Creates a C++ runtime plugin if no existing strategy handles the model
+5. Iterates until `./build/trtf run <bundle> --prompt "..."` produces correct output
+6. Creates the E2E manifest (no skip)
+
+**Prerequisites**: Agent workspaces bootstrapped (`./scripts/bootstrap_workspace.sh --id agent-N --detach`) and `claude` CLI in PATH.
+
+See `scripts/autopilot/autorun.py` for full options and `CLAUDE.md` for detailed documentation.
+
+---
+
+## Manual Path
+
+Adding support for a new HuggingFace model family manually is a Python task in `trtf_build/` **when the model reuses an existing runtime strategy** already handled by C++ (`src/cabi/api/trtf_c.cpp`, `src/runtime/trt/*`). C++ edits are needed only when introducing a new `runtime_strategy`/backend/state type.
 
 ## Prerequisites
 

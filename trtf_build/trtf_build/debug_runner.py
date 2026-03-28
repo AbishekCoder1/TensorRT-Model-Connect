@@ -1366,6 +1366,254 @@ class HybridTrtRunner:
             del self.engine
 
 
+class Seq2SeqTrtRunner:
+    """Device-resident encoder-decoder TRT inference runner for seq2seq models.
+
+    Runs encoder on text input tokens, then feeds encoder output as cross_k/cross_v
+    to a standard KV-cache decoder. Used for BART, T5, Marian, and other
+    encoder-decoder text models.
+    """
+
+    def __init__(
+        self,
+        decoder_plan: bytes,
+        encoder_plan: bytes,
+        num_layers: int,
+        max_cache_length: int,
+        max_source_positions: int,
+        hidden_size: int | None = None,
+        decoder_start_token_id: int = 2,
+    ):
+        self.num_layers = num_layers
+        self.max_cache_length = max_cache_length
+        self.max_source_positions = max_source_positions
+        self.decoder_start_token_id = decoder_start_token_id
+
+        logger = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(logger)
+
+        # Decoder engine
+        self.dec_engine = runtime.deserialize_cuda_engine(decoder_plan)
+        if self.dec_engine is None:
+            raise RuntimeError("Failed to deserialize seq2seq decoder TRT engine")
+        self.dec_context = self.dec_engine.create_execution_context()
+
+        # Encoder engine
+        self.enc_engine = runtime.deserialize_cuda_engine(encoder_plan)
+        if self.enc_engine is None:
+            raise RuntimeError("Failed to deserialize seq2seq encoder TRT engine")
+        self.enc_context = self.enc_engine.create_execution_context()
+
+        # Auto-detect dimensions from decoder engine
+        cache_shape = tuple(self.dec_engine.get_tensor_shape("cache_k_0"))
+        self.attention_size = cache_shape[1]
+        if hidden_size is None:
+            cross_shape = tuple(self.dec_engine.get_tensor_shape("cross_k_0"))
+            hidden_size = cross_shape[1]
+        self.hidden_size = hidden_size
+
+        err, self.stream = cudart.cudaStreamCreate()
+        _check_cuda(err)
+
+        self.cache_length = 0
+        attention_window = max_cache_length + 1
+        row_bytes = self.attention_size * 4
+
+        # ----- Decoder device buffers -----
+        cache_bytes = max_cache_length * row_bytes
+        self._d_cache_k = []; self._d_cache_v = []
+        self._d_present_k = []; self._d_present_v = []
+        for _ in range(num_layers):
+            for lst, sz in [(self._d_cache_k, cache_bytes), (self._d_cache_v, cache_bytes),
+                            (self._d_present_k, row_bytes), (self._d_present_v, row_bytes)]:
+                err, ptr = cudart.cudaMalloc(sz)
+                _check_cuda(err)
+                lst.append(ptr)
+
+        # Cross-attention K/V (per layer, [max_source_positions, hidden_size])
+        cross_bytes = max_source_positions * hidden_size * 4
+        self._d_cross_k = []; self._d_cross_v = []
+        for _ in range(num_layers):
+            for lst in [self._d_cross_k, self._d_cross_v]:
+                err, ptr = cudart.cudaMalloc(cross_bytes)
+                _check_cuda(err)
+                lst.append(ptr)
+
+        # Small I/O buffers
+        self._h_token_id = np.zeros((1,), dtype=np.int32)
+        self._h_position_id = np.zeros((1,), dtype=np.int32)
+        err, self._d_token_id = cudart.cudaMalloc(4)
+        _check_cuda(err)
+        err, self._d_position_id = cudart.cudaMalloc(4)
+        _check_cuda(err)
+
+        self._h_mask = np.zeros((1, attention_window), dtype=np.float32)
+        err, self._d_mask = cudart.cudaMalloc(attention_window * 4)
+        _check_cuda(err)
+
+        logits_shape = tuple(self.dec_engine.get_tensor_shape("logits"))
+        self._logits_numel = int(np.prod(logits_shape))
+        self._h_logits = np.zeros(logits_shape, dtype=np.float32)
+        err, self._d_logits = cudart.cudaMalloc(self._logits_numel * 4)
+        _check_cuda(err)
+
+        # ----- Encoder device buffers -----
+        enc_input_bytes = max_source_positions * 4  # int32 tokens
+        err, self._d_enc_input_ids = cudart.cudaMalloc(enc_input_bytes)
+        _check_cuda(err)
+
+        enc_mask_bytes = max_source_positions * 4  # float32 mask
+        err, self._d_enc_mask = cudart.cudaMalloc(enc_mask_bytes)
+        _check_cuda(err)
+
+        enc_out_bytes = max_source_positions * hidden_size * 4
+        err, self._d_enc_out = cudart.cudaMalloc(enc_out_bytes)
+        _check_cuda(err)
+
+        # Zero-init caches
+        for i in range(num_layers):
+            _check_cuda(cudart.cudaMemsetAsync(self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
+            _check_cuda(cudart.cudaMemsetAsync(self._d_cache_v[i], 0, cache_bytes, self.stream)[0])
+        cudart.cudaStreamSynchronize(self.stream)
+
+    def run_encoder(self, input_ids: list[int]):
+        """Run encoder on input token IDs, populate cross_k/cross_v buffers."""
+        H2D = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+        D2D = cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice
+        stream = self.stream
+
+        # Pad input_ids to max_source_positions
+        padded = np.zeros((self.max_source_positions,), dtype=np.int32)
+        copy_len = min(len(input_ids), self.max_source_positions)
+        padded[:copy_len] = input_ids[:copy_len]
+
+        # Build encoder attention mask: 0.0 for valid, -1e9 for padding
+        enc_mask = np.full((self.max_source_positions,), -1e9, dtype=np.float32)
+        enc_mask[:copy_len] = 0.0
+
+        cudart.cudaMemcpyAsync(self._d_enc_input_ids, padded.ctypes.data,
+                               padded.nbytes, H2D, stream)
+        cudart.cudaMemcpyAsync(self._d_enc_mask, enc_mask.ctypes.data,
+                               enc_mask.nbytes, H2D, stream)
+
+        self.enc_context.set_tensor_address("input_ids", self._d_enc_input_ids)
+        # Only set attention_mask if the encoder expects it
+        has_mask = False
+        for i in range(self.enc_engine.num_io_tensors):
+            if self.enc_engine.get_tensor_name(i) == "attention_mask":
+                has_mask = True
+                break
+        if has_mask:
+            self.enc_context.set_tensor_address("attention_mask", self._d_enc_mask)
+        self.enc_context.set_tensor_address("encoder_output", self._d_enc_out)
+        self.enc_context.execute_async_v3(stream)
+
+        # Copy encoder output to all cross_k/cross_v
+        enc_bytes = self.max_source_positions * self.hidden_size * 4
+        for i in range(self.num_layers):
+            cudart.cudaMemcpyAsync(self._d_cross_k[i], self._d_enc_out, enc_bytes, D2D, stream)
+            cudart.cudaMemcpyAsync(self._d_cross_v[i], self._d_enc_out, enc_bytes, D2D, stream)
+        cudart.cudaStreamSynchronize(stream)
+
+    def step(self, token_id: int) -> dict[str, np.ndarray]:
+        """Run one decoder step with KV cache + cross attention."""
+        H2D = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+        D2H = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
+        D2D = cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice
+        stream = self.stream
+        attention_window = self.max_cache_length + 1
+
+        # Build attention mask
+        position_id = min(self.cache_length, self.max_cache_length)
+        self._h_mask[:] = -1e9
+        valid = min(self.cache_length, self.max_cache_length)
+        self._h_mask[0, :valid] = 0.0
+        self._h_mask[0, -1] = 0.0
+
+        self._h_token_id[0] = token_id
+        self._h_position_id[0] = position_id
+
+        cudart.cudaMemcpyAsync(self._d_token_id, self._h_token_id.ctypes.data, 4, H2D, stream)
+        cudart.cudaMemcpyAsync(self._d_position_id, self._h_position_id.ctypes.data, 4, H2D, stream)
+        cudart.cudaMemcpyAsync(self._d_mask, self._h_mask.ctypes.data, attention_window * 4, H2D, stream)
+
+        # Bind decoder tensors
+        self.dec_context.set_tensor_address("token_id", self._d_token_id)
+        self.dec_context.set_tensor_address("position_id", self._d_position_id)
+        self.dec_context.set_tensor_address("attention_mask", self._d_mask)
+        self.dec_context.set_tensor_address("logits", self._d_logits)
+
+        for i in range(self.num_layers):
+            self.dec_context.set_tensor_address(f"cache_k_{i}", self._d_cache_k[i])
+            self.dec_context.set_tensor_address(f"cache_v_{i}", self._d_cache_v[i])
+            self.dec_context.set_tensor_address(f"present_k_{i}", self._d_present_k[i])
+            self.dec_context.set_tensor_address(f"present_v_{i}", self._d_present_v[i])
+            self.dec_context.set_tensor_address(f"cross_k_{i}", self._d_cross_k[i])
+            self.dec_context.set_tensor_address(f"cross_v_{i}", self._d_cross_v[i])
+
+        self.dec_context.execute_async_v3(stream)
+
+        # D2D cache update
+        row_bytes = self.attention_size * 4
+        for i in range(self.num_layers):
+            for cache_buf, present_buf in [
+                (self._d_cache_k[i], self._d_present_k[i]),
+                (self._d_cache_v[i], self._d_present_v[i]),
+            ]:
+                if self.cache_length < self.max_cache_length:
+                    offset = self.cache_length * row_bytes
+                    cudart.cudaMemcpyAsync(cache_buf + offset, present_buf, row_bytes, D2D, stream)
+                else:
+                    cudart.cudaMemcpyAsync(cache_buf, cache_buf + row_bytes,
+                        (self.max_cache_length - 1) * row_bytes, D2D, stream)
+                    offset = (self.max_cache_length - 1) * row_bytes
+                    cudart.cudaMemcpyAsync(cache_buf + offset, present_buf, row_bytes, D2D, stream)
+
+        cudart.cudaMemcpyAsync(self._h_logits.ctypes.data, self._d_logits,
+            self._logits_numel * 4, D2H, stream)
+        cudart.cudaStreamSynchronize(stream)
+        self.cache_length = min(self.cache_length + 1, self.max_cache_length)
+
+        return {"logits": self._h_logits.copy()}
+
+    def reset(self):
+        cache_bytes = self.max_cache_length * self.attention_size * 4
+        for i in range(self.num_layers):
+            _check_cuda(cudart.cudaMemsetAsync(self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
+            _check_cuda(cudart.cudaMemsetAsync(self._d_cache_v[i], 0, cache_bytes, self.stream)[0])
+        cudart.cudaStreamSynchronize(self.stream)
+        self.cache_length = 0
+
+    def generate(self, input_ids: list[int], max_new_tokens: int) -> list[dict[str, np.ndarray]]:
+        """Run encoder on input_ids, then decode autoregressively.
+
+        Returns per-step decoder logits (one dict per decoder step).
+        """
+        self.run_encoder(input_ids)
+        self.reset()
+
+        results = []
+        token = self.decoder_start_token_id
+        for _ in range(max_new_tokens):
+            result = self.step(token)
+            results.append(result)
+            token = int(np.argmax(result["logits"].flatten()))
+        return results
+
+    def __del__(self):
+        if not hasattr(self, "_d_logits"):
+            return
+        bufs = [self._d_token_id, self._d_position_id, self._d_mask, self._d_logits,
+                self._d_enc_input_ids, self._d_enc_mask, self._d_enc_out]
+        bufs.extend(self._d_cache_k); bufs.extend(self._d_cache_v)
+        bufs.extend(self._d_present_k); bufs.extend(self._d_present_v)
+        bufs.extend(self._d_cross_k); bufs.extend(self._d_cross_v)
+        for d_ptr in bufs:
+            cudart.cudaFree(d_ptr)
+        if hasattr(self, "stream"):
+            cudart.cudaStreamDestroy(self.stream)
+
+
 def load_engine_from_bundle(bundle_path: str) -> tuple[bytes, dict]:
     """Load engine plan bytes and metadata from a .trtfb bundle.
 
@@ -1392,13 +1640,28 @@ def load_engine_from_bundle(bundle_path: str) -> tuple[bytes, dict]:
 def runner_from_bundle(bundle_path: str) -> TrtRunner:
     """Create the appropriate TrtRunner from a .trtfb bundle file.
 
-    Dispatches to HybridTrtRunner, MambaTrtRunner, RwkvTrtRunner, or
-    TrtRunner based on the runtime_strategy in the bundle config.
+    Dispatches to Seq2SeqTrtRunner, HybridTrtRunner, MambaTrtRunner,
+    RwkvTrtRunner, or TrtRunner based on the runtime_strategy in the
+    bundle config.
     """
     config = load_config_from_bundle(bundle_path)
     engine_plan, header = load_engine_from_bundle(bundle_path)
     runtime_strategy = config.get("runtime_strategy", "decoder_kv_cache")
     num_layers = header.get("num_layers", config.get("num_hidden_layers", 1))
+
+    if runtime_strategy in ("seq2seq_encoder_decoder", "text_to_text", "marian_translation"):
+        encoder_plan, _ = load_vision_engine_from_bundle(bundle_path)
+        if encoder_plan is not None:
+            dec_layers = config.get("decoder_layers", num_layers)
+            decoder_start = config.get("decoder_start_token_id", 2)
+            return Seq2SeqTrtRunner(
+                decoder_plan=engine_plan,
+                encoder_plan=encoder_plan,
+                num_layers=dec_layers,
+                max_cache_length=header["max_cache_length"],
+                max_source_positions=header["max_cache_length"],
+                decoder_start_token_id=decoder_start,
+            )
 
     if runtime_strategy == "hybrid_mamba_attention":
         num_mamba = config.get("num_mamba_layers", 0)

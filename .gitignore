@@ -91,3 +91,4 @@ engines
 *.wav
 *.trtfb
 !**/Recording.wav
+worktrees/

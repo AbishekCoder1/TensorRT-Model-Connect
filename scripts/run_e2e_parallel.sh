@@ -51,6 +51,7 @@ fi
 # Passthrough args (e.g., --rebuild-engines, --task-strategy ...)
 EXTRA_ARGS=()
 FILTER_ARGS=()
+MODELS_FILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --engine-dir)         ENGINE_DIR="$2"; shift 2 ;;
@@ -62,6 +63,10 @@ while [ $# -gt 0 ]; do
         --progress-interval)  PROGRESS_INTERVAL="$2"; shift 2 ;;
         --task-strategy)
             FILTER_ARGS+=(--e2e-task-strategy "$2")
+            shift 2
+            ;;
+        --models-file)
+            MODELS_FILE="$2"
             shift 2
             ;;
         *)
@@ -88,12 +93,22 @@ echo "  HF Python:       $HF_PYTHON"
 echo "  Progress every:  ${PROGRESS_INTERVAL}s"
 echo "  Extra args:      ${EXTRA_ARGS[*]:-none}"
 echo "  Filter:          ${FILTER_ARGS[*]:-all models}"
+echo "  Models file:     ${MODELS_FILE:-none (collect all)}"
 echo ""
 
 # --- Collect test IDs ---------------------------------------------------------
 
-TESTS=$("$HF_PYTHON" -m pytest tests/test_e2e.py --co -q "${FILTER_ARGS[@]}" 2>/dev/null \
-    | grep "test_e2e\[" | sort)
+if [ -n "$MODELS_FILE" ] && [ -f "$MODELS_FILE" ]; then
+    # Selective mode: read model names from file (one per line), convert to test IDs
+    TESTS=$(sed '/^$/d' "$MODELS_FILE" | while read -r model; do
+        echo "tests/test_e2e.py::test_e2e[${model}]"
+    done | sort)
+    echo "  Models file:     $MODELS_FILE ($(echo "$TESTS" | wc -l) models)"
+else
+    # Full mode: collect all tests via pytest
+    TESTS=$("$HF_PYTHON" -m pytest tests/test_e2e.py --co -q "${FILTER_ARGS[@]}" 2>/dev/null \
+        | grep "test_e2e\[" | sort)
+fi
 TOTAL=$(echo "$TESTS" | wc -l)
 
 if [ "$TOTAL" -eq 0 ]; then

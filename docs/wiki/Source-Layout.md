@@ -356,6 +356,10 @@ implementing the `FamilyPlugin` protocol from `base.py`.
 | `whisper` | Whisper |
 | `xglm` | XGLM |
 | `z_image` | Z-Image |
+| `electra` | ELECTRA (autopilot-generated) |
+| `modernbert` | ModernBERT (autopilot-generated) |
+| `deberta` | DeBERTa v1 (autopilot-generated) |
+| `t5` | T5 encoder-decoder (autopilot-generated) |
 
 ---
 
@@ -509,6 +513,10 @@ Per-strategy JSON threshold files defining default pass/fail criteria.
 | `docker_run_gb300.sh` | Launch GB300 dev container |
 | `validate_family.sh` | One-command family validation (build + diff + parity) |
 | `new_family.py` | Scaffold a new family plugin from HF repo |
+| `autopilot/autorun.py` | One-command autopilot: discover → select → dispatch → validate |
+| `autopilot/discover.py` | Query HF Hub → find unsupported model_types → JSON task list |
+| `autopilot/dispatch.py` | Launch parallel Claude Code agents across agent workspaces |
+| `autopilot/run.sh` | Shell wrapper for discover + dispatch |
 | `check_family_coverage.py` | Check family plugin test coverage |
 | `hf_generate.py` | HuggingFace generation script |
 | `hf_tokenizer.py` | HuggingFace tokenizer utility |

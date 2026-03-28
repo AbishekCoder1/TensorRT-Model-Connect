@@ -480,7 +480,7 @@ The system is split into two stages:
 
 **Plugin registry dispatch:** The `runtime_strategy` field in the bundle's `config.json` selects the backend via `PipelineRegistry` — a singleton that maps strategy strings to self-registering `IPipelinePlugin` instances. Each plugin lives in its own `.cpp` file under `src/runtime/plugins/` and registers at static-init time via the `REGISTER_PIPELINE_PLUGIN` macro. `pipeline_factory.cpp` is ~124 LOC: it reads the bundle, extracts the strategy, normalizes legacy strategy strings (e.g. `"diffusion"` → `"diffusion_flux"`), looks up the plugin, and calls `plugin->create(ctx)`. No switch/case, no edits needed when adding new strategies.
 
-**Runtime strategies (16 registered):**
+**Runtime strategies (17 registered):**
 | Strategy | Plugin | Pipeline |
 |----------|--------|----------|
 | `decoder_kv_cache` | DecoderPlugin | TextGenerationPipeline |
@@ -490,6 +490,7 @@ The system is split into two stages:
 | `hybrid_mamba_attention` | HybridPlugin | RecurrentPipeline |
 | `vision_language` | VLPlugin | VLPipeline |
 | `speech_to_text` | WhisperPlugin | WhisperPipeline |
+| `text_to_text` | T5Plugin | T5Pipeline |
 | `text_to_audio_bark` | BarkPlugin | BarkPipeline |
 | `text_to_audio_magpie` | MagpiePlugin | MagpiePipeline |
 | `omni_multimodal` | OmniPlugin | OmniPipeline |
@@ -540,6 +541,7 @@ trtf_build/                          # Python package (engine builder)
       canary.py distilbert.py glm.py gpt_oss.py magpie_tts.py
       mpnet.py pixart.py qwen3_5.py roberta.py
       wan_t2v.py flux.py z_image.py                # Diffusion T2V/T2I
+      electra.py modernbert.py deberta.py t5.py     # Autopilot-generated
   pyproject.toml
 include/trtf/runtime/                # Public C++ headers (plugin system)
   pipeline_factory.h                 # PipelineFactory::from_bundle()
@@ -575,6 +577,7 @@ src/                                 # C++ bundle-only runtime
       flux_plugin.cpp                # diffusion_flux
       wan_plugin.cpp                 # diffusion_wan, diffusion_pixart
       zimage_plugin.cpp              # diffusion_zimage
+      t5_plugin.cpp                  # text_to_text (encoder-decoder seq2seq)
       force_link_plugins.cpp         # Linker anchors for static lib
     pipelines/                       # Pipeline implementations (one per modality)
       text_generation_pipeline.h/cpp # Standard decoder + MoE
@@ -613,6 +616,11 @@ scripts/                             # Infrastructure & utility scripts
   setup_container.sh                 # One-shot container repo setup (editable install + build + tests)
   new_family.py                      # Scaffold a new family plugin from HF repo
   validate_family.sh                 # One-command validation gate (build + diff + parity)
+  autopilot/                         # Autonomous model family discovery + implementation
+    autorun.py                       # One-command entry: discover → select → dispatch → validate
+    discover.py                      # Query HF Hub → find unsupported model_types → JSON task list
+    dispatch.py                      # Launch parallel Claude Code agents across agent workspaces
+    run.sh                           # Shell wrapper for discover + dispatch
 tests/
   test_e2e.py                        # Unified E2E entrypoint (parametrized over all manifests)
   conftest.py                        # Shared CLI options (--engine-dir, --trtf-binary, etc.)
@@ -656,9 +664,83 @@ tests/
       defaults/                      # Per-strategy JSON threshold files
 ```
 
-## Adding a new model family
+## Autopilot: autonomous model family onboarding
 
-Adding a new model family is done in the Python build package. For standard decoder, MoE, and extended-decoder families, no C++ changes are needed. Families with fundamentally different state management (e.g., Mamba/SSM, diffusion, audio) require a new C++ runtime plugin — see "Adding a new C++ runtime plugin" below.
+The autopilot system discovers unsupported HuggingFace model families and
+dispatches parallel agents to implement them end-to-end — Python plugin,
+C++ runtime plugin (if needed), validation, and E2E manifest. One command:
+
+```bash
+# Fully autonomous — discovers gaps, implements, validates, reports
+python3 scripts/autopilot/autorun.py --auto
+
+# Interactive (shows candidates, asks Y/n before each batch)
+python3 scripts/autopilot/autorun.py
+
+# Control scope
+python3 scripts/autopilot/autorun.py --auto --limit 8 --min-downloads 5000000
+
+# Dry run (preview what would be dispatched)
+python3 scripts/autopilot/autorun.py --dry-run
+```
+
+### How it works
+
+1. **Discover** (`discover.py`): Queries HuggingFace Hub for top N transformer
+   models by downloads, extracts `model_type`, checks against existing family
+   plugins via `find_plugin()`, outputs ranked gaps as JSON.
+
+2. **Select** (`autorun.py`): Filters gaps by feasibility — skips exotic
+   vision/audio-only models, optionally skips `trust_remote_code` models.
+   Ranks by total downloads.
+
+3. **Dispatch** (`dispatch.py` or `autorun.py`): Launches `claude --print`
+   sessions in parallel across isolated agent workspaces (agent-1 through
+   agent-4). Each agent gets a self-contained prompt.
+
+4. **Agent loop** (per model): Each agent autonomously runs:
+   - Scaffold plugin via `new_family.py`
+   - Build bundle via `trtf-build build`
+   - Validate: compare TRT output against HuggingFace (agent picks the
+     metric — cosine similarity, text match, PSNR, etc.)
+   - If build or validation fails → read error, read HF source code, fix
+     plugin, rebuild, re-validate
+   - If no existing C++ runtime strategy fits → create a new C++ plugin
+     (.cpp file), register it, rebuild C++ binary
+   - Iterate until `./build/trtf run <bundle> --prompt "..." --max-new-tokens N`
+     produces correct output
+   - Create E2E manifest (no skip field)
+
+### Architecture principles
+
+- **Decoupled plugins**: Each model family gets its own isolated files.
+  Agents never modify existing plugins. Shared code only through
+  `graph_ops.py`, `graph_blocks.py`, and `shared/plugin_helpers.h`.
+- **Agent decides validation**: The prompt does not prescribe HOW to
+  validate. The agent reads the model's modality, picks the right metric,
+  and reports actual numbers.
+- **Full E2E required**: Every onboarded model must work via the C++ binary.
+  No "skip" in manifests. If a new C++ runtime plugin is needed, the agent
+  implements it.
+
+### Prerequisites
+
+```bash
+# Bootstrap agent workspaces (one-time)
+./scripts/bootstrap_workspace.sh --id agent-1 --branch master --detach
+./scripts/bootstrap_workspace.sh --id agent-2 --branch master --detach
+./scripts/bootstrap_workspace.sh --id agent-3 --branch master --detach
+./scripts/bootstrap_workspace.sh --id agent-4 --branch master --detach
+
+# claude CLI must be in PATH
+which claude
+```
+
+## Adding a new model family (manual path)
+
+Adding a new model family manually is done in the Python build package. For standard decoder, MoE, and extended-decoder families, no C++ changes are needed. Families with fundamentally different state management (e.g., Mamba/SSM, diffusion, audio) require a new C++ runtime plugin — see "Adding a new C++ runtime plugin" below.
+
+For the **automated path**, use the autopilot (see above).
 
 ### Quick path (scaffolding script)
 
@@ -763,6 +845,7 @@ pytest tests/test_e2e.py::test_e2e[my-new-model] -v \
 | encoder_only | encoder_only_nlp | encoder_only | hf_transformers |
 | embedding | embedding | embedding | hf_transformers |
 | reranking | reranking | reranking | hf_transformers |
+| text_to_text | text_to_text | text_generation | hf_transformers |
 | neural_operator | neural_operator | encoder_only | torch_reference |
 
 Legacy aliases (`text_to_audio`, `diffusion`) are auto-normalized by `pipeline_factory.cpp` — new bundles use the split strategy strings above.
@@ -774,6 +857,9 @@ See `trtf_build/trtf_build/families/phi.py` for Phi-3 (fused QKV/gate_up weight 
 See `trtf_build/trtf_build/families/phi_moe.py` for Phi-MoE (MoE with SparseMixer routing, uses `graph_blocks.add_attention_block`).
 See `trtf_build/trtf_build/families/qwen_vl.py` for Qwen VL (Qwen2.5-VL standard + Qwen3-VL DeepStack via `graph_blocks` composition).
 See `trtf_build/trtf_build/families/mamba.py` for Mamba (SSM, custom graph + C++ backend).
+See `trtf_build/trtf_build/families/t5.py` for T5 (encoder-decoder seq2seq, custom graph + `text_to_text` C++ plugin).
+See `trtf_build/trtf_build/families/deberta.py` for DeBERTa (disentangled attention, custom encoder graph).
+See `trtf_build/trtf_build/families/modernbert.py` for ModernBERT (PRE-norm, fused QKV, GeGLU, per-layer RoPE).
 See `trtf_build/trtf_build/families/base.py` for the plugin protocol.
 
 ### Adding a new C++ runtime plugin
@@ -818,6 +904,16 @@ When a model family requires fundamentally different runtime behavior (new state
 4. **Create or reuse a pipeline class** in `src/runtime/pipelines/` that implements `IPipeline`.
 
 5. **Set `runtime_strategy`** in the Python family plugin so bundles carry the new strategy string.
+
+**Examples of C++ runtime plugins:**
+- `decoder_plugin.cpp` — decoder-only text generation (simplest reference)
+- `encoder_plugin.cpp` — encoder-only (BERT, ELECTRA, ModernBERT, DeBERTa)
+- `whisper_plugin.cpp` — encoder-decoder with mel spectrogram input
+- `t5_plugin.cpp` — encoder-decoder with text token input (T5, seq2seq)
+- `flux_plugin.cpp` — diffusion model (multi-step denoising loop)
+
+**Note:** The autopilot system creates C++ plugins automatically when no
+existing strategy fits the model. See "Autopilot" section above.
 
 ### Diff-test framework
 

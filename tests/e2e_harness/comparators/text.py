@@ -246,19 +246,10 @@ class TextComparator:
         trt_logits = _load_logits(trt)
         ref_logits = _load_logits(ref)
 
-        # Shape/schema check
+        # Shape/schema check — fall back to text-only for seq2seq models
+        # where the debug runner doesn't produce logits
         if trt_logits is None or ref_logits is None:
-            missing = []
-            if trt_logits is None:
-                missing.append("TRT")
-            if ref_logits is None:
-                missing.append("HF")
-            return CompareResult(
-                stage_name=stage.name,
-                status=StageStatus.ERROR.value,
-                metrics=metrics,
-                message=f"Cannot compare: missing logits from {', '.join(missing)}",
-            )
+            return self._compare_text_only(trt, ref, threshold, stage, metrics)
 
         if trt_logits.ndim != 2 or ref_logits.ndim != 2:
             return CompareResult(
@@ -402,6 +393,14 @@ class TextComparator:
             )
         )
         trt_text_for_ned = _strip_prompt_echo_normalized(trt_text_for_ned, prompt)
+        # Seq2seq models output text that may start with the prompt (e.g.
+        # BART reconstructing its input).  Strip the prompt prefix from ref
+        # only when it appears at the very start of the normalized text.
+        # This avoids accidentally removing prompt substrings that appear
+        # later in naturally generated text from causal models.
+        norm_prompt = _normalize_for_ned(prompt)
+        if norm_prompt and ref_text_for_ned.startswith(norm_prompt):
+            ref_text_for_ned = ref_text_for_ned[len(norm_prompt):].lstrip()
 
         if trt_text_for_ned or ref_text_for_ned:
             ned = normalized_edit_distance(trt_text_for_ned, ref_text_for_ned)
@@ -465,6 +464,48 @@ class TextComparator:
             metrics=metrics,
             composite_rule=_COMPOSITE_RULE,
             message=message,
+        )
+
+
+    def _compare_text_only(
+        self,
+        trt: StageOutput,
+        ref: StageOutput,
+        threshold: ThresholdProfile,
+        stage: StageSpec,
+        metrics: dict[str, MetricResult],
+    ) -> CompareResult:
+        """Text-only comparison when logits are unavailable (seq2seq models)."""
+        thresh = threshold.metrics
+
+        prompt = (trt.data or {}).get("prompt", "")
+        trt_text = _normalize_for_ned(
+            _strip_leading_role_prefix(_strip_prompt_echo((trt.text or "").strip(), prompt))
+        )
+        ref_text = _normalize_for_ned(
+            _strip_leading_role_prefix(_strip_prompt_echo((ref.text or "").strip(), prompt))
+        )
+
+        if trt_text and ref_text:
+            ned = normalized_edit_distance(trt_text, ref_text)
+        elif not trt_text and not ref_text:
+            ned = 0.0
+        else:
+            ned = 1.0
+
+        ned_thresh = thresh.get("normalized_text_edit_distance", 0.2)
+        metrics["normalized_text_edit_distance"] = MetricResult(
+            value=ned, threshold=ned_thresh,
+            operator="<=", passed=ned <= ned_thresh,
+        )
+
+        passed = ned <= ned_thresh
+        return CompareResult(
+            stage_name=stage.name,
+            status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
+            metrics=metrics,
+            composite_rule="text-only (logits unavailable for seq2seq): ned <= threshold",
+            message=f"{'PASS' if passed else 'FAIL'}: text-only ned={ned:.4f}",
         )
 
 

@@ -1,0 +1,10 @@
+{
+  "name": "electra-base-discriminator",
+  "hf_id": "google/electra-base-discriminator",
+  "bundle": "electra-base-discriminator.trtfb",
+  "family": "electra",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is",
+  "max_new_tokens": 1
+}

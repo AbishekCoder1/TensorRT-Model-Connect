@@ -1,0 +1,15 @@
+{
+  "name": "dpr-ctx-encoder",
+  "hf_id": "facebook/dpr-ctx_encoder-single-nq-base",
+  "bundle": "dpr-ctx-encoder.trtfb",
+  "family": "dpr",
+  "runtime_strategy": "encoder_only",
+  "max_cache_length": 256,
+  "prompt": "The capital of France is Paris",
+  "max_new_tokens": 0,
+  "threshold_overrides": {
+    "cls_embedding_cosine": -0.1,
+    "cls_embedding_l2": 35.0
+  },
+  "notes": "DPR CLS cosine=-0.05; DPR plugin weight prefix mapping produces fundamentally different hidden states from BertModel reference. Needs layer-by-layer debug."
+}

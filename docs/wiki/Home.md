@@ -15,7 +15,7 @@ A split-language system for TensorRT inference: **Python builds** optimized TRT 
 | **[Testing and Validation](Testing-and-Validation.md)** | Test tiers, smoke/E2E policy, CCN gate, traceability requirements |
 | **[Traceability Matrix](Traceability-Matrix.md)** | Bi-directional architecture/design/test traceability (ARCH/UD/UT/IT) |
 | **[ISO 26262 Compliance](ISO-26262-Compliance.md)** | Safety-related development process alignment (NEW) |
-| **[Adding a Model Family](Adding-a-Model-Family.md)** | How to add a new Python family plugin |
+| **[Adding a Model Family](Adding-a-Model-Family.md)** | How to add a new family plugin (autopilot + manual paths) |
 | **[Architecture Extensibility Assessment](Architecture-Extensibility-Assessment.md)** | Coverage of model families and runtime strategies |
 | **[HF vs TRT Comparison](HF-vs-TRT-Comparison.md)** | HuggingFace reference flow versus TRT runtime flow |
 | **[TRT Internals](TRT-Internals.md)** | TensorRT graph-building and engine lifecycle details |
@@ -99,7 +99,12 @@ ls trtf_build/trtf_build/families/*.py \
   | sort
 ```
 
-As of **March 2026**, the repository contains **50** family modules covering standard decoders (Qwen, LLaMA, Mistral, Phi, GPT-2, OPT, Bloom, Gemma, Falcon, etc.), MoE (Mixtral, Phi-MoE, Qwen-MoE, DeepSeek-V2), SSM/recurrent (Mamba, RWKV), encoder-only (BERT, DistilBERT, RoBERTa, MPNet), speech (Whisper, Bark, MagpieTTS, PersonaPlex, Qwen3-Omni, Canary), vision-language (Qwen-VL, InternVL, Phi4-Multimodal, Eagle-VLM), segmentation (SegFormer, SAM), diffusion (Wan-T2V, FLUX, Z-Image, PixArt), and embedding/reranking (Eagle).
+As of **March 2026**, the repository contains **54+** family modules covering standard decoders (Qwen, LLaMA, Mistral, Phi, GPT-2, OPT, Bloom, Gemma, Falcon, etc.), MoE (Mixtral, Phi-MoE, Qwen-MoE, DeepSeek-V2), SSM/recurrent (Mamba, RWKV), encoder-only (BERT, ELECTRA, ModernBERT, DeBERTa, DistilBERT, RoBERTa, MPNet), encoder-decoder (T5), speech (Whisper, Bark, MagpieTTS, PersonaPlex, Qwen3-Omni, Canary), vision-language (Qwen-VL, InternVL, Phi4-Multimodal, Eagle-VLM), segmentation (SegFormer, SAM), diffusion (Wan-T2V, FLUX, Z-Image, PixArt), and embedding/reranking (Eagle).
+
+To add more families automatically, use the autopilot:
+```bash
+python3 scripts/autopilot/autorun.py --auto
+```
 
 ## Quick Start
 

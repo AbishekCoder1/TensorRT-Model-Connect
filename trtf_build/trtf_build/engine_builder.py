@@ -225,9 +225,16 @@ def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
 def _ensure_tokenizer_json(model_dir: Path) -> None:
     """If the model directory lacks tokenizer.json, generate it from the
     slow tokenizer using HF transformers. This ensures the C++ runtime can
-    always load the tokenizer via AutoTokenizer."""
+    always load the tokenizer natively (BPE / WordPiece / Unigram).
+
+    Fallback chain:
+      1. AutoTokenizer(use_fast=False).save_pretrained() — works for most models
+      2. SentencePiece .spm → tokenizers.Unigram conversion — for Marian / NLLB
+    """
     if (model_dir / "tokenizer.json").exists():
         return
+
+    # --- Attempt 1: standard HF slow → fast conversion ---
     try:
         from transformers import AutoTokenizer
         tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=False)
@@ -235,9 +242,70 @@ def _ensure_tokenizer_json(model_dir: Path) -> None:
         if (model_dir / "tokenizer.json").exists():
             print("[trtf-build] Generated tokenizer.json from slow tokenizer",
                   file=sys.stderr)
-    except Exception as e:
-        print(f"[trtf-build] Warning: could not generate tokenizer.json: {e}",
-              file=sys.stderr)
+            return
+    except Exception:
+        pass
+
+    # --- Attempt 2: build from SentencePiece .spm + vocab.json ---
+    # Marian/NLLB models have source.spm (encoder-side SentencePiece) and
+    # vocab.json (combined source+target vocabulary with IDs).  We build a
+    # Unigram tokenizer.json using the full combined vocab (so IDs match the
+    # TRT engine) with scores from the SPM model for source tokens and a
+    # default low score for target-only tokens.
+    spm_candidates = list(model_dir.glob("*.spm"))
+    source_spm = model_dir / "source.spm"
+    spm_path = source_spm if source_spm.exists() else (spm_candidates[0] if spm_candidates else None)
+    vocab_json_path = model_dir / "vocab.json"
+    if spm_path is not None:
+        try:
+            import sentencepiece as spm_lib
+            from tokenizers import Tokenizer, normalizers, pre_tokenizers, decoders
+            from tokenizers.models import Unigram
+
+            sp = spm_lib.SentencePieceProcessor()
+            sp.Load(str(spm_path))
+            # Build score lookup from SPM model
+            spm_scores = {}
+            for i in range(sp.GetPieceSize()):
+                spm_scores[sp.IdToPiece(i)] = sp.GetScore(i)
+            min_score = min(spm_scores.values()) if spm_scores else 0.0
+            default_score = min_score - 10.0  # worse than any real token
+
+            # Build combined vocab with correct IDs from vocab.json
+            if vocab_json_path.exists():
+                with open(vocab_json_path) as f:
+                    combined_vocab = json.load(f)
+                # combined_vocab is {token_str: id_int}, build id-ordered list
+                max_id = max(combined_vocab.values())
+                vocab = [("", default_score)] * (max_id + 1)
+                for token, tid in combined_vocab.items():
+                    score = spm_scores.get(token, default_score)
+                    vocab[tid] = (token, score)
+            else:
+                # Fallback: use SPM vocab only
+                vocab = [(sp.IdToPiece(i), sp.GetScore(i)) for i in range(sp.GetPieceSize())]
+
+            unk_id = combined_vocab.get("<unk>", 0) if vocab_json_path.exists() else 0
+
+            tokenizer = Tokenizer(Unigram(vocab, unk_id))
+            tokenizer.normalizer = normalizers.Sequence([
+                normalizers.Prepend(prepend="\u2581"),
+                normalizers.Replace(" ", "\u2581"),
+            ])
+            tokenizer.pre_tokenizer = pre_tokenizers.Sequence([])
+            tokenizer.decoder = decoders.Metaspace()
+
+            out_path = str(model_dir / "tokenizer.json")
+            tokenizer.save(out_path)
+            print(f"[trtf-build] Generated tokenizer.json from {spm_path.name} "
+                  f"({len(vocab)} tokens)", file=sys.stderr)
+            return
+        except Exception as e:
+            print(f"[trtf-build] Warning: SentencePiece conversion failed: {e}",
+                  file=sys.stderr)
+
+    print("[trtf-build] Warning: could not generate tokenizer.json "
+          "(C++ runtime may fail to create tokenizer)", file=sys.stderr)
 
 
 def build_bundle(

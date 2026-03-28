@@ -1,18 +1,13 @@
-"""RoBERTa / XLM-RoBERTa family plugin — encoder-only bidirectional transformer.
+"""DPR (Dense Passage Retrieval) family plugin -- BERT-based dual encoder.
 
-Architecturally identical to BERT:
-  - Learned absolute position embeddings
-  - Token type embeddings (present but unused — all zeros)
-  - LayerNorm (with bias) instead of RMSNorm
-  - 2-projection MLP (fc1/fc2) with GELU activation
-  - POST-norm (residual then LayerNorm), not pre-norm
-  - Bidirectional attention (no causal mask)
+DPR uses a BERT backbone with the prefix 'ctx_encoder.bert_model.*' for context
+encoders and 'question_encoder.bert_model.*' for question encoders. The
+architecture is identical to BERT -- the only difference is the weight key prefix.
 
-Key differences from BERT:
-  - Weight prefix is "roberta." instead of "bert."
-  - Some XLM-RoBERTa checkpoints use "model.roberta." prefix
-  - Token type embeddings exist but are unused (all zeros at inference)
-  - Vocab size differs (50265 for RoBERTa, ~250K for XLM-RoBERTa)
+DPR outputs a pooled [CLS] embedding for passage retrieval. Uses the embedding
+runtime strategy with mean-pool + L2-normalize in the C++ runtime.
+
+Trace: ARCH-ENCODER, UD-DPR-WEIGHTS
 """
 
 from __future__ import annotations
@@ -31,17 +26,6 @@ from ..checkpoint_mapper import (
 from ..encoder_builder import build_encoder_engine
 
 
-def _detect_prefix(readers) -> str:
-    """Detect the weight prefix used in the checkpoint.
-
-    Returns "roberta" or "model.roberta" depending on which prefix is found.
-    XLM-RoBERTa checkpoints sometimes nest under "model.roberta.*".
-    """
-    if _has_tensor(readers, "model.roberta.embeddings.word_embeddings.weight"):
-        return "model.roberta"
-    return "roberta"
-
-
 def _load_ln(readers, prefix):
     """Load LayerNorm weight+bias, handling legacy gamma/beta naming."""
     if _has_tensor(readers, f"{prefix}.weight"):
@@ -53,12 +37,35 @@ def _load_ln(readers, prefix):
     return w.astype(np.float32), b.astype(np.float32)
 
 
-class RobertaPlugin:
-    name = "roberta"
+def _detect_dpr_prefix(readers) -> str:
+    """Detect the DPR weight prefix.
+
+    DPR context encoders use 'ctx_encoder.bert_model', question encoders
+    use 'question_encoder.bert_model'. Fall back to 'bert' for compatibility.
+    """
+    for prefix in (
+        "ctx_encoder.bert_model",
+        "question_encoder.bert_model",
+        "bert",
+    ):
+        if _has_tensor(readers, f"{prefix}.embeddings.word_embeddings.weight"):
+            return prefix
+    if _has_tensor(readers, "embeddings.word_embeddings.weight"):
+        return ""
+    return "ctx_encoder.bert_model"
+
+
+def _bpfx(root, key):
+    """Join root prefix with key, handling empty root."""
+    return f"{root}.{key}" if root else key
+
+
+class DprPlugin:
+    name = "dpr"
     runtime_strategy = "encoder_only"
 
     def matches(self, model_type: str) -> bool:
-        return model_type.lower() in ("roberta", "xlm-roberta", "camembert")
+        return model_type.lower() == "dpr"
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
@@ -69,36 +76,28 @@ class RobertaPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
+        num_heads = config.num_attention_heads
         intermediate = config.intermediate_size
         max_pos = config.max_position_embeddings
-        type_vocab_size = config.raw.get("type_vocab_size", 1)
+        type_vocab_size = config.raw.get("type_vocab_size", 2)
 
-        hf_root = _detect_prefix(readers)
+        root = _detect_dpr_prefix(readers)
 
         weights = WeightDict()
 
-        # Word embedding
         embedding = _load_tensor(
-            readers, f"{hf_root}.embeddings.word_embeddings.weight")
+            readers, _bpfx(root, "embeddings.word_embeddings.weight"))
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
-        # Position embedding (learned absolute).
-        # RoBERTa has padding_idx=1, so position IDs start at 2.
-        # The position embedding table has (max_pos, hidden) rows where
-        # rows 0 and 1 are padding-related. Slice starting at offset 2
-        # so the encoder builder can use positions [0, 1, ..., N-1].
-        pos_embed_raw = _load_tensor(
-            readers, f"{hf_root}.embeddings.position_embeddings.weight")
-        pad_idx = config.raw.get("pad_token_id", 1)
-        pos_offset = pad_idx + 1  # RoBERTa positions start at padding_idx + 1
-        pos_embed = pos_embed_raw[pos_offset:].astype(np.float32)
-        weights["position_embedding"] = pos_embed
+        pos_embed = _load_tensor(
+            readers, _bpfx(root, "embeddings.position_embeddings.weight"))
+        assert pos_embed.shape == (max_pos, hidden), (
+            f"Position embedding shape {pos_embed.shape} != ({max_pos}, {hidden})")
+        weights["position_embedding"] = pos_embed.astype(np.float32)
 
-        # Token type embedding — present but unused (all zeros at inference).
-        # Load if available; otherwise synthesize zeros.
-        tt_key = f"{hf_root}.embeddings.token_type_embeddings.weight"
+        tt_key = _bpfx(root, "embeddings.token_type_embeddings.weight")
         if _has_tensor(readers, tt_key):
             tt_embed = _load_tensor(readers, tt_key)
             assert tt_embed.shape == (type_vocab_size, hidden), (
@@ -109,17 +108,15 @@ class RobertaPlugin:
             weights["token_type_embedding"] = np.zeros(
                 (type_vocab_size, hidden), dtype=np.float32)
 
-        # Embedding LayerNorm
         embed_ln_w, embed_ln_b = _load_ln(
-            readers, f"{hf_root}.embeddings.LayerNorm")
+            readers, _bpfx(root, "embeddings.LayerNorm"))
         weights["embed_norm"] = embed_ln_w
         weights["embed_norm_beta"] = embed_ln_b
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
-            hf_prefix = f"{hf_root}.encoder.layer.{layer_idx}"
+            hf_prefix = _bpfx(root, f"encoder.layer.{layer_idx}")
 
-            # Q, K, V projections — HF stores [out, in], transpose to [in, out]
             q_w = _load_tensor(
                 readers, f"{hf_prefix}.attention.self.query.weight")
             k_w = _load_tensor(
@@ -134,33 +131,29 @@ class RobertaPlugin:
             weights[f"{prefix}.w_v"] = np.ascontiguousarray(
                 v_w.T.astype(np.float32))
 
-            # QKV biases
             weights[f"{prefix}.q_bias"] = _load_tensor(
-                readers, f"{hf_prefix}.attention.self.query.bias",
+                readers, f"{hf_prefix}.attention.self.query.bias"
             ).astype(np.float32)
             weights[f"{prefix}.k_bias"] = _load_tensor(
-                readers, f"{hf_prefix}.attention.self.key.bias",
+                readers, f"{hf_prefix}.attention.self.key.bias"
             ).astype(np.float32)
             weights[f"{prefix}.v_bias"] = _load_tensor(
-                readers, f"{hf_prefix}.attention.self.value.bias",
+                readers, f"{hf_prefix}.attention.self.value.bias"
             ).astype(np.float32)
 
-            # Output projection
             o_w = _load_tensor(
                 readers, f"{hf_prefix}.attention.output.dense.weight")
             weights[f"{prefix}.w_o"] = np.ascontiguousarray(
                 o_w.T.astype(np.float32))
             weights[f"{prefix}.o_bias"] = _load_tensor(
-                readers, f"{hf_prefix}.attention.output.dense.bias",
+                readers, f"{hf_prefix}.attention.output.dense.bias"
             ).astype(np.float32)
 
-            # Post-attention LayerNorm (handles legacy gamma/beta)
             attn_ln_w, attn_ln_b = _load_ln(
                 readers, f"{hf_prefix}.attention.output.LayerNorm")
             weights[f"{prefix}.post_attn_norm"] = attn_ln_w
             weights[f"{prefix}.post_attn_norm_beta"] = attn_ln_b
 
-            # FFN: intermediate.dense -> output.dense
             fc1_w = _load_tensor(
                 readers, f"{hf_prefix}.intermediate.dense.weight")
             fc1_b = _load_tensor(
@@ -177,17 +170,16 @@ class RobertaPlugin:
                 fc2_w.T.astype(np.float32))
             weights[f"{prefix}.fc2_bias"] = fc2_b.astype(np.float32)
 
-            # Output LayerNorm (handles legacy gamma/beta)
             out_ln_w, out_ln_b = _load_ln(
                 readers, f"{hf_prefix}.output.LayerNorm")
             weights[f"{prefix}.output_norm"] = out_ln_w
             weights[f"{prefix}.output_norm_beta"] = out_ln_b
 
-        # Pooler (optional — used for [CLS] representation)
-        pooler_key = f"{hf_root}.pooler.dense.weight"
+        pooler_key = _bpfx(root, "pooler.dense.weight")
         if _has_tensor(readers, pooler_key):
             pooler_w = _load_tensor(readers, pooler_key)
-            pooler_b = _load_tensor(readers, f"{hf_root}.pooler.dense.bias")
+            pooler_b = _load_tensor(
+                readers, _bpfx(root, "pooler.dense.bias"))
             weights["pooler_w"] = np.ascontiguousarray(
                 pooler_w.T.astype(np.float32))
             weights["pooler_bias"] = pooler_b.astype(np.float32)
@@ -204,4 +196,4 @@ class RobertaPlugin:
             verbose=verbose)
 
 
-plugin = RobertaPlugin()
+plugin = DprPlugin()

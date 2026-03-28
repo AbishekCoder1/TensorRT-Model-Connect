@@ -51,6 +51,9 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
     "omni_multimodal": "omni_multimodal",
+    "text_to_text": "text_generation_causal",
+    "marian_translation": "text_generation_causal",
+    "seq2seq_encoder_decoder": "text_generation_causal",
 }
 
 # C++ plugin filename (stem) -> registered runtime_strategies
@@ -71,6 +74,9 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "flux_plugin": ["diffusion_flux"],
     "wan_plugin": ["diffusion_wan", "diffusion_pixart"],
     "zimage_plugin": ["diffusion_zimage"],
+    "t5_plugin": ["text_to_text"],
+    "marian_plugin": ["marian_translation"],
+    "seq2seq_plugin": ["seq2seq_encoder_decoder"],
 }
 
 # C++ pipeline filename (stem) -> runtime_strategies it serves
@@ -159,6 +165,8 @@ _NO_IMPACT_PATTERNS = [
     r"^\.clang-format$",
     r"^\.editorconfig$",
     r"^\.github/",
+    r"^\.gitlab-ci\.yml$",
+    r"^\.gitlab/",
     r"^\.claude/",
     r"^LICENSE",
     r"^CLAUDE\.md$",
@@ -381,7 +389,9 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     if m:
         plugin_stem = m.group(1)
         if plugin_stem == "force_link_plugins":
-            return RuleMatch("cpp_force_link", list(imap.all_model_names), unit_tiers, rebuild)
+            # Linker anchors only — actual model impact comes from the
+            # individual plugin .cpp files which are classified separately.
+            return RuleMatch("cpp_force_link", [], unit_tiers, rebuild)
         strategies = CPP_PLUGIN_STRATEGIES.get(plugin_stem, [])
         if strategies:
             return RuleMatch(
@@ -483,9 +493,10 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     if path.startswith("tests/tools/"):
         return RuleMatch("unit_tools", [], unit_tiers, rebuild)
 
-    # Rule 11: CMake / build system
+    # Rule 11: CMake / build system — triggers C++ rebuild + unit tests
+    # but no E2E models; actual model impact comes from the source files.
     if path == "CMakeLists.txt" or path.startswith("cmake/"):
-        return RuleMatch("cmake", list(imap.all_model_names), unit_tiers, rebuild)
+        return RuleMatch("cmake", [], unit_tiers, rebuild)
 
     # Rule 12: Non-code files (no impact)
     if path.startswith("tools/") or path.startswith("scripts/"):
