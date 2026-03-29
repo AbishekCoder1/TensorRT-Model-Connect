@@ -5,7 +5,7 @@
 #include "trtf/runtime/pipeline_plugin.h"
 #include "trtf/runtime/kv_cache.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/trt/core/trt_decode_runtime.h"
+#include "runtime/core/trt_decode_runtime.h"
 #include "utils/json_helpers.h"
 
 #if TRTF_HAS_TRT

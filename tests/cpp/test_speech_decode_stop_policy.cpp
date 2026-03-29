@@ -9,7 +9,7 @@
 // Postconditions: EOS requires consecutive tokens, pad fallback needs tail+threshold, cap breaks correctly
 // =============================================================================
 
-#include "trtf/runtime/trt/audio/speech_decode_stop_policy.h"
+#include "trtf/runtime/domains/audio/speech_decode_stop_policy.h"
 
 #include <iostream>
 

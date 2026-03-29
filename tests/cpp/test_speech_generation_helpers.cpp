@@ -9,8 +9,8 @@
 // Postconditions: Delays generalize to num_codebooks, cache reads correct, waveform trimmed/normalized
 // =============================================================================
 
-#include "runtime/trt/audio/speech_delay_cache.h"
-#include "runtime/trt/audio/speech_waveform_postprocess.h"
+#include "runtime/domains/audio/speech_delay_cache.h"
+#include "runtime/domains/audio/speech_waveform_postprocess.h"
 
 #include <cmath>
 #include <cstdint>

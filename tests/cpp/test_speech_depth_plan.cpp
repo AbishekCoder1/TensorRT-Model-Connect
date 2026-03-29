@@ -9,7 +9,7 @@
 // Postconditions: Dimensions derived correctly, embeddings use text or audio seed, forced audio preferred
 // =============================================================================
 
-#include "runtime/trt/audio/speech_depth_plan.h"
+#include "runtime/domains/audio/speech_depth_plan.h"
 
 #include <cmath>
 #include <cstdint>

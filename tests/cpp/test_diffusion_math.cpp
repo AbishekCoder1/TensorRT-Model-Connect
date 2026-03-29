@@ -11,7 +11,7 @@
 // =============================================================================
 
 // test_diffusion_math.cpp — Unit tests for
-//   src/runtime/trt/diffusion/diffusion_math.h
+//   src/runtime/domains/diffusion/diffusion_math.h
 //
 // Purpose:
 //   Validates the inline CPU math helpers shared across diffusion pipelines
@@ -20,10 +20,10 @@
 //   timestep MLP used to condition diffusion denoising steps.
 //
 // Dependencies:
-//   - runtime/trt/diffusion/diffusion_math.h  (header-only, CPU)
+//   - runtime/domains/diffusion/diffusion_math.h  (header-only, CPU)
 //   No TRT, CUDA, or GPU required.
 
-#include "runtime/trt/diffusion/diffusion_math.h"
+#include "runtime/domains/diffusion/diffusion_math.h"
 
 #include <cmath>
 #include <cstdint>

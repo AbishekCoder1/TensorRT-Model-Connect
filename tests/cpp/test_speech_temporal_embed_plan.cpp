@@ -9,7 +9,7 @@
 // Postconditions: Dual streams summed correctly, tokens clamped to vocab, logits padded/truncated
 // =============================================================================
 
-#include "runtime/trt/audio/speech_temporal_embed_plan.h"
+#include "runtime/domains/audio/speech_temporal_embed_plan.h"
 
 #include <cmath>
 #include <cstdint>

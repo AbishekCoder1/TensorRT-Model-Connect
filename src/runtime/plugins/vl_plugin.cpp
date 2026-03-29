@@ -4,7 +4,7 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/pipelines/vl_pipeline.h"
-#include "runtime/trt/multimodal/image_preprocessor.h"
+#include "runtime/domains/multimodal/image_preprocessor.h"
 #include "utils/json_helpers.h"
 
 #include <iostream>

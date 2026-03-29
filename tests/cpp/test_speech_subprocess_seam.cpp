@@ -9,8 +9,8 @@
 // Postconditions: Resample path correct, frame rate clamped, tokens parsed from subprocess output
 // =============================================================================
 
-#include "trtf/runtime/trt/audio/subprocess_runner.h"
-#include "../../src/runtime/trt/audio/speech_generation_policy.h"
+#include "trtf/runtime/domains/audio/subprocess_runner.h"
+#include "../../src/runtime/domains/audio/speech_generation_policy.h"
 
 #include <cstdint>
 #include <cstring>

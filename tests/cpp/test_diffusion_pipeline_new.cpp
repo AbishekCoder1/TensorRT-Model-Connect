@@ -25,7 +25,9 @@
 // For full E2E validation with real models, see tests/test_e2e.py.
 // =============================================================================
 
-#include "runtime/pipelines/diffusion_pipeline.h"
+#include "runtime/pipelines/flux_pipeline.h"
+#include "runtime/pipelines/wan_pipeline.h"
+#include "runtime/pipelines/z_image_pipeline.h"
 
 #include <cstdint>
 #include <iostream>

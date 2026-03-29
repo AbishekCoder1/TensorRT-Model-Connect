@@ -9,7 +9,7 @@
 // Postconditions: Written WAV is readable and matches input; bad-path returns false
 // =============================================================================
 
-// test_audio_types.cpp — Unit tests for src/runtime/trt/audio/audio_types.cpp
+// test_audio_types.cpp — Unit tests for src/runtime/domains/audio/audio_types.cpp
 //
 // Purpose:
 //   Validates write_wav() from audio_types.h: the function that serialises a
@@ -17,12 +17,12 @@
 //   utils/wav_reader.h to verify the written bytes round-trip correctly.
 //
 // Dependencies:
-//   - runtime/trt/audio/audio_types.h : write_wav
+//   - runtime/domains/audio/audio_types.h : write_wav
 //   - utils/wav_reader.h              : read_wav (for verification)
 //   - test_helpers.h                  : TempDirGuard
 //   No TRT, GPU, or CUDA required.
 
-#include "runtime/trt/audio/audio_types.h"
+#include "runtime/domains/audio/audio_types.h"
 #include "utils/wav_reader.h"
 #include "test_helpers.h"
 

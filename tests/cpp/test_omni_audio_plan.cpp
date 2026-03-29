@@ -9,7 +9,7 @@
 // Postconditions: Frames padded/trimmed correctly, talker/codec gates match config, codebook argmax correct
 // =============================================================================
 
-#include "runtime/trt/audio/omni_audio_plan.h"
+#include "runtime/domains/audio/omni_audio_plan.h"
 
 #include <cstdint>
 #include <iostream>

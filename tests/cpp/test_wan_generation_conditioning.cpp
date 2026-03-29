@@ -9,7 +9,7 @@
 // Postconditions: Mask and null IDs built correctly, encoder failures propagated, latents deterministic by seed
 // =============================================================================
 
-#include "runtime/trt/diffusion/wan_generation_conditioning.h"
+#include "runtime/domains/diffusion/wan_generation_conditioning.h"
 
 #include <cmath>
 #include <cstdint>

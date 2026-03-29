@@ -81,37 +81,42 @@ FetchContent_MakeAvailable(nlohmann_json)
 # --- Bundle-only runtime library ---
 add_library(trtf_core
   src/bundle/bundle_format.cpp
+  src/bundle/bundle_view.cpp
   src/cabi/api/trtf_c.cpp
-  src/runtime/trt/core/trt_common.cpp
-  src/runtime/trt/core/trt_engine_lifecycle.cpp
-  src/runtime/trt/core/trt_decode_runtime.cpp
-  src/runtime/trt/core/device_kv_cache.cpp
-  # Legacy backends removed — all pipelines use TrtModule + KvCache directly
-  src/runtime/trt/multimodal/image_preprocessor.cpp
-  src/runtime/trt/multimodal/vision_engine.cpp
-  src/runtime/trt/audio/audio_types.cpp
-  src/runtime/trt/diffusion/diffusion_preprocessor.cpp
-  src/runtime/trt/core/stb_impl.cpp
+  # Core runtime infrastructure (TRT engine, CUDA, KV cache, decode)
+  src/runtime/core/trt_common.cpp
+  src/runtime/core/trt_engine_lifecycle.cpp
+  src/runtime/core/trt_decode_runtime.cpp
+  src/runtime/core/device_kv_cache.cpp
+  src/runtime/core/device_tensor.cpp
+  src/runtime/core/trt_module.cpp
+  src/runtime/core/kv_cache.cpp
+  src/runtime/core/recurrent_state.cpp
+  src/runtime/core/flow_match_euler_scheduler.cpp
+  src/runtime/core/stb_impl.cpp
+  # Domain-specific components
+  src/runtime/domains/multimodal/image_preprocessor.cpp
+  src/runtime/domains/multimodal/vision_engine.cpp
+  src/runtime/domains/audio/audio_types.cpp
+  src/runtime/domains/audio/mel_spectrogram.cpp
+  src/runtime/domains/audio/audio_bundle_validation.cpp
+  src/runtime/domains/diffusion/diffusion_preprocessor.cpp
+  # Tokenizers
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
   src/tokenizer/bpe_tokenizer.cpp
   src/tokenizer/wordpiece_tokenizer.cpp
   src/tokenizer/unigram_tokenizer.cpp
+  # Utilities
   src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
   src/utils/wav_reader.cpp
   src/utils/image_reader.cpp
-  src/runtime/trt/audio/mel_spectrogram.cpp
-  src/runtime/trt/core/device_tensor.cpp
-  src/runtime/trt/core/trt_module.cpp
-  src/runtime/trt/core/kv_cache.cpp
-  src/runtime/trt/core/recurrent_state.cpp
-  src/runtime/trt/core/flow_match_euler_scheduler.cpp
-  src/runtime/pipeline_factory.cpp
-  src/runtime/pipeline_registry.cpp
-  src/runtime/pipeline_plugin.cpp
-  src/bundle/bundle_view.cpp
+  # Registry (factory + plugin dispatch)
+  src/runtime/registry/pipeline_factory.cpp
+  src/runtime/registry/pipeline_registry.cpp
+  src/runtime/registry/pipeline_plugin.cpp
   # Plugin shared helpers
   src/runtime/plugins/shared/plugin_helpers.cpp
   src/runtime/plugins/shared/diffusion_helpers.cpp
@@ -141,18 +146,23 @@ add_library(trtf_core
   src/runtime/pipelines/text_generation_pipeline.cpp
   src/runtime/pipelines/recurrent_pipeline.cpp
   src/runtime/pipelines/encoder_pipeline.cpp
+  src/runtime/pipelines/segment_pipeline.cpp
+  src/runtime/pipelines/sam_pipeline.cpp
   src/runtime/pipelines/vl_pipeline.cpp
   src/runtime/pipelines/flux_pipeline.cpp
   src/runtime/pipelines/wan_pipeline.cpp
   src/runtime/pipelines/z_image_pipeline.cpp
-  src/runtime/pipelines/audio_pipeline.cpp
-  src/runtime/trt/audio/audio_bundle_validation.cpp
+  src/runtime/pipelines/whisper_pipeline.cpp
+  src/runtime/pipelines/bark_pipeline.cpp
+  src/runtime/pipelines/magpie_pipeline.cpp
+  src/runtime/pipelines/speech_pipeline.cpp
+  src/runtime/pipelines/omni_pipeline.cpp
 )
 
 # Add CUDA kernel sources when CUDA compiler is available
 if(CMAKE_CUDA_COMPILER)
-  target_sources(trtf_core PRIVATE src/runtime/trt/audio/magpie_kernels.cu)
-  set_source_files_properties(src/runtime/trt/audio/magpie_kernels.cu PROPERTIES
+  target_sources(trtf_core PRIVATE src/runtime/domains/audio/magpie_kernels.cu)
+  set_source_files_properties(src/runtime/domains/audio/magpie_kernels.cu PROPERTIES
     LANGUAGE CUDA
   )
   target_include_directories(trtf_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})

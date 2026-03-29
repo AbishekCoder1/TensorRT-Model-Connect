@@ -9,7 +9,7 @@
 // Postconditions: High-water mark updates, text consumed detected, finish limit advances correctly
 // =============================================================================
 
-#include "runtime/trt/audio/magpie_text_completion_policy.h"
+#include "runtime/domains/audio/magpie_text_completion_policy.h"
 
 #include <cstdint>
 #include <iostream>

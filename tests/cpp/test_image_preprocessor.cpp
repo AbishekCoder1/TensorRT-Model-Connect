@@ -20,9 +20,9 @@
 // a small in-memory PPM image written to a temp file.
 // =============================================================================
 
-#include "runtime/trt/multimodal/image_preprocessor.h"
+#include "runtime/domains/multimodal/image_preprocessor.h"
 #include "test_helpers.h"
-#include "trtf/runtime/trt/multimodal/image_transform_helper.h"
+#include "trtf/runtime/domains/multimodal/image_transform_helper.h"
 
 #include <cmath>
 #include <cstdio>

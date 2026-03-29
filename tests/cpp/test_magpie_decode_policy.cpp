@@ -9,7 +9,7 @@
 // Postconditions: Greedy uses audio range, sampling uses sampler, EOS stops generation
 // =============================================================================
 
-#include "runtime/trt/audio/magpie_decode_policy.h"
+#include "runtime/domains/audio/magpie_decode_policy.h"
 
 #include <cmath>
 #include <cstdint>

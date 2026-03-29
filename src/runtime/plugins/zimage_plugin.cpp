@@ -6,8 +6,8 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/plugins/shared/diffusion_helpers.h"
-#include "runtime/pipelines/diffusion_pipeline.h"
-#include "runtime/trt/diffusion/diffusion_preprocessor_weights_helpers.h"
+#include "runtime/pipelines/z_image_pipeline.h"
+#include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
 
 #include <iostream>
 #include <string>

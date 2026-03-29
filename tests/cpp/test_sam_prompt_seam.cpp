@@ -9,9 +9,9 @@
 // Postconditions: Sparse prompts padded correctly, missing data returns zeros, multimask selection correct
 // =============================================================================
 
-#include "runtime/trt/perception/sam_prompt_seam.h"
-#include "runtime/trt/perception/sam_output_selection.h"
-#include "runtime/trt/perception/sam_postprocess_seam.h"
+#include "runtime/domains/perception/sam_prompt_seam.h"
+#include "runtime/domains/perception/sam_output_selection.h"
+#include "runtime/domains/perception/sam_postprocess_seam.h"
 
 #include <cmath>
 #include <cstdint>

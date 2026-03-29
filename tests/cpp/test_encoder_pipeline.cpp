@@ -21,6 +21,8 @@
 // =============================================================================
 
 #include "runtime/pipelines/encoder_pipeline.h"
+#include "runtime/pipelines/segment_pipeline.h"
+#include "runtime/pipelines/sam_pipeline.h"
 #include "trtf/runtime/trt_module.h"
 #include "trtf/tokenizer.h"
 
@@ -34,7 +36,7 @@
 #if TRTF_HAS_TRT
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#include "runtime/trt/core/trt_common.h"
+#include "runtime/core/trt_common.h"
 #endif
 
 static int failures = 0;

@@ -161,8 +161,8 @@ For `vision_language`:
 
 **Key files:**
 - `src/runtime/pipelines/vl_pipeline.h` -- `VLPipeline`, `VLConfig`
-- `src/runtime/trt/multimodal/image_preprocessor.h` -- `VLPreprocessConfig`, `parse_vl_preprocess_config()`
-- `src/runtime/trt/multimodal/vision_engine.h` -- vision engine helpers
+- `src/runtime/domains/multimodal/image_preprocessor.h` -- `VLPreprocessConfig`, `parse_vl_preprocess_config()`
+- `src/runtime/domains/multimodal/vision_engine.h` -- vision engine helpers
 
 ### 4.3 Diffusion Family (`create_diffusion_pipeline`)
 
@@ -185,9 +185,9 @@ For `vision_language`:
      - Returns `WanPipeline(text_encoder, denoiser, vae, config, weights, tokenizer, model_id)`.
 
 **Key files:**
-- `src/runtime/pipelines/diffusion_pipeline.h` -- `FluxPipeline`, `WanPipeline`, `ZImagePipeline`, `ZImagePreprocessorWeights`
+- `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` -- `FluxPipeline`, `WanPipeline`, `ZImagePipeline`, `ZImagePreprocessorWeights`
 - `src/runtime/pipelines/wan_pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp` -- implementations
-- `src/runtime/trt/diffusion/diffusion_types.h` -- `DiffusionConfig`, `PreprocessorWeights`
+- `src/runtime/domains/diffusion/diffusion_types.h` -- `DiffusionConfig`, `PreprocessorWeights`
 
 ### 4.4 Audio Family (`create_audio_pipeline`)
 
@@ -210,10 +210,10 @@ The `create_omni_pipeline()` function is defined inline in `pipeline_factory.cpp
 The other audio factory functions live in `src/runtime/pipelines/audio_backend_factory.cpp`.
 
 **Key files:**
-- `src/runtime/pipelines/audio_pipeline.h` -- all audio pipeline classes
+- `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, etc. -- all audio pipeline classes
 - `src/runtime/pipelines/audio_backend_factory.h` -- factory function declarations
 - `src/runtime/pipelines/audio_backend_factory.cpp` -- factory function implementations
-- `src/runtime/trt/audio/` -- backend implementations (WhisperBackend, BarkBackend, etc.)
+- `src/runtime/domains/audio/` -- backend implementations (WhisperBackend, BarkBackend, etc.)
 
 ### 4.5 Encoder Family (`create_encoder_pipeline`)
 
@@ -233,7 +233,7 @@ The other audio factory functions live in `src/runtime/pipelines/audio_backend_f
 ## 5. TrtModule: The Forward Pass Abstraction
 
 **Header:** `include/trtf/runtime/trt_module.h`
-**Implementation:** `src/runtime/trt/core/trt_module.cpp`
+**Implementation:** `src/runtime/core/trt_module.cpp`
 
 `TrtModule` wraps a TRT `ICudaEngine` + `IExecutionContext`. It pre-allocates
 all device buffers at construction and provides three forward pass modes:
@@ -278,7 +278,7 @@ execution context. Called by `pipeline_factory.cpp` after engine deserialization
 ## 6. KvCache Lifecycle
 
 **Header:** `include/trtf/runtime/kv_cache.h`
-**Implementation:** `src/runtime/trt/core/kv_cache.cpp`
+**Implementation:** `src/runtime/core/kv_cache.cpp`
 
 ### 6.1 Construction
 
@@ -330,7 +330,7 @@ Sets `position_ = 0`. Synchronizes the stream.
 ## 7. RecurrentState Lifecycle
 
 **Header:** `include/trtf/runtime/recurrent_state.h`
-**Implementation:** `src/runtime/trt/core/recurrent_state.cpp`
+**Implementation:** `src/runtime/core/recurrent_state.cpp`
 
 Generic state manager for SSM (Mamba) and RWKV models.
 
@@ -509,19 +509,19 @@ from the `config.json` section text.
 | TextGenerationPipeline | `src/runtime/pipelines/text_generation_pipeline.h`, `.cpp` |
 | RecurrentPipeline | `src/runtime/pipelines/recurrent_pipeline.h`, `.cpp` |
 | VLPipeline | `src/runtime/pipelines/vl_pipeline.h`, `.cpp` |
-| Diffusion pipelines | `src/runtime/pipelines/diffusion_pipeline.h`, `wan_pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp` |
-| Audio pipelines | `src/runtime/pipelines/audio_pipeline.h`, `.cpp` |
+| Diffusion pipelines | `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h`, `wan_pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp` |
+| Audio pipelines | `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, etc., `.cpp` |
 | Audio factory | `src/runtime/pipelines/audio_backend_factory.h`, `.cpp` |
 | Encoder pipelines | `src/runtime/pipelines/encoder_pipeline.h`, `.cpp` |
-| TrtModule | `include/trtf/runtime/trt_module.h`, `src/runtime/trt/core/trt_module.cpp` |
-| KvCache | `include/trtf/runtime/kv_cache.h`, `src/runtime/trt/core/kv_cache.cpp` |
-| RecurrentState | `include/trtf/runtime/recurrent_state.h`, `src/runtime/trt/core/recurrent_state.cpp` |
+| TrtModule | `include/trtf/runtime/trt_module.h`, `src/runtime/core/trt_module.cpp` |
+| KvCache | `include/trtf/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp` |
+| RecurrentState | `include/trtf/runtime/recurrent_state.h`, `src/runtime/core/recurrent_state.cpp` |
 | Bundle format | `src/bundle/bundle_format.h`, `.cpp` |
 | Bundle helpers | `src/cabi/bundle/bundle_helpers.h`, `.cpp` |
 | Config parser | `src/cabi/config/fast_path_config.h`, `.cpp` |
-| Image preprocessor | `src/runtime/trt/multimodal/image_preprocessor.h`, `.cpp` |
-| Diffusion types | `src/runtime/trt/diffusion/diffusion_types.h` |
-| Scheduler | `src/runtime/trt/core/flow_match_euler_scheduler.cpp` |
+| Image preprocessor | `src/runtime/domains/multimodal/image_preprocessor.h`, `.cpp` |
+| Diffusion types | `src/runtime/domains/diffusion/diffusion_types.h` |
+| Scheduler | `src/runtime/core/flow_match_euler_scheduler.cpp` |
 | Tokenizer interface | `include/trtf/runtime/tokenizer_interface.h` |
 | HF Python tokenizer | `src/tokenizer/hf_python_tokenizer.cpp` |
 | Vocab tokenizer | `src/tokenizer/vocab_tokenizer.cpp` |

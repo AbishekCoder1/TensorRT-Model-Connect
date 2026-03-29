@@ -9,7 +9,7 @@
 // Postconditions: CFG flag set correctly, fallback estimate used without cross attention
 // =============================================================================
 
-#include "runtime/trt/audio/magpie_decoder_plan.h"
+#include "runtime/domains/audio/magpie_decoder_plan.h"
 
 #include <cstdint>
 #include <iostream>

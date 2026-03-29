@@ -478,7 +478,7 @@ The system is split into two stages:
 
 2. **C++ runtime** — loads a `.trtfb` bundle, deserializes the TRT engine plan, and runs inference. The runtime is bundle-only: it does not load HF model directories directly.
 
-**Plugin registry dispatch:** The `runtime_strategy` field in the bundle's `config.json` selects the backend via `PipelineRegistry` — a singleton that maps strategy strings to self-registering `IPipelinePlugin` instances. Each plugin lives in its own `.cpp` file under `src/runtime/plugins/` and registers at static-init time via the `REGISTER_PIPELINE_PLUGIN` macro. `pipeline_factory.cpp` is ~124 LOC: it reads the bundle, extracts the strategy, normalizes legacy strategy strings (e.g. `"diffusion"` → `"diffusion_flux"`), looks up the plugin, and calls `plugin->create(ctx)`. No switch/case, no edits needed when adding new strategies.
+**Plugin registry dispatch:** The `runtime_strategy` field in the bundle's `config.json` selects the backend via `PipelineRegistry` — a singleton that maps strategy strings to self-registering `IPipelinePlugin` instances. Each plugin lives in its own `.cpp` file under `src/runtime/plugins/` and registers at static-init time via the `REGISTER_PIPELINE_PLUGIN` macro. The registry and factory live in `src/runtime/registry/` — `pipeline_factory.cpp` is ~124 LOC: it reads the bundle, extracts the strategy, normalizes legacy strategy strings (e.g. `"diffusion"` → `"diffusion_flux"`), looks up the plugin, and calls `plugin->create(ctx)`. No switch/case, no edits needed when adding new strategies.
 
 **Runtime strategies (17 registered):**
 | Strategy | Plugin | Pipeline |
@@ -498,8 +498,9 @@ The system is split into two stages:
 | `diffusion_wan` | WanPlugin | WanPipeline |
 | `diffusion_zimage` | ZImagePlugin | ZImagePipeline |
 | `encoder_only_nlp` | EncoderPlugin | EncoderPipeline |
-| `segmentation` | SegmentationPlugin | SegmentationPipeline |
-| `object_detection` | ObjectDetectionPlugin | ObjectDetectionPipeline |
+| `segmentation` | SegmentationPlugin | SegmentPipeline |
+| `prompted_segmentation` | SegmentationPlugin | SamPipeline |
+| `object_detection` | ObjectDetectionPlugin | EncoderPipeline |
 
 **Legacy strategy normalization:** Old bundles may contain ambiguous strategy strings (`"text_to_audio"`, `"diffusion"`). `pipeline_factory.cpp` auto-rewrites these to their unambiguous equivalents using bundle config fields (`magpie_tts`, `diffusion_backend_type`).
 
@@ -553,10 +554,11 @@ src/                                 # C++ bundle-only runtime
   cabi/
     api/trtf_c.cpp                   # C ABI: trtf_create_pipeline_ex()
   runtime/
-    pipeline_factory.cpp             # Registry-based dispatch (~124 LOC, no switch/case)
-    pipeline_plugin.cpp              # BaseConfig parsing (parse_base_config)
-    pipeline_registry.cpp            # Singleton registry + force_link_all_plugins() call
-    plugins/                         # Self-registering pipeline plugins
+    registry/                        # Factory + plugin dispatch
+      pipeline_factory.cpp           # Registry-based dispatch (~124 LOC, no switch/case)
+      pipeline_plugin.cpp            # BaseConfig parsing (parse_base_config)
+      pipeline_registry.cpp          # Singleton registry + force_link_all_plugins() call
+    plugins/                         # Self-registering pipeline plugins (strategy → pipeline factories)
       shared/
         plugin_helpers.h/cpp         # TrtModule loading, tokenizer, KV helpers
         diffusion_helpers.h/cpp      # Shared diffusion config/loading
@@ -579,29 +581,67 @@ src/                                 # C++ bundle-only runtime
       zimage_plugin.cpp              # diffusion_zimage
       t5_plugin.cpp                  # text_to_text (encoder-decoder seq2seq)
       force_link_plugins.cpp         # Linker anchors for static lib
-    pipelines/                       # Pipeline implementations (one per modality)
-      text_generation_pipeline.h/cpp # Standard decoder + MoE
-      recurrent_pipeline.h/cpp       # SSM, RWKV, hybrid
-      vl_pipeline.h/cpp              # Vision-language
-      encoder_pipeline.h/cpp         # Encoder-only, embedding, reranking
-      audio_pipeline.h/cpp           # Whisper, Bark, Magpie, speech
-      flux_pipeline.cpp              # FLUX diffusion
-      wan_pipeline.cpp               # Wan/PixArt diffusion
-      z_image_pipeline.cpp           # Z-Image diffusion
-    trt/
+    pipelines/                       # Pipeline implementations (one class per file, fully isolated)
+      text_generation_pipeline.h/cpp # TextGenerationPipeline: standard decoder + MoE
+      recurrent_pipeline.h/cpp       # RecurrentPipeline: SSM, RWKV, hybrid (via IStateManager)
+      vl_pipeline.h/cpp              # VLPipeline: vision-language
+      encoder_pipeline.h/cpp         # EncoderPipeline: encoder-only, embedding, reranking
+      segment_pipeline.h/cpp         # SegmentPipeline: SegFormer segmentation
+      sam_pipeline.h/cpp             # SamPipeline: SAM prompted segmentation
+      whisper_pipeline.h/cpp         # WhisperPipeline: speech-to-text
+      bark_pipeline.h/cpp            # BarkPipeline: text-to-audio (Bark)
+      magpie_pipeline.h/cpp          # MagpiePipeline: text-to-audio (Magpie TTS)
+      speech_pipeline.h/cpp          # SpeechPipeline: speech-to-speech (PersonaPlex)
+      omni_pipeline.h/cpp            # OmniPipeline: omni-multimodal
+      flux_pipeline.h/cpp            # FluxPipeline: FLUX text-to-image diffusion
+      wan_pipeline.h/cpp             # WanPipeline: Wan/PixArt text-to-video diffusion
+      z_image_pipeline.h/cpp         # ZImagePipeline: Z-Image text-to-image diffusion
+    core/                            # Foundational runtime infrastructure
       trt_common.h/cpp               # TRT logger, CUDA helpers (CudaBuffer/CudaStream with move semantics)
-      trt_engine_lifecycle.h/cpp     # DecoderStepEngine, tensor validation
+      trt_engine_lifecycle.h/cpp     # Engine deserialization, tensor validation
       trt_decode_runtime.h/cpp       # select_argmax_token, build_attention_mask
+      trt_module.cpp                 # TrtModule: engine wrapper (forward, bind, I/O)
       device_kv_cache.h/cpp          # DeviceKvCache, DeviceResources, run_decoder_step_device
-      trt_backend_shared.h/cpp       # TrtBackendFastPath autoregressive loop (device-resident cache)
+      kv_cache.cpp                   # KvCache: device-resident K/V buffer management
+      recurrent_state.cpp            # RecurrentState: Mamba/RWKV recurrent state management
+      device_tensor.cpp              # DeviceTensor: GPU-resident tensor reference
+      flow_match_euler_scheduler.cpp # Flow-matching Euler scheduler (diffusion)
       step_state.h                   # IStepState interface
-      mamba_backend.h/cpp            # MambaBackend: SSM autoregressive loop
-      mamba_decode_runtime.h/cpp     # MambaStepEngine, run_mamba_step
-      mamba_step_state.h/cpp         # MambaStepState: conv + SSM recurrent state
-      image_preprocessor.h/cpp       # VL image preprocessing: 4 strategies + configurable interpolation
+    domains/                         # Domain-specific components (grouped by modality)
+      audio/                         # Audio processing (mel, whisper, bark, speech, magpie)
+        mel_spectrogram.h/cpp        # Mel spectrogram extraction
+        audio_types.h/cpp            # WAV I/O, audio format types
+        audio_bundle_validation.h/cpp # Bundle section validation for audio models
+        whisper_config.h             # Whisper model config
+        bark_config.h                # Bark model config
+        audio_configs.h              # Shared audio config structs
+        speech_*.h                   # Speech-to-speech plans and policies
+        magpie_*.h                   # Magpie TTS plans and policies
+        omni_audio_plan.h            # Omni multimodal audio plan
+      diffusion/                     # Diffusion model components
+        diffusion_types.h            # DiffusionConfig, PreprocessorWeights
+        diffusion_preprocessor.cpp   # Weight preprocessing for diffusion
+        diffusion_math.h             # Diffusion math helpers
+        diffusion_generation_plan.h  # Denoising loop plan
+        wan_generation_conditioning.h # Wan-specific conditioning
+      multimodal/                    # Vision-language components
+        image_preprocessor.h/cpp     # VL image preprocessing: 4 strategies + configurable interpolation
+        vision_engine.h/cpp          # Vision encoder TRT module wrapper
+        vision_execution_plan.h      # Vision encoder execution plan
+        vl_decode_policy.h           # VL decode policy
+      perception/                    # Segmentation and detection components
+        perception_types.h           # Shared types for perception models
+        sam_*.h                      # SAM prompt, preprocess, postprocess seams
+        segmentation_*.h             # SegFormer preprocess/postprocess seams
+      recurrent/                     # Recurrent model components (Mamba/RWKV)
+        recurrent_step_contracts.h   # Step contract types
+        recurrent_tensor_bindings.h  # Tensor binding helpers
   tokenizer/
     vocab_tokenizer.cpp              # Word-to-id lookup from vocabulary list
-    hf_python_tokenizer.cpp          # HF tokenizers bridge via Python subprocess
+    bpe_tokenizer.cpp                # BPE tokenizer (native C++)
+    wordpiece_tokenizer.cpp          # WordPiece tokenizer (native C++)
+    unigram_tokenizer.cpp            # Unigram tokenizer (native C++)
+    ipa_tokenizer.cpp                # IPA phoneme tokenizer
   utils/
     data_dir.h/cpp                   # centralized source-dir resolution
     text_parsers.h/cpp               # shared string/file parsing (starts_with, read_file, etc.)

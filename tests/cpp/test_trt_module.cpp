@@ -38,7 +38,7 @@
 #if TRTF_HAS_TRT
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#include "runtime/trt/core/trt_common.h"
+#include "runtime/core/trt_common.h"
 #endif
 
 static int failures = 0;

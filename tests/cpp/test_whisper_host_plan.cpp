@@ -9,9 +9,9 @@
 // Postconditions: Mel length and tokens correct, encoder mask planned, cross-KV copy operations tracked
 // =============================================================================
 
-#include "runtime/trt/audio/whisper_cross_kv_apply.h"
-#include "runtime/trt/audio/whisper_cross_kv_plan.h"
-#include "runtime/trt/audio/whisper_host_plan.h"
+#include "runtime/domains/audio/whisper_cross_kv_apply.h"
+#include "runtime/domains/audio/whisper_cross_kv_plan.h"
+#include "runtime/domains/audio/whisper_host_plan.h"
 
 #include <cstdint>
 #include <cstring>

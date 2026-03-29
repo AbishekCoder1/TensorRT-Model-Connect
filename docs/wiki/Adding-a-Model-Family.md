@@ -31,7 +31,7 @@ See `scripts/autopilot/autorun.py` for full options and `CLAUDE.md` for detailed
 
 ## Manual Path
 
-Adding support for a new HuggingFace model family manually is a Python task in `trtf_build/` **when the model reuses an existing runtime strategy** already handled by C++ (`src/cabi/api/trtf_c.cpp`, `src/runtime/trt/*`). C++ edits are needed only when introducing a new `runtime_strategy`/backend/state type.
+Adding support for a new HuggingFace model family manually is a Python task in `trtf_build/` **when the model reuses an existing runtime strategy** already handled by C++ (`src/cabi/api/trtf_c.cpp`, `src/runtime/core/`, `src/runtime/domains/`). C++ edits are needed only when introducing a new `runtime_strategy`/backend/state type.
 
 ## Prerequisites
 
@@ -217,7 +217,7 @@ If your model has an architecture not covered by the parameterized standard buil
 ### Already implemented custom architectures
 
 - **MoE (Phi-MoE)**: SparseMixer routing + per-expert SwiGLU MLPs. See `families/phi_moe.py`. Uses `runtime_strategy="decoder_moe"` (same KV-cache C++ backend).
-- **Mamba/SSM**: Selective state space model with conv1d + selective scan. See `families/mamba.py`. Uses `runtime_strategy="ssm_recurrent"` and reuses the existing C++ `MambaBackend` (`src/runtime/trt/recurrent/mamba_backend.cpp`).
+- **Mamba/SSM**: Selective state space model with conv1d + selective scan. See `families/mamba.py`. Uses `runtime_strategy="ssm_recurrent"` and reuses the existing C++ `MambaBackend` (`src/runtime/domains/recurrent/mamba_backend.cpp`).
 - **Vision-Language (Qwen-VL)**: Vision encoder (ViT + 3D RoPE + spatial merge) + text decoder with embed_input. See `families/qwen_vl.py`. Uses `runtime_strategy="vision_language"`. Requires `build_vision_engine()` and `get_vl_config()` methods.
 
 ### Adding a Vision-Language Family

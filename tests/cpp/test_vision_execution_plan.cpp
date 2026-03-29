@@ -9,7 +9,7 @@
 // Postconditions: Feature counts match config, DeepStack names collected, copy plan succeeds/fails correctly
 // =============================================================================
 
-#include "runtime/trt/multimodal/vision_execution_plan.h"
+#include "runtime/domains/multimodal/vision_execution_plan.h"
 
 #include <cstdint>
 #include <iostream>

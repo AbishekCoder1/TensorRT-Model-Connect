@@ -275,7 +275,7 @@ containerized E2E (`trtf generate-video`) repeatedly until quality recovered.
 
 ### Fixes applied
 
-- `src/runtime/trt/flux_diffusion_backend.cpp`
+- `src/runtime/domains/flux_diffusion_backend.cpp`
   - Guidance embedding uses `guidance * 1000.0F`.
   - CLIP pooled conditioning now derived from CLIP hidden states at first EOS
     (with OpenAI-compatible argmax fallback).
@@ -342,8 +342,8 @@ mismatch, not an engine bug.
 
 ### Files changed
 
-- `src/runtime/trt/diffusion_backend.cpp` — unpatchify loop order, scheduler, T5 mask + zeroing, CFG null text encoding, text_seq_len wiring
-- `src/runtime/trt/diffusion_backend.h` — (unchanged, text_seq_len already had default 512)
+- `src/runtime/domains/diffusion_backend.cpp` — unpatchify loop order, scheduler, T5 mask + zeroing, CFG null text encoding, text_seq_len wiring
+- `src/runtime/domains/diffusion_backend.h` — (unchanged, text_seq_len already had default 512)
 - `src/cabi/config/fast_path_config.h` — added `text_seq_len` field
 - `src/cabi/config/fast_path_config.cpp` — parse `text_seq_len` from config JSON
 - `trtf_build/trtf_build/diffusion_runner.py` — encode_text mask + zeroing, unpatchify ordering
@@ -544,7 +544,7 @@ Added two models to E2E test suite:
 
 ## 2026-02-17 — Device-Resident KV Cache (C++ + Python)
 
-- **C++ device-resident KV cache** (`src/runtime/trt/device_kv_cache.h/cpp`)
+- **C++ device-resident KV cache** (`src/runtime/domains/device_kv_cache.h/cpp`)
   - `DeviceKvCache`: persistent GPU buffers for KV cache. D2D append/shift-left per step instead of full H2D cache transfer.
   - `DeviceResources`: pre-allocated per-step I/O buffers (token_id, position_id, mask, logits, present_k/v, VL embed).
   - `run_decoder_step_device()`: replaces `run_decoder_step()`. Only H2D for small inputs (~1KB), D2D cache update, D2H for logits.
@@ -915,7 +915,7 @@ Added two models to E2E test suite:
   - **Phase 1**: Created `model_runtime_fwd.h` — lightweight header with forward-declared TRT types. Family registrations no longer include `trt_common.h` or `NvInfer.h`.
   - **Phase 2**: CMake-generated family dispatch. `RegisterBuiltinHfModelFamilies()` is now auto-generated from `cmake/family_dispatch.cpp.in`. CMake discovers families by globbing `src/models/*/registration.h`. Removed manual includes + calls from `hf_family_registry.cpp`.
   - **Phase 3**: CMake GLOB for sources and tests. Family `.cpp` files auto-discovered. Test files matching `tests/test_*_family.cpp` auto-discovered. Moved template to `scripts/templates/model_family/`.
-  - **Phase 4**: Relocated `StandardDecoderGraphBuilder` from `src/runtime/trt/` to `src/model/` — correct layering (build-time infrastructure alongside `StandardCheckpointMapper`).
+  - **Phase 4**: Relocated `StandardDecoderGraphBuilder` from `src/runtime/core/` and `src/runtime/domains/` to `src/model/` — correct layering (build-time infrastructure alongside `StandardCheckpointMapper`).
   - Merge conflict risk: **ZERO** for parallel agents working on different families.
   - Validated: 26/26 unit tests pass in container. TRT E2E pass for Qwen3 (0.6B), TinyLlama (1.1B), TinyMistral (248M). Gemma E2E skipped (gated model, no HF token available; TRT pipeline verified with toy fixture).
 
@@ -1246,7 +1246,7 @@ Phase 1 implementation completed in this iteration:
   - added `src/utils/trt/engine_cache.cpp`.
   - added utility source to build target in `CMakeLists.txt`.
 - Implemented engine-plan reuse to avoid repeated TRT rebuilds across process invocations:
-  - Qwen TRT graph builder (now in `src/runtime/trt/standard_decoder_graph_builder.cpp`) uses cache key + load/store hooks in
+  - Qwen TRT graph builder (now in `src/runtime/domains/standard_decoder_graph_builder.cpp`) uses cache key + load/store hooks in
     `finalize_decoder_step_engine(...)`.
   - First run builds serialized engine plan and persists it.
   - Subsequent runs deserialize cached plan directly when cache key matches model/runtime definition.
@@ -1266,7 +1266,7 @@ Validation policy for this branch (requested by user):
 ## 2026-02-13 (continued: TRT logger passthrough + E2E stdout diagnostics)
 
 Implemented to support direct stdout-based debugging:
-- Added TRT logger passthrough (now in `src/runtime/trt/trt_common.cpp`):
+- Added TRT logger passthrough (now in `src/runtime/domains/trt_common.cpp`):
   - `TRTF_TRT_LOG_STDERR=1` enables forwarding TensorRT `ILogger` lines to stderr/stdout stream.
   - `TRTF_TRT_LOG_MIN_SEVERITY=<INTERNAL_ERROR|ERROR|WARNING|INFO|VERBOSE>` controls verbosity (default: `INFO`).
 - Added new reproducible E2E diagnostics script:
@@ -1443,15 +1443,15 @@ Validation: host build + ctest passed (same 5/9 baseline — 4 failures are sand
 
 ### Phase 1: Extract Shared TRT Infrastructure (no behavioral change)
 
-Carved `src/runtime/trt_backend_qwen.cpp` (1732 LOC) into shared reusable modules under `src/runtime/trt/`:
+Carved `src/runtime/trt_backend_qwen.cpp` (1732 LOC) into shared reusable modules under `src/runtime/core/` and `src/runtime/domains/`:
 
-- `src/runtime/trt/trt_common.h/cpp` — `TrtLogger`, `TrtDeleter`, `TrtUniquePtr`, `CudaStream`, `CudaBuffer`, TRT severity/log controls.
-- `src/runtime/trt/trt_graph_ops.h/cpp` — Reusable TRT graph construction ops: `make_dims_*`, `add_constant_tensor`, `add_matmul_rhs_constant`, `add_bias_sum`, `add_rms_norm`, `add_rms_norm_per_head`, `make_rope_table`, `make_rotate_half_matrix`, `add_apply_rope`, `layer_tensor_name`.
-- `src/runtime/trt/trt_engine_lifecycle.h/cpp` — `DecoderStepEngine` struct, `has_io_tensor`, `has_all_required_tensors`, `finalize_decoder_step_engine` (with engine cache integration).
-- `src/runtime/trt/trt_decode_runtime.h/cpp` — `select_argmax_token`, `select_topk_tokens`, `build_attention_mask`, `append_cache_state`, `run_decoder_step` (full CUDA bind/execute/sync).
-- `src/runtime/trt/trt_backend_shared.h/cpp` — Generic `TrtBackendShared` class implementing `IGenerationBackend` with the autoregressive prefill+decode loop. Exposes `CreateTrtBackendWithFactory()` accepting a pluggable `DecoderStepEngineFactory`.
+- `src/runtime/domains/trt_common.h/cpp` — `TrtLogger`, `TrtDeleter`, `TrtUniquePtr`, `CudaStream`, `CudaBuffer`, TRT severity/log controls.
+- `src/runtime/domains/trt_graph_ops.h/cpp` — Reusable TRT graph construction ops: `make_dims_*`, `add_constant_tensor`, `add_matmul_rhs_constant`, `add_bias_sum`, `add_rms_norm`, `add_rms_norm_per_head`, `make_rope_table`, `make_rotate_half_matrix`, `add_apply_rope`, `layer_tensor_name`.
+- `src/runtime/domains/trt_engine_lifecycle.h/cpp` — `DecoderStepEngine` struct, `has_io_tensor`, `has_all_required_tensors`, `finalize_decoder_step_engine` (with engine cache integration).
+- `src/runtime/domains/trt_decode_runtime.h/cpp` — `select_argmax_token`, `select_topk_tokens`, `build_attention_mask`, `append_cache_state`, `run_decoder_step` (full CUDA bind/execute/sync).
+- `src/runtime/domains/trt_backend_shared.h/cpp` — Generic `TrtBackendShared` class implementing `IGenerationBackend` with the autoregressive prefill+decode loop. Exposes `CreateTrtBackendWithFactory()` accepting a pluggable `DecoderStepEngineFactory`.
 
-`trt_backend_qwen.cpp` (since deleted) was rewritten to `#include` shared headers and call shared functions instead of defining everything locally. Reduced from 1732 LOC of self-contained code to ~630 LOC of Qwen-specific graph builder logic (legacy + multi-layer). This graph builder logic was later renamed to `StandardDecoderGraphBuilder` in `src/runtime/trt/standard_decoder_graph_builder.cpp` when it was found to be family-agnostic.
+`trt_backend_qwen.cpp` (since deleted) was rewritten to `#include` shared headers and call shared functions instead of defining everything locally. Reduced from 1732 LOC of self-contained code to ~630 LOC of Qwen-specific graph builder logic (legacy + multi-layer). This graph builder logic was later renamed to `StandardDecoderGraphBuilder` in `src/runtime/domains/standard_decoder_graph_builder.cpp` when it was found to be family-agnostic.
 
 Validation: host build + ctest passed (same 5/9 baseline).
 
@@ -1469,7 +1469,7 @@ Validation: host build + ctest passed (same 5/9 baseline).
 ### Phase 3: Registration-Based TRT Dispatch (architectural enhancement)
 
 Introduced `ITrtGraphBuilder` interface for family-specific TRT graph builders:
-- `src/runtime/trt/trt_graph_builder.h/cpp` — defines `ITrtGraphBuilder` abstract class with `build_decoder_step_engine()` virtual method, plus `RegisterTrtGraphBuilder(family, builder)` and `FindTrtGraphBuilder(family)` registry functions.
+- `src/runtime/domains/trt_graph_builder.h/cpp` — defines `ITrtGraphBuilder` abstract class with `build_decoder_step_engine()` virtual method, plus `RegisterTrtGraphBuilder(family, builder)` and `FindTrtGraphBuilder(family)` registry functions.
 
 This enables a new model family to register its TRT graph builder without modifying any shared runtime code.
 
@@ -1653,20 +1653,20 @@ Added `extra_tensors`/`extra_params` maps so families can carry arbitrary weight
 
 Added generic tensor bindings to `DecoderStepEngine` for non-KV-cache models:
 
-- `src/runtime/trt/trt_engine_lifecycle.h`:
+- `src/runtime/domains/trt_engine_lifecycle.h`:
   - Added `DecoderStepEngine::TensorBinding` struct (logical_name, engine_name, is_input, element_count)
   - Added `extra_bindings` vector to `DecoderStepEngine`
   - Added `find_extra_bindings()` free function (prefix match + is_input filter)
   - Added second `finalize_decoder_step_engine` overload accepting extra bindings
-- `src/runtime/trt/trt_engine_lifecycle.cpp`: implemented all new functions; `has_all_required_tensors()` now validates extra bindings
+- `src/runtime/domains/trt_engine_lifecycle.cpp`: implemented all new functions; `has_all_required_tensors()` now validates extra bindings
 
 ### Phase C: Abstract state management (IStepState)
 
 Extracted KV-cache management from `generate()` into an interface:
 
-- Created `src/runtime/trt/step_state.h`: `IStepState` abstract interface with `prepare_step()`, `cache_k/v_by_layer()`, `update_after_step()`
-- Created `src/runtime/trt/kv_cache_step_state.h/cpp`: `KvCacheStepState` implementing `IStepState` — mechanical extraction from previous inline code in `generate()`
-- Refactored `src/runtime/trt/trt_backend_shared.cpp`: `generate()` now uses `KvCacheStepState` via the `IStepState` interface (reduced from ~97 LOC to ~65 LOC, identical behavior)
+- Created `src/runtime/domains/step_state.h`: `IStepState` abstract interface with `prepare_step()`, `cache_k/v_by_layer()`, `update_after_step()`
+- Created `src/runtime/domains/kv_cache_step_state.h/cpp`: `KvCacheStepState` implementing `IStepState` — mechanical extraction from previous inline code in `generate()`
+- Refactored `src/runtime/domains/trt_backend_shared.cpp`: `generate()` now uses `KvCacheStepState` via the `IStepState` interface (reduced from ~97 LOC to ~65 LOC, identical behavior)
 - Added `kv_cache_step_state.cpp` to `CMakeLists.txt`
 
 ### Phase D: Documentation updates
@@ -1693,13 +1693,13 @@ Extracted KV-cache management from `generate()` into an interface:
 | Edit | `src/model/standard_trt_model_definition_populator.cpp` |
 | Edit | `src/model/model_loader.cpp` |
 | Edit | `src/utils/trt/engine_cache.cpp` |
-| Edit | `src/runtime/trt/trt_engine_lifecycle.h` |
-| Edit | `src/runtime/trt/trt_engine_lifecycle.cpp` |
-| Create | `src/runtime/trt/step_state.h` |
-| Create | `src/runtime/trt/kv_cache_step_state.h` |
-| Create | `src/runtime/trt/kv_cache_step_state.cpp` |
-| Edit | `src/runtime/trt/trt_backend_shared.h` |
-| Edit | `src/runtime/trt/trt_backend_shared.cpp` |
+| Edit | `src/runtime/domains/trt_engine_lifecycle.h` |
+| Edit | `src/runtime/domains/trt_engine_lifecycle.cpp` |
+| Create | `src/runtime/domains/step_state.h` |
+| Create | `src/runtime/domains/kv_cache_step_state.h` |
+| Create | `src/runtime/domains/kv_cache_step_state.cpp` |
+| Edit | `src/runtime/domains/trt_backend_shared.h` |
+| Edit | `src/runtime/domains/trt_backend_shared.cpp` |
 | Edit | `CMakeLists.txt` |
 | Edit | `docs/wiki/Static-Design.md` |
 | Edit | `docs/wiki/Dynamic-Design.md` |
@@ -1758,13 +1758,13 @@ All source modules now have dedicated test coverage:
 - `src/utils/json_helpers.cpp` → test_json_helpers
 - `src/utils/text_parsers.cpp` → test_text_parsers
 - `src/utils/trt/engine_cache.cpp` → test_engine_cache_key
-- `src/runtime/trt/trt_decode_runtime.cpp` → test_decode_runtime
-- `src/runtime/trt/kv_cache_step_state.cpp` → test_kv_cache_step_state
-- `src/runtime/trt/step_state.h` → test_kv_cache_step_state
-- `src/runtime/trt/trt_engine_lifecycle.cpp` → test_extra_fields + test_trt_ops_gold
+- `src/runtime/domains/trt_decode_runtime.cpp` → test_decode_runtime
+- `src/runtime/domains/kv_cache_step_state.cpp` → test_kv_cache_step_state
+- `src/runtime/domains/step_state.h` → test_kv_cache_step_state
+- `src/runtime/domains/trt_engine_lifecycle.cpp` → test_extra_fields + test_trt_ops_gold
 - `include/trtf/model.h` (extra fields) → test_extra_fields
 - `src/model/trt_model_definition.h` (extra fields) → test_extra_fields
-- `src/runtime/trt/trt_graph_ops.cpp` → test_trt_ops_gold (6 ops)
+- `src/runtime/domains/trt_graph_ops.cpp` → test_trt_ops_gold (6 ops)
 - `src/model/standard_trt_model_definition_populator.cpp` → test_extra_fields
 
 ### File summary
@@ -1880,7 +1880,7 @@ Changes:
 - **`src/model/trt_model_definition.h`**: Added same fields to `TrtDecoderLayerDefinition`
 - **`src/model/standard_checkpoint_mapper.cpp`**: Loads `self_attn.{q,k,v}_proj.bias` when present. K/V biases expanded from `kv_hidden` to `q_hidden` for GQA models (same expansion pattern as K/V weights).
 - **`src/model/standard_trt_model_definition_populator.cpp`**: Copies biases through to TRT definition
-- **`src/runtime/trt/standard_decoder_graph_builder.cpp`**: Calls `add_bias_sum()` after Q/K/V matmuls when bias vectors are non-empty
+- **`src/runtime/domains/standard_decoder_graph_builder.cpp`**: Calls `add_bias_sum()` after Q/K/V matmuls when bias vectors are non-empty
 
 ### Validation
 

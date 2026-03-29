@@ -9,8 +9,8 @@
 // Postconditions: Normalization produces correct float values, empty images rejected, SAM plan tracks resize
 // =============================================================================
 
-#include "runtime/trt/perception/sam_image_preprocess_seam.h"
-#include "runtime/trt/perception/segmentation_preprocess_seam.h"
+#include "runtime/domains/perception/sam_image_preprocess_seam.h"
+#include "runtime/domains/perception/segmentation_preprocess_seam.h"
 
 #include <cmath>
 #include <cstdint>

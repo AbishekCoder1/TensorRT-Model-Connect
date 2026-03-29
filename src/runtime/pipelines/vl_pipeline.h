@@ -7,7 +7,7 @@
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/kv_cache.h"
-#include "runtime/trt/multimodal/image_preprocessor.h"
+#include "runtime/domains/multimodal/image_preprocessor.h"
 
 #include <cstdint>
 #include <memory>

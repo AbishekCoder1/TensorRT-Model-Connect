@@ -3,7 +3,8 @@
 
 #include "trtf/runtime/pipeline_registry.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/pipelines/encoder_pipeline.h"
+#include "runtime/pipelines/segment_pipeline.h"
+#include "runtime/pipelines/sam_pipeline.h"
 
 #if TRTF_HAS_TRT
 

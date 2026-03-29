@@ -314,7 +314,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/runtime/trt_module.h`, `src/runtime/trt/core/trt_module.cpp` |
+| **Files** | `include/trtf/runtime/trt_module.h`, `src/runtime/core/trt_module.cpp` |
 | **Purpose** | `model.forward()` abstraction for TensorRT engines. Wraps `ICudaEngine` + `IExecutionContext`. Manages all I/O binding, H2D/D2H transfers, and execution. |
 | **Key API** | `forward()` (CPU tensors, synchronous), `forward_device()` (GPU tensors, no copies), `forward_async()`/`sync()` (async), `bind_external()` (KvCache binding), `device_ptr()` (direct buffer access). |
 | **Ownership** | Non-copyable, movable. `keep_alive()` stores `shared_ptr<void>` to ensure TRT engine and CUDA stream outlive the execution context. |
@@ -324,7 +324,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/runtime/kv_cache.h`, `src/runtime/trt/core/kv_cache.cpp`, `src/runtime/trt/core/device_kv_cache.h`, `src/runtime/trt/core/device_kv_cache.cpp` |
+| **Files** | `include/trtf/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp`, `src/runtime/core/device_kv_cache.h`, `src/runtime/core/device_kv_cache.cpp` |
 | **Purpose** | Autoregressive KV cache state manager. Allocates per-layer K/V device tensors, builds causal attention masks, and binds directly to TrtModule. |
 | **Key API** | `bind_to()` binds `cache_k_{i}`, `cache_v_{i}` (inputs) and `present_k_{i}`, `present_v_{i}` (outputs). `advance()` appends present into cache and increments position. `build_attention_mask()` produces `[max_length]` float mask. |
 | **Legacy** | `device_kv_cache.h/cpp` contains the older `DeviceKvCache` and `run_decoder_step_device()` used by legacy backends. |
@@ -333,7 +333,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/runtime/recurrent_state.h`, `src/runtime/trt/core/recurrent_state.cpp` |
+| **Files** | `include/trtf/runtime/recurrent_state.h`, `src/runtime/core/recurrent_state.cpp` |
 | **Purpose** | Config-driven SSM/RWKV state manager. Replaces old `MambaStepState` and `RwkvStepState` with a single class parametrized by `TensorSpec` array. |
 | **Key API** | `bind_to()` binds state tensors (`{name}_{i}`) and present tensors (`{output_prefix}_{i}`). `advance()` copies present->state (D2D async). `reset()` zeros all state. |
 | **Usage** | Mamba: `specs = {{"conv_state", ...}, {"ssm_state", ...}}`. RWKV: `specs = {{"attn_state", ...}, ...}`. |
@@ -383,185 +383,185 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/pipelines/audio_pipeline.h`, `src/runtime/pipelines/audio_pipeline.cpp`, `src/runtime/pipelines/audio_backend_factory.h`, `src/runtime/pipelines/audio_backend_factory.cpp` |
+| **Files** | `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, etc., individual pipeline `.cpp` files, `src/runtime/pipelines/audio_backend_factory.h`, `src/runtime/pipelines/audio_backend_factory.cpp` |
 | **Purpose** | Five audio pipeline classes. `WhisperPipeline` (`transcribe()`), `BarkPipeline` (`generate_audio()`), `MagpiePipeline` (`generate_audio()`), `SpeechPipeline` (`speak()`), and `OmniPipeline` (`generate_audio()` -- three-stage: thinker->talker->code2wav). |
-| **Backend delegation** | Whisper, Bark, Magpie, and Speech delegate to old-style backends in `src/runtime/trt/audio/`. OmniPipeline uses TrtModule + KvCache directly. Factory functions in `audio_backend_factory.h` create backends from bundle sections. |
+| **Backend delegation** | Whisper, Bark, Magpie, and Speech delegate to old-style backends in `src/runtime/domains/audio/`. OmniPipeline uses TrtModule + KvCache directly. Factory functions in `audio_backend_factory.h` create backends from bundle sections. |
 
 ### UD-PIP-DIFF-01: Diffusion Pipelines
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/pipelines/diffusion_pipeline.h`, `src/runtime/pipelines/wan_pipeline.cpp`, `src/runtime/pipelines/flux_pipeline.cpp`, `src/runtime/pipelines/z_image_pipeline.cpp` |
+| **Files** | `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h`, `src/runtime/pipelines/wan_pipeline.cpp`, `src/runtime/pipelines/flux_pipeline.cpp`, `src/runtime/pipelines/z_image_pipeline.cpp` |
 | **Purpose** | Three diffusion pipelines, all using TrtModule directly. `WanPipeline` (T5 + denoiser + 3D VAE for text-to-video), `FluxPipeline` (T5 + CLIP + denoiser + VAE for text-to-image), `ZImagePipeline` (Qwen3 text encoder + denoiser + VAE for text-to-image). |
 | **Key API** | `generate_image(prompt, cfg)` returns `ImageResult`. All use `FlowMatchEulerScheduler` for noise scheduling. |
-| **Supporting types** | `src/runtime/trt/diffusion/diffusion_types.h` (`DiffusionConfig`, `PreprocessorWeights`, `VideoResult`), `src/runtime/trt/diffusion/diffusion_math.h` (math helpers). |
+| **Supporting types** | `src/runtime/domains/diffusion/diffusion_types.h` (`DiffusionConfig`, `PreprocessorWeights`, `VideoResult`), `src/runtime/domains/diffusion/diffusion_math.h` (math helpers). |
 
 ### UD-TRT-CORE-01: TRT Common
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/core/trt_common.h`, `src/runtime/trt/core/trt_common.cpp` |
+| **Files** | `src/runtime/core/trt_common.h`, `src/runtime/core/trt_common.cpp` |
 | **Purpose** | TRT logger implementation, CUDA helper utilities (CudaBuffer with RAII, CudaStream with RAII and move semantics), error checking macros. |
 
 ### UD-TRT-DEC-01: Decode Runtime
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/core/trt_decode_runtime.h`, `src/runtime/trt/core/trt_decode_runtime.cpp` |
+| **Files** | `src/runtime/core/trt_decode_runtime.h`, `src/runtime/core/trt_decode_runtime.cpp` |
 | **Purpose** | `select_argmax_token()`, `build_attention_mask()`, and engine lifecycle management (`DecoderStepEngine`, tensor validation). Used by legacy backend code. |
 
 ### UD-IMG-01: Image Preprocessor
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/multimodal/image_preprocessor.h`, `src/runtime/trt/multimodal/image_preprocessor.cpp` |
+| **Files** | `src/runtime/domains/multimodal/image_preprocessor.h`, `src/runtime/domains/multimodal/image_preprocessor.cpp` |
 | **Purpose** | VL image preprocessing with 4 strategies (configurable per model). Handles resize, normalize, pad, and CHW reorder. `VLPreprocessConfig` drives the preprocessing behavior. |
 
 ### UD-SCHED-01: Noise Scheduler
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/runtime/scheduler.h`, `src/runtime/trt/core/flow_match_euler_scheduler.cpp` |
+| **Files** | `include/trtf/runtime/scheduler.h`, `src/runtime/core/flow_match_euler_scheduler.cpp` |
 | **Purpose** | `IScheduler` interface for diffusion noise scheduling. `FlowMatchEulerScheduler` implements the Flow Matching Euler Discrete schedule used by FLUX, Wan, and Z-Image. |
 
 ### UD-AUD-WHISPER-01: Whisper Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/audio/whisper_backend.h`, `src/runtime/trt/audio/whisper_backend.cpp`, `src/runtime/trt/audio/whisper_cross_kv_apply.h`, `src/runtime/trt/audio/whisper_cross_kv_plan.h`, `src/runtime/trt/audio/whisper_decode_policy.h`, `src/runtime/trt/audio/whisper_host_plan.h` |
+| **Files** | `src/runtime/domains/audio/whisper_backend.h`, `src/runtime/domains/audio/whisper_backend.cpp`, `src/runtime/domains/audio/whisper_cross_kv_apply.h`, `src/runtime/domains/audio/whisper_cross_kv_plan.h`, `src/runtime/domains/audio/whisper_decode_policy.h`, `src/runtime/domains/audio/whisper_host_plan.h` |
 | **Purpose** | Whisper speech-to-text backend. Manages encoder-decoder architecture with cross-attention KV cache, mel spectrogram input, and autoregressive token decoding. Host plan orchestrates the two-stage (encode + decode) inference. Decode policy governs stopping criteria and token selection. |
 
 ### UD-AUD-BARK-01: Bark Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/audio/bark_backend.h`, `src/runtime/trt/audio/bark_backend.cpp`, `src/runtime/trt/audio/bark_generation_plan.h` |
+| **Files** | `src/runtime/domains/audio/bark_backend.h`, `src/runtime/domains/audio/bark_backend.cpp`, `src/runtime/domains/audio/bark_generation_plan.h` |
 | **Purpose** | Bark text-to-audio backend. Multi-stage codebook generation (semantic, coarse, fine) producing audio waveforms from text. Generation plan configures the three-stage autoregressive pipeline. |
 
 ### UD-AUD-MAGPIE-01: Magpie TTS Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/audio/magpie_tts_backend.h`, `src/runtime/trt/audio/magpie_tts_backend.cpp`, `src/runtime/trt/audio/magpie_codec_plan.h`, `src/runtime/trt/audio/magpie_decode_policy.h`, `src/runtime/trt/audio/magpie_decoder_plan.h`, `src/runtime/trt/audio/magpie_text_completion_policy.h`, `src/runtime/trt/audio/magpie_kernels.cu`, `src/runtime/trt/audio/magpie_kernels.h` |
+| **Files** | `src/runtime/domains/audio/magpie_tts_backend.h`, `src/runtime/domains/audio/magpie_tts_backend.cpp`, `src/runtime/domains/audio/magpie_codec_plan.h`, `src/runtime/domains/audio/magpie_decode_policy.h`, `src/runtime/domains/audio/magpie_decoder_plan.h`, `src/runtime/domains/audio/magpie_text_completion_policy.h`, `src/runtime/domains/audio/magpie_kernels.cu`, `src/runtime/domains/audio/magpie_kernels.h` |
 | **Purpose** | Magpie neural TTS backend. Codec plan configures audio codec parameters, decode policy governs autoregressive stopping, decoder plan orchestrates the multi-step generation, and text completion policy handles prompt completion. Custom CUDA kernels accelerate audio processing. |
 
 ### UD-AUD-SPEECH-01: Speech-to-Speech Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/audio/speech_backend.h`, `src/runtime/trt/audio/speech_backend.cpp`, `src/runtime/trt/audio/speech_delay_cache.h`, `src/runtime/trt/audio/speech_depth_plan.h`, `src/runtime/trt/audio/speech_generation_policy.h`, `src/runtime/trt/audio/speech_mimi_decode_plan.h`, `src/runtime/trt/audio/speech_runtime_plan.h`, `src/runtime/trt/audio/speech_temporal_embed_plan.h`, `src/runtime/trt/audio/speech_waveform_postprocess.h` |
+| **Files** | `src/runtime/domains/audio/speech_backend.h`, `src/runtime/domains/audio/speech_backend.cpp`, `src/runtime/domains/audio/speech_delay_cache.h`, `src/runtime/domains/audio/speech_depth_plan.h`, `src/runtime/domains/audio/speech_generation_policy.h`, `src/runtime/domains/audio/speech_mimi_decode_plan.h`, `src/runtime/domains/audio/speech_runtime_plan.h`, `src/runtime/domains/audio/speech_temporal_embed_plan.h`, `src/runtime/domains/audio/speech_waveform_postprocess.h` |
 | **Purpose** | PersonaPlex speech-to-speech backend. Delay cache manages temporal audio buffering, depth plan configures multi-depth codec decoding, MIMI decode plan handles neural audio codec, temporal embed plan manages time embeddings, and waveform postprocess produces final audio output. |
 
 ### UD-AUD-OMNI-01: Omni Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/audio/omni_backend.h`, `src/runtime/trt/audio/omni_backend.cpp`, `src/runtime/trt/audio/omni_audio_plan.h` |
+| **Files** | `src/runtime/domains/audio/omni_backend.h`, `src/runtime/domains/audio/omni_backend.cpp`, `src/runtime/domains/audio/omni_audio_plan.h` |
 | **Purpose** | Omni multimodal backend (legacy). Audio plan configures the thinker-talker-code2wav three-stage pipeline for multimodal audio generation. |
 
 ### UD-AUD-COMMON-01: Audio Common Utilities
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/audio/audio_bundle_validation.h`, `src/runtime/trt/audio/audio_bundle_validation.cpp`, `src/runtime/trt/audio/audio_configs.h`, `src/runtime/trt/audio/mel_spectrogram.h`, `src/runtime/trt/audio/mel_spectrogram.cpp` |
+| **Files** | `src/runtime/domains/audio/audio_bundle_validation.h`, `src/runtime/domains/audio/audio_bundle_validation.cpp`, `src/runtime/domains/audio/audio_configs.h`, `src/runtime/domains/audio/mel_spectrogram.h`, `src/runtime/domains/audio/mel_spectrogram.cpp` |
 | **Purpose** | Shared audio infrastructure. Bundle validation ensures required sections exist for each audio pipeline type. Audio configs define shared configuration types. Mel spectrogram computes filterbank features from raw audio for Whisper input. |
 
 ### UD-REC-MAMBA-01: Legacy Mamba Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/recurrent/mamba_backend.h`, `src/runtime/trt/recurrent/mamba_backend.cpp`, `src/runtime/trt/recurrent/mamba_decode_runtime.h`, `src/runtime/trt/recurrent/mamba_decode_runtime.cpp`, `src/runtime/trt/recurrent/mamba_step_state.h`, `src/runtime/trt/recurrent/mamba_step_state.cpp` |
+| **Files** | `src/runtime/domains/recurrent/mamba_backend.h`, `src/runtime/domains/recurrent/mamba_backend.cpp`, `src/runtime/domains/recurrent/mamba_decode_runtime.h`, `src/runtime/domains/recurrent/mamba_decode_runtime.cpp`, `src/runtime/domains/recurrent/mamba_step_state.h`, `src/runtime/domains/recurrent/mamba_step_state.cpp` |
 | **Purpose** | Legacy Mamba SSM backend. `MambaBackend` runs the autoregressive loop, `MambaStepEngine` manages per-step TRT execution, and `MambaStepState` tracks conv and SSM recurrent state across steps. Superseded by `RecurrentPipeline` + `RecurrentState` for new code. |
 
 ### UD-REC-RWKV-01: Legacy RWKV Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/recurrent/rwkv_backend.h`, `src/runtime/trt/recurrent/rwkv_backend.cpp`, `src/runtime/trt/recurrent/rwkv_decode_runtime.h`, `src/runtime/trt/recurrent/rwkv_decode_runtime.cpp`, `src/runtime/trt/recurrent/rwkv_step_state.h`, `src/runtime/trt/recurrent/rwkv_step_state.cpp` |
+| **Files** | `src/runtime/domains/recurrent/rwkv_backend.h`, `src/runtime/domains/recurrent/rwkv_backend.cpp`, `src/runtime/domains/recurrent/rwkv_decode_runtime.h`, `src/runtime/domains/recurrent/rwkv_decode_runtime.cpp`, `src/runtime/domains/recurrent/rwkv_step_state.h`, `src/runtime/domains/recurrent/rwkv_step_state.cpp` |
 | **Purpose** | Legacy RWKV backend. `RwkvBackend` runs the autoregressive loop, `RwkvStepEngine` manages per-step execution, and `RwkvStepState` tracks attention and FFN recurrent state. Superseded by `RecurrentPipeline` + `RecurrentState`. |
 
 ### UD-REC-HYBRID-01: Legacy Hybrid Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/recurrent/hybrid_backend.h`, `src/runtime/trt/recurrent/hybrid_backend.cpp` |
+| **Files** | `src/runtime/domains/recurrent/hybrid_backend.h`, `src/runtime/domains/recurrent/hybrid_backend.cpp` |
 | **Purpose** | Legacy Hybrid (Mamba + Attention) backend for Nemotron-H. Combines KV cache attention layers with SSM recurrent layers in a single autoregressive loop. Superseded by `RecurrentPipeline` + `HybridStateManager`. |
 
 ### UD-REC-COMMON-01: Recurrent Common Contracts
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/recurrent/recurrent_step_contracts.h`, `src/runtime/trt/recurrent/recurrent_tensor_bindings.h` |
+| **Files** | `src/runtime/domains/recurrent/recurrent_step_contracts.h`, `src/runtime/domains/recurrent/recurrent_tensor_bindings.h` |
 | **Purpose** | Shared contracts for recurrent backends. Step contracts define the interface for per-step execution. Tensor bindings provide helpers for binding recurrent state tensors to TRT modules. |
 
 ### UD-VL-VISION-01: Vision Engine
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/multimodal/vision_engine.h`, `src/runtime/trt/multimodal/vision_engine.cpp`, `src/runtime/trt/multimodal/vision_execution_plan.h` |
+| **Files** | `src/runtime/domains/multimodal/vision_engine.h`, `src/runtime/domains/multimodal/vision_engine.cpp`, `src/runtime/domains/multimodal/vision_execution_plan.h` |
 | **Purpose** | Vision encoder TRT engine lifecycle. Manages deserialization, execution, and output extraction for vision encoders in VL pipelines. Execution plan configures input/output tensor shapes and processing parameters. |
 
 ### UD-VL-DECODE-01: VL Decode Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/multimodal/vl_backend.h`, `src/runtime/trt/multimodal/vl_backend.cpp`, `src/runtime/trt/multimodal/vl_decode_policy.h` |
+| **Files** | `src/runtime/domains/multimodal/vl_backend.h`, `src/runtime/domains/multimodal/vl_backend.cpp`, `src/runtime/domains/multimodal/vl_decode_policy.h` |
 | **Purpose** | Legacy VL backend and decode policy. VL backend orchestrates vision-then-text inference. Decode policy governs vision feature injection into text decoder at image token positions and autoregressive generation stopping. |
 
 ### UD-SEG-01: Segmentation Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/perception/segmentation_backend.h`, `src/runtime/trt/perception/segmentation_backend.cpp`, `src/runtime/trt/perception/segmentation_postprocess_seam.h`, `src/runtime/trt/perception/segmentation_preprocess_seam.h` |
+| **Files** | `src/runtime/domains/perception/segmentation_backend.h`, `src/runtime/domains/perception/segmentation_backend.cpp`, `src/runtime/domains/perception/segmentation_postprocess_seam.h`, `src/runtime/domains/perception/segmentation_preprocess_seam.h` |
 | **Purpose** | SegFormer semantic segmentation backend. Preprocess seam handles image resize/normalize, postprocess seam handles argmax class selection and colorization. |
 
 ### UD-SAM-01: SAM Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/perception/sam_backend.h`, `src/runtime/trt/perception/sam_backend.cpp`, `src/runtime/trt/perception/sam_image_preprocess_seam.h`, `src/runtime/trt/perception/sam_output_selection.h`, `src/runtime/trt/perception/sam_postprocess_seam.h`, `src/runtime/trt/perception/sam_prompt_seam.h` |
+| **Files** | `src/runtime/domains/perception/sam_backend.h`, `src/runtime/domains/perception/sam_backend.cpp`, `src/runtime/domains/perception/sam_image_preprocess_seam.h`, `src/runtime/domains/perception/sam_output_selection.h`, `src/runtime/domains/perception/sam_postprocess_seam.h`, `src/runtime/domains/perception/sam_prompt_seam.h` |
 | **Purpose** | SAM (Segment Anything Model) two-stage backend. Image encoder produces embeddings, mask decoder takes point/box prompts to produce segmentation masks. Seams handle image preprocessing, prompt encoding, output mask selection, and postprocessing. |
 
 ### UD-DET-01: Detection Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/perception/detection_backend.h`, `src/runtime/trt/perception/detection_backend.cpp` |
+| **Files** | `src/runtime/domains/perception/detection_backend.h`, `src/runtime/domains/perception/detection_backend.cpp` |
 | **Purpose** | Object detection backend. Runs single-pass detection inference and applies NMS/postprocessing. |
 
 ### UD-NOP-01: Neural Operator Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/perception/neural_operator_backend.h`, `src/runtime/trt/perception/neural_operator_backend.cpp` |
+| **Files** | `src/runtime/domains/perception/neural_operator_backend.h`, `src/runtime/domains/perception/neural_operator_backend.cpp` |
 | **Purpose** | Neural operator (FNO) backend for scientific computing models. Single-pass inference for PDEs and other operator-based tasks. |
 
 ### UD-DIFF-HELPER-01: Diffusion Helpers
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/diffusion/diffusion_denoising_step_seam.h`, `src/runtime/trt/diffusion/diffusion_generation_plan.h`, `src/runtime/trt/diffusion/diffusion_math.h`, `src/runtime/trt/diffusion/diffusion_preprocessor_weights_helpers.h`, `src/runtime/trt/diffusion/diffusion_scheduler_helpers.h`, `src/runtime/trt/diffusion/diffusion_types.h`, `src/runtime/trt/diffusion/wan_generation_conditioning.h`, `src/runtime/trt/diffusion/diffusion_preprocessor.cpp` |
+| **Files** | `src/runtime/domains/diffusion/diffusion_denoising_step_seam.h`, `src/runtime/domains/diffusion/diffusion_generation_plan.h`, `src/runtime/domains/diffusion/diffusion_math.h`, `src/runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h`, `src/runtime/domains/diffusion/diffusion_scheduler_helpers.h`, `src/runtime/domains/diffusion/diffusion_types.h`, `src/runtime/domains/diffusion/wan_generation_conditioning.h`, `src/runtime/domains/diffusion/diffusion_preprocessor.cpp` |
 | **Purpose** | Shared diffusion infrastructure. Denoising step seam isolates per-step denoising logic. Generation plan configures the full denoising schedule. Math helpers provide numerical utilities. Preprocessor weights helpers manage VAE/text encoder weight extraction. Scheduler helpers bridge to `IScheduler`. Types define `DiffusionConfig`, `PreprocessorWeights`, `VideoResult`. Wan conditioning handles T2V-specific guidance. |
 
 ### UD-CORE-HELPER-01: Core Runtime Helpers
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/core/decoded_image.h`, `src/runtime/trt/core/device_kv_cache_update_plan.h`, `src/runtime/trt/core/device_tensor.cpp`, `src/runtime/trt/core/flow_match_euler_scheduler.cpp`, `src/runtime/trt/core/generation_backend.h`, `src/runtime/trt/core/step_state.h`, `src/runtime/trt/core/stb_impl.cpp`, `src/runtime/trt/core/trt_graph_builder.cpp` |
+| **Files** | `src/runtime/core/decoded_image.h`, `src/runtime/core/device_kv_cache_update_plan.h`, `src/runtime/core/device_tensor.cpp`, `src/runtime/core/flow_match_euler_scheduler.cpp`, `src/runtime/core/generation_backend.h`, `src/runtime/core/step_state.h`, `src/runtime/core/stb_impl.cpp`, `src/runtime/core/trt_graph_builder.cpp` |
 | **Purpose** | Core runtime helpers not covered by other UD entries. `decoded_image.h` holds decoded pixel data. `device_kv_cache_update_plan.h` describes cache update operations. `device_tensor.cpp` implements GPU tensor memory management. `flow_match_euler_scheduler.cpp` implements the `FlowMatchEulerScheduler` (see UD-SCHED-01). `generation_backend.h` defines the `IGenerationBackend` interface. `step_state.h` defines the `IStepState` interface. `stb_impl.cpp` provides STB image library implementation. `trt_graph_builder.cpp` provides TRT network construction utilities. |
 
 ### UD-ENC-EMBED-01: Embedding Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/encoder/embedding_backend.h`, `src/runtime/trt/encoder/embedding_backend.cpp` |
+| **Files** | `src/runtime/domains/encoder/embedding_backend.h`, `src/runtime/domains/encoder/embedding_backend.cpp` |
 | **Purpose** | Embedding extraction backend for encoder models (Eagle-embed). Produces dense vector embeddings from input text via single-pass encoder inference with mean pooling. |
 
 ### UD-ENC-RERANK-01: Reranking Backend
 
 | Field | Value |
 |---|---|
-| **Files** | `src/runtime/trt/encoder/reranking_backend.h`, `src/runtime/trt/encoder/reranking_backend.cpp` |
+| **Files** | `src/runtime/domains/encoder/reranking_backend.h`, `src/runtime/domains/encoder/reranking_backend.cpp` |
 | **Purpose** | Reranking backend for cross-encoder models (Eagle-rerank). Scores query-document pairs via single-pass encoder inference and returns relevance scores. |
 
 ### UD-UTIL-MEDIA-01: Media I/O Utilities
@@ -575,7 +575,7 @@ classDiagram
 
 ## 4. C++ Runtime Supporting Subsystems
 
-### Audio Backends (`src/runtime/trt/audio/`)
+### Audio Backends (`src/runtime/domains/audio/`)
 
 | UD ID | File | Backend | Used by |
 |---|---|---|---|
@@ -586,7 +586,7 @@ classDiagram
 | `UD-AUD-OMNI-01` | `omni_backend.h/cpp`, `omni_audio_plan.h` | `OmniBackend` (legacy) | -- |
 | `UD-AUD-COMMON-01` | `mel_spectrogram.h/cpp`, `audio_bundle_validation.h/cpp`, `audio_configs.h` | Shared audio utilities | All audio pipelines |
 
-### Recurrent Backends (`src/runtime/trt/recurrent/`)
+### Recurrent Backends (`src/runtime/domains/recurrent/`)
 
 | UD ID | File | Purpose |
 |---|---|---|
@@ -595,7 +595,7 @@ classDiagram
 | `UD-REC-HYBRID-01` | `hybrid_backend.h/cpp` | Legacy Hybrid (Mamba + Attention) |
 | `UD-REC-COMMON-01` | `recurrent_step_contracts.h`, `recurrent_tensor_bindings.h` | Shared contracts and tensor binding helpers |
 
-### Multimodal (`src/runtime/trt/multimodal/`)
+### Multimodal (`src/runtime/domains/multimodal/`)
 
 | UD ID | File | Purpose |
 |---|---|---|
@@ -603,7 +603,7 @@ classDiagram
 | `UD-VL-DECODE-01` | `vl_backend.h/cpp`, `vl_decode_policy.h` | Legacy VL backend and decode step policy |
 | `UD-IMG-01` | `image_preprocessor.h/cpp` | Image preprocessing (4 strategies) |
 
-### Perception (`src/runtime/trt/perception/`)
+### Perception (`src/runtime/domains/perception/`)
 
 | UD ID | File | Purpose |
 |---|---|---|
@@ -612,7 +612,7 @@ classDiagram
 | `UD-DET-01` | `detection_backend.h/cpp` | Object detection backend |
 | `UD-NOP-01` | `neural_operator_backend.h/cpp` | Neural operator (FNO) backend |
 
-### Encoder (`src/runtime/trt/encoder/`)
+### Encoder (`src/runtime/domains/encoder/`)
 
 | UD ID | File | Purpose |
 |---|---|---|

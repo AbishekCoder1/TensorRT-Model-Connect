@@ -1,0 +1,88 @@
+#pragma once
+
+// BarkPipeline: text-to-audio pipeline with semantic, coarse, fine, and codec stages.
+// Uses TrtModule(semantic) + TrtModule(coarse) + TrtModule(codec) + TrtModule(fine) +
+// KvCaches + embeddings.
+
+#include "trtf/pipeline.h"
+#include "trtf/tokenizer.h"
+#include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/kv_cache.h"
+#include "runtime/domains/audio/bark_config.h"
+
+#include <cstdint>
+#include <memory>
+#include <random>
+#include <string>
+#include <vector>
+
+#if TRTF_HAS_TRT
+
+#include <cuda_runtime_api.h>
+
+namespace trtf {
+
+class BarkPipeline final : public IPipeline {
+public:
+    BarkPipeline(
+        std::unique_ptr<TrtModule> semantic,
+        std::unique_ptr<TrtModule> coarse,
+        std::unique_ptr<KvCache> semantic_cache,
+        std::unique_ptr<KvCache> coarse_cache,
+        std::vector<float> semantic_embed,
+        std::vector<float> coarse_embed,
+        BarkConfig config,
+        cudaStream_t stream,
+        std::shared_ptr<ITokenizer> tokenizer = nullptr,
+        std::string model_id_str = "");
+
+    ~BarkPipeline() override;
+
+    AudioResult generate_audio(const std::string& prompt, const GenerateConfig& cfg = {}) override;
+
+    const char* model_id() const override { return model_id_.c_str(); }
+    const char* pipeline_type() const override { return "BarkPipeline"; }
+
+    void set_codec_module(std::unique_ptr<TrtModule> codec);
+    void set_fine_module(std::unique_ptr<TrtModule> fine);
+    void set_fine_embeddings(std::vector<float> embed,
+                             std::vector<float> pos_embed);
+
+private:
+    std::vector<int32_t> run_semantic(const std::vector<int32_t>& text_ids,
+                                       int32_t max_tokens);
+    std::vector<int32_t> run_coarse(const std::vector<int32_t>& semantic_tokens);
+    std::vector<int32_t> run_fine(const std::vector<int32_t>& coarse_tokens);
+    std::vector<float> run_codec(const std::vector<int32_t>& coarse_tokens);
+    std::vector<float> run_codec(const std::vector<int32_t>& codes_flat,
+                                  int32_t n_frames);
+
+    void run_step_with_embed(TrtModule& module, KvCache& cache,
+                              const float* embed, int32_t embed_dim,
+                              std::vector<float>& logits);
+    void run_step_with_token(TrtModule& module, KvCache& cache,
+                              int32_t token_id,
+                              std::vector<float>& logits);
+    int32_t sample_top_k(const float* logits, int32_t vocab_size,
+                          float temperature, int32_t top_k);
+
+    std::unique_ptr<TrtModule> semantic_;
+    std::unique_ptr<TrtModule> coarse_;
+    std::unique_ptr<TrtModule> codec_;
+    std::unique_ptr<TrtModule> fine_;
+    std::unique_ptr<KvCache> semantic_cache_;
+    std::unique_ptr<KvCache> coarse_cache_;
+    std::vector<float> semantic_embed_;
+    std::vector<float> coarse_embed_;
+    std::vector<float> fine_embed_;
+    std::vector<float> fine_position_embed_;
+    BarkConfig config_;
+    cudaStream_t stream_;
+    std::shared_ptr<ITokenizer> tokenizer_;
+    std::string model_id_;
+    std::mt19937 rng_{std::random_device{}()};
+};
+
+} // namespace trtf
+
+#endif // TRTF_HAS_TRT

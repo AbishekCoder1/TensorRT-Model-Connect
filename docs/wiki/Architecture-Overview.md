@@ -361,21 +361,21 @@ All 14 pipeline classes implement `IPipeline` and reside in `src/runtime/pipelin
 
 | Class | Header | Composition |
 |-------|--------|-------------|
-| `WanPipeline` | `diffusion_pipeline.h` | `TrtModule` (T5 encoder) + `TrtModule` (denoiser) + `TrtModule` (VAE) |
-| `FluxPipeline` | `diffusion_pipeline.h` | `TrtModule`(s) (T5 + CLIP) + `TrtModule` (denoiser) + `TrtModule` (VAE) |
-| `ZImagePipeline` | `diffusion_pipeline.h` | `TrtModule` (text encoder) + `TrtModule` (denoiser) + `TrtModule` (VAE) |
+| `WanPipeline` | `flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` | `TrtModule` (T5 encoder) + `TrtModule` (denoiser) + `TrtModule` (VAE) |
+| `FluxPipeline` | `flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` | `TrtModule`(s) (T5 + CLIP) + `TrtModule` (denoiser) + `TrtModule` (VAE) |
+| `ZImagePipeline` | `flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` | `TrtModule` (text encoder) + `TrtModule` (denoiser) + `TrtModule` (VAE) |
 
 ### 7.5 Audio
 
 | Class | Header | Composition |
 |-------|--------|-------------|
-| `WhisperPipeline` | `audio_pipeline.h` | Legacy `WhisperBackend` + mel filterbank + `ITokenizer` |
-| `BarkPipeline` | `audio_pipeline.h` | Legacy `BarkBackend` + `ITokenizer` |
-| `MagpiePipeline` | `audio_pipeline.h` | Legacy `MagpieTTSBackend` + `ITokenizer` |
-| `SpeechPipeline` | `audio_pipeline.h` | Legacy `SpeechToSpeechBackend` |
-| `OmniPipeline` | `audio_pipeline.h` | `TrtModule` (thinker) + `KvCache` + `TrtModule` (talker) + `KvCache` + `TrtModule` (code2wav) + `ITokenizer` |
+| `WhisperPipeline` | `whisper_pipeline.h`, `bark_pipeline.h`, etc. | Legacy `WhisperBackend` + mel filterbank + `ITokenizer` |
+| `BarkPipeline` | `whisper_pipeline.h`, `bark_pipeline.h`, etc. | Legacy `BarkBackend` + `ITokenizer` |
+| `MagpiePipeline` | `whisper_pipeline.h`, `bark_pipeline.h`, etc. | Legacy `MagpieTTSBackend` + `ITokenizer` |
+| `SpeechPipeline` | `whisper_pipeline.h`, `bark_pipeline.h`, etc. | Legacy `SpeechToSpeechBackend` |
+| `OmniPipeline` | `whisper_pipeline.h`, `bark_pipeline.h`, etc. | `TrtModule` (thinker) + `KvCache` + `TrtModule` (talker) + `KvCache` + `TrtModule` (code2wav) + `ITokenizer` |
 
-Note: Whisper, Bark, Magpie, and Speech pipelines delegate to legacy backend classes in `src/runtime/trt/audio/`. `OmniPipeline` is fully migrated to the `TrtModule` + `KvCache` composition pattern.
+Note: Whisper, Bark, Magpie, and Speech pipelines delegate to legacy backend classes in `src/runtime/domains/audio/`. `OmniPipeline` is fully migrated to the `TrtModule` + `KvCache` composition pattern.
 
 ---
 
@@ -384,7 +384,7 @@ Note: Whisper, Bark, Magpie, and Speech pipelines delegate to legacy backend cla
 ### 8.1 TrtModule
 
 - **Header**: `include/trtf/runtime/trt_module.h`
-- **Implementation**: `src/runtime/trt/core/trt_module.cpp`
+- **Implementation**: `src/runtime/core/trt_module.cpp`
 
 The `model.forward()` abstraction for TensorRT engines. Wraps an engine + execution context. Provides:
 
@@ -398,7 +398,7 @@ The `model.forward()` abstraction for TensorRT engines. Wraps an engine + execut
 ### 8.2 KvCache
 
 - **Header**: `include/trtf/runtime/kv_cache.h`
-- **Implementation**: `src/runtime/trt/core/kv_cache.cpp`
+- **Implementation**: `src/runtime/core/kv_cache.cpp`
 
 Autoregressive KV cache state manager. HF equivalent: `DynamicCache` / `past_key_values`. Manages:
 
@@ -411,7 +411,7 @@ Autoregressive KV cache state manager. HF equivalent: `DynamicCache` / `past_key
 ### 8.3 RecurrentState
 
 - **Header**: `include/trtf/runtime/recurrent_state.h`
-- **Implementation**: `src/runtime/trt/core/recurrent_state.cpp`
+- **Implementation**: `src/runtime/core/recurrent_state.cpp`
 
 Generic config-driven SSM/RWKV state manager. Replaces the original separate `MambaStepState` and `RwkvStepState` with a single class parameterized by `TensorSpec` vectors:
 
@@ -421,7 +421,7 @@ Generic config-driven SSM/RWKV state manager. Replaces the original separate `Ma
 ### 8.4 IScheduler
 
 - **Header**: `include/trtf/runtime/scheduler.h`
-- **Implementation**: `src/runtime/trt/core/flow_match_euler_scheduler.cpp`
+- **Implementation**: `src/runtime/core/flow_match_euler_scheduler.cpp`
 
 Diffusion noise scheduler interface. HF equivalent: `SchedulerMixin` / `FlowMatchEulerDiscreteScheduler`. Provides:
 
@@ -450,17 +450,17 @@ Users should include `trtf/tokenizer.h` (the public API). `trtf/runtime/tokenize
 
 ## 9. Backend Executor Organization
 
-Backend executor code lives in `src/runtime/trt/` organized by modality:
+Backend executor code lives in `src/runtime/core/` and `src/runtime/domains/` organized by modality:
 
 | Directory | Contents |
 |-----------|----------|
-| `src/runtime/trt/core/` | Shared infrastructure: `TrtModule`, `KvCache`, `RecurrentState`, `DeviceTensor`, TRT common utilities, decode runtime (argmax, mask building), engine lifecycle |
-| `src/runtime/trt/audio/` | Whisper, Bark, MagpieTTS, Speech-to-Speech, Omni backends and supporting types |
-| `src/runtime/trt/diffusion/` | Diffusion denoising step seam, generation plan, scheduler helpers, preprocessor weights, math utilities |
-| `src/runtime/trt/encoder/` | Encoder, embedding, and reranking backends |
-| `src/runtime/trt/multimodal/` | VL backend, vision engine, image preprocessor (4 strategies: `qwen_merge_group`, `simple_chw`, `center_crop_chw`, `aspect_preserve_chw`) |
-| `src/runtime/trt/perception/` | Segmentation, SAM, detection, neural operator backends |
-| `src/runtime/trt/recurrent/` | Mamba, RWKV, hybrid backends and their decode runtimes and step states |
+| `src/runtime/core/` | Shared infrastructure: `TrtModule`, `KvCache`, `RecurrentState`, `DeviceTensor`, TRT common utilities, decode runtime (argmax, mask building), engine lifecycle |
+| `src/runtime/domains/audio/` | Whisper, Bark, MagpieTTS, Speech-to-Speech, Omni backends and supporting types |
+| `src/runtime/domains/diffusion/` | Diffusion denoising step seam, generation plan, scheduler helpers, preprocessor weights, math utilities |
+| `src/runtime/domains/encoder/` | Encoder, embedding, and reranking backends |
+| `src/runtime/domains/multimodal/` | VL backend, vision engine, image preprocessor (4 strategies: `qwen_merge_group`, `simple_chw`, `center_crop_chw`, `aspect_preserve_chw`) |
+| `src/runtime/domains/perception/` | Segmentation, SAM, detection, neural operator backends |
+| `src/runtime/domains/recurrent/` | Mamba, RWKV, hybrid backends and their decode runtimes and step states |
 
 ---
 
@@ -480,13 +480,13 @@ Backend executor code lives in `src/runtime/trt/` organized by modality:
 
 ### 10.3 Legacy Audio Backends
 
-Whisper, Bark, Magpie, and Speech pipelines delegate to legacy backend classes (`WhisperBackend`, `BarkBackend`, `MagpieTTSBackend`, `SpeechToSpeechBackend` in `src/runtime/trt/audio/`) that predate the `TrtModule` + `KvCache` composition pattern. `OmniPipeline` is the only audio pipeline that has been migrated to the new pattern.
+Whisper, Bark, Magpie, and Speech pipelines delegate to legacy backend classes (`WhisperBackend`, `BarkBackend`, `MagpieTTSBackend`, `SpeechToSpeechBackend` in `src/runtime/domains/audio/`) that predate the `TrtModule` + `KvCache` composition pattern. `OmniPipeline` is the only audio pipeline that has been migrated to the new pattern.
 
 **Impact**: The legacy backends duplicate patterns (engine loading, cache management, decode loops) that are now handled generically by `TrtModule` and `KvCache`.
 
 ### 10.4 Perception Backends vs Pipeline Classes
 
-The perception backends (`DetectionBackend`, `NeuralOperatorBackend`, `SegmentationBackend`, `SamBackend` in `src/runtime/trt/perception/`) coexist with the pipeline-level classes (`SegmentPipeline`, `SamPipeline` in `src/runtime/pipelines/encoder_pipeline.h`). The relationship between backend and pipeline is not always clear. `EncoderPipeline` handles `object_detection` and `neural_operator` strategies but the corresponding dedicated pipeline classes do not exist at the `IPipeline` level.
+The perception backends (`DetectionBackend`, `NeuralOperatorBackend`, `SegmentationBackend`, `SamBackend` in `src/runtime/domains/perception/`) coexist with the pipeline-level classes (`SegmentPipeline`, `SamPipeline` in `src/runtime/pipelines/encoder_pipeline.h`). The relationship between backend and pipeline is not always clear. `EncoderPipeline` handles `object_detection` and `neural_operator` strategies but the corresponding dedicated pipeline classes do not exist at the `IPipeline` level.
 
 ---
 
@@ -550,9 +550,9 @@ All paths below are relative to the repository root and have been verified to ex
 | `include/trtf/runtime/device_tensor.h` | DeviceTensor, DeviceTensorMap types |
 | `include/trtf/runtime/pipeline_factory.h` | PipelineFactory |
 | `include/trtf/runtime/tokenizer_interface.h` | ITokenizer abstract interface (re-exported by `tokenizer.h`) |
-| `include/trtf/runtime/trt/audio/speech_decode_stop_policy.h` | Speech decode stop policy for audio pipelines |
-| `include/trtf/runtime/trt/audio/subprocess_runner.h` | Subprocess runner utility for tokenizer bridge |
-| `include/trtf/runtime/trt/multimodal/image_transform_helper.h` | Image transformation utilities for VL preprocessing |
+| `include/trtf/runtime/domains/audio/speech_decode_stop_policy.h` | Speech decode stop policy for audio pipelines |
+| `include/trtf/runtime/domains/audio/subprocess_runner.h` | Subprocess runner utility for tokenizer bridge |
+| `include/trtf/runtime/domains/multimodal/image_transform_helper.h` | Image transformation utilities for VL preprocessing |
 
 ### C++ Runtime -- Implementation
 | Path | Purpose |
@@ -565,16 +565,16 @@ All paths below are relative to the repository root and have been verified to ex
 | `src/bundle/bundle_format.h` | Bundle magic, section types |
 | `src/bundle/bundle_format.cpp` | Bundle reader |
 | `src/runtime/pipeline_factory.cpp` | Centralized factory dispatch |
-| `src/runtime/trt/core/trt_module.cpp` | TrtModule implementation |
-| `src/runtime/trt/core/kv_cache.cpp` | KvCache implementation |
-| `src/runtime/trt/core/recurrent_state.cpp` | RecurrentState implementation |
-| `src/runtime/trt/core/flow_match_euler_scheduler.cpp` | FlowMatchEulerScheduler implementation |
+| `src/runtime/core/trt_module.cpp` | TrtModule implementation |
+| `src/runtime/core/kv_cache.cpp` | KvCache implementation |
+| `src/runtime/core/recurrent_state.cpp` | RecurrentState implementation |
+| `src/runtime/core/flow_match_euler_scheduler.cpp` | FlowMatchEulerScheduler implementation |
 | `src/runtime/pipelines/text_generation_pipeline.h` | TextGenerationPipeline |
 | `src/runtime/pipelines/recurrent_pipeline.h` | RecurrentPipeline, IStateManager |
 | `src/runtime/pipelines/vl_pipeline.h` | VLPipeline |
 | `src/runtime/pipelines/encoder_pipeline.h` | EncoderPipeline, SegmentPipeline, SamPipeline |
-| `src/runtime/pipelines/diffusion_pipeline.h` | FluxPipeline, WanPipeline, ZImagePipeline |
-| `src/runtime/pipelines/audio_pipeline.h` | WhisperPipeline, BarkPipeline, MagpiePipeline, SpeechPipeline, OmniPipeline |
+| `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` | FluxPipeline, WanPipeline, ZImagePipeline |
+| `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, etc. | WhisperPipeline, BarkPipeline, MagpiePipeline, SpeechPipeline, OmniPipeline |
 | `src/tokenizer/vocab_tokenizer.cpp` | VocabTokenizer |
 | `src/tokenizer/hf_python_tokenizer.cpp` | HfPythonTokenizer |
 | `src/tokenizer/ipa_tokenizer.cpp` | IpaTokenizer |

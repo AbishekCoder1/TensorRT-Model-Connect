@@ -9,7 +9,7 @@
 // Postconditions: Latents updated after each step, failures propagated, zero steps handled
 // =============================================================================
 
-#include "runtime/trt/diffusion/diffusion_denoising_step_seam.h"
+#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"
 
 #include <cstdint>
 #include <iostream>

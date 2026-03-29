@@ -9,7 +9,7 @@
 // Postconditions: has_io_tensor returns correct bool, has_all_required_tensors validates base+layer tensors
 // =============================================================================
 
-#include "runtime/trt/core/trt_engine_lifecycle.h"
+#include "runtime/core/trt_engine_lifecycle.h"
 
 #include <algorithm>
 #include <cstdint>

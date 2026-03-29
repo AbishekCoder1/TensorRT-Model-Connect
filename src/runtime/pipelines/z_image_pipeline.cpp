@@ -1,6 +1,6 @@
-#include "runtime/pipelines/diffusion_pipeline.h"
-#include "runtime/trt/diffusion/diffusion_math.h"
-#include "runtime/trt/diffusion/diffusion_scheduler_helpers.h"
+#include "runtime/pipelines/z_image_pipeline.h"
+#include "runtime/domains/diffusion/diffusion_math.h"
+#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
 
 #if TRTF_HAS_TRT
 

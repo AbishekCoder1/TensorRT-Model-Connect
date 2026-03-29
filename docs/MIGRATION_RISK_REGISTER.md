@@ -88,9 +88,9 @@ Validation has been run for the current implementation wave (see status below), 
 
 2. Advertised strategies with stub backends.
    - Detection backend is explicitly stubbed and factory returns `nullptr`:
-     - `src/runtime/trt/detection_backend.h:2`, `35-39`.
+     - `src/runtime/domains/detection_backend.h:2`, `35-39`.
    - Neural operator backend is explicitly stubbed and factory returns `nullptr`:
-     - `src/runtime/trt/neural_operator_backend.h:2`, `36-40`.
+     - `src/runtime/domains/neural_operator_backend.h:2`, `36-40`.
    - Dispatcher still routes to these factories:
      - `object_detection`: `src/cabi/api/trtf_c.cpp:2741-2745`
      - `neural_operator`: `src/cabi/api/trtf_c.cpp:2755-2759`
@@ -106,11 +106,11 @@ Validation has been run for the current implementation wave (see status below), 
 
 2. Layering inversion (`runtime` depends on `cabi` config header).
    - Runtime headers include `cabi/config/fast_path_config.h`, for example:
-     - `src/runtime/trt/whisper_backend.h:7`
-     - `src/runtime/trt/embedding_backend.h:6`
-     - `src/runtime/trt/diffusion_backend.h:5`
-     - `src/runtime/trt/vl_backend.h:8`
-     - `src/runtime/trt/speech_backend.h:8`
+     - `src/runtime/domains/whisper_backend.h:7`
+     - `src/runtime/domains/embedding_backend.h:6`
+     - `src/runtime/domains/diffusion_backend.h:5`
+     - `src/runtime/domains/vl_backend.h:8`
+     - `src/runtime/domains/speech_backend.h:8`
    - This inverts intended layering and makes runtime plugins less isolated.
 
 3. Config parsing is text-search based and order-sensitive.
@@ -167,7 +167,7 @@ Validation has been run for the current implementation wave (see status below), 
      - but later notes SSM needs C++ state management: `docs/wiki/Adding-a-Model-Family.md:23`.
    - `Architecture-Extensibility-Assessment` still marks MLA/hybrid as "Not yet implemented":
      - `docs/wiki/Architecture-Extensibility-Assessment.md:19-20`,
-     - while runtime has hybrid dispatch/backend paths: `src/cabi/api/trtf_c.cpp:2817-2821`, `src/runtime/trt/hybrid_backend.cpp`.
+     - while runtime has hybrid dispatch/backend paths: `src/cabi/api/trtf_c.cpp:2817-2821`, `src/runtime/domains/hybrid_backend.cpp`.
    - README family list is stale relative to actual plugin files:
      - README snapshot list at `README.md:157-159`,
      - current family directory has 46 plugins (`trtf_build/trtf_build/families/`).

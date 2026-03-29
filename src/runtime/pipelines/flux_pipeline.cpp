@@ -6,10 +6,10 @@
 // internally. CPU math (timestep embedding, RoPE, packing/unpacking,
 // sinusoidal embedding, matmul, BN denorm) is preserved identically.
 
-#include "runtime/pipelines/diffusion_pipeline.h"
-#include "runtime/trt/diffusion/diffusion_denoising_step_seam.h"
-#include "runtime/trt/diffusion/diffusion_generation_plan.h"
-#include "runtime/trt/diffusion/diffusion_scheduler_helpers.h"
+#include "runtime/pipelines/flux_pipeline.h"
+#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"
+#include "runtime/domains/diffusion/diffusion_generation_plan.h"
+#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
 
 #if TRTF_HAS_TRT
 

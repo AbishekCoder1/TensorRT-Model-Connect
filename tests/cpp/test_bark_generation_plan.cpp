@@ -9,7 +9,7 @@
 // Postconditions: Step counts, window plans, and codec transposition are correct
 // =============================================================================
 
-#include "runtime/trt/audio/bark_generation_plan.h"
+#include "runtime/domains/audio/bark_generation_plan.h"
 
 #include <cstdint>
 #include <iostream>

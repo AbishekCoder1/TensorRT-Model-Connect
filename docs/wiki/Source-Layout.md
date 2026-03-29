@@ -41,14 +41,14 @@ path listed here exists in the source tree.
 | `device_tensor.h` | `DeviceTensor` -- GPU-resident tensor with RAII |
 | `tokenizer_interface.h` | Minimal `ITokenizer` (encode/decode only) |
 
-### `include/trtf/runtime/trt/audio/`
+### `include/trtf/runtime/domains/audio/`
 
 | File | Purpose |
 |------|---------|
 | `speech_decode_stop_policy.h` | Speech decode stopping criterion |
 | `subprocess_runner.h` | Subprocess execution helper |
 
-### `include/trtf/runtime/trt/multimodal/`
+### `include/trtf/runtime/domains/multimodal/`
 
 | File | Purpose |
 |------|---------|
@@ -85,31 +85,64 @@ path listed here exists in the source tree.
 | `bundle_helpers.h` | `BundleSections` struct, tokenizer/engine extraction |
 | `bundle_helpers.cpp` | Bundle section extraction implementation |
 
-### `src/runtime/pipeline_factory.cpp`
+### `src/runtime/registry/`
 
-Central factory. Reads `.trtfb`, parses config via `FastPathModelConfig`,
-dispatches on `runtime_strategy` via `resolve_family()` -> `StrategyFamily`
-enum (`kText`, `kEncoder`, `kVision`, `kAudio`, `kDiffusion`). Creates the
-appropriate pipeline with all required components.
+Factory, registry, and base config parsing for plugin dispatch.
+
+| File | Purpose |
+|------|---------|
+| `pipeline_factory.cpp` | Central factory. Reads `.trtfb`, extracts strategy, normalizes legacy strings, looks up plugin, calls `plugin->create(ctx)` (~124 LOC, no switch/case) |
+| `pipeline_registry.cpp` | Singleton registry mapping strategy strings to `IPipelinePlugin` instances |
+| `pipeline_plugin.cpp` | `parse_base_config()` — universal base config from bundle JSON |
+
+### `src/runtime/plugins/`
+
+Self-registering pipeline plugins. Each plugin handles one or more `runtime_strategy` values, parses strategy-specific config, loads TRT engines and tokenizers, and returns a fully constructed pipeline.
+
+| File | Strategies |
+|------|-----------|
+| `decoder_plugin.cpp` | `decoder_kv_cache`, `decoder_moe` |
+| `ssm_plugin.cpp` | `ssm_recurrent` |
+| `rwkv_plugin.cpp` | `rwkv_recurrent` |
+| `hybrid_plugin.cpp` | `hybrid_mamba_attention` |
+| `encoder_plugin.cpp` | `encoder_only`, `embedding`, `reranking`, `neural_operator` |
+| `segmentation_plugin.cpp` | `segmentation`, `prompted_segmentation` |
+| `object_detection_plugin.cpp` | `object_detection` |
+| `vl_plugin.cpp` | `vision_language` |
+| `whisper_plugin.cpp` | `speech_to_text` |
+| `bark_plugin.cpp` | `text_to_audio_bark` |
+| `magpie_plugin.cpp` | `text_to_audio_magpie` |
+| `speech_plugin.cpp` | `speech_to_speech` |
+| `omni_plugin.cpp` | `omni_multimodal` |
+| `flux_plugin.cpp` | `diffusion_flux` |
+| `wan_plugin.cpp` | `diffusion_wan`, `diffusion_pixart` |
+| `zimage_plugin.cpp` | `diffusion_zimage` |
+| `force_link_plugins.cpp` | Linker anchors for static lib |
+
+Shared helpers in `plugins/shared/`: `plugin_helpers.h/cpp` (TrtModule loading, tokenizer creation, KV-dim), `diffusion_helpers.h/cpp`, `audio_helpers.h/cpp`.
 
 ### `src/runtime/pipelines/`
 
-Concrete pipeline implementations. Each is a final class implementing `IPipeline`.
+Concrete pipeline implementations. One class per file, fully isolated — modifying one pipeline never affects another.
 
-| File | Pipeline class(es) | Modality |
-|------|-------------------|----------|
+| File | Pipeline class | Modality |
+|------|---------------|----------|
 | `text_generation_pipeline.h/cpp` | `TextGenerationPipeline` | Decoder-only LLMs, MoE |
-| `recurrent_pipeline.h/cpp` | `RecurrentPipeline`, `IStateManager`, `RecurrentStateManager`, `HybridStateManager` | Mamba, RWKV, Hybrid |
+| `recurrent_pipeline.h/cpp` | `RecurrentPipeline` (+ `IStateManager`, `RecurrentStateManager`, `HybridStateManager`) | Mamba, RWKV, Hybrid |
 | `vl_pipeline.h/cpp` | `VLPipeline` | Vision-language (Qwen VL, InternVL, Phi4) |
-| `encoder_pipeline.h/cpp` | `EncoderPipeline`, `SegmentPipeline`, `SamPipeline` | BERT, embedding, reranking, segmentation |
-| `audio_pipeline.h/cpp` | `WhisperPipeline`, `BarkPipeline`, `MagpiePipeline`, `SpeechPipeline`, `OmniPipeline` | Speech-to-text, TTS, speech-to-speech |
-| `audio_backend_factory.h/cpp` | Factory functions for audio backends | Audio backend creation |
-| `diffusion_pipeline.h` | `FluxPipeline`, `WanPipeline`, `ZImagePipeline` | Text-to-image, text-to-video |
-| `flux_pipeline.cpp` | `FluxPipeline` implementation | FLUX text-to-image |
-| `wan_pipeline.cpp` | `WanPipeline` implementation | Wan text-to-video |
-| `z_image_pipeline.cpp` | `ZImagePipeline` implementation | Z-Image text-to-image |
+| `encoder_pipeline.h/cpp` | `EncoderPipeline` | BERT, embedding, reranking |
+| `segment_pipeline.h/cpp` | `SegmentPipeline` | SegFormer segmentation |
+| `sam_pipeline.h/cpp` | `SamPipeline` | SAM prompted segmentation |
+| `whisper_pipeline.h/cpp` | `WhisperPipeline` | Speech-to-text |
+| `bark_pipeline.h/cpp` | `BarkPipeline` | Text-to-audio (Bark) |
+| `magpie_pipeline.h/cpp` | `MagpiePipeline` | Text-to-audio (Magpie TTS) |
+| `speech_pipeline.h/cpp` | `SpeechPipeline` | Speech-to-speech (PersonaPlex) |
+| `omni_pipeline.h/cpp` | `OmniPipeline` | Omni multimodal |
+| `flux_pipeline.h/cpp` | `FluxPipeline` | FLUX text-to-image |
+| `wan_pipeline.h/cpp` | `WanPipeline` | Wan/PixArt text-to-video |
+| `z_image_pipeline.h/cpp` | `ZImagePipeline` | Z-Image text-to-image |
 
-### `src/runtime/trt/core/`
+### `src/runtime/core/`
 
 Common TRT runtime infrastructure.
 
@@ -131,7 +164,7 @@ Common TRT runtime infrastructure.
 | `decoded_image.h` | Decoded image data struct |
 | `stb_impl.cpp` | stb_image implementation |
 
-### `src/runtime/trt/audio/`
+### `src/runtime/domains/audio/`
 
 Audio-family backends and helpers.
 
@@ -164,7 +197,7 @@ Audio-family backends and helpers.
 | `speech_waveform_postprocess.h` | Speech waveform postprocessing |
 | `omni_audio_plan.h` | Omni audio plan |
 
-### `src/runtime/trt/diffusion/`
+### `src/runtime/domains/diffusion/`
 
 Diffusion-family helpers and types.
 
@@ -179,7 +212,7 @@ Diffusion-family helpers and types.
 | `diffusion_generation_plan.h` | Generation plan for diffusion |
 | `wan_generation_conditioning.h` | Wan-specific conditioning |
 
-### `src/runtime/trt/encoder/`
+### `src/runtime/domains/encoder/`
 
 Encoder-family backends.
 
@@ -189,7 +222,7 @@ Encoder-family backends.
 | `embedding_backend.h/cpp` | Embedding model backend |
 | `reranking_backend.h/cpp` | Reranking model backend |
 
-### `src/runtime/trt/multimodal/`
+### `src/runtime/domains/multimodal/`
 
 Vision-language and multimodal support.
 
@@ -201,7 +234,7 @@ Vision-language and multimodal support.
 | `vision_execution_plan.h` | Vision execution plan config |
 | `vl_decode_policy.h` | VL decode step policy |
 
-### `src/runtime/trt/perception/`
+### `src/runtime/domains/perception/`
 
 Segmentation and detection backends.
 
@@ -218,7 +251,7 @@ Segmentation and detection backends.
 | `detection_backend.h/cpp` | Object detection backend |
 | `neural_operator_backend.h/cpp` | Neural operator (FNO) backend |
 
-### `src/runtime/trt/recurrent/`
+### `src/runtime/domains/recurrent/`
 
 Recurrent model backends (Mamba, RWKV, Hybrid).
 

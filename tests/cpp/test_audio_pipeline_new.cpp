@@ -61,7 +61,11 @@
 // For full E2E validation with real models, see tests/test_e2e.py.
 // =============================================================================
 
-#include "runtime/pipelines/audio_pipeline.h"
+#include "runtime/pipelines/whisper_pipeline.h"
+#include "runtime/pipelines/bark_pipeline.h"
+#include "runtime/pipelines/magpie_pipeline.h"
+#include "runtime/pipelines/speech_pipeline.h"
+#include "runtime/pipelines/omni_pipeline.h"
 
 #include <cstdint>
 #include <iostream>
@@ -74,12 +78,12 @@
 #include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/kv_cache.h"
 #include "trtf/tokenizer.h"
-#include "runtime/trt/audio/whisper_config.h"
-#include "runtime/trt/audio/bark_config.h"
-#include "runtime/trt/audio/audio_configs.h"
-#include "runtime/trt/audio/whisper_cross_kv_apply.h"
-#include "runtime/trt/audio/whisper_cross_kv_plan.h"
-#include "runtime/trt/core/trt_common.h"
+#include "runtime/domains/audio/whisper_config.h"
+#include "runtime/domains/audio/bark_config.h"
+#include "runtime/domains/audio/audio_configs.h"
+#include "runtime/domains/audio/whisper_cross_kv_apply.h"
+#include "runtime/domains/audio/whisper_cross_kv_plan.h"
+#include "runtime/core/trt_common.h"
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>

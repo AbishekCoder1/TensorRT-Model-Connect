@@ -9,7 +9,7 @@
 // Postconditions: Layout dimensions and scheduler parameters match expected values
 // =============================================================================
 
-#include "runtime/trt/diffusion/diffusion_generation_plan.h"
+#include "runtime/domains/diffusion/diffusion_generation_plan.h"
 
 #include <cmath>
 #include <cstddef>

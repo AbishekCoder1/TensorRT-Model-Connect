@@ -9,7 +9,7 @@
 // Postconditions: Current token and embedding selected correctly, loop stops on EOS, failures reported
 // =============================================================================
 
-#include "runtime/trt/multimodal/vl_decode_policy.h"
+#include "runtime/domains/multimodal/vl_decode_policy.h"
 
 #include <cstdint>
 #include <iostream>

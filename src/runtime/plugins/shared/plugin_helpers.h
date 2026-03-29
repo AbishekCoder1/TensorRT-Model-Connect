@@ -11,7 +11,7 @@
 #include "trtf/runtime/pipeline_plugin.h"
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
-#include "runtime/trt/core/trt_common.h"
+#include "runtime/core/trt_common.h"
 #include "runtime/pipelines/recurrent_pipeline.h"
 
 #include <memory>

@@ -9,7 +9,7 @@
 // Postconditions: Sizes and transposed inputs match expected values
 // =============================================================================
 
-#include "runtime/trt/audio/magpie_codec_plan.h"
+#include "runtime/domains/audio/magpie_codec_plan.h"
 
 #include <iostream>
 #include <vector>

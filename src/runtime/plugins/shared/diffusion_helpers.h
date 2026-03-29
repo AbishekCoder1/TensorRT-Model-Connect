@@ -1,7 +1,7 @@
 #pragma once
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/trt/diffusion/diffusion_types.h"
-#include "runtime/trt/diffusion/diffusion_preprocessor_weights_helpers.h"
+#include "runtime/domains/diffusion/diffusion_types.h"
+#include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
 #include "utils/json_helpers.h"
 
 #if TRTF_HAS_TRT

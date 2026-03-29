@@ -9,7 +9,7 @@
 // Postconditions: Loop stops on EOT, failures reported at prefill and decode stages, zero budget handled
 // =============================================================================
 
-#include "runtime/trt/audio/whisper_decode_policy.h"
+#include "runtime/domains/audio/whisper_decode_policy.h"
 
 #include <cstdint>
 #include <iostream>

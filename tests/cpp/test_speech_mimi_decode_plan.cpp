@@ -9,7 +9,7 @@
 // Postconditions: Layout bytes and output elems correct, transposition frame-major, RMS/peak reported
 // =============================================================================
 
-#include "runtime/trt/audio/speech_mimi_decode_plan.h"
+#include "runtime/domains/audio/speech_mimi_decode_plan.h"
 
 #include <cmath>
 #include <cstdint>

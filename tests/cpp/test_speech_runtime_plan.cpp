@@ -9,7 +9,7 @@
 // Postconditions: Encoder shape falls back correctly, prompt injected, generation settings applied
 // =============================================================================
 
-#include "runtime/trt/audio/speech_runtime_plan.h"
+#include "runtime/domains/audio/speech_runtime_plan.h"
 
 #include <cstdint>
 #include <iostream>

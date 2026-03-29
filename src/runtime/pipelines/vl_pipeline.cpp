@@ -2,7 +2,7 @@
 
 #if TRTF_HAS_TRT
 
-#include "runtime/trt/multimodal/image_preprocessor.h"
+#include "runtime/domains/multimodal/image_preprocessor.h"
 
 #include <algorithm>
 #include <cstring>

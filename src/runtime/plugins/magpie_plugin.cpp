@@ -4,7 +4,7 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/plugins/shared/audio_helpers.h"
-#include "runtime/pipelines/audio_pipeline.h"
+#include "runtime/pipelines/magpie_pipeline.h"
 
 #if TRTF_HAS_TRT
 

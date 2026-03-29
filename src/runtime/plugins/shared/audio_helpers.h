@@ -1,6 +1,6 @@
 #pragma once
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/trt/audio/audio_configs.h"
+#include "runtime/domains/audio/audio_configs.h"
 #include "utils/json_helpers.h"
 
 #if TRTF_HAS_TRT

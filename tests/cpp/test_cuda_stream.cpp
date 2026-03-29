@@ -19,7 +19,7 @@
 //   cudaStream_t handle is valid.
 //
 // Dependencies:
-//   - runtime/trt/core/trt_common.h (CudaStream)
+//   - runtime/core/trt_common.h (CudaStream)
 //   - CUDA runtime (cudaStreamCreate, cudaStreamSynchronize)
 //
 // Environment:
@@ -27,7 +27,7 @@
 //   headers are not available. Requires a CUDA-capable GPU at runtime.
 // =============================================================================
 
-#include "runtime/trt/core/trt_common.h"
+#include "runtime/core/trt_common.h"
 
 #include <iostream>
 

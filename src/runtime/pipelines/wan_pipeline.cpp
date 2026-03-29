@@ -3,11 +3,11 @@
 // All CPU math (timestep embedding, RoPE, patchify, unpatchify, text projection)
 // is kept identical. Raw TRT calls replaced with TrtModule::forward(TensorMap).
 
-#include "runtime/pipelines/diffusion_pipeline.h"
-#include "runtime/trt/diffusion/diffusion_denoising_step_seam.h"
-#include "runtime/trt/diffusion/diffusion_generation_plan.h"
-#include "runtime/trt/diffusion/diffusion_scheduler_helpers.h"
-#include "runtime/trt/diffusion/wan_generation_conditioning.h"
+#include "runtime/pipelines/wan_pipeline.h"
+#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"
+#include "runtime/domains/diffusion/diffusion_generation_plan.h"
+#include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
+#include "runtime/domains/diffusion/wan_generation_conditioning.h"
 
 #if TRTF_HAS_TRT
 

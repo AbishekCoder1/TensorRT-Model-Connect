@@ -4,7 +4,7 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/plugins/shared/diffusion_helpers.h"
-#include "runtime/pipelines/diffusion_pipeline.h"
+#include "runtime/pipelines/flux_pipeline.h"
 
 #if TRTF_HAS_TRT
 

@@ -9,7 +9,7 @@
 // Postconditions: Validation rejects mismatched layers, outputs initialized to correct sizes
 // =============================================================================
 
-#include "runtime/trt/recurrent/recurrent_step_contracts.h"
+#include "runtime/domains/recurrent/recurrent_step_contracts.h"
 
 #include <cstdint>
 #include <iostream>

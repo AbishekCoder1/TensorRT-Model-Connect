@@ -191,8 +191,8 @@ sequenceDiagram
 **Key files:**
 - `src/runtime/pipelines/text_generation_pipeline.cpp` -- `generate()`, `generate_from_ids()`, `run_step()`
 - `src/runtime/pipelines/text_generation_pipeline.h` -- class declaration
-- `src/runtime/trt/core/kv_cache.cpp` -- `bind_to()`, `advance()`, `build_attention_mask()`, `reset()`
-- `src/runtime/trt/core/trt_module.cpp` -- `forward()`, `forward_async()`, `bind_external()`
+- `src/runtime/core/kv_cache.cpp` -- `bind_to()`, `advance()`, `build_attention_mask()`, `reset()`
+- `src/runtime/core/trt_module.cpp` -- `forward()`, `forward_async()`, `bind_external()`
 
 ---
 
@@ -273,7 +273,7 @@ sequenceDiagram
 **Key files:**
 - `src/runtime/pipelines/vl_pipeline.h` -- `VLPipeline`, `VLConfig`
 - `src/runtime/pipelines/vl_pipeline.cpp` -- `generate()`, `generate_vl_from_ids()`, `run_vision_encoder()`
-- `src/runtime/trt/multimodal/image_preprocessor.h` -- `VLPreprocessConfig`, preprocessing strategies
+- `src/runtime/domains/multimodal/image_preprocessor.h` -- `VLPreprocessConfig`, preprocessing strategies
 
 ---
 
@@ -314,17 +314,17 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/diffusion_pipeline.h` -- `WanPipeline`, `FluxPipeline`, `ZImagePipeline`
+- `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` -- `WanPipeline`, `FluxPipeline`, `ZImagePipeline`
 - `src/runtime/pipelines/wan_pipeline.cpp` -- `generate_image()`, denoising loop, VAE decode
 - `src/runtime/pipelines/flux_pipeline.cpp` -- FLUX-specific RoPE, timestep embedding, dual tokenizer
 - `src/runtime/pipelines/z_image_pipeline.cpp` -- Z-Image patchify, caption projection
-- `src/runtime/trt/core/flow_match_euler_scheduler.cpp` -- scheduler implementation
+- `src/runtime/core/flow_match_euler_scheduler.cpp` -- scheduler implementation
 
 ---
 
 ## 7. Audio Generation Flow (Bark)
 
-Entry point: `BarkPipeline::generate_audio()` in `src/runtime/pipelines/audio_pipeline.cpp`.
+Entry point: `BarkPipeline::generate_audio()` in individual pipeline `.cpp` files.
 
 ```mermaid
 sequenceDiagram
@@ -343,16 +343,16 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/audio_pipeline.h` -- `BarkPipeline`, `WhisperPipeline`, `MagpiePipeline`, `SpeechPipeline`, `OmniPipeline`
-- `src/runtime/pipelines/audio_pipeline.cpp` -- pipeline implementations
+- `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, etc. -- `BarkPipeline`, `WhisperPipeline`, `MagpiePipeline`, `SpeechPipeline`, `OmniPipeline`
+- individual pipeline `.cpp` files -- pipeline implementations
 - `src/runtime/pipelines/audio_backend_factory.h` -- `make_whisper_pipeline_from_bundle()`, etc.
-- `src/runtime/trt/audio/bark_backend.h` -- `BarkBackend`
+- `src/runtime/domains/audio/bark_backend.h` -- `BarkBackend`
 
 ---
 
 ## 8. Omni Multimodal Flow (TrtModule-based)
 
-Entry point: `OmniPipeline::generate_audio()` in `src/runtime/pipelines/audio_pipeline.cpp`.
+Entry point: `OmniPipeline::generate_audio()` in individual pipeline `.cpp` files.
 
 ```mermaid
 sequenceDiagram
@@ -377,8 +377,8 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/audio_pipeline.h` -- `OmniPipeline`, `OmniConfig`
-- `src/runtime/pipelines/audio_pipeline.cpp` -- `run_thinker()`, `run_talker()`, `run_code2wav()`
+- `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, etc. -- `OmniPipeline`, `OmniConfig`
+- individual pipeline `.cpp` files -- `run_thinker()`, `run_talker()`, `run_code2wav()`
 
 ---
 

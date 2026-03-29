@@ -9,7 +9,7 @@
 // Postconditions: Validation accepts complete bundles and rejects incomplete ones
 // =============================================================================
 
-#include "runtime/trt/audio/audio_bundle_validation.h"
+#include "runtime/domains/audio/audio_bundle_validation.h"
 
 #include <iostream>
 #include <stdexcept>

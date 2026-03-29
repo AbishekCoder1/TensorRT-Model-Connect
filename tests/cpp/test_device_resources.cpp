@@ -29,14 +29,14 @@
 //   run_decoder_step_device to exercise the full step path.
 //
 // Dependencies:
-//   - runtime/trt/core/device_kv_cache.h
-//   - runtime/trt/core/trt_engine_lifecycle.h
-//   - runtime/trt/core/trt_common.h
+//   - runtime/core/device_kv_cache.h
+//   - runtime/core/trt_engine_lifecycle.h
+//   - runtime/core/trt_common.h
 //   TRT + CUDA required.
 
-#include "runtime/trt/core/device_kv_cache.h"
-#include "runtime/trt/core/trt_engine_lifecycle.h"
-#include "runtime/trt/core/trt_common.h"
+#include "runtime/core/device_kv_cache.h"
+#include "runtime/core/trt_engine_lifecycle.h"
+#include "runtime/core/trt_common.h"
 
 #include <cstdint>
 #include <iostream>

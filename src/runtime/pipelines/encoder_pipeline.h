@@ -1,8 +1,6 @@
 #pragma once
 
 // EncoderPipeline: single-pass encoder models (BERT, embedding, reranking).
-// SegmentPipeline: single-pass segmentation (SegFormer).
-// SamPipeline: two-stage segmentation (SAM — encoder + decoder).
 
 #include "trtf/pipeline.h"
 #include "trtf/tokenizer.h"
@@ -37,38 +35,6 @@ private:
     std::unique_ptr<TrtModule> encoder_;
     std::string mode_;  // "encoder_only", "embedding", "reranking"
     std::shared_ptr<ITokenizer> tokenizer_;
-    std::string model_id_;
-};
-
-class SegmentPipeline final : public IPipeline {
-public:
-    explicit SegmentPipeline(std::unique_ptr<TrtModule> model,
-                             std::string model_id_str = "");
-
-    SegmentResult segment(const float* pixels, int32_t height, int32_t width) override;
-
-    const char* model_id() const override { return model_id_.c_str(); }
-    const char* pipeline_type() const override { return "SegmentPipeline"; }
-
-private:
-    std::unique_ptr<TrtModule> model_;
-    std::string model_id_;
-};
-
-class SamPipeline final : public IPipeline {
-public:
-    SamPipeline(std::unique_ptr<TrtModule> image_encoder,
-                std::unique_ptr<TrtModule> mask_decoder,
-                std::string model_id_str = "");
-
-    SegmentResult segment(const float* pixels, int32_t height, int32_t width) override;
-
-    const char* model_id() const override { return model_id_.c_str(); }
-    const char* pipeline_type() const override { return "SamPipeline"; }
-
-private:
-    std::unique_ptr<TrtModule> image_encoder_;
-    std::unique_ptr<TrtModule> mask_decoder_;
     std::string model_id_;
 };
 

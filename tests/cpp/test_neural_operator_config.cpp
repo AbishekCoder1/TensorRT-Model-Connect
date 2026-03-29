@@ -9,7 +9,7 @@
 // Postconditions: Argmax selects correct class, ties select first, invalid shapes rejected
 // =============================================================================
 
-#include "runtime/trt/perception/segmentation_postprocess_seam.h"
+#include "runtime/domains/perception/segmentation_postprocess_seam.h"
 
 #include <cstdint>
 #include <iostream>
