@@ -16,6 +16,7 @@ stages:
   - tier2-graph-ops
   - tier3-e2e
   - nightly-e2e
+  - nightly-coverage
 
 variables:
   ENGINE_DIR: /workspace/users/yifeif/trt-transformers/engines
@@ -60,13 +61,26 @@ impact-analysis:
   before_script: []   # No deps needed — pure Python + git
   script:
     - python3 tools/test_impact.py --validate
-    - python3 tools/test_impact.py --base ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} --json > impact.json
+    # Try to fetch coverage map for per-test selection (non-fatal if unavailable)
+    - |
+      python3 tools/coverage_map/fetch_latest.py \
+        --output coverage_map.json \
+        --local-fallback "${COVERAGE_MAP_PATH:-}" \
+        || echo "No coverage map available -- using tier-level selection"
+    # Run impact analysis with coverage map if available
+    - |
+      if [ -f coverage_map.json ]; then
+        python3 tools/test_impact.py --base ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} --coverage-map coverage_map.json --json > impact.json
+      else
+        python3 tools/test_impact.py --base ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} --json > impact.json
+      fi
     - echo "--- Impact Analysis ---"
     - cat impact.json
     - python3 tools/test_impact.py --base ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} --verbose
   artifacts:
     paths:
       - impact.json
+      - coverage_map.json
     expire_in: 1 day
   timeout: 5m
 
@@ -128,7 +142,24 @@ test-cpp-unit:
         echo "Skipping: cpp tier not affected by this change"
         exit 0
       fi
-    - ctest --test-dir build --output-on-failure
+    - |
+      # Check for coverage-map-based selective tests
+      CPP_TESTS=$(python3 -c "
+      import json, sys
+      d = json.load(open('impact.json'))
+      tests = d.get('cpp_tests', [])
+      fallback = d.get('fallback_tiers', [])
+      if 'cpp' in fallback or not tests:
+          sys.exit(0)
+      print('|'.join(tests))
+      " 2>/dev/null) || true
+      if [ -n "$CPP_TESTS" ]; then
+        echo "Selective C++ tests: $CPP_TESTS"
+        ctest --test-dir build -R "$CPP_TESTS" --output-on-failure
+      else
+        echo "Running all C++ tests (fallback or no coverage map)"
+        ctest --test-dir build --output-on-failure
+      fi
   timeout: 20m
 
 test-python-builder:
@@ -140,7 +171,24 @@ test-python-builder:
         echo "Skipping: builder tier not affected by this change"
         exit 0
       fi
-    - python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py -n auto
+    - |
+      # Check for coverage-map-based selective tests
+      BUILDER_TESTS=$(python3 -c "
+      import json, sys
+      d = json.load(open('impact.json'))
+      tests = d.get('builder_tests', [])
+      fallback = d.get('fallback_tiers', [])
+      if 'builder' in fallback or not tests:
+          sys.exit(0)
+      print(' or '.join(tests))
+      " 2>/dev/null) || true
+      if [ -n "$BUILDER_TESTS" ]; then
+        echo "Selective builder tests: $BUILDER_TESTS"
+        python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py -k "$BUILDER_TESTS" -n auto
+      else
+        echo "Running all builder tests (fallback or no coverage map)"
+        python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py -n auto
+      fi
   timeout: 40m
 
 coverage-python:
@@ -310,5 +358,28 @@ test-e2e-nightly:
     when: always
     expire_in: 7 days
   timeout: 6h
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+# ── Nightly: Coverage Map Generation ──────────────────────────────────────────
+# Generates per-test coverage mapping for selective unit test execution.
+# MR pipelines fetch this artifact to skip irrelevant unit tests.
+
+generate-coverage-map:
+  stage: nightly-coverage
+  needs: [build-all]
+  script:
+    - python -m pip install --disable-pip-version-check --quiet "coverage[toml]==7.6.10" "pytest-cov>=6.0" "gcovr==8.2"
+    - python tools/coverage_map/generate.py --output coverage_map.json --python-bin python --build-dir build
+    - python tools/coverage_map/generate.py --validate coverage_map.json
+    - echo "Coverage map generated successfully"
+    - >-
+      python -c "import json; d=json.load(open('coverage_map.json')); m=d['meta'];
+      print('Python tests: %s, C++ tests: %s, Source files: %d' % (m['python_tests'], m['cpp_tests'], len(d['source_to_tests'])))"
+  artifacts:
+    paths:
+      - coverage_map.json
+    expire_in: 30 days
+  timeout: 90m
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"

@@ -204,6 +204,10 @@ class ImpactResult:
     rebuild_cpp: bool
     cap_applied: bool
     matched_rules: List[Dict]
+    builder_tests: List[str] = field(default_factory=list)
+    cpp_tests: List[str] = field(default_factory=list)
+    tools_tests: List[str] = field(default_factory=list)
+    fallback_tiers: List[str] = field(default_factory=list)
 
 # ---------------------------------------------------------------------------
 # Impact map construction
@@ -520,6 +524,7 @@ def analyze_impact(
     changed_files: List[str],
     imap: ImpactMap,
     cap: Optional[int] = None,
+    coverage_map: Optional[Dict[str, List[str]]] = None,
 ) -> ImpactResult:
     """Analyze impact of all changed files and return aggregated result."""
     all_models: Set[str] = set()
@@ -544,12 +549,30 @@ def analyze_impact(
         e2e_models = sorted(imap.core_models)
         cap_applied = True
 
+    # Coverage-map-based unit test selection
+    builder_tests: List[str] = []
+    cpp_tests: List[str] = []
+    tools_tests: List[str] = []
+    fallback_tiers: List[str] = []
+
+    if coverage_map is not None:
+        from coverage_map.select_tests import select_tests
+        sel = select_tests(changed_files, coverage_map)
+        builder_tests = sel.builder_tests
+        cpp_tests = sel.cpp_tests
+        tools_tests = sel.tools_tests
+        fallback_tiers = sel.fallback_tiers
+
     return ImpactResult(
         e2e_models=e2e_models,
         unit_tiers=sorted(all_tiers),
         rebuild_cpp=rebuild_cpp,
         cap_applied=cap_applied,
         matched_rules=matched_rules,
+        builder_tests=builder_tests,
+        cpp_tests=cpp_tests,
+        tools_tests=tools_tests,
+        fallback_tiers=fallback_tiers,
     )
 
 # ---------------------------------------------------------------------------
@@ -672,6 +695,10 @@ def format_json(result: ImpactResult) -> str:
         "rebuild_cpp": result.rebuild_cpp,
         "cap_applied": result.cap_applied,
         "matched_rules": result.matched_rules,
+        "builder_tests": result.builder_tests,
+        "cpp_tests": result.cpp_tests,
+        "tools_tests": result.tools_tests,
+        "fallback_tiers": result.fallback_tiers,
     }, indent=2)
 
 # ---------------------------------------------------------------------------
@@ -699,6 +726,8 @@ def main() -> int:
                         help="Show per-file rule matches")
     parser.add_argument("--repo-root", default=None,
                         help="Repository root (default: auto-detect)")
+    parser.add_argument("--coverage-map", default=None,
+                        help="Path to coverage_map.json for per-test selection")
     args = parser.parse_args()
 
     # Resolve repo root
@@ -729,6 +758,16 @@ def main() -> int:
               file=sys.stderr)
         return 0
 
+    # Load coverage map if provided
+    coverage_map_data = None
+    if args.coverage_map:
+        sys.path.insert(0, str(repo_root / "tools"))
+        from coverage_map.generate import load_coverage_map
+        coverage_map_data = load_coverage_map(Path(args.coverage_map))
+        if coverage_map_data is None:
+            print(f"WARNING: Coverage map not found at {args.coverage_map}. "
+                  "Falling back to tier-level selection.", file=sys.stderr)
+
     # Get changed files
     if args.files:
         changed: Optional[List[str]] = [f.strip() for f in args.files.split(",") if f.strip()]
@@ -755,7 +794,7 @@ def main() -> int:
             cap_applied=False, matched_rules=[],
         )
     else:
-        result_obj = analyze_impact(changed, imap, cap=args.cap)
+        result_obj = analyze_impact(changed, imap, cap=args.cap, coverage_map=coverage_map_data)
 
     if args.verbose:
         for rule in result_obj.matched_rules:

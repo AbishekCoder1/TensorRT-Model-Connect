@@ -576,3 +576,60 @@ class TestOutput:
         output = test_impact.format_json(result)
         data = json.loads(output)
         assert data["cap_applied"] is True
+
+
+# ---------------------------------------------------------------------------
+# Coverage map integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestCoverageMapIntegration:
+    def test_impact_result_has_test_lists(self, imap):
+        """ImpactResult with coverage map includes per-tier test lists."""
+        coverage_map = {
+            "trtf_build/trtf_build/families/qwen.py": [
+                "tests/builder/test_engine_qwen.py::TestQwen::test_plugin",
+            ],
+        }
+        result = test_impact.analyze_impact(
+            ["trtf_build/trtf_build/families/qwen.py"], imap,
+            coverage_map=coverage_map,
+        )
+        assert "tests/builder/test_engine_qwen.py::TestQwen::test_plugin" in result.builder_tests
+        assert "builder" not in result.fallback_tiers
+
+    def test_unknown_file_triggers_fallback(self, imap):
+        """File not in coverage map triggers tier fallback."""
+        coverage_map = {"trtf_build/trtf_build/config.py": ["tests/builder/test_config.py::test_a"]}
+        result = test_impact.analyze_impact(
+            ["trtf_build/trtf_build/families/qwen.py"], imap,
+            coverage_map=coverage_map,
+        )
+        assert "builder" in result.fallback_tiers
+
+    def test_no_coverage_map_no_test_lists(self, imap):
+        """Without coverage map, test lists are empty and fallback_tiers empty."""
+        result = test_impact.analyze_impact(
+            ["trtf_build/trtf_build/families/qwen.py"], imap,
+        )
+        assert result.builder_tests == []
+        assert result.cpp_tests == []
+        assert result.fallback_tiers == []
+
+    def test_json_output_includes_test_lists(self, imap):
+        """JSON output includes builder_tests, cpp_tests, fallback_tiers."""
+        result = test_impact.ImpactResult(
+            e2e_models=["qwen3-0.6b"],
+            unit_tiers=["builder"],
+            rebuild_cpp=False,
+            cap_applied=False,
+            matched_rules=[],
+            builder_tests=["tests/builder/test_config.py::test_a"],
+            cpp_tests=[],
+            tools_tests=[],
+            fallback_tiers=[],
+        )
+        output = json.loads(test_impact.format_json(result))
+        assert output["builder_tests"] == ["tests/builder/test_config.py::test_a"]
+        assert output["cpp_tests"] == []
+        assert output["fallback_tiers"] == []
