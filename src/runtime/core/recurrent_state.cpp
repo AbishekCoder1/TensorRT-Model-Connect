@@ -49,7 +49,13 @@ void RecurrentState::bind_to(TrtModule& module)
     }
 }
 
-void RecurrentState::advance()
+void RecurrentState::prepare_step(TensorMap& /*inputs*/, int32_t /*seq_len*/)
+{
+    // Recurrent state has no per-step inputs (no mask, no position).
+    // State tensors are already bound via bind_to().
+}
+
+void RecurrentState::advance(int32_t n_tokens)
 {
     for (std::size_t si = 0; si < specs_.size(); ++si)
     {
@@ -59,10 +65,12 @@ void RecurrentState::advance()
             state_[si][uli].copy_from(present_[si][uli]);
         }
     }
+    position_ += n_tokens;
 }
 
 void RecurrentState::reset()
 {
+    position_ = 0;
     for (std::size_t si = 0; si < specs_.size(); ++si)
     {
         for (int32_t li = 0; li < num_layers_; ++li)
@@ -73,6 +81,17 @@ void RecurrentState::reset()
         }
     }
     cudaStreamSynchronize(stream_);
+}
+
+std::size_t RecurrentState::device_memory_bytes() const
+{
+    std::size_t total = 0;
+    for (std::size_t si = 0; si < specs_.size(); ++si)
+    {
+        for (const auto& t : state_[si]) total += t.nbytes();
+        for (const auto& t : present_[si]) total += t.nbytes();
+    }
+    return total;
 }
 
 bool RecurrentState::ok() const

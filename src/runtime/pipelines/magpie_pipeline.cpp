@@ -112,9 +112,9 @@ void maybe_enable_magpie_greedy(MagpieTTSConfig& cfg)
 MagpiePipeline::MagpiePipeline(
     std::unique_ptr<TrtModule> encoder,
     std::unique_ptr<TrtModule> decoder,
-    std::unique_ptr<KvCache> decoder_cache,
+    std::unique_ptr<IInferenceState> decoder_state,
     std::unique_ptr<TrtModule> codec,
-    std::unique_ptr<KvCache> decoder_cache_uncond,
+    std::unique_ptr<IInferenceState> decoder_state_uncond,
     std::vector<CudaBuffer> cross_k,
     std::vector<CudaBuffer> cross_v,
     std::vector<CudaBuffer> cross_k_uncond,
@@ -131,9 +131,9 @@ MagpiePipeline::MagpiePipeline(
     std::string model_id_str)
     : encoder_(std::move(encoder))
     , decoder_(std::move(decoder))
-    , decoder_cache_(std::move(decoder_cache))
+    , decoder_state_(std::move(decoder_state))
     , codec_(std::move(codec))
-    , decoder_cache_uncond_(std::move(decoder_cache_uncond))
+    , decoder_state_uncond_(std::move(decoder_state_uncond))
     , cross_k_(std::move(cross_k))
     , cross_v_(std::move(cross_v))
     , cross_k_uncond_(std::move(cross_k_uncond))
@@ -162,8 +162,8 @@ MagpiePipeline::MagpiePipeline(
 {
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error("MagpiePipeline: invalid decoder module");
-    if (!decoder_cache_ || !decoder_cache_->ok())
-        throw std::runtime_error("MagpiePipeline: invalid decoder cache");
+    if (!decoder_state_ || !decoder_state_->ok())
+        throw std::runtime_error("MagpiePipeline: invalid decoder state");
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("MagpiePipeline: invalid encoder module");
 
@@ -381,9 +381,6 @@ void MagpiePipeline::bind_cross_kv_uncond()
 void MagpiePipeline::run_decoder_step(const float* embed, int32_t embed_size,
                                        std::vector<float>& logits_out)
 {
-    std::vector<float> mask;
-    decoder_cache_->build_attention_mask(mask);
-    int32_t position = decoder_cache_->position();
     int32_t dummy_token = 0;
     float use_input_embed = 1.0F;
 
@@ -393,16 +390,6 @@ void MagpiePipeline::run_decoder_step(const float* embed, int32_t embed_size,
     token_tensor.data = &dummy_token;
     token_tensor.shape = {1};
     token_tensor.dtype = DType::kInt32;
-
-    Tensor position_tensor;
-    position_tensor.data = &position;
-    position_tensor.shape = {1};
-    position_tensor.dtype = DType::kInt32;
-
-    Tensor mask_tensor;
-    mask_tensor.data = mask.data();
-    mask_tensor.shape = {static_cast<int64_t>(mask.size())};
-    mask_tensor.dtype = DType::kFloat32;
 
     Tensor embed_tensor;
     embed_tensor.data = embed_buf.data();
@@ -416,11 +403,9 @@ void MagpiePipeline::run_decoder_step(const float* embed, int32_t embed_size,
 
     TensorMap inputs;
     inputs["token_id"] = token_tensor;
-    if (decoder_->has_input("position_id"))
-        inputs["position_id"] = position_tensor;
-    inputs["attention_mask"] = mask_tensor;
     inputs["input_embed"] = embed_tensor;
     inputs["use_input_embed"] = use_embed_tensor;
+    decoder_state_->prepare_step(inputs);
 
     TensorMap outputs = decoder_->forward(inputs);
 
@@ -433,19 +418,16 @@ void MagpiePipeline::run_decoder_step(const float* embed, int32_t embed_size,
         std::memcpy(logits_out.data(), lt.data, n * sizeof(float));
     }
 
-    decoder_cache_->advance();
+    decoder_state_->advance();
 }
 
 void MagpiePipeline::run_decoder_step_uncond(const float* embed, int32_t embed_size,
                                               std::vector<float>& logits_out)
 {
     // Swap to unconditional cache + cross-KV
-    decoder_cache_uncond_->bind_to(*decoder_);
+    decoder_state_uncond_->bind_to(*decoder_);
     bind_cross_kv_uncond();
 
-    std::vector<float> mask;
-    decoder_cache_uncond_->build_attention_mask(mask);
-    int32_t position = decoder_cache_uncond_->position();
     int32_t dummy_token = 0;
     float use_input_embed = 1.0F;
 
@@ -455,16 +437,6 @@ void MagpiePipeline::run_decoder_step_uncond(const float* embed, int32_t embed_s
     token_tensor.data = &dummy_token;
     token_tensor.shape = {1};
     token_tensor.dtype = DType::kInt32;
-
-    Tensor position_tensor;
-    position_tensor.data = &position;
-    position_tensor.shape = {1};
-    position_tensor.dtype = DType::kInt32;
-
-    Tensor mask_tensor;
-    mask_tensor.data = mask.data();
-    mask_tensor.shape = {static_cast<int64_t>(mask.size())};
-    mask_tensor.dtype = DType::kFloat32;
 
     Tensor embed_tensor;
     embed_tensor.data = embed_buf.data();
@@ -478,11 +450,9 @@ void MagpiePipeline::run_decoder_step_uncond(const float* embed, int32_t embed_s
 
     TensorMap inputs;
     inputs["token_id"] = token_tensor;
-    if (decoder_->has_input("position_id"))
-        inputs["position_id"] = position_tensor;
-    inputs["attention_mask"] = mask_tensor;
     inputs["input_embed"] = embed_tensor;
     inputs["use_input_embed"] = use_embed_tensor;
+    decoder_state_uncond_->prepare_step(inputs);
 
     TensorMap outputs = decoder_->forward(inputs);
 
@@ -495,10 +465,10 @@ void MagpiePipeline::run_decoder_step_uncond(const float* embed, int32_t embed_s
         std::memcpy(logits_out.data(), lt.data, n * sizeof(float));
     }
 
-    decoder_cache_uncond_->advance();
+    decoder_state_uncond_->advance();
 
     // Restore conditioned cache + cross-KV
-    decoder_cache_->bind_to(*decoder_);
+    decoder_state_->bind_to(*decoder_);
     bind_cross_kv();
 }
 
@@ -511,8 +481,8 @@ MagpiePipeline::DecoderLoopState MagpiePipeline::init_decoder_state() const
     DecoderLoopState s;
     const auto plan = make_magpie_decoder_plan(
         config_,
-        static_cast<bool>(decoder_cache_uncond_),
-        static_cast<bool>(decoder_cache_uncond_),  // resources == cache in new runtime
+        static_cast<bool>(decoder_state_uncond_),
+        static_cast<bool>(decoder_state_uncond_),  // resources == cache in new runtime
         !cross_k_uncond_.empty(),
         check_magpie_gpu_kernels_available(
             audio_embed_device_, device_codes_, device_full_argmax_, device_prev_codes_),
@@ -555,7 +525,7 @@ int32_t MagpiePipeline::prefill_context(DecoderLoopState& state)
     const auto t_prefill_start = SteadyClock::now();
 
     // Conditioned cache prefill
-    decoder_cache_->bind_to(*decoder_);
+    decoder_state_->bind_to(*decoder_);
     bind_cross_kv();
 
     const float* ctx_ptr = context_embed_.data();
@@ -569,23 +539,18 @@ int32_t MagpiePipeline::prefill_context(DecoderLoopState& state)
     state.prof_prefill_ms = elapsed_ms(t_prefill_start, t_prefill_end);
 
     // CFG: prefill unconditional cache with same speaker context but uncond cross-KV
-    if (state.use_cfg && decoder_cache_uncond_)
+    if (state.use_cfg && decoder_state_uncond_)
     {
         std::cerr << "[magpie-tts] CFG: prefilling unconditional cache ("
                   << ctx_frames << " frames) ..." << std::endl;
 
-        decoder_cache_uncond_->bind_to(*decoder_);
+        decoder_state_uncond_->bind_to(*decoder_);
         bind_cross_kv_uncond();
 
         for (int32_t pos = 0; pos < ctx_frames; ++pos)
         {
             const float* frame_embed = ctx_ptr + static_cast<std::size_t>(pos) * hidden;
 
-            std::vector<float> dummy_logits;
-            // Use the uncond cache step
-            std::vector<float> mask;
-            decoder_cache_uncond_->build_attention_mask(mask);
-            int32_t position = decoder_cache_uncond_->position();
             int32_t dummy_token = 0;
             float use_input_embed = 1.0F;
             std::vector<float> embed_buf(frame_embed, frame_embed + hidden);
@@ -594,16 +559,6 @@ int32_t MagpiePipeline::prefill_context(DecoderLoopState& state)
             token_tensor.data = &dummy_token;
             token_tensor.shape = {1};
             token_tensor.dtype = DType::kInt32;
-
-            Tensor position_tensor;
-            position_tensor.data = &position;
-            position_tensor.shape = {1};
-            position_tensor.dtype = DType::kInt32;
-
-            Tensor mask_tensor;
-            mask_tensor.data = mask.data();
-            mask_tensor.shape = {static_cast<int64_t>(mask.size())};
-            mask_tensor.dtype = DType::kFloat32;
 
             Tensor embed_tensor;
             embed_tensor.data = embed_buf.data();
@@ -617,18 +572,16 @@ int32_t MagpiePipeline::prefill_context(DecoderLoopState& state)
 
             TensorMap inputs;
             inputs["token_id"] = token_tensor;
-            if (decoder_->has_input("position_id"))
-                inputs["position_id"] = position_tensor;
-            inputs["attention_mask"] = mask_tensor;
             inputs["input_embed"] = embed_tensor;
             inputs["use_input_embed"] = use_embed_tensor;
+            decoder_state_uncond_->prepare_step(inputs);
 
             decoder_->forward(inputs);
-            decoder_cache_uncond_->advance();
+            decoder_state_uncond_->advance();
         }
 
         // Restore conditioned state
-        decoder_cache_->bind_to(*decoder_);
+        decoder_state_->bind_to(*decoder_);
         bind_cross_kv();
     }
 
@@ -652,7 +605,7 @@ bool MagpiePipeline::run_cfg_uncond_pass_gpu(DecoderLoopState& state, int32_t fr
     void* cond_embed_ptr = decoder_->device_ptr("input_embed");
 
     // Run unconditional pass
-    decoder_cache_uncond_->bind_to(*decoder_);
+    decoder_state_uncond_->bind_to(*decoder_);
     bind_cross_kv_uncond();
 
     // Copy embed
@@ -663,13 +616,13 @@ bool MagpiePipeline::run_cfg_uncond_pass_gpu(DecoderLoopState& state, int32_t fr
 
     // Forward async
     decoder_->forward_device_async({});
-    decoder_cache_uncond_->advance();
+    decoder_state_uncond_->advance();
 
     void* uncond_logits_ptr = decoder_->device_ptr("logits");
 
     // CFG interpolation: out = uncond + scale * (cond - uncond)
     // Restore conditioned bindings first
-    decoder_cache_->bind_to(*decoder_);
+    decoder_state_->bind_to(*decoder_);
     bind_cross_kv();
 
     magpie_cfg_interpolate_device(
@@ -813,7 +766,7 @@ bool MagpiePipeline::gpu_greedy_frame_step(
     const auto t_step_start = SteadyClock::now();
     if (state.use_cfg || frame == 0)
     {
-        decoder_cache_->bind_to(*decoder_);
+        decoder_state_->bind_to(*decoder_);
         bind_cross_kv();
     }
 
@@ -824,29 +777,31 @@ bool MagpiePipeline::gpu_greedy_frame_step(
     cudaMemcpyAsync(use_embed_ptr, &use_embed_val, sizeof(float),
                     cudaMemcpyHostToDevice, stream_);
 
-    // Build mask + position
-    std::vector<float> mask;
-    decoder_cache_->build_attention_mask(mask);
-    int32_t position = decoder_cache_->position();
+    // Build mask + position via prepare_step, then upload to device.
+    // TODO: migrate to device-resident prepare_step when available.
+    int32_t dummy_token = 0;
+    Tensor token_tensor;
+    token_tensor.data = &dummy_token;
+    token_tensor.shape = {1};
+    token_tensor.dtype = DType::kInt32;
 
-    void* mask_ptr = decoder_->device_ptr("attention_mask");
-    cudaMemcpyAsync(mask_ptr, mask.data(), mask.size() * sizeof(float),
-                    cudaMemcpyHostToDevice, stream_);
+    TensorMap step_inputs;
+    step_inputs["token_id"] = token_tensor;
+    decoder_state_->prepare_step(step_inputs);
 
-    if (decoder_->has_input("position_id"))
+    // Upload state-provided tensors to device
+    for (auto& [name, tensor] : step_inputs)
     {
-        void* pos_ptr = decoder_->device_ptr("position_id");
-        cudaMemcpyAsync(pos_ptr, &position, sizeof(int32_t),
-                        cudaMemcpyHostToDevice, stream_);
+        void* dev_ptr = decoder_->device_ptr(name.c_str());
+        if (dev_ptr && tensor.data)
+        {
+            cudaMemcpyAsync(dev_ptr, tensor.data, tensor.nbytes(),
+                            cudaMemcpyHostToDevice, stream_);
+        }
     }
 
-    int32_t dummy_token = 0;
-    void* token_ptr = decoder_->device_ptr("token_id");
-    cudaMemcpyAsync(token_ptr, &dummy_token, sizeof(int32_t),
-                    cudaMemcpyHostToDevice, stream_);
-
     decoder_->forward_device_async({});
-    decoder_cache_->advance();
+    decoder_state_->advance();
 
     // CFG: unconditional pass + device-side blend
     if (state.use_cfg && !run_cfg_uncond_pass_gpu(state, frame))
@@ -997,7 +952,7 @@ std::vector<int32_t> MagpiePipeline::run_cpu_sampling_loop(
         const auto t_step_start = SteadyClock::now();
         if (state.use_cfg || frame == 0)
         {
-            decoder_cache_->bind_to(*decoder_);
+            decoder_state_->bind_to(*decoder_);
             bind_cross_kv();
         }
         run_decoder_step(state.embed_buf.data(), state.hidden, state.logits);
@@ -1048,12 +1003,12 @@ std::vector<int32_t> MagpiePipeline::run_decoder(int32_t max_frames)
     DecoderLoopState state = init_decoder_state();
 
     // Reset KV caches
-    decoder_cache_->reset();
-    if (state.use_cfg && decoder_cache_uncond_)
-        decoder_cache_uncond_->reset();
+    decoder_state_->reset();
+    if (state.use_cfg && decoder_state_uncond_)
+        decoder_state_uncond_->reset();
 
     // Bind cross-attention K/V
-    decoder_cache_->bind_to(*decoder_);
+    decoder_state_->bind_to(*decoder_);
     bind_cross_kv();
 
     // Phase 1: Context prefill
@@ -1254,12 +1209,12 @@ void MagpiePipeline::apply_env_overrides()
 
 void MagpiePipeline::ensure_cfg_resources()
 {
-    if (config_.cfg_scale <= 1.0F || decoder_cache_uncond_)
+    if (config_.cfg_scale <= 1.0F || decoder_state_uncond_)
         return;
 
     // Lazy-allocate CFG resources if cfg_scale was bumped via env var
     const int32_t dec_layers = static_cast<int32_t>(cross_k_.size());
-    const int32_t kv_dim = decoder_cache_->max_length() > 0
+    const int32_t kv_dim = decoder_state_->max_length() > 0
         ? static_cast<int32_t>(cross_k_[0].size() / (static_cast<std::size_t>(config_.max_source_positions) * sizeof(float)))
         : config_.hidden_size;
 

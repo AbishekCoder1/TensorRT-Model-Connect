@@ -6,6 +6,7 @@
 
 #include "trtf/pipeline.h"
 #include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/inference_state.h"
 #include "trtf/runtime/kv_cache.h"
 
 #include <cstdint>
@@ -31,9 +32,9 @@ public:
     SpeechPipeline(
         std::unique_ptr<TrtModule> mimi_encoder,
         std::unique_ptr<TrtModule> temporal,
-        std::unique_ptr<KvCache> temporal_cache,
+        std::unique_ptr<IInferenceState> temporal_state,
         std::vector<std::unique_ptr<TrtModule>> depth_engines,
-        std::unique_ptr<KvCache> depth_cache,
+        std::unique_ptr<IInferenceState> depth_state,
         std::unique_ptr<TrtModule> mimi_decoder,
         SpeechConfig config,
         cudaStream_t stream,
@@ -82,9 +83,9 @@ private:
 
     std::unique_ptr<TrtModule> mimi_encoder_;
     std::unique_ptr<TrtModule> temporal_;
-    std::unique_ptr<KvCache> temporal_cache_;
+    std::unique_ptr<IInferenceState> temporal_state_;
     std::vector<std::unique_ptr<TrtModule>> depth_engines_;
-    std::unique_ptr<KvCache> depth_cache_;
+    std::unique_ptr<IInferenceState> depth_state_;
     std::unique_ptr<TrtModule> mimi_decoder_;
 
     cudaStream_t stream_;

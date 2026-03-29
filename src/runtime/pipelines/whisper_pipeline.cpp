@@ -27,7 +27,7 @@ namespace trtf {
 WhisperPipeline::WhisperPipeline(
     std::unique_ptr<TrtModule> encoder,
     std::unique_ptr<TrtModule> decoder,
-    std::unique_ptr<KvCache> cache,
+    std::unique_ptr<IInferenceState> state,
     WhisperConfig whisper_config,
     int32_t hidden_size,
     int32_t num_decoder_layers,
@@ -41,7 +41,7 @@ WhisperPipeline::WhisperPipeline(
     std::string model_id_str)
     : encoder_(std::move(encoder))
     , decoder_(std::move(decoder))
-    , cache_(std::move(cache))
+    , state_(std::move(state))
     , whisper_config_(std::move(whisper_config))
     , hidden_size_(hidden_size)
     , num_decoder_layers_(num_decoder_layers)
@@ -58,8 +58,8 @@ WhisperPipeline::WhisperPipeline(
         throw std::runtime_error("WhisperPipeline: invalid encoder module");
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error("WhisperPipeline: invalid decoder module");
-    if (!cache_ || !cache_->ok())
-        throw std::runtime_error("WhisperPipeline: invalid KvCache");
+    if (!state_ || !state_->ok())
+        throw std::runtime_error("WhisperPipeline: invalid inference state");
 
     // Allocate cross-attention K/V device buffers
     cross_kv_bytes_ = static_cast<std::size_t>(whisper_config_.max_source_positions)
@@ -246,8 +246,8 @@ std::vector<int32_t> WhisperPipeline::run_decoder(
     const std::vector<int32_t>& initial_tokens,
     int32_t max_new_tokens)
 {
-    cache_->reset();
-    cache_->bind_to(*decoder_);
+    state_->reset();
+    state_->bind_to(*decoder_);
 
     const int32_t eot_id = whisper_config_.eot_token_id;
 
@@ -279,32 +279,14 @@ std::vector<int32_t> WhisperPipeline::run_decoder(
 
 void WhisperPipeline::run_decoder_step(int32_t token_id, std::vector<float>& logits)
 {
-    std::vector<float> mask;
-    cache_->build_attention_mask(mask);
-    int32_t position = cache_->position();
-
     Tensor token_tensor;
     token_tensor.data = &token_id;
     token_tensor.shape = {1};
     token_tensor.dtype = DType::kInt32;
 
-    Tensor position_tensor;
-    position_tensor.data = &position;
-    position_tensor.shape = {1};
-    position_tensor.dtype = DType::kInt32;
-
-    Tensor mask_tensor;
-    mask_tensor.data = mask.data();
-    mask_tensor.shape = {static_cast<int64_t>(mask.size())};
-    mask_tensor.dtype = DType::kFloat32;
-
     TensorMap inputs;
     inputs["token_id"] = token_tensor;
-    if (decoder_->has_input("position_id"))
-    {
-        inputs["position_id"] = position_tensor;
-    }
-    inputs["attention_mask"] = mask_tensor;
+    state_->prepare_step(inputs);
 
     TensorMap outputs = decoder_->forward(inputs);
 
@@ -320,7 +302,7 @@ void WhisperPipeline::run_decoder_step(int32_t token_id, std::vector<float>& log
     std::memcpy(logits.data(), logits_tensor.data,
                 num_logits * sizeof(float));
 
-    cache_->advance();
+    state_->advance();
 }
 
 } // namespace trtf

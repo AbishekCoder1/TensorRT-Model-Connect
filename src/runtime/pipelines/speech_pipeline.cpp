@@ -161,9 +161,9 @@ std::shared_ptr<ISubprocessRunner> CreateDefaultSubprocessRunner()
 SpeechPipeline::SpeechPipeline(
     std::unique_ptr<TrtModule> mimi_encoder,
     std::unique_ptr<TrtModule> temporal,
-    std::unique_ptr<KvCache> temporal_cache,
+    std::unique_ptr<IInferenceState> temporal_state,
     std::vector<std::unique_ptr<TrtModule>> depth_engines,
-    std::unique_ptr<KvCache> depth_cache,
+    std::unique_ptr<IInferenceState> depth_state,
     std::unique_ptr<TrtModule> mimi_decoder,
     SpeechConfig config,
     cudaStream_t stream,
@@ -171,9 +171,9 @@ SpeechPipeline::SpeechPipeline(
     std::string model_id_str)
     : mimi_encoder_(std::move(mimi_encoder))
     , temporal_(std::move(temporal))
-    , temporal_cache_(std::move(temporal_cache))
+    , temporal_state_(std::move(temporal_state))
     , depth_engines_(std::move(depth_engines))
-    , depth_cache_(std::move(depth_cache))
+    , depth_state_(std::move(depth_state))
     , mimi_decoder_(std::move(mimi_decoder))
     , stream_(stream)
     , config_(std::move(config))
@@ -182,7 +182,7 @@ SpeechPipeline::SpeechPipeline(
 {
     if (!temporal_ || !temporal_->ok())
         throw std::runtime_error("SpeechPipeline: invalid temporal module");
-    if (!temporal_cache_ || !temporal_cache_->ok())
+    if (!temporal_state_ || !temporal_state_->ok())
         throw std::runtime_error("SpeechPipeline: invalid temporal cache");
 
     if (!subprocess_runner_)
@@ -330,11 +330,8 @@ void SpeechPipeline::run_temporal_embed_step(
     std::vector<float>& logits,
     std::vector<float>& hidden_out)
 {
-    std::vector<float> mask;
-    temporal_cache_->build_attention_mask(mask);
-    temporal_cache_->bind_to(*temporal_);
+    temporal_state_->bind_to(*temporal_);
 
-    int32_t position = temporal_cache_->position();
     float use_input_embed = 1.0F;
     int32_t dummy_token = 0;
 
@@ -345,16 +342,6 @@ void SpeechPipeline::run_temporal_embed_step(
     token_tensor.data = &dummy_token;
     token_tensor.shape = {1};
     token_tensor.dtype = DType::kInt32;
-
-    Tensor position_tensor;
-    position_tensor.data = &position;
-    position_tensor.shape = {1};
-    position_tensor.dtype = DType::kInt32;
-
-    Tensor mask_tensor;
-    mask_tensor.data = mask.data();
-    mask_tensor.shape = {static_cast<int64_t>(mask.size())};
-    mask_tensor.dtype = DType::kFloat32;
 
     Tensor embed_tensor;
     embed_tensor.data = embed_buf.data();
@@ -368,11 +355,9 @@ void SpeechPipeline::run_temporal_embed_step(
 
     TensorMap inputs;
     inputs["token_id"] = token_tensor;
-    if (temporal_->has_input("position_id"))
-        inputs["position_id"] = position_tensor;
-    inputs["attention_mask"] = mask_tensor;
     inputs["input_embed"] = embed_tensor;
     inputs["use_input_embed"] = use_embed_tensor;
+    temporal_state_->prepare_step(inputs);
 
     TensorMap outputs = temporal_->forward(inputs);
 
@@ -401,7 +386,7 @@ void SpeechPipeline::run_temporal_embed_step(
         hidden_out.clear();
     }
 
-    temporal_cache_->advance();
+    temporal_state_->advance();
 }
 
 // ---------------------------------------------------------------------------
@@ -515,7 +500,7 @@ std::vector<int32_t> SpeechPipeline::run_depth(
         return std::vector<int32_t>(static_cast<std::size_t>(num_cb), 0);
 
     // Reset shared depth cache for this frame
-    depth_cache_->reset();
+    depth_state_->reset();
 
     std::vector<int32_t> codebook_tokens;
     codebook_tokens.reserve(static_cast<std::size_t>(num_cb));
@@ -546,11 +531,8 @@ std::vector<int32_t> SpeechPipeline::run_depth(
             depth_embed);
 
         // Bind depth cache and run with input_embed
-        std::vector<float> mask;
-        depth_cache_->build_attention_mask(mask);
-        depth_cache_->bind_to(*engine);
+        depth_state_->bind_to(*engine);
 
-        int32_t position = depth_cache_->position();
         float use_input_embed = 1.0F;
         int32_t dummy_token = 0;
 
@@ -558,16 +540,6 @@ std::vector<int32_t> SpeechPipeline::run_depth(
         token_tensor.data = &dummy_token;
         token_tensor.shape = {1};
         token_tensor.dtype = DType::kInt32;
-
-        Tensor position_tensor;
-        position_tensor.data = &position;
-        position_tensor.shape = {1};
-        position_tensor.dtype = DType::kInt32;
-
-        Tensor mask_tensor;
-        mask_tensor.data = mask.data();
-        mask_tensor.shape = {static_cast<int64_t>(mask.size())};
-        mask_tensor.dtype = DType::kFloat32;
 
         Tensor embed_tensor;
         embed_tensor.data = depth_embed.data();
@@ -581,11 +553,9 @@ std::vector<int32_t> SpeechPipeline::run_depth(
 
         TensorMap inputs;
         inputs["token_id"] = token_tensor;
-        if (engine->has_input("position_id"))
-            inputs["position_id"] = position_tensor;
-        inputs["attention_mask"] = mask_tensor;
         inputs["input_embed"] = embed_tensor;
         inputs["use_input_embed"] = use_embed_tensor;
+        depth_state_->prepare_step(inputs);
 
         TensorMap outputs = engine->forward(inputs);
 
@@ -602,7 +572,7 @@ std::vector<int32_t> SpeechPipeline::run_depth(
         logits.resize(static_cast<std::size_t>(n));
         std::memcpy(logits.data(), lt.data, n * sizeof(float));
 
-        depth_cache_->advance();
+        depth_state_->advance();
 
         int32_t best = select_token(logits, cfg, rng_state_);
         best = std::max(0, std::min(best, cfg.codebook_size - 1));
@@ -1141,7 +1111,7 @@ AudioResult SpeechPipeline::speak(
     if (!speak_validate_dual_stream())
         return result;
 
-    temporal_cache_->reset();
+    temporal_state_->reset();
 
     if (should_run_text_prompt_injection(config_))
         run_text_prompt();

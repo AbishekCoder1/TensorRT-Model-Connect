@@ -20,9 +20,9 @@ public:
         auto thinker_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "omni thinker");
         cudaStream_t stream = thinker_loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
-        auto thinker_cache = std::make_unique<KvCache>(
+        std::unique_ptr<IInferenceState> thinker_state = std::make_unique<KvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream);
-        if (!thinker_cache->ok())
+        if (!thinker_state->ok())
             throw std::runtime_error("OmniPipeline: failed to create thinker KvCache");
 
         int32_t omni_talker_hidden_size = extract_json_int(json, "omni_talker_hidden_size", 0);
@@ -31,7 +31,7 @@ public:
 
         // Talker (optional)
         std::unique_ptr<TrtModule> talker_module;
-        std::unique_ptr<KvCache> talker_cache;
+        std::unique_ptr<IInferenceState> talker_state;
         auto talker_loaded = try_load_trt_module_from_plan(
             find_section(ctx.bundle, "talker_engine_plan"), "talker", thinker_loaded.stream);
         if (talker_loaded.module && talker_loaded.module->ok())
@@ -41,7 +41,7 @@ public:
             int32_t talker_cache_len = omni_talker_max_cache_length;
             int32_t talker_layers = omni_talker_num_layers > 0
                 ? omni_talker_num_layers : ctx.config.num_layers;
-            talker_cache = std::make_unique<KvCache>(
+            talker_state = std::make_unique<KvCache>(
                 talker_layers, talker_cache_len, talker_kv_dim, stream);
         }
 
@@ -69,9 +69,9 @@ public:
 
         return std::make_unique<OmniPipeline>(
             std::move(thinker_loaded.module),
-            std::move(thinker_cache),
+            std::move(thinker_state),
             std::move(talker_module),
-            std::move(talker_cache),
+            std::move(talker_state),
             std::move(code2wav_module),
             std::move(omni_cfg),
             stream,

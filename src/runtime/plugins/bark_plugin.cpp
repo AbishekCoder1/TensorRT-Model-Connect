@@ -51,11 +51,11 @@ public:
 
         // Create KvCaches for semantic and coarse stages
         int32_t sem_kv_dim = compute_kv_dim(ctx.config);
-        auto sem_cache = std::make_unique<KvCache>(
+        std::unique_ptr<IInferenceState> sem_state = std::make_unique<KvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, sem_kv_dim, stream);
 
         // Coarse engine may have different dimensions -- resolve with semantic fallbacks
-        auto coarse_cache = make_coarse_kv_cache(json, ctx.config, stream);
+        std::unique_ptr<IInferenceState> coarse_state(make_coarse_kv_cache(json, ctx.config, stream));
 
         // Load embeddings
         auto sem_embed = section_to_floats(find_section(ctx.bundle, "semantic_embed"));
@@ -69,7 +69,8 @@ public:
 
         auto pipeline = std::make_unique<BarkPipeline>(
             std::move(sem_loaded.module), std::move(coarse_loaded.module),
-            std::move(sem_cache), std::move(coarse_cache),
+            std::move(sem_state),
+            std::move(coarse_state),
             std::move(sem_embed), std::move(coarse_embed),
             std::move(bark_cfg), stream,
             std::move(bark_tokenizer), ctx.bundle.info.model_id);

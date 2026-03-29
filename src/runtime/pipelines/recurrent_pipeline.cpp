@@ -10,12 +10,13 @@ namespace trtf {
 
 RecurrentPipeline::RecurrentPipeline(
     std::unique_ptr<TrtModule> decoder,
-    std::unique_ptr<IStateManager> state,
+    std::unique_ptr<IInferenceState> state,
     RecurrentGenConfig config,
     cudaStream_t stream,
     const char* name,
     std::shared_ptr<ITokenizer> tokenizer,
-    std::string model_id_str)
+    std::string model_id_str,
+    std::unique_ptr<ISampler> sampler)
     : decoder_(std::move(decoder))
     , state_(std::move(state))
     , config_(config)
@@ -23,6 +24,7 @@ RecurrentPipeline::RecurrentPipeline(
     , name_(name)
     , tokenizer_(std::move(tokenizer))
     , model_id_(std::move(model_id_str))
+    , sampler_(std::move(sampler))
 {
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
@@ -38,7 +40,8 @@ TextResult RecurrentPipeline::generate(
     int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
 
-    auto output_ids = generate_from_ids(input_ids, max_new, eos);
+    auto sp = sampling_params_from_config(cfg, eos);
+    auto output_ids = generate_from_ids(input_ids, max_new, sp);
 
     std::vector<int32_t> new_tokens(
         output_ids.begin() + static_cast<std::ptrdiff_t>(input_ids.size()),
@@ -54,16 +57,27 @@ RecurrentPipeline::GenerationResult RecurrentPipeline::generate_ids(
 {
     int32_t max_new = cfg.max_new_tokens;
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-    return GenerationResult{generate_from_ids(input_ids, max_new, eos)};
+    auto sp = sampling_params_from_config(cfg, eos);
+    return GenerationResult{generate_from_ids(input_ids, max_new, sp)};
 }
 
 std::vector<int32_t> RecurrentPipeline::generate_from_ids(
     const std::vector<int32_t>& input_ids,
     int32_t max_new_tokens,
-    int32_t eos_token_id)
+    const SamplingParams& params)
 {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
+
+    // Create a per-call sampler if none was injected at construction time.
+    ISampler* active_sampler = sampler_.get();
+    std::unique_ptr<ISampler> local_sampler;
+    if (!active_sampler)
+    {
+        local_sampler = create_sampler(params);
+        active_sampler = local_sampler.get();
+    }
+    active_sampler->reset();
 
     state_->reset();
     state_->bind_to(*decoder_);
@@ -76,13 +90,15 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(
     run_step(input_ids.back(), logits);
 
     std::vector<int32_t> output = input_ids;
+    const int32_t vocab_size = static_cast<int32_t>(logits.size());
 
     for (int32_t step = 0; step < max_new_tokens; ++step)
     {
-        int32_t next = argmax(logits);
-        output.push_back(next);
-        if (next == eos_token_id) break;
-        run_step(next, logits);
+        SampleResult result = active_sampler->sample(
+            logits.data(), vocab_size, params);
+        output.push_back(result.token_id);
+        if (result.is_eos) break;
+        run_step(result.token_id, logits);
     }
 
     return output;
@@ -90,33 +106,15 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(
 
 void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits)
 {
+    TensorMap inputs;
+
     Tensor token_t;
     token_t.data = &token_id;
     token_t.shape = {1};
     token_t.dtype = DType::kInt32;
-
-    TensorMap inputs;
     inputs["token_id"] = token_t;
 
-    int32_t pos = state_->position();
-    std::vector<float> mask;
-
-    if (state_->has_mask())
-    {
-        state_->build_mask(mask);
-
-        Tensor pos_t;
-        pos_t.data = &pos;
-        pos_t.shape = {1};
-        pos_t.dtype = DType::kInt32;
-        inputs["position_id"] = pos_t;
-
-        Tensor mask_t;
-        mask_t.data = mask.data();
-        mask_t.shape = {static_cast<int64_t>(mask.size())};
-        mask_t.dtype = DType::kFloat32;
-        inputs["attention_mask"] = mask_t;
-    }
+    state_->prepare_step(inputs);
 
     TensorMap outputs = decoder_->forward(inputs);
 

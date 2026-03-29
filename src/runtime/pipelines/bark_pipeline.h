@@ -7,6 +7,7 @@
 #include "trtf/pipeline.h"
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/inference_state.h"
 #include "trtf/runtime/kv_cache.h"
 #include "runtime/domains/audio/bark_config.h"
 
@@ -27,8 +28,8 @@ public:
     BarkPipeline(
         std::unique_ptr<TrtModule> semantic,
         std::unique_ptr<TrtModule> coarse,
-        std::unique_ptr<KvCache> semantic_cache,
-        std::unique_ptr<KvCache> coarse_cache,
+        std::unique_ptr<IInferenceState> semantic_state,
+        std::unique_ptr<IInferenceState> coarse_state,
         std::vector<float> semantic_embed,
         std::vector<float> coarse_embed,
         BarkConfig config,
@@ -57,10 +58,10 @@ private:
     std::vector<float> run_codec(const std::vector<int32_t>& codes_flat,
                                   int32_t n_frames);
 
-    void run_step_with_embed(TrtModule& module, KvCache& cache,
+    void run_step_with_embed(TrtModule& module, IInferenceState& state,
                               const float* embed, int32_t embed_dim,
                               std::vector<float>& logits);
-    void run_step_with_token(TrtModule& module, KvCache& cache,
+    void run_step_with_token(TrtModule& module, IInferenceState& state,
                               int32_t token_id,
                               std::vector<float>& logits);
     int32_t sample_top_k(const float* logits, int32_t vocab_size,
@@ -70,8 +71,8 @@ private:
     std::unique_ptr<TrtModule> coarse_;
     std::unique_ptr<TrtModule> codec_;
     std::unique_ptr<TrtModule> fine_;
-    std::unique_ptr<KvCache> semantic_cache_;
-    std::unique_ptr<KvCache> coarse_cache_;
+    std::unique_ptr<IInferenceState> semantic_state_;
+    std::unique_ptr<IInferenceState> coarse_state_;
     std::vector<float> semantic_embed_;
     std::vector<float> coarse_embed_;
     std::vector<float> fine_embed_;

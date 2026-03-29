@@ -21,6 +21,7 @@
 #include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/kv_cache.h"
 #include "trtf/runtime/recurrent_state.h"
+#include "trtf/runtime/hybrid_state.h"
 // pipeline_interface.h was removed; GenerateConfig is in trtf/pipeline.h
 // (already included transitively via recurrent_pipeline.h)
 
@@ -96,13 +97,12 @@ static void test_mamba_pipeline()
         {"conv_state", {12}}, {"ssm_state", {32}},
     };
     auto rs = std::make_unique<trtf::RecurrentState>(1, specs, stream);
-    auto mgr = std::make_unique<trtf::RecurrentStateManager>(std::move(rs));
 
     trtf::RecurrentGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 2;  // argmax=2=eos
 
-    trtf::RecurrentPipeline pipeline(std::move(module), std::move(mgr), cfg, stream, "MambaPipeline");
+    trtf::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream, "MambaPipeline");
     check(std::string(pipeline.pipeline_type()) == "MambaPipeline", "mamba name");
 
     trtf::GenerateConfig gen_cfg;
@@ -132,13 +132,12 @@ static void test_rwkv_pipeline()
         {"den_state", {8}}, {"max_state", {8}},
     };
     auto rs = std::make_unique<trtf::RecurrentState>(2, specs, stream);
-    auto mgr = std::make_unique<trtf::RecurrentStateManager>(std::move(rs));
 
     trtf::RecurrentGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 99;  // never hit
 
-    trtf::RecurrentPipeline pipeline(std::move(module), std::move(mgr), cfg, stream, "RwkvPipeline");
+    trtf::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream, "RwkvPipeline");
     check(std::string(pipeline.pipeline_type()) == "RwkvPipeline", "rwkv name");
 
     trtf::GenerateConfig gen_cfg;
@@ -195,14 +194,14 @@ static void test_hybrid_pipeline()
     auto kv = std::make_unique<trtf::KvCache>(1, 4, 2, stream);
     std::vector<trtf::RecurrentState::TensorSpec> specs = {{"ssm", {4}}};
     auto ssm = std::make_unique<trtf::RecurrentState>(1, specs, stream);
-    auto mgr = std::make_unique<trtf::HybridStateManager>(std::move(kv), std::move(ssm));
+    auto hybrid = std::make_unique<trtf::HybridState>(std::move(kv), std::move(ssm));
 
     trtf::RecurrentGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 2;
     cfg.has_position_input = true;
 
-    trtf::RecurrentPipeline pipeline(std::move(module), std::move(mgr), cfg, stream, "HybridPipeline");
+    trtf::RecurrentPipeline pipeline(std::move(module), std::move(hybrid), cfg, stream, "HybridPipeline");
     check(std::string(pipeline.pipeline_type()) == "HybridPipeline", "hybrid name");
 
     trtf::GenerateConfig gen_cfg;

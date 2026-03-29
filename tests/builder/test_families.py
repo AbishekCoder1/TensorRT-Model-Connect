@@ -376,6 +376,9 @@ _POSITIVE_MATCH_CASES = [
     ("xlnet", "xlnet"),
     ("convbert", "convbert"),
     ("dpr", "dpr"),
+    # M2M-100 / NLLB (encoder-decoder seq2seq)
+    ("m2m_100", "m2m_100"),
+    ("nllb", "m2m_100"),
 ]
 
 

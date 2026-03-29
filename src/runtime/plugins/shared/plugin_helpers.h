@@ -7,6 +7,7 @@
 
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/inference_state.h"
 #include "trtf/runtime/kv_cache.h"
 #include "trtf/runtime/pipeline_plugin.h"
 #include "bundle/bundle_format.h"

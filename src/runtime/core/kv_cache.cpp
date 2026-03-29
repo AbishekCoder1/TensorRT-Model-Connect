@@ -4,6 +4,7 @@
 #if TRTF_HAS_TRT
 
 #include <algorithm>
+#include <cassert>
 #include <cstring>
 
 namespace trtf {
@@ -32,26 +33,57 @@ KvCache::KvCache(int32_t num_layers, int32_t max_length,
             std::vector<int64_t>{1, kv_dim}, DType::kFloat32, stream);
     }
 
+    // Pre-allocate mask buffer: [max_length + 1] for dense causal mask.
+    mask_buf_.resize(static_cast<std::size_t>(max_length) + 1);
+
     reset();
 }
 
+// Masked score constant — must match trt_engine_lifecycle.h kMaskedScore.
+static constexpr float kMaskedScore = -1.0e4F;
+
 void KvCache::build_attention_mask(std::vector<float>& mask) const
 {
-    // Mask size = max_cache_length + 1 (last slot is current token position).
-    // Format matches the TRT engine's attention_mask input: [1, max_length+1].
+    // DEPRECATED: use prepare_step() instead.
     const auto width = static_cast<std::size_t>(max_length_) + 1;
-    mask.assign(width, -1e4f);
+    mask.assign(width, kMaskedScore);
     const int32_t valid = std::max(0, std::min(position_, max_length_));
     for (int32_t i = 0; i < valid; ++i)
-    {
         mask[static_cast<std::size_t>(i)] = 0.0f;
-    }
-    // Current token slot (last position) is always visible
     mask.back() = 0.0f;
+}
+
+void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/)
+{
+    // Position input (discovered during bind_to).
+    if (has_position_input_)
+    {
+        pos_buf_ = position_;
+        Tensor pos_t;
+        pos_t.data = &pos_buf_;
+        pos_t.shape = {1};
+        pos_t.dtype = DType::kInt32;
+        inputs["position_id"] = pos_t;
+    }
+
+    // Dense causal mask: 0.0 = visible, -1e4 = masked.
+    const int32_t valid = std::max(0, std::min(position_, max_length_));
+    std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
+    for (int32_t i = 0; i < valid; ++i)
+        mask_buf_[static_cast<std::size_t>(i)] = 0.0f;
+    mask_buf_.back() = 0.0f;
+
+    Tensor mask_t;
+    mask_t.data = mask_buf_.data();
+    mask_t.shape = {static_cast<int64_t>(mask_buf_.size())};
+    mask_t.dtype = DType::kFloat32;
+    inputs["attention_mask"] = mask_t;
 }
 
 void KvCache::bind_to(TrtModule& module)
 {
+    has_position_input_ = module.has_input("position_id");
+
     for (int32_t i = 0; i < num_layers_; ++i)
     {
         std::string suffix = "_" + std::to_string(i);
@@ -62,8 +94,13 @@ void KvCache::bind_to(TrtModule& module)
     }
 }
 
-void KvCache::advance()
+void KvCache::advance(int32_t n_tokens)
 {
+    // For now, only single-token advance is supported.
+    // n_tokens > 1 reserved for future batched prefill (TASK-10).
+    assert(n_tokens == 1 && "KvCache::advance: only n_tokens==1 supported");
+    (void)n_tokens;
+
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
     auto row_bytes = static_cast<std::size_t>(kv_dim_) * sizeof(float);
@@ -121,6 +158,16 @@ void KvCache::reset()
         cudaMemsetAsync(present_v_[li].data(), 0, present_v_[li].nbytes(), stream_);
     }
     cudaStreamSynchronize(stream_);
+}
+
+std::size_t KvCache::device_memory_bytes() const
+{
+    std::size_t total = 0;
+    for (const auto& t : cache_k_) total += t.nbytes();
+    for (const auto& t : cache_v_) total += t.nbytes();
+    for (const auto& t : present_k_) total += t.nbytes();
+    for (const auto& t : present_v_) total += t.nbytes();
+    return total;
 }
 
 bool KvCache::ok() const

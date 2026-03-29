@@ -29,12 +29,11 @@ public:
             {"ssm_state", {state_size * d_inner}, "present_ssm"}};
 
         auto state = std::make_unique<RecurrentState>(ctx.config.num_layers, specs, stream);
-        auto mgr = std::make_unique<RecurrentStateManager>(std::move(state));
         auto rgc = make_recurrent_gen_config(ctx.config);
 
         return std::make_unique<RecurrentPipeline>(
-            std::move(loaded.module), std::move(mgr), rgc, stream,
-            "MambaPipeline", std::move(tokenizer), ctx.bundle.info.model_id);
+            std::move(loaded.module), std::move(state),
+            rgc, stream, "MambaPipeline", std::move(tokenizer), ctx.bundle.info.model_id);
     }
 };
 

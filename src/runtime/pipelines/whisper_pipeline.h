@@ -1,11 +1,12 @@
 #pragma once
 
 // WhisperPipeline: encoder-decoder speech-to-text pipeline.
-// Uses TrtModule(encoder) + TrtModule(decoder) + KvCache.
+// Uses TrtModule(encoder) + TrtModule(decoder) + IInferenceState.
 
 #include "trtf/pipeline.h"
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/inference_state.h"
 #include "trtf/runtime/kv_cache.h"
 #include "runtime/domains/audio/whisper_config.h"
 
@@ -29,7 +30,7 @@ public:
     WhisperPipeline(
         std::unique_ptr<TrtModule> encoder,
         std::unique_ptr<TrtModule> decoder,
-        std::unique_ptr<KvCache> cache,
+        std::unique_ptr<IInferenceState> state,
         WhisperConfig whisper_config,
         int32_t hidden_size,
         int32_t num_decoder_layers,
@@ -60,7 +61,7 @@ private:
 
     std::unique_ptr<TrtModule> encoder_;
     std::unique_ptr<TrtModule> decoder_;
-    std::unique_ptr<KvCache> cache_;
+    std::unique_ptr<IInferenceState> state_;
     WhisperConfig whisper_config_;
     int32_t hidden_size_;
     int32_t num_decoder_layers_;

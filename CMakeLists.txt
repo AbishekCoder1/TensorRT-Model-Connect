@@ -87,6 +87,7 @@ add_library(trtf_core
   src/runtime/core/trt_common.cpp
   src/runtime/core/trt_engine_lifecycle.cpp
   src/runtime/core/trt_decode_runtime.cpp
+  src/runtime/core/sampler.cpp
   src/runtime/core/device_kv_cache.cpp
   src/runtime/core/device_tensor.cpp
   src/runtime/core/trt_module.cpp
@@ -101,7 +102,6 @@ add_library(trtf_core
   src/runtime/domains/audio/mel_spectrogram.cpp
   src/runtime/domains/audio/audio_bundle_validation.cpp
   src/runtime/domains/diffusion/diffusion_preprocessor.cpp
-  # Tokenizers
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
   src/tokenizer/bpe_tokenizer.cpp
@@ -113,6 +113,7 @@ add_library(trtf_core
   src/utils/json_helpers.cpp
   src/utils/wav_reader.cpp
   src/utils/image_reader.cpp
+  src/runtime/core/hybrid_state.cpp
   # Registry (factory + plugin dispatch)
   src/runtime/registry/pipeline_factory.cpp
   src/runtime/registry/pipeline_registry.cpp

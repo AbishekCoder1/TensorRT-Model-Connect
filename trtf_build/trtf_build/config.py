@@ -131,7 +131,7 @@ class ModelConfig:
                        or d.get("dim", 0))
         num_heads = (d.get("num_attention_heads", 0) or d.get("n_head", 0)
                      or d.get("attention_heads", 0) or d.get("num_heads", 0)
-                     or d.get("n_heads", 0) or 1)
+                     or d.get("n_heads", 0) or d.get("decoder_attention_heads", 0) or 1)
         num_layers = (d.get("num_hidden_layers", 0) or d.get("n_layer", 0)
                       or d.get("num_layers", 0) or d.get("n_layers", 0))
         intermediate = (d.get("intermediate_size", 0)

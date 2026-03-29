@@ -6,6 +6,7 @@
 #include "trtf/pipeline.h"
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/inference_state.h"
 #include "trtf/runtime/kv_cache.h"
 
 #include <cstdint>
@@ -25,9 +26,9 @@ class OmniPipeline final : public IPipeline {
 public:
     OmniPipeline(
         std::unique_ptr<TrtModule> thinker,
-        std::unique_ptr<KvCache> thinker_cache,
+        std::unique_ptr<IInferenceState> thinker_state,
         std::unique_ptr<TrtModule> talker,
-        std::unique_ptr<KvCache> talker_cache,
+        std::unique_ptr<IInferenceState> talker_state,
         std::unique_ptr<TrtModule> code2wav,
         OmniConfig config,
         cudaStream_t stream,
@@ -58,9 +59,9 @@ private:
         int32_t n_frames);
 
     std::unique_ptr<TrtModule> thinker_;
-    std::unique_ptr<KvCache> thinker_cache_;
+    std::unique_ptr<IInferenceState> thinker_state_;
     std::unique_ptr<TrtModule> talker_;
-    std::unique_ptr<KvCache> talker_cache_;
+    std::unique_ptr<IInferenceState> talker_state_;
     std::unique_ptr<TrtModule> code2wav_;
     std::unique_ptr<OmniConfig> config_;
     cudaStream_t stream_;

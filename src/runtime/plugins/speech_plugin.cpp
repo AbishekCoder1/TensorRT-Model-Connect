@@ -24,9 +24,9 @@ public:
 
         int32_t temporal_kv_dim = compute_kv_dim_kv_heads(ctx.config, ctx.config.hidden_size);
 
-        auto temporal_cache = std::make_unique<KvCache>(
+        std::unique_ptr<IInferenceState> temporal_state = std::make_unique<KvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, temporal_kv_dim, stream);
-        if (!temporal_cache->ok())
+        if (!temporal_state->ok())
             throw std::runtime_error("SpeechPipeline: failed to create temporal KvCache");
 
         auto depth_engines = load_depth_engines(ctx.bundle, shared_stream);
@@ -34,9 +34,9 @@ public:
         const auto depth_cfg = make_depth_engine_config(ctx.config_json, ctx.config);
         int32_t depth_kv_dim = compute_kv_dim_kv_heads(depth_cfg, depth_cfg.hidden_size);
 
-        auto depth_cache = std::make_unique<KvCache>(
+        std::unique_ptr<IInferenceState> depth_state = std::make_unique<KvCache>(
             depth_cfg.num_layers, depth_cfg.max_cache_length, depth_kv_dim, stream);
-        if (!depth_cache->ok())
+        if (!depth_state->ok())
             throw std::runtime_error("SpeechPipeline: failed to create depth KvCache");
 
         auto mimi_encoder = extract_optional_module(
@@ -47,9 +47,9 @@ public:
         return std::make_unique<SpeechPipeline>(
             std::move(mimi_encoder),
             std::move(temporal_loaded.module),
-            std::move(temporal_cache),
+            std::move(temporal_state),
             std::move(depth_engines),
-            std::move(depth_cache),
+            std::move(depth_state),
             std::move(mimi_decoder),
             std::move(speech_cfg),
             stream,

@@ -3,6 +3,7 @@
 // using KvCache for attention layers and RecurrentState for SSM layers.
 
 #include "trtf/runtime/pipeline_registry.h"
+#include "trtf/runtime/hybrid_state.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/pipelines/recurrent_pipeline.h"
 #include "utils/json_helpers.h"
@@ -49,14 +50,14 @@ public:
                 {"ssm_state", {ssm_elems}, "present_ssm"}},
             stream);
 
-        // HybridStateManager combines KvCache + RecurrentState
-        auto mgr = std::make_unique<HybridStateManager>(std::move(cache), std::move(ssm));
+        // HybridState combines KvCache + RecurrentState behind IInferenceState
+        auto hybrid = std::make_unique<HybridState>(std::move(cache), std::move(ssm));
         auto rgc = make_recurrent_gen_config(ctx.config);
         rgc.has_position_input = loaded.module->has_input("position_id");
 
         return std::make_unique<RecurrentPipeline>(
-            std::move(loaded.module), std::move(mgr), rgc, stream,
-            "HybridPipeline", std::move(tokenizer), ctx.bundle.info.model_id);
+            std::move(loaded.module), std::move(hybrid),
+            rgc, stream, "HybridPipeline", std::move(tokenizer), ctx.bundle.info.model_id);
     }
 };
 

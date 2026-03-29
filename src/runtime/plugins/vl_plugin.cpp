@@ -20,7 +20,7 @@ public:
 
         cudaStream_t stream = loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
-        auto cache = std::make_unique<KvCache>(
+        std::unique_ptr<IInferenceState> state = std::make_unique<KvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream);
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
@@ -59,7 +59,7 @@ public:
         auto vl_preprocess = parse_vl_preprocess_config(config_text, preproc_text);
 
         return std::make_unique<VLPipeline>(
-            std::move(loaded.module), std::move(vision_module), std::move(cache),
+            std::move(loaded.module), std::move(vision_module), std::move(state),
             vlc, vl_preprocess, stream, std::move(tokenizer),
             ctx.bundle.info.model_id);
     }

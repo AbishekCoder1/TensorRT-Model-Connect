@@ -27,15 +27,15 @@ public:
             : ((ctx.config.num_heads > 0 && ctx.config.head_dim > 0) ? ctx.config.num_heads * ctx.config.head_dim
                : magpie_cfg.hidden_size);
 
-        auto decoder_cache = std::make_unique<KvCache>(
+        std::unique_ptr<IInferenceState> decoder_state = std::make_unique<KvCache>(
             magpie_cfg.decoder_layers, ctx.config.max_cache_length, kv_dim, stream);
-        if (!decoder_cache->ok())
+        if (!decoder_state->ok())
             throw std::runtime_error("MagpiePipeline: failed to create decoder KvCache");
 
-        std::unique_ptr<KvCache> decoder_cache_uncond;
+        std::unique_ptr<IInferenceState> decoder_state_uncond;
         if (magpie_cfg.cfg_scale > 1.0F)
         {
-            decoder_cache_uncond = std::make_unique<KvCache>(
+            decoder_state_uncond = std::make_unique<KvCache>(
                 magpie_cfg.decoder_layers, ctx.config.max_cache_length, kv_dim, stream);
         }
 
@@ -61,9 +61,9 @@ public:
         return std::make_unique<MagpiePipeline>(
             std::move(enc_loaded.module),
             std::move(dec_loaded.module),
-            std::move(decoder_cache),
+            std::move(decoder_state),
             std::move(codec_module),
-            std::move(decoder_cache_uncond),
+            std::move(decoder_state_uncond),
             std::move(cross_k),
             std::move(cross_v),
             std::move(cross_k_uncond),

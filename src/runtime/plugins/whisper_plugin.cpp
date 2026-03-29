@@ -44,8 +44,8 @@ public:
         cudaStream_t stream = dec_loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         int32_t max_cache = ctx.config.max_cache_length;
-        auto cache = std::make_unique<KvCache>(dl, max_cache, kv_dim, stream);
-        if (!cache->ok())
+        std::unique_ptr<IInferenceState> state = std::make_unique<KvCache>(dl, max_cache, kv_dim, stream);
+        if (!state->ok())
             throw std::runtime_error("Failed to create KvCache for Whisper decoder");
 
         // Load mel filterbank + tokenizer
@@ -59,7 +59,7 @@ public:
 
         return std::make_unique<WhisperPipeline>(
             std::move(enc_loaded.module), std::move(dec_loaded.module),
-            std::move(cache), std::move(wc), ctx.config.hidden_size, dl,
+            std::move(state), std::move(wc), ctx.config.hidden_size, dl,
             std::move(mel_fb),
             mel_n_fft, mel_hop_length, mel_chunk_length, mel_sampling_rate,
             stream, std::move(tok), ctx.bundle.info.model_id);

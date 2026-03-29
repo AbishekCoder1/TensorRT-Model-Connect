@@ -6,7 +6,9 @@
 #include "trtf/pipeline.h"
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/inference_state.h"
 #include "trtf/runtime/kv_cache.h"
+#include "trtf/runtime/sampler.h"
 #include "runtime/domains/multimodal/image_preprocessor.h"
 
 #include <cstdint>
@@ -33,12 +35,13 @@ public:
     VLPipeline(
         std::unique_ptr<TrtModule> text_decoder,
         std::unique_ptr<TrtModule> vision_encoder,
-        std::unique_ptr<KvCache> cache,
+        std::unique_ptr<IInferenceState> state,
         VLConfig config,
         VLPreprocessConfig vl_preprocess,
         cudaStream_t stream,
         std::shared_ptr<ITokenizer> tokenizer = nullptr,
-        std::string model_id_str = "");
+        std::string model_id_str = "",
+        std::unique_ptr<ISampler> sampler = nullptr);
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
@@ -65,17 +68,18 @@ public:
 private:
     std::unique_ptr<TrtModule> text_decoder_;
     std::unique_ptr<TrtModule> vision_encoder_;
-    std::unique_ptr<KvCache> cache_;
+    std::unique_ptr<IInferenceState> state_;
     VLConfig config_;
     VLPreprocessConfig vl_preprocess_;
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
+    std::unique_ptr<ISampler> sampler_;
 
     std::vector<int32_t> generate_from_ids(
         const std::vector<int32_t>& input_ids,
         int32_t max_new_tokens,
-        int32_t eos_token_id);
+        const SamplingParams& params);
 
     // VL generation with vision features injected at image token positions.
     std::vector<int32_t> generate_vl_from_ids(
@@ -84,7 +88,7 @@ private:
         int32_t num_features,
         int32_t feature_dim,
         int32_t max_new_tokens,
-        int32_t eos_token_id);
+        const SamplingParams& params);
 
     std::pair<int32_t, int32_t> resolve_gen_limits(const GenerateConfig& cfg) const;
 

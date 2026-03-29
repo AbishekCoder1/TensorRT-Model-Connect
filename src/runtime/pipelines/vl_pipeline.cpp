@@ -14,25 +14,27 @@ namespace trtf {
 VLPipeline::VLPipeline(
     std::unique_ptr<TrtModule> text_decoder,
     std::unique_ptr<TrtModule> vision_encoder,
-    std::unique_ptr<KvCache> cache,
+    std::unique_ptr<IInferenceState> state,
     VLConfig config,
     VLPreprocessConfig vl_preprocess,
     cudaStream_t stream,
     std::shared_ptr<ITokenizer> tokenizer,
-    std::string model_id_str)
+    std::string model_id_str,
+    std::unique_ptr<ISampler> sampler)
     : text_decoder_(std::move(text_decoder))
     , vision_encoder_(std::move(vision_encoder))
-    , cache_(std::move(cache))
+    , state_(std::move(state))
     , config_(config)
     , vl_preprocess_(std::move(vl_preprocess))
     , stream_(stream)
     , tokenizer_(std::move(tokenizer))
     , model_id_(std::move(model_id_str))
+    , sampler_(std::move(sampler))
 {
     if (!text_decoder_ || !text_decoder_->ok())
         throw std::runtime_error("VLPipeline: invalid text decoder");
-    if (!cache_ || !cache_->ok())
-        throw std::runtime_error("VLPipeline: invalid KvCache");
+    if (!state_ || !state_->ok())
+        throw std::runtime_error("VLPipeline: invalid inference state");
 
     // Sync image_token_id from VLPreprocessConfig if not set in VLConfig
     if (config_.image_token_id < 0 && vl_preprocess_.image_token_id >= 0)
@@ -49,7 +51,8 @@ TextResult VLPipeline::generate(
 
     auto input_ids = tokenizer_->encode(prompt);
     auto [max_new, eos] = resolve_gen_limits(cfg);
-    auto output_ids = generate_from_ids(input_ids, max_new, eos);
+    auto sp = sampling_params_from_config(cfg, eos);
+    auto output_ids = generate_from_ids(input_ids, max_new, sp);
 
     std::vector<int32_t> new_tokens(
         output_ids.begin() + static_cast<std::ptrdiff_t>(input_ids.size()),
@@ -131,7 +134,8 @@ TextResult VLPipeline::generate(
     // Format prompt, tokenize, generate with vision features
     auto input_ids = tokenizer_->encode(format_vl_prompt(prompt, vl_preprocess_));
     auto [max_new, eos] = resolve_gen_limits(cfg);
-    auto out = generate_vl_from_ids(input_ids, features, nf, dim, max_new, eos);
+    auto sp_vl = sampling_params_from_config(cfg, eos);
+    auto out = generate_vl_from_ids(input_ids, features, nf, dim, max_new, sp_vl);
 
     std::vector<int32_t> new_tokens(
         out.begin() + static_cast<std::ptrdiff_t>(input_ids.size()), out.end());
@@ -144,19 +148,30 @@ VLPipeline::GenerationResult VLPipeline::generate_ids(
 {
     int32_t max_new = cfg.max_new_tokens;
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-    return GenerationResult{generate_from_ids(input_ids, max_new, eos)};
+    auto sp = sampling_params_from_config(cfg, eos);
+    return GenerationResult{generate_from_ids(input_ids, max_new, sp)};
 }
 
 std::vector<int32_t> VLPipeline::generate_from_ids(
     const std::vector<int32_t>& input_ids,
     int32_t max_new_tokens,
-    int32_t eos_token_id)
+    const SamplingParams& params)
 {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
 
-    cache_->reset();
-    cache_->bind_to(*text_decoder_);
+    // Create a per-call sampler if none was injected at construction time.
+    ISampler* active_sampler = sampler_.get();
+    std::unique_ptr<ISampler> local_sampler;
+    if (!active_sampler)
+    {
+        local_sampler = create_sampler(params);
+        active_sampler = local_sampler.get();
+    }
+    active_sampler->reset();
+
+    state_->reset();
+    state_->bind_to(*text_decoder_);
 
     std::vector<float> logits;
 
@@ -166,13 +181,15 @@ std::vector<int32_t> VLPipeline::generate_from_ids(
     run_text_step(input_ids.back(), logits);
 
     std::vector<int32_t> output = input_ids;
+    const int32_t vocab_size = static_cast<int32_t>(logits.size());
 
     for (int32_t step = 0; step < max_new_tokens; ++step)
     {
-        int32_t next = argmax(logits);
-        output.push_back(next);
-        if (next == eos_token_id) break;
-        run_text_step(next, logits);
+        SampleResult result = active_sampler->sample(
+            logits.data(), vocab_size, params);
+        output.push_back(result.token_id);
+        if (result.is_eos) break;
+        run_text_step(result.token_id, logits);
     }
 
     return output;
@@ -184,13 +201,23 @@ std::vector<int32_t> VLPipeline::generate_vl_from_ids(
     int32_t num_features,
     int32_t feature_dim,
     int32_t max_new_tokens,
-    int32_t eos_token_id)
+    const SamplingParams& params)
 {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
 
-    cache_->reset();
-    cache_->bind_to(*text_decoder_);
+    // Create a per-call sampler if none was injected at construction time.
+    ISampler* active_sampler = sampler_.get();
+    std::unique_ptr<ISampler> local_sampler;
+    if (!active_sampler)
+    {
+        local_sampler = create_sampler(params);
+        active_sampler = local_sampler.get();
+    }
+    active_sampler->reset();
+
+    state_->reset();
+    state_->bind_to(*text_decoder_);
 
     std::vector<float> logits;
     int32_t feature_index = 0;
@@ -216,12 +243,14 @@ std::vector<int32_t> VLPipeline::generate_vl_from_ids(
 
     // Autoregressive decode
     std::vector<int32_t> output = input_ids;
+    const int32_t vocab_size = static_cast<int32_t>(logits.size());
     for (int32_t step = 0; step < max_new_tokens; ++step)
     {
-        int32_t next = argmax(logits);
-        output.push_back(next);
-        if (next == eos_token_id) break;
-        run_text_step(next, logits);
+        SampleResult result = active_sampler->sample(
+            logits.data(), vocab_size, params);
+        output.push_back(result.token_id);
+        if (result.is_eos) break;
+        run_text_step(result.token_id, logits);
     }
 
     return output;
@@ -229,31 +258,15 @@ std::vector<int32_t> VLPipeline::generate_vl_from_ids(
 
 void VLPipeline::run_text_step(int32_t token_id, std::vector<float>& logits)
 {
-    std::vector<float> mask;
-    cache_->build_attention_mask(mask);
-
-    int32_t position = cache_->position();
+    TensorMap inputs;
 
     Tensor token_t;
     token_t.data = &token_id;
     token_t.shape = {1};
     token_t.dtype = DType::kInt32;
-
-    Tensor pos_t;
-    pos_t.data = &position;
-    pos_t.shape = {1};
-    pos_t.dtype = DType::kInt32;
-
-    Tensor mask_t;
-    mask_t.data = mask.data();
-    mask_t.shape = {static_cast<int64_t>(mask.size())};
-    mask_t.dtype = DType::kFloat32;
-
-    TensorMap inputs;
     inputs["token_id"] = token_t;
-    if (config_.has_position_input && text_decoder_->has_input("position_id"))
-        inputs["position_id"] = pos_t;
-    inputs["attention_mask"] = mask_t;
+
+    state_->prepare_step(inputs);
 
     auto outputs = text_decoder_->forward(inputs);
 
@@ -265,7 +278,7 @@ void VLPipeline::run_text_step(int32_t token_id, std::vector<float>& logits)
     logits.resize(static_cast<std::size_t>(n));
     std::memcpy(logits.data(), it->second.data, n * sizeof(float));
 
-    cache_->advance();
+    state_->advance();
 }
 
 void VLPipeline::run_text_step_with_embed(
@@ -274,45 +287,27 @@ void VLPipeline::run_text_step_with_embed(
     float use_input_embed,
     std::vector<float>& logits)
 {
-    // If the text decoder does not have the input_embed input, fall back
-    // to the normal step (embed_input mode not enabled for this engine).
     if (!text_decoder_->has_input("input_embed"))
     {
         run_text_step(token_id, logits);
         return;
     }
 
-    std::vector<float> mask;
-    cache_->build_attention_mask(mask);
-
-    int32_t position = cache_->position();
+    TensorMap inputs;
 
     Tensor token_t;
     token_t.data = &token_id;
     token_t.shape = {1};
     token_t.dtype = DType::kInt32;
+    inputs["token_id"] = token_t;
 
-    Tensor pos_t;
-    pos_t.data = &position;
-    pos_t.shape = {1};
-    pos_t.dtype = DType::kInt32;
-
-    Tensor mask_t;
-    mask_t.data = mask.data();
-    mask_t.shape = {static_cast<int64_t>(mask.size())};
-    mask_t.dtype = DType::kFloat32;
+    state_->prepare_step(inputs);
 
     // use_input_embed scalar: 1.0 = use input_embed, 0.0 = use token embedding
     Tensor use_embed_t;
     use_embed_t.data = &use_input_embed;
     use_embed_t.shape = {1};
     use_embed_t.dtype = DType::kFloat32;
-
-    TensorMap inputs;
-    inputs["token_id"] = token_t;
-    if (config_.has_position_input && text_decoder_->has_input("position_id"))
-        inputs["position_id"] = pos_t;
-    inputs["attention_mask"] = mask_t;
     inputs["use_input_embed"] = use_embed_t;
 
     // Provide the input embedding vector
@@ -320,7 +315,6 @@ void VLPipeline::run_text_step_with_embed(
     std::vector<float> zero_embed;
     if (input_embed == nullptr)
     {
-        // Provide a zero embed when not injecting
         zero_embed.resize(static_cast<std::size_t>(embed_dim), 0.0F);
         input_embed = zero_embed.data();
     }
@@ -332,11 +326,6 @@ void VLPipeline::run_text_step_with_embed(
     inputs["input_embed"] = embed_t;
 
     // DeepStack: if the engine has deepstack inputs, provide inactive zeros.
-    // Full DeepStack support with per-level features would require the vision
-    // encoder to output multiple feature levels (deepstack_features_0..N).
-    // For now we set deepstack_active=0 which disables the DeepStack injection
-    // in the TRT graph (the text-only embedding path is used for non-image tokens,
-    // and the standard input_embed path is used for image tokens).
     if (text_decoder_->has_input("deepstack_active"))
     {
         float ds_active = 0.0F;
@@ -357,7 +346,7 @@ void VLPipeline::run_text_step_with_embed(
     logits.resize(static_cast<std::size_t>(n));
     std::memcpy(logits.data(), it->second.data, n * sizeof(float));
 
-    cache_->advance();
+    state_->advance();
 }
 
 bool VLPipeline::run_vision_encoder(

@@ -17,9 +17,9 @@ public:
 
         cudaStream_t stream = loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
-        auto cache = std::make_unique<KvCache>(
+        std::unique_ptr<IInferenceState> state = std::make_unique<KvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream);
-        if (!cache->ok())
+        if (!state->ok())
             throw std::runtime_error("Failed to create KvCache");
 
         TextGenConfig tgc;
@@ -29,8 +29,8 @@ public:
         tgc.has_position_input = loaded.module->has_input("position_id");
 
         return std::make_unique<TextGenerationPipeline>(
-            std::move(loaded.module), std::move(cache), tgc, stream,
-            std::move(tokenizer), ctx.bundle.info.model_id);
+            std::move(loaded.module), std::move(state),
+            tgc, stream, std::move(tokenizer), ctx.bundle.info.model_id);
     }
 };
 

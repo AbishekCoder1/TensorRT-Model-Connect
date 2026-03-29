@@ -18,18 +18,18 @@ namespace trtf {
 
 OmniPipeline::OmniPipeline(
     std::unique_ptr<TrtModule> thinker,
-    std::unique_ptr<KvCache> thinker_cache,
+    std::unique_ptr<IInferenceState> thinker_state,
     std::unique_ptr<TrtModule> talker,
-    std::unique_ptr<KvCache> talker_cache,
+    std::unique_ptr<IInferenceState> talker_state,
     std::unique_ptr<TrtModule> code2wav,
     OmniConfig config,
     cudaStream_t stream,
     std::shared_ptr<ITokenizer> tokenizer,
     std::string model_id_str)
     : thinker_(std::move(thinker))
-    , thinker_cache_(std::move(thinker_cache))
+    , thinker_state_(std::move(thinker_state))
     , talker_(std::move(talker))
-    , talker_cache_(std::move(talker_cache))
+    , talker_state_(std::move(talker_state))
     , code2wav_(std::move(code2wav))
     , config_(std::make_unique<OmniConfig>(std::move(config)))
     , stream_(stream)
@@ -38,7 +38,7 @@ OmniPipeline::OmniPipeline(
 {
     if (!thinker_ || !thinker_->ok())
         throw std::runtime_error("OmniPipeline: invalid thinker module");
-    if (!thinker_cache_ || !thinker_cache_->ok())
+    if (!thinker_state_ || !thinker_state_->ok())
         throw std::runtime_error("OmniPipeline: invalid thinker cache");
 }
 
@@ -46,30 +46,14 @@ OmniPipeline::~OmniPipeline() = default;
 
 void OmniPipeline::run_thinker_step(int32_t token_id, std::vector<float>& logits)
 {
-    std::vector<float> mask;
-    thinker_cache_->build_attention_mask(mask);
-    int32_t position = thinker_cache_->position();
-
     Tensor token_tensor;
     token_tensor.data = &token_id;
     token_tensor.shape = {1};
     token_tensor.dtype = DType::kInt32;
 
-    Tensor position_tensor;
-    position_tensor.data = &position;
-    position_tensor.shape = {1};
-    position_tensor.dtype = DType::kInt32;
-
-    Tensor mask_tensor;
-    mask_tensor.data = mask.data();
-    mask_tensor.shape = {static_cast<int64_t>(mask.size())};
-    mask_tensor.dtype = DType::kFloat32;
-
     TensorMap inputs;
     inputs["token_id"] = token_tensor;
-    if (thinker_->has_input("position_id"))
-        inputs["position_id"] = position_tensor;
-    inputs["attention_mask"] = mask_tensor;
+    thinker_state_->prepare_step(inputs);
 
     TensorMap outputs = thinker_->forward(inputs);
 
@@ -82,16 +66,13 @@ void OmniPipeline::run_thinker_step(int32_t token_id, std::vector<float>& logits
     logits.resize(static_cast<std::size_t>(n));
     std::memcpy(logits.data(), lt.data, n * sizeof(float));
 
-    thinker_cache_->advance();
+    thinker_state_->advance();
 }
 
 void OmniPipeline::run_talker_embed_step(
     const float* embed_ptr, int32_t embed_size,
     std::vector<float>& logits)
 {
-    std::vector<float> mask;
-    talker_cache_->build_attention_mask(mask);
-    int32_t position = talker_cache_->position();
     float use_input_embed = 1.0F;
 
     std::vector<float> embed_buf(embed_ptr, embed_ptr + embed_size);
@@ -101,16 +82,6 @@ void OmniPipeline::run_talker_embed_step(
     token_tensor.data = &dummy_token;
     token_tensor.shape = {1};
     token_tensor.dtype = DType::kInt32;
-
-    Tensor position_tensor;
-    position_tensor.data = &position;
-    position_tensor.shape = {1};
-    position_tensor.dtype = DType::kInt32;
-
-    Tensor mask_tensor;
-    mask_tensor.data = mask.data();
-    mask_tensor.shape = {static_cast<int64_t>(mask.size())};
-    mask_tensor.dtype = DType::kFloat32;
 
     Tensor embed_tensor;
     embed_tensor.data = embed_buf.data();
@@ -124,11 +95,9 @@ void OmniPipeline::run_talker_embed_step(
 
     TensorMap inputs;
     inputs["token_id"] = token_tensor;
-    if (talker_->has_input("position_id"))
-        inputs["position_id"] = position_tensor;
-    inputs["attention_mask"] = mask_tensor;
     inputs["input_embed"] = embed_tensor;
     inputs["use_input_embed"] = use_embed_tensor;
+    talker_state_->prepare_step(inputs);
 
     TensorMap outputs = talker_->forward(inputs);
 
@@ -141,7 +110,7 @@ void OmniPipeline::run_talker_embed_step(
     logits.resize(static_cast<std::size_t>(n));
     std::memcpy(logits.data(), lt.data, n * sizeof(float));
 
-    talker_cache_->advance();
+    talker_state_->advance();
 }
 
 static int32_t omni_argmax(const std::vector<float>& logits)
@@ -159,8 +128,8 @@ std::vector<int32_t> OmniPipeline::run_thinker(
 {
     (void)hidden_states_out;
 
-    thinker_cache_->reset();
-    thinker_cache_->bind_to(*thinker_);
+    thinker_state_->reset();
+    thinker_state_->bind_to(*thinker_);
 
     std::vector<float> logits;
 
@@ -191,14 +160,14 @@ std::vector<int32_t> OmniPipeline::run_talker(
     const std::vector<float>& hidden_states,
     int32_t num_tokens)
 {
-    if (!talker_ || !talker_cache_)
+    if (!talker_ || !talker_state_)
     {
         std::cerr << "[trtf] Omni: no Talker engine" << std::endl;
         return {};
     }
 
-    talker_cache_->reset();
-    talker_cache_->bind_to(*talker_);
+    talker_state_->reset();
+    talker_state_->bind_to(*talker_);
 
     const int32_t n_codebooks = config_->talker_n_codebooks;
     const int32_t codebook_size = config_->talker_codebook_size;

@@ -6,6 +6,7 @@
 #include "trtf/pipeline.h"
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/inference_state.h"
 #include "trtf/runtime/kv_cache.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 
@@ -29,9 +30,9 @@ public:
     MagpiePipeline(
         std::unique_ptr<TrtModule> encoder,
         std::unique_ptr<TrtModule> decoder,
-        std::unique_ptr<KvCache> decoder_cache,
+        std::unique_ptr<IInferenceState> decoder_state,
         std::unique_ptr<TrtModule> codec,
-        std::unique_ptr<KvCache> decoder_cache_uncond,
+        std::unique_ptr<IInferenceState> decoder_state_uncond,
         std::vector<CudaBuffer> cross_k,
         std::vector<CudaBuffer> cross_v,
         std::vector<CudaBuffer> cross_k_uncond,
@@ -131,10 +132,10 @@ private:
 
     std::unique_ptr<TrtModule> encoder_;
     std::unique_ptr<TrtModule> decoder_;
-    std::unique_ptr<KvCache> decoder_cache_;
+    std::unique_ptr<IInferenceState> decoder_state_;
     std::unique_ptr<TrtModule> codec_;
 
-    std::unique_ptr<KvCache> decoder_cache_uncond_;
+    std::unique_ptr<IInferenceState> decoder_state_uncond_;
 
     std::vector<CudaBuffer> cross_k_, cross_v_;
     std::vector<CudaBuffer> cross_k_uncond_, cross_v_uncond_;

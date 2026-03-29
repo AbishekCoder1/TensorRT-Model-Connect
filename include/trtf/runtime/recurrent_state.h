@@ -12,6 +12,7 @@
 //   state.advance();
 
 #include "trtf/runtime/device_tensor.h"
+#include "trtf/runtime/inference_state.h"
 
 #include <cstdint>
 #include <string>
@@ -24,7 +25,7 @@ namespace trtf {
 
 class TrtModule;
 
-class RecurrentState {
+class RecurrentState : public IInferenceState {
 public:
     // Specification for one named state tensor per layer.
     struct TensorSpec {
@@ -40,28 +41,29 @@ public:
     // For RWKV:  specs = {{"attn_state", {hidden}, "present_attn"}, ...}
     RecurrentState(int32_t num_layers, std::vector<TensorSpec> specs, cudaStream_t stream);
 
-    // Bind all state tensors to a TrtModule.
-    // For each spec and layer i:
-    //   input name:  "{spec.name}_{i}"
-    //   output name: "{spec.output_prefix}_{i}"  (or "present_{spec.name}_{i}" if output_prefix is empty)
-    void bind_to(TrtModule& module);
+    // --- IInferenceState overrides ---
+    void reset() override;
+    void bind_to(TrtModule& module) override;
+    void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
+    void advance(int32_t n_tokens = 1) override;
+    int32_t position() const override { return position_; }
+    int32_t max_length() const override { return -1; }  // unbounded
+    int32_t num_layers() const override { return num_layers_; }
+    bool needs_attention_mask() const override { return false; }
+    std::size_t device_memory_bytes() const override;
+    const char* state_type() const override { return "recurrent"; }
+    bool ok() const override;
 
-    // After each step: copy present→state for all tensors (D2D async).
-    void advance();
-
-    // Reset all state to zeros.
-    void reset();
-
-    int32_t num_layers() const { return num_layers_; }
+    // --- RecurrentState-specific methods ---
     const std::vector<TensorSpec>& specs() const { return specs_; }
-    bool ok() const;
 
 private:
     std::vector<TensorSpec> specs_;
-    // state_[spec_index][layer_index] → DeviceTensor
+    // state_[spec_index][layer_index] -> DeviceTensor
     std::vector<std::vector<DeviceTensor>> state_;
     std::vector<std::vector<DeviceTensor>> present_;
     int32_t num_layers_{0};
+    int32_t position_{0};
     cudaStream_t stream_{nullptr};
 };
 

@@ -1,5 +1,5 @@
 // Seq2SeqPlugin: handles "seq2seq_encoder_decoder" strategy.
-// Encoder-decoder text-to-text pipeline for BART/Marian translation models.
+// Encoder-decoder text-to-text pipeline for BART/Marian/M2M-100/NLLB translation models.
 
 #include "trtf/runtime/pipeline_registry.h"
 #include "trtf/runtime/pipeline_plugin.h"
@@ -27,7 +27,7 @@ public:
     Seq2SeqPipeline(
         std::unique_ptr<TrtModule> encoder,
         std::unique_ptr<TrtModule> decoder,
-        std::unique_ptr<KvCache> state,
+        std::unique_ptr<IInferenceState> state,
         int32_t hidden_size,
         int32_t num_decoder_layers,
         int32_t max_source_length,
@@ -40,7 +40,7 @@ public:
         std::string model_id_str)
         : encoder_(std::move(encoder))
         , decoder_(std::move(decoder))
-        , cache_(std::move(state))
+        , state_(std::move(state))
         , hidden_size_(hidden_size)
         , num_decoder_layers_(num_decoder_layers)
         , max_source_length_(max_source_length)
@@ -56,8 +56,8 @@ public:
             throw std::runtime_error("Seq2SeqPipeline: invalid encoder");
         if (!decoder_ || !decoder_->ok())
             throw std::runtime_error("Seq2SeqPipeline: invalid decoder");
-        if (!cache_ || !cache_->ok())
-            throw std::runtime_error("Seq2SeqPipeline: invalid cache");
+        if (!state_ || !state_->ok())
+            throw std::runtime_error("Seq2SeqPipeline: invalid state");
 
         cross_kv_bytes_ = static_cast<std::size_t>(max_source_length_)
             * static_cast<std::size_t>(hidden_size_) * sizeof(float);
@@ -157,49 +157,13 @@ private:
     }
 
     std::vector<int32_t> run_decoder(int32_t max_new_tokens) {
-        cache_->reset();
-        cache_->bind_to(*decoder_);
+        state_->reset();
+        state_->bind_to(*decoder_);
         std::vector<int32_t> output_ids;
         std::vector<float> logits;
-        std::vector<float> mask;
         int32_t current_token = decoder_start_token_id_;
         for (int32_t step = 0; step < max_new_tokens; ++step) {
-            // Build attention mask
-            cache_->build_attention_mask(mask);
-
-            // Set up inputs
-            int32_t position = cache_->position();
-            TensorMap inputs;
-            Tensor token_tensor;
-            token_tensor.data = &current_token;
-            token_tensor.shape = {1};
-            token_tensor.dtype = DType::kInt32;
-            inputs["token_id"] = token_tensor;
-
-            Tensor position_tensor;
-            if (decoder_->has_input("position_id")) {
-                position_tensor.data = &position;
-                position_tensor.shape = {1};
-                position_tensor.dtype = DType::kInt32;
-                inputs["position_id"] = position_tensor;
-            }
-
-            Tensor mask_tensor;
-            mask_tensor.data = mask.data();
-            mask_tensor.shape = {static_cast<int64_t>(mask.size())};
-            mask_tensor.dtype = DType::kFloat32;
-            inputs["attention_mask"] = mask_tensor;
-
-            TensorMap outputs = decoder_->forward(inputs);
-            auto it = outputs.find("logits");
-            if (it == outputs.end())
-                throw std::runtime_error("Seq2SeqPipeline: no logits output");
-            auto num = it->second.numel();
-            logits.resize(static_cast<std::size_t>(num));
-            std::memcpy(logits.data(), it->second.data, num * sizeof(float));
-
-            cache_->advance();
-
+            run_decoder_step(current_token, logits);
             int32_t next = select_argmax_token(logits);
             if (next == eos_token_id_) break;
             output_ids.push_back(next);
@@ -208,9 +172,27 @@ private:
         return output_ids;
     }
 
+    void run_decoder_step(int32_t token_id, std::vector<float>& logits) {
+        Tensor token_tensor;
+        token_tensor.data = &token_id;
+        token_tensor.shape = {1};
+        token_tensor.dtype = DType::kInt32;
+        TensorMap inputs;
+        inputs["token_id"] = token_tensor;
+        state_->prepare_step(inputs);
+        TensorMap outputs = decoder_->forward(inputs);
+        auto it = outputs.find("logits");
+        if (it == outputs.end())
+            throw std::runtime_error("Seq2SeqPipeline: no logits output");
+        auto num = it->second.numel();
+        logits.resize(static_cast<std::size_t>(num));
+        std::memcpy(logits.data(), it->second.data, num * sizeof(float));
+        state_->advance();
+    }
+
     std::unique_ptr<TrtModule> encoder_;
     std::unique_ptr<TrtModule> decoder_;
-    std::unique_ptr<KvCache> cache_;
+    std::unique_ptr<IInferenceState> state_;
     int32_t hidden_size_;
     int32_t num_decoder_layers_;
     int32_t max_source_length_;
@@ -238,7 +220,7 @@ public:
             enc_loaded.stream);
         int32_t decoder_layers = extract_json_int(json, "decoder_layers", ctx.config.num_layers);
         int32_t dl = (decoder_layers > 0) ? decoder_layers : ctx.config.num_layers;
-        int32_t max_source_length = ctx.config.max_cache_length;
+        int32_t max_source_length = extract_json_int(json, "max_source_length", 128);
         int32_t decoder_start_token_id = extract_json_int(json, "decoder_start_token_id", 2);
         int32_t eos_token_id = (ctx.config.id_eos >= 0) ? ctx.config.id_eos : 2;
         int32_t bos_token_id = (ctx.config.id_bos >= 0) ? ctx.config.id_bos : -1;

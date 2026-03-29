@@ -10,7 +10,8 @@
 #include "trtf/pipeline.h"
 #include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
-#include "trtf/runtime/kv_cache.h"
+#include "trtf/runtime/inference_state.h"
+#include "trtf/runtime/sampler.h"
 
 #include <cstdint>
 #include <memory>
@@ -32,11 +33,12 @@ class TextGenerationPipeline final : public IPipeline {
 public:
     TextGenerationPipeline(
         std::unique_ptr<TrtModule> decoder,
-        std::unique_ptr<KvCache> cache,
+        std::unique_ptr<IInferenceState> state,
         TextGenConfig config,
         cudaStream_t stream,
         std::shared_ptr<ITokenizer> tokenizer = nullptr,
-        std::string model_id_str = "");
+        std::string model_id_str = "",
+        std::unique_ptr<ISampler> sampler = nullptr);
 
     // Public API: takes raw text, returns typed result.
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
@@ -56,17 +58,18 @@ public:
 
 private:
     std::unique_ptr<TrtModule> decoder_;
-    std::unique_ptr<KvCache> cache_;
+    std::unique_ptr<IInferenceState> state_;
     TextGenConfig config_;
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
+    std::unique_ptr<ISampler> sampler_;
 
-    // Internal: generate from token IDs.
+    // Internal: generate from token IDs with sampling parameters.
     std::vector<int32_t> generate_from_ids(
         const std::vector<int32_t>& input_ids,
         int32_t max_new_tokens,
-        int32_t eos_token_id);
+        const SamplingParams& params);
 
     // Run one decoder step: token_id → logits. Updates cache.
     void run_step(int32_t token_id, std::vector<float>& logits);
