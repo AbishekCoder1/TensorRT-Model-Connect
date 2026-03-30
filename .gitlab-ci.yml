@@ -121,6 +121,27 @@ check-cyclomatic-complexity:
     - python tools/check_cyclomatic_complexity.py src --max-ccn ${CCM_MAX_CCN:-10} --top 20
   timeout: 15m
 
+lint-check:
+  stage: tier1-unit
+  needs: [build-all]
+  script:
+    - pip install --quiet ruff
+    # Only lint files changed in this MR (codebase has pre-existing violations)
+    - |
+      CHANGED_PY=$(git diff --name-only ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} -- '*.py' || true)
+      if [ -n "$CHANGED_PY" ]; then
+        echo "Checking Python lint on changed files:"
+        echo "$CHANGED_PY"
+        echo "$CHANGED_PY" | xargs ruff check --config ruff.toml
+      fi
+    - |
+      CHANGED_CPP=$(git diff --name-only ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} -- '*.cpp' '*.h' || true)
+      if [ -n "$CHANGED_CPP" ]; then
+        echo "Checking C++ formatting on changed files:"
+        echo "$CHANGED_CPP" | xargs clang-format --dry-run --Werror
+      fi
+  timeout: 5m
+
 test-tools:
   stage: tier1-unit
   needs: [build-all, impact-analysis]
