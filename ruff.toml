@@ -1,0 +1,19 @@
+# ruff configuration for trtf quality gate.
+# Start permissive (E, W, F only), tighten over time.
+
+line-length = 100
+
+[lint]
+select = ["E", "W", "F"]
+ignore = [
+    "E501",  # line too long
+    "E741",  # ambiguous variable names
+    "W291",  # trailing whitespace
+    "W292",  # no newline at end
+    "W293",  # whitespace before ':'
+]
+
+[lint.per-file-ignores]
+"tests/**" = ["F811"]
+
+[format]
