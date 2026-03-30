@@ -320,8 +320,8 @@ def _build_metadata(manifest: dict) -> dict:
     standard_fields = {
         "name", "hf_id", "model_id", "bundle", "family", "runtime_strategy",
         "task_strategy", "reference_backend", "oracle_level", "prompt",
-        "test_prompt", "max_new_tokens", "max_cache_length", "logit_atol",
-        "layer_atol", "trust_remote_code", "skip", "test_image",
+        "test_prompt", "max_new_tokens", "max_cache_length", "precision",
+        "logit_atol", "layer_atol", "trust_remote_code", "skip", "test_image",
         "test_input_audio", "speech_reference_tokens", "speech_test_max_frames",
         "speech_min_token_match", "speech_min_frame_exact", "speech_min_rms",
         "point_x", "point_y", "num_expected_masks", "min_pixel_agreement",
@@ -341,6 +341,11 @@ def _build_metadata(manifest: dict) -> dict:
     # can access it via case.metadata["trust_remote_code"].
     if "trust_remote_code" in manifest:
         meta["trust_remote_code"] = manifest["trust_remote_code"]
+
+    # Propagate precision to metadata so the orchestrator can pass it to
+    # the trtf-build CLI when building bundles.
+    if "precision" in manifest:
+        meta["precision"] = manifest["precision"]
 
     return meta
 

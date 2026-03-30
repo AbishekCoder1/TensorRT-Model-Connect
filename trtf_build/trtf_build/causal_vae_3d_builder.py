@@ -212,10 +212,9 @@ def build_causal_vae_3d_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
-    config.clear_flag(trt.BuilderFlag.TF32)
 
     num_levels = len(dim_mult)
     channels_list = [base_dim * m for m in dim_mult]  # [96, 192, 384, 384]
@@ -397,16 +396,18 @@ def build_causal_vae_3d_engine(
     _set_cache_output(cache_idx - 1, co_cache_out)
 
     # --- Mark outputs ---
-    x.name = "video_frame"
-    network.mark_output(x)
-    x.dtype = trt.float32
+    cast_x = network.add_cast(x, trt.float32)
+    x_out = cast_x.get_output(0)
+    x_out.name = "video_frame"
+    network.mark_output(x_out)
 
     # Mark cache outputs
     for idx in sorted(cache_outputs.keys()):
         t = cache_outputs[idx]
-        t.name = f"cache_out_{idx}"
-        network.mark_output(t)
-        t.dtype = trt.float32
+        cast_t = network.add_cast(t, trt.float32)
+        t_out = cast_t.get_output(0)
+        t_out.name = f"cache_out_{idx}"
+        network.mark_output(t_out)
 
     total_caches = cache_idx
     print(f"[vae-3d] Building TRT engine: {total_caches} caches, "

@@ -91,7 +91,7 @@ class TestCmdBuildValidation:
     def test_missing_model(self):
         """_cmd_build returns 1 when model is empty."""
         from trtf_build.cli import _cmd_build
-        args = argparse.Namespace(model="", output="out.trtfb",
+        args = argparse.Namespace(model="", output="out.trtfb", quantize=None, quant_scales=None, quant_calibration_samples=512,
                                   max_cache_length=256, verbose=False)
         result = _cmd_build(args)
         assert result == 1
@@ -99,7 +99,7 @@ class TestCmdBuildValidation:
     def test_missing_output(self):
         """_cmd_build returns 1 when output is empty."""
         from trtf_build.cli import _cmd_build
-        args = argparse.Namespace(model="some-model", output="",
+        args = argparse.Namespace(model="some-model", output="", quantize=None, quant_scales=None, quant_calibration_samples=512,
                                   max_cache_length=256, verbose=False)
         result = _cmd_build(args)
         assert result == 1
@@ -184,10 +184,11 @@ class TestCmdBuildMocked:
         captured_kwargs = {}
 
         def mock_build(model_id_or_path, output_path, max_cache_length, *,
-                       verbose=False):
+                       precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False):
             captured_kwargs["model_id_or_path"] = model_id_or_path
             captured_kwargs["output_path"] = output_path
             captured_kwargs["max_cache_length"] = max_cache_length
+            captured_kwargs["precision"] = precision
             captured_kwargs["verbose"] = verbose
 
         # _cmd_build does a lazy `from .engine_builder import build` at call
@@ -199,6 +200,8 @@ class TestCmdBuildMocked:
                 model="/path/to/model",
                 output=str(tmp_path / "out.trtfb"),
                 max_cache_length=512,
+                precision="fp32",
+                quantize=None, quant_scales=None, quant_calibration_samples=512,
                 verbose=True,
             )
             result = _cmd_build(args)
@@ -219,7 +222,7 @@ class TestCmdBuildMocked:
         received_verbose = []
 
         def mock_build(model_id_or_path, output_path, max_cache_length, *,
-                       verbose=False):
+                       precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False):
             received_verbose.append(verbose)
 
         original_build = eb.build
@@ -227,14 +230,14 @@ class TestCmdBuildMocked:
         try:
             args = argparse.Namespace(
                 model="some-model", output=str(tmp_path / "out.trtfb"),
-                max_cache_length=256, verbose=True)
+                max_cache_length=256, precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=True)
             _cmd_build(args)
             assert received_verbose == [True]
 
             received_verbose.clear()
             args = argparse.Namespace(
                 model="some-model", output=str(tmp_path / "out.trtfb"),
-                max_cache_length=256, verbose=False)
+                max_cache_length=256, precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False)
             _cmd_build(args)
             assert received_verbose == [False]
         finally:
@@ -248,7 +251,7 @@ class TestCmdBuildMocked:
         received_cache = []
 
         def mock_build(model_id_or_path, output_path, max_cache_length, *,
-                       verbose=False):
+                       precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False):
             received_cache.append(max_cache_length)
 
         original_build = eb.build
@@ -259,6 +262,9 @@ class TestCmdBuildMocked:
                     model="some-model",
                     output=str(tmp_path / "out.trtfb"),
                     max_cache_length=cache_len,
+                    precision="fp32",
+                    quantize=None, quant_scales=None,
+                    quant_calibration_samples=512,
                     verbose=False)
                 _cmd_build(args)
             assert received_cache == [128, 1024, 4096]
@@ -280,6 +286,7 @@ class TestCmdBuildMocked:
                 model="some-model",
                 output=str(tmp_path / "out.trtfb"),
                 max_cache_length=256,
+                precision="fp32",
                 verbose=False)
             result = _cmd_build(args)
             assert result == 1

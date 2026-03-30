@@ -51,11 +51,13 @@ public:
 
         // Create KvCaches for semantic and coarse stages
         int32_t sem_kv_dim = compute_kv_dim(ctx.config);
+        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> sem_state = std::make_unique<KvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, sem_kv_dim, stream);
+            ctx.config.num_layers, ctx.config.max_cache_length, sem_kv_dim, stream,
+            cache_dtype);
 
         // Coarse engine may have different dimensions -- resolve with semantic fallbacks
-        std::unique_ptr<IInferenceState> coarse_state(make_coarse_kv_cache(json, ctx.config, stream));
+        std::unique_ptr<IInferenceState> coarse_state(make_coarse_kv_cache(json, ctx.config, stream, cache_dtype));
 
         // Load embeddings
         auto sem_embed = section_to_floats(find_section(ctx.bundle, "semantic_embed"));

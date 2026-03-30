@@ -56,6 +56,10 @@ def _cmd_build(args: argparse.Namespace) -> int:
             model_id_or_path=args.model,
             output_path=args.output,
             max_cache_length=args.max_cache_length,
+            precision=args.precision,
+            quantize=args.quantize,
+            quant_scales=args.quant_scales,
+            quant_calibration_samples=args.quant_calibration_samples,
             verbose=args.verbose,
             fp8_scales=fp8_scales,
         )
@@ -96,6 +100,8 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
             ("Attention heads", "num_attention_heads"),
             ("KV heads", "num_key_value_heads"),
             ("Max cache length", "max_cache_length"),
+            ("Precision", "precision"),
+            ("Quantization", "quantization"),
         ]
         for label, key in fields:
             print(f"{label + ':':<20} {header.get(key, '')}")
@@ -137,6 +143,19 @@ def main() -> None:
                          help="Output .trtfb file path")
     build_p.add_argument("--max-cache-length", type=int, default=256,
                          help="KV cache length (default: 256)")
+    build_p.add_argument("--precision", choices=["fp32", "fp16", "bf16"],
+                         default="fp32",
+                         help="Engine precision (default: fp32)")
+    build_p.add_argument("--quantize",
+                         choices=["fp8", "int8", "int4", "nvfp4", "w4a8"],
+                         default=None,
+                         help="Quantization format (default: none)")
+    build_p.add_argument("--quant-scales",
+                         default=None,
+                         help="Path to pre-computed quantization scales JSON (skips calibration)")
+    build_p.add_argument("--quant-calibration-samples",
+                         type=int, default=512,
+                         help="Number of calibration samples for PTQ (default: 512)")
     build_p.add_argument("--verbose", action="store_true",
                          help="Verbose TRT builder output")
     build_p.add_argument("--fp8", action="store_true",

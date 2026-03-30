@@ -42,10 +42,9 @@ def build_clip_encoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
-    config.clear_flag(trt.BuilderFlag.TF32)
 
     input_ids = network.add_input("input_ids", trt.int32, (max_seq_len,))
 
@@ -198,9 +197,10 @@ def build_clip_encoder_engine(
         network, hidden, hidden_size, final_ln_w, final_ln_b, eps_t)
 
     # Outputs
-    hidden.name = "text_embeddings"
-    network.mark_output(hidden)
-    hidden.dtype = trt.float32
+    cast_hidden = network.add_cast(hidden, trt.float32)
+    hidden_out = cast_hidden.get_output(0)
+    hidden_out.name = "text_embeddings"
+    network.mark_output(hidden_out)
 
     # Pooled output: extract at position of EOS token (last position)
     # For FLUX, we just take the last-token embedding as pooled output.
@@ -212,9 +212,10 @@ def build_clip_encoder_engine(
     pooled_flat = network.add_shuffle(pooled_slice.get_output(0))
     pooled_flat.reshape_dims = (hidden_size,)
     pooled_out = pooled_flat.get_output(0)
-    pooled_out.name = "pooled_output"
-    network.mark_output(pooled_out)
-    pooled_out.dtype = trt.float32
+    cast_pooled = network.add_cast(pooled_out, trt.float32)
+    pooled_final = cast_pooled.get_output(0)
+    pooled_final.name = "pooled_output"
+    network.mark_output(pooled_final)
 
     print(f"[clip-builder] Building TRT engine "
           f"(hidden={hidden_size}, layers={num_layers}, seq={max_seq_len}) ...",

@@ -132,7 +132,8 @@ class DistilBertPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
     ) -> bytes:
         return build_encoder_engine(
             config, weights,

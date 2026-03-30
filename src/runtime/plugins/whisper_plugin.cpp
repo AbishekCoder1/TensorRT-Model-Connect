@@ -44,7 +44,8 @@ public:
         cudaStream_t stream = dec_loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         int32_t max_cache = ctx.config.max_cache_length;
-        std::unique_ptr<IInferenceState> state = std::make_unique<KvCache>(dl, max_cache, kv_dim, stream);
+        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
+        std::unique_ptr<IInferenceState> state = std::make_unique<KvCache>(dl, max_cache, kv_dim, stream, cache_dtype);
         if (!state->ok())
             throw std::runtime_error("Failed to create KvCache for Whisper decoder");
 

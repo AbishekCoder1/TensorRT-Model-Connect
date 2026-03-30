@@ -37,7 +37,8 @@ def build_vision_engine_from_onnx(
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+        | 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     parser = trt.OnnxParser(network, logger)
 
     if not parser.parse(onnx_bytes):

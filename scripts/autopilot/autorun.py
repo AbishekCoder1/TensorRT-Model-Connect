@@ -175,6 +175,8 @@ WORKER_PROMPT = textwrap.dedent("""\
     This MUST pass. If it fails, debug and fix. Do NOT report success
     unless this pytest command exits with 0.
 
+    {optimize_section}
+
     ### Report
     Print a clear summary:
     - PASS or FAIL
@@ -289,9 +291,30 @@ def select_tasks(
 # Build prompt
 # ---------------------------------------------------------------------------
 
-def build_prompt(task: dict, agent_id: str) -> str:
+_OPTIMIZE_SECTION = """\
+### Optimize (precision tuning)
+
+    After all validation gates pass, optimize the model for low precision:
+
+    1. Read the optimization skill:
+       cat /workspace/users/yifeif/workspaces/{agent_id}/trt-transformers-cpp/.claude/skills/optimize-model-precision.md
+    2. Follow the skill instructions to find the best non-FP32 precision config
+    3. Use the progress file at /tmp/optimize_progress_{family_name}.json
+    4. At minimum, build and validate an FP16 variant (guaranteed to work for standard decoders)
+    5. Update the E2E manifest with the recommended precision field
+    6. Create a second manifest for the optimized variant (e.g., {family_name}-fp16.json)
+"""
+
+
+def build_prompt(task: dict, agent_id: str, *, optimize: bool = False) -> str:
     """Fill in the worker prompt template."""
     trust_rc = task.get("trust_remote_code", False)
+    optimize_section = ""
+    if optimize:
+        optimize_section = _OPTIMIZE_SECTION.format(
+            agent_id=agent_id,
+            family_name=task["family_name"],
+        )
     return WORKER_PROMPT.format(
         model_type=task["model_type"],
         hf_id=task["hf_id"],
@@ -303,6 +326,7 @@ def build_prompt(task: dict, agent_id: str) -> str:
         trust_remote_code_py=", trust_remote_code=True" if trust_rc else "",
         trust_manifest_line=(
             ',\n    "trust_remote_code": true' if trust_rc else ""),
+        optimize_section=optimize_section,
     )
 
 
@@ -313,6 +337,7 @@ def build_prompt(task: dict, agent_id: str) -> str:
 def launch_batch(
     batch: list[tuple[str, dict]],  # [(agent_id, task), ...]
     dry_run: bool = False,
+    optimize: bool = False,
 ) -> dict[str, subprocess.Popen]:
     """Launch claude --print for each (agent_id, task) pair."""
     claude_bin = shutil.which("claude")
@@ -323,7 +348,7 @@ def launch_batch(
     procs = {}
     for agent_id, task in batch:
         workspace = f"{WORKSPACE_ROOT}/{agent_id}/trt-transformers-cpp"
-        prompt = build_prompt(task, agent_id)
+        prompt = build_prompt(task, agent_id, optimize=optimize)
         family = task["family_name"]
 
         if dry_run:
@@ -446,6 +471,8 @@ def main():
                         help="Per-batch timeout in seconds (default: 1800)")
     parser.add_argument("--include-trust-remote-code", action="store_true",
                         help="Include models needing trust_remote_code")
+    parser.add_argument("--optimize", action="store_true",
+                        help="After validation, run precision optimization (FP16/FP8/INT8)")
     parser.add_argument("--discover-container", default=DISCOVER_CONTAINER,
                         help=f"Container for discovery (default: {DISCOVER_CONTAINER})")
     args = parser.parse_args()
@@ -504,7 +531,8 @@ def main():
         batch = list(zip(agent_ids[:len(batch_tasks)], batch_tasks))
 
         print(f"\n--- Batch {batch_num + 1}/{total_batches} ---")
-        procs = launch_batch(batch, dry_run=args.dry_run)
+        procs = launch_batch(batch, dry_run=args.dry_run,
+                             optimize=args.optimize)
 
         if args.dry_run:
             continue

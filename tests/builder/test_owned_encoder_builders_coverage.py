@@ -70,8 +70,10 @@ class _FakeNetwork:
     def add_constant(self, shape: tuple[int, ...], weights: object) -> _FakeLayer:
         return self._record("add_constant", shape, weights)
 
-    def add_cast(self, *args, **kwargs) -> _FakeLayer:
-        return self._record("add_cast", *args, **kwargs)
+    def add_cast(self, tensor, target_dtype, **kwargs) -> _FakeLayer:
+        layer = self._record("add_cast", tensor, target_dtype, **kwargs)
+        layer._output.dtype = target_dtype
+        return layer
 
     def add_identity(self, *args, **kwargs) -> _FakeLayer:
         return self._record("add_identity", *args, **kwargs)
@@ -145,7 +147,7 @@ def _make_fake_trt() -> types.SimpleNamespace:
             self.build_calls: list[tuple[_FakeNetwork, _FakeBuilderConfig]] = []
             type(self).last_instance = self
 
-        def create_network(self):
+        def create_network(self, flags=0):
             return self.network
 
         def create_builder_config(self):
@@ -166,6 +168,7 @@ def _make_fake_trt() -> types.SimpleNamespace:
         ActivationType=types.SimpleNamespace(SIGMOID="sigmoid"),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
         BuilderFlag=types.SimpleNamespace(TF32="tf32"),
+        NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         Permutation=lambda dims: tuple(dims),
         float32="float32",
         int32="int32",
@@ -355,7 +358,7 @@ def test_build_clip_encoder_engine_success_uses_fake_builder_and_marks_outputs(m
     assert plan == b"engine-plan"
     builder = fake_trt.Builder.last_instance
     assert builder.config.pool_limits == [("workspace", 4 << 30)]
-    assert builder.config.cleared_flags == ["tf32"]
+    assert builder.config.cleared_flags == []
     assert [t.name for t in builder.network.outputs] == ["text_embeddings", "pooled_output"]
     assert [t.dtype for t in builder.network.outputs] == ["float32", "float32"]
     assert any(shape == (1, 3, 3) for shape, _ in constant_payloads)
@@ -593,7 +596,7 @@ def test_build_encoder_engine_success_passes_rel_pos_bias_and_activation(monkeyp
 
     builder = fake_trt.Builder.last_instance
     assert builder.config.pool_limits == [("workspace", 1 << 30)]
-    assert builder.config.cleared_flags == ["tf32"]
+    assert builder.config.cleared_flags == []
     assert [t.name for t in builder.network.outputs] == ["hidden_states"]
 
 
@@ -680,7 +683,7 @@ def test_build_qwen3_encoder_engine_success_with_gqa_and_negative_output_layer(m
     assert plan == b"engine-plan"
     builder = fake_trt.Builder.last_instance
     assert builder.config.pool_limits == [("workspace", 64 << 30)]
-    assert builder.config.cleared_flags == ["tf32"]
+    assert builder.config.cleared_flags == []
     assert [t.name for t in builder.network.outputs] == ["text_embeddings"]
     assert [t.dtype for t in builder.network.outputs] == ["float32"]
     assert sum(1 for op, _args, _kwargs in builder.network.calls if op == "add_concatenation") >= 2

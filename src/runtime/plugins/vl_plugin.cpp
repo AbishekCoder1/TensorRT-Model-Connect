@@ -20,8 +20,10 @@ public:
 
         cudaStream_t stream = loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
+        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> state = std::make_unique<KvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream);
+            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream,
+            cache_dtype);
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 

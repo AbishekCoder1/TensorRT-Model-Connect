@@ -66,6 +66,8 @@ void parse_strategy_and_tokenizer_flags(const std::string& config_text, BaseConf
     cfg.runtime_strategy = extract_json_string(
         config_text, "runtime_strategy", "decoder_kv_cache");
 
+    cfg.precision = extract_json_string(config_text, "precision", "fp32");
+
     int32_t raw = extract_json_int(config_text, "tokenizer_add_special_tokens", -1);
     if (raw >= 0)
     {

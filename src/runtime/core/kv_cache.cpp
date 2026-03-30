@@ -10,11 +10,14 @@
 namespace trtf {
 
 KvCache::KvCache(int32_t num_layers, int32_t max_length,
-                 int32_t kv_dim, cudaStream_t stream)
+                 int32_t kv_dim, cudaStream_t stream,
+                 DType cache_dtype)
     : num_layers_(num_layers)
     , max_length_(max_length)
     , kv_dim_(kv_dim)
     , stream_(stream)
+    , cache_dtype_(cache_dtype)
+    , cache_element_size_(dtype_size(cache_dtype))
 {
     cache_k_.reserve(static_cast<std::size_t>(num_layers));
     cache_v_.reserve(static_cast<std::size_t>(num_layers));
@@ -24,13 +27,13 @@ KvCache::KvCache(int32_t num_layers, int32_t max_length,
     for (int32_t i = 0; i < num_layers; ++i)
     {
         cache_k_.emplace_back(
-            std::vector<int64_t>{max_length, kv_dim}, DType::kFloat32, stream);
+            std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
         cache_v_.emplace_back(
-            std::vector<int64_t>{max_length, kv_dim}, DType::kFloat32, stream);
+            std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
         present_k_.emplace_back(
-            std::vector<int64_t>{1, kv_dim}, DType::kFloat32, stream);
+            std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
         present_v_.emplace_back(
-            std::vector<int64_t>{1, kv_dim}, DType::kFloat32, stream);
+            std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
     }
 
     // Pre-allocate mask buffer: [max_length + 1] for dense causal mask.
@@ -103,7 +106,7 @@ void KvCache::advance(int32_t n_tokens)
 
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
-    auto row_bytes = static_cast<std::size_t>(kv_dim_) * sizeof(float);
+    auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
 
     if (position_ < max_length_)
     {

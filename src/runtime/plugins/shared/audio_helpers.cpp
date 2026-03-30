@@ -44,14 +44,15 @@ std::vector<int32_t> parse_speech_text_prompt_ids(const std::string& config_text
 } // namespace
 
 std::unique_ptr<KvCache> make_coarse_kv_cache(
-    const std::string& json, const BaseConfig& base, cudaStream_t stream)
+    const std::string& json, const BaseConfig& base, cudaStream_t stream,
+    DType cache_dtype)
 {
     int32_t hidden = extract_json_int(json, "coarse_hidden_size", base.hidden_size);
     int32_t layers = extract_json_int(json, "coarse_num_layers", base.num_layers);
     int32_t heads  = extract_json_int(json, "coarse_num_heads", base.num_heads);
     int32_t hd     = (heads > 0) ? hidden / heads : 128;
     int32_t max_cache = extract_json_int(json, "coarse_max_cache_length", base.max_cache_length);
-    return std::make_unique<KvCache>(layers, max_cache, heads * hd, stream);
+    return std::make_unique<KvCache>(layers, max_cache, heads * hd, stream, cache_dtype);
 }
 
 MagpieTTSConfig build_magpie_config(const std::string& json, const BaseConfig& base)

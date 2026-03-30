@@ -95,14 +95,15 @@ class ZImagePlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
     ) -> bytes:
         raise NotImplementedError(
             "Z-Image uses build_components(), not build_engine()")
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False, **_kwargs,
+        *, precision: str = "fp32", verbose: bool = False, **_kwargs,
     ) -> dict:
         """Build REAL TRT engines for all Z-Image components."""
         from ..qwen3_encoder_builder import (

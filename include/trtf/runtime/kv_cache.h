@@ -22,8 +22,10 @@ class KvCache : public IInferenceState {
 public:
     // Allocate cache buffers for the given configuration.
     // kv_dim = num_kv_heads * head_dim (size of one K or V row per layer).
+    // cache_dtype controls the element type for K/V cache buffers (default FP32).
     KvCache(int32_t num_layers, int32_t max_length,
-            int32_t kv_dim, cudaStream_t stream);
+            int32_t kv_dim, cudaStream_t stream,
+            DType cache_dtype = DType::kFloat32);
 
     // --- IInferenceState overrides ---
     void reset() override;
@@ -62,6 +64,8 @@ private:
     std::vector<float> mask_buf_;
     int32_t pos_buf_{0};
     bool has_position_input_{false};
+    DType cache_dtype_{DType::kFloat32};
+    std::size_t cache_element_size_{sizeof(float)};
 };
 
 } // namespace trtf

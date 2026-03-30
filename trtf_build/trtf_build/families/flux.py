@@ -134,14 +134,16 @@ class FluxPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
     ) -> bytes:
         raise NotImplementedError(
             "FLUX uses build_components(), not build_engine()")
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False, fp8_scales: dict | None = None,
+        *, precision: str = "fp32", verbose: bool = False,
+        fp8_scales: dict | None = None,
     ) -> dict:
         """Build all component engines.
 
@@ -804,7 +806,7 @@ def _build_vae_placeholder(latent_channels, h_lat, w_lat, verbose):
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
 
@@ -812,9 +814,10 @@ def _build_vae_placeholder(latent_channels, h_lat, w_lat, verbose):
     inp = network.add_input("latents", trt.float32, (latent_channels, h_lat, w_lat))
     identity = network.add_identity(inp)
     out = identity.get_output(0)
-    out.name = "output"
-    network.mark_output(out)
-    out.dtype = trt.float32
+    cast_out = network.add_cast(out, trt.float32)
+    out_final = cast_out.get_output(0)
+    out_final.name = "output"
+    network.mark_output(out_final)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:

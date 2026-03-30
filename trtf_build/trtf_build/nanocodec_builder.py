@@ -75,8 +75,7 @@ def _build_length_mask(network, current_len, max_len):
     arange = graph_ops.add_constant(
         network, (1, 1, max_len),
         np.arange(max_len, dtype=np.float32).reshape(1, 1, max_len))
-    len_f = network.add_identity(current_len)
-    len_f.set_output_type(0, trt.float32)
+    len_f = network.add_cast(current_len, trt.float32)
     len_r = network.add_shuffle(len_f.get_output(0))
     len_r.reshape_dims = (1, 1, 1)
     diff = network.add_elementwise(

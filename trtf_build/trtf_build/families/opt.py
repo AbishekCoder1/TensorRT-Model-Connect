@@ -188,11 +188,13 @@ class OPTPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         return build_standard_decoder_engine(
             config, weights, max_cache_length,
+            precision=precision, quant_ctx=quant_ctx,
             norm_type="layernorm",
             mlp_type="gelu_fc",
             position_type="learned",

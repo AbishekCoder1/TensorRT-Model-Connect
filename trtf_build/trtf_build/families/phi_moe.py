@@ -214,7 +214,8 @@ class PhiMoEPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         """Build TRT engine with MoE layers.
@@ -237,10 +238,9 @@ class PhiMoEPlugin:
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network()
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-        trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # -----------------------------------------------------------
         # Inputs
@@ -485,8 +485,7 @@ def _sparsemixer_weight(
         network, (1, 1),
         np.array([-1e9], dtype=np.float32))
     # Cast bool mask to float
-    mask_f = network.add_identity(mask_float.get_output(0))
-    mask_f.set_output_type(0, trt.float32)
+    mask_f = network.add_cast(mask_float.get_output(0), trt.float32)
     penalty = network.add_elementwise(
         mask_f.get_output(0), neginf, trt.ElementWiseOperation.PROD)
     masked = network.add_elementwise(
@@ -553,14 +552,12 @@ def _add_moe_block(
     idx_1_broadcast = network.add_shuffle(idx_1_flat.get_output(0))
     idx_1_broadcast.reshape_dims = (1, 1)
     # Cast idx to float for comparison
-    idx_1_f = network.add_identity(idx_1_broadcast.get_output(0))
-    idx_1_f.set_output_type(0, trt.float32)
+    idx_1_f = network.add_cast(idx_1_broadcast.get_output(0), trt.float32)
     # one_hot_mask: 1 where expert == idx_1, 0 elsewhere
     eq = network.add_elementwise(
         range_const, idx_1_f.get_output(0),
         trt.ElementWiseOperation.EQUAL)
-    eq_f = network.add_identity(eq.get_output(0))
-    eq_f.set_output_type(0, trt.float32)
+    eq_f = network.add_cast(eq.get_output(0), trt.float32)
     # Subtract large value at expert 1 position
     neginf_mask = graph_ops.add_constant(
         network, (1, 1),

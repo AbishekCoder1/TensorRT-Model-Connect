@@ -36,7 +36,7 @@ def _make_fake_trt_base() -> types.SimpleNamespace:
         ActivationType=types.SimpleNamespace(SIGMOID="sigmoid", TANH="tanh"),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
         BuilderFlag=types.SimpleNamespace(TF32="tf32"),
-        NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0),
+        NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         Permutation=lambda dims: tuple(dims),
         float32="float32",
         int32="int32",
@@ -199,7 +199,7 @@ def test_onnx_builder_raises_parser_error_with_details() -> None:
         Logger=_FakeLogger,
         Builder=_FakeBuilder,
         OnnxParser=_FakeParser,
-        NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0),
+        NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
     )
     mod = _import_with_fake_trt("trtf_build.onnx_vision_builder", fake_trt=fake_trt)
@@ -272,14 +272,15 @@ def test_onnx_builder_success_and_plan_none_branches() -> None:
         Logger=_FakeLogger,
         Builder=_FakeBuilder,
         OnnxParser=_FakeParser,
-        NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0),
+        NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
     )
     mod = _import_with_fake_trt("trtf_build.onnx_vision_builder", fake_trt=fake_trt)
 
     plan = mod.build_vision_engine_from_onnx(b"good-onnx", verbose=True)
     assert plan == b"engine-plan"
-    assert _FakeBuilder.last_instance.flags == 1
+    # EXPLICIT_BATCH (1 << 0) | STRONGLY_TYPED (1 << 1) = 3
+    assert _FakeBuilder.last_instance.flags == 3
     assert _FakeBuilder.last_instance.config.calls == [("workspace", 1 << 30)]
 
     _FakeBuilder.plan_to_return = None

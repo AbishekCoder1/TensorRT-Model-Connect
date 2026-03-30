@@ -102,14 +102,15 @@ class PixArtPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
     ) -> bytes:
         raise NotImplementedError(
             "PixArt uses build_components(), not build_engine()")
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False, **_kwargs,
+        *, precision: str = "fp32", verbose: bool = False, **_kwargs,
     ) -> dict:
         """Build all three component engines."""
         from ..t5_encoder_builder import build_t5_encoder_engine, load_t5_weights

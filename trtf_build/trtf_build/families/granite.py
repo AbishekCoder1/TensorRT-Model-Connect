@@ -31,8 +31,9 @@ class GranitePlugin:
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
+        *, precision: str = "fp32",
     ) -> WeightDict:
-        weights = load_standard_weights(model_dir, config)
+        weights = load_standard_weights(model_dir, config, precision=precision)
 
         raw = config.raw
         embedding_multiplier = raw.get("embedding_multiplier", 1.0)
@@ -81,11 +82,13 @@ class GranitePlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         return build_standard_decoder_engine(
-            config, weights, max_cache_length, verbose=verbose,
+            config, weights, max_cache_length, precision=precision,
+            quant_ctx=quant_ctx, verbose=verbose,
             debug_layer_outputs=debug_layer_outputs)
 
 

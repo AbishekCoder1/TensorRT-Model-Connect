@@ -204,7 +204,7 @@ def build_qwen_vl_vision_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
 
@@ -284,10 +284,10 @@ def build_qwen_vl_vision_engine(
 
     win_idx_weights = trt.Weights(np.ascontiguousarray(window_index))
     win_idx_layer = network.add_constant((num_merged,), win_idx_weights)
-    win_idx_layer.get_output(0).dtype = trt.int32
+    win_idx_cast = network.add_cast(win_idx_layer.get_output(0), trt.int32)
 
     gathered_win = network.add_gather(
-        reshp_win.get_output(0), win_idx_layer.get_output(0), 0)
+        reshp_win.get_output(0), win_idx_cast.get_output(0), 0)
 
     reshp_back = network.add_shuffle(gathered_win.get_output(0))
     reshp_back.reshape_dims = (num_patches, embed_dim)
@@ -498,10 +498,10 @@ def build_qwen_vl_vision_engine(
     # 4. Reverse window reorder: restore original spatial order
     rev_idx_weights = trt.Weights(np.ascontiguousarray(reverse_indices))
     rev_idx_layer = network.add_constant((num_merged,), rev_idx_weights)
-    rev_idx_layer.get_output(0).dtype = trt.int32
+    rev_idx_cast = network.add_cast(rev_idx_layer.get_output(0), trt.int32)
 
     reversed_out = network.add_gather(
-        fc2_out, rev_idx_layer.get_output(0), 0)
+        fc2_out, rev_idx_cast.get_output(0), 0)
 
     # ---------------------------------------------------------------
     # Output: image_features [num_merged, text_hidden_size]
@@ -589,8 +589,8 @@ def _add_deepstack_merger(
     # Reverse window reorder
     rev_idx = trt.Weights(np.ascontiguousarray(reverse_indices))
     rev_layer = network.add_constant((num_merged,), rev_idx)
-    rev_layer.get_output(0).dtype = trt.int32
-    reversed_out = network.add_gather(fc2, rev_layer.get_output(0), 0)
+    rev_cast = network.add_cast(rev_layer.get_output(0), trt.int32)
+    reversed_out = network.add_gather(fc2, rev_cast.get_output(0), 0)
 
     return reversed_out.get_output(0)
 
@@ -642,7 +642,7 @@ def build_qwen3_vl_vision_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
 
@@ -887,8 +887,8 @@ def build_qwen3_vl_vision_engine(
     # Reverse window reorder
     rev_idx = trt.Weights(np.ascontiguousarray(reverse_indices))
     rev_layer = network.add_constant((num_merged,), rev_idx)
-    rev_layer.get_output(0).dtype = trt.int32
-    main_features = network.add_gather(fc2_out, rev_layer.get_output(0), 0)
+    rev_cast = network.add_cast(rev_layer.get_output(0), trt.int32)
+    main_features = network.add_gather(fc2_out, rev_cast.get_output(0), 0)
 
     main_features.get_output(0).name = "image_features"
     network.mark_output(main_features.get_output(0))

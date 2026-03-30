@@ -27,8 +27,10 @@ public:
             : ((ctx.config.num_heads > 0 && ctx.config.head_dim > 0) ? ctx.config.num_heads * ctx.config.head_dim
                : magpie_cfg.hidden_size);
 
+        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> decoder_state = std::make_unique<KvCache>(
-            magpie_cfg.decoder_layers, ctx.config.max_cache_length, kv_dim, stream);
+            magpie_cfg.decoder_layers, ctx.config.max_cache_length, kv_dim, stream,
+            cache_dtype);
         if (!decoder_state->ok())
             throw std::runtime_error("MagpiePipeline: failed to create decoder KvCache");
 
@@ -36,7 +38,8 @@ public:
         if (magpie_cfg.cfg_scale > 1.0F)
         {
             decoder_state_uncond = std::make_unique<KvCache>(
-                magpie_cfg.decoder_layers, ctx.config.max_cache_length, kv_dim, stream);
+                magpie_cfg.decoder_layers, ctx.config.max_cache_length, kv_dim, stream,
+                cache_dtype);
         }
 
         const std::size_t enc_buf_size = static_cast<std::size_t>(magpie_cfg.max_source_positions) *

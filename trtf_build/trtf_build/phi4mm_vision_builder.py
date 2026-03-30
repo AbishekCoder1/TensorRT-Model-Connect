@@ -72,7 +72,7 @@ def build_phi4mm_vision_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
 
@@ -360,8 +360,8 @@ def build_phi4mm_vision_engine(
         # Need int32 for gather index
         idx_w = trt.Weights(np.ascontiguousarray(indices))
         idx_layer = network.add_constant((num_patches,), idx_w)
-        idx_layer.get_output(0).dtype = trt.int32
-        gather = network.add_gather(hidden, idx_layer.get_output(0), 0)
+        idx_cast = network.add_cast(idx_layer.get_output(0), trt.int32)
+        gather = network.add_gather(hidden, idx_cast.get_output(0), 0)
         hidden = gather.get_output(0)
         seq_len = num_patches
 

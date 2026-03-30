@@ -99,9 +99,8 @@ def build_standard_dit_engine(
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
-    config.clear_flag(trt.BuilderFlag.TF32)
 
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
     # Inputs
     hidden_inp = network.add_input(
@@ -461,9 +460,10 @@ def build_standard_dit_engine(
         output = graph_ops.add_bias_sum(network, output, out_dim, proj_out_b)
 
     # Mark output
-    output.name = "output"
-    network.mark_output(output)
-    output.dtype = trt.float32
+    cast_output = network.add_cast(output, trt.float32)
+    output_final = cast_output.get_output(0)
+    output_final.name = "output"
+    network.mark_output(output_final)
 
     # --- Build ---
     print(f"[dit-builder] Building TRT engine "

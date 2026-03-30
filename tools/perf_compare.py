@@ -70,6 +70,17 @@ def _get_trt_version() -> str:
         return "unknown"
 
 
+def _get_peak_memory_mb() -> float | None:
+    """Return peak GPU memory usage in MB, or None if unavailable."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.max_memory_allocated() / (1024 * 1024)
+    except Exception:
+        pass
+    return None
+
+
 def build_trt_engine(model_id_or_path: str, max_cache_length: int,
                      verbose: bool):
     """Build TRT engine and return (engine_plan_bytes, config, model_dir)."""
@@ -551,6 +562,8 @@ def build_json_output(model_name: str, prompt: str, num_input_tokens: int,
     def _safe_div(a: float, b: float) -> float | None:
         return round(a / b, 3) if b > 0 else None
 
+    peak_memory_mb = _get_peak_memory_mb()
+
     return {
         "metadata": {
             "model": model_name,
@@ -567,17 +580,23 @@ def build_json_output(model_name: str, prompt: str, num_input_tokens: int,
         "trt": {
             "prefill_ms": trt_prefill,
             "decode_ms": trt_decode,
+            "decode_ms_per_token": trt_tok["per_token_ms"]["mean"],
             "per_token_ms": trt_tok["per_token_ms"],
             "throughput_tps": trt_tok["throughput_tps"],
+            "tokens_per_second": trt_tok["throughput_tps"]["mean"],
             "total_ms": trt_total,
+            "total_latency_ms": trt_total["mean"],
             "num_decode_tokens": int(trt_avg_tokens),
         },
         "hf": {
             "prefill_ms": hf_prefill,
             "decode_ms": hf_decode,
+            "decode_ms_per_token": hf_tok["per_token_ms"]["mean"],
             "per_token_ms": hf_tok["per_token_ms"],
             "throughput_tps": hf_tok["throughput_tps"],
+            "tokens_per_second": hf_tok["throughput_tps"]["mean"],
             "total_ms": hf_total,
+            "total_latency_ms": hf_total["mean"],
             "num_decode_tokens": int(hf_avg_tokens),
         },
         "speedup": {
@@ -590,6 +609,7 @@ def build_json_output(model_name: str, prompt: str, num_input_tokens: int,
             "total": _safe_div(hf_total["mean"], trt_total["mean"]),
         },
         "token_match": trt_res["gen_ids"] == hf_res["gen_ids"],
+        "peak_memory_mb": peak_memory_mb,
     }
 
 
@@ -687,6 +707,8 @@ def main():
     if trt_avg_tokens_early > 0 and trt_decode_early["mean"] > 0:
         trt_tps_early = 1000.0 * trt_avg_tokens_early / trt_decode_early["mean"]
         trt_pt_early = trt_decode_early["mean"] / trt_avg_tokens_early
+    trt_total_early = _stats([p + d for p, d in zip(trt_res["prefill_times"],
+                                                     trt_res["decode_times"])])
     trt_only_json = {
         "metadata": {
             "model": args.model,
@@ -703,13 +725,18 @@ def main():
         "trt": {
             "prefill_ms": trt_prefill_early,
             "decode_ms": trt_decode_early,
+            "decode_ms_per_token": trt_pt_early,
             "per_token_ms": {"mean": trt_pt_early, "std": 0.0},
             "throughput_tps": {"mean": trt_tps_early, "std": 0.0},
+            "tokens_per_second": trt_tps_early,
+            "total_ms": trt_total_early,
+            "total_latency_ms": trt_total_early["mean"],
             "num_decode_tokens": int(trt_avg_tokens_early),
         },
         "hf": {},
         "speedup": {},
         "token_match": None,
+        "peak_memory_mb": _get_peak_memory_mb(),
     }
 
     if args.trt_only:

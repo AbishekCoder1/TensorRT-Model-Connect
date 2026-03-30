@@ -41,6 +41,7 @@ private:
     bool mIncludeCurrentSlot;
     int32_t mPositionLimit;
     int32_t mCacheLength{0};
+    std::size_t mCacheElementSize{sizeof(float)};  // 4 for FP32, 2 for FP16/BF16
     std::vector<CudaBuffer> mCacheK;  // persistent GPU memory [num_layers]
     std::vector<CudaBuffer> mCacheV;
 };

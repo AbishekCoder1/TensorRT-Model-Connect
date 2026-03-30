@@ -60,10 +60,9 @@ def build_encoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     # Resolve GELU variant from config
     hidden_act = config.hidden_act or config.raw.get("activation", "") or "gelu"
@@ -120,8 +119,7 @@ def build_encoder_engine(
         network, (max_seq_length,),
         np.arange(max_seq_length, dtype=np.int32).astype(np.float32))
     # Cast back to int32 for gather
-    pos_int = network.add_identity(position_indices)
-    pos_int.set_output_type(0, trt.int32)
+    pos_int = network.add_cast(position_indices, trt.int32)
 
     # -------------------------------------------------------------------
     # Embedding: word + position + token_type + LayerNorm

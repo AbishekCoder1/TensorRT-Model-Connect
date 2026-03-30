@@ -377,7 +377,8 @@ class Qwen35Plugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         """Build hybrid TRT engine with DeltaNet + attention layers."""
@@ -404,10 +405,9 @@ class Qwen35Plugin:
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network()
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-        trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # --- Inputs ---
         token_id = network.add_input("token_id", trt.int32, (1,))
@@ -634,10 +634,10 @@ def _mark_debug_output(
     name: str,
 ) -> None:
     identity = network.add_identity(tensor)
-    out = identity.get_output(0)
+    cast = network.add_cast(identity.get_output(0), trt.float32)
+    out = cast.get_output(0)
     out.name = name
     network.mark_output(out)
-    out.dtype = trt.float32
 
 
 def _add_deltanet_layer(

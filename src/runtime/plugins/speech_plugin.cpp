@@ -24,8 +24,10 @@ public:
 
         int32_t temporal_kv_dim = compute_kv_dim_kv_heads(ctx.config, ctx.config.hidden_size);
 
+        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> temporal_state = std::make_unique<KvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, temporal_kv_dim, stream);
+            ctx.config.num_layers, ctx.config.max_cache_length, temporal_kv_dim, stream,
+            cache_dtype);
         if (!temporal_state->ok())
             throw std::runtime_error("SpeechPipeline: failed to create temporal KvCache");
 
@@ -35,7 +37,8 @@ public:
         int32_t depth_kv_dim = compute_kv_dim_kv_heads(depth_cfg, depth_cfg.hidden_size);
 
         std::unique_ptr<IInferenceState> depth_state = std::make_unique<KvCache>(
-            depth_cfg.num_layers, depth_cfg.max_cache_length, depth_kv_dim, stream);
+            depth_cfg.num_layers, depth_cfg.max_cache_length, depth_kv_dim, stream,
+            cache_dtype);
         if (!depth_state->ok())
             throw std::runtime_error("SpeechPipeline: failed to create depth KvCache");
 

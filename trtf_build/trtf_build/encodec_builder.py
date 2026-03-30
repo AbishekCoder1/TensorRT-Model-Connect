@@ -83,10 +83,9 @@ def build_encodec_decoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
-    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     # Input: audio_codes [1, num_codebooks, seq_length] (int32)
     audio_codes = network.add_input(

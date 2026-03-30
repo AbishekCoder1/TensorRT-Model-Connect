@@ -313,6 +313,10 @@ def build_bundle(
     output_path: str,
     max_cache_length: int = 256,
     *,
+    precision: str = "fp32",
+    quantize: str | None = None,
+    quant_scales: str | None = None,
+    quant_calibration_samples: int = 512,
     verbose: bool = False,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
@@ -335,7 +339,8 @@ def build_bundle(
         fp8_scales = getattr(build_bundle, '_fp8_scales', None)
         _build_diffusion_bundle(
             model_dir_path, output_path, max_cache_length,
-            verbose=verbose, t0=t0, fp8_scales=fp8_scales)
+            precision=precision, verbose=verbose, t0=t0,
+            fp8_scales=fp8_scales)
         return
 
     # 1. Parse config
@@ -361,11 +366,35 @@ def build_bundle(
     t2 = time.monotonic()
     print(f"[trtf-build] Weights loaded [{t2 - t1:.1f}s]", file=sys.stderr)
 
+    # 3b. Build quantization context (if requested)
+    quant_ctx = None
+    if quantize:
+        from .quantization import build_quant_context
+        exclude_patterns = (plugin.quant_exclude_patterns(quantize)
+                            if hasattr(plugin, 'quant_exclude_patterns') else None)
+        quant_ctx = build_quant_context(
+            format_name=quantize,
+            model_dir=str(model_dir_path),
+            config=config,
+            exclude_patterns=exclude_patterns,
+            scales_json=quant_scales,
+            num_calibration_samples=quant_calibration_samples,
+        )
+        print(f"[trtf-build] Quantization: {quantize}", file=sys.stderr)
+
     # 4. Build TRT engine
     print(f"[trtf-build] Building TRT engine (cache={max_cache_length}) ...",
           file=sys.stderr)
+    # Pass precision/quant_ctx only if the plugin accepts them (not all do).
+    import inspect
+    sig = inspect.signature(plugin.build_engine)
+    extra_kwargs = {}
+    if 'precision' in sig.parameters:
+        extra_kwargs['precision'] = precision
+    if 'quant_ctx' in sig.parameters:
+        extra_kwargs['quant_ctx'] = quant_ctx
     engine_plan = plugin.build_engine(
-        config, weights, max_cache_length, verbose=verbose)
+        config, weights, max_cache_length, verbose=verbose, **extra_kwargs)
     t3 = time.monotonic()
     print(f"[trtf-build] Engine built [{t3 - t2:.1f}s] "
           f"({len(engine_plan) / (1024 * 1024):.1f} MB)", file=sys.stderr)
@@ -415,6 +444,8 @@ def build_bundle(
         num_key_value_heads=config.num_key_value_heads,
         max_cache_length=max_cache_length,
         runtime_strategy=getattr(plugin, "runtime_strategy", ""),
+        precision=precision,
+        quantization=quantize or "none",
         tokenizer_add_special_tokens=tokenizer_add_special_tokens,
     )
 
@@ -454,6 +485,9 @@ def build_bundle(
                 runtime_strategy = getattr(plugin, "runtime_strategy", None)
                 if runtime_strategy:
                     cfg_dict["runtime_strategy"] = runtime_strategy
+                cfg_dict["precision"] = precision
+                if quantize:
+                    cfg_dict["quantization"] = {"format": quantize}
                 embed_input = getattr(plugin, "embed_input", False)
                 if embed_input:
                     cfg_dict["embed_input"] = True
@@ -517,6 +551,7 @@ def _build_diffusion_bundle(
     output_path: str,
     max_cache_length: int,
     *,
+    precision: str = "fp32",
     verbose: bool = False,
     t0: float = 0.0,
     fp8_scales: dict | None = None,
@@ -619,6 +654,7 @@ def _build_diffusion_bundle(
     cfg_dict = {
         "model_type": model_type,
         "runtime_strategy": getattr(plugin, "runtime_strategy", "diffusion"),
+        "precision": precision,
         "num_text_encoders": len(components["text_encoders"]),
     }
 
@@ -688,6 +724,7 @@ def _build_diffusion_bundle(
         gpu_name=_get_gpu_name(),
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         runtime_strategy=getattr(plugin, "runtime_strategy", "diffusion"),
+        precision=precision,
     )
 
     write_bundle(output_path, info, sections)
@@ -701,6 +738,10 @@ def build(
     output_path: str,
     max_cache_length: int = 256,
     *,
+    precision: str = "fp32",
+    quantize: str | None = None,
+    quant_scales: str | None = None,
+    quant_calibration_samples: int = 512,
     verbose: bool = False,
     fp8_scales: dict | str | None = None,
 ) -> None:
@@ -720,4 +761,9 @@ def build(
     model_dir = _resolve_model(model_id_or_path)
     build_bundle._model_id_or_path_orig = model_id_or_path
     build_bundle._fp8_scales = fp8_scales
-    build_bundle(model_dir, output_path, max_cache_length, verbose=verbose)
+    build_bundle(model_dir, output_path, max_cache_length,
+                 precision=precision,
+                 quantize=quantize,
+                 quant_scales=quant_scales,
+                 quant_calibration_samples=quant_calibration_samples,
+                 verbose=verbose)

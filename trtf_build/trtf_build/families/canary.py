@@ -576,7 +576,8 @@ class CanaryPlugin:
         return w
 
     def build_engine(self, config: ModelConfig, weights: WeightDict,
-                     max_cache_length: int, *, verbose: bool = False,
+                     max_cache_length: int, *, precision: str = "fp32",
+                     quant_ctx=None, verbose: bool = False,
                      debug_layer_outputs: bool = False) -> bytes:
         dl = weights["_dec_layers"]; dh = weights["_dec_heads"]
         df = weights["_dec_ffn"]; h = weights["_hidden"]
@@ -584,10 +585,9 @@ class CanaryPlugin:
         es = weights["_enc_seq"]
 
         log = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-        b = trt.Builder(log); net = b.create_network()
+        b = trt.Builder(log); net = b.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         tc = b.create_builder_config()
         tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-        tc.clear_flag(trt.BuilderFlag.TF32)
 
         tid = net.add_input("token_id", trt.int32, (1,))
         pid = net.add_input("position_id", trt.int32, (1,))
@@ -640,7 +640,8 @@ class CanaryPlugin:
         return bytes(plan)
 
     def build_vision_engine(self, model_dir: str, config: ModelConfig,
-                            weights: WeightDict, *, verbose: bool = False) -> bytes | None:
+                            weights: WeightDict, *, precision: str = "fp32",
+                            verbose: bool = False) -> bytes | None:
         return _build_encoder(config, weights, verbose=verbose)
 
     def get_audio_config(self, config: ModelConfig) -> dict | None:
@@ -652,7 +653,7 @@ class CanaryPlugin:
             "mel_sampling_rate": 16000,
         }
 
-    def build_extra_engines(self, config: ModelConfig, weights, max_cache_length: int, *, verbose: bool = False) -> dict | None:
+    def build_extra_engines(self, config: ModelConfig, weights, max_cache_length: int, *, precision: str = "fp32", verbose: bool = False) -> dict | None:
         """Bake the NeMo mel filterbank into the bundle for C++ mel extraction."""
         num_mel_bins = weights.get("_mel_bins", 128)
         n_fft = 512
@@ -718,10 +719,9 @@ def _build_encoder(config, weights, *, verbose=False):
     es = weights["_enc_seq"]; sc = weights["_sub_ch"]
 
     log = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    b = trt.Builder(log); net = b.create_network()
+    b = trt.Builder(log); net = b.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = b.create_builder_config()
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
-    tc.clear_flag(trt.BuilderFlag.TF32)
 
     eps = graph_ops.add_constant(net, (1, 1), np.array([1e-5], dtype=np.float32))
     mel = net.add_input("mel_features", trt.float32, (mb, ml))

@@ -540,10 +540,9 @@ def build_flux_vae_decoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
-    config.clear_flag(trt.BuilderFlag.TF32)
 
     # --- Input ---
     latents = network.add_input(
@@ -669,9 +668,10 @@ def build_flux_vae_decoder_engine(
               f"[{out_ch},{cur_h * patch_h},{cur_w * patch_w}]", file=sys.stderr)
 
     # --- Mark output ---
-    x.name = "image"
-    network.mark_output(x)
-    x.dtype = trt.float32
+    cast_x = network.add_cast(x, trt.float32)
+    x_out = cast_x.get_output(0)
+    x_out.name = "image"
+    network.mark_output(x_out)
 
     print(f"[flux-vae] Building TRT engine: output [1, 3, {h_out}, {w_out}] ...",
           file=sys.stderr)

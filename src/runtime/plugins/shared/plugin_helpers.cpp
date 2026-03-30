@@ -176,6 +176,13 @@ int32_t compute_kv_dim(const BaseConfig& cfg)
     return cfg.num_heads * hd;
 }
 
+DType cache_dtype_from_precision(const std::string& precision)
+{
+    if (precision == "fp16") return DType::kFloat16;
+    if (precision == "bf16") return DType::kBFloat16;
+    return DType::kFloat32;
+}
+
 RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg)
 {
     RecurrentGenConfig rgc;

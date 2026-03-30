@@ -612,7 +612,8 @@ class MagpieTTSPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         """Build MagpieTTS decoder TRT engine (KV cache + cross-attention)."""
@@ -634,10 +635,7 @@ class MagpieTTSPlugin:
         network = builder.create_network()
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-        # NOTE: FP16 disabled — causes audio degradation due to out-of-range
-        # weights and LayerNorm overflow. TF32 is enabled by default (TRT default).
-        # TODO: re-enable with per-layer precision constraints (keep LN/softmax FP32).
-        pass
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # Decoder uses embed_input mode: C++ runtime sums 8 codebook embeddings
         # on host and passes the result as input_embed [1, hidden].
@@ -755,14 +753,15 @@ class MagpieTTSPlugin:
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False,
+        *, precision: str = "fp32", verbose: bool = False,
     ) -> bytes | None:
         """Build MagpieTTS text encoder engine (stored as vision_engine_plan)."""
         return _build_magpie_encoder(weights, verbose=verbose)
 
     def build_extra_engines(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        verbose: bool = False,
     ) -> dict:
         """Build extra bundle sections: codec engine + embedding tables."""
         result = {}
@@ -869,7 +868,7 @@ def _build_magpie_encoder(weights: WeightDict, *, verbose: bool = False) -> byte
     network = builder.create_network()
     tc = builder.create_builder_config()
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    pass  # FP16 disabled for test
+    tc.clear_flag(trt.BuilderFlag.TF32)
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([1e-5], dtype=np.float32))
@@ -1294,7 +1293,7 @@ def _add_magpie_decoder_layer(
 
 def _mark_debug_output(network, tensor, name):
     identity = network.add_identity(tensor)
-    out = identity.get_output(0)
+    cast = network.add_cast(identity.get_output(0), trt.float32)
+    out = cast.get_output(0)
     out.name = name
     network.mark_output(out)
-    out.dtype = trt.float32

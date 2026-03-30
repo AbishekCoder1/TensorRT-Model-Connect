@@ -195,6 +195,64 @@ class TestBuildJsonOutput:
         parsed = json.loads(serialized)
         assert parsed["metadata"]["model"] == "m"
 
+    def test_required_flywheel_fields_present(self):
+        """JSON must include prefill_ms, decode_ms_per_token, total_latency_ms,
+        tokens_per_second, and peak_memory_mb for quantization performance tracking."""
+        mod = _import_perf_compare()
+        # 10 tokens in 100ms decode -> 10ms/token, 100 t/s; total = 5+100 = 105ms
+        trt = _make_bench_result([5.0, 5.0], [100.0, 100.0], 10, list(range(10)))
+        hf = _make_bench_result([5.0, 5.0], [200.0, 200.0], 10, list(range(10)))
+        result = mod.build_json_output(
+            "m", "p", 1, 10, 2, 0, "float16", trt, hf)
+
+        # prefill_ms (detailed stats dict — already tested elsewhere)
+        assert "prefill_ms" in result["trt"]
+        assert "prefill_ms" in result["hf"]
+
+        # decode_ms_per_token — scalar convenience field
+        assert result["trt"]["decode_ms_per_token"] == pytest.approx(10.0)
+        assert result["hf"]["decode_ms_per_token"] == pytest.approx(20.0)
+
+        # total_latency_ms — scalar convenience field
+        assert result["trt"]["total_latency_ms"] == pytest.approx(105.0)
+        assert result["hf"]["total_latency_ms"] == pytest.approx(205.0)
+
+        # tokens_per_second — scalar convenience field
+        assert result["trt"]["tokens_per_second"] == pytest.approx(100.0)
+        assert result["hf"]["tokens_per_second"] == pytest.approx(50.0)
+
+        # peak_memory_mb — top-level, may be None when CUDA unavailable
+        assert "peak_memory_mb" in result
+
+    def test_flywheel_fields_zero_tokens(self):
+        """Flywheel fields degrade gracefully with zero decode tokens."""
+        mod = _import_perf_compare()
+        trt = _make_bench_result([5.0], [0.1], 0, [])
+        hf = _make_bench_result([5.0], [0.1], 0, [])
+        result = mod.build_json_output(
+            "m", "p", 1, 0, 1, 0, "float16", trt, hf)
+
+        assert result["trt"]["decode_ms_per_token"] == 0.0
+        assert result["trt"]["tokens_per_second"] == 0.0
+        assert result["trt"]["total_latency_ms"] == pytest.approx(5.1)
+        assert result["hf"]["decode_ms_per_token"] == 0.0
+        assert result["hf"]["tokens_per_second"] == 0.0
+
+    def test_flywheel_fields_json_round_trip(self):
+        """Flywheel scalar fields survive JSON serialization."""
+        mod = _import_perf_compare()
+        trt = _make_bench_result([5.0], [100.0], 10, list(range(10)))
+        hf = _make_bench_result([5.0], [200.0], 10, list(range(10)))
+        result = mod.build_json_output(
+            "m", "p", 1, 10, 1, 0, "float16", trt, hf)
+
+        parsed = json.loads(json.dumps(result))
+        assert parsed["trt"]["decode_ms_per_token"] == pytest.approx(10.0)
+        assert parsed["trt"]["tokens_per_second"] == pytest.approx(100.0)
+        assert parsed["trt"]["total_latency_ms"] == pytest.approx(105.0)
+        assert parsed["hf"]["decode_ms_per_token"] == pytest.approx(20.0)
+        assert parsed["hf"]["tokens_per_second"] == pytest.approx(50.0)
+
 
 # ---------------------------------------------------------------------------
 # print_report

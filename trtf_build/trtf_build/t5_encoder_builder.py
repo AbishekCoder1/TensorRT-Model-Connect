@@ -68,10 +68,9 @@ def build_t5_encoder_engine(
     """
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    config.clear_flag(trt.BuilderFlag.TF32)
 
     # --- Inputs ---
     input_ids = network.add_input(
@@ -254,9 +253,10 @@ def build_t5_encoder_engine(
     out_reshape = network.add_shuffle(hidden)
     out_reshape.reshape_dims = (1, max_seq_len, d_model)
     out_tensor = out_reshape.get_output(0)
-    out_tensor.name = "text_embeddings"
-    network.mark_output(out_tensor)
-    out_tensor.dtype = trt.float32
+    cast_out = network.add_cast(out_tensor, trt.float32)
+    out_final = cast_out.get_output(0)
+    out_final.name = "text_embeddings"
+    network.mark_output(out_final)
 
     # --- Build ---
     print(f"[t5-encoder] Building TRT engine "

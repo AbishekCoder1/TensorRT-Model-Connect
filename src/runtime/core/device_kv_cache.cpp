@@ -569,8 +569,29 @@ DeviceKvCache::DeviceKvCache(const DecoderStepEngine& engine)
     , mIncludeCurrentSlot(engine.requires_position_input)
     , mPositionLimit(mIncludeCurrentSlot ? mMaxCacheLength : std::max(mMaxCacheLength - 1, 0))
 {
+    // Detect cache element size from the engine's cache_k_0 tensor dtype.
+    // FP16 engines will have kHALF cache tensors; FP32 engines will have kFLOAT.
+    if (!engine.cache_k_input_names.empty()
+        && has_io_tensor(*engine.engine, engine.cache_k_input_names[0]))
+    {
+        auto trt_dtype = engine.engine->getTensorDataType(
+            engine.cache_k_input_names[0].c_str());
+        switch (trt_dtype)
+        {
+        case nvinfer1::DataType::kHALF:
+            mCacheElementSize = 2;
+            break;
+        case nvinfer1::DataType::kBF16:
+            mCacheElementSize = 2;
+            break;
+        default:
+            mCacheElementSize = sizeof(float);
+            break;
+        }
+    }
+
     const std::size_t cache_bytes
-        = static_cast<std::size_t>(mMaxCacheLength) * static_cast<std::size_t>(mCacheStateSize) * sizeof(float);
+        = static_cast<std::size_t>(mMaxCacheLength) * static_cast<std::size_t>(mCacheStateSize) * mCacheElementSize;
 
     mCacheK.reserve(static_cast<std::size_t>(mNumLayers));
     mCacheV.reserve(static_cast<std::size_t>(mNumLayers));
@@ -606,7 +627,7 @@ void DeviceKvCache::update_after_step(
     const std::vector<CudaBuffer>& present_v,
     cudaStream_t stream)
 {
-    const std::size_t row_bytes = static_cast<std::size_t>(mCacheStateSize) * sizeof(float);
+    const std::size_t row_bytes = static_cast<std::size_t>(mCacheStateSize) * mCacheElementSize;
     const detail::CacheRowUpdatePlan plan = detail::plan_cache_row_update(mCacheLength, mMaxCacheLength, row_bytes);
 
     auto copy_one = [&](CudaBuffer& cache_buf, const CudaBuffer& present_buf) {
@@ -641,7 +662,7 @@ void DeviceKvCache::update_after_step(
 void DeviceKvCache::reset(cudaStream_t stream)
 {
     const std::size_t cache_bytes
-        = static_cast<std::size_t>(mMaxCacheLength) * static_cast<std::size_t>(mCacheStateSize) * sizeof(float);
+        = static_cast<std::size_t>(mMaxCacheLength) * static_cast<std::size_t>(mCacheStateSize) * mCacheElementSize;
 
     for (int32_t i = 0; i < mNumLayers; ++i)
     {
@@ -692,7 +713,26 @@ DeviceResources::DeviceResources(const DecoderStepEngine& engine)
     , d_use_input_embed(has_io_tensor(*engine.engine, "input_embed") ? sizeof(float) : 0)
     , d_deepstack_active(has_io_tensor(*engine.engine, "deepstack_active") ? sizeof(float) : 0)
 {
-    const std::size_t state_bytes = static_cast<std::size_t>(engine.cache_state_size) * sizeof(float);
+    // Detect cache element size from the engine's present_k_0 tensor dtype.
+    std::size_t cache_elem_size = sizeof(float);
+    if (!engine.present_k_output_names.empty()
+        && has_io_tensor(*engine.engine, engine.present_k_output_names[0]))
+    {
+        auto trt_dtype = engine.engine->getTensorDataType(
+            engine.present_k_output_names[0].c_str());
+        switch (trt_dtype)
+        {
+        case nvinfer1::DataType::kHALF:
+        case nvinfer1::DataType::kBF16:
+            cache_elem_size = 2;
+            break;
+        default:
+            cache_elem_size = sizeof(float);
+            break;
+        }
+    }
+
+    const std::size_t state_bytes = static_cast<std::size_t>(engine.cache_state_size) * cache_elem_size;
     d_present_k.reserve(static_cast<std::size_t>(engine.num_layers));
     d_present_v.reserve(static_cast<std::size_t>(engine.num_layers));
     for (int32_t i = 0; i < engine.num_layers; ++i)

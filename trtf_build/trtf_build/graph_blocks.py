@@ -28,6 +28,51 @@ from . import graph_ops
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
+    from .quantization.context import QuantContext
+
+
+# ---------------------------------------------------------------------------
+# Precision boundary helpers (used by standard_decoder_builder, not inside
+# blocks themselves).
+# ---------------------------------------------------------------------------
+
+def _make_matmul_fn(network, dtype, quant_ctx):
+    """Create a matmul callable that routes through quant_ctx if present.
+
+    Returns a function: (lhs, lhs_w, rhs_w, rhs_weights, weight_name) -> ITensor
+    """
+    if quant_ctx is None:
+        def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
+            return graph_ops.add_matmul_rhs_constant(
+                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
+        return matmul
+    else:
+        def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
+            return quant_ctx.maybe_quantized_matmul(
+                network, lhs, lhs_w, rhs_w, rhs_weights, weight_name,
+                dtype=dtype)
+        return matmul
+
+
+def cast_to_fp32(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+) -> trt.ITensor:
+    """Cast tensor to FP32 for numerically sensitive ops."""
+    if tensor.dtype == trt.float32:
+        return tensor
+    return network.add_cast(tensor, trt.float32).get_output(0)
+
+
+def cast_to_dtype(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    target_dtype: trt.DataType,
+) -> trt.ITensor:
+    """Cast tensor to target dtype (no-op if already matching)."""
+    if tensor.dtype == target_dtype:
+        return tensor
+    return network.add_cast(tensor, target_dtype).get_output(0)
 
 
 def apply_norm(
@@ -38,16 +83,17 @@ def apply_norm(
     beta: np.ndarray | None,
     eps_tensor: trt.ITensor,
     norm_type: str,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Dispatch to RMSNorm or LayerNorm based on norm_type."""
     if norm_type == "layernorm":
         if beta is None:
             beta = np.zeros(hidden_size, dtype=np.float32)
         return graph_ops.add_layer_norm(
-            network, inp, hidden_size, gamma, beta, eps_tensor)
+            network, inp, hidden_size, gamma, beta, eps_tensor, dtype=dtype)
     else:
         return graph_ops.add_rms_norm(
-            network, inp, hidden_size, gamma, eps_tensor)
+            network, inp, hidden_size, gamma, eps_tensor, dtype=dtype)
 
 
 def add_attention_block(
@@ -74,52 +120,57 @@ def add_attention_block(
     position_type: str = "rope",
     alibi_slopes_tensor: trt.ITensor | None = None,
     alibi_indices_tensor: trt.ITensor | None = None,
+    dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
+    layer_prefix: str = "",
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
     Returns {"normed": ..., "attn_out": ..., "present_k": ..., "present_v": ...}.
     Does NOT apply residual -- callers compose the residual pattern.
     """
+    matmul = _make_matmul_fn(network, dtype, quant_ctx)
     attention_window = max_cache_length + 1
+
+    # Weight name for quant scale lookup — use layer_prefix if provided,
+    # otherwise fall back to the weights-dict prefix.
+    _lp = layer_prefix or prefix
 
     # Pre-attention norm
     normed = apply_norm(
         network, hidden, hidden_size,
         weights[f"{prefix}.input_norm"],
         weights.get(f"{prefix}.input_norm_beta"),
-        eps_tensor, norm_type)
+        eps_tensor, norm_type, dtype=dtype)
 
     # QKV projections
-    q = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, attention_size,
-        weights[f"{prefix}.w_q"])
-    k = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, attention_size,
-        weights[f"{prefix}.w_k"])
-    v = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, attention_size,
-        weights[f"{prefix}.w_v"])
+    q = matmul(normed, hidden_size, attention_size,
+               weights[f"{prefix}.w_q"], f"{_lp}.w_q")
+    k = matmul(normed, hidden_size, attention_size,
+               weights[f"{prefix}.w_k"], f"{_lp}.w_k")
+    v = matmul(normed, hidden_size, attention_size,
+               weights[f"{prefix}.w_v"], f"{_lp}.w_v")
 
     # Optional QKV biases
     q_bias = weights.get(f"{prefix}.q_bias")
     if q_bias is not None:
-        q = graph_ops.add_bias_sum(network, q, attention_size, q_bias)
+        q = graph_ops.add_bias_sum(network, q, attention_size, q_bias, dtype=dtype)
     k_bias = weights.get(f"{prefix}.k_bias")
     if k_bias is not None:
-        k = graph_ops.add_bias_sum(network, k, attention_size, k_bias)
+        k = graph_ops.add_bias_sum(network, k, attention_size, k_bias, dtype=dtype)
     v_bias = weights.get(f"{prefix}.v_bias")
     if v_bias is not None:
-        v = graph_ops.add_bias_sum(network, v, attention_size, v_bias)
+        v = graph_ops.add_bias_sum(network, v, attention_size, v_bias, dtype=dtype)
 
     # Optional per-head q/k norm
     q_norm = weights.get(f"{prefix}.q_norm")
     if q_norm is not None:
         q = graph_ops.add_rms_norm_per_head(
-            network, q, num_heads, head_dim, q_norm, eps_tensor)
+            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype)
     k_norm = weights.get(f"{prefix}.k_norm")
     if k_norm is not None:
         k = graph_ops.add_rms_norm_per_head(
-            network, k, num_heads, head_dim, k_norm, eps_tensor)
+            network, k, num_heads, head_dim, k_norm, eps_tensor, dtype=dtype)
 
     # Apply RoPE if using rotary positions
     if position_type == "rope" and cos_tensor is not None:
@@ -173,8 +224,7 @@ def add_attention_block(
 
     # ALiBi bias
     if alibi_slopes_tensor is not None and alibi_indices_tensor is not None:
-        pos_float = network.add_identity(position_id)
-        pos_float.set_output_type(0, trt.float32)
+        pos_float = network.add_cast(position_id, trt.float32)
         pos_1d = network.add_shuffle(pos_float.get_output(0))
         pos_1d.reshape_dims = (1,)
         full_indices = network.add_concatenation(
@@ -216,15 +266,14 @@ def add_attention_block(
     context_flat.reshape_dims = (1, attention_size)
 
     # Output projection
-    attn_out = graph_ops.add_matmul_rhs_constant(
-        network, context_flat.get_output(0),
-        attention_size, hidden_size,
-        weights[f"{prefix}.w_o"])
+    attn_out = matmul(context_flat.get_output(0),
+                      attention_size, hidden_size,
+                      weights[f"{prefix}.w_o"], f"{_lp}.w_o")
 
     # Optional output projection bias
     o_bias = weights.get(f"{prefix}.o_bias")
     if o_bias is not None:
-        attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size, o_bias)
+        attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size, o_bias, dtype=dtype)
 
     return {
         "normed": normed,
@@ -242,14 +291,18 @@ def add_swiglu_mlp(
     prefix: str,
     hidden_size: int,
     mlp_size: int,
+    dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
+    layer_prefix: str = "",
 ) -> trt.ITensor:
     """Gate/up/down SwiGLU MLP. Returns output tensor."""
-    gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, mlp_size,
-        weights[f"{prefix}.w_gate"])
-    up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, mlp_size,
-        weights[f"{prefix}.w_up"])
+    matmul = _make_matmul_fn(network, dtype, quant_ctx)
+    _lp = layer_prefix or prefix
+
+    gate = matmul(inp, hidden_size, mlp_size,
+                  weights[f"{prefix}.w_gate"], f"{_lp}.w_gate")
+    up = matmul(inp, hidden_size, mlp_size,
+                weights[f"{prefix}.w_up"], f"{_lp}.w_up")
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(
@@ -257,9 +310,8 @@ def add_swiglu_mlp(
     gated = network.add_elementwise(
         swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
-    mlp_out = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), mlp_size, hidden_size,
-        weights[f"{prefix}.w_down"])
+    mlp_out = matmul(gated.get_output(0), mlp_size, hidden_size,
+                     weights[f"{prefix}.w_down"], f"{_lp}.w_down")
     return mlp_out
 
 
@@ -272,23 +324,27 @@ def add_gelu_fc_mlp(
     hidden_size: int,
     mlp_size: int,
     activation: str = "gelu_new",
+    dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
+    layer_prefix: str = "",
 ) -> trt.ITensor:
     """fc1 -> activation -> fc2 MLP. Returns output tensor."""
-    fc1 = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, mlp_size,
-        weights[f"{prefix}.w_fc1"])
+    matmul = _make_matmul_fn(network, dtype, quant_ctx)
+    _lp = layer_prefix or prefix
+
+    fc1 = matmul(inp, hidden_size, mlp_size,
+                 weights[f"{prefix}.w_fc1"], f"{_lp}.w_fc1")
     fc1_bias = weights.get(f"{prefix}.fc1_bias")
     if fc1_bias is not None:
-        fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias)
+        fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias, dtype=dtype)
 
-    activated = graph_ops.add_activation(network, fc1, activation)
+    activated = graph_ops.add_activation(network, fc1, activation, dtype=dtype)
 
-    fc2 = graph_ops.add_matmul_rhs_constant(
-        network, activated, mlp_size, hidden_size,
-        weights[f"{prefix}.w_fc2"])
+    fc2 = matmul(activated, mlp_size, hidden_size,
+                 weights[f"{prefix}.w_fc2"], f"{_lp}.w_fc2")
     fc2_bias = weights.get(f"{prefix}.fc2_bias")
     if fc2_bias is not None:
-        fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, fc2_bias)
+        fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, fc2_bias, dtype=dtype)
 
     return fc2
 
@@ -306,6 +362,9 @@ def add_gated_mlp(
     hidden_size: int,
     mlp_size: int,
     activation: str = "gelu_new",
+    dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
+    layer_prefix: str = "",
 ) -> trt.ITensor:
     """Gated MLP: activation(fc1(x)) * fc1_gate(x), then fc2.
 
@@ -315,34 +374,34 @@ def add_gated_mlp(
     Weight keys: {prefix}.w_fc1, {prefix}.w_fc1_gate, {prefix}.w_fc2
     Optional: {prefix}.fc1_bias, {prefix}.fc1_gate_bias, {prefix}.fc2_bias
     """
+    matmul = _make_matmul_fn(network, dtype, quant_ctx)
+    _lp = layer_prefix or prefix
+
     # Two parallel projections
-    fc1 = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, mlp_size,
-        weights[f"{prefix}.w_fc1"])
+    fc1 = matmul(inp, hidden_size, mlp_size,
+                 weights[f"{prefix}.w_fc1"], f"{_lp}.w_fc1")
     fc1_bias = weights.get(f"{prefix}.fc1_bias")
     if fc1_bias is not None:
-        fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias)
+        fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias, dtype=dtype)
 
-    fc1_gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, mlp_size,
-        weights[f"{prefix}.w_fc1_gate"])
+    fc1_gate = matmul(inp, hidden_size, mlp_size,
+                      weights[f"{prefix}.w_fc1_gate"], f"{_lp}.w_fc1_gate")
     fc1_gate_bias = weights.get(f"{prefix}.fc1_gate_bias")
     if fc1_gate_bias is not None:
         fc1_gate = graph_ops.add_bias_sum(
-            network, fc1_gate, mlp_size, fc1_gate_bias)
+            network, fc1_gate, mlp_size, fc1_gate_bias, dtype=dtype)
 
     # Gate: activation(fc1) * fc1_gate
-    activated = graph_ops.add_activation(network, fc1, activation)
+    activated = graph_ops.add_activation(network, fc1, activation, dtype=dtype)
     gated = network.add_elementwise(
         activated, fc1_gate, trt.ElementWiseOperation.PROD)
 
     # Output projection
-    fc2 = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), mlp_size, hidden_size,
-        weights[f"{prefix}.w_fc2"])
+    fc2 = matmul(gated.get_output(0), mlp_size, hidden_size,
+                 weights[f"{prefix}.w_fc2"], f"{_lp}.w_fc2")
     fc2_bias = weights.get(f"{prefix}.fc2_bias")
     if fc2_bias is not None:
-        fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, fc2_bias)
+        fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, fc2_bias, dtype=dtype)
 
     return fc2
 
@@ -362,6 +421,9 @@ def add_dit_block(
     kv_seq_len: int,
     mlp_size: int,
     eps: float = 1e-5,
+    dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
+    layer_prefix: str = "",
 ) -> trt.ITensor:
     """DiT block: AdaLN self-attention + cross-attention + AdaLN FFN.
 
@@ -391,7 +453,7 @@ def add_dit_block(
 
     # --- Self-attention with AdaLN ---
     normed = graph_ops.add_adaptive_layernorm(
-        network, hidden, scale1, shift1, hidden_size, eps)
+        network, hidden, scale1, shift1, hidden_size, eps, dtype=dtype)
 
     self_attn_out = graph_ops.add_self_attention_block(
         network, normed,
@@ -402,6 +464,7 @@ def add_dit_block(
         hidden_size=hidden_size,
         num_heads=num_heads,
         seq_length=q_seq_len,
+        dtype=dtype,
     )
 
     # Gate and residual
@@ -415,13 +478,13 @@ def add_dit_block(
     cross_norm_gamma = weights.get(f"{prefix}.norm_cross.gamma")
     if cross_norm_gamma is not None:
         eps_t = graph_ops.add_constant(
-            network, (1, 1), np.array([eps], dtype=np.float32))
+            network, (1, 1), np.array([eps], dtype=np.float32), dtype=dtype)
         cross_normed = graph_ops.add_layer_norm(
             network, hidden, hidden_size,
             cross_norm_gamma,
             weights.get(f"{prefix}.norm_cross.beta",
                         np.zeros(hidden_size, dtype=np.float32)),
-            eps_t)
+            eps_t, dtype=dtype)
     else:
         cross_normed = hidden
 
@@ -436,6 +499,7 @@ def add_dit_block(
         num_heads=num_heads,
         q_seq_len=q_seq_len,
         kv_seq_len=kv_seq_len,
+        dtype=dtype,
     )
 
     hidden = network.add_elementwise(
@@ -444,7 +508,7 @@ def add_dit_block(
 
     # --- FFN with AdaLN ---
     ffn_normed = graph_ops.add_adaptive_layernorm(
-        network, hidden, scale2, shift2, hidden_size, eps)
+        network, hidden, scale2, shift2, hidden_size, eps, dtype=dtype)
 
     ffn_out = add_gated_mlp(
         network, ffn_normed,
@@ -453,6 +517,9 @@ def add_dit_block(
         hidden_size=hidden_size,
         mlp_size=mlp_size,
         activation="silu",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
+        layer_prefix=layer_prefix,
     )
 
     # Gate and residual
@@ -479,6 +546,7 @@ def add_vae_resblock_3d(
     num_groups: int = 32,
     temporal_kernel: int = 3,
     eps: float = 1e-6,
+    dtype: np.dtype = np.float32,
 ) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
     """3D VAE residual block with causal temporal convolutions.
 
@@ -497,12 +565,14 @@ def add_vae_resblock_3d(
         if norm_type == "l2_channel_norm":
             return graph_ops.add_l2_channel_norm(
                 network, x, channels,
-                weights[f"{prefix}.norm{norm_idx}.gamma"], eps)
+                weights[f"{prefix}.norm{norm_idx}.gamma"], eps,
+                dtype=dtype)
         else:
             return graph_ops.add_group_norm(
                 network, x, channels, num_groups,
                 weights[f"{prefix}.norm{norm_idx}.weight"],
-                weights[f"{prefix}.norm{norm_idx}.bias"], eps)
+                weights[f"{prefix}.norm{norm_idx}.bias"], eps,
+                dtype=dtype)
 
     # First Norm + SiLU + CausalConv3D
     normed1 = _apply_vae_norm(inp, in_channels, 1)
@@ -514,6 +584,7 @@ def add_vae_resblock_3d(
         out_channels=out_channels,
         kernel_size=(temporal_kernel, 3, 3),
         padding_hw=(1, 1),
+        dtype=dtype,
     )
 
     # Second Norm + SiLU + CausalConv3D
@@ -526,6 +597,7 @@ def add_vae_resblock_3d(
         out_channels=out_channels,
         kernel_size=(temporal_kernel, 3, 3),
         padding_hw=(1, 1),
+        dtype=dtype,
     )
 
     # Shortcut (1x1 conv if channel mismatch)
@@ -538,6 +610,7 @@ def add_vae_resblock_3d(
             bias=weights.get(f"{sc_key}.bias"),
             out_channels=out_channels,
             kernel_size=(1, 1, 1),
+            dtype=dtype,
         )
     else:
         shortcut = inp
@@ -559,6 +632,9 @@ def add_vae_spatial_attention(
     norm_type: str = "l2_channel_norm",
     num_groups: int = 32,
     eps: float = 1e-6,
+    dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
+    layer_prefix: str = "",
 ) -> trt.ITensor:
     """VAE mid-block spatial self-attention with configurable norm.
 
@@ -575,6 +651,9 @@ def add_vae_spatial_attention(
 
     Output: [B, C, T, H, W] (residual connection applied)
     """
+    matmul = _make_matmul_fn(network, dtype, quant_ctx)
+    _lp = layer_prefix or prefix
+
     b, c, t, h, w = inp.shape
     bt = b * t
     hw = h * w
@@ -586,12 +665,12 @@ def add_vae_spatial_attention(
     if norm_type == "l2_channel_norm":
         normed = graph_ops.add_l2_channel_norm(
             network, inp, channels,
-            weights[f"{prefix}.norm.gamma"], eps)
+            weights[f"{prefix}.norm.gamma"], eps, dtype=dtype)
     else:
         normed = graph_ops.add_group_norm(
             network, inp, channels, num_groups,
             weights[f"{prefix}.norm.weight"],
-            weights[f"{prefix}.norm.bias"], eps)
+            weights[f"{prefix}.norm.bias"], eps, dtype=dtype)
 
     # Reshape [B, C, T, H, W] -> [B*T*H*W, C]  (2D for matmul compat)
     flatten = network.add_shuffle(normed)
@@ -601,11 +680,11 @@ def add_vae_spatial_attention(
     # QKV projection: [BT*HW, C] @ [C, 3C] -> [BT*HW, 3C]
     qkv_w = weights[f"{prefix}.to_qkv.weight"]
     qkv_w_2d = qkv_w.reshape(3 * c, c).T.copy()
-    qkv = graph_ops.add_matmul_rhs_constant(
-        network, flatten.get_output(0), c, 3 * c, qkv_w_2d)
+    qkv = matmul(flatten.get_output(0), c, 3 * c, qkv_w_2d,
+                 f"{_lp}.to_qkv.weight")
     qkv_bias = weights.get(f"{prefix}.to_qkv.bias")
     if qkv_bias is not None:
-        qkv = graph_ops.add_bias_sum(network, qkv, 3 * c, qkv_bias)
+        qkv = graph_ops.add_bias_sum(network, qkv, 3 * c, qkv_bias, dtype=dtype)
 
     # Reshape to [BT, HW, 3C] then split Q, K, V
     qkv_3d = network.add_shuffle(qkv)
@@ -631,7 +710,7 @@ def add_vae_spatial_attention(
         k, trt.MatrixOperation.TRANSPOSE)
 
     scale_const = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32), dtype=dtype)
     scaled = network.add_elementwise(
         score.get_output(0), scale_const, trt.ElementWiseOperation.PROD)
 
@@ -650,11 +729,11 @@ def add_vae_spatial_attention(
     # Output projection: [BT*HW, C] @ [C, C] -> [BT*HW, C]
     proj_w = weights[f"{prefix}.proj.weight"]
     proj_w_2d = proj_w.reshape(c, c).T.copy()
-    proj_out = graph_ops.add_matmul_rhs_constant(
-        network, ctx_flat.get_output(0), c, c, proj_w_2d)
+    proj_out = matmul(ctx_flat.get_output(0), c, c, proj_w_2d,
+                      f"{_lp}.proj.weight")
     proj_bias = weights.get(f"{prefix}.proj.bias")
     if proj_bias is not None:
-        proj_out = graph_ops.add_bias_sum(network, proj_out, c, proj_bias)
+        proj_out = graph_ops.add_bias_sum(network, proj_out, c, proj_bias, dtype=dtype)
 
     # Reshape back to [B, C, T, H, W]
     reshape_out = network.add_shuffle(proj_out)

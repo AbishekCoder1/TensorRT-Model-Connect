@@ -22,15 +22,22 @@ from safetensors import safe_open
 from .config import ModelConfig
 
 
+def _target_np_dtype(precision: str) -> np.dtype:
+    """Map precision string to numpy dtype for weight storage."""
+    if precision in ("fp16", "bf16"):
+        return np.float16
+    return np.float32
+
+
 def _layer_key(layer_idx: int, suffix: str) -> str:
     return f"model.layers.{layer_idx}.{suffix}"
 
 
-def _transpose_2d(arr: np.ndarray, name: str) -> np.ndarray:
-    """Transpose [rows, cols] -> [cols, rows] in C-contiguous float32."""
+def _transpose_2d(arr: np.ndarray, name: str, precision: str = "fp32") -> np.ndarray:
+    """Transpose [rows, cols] -> [cols, rows] in C-contiguous target dtype."""
     if arr.ndim != 2:
         raise ValueError(f"Expected rank-2 tensor for transpose: {name}")
-    return np.ascontiguousarray(arr.T, dtype=np.float32)
+    return np.ascontiguousarray(arr.T, dtype=_target_np_dtype(precision))
 
 
 def _expand_kv_projection(
@@ -40,6 +47,7 @@ def _expand_kv_projection(
     target_hidden: int,
     num_heads: int,
     num_kv_heads: int,
+    precision: str = "fp32",
 ) -> np.ndarray:
     """Expand GQA K/V projection from [hidden, kv_hidden] to [hidden, target_hidden]."""
     if kv_hidden == target_hidden:
@@ -48,7 +56,7 @@ def _expand_kv_projection(
     head_dim = target_hidden // num_heads
     group_size = num_heads // num_kv_heads
 
-    out = np.zeros((hidden, target_hidden), dtype=np.float32)
+    out = np.zeros((hidden, target_hidden), dtype=_target_np_dtype(precision))
     for row in range(hidden):
         for col in range(target_hidden):
             q_head = col // head_dim
@@ -91,6 +99,8 @@ class WeightDict(dict):
 def load_standard_weights(
     model_dir: str | Path,
     config: ModelConfig,
+    *,
+    precision: str = "fp32",
 ) -> WeightDict:
     """Load HF safetensors and map to standard weight dict."""
     model_dir = Path(model_dir)
@@ -108,7 +118,7 @@ def load_standard_weights(
     embedding = _load_tensor(readers, "model.embed_tokens.weight")
     assert embedding.shape == (vocab, hidden), (
         f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
-    weights["embedding"] = embedding.astype(np.float32)
+    weights["embedding"] = embedding.astype(_target_np_dtype(precision))
 
     mlp_size = 0
     attention_size = 0
@@ -149,16 +159,18 @@ def load_standard_weights(
         head_dim = q_hidden // num_heads
 
         # Transpose all projections [out, in] -> [in, out]
-        q_t = _transpose_2d(q_raw, "q_proj")
-        k_t = _transpose_2d(k_raw, "k_proj")
-        v_t = _transpose_2d(v_raw, "v_proj")
-        o_t = _transpose_2d(o_raw, "o_proj")
+        q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
+        k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
+        v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
+        o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
 
         # GQA expansion for K, V
         k_expanded = _expand_kv_projection(
-            k_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads)
+            k_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads,
+            precision=precision)
         v_expanded = _expand_kv_projection(
-            v_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads)
+            v_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads,
+            precision=precision)
 
         weights[f"{prefix}.w_q"] = q_t
         weights[f"{prefix}.w_k"] = k_expanded
@@ -171,11 +183,11 @@ def load_standard_weights(
         v_bias_key = _layer_key(layer_idx, "self_attn.v_proj.bias")
         if _has_tensor(readers, q_bias_key):
             weights[f"{prefix}.q_bias"] = _load_tensor(
-                readers, q_bias_key).astype(np.float32)
+                readers, q_bias_key).astype(_target_np_dtype(precision))
         if _has_tensor(readers, k_bias_key):
-            raw = _load_tensor(readers, k_bias_key).astype(np.float32)
+            raw = _load_tensor(readers, k_bias_key).astype(_target_np_dtype(precision))
             if raw.shape[0] == kv_hidden and kv_hidden != q_hidden:
-                expanded = np.zeros(q_hidden, dtype=np.float32)
+                expanded = np.zeros(q_hidden, dtype=_target_np_dtype(precision))
                 for qh in range(num_heads):
                     kvh = min(num_kv_heads - 1,
                               qh // (num_heads // num_kv_heads))
@@ -185,9 +197,9 @@ def load_standard_weights(
             else:
                 weights[f"{prefix}.k_bias"] = raw
         if _has_tensor(readers, v_bias_key):
-            raw = _load_tensor(readers, v_bias_key).astype(np.float32)
+            raw = _load_tensor(readers, v_bias_key).astype(_target_np_dtype(precision))
             if raw.shape[0] == kv_hidden and kv_hidden != q_hidden:
-                expanded = np.zeros(q_hidden, dtype=np.float32)
+                expanded = np.zeros(q_hidden, dtype=_target_np_dtype(precision))
                 for qh in range(num_heads):
                     kvh = min(num_kv_heads - 1,
                               qh // (num_heads // num_kv_heads))
@@ -215,9 +227,9 @@ def load_standard_weights(
         down_raw = _load_tensor(
             readers, _layer_key(layer_idx, "mlp.down_proj.weight"))
 
-        weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj")
-        weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
-        weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
+        weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj", precision=precision)
+        weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj", precision=precision)
+        weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj", precision=precision)
 
     # Final norm
     final_norm_key = "model.norm.weight"
@@ -231,10 +243,11 @@ def load_standard_weights(
     lm_head_key = "lm_head.weight"
     if _has_tensor(readers, lm_head_key):
         weights["w_out"] = _transpose_2d(
-            _load_tensor(readers, lm_head_key), "lm_head")
+            _load_tensor(readers, lm_head_key), "lm_head", precision=precision)
     else:
         # Tied embeddings
-        weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
+        weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied",
+                                         precision=precision)
 
     weights["_attention_size"] = attention_size  # type: ignore[assignment]
     weights["_mlp_size"] = mlp_size  # type: ignore[assignment]

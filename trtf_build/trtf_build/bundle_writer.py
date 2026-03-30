@@ -33,6 +33,8 @@ class BundleInfo:
     num_key_value_heads: int = 1
     max_cache_length: int = 32
     runtime_strategy: str = ""
+    precision: str = "fp32"
+    quantization: str = "none"
     tokenizer_add_special_tokens: bool = False
 
 
@@ -75,6 +77,9 @@ def write_bundle(
         "max_cache_length": info.max_cache_length,
         **({"runtime_strategy": info.runtime_strategy}
            if info.runtime_strategy else {}),
+        "precision": info.precision,
+        **({"quantization": info.quantization}
+           if info.quantization != "none" else {}),
         "tokenizer_add_special_tokens": int(info.tokenizer_add_special_tokens),
         "sections": {
             s["name"]: {"offset": s["offset"], "size": s["size"]}

@@ -511,9 +511,10 @@ def build_flux2_dit_engine(
     # Cast back to FP32 at output boundary
     output = _to_fp32(network, output)
 
-    output.name = "output"
-    network.mark_output(output)
-    output.dtype = trt.float32
+    cast_output = network.add_cast(output, trt.float32)
+    output_final = cast_output.get_output(0)
+    output_final.name = "output"
+    network.mark_output(output_final)
 
     print(f"[flux2-dit] Building TRT engine "
           f"(dim={dim}, joint={num_layers}, single={num_single_layers}, "

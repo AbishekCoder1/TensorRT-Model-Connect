@@ -27,6 +27,7 @@ from .config import ModelConfig
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
+    from .quantization.context import QuantContext
 
 
 def _mark_debug_output(
@@ -36,11 +37,10 @@ def _mark_debug_output(
 ) -> None:
     """Mark a tensor as a network output for debug inspection."""
     # Use an identity layer to avoid aliasing issues with existing outputs.
-    identity = network.add_identity(tensor)
-    out = identity.get_output(0)
+    cast = network.add_cast(tensor, trt.float32)
+    out = cast.get_output(0)
     out.name = name
     network.mark_output(out)
-    out.dtype = trt.float32
 
 
 def build_standard_decoder_engine(
@@ -48,6 +48,8 @@ def build_standard_decoder_engine(
     weights: WeightDict,
     max_cache_length: int,
     *,
+    precision: str = "fp32",
+    quant_ctx: QuantContext | None = None,
     norm_type: str = "rmsnorm",
     mlp_type: str = "swiglu",
     position_type: str = "rope",
@@ -67,6 +69,7 @@ def build_standard_decoder_engine(
         config: Model architecture from config.json.
         weights: Loaded weight dict from checkpoint_mapper.
         max_cache_length: KV cache length (engine is compiled for this value).
+        precision: Compute precision ("fp32", "fp16", or "bf16").
         norm_type: "rmsnorm" or "layernorm".
         mlp_type: "swiglu" (3 projections: gate/up/down) or
                   "gelu_fc" (2 projections: fc1/fc2 with activation).
@@ -101,10 +104,20 @@ def build_standard_decoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    trt_config.clear_flag(trt.BuilderFlag.TF32)
+
+    # Precision configuration
+    if precision == "fp16":
+        work_np_dtype = np.float16
+        work_trt_dtype = trt.float16
+    elif precision == "bf16":
+        work_np_dtype = np.float16  # stored as float16, TRT uses bfloat16
+        work_trt_dtype = trt.bfloat16
+    else:
+        work_np_dtype = np.float32
+        work_trt_dtype = trt.float32
 
     # ---------------------------------------------------------------
     # Inputs
@@ -120,7 +133,7 @@ def build_standard_decoder_engine(
     use_input_embed_tensor = None
     if embed_input:
         input_embed_tensor = network.add_input(
-            "input_embed", trt.float32, (1, hidden))
+            "input_embed", work_trt_dtype, (1, hidden))
         use_input_embed_tensor = network.add_input(
             "use_input_embed", trt.float32, (1,))
 
@@ -129,18 +142,23 @@ def build_standard_decoder_engine(
     for i in range(num_layers):
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
-            trt.float32, (max_cache_length, attention_size))
+            work_trt_dtype, (max_cache_length, attention_size))
         cv = network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
-            trt.float32, (max_cache_length, attention_size))
+            work_trt_dtype, (max_cache_length, attention_size))
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
+
+    # Cast attention mask to work dtype for elementwise compatibility
+    if work_trt_dtype != trt.float32:
+        mask_cast = network.add_cast(attention_mask, work_trt_dtype)
+        attention_mask = mask_cast.get_output(0)
 
     # ---------------------------------------------------------------
     # Shared constants
     # ---------------------------------------------------------------
     embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), weights["embedding"])
+        network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
 
     # RoPE tables (only needed when position_type == "rope")
     cos_tensor = None
@@ -162,31 +180,37 @@ def build_standard_decoder_engine(
             interleaved=interleaved_rope)
 
         cos_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), cos_table_np)
+            network, (attention_window, attention_size), cos_table_np,
+            dtype=work_np_dtype)
         sin_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), sin_table_np)
+            network, (attention_window, attention_size), sin_table_np,
+            dtype=work_np_dtype)
         rotate_half_tensor = graph_ops.add_constant(
-            network, (attention_size, attention_size), rotate_half_np)
+            network, (attention_size, attention_size), rotate_half_np,
+            dtype=work_np_dtype)
     elif position_type == "learned":
         pos_embed_np = weights["position_embedding"]
         position_embed_table = graph_ops.add_constant(
-            network, pos_embed_np.shape, pos_embed_np)
+            network, pos_embed_np.shape, pos_embed_np, dtype=work_np_dtype)
     elif position_type == "alibi":
         alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads)
         alibi_slopes_tensor = graph_ops.add_constant(
             network, (num_heads, 1, 1),
-            alibi_slopes_np.reshape(num_heads, 1, 1))
+            alibi_slopes_np.reshape(num_heads, 1, 1), dtype=work_np_dtype)
         # Cache position indices [0, 1, ..., max_cache_length-1].
         # The current token's position (position_id) is appended at runtime.
         alibi_indices_tensor = graph_ops.add_constant(
             network, (max_cache_length,),
-            np.arange(max_cache_length, dtype=np.float32))
+            np.arange(max_cache_length, dtype=work_np_dtype),
+            dtype=work_np_dtype)
 
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
+        network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
     attn_scale_tensor = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+        network, (1, 1, 1), np.array([attn_scale], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     # ---------------------------------------------------------------
     # Embedding lookup (with optional embed_input override for VL)
@@ -196,13 +220,18 @@ def build_standard_decoder_engine(
 
     if embed_input and input_embed_tensor is not None and use_input_embed_tensor is not None:
         # Conditional embedding: (1 - flag) * token_embed + flag * input_embed
-        # use_input_embed is [1] scalar, broadcast to [1, hidden]
+        # use_input_embed is [1] scalar (FP32), broadcast to [1, hidden]
         flag_broadcast = network.add_shuffle(use_input_embed_tensor)
         flag_broadcast.reshape_dims = (1, 1)
+        # Cast flag to work dtype for elementwise compatibility
+        flag_for_math = flag_broadcast.get_output(0)
+        if work_trt_dtype != trt.float32:
+            flag_for_math = network.add_cast(flag_for_math, work_trt_dtype).get_output(0)
         one_const = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=np.float32))
+            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
+            dtype=work_np_dtype)
         inv_flag = network.add_elementwise(
-            one_const, flag_broadcast.get_output(0),
+            one_const, flag_for_math,
             trt.ElementWiseOperation.SUB)
         # (1 - flag) * token_embed
         tok_part = network.add_elementwise(
@@ -210,7 +239,7 @@ def build_standard_decoder_engine(
             trt.ElementWiseOperation.PROD)
         # flag * input_embed
         embed_part = network.add_elementwise(
-            flag_broadcast.get_output(0), input_embed_tensor,
+            flag_for_math, input_embed_tensor,
             trt.ElementWiseOperation.PROD)
         # sum
         hidden_state_sum = network.add_elementwise(
@@ -233,10 +262,10 @@ def build_standard_decoder_engine(
     if embed_norm is not None:
         embed_norm_beta = weights.get("embedding_norm_beta")
         if embed_norm_beta is None:
-            embed_norm_beta = np.zeros(hidden, dtype=np.float32)
+            embed_norm_beta = np.zeros(hidden, dtype=work_np_dtype)
         hidden_state = graph_ops.add_layer_norm(
             network, hidden_state, hidden, embed_norm, embed_norm_beta,
-            eps_tensor)
+            eps_tensor, dtype=work_np_dtype)
 
     if debug_layer_outputs:
         _mark_debug_output(network, hidden_state, "debug_embed")
@@ -277,6 +306,8 @@ def build_standard_decoder_engine(
             parallel_residual=parallel_residual,
             alibi_slopes_tensor=alibi_slopes_tensor,
             alibi_indices_tensor=alibi_indices_tensor,
+            dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
         )
 
         hidden_state = result["hidden"]
@@ -294,7 +325,8 @@ def build_standard_decoder_engine(
     if final_norm is not None and len(final_norm) > 0:
         hidden_state = _apply_norm(
             network, hidden_state, hidden, final_norm,
-            weights.get("final_norm_beta"), eps_tensor, norm_type)
+            weights.get("final_norm_beta"), eps_tensor, norm_type,
+            dtype=work_np_dtype)
 
     # Optional: mark hidden state as extra output for speech pipelines
     if hidden_state_output:
@@ -309,15 +341,22 @@ def build_standard_decoder_engine(
     # Derive from w_out shape if available.
     out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
     logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, out_vocab, weights["w_out"])
+        network, hidden_state, hidden, out_vocab, weights["w_out"],
+        dtype=work_np_dtype)
     # LM head bias (if present, e.g. CodeGen) or zero bias for C++ parity
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
-        logits = graph_ops.add_bias_sum(network, logits, out_vocab, lm_bias)
+        logits = graph_ops.add_bias_sum(network, logits, out_vocab, lm_bias,
+                                        dtype=work_np_dtype)
     else:
-        b_out = np.zeros(out_vocab, dtype=np.float32)
-        logits = graph_ops.add_bias_sum(network, logits, out_vocab, b_out)
+        b_out = np.zeros(out_vocab, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(network, logits, out_vocab, b_out,
+                                        dtype=work_np_dtype)
 
+    # Logits output: always FP32 for accurate argmax/sampling
+    if work_trt_dtype != trt.float32:
+        logits_cast = network.add_cast(logits, trt.float32)
+        logits = logits_cast.get_output(0)
     logits.name = "logits"
     network.mark_output(logits)
 
@@ -338,7 +377,8 @@ def build_standard_decoder_engine(
     if verbose:
         print(f"[trtf-build] Building TRT engine ({num_layers} layers, "
               f"hidden={hidden}, attn={attention_size}, mlp={mlp_size}, "
-              f"cache={max_cache_length}) ...", file=sys.stderr)
+              f"cache={max_cache_length}, precision={precision}) ...",
+              file=sys.stderr)
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:
@@ -355,10 +395,12 @@ def _apply_norm(
     beta: np.ndarray | None,
     eps_tensor: trt.ITensor,
     norm_type: str,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Dispatch to RMSNorm or LayerNorm based on norm_type."""
     return graph_blocks.apply_norm(
-        network, inp, hidden_size, gamma, beta, eps_tensor, norm_type)
+        network, inp, hidden_size, gamma, beta, eps_tensor, norm_type,
+        dtype=dtype)
 
 
 def _add_decoder_layer(
@@ -389,6 +431,8 @@ def _add_decoder_layer(
     parallel_residual: bool = False,
     alibi_slopes_tensor: trt.ITensor | None = None,
     alibi_indices_tensor: trt.ITensor | None = None,
+    dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
 
@@ -405,6 +449,9 @@ def _add_decoder_layer(
         norm_type=norm_type, position_type=position_type,
         alibi_slopes_tensor=alibi_slopes_tensor,
         alibi_indices_tensor=alibi_indices_tensor,
+        dtype=dtype,
+        quant_ctx=quant_ctx,
+        layer_prefix=prefix,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]
@@ -418,7 +465,7 @@ def _add_decoder_layer(
                 network, hidden, hidden_size,
                 post_attn_norm_w,
                 weights.get(f"{prefix}.post_attn_norm_beta"),
-                eps_tensor, norm_type)
+                eps_tensor, norm_type, dtype=dtype)
         else:
             norm2 = attn["normed"]
     else:
@@ -428,18 +475,20 @@ def _add_decoder_layer(
             network, residual1.get_output(0), hidden_size,
             weights[f"{prefix}.post_attn_norm"],
             weights.get(f"{prefix}.post_attn_norm_beta"),
-            eps_tensor, norm_type)
+            eps_tensor, norm_type, dtype=dtype)
 
     # MLP
     if mlp_type == "gelu_fc":
         mlp_out = graph_blocks.add_gelu_fc_mlp(
             network, norm2, weights=weights, prefix=prefix,
             hidden_size=hidden_size, mlp_size=mlp_size,
-            activation=activation)
+            activation=activation, dtype=dtype,
+            quant_ctx=quant_ctx, layer_prefix=prefix)
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2, weights=weights, prefix=prefix,
-            hidden_size=hidden_size, mlp_size=mlp_size)
+            hidden_size=hidden_size, mlp_size=mlp_size, dtype=dtype,
+            quant_ctx=quant_ctx, layer_prefix=prefix)
 
     # Final residual connection
     if parallel_residual:

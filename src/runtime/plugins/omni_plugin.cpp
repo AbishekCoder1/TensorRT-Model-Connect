@@ -20,8 +20,10 @@ public:
         auto thinker_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "omni thinker");
         cudaStream_t stream = thinker_loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
+        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> thinker_state = std::make_unique<KvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream);
+            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream,
+            cache_dtype);
         if (!thinker_state->ok())
             throw std::runtime_error("OmniPipeline: failed to create thinker KvCache");
 
@@ -42,7 +44,8 @@ public:
             int32_t talker_layers = omni_talker_num_layers > 0
                 ? omni_talker_num_layers : ctx.config.num_layers;
             talker_state = std::make_unique<KvCache>(
-                talker_layers, talker_cache_len, talker_kv_dim, stream);
+                talker_layers, talker_cache_len, talker_kv_dim, stream,
+                cache_dtype);
         }
 
         // Code2Wav (optional)

@@ -69,7 +69,8 @@ class EagleVLMPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
     ) -> bytes:
         is_rerank = _is_reranker(config)
         # Store for runtime_strategy property
@@ -80,7 +81,7 @@ class EagleVLMPlugin:
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False,
+        *, precision: str = "fp32", verbose: bool = False,
     ) -> bytes | None:
         vision_config = config.raw.get("vision_config")
         if vision_config is None:
@@ -315,10 +316,9 @@ def _build_eagle_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     # --- Inputs ---
     # input_ids: [seq_length] token IDs (padded to max length)
@@ -616,10 +616,9 @@ def _build_siglip_vision_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     # Input: pixel_values [3, image_size, image_size]
     pixel_values = network.add_input(

@@ -501,7 +501,8 @@ class Qwen3OmniPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         """Build TRT engine for Thinker MoE decoder (primary engine).
@@ -523,10 +524,9 @@ class Qwen3OmniPlugin:
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network()
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-        trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # Inputs
         token_id = network.add_input("token_id", trt.int32, (1,))
@@ -710,7 +710,7 @@ class Qwen3OmniPlugin:
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False,
+        *, precision: str = "fp32", verbose: bool = False,
     ) -> bytes | None:
         """Build Thinker vision encoder (reuses Qwen VL vision builder)."""
         vision_config = config.raw.get("vision_config")
@@ -758,7 +758,8 @@ class Qwen3OmniPlugin:
 
     def build_extra_engines(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        verbose: bool = False,
     ) -> dict:
         """Build audio encoder, Talker, and Code2Wav engines."""
         result = {}
@@ -1027,10 +1028,9 @@ def _build_audio_encoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
-    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([1e-5], dtype=np.float32))
@@ -1317,10 +1317,9 @@ def _build_code2wav_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
-    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     # Input: codec tokens [n_codebooks, max_frames] int32
     n_codebooks = 8

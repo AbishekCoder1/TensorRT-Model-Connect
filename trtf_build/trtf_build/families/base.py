@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict
+
+if TYPE_CHECKING:
+    from ..quantization.context import QuantContext
 
 
 class FamilyPlugin(Protocol):
@@ -32,16 +35,34 @@ class FamilyPlugin(Protocol):
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
+        *, precision: str = "fp32",
     ) -> WeightDict:
         """Load and preprocess weights for this family."""
         ...
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx: QuantContext | None = None,
+        verbose: bool = False,
     ) -> bytes:
         """Build TRT engine plan bytes."""
         ...
+
+    # ------------------------------------------------------------------
+    # Optional: Quantization support
+    # ------------------------------------------------------------------
+
+    def quant_exclude_patterns(self, format_name: str) -> list[str]:
+        """Weight name patterns to exclude from quantization."""
+        return [
+            "embedding", "final_norm", "w_out", "lm_head",
+            "*.input_norm", "*.post_attn_norm", "*_norm*",
+        ]
+
+    def calibration_data(self, format_name: str) -> list[str] | None:
+        """Calibration prompts. None = default dataset."""
+        return None
 
     # ------------------------------------------------------------------
     # Optional: Vision-Language support
@@ -49,7 +70,7 @@ class FamilyPlugin(Protocol):
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False,
+        *, precision: str = "fp32", verbose: bool = False,
     ) -> bytes | None:
         """Build TRT engine plan bytes for the vision encoder.
 
@@ -88,7 +109,7 @@ class FamilyPlugin(Protocol):
 
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False,
+        *, precision: str = "fp32", verbose: bool = False,
     ) -> dict | None:
         """Build all diffusion engine components.
 

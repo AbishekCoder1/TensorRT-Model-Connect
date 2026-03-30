@@ -57,18 +57,19 @@ class InternVLPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         """Build text decoder engine (Qwen2 architecture with embed_input for VL)."""
         return build_standard_decoder_engine(
             config, weights, max_cache_length, verbose=verbose,
-            embed_input=True,
+            quant_ctx=quant_ctx, embed_input=True,
             debug_layer_outputs=debug_layer_outputs)
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False,
+        *, precision: str = "fp32", verbose: bool = False,
     ) -> bytes | None:
         vision_config = config.raw.get("vision_config")
         if vision_config is None:

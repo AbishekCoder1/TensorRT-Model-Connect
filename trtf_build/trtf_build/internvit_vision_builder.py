@@ -316,7 +316,7 @@ def build_internvit_vision_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     trt_builder = trt.Builder(logger)
-    network = trt_builder.create_network()
+    network = trt_builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = trt_builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
 

@@ -227,6 +227,9 @@ def _resolve_bundle(
         hf_id, "-o", str(bundle_path),
         "--max-cache-length", str(max_cache),
     ]
+    precision = case.metadata.get("precision", "fp32")
+    if precision != "fp32":
+        cmd.extend(["--precision", precision])
     if case.metadata.get("trust_remote_code"):
         cmd.append("--trust-remote-code")
 

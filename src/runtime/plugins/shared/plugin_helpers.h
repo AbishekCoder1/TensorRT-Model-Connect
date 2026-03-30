@@ -72,6 +72,10 @@ std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(
 // Compute the KV cache dimension from model config.
 int32_t compute_kv_dim(const BaseConfig& cfg);
 
+// Convert the BaseConfig precision string ("fp16", "bf16", "fp32") to a DType
+// for use as KV cache element type.
+DType cache_dtype_from_precision(const std::string& precision);
+
 // Build a RecurrentGenConfig from model config fields.
 RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg);
 

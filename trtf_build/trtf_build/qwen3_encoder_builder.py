@@ -109,9 +109,8 @@ def build_qwen3_encoder_engine(
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
-    config.clear_flag(trt.BuilderFlag.TF32)
 
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
     # Inputs
     input_ids = network.add_input("input_ids", trt.int32, (max_seq_len,))
@@ -286,9 +285,10 @@ def build_qwen3_encoder_engine(
     elif output_layer < 0:
         output_hidden = hidden
 
-    output_hidden.name = "text_embeddings"
-    output_hidden.dtype = trt.float32
-    network.mark_output(output_hidden)
+    cast_out = network.add_cast(output_hidden, trt.float32)
+    out_final = cast_out.get_output(0)
+    out_final.name = "text_embeddings"
+    network.mark_output(out_final)
 
     print(f"[qwen3-encoder] Building TRT engine "
           f"(layers={num_layers}, hidden={hidden_size}, output_layer={output_layer}, "

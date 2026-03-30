@@ -14,6 +14,12 @@ import tensorrt as trt
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _np_to_trt_dtype(dtype: np.dtype):
+    """Convert numpy dtype to TRT DataType for cast-back after FP32 compute."""
+    if dtype == np.float16:
+        return trt.float16
+    return trt.float32
+
 def layer_tensor_name(stem: str, layer: int) -> str:
     return f"{stem}_{layer}"
 
@@ -22,9 +28,10 @@ def add_constant(
     network: trt.INetworkDefinition,
     shape: tuple[int, ...],
     values: np.ndarray,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """Add a constant tensor (float32)."""
-    weights = trt.Weights(np.ascontiguousarray(values, dtype=np.float32))
+    """Add a constant tensor in the given *dtype* (default float32)."""
+    weights = trt.Weights(np.ascontiguousarray(values, dtype=dtype))
     layer = network.add_constant(shape, weights)
     return layer.get_output(0)
 
@@ -35,9 +42,10 @@ def add_matmul_rhs_constant(
     lhs_width: int,
     rhs_width: int,
     rhs_weights: np.ndarray,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
-    rhs = add_constant(network, (lhs_width, rhs_width), rhs_weights)
+    rhs = add_constant(network, (lhs_width, rhs_width), rhs_weights, dtype=dtype)
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,
         rhs, trt.MatrixOperation.NONE,
@@ -50,9 +58,10 @@ def add_bias_sum(
     inp: trt.ITensor,
     width: int,
     bias: np.ndarray,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Element-wise add a [1, width] bias."""
-    bias_t = add_constant(network, (1, width), bias)
+    bias_t = add_constant(network, (1, width), bias, dtype=dtype)
     s = network.add_elementwise(inp, bias_t, trt.ElementWiseOperation.SUM)
     return s.get_output(0)
 
@@ -63,8 +72,17 @@ def add_rms_norm(
     hidden_size: int,
     gamma: np.ndarray,
     eps_tensor: trt.ITensor,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """RMSNorm: gamma * (x / sqrt(mean(x^2) + eps))."""
+    """RMSNorm: gamma * (x / sqrt(mean(x^2) + eps)).
+
+    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    norm computation for numerical stability, then casts back.
+    """
+    need_cast = (dtype != np.float32)
+    if need_cast:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
+        eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
     sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
     mean = network.add_reduce(
         sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
@@ -74,10 +92,13 @@ def add_rms_norm(
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(
         inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
-    gamma_t = add_constant(network, (1, hidden_size), gamma)
+    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
     scaled = network.add_elementwise(
         normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    return scaled.get_output(0)
+    result = scaled.get_output(0)
+    if need_cast:
+        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+    return result
 
 
 def add_rms_norm_per_head(
@@ -87,12 +108,21 @@ def add_rms_norm_per_head(
     head_dim: int,
     gamma: np.ndarray,
     eps_tensor: trt.ITensor,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """Per-head RMSNorm: reshape to [num_heads, head_dim], norm, reshape back."""
+    """Per-head RMSNorm: reshape to [num_heads, head_dim], norm, reshape back.
+
+    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    norm computation for numerical stability, then casts back.
+    """
+    need_cast = (dtype != np.float32)
     reshape_in = network.add_shuffle(inp)
     reshape_in.reshape_dims = (num_heads, head_dim)
 
     reshaped = reshape_in.get_output(0)
+    if need_cast:
+        reshaped = network.add_cast(reshaped, trt.float32).get_output(0)
+        eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
     sq = network.add_elementwise(reshaped, reshaped, trt.ElementWiseOperation.PROD)
     mean = network.add_reduce(
         sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
@@ -102,11 +132,14 @@ def add_rms_norm_per_head(
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(
         reshaped, recip.get_output(0), trt.ElementWiseOperation.PROD)
-    gamma_t = add_constant(network, (num_heads, head_dim), gamma)
+    gamma_t = add_constant(network, (num_heads, head_dim), gamma, dtype=np.float32)
     scaled = network.add_elementwise(
         normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
 
-    reshape_out = network.add_shuffle(scaled.get_output(0))
+    result = scaled.get_output(0)
+    if need_cast:
+        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+    reshape_out = network.add_shuffle(result)
     reshape_out.reshape_dims = (1, num_heads * head_dim)
     return reshape_out.get_output(0)
 
@@ -116,11 +149,18 @@ def add_l2_norm(
     inp: trt.ITensor,
     reduce_axis: int,
     eps: float = 1e-12,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """L2 normalize: x / max(||x||_2, eps) along reduce_axis.
 
     Used for DeltaNet Q/K normalization (Gated DeltaNet architecture).
+
+    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    norm computation for numerical stability, then casts back.
     """
+    need_cast = (dtype != np.float32)
+    if need_cast:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
     sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
     sum_sq = network.add_reduce(
         sq.get_output(0), trt.ReduceOperation.SUM,
@@ -129,13 +169,16 @@ def add_l2_norm(
     # max(norm, eps) to avoid division by zero
     eps_const = add_constant(
         network, (1,) * (reduce_axis + 1),
-        np.array([eps], dtype=np.float32))
+        np.array([eps], dtype=np.float32), dtype=np.float32)
     safe_norm = network.add_elementwise(
         norm.get_output(0), eps_const, trt.ElementWiseOperation.MAX)
     recip = network.add_unary(safe_norm.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(
         inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
-    return normalized.get_output(0)
+    result = normalized.get_output(0)
+    if need_cast:
+        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -324,8 +367,17 @@ def add_layer_norm(
     gamma: np.ndarray,
     beta: np.ndarray,
     eps_tensor: trt.ITensor,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """LayerNorm: gamma * ((x - mean) / sqrt(var + eps)) + beta."""
+    """LayerNorm: gamma * ((x - mean) / sqrt(var + eps)) + beta.
+
+    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    norm computation for numerical stability, then casts back.
+    """
+    need_cast = (dtype != np.float32)
+    if need_cast:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
+        eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
     # mean = reduce_mean(x)
     mean = network.add_reduce(
         inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
@@ -348,18 +400,22 @@ def add_layer_norm(
         centered.get_output(0), recip.get_output(0),
         trt.ElementWiseOperation.PROD)
     # gamma * normalized + beta
-    gamma_t = add_constant(network, (1, hidden_size), gamma)
+    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
     scaled = network.add_elementwise(
         normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    beta_t = add_constant(network, (1, hidden_size), beta)
+    beta_t = add_constant(network, (1, hidden_size), beta, dtype=np.float32)
     result = network.add_elementwise(
         scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
-    return result.get_output(0)
+    result = result.get_output(0)
+    if need_cast:
+        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+    return result
 
 
 def add_gelu_new(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """GELU (tanh approximation): 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))."""
     # x^3
@@ -367,7 +423,7 @@ def add_gelu_new(
     x_cu = network.add_elementwise(
         x_sq.get_output(0), inp, trt.ElementWiseOperation.PROD)
     # 0.044715 * x^3
-    coeff = add_constant(network, (1, 1), np.array([0.044715], dtype=np.float32))
+    coeff = add_constant(network, (1, 1), np.array([0.044715], dtype=np.float32), dtype=dtype)
     scaled_cube = network.add_elementwise(
         x_cu.get_output(0), coeff, trt.ElementWiseOperation.PROD)
     # x + 0.044715 * x^3
@@ -376,7 +432,7 @@ def add_gelu_new(
     # sqrt(2/pi) * (x + 0.044715 * x^3)
     sqrt_2_over_pi = add_constant(
         network, (1, 1),
-        np.array([np.sqrt(2.0 / np.pi)], dtype=np.float32))
+        np.array([np.sqrt(2.0 / np.pi)], dtype=np.float32), dtype=dtype)
     tanh_arg = network.add_elementwise(
         sqrt_2_over_pi, inner_sum.get_output(0),
         trt.ElementWiseOperation.PROD)
@@ -384,11 +440,11 @@ def add_gelu_new(
     tanh_l = network.add_activation(
         tanh_arg.get_output(0), trt.ActivationType.TANH)
     # 1 + tanh(...)
-    one = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    one = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32), dtype=dtype)
     one_plus_tanh = network.add_elementwise(
         one, tanh_l.get_output(0), trt.ElementWiseOperation.SUM)
     # 0.5 * x
-    half = add_constant(network, (1, 1), np.array([0.5], dtype=np.float32))
+    half = add_constant(network, (1, 1), np.array([0.5], dtype=np.float32), dtype=dtype)
     half_x = network.add_elementwise(
         half, inp, trt.ElementWiseOperation.PROD)
     # 0.5 * x * (1 + tanh(...))
@@ -401,16 +457,17 @@ def add_gelu_new(
 def add_gelu_erf(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """GELU (exact, erf-based): 0.5 * x * (1 + erf(x / sqrt(2)))."""
-    inv_sqrt2 = add_constant(network, (1, 1), np.array([1.0 / np.sqrt(2.0)], dtype=np.float32))
+    inv_sqrt2 = add_constant(network, (1, 1), np.array([1.0 / np.sqrt(2.0)], dtype=np.float32), dtype=dtype)
     x_scaled = network.add_elementwise(
         inp, inv_sqrt2, trt.ElementWiseOperation.PROD)
     erf_out = network.add_unary(x_scaled.get_output(0), trt.UnaryOperation.ERF)
-    one = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    one = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32), dtype=dtype)
     one_plus_erf = network.add_elementwise(
         one, erf_out.get_output(0), trt.ElementWiseOperation.SUM)
-    half = add_constant(network, (1, 1), np.array([0.5], dtype=np.float32))
+    half = add_constant(network, (1, 1), np.array([0.5], dtype=np.float32), dtype=dtype)
     half_x = network.add_elementwise(
         half, inp, trt.ElementWiseOperation.PROD)
     result = network.add_elementwise(
@@ -423,10 +480,11 @@ def add_activation(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     activation_type: str,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
     if activation_type in ("gelu_new", "gelu"):
-        return add_gelu_new(network, inp)
+        return add_gelu_new(network, inp, dtype=dtype)
     elif activation_type == "relu":
         act = network.add_activation(inp, trt.ActivationType.RELU)
         return act.get_output(0)
@@ -514,6 +572,7 @@ def add_self_attention_block(
     k_bias: np.ndarray | None = None,
     v_bias: np.ndarray | None = None,
     o_bias: np.ndarray | None = None,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Full self-attention without KV cache (single-pass, for vision encoders).
 
@@ -524,16 +583,16 @@ def add_self_attention_block(
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     # Q, K, V projections: [seq, hidden] @ [hidden, hidden] = [seq, hidden]
-    q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q)
-    k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k)
-    v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v)
+    q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q, dtype=dtype)
+    k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k, dtype=dtype)
+    v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v, dtype=dtype)
 
     if q_bias is not None:
-        q = add_bias_sum(network, q, hidden_size, q_bias)
+        q = add_bias_sum(network, q, hidden_size, q_bias, dtype=dtype)
     if k_bias is not None:
-        k = add_bias_sum(network, k, hidden_size, k_bias)
+        k = add_bias_sum(network, k, hidden_size, k_bias, dtype=dtype)
     if v_bias is not None:
-        v = add_bias_sum(network, v, hidden_size, v_bias)
+        v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
 
     # Reshape to [num_heads, seq, head_dim]
     q_heads = network.add_shuffle(q)
@@ -555,18 +614,24 @@ def add_self_attention_block(
 
     # Scale
     scale_const = add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32), dtype=dtype)
     scaled = network.add_elementwise(
         score.get_output(0), scale_const,
         trt.ElementWiseOperation.PROD)
 
-    # Softmax over last dim
-    softmax = network.add_softmax(scaled.get_output(0))
+    # Softmax over last dim — FP32 precision boundary for numerical stability
+    softmax_inp = scaled.get_output(0)
+    if dtype != np.float32:
+        softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
+    softmax = network.add_softmax(softmax_inp)
     softmax.axes = 1 << 2  # last dim
+    attn_weights = softmax.get_output(0)
+    if dtype != np.float32:
+        attn_weights = network.add_cast(attn_weights, _np_to_trt_dtype(dtype)).get_output(0)
 
     # Context: [num_heads, seq, head_dim]
     context = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
+        attn_weights, trt.MatrixOperation.NONE,
         v_heads.get_output(0), trt.MatrixOperation.NONE)
 
     # Reshape back to [seq, hidden]
@@ -576,9 +641,9 @@ def add_self_attention_block(
 
     # Output projection
     out = add_matmul_rhs_constant(
-        network, context_flat.get_output(0), hidden_size, hidden_size, w_o)
+        network, context_flat.get_output(0), hidden_size, hidden_size, w_o, dtype=dtype)
     if o_bias is not None:
-        out = add_bias_sum(network, out, hidden_size, o_bias)
+        out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
 
     return out
 
@@ -599,6 +664,7 @@ def add_self_attention_block_with_rope(
     k_bias: np.ndarray | None = None,
     v_bias: np.ndarray | None = None,
     o_bias: np.ndarray | None = None,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Full self-attention with precomputed RoPE (for vision encoders with 3D RoPE).
 
@@ -613,25 +679,25 @@ def add_self_attention_block_with_rope(
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     # Q, K, V projections: [seq, hidden] @ [hidden, hidden] = [seq, hidden]
-    q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q)
-    k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k)
-    v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v)
+    q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q, dtype=dtype)
+    k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k, dtype=dtype)
+    v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v, dtype=dtype)
 
     if q_bias is not None:
-        q = add_bias_sum(network, q, hidden_size, q_bias)
+        q = add_bias_sum(network, q, hidden_size, q_bias, dtype=dtype)
     if k_bias is not None:
-        k = add_bias_sum(network, k, hidden_size, k_bias)
+        k = add_bias_sum(network, k, hidden_size, k_bias, dtype=dtype)
     if v_bias is not None:
-        v = add_bias_sum(network, v, hidden_size, v_bias)
+        v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
 
     # Apply RoPE using precomputed per-position cos/sin tables.
     # q_rot = q * cos + rotate_half(q) * sin  (element-wise per position)
-    cos_const = add_constant(network, (seq_length, hidden_size), cos_table)
-    sin_const = add_constant(network, (seq_length, hidden_size), sin_table)
+    cos_const = add_constant(network, (seq_length, hidden_size), cos_table, dtype=dtype)
+    sin_const = add_constant(network, (seq_length, hidden_size), sin_table, dtype=dtype)
 
     # Build rotate-half matrix for this hidden_size/num_heads config
     rot_half_np = make_rotate_half_matrix(hidden_size, num_heads)
-    rot_half_const = add_constant(network, (hidden_size, hidden_size), rot_half_np)
+    rot_half_const = add_constant(network, (hidden_size, hidden_size), rot_half_np, dtype=dtype)
 
     # Apply RoPE to Q
     q_rot = network.add_matrix_multiply(
@@ -673,18 +739,24 @@ def add_self_attention_block_with_rope(
 
     # Scale
     scale_const = add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32), dtype=dtype)
     scaled = network.add_elementwise(
         score.get_output(0), scale_const,
         trt.ElementWiseOperation.PROD)
 
-    # Softmax over last dim
-    softmax = network.add_softmax(scaled.get_output(0))
+    # Softmax over last dim — FP32 precision boundary for numerical stability
+    softmax_inp = scaled.get_output(0)
+    if dtype != np.float32:
+        softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
+    softmax = network.add_softmax(softmax_inp)
     softmax.axes = 1 << 2  # last dim
+    attn_weights = softmax.get_output(0)
+    if dtype != np.float32:
+        attn_weights = network.add_cast(attn_weights, _np_to_trt_dtype(dtype)).get_output(0)
 
     # Context: [num_heads, seq, head_dim]
     context = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
+        attn_weights, trt.MatrixOperation.NONE,
         v_heads.get_output(0), trt.MatrixOperation.NONE)
 
     # Reshape back to [seq, hidden]
@@ -694,9 +766,9 @@ def add_self_attention_block_with_rope(
 
     # Output projection
     out = add_matmul_rhs_constant(
-        network, context_flat.get_output(0), hidden_size, hidden_size, w_o)
+        network, context_flat.get_output(0), hidden_size, hidden_size, w_o, dtype=dtype)
     if o_bias is not None:
-        out = add_bias_sum(network, out, hidden_size, o_bias)
+        out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
 
     return out
 
@@ -718,6 +790,7 @@ def add_windowed_self_attention_with_rope(
     k_bias: np.ndarray | None = None,
     v_bias: np.ndarray | None = None,
     o_bias: np.ndarray | None = None,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Windowed self-attention with precomputed RoPE.
 
@@ -734,22 +807,22 @@ def add_windowed_self_attention_with_rope(
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     # Q, K, V projections: [seq, hidden] @ [hidden, hidden]
-    q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q)
-    k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k)
-    v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v)
+    q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q, dtype=dtype)
+    k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k, dtype=dtype)
+    v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v, dtype=dtype)
 
     if q_bias is not None:
-        q = add_bias_sum(network, q, hidden_size, q_bias)
+        q = add_bias_sum(network, q, hidden_size, q_bias, dtype=dtype)
     if k_bias is not None:
-        k = add_bias_sum(network, k, hidden_size, k_bias)
+        k = add_bias_sum(network, k, hidden_size, k_bias, dtype=dtype)
     if v_bias is not None:
-        v = add_bias_sum(network, v, hidden_size, v_bias)
+        v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
 
     # RoPE: same as full attention
-    cos_const = add_constant(network, (seq_length, hidden_size), cos_table)
-    sin_const = add_constant(network, (seq_length, hidden_size), sin_table)
+    cos_const = add_constant(network, (seq_length, hidden_size), cos_table, dtype=dtype)
+    sin_const = add_constant(network, (seq_length, hidden_size), sin_table, dtype=dtype)
     rot_half_np = make_rotate_half_matrix(hidden_size, num_heads)
-    rot_half_const = add_constant(network, (hidden_size, hidden_size), rot_half_np)
+    rot_half_const = add_constant(network, (hidden_size, hidden_size), rot_half_np, dtype=dtype)
 
     q_rot = network.add_matrix_multiply(
         q, trt.MatrixOperation.NONE, rot_half_const, trt.MatrixOperation.NONE)
@@ -796,15 +869,22 @@ def add_windowed_self_attention_with_rope(
         k_flat.get_output(0), trt.MatrixOperation.TRANSPOSE)
 
     scale_const = add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32), dtype=dtype)
     scaled = network.add_elementwise(
         score.get_output(0), scale_const, trt.ElementWiseOperation.PROD)
 
-    softmax = network.add_softmax(scaled.get_output(0))
+    # Softmax — FP32 precision boundary for numerical stability
+    softmax_inp = scaled.get_output(0)
+    if dtype != np.float32:
+        softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
+    softmax = network.add_softmax(softmax_inp)
     softmax.axes = 1 << 2
+    attn_weights = softmax.get_output(0)
+    if dtype != np.float32:
+        attn_weights = network.add_cast(attn_weights, _np_to_trt_dtype(dtype)).get_output(0)
 
     context = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
+        attn_weights, trt.MatrixOperation.NONE,
         v_flat.get_output(0), trt.MatrixOperation.NONE)
 
     # Reshape back: [NW*NH, win_seq, head_dim] → [NW, NH, win_seq, head_dim]
@@ -817,9 +897,9 @@ def add_windowed_self_attention_with_rope(
 
     # Output projection
     out = add_matmul_rhs_constant(
-        network, ctx_flat.get_output(0), hidden_size, hidden_size, w_o)
+        network, ctx_flat.get_output(0), hidden_size, hidden_size, w_o, dtype=dtype)
     if o_bias is not None:
-        out = add_bias_sum(network, out, hidden_size, o_bias)
+        out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
 
     return out
 
@@ -833,6 +913,7 @@ def add_patch_embed_3d(
     embed_dim: int,
     temporal_patch_size: int,
     patch_size: int,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """3D patch embedding via convolution.
 
@@ -858,10 +939,10 @@ def add_patch_embed_3d(
 
     # Conv2D with kernel [embed_dim, T*C, patch_size, patch_size]
     # weight shape from HF: [embed_dim, T*C, patch_size, patch_size]
-    conv_w = trt.Weights(np.ascontiguousarray(weight, dtype=np.float32))
+    conv_w = trt.Weights(np.ascontiguousarray(weight, dtype=dtype))
     conv_b = trt.Weights()
     if bias is not None:
-        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
+        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
 
     conv = network.add_convolution_nd(
         reshape_in.get_output(0),
@@ -894,6 +975,7 @@ def add_spatial_merge(
     eps_tensor: trt.ITensor,
     seq_length: int,
     merge_size: int = 2,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Spatial merge: 2x2 merge MLP that reduces spatial resolution.
 
@@ -909,21 +991,22 @@ def add_spatial_merge(
     # LayerNorm on the merged representation
     norm = add_layer_norm(
         network, inp, input_dim,
-        norm_gamma, np.zeros(input_dim, dtype=np.float32), eps_tensor)
+        norm_gamma, np.zeros(input_dim, dtype=np.float32), eps_tensor,
+        dtype=dtype)
 
     # For simplicity in the TRT graph, we use a 2-layer MLP directly
     # on the already-flattened input. The spatial rearrangement is handled
     # during preprocessing.
-    fc1 = add_matmul_rhs_constant(network, norm, input_dim, hidden_dim, w_fc1)
+    fc1 = add_matmul_rhs_constant(network, norm, input_dim, hidden_dim, w_fc1, dtype=dtype)
     if b_fc1 is not None:
-        fc1 = add_bias_sum(network, fc1, hidden_dim, b_fc1)
+        fc1 = add_bias_sum(network, fc1, hidden_dim, b_fc1, dtype=dtype)
 
     # GELU activation
-    activated = add_gelu_new(network, fc1)
+    activated = add_gelu_new(network, fc1, dtype=dtype)
 
-    fc2 = add_matmul_rhs_constant(network, activated, hidden_dim, output_dim, w_fc2)
+    fc2 = add_matmul_rhs_constant(network, activated, hidden_dim, output_dim, w_fc2, dtype=dtype)
     if b_fc2 is not None:
-        fc2 = add_bias_sum(network, fc2, output_dim, b_fc2)
+        fc2 = add_bias_sum(network, fc2, output_dim, b_fc2, dtype=dtype)
 
     return fc2
 
@@ -940,6 +1023,7 @@ def add_group_norm(
     gamma: np.ndarray,
     beta: np.ndarray,
     eps: float = 1e-5,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """GroupNorm: split channels into groups, normalize each group.
 
@@ -949,11 +1033,18 @@ def add_group_norm(
     TRT 10 does not have a native GroupNorm layer, so we reshape to
     [batch, num_groups, group_size], normalize, reshape back, then apply
     affine (gamma, beta).
+
+    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    norm computation for numerical stability, then casts back.
     """
     # Reshape: [B, C] or [B, C, ...] — we handle the 2D case [seq, C]
     # and the 5D case [B, C, T, H, W] for VAE.
+    need_cast = (dtype != np.float32)
     ndims = len(inp.shape)
     group_size = num_channels // num_groups
+
+    if need_cast:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
 
     if ndims == 2:
         # [seq, C] -> [seq, G, Gs]
@@ -963,7 +1054,7 @@ def add_group_norm(
 
         # Normalize over group_size dim (dim=2)
         eps_t = add_constant(network, (1, 1, 1),
-                             np.array([eps], dtype=np.float32))
+                             np.array([eps], dtype=np.float32), dtype=np.float32)
         sq = network.add_elementwise(x, x, trt.ElementWiseOperation.PROD)
         mean = network.add_reduce(
             x, trt.ReduceOperation.AVG, 1 << 2, keep_dims=True)
@@ -1006,7 +1097,7 @@ def add_group_norm(
         # Reduce over dims 2,3,4,5 (group_size, T, H, W)
         reduce_axes = (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5)
         eps_t = add_constant(network, (1, 1, 1, 1, 1, 1),
-                             np.array([eps], dtype=np.float32))
+                             np.array([eps], dtype=np.float32), dtype=np.float32)
         sq = network.add_elementwise(x, x, trt.ElementWiseOperation.PROD)
         mean = network.add_reduce(
             x, trt.ReduceOperation.AVG, reduce_axes, keep_dims=True)
@@ -1041,17 +1132,20 @@ def add_group_norm(
 
     # Affine: gamma * result + beta (broadcast over spatial dims)
     if ndims == 2:
-        gamma_t = add_constant(network, (1, num_channels), gamma)
-        beta_t = add_constant(network, (1, num_channels), beta)
+        gamma_t = add_constant(network, (1, num_channels), gamma, dtype=np.float32)
+        beta_t = add_constant(network, (1, num_channels), beta, dtype=np.float32)
     else:
         gamma_t = add_constant(
-            network, (1, num_channels, 1, 1, 1), gamma.reshape(1, -1, 1, 1, 1))
+            network, (1, num_channels, 1, 1, 1), gamma.reshape(1, -1, 1, 1, 1), dtype=np.float32)
         beta_t = add_constant(
-            network, (1, num_channels, 1, 1, 1), beta.reshape(1, -1, 1, 1, 1))
+            network, (1, num_channels, 1, 1, 1), beta.reshape(1, -1, 1, 1, 1), dtype=np.float32)
     scaled = network.add_elementwise(
         result, gamma_t, trt.ElementWiseOperation.PROD)
-    return network.add_elementwise(
+    result = network.add_elementwise(
         scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM).get_output(0)
+    if need_cast:
+        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+    return result
 
 
 def add_silu(
@@ -1073,6 +1167,7 @@ def add_conv3d_as_conv2d(
     kernel_size: tuple[int, int, int],
     stride: tuple[int, int, int] = (1, 1, 1),
     padding: tuple[int, int, int] = (0, 0, 0),
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """3D convolution decomposed as 2D convolution over fused (T*C) channels.
 
@@ -1098,10 +1193,10 @@ def add_conv3d_as_conv2d(
 
         # Weight: [C_out, C_in, 1, Kh, Kw] -> [C_out, C_in, Kh, Kw]
         w2d = weight.reshape(out_channels, c_in, kh, kw)
-        conv_w = trt.Weights(np.ascontiguousarray(w2d, dtype=np.float32))
+        conv_w = trt.Weights(np.ascontiguousarray(w2d, dtype=dtype))
         conv_b = trt.Weights()
         if bias is not None:
-            conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
+            conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
 
         conv = network.add_convolution_nd(
             reshape_in.get_output(0),
@@ -1158,6 +1253,7 @@ def add_causal_conv3d(
     kernel_size: tuple[int, int, int],
     stride: tuple[int, int, int] = (1, 1, 1),
     padding_hw: tuple[int, int] = (0, 0),
+    dtype: np.dtype = np.float32,
 ) -> tuple[trt.ITensor, trt.ITensor]:
     """Causal 3D convolution with temporal cache.
 
@@ -1180,7 +1276,7 @@ def add_causal_conv3d(
         result = add_conv3d_as_conv2d(
             network, inp, weight, bias, out_channels,
             kernel_size=(1, kh, kw), stride=stride,
-            padding=(0, ph, pw))
+            padding=(0, ph, pw), dtype=dtype)
         # Cache is unchanged
         return result, cache
 
@@ -1197,10 +1293,10 @@ def add_causal_conv3d(
         reshape_in.reshape_dims = (b, c_in * kt, h, w)
 
         w2d = weight.reshape(out_channels, c_in * kt, kh, kw)
-        conv_w = trt.Weights(np.ascontiguousarray(w2d, dtype=np.float32))
+        conv_w = trt.Weights(np.ascontiguousarray(w2d, dtype=dtype))
         conv_b = trt.Weights()
         if bias is not None:
-            conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
+            conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
 
         conv = network.add_convolution_nd(
             reshape_in.get_output(0),
@@ -1221,10 +1317,10 @@ def add_causal_conv3d(
         # General T>1 path: native 3D convolution
         # full_temporal is [B, C_in, Kt-1+T, H, W]
         w3d = weight.reshape(out_channels, c_in, kt, kh, kw)
-        conv_w = trt.Weights(np.ascontiguousarray(w3d, dtype=np.float32))
+        conv_w = trt.Weights(np.ascontiguousarray(w3d, dtype=dtype))
         conv_b = trt.Weights()
         if bias is not None:
-            conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
+            conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
 
         conv = network.add_convolution_nd(
             full_temporal,
@@ -1276,6 +1372,7 @@ def add_spatial_upsample_with_conv(
     weight: np.ndarray,
     bias: np.ndarray | None,
     scale: int = 2,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Spatial nearest-neighbor 2x upsample + Conv3D(1,3,3) smoothing.
 
@@ -1297,6 +1394,7 @@ def add_spatial_upsample_with_conv(
         out_channels=out_channels,
         kernel_size=(1, 3, 3),
         padding=(0, 1, 1),
+        dtype=dtype,
     )
     return result
 
@@ -1323,6 +1421,7 @@ def add_l2_channel_norm(
     num_channels: int,
     gamma: np.ndarray,
     eps: float = 1e-6,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """L2 channel norm: F.normalize(x, dim=1) * sqrt(C) * gamma.
 
@@ -1332,14 +1431,20 @@ def add_l2_channel_norm(
     Input: [B, C, T, H, W] (5D tensor)
     gamma: [C, 1, 1, 1] reshaped to [1, C, 1, 1, 1] for broadcast
     Output: same shape
+
+    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    norm computation for numerical stability, then casts back.
     """
+    need_cast = (dtype != np.float32)
+    if need_cast:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
     # L2 norm over channel dim: ||x||_2 = sqrt(sum(x^2, dim=1))
     sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
     sum_sq = network.add_reduce(
         sq.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
 
     eps_t = add_constant(network, (1, 1, 1, 1, 1),
-                         np.array([eps], dtype=np.float32))
+                         np.array([eps], dtype=np.float32), dtype=np.float32)
     denom_in = network.add_elementwise(
         sum_sq.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
     norm = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
@@ -1354,11 +1459,14 @@ def add_l2_channel_norm(
     scale = np.sqrt(num_channels) * gamma_flat
     scale_t = add_constant(
         network, (1, num_channels, 1, 1, 1),
-        scale.reshape(1, num_channels, 1, 1, 1))
+        scale.reshape(1, num_channels, 1, 1, 1), dtype=np.float32)
 
-    return network.add_elementwise(
+    result = network.add_elementwise(
         normalized.get_output(0), scale_t,
         trt.ElementWiseOperation.PROD).get_output(0)
+    if need_cast:
+        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+    return result
 
 
 def add_temporal_pixel_shuffle(
@@ -1395,6 +1503,7 @@ def add_timestep_embedding(
     dim: int,
     freq_dim: int = 256,
     max_period: float = 10000.0,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Sinusoidal timestep embedding: sin/cos frequencies -> MLP.
 
@@ -1408,7 +1517,7 @@ def add_timestep_embedding(
     half = freq_dim // 2
     # Precompute frequency table: exp(-log(max_period) * i / half)
     freqs = np.exp(-np.log(max_period) * np.arange(half, dtype=np.float32) / half)
-    freqs_const = add_constant(network, (1, half), freqs.reshape(1, -1))
+    freqs_const = add_constant(network, (1, half), freqs.reshape(1, -1), dtype=dtype)
 
     # timestep * freqs: [1] * [1, half] -> [1, half]
     ts_reshaped = network.add_shuffle(timestep)
@@ -1438,6 +1547,7 @@ def add_adaptive_layernorm(
     shift: trt.ITensor,
     hidden_size: int,
     eps: float = 1e-5,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Adaptive LayerNorm (AdaLN): norm(x) * (1 + scale) + shift.
 
@@ -1447,9 +1557,17 @@ def add_adaptive_layernorm(
     scale: [1, hidden_size]
     shift: [1, hidden_size]
     Output: [seq, hidden_size]
+
+    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    norm computation for numerical stability, then casts back.
     """
+    need_cast = (dtype != np.float32)
+    if need_cast:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
+        scale = network.add_cast(scale, trt.float32).get_output(0)
+        shift = network.add_cast(shift, trt.float32).get_output(0)
     # Standard LayerNorm without affine
-    eps_t = add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
+    eps_t = add_constant(network, (1, 1), np.array([eps], dtype=np.float32), dtype=np.float32)
     mean = network.add_reduce(
         inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
     centered = network.add_elementwise(
@@ -1470,15 +1588,18 @@ def add_adaptive_layernorm(
         trt.ElementWiseOperation.PROD)
 
     # Adaptive modulation: norm(x) * (1 + scale) + shift
-    one = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    one = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32), dtype=np.float32)
     scale_plus_one = network.add_elementwise(
         one, scale, trt.ElementWiseOperation.SUM)
     scaled = network.add_elementwise(
         normalized.get_output(0), scale_plus_one.get_output(0),
         trt.ElementWiseOperation.PROD)
-    return network.add_elementwise(
+    result = network.add_elementwise(
         scaled.get_output(0), shift,
         trt.ElementWiseOperation.SUM).get_output(0)
+    if need_cast:
+        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+    return result
 
 
 def add_cross_attention(
@@ -1498,6 +1619,7 @@ def add_cross_attention(
     k_bias: np.ndarray | None = None,
     v_bias: np.ndarray | None = None,
     o_bias: np.ndarray | None = None,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Cross-attention: Q from query, K/V from context.
 
@@ -1509,17 +1631,17 @@ def add_cross_attention(
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     # Q projection: [q_seq, hidden] @ [hidden, hidden] = [q_seq, hidden]
-    q = add_matmul_rhs_constant(network, query, hidden_size, hidden_size, w_q)
+    q = add_matmul_rhs_constant(network, query, hidden_size, hidden_size, w_q, dtype=dtype)
     # K, V projections: [kv_seq, context_dim] @ [context_dim, hidden] = [kv_seq, hidden]
-    k = add_matmul_rhs_constant(network, context, context_dim, hidden_size, w_k)
-    v = add_matmul_rhs_constant(network, context, context_dim, hidden_size, w_v)
+    k = add_matmul_rhs_constant(network, context, context_dim, hidden_size, w_k, dtype=dtype)
+    v = add_matmul_rhs_constant(network, context, context_dim, hidden_size, w_v, dtype=dtype)
 
     if q_bias is not None:
-        q = add_bias_sum(network, q, hidden_size, q_bias)
+        q = add_bias_sum(network, q, hidden_size, q_bias, dtype=dtype)
     if k_bias is not None:
-        k = add_bias_sum(network, k, hidden_size, k_bias)
+        k = add_bias_sum(network, k, hidden_size, k_bias, dtype=dtype)
     if v_bias is not None:
-        v = add_bias_sum(network, v, hidden_size, v_bias)
+        v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
 
     # Reshape to multi-head: [seq, hidden] -> [num_heads, seq, head_dim]
     q_heads = network.add_shuffle(q)
@@ -1540,17 +1662,24 @@ def add_cross_attention(
         k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
 
     scale_const = add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32), dtype=dtype)
     scaled = network.add_elementwise(
         score.get_output(0), scale_const,
         trt.ElementWiseOperation.PROD)
 
-    softmax = network.add_softmax(scaled.get_output(0))
+    # Softmax — FP32 precision boundary for numerical stability
+    softmax_inp = scaled.get_output(0)
+    if dtype != np.float32:
+        softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
+    softmax = network.add_softmax(softmax_inp)
     softmax.axes = 1 << 2
+    attn_weights = softmax.get_output(0)
+    if dtype != np.float32:
+        attn_weights = network.add_cast(attn_weights, _np_to_trt_dtype(dtype)).get_output(0)
 
     # Context: softmax @ V
     context_out = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
+        attn_weights, trt.MatrixOperation.NONE,
         v_heads.get_output(0), trt.MatrixOperation.NONE)
 
     # Reshape back: [num_heads, q_seq, head_dim] -> [q_seq, hidden]
@@ -1560,9 +1689,9 @@ def add_cross_attention(
 
     # Output projection
     out = add_matmul_rhs_constant(
-        network, context_flat.get_output(0), hidden_size, hidden_size, w_o)
+        network, context_flat.get_output(0), hidden_size, hidden_size, w_o, dtype=dtype)
     if o_bias is not None:
-        out = add_bias_sum(network, out, hidden_size, o_bias)
+        out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
 
     return out
 
@@ -1638,6 +1767,7 @@ def add_conv2d(
     stride: tuple[int, int] = (1, 1),
     padding: tuple[int, int] = (0, 0),
     groups: int = 1,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """2D convolution wrapper.
 
@@ -1645,10 +1775,10 @@ def add_conv2d(
     Weight: [C_out, C_in/groups, kH, kW]
     Output: [N, C_out, H', W']
     """
-    conv_w = trt.Weights(np.ascontiguousarray(weight, dtype=np.float32))
+    conv_w = trt.Weights(np.ascontiguousarray(weight, dtype=dtype))
     conv_b = trt.Weights()
     if bias is not None:
-        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
+        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
 
     conv = network.add_convolution_nd(
         inp,
@@ -1672,28 +1802,38 @@ def add_batch_norm_2d(
     running_mean: np.ndarray,
     running_var: np.ndarray,
     eps: float = 1e-5,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Fused BatchNorm2d: gamma * (x - mean) / sqrt(var + eps) + beta.
 
     Input: [N, C, H, W]
     Output: same shape
+
+    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    norm computation for numerical stability, then casts back.
     """
+    need_cast = (dtype != np.float32)
+    if need_cast:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
     # Fuse into scale + shift
     scale = gamma / np.sqrt(running_var + eps)
     shift = beta - running_mean * scale
 
     scale_t = add_constant(
         network, (1, num_channels, 1, 1),
-        scale.reshape(1, -1, 1, 1).astype(np.float32))
+        scale.reshape(1, -1, 1, 1).astype(np.float32), dtype=np.float32)
     shift_t = add_constant(
         network, (1, num_channels, 1, 1),
-        shift.reshape(1, -1, 1, 1).astype(np.float32))
+        shift.reshape(1, -1, 1, 1).astype(np.float32), dtype=np.float32)
 
     scaled = network.add_elementwise(
         inp, scale_t, trt.ElementWiseOperation.PROD)
-    return network.add_elementwise(
+    result = network.add_elementwise(
         scaled.get_output(0), shift_t,
         trt.ElementWiseOperation.SUM).get_output(0)
+    if need_cast:
+        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+    return result
 
 
 def add_bilinear_resize_2d(
@@ -1723,6 +1863,7 @@ def add_conv1d(
     stride: int = 1,
     padding: int = 0,
     groups: int = 1,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """1D convolution via 2D convolution with height=1.
 
@@ -1743,7 +1884,8 @@ def add_conv1d(
         kernel_size=(1, kernel_size),
         stride=(1, stride),
         padding=(0, padding),
-        groups=groups)
+        groups=groups,
+        dtype=dtype)
 
     # Reshape back to [N, C_out, L']
     out_length = result.shape[3]
@@ -1761,6 +1903,7 @@ def add_conv1d_transpose(
     kernel_size: int,
     stride: int = 1,
     padding: int = 0,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """1D transposed convolution via 2D deconvolution with height=1.
 
@@ -1775,10 +1918,10 @@ def add_conv1d_transpose(
 
     # Weight for deconv: [C_in, C_out, 1, K]
     w_4d = weight.reshape(c_in, out_channels, 1, kernel_size)
-    conv_w = trt.Weights(np.ascontiguousarray(w_4d, dtype=np.float32))
+    conv_w = trt.Weights(np.ascontiguousarray(w_4d, dtype=dtype))
     conv_b = trt.Weights()
     if bias is not None:
-        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=np.float32))
+        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
 
     deconv = network.add_deconvolution_nd(
         reshape_in.get_output(0),
@@ -1884,6 +2027,7 @@ def add_lstm_unrolled(
     b_hh: np.ndarray,
     hidden_size: int,
     seq_length: int,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """LSTM using TRT native loop API (ILoopLayer + IRecurrenceLayer).
 
@@ -1906,14 +2050,14 @@ def add_lstm_unrolled(
 
     # Weight constants
     w_ih_t = add_constant(network, (input_size, 4 * H),
-                          np.ascontiguousarray(w_ih.T, dtype=np.float32))
+                          np.ascontiguousarray(w_ih.T, dtype=np.float32), dtype=dtype)
     w_hh_t = add_constant(network, (H, 4 * H),
-                          np.ascontiguousarray(w_hh.T, dtype=np.float32))
-    bias_t = add_constant(network, (1, 4 * H), bias.reshape(1, -1))
+                          np.ascontiguousarray(w_hh.T, dtype=np.float32), dtype=dtype)
+    bias_t = add_constant(network, (1, 4 * H), bias.reshape(1, -1), dtype=dtype)
 
     # Init h, c to zeros [1, H]
-    zero_h = add_constant(network, (1, H), np.zeros((1, H), dtype=np.float32))
-    zero_c = add_constant(network, (1, H), np.zeros((1, H), dtype=np.float32))
+    zero_h = add_constant(network, (1, H), np.zeros((1, H), dtype=np.float32), dtype=dtype)
+    zero_c = add_constant(network, (1, H), np.zeros((1, H), dtype=np.float32), dtype=dtype)
 
     # --- TRT loop ---
     loop = network.add_loop()
@@ -1997,8 +2141,17 @@ def add_layer_norm_no_affine(
     inp: trt.ITensor,
     hidden_size: int,
     eps_tensor: trt.ITensor,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """LayerNorm without learnable affine: (x - mean) / sqrt(var + eps)."""
+    """LayerNorm without learnable affine: (x - mean) / sqrt(var + eps).
+
+    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    norm computation for numerical stability, then casts back.
+    """
+    need_cast = (dtype != np.float32)
+    if need_cast:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
+        eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
     mean = network.add_reduce(
         inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
     centered = network.add_elementwise(
@@ -2015,7 +2168,10 @@ def add_layer_norm_no_affine(
     normalized = network.add_elementwise(
         centered.get_output(0), recip.get_output(0),
         trt.ElementWiseOperation.PROD)
-    return normalized.get_output(0)
+    result = normalized.get_output(0)
+    if need_cast:
+        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+    return result
 
 
 # Alias: add_gelu_tanh is the same as add_gelu_new (tanh approximation)

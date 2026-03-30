@@ -449,7 +449,8 @@ class BarkPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
     ) -> bytes:
         """Build TRT engine for semantic decoder (primary engine)."""
         sem_cfg = weights["_semantic_cfg"]
@@ -459,7 +460,8 @@ class BarkPlugin:
 
     def build_extra_engines(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        verbose: bool = False,
     ) -> dict:
         """Build coarse, fine, codec engines + embedding tables for C++ runtime."""
         coarse_cfg = weights["_coarse_cfg"]
@@ -673,10 +675,9 @@ def _build_bark_decoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     attention_window = max_cache_length + 1
     attention_size = num_heads * head_dim
@@ -924,10 +925,9 @@ def _build_bark_fine_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     # Input: pre-computed summed embeddings [seq_length, hidden_size]
     # C++ runtime sums the 8 codebook embeddings + position embedding and

@@ -131,6 +131,8 @@ WORKER_PROMPT = textwrap.dedent("""\
     If all retries failed, write status "FAIL" with the last error message instead.
     Write this file on the HOST filesystem, not via docker exec.
 
+    {optimize_section}
+
     ## Important rules
     - ALL commands run via `docker exec trtf-dev-gb300-{agent_id}`.
     - Do NOT modify any file outside families/{family_name}.py and
@@ -142,9 +144,24 @@ WORKER_PROMPT = textwrap.dedent("""\
 """)
 
 
-def build_prompt(task: dict, agent_id: str) -> str:
+_OPTIMIZE_SECTION = """\
+## Step 4b: Optimize precision (optional)
+
+    After validation passes, optimize the model for low precision:
+    1. Read the skill: cat /workspace/users/yifeif/workspaces/{agent_id}/trt-transformers-cpp/.claude/skills/optimize-model-precision.md
+    2. Follow the skill to find the best non-FP32 precision config
+    3. At minimum, build an FP16 variant
+    4. Create a second E2E manifest for the optimized variant
+"""
+
+
+def build_prompt(task: dict, agent_id: str, *, optimize: bool = False) -> str:
     """Fill in the worker prompt template for a specific task."""
     trust_rc = task.get("trust_remote_code", False)
+    optimize_section = ""
+    if optimize:
+        optimize_section = _OPTIMIZE_SECTION.format(
+            agent_id=agent_id, family_name=task["family_name"])
     return WORKER_PROMPT.format(
         model_type=task["model_type"],
         hf_id=task["hf_id"],
@@ -155,6 +172,7 @@ def build_prompt(task: dict, agent_id: str) -> str:
         trust_flag="--trust-remote-code" if trust_rc else "",
         trust_remote_code_py=", trust_remote_code=True" if trust_rc else "",
         trust_manifest_line=',\n    "trust_remote_code": true' if trust_rc else "",
+        optimize_section=optimize_section,
     )
 
 
@@ -167,10 +185,11 @@ def launch_agent(
     agent_id: str,
     task: dict,
     dry_run: bool = False,
+    optimize: bool = False,
 ) -> subprocess.Popen | None:
     """Launch a Claude Code session for one task in one agent workspace."""
     workspace = f"{WORKSPACE_ROOT}/{agent_id}/trt-transformers-cpp"
-    prompt = build_prompt(task, agent_id)
+    prompt = build_prompt(task, agent_id, optimize=optimize)
 
     if dry_run:
         print(f"\n{'='*60}")
@@ -307,7 +326,8 @@ def dispatch(
         procs = {}
         for i, task in enumerate(batch):
             agent = agent_ids[i]
-            proc = launch_agent(agent, task, dry_run=is_dry_run)
+            proc = launch_agent(agent, task, dry_run=is_dry_run,
+                                optimize=args.optimize)
             if proc:
                 procs[agent] = (proc, task)
 
@@ -359,6 +379,8 @@ def main():
                         help="Execution mode (default: interactive)")
     parser.add_argument("--timeout", type=int, default=1800,
                         help="Per-batch timeout in seconds (default: 1800)")
+    parser.add_argument("--optimize", action="store_true",
+                        help="After validation, run precision optimization")
     parser.add_argument("--offset", type=int, default=0,
                         help="Skip first N tasks (for resuming)")
     parser.add_argument("--limit", type=int, default=None,

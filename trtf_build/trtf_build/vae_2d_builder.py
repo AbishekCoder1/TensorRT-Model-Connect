@@ -369,7 +369,7 @@ def build_vae_2d_decoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
 
@@ -468,9 +468,10 @@ def build_vae_2d_decoder_engine(
         padding=(1, 1))
 
     # Mark output
-    x.name = "decoder_output"
-    x.dtype = trt.float32
-    network.mark_output(x)
+    cast_x = network.add_cast(x, trt.float32)
+    x_out = cast_x.get_output(0)
+    x_out.name = "decoder_output"
+    network.mark_output(x_out)
 
     print("[vae-2d] Building TRT engine ...", file=sys.stderr)
     plan = builder.build_serialized_network(network, config)
@@ -503,7 +504,7 @@ def build_vae_2d_placeholder(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
 
@@ -513,9 +514,10 @@ def build_vae_2d_placeholder(
     zeros = np.zeros((1, 3, h_out, w_out), dtype=np.float32)
     const = network.add_constant((1, 3, h_out, w_out), trt.Weights(zeros))
     out = const.get_output(0)
-    out.name = "decoder_output"
-    out.dtype = trt.float32
-    network.mark_output(out)
+    cast_out = network.add_cast(out, trt.float32)
+    out_final = cast_out.get_output(0)
+    out_final.name = "decoder_output"
+    network.mark_output(out_final)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:

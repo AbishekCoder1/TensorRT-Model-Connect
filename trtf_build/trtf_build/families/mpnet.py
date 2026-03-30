@@ -211,7 +211,8 @@ class MpnetPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
     ) -> bytes:
         # Pre-compute relative position bias if present
         if "_relative_attention_bias" in weights:

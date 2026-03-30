@@ -12,8 +12,13 @@ Usage:
 
     python3 tools/diff_logits.py \
       --model models/hf/Qwen__Qwen3-0.6B --battery
+
+    # Machine-readable JSON output for automated accuracy gating:
+    python3 tools/diff_logits.py \
+      --model Qwen/Qwen3-0.6B --battery --json results.json
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -257,11 +262,28 @@ def _run_hf_whisper(model, config, input_ids, max_new_tokens):
     return all_logits
 
 
+def _cosine_similarity(a, b):
+    """Cosine similarity between two 1-D arrays. Returns 0.0 if either is zero."""
+    dot = float(np.dot(a, b))
+    norm_a = float(np.linalg.norm(a))
+    norm_b = float(np.linalg.norm(b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
 def compare_logits(trt_logits, hf_logits, atol, top_k=10):
-    """Compare logit arrays step by step. Returns (max_diff, report_lines)."""
+    """Compare logit arrays step by step.
+
+    Returns (max_diff, report_lines, step_metrics) where step_metrics is a
+    list of dicts with per-step structured data (cosine_sim, argmax_match,
+    mean_abs_diff).  Steps with shape mismatches are omitted from
+    step_metrics.
+    """
     n = min(len(trt_logits), len(hf_logits))
     max_diff = 0.0
     lines = []
+    step_metrics = []
 
     for step in range(n):
         trt_l = trt_logits[step]
@@ -275,7 +297,11 @@ def compare_logits(trt_logits, hf_logits, atol, top_k=10):
         # Full logit comparison
         diff = np.abs(trt_l - hf_l)
         step_max = float(diff.max())
+        step_mean = float(diff.mean())
         max_diff = max(max_diff, step_max)
+
+        # Cosine similarity
+        cosine = _cosine_similarity(trt_l, hf_l)
 
         # Top-K token agreement
         trt_top = set(np.argsort(trt_l)[-top_k:])
@@ -291,7 +317,96 @@ def compare_logits(trt_logits, hf_logits, atol, top_k=10):
             f"argmax_match={argmax_match}  "
             f"top{top_k}_overlap={overlap}/{top_k}")
 
-    return max_diff, lines
+        step_metrics.append({
+            "step": step,
+            "cosine_sim": cosine,
+            "argmax_match": trt_argmax == hf_argmax,
+            "mean_abs_diff": step_mean,
+            "max_abs_diff": step_max,
+        })
+
+    return max_diff, lines, step_metrics
+
+
+def _build_json_report(prompt_results, atol):
+    """Build a machine-readable JSON report from accumulated prompt results.
+
+    Args:
+        prompt_results: list of dicts, each with keys:
+            - label: prompt label string
+            - passed: bool, whether this prompt passed the atol gate
+            - max_diff: float, max absolute logit diff for this prompt
+            - step_metrics: list of per-step metric dicts from compare_logits
+            - trt_text: decoded TRT output text
+            - hf_text: decoded HF output text
+        atol: float, absolute tolerance used for the comparison
+
+    Returns:
+        dict with top-level summary fields and per-prompt details.
+    """
+    # Collect all step metrics across all prompts
+    all_cosines = []
+    all_argmax_matches = []
+    all_mean_abs_diffs = []
+    for pr in prompt_results:
+        for sm in pr["step_metrics"]:
+            all_cosines.append(sm["cosine_sim"])
+            all_argmax_matches.append(sm["argmax_match"])
+            all_mean_abs_diffs.append(sm["mean_abs_diff"])
+
+    overall_pass = all(pr["passed"] for pr in prompt_results)
+
+    # Compute aggregate metrics (safe defaults when no steps exist)
+    if all_cosines:
+        cosine_p5 = float(np.percentile(all_cosines, 5))
+    else:
+        cosine_p5 = 0.0
+
+    if all_argmax_matches:
+        top1_match_rate = float(
+            sum(all_argmax_matches) / len(all_argmax_matches))
+    else:
+        top1_match_rate = 0.0
+
+    if all_mean_abs_diffs:
+        mean_abs_diff = float(np.mean(all_mean_abs_diffs))
+    else:
+        mean_abs_diff = 0.0
+
+    # Token agreement: fraction of prompts where TRT and HF produce the
+    # same decoded text (stripped).
+    if prompt_results:
+        text_matches = sum(
+            1 for pr in prompt_results
+            if pr["trt_text"].strip() == pr["hf_text"].strip()
+        )
+        token_agreement = float(text_matches / len(prompt_results))
+    else:
+        token_agreement = 0.0
+
+    report = {
+        "pass": overall_pass,
+        "cosine_p5": cosine_p5,
+        "top1_match_rate": top1_match_rate,
+        "token_agreement": token_agreement,
+        "mean_abs_diff": mean_abs_diff,
+        "atol": atol,
+        "num_prompts": len(prompt_results),
+        "prompts": [],
+    }
+
+    for pr in prompt_results:
+        prompt_entry = {
+            "label": pr["label"],
+            "passed": pr["passed"],
+            "max_diff": pr["max_diff"],
+            "trt_text": pr["trt_text"],
+            "hf_text": pr["hf_text"],
+            "num_steps": len(pr["step_metrics"]),
+        }
+        report["prompts"].append(prompt_entry)
+
+    return report
 
 
 def main():
@@ -311,6 +426,8 @@ def main():
                         help="Allow executing custom Python code from the "
                              "model repository (required for models without "
                              "native transformers support)")
+    parser.add_argument("--json", metavar="PATH", default=None,
+                        help="Write machine-readable JSON report to PATH")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -339,6 +456,7 @@ def main():
         prompts = [("whisper-decode", f"[decoder start tokens: {start_ids}]")]
 
     all_passed = True
+    prompt_results = []
     for label, prompt in prompts:
         print(f"\n{'=' * 60}")
         print(f"Prompt [{label}]: {prompt[:80]}{'...' if len(prompt) > 80 else ''}")
@@ -362,7 +480,8 @@ def main():
                            trust_remote_code=args.trust_remote_code)
 
         # Compare
-        max_diff, report = compare_logits(trt_logits, hf_logits, args.atol)
+        max_diff, report, step_metrics = compare_logits(
+            trt_logits, hf_logits, args.atol)
 
         # Decode generated text
         trt_gen_ids = [int(np.argmax(l)) for l in trt_logits[len(input_ids) - 1:]]
@@ -385,6 +504,22 @@ def main():
 
         if not passed:
             all_passed = False
+
+        prompt_results.append({
+            "label": label,
+            "passed": passed,
+            "max_diff": max_diff,
+            "step_metrics": step_metrics,
+            "trt_text": trt_text,
+            "hf_text": hf_text,
+        })
+
+    # Write JSON report if requested
+    if args.json:
+        report_dict = _build_json_report(prompt_results, args.atol)
+        json_path = Path(args.json)
+        json_path.write_text(json.dumps(report_dict, indent=2))
+        print(f"\n[diff] JSON report written to {json_path}", file=sys.stderr)
 
     sys.exit(0 if all_passed else 1)
 

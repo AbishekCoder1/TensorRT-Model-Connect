@@ -402,7 +402,8 @@ class SamPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
     ) -> bytes:
         """Build TRT engine for SAM image encoder.
 
@@ -426,10 +427,9 @@ class SamPlugin:
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network()
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
-        trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         eps_t = graph_ops.add_constant(
             network, (1, 1), np.array([1e-6], dtype=np.float32))
@@ -603,7 +603,7 @@ class SamPlugin:
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, verbose: bool = False,
+        *, precision: str = "fp32", verbose: bool = False,
     ) -> bytes | None:
         """Build TRT engine for SAM mask decoder.
 
@@ -641,10 +641,9 @@ class SamPlugin:
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network()
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-        trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         eps_t = graph_ops.add_constant(
             network, (1, 1), np.array([1e-6], dtype=np.float32))
@@ -972,9 +971,10 @@ class SamPlugin:
         masks_concat = network.add_concatenation(mask_outputs)
         masks_concat.axis = 0
         masks = masks_concat.get_output(0)
-        masks.name = "masks"
-        network.mark_output(masks)
-        masks.dtype = trt.float32
+        cast_masks = network.add_cast(masks, trt.float32)
+        masks_out = cast_masks.get_output(0)
+        masks_out.name = "masks"
+        network.mark_output(masks_out)
 
         # --- IoU prediction ---
         iou = iou_token_out
@@ -993,9 +993,10 @@ class SamPlugin:
         iou_out = network.add_shuffle(iou)
         iou_out.reshape_dims = (num_mask_outputs,)
         iou_scores = iou_out.get_output(0)
-        iou_scores.name = "iou_scores"
-        network.mark_output(iou_scores)
-        iou_scores.dtype = trt.float32
+        cast_iou = network.add_cast(iou_scores, trt.float32)
+        iou_out = cast_iou.get_output(0)
+        iou_out.name = "iou_scores"
+        network.mark_output(iou_out)
 
         if verbose:
             print(f"[trtf-build] Building SAM mask decoder engine "

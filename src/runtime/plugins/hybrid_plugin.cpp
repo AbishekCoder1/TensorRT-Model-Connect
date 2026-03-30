@@ -33,8 +33,10 @@ public:
         int32_t conv_dim = extract_json_int(ctx.config_json, "conv_dim", d_inner);
 
         // KvCache for the attention layers
+        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         auto cache = std::make_unique<KvCache>(
-            num_attention_layers, ctx.config.max_cache_length, kv_dim, stream);
+            num_attention_layers, ctx.config.max_cache_length, kv_dim, stream,
+            cache_dtype);
         if (!cache->ok())
             throw std::runtime_error("Failed to create KvCache for hybrid model");
 

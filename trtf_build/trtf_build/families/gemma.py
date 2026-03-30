@@ -19,8 +19,9 @@ class GemmaPlugin:
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
+        *, precision: str = "fp32",
     ) -> WeightDict:
-        weights = load_standard_weights(model_dir, config)
+        weights = load_standard_weights(model_dir, config, precision=precision)
 
         # Fix 1: Gemma uses (1 + gamma) * normalized instead of gamma * normalized.
         for layer_idx in range(config.num_hidden_layers):
@@ -37,10 +38,12 @@ class GemmaPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
     ) -> bytes:
         return build_standard_decoder_engine(
-            config, weights, max_cache_length, verbose=verbose)
+            config, weights, max_cache_length, precision=precision,
+            quant_ctx=quant_ctx, verbose=verbose)
 
 
 plugin = GemmaPlugin()

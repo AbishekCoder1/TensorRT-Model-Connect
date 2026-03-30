@@ -8,7 +8,8 @@
 namespace trtf {
 
 std::unique_ptr<KvCache> make_coarse_kv_cache(
-    const std::string& json, const BaseConfig& base, cudaStream_t stream);
+    const std::string& json, const BaseConfig& base, cudaStream_t stream,
+    DType cache_dtype = DType::kFloat32);
 
 MagpieTTSConfig build_magpie_config(const std::string& json, const BaseConfig& base);
 

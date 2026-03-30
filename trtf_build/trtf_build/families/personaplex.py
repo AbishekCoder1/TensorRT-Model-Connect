@@ -249,7 +249,8 @@ class PersonaPlexPlugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         """Build TRT engine for the Temporal Transformer.
@@ -291,6 +292,7 @@ class PersonaPlexPlugin:
 
         return build_standard_decoder_engine(
             temporal_config, decoder_weights, max_cache_length,
+            quant_ctx=quant_ctx,
             norm_type="rmsnorm",
             mlp_type="swiglu",
             # Official PersonaPlex temporal transformer uses RoPE.
@@ -304,7 +306,8 @@ class PersonaPlexPlugin:
 
     def build_extra_engines(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        verbose: bool = False,
     ) -> dict[str, bytes]:
         """Build additional engines: Depth Transformer, Mimi encoder, Mimi decoder.
 
@@ -988,7 +991,7 @@ def _build_mimi_encoder_engine(
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED) | 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
@@ -1243,8 +1246,7 @@ def _build_mimi_encoder_engine(
     codec_tokens = out_shuf.get_output(0)
 
     # Cast to float32 for output (TRT output must be float; C++ will cast to int32)
-    cast_layer = network.add_identity(codec_tokens)
-    cast_layer.set_output_type(0, trt.float32)
+    cast_layer = network.add_cast(codec_tokens, trt.float32)
     codec_out = cast_layer.get_output(0)
 
     codec_out.name = "codec_tokens"
@@ -1321,7 +1323,7 @@ def _build_mimi_decoder_engine(
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED) | 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
@@ -1337,8 +1339,7 @@ def _build_mimi_decoder_engine(
     # Semantic quantizer output_proj maps back to hidden_size after dequant
 
     # Cast float32 indices to int32 for gather
-    cast_input = network.add_identity(codec_input)
-    cast_input.set_output_type(0, trt.int32)
+    cast_input = network.add_cast(codec_input, trt.int32)
     indices_int = cast_input.get_output(0)
 
     # Semantic codebook 0: indices_int[0, :] -> gather from codebook -> sum
