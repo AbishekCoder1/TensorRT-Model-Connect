@@ -100,7 +100,7 @@ echo ""
 
 if [ -n "$MODELS_FILE" ] && [ -f "$MODELS_FILE" ]; then
     # Selective mode: read model names from file (one per line), convert to test IDs
-    TESTS=$(sed '/^$/d' "$MODELS_FILE" | while read -r model; do
+    TESTS=$(sed '/^$/d' "$MODELS_FILE" | while read -r model || [ -n "$model" ]; do
         echo "tests/test_e2e.py::test_e2e[${model}]"
     done | sort)
     echo "  Models file:     $MODELS_FILE ($(echo "$TESTS" | wc -l) models)"

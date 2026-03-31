@@ -306,7 +306,8 @@ test-e2e-selective:
       d = json.load(open('impact.json'))
       models = d.get('e2e_models', [])
       with open('e2e_models.txt', 'w') as f:
-          f.write('\n'.join(models))
+          for m in models:
+              f.write(m + '\n')
       print(f'Selective E2E: {len(models)} models')
       for m in models[:10]:
           print(f'  {m}')
@@ -391,8 +392,8 @@ generate-coverage-map:
   needs: [build-all]
   script:
     - python -m pip install --disable-pip-version-check --quiet "coverage[toml]==7.6.10" "pytest-cov>=6.0" "gcovr==8.2"
-    - python tools/coverage_map/generate.py --output coverage_map.json --python-bin python --build-dir build
-    - python tools/coverage_map/generate.py --validate coverage_map.json
+    - python -m tools.coverage_map.generate --output coverage_map.json --python-bin python --build-dir build
+    - python -m tools.coverage_map.generate --validate coverage_map.json
     - echo "Coverage map generated successfully"
     - >-
       python -c "import json; d=json.load(open('coverage_map.json')); m=d['meta'];
