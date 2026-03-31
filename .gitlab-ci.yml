@@ -125,7 +125,7 @@ lint-check:
   stage: tier1-unit
   needs: [build-all]
   script:
-    - pip install --quiet ruff
+    - pip install --quiet ruff clang-format
     # Only lint files changed in this MR (codebase has pre-existing violations)
     - |
       CHANGED_PY=$(git diff --name-only ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} -- '*.py' || true)
