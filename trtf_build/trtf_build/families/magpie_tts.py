@@ -83,6 +83,60 @@ def _t2d(tensor) -> np.ndarray:
     return a
 
 
+# ---------------------------------------------------------------------------
+# Strongly-typed FP16 compute + FP32 accumulation helpers
+#
+# From TRT docs: "When using strongly typed mode, you can enforce FP32
+# precision for FP16 GEMMs by casting the inputs to FP32. TensorRT
+# recognizes this pattern and fuses the casts with the GEMM, resulting
+# in a single kernel with FP16 inputs and FP32 accumulation."
+#
+# Pattern: FP16 tensor → cast FP32 → matmul (FP32 inputs)
+#   → TRT fuses into: FP16 tensor core compute + FP32 accumulation
+# ---------------------------------------------------------------------------
+
+def _add_matmul_fp16_compute_fp32_accum(  # pragma: no cover
+    network, lhs_fp32, lhs_width, rhs_width, rhs_weights,
+):
+    """Matmul with FP16 compute and FP32 accumulation (strongly-typed pattern).
+
+    Both inputs pass through the FP16→FP32 cast pattern so TRT fuses into a
+    single kernel: FP16 tensor core compute + FP32 accumulation. Result is FP32.
+
+    Args:
+        lhs_fp32: FP32 activation tensor (e.g., from LayerNorm)
+        rhs_weights: numpy array with weight values (stored as FP16 constant)
+    """
+    # LHS: FP32 → FP16 → FP32 (triggers TRT fusion pattern)
+    lhs_fp16 = network.add_cast(lhs_fp32, trt.float16).get_output(0)
+    lhs_cast = network.add_cast(lhs_fp16, trt.float32).get_output(0)
+
+    # RHS: FP16 constant → FP32 (triggers TRT fusion pattern)
+    fp16_vals = np.ascontiguousarray(rhs_weights, dtype=np.float32).astype(np.float16)
+    rhs_fp16 = network.add_constant(
+        (lhs_width, rhs_width), trt.Weights(fp16_vals)).get_output(0)
+    rhs_cast = network.add_cast(rhs_fp16, trt.float32).get_output(0)
+
+    # FP32 matmul — TRT fuses the casts into FP16 compute + FP32 accum
+    mm = network.add_matrix_multiply(
+        lhs_cast, trt.MatrixOperation.NONE,
+        rhs_cast, trt.MatrixOperation.NONE)
+    return mm.get_output(0)
+
+
+def _cast_matmul_inputs_fp16_fp32(network, lhs_fp32, rhs_fp32):  # pragma: no cover
+    """Cast both matmul inputs through FP16→FP32 for tensor core fusion.
+
+    Use this for activation×activation matmuls (e.g., Q@K^T, softmax@V)
+    where both inputs are already FP32 tensors (not weight constants).
+    """
+    lhs_fp16 = network.add_cast(lhs_fp32, trt.float16).get_output(0)
+    lhs_cast = network.add_cast(lhs_fp16, trt.float32).get_output(0)
+    rhs_fp16 = network.add_cast(rhs_fp32, trt.float16).get_output(0)
+    rhs_cast = network.add_cast(rhs_fp16, trt.float32).get_output(0)
+    return lhs_cast, rhs_cast
+
+
 def _split_fused_qkv(fused_weight, hidden: int):
     """Split fused QKV weight [3H, H] into Q[H,H], K[H,H], V[H,H].
 
@@ -393,7 +447,7 @@ class MagpieTTSPlugin:
         enc_kernel_size = int(enc_cfg.get("kernel_size", 3))
         xa_n_heads = int(dec_cfg.get("xa_n_heads", 1))
         xa_d_head = int(dec_cfg.get("xa_d_head", 128))
-        max_positions = 2048  # from position_embeddings shape
+        max_positions = 2048  # default from position_embeddings shape
 
         # Infer from actual weight shapes
         if "text_embedding.weight" in state_dict:
@@ -428,13 +482,27 @@ class MagpieTTSPlugin:
         weights["_hidden_size"] = hidden
         weights["_num_codebooks"] = num_codebooks
         weights["_codebook_size"] = codebook_size
+        # Allow overriding max_source_positions via env var for cross-attention
+        # optimization. Smaller values reduce decoder cross-attention compute
+        # proportionally (e.g., 256 vs 2048 = 8x less cross-attn work).
+        import os
+        env_max_pos = os.environ.get("TRTF_MAGPIE_MAX_SOURCE_POS")
+        if env_max_pos is not None:
+            override = int(env_max_pos)
+            if override < max_positions:
+                print(f"[trtf-build]   Overriding max_source_positions: "
+                      f"{max_positions} -> {override}", file=sys.stderr)
+                max_positions = override
+                # Truncate encoder position embedding to new size
+                if "encoder.position_embeddings.weight" in state_dict:
+                    pe = _to_np(state_dict["encoder.position_embeddings.weight"])
+                    state_dict["encoder.position_embeddings.weight"] = pe[:max_positions]
+
         weights["_max_source_positions"] = max_positions
         weights["_text_vocab_size"] = text_vocab_size
         weights["_xa_n_heads"] = xa_n_heads
         weights["_xa_d_head"] = xa_d_head
         weights["_enc_kernel_size"] = enc_kernel_size
-
-        head_dim = hidden // enc_heads
 
         # --- Encoder weights ---
         weights["enc_pos_embedding"] = _to_np(
@@ -542,6 +610,38 @@ class MagpieTTSPlugin:
             weights[f"audio_embedding_{cb}"] = _to_np(
                 state_dict[f"audio_embeddings.{cb}.weight"])
 
+        # --- Local transformer weights (codebook AR sampling) ---
+        if "local_transformer.position_embeddings.weight" in state_dict:
+            weights["lt_pos_embedding"] = _to_np(
+                state_dict["local_transformer.position_embeddings.weight"])
+            weights["lt_in_proj_w"] = _to_np(
+                state_dict["local_transformer_in_projection.weight"]).T
+            weights["lt_in_proj_b"] = _to_np(
+                state_dict["local_transformer_in_projection.bias"])
+            lt_src = "local_transformer.layers.0"
+            weights["lt_norm_self"] = _to_np(
+                state_dict[f"{lt_src}.norm_self.weight"])
+            weights["lt_qkv_net"] = _to_np(
+                state_dict[f"{lt_src}.self_attention.qkv_net.weight"]).T
+            weights["lt_o_net"] = _to_np(
+                state_dict[f"{lt_src}.self_attention.o_net.weight"]).T
+            weights["lt_norm_ff"] = _to_np(
+                state_dict[f"{lt_src}.norm_pos_ff.weight"])
+            weights["lt_ff_proj"] = _to_np(
+                state_dict[f"{lt_src}.pos_ff.proj.conv.weight"]).squeeze(-1).T
+            weights["lt_ff_out"] = _to_np(
+                state_dict[f"{lt_src}.pos_ff.o_net.conv.weight"]).squeeze(-1).T
+            for cb in range(num_codebooks):
+                weights[f"lt_out_proj_w_{cb}"] = _to_np(
+                    state_dict[f"local_transformer_out_projections.{cb}.weight"]).T
+                weights[f"lt_out_proj_b_{cb}"] = _to_np(
+                    state_dict[f"local_transformer_out_projections.{cb}.bias"])
+            lt_hidden = weights["lt_pos_embedding"].shape[1]
+            weights["_lt_hidden"] = lt_hidden
+            weights["_lt_max_positions"] = weights["lt_pos_embedding"].shape[0]
+            weights["_lt_d_head"] = lt_hidden
+            weights["_lt_ffn_dim"] = weights["lt_ff_proj"].shape[1]
+
         # Baked speaker context embedding
         if "baked_context_embedding.weight" in state_dict:
             weights["baked_context_embedding"] = _to_np(
@@ -616,7 +716,13 @@ class MagpieTTSPlugin:
         quant_ctx=None, verbose: bool = False,
         debug_layer_outputs: bool = False,
     ) -> bytes:
-        """Build MagpieTTS decoder TRT engine (KV cache + cross-attention)."""
+        """Build MagpieTTS decoder TRT engine with dynamic seq_len.
+
+        Uses optimization profiles so the SAME engine handles both:
+          - Autoregressive decode: seq_len=1 (profile 0, optimized)
+          - Batched prefill: seq_len=ctx_len (profile 1)
+        No separate prefill engine needed — saves ~400MB bundle space.
+        """
         dec_layers = weights["_dec_layers"]
         dec_heads = weights["_dec_heads"]
         dec_ffn = weights["_dec_ffn"]
@@ -627,8 +733,17 @@ class MagpieTTSPlugin:
         xa_n_heads = weights["_xa_n_heads"]
         xa_d_head = weights["_xa_d_head"]
         head_dim = hidden // dec_heads
-        attention_window = max_cache_length + 1
         output_size = num_codebooks * codebook_size
+
+        # Determine max prefill length from baked context
+        ctx_len = 1
+        if "baked_context_lengths" in weights:
+            ctx_lengths = np.asarray(
+                weights["baked_context_lengths"], dtype=np.int32)
+            if ctx_lengths.size > 0:
+                ctx_len = max(int(ctx_lengths.max()), 1)
+
+        W = max_cache_length  # shorthand for cache size
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
@@ -637,14 +752,16 @@ class MagpieTTSPlugin:
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
         trt_config.clear_flag(trt.BuilderFlag.TF32)
 
-        # Decoder uses embed_input mode: C++ runtime sums 8 codebook embeddings
-        # on host and passes the result as input_embed [1, hidden].
-        input_embed = network.add_input("input_embed", trt.float32, (1, hidden))
-        position_id = network.add_input("position_id", trt.int32, (1,))
+        # Dynamic inputs: seq_len varies from 1 (decode) to ctx_len (prefill)
+        input_embed = network.add_input(
+            "input_embed", trt.float32, (-1, hidden))
+        position_id = network.add_input(
+            "position_id", trt.int32, (-1,))
+        # 3D mask: [1, seq_len, max_cache + seq_len]
         attention_mask = network.add_input(
-            "attention_mask", trt.float32, (1, attention_window))
+            "attention_mask", trt.float32, (1, -1, -1))
 
-        # Per-layer KV cache inputs
+        # Per-layer KV cache inputs (fixed shape)
         cache_k_inputs, cache_v_inputs = [], []
         for i in range(dec_layers):
             cache_k_inputs.append(network.add_input(
@@ -654,8 +771,7 @@ class MagpieTTSPlugin:
                 graph_ops.layer_tensor_name("cache_v", i),
                 trt.float32, (max_cache_length, hidden)))
 
-        # Per-layer cross-attention inputs: raw encoder output
-        # All layers share the same input (C++ runtime copies it)
+        # Per-layer cross-attention inputs (fixed shape)
         cross_k_inputs, cross_v_inputs = [], []
         for i in range(dec_layers):
             cross_k_inputs.append(network.add_input(
@@ -664,6 +780,34 @@ class MagpieTTSPlugin:
             cross_v_inputs.append(network.add_input(
                 graph_ops.layer_tensor_name("cross_v", i),
                 trt.float32, (max_source_positions, hidden)))
+
+        # Cross-attention prior for monotonic alignment (NeMo inference)
+        # Shape [1, 1, max_source_positions] — broadcasts over [xa_heads, seq, max_src]
+        # Layers 3-9 get the prior; others get None (vanilla attention).
+        cross_attn_prior = network.add_input(
+            "cross_attn_prior", trt.float32, (1, 1, max_source_positions))
+        prior_layers = set(range(3, 10))  # layers 3,4,5,6,7,8,9
+
+        # Optimization profiles
+        # Profile 0: autoregressive (seq_len=1) — common case, optimized
+        ar_profile = builder.create_optimization_profile()
+        ar_profile.set_shape("input_embed",
+            (1, hidden), (1, hidden), (ctx_len, hidden))
+        ar_profile.set_shape("position_id",
+            (1,), (1,), (ctx_len,))
+        ar_profile.set_shape("attention_mask",
+            (1, 1, W + 1), (1, 1, W + 1), (1, ctx_len, W + ctx_len))
+        trt_config.add_optimization_profile(ar_profile)
+
+        # Profile 1: prefill (seq_len=ctx_len) — one-time, optimized for bulk
+        pf_profile = builder.create_optimization_profile()
+        pf_profile.set_shape("input_embed",
+            (1, hidden), (ctx_len, hidden), (ctx_len, hidden))
+        pf_profile.set_shape("position_id",
+            (1,), (ctx_len,), (ctx_len,))
+        pf_profile.set_shape("attention_mask",
+            (1, 1, W + 1), (1, ctx_len, W + ctx_len), (1, ctx_len, W + ctx_len))
+        trt_config.add_optimization_profile(pf_profile)
 
         # Learned positional embedding
         dec_pos_np = weights["dec_pos_embedding"]
@@ -688,8 +832,11 @@ class MagpieTTSPlugin:
             _mark_debug_output(network, hidden_state, "debug_embed")
 
         present_k_outputs, present_v_outputs = [], []
+        alignment_layers = [3, 4, 5, 6]  # layers used for alignment estimation
+        alignment_weights = []
         for layer_idx in range(dec_layers):
             prefix = f"layer.{layer_idx}"
+            layer_prior = cross_attn_prior if layer_idx in prior_layers else None
             result = _add_magpie_decoder_layer(
                 network=network, hidden=hidden_state,
                 cache_k=cache_k_inputs[layer_idx],
@@ -703,12 +850,15 @@ class MagpieTTSPlugin:
                 hidden_size=hidden, num_heads=dec_heads, head_dim=head_dim,
                 ffn_dim=dec_ffn, max_cache_length=max_cache_length,
                 max_source_positions=max_source_positions,
-                xa_n_heads=xa_n_heads, xa_d_head=xa_d_head)
+                xa_n_heads=xa_n_heads, xa_d_head=xa_d_head,
+                cross_attn_prior=layer_prior)
             hidden_state = result["hidden"]
             present_k_outputs.append(result["present_k"])
             present_v_outputs.append(result["present_v"])
-            # Mark cross-attention weights from the last decoder layer as output
-            # for runtime text-completion tracking (shape [1, 1, max_source_positions])
+            # Collect cross-attn weights from alignment layers for averaging
+            if layer_idx in alignment_layers:
+                alignment_weights.append(result["cross_attn_weights"])
+            # Mark last layer's cross-attn weights as output
             if layer_idx == dec_layers - 1:
                 _mark_debug_output(network, result["cross_attn_weights"],
                                    "cross_attn_weights")
@@ -716,14 +866,36 @@ class MagpieTTSPlugin:
                 _mark_debug_output(network, hidden_state,
                                    f"debug_hidden_{layer_idx}")
 
+        # Average alignment weights from layers 3-6 → output for C++ alignment tracking
+        # Each weight tensor has shape [xa_heads, 1, max_source_positions].
+        # Average across layers first, then reduce over heads to get
+        # [1, 1, max_source_positions] — matching the C++ buffer allocation.
+        if len(alignment_weights) >= 2:
+            avg = alignment_weights[0]
+            for aw in alignment_weights[1:]:
+                avg = network.add_elementwise(
+                    avg, aw, trt.ElementWiseOperation.SUM).get_output(0)
+            n_align = graph_ops.add_constant(
+                network, (1, 1, 1),
+                np.array([1.0 / len(alignment_weights)], dtype=np.float32))
+            avg = network.add_elementwise(
+                avg, n_align, trt.ElementWiseOperation.PROD).get_output(0)
+            # Reduce over heads (axis 0) → [1, 1, max_source_positions]
+            avg_over_heads = network.add_reduce(
+                avg, trt.ReduceOperation.AVG, 1 << 0, True)
+            _mark_debug_output(network, avg_over_heads.get_output(0),
+                               "alignment_weights")
+
         # Final LayerNorm
         hidden_state = graph_ops.add_layer_norm(
             network, hidden_state, hidden,
             weights["final_norm"],
             np.zeros(hidden, dtype=np.float32), eps_tensor)
 
-        # Output: all 8 codebooks predicted simultaneously
-        # [1, hidden] @ [hidden, 8*codebook_size] -> [1, 8*codebook_size]
+        # Output pre-logits hidden state for local transformer
+        _mark_debug_output(network, hidden_state, "decoder_hidden")
+
+        # Output logits: [seq_len, output_size]
         logits = graph_ops.add_matmul_rhs_constant(
             network, hidden_state, hidden, output_size, weights["w_out"])
         logits = graph_ops.add_bias_sum(
@@ -731,7 +903,7 @@ class MagpieTTSPlugin:
         logits.name = "logits"
         network.mark_output(logits)
 
-        # Present KV outputs
+        # Present KV outputs: [seq_len, hidden]
         for i in range(dec_layers):
             present_k_outputs[i].name = graph_ops.layer_tensor_name("present_k", i)
             present_v_outputs[i].name = graph_ops.layer_tensor_name("present_v", i)
@@ -743,7 +915,8 @@ class MagpieTTSPlugin:
                   f"({dec_layers}L, h={hidden}, SA heads={dec_heads}, "
                   f"XA heads={xa_n_heads} d_head={xa_d_head}, "
                   f"ffn={dec_ffn}, cache={max_cache_length}, "
-                  f"output={num_codebooks}x{codebook_size})",
+                  f"output={num_codebooks}x{codebook_size}, "
+                  f"prefill_ctx_len={ctx_len})",
                   file=sys.stderr)
 
         plan = builder.build_serialized_network(network, trt_config)
@@ -765,10 +938,7 @@ class MagpieTTSPlugin:
     ) -> dict:
         """Build extra bundle sections: codec engine + embedding tables."""
         result = {}
-        hidden = weights["_hidden_size"]
         num_codebooks = weights["_num_codebooks"]
-        codebook_size = weights["_codebook_size"]
-        text_vocab_size = weights["_text_vocab_size"]
 
         # Audio embedding tables: 8 codebook tables concatenated
         # Layout: table0 || table1 || ... || table7
@@ -798,6 +968,29 @@ class MagpieTTSPlugin:
             result["magpie_context_lengths"] = np.asarray(
                 weights["baked_context_lengths"],
                 dtype=np.int32).ravel().tobytes()
+
+        # Build local transformer TRT engine (codebook AR sampling)
+        if "_lt_hidden" in weights:
+            lt_hidden = weights["_lt_hidden"]
+            num_cb = weights["_num_codebooks"]
+            if verbose:
+                print(f"[trtf-build]   Building local transformer engine "
+                      f"(hidden={lt_hidden}, 1 layer, {num_cb} codebooks) ...",
+                      file=sys.stderr)
+            lt_plan = _build_local_transformer_engine(weights, verbose=verbose)
+            result["lt_engine_plan"] = lt_plan
+            result["lt_in_projection"] = np.concatenate([
+                weights["lt_in_proj_w"].ravel(),
+                weights["lt_in_proj_b"].ravel(),
+            ]).astype(np.float32).tobytes()
+            out_proj_parts = []
+            for cb in range(num_cb):
+                out_proj_parts.append(weights[f"lt_out_proj_w_{cb}"].ravel())
+                out_proj_parts.append(weights[f"lt_out_proj_b_{cb}"].ravel())
+            result["lt_out_projections"] = np.concatenate(
+                out_proj_parts).astype(np.float32).tobytes()
+            result["lt_position_embedding"] = weights[
+                "lt_pos_embedding"].astype(np.float32).ravel().tobytes()
 
         # Build NanoCodec (HiFi-GAN) TRT engine
         codec_sd = weights.get("_codec_state_dict")
@@ -1126,19 +1319,20 @@ def _add_magpie_decoder_layer(
     weights, prefix,
     hidden_size, num_heads, head_dim, ffn_dim, max_cache_length,
     max_source_positions, xa_n_heads, xa_d_head,
+    cross_attn_prior=None,
 ):
-    """Single MagpieTTS decoder layer: self-attn + asymmetric cross-attn + FFN.
+    """Single MagpieTTS decoder layer with dynamic seq_len support.
 
-    Self-attention: 12 heads, head_dim=64, full hidden_size=768
-    Cross-attention: 1 head, d_head=128 (ASYMMETRIC)
-      - Q from decoder state via norm_xattn_query -> q_net [128, 768]
-      - K, V from encoder output via norm_xattn_memory -> kv_net split
-      - Output: o_net [768, 128]
-    FFN: GELU MLP (Conv1d k=1 squeezed to linear)
-    All norms: LayerNorm (bias=False, beta=0)
+    Input hidden has shape [seq_len, hidden_size] where seq_len is dynamic:
+      - seq_len=1 during autoregressive decode
+      - seq_len=ctx_len during batched prefill
+
+    Self-attention: concat(cache_k, present_k) with 3D causal mask.
+    Cross-attention: 1 head, d_head=128 (ASYMMETRIC).
+    FFN: GELU MLP (Conv1d k=1 squeezed to linear).
+    All norms: LayerNorm (bias=False, beta=0).
     """
     attention_size = hidden_size
-    attention_window = max_cache_length + 1
     xa_attention_size = xa_n_heads * xa_d_head  # 1 * 128 = 128
 
     # --- Self-attention ---
@@ -1160,43 +1354,43 @@ def _add_magpie_decoder_layer(
     present_k = k
     present_v = v
 
-    # Concat with KV cache
-    kr = network.add_shuffle(k)
-    kr.reshape_dims = (1, attention_size)
-    vr = network.add_shuffle(v)
-    vr.reshape_dims = (1, attention_size)
-    ak = network.add_concatenation([cache_k, kr.get_output(0)])
+    # Concat with KV cache: [max_cache, attn] + [seq_len, attn] -> [max_cache+seq_len, attn]
+    ak = network.add_concatenation([cache_k, k])
     ak.axis = 0
-    av = network.add_concatenation([cache_v, vr.get_output(0)])
+    av = network.add_concatenation([cache_v, v])
     av.axis = 0
 
-    # Multi-head reshape for self-attention
+    # Multi-head reshape (dynamic seq_len via -1 inference)
+    # Q: [seq_len, attn] -> [seq_len, heads, dim] -> [heads, seq_len, dim]
     qh = network.add_shuffle(q)
-    qh.reshape_dims = (num_heads, 1, head_dim)
+    qh.reshape_dims = (-1, num_heads, head_dim)
+    qh.second_transpose = trt.Permutation([1, 0, 2])
+    # K: [max_cache+seq_len, attn] -> [heads, max_cache+seq_len, dim]
     kh = network.add_shuffle(ak.get_output(0))
-    kh.reshape_dims = (attention_window, num_heads, head_dim)
+    kh.reshape_dims = (-1, num_heads, head_dim)
     kh.second_transpose = trt.Permutation([1, 0, 2])
     vh = network.add_shuffle(av.get_output(0))
-    vh.reshape_dims = (attention_window, num_heads, head_dim)
+    vh.reshape_dims = (-1, num_heads, head_dim)
     vh.second_transpose = trt.Permutation([1, 0, 2])
 
-    # Attention scores + mask + softmax
+    # Attention scores: [heads, seq_len, max_cache+seq_len]
     sc = network.add_elementwise(
         network.add_matrix_multiply(
             qh.get_output(0), trt.MatrixOperation.NONE,
             kh.get_output(0), trt.MatrixOperation.TRANSPOSE).get_output(0),
         sa_scale_tensor, trt.ElementWiseOperation.PROD)
-    m3 = network.add_shuffle(attention_mask)
-    m3.reshape_dims = (1, 1, attention_window)
+    # Mask is already 3D: [1, seq_len, max_cache+seq_len] — broadcasts over heads
     ma = network.add_elementwise(
-        sc.get_output(0), m3.get_output(0), trt.ElementWiseOperation.SUM)
+        sc.get_output(0), attention_mask, trt.ElementWiseOperation.SUM)
     sm = network.add_softmax(ma.get_output(0))
     sm.axes = 1 << 2
+    # Context: [heads, seq_len, dim] -> [seq_len, heads, dim] -> [seq_len, attn]
     ct = network.add_matrix_multiply(
         sm.get_output(0), trt.MatrixOperation.NONE,
         vh.get_output(0), trt.MatrixOperation.NONE)
     cf = network.add_shuffle(ct.get_output(0))
-    cf.reshape_dims = (1, attention_size)
+    cf.first_transpose = trt.Permutation([1, 0, 2])
+    cf.reshape_dims = (-1, attention_size)
 
     # Output projection + residual
     sa = graph_ops.add_matmul_rhs_constant(
@@ -1206,25 +1400,19 @@ def _add_magpie_decoder_layer(
         hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
 
     # --- Asymmetric cross-attention ---
-    # Norm query (decoder state) with norm_xattn_query
     cn_query = graph_ops.add_layer_norm(
         network, psa, hidden_size,
         weights[f"{prefix}.norm_xattn_query"],
         np.zeros(hidden_size, dtype=np.float32), eps_tensor)
 
-    # Norm memory (encoder output) with norm_xattn_memory
     cn_memory = graph_ops.add_layer_norm(
         network, cross_k, hidden_size,
         weights[f"{prefix}.norm_xattn_memory"],
         np.zeros(hidden_size, dtype=np.float32), eps_tensor)
 
-    # Q projection: [1, hidden] @ [hidden, xa_d_head] -> [1, xa_d_head]
     cq = graph_ops.add_matmul_rhs_constant(
         network, cn_query, hidden_size, xa_attention_size,
         weights[f"{prefix}.cross_w_q"])
-
-    # K, V projections from normed encoder output:
-    # [max_pos, hidden] @ [hidden, xa_d_head] -> [max_pos, xa_d_head]
     ck_proj = graph_ops.add_matmul_rhs_constant(
         network, cn_memory, hidden_size, xa_attention_size,
         weights[f"{prefix}.cross_w_k"])
@@ -1232,10 +1420,12 @@ def _add_magpie_decoder_layer(
         network, cn_memory, hidden_size, xa_attention_size,
         weights[f"{prefix}.cross_w_v"])
 
-    # Single-head cross-attention (xa_n_heads=1)
-    # Q: [1, 1, xa_d_head]  K: [1, max_pos, xa_d_head]  V: [1, max_pos, xa_d_head]
+    # Cross-attention (xa_n_heads=1, dynamic seq_len)
+    # Q: [seq_len, xa_size] -> [xa_heads, seq_len, xa_d_head]
     cqh = network.add_shuffle(cq)
-    cqh.reshape_dims = (xa_n_heads, 1, xa_d_head)
+    cqh.reshape_dims = (-1, xa_n_heads, xa_d_head)
+    cqh.second_transpose = trt.Permutation([1, 0, 2])
+    # K/V: [max_src, xa_size] -> [xa_heads, max_src, xa_d_head] (fixed)
     ckh = network.add_shuffle(ck_proj)
     ckh.reshape_dims = (max_source_positions, xa_n_heads, xa_d_head)
     ckh.second_transpose = trt.Permutation([1, 0, 2])
@@ -1243,7 +1433,7 @@ def _add_magpie_decoder_layer(
     cvh.reshape_dims = (max_source_positions, xa_n_heads, xa_d_head)
     cvh.second_transpose = trt.Permutation([1, 0, 2])
 
-    # Scores: [1, 1, xa_d_head] @ [1, xa_d_head, max_pos] -> [1, 1, max_pos]
+    # Scores: [xa_heads, seq_len, max_src]
     cs = network.add_elementwise(
         network.add_matrix_multiply(
             cqh.get_output(0), trt.MatrixOperation.NONE,
@@ -1252,14 +1442,36 @@ def _add_magpie_decoder_layer(
     csm = network.add_softmax(cs.get_output(0))
     csm.axes = 1 << 2
 
-    # Context: [1, 1, max_pos] @ [1, max_pos, xa_d_head] -> [1, 1, xa_d_head]
+    # Apply attention prior (NeMo inference path: multiply + re-normalize)
+    # Prior shape: [1, 1, max_src] — broadcasts over [xa_heads, seq_len, max_src]
+    if cross_attn_prior is not None:
+        # attn_prob = softmax(scores) * prior
+        attn_weighted = network.add_elementwise(
+            csm.get_output(0), cross_attn_prior,
+            trt.ElementWiseOperation.PROD)
+        # re-normalize: attn_prob / sum(attn_prob, dim=-1, keepdim=True)
+        sum_layer = network.add_reduce(
+            attn_weighted.get_output(0),
+            trt.ReduceOperation.SUM, 1 << 2, True)  # reduce last dim, keep dims
+        eps_norm = graph_ops.add_constant(
+            network, (1, 1, 1), np.array([1e-8], dtype=np.float32))
+        sum_safe = network.add_elementwise(
+            sum_layer.get_output(0), eps_norm,
+            trt.ElementWiseOperation.SUM)
+        csm_final = network.add_elementwise(
+            attn_weighted.get_output(0), sum_safe.get_output(0),
+            trt.ElementWiseOperation.DIV)
+    else:
+        csm_final = csm
+
+    # Context: [xa_heads, seq_len, xa_d_head] -> [seq_len, xa_size]
     cc = network.add_matrix_multiply(
-        csm.get_output(0), trt.MatrixOperation.NONE,
+        csm_final.get_output(0), trt.MatrixOperation.NONE,
         cvh.get_output(0), trt.MatrixOperation.NONE)
     ccf = network.add_shuffle(cc.get_output(0))
-    ccf.reshape_dims = (1, xa_attention_size)
+    ccf.first_transpose = trt.Permutation([1, 0, 2])
+    ccf.reshape_dims = (-1, xa_attention_size)
 
-    # Cross-attention output: [1, xa_d_head] @ [xa_d_head, hidden] -> [1, hidden]
     ca = graph_ops.add_matmul_rhs_constant(
         network, ccf.get_output(0), xa_attention_size, hidden_size,
         weights[f"{prefix}.cross_w_o"])
@@ -1272,11 +1484,9 @@ def _add_magpie_decoder_layer(
         weights[f"{prefix}.post_attn_norm"],
         np.zeros(hidden_size, dtype=np.float32), eps_tensor)
 
-    # fc1: [1, hidden] @ [hidden, ffn_dim] -> [1, ffn_dim]
     fc1 = graph_ops.add_matmul_rhs_constant(
         network, fn, hidden_size, ffn_dim, weights[f"{prefix}.w_fc1"])
     act = graph_ops.add_activation(network, fc1, "gelu_new")
-    # fc2: [1, ffn_dim] @ [ffn_dim, hidden] -> [1, hidden]
     fc2 = graph_ops.add_matmul_rhs_constant(
         network, act, ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"])
 
@@ -1285,6 +1495,139 @@ def _add_magpie_decoder_layer(
 
     return {"hidden": out, "present_k": present_k, "present_v": present_v,
             "cross_attn_weights": csm.get_output(0)}
+
+
+# ---------------------------------------------------------------------------
+# Local transformer engine builder (1-layer, codebook AR sampling)
+# ---------------------------------------------------------------------------
+
+def _build_local_transformer_engine(  # pragma: no cover
+    weights: WeightDict, *, verbose: bool = False,
+) -> bytes:
+    """Build TRT engine for the local transformer (AR codebook sampling).
+
+    Tiny 1-layer transformer with KV cache. Called 8 times per frame
+    (once per codebook). Input is projected decoder hidden [1, lt_hidden].
+    Output is hidden state [1, lt_hidden] (out_proj applied externally).
+    """
+    lt_hidden = weights["_lt_hidden"]
+    lt_d_head = weights["_lt_d_head"]
+    lt_ffn_dim = weights["_lt_ffn_dim"]
+    lt_max_cache = 8
+    attention_window = lt_max_cache + 1
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network()
+    trt_config = builder.create_builder_config()
+    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
+
+    input_embed = network.add_input(
+        "input_embed", trt.float32, (1, lt_hidden))
+    position_id = network.add_input(
+        "position_id", trt.int32, (1,))
+    attention_mask = network.add_input(
+        "attention_mask", trt.float32, (1, attention_window))
+    cache_k = network.add_input(
+        "cache_k_0", trt.float32, (lt_max_cache, lt_hidden))
+    cache_v = network.add_input(
+        "cache_v_0", trt.float32, (lt_max_cache, lt_hidden))
+
+    pos_np = weights["lt_pos_embedding"]
+    pos_table = graph_ops.add_constant(network, pos_np.shape, pos_np)
+    pos_embed = network.add_gather(pos_table, position_id, 0)
+
+    hidden_state = network.add_elementwise(
+        input_embed, pos_embed.get_output(0),
+        trt.ElementWiseOperation.SUM).get_output(0)
+
+    eps_tensor = graph_ops.add_constant(
+        network, (1, 1), np.array([1e-5], dtype=np.float32))
+
+    # Self-attention (1 head, d_head=lt_hidden, causal)
+    normed = graph_ops.add_layer_norm(
+        network, hidden_state, lt_hidden,
+        weights["lt_norm_self"],
+        np.zeros(lt_hidden, dtype=np.float32), eps_tensor)
+
+    qkv = graph_ops.add_matmul_rhs_constant(
+        network, normed, lt_hidden, 3 * lt_hidden,
+        weights["lt_qkv_net"])
+
+    q_slice = network.add_slice(qkv, (0, 0), (1, lt_hidden), (1, 1))
+    k_slice = network.add_slice(qkv, (0, lt_hidden), (1, lt_hidden), (1, 1))
+    v_slice = network.add_slice(qkv, (0, 2 * lt_hidden), (1, lt_hidden), (1, 1))
+
+    present_k = k_slice.get_output(0)
+    present_v = v_slice.get_output(0)
+
+    ak = network.add_concatenation([cache_k, present_k])
+    ak.axis = 0
+    av = network.add_concatenation([cache_v, present_v])
+    av.axis = 0
+
+    qh = network.add_shuffle(q_slice.get_output(0))
+    qh.reshape_dims = (1, 1, lt_d_head)
+    kh = network.add_shuffle(ak.get_output(0))
+    kh.reshape_dims = (attention_window, 1, lt_d_head)
+    kh.second_transpose = trt.Permutation([1, 0, 2])
+    vh = network.add_shuffle(av.get_output(0))
+    vh.reshape_dims = (attention_window, 1, lt_d_head)
+    vh.second_transpose = trt.Permutation([1, 0, 2])
+
+    scale_val = 1.0 / np.sqrt(lt_d_head)
+    scale_tensor = graph_ops.add_constant(
+        network, (1, 1, 1), np.array([scale_val], dtype=np.float32))
+
+    sc = network.add_elementwise(
+        network.add_matrix_multiply(
+            qh.get_output(0), trt.MatrixOperation.NONE,
+            kh.get_output(0), trt.MatrixOperation.TRANSPOSE).get_output(0),
+        scale_tensor, trt.ElementWiseOperation.PROD)
+    m3 = network.add_shuffle(attention_mask)
+    m3.reshape_dims = (1, 1, attention_window)
+    ma = network.add_elementwise(
+        sc.get_output(0), m3.get_output(0), trt.ElementWiseOperation.SUM)
+    sm = network.add_softmax(ma.get_output(0))
+    sm.axes = 1 << 2
+    ct = network.add_matrix_multiply(
+        sm.get_output(0), trt.MatrixOperation.NONE,
+        vh.get_output(0), trt.MatrixOperation.NONE)
+    cf = network.add_shuffle(ct.get_output(0))
+    cf.reshape_dims = (1, lt_hidden)
+
+    sa = graph_ops.add_matmul_rhs_constant(
+        network, cf.get_output(0), lt_hidden, lt_hidden,
+        weights["lt_o_net"])
+    psa = network.add_elementwise(
+        hidden_state, sa, trt.ElementWiseOperation.SUM).get_output(0)
+
+    # FFN (GELU MLP)
+    fn = graph_ops.add_layer_norm(
+        network, psa, lt_hidden,
+        weights["lt_norm_ff"],
+        np.zeros(lt_hidden, dtype=np.float32), eps_tensor)
+
+    fc1 = graph_ops.add_matmul_rhs_constant(
+        network, fn, lt_hidden, lt_ffn_dim, weights["lt_ff_proj"])
+    act = graph_ops.add_activation(network, fc1, "gelu_new")
+    fc2 = graph_ops.add_matmul_rhs_constant(
+        network, act, lt_ffn_dim, lt_hidden, weights["lt_ff_out"])
+
+    out = network.add_elementwise(
+        psa, fc2, trt.ElementWiseOperation.SUM).get_output(0)
+
+    out.name = "lt_output"
+    network.mark_output(out)
+    present_k.name = "present_k_0"
+    network.mark_output(present_k)
+    present_v.name = "present_v_0"
+    network.mark_output(present_v)
+
+    plan = builder.build_serialized_network(network, trt_config)
+    if plan is None:
+        raise RuntimeError("TensorRT local transformer engine build failed")
+    return bytes(plan)
 
 
 # ---------------------------------------------------------------------------

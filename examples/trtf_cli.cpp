@@ -8,12 +8,13 @@
 //   trtf inspect         <bundle.trtfb>
 //   trtf version
 
+#include "stb_image_write.h"
+#include "trtf/bundle.h"
 #include "trtf/pipeline.h"
 #include "trtf/trtf_io.hpp"
-#include "trtf/bundle.h"
-#include "stb_image_write.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -46,64 +47,74 @@ struct CliArgs {
     float conf_threshold{-1.0F};
     float cfg_scale{-1.0F};
     bool greedy{false};
+    bool stream{false};
+    int chunk_frames{32};
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
 };
 
-void print_usage()
-{
-    std::cerr <<
-        "Usage:\n"
-        "  trtf run             <bundle.trtfb> --prompt \"text\" [--image PATH] [--max-new-tokens N] [--hf-python PATH]\n"
-        "  trtf encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
-        "  trtf segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
-        "  trtf generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH [--max-new-tokens N] [--hf-python PATH]\n"
-        "  trtf generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] [--guidance-scale S]\n"
-        "  trtf embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
-        "  trtf rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" [--hf-python PATH]\n"
-        "  trtf transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]\n"
-        "  trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
-        "  trtf inspect         <bundle.trtfb>\n"
-        "  trtf version\n";
+void print_usage() {
+    std::cerr
+        << "Usage:\n"
+           "  trtf run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
+           "[--max-new-tokens N] [--hf-python PATH]\n"
+           "  trtf encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
+           "  trtf segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
+           "  trtf generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH "
+           "[--max-new-tokens N] [--hf-python PATH]\n"
+           "  trtf serve-audio     <bundle.trtfb> [--chunk-frames N] [--max-new-tokens N] "
+           "[--hf-python PATH]\n"
+           "                       Loads bundle once, reads prompts from stdin, streams PCM to "
+           "stdout.\n"
+           "  trtf generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] "
+           "[--guidance-scale S]\n"
+           "  trtf embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
+           "  trtf rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" "
+           "[--hf-python PATH]\n"
+           "  trtf transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] "
+           "[--hf-python PATH]\n"
+           "  trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
+           "  trtf inspect         <bundle.trtfb>\n"
+           "  trtf version\n";
 }
 
-CliArgs parse_args(int argc, char** argv)
-{
+CliArgs parse_args(int argc, char** argv) {
     CliArgs args;
 
-    if (argc < 2) { args.show_help = true; return args; }
+    if (argc < 2) {
+        args.show_help = true;
+        return args;
+    }
 
     args.command = argv[1];
 
-    if (args.command == "version" || args.command == "--version" || args.command == "-v")
-    {
+    if (args.command == "version" || args.command == "--version" || args.command == "-v") {
         args.command = "version";
         return args;
     }
 
-    if (args.command == "help" || args.command == "--help" || args.command == "-h")
-    {
+    if (args.command == "help" || args.command == "--help" || args.command == "-h") {
         args.show_help = true;
         return args;
     }
 
     static const char* known_cmds[] = {
-        "run", "inspect", "generate-video", "segment", "generate-audio",
-        "encode", "embed", "rerank", "speak", "transcribe", nullptr
-    };
+        "run",    "inspect", "generate-video", "segment", "generate-audio", "serve-audio",
+        "encode", "embed",   "rerank",         "speak",   "transcribe",     nullptr};
     bool valid = false;
     for (const char** p = known_cmds; *p; ++p)
-        if (args.command == *p) { valid = true; break; }
-    if (!valid)
-    {
+        if (args.command == *p) {
+            valid = true;
+            break;
+        }
+    if (!valid) {
         args.parse_error = true;
         args.error_message = "Unknown command: " + args.command;
         return args;
     }
 
-    for (int i = 2; i < argc; ++i)
-    {
+    for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
 
         auto need_value = [&](const std::string& name) -> bool {
@@ -115,29 +126,91 @@ CliArgs parse_args(int argc, char** argv)
             return true;
         };
 
-        if ((arg == "--prompt" || arg == "-p") && need_value(arg)) { args.prompt = argv[++i]; continue; }
-        if (arg == "--max-new-tokens" && need_value(arg)) { args.max_new_tokens = std::atoi(argv[++i]); continue; }
-        if (arg == "--tail-frames" && need_value(arg)) { args.tail_frames = std::max(0, std::atoi(argv[++i])); continue; }
-        if (arg == "--hf-python" && need_value(arg)) { args.hf_python = argv[++i]; continue; }
-        if (arg == "--image" && need_value(arg)) { args.image_path = argv[++i]; continue; }
-        if ((arg == "--output" || arg == "-o") && need_value(arg)) { args.output_dir = argv[++i]; continue; }
-        if (arg == "--num-steps" && need_value(arg)) { args.num_steps = std::atoi(argv[++i]); continue; }
-        if (arg == "--guidance-scale" && need_value(arg)) { args.guidance_scale = static_cast<float>(std::atof(argv[++i])); continue; }
-        if ((arg == "--threshold" || arg == "--score-threshold") && need_value(arg)) { args.conf_threshold = static_cast<float>(std::atof(argv[++i])); continue; }
-        if (arg == "--cfg-scale" && need_value(arg)) { args.cfg_scale = static_cast<float>(std::atof(argv[++i])); continue; }
-        if (arg == "--greedy") { args.greedy = true; continue; }
-        if (arg == "--document" && need_value(arg)) { args.document = argv[++i]; continue; }
-        if (arg == "--audio-in" && need_value(arg)) { args.audio_in = argv[++i]; continue; }
-        if (arg == "--audio-out" && need_value(arg)) { args.audio_out = argv[++i]; continue; }
-        if (arg == "--audio" && need_value(arg)) { args.audio_in = argv[++i]; continue; }
-        if (arg == "--point-x" && need_value(arg)) { args.point_x = static_cast<float>(std::atof(argv[++i])); continue; }
-        if (arg == "--point-y" && need_value(arg)) { args.point_y = static_cast<float>(std::atof(argv[++i])); continue; }
-        if (arg == "--background") { args.is_foreground = false; continue; }
+        if ((arg == "--prompt" || arg == "-p") && need_value(arg)) {
+            args.prompt = argv[++i];
+            continue;
+        }
+        if (arg == "--max-new-tokens" && need_value(arg)) {
+            args.max_new_tokens = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--tail-frames" && need_value(arg)) {
+            args.tail_frames = std::max(0, std::atoi(argv[++i]));
+            continue;
+        }
+        if (arg == "--hf-python" && need_value(arg)) {
+            args.hf_python = argv[++i];
+            continue;
+        }
+        if (arg == "--image" && need_value(arg)) {
+            args.image_path = argv[++i];
+            continue;
+        }
+        if ((arg == "--output" || arg == "-o") && need_value(arg)) {
+            args.output_dir = argv[++i];
+            continue;
+        }
+        if (arg == "--num-steps" && need_value(arg)) {
+            args.num_steps = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--guidance-scale" && need_value(arg)) {
+            args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if ((arg == "--threshold" || arg == "--score-threshold") && need_value(arg)) {
+            args.conf_threshold = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--cfg-scale" && need_value(arg)) {
+            args.cfg_scale = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--greedy") {
+            args.greedy = true;
+            continue;
+        }
+        if (arg == "--stream") {
+            args.stream = true;
+            continue;
+        }
+        if (arg == "--chunk-frames" && i + 1 < argc) {
+            args.chunk_frames = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--document" && need_value(arg)) {
+            args.document = argv[++i];
+            continue;
+        }
+        if (arg == "--audio-in" && need_value(arg)) {
+            args.audio_in = argv[++i];
+            continue;
+        }
+        if (arg == "--audio-out" && need_value(arg)) {
+            args.audio_out = argv[++i];
+            continue;
+        }
+        if (arg == "--audio" && need_value(arg)) {
+            args.audio_in = argv[++i];
+            continue;
+        }
+        if (arg == "--point-x" && need_value(arg)) {
+            args.point_x = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--point-y" && need_value(arg)) {
+            args.point_y = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--background") {
+            args.is_foreground = false;
+            continue;
+        }
 
-        if (args.parse_error) return args;
+        if (args.parse_error)
+            return args;
 
-        if (arg[0] == '-')
-        {
+        if (arg[0] == '-') {
             args.parse_error = true;
             args.error_message = "Unknown flag: " + arg;
             return args;
@@ -145,8 +218,7 @@ CliArgs parse_args(int argc, char** argv)
 
         if (args.bundle_path.empty())
             args.bundle_path = arg;
-        else
-        {
+        else {
             args.parse_error = true;
             args.error_message = "Unexpected positional argument: " + arg;
             return args;
@@ -156,24 +228,20 @@ CliArgs parse_args(int argc, char** argv)
     return args;
 }
 
-int cmd_version()
-{
+int cmd_version() {
     std::cout << "trtf " << trtf_version() << '\n';
     std::cout << "TRT support: " << (trtf_has_trt() ? "yes" : "no") << '\n';
     return EXIT_SUCCESS;
 }
 
-int cmd_run(const CliArgs& args)
-{
-    if (args.bundle_path.empty())
-    {
+int cmd_run(const CliArgs& args) {
+    if (args.bundle_path.empty()) {
         std::cerr << "Error: run requires a .trtfb bundle file\n";
         return EXIT_FAILURE;
     }
 
     auto pipeline = trtf::load(args.bundle_path, args.hf_python);
-    if (!pipeline)
-    {
+    if (!pipeline) {
         std::cerr << "Error: failed to load bundle\n";
         return EXIT_FAILURE;
     }
@@ -182,38 +250,32 @@ int cmd_run(const CliArgs& args)
     trtf::GenerateConfig cfg;
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 20;
 
-    if (!args.image_path.empty())
-    {
+    if (!args.image_path.empty()) {
         // Load image using trtf_io
         auto image = trtf::io::read_image(args.image_path);
-        if (image.pixels.empty())
-        {
+        if (image.pixels.empty()) {
             std::cerr << "Error: failed to load image: " << args.image_path << '\n';
             return EXIT_FAILURE;
         }
 
-        auto result = pipeline->generate(prompt, image.pixels.data(),
-                                         image.height, image.width, cfg);
+        auto result =
+            pipeline->generate(prompt, image.pixels.data(), image.height, image.width, cfg);
         std::cout << result.text << '\n';
-    }
-    else
-    {
+    } else {
         auto result = pipeline->generate(prompt, cfg);
         std::cout << result.text << '\n';
     }
     return EXIT_SUCCESS;
 }
 
-int cmd_generate_video(const CliArgs& args)
-{
-    if (args.bundle_path.empty() || args.prompt.empty())
-    {
+int cmd_generate_video(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.prompt.empty()) {
         std::cerr << "Error: generate-video requires bundle + --prompt\n";
         return EXIT_FAILURE;
     }
 
-    const std::string out_dir = args.output_dir.empty()
-        ? "/tmp/trtf_generate_video" : args.output_dir;
+    const std::string out_dir =
+        args.output_dir.empty() ? "/tmp/trtf_generate_video" : args.output_dir;
 
     auto pipeline = trtf::load(args.bundle_path, args.hf_python);
 
@@ -222,39 +284,33 @@ int cmd_generate_video(const CliArgs& args)
     cfg.guidance_scale = args.guidance_scale;
 
     auto result = pipeline->generate_image(args.prompt, cfg);
-    std::cout << "Generated image: " << result.width << "x" << result.height
-              << " (" << result.num_frames << " frames)\n";
+    std::cout << "Generated image: " << result.width << "x" << result.height << " ("
+              << result.num_frames << " frames)\n";
 
     // Create output directory (including parents) if it doesn't exist.
     std::filesystem::create_directories(out_dir);
 
     // Each frame in result.pixels is stored as [H, W, 3] float32 in [0,1],
     // with frames stacked contiguously: total layout is [T, H, W, 3].
-    const auto frame_pixels = static_cast<std::size_t>(result.height)
-        * static_cast<std::size_t>(result.width) * 3;
+    const auto frame_pixels =
+        static_cast<std::size_t>(result.height) * static_cast<std::size_t>(result.width) * 3;
 
-    for (int32_t f = 0; f < result.num_frames; ++f)
-    {
+    for (int32_t f = 0; f < result.num_frames; ++f) {
         // Convert float32 HWC [0,1] to uint8 HWC [0,255].
         std::vector<unsigned char> rgb(frame_pixels);
-        const float* src = result.pixels.data()
-            + static_cast<std::size_t>(f) * frame_pixels;
-        for (std::size_t i = 0; i < frame_pixels; ++i)
-        {
+        const float* src = result.pixels.data() + static_cast<std::size_t>(f) * frame_pixels;
+        for (std::size_t i = 0; i < frame_pixels; ++i) {
             const float v = std::max(0.0F, std::min(1.0F, src[i]));
             rgb[i] = static_cast<unsigned char>(v * 255.0F + 0.5F);
         }
 
         // Build filename: frame_0000.png
         std::ostringstream fname;
-        fname << out_dir << "/frame_"
-              << std::setw(4) << std::setfill('0') << f << ".png";
+        fname << out_dir << "/frame_" << std::setw(4) << std::setfill('0') << f << ".png";
 
         const int stride = result.width * 3;
-        if (!stbi_write_png(fname.str().c_str(),
-                            result.width, result.height,
-                            3, rgb.data(), stride))
-        {
+        if (!stbi_write_png(fname.str().c_str(), result.width, result.height, 3, rgb.data(),
+                            stride)) {
             std::cerr << "Error: failed to write " << fname.str() << '\n';
             return EXIT_FAILURE;
         }
@@ -264,10 +320,8 @@ int cmd_generate_video(const CliArgs& args)
     return EXIT_SUCCESS;
 }
 
-int cmd_segment(const CliArgs& args)
-{
-    if (args.bundle_path.empty() || args.image_path.empty())
-    {
+int cmd_segment(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.image_path.empty()) {
         std::cerr << "Error: segment requires bundle + --image\n";
         return EXIT_FAILURE;
     }
@@ -276,8 +330,7 @@ int cmd_segment(const CliArgs& args)
 
     // Load image (HWC float32 in [0,1])
     auto image = trtf::io::read_image(args.image_path);
-    if (image.empty())
-    {
+    if (image.empty()) {
         std::cerr << "Error: failed to load image: " << args.image_path << '\n';
         return EXIT_FAILURE;
     }
@@ -289,24 +342,20 @@ int cmd_segment(const CliArgs& args)
     const float stdv[3] = {0.229F, 0.224F, 0.225F};
 
     std::vector<float> chw_pixels(static_cast<std::size_t>(3) * target_h * target_w);
-    for (int32_t y = 0; y < target_h; ++y)
-    {
-        for (int32_t x = 0; x < target_w; ++x)
-        {
+    for (int32_t y = 0; y < target_h; ++y) {
+        for (int32_t x = 0; x < target_w; ++x) {
             // Bilinear-ish nearest-neighbor resize
-            const int32_t src_y = std::min(
-                static_cast<int32_t>(static_cast<float>(y) * image.height / target_h),
-                image.height - 1);
-            const int32_t src_x = std::min(
-                static_cast<int32_t>(static_cast<float>(x) * image.width / target_w),
-                image.width - 1);
-            const auto src_idx = static_cast<std::size_t>(
-                (src_y * image.width + src_x) * 3);
-            for (int32_t c = 0; c < 3; ++c)
-            {
+            const int32_t src_y =
+                std::min(static_cast<int32_t>(static_cast<float>(y) * image.height / target_h),
+                         image.height - 1);
+            const int32_t src_x =
+                std::min(static_cast<int32_t>(static_cast<float>(x) * image.width / target_w),
+                         image.width - 1);
+            const auto src_idx = static_cast<std::size_t>((src_y * image.width + src_x) * 3);
+            for (int32_t c = 0; c < 3; ++c) {
                 const float val = (image.pixels[src_idx + c] - mean[c]) / stdv[c];
-                chw_pixels[static_cast<std::size_t>(c) * target_h * target_w
-                    + static_cast<std::size_t>(y) * target_w + x] = val;
+                chw_pixels[static_cast<std::size_t>(c) * target_h * target_w +
+                           static_cast<std::size_t>(y) * target_w + x] = val;
             }
         }
     }
@@ -314,31 +363,89 @@ int cmd_segment(const CliArgs& args)
     auto result = pipeline->segment(chw_pixels.data(), target_h, target_w);
 
     // Save class map as grayscale PNG (pixel value = class index)
-    const std::string out_path = args.output_dir.empty()
-        ? "/tmp/seg_output.png" : args.output_dir;
+    const std::string out_path = args.output_dir.empty() ? "/tmp/seg_output.png" : args.output_dir;
     const int32_t out_h = result.height > 0 ? result.height : target_h;
     const int32_t out_w = result.width > 0 ? result.width : target_w;
     const auto total_px = static_cast<std::size_t>(out_h) * out_w;
     std::vector<unsigned char> gray(total_px);
     for (std::size_t i = 0; i < total_px && i < result.mask.size(); ++i)
-        gray[i] = static_cast<unsigned char>(
-            std::max(0, std::min(255, result.mask[i])));
+        gray[i] = static_cast<unsigned char>(std::max(0, std::min(255, result.mask[i])));
 
-    if (!stbi_write_png(out_path.c_str(), out_w, out_h, 1, gray.data(), out_w))
-    {
+    if (!stbi_write_png(out_path.c_str(), out_w, out_h, 1, gray.data(), out_w)) {
         std::cerr << "Error: failed to write output PNG: " << out_path << '\n';
         return EXIT_FAILURE;
     }
 
-    std::cout << "Segmentation saved: " << out_path
-              << " (" << out_w << "x" << out_h << ")\n";
+    std::cout << "Segmentation saved: " << out_path << " (" << out_w << "x" << out_h << ")\n";
     return EXIT_SUCCESS;
 }
 
-int cmd_generate_audio(const CliArgs& args)
-{
-    if (args.bundle_path.empty() || args.prompt.empty())
-    {
+// ---------------------------------------------------------------------------
+// serve-audio: persistent mode — load bundle once, read prompts from stdin,
+// stream PCM float32 to stdout. One prompt per line.
+//
+// Protocol:
+//   - Each line on stdin is a text prompt
+//   - For each prompt, raw PCM float32 audio is written to stdout
+//   - A 4-byte zero float (0x00000000) sentinel marks end of each utterance
+//   - Logging goes to stderr
+//   - Empty lines are skipped
+//   - EOF on stdin exits
+//
+// Usage:
+//   echo "Hello world" | trtf serve-audio bundle.trtfb > out.raw
+//   (or pipe multiple prompts, one per line)
+// ---------------------------------------------------------------------------
+int cmd_serve_audio(const CliArgs& args) {
+    if (args.bundle_path.empty()) {
+        std::cerr << "Error: serve-audio requires a bundle path\n";
+        return EXIT_FAILURE;
+    }
+
+    std::cerr << "[serve-audio] Loading bundle: " << args.bundle_path << std::endl;
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
+    std::cerr << "[serve-audio] Ready. Reading prompts from stdin (one per line)..." << std::endl;
+
+    trtf::GenerateConfig cfg;
+    cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 750;
+    const int32_t chunk = args.chunk_frames > 0 ? args.chunk_frames : 16;
+
+    // Sentinel: 4-byte zero float to mark end of utterance
+    const float sentinel = 0.0F;
+
+    std::string line;
+    int32_t utterance = 0;
+    while (std::getline(std::cin, line)) {
+        // Skip empty lines
+        if (line.empty() || line.find_first_not_of(" \t\r\n") == std::string::npos)
+            continue;
+
+        ++utterance;
+        std::cerr << "[serve-audio] Utterance " << utterance << ": \"" << line.substr(0, 80)
+                  << (line.size() > 80 ? "..." : "") << "\"" << std::endl;
+
+        pipeline->generate_audio_streaming(
+            line, cfg,
+            [](const float* samples, int32_t n, int32_t /*rate*/) {
+                std::fwrite(samples, sizeof(float), static_cast<std::size_t>(n), stdout);
+                std::fflush(stdout);
+            },
+            chunk);
+
+        // Write sentinel (end of utterance marker)
+        std::fwrite(&sentinel, sizeof(float), 1, stdout);
+        std::fflush(stdout);
+
+        std::cerr << "[serve-audio] Utterance " << utterance << " done." << std::endl;
+    }
+
+    std::cerr << "[serve-audio] EOF on stdin, exiting after " << utterance << " utterances."
+              << std::endl;
+    return EXIT_SUCCESS;
+}
+
+int cmd_generate_audio(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.prompt.empty()) {
         std::cerr << "Error: generate-audio requires bundle + --prompt\n";
         return EXIT_FAILURE;
     }
@@ -348,20 +455,43 @@ int cmd_generate_audio(const CliArgs& args)
     trtf::GenerateConfig cfg;
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 0;
 
+    if (args.stream) {
+        // Streaming mode: write raw PCM float32 to output file (or stdout
+        // placeholder). Codec runs on chunks during decoding for low latency.
+        // Pipe output to: aplay -r 22050 -f FLOAT_LE -c 1 -t raw
+        const std::string out_path =
+            args.output_dir.empty() ? "/tmp/generated_audio_stream.raw" : args.output_dir;
+        FILE* fp = std::fopen(out_path.c_str(), "wb");
+        if (!fp) {
+            std::cerr << "Error: cannot open " << out_path << " for writing\n";
+            return EXIT_FAILURE;
+        }
+
+        int32_t total = pipeline->generate_audio_streaming(
+            args.prompt, cfg,
+            [fp](const float* samples, int32_t n, int32_t /*rate*/) {
+                std::fwrite(samples, sizeof(float), static_cast<std::size_t>(n), fp);
+                std::fflush(fp);
+            },
+            args.chunk_frames);
+
+        std::fclose(fp);
+        std::cout << "Streamed " << total << " audio samples -> " << out_path << '\n';
+        return EXIT_SUCCESS;
+    }
+
     auto result = pipeline->generate_audio(args.prompt, cfg);
 
-    const std::string out_path = args.output_dir.empty()
-        ? "/tmp/generated_audio.wav" : args.output_dir;
+    const std::string out_path =
+        args.output_dir.empty() ? "/tmp/generated_audio.wav" : args.output_dir;
     trtf::io::write_wav(result, out_path);
 
     std::cout << "Generated " << result.num_samples << " audio samples -> " << out_path << '\n';
     return EXIT_SUCCESS;
 }
 
-int cmd_encode(const CliArgs& args)
-{
-    if (args.bundle_path.empty() || args.prompt.empty())
-    {
+int cmd_encode(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.prompt.empty()) {
         std::cerr << "Error: encode requires bundle + --prompt\n";
         return EXIT_FAILURE;
     }
@@ -371,19 +501,17 @@ int cmd_encode(const CliArgs& args)
 
     std::cerr << "Hidden states dim: " << result.dim << std::endl;
     std::cout << "{\"cls_embedding\": [";
-    for (int i = 0; i < result.dim; ++i)
-    {
-        if (i > 0) std::cout << ", ";
+    for (int i = 0; i < result.dim; ++i) {
+        if (i > 0)
+            std::cout << ", ";
         std::cout << result.data[static_cast<std::size_t>(i)];
     }
     std::cout << "]}\n";
     return EXIT_SUCCESS;
 }
 
-int cmd_embed(const CliArgs& args)
-{
-    if (args.bundle_path.empty() || args.prompt.empty())
-    {
+int cmd_embed(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.prompt.empty()) {
         std::cerr << "Error: embed requires bundle + --prompt\n";
         return EXIT_FAILURE;
     }
@@ -393,19 +521,17 @@ int cmd_embed(const CliArgs& args)
 
     std::cerr << "Embedding dim: " << result.dim << std::endl;
     std::cout << "{\"embedding\": [";
-    for (int i = 0; i < result.dim; ++i)
-    {
-        if (i > 0) std::cout << ", ";
+    for (int i = 0; i < result.dim; ++i) {
+        if (i > 0)
+            std::cout << ", ";
         std::cout << result.data[static_cast<std::size_t>(i)];
     }
     std::cout << "]}\n";
     return EXIT_SUCCESS;
 }
 
-int cmd_rerank(const CliArgs& args)
-{
-    if (args.bundle_path.empty() || args.prompt.empty() || args.document.empty())
-    {
+int cmd_rerank(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.prompt.empty() || args.document.empty()) {
         std::cerr << "Error: rerank requires bundle + --prompt + --document\n";
         return EXIT_FAILURE;
     }
@@ -416,10 +542,8 @@ int cmd_rerank(const CliArgs& args)
     return EXIT_SUCCESS;
 }
 
-int cmd_transcribe(const CliArgs& args)
-{
-    if (args.bundle_path.empty() || args.audio_in.empty())
-    {
+int cmd_transcribe(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.audio_in.empty()) {
         std::cerr << "Error: transcribe requires bundle + --audio\n";
         return EXIT_FAILURE;
     }
@@ -429,18 +553,15 @@ int cmd_transcribe(const CliArgs& args)
     auto audio = trtf::io::read_wav(args.audio_in);
     int32_t max_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 224;
 
-    auto result = pipeline->transcribe(audio.samples.data(),
-                                       static_cast<int32_t>(audio.samples.size()),
-                                       max_tokens,
-                                       audio.sample_rate);
+    auto result =
+        pipeline->transcribe(audio.samples.data(), static_cast<int32_t>(audio.samples.size()),
+                             max_tokens, audio.sample_rate);
     std::cout << result.text << '\n';
     return EXIT_SUCCESS;
 }
 
-int cmd_speak(const CliArgs& args)
-{
-    if (args.bundle_path.empty() || args.audio_in.empty())
-    {
+int cmd_speak(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.audio_in.empty()) {
         std::cerr << "Error: speak requires bundle + --audio-in\n";
         return EXIT_FAILURE;
     }
@@ -453,34 +574,28 @@ int cmd_speak(const CliArgs& args)
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : -1;
     cfg.tail_frames = args.tail_frames;
 
-    auto result = pipeline->speak(audio.samples.data(),
-                                  static_cast<int32_t>(audio.samples.size()), cfg,
-                                  audio.sample_rate);
+    auto result = pipeline->speak(audio.samples.data(), static_cast<int32_t>(audio.samples.size()),
+                                  cfg, audio.sample_rate);
 
-    const std::string out_path = args.audio_out.empty()
-        ? "/tmp/speech_output.wav" : args.audio_out;
+    const std::string out_path = args.audio_out.empty() ? "/tmp/speech_output.wav" : args.audio_out;
     trtf::io::write_wav(result, out_path);
 
     std::cout << "Generated " << result.num_samples << " audio samples -> " << out_path << '\n';
     return EXIT_SUCCESS;
 }
 
-int cmd_inspect(const CliArgs& args)
-{
-    if (args.bundle_path.empty())
-    {
+int cmd_inspect(const CliArgs& args) {
+    if (args.bundle_path.empty()) {
         std::cerr << "Error: inspect requires a bundle file path\n";
         return EXIT_FAILURE;
     }
 
-    if (!trtf::IsBundle(args.bundle_path))
-    {
+    if (!trtf::IsBundle(args.bundle_path)) {
         std::cerr << "Error: not a valid .trtfb bundle: " << args.bundle_path << '\n';
         return EXIT_FAILURE;
     }
 
-    try
-    {
+    try {
         const auto info = trtf::InspectBundle(args.bundle_path);
         std::cout << "Model ID:           " << info.model_id << '\n';
         std::cout << "Model type:         " << info.model_type << '\n';
@@ -497,9 +612,7 @@ int cmd_inspect(const CliArgs& args)
         if (!info.runtime_strategy.empty())
             std::cout << "Runtime strategy:   " << info.runtime_strategy << '\n';
         return EXIT_SUCCESS;
-    }
-    catch (const std::exception& e)
-    {
+    } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << '\n';
         return EXIT_FAILURE;
     }
@@ -507,24 +620,43 @@ int cmd_inspect(const CliArgs& args)
 
 } // namespace
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     const CliArgs args = parse_args(argc, argv);
 
-    if (args.show_help) { print_usage(); return EXIT_SUCCESS; }
-    if (args.parse_error) { std::cerr << "Error: " << args.error_message << '\n'; print_usage(); return EXIT_FAILURE; }
+    if (args.show_help) {
+        print_usage();
+        return EXIT_SUCCESS;
+    }
+    if (args.parse_error) {
+        std::cerr << "Error: " << args.error_message << '\n';
+        print_usage();
+        return EXIT_FAILURE;
+    }
 
-    if (args.command == "version") return cmd_version();
-    if (args.command == "run") return cmd_run(args);
-    if (args.command == "encode") return cmd_encode(args);
-    if (args.command == "segment") return cmd_segment(args);
-    if (args.command == "generate-audio") return cmd_generate_audio(args);
-    if (args.command == "generate-video") return cmd_generate_video(args);
-    if (args.command == "embed") return cmd_embed(args);
-    if (args.command == "rerank") return cmd_rerank(args);
-    if (args.command == "speak") return cmd_speak(args);
-    if (args.command == "transcribe") return cmd_transcribe(args);
-    if (args.command == "inspect") return cmd_inspect(args);
+    if (args.command == "version")
+        return cmd_version();
+    if (args.command == "run")
+        return cmd_run(args);
+    if (args.command == "encode")
+        return cmd_encode(args);
+    if (args.command == "segment")
+        return cmd_segment(args);
+    if (args.command == "generate-audio")
+        return cmd_generate_audio(args);
+    if (args.command == "serve-audio")
+        return cmd_serve_audio(args);
+    if (args.command == "generate-video")
+        return cmd_generate_video(args);
+    if (args.command == "embed")
+        return cmd_embed(args);
+    if (args.command == "rerank")
+        return cmd_rerank(args);
+    if (args.command == "speak")
+        return cmd_speak(args);
+    if (args.command == "transcribe")
+        return cmd_transcribe(args);
+    if (args.command == "inspect")
+        return cmd_inspect(args);
 
     print_usage();
     return EXIT_FAILURE;

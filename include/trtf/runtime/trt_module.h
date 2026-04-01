@@ -12,8 +12,8 @@
 //
 // HF equivalent: nn.Module.__call__() / model(input_ids, attention_mask)
 
-#include "trtf/runtime/tensor.h"
 #include "trtf/runtime/device_tensor.h"
+#include "trtf/runtime/tensor.h"
 
 #include <string>
 #include <unordered_map>
@@ -29,7 +29,7 @@ namespace trtf {
 #if TRTF_HAS_TRT
 
 class TrtModule {
-public:
+  public:
     // Construct from a deserialized engine. Pre-allocates all device buffers
     // and binds them to the execution context.
     // The engine must outlive this TrtModule (caller owns it).
@@ -88,19 +88,20 @@ public:
     // and CUDA stream, ensuring they outlive the execution context.
     void keep_alive(std::shared_ptr<void> resource);
 
-private:
+  private:
     struct BufferEntry {
-        void* d_ptr{nullptr};          // Device pointer (owned unless external)
+        void* d_ptr{nullptr}; // Device pointer (owned unless external)
         std::vector<int64_t> shape;
         DType dtype{DType::kFloat32};
         std::size_t nbytes{0};
         bool is_input{true};
-        bool is_external{false};       // If true, we don't free d_ptr
+        bool is_external{false}; // If true, we don't free d_ptr
     };
 
     nvinfer1::IExecutionContext* ctx_{nullptr};
     cudaStream_t stream_{nullptr};
-    std::vector<std::shared_ptr<void>> keep_alive_;     // opaque resource ownership
+    bool has_dynamic_shapes_{false};                // True if engine uses optimization profiles
+    std::vector<std::shared_ptr<void>> keep_alive_; // opaque resource ownership
     std::unordered_map<std::string, BufferEntry> buffers_;
 
     // Pre-allocated host staging buffers for output D2H
@@ -111,6 +112,23 @@ private:
 
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
     void free_buffers();
+
+    // Helpers extracted from allocate_buffers to reduce cyclomatic complexity.
+    void detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io);
+    void allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
+                                int32_t num_profiles);
+    void allocate_single_input(nvinfer1::ICudaEngine* engine, const char* name,
+                               int32_t num_profiles);
+    void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
+    void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
+                                  nvinfer1::OptProfileSelector selector);
+    void update_dynamic_shape(const std::string& name, BufferEntry& entry,
+                              const std::vector<int64_t>& new_shape);
+
+    static bool dims_are_dynamic(const nvinfer1::Dims& dims);
+    static std::vector<int64_t> dims_to_shape(const nvinfer1::Dims& dims);
+    static std::size_t compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,
+                                           std::vector<int64_t>& shape_out);
 
     static DType from_trt_dtype(nvinfer1::DataType dt);
 };

@@ -207,6 +207,161 @@ void magpie_scatter_codes_device(
 }
 
 // ---------------------------------------------------------------------------
+// Kernel: top-k sampling per codebook.
+// One block per codebook, 256 threads.
+//   Phase 1: parallel reduction to find global max and full-range argmax
+//   Phase 2: binary search on logit value to find top-k threshold
+//   Phase 3: temperature softmax over elements above threshold
+//   Phase 4: thread-0 sequential scan for multinomial sampling
+// ---------------------------------------------------------------------------
+
+// Exact replica of CPU sample_top_k + decode_magpie_frame_codes logic.
+// One block per codebook. Thread 0 does all work for exact CPU parity —
+// same partial-sort order, same softmax accumulation, same CDF scan.
+// The other threads are idle but 8 blocks run in parallel (one per codebook).
+// Total work per codebook: ~160K comparisons for selection sort + 80 exp() = ~0.16 ms.
+__global__ void topk_sample_kernel(
+    const float* __restrict__ d_logits,
+    int32_t cb_size,
+    int32_t audio_range,
+    int32_t top_k,
+    float temperature,
+    int32_t eos_token,
+    const float* __restrict__ d_rand_vals,
+    int32_t* __restrict__ d_codes_out,
+    int32_t* __restrict__ d_full_argmax_out,
+    int32_t* __restrict__ d_eos_flag)
+{
+    if (threadIdx.x != 0) return;
+
+    const int32_t cb = static_cast<int32_t>(blockIdx.x);
+    const float* logits = d_logits + cb * cb_size;
+
+    // Use shared memory for the indices array: [cb_size] int32_t
+    extern __shared__ int32_t s_indices[];
+
+    // Initialize indices 0..cb_size-1
+    for (int32_t i = 0; i < cb_size; ++i)
+        s_indices[i] = i;
+
+    // ---- Step 1: Full-range argmax for EOS detection ----
+    int32_t full_argmax = 0;
+    float full_max = logits[0];
+    for (int32_t i = 1; i < cb_size; ++i)
+    {
+        if (logits[i] > full_max) { full_max = logits[i]; full_argmax = i; }
+    }
+    d_full_argmax_out[cb] = full_argmax;
+    if (full_argmax == eos_token)
+        atomicOr(d_eos_flag, 1);
+
+    // ---- Step 2: Selection sort for top-k (exact std::partial_sort equivalent) ----
+    // Place the k largest elements at indices[0..k-1] in descending logit order.
+    const int32_t k = (top_k < cb_size) ? top_k : cb_size;
+    for (int32_t pos = 0; pos < k; ++pos)
+    {
+        int32_t best = pos;
+        float best_val = logits[s_indices[pos]];
+        for (int32_t j = pos + 1; j < cb_size; ++j)
+        {
+            float v = logits[s_indices[j]];
+            if (v > best_val) { best_val = v; best = j; }
+        }
+        if (best != pos)
+        {
+            int32_t tmp = s_indices[pos];
+            s_indices[pos] = s_indices[best];
+            s_indices[best] = tmp;
+        }
+    }
+
+    // ---- Step 3: Temperature softmax over top-k ----
+    // Matches CPU: max_logit = logits[indices[0]], probs[i] = exp((logits[indices[i]] - max) / temp)
+    const float max_logit = logits[s_indices[0]];
+    float sum = 0.0F;
+
+    // Compute unnormalized probs in-place (reuse shared memory as float)
+    float* s_probs = reinterpret_cast<float*>(s_indices + cb_size);
+    for (int32_t i = 0; i < k; ++i)
+    {
+        s_probs[i] = expf((logits[s_indices[i]] - max_logit) / temperature);
+        sum += s_probs[i];
+    }
+    // Normalize
+    for (int32_t i = 0; i < k; ++i)
+        s_probs[i] /= sum;
+
+    // ---- Step 4: Multinomial sampling (exact CPU replica) ----
+    const float r = d_rand_vals[cb];
+    float cumulative = 0.0F;
+    int32_t sampled_id = s_indices[k - 1]; // fallback: last top-k element
+
+    for (int32_t i = 0; i < k; ++i)
+    {
+        cumulative += s_probs[i];
+        if (r < cumulative)
+        {
+            sampled_id = s_indices[i];
+            break;
+        }
+    }
+
+    // ---- Step 5: Validate sampled token (exact CPU decode_magpie_frame_codes logic) ----
+    if (sampled_id == eos_token)
+    {
+        // Sampled EOS — signal stop, use audio-range argmax as output code
+        atomicOr(d_eos_flag, 1);
+        // Fallback to audio-range argmax
+        int32_t audio_best = 0;
+        float audio_best_val = logits[0];
+        for (int32_t i = 1; i < audio_range; ++i)
+        {
+            if (logits[i] > audio_best_val) { audio_best_val = logits[i]; audio_best = i; }
+        }
+        sampled_id = audio_best;
+    }
+    else if (sampled_id < 0 || sampled_id >= audio_range)
+    {
+        // BOS or other special token — fallback to audio-range argmax
+        int32_t audio_best = 0;
+        float audio_best_val = logits[0];
+        for (int32_t i = 1; i < audio_range; ++i)
+        {
+            if (logits[i] > audio_best_val) { audio_best_val = logits[i]; audio_best = i; }
+        }
+        sampled_id = audio_best;
+    }
+
+    d_codes_out[cb] = sampled_id;
+}
+
+void magpie_topk_sample_device(
+    const float* d_logits,
+    int32_t num_codebooks,
+    int32_t codebook_size,
+    int32_t audio_range,
+    int32_t top_k,
+    float temperature,
+    int32_t eos_token,
+    const float* d_rand_vals,
+    int32_t* d_codes_out,
+    int32_t* d_full_argmax_out,
+    int32_t* d_eos_flag,
+    cudaStream_t stream)
+{
+    // Shared memory: [codebook_size] int32 for indices + [top_k] float for probs
+    const std::size_t smem_bytes =
+        static_cast<std::size_t>(codebook_size) * sizeof(int32_t) +
+        static_cast<std::size_t>(top_k) * sizeof(float);
+
+    // One thread per block — exact CPU parity; parallelism is across codebooks
+    topk_sample_kernel<<<num_codebooks, 1, smem_bytes, stream>>>(
+        d_logits, codebook_size, audio_range, top_k, temperature,
+        eos_token, d_rand_vals,
+        d_codes_out, d_full_argmax_out, d_eos_flag);
+}
+
+// ---------------------------------------------------------------------------
 // Kernel: CFG interpolation
 // out[i] = uncond[i] + scale * (cond[i] - uncond[i])
 // ---------------------------------------------------------------------------
@@ -239,54 +394,4 @@ void magpie_cfg_interpolate_device(
         cfg_scale, num_elements);
 }
 
-} // namespace trtf
-
-// ---------------------------------------------------------------------------
-// DeviceOps: public API wrapping the kernels above.
-// ---------------------------------------------------------------------------
-
-namespace trtf {
-namespace device_ops {
-
-void greedy_sample_codebooks(
-    const float* d_logits, int32_t num_codebooks, int32_t codebook_size,
-    int32_t audio_range, int32_t* d_codes, int32_t* d_full_argmax,
-    cudaStream_t stream)
-{
-    trtf::magpie_greedy_sample_device(
-        d_logits, num_codebooks, codebook_size, audio_range,
-        d_codes, d_full_argmax, stream);
-}
-
-void gather_average_embeddings(
-    const float* d_embed_table, const int32_t* d_token_ids,
-    int32_t num_entries, int32_t vocab_size, int32_t hidden_size,
-    float* d_output, cudaStream_t stream)
-{
-    trtf::magpie_gather_average_embed_device(
-        d_embed_table, d_token_ids,
-        num_entries, vocab_size, hidden_size,
-        d_output, stream);
-}
-
-void cfg_interpolate(
-    const float* d_cond, const float* d_uncond, float* d_out,
-    float scale, int32_t n, cudaStream_t stream)
-{
-    trtf::magpie_cfg_interpolate_device(
-        d_cond, d_uncond, d_out, scale, n, stream);
-}
-
-void scatter_codes_check_eos(
-    const int32_t* d_codes, int32_t* d_all_codes, int32_t* d_prev_codes,
-    const int32_t* d_full_argmax, int32_t* d_eos_flag,
-    int32_t frame, int32_t num_codebooks, int32_t eos_token,
-    cudaStream_t stream)
-{
-    trtf::magpie_scatter_codes_device(
-        d_codes, d_all_codes, d_prev_codes, d_full_argmax, d_eos_flag,
-        frame, num_codebooks, eos_token, stream);
-}
-
-} // namespace device_ops
 } // namespace trtf
