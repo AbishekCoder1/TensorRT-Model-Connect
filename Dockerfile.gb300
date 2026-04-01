@@ -62,6 +62,9 @@ RUN pip install \
     sentencepiece \
     ftfy
 
+# ModelOpt: FP8/INT8 quantization calibration (used by trtf-build --fp8)
+RUN pip install nvidia-modelopt
+
 # NeMo currently declares transformers~=4.57; force the runtime pin we need.
 RUN pip install "nemo_toolkit[tts]==2.7.0" && \
     pip install --upgrade "transformers==5.2.0" && \
