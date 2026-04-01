@@ -1,4 +1,10 @@
-"""Self-tests for tools/diff_vl.py — preprocessor config, cosine similarity, sanity checks."""
+"""Self-tests for tools/diff_vl.py — preprocessor config, cosine similarity, sanity checks.
+
+Trace: ARCH-TRT-001, UD-TRT-DIFF-VL
+Intent: Validate VL diff tool Qwen VL detection, cosine similarity computation, and preprocessor config
+Preconditions: diff_vl module is importable; numpy available
+Postconditions: Qwen VL model types are correctly identified and cosine similarity matches mathematical expectations
+"""
 
 from __future__ import annotations
 

@@ -84,7 +84,8 @@ sequenceDiagram
 ## 2. Runtime Pipeline Creation Flow (C++)
 
 Entry point: `trtf_create_pipeline_ex()` in `src/cabi/api/trtf_c.cpp`.
-All assembly logic lives in `PipelineFactory::from_bundle()` in `src/runtime/pipeline_factory.cpp`.
+Factory logic lives in `PipelineFactory::from_bundle()` in `src/runtime/registry/pipeline_factory.cpp`.
+Plugin dispatch uses `PipelineRegistry` in `src/runtime/registry/pipeline_registry.cpp`.
 
 ```mermaid
 sequenceDiagram
@@ -92,9 +93,9 @@ sequenceDiagram
     participant CABI as trtf_c.cpp<br/>trtf_create_pipeline_ex()
     participant Factory as PipelineFactory::from_bundle()<br/>(pipeline_factory.cpp)
     participant Bundle as bundle_format.cpp<br/>ReadBundleFile()
-    participant Sections as bundle_helpers.cpp<br/>find_bundle_sections()
-    participant Config as fast_path_config.cpp<br/>parse_fast_path_config()
-    participant Dispatch as resolve_family() +<br/>dispatch_pipeline()
+    participant Config as pipeline_plugin.cpp<br/>parse_base_config()
+    participant Registry as PipelineRegistry<br/>::instance().lookup()
+    participant Plugin as IPipelinePlugin<br/>::create()
     participant Pipeline as Concrete IPipeline
 
     User->>CABI: trtf_create_pipeline_ex(bundle_path, options)
@@ -103,42 +104,33 @@ sequenceDiagram
     CABI->>Factory: PipelineFactory::from_bundle(path, hf_python)
     Factory->>Bundle: ReadBundleFile(bundle_path)
     Bundle-->>Factory: BundleFile (info + sections vector)
-    Factory->>Sections: find_bundle_sections(bundle)
-    Sections-->>Factory: BundleSections (non-owning pointers into section data)
-    Factory->>Config: parse_bundle_config(sections, info)
-    Note over Config: If config.json section exists:<br/>parse_fast_path_config(text, max_cache_length)<br/>Otherwise: populate from BundleInfo header fields
-    Config-->>Factory: FastPathModelConfig
-    Factory->>Dispatch: resolve_family(cfg.runtime_strategy)
-    Dispatch-->>Factory: StrategyFamily enum
-    Factory->>Dispatch: dispatch_pipeline(family, bundle, sections, cfg, ...)
-    alt kText
-        Dispatch->>Pipeline: create_text_pipeline()
-        Note over Pipeline: decoder_kv_cache/decoder_moe -> TextGenerationPipeline<br/>ssm_recurrent -> RecurrentPipeline("MambaPipeline")<br/>rwkv_recurrent -> RecurrentPipeline("RwkvPipeline")<br/>hybrid_mamba_attention -> RecurrentPipeline("HybridPipeline")
-    else kVision
-        Dispatch->>Pipeline: create_vision_pipeline()
-        Note over Pipeline: text TrtModule + vision TrtModule + KvCache<br/>-> VLPipeline
-    else kDiffusion
-        Dispatch->>Pipeline: create_diffusion_pipeline()
-        Note over Pipeline: denoiser + vae + text_encoder TrtModules<br/>-> WanPipeline / FluxPipeline / ZImagePipeline
-    else kAudio
-        Dispatch->>Pipeline: create_audio_pipeline()
-        Note over Pipeline: -> WhisperPipeline / BarkPipeline /<br/>MagpiePipeline / SpeechPipeline / OmniPipeline
-    else kEncoder
-        Dispatch->>Pipeline: create_encoder_pipeline()
-        Note over Pipeline: -> EncoderPipeline / SegmentPipeline / SamPipeline
-    end
-    Pipeline-->>Factory: unique_ptr<IPipeline>
+    Factory->>Factory: Extract config.json section text
+    Factory->>Factory: extract_json_string("runtime_strategy")
+    Factory->>Factory: normalize_legacy_strategy(strategy, config_text)
+    Note over Factory: Rewrites legacy strings:<br/>"text_to_audio" -> bark/magpie<br/>"diffusion" -> wan/flux/zimage/pixart
+    Factory->>Registry: PipelineRegistry::instance().lookup(strategy)
+    Registry-->>Factory: IPipelinePlugin* (or nullptr -> error)
+    Factory->>Config: parse_base_config(config_text, max_cache_length)
+    Config-->>Factory: BaseConfig (~10 universal fields)
+    Factory->>Plugin: plugin->create(PipelineContext{bundle, config, json, hf_python, path})
+    Note over Plugin: Plugin parses strategy-specific config from raw JSON,<br/>extracts bundle sections, loads TRT engines,<br/>creates tokenizers/caches, returns pipeline
+    Plugin->>Pipeline: Construct concrete pipeline
+    Pipeline-->>Plugin: unique_ptr<IPipeline>
+    Plugin-->>Factory: unique_ptr<IPipeline>
     Factory-->>CABI: unique_ptr<IPipeline>
     CABI-->>User: IPipeline* (released raw pointer)
 ```
 
 **Key files:**
-- `src/cabi/api/trtf_c.cpp` -- C ABI entry point (108 LOC)
-- `src/runtime/pipeline_factory.cpp` -- `PipelineFactory::from_bundle()`, all `create_*_pipeline()` functions (~700 LOC)
+- `src/cabi/api/trtf_c.cpp` -- C ABI entry point
+- `src/runtime/registry/pipeline_factory.cpp` -- `PipelineFactory::from_bundle()` (~124 LOC)
+- `src/runtime/registry/pipeline_registry.cpp` -- `PipelineRegistry` singleton
+- `src/runtime/registry/pipeline_plugin.cpp` -- `parse_base_config()`
 - `include/trtf/runtime/pipeline_factory.h` -- `PipelineFactory` class declaration
+- `include/trtf/runtime/pipeline_registry.h` -- `PipelineRegistry`, `PluginRegistrar`, macros
+- `include/trtf/runtime/pipeline_plugin.h` -- `IPipelinePlugin`, `BaseConfig`, `PipelineContext`
+- `src/runtime/plugins/` -- 20 self-registering plugin files (25 strategies total)
 - `src/bundle/bundle_format.cpp` -- `ReadBundleFile()`, `HasBundleMagic()`
-- `src/cabi/bundle/bundle_helpers.cpp` -- `find_bundle_sections()`, `extract_tokenizer_from_bundle()`
-- `src/cabi/config/fast_path_config.cpp` -- `parse_fast_path_config()`
 
 ---
 
@@ -198,33 +190,34 @@ sequenceDiagram
 
 ## 4. Recurrent (Mamba/RWKV/Hybrid) Generation Flow
 
-Same generate loop structure as text generation, but using `IStateManager` abstraction.
+Same generate loop structure as text generation, but using `IInferenceState` abstraction.
 
 ```mermaid
 sequenceDiagram
     participant User
     participant RP as RecurrentPipeline
-    participant SM as IStateManager
+    participant SM as IInferenceState
     participant Module as TrtModule
 
     User->>RP: generate(prompt, cfg)
     RP->>RP: tokenizer_->encode(prompt)
     RP->>SM: reset()
     RP->>SM: bind_to(*decoder_)
-    Note over SM: RecurrentStateManager: binds conv_state/ssm_state per layer<br/>HybridStateManager: binds KvCache + RecurrentState tensors
+    Note over SM: RecurrentState: binds conv_state/ssm_state per layer<br/>HybridState: binds KvCache + RecurrentState tensors
     loop Prefill + Decode
         RP->>SM: build_mask(mask)
-        Note over SM: RecurrentStateManager: no-op (no mask needed)<br/>HybridStateManager: delegates to KvCache::build_attention_mask()
+        Note over SM: RecurrentState: no-op (no mask needed)<br/>HybridState: delegates to KvCache::build_attention_mask()
         RP->>Module: forward({token_id, [mask], [position_id]})
         Module-->>RP: logits
         RP->>SM: advance()
-        Note over SM: RecurrentStateManager: D2D present->state, position++<br/>HybridStateManager: KvCache::advance() + RecurrentState::advance()
+        Note over SM: RecurrentState: D2D present->state, position++<br/>HybridState: KvCache::advance() + RecurrentState::advance()
     end
     RP-->>User: TextResult{text, token_ids}
 ```
 
 **Key files:**
-- `src/runtime/pipelines/recurrent_pipeline.h` -- `RecurrentPipeline`, `IStateManager`, `RecurrentStateManager`, `HybridStateManager`
+- `src/runtime/pipelines/recurrent_pipeline.h` -- `RecurrentPipeline`
+- `include/trtf/runtime/inference_state.h` -- `IInferenceState` interface
 - `src/runtime/pipelines/recurrent_pipeline.cpp` -- `generate()`, `run_step()`
 - `include/trtf/runtime/recurrent_state.h` -- `RecurrentState` class
 
@@ -343,10 +336,10 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, etc. -- `BarkPipeline`, `WhisperPipeline`, `MagpiePipeline`, `SpeechPipeline`, `OmniPipeline`
-- individual pipeline `.cpp` files -- pipeline implementations
-- `src/runtime/pipelines/audio_backend_factory.h` -- `make_whisper_pipeline_from_bundle()`, etc.
-- `src/runtime/domains/audio/bark_backend.h` -- `BarkBackend`
+- `src/runtime/pipelines/bark_pipeline.h/cpp` -- `BarkPipeline`
+- `src/runtime/pipelines/whisper_pipeline.h/cpp`, `magpie_pipeline.h/cpp`, `speech_pipeline.h/cpp`, `omni_pipeline.h/cpp`
+- `src/runtime/plugins/bark_plugin.cpp`, `whisper_plugin.cpp`, `magpie_plugin.cpp`, `speech_plugin.cpp`, `omni_plugin.cpp`
+- `src/runtime/domains/audio/bark_config.h`, `bark_generation_plan.h`
 
 ---
 
@@ -377,8 +370,8 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, etc. -- `OmniPipeline`, `OmniConfig`
-- individual pipeline `.cpp` files -- `run_thinker()`, `run_talker()`, `run_code2wav()`
+- `src/runtime/pipelines/omni_pipeline.h/cpp` -- `OmniPipeline`, `OmniConfig`
+- `src/runtime/plugins/omni_plugin.cpp` -- `OmniPlugin`
 
 ---
 
@@ -412,8 +405,8 @@ Each stage in these flows is independently testable:
 | `ModelConfig.from_dir()` | Synthetic config.json | `tests/builder/test_config.py` |
 | `find_plugin()` + `load_weights()` | Synthetic safetensors | `tests/builder/test_family_plugins.py` |
 | `write_bundle()` / `ReadBundleFile()` | Round-trip in memory | `tests/builder/test_bundle_writer.py`, `tests/cpp/test_bundle_format.cpp` |
-| `parse_fast_path_config()` | Config JSON strings | `tests/cpp/test_fast_path_config.cpp` |
-| `find_bundle_sections()` | Synthetic bundles | `tests/cpp/test_bundle_helpers.cpp` |
+| `parse_base_config()` | Config JSON strings | `tests/cpp/test_fast_path_config.cpp` |
+| `find_section()` | Synthetic bundles | `tests/cpp/test_bundle_helpers.cpp` |
 | KvCache state machine | GPU buffer ops | `tests/cpp/test_device_kv_cache.cpp`, `tests/builder/test_cache_state_machine.py` |
 | TrtModule forward | Real TRT engine | `tests/cpp/test_cuda_buffer.cpp` (buffer ops), E2E tests |
 | Full pipeline | E2E harness | `tests/test_e2e.py` |

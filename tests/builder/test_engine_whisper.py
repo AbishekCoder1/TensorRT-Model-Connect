@@ -22,6 +22,11 @@ Setup:
     expected_weight_keys() (for enc_layer.*/layer.*/cross_* keys).
     Tier 2 is skipped because Whisper uses a custom dual-engine builder
     (encoder + decoder) rather than the standard single-engine builder.
+
+Trace: ARCH-FAM-001, UD-FAM-WHISPER-01
+Intent: Validate the Whisper family plugin weight loading for encoder-decoder ASR including conv stem, encoder/decoder layers, cross-attention, learned positions, and dual-engine key layout.
+Preconditions: safetensors and trtf_build are importable; no TRT or GPU required for weight-loading tests.
+Postconditions: All encoder (enc_layer.*), decoder (layer.*), and cross-attention (cross_*) weight keys are present with correct shapes for the dual-engine architecture.
 """
 
 from __future__ import annotations

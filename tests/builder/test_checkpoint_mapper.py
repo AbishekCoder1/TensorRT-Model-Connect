@@ -1,6 +1,11 @@
 """Tests for checkpoint_mapper.py — weight transforms and loading.
 
 Uses synthetic safetensors files. No TRT needed.
+
+Trace: ARCH-CHK-001, UD-CHK-01
+Intent: Validate weight transform helpers (transpose, GQA expansion, head norm repeat) and full weight loading from synthetic safetensors.
+Preconditions: trtf_build and safetensors are importable; no TRT or GPU required.
+Postconditions: Weight shapes, dtypes, and values are correct after transpose, KV expansion, head norm repeat, and end-to-end load_standard_weights.
 """
 
 from __future__ import annotations

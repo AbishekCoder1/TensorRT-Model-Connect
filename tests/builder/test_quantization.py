@@ -1,4 +1,10 @@
-"""Tests for quantization framework abstractions."""
+"""Tests for quantization framework abstractions.
+
+Trace: ARCH-QUANT-001, UD-QUANT-FRAMEWORK
+Intent: Validate quantization format registry, scale map JSON round-trip, and format protocol compliance
+Preconditions: Quantization formats (FP8, INT8, INT4, NVFP4, W4A8) are registered
+Postconditions: All formats are discoverable, scale maps survive JSON serialization, and formats expose wrap_matmul
+"""
 import json
 import numpy as np
 import pytest

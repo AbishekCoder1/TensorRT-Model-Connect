@@ -1,3 +1,11 @@
+"""Tests for E2E orchestrator TRT runtime path validation guard.
+
+Trace: ARCH-E2E-001, UD-E2E-RUNTIME-GUARD
+Intent: Validate that the runtime path guard accepts new-runtime markers and rejects legacy runtime markers
+Preconditions: StageOutput metadata contains stderr with runtime backend markers
+Postconditions: New runtime markers pass validation; legacy runtime markers trigger rejection
+"""
+
 from __future__ import annotations
 
 from pathlib import Path

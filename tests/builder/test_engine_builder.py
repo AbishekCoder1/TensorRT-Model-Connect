@@ -1,6 +1,11 @@
 """Tests for engine_builder.py — orchestrator logic.
 
 Tests plugin discovery and model resolution without requiring TRT.
+
+Trace: ARCH-ENG-001, UD-ENG-03
+Intent: Validate the engine builder orchestrator's model resolution, plugin discovery, and family dispatch logic.
+Preconditions: trtf_build is importable; no TRT or GPU required.
+Postconditions: Local directories with config.json resolve correctly, HF repo IDs are detected, and all registered family plugins are discoverable.
 """
 
 from __future__ import annotations

@@ -2,6 +2,11 @@
 
 Builds tiny engines and verifies all I/O tensor names match C++ expectations.
 Requires TRT + GPU.
+
+Trace: ARCH-GRP-001, UD-GRP-DECODER
+Intent: Validate standard decoder builder I/O tensor naming contract against C++ runtime expectations
+Preconditions: TRT and CUDA GPU are available; synthetic weight dicts match builder requirements
+Postconditions: Built engine I/O tensor names exactly match the naming convention expected by C++ runtime
 """
 
 from __future__ import annotations

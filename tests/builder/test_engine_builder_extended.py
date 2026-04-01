@@ -1,6 +1,11 @@
 """Extended tests for engine_builder.py — helper functions and orchestration.
 
 Uses mocks for TRT, GPU, and filesystem access. No GPU or TRT needed.
+
+Trace: ARCH-ENG-001, UD-ENG-04
+Intent: Validate engine builder helper functions including TRT version detection, GPU name retrieval, tokenizer JSON provisioning, and build_bundle orchestration.
+Preconditions: trtf_build is importable; uses mocks for TRT and GPU introspection.
+Postconditions: TRT version is correctly retrieved or falls back to 'unknown', GPU name is detected, tokenizer JSON is ensured, and build_bundle dispatches correctly.
 """
 
 from __future__ import annotations

@@ -1,4 +1,10 @@
-"""Self-tests for tools/diff_audio.py — compute_energy, WAV I/O, token_stats, arg parsing."""
+"""Self-tests for tools/diff_audio.py — compute_energy, WAV I/O, token_stats, arg parsing.
+
+Trace: ARCH-PIP-AUD-001, UD-AUD-DIFF
+Intent: Validate audio diff tool compute_energy, WAV read/write round-trip, token statistics, and arg parsing
+Preconditions: diff_audio module is importable via tools/ path; numpy available
+Postconditions: Energy computation is correct for edge cases, WAV I/O round-trips preserve sample data
+"""
 
 from __future__ import annotations
 

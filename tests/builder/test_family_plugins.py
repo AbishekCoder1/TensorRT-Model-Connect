@@ -5,6 +5,11 @@ files containing random tensors of the correct shapes, then calls plugin.load_we
 and verifies the returned WeightDict has the expected keys and transforms applied.
 
 No GPU or TRT needed.
+
+Trace: ARCH-FAM-001, UD-FAM-WEIGHTS
+Intent: Validate load_weights correctness for core family plugins (Qwen, LLaMA, Gemma, Phi, etc.)
+Preconditions: Synthetic safetensors with family-specific HF weight naming are available in temp directories
+Postconditions: Each plugin produces expected canonical weight keys with correct shapes and family-specific transforms
 """
 
 from __future__ import annotations

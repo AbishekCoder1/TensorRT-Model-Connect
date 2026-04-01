@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-TOK-CPP-05
+// Architecture:   ARCH-TOK-001
+// Unit Design:    UD-TOK-01
+// Intent:         BPE tokenizer correctness: array/string merge formats, pre-tokenizer configs, special tokens, round-trip
+// Preconditions:  None (CPU-only, inline JSON vocab definitions)
+// Postconditions: Encode produces correct token IDs, decode recovers original text, special tokens handled correctly
+// =============================================================================
+
 #include "trtf/tokenizer.h"
 
 #include <iostream>

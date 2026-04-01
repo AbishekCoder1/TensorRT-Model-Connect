@@ -5,6 +5,11 @@ files containing random tensors of the correct shapes, then calls
 plugin.load_weights() and verifies the returned WeightDict.
 
 No GPU or TRT needed.
+
+Trace: ARCH-FAM-001, UD-FAM-BERT
+Intent: Validate BERT family plugin weight key mapping and transform correctness
+Preconditions: Synthetic safetensors with BERT weight naming convention are available
+Postconditions: Loaded WeightDict contains expected keys with correct shapes for encoder-only architecture
 """
 
 from __future__ import annotations

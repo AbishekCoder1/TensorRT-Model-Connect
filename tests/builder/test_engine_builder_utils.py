@@ -3,7 +3,10 @@
 Tests _is_hf_model_dir, _detect_tokenizer_add_special_tokens, _resolve_model
 (local path), _ensure_tokenizer_json (skips), and build() public API error paths.
 
-Trace IDs: UT-ENGINE-BUILDER-UTILS
+Trace: ARCH-ENG-001, UD-ENG-05
+Intent: Validate engine builder utility functions including HF model directory detection, tokenizer special-token detection, model resolution, and public API error paths.
+Preconditions: trtf_build is importable; no TRT or GPU required.
+Postconditions: HF directories are correctly identified, tokenizer special-token flags match HF config, local paths resolve as expected, and invalid inputs raise appropriate errors.
 """
 
 from __future__ import annotations

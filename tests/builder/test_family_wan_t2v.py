@@ -1,4 +1,10 @@
-"""Unit tests for Wan T2V family plugin and preprocessor serialization."""
+"""Unit tests for Wan T2V family plugin and preprocessor serialization.
+
+Trace: ARCH-FAM-001, UD-FAM-WAN-T2V
+Intent: Validate Wan T2V diffusion family plugin matching, weight serialization, and video config encoding
+Preconditions: Synthetic Wan T2V model config with video dimensions and weight tensors are available
+Postconditions: Plugin matches Wan aliases, serializes preprocessor weights correctly, and encodes video parameters
+"""
 
 from __future__ import annotations
 

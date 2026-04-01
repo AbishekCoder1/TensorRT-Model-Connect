@@ -1,4 +1,10 @@
-"""Unit tests for owned builder modules using deterministic mocks/stubs."""
+"""Unit tests for owned builder modules using deterministic mocks/stubs.
+
+Trace: ARCH-ENG-001, UD-ENG-MOCKED
+Intent: Validate builder module code paths using fake TRT stubs without real GPU execution
+Preconditions: Fake tensorrt module is injected; no real TRT or GPU available
+Postconditions: Builder modules execute expected code paths and produce correct intermediate structures
+"""
 
 from __future__ import annotations
 

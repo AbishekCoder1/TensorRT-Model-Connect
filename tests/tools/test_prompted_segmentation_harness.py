@@ -1,3 +1,11 @@
+"""Tests for prompted segmentation E2E harness comparator.
+
+Trace: ARCH-PIP-SEG-001, UD-SEG-HARNESS
+Intent: Validate PromptedSegmentationComparator mask loading, IoU computation, and threshold gating
+Preconditions: Synthetic mask arrays and threshold profiles are available in temp directories
+Postconditions: Comparator correctly loads reference masks from .npy and computes per-mask IoU metrics
+"""
+
 from __future__ import annotations
 
 import json

@@ -5,6 +5,11 @@ and generate() sequencing.
 
 Mock-based where possible (no TRT/GPU needed). TRT-requiring tests are marked
 with @requires_trt.
+
+Trace: ARCH-DBG-001, UD-DBG-03
+Intent: Validate extended debug runner functionality including multi-runner cleanup, VL config loading, image preprocessing dispatch, and autoregressive generate sequencing.
+Preconditions: trtf_build.debug_runner is importable; TRT-dependent tests require TRT+CUDA.
+Postconditions: All runner variants clean up resources correctly, VL config fields parse from bundle headers, and generate produces the expected token sequence.
 """
 
 from __future__ import annotations

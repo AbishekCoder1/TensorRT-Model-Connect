@@ -1,4 +1,10 @@
-"""Branch-focused tests for the GPT-OSS family plugin."""
+"""Branch-focused tests for the GPT-OSS family plugin.
+
+Trace: ARCH-FAM-001, UD-FAM-GPT-OSS
+Intent: Validate GPT-OSS family plugin weight loading via HuggingFace AutoModel state_dict path
+Preconditions: Fake HF model loader returns synthetic state_dict with GPT-OSS weight naming
+Postconditions: Plugin correctly maps HF weight keys to canonical names with expected transforms
+"""
 
 from __future__ import annotations
 

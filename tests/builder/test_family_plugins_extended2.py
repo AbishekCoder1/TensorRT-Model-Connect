@@ -5,7 +5,10 @@ sinusoidal positional encodings, and cross-attention layers.
 
 No GPU or TRT needed.
 
-Trace IDs: UT-FAMILY-EXTENDED-2
+Trace: ARCH-FAM-001, UD-FAM-EXTENDED-2
+Intent: Validate M2M-100/NLLB and Marian encoder-decoder plugins with sinusoidal position embeddings
+Preconditions: Synthetic safetensors with translation model weight naming and shared embeddings are available
+Postconditions: Plugins produce correct sinusoidal embeddings and cross-attention weight keys
 """
 
 from __future__ import annotations

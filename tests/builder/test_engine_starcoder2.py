@@ -16,6 +16,11 @@ Setup:
     with bias, c_fc/c_proj MLP naming, QKV biases, output bias), and
     expected_weight_keys() to match the canonical keys with biases and
     fc1/fc2 MLP keys.
+
+Trace: ARCH-FAM-001, UD-FAM-STARCODER2-01
+Intent: Validate the StarCoder2 family plugin weight loading including LayerNorm with beta, GELU FC MLP (c_fc/c_proj), QKV biases, and output projection bias.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: MLP keys map to fc1/fc2, all biases (QKV, output, norm) are loaded, and weight shapes match expected dimensions.
 """
 
 from __future__ import annotations

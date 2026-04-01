@@ -9,7 +9,10 @@ and verifies the returned WeightDict has the expected keys and transforms applie
 
 No GPU or TRT needed.
 
-Trace IDs: UT-FAMILY-EXTENDED
+Trace: ARCH-FAM-001, UD-FAM-EXTENDED
+Intent: Validate load_weights for extended family plugins (T5, BART, OLMo, ModernBERT, DeBERTa, etc.)
+Preconditions: Synthetic safetensors with each family's HF weight naming are available
+Postconditions: Each plugin produces expected canonical weight keys including encoder-decoder and encoder-only variants
 """
 
 from __future__ import annotations

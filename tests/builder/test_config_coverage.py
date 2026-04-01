@@ -1,4 +1,10 @@
-"""Coverage-focused tests for merge/fallback behavior in ModelConfig."""
+"""Coverage-focused tests for merge/fallback behavior in ModelConfig.
+
+Trace: ARCH-CFG-002, UD-CFG-02
+Intent: Validate ModelConfig merge and fallback paths including language_config merge for VL models, text_config promotion, and head_dim computation edge cases.
+Preconditions: trtf_build is importable; no TRT or GPU required.
+Postconditions: Nested config sections (language_config, text_config) merge correctly, guard conditions prevent unintended overrides, and derived fields compute accurately.
+"""
 
 from __future__ import annotations
 

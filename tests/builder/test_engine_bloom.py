@@ -10,6 +10,11 @@ BLOOM uses:
   - Tied word embeddings (word_embeddings == lm_head)
   - HF config uses d_model, attention_heads, num_layers (not hidden_size, etc.)
   - transformer.h.{i} prefix (not model.layers.{i})
+
+Trace: ARCH-FAM-001, UD-FAM-BLOOM-01
+Intent: Validate the BLOOM family plugin weight loading including ALiBi, fused QKV splitting, embedding LayerNorm, tied embeddings, and non-standard HF key aliases.
+Preconditions: safetensors and trtf_build are importable; no TRT or GPU required for weight-loading tests.
+Postconditions: All weight keys map correctly from BLOOM's HF layout, fused QKV is split per-head, biases are loaded, and config aliases (d_model, attention_heads) resolve properly.
 """
 import numpy as np
 

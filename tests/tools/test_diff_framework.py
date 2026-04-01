@@ -2,6 +2,11 @@
 
 Pure-Python tests (no GPU, no model loading) that verify the framework
 mechanics. Runs as part of Tier 1 (`pytest tests/tools/ -v`).
+
+Trace: ARCH-DIFF-001, UD-DIFF-FRAMEWORK
+Intent: Validate diff framework protocol, plugin registry, runner lifecycle, and CLI argument parsing
+Preconditions: diff_framework modules are importable; no GPU or model files required
+Postconditions: Registry discovers plugins, runner executes comparison lifecycle, and CLI parses arguments correctly
 """
 
 from __future__ import annotations

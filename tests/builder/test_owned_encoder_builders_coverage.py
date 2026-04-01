@@ -2,6 +2,11 @@
 
 These tests avoid real TensorRT execution by importing builders with a fake
 `tensorrt` module and monkeypatching graph helper ops.
+
+Trace: ARCH-ENG-001, UD-ENG-ENCODER
+Intent: Validate encoder builder code paths using fake TRT module and monkeypatched graph ops
+Preconditions: Fake tensorrt module and graph op stubs are injected
+Postconditions: Encoder builders execute all code branches and produce expected fake tensor structures
 """
 
 from __future__ import annotations

@@ -15,6 +15,11 @@ Setup:
     ALL of: get_config_dict(), make_hf_tensors(), expected_weight_keys(),
     expected_engine_input_names(), and expected_engine_output_names() for
     Mamba's fundamentally different architecture.
+
+Trace: ARCH-FAM-001, UD-FAM-MAMBA-01
+Intent: Validate the Mamba SSM family plugin weight loading including conv1d state, SSM parameters, and non-decoder engine IO (no attention mask, no KV cache).
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: All SSM weight keys (in_proj, conv1d, x_proj, dt_proj, etc.) are present, engine inputs/outputs match recurrent SSM contract, and shapes are correct.
 """
 
 from __future__ import annotations

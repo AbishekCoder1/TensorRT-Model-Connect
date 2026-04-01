@@ -2,6 +2,11 @@
 
 Pure Python, no TRT needed. Tests the CLI argument parser without
 actually invoking engine builds.
+
+Trace: ARCH-ENG-001, UD-ENG-01
+Intent: Validate that the trtf-build CLI correctly parses build/inspect/version subcommands and their arguments.
+Preconditions: trtf_build.cli is importable; no TRT or GPU required.
+Postconditions: Parsed arguments match expected values for all subcommands, defaults, and edge cases.
 """
 
 from __future__ import annotations

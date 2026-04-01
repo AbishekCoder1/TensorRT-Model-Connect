@@ -11,11 +11,11 @@ purpose, dependency profile, and speed:
 
 | Layer | Directory | Files | Tests | GPU? | Time | Purpose |
 |-------|-----------|:--:|:--:|:--:|------|---------|
-| 1. Builder unit | `tests/builder/` | 74 | ~940 | No | ~10 min | Python build logic in isolation |
-| 2. C++ runtime unit | `tests/cpp/` | 61 | 60+ | Mix | ~8 s | C++ runtime correctness |
-| 3. Tools self-tests | `tests/tools/` | 20 | ~160 | No | ~35 s | Diff framework + comparison utilities |
+| 1. Builder unit | `tests/builder/` | 79 | ~940 | No | ~10 min | Python build logic in isolation |
+| 2. C++ runtime unit | `tests/cpp/` | 72 | 70+ | Mix | ~8 s | C++ runtime correctness |
+| 3. Tools self-tests | `tests/tools/` | 22 | ~160 | No | ~35 s | Diff framework + comparison utilities |
 | 4. Graph-op GPU | `tests/builder/test_graph_*.py` | 3 | ~70 | TRT | ~2 min | TRT graph operations on real GPU |
-| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 68 manifests | 68 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
+| 5. Unified E2E | `tests/test_e2e.py` + `tests/e2e_harness/` | 84 manifests | 84 | GPU | 2-3 h | Full pipeline (build + infer + compare) |
 | 6. Diff framework | `tools/diff_logits.py`, `tools/diff_layers.py`, etc. | 6 checks | -- | GPU | varies | Ad-hoc TRT-vs-HF model comparison |
 
 **Philosophy**: Every TRT engine must produce output matching HuggingFace
@@ -128,12 +128,26 @@ for the majority of tests.
 | File | What it tests |
 |------|---------------|
 | `test_families.py` | Plugin match/dispatch, runtime_strategy, embed_input, `matches()` returns bool |
+| `test_families_coverage.py` | Plugin coverage tests |
 | `test_family_plugins.py` | 10 family plugins: `load_weights()` correctness |
+| `test_family_plugins_extended.py` | Extended family plugin tests |
+| `test_family_plugins_extended2.py` | Additional extended family plugin tests |
 | `test_family_bert.py` | BERT-specific plugin tests |
+| `test_family_deepseek_v2.py` | DeepSeek-V2 plugin tests |
+| `test_family_distilbert.py` | DistilBERT plugin tests |
+| `test_family_flux.py` | FLUX diffusion plugin tests |
+| `test_family_gpt_oss.py` | GPT-OSS plugin tests |
+| `test_family_mpnet.py` | MPNet plugin tests |
+| `test_family_nemotron_h.py` | Nemotron-H hybrid plugin tests |
 | `test_family_phi4mm.py` | Phi-4 multimodal plugin |
+| `test_family_pixart.py` | PixArt diffusion plugin tests |
+| `test_family_qwen3_5.py` | Qwen3.5 plugin tests |
 | `test_family_qwen_moe.py` | Qwen MoE plugin |
+| `test_family_roberta.py` | RoBERTa plugin tests |
 | `test_family_sam.py` | SAM prompted segmentation plugin |
+| `test_family_wan_t2v.py` | Wan T2V diffusion plugin tests |
 | `test_family_yolox.py` | YOLOX object detection plugin |
+| `test_family_z_image.py` | Z-Image diffusion plugin tests |
 
 #### Per-family engine tests (mixin-based, 3-tier)
 
@@ -188,10 +202,35 @@ Graph-op tests use the `trt_runner` fixture from `conftest.py`: a `build_fn(netw
 |------|---------------|
 | `test_engine_builder.py` | Engine builder mock tests |
 | `test_engine_builder_extended.py` | `build_bundle` orchestration, GPU name, TRT version |
+| `test_engine_builder_utils.py` | Engine builder utility tests |
 | `test_pipeline.py` | Pipeline subprocess wrapper, binary detection |
 | `test_debug_runner.py` | Debug runner mock tests |
 | `test_debug_runner_extended.py` | Bundle section loading, runner cleanup, generate sequencing |
 | `test_cli.py` | CLI inspect/build command dispatch (excluded from default run) |
+| `test_cli_coverage.py` | CLI coverage tests |
+| `test_quantization.py` | FP16/FP8/INT8/INT4/NVFP4/W4A8 quantization framework tests |
+| `test_bark_tokenizer.py` | Bark tokenizer tests |
+| `test_magpie_tokenizer_script.py` | Magpie tokenizer script tests |
+| `test_owned_builder_mocked_paths.py` | Builder mocked path tests |
+| `test_owned_encoder_builders_coverage.py` | Encoder builder coverage tests |
+| `test_owned_qwen3_t5_helpers.py` | Qwen3/T5 helper tests |
+| `test_owned_schedulers.py` | Scheduler tests |
+
+#### Additional configuration & coverage (no GPU)
+
+| File | What it tests |
+|------|---------------|
+| `test_config_coverage.py` | ModelConfig coverage tests |
+| `test_checkpoint_mapper_coverage.py` | Checkpoint mapper coverage tests |
+
+#### Build-engine integration tests (needs TRT)
+
+| File | What it tests |
+|------|---------------|
+| `test_build_engine_decoders.py` | Decoder engine build integration tests |
+| `test_build_engine_std_decoders.py` | Standard decoder engine build tests |
+| `test_build_engine_enc_dec.py` | Encoder-decoder engine build tests |
+| `test_build_engine_integration.py` | Engine build integration tests |
 
 #### Standard decoder & vision (needs TRT)
 
@@ -232,27 +271,132 @@ and skip gracefully (exit 0).
 
 ### File inventory
 
+#### Bundle and format tests
+
 | File | What it tests | GPU? |
 |------|---------------|:--:|
 | `test_bundle_format.cpp` | Bundle magic, section parsing, round-trip | No |
 | `test_bundle_e2e.cpp` | Bundle build + load round-trip | TRT |
-| `test_bundle_helpers.cpp` | `find_bundle_sections` for all bundle types | TRT |
-| `test_c_abi_entry.cpp` | C ABI entry point | TRT |
-| `test_cli_args.cpp` | CLI argument parsing | No |
+| `test_bundle_view.cpp` | Bundle view API | No |
+| `test_trtf_io.cpp` | Bundle I/O operations | No |
+
+#### Tokenizer tests
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
+| `test_vocab_tokenizer.cpp` | Encode/decode, round-trip, case insensitivity | No |
+| `test_bpe_tokenizer.cpp` | BPE tokenizer encode/decode | No |
+| `test_bpe_golden.cpp` | BPE golden reference tests | No |
+| `test_bpe_benchmark.cpp` | BPE tokenizer performance | No |
+| `test_wordpiece_tokenizer.cpp` | WordPiece tokenizer encode/decode | No |
+| `test_wordpiece_golden.cpp` | WordPiece golden reference tests | No |
+| `test_unigram_tokenizer.cpp` | Unigram tokenizer encode/decode | No |
+| `test_unigram_golden.cpp` | Unigram golden reference tests | No |
+| `test_ipa_tokenizer.cpp` | IPA phoneme tokenizer | No |
+
+#### CUDA and device tests
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
 | `test_cuda_buffer.cpp` | RAII alloc, move semantics, data round-trip (with index on mismatch) | GPU |
 | `test_cuda_stream.cpp` | RAII stream, move semantics | GPU |
-| `test_data_dir.cpp` | Source/scripts dir resolution, env overrides (via `EnvVarGuard`) | No |
-| `test_decode_runtime.cpp` | Argmax, mask building | TRT |
 | `test_device_kv_cache.cpp` | Cache construction, mask progression, position clamping, reset | GPU |
-| `test_fast_path_config.cpp` | Config JSON parsing | TRT |
-| `test_hf_python_tokenizer.cpp` | Shell quoting, int parsing, HF output sanitization | No |
-| `test_image_preprocessor.cpp` | All 4 strategies, config parsing, prompt formatting (via `TempDirGuard`) | No |
-| `test_json_helpers.cpp` | JSON extraction helpers | No |
-| `test_pipeline_api.cpp` | C API pipeline creation | TRT |
-| `test_text_parsers.cpp` | String/file parsing helpers | No |
+| `test_device_resources.cpp` | Device resource management | GPU |
+| `test_device_tensor.cpp` | GPU-resident tensor operations | GPU |
+| `test_kv_cache_new.cpp` | Additional KV cache tests | GPU |
+
+#### TRT engine and runtime tests
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
 | `test_trt_engine_lifecycle.cpp` | `layer_tensor_name`, constants | TRT |
+| `test_trt_engine_lifecycle_fake_engine.cpp` | Engine lifecycle with fake engines | TRT |
 | `test_trt_logger.cpp` | Severity names, error storage, env-var controls | TRT |
-| `test_vocab_tokenizer.cpp` | Encode/decode, round-trip, case insensitivity | No |
+| `test_trt_module.cpp` | TrtModule construction, tensor binding, lifecycle | TRT |
+| `test_trt_runtime_lifetime.cpp` | TRT runtime lifetime management | TRT |
+| `test_decode_runtime.cpp` | Argmax, mask building | TRT |
+| `test_flow_match_scheduler.cpp` | Flow-matching Euler scheduler | No |
+
+#### Pipeline and plugin tests
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
+| `test_pipeline_api.cpp` | C API pipeline creation | TRT |
+| `test_pipeline_registry.cpp` | Plugin registry, strategy lookup | TRT |
+| `test_c_abi_entry.cpp` | C ABI entry point | TRT |
+| `test_c_abi_runtime_regression.cpp` | C ABI runtime regression tests | TRT |
+| `test_text_generation_pipeline.cpp` | Text generation pipeline | TRT |
+| `test_encoder_pipeline.cpp` | Encoder pipeline (BERT, embedding, reranking) | TRT |
+| `test_recurrent_pipeline.cpp` | Recurrent pipeline (Mamba, RWKV, hybrid) | TRT |
+| `test_recurrent_state.cpp` | Recurrent state management | TRT |
+| `test_recurrent_step_contracts.cpp` | Step contract types | No |
+| `test_vl_pipeline.cpp` | Vision-language pipeline | TRT |
+| `test_vl_decode_policy.cpp` | VL decode policy | No |
+| `test_vision_execution_plan.cpp` | Vision encoder execution plan | No |
+
+#### Audio domain tests
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
+| `test_audio_bundle_validation.cpp` | Bundle section validation for audio models | No |
+| `test_audio_pipeline_new.cpp` | Audio pipeline construction | TRT |
+| `test_audio_types.cpp` | Audio format types and WAV I/O | No |
+| `test_bark_generation_plan.cpp` | Bark multi-stage codebook generation plan | No |
+| `test_mel_spectrogram.cpp` | Mel spectrogram feature extraction | No |
+| `test_whisper_decode_policy.cpp` | Whisper decode policy | No |
+| `test_whisper_host_plan.cpp` | Whisper host plan | No |
+| `test_magpie_codec_plan.cpp` | Magpie TTS codec plan | No |
+| `test_magpie_decode_policy.cpp` | Magpie TTS decode policy | No |
+| `test_magpie_decoder_plan.cpp` | Magpie TTS decoder plan | No |
+| `test_magpie_text_completion_policy.cpp` | Magpie TTS text completion policy | No |
+| `test_omni_audio_plan.cpp` | Omni multimodal audio plan | No |
+| `test_wav_reader.cpp` | WAV file reading | No |
+
+#### Speech domain tests
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
+| `test_speech_decode_stop_policy.cpp` | Speech decode stop policy | No |
+| `test_speech_depth_plan.cpp` | Speech depth plan | No |
+| `test_speech_generation_helpers.cpp` | Speech generation helpers | No |
+| `test_speech_mimi_decode_plan.cpp` | Speech MIMI decode plan | No |
+| `test_speech_runtime_plan.cpp` | Speech runtime plan | No |
+| `test_speech_subprocess_seam.cpp` | Speech subprocess seam | No |
+| `test_speech_temporal_embed_plan.cpp` | Speech temporal embedding plan | No |
+
+#### Diffusion domain tests
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
+| `test_diffusion_denoising_step_seam.cpp` | Diffusion denoising step seam | No |
+| `test_diffusion_generation_plan.cpp` | Diffusion generation plan | No |
+| `test_diffusion_math.cpp` | Diffusion math helpers | No |
+| `test_diffusion_pipeline_new.cpp` | Diffusion pipeline construction | TRT |
+| `test_wan_generation_conditioning.cpp` | Wan-specific generation conditioning | No |
+
+#### Perception and segmentation tests
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
+| `test_perception_preprocess_seams.cpp` | Segmentation/SAM preprocessing seams | No |
+| `test_sam_prompt_seam.cpp` | SAM prompt encoding seam | No |
+| `test_neural_operator_config.cpp` | Neural operator config parsing | No |
+
+#### Image and multimodal tests
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
+| `test_image_preprocessor.cpp` | All 4 strategies, config parsing, prompt formatting (via `TempDirGuard`) | No |
+| `test_image_reader.cpp` | Image file reading | No |
+
+#### Utility and helper tests
+
+| File | What it tests | GPU? |
+|------|---------------|:--:|
+| `test_cli_args.cpp` | CLI argument parsing | No |
+| `test_data_dir.cpp` | Source/scripts dir resolution, env overrides (via `EnvVarGuard`) | No |
+| `test_text_parsers.cpp` | String/file parsing helpers | No |
+| `test_json_helpers.cpp` | JSON extraction helpers | No |
 
 ---
 
@@ -289,6 +433,17 @@ importing. Comparison logic tested with synthetic NumPy arrays.
 | `test_parity.py` | Text/token comparison for runner parity |
 | `test_perf_compare.py` | Stats, formatting, JSON output, serial GPU execution |
 | `test_perf_parity.py` | Performance parity validation |
+| `test_perfdb.py` | Performance database utilities |
+| `test_text_comparator.py` | Text comparator logic |
+| `test_coverage_map.py` | Coverage mapping utilities |
+| `test_generate_report.py` | Report generation |
+| `test_generate_perf_report.py` | Performance report generation |
+| `test_test_impact.py` | Test impact analysis |
+| `test_e2e_repro_commands.py` | E2E reproduction command generation |
+| `test_e2e_runner_cli_alignment.py` | E2E runner CLI alignment validation |
+| `test_e2e_runtime_path_guard.py` | E2E runtime path guard validation |
+| `test_runtime_strategy_matrix_checker.py` | Runtime strategy matrix consistency checks |
+| `test_prompted_segmentation_harness.py` | Prompted segmentation harness validation |
 
 ---
 
@@ -339,7 +494,7 @@ gold-standard correctness gate. All modalities use the same harness.
   --trtf-binary ./build/trtf --hf-python .venv/bin/python \
   --rebuild-engines
 
-# All 50 models with artifact output
+# All 84 models with artifact output
 .venv/bin/python -m pytest tests/test_e2e.py -v \
   --engine-dir /mnt/storage/trt-transformers/engines \
   --trtf-binary ./build/trtf --hf-python .venv/bin/python \
@@ -356,23 +511,24 @@ gold-standard correctness gate. All modalities use the same harness.
 
 | Strategy | Models | Runner |
 |----------|:--:|--------|
-| `text_generation_causal` | 26 | `text_generation.py` |
-| `vision_language_generation` | 5 | `vision_language.py` |
-| `diffusion_media_generation` | 3 | `diffusion.py` |
-| `text_to_audio` | 2 | `audio_speech.py` |
-| `speech_to_text` | 1 | `audio_speech.py` |
+| `text_generation_causal` | 38 | `text_generation.py` |
+| `encoder_only_nlp` | 18 | `encoder_only.py` |
+| `vision_language_generation` | 5 (1 skip) | `vision_language.py` |
+| `diffusion_media_generation` | 4 | `diffusion.py` |
+| `speech_to_text` | 4 | `audio_speech.py` |
+| `text_to_audio` | 3 | `audio_speech.py` |
+| `text_to_text` | 3 | `text_generation.py` |
+| `embedding` | 2 | `embedding.py` |
 | `speech_to_speech` | 1 | `audio_speech.py` |
 | `segmentation` | 1 | `segmentation.py` |
 | `prompted_segmentation` | 1 | `segmentation.py` |
-| `encoder_only_nlp` | 1 | `encoder_only.py` |
-| `embedding` | 1 (skip) | `embedding.py` |
-| `reranking` | 1 (skip) | `reranking.py` |
+| `reranking` | 1 | `reranking.py` |
 
 ### E2E harness architecture (DIP-first)
 
 ```
 tests/test_e2e.py                    # Single parametrized pytest entrypoint
-tests/e2e/models/*.json              # 68 per-model JSON manifests
+tests/e2e/models/*.json              # 84 per-model JSON manifests
 tests/e2e_harness/
   __init__.py                        # save_full_stderr() helper
   contracts.py                       # E2ECase, StageOutput, CompareResult, protocols
@@ -462,22 +618,25 @@ Every `CompareResult` returned by any comparator includes:
 - **Full tracebacks**: Exception blocks in the orchestrator capture
   `traceback.format_exc()` and include it in the `CompareResult.message`.
 
-### 50 model manifests by category
+### 84 model manifests by category
 
 | Category | Count | Models |
 |----------|:--:|---------|
-| Standard decoder | 24 | Qwen3, LLaMA, Mistral, Phi, GPT-2, OPT, Bloom, Nemotron, etc. |
-| MoE decoder | 3 | Mixtral, Phi-MoE, DeepSeek-V2 |
-| SSM | 2 | Mamba, RWKV |
-| Encoder-only | 1 | BERT |
-| Speech-to-text | 1 | Whisper |
-| Text-to-audio | 2 | Bark-small, Bark-large |
+| Standard decoder | 32 | Qwen3, LLaMA, Mistral, Phi, GPT-2, OPT, Bloom, Nemotron, OLMo, etc. |
+| Encoder-only | 18 | BERT, ALBERT, DeBERTa, DistilBERT, ELECTRA, ModernBERT, RoBERTa, XLNet, ConvBERT, FNet, etc. |
+| Vision-language | 4+1 skip | Qwen2.5-VL, Qwen3-VL, InternVL3, Phi4-multimodal (+DeepSeek-OCR skip) |
+| Diffusion (T2V/T2I) | 4 | Wan2.1-T2V, FLUX.1-schnell, FLUX-2-dev, Z-Image-Turbo, PixArt-Sigma |
+| Speech-to-text | 4 | Whisper-tiny, Whisper-tiny-fp16, Whisper-large-v3-turbo, Canary-1b-v2 |
+| MoE decoder | 3 | Mixtral, GPT-OSS, Qwen3-MoE |
+| Text-to-audio | 3 | Bark-small, Bark-large, Magpie-TTS |
+| Seq2seq / translation | 3 | T5-small, BART-base, Marian-en-ru (+NLLB skip) |
+| Hybrid (Mamba+Attention) | 2 | Nemotron-H, Qwen3.5 |
+| Embedding | 2 | Eagle-embed, Nemotron-embed |
+| SSM / RWKV | 2 | Mamba, RWKV |
 | Speech-to-speech | 1 | PersonaPlex |
 | Segmentation | 1 | SegFormer |
-| Vision-language | 3+2 skip | Qwen2.5-VL, Qwen3-VL, InternVL3 |
-| Diffusion (T2V/T2I) | 3 | Wan2.1-T2V, FLUX.1-schnell, Z-Image-Turbo |
-| Embedding/Reranking | 2 skip | Eagle-embed, Eagle-rerank |
-| Hybrid | 1 skip | Nemotron-H |
+| Prompted segmentation | 1 | SAM |
+| Reranking | 1 | Eagle-rerank |
 
 ---
 
@@ -542,9 +701,9 @@ ctest --test-dir build --output-on-failure
 ```
 
 **What's covered**:
-- Python: 50 test modules -- config, checkpoint_mapper, bundle_writer, family plugins, 27 per-family engine tests, manifest validation, debug runner, cache state machine
-- Tools: 11 modules -- diff framework, logits, layers, audio, segmentation, diffusion helpers, perf_compare
-- C++: 61 test executables -- bundle format, tokenizers, CUDA RAII, KV cache, image preprocessor, CLI args
+- Python: 79 test modules -- config, checkpoint_mapper, bundle_writer, family plugins, 26 per-family engine tests, build-engine integration, manifest validation, debug runner, cache state machine, quantization
+- Tools: 22 modules -- diff framework, logits, layers, VL, audio, segmentation, diffusion helpers, perf_compare, coverage map, report generation, E2E harness alignment
+- C++: 72 test executables -- bundle format, tokenizers (vocab, BPE, WordPiece, unigram, IPA), CUDA RAII, KV cache, TRT module, pipelines (text gen, recurrent, VL, encoder, audio, diffusion, perception), image preprocessor, CLI args
 
 ### Tier 1.5: C++ Cyclomatic Complexity Gate (no GPU, <1 min)
 
@@ -589,7 +748,7 @@ Current policy and status:
 
 ### Tier 4: Full E2E suite (~2-3 hours, needs GPU)
 
-All 68 models, force-rebuild every bundle. Gold-standard regression gate.
+All 84 models, force-rebuild every bundle. Gold-standard regression gate.
 
 ```bash
 .venv/bin/python -m pytest tests/test_e2e.py -v \

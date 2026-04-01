@@ -9,6 +9,11 @@ GPT-2 uses:
   - Tied word embeddings (wte == lm_head)
   - HF config uses n_embd, n_head, n_layer, n_inner
   - h.{i} prefix (not model.layers.{i})
+
+Trace: ARCH-FAM-001, UD-FAM-GPT2-01
+Intent: Validate the GPT-2 family plugin weight loading including Conv1D transpose, fused QKV splitting, learned positions, tied embeddings, and non-standard HF config aliases.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: Conv1D weights are transposed to [out, in], fused QKV is split correctly, position embeddings are loaded, and config aliases (n_embd, n_head) resolve properly.
 """
 import numpy as np
 

@@ -101,21 +101,24 @@ Self-registering pipeline plugins. Each plugin handles one or more `runtime_stra
 
 | File | Strategies |
 |------|-----------|
-| `decoder_plugin.cpp` | `decoder_kv_cache`, `decoder_moe` |
-| `ssm_plugin.cpp` | `ssm_recurrent` |
-| `rwkv_plugin.cpp` | `rwkv_recurrent` |
-| `hybrid_plugin.cpp` | `hybrid_mamba_attention` |
-| `encoder_plugin.cpp` | `encoder_only`, `embedding`, `reranking`, `neural_operator` |
-| `segmentation_plugin.cpp` | `segmentation`, `prompted_segmentation` |
-| `object_detection_plugin.cpp` | `object_detection` |
-| `vl_plugin.cpp` | `vision_language` |
-| `whisper_plugin.cpp` | `speech_to_text` |
 | `bark_plugin.cpp` | `text_to_audio_bark` |
-| `magpie_plugin.cpp` | `text_to_audio_magpie` |
-| `speech_plugin.cpp` | `speech_to_speech` |
-| `omni_plugin.cpp` | `omni_multimodal` |
+| `decoder_plugin.cpp` | `decoder_kv_cache`, `decoder_moe` |
+| `encoder_plugin.cpp` | `encoder_only`, `embedding`, `reranking`, `neural_operator` |
 | `flux_plugin.cpp` | `diffusion_flux` |
+| `hybrid_plugin.cpp` | `hybrid_mamba_attention` |
+| `magpie_plugin.cpp` | `text_to_audio_magpie` |
+| `marian_plugin.cpp` | `marian_translation` |
+| `object_detection_plugin.cpp` | `object_detection` |
+| `omni_plugin.cpp` | `omni_multimodal` |
+| `rwkv_plugin.cpp` | `rwkv_recurrent` |
+| `segmentation_plugin.cpp` | `segmentation`, `prompted_segmentation` |
+| `seq2seq_plugin.cpp` | `seq2seq_encoder_decoder` |
+| `speech_plugin.cpp` | `speech_to_speech` |
+| `ssm_plugin.cpp` | `ssm_recurrent` |
+| `t5_plugin.cpp` | `text_to_text` |
+| `vl_plugin.cpp` | `vision_language` |
 | `wan_plugin.cpp` | `diffusion_wan`, `diffusion_pixart` |
+| `whisper_plugin.cpp` | `speech_to_text` |
 | `zimage_plugin.cpp` | `diffusion_zimage` |
 | `force_link_plugins.cpp` | Linker anchors for static lib |
 
@@ -334,22 +337,29 @@ Recurrent model backends (Mamba, RWKV, Hybrid).
 
 ### Family Plugins (`trtf_build/trtf_build/families/`)
 
-50 auto-discovered family plugins. Each exports a module-level `plugin` attribute
+63 auto-discovered family plugins. Each exports a module-level `plugin` attribute
 implementing the `FamilyPlugin` protocol from `base.py`.
 
 | Plugin | Model families |
 |--------|---------------|
+| `albert` | ALBERT |
 | `bark` | Bark TTS |
+| `bart` | BART |
 | `bert` | BERT |
 | `bloom` | BLOOM |
 | `canary` | Canary ASR |
 | `codegen` | CodeGen |
+| `convbert` | ConvBERT |
+| `deberta` | DeBERTa v1 (autopilot-generated) |
 | `deepseek_ocr` | DeepSeek-OCR |
 | `deepseek_v2` | DeepSeek-V2 |
 | `distilbert` | DistilBERT |
+| `dpr` | DPR (Dense Passage Retrieval) |
 | `eagle_vlm` | Eagle VLM |
+| `electra` | ELECTRA (autopilot-generated) |
 | `falcon` | Falcon |
 | `flux` | FLUX.1 |
+| `fnet` | FNet |
 | `gemma` | Gemma |
 | `glm` | GLM |
 | `gpt2` | GPT-2 |
@@ -360,14 +370,18 @@ implementing the `FamilyPlugin` protocol from `base.py`.
 | `internlm` | InternLM |
 | `internvl` | InternVL |
 | `llama` | LLaMA |
+| `m2m_100` | M2M-100 |
 | `magpie_tts` | Magpie TTS |
 | `mamba` | Mamba SSM |
+| `marian` | Marian MT |
 | `mistral` | Mistral |
 | `mixtral` | Mixtral MoE |
+| `modernbert` | ModernBERT (autopilot-generated) |
 | `mpnet` | MPNet |
 | `nemotron` | Nemotron |
 | `nemotron_h` | Nemotron-H (Hybrid) |
 | `olmo` | OLMo |
+| `olmo2` | OLMo2 |
 | `opt` | OPT |
 | `personaplex` | PersonaPlex |
 | `phi` | Phi-3 |
@@ -385,14 +399,12 @@ implementing the `FamilyPlugin` protocol from `base.py`.
 | `segformer` | SegFormer |
 | `stablelm` | StableLM |
 | `starcoder2` | StarCoder2 |
+| `t5` | T5 encoder-decoder (autopilot-generated) |
 | `wan_t2v` | Wan2.1 Text-to-Video |
 | `whisper` | Whisper |
 | `xglm` | XGLM |
+| `xlnet` | XLNet |
 | `z_image` | Z-Image |
-| `electra` | ELECTRA (autopilot-generated) |
-| `modernbert` | ModernBERT (autopilot-generated) |
-| `deberta` | DeBERTa v1 (autopilot-generated) |
-| `t5` | T5 encoder-decoder (autopilot-generated) |
 
 ---
 
@@ -400,8 +412,8 @@ implementing the `FamilyPlugin` protocol from `base.py`.
 
 ### `tests/builder/` -- Python Builder Unit Tests
 
-70 test modules (`test_*.py`) plus 4 infrastructure files (`conftest.py`,
-`__init__.py`, `family_plugin_test_mixin.py`, `family_plugin_tester.py`).
+79 test modules (`test_*.py`) plus 3 infrastructure files (`conftest.py`,
+`__init__.py`, `family_plugin_tester.py`).
 Covers config parsing, checkpoint mapping, family plugins,
 graph ops, graph blocks, standard decoder, bundle writer, engine builder,
 debug runner, cache state machine, CLI, vision compute, and pipeline wrapper.
@@ -411,7 +423,7 @@ Key fixtures in `conftest.py`: `trt_runner` (GPU graph op testing),
 
 ### `tests/cpp/` -- C++ Runtime Unit Tests
 
-61 test executables. Plain `main()` programs with `check(condition, name)`
+72 test executables. Plain `main()` programs with `check(condition, name)`
 helpers. Registered in `CMakeLists.txt` with `add_executable` + `add_test`.
 
 Covers: bundle format, tokenizers (vocab, HF Python), text/JSON parsers,
@@ -423,11 +435,12 @@ Shared utilities in `test_helpers.h`.
 
 ### `tests/tools/` -- Tool Self-Tests
 
-18 test modules (`test_*.py`) plus 2 infrastructure files (`conftest.py`,
+22 test modules (`test_*.py`) plus 2 infrastructure files (`conftest.py`,
 `__init__.py`). Pure Python, no GPU needed. Covers diff framework, logit
 comparison, audio diff, segmentation diff, diffusion helpers, perf compare,
 parity testing, text comparator, E2E report generation, runtime strategy
-matrix checker, E2E repro commands, and runtime path guards.
+matrix checker, E2E repro commands, runtime path guards, test impact analysis,
+performance parity, and performance database.
 
 ### `tests/test_e2e.py` -- Unified E2E Entry Point
 
@@ -437,7 +450,7 @@ orchestrator.
 
 ### `tests/e2e/models/` -- Model Manifests
 
-68 JSON manifest files, one per model. Each specifies `hf_id`, `bundle`,
+84 JSON manifest files, one per model. Each specifies `hf_id`, `bundle`,
 `family`, `runtime_strategy`, `prompt`, `max_new_tokens`, and optional
 fields like `logit_atol`, `trust_remote_code`, `skip`.
 

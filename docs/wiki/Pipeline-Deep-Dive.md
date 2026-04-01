@@ -49,7 +49,7 @@ All construction logic is in `pipeline_factory.cpp`.
 
 ## 2. Pipeline Factory: `PipelineFactory::from_bundle()`
 
-**File:** `src/runtime/pipeline_factory.cpp` (~700 LOC)
+**File:** `src/runtime/registry/pipeline_factory.cpp` (~124 LOC)
 **Header:** `include/trtf/runtime/pipeline_factory.h`
 
 This single static method is the entire pipeline assembly path:
@@ -57,23 +57,29 @@ This single static method is the entire pipeline assembly path:
 ```text
 PipelineFactory::from_bundle(bundle_path, hf_python)
   |
-  +-> ReadBundleFile(bundle_path)             [src/bundle/bundle_format.cpp]
+  +-> ReadBundleFile(bundle_path)                 [src/bundle/bundle_format.cpp]
   |     Returns BundleFile{info, sections[]}
   |
-  +-> find_bundle_sections(bundle)            [src/cabi/bundle/bundle_helpers.cpp]
-  |     Returns BundleSections (non-owning pointers into section data)
+  +-> Extract config.json section text
   |
-  +-> parse_bundle_config(sections, info)     [local in pipeline_factory.cpp]
-  |     If config.json section exists:
-  |       parse_fast_path_config(text, max_cache_length)  [src/cabi/config/fast_path_config.cpp]
-  |     Otherwise: populate FastPathModelConfig from BundleInfo header fields
-  |     Returns FastPathModelConfig
+  +-> extract_json_string(config_text, "runtime_strategy")
+  |     Defaults to "decoder_kv_cache" if empty/absent
   |
-  +-> resolve_family(cfg.runtime_strategy)    [local anonymous namespace]
-  |     Returns StrategyFamily enum
+  +-> normalize_legacy_strategy(strategy, config_text)
+  |     Rewrites legacy ambiguous strings:
+  |       "text_to_audio" -> "text_to_audio_bark" or "text_to_audio_magpie"
+  |       "diffusion"     -> "diffusion_wan" / "diffusion_flux" / "diffusion_zimage" / "diffusion_pixart"
   |
-  +-> dispatch_pipeline(family, bundle, sections, cfg, strategy, path, hf_python)
-        Switch on StrategyFamily, calls per-family factory function
+  +-> PipelineRegistry::instance().lookup(strategy)
+  |     Returns IPipelinePlugin* from the registry singleton
+  |
+  +-> parse_base_config(config_text, max_cache_length)
+  |     Returns BaseConfig (~10 universal fields)
+  |
+  +-> plugin->create(PipelineContext{bundle, base_cfg, config_json, hf_python, bundle_path})
+        Each plugin parses its own strategy-specific config from raw JSON,
+        extracts bundle sections, loads engines, creates tokenizers/caches,
+        and returns the fully constructed pipeline.
         Returns unique_ptr<IPipeline>
 ```
 
@@ -87,145 +93,226 @@ std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::strin
 
 ---
 
-## 3. Strategy Families
+## 3. Plugin Registry: Strategy Dispatch
 
-**Defined in:** `src/runtime/pipeline_factory.cpp` (anonymous namespace)
+**Defined in:** `include/trtf/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp`
+
+The runtime uses a **registry-based plugin pattern** for strategy dispatch.
+There is no enum, no switch/case, and no centralized factory function per
+strategy family.
+
+### PipelineRegistry (singleton)
 
 ```cpp
-enum class StrategyFamily { kText, kEncoder, kVision, kAudio, kDiffusion, kUnknown };
+class PipelineRegistry {
+public:
+    static PipelineRegistry& instance();
+    void register_plugin(const std::string& strategy, IPipelinePlugin* plugin);
+    IPipelinePlugin* lookup(const std::string& strategy) const;
+    std::vector<std::string> registered_strategies() const;
+};
 ```
 
-The `resolve_family()` function maps `runtime_strategy` strings to families:
+### IPipelinePlugin (interface)
 
-| StrategyFamily | runtime_strategy values |
-|---------------|------------------------|
-| `kText` | `decoder_kv_cache`, `decoder_moe`, `ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention` |
-| `kEncoder` | `encoder_only`, `embedding`, `reranking`, `neural_operator` |
-| `kVision` | `vision_language`, `segmentation`, `prompted_segmentation`, `object_detection` |
-| `kAudio` | `speech_to_text`, `text_to_audio`, `speech_to_speech`, `omni_multimodal` |
-| `kDiffusion` | `diffusion` |
-| `kText` | `text_to_text` |
+**Defined in:** `include/trtf/runtime/pipeline_plugin.h`
+
+```cpp
+class IPipelinePlugin {
+public:
+    virtual ~IPipelinePlugin() = default;
+    virtual std::unique_ptr<IPipeline> create(const PipelineContext& ctx) = 0;
+};
+```
+
+Each plugin receives a `PipelineContext` containing the `BundleFile`, `BaseConfig`,
+raw JSON text, `hf_python` path, and `bundle_path`. The plugin is responsible for
+parsing its own strategy-specific config fields from the raw JSON, extracting
+needed sections from the bundle, loading TRT engines, creating tokenizers and
+caches, and returning a fully constructed pipeline.
+
+### Self-Registration
+
+Plugins register themselves at static-init time via `PluginRegistrar`:
+
+```cpp
+// In decoder_plugin.cpp (file scope, outside any namespace):
+static trtf::DecoderPlugin g_DecoderPlugin_instance;
+static trtf::PluginRegistrar g_DecoderPlugin_reg1("decoder_kv_cache", &g_DecoderPlugin_instance);
+static trtf::PluginRegistrar g_DecoderPlugin_reg2("decoder_moe", &g_DecoderPlugin_instance);
+```
+
+The `REGISTER_PIPELINE_PLUGIN` and `REGISTER_PIPELINE_PLUGIN_MULTI` macros in
+`pipeline_registry.h` provide convenience wrappers for this pattern.
+
+A `force_link_all_plugins()` function in `src/runtime/plugins/force_link_plugins.cpp`
+ensures the linker does not strip self-registering statics from the binary.
+
+### 25 Registered Strategies (20 plugin files, 14 pipeline implementations)
+
+| Strategy | Plugin file | Pipeline class |
+|----------|------------|----------------|
+| `decoder_kv_cache` | `decoder_plugin.cpp` | `TextGenerationPipeline` |
+| `decoder_moe` | `decoder_plugin.cpp` | `TextGenerationPipeline` |
+| `ssm_recurrent` | `ssm_plugin.cpp` | `RecurrentPipeline` |
+| `rwkv_recurrent` | `rwkv_plugin.cpp` | `RecurrentPipeline` |
+| `hybrid_mamba_attention` | `hybrid_plugin.cpp` | `RecurrentPipeline` |
+| `encoder_only` | `encoder_plugin.cpp` | `EncoderPipeline` |
+| `embedding` | `encoder_plugin.cpp` | `EncoderPipeline` |
+| `reranking` | `encoder_plugin.cpp` | `EncoderPipeline` |
+| `neural_operator` | `encoder_plugin.cpp` | `EncoderPipeline` |
+| `vision_language` | `vl_plugin.cpp` | `VLPipeline` |
+| `segmentation` | `segmentation_plugin.cpp` | `SegmentPipeline` |
+| `prompted_segmentation` | `segmentation_plugin.cpp` | `SamPipeline` |
+| `object_detection` | `object_detection_plugin.cpp` | `EncoderPipeline` |
+| `speech_to_text` | `whisper_plugin.cpp` | `WhisperPipeline` |
+| `text_to_audio_bark` | `bark_plugin.cpp` | `BarkPipeline` |
+| `text_to_audio_magpie` | `magpie_plugin.cpp` | `MagpiePipeline` |
+| `speech_to_speech` | `speech_plugin.cpp` | `SpeechPipeline` |
+| `omni_multimodal` | `omni_plugin.cpp` | `OmniPipeline` |
+| `text_to_text` | `t5_plugin.cpp` | `T5Pipeline` |
+| `marian_translation` | `marian_plugin.cpp` | `MarianPipeline` |
+| `seq2seq_encoder_decoder` | `seq2seq_plugin.cpp` | `Seq2SeqPipeline` |
+| `diffusion_flux` | `flux_plugin.cpp` | `FluxPipeline` |
+| `diffusion_wan` | `wan_plugin.cpp` | `WanPipeline` |
+| `diffusion_pixart` | `wan_plugin.cpp` | `WanPipeline` |
+| `diffusion_zimage` | `zimage_plugin.cpp` | `ZImagePipeline` |
+
+All plugin files are in `src/runtime/plugins/`. Pipeline implementations are
+in `src/runtime/pipelines/`, except for `T5Pipeline`, `MarianPipeline`, and
+`Seq2SeqPipeline` which are defined inline in their respective plugin files.
 
 If `runtime_strategy` is empty (old bundles), it defaults to `"decoder_kv_cache"`.
-If the strategy string is not in the map, `resolve_family` returns `kUnknown`
-and `dispatch_pipeline` throws `std::runtime_error`.
+If no plugin is registered for the strategy string, `PipelineFactory::from_bundle()`
+throws `std::runtime_error` listing all available strategies.
 
 ---
 
-## 4. Per-Family Pipeline Construction
+## 4. Per-Plugin Pipeline Construction
 
-### 4.1 Text Family (`create_text_pipeline`)
+Each plugin in `src/runtime/plugins/` is a self-contained file that implements
+`IPipelinePlugin::create()`. The plugin parses its own strategy-specific config
+from the raw JSON, extracts the bundle sections it needs via
+`find_section(ctx.bundle, "section_name")`, loads TRT engines, creates
+tokenizers and caches, and returns a fully constructed pipeline.
 
-All text strategies share a common pattern:
-1. `load_trt_module(sections)` -- deserialize the engine plan into a `TrtModule`.
-2. `create_tokenizer_from_bundle(sections, hf_python)` -- extract tokenizer files to temp dir, create `HfPythonTokenizer`.
+Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
+- `plugin_helpers.h/cpp` -- `load_trt_module_from_plan()`, `create_tokenizer_from_bundle()`, `compute_kv_dim()`, `cache_dtype_from_precision()`, `find_section()`
+- `diffusion_helpers.h/cpp` -- `load_diffusion_parts()`, `DiffusionConfig` parsing
+- `audio_helpers.h/cpp` -- Audio-specific bundle loading helpers
 
-Then dispatch by strategy:
+### 4.1 Decoder Plugins
 
-**`decoder_kv_cache` / `decoder_moe`** -> `create_decoder_pipeline()`:
-- `compute_kv_dim(cfg)` -> KV dimension from config.
+**`decoder_plugin.cpp`** -- handles `decoder_kv_cache` and `decoder_moe`:
+- `load_trt_module_from_plan()` -- deserialize the engine plan into a `TrtModule`.
+- `create_tokenizer_from_bundle()` -- extract tokenizer files, create `HfPythonTokenizer`.
 - `KvCache(num_layers, max_cache_length, kv_dim, stream)`.
 - Returns `TextGenerationPipeline(decoder, cache, config, stream, tokenizer, model_id)`.
 
-**`ssm_recurrent`** -> `create_recurrent_pipeline()`:
+**`ssm_plugin.cpp`** -- handles `ssm_recurrent`:
 - `RecurrentState` with specs: `conv_state` [d_inner * conv_kernel], `ssm_state` [state_size * d_inner].
-- `RecurrentStateManager(state)`.
+- `RecurrentState(state)`.
 - Returns `RecurrentPipeline(decoder, state_mgr, config, stream, "MambaPipeline", tokenizer, model_id)`.
 
-**`rwkv_recurrent`** -> `create_recurrent_pipeline()`:
+**`rwkv_plugin.cpp`** -- handles `rwkv_recurrent`:
 - `RecurrentState` with 5 specs per layer: `attn_state`, `ff_state`, `num_state`, `den_state`, `max_state` (each [hidden_size]).
 - Returns `RecurrentPipeline(..., "RwkvPipeline", ...)`.
 
-**`hybrid_mamba_attention`** -> `create_hybrid_pipeline()`:
+**`hybrid_plugin.cpp`** -- handles `hybrid_mamba_attention`:
 - `KvCache` for attention layers (num_attention_layers).
 - `RecurrentState` for Mamba layers (num_mamba_layers) with `conv_state` and `ssm_state`.
-- `HybridStateManager(kv, ssm)` -- implements `IStateManager` by delegating to both.
+- `HybridState(kv, ssm)` -- implements `IInferenceState` by delegating to both.
 - Returns `RecurrentPipeline(..., "HybridPipeline", ...)`.
 
 **Key files:**
 - `src/runtime/pipelines/text_generation_pipeline.h` -- `TextGenerationPipeline`
-- `src/runtime/pipelines/recurrent_pipeline.h` -- `RecurrentPipeline`, `IStateManager`, `RecurrentStateManager`, `HybridStateManager`
+- `src/runtime/pipelines/recurrent_pipeline.h` -- `RecurrentPipeline`
+- `include/trtf/runtime/inference_state.h` -- `IInferenceState` interface
+- `include/trtf/runtime/hybrid_state.h` -- `HybridState` (KvCache + RecurrentState)
 - `include/trtf/runtime/kv_cache.h` -- `KvCache`
 - `include/trtf/runtime/recurrent_state.h` -- `RecurrentState`
 
-### 4.2 Vision Family (`create_vision_pipeline`)
+### 4.2 Vision and Perception Plugins
 
-Segmentation and prompted segmentation are routed to `create_encoder_pipeline()`.
-For `vision_language`:
-
-1. Load text decoder TrtModule from `plan_data`.
-2. `try_load_trt_module_from_plan(vision_plan_data)` -- optional vision encoder (soft failure).
+**`vl_plugin.cpp`** -- handles `vision_language`:
+1. Load text decoder TrtModule from `engine_plan`.
+2. Load optional vision encoder TrtModule from `vision_engine_plan` (soft failure).
 3. `KvCache` for text decoder.
-4. `build_vl_preprocess_config(sections)` -- parse preprocessor_config.json + config.json.
+4. Parse VL preprocessing config from bundle.
 5. Returns `VLPipeline(text_decoder, vision_encoder, cache, vlc, vl_preprocess, stream, tokenizer, model_id)`.
+
+**`segmentation_plugin.cpp`** -- handles `segmentation` and `prompted_segmentation`:
+- `segmentation` -> `SegmentPipeline(module, model_id)`.
+- `prompted_segmentation` -> `SamPipeline(image_encoder, mask_decoder, model_id)`.
+
+**`object_detection_plugin.cpp`** -- handles `object_detection`:
+- Returns `EncoderPipeline` configured for detection mode.
 
 **Key files:**
 - `src/runtime/pipelines/vl_pipeline.h` -- `VLPipeline`, `VLConfig`
-- `src/runtime/domains/multimodal/image_preprocessor.h` -- `VLPreprocessConfig`, `parse_vl_preprocess_config()`
-- `src/runtime/domains/multimodal/vision_engine.h` -- vision engine helpers
+- `src/runtime/pipelines/segment_pipeline.h` -- `SegmentPipeline`
+- `src/runtime/pipelines/sam_pipeline.h` -- `SamPipeline`
+- `src/runtime/domains/multimodal/image_preprocessor.h` -- `VLPreprocessConfig`, preprocessing strategies
 
-### 4.3 Diffusion Family (`create_diffusion_pipeline`)
+### 4.3 Diffusion Plugins
 
-1. `load_diffusion_parts(sections, cfg, hf_python)`:
-   - Creates a shared `CudaStream` for all engines.
-   - Loads `denoiser_plan_data` and `vae_decoder_plan_data` as TrtModules.
-   - Loads `text_encoder_plans[0..N]` as TrtModules. Falls back to `plan_data` if no dedicated text encoder sections exist.
-   - Parses `DiffusionConfig` from `FastPathModelConfig`.
-   - Parses `PreprocessorWeights` from `preprocessor_weights_data` section.
-   - Creates tokenizer.
+**`flux_plugin.cpp`** -- handles `diffusion_flux`:
+- Loads denoiser, VAE, and text encoder TrtModules.
+- Also extracts a CLIP tokenizer from bundle (dual tokenizer).
+- Returns `FluxPipeline(text_encoders[], denoiser, vae, config, weights, tokenizer, clip_tokenizer, model_id)`.
 
-2. Dispatch on `cfg.diffusion_backend_type`:
-   - `"flux_2d"` or contains `"flux"` -> `create_flux_pipeline()`:
-     - Also extracts a CLIP tokenizer from bundle (dual tokenizer).
-     - Returns `FluxPipeline(text_encoders[], denoiser, vae, config, weights, tokenizer, clip_tokenizer, model_id)`.
-   - `"z_image_2d"` or contains `"z_image"` -> `create_zimage_pipeline()`:
-     - Parses `ZImagePreprocessorWeights` (timestep embedder, caption embedder, patch embedder).
-     - Returns `ZImagePipeline(text_encoder, denoiser, vae, config, weights, z_weights, tokenizer, model_id, hf_python, bundle_path)`.
-   - Default (including `"wan_3d"`) -> `create_wan_t2v_pipeline()`:
-     - Returns `WanPipeline(text_encoder, denoiser, vae, config, weights, tokenizer, model_id)`.
+**`wan_plugin.cpp`** -- handles `diffusion_wan` and `diffusion_pixart`:
+- Returns `WanPipeline(text_encoder, denoiser, vae, config, weights, tokenizer, model_id)`.
+
+**`zimage_plugin.cpp`** -- handles `diffusion_zimage`:
+- Parses `ZImagePreprocessorWeights`.
+- Returns `ZImagePipeline(text_encoder, denoiser, vae, config, weights, z_weights, tokenizer, model_id, hf_python, bundle_path)`.
 
 **Key files:**
-- `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` -- `FluxPipeline`, `WanPipeline`, `ZImagePipeline`, `ZImagePreprocessorWeights`
+- `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h` -- `FluxPipeline`, `WanPipeline`, `ZImagePipeline`
 - `src/runtime/pipelines/wan_pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp` -- implementations
 - `src/runtime/domains/diffusion/diffusion_types.h` -- `DiffusionConfig`, `PreprocessorWeights`
+- `src/runtime/plugins/shared/diffusion_helpers.h` -- shared diffusion loading
 
-### 4.4 Audio Family (`create_audio_pipeline`)
+### 4.4 Audio Plugins
 
-Dispatches by strategy string:
+**`whisper_plugin.cpp`** -- handles `speech_to_text`:
+- Creates `WhisperPipeline` from bundle sections.
 
-- `"speech_to_text"` -> `make_whisper_pipeline_from_bundle()` -> `WhisperPipeline`.
-- `"text_to_audio"`:
-  - If `cfg.is_magpie_tts` -> `make_magpie_pipeline_from_bundle()` -> `MagpiePipeline`.
-  - Otherwise -> `make_bark_pipeline_from_bundle()` -> `BarkPipeline`.
-- `"speech_to_speech"` -> `make_speech_pipeline_from_bundle()` -> `SpeechPipeline`.
-- `"omni_multimodal"` -> `create_omni_pipeline()` -> `OmniPipeline`.
+**`bark_plugin.cpp`** -- handles `text_to_audio_bark`:
+- Creates `BarkPipeline` with multi-engine (semantic, coarse, fine, codec).
 
-The `create_omni_pipeline()` function is defined inline in `pipeline_factory.cpp`:
-1. Load thinker TrtModule from `plan_data` + KvCache.
-2. Load optional talker TrtModule from `talker_engine_plan_data` + its own KvCache.
-3. Load optional code2wav TrtModule from `code2wav_engine_plan_data`.
-4. Build `OmniConfig` from `FastPathModelConfig` fields.
-5. Returns `OmniPipeline(thinker, thinker_cache, talker, talker_cache, code2wav, config, stream, tokenizer, model_id)`.
+**`magpie_plugin.cpp`** -- handles `text_to_audio_magpie`:
+- Creates `MagpiePipeline` from bundle sections.
 
-The other audio factory functions live in `src/runtime/pipelines/audio_backend_factory.cpp`.
+**`speech_plugin.cpp`** -- handles `speech_to_speech`:
+- Creates `SpeechPipeline` from bundle sections.
 
-**Key files:**
-- `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, etc. -- all audio pipeline classes
-- `src/runtime/pipelines/audio_backend_factory.h` -- factory function declarations
-- `src/runtime/pipelines/audio_backend_factory.cpp` -- factory function implementations
-- `src/runtime/domains/audio/` -- backend implementations (WhisperBackend, BarkBackend, etc.)
-
-### 4.5 Encoder Family (`create_encoder_pipeline`)
-
-- `"segmentation"` -> `SegmentPipeline(module, model_id)`.
-- `"prompted_segmentation"`:
-  - Try loading mask decoder from `vision_plan_data`.
-  - If successful: `SamPipeline(image_encoder, mask_decoder, model_id)`.
-  - If not: fall back to `SegmentPipeline`.
-- `"encoder_only"`, `"embedding"`, `"reranking"` -> `EncoderPipeline(module, strategy, tokenizer, model_id)`.
+**`omni_plugin.cpp`** -- handles `omni_multimodal`:
+- Loads thinker TrtModule + KvCache, optional talker TrtModule + KvCache, optional code2wav TrtModule.
+- Returns `OmniPipeline(thinker, thinker_cache, talker, talker_cache, code2wav, config, stream, tokenizer, model_id)`.
 
 **Key files:**
-- `src/runtime/pipelines/encoder_pipeline.h` -- `EncoderPipeline`, `SegmentPipeline`, `SamPipeline`
+- `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, `magpie_pipeline.h`, `speech_pipeline.h`, `omni_pipeline.h`
+- `src/runtime/plugins/shared/audio_helpers.h` -- shared audio loading helpers
+- `src/runtime/domains/audio/` -- audio config types and seam headers
+
+### 4.5 Encoder and Seq2Seq Plugins
+
+**`encoder_plugin.cpp`** -- handles `encoder_only`, `embedding`, `reranking`, `neural_operator`:
+- Returns `EncoderPipeline(module, strategy, tokenizer, model_id)`.
+
+**`t5_plugin.cpp`** -- handles `text_to_text`:
+- Defines `T5Pipeline` inline (encoder-decoder seq2seq).
+
+**`marian_plugin.cpp`** -- handles `marian_translation`:
+- Defines `MarianPipeline` inline (encoder-decoder machine translation).
+
+**`seq2seq_plugin.cpp`** -- handles `seq2seq_encoder_decoder`:
+- Defines `Seq2SeqPipeline` inline (generic encoder-decoder).
+
+**Key files:**
+- `src/runtime/pipelines/encoder_pipeline.h` -- `EncoderPipeline`
 - `src/runtime/pipelines/encoder_pipeline.cpp` -- implementations
 
 ---
@@ -362,31 +449,35 @@ Zeros all state and present buffers.
 
 ---
 
-## 8. IStateManager: Unifying KvCache and RecurrentState
+## 8. IInferenceState: Unifying KvCache and RecurrentState
 
-**Defined in:** `src/runtime/pipelines/recurrent_pipeline.h`
+**Defined in:** `include/trtf/runtime/inference_state.h`
 
 ```cpp
-struct IStateManager {
+class IInferenceState {
+public:
+    virtual ~IInferenceState() = default;
     virtual void reset() = 0;
     virtual void bind_to(TrtModule& module) = 0;
+    virtual void prepare_step(TensorMap& inputs) = 0;
     virtual void advance() = 0;
-    virtual void build_mask(vector<float>& mask) const = 0;
     virtual int32_t position() const = 0;
+    virtual bool ok() const = 0;
     virtual bool has_mask() const = 0;
 };
 ```
 
 Three concrete implementations:
 
-| Class | Used by | State | Mask? |
-|-------|---------|-------|-------|
-| `RecurrentStateManager` | Mamba, RWKV | `RecurrentState` | No (no-op `build_mask`) |
-| `HybridStateManager` | Nemotron-H | `KvCache` + `RecurrentState` | Yes (delegates to `KvCache::build_attention_mask`) |
-| (implicit) | Standard decoders | `KvCache` directly | Yes (called directly in `TextGenerationPipeline`) |
+| Class | Header | Used by | Mask? |
+|-------|--------|---------|-------|
+| `KvCache` | `include/trtf/runtime/kv_cache.h` | Standard decoders, VL | Yes |
+| `RecurrentState` | `include/trtf/runtime/recurrent_state.h` | Mamba, RWKV | No |
+| `HybridState` | `include/trtf/runtime/hybrid_state.h` | Nemotron-H | Yes (delegates to KvCache) |
 
-Note: `TextGenerationPipeline` does NOT use `IStateManager` -- it owns a
-`KvCache` directly. Only `RecurrentPipeline` uses the `IStateManager` interface.
+All three implement `IInferenceState`. Pipelines program against the
+interface -- `TextGenerationPipeline` and `RecurrentPipeline` both accept
+`unique_ptr<IInferenceState>`.
 
 ---
 
@@ -419,81 +510,76 @@ All pipelines also implement `model_id()` and `pipeline_type()` (pure virtual).
 
 ---
 
-## 10. BundleSections: Non-Owning Section Pointers
+## 10. Bundle Sections: Accessed via `find_section()`
 
-**Header:** `src/cabi/bundle/bundle_helpers.h`
+In the plugin-based architecture, each plugin accesses bundle sections directly
+via the `find_section(bundle, "section_name")` helper from
+`src/runtime/plugins/shared/plugin_helpers.h`. This returns a `const BundleSection*`
+(non-owning pointer into the `BundleFile::sections` vector).
 
-`BundleSections` is a struct of `const std::vector<char>*` pointers into the
-`BundleFile::sections` vector. It is populated by `find_bundle_sections()` which
-scans section names and assigns pointers:
+Common section names used by plugins:
 
-| Section name pattern | Pointer field |
-|---------------------|---------------|
-| `engine_plan` | `plan_data` |
-| `vision_engine_plan` | `vision_plan_data` |
-| `config.json` | `config_json_data` |
-| `preprocessor_config.json` | `preprocessor_config_data` |
-| `tokenizer.json` | `tokenizer_json_data` |
-| `tokenizer_config.json` | `tokenizer_config_data` |
-| `denoiser_plan` | `denoiser_plan_data` |
-| `vae_decoder_plan` | `vae_decoder_plan_data` |
-| `text_encoder_N_plan` | `text_encoder_plans[N]` |
-| `coarse_engine_plan` | `coarse_engine_plan_data` |
-| `fine_engine_plan` | `fine_engine_plan_data` |
-| `codec_engine_plan` | `codec_engine_plan_data` |
-| `talker_engine_plan` | `talker_engine_plan_data` |
-| `code2wav_engine_plan` | `code2wav_engine_plan_data` |
-| `mel_filterbank` | `mel_filterbank_data` |
-| ... (30+ section types) | ... |
+| Section name pattern | Used by |
+|---------------------|---------|
+| `engine_plan` | Most plugins (main TRT engine) |
+| `vision_engine_plan` | `vl_plugin.cpp` (vision encoder) |
+| `config.json` | Parsed by `pipeline_factory.cpp` for `BaseConfig` |
+| `preprocessor_config.json` | `vl_plugin.cpp` (image preprocessing) |
+| `tokenizer.json`, `tokenizer_config.json` | All plugins with tokenizers |
+| `denoiser_plan` | Diffusion plugins |
+| `vae_decoder_plan` | Diffusion plugins |
+| `text_encoder_N_plan` | Diffusion plugins |
+| `coarse_engine_plan`, `fine_engine_plan`, `codec_engine_plan` | `bark_plugin.cpp` |
+| `talker_engine_plan`, `code2wav_engine_plan` | `omni_plugin.cpp` |
+| `mel_filterbank` | `whisper_plugin.cpp` |
 
-The `BundleFile` must outlive any use of `BundleSections`.
+The `BundleFile` must outlive any use of section pointers.
 
 ---
 
-## 11. FastPathModelConfig: The Monolithic Config Struct
+## 11. BaseConfig: Universal Bundle Metadata
 
-**Header:** `src/cabi/config/fast_path_config.h` (~181 fields)
+**Header:** `include/trtf/runtime/pipeline_plugin.h`
+**Implementation:** `src/runtime/registry/pipeline_plugin.cpp`
 
-`FastPathModelConfig` holds ALL configuration fields for ALL modalities in a single
-flat struct. Each runtime strategy uses a subset of the fields:
+`BaseConfig` holds the ~10 universal fields that every pipeline needs:
 
-| Strategy | Fields used |
-|----------|------------|
-| `decoder_kv_cache` | `vocab_size`, `hidden_size`, `num_layers`, `num_heads`, `num_kv_heads`, `head_dim`, `max_cache_length`, `id_bos`, `id_eos`, `runtime_strategy` |
-| `ssm_recurrent` | Above + `d_inner`, `state_size`, `conv_kernel` |
-| `rwkv_recurrent` | Above + `hidden_size` (for state dimensions) |
-| `hybrid_mamba_attention` | Above + `num_mamba_layers`, `num_attention_layers`, `mamba_d_state`, `mamba_d_conv`, `mamba_nheads`, `mamba_head_dim`, `conv_dim` |
-| `vision_language` | Text decoder fields + `has_vision_engine`, `embed_input`, `image_token_id`, `vision_output_dim`, `fixed_image_size`, VL prompt template fields |
-| `diffusion` | `scheduler`, `num_inference_steps`, `guidance_scale`, `flow_shift`, `video_height`, `video_width`, `video_num_frames`, `z_dim`, `dit_dim`, `dit_num_heads`, `freq_dim`, `text_seq_len`, `diffusion_backend_type`, RoPE fields, VAE fields |
-| `text_to_audio` | Audio/Bark fields (~30 fields), MagpieTTS fields |
-| `speech_to_text` | `num_mel_bins`, `max_source_positions`, `mel_*` fields, `eot_token_id` |
-| `omni_multimodal` | `omni_*` fields (sample_rate, experts, talker, codebooks) |
+```cpp
+struct BaseConfig {
+    int32_t vocab_size{0};
+    int32_t hidden_size{0};
+    int32_t num_layers{1};
+    int32_t num_heads{1};
+    int32_t num_kv_heads{1};
+    int32_t head_dim{0};
+    int32_t attention_size{0};
+    int32_t max_cache_length{32};
+    int32_t id_bos{-1};
+    int32_t id_eos{-1};
+    std::string runtime_strategy{"decoder_kv_cache"};
+    std::string precision{"fp32"};
+    bool tokenizer_add_special_tokens{false};
+    bool tokenizer_add_special_tokens_present{false};
+};
+```
 
-Parsed by `parse_fast_path_config()` in `src/cabi/config/fast_path_config.cpp`
-from the `config.json` section text.
+Parsed by `parse_base_config()` from the `config.json` section text. Each plugin
+then parses its own strategy-specific fields directly from `ctx.config_json`
+(the raw JSON text). This avoids the need for a monolithic config struct --
+each plugin reads only the fields it requires.
 
 ---
 
 ## 12. Known Limitations
 
-1. **FastPathModelConfig is monolithic.** All ~181 fields live in one struct,
-   even though each strategy uses only 10-30 of them. This works today because
-   the parser simply ignores unknown fields, but it grows linearly with every
-   new modality.
-
-2. **Pipeline factory is centralized.** All strategy construction logic lives
-   in one 700-line file (`pipeline_factory.cpp`). Adding a new strategy requires
-   editing this file. There is no plugin registration mechanism on the C++ side
-   (unlike the Python build side where family plugins are auto-discovered).
-
-3. **No pipeline reuse.** Each `trtf_create_pipeline_ex()` call deserializes
+1. **No pipeline reuse.** Each `trtf_create_pipeline_ex()` call deserializes
    engines from scratch. There is no caching of deserialized engines across
    pipeline instances.
 
-4. **Single-sequence inference only.** KvCache and RecurrentState manage state
+2. **Single-sequence inference only.** KvCache and RecurrentState manage state
    for one sequence at a time. There is no batching support.
 
-5. **Synchronous execution.** All pipeline `generate()` methods are fully
+3. **Synchronous execution.** All pipeline `generate()` methods are fully
    synchronous and block until completion. There is no async/streaming API.
 
 ---
@@ -503,24 +589,28 @@ from the `config.json` section text.
 | Component | File |
 |-----------|------|
 | C ABI entry point | `src/cabi/api/trtf_c.cpp` |
-| Pipeline factory | `src/runtime/pipeline_factory.cpp` |
+| Pipeline factory | `src/runtime/registry/pipeline_factory.cpp` |
 | Pipeline factory header | `include/trtf/runtime/pipeline_factory.h` |
+| Pipeline registry | `include/trtf/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp` |
+| Plugin interface + BaseConfig | `include/trtf/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
+| Plugin shared helpers | `src/runtime/plugins/shared/plugin_helpers.h`, `.cpp` |
+| Force-link anchors | `src/runtime/plugins/force_link_plugins.cpp` |
 | IPipeline interface | `include/trtf/pipeline.h` |
 | TextGenerationPipeline | `src/runtime/pipelines/text_generation_pipeline.h`, `.cpp` |
 | RecurrentPipeline | `src/runtime/pipelines/recurrent_pipeline.h`, `.cpp` |
 | VLPipeline | `src/runtime/pipelines/vl_pipeline.h`, `.cpp` |
-| Diffusion pipelines | `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h`, `wan_pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp` |
-| Audio pipelines | `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, etc., `.cpp` |
-| Audio factory | `src/runtime/pipelines/audio_backend_factory.h`, `.cpp` |
+| Diffusion pipelines | `src/runtime/pipelines/flux_pipeline.h`, `wan_pipeline.h`, `z_image_pipeline.h`, `.cpp` |
+| Audio pipelines | `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, `magpie_pipeline.h`, `speech_pipeline.h`, `omni_pipeline.h`, `.cpp` |
+| Segment/SAM pipelines | `src/runtime/pipelines/segment_pipeline.h`, `sam_pipeline.h`, `.cpp` |
 | Encoder pipelines | `src/runtime/pipelines/encoder_pipeline.h`, `.cpp` |
 | TrtModule | `include/trtf/runtime/trt_module.h`, `src/runtime/core/trt_module.cpp` |
 | KvCache | `include/trtf/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp` |
 | RecurrentState | `include/trtf/runtime/recurrent_state.h`, `src/runtime/core/recurrent_state.cpp` |
 | Bundle format | `src/bundle/bundle_format.h`, `.cpp` |
-| Bundle helpers | `src/cabi/bundle/bundle_helpers.h`, `.cpp` |
-| Config parser | `src/cabi/config/fast_path_config.h`, `.cpp` |
 | Image preprocessor | `src/runtime/domains/multimodal/image_preprocessor.h`, `.cpp` |
 | Diffusion types | `src/runtime/domains/diffusion/diffusion_types.h` |
+| Diffusion helpers | `src/runtime/plugins/shared/diffusion_helpers.h`, `.cpp` |
+| Audio helpers | `src/runtime/plugins/shared/audio_helpers.h`, `.cpp` |
 | Scheduler | `src/runtime/core/flow_match_euler_scheduler.cpp` |
 | Tokenizer interface | `include/trtf/runtime/tokenizer_interface.h` |
 | HF Python tokenizer | `src/tokenizer/hf_python_tokenizer.cpp` |

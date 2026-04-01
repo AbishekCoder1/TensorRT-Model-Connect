@@ -11,19 +11,10 @@ Tests cover:
 
 All tests are pure-Python; no GPU, TRT, or perf.db on disk required.
 
-Intent:
-    Verify that the performance report generator correctly reads PerfDB data,
-    computes regression status, and produces valid self-contained HTML that
-    can be opened in a browser without external dependencies.
-
-Preconditions:
-    scripts/ is on sys.path (handled by _import_report() helper below).
-    No GPU, TRT, or network access required.
-
-Postconditions:
-    All assertions pass; no files written to disk.
-
-Trace IDs: UT-PERF-REPORT-001 through UT-PERF-REPORT-020
+Trace: ARCH-REPORT-001, UD-REPORT-PERF
+Intent: Validate performance report generator regression detection, formatting, and HTML rendering
+Preconditions: scripts/ is on sys.path; in-memory SQLite database with synthetic perf data is available
+Postconditions: Regression status is correctly computed and rendered HTML contains expected structure and content
 """
 
 from __future__ import annotations

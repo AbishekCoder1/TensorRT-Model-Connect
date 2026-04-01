@@ -1,4 +1,10 @@
-"""Coverage-focused tests for families discovery helpers and protocol defaults."""
+"""Coverage-focused tests for families discovery helpers and protocol defaults.
+
+Trace: ARCH-FAM-001, UD-FAM-DISCOVERY
+Intent: Validate family plugin discovery helpers, diffusion lookup, and protocol default behavior
+Preconditions: Family registry is populated with discoverable plugins
+Postconditions: Lookup helpers return correct plugins and protocol defaults are correctly applied
+"""
 
 from __future__ import annotations
 

@@ -6,6 +6,11 @@ Tests for composable building blocks in graph_blocks.py:
   - add_gelu_fc_mlp (fc1/activation/fc2)
 
 All tests require TRT + CUDA GPU.
+
+Trace: ARCH-GRP-001, UD-GRP-BLOCKS
+Intent: Validate composable TRT graph blocks (norm, SwiGLU MLP, GELU MLP) against PyTorch references
+Preconditions: TRT and CUDA GPU are available; synthetic weight arrays match expected dimensions
+Postconditions: TRT graph block outputs match PyTorch reference within numerical tolerance
 """
 
 from __future__ import annotations

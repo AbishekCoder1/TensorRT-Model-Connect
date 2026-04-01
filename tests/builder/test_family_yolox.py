@@ -2,6 +2,11 @@
 and CNN builder integration.
 
 No GPU or TRT needed for weight loading tests.
+
+Trace: ARCH-FAM-001, UD-FAM-YOLOX
+Intent: Validate YOLOX object detection family plugin weight key mapping and CNN builder config
+Preconditions: Synthetic safetensors with YOLOX conv/bn weight naming are available (currently skipped)
+Postconditions: Plugin produces correct conv/bn weight keys for backbone, neck, and detection head
 """
 
 from __future__ import annotations

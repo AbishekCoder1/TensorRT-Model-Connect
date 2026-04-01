@@ -17,6 +17,11 @@ Setup:
     XGLM's HF weight naming, and expected_weight_keys() for XGLM's canonical
     keys including position_embedding, fc1/fc2, QKV biases, output bias, and
     norm betas.
+
+Trace: ARCH-FAM-001, UD-FAM-XGLM
+Intent: Validate XGLM family plugin weight loading, key mapping, and engine build contract
+Preconditions: Synthetic safetensors with XGLM-specific weight naming and config keys are available
+Postconditions: Loaded WeightDict contains all expected canonical keys with correct shapes and transforms
 """
 
 from __future__ import annotations

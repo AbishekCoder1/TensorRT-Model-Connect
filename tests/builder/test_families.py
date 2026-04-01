@@ -3,6 +3,11 @@
 Pure Python, no TRT/GPU needed. Verifies every plugin's match() returns
 True for its model_types and False for others, and checks special attributes
 like runtime_strategy and embed_input.
+
+Trace: ARCH-FAM-001, UD-FAM-MATCH
+Intent: Validate family plugin match() dispatch and attribute correctness for all registered plugins
+Preconditions: All family plugins are discoverable via the auto-discovery registry
+Postconditions: Each plugin matches its declared model_types and rejects foreign types
 """
 
 from __future__ import annotations

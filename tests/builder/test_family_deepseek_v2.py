@@ -1,4 +1,10 @@
-"""Branch-focused tests for the DeepSeek-V2 family plugin."""
+"""Branch-focused tests for the DeepSeek-V2 family plugin.
+
+Trace: ARCH-FAM-001, UD-FAM-DEEPSEEK-V2
+Intent: Validate DeepSeek-V2 MLA cache head_dim override and weight loading branches
+Preconditions: ModelConfig with MLA-specific qk_nope_head_dim and qk_rope_head_dim fields is provided
+Postconditions: Bundle config overrides compute correct K-cache head_dim and weights load with correct routing
+"""
 
 from __future__ import annotations
 

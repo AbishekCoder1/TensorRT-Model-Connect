@@ -1,6 +1,11 @@
 """Tests for SAM family plugin -- weight loading and config parsing.
 
 No GPU or TRT needed.
+
+Trace: ARCH-FAM-001, UD-FAM-SAM
+Intent: Validate SAM prompted segmentation family plugin weight loading and encoder/decoder key mapping
+Preconditions: Synthetic safetensors with SAM vision encoder and mask decoder weight naming are available
+Postconditions: Plugin produces correct weight keys for image encoder, prompt encoder, and mask decoder
 """
 
 from __future__ import annotations

@@ -19,6 +19,11 @@ Setup:
     ALL of: spec, get_config_dict(), make_hf_tensors(), expected_weight_keys().
     Tier 2 is skipped because SegFormer uses a fully custom graph builder with
     4-stage hierarchical encoder + decode head (no standard decoder).
+
+Trace: ARCH-FAM-001, UD-FAM-SEGFORMER-01
+Intent: Validate the SegFormer family plugin weight loading for hierarchical 4-stage encoder with overlapping patch embeddings, efficient self-attention, Mix-FFN, and All-MLP decode head.
+Preconditions: safetensors and trtf_build are importable; no TRT or GPU required for weight-loading tests.
+Postconditions: All SegFormer weight keys (patch embed, attention, Mix-FFN, decode head) are present with correct shapes for all 4 encoder stages.
 """
 
 from __future__ import annotations

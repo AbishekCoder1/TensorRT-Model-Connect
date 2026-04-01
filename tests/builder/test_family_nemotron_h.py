@@ -1,4 +1,10 @@
-"""Branch-focused tests for the Nemotron-H family plugin."""
+"""Branch-focused tests for the Nemotron-H family plugin.
+
+Trace: ARCH-FAM-001, UD-FAM-NEMOTRON-H
+Intent: Validate Nemotron-H hybrid mamba/attention layer routing and weight loading branches
+Preconditions: Layer type pattern string and synthetic tensors for mamba2/mlp/attention layers are provided
+Postconditions: Layer types are correctly parsed and branch-specific weights load with correct fallback behavior
+"""
 
 from __future__ import annotations
 

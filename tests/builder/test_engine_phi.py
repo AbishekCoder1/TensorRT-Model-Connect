@@ -3,6 +3,11 @@
 Phi-3 uses fused qkv_proj [q_dim + 2*kv_dim, hidden] and fused gate_up_proj
 [2*intermediate, hidden]. The tester overrides make_hf_tensors() to produce
 these fused weights in the correct layout.
+
+Trace: ARCH-FAM-001, UD-FAM-PHI-01
+Intent: Validate the Phi-3 family plugin weight loading including fused QKV splitting and fused gate_up_proj splitting into separate gate and up projections.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: Fused QKV is split into separate Q/K/V with correct shapes, fused gate_up is split into gate and up projections, and all weight keys are present.
 """
 import numpy as np
 

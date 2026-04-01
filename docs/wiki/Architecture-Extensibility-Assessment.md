@@ -4,20 +4,23 @@ Status of non-standard architecture support. MoE, Mamba/SSM, vision-language (Qw
 
 ## Executive Summary
 
-With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by C++ (`src/runtime/pipeline_factory.cpp` + `src/runtime/core/`, `src/runtime/domains/`). New strategy/state types still require C++ backend + dispatch changes in `src/runtime/pipeline_factory.cpp`.
+With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by a C++ plugin in `src/runtime/plugins/`. New strategy/state types require a new C++ plugin file in `src/runtime/plugins/` with self-registration via `PluginRegistrar` -- no edits to `pipeline_factory.cpp` are needed.
 
 As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support are **fully implemented**. The standard decoder builder is parameterized to support LayerNorm, GELU, learned positions, and multiple activations. The VL image preprocessor supports 4 strategies with configurable interpolation. The diffusion pipeline supports text-to-video with T5 encoding, DiT denoising, and causal 3D VAE decoding.
 
 | Architecture Class | Current Support | Effort to Add New Instance | Where Changes Needed |
 |---|---|---|---|
-| Standard decoder (RMSNorm + RoPE + SwiGLU) | **Works today** (7 families) | ~30 LOC Python | Python plugin only |
-| Extended decoder (LayerNorm, GELU, learned positions) | **Works today** (12 families) | ~60 LOC Python | Python plugin only |
-| MoE decoder (top-k softmax / SparseMixer routing) | **Works today** (2 families) | ~300 LOC Python | Python graph builder + checkpoint mapper |
-| SSM / Mamba | **Works today** (Mamba 130M-2.8B) | ~400 LOC Python | Python graph builder (C++ backend exists) |
-| Vision-Language | **Works today** (Qwen-VL) | ~200 LOC Python | Python vision builder + plugin VL config |
-| Diffusion (T2V) | **Works today** (Wan2.1) | ~500 LOC Python | Python builders (T5+DiT+VAE) + family plugin |
+| Standard decoder (RMSNorm + RoPE + SwiGLU) | **Works today** (15+ families) | ~30 LOC Python | Python plugin only |
+| Extended decoder (LayerNorm, GELU, learned positions) | **Works today** (25+ families) | ~60 LOC Python | Python plugin only |
+| MoE decoder (top-k softmax / SparseMixer routing) | **Works today** (4 families) | ~300 LOC Python | Python graph builder + checkpoint mapper |
+| SSM / Mamba | **Works today** (Mamba 130M-2.8B) | ~400 LOC Python | Python graph builder (C++ plugin exists) |
+| RWKV | **Works today** | ~400 LOC Python | Python graph builder (C++ plugin exists) |
+| Vision-Language | **Works today** (Qwen-VL, InternVL, Phi4) | ~200 LOC Python | Python vision builder + plugin VL config |
+| Diffusion (T2V/T2I) | **Works today** (Wan, FLUX, Z-Image, PixArt) | ~500 LOC Python | Python builders + family plugin |
+| Encoder-only | **Works today** (BERT, ELECTRA, etc.) | ~60 LOC Python | Python plugin only |
+| Encoder-decoder (seq2seq) | **Works today** (T5, Marian, M2M-100) | ~300 LOC Python + C++ | Python + C++ plugin |
 | Multi-Latent Attention -- MLA (DeepSeek-V2/V3) | **Not yet implemented** | ~400 LOC Python + C++ | Python graph builder + C++ KV cache shape |
-| Hybrid SSM+Attention (Jamba) | **Works today** (Nemotron-H) | ~500 LOC Python + C++ | Python + C++ hybrid state (implemented) |
+| Hybrid SSM+Attention | **Works today** (Nemotron-H) | ~500 LOC Python + C++ | Python + C++ hybrid state (implemented) |
 
 ---
 
@@ -37,7 +40,7 @@ Write a Python graph builder for the expert routing logic. The C++ runtime uses 
 
 ### Adding a new Mamba/SSM family
 
-Write a Python graph builder for the SSM architecture. The C++ `MambaBackend` and `MambaStepState` are already implemented for `runtime_strategy="ssm_recurrent"` (`src/runtime/domains/recurrent/mamba_backend.cpp`, `src/runtime/domains/recurrent/mamba_step_state.cpp`). ~400 LOC Python.
+Write a Python graph builder for the SSM architecture. The C++ `ssm_plugin.cpp` constructs a `RecurrentPipeline` with `RecurrentStateManager` for `runtime_strategy="ssm_recurrent"`. ~400 LOC Python.
 
 **Implemented**: Mamba (130M-2.8B, selective scan + conv1d).
 
@@ -57,18 +60,24 @@ Write a Python family plugin that composes the shared builders (`t5_encoder_buil
 
 ## What Requires C++ Changes
 
-### Different state management (done for Mamba/SSM)
+### Different state management (done for Mamba/SSM/RWKV/Hybrid)
 
-The C++ runtime now supports multiple state backends via `runtime_strategy` dispatch in `src/cabi/api/trtf_c.cpp`:
-- `decoder_kv_cache` / `decoder_moe` -> `TrtBackendFastPath` + `DeviceKvCache`
-- `ssm_recurrent` -> `MambaBackend` + `MambaStepState`
-- `vision_language` -> `VLBackendFastPath` + vision encoder + decoder
-- `diffusion` -> `CreateDiffusionBackend(...)` dispatch (Wan/FLUX/Z-Image backends in `src/runtime/core/` and `src/runtime/domains/`)
+The C++ runtime supports multiple state management patterns via the plugin registry. Each plugin in `src/runtime/plugins/` self-registers for one or more `runtime_strategy` strings. 25 strategies are currently registered across 20 plugin files:
+- `decoder_kv_cache` / `decoder_moe` -> `decoder_plugin.cpp` -> `TextGenerationPipeline` + `KvCache`
+- `ssm_recurrent` -> `ssm_plugin.cpp` -> `RecurrentPipeline` + `RecurrentStateManager`
+- `rwkv_recurrent` -> `rwkv_plugin.cpp` -> `RecurrentPipeline` + `RecurrentStateManager`
+- `hybrid_mamba_attention` -> `hybrid_plugin.cpp` -> `RecurrentPipeline` + `HybridStateManager`
+- `vision_language` -> `vl_plugin.cpp` -> `VLPipeline`
+- `diffusion_flux`/`diffusion_wan`/`diffusion_zimage`/`diffusion_pixart` -> separate plugin files
 
-New state types (e.g., for hybrid architectures) would need:
-1. A new `IStepState` implementation in C++
-2. A new backend class implementing `IGenerationBackend`
-3. A new `runtime_strategy` value wired into `src/cabi/api/trtf_c.cpp` (factory registration and/or explicit branch in `try_create_from_bundle()`)
+New state types require:
+1. A new plugin `.cpp` file in `src/runtime/plugins/` implementing `IPipelinePlugin`
+2. Self-registration via `PluginRegistrar` at file scope
+3. A force-link anchor in `force_link_plugins.cpp`
+4. A new or existing pipeline class in `src/runtime/pipelines/`
+5. Adding the `.cpp` to `CMakeLists.txt`
+
+No edits to `pipeline_factory.cpp` are needed -- the registry handles dispatch automatically.
 
 ### Different KV cache shapes (DeepSeek MLA)
 
@@ -87,7 +96,7 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 - Custom graph builder: SparseMixer routing (independent masked softmax, not standard top-k), per-expert SwiGLU MLPs with gather/scatter dispatch
 - LayerNorm with bias, separate Q/K/V/O with biases
 
-**C++**: No changes. Uses `runtime_strategy="decoder_moe"` which dispatches to the same `TrtBackendFastPath` (routing is handled entirely in the TRT graph).
+**C++**: No changes. Uses `runtime_strategy="decoder_moe"` which is handled by the same `decoder_plugin.cpp` as `decoder_kv_cache`, constructing a `TextGenerationPipeline` (routing is handled entirely in the TRT graph).
 
 ### Mamba / SSM (IMPLEMENTED)
 
@@ -98,11 +107,10 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 - Custom graph builder: Selective scan, causal conv1d with cached state, input-dependent discretization
 - Engine I/O: token_id + per-layer conv_state/ssm_state inputs, logits + present_conv/present_ssm outputs
 
-**C++** (new files):
-- `MambaStepState` (`mamba_step_state.h/cpp`): conv_state + ssm_state per layer (constant memory)
-- `MambaStepEngine` + `run_mamba_step()` (`mamba_decode_runtime.h/cpp`)
-- `MambaBackend` (`mamba_backend.h/cpp`): autoregressive loop without prefill
-- `runtime_strategy="ssm_recurrent"` dispatch in `src/cabi/api/trtf_c.cpp`
+**C++** (plugin-based):
+- `ssm_plugin.cpp`: Self-registering plugin for `ssm_recurrent` strategy
+- Constructs `RecurrentPipeline` with `RecurrentStateManager` wrapping `RecurrentState` (conv_state + ssm_state specs)
+- State management via `RecurrentState` (`include/trtf/runtime/recurrent_state.h`)
 
 **Debug runner**: `MambaTrtRunner` in `debug_runner.py` for pure-Python Mamba TRT inference.
 
@@ -149,17 +157,19 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
   - `decode_video()`: Frame-by-frame VAE decode with causal convolution caches
   - `generate()`: Full pipeline: text encode -> denoise -> VAE decode
 
-**C++** (`wan_diffusion_backend.h/cpp`, `diffusion_backend.h`, `diffusion_backend_base.cpp`):
-- `DiffusionBackendBase`: Shared infrastructure -- CPU math helpers, preprocessor weight parsing, `run_t5_encoder()`, `run_denoiser()`, `decode_vae_subprocess()` (Python fallback)
-- `WanDiffusionBackend`: Wan-specific implementation -- flow-match Euler scheduler, 3D RoPE (temporal + spatial), patchify/unpatchify, native causal VAE decode with cache management
-- `generate_video()`: Full C++ pipeline producing PNG frames
-- `DiffusionConfig`: Pipeline parameters (scheduler type, steps, guidance, video dimensions, model dimensions)
-- `PreprocessorWeights`: DiT preprocessor weights loaded from bundle section
+**C++** (plugin-based):
+- `wan_plugin.cpp`: Self-registering plugin for `diffusion_wan` and `diffusion_pixart` strategies. Constructs `WanPipeline`.
+- `flux_plugin.cpp`: Plugin for `diffusion_flux`. Constructs `FluxPipeline`.
+- `zimage_plugin.cpp`: Plugin for `diffusion_zimage`. Constructs `ZImagePipeline`.
+- Shared diffusion helpers in `src/runtime/plugins/shared/diffusion_helpers.h/cpp`.
+- Pipeline implementations in `src/runtime/pipelines/wan_pipeline.cpp`, `flux_pipeline.cpp`, `z_image_pipeline.cpp`.
+- `DiffusionConfig`, `PreprocessorWeights` in `src/runtime/domains/diffusion/diffusion_types.h`.
+- `FlowMatchEulerScheduler` in `src/runtime/core/flow_match_euler_scheduler.cpp`.
 
-**Schedulers** (`schedulers/flow_match_euler.py`, C++ inline in `wan_diffusion_backend.cpp`):
+**Schedulers**:
 - Flow matching: `z_t = (1-t)*x + t*noise`, Euler step: `z_{t-dt} = z_t - dt*v`
 - Configurable shift parameter for timestep adjustment
-- Both Python (numpy) and C++ implementations for parity
+- C++ implementation in `flow_match_euler_scheduler.cpp`, Python in `trtf_build/trtf_build/diffusion_runner.py`
 
 **Testing**: See [Testing and Validation](Testing-and-Validation.md#diffusion-diffusion) for the 9-step component validation and frame quality checks.
 
@@ -188,22 +198,25 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 
 ## Recommended Approach for New Families
 
-### Tier 1: Python-only (existing runtime strategy), standard builder (implemented for 19 families)
+### Tier 1: Python-only (existing runtime strategy), standard builder (implemented for 40+ families)
 Standard and extended decoders using the parameterized graph builder:
 - Already done: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM, StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Nemotron
 - Candidates: Yi (use llama), Baichuan, DeepSeek-dense, CodeLlama (use llama), Vicuna (use llama)
 - ~30-60 LOC each, fully parallelizable
 
-### Tier 2: Python custom graph builder (existing C++ backend), implemented for 6 families
+### Tier 2: Python custom graph builder (existing C++ plugin), implemented for 15+ families
 Non-standard graph topologies with existing C++ backends:
 - Already done: Phi-MoE (MoE, Python only), Mixtral (MoE, Python only), Mamba (SSM, Python + existing C++ backend), Qwen-VL (VL, Python + existing C++ image preprocessor), Wan2.1-T2V (diffusion, Python builders + C++ diffusion backend)
 - Candidates: Other Mamba variants, LLaVA/InternVL (can reuse simple_chw/aspect_preserve_chw preprocessor), other DiT-based diffusion models (can reuse shared builders)
 - ~200-500 LOC each
 
-### Tier 3: Python + new C++ backend (not yet needed)
-Fundamentally different architectures requiring new C++ state management:
-- DeepSeek MLA (Python + C++ cache shape, ~400 LOC total)
-- Jamba hybrid SSM+Attention (Python + C++ hybrid state, ~500 LOC total)
-- RWKV (Python + C++ recurrent state)
+### Tier 3: Python + new C++ plugin (done for RWKV, Hybrid, Seq2Seq, Marian)
+Fundamentally different architectures requiring new C++ state management or pipeline logic:
+- RWKV (`rwkv_plugin.cpp` -- **implemented**)
+- Hybrid SSM+Attention (`hybrid_plugin.cpp` -- **implemented**)
+- T5 encoder-decoder (`t5_plugin.cpp` -- **implemented**)
+- Marian machine translation (`marian_plugin.cpp` -- **implemented**)
+- Seq2seq encoder-decoder (`seq2seq_plugin.cpp` -- **implemented**)
+- DeepSeek MLA (Python + C++ cache shape, ~400 LOC total -- **not yet implemented**)
 
 Each tier can be worked on independently. Tier 1 and 2 families are fully parallelizable since they only touch Python plugins with no shared file edits.

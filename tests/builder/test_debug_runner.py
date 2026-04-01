@@ -3,6 +3,11 @@ load_vision_engine_from_bundle, and runner resource cleanup.
 
 Mock-based, no TRT/GPU needed. Tests bundle parsing logic and
 runner __del__ cleanup order.
+
+Trace: ARCH-DBG-001, UD-DBG-02
+Intent: Validate debug runner bundle section loading, vision engine extraction, and deterministic resource cleanup ordering.
+Preconditions: No TRT or GPU required; uses in-memory .trtfb bundles and mocks for TRT engine deserialization.
+Postconditions: Engine plan bytes are correctly extracted from bundle sections, vision plans are found when present, and runner destructors release resources in the correct order.
 """
 
 from __future__ import annotations

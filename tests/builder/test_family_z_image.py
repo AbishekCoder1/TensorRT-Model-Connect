@@ -1,4 +1,10 @@
-"""Unit tests for Z-Image family plugin and serialization helpers."""
+"""Unit tests for Z-Image family plugin and serialization helpers.
+
+Trace: ARCH-FAM-001, UD-FAM-ZIMAGE
+Intent: Validate Z-Image diffusion family plugin matching, weight serialization, and image config encoding
+Preconditions: Synthetic Z-Image model config and weight tensors are available
+Postconditions: Plugin matches Z-Image aliases, serializes preprocessor weights correctly, and rejects build_engine
+"""
 
 from __future__ import annotations
 

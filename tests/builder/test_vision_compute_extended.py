@@ -4,6 +4,11 @@ Tests vision encoder graph construction with tiny dims, spatial merge
 correctness, and DeepStack multi-level output structure.
 
 Pure-numpy tests run everywhere. TRT graph tests require TensorRT + CUDA GPU.
+
+Trace: ARCH-VIS-001, UD-VIS-GRAPH
+Intent: Validate vision encoder TRT graph construction, spatial merge, and DeepStack multi-level outputs
+Preconditions: trtf_build is importable; TRT+GPU available for graph-level tests
+Postconditions: Vision encoder graphs produce correct spatial merge and multi-level feature outputs
 """
 
 from __future__ import annotations

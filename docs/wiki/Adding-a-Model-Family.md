@@ -31,7 +31,7 @@ See `scripts/autopilot/autorun.py` for full options and `CLAUDE.md` for detailed
 
 ## Manual Path
 
-Adding support for a new HuggingFace model family manually is a Python task in `trtf_build/` **when the model reuses an existing runtime strategy** already handled by C++ (`src/cabi/api/trtf_c.cpp`, `src/runtime/core/`, `src/runtime/domains/`). C++ edits are needed only when introducing a new `runtime_strategy`/backend/state type.
+Adding support for a new HuggingFace model family manually is a Python task in `trtf_build/` **when the model reuses an existing runtime strategy** already handled by a C++ plugin in `src/runtime/plugins/`. C++ edits are needed only when introducing a new `runtime_strategy` that no existing plugin handles.
 
 ## Prerequisites
 

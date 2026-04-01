@@ -9,7 +9,10 @@ tiny synthetic models. Each test:
 
 Requires TRT + GPU. Tests are marked with requires_trt.
 
-Trace IDs: IT-BUILD-ENGINE
+Trace: ARCH-ENG-001, IT-BUILD-ENGINE
+Intent: Validate full build_engine pipeline for multiple family plugins with synthetic weights
+Preconditions: TRT and CUDA GPU are available; synthetic safetensors and config for each family are created
+Postconditions: Each plugin produces valid engine plan bytes from load_weights + build_engine sequence
 """
 
 from __future__ import annotations

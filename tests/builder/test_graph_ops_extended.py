@@ -2,6 +2,11 @@
 
 Covers _yarn_correction_dim, compute_alibi_slopes (extended cases),
 make_t5_relative_position_bias, and make_yarn_rope_table.
+
+Trace: ARCH-GRP-001, UD-GRP-OPS-EXT
+Intent: Validate pure-NumPy graph op helpers (YaRN correction, T5 bias, ALiBi slopes, RoPE tables)
+Preconditions: trtf_build is importable; no GPU or TRT required
+Postconditions: Helper functions produce mathematically correct values matching hand-computed references
 """
 from __future__ import annotations
 

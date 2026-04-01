@@ -16,6 +16,11 @@ Setup:
     make_hf_tensors() (for MoE weight layout with router + per-expert MLPs),
     and expected_weight_keys() (for router + expert.{e}.w_gate/up/down keys).
     Uses a tiny model with 2 experts to keep engine build fast.
+
+Trace: ARCH-FAM-001, UD-FAM-MIXTRAL-01
+Intent: Validate the Mixtral MoE family plugin weight loading including router weights, per-expert SwiGLU MLP mapping, and MoE config fields (num_local_experts, num_experts_per_tok).
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: Router and per-expert weight keys are present, expert MLP shapes are correct, and MoE-specific config fields are parsed.
 """
 
 from __future__ import annotations

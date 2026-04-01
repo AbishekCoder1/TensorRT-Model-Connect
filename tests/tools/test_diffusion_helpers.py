@@ -1,4 +1,10 @@
-"""Self-tests for tools/diffusion_helpers.py — silu, gelu_tanh, bundle I/O, timestep embedding."""
+"""Self-tests for tools/diffusion_helpers.py — silu, gelu_tanh, bundle I/O, timestep embedding.
+
+Trace: ARCH-PIP-DIFF-001, UD-DIFF-HELPERS
+Intent: Validate diffusion helper functions (silu, gelu_tanh), bundle config/weight I/O, and timestep embedding
+Preconditions: diffusion_helpers module is importable; numpy available
+Postconditions: Activation functions match mathematical definitions and bundle I/O correctly round-trips data
+"""
 
 from __future__ import annotations
 

@@ -5,6 +5,11 @@ calls plugin.load_weights(), and verifies the returned WeightDict has
 expected keys, shapes, and transforms. Also tests matches() and metadata.
 
 No GPU or TRT needed.
+
+Trace: ARCH-FAM-001, UD-FAM-QWEN-MOE
+Intent: Validate Qwen3 MoE family plugin expert weight mapping, router weights, and shared expert handling
+Preconditions: Synthetic safetensors with MoE expert weight naming and config with expert count are available
+Postconditions: Plugin produces correct per-expert weight keys, router weights, and shared expert projections
 """
 
 from __future__ import annotations

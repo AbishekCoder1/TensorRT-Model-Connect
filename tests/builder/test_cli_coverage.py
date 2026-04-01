@@ -1,4 +1,10 @@
-"""Coverage-focused tests for CLI control flow in trtf_build.cli."""
+"""Coverage-focused tests for CLI control flow in trtf_build.cli.
+
+Trace: ARCH-ENG-001, UD-ENG-02
+Intent: Validate CLI control flow branches including version lookup fallbacks, inspect output formatting, build dispatch, and error handling.
+Preconditions: trtf_build is importable; uses mocks for TRT/GPU dependencies.
+Postconditions: Version resolution follows the correct fallback chain, inspect prints expected output, and build errors propagate cleanly.
+"""
 
 from __future__ import annotations
 

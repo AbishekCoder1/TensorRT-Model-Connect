@@ -3,6 +3,11 @@
 Tests cover data loading, modality classification, rendering, file encoding,
 and graceful handling of missing/corrupt data.  All tests are pure-Python
 with no GPU or TRT dependency.
+
+Trace: ARCH-REPORT-001, UD-REPORT-E2E
+Intent: Validate E2E report generator data loading, modality classification, and HTML rendering
+Preconditions: scripts/ is on sys.path; synthetic E2E result data is available
+Postconditions: Report correctly classifies modalities and produces valid HTML with expected sections
 """
 
 from __future__ import annotations

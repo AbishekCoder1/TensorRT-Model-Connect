@@ -3,6 +3,11 @@
 InternLM2 uses non-standard HF key names and a group-interleaved fused QKV
 projection (attention.wqkv.weight). The tester overrides make_hf_tensors()
 to produce the correct synthetic weight layout.
+
+Trace: ARCH-FAM-001, UD-FAM-INTERNLM-01
+Intent: Validate the InternLM2 family plugin weight loading including group-interleaved fused QKV splitting and non-standard HF key names (tok_embeddings, attention.wqkv, output.weight).
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: Fused QKV is correctly split from group-interleaved layout, non-standard keys are mapped to canonical names, and all weight shapes match expected dimensions.
 """
 import numpy as np
 

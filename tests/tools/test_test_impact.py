@@ -3,6 +3,11 @@
 Tests use synthetic manifests and family plugins in tmp directories to
 verify rule classification in isolation. The validate test uses the real
 repo state.
+
+Trace: ARCH-CI-001, UD-CI-TEST-IMPACT
+Intent: Validate test impact analysis rule classification and zero-false-negative guarantee
+Preconditions: Synthetic manifests and family plugin files are created in temp directories
+Postconditions: Changed files are correctly classified to affected test sets with no false negatives
 """
 
 import json

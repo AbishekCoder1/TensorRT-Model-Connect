@@ -5,7 +5,10 @@ encoder-decoder seq2seq models using tiny synthetic weights.
 
 Requires TRT + GPU.
 
-Trace IDs: IT-BUILD-ENGINE-DECODERS
+Trace: ARCH-ENG-001, IT-BUILD-ENGINE-DECODERS
+Intent: Validate full build_engine pipeline for decoder and encoder-decoder models with synthetic weights
+Preconditions: TRT and CUDA GPU are available; synthetic safetensors and config match model requirements
+Postconditions: Engine plans are valid bytes and built engines contain expected I/O tensor bindings
 """
 
 from __future__ import annotations

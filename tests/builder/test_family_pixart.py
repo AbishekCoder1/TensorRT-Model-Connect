@@ -1,4 +1,10 @@
-"""Unit tests for PixArt family plugin, weight loader, and serializer helpers."""
+"""Unit tests for PixArt family plugin, weight loader, and serializer helpers.
+
+Trace: ARCH-FAM-001, UD-FAM-PIXART
+Intent: Validate PixArt diffusion family plugin matching, weight serialization, and preprocessor encoding
+Preconditions: Synthetic PixArt model config and weight tensors are available
+Postconditions: Plugin matches PixArt aliases, serializes preprocessor weights correctly, and produces valid blobs
+"""
 
 from __future__ import annotations
 

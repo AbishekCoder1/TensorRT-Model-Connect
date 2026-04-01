@@ -15,6 +15,11 @@ Setup:
     ALL of: get_config_dict(), make_hf_tensors(), expected_weight_keys(),
     expected_engine_input_names(), and expected_engine_output_names() for
     RWKV's fundamentally different architecture.
+
+Trace: ARCH-FAM-001, UD-FAM-RWKV-01
+Intent: Validate the RWKV family plugin weight loading including time-mixing and channel-mixing blocks, 5 recurrent state tensors per layer, and non-decoder engine IO.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: All RWKV weight keys (time-mixing R/K/V, channel-mixing, decay, bonus) are present, engine inputs/outputs match recurrent WKV contract, and shapes are correct.
 """
 
 from __future__ import annotations

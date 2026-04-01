@@ -1,6 +1,11 @@
 """Tests for all 18 graph_ops.py functions.
 
 Pure-numpy tests run everywhere. TRT graph tests require TensorRT + CUDA GPU.
+
+Trace: ARCH-GRP-001, UD-GRP-OPS
+Intent: Validate atomic TRT graph ops (RoPE, ALiBi, RMSNorm, attention, etc.) against NumPy/PyTorch references
+Preconditions: trtf_build is importable; TRT+GPU available for graph-level tests
+Postconditions: Each graph op produces numerically correct output matching its reference implementation
 """
 
 from __future__ import annotations

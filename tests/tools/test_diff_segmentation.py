@@ -4,6 +4,11 @@ diff_segmentation.py is a relatively thin script whose heavy lifting
 (HF model loading, TRT runner) requires GPU. These tests verify the
 module-level structure and the argument parser without requiring a GPU
 or model files.
+
+Trace: ARCH-PIP-SEG-001, UD-SEG-DIFF
+Intent: Validate segmentation diff tool module structure and argument parser configuration
+Preconditions: diff_segmentation module is importable; no GPU or model files required
+Postconditions: Module exposes expected interface and argparse correctly handles required/optional arguments
 """
 
 from __future__ import annotations

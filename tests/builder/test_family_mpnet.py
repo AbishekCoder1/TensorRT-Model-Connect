@@ -1,4 +1,10 @@
-"""Unit tests for MPNet family plugin helpers and plugin behavior."""
+"""Unit tests for MPNet family plugin helpers and plugin behavior.
+
+Trace: ARCH-FAM-001, UD-FAM-MPNET
+Intent: Validate MPNet family plugin weight key mapping, relative position bias handling, and config parsing
+Preconditions: Synthetic MPNet weight tensors with optional relative position bias are provided
+Postconditions: Plugin produces correct canonical weight keys including optional bias terms
+"""
 
 from __future__ import annotations
 

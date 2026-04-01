@@ -4,7 +4,10 @@ Tests GPT2, GPT-Neo, GPT-NeoX, InternLM2, CodeGen build_engine pipelines.
 
 Requires TRT + GPU.
 
-Trace IDs: IT-BUILD-ENGINE-STD-DECODERS
+Trace: ARCH-ENG-001, IT-BUILD-ENGINE-STD-DECODERS
+Intent: Validate build_engine for standard decoder families (GPT2, GPT-Neo, GPT-NeoX, InternLM2, CodeGen)
+Preconditions: TRT and CUDA GPU are available; synthetic safetensors for each decoder variant are created
+Postconditions: Each standard decoder plugin produces valid engine plan bytes with correct I/O tensor names
 """
 
 from __future__ import annotations

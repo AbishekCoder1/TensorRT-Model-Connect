@@ -2,6 +2,11 @@
 
 Tests vision RoPE table shapes, frequency correctness, and window index
 permutation. No TRT needed.
+
+Trace: ARCH-VIS-001, UD-VIS-ROPE
+Intent: Validate vision 2D RoPE table computation shapes, frequency correctness, and window index permutation
+Preconditions: trtf_build is importable; no TRT or GPU required
+Postconditions: RoPE cos/sin tables and window indices have correct shapes and mathematical properties
 """
 
 from __future__ import annotations

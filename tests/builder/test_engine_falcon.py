@@ -7,6 +7,11 @@ Falcon-3 uses:
   - GQA (grouped query attention) with separate Q/K/V projections
   - No QKV biases, no output projection bias
   - model.layers.{i}.mlp.dense_h_to_4h/dense_4h_to_h naming
+
+Trace: ARCH-FAM-001, UD-FAM-FALCON-01
+Intent: Validate the Falcon family plugin weight loading including LayerNorm with bias, GELU FC MLP, RoPE config, and GQA projections.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: All weight keys map correctly from Falcon's HF layout, LayerNorm biases are loaded, and FC MLP keys (dense_h_to_4h/dense_4h_to_h) resolve to fc1/fc2.
 """
 import numpy as np
 

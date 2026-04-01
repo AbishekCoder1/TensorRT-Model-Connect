@@ -1,4 +1,10 @@
-"""Branch-focused tests for the Qwen3.5 family plugin."""
+"""Branch-focused tests for the Qwen3.5 family plugin.
+
+Trace: ARCH-FAM-001, UD-FAM-QWEN3-5
+Intent: Validate Qwen3.5 DeltaNet/attention layer routing normalization and weight loading branches
+Preconditions: Mixed DeltaNet/attention layer types and synthetic tensors with partial keys are provided
+Postconditions: Layer type aliases are normalized correctly and branch-specific weights load with fallback behavior
+"""
 
 from __future__ import annotations
 

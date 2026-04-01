@@ -1,3 +1,14 @@
+// =============================================================================
+// ISO 26262 Traceability
+// =============================================================================
+// Trace ID:       UT-TOK-CPP-04
+// Architecture:   ARCH-TOK-001
+// Unit Design:    UD-TOK-01
+// Intent:         BPE tokenizer performance: init time, encode/decode latency, throughput, round-trip
+// Preconditions:  Built-in small vocab or external tokenizer.json via TOKENIZER_JSON env var
+// Postconditions: Encode/decode execute within measured latency; round-trip verified for real vocabs
+// =============================================================================
+
 // BPE Tokenizer performance benchmark.
 //
 // Usage:

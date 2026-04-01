@@ -15,6 +15,11 @@ Setup:
     Uses FamilyPluginTester + FamilyPluginTestMixin infrastructure. Overrides
     all of get_config_dict(), make_hf_tensors(), and expected_weight_keys()
     for GPT-NeoX's unique HF layout.
+
+Trace: ARCH-FAM-001, UD-FAM-GPTNEOX-01
+Intent: Validate the GPT-NeoX family plugin weight loading including per-head interleaved fused QKV splitting, parallel residual, partial RoPE, and non-standard HF prefixes.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: Fused QKV is split from per-head interleaved layout, FC MLP keys resolve correctly, and all weight shapes match expected dimensions.
 """
 
 from __future__ import annotations

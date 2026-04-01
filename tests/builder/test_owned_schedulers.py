@@ -1,6 +1,11 @@
 """Unit tests for owned scheduler modules.
 
 These tests target deterministic math and branch behavior only.
+
+Trace: ARCH-PIP-DIFF-001, UD-DIFF-SCHED
+Intent: Validate flow-match Euler scheduler timestep construction and shift behavior
+Preconditions: Scheduler is instantiated with known train timesteps and shift parameters
+Postconditions: Timestep arrays are decreasing float32 with correct schedule shape and sigma termination
 """
 
 from __future__ import annotations

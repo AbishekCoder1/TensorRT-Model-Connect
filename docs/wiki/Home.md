@@ -11,7 +11,7 @@ A split-language system for TensorRT inference: **Python builds** optimized TRT 
 | **[Dynamic Design](Dynamic-Design.md)** | Runtime and build-time sequence diagrams |
 | **[Pipeline Deep Dive](Pipeline-Deep-Dive.md)** | Detailed walkthrough of bundle loading, factory dispatch, and pipeline assembly |
 | **[Source Layout](Source-Layout.md)** | File and directory guide for the current codebase |
-| **[Runtime Target Architecture](Runtime-Target-Architecture.md)** | **PLANNED** target architecture for plugin-registry-based runtime (not yet implemented) |
+| **[Runtime Target Architecture](Runtime-Target-Architecture.md)** | **IMPLEMENTED** -- describes the plugin-registry-based runtime design (now the current architecture) |
 | **[Testing and Validation](Testing-and-Validation.md)** | Test tiers, smoke/E2E policy, CCN gate, traceability requirements |
 | **[Traceability Matrix](Traceability-Matrix.md)** | Bi-directional architecture/design/test traceability (ARCH/UD/UT/IT) |
 | **[ISO 26262 Compliance](ISO-26262-Compliance.md)** | Safety-related development process alignment (NEW) |
@@ -24,7 +24,7 @@ A split-language system for TensorRT inference: **Python builds** optimized TRT 
 
 1. **Python builds, C++ runs.** Checkpoint loading, graph construction, and engine compilation stay in Python (`trtf_build/`). Low-latency inference stays in C++ (`src/`).
 2. **The bundle is self-describing.** Each `.trtfb` bundle carries a `config.json` with `runtime_strategy`, model dimensions, tokenizer settings, and all metadata the C++ runtime needs. No external configuration files are required.
-3. **Strategy is resolved once at bundle load.** `PipelineFactory::from_bundle()` reads `runtime_strategy` from the bundle's config, dispatches to the correct pipeline constructor, and returns a fully-assembled `IPipeline`. There is no per-request strategy redispatch.
+3. **Strategy is resolved once at bundle load.** `PipelineFactory::from_bundle()` reads `runtime_strategy` from the bundle's config, looks up the matching `IPipelinePlugin` in the `PipelineRegistry` singleton, and delegates pipeline construction to the plugin. There is no per-request strategy redispatch.
 4. **Family plugins are auto-discovered.** Python family plugins in `trtf_build/trtf_build/families/` are found via `pkgutil.iter_modules()`. Adding a new family requires only a new `.py` file with a module-level `plugin` attribute -- no edits to shared registration code.
 5. **Complexity budget is enforced.** C++ cyclomatic complexity must stay at or below the repository gate (CCN <= 10), checked by `tools/check_cyclomatic_complexity.py` and CI.
 6. **Traceability is required.** Architecture decisions (ARCH-*), unit designs (UD-*), and tests (UT-*/IT-*) must stay linked per the traceability matrix.
@@ -52,17 +52,18 @@ trtf run model.trtfb --prompt "Hello" --max-new-tokens 20
 ```
 
 - `trtf_create_pipeline_ex()` validates input and reads the `.trtfb` bundle
-- `PipelineFactory::from_bundle()` parses `config.json` from the bundle
-- `resolve_family()` maps `runtime_strategy` to a strategy family (Text, Encoder, Vision, Audio, Diffusion)
-- The matching factory function creates the pipeline: loads TRT engines, creates tokenizers, allocates KV cache or recurrent state
+- `PipelineFactory::from_bundle()` extracts `config.json`, parses `runtime_strategy`
+- `PipelineRegistry::instance().lookup(strategy)` finds the registered `IPipelinePlugin`
+- The plugin's `create()` method loads TRT engines, creates tokenizers, allocates KV cache or recurrent state
 - Returns an `IPipeline` pointer to the caller
 
 ```text
 trtf_create_pipeline_ex(bundle_path)
   -> ReadBundleFile()
-  -> parse_fast_path_config()
-  -> resolve_family(runtime_strategy)
-  -> create_{text,encoder,vision,audio,diffusion}_pipeline()
+  -> extract_json_string("runtime_strategy")
+  -> normalize_legacy_strategy()
+  -> PipelineRegistry::instance().lookup(strategy)
+  -> plugin->create(PipelineContext{...})
   -> IPipeline*
 ```
 
@@ -99,7 +100,7 @@ ls trtf_build/trtf_build/families/*.py \
   | sort
 ```
 
-As of **March 2026**, the repository contains **54+** family modules covering standard decoders (Qwen, LLaMA, Mistral, Phi, GPT-2, OPT, Bloom, Gemma, Falcon, etc.), MoE (Mixtral, Phi-MoE, Qwen-MoE, DeepSeek-V2), SSM/recurrent (Mamba, RWKV), encoder-only (BERT, ELECTRA, ModernBERT, DeBERTa, DistilBERT, RoBERTa, MPNet), encoder-decoder (T5), speech (Whisper, Bark, MagpieTTS, PersonaPlex, Qwen3-Omni, Canary), vision-language (Qwen-VL, InternVL, Phi4-Multimodal, Eagle-VLM), segmentation (SegFormer, SAM), diffusion (Wan-T2V, FLUX, Z-Image, PixArt), and embedding/reranking (Eagle).
+As of **March 2026**, the repository contains **63** family modules covering standard decoders (Qwen, LLaMA, Mistral, Phi, GPT-2, OPT, Bloom, Gemma, Falcon, etc.), MoE (Mixtral, Phi-MoE, Qwen-MoE, DeepSeek-V2), SSM/recurrent (Mamba, RWKV), encoder-only (BERT, ELECTRA, ModernBERT, DeBERTa, DistilBERT, RoBERTa, MPNet, Albert, ConvBERT, FNet, DPR, XLNet), encoder-decoder (T5, Marian, BART, M2M-100), speech (Whisper, Bark, MagpieTTS, PersonaPlex, Qwen3-Omni, Canary), vision-language (Qwen-VL, InternVL, Phi4-Multimodal, Eagle-VLM), segmentation (SegFormer, SAM), diffusion (Wan-T2V, FLUX, Z-Image, PixArt), and embedding/reranking (Eagle). 84 E2E model manifests cover the full test matrix.
 
 To add more families automatically, use the autopilot:
 ```bash

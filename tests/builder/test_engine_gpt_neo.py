@@ -16,6 +16,11 @@ Setup:
     make_hf_tensors() for GPT-Neo's unique HF weight layout, expected_weight_keys()
     for position_embedding + fc1/fc2 + biases + norm betas, and get_config_dict()
     for GPT-Neo config.
+
+Trace: ARCH-FAM-001, UD-FAM-GPTNEO-01
+Intent: Validate the GPT-Neo family plugin weight loading including learned positions, separate Q/K/V projections, GELU FC MLP, tied embeddings, and non-standard HF prefixes.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: All weight keys map correctly from GPT-Neo's HF layout, position embeddings are loaded, biases are present, and engine IO tensors match expectations.
 """
 
 from __future__ import annotations

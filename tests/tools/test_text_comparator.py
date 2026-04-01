@@ -1,4 +1,10 @@
-"""Unit tests for text_generation comparator normalization behavior."""
+"""Unit tests for text_generation comparator normalization behavior.
+
+Trace: ARCH-E2E-001, UD-E2E-TEXT-COMPARATOR
+Intent: Validate TextComparator warning preamble normalization and NED metric computation
+Preconditions: Synthetic TRT and reference stage outputs with logits and text are available
+Postconditions: Warning preambles do not inflate NED scores and identical logits produce passing metrics
+"""
 
 from __future__ import annotations
 

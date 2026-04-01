@@ -22,6 +22,11 @@ Setup:
     (for bark's multi-prefix weight layout with fused QKV), and
     expected_weight_keys() (for semantic.*/coarse.*/fine.* keys).
     Tier 2 is skipped because bark uses a custom multi-engine builder.
+
+Trace: ARCH-FAM-001, UD-FAM-BARK-01
+Intent: Validate the Bark family plugin weight loading, fused QKV splitting, and multi-prefix key mapping for semantic/coarse/fine sub-models.
+Preconditions: safetensors and trtf_build are importable; no TRT or GPU required for weight-loading tests.
+Postconditions: All weight keys are present with correct shapes, fused QKV is split into separate Q/K/V, and multi-prefix layout matches expectations.
 """
 
 from __future__ import annotations

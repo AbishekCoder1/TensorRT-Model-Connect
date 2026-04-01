@@ -1,4 +1,10 @@
-"""Self-tests for tools/diff_layers.py — layer diff table, pass/fail logic."""
+"""Self-tests for tools/diff_layers.py — layer diff table, pass/fail logic.
+
+Trace: ARCH-TRT-001, UD-TRT-DIFF-LAYERS
+Intent: Validate per-layer hidden state diff logic including tolerance checks and argmax matching
+Preconditions: NumPy arrays simulating TRT and HF layer outputs are available
+Postconditions: Identical layers show zero diff, within-tolerance layers pass, and argmax matches are detected
+"""
 
 from __future__ import annotations
 

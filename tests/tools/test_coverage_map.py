@@ -1,4 +1,10 @@
-"""Tests for tools/coverage_map/ -- coverage-based test selection."""
+"""Tests for tools/coverage_map/ -- coverage-based test selection.
+
+Trace: ARCH-CI-001, UD-CI-COVERAGE
+Intent: Validate coverage-map test selection pipeline including Python/C++ collection, merge, and selection
+Preconditions: Synthetic coverage databases and gcovr JSON files are created in temp directories
+Postconditions: Coverage maps are correctly merged and test selection returns expected test sets for changed files
+"""
 
 import json
 import sqlite3

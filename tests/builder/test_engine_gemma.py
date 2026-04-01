@@ -8,6 +8,11 @@ transforms during weight loading:
 
 The test class inherits all standard mixin tests and adds two extra
 tests to verify these Gemma-specific transforms.
+
+Trace: ARCH-FAM-001, UD-FAM-GEMMA-01
+Intent: Validate the Gemma family plugin weight loading including the +1.0 RMSNorm gamma offset and sqrt(hidden_size) embedding scaling.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: All RMSNorm gamma weights are offset by +1.0, embedding matrix is scaled by sqrt(hidden_size), and standard decoder keys are present.
 """
 import math
 

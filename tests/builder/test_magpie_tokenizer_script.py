@@ -1,3 +1,11 @@
+"""Tests for scripts/magpie_tokenizer.py — HF cache path parsing and NeMo resolution.
+
+Trace: ARCH-TOK-001, UD-TOK-MAGPIE
+Intent: Validate Magpie tokenizer script HF cache path parsing and NeMo file resolution
+Preconditions: Fake HF cache directory structure and snapshot_download mock are available
+Postconditions: Repo ID is correctly extracted from cache paths and NeMo file is resolved via fallback download
+"""
+
 from __future__ import annotations
 
 import importlib.util

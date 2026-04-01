@@ -1,4 +1,10 @@
-"""Coverage-focused tests for checkpoint_mapper helper branches."""
+"""Coverage-focused tests for checkpoint_mapper helper branches.
+
+Trace: ARCH-CHK-001, UD-CHK-02
+Intent: Validate edge-case branches in checkpoint_mapper including q/k norm expansion, final norm fallback, QKV bias loading, and GQA head repetition.
+Preconditions: trtf_build and safetensors are importable; no TRT or GPU required.
+Postconditions: Optional norm weights are expanded per-head, missing final norm defaults to ones, biases are loaded when present, and GQA expansion produces correct shapes.
+"""
 
 from __future__ import annotations
 

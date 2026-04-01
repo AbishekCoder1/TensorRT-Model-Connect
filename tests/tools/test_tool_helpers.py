@@ -1,4 +1,10 @@
-"""Self-tests for tools/tool_helpers.py — cosine_sim, compare_arrays."""
+"""Self-tests for tools/tool_helpers.py — cosine_sim, compare_arrays.
+
+Trace: ARCH-DIFF-001, UD-DIFF-HELPERS
+Intent: Validate tool_helpers cosine similarity computation and array comparison for edge cases
+Preconditions: tool_helpers module is importable; numpy available
+Postconditions: Cosine similarity matches mathematical expectations including zero/opposite vector edge cases
+"""
 
 from __future__ import annotations
 

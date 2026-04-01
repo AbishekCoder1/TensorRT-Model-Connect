@@ -1,4 +1,10 @@
-"""Unit tests for FLUX family plugin and preprocessor serialization."""
+"""Unit tests for FLUX family plugin and preprocessor serialization.
+
+Trace: ARCH-FAM-001, UD-FAM-FLUX
+Intent: Validate FLUX diffusion family plugin matching, weight serialization, and preprocessor blob encoding
+Preconditions: Synthetic FLUX model config and weight tensors are available
+Postconditions: Plugin matches FLUX aliases, serializes preprocessor weights correctly, and rejects build_engine
+"""
 
 from __future__ import annotations
 

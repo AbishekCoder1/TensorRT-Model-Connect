@@ -150,72 +150,54 @@ Engine deserialization happens during `trtf_create_pipeline()`:
 - `deserializeCudaEngine(plan_bytes)` recreates the `ICudaEngine` (~5s)
 - `createExecutionContext()` creates the execution context
 
-### DecoderStepEngine
+### TrtModule
 
-The deserialized engine is wrapped in `DecoderStepEngine` (C++):
+The deserialized engine is wrapped in `TrtModule` (C++, `include/trtf/runtime/trt_module.h`):
 
-```cpp
-struct DecoderStepEngine {
-    TrtUniquePtr<nvinfer1::ICudaEngine> engine;
-    TrtUniquePtr<nvinfer1::IExecutionContext> context;
-
-    // Tensor binding names (derived from bundle metadata)
-    std::string token_id_name;
-    std::string position_id_name;
-    std::string attention_mask_name;
-    std::vector<std::string> cache_k_names;
-    std::vector<std::string> cache_v_names;
-    std::vector<std::string> present_k_names;
-    std::vector<std::string> present_v_names;
-    std::string logits_name;
-
-    // Metadata
-    int32_t num_layers;
-    int32_t vocab_size;
-    int32_t hidden_size;
-    int32_t cache_state_size;
-    int32_t max_cache_length;
-};
-```
+`TrtModule` wraps a TRT `ICudaEngine` + `IExecutionContext`. It pre-allocates
+all device buffers at construction and provides forward pass modes:
+- `forward(inputs) -> TensorMap` (CPU-to-CPU, synchronous)
+- `forward_device(inputs) -> DeviceTensorMap` (GPU-to-GPU, no copies)
+- `forward_async(inputs)` + `sync()` (split async path)
+- `bind_external(name, ptr)` for injecting KV cache / recurrent state buffers
 
 ---
 
 ## Autoregressive Generation Loop (C++)
 
-`TrtBackendFastPath::generate()` in `trt_backend_shared.cpp`:
+`TextGenerationPipeline::generate()` in `src/runtime/pipelines/text_generation_pipeline.cpp`:
 
 ```
-generate(input_ids, config):
-  1. Create DeviceKvCache + DeviceResources:
-     - Allocate per-layer cache_k, cache_v on GPU [max_cache_length, attention_size]
-     - Pre-allocate per-step I/O buffers (token, position, mask, logits)
+generate(prompt, cfg):
+  1. Tokenize: tokenizer->encode(prompt) -> input_ids
+  2. Reset KvCache: zero all buffers, position = 0
+  3. Bind KvCache to TrtModule: bind_external() for cache_k/v and present_k/v per layer
 
-  2. Prefill phase:
-     For each token in input_ids:
-       - Build causal attention mask (0 for visible, -1e9 for masked)
-       - run_decoder_step_device(engine, token_id, position, mask, cache)
-       - D2D cache update internal to DeviceKvCache
-       - Advance position counter
+  4. Prefill phase:
+     For each token in input_ids[0..N-2]:
+       - build_attention_mask(mask)
+       - module.forward({token_id, position_id, attention_mask})
+       - cache.advance() -- D2D copy: present_k/v -> cache_k/v[position], position++
 
-  3. Decode phase:
+  5. Decode phase:
      For step = 0 to max_new_tokens:
        - Run one decode step with the previously generated token
-       - Read logits from GPU
        - Greedy sampling: argmax over logits -> next_token_id
        - If next_token == eos_token: break
-       - Append to output, update cache
+       - Append to output, advance cache
 
-  4. Return: input_ids + generated_token_ids
+  6. Decode output token IDs to text: tokenizer->decode(new_tokens)
+  7. Return: TextResult{text, token_ids}
 ```
 
 ### KV-Cache Management
 
-The cache uses a fixed-size circular buffer per layer, held in device memory (`DeviceKvCache`):
-- Size: `[max_cache_length, attention_size]` per layer, per K and V, resident on GPU
-- D2D cache update is internal to `DeviceKvCache` (present K/V written directly to cache slots on device, no host round-trip)
-- Only small inputs (token ID, position, mask) are transferred H2D per step via `DeviceResources`
-- Attention mask grows by one position each step
-- When cache is full, oldest entries are evicted (sliding window)
+The cache uses a fixed-size buffer per layer, held in device memory (`KvCache` in `include/trtf/runtime/kv_cache.h`):
+- Size: `[max_cache_length, kv_dim]` per layer, per K and V, resident on GPU
+- `bind_to(module)` injects cache pointers directly into the TrtModule's execution context
+- `advance()` does D2D async copy of present K/V into cache slots, then increments position
+- `build_attention_mask()` produces a causal mask: visible positions = 0.0, future = -1e4
+- When cache is full, position clamps to `max_length - 1` (sliding window)
 
 ### CUDA Resource Management
 

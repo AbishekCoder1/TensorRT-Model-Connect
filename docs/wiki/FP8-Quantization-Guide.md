@@ -5,8 +5,8 @@ network definition API. Covers the full workflow from calibration to
 deployment, with pitfalls discovered during FLUX.2-dev optimization
 (1.58x speedup over BF16).
 
-**Reference implementation**: `trtf_build/trtf_build/flux2_dit_builder.py`
-(`_matmul_reduced_precision()` function).
+**Reference**: `trtf_build/trtf_build/flux2_dit_builder.py` (FLUX.2-dev DiT builder).
+The quantization framework is in `trtf_build/trtf_build/graph_ops.py` (add_matmul with precision support).
 
 ---
 

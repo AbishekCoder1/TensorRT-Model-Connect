@@ -1,4 +1,10 @@
-"""Unit tests for E2E runner to CLI contract alignment."""
+"""Unit tests for E2E runner to CLI contract alignment.
+
+Trace: ARCH-E2E-001, UD-E2E-CLI
+Intent: Validate that E2E runners construct CLI commands matching the C++ binary's expected argument contract
+Preconditions: Fake binary path and E2ECase with strategy-specific inputs are provided
+Postconditions: Runner-generated commands contain correct subcommand aliases and required flags
+"""
 
 from __future__ import annotations
 

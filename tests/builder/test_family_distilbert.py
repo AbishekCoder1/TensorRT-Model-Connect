@@ -2,6 +2,11 @@
 
 These tests are deterministic and avoid TRT/GPU dependencies by mocking
 checkpoint I/O and engine-builder calls.
+
+Trace: ARCH-FAM-001, UD-FAM-DISTILBERT
+Intent: Validate DistilBERT family plugin weight loading and config parsing with mocked I/O
+Preconditions: Mocked tensor I/O returns synthetic DistilBERT weight tensors
+Postconditions: Plugin correctly maps HF weight keys and produces expected canonical WeightDict
 """
 
 from __future__ import annotations

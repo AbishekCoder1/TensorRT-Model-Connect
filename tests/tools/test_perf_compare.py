@@ -1,4 +1,10 @@
-"""Self-tests for tools/perf_compare.py — stats, formatting, JSON output, reporting."""
+"""Self-tests for tools/perf_compare.py — stats, formatting, JSON output, reporting.
+
+Trace: ARCH-PERF-001, UD-PERF-COMPARE
+Intent: Validate perf_compare timing statistics, formatting helpers, and JSON output structure
+Preconditions: perf_compare module is importable; numpy available
+Postconditions: Statistics correctly handle edge cases (empty, single, multiple) and JSON output is well-formed
+"""
 
 from __future__ import annotations
 

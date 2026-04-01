@@ -5,6 +5,11 @@ convention (fused QKV + gate_up with LoRA base_layer infix), then verifies
 the plugin correctly splits/transposes weights.
 
 No GPU or TRT needed.
+
+Trace: ARCH-FAM-001, UD-FAM-PHI4MM
+Intent: Validate Phi-4-multimodal fused QKV split, gate_up split, and LoRA base_layer weight loading
+Preconditions: Synthetic safetensors with Phi-4-multimodal weight naming (fused QKV + gate_up) are available
+Postconditions: Plugin correctly splits fused weights and produces expected per-head Q/K/V and gate/up projections
 """
 
 from __future__ import annotations

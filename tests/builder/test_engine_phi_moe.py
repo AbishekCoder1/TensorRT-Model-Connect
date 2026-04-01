@@ -26,6 +26,11 @@ Setup:
     Uses a tiny model with 2 experts to keep engine build fast.
     Tier 2 is skipped because Phi-MoE uses a custom MoE decoder builder with
     SparseMixer routing rather than the standard single-engine builder.
+
+Trace: ARCH-FAM-001, UD-FAM-PHIMOE-01
+Intent: Validate the Phi-MoE family plugin weight loading including SparseMixer router, per-expert SwiGLU MLP mapping, LayerNorm biases, QKV biases, and lm_head bias.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: Router and per-expert weight keys are present with biases, LayerNorm biases are loaded, and MoE-specific config fields are parsed correctly.
 """
 
 from __future__ import annotations

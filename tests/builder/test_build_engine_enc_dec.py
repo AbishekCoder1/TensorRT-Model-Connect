@@ -5,7 +5,10 @@ Each builds both encoder and decoder TRT engines from synthetic data.
 
 Requires TRT + GPU.
 
-Trace IDs: IT-BUILD-ENGINE-ENC-DEC
+Trace: ARCH-ENG-001, IT-BUILD-ENGINE-ENC-DEC
+Intent: Validate encoder-decoder build_engine for BART, M2M-100, and Marian with synthetic weights
+Preconditions: TRT and CUDA GPU are available; synthetic safetensors for encoder-decoder models are available
+Postconditions: Both encoder and decoder engine plans are valid bytes with correct I/O tensor structure
 """
 
 from __future__ import annotations

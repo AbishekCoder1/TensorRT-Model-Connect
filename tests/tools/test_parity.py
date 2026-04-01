@@ -1,4 +1,10 @@
-"""Self-tests for tools/test_runner_parity.py — token comparison, divergence reporting."""
+"""Self-tests for tools/test_runner_parity.py — token comparison, divergence reporting.
+
+Trace: ARCH-TRT-001, UD-TRT-PARITY
+Intent: Validate text/token comparison logic used in C++ vs Python runner parity checks
+Preconditions: Synthetic text strings simulating C++ and Python runner outputs are available
+Postconditions: Exact matches, whitespace-stripped matches, and word-level divergence are correctly detected
+"""
 
 from __future__ import annotations
 

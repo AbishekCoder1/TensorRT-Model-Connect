@@ -1,3 +1,11 @@
+"""Tests for E2E orchestrator repro command generation.
+
+Trace: ARCH-E2E-001, UD-E2E-REPRO
+Intent: Validate that E2E orchestrator generates correct reproduction commands for each task strategy
+Preconditions: E2ECase and RunContext are constructed with known strategy and input parameters
+Postconditions: Generated repro commands contain correct binary subcommand, flags, and input paths
+"""
+
 from __future__ import annotations
 
 from tests.e2e_harness.contracts import E2ECase, RunContext

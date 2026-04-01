@@ -1,6 +1,11 @@
 """Tests for pipeline.py — Python wrapper around the C++ trtf CLI.
 
 Pure Python tests with mocked subprocess calls. No GPU or TRT needed.
+
+Trace: ARCH-FAC-001, UD-FAC-PIPELINE
+Intent: Validate Pipeline subprocess wrapper init, binary detection, and CLI argument construction
+Preconditions: subprocess calls are mocked; no real C++ binary or GPU required
+Postconditions: Pipeline correctly stores paths, auto-detects binary, and constructs valid subprocess commands
 """
 
 from __future__ import annotations

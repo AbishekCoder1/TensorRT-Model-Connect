@@ -5,6 +5,11 @@ text output, and reports timing as informational (not a hard assertion).
 
 Requires GPU + engine bundle + built C++ binary.
 Skips if any prerequisite is missing.
+
+Trace: ARCH-PERF-001, UD-PERF-PARITY
+Intent: Validate C++ binary and Python TrtRunner produce matching text output with informational timing
+Preconditions: GPU, engine bundle, and built C++ binary are available (skips otherwise)
+Postconditions: C++ and Python outputs match textually; timing difference is reported but not asserted
 """
 
 from __future__ import annotations

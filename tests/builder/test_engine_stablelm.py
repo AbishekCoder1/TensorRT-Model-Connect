@@ -14,6 +14,11 @@ Setup:
     make_hf_tensors() to produce StableLM's HF weight layout (LayerNorm with
     bias, SwiGLU MLP, QKV biases), and expected_weight_keys() to match the
     canonical keys with biases and norm betas.
+
+Trace: ARCH-FAM-001, UD-FAM-STABLELM-01
+Intent: Validate the StableLM-2 family plugin weight loading including LayerNorm with beta, SwiGLU MLP, QKV biases, and RoPE configuration.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: LayerNorm biases are loaded, QKV biases are mapped correctly, SwiGLU gate/up/down keys are present, and all weight shapes match expected dimensions.
 """
 
 from __future__ import annotations

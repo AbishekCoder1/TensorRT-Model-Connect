@@ -16,6 +16,11 @@ Setup:
     so this test uses the standard make_hf_tensors() but overrides
     expected_weight_keys() to include norm_beta keys (OLMo synthesizes
     beta=zeros when weights are absent).
+
+Trace: ARCH-FAM-001, UD-FAM-OLMO-01
+Intent: Validate the OLMo family plugin weight loading including synthesized LayerNorm weights when absent, SwiGLU MLP, and tied embedding handling.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: Norm weights are correctly loaded or synthesized as ones/zeros, all standard decoder keys are present, and tied embeddings are handled.
 """
 
 from __future__ import annotations

@@ -1,6 +1,11 @@
 """Unit tests for the RoBERTa/XLM-RoBERTa family plugin.
 
 Tests are deterministic and isolate filesystem/TRT dependencies via monkeypatch.
+
+Trace: ARCH-FAM-001, UD-FAM-ROBERTA
+Intent: Validate RoBERTa/XLM-RoBERTa family plugin weight key mapping and config parsing
+Preconditions: Mocked tensor I/O returns synthetic RoBERTa weight tensors with correct naming
+Postconditions: Plugin correctly maps HF weight keys to canonical encoder-only WeightDict format
 """
 
 from __future__ import annotations

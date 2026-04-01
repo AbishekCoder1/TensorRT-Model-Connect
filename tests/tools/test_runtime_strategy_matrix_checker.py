@@ -1,4 +1,10 @@
-"""Unit tests for tools/check_runtime_strategy_matrix.py."""
+"""Unit tests for tools/check_runtime_strategy_matrix.py.
+
+Trace: ARCH-E2E-001, UD-E2E-STRATEGY-MATRIX
+Intent: Validate runtime strategy matrix checker C++ extraction, manifest scanning, and gap detection
+Preconditions: Synthetic C++ files and manifest directories with strategy strings are created
+Postconditions: Checker correctly extracts strategies from C++ source and identifies coverage gaps
+"""
 
 from __future__ import annotations
 

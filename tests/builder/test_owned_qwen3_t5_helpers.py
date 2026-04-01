@@ -1,6 +1,11 @@
 """Unit tests for owned Qwen3/T5 helper and weight-loader logic.
 
 These tests avoid TensorRT runtime by importing modules with a fake trt stub.
+
+Trace: ARCH-FAM-001, UD-FAM-QWEN3-T5
+Intent: Validate Qwen3 and T5 helper functions and weight-loader logic with fake TRT stub
+Preconditions: Fake tensorrt module is injected; no real TRT runtime
+Postconditions: Helper functions produce correct weight transformations and config derivations
 """
 
 from __future__ import annotations

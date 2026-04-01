@@ -3,232 +3,189 @@
 | Field | Value |
 |-------|-------|
 | **Document ID** | ARCH-RT-001 |
-| **Status** | DRAFT / PLANNED |
+| **Status** | IMPLEMENTED |
 | **Applies to** | C++ runtime (`src/`) |
 | **Author** | Safety Architecture Team (yifeif@nvidia.com) |
 | **Reviewer** | Independent Review Required (TBD — assign before merge) |
 | **Review Status** | Pending independent review |
-| **Last updated** | 2026-03-12 |
+| **Last updated** | 2026-03-30 |
 | **ISO 26262 relevance** | ASIL-QM (non-safety, design improvement) |
 
 ---
 
-> **STATUS: PLANNED -- NOT YET IMPLEMENTED**
+> **STATUS: IMPLEMENTED**
 >
-> This document describes the **target** architecture for the C++ runtime.
-> It is **NOT** the current architecture. See [Architecture Overview](Architecture-Overview.md)
-> for the implemented system.
->
-> Nothing described below exists in the codebase today. All sections describe
-> future work that has not been scheduled. Do not use this document as a
-> reference for how the runtime currently operates.
+> The plugin-registry architecture described in this document has been
+> fully implemented. The `PipelineRegistry` singleton, `IPipelinePlugin`
+> interface, `PluginRegistrar` self-registration, and `BaseConfig` parsing
+> are all in the codebase. `PipelineFactory::from_bundle()` is now a thin
+> ~124 LOC wrapper that delegates to registry-resolved plugins.
+> See [Pipeline Deep Dive](Pipeline-Deep-Dive.md) for implementation details.
 
 ---
 
 ## 1. Motivation
 
-The current C++ runtime uses a centralized dispatch model:
+The original C++ runtime used a centralized dispatch model with a
+`StrategyFamily` enum, a `resolve_family()` switch, and a monolithic
+`FastPathModelConfig` struct. This had scaling limitations: adding a new
+strategy required editing shared files, the config struct grew with every
+modality, and factory logic could not be tested in isolation.
 
-- `PipelineFactory::from_bundle()` in `src/runtime/pipeline_factory.cpp` is the single assembly point for all strategies.
-- `FastPathModelConfig` in `src/cabi/config/fast_path_config.h` is a monolithic struct (~230 fields) that carries configuration for every strategy family (decoder, encoder, vision, audio, diffusion, segmentation, detection, neural operator, speech-to-speech, omni, etc.).
-- `resolve_family()` maps `runtime_strategy` strings to a `StrategyFamily` enum and dispatches to per-family factory functions within the same file.
+The plugin-registry architecture described below was designed to address
+these limitations, and has since been fully implemented.
 
-This works, but it has scaling limitations:
-
-1. **Adding a new runtime strategy requires editing shared files.** You must add fields to `FastPathModelConfig`, add a case to `resolve_family()`, and add a factory function in `pipeline_factory.cpp`.
-2. **The god struct grows with every strategy.** Fields for unrelated strategies share the same struct, making it hard to validate that a bundle provides exactly the config a strategy needs.
-3. **Unit testing factory logic requires including all strategy headers.** There is no way to test one strategy's assembly in isolation.
-
-## 2. Current State (As-Is)
+## 2. Implementation (Current State)
 
 ```text
 trtf_create_pipeline_ex(bundle_path)
   -> ReadBundleFile()
-  -> parse_fast_path_config()          // populates ALL fields in FastPathModelConfig
-  -> resolve_family(runtime_strategy)  // returns StrategyFamily enum
-  -> switch on StrategyFamily:
-       kText      -> create_text_pipeline()
-       kEncoder   -> create_encoder_pipeline()
-       kVision    -> create_vision_pipeline()
-       kAudio     -> create_audio_pipeline()
-       kDiffusion -> create_diffusion_pipeline()
+  -> extract_json_string("runtime_strategy")
+  -> normalize_legacy_strategy()
+  -> PipelineRegistry::instance().lookup(strategy)  // returns IPipelinePlugin*
+  -> parse_base_config()                             // ~10 universal fields
+  -> plugin->create(PipelineContext{...})             // plugin-specific assembly
   -> IPipeline*
 ```
 
-Key files in the current implementation:
+Key files:
 
 | File | Role |
 |------|------|
 | `include/trtf/runtime/pipeline_factory.h` | `PipelineFactory::from_bundle()` declaration |
-| `src/runtime/pipeline_factory.cpp` | Central dispatch: `resolve_family()` + all `create_*_pipeline()` functions |
-| `src/cabi/config/fast_path_config.h` | `FastPathModelConfig` -- monolithic config struct |
-| `src/cabi/config/fast_path_config.cpp` | JSON parsing into `FastPathModelConfig` |
+| `src/runtime/registry/pipeline_factory.cpp` | Thin dispatch: read strategy, lookup plugin, delegate (~124 LOC) |
+| `include/trtf/runtime/pipeline_registry.h` | `PipelineRegistry` singleton, `PluginRegistrar`, macros |
+| `src/runtime/registry/pipeline_registry.cpp` | Registry implementation |
+| `include/trtf/runtime/pipeline_plugin.h` | `IPipelinePlugin`, `BaseConfig`, `PipelineContext` |
+| `src/runtime/registry/pipeline_plugin.cpp` | `parse_base_config()` |
+| `src/runtime/plugins/*.cpp` | 20 self-registering plugin files (25 strategies) |
+| `src/runtime/plugins/shared/` | Shared helpers: `plugin_helpers`, `diffusion_helpers`, `audio_helpers` |
+| `src/runtime/plugins/force_link_plugins.cpp` | Linker anchors for static-init plugins |
 | `src/cabi/api/trtf_c.cpp` | C ABI entry point, calls `PipelineFactory::from_bundle()` |
-| `src/runtime/pipelines/*.h/*.cpp` | Concrete `IPipeline` implementations per strategy |
+| `src/runtime/pipelines/*.h/*.cpp` | 14 concrete `IPipeline` implementations |
 
-## 3. Target State (To-Be)
+## 3. Design Details (Implemented)
 
-The target architecture replaces centralized dispatch with a plugin registry.
-
-```text
-trtf_create_pipeline_ex(bundle_path)
-  -> ReadBundleFile()
-  -> extract runtime_strategy string from config.json (lightweight parse)
-  -> StrategyRegistry::resolve(runtime_strategy)
-  -> IRuntimeStrategyPlugin::parse_config(config_json)   // per-strategy config
-  -> IRuntimeStrategyPlugin::create_pipeline(config, bundle, hf_python)
-  -> IPipeline*
-```
-
-### 3.1 IRuntimeStrategyPlugin
+### 3.1 IPipelinePlugin
 
 ```cpp
-// PLANNED -- does not exist today
-class IRuntimeStrategyPlugin {
+// include/trtf/runtime/pipeline_plugin.h
+class IPipelinePlugin {
 public:
-    virtual ~IRuntimeStrategyPlugin() = default;
-
-    // Strategies this plugin handles (e.g., {"decoder_kv_cache", "decoder_moe"}).
-    virtual std::vector<std::string> supported_strategies() const = 0;
-
-    // Parse only the config fields this strategy needs.
-    // Returns an opaque config object owned by the plugin.
-    virtual std::unique_ptr<IStrategyConfig> parse_config(
-        const std::string& config_json) const = 0;
-
-    // Validate that the bundle has the required sections.
-    virtual bool validate_bundle(
-        const BundleSections& sections,
-        const IStrategyConfig& config,
-        std::string& error_message) const = 0;
-
-    // Create the pipeline. This is the composition root for the strategy.
-    virtual std::unique_ptr<IPipeline> create_pipeline(
-        const IStrategyConfig& config,
-        const BundleSections& sections,
-        const std::string& hf_python) const = 0;
+    virtual ~IPipelinePlugin() = default;
+    virtual std::unique_ptr<IPipeline> create(const PipelineContext& ctx) = 0;
 };
 ```
 
-### 3.2 StrategyRegistry
+Each plugin receives a `PipelineContext` with the `BundleFile`, `BaseConfig`,
+raw JSON text, `hf_python` path, and `bundle_path`. The plugin parses its own
+strategy-specific config directly from the raw JSON.
+
+### 3.2 PipelineRegistry
 
 ```cpp
-// PLANNED -- does not exist today
-class StrategyRegistry {
+// include/trtf/runtime/pipeline_registry.h
+class PipelineRegistry {
 public:
-    static StrategyRegistry& instance();
-
-    void register_plugin(std::unique_ptr<IRuntimeStrategyPlugin> plugin);
-
-    // Returns the plugin that handles the given runtime_strategy,
-    // or nullptr if no plugin is registered for it.
-    const IRuntimeStrategyPlugin* resolve(const std::string& strategy) const;
-
-    // List all registered strategies (for diagnostics and testing).
+    static PipelineRegistry& instance();
+    void register_plugin(const std::string& strategy, IPipelinePlugin* plugin);
+    IPipelinePlugin* lookup(const std::string& strategy) const;
     std::vector<std::string> registered_strategies() const;
 };
 ```
 
-### 3.3 Per-Strategy Config Structs
+### 3.3 BaseConfig (Universal Fields)
 
-Each strategy plugin defines its own config struct instead of sharing `FastPathModelConfig`:
+Instead of a monolithic `FastPathModelConfig`, the factory parses only the ~10
+universal fields into `BaseConfig`. Each plugin reads its own strategy-specific
+fields from the raw JSON:
 
 ```cpp
-// PLANNED -- does not exist today
-
-struct DecoderKvConfig : IStrategyConfig {
-    int32_t vocab_size;
-    int32_t hidden_size;
-    int32_t num_layers;
-    int32_t num_heads;
-    int32_t num_kv_heads;
-    int32_t head_dim;
-    int32_t max_cache_length;
-    int32_t id_bos;
-    int32_t id_eos;
-    bool tokenizer_add_special_tokens;
-};
-
-struct WhisperConfig : IStrategyConfig {
-    int32_t num_mel_bins;
-    int32_t max_source_positions;
-    int32_t encoder_layers;
-    int32_t decoder_layers;
-    // ... only Whisper-relevant fields
-};
-
-struct DiffusionConfig : IStrategyConfig {
-    std::string scheduler;
-    int32_t num_inference_steps;
-    float guidance_scale;
-    // ... only diffusion-relevant fields
+// include/trtf/runtime/pipeline_plugin.h
+struct BaseConfig {
+    int32_t vocab_size{0};
+    int32_t hidden_size{0};
+    int32_t num_layers{1};
+    int32_t num_heads{1};
+    int32_t num_kv_heads{1};
+    int32_t head_dim{0};
+    int32_t attention_size{0};
+    int32_t max_cache_length{32};
+    int32_t id_bos{-1};
+    int32_t id_eos{-1};
+    std::string runtime_strategy{"decoder_kv_cache"};
+    std::string precision{"fp32"};
+    bool tokenizer_add_special_tokens{false};
+    bool tokenizer_add_special_tokens_present{false};
 };
 ```
 
 ### 3.4 Self-Contained Plugins
 
-Each strategy becomes a self-contained plugin that owns:
+Each plugin is a single `.cpp` file in `src/runtime/plugins/` that:
 
-- Its config parsing logic
-- Its bundle validation logic
-- Its pipeline construction logic (tokenizer, engine loading, state allocation)
-- Its own header dependencies (no need to include audio headers for text strategies)
+- Registers itself via `PluginRegistrar` at static-init time (file scope)
+- Parses strategy-specific config from raw JSON in `create()`
+- Extracts bundle sections via `find_section()`
+- Loads TRT engines, creates tokenizers and caches
+- Returns a fully constructed `IPipeline`
 
 ```text
-src/runtime/strategies/
-  decoder_kv/
-    decoder_kv_plugin.h
-    decoder_kv_plugin.cpp
-    decoder_kv_config.h
-  ssm_recurrent/
-    ssm_plugin.h
-    ssm_plugin.cpp
-    ssm_config.h
-  diffusion/
-    diffusion_plugin.h
-    diffusion_plugin.cpp
-    diffusion_config.h
-  ...
+src/runtime/plugins/
+  decoder_plugin.cpp          # decoder_kv_cache, decoder_moe
+  ssm_plugin.cpp              # ssm_recurrent
+  rwkv_plugin.cpp             # rwkv_recurrent
+  hybrid_plugin.cpp           # hybrid_mamba_attention
+  encoder_plugin.cpp          # encoder_only, embedding, reranking, neural_operator
+  vl_plugin.cpp               # vision_language
+  segmentation_plugin.cpp     # segmentation, prompted_segmentation
+  object_detection_plugin.cpp # object_detection
+  whisper_plugin.cpp          # speech_to_text
+  bark_plugin.cpp             # text_to_audio_bark
+  magpie_plugin.cpp           # text_to_audio_magpie
+  speech_plugin.cpp           # speech_to_speech
+  omni_plugin.cpp             # omni_multimodal
+  t5_plugin.cpp               # text_to_text
+  marian_plugin.cpp           # marian_translation
+  seq2seq_plugin.cpp          # seq2seq_encoder_decoder
+  flux_plugin.cpp             # diffusion_flux
+  wan_plugin.cpp              # diffusion_wan, diffusion_pixart
+  zimage_plugin.cpp           # diffusion_zimage
+  force_link_plugins.cpp      # linker anchors
+  shared/                     # plugin_helpers, diffusion_helpers, audio_helpers
 ```
 
-## 4. Migration Phases
+## 4. Migration History
 
-All phases below are **PLANNED and not yet started**.
+All phases have been **completed**.
 
-### Phase 1: Introduce IRuntimeStrategyPlugin + StrategyRegistry
+### Phase 1: Introduce IPipelinePlugin + PipelineRegistry -- DONE
 
-- Define the `IRuntimeStrategyPlugin` interface and `IStrategyConfig` base class.
-- Implement `StrategyRegistry` with `register_plugin()` and `resolve()`.
-- `PipelineFactory::from_bundle()` continues to work as before -- the registry exists alongside but is not yet the primary path.
-- **Risk:** Low. Purely additive, no existing code changes.
+- Defined `IPipelinePlugin` interface in `include/trtf/runtime/pipeline_plugin.h`.
+- Implemented `PipelineRegistry` singleton in `include/trtf/runtime/pipeline_registry.h`.
+- Added `PluginRegistrar` helper and `REGISTER_PIPELINE_PLUGIN` / `REGISTER_PIPELINE_PLUGIN_MULTI` macros.
 
-### Phase 2: Decompose FastPathModelConfig
+### Phase 2: Decompose FastPathModelConfig -- DONE
 
-- Extract per-strategy config structs (DecoderKvConfig, WhisperConfig, DiffusionConfig, etc.).
-- Implement `parse_config()` for each, reading only the fields the strategy needs.
-- `FastPathModelConfig` remains as a compatibility layer during transition.
-- **Risk:** Medium. Config parsing changes can cause subtle regressions. Each extraction needs E2E validation.
+- Replaced the monolithic config struct with `BaseConfig` (~10 universal fields).
+- Each plugin now parses its strategy-specific config directly from raw JSON.
+- `parse_base_config()` in `src/runtime/registry/pipeline_plugin.cpp`.
 
-### Phase 3: Migrate strategies one-by-one to plugins
+### Phase 3: Migrate strategies to plugins -- DONE
 
-- Convert each `create_*_pipeline()` function into an `IRuntimeStrategyPlugin` implementation.
-- Start with the simplest strategies (encoder_only, embedding, reranking) as proof-of-concept.
-- Move to higher-complexity strategies (decoder_kv_cache, vision_language, diffusion) once the pattern is validated.
-- Each migration is independently testable and deployable.
-- **Risk:** Medium-high for complex strategies. Each migration requires full E2E regression.
+- All 25 strategies migrated to 20 self-registering plugin files in `src/runtime/plugins/`.
+- Shared helpers factored into `src/runtime/plugins/shared/`.
 
-### Phase 4: Remove centralized dispatch from pipeline_factory.cpp
+### Phase 4: Simplify pipeline_factory.cpp -- DONE
 
-- Once all strategies are migrated, `PipelineFactory::from_bundle()` becomes a thin wrapper: parse `runtime_strategy`, call `StrategyRegistry::resolve()`, call plugin's `create_pipeline()`.
-- Delete `resolve_family()` enum dispatch.
-- Delete `FastPathModelConfig` (all config parsing now lives in plugins).
-- **Risk:** Low if Phase 3 is complete. This is cleanup.
+- `PipelineFactory::from_bundle()` is now ~124 LOC: read strategy, normalize legacy strings, lookup plugin, delegate.
+- No `resolve_family()` enum, no `StrategyFamily`, no `create_*_pipeline()` functions.
 
-### Phase 5: Plugin self-registration
+### Phase 5: Plugin self-registration -- DONE
 
-- Each plugin registers itself via static initialization or an explicit `register_all_plugins()` call.
-- External plugins (out-of-tree strategies) become possible.
-- **Risk:** Low. Static initialization order is the main concern, mitigated by explicit registration as a fallback.
+- Each plugin registers via `PluginRegistrar` at static-init time.
+- `force_link_all_plugins()` in `src/runtime/plugins/force_link_plugins.cpp` ensures linker retention.
+- External out-of-tree plugins are now architecturally possible.
 
 ## 5. C ABI Stability Constraint
 
@@ -250,7 +207,7 @@ Each migration phase must maintain the existing test gates:
 | C++ unit tests (`ctest`) | Bundle parsing, tokenizers, CUDA wrappers, KV cache |
 | Python builder tests (`pytest tests/builder/`) | Config parsing, weight mapping, graph ops |
 | CCN gate (`tools/check_cyclomatic_complexity.py`) | No function exceeds CCN 10 |
-| E2E suite (`pytest tests/test_e2e.py`) | Full pipeline correctness for all 50+ models |
+| E2E suite (`pytest tests/test_e2e.py`) | Full pipeline correctness for all 84 model manifests |
 
 Additionally, each new plugin should have:
 
@@ -263,4 +220,4 @@ Additionally, each new plugin should have:
 - This is **not** the current architecture. See [Architecture Overview](Architecture-Overview.md).
 - This is **not** an approved migration plan with a schedule. It is a design target.
 - This does **not** describe PipelineRouter, PipelineServices, StrategyBuilder, or service-composed runtime patterns. Those concepts do not exist in the codebase and are not part of this target.
-- This does **not** imply that the current `PipelineFactory` approach is broken. It works correctly for all 50+ supported models. The target architecture addresses long-term maintainability as the strategy count grows.
+- This document now describes the **implemented** plugin-registry architecture. The migration is complete. `PipelineFactory::from_bundle()` is a thin wrapper that delegates to 20 self-registering plugins handling 25 strategies across 84 model manifests.

@@ -15,6 +15,11 @@ Setup:
     make_hf_tensors() for CodeGen's unique HF weight layout, expected_weight_keys()
     for fc1/fc2 MLP + biases (no post_attn_norm due to single-norm parallel
     residual), and get_config_dict() for CodeGen's rotary_dim config.
+
+Trace: ARCH-FAM-001, UD-FAM-CODEGEN-01
+Intent: Validate the CodeGen family plugin weight loading including fused QKV with mp_num interleaving, partial RoPE, parallel residual, and non-standard HF prefixes.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: All weight keys are present with correct shapes, fused QKV is split correctly from interleaved layout, and engine IO tensors match expected names.
 """
 
 from __future__ import annotations

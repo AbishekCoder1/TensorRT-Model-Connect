@@ -1,6 +1,11 @@
 """Unit tests for tools/perfdb.py — performance database.
 
 All tests use in-memory SQLite (:memory:), no GPU or filesystem needed.
+
+Trace: ARCH-PERF-001, UD-PERF-DB
+Intent: Validate PerfDB schema creation, record ingestion, environment fingerprinting, and query correctness
+Preconditions: In-memory SQLite database is used; no GPU or filesystem needed
+Postconditions: Records are correctly stored, queried, and environment IDs are deterministically computed
 """
 from __future__ import annotations
 

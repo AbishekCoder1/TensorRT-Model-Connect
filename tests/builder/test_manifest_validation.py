@@ -1,4 +1,10 @@
-"""Tests for E2E manifest schema validation."""
+"""Tests for E2E manifest schema validation.
+
+Trace: ARCH-E2E-001, UD-E2E-MANIFEST
+Intent: Validate E2E manifest schema enforcement for required fields, type checks, and skip semantics
+Preconditions: e2e_harness manifest_loader is importable
+Postconditions: Invalid manifests raise appropriate ValueError/TypeError; valid manifests pass validation
+"""
 import json
 import os
 import pytest

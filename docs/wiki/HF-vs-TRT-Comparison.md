@@ -88,11 +88,10 @@ For the same model weights and input, TRT and HF should produce nearly identical
 Validation tools:
 ```bash
 # E2E logit comparison
-python3 tools/diff_logits.py --model-dir <hf-dir> --binary ./build/trtf \
-  --backend-flag --force-trt --atol 1e-3 --battery
+python3 tools/diff_logits.py --model <hf-model> --atol 1e-3 --battery
 
 # Per-layer hidden state comparison
-python3 tools/diff_layers.py --model-dir <hf-dir>
+python3 tools/diff_layers.py --model <hf-model> --atol 0.05
 
 # Vision-language feature comparison (TRT vision encoder vs HF)
 python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
@@ -116,10 +115,10 @@ python3 tools/perf_compare.py \
 | Auto model download | Hub integration, `from_pretrained("Qwen/Qwen3-0.6B")` downloads automatically | Must pre-download weights to local directory |
 | Sampling strategies | top-k, top-p, beam search, temperature, repetition penalty | Greedy argmax only (currently) |
 | Dynamic batch size | Arbitrary batch sizes | Batch size = 1 |
-| Quantization | GPTQ, AWQ, bitsandbytes | FP32 only (TRT quantization planned) |
+| Quantization | GPTQ, AWQ, bitsandbytes | FP16, FP8, INT8, INT4, NVFP4, W4A8 via extensible quantization framework |
 | Attention variants | Flash Attention 2, SDPA, PagedAttention | Standard scaled dot-product in TRT |
 | Model formats | safetensors, PyTorch bin, GGUF | safetensors only |
-| Architecture breadth | 200+ model architectures | Dense decoders with standard structure |
+| Architecture breadth | 200+ model architectures | 63 family plugins: decoders, MoE, SSM, VL, diffusion, audio, encoder-only, seq2seq, segmentation |
 
 ## What We Have That HF Doesn't
 

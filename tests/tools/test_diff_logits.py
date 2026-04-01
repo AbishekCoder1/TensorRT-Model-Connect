@@ -1,4 +1,10 @@
-"""Self-tests for tools/diff_logits.py — battery prompts, tolerance, compare_logits."""
+"""Self-tests for tools/diff_logits.py — battery prompts, tolerance, compare_logits.
+
+Trace: ARCH-TRT-001, UD-TRT-DIFF-LOGITS
+Intent: Validate logit comparison tool battery prompts, tolerance thresholds, and per-step diff metrics
+Preconditions: diff_logits module is importable; synthetic logit arrays are available
+Postconditions: Identical logits produce zero diff, within-tolerance logits pass, and battery prompts are well-formed
+"""
 
 from __future__ import annotations
 

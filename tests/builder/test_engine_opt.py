@@ -9,6 +9,11 @@ OPT uses a different HF weight layout from standard decoders:
   - model.decoder.final_layer_norm
   - LayerNorm everywhere (with beta/bias)
   - ReLU activation in MLP (2-proj fc1/fc2, not SwiGLU gate/up/down)
+
+Trace: ARCH-FAM-001, UD-FAM-OPT-01
+Intent: Validate the OPT family plugin weight loading including model.decoder.* prefix mapping, learned positions with offset, fc1/fc2 MLP, and biases on all linear layers and LayerNorms.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: All weight keys map correctly from OPT's non-standard HF layout, position embeddings include the 2-position offset, and biases are loaded for all projections and norms.
 """
 import numpy as np
 

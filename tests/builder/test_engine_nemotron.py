@@ -16,6 +16,11 @@ Setup:
     make_hf_tensors() to produce Nemotron's HF weight layout (up_proj/down_proj
     MLP, LayerNorm biases), expected_weight_keys() for fc1/fc2 MLP keys +
     norm betas, and get_config_dict() to add partial_rotary_factor.
+
+Trace: ARCH-FAM-001, UD-FAM-NEMOTRON-01
+Intent: Validate the Nemotron-4 family plugin weight loading including LayerNorm1P gamma offset, 2-projection MLP with squared ReLU, partial RoPE, and LayerNorm biases.
+Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Postconditions: Norm gamma weights are offset by +1.0, fc1/fc2 MLP keys map correctly, norm biases are loaded, and partial RoPE config is parsed.
 """
 
 from __future__ import annotations
