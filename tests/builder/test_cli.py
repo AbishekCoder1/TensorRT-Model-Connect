@@ -17,13 +17,11 @@ from unittest.mock import patch
 
 import pytest
 
-from trtf_build.cli import main
 
 
 class TestBuildArgs:
     def test_build_with_all_args(self):
         """Verify build command parses all arguments."""
-        from trtf_build.cli import main as cli_main
         test_args = [
             "trtf-build", "build", "Qwen/Qwen3-0.6B",
             "-o", "/tmp/out.trtfb",
@@ -189,7 +187,7 @@ class TestCmdBuildMocked:
         captured_kwargs = {}
 
         def mock_build(model_id_or_path, output_path, max_cache_length, *,
-                       precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False):
+                       precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False, **kwargs):
             captured_kwargs["model_id_or_path"] = model_id_or_path
             captured_kwargs["output_path"] = output_path
             captured_kwargs["max_cache_length"] = max_cache_length
@@ -227,7 +225,7 @@ class TestCmdBuildMocked:
         received_verbose = []
 
         def mock_build(model_id_or_path, output_path, max_cache_length, *,
-                       precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False):
+                       precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False, **kwargs):
             received_verbose.append(verbose)
 
         original_build = eb.build
@@ -256,7 +254,7 @@ class TestCmdBuildMocked:
         received_cache = []
 
         def mock_build(model_id_or_path, output_path, max_cache_length, *,
-                       precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False):
+                       precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False, **kwargs):
             received_cache.append(max_cache_length)
 
         original_build = eb.build
@@ -297,3 +295,105 @@ class TestCmdBuildMocked:
             assert result == 1
         finally:
             eb.build = original_build
+
+
+class TestFriendlyDownloadErrors:
+    """Tests for _raise_friendly_download_error — clear messages for HF failures.
+
+    Trace ID: UT-CLI-03 / ARCH-BUILD-001 / UD-BUILD-ERR-01
+    Intent: Verify that HF download failures produce actionable error messages
+    Preconditions: No network or HF access needed (mocked exceptions)
+    Postconditions: Each HF error type maps to a clear, actionable RuntimeError
+    """
+
+    def test_repository_not_found(self):
+        """RepositoryNotFoundError → tells user to check repo ID and login."""
+        from trtf_build.engine_builder import _raise_friendly_download_error
+
+        class RepositoryNotFoundError(Exception):
+            pass
+
+        exc = RepositoryNotFoundError("404 Client Error")
+        with pytest.raises(RuntimeError, match="not found on HuggingFace"):
+            _raise_friendly_download_error("Qwen/nonexistent-model", exc)
+
+    def test_gated_repo(self):
+        """GatedRepoError → tells user to accept license and login."""
+        from trtf_build.engine_builder import _raise_friendly_download_error
+
+        class GatedRepoError(Exception):
+            pass
+
+        exc = GatedRepoError("Access to model is restricted")
+        with pytest.raises(RuntimeError, match="gated.*license"):
+            _raise_friendly_download_error("meta-llama/Llama-3-8B", exc)
+
+    def test_connection_error(self):
+        """ConnectionError → tells user to check network."""
+        from trtf_build.engine_builder import _raise_friendly_download_error
+
+        exc = ConnectionError("Name resolution failed")
+        with pytest.raises(RuntimeError, match="Network error"):
+            _raise_friendly_download_error("Qwen/Qwen3-0.6B", exc)
+
+    def test_entry_not_found(self):
+        """EntryNotFoundError → tells user about missing files."""
+        from trtf_build.engine_builder import _raise_friendly_download_error
+
+        class EntryNotFoundError(Exception):
+            pass
+
+        exc = EntryNotFoundError("config.json not found")
+        with pytest.raises(RuntimeError, match="required files are missing"):
+            _raise_friendly_download_error("some/model", exc)
+
+    def test_generic_exception_includes_context(self):
+        """Unknown exceptions → includes model ID and original message."""
+        from trtf_build.engine_builder import _raise_friendly_download_error
+
+        exc = ValueError("something unexpected")
+        with pytest.raises(RuntimeError, match="Failed to download.*something unexpected"):
+            _raise_friendly_download_error("org/model", exc)
+
+    def test_original_exception_chained(self):
+        """All friendly errors chain the original exception via __cause__."""
+        from trtf_build.engine_builder import _raise_friendly_download_error
+
+        class RepositoryNotFoundError(Exception):
+            pass
+
+        original = RepositoryNotFoundError("404")
+        with pytest.raises(RuntimeError) as exc_info:
+            _raise_friendly_download_error("org/model", original)
+        assert exc_info.value.__cause__ is original
+
+    def test_resolve_model_wraps_download_error(self):
+        """_resolve_model wraps snapshot_download failures with friendly messages."""
+        from trtf_build.engine_builder import _resolve_model
+
+        class RepositoryNotFoundError(Exception):
+            pass
+
+        with patch("huggingface_hub.snapshot_download",
+                    side_effect=RepositoryNotFoundError("404")):
+            with pytest.raises(RuntimeError, match="not found on HuggingFace"):
+                _resolve_model("nonexistent/repo-id")
+
+    def test_disk_error(self):
+        """OSError with 'disk' in message → tells user to check disk space."""
+        from trtf_build.engine_builder import _raise_friendly_download_error
+
+        exc = OSError("No space left on disk")
+        with pytest.raises(RuntimeError, match="Disk error.*disk space"):
+            _raise_friendly_download_error("org/model", exc)
+
+    def test_http_error(self):
+        """HTTPError → tells user about network issues."""
+        from trtf_build.engine_builder import _raise_friendly_download_error
+
+        class HTTPError(Exception):
+            pass
+
+        exc = HTTPError("503 Service Unavailable")
+        with pytest.raises(RuntimeError, match="Network error"):
+            _raise_friendly_download_error("org/model", exc)

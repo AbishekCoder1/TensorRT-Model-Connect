@@ -295,6 +295,7 @@ trtf_add_test(test_wordpiece_tokenizer)
 trtf_add_test(test_wordpiece_golden)
 trtf_add_test(test_unigram_tokenizer)
 trtf_add_test(test_unigram_golden)
+trtf_add_test(test_tokenizer_edge_cases)
 
 # Image I/O
 trtf_add_test(test_image_reader        NO_SRC_INCLUDE)

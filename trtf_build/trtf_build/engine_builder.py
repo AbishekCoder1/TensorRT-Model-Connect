@@ -42,6 +42,47 @@ _HF_ALLOW_PATTERNS = [
 ]
 
 
+def _raise_friendly_download_error(model_id: str, exc: Exception) -> None:
+    """Re-raise HF download errors with clear, actionable messages."""
+    exc_type = type(exc).__name__
+
+    if "RepositoryNotFound" in exc_type:
+        raise RuntimeError(
+            f"Model '{model_id}' not found on HuggingFace Hub. "
+            f"Check the repo ID for typos (format: 'org/model-name'). "
+            f"If it's a private repo, run: huggingface-cli login"
+        ) from exc
+
+    if "GatedRepo" in exc_type:
+        raise RuntimeError(
+            f"Model '{model_id}' is gated. Accept the license at "
+            f"https://huggingface.co/{model_id} then run: huggingface-cli login"
+        ) from exc
+
+    if "LocalEntryNotFound" in exc_type or "EntryNotFound" in exc_type:
+        raise RuntimeError(
+            f"Model '{model_id}' exists but required files are missing. "
+            f"The model may use a non-standard layout."
+        ) from exc
+
+    if "HTTPError" in exc_type or "ConnectionError" in exc_type:
+        raise RuntimeError(
+            f"Network error downloading '{model_id}': {exc}. "
+            f"Check your internet connection and try again."
+        ) from exc
+
+    if "OSError" in exc_type and "disk" in str(exc).lower():
+        raise RuntimeError(
+            f"Disk error downloading '{model_id}': {exc}. "
+            f"Check available disk space."
+        ) from exc
+
+    # Fallback: re-raise with context
+    raise RuntimeError(
+        f"Failed to download '{model_id}' from HuggingFace Hub: {exc}"
+    ) from exc
+
+
 def _is_hf_model_dir(path: Path) -> bool:
     """Return True if path contains a standard HF model entrypoint config."""
     return (path / "config.json").exists() or (path / "model_index.json").exists()
@@ -78,10 +119,13 @@ def _resolve_model(model_id_or_path: str) -> str:
         )
 
     print(f"[trtf-build] Downloading {model_id_or_path} ...", file=sys.stderr)
-    local_dir = snapshot_download(
-        repo_id=model_id_or_path,
-        allow_patterns=_HF_ALLOW_PATTERNS + ["*.nemo"],
-    )
+    try:
+        local_dir = snapshot_download(
+            repo_id=model_id_or_path,
+            allow_patterns=_HF_ALLOW_PATTERNS + ["*.nemo"],
+        )
+    except Exception as exc:
+        _raise_friendly_download_error(model_id_or_path, exc)
 
     # Prefer HF config when both HF files and .nemo are present.
     dl_path = Path(local_dir)
@@ -328,8 +372,6 @@ def build_bundle(
         verbose: Print detailed logs.
     """
     model_dir_path = Path(model_dir)
-    model_id_or_path_orig = getattr(
-        build_bundle, '_model_id_or_path_orig', model_dir)
     t0 = time.monotonic()
 
     # Detect diffusers format (model_index.json present)
@@ -361,7 +403,7 @@ def build_bundle(
 
     # 3. Load weights
     t1 = time.monotonic()
-    print(f"[trtf-build] Loading weights ...", file=sys.stderr)
+    print("[trtf-build] Loading weights ...", file=sys.stderr)
     weights = plugin.load_weights(str(model_dir_path), config)
     t2 = time.monotonic()
     print(f"[trtf-build] Weights loaded [{t2 - t1:.1f}s]", file=sys.stderr)
@@ -403,7 +445,7 @@ def build_bundle(
     vision_plan = None
     build_vision = getattr(plugin, 'build_vision_engine', None)
     if build_vision is not None:
-        print(f"[trtf-build] Building vision encoder engine ...",
+        print("[trtf-build] Building vision encoder engine ...",
               file=sys.stderr)
         vision_plan = build_vision(
             str(model_dir_path), config, weights, verbose=verbose)
@@ -417,10 +459,9 @@ def build_bundle(
     extra_engines = {}
     build_extra = getattr(plugin, 'build_extra_engines', None)
     if build_extra is not None:
-        print(f"[trtf-build] Building extra engines ...", file=sys.stderr)
+        print("[trtf-build] Building extra engines ...", file=sys.stderr)
         extra_engines = build_extra(
             config, weights, max_cache_length, verbose=verbose) or {}
-        t3c = time.monotonic()
         for ename, eplan in extra_engines.items():
             print(f"[trtf-build]   {ename}: {len(eplan) / (1024 * 1024):.1f} MB",
                   file=sys.stderr)
@@ -557,8 +598,6 @@ def _build_diffusion_bundle(
     fp8_scales: dict | None = None,
 ) -> None:
     """Build a diffusion model bundle from a diffusers-format directory."""
-    import json as json_module
-
     # Parse model_index.json to determine pipeline type
     model_index = json.loads(
         (model_dir_path / "model_index.json").read_text())
@@ -586,7 +625,6 @@ def _build_diffusion_bundle(
     # Load weights (lightweight — just paths for diffusion)
     t1 = time.monotonic()
     weights = plugin.load_weights(str(model_dir_path), config)
-    t2 = time.monotonic()
 
     # Propagate transformer config to ModelConfig so get_diffusion_config can access it
     if "_transformer_config" in weights:
