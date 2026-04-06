@@ -315,9 +315,83 @@ def bench_trt_mamba(engine_plan: bytes, num_layers: int,
     }
 
 
+def bench_trtf_cpp(
+    binary: str,
+    bundle_path: str,
+    prompt: str,
+    max_new_tokens: int,
+    warmup: int,
+    iterations: int,
+    hf_python: str | None,
+    verbose: bool,
+) -> dict | None:
+    """Benchmark the C++ trtf binary using --benchmark / --warmup flags.
+
+    Parses timing from lines printed to stderr by the binary:
+      [trtf.benchmark] prefill_ms=X decode_ms=Y tokens_per_sec=Z
+
+    Returns a dict with the same schema as bench_trt(), or None on error.
+    """
+    import re
+
+    cmd = [
+        binary, "run", bundle_path,
+        "--prompt", prompt,
+        "--max-new-tokens", str(max_new_tokens),
+        "--benchmark", str(iterations),
+        "--warmup", str(warmup),
+    ]
+    if hf_python:
+        cmd += ["--hf-python", hf_python]
+
+    if verbose:
+        print(f"  [cpp] running: {' '.join(cmd)}", file=sys.stderr)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except Exception as exc:
+        print(f"[perf] C++ binary failed: {exc}", file=sys.stderr)
+        return None
+
+    if result.returncode != 0:
+        print(f"[perf] C++ binary exited {result.returncode}: {result.stderr}",
+              file=sys.stderr)
+        return None
+
+    # Parse "[trtf.benchmark] prefill_ms=X decode_ms=Y tokens_per_sec=Z"
+    m = re.search(
+        r"\[trtf\.benchmark\]\s+prefill_ms=([\d.]+)\s+decode_ms=([\d.]+)"
+        r"\s+tokens_per_sec=([\d.]+)",
+        result.stderr)
+    if not m:
+        print("[perf] C++ binary: could not parse benchmark output from stderr.",
+              file=sys.stderr)
+        if verbose:
+            print(result.stderr, file=sys.stderr)
+        return None
+
+    prefill_ms = float(m.group(1))
+    decode_ms  = float(m.group(2))
+    tps        = float(m.group(3))
+
+    if verbose:
+        print(f"  [cpp] prefill={prefill_ms:.2f}ms decode={decode_ms:.2f}ms "
+              f"tps={tps:.1f}", file=sys.stderr)
+
+    # The C++ binary reports the mean over all timed iterations; synthesise
+    # single-element lists so the same stats helpers work.
+    n_decode_tokens = int(round(tps * decode_ms / 1000.0)) if tps > 0 else max_new_tokens
+    return {
+        "prefill_times": [prefill_ms],
+        "decode_times": [decode_ms],
+        "decode_token_counts": [n_decode_tokens],
+        "gen_ids": [],  # C++ binary doesn't return token IDs
+    }
+
+
 def bench_hf(model, input_ids: list[int], max_new_tokens: int,
              warmup: int, iterations: int, eos_token_id: int | None,
-             verbose: bool) -> dict:
+             verbose: bool, _cudagraph_mark: bool = False) -> dict:
     """Benchmark HF inference with KV cache.
 
     Returns dict with timing lists and generated token IDs.
@@ -337,6 +411,8 @@ def bench_hf(model, input_ids: list[int], max_new_tokens: int,
 
         with torch.no_grad():
             # -- Prefill --
+            if _cudagraph_mark:
+                torch.compiler.cudagraph_mark_step_begin()
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             outputs = model(ids_tensor, use_cache=True)
@@ -364,6 +440,8 @@ def bench_hf(model, input_ids: list[int], max_new_tokens: int,
                     break
                 next_input = torch.tensor(
                     [[next_token]], dtype=torch.long, device="cuda")
+                if _cudagraph_mark:
+                    torch.compiler.cudagraph_mark_step_begin()
                 if is_mamba_hf:
                     cache_pos = torch.tensor(
                         [seq_len + step], dtype=torch.long, device="cuda")
@@ -401,6 +479,23 @@ def bench_hf(model, input_ids: list[int], max_new_tokens: int,
     }
 
 
+def bench_hf_compiled(model, input_ids: list[int], max_new_tokens: int,
+                      warmup: int, iterations: int, eos_token_id: int | None,
+                      compile_mode: str, verbose: bool) -> dict:
+    """Benchmark torch.compile(model) inference.
+
+    Applies torch.compile before the warmup loop; graph tracing happens on the
+    first forward passes (included in warmup, excluded from timing). Returns the
+    same dict format as bench_hf().
+    """
+    import torch
+    print(f"[perf] torch.compile(mode={compile_mode!r}) ...", file=sys.stderr)
+    compiled = torch.compile(model, mode=compile_mode)
+    return bench_hf(compiled, input_ids, max_new_tokens,
+                    warmup, iterations, eos_token_id, verbose,
+                    _cudagraph_mark=True)
+
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -420,7 +515,8 @@ def _speedup(hf_mean: float, trt_mean: float) -> str:
 def print_report(model_name: str, prompt: str, num_input_tokens: int,
                  max_new_tokens: int, iterations: int, warmup: int,
                  hf_dtype: str, trt_res: dict, hf_res: dict,
-                 is_mamba: bool = False):
+                 is_mamba: bool = False, compile_res: dict | None = None,
+                 compile_mode: str = "reduce-overhead"):
     """Print formatted comparison table to stdout."""
     gpu = _get_gpu_name()
     trt_ver = _get_trt_version()
@@ -429,6 +525,11 @@ def print_report(model_name: str, prompt: str, num_input_tokens: int,
     trt_decode = _stats(trt_res["decode_times"])
     hf_prefill = _stats(hf_res["prefill_times"])
     hf_decode = _stats(hf_res["decode_times"])
+
+    has_compile = compile_res is not None
+    if has_compile:
+        cp_prefill = _stats(compile_res["prefill_times"])
+        cp_decode = _stats(compile_res["decode_times"])
 
     # Per-token and throughput (from decode phase)
     trt_avg_tokens = (statistics.mean(trt_res["decode_token_counts"])
@@ -456,10 +557,26 @@ def print_report(model_name: str, prompt: str, num_input_tokens: int,
         hf_per_tok = hf_per_tok_std = 0.0
         hf_tps = hf_tps_std = 0.0
 
+    if has_compile:
+        cp_avg_tokens = (statistics.mean(compile_res["decode_token_counts"])
+                         if compile_res["decode_token_counts"] else 0)
+        if cp_avg_tokens > 0 and cp_decode["mean"] > 0:
+            cp_per_tok = cp_decode["mean"] / cp_avg_tokens
+            cp_per_tok_std = cp_decode["std"] / cp_avg_tokens
+            cp_tps = 1000.0 * cp_avg_tokens / cp_decode["mean"]
+            cp_tps_std = (1000.0 * cp_avg_tokens * cp_decode["std"]
+                          / cp_decode["mean"] ** 2)
+        else:
+            cp_per_tok = cp_per_tok_std = 0.0
+            cp_tps = cp_tps_std = 0.0
+
     trt_total = _stats([p + d for p, d in zip(trt_res["prefill_times"],
                                               trt_res["decode_times"])])
     hf_total = _stats([p + d for p, d in zip(hf_res["prefill_times"],
                                              hf_res["decode_times"])])
+    if has_compile:
+        cp_total = _stats([p + d for p, d in zip(compile_res["prefill_times"],
+                                                  compile_res["decode_times"])])
 
     # Check token agreement
     trt_gen = trt_res["gen_ids"]
@@ -467,7 +584,7 @@ def print_report(model_name: str, prompt: str, num_input_tokens: int,
     text_match = trt_gen == hf_gen
 
     prompt_display = prompt[:60] + ("..." if len(prompt) > 60 else "")
-    sep = "=" * 60
+    sep = "=" * (60 if not has_compile else 80)
 
     print(f"\n{sep}")
     print(f"Perf Comparison: {model_name}")
@@ -478,39 +595,76 @@ def print_report(model_name: str, prompt: str, num_input_tokens: int,
     print(f"Token match: {text_match}"
           + ("" if text_match
              else f" (TRT={len(trt_gen)} tokens, HF={len(hf_gen)} tokens)"))
-    print(sep)
+    if has_compile:
+        compile_label = f"HF (compile/{compile_mode})"
+        print(sep)
+        hdr = (f"{'':>20s}  {'TRT':>16s}  {'HF (eager)':>16s}"
+               f"  {compile_label:>22s}  {'TRT/compile':>11s}")
+        print(hdr)
 
-    hdr = f"{'':>20s}  {'TRT':>16s}  {'HF':>16s}  {'Speedup':>8s}"
-    print(hdr)
+        def _row3(label, trt_v, hf_v, cp_v, sp_col):
+            print(f"  {label:>18s}:  {trt_v:>16s}  {hf_v:>16s}"
+                  f"  {cp_v:>22s}  {sp_col:>11s}")
 
-    rows = [
-        ("Prefill (ms)",
-         _fmt(trt_prefill["mean"], trt_prefill["std"]),
-         _fmt(hf_prefill["mean"], hf_prefill["std"]),
-         _speedup(hf_prefill["mean"], trt_prefill["mean"]) + "  *"),
-        ("Decode (ms)",
-         _fmt(trt_decode["mean"], trt_decode["std"]),
-         _fmt(hf_decode["mean"], hf_decode["std"]),
-         _speedup(hf_decode["mean"], trt_decode["mean"])),
-    ]
+        _row3("Prefill (ms)",
+              _fmt(trt_prefill["mean"], trt_prefill["std"]),
+              _fmt(hf_prefill["mean"], hf_prefill["std"]),
+              _fmt(cp_prefill["mean"], cp_prefill["std"]),
+              _speedup(cp_prefill["mean"], trt_prefill["mean"]) + "  *")
+        _row3("Decode (ms)",
+              _fmt(trt_decode["mean"], trt_decode["std"]),
+              _fmt(hf_decode["mean"], hf_decode["std"]),
+              _fmt(cp_decode["mean"], cp_decode["std"]),
+              _speedup(cp_decode["mean"], trt_decode["mean"]))
+        if trt_per_tok > 0 and cp_per_tok > 0:
+            _row3("Per-token (ms)",
+                  f"{trt_per_tok:.2f} +/- {trt_per_tok_std:.2f}",
+                  f"{hf_per_tok:.2f} +/- {hf_per_tok_std:.2f}",
+                  f"{cp_per_tok:.2f} +/- {cp_per_tok_std:.2f}",
+                  _speedup(cp_per_tok, trt_per_tok))
+            _row3("Throughput (t/s)",
+                  f"{trt_tps:.1f} +/- {trt_tps_std:.1f}",
+                  f"{hf_tps:.1f} +/- {hf_tps_std:.1f}",
+                  f"{cp_tps:.1f} +/- {cp_tps_std:.1f}",
+                  _speedup(trt_tps, cp_tps))
+        _row3("Total (ms)",
+              _fmt(trt_total["mean"], trt_total["std"]),
+              _fmt(hf_total["mean"], hf_total["std"]),
+              _fmt(cp_total["mean"], cp_total["std"]),
+              _speedup(cp_total["mean"], trt_total["mean"]))
+    else:
+        print(sep)
+        hdr = f"{'':>20s}  {'TRT':>16s}  {'HF':>16s}  {'Speedup':>8s}"
+        print(hdr)
 
-    if trt_per_tok > 0 and hf_per_tok > 0:
-        rows.append(("Per-token (ms)",
-                      f"{trt_per_tok:.2f} +/- {trt_per_tok_std:.2f}",
-                      f"{hf_per_tok:.2f} +/- {hf_per_tok_std:.2f}",
-                      _speedup(hf_per_tok, trt_per_tok)))
-        rows.append(("Throughput (t/s)",
-                      f"{trt_tps:.1f} +/- {trt_tps_std:.1f}",
-                      f"{hf_tps:.1f} +/- {hf_tps_std:.1f}",
-                      _speedup(trt_tps, hf_tps)))
+        rows = [
+            ("Prefill (ms)",
+             _fmt(trt_prefill["mean"], trt_prefill["std"]),
+             _fmt(hf_prefill["mean"], hf_prefill["std"]),
+             _speedup(hf_prefill["mean"], trt_prefill["mean"]) + "  *"),
+            ("Decode (ms)",
+             _fmt(trt_decode["mean"], trt_decode["std"]),
+             _fmt(hf_decode["mean"], hf_decode["std"]),
+             _speedup(hf_decode["mean"], trt_decode["mean"])),
+        ]
 
-    rows.append(("Total (ms)",
-                  _fmt(trt_total["mean"], trt_total["std"]),
-                  _fmt(hf_total["mean"], hf_total["std"]),
-                  _speedup(hf_total["mean"], trt_total["mean"])))
+        if trt_per_tok > 0 and hf_per_tok > 0:
+            rows.append(("Per-token (ms)",
+                          f"{trt_per_tok:.2f} +/- {trt_per_tok_std:.2f}",
+                          f"{hf_per_tok:.2f} +/- {hf_per_tok_std:.2f}",
+                          _speedup(hf_per_tok, trt_per_tok)))
+            rows.append(("Throughput (t/s)",
+                          f"{trt_tps:.1f} +/- {trt_tps_std:.1f}",
+                          f"{hf_tps:.1f} +/- {hf_tps_std:.1f}",
+                          _speedup(trt_tps, hf_tps)))
 
-    for label, trt_val, hf_val, sp in rows:
-        print(f"  {label:>18s}:  {trt_val:>16s}  {hf_val:>16s}  {sp:>8s}")
+        rows.append(("Total (ms)",
+                      _fmt(trt_total["mean"], trt_total["std"]),
+                      _fmt(hf_total["mean"], hf_total["std"]),
+                      _speedup(hf_total["mean"], trt_total["mean"])))
+
+        for label, trt_val, hf_val, sp in rows:
+            print(f"  {label:>18s}:  {trt_val:>16s}  {hf_val:>16s}  {sp:>8s}")
 
     print()
     if is_mamba:
@@ -519,13 +673,18 @@ def print_report(model_name: str, prompt: str, num_input_tokens: int,
     else:
         print("* Prefill: HF batches all tokens; TRT processes token-by-token")
         print("  Decode: both token-by-token with KV cache (apples-to-apples)")
-    print(f"  Excludes: model loading, tokenization, engine build")
+    if has_compile:
+        print(f"  TRT/compile speedup = TRT vs HF (compile/{compile_mode})")
+    print("  Excludes: model loading, tokenization, engine build")
     print(f"  HF dtype: {hf_dtype}")
 
 
 def build_json_output(model_name: str, prompt: str, num_input_tokens: int,
                       max_new_tokens: int, iterations: int, warmup: int,
-                      hf_dtype: str, trt_res: dict, hf_res: dict) -> dict:
+                      hf_dtype: str, trt_res: dict, hf_res: dict,
+                      compile_res: dict | None = None,
+                      compile_mode: str = "reduce-overhead",
+                      cpp_res: dict | None = None) -> dict:
     """Build structured JSON output."""
     trt_prefill = _stats(trt_res["prefill_times"])
     trt_decode = _stats(trt_res["decode_times"])
@@ -564,7 +723,7 @@ def build_json_output(model_name: str, prompt: str, num_input_tokens: int,
 
     peak_memory_mb = _get_peak_memory_mb()
 
-    return {
+    out: dict = {
         "metadata": {
             "model": model_name,
             "gpu": _get_gpu_name(),
@@ -612,6 +771,53 @@ def build_json_output(model_name: str, prompt: str, num_input_tokens: int,
         "peak_memory_mb": peak_memory_mb,
     }
 
+    if cpp_res is not None:
+        cpp_prefill = _stats(cpp_res["prefill_times"])
+        cpp_decode = _stats(cpp_res["decode_times"])
+        cpp_avg_tokens = (statistics.mean(cpp_res["decode_token_counts"])
+                          if cpp_res["decode_token_counts"] else 0)
+        cpp_tok = _per_token_stats(cpp_decode, cpp_avg_tokens)
+        cpp_total = _stats([p + d for p, d in zip(cpp_res["prefill_times"],
+                                                   cpp_res["decode_times"])])
+        out["trt_cpp"] = {
+            "prefill_ms": cpp_prefill,
+            "decode_ms": cpp_decode,
+            "per_token_ms": cpp_tok["per_token_ms"],
+            "throughput_tps": cpp_tok["throughput_tps"],
+            "total_ms": cpp_total,
+            "num_decode_tokens": int(cpp_avg_tokens),
+        }
+        out["speedup"]["cpp_vs_hf_decode"] = _safe_div(
+            hf_decode["mean"], cpp_decode["mean"])
+        out["speedup"]["cpp_vs_trt_python_decode"] = _safe_div(
+            trt_decode["mean"], cpp_decode["mean"])
+
+    if compile_res is not None:
+        cp_prefill = _stats(compile_res["prefill_times"])
+        cp_decode = _stats(compile_res["decode_times"])
+        cp_avg_tokens = (statistics.mean(compile_res["decode_token_counts"])
+                         if compile_res["decode_token_counts"] else 0)
+        cp_tok = _per_token_stats(cp_decode, cp_avg_tokens)
+        cp_total = _stats([p + d for p, d in zip(compile_res["prefill_times"],
+                                                  compile_res["decode_times"])])
+        out["hf_compiled"] = {
+            "compile_mode": compile_mode,
+            "prefill_ms": cp_prefill,
+            "decode_ms": cp_decode,
+            "per_token_ms": cp_tok["per_token_ms"],
+            "throughput_tps": cp_tok["throughput_tps"],
+            "total_ms": cp_total,
+            "num_decode_tokens": int(cp_avg_tokens),
+        }
+        out["speedup"]["trt_vs_compile_prefill"] = _safe_div(
+            cp_prefill["mean"], trt_prefill["mean"])
+        out["speedup"]["trt_vs_compile_decode"] = _safe_div(
+            cp_decode["mean"], trt_decode["mean"])
+        out["speedup"]["trt_vs_compile_total"] = _safe_div(
+            cp_total["mean"], trt_total["mean"])
+
+    return out
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -640,10 +846,21 @@ def main():
                         help="Allow custom code from the HF model repo")
     parser.add_argument("--trt-only", action="store_true",
                         help="Benchmark TRT only (skip HF reference)")
+    parser.add_argument("--no-compile", action="store_true",
+                        help="Skip torch.compile benchmark")
+    parser.add_argument("--compile-mode", default="reduce-overhead",
+                        choices=["default", "reduce-overhead", "max-autotune"],
+                        help="torch.compile mode (default: reduce-overhead)")
     parser.add_argument("--json", dest="json_path", metavar="PATH",
                         help="Save results to JSON file")
     parser.add_argument("--perf-db", dest="perf_db_path", metavar="PATH",
                         help="SQLite perf database path (enables perf tracking)")
+    parser.add_argument("--trtf-binary", dest="trtf_binary", metavar="PATH",
+                        help="Path to trtf C++ binary for C++ runtime benchmark "
+                             "(requires --bundle)")
+    parser.add_argument("--hf-python", dest="hf_python", metavar="PATH",
+                        help="Path to Python interpreter for HF tokenizer in C++ binary "
+                             "(passed to --trtf-binary runs)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -785,10 +1002,10 @@ def main():
             print(f"[perf] WARNING: PerfDB early recording failed: {e}",
                   file=sys.stderr)
 
-    # -- Bench HF (GPU-exclusive) --
+    # -- Bench HF eager (GPU-exclusive) --
     print(f"[perf] Loading HF model (dtype={args.dtype}) ...", file=sys.stderr)
     hf_model = load_hf_model(model_dir, args.dtype, args.trust_remote_code)
-    print(f"[perf] Benchmarking HF ({args.warmup} warmup + "
+    print(f"[perf] Benchmarking HF eager ({args.warmup} warmup + "
           f"{args.iterations} iterations) ...", file=sys.stderr)
     hf_res = bench_hf(
         hf_model, input_ids, args.max_new_tokens,
@@ -797,17 +1014,56 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
+    # -- Bench HF compiled (optional) --
+    compile_res = None
+    if not args.no_compile and not is_mamba:
+        print("[perf] Loading HF model for torch.compile ...", file=sys.stderr)
+        hf_model2 = load_hf_model(model_dir, args.dtype, args.trust_remote_code)
+        print(f"[perf] Benchmarking HF compiled ({args.warmup} warmup + "
+              f"{args.iterations} iterations) ...", file=sys.stderr)
+        try:
+            compile_res = bench_hf_compiled(
+                hf_model2, input_ids, args.max_new_tokens,
+                args.warmup, args.iterations, eos_token_id,
+                args.compile_mode, args.verbose)
+        except Exception as exc:
+            print(f"[perf] torch.compile failed ({exc}); skipping.",
+                  file=sys.stderr)
+        del hf_model2
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    # -- Bench C++ binary (optional) --
+    cpp_res = None
+    trtf_binary = getattr(args, "trtf_binary", None)
+    if trtf_binary and args.bundle:
+        hf_python = getattr(args, "hf_python", None)
+        print(f"[perf] Benchmarking C++ binary ({args.warmup} warmup + "
+              f"{args.iterations} iterations) ...", file=sys.stderr)
+        cpp_res = bench_trtf_cpp(
+            trtf_binary, args.bundle, args.prompt, args.max_new_tokens,
+            args.warmup, args.iterations, hf_python, args.verbose)
+        if cpp_res is None:
+            print("[perf] WARNING: C++ benchmark failed; omitting from report.",
+                  file=sys.stderr)
+    elif trtf_binary and not args.bundle:
+        print("[perf] WARNING: --trtf-binary requires --bundle; skipping C++ bench.",
+              file=sys.stderr)
+
     # -- Report --
     print_report(
         args.model, args.prompt, len(input_ids),
         args.max_new_tokens, args.iterations, args.warmup,
-        args.dtype, trt_res, hf_res, is_mamba=is_mamba)
+        args.dtype, trt_res, hf_res, is_mamba=is_mamba,
+        compile_res=compile_res, compile_mode=args.compile_mode)
 
-    # -- JSON output (full TRT+HF) --
+    # -- JSON output (full TRT+HF+CPP) --
     json_output_data = build_json_output(
         args.model, args.prompt, len(input_ids),
         args.max_new_tokens, args.iterations, args.warmup,
-        args.dtype, trt_res, hf_res)
+        args.dtype, trt_res, hf_res,
+        compile_res=compile_res, compile_mode=args.compile_mode,
+        cpp_res=cpp_res)
     if args.json_path:
         with open(args.json_path, "w") as f:
             json.dump(json_output_data, f, indent=2)
@@ -839,7 +1095,7 @@ def main():
               file=sys.stderr)
 
 
-def run_as_diff_test(ctx):
+def run_as_diff_test(ctx, include_compile: bool = False):
     """Framework entry point. Returns DiffResult."""
     from diff_framework.protocol import DiffResult
     import time as _time
@@ -879,7 +1135,8 @@ def run_as_diff_test(ctx):
                 warmup, iterations, eos_token_id, ctx.verbose)
         del engine_plan
 
-        import gc, torch
+        import gc
+        import torch
         gc.collect()
         torch.cuda.empty_cache()
 

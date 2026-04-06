@@ -14,6 +14,7 @@
 #include "trtf/trtf_io.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +22,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -42,6 +44,8 @@ struct CliArgs {
     float point_y{0.5F};
     bool is_foreground{true};
     int max_new_tokens{0};
+    int benchmark{0}; // >0: run N timed iterations after warmup
+    int warmup{1};    // number of warmup iterations before timing
     int num_steps{-1};
     float guidance_scale{-1.0F};
     float conf_threshold{-1.0F};
@@ -132,6 +136,14 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--max-new-tokens" && need_value(arg)) {
             args.max_new_tokens = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--benchmark" && need_value(arg)) {
+            args.benchmark = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--warmup" && need_value(arg)) {
+            args.warmup = std::atoi(argv[++i]);
             continue;
         }
         if (arg == "--tail-frames" && need_value(arg)) {
@@ -250,7 +262,43 @@ int cmd_run(const CliArgs& args) {
     trtf::GenerateConfig cfg;
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 20;
 
-    if (!args.image_path.empty()) {
+    if (args.benchmark > 0) {
+        // Benchmark mode: warmup, then N timed iterations.
+        cfg.collect_timing = true;
+        const int warmup_n = args.warmup > 0 ? args.warmup : 1;
+        const int bench_n = args.benchmark;
+
+        std::cerr << "[trtf.benchmark] warmup=" << warmup_n << " iterations=" << bench_n
+                  << " max_new_tokens=" << cfg.max_new_tokens << '\n';
+
+        for (int w = 0; w < warmup_n; ++w)
+            pipeline->generate(prompt, cfg);
+
+        std::vector<double> prefill_ms_v, decode_ms_v;
+        prefill_ms_v.reserve(static_cast<std::size_t>(bench_n));
+        decode_ms_v.reserve(static_cast<std::size_t>(bench_n));
+
+        for (int r = 0; r < bench_n; ++r) {
+            auto result = pipeline->generate(prompt, cfg);
+            prefill_ms_v.push_back(result.prefill_ms);
+            decode_ms_v.push_back(result.decode_ms);
+        }
+
+        auto mean = [](const std::vector<double>& v) {
+            return std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size());
+        };
+
+        const double pmean = mean(prefill_ms_v);
+        const double dmean = mean(decode_ms_v);
+        const int ntoks = cfg.max_new_tokens;
+
+        std::cerr << std::fixed << std::setprecision(2);
+        std::cerr << "[trtf.benchmark] prefill_ms=" << pmean << " decode_ms=" << dmean
+                  << " tokens_per_sec=" << (ntoks > 0 ? ntoks / (dmean / 1000.0) : 0.0) << '\n';
+
+        auto last = pipeline->generate(prompt, trtf::GenerateConfig{cfg});
+        std::cout << last.text << '\n';
+    } else if (!args.image_path.empty()) {
         // Load image using trtf_io
         auto image = trtf::io::read_image(args.image_path);
         if (image.pixels.empty()) {

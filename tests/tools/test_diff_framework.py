@@ -13,11 +13,9 @@ from __future__ import annotations
 
 import json
 import struct
-import subprocess
 import sys
 import types
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -203,7 +201,8 @@ class TestRegistry:
         assert "perf_benchmark" in names
         assert "vl_pipeline" in names
         assert "diffusion_components" in names
-        assert len(names) == 6
+        assert "layer_profile" in names
+        assert len(names) == 7
 
 
 # -----------------------------------------------------------------------

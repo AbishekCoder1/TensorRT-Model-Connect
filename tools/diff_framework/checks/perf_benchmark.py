@@ -7,11 +7,12 @@ from diff_framework.protocol import DiffResult, TestContext
 @register
 class PerfBenchmarkTest:
     name = "perf_benchmark"
-    description = "TRT vs HF inference performance comparison"
+    description = "TRT vs HF inference performance comparison (2-way or 3-way with torch.compile)"
     runtime_strategies = ["decoder_kv_cache", "decoder_moe", "ssm_recurrent"]
     requires_bundle = False
     requires_gpu = True
 
     def run(self, ctx: TestContext) -> DiffResult:
         from perf_compare import run_as_diff_test
-        return run_as_diff_test(ctx)
+        include_compile = getattr(ctx, "options", {}).get("include_compile", False)
+        return run_as_diff_test(ctx, include_compile=include_compile)

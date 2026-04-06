@@ -9,10 +9,8 @@ Postconditions: Statistics correctly handle edge cases (empty, single, multiple)
 from __future__ import annotations
 
 import json
-import math
 from unittest import mock
 
-import numpy as np
 import pytest
 
 
@@ -261,6 +259,174 @@ class TestBuildJsonOutput:
 
 
 # ---------------------------------------------------------------------------
+# bench_hf_compiled
+# ---------------------------------------------------------------------------
+
+class TestBenchHfCompiled:
+    """Tests for bench_hf_compiled() — torch.compile benchmarking."""
+
+    def test_returns_correct_keys(self, monkeypatch):
+        mod = _import_perf_compare()
+        fake_model = mock.MagicMock()
+
+        # bench_hf_compiled delegates to bench_hf after compiling
+        def fake_bench_hf(model, input_ids, max_new_tokens, warmup,
+                          iterations, eos_token_id, verbose, **kwargs):
+            return {
+                "prefill_times": [5.0],
+                "decode_times": [20.0],
+                "decode_token_counts": [5],
+                "gen_ids": [1, 2, 3],
+            }
+
+        import torch as _torch  # noqa: F401
+        monkeypatch.setattr(mod, "bench_hf", fake_bench_hf)
+
+        # Patch torch.compile to return model unchanged
+        import sys as _sys
+        fake_torch = mock.MagicMock()
+        fake_torch.compile = lambda m, mode=None: m
+        monkeypatch.setitem(_sys.modules, "torch", fake_torch)
+
+        result = mod.bench_hf_compiled(
+            fake_model, [1, 2, 3], 5, 1, 1, None, "reduce-overhead", False)
+
+        assert "prefill_times" in result
+        assert "decode_times" in result
+        assert "decode_token_counts" in result
+        assert "gen_ids" in result
+
+    def test_delegates_to_bench_hf(self, monkeypatch):
+        mod = _import_perf_compare()
+        call_log = []
+
+        def fake_bench_hf(model, *args, **kwargs):
+            call_log.append("bench_hf_called")
+            return _fake_bench_result()
+
+        monkeypatch.setattr(mod, "bench_hf", fake_bench_hf)
+
+        import sys as _sys
+        fake_torch = mock.MagicMock()
+        fake_torch.compile = lambda m, mode=None: m
+        monkeypatch.setitem(_sys.modules, "torch", fake_torch)
+
+        mod.bench_hf_compiled(
+            mock.MagicMock(), [1, 2, 3], 5, 1, 1, None,
+            "reduce-overhead", False)
+        assert "bench_hf_called" in call_log
+
+
+# ---------------------------------------------------------------------------
+# build_json_output with compile_res
+# ---------------------------------------------------------------------------
+
+class TestBuildJsonOutputWithCompile:
+    """Tests for build_json_output() with the new hf_compiled section."""
+
+    def test_no_compile_res_no_hf_compiled_key(self):
+        mod = _import_perf_compare()
+        trt = _make_bench_result([10.0], [40.0], 20, [1, 2, 3])
+        hf = _make_bench_result([8.0], [80.0], 20, [1, 2, 3])
+        result = mod.build_json_output(
+            "m", "p", 1, 20, 1, 0, "float16", trt, hf)
+        assert "hf_compiled" not in result
+
+    def test_with_compile_res_has_hf_compiled_key(self):
+        mod = _import_perf_compare()
+        trt = _make_bench_result([10.0, 10.0], [40.0, 40.0], 20, [1, 2])
+        hf = _make_bench_result([8.0, 8.0], [80.0, 80.0], 20, [1, 2])
+        cp = _make_bench_result([9.0, 9.0], [60.0, 60.0], 20, [1, 2])
+        result = mod.build_json_output(
+            "m", "p", 1, 20, 2, 0, "float16", trt, hf,
+            compile_res=cp, compile_mode="reduce-overhead")
+        assert "hf_compiled" in result
+
+    def test_hf_compiled_has_compile_mode(self):
+        mod = _import_perf_compare()
+        trt = _make_bench_result([10.0], [40.0], 20, [1])
+        hf = _make_bench_result([8.0], [80.0], 20, [1])
+        cp = _make_bench_result([9.0], [60.0], 20, [1])
+        result = mod.build_json_output(
+            "m", "p", 1, 20, 1, 0, "float16", trt, hf,
+            compile_res=cp, compile_mode="max-autotune")
+        assert result["hf_compiled"]["compile_mode"] == "max-autotune"
+
+    def test_speedup_has_trt_vs_compile_keys(self):
+        mod = _import_perf_compare()
+        trt = _make_bench_result([10.0, 10.0], [50.0, 50.0], 20, [1])
+        hf = _make_bench_result([5.0, 5.0], [100.0, 100.0], 20, [1])
+        cp = _make_bench_result([8.0, 8.0], [80.0, 80.0], 20, [1])
+        result = mod.build_json_output(
+            "m", "p", 1, 20, 2, 0, "float16", trt, hf,
+            compile_res=cp)
+        sp = result["speedup"]
+        assert "trt_vs_compile_decode" in sp
+        assert "trt_vs_compile_prefill" in sp
+
+    def test_compile_decode_speedup_value(self):
+        mod = _import_perf_compare()
+        # TRT decode=50ms, compile decode=100ms → 2.0x
+        trt = _make_bench_result([10.0, 10.0], [50.0, 50.0], 20, [1])
+        hf = _make_bench_result([5.0, 5.0], [100.0, 100.0], 20, [1])
+        cp = _make_bench_result([5.0, 5.0], [100.0, 100.0], 20, [1])
+        result = mod.build_json_output(
+            "m", "p", 1, 20, 2, 0, "float16", trt, hf, compile_res=cp)
+        import pytest
+        assert result["speedup"]["trt_vs_compile_decode"] == pytest.approx(2.0, abs=0.01)
+
+    def test_compile_result_json_serializable(self):
+        mod = _import_perf_compare()
+        trt = _make_bench_result([10.0, 11.0], [40.0, 42.0], 5, [1, 2, 3])
+        hf = _make_bench_result([8.0, 9.0], [80.0, 82.0], 5, [1, 2, 3])
+        cp = _make_bench_result([9.0, 10.0], [60.0, 62.0], 5, [1, 2, 3])
+        result = mod.build_json_output(
+            "m", "p", 3, 5, 2, 1, "float16", trt, hf, compile_res=cp)
+        serialized = json.dumps(result)
+        parsed = json.loads(serialized)
+        assert "hf_compiled" in parsed
+
+
+# ---------------------------------------------------------------------------
+# print_report with compile_res
+# ---------------------------------------------------------------------------
+
+class TestPrintReportWithCompile:
+    """Tests for print_report() 3-column mode with compile_res."""
+
+    def test_three_column_contains_compile_label(self, capsys):
+        mod = _import_perf_compare()
+        trt = _make_bench_result([10.0, 10.0], [40.0, 40.0], 20, [1, 2])
+        hf = _make_bench_result([8.0, 8.0], [80.0, 80.0], 20, [1, 2])
+        cp = _make_bench_result([9.0, 9.0], [60.0, 60.0], 20, [1, 2])
+        mod.print_report("TestModel", "Hello", 3, 20, 2, 1,
+                         "float16", trt, hf,
+                         compile_res=cp, compile_mode="reduce-overhead")
+        out = capsys.readouterr().out
+        assert "reduce-overhead" in out or "compile" in out.lower()
+
+    def test_three_column_shows_all_backends(self, capsys):
+        mod = _import_perf_compare()
+        trt = _make_bench_result([10.0, 10.0], [40.0, 40.0], 20, [1])
+        hf = _make_bench_result([8.0, 8.0], [80.0, 80.0], 20, [1])
+        cp = _make_bench_result([9.0, 9.0], [60.0, 60.0], 20, [1])
+        mod.print_report("m", "p", 1, 20, 2, 0,
+                         "float16", trt, hf, compile_res=cp)
+        out = capsys.readouterr().out
+        assert "TRT" in out
+        assert "HF" in out
+
+    def test_no_compile_res_keeps_2col_format(self, capsys):
+        mod = _import_perf_compare()
+        trt = _make_bench_result([10.0], [40.0], 20, [1])
+        hf = _make_bench_result([8.0], [80.0], 20, [1])
+        mod.print_report("m", "p", 1, 20, 1, 0, "float16", trt, hf)
+        out = capsys.readouterr().out
+        # Should still have speedup
+        assert "Speedup" in out or "speedup" in out.lower()
+
+
+# ---------------------------------------------------------------------------
 # print_report
 # ---------------------------------------------------------------------------
 
@@ -359,13 +525,13 @@ def _fake_bench_result():
 class TestSerialGpuExecution:
     """Verify main() runs TRT before HF and frees GPU between them."""
 
-    def _run_main_with_mocks(self, monkeypatch, is_mamba=False):
+    def _run_main_with_mocks(self, monkeypatch, is_mamba=False,
+                             extra_argv=None):
         """Patch all heavy deps in main() and return the call log."""
         mod = _import_perf_compare()
         call_log = []
 
-        # Patch sys.argv
-        monkeypatch.setattr("sys.argv", [
+        base_argv = [
             "perf_compare.py",
             "--model", "fake/model",
             "--bundle", "/fake/bundle.trtfb",
@@ -373,20 +539,26 @@ class TestSerialGpuExecution:
             "--max-new-tokens", "5",
             "--warmup", "0",
             "--iterations", "1",
-        ])
+        ]
+        # Patch sys.argv
+        monkeypatch.setattr("sys.argv", base_argv + (extra_argv or []))
 
         # Patch _resolve_model
         monkeypatch.setattr(
             "trtf_build.engine_builder._resolve_model",
             lambda _: "/fake/model_dir")
 
-        # Patch AutoTokenizer
+        # Patch AutoTokenizer — patch via sys.modules to avoid triggering
+        # transformers' lazy importer (which can fail in some environments)
         fake_tok = mock.MagicMock()
         fake_tok.encode.return_value = [1, 2, 3]
         fake_tok.eos_token_id = None
-        monkeypatch.setattr(
-            "transformers.AutoTokenizer.from_pretrained",
-            lambda *a, **kw: fake_tok)
+        fake_auto_tok = mock.MagicMock()
+        fake_auto_tok.from_pretrained = mock.MagicMock(return_value=fake_tok)
+        fake_transformers = mock.MagicMock()
+        fake_transformers.AutoTokenizer = fake_auto_tok
+        monkeypatch.setitem(__import__("sys").modules,
+                            "transformers", fake_transformers)
 
         # Patch load_trt_from_bundle
         def fake_load_bundle(path):
@@ -420,7 +592,7 @@ class TestSerialGpuExecution:
         fake_torch.cuda = fake_cuda
         monkeypatch.setitem(__import__("sys").modules, "torch", fake_torch)
 
-        # Patch load_hf_model / bench_hf
+        # Patch load_hf_model / bench_hf / bench_hf_compiled
         def fake_load_hf(*args, **kwargs):
             call_log.append("load_hf")
             return mock.MagicMock()
@@ -430,6 +602,11 @@ class TestSerialGpuExecution:
             call_log.append("bench_hf")
             return _fake_bench_result()
         monkeypatch.setattr(mod, "bench_hf", fake_bench_hf)
+
+        def fake_bench_hf_compiled(*args, **kwargs):
+            call_log.append("bench_hf_compiled")
+            return _fake_bench_result()
+        monkeypatch.setattr(mod, "bench_hf_compiled", fake_bench_hf_compiled)
 
         # Patch print_report to suppress output
         monkeypatch.setattr(mod, "print_report", lambda *a, **kw: None)
@@ -480,13 +657,38 @@ class TestSerialGpuExecution:
         assert "empty_cache" in mid_section
 
     def test_hf_never_loaded_before_trt_completes(self, monkeypatch):
-        """Verify full ordering: load_bundle → bench_trt → cleanup → load_hf → bench_hf → cleanup."""
-        log = self._run_main_with_mocks(monkeypatch)
+        """Verify full ordering with --no-compile:
+        load_bundle → bench_trt → cleanup → load_hf → bench_hf → cleanup."""
+        log = self._run_main_with_mocks(monkeypatch, extra_argv=["--no-compile"])
         expected_order = ["load_bundle", "bench_trt", "gc_collect",
                           "empty_cache", "load_hf", "bench_hf",
                           "gc_collect", "empty_cache"]
         assert log == expected_order, (
             f"Expected exact serial order:\n  {expected_order}\nGot:\n  {log}")
+
+    def test_compile_pass_runs_after_hf_eager(self, monkeypatch):
+        """With compile enabled (default), compile pass runs after HF eager."""
+        log = self._run_main_with_mocks(monkeypatch)
+        # bench_hf (eager) must appear before bench_hf_compiled
+        if "bench_hf_compiled" not in log:
+            return  # Mamba path or torch.compile unavailable — skip check
+        hf_idx = log.index("bench_hf")
+        compile_idx = log.index("bench_hf_compiled")
+        assert hf_idx < compile_idx, (
+            f"bench_hf ({hf_idx}) must run before bench_hf_compiled "
+            f"({compile_idx}): {log}")
+
+    def test_compile_pass_has_cleanup(self, monkeypatch):
+        """GPU memory freed after compile pass."""
+        log = self._run_main_with_mocks(monkeypatch)
+        if "bench_hf_compiled" not in log:
+            return
+        compile_idx = log.index("bench_hf_compiled")
+        remaining = log[compile_idx + 1:]
+        assert "gc_collect" in remaining, (
+            f"gc.collect() missing after bench_hf_compiled: {log}")
+        assert "empty_cache" in remaining, (
+            f"torch.cuda.empty_cache() missing after bench_hf_compiled: {log}")
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +699,7 @@ class TestTrtOnlyCLI:
     """Tests for --trt-only CLI flag."""
 
     def test_trt_only_flag_accepted(self):
-        mod = _import_perf_compare()
+        _import_perf_compare()  # ensure importable
         # Verify the parser accepts --trt-only
         import argparse
         parser = argparse.ArgumentParser()

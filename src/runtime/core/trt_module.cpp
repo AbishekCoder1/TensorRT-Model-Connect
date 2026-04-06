@@ -273,10 +273,12 @@ TensorMap TrtModule::forward(const TensorMap& inputs) {
     forward_async(inputs);
     sync();
 
-    // Download outputs
+    // Download outputs — skip externally-bound buffers (they stay on device)
     TensorMap outputs;
     for (auto& [name, entry] : buffers_) {
         if (entry.is_input)
+            continue;
+        if (entry.is_external)
             continue;
 
         auto& staging = host_output_staging_[name];

@@ -22,6 +22,8 @@ namespace trtf {
 struct TextResult {
     std::string text;
     std::vector<int32_t> token_ids;
+    double prefill_ms{0.0}; // populated when GenerateConfig::collect_timing is true
+    double decode_ms{0.0};  // populated when GenerateConfig::collect_timing is true
 };
 
 struct ImageResult {
@@ -62,7 +64,8 @@ struct GenerateConfig {
     float guidance_scale{-1.0f}; // diffusion
     int32_t num_steps{-1};       // diffusion
     int32_t eos_token_id{-1};
-    int32_t tail_frames{0}; // speech-to-speech: extra frames after input
+    int32_t tail_frames{0};     // speech-to-speech: extra frames after input
+    bool collect_timing{false}; // if true, populate TextResult::prefill_ms / decode_ms
 };
 
 // --- Pipeline interface ---
