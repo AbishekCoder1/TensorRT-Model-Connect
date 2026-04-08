@@ -261,6 +261,14 @@ int cmd_run(const CliArgs& args) {
     const std::string prompt = args.prompt.empty() ? "Hello" : args.prompt;
     trtf::GenerateConfig cfg;
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 20;
+    cfg.num_steps = args.num_steps;
+    cfg.guidance_scale = args.guidance_scale;
+
+    // Detect diffusion pipelines — they use generate_image(), not generate().
+    const std::string ptype = pipeline->pipeline_type();
+    const bool is_diffusion =
+        (ptype.find("Diffusion") != std::string::npos || ptype.find("Flux") != std::string::npos ||
+         ptype.find("Wan") != std::string::npos || ptype.find("ZImage") != std::string::npos);
 
     if (args.benchmark > 0) {
         // Benchmark mode: warmup, then N timed iterations.
@@ -298,6 +306,43 @@ int cmd_run(const CliArgs& args) {
 
         auto last = pipeline->generate(prompt, trtf::GenerateConfig{cfg});
         std::cout << last.text << '\n';
+    } else if (is_diffusion) {
+        auto result = pipeline->generate_image(prompt, cfg);
+        if (result.pixels.empty()) {
+            std::cerr << "Error: image generation failed\n";
+            return EXIT_FAILURE;
+        }
+
+        // Save as PNG. If -o ends with .png, use as file path; otherwise
+        // treat as directory and write output.png inside it.
+        std::string out_path;
+        if (!args.output_dir.empty() && args.output_dir.size() > 4 &&
+            args.output_dir.substr(args.output_dir.size() - 4) == ".png") {
+            out_path = args.output_dir;
+            auto parent = std::filesystem::path(out_path).parent_path();
+            if (!parent.empty())
+                std::filesystem::create_directories(parent);
+        } else {
+            const std::string out_dir =
+                args.output_dir.empty() ? "/tmp/trtf_run_output" : args.output_dir;
+            std::filesystem::create_directories(out_dir);
+            out_path = out_dir + "/output.png";
+        }
+
+        const auto frame_pixels =
+            static_cast<std::size_t>(result.height) * static_cast<std::size_t>(result.width) * 3;
+        std::vector<unsigned char> rgb(frame_pixels);
+        for (std::size_t i = 0; i < frame_pixels; ++i) {
+            const float v = std::max(0.0F, std::min(1.0F, result.pixels[i]));
+            rgb[i] = static_cast<unsigned char>(v * 255.0F + 0.5F);
+        }
+
+        const int stride = result.width * 3;
+        if (!stbi_write_png(out_path.c_str(), result.width, result.height, 3, rgb.data(), stride)) {
+            std::cerr << "Error: failed to write " << out_path << '\n';
+            return EXIT_FAILURE;
+        }
+        std::cout << "Saved " << out_path << " (" << result.width << "x" << result.height << ")\n";
     } else if (!args.image_path.empty()) {
         // Load image using trtf_io
         auto image = trtf::io::read_image(args.image_path);

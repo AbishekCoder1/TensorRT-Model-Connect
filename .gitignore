@@ -1,5 +1,10 @@
+# Removed LibTorch/Torch-TRT C++ runtime (root-owned files may linger)
+/src/torchtrt/
+
 # Build outputs
 /build/
+**/build/
+/build_*/
 /build-*/
 /build-container/
 /build-container-*/
@@ -77,6 +82,9 @@ models/hf/hf-internal-testing__*/
 models/hf/trl-internal-testing__*/
 models/hf/*/.cache/
 
+# Torch-TRT E2E model manifests (machine-specific, not committed)
+tests/torchtrt_e2e/models/*.json
+
 .*
 !.gitignore
 !.gitlab-ci.yml
@@ -90,5 +98,7 @@ engines
 *.png
 *.wav
 *.trtfb
+*.ttrtb
+results.json
 !**/Recording.wav
 worktrees/

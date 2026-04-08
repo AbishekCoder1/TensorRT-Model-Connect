@@ -1,4 +1,5 @@
 #include "trtf/runtime/kv_cache.h"
+
 #include "trtf/runtime/trt_module.h"
 
 #if TRTF_HAS_TRT
@@ -9,31 +10,20 @@
 
 namespace trtf {
 
-KvCache::KvCache(int32_t num_layers, int32_t max_length,
-                 int32_t kv_dim, cudaStream_t stream,
-                 DType cache_dtype)
-    : num_layers_(num_layers)
-    , max_length_(max_length)
-    , kv_dim_(kv_dim)
-    , stream_(stream)
-    , cache_dtype_(cache_dtype)
-    , cache_element_size_(dtype_size(cache_dtype))
-{
+KvCache::KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
+                 DType cache_dtype, NamingScheme naming)
+    : num_layers_(num_layers), max_length_(max_length), kv_dim_(kv_dim), stream_(stream),
+      cache_dtype_(cache_dtype), cache_element_size_(dtype_size(cache_dtype)), naming_(naming) {
     cache_k_.reserve(static_cast<std::size_t>(num_layers));
     cache_v_.reserve(static_cast<std::size_t>(num_layers));
     present_k_.reserve(static_cast<std::size_t>(num_layers));
     present_v_.reserve(static_cast<std::size_t>(num_layers));
 
-    for (int32_t i = 0; i < num_layers; ++i)
-    {
-        cache_k_.emplace_back(
-            std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
-        cache_v_.emplace_back(
-            std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
-        present_k_.emplace_back(
-            std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
-        present_v_.emplace_back(
-            std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
+    for (int32_t i = 0; i < num_layers; ++i) {
+        cache_k_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
+        cache_v_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
+        present_k_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
+        present_v_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
     }
 
     // Pre-allocate mask buffer: [max_length + 1] for dense causal mask.
@@ -45,8 +35,7 @@ KvCache::KvCache(int32_t num_layers, int32_t max_length,
 // Masked score constant — must match trt_engine_lifecycle.h kMaskedScore.
 static constexpr float kMaskedScore = -1.0e4F;
 
-void KvCache::build_attention_mask(std::vector<float>& mask) const
-{
+void KvCache::build_attention_mask(std::vector<float>& mask) const {
     // DEPRECATED: use prepare_step() instead.
     const auto width = static_cast<std::size_t>(max_length_) + 1;
     mask.assign(width, kMaskedScore);
@@ -56,11 +45,9 @@ void KvCache::build_attention_mask(std::vector<float>& mask) const
     mask.back() = 0.0f;
 }
 
-void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/)
-{
+void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
     // Position input (discovered during bind_to).
-    if (has_position_input_)
-    {
+    if (has_position_input_) {
         pos_buf_ = position_;
         Tensor pos_t;
         pos_t.data = &pos_buf_;
@@ -83,22 +70,31 @@ void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/)
     inputs["attention_mask"] = mask_t;
 }
 
-void KvCache::bind_to(TrtModule& module)
-{
+void KvCache::bind_to(TrtModule& module) {
     has_position_input_ = module.has_input("position_id");
 
-    for (int32_t i = 0; i < num_layers_; ++i)
-    {
-        std::string suffix = "_" + std::to_string(i);
-        module.bind_external("cache_k" + suffix, cache_k_[static_cast<std::size_t>(i)].data());
-        module.bind_external("cache_v" + suffix, cache_v_[static_cast<std::size_t>(i)].data());
-        module.bind_external("present_k" + suffix, present_k_[static_cast<std::size_t>(i)].data());
-        module.bind_external("present_v" + suffix, present_v_[static_cast<std::size_t>(i)].data());
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        if (naming_ == NamingScheme::kTorchTrt) {
+            // Torch-TRT naming: cache_kv_{2i}/cache_kv_{2i+1} (interleaved K/V inputs),
+            // output{2i+1}/output{2i+2} (interleaved K/V outputs, output0 = logits).
+            std::string k_idx = std::to_string(2 * i);
+            std::string v_idx = std::to_string(2 * i + 1);
+            module.bind_external("cache_kv_" + k_idx, cache_k_[li].data());
+            module.bind_external("cache_kv_" + v_idx, cache_v_[li].data());
+            module.bind_external("output" + std::to_string(2 * i + 1), present_k_[li].data());
+            module.bind_external("output" + std::to_string(2 * i + 2), present_v_[li].data());
+        } else {
+            std::string suffix = "_" + std::to_string(i);
+            module.bind_external("cache_k" + suffix, cache_k_[li].data());
+            module.bind_external("cache_v" + suffix, cache_v_[li].data());
+            module.bind_external("present_k" + suffix, present_k_[li].data());
+            module.bind_external("present_v" + suffix, present_v_[li].data());
+        }
     }
 }
 
-void KvCache::advance(int32_t n_tokens)
-{
+void KvCache::advance(int32_t n_tokens) {
     // For now, only single-token advance is supported.
     // n_tokens > 1 reserved for future batched prefill (TASK-10).
     assert(n_tokens == 1 && "KvCache::advance: only n_tokens==1 supported");
@@ -108,52 +104,39 @@ void KvCache::advance(int32_t n_tokens)
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
     auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
 
-    if (position_ < max_length_)
-    {
+    if (position_ < max_length_) {
         // Normal append: write to position_ slot
         auto offset = static_cast<std::size_t>(position_) * row_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i)
-        {
+        for (int32_t i = 0; i < num_layers_; ++i) {
             auto li = static_cast<std::size_t>(i);
-            cudaMemcpyAsync(
-                static_cast<uint8_t*>(cache_k_[li].data()) + offset,
-                present_k_[li].data(), row_bytes,
-                cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(
-                static_cast<uint8_t*>(cache_v_[li].data()) + offset,
-                present_v_[li].data(), row_bytes,
-                cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
+                            present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
+                            present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
         }
         ++position_;
-    }
-    else
-    {
+    } else {
         // Cache full: shift [1..max) → [0..max-1), then write at tail
         auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
         auto tail_offset = shift_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i)
-        {
+        for (int32_t i = 0; i < num_layers_; ++i) {
             auto li = static_cast<std::size_t>(i);
             auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
             auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes,
-                cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes,
-                cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
             cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
-                cudaMemcpyDeviceToDevice, stream_);
+                            cudaMemcpyDeviceToDevice, stream_);
             cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
-                cudaMemcpyDeviceToDevice, stream_);
+                            cudaMemcpyDeviceToDevice, stream_);
         }
         // position_ stays at max_length_ (cache is full, all slots visible)
     }
 }
 
-void KvCache::reset()
-{
+void KvCache::reset() {
     position_ = 0;
-    for (int32_t i = 0; i < num_layers_; ++i)
-    {
+    for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
         cudaMemsetAsync(cache_k_[li].data(), 0, cache_k_[li].nbytes(), stream_);
         cudaMemsetAsync(cache_v_[li].data(), 0, cache_v_[li].nbytes(), stream_);
@@ -163,22 +146,25 @@ void KvCache::reset()
     cudaStreamSynchronize(stream_);
 }
 
-std::size_t KvCache::device_memory_bytes() const
-{
+std::size_t KvCache::device_memory_bytes() const {
     std::size_t total = 0;
-    for (const auto& t : cache_k_) total += t.nbytes();
-    for (const auto& t : cache_v_) total += t.nbytes();
-    for (const auto& t : present_k_) total += t.nbytes();
-    for (const auto& t : present_v_) total += t.nbytes();
+    for (const auto& t : cache_k_)
+        total += t.nbytes();
+    for (const auto& t : cache_v_)
+        total += t.nbytes();
+    for (const auto& t : present_k_)
+        total += t.nbytes();
+    for (const auto& t : present_v_)
+        total += t.nbytes();
     return total;
 }
 
-bool KvCache::ok() const
-{
-    if (cache_k_.size() != static_cast<std::size_t>(num_layers_)) return false;
-    for (const auto& t : cache_k_)
-    {
-        if (!t.ok()) return false;
+bool KvCache::ok() const {
+    if (cache_k_.size() != static_cast<std::size_t>(num_layers_))
+        return false;
+    for (const auto& t : cache_k_) {
+        if (!t.ok())
+            return false;
     }
     return true;
 }

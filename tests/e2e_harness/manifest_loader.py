@@ -40,6 +40,7 @@ _DEFAULT_REFERENCE_BACKEND: dict[str, str] = {
     "prompted_segmentation": "hf_transformers",
     "object_detection": "hf_transformers",
     "diffusion_media_generation": "hf_diffusers",
+    "torchtrt_diffusion": "torchtrt_diffusers",
     "embedding": "hf_transformers",
     "reranking": "hf_transformers",
     "encoder_only_nlp": "hf_transformers",
@@ -51,6 +52,7 @@ _DEFAULT_REFERENCE_BACKEND: dict[str, str] = {
 _DEFAULT_ORACLE_LEVEL: dict[str, str] = {
     "hf_transformers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "hf_diffusers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
+    "torchtrt_diffusers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "torch_reference": OracleLevel.L2_INTERNAL_REFERENCE.value,
     "custom_python": OracleLevel.L2_INTERNAL_REFERENCE.value,
     "golden_snapshot": OracleLevel.L3_SNAPSHOT_REGRESSION.value,
@@ -110,6 +112,12 @@ _DEFAULT_STAGES: dict[str, list[dict[str, Any]]] = {
         {"name": "vision_encode", "required": False},
         {"name": "audio_encode", "required": False},
         {"name": "talker_decode", "required": True},
+        {"name": "end_to_end", "required": True},
+    ],
+    "torchtrt_diffusion": [
+        {"name": "t5_encode", "required": True},
+        {"name": "dit_step", "required": True},
+        {"name": "vae_decode", "required": True},
         {"name": "end_to_end", "required": True},
     ],
     "composite_pipeline": [
@@ -184,6 +192,15 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
         reqs.append(PreflightRequirement(
             kind="asset_exists",
             args={"path": manifest["speech_reference_tokens"]},
+            gating=True,
+        ))
+
+    # Torch-TRT models need torch_tensorrt
+    build_args = manifest.get("build_args", {})
+    if build_args.get("torch_trt", False):
+        reqs.append(PreflightRequirement(
+            kind="python_module_available",
+            args={"module": "torch_tensorrt"},
             gating=True,
         ))
 
@@ -269,6 +286,11 @@ def _build_inputs(manifest: dict) -> dict:
         inputs["video_width"] = manifest.get("video_width", 832)
         inputs["num_inference_steps"] = manifest.get("num_inference_steps", 30)
 
+    # Image dimensions (torch-trt diffusion uses these for latent shape)
+    if manifest.get("image_height"):
+        inputs["image_height"] = manifest["image_height"]
+        inputs["image_width"] = manifest.get("image_width", manifest["image_height"])
+
     return inputs
 
 
@@ -347,6 +369,11 @@ def _build_metadata(manifest: dict) -> dict:
     if "precision" in manifest:
         meta["precision"] = manifest["precision"]
 
+    # Propagate build_args so the orchestrator can select the correct backend
+    # (e.g. --torch-trt flag for torch-trt models vs raw TRT default).
+    if "build_args" in manifest:
+        meta["build_args"] = manifest["build_args"]
+
     return meta
 
 
@@ -382,6 +409,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "diffusion_wan",
     "diffusion_zimage",
     "diffusion_pixart",
+    "torchtrt_diffusion",
     "segmentation",
     "prompted_segmentation",
     "encoder_only",
@@ -393,6 +421,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "object_detection",
     "omni_multimodal",
     "neural_operator",
+    "torchtrt_decoder",
 })
 
 

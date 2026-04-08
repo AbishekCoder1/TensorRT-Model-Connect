@@ -131,9 +131,10 @@ void TextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logi
 
     TensorMap outputs = decoder_->forward(inputs);
 
-    auto it = outputs.find("logits");
+    auto it = outputs.find(config_.logits_output_name);
     if (it == outputs.end()) {
-        throw std::runtime_error("TextGenerationPipeline: no 'logits' output");
+        throw std::runtime_error("TextGenerationPipeline: no '" + config_.logits_output_name +
+                                 "' output");
     }
 
     const auto& logits_tensor = it->second;

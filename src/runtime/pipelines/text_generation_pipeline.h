@@ -27,6 +27,7 @@ struct TextGenConfig {
     int32_t id_bos{0};
     int32_t id_eos{0};
     bool has_position_input{true};
+    std::string logits_output_name{"logits"};
 };
 
 class TextGenerationPipeline final : public IPipeline {

@@ -1,0 +1,16 @@
+{
+  "name": "qwen2.5-0.5b-torchtrt",
+  "hf_id": "Qwen/Qwen2.5-0.5B",
+  "bundle": "qwen2.5-0.5b-torchtrt.trtfb",
+  "family": "qwen",
+  "runtime_strategy": "torchtrt_decoder",
+  "max_cache_length": 256,
+  "precision": "fp16",
+  "prompt": "The largest ocean on Earth is",
+  "max_new_tokens": 20,
+  "logit_atol": 1e-2,
+  "build_args": {
+    "torch_trt": true,
+    "max_cache_length": 256
+  }
+}

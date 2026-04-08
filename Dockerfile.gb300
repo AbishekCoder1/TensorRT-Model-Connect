@@ -41,9 +41,22 @@ RUN pip install \
     ml_dtypes \
     datasets
 
-# PyTorch ecosystem (cu130 wheels for aarch64)
-RUN pip install torch torchaudio torchvision \
-    --index-url https://download.pytorch.org/whl/cu130
+# PyTorch ecosystem — install torch first, then derive the CUDA variant tag
+# so torchvision/torchaudio/torch_tensorrt all use the same CUDA build.
+RUN pip install torch --index-url https://download.pytorch.org/whl/cu130 && \
+    TORCH_CUDA=$(python3 -c "import torch; print(torch.version.cuda.replace('.','')[:3])") && \
+    echo "Detected torch CUDA variant: cu${TORCH_CUDA}" && \
+    pip install torchvision torchaudio \
+        --index-url "https://download.pytorch.org/whl/cu${TORCH_CUDA}"
+
+# Torch-TRT (compiles HF models to TRT-optimized TorchScript via torch.export + dynamo)
+# Use the same CUDA variant index as torch to avoid version mismatch.
+RUN TORCH_CUDA=$(python3 -c "import torch; print(torch.version.cuda.replace('.','')[:3])") && \
+    pip install torch_tensorrt \
+        --extra-index-url "https://download.pytorch.org/whl/cu${TORCH_CUDA}"
+
+# Quantized model support for Torch-TRT
+RUN pip install nvidia-modelopt
 
 # ML / testing / utilities
 RUN pip install \
@@ -71,6 +84,16 @@ RUN pip install "nemo_toolkit[tts]==2.7.0" && \
     python3 -c "import transformers; assert transformers.__version__ == '5.2.0', transformers.__version__" && \
     python3 -c "import diffusers, ftfy; print('deps_ok', diffusers.__version__)"
 
+# Fix CUDA version mismatch: nemo_toolkit can pull in incompatible torch
+# builds from PyPI that break torchvision/torchaudio C++ extensions.
+# Reinstall the full torch stack from the cu130 index so all C++ ABIs match.
+RUN pip install --force-reinstall \
+        torch torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cu130 && \
+    python3 -c "import torch; print('torch ok:', torch.__version__, torch.version.cuda)" && \
+    python3 -c "import torchvision; print('torchvision ok:', torchvision.__version__)" && \
+    python3 -c "import torchaudio; print('torchaudio ok:', torchaudio.__version__)"
+
 # Create libnvinfer.so symlink (pip ships libnvinfer.so.10 only)
 RUN TRT_LIB=$(python3 -c \
       "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])") && \
@@ -81,7 +104,8 @@ RUN TRT_LIB=$(python3 -c \
 # ── Environment ─────────────────────────────────────────────────────────────
 # Pre-compute paths so cmake / runtime find TRT without manual exports
 ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
-ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
+# TRT_INC_DIR: auto-detected at cmake time in setup_container.sh
+# (works on both x86_64 and aarch64/GB300)
 ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
 
 # cuBLAS fix for GB300 (Blackwell, sm_103): the pip-installed nvidia-cu13

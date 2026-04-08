@@ -704,6 +704,18 @@ tests/
       defaults/                      # Per-strategy JSON threshold files
 ```
 
+## Torch-TRT model transforms
+
+When transforming a new model to torch-trt (building a `.trtfb` bundle via `ttrt_build/`):
+
+1. **Read `docs/torch-trt/TORCHTRT_TRANSFORM_GUIDE.md` first** — step-by-step playbook covering wrapper rules, the validation loop, output conventions, and deliverables checklist.
+2. **Consult `docs/torch-trt/TORCHTRT_KNOWN_ISSUES.md`** — living registry of compilation failures, masking bugs, and workarounds discovered during previous transforms. Check it before writing wrapper code.
+3. **Log new issues** — if you discover a new issue during the transform, add it to `docs/torch-trt/TORCHTRT_KNOWN_ISSUES.md` with symptom, root cause, and fix.
+4. **Do not stop until output is produced and validated** — iterate through build → inference → diagnose → fix cycles until the model produces correct output. Save all outputs to `/workspace/trt-transformers-cpp/outputs/<model_name>/` with descriptive filenames so the user can inspect them.
+5. **Log work** in `docs/torch-trt/TORCHTRT_WORKLOG.md` — what was done, what failed, decisions made.
+
+The agent guide at `docs/torch-trt/TORCHTRT_AGENT_GUIDE.md` has the detailed execution plan for decoder/encoder models.
+
 ## Autopilot: autonomous model family onboarding
 
 The autopilot system discovers unsupported HuggingFace model families and

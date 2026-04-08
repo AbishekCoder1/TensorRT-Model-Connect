@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ttrt_build"
+version = "0.1.0"
+description = "Torch-TRT model builder — compile HuggingFace models via torch_tensorrt"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "torch_tensorrt>=2.4",
+    "transformers>=4.38",
+    "numpy",
+    "safetensors",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "huggingface_hub"]
+
+[tool.setuptools.packages.find]
+where = ["."]

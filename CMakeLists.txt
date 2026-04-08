@@ -143,6 +143,7 @@ add_library(trtf_core
   src/runtime/plugins/t5_plugin.cpp
   src/runtime/plugins/marian_plugin.cpp
   src/runtime/plugins/seq2seq_plugin.cpp
+  src/runtime/plugins/torchtrt_diffusion_plugin.cpp
   # Pipeline implementations
   src/runtime/pipelines/text_generation_pipeline.cpp
   src/runtime/pipelines/recurrent_pipeline.cpp
@@ -158,6 +159,7 @@ add_library(trtf_core
   src/runtime/pipelines/magpie_pipeline.cpp
   src/runtime/pipelines/speech_pipeline.cpp
   src/runtime/pipelines/omni_pipeline.cpp
+  src/runtime/pipelines/torchtrt_diffusion_pipeline.cpp
 )
 
 # Add CUDA kernel sources when CUDA compiler is available
@@ -349,6 +351,9 @@ trtf_add_test(test_perception_preprocess_seams)
 
 # Diffusion — conditioning
 trtf_add_test(test_wan_generation_conditioning)
+
+# Torch-TRT decoder strategy
+trtf_add_test(test_torchtrt_decoder)
 
 # --- Install ---
 include(CMakePackageConfigHelpers)

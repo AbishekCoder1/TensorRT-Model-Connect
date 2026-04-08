@@ -19,13 +19,18 @@ namespace trtf {
 class TrtModule;
 
 class KvCache : public IInferenceState {
-public:
+  public:
     // Allocate cache buffers for the given configuration.
     // kv_dim = num_kv_heads * head_dim (size of one K or V row per layer).
     // cache_dtype controls the element type for K/V cache buffers (default FP32).
-    KvCache(int32_t num_layers, int32_t max_length,
-            int32_t kv_dim, cudaStream_t stream,
-            DType cache_dtype = DType::kFloat32);
+    // Tensor naming scheme for engine I/O.
+    enum class NamingScheme {
+        kStandard, // cache_k_N / cache_v_N / present_k_N / present_v_N
+        kTorchTrt, // cache_kv_{2N} / cache_kv_{2N+1} / output{2N+1} / output{2N+2}
+    };
+
+    KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
+            DType cache_dtype = DType::kFloat32, NamingScheme naming = NamingScheme::kStandard);
 
     // --- IInferenceState overrides ---
     void reset() override;
@@ -50,11 +55,11 @@ public:
     DeviceTensor& cache_k(int32_t layer) { return cache_k_[static_cast<std::size_t>(layer)]; }
     DeviceTensor& cache_v(int32_t layer) { return cache_v_[static_cast<std::size_t>(layer)]; }
 
-private:
-    std::vector<DeviceTensor> cache_k_;    // [num_layers], shape [max_length, kv_dim]
-    std::vector<DeviceTensor> cache_v_;    // [num_layers]
-    std::vector<DeviceTensor> present_k_;  // [num_layers], shape [1, kv_dim] (single step output)
-    std::vector<DeviceTensor> present_v_;  // [num_layers]
+  private:
+    std::vector<DeviceTensor> cache_k_;   // [num_layers], shape [max_length, kv_dim]
+    std::vector<DeviceTensor> cache_v_;   // [num_layers]
+    std::vector<DeviceTensor> present_k_; // [num_layers], shape [1, kv_dim] (single step output)
+    std::vector<DeviceTensor> present_v_; // [num_layers]
     int32_t num_layers_{0};
     int32_t max_length_{0};
     int32_t kv_dim_{0};
@@ -66,6 +71,7 @@ private:
     bool has_position_input_{false};
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};
+    NamingScheme naming_{NamingScheme::kStandard};
 };
 
 } // namespace trtf

@@ -503,8 +503,10 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_wan": "diffusion_media_generation",
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
+    "torchtrt_diffusion": "torchtrt_diffusion",
     "omni_multimodal": "omni_multimodal",
     "text_to_text": "text_generation_causal",
     "marian_translation": "text_generation_causal",
     "seq2seq_encoder_decoder": "text_generation_causal",
+    "torchtrt_decoder": "text_generation_causal",
 }

@@ -14,13 +14,12 @@ Usage:
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 # ---------------------------------------------------------------------------
 # Constants -- strategy mappings (mirrored from e2e_harness/contracts.py)
@@ -50,6 +49,8 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "diffusion_wan": "diffusion_media_generation",
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
+    "torchtrt_decoder": "text_generation_causal",
+    "torchtrt_diffusion": "diffusion_media_generation",
     "omni_multimodal": "omni_multimodal",
     "text_to_text": "text_generation_causal",
     "marian_translation": "text_generation_causal",
@@ -72,7 +73,7 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "object_detection_plugin": ["object_detection"],
     "omni_plugin": ["omni_multimodal"],
     "flux_plugin": ["diffusion_flux"],
-    "wan_plugin": ["diffusion_wan", "diffusion_pixart"],
+    "wan_plugin": ["diffusion_wan", "diffusion_pixart", "torchtrt_diffusion"],
     "zimage_plugin": ["diffusion_zimage"],
     "t5_plugin": ["text_to_text"],
     "marian_plugin": ["marian_translation"],
@@ -93,10 +94,11 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
         "segmentation", "prompted_segmentation", "object_detection",
     ],
     "flux_pipeline": ["diffusion_flux"],
-    "wan_pipeline": ["diffusion_wan", "diffusion_pixart"],
+    "wan_pipeline": ["diffusion_wan", "diffusion_pixart", "torchtrt_diffusion"],
     "z_image_pipeline": ["diffusion_zimage"],
     "diffusion_pipeline": [
         "diffusion_flux", "diffusion_wan", "diffusion_pixart", "diffusion_zimage",
+        "torchtrt_diffusion",
     ],
 }
 
@@ -318,12 +320,12 @@ def _models_for_task_strategies(
 def _infer_unit_tiers(path: str) -> List[str]:
     """Infer which unit test tiers a file change implies."""
     tiers: List[str] = []
-    if path.startswith("trtf_build/"):
+    if path.startswith("trtf_build/") or path.startswith("ttrt_build/"):
         tiers.append("builder")
     if (path.startswith("src/") or path.startswith("include/")
             or path == "CMakeLists.txt" or path.startswith("cmake/")):
         tiers.append("cpp")
-    if path.startswith("tests/builder/"):
+    if path.startswith("tests/builder/") or path.startswith("tests/torchtrt_builder/"):
         tiers.append("builder")
     if path.startswith("tests/cpp/"):
         tiers.append("cpp")
@@ -384,8 +386,8 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
                 return RuleMatch("specialized_builder", sorted(models), unit_tiers, rebuild)
         # Fall through to Rule 3 for non-builder or unmatched builder
 
-    # Rule 3: Any other file under trtf_build/
-    if path.startswith("trtf_build/"):
+    # Rule 3: Any other file under trtf_build/ or ttrt_build/
+    if path.startswith("trtf_build/") or path.startswith("ttrt_build/"):
         return RuleMatch("shared_builder_module", list(imap.all_model_names), unit_tiers, rebuild)
 
     # Rule 4: C++ plugin
@@ -496,6 +498,8 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
         return RuleMatch("unit_cpp", [], unit_tiers, rebuild)
     if path.startswith("tests/tools/"):
         return RuleMatch("unit_tools", [], unit_tiers, rebuild)
+    if path.startswith("tests/torchtrt_builder/"):
+        return RuleMatch("unit_torchtrt_builder", [], unit_tiers, rebuild)
 
     # Rule 11: CMake / build system — triggers C++ rebuild + unit tests
     # but no E2E models; actual model impact comes from the source files.

@@ -2,9 +2,14 @@
 
 Python builds TensorRT engines from HuggingFace models. C++ runs them.
 
-The system is split into two stages:
-- **`trtf_build`** (Python) — downloads an HF model, builds a TRT engine, and packages it into a `.trtfb` bundle.
-- **`trtf`** (C++) — loads a `.trtfb` bundle and runs task-specific GPU inference (text, vision, audio, diffusion, neural operators, etc.).
+Two pipelines are available:
+
+| Pipeline | Builder | Bundle | Runtime | How it works |
+|----------|---------|--------|---------|--------------|
+| **Raw TRT** | `trtf-build` (Python) | `.trtfb` | C++ (TensorRT C API) | Builds a TRT engine from scratch using the TensorRT network API with hand-written graph ops. Fastest inference, most control. |
+| **Torch-TRT** | `trtf-build --torch-trt` (Python) | `.trtfb` | C++ (TensorRT C API) | Uses `torch.export` + `torch_tensorrt` to compile an HF model into a raw TRT engine. No manual graph construction needed — just a family plugin that loads the model. |
+
+Both pipelines produce `.trtfb` bundles that run on the same C++ runtime with the same `./build/trtf` CLI. No LibTorch dependency.
 
 The live C++ runtime has one composition path: `trtf_c.cpp -> strategy builder -> PipelineServices -> PipelineRouter -> ports/adapters -> TRT executors`. Core services operate on in-memory request/result DTOs; file and artifact IO stays at the router and adapter edge.
 
@@ -13,23 +18,46 @@ The live C++ runtime has one composition path: `trtf_c.cpp -> strategy builder -
 Prerequisites: Docker + NVIDIA Container Toolkit.
 
 ```bash
-# 1. Build and launch the GB300 dev container
+# 1. Build and launch the dev container
 ./scripts/docker_build_gb300.sh
 ./scripts/docker_run_gb300.sh
 
-# 2. Inside the container: install local package + build C++ runtime
+# 2. Inside the container: install packages + build C++ runtime
 ./scripts/setup_container.sh
+```
 
-# 3. Build a bundle from a HuggingFace model (auto-downloads)
-#    Bundles are stored on persistent storage so they survive container restarts.
-trtf-build build Qwen/Qwen3-0.6B -o /workspace/users/yifeif/trt-transformers/engines/qwen3.trtfb
+### Raw TRT pipeline (Qwen3-0.6B)
 
-# 4. Run inference
-./build/trtf run /workspace/users/yifeif/trt-transformers/engines/qwen3.trtfb \
+```bash
+# Build a bundle
+trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb
+
+# Run inference
+./build/trtf run /tmp/qwen3.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --hf-python /opt/venv/bin/python
 ```
+
+### Torch-TRT pipeline (Qwen3-0.6B)
+
+```bash
+# Build a bundle
+trtf-build build --torch-trt Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+
+# Run inference (same CLI — auto-detects bundle type)
+./build/trtf run /tmp/qwen3.trtfb \
+  --prompt "The capital of France is" \
+  --max-new-tokens 20 \
+  --hf-python /opt/venv/bin/python
+# Output: " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China"
+```
+
+---
+
+## Raw TRT pipeline
+
+The raw TRT pipeline builds engines from scratch using the TensorRT network API with hand-written graph ops. It supports all modalities (text, vision, audio, diffusion, segmentation, etc.) and is the primary pipeline for production use.
 
 ## Python API
 
@@ -143,6 +171,113 @@ trtf_version();
 trtf_has_trt();              // 1 if compiled with TRT support
 ```
 
+## Torch-TRT pipeline
+
+The Torch-TRT pipeline compiles HF models via `torch.export` and `torch_tensorrt`, producing `.trtfb` bundles with raw TRT engines. It requires no hand-written graph ops — just a family plugin that loads the model. Bundles run on the same C++ runtime as the raw TRT pipeline (no LibTorch dependency).
+
+### How it works
+
+1. **Load** — Downloads the HF model and wraps it with `StatelessCacheWrapper`, which adapts the model's I/O to match the raw TRT format: int32 token/position IDs, float32 attention mask, float32 GQA-expanded cache tensors.
+2. **Export** — `torch.export.export(strict=False)` traces the wrapped model into an `ExportedProgram`.
+3. **Compile** — `torch_tensorrt.dynamo.convert_exported_program_to_serialized_trt_engine(use_explicit_typing=True)` converts the exported graph into a raw TRT engine plan.
+4. **Bundle** — The engine plan, tokenizer, and config are packaged into a `.trtfb` bundle with `runtime_strategy=torchtrt_decoder`.
+5. **Run** — The C++ runtime loads the bundle, deserializes the TRT engine, and runs autoregressive inference via `DeviceKvCache` — the same backend used by the raw TRT pipeline.
+
+### Python API
+
+```python
+import ttrt_build
+
+# From a HuggingFace repo ID (auto-downloads):
+ttrt_build.build("Qwen/Qwen3-0.6B", "qwen3.trtfb")
+
+# With options:
+ttrt_build.build("Qwen/Qwen3-0.6B", "qwen3.trtfb",
+                  max_cache_length=512, verbose=True)
+```
+
+Install the package:
+```bash
+pip install --no-deps -e ttrt_build/
+```
+
+### CLI (`trtf-build --torch-trt`)
+
+```bash
+# Build from HF repo ID (default: fp16)
+trtf-build build --torch-trt Qwen/Qwen3-0.6B -o qwen3.trtfb --max-cache-length 256
+
+# Build with fp32 precision
+trtf-build build --torch-trt Qwen/Qwen3-0.6B -o qwen3_fp32.trtfb --precision fp32
+
+# Build a smaller model
+trtf-build build --torch-trt Qwen/Qwen2.5-0.5B -o qwen2.5-0.5b.trtfb --max-cache-length 256
+
+# Inspect a bundle
+trtf-build inspect qwen3.trtfb
+
+# Version info
+trtf-build version
+```
+
+### Validation tools
+
+**Accuracy validation** — compares Torch-TRT engine logits against HF eager reference:
+
+```bash
+# Battery test (multiple prompts, detailed metrics)
+python3 tools/diff_torchtrt.py \
+  --model Qwen/Qwen2.5-0.5B --atol 1e-2 --battery --verbose
+
+# Single prompt
+python3 tools/diff_torchtrt.py \
+  --model Qwen/Qwen3-0.6B --prompt "The capital of France is" --atol 1e-2
+
+# Key metrics to check:
+#   top1_match_rate >= 80%   (argmax agreement between TRT and HF)
+#   mean_cosine_sim > 0.99   (logit distribution similarity)
+```
+
+**Performance comparison** — measures inference speed across backends:
+
+```bash
+# Torch-TRT only (build + benchmark, default fp16)
+python3 tools/perf_compare_torchtrt.py \
+  --model Qwen/Qwen2.5-0.5B --max-new-tokens 50 --json results.json
+
+# Force fp32 precision (all backends except Raw TRT which is always fp32)
+python3 tools/perf_compare_torchtrt.py \
+  --model Qwen/Qwen2.5-0.5B --precision fp32 --max-new-tokens 50
+
+# All 4 backends: Torch-TRT vs Raw TRT vs torch.compile vs HF eager
+python3 tools/perf_compare_all.py \
+  --model Qwen/Qwen2.5-0.5B \
+  --prompt "The largest ocean on Earth is" \
+  --max-new-tokens 50 --json results.json
+
+# Compare fp16 vs fp32 for Torch-TRT (run twice, save JSON, compare)
+python3 tools/perf_compare_torchtrt.py \
+  --model Qwen/Qwen3-0.6B --precision fp16 --json fp16.json
+python3 tools/perf_compare_torchtrt.py \
+  --model Qwen/Qwen3-0.6B --precision fp32 --json fp32.json
+
+# With pre-built bundles (skips engine build, faster iteration)
+python3 tools/perf_compare_all.py \
+  --model Qwen/Qwen3-0.6B \
+  --torchtrt-bundle /tmp/qwen3_torchtrt.trtfb \
+  --rawtrt-bundle /tmp/qwen3_raw.trtfb \
+  --prompt "The capital of France is" \
+  --max-new-tokens 50
+
+# Skip specific backends
+python3 tools/perf_compare_all.py \
+  --model Qwen/Qwen3-0.6B --skip-compile --skip-rawtrt
+
+# Output includes: tokens/sec, per-token latency, total latency, per-backend dtype
+```
+
+The `--precision` flag controls Torch-TRT, HF eager, and torch.compile. Raw TRT always uses fp32 (hardcoded in graph ops). The report header shows the dtype used by each backend.
+
 ## Supported models
 
 Model support is plugin-driven and auto-discovered from `trtf_build/trtf_build/families/` at build time. Any HF model whose `config.json` `model_type` matches a plugin is supported without C++ registration changes.
@@ -250,12 +385,40 @@ tools/coverage/run_coverage_all.sh
   --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
   --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
 
-# === Tier 5: Performance regression (manual, per model) ===
+# === Tier 5: Performance + accuracy comparison (manual, per model) ===
 
-python3 tools/perf_compare.py \
+# Accuracy validation: Torch-TRT logits vs HF eager
+python3 tools/diff_torchtrt.py \
+  --model Qwen/Qwen2.5-0.5B --atol 1e-2 --battery --verbose
+
+# All 4 backends: Torch-TRT vs Raw TRT vs torch.compile vs HF eager
+python3 tools/perf_compare_all.py \
   --model Qwen/Qwen3-0.6B \
-  --bundle /workspace/users/yifeif/trt-transformers/engines/qwen3-0.6b.trtfb \
-  --prompt "The capital of France is" --max-new-tokens 20 --json results.json
+  --prompt "The capital of France is" \
+  --max-new-tokens 50 --json results.json
+
+# With pre-built bundles (skips engine build)
+python3 tools/perf_compare_all.py \
+  --model Qwen/Qwen3-0.6B \
+  --torchtrt-bundle /tmp/qwen3_torchtrt.trtfb \
+  --rawtrt-bundle /tmp/qwen3_raw.trtfb \
+  --prompt "The capital of France is" \
+  --max-new-tokens 50
+
+# Skip specific backends
+python3 tools/perf_compare_all.py \
+  --model Qwen/Qwen3-0.6B --skip-compile --skip-rawtrt
+
+# Force fp32 precision (compare accuracy vs speed tradeoff)
+python3 tools/perf_compare_all.py \
+  --model Qwen/Qwen3-0.6B --precision fp32
+
+# Individual pipeline comparisons
+python3 tools/perf_compare.py \
+  --model Qwen/Qwen3-0.6B --max-new-tokens 20 --json raw_trt.json
+
+python3 tools/perf_compare_torchtrt.py \
+  --model Qwen/Qwen3-0.6B --precision fp16 --max-new-tokens 20 --json torch_trt.json
 ```
 
 ### What to run when
@@ -269,6 +432,7 @@ python3 tools/perf_compare.py \
 | KV cache / position logic | Tier 1, Tier 3, Tier 4 |
 | New model (existing family) | Add JSON manifest to `tests/e2e/models/`, run Tier 3 |
 | New model family | Tier 1, Tier 2, `validate_family.sh`, add manifest, Tier 4 |
+| Performance-sensitive change | Tier 5 (`perf_compare_all.py`, `diff_torchtrt.py`) |
 
 ### Filtering with pytest markers
 
@@ -307,5 +471,7 @@ pytest tests/test_e2e.py --e2e-task-strategy vision_language_generation -v ...
 | [Static Design](docs/wiki/Static-Design.md) | Class-level UML diagrams and descriptions |
 | [Source Layout](docs/wiki/Source-Layout.md) | File-by-file guide |
 | [Extensibility Assessment](docs/wiki/Architecture-Extensibility-Assessment.md) | MoE, Mamba/SSM, MLA support status |
-| [Development Log](docs/WORKLOG.md) | Chronological history |
+| [Torch-TRT Agent Guide](docs/torch-trt/TORCHTRT_AGENT_GUIDE.md) | Torch-TRT pipeline architecture and development guide |
+| [Torch-TRT Work Log](docs/torch-trt/TORCHTRT_WORKLOG.md) | Torch-TRT pipeline development history |
+| [Development Log](docs/WORKLOG.md) | Chronological history (raw TRT pipeline) |
 | [CLAUDE.md](CLAUDE.md) | Full build/test/container runbook |

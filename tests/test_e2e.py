@@ -323,7 +323,12 @@ def test_e2e(case_name: str, request) -> None:
 
     # Assert
     if result.status == E2EStatus.SKIP.value:
-        pytest.skip(f"Case {case_name} skipped")
+        skip_detail = ""
+        if result.determinism and "preflight" in result.determinism:
+            failed = [d for d in result.determinism["preflight"] if not d.get("passed")]
+            if failed:
+                skip_detail = "; ".join(d.get("message", "") for d in failed)
+        pytest.skip(f"Case {case_name} skipped: {skip_detail}" if skip_detail else f"Case {case_name} skipped")
     elif result.status == E2EStatus.PASS.value:
         pass  # Test passes
     else:

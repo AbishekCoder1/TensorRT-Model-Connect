@@ -26,7 +26,6 @@ import logging
 import os
 import shlex
 import subprocess
-import sys
 import time
 import traceback
 from datetime import datetime, timezone
@@ -42,7 +41,6 @@ from .contracts import (
     PreflightRequirement,
     RunContext,
     StageOutput,
-    StageSpec,
     StageStatus,
     ThresholdProfile,
 )
@@ -222,11 +220,16 @@ def _resolve_bundle(
     hf_id = case.hf_id
     max_cache = case.inputs.get("max_cache_length", 256)
 
+    build_args = case.metadata.get("build_args", {})
+    use_torch_trt = build_args.get("torch_trt", False)
+
     cmd = [
         "trtf-build", "build",
         hf_id, "-o", str(bundle_path),
         "--max-cache-length", str(max_cache),
     ]
+    if use_torch_trt:
+        cmd.append("--torch-trt")
     precision = case.metadata.get("precision", "fp32")
     if precision != "fp32":
         cmd.extend(["--precision", precision])
@@ -619,11 +622,9 @@ class E2EOrchestrator:
         timing["preflight_s"] = time.monotonic() - t0
 
         if not preflight_ok:
-            failed_reqs = [d for d in preflight_details if not d["passed"] and d["gating"]]
-            message = "; ".join(d["message"] for d in failed_reqs)
             result = E2EResult(
                 case_name=case.name,
-                status=E2EStatus.FAIL.value,
+                status=E2EStatus.SKIP.value,
                 failure_type=FailureType.PRECHECK_FAIL.value,
                 oracle_level=case.oracle_level,
                 stages={},

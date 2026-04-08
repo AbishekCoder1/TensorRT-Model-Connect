@@ -27,10 +27,10 @@ extern volatile int kForceLink_ZImagePlugin;
 extern volatile int kForceLink_T5Plugin;
 extern volatile int kForceLink_MarianPlugin;
 extern volatile int kForceLink_Seq2SeqPlugin;
+extern volatile int kForceLink_TorchTrtDiffusionPlugin;
 
 // Referenced from pipeline_registry.cpp to ensure this TU is linked.
-volatile int* force_link_all_plugins()
-{
+volatile int* force_link_all_plugins() {
     static volatile int* kPluginAnchors[] = {
         &kForceLink_DecoderPlugin,
         &kForceLink_SsmPlugin,
@@ -51,6 +51,7 @@ volatile int* force_link_all_plugins()
         &kForceLink_T5Plugin,
         &kForceLink_MarianPlugin,
         &kForceLink_Seq2SeqPlugin,
+        &kForceLink_TorchTrtDiffusionPlugin,
     };
     return kPluginAnchors[0];
 }

@@ -41,9 +41,22 @@ RUN pip install \
     ml_dtypes \
     datasets
 
-# PyTorch ecosystem (cu130 wheels for aarch64)
-RUN pip install torch torchaudio torchvision \
-    --index-url https://download.pytorch.org/whl/cu130
+# PyTorch ecosystem — install torch first, then derive the CUDA variant tag
+# so torchvision/torchaudio/torch_tensorrt all use the same CUDA build.
+RUN pip install torch --index-url https://download.pytorch.org/whl/cu130 && \
+    TORCH_CUDA=$(python3 -c "import torch; print(torch.version.cuda.replace('.','')[:3])") && \
+    echo "Detected torch CUDA variant: cu${TORCH_CUDA}" && \
+    pip install torchvision torchaudio \
+        --index-url "https://download.pytorch.org/whl/cu${TORCH_CUDA}"
+
+# Torch-TRT (compiles HF models to TRT-optimized TorchScript via torch.export + dynamo)
+# Use the same CUDA variant index as torch to avoid version mismatch.
+RUN TORCH_CUDA=$(python3 -c "import torch; print(torch.version.cuda.replace('.','')[:3])") && \
+    pip install torch_tensorrt \
+        --extra-index-url "https://download.pytorch.org/whl/cu${TORCH_CUDA}"
+
+# Quantized model support for Torch-TRT
+RUN pip install nvidia-modelopt
 
 # ML / testing / utilities
 RUN pip install \
