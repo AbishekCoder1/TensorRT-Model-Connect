@@ -6,7 +6,7 @@
   "family": "mistral",
   "runtime_strategy": "decoder_kv_cache",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
+  "prompt": "<s>System\nYou are an expert at translating text from English to French.</s>\n<s>User\nWhat is the French translation of the sentence: Hello, how are you?</s>\n<s>Assistant\n",
   "max_new_tokens": 20,
   "logit_atol": 0.001,
   "layer_atol": 0.05,

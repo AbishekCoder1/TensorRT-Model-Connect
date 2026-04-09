@@ -7,6 +7,7 @@
 // The model-specific architecture (GQA, RoPE, SwiGLU, etc.) is baked into
 // the TRT engine. This pipeline just runs prefill → decode loop.
 
+#include "runtime/core/chat_template.h"
 #include "trtf/pipeline.h"
 #include "trtf/runtime/inference_state.h"
 #include "trtf/runtime/sampler.h"
@@ -28,6 +29,7 @@ struct TextGenConfig {
     int32_t id_eos{0};
     bool has_position_input{true};
     std::string logits_output_name{"logits"};
+    ChatTemplateFormat chat_template_format{ChatTemplateFormat::kNone};
 };
 
 class TextGenerationPipeline final : public IPipeline {

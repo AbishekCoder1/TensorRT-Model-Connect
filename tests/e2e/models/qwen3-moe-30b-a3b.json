@@ -6,7 +6,7 @@
   "family": "qwen_moe",
   "runtime_strategy": "decoder_moe",
   "max_cache_length": 128,
-  "prompt": "The capital of France is",
+  "prompt": "What is the largest planet in our solar system? Answer in one word.",
   "max_new_tokens": 10,
   "logit_atol": 0.01,
   "layer_atol": 0.05,

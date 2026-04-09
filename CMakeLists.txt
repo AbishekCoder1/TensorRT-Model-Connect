@@ -93,6 +93,7 @@ add_library(trtf_core
   src/runtime/core/trt_module.cpp
   src/runtime/core/kv_cache.cpp
   src/runtime/core/recurrent_state.cpp
+  src/runtime/core/chat_template.cpp
   src/runtime/core/flow_match_euler_scheduler.cpp
   src/runtime/core/stb_impl.cpp
   # Domain-specific components
@@ -260,6 +261,7 @@ trtf_add_test(test_text_parsers)
 trtf_add_test(test_json_helpers)
 trtf_add_test(test_data_dir)
 trtf_add_test(test_cli_args            NO_SRC_INCLUDE)
+trtf_add_test(test_chat_template)
 
 # TRT runtime core
 trtf_add_test(test_decode_runtime)

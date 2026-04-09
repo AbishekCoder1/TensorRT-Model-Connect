@@ -73,6 +73,10 @@ class HfTransformersReference:
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
 
+        contract_config = case.metadata.get("contract_config", {})
+        use_chat_template = contract_config.get("use_chat_template", False)
+        enable_thinking = contract_config.get("enable_thinking", True)
+
         script = textwrap.dedent(f"""\
             import sys, numpy as np, torch
             from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
@@ -83,10 +87,25 @@ class HfTransformersReference:
             trust_remote_code = {trust_remote_code!r}
             logits_path = {logits_path!r}
             text_path = {text_path!r}
+            use_chat_template = {use_chat_template!r}
+            enable_thinking = {enable_thinking!r}
 
             tokenizer = AutoTokenizer.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code)
-            input_ids = tokenizer.encode(prompt)
+            if use_chat_template:
+                messages = [{{"role": "user", "content": prompt}}]
+                try:
+                    chat_kwargs = {{"add_generation_prompt": True}}
+                    if not enable_thinking:
+                        chat_kwargs["enable_thinking"] = False
+                    text_input = tokenizer.apply_chat_template(
+                        messages, tokenize=False, **chat_kwargs)
+                    input_ids = tokenizer.encode(text_input, add_special_tokens=False)
+                except Exception:
+                    # Fallback: model doesn't support chat template
+                    input_ids = tokenizer.encode(prompt)
+            else:
+                input_ids = tokenizer.encode(prompt)
 
             load_kwargs = {{
                 "trust_remote_code": trust_remote_code,
@@ -128,9 +147,12 @@ class HfTransformersReference:
 
                     gen_ids = list(input_ids)
                     generated_token_ids = []
+                    eos_id = getattr(tokenizer, "eos_token_id", None)
                     for _ in range(max_new_tokens):
                         next_token = int(np.argmax(all_logits[-1]))
                         generated_token_ids.append(next_token)
+                        if eos_id is not None and next_token == eos_id:
+                            break
                         gen_ids.append(next_token)
                         ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
                         outputs = model(ids_tensor)
@@ -264,12 +286,15 @@ class HfTransformersReference:
             model_type = getattr(config, 'model_type', '')
 
             if model_type == 'dpr':
-                # DPR wraps BERT — load the base BERT model directly
-                # to get raw hidden states matching TRT encoder output.
-                from transformers import BertModel
-                model = BertModel.from_pretrained(
+                # DPR wraps BERT under ctx_encoder.bert_model or
+                # question_encoder.bert_model prefix.  AutoModel loads
+                # the wrong class (DPRQuestionEncoder) with missing weights.
+                # Load as DPRContextEncoder and extract the inner BERT.
+                from transformers import DPRContextEncoder
+                _dpr = DPRContextEncoder.from_pretrained(
                     hf_id, trust_remote_code=trust_remote_code,
                     torch_dtype=torch.float32)
+                model = _dpr.ctx_encoder.bert_model
             else:
                 model = AutoModel.from_pretrained(
                     hf_id, trust_remote_code=trust_remote_code,

@@ -52,6 +52,8 @@ struct CliArgs {
     float cfg_scale{-1.0F};
     bool greedy{false};
     bool stream{false};
+    bool chat_template{false};
+    bool no_thinking{false};
     int chunk_frames{32};
     bool show_help{false};
     bool parse_error{false};
@@ -62,7 +64,7 @@ void print_usage() {
     std::cerr
         << "Usage:\n"
            "  trtf run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
-           "[--max-new-tokens N] [--hf-python PATH]\n"
+           "[--max-new-tokens N] [--hf-python PATH] [--chat-template] [--no-thinking]\n"
            "  trtf encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtf segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
            "  trtf generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH "
@@ -214,6 +216,14 @@ CliArgs parse_args(int argc, char** argv) {
             args.point_y = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
+        if (arg == "--chat-template") {
+            args.chat_template = true;
+            continue;
+        }
+        if (arg == "--no-thinking") {
+            args.no_thinking = true;
+            continue;
+        }
         if (arg == "--background") {
             args.is_foreground = false;
             continue;
@@ -263,6 +273,8 @@ int cmd_run(const CliArgs& args) {
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 20;
     cfg.num_steps = args.num_steps;
     cfg.guidance_scale = args.guidance_scale;
+    cfg.use_chat_template = args.chat_template;
+    cfg.enable_thinking = !args.no_thinking;
 
     // Detect diffusion pipelines — they use generate_image(), not generate().
     const std::string ptype = pipeline->pipeline_type();

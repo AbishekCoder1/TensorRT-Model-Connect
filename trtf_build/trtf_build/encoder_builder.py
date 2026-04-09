@@ -63,6 +63,9 @@ def build_encoder_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    # Disable TF32 to ensure full FP32 precision. TF32 uses 10-bit mantissa
+    # which causes significant accuracy loss across 12+ encoder layers.
+    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     # Resolve GELU variant from config
     hidden_act = config.hidden_act or config.raw.get("activation", "") or "gelu"
@@ -216,40 +219,20 @@ def _add_seq_layer_norm(
 ) -> trt.ITensor:
     """LayerNorm over sequence of vectors: [seq_len, hidden] -> [seq_len, hidden].
 
-    Processes each position independently via reshape to apply per-position norm.
+    Uses TRT's native fused normalization layer for higher numerical precision
+    (single kernel, no intermediate rounding from 6 separate ops).
     """
-    # Reshape to [seq_len, 1, hidden] so that the reduce ops work on the last dim
-    # Actually, for a [seq_len, hidden] tensor, reduce on axis 1 is already correct.
-    # graph_ops.add_layer_norm expects [batch, hidden] with reduce on axis 1.
-    # But our input is [seq_len, hidden] — same layout, so we can just apply
-    # per-position layernorm by treating each position as a batch element.
+    # gamma/beta must match input ndims for add_normalization.
+    # Input is [seq_len, hidden], so constants are [1, hidden].
     gamma_t = graph_ops.add_constant(network, (1, hidden_size), gamma)
     beta_t = graph_ops.add_constant(network, (1, hidden_size), beta)
-    eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([eps], dtype=np.float32))
 
-    # mean = reduce_mean(x, axis=-1)
-    mean = network.add_reduce(
-        inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    centered = network.add_elementwise(
-        inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
-    sq = network.add_elementwise(
-        centered.get_output(0), centered.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    var = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    denom_in = network.add_elementwise(
-        var.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(
-        centered.get_output(0), recip.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    result = network.add_elementwise(
-        scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
-    return result.get_output(0)
+    # TRT native fused LayerNorm: normalizes over the axes specified by axis_mask.
+    # For [seq_len, hidden], normalize over axis 1 (hidden dimension).
+    norm_layer = network.add_normalization(
+        inp, gamma_t, beta_t, 1 << 1)  # axis_mask = bit 1 = hidden dim
+    norm_layer.epsilon = eps
+    return norm_layer.get_output(0)
 
 
 def _add_encoder_layer(

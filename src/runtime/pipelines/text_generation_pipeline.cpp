@@ -26,12 +26,31 @@ TextGenerationPipeline::TextGenerationPipeline(std::unique_ptr<TrtModule> decode
     }
 }
 
+// Encode a prompt, optionally applying a chat template first.
+// Deduplicates the leading BOS token that chat templates embed but
+// the tokenizer's add_special_tokens may also prepend.
+static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer, const TextGenConfig& config,
+                                          const std::string& prompt, const GenerateConfig& cfg) {
+    std::string effective = prompt;
+    bool templated = false;
+    if (cfg.use_chat_template && config.chat_template_format != ChatTemplateFormat::kNone) {
+        effective = apply_chat_template(config.chat_template_format, prompt, cfg.enable_thinking);
+        templated = true;
+    }
+    auto ids = tokenizer.encode(effective);
+    if (templated && ids.size() >= 2 && config.id_bos >= 0 && ids[0] == config.id_bos &&
+        ids[1] == config.id_bos) {
+        ids.erase(ids.begin());
+    }
+    return ids;
+}
+
 TextResult TextGenerationPipeline::generate(const std::string& prompt, const GenerateConfig& cfg) {
     if (!tokenizer_) {
         throw std::runtime_error("TextGenerationPipeline: no tokenizer configured");
     }
 
-    auto input_ids = tokenizer_->encode(prompt);
+    auto input_ids = encode_prompt(*tokenizer_, config_, prompt, cfg);
     int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
 

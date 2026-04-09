@@ -66,13 +66,23 @@ class TextGenerationCausalRunner:
 
         # C++ binary inference
         cpp_text, cpp_time, cpp_meta = self._run_cpp_binary(
-            ctx, bundle_path, prompt, max_new_tokens
+            ctx, bundle_path, prompt, max_new_tokens, case=case
         )
 
-        # Debug runner for per-step logits (prefill + decode combined)
-        logits_path, debug_time, debug_meta = self._run_debug_runner_logits(
-            ctx, bundle_path, prompt, max_new_tokens, case, phase="full"
-        )
+        # Debug runner for per-step logits — skip in acceptance lane when
+        # a contract plugin handles verification (only needs text, not logits)
+        has_contract = "contract_config" in case.metadata
+        is_acceptance = case.ci_lane == "acceptance"
+        skip_debug = has_contract and is_acceptance
+
+        if skip_debug:
+            logits_path = None
+            debug_time = 0.0
+            debug_meta = {"skipped": "contract plugin active in acceptance lane"}
+        else:
+            logits_path, debug_time, debug_meta = self._run_debug_runner_logits(
+                ctx, bundle_path, prompt, max_new_tokens, case, phase="full"
+            )
 
         data = {
             "cpp_text": cpp_text,
@@ -158,6 +168,7 @@ class TextGenerationCausalRunner:
         bundle_path: str,
         prompt: str,
         max_new_tokens: int,
+        case: E2ECase | None = None,
     ) -> tuple[str, float, dict]:
         """Run the C++ trtf binary as a subprocess. Returns (text, time_s, meta)."""
         cmd = [
@@ -167,6 +178,13 @@ class TextGenerationCausalRunner:
         ]
         if ctx.hf_python:
             cmd.extend(["--hf-python", ctx.hf_python])
+
+        if case is not None:
+            contract_config = case.metadata.get("contract_config", {})
+            if contract_config.get("use_chat_template"):
+                cmd.append("--chat-template")
+            if contract_config.get("enable_thinking") is False:
+                cmd.append("--no-thinking")
 
         env = dict(os.environ)
         if ctx.ld_library_path:

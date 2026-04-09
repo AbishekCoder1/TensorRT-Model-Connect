@@ -7,9 +7,10 @@
   "runtime_strategy": "vision_language",
   "max_cache_length": 4096,
   "prompt": "Extract the text from this image.",
-  "max_new_tokens": 30,
+  "max_new_tokens": 300,
   "logit_atol": 0.001,
   "test_image": "tests/e2e/data/orc_test_img.jpeg",
   "trust_remote_code": true,
-  "skip": "HF reference runner cannot load DeepseekOCR2 custom model class via AutoModel"
+  "reference_backend": "invariant_only",
+  "notes": "HF reference broken: DeepSeek-OCR-2 custom code imports LlamaFlashAttention2 removed in transformers 5.x. TRT pipeline still validated via invariant checks."
 }

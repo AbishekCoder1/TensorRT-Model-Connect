@@ -64,8 +64,10 @@ struct GenerateConfig {
     float guidance_scale{-1.0f}; // diffusion
     int32_t num_steps{-1};       // diffusion
     int32_t eos_token_id{-1};
-    int32_t tail_frames{0};     // speech-to-speech: extra frames after input
-    bool collect_timing{false}; // if true, populate TextResult::prefill_ms / decode_ms
+    int32_t tail_frames{0};        // speech-to-speech: extra frames after input
+    bool collect_timing{false};    // if true, populate TextResult::prefill_ms / decode_ms
+    bool use_chat_template{false}; ///< Apply chat template before tokenization
+    bool enable_thinking{true};    ///< Qwen3: if false, disable thinking mode
 };
 
 // --- Pipeline interface ---

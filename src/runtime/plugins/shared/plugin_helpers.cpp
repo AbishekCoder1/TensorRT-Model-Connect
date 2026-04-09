@@ -11,41 +11,38 @@ namespace trtf {
 
 // ─── Tokenizer helpers ───
 
-bool detect_add_special_tokens(const BundleFile& bundle)
-{
+bool detect_add_special_tokens(const BundleFile& bundle) {
     auto* config_data = find_section(bundle, "config.json");
-    if (!config_data) return true;
+    if (!config_data)
+        return true;
     std::string cfg_text(config_data->begin(), config_data->end());
     auto pos = cfg_text.find("\"tokenizer_add_special_tokens\"");
-    if (pos == std::string::npos) return true;
+    if (pos == std::string::npos)
+        return true;
     auto val_pos = cfg_text.find(':', pos);
-    if (val_pos == std::string::npos) return true;
+    if (val_pos == std::string::npos)
+        return true;
     auto rest = cfg_text.substr(val_pos + 1, 20);
     return rest.find("false") == std::string::npos;
 }
 
-bool is_bpe_tokenizer_json(const BundleFile& bundle)
-{
+bool is_bpe_tokenizer_json(const BundleFile& bundle) {
     auto* tok_data = find_section(bundle, "tokenizer.json");
     if (!tok_data || tok_data->empty())
         return false;
     // Quick string search — avoid full JSON parse just for type detection
     std::string_view json(tok_data->data(), tok_data->size());
-    return json.find("\"type\":\"BPE\"") != std::string_view::npos
-        || json.find("\"type\": \"BPE\"") != std::string_view::npos;
+    return json.find("\"type\":\"BPE\"") != std::string_view::npos ||
+           json.find("\"type\": \"BPE\"") != std::string_view::npos;
 }
 
-std::shared_ptr<ITokenizer> try_create_native_bpe(
-    const BundleFile& bundle, bool add_special, bool throw_on_failure)
-{
+std::shared_ptr<ITokenizer> try_create_native_bpe(const BundleFile& bundle, bool add_special,
+                                                  bool throw_on_failure) {
     auto* tok_data = find_section(bundle, "tokenizer.json");
     if (!tok_data || tok_data->empty())
         return nullptr;
     try {
-        auto tok = CreateBpeTokenizer(
-            tok_data->data(),
-            tok_data->size(),
-            add_special);
+        auto tok = CreateBpeTokenizer(tok_data->data(), tok_data->size(), add_special);
         if (tok) {
             std::cerr << "[trtf] Using native BPE tokenizer" << std::endl;
         }
@@ -57,19 +54,17 @@ std::shared_ptr<ITokenizer> try_create_native_bpe(
 
         if (throw_on_failure || (!is_non_bpe && is_bpe_tokenizer_json(bundle))) {
             // BPE model but native failed → error, no silent fallback
-            throw std::runtime_error(
-                std::string("Native BPE tokenizer failed for BPE model: ")
-                + e.what());
+            throw std::runtime_error(std::string("Native BPE tokenizer failed for BPE model: ") +
+                                     e.what());
         }
-        std::cerr << "[trtf] Native BPE unavailable (" << e.what()
-                  << "), falling back to HF Python" << std::endl;
+        std::cerr << "[trtf] Native BPE unavailable (" << e.what() << "), falling back to HF Python"
+                  << std::endl;
     }
     return nullptr;
 }
 
-std::shared_ptr<ITokenizer> try_create_native_tokenizer(
-    const BundleFile& bundle, bool add_special_tokens)
-{
+std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle,
+                                                        bool add_special_tokens) {
     auto* tok_data = find_section(bundle, "tokenizer.json");
     if (!tok_data || tok_data->empty())
         return nullptr;
@@ -84,7 +79,8 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer(
             std::cerr << "[trtf] Using native BPE tokenizer" << std::endl;
             return tok;
         }
-    } catch (...) {}
+    } catch (...) {
+    }
 
     // Try WordPiece
     try {
@@ -93,7 +89,8 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer(
             std::cerr << "[trtf] Using native WordPiece tokenizer" << std::endl;
             return tok;
         }
-    } catch (...) {}
+    } catch (...) {
+    }
 
     // Try Unigram (SentencePiece)
     try {
@@ -102,24 +99,21 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer(
             std::cerr << "[trtf] Using native Unigram tokenizer" << std::endl;
             return tok;
         }
-    } catch (...) {}
+    } catch (...) {
+    }
 
     return nullptr;
 }
 
-std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(
-    const BundleFile& bundle)
-{
+std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(const BundleFile& bundle) {
     bool add_special = detect_add_special_tokens(bundle);
     return try_create_native_tokenizer(bundle, add_special);
 }
 
 // ─── TRT module loading ───
 
-LoadedModule load_trt_module_from_plan(
-    const std::vector<char>* plan, const char* label,
-    std::shared_ptr<CudaStream> shared_stream)
-{
+LoadedModule load_trt_module_from_plan(const std::vector<char>* plan, const char* label,
+                                       std::shared_ptr<CudaStream> shared_stream) {
     if (!plan || plan->empty())
         throw std::runtime_error(std::string("Bundle missing ") + label);
     auto trt_runtime = create_trt_runtime();
@@ -144,22 +138,20 @@ LoadedModule load_trt_module_from_plan(
     return result;
 }
 
-LoadedModule try_load_trt_module_from_plan(
-    const std::vector<char>* plan, const char* label,
-    std::shared_ptr<CudaStream> shared_stream)
-{
-    if (!plan || plan->empty()) return LoadedModule{};
-    try { return load_trt_module_from_plan(plan, label, shared_stream); }
-    catch (...) {
+LoadedModule try_load_trt_module_from_plan(const std::vector<char>* plan, const char* label,
+                                           std::shared_ptr<CudaStream> shared_stream) {
+    if (!plan || plan->empty())
+        return LoadedModule{};
+    try {
+        return load_trt_module_from_plan(plan, label, shared_stream);
+    } catch (...) {
         std::cerr << "[trtf] WARNING: failed to load optional engine: " << label << std::endl;
         return LoadedModule{};
     }
 }
 
-std::unique_ptr<TrtModule> extract_optional_module(
-    const std::vector<char>* plan, const char* label,
-    std::shared_ptr<CudaStream> shared_stream)
-{
+std::unique_ptr<TrtModule> extract_optional_module(const std::vector<char>* plan, const char* label,
+                                                   std::shared_ptr<CudaStream> shared_stream) {
     auto loaded = try_load_trt_module_from_plan(plan, label, shared_stream);
     if (loaded.module && loaded.module->ok())
         return std::move(loaded.module);
@@ -168,23 +160,23 @@ std::unique_ptr<TrtModule> extract_optional_module(
 
 // ─── Config helpers ───
 
-int32_t compute_kv_dim(const BaseConfig& cfg)
-{
-    if (cfg.attention_size > 0) return cfg.attention_size;
+int32_t compute_kv_dim(const BaseConfig& cfg) {
+    if (cfg.attention_size > 0)
+        return cfg.attention_size;
     int32_t hd = (cfg.head_dim > 0) ? cfg.head_dim
-        : ((cfg.num_heads > 0) ? cfg.hidden_size / cfg.num_heads : 128);
+                                    : ((cfg.num_heads > 0) ? cfg.hidden_size / cfg.num_heads : 128);
     return cfg.num_heads * hd;
 }
 
-DType cache_dtype_from_precision(const std::string& precision)
-{
-    if (precision == "fp16") return DType::kFloat16;
-    if (precision == "bf16") return DType::kBFloat16;
+DType cache_dtype_from_precision(const std::string& precision) {
+    if (precision == "fp16")
+        return DType::kFloat16;
+    if (precision == "bf16")
+        return DType::kBFloat16;
     return DType::kFloat32;
 }
 
-RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg)
-{
+RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg) {
     RecurrentGenConfig rgc;
     rgc.vocab_size = cfg.vocab_size;
     rgc.id_bos = cfg.id_bos;
@@ -194,31 +186,29 @@ RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg)
 
 // ─── Section data conversion ───
 
-std::vector<float> section_to_floats(const std::vector<char>* sec)
-{
-    if (!sec || sec->empty()) return {};
+std::vector<float> section_to_floats(const std::vector<char>* sec) {
+    if (!sec || sec->empty())
+        return {};
     std::size_t count = sec->size() / sizeof(float);
     std::vector<float> out(count);
     std::memcpy(out.data(), sec->data(), count * sizeof(float));
     return out;
 }
 
-std::vector<int32_t> section_to_int32s(const std::vector<char>* sec)
-{
-    if (!sec || sec->empty()) return {};
+std::vector<int32_t> section_to_int32s(const std::vector<char>* sec) {
+    if (!sec || sec->empty())
+        return {};
     std::size_t count = sec->size() / sizeof(int32_t);
     std::vector<int32_t> out(count);
     std::memcpy(out.data(), sec->data(), count * sizeof(int32_t));
     return out;
 }
 
-bool has_section_data(const std::vector<char>* d)
-{
+bool has_section_data(const std::vector<char>* d) {
     return d && !d->empty();
 }
 
-MelFilterbank load_mel_filterbank(const BundleFile& bundle)
-{
+MelFilterbank load_mel_filterbank(const BundleFile& bundle) {
     MelFilterbank fb;
     const auto* data = find_section(bundle, "mel_filterbank");
     if (data == nullptr || data->empty())
@@ -237,30 +227,26 @@ MelFilterbank load_mel_filterbank(const BundleFile& bundle)
         return fb;
 
     const auto expected_data_size = static_cast<std::size_t>(fb.n_freq_bins) *
-        static_cast<std::size_t>(fb.n_mel_bins) * sizeof(float);
+                                    static_cast<std::size_t>(fb.n_mel_bins) * sizeof(float);
     const auto payload_offset = 2 * sizeof(int32_t);
-    if (data->size() < payload_offset + expected_data_size)
-    {
+    if (data->size() < payload_offset + expected_data_size) {
         fb.n_freq_bins = 0;
         fb.n_mel_bins = 0;
         return fb;
     }
 
     fb.data.resize(static_cast<std::size_t>(fb.n_freq_bins) * fb.n_mel_bins);
-    std::memcpy(fb.data.data(), data->data() + payload_offset,
-                expected_data_size);
+    std::memcpy(fb.data.data(), data->data() + payload_offset, expected_data_size);
     return fb;
 }
 
-std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(
-    const BundleFile& bundle)
-{
+std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(const BundleFile& bundle) {
     auto* tok_data = find_section(bundle, "clip_tokenizer.json");
     if (!tok_data || tok_data->empty())
         return nullptr;
     try {
-        auto tok = CreateBpeTokenizer(
-            tok_data->data(), tok_data->size(), /*add_special_tokens=*/true);
+        auto tok =
+            CreateBpeTokenizer(tok_data->data(), tok_data->size(), /*add_special_tokens=*/true);
         if (tok)
             std::cerr << "[trtf] Using native BPE CLIP tokenizer" << std::endl;
         return tok;

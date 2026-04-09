@@ -433,39 +433,51 @@ def _sparsemixer_weight(
     scores: trt.ITensor,
     num_experts: int,
     jitter_eps: float,
+    original_scores: trt.ITensor | None = None,
 ) -> tuple[trt.ITensor, trt.ITensor]:
     """Compute one expert selection via SparseMixer (inference mode).
 
     Replicates the HF ``sparsemixer()`` function for a single expert:
       1. max_val, max_ind = max(scores)
-      2. factor = clamp(|scores|, min=max_val)
-      3. mask = ((max_val - scores) / factor) > (2 * jitter_eps)
+      2. factor = clamp(|original_scores|, min=max_val)
+      3. mask = ((max_val - original_scores) / factor) > (2 * jitter_eps)
       4. masked = where(mask, -inf, scores)
       5. weight = softmax(masked)[max_ind]
+
+    HF uses the ORIGINAL unmasked scores for factor and threshold even
+    for the second expert selection.  The ``original_scores`` parameter
+    carries the unmasked router logits.
 
     Args:
         scores: [1, num_experts] router logits (may contain -inf for
                 previously selected experts).
         num_experts: Number of experts.
         jitter_eps: Router jitter epsilon from config.
+        original_scores: Original unmasked router logits for factor/threshold.
+                If None, uses scores (first expert selection).
 
     Returns:
         (weight, index) where weight is [1, 1] float32 and index is [1, 1] int32.
     """
-    # max_val [1, 1], max_ind [1, 1]
+    if original_scores is None:
+        original_scores = scores
+
+    # max_val [1, 1], max_ind [1, 1]  — from (potentially masked) scores
     topk1 = network.add_topk(scores, trt.TopKOperation.MAX, 1, 1 << 1)
     max_val = topk1.get_output(0)   # [1, 1]
     max_ind = topk1.get_output(1)   # [1, 1]
 
-    # factor = clamp(|scores|, min=max_val)  ->  max(|scores|, max_val)
-    abs_scores = network.add_unary(scores, trt.UnaryOperation.ABS)
+    # factor = clamp(|original_scores|, min=max_val)
+    # HF uses original (unmasked) scores for abs(), not the masked scores.
+    abs_scores = network.add_unary(original_scores, trt.UnaryOperation.ABS)
     factor = network.add_elementwise(
         abs_scores.get_output(0), max_val,
         trt.ElementWiseOperation.MAX)
 
-    # (max_val - scores) / factor
+    # (max_val - original_scores) / factor
+    # HF uses original scores here too.
     diff = network.add_elementwise(
-        max_val, scores, trt.ElementWiseOperation.SUB)
+        max_val, original_scores, trt.ElementWiseOperation.SUB)
     ratio = network.add_elementwise(
         diff.get_output(0), factor.get_output(0),
         trt.ElementWiseOperation.DIV)
@@ -569,9 +581,11 @@ def _add_moe_block(
         router_logits, penalty.get_output(0),
         trt.ElementWiseOperation.SUM)
 
-    # 4. SparseMixer expert 2 selection
+    # 4. SparseMixer expert 2 selection — pass original router_logits
+    # for the factor/threshold computation (HF uses unmasked scores).
     weight_2, idx_2 = _sparsemixer_weight(
-        network, scores_2.get_output(0), num_experts, jitter_eps)
+        network, scores_2.get_output(0), num_experts, jitter_eps,
+        original_scores=router_logits)
 
     # 5. Compute ALL expert outputs and stack
     expert_outputs = []

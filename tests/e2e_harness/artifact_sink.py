@@ -32,6 +32,84 @@ from .contracts import (
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Artifact schema definitions
+# ---------------------------------------------------------------------------
+
+# Expected fields per ArtifactType for schema validation.
+# Each key is an ArtifactType value; each value is a dict of
+# field_name -> (required: bool, type_description: str).
+ARTIFACT_SCHEMAS: dict[str, dict[str, tuple[bool, str]]] = {
+    "token_ids": {
+        "token_ids": (True, "list[int]"),
+        "text": (False, "str"),
+    },
+    "normalized_text": {
+        "text": (True, "str"),
+        "normalized_text": (True, "str"),
+    },
+    "embedding": {
+        "embedding": (True, "list[float] or numpy path"),
+        "pooling_method": (False, "str"),
+    },
+    "class_map": {
+        "class_map": (True, "numpy array or path"),
+        "class_ids": (False, "list[int]"),
+        "num_classes": (False, "int"),
+    },
+    "semantic_tokens": {
+        "semantic_token_ids": (True, "list[int]"),
+    },
+    "waveform": {
+        "wav_path": (True, "str"),
+        "sample_rate": (False, "int"),
+        "duration_s": (False, "float"),
+        "rms": (False, "float"),
+    },
+    "image": {
+        "image_path": (True, "str"),
+        "width": (False, "int"),
+        "height": (False, "int"),
+    },
+    "video_frames": {
+        "frames_dir": (True, "str"),
+        "num_frames": (False, "int"),
+        "fps": (False, "float"),
+    },
+    "logits": {
+        "logits_path": (True, "str"),
+        "vocab_size": (False, "int"),
+    },
+    "score": {
+        "score": (True, "float"),
+    },
+    "ranking": {
+        "ranking": (True, "list[int] or list[tuple]"),
+        "scores": (False, "list[float]"),
+    },
+}
+
+
+def validate_artifact_schema(
+    artifact_type: str, data: dict[str, Any]
+) -> list[str]:
+    """Validate stage output data against the expected schema for an artifact type.
+
+    Returns a list of validation error messages (empty if valid).
+    """
+    schema = ARTIFACT_SCHEMAS.get(artifact_type)
+    if schema is None:
+        return []  # Unknown type -- no validation
+
+    errors: list[str] = []
+    for field_name, (required, type_desc) in schema.items():
+        if required and field_name not in data:
+            errors.append(
+                f"Missing required field '{field_name}' (expected {type_desc})"
+            )
+    return errors
+
+
 def _collect_env_fingerprint() -> dict[str, Any]:
     """Collect environment fingerprint: GPU, CUDA, TRT, Python versions."""
     fp: dict[str, Any] = {
@@ -117,6 +195,9 @@ def _case_to_dict(case: E2ECase) -> dict[str, Any]:
         "task_strategy": case.task_strategy,
         "reference_backend": case.reference_backend,
         "oracle_level": case.oracle_level,
+        "reference_family": case.reference_family,
+        "user_contract": case.user_contract,
+        "ci_lane": case.ci_lane,
         "bundle": case.bundle,
         "inputs": case.inputs,
         "preflight": [
@@ -129,6 +210,9 @@ def _case_to_dict(case: E2ECase) -> dict[str, Any]:
                 "required": s.required,
                 "runner_override": s.runner_override,
                 "comparator_override": s.comparator_override,
+                "artifact_type": s.artifact_type,
+                "comparison_mode": s.comparison_mode,
+                "ci_lanes": s.ci_lanes,
             }
             for s in case.stages
         ],
@@ -243,10 +327,27 @@ class FileArtifactSink:
         stage_name: str,
         output: StageOutput,
         prefix: str = "trt",
+        artifact_type: str = "",
     ) -> None:
-        """Accumulate stage output in memory (written in finalize)."""
+        """Accumulate stage output in memory (written in finalize).
+
+        If artifact_type is provided, validates the output data against
+        the expected schema and logs warnings for missing fields.
+        """
         key = f"{prefix}_{stage_name}"
-        self._stage_outputs[key] = _serialize_stage_output(output)
+        serialized = _serialize_stage_output(output)
+
+        # Schema validation
+        if artifact_type:
+            errors = validate_artifact_schema(artifact_type, output.data)
+            if errors:
+                serialized["schema_warnings"] = errors
+                logger.warning(
+                    "Stage %s (%s) artifact schema warnings: %s",
+                    stage_name, artifact_type, errors,
+                )
+
+        self._stage_outputs[key] = serialized
 
     def write_compare(
         self,
@@ -255,6 +356,56 @@ class FileArtifactSink:
     ) -> None:
         """No-op — comparison data is already in E2EResult.stages."""
         pass
+
+    def write_golden(
+        self,
+        stage_name: str,
+        output: StageOutput,
+        artifact_type: str = "",
+    ) -> str:
+        """Write a stage output as a golden reference artifact.
+
+        Golden artifacts are stored in a 'goldens/' subdirectory and contain
+        the canonical expected output for acceptance CI lane comparisons.
+
+        Returns the path to the golden file.
+        """
+        goldens_dir = self._base / "goldens"
+        goldens_dir.mkdir(parents=True, exist_ok=True)
+
+        golden_data = _serialize_stage_output(output)
+        golden_data["artifact_type"] = artifact_type
+        golden_data["golden_timestamp"] = datetime.now(timezone.utc).isoformat()
+
+        # Validate schema if artifact_type is specified
+        if artifact_type:
+            errors = validate_artifact_schema(artifact_type, output.data)
+            if errors:
+                golden_data["schema_warnings"] = errors
+                logger.warning(
+                    "Golden artifact for %s has schema warnings: %s",
+                    stage_name, errors,
+                )
+
+        path = goldens_dir / f"{stage_name}.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(golden_data, f, indent=2, default=str)
+
+        self.register_artifact(
+            f"golden_{stage_name}", str(path.relative_to(self._base))
+        )
+        return str(path)
+
+    def load_golden(self, stage_name: str) -> dict[str, Any] | None:
+        """Load a golden reference artifact for a stage.
+
+        Returns the golden data dict, or None if no golden exists.
+        """
+        path = self._base / "goldens" / f"{stage_name}.json"
+        if not path.is_file():
+            return None
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
 
     def register_artifact(self, key: str, rel_path: str) -> None:
         """Register a modality artifact by key and relative path."""

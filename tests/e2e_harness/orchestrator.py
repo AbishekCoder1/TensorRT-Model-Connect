@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import (
+    CILane,
     CompareResult,
     E2ECase,
     E2EResult,
@@ -45,7 +46,7 @@ from .contracts import (
     ThresholdProfile,
 )
 from . import save_full_stderr
-from .registry import get_comparator, get_reference, get_runner
+from .registry import get_comparator, get_contract_plugin, get_reference, get_runner
 
 logger = logging.getLogger(__name__)
 
@@ -682,18 +683,52 @@ class E2EOrchestrator:
             verbose=ctx.verbose,
         )
 
-        # Resolve runner, reference, comparator
+        # Resolve runner, reference, comparator, and contract plugin
         runner = get_runner(case.task_strategy)
         reference = get_reference(case.reference_backend)
         comparator = get_comparator(case.task_strategy)
+        contract_plugin = get_contract_plugin(case.reference_family) if case.reference_family else None
         threshold = _resolve_threshold(case)
+
+        # Apply contract plugin configuration to the case metadata
+        if contract_plugin is not None:
+            try:
+                ref_config = contract_plugin.configure_reference(case)
+                if ref_config:
+                    case.metadata["contract_config"] = ref_config
+            except Exception as e:
+                logger.warning("Contract plugin configure_reference failed: %s", e)
+
+            # Expose runtime paths so plugins can invoke auxiliary binaries
+            # (e.g., TTS plugin uses Whisper TRT for ASR round-trip)
+            case.metadata["_ctx"] = {
+                "engine_dir": ctx.engine_dir,
+                "binary_path": ctx.binary_path,
+                "hf_python": ctx.hf_python,
+                "artifacts_dir": artifacts_dir,
+            }
 
         # 3. Execute stages
         stage_results: dict[str, CompareResult] = {}
         all_stages_pass = True
+        baseline_trt_outputs: dict[str, StageOutput] = {}
 
         for stage in case.stages:
             stage_name = stage.name
+
+            # Lane filtering: skip stages not in this case's CI lane
+            if case.ci_lane and stage.ci_lanes:
+                if case.ci_lane not in stage.ci_lanes:
+                    logger.info(
+                        "Skipping stage %s for lane %s (stage lanes: %s)",
+                        stage_name, case.ci_lane, stage.ci_lanes,
+                    )
+                    stage_results[stage_name] = CompareResult(
+                        stage_name=stage_name,
+                        status=StageStatus.SKIPPED.value,
+                        message=f"Skipped: stage not in CI lane {case.ci_lane}",
+                    )
+                    continue
 
             # TRT run
             trt_output: StageOutput | None = None
@@ -741,6 +776,10 @@ class E2EOrchestrator:
                     case.task_strategy, stage_name,
                 )
 
+            # Store baseline TRT output for determinism reruns
+            if trt_output is not None and runner is not None:
+                baseline_trt_outputs[stage_name] = trt_output
+
             # Reference run (skipped when skip_reason is set)
             ref_output: StageOutput | None = None
             if skip_reason:
@@ -774,32 +813,59 @@ class E2EOrchestrator:
                     case.reference_backend, stage_name,
                 )
 
-            # Comparison
-            if trt_output is not None and ref_output is not None and comparator is not None:
-                t0 = time.monotonic()
-                try:
-                    compare_result = comparator.compare(
-                        trt_output, ref_output, threshold, stage)
-                    timing[f"compare_{stage_name}_s"] = time.monotonic() - t0
-                except Exception as e:
-                    timing[f"compare_{stage_name}_s"] = time.monotonic() - t0
-                    tb = traceback.format_exc()
-                    compare_result = CompareResult(
-                        stage_name=stage_name,
-                        status=StageStatus.ERROR.value,
-                        message=f"Comparison failed: {e}\n{tb}",
-                    )
-                stage_results[stage_name] = compare_result
-                sink.write_compare(stage_name, compare_result)
+            # Comparison: contract plugin (acceptance) then numeric comparator (nightly)
+            if trt_output is not None and ref_output is not None:
+                compare_result: CompareResult | None = None
 
-                if not compare_result.passed and stage.required:
-                    all_stages_pass = False
-            elif trt_output is not None and (ref_output is None or comparator is None):
-                # No reference or comparator — record as skipped
+                # Contract verification via plugin (if available)
+                if contract_plugin is not None:
+                    t0 = time.monotonic()
+                    try:
+                        compare_result = contract_plugin.verify(
+                            trt_output, ref_output, case, threshold)
+                        timing[f"contract_{stage_name}_s"] = time.monotonic() - t0
+                    except Exception as e:
+                        timing[f"contract_{stage_name}_s"] = time.monotonic() - t0
+                        tb = traceback.format_exc()
+                        compare_result = CompareResult(
+                            stage_name=stage_name,
+                            status=StageStatus.ERROR.value,
+                            message=f"Contract verification failed: {e}\n{tb}",
+                        )
+
+                # Numeric parity via existing comparator (fallback or nightly supplement)
+                if compare_result is None and comparator is not None:
+                    t0 = time.monotonic()
+                    try:
+                        compare_result = comparator.compare(
+                            trt_output, ref_output, threshold, stage)
+                        timing[f"compare_{stage_name}_s"] = time.monotonic() - t0
+                    except Exception as e:
+                        timing[f"compare_{stage_name}_s"] = time.monotonic() - t0
+                        tb = traceback.format_exc()
+                        compare_result = CompareResult(
+                            stage_name=stage_name,
+                            status=StageStatus.ERROR.value,
+                            message=f"Comparison failed: {e}\n{tb}",
+                        )
+
+                if compare_result is not None:
+                    stage_results[stage_name] = compare_result
+                    sink.write_compare(stage_name, compare_result)
+                    if not compare_result.passed and stage.required:
+                        all_stages_pass = False
+                else:
+                    stage_results[stage_name] = CompareResult(
+                        stage_name=stage_name,
+                        status=StageStatus.SKIPPED.value,
+                        message="TRT and reference ran (no contract plugin or comparator)",
+                    )
+            elif trt_output is not None and ref_output is None:
+                # No reference — record as skipped
                 stage_results[stage_name] = CompareResult(
                     stage_name=stage_name,
                     status=StageStatus.SKIPPED.value,
-                    message="TRT run succeeded (no reference/comparator available)",
+                    message="TRT run succeeded (no reference available)",
                 )
 
         # 4. Determinism reruns (if configured)
@@ -807,8 +873,92 @@ class E2EOrchestrator:
         reruns = case.determinism.get("reruns", 0)
         if reruns > 0 and runner is not None:
             determinism_results["reruns_requested"] = reruns
-            # TODO: implement rerun logic when determinism policy is available
-            determinism_results["status"] = "not_implemented"
+            determinism_results["per_stage"] = {}
+            determinism_ok = True
+
+            for stage in case.stages:
+                if not stage.required:
+                    continue
+                stage_name = stage.name
+                baseline = baseline_trt_outputs.get(stage_name)
+                if baseline is None:
+                    continue
+
+                rerun_outputs: list[dict[str, Any]] = []
+                for i in range(reruns):
+                    t0 = time.monotonic()
+                    try:
+                        rerun_out = runner.run_stage(case, stage, ctx_with_bundle)
+                        elapsed = time.monotonic() - t0
+                        timing[f"determinism_{stage_name}_rerun_{i}_s"] = elapsed
+
+                        # Compare text output
+                        text_match = (
+                            rerun_out.text == baseline.text
+                        ) if baseline.text is not None else True
+
+                        # Compare data keys
+                        data_match = True
+                        for key in baseline.data:
+                            if key not in rerun_out.data:
+                                data_match = False
+                                break
+                            try:
+                                if baseline.data[key] != rerun_out.data[key]:
+                                    data_match = False
+                                    break
+                            except (TypeError, ValueError):
+                                pass  # non-comparable types, skip
+
+                        matched = text_match and data_match
+                        rerun_outputs.append({
+                            "rerun_index": i,
+                            "text_match": text_match,
+                            "data_match": data_match,
+                            "matched": matched,
+                            "timing_s": elapsed,
+                        })
+                        if not matched:
+                            determinism_ok = False
+
+                        sink.log_command(
+                            command=[f"determinism_rerun_{stage_name}_{i}"],
+                            rc=0 if matched else 1,
+                            stdout=rerun_out.text or "",
+                            stderr="",
+                            label=f"determinism_{stage_name}_rerun_{i}",
+                        )
+                    except Exception as e:
+                        elapsed = time.monotonic() - t0
+                        timing[f"determinism_{stage_name}_rerun_{i}_s"] = elapsed
+                        tb = traceback.format_exc()
+                        logger.error(
+                            "Determinism rerun %d for stage %s failed: %s\n%s",
+                            i, stage_name, e, tb,
+                        )
+                        rerun_outputs.append({
+                            "rerun_index": i,
+                            "matched": False,
+                            "error": str(e),
+                            "timing_s": elapsed,
+                        })
+                        determinism_ok = False
+
+                        sink.log_command(
+                            command=[f"determinism_rerun_{stage_name}_{i}"],
+                            rc=1,
+                            stdout="",
+                            stderr=f"{e}\n{tb}",
+                            label=f"determinism_{stage_name}_rerun_{i}",
+                        )
+
+                determinism_results["per_stage"][stage_name] = rerun_outputs
+
+            determinism_results["status"] = (
+                "deterministic" if determinism_ok else "non_deterministic"
+            )
+            if not determinism_ok:
+                all_stages_pass = False
 
         # 5. Build reproducibility commands
         repro = _build_repro_commands(case, ctx, bundle_path, build_info)
@@ -829,6 +979,9 @@ class E2EOrchestrator:
                     elif "Reference run failed" in cr.message:
                         failure_type = FailureType.REFERENCE_RUN_FAIL.value
                         break
+            # Override with determinism failure if that was the cause
+            if determinism_results.get("status") == "non_deterministic":
+                failure_type = FailureType.DETERMINISM_FAIL.value
 
         result = E2EResult(
             case_name=case.name,

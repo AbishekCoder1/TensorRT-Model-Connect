@@ -87,11 +87,12 @@ def test_encodec_fuse_weight_norm_matches_manual_formula() -> None:
 
 
 @pytest.mark.unit
-def test_encoder_seq_layer_norm_uses_expected_reduce_and_unary_ops() -> None:
-    """Intent: verify layer-norm helper follows expected op sequence.
+def test_encoder_seq_layer_norm_uses_native_normalization() -> None:
+    """Intent: verify layer-norm helper uses TRT native add_normalization.
 
-    Preconditions: Fake network implements add_reduce/elementwise/unary APIs.
-    Postconditions: Function returns final tensor and emits expected op counts.
+    Preconditions: Fake network implements add_normalization API.
+    Postconditions: Function returns tensor from native normalization layer
+        with correct epsilon and axis mask.
     """
     mod = _import_with_fake_trt("trtf_build.encoder_builder")
 
@@ -99,35 +100,25 @@ def test_encoder_seq_layer_norm_uses_expected_reduce_and_unary_ops() -> None:
         def __init__(self, name: str):
             self.name = name
 
-    class _FakeLayer:
-        _idx = 0
-
+    class _FakeNormLayer:
         def __init__(self):
-            _FakeLayer._idx += 1
-            self._out = _FakeTensor(f"t{_FakeLayer._idx}")
+            self.epsilon = 0.0
+            self._out = _FakeTensor("norm_out")
 
         def get_output(self, _i: int):
             return self._out
 
     class _FakeNetwork:
         def __init__(self):
-            self.calls: list[tuple[str, object]] = []
+            self.norm_calls: list[tuple] = []
 
-        def add_reduce(self, *_args, **_kwargs):
-            self.calls.append(("reduce", None))
-            return _FakeLayer()
-
-        def add_elementwise(self, *_args, **_kwargs):
-            self.calls.append(("elementwise", None))
-            return _FakeLayer()
-
-        def add_unary(self, *_args, **_kwargs):
-            self.calls.append(("unary", None))
-            return _FakeLayer()
+        def add_normalization(self, inp, gamma, beta, axis_mask):
+            self.norm_calls.append((inp, gamma, beta, axis_mask))
+            return _FakeNormLayer()
 
     add_constant_calls: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
 
-    def _fake_add_constant(_network, shape, values):
+    def _fake_add_constant(_network, shape, values, **_kw):
         add_constant_calls.append((tuple(shape), tuple(np.asarray(values).shape)))
         return _FakeTensor(f"const_{len(add_constant_calls)}")
 
@@ -144,12 +135,10 @@ def test_encoder_seq_layer_norm_uses_expected_reduce_and_unary_ops() -> None:
         )
 
     assert isinstance(out, _FakeTensor)
-    assert [name for name, _ in net.calls].count("reduce") == 2
-    assert [name for name, _ in net.calls].count("elementwise") == 6
-    assert [name for name, _ in net.calls].count("unary") == 2
-    assert add_constant_calls[0][0] == (1, 4)  # gamma
-    assert add_constant_calls[1][0] == (1, 4)  # beta
-    assert add_constant_calls[2][0] == (1, 1)  # eps
+    assert len(net.norm_calls) == 1  # single native normalization call
+    assert net.norm_calls[0][3] == (1 << 1)  # axis_mask = hidden dim
+    assert add_constant_calls[0][0] == (1, 4)  # gamma [1, hidden]
+    assert add_constant_calls[1][0] == (1, 4)  # beta [1, hidden]
 
 
 @pytest.mark.unit

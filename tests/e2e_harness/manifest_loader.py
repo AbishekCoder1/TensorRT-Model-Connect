@@ -14,9 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import (
+    CILane,
     E2ECase,
+    MODEL_REFERENCE_FAMILY,
     OracleLevel,
     PreflightRequirement,
+    REFERENCE_FAMILY_TO_USER_CONTRACT,
     RUNTIME_TO_TASK_STRATEGY,
     StageSpec,
 )
@@ -53,6 +56,7 @@ _DEFAULT_ORACLE_LEVEL: dict[str, str] = {
     "hf_transformers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "hf_diffusers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "torchtrt_diffusers": OracleLevel.L1_EXTERNAL_REFERENCE.value,
+    "nemo": OracleLevel.L1_EXTERNAL_REFERENCE.value,
     "torch_reference": OracleLevel.L2_INTERNAL_REFERENCE.value,
     "custom_python": OracleLevel.L2_INTERNAL_REFERENCE.value,
     "golden_snapshot": OracleLevel.L3_SNAPSHOT_REGRESSION.value,
@@ -153,6 +157,29 @@ def _infer_oracle_level(manifest: dict, reference_backend: str) -> str:
         reference_backend, OracleLevel.L2_INTERNAL_REFERENCE.value)
 
 
+def _infer_reference_family(manifest: dict) -> str:
+    """Infer reference_family from manifest name or explicit field."""
+    if "reference_family" in manifest:
+        return manifest["reference_family"]
+    return MODEL_REFERENCE_FAMILY.get(manifest.get("name", ""), "")
+
+
+def _infer_user_contract(manifest: dict, reference_family: str) -> str:
+    """Infer user_contract from reference_family or explicit field."""
+    if "user_contract" in manifest:
+        return manifest["user_contract"]
+    if reference_family:
+        return REFERENCE_FAMILY_TO_USER_CONTRACT.get(reference_family, "")
+    return ""
+
+
+def _infer_ci_lane(manifest: dict) -> str:
+    """Infer ci_lane from manifest or default to acceptance."""
+    if "ci_lane" in manifest:
+        return manifest["ci_lane"]
+    return CILane.ACCEPTANCE.value
+
+
 def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequirement]:
     """Build preflight requirements from manifest or infer defaults."""
     if "preflight_requirements" in manifest:
@@ -237,6 +264,9 @@ def _build_stages(manifest: dict, task_strategy: str) -> list[StageSpec]:
                 required=s.get("required", True),
                 runner_override=s.get("runner_override"),
                 comparator_override=s.get("comparator_override"),
+                artifact_type=s.get("artifact_type", ""),
+                comparison_mode=s.get("comparison_mode", ""),
+                ci_lanes=s.get("ci_lanes", [CILane.ACCEPTANCE.value]),
             )
             for s in manifest["stages"]
         ]
@@ -351,7 +381,7 @@ def _build_metadata(manifest: dict) -> dict:
         "video_num_frames", "video_height", "video_width",
         "num_inference_steps", "build_args", "preflight_requirements",
         "stages", "comparison_profile", "threshold_overrides", "determinism",
-        "inputs", "metadata",
+        "inputs", "metadata", "reference_family", "user_contract", "ci_lane",
     }
 
     meta = manifest.get("metadata", {}).copy()
@@ -496,6 +526,11 @@ def load_manifest(
     reference_backend = _infer_reference_backend(raw, task_strategy)
     oracle_level = _infer_oracle_level(raw, reference_backend)
 
+    # Infer reference family, user contract, and CI lane
+    reference_family = _infer_reference_family(raw)
+    user_contract = _infer_user_contract(raw, reference_family)
+    ci_lane = _infer_ci_lane(raw)
+
     # Handle skip -> known_limitations migration
     known_limitation = _convert_skip_to_known_limitation(raw)
     metadata = _build_metadata(raw)
@@ -511,6 +546,9 @@ def load_manifest(
         task_strategy=task_strategy,
         reference_backend=reference_backend,
         oracle_level=oracle_level,
+        reference_family=reference_family,
+        user_contract=user_contract,
+        ci_lane=ci_lane,
         bundle=raw.get("bundle", f"{raw['name']}.trtfb"),
         inputs=_build_inputs(raw),
         preflight=_build_preflight(raw, task_strategy),

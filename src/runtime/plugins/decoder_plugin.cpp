@@ -1,8 +1,10 @@
 // DecoderPlugin: handles "decoder_kv_cache", "decoder_moe", and "torchtrt_decoder" strategies.
 // Standard attention-based decoder with device-resident KV cache.
 
+#include "runtime/core/chat_template.h"
 #include "runtime/pipelines/text_generation_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
+#include "utils/json_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
 #if TRTF_HAS_TRT
@@ -23,9 +25,9 @@ class DecoderPlugin final : public IPipelinePlugin {
         cudaStream_t stream = loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        std::unique_ptr<IInferenceState> state =
-            std::make_unique<KvCache>(ctx.config.num_layers, ctx.config.max_cache_length, kv_dim,
-                                      stream, cache_dtype, naming);
+        std::unique_ptr<IInferenceState> state = std::make_unique<KvCache>(
+            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, cache_dtype,
+            naming);
         if (!state->ok())
             throw std::runtime_error("Failed to create KvCache");
 
@@ -36,6 +38,14 @@ class DecoderPlugin final : public IPipelinePlugin {
         tgc.has_position_input = loaded.module->has_input("position_id");
         if (is_torchtrt)
             tgc.logits_output_name = "output0";
+
+        // Detect chat template format from tokenizer_config.json
+        auto* tok_cfg_sec = find_section(ctx.bundle, "tokenizer_config.json");
+        if (tok_cfg_sec && !tok_cfg_sec->empty()) {
+            std::string tok_cfg_text(tok_cfg_sec->begin(), tok_cfg_sec->end());
+            std::string chat_tpl = extract_json_string(tok_cfg_text, "chat_template", "");
+            tgc.chat_template_format = detect_chat_template_format(chat_tpl);
+        }
 
         return std::make_unique<TextGenerationPipeline>(std::move(loaded.module), std::move(state),
                                                         tgc, stream, std::move(tokenizer),

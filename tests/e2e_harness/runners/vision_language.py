@@ -278,6 +278,12 @@ class VisionLanguageRunner:
         if ctx.hf_python:
             cmd.extend(["--hf-python", str(ctx.hf_python)])
 
+        contract_config = case.metadata.get("contract_config", {})
+        if contract_config.get("use_chat_template"):
+            cmd.append("--chat-template")
+        if contract_config.get("enable_thinking") is False:
+            cmd.append("--no-thinking")
+
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path

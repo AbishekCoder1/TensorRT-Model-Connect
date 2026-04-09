@@ -1,15 +1,19 @@
-"""Plugin registry for strategy runners, reference backends, and comparators.
+"""Plugin registry for strategy runners, reference backends, comparators,
+and contract test plugins.
 
 Supports both explicit registration and auto-discovery from subdirectories.
-Auto-discovery scans ``runners/``, ``references/``, and ``comparators/``
-sibling packages for modules that expose a module-level ``plugin`` attribute
-implementing the corresponding protocol.
+Auto-discovery scans ``runners/``, ``references/``, ``comparators/``, and
+``plugins/`` sibling packages for modules that expose a module-level
+``plugin`` attribute implementing the corresponding protocol.
 
 Usage:
-    from tests.e2e_harness.registry import get_runner, get_comparator
+    from tests.e2e_harness.registry import get_runner, get_comparator, get_contract_plugin
 
     runner = get_runner("text_generation_causal")
     output = runner.run_stage(case, stage, ctx)
+
+    contract = get_contract_plugin("chat_instruct_template")
+    result = contract.verify(trt_output, ref_output, case, threshold)
 
 Auto-discovery is lazy: it runs on first access if the registry is empty.
 """
@@ -207,6 +211,16 @@ def list_comparators() -> Dict[str, Comparator]:
     return dict(_comparators)
 
 
+def get_contract_plugin(reference_family: str):
+    """Look up a contract test plugin by reference family.
+
+    Returns None if no plugin is registered for the given family.
+    Delegates to the plugins sub-package which has its own auto-discovery.
+    """
+    from .plugins import find_plugin
+    return find_plugin(reference_family)
+
+
 def reset() -> None:
     """Clear all registries and reset discovery state. For testing only."""
     global _discovered
@@ -214,3 +228,9 @@ def reset() -> None:
     _reference_backends.clear()
     _comparators.clear()
     _discovered = False
+    # Also reset contract plugins
+    try:
+        from .plugins import reset as reset_plugins
+        reset_plugins()
+    except ImportError:
+        pass

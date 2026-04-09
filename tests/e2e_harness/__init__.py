@@ -34,10 +34,16 @@ def save_full_stderr(stderr: str, artifacts_dir: str, stage_name: str, case_name
     return truncated, path
 
 from .contracts import (
+    MODEL_REFERENCE_FAMILY,
+    REFERENCE_FAMILY_TO_COMPARISON_MODE,
+    REFERENCE_FAMILY_TO_USER_CONTRACT,
     RUNTIME_TO_TASK_STRATEGY,
     ArtifactSink,
+    ArtifactType,
+    CILane,
     Comparator,
     CompareResult,
+    ComparisonMode,
     DeterminismPolicy,
     E2ECase,
     E2EResult,
@@ -46,13 +52,15 @@ from .contracts import (
     MetricResult,
     OracleLevel,
     PreflightRequirement,
-    RunContext,
     ReferenceBackendRunner,
+    ReferenceFamily,
+    RunContext,
     StageOutput,
     StageSpec,
     StageStatus,
     TaskStrategyRunner,
     ThresholdProfile,
+    UserContract,
 )
 
 __all__ = [
@@ -62,6 +70,11 @@ __all__ = [
     "OracleLevel",
     "E2EStatus",
     "StageStatus",
+    "ReferenceFamily",
+    "ArtifactType",
+    "ComparisonMode",
+    "CILane",
+    "UserContract",
     # Dataclasses
     "PreflightRequirement",
     "StageSpec",
@@ -80,6 +93,9 @@ __all__ = [
     "DeterminismPolicy",
     # Constants
     "RUNTIME_TO_TASK_STRATEGY",
+    "MODEL_REFERENCE_FAMILY",
+    "REFERENCE_FAMILY_TO_USER_CONTRACT",
+    "REFERENCE_FAMILY_TO_COMPARISON_MODE",
     # Helpers
     "save_full_stderr",
     "_case_artifact_dir",
