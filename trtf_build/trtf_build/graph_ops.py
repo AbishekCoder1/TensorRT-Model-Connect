@@ -986,8 +986,6 @@ def add_spatial_merge(
     Note: This is a simplified version. For Qwen2.5-VL, the merge
     concatenates merge_size^2 adjacent patches, then applies layernorm + MLP.
     """
-    merged_dim = input_dim * merge_size * merge_size
-
     # LayerNorm on the merged representation
     norm = add_layer_norm(
         network, inp, input_dim,
@@ -1218,20 +1216,6 @@ def add_conv3d_as_conv2d(
     else:
         # General case: temporal kernel > 1
         # Pad temporally if needed
-        if pt > 0:
-            # Zero-pad [B, C, T, H, W] -> [B, C, T+2*pt, H, W]
-            pad_layer = network.add_padding_nd(
-                inp,
-                pre_padding=(0, pt, 0),
-                post_padding=(0, pt, 0),
-            )
-            inp = pad_layer.get_output(0)
-            t_padded = t + 2 * pt
-        else:
-            t_padded = t
-
-        t_out = (t_padded - kt) // st + 1
-
         # For causal conv we handle this via the cache mechanism externally,
         # so here we just do a per-frame conv with gathered temporal neighbors.
         # Reshape [B, C, T_padded, H, W] -> sliding window gather -> Conv2D
@@ -1678,12 +1662,12 @@ def add_cross_attention(
         attn_weights = network.add_cast(attn_weights, _np_to_trt_dtype(dtype)).get_output(0)
 
     # Context: softmax @ V
-    context_out = network.add_matrix_multiply(
+    context = network.add_matrix_multiply(
         attn_weights, trt.MatrixOperation.NONE,
         v_heads.get_output(0), trt.MatrixOperation.NONE)
 
-    # Reshape back: [num_heads, q_seq, head_dim] -> [q_seq, hidden]
-    context_flat = network.add_shuffle(context_out.get_output(0))
+    # Reshape back: [num_heads, q_seq, head_dim] → [q_seq, hidden]
+    context_flat = network.add_shuffle(context.get_output(0))
     context_flat.first_transpose = trt.Permutation([1, 0, 2])
     context_flat.reshape_dims = (q_seq_len, hidden_size)
 
@@ -2176,3 +2160,222 @@ def add_layer_norm_no_affine(
 
 # Alias: add_gelu_tanh is the same as add_gelu_new (tanh approximation)
 add_gelu_tanh = add_gelu_new
+
+
+# ---------------------------------------------------------------------------
+# TRT 10 native attention APIs (TRT 10.x)
+#
+# Three primitives replace manual primitive chains:
+#   add_layer_norm_native  → INormalizationLayer  (replaces add_layer_norm)
+#   add_apply_rope_native  → IRotaryEmbeddingLayer (replaces add_apply_rope)
+#   add_attention_core     → IAttention           (replaces score+softmax+V)
+# ---------------------------------------------------------------------------
+
+def add_layer_norm_native(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    hidden_size: int,
+    gamma: np.ndarray,
+    beta: np.ndarray,
+    eps: float,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """LayerNorm via TRT native INormalizationLayer (add_normalization_v2).
+
+    Replaces the manual reduce/elementwise chain in add_layer_norm with a
+    single fused layer that TRT can optimize end-to-end.  Compute precision
+    is forced to FP32 for numerical stability, with the result cast back to
+    ``dtype`` if needed.
+
+    Note: INormalizationLayer computes (x - mean) / sqrt(var + eps) * gamma + beta.
+    This is LayerNorm, NOT RMSNorm.  Use add_rms_norm for RMSNorm models.
+
+    Args:
+        inp:         Input tensor [*, hidden_size].
+        hidden_size: Size of the normalized dimension (last axis).
+        gamma:       Scale weights [hidden_size].
+        beta:        Bias weights [hidden_size].
+        eps:         Numerical stability epsilon (scalar, not a tensor).
+        dtype:       Working dtype for gamma/beta constants.
+    """
+    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
+    beta_t = add_constant(network, (1, hidden_size), beta, dtype=np.float32)
+    # axesMask bit i selects axis i as a reduction axis.
+    # For a [..., H] tensor the hidden dim is the last axis.
+    # With rank-2 input [1, H], axis 1 → mask = 1 << 1 = 2.
+    norm = network.add_normalization_v2(inp, gamma_t, beta_t, 1 << 1)
+    norm.epsilon = eps
+    norm.compute_precision = trt.float32
+    result = norm.get_output(0)
+    if dtype != np.float32:
+        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+    return result
+
+
+def make_rope_table_half_dim(
+    max_cache_length: int,
+    head_dim: int,
+    rope_theta: float,
+    cosine: bool,
+    partial_rotary_factor: float = 1.0,
+    interleaved: bool = False,
+) -> np.ndarray:
+    """Build a RoPE cos/sin table of shape [max_cache_length, rotary_ndims // 2].
+
+    IRotaryEmbeddingLayer expects the cos/sin cache with only the *half*
+    rotary dimension (it internally handles both halves).  This is different
+    from make_rope_table which produces [max_cache_length, hidden_size] by
+    repeating the per-head values across all heads.
+
+    Args:
+        max_cache_length: Number of positions (rows in the table).
+        head_dim:         Full head dimension (D).
+        rope_theta:       Base frequency for inverse-frequency computation.
+        cosine:           True → cos table, False → sin table.
+        partial_rotary_factor: Fraction of head dims that rotate (default 1.0).
+        interleaved:      If True, adjacent-pair frequencies (CodeGen/GPT-J).
+                          If False, half-split frequencies (LLaMA/Qwen).
+
+    Returns:
+        Float32 array [max_cache_length, rotary_ndims // 2].
+    """
+    rotary_ndims = int(head_dim * partial_rotary_factor)
+    half = rotary_ndims // 2
+    default = 1.0 if cosine else 0.0
+    if max_cache_length <= 0 or half <= 0 or rope_theta <= 0.0:
+        return np.full((max(max_cache_length, 1), max(half, 1)),
+                       default, dtype=np.float32)
+    table = np.full((max_cache_length, half), default, dtype=np.float32)
+    for pos in range(max_cache_length):
+        for d in range(half):
+            # For both interleaved and rotate-half the frequency index is d
+            # (the distinction only affects which input pair is rotated; the
+            # freq assignment per half-dim is the same).
+            exponent = (2.0 * d) / rotary_ndims
+            inv_freq = rope_theta ** (-exponent)
+            angle = pos * inv_freq
+            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
+    return table
+
+
+def add_apply_rope_native(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    cos_cache_2d: trt.ITensor,
+    sin_cache_2d: trt.ITensor,
+    position_id: trt.ITensor,
+    rotary_embedding_dim: int,
+    interleaved: bool = False,
+) -> trt.ITensor:
+    """Apply RoPE via TRT native IRotaryEmbeddingLayer.
+
+    Replaces the manual matmul+elementwise chain in add_apply_rope with a
+    single fused layer.  Used for single-token decoder steps where Q or K
+    has shape [1, num_heads * head_dim].
+
+    Shape contract (IRotaryEmbeddingLayer with position_ids):
+      input:           [1, num_heads, 1, head_dim]   (reshaped internally)
+      cos_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
+      sin_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
+      position_id:     [1] int32, reshaped to [1, 1] (B=1, S=1) internally
+      interleaved:     False → rotate-half (LLaMA/Qwen)
+                       True  → adjacent-pair (CodeGen/GPT-J)
+
+    Args:
+        inp:                  [1, num_heads * head_dim].
+        num_heads:            Number of attention heads.
+        head_dim:             Per-head dimension.
+        cos_cache_2d:         Pre-built 2-D cos table constant.
+        sin_cache_2d:         Pre-built 2-D sin table constant.
+        position_id:          Runtime position index, shape [1] int32.
+        rotary_embedding_dim: Number of head dims that participate in RoPE.
+        interleaved:          Frequency layout (see above).
+
+    Returns:
+        [1, num_heads * head_dim] with RoPE applied.
+    """
+    attention_size = num_heads * head_dim
+
+    # Reshape [1, attention_size] → [1, num_heads, 1, head_dim]
+    inp_4d = network.add_shuffle(inp)
+    inp_4d.reshape_dims = (1, num_heads, 1, head_dim)
+
+    # Reshape position_id [1] → [1, 1]  (batch=1, seq=1)
+    pos_2d = network.add_shuffle(position_id)
+    pos_2d.reshape_dims = (1, 1)
+
+    rope = network.add_rotary_embedding(
+        inp_4d.get_output(0),
+        cos_cache_2d,
+        sin_cache_2d,
+        interleaved,
+        rotary_embedding_dim,
+    )
+    rope.set_input(3, pos_2d.get_output(0))
+
+    # Reshape [1, num_heads, 1, head_dim] → [1, attention_size]
+    out_2d = network.add_shuffle(rope.get_output(0))
+    out_2d.reshape_dims = (1, attention_size)
+    return out_2d.get_output(0)
+
+
+def _add_attention_core(
+    network: trt.INetworkDefinition,
+    q_4d: trt.ITensor,
+    k_4d: trt.ITensor,
+    v_4d: trt.ITensor,
+    causal: bool = False,
+    mask: trt.ITensor | None = None,
+) -> trt.ITensor:
+    """Scaled dot-product attention via TRT native IAttention layer.
+
+    Replaces the manual Q@K^T → scale → softmax → @V chain.  TRT 10 fuses
+    this into a single kernel when a compatible implementation is available;
+    decomposable=True ensures a correct fallback to primitives otherwise.
+
+    NOTE: TRT IAttention computes raw BMM1 = Q @ K^T without any built-in
+    1/sqrt(D) scaling.  We pre-scale Q by 1/sqrt(D) so that the fused kernel
+    computes the standard scaled dot-product attention formula.
+
+    Args:
+        q_4d:    Query  [B, H, q_seq, D].
+        k_4d:    Key    [B, H, kv_seq, D].
+        v_4d:    Value  [B, H, kv_seq, D].
+        causal:  Apply causal (autoregressive) mask.  Mutually exclusive
+                 with ``mask``.
+        mask:    Optional additive float mask [B, H, q_seq, kv_seq] added
+                 to scaled logits before softmax.  Cannot be used with
+                 causal=True.
+
+    Returns:
+        Context tensor [B, H, q_seq, D].
+    """
+    # Pre-scale Q by 1/sqrt(D): TRT IAttention does not apply this itself.
+    # Match the scale constant's dtype to Q's dtype: in strongly-typed networks
+    # a FP32 constant mixed with a FP16/BF16 Q causes add_elementwise to emit
+    # a type-mismatch error and produce a tensor with corrupted dimensions,
+    # which makes add_attention return None.
+    head_dim = q_4d.shape[-1]
+    scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    # Use FP16 weights directly for FP16; BF16 has no numpy native type so
+    # create as FP32 and cast; FP32 falls through to the default.
+    scale_np_dtype = np.float16 if q_4d.dtype == trt.float16 else np.float32
+    scale_t = add_constant(network, (1, 1, 1, 1), np.array([[[[scale]]]]), dtype=scale_np_dtype)
+    if q_4d.dtype == trt.bfloat16:
+        scale_t = network.add_cast(scale_t, trt.bfloat16).get_output(0)
+    q_scaled = network.add_elementwise(q_4d, scale_t, trt.ElementWiseOperation.PROD)
+
+    attn = network.add_attention(
+        q_scaled.get_output(0), k_4d, v_4d,
+        trt.AttentionNormalizationOp.SOFTMAX,
+        causal,
+    )
+    # Allow TRT to decompose into primitive ops when no fused kernel is
+    # available (e.g. unsupported head-dim or dtype).  This guarantees
+    # correctness on any configuration at the cost of potential performance.
+    attn.decomposable = True
+    if mask is not None and not causal:
+        attn.mask = mask
+    return attn.get_output(0)

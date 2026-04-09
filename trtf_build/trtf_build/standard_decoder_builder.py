@@ -168,6 +168,13 @@ def build_standard_decoder_engine(
     alibi_slopes_tensor = None
     alibi_indices_tensor = None
 
+    # Native RoPE tensors for IRotaryEmbeddingLayer (TRT 10+).
+    # Shape: [attention_window, rotary_ndims // 2] — one entry per position,
+    # half the rotating dimension (IRotaryEmbeddingLayer broadcasts per-head).
+    cos_half_tensor = None
+    sin_half_tensor = None
+    rotary_embedding_dim = int(head_dim * partial_rotary_factor)
+
     if position_type == "rope":
         cos_table_np = graph_ops.make_rope_table(
             attention_window, attention_size, num_heads, config.rope_theta, True,
@@ -188,6 +195,23 @@ def build_standard_decoder_engine(
         rotate_half_tensor = graph_ops.add_constant(
             network, (attention_size, attention_size), rotate_half_np,
             dtype=work_np_dtype)
+
+        # Half-dim tables for native IRotaryEmbeddingLayer.
+        # Shape [attention_window, rotary_ndims // 2]; TRT broadcasts across heads.
+        # IRotaryEmbeddingLayer requires rotary_embedding_dim >= 2 and even;
+        # fall back to manual RoPE for degenerate configs (e.g. tiny synthetic
+        # models with partial_rotary_factor producing an odd dim).
+        if rotary_embedding_dim >= 2 and rotary_embedding_dim % 2 == 0:
+            cos_half_np = graph_ops.make_rope_table_half_dim(
+                attention_window, head_dim, config.rope_theta, True,
+                partial_rotary_factor, interleaved=interleaved_rope)
+            sin_half_np = graph_ops.make_rope_table_half_dim(
+                attention_window, head_dim, config.rope_theta, False,
+                partial_rotary_factor, interleaved=interleaved_rope)
+            cos_half_tensor = graph_ops.add_constant(
+                network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
+            sin_half_tensor = graph_ops.add_constant(
+                network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
     elif position_type == "learned":
         pos_embed_np = weights["position_embedding"]
         position_embed_table = graph_ops.add_constant(
@@ -257,15 +281,15 @@ def build_standard_decoder_engine(
             trt.ElementWiseOperation.SUM)
         hidden_state = pos_add.get_output(0)
 
-    # Optional embedding LayerNorm (e.g. BLOOM)
+    # Optional embedding LayerNorm (e.g. BLOOM) — use native INormalizationLayer
     embed_norm = weights.get("embedding_norm")
     if embed_norm is not None:
         embed_norm_beta = weights.get("embedding_norm_beta")
         if embed_norm_beta is None:
             embed_norm_beta = np.zeros(hidden, dtype=work_np_dtype)
-        hidden_state = graph_ops.add_layer_norm(
+        hidden_state = graph_ops.add_layer_norm_native(
             network, hidden_state, hidden, embed_norm, embed_norm_beta,
-            eps_tensor, dtype=work_np_dtype)
+            config.rms_norm_eps, dtype=work_np_dtype)
 
     if debug_layer_outputs:
         _mark_debug_output(network, hidden_state, "debug_embed")
@@ -308,6 +332,10 @@ def build_standard_decoder_engine(
             alibi_indices_tensor=alibi_indices_tensor,
             dtype=work_np_dtype,
             quant_ctx=quant_ctx,
+            cos_half_tensor=cos_half_tensor,
+            sin_half_tensor=sin_half_tensor,
+            rotary_embedding_dim=rotary_embedding_dim,
+            interleaved_rope=interleaved_rope,
         )
 
         hidden_state = result["hidden"]
@@ -433,6 +461,10 @@ def _add_decoder_layer(
     alibi_indices_tensor: trt.ITensor | None = None,
     dtype: np.dtype = np.float32,
     quant_ctx: QuantContext | None = None,
+    cos_half_tensor: trt.ITensor | None = None,
+    sin_half_tensor: trt.ITensor | None = None,
+    rotary_embedding_dim: int = 0,
+    interleaved_rope: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
 
@@ -452,6 +484,10 @@ def _add_decoder_layer(
         dtype=dtype,
         quant_ctx=quant_ctx,
         layer_prefix=prefix,
+        cos_half_tensor=cos_half_tensor,
+        sin_half_tensor=sin_half_tensor,
+        rotary_embedding_dim=rotary_embedding_dim,
+        interleaved_rope=interleaved_rope,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]

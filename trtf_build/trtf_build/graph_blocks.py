@@ -123,11 +123,24 @@ def add_attention_block(
     dtype: np.dtype = np.float32,
     quant_ctx: QuantContext | None = None,
     layer_prefix: str = "",
+    # TRT 10 native API tensors (optional — when provided, replaces manual
+    # rotate-half RoPE and the score/softmax/V chain with fused kernels).
+    cos_half_tensor: trt.ITensor | None = None,
+    sin_half_tensor: trt.ITensor | None = None,
+    rotary_embedding_dim: int = 0,
+    interleaved_rope: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
     Returns {"normed": ..., "attn_out": ..., "present_k": ..., "present_v": ...}.
     Does NOT apply residual -- callers compose the residual pattern.
+
+    When ``cos_half_tensor`` / ``sin_half_tensor`` are provided the function
+    uses TRT 10 native APIs:
+      - IRotaryEmbeddingLayer  (replaces the rotate-half matmul+elementwise chain)
+      - IAttention             (replaces the Q@K^T → scale → mask → softmax → @V chain)
+    Otherwise it falls back to the manual primitive implementation, which is
+    used for ALiBi and other callers that have not yet been updated.
     """
     matmul = _make_matmul_fn(network, dtype, quant_ctx)
     attention_window = max_cache_length + 1
@@ -172,8 +185,26 @@ def add_attention_block(
         k = graph_ops.add_rms_norm_per_head(
             network, k, num_heads, head_dim, k_norm, eps_tensor, dtype=dtype)
 
-    # Apply RoPE if using rotary positions
-    if position_type == "rope" and cos_tensor is not None:
+    # ------------------------------------------------------------------ #
+    # RoPE — native IRotaryEmbeddingLayer or manual rotate-half fallback  #
+    # ------------------------------------------------------------------ #
+    use_native = (
+        position_type == "rope"
+        and cos_half_tensor is not None
+        and sin_half_tensor is not None
+        and alibi_slopes_tensor is None  # ALiBi still uses manual path
+    )
+
+    if use_native:
+        q = graph_ops.add_apply_rope_native(
+            network, q, num_heads, head_dim,
+            cos_half_tensor, sin_half_tensor, position_id,
+            rotary_embedding_dim or head_dim, interleaved_rope)
+        k = graph_ops.add_apply_rope_native(
+            network, k, num_heads, head_dim,
+            cos_half_tensor, sin_half_tensor, position_id,
+            rotary_embedding_dim or head_dim, interleaved_rope)
+    elif position_type == "rope" and cos_tensor is not None:
         q = graph_ops.add_apply_rope(
             network, q, position_id, cos_tensor, sin_tensor,
             rotate_half_tensor)
@@ -199,71 +230,106 @@ def add_attention_block(
         [cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
 
-    # Reshape for multi-head attention
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (num_heads, 1, head_dim)
+    # ------------------------------------------------------------------ #
+    # Attention core — native IAttention or manual fallback               #
+    # ------------------------------------------------------------------ #
+    if use_native:
+        # Reshape Q/K/V to [B=1, H, S, D] for IAttention.
+        #
+        # Q layout: [1, H*D] — heads are contiguous, so reshape directly.
+        q_4d = network.add_shuffle(q)
+        q_4d.reshape_dims = (1, num_heads, 1, head_dim)
 
-    k_heads = network.add_shuffle(all_k.get_output(0))
-    k_heads.reshape_dims = (attention_window, num_heads, head_dim)
-    v_heads = network.add_shuffle(all_v.get_output(0))
-    v_heads.reshape_dims = (attention_window, num_heads, head_dim)
+        # K/V layout: [attention_window, H*D] — each row has all heads interleaved.
+        # Direct reshape to [1, H, S, D] would mis-map heads and positions.
+        # Correct: reshape to [S, H, D], transpose to [H, S, D], add batch dim.
+        kv_3d_k = network.add_shuffle(all_k.get_output(0))
+        kv_3d_k.reshape_dims = (attention_window, num_heads, head_dim)
+        kv_3d_k.second_transpose = trt.Permutation([1, 0, 2])
+        all_k_4d = network.add_shuffle(kv_3d_k.get_output(0))
+        all_k_4d.reshape_dims = (1, num_heads, attention_window, head_dim)
 
-    # Transpose K, V to [num_heads, seq_len, head_dim]
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
+        kv_3d_v = network.add_shuffle(all_v.get_output(0))
+        kv_3d_v.reshape_dims = (attention_window, num_heads, head_dim)
+        kv_3d_v.second_transpose = trt.Permutation([1, 0, 2])
+        all_v_4d = network.add_shuffle(kv_3d_v.get_output(0))
+        all_v_4d.reshape_dims = (1, num_heads, attention_window, head_dim)
 
-    # Attention scores: Q @ K^T
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
+        # Reshape mask [1, attention_window] → [1, 1, 1, attention_window]
+        # for broadcast across the head dimension.
+        mask_4d = network.add_shuffle(attention_mask)
+        mask_4d.reshape_dims = (1, 1, 1, attention_window)
 
-    # Scale
-    scaled = network.add_elementwise(
-        score.get_output(0), attn_scale_tensor,
-        trt.ElementWiseOperation.PROD)
+        ctx_4d = graph_ops._add_attention_core(
+            network,
+            q_4d.get_output(0),
+            all_k_4d.get_output(0),
+            all_v_4d.get_output(0),
+            causal=False,
+            mask=mask_4d.get_output(0),
+        )
 
-    # ALiBi bias
-    if alibi_slopes_tensor is not None and alibi_indices_tensor is not None:
-        pos_float = network.add_cast(position_id, trt.float32)
-        pos_1d = network.add_shuffle(pos_float.get_output(0))
-        pos_1d.reshape_dims = (1,)
-        full_indices = network.add_concatenation(
-            [alibi_indices_tensor, pos_1d.get_output(0)])
-        full_indices.axis = 0
-        idx_3d = network.add_shuffle(full_indices.get_output(0))
-        idx_3d.reshape_dims = (1, 1, attention_window)
-        pos_reshaped = network.add_shuffle(pos_float.get_output(0))
-        pos_reshaped.reshape_dims = (1, 1, 1)
-        rel_pos = network.add_elementwise(
-            idx_3d.get_output(0), pos_reshaped.get_output(0),
-            trt.ElementWiseOperation.SUB)
-        alibi_bias = network.add_elementwise(
-            alibi_slopes_tensor, rel_pos.get_output(0),
-            trt.ElementWiseOperation.PROD)
+        # Reshape [1, num_heads, 1, head_dim] → [1, attention_size]
+        context_flat = network.add_shuffle(ctx_4d)
+        context_flat.reshape_dims = (1, attention_size)
+    else:
+        # Manual path: reshape → Q@K^T → scale → ALiBi/mask → softmax → @V
+        q_heads = network.add_shuffle(q)
+        q_heads.reshape_dims = (num_heads, 1, head_dim)
+
+        k_heads = network.add_shuffle(all_k.get_output(0))
+        k_heads.reshape_dims = (attention_window, num_heads, head_dim)
+        v_heads = network.add_shuffle(all_v.get_output(0))
+        v_heads.reshape_dims = (attention_window, num_heads, head_dim)
+
+        k_heads.second_transpose = trt.Permutation([1, 0, 2])
+        v_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+        score = network.add_matrix_multiply(
+            q_heads.get_output(0), trt.MatrixOperation.NONE,
+            k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
+
         scaled = network.add_elementwise(
-            scaled.get_output(0), alibi_bias.get_output(0),
+            score.get_output(0), attn_scale_tensor,
+            trt.ElementWiseOperation.PROD)
+
+        if alibi_slopes_tensor is not None and alibi_indices_tensor is not None:
+            pos_float = network.add_cast(position_id, trt.float32)
+            pos_1d = network.add_shuffle(pos_float.get_output(0))
+            pos_1d.reshape_dims = (1,)
+            full_indices = network.add_concatenation(
+                [alibi_indices_tensor, pos_1d.get_output(0)])
+            full_indices.axis = 0
+            idx_3d = network.add_shuffle(full_indices.get_output(0))
+            idx_3d.reshape_dims = (1, 1, attention_window)
+            pos_reshaped = network.add_shuffle(pos_float.get_output(0))
+            pos_reshaped.reshape_dims = (1, 1, 1)
+            rel_pos = network.add_elementwise(
+                idx_3d.get_output(0), pos_reshaped.get_output(0),
+                trt.ElementWiseOperation.SUB)
+            alibi_bias = network.add_elementwise(
+                alibi_slopes_tensor, rel_pos.get_output(0),
+                trt.ElementWiseOperation.PROD)
+            scaled = network.add_elementwise(
+                scaled.get_output(0), alibi_bias.get_output(0),
+                trt.ElementWiseOperation.SUM)
+
+        mask3d = network.add_shuffle(attention_mask)
+        mask3d.reshape_dims = (1, 1, attention_window)
+
+        masked = network.add_elementwise(
+            scaled.get_output(0), mask3d.get_output(0),
             trt.ElementWiseOperation.SUM)
 
-    # Mask (reshape to [1, 1, attention_window])
-    mask3d = network.add_shuffle(attention_mask)
-    mask3d.reshape_dims = (1, 1, attention_window)
+        softmax = network.add_softmax(masked.get_output(0))
+        softmax.axes = 1 << 2
 
-    masked = network.add_elementwise(
-        scaled.get_output(0), mask3d.get_output(0),
-        trt.ElementWiseOperation.SUM)
+        context_heads = network.add_matrix_multiply(
+            softmax.get_output(0), trt.MatrixOperation.NONE,
+            v_heads.get_output(0), trt.MatrixOperation.NONE)
 
-    # Softmax
-    softmax = network.add_softmax(masked.get_output(0))
-    softmax.axes = 1 << 2
-
-    # Context: softmax @ V
-    context_heads = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    # Reshape back to [1, attention_size]
-    context_flat = network.add_shuffle(context_heads.get_output(0))
-    context_flat.reshape_dims = (1, attention_size)
+        context_flat = network.add_shuffle(context_heads.get_output(0))
+        context_flat.reshape_dims = (1, attention_size)
 
     # Output projection
     attn_out = matmul(context_flat.get_output(0),
