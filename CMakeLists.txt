@@ -16,6 +16,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(GNUInstallDirs)
 
+option(TRTF_ENABLE_TRT "Enable TensorRT backend integration" ON)
+
 # TensorRT is mandatory — the container image must provide TRT and CUDA.
 set(_trtf_default_search_paths
   /usr/include/x86_64-linux-gnu
@@ -233,13 +235,14 @@ target_include_directories(trtf_core SYSTEM PRIVATE
 
 target_link_libraries(trtf_core PRIVATE ${CMAKE_DL_LIBS})
 
-option(TRTF_ENABLE_TRT "Enable TensorRT backend" ON)
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
   target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=1)
   target_include_directories(trtf_core SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  # TRT symbols come from the backend DSOs. trtf_core only needs CUDA runtime,
+  # cuBLAS for gpu_matmul, and dlopen support.
   find_library(TRTF_CUBLAS_LIBRARY NAMES cublas libcublas.so
     PATHS ${_trtf_default_search_paths} PATH_SUFFIXES "" lib lib64)
-  target_link_libraries(trtf_core PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY}
+  target_link_libraries(trtf_core PRIVATE ${TRTF_CUDART_LIBRARY}
     $<$<BOOL:${TRTF_CUBLAS_LIBRARY}>:${TRTF_CUBLAS_LIBRARY}>)
   message(STATUS "TensorRT backend enabled")
   message(STATUS "  TRT include: ${TRTF_TRT_INCLUDE_DIR}")
@@ -342,7 +345,8 @@ endif()
 option(TRTF_BUILD_BACKEND_RTX "Build TRT-RTX backend DSO" OFF)
 if(TRTF_BUILD_BACKEND_RTX)
   find_library(TENSORRT_RTX_LIB tensorrt_rtx HINTS ${TRTF_RTX_LIBRARY_DIR})
-  find_path(TRT_RTX_INCLUDE_DIR NvInferRuntime.h HINTS ${TRTF_RTX_INCLUDE_DIR})
+  # Use TRTF_RTX_INCLUDE_DIR directly; find_path can pick up standard TRT first.
+  set(TRT_RTX_INCLUDE_DIR "${TRTF_RTX_INCLUDE_DIR}")
   if(TENSORRT_RTX_LIB AND TRT_RTX_INCLUDE_DIR)
     add_library(trtf_backend_rtx SHARED
       src/runtime/backend/trt_module_impl.cpp
@@ -359,17 +363,18 @@ if(TRTF_BUILD_BACKEND_RTX)
       ${TRTF_CUDA_INCLUDE_DIR}
     )
     target_link_libraries(trtf_backend_rtx PRIVATE
-      ${TENSORRT_RTX_LIB} ${TRTF_CUDART_LIBRARY}
+      trtf_core ${TENSORRT_RTX_LIB} ${TRTF_CUDART_LIBRARY}
     )
     target_compile_options(trtf_backend_rtx PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_definitions(trtf_backend_rtx PRIVATE TRTF_HAS_TRT=1)
     set_target_properties(trtf_backend_rtx PROPERTIES
+      OUTPUT_NAME trtf_backend_trt_rtx
       LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     target_include_directories(trtf_backend_rtx SYSTEM PRIVATE
       ${nlohmann_json_SOURCE_DIR}/include
     )
-    message(STATUS "TRT-RTX backend DSO: enabled (libtrtf_backend_rtx.so)")
+    message(STATUS "TRT-RTX backend DSO: enabled (libtrtf_backend_trt_rtx.so)")
   else()
     message(STATUS "TRT-RTX backend DSO: disabled (missing tensorrt_rtx lib or headers)")
   endif()

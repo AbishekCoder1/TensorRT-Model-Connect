@@ -17,7 +17,11 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    """Lazily import heavyweight helpers so lightweight utilities stay cheap."""
+    """Lazily import heavyweight helpers so lightweight utilities stay cheap.
+
+    This also keeps TensorRT imports out of package load so --rtx can
+    monkeypatch sys.modules before graph_ops imports tensorrt.
+    """
     if name in {"build", "build_bundle"}:
         from .engine_builder import build, build_bundle
 

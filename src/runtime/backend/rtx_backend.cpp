@@ -1,5 +1,8 @@
 // RtxBackend: IBackend implementation for TensorRT-RTX.
 // Compiled into libtrtf_backend_rtx.so. Links libtensorrt_rtx.so.
+//
+// Uses the RTX-specific NvInfer.h headers which declare IRuntimeCache,
+// CudaGraphStrategy, and DynamicShapesKernelSpecializationStrategy.
 
 #include "trtf/runtime/trt_backend.h"
 #include "trt_module_impl.h"
@@ -77,7 +80,7 @@ public:
         auto module = std::make_unique<TrtModuleImpl>(engine, ctx, stream);
         if (!module->ok()) {
             delete engine;
-            throw std::runtime_error("[trtf] TrtModuleImpl creation failed");
+            throw std::runtime_error("[trtf] TrtModuleImpl creation failed (RTX)");
         }
 
         module->keep_alive(std::shared_ptr<nvinfer1::ICudaEngine>(
@@ -99,7 +102,6 @@ private:
         if (!runtime_cache_) {
             runtime_cache_ = cfg->createRuntimeCache();
             cache_path_ = path;
-            // Load existing cache from disk
             std::ifstream ifs(path, std::ios::binary | std::ios::ate);
             if (ifs) {
                 auto sz = ifs.tellg();

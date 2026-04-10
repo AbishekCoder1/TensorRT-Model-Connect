@@ -98,7 +98,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 traceback.print_exc()
             return 1
 
-    # Default TRT Network API path
+    # RTX monkeypatch MUST happen before any tensorrt import (graph_ops, etc.)
+    if getattr(args, 'rtx', False):
+        import tensorrt_rtx
+        sys.modules["tensorrt"] = tensorrt_rtx
+        print("[trtf-build] Using TensorRT-RTX backend", file=sys.stderr)
+
+    # Raw TRT path (this triggers import of graph_ops which does 'import tensorrt')
     from .engine_builder import build
     from .quantization import canonicalize_quant_format
 
@@ -410,6 +416,19 @@ def _cmd_version(_args: argparse.Namespace) -> int:
 
 
 def main() -> None:
+    # RTX monkeypatch MUST happen before ANY trtf_build module is imported,
+    # because graph_ops.py does 'import tensorrt as trt' at module level.
+    # We do an early argv scan before argparse touches anything.
+    if "--rtx" in sys.argv:
+        try:
+            import tensorrt_rtx
+            sys.modules["tensorrt"] = tensorrt_rtx
+            print("[trtf-build] Using TensorRT-RTX backend", file=sys.stderr)
+        except ImportError:
+            print("Error: --rtx requires tensorrt_rtx. Install: pip install tensorrt-rtx",
+                  file=sys.stderr)
+            sys.exit(1)
+
     parser = argparse.ArgumentParser(
         prog="trtf-build",
         description="Build .trtfb bundles from HuggingFace models",
