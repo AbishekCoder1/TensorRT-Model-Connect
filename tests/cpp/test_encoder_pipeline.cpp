@@ -37,6 +37,7 @@
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
 #include "runtime/core/trt_common.h"
+#include "runtime/backend/trt_module_impl.h"
 #endif
 
 static int failures = 0;
@@ -285,7 +286,7 @@ static void test_encoder_pipeline()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     trtf::EncoderPipeline pipeline(std::move(module), "embedding");
 
     check(std::string(pipeline.pipeline_type()) == "EncoderPipeline", "encoder name");
@@ -305,7 +306,7 @@ static void test_encoder_embed_mode()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto tokenizer = std::make_shared<FixedTokenizer>();
     trtf::EncoderPipeline pipeline(std::move(module), "embedding", tokenizer);
 
@@ -326,7 +327,7 @@ static void test_encoder_encode_mode()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto tokenizer = std::make_shared<FixedTokenizer>();
     trtf::EncoderPipeline pipeline(std::move(module), "encode", tokenizer);
 
@@ -346,7 +347,7 @@ static void test_encoder_rerank()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto tokenizer = std::make_shared<FixedTokenizer>();
     trtf::EncoderPipeline pipeline(std::move(module), "rerank", tokenizer);
 
@@ -366,7 +367,7 @@ static void test_encoder_int32_mask()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto tokenizer = std::make_shared<FixedTokenizer>();
     // mode="embedding" with int32 mask covers engine_mask_is_int32() == true path
     trtf::EncoderPipeline pipeline(std::move(module), "embedding", tokenizer);
@@ -397,7 +398,7 @@ static void test_segment_pipeline()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     trtf::SegmentPipeline pipeline(std::move(module));
 
     check(std::string(pipeline.pipeline_type()) == "SegmentPipeline", "segment name");
@@ -418,7 +419,7 @@ static void test_segment_with_class_output()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     trtf::SegmentPipeline pipeline(std::move(module));
 
     float img[3 * 4 * 4] = {0};
@@ -452,8 +453,8 @@ static void test_sam_pipeline()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto enc_mod = std::make_unique<trtf::TrtModule>(enc_engine.get(), stream);
-    auto dec_mod = std::make_unique<trtf::TrtModule>(dec_engine.get(), stream);
+    auto enc_mod = std::make_unique<trtf::TrtModuleImpl>(enc_engine.get(), enc_engine->createExecutionContext(), stream);
+    auto dec_mod = std::make_unique<trtf::TrtModuleImpl>(dec_engine.get(), dec_engine->createExecutionContext(), stream);
     trtf::SamPipeline pipeline(std::move(enc_mod), std::move(dec_mod));
 
     check(std::string(pipeline.pipeline_type()) == "SamPipeline", "sam name");
@@ -488,7 +489,7 @@ static void test_encoder_score_output()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     trtf::EncoderPipeline pipeline(std::move(module), "embedding");
 
     auto result = pipeline.encode_ids({1, 2, 3, 4});
@@ -507,7 +508,7 @@ static void test_encoder_no_tokenizer_embed()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     trtf::EncoderPipeline pipeline(std::move(module), "embedding");  // no tokenizer
 
     bool threw = false;
@@ -526,7 +527,7 @@ static void test_encoder_no_tokenizer_encode()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     trtf::EncoderPipeline pipeline(std::move(module), "encode");  // no tokenizer
 
     bool threw = false;
@@ -545,7 +546,7 @@ static void test_encoder_no_tokenizer_rerank()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     trtf::EncoderPipeline pipeline(std::move(module), "rerank");  // no tokenizer
 
     bool threw = false;
@@ -564,7 +565,7 @@ static void test_segment_4d_output()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     trtf::SegmentPipeline pipeline(std::move(module));
 
     float img[3 * 4 * 4] = {0};
@@ -586,7 +587,7 @@ static void test_segment_mask_named_output()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     trtf::SegmentPipeline pipeline(std::move(module));
 
     float img[3 * 4 * 4] = {0};

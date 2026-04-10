@@ -33,6 +33,7 @@
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
 #include "runtime/core/trt_common.h"
+#include "runtime/backend/trt_module_impl.h"
 #endif
 
 static int failures = 0;
@@ -90,7 +91,7 @@ static void test_mamba_pipeline()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
 
     // Mamba: 2 state specs, 1 layer
     std::vector<trtf::RecurrentState::TensorSpec> specs = {
@@ -124,7 +125,7 @@ static void test_rwkv_pipeline()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
 
     // RWKV: 5 state specs, 2 layers
     std::vector<trtf::RecurrentState::TensorSpec> specs = {
@@ -190,7 +191,7 @@ static void test_hybrid_pipeline()
         rt->deserializeCudaEngine(plan->data(), plan->size()));
     if (!hybrid_engine) { cudaStreamDestroy(stream); return; }
 
-    auto module = std::make_unique<trtf::TrtModule>(hybrid_engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(hybrid_engine.get(), hybrid_engine->createExecutionContext(), stream);
     auto kv = std::make_unique<trtf::KvCache>(1, 4, 2, stream);
     std::vector<trtf::RecurrentState::TensorSpec> specs = {{"ssm", {4}}};
     auto ssm = std::make_unique<trtf::RecurrentState>(1, specs, stream);

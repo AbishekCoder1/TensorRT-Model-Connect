@@ -35,6 +35,7 @@
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
 #include "runtime/core/trt_common.h"
+#include "runtime/backend/trt_module_impl.h"
 #endif
 
 static int failures = 0;
@@ -114,7 +115,7 @@ static void test_pipeline_construction()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::TextGenConfig cfg;
@@ -144,7 +145,7 @@ static void test_generate_stops_at_eos()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::TextGenConfig cfg;
@@ -181,7 +182,7 @@ static void test_generate_max_tokens()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::TextGenConfig cfg;
@@ -229,7 +230,7 @@ static void test_zero_max_tokens()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::TextGenConfig cfg;

@@ -40,6 +40,7 @@
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
 #include "runtime/core/trt_common.h"
+#include "runtime/backend/trt_module_impl.h"
 #endif
 
 static int failures = 0;
@@ -129,7 +130,7 @@ static void test_vl_text_only()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::VLConfig cfg;
@@ -161,7 +162,7 @@ static void test_vl_text_only_max_tokens()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::VLConfig cfg;
@@ -216,7 +217,7 @@ static void test_vl_validates_cache()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
 
     trtf::VLConfig cfg;
     cfg.has_position_input = false;
@@ -245,7 +246,7 @@ static void test_vl_config_sync()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::VLConfig cfg;
@@ -278,7 +279,7 @@ static void test_vl_zero_max_tokens()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::VLConfig cfg;
@@ -311,7 +312,7 @@ static void test_vl_no_tokenizer_throws()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::VLConfig cfg;
@@ -351,7 +352,7 @@ static void test_vl_generate_with_image_no_encoder()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::VLConfig cfg;
@@ -391,8 +392,8 @@ static void test_vl_generate_with_vision_encoder()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModule>(dec_engine.get(), stream);
-    auto vision = std::make_unique<trtf::TrtModule>(vis_engine.get(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(dec_engine.get(), dec_engine->createExecutionContext(), stream);
+    auto vision = std::make_unique<trtf::TrtModuleImpl>(vis_engine.get(), vis_engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::VLConfig cfg;
@@ -492,8 +493,8 @@ static void test_vl_generate_with_embed_decoder()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModule>(dec_engine.get(), stream);
-    auto vision  = std::make_unique<trtf::TrtModule>(vis_engine.get(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(dec_engine.get(), dec_engine->createExecutionContext(), stream);
+    auto vision  = std::make_unique<trtf::TrtModuleImpl>(vis_engine.get(), vis_engine->createExecutionContext(), stream);
     auto cache   = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::VLConfig cfg;
@@ -545,7 +546,7 @@ static void test_vl_generate_with_tokenizer()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::VLConfig cfg;
