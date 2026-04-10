@@ -33,7 +33,8 @@ path listed here exists in the source tree.
 | File | Purpose |
 |------|---------|
 | `pipeline_factory.h` | `PipelineFactory::from_bundle()` -- sole pipeline creation path |
-| `trt_module.h` | `TrtModule` -- TRT engine execution wrapper (`forward()`, `forward_device()`, `bind_external()`) |
+| `trt_module.h` | `ITrtModule` -- pure virtual interface for TRT engine execution (`forward()`, `forward_device()`, `bind_external()`). Concrete impl lives in backend DSOs. |
+| `trt_backend.h` | `IBackend` interface + `ModuleCreateOptions` for backend DSO dispatch |
 | `kv_cache.h` | `KvCache` -- autoregressive KV cache with per-layer device tensors |
 | `recurrent_state.h` | `RecurrentState` -- config-driven SSM/RWKV state manager |
 | `scheduler.h` | `IScheduler` interface, `FlowMatchEulerScheduler` for diffusion |
@@ -85,6 +86,18 @@ path listed here exists in the source tree.
 | `bundle_helpers.h` | `BundleSections` struct, tokenizer/engine extraction |
 | `bundle_helpers.cpp` | Bundle section extraction implementation |
 
+### `src/runtime/backend/`
+
+Backend DSO implementations. The main binary does not link libnvinfer -- it dlopen's a backend DSO at runtime based on the bundle's `engine_backend` config field. Each DSO exports an `IBackend` factory that creates `ITrtModule` instances.
+
+| File | Purpose |
+|------|---------|
+| `backend_loader.h/cpp` | `BackendLoader::load()` -- reads `engine_backend` from bundle config, dlopen's matching DSO, caches handle |
+| `trt_module_impl.h/cpp` | `TrtModuleImpl` : `ITrtModule` -- shared engine wrapper compiled into both DSOs |
+| `trt_logger.h/cpp` | `TrtLogger` -- DSO-internal TRT logger (moved from `trt_common`) |
+| `trt_backend.cpp` | Standard TRT `IBackend` impl. Links libnvinfer. Produces `libtrtf_backend_trt.so` |
+| `rtx_backend.cpp` | TRT-RTX `IBackend` impl. Links libtensorrt_rtx. Adds `IRuntimeCache` + `CudaGraphStrategy`. Produces `libtrtf_backend_trt_rtx.so` |
+
 ### `src/runtime/registry/`
 
 Factory, registry, and base config parsing for plugin dispatch.
@@ -122,7 +135,7 @@ Self-registering pipeline plugins. Each plugin handles one or more `runtime_stra
 | `zimage_plugin.cpp` | `diffusion_zimage` |
 | `force_link_plugins.cpp` | Linker anchors for static lib |
 
-Shared helpers in `plugins/shared/`: `plugin_helpers.h/cpp` (TrtModule loading, tokenizer creation, KV-dim), `diffusion_helpers.h/cpp`, `audio_helpers.h/cpp`.
+Shared helpers in `plugins/shared/`: `plugin_helpers.h/cpp` (ITrtModule loading via backend, tokenizer creation, KV-dim), `diffusion_helpers.h/cpp`, `audio_helpers.h/cpp`.
 
 ### `src/runtime/pipelines/`
 
@@ -152,7 +165,7 @@ Common TRT runtime infrastructure.
 | File | Purpose |
 |------|---------|
 | `trt_common.h/cpp` | TRT logger, CudaBuffer (RAII), CudaStream (RAII + move) |
-| `trt_module.cpp` | `TrtModule` implementation (I/O binding, forward, buffer management) |
+| `trt_module.cpp` | Legacy `TrtModule` stubs (I/O binding delegates to `ITrtModule` from backend DSO) |
 | `kv_cache.cpp` | `KvCache` implementation (bind_to, advance, mask, reset) |
 | `recurrent_state.cpp` | `RecurrentState` implementation |
 | `device_tensor.cpp` | `DeviceTensor` GPU memory management |

@@ -5,6 +5,31 @@ older entries may describe deleted implementations and should not be treated as
 the current design source of truth. Use `docs/wiki/` for the live runtime
 architecture.
 
+## 2026-04-10 — TRT-RTX Backend Abstraction
+
+### What
+- Replaced compile-time TRT dependency with dlopen-based backend dispatch
+- Created ITrtModule virtual interface (was concrete TrtModule)
+- Two DSO backends: libtrtf_backend_trt.so (standard TRT) and libtrtf_backend_trt_rtx.so (TRT-RTX)
+- Python --rtx flag for building TRT-RTX engines
+- RTX-specific features: IRuntimeCache (JIT cache) and CudaGraphStrategy (CUDA graphs)
+
+### Why
+- Enable TRT-RTX support without making either TRT SDK a link-time dependency
+- Bundle metadata (engine_backend field) drives runtime backend selection
+- Main binary is now GPU-SDK-agnostic -- can load any backend at runtime
+
+### Key files
+- `include/trtf/runtime/trt_module.h` -- ITrtModule pure virtual interface
+- `include/trtf/runtime/trt_backend.h` -- IBackend + ModuleCreateOptions
+- `src/runtime/backend/backend_loader.cpp` -- dlopen dispatch
+- `src/runtime/backend/trt_backend.cpp` -- standard TRT DSO
+- `src/runtime/backend/rtx_backend.cpp` -- TRT-RTX DSO
+- `src/runtime/backend/trt_module_impl.cpp` -- shared ITrtModule implementation
+
+### E2E verified
+- Qwen3-0.6B + Qwen3.5-2B on RTX 3090 Ti via both backends
+
 ## 2026-02-27 — Fix C++ tokenizer parity, NED comparator, artifact layout
 
 Fixed the root cause of C++ binary text divergence from HF reference for

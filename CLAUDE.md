@@ -43,6 +43,19 @@ cmake -S . -B build -G Ninja \
 cmake --build build -j
 ```
 
+With TRT-RTX backend DSO (optional, needs TRT-RTX SDK):
+```bash
+cmake -S . -B build -G Ninja \
+  -DTRTF_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+  -DTRTF_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
+  -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so \
+  -DTRTF_BUILD_BACKEND_RTX=ON \
+  -DTRTF_RTX_LIBRARY_DIR=<path-to-libtensorrt_rtx> \
+  -DTRTF_RTX_INCLUDE_DIR=<path-to-TensorRT-RTX-SDK/include>
+cmake --build build -j
+```
+
 ### Python build package
 
 ```bash
@@ -51,6 +64,9 @@ pip install --no-deps -e trtf_build/
 # Build from HF repo ID (auto-downloads) or local directory
 trtf-build build Qwen/Qwen3-0.6B -o <output.trtfb> [--max-cache-length N] [--verbose]
 trtf-build build <model-dir> -o <output.trtfb> [--max-cache-length N] [--verbose]
+
+# Build for TRT-RTX backend (sets engine_backend="trt_rtx" in bundle metadata)
+trtf-build build Qwen/Qwen3-0.6B -o <output.trtfb> [--rtx]
 
 # Or use the Python API
 python3 -c "import trtf_build; trtf_build.build('Qwen/Qwen3-0.6B', 'qwen3.trtfb')"
@@ -460,15 +476,19 @@ python3 tools/perf_compare.py \
 ```bash
 ./build/trtf run     <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
 ./build/trtf run     <bundle.trtfb> --prompt "text" --image <image.jpg> [--max-new-tokens N] [--hf-python PATH]
+./build/trtf run     <bundle.trtfb> --prompt "text" [--runtime-cache PATH] [--cuda-graphs]
 ./build/trtf inspect <bundle.trtfb>
 ./build/trtf version
 ```
 
 For vision-language models, pass `--image` with the path to an image file. The VL bundle must have been built from a VL model (e.g. Qwen2.5-VL) and contains both a text decoder and vision encoder engine.
 
+For TRT-RTX bundles, `--runtime-cache PATH` persists JIT compilation results to disk (speeds up subsequent runs), and `--cuda-graphs` enables CUDA graph capture/replay for reduced kernel launch overhead.
+
 ## Key environment variables
 
 - `TRTF_TRT_LOG_STDERR=1` / `TRTF_TRT_LOG_MIN_SEVERITY` - TRT logger controls
+- `TRTF_BACKEND_DIR` - override directory for backend DSO search (default: same directory as the `trtf` binary)
 
 ## Architecture
 
@@ -477,6 +497,13 @@ The system is split into two stages:
 1. **Python build** (`trtf_build/`) — takes an HF model directory (with `config.json` + safetensors), builds a TRT engine via TensorRT's Python API, and packages it into a `.trtfb` bundle. Model family plugins in `trtf_build/trtf_build/families/` handle family-specific weight mapping and graph construction.
 
 2. **C++ runtime** — loads a `.trtfb` bundle, deserializes the TRT engine plan, and runs inference. The runtime is bundle-only: it does not load HF model directories directly.
+
+**Backend abstraction (dlopen-based dispatch):** The main `trtf` binary links only libcudart -- it does not link libnvinfer or any TRT SDK at compile time. TRT engine execution is delegated to dynamically loaded backend DSOs. At runtime, `BackendLoader::load()` reads the `engine_backend` field from the bundle's `config.json` and `dlopen`s the matching shared library:
+- `libtrtf_backend_trt.so` -- standard TRT backend, links libnvinfer.
+- `libtrtf_backend_trt_rtx.so` -- TRT-RTX backend, links libtensorrt_rtx. Adds `IRuntimeCache` (JIT compilation cache persisted to disk) and `CudaGraphStrategy` (CUDA graph capture/replay for reduced launch overhead).
+- Old bundles without an `engine_backend` field default to `"trt"`.
+
+All pipelines interact with TRT engines through `ITrtModule`, a pure virtual interface declared in `include/trtf/runtime/trt_module.h`. The concrete implementation (`TrtModuleImpl`) lives inside the backend DSOs. Each DSO exports an `IBackend` factory that creates `ITrtModule` instances with backend-specific options (e.g., runtime cache path, CUDA graph enablement).
 
 **Plugin registry dispatch:** The `runtime_strategy` field in the bundle's `config.json` selects the backend via `PipelineRegistry` — a singleton that maps strategy strings to self-registering `IPipelinePlugin` instances. Each plugin lives in its own `.cpp` file under `src/runtime/plugins/` and registers at static-init time via the `REGISTER_PIPELINE_PLUGIN` macro. The registry and factory live in `src/runtime/registry/` — `pipeline_factory.cpp` is ~124 LOC: it reads the bundle, extracts the strategy, normalizes legacy strategy strings (e.g. `"diffusion"` → `"diffusion_flux"`), looks up the plugin, and calls `plugin->create(ctx)`. No switch/case, no edits needed when adding new strategies.
 
@@ -548,6 +575,8 @@ include/trtf/runtime/                # Public C++ headers (plugin system)
   pipeline_factory.h                 # PipelineFactory::from_bundle()
   pipeline_plugin.h                  # IPipelinePlugin interface, BaseConfig, PipelineContext
   pipeline_registry.h                # PipelineRegistry singleton, REGISTER_PIPELINE_PLUGIN macro
+  trt_module.h                       # ITrtModule pure virtual interface (forward, forward_device, bind)
+  trt_backend.h                      # IBackend interface + ModuleCreateOptions
 src/                                 # C++ bundle-only runtime
   bundle/
     bundle_format.h/cpp              # Read .trtfb files
@@ -558,9 +587,15 @@ src/                                 # C++ bundle-only runtime
       pipeline_factory.cpp           # Registry-based dispatch (~124 LOC, no switch/case)
       pipeline_plugin.cpp            # BaseConfig parsing (parse_base_config)
       pipeline_registry.cpp          # Singleton registry + force_link_all_plugins() call
+    backend/                         # Backend DSO implementations (dlopen-loaded)
+      backend_loader.h/cpp           # dlopen dispatch, DSO caching
+      trt_module_impl.h/cpp          # TrtModuleImpl : ITrtModule (compiled into both DSOs)
+      trt_logger.h/cpp               # TrtLogger (DSO-internal, moved from trt_common)
+      trt_backend.cpp                # Standard TRT IBackend → libtrtf_backend_trt.so
+      rtx_backend.cpp                # TRT-RTX IBackend → libtrtf_backend_trt_rtx.so
     plugins/                         # Self-registering pipeline plugins (strategy → pipeline factories)
       shared/
-        plugin_helpers.h/cpp         # TrtModule loading, tokenizer, KV helpers
+        plugin_helpers.h/cpp         # ITrtModule loading via backend, tokenizer, KV helpers
         diffusion_helpers.h/cpp      # Shared diffusion config/loading
         audio_helpers.h/cpp          # Audio config, mel, speech helpers
       decoder_plugin.cpp             # decoder_kv_cache, decoder_moe
