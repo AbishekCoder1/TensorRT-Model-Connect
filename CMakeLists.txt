@@ -100,12 +100,10 @@ add_library(trtf_core
   src/runtime/core/gpu_matmul.cpp
   src/runtime/core/cuda_common.cpp
   src/runtime/backend/backend_loader.cpp
-  src/runtime/core/trt_engine_lifecycle.cpp
   src/runtime/core/trt_decode_runtime.cpp
   src/runtime/core/sampler.cpp
   src/runtime/core/device_kv_cache.cpp
   src/runtime/core/device_tensor.cpp
-  src/runtime/core/trt_module.cpp
   src/runtime/core/kv_cache.cpp
   src/runtime/core/recurrent_state.cpp
   src/runtime/core/chat_template.cpp
@@ -304,6 +302,74 @@ if(_trtf_has_tvm_ffi)
   target_compile_definitions(trtf_tvm_ffi_plugin PRIVATE TRTF_HAS_TRT=1 TRTF_HAS_TVM_FFI=1)
   target_compile_options(trtf_tvm_ffi_plugin PRIVATE -Wall -Wextra -Wpedantic)
   message(STATUS "TVM-FFI plugin shared library: trtf_tvm_ffi_plugin.so")
+endif()
+
+# --- Backend DSO: standard TRT ---
+if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
+  add_library(trtf_backend_trt SHARED
+    src/runtime/backend/trt_module_impl.cpp
+    src/runtime/backend/trt_logger.cpp
+    src/runtime/backend/trt_backend.cpp
+  )
+  target_include_directories(trtf_backend_trt
+    PRIVATE
+      ${PROJECT_SOURCE_DIR}/include
+      ${PROJECT_SOURCE_DIR}/src
+  )
+  target_include_directories(trtf_backend_trt SYSTEM PRIVATE
+    ${TRTF_TRT_INCLUDE_DIR}
+    ${TRTF_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(trtf_backend_trt PRIVATE
+    ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY}
+  )
+  target_compile_options(trtf_backend_trt PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_definitions(trtf_backend_trt PRIVATE TRTF_HAS_TRT=1)
+  set_target_properties(trtf_backend_trt PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+  )
+  # Also add nlohmann_json include for trt_module_impl (uses DType from tensor.h)
+  target_include_directories(trtf_backend_trt SYSTEM PRIVATE
+    ${nlohmann_json_SOURCE_DIR}/include
+  )
+  message(STATUS "TRT backend DSO: enabled (libtrtf_backend_trt.so)")
+endif()
+
+# --- Backend DSO: TRT-RTX (optional) ---
+option(TRTF_BUILD_BACKEND_RTX "Build TRT-RTX backend DSO" OFF)
+if(TRTF_BUILD_BACKEND_RTX)
+  find_library(TENSORRT_RTX_LIB tensorrt_rtx HINTS ${TRTF_RTX_LIBRARY_DIR})
+  find_path(TRT_RTX_INCLUDE_DIR NvInferRuntime.h HINTS ${TRTF_RTX_INCLUDE_DIR})
+  if(TENSORRT_RTX_LIB AND TRT_RTX_INCLUDE_DIR)
+    add_library(trtf_backend_rtx SHARED
+      src/runtime/backend/trt_module_impl.cpp
+      src/runtime/backend/trt_logger.cpp
+      src/runtime/backend/rtx_backend.cpp
+    )
+    target_include_directories(trtf_backend_rtx
+      PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src
+    )
+    target_include_directories(trtf_backend_rtx SYSTEM PRIVATE
+      ${TRT_RTX_INCLUDE_DIR}
+      ${TRTF_CUDA_INCLUDE_DIR}
+    )
+    target_link_libraries(trtf_backend_rtx PRIVATE
+      ${TENSORRT_RTX_LIB} ${TRTF_CUDART_LIBRARY}
+    )
+    target_compile_options(trtf_backend_rtx PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_definitions(trtf_backend_rtx PRIVATE TRTF_HAS_TRT=1)
+    set_target_properties(trtf_backend_rtx PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    target_include_directories(trtf_backend_rtx SYSTEM PRIVATE
+      ${nlohmann_json_SOURCE_DIR}/include
+    )
+    message(STATUS "TRT-RTX backend DSO: enabled (libtrtf_backend_rtx.so)")
+  else()
+    message(STATUS "TRT-RTX backend DSO: disabled (missing tensorrt_rtx lib or headers)")
+  endif()
 endif()
 
 add_executable(trtf examples/trtf_cli.cpp)
