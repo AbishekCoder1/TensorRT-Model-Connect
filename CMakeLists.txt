@@ -98,6 +98,7 @@ add_library(trtf_core
   # Core runtime infrastructure (TRT engine, CUDA, KV cache, decode)
   src/runtime/core/trt_common.cpp
   src/runtime/core/gpu_matmul.cpp
+  src/runtime/core/cuda_common.cpp
   src/runtime/core/trt_engine_lifecycle.cpp
   src/runtime/core/trt_decode_runtime.cpp
   src/runtime/core/sampler.cpp

@@ -8,6 +8,8 @@
 #include <memory>
 #include <string>
 
+#include "runtime/core/cuda_common.h"
+
 #if TRTF_HAS_TRT
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
@@ -53,46 +55,6 @@ using TrtUniquePtr = std::unique_ptr<T, TrtDeleter<T>>;
 // all runtime/engine/context objects created from it.
 TrtUniquePtr<nvinfer1::IRuntime> create_trt_runtime();
 
-class CudaStream final {
-  public:
-    CudaStream();
-    ~CudaStream();
-
-    CudaStream(const CudaStream&) = delete;
-    CudaStream& operator=(const CudaStream&) = delete;
-
-    CudaStream(CudaStream&& other) noexcept;
-    CudaStream& operator=(CudaStream&& other) noexcept;
-
-    bool ok() const;
-    cudaStream_t get() const;
-
-  private:
-    cudaStream_t mStream{nullptr};
-    cudaError_t mStatus{cudaSuccess};
-};
-
-class CudaBuffer final {
-  public:
-    explicit CudaBuffer(std::size_t bytes);
-    ~CudaBuffer();
-
-    CudaBuffer(const CudaBuffer&) = delete;
-    CudaBuffer& operator=(const CudaBuffer&) = delete;
-
-    CudaBuffer(CudaBuffer&& other) noexcept;
-    CudaBuffer& operator=(CudaBuffer&& other) noexcept;
-
-    bool ok() const;
-    void* data() const;
-    std::size_t size() const;
-
-  private:
-    void* mPtr{nullptr};
-    std::size_t mBytes{0};
-    cudaError_t mStatus{cudaSuccess};
-};
-
 // RAII wrapper for CUDA graph + executable graph.
 // Captures a stream region and replays it without per-kernel launch overhead.
 class CudaGraphExec final {
@@ -125,7 +87,6 @@ class CudaGraphExec final {
     cudaGraph_t graph_{nullptr};
     cudaGraphExec_t exec_{nullptr};
 };
-
 #endif // TRTF_HAS_TRT
 
 } // namespace trtf
