@@ -1,153 +1,49 @@
 #pragma once
 
-// TrtModule: the model.forward() abstraction for TensorRT engines.
-//
-// Wraps a TRT engine + execution context. All I/O binding, H2D/D2H transfers,
-// execution, and synchronization are hidden inside forward().
-//
-// Usage:
-//   auto module = TrtModule(engine, stream);
-//   TensorMap outputs = module.forward({{"input_ids", ids}, {"mask", mask}});
-//   // Done. No set_tensor_address, no cudaMemcpyAsync, no enqueueV3.
-//
-// HF equivalent: nn.Module.__call__() / model(input_ids, attention_mask)
+// ITrtModule: virtual interface for TRT engine execution.
+// Concrete implementations live in backend DSOs (libtrtf_backend_*.so).
+// No TRT headers — only CUDA runtime types and our own tensor types.
 
-#include "runtime/core/trt_common.h"
 #include "trtf/runtime/device_tensor.h"
 #include "trtf/runtime/tensor.h"
 
-#include <string>
-#include <unordered_map>
-#include <vector>
-
-#if TRTF_HAS_TRT
-#include <NvInfer.h>
+#include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
-#endif
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
+class ITrtModule {
+public:
+    virtual ~ITrtModule() = default;
 
-class TrtModule {
-  public:
-    // Construct from a deserialized engine. Pre-allocates all device buffers
-    // and binds them to the execution context.
-    // The engine must outlive this TrtModule (caller owns it).
-    // profile_idx selects which optimization profile to use (default 0).
-    // Use profile_idx > 0 for secondary contexts (e.g., batched prefill).
-    TrtModule(nvinfer1::ICudaEngine* engine, cudaStream_t stream, int32_t profile_idx = 0);
-    ~TrtModule();
+    // Forward passes
+    virtual TensorMap forward(const TensorMap& inputs) = 0;
+    virtual DeviceTensorMap forward_device(const DeviceTensorMap& inputs) = 0;
+    virtual void forward_device_async(const DeviceTensorMap& inputs) = 0;
+    virtual void forward_async(const TensorMap& inputs) = 0;
+    virtual void sync() = 0;
 
-    // Non-copyable, movable.
-    TrtModule(const TrtModule&) = delete;
-    TrtModule& operator=(const TrtModule&) = delete;
-    TrtModule(TrtModule&& other) noexcept;
-    TrtModule& operator=(TrtModule&& other) noexcept;
+    // Introspection
+    virtual cudaStream_t stream() const = 0;
+    virtual std::vector<TensorInfo> input_info() const = 0;
+    virtual std::vector<TensorInfo> output_info() const = 0;
+    virtual bool has_input(const std::string& name) const = 0;
+    virtual bool has_output(const std::string& name) const = 0;
 
-    // === The "forward pass" ===
+    // Direct buffer access (KV cache binding)
+    virtual void* device_ptr(const std::string& name) const = 0;
+    virtual void bind_external(const std::string& name, void* ptr) = 0;
 
-    // CPU → GPU → execute → GPU → CPU (synchronous).
-    // Uploads each input from TensorMap, runs the engine, downloads outputs.
-    TensorMap forward(const TensorMap& inputs);
-
-    // GPU → execute → GPU (no H2D/D2H). Caller provides DeviceTensors.
-    // Returns pointers to the module's internal output buffers.
-    DeviceTensorMap forward_device(const DeviceTensorMap& inputs);
-
-    // GPU → execute (no sync, no D2H). Caller calls sync() later.
-    // Enables GPU-resident decode loops: forward_device_async() → device
-    // kernels on same stream → periodic sync().
-    void forward_device_async(const DeviceTensorMap& inputs);
-
-    // Async: upload + enqueue (no sync). Caller calls sync() later.
-    void forward_async(const TensorMap& inputs);
-    void sync();
-
-    // Access the CUDA stream used by this module.
-    cudaStream_t stream() const { return stream_; }
-
-    // Enable CUDA Graph capture for enqueueV3().
-    // On first execution after enabling, the TRT kernel sequence is captured.
-    // Subsequent executions replay the graph, eliminating kernel launch overhead.
-    // Only valid for fixed-shape engines (batch=1 decode).
-    void enable_cuda_graph();
-    bool cuda_graph_active() const { return use_cuda_graph_; }
-    int32_t profile_idx() const { return profile_idx_; }
-
-    // === Introspection ===
-
-    std::vector<TensorInfo> input_info() const;
-    std::vector<TensorInfo> output_info() const;
-    bool has_input(const std::string& name) const;
-    bool has_output(const std::string& name) const;
-
-    // === Direct buffer access (for KvCache binding) ===
-
-    // Get the device pointer for a named tensor (input or output).
-    void* device_ptr(const std::string& name) const;
-
-    // Override the pre-allocated buffer for a tensor with an external pointer.
-    // Used by KvCache to bind cache_k/v directly.
-    // The caller owns the external memory and must keep it alive.
-    void bind_external(const std::string& name, void* external_device_ptr);
-
-    bool ok() const;
-
-    // Keep an opaque resource alive for the lifetime of this module.
-    // Used by pipeline_factory to transfer ownership of the TRT engine
-    // and CUDA stream, ensuring they outlive the execution context.
-    void keep_alive(std::shared_ptr<void> resource);
-
-  private:
-    struct BufferEntry {
-        void* d_ptr{nullptr}; // Device pointer (owned unless external)
-        std::vector<int64_t> shape;
-        DType dtype{DType::kFloat32};
-        std::size_t nbytes{0};
-        bool is_input{true};
-        bool is_external{false}; // If true, we don't free d_ptr
-    };
-
-    nvinfer1::IExecutionContext* ctx_{nullptr};
-    cudaStream_t stream_{nullptr};
-    int32_t profile_idx_{0};                        // Optimization profile index
-    bool has_dynamic_shapes_{false};                // True if engine uses optimization profiles
-    bool use_cuda_graph_{false};                    // CUDA Graph capture enabled
-    CudaGraphExec cuda_graph_;                      // Captured TRT execution graph
-    std::vector<std::shared_ptr<void>> keep_alive_; // opaque resource ownership
-    std::unordered_map<std::string, BufferEntry> buffers_;
-
-    // Pre-allocated host staging buffers for output D2H
-    std::unordered_map<std::string, std::vector<uint8_t>> host_output_staging_;
-
-    // Internal output DeviceTensors returned by forward_device()
-    std::unordered_map<std::string, DeviceTensor> output_device_tensors_;
-
-    void allocate_buffers(nvinfer1::ICudaEngine* engine);
-    void free_buffers();
-
-    // Helpers extracted from allocate_buffers to reduce cyclomatic complexity.
-    void detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io);
-    void allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
-                                int32_t num_profiles);
-    void allocate_single_input(nvinfer1::ICudaEngine* engine, const char* name,
-                               int32_t num_profiles);
-    void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
-    void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
-                                  nvinfer1::OptProfileSelector selector);
-    void update_dynamic_shape(const std::string& name, BufferEntry& entry,
-                              const std::vector<int64_t>& new_shape);
-    void execute_enqueue();
-
-    static bool dims_are_dynamic(const nvinfer1::Dims& dims);
-    static std::vector<int64_t> dims_to_shape(const nvinfer1::Dims& dims);
-    static std::size_t compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,
-                                           std::vector<int64_t>& shape_out);
-
-    static DType from_trt_dtype(nvinfer1::DataType dt);
+    virtual bool ok() const = 0;
+    virtual void keep_alive(std::shared_ptr<void> resource) = 0;
 };
 
-#endif // TRTF_HAS_TRT
+// Backward-compat alias — all existing code references TrtModule.
+// This alias lets it compile without changes during migration.
+using TrtModule = ITrtModule;
 
 } // namespace trtf
