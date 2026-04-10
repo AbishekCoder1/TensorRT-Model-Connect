@@ -27,8 +27,8 @@
 // Requires TRT + CUDA GPU. Skips gracefully without TRT.
 // =============================================================================
 
-#include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/tensor.h"
+#include "trtf/runtime/trt_module.h"
 
 #include <cstdint>
 #include <cstring>
@@ -36,17 +36,16 @@
 #include <vector>
 
 #if TRTF_HAS_TRT
+#include "runtime/core/trt_common.h"
+
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#include "runtime/core/trt_common.h"
 #endif
 
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
@@ -58,46 +57,46 @@ static void check(bool condition, const char* test_name)
 static trtf::TrtLogger g_logger;
 
 // Build a tiny TRT engine: identity mapping input[4] → output[4] (float32)
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine()
-{
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(
-        nvinfer1::createInferBuilder(g_logger));
-    if (!builder) return nullptr;
+static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
+    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    if (!builder)
+        return nullptr;
 
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(
-        builder->createNetworkV2(0));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(
-        builder->createBuilderConfig());
+    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     // Single input: "x" [4] float32
     auto* inp = network->addInput("x", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {4}});
-    if (!inp) return nullptr;
+    if (!inp)
+        return nullptr;
 
     // Identity layer
     auto* id_layer = network->addIdentity(*inp);
-    if (!id_layer) return nullptr;
+    if (!id_layer)
+        return nullptr;
     auto* out = id_layer->getOutput(0);
     out->setName("y");
     network->markOutput(*out);
 
     auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
-    if (!plan) return nullptr;
+    if (!plan)
+        return nullptr;
 
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(
-        nvinfer1::createInferRuntime(g_logger));
-    if (!runtime) return nullptr;
+    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    if (!runtime)
+        return nullptr;
 
     return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
-static void test_forward_cpu()
-{
+static void test_forward_cpu() {
     auto engine = build_identity_engine();
     check(engine != nullptr, "engine built");
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -119,8 +118,7 @@ static void test_forward_cpu()
     auto outputs = module.forward(inputs);
 
     check(outputs.count("y") == 1, "output 'y' exists");
-    if (outputs.count("y"))
-    {
+    if (outputs.count("y")) {
         auto& y = outputs["y"];
         check(y.shape.size() == 1, "output shape has 1 dim");
         check(y.shape[0] == 4, "output shape[0] = 4");
@@ -134,10 +132,10 @@ static void test_forward_cpu()
     cudaStreamDestroy(stream);
 }
 
-static void test_forward_async()
-{
+static void test_forward_async() {
     auto engine = build_identity_engine();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -169,10 +167,10 @@ static void test_forward_async()
     cudaStreamDestroy(stream);
 }
 
-static void test_introspection()
-{
+static void test_introspection() {
     auto engine = build_identity_engine();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -181,8 +179,7 @@ static void test_introspection()
 
     auto ins = module.input_info();
     check(ins.size() == 1, "1 input");
-    if (!ins.empty())
-    {
+    if (!ins.empty()) {
         check(ins[0].name == "x", "input name = 'x'");
         check(ins[0].shape[0] == 4, "input shape[0] = 4");
         check(ins[0].is_input == true, "is_input = true");
@@ -190,8 +187,7 @@ static void test_introspection()
 
     auto outs = module.output_info();
     check(outs.size() == 1, "1 output");
-    if (!outs.empty())
-    {
+    if (!outs.empty()) {
         check(outs[0].name == "y", "output name = 'y'");
         check(outs[0].is_input == false, "is_input = false");
     }
@@ -204,10 +200,10 @@ static void test_introspection()
     cudaStreamDestroy(stream);
 }
 
-static void test_device_ptr()
-{
+static void test_device_ptr() {
     auto engine = build_identity_engine();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -221,10 +217,10 @@ static void test_device_ptr()
     cudaStreamDestroy(stream);
 }
 
-static void test_bind_external()
-{
+static void test_bind_external() {
     auto engine = build_identity_engine();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -261,10 +257,10 @@ static void test_bind_external()
     cudaStreamDestroy(stream);
 }
 
-static void test_move_semantics()
-{
+static void test_move_semantics() {
     auto engine = build_identity_engine();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -288,11 +284,11 @@ static void test_move_semantics()
     cudaStreamDestroy(stream);
 }
 
-static void test_move_assignment()
-{
+static void test_move_assignment() {
     // Covers TrtModule::operator=(TrtModule&&) — move assignment operator
     auto engine = build_identity_engine();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -315,8 +311,7 @@ static void test_move_assignment()
     t.dtype = trtf::DType::kFloat32;
     auto out = b.forward({{"x", t}});
     check(out.count("y") == 1, "move-assigned module forward works");
-    if (out.count("y"))
-    {
+    if (out.count("y")) {
         auto* p = static_cast<float*>(out["y"].data);
         check(p[0] == 3.0f, "move-assigned output[0] = 3.0");
     }
@@ -324,11 +319,11 @@ static void test_move_assignment()
     cudaStreamDestroy(stream);
 }
 
-static void test_keep_alive()
-{
+static void test_keep_alive() {
     // Covers TrtModule::keep_alive() — stores a shared_ptr to prevent resource release
     auto engine = build_identity_engine();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -351,12 +346,12 @@ static void test_keep_alive()
     cudaStreamDestroy(stream);
 }
 
-static void test_forward_device()
-{
+static void test_forward_device() {
     // Covers TrtModule::forward_device() with empty inputs
     // Exercises: forward_device_async (enqueue only), sync, output DeviceTensorMap
     auto engine = build_identity_engine();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -378,11 +373,59 @@ static void test_forward_device()
     cudaStreamDestroy(stream);
 }
 
-static void test_forward_device_with_input()
-{
+static void test_profile_idx_default() {
+    // Verify that explicit profile_idx=0 works identically to the default constructor
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    trtf::TrtModule module(engine.get(), stream, 0);
+    check(module.ok(), "profile_idx=0: module is ok");
+    check(module.profile_idx() == 0, "profile_idx=0: accessor returns 0");
+
+    float input_data[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+    trtf::Tensor input_tensor;
+    input_tensor.data = input_data;
+    input_tensor.shape = {4};
+    input_tensor.dtype = trtf::DType::kFloat32;
+    trtf::TensorMap inputs;
+    inputs["x"] = input_tensor;
+
+    auto outputs = module.forward(inputs);
+    check(outputs.count("y") == 1, "profile_idx=0: output exists");
+    if (outputs.count("y")) {
+        auto* out = static_cast<float*>(outputs["y"].data);
+        check(out[0] == 5.0f, "profile_idx=0: output[0] = 5.0");
+        check(out[3] == 8.0f, "profile_idx=0: output[3] = 8.0");
+    }
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_profile_idx_invalid() {
+    // Verify that an invalid profile index (engine has only 1 profile) fails gracefully
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    // Identity engine has 0 optimization profiles (static shapes), so profile 1 should fail
+    trtf::TrtModule module(engine.get(), stream, 1);
+    check(!module.ok(), "profile_idx=1 on static engine: module should not be ok");
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_forward_device_with_input() {
     // Covers TrtModule::forward_device_async() body — D2D copy from DeviceTensor
     auto engine = build_identity_engine();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -412,8 +455,7 @@ static void test_forward_device_with_input()
 
 #endif // TRTF_HAS_TRT
 
-int main()
-{
+int main() {
 #if TRTF_HAS_TRT
     test_forward_cpu();
     test_forward_async();
@@ -425,12 +467,13 @@ int main()
     test_keep_alive();
     test_forward_device();
     test_forward_device_with_input();
+    test_profile_idx_default();
+    test_profile_idx_invalid();
 #else
     std::cerr << "TRT not available, skipping TrtModule tests\n";
 #endif
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
     }
     return failures;

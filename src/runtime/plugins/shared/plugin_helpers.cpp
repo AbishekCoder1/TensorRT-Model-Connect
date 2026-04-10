@@ -113,7 +113,8 @@ std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(const BundleFile& bundl
 // ─── TRT module loading ───
 
 LoadedModule load_trt_module_from_plan(const std::vector<char>* plan, const char* label,
-                                       std::shared_ptr<CudaStream> shared_stream) {
+                                       std::shared_ptr<CudaStream> shared_stream,
+                                       int32_t profile_idx) {
     if (!plan || plan->empty())
         throw std::runtime_error(std::string("Bundle missing ") + label);
     auto trt_runtime = create_trt_runtime();
@@ -128,9 +129,10 @@ LoadedModule load_trt_module_from_plan(const std::vector<char>* plan, const char
         throw std::runtime_error("Failed to create CUDA stream");
     LoadedModule result;
     result.stream = stream;
-    result.module = std::make_unique<TrtModule>(engine.get(), stream->get());
+    result.module = std::make_unique<TrtModule>(engine.get(), stream->get(), profile_idx);
     if (!result.module->ok())
-        throw std::runtime_error(std::string("Failed to create TrtModule for ") + label);
+        throw std::runtime_error(std::string("Failed to create TrtModule for ") + label +
+                                 " (profile " + std::to_string(profile_idx) + ")");
     nvinfer1::ICudaEngine* raw_engine = engine.release();
     result.module->keep_alive(std::shared_ptr<nvinfer1::ICudaEngine>(
         raw_engine, [](nvinfer1::ICudaEngine* p) { delete p; }));
@@ -139,11 +141,12 @@ LoadedModule load_trt_module_from_plan(const std::vector<char>* plan, const char
 }
 
 LoadedModule try_load_trt_module_from_plan(const std::vector<char>* plan, const char* label,
-                                           std::shared_ptr<CudaStream> shared_stream) {
+                                           std::shared_ptr<CudaStream> shared_stream,
+                                           int32_t profile_idx) {
     if (!plan || plan->empty())
         return LoadedModule{};
     try {
-        return load_trt_module_from_plan(plan, label, shared_stream);
+        return load_trt_module_from_plan(plan, label, shared_stream, profile_idx);
     } catch (...) {
         std::cerr << "[trtf] WARNING: failed to load optional engine: " << label << std::endl;
         return LoadedModule{};

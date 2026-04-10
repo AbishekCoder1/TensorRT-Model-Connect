@@ -12,6 +12,7 @@
 //
 // HF equivalent: nn.Module.__call__() / model(input_ids, attention_mask)
 
+#include "runtime/core/trt_common.h"
 #include "trtf/runtime/device_tensor.h"
 #include "trtf/runtime/tensor.h"
 
@@ -33,7 +34,9 @@ class TrtModule {
     // Construct from a deserialized engine. Pre-allocates all device buffers
     // and binds them to the execution context.
     // The engine must outlive this TrtModule (caller owns it).
-    TrtModule(nvinfer1::ICudaEngine* engine, cudaStream_t stream);
+    // profile_idx selects which optimization profile to use (default 0).
+    // Use profile_idx > 0 for secondary contexts (e.g., batched prefill).
+    TrtModule(nvinfer1::ICudaEngine* engine, cudaStream_t stream, int32_t profile_idx = 0);
     ~TrtModule();
 
     // Non-copyable, movable.
@@ -63,6 +66,14 @@ class TrtModule {
 
     // Access the CUDA stream used by this module.
     cudaStream_t stream() const { return stream_; }
+
+    // Enable CUDA Graph capture for enqueueV3().
+    // On first execution after enabling, the TRT kernel sequence is captured.
+    // Subsequent executions replay the graph, eliminating kernel launch overhead.
+    // Only valid for fixed-shape engines (batch=1 decode).
+    void enable_cuda_graph();
+    bool cuda_graph_active() const { return use_cuda_graph_; }
+    int32_t profile_idx() const { return profile_idx_; }
 
     // === Introspection ===
 
@@ -100,7 +111,10 @@ class TrtModule {
 
     nvinfer1::IExecutionContext* ctx_{nullptr};
     cudaStream_t stream_{nullptr};
+    int32_t profile_idx_{0};                        // Optimization profile index
     bool has_dynamic_shapes_{false};                // True if engine uses optimization profiles
+    bool use_cuda_graph_{false};                    // CUDA Graph capture enabled
+    CudaGraphExec cuda_graph_;                      // Captured TRT execution graph
     std::vector<std::shared_ptr<void>> keep_alive_; // opaque resource ownership
     std::unordered_map<std::string, BufferEntry> buffers_;
 
@@ -124,6 +138,7 @@ class TrtModule {
                                   nvinfer1::OptProfileSelector selector);
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,
                               const std::vector<int64_t>& new_shape);
+    void execute_enqueue();
 
     static bool dims_are_dynamic(const nvinfer1::Dims& dims);
     static std::vector<int64_t> dims_to_shape(const nvinfer1::Dims& dims);

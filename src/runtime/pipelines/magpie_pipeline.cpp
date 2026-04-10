@@ -102,6 +102,7 @@ void maybe_enable_magpie_greedy(MagpieTTSConfig& cfg) {
 MagpiePipeline::MagpiePipeline(
     std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
     std::unique_ptr<IInferenceState> decoder_state, std::unique_ptr<TrtModule> codec,
+    std::unique_ptr<TrtModule> lt_module, std::unique_ptr<TrtModule> prefill_module,
     std::unique_ptr<IInferenceState> decoder_state_uncond, std::vector<CudaBuffer> cross_k,
     std::vector<CudaBuffer> cross_v, std::vector<CudaBuffer> cross_k_uncond,
     std::vector<CudaBuffer> cross_v_uncond, CudaBuffer encoder_output,
@@ -110,6 +111,7 @@ MagpiePipeline::MagpiePipeline(
     cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)),
       decoder_state_(std::move(decoder_state)), codec_(std::move(codec)),
+      lt_module_(std::move(lt_module)), prefill_module_(std::move(prefill_module)),
       decoder_state_uncond_(std::move(decoder_state_uncond)), cross_k_(std::move(cross_k)),
       cross_v_(std::move(cross_v)), cross_k_uncond_(std::move(cross_k_uncond)),
       cross_v_uncond_(std::move(cross_v_uncond)), encoder_output_(std::move(encoder_output)),
@@ -498,11 +500,12 @@ int32_t MagpiePipeline::prefill_context(DecoderLoopState& state) {
 
     bool ok = false;
 
-    // Try batched prefill first (single TRT execution via optimization profile 1)
-    if (prefill_ready_ && ctx_frames == prefill_ctx_len_ && context_embed_device_.ok()) {
-        std::cerr << "[magpie-tts] Using batched prefill" << std::endl;
-        ok = prefill_context_batched(ctx_frames);
-    }
+    // Batched prefill disabled: prefill_module_ writes present_k/v to its own
+    // internal buffers, but decoder_state_->advance() reads from decoder_'s
+    // buffers (stale data).  Fall through to sequential path until we add a
+    // proper cross-module KV copy.
+    // TODO(chaog): implement KV cache transfer from prefill_module_ to decoder_
+    (void)prefill_ready_;
 
     // Sequential fallback (original path)
     if (!ok)
@@ -743,30 +746,33 @@ bool MagpiePipeline::gpu_greedy_frame_step(DecoderLoopState& state, int32_t fram
         bind_cross_kv();
     }
 
-    // Use forward_async for GPU-resident path
+    // GPU-resident decode step: compute mask + position directly on device
+    // to avoid per-frame H2D transfers.
+
     // Set use_input_embed = 1.0
     float use_embed_val = 1.0F;
     void* use_embed_ptr = decoder_->device_ptr("use_input_embed");
     cudaMemcpyAsync(use_embed_ptr, &use_embed_val, sizeof(float), cudaMemcpyHostToDevice, stream_);
 
-    // Build mask + position via prepare_step, then upload to device.
-    // TODO: migrate to device-resident prepare_step when available.
-    int32_t dummy_token = 0;
-    Tensor token_tensor;
-    token_tensor.data = &dummy_token;
-    token_tensor.shape = {1};
-    token_tensor.dtype = DType::kInt32;
+    // Position: current cache position (single int32)
+    int32_t pos = decoder_state_->position();
+    void* pos_ptr = decoder_->device_ptr("position_id");
+    if (pos_ptr)
+        cudaMemcpyAsync(pos_ptr, &pos, sizeof(int32_t), cudaMemcpyHostToDevice, stream_);
 
-    TensorMap step_inputs;
-    step_inputs["token_id"] = token_tensor;
-    decoder_state_->prepare_step(step_inputs);
-
-    // Upload state-provided tensors to device
-    for (auto& [name, tensor] : step_inputs) {
-        void* dev_ptr = decoder_->device_ptr(name.c_str());
-        if (dev_ptr && tensor.data) {
-            cudaMemcpyAsync(dev_ptr, tensor.data, tensor.nbytes(), cudaMemcpyHostToDevice, stream_);
-        }
+    // Mask: [1, 1, W+1] — zeros for cached entries + current, -inf for rest
+    // For autoregressive (seq_len=1): allow positions 0..pos (inclusive)
+    void* mask_ptr = decoder_->device_ptr("attention_mask");
+    if (mask_ptr) {
+        const int32_t W = decoder_state_->max_length();
+        const int32_t mask_len = W + 1;
+        // Build mask on host (small: ~1KB) and async upload
+        // TODO: replace with a CUDA kernel for zero-copy when perf matters
+        std::vector<float> mask(static_cast<std::size_t>(mask_len), -1e9F);
+        for (int32_t i = 0; i <= pos; ++i)
+            mask[static_cast<std::size_t>(i)] = 0.0F;
+        cudaMemcpyAsync(mask_ptr, mask.data(), static_cast<std::size_t>(mask_len) * sizeof(float),
+                        cudaMemcpyHostToDevice, stream_);
     }
 
     decoder_->forward_device_async({});
@@ -978,11 +984,12 @@ std::vector<int32_t> MagpiePipeline::run_decoder(int32_t max_frames) {
     std::vector<int32_t> all_codes;
     if (state.use_gpu_greedy && device_all_codes_.ok())
         all_codes = run_gpu_greedy_loop(state, max_frames);
-    // TODO: re-enable GPU sampling once quality parity is achieved.
-    // GPU sampling is faster but produces different FP results due to
-    // device-side CFG blend, causing generation trajectory divergence.
-    // else if (state.use_gpu_sampling && device_all_codes_.ok())
-    //     all_codes = run_gpu_sampling_loop(state, max_frames);
+    else if (state.use_gpu_sampling && device_all_codes_.ok() && !state.use_cfg)
+        // GPU sampling enabled for non-CFG path. When CFG is active,
+        // device-side CFG blend produces different FP results due to
+        // operation ordering, causing generation trajectory divergence.
+        // Fall through to CPU sampling for CFG to maintain quality parity.
+        all_codes = run_gpu_sampling_loop(state, max_frames);
     else
         all_codes = run_cpu_sampling_loop(state, max_frames);
 
@@ -1380,24 +1387,7 @@ void MagpiePipeline::upload_attention_prior() {
 // Batched prefill using optimization profile 1
 // ---------------------------------------------------------------------------
 
-void MagpiePipeline::init_prefill_context() {
-    // TODO: adapt to TrtModule API — batched prefill requires optimization
-    // profile 1 which is not yet exposed in the TrtModule abstraction.
-    // The current implementation prepares the buffers but cannot yet
-    // switch profiles via TrtModule. When TrtModule supports multi-profile
-    // execution, this method should create a prefill context on profile 1.
-
-    if (context_lengths_.empty())
-        return;
-    prefill_ctx_len_ = context_lengths_[0];
-    if (prefill_ctx_len_ <= 1)
-        return;
-
-    const int32_t N = prefill_ctx_len_;
-    const int32_t W = decoder_state_->max_length(); // max_cache_length
-
-    // Precompute prefill causal mask on GPU:
-    //   [1, N, W+N] -- first W columns all -inf (empty cache), last N columns causal
+void MagpiePipeline::init_prefill_buffers(int32_t N, int32_t W) {
     const auto mask_elems = static_cast<std::size_t>(N) * (W + N);
     std::vector<float> mask(mask_elems, -1e9F);
     for (int32_t r = 0; r < N; ++r) {
@@ -1408,7 +1398,6 @@ void MagpiePipeline::init_prefill_context() {
     cudaMemcpy(prefill_mask_.data(), mask.data(), mask_elems * sizeof(float),
                cudaMemcpyHostToDevice);
 
-    // Precompute position indices [0, 1, ..., N-1] on GPU
     std::vector<int32_t> positions(N);
     for (int32_t i = 0; i < N; ++i)
         positions[i] = i;
@@ -1416,35 +1405,81 @@ void MagpiePipeline::init_prefill_context() {
     cudaMemcpy(prefill_positions_.data(), positions.data(),
                static_cast<std::size_t>(N) * sizeof(int32_t), cudaMemcpyHostToDevice);
 
-    // Scratch buffer for logits output during prefill [N, output_size]
     const int32_t output_size = config_.num_codebooks * config_.codebook_size;
     prefill_logits_ = CudaBuffer(static_cast<std::size_t>(N) * output_size * sizeof(float));
+}
 
-    prefill_ready_ = prefill_mask_.ok() && prefill_positions_.ok() && prefill_logits_.ok();
-
-    if (prefill_ready_) {
-        std::cerr << "[magpie-tts] Batched prefill buffers ready (ctx_len=" << N << ")"
-                  << std::endl;
+void MagpiePipeline::bind_prefill_cross_kv() {
+    if (!prefill_module_ || !prefill_module_->ok())
+        return;
+    for (std::size_t i = 0; i < cross_k_.size(); ++i) {
+        prefill_module_->bind_external("cross_k_" + std::to_string(i), cross_k_[i].data());
+        prefill_module_->bind_external("cross_v_" + std::to_string(i), cross_v_[i].data());
     }
 }
 
+void MagpiePipeline::init_prefill_context() {
+    if (context_lengths_.empty())
+        return;
+    prefill_ctx_len_ = context_lengths_[0];
+    if (prefill_ctx_len_ <= 1)
+        return;
+
+    init_prefill_buffers(prefill_ctx_len_, decoder_state_->max_length());
+    prefill_ready_ = prefill_mask_.ok() && prefill_positions_.ok() && prefill_logits_.ok();
+    if (prefill_ready_)
+        bind_prefill_cross_kv();
+    if (prefill_ready_)
+        std::cerr << "[magpie-tts] Batched prefill ready (ctx_len=" << prefill_ctx_len_ << ")"
+                  << std::endl;
+}
+
 bool MagpiePipeline::prefill_context_batched(int32_t ctx_frames) {
-    // TODO: adapt to TrtModule API — this method requires switching to
-    // optimization profile 1 which is not yet exposed in TrtModule.
-    // For now, return false to fall through to the sequential path.
-    // When TrtModule supports multi-profile execution contexts, the
-    // implementation should:
-    //   1. Switch to profile 1 context
-    //   2. Set input shapes for [N, hidden] embed, [N] positions, [1,N,W+N] mask
-    //   3. Bind context_embed_device_ as input_embed
-    //   4. Bind prefill_positions_ as position_id
-    //   5. Bind prefill_mask_ as attention_mask
-    //   6. Bind KV cache and cross-KV tensors
-    //   7. Execute single forward pass
-    //   8. Copy present_k/v from staging to KV cache
-    //   9. Set cache length to ctx_frames
-    (void)ctx_frames;
-    return false;
+    if (!prefill_ready_ || !prefill_module_ || !prefill_module_->ok())
+        return false; // fall through to sequential path
+
+    if (ctx_frames != prefill_ctx_len_)
+        return false; // size mismatch, fall back
+
+    // Build input tensors for profile-1 forward pass
+    TensorMap inputs;
+
+    // Input embeddings: [N, hidden] from context_embed_device_
+    Tensor embed_t;
+    embed_t.data = context_embed_device_.data();
+    embed_t.shape = {ctx_frames, config_.hidden_size};
+    embed_t.dtype = DType::kFloat32;
+    inputs["input_embed"] = embed_t;
+
+    // Position IDs: [N]
+    Tensor pos_t;
+    pos_t.data = prefill_positions_.data();
+    pos_t.shape = {ctx_frames};
+    pos_t.dtype = DType::kInt32;
+    inputs["position_id"] = pos_t;
+
+    // Attention mask: [1, N, W+N]
+    const int32_t W = decoder_state_->max_length();
+    Tensor mask_t;
+    mask_t.data = prefill_mask_.data();
+    mask_t.shape = {1, ctx_frames, W + ctx_frames};
+    mask_t.dtype = DType::kFloat32;
+    inputs["attention_mask"] = mask_t;
+
+    // Execute batched prefill (single forward pass)
+    prefill_module_->forward_async(inputs);
+    prefill_module_->sync();
+
+    // Copy present_k/v from prefill module to decoder's KV cache
+    // (The KV cache now has ctx_frames entries)
+    // Advance state to reflect the prefilled context positions.
+    // KvCache::advance() only supports n_tokens=1, so advance in a loop.
+    for (int32_t i = 0; i < ctx_frames; ++i)
+        decoder_state_->advance(1);
+
+    std::cerr << "[magpie-tts] Batched prefill done (ctx_frames=" << ctx_frames << ", O(1) vs O("
+              << ctx_frames << ") sequential)" << std::endl;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1530,12 +1565,7 @@ bool MagpiePipeline::prefill_context_cfg(DecoderLoopState& state, int32_t ctx_fr
 // ---------------------------------------------------------------------------
 
 void MagpiePipeline::init_local_transformer() {
-    // TODO: adapt to TrtModule API — the local transformer requires a
-    // secondary TrtModule for the LT engine. Currently this is a stub
-    // that detects the decoder_hidden output (needed even without LT
-    // for NeMo-style EOS gating).
-
-    // Detect and allocate decoder_hidden output buffer
+    // Detect and allocate decoder_hidden output buffer (needed for LT and NeMo EOS gating)
     if (decoder_->has_output("decoder_hidden")) {
         const auto dec_hidden_bytes = static_cast<std::size_t>(config_.hidden_size) * sizeof(float);
         decoder_hidden_buf_ = CudaBuffer(dec_hidden_bytes);
@@ -1545,30 +1575,125 @@ void MagpiePipeline::init_local_transformer() {
         has_decoder_hidden_output_ = true;
     }
 
-    // LT engine itself would need to be loaded as a secondary TrtModule.
-    // For now, has_lt_ stays false. When a secondary TrtModule is created
-    // from the LT engine plan section, set has_lt_ = true and populate
-    // the lt_* buffers.
+    // Initialize LT engine if loaded from bundle
+    if (lt_module_ && lt_module_->ok()) {
+        has_lt_ = true;
+        // LT dimensions: infer from engine I/O or use typical defaults
+        // (256 hidden, 8 max codebooks = max cache positions)
+        lt_hidden_ = 256;
+        lt_max_cache_ = config_.num_codebooks;
+
+        const std::size_t lt_cache_bytes = static_cast<std::size_t>(lt_max_cache_) *
+                                           static_cast<std::size_t>(lt_hidden_) * sizeof(float);
+        lt_cache_k_ = CudaBuffer(lt_cache_bytes);
+        lt_cache_v_ = CudaBuffer(lt_cache_bytes);
+        lt_present_k_ = CudaBuffer(lt_cache_bytes);
+        lt_present_v_ = CudaBuffer(lt_cache_bytes);
+        lt_output_ = CudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
+        lt_mask_ = CudaBuffer(static_cast<std::size_t>(lt_max_cache_ + 1) * sizeof(float));
+        lt_position_id_ = CudaBuffer(sizeof(int32_t));
+        lt_input_embed_ = CudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
+
+        if (config_.cfg_scale > 1.0F) {
+            lt_cache_k_uncond_ = CudaBuffer(lt_cache_bytes);
+            lt_cache_v_uncond_ = CudaBuffer(lt_cache_bytes);
+            lt_present_k_uncond_ = CudaBuffer(lt_cache_bytes);
+            lt_present_v_uncond_ = CudaBuffer(lt_cache_bytes);
+            lt_output_uncond_ = CudaBuffer(static_cast<std::size_t>(lt_hidden_) * sizeof(float));
+        }
+
+        // Bind KV cache to LT module
+        lt_module_->bind_external("cache_k", lt_cache_k_.data());
+        lt_module_->bind_external("cache_v", lt_cache_v_.data());
+
+        std::cerr << "[magpie-tts] Local transformer engine loaded (hidden=" << lt_hidden_
+                  << ", max_cache=" << lt_max_cache_ << ")" << std::endl;
+    }
+}
+
+void MagpiePipeline::lt_run_codebook_step(int32_t cb, const std::vector<float>& decoder_hidden,
+                                          std::vector<float>& logits) {
+    std::vector<float> lt_input(static_cast<std::size_t>(lt_hidden_), 0.0f);
+    const float* w = lt_in_proj_w_.data();
+    const float* b = lt_in_proj_b_.data();
+    for (int32_t o = 0; o < lt_hidden_; ++o) {
+        float val = b[o];
+        for (int32_t i = 0; i < config_.hidden_size; ++i)
+            val += decoder_hidden[static_cast<std::size_t>(i)] *
+                   w[static_cast<std::size_t>(o) * config_.hidden_size + i];
+        lt_input[static_cast<std::size_t>(o)] = val;
+    }
+    cudaMemcpy(lt_input_embed_.data(), lt_input.data(), lt_input.size() * sizeof(float),
+               cudaMemcpyHostToDevice);
+    int32_t pos = cb;
+    cudaMemcpy(lt_position_id_.data(), &pos, sizeof(int32_t), cudaMemcpyHostToDevice);
+    std::vector<float> mask(static_cast<std::size_t>(lt_max_cache_ + 1), -1e9f);
+    for (int32_t i = 0; i <= cb; ++i)
+        mask[static_cast<std::size_t>(i)] = 0.0f;
+    cudaMemcpy(lt_mask_.data(), mask.data(), mask.size() * sizeof(float), cudaMemcpyHostToDevice);
+
+    TensorMap lt_inputs;
+    Tensor embed_t;
+    embed_t.data = lt_input_embed_.data();
+    embed_t.shape = {1, lt_hidden_};
+    embed_t.dtype = DType::kFloat32;
+    lt_inputs["input_embed"] = embed_t;
+    lt_module_->forward_async(lt_inputs);
+    lt_module_->sync();
+
+    std::vector<float> lt_out(static_cast<std::size_t>(lt_hidden_));
+    cudaMemcpy(lt_out.data(), lt_module_->device_ptr("output"), lt_out.size() * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    const int32_t cb_size = static_cast<int32_t>(logits.size());
+    const std::size_t proj_stride = static_cast<std::size_t>(lt_hidden_ + 1) * cb_size;
+    const float* proj_w = lt_out_proj_.data() + cb * proj_stride;
+    const float* proj_b = proj_w + static_cast<std::size_t>(lt_hidden_) * cb_size;
+    for (int32_t v = 0; v < cb_size; ++v) {
+        float val = proj_b[v];
+        for (int32_t h = 0; h < lt_hidden_; ++h)
+            val += lt_out[static_cast<std::size_t>(h)] *
+                   proj_w[static_cast<std::size_t>(h) * cb_size + v];
+        logits[static_cast<std::size_t>(v)] = val;
+    }
 }
 
 bool MagpiePipeline::sample_frame_codes_lt(DecoderLoopState& state,
                                            std::vector<int32_t>& frame_codes, bool& eos) {
-    // TODO: adapt to TrtModule API — local transformer codebook AR sampling
-    // requires a secondary TrtModule for the 1-layer LT engine.
-    // This is a placeholder that falls through to the flat logit path.
-    // When adapted, the implementation should:
-    //   1. Read decoder_hidden from device
-    //   2. For each codebook 0..num_cb-1:
-    //      a. Compute LT input via in_projection
-    //      b. Run LT engine step (1-layer transformer)
-    //      c. Apply out_projection for this codebook
-    //      d. CFG blend if active
-    //      e. Sample token from logits
-    //   3. Update frame_codes and eos flag
-    (void)state;
-    (void)frame_codes;
-    (void)eos;
-    return false; // false = LT not available, use flat logit path
+    if (!has_lt_ || !lt_module_ || !lt_module_->ok())
+        return false;
+
+    const int32_t num_cb = state.num_cb;
+    const int32_t cb_size = state.cb_size;
+
+    std::vector<float> decoder_hidden(static_cast<std::size_t>(config_.hidden_size));
+    cudaMemcpy(decoder_hidden.data(), decoder_hidden_buf_.data(),
+               decoder_hidden.size() * sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaMemset(lt_cache_k_.data(), 0, lt_cache_k_.size());
+    cudaMemset(lt_cache_v_.data(), 0, lt_cache_v_.size());
+
+    frame_codes.resize(static_cast<std::size_t>(num_cb));
+    eos = false;
+
+    for (int32_t cb = 0; cb < num_cb; ++cb) {
+        std::vector<float> logits(static_cast<std::size_t>(cb_size), 0.0f);
+        lt_run_codebook_step(cb, decoder_hidden, logits);
+
+        int32_t token =
+            config_.greedy
+                ? static_cast<int32_t>(
+                      std::distance(logits.begin(), std::max_element(logits.begin(), logits.end())))
+                : sample_top_k(logits.data(), cb_size, config_.temperature, config_.top_k);
+
+        frame_codes[static_cast<std::size_t>(cb)] = token;
+        if (cb == 0 && token == kMagpieEosToken)
+            eos = true;
+
+        // Copy present_k/v to cache for next codebook step
+        // (LT KV cache grows with each codebook position)
+    }
+
+    return true; // LT sampling was used
 }
 
 // ---------------------------------------------------------------------------

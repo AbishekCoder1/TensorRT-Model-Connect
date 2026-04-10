@@ -165,9 +165,14 @@ add_library(trtf_core
 
 # Add CUDA kernel sources when CUDA compiler is available
 if(CMAKE_CUDA_COMPILER)
-  target_sources(trtf_core PRIVATE src/runtime/domains/audio/magpie_kernels.cu)
-  set_source_files_properties(src/runtime/domains/audio/magpie_kernels.cu PROPERTIES
-    LANGUAGE CUDA
+  target_sources(trtf_core PRIVATE
+    src/runtime/domains/audio/magpie_kernels.cu
+    src/runtime/core/argmax_kernel.cu
+  )
+  set_source_files_properties(
+    src/runtime/domains/audio/magpie_kernels.cu
+    src/runtime/core/argmax_kernel.cu
+    PROPERTIES LANGUAGE CUDA
   )
   target_include_directories(trtf_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_compile_definitions(trtf_core PRIVATE TRTF_HAS_CUDA_KERNELS=1)
@@ -274,6 +279,7 @@ trtf_add_test(test_trt_module)
 # CUDA / device
 trtf_add_test(test_cuda_buffer)
 trtf_add_test(test_cuda_stream)
+trtf_add_test(test_cuda_graph)
 trtf_add_test(test_device_kv_cache)
 trtf_add_test(test_device_resources)
 trtf_add_test(test_device_tensor)

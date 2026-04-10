@@ -63,6 +63,7 @@ class TextGenerationPipeline final : public IPipeline {
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
     std::unique_ptr<ISampler> sampler_;
+    const float* d_logits_ptr_{nullptr}; // device logits pointer (for GPU sampling)
 
     // Internal: generate from token IDs with sampling parameters and optional timing.
     struct TimedGenResult {
@@ -73,8 +74,16 @@ class TextGenerationPipeline final : public IPipeline {
     TimedGenResult generate_from_ids(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
                                      const SamplingParams& params, bool collect_timing = false);
 
-    // Run one decoder step: token_id → logits. Updates cache.
+    // Run one decoder step: token_id → logits (D2H to host). Updates cache.
     void run_step(int32_t token_id, std::vector<float>& logits);
+
+    // Run one decoder step: logits stay on device (d_logits_ptr_ updated).
+    void run_step_device(int32_t token_id);
+
+    // Decode loop (extracted for CCN).
+    int32_t run_decode_loop(ISampler* sampler, const SamplingParams& params,
+                            std::vector<int32_t>& output, std::vector<float>& logits,
+                            int32_t max_new_tokens, bool gpu_sampling);
 };
 
 } // namespace trtf

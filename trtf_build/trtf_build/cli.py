@@ -93,6 +93,58 @@ def _cmd_build(args: argparse.Namespace) -> int:
         return 1
 
 
+def _read_bundle_header(bundle_path: str) -> dict:
+    """Read and return the JSON header from a .trtfb bundle."""
+    with open(bundle_path, "rb") as f:
+        magic = f.read(8)
+        if magic != b"TRTFB\x00\x01\x00":
+            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header_json = f.read(header_len).decode("utf-8")
+    return json.loads(header_json)
+
+
+def list_engine_sections(bundle_path: str) -> list[dict]:
+    """List all TRT engine plan sections in a bundle.
+
+    Returns list of dicts: [{name, size_bytes, size_mb, role}]
+    where role is 'primary', 'vision', 'text_encoder', 'denoiser', 'vae', etc.
+    """
+    header = _read_bundle_header(bundle_path)
+    sections = header.get("sections", {})
+
+    engines = []
+    for name, meta in sections.items():
+        if not name.endswith("_plan") and name != "engine_plan":
+            continue
+        size_bytes = meta.get("size", 0)
+
+        # Infer role from section name
+        if name == "engine_plan":
+            role = "primary"
+        elif "vision" in name:
+            role = "vision"
+        elif "text_encoder" in name:
+            role = "text_encoder"
+        elif "denoiser" in name:
+            role = "denoiser"
+        elif "vae" in name:
+            role = "vae"
+        elif "lt_" in name or "local_transformer" in name:
+            role = "local_transformer"
+        else:
+            role = name.replace("_plan", "")
+
+        engines.append({
+            "name": name,
+            "size_bytes": size_bytes,
+            "size_mb": round(size_bytes / (1024 * 1024), 1),
+            "role": role,
+        })
+
+    return engines
+
+
 def _cmd_inspect(args: argparse.Namespace) -> int:
     bundle_path = args.bundle_path
     if not bundle_path:
@@ -100,17 +152,20 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        with open(bundle_path, "rb") as f:
-            magic = f.read(8)
-            if magic != b"TRTFB\x00\x01\x00":
-                print(f"Error: not a valid .trtfb bundle: {bundle_path}",
-                      file=sys.stderr)
+        header = _read_bundle_header(bundle_path)
+
+        if getattr(args, 'list_engines', False):
+            # Engine-only listing mode
+            engines = list_engine_sections(bundle_path)
+            if not engines:
+                print("No engine sections found.", file=sys.stderr)
                 return 1
+            print(f"{'Section':<30} {'Size':>10} {'Role':<16}")
+            print(f"{'-'*30} {'-'*10} {'-'*16}")
+            for e in engines:
+                print(f"{e['name']:<30} {e['size_mb']:>8.1f} MB {e['role']:<16}")
+            return 0
 
-            header_len = struct.unpack("<Q", f.read(8))[0]
-            header_json = f.read(header_len).decode("utf-8")
-
-        header = json.loads(header_json)
         fields = [
             ("Model ID", "model_id"),
             ("Model type", "model_type"),
@@ -193,6 +248,8 @@ def main() -> None:
     inspect_p = subparsers.add_parser("inspect",
                                       help="Inspect a .trtfb bundle")
     inspect_p.add_argument("bundle_path", help=".trtfb file to inspect")
+    inspect_p.add_argument("--list-engines", action="store_true",
+                           help="List only TRT engine plan sections with roles")
 
     # trtf-build version
     subparsers.add_parser("version", help="Show version info")

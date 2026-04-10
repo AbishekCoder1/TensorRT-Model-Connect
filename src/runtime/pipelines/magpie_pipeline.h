@@ -30,6 +30,7 @@ class MagpiePipeline final : public IPipeline {
   public:
     MagpiePipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
                    std::unique_ptr<IInferenceState> decoder_state, std::unique_ptr<TrtModule> codec,
+                   std::unique_ptr<TrtModule> lt_module, std::unique_ptr<TrtModule> prefill_module,
                    std::unique_ptr<IInferenceState> decoder_state_uncond,
                    std::vector<CudaBuffer> cross_k, std::vector<CudaBuffer> cross_v,
                    std::vector<CudaBuffer> cross_k_uncond, std::vector<CudaBuffer> cross_v_uncond,
@@ -164,6 +165,12 @@ class MagpiePipeline final : public IPipeline {
     bool sample_frame_codes_lt(DecoderLoopState& state, std::vector<int32_t>& frame_codes,
                                bool& eos);
 
+    // Extracted helpers (CCN reduction)
+    void lt_run_codebook_step(int32_t cb, const std::vector<float>& decoder_hidden,
+                              std::vector<float>& logits);
+    void init_prefill_buffers(int32_t N, int32_t W);
+    void bind_prefill_cross_kv();
+
     // Constructor helpers
     void upload_embeddings_to_gpu();
     void init_cross_attn_resources();
@@ -214,16 +221,16 @@ class MagpiePipeline final : public IPipeline {
     int32_t last_attended_pos_{0};
     std::vector<int32_t> attended_count_; // per-position visit count
 
-    // Batched prefill buffers (optimization profile 1)
+    // Batched prefill (optimization profile 1)
+    std::unique_ptr<TrtModule> prefill_module_; // profile-1 context for batched prefill
     int32_t prefill_ctx_len_{0};
     CudaBuffer prefill_mask_{0};      // [1, ctx_len, max_cache + ctx_len] causal mask
     CudaBuffer prefill_logits_{0};    // [ctx_len, output_size] scratch for prefill logits
     CudaBuffer prefill_positions_{0}; // [ctx_len] int32 positions 0..ctx_len-1
     bool prefill_ready_{false};
 
-    // Local transformer members (codebook AR sampling)
-    // TODO: adapt to TrtModule API — currently uses raw TRT execution contexts
-    // which would require a secondary TrtModule for the LT engine.
+    // Local transformer TrtModule (codebook AR sampling)
+    std::unique_ptr<TrtModule> lt_module_; // secondary engine for 1-layer LT
     CudaBuffer lt_cache_k_{0}, lt_cache_v_{0};
     CudaBuffer lt_present_k_{0}, lt_present_v_{0};
     CudaBuffer lt_output_{0}, lt_mask_{0}, lt_position_id_{0}, lt_input_embed_{0};

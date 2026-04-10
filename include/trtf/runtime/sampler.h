@@ -20,40 +20,38 @@ namespace trtf {
 /// Sampling parameters -- controls token selection behavior.
 struct SamplingParams {
     float temperature{1.0f};
-    int32_t top_k{1};           // 1 = greedy
-    float top_p{1.0f};          // 1.0 = disabled
-    float min_p{0.0f};          // 0.0 = disabled
+    int32_t top_k{1};  // 1 = greedy
+    float top_p{1.0f}; // 1.0 = disabled
+    float min_p{0.0f}; // 0.0 = disabled
     float repetition_penalty{1.0f};
-    int32_t seed{-1};           // -1 = deterministic (argmax)
+    int32_t seed{-1}; // -1 = deterministic (argmax)
     int32_t eos_token_id{-1};
 };
 
 /// Where the sampler expects logits to live.
 enum class LogitsLocation {
-    HOST,    // Sampler reads from CPU memory (current default)
-    DEVICE,  // Sampler reads from GPU memory (for on-device sampling)
+    HOST,   // Sampler reads from CPU memory (current default)
+    DEVICE, // Sampler reads from GPU memory (for on-device sampling)
 };
 
 /// Token selection result.
 struct SampleResult {
     int32_t token_id{0};
-    float logprob{0.0f};       // log-probability of selected token (informational)
-    bool is_eos{false};         // true if token_id matches eos_token_id
+    float logprob{0.0f}; // log-probability of selected token (informational)
+    bool is_eos{false};  // true if token_id matches eos_token_id
 };
 
 /// Abstract sampler interface.
 class ISampler {
-public:
+  public:
     virtual ~ISampler() = default;
 
     /// Select the next token from logits.
     /// logits: float[vocab_size] on host or device (see logits_location()).
     /// vocab_size: number of logit values.
     /// params: sampling parameters for this step.
-    virtual SampleResult sample(
-        const float* logits,
-        int32_t vocab_size,
-        const SamplingParams& params) = 0;
+    virtual SampleResult sample(const float* logits, int32_t vocab_size,
+                                const SamplingParams& params) = 0;
 
     /// Where does this sampler expect logits?
     /// HOST: pipeline must D2H logits before calling sample().
@@ -69,14 +67,20 @@ public:
 
 /// Build SamplingParams from GenerateConfig fields.
 /// Forward-declared here; defined in sampler.cpp alongside the factory.
-struct GenerateConfig;  // defined in trtf/pipeline.h
+struct GenerateConfig; // defined in trtf/pipeline.h
 
-SamplingParams sampling_params_from_config(
-    const GenerateConfig& cfg, int32_t default_eos = -1);
+SamplingParams sampling_params_from_config(const GenerateConfig& cfg, int32_t default_eos = -1);
 
 /// Factory: create sampler from SamplingParams.
 /// - top_k == 1 && seed == -1 => GreedySampler
 /// - otherwise => TopKSampler
 std::unique_ptr<ISampler> create_sampler(const SamplingParams& params);
+
+/// Factory: create a GPU-side greedy sampler (on-device argmax).
+/// Requires CUDA kernels (TRTF_HAS_CUDA_KERNELS). Returns nullptr if unavailable.
+/// The sampler reads logits directly from GPU memory and copies back only the
+/// token ID (4 bytes) instead of the full logit vector (~600KB for 151K vocab).
+/// Pass the CUDA stream used by the pipeline for synchronized kernel execution.
+std::unique_ptr<ISampler> create_gpu_greedy_sampler(void* stream);
 
 } // namespace trtf

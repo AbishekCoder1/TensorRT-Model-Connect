@@ -30,10 +30,20 @@ DType TrtModule::from_trt_dtype(nvinfer1::DataType dt) {
 
 // --- Construction ---
 
-TrtModule::TrtModule(nvinfer1::ICudaEngine* engine, cudaStream_t stream) : stream_(stream) {
+TrtModule::TrtModule(nvinfer1::ICudaEngine* engine, cudaStream_t stream, int32_t profile_idx)
+    : stream_(stream), profile_idx_(profile_idx) {
     ctx_ = engine->createExecutionContext();
     if (!ctx_)
         return;
+    if (profile_idx_ > 0) {
+        if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
+            std::cerr << "[trt_module] Failed to set optimization profile " << profile_idx_ << "\n";
+            delete ctx_;
+            ctx_ = nullptr;
+            return;
+        }
+        cudaStreamSynchronize(stream_);
+    }
     allocate_buffers(engine);
 }
 
@@ -43,8 +53,9 @@ TrtModule::~TrtModule() {
 }
 
 TrtModule::TrtModule(TrtModule&& other) noexcept
-    : ctx_(other.ctx_), stream_(other.stream_), has_dynamic_shapes_(other.has_dynamic_shapes_),
-      keep_alive_(std::move(other.keep_alive_)), buffers_(std::move(other.buffers_)),
+    : ctx_(other.ctx_), stream_(other.stream_), profile_idx_(other.profile_idx_),
+      has_dynamic_shapes_(other.has_dynamic_shapes_), keep_alive_(std::move(other.keep_alive_)),
+      buffers_(std::move(other.buffers_)),
       host_output_staging_(std::move(other.host_output_staging_)),
       output_device_tensors_(std::move(other.output_device_tensors_)) {
     other.ctx_ = nullptr;
@@ -56,6 +67,7 @@ TrtModule& TrtModule::operator=(TrtModule&& other) noexcept {
         delete ctx_;
         ctx_ = other.ctx_;
         stream_ = other.stream_;
+        profile_idx_ = other.profile_idx_;
         has_dynamic_shapes_ = other.has_dynamic_shapes_;
         keep_alive_ = std::move(other.keep_alive_);
         buffers_ = std::move(other.buffers_);
@@ -133,7 +145,7 @@ void TrtModule::set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t 
         if (engine->getTensorIOMode(name) != nvinfer1::TensorIOMode::kINPUT)
             continue;
         if (dims_are_dynamic(engine->getTensorShape(name))) {
-            auto dims = engine->getProfileShape(name, 0, selector);
+            auto dims = engine->getProfileShape(name, profile_idx_, selector);
             ctx_->setInputShape(name, dims);
         }
     }
@@ -150,8 +162,9 @@ void TrtModule::allocate_single_input(nvinfer1::ICudaEngine* engine, const char*
     bool is_dynamic = has_dynamic_shapes_ && num_profiles > 0 && dims_are_dynamic(trt_shape);
 
     if (is_dynamic) {
-        alloc_dims = engine->getProfileShape(name, 0, nvinfer1::OptProfileSelector::kMAX);
-        init_dims = engine->getProfileShape(name, 0, nvinfer1::OptProfileSelector::kOPT);
+        alloc_dims =
+            engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kMAX);
+        init_dims = engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kOPT);
     }
 
     std::vector<int64_t> shape;
@@ -295,6 +308,11 @@ TensorMap TrtModule::forward(const TensorMap& inputs) {
 
 // --- Forward async ---
 
+void TrtModule::enable_cuda_graph() {
+    use_cuda_graph_ = true;
+    cuda_graph_.reset(); // Force re-capture on next execution
+}
+
 void TrtModule::forward_async(const TensorMap& inputs) {
     // Upload inputs H2D, updating shapes for dynamic engines
     for (const auto& [name, tensor] : inputs) {
@@ -313,7 +331,34 @@ void TrtModule::forward_async(const TensorMap& inputs) {
         }
     }
 
-    // Execute
+    // Execute — either via CUDA Graph replay or direct enqueue
+    execute_enqueue();
+}
+
+void TrtModule::execute_enqueue() {
+    if (use_cuda_graph_ && cuda_graph_.ready()) {
+        // Replay: launch captured graph (no per-kernel launch overhead)
+        cuda_graph_.launch(stream_);
+        return;
+    }
+    if (use_cuda_graph_) {
+        // First execution: capture the TRT kernel sequence into a graph.
+        // During capture, enqueueV3 is RECORDED but NOT executed.
+        // After capture, we immediately launch the graph to execute
+        // this step's kernels with the current inputs.
+        cuda_graph_.begin_capture(stream_);
+        ctx_->enqueueV3(stream_);
+        if (!cuda_graph_.end_capture(stream_)) {
+            // Capture failed — fall back to normal execution permanently
+            std::cerr << "[cuda_graph] Capture failed, disabling CUDA Graphs\n";
+            use_cuda_graph_ = false;
+            ctx_->enqueueV3(stream_);
+        } else {
+            cuda_graph_.launch(stream_);
+        }
+        return;
+    }
+    // Normal execution (no CUDA Graph)
     ctx_->enqueueV3(stream_);
 }
 

@@ -4,10 +4,20 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <stdexcept>
+#include <string>
 
 namespace trtf {
+
+namespace {
+bool env_flag_set(const char* name) {
+    const char* v = std::getenv(name);
+    return v != nullptr && v[0] == '1';
+}
+} // namespace
 
 TextGenerationPipeline::TextGenerationPipeline(std::unique_ptr<TrtModule> decoder,
                                                std::unique_ptr<IInferenceState> state,
@@ -23,6 +33,19 @@ TextGenerationPipeline::TextGenerationPipeline(std::unique_ptr<TrtModule> decode
     }
     if (!state_ || !state_->ok()) {
         throw std::runtime_error("TextGenerationPipeline: invalid inference state");
+    }
+
+    // CUDA Graphs: capture TRT kernels on first step, replay on subsequent steps.
+    // Disable with TRTF_DISABLE_CUDA_GRAPH=1.
+    if (!env_flag_set("TRTF_DISABLE_CUDA_GRAPH"))
+        decoder_->enable_cuda_graph();
+
+    // GPU-side argmax: eliminates D2H transfer of full logit vector.
+    // Enable with TRTF_GPU_ARGMAX=1 (greedy decoding only).
+    if (!sampler_ && env_flag_set("TRTF_GPU_ARGMAX")) {
+        auto gpu_sampler = create_gpu_greedy_sampler(stream_);
+        if (gpu_sampler)
+            sampler_ = std::move(gpu_sampler);
     }
 }
 
@@ -98,34 +121,31 @@ TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
     state_->bind_to(*decoder_);
 
     std::vector<float> logits;
+    const bool gpu_sampling = (active_sampler->logits_location() == LogitsLocation::DEVICE);
 
     auto t0 = Clock::now();
 
-    // Prefill: process all input tokens except the last
+    // Prefill: process all input tokens except the last.
     for (std::size_t i = 0; i + 1 < input_ids.size(); ++i) {
-        run_step(input_ids[i], logits);
+        if (gpu_sampling)
+            run_step_device(input_ids[i]);
+        else
+            run_step(input_ids[i], logits);
     }
 
     // Start decode from last input token
     int32_t current_token = input_ids.back();
-    run_step(current_token, logits);
+    if (gpu_sampling)
+        run_step_device(current_token);
+    else
+        run_step(current_token, logits);
 
     auto t1 = Clock::now();
 
     // Decode: autoregressive loop
     std::vector<int32_t> output = input_ids;
-    const int32_t vocab_size = static_cast<int32_t>(logits.size());
-
-    for (int32_t step = 0; step < max_new_tokens; ++step) {
-        SampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
-        output.push_back(result.token_id);
-
-        if (result.is_eos) {
-            break;
-        }
-
-        run_step(result.token_id, logits);
-    }
+    int32_t decode_steps =
+        run_decode_loop(active_sampler, params, output, logits, max_new_tokens, gpu_sampling);
 
     auto t2 = Clock::now();
 
@@ -135,6 +155,36 @@ TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
         collect_timing ? std::chrono::duration<double, std::milli>(t2 - t1).count() : 0.0;
 
     return TimedGenResult{std::move(output), prefill_ms, decode_ms};
+}
+
+int32_t TextGenerationPipeline::run_decode_loop(ISampler* sampler, const SamplingParams& params,
+                                                std::vector<int32_t>& output,
+                                                std::vector<float>& logits, int32_t max_new_tokens,
+                                                bool gpu_sampling) {
+    const int32_t vocab_size =
+        gpu_sampling ? config_.vocab_size : static_cast<int32_t>(logits.size());
+    auto decode_start = std::chrono::steady_clock::now();
+    int32_t steps = 0;
+    for (int32_t step = 0; step < max_new_tokens; ++step) {
+        const float* sample_ptr = gpu_sampling ? d_logits_ptr_ : logits.data();
+        SampleResult result = sampler->sample(sample_ptr, vocab_size, params);
+        output.push_back(result.token_id);
+        if (result.is_eos)
+            break;
+        if (gpu_sampling)
+            run_step_device(result.token_id);
+        else
+            run_step(result.token_id, logits);
+        ++steps;
+    }
+    auto decode_end = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(decode_end - decode_start).count();
+    if (steps > 0 && trt_log_to_stderr_enabled()) {
+        double tps = steps * 1000.0 / ms;
+        std::cerr << "[trtf] Decode: " << steps << " tokens, " << ms << " ms, " << tps << " tok/s"
+                  << (decoder_->cuda_graph_active() ? " [CUDA Graph ON]" : "") << '\n';
+    }
+    return steps;
 }
 
 void TextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logits) {
@@ -160,6 +210,28 @@ void TextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logi
     auto num_logits = logits_tensor.numel();
     logits.resize(static_cast<std::size_t>(num_logits));
     std::memcpy(logits.data(), logits_tensor.data, num_logits * sizeof(float));
+
+    state_->advance();
+}
+
+void TextGenerationPipeline::run_step_device(int32_t token_id) {
+    TensorMap inputs;
+
+    Tensor token_tensor;
+    token_tensor.data = &token_id;
+    token_tensor.shape = {1};
+    token_tensor.dtype = DType::kInt32;
+    inputs["token_id"] = token_tensor;
+
+    state_->prepare_step(inputs);
+
+    // Use forward_async + sync instead of forward() to skip the D2H output copy.
+    // The GPU argmax kernel reads logits directly from the device buffer.
+    decoder_->forward_async(inputs);
+    decoder_->sync();
+
+    // Get device pointer to logits output buffer (still on GPU).
+    d_logits_ptr_ = static_cast<const float*>(decoder_->device_ptr("logits"));
 
     state_->advance();
 }

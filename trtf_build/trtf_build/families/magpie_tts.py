@@ -772,14 +772,17 @@ class MagpieTTSPlugin:
                 trt.float32, (max_cache_length, hidden)))
 
         # Per-layer cross-attention inputs (fixed shape)
+        # Use FP16 for cross-KV when precision allows — reduces memory and
+        # bandwidth for cross-attention. KV cache dtype follows precision.
+        cross_kv_dtype = trt.float16 if precision == "fp16" else trt.float32
         cross_k_inputs, cross_v_inputs = [], []
         for i in range(dec_layers):
             cross_k_inputs.append(network.add_input(
                 graph_ops.layer_tensor_name("cross_k", i),
-                trt.float32, (max_source_positions, hidden)))
+                cross_kv_dtype, (max_source_positions, hidden)))
             cross_v_inputs.append(network.add_input(
                 graph_ops.layer_tensor_name("cross_v", i),
-                trt.float32, (max_source_positions, hidden)))
+                cross_kv_dtype, (max_source_positions, hidden)))
 
         # Cross-attention prior for monotonic alignment (NeMo inference)
         # Shape [1, 1, max_source_positions] — broadcasts over [xa_heads, seq, max_src]
