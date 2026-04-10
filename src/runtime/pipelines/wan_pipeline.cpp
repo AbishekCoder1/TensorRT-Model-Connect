@@ -9,8 +9,6 @@
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
 #include "runtime/domains/diffusion/wan_generation_conditioning.h"
 
-#if TRTF_HAS_TRT
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -1450,5 +1448,3 @@ ImageResult WanPipeline::generate_image(
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

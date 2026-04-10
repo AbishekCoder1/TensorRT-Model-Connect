@@ -1,7 +1,5 @@
 #include "runtime/pipelines/segment_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -123,5 +121,3 @@ SegmentResult SegmentPipeline::segment(
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

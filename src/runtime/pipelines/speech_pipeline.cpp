@@ -1,7 +1,5 @@
 #include "runtime/pipelines/speech_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include "runtime/domains/audio/audio_configs.h"
 #include "runtime/domains/audio/speech_depth_plan.h"
 #include "runtime/domains/audio/speech_delay_cache.h"
@@ -1168,5 +1166,3 @@ AudioResult SpeechPipeline::speak(
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

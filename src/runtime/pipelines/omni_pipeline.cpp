@@ -1,7 +1,5 @@
 #include "runtime/pipelines/omni_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include "runtime/domains/audio/audio_configs.h"
 #include "runtime/domains/audio/omni_audio_plan.h"
 #include "trtf/tokenizer.h"
@@ -319,5 +317,3 @@ AudioResult OmniPipeline::generate_audio(
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

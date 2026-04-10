@@ -2,8 +2,6 @@
 #include "runtime/domains/diffusion/diffusion_math.h"
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
 
-#if TRTF_HAS_TRT
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -807,5 +805,3 @@ ImageResult ZImagePipeline::generate_image(
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

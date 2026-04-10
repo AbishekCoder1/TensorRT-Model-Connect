@@ -16,8 +16,6 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
-
 namespace trtf {
 
 struct RecurrentGenConfig {
@@ -81,5 +79,3 @@ class RecurrentPipeline final : public IPipeline {
 };
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

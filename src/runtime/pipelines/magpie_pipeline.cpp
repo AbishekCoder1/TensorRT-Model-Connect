@@ -1,7 +1,5 @@
 #include "runtime/pipelines/magpie_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include "runtime/core/trt_decode_runtime.h"
 #include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/domains/audio/audio_configs.h"
@@ -2131,5 +2129,3 @@ AudioResult MagpiePipeline::generate_audio(const std::string& prompt, const Gene
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

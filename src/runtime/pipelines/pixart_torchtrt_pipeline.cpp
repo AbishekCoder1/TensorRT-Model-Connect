@@ -18,8 +18,6 @@
 #include <random>
 #include <vector>
 
-#if TRTF_HAS_TRT
-
 namespace trtf {
 
 // ─── fp32 ↔ fp16 conversion helpers ─────────────────────────────────────
@@ -563,5 +561,3 @@ ImageResult PixArtTorchTrtPipeline::generate_image(const std::string& prompt,
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

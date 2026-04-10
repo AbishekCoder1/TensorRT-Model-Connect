@@ -1,7 +1,5 @@
 #include "runtime/pipelines/whisper_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/domains/audio/mel_spectrogram.h"
 #include "runtime/domains/audio/whisper_host_plan.h"
@@ -306,5 +304,3 @@ void WhisperPipeline::run_decoder_step(int32_t token_id, std::vector<float>& log
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

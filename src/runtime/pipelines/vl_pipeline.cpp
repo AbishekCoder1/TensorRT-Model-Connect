@@ -1,7 +1,5 @@
 #include "runtime/pipelines/vl_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include "runtime/domains/multimodal/image_preprocessor.h"
 
 #include <algorithm>
@@ -406,5 +404,3 @@ int32_t VLPipeline::argmax(const std::vector<float>& logits)
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

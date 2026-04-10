@@ -17,8 +17,6 @@
 #include <utility>
 #include <vector>
 
-#if TRTF_HAS_TRT
-
 namespace trtf {
 
 struct VLConfig {
@@ -109,5 +107,3 @@ private:
 };
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

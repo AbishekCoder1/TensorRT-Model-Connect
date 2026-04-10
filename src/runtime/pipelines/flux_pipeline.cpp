@@ -13,8 +13,6 @@
 #include "runtime/domains/diffusion/diffusion_generation_plan.h"
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
 
-#if TRTF_HAS_TRT
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1325,5 +1323,3 @@ ImageResult FluxPipeline::generate_image(const std::string& prompt, const Genera
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

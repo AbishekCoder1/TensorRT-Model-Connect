@@ -1,7 +1,5 @@
 #include "runtime/pipelines/encoder_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -175,5 +173,3 @@ EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_id
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

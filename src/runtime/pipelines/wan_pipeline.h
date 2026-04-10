@@ -14,8 +14,6 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
-
 namespace trtf {
 
 class WanPipeline final : public IPipeline {
@@ -103,5 +101,3 @@ private:
 };
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

@@ -1,7 +1,5 @@
 #include "runtime/pipelines/sam_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -60,5 +58,3 @@ SegmentResult SamPipeline::segment(
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

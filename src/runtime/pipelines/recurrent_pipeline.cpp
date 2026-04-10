@@ -1,7 +1,5 @@
 #include "runtime/pipelines/recurrent_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -230,5 +228,3 @@ int32_t RecurrentPipeline::argmax(const std::vector<float>& logits) {
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

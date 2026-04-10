@@ -14,8 +14,6 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
-
 #include "runtime/domains/audio/audio_configs.h"
 #include "runtime/domains/audio/speech_delay_cache.h"
 #include "runtime/domains/audio/speech_generation_policy.h"
@@ -101,5 +99,3 @@ private:
 };
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

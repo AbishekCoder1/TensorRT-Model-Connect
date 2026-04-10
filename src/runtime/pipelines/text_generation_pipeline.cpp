@@ -1,7 +1,5 @@
 #include "runtime/pipelines/text_generation_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -243,5 +241,3 @@ int32_t TextGenerationPipeline::argmax(const std::vector<float>& logits) {
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

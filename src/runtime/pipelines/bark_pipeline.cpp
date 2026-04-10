@@ -1,7 +1,5 @@
 #include "runtime/pipelines/bark_pipeline.h"
 
-#if TRTF_HAS_TRT
-
 #include "runtime/domains/audio/bark_generation_plan.h"
 #include "runtime/core/trt_decode_runtime.h"
 #include "trtf/tokenizer.h"
@@ -776,5 +774,3 @@ std::vector<float> BarkPipeline::run_codec(const std::vector<int32_t>& codes_fla
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT
