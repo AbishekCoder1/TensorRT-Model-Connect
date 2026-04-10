@@ -1,8 +1,6 @@
 #include "trtf/runtime/recurrent_state.h"
 #include "trtf/runtime/trt_module.h"
 
-#if TRTF_HAS_TRT
-
 namespace trtf {
 
 RecurrentState::RecurrentState(int32_t num_layers, std::vector<TensorSpec> specs,
@@ -108,5 +106,3 @@ bool RecurrentState::ok() const
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

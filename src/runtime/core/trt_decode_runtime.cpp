@@ -6,8 +6,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
-
 int32_t select_argmax_token(const std::vector<float>& logits)
 {
     if (logits.empty())
@@ -132,7 +130,5 @@ std::vector<float> build_attention_mask(int32_t cache_length, int32_t max_cache_
 
     return mask;
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

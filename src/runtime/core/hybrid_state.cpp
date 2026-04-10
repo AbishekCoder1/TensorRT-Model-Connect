@@ -1,7 +1,5 @@
 #include "trtf/runtime/hybrid_state.h"
 
-#if TRTF_HAS_TRT
-
 #include <cassert>
 
 namespace trtf {
@@ -62,5 +60,3 @@ bool HybridState::ok() const
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

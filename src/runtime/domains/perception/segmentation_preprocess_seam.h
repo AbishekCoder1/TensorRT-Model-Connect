@@ -10,8 +10,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
-
 inline std::vector<float> preprocess_segmentation_image(
     const runtime::adapters::io::DecodedImage& image,
     const SegmentationConfig& config)
@@ -48,7 +46,5 @@ inline std::vector<float> preprocess_segmentation_image(
 
     return pixel_values;
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

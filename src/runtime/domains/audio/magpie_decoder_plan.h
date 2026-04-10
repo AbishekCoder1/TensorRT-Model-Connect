@@ -7,8 +7,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
-
 struct MagpieDecoderPlan {
     int32_t hidden{0};
     int32_t num_cb{0};
@@ -62,7 +60,5 @@ inline MagpieDecoderPlan make_magpie_decoder_plan(const MagpieTTSConfig& config,
         std::max(static_cast<int32_t>(static_cast<float>(text_length) * 0.9F), 1);
     return plan;
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

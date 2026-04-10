@@ -1,7 +1,5 @@
 #include "trtf/runtime/device_tensor.h"
 
-#if TRTF_HAS_TRT
-
 #include <algorithm>
 #include <cstring>
 
@@ -113,5 +111,3 @@ void DeviceTensor::free()
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

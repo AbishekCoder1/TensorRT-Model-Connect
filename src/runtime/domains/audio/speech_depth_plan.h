@@ -9,8 +9,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
-
 struct DepthProjectionView
 {
     bool has_projection{false};
@@ -167,7 +165,5 @@ inline int32_t resolve_depth_prev_token(
     }
     return clamp_speech_depth_token(forced_audio_tokens[codebook], cfg.audio_vocab_size);
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

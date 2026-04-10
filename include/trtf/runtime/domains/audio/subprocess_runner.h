@@ -9,8 +9,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
-
 class ISubprocessRunner {
 public:
     virtual ~ISubprocessRunner() = default;
@@ -63,7 +61,5 @@ inline RuntimePromptTokenizationResult TokenizeSpeechPromptRuntime(
         num_tokens * sizeof(int32_t));
     return result;
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

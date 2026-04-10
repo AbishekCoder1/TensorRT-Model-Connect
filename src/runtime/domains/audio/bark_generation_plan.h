@@ -10,8 +10,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
-
 struct BarkCoarsePlan
 {
     std::vector<int32_t> remapped_semantic;
@@ -242,7 +240,5 @@ inline std::vector<int32_t> make_bark_codec_input_codes(
     }
     return input_codes;
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

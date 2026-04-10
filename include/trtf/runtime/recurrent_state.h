@@ -19,8 +19,6 @@
 #include <unordered_map>
 #include <vector>
 
-#if TRTF_HAS_TRT
-
 namespace trtf {
 
 class TrtModule;
@@ -68,5 +66,3 @@ private:
 };
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

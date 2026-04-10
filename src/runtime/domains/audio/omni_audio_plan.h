@@ -10,8 +10,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
-
 struct OmniAudioEncodePlan
 {
     int32_t actual_frames{0};
@@ -168,7 +166,5 @@ inline std::vector<int32_t> build_omni_code2wav_input_codes(
     }
     return input_codes;
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

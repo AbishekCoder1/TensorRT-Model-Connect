@@ -14,8 +14,6 @@
 namespace trtf {
 namespace diffusion {
 
-#if TRTF_HAS_TRT
-
 struct WanConditioningInputs
 {
     std::vector<float> encoder_attn_mask;
@@ -115,8 +113,6 @@ inline std::vector<float> make_wan_initial_latents(
     }
     return latents;
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace diffusion
 } // namespace trtf

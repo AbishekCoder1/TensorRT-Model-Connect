@@ -9,8 +9,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
-
 struct EncoderShapeInfo
 {
     int32_t encode_codebooks{0};
@@ -110,7 +108,5 @@ inline SpeechGenerationSettings make_speech_generation_settings(
     settings.mimi_cb = cfg.mimi_decode_codebooks;
     return settings;
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

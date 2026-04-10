@@ -12,13 +12,9 @@
 #include <unordered_map>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <cuda_runtime_api.h>
-#endif
 
 namespace trtf {
-
-#if TRTF_HAS_TRT
 
 class DeviceTensor {
 public:
@@ -65,7 +61,5 @@ private:
 };
 
 using DeviceTensorMap = std::unordered_map<std::string, DeviceTensor*>;
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

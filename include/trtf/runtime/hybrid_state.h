@@ -10,8 +10,6 @@
 
 #include <memory>
 
-#if TRTF_HAS_TRT
-
 namespace trtf {
 
 class HybridState : public IInferenceState {
@@ -43,5 +41,3 @@ private:
 };
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

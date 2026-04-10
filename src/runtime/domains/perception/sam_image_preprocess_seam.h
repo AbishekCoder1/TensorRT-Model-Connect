@@ -10,8 +10,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
-
 struct SamImageEncodePlan {
     std::vector<float> pixel_values;
     int32_t rescaled_width{0};
@@ -95,7 +93,5 @@ inline SamImageEncodePlan build_sam_image_encode_plan(
 
     return plan;
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

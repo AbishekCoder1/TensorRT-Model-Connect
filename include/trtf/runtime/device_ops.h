@@ -8,14 +8,10 @@
 
 #include <cstdint>
 
-#if TRTF_HAS_TRT
 #include <cuda_runtime_api.h>
-#endif
 
 namespace trtf {
 namespace device_ops {
-
-#if TRTF_HAS_TRT
 
 // Multi-codebook greedy argmax on device logits.
 // d_logits: [num_codebooks * codebook_size] float on device
@@ -51,8 +47,6 @@ void scatter_codes_check_eos(
     const int32_t* d_full_argmax, int32_t* d_eos_flag,
     int32_t frame, int32_t num_codebooks, int32_t eos_token,
     cudaStream_t stream);
-
-#endif // TRTF_HAS_TRT
 
 } // namespace device_ops
 } // namespace trtf

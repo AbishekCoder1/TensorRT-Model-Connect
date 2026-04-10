@@ -24,8 +24,6 @@
 #include <cstddef>
 #include <cstdint>
 
-#if TRTF_HAS_TRT
-
 namespace trtf {
 
 class TrtModule;
@@ -83,5 +81,3 @@ public:
 };
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

@@ -10,8 +10,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
-
 inline void add_speech_embedding_row(
     const std::vector<float>& table,
     std::size_t offset,
@@ -114,7 +112,5 @@ inline void fill_hidden_from_logits(
             (d < static_cast<int32_t>(logits.size())) ? logits[d] : 0.0F;
     }
 }
-
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

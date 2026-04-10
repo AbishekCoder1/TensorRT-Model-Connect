@@ -13,8 +13,6 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
-
 namespace trtf {
 
 class TrtModule;
@@ -82,5 +80,3 @@ class KvCache : public IInferenceState {
 };
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT

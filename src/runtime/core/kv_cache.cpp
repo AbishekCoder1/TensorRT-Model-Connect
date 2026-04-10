@@ -2,8 +2,6 @@
 
 #include "trtf/runtime/trt_module.h"
 
-#if TRTF_HAS_TRT
-
 #include <algorithm>
 #include <cassert>
 #include <cstring>
@@ -175,5 +173,3 @@ bool KvCache::ok() const {
 }
 
 } // namespace trtf
-
-#endif // TRTF_HAS_TRT
