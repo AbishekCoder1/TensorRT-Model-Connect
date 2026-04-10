@@ -15,6 +15,7 @@ namespace trtf {
 // Forward declaration — defined in src/bundle/bundle_format.h (internal).
 // PipelineContext holds a const reference, so no full definition needed here.
 struct BundleFile;
+class IBackend;
 
 // Tensor I/O name mapping — read from the bundle's config.json "io_map" object.
 // Per-layer patterns use tokens: {i}=layer, {2i}=2*layer, {2i+1}=2*layer+1, {2i+2}=2*layer+2.
@@ -61,6 +62,9 @@ struct PipelineContext {
     const std::string& config_json; // raw JSON text from bundle
     const std::string& hf_python;   // path to HF Python interpreter
     const std::string& bundle_path; // filesystem path to .trtfb file
+    IBackend* backend;                 // Backend for creating ITrtModule instances
+    const std::string& runtime_cache_path; // RTX: JIT kernel cache file path
+    bool cuda_graphs;                  // RTX: whole-graph CUDA capture
 };
 
 // Plugin interface. Each plugin registers itself with the PipelineRegistry
