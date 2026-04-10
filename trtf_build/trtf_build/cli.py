@@ -131,6 +131,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             verbose=args.verbose,
             fp8_scales=fp8_scales,
             save_fp8_scales=save_fp8_scales,
+            rtx=getattr(args, 'rtx', False),
         )
         return 0
     except Exception as e:
@@ -376,6 +377,7 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
             ("Max cache length", "max_cache_length"),
             ("Precision", "precision"),
             ("Quantization", "quantization"),
+            ("Engine backend", "engine_backend"),
         ]
         for label, key in fields:
             print(f"{label + ':':<20} {header.get(key, '')}")
@@ -399,6 +401,11 @@ def _cmd_version(_args: argparse.Namespace) -> int:
         print(f"TensorRT:  {trt.__version__}")
     except ImportError:
         print("TensorRT:  not installed")
+    try:
+        import tensorrt_rtx as trt_rtx
+        print(f"TensorRT-RTX: {trt_rtx.__version__}")
+    except ImportError:
+        print("TensorRT-RTX: not installed")
     return 0
 
 
@@ -442,6 +449,8 @@ def main() -> None:
                          help="Path to pre-computed FP8 scales JSON (skips calibration)")
     build_p.add_argument("--save-fp8-scales", default=None,
                          help="Save calibrated FP8 scales to JSON (reuse with --fp8-scales)")
+    build_p.add_argument("--rtx", action="store_true",
+                         help="Build engine for TRT-RTX (portable, JIT-compiled at runtime)")
 
     # trtf-build inspect <bundle.trtfb>
     inspect_p = subparsers.add_parser("inspect",

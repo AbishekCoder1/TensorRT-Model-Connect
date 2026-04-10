@@ -12,6 +12,21 @@ from .config import ModelConfig
 from .families import find_plugin, find_diffusion_plugin, _ALL_PLUGINS
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
 
+def _setup_trt_import(rtx: bool) -> None:
+    """If rtx=True, monkeypatch sys.modules so 'import tensorrt' resolves to tensorrt_rtx."""
+    if not rtx:
+        return
+    try:
+        import tensorrt_rtx
+    except ImportError:
+        raise ImportError(
+            "TensorRT-RTX is required for --rtx builds. "
+            "Install it with: pip install tensorrt_rtx"
+        )
+    sys.modules["tensorrt"] = tensorrt_rtx
+    print("[trtf-build] Using TensorRT-RTX backend", file=sys.stderr)
+
+
 # Standard HF file patterns to download (matches what the builder needs).
 _HF_ALLOW_PATTERNS = [
     "config.json",
@@ -363,6 +378,7 @@ def build_bundle(
     quant_calibration_samples: int = 512,
     verbose: bool = False,
     kernel_artifacts: list[tuple[str, str]] | None = None,
+    rtx: bool = False,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -372,6 +388,7 @@ def build_bundle(
         max_cache_length: KV cache length for the engine.
         verbose: Print detailed logs.
     """
+    _setup_trt_import(rtx)
     model_dir_path = Path(model_dir)
     t0 = time.monotonic()
 
@@ -384,7 +401,8 @@ def build_bundle(
         _build_diffusion_bundle(
             model_dir_path, output_path, max_cache_length,
             precision=precision, verbose=verbose, t0=t0,
-            fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales)
+            fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales,
+            rtx=rtx)
         return
 
     # 1. Parse config
@@ -538,6 +556,7 @@ def build_bundle(
                 runtime_strategy = getattr(plugin, "runtime_strategy", None)
                 if runtime_strategy:
                     cfg_dict["runtime_strategy"] = runtime_strategy
+                cfg_dict["engine_backend"] = "trt_rtx" if rtx else "trt"
                 cfg_dict["precision"] = precision
                 if quant_plan is not None:
                     cfg_dict["quantization"] = quant_plan.as_config_dict()
@@ -625,8 +644,10 @@ def _build_diffusion_bundle(
     t0: float = 0.0,
     fp8_scales: dict | None = None,
     save_fp8_scales: str | None = None,
+    rtx: bool = False,
 ) -> None:
     """Build a diffusion model bundle from a diffusers-format directory."""
+    _setup_trt_import(rtx)
     # Parse model_index.json to determine pipeline type
     model_index = json.loads(
         (model_dir_path / "model_index.json").read_text())
@@ -730,6 +751,7 @@ def _build_diffusion_bundle(
         "model_type": model_type,
         "runtime_strategy": getattr(plugin, "runtime_strategy", "diffusion"),
         "precision": _effective_precision,
+        "engine_backend": "trt_rtx" if rtx else "trt",
         "num_text_encoders": len(components["text_encoders"]),
     }
     if fp8_scales:
@@ -822,6 +844,7 @@ def build(
     verbose: bool = False,
     fp8_scales: dict | str | None = None,
     save_fp8_scales: str | None = None,
+    rtx: bool = False,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -846,4 +869,5 @@ def build(
                  quantize=quantize,
                  quant_scales=quant_scales,
                  quant_calibration_samples=quant_calibration_samples,
-                 verbose=verbose)
+                 verbose=verbose,
+                 rtx=rtx)
