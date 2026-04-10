@@ -5,15 +5,16 @@
 // strategy plugins can reuse TRT module loading, tokenizer creation,
 // KV-dim computation, and data-section conversion utilities.
 
+#include "trtf/tokenizer.h"
+#include "trtf/runtime/trt_module.h"
+#include "trtf/runtime/trt_backend.h"
+#include "trtf/runtime/inference_state.h"
+#include "trtf/runtime/kv_cache.h"
+#include "trtf/runtime/pipeline_plugin.h"
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/pipelines/recurrent_pipeline.h"
-#include "trtf/runtime/inference_state.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/pipeline_plugin.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
 
 #include <memory>
 #include <string>
@@ -23,29 +24,29 @@ namespace trtf {
 
 #if TRTF_HAS_TRT
 
-// A loaded TRT engine + its CUDA stream, ready for inference.
+// A loaded TRT engine, ready for inference.
+// The stream is owned internally by the module — callers get it via module->stream().
 struct LoadedModule {
-    std::unique_ptr<TrtModule> module;
-    std::shared_ptr<CudaStream> stream;
+    std::unique_ptr<ITrtModule> module;
 };
 
-// Load a TRT engine from a serialized plan. Throws on failure.
-// If shared_stream is provided, reuses it; otherwise creates a new one.
-// profile_idx selects which optimization profile to use (default 0).
-LoadedModule load_trt_module_from_plan(const std::vector<char>* plan, const char* label,
-                                       std::shared_ptr<CudaStream> shared_stream = nullptr,
-                                       int32_t profile_idx = 0);
+// Load a TRT engine from a serialized plan via the backend. Throws on failure.
+LoadedModule load_trt_module_from_plan(IBackend* backend, const std::vector<char>* plan,
+                                       const char* label,
+                                       const ModuleCreateOptions& options = {});
 
 // Like load_trt_module_from_plan but returns empty LoadedModule on failure
 // instead of throwing (for optional engines).
-LoadedModule try_load_trt_module_from_plan(const std::vector<char>* plan, const char* label,
-                                           std::shared_ptr<CudaStream> shared_stream,
-                                           int32_t profile_idx = 0);
+LoadedModule try_load_trt_module_from_plan(IBackend* backend, const std::vector<char>* plan,
+                                           const char* label,
+                                           const ModuleCreateOptions& options = {});
 
 // Load an optional TRT module, returning nullptr if the plan is absent.
 // On deserialization failure, returns nullptr (does not throw).
-std::unique_ptr<TrtModule> extract_optional_module(const std::vector<char>* plan, const char* label,
-                                                   std::shared_ptr<CudaStream> shared_stream);
+std::unique_ptr<ITrtModule> extract_optional_module(IBackend* backend,
+                                                    const std::vector<char>* plan,
+                                                    const char* label,
+                                                    const ModuleCreateOptions& options = {});
 
 // Detect whether the bundle's config requests add_special_tokens for the tokenizer.
 bool detect_add_special_tokens(const BundleFile& bundle);
@@ -60,11 +61,11 @@ std::shared_ptr<ITokenizer> try_create_native_bpe(const BundleFile& bundle, bool
                                                   bool throw_on_failure);
 
 // Try to create a native C++ tokenizer from the bundle's tokenizer.json.
-// Attempts: BPE → WordPiece → Unigram. Returns nullptr if none match.
+// Attempts: BPE -> WordPiece -> Unigram. Returns nullptr if none match.
 std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle,
                                                         bool add_special_tokens);
 
-// Create a native tokenizer from bundle. Tries BPE → WordPiece → Unigram.
+// Create a native tokenizer from bundle. Tries BPE -> WordPiece -> Unigram.
 // Returns nullptr if no native tokenizer matches.
 std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(const BundleFile& bundle);
 
@@ -87,7 +88,7 @@ std::vector<int32_t> section_to_int32s(const std::vector<char>* sec);
 // Return true if the section pointer is non-null and non-empty.
 bool has_section_data(const std::vector<char>* d);
 
-// ─── BundleFile-based helpers ───
+// BundleFile-based helpers.
 
 // Mel filterbank loaded from bundle (for Whisper native mel extraction).
 struct MelFilterbank {

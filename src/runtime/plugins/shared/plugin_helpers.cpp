@@ -1,4 +1,5 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/trt_backend.h"
 
 #include "utils/json_helpers.h"
 
@@ -17,7 +18,7 @@ namespace trtf {
 
 #if TRTF_HAS_TRT
 
-// ─── Tokenizer helpers ───
+// Tokenizer helpers.
 
 bool detect_add_special_tokens(const BundleFile& bundle) {
     auto* config_data = find_section(bundle, "config.json");
@@ -56,12 +57,12 @@ std::shared_ptr<ITokenizer> try_create_native_bpe(const BundleFile& bundle, bool
         }
         return tok;
     } catch (const std::exception& e) {
-        // "Not a BPE tokenizer" → non-BPE model (WordPiece, Unigram), allow fallback
+        // "Not a BPE tokenizer" -> non-BPE model (WordPiece, Unigram), allow fallback
         std::string msg = e.what();
         bool is_non_bpe = msg.find("Not a BPE") != std::string::npos;
 
         if (throw_on_failure || (!is_non_bpe && is_bpe_tokenizer_json(bundle))) {
-            // BPE model but native failed → error, no silent fallback
+            // BPE model but native failed -> error, no silent fallback
             throw std::runtime_error(std::string("Native BPE tokenizer failed for BPE model: ") +
                                      e.what());
         }
@@ -118,58 +119,46 @@ std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(const BundleFile& bundl
     return try_create_native_tokenizer(bundle, add_special);
 }
 
-// ─── TRT module loading ───
+// TRT module loading (delegated to IBackend).
 
-LoadedModule load_trt_module_from_plan(const std::vector<char>* plan, const char* label,
-                                       std::shared_ptr<CudaStream> shared_stream,
-                                       int32_t profile_idx) {
+LoadedModule load_trt_module_from_plan(IBackend* backend, const std::vector<char>* plan,
+                                       const char* label, const ModuleCreateOptions& options) {
     if (!plan || plan->empty())
         throw std::runtime_error(std::string("Bundle missing ") + label);
-    auto trt_runtime = create_trt_runtime();
-    if (!trt_runtime)
-        throw std::runtime_error(std::string("Failed to create TRT runtime for ") + label);
-    auto engine = TrtUniquePtr<nvinfer1::ICudaEngine>(
-        trt_runtime->deserializeCudaEngine(plan->data(), plan->size()));
-    if (!engine)
-        throw std::runtime_error(std::string("Failed to deserialize ") + label);
-    auto stream = shared_stream ? shared_stream : std::make_shared<CudaStream>();
-    if (!stream->ok())
-        throw std::runtime_error("Failed to create CUDA stream");
+    if (!backend)
+        throw std::runtime_error("No backend loaded");
+
     LoadedModule result;
-    result.stream = stream;
-    result.module = std::make_unique<TrtModule>(engine.get(), stream->get(), profile_idx);
-    if (!result.module->ok())
-        throw std::runtime_error(std::string("Failed to create TrtModule for ") + label +
-                                 " (profile " + std::to_string(profile_idx) + ")");
-    nvinfer1::ICudaEngine* raw_engine = engine.release();
-    result.module->keep_alive(std::shared_ptr<nvinfer1::ICudaEngine>(
-        raw_engine, [](nvinfer1::ICudaEngine* p) { delete p; }));
-    result.module->keep_alive(stream);
+    result.module = backend->create_module(plan->data(), plan->size(), options);
+    if (!result.module || !result.module->ok())
+        throw std::runtime_error(std::string("Failed to create ITrtModule for ") + label);
     return result;
 }
 
-LoadedModule try_load_trt_module_from_plan(const std::vector<char>* plan, const char* label,
-                                           std::shared_ptr<CudaStream> shared_stream,
-                                           int32_t profile_idx) {
+LoadedModule try_load_trt_module_from_plan(IBackend* backend, const std::vector<char>* plan,
+                                           const char* label,
+                                           const ModuleCreateOptions& options) {
     if (!plan || plan->empty())
         return LoadedModule{};
     try {
-        return load_trt_module_from_plan(plan, label, shared_stream, profile_idx);
+        return load_trt_module_from_plan(backend, plan, label, options);
     } catch (...) {
         std::cerr << "[trtf] WARNING: failed to load optional engine: " << label << std::endl;
         return LoadedModule{};
     }
 }
 
-std::unique_ptr<TrtModule> extract_optional_module(const std::vector<char>* plan, const char* label,
-                                                   std::shared_ptr<CudaStream> shared_stream) {
-    auto loaded = try_load_trt_module_from_plan(plan, label, shared_stream);
+std::unique_ptr<ITrtModule> extract_optional_module(IBackend* backend,
+                                                    const std::vector<char>* plan,
+                                                    const char* label,
+                                                    const ModuleCreateOptions& options) {
+    auto loaded = try_load_trt_module_from_plan(backend, plan, label, options);
     if (loaded.module && loaded.module->ok())
         return std::move(loaded.module);
     return nullptr;
 }
 
-// ─── Config helpers ───
+// Config helpers.
 
 int32_t compute_kv_dim(const BaseConfig& cfg) {
     if (cfg.attention_size > 0)
@@ -195,7 +184,7 @@ RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg) {
     return rgc;
 }
 
-// ─── Section data conversion ───
+// Section data conversion.
 
 std::vector<float> section_to_floats(const std::vector<char>* sec) {
     if (!sec || sec->empty())
