@@ -21,8 +21,10 @@ struct DiffusionParts {
 };
 
 DiffusionParts load_diffusion_parts(
+    IBackend* backend,
     const BundleFile& bundle,
-    const std::string& json);
+    const std::string& json,
+    const ModuleCreateOptions& options = {});
 
 } // namespace trtf
 

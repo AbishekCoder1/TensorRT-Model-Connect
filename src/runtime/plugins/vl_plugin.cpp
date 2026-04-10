@@ -18,8 +18,15 @@ class VLPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
-        auto loaded =
-            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
+
+        auto shared_stream = std::make_shared<CudaStream>();
+        if (!shared_stream->ok())
+            throw std::runtime_error("VLPlugin: failed to create CUDA stream");
+
+        ModuleCreateOptions opts;
+        opts.stream = shared_stream->get();
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
 
         // Build KvCacheNames from IoMap patterns.
         const auto& io = ctx.config.io_map;
@@ -31,7 +38,11 @@ class VLPlugin final : public IPipelinePlugin {
             kv_names.present_v.push_back(expand_layer_name(io.present_v_pattern, i));
         }
 
-        cudaStream_t stream = loaded.stream->get();
+        auto loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "engine_plan", opts);
+        loaded.module->keep_alive(shared_stream);
+
+        cudaStream_t stream = loaded.module->stream();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> state =
@@ -53,8 +64,10 @@ class VLPlugin final : public IPipelinePlugin {
         // Try to load the vision encoder engine from the bundle.
         std::unique_ptr<TrtModule> vision_module;
         auto vision_loaded = try_load_trt_module_from_plan(
-            find_section(ctx.bundle, "vision_engine_plan"), "vision_engine_plan", loaded.stream);
+            ctx.backend,
+            find_section(ctx.bundle, "vision_engine_plan"), "vision_engine_plan", opts);
         if (vision_loaded.module && vision_loaded.module->ok()) {
+            vision_loaded.module->keep_alive(shared_stream);
             vision_module = std::move(vision_loaded.module);
             std::cerr << "[trtf] Vision encoder loaded" << std::endl;
         } else if (has_vision_engine) {

@@ -18,11 +18,16 @@ class HybridPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
-        auto loaded =
-            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
+
+        ModuleCreateOptions opts;
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
+
+        auto loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "engine_plan", opts);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
-        cudaStream_t stream = loaded.stream->get();
+        cudaStream_t stream = loaded.module->stream();
         int32_t kv_dim = compute_kv_dim(ctx.config);
 
         int32_t num_attention_layers = extract_json_int(ctx.config_json, "num_attention_layers", 0);

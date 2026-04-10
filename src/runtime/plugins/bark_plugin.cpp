@@ -15,17 +15,22 @@ class BarkPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
+
+        ModuleCreateOptions opts;
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
+
         const auto& json = ctx.config_json;
 
         // Load semantic engine (main plan)
-        auto sem_loaded =
-            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "bark semantic");
+        auto sem_loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "bark semantic", opts);
 
         // Load coarse engine
         auto coarse_loaded = load_trt_module_from_plan(
-            find_section(ctx.bundle, "coarse_engine_plan"), "bark coarse", sem_loaded.stream);
+            ctx.backend, find_section(ctx.bundle, "coarse_engine_plan"), "bark coarse", opts);
 
-        cudaStream_t stream = sem_loaded.stream->get();
+        cudaStream_t stream = sem_loaded.module->stream();
 
         // Build BarkConfig
         BarkConfig bark_cfg;
@@ -79,13 +84,15 @@ class BarkPlugin final : public IPipelinePlugin {
 
         // Optional codec engine
         auto codec_loaded = try_load_trt_module_from_plan(
-            find_section(ctx.bundle, "codec_engine_plan"), "bark codec", sem_loaded.stream);
+            ctx.backend,
+            find_section(ctx.bundle, "codec_engine_plan"), "bark codec", opts);
         if (codec_loaded.module && codec_loaded.module->ok())
             pipeline->set_codec_module(std::move(codec_loaded.module));
 
         // Optional fine engine
         auto fine_loaded = try_load_trt_module_from_plan(
-            find_section(ctx.bundle, "fine_engine_plan"), "bark fine", sem_loaded.stream);
+            ctx.backend,
+            find_section(ctx.bundle, "fine_engine_plan"), "bark fine", opts);
         if (fine_loaded.module && fine_loaded.module->ok()) {
             pipeline->set_fine_module(std::move(fine_loaded.module));
             auto fe = section_to_floats(find_section(ctx.bundle, "fine_embed"));

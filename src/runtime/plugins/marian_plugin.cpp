@@ -256,15 +256,20 @@ class MarianPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
+
+        ModuleCreateOptions opts;
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
+
         const auto& json = ctx.config_json;
 
         const auto* enc_plan = find_section(ctx.bundle, "vision_engine_plan");
         if (!enc_plan || enc_plan->empty())
             throw std::runtime_error("MarianPlugin: no encoder engine in bundle");
-        auto enc_loaded = load_trt_module_from_plan(enc_plan, "marian encoder");
+        auto enc_loaded = load_trt_module_from_plan(ctx.backend, enc_plan, "marian encoder", opts);
 
-        auto dec_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"),
-                                                    "marian decoder", enc_loaded.stream);
+        auto dec_loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "marian decoder", opts);
 
         int32_t decoder_layers =
             extract_json_int(json, "decoder_layers",
@@ -276,7 +281,7 @@ class MarianPlugin final : public IPipelinePlugin {
         int32_t eos_token_id = extract_json_int(json, "eos_token_id", 0);
         int32_t pad_token_id = extract_json_int(json, "pad_token_id", eos_token_id);
 
-        cudaStream_t stream = dec_loaded.stream->get();
+        cudaStream_t stream = dec_loaded.module->stream();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         auto cache = std::make_unique<KvCache>(dl, ctx.config.max_cache_length, kv_dim, stream);
         if (!cache->ok())

@@ -277,17 +277,22 @@ class T5Plugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
+
+        ModuleCreateOptions opts;
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
+
         const auto& json = ctx.config_json;
 
         // Load encoder (stored as vision_engine_plan in T5 bundles)
         const auto* enc_plan = find_section(ctx.bundle, "vision_engine_plan");
         if (!enc_plan || enc_plan->empty())
             throw std::runtime_error("T5Plugin: no encoder engine in bundle");
-        auto enc_loaded = load_trt_module_from_plan(enc_plan, "t5 encoder");
+        auto enc_loaded = load_trt_module_from_plan(ctx.backend, enc_plan, "t5 encoder", opts);
 
         // Load decoder (main engine_plan)
-        auto dec_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"),
-                                                    "t5 decoder", enc_loaded.stream);
+        auto dec_loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "t5 decoder", opts);
 
         // Config
         int32_t decoder_layers =
@@ -298,7 +303,7 @@ class T5Plugin final : public IPipelinePlugin {
         int32_t decoder_start_token_id = extract_json_int(json, "decoder_start_token_id", 0);
 
         // Create KvCache for decoder self-attention
-        cudaStream_t stream = dec_loaded.stream->get();
+        cudaStream_t stream = dec_loaded.module->stream();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         auto cache = std::make_unique<KvCache>(dl, ctx.config.max_cache_length, kv_dim, stream);
         if (!cache->ok())

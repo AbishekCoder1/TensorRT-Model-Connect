@@ -98,8 +98,9 @@ void allocate_cross_kv_buffers(
 }
 
 std::vector<std::unique_ptr<TrtModule>> load_depth_engines(
+    IBackend* backend,
     const BundleFile& bundle,
-    std::shared_ptr<CudaStream> shared_stream)
+    const ModuleCreateOptions& options)
 {
     std::vector<std::unique_ptr<TrtModule>> depth_engines;
     auto depth_plans = find_sections_by_prefix(bundle, "depth_engine_plan_");
@@ -108,16 +109,17 @@ std::vector<std::unique_ptr<TrtModule>> load_depth_engines(
         for (std::size_t i = 0; i < depth_plans.size(); ++i)
         {
             auto m = extract_optional_module(
+                backend,
                 depth_plans[i],
                 ("speech depth_" + std::to_string(i)).c_str(),
-                shared_stream);
+                options);
             if (m) depth_engines.push_back(std::move(m));
         }
     }
     if (depth_engines.empty())
     {
         auto* fallback = find_section(bundle, "depth_engine_plan");
-        auto m = extract_optional_module(fallback, "speech depth", shared_stream);
+        auto m = extract_optional_module(backend, fallback, "speech depth", options);
         if (m) depth_engines.push_back(std::move(m));
     }
     return depth_engines;

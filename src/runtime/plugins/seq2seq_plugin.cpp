@@ -205,11 +205,16 @@ class Seq2SeqPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
+
+        ModuleCreateOptions opts;
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
+
         const auto& json = ctx.config_json;
-        auto enc_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "vision_engine_plan"),
-                                                    "seq2seq encoder");
-        auto dec_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"),
-                                                    "seq2seq decoder", enc_loaded.stream);
+        auto enc_loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "vision_engine_plan"), "seq2seq encoder", opts);
+        auto dec_loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "seq2seq decoder", opts);
         int32_t decoder_layers = extract_json_int(json, "decoder_layers", ctx.config.num_layers);
         int32_t dl = (decoder_layers > 0) ? decoder_layers : ctx.config.num_layers;
         int32_t max_source_length = extract_json_int(json, "max_source_length", 128);
@@ -217,7 +222,7 @@ class Seq2SeqPlugin final : public IPipelinePlugin {
         int32_t eos_token_id = (ctx.config.id_eos >= 0) ? ctx.config.id_eos : 2;
         int32_t bos_token_id = (ctx.config.id_bos >= 0) ? ctx.config.id_bos : -1;
         int32_t pad_token_id = extract_json_int(json, "pad_token_id", 1);
-        cudaStream_t stream = dec_loaded.stream->get();
+        cudaStream_t stream = dec_loaded.module->stream();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         int32_t max_cache = ctx.config.max_cache_length;
         auto state = std::make_unique<KvCache>(dl, max_cache, kv_dim, stream);

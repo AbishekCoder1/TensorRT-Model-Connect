@@ -15,12 +15,17 @@ class OmniPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
+
+        ModuleCreateOptions opts;
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
+
         const auto& json = ctx.config_json;
 
         // Thinker (MoE decoder) -- main engine plan
-        auto thinker_loaded =
-            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "omni thinker");
-        cudaStream_t stream = thinker_loaded.stream->get();
+        auto thinker_loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "omni thinker", opts);
+        cudaStream_t stream = thinker_loaded.module->stream();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> thinker_state = std::make_unique<KvCache>(
@@ -37,7 +42,8 @@ class OmniPlugin final : public IPipelinePlugin {
         std::unique_ptr<TrtModule> talker_module;
         std::unique_ptr<IInferenceState> talker_state;
         auto talker_loaded = try_load_trt_module_from_plan(
-            find_section(ctx.bundle, "talker_engine_plan"), "talker", thinker_loaded.stream);
+            ctx.backend,
+            find_section(ctx.bundle, "talker_engine_plan"), "talker", opts);
         if (talker_loaded.module && talker_loaded.module->ok()) {
             talker_module = std::move(talker_loaded.module);
             int32_t talker_kv_dim = omni_talker_hidden_size;
@@ -51,7 +57,8 @@ class OmniPlugin final : public IPipelinePlugin {
         // Code2Wav (optional)
         std::unique_ptr<TrtModule> code2wav_module;
         auto code2wav_loaded = try_load_trt_module_from_plan(
-            find_section(ctx.bundle, "code2wav_engine_plan"), "code2wav", thinker_loaded.stream);
+            ctx.backend,
+            find_section(ctx.bundle, "code2wav_engine_plan"), "code2wav", opts);
         if (code2wav_loaded.module && code2wav_loaded.module->ok())
             code2wav_module = std::move(code2wav_loaded.module);
 

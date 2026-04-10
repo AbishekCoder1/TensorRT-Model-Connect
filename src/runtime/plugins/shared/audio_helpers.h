@@ -24,8 +24,9 @@ void infer_speech_vocab_sizes(SpeechConfig& sc, const std::string& json, const B
 BaseConfig make_depth_engine_config(const std::string& json, const BaseConfig& base);
 
 std::vector<std::unique_ptr<TrtModule>> load_depth_engines(
+    IBackend* backend,
     const BundleFile& bundle,
-    std::shared_ptr<CudaStream> shared_stream);
+    const ModuleCreateOptions& options = {});
 
 void allocate_cross_kv_buffers(
     int32_t num_layers, std::size_t buf_size,

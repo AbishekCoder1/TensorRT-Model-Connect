@@ -41,31 +41,29 @@ DiffusionConfig make_diffusion_config(const std::string& json)
 }
 
 DiffusionParts load_diffusion_parts(
+    IBackend* backend,
     const BundleFile& bundle,
-    const std::string& json)
+    const std::string& json,
+    const ModuleCreateOptions& options)
 {
     DiffusionParts parts;
 
-    auto shared_stream = std::make_shared<CudaStream>();
-    if (!shared_stream->ok())
-        throw std::runtime_error("Failed to create CUDA stream for diffusion");
-
     parts.denoiser = load_trt_module_from_plan(
-        find_section(bundle, "denoiser_plan"), "denoiser_plan", shared_stream);
+        backend, find_section(bundle, "denoiser_plan"), "denoiser_plan", options);
     parts.vae = load_trt_module_from_plan(
-        find_section(bundle, "vae_decoder_plan"), "vae_decoder_plan", shared_stream);
+        backend, find_section(bundle, "vae_decoder_plan"), "vae_decoder_plan", options);
 
     auto te_plans = find_sections_by_prefix(bundle, "text_encoder_");
     for (std::size_t i = 0; i < te_plans.size(); ++i) {
         std::string label = "text_encoder_" + std::to_string(i);
         parts.text_encoders.push_back(load_trt_module_from_plan(
-            te_plans[i], label.c_str(), shared_stream));
+            backend, te_plans[i], label.c_str(), options));
     }
     if (parts.text_encoders.empty()) {
         auto* plan = find_section(bundle, "engine_plan");
         if (plan && !plan->empty()) {
             parts.text_encoders.push_back(load_trt_module_from_plan(
-                plan, "text_encoder_0", shared_stream));
+                backend, plan, "text_encoder_0", options));
         }
     }
 

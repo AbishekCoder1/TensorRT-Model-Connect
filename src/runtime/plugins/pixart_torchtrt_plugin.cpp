@@ -15,15 +15,17 @@ namespace trtf {
 class PixArtTorchTrtPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto shared_stream = std::make_shared<CudaStream>();
+        ModuleCreateOptions opts;
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
 
         // Load the three component engines
-        auto te = load_trt_module_from_plan(find_section(ctx.bundle, "text_encoder_0_plan"),
-                                            "text_encoder_0_plan", shared_stream);
-        auto denoiser = load_trt_module_from_plan(find_section(ctx.bundle, "denoiser_plan"),
-                                                  "denoiser_plan", shared_stream);
-        auto vae = load_trt_module_from_plan(find_section(ctx.bundle, "vae_decoder_plan"),
-                                             "vae_decoder_plan", shared_stream);
+        auto te = load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "text_encoder_0_plan"),
+                                            "text_encoder_0_plan", opts);
+        auto denoiser = load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "denoiser_plan"),
+                                                  "denoiser_plan", opts);
+        auto vae = load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "vae_decoder_plan"),
+                                             "vae_decoder_plan", opts);
 
         auto config = make_diffusion_config(ctx.config_json);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);

@@ -15,13 +15,22 @@ class MagpiePlugin final : public IPipelinePlugin {
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         load_ffi_kernels_from_bundle(ctx.bundle);
         auto shared_stream = std::make_shared<CudaStream>();
+        if (!shared_stream->ok())
+            throw std::runtime_error("MagpiePlugin: failed to create CUDA stream");
 
-        auto enc_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "vision_engine_plan"),
-                                                    "magpie encoder", shared_stream);
-        auto dec_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"),
-                                                    "magpie decoder", shared_stream);
+        ModuleCreateOptions opts;
+        opts.stream = shared_stream->get();
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
 
-        cudaStream_t stream = shared_stream->get();
+        auto enc_loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "vision_engine_plan"), "magpie encoder", opts);
+        auto dec_loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "magpie decoder", opts);
+        enc_loaded.module->keep_alive(shared_stream);
+        dec_loaded.module->keep_alive(shared_stream);
+
+        cudaStream_t stream = enc_loaded.module->stream();
 
         auto magpie_cfg = build_magpie_config(ctx.config_json, ctx.config);
         int32_t kv_dim = (ctx.config.attention_size > 0)
@@ -58,20 +67,20 @@ class MagpiePlugin final : public IPipelinePlugin {
         CudaBuffer encoder_output(enc_buf_size);
         CudaBuffer encoder_output_uncond(magpie_cfg.cfg_scale > 1.0F ? enc_buf_size : 0);
 
-        auto codec_module = extract_optional_module(find_section(ctx.bundle, "codec_engine_plan"),
-                                                    "magpie codec", shared_stream);
+        auto codec_module = extract_optional_module(
+            ctx.backend, find_section(ctx.bundle, "codec_engine_plan"), "magpie codec", opts);
+        if (codec_module)
+            codec_module->keep_alive(shared_stream);
 
-        auto lt_module = extract_optional_module(find_section(ctx.bundle, "lt_engine_plan"),
-                                                 "magpie local transformer", shared_stream);
+        auto lt_module = extract_optional_module(
+            ctx.backend, find_section(ctx.bundle, "lt_engine_plan"), "magpie local transformer",
+            opts);
+        if (lt_module)
+            lt_module->keep_alive(shared_stream);
 
-        // Try to create a profile-1 prefill module from the same decoder engine.
-        // Profile 1 supports batched input shapes for O(1) context prefill.
-        auto prefill_loaded = try_load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"),
-                                                            "magpie decoder (prefill profile 1)",
-                                                            shared_stream, /*profile_idx=*/1);
-        auto prefill_module = (prefill_loaded.module && prefill_loaded.module->ok())
-                                  ? std::move(prefill_loaded.module)
-                                  : nullptr;
+        // Backend module creation does not yet expose optimization profile selection,
+        // so the profile-1 prefill module cannot be created through ctx.backend.
+        std::unique_ptr<TrtModule> prefill_module;
 
         auto tok = make_ipa_tok(ctx.bundle);
 
