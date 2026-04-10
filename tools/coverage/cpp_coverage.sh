@@ -20,7 +20,6 @@ Environment:
   COVERAGE_COMPILE_FLAGS Compiler flags (default: "--coverage -O0 -g")
   COVERAGE_LINK_FLAGS    Linker flags (default: "--coverage")
   BUILD_PARALLEL         Build parallelism passed to cmake --build --parallel
-  TRTF_ENABLE_TRT        Optional CMake override (ON/OFF)
   CMAKE_EXTRA_ARGS       Extra CMake configure args (space-separated)
   TRT_INC_DIR            TensorRT include root (optional, used for explicit cmake wiring)
   TRT_LIB_DIR            TensorRT library root (optional, used for explicit cmake wiring)
@@ -47,7 +46,7 @@ Examples:
   tools/coverage/cpp_coverage.sh
   tools/coverage/cpp_coverage.sh -R test_bundle_format
   BUILD_DIR=build-cov-fast tools/coverage/cpp_coverage.sh
-  TRTF_ENABLE_TRT=OFF tools/coverage/cpp_coverage.sh
+  TRT_INC_DIR=/usr/include tools/coverage/cpp_coverage.sh
 EOF
 }
 
@@ -116,10 +115,6 @@ cmake_args=(
 
 if [[ -n "${CMAKE_GENERATOR}" ]]; then
   cmake_args=(-G "${CMAKE_GENERATOR}" "${cmake_args[@]}")
-fi
-
-if [[ -n "${TRTF_ENABLE_TRT:-}" ]]; then
-  cmake_args+=("-DTRTF_ENABLE_TRT=${TRTF_ENABLE_TRT}")
 fi
 
 if [[ -n "${TRT_INC_DIR}" && -n "${TRT_LIB_DIR}" ]]; then

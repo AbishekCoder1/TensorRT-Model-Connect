@@ -53,8 +53,6 @@ default:
     - python -c "import transformers, sys; print(f'python={sys.executable} transformers={transformers.__version__}'); assert transformers.__version__ == '5.2.0', transformers.__version__"
     - pip install --no-deps -e trtf_build/
     - pip install --no-deps -e ttrt_build/
-    # Install torch_tensorrt matching the container's torch version (--no-deps to avoid upgrading torch)
-    - python -c "import torch_tensorrt" 2>/dev/null || pip install --no-deps "torch_tensorrt==2.10.*"
     - chmod +x ./build/trtf 2>/dev/null || true
 
 # ── Analyze: Test Impact Analysis (fast, no GPU) ────────────────────────────

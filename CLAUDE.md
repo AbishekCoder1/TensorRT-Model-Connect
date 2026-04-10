@@ -653,7 +653,6 @@ tools/                               # Diff test framework (TRT vs HF comparison
   test_runner_parity.py              # Python vs C++ runtime parity
   test_graph_ops.py                  # TRT graph operation testing
 scripts/                             # Infrastructure & utility scripts
-  setup_container.sh                 # One-shot container repo setup (editable install + build + tests)
   new_family.py                      # Scaffold a new family plugin from HF repo
   validate_family.sh                 # One-command validation gate (build + diff + parity)
   autopilot/                         # Autonomous model family discovery + implementation
@@ -1022,12 +1021,18 @@ Prerequisites: Docker + NVIDIA Container Toolkit. The container is fully self-co
 ./scripts/docker_run_gb300.sh
 ```
 
-### 2) One-shot repo setup (inside container)
+### 2) Install local packages and build (inside container)
 ```bash
-./scripts/setup_container.sh
-```
+pip install --no-deps -e trtf_build/
+pip install --no-deps -e ttrt_build/
 
-This installs local `trtf_build` in editable mode, configures/builds C++ runtime into `build/`, and runs C++ unit tests.
+cmake -S . -B build -G Ninja \
+  -DTRTF_TRT_INCLUDE_DIR=$TRT_INC_DIR \
+  -DTRTF_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so \
+  -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+cmake --build build -j
+```
 
 ### 3) Build bundle + validate Qwen3 TRT E2E (inside container)
 ```bash

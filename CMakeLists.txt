@@ -16,8 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(GNUInstallDirs)
 
-option(TRTF_ENABLE_TRT "Enable TensorRT backend integration" ON)
-
+# TensorRT is mandatory — the container image must provide TRT and CUDA.
 set(_trtf_default_search_paths
   /usr/include/x86_64-linux-gnu
   /usr/include/aarch64-linux-gnu
@@ -43,28 +42,41 @@ if(DEFINED ENV{CUDA_HOME})
   list(APPEND _trtf_default_search_paths "$ENV{CUDA_HOME}/lib64")
 endif()
 
-if(TRTF_ENABLE_TRT)
-  find_path(TRTF_TRT_INCLUDE_DIR NvInferRuntime.h
-    PATHS ${_trtf_default_search_paths}
-    PATH_SUFFIXES "" include include/zapped_headers
-  )
+find_path(TRTF_TRT_INCLUDE_DIR NvInferRuntime.h
+  PATHS ${_trtf_default_search_paths}
+  PATH_SUFFIXES "" include include/zapped_headers
+)
 
-  find_library(TRTF_TRT_LIBRARY
-    NAMES nvinfer libnvinfer.so.10 nvinfer.so.10
-    PATHS ${_trtf_default_search_paths}
-    PATH_SUFFIXES "" lib lib64
-  )
+find_library(TRTF_TRT_LIBRARY
+  NAMES nvinfer libnvinfer.so.10 nvinfer.so.10
+  PATHS ${_trtf_default_search_paths}
+  PATH_SUFFIXES "" lib lib64
+)
 
-  find_path(TRTF_CUDA_INCLUDE_DIR cuda_runtime_api.h
-    PATHS ${_trtf_default_search_paths}
-    PATH_SUFFIXES "" include
-  )
+find_path(TRTF_CUDA_INCLUDE_DIR cuda_runtime_api.h
+  PATHS ${_trtf_default_search_paths}
+  PATH_SUFFIXES "" include
+)
 
-  find_library(TRTF_CUDART_LIBRARY
-    NAMES cudart libcudart.so
-    PATHS ${_trtf_default_search_paths}
-    PATH_SUFFIXES "" lib lib64
-  )
+find_library(TRTF_CUDART_LIBRARY
+  NAMES cudart libcudart.so
+  PATHS ${_trtf_default_search_paths}
+  PATH_SUFFIXES "" lib lib64
+)
+
+if(NOT TRTF_TRT_INCLUDE_DIR OR NOT TRTF_TRT_LIBRARY)
+  message(FATAL_ERROR
+    "TensorRT is required but not found.\n"
+    "  TRTF_TRT_INCLUDE_DIR=${TRTF_TRT_INCLUDE_DIR}\n"
+    "  TRTF_TRT_LIBRARY=${TRTF_TRT_LIBRARY}\n"
+    "Ensure the container image has libnvinfer-headers-dev and tensorrt_libs installed.")
+endif()
+
+if(NOT TRTF_CUDA_INCLUDE_DIR OR NOT TRTF_CUDART_LIBRARY)
+  message(FATAL_ERROR
+    "CUDA dev dependencies are required but not found.\n"
+    "  TRTF_CUDA_INCLUDE_DIR=${TRTF_CUDA_INCLUDE_DIR}\n"
+    "  TRTF_CUDART_LIBRARY=${TRTF_CUDART_LIBRARY}")
 endif()
 
 # --- nlohmann/json for BPE tokenizer JSON parsing ---
@@ -205,19 +217,13 @@ target_include_directories(trtf_core SYSTEM PRIVATE
   ${nlohmann_json_SOURCE_DIR}/include
 )
 
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=1)
-  target_include_directories(trtf_core SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(trtf_core PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-  message(STATUS "TensorRT backend enabled")
-  message(STATUS "  TRT include: ${TRTF_TRT_INCLUDE_DIR}")
-  message(STATUS "  TRT library: ${TRTF_TRT_LIBRARY}")
-  message(STATUS "  CUDA include: ${TRTF_CUDA_INCLUDE_DIR}")
-  message(STATUS "  CUDART lib : ${TRTF_CUDART_LIBRARY}")
-else()
-  target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=0)
-  message(STATUS "TensorRT backend disabled (missing TensorRT or CUDA dev dependencies)")
-endif()
+target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=1)
+target_include_directories(trtf_core SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+target_link_libraries(trtf_core PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
+message(STATUS "TensorRT: ${TRTF_TRT_INCLUDE_DIR}")
+message(STATUS "TensorRT lib: ${TRTF_TRT_LIBRARY}")
+message(STATUS "CUDA: ${TRTF_CUDA_INCLUDE_DIR}")
+message(STATUS "CUDART: ${TRTF_CUDART_LIBRARY}")
 
 add_executable(trtf examples/trtf_cli.cpp)
 target_link_libraries(trtf PRIVATE trtf_core)
@@ -239,13 +245,10 @@ function(trtf_add_test TEST_NAME)
   if(ARG_EXTRA_INCLUDES)
     target_include_directories(${TEST_NAME} PRIVATE ${ARG_EXTRA_INCLUDES})
   endif()
-  if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY
-     AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-    target_include_directories(${TEST_NAME} SYSTEM PRIVATE
-      ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-    target_link_libraries(${TEST_NAME} PRIVATE
-      ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-  endif()
+  target_include_directories(${TEST_NAME} SYSTEM PRIVATE
+    ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  target_link_libraries(${TEST_NAME} PRIVATE
+    ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
   add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
 endfunction()
 
