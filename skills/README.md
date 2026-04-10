@@ -4,6 +4,8 @@ Project-specific Claude Code skills. Each skill is a `SKILL.md` file in its own 
 
 | Skill | Purpose |
 |-------|---------|
+| [profile-model](profile-model/SKILL.md) | E2E performance profiling — TRT vs HF vs torch.compile, per-layer timing, CPU phase breakdown, bottleneck classification |
+| [debug-trt-mismatch](debug-trt-mismatch/SKILL.md) | 5-level numerical divergence investigation — logits, layers, VL, C++ parity, graph op isolation |
 | [doc-sync](doc-sync/SKILL.md) | Daily documentation maintenance — ADR upkeep, wiki drift repair, traceability audit |
 | [submit-gitlab-mr](submit-gitlab-mr/SKILL.md) | Push branch and create GitLab MR via glab, with automatic ADR creation |
 | [mr-babysitter](mr-babysitter/SKILL.md) | Monitor GitLab MR CI pipelines, diagnose and fix failures |
