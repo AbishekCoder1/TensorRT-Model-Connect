@@ -1,3 +1,6 @@
+// trt_common.cpp — TensorRT logger/runtime helpers plus CUDA graph support.
+// CudaStream/CudaBuffer moved to cuda_common.cpp.
+
 #include "runtime/core/trt_common.h"
 
 #include <algorithm>
@@ -74,7 +77,6 @@ void TrtLogger::log(Severity severity, const char* msg) noexcept {
     if (trt_log_to_stderr_enabled() && severity <= trt_log_stderr_min_severity()) {
         std::cerr << "TRT_LOG[" << trt_severity_name(severity) << "] " << msg << '\n';
     } else if (severity <= Severity::kWARNING) {
-        // Always show warnings and errors even without TRTF_TRT_LOG_STDERR
         std::cerr << "[trt] " << trt_severity_name(severity) << ": " << msg << '\n';
     }
 }
@@ -88,93 +90,9 @@ void TrtLogger::clear_error() {
 }
 
 TrtUniquePtr<nvinfer1::IRuntime> create_trt_runtime() {
-    // Keep logger alive for entire process lifetime because TensorRT runtime
-    // stores ILogger by reference.
     static TrtLogger logger;
     return TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
 }
-
-CudaStream::CudaStream() {
-    mStatus = cudaStreamCreate(&mStream);
-}
-
-CudaStream::~CudaStream() {
-    if (mStream != nullptr) {
-        cudaStreamDestroy(mStream);
-    }
-}
-
-CudaStream::CudaStream(CudaStream&& other) noexcept
-    : mStream(other.mStream), mStatus(other.mStatus) {
-    other.mStream = nullptr;
-}
-
-CudaStream& CudaStream::operator=(CudaStream&& other) noexcept {
-    if (this != &other) {
-        if (mStream != nullptr) {
-            cudaStreamDestroy(mStream);
-        }
-        mStream = other.mStream;
-        mStatus = other.mStatus;
-        other.mStream = nullptr;
-    }
-    return *this;
-}
-
-bool CudaStream::ok() const {
-    return mStatus == cudaSuccess;
-}
-
-cudaStream_t CudaStream::get() const {
-    return mStream;
-}
-
-CudaBuffer::CudaBuffer(std::size_t bytes) : mBytes(bytes) {
-    if (mBytes == 0) {
-        return;
-    }
-    mStatus = cudaMalloc(&mPtr, mBytes);
-}
-
-CudaBuffer::~CudaBuffer() {
-    if (mPtr != nullptr) {
-        cudaFree(mPtr);
-    }
-}
-
-CudaBuffer::CudaBuffer(CudaBuffer&& other) noexcept
-    : mPtr(other.mPtr), mBytes(other.mBytes), mStatus(other.mStatus) {
-    other.mPtr = nullptr;
-    other.mBytes = 0;
-}
-
-CudaBuffer& CudaBuffer::operator=(CudaBuffer&& other) noexcept {
-    if (this != &other) {
-        if (mPtr != nullptr) {
-            cudaFree(mPtr);
-        }
-        mPtr = other.mPtr;
-        mBytes = other.mBytes;
-        mStatus = other.mStatus;
-        other.mPtr = nullptr;
-        other.mBytes = 0;
-    }
-    return *this;
-}
-
-bool CudaBuffer::ok() const {
-    return mStatus == cudaSuccess;
-}
-
-void* CudaBuffer::data() const {
-    return mPtr;
-}
-
-std::size_t CudaBuffer::size() const {
-    return mBytes;
-}
-
-// --- CudaGraphExec ---
 
 CudaGraphExec::~CudaGraphExec() {
     reset();
@@ -230,8 +148,7 @@ bool CudaGraphExec::launch(cudaStream_t stream) const {
     if (exec_ == nullptr) {
         return false;
     }
-    auto err = cudaGraphLaunch(exec_, stream);
-    return err == cudaSuccess;
+    return cudaGraphLaunch(exec_, stream) == cudaSuccess;
 }
 
 bool CudaGraphExec::ready() const {

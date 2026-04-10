@@ -15,7 +15,8 @@
 
 namespace trtf {
 
-class TrtModule;
+class ITrtModule;
+using TrtModule = ITrtModule;
 
 // Explicit tensor names for KV cache I/O binding.
 // Per-layer vectors hold expanded names; scalar names are for single inputs.

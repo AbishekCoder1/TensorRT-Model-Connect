@@ -91,6 +91,8 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 
 # --- Bundle-only runtime library ---
+# PIC needed because trtf_core is linked into backend DSOs (shared libs).
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_library(trtf_core
   src/bundle/bundle_format.cpp
   src/bundle/bundle_view.cpp
@@ -100,6 +102,7 @@ add_library(trtf_core
   src/runtime/core/gpu_matmul.cpp
   src/runtime/core/cuda_common.cpp
   src/runtime/backend/backend_loader.cpp
+  src/runtime/core/trt_engine_lifecycle.cpp
   src/runtime/core/trt_decode_runtime.cpp
   src/runtime/core/sampler.cpp
   src/runtime/core/device_kv_cache.cpp
@@ -321,7 +324,7 @@ if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_I
     ${TRTF_CUDA_INCLUDE_DIR}
   )
   target_link_libraries(trtf_backend_trt PRIVATE
-    ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY}
+    trtf_core ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY}
   )
   target_compile_options(trtf_backend_trt PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_definitions(trtf_backend_trt PRIVATE TRTF_HAS_TRT=1)
@@ -422,7 +425,13 @@ trtf_add_test(test_chat_template)
 # TRT runtime core
 trtf_add_test(test_decode_runtime)
 trtf_add_test(test_trt_logger)
+if(TARGET trtf_backend_trt)
+  target_link_libraries(test_trt_logger PRIVATE trtf_backend_trt)
+endif()
 trtf_add_test(test_trt_runtime_lifetime)
+if(TARGET trtf_backend_trt)
+  target_link_libraries(test_trt_runtime_lifetime PRIVATE trtf_backend_trt)
+endif()
 trtf_add_test(test_trt_engine_lifecycle)
 trtf_add_test(test_trt_engine_lifecycle_fake_engine)
 trtf_add_test(test_trt_module)
@@ -436,6 +445,9 @@ trtf_add_test(test_cuda_stream)
 trtf_add_test(test_cuda_graph)
 trtf_add_test(test_device_kv_cache)
 trtf_add_test(test_device_resources)
+if(TARGET trtf_backend_trt)
+  target_link_libraries(test_device_resources PRIVATE trtf_backend_trt)
+endif()
 trtf_add_test(test_device_tensor)
 trtf_add_test(test_kv_cache_new)
 trtf_add_test(test_recurrent_state)

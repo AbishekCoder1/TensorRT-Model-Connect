@@ -27,8 +27,9 @@
 // Requires TRT + CUDA GPU. Skips gracefully without TRT.
 // =============================================================================
 
-#include "trtf/runtime/tensor.h"
 #include "trtf/runtime/trt_module.h"
+#include "runtime/backend/trt_module_impl.h"
+#include "trtf/runtime/tensor.h"
 
 #include <cstdint>
 #include <cstring>
@@ -101,7 +102,8 @@ static void test_forward_cpu() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
+    auto* ctx = engine->createExecutionContext();
+    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
     check(module.ok(), "module is ok");
 
     // Create input tensor
@@ -140,7 +142,8 @@ static void test_forward_async() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
+    auto* ctx = engine->createExecutionContext();
+    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
 
     float input_data[4] = {10.0f, 20.0f, 30.0f, 40.0f};
     trtf::Tensor input_tensor;
@@ -175,7 +178,8 @@ static void test_introspection() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
+    auto* ctx = engine->createExecutionContext();
+    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
 
     auto ins = module.input_info();
     check(ins.size() == 1, "1 input");
@@ -208,7 +212,8 @@ static void test_device_ptr() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
+    auto* ctx = engine->createExecutionContext();
+    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
 
     check(module.device_ptr("x") != nullptr, "input device_ptr not null");
     check(module.device_ptr("y") != nullptr, "output device_ptr not null");
@@ -225,7 +230,8 @@ static void test_bind_external() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
+    auto* ctx = engine->createExecutionContext();
+    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
 
     // Allocate external buffer
     void* ext_ptr = nullptr;
@@ -257,7 +263,8 @@ static void test_bind_external() {
     cudaStreamDestroy(stream);
 }
 
-static void test_move_semantics() {
+static void test_unique_ptr_ownership() {
+    // Modules now live behind unique_ptr<ITrtModule> — verify ownership transfer
     auto engine = build_identity_engine();
     if (!engine)
         return;
@@ -265,56 +272,21 @@ static void test_move_semantics() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule a(engine.get(), stream);
-    check(a.ok(), "a is ok before move");
+    auto* ctx = engine->createExecutionContext();
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), ctx, stream);
+    check(module->ok(), "module is ok via unique_ptr");
 
-    trtf::TrtModule b(std::move(a));
-    check(b.ok(), "b is ok after move");
-    check(!a.ok(), "a is empty after move");
-
-    // b should still work
     float data[4] = {5.0f, 6.0f, 7.0f, 8.0f};
     trtf::Tensor t;
     t.data = data;
     t.shape = {4};
     t.dtype = trtf::DType::kFloat32;
-    auto out = b.forward({{"x", t}});
-    check(out.count("y") == 1, "moved module still works");
+    auto out = module->forward({{"x", t}});
+    check(out.count("y") == 1, "unique_ptr module forward works");
 
-    cudaStreamDestroy(stream);
-}
-
-static void test_move_assignment() {
-    // Covers TrtModule::operator=(TrtModule&&) — move assignment operator
-    auto engine = build_identity_engine();
-    if (!engine)
-        return;
-
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-
-    trtf::TrtModule a(engine.get(), stream);
-    trtf::TrtModule b(engine.get(), stream);
-    check(a.ok(), "a ok before assignment");
-    check(b.ok(), "b ok before assignment");
-
-    // Move assign a into b (b releases its old context/buffers, acquires a's)
-    b = std::move(a);
-    check(b.ok(), "b ok after move assignment");
-    check(!a.ok(), "a empty after move assignment");
-
-    // b should produce correct output after move assignment
-    float data[4] = {3.0f, 4.0f, 5.0f, 6.0f};
-    trtf::Tensor t;
-    t.data = data;
-    t.shape = {4};
-    t.dtype = trtf::DType::kFloat32;
-    auto out = b.forward({{"x", t}});
-    check(out.count("y") == 1, "move-assigned module forward works");
-    if (out.count("y")) {
-        auto* p = static_cast<float*>(out["y"].data);
-        check(p[0] == 3.0f, "move-assigned output[0] = 3.0");
-    }
+    // Transfer ownership
+    std::unique_ptr<trtf::ITrtModule> base = std::move(module);
+    check(base->ok(), "ITrtModule base ptr works after move");
 
     cudaStreamDestroy(stream);
 }
@@ -328,7 +300,8 @@ static void test_keep_alive() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
+    auto* ctx = engine->createExecutionContext();
+    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
 
     // keep_alive with a trivial shared_ptr<void> resource
     module.keep_alive(std::make_shared<int>(42));
@@ -356,7 +329,8 @@ static void test_forward_device() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
+    auto* ctx = engine->createExecutionContext();
+    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
 
     // forward_device with empty inputs: runs inference on pre-zeroed buffers,
     // returns a DeviceTensorMap of name->nullptr
@@ -430,7 +404,8 @@ static void test_forward_device_with_input() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
+    auto* ctx = engine->createExecutionContext();
+    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
 
     // Create a DeviceTensor for input "x", upload data
     trtf::DeviceTensor dt({4}, trtf::DType::kFloat32, stream);
@@ -462,8 +437,7 @@ int main() {
     test_introspection();
     test_device_ptr();
     test_bind_external();
-    test_move_semantics();
-    test_move_assignment();
+    test_unique_ptr_ownership();
     test_keep_alive();
     test_forward_device();
     test_forward_device_with_input();

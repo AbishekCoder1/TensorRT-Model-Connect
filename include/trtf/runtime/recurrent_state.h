@@ -21,7 +21,8 @@
 
 namespace trtf {
 
-class TrtModule;
+class ITrtModule;
+using TrtModule = ITrtModule;
 
 class RecurrentState : public IInferenceState {
 public:

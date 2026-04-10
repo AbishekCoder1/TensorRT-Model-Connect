@@ -1,12 +1,12 @@
 #pragma once
 
+#include "runtime/core/trt_engine_lifecycle.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace trtf {
-
-constexpr float kMaskedScore = -1.0e4F;
 
 int32_t select_argmax_token(const std::vector<float>& logits);
 
