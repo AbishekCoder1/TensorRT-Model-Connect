@@ -99,6 +99,7 @@ add_library(trtf_core
   src/runtime/core/trt_common.cpp
   src/runtime/core/gpu_matmul.cpp
   src/runtime/core/cuda_common.cpp
+  src/runtime/backend/backend_loader.cpp
   src/runtime/core/trt_engine_lifecycle.cpp
   src/runtime/core/trt_decode_runtime.cpp
   src/runtime/core/sampler.cpp
@@ -229,6 +230,8 @@ target_include_directories(trtf_core SYSTEM PRIVATE
   ${nlohmann_json_SOURCE_DIR}/include
 )
 
+target_link_libraries(trtf_core PRIVATE ${CMAKE_DL_LIBS})
+
 option(TRTF_ENABLE_TRT "Enable TensorRT backend" ON)
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
   target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=1)
@@ -337,6 +340,7 @@ trtf_add_test(test_bundle_format)
 trtf_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtf_add_test(test_bundle_view)
 trtf_add_test(test_pipeline_registry)
+trtf_add_test(test_backend_loader)
 
 # C ABI
 trtf_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
