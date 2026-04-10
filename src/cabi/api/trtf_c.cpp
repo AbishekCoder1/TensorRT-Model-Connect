@@ -36,6 +36,8 @@ trtf::IPipeline* trtf_create_pipeline(const char* bundle_path, int flags)
     opts.max_new_tokens = 0;
     opts.hf_python = nullptr;
     opts.image_path = nullptr;
+    opts.runtime_cache = nullptr;
+    opts.cuda_graphs = 0;
     return trtf_create_pipeline_ex(bundle_path, &opts);
 }
 
@@ -62,9 +64,15 @@ trtf::IPipeline* trtf_create_pipeline_ex(const char* bundle_path, const TrtfPipe
         if (options != nullptr && options->hf_python != nullptr)
             hf_python = options->hf_python;
 
+        std::string runtime_cache;
+        if (options != nullptr && options->runtime_cache != nullptr)
+            runtime_cache = options->runtime_cache;
+
+        const bool cuda_graphs = (options != nullptr && options->cuda_graphs != 0);
+
         auto t0 = std::chrono::steady_clock::now();
 
-        auto pipeline = trtf::PipelineFactory::from_bundle(path, hf_python);
+        auto pipeline = trtf::PipelineFactory::from_bundle(path, hf_python, runtime_cache, cuda_graphs);
 
         auto t1 = std::chrono::steady_clock::now();
         std::cerr << "[trtf] Runtime ready (strategy="

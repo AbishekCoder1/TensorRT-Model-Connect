@@ -224,9 +224,11 @@ std::unique_ptr<IPipeline> load(
 extern "C" {
 
 struct TrtfPipelineOptions {
-    int max_new_tokens;     // 0 = use model default
-    const char* hf_python;  // nullptr = auto-detect
-    const char* image_path; // nullptr = text-only
+    int max_new_tokens;          // 0 = use model default
+    const char* hf_python;       // nullptr = auto-detect
+    const char* image_path;      // nullptr = text-only
+    const char* runtime_cache;   // nullptr = no RTX cache
+    int cuda_graphs;             // 0 = disabled
 };
 
 trtf::IPipeline* trtf_create_pipeline(const char* bundle_path, int flags);
