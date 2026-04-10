@@ -1,8 +1,9 @@
 #include "trtf/runtime/pipeline_factory.h"
-
-#include "bundle/bundle_format.h"
 #include "trtf/runtime/pipeline_plugin.h"
 #include "trtf/runtime/pipeline_registry.h"
+#include "trtf/runtime/trt_backend.h"
+#include "runtime/backend/backend_loader.h"
+#include "bundle/bundle_format.h"
 #include "utils/json_helpers.h"
 
 #include <iostream>
@@ -64,8 +65,10 @@ std::string normalize_legacy_strategy(const std::string& strategy, const std::st
 
 } // namespace
 
-std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
-                                                        const std::string& hf_python) {
+std::unique_ptr<IPipeline> PipelineFactory::from_bundle(
+    const std::string& bundle_path, const std::string& hf_python,
+    const std::string& runtime_cache_path, bool cuda_graphs)
+{
 #if TRTF_HAS_TRT
     BundleFile bundle = ReadBundleFile(bundle_path);
     if (bundle.sections.empty())
@@ -86,6 +89,10 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         strategy = "decoder_kv_cache";
     strategy = normalize_legacy_strategy(strategy, config_text);
 
+    // Load backend DSO based on bundle metadata
+    std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
+    IBackend* backend = BackendLoader::load(backend_name);
+
     // Look up plugin in registry
     auto* plugin = PipelineRegistry::instance().lookup(strategy);
     if (!plugin) {
@@ -104,7 +111,8 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy; // use normalized strategy
 
-    PipelineContext ctx{bundle, base_cfg, config_text, hf_python, bundle_path};
+    PipelineContext ctx{bundle, base_cfg, config_text, hf_python, bundle_path,
+                        backend, runtime_cache_path, cuda_graphs};
     auto pipeline = plugin->create(ctx);
 
     std::cerr << "[trtf] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
@@ -113,12 +121,16 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
 #else
     (void)bundle_path;
     (void)hf_python;
+    (void)runtime_cache_path;
+    (void)cuda_graphs;
     throw std::runtime_error("Bundle loading requires TRT support (compile with TRT)");
 #endif
 }
 
-std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python) {
-    return PipelineFactory::from_bundle(bundle_path, hf_python);
+std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python,
+                                const std::string& runtime_cache_path, bool cuda_graphs)
+{
+    return PipelineFactory::from_bundle(bundle_path, hf_python, runtime_cache_path, cuda_graphs);
 }
 
 } // namespace trtf
