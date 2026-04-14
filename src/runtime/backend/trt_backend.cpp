@@ -26,7 +26,7 @@ public:
     {
         auto* engine = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine)
-            throw std::runtime_error("[trtf] Failed to deserialize TRT engine");
+            throw std::runtime_error("[trtf] Failed to deserialize engine (TRT)");
 
         auto* ctx = engine->createExecutionContext();
         if (!ctx) {

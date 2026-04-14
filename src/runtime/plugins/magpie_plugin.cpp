@@ -10,6 +10,19 @@
 
 namespace trtf {
 
+namespace {
+
+int32_t compute_magpie_kv_dim(const BaseConfig& base_cfg, const MagpieTTSConfig& magpie_cfg)
+{
+    if (base_cfg.attention_size > 0)
+        return base_cfg.attention_size;
+    if (base_cfg.num_heads > 0 && base_cfg.head_dim > 0)
+        return base_cfg.num_heads * base_cfg.head_dim;
+    return magpie_cfg.hidden_size;
+}
+
+} // namespace
+
 class MagpiePlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
@@ -33,11 +46,7 @@ class MagpiePlugin final : public IPipelinePlugin {
         cudaStream_t stream = enc_loaded.module->stream();
 
         auto magpie_cfg = build_magpie_config(ctx.config_json, ctx.config);
-        int32_t kv_dim = (ctx.config.attention_size > 0)
-                             ? ctx.config.attention_size
-                             : ((ctx.config.num_heads > 0 && ctx.config.head_dim > 0)
-                                    ? ctx.config.num_heads * ctx.config.head_dim
-                                    : magpie_cfg.hidden_size);
+        int32_t kv_dim = compute_magpie_kv_dim(ctx.config, magpie_cfg);
 
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> decoder_state = std::make_unique<KvCache>(

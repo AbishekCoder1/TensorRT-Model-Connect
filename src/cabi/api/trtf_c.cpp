@@ -15,6 +15,12 @@ namespace {
 
 thread_local std::string g_last_error;
 
+struct PipelineCreateArgs {
+    std::string hf_python;
+    std::string runtime_cache;
+    bool cuda_graphs{false};
+};
+
 void set_last_error(const std::string& msg)
 {
     g_last_error = msg;
@@ -23,6 +29,17 @@ void set_last_error(const std::string& msg)
 void clear_last_error()
 {
     g_last_error.clear();
+}
+
+PipelineCreateArgs parse_pipeline_options(const TrtfPipelineOptions* options)
+{
+    PipelineCreateArgs args;
+    if (options != nullptr && options->hf_python != nullptr)
+        args.hf_python = options->hf_python;
+    if (options != nullptr && options->runtime_cache != nullptr)
+        args.runtime_cache = options->runtime_cache;
+    args.cuda_graphs = (options != nullptr && options->cuda_graphs != 0);
+    return args;
 }
 
 } // namespace
@@ -60,19 +77,12 @@ trtf::IPipeline* trtf_create_pipeline_ex(const char* bundle_path, const TrtfPipe
             return nullptr;
         }
 
-        std::string hf_python;
-        if (options != nullptr && options->hf_python != nullptr)
-            hf_python = options->hf_python;
-
-        std::string runtime_cache;
-        if (options != nullptr && options->runtime_cache != nullptr)
-            runtime_cache = options->runtime_cache;
-
-        const bool cuda_graphs = (options != nullptr && options->cuda_graphs != 0);
+        const PipelineCreateArgs args = parse_pipeline_options(options);
 
         auto t0 = std::chrono::steady_clock::now();
 
-        auto pipeline = trtf::PipelineFactory::from_bundle(path, hf_python, runtime_cache, cuda_graphs);
+        auto pipeline = trtf::PipelineFactory::from_bundle(
+            path, args.hf_python, args.runtime_cache, args.cuda_graphs);
 
         auto t1 = std::chrono::steady_clock::now();
         std::cerr << "[trtf] Runtime ready (strategy="

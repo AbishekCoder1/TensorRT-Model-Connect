@@ -18,6 +18,29 @@
 
 namespace trtf {
 
+namespace {
+
+struct StreamSetup {
+    cudaStream_t stream{nullptr};
+    std::shared_ptr<void> owner;
+};
+
+StreamSetup resolve_stream(cudaStream_t requested_stream)
+{
+    if (requested_stream) {
+        return StreamSetup{requested_stream, {}};
+    }
+
+    auto owned = std::make_shared<CudaStream>();
+    if (!owned->ok()) {
+        throw std::runtime_error("[trtf] Failed to create CUDA stream");
+    }
+
+    return StreamSetup{owned->get(), owned};
+}
+
+} // namespace
+
 class RtxBackend final : public IBackend {
 public:
     RtxBackend() : runtime_(create_trt_runtime()) {
@@ -36,7 +59,7 @@ public:
     {
         auto* engine = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine)
-            throw std::runtime_error("[trtf] Failed to deserialize RTX engine");
+            throw std::runtime_error("[trtf] Failed to deserialize engine (RTX)");
 
         // Create IRuntimeConfig with RTX-specific features
         auto* rt_config = engine->createRuntimeConfig();
@@ -64,20 +87,16 @@ public:
             throw std::runtime_error("[trtf] Failed to create RTX execution context");
         }
 
-        cudaStream_t stream = options.stream;
-        std::shared_ptr<void> stream_owner;
-        if (!stream) {
-            auto owned = std::make_shared<CudaStream>();
-            if (!owned->ok()) {
-                delete ctx;
-                delete engine;
-                throw std::runtime_error("[trtf] Failed to create CUDA stream");
-            }
-            stream = owned->get();
-            stream_owner = owned;
+        StreamSetup stream_setup;
+        try {
+            stream_setup = resolve_stream(options.stream);
+        } catch (...) {
+            delete ctx;
+            delete engine;
+            throw;
         }
 
-        auto module = std::make_unique<TrtModuleImpl>(engine, ctx, stream);
+        auto module = std::make_unique<TrtModuleImpl>(engine, ctx, stream_setup.stream);
         if (!module->ok()) {
             delete engine;
             throw std::runtime_error("[trtf] TrtModuleImpl creation failed (RTX)");
@@ -85,8 +104,8 @@ public:
 
         module->keep_alive(std::shared_ptr<nvinfer1::ICudaEngine>(
             engine, [](nvinfer1::ICudaEngine* p) { delete p; }));
-        if (stream_owner)
-            module->keep_alive(stream_owner);
+        if (stream_setup.owner)
+            module->keep_alive(stream_setup.owner);
 
         return module;
     }
