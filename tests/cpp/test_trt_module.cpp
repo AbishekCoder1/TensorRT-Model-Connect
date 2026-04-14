@@ -356,7 +356,8 @@ static void test_profile_idx_default() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream, 0);
+    auto* ctx = engine->createExecutionContext();
+    trtf::TrtModuleImpl module(engine.get(), ctx, stream, 0);
     check(module.ok(), "profile_idx=0: module is ok");
     check(module.profile_idx() == 0, "profile_idx=0: accessor returns 0");
 
@@ -389,7 +390,8 @@ static void test_profile_idx_invalid() {
     cudaStreamCreate(&stream);
 
     // Identity engine has 0 optimization profiles (static shapes), so profile 1 should fail
-    trtf::TrtModule module(engine.get(), stream, 1);
+    auto* ctx = engine->createExecutionContext();
+    trtf::TrtModuleImpl module(engine.get(), ctx, stream, 1);
     check(!module.ok(), "profile_idx=1 on static engine: module should not be ok");
 
     cudaStreamDestroy(stream);

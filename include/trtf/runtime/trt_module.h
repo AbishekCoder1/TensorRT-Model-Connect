@@ -29,6 +29,9 @@ public:
 
     // Introspection
     virtual cudaStream_t stream() const = 0;
+    virtual void enable_cuda_graph() = 0;
+    virtual bool cuda_graph_active() const = 0;
+    virtual int32_t profile_idx() const = 0;
     virtual std::vector<TensorInfo> input_info() const = 0;
     virtual std::vector<TensorInfo> output_info() const = 0;
     virtual bool has_input(const std::string& name) const = 0;

@@ -1,4 +1,5 @@
 #include "runtime/pipelines/text_generation_pipeline.h"
+#include "runtime/core/trt_common.h"
 
 #include <algorithm>
 #include <chrono>

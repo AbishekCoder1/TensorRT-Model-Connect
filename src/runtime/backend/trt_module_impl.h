@@ -16,13 +16,16 @@
 
 namespace trtf {
 
+class CudaGraphExec;
+
 class TrtModuleImpl final : public ITrtModule {
 public:
     // Backend creates engine + context, passes them in.
     // The engine must outlive this module (caller manages lifetime via keep_alive).
     TrtModuleImpl(nvinfer1::ICudaEngine* engine,
                   nvinfer1::IExecutionContext* ctx,
-                  cudaStream_t stream);
+                  cudaStream_t stream,
+                  int32_t profile_idx = 0);
     ~TrtModuleImpl() override;
 
     TrtModuleImpl(const TrtModuleImpl&) = delete;
@@ -35,6 +38,9 @@ public:
     void forward_async(const TensorMap& inputs) override;
     void sync() override;
     cudaStream_t stream() const override { return stream_; }
+    void enable_cuda_graph() override;
+    bool cuda_graph_active() const override { return use_cuda_graph_; }
+    int32_t profile_idx() const override { return profile_idx_; }
     std::vector<TensorInfo> input_info() const override;
     std::vector<TensorInfo> output_info() const override;
     bool has_input(const std::string& name) const override;
@@ -56,7 +62,10 @@ private:
 
     nvinfer1::IExecutionContext* ctx_{nullptr};
     cudaStream_t stream_{nullptr};
+    int32_t profile_idx_{0};
     bool has_dynamic_shapes_{false};
+    bool use_cuda_graph_{false};
+    std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;
     std::unordered_map<std::string, BufferEntry> buffers_;
     std::unordered_map<std::string, std::vector<uint8_t>> host_output_staging_;
@@ -72,6 +81,7 @@ private:
                                   nvinfer1::OptProfileSelector selector);
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,
                               const std::vector<int64_t>& new_shape);
+    void execute_enqueue();
     static bool dims_are_dynamic(const nvinfer1::Dims& dims);
     static std::vector<int64_t> dims_to_shape(const nvinfer1::Dims& dims);
     static std::size_t compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,

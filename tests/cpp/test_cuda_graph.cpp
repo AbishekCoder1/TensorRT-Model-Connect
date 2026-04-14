@@ -25,6 +25,7 @@
 // =============================================================================
 
 #include "runtime/core/trt_common.h"
+#include "runtime/backend/trt_module_impl.h"
 #include "test_helpers.h"
 #include "trtf/runtime/tensor.h"
 #include "trtf/runtime/trt_module.h"
@@ -87,7 +88,7 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
 }
 
 // Helper: run forward_async + sync, read back output
-static void run_and_read(trtf::TrtModule& module, const float* input, float* output) {
+static void run_and_read(trtf::ITrtModule& module, const float* input, float* output) {
     trtf::Tensor input_tensor;
     input_tensor.data = const_cast<float*>(input);
     input_tensor.shape = {4};
@@ -100,6 +101,13 @@ static void run_and_read(trtf::TrtModule& module, const float* input, float* out
     module.sync();
 
     cudaMemcpy(output, module.device_ptr("y"), 4 * sizeof(float), cudaMemcpyDeviceToHost);
+}
+
+static std::unique_ptr<trtf::TrtModuleImpl> make_module(nvinfer1::ICudaEngine* engine,
+                                                        cudaStream_t stream,
+                                                        int32_t profile_idx = 0) {
+    auto* ctx = engine->createExecutionContext();
+    return std::make_unique<trtf::TrtModuleImpl>(engine, ctx, stream, profile_idx);
 }
 
 // --- CudaGraphExec unit tests ---
@@ -232,23 +240,23 @@ static void test_module_cuda_graph_correctness() {
     cudaStreamCreate(&stream);
 
     // Run without CUDA Graph
-    trtf::TrtModule normal(engine.get(), stream);
+    auto normal = make_module(engine.get(), stream);
     float input[4] = {10.0f, 20.0f, 30.0f, 40.0f};
     float normal_out[4] = {0};
-    run_and_read(normal, input, normal_out);
+    run_and_read(*normal, input, normal_out);
 
     // Run with CUDA Graph
-    trtf::TrtModule graphed(engine.get(), stream);
-    graphed.enable_cuda_graph();
-    check(graphed.cuda_graph_active(), "graph_correctness: cuda_graph_active");
+    auto graphed = make_module(engine.get(), stream);
+    graphed->enable_cuda_graph();
+    check(graphed->cuda_graph_active(), "graph_correctness: cuda_graph_active");
 
     // First call: capture + execute
     float graph_out1[4] = {0};
-    run_and_read(graphed, input, graph_out1);
+    run_and_read(*graphed, input, graph_out1);
 
     // Second call: replay
     float graph_out2[4] = {0};
-    run_and_read(graphed, input, graph_out2);
+    run_and_read(*graphed, input, graph_out2);
 
     // All three should produce identical results
     for (int i = 0; i < 4; ++i) {
@@ -268,14 +276,14 @@ static void test_module_cuda_graph_multiple_runs() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
-    module.enable_cuda_graph();
+    auto module = make_module(engine.get(), stream);
+    module->enable_cuda_graph();
 
     float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
 
     for (int iter = 0; iter < 10; ++iter) {
         float out[4] = {0};
-        run_and_read(module, input, out);
+        run_and_read(*module, input, out);
         for (int i = 0; i < 4; ++i) {
             check(out[i] == input[i], "multi_run: output matches input");
         }
@@ -293,24 +301,24 @@ static void test_module_enable_after_normal_run() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
+    auto module = make_module(engine.get(), stream);
 
     // Run 3 normal steps
     float input[4] = {5.0f, 6.0f, 7.0f, 8.0f};
     for (int i = 0; i < 3; ++i) {
         float out[4] = {0};
-        run_and_read(module, input, out);
+        run_and_read(*module, input, out);
     }
 
     // Now enable CUDA Graph
-    module.enable_cuda_graph();
-    check(module.cuda_graph_active(), "enable_after_normal: active");
+    module->enable_cuda_graph();
+    check(module->cuda_graph_active(), "enable_after_normal: active");
 
     // First call captures, second replays
     float out1[4] = {0};
-    run_and_read(module, input, out1);
+    run_and_read(*module, input, out1);
     float out2[4] = {0};
-    run_and_read(module, input, out2);
+    run_and_read(*module, input, out2);
 
     for (int i = 0; i < 4; ++i) {
         check(out1[i] == input[i], "enable_after_normal: capture output correct");
@@ -331,16 +339,16 @@ static void test_env_var_disable() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream);
-    check(!module.cuda_graph_active(), "env_disable: not active by default");
+    auto module = make_module(engine.get(), stream);
+    check(!module->cuda_graph_active(), "env_disable: not active by default");
 
-    module.enable_cuda_graph();
-    check(module.cuda_graph_active(), "env_disable: active after enable");
+    module->enable_cuda_graph();
+    check(module->cuda_graph_active(), "env_disable: active after enable");
 
     // Verify it still works correctly
     float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
     float out[4] = {0};
-    run_and_read(module, input, out);
+    run_and_read(*module, input, out);
     check(out[0] == 1.0f, "env_disable: output correct");
 
     cudaStreamDestroy(stream);

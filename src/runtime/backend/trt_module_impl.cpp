@@ -1,5 +1,7 @@
 #include "trt_module_impl.h"
 
+#include "runtime/core/trt_common.h"
+
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -30,10 +32,22 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
 
 TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine,
                              nvinfer1::IExecutionContext* ctx,
-                             cudaStream_t stream)
-    : ctx_(ctx), stream_(stream) {
+                             cudaStream_t stream,
+                             int32_t profile_idx)
+    : ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
+      cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
+    if (profile_idx_ > 0) {
+        if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
+            std::cerr << "[trt_module] Failed to set optimization profile " << profile_idx_
+                      << "\n";
+            delete ctx_;
+            ctx_ = nullptr;
+            return;
+        }
+        cudaStreamSynchronize(stream_);
+    }
     allocate_buffers(engine);
 }
 
@@ -267,6 +281,11 @@ TensorMap TrtModuleImpl::forward(const TensorMap& inputs) {
 
 // --- Forward async ---
 
+void TrtModuleImpl::enable_cuda_graph() {
+    use_cuda_graph_ = true;
+    cuda_graph_->reset();
+}
+
 void TrtModuleImpl::forward_async(const TensorMap& inputs) {
     // Upload inputs H2D, updating shapes for dynamic engines
     for (const auto& [name, tensor] : inputs) {
@@ -285,7 +304,26 @@ void TrtModuleImpl::forward_async(const TensorMap& inputs) {
         }
     }
 
-    // Execute
+    execute_enqueue();
+}
+
+void TrtModuleImpl::execute_enqueue() {
+    if (use_cuda_graph_ && cuda_graph_->ready()) {
+        cuda_graph_->launch(stream_);
+        return;
+    }
+    if (use_cuda_graph_) {
+        cuda_graph_->begin_capture(stream_);
+        ctx_->enqueueV3(stream_);
+        if (!cuda_graph_->end_capture(stream_)) {
+            std::cerr << "[cuda_graph] Capture failed, disabling CUDA Graphs\n";
+            use_cuda_graph_ = false;
+            ctx_->enqueueV3(stream_);
+        } else {
+            cuda_graph_->launch(stream_);
+        }
+        return;
+    }
     ctx_->enqueueV3(stream_);
 }
 
@@ -317,7 +355,7 @@ void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
     }
 
     // Execute (no sync — caller will sync or run more kernels on same stream)
-    ctx_->enqueueV3(stream_);
+    execute_enqueue();
 }
 
 // --- Forward device (GPU → GPU, synchronous) ---

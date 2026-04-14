@@ -314,7 +314,6 @@ endif()
 if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
   add_library(trtf_backend_trt SHARED
     src/runtime/backend/trt_module_impl.cpp
-    src/runtime/backend/trt_logger.cpp
     src/runtime/backend/trt_backend.cpp
   )
   target_include_directories(trtf_backend_trt
@@ -350,7 +349,6 @@ if(TRTF_BUILD_BACKEND_RTX)
   if(TENSORRT_RTX_LIB AND TRT_RTX_INCLUDE_DIR)
     add_library(trtf_backend_rtx SHARED
       src/runtime/backend/trt_module_impl.cpp
-      src/runtime/backend/trt_logger.cpp
       src/runtime/backend/rtx_backend.cpp
     )
     target_include_directories(trtf_backend_rtx
@@ -448,6 +446,9 @@ endif()
 trtf_add_test(test_cuda_buffer)
 trtf_add_test(test_cuda_stream)
 trtf_add_test(test_cuda_graph)
+if(TARGET trtf_backend_trt)
+  target_link_libraries(test_cuda_graph PRIVATE trtf_backend_trt)
+endif()
 trtf_add_test(test_device_kv_cache)
 trtf_add_test(test_device_resources)
 if(TARGET trtf_backend_trt)
