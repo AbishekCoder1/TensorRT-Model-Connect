@@ -49,7 +49,7 @@ For diffusers models, set a custom attention processor:
 model.set_attn_processor(TrtSafeAttnProcessor())
 ```
 
-**Reference:** `ttrt_build/ttrt_build/strategies/diffusion.py` —
+**Reference:** `trtf_build/trtf_build/engine_defs/torch_trt/strategies/diffusion.py` —
 `_TrtSafeAttnProcessor` class.
 
 **Discovered:** 2026-03-24, PixArt-Sigma transform.
@@ -91,7 +91,7 @@ attn_scores = attn_scores + additive_mask
 **Diagnostic:** Track `|conditioned_pred - unconditioned_pred|` per denoising
 step. Should be 0.002-0.013+. If < 0.001, masking is likely wrong.
 
-**Reference:** `ttrt_build/ttrt_build/strategies/diffusion.py` —
+**Reference:** `trtf_build/trtf_build/engine_defs/torch_trt/strategies/diffusion.py` —
 `PixArtDiTWrapper.forward()`.
 
 **Discovered:** 2026-03-24, PixArt-Sigma transform.
@@ -153,7 +153,7 @@ torch_tensorrt) fails on stateful modules where buffers are mutated in-place
 assertion and return the program unchanged. The non-decomposed graph compiles
 correctly via TRT.
 
-**Reference:** `ttrt_build/ttrt_build/compiler.py` —
+**Reference:** `trtf_build/trtf_build/engine_defs/torch_trt/compiler.py` —
 `_patch_run_decompositions()`.
 
 **Discovered:** 2026-03-06, Qwen3-0.6B transform.
@@ -226,7 +226,7 @@ def patch_static_cache_scatter():
         patched_update._scatter_patched = True
 ```
 
-**Reference:** `ttrt_build/ttrt_build/strategies/decoder.py` —
+**Reference:** `trtf_build/trtf_build/engine_defs/torch_trt/strategies/decoder.py` —
 `patch_static_cache_scatter()`.
 
 **Discovered:** 2026-03-07, Qwen3-0.6B transform.

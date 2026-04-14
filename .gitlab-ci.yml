@@ -52,7 +52,6 @@ default:
   before_script:
     - python -c "import transformers, sys; print(f'python={sys.executable} transformers={transformers.__version__}'); assert transformers.__version__ == '5.2.0', transformers.__version__"
     - pip install --no-deps -e trtf_build/
-    - pip install --no-deps -e ttrt_build/
     - chmod +x ./build/trtf 2>/dev/null || true
 
 # ── Analyze: Test Impact Analysis (fast, no GPU) ────────────────────────────
@@ -129,14 +128,14 @@ lint-check:
     - pip install --quiet ruff clang-format
     # Only lint files changed in this MR (codebase has pre-existing violations)
     - |
-      CHANGED_PY=$(git diff --name-only ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} -- '*.py' || true)
+      CHANGED_PY=$(git diff --diff-filter=d --name-only ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} -- '*.py' || true)
       if [ -n "$CHANGED_PY" ]; then
         echo "Checking Python lint on changed files:"
         echo "$CHANGED_PY"
         echo "$CHANGED_PY" | xargs ruff check --config ruff.toml
       fi
     - |
-      CHANGED_CPP=$(git diff --name-only ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} -- '*.cpp' '*.h' || true)
+      CHANGED_CPP=$(git diff --diff-filter=d --name-only ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} -- '*.cpp' '*.h' || true)
       if [ -n "$CHANGED_CPP" ]; then
         echo "Checking C++ formatting on changed files:"
         echo "$CHANGED_CPP" | xargs clang-format --dry-run --Werror
@@ -204,10 +203,10 @@ test-python-builder:
       COV_ARGS="--cov=trtf_build/trtf_build --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml"
       if [ -n "$BUILDER_TESTS" ]; then
         echo "Selective builder tests (with coverage): $BUILDER_TESTS"
-        python -m pytest tests/builder/ tests/tools/ tests/torchtrt_builder/ -v --ignore=tests/builder/test_cli.py --ignore=tests/torchtrt_builder/test_pixart_vs_hf.py -k "$BUILDER_TESTS" -n auto $COV_ARGS
+        python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v --ignore=tests/builder/test_cli.py --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py -k "$BUILDER_TESTS" -n auto $COV_ARGS
       else
         echo "Running all builder + tools tests (with coverage)"
-        python -m pytest tests/builder/ tests/tools/ tests/torchtrt_builder/ -v --ignore=tests/builder/test_cli.py --ignore=tests/torchtrt_builder/test_pixart_vs_hf.py -n auto $COV_ARGS
+        python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v --ignore=tests/builder/test_cli.py --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py -n auto $COV_ARGS
       fi
     # Generate text summary from the Cobertura XML (pytest-cov already wrote it)
     - python -m coverage report --show-missing 2>/dev/null | tee coverage/python-coverage.txt || true

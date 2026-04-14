@@ -9,7 +9,7 @@
 #   ./scripts/validate_torchtrt_family.sh Qwen/Qwen3-0.6B --max-cache-length 512
 #   ./scripts/validate_torchtrt_family.sh Qwen/Qwen3-0.6B --binary ./build/trtf
 #
-# Requirements: torch, torch_tensorrt, ttrt_build installed, C++ binary built.
+# Requirements: torch, torch_tensorrt, trtf_build[torch-trt] installed, C++ binary built.
 
 set -euo pipefail
 

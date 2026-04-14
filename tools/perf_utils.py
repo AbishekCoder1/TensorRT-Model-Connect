@@ -433,7 +433,7 @@ def build_torchtrt_bundle(model_id: str, max_cache_length: int,
     print(f"  Building Torch-TRT engine (precision={precision}) ...",
           file=sys.stderr)
     t0 = time.perf_counter()
-    from ttrt_build.compiler import build_bundle
+    from trtf_build.engine_defs.torch_trt.compiler import build_bundle
     build_bundle(model_dir, out_path, max_cache_length=max_cache_length,
                  precision=precision, verbose=verbose)
     build_s = time.perf_counter() - t0

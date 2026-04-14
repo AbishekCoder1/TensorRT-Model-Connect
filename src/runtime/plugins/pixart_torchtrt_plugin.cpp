@@ -1,9 +1,9 @@
-// TorchTrtDiffusionPlugin: handles "torchtrt_diffusion" strategy.
-// Uses TorchTrtDiffusionPipeline for torch-trt compiled diffusion models.
-// Unlike WanPlugin, no preprocessor_weights are needed since the torch-trt
+// PixArtTorchTrtPlugin: handles "diffusion_pixart_torchtrt" strategy.
+// Uses PixArtTorchTrtPipeline for torch-trt compiled PixArt diffusion models.
+// Unlike PixArtPlugin, no preprocessor_weights are needed since the torch-trt
 // engines include all preprocessing internally.
 
-#include "runtime/pipelines/torchtrt_diffusion_pipeline.h"
+#include "runtime/pipelines/pixart_torchtrt_pipeline.h"
 #include "runtime/plugins/shared/diffusion_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
@@ -12,7 +12,7 @@
 
 namespace trtf {
 
-class TorchTrtDiffusionPlugin final : public IPipelinePlugin {
+class PixArtTorchTrtPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         auto shared_stream = std::make_shared<CudaStream>();
@@ -28,18 +28,18 @@ class TorchTrtDiffusionPlugin final : public IPipelinePlugin {
         auto config = make_diffusion_config(ctx.config_json);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
-        return std::make_unique<TorchTrtDiffusionPipeline>(
+        return std::make_unique<PixArtTorchTrtPipeline>(
             std::move(te.module), std::move(denoiser.module), std::move(vae.module),
             std::move(config), std::move(tokenizer), ctx.bundle.info.model_id);
     }
 };
 
-volatile int kForceLink_TorchTrtDiffusionPlugin = 0;
+volatile int kForceLink_PixArtTorchTrtPlugin = 0;
 
 } // namespace trtf
 
-static trtf::TorchTrtDiffusionPlugin g_TorchTrtDiffusionPlugin_instance;
-static trtf::PluginRegistrar g_TorchTrtDiffusionPlugin_reg("torchtrt_diffusion",
-                                                           &g_TorchTrtDiffusionPlugin_instance);
+static trtf::PixArtTorchTrtPlugin g_PixArtTorchTrtPlugin_instance;
+static trtf::PluginRegistrar g_PixArtTorchTrtPlugin_reg("diffusion_pixart_torchtrt",
+                                                        &g_PixArtTorchTrtPlugin_instance);
 
 #endif // TRTF_HAS_TRT

@@ -1,11 +1,8 @@
-"""Torch-TRT model builder — compile HuggingFace models into .trtfb bundles.
+"""Torch-TRT build backend -- optional performance optimization.
 
-Usage:
-    import ttrt_build
-    ttrt_build.build("Qwen/Qwen3-0.6B", "qwen3.trtfb")
-
-Or via CLI:
-    ttrt-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
+Compiles HuggingFace models into .trtfb bundles via torch.export +
+torch_tensorrt. Produces standard bundles with standard runtime_strategy
+values (decoder_kv_cache, diffusion_pixart, etc.).
 """
 
 from __future__ import annotations
@@ -73,40 +70,49 @@ def _resolve_model(model_id_or_path: str) -> str:
     patterns = _DIFFUSERS_PATTERNS if is_diffusers else _TRANSFORMER_PATTERNS
     fmt = "diffusers" if is_diffusers else "transformers"
 
-    print(f"[ttrt-build] Downloading {model_id_or_path} ({fmt} format) ...",
+    print(f"[torch-trt] Downloading {model_id_or_path} ({fmt} format) ...",
           file=sys.stderr)
     local_dir = snapshot_download(
         repo_id=model_id_or_path,
         allow_patterns=patterns,
     )
-    print(f"[ttrt-build] Downloaded to {local_dir}", file=sys.stderr)
+    print(f"[torch-trt] Downloaded to {local_dir}", file=sys.stderr)
     return local_dir
 
 
-def build(
-    model_id_or_path: str,
-    output_path: str,
-    max_cache_length: int = 256,
-    *,
-    precision: str = "fp16",
-    verbose: bool = False,
-) -> None:
-    """Build a .trtfb bundle from a HuggingFace model ID or local path.
+class TorchTrtBackend:
+    """BuildBackend implementation for torch-trt."""
 
-    Args:
-        model_id_or_path: HF repo ID or local directory with config.json + safetensors.
-        output_path: Where to write the .trtfb bundle.
-        max_cache_length: KV cache length for the engine.
-        precision: "fp16", "bf16", or "fp32".
-        verbose: Print detailed logs.
-    """
-    from .compiler import build_bundle
+    name = "torch_trt"
 
-    model_dir = _resolve_model(model_id_or_path)
-    t0 = time.monotonic()
-    build_bundle(
-        model_dir, output_path, max_cache_length,
-        precision=precision, verbose=verbose,
-    )
-    elapsed = time.monotonic() - t0
-    print(f"[ttrt-build] Done [{elapsed:.1f}s total]", file=sys.stderr)
+    def is_available(self) -> bool:
+        try:
+            import torch  # noqa: F401
+            import torch_tensorrt  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    def build(
+        self,
+        model_dir: str,
+        output_path: str,
+        max_cache_length: int = 256,
+        *,
+        precision: str = "fp16",
+        verbose: bool = False,
+    ) -> None:
+        from .compiler import build_bundle
+
+        resolved_dir = _resolve_model(model_dir)
+        t0 = time.monotonic()
+        build_bundle(
+            resolved_dir, output_path, max_cache_length,
+            precision=precision, verbose=verbose,
+        )
+        elapsed = time.monotonic() - t0
+        print(f"[torch-trt] Done [{elapsed:.1f}s total]", file=sys.stderr)
+
+
+# Module-level attribute for auto-discovery by engine_defs registry
+backend = TorchTrtBackend()

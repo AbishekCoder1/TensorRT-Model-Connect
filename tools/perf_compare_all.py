@@ -2,7 +2,7 @@
 """Unified 4-way inference performance comparison.
 
 Compares all four inference backends for the same HF model:
-  1. Torch-TRT  (StatelessCacheWrapper -> raw TRT engine via ttrt_build)
+  1. Torch-TRT  (StatelessCacheWrapper -> raw TRT engine via trtf_build.engine_defs.torch_trt)
   2. Raw TRT    (trtf_build graph API -> raw TRT engine)
   3. torch.compile (PyTorch 2.x compiler, default backend)
   4. HF eager   (baseline, no compilation)

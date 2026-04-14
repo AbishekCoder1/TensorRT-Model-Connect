@@ -10,10 +10,10 @@ import json
 import pytest
 
 try:
-    from ttrt_build.bundle_writer import (
+    from trtf_build.engine_defs.torch_trt.bundle_writer import (
         BUNDLE_MAGIC, TtrtBundleInfo, BundleSection, write_bundle,
     )
-    from ttrt_build.bundle_reader import (
+    from trtf_build.engine_defs.torch_trt.bundle_reader import (
         has_ttrtb_magic, read_bundle_header, read_bundle_section,
     )
 except ImportError:

@@ -61,10 +61,8 @@ def sample_config_dict():
 @pytest.fixture
 def sample_config(sample_config_dict):
     """ModelConfig from a minimal Qwen-like config."""
-    from ttrt_build.config import ModelConfig
-    # trtf_build.config.ModelConfig uses _head_dim as the dataclass field
-    # but exposes head_dim as a property. Map accordingly.
-    kwargs = dict(sample_config_dict)
-    if "head_dim" in kwargs:
-        kwargs["_head_dim"] = kwargs.pop("head_dim")
-    return ModelConfig(**kwargs)
+    from trtf_build.engine_defs.torch_trt.config import ModelConfig
+    return ModelConfig(
+        model_type=sample_config_dict.get("model_type", ""),
+        raw=sample_config_dict,
+    )

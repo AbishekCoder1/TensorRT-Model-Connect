@@ -11,9 +11,26 @@
 namespace trtf {
 
 KvCache::KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
-                 DType cache_dtype, NamingScheme naming)
+                 DType cache_dtype, KvCacheNames names)
     : num_layers_(num_layers), max_length_(max_length), kv_dim_(kv_dim), stream_(stream),
-      cache_dtype_(cache_dtype), cache_element_size_(dtype_size(cache_dtype)), naming_(naming) {
+      cache_dtype_(cache_dtype), cache_element_size_(dtype_size(cache_dtype)),
+      names_(std::move(names)) {
+
+    // If names were not supplied, generate standard defaults.
+    if (names_.cache_k.empty()) {
+        names_.cache_k.reserve(static_cast<std::size_t>(num_layers));
+        names_.cache_v.reserve(static_cast<std::size_t>(num_layers));
+        names_.present_k.reserve(static_cast<std::size_t>(num_layers));
+        names_.present_v.reserve(static_cast<std::size_t>(num_layers));
+        for (int32_t i = 0; i < num_layers; ++i) {
+            std::string suffix = "_" + std::to_string(i);
+            names_.cache_k.push_back("cache_k" + suffix);
+            names_.cache_v.push_back("cache_v" + suffix);
+            names_.present_k.push_back("present_k" + suffix);
+            names_.present_v.push_back("present_v" + suffix);
+        }
+    }
+
     cache_k_.reserve(static_cast<std::size_t>(num_layers));
     cache_v_.reserve(static_cast<std::size_t>(num_layers));
     present_k_.reserve(static_cast<std::size_t>(num_layers));
@@ -53,7 +70,7 @@ void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
         pos_t.data = &pos_buf_;
         pos_t.shape = {1};
         pos_t.dtype = DType::kInt32;
-        inputs["position_id"] = pos_t;
+        inputs[names_.position_id] = pos_t;
     }
 
     // Dense causal mask: 0.0 = visible, -1e4 = masked.
@@ -67,30 +84,18 @@ void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
     mask_t.data = mask_buf_.data();
     mask_t.shape = {static_cast<int64_t>(mask_buf_.size())};
     mask_t.dtype = DType::kFloat32;
-    inputs["attention_mask"] = mask_t;
+    inputs[names_.attention_mask] = mask_t;
 }
 
 void KvCache::bind_to(TrtModule& module) {
-    has_position_input_ = module.has_input("position_id");
+    has_position_input_ = module.has_input(names_.position_id);
 
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
-        if (naming_ == NamingScheme::kTorchTrt) {
-            // Torch-TRT naming: cache_kv_{2i}/cache_kv_{2i+1} (interleaved K/V inputs),
-            // output{2i+1}/output{2i+2} (interleaved K/V outputs, output0 = logits).
-            std::string k_idx = std::to_string(2 * i);
-            std::string v_idx = std::to_string(2 * i + 1);
-            module.bind_external("cache_kv_" + k_idx, cache_k_[li].data());
-            module.bind_external("cache_kv_" + v_idx, cache_v_[li].data());
-            module.bind_external("output" + std::to_string(2 * i + 1), present_k_[li].data());
-            module.bind_external("output" + std::to_string(2 * i + 2), present_v_[li].data());
-        } else {
-            std::string suffix = "_" + std::to_string(i);
-            module.bind_external("cache_k" + suffix, cache_k_[li].data());
-            module.bind_external("cache_v" + suffix, cache_v_[li].data());
-            module.bind_external("present_k" + suffix, present_k_[li].data());
-            module.bind_external("present_v" + suffix, present_v_[li].data());
-        }
+        module.bind_external(names_.cache_k[li], cache_k_[li].data());
+        module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        module.bind_external(names_.present_k[li], present_k_[li].data());
+        module.bind_external(names_.present_v[li], present_v_[li].data());
     }
 }
 

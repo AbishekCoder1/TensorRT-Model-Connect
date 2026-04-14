@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 try:
-    from ttrt_build.families import find_plugin, ALL_PLUGINS
+    from trtf_build.engine_defs.torch_trt.families import find_plugin, ALL_PLUGINS
 except ImportError:
     pytest.skip("ttrt_build not importable", allow_module_level=True)
 

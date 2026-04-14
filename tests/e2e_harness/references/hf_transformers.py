@@ -22,6 +22,23 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 logger = logging.getLogger(__name__)
 
 
+_PRECISION_TO_TORCH_DTYPE = {
+    "fp16": "torch.float16",
+    "fp32": "torch.float32",
+    "bf16": "torch.bfloat16",
+}
+
+
+def _torch_dtype_for_case(case: E2ECase) -> str:
+    """Return a torch dtype expression string matching the manifest precision.
+
+    The reference runner injects this into subprocess scripts so the HF model
+    loads at the same precision as the TRT engine, keeping comparisons fair.
+    """
+    precision = case.metadata.get("precision", "fp32")
+    return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
+
+
 class HfTransformersReference:
     """Run HuggingFace Transformers inference as the reference oracle."""
 
@@ -72,6 +89,7 @@ class HfTransformersReference:
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         contract_config = case.metadata.get("contract_config", {})
         use_chat_template = contract_config.get("use_chat_template", False)
@@ -109,7 +127,7 @@ class HfTransformersReference:
 
             load_kwargs = {{
                 "trust_remote_code": trust_remote_code,
-                "torch_dtype": torch.float32,
+                "torch_dtype": {torch_dtype_expr},
             }}
             # Detect encoder-decoder models by checking config
             from transformers import AutoConfig
@@ -264,6 +282,7 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "Hello world")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
             import json, torch, numpy as np
@@ -293,12 +312,12 @@ class HfTransformersReference:
                 from transformers import DPRContextEncoder
                 _dpr = DPRContextEncoder.from_pretrained(
                     hf_id, trust_remote_code=trust_remote_code,
-                    torch_dtype=torch.float32)
+                    torch_dtype={torch_dtype_expr})
                 model = _dpr.ctx_encoder.bert_model
             else:
                 model = AutoModel.from_pretrained(
                     hf_id, trust_remote_code=trust_remote_code,
-                    torch_dtype=torch.float32)
+                    torch_dtype={torch_dtype_expr})
             model.eval()
 
             inputs = tokenizer(prompt, return_tensors="pt")
@@ -381,6 +400,7 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "What is machine learning?")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
             import json, torch, numpy as np
@@ -395,7 +415,7 @@ class HfTransformersReference:
                 hf_id, trust_remote_code=trust_remote_code)
             model = AutoModel.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype=torch.float32)
+                torch_dtype={torch_dtype_expr})
             model.eval()
 
             # Generic forward pass: tokenize -> forward -> mean pool -> L2 norm
@@ -464,6 +484,7 @@ class HfTransformersReference:
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
             import numpy as np, torch
@@ -479,7 +500,7 @@ class HfTransformersReference:
                 hf_id, trust_remote_code=trust_remote_code)
             model = AutoModelForSemanticSegmentation.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype=torch.float32)
+                torch_dtype={torch_dtype_expr})
             model.eval()
 
             image = Image.open(image_path).convert("RGB")
@@ -558,6 +579,7 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "query: test")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
             import json, torch
@@ -572,7 +594,7 @@ class HfTransformersReference:
                 hf_id, trust_remote_code=trust_remote_code)
             model = AutoModelForSequenceClassification.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype=torch.float32)
+                torch_dtype={torch_dtype_expr})
             model.eval()
 
             inputs = tokenizer(prompt, return_tensors="pt", padding=True,
@@ -630,6 +652,7 @@ class HfTransformersReference:
         audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
             import json, torch, numpy as np
@@ -645,7 +668,7 @@ class HfTransformersReference:
                 hf_id, trust_remote_code=trust_remote_code)
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype=torch.float32)
+                torch_dtype={torch_dtype_expr})
             model.eval()
 
             sr, audio = wav.read(audio_path)
@@ -665,6 +688,10 @@ class HfTransformersReference:
                 sr = target_sr
 
             inputs = processor(audio, sampling_rate=sr, return_tensors="pt")
+            # Cast floating-point inputs to match model dtype (e.g. fp16 mel features)
+            model_dtype = next(model.parameters()).dtype
+            inputs = {{k: v.to(model_dtype) if v.is_floating_point() else v
+                       for k, v in inputs.items()}}
             with torch.no_grad():
                 generated_ids = model.generate(**inputs, max_new_tokens=100)
             text = processor.batch_decode(
@@ -717,6 +744,7 @@ class HfTransformersReference:
 
         audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
             import json, numpy as np
@@ -769,7 +797,7 @@ class HfTransformersReference:
                 pipe = pipeline(
                     "automatic-speech-recognition",
                     model=hf_id,
-                    torch_dtype=torch.float32)
+                    torch_dtype={torch_dtype_expr})
                 result = pipe(audio)
                 text = result.get("text", "")
 
@@ -822,6 +850,7 @@ class HfTransformersReference:
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
             import json, torch
@@ -837,7 +866,7 @@ class HfTransformersReference:
                 hf_id, trust_remote_code=trust_remote_code)
             model = AutoModelForObjectDetection.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype=torch.float32)
+                torch_dtype={torch_dtype_expr})
             model.eval()
 
             image = Image.open(image_path).convert("RGB")
@@ -904,6 +933,7 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "Hello, this is a test.")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         seed = int(case.determinism.get("seed", 42))
         voice_preset = case.inputs.get("voice_preset", "")
@@ -938,7 +968,7 @@ class HfTransformersReference:
                 hf_id, trust_remote_code=trust_remote_code)
             model = BarkModel.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code,
-                torch_dtype=torch.float32)
+                torch_dtype={torch_dtype_expr})
             model.eval()
 
             if voice_preset:
@@ -1021,6 +1051,7 @@ class HfTransformersReference:
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
             import sys, torch
@@ -1046,7 +1077,7 @@ class HfTransformersReference:
                     cls = getattr(transformers, cls_name)
                     model = cls.from_pretrained(
                         hf_id, trust_remote_code=trust_remote_code,
-                        torch_dtype=torch.float32)
+                        torch_dtype={torch_dtype_expr})
                     break
                 except (AttributeError, ImportError, ValueError, KeyError):
                     continue
@@ -1055,7 +1086,7 @@ class HfTransformersReference:
             if model is None:
                 model = transformers.AutoModelForCausalLM.from_pretrained(
                     hf_id, trust_remote_code=True,
-                    torch_dtype=torch.float32)
+                    torch_dtype={torch_dtype_expr})
             model.eval()
 
             image = Image.open(image_path).convert("RGB")
@@ -1140,6 +1171,7 @@ class HfTransformersReference:
         point_x = case.inputs.get("point_x", 0.5)
         point_y = case.inputs.get("point_y", 0.5)
         hf_id = case.hf_id
+        torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
             import json, torch, numpy as np
@@ -1156,7 +1188,7 @@ class HfTransformersReference:
 
             processor = SamProcessor.from_pretrained(hf_id)
             model = SamModel.from_pretrained(
-                hf_id, torch_dtype=torch.float32)
+                hf_id, torch_dtype={torch_dtype_expr})
             model.eval()
 
             image = Image.open(image_path).convert("RGB")

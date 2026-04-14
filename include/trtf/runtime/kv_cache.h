@@ -10,6 +10,7 @@
 #include "trtf/runtime/inference_state.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #if TRTF_HAS_TRT
@@ -18,19 +19,25 @@ namespace trtf {
 
 class TrtModule;
 
+// Explicit tensor names for KV cache I/O binding.
+// Per-layer vectors hold expanded names; scalar names are for single inputs.
+struct KvCacheNames {
+    std::vector<std::string> cache_k;
+    std::vector<std::string> cache_v;
+    std::vector<std::string> present_k;
+    std::vector<std::string> present_v;
+    std::string position_id{"position_id"};
+    std::string attention_mask{"attention_mask"};
+};
+
 class KvCache : public IInferenceState {
   public:
     // Allocate cache buffers for the given configuration.
     // kv_dim = num_kv_heads * head_dim (size of one K or V row per layer).
     // cache_dtype controls the element type for K/V cache buffers (default FP32).
-    // Tensor naming scheme for engine I/O.
-    enum class NamingScheme {
-        kStandard, // cache_k_N / cache_v_N / present_k_N / present_v_N
-        kTorchTrt, // cache_kv_{2N} / cache_kv_{2N+1} / output{2N+1} / output{2N+2}
-    };
-
+    // names provides explicit tensor names for engine I/O binding.
     KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
-            DType cache_dtype = DType::kFloat32, NamingScheme naming = NamingScheme::kStandard);
+            DType cache_dtype = DType::kFloat32, KvCacheNames names = {});
 
     // --- IInferenceState overrides ---
     void reset() override;
@@ -71,7 +78,7 @@ class KvCache : public IInferenceState {
     bool has_position_input_{false};
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};
-    NamingScheme naming_{NamingScheme::kStandard};
+    KvCacheNames names_;
 };
 
 } // namespace trtf

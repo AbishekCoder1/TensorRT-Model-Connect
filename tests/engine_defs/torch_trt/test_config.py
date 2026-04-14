@@ -6,7 +6,7 @@ import json
 import pytest
 
 try:
-    from ttrt_build.config import ModelConfig
+    from trtf_build.engine_defs.torch_trt.config import ModelConfig
 except ImportError:
     pytest.skip("ttrt_build not importable", allow_module_level=True)
 

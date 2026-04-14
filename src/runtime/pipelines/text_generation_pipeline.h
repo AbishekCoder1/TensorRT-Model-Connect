@@ -28,8 +28,9 @@ struct TextGenConfig {
     int32_t id_bos{0};
     int32_t id_eos{0};
     bool has_position_input{true};
-    std::string logits_output_name{"logits"};
     ChatTemplateFormat chat_template_format{ChatTemplateFormat::kNone};
+    std::string token_id_name{"token_id"};
+    std::string logits_output_name{"logits"};
 };
 
 class TextGenerationPipeline final : public IPipeline {
@@ -64,6 +65,7 @@ class TextGenerationPipeline final : public IPipeline {
     std::string model_id_;
     std::unique_ptr<ISampler> sampler_;
     const float* d_logits_ptr_{nullptr}; // device logits pointer (for GPU sampling)
+    std::string logits_output_name_;
 
     // Internal: generate from token IDs with sampling parameters and optional timing.
     struct TimedGenResult {

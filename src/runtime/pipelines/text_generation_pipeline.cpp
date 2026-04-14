@@ -27,7 +27,7 @@ TextGenerationPipeline::TextGenerationPipeline(std::unique_ptr<TrtModule> decode
                                                std::unique_ptr<ISampler> sampler)
     : decoder_(std::move(decoder)), state_(std::move(state)), config_(config), stream_(stream),
       tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      sampler_(std::move(sampler)) {
+      sampler_(std::move(sampler)), logits_output_name_(config.logits_output_name) {
     if (!decoder_ || !decoder_->ok()) {
         throw std::runtime_error("TextGenerationPipeline: invalid decoder module");
     }
@@ -194,16 +194,15 @@ void TextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logi
     token_tensor.data = &token_id;
     token_tensor.shape = {1};
     token_tensor.dtype = DType::kInt32;
-    inputs["token_id"] = token_tensor;
+    inputs[config_.token_id_name] = token_tensor;
 
     state_->prepare_step(inputs);
 
     TensorMap outputs = decoder_->forward(inputs);
 
-    auto it = outputs.find(config_.logits_output_name);
+    auto it = outputs.find(logits_output_name_);
     if (it == outputs.end()) {
-        throw std::runtime_error("TextGenerationPipeline: no '" + config_.logits_output_name +
-                                 "' output");
+        throw std::runtime_error("TextGenerationPipeline: no '" + logits_output_name_ + "' output");
     }
 
     const auto& logits_tensor = it->second;
@@ -221,7 +220,7 @@ void TextGenerationPipeline::run_step_device(int32_t token_id) {
     token_tensor.data = &token_id;
     token_tensor.shape = {1};
     token_tensor.dtype = DType::kInt32;
-    inputs["token_id"] = token_tensor;
+    inputs[config_.token_id_name] = token_tensor;
 
     state_->prepare_step(inputs);
 
@@ -231,7 +230,7 @@ void TextGenerationPipeline::run_step_device(int32_t token_id) {
     decoder_->sync();
 
     // Get device pointer to logits output buffer (still on GPU).
-    d_logits_ptr_ = static_cast<const float*>(decoder_->device_ptr("logits"));
+    d_logits_ptr_ = static_cast<const float*>(decoder_->device_ptr(logits_output_name_));
 
     state_->advance();
 }

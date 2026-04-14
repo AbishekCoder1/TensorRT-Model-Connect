@@ -5,7 +5,7 @@
   "bundle": "pixart-sigma-1024-torchtrt.trtfb",
   "model_type": "pixart",
   "family": "pixart",
-  "runtime_strategy": "torchtrt_diffusion",
+  "runtime_strategy": "diffusion_pixart_torchtrt",
   "description": "PixArt-Sigma XL-2 via torch-trt (T5EncoderWrapper + PixArtDiTWrapper + VAEDecoderWrapper). Per-component cosine similarity against HF + end-to-end image generation sanity.",
   "build_args": {
     "torch_trt": true,

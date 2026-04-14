@@ -40,7 +40,7 @@ class TestCliInspect:
         assert result == 1
 
     def test_inspect_valid_bundle(self, tmp_path):
-        from ttrt_build.bundle_writer import TtrtBundleInfo, write_bundle
+        from trtf_build.engine_defs.torch_trt.bundle_writer import TtrtBundleInfo, write_bundle
         bundle_path = tmp_path / "test.ttrtb"
         write_bundle(str(bundle_path), TtrtBundleInfo(model_type="test"), [])
 

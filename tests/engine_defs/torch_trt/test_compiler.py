@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 from types import SimpleNamespace
 
 try:
-    from ttrt_build.compiler import (
+    from trtf_build.engine_defs.torch_trt.compiler import (
         _detect_tokenizer_add_special_tokens,
         _parse_model_config,
         _get_torch_version,
@@ -24,7 +24,7 @@ try:
         StatelessCacheWrapper,
         patch_static_cache_scatter,
     )
-    from ttrt_build.ttrt_build import _resolve_model
+    from trtf_build.engine_defs.torch_trt import _resolve_model
 except ImportError:
     pytest.skip("ttrt_build not importable", allow_module_level=True)
 
@@ -150,7 +150,7 @@ class TestBuildBundle:
     """Mock-based tests for the build_bundle orchestrator."""
 
     def test_missing_plugin_raises(self, tmp_path):
-        from ttrt_build.compiler import build_bundle
+        from trtf_build.engine_defs.torch_trt.compiler import build_bundle
 
         (tmp_path / "config.json").write_text(json.dumps({
             "model_type": "nonexistent_model_xyz",
@@ -162,7 +162,7 @@ class TestBuildBundle:
 
     def test_config_parsed_correctly(self, tmp_path):
         """Verify config is parsed before plugin lookup."""
-        from ttrt_build.config import ModelConfig
+        from trtf_build.engine_defs.torch_trt.config import ModelConfig
         (tmp_path / "config.json").write_text(json.dumps({
             "model_type": "qwen3",
             "hidden_size": 1024,
@@ -177,7 +177,7 @@ class TestBuildBundle:
 
     def test_output_extension_trtfb(self, tmp_path):
         """build_bundle writes .trtfb files (not .ttrtb)."""
-        from ttrt_build.compiler import build_bundle
+        from trtf_build.engine_defs.torch_trt.compiler import build_bundle
 
         (tmp_path / "config.json").write_text(json.dumps({
             "model_type": "nonexistent_model_xyz",
@@ -191,7 +191,7 @@ class TestBuildBundle:
 
     def test_runtime_strategy_is_torchtrt_decoder(self, tmp_path):
         """build_bundle sets runtime_strategy='torchtrt_decoder' in the bundle."""
-        from ttrt_build.bundle_writer import TtrtBundleInfo
+        from trtf_build.engine_defs.torch_trt.bundle_writer import TtrtBundleInfo
         info = TtrtBundleInfo(runtime_strategy="torchtrt_decoder")
         assert info.runtime_strategy == "torchtrt_decoder"
 

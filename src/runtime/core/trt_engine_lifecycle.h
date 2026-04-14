@@ -14,6 +14,10 @@
 
 namespace trtf {
 
+// Expand a layer-name pattern by replacing {i}, {2i}, {2i+1}, {2i+2} tokens.
+// Pure string logic — no TRT dependency.
+std::string expand_layer_name(const std::string& pattern, int32_t layer);
+
 #if TRTF_HAS_TRT
 
 constexpr int32_t kDefaultMaxCacheLength = 32;

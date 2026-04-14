@@ -5,7 +5,7 @@
 falcon-rw-1b             XFAIL  (ALiBi attention numerical divergence — TRT logit rel_l2 1.7x, needs investigation)
 gemma-2-2b               SKIP   (gated model, needs HF_TOKEN)
 internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in transformers 5.x)
-nemotron-h-nano-9b       SKIP   (requires mamba-ssm package)
+nemotron-h-nano-9b       XFAIL  (TRT-only: HF reference needs mamba-ssm which is not installed; build+inference verified, no parity comparison)
 phi4-multimodal           SKIP   (phi4-multimodal remote code incompatible with transformers 5.x)
 eagle-embed-vl-1b-v2     SKIP   (HF repo 404)
 eagle-rerank-vl-1b-v2    SKIP   (HF repo 404)

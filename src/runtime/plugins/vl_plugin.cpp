@@ -1,10 +1,11 @@
 // VLPlugin: handles "vision_language" strategy.
 // Two-engine pipeline: vision encoder + text decoder with KV cache.
 
-#include "trtf/runtime/pipeline_registry.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/pipelines/vl_pipeline.h"
+#include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/domains/multimodal/image_preprocessor.h"
+#include "runtime/pipelines/vl_pipeline.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <iostream>
@@ -14,16 +15,27 @@
 namespace trtf {
 
 class VLPlugin final : public IPipelinePlugin {
-public:
+  public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
+        auto loaded =
+            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
+
+        // Build KvCacheNames from IoMap patterns.
+        const auto& io = ctx.config.io_map;
+        KvCacheNames kv_names;
+        for (int32_t i = 0; i < ctx.config.num_layers; ++i) {
+            kv_names.cache_k.push_back(expand_layer_name(io.cache_k_pattern, i));
+            kv_names.cache_v.push_back(expand_layer_name(io.cache_v_pattern, i));
+            kv_names.present_k.push_back(expand_layer_name(io.present_k_pattern, i));
+            kv_names.present_v.push_back(expand_layer_name(io.present_v_pattern, i));
+        }
 
         cudaStream_t stream = loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        std::unique_ptr<IInferenceState> state = std::make_unique<KvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream,
-            cache_dtype);
+        std::unique_ptr<IInferenceState> state =
+            std::make_unique<KvCache>(ctx.config.num_layers, ctx.config.max_cache_length, kv_dim,
+                                      stream, cache_dtype, std::move(kv_names));
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
@@ -46,7 +58,8 @@ public:
             std::cerr << "[trtf] Vision encoder loaded" << std::endl;
         } else if (has_vision_engine) {
             std::cerr << "[trtf] WARNING: Bundle declares vision engine but "
-                         "deserialization failed" << std::endl;
+                         "deserialization failed"
+                      << std::endl;
         }
 
         // Build VL preprocessing config from bundle's config.json +
@@ -60,10 +73,9 @@ public:
             preproc_text.assign(preproc_sec->begin(), preproc_sec->end());
         auto vl_preprocess = parse_vl_preprocess_config(config_text, preproc_text);
 
-        return std::make_unique<VLPipeline>(
-            std::move(loaded.module), std::move(vision_module), std::move(state),
-            vlc, vl_preprocess, stream, std::move(tokenizer),
-            ctx.bundle.info.model_id);
+        return std::make_unique<VLPipeline>(std::move(loaded.module), std::move(vision_module),
+                                            std::move(state), vlc, vl_preprocess, stream,
+                                            std::move(tokenizer), ctx.bundle.info.model_id);
     }
 };
 

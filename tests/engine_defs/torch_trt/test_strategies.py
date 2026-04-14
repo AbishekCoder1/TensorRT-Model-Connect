@@ -17,17 +17,17 @@ from unittest.mock import MagicMock
 from types import SimpleNamespace
 
 try:
-    from ttrt_build.strategies import get_strategy
-    from ttrt_build.strategies.base import BuildStrategy  # noqa: F401
-    from ttrt_build.strategies.decoder import (
+    from trtf_build.engine_defs.torch_trt.strategies import get_strategy
+    from trtf_build.engine_defs.torch_trt.strategies.base import BuildStrategy  # noqa: F401
+    from trtf_build.engine_defs.torch_trt.strategies.decoder import (
         DecoderBuildStrategy,
         StatelessCacheWrapper,
     )
-    from ttrt_build.strategies.encoder_only import (
+    from trtf_build.engine_defs.torch_trt.strategies.encoder_only import (
         EncoderOnlyBuildStrategy,
         EncoderOnlyWrapper,
     )
-    from ttrt_build.strategies.diffusion import (
+    from trtf_build.engine_defs.torch_trt.strategies.diffusion import (
         DiffusionBuildStrategy,
         T5EncoderWrapper,
         PixArtDiTWrapper,
@@ -338,11 +338,11 @@ class TestBackwardCompatImports:
     """Test that backward-compat aliases in compiler.py still work."""
 
     def test_import_stateless_cache_wrapper_from_compiler(self):
-        from ttrt_build.compiler import StatelessCacheWrapper as SCW
-        from ttrt_build.strategies.decoder import StatelessCacheWrapper as SCW2
+        from trtf_build.engine_defs.torch_trt.compiler import StatelessCacheWrapper as SCW
+        from trtf_build.engine_defs.torch_trt.strategies.decoder import StatelessCacheWrapper as SCW2
         assert SCW is SCW2
 
     def test_import_patch_from_compiler(self):
-        from ttrt_build.compiler import patch_static_cache_scatter as p1
-        from ttrt_build.strategies.decoder import patch_static_cache_scatter as p2
+        from trtf_build.engine_defs.torch_trt.compiler import patch_static_cache_scatter as p1
+        from trtf_build.engine_defs.torch_trt.strategies.decoder import patch_static_cache_scatter as p2
         assert p1 is p2

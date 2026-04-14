@@ -1,12 +1,12 @@
-// TorchTrtDiffusionPipeline — simplified diffusion for torch-trt engines.
+// PixArtTorchTrtPipeline — simplified diffusion for torch-trt PixArt engines.
 //
 // The torch-trt engines include all preprocessing internally (patch embedding,
 // timestep embedding, caption projection), so the pipeline is simpler than
-// WanPipeline: no CPU patchify/unpatchify, no preprocessor weights.
+// PixArtPipeline: no CPU patchify/unpatchify, no preprocessor weights.
 //
-// Flow: tokenize → T5 encoder → denoising loop → VAE decode → image
+// Flow: tokenize -> T5 encoder -> denoising loop -> VAE decode -> image
 
-#include "runtime/pipelines/torchtrt_diffusion_pipeline.h"
+#include "runtime/pipelines/pixart_torchtrt_pipeline.h"
 
 #include "runtime/domains/diffusion/diffusion_generation_plan.h"
 
@@ -228,23 +228,23 @@ void chw_to_hwc(const float* src, int32_t h, int32_t w, std::vector<float>& out)
 
 // ─── Construction / destruction ──────────────────────────────────────────
 
-TorchTrtDiffusionPipeline::TorchTrtDiffusionPipeline(std::unique_ptr<TrtModule> text_encoder,
-                                                     std::unique_ptr<TrtModule> denoiser,
-                                                     std::unique_ptr<TrtModule> vae,
-                                                     DiffusionConfig config,
-                                                     std::shared_ptr<ITokenizer> tokenizer,
-                                                     std::string model_id_str)
+PixArtTorchTrtPipeline::PixArtTorchTrtPipeline(std::unique_ptr<TrtModule> text_encoder,
+                                               std::unique_ptr<TrtModule> denoiser,
+                                               std::unique_ptr<TrtModule> vae,
+                                               DiffusionConfig config,
+                                               std::shared_ptr<ITokenizer> tokenizer,
+                                               std::string model_id_str)
     : text_encoder_(std::move(text_encoder)), denoiser_(std::move(denoiser)), vae_(std::move(vae)),
       config_(std::move(config)), tokenizer_(std::move(tokenizer)),
       model_id_(std::move(model_id_str)) {}
 
-TorchTrtDiffusionPipeline::~TorchTrtDiffusionPipeline() = default;
+PixArtTorchTrtPipeline::~PixArtTorchTrtPipeline() = default;
 
 // ─── T5 text encoder ────────────────────────────────────────────────────
 
-bool TorchTrtDiffusionPipeline::run_t5_encoder(const std::vector<int32_t>& input_ids,
-                                               std::vector<float>& text_embeddings,
-                                               bool zero_padding) {
+bool PixArtTorchTrtPipeline::run_t5_encoder(const std::vector<int32_t>& input_ids,
+                                            std::vector<float>& text_embeddings,
+                                            bool zero_padding) {
     if (!text_encoder_ || !text_encoder_->ok())
         return false;
 
@@ -301,10 +301,10 @@ bool TorchTrtDiffusionPipeline::run_t5_encoder(const std::vector<int32_t>& input
 
 // ─── DiT denoiser ───────────────────────────────────────────────────────
 
-bool TorchTrtDiffusionPipeline::run_denoiser(const std::vector<float>& latent,
-                                             const std::vector<float>& text_embeddings,
-                                             int32_t num_real_tokens, float timestep,
-                                             std::vector<float>& output) {
+bool PixArtTorchTrtPipeline::run_denoiser(const std::vector<float>& latent,
+                                          const std::vector<float>& text_embeddings,
+                                          int32_t num_real_tokens, float timestep,
+                                          std::vector<float>& output) {
     if (!denoiser_ || !denoiser_->ok())
         return false;
 
@@ -375,8 +375,8 @@ bool TorchTrtDiffusionPipeline::run_denoiser(const std::vector<float>& latent,
 
 // ─── VAE decode ─────────────────────────────────────────────────────────
 
-bool TorchTrtDiffusionPipeline::decode_vae(const std::vector<float>& latent, int32_t h_lat,
-                                           int32_t w_lat, VideoResult& result) {
+bool PixArtTorchTrtPipeline::decode_vae(const std::vector<float>& latent, int32_t h_lat,
+                                        int32_t w_lat, VideoResult& result) {
     if (!vae_ || !vae_->ok())
         return false;
 
@@ -416,10 +416,10 @@ bool TorchTrtDiffusionPipeline::decode_vae(const std::vector<float>& latent, int
 
 // ─── Tokenize + T5 encode ───────────────────────────────────────────────
 
-bool TorchTrtDiffusionPipeline::encode_prompt(const std::string& prompt,
-                                              std::vector<int32_t>& input_ids,
-                                              std::vector<float>& text_embeddings,
-                                              std::vector<float>& null_text) {
+bool PixArtTorchTrtPipeline::encode_prompt(const std::string& prompt,
+                                           std::vector<int32_t>& input_ids,
+                                           std::vector<float>& text_embeddings,
+                                           std::vector<float>& null_text) {
     if (!tokenizer_) {
         std::cerr << "[torchtrt_diffusion] No tokenizer available\n";
         return false;
@@ -444,12 +444,11 @@ bool TorchTrtDiffusionPipeline::encode_prompt(const std::string& prompt,
 
 // ─── Denoising loop ─────────────────────────────────────────────────────
 
-bool TorchTrtDiffusionPipeline::denoise_loop(std::vector<float>& latents,
-                                             const std::vector<float>& text_embeddings,
-                                             int32_t num_real_tokens,
-                                             const std::vector<float>& null_text,
-                                             float guidance_scale, DpmSolverState& scheduler,
-                                             int32_t num_steps) {
+bool PixArtTorchTrtPipeline::denoise_loop(std::vector<float>& latents,
+                                          const std::vector<float>& text_embeddings,
+                                          int32_t num_real_tokens,
+                                          const std::vector<float>& null_text, float guidance_scale,
+                                          DpmSolverState& scheduler, int32_t num_steps) {
     const auto latent_count = latents.size();
     std::vector<float> noise_pred(latent_count);
     std::vector<float> noise_uncond(latent_count);
@@ -478,12 +477,11 @@ bool TorchTrtDiffusionPipeline::denoise_loop(std::vector<float>& latents,
 
 // ─── CFG helper ─────────────────────────────────────────────────────────
 
-bool TorchTrtDiffusionPipeline::apply_cfg(const std::vector<float>& latents,
-                                          const std::vector<float>& null_text, float timestep,
-                                          float guidance_scale,
-                                          const std::vector<float>& noise_pred,
-                                          std::vector<float>& noise_uncond,
-                                          std::vector<float>& eps_out) {
+bool PixArtTorchTrtPipeline::apply_cfg(const std::vector<float>& latents,
+                                       const std::vector<float>& null_text, float timestep,
+                                       float guidance_scale, const std::vector<float>& noise_pred,
+                                       std::vector<float>& noise_uncond,
+                                       std::vector<float>& eps_out) {
     if (guidance_scale <= 1.0F) {
         eps_out = noise_pred;
         return true;
@@ -498,8 +496,8 @@ bool TorchTrtDiffusionPipeline::apply_cfg(const std::vector<float>& latents,
 
 // ─── Main generation ────────────────────────────────────────────────────
 
-ImageResult TorchTrtDiffusionPipeline::generate_image(const std::string& prompt,
-                                                      const GenerateConfig& cfg) {
+ImageResult PixArtTorchTrtPipeline::generate_image(const std::string& prompt,
+                                                   const GenerateConfig& cfg) {
     ImageResult result;
     const int32_t z_dim = config_.z_dim;
     const int32_t h_lat = config_.video_height / config_.scale_factor_spatial;

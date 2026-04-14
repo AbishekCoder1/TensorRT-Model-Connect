@@ -1,17 +1,17 @@
-// WanPlugin: handles "diffusion_wan" and "diffusion_pixart" strategies.
-// Both use WanPipeline with a single text encoder, denoiser, and VAE.
+// WanPlugin: handles "diffusion_wan" strategy only.
+// Uses WanPipeline with a single text encoder, denoiser, and VAE.
 
-#include "trtf/runtime/pipeline_registry.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/plugins/shared/diffusion_helpers.h"
 #include "runtime/pipelines/wan_pipeline.h"
+#include "runtime/plugins/shared/diffusion_helpers.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/pipeline_registry.h"
 
 #if TRTF_HAS_TRT
 
 namespace trtf {
 
 class WanPlugin final : public IPipelinePlugin {
-public:
+  public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         auto parts = load_diffusion_parts(ctx.bundle, ctx.config_json);
 
@@ -20,14 +20,10 @@ public:
         if (!parts.text_encoders.empty())
             te_module = std::move(parts.text_encoders[0].module);
 
-        return std::make_unique<WanPipeline>(
-            std::move(te_module),
-            std::move(parts.denoiser.module),
-            std::move(parts.vae.module),
-            std::move(parts.config),
-            std::move(parts.weights),
-            std::move(parts.tokenizer),
-            ctx.bundle.info.model_id);
+        return std::make_unique<WanPipeline>(std::move(te_module), std::move(parts.denoiser.module),
+                                             std::move(parts.vae.module), std::move(parts.config),
+                                             std::move(parts.weights), std::move(parts.tokenizer),
+                                             ctx.bundle.info.model_id);
     }
 };
 
@@ -36,7 +32,6 @@ volatile int kForceLink_WanPlugin = 0;
 } // namespace trtf
 
 static trtf::WanPlugin g_WanPlugin_instance;
-static trtf::PluginRegistrar g_WanPlugin_reg1("diffusion_wan", &g_WanPlugin_instance);
-static trtf::PluginRegistrar g_WanPlugin_reg2("diffusion_pixart", &g_WanPlugin_instance);
+static trtf::PluginRegistrar g_WanPlugin_reg("diffusion_wan", &g_WanPlugin_instance);
 
 #endif // TRTF_HAS_TRT

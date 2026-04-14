@@ -2,7 +2,7 @@
 """Torch-TRT vs torch.compile vs HF eager performance comparison.
 
 Compares three inference backends for the same HF model:
-  1. Torch-TRT (StatelessCacheWrapper -> raw TRT engine via ttrt_build)
+  1. Torch-TRT (StatelessCacheWrapper -> raw TRT engine via trtf_build.engine_defs.torch_trt)
   2. torch.compile (PyTorch 2.x compiler with default backend)
   3. HF eager (baseline, no compilation)
 

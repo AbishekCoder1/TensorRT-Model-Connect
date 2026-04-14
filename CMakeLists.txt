@@ -136,7 +136,7 @@ add_library(trtf_core
   src/runtime/plugins/shared/diffusion_helpers.cpp
   src/runtime/plugins/shared/audio_helpers.cpp
   src/runtime/plugins/force_link_plugins.cpp
-  # Pipeline plugins (16 files — self-registering via REGISTER_PIPELINE_PLUGIN)
+  # Pipeline plugins (self-registering via REGISTER_PIPELINE_PLUGIN)
   src/runtime/plugins/decoder_plugin.cpp
   src/runtime/plugins/ssm_plugin.cpp
   src/runtime/plugins/rwkv_plugin.cpp
@@ -156,7 +156,8 @@ add_library(trtf_core
   src/runtime/plugins/t5_plugin.cpp
   src/runtime/plugins/marian_plugin.cpp
   src/runtime/plugins/seq2seq_plugin.cpp
-  src/runtime/plugins/torchtrt_diffusion_plugin.cpp
+  src/runtime/plugins/pixart_plugin.cpp
+  src/runtime/plugins/pixart_torchtrt_plugin.cpp
   # Pipeline implementations
   src/runtime/pipelines/text_generation_pipeline.cpp
   src/runtime/pipelines/recurrent_pipeline.cpp
@@ -172,7 +173,8 @@ add_library(trtf_core
   src/runtime/pipelines/magpie_pipeline.cpp
   src/runtime/pipelines/speech_pipeline.cpp
   src/runtime/pipelines/omni_pipeline.cpp
-  src/runtime/pipelines/torchtrt_diffusion_pipeline.cpp
+  src/runtime/pipelines/pixart_pipeline.cpp
+  src/runtime/pipelines/pixart_torchtrt_pipeline.cpp
 )
 
 # Add CUDA kernel sources when CUDA compiler is available
@@ -363,7 +365,10 @@ trtf_add_test(test_perception_preprocess_seams)
 # Diffusion — conditioning
 trtf_add_test(test_wan_generation_conditioning)
 
-# Torch-TRT decoder strategy
+# IoMap tensor name mapping
+trtf_add_test(test_io_map)
+
+# Decoder config parsing (legacy name: test_torchtrt_decoder)
 trtf_add_test(test_torchtrt_decoder)
 
 # --- Install ---

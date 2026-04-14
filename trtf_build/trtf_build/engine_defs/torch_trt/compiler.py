@@ -73,6 +73,26 @@ from .strategies.decoder import StatelessCacheWrapper, patch_static_cache_scatte
 
 
 # ---------------------------------------------------------------------------
+# Strategy normalization: torch-trt internal strategies -> standard C++ runtime
+# strategies so the resulting bundle is indistinguishable at runtime.
+# ---------------------------------------------------------------------------
+
+_NORMALIZE_STRATEGY: dict[str, str] = {
+    "torchtrt_decoder": "decoder_kv_cache",
+    "torchtrt_encoder": "encoder_only",
+    "torchtrt_diffusion": "diffusion_pixart",
+    "decoder": "decoder_kv_cache",
+    "encoder_only": "encoder_only",
+    "diffusion": "diffusion_pixart",
+}
+
+
+def _normalize_runtime_strategy(raw_strategy: str) -> str:
+    """Map torch-trt internal strategy names to standard C++ runtime names."""
+    return _NORMALIZE_STRATEGY.get(raw_strategy, raw_strategy)
+
+
+# ---------------------------------------------------------------------------
 # Engine compilation
 # ---------------------------------------------------------------------------
 
@@ -118,6 +138,33 @@ def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     return False
 
 
+
+# ---------------------------------------------------------------------------
+# IO map: declares tensor names for torch-trt decoder bundles so the C++
+# runtime knows which engine tensors correspond to which semantic roles.
+# ---------------------------------------------------------------------------
+
+def _decoder_io_map(num_layers: int) -> dict:
+    """Build the io_map for a decoder KV-cache model.
+
+    The torch-trt path produces engines where cache/present tensors follow
+    a numbered pattern (cache_kv_0..cache_kv_{2L-1} for inputs,
+    output0..output{2L} for outputs). This map lets the C++ runtime resolve
+    them without hard-coding names.
+    """
+    return {
+        "token_id": "token_id",
+        "position_id": "position_id",
+        "attention_mask": "attention_mask",
+        "logits": "output0",
+        "cache_k": "cache_kv_{2i}",
+        "cache_v": "cache_kv_{2i+1}",
+        "present_k": "output{2i+1}",
+        "present_v": "output{2i+2}",
+        "num_layers": num_layers,
+    }
+
+
 def compile_model(
     wrapper: nn.Module,
     example_args: tuple,
@@ -151,7 +198,7 @@ def compile_model(
 
     # 1. Export to ExportedProgram
     if verbose:
-        print("[ttrt-build] Running torch.export ...", file=sys.stderr)
+        print("[torch-trt] Running torch.export ...", file=sys.stderr)
 
     t0 = time.monotonic()
     with torch.no_grad():
@@ -166,13 +213,13 @@ def compile_model(
         inputs_nodes = [n for n in exported.graph.nodes if n.op == 'placeholder']
         user_inputs = [n for n in inputs_nodes if not n.name.startswith('p_')]
         weight_params = [n for n in inputs_nodes if n.name.startswith('p_')]
-        print(f"[ttrt-build] torch.export complete [{t1-t0:.1f}s] "
+        print(f"[torch-trt] torch.export complete [{t1-t0:.1f}s] "
               f"({len(user_inputs)} user inputs, {len(weight_params)} weights)",
               file=sys.stderr)
 
     # 2. Convert to raw TRT engine
     if verbose:
-        print("[ttrt-build] Converting to raw TRT engine ...", file=sys.stderr)
+        print("[torch-trt] Converting to raw TRT engine ...", file=sys.stderr)
 
     conversion_inputs = list(trt_inputs) if trt_inputs is not None else list(example_args)
 
@@ -191,7 +238,7 @@ def compile_model(
     del exported
 
     if verbose:
-        print(f"[ttrt-build] Raw TRT engine: {len(engine_bytes)/(1024*1024):.1f} MB "
+        print(f"[torch-trt] Raw TRT engine: {len(engine_bytes)/(1024*1024):.1f} MB "
               f"[{t3-t2:.1f}s]", file=sys.stderr)
 
     return engine_bytes
@@ -254,7 +301,7 @@ def _build_multi_engine_bundle(
     and calls compile_model() for each. Results are packaged into a single
     .trtfb bundle with multiple engine plan sections.
     """
-    print(f"[ttrt-build] Multi-engine build (precision={precision}) ...",
+    print(f"[torch-trt] Multi-engine build (precision={precision}) ...",
           file=sys.stderr)
 
     result = plugin.build_components(
@@ -263,12 +310,13 @@ def _build_multi_engine_bundle(
     )
 
     component_sections = result["sections"]
-    bundle_runtime_strategy = result["runtime_strategy"]
+    raw_runtime_strategy = result["runtime_strategy"]
+    normalized_strategy = _normalize_runtime_strategy(raw_runtime_strategy)
     diffusion_config = result.get("diffusion_config", {})
 
-    # Build config.json for the bundle
+    # Build config.json for the bundle (using normalized strategy)
     bundle_config = {
-        "runtime_strategy": bundle_runtime_strategy,
+        "runtime_strategy": normalized_strategy,
         **diffusion_config,
     }
     config_data = json.dumps(bundle_config, indent=2).encode("utf-8")
@@ -298,13 +346,14 @@ def _build_multi_engine_bundle(
         gpu_name=_get_gpu_name(),
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         precision=precision,
-        runtime_strategy=bundle_runtime_strategy,
+        runtime_strategy=normalized_strategy,
+        build_backend="torch_trt",
     )
 
     write_bundle(output_path, info, sections)
     t_end = time.monotonic()
     total_engine_mb = sum(len(s.data) for s in component_sections) / (1024 * 1024)
-    print(f"[ttrt-build] Bundle saved: {output_path} "
+    print(f"[torch-trt] Bundle saved: {output_path} "
           f"({len(component_sections)} engines, {total_engine_mb:.1f} MB total) "
           f"[{t_end - t0:.1f}s]", file=sys.stderr)
 
@@ -342,7 +391,7 @@ def build_bundle(
 
     # 1. Parse config (supports both config.json and model_index.json)
     config = _parse_model_config(model_dir_path)
-    print(f"[ttrt-build] Model: {config.model_type} "
+    print(f"[torch-trt] Model: {config.model_type} "
           f"(layers={config.num_hidden_layers}, hidden={config.hidden_size}, "
           f"vocab={config.vocab_size})", file=sys.stderr)
 
@@ -354,12 +403,12 @@ def build_bundle(
             f"No Torch-TRT family plugin for model_type={config.model_type!r}. "
             f"Supported: {supported}")
 
-    print(f"[ttrt-build] Family: {plugin.name}", file=sys.stderr)
+    print(f"[torch-trt] Family: {plugin.name}", file=sys.stderr)
 
     # 3. Select build strategy from plugin (defaults to "decoder")
     strategy_name = getattr(plugin, 'runtime_strategy', 'decoder')
     strategy = get_strategy(strategy_name)
-    print(f"[ttrt-build] Strategy: {strategy.name} "
+    print(f"[torch-trt] Strategy: {strategy.name} "
           f"(runtime_strategy={strategy.runtime_strategy})", file=sys.stderr)
 
     # Multi-engine path: diffusion and other multi-component models.
@@ -377,13 +426,13 @@ def build_bundle(
     try:
         # 4. Load HF model in the requested precision
         t1 = time.monotonic()
-        print(f"[ttrt-build] Loading model (dtype={compute_dtype}) ...",
+        print(f"[torch-trt] Loading model (dtype={compute_dtype}) ...",
               file=sys.stderr)
         model = plugin.load_model(
             str(model_dir_path), config, max_cache_length,
             dtype=compute_dtype)
         t2 = time.monotonic()
-        print(f"[ttrt-build] Model loaded [{t2 - t1:.1f}s]", file=sys.stderr)
+        print(f"[torch-trt] Model loaded [{t2 - t1:.1f}s]", file=sys.stderr)
 
         # 5. Pre-export setup (e.g. patch StaticCache for decoder strategy)
         strategy.pre_export_setup()
@@ -400,27 +449,28 @@ def build_bundle(
             hf_config, max_cache_length, precision=precision)
 
         # 8. Compile to raw TRT engine
-        print(f"[ttrt-build] Compiling (precision={precision}, "
+        print(f"[torch-trt] Compiling (precision={precision}, "
               f"cache={max_cache_length}) ...", file=sys.stderr)
         engine_bytes = compile_model(
             wrapper, export_args,
             verbose=verbose,
         )
         t3 = time.monotonic()
-        print(f"[ttrt-build] Compiled [{t3 - t2:.1f}s] "
+        print(f"[torch-trt] Compiled [{t3 - t2:.1f}s] "
               f"({len(engine_bytes) / (1024 * 1024):.1f} MB)", file=sys.stderr)
 
         # 9. Inspect engine I/O for bundle metadata
         io_map = _inspect_engine(engine_bytes)
         if verbose:
-            print(f"[ttrt-build] Engine I/O: {len(io_map['inputs'])} inputs, "
+            print(f"[torch-trt] Engine I/O: {len(io_map['inputs'])} inputs, "
                   f"{len(io_map['outputs'])} outputs", file=sys.stderr)
 
         # 10. Detect tokenizer behavior
         tokenizer_add_special_tokens = _detect_tokenizer_add_special_tokens(
             model_dir_path)
 
-        # 11. Write .trtfb bundle
+        # 11. Write .trtfb bundle (normalize strategy to standard C++ name)
+        normalized_strategy = _normalize_runtime_strategy(strategy.runtime_strategy)
         info = TtrtBundleInfo(
             model_id=model_dir_path.name,
             model_type=config.model_type,
@@ -436,8 +486,11 @@ def build_bundle(
             num_key_value_heads=config.num_key_value_heads,
             max_cache_length=max_cache_length,
             precision=precision,
-            runtime_strategy=strategy.runtime_strategy,
+            runtime_strategy=normalized_strategy,
             tokenizer_add_special_tokens=tokenizer_add_special_tokens,
+            build_backend="torch_trt",
+            io_map=_decoder_io_map(config.num_hidden_layers)
+                if normalized_strategy == "decoder_kv_cache" else None,
         )
 
         # Use engine_plan as section name (C++ bundle reader looks for this)
@@ -452,14 +505,14 @@ def build_bundle(
                 data = file_path.read_bytes()
                 if filename == "config.json":
                     cfg_dict = json.loads(data)
-                    cfg_dict["runtime_strategy"] = strategy.runtime_strategy
+                    cfg_dict["runtime_strategy"] = normalized_strategy
                     cfg_dict["torchtrt_io_map"] = io_map
                     data = json.dumps(cfg_dict, indent=2).encode("utf-8")
                 sections.append(BundleSection(filename, data))
 
         write_bundle(output_path, info, sections)
         t4 = time.monotonic()
-        print(f"[ttrt-build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
+        print(f"[torch-trt] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
               file=sys.stderr)
 
     finally:

@@ -34,16 +34,18 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print("Error: -o / --output required", file=sys.stderr)
         return 1
 
-    # Torch-TRT path: delegate to ttrt_build
-    if getattr(args, 'torch_trt', False):
-        try:
-            import ttrt_build
-        except ImportError:
-            print("Error: --torch-trt requires the ttrt_build package "
-                  "(pip install -e ttrt_build/)", file=sys.stderr)
+    # Method dispatch: non-default methods go through the registry
+    method_name = getattr(args, 'method', 'trt')
+    if method_name != 'trt':
+        from .engine_defs import get_engine_def
+        engine_def = get_engine_def(method_name)
+        if engine_def is None:
+            print(f"Error: method '{method_name}' is not available. "
+                  f"Install its dependencies (e.g., pip install torch_tensorrt).",
+                  file=sys.stderr)
             return 1
         try:
-            ttrt_build.build(
+            engine_def.build(
                 args.model,
                 args.output,
                 max_cache_length=args.max_cache_length,
@@ -58,7 +60,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 traceback.print_exc()
             return 1
 
-    # Raw TRT path
+    # Default TRT Network API path
     from .engine_builder import build
 
     # FP8 quantization: --fp8-scales (pre-computed) or --fp8 (auto-calibrate)
@@ -235,8 +237,10 @@ def main() -> None:
     build_p.add_argument("--quant-calibration-samples",
                          type=int, default=512,
                          help="Number of calibration samples for PTQ (default: 512)")
-    build_p.add_argument("--torch-trt", action="store_true",
-                         help="Use torch_tensorrt backend instead of raw TRT")
+    build_p.add_argument("--method", type=str, default="trt",
+                         choices=["trt", "torchtrt"],
+                         help="Engine definition method: trt (default, TRT Network API) "
+                              "or torchtrt (torch-trt)")
     build_p.add_argument("--verbose", action="store_true",
                          help="Verbose TRT builder output")
     build_p.add_argument("--fp8", action="store_true",

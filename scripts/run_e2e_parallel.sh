@@ -356,5 +356,50 @@ for LABEL in "${WORKER_LABELS[@]}"; do
     [ -n "$SUMMARY" ] && echo "    $SUMMARY"
 done
 
+# Print failure details so CI console shows root causes
+if [ "$FAILURES" -gt 0 ]; then
+    echo ""
+    echo "--- Failure details ---"
+    for LABEL in "${WORKER_LABELS[@]}"; do
+        LOG="$RESULT_DIR/console-${LABEL}.log"
+        [ -f "$LOG" ] || continue
+        python -c "
+import re, sys
+
+log = open('$LOG').read()
+failed = re.findall(r'tests/test_e2e\.py::test_e2e\[(.+?)\] FAILED', log)
+if not failed:
+    sys.exit(0)
+
+# Extract the FAILURES section
+failures_match = re.search(r'=+ FAILURES =+\n(.+?)(?=\n=+ )', log, re.DOTALL)
+if not failures_match:
+    for name in failed:
+        print(f'  [{name}]')
+        for line in log.splitlines():
+            if 'E2E failed for' in line and name in line:
+                print(f'    {line.strip()}')
+                break
+            if 'Failed:' in line and name in line:
+                print(f'    {line.strip()}')
+                break
+        else:
+            print(f'    (no detail found — check console log)')
+    sys.exit(0)
+
+failures_text = failures_match.group(1)
+blocks = re.split(r'_+ test_e2e\[(.+?)\] _+\n', failures_text)
+for i in range(1, len(blocks), 2):
+    name = blocks[i]
+    body = blocks[i + 1] if i + 1 < len(blocks) else ''
+    print(f'  [{name}]')
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('E '):
+            print(f'    {stripped}')
+" 2>/dev/null || true
+    done
+fi
+
 echo ""
 exit "$FAILURES"

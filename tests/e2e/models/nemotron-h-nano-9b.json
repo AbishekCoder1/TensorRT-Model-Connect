@@ -5,6 +5,7 @@
   "bundle": "nemotron-h-nano-9b.trtfb",
   "family": "nemotron_h",
   "runtime_strategy": "hybrid_mamba_attention",
+  "reference_backend": "none",
   "max_cache_length": 256,
   "prompt": "What is the capital of France? Answer in one word.",
   "max_new_tokens": 10,

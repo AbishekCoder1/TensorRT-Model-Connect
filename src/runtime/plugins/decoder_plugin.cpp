@@ -1,11 +1,12 @@
-// DecoderPlugin: handles "decoder_kv_cache", "decoder_moe", and "torchtrt_decoder" strategies.
+// DecoderPlugin: handles "decoder_kv_cache" and "decoder_moe" strategies.
 // Standard attention-based decoder with device-resident KV cache.
 
 #include "runtime/core/chat_template.h"
+#include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/pipelines/text_generation_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "utils/json_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
+#include "utils/json_helpers.h"
 
 #if TRTF_HAS_TRT
 
@@ -18,16 +19,24 @@ class DecoderPlugin final : public IPipelinePlugin {
             load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
-        bool is_torchtrt = (ctx.config.runtime_strategy == "torchtrt_decoder");
-        auto naming =
-            is_torchtrt ? KvCache::NamingScheme::kTorchTrt : KvCache::NamingScheme::kStandard;
+        // Build KvCacheNames from IoMap patterns.
+        const auto& io = ctx.config.io_map;
+        KvCacheNames kv_names;
+        kv_names.position_id = io.position_id;
+        kv_names.attention_mask = io.attention_mask;
+        for (int32_t i = 0; i < ctx.config.num_layers; ++i) {
+            kv_names.cache_k.push_back(expand_layer_name(io.cache_k_pattern, i));
+            kv_names.cache_v.push_back(expand_layer_name(io.cache_v_pattern, i));
+            kv_names.present_k.push_back(expand_layer_name(io.present_k_pattern, i));
+            kv_names.present_v.push_back(expand_layer_name(io.present_v_pattern, i));
+        }
 
         cudaStream_t stream = loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        std::unique_ptr<IInferenceState> state = std::make_unique<KvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, cache_dtype,
-            naming);
+        std::unique_ptr<IInferenceState> state =
+            std::make_unique<KvCache>(ctx.config.num_layers, ctx.config.max_cache_length, kv_dim,
+                                      stream, cache_dtype, std::move(kv_names));
         if (!state->ok())
             throw std::runtime_error("Failed to create KvCache");
 
@@ -35,9 +44,9 @@ class DecoderPlugin final : public IPipelinePlugin {
         tgc.vocab_size = ctx.config.vocab_size;
         tgc.id_bos = ctx.config.id_bos;
         tgc.id_eos = ctx.config.id_eos;
-        tgc.has_position_input = loaded.module->has_input("position_id");
-        if (is_torchtrt)
-            tgc.logits_output_name = "output0";
+        tgc.has_position_input = loaded.module->has_input(io.position_id);
+        tgc.token_id_name = io.token_id;
+        tgc.logits_output_name = io.logits;
 
         // Detect chat template format from tokenizer_config.json
         auto* tok_cfg_sec = find_section(ctx.bundle, "tokenizer_config.json");
@@ -60,6 +69,5 @@ volatile int kForceLink_DecoderPlugin = 0;
 static trtf::DecoderPlugin g_DecoderPlugin_instance;
 static trtf::PluginRegistrar g_DecoderPlugin_reg1("decoder_kv_cache", &g_DecoderPlugin_instance);
 static trtf::PluginRegistrar g_DecoderPlugin_reg2("decoder_moe", &g_DecoderPlugin_instance);
-static trtf::PluginRegistrar g_DecoderPlugin_reg3("torchtrt_decoder", &g_DecoderPlugin_instance);
 
 #endif // TRTF_HAS_TRT

@@ -11,8 +11,8 @@ from __future__ import annotations
 import pytest
 
 try:
-    from ttrt_build.config import ModelConfig
-    from ttrt_build.cache_config import (
+    from trtf_build.engine_defs.torch_trt.config import ModelConfig
+    from trtf_build.engine_defs.torch_trt.cache_config import (
         build_attention_mask, make_cache_tensors, make_export_args,
     )
 except ImportError:
@@ -89,11 +89,13 @@ class TestMakeCacheTensors:
         """Cache uses num_attention_heads (expanded), not num_key_value_heads."""
         config = ModelConfig(
             model_type="qwen3",
-            hidden_size=1024,
-            num_hidden_layers=1,
-            num_attention_heads=16,
-            num_key_value_heads=2,
-            _head_dim=64,
+            raw={
+                "hidden_size": 1024,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 2,
+                "head_dim": 64,
+            },
         )
         cache = make_cache_tensors(config, max_cache_length=64, device="cpu")
         assert len(cache) == 2  # 1 layer * 2 (k + v)
@@ -111,11 +113,13 @@ class TestMakeCacheTensors:
         """MHA (kv_heads == heads): attention_size = hidden_size."""
         config = ModelConfig(
             model_type="gpt2",
-            hidden_size=768,
-            num_hidden_layers=2,
-            num_attention_heads=12,
-            num_key_value_heads=12,
-            _head_dim=64,
+            raw={
+                "hidden_size": 768,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 12,
+                "num_key_value_heads": 12,
+                "head_dim": 64,
+            },
         )
         cache = make_cache_tensors(config, max_cache_length=32, device="cpu")
         assert cache[0].shape == (32, 768)
@@ -176,11 +180,13 @@ class TestMakeExportArgs:
         """Verify tuple length scales with num_layers."""
         config = ModelConfig(
             model_type="llama",
-            hidden_size=2048,
-            num_hidden_layers=28,
-            num_attention_heads=16,
-            num_key_value_heads=4,
-            _head_dim=128,
+            raw={
+                "hidden_size": 2048,
+                "num_hidden_layers": 28,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 4,
+                "head_dim": 128,
+            },
         )
         args = make_export_args(config, max_cache_length=64, device="cpu")
         # 3 core inputs + 28*2 cache tensors = 59

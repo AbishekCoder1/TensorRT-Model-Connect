@@ -8,7 +8,6 @@ Supports both standard decoder (KV cache) and Mamba/SSM (recurrent state).
 
 from __future__ import annotations
 
-import sys
 import warnings
 from typing import Any
 
@@ -64,13 +63,17 @@ class TrtRunner:
             attention_size = cache_shape[1]  # (max_cache_length, attention_size)
         self.attention_size = attention_size
 
+        # Detect cache element size from engine dtype (fp16=2, fp32=4)
+        cache_dtype = self.engine.get_tensor_dtype("cache_k_0")
+        self._cache_elem_bytes = np.dtype(trt.nptype(cache_dtype)).itemsize
+
         # Create CUDA stream
         err, self.stream = cudart.cudaStreamCreate()
         _check_cuda(err)
 
         self.cache_length = 0
         attention_window = max_cache_length + 1
-        row_bytes = self.attention_size * 4  # float32
+        row_bytes = self.attention_size * self._cache_elem_bytes
 
         # Discover IO tensor metadata and identify debug/extra outputs
         self._output_names: list[str] = []
@@ -312,7 +315,7 @@ class TrtRunner:
         self.context.execute_async_v3(stream)
 
         # D2D cache update
-        row_bytes = self.attention_size * 4
+        row_bytes = self.attention_size * self._cache_elem_bytes
         for i in range(self.num_layers):
             for cache_buf, present_buf in [
                 (self._d_cache_k[i], self._d_present_k[i]),
@@ -356,7 +359,7 @@ class TrtRunner:
 
     def reset(self):
         """Zero all device cache buffers and reset cache_length."""
-        cache_bytes = self.max_cache_length * self.attention_size * 4
+        cache_bytes = self.max_cache_length * self.attention_size * self._cache_elem_bytes
         for i in range(self.num_layers):
             _check_cuda(cudart.cudaMemsetAsync(
                 self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
@@ -701,10 +704,16 @@ class RwkvTrtRunner:
         _check_cuda(err)
 
         # Per-layer device state buffers (5 per layer)
-        self._d_attn = []; self._d_ff = []; self._d_num = []
-        self._d_den = []; self._d_max = []
-        self._d_p_attn = []; self._d_p_ff = []; self._d_p_num = []
-        self._d_p_den = []; self._d_p_max = []
+        self._d_attn = []
+        self._d_ff = []
+        self._d_num = []
+        self._d_den = []
+        self._d_max = []
+        self._d_p_attn = []
+        self._d_p_ff = []
+        self._d_p_num = []
+        self._d_p_den = []
+        self._d_p_max = []
         for _ in range(num_layers):
             for lst in [self._d_attn, self._d_ff, self._d_num, self._d_den,
                         self._d_max, self._d_p_attn, self._d_p_ff,
@@ -739,7 +748,8 @@ class RwkvTrtRunner:
                         and not name.startswith("present_max_")):
                     self._debug_output_names.append(name)
 
-        self._d_debug = {}; self._h_debug = {}
+        self._d_debug = {}
+        self._h_debug = {}
         for name in self._debug_output_names:
             shape = self._output_shapes[name]
             nbytes = int(np.prod(shape)) * 4
@@ -885,17 +895,22 @@ class WhisperTrtRunner:
             hidden_size = cross_shape[1]
         self.hidden_size = hidden_size
 
+        cache_dtype = self.dec_engine.get_tensor_dtype("cache_k_0")
+        self._cache_elem_bytes = np.dtype(trt.nptype(cache_dtype)).itemsize
+
         err, self.stream = cudart.cudaStreamCreate()
         _check_cuda(err)
 
         self.cache_length = 0
         attention_window = max_cache_length + 1
-        row_bytes = self.attention_size * 4
+        row_bytes = self.attention_size * self._cache_elem_bytes
 
         # ----- Decoder device buffers -----
         cache_bytes = max_cache_length * row_bytes
-        self._d_cache_k = []; self._d_cache_v = []
-        self._d_present_k = []; self._d_present_v = []
+        self._d_cache_k = []
+        self._d_cache_v = []
+        self._d_present_k = []
+        self._d_present_v = []
         for _ in range(num_layers):
             for lst, sz in [(self._d_cache_k, cache_bytes), (self._d_cache_v, cache_bytes),
                             (self._d_present_k, row_bytes), (self._d_present_v, row_bytes)]:
@@ -905,7 +920,8 @@ class WhisperTrtRunner:
 
         # Cross-attention K/V (per layer, [max_source_positions, hidden_size])
         cross_bytes = max_source_positions * hidden_size * 4
-        self._d_cross_k = []; self._d_cross_v = []
+        self._d_cross_k = []
+        self._d_cross_v = []
         for _ in range(num_layers):
             for lst in [self._d_cross_k, self._d_cross_v]:
                 err, ptr = cudart.cudaMalloc(cross_bytes)
@@ -1006,7 +1022,7 @@ class WhisperTrtRunner:
         self.dec_context.execute_async_v3(stream)
 
         # D2D cache update
-        row_bytes = self.attention_size * 4
+        row_bytes = self.attention_size * self._cache_elem_bytes
         for i in range(self.num_layers):
             for cache_buf, present_buf in [
                 (self._d_cache_k[i], self._d_present_k[i]),
@@ -1029,7 +1045,7 @@ class WhisperTrtRunner:
         return {"logits": self._h_logits.copy()}
 
     def reset(self):
-        cache_bytes = self.max_cache_length * self.attention_size * 4
+        cache_bytes = self.max_cache_length * self.attention_size * self._cache_elem_bytes
         for i in range(self.num_layers):
             _check_cuda(cudart.cudaMemsetAsync(self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
             _check_cuda(cudart.cudaMemsetAsync(self._d_cache_v[i], 0, cache_bytes, self.stream)[0])
@@ -1050,9 +1066,12 @@ class WhisperTrtRunner:
             return
         bufs = [self._d_token_id, self._d_position_id, self._d_mask, self._d_logits,
                 self._d_mel, self._d_enc_out]
-        bufs.extend(self._d_cache_k); bufs.extend(self._d_cache_v)
-        bufs.extend(self._d_present_k); bufs.extend(self._d_present_v)
-        bufs.extend(self._d_cross_k); bufs.extend(self._d_cross_v)
+        bufs.extend(self._d_cache_k)
+        bufs.extend(self._d_cache_v)
+        bufs.extend(self._d_present_k)
+        bufs.extend(self._d_present_v)
+        bufs.extend(self._d_cross_k)
+        bufs.extend(self._d_cross_v)
         for d_ptr in bufs:
             cudart.cudaFree(d_ptr)
         if hasattr(self, "stream"):
@@ -1098,8 +1117,11 @@ class HybridTrtRunner:
         if num_attention_layers > 0:
             cache_shape = tuple(self.engine.get_tensor_shape("cache_k_0"))
             self.attention_size = cache_shape[1]
+            cache_dtype = self.engine.get_tensor_dtype("cache_k_0")
+            self._cache_elem_bytes = np.dtype(trt.nptype(cache_dtype)).itemsize
         else:
             self.attention_size = 0
+            self._cache_elem_bytes = 4
 
         err, self.stream = cudart.cudaStreamCreate()
         _check_cuda(err)
@@ -1143,7 +1165,7 @@ class HybridTrtRunner:
                 lst.append(ptr)
 
         # --- KV cache buffers ---
-        row_bytes = self.attention_size * 4
+        row_bytes = self.attention_size * self._cache_elem_bytes
         cache_bytes = max_cache_length * row_bytes
 
         self._d_cache_k: list[int] = []
@@ -1272,7 +1294,7 @@ class HybridTrtRunner:
                 self._ssm_state_bytes, D2D, stream)
 
         # D2D cache update: KV (append or shift)
-        row_bytes = self.attention_size * 4
+        row_bytes = self.attention_size * self._cache_elem_bytes
         for i in range(self.num_attention_layers):
             for cache_buf, present_buf in [
                 (self._d_cache_k[i], self._d_present_k[i]),
@@ -1313,7 +1335,7 @@ class HybridTrtRunner:
 
     def reset(self):
         """Zero all device state buffers and reset cache_length."""
-        cache_bytes = self.max_cache_length * self.attention_size * 4
+        cache_bytes = self.max_cache_length * self.attention_size * self._cache_elem_bytes
         for i in range(self.num_mamba_layers):
             _check_cuda(cudart.cudaMemsetAsync(
                 self._d_conv_state[i], 0, self._conv_state_bytes, self.stream)[0])
@@ -1412,17 +1434,22 @@ class Seq2SeqTrtRunner:
             hidden_size = cross_shape[1]
         self.hidden_size = hidden_size
 
+        cache_dtype = self.dec_engine.get_tensor_dtype("cache_k_0")
+        self._cache_elem_bytes = np.dtype(trt.nptype(cache_dtype)).itemsize
+
         err, self.stream = cudart.cudaStreamCreate()
         _check_cuda(err)
 
         self.cache_length = 0
         attention_window = max_cache_length + 1
-        row_bytes = self.attention_size * 4
+        row_bytes = self.attention_size * self._cache_elem_bytes
 
         # ----- Decoder device buffers -----
         cache_bytes = max_cache_length * row_bytes
-        self._d_cache_k = []; self._d_cache_v = []
-        self._d_present_k = []; self._d_present_v = []
+        self._d_cache_k = []
+        self._d_cache_v = []
+        self._d_present_k = []
+        self._d_present_v = []
         for _ in range(num_layers):
             for lst, sz in [(self._d_cache_k, cache_bytes), (self._d_cache_v, cache_bytes),
                             (self._d_present_k, row_bytes), (self._d_present_v, row_bytes)]:
@@ -1432,7 +1459,8 @@ class Seq2SeqTrtRunner:
 
         # Cross-attention K/V (per layer, [max_source_positions, hidden_size])
         cross_bytes = max_source_positions * hidden_size * 4
-        self._d_cross_k = []; self._d_cross_v = []
+        self._d_cross_k = []
+        self._d_cross_v = []
         for _ in range(num_layers):
             for lst in [self._d_cross_k, self._d_cross_v]:
                 err, ptr = cudart.cudaMalloc(cross_bytes)
@@ -1554,7 +1582,7 @@ class Seq2SeqTrtRunner:
         self.dec_context.execute_async_v3(stream)
 
         # D2D cache update
-        row_bytes = self.attention_size * 4
+        row_bytes = self.attention_size * self._cache_elem_bytes
         for i in range(self.num_layers):
             for cache_buf, present_buf in [
                 (self._d_cache_k[i], self._d_present_k[i]),
@@ -1577,7 +1605,7 @@ class Seq2SeqTrtRunner:
         return {"logits": self._h_logits.copy()}
 
     def reset(self):
-        cache_bytes = self.max_cache_length * self.attention_size * 4
+        cache_bytes = self.max_cache_length * self.attention_size * self._cache_elem_bytes
         for i in range(self.num_layers):
             _check_cuda(cudart.cudaMemsetAsync(self._d_cache_k[i], 0, cache_bytes, self.stream)[0])
             _check_cuda(cudart.cudaMemsetAsync(self._d_cache_v[i], 0, cache_bytes, self.stream)[0])
@@ -1605,9 +1633,12 @@ class Seq2SeqTrtRunner:
             return
         bufs = [self._d_token_id, self._d_position_id, self._d_mask, self._d_logits,
                 self._d_enc_input_ids, self._d_enc_mask, self._d_enc_out]
-        bufs.extend(self._d_cache_k); bufs.extend(self._d_cache_v)
-        bufs.extend(self._d_present_k); bufs.extend(self._d_present_v)
-        bufs.extend(self._d_cross_k); bufs.extend(self._d_cross_v)
+        bufs.extend(self._d_cache_k)
+        bufs.extend(self._d_cache_v)
+        bufs.extend(self._d_present_k)
+        bufs.extend(self._d_present_v)
+        bufs.extend(self._d_cross_k)
+        bufs.extend(self._d_cross_v)
         for d_ptr in bufs:
             cudart.cudaFree(d_ptr)
         if hasattr(self, "stream"):

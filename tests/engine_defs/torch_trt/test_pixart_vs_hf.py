@@ -9,11 +9,11 @@ This isolates regressions to specific components rather than relying on
 full-pipeline pixel comparison (which diverges due to scheduler differences).
 
 Usage (inside container):
-    pytest tests/torchtrt_builder/test_pixart_vs_hf.py -v \
+    pytest tests/engine_defs/torch_trt/test_pixart_vs_hf.py -v \
         --bundle /workspace/trt-transformers-cpp/engines/pixart_sigma.trtfb
 
 Or standalone:
-    python tests/torchtrt_builder/test_pixart_vs_hf.py \
+    python tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
         --bundle /workspace/trt-transformers-cpp/engines/pixart_sigma.trtfb
 """
 
@@ -67,7 +67,7 @@ def _get_bundle_path(request=None):
 def _load_trt_engine(bundle_path: str, section_name: str):
     """Load a TRT engine from a bundle section."""
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ttrt_build"))
-    from ttrt_build.bundle_reader import read_bundle_section
+    from trtf_build.engine_defs.torch_trt.bundle_reader import read_bundle_section
     data = read_bundle_section(bundle_path, section_name)
     logger = trt.Logger(trt.Logger.WARNING)
     runtime = trt.Runtime(logger)

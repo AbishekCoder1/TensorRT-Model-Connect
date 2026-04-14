@@ -440,6 +440,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "diffusion_zimage",
     "diffusion_pixart",
     "torchtrt_diffusion",
+    "diffusion_pixart_torchtrt",
     "segmentation",
     "prompted_segmentation",
     "encoder_only",

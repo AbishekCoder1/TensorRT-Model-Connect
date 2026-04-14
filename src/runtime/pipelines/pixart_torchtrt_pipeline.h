@@ -1,16 +1,16 @@
 #pragma once
 
-// TorchTrtDiffusionPipeline: Simplified diffusion pipeline for torch-trt engines.
+// PixArtTorchTrtPipeline: Simplified diffusion pipeline for torch-trt engines.
 //
-// Unlike WanPipeline which does CPU-side preprocessing (patch embedding,
+// Unlike PixArtPipeline which does CPU-side preprocessing (patch embedding,
 // timestep embedding, text projection), the torch-trt engines include all
 // preprocessing internally. The pipeline just:
-//   1. Tokenize prompt → run T5 → text embeddings
-//   2. For each step: run DiT(latent, text, timestep) → noise prediction
-//   3. Run VAE(latent) → image
+//   1. Tokenize prompt -> run T5 -> text embeddings
+//   2. For each step: run DiT(latent, text, timestep) -> noise prediction
+//   3. Run VAE(latent) -> image
 //
 // Bundle sections: text_encoder_0_plan, denoiser_plan, vae_decoder_plan,
-//                  config.json (with runtime_strategy="torchtrt_diffusion")
+//                  config.json (with runtime_strategy="diffusion_pixart_torchtrt")
 // No preprocessor_weights needed.
 
 #include "runtime/domains/diffusion/diffusion_types.h"
@@ -29,7 +29,7 @@
 namespace trtf {
 
 // DPM-Solver++ Multistep Scheduler (matches HF diffusers exactly).
-// See torchtrt_diffusion_pipeline.cpp for detailed algorithm comments.
+// See pixart_torchtrt_pipeline.cpp for detailed algorithm comments.
 struct DpmSolverState {
     std::vector<double> alpha_t;
     std::vector<double> sigma_t;
@@ -44,19 +44,19 @@ struct DpmSolverState {
               int32_t step_index, int32_t num_steps);
 };
 
-class TorchTrtDiffusionPipeline final : public IPipeline {
+class PixArtTorchTrtPipeline final : public IPipeline {
   public:
-    TorchTrtDiffusionPipeline(std::unique_ptr<TrtModule> text_encoder,
-                              std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
-                              DiffusionConfig config, std::shared_ptr<ITokenizer> tokenizer,
-                              std::string model_id_str);
+    PixArtTorchTrtPipeline(std::unique_ptr<TrtModule> text_encoder,
+                           std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
+                           DiffusionConfig config, std::shared_ptr<ITokenizer> tokenizer,
+                           std::string model_id_str);
 
-    ~TorchTrtDiffusionPipeline() override;
+    ~PixArtTorchTrtPipeline() override;
 
     ImageResult generate_image(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
     const char* model_id() const override { return model_id_.c_str(); }
-    const char* pipeline_type() const override { return "TorchTrtDiffusionPipeline"; }
+    const char* pipeline_type() const override { return "PixArtTorchTrtPipeline"; }
 
   private:
     bool run_t5_encoder(const std::vector<int32_t>& input_ids, std::vector<float>& text_embeddings,

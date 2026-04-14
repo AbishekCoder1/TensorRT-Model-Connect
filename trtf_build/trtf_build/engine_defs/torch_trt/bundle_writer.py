@@ -41,6 +41,8 @@ class TtrtBundleInfo:
     precision: str = "fp16"
     runtime_strategy: str = ""
     tokenizer_add_special_tokens: bool = False
+    build_backend: str = ""
+    io_map: dict | None = None  # tensor name mapping; None = TRT API defaults
 
 
 @dataclass
@@ -82,6 +84,9 @@ def write_bundle(
         "precision": info.precision,
         **({"runtime_strategy": info.runtime_strategy}
            if info.runtime_strategy else {}),
+        **({"build_backend": info.build_backend}
+           if info.build_backend else {}),
+        **({"io_map": info.io_map} if info.io_map else {}),
         "tokenizer_add_special_tokens": int(info.tokenizer_add_special_tokens),
         "sections": {
             s["name"]: {"offset": s["offset"], "size": s["size"]}

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,7 @@ class BundleInfo:
     precision: str = "fp32"
     quantization: str = "none"
     tokenizer_add_special_tokens: bool = False
+    io_map: dict | None = None  # tensor name mapping; None = TRT API defaults
 
 
 @dataclass
@@ -81,6 +82,7 @@ def write_bundle(
         **({"quantization": info.quantization}
            if info.quantization != "none" else {}),
         "tokenizer_add_special_tokens": int(info.tokenizer_add_special_tokens),
+        **({"io_map": info.io_map} if info.io_map else {}),
         "sections": {
             s["name"]: {"offset": s["offset"], "size": s["size"]}
             for s in section_meta

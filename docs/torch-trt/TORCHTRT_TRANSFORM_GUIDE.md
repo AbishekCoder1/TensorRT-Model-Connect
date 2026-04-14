@@ -71,12 +71,12 @@ mask[0, seq_len // 2:] = 0.0
 
 ```bash
 # Decoder models
-docker exec <container> trtf-build build --torch-trt <HF_ID> \
+docker exec <container> trtf-build build --backend torchtrt <HF_ID> \
   -o /workspace/trt-transformers-cpp/engines/<model>.trtfb \
   --max-cache-length 256 --verbose
 
 # Diffusion models (uses build_components path)
-docker exec <container> /opt/venv/bin/python -m ttrt_build build <HF_ID> \
+docker exec <container> trtf-build build --backend torchtrt <HF_ID> \
   -o /workspace/trt-transformers-cpp/engines/<model>.trtfb --verbose
 ```
 
@@ -179,7 +179,7 @@ Once output is correct, run the full validation suite:
 
 ```bash
 # Unit tests
-docker exec <container> python -m pytest tests/torchtrt_builder/ -v
+docker exec <container> python -m pytest tests/engine_defs/torch_trt/ -v
 
 # C++ tests
 docker exec <container> ctest --test-dir build --output-on-failure

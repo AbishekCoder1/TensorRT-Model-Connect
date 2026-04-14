@@ -16,6 +16,19 @@ namespace trtf {
 // PipelineContext holds a const reference, so no full definition needed here.
 struct BundleFile;
 
+// Tensor I/O name mapping — read from the bundle's config.json "io_map" object.
+// Per-layer patterns use tokens: {i}=layer, {2i}=2*layer, {2i+1}=2*layer+1, {2i+2}=2*layer+2.
+struct IoMap {
+    std::string token_id{"token_id"};
+    std::string position_id{"position_id"};
+    std::string attention_mask{"attention_mask"};
+    std::string logits{"logits"};
+    std::string cache_k_pattern{"cache_k_{i}"};
+    std::string cache_v_pattern{"cache_v_{i}"};
+    std::string present_k_pattern{"present_k_{i}"};
+    std::string present_v_pattern{"present_v_{i}"};
+};
+
 // Universal base config — the ~10 fields every pipeline needs.
 // Plugins parse strategy-specific fields directly from config_json.
 struct BaseConfig {
@@ -33,6 +46,7 @@ struct BaseConfig {
     std::string precision{"fp32"};
     bool tokenizer_add_special_tokens{false};
     bool tokenizer_add_special_tokens_present{false};
+    IoMap io_map;
 };
 
 // Parse universal base config from config.json text.
@@ -44,16 +58,16 @@ BaseConfig parse_base_config(const std::string& config_text, int32_t max_cache_l
 struct PipelineContext {
     const BundleFile& bundle;
     const BaseConfig& config;
-    const std::string& config_json;     // raw JSON text from bundle
-    const std::string& hf_python;       // path to HF Python interpreter
-    const std::string& bundle_path;     // filesystem path to .trtfb file
+    const std::string& config_json; // raw JSON text from bundle
+    const std::string& hf_python;   // path to HF Python interpreter
+    const std::string& bundle_path; // filesystem path to .trtfb file
 };
 
 // Plugin interface. Each plugin registers itself with the PipelineRegistry
 // via the REGISTER_PIPELINE_PLUGIN macro. The registry calls create() when
 // the bundle's runtime_strategy matches one of the plugin's registered keys.
 class IPipelinePlugin {
-public:
+  public:
     virtual ~IPipelinePlugin() = default;
 
     // Create a pipeline from the given context. The plugin is responsible for:
