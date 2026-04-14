@@ -381,6 +381,9 @@ endif()
 add_executable(trtf examples/trtf_cli.cpp)
 target_link_libraries(trtf PRIVATE trtf_core)
 target_include_directories(trtf PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb ${PROJECT_SOURCE_DIR}/src)
+if(TRTF_ENABLE_TRT AND TRTF_TRT_LIBRARY)
+  target_link_libraries(trtf PRIVATE ${TRTF_TRT_LIBRARY})
+endif()
 
 enable_testing()
 
