@@ -97,6 +97,7 @@ add_library(trtf_core
   src/cabi/api/trtf_c.cpp
   # Core runtime infrastructure (TRT engine, CUDA, KV cache, decode)
   src/runtime/core/trt_common.cpp
+  src/runtime/core/gpu_matmul.cpp
   src/runtime/core/trt_engine_lifecycle.cpp
   src/runtime/core/trt_decode_runtime.cpp
   src/runtime/core/sampler.cpp
@@ -219,13 +220,23 @@ target_include_directories(trtf_core SYSTEM PRIVATE
   ${nlohmann_json_SOURCE_DIR}/include
 )
 
-target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=1)
-target_include_directories(trtf_core SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-target_link_libraries(trtf_core PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
-message(STATUS "TensorRT: ${TRTF_TRT_INCLUDE_DIR}")
-message(STATUS "TensorRT lib: ${TRTF_TRT_LIBRARY}")
-message(STATUS "CUDA: ${TRTF_CUDA_INCLUDE_DIR}")
-message(STATUS "CUDART: ${TRTF_CUDART_LIBRARY}")
+option(TRTF_ENABLE_TRT "Enable TensorRT backend" ON)
+if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
+  target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=1)
+  target_include_directories(trtf_core SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
+  find_library(TRTF_CUBLAS_LIBRARY NAMES cublas libcublas.so
+    PATHS ${_trtf_default_search_paths} PATH_SUFFIXES "" lib lib64)
+  target_link_libraries(trtf_core PRIVATE ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY}
+    $<$<BOOL:${TRTF_CUBLAS_LIBRARY}>:${TRTF_CUBLAS_LIBRARY}>)
+  message(STATUS "TensorRT backend enabled")
+  message(STATUS "  TRT include: ${TRTF_TRT_INCLUDE_DIR}")
+  message(STATUS "  TRT library: ${TRTF_TRT_LIBRARY}")
+  message(STATUS "  CUDA include: ${TRTF_CUDA_INCLUDE_DIR}")
+  message(STATUS "  CUDART lib : ${TRTF_CUDART_LIBRARY}")
+else()
+  target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=0)
+  message(STATUS "TensorRT backend disabled (missing TensorRT or CUDA dev dependencies)")
+endif()
 
 add_executable(trtf examples/trtf_cli.cpp)
 target_link_libraries(trtf PRIVATE trtf_core)

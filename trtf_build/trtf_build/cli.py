@@ -77,6 +77,8 @@ def _cmd_build(args: argparse.Namespace) -> int:
         fp8_scales = "auto"
         print("[trtf-build] FP8 auto-calibration enabled", file=sys.stderr)
 
+    save_fp8_scales = getattr(args, 'save_fp8_scales', None)
+
     try:
         build(
             model_id_or_path=args.model,
@@ -88,6 +90,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             quant_calibration_samples=args.quant_calibration_samples,
             verbose=args.verbose,
             fp8_scales=fp8_scales,
+            save_fp8_scales=save_fp8_scales,
         )
         return 0
     except Exception as e:
@@ -247,6 +250,8 @@ def main() -> None:
                          help="Enable FP8 quantization (auto-calibrate via ModelOpt)")
     build_p.add_argument("--fp8-scales", default=None,
                          help="Path to pre-computed FP8 scales JSON (skips calibration)")
+    build_p.add_argument("--save-fp8-scales", default=None,
+                         help="Save calibrated FP8 scales to JSON (reuse with --fp8-scales)")
 
     # trtf-build inspect <bundle.trtfb>
     inspect_p = subparsers.add_parser("inspect",

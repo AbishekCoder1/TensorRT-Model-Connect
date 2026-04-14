@@ -150,11 +150,9 @@ class FluxPlugin:
         Detects FLUX.1 vs FLUX.2 from the transformer config and dispatches
         to the appropriate builders.
         """
-        import json
-        from pathlib import Path
 
-        transformer_dir = weights["_transformer_dir"]
-        vae_dir = weights["_vae_dir"]
+        weights["_transformer_dir"]
+        weights["_vae_dir"]
 
         # Read transformer config for exact params
         tc = weights.get("_transformer_config", {})
@@ -187,12 +185,12 @@ class FluxPlugin:
         num_heads = tc.get("num_attention_heads", self._DIT_NUM_HEADS)
         num_layers = tc.get("num_layers", self._DIT_NUM_LAYERS)
         num_single_layers = tc.get("num_single_layers", self._DIT_NUM_SINGLE_LAYERS)
-        in_channels = tc.get("in_channels", self._DIT_IN_CHANNELS)
-        patch_size = tc.get("patch_size", self._DIT_PATCH_SIZE)
-        joint_attn_dim = tc.get("joint_attention_dim", self._DIT_JOINT_ATTN_DIM)
-        pooled_proj_dim = tc.get("pooled_projection_dim", self._DIT_POOLED_PROJ_DIM)
+        tc.get("in_channels", self._DIT_IN_CHANNELS)
+        tc.get("patch_size", self._DIT_PATCH_SIZE)
+        tc.get("joint_attention_dim", self._DIT_JOINT_ATTN_DIM)
+        tc.get("pooled_projection_dim", self._DIT_POOLED_PROJ_DIM)
         guidance_embeds = tc.get("guidance_embeds", False)
-        axes_dims_rope = tuple(tc.get("axes_dims_rope", self._AXES_DIMS_ROPE))
+        tuple(tc.get("axes_dims_rope", self._AXES_DIMS_ROPE))
 
         # Image dimensions
         img_h = config.raw.get("image_height", self._IMAGE_HEIGHT)
@@ -348,8 +346,6 @@ class FluxPlugin:
             build_mistral_encoder_engine, load_mistral_encoder_weights)
         from ..flux2_dit_builder import build_flux2_dit_engine, load_flux2_dit_weights
         from ..flux_vae_builder import build_flux_vae_decoder_engine
-        import json
-        from pathlib import Path
 
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
@@ -363,13 +359,13 @@ class FluxPlugin:
         num_layers = tc.get("num_layers", self._FLUX2_DIT_NUM_LAYERS)
         num_single_layers = tc.get("num_single_layers", self._FLUX2_DIT_NUM_SINGLE_LAYERS)
         mlp_ratio = tc.get("mlp_ratio", self._FLUX2_DIT_MLP_RATIO)
-        axes_dims_rope = tuple(tc.get("axes_dims_rope", self._FLUX2_AXES_DIMS_ROPE))
+        tuple(tc.get("axes_dims_rope", self._FLUX2_AXES_DIMS_ROPE))
 
         # VAE params
         vc = weights.get("_vae_config", {})
         vae_latent_channels = vc.get("latent_channels", self._FLUX2_VAE_LATENT_CHANNELS)
-        vae_scaling = vc.get("scaling_factor", self._VAE_SCALING_FACTOR)
-        vae_shift = vc.get("shift_factor", self._VAE_SHIFT_FACTOR)
+        vc.get("scaling_factor", self._VAE_SCALING_FACTOR)
+        vc.get("shift_factor", self._VAE_SHIFT_FACTOR)
 
         # Image dimensions
         # FLUX.2 pipeline: noise is [z_dim, h_lat, w_lat], packed 2x2 for DiT.
@@ -440,7 +436,9 @@ class FluxPlugin:
         # Free GPU memory from encoder build before DiT (monolithic Myelin
         # compilation needs ~48 GB scratch).  Write the encoder plan to a temp
         # file so Python can release the bytes object.
-        import gc, tempfile, os
+        import gc
+        import os
+        import tempfile
         _te_tmp = None
         if text_encoders:
             _te_tmp = tempfile.NamedTemporaryFile(suffix=".plan", delete=False)
@@ -471,6 +469,12 @@ class FluxPlugin:
         _strongly_typed = fp8_scales is not None
         _cast_dtype = "bf16" if fp8_scales is not None else "fp16"
 
+        # packed_channels = z_dim * patch_h * patch_w (2x2 packing)
+        packed_channels = vae_latent_channels * 4
+        # t5_dim = Mistral hidden * num_extract_layers
+        text_encoder_dim = len(self._MISTRAL_EXTRACT_LAYERS) * m_hidden
+        _freq_dim = tc.get("timestep_guidance_channels", 256)
+
         dit_plan = build_flux2_dit_engine(
             dit_weights,
             dim=dit_dim,
@@ -480,6 +484,9 @@ class FluxPlugin:
             num_img_tokens=num_img_tokens,
             text_seq_len=text_seq_len,
             mlp_ratio=mlp_ratio,
+            packed_channels=packed_channels,
+            t5_dim=text_encoder_dim,
+            freq_dim=_freq_dim,
             verbose=verbose,
             strongly_typed=_strongly_typed,
             cast_dtype=_cast_dtype,
@@ -802,7 +809,6 @@ def _build_vae_placeholder(latent_channels, h_lat, w_lat, verbose):
     only to satisfy the bundle format requirement for a vae_decoder_plan.
     """
     import tensorrt as trt
-    import numpy as np
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)

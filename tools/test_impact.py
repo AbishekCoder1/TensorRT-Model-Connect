@@ -202,6 +202,9 @@ class ImpactMap:
     all_model_names_set: Set[str]
     core_models: List[str]
     builder_to_families: Dict[str, List[str]]       # parent module -> families
+    manifest_field_to_models: Dict[str, List[str]]
+    e2e_data_file_to_models: Dict[str, List[str]]
+    path_scope_overrides: Dict[str, List[str]]
 
 
 @dataclass
@@ -257,10 +260,13 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family plugins."""
     models_dir = repo_root / "tests" / "e2e" / "models"
     families_dir = repo_root / "trtf_build" / "trtf_build" / "families"
+    pipelines_dir = repo_root / "src" / "runtime" / "pipelines"
 
     family_to_models: Dict[str, List[str]] = {}
     strategy_to_models: Dict[str, List[str]] = {}
     task_strategy_to_models: Dict[str, List[str]] = {}
+    manifest_field_to_models_sets: Dict[str, Set[str]] = {}
+    e2e_data_file_to_models_sets: Dict[str, Set[str]] = {}
     all_model_names: List[str] = []
     core_models: List[str] = []
 
@@ -286,8 +292,41 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
                 task_strategy_to_models.setdefault(task_strategy, []).append(name)
         if is_core:
             core_models.append(name)
+        fp8_scales = data.get("fp8_scales")
+        if isinstance(fp8_scales, str) and fp8_scales:
+            manifest_field_to_models_sets.setdefault("fp8_scales", set()).add(name)
+            e2e_data_file_to_models_sets.setdefault(
+                f"tests/e2e/data/{fp8_scales}", set()).add(name)
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
+
+    def _models_for_scoped_strategies(strategies: Set[str]) -> List[str]:
+        models: Set[str] = set()
+        for strategy in strategies:
+            models.update(strategy_to_models.get(strategy, []))
+        return sorted(models)
+
+    path_scope_overrides: Dict[str, List[str]] = {}
+    scoped_cpp_tokens = {
+        "src/runtime/core/gpu_matmul.h": "gpu_matmul",
+        "src/runtime/core/gpu_matmul.cpp": "gpu_matmul",
+        "src/runtime/domains/diffusion/diffusion_denoising_step_seam.h": (
+            "diffusion_denoising_step_seam.h"
+        ),
+    }
+    if pipelines_dir.is_dir():
+        for path, token in scoped_cpp_tokens.items():
+            strategies: Set[str] = set()
+            for cpp_file in sorted(pipelines_dir.glob("*.cpp")):
+                try:
+                    content = cpp_file.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                if token not in content:
+                    continue
+                strategies.update(CPP_PIPELINE_STRATEGIES.get(cpp_file.stem, []))
+            if strategies:
+                path_scope_overrides[path] = _models_for_scoped_strategies(strategies)
 
     return ImpactMap(
         family_to_models=family_to_models,
@@ -297,6 +336,15 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         all_model_names_set=set(all_model_names),
         core_models=sorted(core_models),
         builder_to_families=builder_to_families,
+        manifest_field_to_models={
+            key: sorted(models)
+            for key, models in manifest_field_to_models_sets.items()
+        },
+        e2e_data_file_to_models={
+            path: sorted(models)
+            for path, models in e2e_data_file_to_models_sets.items()
+        },
+        path_scope_overrides=path_scope_overrides,
     )
 
 # ---------------------------------------------------------------------------
@@ -439,6 +487,10 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             )
         return RuleMatch("cpp_shared_helper_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
+    # Rule 6b: Scoped C++ helper/source used by a subset of pipelines
+    if path in imap.path_scope_overrides:
+        return RuleMatch("cpp_scoped_helper", imap.path_scope_overrides[path], unit_tiers, rebuild)
+
     # Rule 7: Any other C++ source/header
     if path.startswith("src/") or path.startswith("include/"):
         return RuleMatch("cpp_source", list(imap.all_model_names), unit_tiers, rebuild)
@@ -511,6 +563,10 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     if path == "CMakeLists.txt" or path.startswith("cmake/"):
         return RuleMatch("cmake", [], unit_tiers, rebuild)
 
+    # Rule 11b: E2E data file referenced by manifests
+    if path in imap.e2e_data_file_to_models:
+        return RuleMatch("e2e_data_file", imap.e2e_data_file_to_models[path], unit_tiers, rebuild)
+
     # Rule 12: Non-code files (no impact)
     if path.startswith("tools/") or path.startswith("scripts/"):
         return RuleMatch("no_impact", [], [], False)
@@ -534,6 +590,9 @@ def analyze_impact(
     imap: ImpactMap,
     cap: Optional[int] = None,
     coverage_map: Optional[Dict[str, List[str]]] = None,
+    base: Optional[str] = None,
+    head: Optional[str] = None,
+    repo_root: Optional[Path] = None,
 ) -> ImpactResult:
     """Analyze impact of all changed files and return aggregated result."""
     all_models: Set[str] = set()
@@ -543,6 +602,10 @@ def analyze_impact(
 
     for fpath in changed_files:
         match = classify_file(fpath, imap)
+        if base and head and repo_root:
+            diff_text = get_file_diff(base, head, repo_root, fpath)
+            if diff_text:
+                match = maybe_refine_match_with_diff(fpath, match, diff_text, imap)
         all_models.update(match.models)
         all_tiers.update(match.unit_tiers)
         rebuild_cpp = rebuild_cpp or match.rebuild_cpp
@@ -611,6 +674,107 @@ def get_changed_files(base: str, head: str, repo_root: Path) -> Optional[List[st
     print(f"WARNING: git diff failed for {base}..{head} -- "
           "treating as all files changed (safety net)", file=sys.stderr)
     return None
+
+
+def get_file_diff(base: str, head: str, repo_root: Path, path: str) -> Optional[str]:
+    """Get unified=0 diff for a single file, or None if git diff fails."""
+    for cmd in [
+        ["git", "diff", "--unified=0", f"{base}...{head}", "--", path],
+        ["git", "diff", "--unified=0", base, head, "--", path],
+    ]:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=True, cwd=repo_root,
+            )
+            return result.stdout
+        except subprocess.CalledProcessError:
+            continue
+    return None
+
+
+def _significant_diff_lines(diff_text: str) -> List[str]:
+    """Extract changed code lines, ignoring headers and pure formatting noise."""
+    lines: List[str] = []
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith(("diff --git", "index ", "@@", "---", "+++")):
+            continue
+        if not raw_line.startswith(("+", "-")):
+            continue
+        content = raw_line[1:].strip()
+        if not content:
+            continue
+        if re.fullmatch(r"[\[\]{}(),;]+", content):
+            continue
+        lines.append(content)
+    return lines
+
+
+def _normalize_diff_line(line: str) -> str:
+    """Normalize changed lines for token-based diff heuristics."""
+    return re.sub(r"[-\s]+", "_", line.lower())
+
+
+def maybe_refine_match_with_diff(
+    path: str,
+    match: RuleMatch,
+    diff_text: str,
+    imap: ImpactMap,
+) -> RuleMatch:
+    """Narrow broad file matches when the diff is demonstrably feature-scoped."""
+    lines = _significant_diff_lines(diff_text)
+    if not lines:
+        return match
+
+    fp8_models = imap.manifest_field_to_models.get("fp8_scales", [])
+
+    if path == "tests/e2e_harness/orchestrator.py":
+        allowed = {
+            "CILane,",
+            'fp8_scales = case.metadata.get("fp8_scales")',
+            "if fp8_scales:",
+            "# Resolve relative to tests/e2e/data/",
+            'scales_path = Path(__file__).parent.parent / "e2e" / "data" / fp8_scales',
+            "if scales_path.is_file():",
+            'cmd.extend(["--fp8-scales", str(scales_path)])',
+        }
+        if all(line in allowed for line in lines):
+            return RuleMatch(
+                "harness_shared_fp8_scales", fp8_models,
+                match.unit_tiers, match.rebuild_cpp,
+            )
+
+    if path == "trtf_build/trtf_build/cli.py":
+        allowed_tokens = ("fp8_scales", "save_fp8_scales")
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "shared_builder_fp8_scales_cli", fp8_models,
+                match.unit_tiers, match.rebuild_cpp,
+            )
+
+    if path == "trtf_build/trtf_build/engine_builder.py":
+        allowed_tokens = (
+            "fp8_scales",
+            "save_fp8_scales",
+            "_build_diffusion_bundle(",
+            "_effective_precision",
+            '"precision"',
+            '"quantization"',
+            "cfg_dict[",
+            "fp8_scales",
+        )
+        if all(
+            any(token in _normalize_diff_line(line) for token in allowed_tokens)
+            for line in lines
+        ):
+            return RuleMatch(
+                "shared_builder_fp8_scales_engine", fp8_models,
+                match.unit_tiers, match.rebuild_cpp,
+            )
+
+    return match
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -803,7 +967,15 @@ def main() -> int:
             cap_applied=False, matched_rules=[],
         )
     else:
-        result_obj = analyze_impact(changed, imap, cap=args.cap, coverage_map=coverage_map_data)
+        result_obj = analyze_impact(
+            changed,
+            imap,
+            cap=args.cap,
+            coverage_map=coverage_map_data,
+            base=args.base,
+            head=args.head,
+            repo_root=repo_root,
+        )
 
     if args.verbose:
         for rule in result_obj.matched_rules:

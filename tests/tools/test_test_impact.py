@@ -44,7 +44,10 @@ def mock_repo(tmp_path):
     families_dir.mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "plugins" / "shared").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "pipelines").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "core").mkdir(parents=True)
+    (tmp_path / "src" / "runtime" / "domains" / "diffusion").mkdir(parents=True)
     (tmp_path / "include" / "trtf").mkdir(parents=True)
+    (tmp_path / "tests" / "e2e" / "data").mkdir(parents=True)
     (tmp_path / "tests" / "e2e_harness" / "runners").mkdir(parents=True)
     (tmp_path / "tests" / "e2e_harness" / "comparators").mkdir(parents=True)
     (tmp_path / "tests" / "e2e_harness" / "references").mkdir(parents=True)
@@ -68,6 +71,8 @@ def mock_repo(tmp_path):
          "hf_id": "openai/whisper-tiny", "core": True},
         {"name": "flux-schnell", "family": "flux", "runtime_strategy": "diffusion_flux",
          "hf_id": "bf/FLUX", "core": True},
+        {"name": "flux-2-dev-fp8", "family": "flux", "runtime_strategy": "diffusion_flux",
+         "hf_id": "bf/FLUX2", "fp8_scales": "flux2-fp8-scales.json"},
         {"name": "mamba-130m", "family": "mamba", "runtime_strategy": "ssm_recurrent",
          "hf_id": "ss/mamba", "core": True},
         {"name": "qwen25vl-3b", "family": "qwen_vl", "runtime_strategy": "vision_language",
@@ -116,6 +121,19 @@ def mock_repo(tmp_path):
     (tmp_path / "trtf_build" / "trtf_build" / "config.py").write_text("")
     (tmp_path / "trtf_build" / "trtf_build" / "checkpoint_mapper.py").write_text("")
     (tmp_path / "trtf_build" / "trtf_build" / "graph_ops.py").write_text("")
+    (tmp_path / "src" / "runtime" / "pipelines" / "flux_pipeline.cpp").write_text(
+        '#include "runtime/core/gpu_matmul.h"\n'
+        '#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "runtime" / "pipelines" / "pixart_pipeline.cpp").write_text(
+        '#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "e2e" / "data" / "flux2-fp8-scales.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
 
     return tmp_path
 
@@ -300,6 +318,22 @@ class TestCppScope:
         assert match.models == []
         assert match.rebuild_cpp is True
 
+    def test_scoped_cpp_helper_gpu_matmul(self, imap):
+        """gpu_matmul.cpp -> only the pipelines that reference it."""
+        match = test_impact.classify_file(
+            "src/runtime/core/gpu_matmul.cpp", imap)
+        assert match.rule == "cpp_scoped_helper"
+        assert "flux-schnell" in match.models
+        assert "qwen3-0.6b" not in match.models
+
+    def test_scoped_cpp_helper_diffusion_seam(self, imap):
+        """diffusion seam helper -> only diffusion pipelines that include it."""
+        match = test_impact.classify_file(
+            "src/runtime/domains/diffusion/diffusion_denoising_step_seam.h", imap)
+        assert match.rule == "cpp_scoped_helper"
+        assert "flux-schnell" in match.models
+        assert "qwen3-0.6b" not in match.models
+
 
 # ---------------------------------------------------------------------------
 # Safety net tests
@@ -377,6 +411,15 @@ class TestNoImpact:
         match = test_impact.classify_file(".gitignore", imap)
         assert match.rule == "no_impact"
         assert match.models == []
+
+
+class TestE2EDataFiles:
+    def test_data_file_maps_to_manifest_users(self, imap):
+        """Checked-in E2E data should map to manifests that reference it."""
+        match = test_impact.classify_file(
+            "tests/e2e/data/flux2-fp8-scales.json", imap)
+        assert match.rule == "e2e_data_file"
+        assert match.models == ["flux-2-dev-fp8"]
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +506,65 @@ class TestHarness:
         match = test_impact.classify_file("tests/conftest.py", imap)
         assert match.rule == "e2e_entrypoint"
         assert len(match.models) == len(imap.all_model_names)
+
+    def test_harness_orchestrator_fp8_diff_can_be_refined(self, imap):
+        """Diff-only fp8_scales plumbing narrows orchestrator scope."""
+        diff_text = """
+diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.py
+@@ -1 +1 @@
+-    CILane,
++    fp8_scales = case.metadata.get("fp8_scales")
++    if fp8_scales:
++        # Resolve relative to tests/e2e/data/
++        scales_path = Path(__file__).parent.parent / "e2e" / "data" / fp8_scales
++        if scales_path.is_file():
++            cmd.extend(["--fp8-scales", str(scales_path)])
+"""
+        broad = test_impact.classify_file("tests/e2e_harness/orchestrator.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "tests/e2e_harness/orchestrator.py", broad, diff_text, imap)
+        assert refined.rule == "harness_shared_fp8_scales"
+        assert refined.models == ["flux-2-dev-fp8"]
+
+
+class TestDiffAwareBuilderRefinement:
+    def test_cli_fp8_diff_can_be_refined(self, imap):
+        """CLI fp8-only plumbing narrows to fp8-scales manifests."""
+        diff_text = """
+diff --git a/trtf_build/trtf_build/cli.py b/trtf_build/trtf_build/cli.py
+@@ -1 +1 @@
++    save_fp8_scales = getattr(args, 'save_fp8_scales', None)
++            save_fp8_scales=save_fp8_scales,
++    build_p.add_argument("--save-fp8-scales", default=None,
+"""
+        broad = test_impact.classify_file("trtf_build/trtf_build/cli.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "trtf_build/trtf_build/cli.py", broad, diff_text, imap)
+        assert refined.rule == "shared_builder_fp8_scales_cli"
+        assert refined.models == ["flux-2-dev-fp8"]
+
+    def test_engine_builder_fp8_diff_can_be_refined(self, imap):
+        """Diffusion fp8-only engine_builder changes narrow to fp8-scales manifests."""
+        diff_text = """
+diff --git a/trtf_build/trtf_build/engine_builder.py b/trtf_build/trtf_build/engine_builder.py
+@@ -1 +1 @@
++        save_fp8_scales = getattr(build_bundle, '_save_fp8_scales', None)
++            fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales)
++    save_fp8_scales: str | None = None,
++    if save_fp8_scales and isinstance(fp8_scales, dict):
++    _effective_precision = "bf16" if fp8_scales else precision
+-        "precision": precision,
++        "precision": _effective_precision,
++        cfg_dict["quantization"] = {"format": "fp8"}
++    save_fp8_scales: str | None = None,
++        save_fp8_scales: Path to save calibrated FP8 scales JSON.
++    build_bundle._save_fp8_scales = save_fp8_scales
+"""
+        broad = test_impact.classify_file("trtf_build/trtf_build/engine_builder.py", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "trtf_build/trtf_build/engine_builder.py", broad, diff_text, imap)
+        assert refined.rule == "shared_builder_fp8_scales_engine"
+        assert refined.models == ["flux-2-dev-fp8"]
 
 
 # ---------------------------------------------------------------------------

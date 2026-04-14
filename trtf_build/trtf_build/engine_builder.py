@@ -379,10 +379,11 @@ def build_bundle(
 
     if is_diffusers:
         fp8_scales = getattr(build_bundle, '_fp8_scales', None)
+        save_fp8_scales = getattr(build_bundle, '_save_fp8_scales', None)
         _build_diffusion_bundle(
             model_dir_path, output_path, max_cache_length,
             precision=precision, verbose=verbose, t0=t0,
-            fp8_scales=fp8_scales)
+            fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales)
         return
 
     # 1. Parse config
@@ -596,6 +597,7 @@ def _build_diffusion_bundle(
     verbose: bool = False,
     t0: float = 0.0,
     fp8_scales: dict | None = None,
+    save_fp8_scales: str | None = None,
 ) -> None:
     """Build a diffusion model bundle from a diffusers-format directory."""
     # Parse model_index.json to determine pipeline type
@@ -643,6 +645,13 @@ def _build_diffusion_bundle(
         print(f"[trtf-build] Calibrated {len(fp8_scales)} layers",
               file=sys.stderr)
 
+    # Save FP8 scales to JSON if requested
+    if save_fp8_scales and isinstance(fp8_scales, dict):
+        with open(save_fp8_scales, "w") as _sf:
+            json.dump(fp8_scales, _sf, indent=2)
+        print(f"[trtf-build] Saved FP8 scales to {save_fp8_scales} "
+              f"({len(fp8_scales)} layers)", file=sys.stderr)
+
     # Build all component engines
     build_components = getattr(plugin, 'build_components', None)
     if build_components is None:
@@ -689,12 +698,15 @@ def _build_diffusion_bundle(
               file=sys.stderr)
 
     # Build config.json with diffusion config injected
+    _effective_precision = "bf16" if fp8_scales else precision
     cfg_dict = {
         "model_type": model_type,
         "runtime_strategy": getattr(plugin, "runtime_strategy", "diffusion"),
-        "precision": precision,
+        "precision": _effective_precision,
         "num_text_encoders": len(components["text_encoders"]),
     }
+    if fp8_scales:
+        cfg_dict["quantization"] = {"format": "fp8"}
 
     # Inject diffusion config from plugin
     get_diff_config = getattr(plugin, 'get_diffusion_config', None)
@@ -782,6 +794,7 @@ def build(
     quant_calibration_samples: int = 512,
     verbose: bool = False,
     fp8_scales: dict | str | None = None,
+    save_fp8_scales: str | None = None,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -795,10 +808,12 @@ def build(
         max_cache_length: KV cache length for the engine.
         verbose: Print detailed TRT builder logs.
         fp8_scales: Per-layer FP8 scales dict, or ``"auto"`` for auto-calibration.
+        save_fp8_scales: Path to save calibrated FP8 scales JSON.
     """
     model_dir = _resolve_model(model_id_or_path)
     build_bundle._model_id_or_path_orig = model_id_or_path
     build_bundle._fp8_scales = fp8_scales
+    build_bundle._save_fp8_scales = save_fp8_scales
     build_bundle(model_dir, output_path, max_cache_length,
                  precision=precision,
                  quantize=quantize,

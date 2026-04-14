@@ -3,11 +3,11 @@
 // FluxPipeline: FLUX diffusion pipeline with T5 + CLIP text encoders,
 // denoiser, and VAE. Uses TrtModule::forward() for all GPU work.
 
-#include "trtf/pipeline.h"
-#include "trtf/tokenizer.h"
-#include "trtf/runtime/trt_module.h"
-#include "runtime/domains/diffusion/diffusion_types.h"
 #include "runtime/domains/diffusion/diffusion_generation_plan.h"
+#include "runtime/domains/diffusion/diffusion_types.h"
+#include "trtf/pipeline.h"
+#include "trtf/runtime/trt_module.h"
+#include "trtf/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
@@ -19,16 +19,12 @@
 namespace trtf {
 
 class FluxPipeline final : public IPipeline {
-public:
-    FluxPipeline(
-        std::vector<std::unique_ptr<TrtModule>> text_encoders,
-        std::unique_ptr<TrtModule> denoiser,
-        std::unique_ptr<TrtModule> vae,
-        DiffusionConfig config,
-        PreprocessorWeights weights,
-        std::shared_ptr<ITokenizer> tokenizer,
-        std::unique_ptr<ITokenizer> clip_tokenizer,
-        std::string model_id_str);
+  public:
+    FluxPipeline(std::vector<std::unique_ptr<TrtModule>> text_encoders,
+                 std::unique_ptr<TrtModule> denoiser, std::unique_ptr<TrtModule> vae,
+                 DiffusionConfig config, PreprocessorWeights weights,
+                 std::shared_ptr<ITokenizer> tokenizer, std::unique_ptr<ITokenizer> clip_tokenizer,
+                 std::string model_id_str);
 
     ~FluxPipeline() override;
 
@@ -37,51 +33,40 @@ public:
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "FluxPipeline"; }
 
-private:
-    bool run_clip_encoder(const std::vector<int32_t>& input_ids,
-                          std::vector<float>& pooled_output);
-    bool run_t5_encoder(int32_t encoder_idx,
-                        const std::vector<int32_t>& input_ids,
+  private:
+    bool run_clip_encoder(const std::vector<int32_t>& input_ids, std::vector<float>& pooled_output);
+    bool run_t5_encoder(int32_t encoder_idx, const std::vector<int32_t>& input_ids,
                         std::vector<float>& text_embeddings);
     bool run_flux_denoiser(const std::vector<float>& hidden,
-                           const std::vector<float>& encoder_hidden,
-                           const std::vector<float>& temb,
-                           const std::vector<float>& cos_vals,
-                           const std::vector<float>& sin_vals,
+                           const std::vector<float>& encoder_hidden, const std::vector<float>& temb,
+                           const std::vector<float>& cos_vals, const std::vector<float>& sin_vals,
                            std::vector<float>& output);
+    // FLUX.2: denoiser with baked temb MLP + context embedder
+    bool run_flux2_denoiser(const std::vector<float>& hidden,
+                            const std::vector<float>& encoder_hidden, float timestep,
+                            float guidance, const std::vector<float>& cos_vals,
+                            const std::vector<float>& sin_vals, std::vector<float>& output);
 
-    void compute_flux_timestep_embedding(
-        float timestep, float guidance,
-        const std::vector<float>& pooled_text,
-        std::vector<float>& temb) const;
-    void compute_flux_rope(
-        int32_t h_patches, int32_t w_patches, int32_t text_seq_len,
-        std::vector<float>& cos_out, std::vector<float>& sin_out) const;
+    void compute_flux_timestep_embedding(float timestep, float guidance,
+                                         const std::vector<float>& pooled_text,
+                                         std::vector<float>& temb) const;
+    void compute_flux_rope(int32_t h_patches, int32_t w_patches, int32_t text_seq_len,
+                           std::vector<float>& cos_out, std::vector<float>& sin_out) const;
 
-    bool prepare_conditioning(
-        const std::string& prompt,
-        const GenerateConfig& cfg,
-        diffusion::FluxGenerationPlan& plan,
-        std::vector<float>& pooled_output,
-        std::vector<float>& text_embeddings);
-    void prepare_denoising_state(
-        const diffusion::FluxGenerationPlan& plan,
-        const std::vector<float>& text_embeddings,
-        std::vector<float>& encoder_hidden,
-        std::vector<float>& cos_vals,
-        std::vector<float>& sin_vals,
-        std::vector<float>& latents);
-    bool run_denoising(
-        const diffusion::FluxGenerationPlan& plan,
-        const std::vector<float>& pooled_output,
-        std::vector<float>& encoder_hidden,
-        std::vector<float>& cos_vals,
-        std::vector<float>& sin_vals,
-        std::vector<float>& latents);
-    bool decode_and_convert(
-        const diffusion::FluxGenerationPlan& plan,
-        std::vector<float>& latents,
-        ImageResult& result);
+    bool prepare_conditioning(const std::string& prompt, const GenerateConfig& cfg,
+                              diffusion::FluxGenerationPlan& plan,
+                              std::vector<float>& pooled_output,
+                              std::vector<float>& text_embeddings);
+    void prepare_denoising_state(const diffusion::FluxGenerationPlan& plan,
+                                 const std::vector<float>& text_embeddings,
+                                 std::vector<float>& encoder_hidden, std::vector<float>& cos_vals,
+                                 std::vector<float>& sin_vals, std::vector<float>& latents);
+    bool run_denoising(const diffusion::FluxGenerationPlan& plan,
+                       const std::vector<float>& pooled_output, std::vector<float>& encoder_hidden,
+                       std::vector<float>& cos_vals, std::vector<float>& sin_vals,
+                       std::vector<float>& latents);
+    bool decode_and_convert(const diffusion::FluxGenerationPlan& plan, std::vector<float>& latents,
+                            ImageResult& result);
 
     std::vector<std::unique_ptr<TrtModule>> text_encoders_;
     std::unique_ptr<TrtModule> denoiser_;

@@ -33,7 +33,6 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import (
-    CILane,
     CompareResult,
     E2ECase,
     E2EResult,
@@ -236,6 +235,12 @@ def _resolve_bundle(
         cmd.extend(["--precision", precision])
     if case.metadata.get("trust_remote_code"):
         cmd.append("--trust-remote-code")
+    fp8_scales = case.metadata.get("fp8_scales")
+    if fp8_scales:
+        # Resolve relative to tests/e2e/data/
+        scales_path = Path(__file__).parent.parent / "e2e" / "data" / fp8_scales
+        if scales_path.is_file():
+            cmd.extend(["--fp8-scales", str(scales_path)])
 
     logger.info("Building bundle: %s", " ".join(cmd))
     t0 = time.monotonic()

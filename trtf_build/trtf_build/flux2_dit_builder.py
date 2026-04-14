@@ -186,6 +186,9 @@ def build_flux2_dit_engine(
     num_img_tokens: int,
     text_seq_len: int = 512,
     mlp_ratio: float = 3.0,
+    packed_channels: int = 128,
+    t5_dim: int = 15360,
+    freq_dim: int = 256,
     eps: float = 1e-6,
     verbose: bool = False,
     strongly_typed: bool = False,
@@ -234,12 +237,16 @@ def build_flux2_dit_engine(
           file=sys.stderr)
 
     # --- Inputs ---
+    # All preprocessor ops (x_embedder, context_embedder, temb MLP) are baked
+    # into the engine — no CPU/cuBLAS needed at runtime.
     hidden_inp = network.add_input(
-        "hidden_states", trt.float32, (num_img_tokens, dim))
+        "hidden_states", trt.float32, (num_img_tokens, packed_channels))
     encoder_inp = network.add_input(
-        "encoder_hidden_states", trt.float32, (text_seq_len, dim))
-    temb_inp = network.add_input(
-        "temb", trt.float32, (dim,))
+        "encoder_hidden_states", trt.float32, (text_seq_len, t5_dim))
+    timestep_inp = network.add_input(
+        "timestep", trt.float32, (1,))
+    guidance_inp = network.add_input(
+        "guidance", trt.float32, (1,))
     rotary_cos = network.add_input(
         "rotary_cos", trt.float32, (total_seq, head_dim))
     rotary_sin = network.add_input(
@@ -287,10 +294,105 @@ def build_flux2_dit_engine(
         hidden = _to_compute_dtype(network, hidden)
         encoder_hidden = _to_compute_dtype(network, encoder_hidden)
 
-    # --- Compute SiLU(temb) once for all modulation ---
-    temb_work = temb_inp
+    # --- x_embedder: packed latents [num_img_tokens, packed_channels] → [num_img_tokens, dim] ---
+    x_emb_w = weights.get("x_embedder.weight")  # [packed_channels, dim]
+    if x_emb_w is not None:
+        _xe_inp_s = _FP8_SCALES.get("x_embedder", {}).get("input_scale")
+        _xe_wt_s = _FP8_SCALES.get("x_embedder", {}).get("weight_scale")
+        hidden = _matmul_reduced_precision(network, hidden, packed_channels, dim, x_emb_w,
+                                           inp_scale=_xe_inp_s, wt_scale=_xe_wt_s)
+        x_emb_b = weights.get("x_embedder.bias")
+        if x_emb_b is not None:
+            hidden = _bias_sum_reduced(network, hidden, dim, x_emb_b)
+
+    # --- context_embedder: raw T5 [text_seq, t5_dim] → [text_seq, dim] ---
+    ctx_w = weights.get("context_embedder.weight")  # [t5_dim, dim]
+    if ctx_w is not None:
+        encoder_hidden = _matmul_reduced_precision(
+            network, encoder_hidden, t5_dim, dim, ctx_w)
+        ctx_b = weights.get("context_embedder.bias")
+        if ctx_b is not None:
+            encoder_hidden = _bias_sum_reduced(network, encoder_hidden, dim, ctx_b)
+
+    # --- temb MLP: sinusoidal(timestep) → Linear → SiLU → Linear + guidance ---
+    # Build sinusoidal frequency table as constant: freqs[i] = 1/(10000^(2i/freq_dim))
+    half_freq = freq_dim // 2
+    freq_np = 1.0 / (10000.0 ** (np.arange(half_freq, dtype=np.float32) / half_freq))
+    # freq_const shape [1, half_freq]
     if _ALL_BF16:
-        temb_work = _to_compute_dtype(network, temb_work)
+        freq_const = _add_constant_reduced(network, (1, half_freq), freq_np)
+    else:
+        freq_const = graph_ops.add_constant(network, (1, half_freq), freq_np)
+
+    def _build_sinusoidal_embedding(scalar_inp):
+        """Build sinusoidal embedding: scalar → [1, freq_dim]."""
+        # Scale timestep by 1000 (FLUX convention)
+        s1000 = graph_ops.add_constant(network, (1,), np.array([1000.0], dtype=np.float32))
+        scaled = network.add_elementwise(
+            scalar_inp, s1000, trt.ElementWiseOperation.PROD).get_output(0)
+        if _ALL_BF16:
+            scaled = _to_compute_dtype(network, scaled)
+        # Reshape to [1, 1] for broadcast multiply
+        scaled_2d = network.add_shuffle(scaled)
+        scaled_2d.reshape_dims = (1, 1)
+        # args = scaled * freqs → [1, half_freq]
+        args = network.add_elementwise(
+            scaled_2d.get_output(0), freq_const,
+            trt.ElementWiseOperation.PROD).get_output(0)
+        # cos and sin — C++ convention is [cos, sin]
+        cos_out = network.add_unary(args, trt.UnaryOperation.COS).get_output(0)
+        sin_out = network.add_unary(args, trt.UnaryOperation.SIN).get_output(0)
+        # Concatenate [cos, sin] → [1, freq_dim]
+        cat = network.add_concatenation([cos_out, sin_out])
+        cat.axis = 1
+        return cat.get_output(0)
+
+    def _build_mlp_2layer(emb, w0_key, w2_key):
+        """Linear → SiLU → Linear, returns [1, dim]."""
+        w0 = weights.get(f"{w0_key}.weight")
+        b0 = weights.get(f"{w0_key}.bias")
+        w2 = weights.get(f"{w2_key}.weight")
+        b2 = weights.get(f"{w2_key}.bias")
+        if w0 is None or w2 is None:
+            return None
+        in_dim = w0.shape[0]
+        out_dim = w0.shape[1]
+        x = _matmul_reduced_precision(network, emb, in_dim, out_dim, w0)
+        if b0 is not None:
+            x = _bias_sum_reduced(network, x, out_dim, b0)
+        # SiLU = x * sigmoid(x)
+        sig = network.add_activation(x, trt.ActivationType.SIGMOID)
+        x = network.add_elementwise(
+            x, sig.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+        out2_dim = w2.shape[1]
+        x = _matmul_reduced_precision(network, x, out_dim, out2_dim, w2)
+        if b2 is not None:
+            x = _bias_sum_reduced(network, x, out2_dim, b2)
+        return x
+
+    # Timestep embedding: sinusoidal(t) → MLP → [1, dim]
+    t_sinusoidal = _build_sinusoidal_embedding(timestep_inp)
+    temb_combined = _build_mlp_2layer(
+        t_sinusoidal,
+        "time_text_embed.timestep_embedder.linear_1",
+        "time_text_embed.timestep_embedder.linear_2")
+
+    # Guidance embedding: sinusoidal(g) → MLP → [1, dim], added to temb
+    g_sinusoidal = _build_sinusoidal_embedding(guidance_inp)
+    g_proj = _build_mlp_2layer(
+        g_sinusoidal,
+        "time_text_embed.guidance_embedder.linear_1",
+        "time_text_embed.guidance_embedder.linear_2")
+    if g_proj is not None and temb_combined is not None:
+        temb_combined = network.add_elementwise(
+            temb_combined, g_proj, trt.ElementWiseOperation.SUM).get_output(0)
+
+    # Reshape temb from [1, dim] to [dim] for downstream modulation
+    temb_squeeze = network.add_shuffle(temb_combined)
+    temb_squeeze.reshape_dims = (dim,)
+    temb_work = temb_squeeze.get_output(0)
+
+    # --- Compute SiLU(temb) once for all modulation ---
     temb_silu = network.add_activation(temb_work, trt.ActivationType.SIGMOID)
     temb_silu_out = network.add_elementwise(
         temb_work, temb_silu.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
@@ -484,8 +586,8 @@ def build_flux2_dit_engine(
     final_norm_w = weights["norm_out.linear.weight"]
     final_norm_b = weights.get("norm_out.linear.bias")
 
-    # Reuse BF16 temb if _ALL_BF16, otherwise cast from FP32 input
-    temb_final = temb_work if _ALL_BF16 else temb_inp
+    # temb_work is already in compute dtype (BF16 or FP32) from the temb MLP above
+    temb_final = temb_work
     temb_silu_f = network.add_activation(temb_final, trt.ActivationType.SIGMOID)
     temb_silu_f_out = network.add_elementwise(
         temb_final, temb_silu_f.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
