@@ -21,8 +21,8 @@
 // =============================================================================
 
 #include "runtime/pipelines/text_generation_pipeline.h"
-#include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/kv_cache.h"
+#include "trtf/runtime/trt_module.h"
 // pipeline_interface.h was removed; GenerateConfig is in trtf/pipeline.h
 // (already included transitively via text_generation_pipeline.h)
 
@@ -32,18 +32,17 @@
 #include <vector>
 
 #if TRTF_HAS_TRT
+#include "runtime/backend/trt_module_impl.h"
+#include "runtime/core/trt_common.h"
+
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#include "runtime/core/trt_common.h"
-#include "runtime/backend/trt_module_impl.h"
 #endif
 
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
@@ -58,27 +57,27 @@ static trtf::TrtLogger g_logger;
 // Outputs: logits [4] float32
 // The engine produces fixed logits [0.1, 0.2, 0.9, 0.3] regardless of input
 // (identity on a constant), so argmax always returns 2.
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder()
-{
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(
-        nvinfer1::createInferBuilder(g_logger));
-    if (!builder) return nullptr;
+static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
+    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    if (!builder)
+        return nullptr;
 
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(
-        builder->createNetworkV2(0));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(
-        builder->createBuilderConfig());
+    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     // Inputs
-    auto* token_inp = network->addInput("token_id", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
-    auto* mask_inp = network->addInput("attention_mask", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {8}});
+    auto* token_inp =
+        network->addInput("token_id", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
+    auto* mask_inp =
+        network->addInput("attention_mask", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {8}});
 
     // Constant logits: [0.1, 0.2, 0.9, 0.3] — argmax = index 2
     float const_logits[4] = {0.1f, 0.2f, 0.9f, 0.3f};
-    auto* const_w = network->addConstant(nvinfer1::Dims{1, {4}},
-        nvinfer1::Weights{nvinfer1::DataType::kFLOAT, const_logits, 4});
-    if (!const_w) return nullptr;
+    auto* const_w = network->addConstant(
+        nvinfer1::Dims{1, {4}}, nvinfer1::Weights{nvinfer1::DataType::kFLOAT, const_logits, 4});
+    if (!const_w)
+        return nullptr;
 
     auto* out = const_w->getOutput(0);
     out->setName("logits");
@@ -95,19 +94,17 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder()
 
     auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
-    if (!plan) return nullptr;
+    if (!plan)
+        return nullptr;
 
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(
-        nvinfer1::createInferRuntime(g_logger));
+    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
     return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
-static void test_pipeline_construction()
-{
+static void test_pipeline_construction() {
     auto engine = build_mock_decoder();
-    if (!engine)
-    {
+    if (!engine) {
         std::cerr << "WARNING: Could not build mock decoder engine, skipping test\n";
         return;
     }
@@ -115,29 +112,26 @@ static void test_pipeline_construction()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+                                                        engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_bos = 0;
-    cfg.id_eos = 2;  // argmax will always hit this!
+    cfg.id_eos = 2; // argmax will always hit this!
     cfg.has_position_input = false;
 
-    trtf::TextGenerationPipeline pipeline(
-        std::move(module), std::move(cache), cfg, stream);
+    trtf::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
-    check(std::string(pipeline.pipeline_type()) == "TextGenerationPipeline",
-          "pipeline name");
+    check(std::string(pipeline.pipeline_type()) == "TextGenerationPipeline", "pipeline name");
 
     cudaStreamDestroy(stream);
 }
 
-static void test_generate_stops_at_eos()
-{
+static void test_generate_stops_at_eos() {
     auto engine = build_mock_decoder();
-    if (!engine)
-    {
+    if (!engine) {
         std::cerr << "WARNING: Could not build mock decoder engine, skipping test\n";
         return;
     }
@@ -145,17 +139,17 @@ static void test_generate_stops_at_eos()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+                                                        engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_bos = 0;
-    cfg.id_eos = 2;  // argmax of [0.1, 0.2, 0.9, 0.3] = 2 = eos
+    cfg.id_eos = 2; // argmax of [0.1, 0.2, 0.9, 0.3] = 2 = eos
     cfg.has_position_input = false;
 
-    trtf::TextGenerationPipeline pipeline(
-        std::move(module), std::move(cache), cfg, stream);
+    trtf::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
     trtf::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 10;
@@ -170,11 +164,9 @@ static void test_generate_stops_at_eos()
     cudaStreamDestroy(stream);
 }
 
-static void test_generate_max_tokens()
-{
+static void test_generate_max_tokens() {
     auto engine = build_mock_decoder();
-    if (!engine)
-    {
+    if (!engine) {
         std::cerr << "WARNING: Could not build mock decoder engine, skipping test\n";
         return;
     }
@@ -182,17 +174,17 @@ static void test_generate_max_tokens()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+                                                        engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_bos = 0;
-    cfg.id_eos = 99;  // EOS token that argmax will never produce
+    cfg.id_eos = 99; // EOS token that argmax will never produce
     cfg.has_position_input = false;
 
-    trtf::TextGenerationPipeline pipeline(
-        std::move(module), std::move(cache), cfg, stream);
+    trtf::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
     trtf::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 3;
@@ -209,8 +201,7 @@ static void test_generate_max_tokens()
     cudaStreamDestroy(stream);
 }
 
-static void test_argmax()
-{
+static void test_argmax() {
     std::vector<float> logits = {0.1f, 0.5f, 0.3f, 0.8f, 0.2f};
     int32_t result = trtf::TextGenerationPipeline::argmax(logits);
     check(result == 3, "argmax of [0.1, 0.5, 0.3, 0.8, 0.2] = 3");
@@ -222,15 +213,16 @@ static void test_argmax()
     check(trtf::TextGenerationPipeline::argmax(empty) == 0, "argmax of empty = 0");
 }
 
-static void test_zero_max_tokens()
-{
+static void test_zero_max_tokens() {
     auto engine = build_mock_decoder();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), engine->createExecutionContext(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+                                                        engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
 
     trtf::TextGenConfig cfg;
@@ -238,8 +230,7 @@ static void test_zero_max_tokens()
     cfg.id_eos = 2;
     cfg.has_position_input = false;
 
-    trtf::TextGenerationPipeline pipeline(
-        std::move(module), std::move(cache), cfg, stream);
+    trtf::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
     trtf::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 0;
@@ -252,8 +243,7 @@ static void test_zero_max_tokens()
 
 #endif // TRTF_HAS_TRT
 
-int main()
-{
+int main() {
 #if TRTF_HAS_TRT
     test_argmax();
     test_pipeline_construction();
@@ -264,6 +254,7 @@ int main()
     std::cerr << "TRT not available, skipping TextGenerationPipeline tests\n";
 #endif
 
-    if (failures > 0) std::cerr << failures << " test(s) FAILED\n";
+    if (failures > 0)
+        std::cerr << failures << " test(s) FAILED\n";
     return failures;
 }

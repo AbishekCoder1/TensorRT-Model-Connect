@@ -75,13 +75,13 @@
 
 #if TRTF_HAS_TRT
 
+#include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/domains/audio/audio_configs.h"
 #include "runtime/domains/audio/bark_config.h"
 #include "runtime/domains/audio/whisper_config.h"
 #include "runtime/domains/audio/whisper_cross_kv_apply.h"
 #include "runtime/domains/audio/whisper_cross_kv_plan.h"
-#include "runtime/backend/trt_module_impl.h"
 #include "trtf/runtime/kv_cache.h"
 #include "trtf/runtime/trt_module.h"
 #include "trtf/tokenizer.h"
@@ -258,8 +258,10 @@ static void test_whisper_transcribe() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto encoder = std::make_unique<trtf::TrtModuleImpl>(enc_engine.get(), enc_engine->createExecutionContext(), stream);
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(dec_engine.get(), dec_engine->createExecutionContext(), stream);
+    auto encoder = std::make_unique<trtf::TrtModuleImpl>(
+        enc_engine.get(), enc_engine->createExecutionContext(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(
+        dec_engine.get(), dec_engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
 
     check(encoder->ok(), "whisper encoder ok");
@@ -312,7 +314,10 @@ static void test_whisper_constructor_validates_encoder() {
     // Build a valid decoder so that only encoder validation is tested
     const std::vector<float> dec_logits = {0.1f, 0.2f, 0.9f};
     auto dec_engine = build_mock_step_engine(9, 3, dec_logits);
-    if (!dec_engine) { cudaStreamDestroy(stream); return; }
+    if (!dec_engine) {
+        cudaStreamDestroy(stream);
+        return;
+    }
     auto decoder = std::make_unique<trtf::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
 
@@ -354,8 +359,10 @@ static void test_whisper_with_cross_kv() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto encoder = std::make_unique<trtf::TrtModuleImpl>(enc_engine.get(), enc_engine->createExecutionContext(), stream);
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(dec_engine.get(), dec_engine->createExecutionContext(), stream);
+    auto encoder = std::make_unique<trtf::TrtModuleImpl>(
+        enc_engine.get(), enc_engine->createExecutionContext(), stream);
+    auto decoder = std::make_unique<trtf::TrtModuleImpl>(
+        dec_engine.get(), dec_engine->createExecutionContext(), stream);
     // KvCache with num_layers=0 so ok()=true (no layer buffers needed)
     auto cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
 
@@ -481,7 +488,10 @@ static void test_bark_constructor_validates_semantic() {
 
     const std::vector<float> coarse_logits(12, 0.1f);
     auto coarse_engine = build_mock_mask_only_engine(17, 12, coarse_logits);
-    if (!coarse_engine) { cudaStreamDestroy(stream); return; }
+    if (!coarse_engine) {
+        cudaStreamDestroy(stream);
+        return;
+    }
     auto coarse = std::make_unique<trtf::TrtModuleImpl>(
         coarse_engine.get(), coarse_engine->createExecutionContext(), stream);
 
@@ -554,7 +564,8 @@ static void test_speech_pipeline_construction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto temporal = std::make_unique<trtf::TrtModuleImpl>(temporal_engine.get(), temporal_engine->createExecutionContext(), stream);
+    auto temporal = std::make_unique<trtf::TrtModuleImpl>(
+        temporal_engine.get(), temporal_engine->createExecutionContext(), stream);
     auto temporal_cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
 
     check(temporal->ok(), "speech temporal module ok");
@@ -610,7 +621,8 @@ static void test_omni_pipeline_construction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto thinker = std::make_unique<trtf::TrtModuleImpl>(thinker_engine.get(), thinker_engine->createExecutionContext(), stream);
+    auto thinker = std::make_unique<trtf::TrtModuleImpl>(
+        thinker_engine.get(), thinker_engine->createExecutionContext(), stream);
     auto thinker_cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
 
     check(thinker->ok(), "omni thinker module ok");
@@ -643,7 +655,8 @@ static void test_omni_generate_audio() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto thinker = std::make_unique<trtf::TrtModuleImpl>(thinker_engine.get(), thinker_engine->createExecutionContext(), stream);
+    auto thinker = std::make_unique<trtf::TrtModuleImpl>(
+        thinker_engine.get(), thinker_engine->createExecutionContext(), stream);
     auto thinker_cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
 
     trtf::OmniConfig cfg;
