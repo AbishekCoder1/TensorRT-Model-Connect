@@ -4,12 +4,13 @@
 // Uses IStateManager to abstract recurrent vs KV cache state.
 
 #include "trtf/pipeline.h"
-#include "trtf/tokenizer.h"
-#include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/inference_state.h"
 #include "trtf/runtime/recurrent_state.h"
 #include "trtf/runtime/sampler.h"
+#include "trtf/runtime/trt_module.h"
+#include "trtf/tokenizer.h"
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -27,16 +28,11 @@ struct RecurrentGenConfig {
 };
 
 class RecurrentPipeline final : public IPipeline {
-public:
-    RecurrentPipeline(
-        std::unique_ptr<TrtModule> decoder,
-        std::unique_ptr<IInferenceState> state,
-        RecurrentGenConfig config,
-        cudaStream_t stream,
-        const char* name,
-        std::shared_ptr<ITokenizer> tokenizer = nullptr,
-        std::string model_id_str = "",
-        std::unique_ptr<ISampler> sampler = nullptr);
+  public:
+    RecurrentPipeline(std::unique_ptr<TrtModule> decoder, std::unique_ptr<IInferenceState> state,
+                      RecurrentGenConfig config, cudaStream_t stream, const char* name,
+                      std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                      std::string model_id_str = "", std::unique_ptr<ISampler> sampler = nullptr);
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
@@ -47,12 +43,11 @@ public:
     struct GenerationResult {
         std::vector<int32_t> token_ids;
     };
-    GenerationResult generate_ids(const std::vector<int32_t>& input_ids,
-                                  const GenerateConfig& cfg);
+    GenerationResult generate_ids(const std::vector<int32_t>& input_ids, const GenerateConfig& cfg);
 
     static int32_t argmax(const std::vector<float>& logits);
 
-private:
+  private:
     std::unique_ptr<TrtModule> decoder_;
     std::unique_ptr<IInferenceState> state_;
     RecurrentGenConfig config_;
@@ -62,12 +57,27 @@ private:
     std::string model_id_;
     std::unique_ptr<ISampler> sampler_;
 
-    std::vector<int32_t> generate_from_ids(
-        const std::vector<int32_t>& input_ids,
-        int32_t max_new_tokens,
-        const SamplingParams& params);
+    std::vector<int32_t> generate_from_ids(const std::vector<int32_t>& input_ids,
+                                           int32_t max_new_tokens, const SamplingParams& params);
 
     void run_step(int32_t token_id, std::vector<float>& logits);
+
+    using SteadyClock = std::chrono::steady_clock;
+    void report_timing(SteadyClock::time_point t_prefill_start,
+                       SteadyClock::time_point t_prefill_end,
+                       SteadyClock::time_point t_decode_start, SteadyClock::time_point t_decode_end,
+                       int prefill_tokens, int decode_steps);
+
+    // Cached logits output metadata (resolved once, reused every step)
+    void* logits_device_ptr_{nullptr};
+    std::size_t logits_numel_{0};
+
+    // Per-step profiling accumulators
+    double prof_prepare_ms_{0};
+    double prof_forward_ms_{0};
+    double prof_logits_copy_ms_{0};
+    double prof_advance_ms_{0};
+    int prof_steps_{0};
 };
 
 } // namespace trtf
