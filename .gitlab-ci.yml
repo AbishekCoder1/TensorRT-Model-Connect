@@ -58,7 +58,7 @@ default:
 
 impact-analysis:
   stage: analyze
-  before_script: []   # No deps needed — pure Python + git
+  before_script: []
   script:
     - python3 tools/test_impact.py --validate
     # Try to fetch coverage map for per-test selection (non-fatal if unavailable)
@@ -248,6 +248,21 @@ coverage-cpp:
   needs:
     - job: build-all
       artifacts: false
+  rules:
+    # Always run in scheduled (nightly) pipelines and manual web triggers.
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    # In MR pipelines: only when C++ source or tests change.
+    # Skipping on Python-only / config-only MRs removes 173s from the
+    # tier1 critical path that gates test-graph-ops and test-e2e-selective.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - src/**/*.cpp
+        - src/**/*.h
+        - include/**/*.h
+        - tests/cpp/**/*.cpp
+        - tests/cpp/**/*.h
+        - CMakeLists.txt
   script:
     - python -m pip install --disable-pip-version-check --quiet "gcovr==8.2"
     - bash tools/coverage_ci/run_cpp_coverage.sh
@@ -268,7 +283,9 @@ coverage-cpp:
 
 test-graph-ops:
   stage: tier2-graph-ops
-  needs: [test-python-builder, test-cpp-unit, coverage-cpp]
+  # No `needs:` — relies on stage ordering to gate on the full tier1-unit stage.
+  # Any tier1 failure (lint, complexity, coverage, unit tests) automatically
+  # blocks this job without listing each dependency explicitly.
   script:
     - nvidia-smi
     - python -m pytest tests/builder/test_graph_ops.py tests/builder/test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -n auto
@@ -284,35 +301,22 @@ test-graph-ops:
 test-e2e-selective:
   stage: tier3-e2e
   needs:
-    - build-all
-    - impact-analysis
-    - check-family-coverage
-    - check-cyclomatic-complexity
-    - test-python-builder
-    - test-cpp-unit
-    - coverage-cpp
-    - test-graph-ops
+    - build-all       # binary artifact
+    - impact-analysis # impact.json artifact
+    - test-graph-ops  # gates on full tier1+tier2 via stage ordering
+  variables:
+    # Parallel workers run offline to prevent 429 rate-limit failures from
+    # 16 workers simultaneously calling model_info() (is_base_mistral() chain).
+    # A selective warm phase (Phase 1 below) runs ONLINE first so that:
+    #   a) newly added models not yet in the persistent cache are downloaded, and
+    #   b) existing cached models have their SHA refreshed.
+    # env -u HF_HUB_OFFLINE unsets this variable for the warm phase only.
+    HF_HUB_OFFLINE: "1"
   script:
     - |
-      MODELS=$(python3 -c "
-      import json, sys
-      d = json.load(open('impact.json'))
-      models = d.get('e2e_models', [])
-      if not models:
-          sys.exit(0)
-      print(' or '.join(f'test_e2e[{m}]' for m in models))
-      ")
-      if [ -z "$MODELS" ]; then
-        echo "No E2E models affected by this change -- skipping E2E tests"
-        exit 0
-      fi
-      MODEL_COUNT=$(python3 -c "import json; print(len(json.load(open('impact.json'))['e2e_models']))")
-      echo "Running selective E2E: $MODEL_COUNT models"
-      echo "Filter: $MODELS"
-    - |
-      # Extract selective model list from impact analysis
+      # Build selective model list from impact analysis
       python3 -c "
-      import json
+      import json, sys
       d = json.load(open('impact.json'))
       models = d.get('e2e_models', [])
       with open('e2e_models.txt', 'w') as f:
@@ -326,9 +330,17 @@ test-e2e-selective:
       "
       MODEL_COUNT=$(wc -l < e2e_models.txt)
       if [ "$MODEL_COUNT" -eq 0 ]; then
-        echo "No E2E models affected -- skipping"
+        echo "No E2E models affected by this change -- skipping E2E tests"
         exit 0
       fi
+    - |
+      echo "=== Phase 1: warming HF cache (online, sequential) ==="
+      # Unset HF_HUB_OFFLINE for this step so newly added models (not yet in
+      # the persistent cache) are downloaded before the parallel phase.
+      env -u HF_HUB_OFFLINE python scripts/warm_hf_cache.py --models-file e2e_models.txt
+    - |
+      echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
+      # HF_HUB_OFFLINE=1 is inherited from the job variable above.
       ./scripts/run_e2e_parallel.sh \
         --engine-dir $ENGINE_DIR \
         --result-dir e2e_artifacts \
@@ -364,10 +376,22 @@ test-e2e-selective:
 test-e2e-nightly:
   stage: nightly-e2e
   needs: [build-all]
+  # Two-phase HF access strategy:
+  #   Phase 1 — warm_hf_cache.py runs ONLINE: fetches latest SHAs + downloads
+  #             any stale/missing files sequentially (300ms inter-request delay
+  #             keeps well below the 10k/5min API quota).
+  #   Phase 2 — parallel rebuild runs OFFLINE (HF_HUB_OFFLINE=1): all
+  #             from_pretrained() and snapshot_download() calls resolve from
+  #             the local cache populated in phase 1, zero network requests.
   script:
     - "echo '=== Nightly Full E2E: all 68 models ==='"
     - nvidia-smi
     - |
+      echo "=== Phase 1: warming HF cache (online, sequential) ==="
+      python scripts/warm_hf_cache.py
+    - export HF_HUB_OFFLINE=1
+    - |
+      echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
       ./scripts/run_e2e_parallel.sh \
         --engine-dir $ENGINE_DIR \
         --result-dir e2e_artifacts \
