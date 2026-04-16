@@ -88,13 +88,18 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
     "text_generation_pipeline": ["decoder_kv_cache", "decoder_moe"],
     "recurrent_pipeline": ["ssm_recurrent", "rwkv_recurrent", "hybrid_mamba_attention"],
     "vl_pipeline": ["vision_language"],
-    "audio_pipeline": [
-        "speech_to_text", "text_to_audio_bark", "text_to_audio_magpie",
-        "speech_to_speech", "omni_multimodal",
-    ],
+    # Audio/speech pipelines — each has its own .cpp file (no shared audio_pipeline.cpp):
+    "whisper_pipeline": ["speech_to_text"],
+    "bark_pipeline": ["text_to_audio_bark"],
+    "magpie_pipeline": ["text_to_audio_magpie"],
+    "speech_pipeline": ["speech_to_speech"],
+    "omni_pipeline": ["omni_multimodal"],
+    # Segmentation pipelines — separate files, not part of encoder_pipeline:
+    "segment_pipeline": ["segmentation"],
+    "sam_pipeline": ["prompted_segmentation"],
     "encoder_pipeline": [
         "encoder_only", "embedding", "reranking", "neural_operator",
-        "segmentation", "prompted_segmentation", "object_detection",
+        "object_detection",
     ],
     "flux_pipeline": ["diffusion_flux"],
     "wan_pipeline": ["diffusion_wan"],
@@ -566,6 +571,14 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     # Rule 11b: E2E data file referenced by manifests
     if path in imap.e2e_data_file_to_models:
         return RuleMatch("e2e_data_file", imap.e2e_data_file_to_models[path], unit_tiers, rebuild)
+
+    # Rule 11c: FP8 weight generation script — affects all models with fp8_scales manifests
+    if path == "scripts/_gen_fp8_bf16.py":
+        return RuleMatch(
+            "fp8_gen_script",
+            sorted(imap.manifest_field_to_models.get("fp8_scales", [])),
+            [], False,
+        )
 
     # Rule 12: Non-code files (no impact)
     if path.startswith("tools/") or path.startswith("scripts/"):
