@@ -93,6 +93,49 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
+static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_dynamic_identity_engine() {
+    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    if (!builder)
+        return nullptr;
+
+    uint32_t flags =
+        1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(flags));
+    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
+
+    auto* inp = network->addInput("x", nvinfer1::DataType::kFLOAT, nvinfer1::Dims2{-1, 4});
+    if (!inp)
+        return nullptr;
+
+    auto profile = builder->createOptimizationProfile();
+    if (!profile)
+        return nullptr;
+    profile->setDimensions("x", nvinfer1::OptProfileSelector::kMIN, nvinfer1::Dims2{1, 4});
+    profile->setDimensions("x", nvinfer1::OptProfileSelector::kOPT, nvinfer1::Dims2{2, 4});
+    profile->setDimensions("x", nvinfer1::OptProfileSelector::kMAX, nvinfer1::Dims2{3, 4});
+    config->addOptimizationProfile(profile);
+
+    auto* id_layer = network->addIdentity(*inp);
+    if (!id_layer)
+        return nullptr;
+    auto* out = id_layer->getOutput(0);
+    out->setName("y");
+    network->markOutput(*out);
+
+    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
+        builder->buildSerializedNetwork(*network, *config));
+    if (!plan)
+        return nullptr;
+
+    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    if (!runtime)
+        return nullptr;
+
+    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+        runtime->deserializeCudaEngine(plan->data(), plan->size()));
+}
+
 static void test_forward_cpu() {
     auto engine = build_identity_engine();
     check(engine != nullptr, "engine built");
@@ -219,6 +262,28 @@ static void test_device_ptr() {
     check(module.device_ptr("y") != nullptr, "output device_ptr not null");
     check(module.device_ptr("nonexistent") == nullptr, "nonexistent returns null");
 
+    cudaStreamDestroy(stream);
+}
+
+static void test_skip_external_input_allocation() {
+    auto engine = build_dynamic_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    trtf::TrtModule module(engine.get(), stream, 0, {"x"});
+    check(module.ok(), "external-input module is ok");
+    check(module.device_ptr("x") == nullptr, "external input buffer skipped");
+    check(module.device_ptr("y") != nullptr, "output buffer still allocated");
+
+    float* external = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&external), 2 * 4 * sizeof(float));
+    module.bind_external("x", external, {2, 4});
+    check(module.device_ptr("x") == external, "external input bind uses provided pointer");
+
+    cudaFree(external);
     cudaStreamDestroy(stream);
 }
 
@@ -438,6 +503,7 @@ int main() {
     test_forward_async();
     test_introspection();
     test_device_ptr();
+    test_skip_external_input_allocation();
     test_bind_external();
     test_unique_ptr_ownership();
     test_keep_alive();

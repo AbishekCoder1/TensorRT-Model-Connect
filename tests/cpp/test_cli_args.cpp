@@ -41,9 +41,13 @@
 
 #include "trtf/pipeline.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -65,6 +69,7 @@ struct CliArgs {
     std::string model_or_bundle;
     std::string prompt;
     std::string hf_python;
+    std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
     std::string output_path;
     int max_new_tokens{0};
@@ -73,6 +78,58 @@ struct CliArgs {
     bool parse_error{false};
     std::string error_message;
 };
+
+std::optional<std::uint64_t> parse_byte_size(const std::string& text)
+{
+    if (text.empty())
+        return std::nullopt;
+
+    std::size_t value_end = 0;
+    double value = 0.0;
+    try
+    {
+        value = std::stod(text, &value_end);
+    }
+    catch (...)
+    {
+        return std::nullopt;
+    }
+    if (value <= 0.0)
+        return std::nullopt;
+
+    std::string suffix = text.substr(value_end);
+    std::transform(suffix.begin(), suffix.end(), suffix.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+
+    long double multiplier = 1.0L;
+    if (suffix.empty() || suffix == "B") {
+        multiplier = 1.0L;
+    } else if (suffix == "K" || suffix == "KB") {
+        multiplier = 1000.0L;
+    } else if (suffix == "M" || suffix == "MB") {
+        multiplier = 1000.0L * 1000.0L;
+    } else if (suffix == "G" || suffix == "GB") {
+        multiplier = 1000.0L * 1000.0L * 1000.0L;
+    } else if (suffix == "T" || suffix == "TB") {
+        multiplier = 1000.0L * 1000.0L * 1000.0L * 1000.0L;
+    } else if (suffix == "KIB") {
+        multiplier = 1024.0L;
+    } else if (suffix == "MIB") {
+        multiplier = 1024.0L * 1024.0L;
+    } else if (suffix == "GIB") {
+        multiplier = 1024.0L * 1024.0L * 1024.0L;
+    } else if (suffix == "TIB") {
+        multiplier = 1024.0L * 1024.0L * 1024.0L * 1024.0L;
+    } else {
+        return std::nullopt;
+    }
+
+    const long double bytes = static_cast<long double>(value) * multiplier;
+    if (bytes <= 0.0L ||
+        bytes > static_cast<long double>(std::numeric_limits<std::uint64_t>::max()))
+        return std::nullopt;
+    return static_cast<std::uint64_t>(bytes + 0.5L);
+}
 
 CliArgs parse_args(int argc, const char** argv)
 {
@@ -125,6 +182,21 @@ CliArgs parse_args(int argc, const char** argv)
         {
             if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
             args.hf_python = argv[++i];
+            continue;
+        }
+        if (arg == "--kv-cache-size" || arg == "--kv_cache_size")
+        {
+            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+            auto parsed = parse_byte_size(argv[++i]);
+            if (!parsed.has_value()) { args.parse_error = true; args.error_message = "--kv-cache-size expects a positive size"; return args; }
+            args.kv_cache_size_bytes = *parsed;
+            continue;
+        }
+        if (arg.rfind("--kv-cache-size=", 0) == 0 || arg.rfind("--kv_cache_size=", 0) == 0)
+        {
+            auto parsed = parse_byte_size(arg.substr(arg.find('=') + 1));
+            if (!parsed.has_value()) { args.parse_error = true; args.error_message = "--kv-cache-size expects a positive size"; return args; }
+            args.kv_cache_size_bytes = *parsed;
             continue;
         }
         if (arg == "--image")
@@ -288,12 +360,35 @@ static void test_all_run_flags_combined()
 {
     auto args = parse({"trtf", "run", "bundle.trtfb", "--prompt", "hello",
         "--max-new-tokens", "10",
-        "--hf-python", "/usr/bin/python3"});
+        "--hf-python", "/usr/bin/python3",
+        "--kv-cache-size", "2GiB"});
     check(!args.parse_error, "combined flags no parse error");
     check(args.model_or_bundle == "bundle.trtfb", "combined bundle path");
     check(args.prompt == "hello", "combined prompt");
     check(args.max_new_tokens == 10, "combined max_new_tokens");
     check(args.hf_python == "/usr/bin/python3", "combined hf-python");
+    check(args.kv_cache_size_bytes == (2ULL * 1024ULL * 1024ULL * 1024ULL), "combined kv-cache-size");
+}
+
+static void test_kv_cache_size_flag()
+{
+    auto args = parse({"trtf", "run", "bundle.trtfb", "--kv-cache-size", "90GB"});
+    check(!args.parse_error, "kv-cache-size no parse error");
+    check(args.kv_cache_size_bytes == 90000000000ULL, "kv-cache-size parsed");
+}
+
+static void test_kv_cache_size_alias_flag()
+{
+    auto args = parse({"trtf", "run", "bundle.trtfb", "--kv_cache_size", "90GB"});
+    check(!args.parse_error, "kv_cache_size alias no parse error");
+    check(args.kv_cache_size_bytes == 90000000000ULL, "kv_cache_size alias parsed");
+}
+
+static void test_kv_cache_size_equals_flag()
+{
+    auto args = parse({"trtf", "run", "bundle.trtfb", "--kv-cache-size=90GB"});
+    check(!args.parse_error, "kv-cache-size equals no parse error");
+    check(args.kv_cache_size_bytes == 90000000000ULL, "kv-cache-size equals parsed");
 }
 
 // -----------------------------------------------------------------------------
@@ -344,6 +439,9 @@ int main()
     test_unknown_flag_errors();
     test_unknown_command_errors();
     test_all_run_flags_combined();
+    test_kv_cache_size_flag();
+    test_kv_cache_size_alias_flag();
+    test_kv_cache_size_equals_flag();
     test_detect_alias_flags();
     test_detect_unknown_flag_still_errors();
 

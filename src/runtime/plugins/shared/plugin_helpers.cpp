@@ -31,8 +31,14 @@ bool detect_add_special_tokens(const BundleFile& bundle) {
     auto val_pos = cfg_text.find(':', pos);
     if (val_pos == std::string::npos)
         return true;
-    auto rest = cfg_text.substr(val_pos + 1, 20);
-    return rest.find("false") == std::string::npos;
+    auto value_pos = cfg_text.find_first_not_of(" \t\r\n", val_pos + 1);
+    if (value_pos == std::string::npos)
+        return true;
+    if (cfg_text.compare(value_pos, 5, "false") == 0 || cfg_text[value_pos] == '0')
+        return false;
+    if (cfg_text.compare(value_pos, 4, "true") == 0 || cfg_text[value_pos] == '1')
+        return true;
+    return true;
 }
 
 bool is_bpe_tokenizer_json(const BundleFile& bundle) {

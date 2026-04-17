@@ -302,6 +302,33 @@ inline void scan_all_whitespace(const char*& p, const char* end)
     }
 }
 
+// Qwen3 regex branch: \s*[\r\n]+
+// Consume any leading whitespace up to the first newline, then consume the
+// contiguous newline run itself, but stop before whitespace that follows the
+// last newline.
+inline void scan_qwen3_newline_chunk(char32_t first_cp, const char*& p, const char* end)
+{
+    bool saw_newline = is_newline(first_cp);
+    while (p < end) {
+        const char* peek = p;
+        char32_t nc = read_utf8(peek, end);
+        if (!saw_newline) {
+            if (is_newline(nc)) {
+                saw_newline = true;
+                p = peek;
+                continue;
+            }
+            if (is_whitespace(nc)) {
+                p = peek;
+                continue;
+            }
+            break;
+        }
+        if (!is_newline(nc)) break;
+        p = peek;
+    }
+}
+
 inline void scan_bloom_words(const char*& p, const char* end)
 {
     while (p < end) {
@@ -427,7 +454,7 @@ inline bool try_whitespace_run(char32_t cp, const char*& p, const char* end,
 
     // Qwen3: \s*[\r\n]+ — newline sequences take priority
     if (variant == Variant::kQwen3 && has_newline_in_ws(cp, p, end)) {
-        scan_all_whitespace(p, end);
+        scan_qwen3_newline_chunk(cp, p, end);
         result.emplace_back(start, p);
         return true;
     }
@@ -482,6 +509,11 @@ std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
 
         // Other chars (punctuation/symbols)
         scan_others(p, end);
+        if (variant == pretok::Variant::kQwen3) {
+            // Qwen3's ` ?[^\s\p{L}\p{N}]+[\r\n]*` keeps trailing newlines
+            // attached to punctuation/symbol runs even without an optional prefix.
+            scan_newlines(p, end);
+        }
         result.emplace_back(start, p);
     }
 

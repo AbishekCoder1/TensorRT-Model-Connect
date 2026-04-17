@@ -75,6 +75,13 @@ def _get_io_names(engine_plan: bytes) -> tuple[list[str], list[str]]:
     return inputs, outputs
 
 
+def _deserialize_engine(engine_plan: bytes):
+    import tensorrt as trt
+    logger = trt.Logger(trt.Logger.WARNING)
+    runtime = trt.Runtime(logger)
+    return runtime.deserialize_cuda_engine(engine_plan)
+
+
 @requires_trt
 class TestTensorNamingContract:
     """Verify that built engines have the exact I/O tensor names the C++ runtime expects."""
@@ -184,3 +191,98 @@ class TestTensorNamingContract:
         plan = self._build_engine(partial_rotary_factor=0.5)
         inputs, outputs = _get_io_names(plan)
         assert "logits" in outputs
+
+    def test_dynamic_kv_cache_shapes(self):
+        from trtf_build.config import ModelConfig
+        from trtf_build.standard_decoder_builder import build_standard_decoder_engine
+
+        hidden, vocab, num_layers = 16, 32, 2
+        num_heads = 4
+        attention_size = hidden
+        mlp_size = 32
+        max_cache = 4
+
+        config = ModelConfig(
+            hidden_size=hidden,
+            vocab_size=vocab,
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            rms_norm_eps=1e-5,
+            rope_theta=10000.0,
+        )
+        config.raw["dynamic_kv_cache"] = True
+        config.raw["_dynamic_kv_opt_length"] = 2
+        weights = _make_weights(hidden, vocab, num_layers, attention_size, mlp_size)
+
+        plan = build_standard_decoder_engine(config, weights, max_cache)
+        engine = _deserialize_engine(plan)
+
+        assert engine is not None
+        assert engine.num_optimization_profiles == 1
+        assert tuple(engine.get_tensor_shape("attention_mask")) == (1, -1)
+        assert tuple(engine.get_tensor_shape("cache_k_0")) == (-1, attention_size)
+        assert tuple(engine.get_tensor_shape("cache_v_0")) == (-1, attention_size)
+
+    def test_dynamic_kv_cache_multiple_profiles(self):
+        from trtf_build.config import ModelConfig
+        from trtf_build.standard_decoder_builder import build_standard_decoder_engine
+
+        hidden, vocab, num_layers = 16, 32, 2
+        num_heads = 4
+        attention_size = hidden
+        mlp_size = 32
+        max_cache = 4
+
+        config = ModelConfig(
+            hidden_size=hidden,
+            vocab_size=vocab,
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            rms_norm_eps=1e-5,
+            rope_theta=10000.0,
+        )
+        config.raw["dynamic_kv_cache"] = True
+        config.raw["_dynamic_kv_profile_rows"] = [4, 2, 3]
+        weights = _make_weights(hidden, vocab, num_layers, attention_size, mlp_size)
+
+        plan = build_standard_decoder_engine(config, weights, max_cache)
+        engine = _deserialize_engine(plan)
+
+        assert engine is not None
+        assert engine.num_optimization_profiles == 3
+        assert engine.get_tensor_profile_shape("attention_mask", 0) == [(1, 2), (1, 3), (1, 3)]
+        assert engine.get_tensor_profile_shape("attention_mask", 1) == [(1, 2), (1, 4), (1, 4)]
+        assert engine.get_tensor_profile_shape("attention_mask", 2) == [(1, 2), (1, 5), (1, 5)]
+        assert engine.get_tensor_profile_shape("cache_k_0", 0) == [(1, attention_size),
+                                                                    (2, attention_size),
+                                                                    (2, attention_size)]
+        assert engine.get_tensor_profile_shape("cache_k_0", 1) == [(1, attention_size),
+                                                                    (3, attention_size),
+                                                                    (3, attention_size)]
+        assert engine.get_tensor_profile_shape("cache_k_0", 2) == [(1, attention_size),
+                                                                    (4, attention_size),
+                                                                    (4, attention_size)]
+
+    def test_dynamic_kv_cache_rejects_alibi(self):
+        from trtf_build.config import ModelConfig
+        from trtf_build.standard_decoder_builder import build_standard_decoder_engine
+
+        hidden, vocab, num_layers = 16, 32, 2
+        num_heads = 4
+        attention_size = hidden
+        mlp_size = 32
+        max_cache = 4
+
+        config = ModelConfig(
+            hidden_size=hidden,
+            vocab_size=vocab,
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            rms_norm_eps=1e-5,
+            rope_theta=10000.0,
+        )
+        config.raw["dynamic_kv_cache"] = True
+        weights = _make_weights(hidden, vocab, num_layers, attention_size, mlp_size)
+
+        with pytest.raises(ValueError, match="ALiBi"):
+            build_standard_decoder_engine(config, weights, max_cache, position_type="alibi")

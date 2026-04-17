@@ -150,14 +150,19 @@ class ModelConfig:
                or 1e-5)
 
         # rope_theta: check top-level first, then rope_parameters dict
-        # (Llama-3.1 variants like Minitron/Nemotron-Nano store it there).
+        # (Llama-3.1 variants like Minitron/Nemotron-Nano store it there),
+        # then rope_scaling dict (Qwen3 stores it there).
         rope_theta = d.get("rope_theta", None)
         if rope_theta is None:
             rope_params = d.get("rope_parameters")
             if isinstance(rope_params, dict):
                 rope_theta = rope_params.get("rope_theta", 10000.0)
             else:
-                rope_theta = 10000.0
+                rope_scaling = d.get("rope_scaling")
+                if isinstance(rope_scaling, dict):
+                    rope_theta = rope_scaling.get("rope_theta", 10000.0)
+                else:
+                    rope_theta = 10000.0
         rope_theta = float(rope_theta)
 
         return ModelConfig(

@@ -8,6 +8,19 @@
 
 namespace trtf {
 
+namespace {
+
+constexpr int32_t kRuntimeBucketRows = 32;
+
+int32_t round_up_rows(int32_t value, int32_t bucket, int32_t maximum) {
+    if (bucket <= 1)
+        return std::min(std::max(value, 1), maximum);
+    const int32_t rounded = ((std::max(value, 1) + bucket - 1) / bucket) * bucket;
+    return std::min(rounded, maximum);
+}
+
+} // namespace
+
 KvCache::KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
                  DType cache_dtype, KvCacheNames names)
     : num_layers_(num_layers), max_length_(max_length), kv_dim_(kv_dim), stream_(stream),
@@ -60,6 +73,12 @@ void KvCache::build_attention_mask(std::vector<float>& mask) const {
     mask.back() = 0.0f;
 }
 
+int32_t KvCache::preferred_cache_rows() const {
+    if (!dynamic_binding_enabled_)
+        return max_length_;
+    return round_up_rows(std::max(position_, 1), kRuntimeBucketRows, max_length_);
+}
+
 void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
     // Position input (discovered during bind_to).
     if (has_position_input_) {
@@ -71,27 +90,52 @@ void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
         inputs[names_.position_id] = pos_t;
     }
 
-    // Dense causal mask: 0.0 = visible, -1e4 = masked.
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
+    const int32_t cache_rows = dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;
+    const int32_t mask_width = dynamic_binding_enabled_ ? (cache_rows + 1) : (max_length_ + 1);
+    if (dynamic_binding_enabled_ && bound_module_ != nullptr && cache_rows != bound_cache_rows_) {
+        const std::vector<int64_t> cache_shape{cache_rows, kv_dim_};
+        for (int32_t i = 0; i < num_layers_; ++i) {
+            const auto li = static_cast<std::size_t>(i);
+            bound_module_->bind_external(names_.cache_k[li], cache_k_[li].data(), cache_shape);
+            bound_module_->bind_external(names_.cache_v[li], cache_v_[li].data(), cache_shape);
+        }
+        bound_cache_rows_ = cache_rows;
+    }
+
+    // Dense causal mask: 0.0 = visible, -1e4 = masked.
+    std::fill(mask_buf_.begin(), mask_buf_.begin() + mask_width, kMaskedScore);
     for (int32_t i = 0; i < valid; ++i)
         mask_buf_[static_cast<std::size_t>(i)] = 0.0f;
-    mask_buf_.back() = 0.0f;
+    mask_buf_[static_cast<std::size_t>(mask_width - 1)] = 0.0f;
 
     Tensor mask_t;
     mask_t.data = mask_buf_.data();
-    mask_t.shape = {static_cast<int64_t>(mask_buf_.size())};
+    mask_t.shape = dynamic_binding_enabled_
+                       ? std::vector<int64_t>{1, mask_width}
+                       : std::vector<int64_t>{static_cast<int64_t>(mask_buf_.size())};
     mask_t.dtype = DType::kFloat32;
     inputs[names_.attention_mask] = mask_t;
 }
 
 void KvCache::bind_to(TrtModule& module) {
+    bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
+    dynamic_binding_enabled_ = module.has_dynamic_shapes();
+    bound_cache_rows_ = 0;
+    const int32_t initial_cache_rows = dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;
+    const std::vector<int64_t> cache_shape{initial_cache_rows, kv_dim_};
 
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
-        module.bind_external(names_.cache_k[li], cache_k_[li].data());
-        module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        if (dynamic_binding_enabled_) {
+            module.bind_external(names_.cache_k[li], cache_k_[li].data(), cache_shape);
+            module.bind_external(names_.cache_v[li], cache_v_[li].data(), cache_shape);
+            bound_cache_rows_ = initial_cache_rows;
+        } else {
+            module.bind_external(names_.cache_k[li], cache_k_[li].data());
+            module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        }
         module.bind_external(names_.present_k[li], present_k_[li].data());
         module.bind_external(names_.present_v[li], present_v_[li].data());
     }

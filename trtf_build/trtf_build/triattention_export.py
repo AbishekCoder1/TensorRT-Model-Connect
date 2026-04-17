@@ -21,9 +21,10 @@ class TriAttentionBundleConfig:
 
     kv_budget: int
     divide_length: int = 128
-    recent_window: int = 0
+    recent_window: int = 128
     score_aggregation: str = "mean"
-    protect_prefill: bool = False
+    count_prompt_tokens: bool = True
+    protect_prefill: bool = True
     disable_mlr: bool = False
     disable_trig: bool = False
     stats_section: str = "triattention_stats.json"
@@ -35,6 +36,7 @@ class TriAttentionBundleConfig:
             "divide_length": int(self.divide_length),
             "recent_window": int(self.recent_window),
             "score_aggregation": str(self.score_aggregation),
+            "count_prompt_tokens": bool(self.count_prompt_tokens),
             "protect_prefill": bool(self.protect_prefill),
             "disable_mlr": bool(self.disable_mlr),
             "disable_trig": bool(self.disable_trig),
@@ -122,6 +124,16 @@ def _to_float_matrix(value: Any) -> list[list[float]]:
     return [_to_float_list(row) for row in value]
 
 
+def _parse_layer_head_key(key: str) -> tuple[int, int] | None:
+    if not key.startswith("layer") or "_head" not in key:
+        return None
+    layer_text, head_text = key.split("_head", 1)
+    try:
+        return int(layer_text.replace("layer", "")), int(head_text)
+    except ValueError:
+        return None
+
+
 def _normalize_rkv_payload(
     payload: dict[str, Any],
     *,
@@ -130,9 +142,9 @@ def _normalize_rkv_payload(
     metadata = dict(payload.get("metadata", {}) or {})
     stats_raw = payload.get("stats", {}) or {}
     sampled_heads = [tuple(item) for item in metadata.get("sampled_heads", [])]
-    if not sampled_heads:
+    if not sampled_heads and not stats_raw:
         raise ValueError(
-            "TriAttention stats file does not contain metadata.sampled_heads. "
+            "TriAttention stats file does not contain metadata.sampled_heads or stats entries. "
             "Use the upstream calibration output from the TriAttention repo."
         )
 
@@ -154,26 +166,24 @@ def _normalize_rkv_payload(
     freq_count = head_dim // 2
     stats_head_count = num_attention_heads
     layer_accum: dict[int, dict[str, list[list[float]] | list[int]]] = {}
+    sampled_score_heads: set[tuple[int, int]] = set()
 
-    out_stats: dict[str, Any] = {}
-    for layer, head in sampled_heads:
-        key = f"layer{int(layer):02d}_head{int(head):02d}"
-        entry = stats_raw.get(key)
-        if entry is None:
+    for key, entry in stats_raw.items():
+        parsed = _parse_layer_head_key(str(key))
+        if parsed is None:
+            continue
+        layer, head = parsed
+        if layer < 0 or layer >= num_layers:
+            continue
+        if head < 0 or head >= num_attention_heads:
             raise ValueError(
-                f"TriAttention stats file is missing sampled-head entry {key!r}"
+                f"TriAttention stats file contains out-of-range head {head} for layer {layer}"
             )
         q_mean_real = _to_float_list(entry["q_mean_real"])
         q_mean_imag = _to_float_list(entry["q_mean_imag"])
         q_abs_mean = _to_float_list(entry["q_abs_mean"])
-        out_stats[key] = {
-            "q_mean_real": q_mean_real,
-            "q_mean_imag": q_mean_imag,
-            "q_abs_mean": q_abs_mean,
-        }
-
         layer_bucket = layer_accum.setdefault(
-            int(layer),
+            layer,
             {
                 "q_mean_real": [[0.0] * freq_count for _ in range(stats_head_count)],
                 "q_mean_imag": [[0.0] * freq_count for _ in range(stats_head_count)],
@@ -190,10 +200,14 @@ def _normalize_rkv_payload(
         assert isinstance(layer_abs, list)
         assert isinstance(counts, list)
         for idx in range(freq_count):
-            layer_real[int(head)][idx] += q_mean_real[idx]
-            layer_imag[int(head)][idx] += q_mean_imag[idx]
-            layer_abs[int(head)][idx] += q_abs_mean[idx]
-        counts[int(head)] += 1
+            layer_real[head][idx] += q_mean_real[idx]
+            layer_imag[head][idx] += q_mean_imag[idx]
+            layer_abs[head][idx] += q_abs_mean[idx]
+        counts[head] += 1
+        sampled_score_heads.add((layer, head))
+
+    if not sampled_score_heads:
+        raise ValueError("TriAttention stats file has no usable R-KV head stats")
 
     inv_freq = metadata.get("inv_freq")
     if inv_freq is None:
@@ -205,6 +219,7 @@ def _normalize_rkv_payload(
         freq_count=freq_count,
     )
     layer_stats: dict[str, Any] = {}
+    out_stats: dict[str, Any] = {}
     for layer_idx in range(num_layers):
         layer_bucket = layer_accum.get(layer_idx)
         if layer_bucket is None:
@@ -240,6 +255,14 @@ def _normalize_rkv_payload(
             "q_abs_mean": q_abs_mean,
             "freq_scale_sq": [list(row) for row in default_freq_scale_sq],
         }
+        for score_head in range(stats_head_count):
+            if (layer_idx, score_head) not in sampled_score_heads:
+                continue
+            out_stats[f"layer{layer_idx:02d}_head{score_head:02d}"] = {
+                "q_mean_real": list(q_mean_real[score_head]),
+                "q_mean_imag": list(q_mean_imag[score_head]),
+                "q_abs_mean": list(q_abs_mean[score_head]),
+            }
 
     out: dict[str, Any] = {
         "version": 2,
@@ -251,7 +274,10 @@ def _normalize_rkv_payload(
         "num_key_value_heads": num_kv_heads,
         "stats_head_count": stats_head_count,
         "num_layers": num_layers,
-        "sampled_heads": [[int(layer), int(head)] for layer, head in sampled_heads],
+        "sampled_heads": [
+            [int(layer), int(head)]
+            for layer, head in sorted(sampled_score_heads)
+        ],
         "stats": out_stats,
         "layer_stats": layer_stats,
     }
@@ -266,52 +292,18 @@ def _normalize_layer_stats_payload(
     config: ModelConfig,
 ) -> dict[str, Any]:
     metadata = dict(payload.get("metadata", {}) or {})
-    sampled_heads = [tuple(item) for item in metadata.get("sampled_heads", [])]
     layer_stats = payload.get("layer_stats", {}) or {}
-    if not sampled_heads or not layer_stats:
+    if not layer_stats:
         raise ValueError(
-            "Unsupported TriAttention stats layout. Expected metadata.sampled_heads "
-            "and layer_stats entries."
+            "Unsupported TriAttention stats layout. Expected layer_stats entries."
         )
 
     num_attention_heads = int(config.num_attention_heads)
     num_kv_heads = int(config.num_key_value_heads or config.num_attention_heads)
     num_layers = int(config.num_hidden_layers)
-    out_stats: dict[str, Any] = {}
-    for layer, head in sampled_heads:
-        layer_entry = layer_stats.get(layer)
-        if layer_entry is None:
-            layer_entry = layer_stats.get(str(layer))
-        if layer_entry is None:
-            raise ValueError(
-                f"TriAttention stats file is missing layer_stats[{layer!r}]"
-            )
-        q_mean_complex = layer_entry.get("q_mean_complex")
-        q_abs_mean = layer_entry.get("q_abs_mean")
-        if q_mean_complex is None or q_abs_mean is None:
-            raise ValueError(
-                f"TriAttention layer_stats[{layer!r}] is missing q_mean_complex/q_abs_mean"
-            )
-        if hasattr(q_mean_complex, "detach"):
-            q_mean_complex = q_mean_complex.detach().cpu()
-        if hasattr(q_abs_mean, "detach"):
-            q_abs_mean = q_abs_mean.detach().cpu()
-        q_mean_complex = q_mean_complex.tolist()
-        q_abs_mean = q_abs_mean.tolist()
-        try:
-            head_row = q_mean_complex[int(head)]
-            abs_row = q_abs_mean[int(head)]
-        except Exception as exc:  # pragma: no cover - defensive guard
-            raise ValueError(
-                f"TriAttention stats head index {head} is out of range for layer {layer}"
-            ) from exc
-        out_stats[f"layer{int(layer):02d}_head{int(head):02d}"] = {
-            "q_mean_real": [float(pair[0]) for pair in head_row],
-            "q_mean_imag": [float(pair[1]) for pair in head_row],
-            "q_abs_mean": [float(x) for x in abs_row],
-        }
-
     serialized_layer_stats: dict[str, Any] = {}
+    out_stats: dict[str, Any] = {}
+    sampled_score_heads: list[tuple[int, int]] = []
     stats_head_count: int | None = None
     for layer_idx, layer_entry in layer_stats.items():
         q_mean_complex = layer_entry.get("q_mean_complex")
@@ -332,8 +324,22 @@ def _normalize_layer_stats_payload(
         for head_row in q_mean_complex:
             q_mean_real.append([float(pair[0]) for pair in head_row])
             q_mean_imag.append([float(pair[1]) for pair in head_row])
+        row_count = len(q_mean_real)
         if stats_head_count is None:
-            stats_head_count = len(q_mean_real)
+            stats_head_count = row_count
+        elif stats_head_count != row_count:
+            raise ValueError("TriAttention layer_stats head count is inconsistent across layers")
+        try:
+            layer_num = int(layer_idx)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid layer_stats key {layer_idx!r}") from exc
+        for head_idx in range(row_count):
+            sampled_score_heads.append((layer_num, head_idx))
+            out_stats[f"layer{layer_num:02d}_head{head_idx:02d}"] = {
+                "q_mean_real": list(q_mean_real[head_idx]),
+                "q_mean_imag": list(q_mean_imag[head_idx]),
+                "q_abs_mean": [float(x) for x in q_abs_mean[head_idx]],
+            }
         serialized_layer_stats[str(layer_idx)] = {
             "q_mean_real": q_mean_real,
             "q_mean_imag": q_mean_imag,
@@ -359,7 +365,10 @@ def _normalize_layer_stats_payload(
         "num_key_value_heads": num_kv_heads,
         "stats_head_count": int(stats_head_count or num_attention_heads),
         "num_layers": num_layers,
-        "sampled_heads": [[int(layer), int(head)] for layer, head in sampled_heads],
+        "sampled_heads": [
+            [int(layer), int(head)]
+            for layer, head in sorted(sampled_score_heads)
+        ],
         "stats": out_stats,
         "layer_stats": serialized_layer_stats,
     }

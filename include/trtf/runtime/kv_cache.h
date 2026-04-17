@@ -45,6 +45,7 @@ class KvCache : public IInferenceState {
     void advance(int32_t n_tokens = 1) override;
     int32_t position() const override { return position_; }
     int32_t max_length() const override { return max_length_; }
+    int32_t preferred_cache_rows() const override;
     int32_t num_layers() const override { return num_layers_; }
     bool needs_attention_mask() const override { return true; }
     std::size_t device_memory_bytes() const override;
@@ -75,9 +76,12 @@ class KvCache : public IInferenceState {
     std::vector<float> mask_buf_;
     int32_t pos_buf_{0};
     bool has_position_input_{false};
+    bool dynamic_binding_enabled_{false};
+    int32_t bound_cache_rows_{0};
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};
     KvCacheNames names_;
+    TrtModule* bound_module_{nullptr};
 };
 
 } // namespace trtf

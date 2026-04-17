@@ -333,12 +333,20 @@ def add_attention_block(
         k_heads.second_transpose = trt.Permutation([1, 0, 2])
         v_heads.second_transpose = trt.Permutation([1, 0, 2])
 
+        score_q = q_heads.get_output(0)
+        score_k = k_heads.get_output(0)
+        attn_scale_value = attn_scale_tensor
+        if score_q.dtype != trt.float32:
+            score_q = network.add_cast(score_q, trt.float32).get_output(0)
+            score_k = network.add_cast(score_k, trt.float32).get_output(0)
+            attn_scale_value = network.add_cast(attn_scale_value, trt.float32).get_output(0)
+
         score = network.add_matrix_multiply(
-            q_heads.get_output(0), trt.MatrixOperation.NONE,
-            k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
+            score_q, trt.MatrixOperation.NONE,
+            score_k, trt.MatrixOperation.TRANSPOSE)
 
         scaled = network.add_elementwise(
-            score.get_output(0), attn_scale_tensor,
+            score.get_output(0), attn_scale_value,
             trt.ElementWiseOperation.PROD)
 
         if alibi_slopes_tensor is not None and alibi_indices_tensor is not None:
@@ -355,8 +363,12 @@ def add_attention_block(
             rel_pos = network.add_elementwise(
                 idx_3d.get_output(0), pos_reshaped.get_output(0),
                 trt.ElementWiseOperation.SUB)
+            alibi_slopes_value = alibi_slopes_tensor
+            if alibi_slopes_value.dtype != rel_pos.get_output(0).dtype:
+                alibi_slopes_value = network.add_cast(
+                    alibi_slopes_value, rel_pos.get_output(0).dtype).get_output(0)
             alibi_bias = network.add_elementwise(
-                alibi_slopes_tensor, rel_pos.get_output(0),
+                alibi_slopes_value, rel_pos.get_output(0),
                 trt.ElementWiseOperation.PROD)
             scaled = network.add_elementwise(
                 scaled.get_output(0), alibi_bias.get_output(0),
@@ -365,16 +377,25 @@ def add_attention_block(
         mask3d = network.add_shuffle(attention_mask)
         mask3d.reshape_dims = (1, 1, -1)
 
+        mask_value = mask3d.get_output(0)
+        if mask_value.dtype != scaled.get_output(0).dtype:
+            mask_value = network.add_cast(mask_value, scaled.get_output(0).dtype).get_output(0)
+
         masked = network.add_elementwise(
-            scaled.get_output(0), mask3d.get_output(0),
+            scaled.get_output(0), mask_value,
             trt.ElementWiseOperation.SUM)
 
         softmax = network.add_softmax(masked.get_output(0))
         softmax.axes = 1 << 2
 
+        softmax_out = softmax.get_output(0)
+        v_value = v_heads.get_output(0)
+        if softmax_out.dtype != v_value.dtype:
+            softmax_out = network.add_cast(softmax_out, v_value.dtype).get_output(0)
+
         context_heads = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_heads.get_output(0), trt.MatrixOperation.NONE)
+            softmax_out, trt.MatrixOperation.NONE,
+            v_value, trt.MatrixOperation.NONE)
 
         context_flat = network.add_shuffle(context_heads.get_output(0))
         context_flat.reshape_dims = (1, attention_size)

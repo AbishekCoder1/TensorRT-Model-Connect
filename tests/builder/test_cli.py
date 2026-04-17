@@ -278,6 +278,38 @@ class TestCmdBuildMocked:
         finally:
             eb.build = original_build
 
+    def test_dynamic_kv_cache_propagated(self, tmp_path):
+        """Verify dynamic_kv_cache is forwarded to engine_builder.build()."""
+        from trtf_build.cli import _cmd_build
+        import trtf_build.engine_builder as eb
+
+        received = []
+
+        def mock_build(model_id_or_path, output_path, max_cache_length, *,
+                       dynamic_kv_cache=False, precision="fp32", quantize=None,
+                       quant_scales=None, quant_calibration_samples=512,
+                       verbose=False, **kwargs):
+            received.append(dynamic_kv_cache)
+
+        original_build = eb.build
+        eb.build = mock_build
+        try:
+            args = argparse.Namespace(
+                model="some-model",
+                output=str(tmp_path / "out.trtfb"),
+                max_cache_length=256,
+                dynamic_kv_cache=True,
+                precision="fp32",
+                quantize=None,
+                quant_scales=None,
+                quant_calibration_samples=512,
+                verbose=False,
+            )
+            _cmd_build(args)
+            assert received == [True]
+        finally:
+            eb.build = original_build
+
     def test_build_exception_returns_1(self, tmp_path):
         """When engine_builder.build() raises, _cmd_build returns 1."""
         from trtf_build.cli import _cmd_build

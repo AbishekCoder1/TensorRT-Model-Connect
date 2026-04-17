@@ -52,6 +52,75 @@ static void check(bool condition, const char* test_name) {
 
 static trtf::TrtLogger g_logger;
 
+class MockTokenizer final : public trtf::ITokenizer {
+  public:
+    std::vector<int32_t> encode(const std::string& text) const override {
+        (void)text;
+        return {9};
+    }
+
+    std::string decode(const std::vector<int32_t>& ids) const override {
+        std::string out;
+        for (int32_t id : ids) {
+            out += token_for_id(id);
+        }
+        return out;
+    }
+
+    int32_t id_for_token(std::string_view token) const override {
+        if (token == "\\boxed{")
+            return 1;
+        if (token == "70")
+            return 2;
+        if (token == "}")
+            return 3;
+        if (token == " extra")
+            return 4;
+        return 0;
+    }
+
+    std::string token_for_id(int32_t id) const override {
+        switch (id) {
+        case 1:
+            return "\\boxed{";
+        case 2:
+            return "70";
+        case 3:
+            return "}";
+        case 4:
+            return " extra";
+        default:
+            return "";
+        }
+    }
+};
+
+class SequenceSampler final : public trtf::ISampler {
+  public:
+    explicit SequenceSampler(std::vector<int32_t> tokens) : tokens_(std::move(tokens)) {}
+
+    trtf::SampleResult sample(const float* logits, int32_t vocab_size,
+                              const trtf::SamplingParams& params) override {
+        (void)logits;
+        (void)vocab_size;
+        trtf::SampleResult result;
+        const std::size_t idx = cursor_ < tokens_.size() ? cursor_ : (tokens_.size() - 1);
+        result.token_id = tokens_[idx];
+        result.is_eos = (result.token_id == params.eos_token_id);
+        if (cursor_ < tokens_.size())
+            ++cursor_;
+        return result;
+    }
+
+    trtf::LogitsLocation logits_location() const override { return trtf::LogitsLocation::HOST; }
+    const char* sampler_type() const override { return "sequence"; }
+    void reset() override { cursor_ = 0; }
+
+  private:
+    std::vector<int32_t> tokens_;
+    std::size_t cursor_{0};
+};
+
 // Build a tiny decoder-like engine:
 // Inputs:  token_id [1] int32, attention_mask [8] float32
 // Outputs: logits [4] float32
@@ -241,6 +310,41 @@ static void test_zero_max_tokens() {
     cudaStreamDestroy(stream);
 }
 
+static void test_stop_on_boxed_answer()
+{
+    auto engine = build_mock_decoder();
+    if (!engine) return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto tokenizer = std::make_shared<MockTokenizer>();
+    auto sampler = std::make_unique<SequenceSampler>(std::vector<int32_t>{1, 2, 3, 4});
+
+    trtf::TextGenConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 99;
+    cfg.has_position_input = false;
+
+    trtf::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream,
+                                          tokenizer, "mock", std::move(sampler));
+
+    trtf::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 10;
+    gen_cfg.stop_on_boxed_answer = true;
+    gen_cfg.stop_check_interval = 1;
+
+    auto result = pipeline.generate_ids({9}, gen_cfg);
+    check(result.token_ids.size() == 4, "boxed-answer stop truncates generation");
+    check(result.token_ids[1] == 1, "boxed stop token 1");
+    check(result.token_ids[2] == 2, "boxed stop token 2");
+    check(result.token_ids[3] == 3, "boxed stop token 3");
+
+    cudaStreamDestroy(stream);
+}
+
 #endif // TRTF_HAS_TRT
 
 int main() {
@@ -250,6 +354,7 @@ int main() {
     test_generate_stops_at_eos();
     test_generate_max_tokens();
     test_zero_max_tokens();
+    test_stop_on_boxed_answer();
 #else
     std::cerr << "TRT not available, skipping TextGenerationPipeline tests\n";
 #endif

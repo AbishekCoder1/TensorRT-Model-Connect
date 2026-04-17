@@ -66,6 +66,7 @@ def _compute_dynamic_kv_profile_rows(
     kv_budget: int,
     *,
     bucket_rows: int = 32,
+    preferred_rows: list[int] | None = None,
 ) -> list[int]:
     """Return ascending profile upper bounds for dynamic-KV engines.
 
@@ -80,14 +81,24 @@ def _compute_dynamic_kv_profile_rows(
     start = max(bucket_rows, min(start, max_cache_length))
 
     rows: list[int] = []
+
+    def add_row(value: int) -> None:
+        rounded = ((min(max(value, 1), max_cache_length) + bucket_rows - 1) // bucket_rows) * bucket_rows
+        rounded = max(bucket_rows, min(rounded, max_cache_length))
+        if rounded not in rows:
+            rows.append(rounded)
+
+    if preferred_rows:
+        for value in preferred_rows:
+            add_row(value)
+
     row = start
     while row < max_cache_length:
-        if row not in rows:
-            rows.append(row)
+        add_row(row)
         next_row = max(row + bucket_rows, row * 2)
         row = ((min(next_row, max_cache_length) + bucket_rows - 1) // bucket_rows) * bucket_rows
-    if max_cache_length not in rows:
-        rows.append(max_cache_length)
+    add_row(max_cache_length)
+    rows.sort()
     return rows
 
 
@@ -417,9 +428,10 @@ def build_bundle(
     triattention_stats_path: str | None = None,
     triattention_kv_budget: int | None = None,
     triattention_divide_length: int = 128,
-    triattention_recent_window: int = 0,
+    triattention_recent_window: int = 128,
     triattention_score_aggregation: str = "mean",
-    triattention_protect_prefill: bool = False,
+    triattention_count_prompt_tokens: bool = True,
+    triattention_protect_prefill: bool = True,
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
 ) -> None:
@@ -539,6 +551,7 @@ def build_bundle(
             divide_length=triattention_divide_length,
             recent_window=triattention_recent_window,
             score_aggregation=triattention_score_aggregation,
+            count_prompt_tokens=triattention_count_prompt_tokens,
             protect_prefill=triattention_protect_prefill,
             disable_mlr=triattention_disable_mlr,
             disable_trig=triattention_disable_trig,
@@ -554,9 +567,13 @@ def build_bundle(
             f"recent_window={triattention_recent_window})",
             file=sys.stderr,
         )
+        preferred_rows: list[int] | None = None
+        if kv_budget >= 4096:
+            preferred_rows = [max(32, kv_budget // 2)]
         dynamic_kv_profile_rows = _compute_dynamic_kv_profile_rows(
             max_cache_length,
             kv_budget,
+            preferred_rows=preferred_rows,
         )
         enable_dynamic_kv_cache = True
 
@@ -982,9 +999,10 @@ def build(
     triattention_stats_path: str | None = None,
     triattention_kv_budget: int | None = None,
     triattention_divide_length: int = 128,
-    triattention_recent_window: int = 0,
+    triattention_recent_window: int = 128,
     triattention_score_aggregation: str = "mean",
-    triattention_protect_prefill: bool = False,
+    triattention_count_prompt_tokens: bool = True,
+    triattention_protect_prefill: bool = True,
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
 ) -> None:
@@ -1019,6 +1037,7 @@ def build(
                  triattention_divide_length=triattention_divide_length,
                  triattention_recent_window=triattention_recent_window,
                  triattention_score_aggregation=triattention_score_aggregation,
+                 triattention_count_prompt_tokens=triattention_count_prompt_tokens,
                  triattention_protect_prefill=triattention_protect_prefill,
                  triattention_disable_mlr=triattention_disable_mlr,
                  triattention_disable_trig=triattention_disable_trig)

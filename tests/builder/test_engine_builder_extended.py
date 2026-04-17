@@ -464,3 +464,115 @@ class TestBuildBundleOrchestration:
 
                             info = mock_write.call_args[0][1]
                             assert info.max_cache_length == 1024
+
+    def test_triattention_embeds_stats_and_config(self, tmp_path):
+        """TriAttention build options add config and stats sections."""
+        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        output_path = str(tmp_path / "output.trtfb")
+
+        mock_plugin = MagicMock()
+        mock_plugin.name = "qwen"
+        mock_plugin.runtime_strategy = "decoder_kv_cache"
+        mock_plugin.load_weights.return_value = {}
+        mock_plugin.build_engine.return_value = b"PLAN"
+
+        del mock_plugin.build_vision_engine
+        del mock_plugin.build_extra_engines
+        del mock_plugin.embed_input
+        del mock_plugin.get_vl_config
+        del mock_plugin.get_segmentation_config
+        del mock_plugin.get_audio_config
+        del mock_plugin.get_bundle_config_overrides
+
+        tri_stats = b'{"version": 1, "sampled_heads": [[0, 0]], "stats": {}}'
+
+        with patch("trtf_build.engine_builder.find_plugin",
+                    return_value=mock_plugin):
+            with patch("trtf_build.engine_builder._get_trt_version",
+                        return_value="10.0"):
+                with patch("trtf_build.engine_builder._get_gpu_name",
+                            return_value=""):
+                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
+                        with patch(
+                            "trtf_build.engine_builder.export_triattention_stats_section",
+                            return_value=tri_stats,
+                        ) as mock_export:
+                            with patch("trtf_build.engine_builder.write_bundle") as mock_write:
+                                build_bundle(
+                                    str(model_dir),
+                                    output_path,
+                                    max_cache_length=256,
+                                    triattention_stats_path="triattention.pt",
+                                    triattention_kv_budget=96,
+                                    triattention_recent_window=24,
+                                    triattention_score_aggregation="max",
+                                    triattention_count_prompt_tokens=False,
+                                    triattention_protect_prefill=True,
+                                    triattention_disable_mlr=True,
+                                )
+
+        mock_export.assert_called_once()
+        sections = mock_write.call_args[0][2]
+        section_map = {section.name: section.data for section in sections}
+        assert section_map["triattention_stats.json"] == tri_stats
+
+        cfg = json.loads(section_map["config.json"].decode("utf-8"))
+        tri_cfg = cfg["triattention"]
+        assert tri_cfg["enabled"] is True
+        assert tri_cfg["kv_budget"] == 96
+        assert tri_cfg["divide_length"] == 128
+        assert tri_cfg["recent_window"] == 24
+        assert tri_cfg["score_aggregation"] == "max"
+        assert tri_cfg["count_prompt_tokens"] is False
+        assert tri_cfg["protect_prefill"] is True
+        assert tri_cfg["disable_mlr"] is True
+        assert tri_cfg["disable_trig"] is False
+        assert cfg["dynamic_kv_cache"] is True
+        assert cfg["dynamic_kv_profile_rows"] == [96, 192, 256]
+
+    def test_large_triattention_budget_adds_lower_warmup_profile(self, tmp_path):
+        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        output_path = str(tmp_path / "output.trtfb")
+
+        mock_plugin = MagicMock()
+        mock_plugin.name = "qwen"
+        mock_plugin.runtime_strategy = "decoder_kv_cache"
+        mock_plugin.load_weights.return_value = {}
+        mock_plugin.build_engine.return_value = b"PLAN"
+
+        del mock_plugin.build_vision_engine
+        del mock_plugin.build_extra_engines
+        del mock_plugin.embed_input
+        del mock_plugin.get_vl_config
+        del mock_plugin.get_segmentation_config
+        del mock_plugin.get_audio_config
+        del mock_plugin.get_bundle_config_overrides
+
+        tri_stats = b'{"version": 1, "sampled_heads": [[0, 0]], "stats": {}}'
+
+        with patch("trtf_build.engine_builder.find_plugin",
+                    return_value=mock_plugin):
+            with patch("trtf_build.engine_builder._get_trt_version",
+                        return_value="10.0"):
+                with patch("trtf_build.engine_builder._get_gpu_name",
+                            return_value=""):
+                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
+                        with patch(
+                            "trtf_build.engine_builder.export_triattention_stats_section",
+                            return_value=tri_stats,
+                        ):
+                            with patch("trtf_build.engine_builder.write_bundle") as mock_write:
+                                build_bundle(
+                                    str(model_dir),
+                                    output_path,
+                                    max_cache_length=12288,
+                                    triattention_stats_path="triattention.pt",
+                                    triattention_kv_budget=6144,
+                                    triattention_divide_length=1024,
+                                    triattention_recent_window=128,
+                                )
+
+        sections = mock_write.call_args[0][2]
+        section_map = {section.name: section.data for section in sections}
+        cfg = json.loads(section_map["config.json"].decode("utf-8"))
+        assert cfg["dynamic_kv_profile_rows"] == [3072, 6144, 12288]

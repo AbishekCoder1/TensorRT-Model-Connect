@@ -236,6 +236,19 @@ class TestEdgeCases:
         }))
         assert cfg.rope_theta == 10000.0
 
+    def test_rope_theta_from_rope_scaling(self):
+        """Qwen3-style configs may store rope_theta inside rope_scaling."""
+        cfg = ModelConfig.from_json(json.dumps({
+            "model_type": "qwen3",
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+            "rope_scaling": {
+                "rope_type": "default",
+                "rope_theta": 1000000.0,
+            },
+        }))
+        assert cfg.rope_theta == 1000000.0
+
     def test_raw_dict_preserved(self):
         raw = {
             "model_type": "test",

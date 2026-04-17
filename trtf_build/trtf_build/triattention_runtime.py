@@ -44,7 +44,8 @@ class TriAttentionRuntimeConfig:
     kv_budget: int
     recent_window: int = 128
     score_aggregation: str = "mean"
-    protect_prefill: bool = False
+    count_prompt_tokens: bool = True
+    protect_prefill: bool = True
     disable_mlr: bool = False
     disable_trig: bool = False
     rope_style: str = "half"
@@ -63,7 +64,8 @@ class TriAttentionRuntimeConfig:
             kv_budget=budget,
             recent_window=int(tri_cfg.get("recent_window", 128)),
             score_aggregation=str(tri_cfg.get("score_aggregation", "mean")),
-            protect_prefill=bool(tri_cfg.get("protect_prefill", False)),
+            count_prompt_tokens=bool(tri_cfg.get("count_prompt_tokens", True)),
+            protect_prefill=bool(tri_cfg.get("protect_prefill", True)),
             disable_mlr=bool(tri_cfg.get("disable_mlr", False)),
             disable_trig=bool(tri_cfg.get("disable_trig", False)),
             rope_style=str(rope_style),
@@ -83,9 +85,26 @@ class TriAttentionSelector:
         self.config = config
         self.head_dim = int(stats_payload["head_dim"])
         self.rope_style = str(stats_payload.get("rope_style", config.rope_style))
+        self.num_attention_heads = int(stats_payload.get("num_attention_heads", 0))
+        self.num_key_value_heads = int(
+            stats_payload.get("num_key_value_heads", self.num_attention_heads or 0)
+        )
+        self.stats_head_count = int(
+            stats_payload.get(
+                "stats_head_count",
+                self.num_key_value_heads or self.num_attention_heads or 0,
+            )
+        )
         self.sampled_heads = [tuple(item) for item in stats_payload.get("sampled_heads", [])]
         if not self.sampled_heads:
             raise ValueError("TriAttention stats payload has no sampled_heads")
+        self.cache_group_size = 1
+        if (
+            self.num_attention_heads > 0
+            and self.stats_head_count > 0
+            and (self.num_attention_heads % self.stats_head_count) == 0
+        ):
+            self.cache_group_size = self.num_attention_heads // self.stats_head_count
 
         inv_freq = stats_payload.get("inv_freq")
         if inv_freq is None:
@@ -188,7 +207,7 @@ class TriAttentionSelector:
             layer_cache = layer_caches.get(int(layer))
             if layer_cache is None:
                 continue
-            start = int(head) * self.head_dim
+            start = int(head) * self.cache_group_size * self.head_dim
             end = start + self.head_dim
             if end > layer_cache.shape[1]:
                 continue

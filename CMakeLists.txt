@@ -440,6 +440,7 @@ trtf_add_test(test_chat_template)
 # TRT runtime core
 trtf_add_test(test_decode_runtime)
 trtf_add_test(test_sampler)
+trtf_add_test(test_plugin_helpers)
 trtf_add_test(test_trt_logger)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_trt_logger PRIVATE trtf_backend_trt)

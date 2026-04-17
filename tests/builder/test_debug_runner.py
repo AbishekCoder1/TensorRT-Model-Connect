@@ -28,6 +28,7 @@ def _make_bundle_bytes(
     header: dict,
     engine_plan: bytes = b"FAKE_ENGINE_PLAN",
     vision_plan: bytes | None = None,
+    extra_sections: dict[str, bytes] | None = None,
 ) -> bytes:
     """Build a minimal .trtfb bundle in memory."""
     magic = b"TRTFB\x00\x01\x00"
@@ -44,6 +45,11 @@ def _make_bundle_bytes(
             "offset": len(body), "size": len(vision_plan),
         }
         body += vision_plan
+
+    if extra_sections:
+        for name, data in extra_sections.items():
+            sections[name] = {"offset": len(body), "size": len(data)}
+            body += data
 
     header["sections"] = sections
     header_json = json.dumps(header).encode("utf-8")
@@ -169,6 +175,77 @@ class TestBundleSectionUtils:
 
         cfg = load_config_from_bundle(str(path))
         assert cfg["model_type"] == "qwen3"
+
+    def test_load_triattention_stats_from_bundle(self, tmp_path):
+        from trtf_build.debug_runner import load_triattention_stats_from_bundle
+
+        stats_data = json.dumps({
+            "version": 1,
+            "sampled_heads": [[0, 0]],
+            "stats": {},
+        }).encode("utf-8")
+        header = {"num_layers": 1, "max_cache_length": 32}
+        bundle = _make_bundle_bytes(
+            header,
+            engine_plan=b"X",
+            extra_sections={"triattention_stats.json": stats_data},
+        )
+
+        path = tmp_path / "tri.trtfb"
+        path.write_bytes(bundle)
+
+        payload = load_triattention_stats_from_bundle(str(path))
+        assert payload["version"] == 1
+        assert payload["sampled_heads"] == [[0, 0]]
+
+
+class TestRunnerFromBundle:
+    def test_triattention_bundle_uses_triattention_runner(self, tmp_path):
+        from trtf_build.debug_runner import runner_from_bundle
+
+        config_data = json.dumps({
+            "runtime_strategy": "decoder_kv_cache",
+            "triattention": {
+                "enabled": True,
+                "kv_budget": 64,
+                "recent_window": 16,
+                "stats_section": "triattention_stats.json",
+            },
+        }).encode("utf-8")
+        stats_data = json.dumps({
+            "version": 1,
+            "head_dim": 4,
+            "rope_style": "half",
+            "sampled_heads": [[0, 0]],
+            "stats": {
+                "layer00_head00": {
+                    "q_mean_real": [0.1, 0.2],
+                    "q_mean_imag": [0.0, 0.1],
+                    "q_abs_mean": [0.3, 0.4],
+                }
+            },
+        }).encode("utf-8")
+        bundle = _make_bundle_bytes(
+            {"num_layers": 2, "max_cache_length": 128},
+            engine_plan=b"ENGINE",
+            extra_sections={
+                "config.json": config_data,
+                "triattention_stats.json": stats_data,
+            },
+        )
+
+        path = tmp_path / "tri_dispatch.trtfb"
+        path.write_bytes(bundle)
+
+        with patch("trtf_build.debug_runner.TriAttentionTrtRunner",
+                   return_value="tri-runner") as mock_tri:
+            runner = runner_from_bundle(str(path))
+
+        assert runner == "tri-runner"
+        kwargs = mock_tri.call_args.kwargs
+        assert kwargs["max_cache_length"] == 128
+        assert kwargs["num_layers"] == 2
+        assert kwargs["triattention_stats_payload"]["head_dim"] == 4
 
 
 # ---------------------------------------------------------------------------

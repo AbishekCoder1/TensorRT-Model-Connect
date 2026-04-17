@@ -29,9 +29,10 @@ struct TriAttentionConfig {
     bool enabled{false};
     int32_t kv_budget{0};
     int32_t divide_length{128};
-    int32_t recent_window{0};
+    int32_t recent_window{128};
     TriAttentionScoreAggregation score_aggregation{TriAttentionScoreAggregation::kMean};
-    bool protect_prefill{false};
+    bool count_prompt_tokens{true};
+    bool protect_prefill{true};
     bool disable_mlr{false};
     bool disable_trig{false};
     std::string stats_section{"triattention_stats.json"};
@@ -54,7 +55,7 @@ struct TriAttentionStats {
     int32_t stats_head_count{0};
     int32_t num_layers{0};
     std::vector<float> inv_freq;
-    std::vector<std::vector<int32_t>> sampled_attention_heads_by_layer;
+    std::vector<std::vector<int32_t>> sampled_score_heads_by_layer;
     std::vector<TriAttentionHeadStats> layer_stats;
 };
 
@@ -123,6 +124,7 @@ class TriAttentionKvCache : public IInferenceState {
   private:
     int32_t compaction_trigger_length() const;
     int32_t compaction_keep_budget(int32_t total_tokens) const;
+    int32_t count_prefix_rows() const;
     void compact_existing_cache(bool reserve_slot_for_append = false);
     std::vector<int32_t> select_keep_indices(int32_t keep_budget,
                                              TriAttentionCompactionProfile* profile = nullptr);
@@ -163,7 +165,7 @@ class TriAttentionKvCache : public IInferenceState {
     int32_t query_head_count_{0};
     int32_t query_group_size_{0};
     int32_t cache_head_count_{0};
-    int32_t attention_group_size_{0};
+    int32_t score_group_size_{0};
     int32_t max_length_{0};
     int32_t kv_dim_{0};
     int32_t cache_length_{0};

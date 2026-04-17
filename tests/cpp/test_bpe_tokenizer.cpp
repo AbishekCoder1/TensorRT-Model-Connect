@@ -1107,13 +1107,47 @@ int main()
         // "[^\r\n]?test" contains literal CR/LF bytes which triggers Qwen3 detection.
         {
             auto ids = tok->encode("!\n");
-            // If Qwen3 detected: ! and \n in one chunk → merge → [4]
-            // If GPT-2 fallback: ! and \n separate chunks → [1, 3]
-            check(!ids.empty(), "qwen3_trailing_nl_nonempty");
-            // Check that the newline was encoded (either merged or separate)
-            bool has_newline_token = false;
-            for (auto id : ids) if (id == 3 || id == 4) has_newline_token = true;
-            check(has_newline_token, "qwen3_trailing_nl_encoded");
+            // Qwen3 must keep punctuation + trailing newline in one chunk,
+            // then allow BPE to merge "!" + "Ċ" -> "!Ċ".
+            check(ids.size() == 1 && ids[0] == 4, "qwen3_trailing_nl_merged");
+        }
+
+        // Double newline after punctuation must also stay in the same chunk.
+        std::string q_double_nl_json = R"({
+          "model": {
+            "type": "BPE",
+            "vocab": {
+              ".": 0, "\u010a": 1, "\u010a\u010a": 2, ".\u010a\u010a": 3
+            },
+            "merges": [
+              "\u010a \u010a",
+              ". \u010a\u010a"
+            ]
+          },
+          "pre_tokenizer": {
+            "type": "Sequence",
+            "pretokenizers": [
+              {
+                "type": "Split",
+                "pattern": {"Regex": "[^\u000d\u000a\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},
+                "behavior": "Removed",
+                "invert": true
+              },
+              {
+                "type": "ByteLevel",
+                "add_prefix_space": false,
+                "trim_offsets": false,
+                "use_regex": false
+              }
+            ]
+          }
+        })";
+        auto tok_double = trtf::CreateBpeTokenizer(
+            q_double_nl_json.data(), q_double_nl_json.size(), false);
+        check(tok_double != nullptr, "qwen3_double_nl_create");
+        {
+            auto ids = tok_double->encode(".\n\n");
+            check(ids.size() == 1 && ids[0] == 3, "qwen3_double_nl_merged");
         }
     }
 

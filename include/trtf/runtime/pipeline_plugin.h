@@ -65,6 +65,7 @@ struct PipelineContext {
     IBackend* backend;                     // Backend for creating ITrtModule instances
     const std::string& runtime_cache_path; // RTX: JIT kernel cache file path
     bool cuda_graphs;                      // RTX: whole-graph CUDA capture
+    std::uint64_t kv_cache_size_bytes{0};  // 0 = use bundle max_cache_length (TriAttention)
 };
 
 // Plugin interface. Each plugin registers itself with the PipelineRegistry

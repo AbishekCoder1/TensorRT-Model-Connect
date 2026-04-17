@@ -33,6 +33,7 @@ trtf::TriAttentionConfig make_config(int32_t kv_budget, int32_t recent_window = 
     trtf::TriAttentionConfig cfg;
     cfg.enabled = true;
     cfg.kv_budget = kv_budget;
+    cfg.count_prompt_tokens = true;
     cfg.recent_window = recent_window;
     cfg.protect_prefill = protect_prefill;
     cfg.disable_trig = true;
@@ -264,6 +265,7 @@ void test_bundle_parsing()
     "divide_length": 16,
     "recent_window": 8,
     "score_aggregation": "max",
+    "count_prompt_tokens": false,
     "protect_prefill": true,
     "disable_mlr": true,
     "disable_trig": false,
@@ -299,17 +301,18 @@ void test_bundle_parsing()
     check(cfg.kv_budget == 64, "bundle config parses kv_budget");
     check(cfg.divide_length == 16, "bundle config parses divide_length");
     check(cfg.recent_window == 8, "bundle config parses recent_window");
+    check(!cfg.count_prompt_tokens, "bundle config parses count_prompt_tokens");
     check(cfg.score_aggregation == trtf::TriAttentionScoreAggregation::kMax,
           "bundle config parses score aggregation");
     check(stats.head_dim == 4, "stats parse head_dim");
     check(stats.layer_stats.size() == 1, "stats parse layer stats");
     check(stats.stats_head_count == 2, "stats parse score head count");
     check(stats.inv_freq.size() == 2 && stats.inv_freq[1] == 0.1F, "stats parse inv_freq");
-    check(stats.sampled_attention_heads_by_layer.size() == 1,
+    check(stats.sampled_score_heads_by_layer.size() == 1,
           "stats parse sampled-head layer mapping");
-    check(stats.sampled_attention_heads_by_layer[0].size() == 1 &&
-              stats.sampled_attention_heads_by_layer[0][0] == 1,
-          "stats preserve actual sampled attention heads");
+    check(stats.sampled_score_heads_by_layer[0].size() == 1 &&
+              stats.sampled_score_heads_by_layer[0][0] == 1,
+          "stats preserve actual sampled score heads");
 }
 
 } // namespace

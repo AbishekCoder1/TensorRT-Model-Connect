@@ -145,7 +145,9 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_recent_window=getattr(args, "triattention_recent_window", 0),
             triattention_score_aggregation=getattr(
                 args, "triattention_score_aggregation", "mean"),
-            triattention_protect_prefill=getattr(args, "triattention_protect_prefill", False),
+            triattention_count_prompt_tokens=getattr(
+                args, "triattention_count_prompt_tokens", True),
+            triattention_protect_prefill=getattr(args, "triattention_protect_prefill", True),
             triattention_disable_mlr=getattr(args, "triattention_disable_mlr", False),
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
         )
@@ -489,13 +491,28 @@ def main() -> None:
     build_p.add_argument("--triattention-divide-length", type=int, default=128,
                          help="Trigger TriAttention compaction when cache reaches "
                               "kv_budget + divide_length (default: 128)")
-    build_p.add_argument("--triattention-recent-window", type=int, default=0,
+    build_p.add_argument("--triattention-recent-window", type=int, default=128,
                          help="Always keep this many recent tokens when TriAttention is enabled")
     build_p.add_argument("--triattention-score-aggregation",
                          choices=["mean", "max"], default="mean",
                          help="How to aggregate TriAttention offset scores")
-    build_p.add_argument("--triattention-protect-prefill", action="store_true",
-                         help="Prefer retaining prompt tokens during TriAttention compaction")
+    build_p.add_argument("--triattention-count-prompt-tokens",
+                         dest="triattention_count_prompt_tokens",
+                         action="store_true", default=True,
+                         help="Count prompt tokens against the TriAttention KV budget")
+    build_p.add_argument("--triattention-no-count-prompt-tokens",
+                         dest="triattention_count_prompt_tokens",
+                         action="store_false",
+                         help="Exclude prompt tokens from the TriAttention KV budget")
+    build_p.add_argument("--triattention-protect-prefill",
+                         dest="triattention_protect_prefill",
+                         action="store_true", default=True,
+                         help="Prefer retaining prompt tokens during TriAttention compaction "
+                              "(default: enabled)")
+    build_p.add_argument("--triattention-no-protect-prefill",
+                         dest="triattention_protect_prefill",
+                         action="store_false",
+                         help="Allow prompt tokens to be pruned during TriAttention compaction")
     build_p.add_argument("--triattention-disable-mlr", action="store_true",
                          help="Disable TriAttention's magnitude-based additive term")
     build_p.add_argument("--triattention-disable-trig", action="store_true",

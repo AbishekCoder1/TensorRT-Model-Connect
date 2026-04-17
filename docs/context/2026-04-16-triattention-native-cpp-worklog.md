@@ -61,6 +61,30 @@ Throughput on that same slice:
 That is about `1.34x` faster while preserving the dense answers on the matched
 pilot.
 
+Current reproducible MR-tip validation:
+
+- TriAttention bundle:
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri12288-b3072-r128-dynkv-fp16-manual-current.trtfb`
+- dense control bundle:
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-dense12288-dynkv-fp16-manual-samefam.trtfb`
+- runtime overrides:
+  `TRTF_TRIATTN_OVERRIDE_KV_BUDGET=6144`
+  `TRTF_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
+  `TRTF_TRIATTN_RUNTIME_BUCKET_ROWS=32`
+- validation outputs:
+  `artifacts/triattention/policy-sweeps/2026-04-17-current-bundle-override-validation/`
+
+Checked results from that current-tree validation:
+
+- `aime25_2`: TriAttention answer `588`, dense answer `588`
+- `aime25_3`: TriAttention answer `16`
+- `aime25_2` no-stop throughput:
+  TriAttention `56.658344 tok/s`
+  dense same-family control `42.614745 tok/s`
+
+That is `1.3295x` on the fair same-family dense baseline while preserving the
+checked hard answers.
+
 ## High-level design choices
 
 ### 1. Treat TriAttention as a runtime/cache policy, not an attention-kernel swap
