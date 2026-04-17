@@ -381,6 +381,10 @@ def add_attention_block(
         if mask_value.dtype != scaled.get_output(0).dtype:
             mask_value = network.add_cast(mask_value, scaled.get_output(0).dtype).get_output(0)
 
+        mask_value = mask3d.get_output(0)
+        if mask_value.dtype != scaled.get_output(0).dtype:
+            mask_value = network.add_cast(mask_value, scaled.get_output(0).dtype).get_output(0)
+
         masked = network.add_elementwise(
             scaled.get_output(0), mask_value,
             trt.ElementWiseOperation.SUM)
