@@ -12,17 +12,27 @@ import warnings
 from typing import Any
 
 import numpy as np
-import tensorrt as trt
+try:
+    import tensorrt as trt
+except ImportError:  # pragma: no cover - exercised in TRT-free test envs
+    trt = None  # type: ignore[assignment]
+
+from .triattention_runtime import TriAttentionRuntimeConfig, TriAttentionSelector
 
 # cuda-python >= 13 uses cuda.bindings.runtime; older versions use cuda.cudart.
 try:
     from cuda.bindings import runtime as cudart
 except ImportError:
-    from cuda import cudart  # type: ignore[no-redef]
+    try:
+        from cuda import cudart  # type: ignore[no-redef]
+    except ImportError:  # pragma: no cover - exercised in TRT-free test envs
+        cudart = None  # type: ignore[assignment]
 
 
 def _check_cuda(status):
     """Raise on CUDA error."""
+    if cudart is None:
+        raise RuntimeError("cuda-python is required for debug_runner execution")
     if hasattr(cudart, "cudaError_t"):
         success = cudart.cudaError_t.cudaSuccess
     else:
@@ -45,6 +55,13 @@ def _trt_itemsize(dtype: trt.DataType) -> int:
     return np.dtype(_trt_nptype_safe(dtype)).itemsize
 
 
+def _require_trt_runtime() -> None:
+    if trt is None:
+        raise ImportError("tensorrt is required for debug_runner execution")
+    if cudart is None:
+        raise ImportError("cuda-python is required for debug_runner execution")
+
+
 class TrtRunner:
     """Device-resident TRT inference runner for debugging and diff testing.
 
@@ -60,6 +77,7 @@ class TrtRunner:
         num_layers: int,
         attention_size: int | None = None,
     ):
+        _require_trt_runtime()
         self.max_cache_length = max_cache_length
         self.num_layers = num_layers
 
@@ -88,6 +106,7 @@ class TrtRunner:
         self.cache_length = 0
         attention_window = max_cache_length + 1
         row_bytes = self.attention_size * self._cache_elem_bytes
+        self._row_bytes = row_bytes
 
         # Discover IO tensor metadata and identify debug/extra outputs
         self._output_names: list[str] = []
@@ -415,6 +434,8 @@ class TrtRunner:
         return all_results
 
     def __del__(self):
+        if cudart is None:
+            return
         if not hasattr(self, "_d_token_id"):
             return
         bufs = [self._d_token_id, self._d_position_id, self._d_mask,
@@ -443,6 +464,256 @@ class TrtRunner:
             del self.engine
 
 
+class TriAttentionTrtRunner(TrtRunner):
+    """Experimental TriAttention runner for dense shared-row KV caches.
+
+    This keeps the base TensorRT engine unchanged and applies cache selection
+    in the Python debug path. Unlike the upstream vLLM integration, this MVP
+    uses a single shared token set across all layers/heads.
+    """
+
+    def __init__(
+        self,
+        engine_plan: bytes,
+        max_cache_length: int,
+        num_layers: int,
+        triattention_config: TriAttentionRuntimeConfig,
+        triattention_stats_payload: dict[str, Any],
+        attention_size: int | None = None,
+    ):
+        super().__init__(
+            engine_plan=engine_plan,
+            max_cache_length=max_cache_length,
+            num_layers=num_layers,
+            attention_size=attention_size,
+        )
+        if triattention_config.kv_budget < 1:
+            raise ValueError("TriAttention kv_budget must be >= 1")
+        if triattention_config.kv_budget > max_cache_length:
+            raise ValueError(
+                "TriAttention kv_budget cannot exceed the engine max_cache_length"
+            )
+        self.triattention_config = triattention_config
+        self.triattention_selector = TriAttentionSelector(
+            triattention_stats_payload,
+            triattention_config,
+        )
+        self.absolute_position = 0
+        self.cache_positions: list[int] = []
+        self._tri_prompt_end_position = 0
+
+    def _copy_layer_cache_to_host(self, device_ptr: int, rows: int) -> np.ndarray:
+        host = np.zeros((rows, self.attention_size), dtype=self._cache_dtype)
+        if rows <= 0:
+            return host
+        cudart.cudaMemcpyAsync(
+            host.ctypes.data,
+            device_ptr,
+            rows * self._row_bytes,
+            cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+            self.stream,
+        )
+        cudart.cudaStreamSynchronize(self.stream)
+        return host
+
+    def _write_layer_cache_from_host(self, device_ptr: int, host: np.ndarray) -> None:
+        if host.size == 0:
+            return
+        cudart.cudaMemcpyAsync(
+            device_ptr,
+            np.ascontiguousarray(host).ctypes.data,
+            host.nbytes,
+            cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
+            self.stream,
+        )
+        cudart.cudaStreamSynchronize(self.stream)
+
+    def _compact_existing_cache(self) -> None:
+        if self.cache_length < self.triattention_config.kv_budget:
+            return
+
+        sampled_layers = sorted({int(layer) for layer, _ in self.triattention_selector.sampled_heads})
+        sampled_k_cache: dict[int, np.ndarray] = {}
+        for layer in sampled_layers:
+            if layer >= self.num_layers:
+                continue
+            sampled_k_cache[layer] = self._copy_layer_cache_to_host(
+                self._d_cache_k[layer],
+                self.cache_length,
+            )
+
+        keep_indices = self.triattention_selector.select_keep_indices(
+            sampled_k_cache,
+            cache_positions=self.cache_positions,
+            next_position=self.absolute_position,
+            prefix_length=self._tri_prompt_end_position,
+        )
+        keep_count = int(keep_indices.size)
+        for i in range(self.num_layers):
+            host_k = self._copy_layer_cache_to_host(self._d_cache_k[i], self.cache_length)
+            host_v = self._copy_layer_cache_to_host(self._d_cache_v[i], self.cache_length)
+            self._write_layer_cache_from_host(self._d_cache_k[i], host_k[keep_indices])
+            self._write_layer_cache_from_host(self._d_cache_v[i], host_v[keep_indices])
+
+        self.cache_positions = [self.cache_positions[int(idx)] for idx in keep_indices]
+        self.cache_length = keep_count
+
+    def step(
+        self,
+        token_id: int,
+        input_embed: np.ndarray | None = None,
+        use_input_embed: float = 0.0,
+        deepstack_embeds: list[np.ndarray] | None = None,
+        deepstack_active: float = 0.0,
+    ) -> dict[str, np.ndarray]:
+        H2D = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+        D2H = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
+        D2D = cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice
+        stream = self.stream
+        attention_window = self.max_cache_length + 1
+
+        position_id = self.absolute_position
+        self._h_mask[:] = -1e9
+        valid = self.cache_length
+        self._h_mask[0, :valid] = 0.0
+        self._h_mask[0, -1] = 0.0
+
+        self._h_token_id[0] = token_id
+        self._h_position_id[0] = position_id
+
+        cudart.cudaMemcpyAsync(
+            self._d_token_id, self._h_token_id.ctypes.data,
+            4, H2D, stream)
+        cudart.cudaMemcpyAsync(
+            self._d_position_id, self._h_position_id.ctypes.data,
+            4, H2D, stream)
+        cudart.cudaMemcpyAsync(
+            self._d_mask, self._h_mask.ctypes.data,
+            attention_window * 4, H2D, stream)
+
+        if self._has_embed_input:
+            if input_embed is not None and use_input_embed > 0.5:
+                self._h_input_embed[:] = input_embed.astype(np.float32)
+                self._h_use_input_embed[0] = use_input_embed
+            else:
+                self._h_input_embed[:] = 0.0
+                self._h_use_input_embed[0] = 0.0
+            cudart.cudaMemcpyAsync(
+                self._d_input_embed, self._h_input_embed.ctypes.data,
+                self._h_input_embed.nbytes, H2D, stream)
+            cudart.cudaMemcpyAsync(
+                self._d_use_input_embed, self._h_use_input_embed.ctypes.data,
+                4, H2D, stream)
+
+        if self._deepstack_names:
+            for idx, ds_name in enumerate(self._deepstack_names):
+                if (deepstack_embeds is not None and idx < len(deepstack_embeds)
+                        and deepstack_active > 0.5):
+                    self._h_deepstack[ds_name][:] = deepstack_embeds[idx].astype(np.float32)
+                else:
+                    self._h_deepstack[ds_name][:] = 0.0
+                cudart.cudaMemcpyAsync(
+                    self._d_deepstack[ds_name],
+                    self._h_deepstack[ds_name].ctypes.data,
+                    self._h_deepstack[ds_name].nbytes, H2D, stream)
+            if self._h_deepstack_active is not None:
+                self._h_deepstack_active[0] = deepstack_active
+                cudart.cudaMemcpyAsync(
+                    self._d_deepstack_active,
+                    self._h_deepstack_active.ctypes.data,
+                    4, H2D, stream)
+
+        self.context.set_tensor_address("token_id", self._d_token_id)
+        self.context.set_tensor_address("position_id", self._d_position_id)
+        self.context.set_tensor_address("attention_mask", self._d_mask)
+        self.context.set_tensor_address("logits", self._d_logits)
+
+        if self._has_embed_input:
+            self.context.set_tensor_address("input_embed", self._d_input_embed)
+            self.context.set_tensor_address(
+                "use_input_embed", self._d_use_input_embed)
+
+        for ds_name in self._deepstack_names:
+            self.context.set_tensor_address(ds_name, self._d_deepstack[ds_name])
+        if self._d_deepstack_active:
+            self.context.set_tensor_address(
+                "deepstack_active", self._d_deepstack_active)
+
+        for i in range(self.num_layers):
+            self.context.set_tensor_address(f"cache_k_{i}", self._d_cache_k[i])
+            self.context.set_tensor_address(f"cache_v_{i}", self._d_cache_v[i])
+            self.context.set_tensor_address(f"present_k_{i}", self._d_present_k[i])
+            self.context.set_tensor_address(f"present_v_{i}", self._d_present_v[i])
+
+        for name in self._debug_output_names:
+            self.context.set_tensor_address(name, self._d_debug[name])
+
+        self.context.execute_async_v3(stream)
+
+        self._compact_existing_cache()
+
+        for i in range(self.num_layers):
+            for cache_buf, present_buf in [
+                (self._d_cache_k[i], self._d_present_k[i]),
+                (self._d_cache_v[i], self._d_present_v[i]),
+            ]:
+                offset = self.cache_length * self._row_bytes
+                cudart.cudaMemcpyAsync(
+                    cache_buf + offset,
+                    present_buf,
+                    self._row_bytes,
+                    D2D,
+                    stream,
+                )
+
+        cudart.cudaMemcpyAsync(
+            self._h_logits.ctypes.data, self._d_logits,
+            self._logits_numel * 4, D2H, stream)
+        for name in self._debug_output_names:
+            h_buf = self._h_debug[name]
+            cudart.cudaMemcpyAsync(
+                h_buf.ctypes.data, self._d_debug[name],
+                h_buf.nbytes, D2H, stream)
+
+        cudart.cudaStreamSynchronize(stream)
+        self.cache_positions.append(self.absolute_position)
+        self.cache_length += 1
+        self.absolute_position += 1
+
+        results: dict[str, np.ndarray] = {
+            "logits": self._h_logits.copy(),
+        }
+        for name in self._debug_output_names:
+            results[name] = self._h_debug[name].copy()
+        return results
+
+    def reset(self):
+        super().reset()
+        self.absolute_position = 0
+        self.cache_positions = []
+        self._tri_prompt_end_position = 0
+
+    def generate(
+        self,
+        input_ids: list[int],
+        max_new_tokens: int,
+    ) -> list[dict[str, np.ndarray]]:
+        all_results = []
+        self._tri_prompt_end_position = self.absolute_position + len(input_ids)
+
+        for tid in input_ids:
+            result = self.step(tid)
+            all_results.append(result)
+
+        for _ in range(max_new_tokens):
+            last_logits = all_results[-1]["logits"].flatten()
+            next_token = int(np.argmax(last_logits))
+            result = self.step(next_token)
+            all_results.append(result)
+
+        return all_results
+
+
 class MambaTrtRunner:
     """Device-resident Mamba/SSM TRT inference runner.
 
@@ -459,6 +730,7 @@ class MambaTrtRunner:
         state_size: int | None = None,
         conv_kernel: int | None = None,
     ):
+        _require_trt_runtime()
         self.num_layers = num_layers
 
         # Deserialize engine
@@ -672,14 +944,18 @@ class MambaTrtRunner:
         return all_results
 
     def __del__(self):
-        if not hasattr(self, "_d_logits"):
+        if cudart is None:
             return
-        bufs = [self._d_token_id, self._d_logits]
-        bufs.extend(self._d_conv_state)
-        bufs.extend(self._d_ssm_state)
-        bufs.extend(self._d_present_conv)
-        bufs.extend(self._d_present_ssm)
-        for d_ptr in self._d_debug.values():
+        if not hasattr(self, "_d_token_id"):
+            return
+        bufs = []
+        for attr in ("_d_token_id", "_d_logits"):
+            value = getattr(self, attr, None)
+            if value is not None:
+                bufs.append(value)
+        for attr in ("_d_conv_state", "_d_ssm_state", "_d_present_conv", "_d_present_ssm"):
+            bufs.extend(getattr(self, attr, []))
+        for d_ptr in getattr(self, "_d_debug", {}).values():
             bufs.append(d_ptr)
         for d_ptr in bufs:
             cudart.cudaFree(d_ptr)
@@ -700,6 +976,7 @@ class RwkvTrtRunner:
     """
 
     def __init__(self, engine_plan: bytes, num_layers: int):
+        _require_trt_runtime()
         self.num_layers = num_layers
 
         logger = trt.Logger(trt.Logger.WARNING)
@@ -852,7 +1129,9 @@ class RwkvTrtRunner:
         return all_results
 
     def __del__(self):
-        if not hasattr(self, "_d_logits"):
+        if cudart is None:
+            return
+        if not hasattr(self, "_d_token_id"):
             return
         bufs = [self._d_token_id, self._d_logits]
         for lst in [self._d_attn, self._d_ff, self._d_num, self._d_den, self._d_max,
@@ -882,6 +1161,7 @@ class WhisperTrtRunner:
         max_source_positions: int = 1500,
         hidden_size: int | None = None,
     ):
+        _require_trt_runtime()
         self.num_layers = num_layers
         self.max_cache_length = max_cache_length
         self.max_source_positions = max_source_positions
@@ -1076,7 +1356,9 @@ class WhisperTrtRunner:
         return all_results
 
     def __del__(self):
-        if not hasattr(self, "_d_logits"):
+        if cudart is None:
+            return
+        if not hasattr(self, "_d_token_id"):
             return
         bufs = [self._d_token_id, self._d_position_id, self._d_mask, self._d_logits,
                 self._d_mel, self._d_enc_out]
@@ -1108,6 +1390,7 @@ class HybridTrtRunner:
         num_mamba_layers: int,
         num_attention_layers: int,
     ):
+        _require_trt_runtime()
         self.max_cache_length = max_cache_length
         self.num_mamba_layers = num_mamba_layers
         self.num_attention_layers = num_attention_layers
@@ -1378,7 +1661,9 @@ class HybridTrtRunner:
         return all_results
 
     def __del__(self):
-        if not hasattr(self, "_d_logits"):
+        if cudart is None:
+            return
+        if not hasattr(self, "_d_token_id"):
             return
         bufs = [self._d_token_id, self._d_position_id, self._d_mask,
                 self._d_logits]
@@ -1420,6 +1705,7 @@ class Seq2SeqTrtRunner:
         hidden_size: int | None = None,
         decoder_start_token_id: int = 2,
     ):
+        _require_trt_runtime()
         self.num_layers = num_layers
         self.max_cache_length = max_cache_length
         self.max_source_positions = max_source_positions
@@ -1643,7 +1929,9 @@ class Seq2SeqTrtRunner:
         return results
 
     def __del__(self):
-        if not hasattr(self, "_d_logits"):
+        if cudart is None:
+            return
+        if not hasattr(self, "_d_token_id"):
             return
         bufs = [self._d_token_id, self._d_position_id, self._d_mask, self._d_logits,
                 self._d_enc_input_ids, self._d_enc_mask, self._d_enc_out]
@@ -1693,6 +1981,7 @@ def runner_from_bundle(bundle_path: str) -> TrtRunner:
     engine_plan, header = load_engine_from_bundle(bundle_path)
     runtime_strategy = config.get("runtime_strategy", "decoder_kv_cache")
     num_layers = header.get("num_layers", config.get("num_hidden_layers", 1))
+    tri_cfg = config.get("triattention", {}) or {}
 
     if runtime_strategy in ("seq2seq_encoder_decoder", "text_to_text", "marian_translation"):
         encoder_plan, _ = load_vision_engine_from_bundle(bundle_path)
@@ -1726,6 +2015,23 @@ def runner_from_bundle(bundle_path: str) -> TrtRunner:
         return RwkvTrtRunner(
             engine_plan=engine_plan,
             num_layers=num_layers,
+        )
+    if tri_cfg.get("enabled") and runtime_strategy in ("decoder_kv_cache", "decoder_moe"):
+        tri_stats = load_triattention_stats_from_bundle(
+            bundle_path,
+            tri_cfg.get("stats_section", "triattention_stats.json"),
+        )
+        tri_runtime_cfg = TriAttentionRuntimeConfig.from_bundle_config(
+            tri_cfg,
+            rope_style=str(tri_stats.get("rope_style", "half")),
+            max_cache_length=header["max_cache_length"],
+        )
+        return TriAttentionTrtRunner(
+            engine_plan=engine_plan,
+            max_cache_length=header["max_cache_length"],
+            num_layers=num_layers,
+            triattention_config=tri_runtime_cfg,
+            triattention_stats_payload=tri_stats,
         )
 
     return TrtRunner(
@@ -1768,6 +2074,7 @@ class VisionTrtRunner:
     """
 
     def __init__(self, engine_plan: bytes):
+        _require_trt_runtime()
         logger = trt.Logger(trt.Logger.WARNING)
         runtime = trt.Runtime(logger)
         self.engine = runtime.deserialize_cuda_engine(engine_plan)
@@ -1854,6 +2161,8 @@ class VisionTrtRunner:
         return results
 
     def __del__(self):
+        if cudart is None:
+            return
         for d_ptr in self._device_buffers.values():
             cudart.cudaFree(d_ptr)
         if hasattr(self, "stream"):
@@ -1892,6 +2201,22 @@ def load_config_from_bundle(bundle_path: str) -> dict:
     data = load_section_from_bundle(bundle_path, "config.json")
     if data is None:
         return {}
+    return json.loads(data.decode("utf-8"))
+
+
+def load_triattention_stats_from_bundle(
+    bundle_path: str,
+    section_name: str = "triattention_stats.json",
+) -> dict[str, Any]:
+    """Load and parse embedded TriAttention stats from a .trtfb bundle."""
+    import json
+
+    data = load_section_from_bundle(bundle_path, section_name)
+    if data is None:
+        raise ValueError(
+            "TriAttention is enabled in the bundle config but the stats section "
+            f"{section_name!r} is missing."
+        )
     return json.loads(data.decode("utf-8"))
 
 
@@ -2146,6 +2471,7 @@ class SegmentationTrtRunner:
     """
 
     def __init__(self, engine_plan: bytes):
+        _require_trt_runtime()
         logger = trt.Logger(trt.Logger.WARNING)
         runtime = trt.Runtime(logger)
         self.engine = runtime.deserialize_cuda_engine(engine_plan)
@@ -2225,6 +2551,8 @@ class SegmentationTrtRunner:
         return results
 
     def __del__(self):
+        if cudart is None:
+            return
         for d_ptr in self._device_buffers.values():
             cudart.cudaFree(d_ptr)
         if hasattr(self, "stream"):

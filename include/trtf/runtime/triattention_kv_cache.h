@@ -1,0 +1,205 @@
+#pragma once
+
+#include "trtf/runtime/device_tensor.h"
+#include "trtf/runtime/inference_state.h"
+#include "trtf/runtime/kv_cache.h"
+
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
+
+#if TRTF_HAS_TRT
+
+namespace trtf {
+
+enum class TriAttentionScoreAggregation
+{
+    kMean,
+    kMax,
+};
+
+enum class TriAttentionRopeStyle
+{
+    kHalf,
+    kInterleaved,
+};
+
+struct TriAttentionConfig {
+    bool enabled{false};
+    int32_t kv_budget{0};
+    int32_t divide_length{128};
+    int32_t recent_window{0};
+    TriAttentionScoreAggregation score_aggregation{TriAttentionScoreAggregation::kMean};
+    bool protect_prefill{false};
+    bool disable_mlr{false};
+    bool disable_trig{false};
+    std::string stats_section{"triattention_stats.json"};
+    int32_t offset_max_length{65536};
+};
+
+struct TriAttentionHeadStats {
+    std::vector<float> q_mean_real;
+    std::vector<float> q_mean_imag;
+    std::vector<float> q_abs_mean;
+    std::vector<float> freq_scale_sq;
+};
+
+struct TriAttentionStats {
+    int32_t head_dim{0};
+    TriAttentionRopeStyle rope_style{TriAttentionRopeStyle::kHalf};
+    float rope_theta{10000.0F};
+    int32_t num_attention_heads{0};
+    int32_t num_key_value_heads{0};
+    int32_t stats_head_count{0};
+    int32_t num_layers{0};
+    std::vector<float> inv_freq;
+    std::vector<std::vector<int32_t>> sampled_attention_heads_by_layer;
+    std::vector<TriAttentionHeadStats> layer_stats;
+};
+
+struct TriAttentionCompactionProfile {
+    double host_copy_ms{0.0};
+    double host_convert_ms{0.0};
+    double trig_prep_ms{0.0};
+    double score_ms{0.0};
+    double combine_ms{0.0};
+    double select_ms{0.0};
+    double repack_ms{0.0};
+    std::size_t host_copy_bytes{0};
+    std::size_t repack_bytes{0};
+    int64_t repack_calls{0};
+    int32_t candidate_count{0};
+    int32_t reserved_count{0};
+    int32_t sampled_layers{0};
+    int32_t sampled_heads{0};
+};
+
+TriAttentionConfig parse_triattention_bundle_config(const std::string& config_json,
+                                                    int32_t max_cache_length);
+
+TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
+                                                int32_t num_attention_heads,
+                                                int32_t num_key_value_heads,
+                                                int32_t num_layers);
+
+class TrtModule;
+
+class TriAttentionKvCache : public IInferenceState {
+  public:
+    TriAttentionKvCache(int32_t num_layers, int32_t num_kv_heads, int32_t max_length, int32_t kv_dim,
+                        cudaStream_t stream, TriAttentionConfig config, TriAttentionStats stats,
+                        DType cache_dtype = DType::kFloat32, KvCacheNames names = {});
+
+    void reset() override;
+    void bind_to(TrtModule& module) override;
+    void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
+    void advance(int32_t n_tokens = 1) override;
+    void set_prompt_length(int32_t prompt_length) override;
+    void mark_prefill_complete() override;
+    int32_t position() const override { return absolute_position_; }
+    int32_t max_length() const override { return max_length_; }
+    int32_t preferred_cache_rows() const override;
+    int32_t num_layers() const override { return num_layers_; }
+    bool needs_attention_mask() const override { return true; }
+    std::size_t device_memory_bytes() const override;
+    const char* state_type() const override { return "triattention_kv_cache"; }
+    bool ok() const override;
+
+    void build_attention_mask(std::vector<float>& mask) const;
+
+    DeviceTensor& cache_k(int32_t layer) { return cache_k_[static_cast<std::size_t>(layer)]; }
+    DeviceTensor& cache_v(int32_t layer) { return cache_v_[static_cast<std::size_t>(layer)]; }
+    DeviceTensor& present_k(int32_t layer) { return present_k_[static_cast<std::size_t>(layer)]; }
+    DeviceTensor& present_v(int32_t layer) { return present_v_[static_cast<std::size_t>(layer)]; }
+
+    int32_t active_length() const { return cache_length_; }
+    const std::vector<int32_t>& cache_positions() const { return cache_positions_; }
+    const std::vector<std::vector<int32_t>>& cache_positions_per_head() const {
+        return cache_positions_per_head_;
+    }
+    int32_t prompt_end_position() const { return prompt_end_position_; }
+
+  private:
+    int32_t compaction_trigger_length() const;
+    int32_t compaction_keep_budget(int32_t total_tokens) const;
+    void compact_existing_cache(bool reserve_slot_for_append = false);
+    std::vector<int32_t> select_keep_indices(int32_t keep_budget,
+                                             TriAttentionCompactionProfile* profile = nullptr);
+    std::vector<int32_t> select_keep_indices_host(int32_t keep_budget,
+                                                  const std::vector<int32_t>& reserved,
+                                                  const std::vector<int32_t>& candidates,
+                                                  TriAttentionCompactionProfile* profile = nullptr) const;
+    std::vector<float> copy_cache_rows_to_host(const DeviceTensor& tensor, int32_t rows,
+                                               TriAttentionCompactionProfile* profile = nullptr) const;
+    void sync_shared_positions_from_head0();
+#ifdef TRTF_HAS_CUDA_KERNELS
+    struct LayerGpuStats {
+        DeviceTensor head_offsets;
+        DeviceTensor head_cache_indices;
+        DeviceTensor q_mean_real;
+        DeviceTensor q_mean_imag;
+        DeviceTensor q_abs_mean;
+        DeviceTensor freq_scale_sq;
+        DeviceTensor scores;
+        std::vector<int32_t> host_cache_head_indices;
+        int32_t score_head_count{0};
+    };
+
+    void initialize_gpu_state();
+    bool can_use_gpu_selection() const;
+    std::vector<int32_t> select_keep_indices_gpu(int32_t keep_budget,
+                                                 const std::vector<int32_t>& reserved,
+                                                 const std::vector<int32_t>& candidates,
+                                                 TriAttentionCompactionProfile* profile = nullptr);
+#endif
+
+    std::vector<DeviceTensor> cache_k_;
+    std::vector<DeviceTensor> cache_v_;
+    std::vector<DeviceTensor> present_k_;
+    std::vector<DeviceTensor> present_v_;
+    int32_t num_layers_{0};
+    int32_t num_kv_heads_{0};
+    int32_t query_head_count_{0};
+    int32_t query_group_size_{0};
+    int32_t cache_head_count_{0};
+    int32_t attention_group_size_{0};
+    int32_t max_length_{0};
+    int32_t kv_dim_{0};
+    int32_t cache_length_{0};
+    int32_t absolute_position_{0};
+    int32_t planned_prompt_length_{0};
+    int32_t prompt_end_position_{0};
+    cudaStream_t stream_{nullptr};
+    std::vector<float> mask_buf_;
+    int32_t pos_buf_{0};
+    bool has_position_input_{false};
+    bool dynamic_binding_enabled_{false};
+    int32_t bound_cache_rows_{0};
+    DType cache_dtype_{DType::kFloat32};
+    std::size_t cache_element_size_{sizeof(float)};
+    KvCacheNames names_;
+    TriAttentionConfig config_;
+    TriAttentionStats stats_;
+    std::vector<int32_t> cache_positions_;
+    std::vector<std::vector<int32_t>> cache_positions_per_head_;
+    std::vector<float> offsets_;
+    bool profile_enabled_{false};
+    int64_t compaction_count_{0};
+    TrtModule* bound_module_{nullptr};
+#ifdef TRTF_HAS_CUDA_KERNELS
+    std::vector<LayerGpuStats> layer_gpu_stats_;
+    DeviceTensor candidate_indices_device_;
+    DeviceTensor keep_indices_device_;
+    DeviceTensor positions_device_;
+    DeviceTensor inv_freq_device_;
+    DeviceTensor cos_phase_device_;
+    DeviceTensor sin_phase_device_;
+    DeviceTensor scratch_k_device_;
+    DeviceTensor scratch_v_device_;
+#endif
+};
+
+} // namespace trtf
+
+#endif // TRTF_HAS_TRT

@@ -130,6 +130,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             model_id_or_path=build_model_ref,
             output_path=args.output,
             max_cache_length=args.max_cache_length,
+            dynamic_kv_cache=getattr(args, "dynamic_kv_cache", False),
             precision=args.precision,
             quantize=quantize,
             quant_scales=args.quant_scales,
@@ -138,6 +139,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
             fp8_scales=fp8_scales,
             save_fp8_scales=save_fp8_scales,
             rtx=getattr(args, 'rtx', False),
+            triattention_stats_path=getattr(args, "triattention_stats", None),
+            triattention_kv_budget=getattr(args, "triattention_kv_budget", None),
+            triattention_divide_length=getattr(args, "triattention_divide_length", 128),
+            triattention_recent_window=getattr(args, "triattention_recent_window", 0),
+            triattention_score_aggregation=getattr(
+                args, "triattention_score_aggregation", "mean"),
+            triattention_protect_prefill=getattr(args, "triattention_protect_prefill", False),
+            triattention_disable_mlr=getattr(args, "triattention_disable_mlr", False),
+            triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
         )
         return 0
     except Exception as e:
@@ -443,6 +453,8 @@ def main() -> None:
                          help="Output .trtfb file path")
     build_p.add_argument("--max-cache-length", type=int, default=256,
                          help="KV cache length (default: 256)")
+    build_p.add_argument("--dynamic-kv-cache", action="store_true",
+                         help="Build decoder bundles with runtime-resizable KV cache support")
     build_p.add_argument("--precision", choices=["fp32", "fp16", "bf16"],
                          default="fp32",
                          help="Engine precision (default: fp32)")
@@ -470,6 +482,24 @@ def main() -> None:
                          help="Save calibrated FP8 scales to JSON (reuse with --fp8-scales)")
     build_p.add_argument("--rtx", action="store_true",
                          help="Build engine for TRT-RTX (portable, JIT-compiled at runtime)")
+    build_p.add_argument("--triattention-stats", default=None,
+                         help="Path to upstream TriAttention calibration stats (.pt) to embed")
+    build_p.add_argument("--triattention-kv-budget", type=int, default=None,
+                         help="Runtime KV budget for experimental TriAttention compaction")
+    build_p.add_argument("--triattention-divide-length", type=int, default=128,
+                         help="Trigger TriAttention compaction when cache reaches "
+                              "kv_budget + divide_length (default: 128)")
+    build_p.add_argument("--triattention-recent-window", type=int, default=0,
+                         help="Always keep this many recent tokens when TriAttention is enabled")
+    build_p.add_argument("--triattention-score-aggregation",
+                         choices=["mean", "max"], default="mean",
+                         help="How to aggregate TriAttention offset scores")
+    build_p.add_argument("--triattention-protect-prefill", action="store_true",
+                         help="Prefer retaining prompt tokens during TriAttention compaction")
+    build_p.add_argument("--triattention-disable-mlr", action="store_true",
+                         help="Disable TriAttention's magnitude-based additive term")
+    build_p.add_argument("--triattention-disable-trig", action="store_true",
+                         help="Disable TriAttention's trig scoring term")
 
     # trtf-build inspect <bundle.trtfb>
     inspect_p = subparsers.add_parser("inspect",

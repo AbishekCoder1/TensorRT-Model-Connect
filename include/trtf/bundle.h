@@ -9,6 +9,7 @@ struct BundleInfo {
     std::string model_id;
     std::string model_type;
     std::string family;
+    std::string precision;
     std::string trt_version;
     std::string gpu_name;
     std::string created_at;

@@ -60,6 +60,8 @@ struct GenerateConfig {
     int32_t max_new_tokens{128};
     float temperature{1.0f};
     int32_t top_k{1}; // 1 = greedy
+    float top_p{1.0f};
+    float min_p{0.0f};
     int32_t seed{-1};
     float guidance_scale{-1.0f}; // diffusion
     int32_t num_steps{-1};       // diffusion
@@ -68,6 +70,8 @@ struct GenerateConfig {
     bool collect_timing{false};    // if true, populate TextResult::prefill_ms / decode_ms
     bool use_chat_template{false}; ///< Apply chat template before tokenization
     bool enable_thinking{true};    ///< Qwen3: if false, disable thinking mode
+    bool stop_on_boxed_answer{false}; ///< Stop once generated text contains a full \boxed{...}
+    int32_t stop_check_interval{16};  ///< Token interval for answer-stop checks
 };
 
 // --- Pipeline interface ---

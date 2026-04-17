@@ -30,12 +30,15 @@ DType TrtModule::from_trt_dtype(nvinfer1::DataType dt) {
 
 // --- Construction ---
 
-TrtModule::TrtModule(nvinfer1::ICudaEngine* engine, cudaStream_t stream, int32_t profile_idx)
-    : stream_(stream), profile_idx_(profile_idx) {
+TrtModule::TrtModule(nvinfer1::ICudaEngine* engine, cudaStream_t stream, int32_t profile_idx,
+                     std::vector<std::string> external_inputs)
+    : stream_(stream), profile_idx_(profile_idx),
+      external_inputs_(external_inputs.begin(), external_inputs.end()) {
     ctx_ = engine->createExecutionContext();
     if (!ctx_)
         return;
-    if (profile_idx_ > 0) {
+    const int32_t num_profiles = engine->getNbOptimizationProfiles();
+    if (num_profiles > 0) {
         if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
             std::cerr << "[trt_module] Failed to set optimization profile " << profile_idx_ << "\n";
             delete ctx_;
@@ -55,7 +58,7 @@ TrtModule::~TrtModule() {
 TrtModule::TrtModule(TrtModule&& other) noexcept
     : ctx_(other.ctx_), stream_(other.stream_), profile_idx_(other.profile_idx_),
       has_dynamic_shapes_(other.has_dynamic_shapes_), keep_alive_(std::move(other.keep_alive_)),
-      buffers_(std::move(other.buffers_)),
+      external_inputs_(std::move(other.external_inputs_)), buffers_(std::move(other.buffers_)),
       host_output_staging_(std::move(other.host_output_staging_)),
       output_device_tensors_(std::move(other.output_device_tensors_)) {
     other.ctx_ = nullptr;
@@ -70,6 +73,7 @@ TrtModule& TrtModule::operator=(TrtModule&& other) noexcept {
         profile_idx_ = other.profile_idx_;
         has_dynamic_shapes_ = other.has_dynamic_shapes_;
         keep_alive_ = std::move(other.keep_alive_);
+        external_inputs_ = std::move(other.external_inputs_);
         buffers_ = std::move(other.buffers_);
         host_output_staging_ = std::move(other.host_output_staging_);
         output_device_tensors_ = std::move(other.output_device_tensors_);
@@ -107,12 +111,22 @@ void TrtModule::update_dynamic_shape(const std::string& name, BufferEntry& entry
                                      const std::vector<int64_t>& new_shape) {
     if (!has_dynamic_shapes_ || new_shape == entry.shape)
         return;
+    if (use_cuda_graph_)
+        cuda_graph_.reset();
     nvinfer1::Dims dims;
     dims.nbDims = static_cast<int32_t>(new_shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
         dims.d[d] = new_shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
+    if (!ctx_->setInputShape(name.c_str(), dims)) {
+        throw std::runtime_error("[trt_module] Failed to set dynamic shape for input '" + name +
+                                 "'");
+    }
     entry.shape = new_shape;
+    entry.nbytes = shape_nbytes(new_shape, entry.dtype);
+    if (entry.alloc_nbytes > 0 && entry.nbytes > entry.alloc_nbytes) {
+        throw std::runtime_error("[trt_module] Dynamic shape for input '" + name +
+                                 "' exceeds allocated buffer size");
+    }
 }
 
 std::size_t TrtModule::compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,
@@ -124,6 +138,13 @@ std::size_t TrtModule::compute_alloc_bytes(const nvinfer1::Dims& dims, DType dty
         shape_out.push_back(dim);
         n *= static_cast<std::size_t>(dim);
     }
+    return n * dtype_size(dtype);
+}
+
+std::size_t TrtModule::shape_nbytes(const std::vector<int64_t>& shape, DType dtype) {
+    std::size_t n = 1;
+    for (int64_t dim : shape)
+        n *= static_cast<std::size_t>(std::max<int64_t>(dim, 1));
     return n * dtype_size(dtype);
 }
 
@@ -152,7 +173,7 @@ void TrtModule::set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t 
 }
 
 void TrtModule::allocate_single_input(nvinfer1::ICudaEngine* engine, const char* name,
-                                      int32_t num_profiles) {
+                                      int32_t num_profiles, bool skip_allocation) {
     auto trt_shape = engine->getTensorShape(name);
     auto dtype = from_trt_dtype(engine->getTensorDataType(name));
 
@@ -167,21 +188,27 @@ void TrtModule::allocate_single_input(nvinfer1::ICudaEngine* engine, const char*
         init_dims = engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kOPT);
     }
 
-    std::vector<int64_t> shape;
-    std::size_t nbytes = compute_alloc_bytes(alloc_dims, dtype, shape);
+    std::vector<int64_t> alloc_shape;
+    std::size_t alloc_nbytes = compute_alloc_bytes(alloc_dims, dtype, alloc_shape);
+    std::vector<int64_t> init_shape = alloc_shape;
+    std::size_t init_nbytes = alloc_nbytes;
+    if (is_dynamic)
+        init_nbytes = compute_alloc_bytes(init_dims, dtype, init_shape);
 
     BufferEntry entry;
     entry.dtype = dtype;
-    entry.nbytes = nbytes;
+    entry.nbytes = init_nbytes;
+    entry.alloc_nbytes = skip_allocation ? 0 : alloc_nbytes;
     entry.is_input = true;
-    entry.shape = is_dynamic ? dims_to_shape(init_dims) : shape;
+    entry.shape = init_shape;
+    entry.is_external = skip_allocation;
 
-    if (nbytes > 0) {
-        auto err = cudaMalloc(&entry.d_ptr, nbytes);
+    if (!skip_allocation && alloc_nbytes > 0) {
+        auto err = cudaMalloc(&entry.d_ptr, alloc_nbytes);
         if (err != cudaSuccess)
             entry.d_ptr = nullptr;
         else
-            cudaMemsetAsync(entry.d_ptr, 0, nbytes, stream_);
+            cudaMemsetAsync(entry.d_ptr, 0, alloc_nbytes, stream_);
     }
 
     if (entry.d_ptr)
@@ -199,7 +226,8 @@ void TrtModule::allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t nu
         const char* name = engine->getIOTensorName(i);
         if (engine->getTensorIOMode(name) != nvinfer1::TensorIOMode::kINPUT)
             continue;
-        allocate_single_input(engine, name, num_profiles);
+        const bool skip_allocation = external_inputs_.find(name) != external_inputs_.end();
+        allocate_single_input(engine, name, num_profiles, skip_allocation);
     }
 }
 
@@ -224,6 +252,7 @@ void TrtModule::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t n
         entry.shape = shape;
         entry.dtype = dtype;
         entry.nbytes = nbytes;
+        entry.alloc_nbytes = nbytes;
         entry.is_input = false;
 
         if (nbytes > 0) {
@@ -294,6 +323,12 @@ TensorMap TrtModule::forward(const TensorMap& inputs) {
         if (entry.is_external)
             continue;
 
+        if (has_dynamic_shapes_) {
+            auto out_dims = ctx_->getTensorShape(name.c_str());
+            entry.shape = dims_to_shape(out_dims);
+            entry.nbytes = shape_nbytes(entry.shape, entry.dtype);
+        }
+
         auto& staging = host_output_staging_[name];
         cudaMemcpy(staging.data(), entry.d_ptr, entry.nbytes, cudaMemcpyDeviceToHost);
 
@@ -325,7 +360,7 @@ void TrtModule::forward_async(const TensorMap& inputs) {
 
         update_dynamic_shape(name, entry, tensor.shape);
 
-        auto copy_bytes = std::min(tensor.nbytes(), entry.nbytes);
+        auto copy_bytes = std::min(tensor.nbytes(), entry.alloc_nbytes);
         if (copy_bytes > 0 && tensor.data) {
             cudaMemcpyAsync(entry.d_ptr, tensor.data, copy_bytes, cudaMemcpyHostToDevice, stream_);
         }
@@ -381,7 +416,7 @@ void TrtModule::forward_device_async(const DeviceTensorMap& inputs) {
         update_dynamic_shape(name, entry, dt_ptr->shape());
 
         if (dt_ptr->data() != entry.d_ptr) {
-            auto copy_bytes = std::min(dt_ptr->nbytes(), entry.nbytes);
+            auto copy_bytes = std::min(dt_ptr->nbytes(), entry.alloc_nbytes);
             if (copy_bytes > 0) {
                 cudaMemcpyAsync(entry.d_ptr, dt_ptr->data(), copy_bytes, cudaMemcpyDeviceToDevice,
                                 stream_);
@@ -469,6 +504,11 @@ void* TrtModule::device_ptr(const std::string& name) const {
 }
 
 void TrtModule::bind_external(const std::string& name, void* external_device_ptr) {
+    bind_external(name, external_device_ptr, {});
+}
+
+void TrtModule::bind_external(const std::string& name, void* external_device_ptr,
+                              const std::vector<int64_t>& shape) {
     auto it = buffers_.find(name);
     if (it == buffers_.end())
         return;
@@ -487,6 +527,9 @@ void TrtModule::bind_external(const std::string& name, void* external_device_ptr
     if (ctx_ && external_device_ptr) {
         ctx_->setTensorAddress(name.c_str(), external_device_ptr);
     }
+
+    if (!shape.empty())
+        update_dynamic_shape(name, entry, shape);
 }
 
 } // namespace trtf

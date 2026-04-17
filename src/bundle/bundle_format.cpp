@@ -150,6 +150,7 @@ BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& secti
     info.model_id = extract_json_string(json, "model_id", "");
     info.model_type = extract_json_string(json, "model_type", "");
     info.family = extract_json_string(json, "family", "");
+    info.precision = extract_json_string(json, "precision", "");
     info.trt_version = extract_json_string(json, "trt_version", "");
     info.gpu_name = extract_json_string(json, "gpu_name", "");
     info.created_at = extract_json_string(json, "created_at", "");

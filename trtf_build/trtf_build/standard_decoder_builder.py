@@ -101,6 +101,19 @@ def build_standard_decoder_engine(
     num_heads = config.num_attention_heads
     head_dim = attention_size // num_heads
     attention_window = max_cache_length + 1
+    dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
+    dynamic_kv_opt_rows = int(config.raw.get("_dynamic_kv_opt_length", max_cache_length))
+    dynamic_kv_opt_rows = max(1, min(dynamic_kv_opt_rows, max_cache_length))
+    raw_profile_rows = config.raw.get("_dynamic_kv_profile_rows")
+    if raw_profile_rows:
+        dynamic_kv_profile_rows = []
+        for row in raw_profile_rows:
+            clamped = max(1, min(int(row), max_cache_length))
+            if clamped not in dynamic_kv_profile_rows:
+                dynamic_kv_profile_rows.append(clamped)
+        dynamic_kv_profile_rows.sort()
+    else:
+        dynamic_kv_profile_rows = []
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -119,13 +132,17 @@ def build_standard_decoder_engine(
         work_np_dtype = np.float32
         work_trt_dtype = trt.float32
 
+    if dynamic_kv_cache and position_type == "alibi":
+        raise ValueError("dynamic_kv_cache is not supported for ALiBi decoder builds")
+
     # ---------------------------------------------------------------
     # Inputs
     # ---------------------------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
     attention_mask = network.add_input(
-        "attention_mask", trt.float32, (1, attention_window))
+        "attention_mask", trt.float32,
+        (1, -1) if dynamic_kv_cache else (1, attention_window))
 
     # Optional VL inputs: when embed_input=True, the decoder can accept
     # a pre-computed embedding vector instead of a token ID.
@@ -142,12 +159,47 @@ def build_standard_decoder_engine(
     for i in range(num_layers):
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
-            work_trt_dtype, (max_cache_length, attention_size))
+            work_trt_dtype,
+            (-1, attention_size) if dynamic_kv_cache else (max_cache_length, attention_size))
         cv = network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
-            work_trt_dtype, (max_cache_length, attention_size))
+            work_trt_dtype,
+            (-1, attention_size) if dynamic_kv_cache else (max_cache_length, attention_size))
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
+
+    if dynamic_kv_cache:
+        if dynamic_kv_profile_rows:
+            for profile_rows in dynamic_kv_profile_rows:
+                profile = builder.create_optimization_profile()
+                # Keep all profiles valid for short prompts / early decode steps.
+                # The profile-specific value is the opt/max row budget, not a
+                # lower bound on the live cache length.
+                min_rows = 1
+                profile.set_shape("attention_mask",
+                                  (1, min_rows + 1),
+                                  (1, profile_rows + 1),
+                                  (1, profile_rows + 1))
+                for i in range(num_layers):
+                    min_cache_shape = (min_rows, attention_size)
+                    cache_shape = (profile_rows, attention_size)
+                    profile.set_shape(graph_ops.layer_tensor_name("cache_k", i),
+                                      min_cache_shape, cache_shape, cache_shape)
+                    profile.set_shape(graph_ops.layer_tensor_name("cache_v", i),
+                                      min_cache_shape, cache_shape, cache_shape)
+                trt_config.add_optimization_profile(profile)
+        else:
+            profile = builder.create_optimization_profile()
+            profile.set_shape("attention_mask", (1, 2), (1, dynamic_kv_opt_rows + 1),
+                              (1, attention_window))
+            for i in range(num_layers):
+                profile.set_shape(graph_ops.layer_tensor_name("cache_k", i),
+                                  (1, attention_size), (dynamic_kv_opt_rows, attention_size),
+                                  (max_cache_length, attention_size))
+                profile.set_shape(graph_ops.layer_tensor_name("cache_v", i),
+                                  (1, attention_size), (dynamic_kv_opt_rows, attention_size),
+                                  (max_cache_length, attention_size))
+            trt_config.add_optimization_profile(profile)
 
     # Cast attention mask to work dtype for elementwise compatibility
     if work_trt_dtype != trt.float32:
@@ -357,6 +409,7 @@ def build_standard_decoder_engine(
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
             ffi_attention_kernel=ffi_attention_kernel,
+            dynamic_kv_cache=dynamic_kv_cache,
         )
 
         hidden_state = result["hidden"]
@@ -487,6 +540,7 @@ def _add_decoder_layer(
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
     ffi_attention_kernel: str | None = None,
+    dynamic_kv_cache: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
 
@@ -511,6 +565,7 @@ def _add_decoder_layer(
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
         ffi_attention_kernel=ffi_attention_kernel,
+        dynamic_kv_cache=dynamic_kv_cache,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]

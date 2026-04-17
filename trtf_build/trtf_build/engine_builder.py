@@ -11,6 +11,10 @@ from pathlib import Path
 from .config import ModelConfig
 from .families import find_plugin, find_diffusion_plugin, _ALL_PLUGINS
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
+from .triattention_export import (
+    TriAttentionBundleConfig,
+    export_triattention_stats_section,
+)
 
 def _setup_trt_import(rtx: bool) -> None:
     """If rtx=True, monkeypatch sys.modules so 'import tensorrt' resolves to tensorrt_rtx."""
@@ -55,6 +59,36 @@ _HF_ALLOW_PATTERNS = [
     "scheduler/*",
     "tokenizer/*",
 ]
+
+
+def _compute_dynamic_kv_profile_rows(
+    max_cache_length: int,
+    kv_budget: int,
+    *,
+    bucket_rows: int = 32,
+) -> list[int]:
+    """Return ascending profile upper bounds for dynamic-KV engines.
+
+    The runtime only changes KV shapes at coarse row buckets, so a small set of
+    range profiles is enough. Each returned value is the maximum KV rows for
+    one optimization profile.
+    """
+    if max_cache_length < 1:
+        return [1]
+
+    start = ((max(kv_budget, 1) + bucket_rows - 1) // bucket_rows) * bucket_rows
+    start = max(bucket_rows, min(start, max_cache_length))
+
+    rows: list[int] = []
+    row = start
+    while row < max_cache_length:
+        if row not in rows:
+            rows.append(row)
+        next_row = max(row + bucket_rows, row * 2)
+        row = ((min(next_row, max_cache_length) + bucket_rows - 1) // bucket_rows) * bucket_rows
+    if max_cache_length not in rows:
+        rows.append(max_cache_length)
+    return rows
 
 
 def _raise_friendly_download_error(model_id: str, exc: Exception) -> None:
@@ -372,6 +406,7 @@ def build_bundle(
     output_path: str,
     max_cache_length: int = 256,
     *,
+    dynamic_kv_cache: bool = False,
     precision: str = "fp32",
     quantize: str | None = None,
     quant_scales: str | None = None,
@@ -379,6 +414,14 @@ def build_bundle(
     verbose: bool = False,
     kernel_artifacts: list[tuple[str, str]] | None = None,
     rtx: bool = False,
+    triattention_stats_path: str | None = None,
+    triattention_kv_budget: int | None = None,
+    triattention_divide_length: int = 128,
+    triattention_recent_window: int = 0,
+    triattention_score_aggregation: str = "mean",
+    triattention_protect_prefill: bool = False,
+    triattention_disable_mlr: bool = False,
+    triattention_disable_trig: bool = False,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -455,6 +498,80 @@ def build_bundle(
               file=sys.stderr)
 
     # 4. Build TRT engine
+    triattention_cfg = None
+    triattention_section = None
+    runtime_strategy = getattr(plugin, "runtime_strategy", "") or "decoder_kv_cache"
+    enable_dynamic_kv_cache = bool(dynamic_kv_cache)
+    dynamic_kv_profile_rows: list[int] | None = None
+    if triattention_stats_path:
+        if runtime_strategy not in ("decoder_kv_cache", "decoder_moe"):
+            raise ValueError(
+                "TriAttention is only supported for decoder KV-cache runtimes. "
+                f"Found runtime_strategy={runtime_strategy!r}."
+            )
+        if triattention_recent_window < 0:
+            raise ValueError(
+                "TriAttention recent_window must be >= 0. "
+                f"Got recent_window={triattention_recent_window}."
+            )
+        if triattention_divide_length < 1:
+            raise ValueError(
+                "TriAttention divide_length must be >= 1. "
+                f"Got divide_length={triattention_divide_length}."
+            )
+        if triattention_score_aggregation not in ("mean", "max"):
+            raise ValueError(
+                "TriAttention score_aggregation must be 'mean' or 'max'. "
+                f"Got {triattention_score_aggregation!r}."
+            )
+        kv_budget = int(
+            triattention_kv_budget
+            if triattention_kv_budget is not None
+            else max_cache_length
+        )
+        if kv_budget < 1 or kv_budget > max_cache_length:
+            raise ValueError(
+                "TriAttention kv_budget must be in [1, max_cache_length]. "
+                f"Got kv_budget={kv_budget}, max_cache_length={max_cache_length}."
+            )
+        triattention_cfg = TriAttentionBundleConfig(
+            kv_budget=kv_budget,
+            divide_length=triattention_divide_length,
+            recent_window=triattention_recent_window,
+            score_aggregation=triattention_score_aggregation,
+            protect_prefill=triattention_protect_prefill,
+            disable_mlr=triattention_disable_mlr,
+            disable_trig=triattention_disable_trig,
+        )
+        triattention_section = export_triattention_stats_section(
+            triattention_stats_path,
+            config=config,
+        )
+        print(
+            "[trtf-build] TriAttention: embedded calibration stats "
+            f"from {triattention_stats_path} (kv_budget={kv_budget}, "
+            f"divide_length={triattention_divide_length}, "
+            f"recent_window={triattention_recent_window})",
+            file=sys.stderr,
+        )
+        dynamic_kv_profile_rows = _compute_dynamic_kv_profile_rows(
+            max_cache_length,
+            kv_budget,
+        )
+        enable_dynamic_kv_cache = True
+
+    if enable_dynamic_kv_cache:
+        if runtime_strategy not in ("decoder_kv_cache", "decoder_moe"):
+            raise ValueError(
+                "dynamic_kv_cache is only supported for decoder KV-cache runtimes. "
+                f"Found runtime_strategy={runtime_strategy!r}."
+            )
+        if dynamic_kv_profile_rows is None:
+            dynamic_kv_profile_rows = _compute_dynamic_kv_profile_rows(max_cache_length, 1)
+        config.raw["dynamic_kv_cache"] = True
+        config.raw["_dynamic_kv_opt_length"] = max_cache_length
+        config.raw["_dynamic_kv_profile_rows"] = dynamic_kv_profile_rows
+
     print(f"[trtf-build] Building TRT engine (cache={max_cache_length}) ...",
           file=sys.stderr)
     # Pass precision/quant_ctx only if the plugin accepts them (not all do).
@@ -530,6 +647,11 @@ def build_bundle(
     for ename, eplan in extra_engines.items():
         sections.append(BundleSection(ename, eplan))
 
+    if triattention_section is not None and triattention_cfg is not None:
+        sections.append(
+            BundleSection(triattention_cfg.stats_section, triattention_section)
+        )
+
     # If model lacks tokenizer.json (fast format), generate it from the
     # slow tokenizer so the C++ runtime can always load via AutoTokenizer.
     # Skip for non-text models (segmentation, audio) that don't use tokenizers.
@@ -557,9 +679,20 @@ def build_bundle(
                 if runtime_strategy:
                     cfg_dict["runtime_strategy"] = runtime_strategy
                 cfg_dict["engine_backend"] = "trt_rtx" if rtx else "trt"
+                elif triattention_cfg is not None:
+                    cfg_dict["runtime_strategy"] = "decoder_kv_cache"
                 cfg_dict["precision"] = precision
                 if quant_plan is not None:
                     cfg_dict["quantization"] = quant_plan.as_config_dict()
+                elif quantize:
+                    cfg_dict["quantization"] = {"format": quantize}
+                if triattention_cfg is not None:
+                    cfg_dict["triattention"] = triattention_cfg.to_dict()
+                if enable_dynamic_kv_cache:
+                    cfg_dict["dynamic_kv_cache"] = True
+                    cfg_dict["dynamic_kv_profile_rows"] = config.raw.get(
+                        "_dynamic_kv_profile_rows", [max_cache_length]
+                    )
                 embed_input = getattr(plugin, "embed_input", False)
                 if embed_input:
                     cfg_dict["embed_input"] = True
@@ -837,6 +970,7 @@ def build(
     output_path: str,
     max_cache_length: int = 256,
     *,
+    dynamic_kv_cache: bool = False,
     precision: str = "fp32",
     quantize: str | None = None,
     quant_scales: str | None = None,
@@ -845,6 +979,14 @@ def build(
     fp8_scales: dict | str | None = None,
     save_fp8_scales: str | None = None,
     rtx: bool = False,
+    triattention_stats_path: str | None = None,
+    triattention_kv_budget: int | None = None,
+    triattention_divide_length: int = 128,
+    triattention_recent_window: int = 0,
+    triattention_score_aggregation: str = "mean",
+    triattention_protect_prefill: bool = False,
+    triattention_disable_mlr: bool = False,
+    triattention_disable_trig: bool = False,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -865,9 +1007,18 @@ def build(
     build_bundle._fp8_scales = fp8_scales
     build_bundle._save_fp8_scales = save_fp8_scales
     build_bundle(model_dir, output_path, max_cache_length,
+                 dynamic_kv_cache=dynamic_kv_cache,
                  precision=precision,
                  quantize=quantize,
                  quant_scales=quant_scales,
                  quant_calibration_samples=quant_calibration_samples,
                  verbose=verbose,
                  rtx=rtx)
+                 triattention_stats_path=triattention_stats_path,
+                 triattention_kv_budget=triattention_kv_budget,
+                 triattention_divide_length=triattention_divide_length,
+                 triattention_recent_window=triattention_recent_window,
+                 triattention_score_aggregation=triattention_score_aggregation,
+                 triattention_protect_prefill=triattention_protect_prefill,
+                 triattention_disable_mlr=triattention_disable_mlr,
+                 triattention_disable_trig=triattention_disable_trig)

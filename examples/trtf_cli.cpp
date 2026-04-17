@@ -1,7 +1,8 @@
 // trtf CLI — command-line interface using the new C++ library API.
 //
 // Usage:
-//   trtf run             <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
+//   trtf run             <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--benchmark N]
+//                        [--warmup N] [--hf-python PATH]
 //   trtf transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]
 //   trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtf generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
@@ -24,7 +25,9 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <limits>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -36,6 +39,7 @@ struct CliArgs {
     std::string bundle_path;
     std::string prompt;
     std::string hf_python;
+    std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
     std::string output_dir;
     std::string document;
@@ -67,11 +71,68 @@ struct CliArgs {
     std::string error_message;
 };
 
+std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
+    if (text.empty())
+        return std::nullopt;
+
+    std::size_t value_end = 0;
+    double value = 0.0;
+    try {
+        value = std::stod(text, &value_end);
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (value <= 0.0)
+        return std::nullopt;
+
+    std::string suffix = text.substr(value_end);
+    std::transform(suffix.begin(), suffix.end(), suffix.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+
+    long double multiplier = 1.0L;
+    if (suffix.empty() || suffix == "B") {
+        multiplier = 1.0L;
+    } else if (suffix == "K" || suffix == "KB") {
+        multiplier = 1000.0L;
+    } else if (suffix == "M" || suffix == "MB") {
+        multiplier = 1000.0L * 1000.0L;
+    } else if (suffix == "G" || suffix == "GB") {
+        multiplier = 1000.0L * 1000.0L * 1000.0L;
+    } else if (suffix == "T" || suffix == "TB") {
+        multiplier = 1000.0L * 1000.0L * 1000.0L * 1000.0L;
+    } else if (suffix == "KIB") {
+        multiplier = 1024.0L;
+    } else if (suffix == "MIB") {
+        multiplier = 1024.0L * 1024.0L;
+    } else if (suffix == "GIB") {
+        multiplier = 1024.0L * 1024.0L * 1024.0L;
+    } else if (suffix == "TIB") {
+        multiplier = 1024.0L * 1024.0L * 1024.0L * 1024.0L;
+    } else {
+        return std::nullopt;
+    }
+
+    const long double bytes = static_cast<long double>(value) * multiplier;
+    if (bytes <= 0.0L ||
+        bytes > static_cast<long double>(std::numeric_limits<std::uint64_t>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint64_t>(bytes + 0.5L);
+}
+
+trtf::LoadOptions make_load_options(const CliArgs& args) {
+    trtf::LoadOptions options;
+    options.hf_python = args.hf_python;
+    options.kv_cache_size_bytes = args.kv_cache_size_bytes;
+    return options;
+}
+
 void print_usage() {
     std::cerr
         << "Usage:\n"
            "  trtf run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
-           "[--max-new-tokens N] [--hf-python PATH] [--chat-template] [--no-thinking]\n"
+           "[--max-new-tokens N] [--benchmark N] [--warmup N] [--hf-python PATH] "
+           "[--kv-cache-size SIZE] [--chat-template] [--no-thinking]\n"
            "  trtf encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtf segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
            "  trtf generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH "
@@ -167,6 +228,31 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--hf-python" && need_value(arg)) {
             args.hf_python = argv[++i];
+            continue;
+        }
+        if (arg == "--kv-cache-size" || arg == "--kv_cache_size") {
+            if (!need_value(arg))
+                return args;
+            auto parsed = parse_byte_size(argv[++i]);
+            if (!parsed.has_value()) {
+                args.parse_error = true;
+                args.error_message =
+                    "--kv-cache-size expects a positive size like 90GB or 90GiB";
+                return args;
+            }
+            args.kv_cache_size_bytes = *parsed;
+            continue;
+        }
+        if (arg.rfind("--kv-cache-size=", 0) == 0 || arg.rfind("--kv_cache_size=", 0) == 0) {
+            const auto eq = arg.find('=');
+            auto parsed = parse_byte_size(arg.substr(eq + 1));
+            if (!parsed.has_value()) {
+                args.parse_error = true;
+                args.error_message =
+                    "--kv-cache-size expects a positive size like 90GB or 90GiB";
+                return args;
+            }
+            args.kv_cache_size_bytes = *parsed;
             continue;
         }
         if (arg == "--image" && need_value(arg)) {
@@ -808,6 +894,8 @@ int cmd_inspect(const CliArgs& args) {
         std::cout << "Model ID:           " << info.model_id << '\n';
         std::cout << "Model type:         " << info.model_type << '\n';
         std::cout << "Family:             " << info.family << '\n';
+        if (!info.precision.empty())
+            std::cout << "Precision:          " << info.precision << '\n';
         std::cout << "TRT version:        " << info.trt_version << '\n';
         std::cout << "GPU:                " << info.gpu_name << '\n';
         std::cout << "Created:            " << info.created_at << '\n';

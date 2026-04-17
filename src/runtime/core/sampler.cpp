@@ -117,6 +117,40 @@ class TopKSampler final : public ISampler {
                 probs[i] = 1.0F / static_cast<float>(k);
         }
 
+        int32_t keep = k;
+        const float max_prob = probs.empty() ? 1.0F : probs[0];
+        if (params.min_p > 0.0F && max_prob > 0.0F) {
+            const float min_prob = params.min_p * max_prob;
+            keep = 0;
+            while (keep < k && probs[static_cast<std::size_t>(keep)] >= min_prob)
+                ++keep;
+            keep = std::max(keep, 1);
+        }
+        if (params.top_p < 1.0F) {
+            float cumulative = 0.0F;
+            int32_t top_p_keep = 0;
+            while (top_p_keep < keep) {
+                cumulative += probs[static_cast<std::size_t>(top_p_keep)];
+                ++top_p_keep;
+                if (cumulative >= params.top_p)
+                    break;
+            }
+            keep = std::max(top_p_keep, 1);
+        }
+
+        if (keep < k) {
+            float kept_sum = 0.0F;
+            for (int32_t i = 0; i < keep; ++i)
+                kept_sum += probs[static_cast<std::size_t>(i)];
+            if (kept_sum > 0.0F) {
+                for (int32_t i = 0; i < keep; ++i)
+                    probs[static_cast<std::size_t>(i)] /= kept_sum;
+            } else {
+                for (int32_t i = 0; i < keep; ++i)
+                    probs[static_cast<std::size_t>(i)] = 1.0F / static_cast<float>(keep);
+            }
+        }
+
         // xorshift64 random number generation
         rng_state_ ^= rng_state_ << 13;
         rng_state_ ^= rng_state_ >> 7;
@@ -125,7 +159,7 @@ class TopKSampler final : public ISampler {
 
         // Sample from cumulative distribution
         float cumulative = 0.0F;
-        for (int32_t i = 0; i < k; ++i) {
+        for (int32_t i = 0; i < keep; ++i) {
             cumulative += probs[i];
             if (u < cumulative) {
                 result.token_id = indices[i];
@@ -135,8 +169,8 @@ class TopKSampler final : public ISampler {
             }
         }
 
-        result.token_id = indices[k - 1];
-        result.logprob = std::log(probs[k - 1]);
+        result.token_id = indices[keep - 1];
+        result.logprob = std::log(probs[keep - 1]);
         result.is_eos = (result.token_id == params.eos_token_id);
         return result;
     }
@@ -216,14 +250,16 @@ SamplingParams sampling_params_from_config(const GenerateConfig& cfg, int32_t de
     SamplingParams p;
     p.temperature = cfg.temperature;
     p.top_k = cfg.top_k;
+    p.top_p = cfg.top_p;
+    p.min_p = cfg.min_p;
     p.seed = cfg.seed;
     p.eos_token_id = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : default_eos;
     return p;
 }
 
 std::unique_ptr<ISampler> create_sampler(const SamplingParams& params) {
-    // Greedy when top_k == 1 and no explicit random seed
-    if (params.top_k <= 1 && params.seed < 0) {
+    // Greedy when sampling is fully disabled and no explicit random seed is set.
+    if (params.top_k <= 1 && params.top_p >= 1.0F && params.min_p <= 0.0F && params.seed < 0) {
         return std::make_unique<GreedySampler>();
     }
 

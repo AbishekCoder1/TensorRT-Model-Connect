@@ -110,6 +110,7 @@ add_library(trtf_core
   src/runtime/core/device_kv_cache.cpp
   src/runtime/core/device_tensor.cpp
   src/runtime/core/kv_cache.cpp
+  src/runtime/core/triattention_kv_cache.cpp
   src/runtime/core/recurrent_state.cpp
   src/runtime/core/chat_template.cpp
   src/runtime/core/flow_match_euler_scheduler.cpp
@@ -196,14 +197,16 @@ if(CMAKE_CUDA_COMPILER)
   target_sources(trtf_core PRIVATE
     src/runtime/domains/audio/magpie_kernels.cu
     src/runtime/core/argmax_kernel.cu
+    src/runtime/core/triattention_kernels.cu
   )
   set_source_files_properties(
     src/runtime/domains/audio/magpie_kernels.cu
     src/runtime/core/argmax_kernel.cu
+    src/runtime/core/triattention_kernels.cu
     PROPERTIES LANGUAGE CUDA
   )
   target_include_directories(trtf_core PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_compile_definitions(trtf_core PRIVATE TRTF_HAS_CUDA_KERNELS=1)
+  target_compile_definitions(trtf_core PUBLIC TRTF_HAS_CUDA_KERNELS=1)
 endif()
 
 target_include_directories(trtf_core
@@ -385,6 +388,12 @@ if(TRTF_ENABLE_TRT AND TRTF_TRT_LIBRARY)
   target_link_libraries(trtf PRIVATE ${TRTF_TRT_LIBRARY})
 endif()
 
+add_executable(trtf_dataset_benchmark examples/trtf_dataset_benchmark.cpp)
+target_link_libraries(trtf_dataset_benchmark PRIVATE trtf_core)
+target_include_directories(trtf_dataset_benchmark PRIVATE
+  ${PROJECT_SOURCE_DIR}/third_party/stb
+)
+
 enable_testing()
 
 # --- Test helper function ---
@@ -430,6 +439,7 @@ trtf_add_test(test_chat_template)
 
 # TRT runtime core
 trtf_add_test(test_decode_runtime)
+trtf_add_test(test_sampler)
 trtf_add_test(test_trt_logger)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_trt_logger PRIVATE trtf_backend_trt)
@@ -459,6 +469,7 @@ if(TARGET trtf_backend_trt)
 endif()
 trtf_add_test(test_device_tensor)
 trtf_add_test(test_kv_cache_new)
+trtf_add_test(test_triattention_kv_cache)
 trtf_add_test(test_recurrent_state)
 
 # Pipelines (public API)
