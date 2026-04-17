@@ -2,10 +2,10 @@
 // Nemotron-H style models with interleaved attention and Mamba layers,
 // using KvCache for attention layers and RecurrentState for SSM layers.
 
-#include "trtf/runtime/pipeline_registry.h"
-#include "trtf/runtime/hybrid_state.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/pipelines/recurrent_pipeline.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/hybrid_state.h"
+#include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -15,9 +15,11 @@
 namespace trtf {
 
 class HybridPlugin final : public IPipelinePlugin {
-public:
+  public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
+        load_ffi_kernels_from_bundle(ctx.bundle);
+        auto loaded =
+            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         cudaStream_t stream = loaded.stream->get();
@@ -34,22 +36,21 @@ public:
 
         // KvCache for the attention layers
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        auto cache = std::make_unique<KvCache>(
-            num_attention_layers, ctx.config.max_cache_length, kv_dim, stream,
-            cache_dtype);
+        auto cache = std::make_unique<KvCache>(num_attention_layers, ctx.config.max_cache_length,
+                                               kv_dim, stream, cache_dtype);
         if (!cache->ok())
             throw std::runtime_error("Failed to create KvCache for hybrid model");
 
         // RecurrentState for the Mamba/SSM layers (conv_state + ssm_state)
         int32_t effective_conv_dim = (conv_dim > 0) ? conv_dim : d_inner;
         int64_t conv_elems = static_cast<int64_t>(effective_conv_dim) * mamba_d_conv;
-        int64_t ssm_elems = static_cast<int64_t>(mamba_nheads)
-            * std::max(mamba_head_dim, 1) * mamba_d_state;
+        int64_t ssm_elems =
+            static_cast<int64_t>(mamba_nheads) * std::max(mamba_head_dim, 1) * mamba_d_state;
 
-        auto ssm = std::make_unique<RecurrentState>(num_mamba_layers,
-            std::vector<RecurrentState::TensorSpec>{
-                {"conv_state", {conv_elems}, "present_conv"},
-                {"ssm_state", {ssm_elems}, "present_ssm"}},
+        auto ssm = std::make_unique<RecurrentState>(
+            num_mamba_layers,
+            std::vector<RecurrentState::TensorSpec>{{"conv_state", {conv_elems}, "present_conv"},
+                                                    {"ssm_state", {ssm_elems}, "present_ssm"}},
             stream);
 
         // HybridState combines KvCache + RecurrentState behind IInferenceState
@@ -57,9 +58,9 @@ public:
         auto rgc = make_recurrent_gen_config(ctx.config);
         rgc.has_position_input = loaded.module->has_input("position_id");
 
-        return std::make_unique<RecurrentPipeline>(
-            std::move(loaded.module), std::move(hybrid),
-            rgc, stream, "HybridPipeline", std::move(tokenizer), ctx.bundle.info.model_id);
+        return std::make_unique<RecurrentPipeline>(std::move(loaded.module), std::move(hybrid), rgc,
+                                                   stream, "HybridPipeline", std::move(tokenizer),
+                                                   ctx.bundle.info.model_id);
     }
 };
 

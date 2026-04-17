@@ -1,10 +1,10 @@
 // WhisperPlugin: handles "speech_to_text" strategy.
 // Whisper encoder-decoder pipeline with mel spectrogram input.
 
-#include "trtf/runtime/pipeline_registry.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/pipelines/whisper_pipeline.h"
+#include "runtime/plugins/shared/audio_helpers.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #if TRTF_HAS_TRT
@@ -12,18 +12,20 @@
 namespace trtf {
 
 class WhisperPlugin final : public IPipelinePlugin {
-public:
+  public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        load_ffi_kernels_from_bundle(ctx.bundle);
         const auto& json = ctx.config_json;
 
         // Load encoder (stored as vision_engine_plan in Whisper bundles)
         const auto* enc_plan = find_section(ctx.bundle, "vision_engine_plan");
-        if (!enc_plan || enc_plan->empty()) enc_plan = find_section(ctx.bundle, "coarse_engine_plan");
+        if (!enc_plan || enc_plan->empty())
+            enc_plan = find_section(ctx.bundle, "coarse_engine_plan");
         auto enc_loaded = load_trt_module_from_plan(enc_plan, "whisper encoder");
 
         // Load decoder (main engine_plan)
-        auto dec_loaded = load_trt_module_from_plan(
-            find_section(ctx.bundle, "engine_plan"), "whisper decoder", enc_loaded.stream);
+        auto dec_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"),
+                                                    "whisper decoder", enc_loaded.stream);
 
         // Build WhisperConfig
         int32_t encoder_layers = extract_json_int(json, "encoder_layers", ctx.config.num_layers);
@@ -45,7 +47,8 @@ public:
         int32_t kv_dim = compute_kv_dim(ctx.config);
         int32_t max_cache = ctx.config.max_cache_length;
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        std::unique_ptr<IInferenceState> state = std::make_unique<KvCache>(dl, max_cache, kv_dim, stream, cache_dtype);
+        std::unique_ptr<IInferenceState> state =
+            std::make_unique<KvCache>(dl, max_cache, kv_dim, stream, cache_dtype);
         if (!state->ok())
             throw std::runtime_error("Failed to create KvCache for Whisper decoder");
 
@@ -59,11 +62,9 @@ public:
         int32_t mel_sampling_rate = extract_json_int(json, "mel_sampling_rate", 16000);
 
         return std::make_unique<WhisperPipeline>(
-            std::move(enc_loaded.module), std::move(dec_loaded.module),
-            std::move(state), std::move(wc), ctx.config.hidden_size, dl,
-            std::move(mel_fb),
-            mel_n_fft, mel_hop_length, mel_chunk_length, mel_sampling_rate,
-            stream, std::move(tok), ctx.bundle.info.model_id);
+            std::move(enc_loaded.module), std::move(dec_loaded.module), std::move(state),
+            std::move(wc), ctx.config.hidden_size, dl, std::move(mel_fb), mel_n_fft, mel_hop_length,
+            mel_chunk_length, mel_sampling_rate, stream, std::move(tok), ctx.bundle.info.model_id);
     }
 };
 

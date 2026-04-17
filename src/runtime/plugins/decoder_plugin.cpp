@@ -15,6 +15,7 @@ namespace trtf {
 class DecoderPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        load_ffi_kernels_from_bundle(ctx.bundle);
         auto loaded =
             load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import numpy as np
 import pytest
 
@@ -43,6 +42,28 @@ requires_trt = pytest.mark.skipif(
 requires_trtf_build = pytest.mark.skipif(
     not _trtf_build_importable(),
     reason="trtf_build not importable (TensorRT not installed)"
+)
+
+
+# ---------------------------------------------------------------------------
+# TVM-FFI availability check (for TVM-FFI kernel bridge tests)
+# ---------------------------------------------------------------------------
+
+def _tvm_ffi_available() -> bool:
+    """Check if tvm.ffi is importable and TvmFfiKernel plugin is registered."""
+    try:
+        import tvm.ffi  # noqa: F401
+        import tensorrt as trt
+        registry = trt.get_plugin_registry()
+        creator = registry.get_creator("TvmFfiKernel", "1", "")
+        return creator is not None
+    except (ImportError, Exception):
+        return False
+
+
+requires_tvm_ffi = pytest.mark.skipif(
+    not _tvm_ffi_available(),
+    reason="TVM-FFI + TvmFfiKernel TRT plugin not available"
 )
 
 

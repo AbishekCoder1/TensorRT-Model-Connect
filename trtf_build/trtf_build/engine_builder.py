@@ -362,6 +362,7 @@ def build_bundle(
     quant_scales: str | None = None,
     quant_calibration_samples: int = 512,
     verbose: bool = False,
+    kernel_artifacts: list[tuple[str, str]] | None = None,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -581,6 +582,22 @@ def build_bundle(
                         cfg_dict = merged
                 data = json.dumps(cfg_dict, indent=2).encode("utf-8")
             sections.append(BundleSection(filename, data))
+
+    # Package FFI kernel .so files into the bundle
+    if kernel_artifacts:
+        import json as _json
+        manifest_entries = []
+        for global_name, so_path in kernel_artifacts:
+            section_name = f"kernel_{global_name.replace('.', '_')}.so"
+            so_data = Path(so_path).read_bytes()
+            sections.append(BundleSection(section_name, so_data))
+            manifest_entries.append({
+                "global_name": global_name,
+                "func_name": "run",
+                "section": section_name,
+            })
+        manifest_json = _json.dumps({"kernels": manifest_entries}).encode("utf-8")
+        sections.append(BundleSection("kernel_manifest.json", manifest_json))
 
     write_bundle(output_path, info, sections)
     t4 = time.monotonic()

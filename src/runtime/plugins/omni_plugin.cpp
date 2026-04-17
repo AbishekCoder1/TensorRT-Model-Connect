@@ -1,10 +1,10 @@
 // OmniPlugin: handles "omni_multimodal" strategy.
 // Omni pipeline with thinker (MoE decoder), optional talker, and optional code2wav.
 
-#include "trtf/runtime/pipeline_registry.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/pipelines/omni_pipeline.h"
+#include "runtime/plugins/shared/audio_helpers.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #if TRTF_HAS_TRT
@@ -12,23 +12,25 @@
 namespace trtf {
 
 class OmniPlugin final : public IPipelinePlugin {
-public:
+  public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        load_ffi_kernels_from_bundle(ctx.bundle);
         const auto& json = ctx.config_json;
 
         // Thinker (MoE decoder) -- main engine plan
-        auto thinker_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "omni thinker");
+        auto thinker_loaded =
+            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "omni thinker");
         cudaStream_t stream = thinker_loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> thinker_state = std::make_unique<KvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream,
-            cache_dtype);
+            ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, cache_dtype);
         if (!thinker_state->ok())
             throw std::runtime_error("OmniPipeline: failed to create thinker KvCache");
 
         int32_t omni_talker_hidden_size = extract_json_int(json, "omni_talker_hidden_size", 0);
-        int32_t omni_talker_max_cache_length = extract_json_int(json, "omni_talker_max_cache_length", 1024);
+        int32_t omni_talker_max_cache_length =
+            extract_json_int(json, "omni_talker_max_cache_length", 1024);
         int32_t omni_talker_num_layers = extract_json_int(json, "omni_talker_num_layers", 0);
 
         // Talker (optional)
@@ -36,16 +38,14 @@ public:
         std::unique_ptr<IInferenceState> talker_state;
         auto talker_loaded = try_load_trt_module_from_plan(
             find_section(ctx.bundle, "talker_engine_plan"), "talker", thinker_loaded.stream);
-        if (talker_loaded.module && talker_loaded.module->ok())
-        {
+        if (talker_loaded.module && talker_loaded.module->ok()) {
             talker_module = std::move(talker_loaded.module);
             int32_t talker_kv_dim = omni_talker_hidden_size;
             int32_t talker_cache_len = omni_talker_max_cache_length;
-            int32_t talker_layers = omni_talker_num_layers > 0
-                ? omni_talker_num_layers : ctx.config.num_layers;
-            talker_state = std::make_unique<KvCache>(
-                talker_layers, talker_cache_len, talker_kv_dim, stream,
-                cache_dtype);
+            int32_t talker_layers =
+                omni_talker_num_layers > 0 ? omni_talker_num_layers : ctx.config.num_layers;
+            talker_state = std::make_unique<KvCache>(talker_layers, talker_cache_len, talker_kv_dim,
+                                                     stream, cache_dtype);
         }
 
         // Code2Wav (optional)
@@ -71,15 +71,9 @@ public:
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<OmniPipeline>(
-            std::move(thinker_loaded.module),
-            std::move(thinker_state),
-            std::move(talker_module),
-            std::move(talker_state),
-            std::move(code2wav_module),
-            std::move(omni_cfg),
-            stream,
-            std::move(tokenizer),
-            ctx.bundle.info.model_id);
+            std::move(thinker_loaded.module), std::move(thinker_state), std::move(talker_module),
+            std::move(talker_state), std::move(code2wav_module), std::move(omni_cfg), stream,
+            std::move(tokenizer), ctx.bundle.info.model_id);
     }
 };
 

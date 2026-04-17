@@ -7,12 +7,12 @@
 //   3. Run decoder autoregressively with cross-attention to encoder output
 //   4. Detokenize output
 
-#include "trtf/runtime/pipeline_registry.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/pipeline.h"
-#include "trtf/tokenizer.h"
-#include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/kv_cache.h"
+#include "trtf/runtime/pipeline_registry.h"
+#include "trtf/runtime/trt_module.h"
+#include "trtf/tokenizer.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -33,33 +33,17 @@ namespace trtf {
 // ---------------------------------------------------------------------------
 
 class T5Pipeline final : public IPipeline {
-public:
-    T5Pipeline(
-        std::unique_ptr<TrtModule> encoder,
-        std::unique_ptr<TrtModule> decoder,
-        std::unique_ptr<KvCache> cache,
-        int32_t hidden_size,
-        int32_t num_decoder_layers,
-        int32_t max_enc_seq_len,
-        int32_t vocab_size,
-        int32_t decoder_start_token_id,
-        int32_t eos_token_id,
-        cudaStream_t stream,
-        std::shared_ptr<ITokenizer> tokenizer,
-        std::string model_id_str)
-        : encoder_(std::move(encoder))
-        , decoder_(std::move(decoder))
-        , cache_(std::move(cache))
-        , hidden_size_(hidden_size)
-        , num_decoder_layers_(num_decoder_layers)
-        , max_enc_seq_len_(max_enc_seq_len)
-        , vocab_size_(vocab_size)
-        , decoder_start_token_id_(decoder_start_token_id)
-        , eos_token_id_(eos_token_id)
-        , stream_(stream)
-        , tokenizer_(std::move(tokenizer))
-        , model_id_(std::move(model_id_str))
-    {
+  public:
+    T5Pipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
+               std::unique_ptr<KvCache> cache, int32_t hidden_size, int32_t num_decoder_layers,
+               int32_t max_enc_seq_len, int32_t vocab_size, int32_t decoder_start_token_id,
+               int32_t eos_token_id, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+               std::string model_id_str)
+        : encoder_(std::move(encoder)), decoder_(std::move(decoder)), cache_(std::move(cache)),
+          hidden_size_(hidden_size), num_decoder_layers_(num_decoder_layers),
+          max_enc_seq_len_(max_enc_seq_len), vocab_size_(vocab_size),
+          decoder_start_token_id_(decoder_start_token_id), eos_token_id_(eos_token_id),
+          stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
         // Allocate cross-attention device buffers (one per decoder layer)
         cross_kv_bytes_ = static_cast<size_t>(max_enc_seq_len_) *
                           static_cast<size_t>(hidden_size_) * sizeof(float);
@@ -74,9 +58,12 @@ public:
     }
 
     ~T5Pipeline() override {
-        for (auto* p : cross_k_ptrs_) cudaFree(p);
-        for (auto* p : cross_v_ptrs_) cudaFree(p);
-        if (enc_mask_device_) cudaFree(enc_mask_device_);
+        for (auto* p : cross_k_ptrs_)
+            cudaFree(p);
+        for (auto* p : cross_v_ptrs_)
+            cudaFree(p);
+        if (enc_mask_device_)
+            cudaFree(enc_mask_device_);
     }
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg) override {
@@ -112,14 +99,12 @@ public:
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "T5Pipeline"; }
 
-private:
+  private:
     void run_encoder(const std::vector<int32_t>& input_ids) {
         // Pad or truncate input_ids to max_enc_seq_len_
         std::vector<int32_t> padded(static_cast<size_t>(max_enc_seq_len_), 0);
-        size_t copy_len = std::min(input_ids.size(),
-                                    static_cast<size_t>(max_enc_seq_len_));
-        std::memcpy(padded.data(), input_ids.data(),
-                     copy_len * sizeof(int32_t));
+        size_t copy_len = std::min(input_ids.size(), static_cast<size_t>(max_enc_seq_len_));
+        std::memcpy(padded.data(), input_ids.data(), copy_len * sizeof(int32_t));
         actual_enc_len_ = static_cast<int32_t>(copy_len);
 
         // Build encoder attention mask: 0.0 for valid, -1e9 for padding
@@ -158,14 +143,10 @@ private:
         // Copy raw encoder output to all decoder layer cross_k/cross_v inputs.
         // The per-layer K/V projections are baked into the decoder TRT graph.
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-            cudaMemcpyAsync(cross_k_ptrs_[static_cast<size_t>(i)],
-                           encoder_output_host_.data(),
-                           cross_kv_bytes_,
-                           cudaMemcpyHostToDevice, stream_);
-            cudaMemcpyAsync(cross_v_ptrs_[static_cast<size_t>(i)],
-                           encoder_output_host_.data(),
-                           cross_kv_bytes_,
-                           cudaMemcpyHostToDevice, stream_);
+            cudaMemcpyAsync(cross_k_ptrs_[static_cast<size_t>(i)], encoder_output_host_.data(),
+                            cross_kv_bytes_, cudaMemcpyHostToDevice, stream_);
+            cudaMemcpyAsync(cross_v_ptrs_[static_cast<size_t>(i)], encoder_output_host_.data(),
+                            cross_kv_bytes_, cudaMemcpyHostToDevice, stream_);
         }
         cudaStreamSynchronize(stream_);
 
@@ -176,8 +157,8 @@ private:
         size_t mask_bytes = static_cast<size_t>(max_enc_seq_len_) * sizeof(float);
         if (!enc_mask_device_)
             cudaMalloc(&enc_mask_device_, mask_bytes);
-        cudaMemcpyAsync(enc_mask_device_, enc_mask_host.data(), mask_bytes,
-                        cudaMemcpyHostToDevice, stream_);
+        cudaMemcpyAsync(enc_mask_device_, enc_mask_host.data(), mask_bytes, cudaMemcpyHostToDevice,
+                        stream_);
         cudaStreamSynchronize(stream_);
 
         // Bind cross-attention buffers to decoder
@@ -205,7 +186,7 @@ private:
         for (int32_t step = 0; step < max_new_tokens; ++step) {
             int32_t next_token = argmax(logits);
             output_ids.push_back(next_token);
-    
+
             if (next_token == eos_id)
                 break;
 
@@ -251,17 +232,16 @@ private:
         auto num_logits = logits_tensor.numel();
         logits.resize(static_cast<size_t>(num_logits));
         std::memcpy(logits.data(), logits_tensor.data,
-                     static_cast<size_t>(num_logits) * sizeof(float));
+                    static_cast<size_t>(num_logits) * sizeof(float));
 
         cache_->advance();
-
     }
 
     static int32_t argmax(const std::vector<float>& logits) {
-        if (logits.empty()) return 0;
+        if (logits.empty())
+            return 0;
         return static_cast<int32_t>(
-            std::distance(logits.begin(),
-                          std::max_element(logits.begin(), logits.end())));
+            std::distance(logits.begin(), std::max_element(logits.begin(), logits.end())));
     }
 
     std::unique_ptr<TrtModule> encoder_;
@@ -294,8 +274,9 @@ private:
 // ---------------------------------------------------------------------------
 
 class T5Plugin final : public IPipelinePlugin {
-public:
+  public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        load_ffi_kernels_from_bundle(ctx.bundle);
         const auto& json = ctx.config_json;
 
         // Load encoder (stored as vision_engine_plan in T5 bundles)
@@ -305,14 +286,13 @@ public:
         auto enc_loaded = load_trt_module_from_plan(enc_plan, "t5 encoder");
 
         // Load decoder (main engine_plan)
-        auto dec_loaded = load_trt_module_from_plan(
-            find_section(ctx.bundle, "engine_plan"), "t5 decoder",
-            enc_loaded.stream);
+        auto dec_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"),
+                                                    "t5 decoder", enc_loaded.stream);
 
         // Config
-        int32_t decoder_layers = extract_json_int(json, "decoder_layers",
-                                   extract_json_int(json, "num_decoder_layers",
-                                     ctx.config.num_layers));
+        int32_t decoder_layers =
+            extract_json_int(json, "decoder_layers",
+                             extract_json_int(json, "num_decoder_layers", ctx.config.num_layers));
         int32_t dl = (decoder_layers > 0) ? decoder_layers : ctx.config.num_layers;
         int32_t max_enc_seq_len = ctx.config.max_cache_length;
         int32_t decoder_start_token_id = extract_json_int(json, "decoder_start_token_id", 0);
@@ -320,8 +300,7 @@ public:
         // Create KvCache for decoder self-attention
         cudaStream_t stream = dec_loaded.stream->get();
         int32_t kv_dim = compute_kv_dim(ctx.config);
-        auto cache = std::make_unique<KvCache>(
-            dl, ctx.config.max_cache_length, kv_dim, stream);
+        auto cache = std::make_unique<KvCache>(dl, ctx.config.max_cache_length, kv_dim, stream);
         if (!cache->ok())
             throw std::runtime_error("T5Plugin: failed to create KvCache");
 
@@ -329,13 +308,10 @@ public:
         auto tok = create_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<T5Pipeline>(
-            std::move(enc_loaded.module), std::move(dec_loaded.module),
-            std::move(cache),
-            ctx.config.hidden_size, dl, max_enc_seq_len,
-            ctx.config.vocab_size,
-            decoder_start_token_id,
-            ctx.config.id_eos,
-            stream, std::move(tok), ctx.bundle.info.model_id);
+            std::move(enc_loaded.module), std::move(dec_loaded.module), std::move(cache),
+            ctx.config.hidden_size, dl, max_enc_seq_len, ctx.config.vocab_size,
+            decoder_start_token_id, ctx.config.id_eos, stream, std::move(tok),
+            ctx.bundle.info.model_id);
     }
 };
 

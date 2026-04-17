@@ -1216,6 +1216,15 @@ def add_conv3d_as_conv2d(
     else:
         # General case: temporal kernel > 1
         # Pad temporally if needed
+        if pt > 0:
+            # Zero-pad [B, C, T, H, W] -> [B, C, T+2*pt, H, W]
+            pad_layer = network.add_padding_nd(
+                inp,
+                pre_padding=(0, pt, 0),
+                post_padding=(0, pt, 0),
+            )
+            inp = pad_layer.get_output(0)
+
         # For causal conv we handle this via the cache mechanism externally,
         # so here we just do a per-frame conv with gathered temporal neighbors.
         # Reshape [B, C, T_padded, H, W] -> sliding window gather -> Conv2D
@@ -2379,3 +2388,209 @@ def _add_attention_core(
     if mask is not None and not causal:
         attn.mask = mask
     return attn.get_output(0)
+
+
+# ---------------------------------------------------------------------------
+# Decoder attention implementations
+# ---------------------------------------------------------------------------
+
+def add_decoder_attention_decomposed(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    all_k: trt.ITensor,
+    all_v: trt.ITensor,
+    attention_mask: trt.ITensor,
+    *,
+    num_heads: int,
+    head_dim: int,
+    attention_window: int,
+    attn_scale_tensor: trt.ITensor,
+    alibi_slopes_tensor: trt.ITensor | None = None,
+    alibi_indices_tensor: trt.ITensor | None = None,
+    position_id: trt.ITensor | None = None,
+) -> trt.ITensor:
+    """Decomposed decoder attention: Q@K^T -> scale -> mask -> softmax -> @V.
+
+    Inputs:
+        q:              [1, attention_size]  (attention_size = num_heads * head_dim)
+        all_k, all_v:   [attention_window, attention_size]
+        attention_mask:  [1, attention_window]
+    Returns:
+        context:        [1, attention_size]
+    """
+    attention_size = num_heads * head_dim
+
+    q_heads = network.add_shuffle(q)
+    q_heads.reshape_dims = (num_heads, 1, head_dim)
+
+    k_heads = network.add_shuffle(all_k)
+    k_heads.reshape_dims = (attention_window, num_heads, head_dim)
+    v_heads = network.add_shuffle(all_v)
+    v_heads.reshape_dims = (attention_window, num_heads, head_dim)
+
+    k_heads.second_transpose = trt.Permutation([1, 0, 2])
+    v_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+    score = network.add_matrix_multiply(
+        q_heads.get_output(0), trt.MatrixOperation.NONE,
+        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
+
+    scaled = network.add_elementwise(
+        score.get_output(0), attn_scale_tensor,
+        trt.ElementWiseOperation.PROD)
+
+    if alibi_slopes_tensor is not None and alibi_indices_tensor is not None:
+        pos_float = network.add_cast(position_id, trt.float32)
+        pos_1d = network.add_shuffle(pos_float.get_output(0))
+        pos_1d.reshape_dims = (1,)
+        full_indices = network.add_concatenation(
+            [alibi_indices_tensor, pos_1d.get_output(0)])
+        full_indices.axis = 0
+        idx_3d = network.add_shuffle(full_indices.get_output(0))
+        idx_3d.reshape_dims = (1, 1, attention_window)
+        pos_reshaped = network.add_shuffle(pos_float.get_output(0))
+        pos_reshaped.reshape_dims = (1, 1, 1)
+        rel_pos = network.add_elementwise(
+            idx_3d.get_output(0), pos_reshaped.get_output(0),
+            trt.ElementWiseOperation.SUB)
+        alibi_bias = network.add_elementwise(
+            alibi_slopes_tensor, rel_pos.get_output(0),
+            trt.ElementWiseOperation.PROD)
+        scaled = network.add_elementwise(
+            scaled.get_output(0), alibi_bias.get_output(0),
+            trt.ElementWiseOperation.SUM)
+
+    mask3d = network.add_shuffle(attention_mask)
+    mask3d.reshape_dims = (1, 1, attention_window)
+
+    masked = network.add_elementwise(
+        scaled.get_output(0), mask3d.get_output(0),
+        trt.ElementWiseOperation.SUM)
+
+    softmax = network.add_softmax(masked.get_output(0))
+    softmax.axes = 1 << 2
+
+    context_heads = network.add_matrix_multiply(
+        softmax.get_output(0), trt.MatrixOperation.NONE,
+        v_heads.get_output(0), trt.MatrixOperation.NONE)
+
+    context_flat = network.add_shuffle(context_heads.get_output(0))
+    context_flat.reshape_dims = (1, attention_size)
+    return context_flat.get_output(0)
+
+
+def add_decoder_attention_ffi(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    all_k: trt.ITensor,
+    all_v: trt.ITensor,
+    *,
+    kernel_name: str,
+    num_heads: int,
+    head_dim: int,
+    attention_window: int,
+) -> trt.ITensor:
+    """Decoder attention via TVM-FFI kernel (FlashInfer, CuTe, etc).
+
+    Same input/output contract as add_decoder_attention_decomposed.
+    The kernel must be registered as a TVM-FFI global before engine build.
+
+    Inputs:
+        q:              [1, attention_size]
+        all_k, all_v:   [attention_window, attention_size]
+    Returns:
+        context:        [1, attention_size]
+    """
+    attention_size = num_heads * head_dim
+
+    q_2d = network.add_shuffle(q)
+    q_2d.reshape_dims = (num_heads, head_dim)
+    k_3d = network.add_shuffle(all_k)
+    k_3d.reshape_dims = (attention_window, num_heads, head_dim)
+    v_3d = network.add_shuffle(all_v)
+    v_3d.reshape_dims = (attention_window, num_heads, head_dim)
+
+    scale_val = 1.0 / (head_dim ** 0.5)
+    ffi_outputs = add_tvm_ffi_kernel(
+        network,
+        kernel_name=kernel_name,
+        inputs=[q_2d.get_output(0), k_3d.get_output(0),
+                v_3d.get_output(0)],
+        output_specs=[{"dims": [num_heads, head_dim], "dtype": "float16"}],
+        workspace_bytes=32 * 1024 * 1024,  # 32MB for FlashInfer tmp
+        extra_args=[
+            {"type": "none"},              # maybe_lse
+            {"type": "int", "value": 0},    # kv_layout_code (NHD)
+            {"type": "int", "value": -1},   # window_left
+            {"type": "none"},              # alibi_slopes
+            {"type": "float", "value": 0.0},     # logits_soft_cap
+            {"type": "float", "value": scale_val}, # sm_scale
+            {"type": "float", "value": 1.0},      # rope_rcp_scale
+            {"type": "float", "value": 0.0001},   # rope_rcp_theta
+        ],
+    )
+    context_flat = network.add_shuffle(ffi_outputs[0])
+    context_flat.reshape_dims = (1, attention_size)
+    return context_flat.get_output(0)
+
+
+# ---------------------------------------------------------------------------
+# TVM-FFI kernel bridge
+# ---------------------------------------------------------------------------
+
+def add_tvm_ffi_kernel(
+    network: trt.INetworkDefinition,
+    kernel_name: str,
+    inputs: list[trt.ITensor],
+    output_specs: list[dict],
+    workspace_bytes: int = 0,
+    extra_args: list[dict] | None = None,
+) -> list[trt.ITensor]:
+    """Add a TVM-FFI kernel call as a TRT plugin layer.
+
+    Args:
+        network: TRT network being built.
+        kernel_name: TVM-FFI global function name (e.g. "my_ns.my_kernel").
+        inputs: List of input ITensor objects.
+        output_specs: List of dicts, one per output. Each dict has:
+            - "dims": "same_as_input_N" or list of ints for fixed shape
+            - "dtype": "float32" or "float16" (default "float32")
+        workspace_bytes: Extra workspace bytes for the kernel (default 0).
+        extra_args: Optional list of extra scalar/pointer args to pass after
+            tensors. Each dict has "type" ("none"|"int"|"float"|"ptr") and
+            optional "value".
+
+    Returns:
+        List of output ITensor objects.
+    """
+    import json
+
+    registry = trt.get_plugin_registry()
+    creator = registry.get_plugin_creator("TvmFfiKernel", "1", "")
+    if creator is None:
+        raise RuntimeError(
+            "TvmFfiKernel plugin not found in TRT registry. "
+            "Ensure the C++ plugin is compiled with TRTF_HAS_TVM_FFI=1."
+        )
+
+    spec_dict = {
+        "num_inputs": len(inputs),
+        "num_outputs": len(output_specs),
+        "outputs": output_specs,
+        "workspace_bytes": workspace_bytes,
+    }
+    if extra_args:
+        spec_dict["extra_args"] = extra_args
+    shape_spec = json.dumps(spec_dict)
+
+    fields = [
+        trt.PluginField("kernel_name", kernel_name.encode("utf-8"),
+                         trt.PluginFieldType.CHAR),
+        trt.PluginField("shape_spec", shape_spec.encode("utf-8"),
+                         trt.PluginFieldType.CHAR),
+    ]
+    fc = trt.PluginFieldCollection(fields)
+    plugin = creator.create_plugin("tvm_ffi_kernel", fc)
+
+    layer = network.add_plugin_v2(inputs, plugin)
+    return [layer.get_output(i) for i in range(layer.num_outputs)]

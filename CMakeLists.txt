@@ -238,9 +238,65 @@ else()
   message(STATUS "TensorRT backend disabled (missing TensorRT or CUDA dev dependencies)")
 endif()
 
+# --- TVM-FFI kernel bridge plugin (optional) ---
+option(TRTF_ENABLE_TVM_FFI "Enable TVM-FFI kernel bridge plugin" ON)
+
+set(_trtf_has_tvm_ffi FALSE)
+
+if(TRTF_ENABLE_TVM_FFI AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY)
+  find_path(TRTF_TVM_FFI_INCLUDE_DIR tvm/ffi/c_api.h
+    PATHS ${_trtf_default_search_paths}
+    PATH_SUFFIXES "" include
+  )
+  find_library(TRTF_TVM_FFI_LIBRARY
+    NAMES tvm_ffi libtvm_ffi.so
+    PATHS ${_trtf_default_search_paths}
+    PATH_SUFFIXES "" lib lib64
+  )
+
+  if(TRTF_TVM_FFI_INCLUDE_DIR AND TRTF_TVM_FFI_LIBRARY)
+    set(_trtf_has_tvm_ffi TRUE)
+    target_sources(trtf_core PRIVATE
+      src/plugins/tvm_ffi_kernel_plugin.cpp
+      src/plugins/tvm_ffi_kernel_creator.cpp
+      src/plugins/tvm_ffi_module_loader.cpp
+    )
+    target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TVM_FFI=1)
+    target_include_directories(trtf_core SYSTEM PRIVATE ${TRTF_TVM_FFI_INCLUDE_DIR})
+    target_link_libraries(trtf_core PRIVATE ${TRTF_TVM_FFI_LIBRARY})
+    message(STATUS "TVM-FFI kernel bridge enabled")
+    message(STATUS "  TVM-FFI include: ${TRTF_TVM_FFI_INCLUDE_DIR}")
+    message(STATUS "  TVM-FFI library: ${TRTF_TVM_FFI_LIBRARY}")
+  endif()
+endif()
+
+if(NOT _trtf_has_tvm_ffi)
+  target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TVM_FFI=0)
+  message(STATUS "TVM-FFI kernel bridge disabled")
+endif()
+
+# Build the TVM-FFI plugin as a standalone shared library for dynamic loading
+# via IPluginRegistry::loadLibrary(). This avoids static-lib registry issues.
+if(_trtf_has_tvm_ffi)
+  add_library(trtf_tvm_ffi_plugin SHARED
+    src/plugins/tvm_ffi_kernel_plugin.cpp
+    src/plugins/tvm_ffi_kernel_creator.cpp
+    src/plugins/tvm_ffi_module_loader.cpp
+    src/utils/json_helpers.cpp
+  )
+  target_include_directories(trtf_tvm_ffi_plugin PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_include_directories(trtf_tvm_ffi_plugin SYSTEM PRIVATE
+    ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR} ${TRTF_TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(trtf_tvm_ffi_plugin PRIVATE
+    ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY} ${TRTF_TVM_FFI_LIBRARY})
+  target_compile_definitions(trtf_tvm_ffi_plugin PRIVATE TRTF_HAS_TRT=1 TRTF_HAS_TVM_FFI=1)
+  target_compile_options(trtf_tvm_ffi_plugin PRIVATE -Wall -Wextra -Wpedantic)
+  message(STATUS "TVM-FFI plugin shared library: trtf_tvm_ffi_plugin.so")
+endif()
+
 add_executable(trtf examples/trtf_cli.cpp)
 target_link_libraries(trtf PRIVATE trtf_core)
-target_include_directories(trtf PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
+target_include_directories(trtf PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb ${PROJECT_SOURCE_DIR}/src)
 
 enable_testing()
 
@@ -381,6 +437,27 @@ trtf_add_test(test_io_map)
 
 # Decoder config parsing (legacy name: test_torchtrt_decoder)
 trtf_add_test(test_torchtrt_decoder)
+
+# TVM-FFI plugin
+trtf_add_test(test_tvm_ffi_plugin)
+if(_trtf_has_tvm_ffi)
+  target_include_directories(test_tvm_ffi_plugin SYSTEM PRIVATE ${TRTF_TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(test_tvm_ffi_plugin PRIVATE ${TRTF_TVM_FFI_LIBRARY})
+endif()
+
+# TVM-FFI plugin V2 (self-contained test with IPluginV2DynamicExt)
+trtf_add_test(test_tvm_ffi_plugin_v2 NO_SRC_INCLUDE)
+
+# TVM-FFI module loader (loads FlashInfer .so from C++)
+trtf_add_test(test_tvm_ffi_module_loader)
+if(_trtf_has_tvm_ffi)
+  target_include_directories(test_tvm_ffi_module_loader SYSTEM PRIVATE ${TRTF_TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(test_tvm_ffi_module_loader PRIVATE ${TRTF_TVM_FFI_LIBRARY})
+endif()
+if(_trtf_has_tvm_ffi)
+  target_include_directories(test_tvm_ffi_plugin_v2 SYSTEM PRIVATE ${TRTF_TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(test_tvm_ffi_plugin_v2 PRIVATE ${TRTF_TVM_FFI_LIBRARY})
+endif()
 
 # --- Install ---
 include(CMakePackageConfigHelpers)

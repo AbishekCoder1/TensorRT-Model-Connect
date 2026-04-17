@@ -294,6 +294,10 @@ def build_standard_decoder_engine(
     if debug_layer_outputs:
         _mark_debug_output(network, hidden_state, "debug_embed")
 
+    # FFI attention kernel: set by the perf agent on their branch.
+    # Default: None (use decomposed attention).
+    ffi_attention_kernel = None
+
     # ---------------------------------------------------------------
     # Decoder layers
     # ---------------------------------------------------------------
@@ -336,6 +340,7 @@ def build_standard_decoder_engine(
             sin_half_tensor=sin_half_tensor,
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
+            ffi_attention_kernel=ffi_attention_kernel,
         )
 
         hidden_state = result["hidden"]
@@ -465,6 +470,7 @@ def _add_decoder_layer(
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
+    ffi_attention_kernel: str | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
 
@@ -488,6 +494,7 @@ def _add_decoder_layer(
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
+        ffi_attention_kernel=ffi_attention_kernel,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]

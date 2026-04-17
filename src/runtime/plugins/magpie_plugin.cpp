@@ -13,6 +13,7 @@ namespace trtf {
 class MagpiePlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        load_ffi_kernels_from_bundle(ctx.bundle);
         auto shared_stream = std::make_shared<CudaStream>();
 
         auto enc_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "vision_engine_plan"),

@@ -210,8 +210,7 @@ class ModernbertPlugin:
 
         pos_indices = graph_ops.add_constant(
             network, (max_seq,), np.arange(max_seq, dtype=np.float32))
-        pos_int = network.add_identity(pos_indices)
-        pos_int.set_output_type(0, trt.int32)
+        pos_int = network.add_cast(pos_indices, trt.int32)
 
         # Embedding
         embed_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"])

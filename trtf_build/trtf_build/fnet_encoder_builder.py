@@ -85,7 +85,6 @@ def build_fnet_encoder_engine(
 ) -> bytes:
     """Build a TRT engine plan for FNet encoder with 2D DFT."""
     hidden = config.hidden_size
-    vocab = config.vocab_size
     num_layers = config.num_hidden_layers
     intermediate = config.intermediate_size
     eps = config.rms_norm_eps
@@ -104,7 +103,7 @@ def build_fnet_encoder_engine(
 
     # Inputs
     input_ids = network.add_input("input_ids", trt.int32, (S,))
-    attention_mask_input = network.add_input("attention_mask", trt.int32, (S,))
+    network.add_input("attention_mask", trt.int32, (S,))
 
     # token_type_ids: constant zeros
     tt_zeros = network.add_constant(
@@ -124,8 +123,7 @@ def build_fnet_encoder_engine(
     # Position indices
     position_indices = graph_ops.add_constant(
         network, (S,), np.arange(S, dtype=np.int32).astype(np.float32))
-    pos_int = network.add_identity(position_indices)
-    pos_int.set_output_type(0, trt.int32)
+    pos_int = network.add_cast(position_indices, trt.int32)
 
     # Embedding: word + position + token_type
     word_embed = network.add_gather(embedding_table, input_ids, 0)

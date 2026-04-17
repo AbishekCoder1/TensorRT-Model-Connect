@@ -1,57 +1,39 @@
 // Seq2SeqPlugin: handles "seq2seq_encoder_decoder" strategy.
 // Encoder-decoder text-to-text pipeline for BART/Marian/M2M-100/NLLB translation models.
 
-#include "trtf/runtime/pipeline_registry.h"
-#include "trtf/runtime/pipeline_plugin.h"
-#include "trtf/runtime/kv_cache.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/core/trt_decode_runtime.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/kv_cache.h"
+#include "trtf/runtime/pipeline_plugin.h"
+#include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #if TRTF_HAS_TRT
 
 #include <algorithm>
 #include <cstring>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include <cuda_runtime_api.h>
-
 namespace trtf {
 
 class Seq2SeqPipeline final : public IPipeline {
-public:
-    Seq2SeqPipeline(
-        std::unique_ptr<TrtModule> encoder,
-        std::unique_ptr<TrtModule> decoder,
-        std::unique_ptr<IInferenceState> state,
-        int32_t hidden_size,
-        int32_t num_decoder_layers,
-        int32_t max_source_length,
-        int32_t decoder_start_token_id,
-        int32_t eos_token_id,
-        int32_t bos_token_id,
-        int32_t pad_token_id,
-        cudaStream_t stream,
-        std::shared_ptr<ITokenizer> tokenizer,
-        std::string model_id_str)
-        : encoder_(std::move(encoder))
-        , decoder_(std::move(decoder))
-        , state_(std::move(state))
-        , hidden_size_(hidden_size)
-        , num_decoder_layers_(num_decoder_layers)
-        , max_source_length_(max_source_length)
-        , decoder_start_token_id_(decoder_start_token_id)
-        , eos_token_id_(eos_token_id)
-        , bos_token_id_(bos_token_id)
-        , pad_token_id_(pad_token_id)
-        , stream_(stream)
-        , tokenizer_(std::move(tokenizer))
-        , model_id_(std::move(model_id_str))
-    {
+  public:
+    Seq2SeqPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
+                    std::unique_ptr<IInferenceState> state, int32_t hidden_size,
+                    int32_t num_decoder_layers, int32_t max_source_length,
+                    int32_t decoder_start_token_id, int32_t eos_token_id, int32_t bos_token_id,
+                    int32_t pad_token_id, cudaStream_t stream,
+                    std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+        : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
+          hidden_size_(hidden_size), num_decoder_layers_(num_decoder_layers),
+          max_source_length_(max_source_length), decoder_start_token_id_(decoder_start_token_id),
+          eos_token_id_(eos_token_id), bos_token_id_(bos_token_id), pad_token_id_(pad_token_id),
+          stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
         if (!encoder_ || !encoder_->ok())
             throw std::runtime_error("Seq2SeqPipeline: invalid encoder");
         if (!decoder_ || !decoder_->ok())
@@ -59,8 +41,8 @@ public:
         if (!state_ || !state_->ok())
             throw std::runtime_error("Seq2SeqPipeline: invalid state");
 
-        cross_kv_bytes_ = static_cast<std::size_t>(max_source_length_)
-            * static_cast<std::size_t>(hidden_size_) * sizeof(float);
+        cross_kv_bytes_ = static_cast<std::size_t>(max_source_length_) *
+                          static_cast<std::size_t>(hidden_size_) * sizeof(float);
         cross_k_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_), nullptr);
         cross_v_ptrs_.resize(static_cast<std::size_t>(num_decoder_layers_), nullptr);
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {
@@ -70,13 +52,20 @@ public:
     }
 
     ~Seq2SeqPipeline() override {
-        for (auto* ptr : cross_k_ptrs_) { if (ptr) cudaFree(ptr); }
-        for (auto* ptr : cross_v_ptrs_) { if (ptr) cudaFree(ptr); }
+        for (auto* ptr : cross_k_ptrs_) {
+            if (ptr)
+                cudaFree(ptr);
+        }
+        for (auto* ptr : cross_v_ptrs_) {
+            if (ptr)
+                cudaFree(ptr);
+        }
     }
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg) override {
         auto [padded, copy_len] = prepare_encoder_input(prompt);
-        if (copy_len == 0) return TextResult{"[empty input]", {}};
+        if (copy_len == 0)
+            return TextResult{"[empty input]", {}};
 
         run_encoder(padded, copy_len);
         setup_cross_attention();
@@ -94,11 +83,13 @@ public:
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "Seq2SeqPipeline"; }
 
-private:
+  private:
     std::pair<std::vector<int32_t>, int32_t> prepare_encoder_input(const std::string& prompt) {
         std::vector<int32_t> ids;
-        if (tokenizer_) ids = tokenizer_->encode(prompt);
-        if (ids.empty()) return {{}, 0};
+        if (tokenizer_)
+            ids = tokenizer_->encode(prompt);
+        if (ids.empty())
+            return {{}, 0};
 
         // Add BOS/EOS if the native tokenizer didn't
         if (bos_token_id_ >= 0 && (ids.empty() || ids.front() != bos_token_id_))
@@ -165,7 +156,8 @@ private:
         for (int32_t step = 0; step < max_new_tokens; ++step) {
             run_decoder_step(current_token, logits);
             int32_t next = select_argmax_token(logits);
-            if (next == eos_token_id_) break;
+            if (next == eos_token_id_)
+                break;
             output_ids.push_back(next);
             current_token = next;
         }
@@ -210,14 +202,14 @@ private:
 };
 
 class Seq2SeqPlugin final : public IPipelinePlugin {
-public:
+  public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        load_ffi_kernels_from_bundle(ctx.bundle);
         const auto& json = ctx.config_json;
-        auto enc_loaded = load_trt_module_from_plan(
-            find_section(ctx.bundle, "vision_engine_plan"), "seq2seq encoder");
-        auto dec_loaded = load_trt_module_from_plan(
-            find_section(ctx.bundle, "engine_plan"), "seq2seq decoder",
-            enc_loaded.stream);
+        auto enc_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "vision_engine_plan"),
+                                                    "seq2seq encoder");
+        auto dec_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"),
+                                                    "seq2seq decoder", enc_loaded.stream);
         int32_t decoder_layers = extract_json_int(json, "decoder_layers", ctx.config.num_layers);
         int32_t dl = (decoder_layers > 0) ? decoder_layers : ctx.config.num_layers;
         int32_t max_source_length = extract_json_int(json, "max_source_length", 128);
@@ -233,11 +225,9 @@ public:
             throw std::runtime_error("Failed to create KvCache for seq2seq decoder");
         auto tok = create_tokenizer_from_bundle(ctx.bundle);
         return std::make_unique<Seq2SeqPipeline>(
-            std::move(enc_loaded.module), std::move(dec_loaded.module),
-            std::move(state), ctx.config.hidden_size, dl,
-            max_source_length, decoder_start_token_id, eos_token_id,
-            bos_token_id, pad_token_id,
-            stream, std::move(tok), ctx.bundle.info.model_id);
+            std::move(enc_loaded.module), std::move(dec_loaded.module), std::move(state),
+            ctx.config.hidden_size, dl, max_source_length, decoder_start_token_id, eos_token_id,
+            bos_token_id, pad_token_id, stream, std::move(tok), ctx.bundle.info.model_id);
     }
 };
 
@@ -246,6 +236,7 @@ volatile int kForceLink_Seq2SeqPlugin = 0;
 } // namespace trtf
 
 static trtf::Seq2SeqPlugin g_Seq2SeqPlugin_instance;
-static trtf::PluginRegistrar g_Seq2SeqPlugin_reg("seq2seq_encoder_decoder", &g_Seq2SeqPlugin_instance);
+static trtf::PluginRegistrar g_Seq2SeqPlugin_reg("seq2seq_encoder_decoder",
+                                                 &g_Seq2SeqPlugin_instance);
 
 #endif // TRTF_HAS_TRT

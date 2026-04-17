@@ -1,10 +1,10 @@
 // BarkPlugin: handles "text_to_audio_bark" strategy.
 // Bark semantic + coarse pipeline with optional codec and fine engines.
 
-#include "trtf/runtime/pipeline_registry.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/pipelines/bark_pipeline.h"
+#include "runtime/plugins/shared/audio_helpers.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #if TRTF_HAS_TRT
@@ -12,12 +12,14 @@
 namespace trtf {
 
 class BarkPlugin final : public IPipelinePlugin {
-public:
+  public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        load_ffi_kernels_from_bundle(ctx.bundle);
         const auto& json = ctx.config_json;
 
         // Load semantic engine (main plan)
-        auto sem_loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "bark semantic");
+        auto sem_loaded =
+            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "bark semantic");
 
         // Load coarse engine
         auto coarse_loaded = load_trt_module_from_plan(
@@ -37,14 +39,16 @@ public:
         bark_cfg.semantic_infer_token = extract_json_int(json, "semantic_infer_token", 129599);
         bark_cfg.semantic_vocab_size = extract_json_int(json, "semantic_vocab_size", 10000);
         bark_cfg.coarse_input_vocab = extract_json_int(json, "coarse_input_vocab", 12096);
-        bark_cfg.coarse_semantic_pad_token = extract_json_int(json, "coarse_semantic_pad_token", 12048);
+        bark_cfg.coarse_semantic_pad_token =
+            extract_json_int(json, "coarse_semantic_pad_token", 12048);
         bark_cfg.coarse_infer_token = extract_json_int(json, "coarse_infer_token", 12050);
         bark_cfg.n_coarse_codebooks = extract_json_int(json, "n_coarse_codebooks", 2);
         bark_cfg.codebook_size = extract_json_int(json, "codebook_size", 1024);
         bark_cfg.codec_seq_length = extract_json_int(json, "codec_seq_length", 0);
         bark_cfg.codec_upsample_factor = extract_json_int(json, "codec_upsample_factor", 320);
         bark_cfg.codec_n_codebooks = extract_json_int(json, "codec_n_codebooks", 8);
-        bark_cfg.fine_hidden_size = extract_json_int(json, "fine_hidden_size", ctx.config.hidden_size);
+        bark_cfg.fine_hidden_size =
+            extract_json_int(json, "fine_hidden_size", ctx.config.hidden_size);
         bark_cfg.fine_n_lm_heads = extract_json_int(json, "fine_n_lm_heads", 7);
         bark_cfg.fine_codebook_size = extract_json_int(json, "fine_codebook_size", 1056);
         bark_cfg.fine_seq_length = extract_json_int(json, "fine_seq_length", 0);
@@ -53,11 +57,11 @@ public:
         int32_t sem_kv_dim = compute_kv_dim(ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> sem_state = std::make_unique<KvCache>(
-            ctx.config.num_layers, ctx.config.max_cache_length, sem_kv_dim, stream,
-            cache_dtype);
+            ctx.config.num_layers, ctx.config.max_cache_length, sem_kv_dim, stream, cache_dtype);
 
         // Coarse engine may have different dimensions -- resolve with semantic fallbacks
-        std::unique_ptr<IInferenceState> coarse_state(make_coarse_kv_cache(json, ctx.config, stream, cache_dtype));
+        std::unique_ptr<IInferenceState> coarse_state(
+            make_coarse_kv_cache(json, ctx.config, stream, cache_dtype));
 
         // Load embeddings
         auto sem_embed = section_to_floats(find_section(ctx.bundle, "semantic_embed"));
@@ -66,16 +70,12 @@ public:
         // Bark uses BertTokenizer WITHOUT special tokens ([CLS]/[SEP]).
         // HF's BarkProcessor calls encode(text, add_special_tokens=False).
         // Always use add_special_tokens=false to match the HF Bark pipeline.
-        auto bark_tokenizer = try_create_native_tokenizer(
-            ctx.bundle, /*add_special_tokens=*/false);
+        auto bark_tokenizer = try_create_native_tokenizer(ctx.bundle, /*add_special_tokens=*/false);
 
         auto pipeline = std::make_unique<BarkPipeline>(
-            std::move(sem_loaded.module), std::move(coarse_loaded.module),
-            std::move(sem_state),
-            std::move(coarse_state),
-            std::move(sem_embed), std::move(coarse_embed),
-            std::move(bark_cfg), stream,
-            std::move(bark_tokenizer), ctx.bundle.info.model_id);
+            std::move(sem_loaded.module), std::move(coarse_loaded.module), std::move(sem_state),
+            std::move(coarse_state), std::move(sem_embed), std::move(coarse_embed),
+            std::move(bark_cfg), stream, std::move(bark_tokenizer), ctx.bundle.info.model_id);
 
         // Optional codec engine
         auto codec_loaded = try_load_trt_module_from_plan(
@@ -86,12 +86,12 @@ public:
         // Optional fine engine
         auto fine_loaded = try_load_trt_module_from_plan(
             find_section(ctx.bundle, "fine_engine_plan"), "bark fine", sem_loaded.stream);
-        if (fine_loaded.module && fine_loaded.module->ok())
-        {
+        if (fine_loaded.module && fine_loaded.module->ok()) {
             pipeline->set_fine_module(std::move(fine_loaded.module));
             auto fe = section_to_floats(find_section(ctx.bundle, "fine_embed"));
             auto fp = section_to_floats(find_section(ctx.bundle, "fine_position_embed"));
-            if (!fe.empty()) pipeline->set_fine_embeddings(std::move(fe), std::move(fp));
+            if (!fe.empty())
+                pipeline->set_fine_embeddings(std::move(fe), std::move(fp));
         }
 
         return pipeline;

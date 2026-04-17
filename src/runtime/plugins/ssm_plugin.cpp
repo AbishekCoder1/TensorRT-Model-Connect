@@ -1,9 +1,9 @@
 // SsmPlugin: handles "ssm_recurrent" strategy.
 // Mamba/SSM models with conv_state + ssm_state recurrent state.
 
-#include "trtf/runtime/pipeline_registry.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/pipelines/recurrent_pipeline.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #if TRTF_HAS_TRT
@@ -11,9 +11,11 @@
 namespace trtf {
 
 class SsmPlugin final : public IPipelinePlugin {
-public:
+  public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
+        load_ffi_kernels_from_bundle(ctx.bundle);
+        auto loaded =
+            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         cudaStream_t stream = loaded.stream->get();
@@ -31,9 +33,9 @@ public:
         auto state = std::make_unique<RecurrentState>(ctx.config.num_layers, specs, stream);
         auto rgc = make_recurrent_gen_config(ctx.config);
 
-        return std::make_unique<RecurrentPipeline>(
-            std::move(loaded.module), std::move(state),
-            rgc, stream, "MambaPipeline", std::move(tokenizer), ctx.bundle.info.model_id);
+        return std::make_unique<RecurrentPipeline>(std::move(loaded.module), std::move(state), rgc,
+                                                   stream, "MambaPipeline", std::move(tokenizer),
+                                                   ctx.bundle.info.model_id);
     }
 };
 

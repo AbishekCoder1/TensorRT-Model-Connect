@@ -236,8 +236,7 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
     if position_biased_input and "position_embedding" in weights:
         pos_embed_table = graph_ops.add_constant(network, weights["position_embedding"].shape, weights["position_embedding"])
         pos_indices = graph_ops.add_constant(network, (max_seq_length,), np.arange(max_seq_length, dtype=np.int32).astype(np.float32))
-        pos_int = network.add_identity(pos_indices)
-        pos_int.set_output_type(0, trt.int32)
+        pos_int = network.add_cast(pos_indices, trt.int32)
         pos_embed = network.add_gather(pos_embed_table, pos_int.get_output(0), 0)
         embed_out = network.add_elementwise(embed_out, pos_embed.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
 

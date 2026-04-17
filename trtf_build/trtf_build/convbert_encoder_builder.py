@@ -101,8 +101,7 @@ def build_convbert_encoder_engine(
     # Position indices
     position_indices = graph_ops.add_constant(
         network, (S,), np.arange(S, dtype=np.int32).astype(np.float32))
-    pos_int = network.add_identity(position_indices)
-    pos_int.set_output_type(0, trt.int32)
+    pos_int = network.add_cast(position_indices, trt.int32)
 
     # -------------------------------------------------------------------
     # Embedding: word + position + token_type + LayerNorm
