@@ -439,6 +439,73 @@ Both had to be solved independently.
 That one design choice explained a large part of the early overflow and prompt
 quality failures.
 
+## Final apples-to-apples check
+
+The final fair comparison used the upstream plain-prompt recipe and a true
+full-KV dense baseline:
+
+- dense full-KV bundle:
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-dense32768-dynkv-fp16-manual-fullkv.trtfb`
+- TriAttention bundle:
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri12288-b3072-r128-dynkv-fp16-manual-current.trtfb`
+
+Prompt recipe:
+
+- plain upstream math prompt, no chat template
+- `temperature=0.6`
+- `top_k=20`
+- `top_p=0.95`
+- `min_p=0.0`
+- `seed=1234`
+
+Artifacts:
+
+- copied probe inputs and outputs:
+  `artifacts/triattention/apple-fullkv-plain/`
+- compact summary:
+  `artifacts/triattention/apple-fullkv-plain/summary.md`
+  `artifacts/triattention/apple-fullkv-plain/summary.json`
+
+Dense full-KV results:
+
+- `aime25_2` no-stop:
+  answer `588`, `38.89729 tok/s`
+- `aime25_3` stop-on-answer:
+  answer `16`, `53.068426 tok/s`
+
+TriAttention results:
+
+- `aime25_2` no-stop:
+  answer `588`, `61.263541 tok/s`
+- `aime25_3` stop-on-answer:
+  answer `16`, `68.298592 tok/s`
+
+Derived result:
+
+- `aime25_2` no-stop speedup versus dense full-KV: `1.5750x`
+
+### Why this is still fair even though the TriAttention bundle is `tri12288`
+
+For these probes, the physical max length difference is inactive.
+
+The prompt lengths are:
+
+- `aime25_2`: `690` tokens
+- `aime25_3`: `164` tokens
+
+The runtime only begins compaction once
+`cache_length_ >= compaction_trigger_length()`, and
+`compaction_trigger_length()` is `kv_budget + divide_length = 3200` for this
+bundle configuration; see
+`src/runtime/core/triattention_kv_cache.cpp`.
+
+Because both prompts are far below `3200`, the tested runs never depend on a
+physical cache capacity larger than `12288`. After compaction starts, the live
+cache stays near the logical TriAttention budget, again far below `12288`.
+So on these probes a hypothetical `tri32768-b3072` bundle would follow the same
+runtime path, and the comparison against `dense32768` is apples-to-apples for
+the actual operating point being measured.
+
 ## Remaining limits
 
 The current state is strong enough for native feature support, but there are
