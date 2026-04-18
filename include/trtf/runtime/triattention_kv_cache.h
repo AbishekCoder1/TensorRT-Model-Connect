@@ -31,6 +31,7 @@ struct TriAttentionConfig {
     int32_t divide_length{128};
     int32_t recent_window{128};
     TriAttentionScoreAggregation score_aggregation{TriAttentionScoreAggregation::kMean};
+    TriAttentionScoreAggregation per_layer_aggregation{TriAttentionScoreAggregation::kMean};
     bool count_prompt_tokens{true};
     bool protect_prefill{true};
     bool disable_mlr{false};

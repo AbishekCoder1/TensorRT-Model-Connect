@@ -167,6 +167,9 @@ TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
 
     state_->reset();
     state_bound_ = false;
+    for (auto& decoder_ctx : decoders_) {
+        decoder_ctx.module->reset_execution_context();
+    }
     state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;

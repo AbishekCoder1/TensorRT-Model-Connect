@@ -131,6 +131,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             output_path=args.output,
             max_cache_length=args.max_cache_length,
             dynamic_kv_cache=getattr(args, "dynamic_kv_cache", False),
+            dynamic_kv_profile_rows_override=getattr(args, "dynamic_kv_profile_rows", None),
             precision=args.precision,
             quantize=quantize,
             quant_scales=args.quant_scales,
@@ -306,6 +307,24 @@ def _auto_select_build_backend(model_ref: str) -> tuple[str, str]:
     print("[trtf-build] Auto-selected backend: trt", file=sys.stderr)
     return "trt", resolved_model_ref
 
+def _parse_profile_rows(value: str) -> list[int]:
+    rows: list[int] = []
+    for part in value.split(","):
+        text = part.strip()
+        if not text:
+            continue
+        try:
+            rows.append(int(text))
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid dynamic KV profile row {text!r}; expected comma-separated integers"
+            ) from exc
+    if not rows:
+        raise argparse.ArgumentTypeError(
+            "Expected at least one integer in --dynamic-kv-profile-rows"
+        )
+    return rows
+
 
 def _read_bundle_header(bundle_path: str) -> dict:
     """Read and return the JSON header from a .trtfb bundle."""
@@ -457,6 +476,13 @@ def main() -> None:
                          help="KV cache length (default: 256)")
     build_p.add_argument("--dynamic-kv-cache", action="store_true",
                          help="Build decoder bundles with runtime-resizable KV cache support")
+    build_p.add_argument(
+        "--dynamic-kv-profile-rows",
+        type=_parse_profile_rows,
+        default=None,
+        help="Comma-separated dynamic-KV optimization profile upper bounds "
+             "(overrides the builder's default profile schedule)",
+    )
     build_p.add_argument("--precision", choices=["fp32", "fp16", "bf16"],
                          default="fp32",
                          help="Engine precision (default: fp32)")

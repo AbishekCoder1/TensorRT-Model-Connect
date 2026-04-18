@@ -42,6 +42,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hf-shard-index", type=int, default=0)
     parser.add_argument("--hf-num-shards", type=int, default=1)
     parser.add_argument("--hf-output-path")
+    parser.add_argument(
+        "--dense-env",
+        action="append",
+        default=[],
+        help="Extra KEY=VALUE env override for the dense TRT run (repeatable)",
+    )
+    parser.add_argument(
+        "--tri-env",
+        action="append",
+        default=[],
+        help="Extra KEY=VALUE env override for the TriAttention TRT run (repeatable)",
+    )
     args = parser.parse_args()
     if not args.run_hf_reference and (not args.dense_bundle or not args.tri_bundle):
         parser.error("--dense-bundle and --tri-bundle are required unless --run-hf-reference is set")
@@ -50,6 +62,19 @@ def parse_args() -> argparse.Namespace:
     if args.hf_shard_index < 0 or args.hf_shard_index >= args.hf_num_shards:
         parser.error("--hf-shard-index must satisfy 0 <= shard < num_shards")
     return args
+
+
+def parse_extra_env(items: list[str]) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"Invalid env override {item!r}; expected KEY=VALUE")
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Invalid env override {item!r}; empty key")
+        env[key] = value
+    return env
 
 
 def write_dataset(output_dir: Path, limit: int) -> Path:
@@ -62,6 +87,7 @@ def write_dataset(output_dir: Path, limit: int) -> Path:
         for row in ds:
             prompt = PROMPT_TEMPLATE.format(question=row["problem"])
             sample = {
+                "dataset_index": count,
                 "sample_id": f"aime25_{row['problem_idx']}",
                 "answer": str(row["answer"]),
                 "question": row["problem"],
@@ -97,6 +123,14 @@ def shard_rows(rows: list[dict], shard_index: int, num_shards: int) -> list[dict
 BOXED_RE = re.compile(r"\\boxed\{([^}]*)\}")
 FINAL_RE = re.compile(r"Final answer:\s*([^\n\r]+)")
 INT_RE = re.compile(r"-?\d+")
+ANSWER_RE = re.compile(r"(?:the\s+)?(?:final\s+)?answer\s*(?:is|=|:)\s*(-?\d+)", re.IGNORECASE)
+DISCOURSE_QUANTITY_RE = re.compile(
+    r"(?:therefore|thus|hence|so),?\s+"
+    r"(?:the\s+)?(?:answer|area|sum|difference|product|remainder|probability|count|number|value|total)"
+    r"[^\n\r]{0,64}?(?:is|=)\s*(-?\d+)",
+    re.IGNORECASE,
+)
+MN_RE = re.compile(r"m\s*\+\s*n\s*=\s*(-?\d+)", re.IGNORECASE)
 
 
 def extract_answer(text: str) -> str | None:
@@ -106,6 +140,12 @@ def extract_answer(text: str) -> str | None:
     final = FINAL_RE.search(text)
     if final:
         return normalize_answer(final.group(1))
+    phrase_match = None
+    for pattern in (ANSWER_RE, DISCOURSE_QUANTITY_RE, MN_RE):
+        for match in pattern.finditer(text):
+            phrase_match = normalize_answer(match.group(1))
+    if phrase_match is not None:
+        return phrase_match
     ints = INT_RE.findall(text)
     if ints:
         return ints[-1].lstrip("+")
@@ -130,14 +170,19 @@ def aggregate(rows: list[dict], hf_by_id: dict[str, dict] | None = None) -> dict
     hf_match = 0
     samples: list[dict] = []
     for row in rows:
-        pred = extract_answer(row["text"])
-        gold = normalize_answer(str(row["answer"]))
+        pred = normalize_answer(str(row.get("pred_answer", ""))) if row.get("pred_answer") else extract_answer(row["text"])
+        gold = normalize_answer(str(row.get("gold_answer", row.get("answer"))))
         is_correct = pred == gold and pred is not None
         correct += int(is_correct)
         hf_pred = None
         hf_agree = None
         if hf_by_id is not None:
-            hf_pred = extract_answer(hf_by_id[row["sample_id"]]["text"])
+            hf_row = hf_by_id[row["sample_id"]]
+            hf_pred = (
+                normalize_answer(str(hf_row.get("pred_answer", "")))
+                if hf_row.get("pred_answer")
+                else extract_answer(hf_row["text"])
+            )
             hf_agree = pred == hf_pred and pred is not None and hf_pred is not None
             hf_match += int(bool(hf_agree))
         total_tokens += int(row["generated_tokens"])
@@ -239,7 +284,7 @@ def run_hf_reference(
     ).eval().cuda()
 
     with output_path.open("w", encoding="utf-8") as f:
-        for row_idx, row in enumerate(rows):
+        for row in rows:
             prompt = row["prompt"]
             if use_chat_template:
                 prompt = tokenizer.apply_chat_template(
@@ -250,7 +295,8 @@ def run_hf_reference(
                 )
             inputs = tokenizer([prompt], return_tensors="pt").to(model.device)
             if seed >= 0:
-                torch.manual_seed(seed + shard_index * 100000 + row_idx)
+                sample_seed = seed + int(row.get("dataset_index", 0))
+                torch.manual_seed(sample_seed)
             torch.cuda.synchronize()
             start = time.perf_counter()
             stopping_criteria = StoppingCriteriaList(
@@ -276,7 +322,8 @@ def run_hf_reference(
             generated_tokens = int(generated.shape[0])
             row_out = {
                 "sample_id": row["sample_id"],
-                "answer": row["answer"],
+                "gold_answer": row["answer"],
+                "pred_answer": extract_answer(text),
                 "generated_tokens": generated_tokens,
                 "wall_ms": wall_ms,
                 "tokens_per_sec": generated_tokens / (wall_ms / 1000.0) if wall_ms > 0 else 0.0,
@@ -326,6 +373,8 @@ def main() -> None:
         "TRTF_GPU_ARGMAX": "1",
         "TRTF_TRIATTN_PROFILE": "1",
     }
+    dense_env |= parse_extra_env(args.dense_env)
+    tri_env |= parse_extra_env(args.tri_env)
     hf_envs = [base_env | {"CUDA_VISIBLE_DEVICES": gpu} for gpu in hf_gpus]
 
     dense_cmd = [

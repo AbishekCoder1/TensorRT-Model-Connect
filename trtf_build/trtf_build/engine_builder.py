@@ -102,6 +102,23 @@ def _compute_dynamic_kv_profile_rows(
     return rows
 
 
+def _sanitize_dynamic_kv_profile_rows(
+    rows: list[int] | None,
+    max_cache_length: int,
+) -> list[int] | None:
+    if rows is None:
+        return None
+    sanitized: list[int] = []
+    for value in rows:
+        clamped = max(1, min(int(value), max_cache_length))
+        if clamped not in sanitized:
+            sanitized.append(clamped)
+    sanitized.sort()
+    if not sanitized:
+        raise ValueError("dynamic_kv_profile_rows_override must contain at least one row")
+    return sanitized
+
+
 def _raise_friendly_download_error(model_id: str, exc: Exception) -> None:
     """Re-raise HF download errors with clear, actionable messages."""
     exc_type = type(exc).__name__
@@ -418,6 +435,7 @@ def build_bundle(
     max_cache_length: int = 256,
     *,
     dynamic_kv_cache: bool = False,
+    dynamic_kv_profile_rows_override: list[int] | None = None,
     precision: str = "fp32",
     quantize: str | None = None,
     quant_scales: str | None = None,
@@ -514,7 +532,10 @@ def build_bundle(
     triattention_section = None
     runtime_strategy = getattr(plugin, "runtime_strategy", "") or "decoder_kv_cache"
     enable_dynamic_kv_cache = bool(dynamic_kv_cache)
-    dynamic_kv_profile_rows: list[int] | None = None
+    dynamic_kv_profile_rows = _sanitize_dynamic_kv_profile_rows(
+        dynamic_kv_profile_rows_override,
+        max_cache_length,
+    )
     if triattention_stats_path:
         if runtime_strategy not in ("decoder_kv_cache", "decoder_moe"):
             raise ValueError(
@@ -567,14 +588,15 @@ def build_bundle(
             f"recent_window={triattention_recent_window})",
             file=sys.stderr,
         )
-        preferred_rows: list[int] | None = None
-        if kv_budget >= 4096:
-            preferred_rows = [max(32, kv_budget // 2)]
-        dynamic_kv_profile_rows = _compute_dynamic_kv_profile_rows(
-            max_cache_length,
-            kv_budget,
-            preferred_rows=preferred_rows,
-        )
+        if dynamic_kv_profile_rows is None:
+            preferred_rows: list[int] | None = None
+            if kv_budget >= 4096:
+                preferred_rows = [max(32, kv_budget // 2)]
+            dynamic_kv_profile_rows = _compute_dynamic_kv_profile_rows(
+                max_cache_length,
+                kv_budget,
+                preferred_rows=preferred_rows,
+            )
         enable_dynamic_kv_cache = True
 
     if enable_dynamic_kv_cache:
@@ -988,6 +1010,7 @@ def build(
     max_cache_length: int = 256,
     *,
     dynamic_kv_cache: bool = False,
+    dynamic_kv_profile_rows_override: list[int] | None = None,
     precision: str = "fp32",
     quantize: str | None = None,
     quant_scales: str | None = None,
@@ -1026,6 +1049,7 @@ def build(
     build_bundle._save_fp8_scales = save_fp8_scales
     build_bundle(model_dir, output_path, max_cache_length,
                  dynamic_kv_cache=dynamic_kv_cache,
+                 dynamic_kv_profile_rows_override=dynamic_kv_profile_rows_override,
                  precision=precision,
                  quantize=quantize,
                  quant_scales=quant_scales,

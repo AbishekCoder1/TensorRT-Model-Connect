@@ -69,6 +69,20 @@ class TestBuildArgs:
         with pytest.raises(SystemExit):
             parser.parse_args(["build", "model-dir"])
 
+    def test_parse_dynamic_kv_profile_rows(self):
+        """Comma-separated dynamic-KV profile rows parse into integer lists."""
+        from trtf_build.cli import _parse_profile_rows
+
+        assert _parse_profile_rows("32,64,128") == [32, 64, 128]
+        assert _parse_profile_rows(" 32, 64 ,128 ") == [32, 64, 128]
+
+    def test_parse_dynamic_kv_profile_rows_rejects_empty(self):
+        """Empty profile-row strings are rejected with a parser-style error."""
+        from trtf_build.cli import _parse_profile_rows
+
+        with pytest.raises(argparse.ArgumentTypeError):
+            _parse_profile_rows(" , ")
+
 
 class TestInspectArgs:
     def test_inspect_parses(self):
@@ -307,6 +321,50 @@ class TestCmdBuildMocked:
             )
             _cmd_build(args)
             assert received == [True]
+        finally:
+            eb.build = original_build
+
+    def test_dynamic_kv_profile_rows_propagated(self, tmp_path):
+        """Verify explicit dynamic-KV profile rows are forwarded to build()."""
+        from trtf_build.cli import _cmd_build
+        import trtf_build.engine_builder as eb
+
+        received = []
+
+        def mock_build(model_id_or_path, output_path, max_cache_length, *,
+                       dynamic_kv_profile_rows_override=None, **kwargs):
+            received.append(dynamic_kv_profile_rows_override)
+
+        original_build = eb.build
+        eb.build = mock_build
+        try:
+            args = argparse.Namespace(
+                model="some-model",
+                output=str(tmp_path / "out.trtfb"),
+                max_cache_length=256,
+                dynamic_kv_cache=True,
+                dynamic_kv_profile_rows=[32, 64, 128],
+                precision="fp32",
+                quantize=None,
+                quant_scales=None,
+                quant_calibration_samples=512,
+                verbose=False,
+                fp8=False,
+                fp8_scales=None,
+                save_fp8_scales=None,
+                triattention_stats=None,
+                triattention_kv_budget=None,
+                triattention_divide_length=128,
+                triattention_recent_window=128,
+                triattention_score_aggregation="mean",
+                triattention_count_prompt_tokens=True,
+                triattention_protect_prefill=True,
+                triattention_disable_mlr=False,
+                triattention_disable_trig=False,
+                method="trt",
+            )
+            _cmd_build(args)
+            assert received == [[32, 64, 128]]
         finally:
             eb.build = original_build
 

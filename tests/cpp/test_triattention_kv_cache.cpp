@@ -265,6 +265,7 @@ void test_bundle_parsing()
     "divide_length": 16,
     "recent_window": 8,
     "score_aggregation": "max",
+    "per_layer_aggregation": "max",
     "count_prompt_tokens": false,
     "protect_prefill": true,
     "disable_mlr": true,
@@ -304,6 +305,8 @@ void test_bundle_parsing()
     check(!cfg.count_prompt_tokens, "bundle config parses count_prompt_tokens");
     check(cfg.score_aggregation == trtf::TriAttentionScoreAggregation::kMax,
           "bundle config parses score aggregation");
+    check(cfg.per_layer_aggregation == trtf::TriAttentionScoreAggregation::kMax,
+          "bundle config parses per-layer aggregation");
     check(stats.head_dim == 4, "stats parse head_dim");
     check(stats.layer_stats.size() == 1, "stats parse layer stats");
     check(stats.stats_head_count == 2, "stats parse score head count");

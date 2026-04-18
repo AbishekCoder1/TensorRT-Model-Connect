@@ -1,10 +1,13 @@
 #include "trtf/pipeline.h"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -152,6 +155,56 @@ std::string json_escape(const std::string& text) {
     return out;
 }
 
+std::optional<std::string> normalize_answer_value(std::string value) {
+    value.erase(std::remove(value.begin(), value.end(), ','), value.end());
+    static const std::regex int_re("-?\\d+");
+    std::smatch match;
+    if (!std::regex_search(value, match, int_re))
+        return std::nullopt;
+    return match.str(0);
+}
+
+std::optional<std::string> extract_answer_from_text(const std::string& text) {
+    static const std::regex boxed_re(R"(\\boxed\{([^}]*)\})");
+    static const std::regex final_re(R"(Final answer:\s*([^\n\r]+))",
+                                     std::regex_constants::icase);
+    static const std::regex answer_re(
+        R"((?:the\s+)?(?:final\s+)?answer\s*(?:is|=|:)\s*(-?\d+))",
+        std::regex_constants::icase);
+    static const std::regex discourse_quantity_re(
+        R"((?:therefore|thus|hence|so),?\s+(?:the\s+)?(?:answer|area|sum|difference|product|remainder|probability|count|number|value|total)[^\n\r]{0,64}?(?:is|=)\s*(-?\d+))",
+        std::regex_constants::icase);
+    static const std::regex mn_re(R"(m\s*\+\s*n\s*=\s*(-?\d+))",
+                                  std::regex_constants::icase);
+    static const std::regex int_re("-?\\d+");
+
+    std::smatch match;
+    if (std::regex_search(text, match, boxed_re)) {
+        if (auto norm = normalize_answer_value(match.str(1)))
+            return norm;
+    }
+    if (std::regex_search(text, match, final_re)) {
+        if (auto norm = normalize_answer_value(match.str(1)))
+            return norm;
+    }
+
+    std::optional<std::string> last_phrase_match;
+    const std::regex* phrase_res[] = {&answer_re, &discourse_quantity_re, &mn_re};
+    for (const std::regex* re : phrase_res) {
+        for (std::sregex_iterator it(text.begin(), text.end(), *re), end; it != end; ++it) {
+            if (auto norm = normalize_answer_value((*it).str(1)))
+                last_phrase_match = norm;
+        }
+    }
+    if (last_phrase_match)
+        return last_phrase_match;
+
+    std::optional<std::string> last_int;
+    for (std::sregex_iterator it(text.begin(), text.end(), int_re), end; it != end; ++it)
+        last_int = (*it).str(0);
+    return last_int;
+}
+
 void usage() {
     std::cerr << "Usage: trtf_dataset_benchmark <bundle.trtfb> <dataset.jsonl> <output.jsonl> "
                  "[--max-new-tokens N] [--hf-python PATH] [--kv-cache-size SIZE] "
@@ -266,7 +319,10 @@ int main(int argc, char** argv) {
     if (!output)
         throw std::runtime_error("Failed to open output file: " + output_path);
 
-    for (const auto& sample : samples) {
+    for (std::size_t sample_idx = 0; sample_idx < samples.size(); ++sample_idx) {
+        const auto& sample = samples[sample_idx];
+        if (seed >= 0)
+            cfg.seed = seed + static_cast<int32_t>(sample_idx);
         auto wall_start = std::chrono::steady_clock::now();
         trtf::TextResult result = pipeline->generate(sample.prompt, cfg);
         auto wall_end = std::chrono::steady_clock::now();
@@ -277,9 +333,11 @@ int main(int argc, char** argv) {
             (result.decode_ms > 0.0 && generated_tokens > 0)
                 ? (static_cast<double>(generated_tokens) / (result.decode_ms / 1000.0))
                 : 0.0;
+        const std::string pred_answer = extract_answer_from_text(result.text).value_or("");
 
         output << "{\"sample_id\":\"" << json_escape(sample.sample_id) << "\""
-               << ",\"answer\":\"" << json_escape(sample.answer) << "\""
+               << ",\"gold_answer\":\"" << json_escape(sample.answer) << "\""
+               << ",\"pred_answer\":\"" << json_escape(pred_answer) << "\""
                << ",\"generated_tokens\":" << generated_tokens
                << ",\"prefill_ms\":" << std::fixed << std::setprecision(6) << result.prefill_ms
                << ",\"decode_ms\":" << std::fixed << std::setprecision(6) << result.decode_ms

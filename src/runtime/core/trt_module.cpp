@@ -32,7 +32,7 @@ DType TrtModule::from_trt_dtype(nvinfer1::DataType dt) {
 
 TrtModule::TrtModule(nvinfer1::ICudaEngine* engine, cudaStream_t stream, int32_t profile_idx,
                      std::vector<std::string> external_inputs)
-    : stream_(stream), profile_idx_(profile_idx),
+    : engine_(engine), stream_(stream), profile_idx_(profile_idx),
       external_inputs_(external_inputs.begin(), external_inputs.end()) {
     ctx_ = engine->createExecutionContext();
     if (!ctx_)
@@ -56,11 +56,13 @@ TrtModule::~TrtModule() {
 }
 
 TrtModule::TrtModule(TrtModule&& other) noexcept
-    : ctx_(other.ctx_), stream_(other.stream_), profile_idx_(other.profile_idx_),
+    : engine_(other.engine_), ctx_(other.ctx_), stream_(other.stream_),
+      profile_idx_(other.profile_idx_),
       has_dynamic_shapes_(other.has_dynamic_shapes_), keep_alive_(std::move(other.keep_alive_)),
       external_inputs_(std::move(other.external_inputs_)), buffers_(std::move(other.buffers_)),
       host_output_staging_(std::move(other.host_output_staging_)),
       output_device_tensors_(std::move(other.output_device_tensors_)) {
+    other.engine_ = nullptr;
     other.ctx_ = nullptr;
 }
 
@@ -68,6 +70,7 @@ TrtModule& TrtModule::operator=(TrtModule&& other) noexcept {
     if (this != &other) {
         free_buffers();
         delete ctx_;
+        engine_ = other.engine_;
         ctx_ = other.ctx_;
         stream_ = other.stream_;
         profile_idx_ = other.profile_idx_;
@@ -77,6 +80,7 @@ TrtModule& TrtModule::operator=(TrtModule&& other) noexcept {
         buffers_ = std::move(other.buffers_);
         host_output_staging_ = std::move(other.host_output_staging_);
         output_device_tensors_ = std::move(other.output_device_tensors_);
+        other.engine_ = nullptr;
         other.ctx_ = nullptr;
     }
     return *this;
@@ -346,6 +350,39 @@ TensorMap TrtModule::forward(const TensorMap& inputs) {
 void TrtModule::enable_cuda_graph() {
     use_cuda_graph_ = true;
     cuda_graph_.reset(); // Force re-capture on next execution
+}
+
+void TrtModule::reset_execution_context() {
+    if (engine_ == nullptr)
+        return;
+
+    delete ctx_;
+    ctx_ = engine_->createExecutionContext();
+    if (!ctx_) {
+        throw std::runtime_error("[trt_module] Failed to recreate execution context");
+    }
+
+    const int32_t num_profiles = engine_->getNbOptimizationProfiles();
+    if (num_profiles > 0) {
+        if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
+            delete ctx_;
+            ctx_ = nullptr;
+            throw std::runtime_error("[trt_module] Failed to reset optimization profile");
+        }
+        cudaStreamSynchronize(stream_);
+    }
+
+    if (use_cuda_graph_)
+        cuda_graph_.reset();
+
+    for (auto& [name, entry] : buffers_) {
+        if (entry.d_ptr)
+            ctx_->setTensorAddress(name.c_str(), entry.d_ptr);
+        if (entry.is_input && has_dynamic_shapes_ && dims_are_dynamic(engine_->getTensorShape(name.c_str()))) {
+            entry.shape.clear();
+            entry.nbytes = 0;
+        }
+    }
 }
 
 void TrtModule::forward_async(const TensorMap& inputs) {
