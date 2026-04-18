@@ -1192,6 +1192,22 @@ through the upstream selector:
   - exact head matches `8 / 8`
   - mean Jaccard `1.0`
 
+The later-compaction cache gather was then checked directly on that same live
+compaction-`3` dump using the recorded `keep_indices_by_head` together with the
+dumped pre/post packed `K`/`V` cache snapshots:
+
+- layers checked: `36 / 36`
+- heads checked per layer: `8 / 8`
+- exact gather matches:
+  - `K`: yes
+  - `V`: yes
+
+So compaction `3` on the fixed path now also has:
+
+- upstream selector parity
+- exact native post-compaction `K` gather
+- exact native post-compaction `V` gather
+
 This also explained a confusing intermediate result: the old artifact
 
 - `artifacts/triattention/qwen3-8b-nonflash/diff/current_native_r128_compact3_afterpatch_postcheck.json`
@@ -1830,3 +1846,137 @@ This is the cleanest sample9 proof so far:
 
 So sample9 now looks much more like a **shared quality loss from compression**
 than a remaining native implementation bug.
+
+### Later correction: the teacher-forced replay harness was double-counting prompt tokens
+
+The earlier "full native trace" HF/upstream replays were still contaminated by a
+bug in the replay harness itself.
+
+The root cause was in:
+
+- `tmp/trace_hf_teacher_forced.py`
+
+That helper always:
+
+1. prefills the prompt through HF, and then
+2. replays all rows from the native TRT trace as warmup/replay tokens
+
+But the native TRT step trace already includes the prompt-side prefill steps.
+So for full traces like:
+
+- `tmp/aime25_7_currentfix_fulltrace_0_3480.jsonl`
+- `tmp/aime25_9_hybrid6144_fulltrace_0_7180.jsonl`
+
+the prompt was being counted twice in the HF/upstream replay.
+
+The symptom was obvious in the replay outputs:
+
+- native sample9 trace position `7150`
+- replay dense/upstream rows_before `7307`
+- prompt length `157`
+
+That is exactly the prompt-length offset caused by replaying prompt rows after
+the prompt had already been prefetched.
+
+The harness was corrected so that when a native trace starts at position `0`,
+the replay skips all trace rows below the prompt token count after the initial
+HF prompt prefill.
+
+### Corrected sample9 replay: native, dense HF, and upstream all stay aligned
+
+After fixing `tmp/trace_hf_teacher_forced.py`, sample9 was rerun on the exact
+same native token trace and window:
+
+- native trace:
+  `tmp/aime25_9_hybrid6144_fulltrace_0_7180.jsonl`
+- corrected dense replay:
+  `tmp/dense_teacherforced_sample9_hybrid6144_promptfix_gpu3_trace_7150_7190.jsonl`
+- corrected upstream replay:
+  `tmp/upstream_teacherforced_sample9_hybrid6144_promptfix_gpu3_trace_7150_7190.jsonl`
+- corrected dense hidden dumps:
+  `tmp/dense_teacherforced_sample9_hybrid6144_promptfix_gpu3_hidden_7150_7190`
+- corrected upstream hidden dumps:
+  `tmp/upstream_teacherforced_sample9_hybrid6144_promptfix_gpu3_hidden_7150_7190`
+
+Corrected result:
+
+- native vs dense first argmax diff: `None`
+- native vs upstream first argmax diff: `None`
+- dense vs upstream first argmax diff: `None`
+
+Across the first compaction boundary:
+
+- position `7167`:
+  - native argmax `7196`
+  - dense argmax `7196`
+  - upstream argmax `7196`
+- position `7168`:
+  - native argmax `356`
+  - dense argmax `356`
+  - upstream argmax `356`
+- positions `7177`, `7179`, `7180`:
+  - all three paths still have identical argmax decisions
+
+Dense vs upstream hidden-state comparison is also exact on the sampled
+positions:
+
+- `7150`, `7166`, `7167`, `7168`, `7176`, `7177`, `7179`, `7180`
+  all have relative L2 `0.0`
+
+So the earlier sample9 claim that native/upstream diverged after compaction was
+an artifact of the replay bug, not a real runtime mismatch.
+
+### Corrected sample7 replay: the previously reported `3455` divergence also disappears
+
+The same corrected replay was then applied to sample7:
+
+- native trace:
+  `tmp/aime25_7_currentfix_fulltrace_0_3480.jsonl`
+- corrected dense replay:
+  `tmp/dense_teacherforced_sample7_currentfix_promptfix_gpu3_trace_3440_3479.jsonl`
+- corrected upstream replay:
+  `tmp/upstream_teacherforced_sample7_currentfix_promptfix_gpu3_trace_3440_3479.jsonl`
+- corrected dense hidden dumps:
+  `tmp/dense_teacherforced_sample7_currentfix_promptfix_gpu3_hidden_3440_3479`
+- corrected upstream hidden dumps:
+  `tmp/upstream_teacherforced_sample7_currentfix_promptfix_gpu3_hidden_3440_3479`
+
+Corrected result:
+
+- native vs dense first argmax diff: `None`
+- native vs upstream first argmax diff: `None`
+- dense vs upstream first argmax diff: `None`
+
+Representative positions that had previously looked suspicious are now all
+aligned on argmax:
+
+- `3444` -> `43778`
+- `3455` -> `4325`
+- `3456` -> `6524`
+- `3479` -> `387`
+
+Dense vs upstream hidden states are not exactly identical on this sample window
+(sampled relative L2 is a few percent on some positions), but the token-level
+argmax path remains identical across native, dense, and upstream throughout the
+entire dumped range.
+
+So the earlier sample7 "native diverges at 3455 and snaps onto upstream" claim
+was also caused by the same prompt-double-count bug in the replay harness.
+
+### Current implication
+
+The two strongest tensor-level diff targets checked after fixing the replay
+harness now say the same thing:
+
+- sample7 currentfix window: native == dense == upstream on argmax
+- sample9 hybrid `6144/1024` window: native == dense == upstream on both
+  argmax and sampled dense-vs-upstream hidden states
+
+So the debugging target has moved again:
+
+- the previously reported token-level divergence windows are no longer valid
+  evidence of a native implementation bug
+- any remaining benchmark-level misses now need either
+  - a later trace window on the true failing sample/path, or
+  - a fresh full-benchmark rerun on the trustworthy hybrid bundle after
+    correcting the replay methodology

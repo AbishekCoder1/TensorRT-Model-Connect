@@ -154,11 +154,25 @@ def main() -> None:
 
     past_key_values = out.past_key_values
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_token_count = int(encoded["input_ids"].shape[1])
 
-    warmup_rows = [row for row in native_rows if int(row["position_before"]) < args.start_position]
+    # Native TRT step traces start at position 0 and include the prompt-side
+    # prefill steps. When we already prefetched the prompt through HF here, we
+    # must skip those prompt rows or we will double-count the prompt and drift
+    # all later RoPE/cache positions by exactly the prompt length.
+    trace_includes_prompt = bool(native_rows) and int(native_rows[0]["position_before"]) == 0
+    replay_source_rows = native_rows
+    if trace_includes_prompt:
+        replay_source_rows = [
+            row for row in native_rows if int(row["position_before"]) >= prompt_token_count
+        ]
+
+    warmup_rows = [
+        row for row in replay_source_rows if int(row["position_before"]) < args.start_position
+    ]
     replay_rows = [
         row
-        for row in native_rows
+        for row in replay_source_rows
         if args.start_position <= int(row["position_before"]) <= args.end_position
     ]
 
