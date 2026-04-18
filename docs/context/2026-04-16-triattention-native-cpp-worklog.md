@@ -1716,3 +1716,117 @@ Result:
 So sample9 is still wrong even at native `8192/1024`. This does **not** prove
 that larger budgets can never recover the row, but it does rule out the
 simplest “just move from `6144` to `8192`” explanation for the sample9 miss.
+
+### Sample9 boundary replay exposed a prompt-token accounting mismatch
+
+The new teacher-forced replay helper:
+
+- `tmp/trace_hf_teacher_forced.py`
+
+was first used to compare the native sample9 trace against dense HF and the
+upstream Python patch around the first `6144/1024` compaction boundary:
+
+- native trace:
+  `tmp/aime25_9_hybrid6144_fulltrace_0_7180.jsonl`
+- dense replay:
+  `tmp/dense_teacherforced_sample9_trace_fast_7160_7180.jsonl`
+- upstream replay:
+  `tmp/upstream_teacherforced_sample9_6144_trace_fast_7160_7180.jsonl`
+
+The first replay attempt used `count_prompt_tokens=True` in the Python patch,
+matching the current builder/runtime config export. That exposed an immediate
+semantic mismatch:
+
+- sample9 prompt length is `157` tokens
+- dense HF raw cache length at position `7166` is `7323`
+- native `rows_before` at the same step is `7168`
+
+That `7323 - 7168 = 155` gap is essentially the prompt length (modulo bucketed
+row rounding in the native trace), which means the native trigger is behaving
+like **decode-only accounting** even though the exported config still says:
+
+- `count_prompt_tokens = true`
+
+This makes sense after reading the native runtime code:
+
+- `cache_length_` only grows in `append_present_to_cache()`
+- prefill tokens do not contribute to `cache_length_`
+- compaction triggering uses `cache_length_ >= compaction_trigger_length()`
+- relevant code:
+  `src/runtime/core/triattention_kv_cache.cpp:1950`
+  `src/runtime/core/triattention_kv_cache.cpp:1043`
+
+So the earlier Python replay with `count_prompt_tokens=True` was not an
+apples-to-apples comparison against the native runtime behavior.
+
+### Aligned sample9 replay: native and upstream match through the boundary
+
+The upstream replay was rerun with:
+
+- `--no-count-prompt-tokens`
+
+using:
+
+- aligned upstream replay:
+  `tmp/upstream_teacherforced_sample9_6144_noprompt_trace_fast_7160_7180.jsonl`
+- aligned hidden dumps:
+  `tmp/upstream_teacherforced_sample9_6144_noprompt_hidden_fast_7160_7180`
+
+Key result on the window `7160..7180`:
+
+- native and upstream-no-prompt have **no argmax mismatch** in this window
+- native and dense first differ on argmax at position `7177`
+- native and upstream-no-prompt stay argmax-identical through the whole window
+
+Representative positions:
+
+- position `7167` (compaction step):
+  - native argmax: `7196`
+  - upstream-no-prompt argmax: `7196`
+  - native rows: `7168 -> 6144`
+  - upstream-no-prompt rows: `7324 -> 6144`
+- position `7168` (first post-compaction token):
+  - native argmax: `356`
+  - upstream-no-prompt argmax: `356`
+- position `7177`:
+  - native argmax: `30`
+  - dense argmax: `476`
+  - upstream-no-prompt argmax: `30`
+
+So for sample9, once prompt-token accounting is aligned, the native runtime
+matches the upstream Python patch at the token-logit level through the first
+post-compaction window.
+
+### Dense-vs-TriAttention hidden states stay identical until compaction, then drift slightly
+
+Dense hidden dumps:
+
+- `tmp/dense_teacherforced_sample9_hidden_fast_7160_7180`
+
+Aligned upstream-no-prompt hidden dumps:
+
+- `tmp/upstream_teacherforced_sample9_6144_noprompt_hidden_fast_7160_7180`
+
+Comparing dense vs upstream-no-prompt hidden states:
+
+- positions `7166` and `7167`:
+  - relative L2 difference is exactly `0.0` across all dumped layers
+- position `7168`:
+  - first post-compaction hidden drift appears
+  - max sampled relative L2 across layers is about `1.05%`
+- position `7171`:
+  - max relative L2 is about `1.71%`
+- position `7177`:
+  - max relative L2 is about `2.83%`
+
+This is the cleanest sample9 proof so far:
+
+- dense and TriAttention are numerically identical right up to the compaction
+  boundary
+- the first dense-vs-TriAttention hidden-state drift appears immediately after
+  compaction
+- the drift starts small
+- native and upstream-no-prompt track each other on that same boundary window
+
+So sample9 now looks much more like a **shared quality loss from compression**
+than a remaining native implementation bug.

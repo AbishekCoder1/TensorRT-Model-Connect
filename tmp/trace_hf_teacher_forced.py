@@ -43,6 +43,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--output-jsonl", required=True)
     parser.add_argument("--hidden-dump-dir")
+    parser.add_argument("--warmup-chunk-size", type=int, default=0)
+    parser.add_argument(
+        "--count-prompt-tokens",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     return parser.parse_args()
 
 
@@ -123,7 +129,7 @@ def main() -> None:
             pruning_seed=0,
             metadata_expectations={},
             normalize_scores=True,
-            count_prompt_tokens=True,
+            count_prompt_tokens=bool(args.count_prompt_tokens),
             allow_prefill_compression=False,
             divide_length=int(args.divide_length),
             use_slack_trigger=True,
@@ -149,12 +155,37 @@ def main() -> None:
     past_key_values = out.past_key_values
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    warmup_rows = [row for row in native_rows if int(row["position_before"]) < args.start_position]
+    replay_rows = [
+        row
+        for row in native_rows
+        if args.start_position <= int(row["position_before"]) <= args.end_position
+    ]
+
+    if args.warmup_chunk_size > 0 and warmup_rows:
+        chunk_size = max(1, int(args.warmup_chunk_size))
+        for start in range(0, len(warmup_rows), chunk_size):
+            chunk = warmup_rows[start : start + chunk_size]
+            chunk_ids = torch.tensor(
+                [[int(row["token_id"]) for row in chunk]],
+                device="cuda",
+                dtype=torch.long,
+            )
+            with torch.no_grad():
+                out = model(
+                    input_ids=chunk_ids,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    return_dict=True,
+                    output_hidden_states=False,
+                )
+            past_key_values = out.past_key_values
+
     with output_path.open("w") as fout:
-        for row in native_rows:
+        for row in replay_rows:
             position_before = int(row["position_before"])
             token_id = int(row["token_id"])
-            in_window = args.start_position <= position_before <= args.end_position
-            want_hidden = hidden_dump_dir is not None and in_window
+            want_hidden = hidden_dump_dir is not None
             rows_before = get_cache_len(past_key_values)
             comp_before = get_comp_state(model)
 
@@ -174,22 +205,21 @@ def main() -> None:
             top_vals, top_ids = torch.topk(logits, k=top_k)
             comp_after = get_comp_state(model)
 
-            if in_window:
-                record = {
-                    "position_before": position_before,
-                    "token_id": token_id,
-                    "rows_before": rows_before,
-                    "rows_after": rows_after,
-                    "argmax_token": int(top_ids[0]),
-                    "argmax_logit": float(top_vals[0]),
-                    "top_ids": [int(x) for x in top_ids.tolist()],
-                    "top_logits": [float(x) for x in top_vals.tolist()],
-                }
-                if comp_before or comp_after:
-                    record["comp_before"] = comp_before
-                    record["comp_after"] = comp_after
-                fout.write(json.dumps(record) + "\n")
-                fout.flush()
+            record = {
+                "position_before": position_before,
+                "token_id": token_id,
+                "rows_before": rows_before,
+                "rows_after": rows_after,
+                "argmax_token": int(top_ids[0]),
+                "argmax_logit": float(top_vals[0]),
+                "top_ids": [int(x) for x in top_ids.tolist()],
+                "top_logits": [float(x) for x in top_vals.tolist()],
+            }
+            if comp_before or comp_after:
+                record["comp_before"] = comp_before
+                record["comp_after"] = comp_after
+            fout.write(json.dumps(record) + "\n")
+            fout.flush()
 
             if want_hidden and out.hidden_states is not None:
                 dump_hidden_states(
