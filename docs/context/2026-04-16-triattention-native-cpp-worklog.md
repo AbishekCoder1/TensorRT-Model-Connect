@@ -1554,3 +1554,165 @@ This again argues against a gross native compaction bug on sample9. The
 remaining miss is increasingly consistent with a long-horizon quality loss from
 compression at this budget, unless the pending upstream sample9 control proves
 otherwise.
+
+### Upstream sample9 `3072/128` control also fails
+
+To get a faster upstream control than the original shard worker, a dedicated
+single-sample upstream harness was added:
+
+- script:
+  `tmp/run_upstream_triattention_single.py`
+
+It loads the same local Qwen3-8B snapshot, applies the official
+`apply_triattention_patch()`, and stops generation once a boxed answer appears
+or the configured token cap is hit.
+
+Running that harness on sample9 at the aggressive upstream point:
+
+- sample file:
+  `tmp/aime25_rescue_samples/aime25_09.jsonl`
+- budget:
+  `3072`
+- divide length:
+  `128`
+- max new tokens:
+  `8192`
+- output:
+  `tmp/upstream_single_sample9_b3072_d128.json`
+
+Result:
+
+- sample id: `aime25_9`
+- gold answer: `62`
+- predicted answer extracted: `""`
+- generated tokens: `8192`
+- no valid final boxed answer was extracted
+
+So sample9 is **not** a clean native-only failure at `3072/128`. Official
+upstream TriAttention also fails to produce the correct answer for this row
+under the same prompt recipe and a long boxed-answer run.
+
+That pushes the interpretation further toward:
+
+- sample9 is a real quality miss for this operating point, not a clear native
+  implementation bug
+
+The next active upstream check is therefore sample9 at the more conservative
+`6144/1024` setting, which is the operating point currently being compared
+against the fair same-family native hybrid path.
+
+### Upstream sample9 `6144/1024` control also fails
+
+The same upstream single-sample harness was then run on sample9 at the more
+conservative operating point:
+
+- sample file:
+  `tmp/aime25_rescue_samples/aime25_09.jsonl`
+- budget:
+  `6144`
+- divide length:
+  `1024`
+- max new tokens:
+  `8192`
+- output:
+  `tmp/upstream_single_sample9_b6144_d1024.json`
+
+Result:
+
+- sample id: `aime25_9`
+- gold answer: `62`
+- predicted answer extracted: `""`
+- generated tokens: `8192`
+- no valid final boxed answer was extracted
+
+So sample9 also fails in the official upstream Python patch at the same
+`6144/1024` point that is currently being used for the fair same-family native
+hybrid run. This is a stronger discriminator than the earlier `3072/128`
+result:
+
+- sample9 remains a real quality miss for TriAttention on this prompt recipe
+  even at the conservative `6144/1024` setting
+- the native miss on sample9 is therefore still not sufficient evidence of a
+  native implementation bug
+
+### Same-family `6144/1024` full run: early partial still breaks the same rows
+
+The full same-family native hybrid benchmark at `6144/1024` is still running:
+
+- output:
+  `artifacts/triattention/qwen3-8b-aime25-vs-hf-fullkv-plain-e2e-2026-04-18-override6144/tri_results.jsonl`
+
+At the latest partial checkpoint:
+
+- rows completed: `12 / 30`
+- correct: `8 / 12`
+- partial accuracy: `0.6667`
+- mean decode throughput so far: `69.14 tok/s`
+
+Wrong rows so far:
+
+- `aime25_7` -> predicted `16`, gold `821`
+- `aime25_9` -> predicted `-3`, gold `62`
+- `aime25_10` -> predicted `70`, gold `81`
+- `aime25_11` -> predicted `36`, gold `259`
+
+This is materially better than the old aggressive `3072/128` benchmark result,
+but it still breaks the same early hard rows that motivated the deeper
+investigation.
+
+### Next diff artifact in flight: native sample9 full token trace
+
+To move from aggregate scores to token-level diffing, a dedicated native trace
+run was started for sample9 on the same-family hybrid path:
+
+- bundle:
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.trtfb`
+- runtime overrides:
+  `kv_budget=6144`, `divide_length=1024`, `bucket_rows=32`
+- trace target:
+  `tmp/aime25_9_hybrid6144_fulltrace_0_7180.jsonl`
+- benchmark output:
+  `tmp/aime25_9_hybrid6144_trace_run.jsonl`
+
+That trace is intended to capture the exact native generated token ids from the
+first decode step through the first `6144/1024` compaction boundary, so the
+same token prefix can then be replayed teacher-forced through:
+
+- dense HF
+- upstream Python TriAttention
+
+using the new helper:
+
+- `tmp/trace_hf_teacher_forced.py`
+
+The goal of that replay is to decide whether the remaining gap is:
+
+- a native-vs-upstream implementation divergence, or
+- a true quality loss shared by both native and upstream TriAttention under
+  this benchmark recipe.
+
+### Native sample9 `8192/1024` still fails
+
+To test whether sample9 would recover under a larger decode budget on the
+same-family native hybrid path, a dedicated native run was executed with:
+
+- bundle:
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.trtfb`
+- runtime overrides:
+  `kv_budget=8192`, `divide_length=1024`, `bucket_rows=32`
+- sample file:
+  `tmp/aime25_rescue_samples/aime25_09.jsonl`
+- output:
+  `tmp/aime25_9_hybrid8192_stop.jsonl`
+
+Result:
+
+- sample id: `aime25_9`
+- gold answer: `62`
+- predicted answer: `-1848`
+- generated tokens: `38912`
+- decode throughput: `45.04 tok/s`
+
+So sample9 is still wrong even at native `8192/1024`. This does **not** prove
+that larger budgets can never recover the row, but it does rule out the
+simplest “just move from `6144` to `8192`” explanation for the sample9 miss.
