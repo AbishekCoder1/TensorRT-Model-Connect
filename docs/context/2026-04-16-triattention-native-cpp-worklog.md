@@ -1133,3 +1133,424 @@ dynamic-KV C++ path achieved the intended state on the corrected pilot:
 - dense-quality answers
 - real native compaction
 - real throughput gain
+
+## 2026-04-18: later-compaction absolute-position bug isolated and fixed
+
+The full `30`-sample AIME25 rerun had shown a severe TriAttention collapse even
+though the short hard probes were still correct. At this point the next step
+was to stop sweeping policy knobs and go back to direct tensor-level diffs.
+
+### What remained true before the fix
+
+On the sampled `aime25_7` repro:
+
+- first compaction trigger was at absolute decode position `3200`
+- sampled-token divergence happened before compaction `2`
+- compaction `1` selection still matched the upstream selector exactly
+- compaction `1` post-compaction `K`/`V` caches were still exact gathers of the
+  pre-compaction cache
+
+So compaction `1` had already been ruled out as a selector or gather bug.
+
+### The concrete later-compaction bug
+
+While reviewing `TriAttentionKvCache`, both selector paths were found to be
+precomputing trig phases from the **current compacted row count** instead of the
+true absolute decode position:
+
+- `select_keep_indices_host()`
+- `select_keep_indices_gpu()`
+
+They used:
+
+- `round_start = total_tokens`
+
+instead of:
+
+- `round_start = absolute_position_`
+
+That mistake is silent on compaction `1` because, before any rows are dropped,
+`total_tokens == absolute_position_`. But it becomes wrong on all later
+compactions after the cache has already been compacted once.
+
+The fix was to switch both host and GPU trig-prep paths to
+`absolute_position_`.
+
+### Live proof after the fix
+
+Using the current sampled `aime25_7` repro and replaying the dumped score cache
+through the upstream selector:
+
+- compaction `2` dump:
+  `artifacts/triattention/investigation-2026-04-18/profile_switch/sample7_compaction2_postfix_dump`
+  - absolute position `3328`
+  - exact head matches `8 / 8`
+  - mean Jaccard `1.0`
+- fresh compaction `3` dump from the current binary:
+  `artifacts/triattention/investigation-2026-04-18/profile_switch/sample7_compaction3_currentfix_dump`
+  - absolute position `3456`
+  - exact head matches `8 / 8`
+  - mean Jaccard `1.0`
+
+This also explained a confusing intermediate result: the old artifact
+
+- `artifacts/triattention/qwen3-8b-nonflash/diff/current_native_r128_compact3_afterpatch_postcheck.json`
+
+was stale from `2026-04-17`, so its compaction-`3` mismatch was no longer a
+valid live signal after the absolute-position fix.
+
+### Updated diagnosis after the fix
+
+By this point:
+
+- compaction `1` selector matches upstream exactly
+- compaction `1` K/V gather matches exactly
+- compaction `2` selector matches upstream exactly
+- compaction `3` selector matches upstream exactly
+
+So the major later-compaction selector bug is fixed. The remaining question is
+how much of the full-benchmark accuracy collapse that bug was responsible for.
+The next active step is a fresh full `30`-sample TriAttention rerun on the
+fixed binary, using the same `upstream_plain` prompt recipe and decode settings
+as the prior dense/HF comparison.
+
+### Full-benchmark rerun after the absolute-position fix
+
+The fixed `3072/128` native rerun was then launched on the same full
+`upstream_plain` AIME25 benchmark recipe. By the time the investigation moved
+ back to targeted diff testing, the live artifact had reached:
+
+- result file:
+  `artifacts/triattention/qwen3-8b-aime25-vs-hf-fullkv-plain-e2e-2026-04-18-currentfix/tri_results.jsonl`
+- rows completed: `29 / 30`
+- correct: `14 / 29`
+- partial accuracy: `0.4828`
+- mean decode throughput across completed rows: `77.33 tok/s`
+
+This is a real improvement over the earlier broken full run (`0.267`), so the
+absolute-position fix mattered materially. But it is still far from dense/HF
+parity, so there must be either another implementation issue or a remaining
+policy gap.
+
+Comparing the completed fixed native rows against the dense/HF full-benchmark
+reference, the following rows were dense-correct and HF-correct but still
+native-wrong:
+
+- `aime25_7`
+- `aime25_9`
+- `aime25_10`
+- `aime25_11`
+- `aime25_12`
+- `aime25_13`
+- `aime25_14`
+- `aime25_15`
+- `aime25_18`
+- `aime25_20`
+- `aime25_21`
+- `aime25_22`
+- `aime25_25`
+- `aime25_28`
+- `aime25_29`
+
+The earliest clean failing probe after the fix is therefore `aime25_7`, and the
+next independent failing probe is `aime25_9`.
+
+### Upstream control checks on failing rows
+
+To separate native-runtime bugs from budget/policy limitations, exact-prompt
+upstream TriAttention worker probes were launched on the same benchmark prompt
+format.
+
+On `aime25_7` with the official upstream TriAttention worker at `3072/128`:
+
+- output file:
+  `tmp/upstream_worker_sample7_tri_local/shard00/run000.jsonl`
+- result: wrong
+- predicted boxed answer: `271`
+- gold answer: `821`
+
+On `aime25_12` with the official upstream TriAttention worker at `3072/128`:
+
+- output file:
+  `tmp/upstream_worker_sample12_tri_local/shard00/run000.jsonl`
+- result: also not correct
+- gold answer: `510`
+- no clean final boxed answer was extracted
+
+So `aime25_7` and `aime25_12` are not enough by themselves to prove another
+native-only implementation mismatch at the aggressive `3072/128` operating
+point. They are at least partly compatible with an upstream policy/quality
+limit.
+
+### New sample9 compaction anomaly to resolve next
+
+The next clean candidate for a native-only bug became `aime25_9`, because dense
+and HF both solve it while the fixed native `3072/128` run does not:
+
+- gold answer: `62`
+- fixed native current rerun answer: `2`
+- dense full-KV answer: `62`
+- HF eager answer: `62`
+
+Two targeted native sample9 probes were then started:
+
+- a `5000`-token native standalone run with
+  `TRTF_TRIATTN_DUMP_KEEP_PATH=/workspace/trt-transformers-cpp/tmp/aime25_9_plain_compaction1_dump`
+  and `TRTF_TRIATTN_ABORT_AFTER_DUMP=1`
+- a focused trace around positions `3190..3220`
+
+The first surprising result is that the `5000`-token standalone native run
+finished without ever writing the requested compaction dump:
+
+- output file:
+  `tmp/aime25_9_plain_compaction1_abort.jsonl`
+- generated tokens: `5000`
+- predicted answer at cutoff: `3`
+- expected dump file:
+  `tmp/aime25_9_plain_compaction1_dump`
+- observed status: dump file absent
+
+That is suspicious, because the same bundle reports live TriAttention init with:
+
+- `kv_budget=3072`
+- `divide_length=128`
+- `count_prompt_tokens=1`
+- `protect_prefill=1`
+
+and earlier sample7 traces from the same runtime clearly show the cache already
+compacted to `3072` rows by the `3200`-position window:
+
+- trace file:
+  `tmp/aime25_7_plain_tri_trace_3200_3600.jsonl`
+- first traced row:
+  - `position_before = 3200`
+  - `rows_before = 3072`
+  - `rows_after = 3104`
+
+So the next concrete question is not “which config sweep next?” but:
+
+- does native sample9 actually compact live KV at the expected threshold?
+- if it does, why was the compaction dump hook not hit?
+- if it does not, what runtime condition is preventing compaction on this row?
+
+### Sample9 compaction was then proven live
+
+That sample9 compaction question was resolved by switching from the dump hook to
+the built-in compaction profile logs.
+
+Using the same native current bundle on the exact benchmark prompt:
+
+- bundle:
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri12288-b3072-r128-dynkv-fp16-manual-current.trtfb`
+- dataset row:
+  `tmp/aime25_rescue_samples/aime25_09.jsonl`
+- runtime flags:
+  - `TRTF_TRIATTN_FORCE_ENABLE=1`
+  - `TRTF_TRIATTN_PROFILE=1`
+  - `TRTF_TRIATTN_DEBUG=1`
+
+The profile logs showed native compaction firing exactly on the expected
+schedule:
+
+- compact `#1`: `abs_pos=3200`, `old_rows=3200`, `kept_rows=3072`
+- compact `#2`: `abs_pos=3328`, `old_rows=3200`, `kept_rows=3072`
+- compact `#3`: `abs_pos=3456`, `old_rows=3200`, `kept_rows=3072`
+- compact `#4`: `abs_pos=3584`, `old_rows=3200`, `kept_rows=3072`
+
+So the missing sample9 dump file was not evidence that compaction was disabled.
+Compaction is definitely occurring on sample9; the problem is elsewhere.
+
+### Sample9 diverges only after the first compaction step
+
+The next check compared the exact same bundle in two modes on the sample9
+prompt:
+
+- TriAttention enabled:
+  `TRTF_TRIATTN_FORCE_ENABLE=1`
+- same bundle, force-off control:
+  `TRTF_TRIATTN_FORCE_ENABLE=0`
+
+Both runs used:
+
+- `--max-new-tokens 3300`
+- `--temperature 0.6`
+- `--top-k 20`
+- `--top-p 0.95`
+- `--min-p 0.0`
+- `--seed 1234`
+
+and recorded the same trace window:
+
+- `TRTF_TEXT_STEP_TRACE_START_POS=3190`
+- `TRTF_TEXT_STEP_TRACE_END_POS=3220`
+
+Trace artifacts:
+
+- TriAttention trace:
+  `tmp/aime25_9_tri_trace_3190_3220.jsonl`
+- force-off trace:
+  `tmp/aime25_9_force0_trace_3190_3220.jsonl`
+
+What that diff proved:
+
+- positions `3190..3198`: logits match exactly
+- position `3199`:
+  - argmax and top logits still match exactly
+  - only the cache-row count changes
+  - TriAttention: `rows_after = 3072`
+  - force-off: `rows_after = 3200`
+- position `3200`:
+  - first actual logit drift appears
+  - argmax is still the same in both paths
+  - differences are small (`~1e-2` scale in top logits)
+- positions `3190..3220`:
+  - argmax stays identical for the whole traced window
+
+So sample9 is not another “explodes immediately at compaction” failure. It is a
+much subtler case:
+
+- native TriAttention matches the force-off control exactly until the first
+  compaction boundary
+- the first numerical drift begins one token *after* compaction
+- that drift is initially small and does not immediately change argmax
+
+That shifts the next investigation step again. The remaining question is no
+longer “does sample9 compact?” but instead:
+
+- are the selected rows themselves still aligned with upstream on sample9?
+- if yes, is the residual accuracy gap on sample9 also reproducible upstream at
+  the same budget?
+- if not, what still differs in native sample9 selection or repack semantics?
+
+### Fixed `3072/128` full benchmark completed at `14 / 30`
+
+The full post-fix aggressive rerun eventually finished:
+
+- result file:
+  `artifacts/triattention/qwen3-8b-aime25-vs-hf-fullkv-plain-e2e-2026-04-18-currentfix/tri_results.jsonl`
+- completed rows: `30 / 30`
+- correct: `14 / 30`
+- final accuracy: `0.4667`
+- mean decode throughput: `77.18 tok/s`
+
+Wrong rows in the completed fixed rerun:
+
+- `aime25_7`
+- `aime25_9`
+- `aime25_10`
+- `aime25_11`
+- `aime25_12`
+- `aime25_13`
+- `aime25_14`
+- `aime25_15`
+- `aime25_18`
+- `aime25_20`
+- `aime25_21`
+- `aime25_22`
+- `aime25_25`
+- `aime25_28`
+- `aime25_29`
+- `aime25_30`
+
+So the absolute-position fix rescued a large chunk of the benchmark, but it did
+not restore full accuracy parity on the aggressive bundle.
+
+### Same-family `6144/1024` sample9 also fails in the live full run
+
+The fair same-family run was already live on:
+
+- bundle:
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.trtfb`
+- runtime overrides:
+  - `TRTF_TRIATTN_OVERRIDE_KV_BUDGET=6144`
+  - `TRTF_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
+  - `TRTF_TRIATTN_RUNTIME_BUCKET_ROWS=32`
+
+and by the time the focused debugging resumed it had reached:
+
+- result file:
+  `artifacts/triattention/qwen3-8b-aime25-vs-hf-fullkv-plain-e2e-2026-04-18-override6144/tri_results.jsonl`
+- rows completed so far: `9`
+- correct so far: `7`
+- partial accuracy so far: `0.7778`
+
+Crucially, sample9 is still wrong even on this more conservative same-family
+path:
+
+- `aime25_9`
+  - predicted answer: `-3`
+  - gold answer: `62`
+  - generated tokens: `38912`
+
+So sample9 remains a live failure on both:
+
+- the aggressive current bundle
+- the same-family conservative `6144/1024` hybrid run
+
+### Same-family `6144/1024` sample9 reaches first compaction cleanly
+
+To inspect the fair path directly, sample9 was then rerun on the same-family
+hybrid bundle with the same `6144/1024` overrides and a focused trace window:
+
+- trace file:
+  `tmp/aime25_9_hybrid6144_tri_trace_7150_7190.jsonl`
+
+That trace shows the first compaction exactly where it should happen:
+
+- position `7150`:
+  - `rows_before = 7168`
+  - `rows_after = 7168`
+- position `7167`:
+  - `rows_before = 7168`
+  - `rows_after = 6144`
+- position `7190`:
+  - `rows_before = 6176`
+  - `rows_after = 6176`
+
+So on the fair hybrid path as well:
+
+- compaction is definitely active
+- the first compaction boundary is clean and on schedule
+
+The next pending comparison is the same hybrid bundle with
+`TRTF_TRIATTN_FORCE_ENABLE=0` over the same `7150..7190` window, to see whether
+the first fair-path numerical drift is again only a small post-compaction
+difference or something more severe.
+
+### Same-family `6144/1024` sample9 vs force-off: same pattern again
+
+That pending force-off comparison was then completed on the exact same hybrid
+bundle and trace window:
+
+- TriAttention trace:
+  `tmp/aime25_9_hybrid6144_tri_trace_7150_7190.jsonl`
+- force-off trace:
+  `tmp/aime25_9_hybrid6144_force0_trace_7150_7190.jsonl`
+
+Diff result:
+
+- first any difference:
+  - position `7167`
+  - rows only
+  - TriAttention: `rows_after = 6144`
+  - force-off: `rows_after = 7168`
+  - logits still match exactly
+- first actual logit drift:
+  - position `7168`
+  - argmax still the same in both paths
+  - top-id ordering still the same
+  - top-logit deltas are again small (`~1e-2` to `1e-1`)
+- across the whole traced window `7150..7190`:
+  - argmax never changes between TriAttention and force-off
+
+So the fair-path same-family result matches the earlier aggressive-bundle
+sample9 finding:
+
+- TriAttention stays numerically identical up to the compaction step itself
+- the first drift appears one token later
+- the initial drift is small and does not immediately flip argmax
+
+This again argues against a gross native compaction bug on sample9. The
+remaining miss is increasingly consistent with a long-horizon quality loss from
+compression at this budget, unless the pending upstream sample9 control proves
+otherwise.

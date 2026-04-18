@@ -204,6 +204,11 @@ bool triattention_dump_score_values_enabled() {
     return value != nullptr && value[0] == '1';
 }
 
+bool triattention_zero_tail_enabled() {
+    const char* value = std::getenv("TRTF_TRIATTN_ZERO_TAIL");
+    return value != nullptr && value[0] == '1';
+}
+
 bool triattention_override_enabled(bool current) {
     const char* value = std::getenv("TRTF_TRIATTN_FORCE_ENABLE");
     if (value == nullptr || value[0] == '\0')
@@ -1068,7 +1073,11 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
         const auto trig_start = Clock::now();
         cos_phase.assign(offsets_.size(), std::vector<float>(static_cast<std::size_t>(half_dim)));
         sin_phase.assign(offsets_.size(), std::vector<float>(static_cast<std::size_t>(half_dim)));
-        const float round_start = static_cast<float>(total_tokens);
+        // TriAttention scoring must use the true absolute decode position, not
+        // the compacted cache length. Once earlier compactions have dropped
+        // rows, `total_tokens` no longer matches the model's current RoPE
+        // position, and reusing it here corrupts later-round scoring.
+        const float round_start = static_cast<float>(absolute_position_);
         for (std::size_t o = 0; o < offsets_.size(); ++o) {
             for (int32_t d = 0; d < half_dim; ++d) {
                 const float phase =
@@ -1374,7 +1383,9 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
             static_cast<std::size_t>(num_offsets) * static_cast<std::size_t>(half_dim));
         std::vector<float> sin_phase(
             static_cast<std::size_t>(num_offsets) * static_cast<std::size_t>(half_dim));
-        const float round_start = static_cast<float>(total_tokens);
+        // Keep GPU scoring aligned with the host path and upstream selector:
+        // use the request's absolute decode position for the trig phase.
+        const float round_start = static_cast<float>(absolute_position_);
         for (int32_t o = 0; o < num_offsets; ++o) {
             for (int32_t d = 0; d < half_dim; ++d) {
                 const std::size_t idx =
@@ -1581,6 +1592,7 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
     const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
     const auto head_block_bytes =
         static_cast<std::size_t>(query_group_size_ * stats_.head_dim) * cache_element_size_;
+    const int32_t old_cache_length = cache_length_;
     int32_t keep_count = compaction_keep_budget(cache_length_);
     if (reserve_slot_for_append)
         keep_count = std::min(keep_count, std::max(0, max_length_ - 1));
@@ -1712,6 +1724,13 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
                 repack_calls += 2;
                 repack_bytes += head_block_bytes * 2U;
             }
+        }
+        if (triattention_zero_tail_enabled() && old_cache_length > keep_count) {
+            const auto tail_offset = static_cast<std::size_t>(keep_count) * row_bytes;
+            const auto tail_bytes =
+                static_cast<std::size_t>(old_cache_length - keep_count) * row_bytes;
+            cudaMemsetAsync(ck + tail_offset, 0, tail_bytes, stream_);
+            cudaMemsetAsync(cv + tail_offset, 0, tail_bytes, stream_);
         }
     }
     if (profile_ptr != nullptr) {

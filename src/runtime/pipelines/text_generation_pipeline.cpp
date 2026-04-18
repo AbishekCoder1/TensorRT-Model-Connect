@@ -6,8 +6,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 
@@ -17,6 +19,93 @@ namespace {
 bool env_flag_set(const char* name) {
     const char* v = std::getenv(name);
     return v != nullptr && v[0] == '1';
+}
+
+int32_t env_int_or_default(const char* name, int32_t fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+        return fallback;
+    char* end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value)
+        return fallback;
+    if (parsed < static_cast<long>(std::numeric_limits<int32_t>::min()))
+        return std::numeric_limits<int32_t>::min();
+    if (parsed > static_cast<long>(std::numeric_limits<int32_t>::max()))
+        return std::numeric_limits<int32_t>::max();
+    return static_cast<int32_t>(parsed);
+}
+
+struct StepTraceConfig {
+    bool enabled{false};
+    std::string path;
+    int32_t start_position{0};
+    int32_t end_position{std::numeric_limits<int32_t>::max()};
+    int32_t top_k{8};
+};
+
+const StepTraceConfig& step_trace_config() {
+    static const StepTraceConfig cfg = [] {
+        StepTraceConfig config;
+        const char* path = std::getenv("TRTF_TEXT_STEP_TRACE_PATH");
+        if (path == nullptr || path[0] == '\0')
+            return config;
+        config.enabled = true;
+        config.path = path;
+        config.start_position = env_int_or_default("TRTF_TEXT_STEP_TRACE_START_POS", 0);
+        config.end_position =
+            env_int_or_default("TRTF_TEXT_STEP_TRACE_END_POS", std::numeric_limits<int32_t>::max());
+        config.top_k = std::max(1, env_int_or_default("TRTF_TEXT_STEP_TRACE_TOPK", 8));
+        std::ofstream clear(config.path, std::ios::trunc);
+        return config;
+    }();
+    return cfg;
+}
+
+void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t decoder_idx,
+                             int32_t rows_before, int32_t rows_after,
+                             const std::vector<float>& logits) {
+    const auto& cfg = step_trace_config();
+    if (!cfg.enabled || position_before < cfg.start_position || position_before > cfg.end_position) {
+        return;
+    }
+    if (logits.empty())
+        return;
+
+    const int32_t top_n = std::min<int32_t>(cfg.top_k, static_cast<int32_t>(logits.size()));
+    std::vector<int32_t> order(logits.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::partial_sort(order.begin(), order.begin() + top_n, order.end(),
+                      [&logits](int32_t lhs, int32_t rhs) {
+                          if (logits[static_cast<std::size_t>(lhs)] !=
+                              logits[static_cast<std::size_t>(rhs)]) {
+                              return logits[static_cast<std::size_t>(lhs)] >
+                                     logits[static_cast<std::size_t>(rhs)];
+                          }
+                          return lhs < rhs;
+                      });
+
+    std::ofstream out(cfg.path, std::ios::app);
+    if (!out)
+        return;
+
+    out << "{\"position_before\":" << position_before << ",\"token_id\":" << token_id
+        << ",\"decoder_idx\":" << decoder_idx << ",\"rows_before\":" << rows_before
+        << ",\"rows_after\":" << rows_after
+        << ",\"argmax_token\":" << order.front() << ",\"argmax_logit\":"
+        << logits[static_cast<std::size_t>(order.front())] << ",\"top_ids\":[";
+    for (int32_t i = 0; i < top_n; ++i) {
+        if (i > 0)
+            out << ',';
+        out << order[static_cast<std::size_t>(i)];
+    }
+    out << "],\"top_logits\":[";
+    for (int32_t i = 0; i < top_n; ++i) {
+        if (i > 0)
+            out << ',';
+        out << logits[static_cast<std::size_t>(order[static_cast<std::size_t>(i)])];
+    }
+    out << "]}\n";
 }
 
 bool contains_boxed_answer(const std::string& text) {
@@ -284,6 +373,8 @@ TrtModule& TextGenerationPipeline::bind_decoder_for_step() {
 
 void TextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logits) {
     TensorMap inputs;
+    const int32_t position_before = state_->position();
+    const int32_t rows_before = std::max(state_->preferred_cache_rows(), 1);
 
     Tensor token_tensor;
     token_tensor.data = &token_id;
@@ -307,6 +398,8 @@ void TextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logi
     std::memcpy(logits.data(), logits_tensor.data, num_logits * sizeof(float));
 
     state_->advance();
+    maybe_append_step_trace(position_before, token_id, active_decoder_index_, rows_before,
+                            std::max(state_->preferred_cache_rows(), 1), logits);
 }
 
 void TextGenerationPipeline::run_step_device(int32_t token_id) {

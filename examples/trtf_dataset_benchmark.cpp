@@ -19,6 +19,7 @@ struct Sample {
     std::string sample_id;
     std::string answer;
     std::string prompt;
+    std::optional<int32_t> seed_index;
 };
 
 std::string trim(std::string value) {
@@ -103,6 +104,32 @@ bool extract_json_field(const std::string& line, const std::string& key, std::st
     throw std::runtime_error("Malformed JSON line: unterminated string for key " + key);
 }
 
+bool extract_json_int_field(const std::string& line, const std::string& key, int32_t& value) {
+    const std::string needle = "\"" + key + "\"";
+    std::size_t pos = line.find(needle);
+    if (pos == std::string::npos)
+        return false;
+    pos = line.find(':', pos + needle.size());
+    if (pos == std::string::npos)
+        throw std::runtime_error("Malformed JSON line: missing ':' for key " + key);
+    ++pos;
+    while (pos < line.size() && std::isspace(static_cast<unsigned char>(line[pos])))
+        ++pos;
+    if (pos >= line.size())
+        throw std::runtime_error("Malformed JSON line: missing integer value for key " + key);
+
+    std::size_t end = pos;
+    if (line[end] == '-')
+        ++end;
+    while (end < line.size() && std::isdigit(static_cast<unsigned char>(line[end])))
+        ++end;
+    if (end == pos || (line[pos] == '-' && end == pos + 1))
+        throw std::runtime_error("Malformed JSON line: expected integer value for key " + key);
+
+    value = std::stoi(line.substr(pos, end - pos));
+    return true;
+}
+
 std::vector<Sample> load_samples(const std::string& dataset_path) {
     std::ifstream input(dataset_path);
     if (!input)
@@ -122,6 +149,9 @@ std::vector<Sample> load_samples(const std::string& dataset_path) {
             throw std::runtime_error("Dataset line missing required fields at line " +
                                      std::to_string(line_no));
         }
+        int32_t seed_index = 0;
+        if (extract_json_int_field(line, "seed_index", seed_index))
+            sample.seed_index = seed_index;
         samples.push_back(std::move(sample));
     }
     return samples;
@@ -321,8 +351,11 @@ int main(int argc, char** argv) {
 
     for (std::size_t sample_idx = 0; sample_idx < samples.size(); ++sample_idx) {
         const auto& sample = samples[sample_idx];
-        if (seed >= 0)
-            cfg.seed = seed + static_cast<int32_t>(sample_idx);
+        if (seed >= 0) {
+            const int32_t seed_index =
+                sample.seed_index.value_or(static_cast<int32_t>(sample_idx));
+            cfg.seed = seed + seed_index;
+        }
         auto wall_start = std::chrono::steady_clock::now();
         trtf::TextResult result = pipeline->generate(sample.prompt, cfg);
         auto wall_end = std::chrono::steady_clock::now();
