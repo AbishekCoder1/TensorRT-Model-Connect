@@ -2147,3 +2147,97 @@ current evidence stack for sample9 is now:
 The most defensible interpretation at this point is still that sample9 is
 primarily a shared TriAttention quality loss on this benchmark recipe, not an
 isolated native TRT implementation bug.
+
+### Exact current-prompt sample10 shows the same delayed post-compaction split shape
+
+To check whether sample9 was a one-off, the same exact-prompt trace cycle was
+run on the next independent failing row:
+
+- sample file:
+  `tmp/aime25_10_hybrid_seedfix_seedidx9.jsonl`
+- effective sample seed: `1243`
+- same-family force-off trace:
+  `tmp/aime25_10_hybrid_force0_fulltrace_0_8000.jsonl`
+- same-family TriAttention `6144/1024` trace:
+  `tmp/aime25_10_hybrid_tri6144_fulltrace_0_8000.jsonl`
+
+The direct native-vs-native trace diff shows the same broad shape as sample9:
+
+- first structural difference:
+  - position `7167`
+  - compaction only
+  - force-off `rows_after = 7168`
+  - TriAttention `rows_after = 6144`
+- first live sampled-token split:
+  - position `7477`
+- first live argmax split:
+  - also position `7477`
+
+So sample10 also does **not** explode at the compaction boundary itself. It
+stays aligned for roughly `300` more tokens after compaction before the first
+sampled-token deviation appears. That further supports the interpretation that
+the current failures are dominated by long-horizon compression effects rather
+than a simple native compaction corruption bug.
+
+### Exact current-prompt sample9 improves materially at `8192/1024`
+
+Because the current evidence points more toward shared compression loss than a
+native-only bug, the next targeted check was whether a more conservative
+current-prompt operating point materially delays or removes the sample9 split.
+
+Using the same exact current sample9 prompt and seed:
+
+- sample file:
+  `tmp/aime25_9_hybrid_seedfix_seedidx8.jsonl`
+- effective sample seed: `1242`
+- force-off trace:
+  `tmp/aime25_9_hybrid_force0_fulltrace_0_10000.jsonl`
+- TriAttention `8192/1024` trace:
+  `tmp/aime25_9_hybrid_tri8192_fulltrace_0_10000.jsonl`
+- TriAttention `8192/1024` short run:
+  `tmp/aime25_9_hybrid_tri8192_run_10000.jsonl`
+
+Compared with the old `6144/1024` result:
+
+- at `6144/1024`
+  - first live sampled-token split: `7427`
+  - `10000`-token extracted answer: `21`
+- at `8192/1024`
+  - first structural difference: `9215` (first compaction boundary)
+  - first live sampled-token split: `9745`
+  - no argmax split before that sampled-token deviation
+  - `10000`-token extracted answer: `062`
+
+So on the exact current prompt, raising the budget from `6144` to `8192`
+substantially improves sample9:
+
+- the first split moves later by more than `2300` positions
+- the `10000`-token extracted answer matches the dense control's extracted
+  value
+
+This is the strongest evidence so far that the remaining misses may be
+recoverable by a more conservative TriAttention operating point, even though it
+is still not enough for full parity.
+
+### Exact current-prompt sample9 full run at `8192/1024` still misses late
+
+The improved sample9 point was then rerun under the full benchmark-style capped
+decode:
+
+- output:
+  `tmp/aime25_9_hybrid_tri8192_stop_full.jsonl`
+
+Result:
+
+- sample id: `aime25_9`
+- gold answer: `62`
+- predicted answer: `32`
+- generated tokens: `25104`
+
+So `8192/1024` materially improves the trajectory on current-prompt sample9,
+but it still does not fully recover the row under the full long decode. That
+keeps the main conclusion intact:
+
+- the failure is now looking less like a native runtime bug
+- and more like a quality-vs-budget tradeoff that still needs a better
+  operating point for parity
