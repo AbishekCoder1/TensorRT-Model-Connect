@@ -132,6 +132,58 @@ static void test_torch_multinomial_uses_full_vocab_semantics() {
 
     unsetenv("TRTF_USE_TORCH_MULTINOMIAL");
 }
+
+static void test_torch_multinomial_advances_offset_like_full_vocab_cuda() {
+    setenv("TRTF_USE_TORCH_MULTINOMIAL", "1", 1);
+
+    trtf::SamplingParams params;
+    params.temperature = 1.0F;
+    params.top_k = 2;
+    params.top_p = 1.0F;
+    params.min_p = 0.0F;
+    params.seed = 1235;
+
+    auto sampler = trtf::create_sampler(params);
+    check(std::string(sampler->sampler_type()) == "torch_multinomial",
+          "torch sampler enabled for offset test");
+
+    std::vector<float> logits(100000, -1000.0F);
+    logits[279] = 0.0F;
+    logits[419] = std::log(0.45458386F / 0.54541614F);
+
+    const int expected[] = {419, 279, 279, 419, 279, 279, 419, 419};
+    for (int token : expected) {
+        auto result = sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params);
+        check(result.token_id == token, "torch sampler preserves full-vocab offset progression");
+    }
+
+    unsetenv("TRTF_USE_TORCH_MULTINOMIAL");
+}
+
+static void test_torch_multinomial_matches_live_step_three_way_case() {
+    setenv("TRTF_USE_TORCH_MULTINOMIAL", "1", 1);
+
+    trtf::SamplingParams params;
+    params.temperature = 0.6F;
+    params.top_k = 20;
+    params.top_p = 0.95F;
+    params.min_p = 0.0F;
+    params.seed = 1235;
+
+    auto sampler = trtf::create_sampler(params);
+    check(std::string(sampler->sampler_type()) == "torch_multinomial",
+          "torch sampler enabled for live three-way test");
+
+    std::vector<float> logits(151936, -1000.0F);
+    logits[2014] = 27.5312F;
+    logits[576] = 26.2188F;
+    logits[6771] = 26.0938F;
+
+    auto result = sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params);
+    check(result.token_id == 2014, "torch sampler matches three-way live-step synthetic case");
+
+    unsetenv("TRTF_USE_TORCH_MULTINOMIAL");
+}
 #endif
 
 int main() {
@@ -142,6 +194,8 @@ int main() {
 #if TRTF_HAS_LIBTORCH_MULTINOMIAL
     test_torch_multinomial_matches_known_hf_sequence();
     test_torch_multinomial_uses_full_vocab_semantics();
+    test_torch_multinomial_advances_offset_like_full_vocab_cuda();
+    test_torch_multinomial_matches_live_step_three_way_case();
 #endif
 
     if (failures > 0) {

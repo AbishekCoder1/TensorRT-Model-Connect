@@ -12,13 +12,9 @@
 #include "trtf/pipeline.h"
 #if TRTF_HAS_CUDA_KERNELS
 #include "runtime/core/argmax_kernel.h"
+#include "runtime/core/sparse_multinomial_kernel.h"
 
 #include <cuda_runtime.h>
-#endif
-
-#if TRTF_HAS_LIBTORCH_MULTINOMIAL
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 
 #include <algorithm>
@@ -218,14 +214,21 @@ class TopKSampler final : public ISampler {
     uint64_t initial_seed_;
 };
 
-#if TRTF_HAS_LIBTORCH_MULTINOMIAL
+#if TRTF_HAS_LIBTORCH_MULTINOMIAL && TRTF_HAS_CUDA_KERNELS
 class TorchCudaMultinomialSampler final : public ISampler {
   public:
-    explicit TorchCudaMultinomialSampler(uint64_t initial_seed)
-        : initial_seed_(initial_seed == 0 ? 1 : initial_seed),
-          generator_(at::cuda::detail::createCUDAGenerator()) {
-        reset();
+    explicit TorchCudaMultinomialSampler(uint64_t initial_seed) : initial_seed_(initial_seed == 0 ? 1 : initial_seed) {
+        cudaMalloc(&d_token_id_, sizeof(int32_t));
     }
+
+    ~TorchCudaMultinomialSampler() override {
+        cudaFree(d_indices_);
+        cudaFree(d_probs_);
+        cudaFree(d_token_id_);
+    }
+
+    TorchCudaMultinomialSampler(const TorchCudaMultinomialSampler&) = delete;
+    TorchCudaMultinomialSampler& operator=(const TorchCudaMultinomialSampler&) = delete;
 
     SampleResult sample(const float* logits, int32_t vocab_size,
                         const SamplingParams& params) override {
@@ -241,32 +244,27 @@ class TorchCudaMultinomialSampler final : public ISampler {
             return argmax_over_logits(logits, vocab_size, params.eos_token_id);
 
         const FilteredDistribution dist = build_filtered_distribution(logits, vocab_size, params);
-        ensure_probability_buffer(vocab_size);
-        probability_buffer_.zero_();
+        ensure_execution_policy(vocab_size);
+        ensure_device_buffers(dist.keep);
 
-        std::vector<int64_t> kept_indices(static_cast<std::size_t>(dist.keep));
-        std::vector<float> kept_probs(static_cast<std::size_t>(dist.keep));
+        cudaMemcpyAsync(d_indices_, dist.indices.data(), static_cast<std::size_t>(dist.keep) * sizeof(int32_t),
+                        cudaMemcpyHostToDevice, stream_);
+        cudaMemcpyAsync(d_probs_, dist.probs.data(), static_cast<std::size_t>(dist.keep) * sizeof(float),
+                        cudaMemcpyHostToDevice, stream_);
+        gpu_sparse_torch_multinomial_exact(d_indices_, d_probs_, dist.keep, initial_seed_,
+                                           current_offset_, total_threads_, d_token_id_, stream_);
+        cudaMemcpyAsync(&h_token_id_, d_token_id_, sizeof(int32_t), cudaMemcpyDeviceToHost, stream_);
+        cudaStreamSynchronize(stream_);
+        current_offset_ += counter_offset_;
+
+        result.token_id = h_token_id_;
+        float picked_prob = 0.0F;
         for (int32_t i = 0; i < dist.keep; ++i) {
-            kept_indices[static_cast<std::size_t>(i)] =
-                static_cast<int64_t>(dist.indices[static_cast<std::size_t>(i)]);
-            kept_probs[static_cast<std::size_t>(i)] = dist.probs[static_cast<std::size_t>(i)];
+            if (dist.indices[static_cast<std::size_t>(i)] == result.token_id) {
+                picked_prob = dist.probs[static_cast<std::size_t>(i)];
+                break;
+            }
         }
-
-        at::Tensor indices = at::from_blob(
-                                 kept_indices.data(), {dist.keep},
-                                 at::TensorOptions().dtype(at::kLong).device(at::kCPU))
-                                 .clone()
-                                 .to(at::TensorOptions().dtype(at::kLong).device(at::kCUDA));
-        at::Tensor probs = at::from_blob(
-                               kept_probs.data(), {dist.keep},
-                               at::TensorOptions().dtype(at::kFloat).device(at::kCPU))
-                               .clone()
-                               .to(at::TensorOptions().dtype(at::kFloat).device(at::kCUDA));
-        probability_buffer_.index_put_({indices}, probs, false);
-
-        at::Tensor choice = at::multinomial(probability_buffer_, 1, false, generator_);
-        result.token_id = static_cast<int32_t>(choice.item<int64_t>());
-        const float picked_prob = probability_buffer_.index({result.token_id}).item<float>();
         result.logprob = std::log(std::max(picked_prob, 1e-20F));
         result.is_eos = (result.token_id == params.eos_token_id);
         return result;
@@ -275,22 +273,40 @@ class TorchCudaMultinomialSampler final : public ISampler {
     LogitsLocation logits_location() const override { return LogitsLocation::HOST; }
     const char* sampler_type() const override { return "torch_multinomial"; }
 
-    void reset() override {
-        generator_.set_current_seed(initial_seed_);
-        generator_.set_offset(0);
-    }
+    void reset() override { current_offset_ = 0; }
 
   private:
-    void ensure_probability_buffer(int32_t vocab_size) {
-        if (!probability_buffer_.defined() || probability_buffer_.numel() != vocab_size) {
-            probability_buffer_ = at::zeros(
-                {vocab_size}, at::TensorOptions().dtype(at::kFloat).device(at::kCUDA));
+    void ensure_device_buffers(int32_t keep) {
+        if (keep > capacity_) {
+            cudaFree(d_indices_);
+            cudaFree(d_probs_);
+            cudaMalloc(&d_indices_, static_cast<std::size_t>(keep) * sizeof(int32_t));
+            cudaMalloc(&d_probs_, static_cast<std::size_t>(keep) * sizeof(float));
+            capacity_ = keep;
+        }
+    }
+
+    void ensure_execution_policy(int32_t vocab_size) {
+        if (vocab_size != cached_vocab_size_) {
+            const TorchMultinomialExecutionPolicy policy =
+                compute_torch_multinomial_execution_policy(vocab_size);
+            cached_vocab_size_ = vocab_size;
+            total_threads_ = policy.total_threads;
+            counter_offset_ = policy.counter_offset;
         }
     }
 
     uint64_t initial_seed_;
-    at::Generator generator_;
-    at::Tensor probability_buffer_;
+    uint64_t current_offset_{0};
+    cudaStream_t stream_{nullptr};
+    int32_t* d_indices_{nullptr};
+    float* d_probs_{nullptr};
+    int32_t* d_token_id_{nullptr};
+    int32_t h_token_id_{0};
+    int32_t capacity_{0};
+    int32_t cached_vocab_size_{-1};
+    int32_t total_threads_{0};
+    uint64_t counter_offset_{0};
 };
 #endif
 
@@ -374,7 +390,7 @@ std::unique_ptr<ISampler> create_sampler(const SamplingParams& params) {
 
     uint64_t seed = (params.seed >= 0) ? static_cast<uint64_t>(params.seed)
                                        : 42ULL; // deterministic default for reproducibility
-#if TRTF_HAS_LIBTORCH_MULTINOMIAL
+#if TRTF_HAS_LIBTORCH_MULTINOMIAL && TRTF_HAS_CUDA_KERNELS
     if (use_torch_multinomial_sampler())
         return std::make_unique<TorchCudaMultinomialSampler>(seed);
 #endif

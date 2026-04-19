@@ -2327,3 +2327,85 @@ This materially changes the interpretation of the dense-vs-HF gap:
 - there **was** a real sampler bug in native
 - after fixing it, the residual sample2 disagreement is best explained as
   `fp16` vs `bf16` sampling sensitivity, not an obvious native runtime defect
+
+### Sparse exact CUDA sampler replaces the slow full-vocab torch bridge
+
+The next step was to remove the large runtime cost of the temporary
+full-vocab torch bridge without giving up parity.
+
+Two direct probes established the target semantics:
+
+1. CUDA `torch.multinomial(..., replacement=False)` for one sample matches the
+   exponential-race form exactly:
+
+   - `argmax(probs / exponential_(1.0))`
+
+2. For contiguous float vocab tensors on our current GPU and Qwen3-8B vocab
+   size, PyTorch's CUDA `exponential_` path is effectively:
+
+   - one thread per vocab index
+   - `curand_uniform4(&state).x` for that absolute index
+   - generator offset increment of `4` per decode step
+
+That led to a new exact sparse CUDA sampler:
+
+- keep the existing host-side filter/top-p/top-k/min-p logic
+- copy only the kept token ids and kept probabilities to GPU
+- reproduce PyTorch's full-vocab RNG semantics for those absolute indices
+- sample with the same exponential-race rule that PyTorch uses internally
+
+The implementation is in:
+
+- `src/runtime/core/sparse_multinomial_kernel.cu`
+- `src/runtime/core/sampler.cpp`
+
+New regression coverage was added in `test_sampler.cpp` for:
+
+- sparse full-vocab semantics
+- offset progression across repeated draws
+- a synthetic three-way case derived from the live sample2 first decode step
+
+### Seed-index correction for dataset benchmark repros
+
+One false alarm in the first live validation came from the benchmark driver:
+
+- `examples/trtf_dataset_benchmark.cpp` adds each sample's `seed_index` to the
+  CLI `--seed`
+
+So for:
+
+- `tmp/aime25_2_seedfix_seedidx1.jsonl`
+
+using:
+
+- `--seed 1235`
+
+actually means:
+
+- effective seed `1236`
+
+The correct base seed for the earlier HF sample2 reference is:
+
+- `--seed 1234`
+
+which yields effective seed `1235` because `seed_index=1`.
+
+### Live sample2 validation after the sparse exact sampler
+
+After correcting that seed-index mistake, the new sparse exact sampler was
+rerun on the exact current-prompt dense sample2 repro.
+
+Artifacts:
+
+- `tmp/aime25_2_densefullkv_sparseexact_seed1234_trace.jsonl`
+- `tmp/aime25_2_densefullkv_sparseexact_seed1234_out.jsonl`
+
+Result:
+
+- the first `64` generated native tokens exactly match the previously validated
+  dense trace and the saved HF `float16` reference
+- the first dense-vs-HF `bfloat16` split remains at generated token `48`
+  (`32711` vs `29985`), exactly as before
+
+So the sparse exact sampler preserves the already-proven dense parity behavior
+while avoiding the expensive full-vocab scatter plus `at::multinomial` call.

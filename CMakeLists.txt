@@ -197,11 +197,13 @@ if(CMAKE_CUDA_COMPILER)
   target_sources(trtf_core PRIVATE
     src/runtime/domains/audio/magpie_kernels.cu
     src/runtime/core/argmax_kernel.cu
+    src/runtime/core/sparse_multinomial_kernel.cu
     src/runtime/core/triattention_kernels.cu
   )
   set_source_files_properties(
     src/runtime/domains/audio/magpie_kernels.cu
     src/runtime/core/argmax_kernel.cu
+    src/runtime/core/sparse_multinomial_kernel.cu
     src/runtime/core/triattention_kernels.cu
     PROPERTIES LANGUAGE CUDA
   )
