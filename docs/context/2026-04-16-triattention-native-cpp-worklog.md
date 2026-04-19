@@ -2241,3 +2241,89 @@ keeps the main conclusion intact:
 - the failure is now looking less like a native runtime bug
 - and more like a quality-vs-budget tradeoff that still needs a better
   operating point for parity
+
+### Sample2 dense-vs-HF split was mostly a sampler bug, then a precision gap
+
+The next debugging cycle switched from config sweeps to direct dense-vs-HF diff
+testing on the exact current-prompt sample2 repro:
+
+- sample file:
+  `tmp/aime25_2_seedfix_seedidx1.jsonl`
+- dense trace:
+  `tmp/aime25_2_densefullkv_torchsampler_trace.jsonl`
+- captured HF token ids:
+  `tmp/hf_sample2_seed1235_2400_ids.json`
+
+The first important finding was that the old native sampler bridge was still
+wrong even after moving to libtorch:
+
+- CUDA `torch.multinomial` over the **full masked vocabulary** is not
+  equivalent to sampling over the compressed kept-slice with the same
+  renormalized probabilities.
+- Direct container probes showed large mismatches for the same seed on the same
+  sparse distributions. For example on the exact step2-style two-way
+  distribution:
+  - full-vocab sparse tensor: token `419`
+  - compressed kept-slice tensor: token `279`
+
+That proved the bridge had to sample over a reusable full-vocab probability
+tensor, not the compressed kept subset.
+
+The sampler was then fixed to:
+
+- build the filtered kept set as before
+- scatter kept probabilities back into a reusable full-vocab CUDA tensor
+- call `at::multinomial(..., replacement=false, generator_)` on that full
+  tensor
+
+Regression coverage was added in `test_sampler.cpp` to lock in the sparse
+full-vocab behavior.
+
+After that fix:
+
+- the first dense-vs-HF sampled-token split on exact sample2 moved from
+  generated token `2` to generated token `48`
+- the first `64` native generated tokens became:
+  `2014, 11625, 279, 3491, ... , 29208, 32711, 1447, ...`
+
+The next question was whether the remaining split at generated token `48`
+(`32711` vs earlier HF `29985`) was still a sampler bug or real model drift.
+
+That was answered with two direct probes:
+
+1. Dense teacher-forced replay on the corrected no-prompt-last trace:
+
+   - trace:
+     `tmp/aime25_2_densefullkv_torchsampler_trace_nopromptlast.jsonl`
+   - replay:
+     `tmp/dense_teacherforced_sample2_torchsampler_653_704_nopromptlast.jsonl`
+
+   Result:
+
+   - dense TRT and dense HF argmax/top-k still match through positions
+     `653..704`
+   - so there is no early native-only tensor corruption on this window
+
+2. Single-GPU HF generate probes at different dtypes:
+
+   - HF `bfloat16`, eager, exact current prompt/seed:
+     - generated token `48`: `29985`
+     - processed probabilities at step `48`:
+       `[0.47153, 0.25239, 0.16639, 0.10969]`
+   - HF `float16`, eager, exact current prompt/seed:
+     - generated token `48`: `32711`
+     - first `64` generated tokens match the native dense trace exactly
+
+So the remaining sample2 split after the sampler fix is not a TRT-only logic
+bug. It is explained by precision:
+
+- native dense bundle is `fp16`
+- HF “golden” runs had been checked in `bf16`
+- on this exact row, HF `float16` matches native dense while HF `bfloat16`
+  samples a different token later in the run
+
+This materially changes the interpretation of the dense-vs-HF gap:
+
+- there **was** a real sampler bug in native
+- after fixing it, the residual sample2 disagreement is best explained as
+  `fp16` vs `bf16` sampling sensitivity, not an obvious native runtime defect

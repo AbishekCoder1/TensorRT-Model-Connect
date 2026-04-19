@@ -5,6 +5,8 @@
 #include "trtf/pipeline.h"
 #include "trtf/runtime/sampler.h"
 
+#include <cmath>
+#include <cstdlib>
 #include <iostream>
 
 static int failures = 0;
@@ -44,7 +46,9 @@ static void test_create_sampler_greedy_only_when_sampling_disabled() {
 
     params.top_p = 0.95F;
     sampler = trtf::create_sampler(params);
-    check(std::string(sampler->sampler_type()) == "top_k", "top_p forces sampling path");
+    const std::string sampler_type = sampler->sampler_type();
+    check(sampler_type == "top_k" || sampler_type == "torch_multinomial",
+          "top_p forces sampling path");
 }
 
 static void test_top_p_truncates_tail_tokens() {
@@ -75,11 +79,70 @@ static void test_min_p_drops_low_probability_tail() {
     }
 }
 
+#if TRTF_HAS_LIBTORCH_MULTINOMIAL
+static void test_torch_multinomial_matches_known_hf_sequence() {
+    setenv("TRTF_USE_TORCH_MULTINOMIAL", "1", 1);
+
+    trtf::SamplingParams params;
+    params.temperature = 1.0F;
+    params.top_k = 20;
+    params.top_p = 0.95F;
+    params.min_p = 0.0F;
+    params.seed = 1235;
+
+    auto sampler = trtf::create_sampler(params);
+    check(std::string(sampler->sampler_type()) == "torch_multinomial",
+          "torch sampler enabled");
+
+    const float step0[] = {46.041664F, 43.75F, 43.541664F};
+    const float step1[] = {46.875F, 45.416664F};
+    const float step2[] = {51.666664F, 51.458332F};
+
+    auto result0 = sampler->sample(step0, 3, params);
+    auto result1 = sampler->sample(step1, 2, params);
+    auto result2 = sampler->sample(step2, 2, params);
+
+    check(result0.token_id == 0, "torch sampler step0 matches HF");
+    check(result1.token_id == 0, "torch sampler step1 matches HF");
+    check(result2.token_id == 0, "torch sampler step2 matches HF");
+
+    unsetenv("TRTF_USE_TORCH_MULTINOMIAL");
+}
+
+static void test_torch_multinomial_uses_full_vocab_semantics() {
+    setenv("TRTF_USE_TORCH_MULTINOMIAL", "1", 1);
+
+    trtf::SamplingParams params;
+    params.temperature = 1.0F;
+    params.top_k = 2;
+    params.top_p = 1.0F;
+    params.min_p = 0.0F;
+    params.seed = 1235;
+
+    auto sampler = trtf::create_sampler(params);
+    check(std::string(sampler->sampler_type()) == "torch_multinomial",
+          "torch sampler enabled for sparse full-vocab test");
+
+    std::vector<float> logits(100000, -1000.0F);
+    logits[279] = 0.0F;
+    logits[419] = std::log(0.45458386F / 0.54541614F);
+
+    auto result = sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params);
+    check(result.token_id == 419, "torch sampler matches full-vocab CUDA multinomial");
+
+    unsetenv("TRTF_USE_TORCH_MULTINOMIAL");
+}
+#endif
+
 int main() {
     test_sampling_params_from_config();
     test_create_sampler_greedy_only_when_sampling_disabled();
     test_top_p_truncates_tail_tokens();
     test_min_p_drops_low_probability_tail();
+#if TRTF_HAS_LIBTORCH_MULTINOMIAL
+    test_torch_multinomial_matches_known_hf_sequence();
+    test_torch_multinomial_uses_full_vocab_semantics();
+#endif
 
     if (failures > 0) {
         std::cerr << failures << " sampler test(s) FAILED\n";

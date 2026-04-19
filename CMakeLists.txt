@@ -257,6 +257,75 @@ else()
   message(STATUS "TensorRT backend disabled (missing TensorRT or CUDA dev dependencies)")
 endif()
 
+# --- libtorch multinomial bridge (optional) ---
+set(_trtf_torch_roots
+  /opt/venv/lib/python3.12/site-packages/torch
+  ${PROJECT_SOURCE_DIR}/.venv/lib/python3.12/site-packages/torch
+)
+if(DEFINED ENV{TRTF_TORCH_ROOT})
+  list(INSERT _trtf_torch_roots 0 "$ENV{TRTF_TORCH_ROOT}")
+endif()
+
+find_path(TRTF_TORCH_INCLUDE_DIR ATen/ATen.h
+  PATHS ${_trtf_torch_roots}
+  PATH_SUFFIXES include
+)
+find_path(TRTF_TORCH_API_INCLUDE_DIR torch/torch.h
+  PATHS ${_trtf_torch_roots}
+  PATH_SUFFIXES include/torch/csrc/api/include
+)
+find_library(TRTF_TORCH_LIBRARY
+  NAMES torch libtorch.so
+  PATHS ${_trtf_torch_roots}
+  PATH_SUFFIXES lib
+)
+find_library(TRTF_TORCH_CPU_LIBRARY
+  NAMES torch_cpu libtorch_cpu.so
+  PATHS ${_trtf_torch_roots}
+  PATH_SUFFIXES lib
+)
+find_library(TRTF_TORCH_CUDA_LIBRARY
+  NAMES torch_cuda libtorch_cuda.so
+  PATHS ${_trtf_torch_roots}
+  PATH_SUFFIXES lib
+)
+find_library(TRTF_C10_LIBRARY
+  NAMES c10 libc10.so
+  PATHS ${_trtf_torch_roots}
+  PATH_SUFFIXES lib
+)
+find_library(TRTF_C10_CUDA_LIBRARY
+  NAMES c10_cuda libc10_cuda.so
+  PATHS ${_trtf_torch_roots}
+  PATH_SUFFIXES lib
+)
+
+if(TRTF_TORCH_INCLUDE_DIR AND TRTF_TORCH_API_INCLUDE_DIR
+   AND TRTF_TORCH_LIBRARY AND TRTF_TORCH_CPU_LIBRARY
+   AND TRTF_TORCH_CUDA_LIBRARY AND TRTF_C10_LIBRARY AND TRTF_C10_CUDA_LIBRARY)
+  get_filename_component(TRTF_TORCH_LIBRARY_DIR ${TRTF_TORCH_LIBRARY} DIRECTORY)
+  target_compile_definitions(trtf_core PUBLIC TRTF_HAS_LIBTORCH_MULTINOMIAL=1)
+  target_include_directories(trtf_core SYSTEM PRIVATE
+    ${TRTF_TORCH_INCLUDE_DIR}
+    ${TRTF_TORCH_API_INCLUDE_DIR}
+  )
+  target_link_libraries(trtf_core PRIVATE
+    ${TRTF_TORCH_LIBRARY}
+    ${TRTF_TORCH_CPU_LIBRARY}
+    ${TRTF_TORCH_CUDA_LIBRARY}
+    ${TRTF_C10_LIBRARY}
+    ${TRTF_C10_CUDA_LIBRARY}
+  )
+  set_property(TARGET trtf_core APPEND PROPERTY BUILD_RPATH ${TRTF_TORCH_LIBRARY_DIR})
+  message(STATUS "libtorch multinomial bridge enabled")
+  message(STATUS "  Torch include: ${TRTF_TORCH_INCLUDE_DIR}")
+  message(STATUS "  Torch API    : ${TRTF_TORCH_API_INCLUDE_DIR}")
+  message(STATUS "  Torch lib dir: ${TRTF_TORCH_LIBRARY_DIR}")
+else()
+  target_compile_definitions(trtf_core PUBLIC TRTF_HAS_LIBTORCH_MULTINOMIAL=0)
+  message(STATUS "libtorch multinomial bridge disabled")
+endif()
+
 # --- TVM-FFI kernel bridge plugin (optional) ---
 option(TRTF_ENABLE_TVM_FFI "Enable TVM-FFI kernel bridge plugin" ON)
 
