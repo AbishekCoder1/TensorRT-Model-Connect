@@ -1980,3 +1980,170 @@ So the debugging target has moved again:
   - a later trace window on the true failing sample/path, or
   - a fresh full-benchmark rerun on the trustworthy hybrid bundle after
     correcting the replay methodology
+
+### Exact current-prompt sample7 is not a valid native-only isolation target
+
+To avoid mixing old prompt recipes with the current benchmark prompt file, a
+single-row repro was rebuilt directly from:
+
+- `artifacts/triattention/qwen3-8b-aime25-vs-hf-hybrid-conservative-e2e-seedfix-2026-04-18/aime25_prompts.jsonl`
+- sample id: `aime25_7`
+- injected `seed_index = 6`
+- seed: `1234`
+- effective sample seed: `1240`
+- same-family bundle:
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.trtfb`
+
+Standalone results on that exact prompt/seed:
+
+- force-off same-family control:
+  `tmp/aime25_7_hybrid_force0_seed1234_stop.jsonl`
+  - predicted answer: `41`
+  - gold answer: `821`
+- TriAttention `6144/1024`:
+  `tmp/aime25_7_hybrid_tri6144_seed1234_stop.jsonl`
+  - predicted answer: `247`
+  - gold answer: `821`
+
+So on the exact current benchmark prompt, `aime25_7` is not a clean
+TriAttention-only regression. The same-family dense control is already wrong,
+which means sample7 is not a trustworthy tensor-diff target for isolating a
+native TriAttention bug.
+
+### Exact current-prompt sample9: first live split is far after compaction
+
+The next target was rebuilt from the same current prompt file:
+
+- `tmp/aime25_9_hybrid_seedfix_seedidx8.jsonl`
+- sample id: `aime25_9`
+- injected `seed_index = 8`
+- effective sample seed: `1242`
+
+Using the same-family hybrid bundle with:
+
+- force-off control:
+  `tmp/aime25_9_hybrid_force0_fulltrace_0_10000.jsonl`
+- TriAttention `6144/1024`:
+  `tmp/aime25_9_hybrid_tri6144_fulltrace_0_10000.jsonl`
+
+and matching `10000`-token no-stop runs:
+
+- force-off output:
+  `tmp/aime25_9_hybrid_force0_run_10000.jsonl`
+- TriAttention output:
+  `tmp/aime25_9_hybrid_tri6144_run_10000.jsonl`
+
+The direct native-vs-native trace diff shows:
+
+- first structural difference:
+  - position `7167`
+  - compaction only
+  - force-off `rows_after = 7168`
+  - TriAttention `rows_after = 6144`
+  - logits still match
+- first live sampled-token split:
+  - position `7427`
+  - force-off token id: `1430`
+  - TriAttention token id: `1221`
+- first live argmax split in those native traces:
+  - also position `7427`
+
+So on the exact current prompt, the first real live split is not at the
+compaction boundary. The two native paths stay aligned for roughly `260` more
+tokens after compaction before the first sampled-token deviation appears.
+
+### Current-prompt sample9 replay: no clean native-only tensor drift before the split
+
+The exact current-prompt sample9 TriAttention trace was then replayed
+teacher-forced through:
+
+- dense HF:
+  `tmp/dense_teacherforced_sample9_seedfix_from_tri_7400_7460.jsonl`
+- upstream Python TriAttention:
+  `tmp/upstream_teacherforced_sample9_seedfix_from_tri_7400_7460.jsonl`
+
+using the native trace:
+
+- `tmp/aime25_9_hybrid_tri6144_fulltrace_0_10000.jsonl`
+
+and the same current sample file:
+
+- `tmp/aime25_9_hybrid_seedfix_seedidx8.jsonl`
+
+The only earlier argmax discrepancy reported by this replay window is at
+position `7404`, but that turns out to be a top-logit tie, not a meaningful
+split:
+
+- native dense and native tri both report:
+  - top-1 `1477`
+  - top-2 `7942`
+  - equal top logits at that step
+- dense HF replay and upstream replay report the same two tied tokens in the
+  opposite order:
+  - top-1 `7942`
+  - top-2 `1477`
+  - equal top logits at that step
+
+That is tie-breaking noise, not evidence of a semantic native/runtime drift.
+
+On the last shared live prefix before the first sampled split (`7426`), all
+four views remain aligned in substance:
+
+- native dense live
+- native tri live
+- dense HF replay
+- upstream Python TriAttention replay
+
+At position `7426` they all still have:
+
+- token id `323`
+- argmax token `400`
+- same top-id ordering at the head:
+  `400`, `1430`, `1221`, `1490`, `1779`
+
+So the current exact-prompt sample9 replay again fails to expose a clean
+native-only tensor bug before the first live split. The evidence currently
+points toward a sampling-sensitive/shared compression effect, not an obvious
+native runtime mismatch.
+
+### Live upstream current-prompt sample9 also fails at `6144/1024`
+
+To check that conclusion outside the native TRT runtime, the official upstream
+Python TriAttention patch was run live on the exact same current prompt/seed:
+
+- sample file:
+  `tmp/aime25_9_hybrid_seedfix_seedidx8.jsonl`
+- effective sample seed: `1242`
+- stats:
+  `artifacts/triattention/qwen3_8b_aime25.pt`
+- budget:
+  `6144`
+- divide length:
+  `1024`
+- output:
+  `tmp/upstream_live_sample9_seedfix_6144_d1024_seed1242_10000.json`
+
+Result:
+
+- sample id: `aime25_9`
+- gold answer: `62`
+- predicted boxed answer extracted: `""`
+- generated tokens: `10000`
+- no valid boxed final answer was produced in the capped run
+
+So on the exact current benchmark prompt and seed, upstream Python
+TriAttention also fails to produce a clean solved answer for sample9 at the
+same `6144/1024` operating point.
+
+That further weakens the case for a native-only runtime bug on this row. The
+current evidence stack for sample9 is now:
+
+- same-family native dense and TriAttention stay aligned until long after the
+  first compaction
+- corrected teacher-forced dense HF and upstream replay do not expose a clean
+  native-only tensor drift before the first live split
+- live upstream TriAttention on the exact same current prompt/seed also fails
+
+The most defensible interpretation at this point is still that sample9 is
+primarily a shared TriAttention quality loss on this benchmark recipe, not an
+isolated native TRT implementation bug.
