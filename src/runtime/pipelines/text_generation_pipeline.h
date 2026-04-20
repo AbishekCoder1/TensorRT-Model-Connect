@@ -29,6 +29,10 @@ struct TextGenConfig {
     ChatTemplateFormat chat_template_format{ChatTemplateFormat::kNone};
     std::string token_id_name{"token_id"};
     std::string logits_output_name{"logits"};
+    // runtime.* namespace (replaces TRTF_DISABLE_CUDA_GRAPH, TRTF_GPU_ARGMAX).
+    // decoder_plugin::create() populates these from ctx.runtime_config.
+    bool disable_cuda_graph{false};
+    bool prefer_gpu_greedy{false};
 };
 
 // Populate the process-wide step-trace state from the resolved ConfigBundle.

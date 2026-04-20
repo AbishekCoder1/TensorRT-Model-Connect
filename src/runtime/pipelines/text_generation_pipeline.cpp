@@ -17,14 +17,6 @@ namespace trtf {
 
 namespace {
 
-// Helper retained for two env vars not yet migrated to the config registry
-// (TRTF_DISABLE_CUDA_GRAPH, TRTF_GPU_ARGMAX). Future clusters (runtime.*)
-// will sweep those; this keeps the file compiling until then.
-bool env_flag_set(const char* name) {
-    const char* v = std::getenv(name);
-    return v != nullptr && v[0] == '1';
-}
-
 struct StepTraceConfig {
     bool enabled{false};
     std::string path;
@@ -175,17 +167,19 @@ TextGenerationPipeline::TextGenerationPipeline(std::vector<DecoderContext> decod
         throw std::runtime_error("TextGenerationPipeline: invalid inference state");
     }
 
-    // CUDA Graphs: capture TRT kernels on first step, replay on subsequent steps.
-    // Disable with TRTF_DISABLE_CUDA_GRAPH=1.
-    if (!env_flag_set("TRTF_DISABLE_CUDA_GRAPH")) {
+    // CUDA Graphs: capture TRT kernels on first step, replay on subsequent
+    // steps. Disabled via --set runtime.disable_cuda_graph=true (replaces
+    // the deleted TRTF_DISABLE_CUDA_GRAPH env var).
+    if (!config_.disable_cuda_graph) {
         for (auto& decoder_ctx : decoders_)
             decoder_ctx.module->enable_cuda_graph();
     }
 
-    // GPU-side argmax is only valid for truly greedy decoding.
-    // We record the preference here and instantiate it per-call when the
-    // requested sampling parameters are actually greedy.
-    prefer_gpu_greedy_ = env_flag_set("TRTF_GPU_ARGMAX");
+    // GPU-side argmax is only valid for truly greedy decoding. Populated
+    // from runtime.prefer_gpu_greedy (replaces the deleted TRTF_GPU_ARGMAX
+    // env var). We record the preference here and instantiate per-call
+    // when the requested sampling parameters are actually greedy.
+    prefer_gpu_greedy_ = config_.prefer_gpu_greedy;
 }
 
 // Encode a prompt, optionally applying a chat template first.

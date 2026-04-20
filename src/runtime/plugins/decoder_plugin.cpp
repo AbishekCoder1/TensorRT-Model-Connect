@@ -291,6 +291,18 @@ class DecoderPlugin final : public IPipelinePlugin {
         tgc.token_id_name = io.token_id;
         tgc.logits_output_name = io.logits;
 
+        // runtime.* namespace (replaces TRTF_DISABLE_CUDA_GRAPH, TRTF_GPU_ARGMAX).
+        if (ctx.runtime_config != nullptr) {
+            try {
+                tgc.disable_cuda_graph = ctx.runtime_config->get<bool>(
+                    "runtime", "disable_cuda_graph");
+                tgc.prefer_gpu_greedy = ctx.runtime_config->get<bool>(
+                    "runtime", "prefer_gpu_greedy");
+            } catch (const std::exception&) {
+                // Schema not registered or type mismatch — stay at defaults.
+            }
+        }
+
         // Detect chat template format from tokenizer_config.json
         auto* tok_cfg_sec = find_section(ctx.bundle, "tokenizer_config.json");
         if (tok_cfg_sec && !tok_cfg_sec->empty()) {

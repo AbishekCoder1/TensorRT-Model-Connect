@@ -230,7 +230,37 @@ imports, `cli.py`, and all internal imports updated.
     `TRTF_GPU_ARGMAX`) live in the same file; future "runtime.*"
     cluster will sweep them.
 - [ ] Cluster D: `profile.*` (dynamic KV profile rows)
-- [ ] Cluster E: `platform.*`
+- [ ] Cluster E: `platform.*` (data_dir, trt_log_*)
+  - Split from original plan: these env vars are read before pipeline
+    construction and require a bootstrap-config mechanism to migrate
+    cleanly. Deferred behind a dedicated design decision.
+
+### Additional clusters landed (not in original plan)
+
+- [x] `runtime.*` — `disable_cuda_graph`, `prefer_gpu_greedy` (commit TBD)
+  - Replaces `TRTF_DISABLE_CUDA_GRAPH`, `TRTF_GPU_ARGMAX`. Session /
+    platform layers only. Threaded through `TextGenConfig` (the
+    existing per-pipeline config struct) so decoder_plugin populates
+    it before constructing `TextGenerationPipeline`. `env_flag_set`
+    helper deleted; no more env-var reads in the text generation
+    pipeline file.
+
+### Deferred env vars (not in cluster plan)
+
+- `TRTF_BARK_DUMP`, `TRTF_BARK_GREEDY`, `TRTF_BARK_SEED` — bark_pipeline
+  family-specific; needs audio.bark.* schema and a bark-pipeline
+  migration.
+- `TRTF_MAGPIE_GREEDY`, `TRTF_MAGPIE_CFG_SCALE`, `TRTF_MAGPIE_TEMPERATURE`,
+  `TRTF_MAGPIE_FINISHED_LIMIT`, `TRTF_MAGPIE_SEED`,
+  `TRTF_MAGPIE_MAX_SOURCE_POS` — magpie_pipeline family-specific;
+  needs audio.magpie.* schema.
+- `TRTF_DATA_DIR`, `TRTF_TRT_LOG_STDERR`, `TRTF_TRT_LOG_MIN_SEVERITY` —
+  infrastructure env vars read before pipeline construction. Can't
+  route through the registry without a bootstrap-config mechanism.
+  Documented as a tolerable exception for now.
+- `parse_positive_env_int` in `src/utils/json_helpers.{h,cpp}` — dead
+  code (defined but unused). Candidate for deletion when the
+  infrastructure env vars are swept.
 
 Each cluster: schema file, plugin queries registry, env-var readers
 deleted (hard removal per CLAUDE.md style — no shims), tests updated.
@@ -398,6 +428,43 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 14 (2026-04-20)
+- New `runtime.*` cluster (not originally scoped): two fields,
+  `disable_cuda_graph` and `prefer_gpu_greedy`. Session / platform
+  layers only.
+- Python schema
+  (`trtf_build/trtf_build/runtime_config/schemas/runtime.py`) + C++
+  mirror (`include/trtf/config/schemas/runtime.h`,
+  `src/runtime/config/schemas/runtime.cpp`) + anchor line in
+  `force_link_schemas.cpp`. Fourth schema; same pattern, no
+  coupling-point creep.
+- Reader migration: deleted `env_flag_set` helper and both of its
+  call sites in `text_generation_pipeline.cpp`. Values now flow
+  through `TextGenConfig::disable_cuda_graph` and
+  `TextGenConfig::prefer_gpu_greedy`, populated by
+  `decoder_plugin::create()` from `ctx.runtime_config` with a
+  try/catch fallback to the struct defaults when schema is
+  unregistered.
+- Deferred env vars (not blocking):
+    * `TRTF_BARK_*`, `TRTF_MAGPIE_*` — family-specific, require
+      audio.bark.* / audio.magpie.* schemas + pipeline migrations.
+      Each would be one tick.
+    * `TRTF_DATA_DIR`, `TRTF_TRT_LOG_*` — infrastructure env vars
+      read before pipeline construction. Need a bootstrap-config
+      mechanism (static-init-safe registry query) that doesn't exist
+      yet; scoping that is itself a design tick.
+- Gates: 6 relevant ctests pass (config trio + triattention + both
+  C ABI regressions); 71 Python config tests pass; full build clean.
+- Commit: pending end-of-tick.
+- Next tick (15) — continue the env-var sweep. Candidates in order of
+  payoff-to-effort:
+    * `audio.bark.*` + bark_pipeline reader migration (3 env vars;
+      one consumer file; straightforward).
+    * `audio.magpie.*` + magpie_pipeline reader migration (5-6 env
+      vars; same pattern).
+  The infrastructure env vars (data_dir, trt_log_*) remain deferred
+  until a bootstrap-config mechanism is designed.
 
 ### Tick 13 (2026-04-20)
 - Phase 5.a delivered: the scalability acceptance test.
