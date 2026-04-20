@@ -215,7 +215,20 @@ imports, `cli.py`, and all internal imports updated.
     `decode_policy.force_manual_attention`, passes as kwarg.
   - Cross-language schema match test auto-detects the new namespace
     (regex-based); no code change in the test.
-- [ ] Cluster C: `text_trace.*`
+- [x] Cluster C: `text_trace.*` — commit TBD
+  - Schema declared in Python + C++ (4 fields: step_trace_path,
+    step_trace_start_pos, step_trace_end_pos, step_trace_topk).
+    Session/platform only (debug knobs, no build-time baking).
+  - `src/runtime/pipelines/text_generation_pipeline.cpp` env-var
+    initializer in `step_trace_config()` deleted. New public entry
+    point `apply_text_trace_config_from_registry(path, start, end,
+    topk)` mutates the process-wide static (same observable shape as
+    before) — called from `decoder_plugin::create()` with values
+    resolved from `ctx.runtime_config`.
+  - `env_flag_set` is retained (not `env_int_or_default`) because two
+    still-unmigrated env vars (`TRTF_DISABLE_CUDA_GRAPH`,
+    `TRTF_GPU_ARGMAX`) live in the same file; future "runtime.*"
+    cluster will sweep them.
 - [ ] Cluster D: `profile.*` (dynamic KV profile rows)
 - [ ] Cluster E: `platform.*`
 
@@ -372,6 +385,50 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 12 (2026-04-20)
+- Phase 4 Cluster C (`text_trace.*`) closed.
+- Python schema
+  (`trtf_build/trtf_build/runtime_config/schemas/text_trace.py`) and
+  C++ mirror (`include/trtf/config/schemas/text_trace.h` +
+  `src/runtime/config/schemas/text_trace.cpp`). Four fields —
+  step_trace_path (string), step_trace_start_pos (int32, ≥0),
+  step_trace_end_pos (int32, ≥0, default 2B as effective
+  unbounded), step_trace_topk (int32, ≥1, default 8). Session /
+  platform layers only; these are debug knobs.
+- Anchor added to `force_link_schemas.cpp` (third schema file).
+- `src/runtime/pipelines/text_generation_pipeline.cpp`:
+  * Deleted the env-var initializer inside `step_trace_config()`;
+    replaced the old lazy-static-from-env pattern with a
+    `mutable_step_trace_config()` + external `apply_text_trace_config_from_registry(path, start, end, topk)` entry point.
+  * `env_int_or_default` helper deleted (only call site was the
+    step-trace init). `env_flag_set` retained: two unmigrated env
+    vars (`TRTF_DISABLE_CUDA_GRAPH`, `TRTF_GPU_ARGMAX`) still use it.
+- `src/runtime/pipelines/text_generation_pipeline.h`: new forward-
+  declared `apply_text_trace_config_from_registry(...)` at namespace
+  scope, so decoder_plugin can call without cross-file fragility.
+- `src/runtime/plugins/decoder_plugin.cpp`:
+  * Includes `trtf/config/config_bundle.h` (needed for templated
+    `ctx.runtime_config->get<T>(...)` calls against the now-complete
+    type; forward declaration in pipeline_plugin.h was insufficient).
+  * New block at the top of `create()` reads the four text_trace
+    fields from `ctx.runtime_config` and calls
+    `apply_text_trace_config_from_registry`. Wrapped in try/catch so
+    a schema-not-registered or type-mismatch falls back to disabled
+    tracing without blocking pipeline construction.
+- Gates: 7 relevant ctests pass (config trio + triattention +
+  pipeline_registry + both C ABI regressions); full build clean; env-var
+  grep `grep -rnE 'TRTF_TEXT_STEP_TRACE' src/ trtf_build/` returns
+  only documentation comments (no live reads).
+- Commit: pending end-of-tick.
+- Next tick (13) — Cluster D (`profile.*`). Scope: the
+  `dynamic_kv_profile_rows` config (already migrated off env vars in
+  a prior refactor — now passed as a CLI flag). Move that under
+  `profile.dynamic_kv_rows` (list<int32>, build-time). The list
+  type needs a small extension to coerce_scalar / type_tag — current
+  scalar coercion only handles int/float/bool/string. Either extend
+  scalar coerce to accept comma-separated for list<int>, or add a
+  list path. Smallest useful cluster.
 
 ### Tick 11 (2026-04-20)
 - Phase 4 Cluster B (`decode_policy.*`) closed.

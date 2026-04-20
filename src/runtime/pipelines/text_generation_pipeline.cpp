@@ -16,24 +16,13 @@
 namespace trtf {
 
 namespace {
+
+// Helper retained for two env vars not yet migrated to the config registry
+// (TRTF_DISABLE_CUDA_GRAPH, TRTF_GPU_ARGMAX). Future clusters (runtime.*)
+// will sweep those; this keeps the file compiling until then.
 bool env_flag_set(const char* name) {
     const char* v = std::getenv(name);
     return v != nullptr && v[0] == '1';
-}
-
-int32_t env_int_or_default(const char* name, int32_t fallback) {
-    const char* value = std::getenv(name);
-    if (value == nullptr || value[0] == '\0')
-        return fallback;
-    char* end = nullptr;
-    const long parsed = std::strtol(value, &end, 10);
-    if (end == value)
-        return fallback;
-    if (parsed < static_cast<long>(std::numeric_limits<int32_t>::min()))
-        return std::numeric_limits<int32_t>::min();
-    if (parsed > static_cast<long>(std::numeric_limits<int32_t>::max()))
-        return std::numeric_limits<int32_t>::max();
-    return static_cast<int32_t>(parsed);
 }
 
 struct StepTraceConfig {
@@ -44,23 +33,42 @@ struct StepTraceConfig {
     int32_t top_k{8};
 };
 
-const StepTraceConfig& step_trace_config() {
-    static const StepTraceConfig cfg = [] {
-        StepTraceConfig config;
-        const char* path = std::getenv("TRTF_TEXT_STEP_TRACE_PATH");
-        if (path == nullptr || path[0] == '\0')
-            return config;
-        config.enabled = true;
-        config.path = path;
-        config.start_position = env_int_or_default("TRTF_TEXT_STEP_TRACE_START_POS", 0);
-        config.end_position =
-            env_int_or_default("TRTF_TEXT_STEP_TRACE_END_POS", std::numeric_limits<int32_t>::max());
-        config.top_k = std::max(1, env_int_or_default("TRTF_TEXT_STEP_TRACE_TOPK", 8));
-        std::ofstream clear(config.path, std::ios::trunc);
-        return config;
-    }();
+// Process-wide step-trace state. Populated once from the resolved
+// ConfigBundle by `apply_text_trace_config_from_registry` (below), called
+// from the decoder plugin before pipeline construction. Replaces the
+// TRTF_TEXT_STEP_TRACE_* environment variables, which are now deleted.
+StepTraceConfig& mutable_step_trace_config() {
+    static StepTraceConfig cfg;
     return cfg;
 }
+
+const StepTraceConfig& step_trace_config() {
+    return mutable_step_trace_config();
+}
+
+} // namespace
+
+// Called from decoder_plugin::create() with values resolved from
+// ctx.runtime_config for the "text_trace" namespace. An empty path keeps
+// tracing disabled. When a non-empty path is supplied, this truncates the
+// target file so repeated runs don't concatenate. Not re-entrant; the
+// caller serializes creation.
+void apply_text_trace_config_from_registry(
+    const std::string& path, int32_t start_position, int32_t end_position, int32_t top_k)
+{
+    StepTraceConfig& cfg = mutable_step_trace_config();
+    cfg.path = path;
+    cfg.enabled = !path.empty();
+    cfg.start_position = start_position;
+    cfg.end_position = end_position;
+    cfg.top_k = std::max(int32_t{1}, top_k);
+    if (cfg.enabled)
+    {
+        std::ofstream clear(cfg.path, std::ios::trunc);
+    }
+}
+
+namespace {
 
 void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t decoder_idx,
                              int32_t rows_before, int32_t rows_after,

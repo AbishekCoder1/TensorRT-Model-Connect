@@ -31,6 +31,14 @@ struct TextGenConfig {
     std::string logits_output_name{"logits"};
 };
 
+// Populate the process-wide step-trace state from the resolved ConfigBundle.
+// Called by decoder_plugin::create() before constructing the pipeline.
+// Replaces the TRTF_TEXT_STEP_TRACE_* env vars (deleted). Empty `path`
+// keeps tracing disabled; a non-empty path truncates the target file.
+void apply_text_trace_config_from_registry(
+    const std::string& path, std::int32_t start_position,
+    std::int32_t end_position, std::int32_t top_k);
+
 class TextGenerationPipeline final : public IPipeline {
   public:
     struct DecoderContext {

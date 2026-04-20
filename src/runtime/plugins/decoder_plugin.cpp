@@ -5,6 +5,7 @@
 #include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/pipelines/text_generation_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/config/config_bundle.h"
 #include "trtf/runtime/triattention_kv_cache.h"
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
@@ -147,6 +148,22 @@ class DecoderPlugin final : public IPipelinePlugin {
         // Master's FFI refactor: load any TVM/FFI kernel plugins bundled alongside
         // the engine before deserializing. Required for FFI-based custom kernels.
         load_ffi_kernels_from_bundle(ctx.bundle);
+
+        // Hydrate process-wide text_trace state from the resolved registry.
+        // Replaces the old TRTF_TEXT_STEP_TRACE_* env-var reads in
+        // text_generation_pipeline.cpp.
+        if (ctx.runtime_config != nullptr) {
+            try {
+                apply_text_trace_config_from_registry(
+                    ctx.runtime_config->get<std::string>("text_trace", "step_trace_path"),
+                    ctx.runtime_config->get<std::int32_t>("text_trace", "step_trace_start_pos"),
+                    ctx.runtime_config->get<std::int32_t>("text_trace", "step_trace_end_pos"),
+                    ctx.runtime_config->get<std::int32_t>("text_trace", "step_trace_topk"));
+            } catch (const std::exception&) {
+                // text_trace schema not registered, or type mismatch —
+                // leave tracing at its disabled default.
+            }
+        }
 
         // TriAttention needs direct ICudaEngine access (multi-profile, row-dim
         // introspection, KV sizing). Keep the manual deserialization path rather
