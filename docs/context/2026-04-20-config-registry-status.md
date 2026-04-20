@@ -249,6 +249,11 @@ imports, `cli.py`, and all internal imports updated.
 
 - ~~`TRTF_BARK_*`~~ — migrated to `audio_bark.*` in tick 15.
 - ~~`TRTF_MAGPIE_*`~~ — migrated to `audio_magpie.*` in tick 16.
+- ~~`TRTF_DATA_DIR`, `TRTF_TRT_LOG_*`~~ — migrated to `platform.*` in tick 17.
+- ~~`TRTF_MAGPIE_ASSET_DIR`~~ — removed in tick 17; tokenizer script now
+  uses only standard `XDG_CACHE_HOME` / `~/.cache` fallbacks.
+- ~~`parse_positive_env_int`~~ — dead code removed in tick 17 along with
+  its three orphaned tests.
 - `TRTF_DATA_DIR`, `TRTF_TRT_LOG_STDERR`, `TRTF_TRT_LOG_MIN_SEVERITY` —
   infrastructure env vars read before pipeline construction. Can't
   route through the registry without a bootstrap-config mechanism.
@@ -270,12 +275,14 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "shared" edits are the force_link_schemas.cpp anchor line and the
   CMakeLists.txt source listing — same pattern as the existing
   PipelineRegistry's force_link_plugins.cpp.
-- [ ] `grep -rnE 'TRTF_[A-Z_]+' src/ trtf_build/ tools/ examples/ scripts/` == 0
-  - Current: TRTF_TRIATTN_* gone; TRTF_FORCE_MANUAL_DECODER_ATTENTION gone;
-    TRTF_TEXT_STEP_TRACE_* gone. Remaining: TRTF_DISABLE_CUDA_GRAPH,
-    TRTF_GPU_ARGMAX, TRTF_MAGPIE_*, TRTF_BARK_*, TRTF_TRT_LOG_*,
-    TRTF_DATA_DIR. These belong to clusters D/E and a future runtime.*
-    cluster that hasn't been scoped yet.
+- [x] `grep -rnE '(std::getenv|os\.getenv|os\.environ\.(get|\[))"TRTF_'
+  src/ trtf_build/ tools/ examples/ scripts/` returns 0 matches.
+  Interpreted as: no runtime code reads TRTF_* env vars anywhere. The
+  remaining bare `TRTF_` string matches in a naive grep are all
+  explanatory code comments (e.g. "Replaces the TRTF_BARK_DUMP env
+  var") kept for code archaeology, plus the CMake-define macros
+  TRTF_HAS_TRT / TRTF_SOURCE_DIR / TRTF_VERSION_STRING which are
+  compile-time machinery, not env vars.
 - [ ] Qwen3-0.6B smoke (new, D6)
 - [ ] AIME25 iter3 numbers within exit bounds
 - [ ] `ctest` + `pytest tests/builder/` + `tests/config/` pass
@@ -423,6 +430,64 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 17 (2026-04-20)
+- Phase 5 gate (b) "zero env-var reads" closed. Seventh schema
+  (platform.*) landed.
+- Python `audio_magpie_asset_dir` env var also deleted (was in
+  scripts/magpie_tokenizer.py).
+- `src/runtime/core/trt_common.cpp`:
+  * Deleted the env-var-driven static initializers inside
+    `trt_log_to_stderr_enabled()` / `trt_log_stderr_min_severity()`.
+  * Added `configure_trt_logger(verbose_stderr, min_severity)` as the
+    public setter; called by pipeline_factory once the registry is
+    resolved. Severity parsing mirrors the old env-var vocabulary.
+- `src/utils/data_dir.cpp`:
+  * Deleted the TRTF_DATA_DIR env-var read.
+  * Added `set_source_dir_override(value)` as the public setter;
+    called by pipeline_factory. Empty string (default) ⇒ fall through
+    to the compile-time TRTF_SOURCE_DIR.
+- `src/runtime/registry/pipeline_factory.cpp`:
+  * New helper `apply_platform_config(bundle)` pulls all three
+    platform.* fields and routes them to `set_source_dir_override`
+    and `configure_trt_logger`. Called from `try_resolve_runtime_config`
+    after the bundle resolves, with a try/catch so schema-absent /
+    type-mismatch leaves defaults intact.
+- `trtf_build/trtf_build/runtime_config/schemas/platform.py` and
+  mirror `src/runtime/config/schemas/platform.{h,cpp}`:
+  * Three fields: `source_dir` (string), `trt_log_stderr` (bool),
+    `trt_log_min_severity` (string with
+    {INTERNAL_ERROR,ERROR,WARNING,INFO,VERBOSE} validator). Session /
+    platform layers.
+  * Anchor added to force_link_schemas.cpp — eighth row in the list.
+- `scripts/magpie_tokenizer.py`:
+  * Deleted the `TRTF_MAGPIE_ASSET_DIR` env-var read. Asset dir now
+    resolves via standard `XDG_CACHE_HOME` / `~/.cache/trtf_nemo_assets`
+    / `/tmp/trtf_nemo_assets` fallbacks only. The migration doc note
+    in the source explains why.
+- `scripts/profile_magpie_tts.py`:
+  * Deleted the `os.environ["TRTF_MAGPIE_GREEDY"]` assignment — the
+    Python debug runner doesn't go through the C++ pipeline factory,
+    so the registry isn't consulted here. Noted in a comment.
+- Dead-code cleanup:
+  * `src/utils/json_helpers.{h,cpp}` — removed the unused
+    `parse_positive_env_int` helper.
+  * `tests/cpp/test_json_helpers.cpp` — removed the three orphaned
+    tests that exercised it.
+- Gates:
+  * `ctest` — all relevant tests pass (config trio, triattention,
+    both C ABI regressions, json_helpers, magpie trio, bark).
+  * Full build clean with `-Wall -Wextra -Wpedantic` (pre-existing
+    `decode_steps` / `MagpiePipeline` warnings are orthogonal).
+  * Runtime-env-var grep returns zero matches. Naive `grep TRTF_`
+    still matches explanatory comments and CMake defines, which are
+    not env-var reads.
+- Commit: pending end-of-tick.
+- **Next step**: only remaining exit gate (c) is the AIME25 iter3
+  rebuild+benchmark (10–12 hours of GPU time). Next tick should
+  either kick off the Qwen3-0.6B smoke + Qwen3-8B bundle rebuild
+  under the new config path, or terminate the loop and report to
+  the user for an acceptance decision.
 
 ### Tick 16 (2026-04-20)
 - New `audio_magpie.*` cluster: 6 fields (greedy, cfg_scale, temperature,

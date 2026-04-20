@@ -23,6 +23,11 @@ const char* trt_severity_name(nvinfer1::ILogger::Severity severity);
 bool trt_log_to_stderr_enabled();
 nvinfer1::ILogger::Severity trt_log_stderr_min_severity();
 
+// Configure the process-wide TRT logger. Called by pipeline_factory after
+// resolving the platform.* namespace (replaces the old TRTF_TRT_LOG_STDERR
+// and TRTF_TRT_LOG_MIN_SEVERITY env vars).
+void configure_trt_logger(bool verbose_stderr, const std::string& min_severity);
+
 class TrtLogger final : public nvinfer1::ILogger {
   public:
     void log(Severity severity, const char* msg) noexcept override;

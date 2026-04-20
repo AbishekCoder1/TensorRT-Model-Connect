@@ -479,48 +479,6 @@ bool test_extract_json_string_array_stops_on_non_string()
     return true;
 }
 
-// Intention: Verify parse_positive_env_int fallback behavior for missing env var.
-// Setup:     Env var unset via guard.
-// Mechanism: Calls parse_positive_env_int and checks fallback.
-bool test_parse_positive_env_int_unset()
-{
-    trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", nullptr);
-    return trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) == 7;
-}
-
-// Intention: Verify parse_positive_env_int parses valid positive integer.
-// Setup:     Env var set to "123".
-// Mechanism: Calls parse_positive_env_int and checks parsed value.
-bool test_parse_positive_env_int_valid()
-{
-    trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", "123");
-    return trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) == 123;
-}
-
-// Intention: Verify parse_positive_env_int rejects non-positive/invalid values.
-// Setup:     Env var set to values that should fail parsing.
-// Mechanism: Calls parse_positive_env_int for each value and expects fallback.
-bool test_parse_positive_env_int_invalid_values()
-{
-    {
-        trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", "");
-        if (trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) != 7) return false;
-    }
-    {
-        trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", "0");
-        if (trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) != 7) return false;
-    }
-    {
-        trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", "-5");
-        if (trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) != 7) return false;
-    }
-    {
-        trtf_test::EnvVarGuard guard("TRTF_PARSE_POSITIVE_ENV_INT_TEST", "12x");
-        if (trtf::parse_positive_env_int("TRTF_PARSE_POSITIVE_ENV_INT_TEST", 7) != 7) return false;
-    }
-    return true;
-}
-
 } // namespace
 
 int main()
@@ -559,9 +517,6 @@ int main()
     run("string_array_empty", test_extract_json_string_array_empty);
     run("string_array_missing", test_extract_json_string_array_missing);
     run("string_array_non_string", test_extract_json_string_array_stops_on_non_string);
-    run("parse_positive_env_int_unset", test_parse_positive_env_int_unset);
-    run("parse_positive_env_int_valid", test_parse_positive_env_int_valid);
-    run("parse_positive_env_int_invalid", test_parse_positive_env_int_invalid_values);
 
     if (all_passed)
     {

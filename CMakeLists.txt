@@ -145,6 +145,7 @@ add_library(trtf_core
   src/runtime/config/schemas/runtime.cpp
   src/runtime/config/schemas/audio_bark.cpp
   src/runtime/config/schemas/audio_magpie.cpp
+  src/runtime/config/schemas/platform.cpp
   # Registry (factory + plugin dispatch)
   src/runtime/registry/pipeline_factory.cpp
   src/runtime/registry/pipeline_registry.cpp

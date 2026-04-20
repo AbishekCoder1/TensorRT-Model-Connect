@@ -1,6 +1,5 @@
 #include "utils/data_dir.h"
 
-#include <cstdlib>
 #include <string>
 
 #ifndef TRTF_SOURCE_DIR
@@ -9,13 +8,25 @@
 
 namespace trtf {
 
+// Process-wide source-dir override. Populated by
+// set_source_dir_override(...) from pipeline_factory after resolving the
+// platform.* registry namespace. Empty (the default) means "use the
+// compile-time TRTF_SOURCE_DIR." Replaces the old TRTF_DATA_DIR env var.
+static std::string& mutable_source_dir_override() {
+    static std::string value;
+    return value;
+}
+
+void set_source_dir_override(const std::string& value)
+{
+    mutable_source_dir_override() = value;
+}
+
 std::string source_dir()
 {
-    const char* env = std::getenv("TRTF_DATA_DIR");
-    if (env != nullptr && env[0] != '\0')
-    {
-        return env;
-    }
+    const auto& override_value = mutable_source_dir_override();
+    if (!override_value.empty())
+        return override_value;
     return TRTF_SOURCE_DIR;
 }
 

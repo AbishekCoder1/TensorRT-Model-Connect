@@ -334,28 +334,4 @@ std::vector<int32_t> extract_json_int_array(const std::string& text, const std::
     return extract_numeric_array_impl<int32_t>(text, key, max_count, is_int_char, parse_int);
 }
 
-int32_t parse_positive_env_int(const char* env_name, int32_t fallback)
-{
-    const char* env = std::getenv(env_name);
-    if (env == nullptr || env[0] == '\0')
-    {
-        return fallback;
-    }
-
-    try
-    {
-        std::size_t parsed = 0;
-        const int value = std::stoi(env, &parsed);
-        if (parsed != std::strlen(env) || value <= 0)
-        {
-            return fallback;
-        }
-        return static_cast<int32_t>(value);
-    }
-    catch (const std::exception&)
-    {
-        return fallback;
-    }
-}
-
 } // namespace trtf

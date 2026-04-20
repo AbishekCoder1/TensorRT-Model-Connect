@@ -2,12 +2,14 @@
 
 #include "bundle/bundle_format.h"
 #include "runtime/backend/backend_loader.h"
+#include "runtime/core/trt_common.h"
 #include "trtf/config/cli_support.h"
 #include "trtf/config/config_bundle.h"
 #include "trtf/config/schema_registry.h"
 #include "trtf/runtime/pipeline_plugin.h"
 #include "trtf/runtime/pipeline_registry.h"
 #include "trtf/runtime/trt_backend.h"
+#include "utils/data_dir.h"
 #include "utils/json_helpers.h"
 
 #include <exception>
@@ -82,6 +84,25 @@ IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy)
         " (available: " + available + ")");
 }
 
+// Apply platform.* values to their process-wide sinks. Replaces the old
+// TRTF_DATA_DIR and TRTF_TRT_LOG_{STDERR,MIN_SEVERITY} env-var reads.
+// Called from try_resolve_runtime_config once a bundle has resolved.
+void apply_platform_config(const config::ConfigBundle& bundle)
+{
+    try
+    {
+        const std::string source = bundle.get<std::string>("platform", "source_dir");
+        if (!source.empty()) set_source_dir_override(source);
+        const bool verbose_stderr = bundle.get<bool>("platform", "trt_log_stderr");
+        const std::string severity = bundle.get<std::string>("platform", "trt_log_min_severity");
+        configure_trt_logger(verbose_stderr, severity);
+    }
+    catch (const std::exception&)
+    {
+        // Schema absent or type mismatch — leave sinks at defaults.
+    }
+}
+
 std::optional<config::ConfigBundle> try_resolve_runtime_config(
     const std::string& config_text,
     const std::string& bundle_path,
@@ -93,6 +114,7 @@ std::optional<config::ConfigBundle> try_resolve_runtime_config(
         auto resolution = config::resolve_pipeline_config(
             config_text, config_path, set_tokens);
         config::write_effective_config_next_to(resolution.bundle, bundle_path);
+        apply_platform_config(resolution.bundle);
         return std::move(resolution.bundle);
     }
     catch (const std::exception& e)

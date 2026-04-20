@@ -20,6 +20,7 @@ extern volatile int kForceLink_text_trace;
 extern volatile int kForceLink_runtime;
 extern volatile int kForceLink_audio_bark;
 extern volatile int kForceLink_audio_magpie;
+extern volatile int kForceLink_platform;
 
 // Pointer array referencing every anchor symbol. The array itself has
 // external linkage so the linker must keep it; each element inside it
@@ -31,6 +32,7 @@ volatile int* const kAllSchemaAnchors[] = {
     &kForceLink_runtime,
     &kForceLink_audio_bark,
     &kForceLink_audio_magpie,
+    &kForceLink_platform,
 };
 
 } // namespace trtf::config::schemas

@@ -144,12 +144,11 @@ def _extract_nemo_assets(nemo_path: pathlib.Path, extract_dir: pathlib.Path) -> 
 
 
 def _resolve_asset_dir() -> pathlib.Path:
-    override = os.environ.get("TRTF_MAGPIE_ASSET_DIR", "").strip()
-    if override:
-        candidate = pathlib.Path(override)
-        candidate.mkdir(parents=True, exist_ok=True)
-        return candidate
-
+    # Asset-dir resolution. The previous TRTF_MAGPIE_ASSET_DIR env var is
+    # removed as part of the config-registry migration. This script is
+    # invoked as a subprocess by the runtime for tokenizer setup — it has
+    # no access to the registry. Users who need to relocate the cache can
+    # set the standard XDG_CACHE_HOME env var (not a TRTF_* var).
     candidates = [
         pathlib.Path(os.environ.get("XDG_CACHE_HOME", "")).expanduser() / "trtf_nemo_assets"
         if os.environ.get("XDG_CACHE_HOME", "").strip()

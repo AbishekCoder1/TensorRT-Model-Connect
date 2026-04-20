@@ -26,43 +26,49 @@ const char* trt_severity_name(nvinfer1::ILogger::Severity severity) {
     }
 }
 
+// Process-wide TRT-logger state. Populated once from a call to
+// configure_trt_logger_from_registry() (invoked by the pipeline factory
+// when it resolves a ConfigBundle that has the platform.* namespace).
+// Defaults: verbose stderr stream is off; warnings and errors always
+// surface via the short "[trt] ..." path in TrtLogger::log.
+namespace {
+struct TrtLogState {
+    bool verbose_stderr_enabled{false};
+    nvinfer1::ILogger::Severity verbose_min_severity{nvinfer1::ILogger::Severity::kINFO};
+};
+TrtLogState& mutable_trt_log_state() {
+    static TrtLogState state;
+    return state;
+}
+} // namespace
+
 bool trt_log_to_stderr_enabled() {
-    static const bool enabled = [] {
-        const char* env = std::getenv("TRTF_TRT_LOG_STDERR");
-        if (env == nullptr || env[0] == '\0') {
-            return false;
-        }
-        return std::strcmp(env, "0") != 0;
-    }();
-    return enabled;
+    return mutable_trt_log_state().verbose_stderr_enabled;
 }
 
 nvinfer1::ILogger::Severity trt_log_stderr_min_severity() {
-    static const nvinfer1::ILogger::Severity severity = [] {
-        const char* env = std::getenv("TRTF_TRT_LOG_MIN_SEVERITY");
-        if (env == nullptr || env[0] == '\0') {
-            return nvinfer1::ILogger::Severity::kINFO;
-        }
+    return mutable_trt_log_state().verbose_min_severity;
+}
 
-        std::string value(env);
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-
-        if (value == "INTERNAL_ERROR") {
-            return nvinfer1::ILogger::Severity::kINTERNAL_ERROR;
-        }
-        if (value == "ERROR") {
-            return nvinfer1::ILogger::Severity::kERROR;
-        }
-        if (value == "WARNING") {
-            return nvinfer1::ILogger::Severity::kWARNING;
-        }
-        if (value == "VERBOSE") {
-            return nvinfer1::ILogger::Severity::kVERBOSE;
-        }
-        return nvinfer1::ILogger::Severity::kINFO;
-    }();
-    return severity;
+// Public setter used by the pipeline factory after resolving the runtime
+// config. Replaces the old TRTF_TRT_LOG_{STDERR,MIN_SEVERITY} env vars.
+// Severity values: INTERNAL_ERROR, ERROR, WARNING, INFO, VERBOSE.
+void configure_trt_logger(bool verbose_stderr, const std::string& min_severity) {
+    TrtLogState& state = mutable_trt_log_state();
+    state.verbose_stderr_enabled = verbose_stderr;
+    std::string upper(min_severity);
+    std::transform(upper.begin(), upper.end(), upper.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    if (upper == "INTERNAL_ERROR")
+        state.verbose_min_severity = nvinfer1::ILogger::Severity::kINTERNAL_ERROR;
+    else if (upper == "ERROR")
+        state.verbose_min_severity = nvinfer1::ILogger::Severity::kERROR;
+    else if (upper == "WARNING")
+        state.verbose_min_severity = nvinfer1::ILogger::Severity::kWARNING;
+    else if (upper == "VERBOSE")
+        state.verbose_min_severity = nvinfer1::ILogger::Severity::kVERBOSE;
+    else
+        state.verbose_min_severity = nvinfer1::ILogger::Severity::kINFO;
 }
 
 void TrtLogger::log(Severity severity, const char* msg) noexcept {
@@ -77,6 +83,8 @@ void TrtLogger::log(Severity severity, const char* msg) noexcept {
     if (trt_log_to_stderr_enabled() && severity <= trt_log_stderr_min_severity()) {
         std::cerr << "TRT_LOG[" << trt_severity_name(severity) << "] " << msg << '\n';
     } else if (severity <= Severity::kWARNING) {
+        // Always show warnings and errors even without verbose logging
+        // (whether or not platform.trt_log_stderr was set).
         std::cerr << "[trt] " << trt_severity_name(severity) << ": " << msg << '\n';
     }
 }
