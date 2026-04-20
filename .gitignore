@@ -111,6 +111,9 @@ refs
 # Re-ignore transient build artifacts inside the un-ignored config dirs.
 **/__pycache__/
 **/*.pyc
+# Ambient leftovers from recovery/benchmark work — not part of source.
+recovery-*-clone/
+/tmp/
 engines
 *.png
 *.wav
