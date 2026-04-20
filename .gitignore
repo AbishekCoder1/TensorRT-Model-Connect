@@ -108,6 +108,9 @@ refs
 !tests/config/**
 !src/runtime/config/
 !src/runtime/config/**
+# Re-ignore transient build artifacts inside the un-ignored config dirs.
+**/__pycache__/
+**/*.pyc
 engines
 *.png
 *.wav

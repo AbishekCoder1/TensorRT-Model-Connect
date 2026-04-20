@@ -101,8 +101,16 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
 
 ### Phase 1 — Foundation
 - [x] Tick 1: state file + C++ header skeleton  (commit `cbe4bae6`)
-- [x] Tick 2: C++ `.cpp` + merge + unit tests   (commit TBD)
-- [ ] Tick 3: Python mirror + codegen + cross-lang test + `effective_config.json`
+- [x] Tick 2: C++ `.cpp` + merge + unit tests   (commit `77fe969e`)
+- [x] Tick 3: Python mirror + `effective_config.json` + cross-lang parity tests (commit TBD)
+  - Codegen scaffolding deferred to Phase 4 Cluster A when the first real
+    schema exists to exercise it. Rationale: a codegen that reads an
+    empty `schemas/` directory has no meaningful test; the empty case
+    pass is not load-bearing. When Cluster A lands, codegen ships in the
+    same commit — schemas and their C++ headers co-evolve.
+  - Cross-language test via `test_layer_int_values_match_cpp` pins the
+    numeric Layer values; the real field-set match test ships with
+    Cluster A (same reasoning as codegen).
 
 ### Phase 2 — CLI supply (serial)
 - [ ] `--config` + `--set` on `examples/trtf_cli.cpp`
@@ -167,6 +175,40 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
 - CMakeLists.txt: two new source files in `trtf_core`, one new test target.
 - Gates passed: build clean with `-Wall -Wextra -Wpedantic`; all 21
   tests pass; CCN p90=7, max=9 over 13 functions (≤ 10 required).
+- Commit: `77fe969e`.
+
+### Tick 3 (2026-04-20)
+- `trtf_build/trtf_build/config/` package — Python mirror of the C++
+  foundation, semantics-identical:
+  - `schema_registry.py` — `Layer` IntEnum (values match C++ 0..4),
+    `ConfigField` / `Schema` dataclasses (frozen), process-wide
+    singleton `SchemaRegistry`, fail-fast on same authoring mistakes
+    (empty namespace, empty fields, duplicate field, empty allowlist,
+    `SCHEMA_DEFAULT` in allowlist, duplicate namespace).
+  - `config_bundle.py` — `LayerContribution`, `ResolvedValue`,
+    `ConfigBundle` with `.build()`, `.get()`, `.source_of()`,
+    `.all()`, `.to_effective_dict()`. Priority merge identical to C++.
+  - `write_effective_config(bundle, path)` — writes the
+    effective-config JSON (sorted namespaces and fields for stable
+    diffs) and returns the written path.
+- `tests/builder/test_config_schema_registry.py` — 23 tests mirroring
+  the C++ cases plus two Python-specific ones: the effective-config
+  JSON round-trip (values + provenance readable after file I/O) and
+  `test_layer_int_values_match_cpp` pinning the numeric Layer values
+  so priority comparison semantics never silently diverge between the
+  languages.
+- Gates passed: all 23 Python tests pass; registry/bundle tests run in
+  0.06s (no GPU, no TRT, no network).
 - Commit: pending end-of-tick.
-- Next tick (3): Python mirror + codegen scaffolding + cross-language
-  field-set match test + `effective_config.json` writer.
+- Next tick (4) — Phase 1 closed. Entering Phase 2: CLI supply.
+  Priorities:
+    * Add `--config <path>` + `--set ns.field=value` to `trtf_build/cli.py`
+      (Python side — exercises the Python registry end to end).
+    * Then C++ CLI in `examples/trtf_cli.cpp` (reads JSON profile,
+      applies overrides via `--set`, produces `LayerContribution`s,
+      calls `ConfigBundle::build`).
+    * C ABI `trtf_create_pipeline_ex` gains a `const char* config_json`
+      parameter (nullable).
+  No per-knob flags; every existing `TRTF_*` env var eventually becomes
+  a namespaced schema field consumed via `--set ns.field=value` or via
+  a profile YAML/JSON file.
