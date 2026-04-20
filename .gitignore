@@ -100,6 +100,14 @@ HEAD
 hooks
 objects
 refs
+!include/trtf/config/
+!include/trtf/config/**
+!trtf_build/trtf_build/config/
+!trtf_build/trtf_build/config/**
+!tests/config/
+!tests/config/**
+!src/runtime/config/
+!src/runtime/config/**
 engines
 *.png
 *.wav
