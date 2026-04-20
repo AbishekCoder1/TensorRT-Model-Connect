@@ -143,6 +143,7 @@ add_library(trtf_core
   src/runtime/config/schemas/decode_policy.cpp
   src/runtime/config/schemas/text_trace.cpp
   src/runtime/config/schemas/runtime.cpp
+  src/runtime/config/schemas/audio_bark.cpp
   # Registry (factory + plugin dispatch)
   src/runtime/registry/pipeline_factory.cpp
   src/runtime/registry/pipeline_registry.cpp

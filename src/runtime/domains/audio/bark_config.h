@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace trtf {
 
@@ -46,6 +47,11 @@ struct BarkConfig {
     int32_t top_k{50};
     float min_eos_p{0.0F};  // 0 = disabled (matching HF bark-small default)
     bool greedy{false};  // if true, use argmax instead of sampling
+
+    // audio.bark.* namespace replaces TRTF_BARK_{DUMP,GREEDY,SEED}.
+    // bark_plugin populates these from ctx.runtime_config.
+    std::string dump_path{};     // empty -> no token dump
+    int64_t     seed{-1};        // -1 -> use default-constructed RNG state
 };
 
 } // namespace trtf

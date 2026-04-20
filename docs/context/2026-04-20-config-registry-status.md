@@ -247,9 +247,7 @@ imports, `cli.py`, and all internal imports updated.
 
 ### Deferred env vars (not in cluster plan)
 
-- `TRTF_BARK_DUMP`, `TRTF_BARK_GREEDY`, `TRTF_BARK_SEED` — bark_pipeline
-  family-specific; needs audio.bark.* schema and a bark-pipeline
-  migration.
+- ~~`TRTF_BARK_*`~~ — migrated to `audio_bark.*` in tick 15.
 - `TRTF_MAGPIE_GREEDY`, `TRTF_MAGPIE_CFG_SCALE`, `TRTF_MAGPIE_TEMPERATURE`,
   `TRTF_MAGPIE_FINISHED_LIMIT`, `TRTF_MAGPIE_SEED`,
   `TRTF_MAGPIE_MAX_SOURCE_POS` — magpie_pipeline family-specific;
@@ -428,6 +426,24 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 15 (2026-04-20)
+- New `audio_bark.*` cluster: 3 fields (dump_path, greedy, seed),
+  session / platform layers only. Fifth schema in the registry.
+- Pattern-identical to runtime.* (schema + mirror + anchor + reader
+  migration):
+    * `BarkConfig` grows `dump_path` (std::string) and `seed` (int64_t,
+      -1 sentinel) alongside the existing `greedy` bool.
+    * `bark_pipeline.cpp` deletes three env-var helper functions
+      (`maybe_dump_tokens` env read, `maybe_enable_bark_greedy`,
+      env portion of `maybe_seed_bark_rng`) and replaces them with
+      parameter-passing variants.
+    * `bark_plugin.cpp` reads the three fields from
+      `ctx.runtime_config` with try/catch fallback to defaults.
+- Gates: 7 relevant ctests pass (config trio + triattention + bark +
+  both C ABI regressions); full build clean; `grep TRTF_BARK_` returns
+  only documentation comments.
+- Commit: pending end-of-tick.
 
 ### Tick 14 (2026-04-20)
 - New `runtime.*` cluster (not originally scoped): two fields,

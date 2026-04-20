@@ -4,8 +4,13 @@
 #include "runtime/pipelines/bark_pipeline.h"
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/config/config_bundle.h"
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
+
+#include <cstdint>
+#include <exception>
+#include <string>
 
 #if TRTF_HAS_TRT
 
@@ -57,6 +62,20 @@ class BarkPlugin final : public IPipelinePlugin {
         bark_cfg.fine_n_lm_heads = extract_json_int(json, "fine_n_lm_heads", 7);
         bark_cfg.fine_codebook_size = extract_json_int(json, "fine_codebook_size", 1056);
         bark_cfg.fine_seq_length = extract_json_int(json, "fine_seq_length", 0);
+
+        // audio_bark.* namespace (replaces TRTF_BARK_{DUMP,GREEDY,SEED}).
+        if (ctx.runtime_config != nullptr) {
+            try {
+                bark_cfg.dump_path = ctx.runtime_config->get<std::string>(
+                    "audio_bark", "dump_path");
+                bark_cfg.greedy = ctx.runtime_config->get<bool>(
+                    "audio_bark", "greedy");
+                bark_cfg.seed = ctx.runtime_config->get<std::int64_t>(
+                    "audio_bark", "seed");
+            } catch (const std::exception&) {
+                // Schema not registered or type mismatch — stay at defaults.
+            }
+        }
 
         // Create KvCaches for semantic and coarse stages
         int32_t sem_kv_dim = compute_kv_dim(ctx.config);

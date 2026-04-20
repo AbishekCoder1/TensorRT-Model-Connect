@@ -74,37 +74,28 @@ void mask_coarse_logits_for_codebook(std::vector<float>& logits, int32_t codeboo
     }
 }
 
-void maybe_dump_tokens(const char* suffix, const std::vector<int32_t>& tokens) {
-    const char* dump_path = std::getenv("TRTF_BARK_DUMP");
-    if (dump_path == nullptr)
-        return;
-    std::ofstream dump(std::string(dump_path) + suffix);
-    for (int32_t token : tokens) {
+// Dump tokens to ``<dump_path><suffix>`` when dump_path is non-empty.
+// Replaces the TRTF_BARK_DUMP env var. Value flows in through the
+// ``audio_bark.dump_path`` schema field.
+void maybe_dump_tokens(const std::string& dump_path, const char* suffix,
+                       const std::vector<int32_t>& tokens)
+{
+    if (dump_path.empty()) return;
+    std::ofstream dump(dump_path + suffix);
+    for (int32_t token : tokens)
+    {
         dump << token << "\n";
     }
 }
 
-void maybe_enable_bark_greedy(BarkConfig& cfg) {
-    const char* env = std::getenv("TRTF_BARK_GREEDY");
-    if (env != nullptr && std::string(env) == "1") {
-        cfg.greedy = true;
-    }
-}
-
-void maybe_seed_bark_rng(std::mt19937& rng) {
-    const char* env = std::getenv("TRTF_BARK_SEED");
-    if (env == nullptr || *env == '\0')
-        return;
-    errno = 0;
-    char* end = nullptr;
-    const unsigned long parsed = std::strtoul(env, &end, 10);
-    if (errno == 0 && end != env && *end == '\0') {
-        const auto seed = static_cast<std::mt19937::result_type>(parsed);
-        rng.seed(seed);
-        std::cerr << "[trtf] Bark: sampler seed=" << seed << std::endl;
-        return;
-    }
-    std::cerr << "[trtf] Bark: ignoring invalid TRTF_BARK_SEED='" << env << "'" << std::endl;
+// Seed the sampler RNG from audio_bark.seed. A value of -1 (default)
+// means "leave the RNG at its constructed state." Replaces TRTF_BARK_SEED.
+void maybe_seed_bark_rng(std::mt19937& rng, std::int64_t seed)
+{
+    if (seed < 0) return;
+    const auto converted = static_cast<std::mt19937::result_type>(seed);
+    rng.seed(converted);
+    std::cerr << "[trtf] Bark: sampler seed=" << converted << std::endl;
 }
 
 std::vector<float> synthesize_simple_waveform(const std::vector<int32_t>& codes_flat,
@@ -217,8 +208,10 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt, const Genera
 
     int32_t max_tokens = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : 768;
 
-    maybe_enable_bark_greedy(config_);
-    maybe_seed_bark_rng(rng_);
+    // config_.greedy and config_.seed arrive pre-populated from the
+    // audio_bark.* namespace (see bark_plugin.cpp). No env-var reads
+    // anywhere in this file.
+    maybe_seed_bark_rng(rng_, config_.seed);
 
     std::cerr << "[trtf] Bark: starting pipeline with " << input_ids.size()
               << " text tokens, max_semantic=" << max_tokens << (config_.greedy ? " (greedy)" : "")
@@ -432,9 +425,9 @@ std::vector<int32_t> BarkPipeline::run_semantic(const std::vector<int32_t>& text
         run_step_with_token(*semantic_, *semantic_state_, token, logits);
     }
 
-    std::cerr << "[trtf] Bark semantic: generated " << semantic_tokens.size() << " tokens"
-              << std::endl;
-    maybe_dump_tokens(".sem_tokens", semantic_tokens);
+    std::cerr << "[trtf] Bark semantic: generated " << semantic_tokens.size()
+              << " tokens" << std::endl;
+    maybe_dump_tokens(config_.dump_path, ".sem_tokens", semantic_tokens);
     return semantic_tokens;
 }
 
@@ -499,8 +492,9 @@ std::vector<int32_t> BarkPipeline::run_coarse(const std::vector<int32_t>& semant
         }
     }
 
-    std::cerr << "[trtf] Bark coarse: generated " << x_coarse.size() << " tokens" << std::endl;
-    maybe_dump_tokens(".coarse_tokens", x_coarse);
+    std::cerr << "[trtf] Bark coarse: generated " << x_coarse.size()
+              << " tokens" << std::endl;
+    maybe_dump_tokens(config_.dump_path, ".coarse_tokens", x_coarse);
     return x_coarse;
 }
 
