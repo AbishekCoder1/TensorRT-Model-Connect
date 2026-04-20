@@ -187,15 +187,17 @@ imports, `cli.py`, and all internal imports updated.
       ("triattention")` returns a non-null schema with exactly the 24
       expected fields. Also constructs the schema directly via
       `make_triattention_schema()` for diagnostic independence.
-- [ ] Cluster A — runtime consumes the schema
-  - Plumb `ConfigBundle` through `PipelineContext`, build it in
-    `pipeline_factory.cpp` by merging CLI contribution + platform
-    profile + bundle `defaults:`. No per-cluster wiring in that
-    commit — just the generic ctx plumbing.
-  - Then swap `triattention_override_*` helpers and the
+- [~] Cluster A — runtime consumes the schema
+  - [x] Plumb `ConfigBundle` through `PipelineContext`, build it in
+    `pipeline_factory.cpp` by merging bundle `defaults:` + optional
+    CLI session contribution (commit TBD). Unknown-namespace defaults
+    are dropped with a diagnostic so old bundles keep loading.
+    `effective_config.json` is now emitted next to the bundle path at
+    pipeline construction time.
+  - [ ] Swap `triattention_override_*` helpers and the
     `parse_triattention_bundle_config` override suffix for
-    `ctx.config->get<...>("triattention", "…")` queries.
-  - Delete the TRTF_TRIATTN_* env-var readers and the helpers.
+    `ctx.runtime_config->get<...>("triattention", "…")` queries.
+  - [ ] Delete the TRTF_TRIATTN_* env-var readers and the helpers.
 - [ ] Cluster B: `decode_policy.*` (build-time layer only)
 - [ ] Cluster C: `text_trace.*`
 - [ ] Cluster D: `profile.*` (dynamic KV profile rows)
@@ -354,6 +356,54 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 9 (2026-04-20)
+- Plumbing commit: ConfigBundle now flows from LoadOptions → factory →
+  PipelineContext. No cluster-specific reader swap yet — that's tick 10.
+- `include/trtf/pipeline.h`: `LoadOptions` gains `config_path` +
+  `set_tokens` (both empty by default, so existing callers see no
+  behavioral change).
+- `include/trtf/runtime/pipeline_plugin.h`: `PipelineContext` gains
+  `const config::ConfigBundle* runtime_config{nullptr}`. Forward-declared
+  so plugins that don't need config don't drag the header in.
+- `include/trtf/config/cli_support.h` + cli_support.cpp:
+  * `filter_to_registered_namespaces` — drops unknown-namespace values
+    from a LayerContribution with a stderr warning. Used for the
+    BundleDefault layer so pre-migration bundles whose defaults mention
+    clusters not yet registered on this build don't fail-fast.
+  * `resolve_pipeline_config(header_json, config_path, set_tokens,
+    registry)` — end-to-end: extracts BundleDefault, filters it,
+    adds SessionRequest from CLI inputs, merges via ConfigBundle::build.
+    Returns both the bundle and the contribution list so callers can
+    feed it into `write_effective_config_next_to`.
+- `src/runtime/registry/pipeline_factory.cpp`:
+  * `try_resolve_runtime_config` helper — best-effort. If resolution
+    throws (e.g., malformed CLI input) the error goes to stderr and
+    the factory proceeds with `runtime_config = nullptr`. Plugins that
+    check `if (ctx.runtime_config)` get a clean no-op fallback.
+  * `lookup_plugin_or_throw` helper — extracted so the original
+    from_bundle function stays under CCN 10 (was 12 after inline
+    config-resolution).
+  * `effective_config.json` is now written alongside the bundle as part
+    of `try_resolve_runtime_config`, so every session produces the
+    "what did I actually run with" artifact.
+- Tests added: 3 new cases in `test_config_cli_support.cpp`
+  (`test_filter_drops_unregistered_namespaces`,
+  `test_resolve_pipeline_config_merges_bundle_and_session`,
+  `test_resolve_pipeline_config_tolerates_unknown_defaults`). Both C
+  ABI regression tests (`test_c_abi_entry`, `test_c_abi_runtime_regression`)
+  still pass — `TrtfPipelineOptions` struct layout unchanged.
+- Gates: 6 config+cabi ctests pass, full build clean, CCN on
+  `src/runtime/config/` + `src/runtime/registry/` ≤ 10.
+- Commit: pending end-of-tick.
+- Next tick (10) — swap TriAttention env-var readers for
+  `ctx.runtime_config->get<T>("triattention", …)` queries. Target
+  `src/runtime/core/triattention_kv_cache.cpp` and
+  `src/runtime/core/triattention_kv_cache.h`. Delete the env-var
+  helpers (`triattention_override_*` and bare `std::getenv` reads) in
+  the same commit. Scope gate: the Python builder path still provides
+  a way to populate the bundle `defaults:` block for TriAttention
+  fields — that's builder-side wiring, also tick 10.
 
 ### Tick 8 (2026-04-20)
 - Phase 4 Cluster A — schema declaration (no runtime wiring yet).

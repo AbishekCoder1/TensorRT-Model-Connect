@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -671,6 +672,58 @@ LayerContribution bundle_defaults_contribution(const std::string& header_json)
     LayerContribution out;
     out.layer = Layer::BundleDefault;
     out.values = extract_bundle_defaults(header_json);
+    return out;
+}
+
+std::vector<std::string> filter_to_registered_namespaces(
+    LayerContribution& contrib, const SchemaRegistry& registry)
+{
+    std::vector<std::string> dropped;
+    for (auto it = contrib.values.begin(); it != contrib.values.end(); )
+    {
+        if (registry.lookup(it->first) == nullptr)
+        {
+            std::cerr << "[trtf.config] dropping bundle default for "
+                      << "unregistered namespace: " << it->first
+                      << " (layer " << layer_name(contrib.layer) << ")\n";
+            dropped.push_back(it->first);
+            it = contrib.values.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    return dropped;
+}
+
+PipelineConfigResolution resolve_pipeline_config(
+    const std::string& header_json,
+    const std::string& config_path,
+    const std::vector<std::string>& set_tokens,
+    const SchemaRegistry& registry)
+{
+    PipelineConfigResolution out;
+
+    // BundleDefault layer. Filter unknown namespaces so old bundles whose
+    // clusters haven't been migrated yet don't fail-fast at load time.
+    LayerContribution bundle_defaults = bundle_defaults_contribution(header_json);
+    filter_to_registered_namespaces(bundle_defaults, registry);
+    if (!bundle_defaults.values.empty())
+        out.contributions.push_back(bundle_defaults);
+
+    // SessionRequest layer (only if the caller supplied something).
+    if (!config_path.empty() || !set_tokens.empty())
+    {
+        LayeredFileValues file_values;
+        if (!config_path.empty())
+            file_values = load_layered_file(config_path);
+        LayerContribution session = build_cli_contribution(
+            file_values, set_tokens, Layer::SessionRequest, registry);
+        out.contributions.push_back(session);
+    }
+
+    out.bundle = ConfigBundle::build(out.contributions, registry);
     return out;
 }
 

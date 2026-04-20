@@ -432,6 +432,71 @@ void test_extract_bundle_defaults_key_in_string_not_confused()
           "extract_defaults: skips key-like string literal");
 }
 
+void test_filter_drops_unregistered_namespaces()
+{
+    SchemaRegistry& reg = SchemaRegistry::instance();
+    reg.clear_for_testing();
+    reg.register_schema(Schema{"known", {int_field("f", 0, {Layer::BundleDefault})}});
+
+    LayerContribution contrib;
+    contrib.layer = Layer::BundleDefault;
+    contrib.values["known"]["f"] = std::any{std::int64_t{1}};
+    contrib.values["stranger_danger"]["f"] = std::any{std::int64_t{2}};
+
+    auto dropped = trtf::config::filter_to_registered_namespaces(contrib, reg);
+    check(dropped.size() == 1 && dropped.front() == "stranger_danger",
+          "filter: dropped unknown namespace");
+    check(contrib.values.count("known") == 1 && contrib.values.count("stranger_danger") == 0,
+          "filter: known kept, unknown removed");
+}
+
+void test_resolve_pipeline_config_merges_bundle_and_session(std::string tmp_dir)
+{
+    namespace fs = std::filesystem;
+    register_demo_schema();
+    const std::string header = R"({"defaults": {"triattention": {
+        "kv_budget": 4096, "protect_prefill": false
+    }}})";
+
+    // Profile file supplies a platform-ish override here, layered as session.
+    fs::path profile = fs::path(tmp_dir) / "profile.json";
+    std::ofstream(profile) << R"({"triattention": {"dump_scores_path": "/tmp/x"}})";
+
+    auto res = trtf::config::resolve_pipeline_config(
+        header, profile.string(), {"triattention.kv_budget=8192"});
+
+    // bundle_default + session contributions both land
+    check(res.contributions.size() == 2, "resolve: two contributions");
+    // Session beats bundle default; bundle default preserved where session silent.
+    check(res.bundle.get<std::int32_t>("triattention", "kv_budget") == 8192,
+          "resolve: session wins");
+    check(res.bundle.get<bool>("triattention", "protect_prefill") == false,
+          "resolve: bundle default preserved");
+    check(res.bundle.get<std::string>("triattention", "dump_scores_path") == "/tmp/x",
+          "resolve: session field routed");
+    check(res.bundle.source_of("triattention", "kv_budget") == Layer::SessionRequest,
+          "resolve: source kv_budget");
+    check(res.bundle.source_of("triattention", "protect_prefill") == Layer::BundleDefault,
+          "resolve: source protect_prefill");
+}
+
+void test_resolve_pipeline_config_tolerates_unknown_defaults()
+{
+    SchemaRegistry& reg = SchemaRegistry::instance();
+    reg.clear_for_testing();
+    reg.register_schema(Schema{"known", {int_field("f", 5, {Layer::BundleDefault})}});
+    const std::string header = R"({"defaults": {
+        "known": {"f": 10},
+        "not_yet_migrated": {"old": 1}
+    }})";
+    auto res = trtf::config::resolve_pipeline_config(header, "", {});
+    // Known namespace retained; unknown dropped at filter step.
+    check(res.bundle.get<std::int64_t>("known", "f") == 10,
+          "resolve: known ns kept");
+    check(res.contributions.size() == 1,
+          "resolve: only bundle_default layer survives");
+}
+
 void test_bundle_defaults_contribution_produces_bundle_default_layer()
 {
     register_demo_schema();
@@ -496,6 +561,15 @@ int main()
     test_extract_bundle_defaults_absent_block();
     test_extract_bundle_defaults_key_in_string_not_confused();
     test_bundle_defaults_contribution_produces_bundle_default_layer();
+    test_filter_drops_unregistered_namespaces();
+    test_resolve_pipeline_config_tolerates_unknown_defaults();
+    {
+        namespace fs = std::filesystem;
+        fs::path tmp = fs::temp_directory_path() / "test_resolve_pipeline";
+        fs::remove_all(tmp);
+        fs::create_directories(tmp);
+        test_resolve_pipeline_config_merges_bundle_and_session(tmp.string());
+    }
 
     // Writing to a temp dir — resolve at runtime.
     {

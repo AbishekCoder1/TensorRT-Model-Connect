@@ -53,6 +53,9 @@ struct BaseConfig {
 // Parse universal base config from config.json text.
 BaseConfig parse_base_config(const std::string& config_text, int32_t max_cache_length_override);
 
+// Forward declaration; full type in trtf/config/config_bundle.h.
+namespace config { class ConfigBundle; }
+
 // Context passed to each plugin's create() method. Non-owning references
 // to the bundle and parsed base config. The BundleFile must outlive the
 // pipeline being created (it does — PipelineFactory::from_bundle() holds it).
@@ -66,6 +69,11 @@ struct PipelineContext {
     const std::string& runtime_cache_path; // RTX: JIT kernel cache file path
     bool cuda_graphs;                      // RTX: whole-graph CUDA capture
     std::uint64_t kv_cache_size_bytes{0};  // 0 = use bundle max_cache_length (TriAttention)
+    // Resolved layered config (schema-driven). Nullable: plugins not yet
+    // migrated to the registry ignore it; migrated plugins query their
+    // namespace via ctx.runtime_config->get<T>("ns", "field"). The bundle
+    // the pointer refers to is owned by the factory and outlives create().
+    const ::trtf::config::ConfigBundle* runtime_config{nullptr};
 };
 
 // Plugin interface. Each plugin registers itself with the PipelineRegistry

@@ -110,4 +110,30 @@ LayeredFileValues extract_bundle_defaults(const std::string& header_json);
 // Convenience: wrap ``extract_bundle_defaults`` as a BundleDefault layer.
 LayerContribution bundle_defaults_contribution(const std::string& header_json);
 
+// Drop namespaces from ``contrib`` that aren't known to ``registry`` —
+// typically used for the BundleDefault layer so old bundles carrying
+// defaults for clusters that haven't migrated yet don't fail-fast.
+//
+// Emits one stderr line per dropped namespace (informational — not an
+// error). Mutates ``contrib`` in place and returns the list of
+// dropped namespace names for diagnostics.
+std::vector<std::string> filter_to_registered_namespaces(
+    LayerContribution& contrib,
+    const SchemaRegistry& registry = SchemaRegistry::instance());
+
+// High-level helper used by PipelineFactory. Takes the bundle's raw
+// header JSON plus the session-layer CLI inputs and produces a merged
+// ConfigBundle ready to attach to PipelineContext. Also returns the
+// full contribution list so callers can feed it into
+// ``write_effective_config_next_to``.
+struct PipelineConfigResolution {
+    ConfigBundle bundle;
+    std::vector<LayerContribution> contributions;
+};
+PipelineConfigResolution resolve_pipeline_config(
+    const std::string& header_json,
+    const std::string& config_path,
+    const std::vector<std::string>& set_tokens,
+    const SchemaRegistry& registry = SchemaRegistry::instance());
+
 } // namespace trtf::config

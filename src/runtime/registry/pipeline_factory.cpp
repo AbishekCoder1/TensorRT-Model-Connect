@@ -2,12 +2,17 @@
 
 #include "bundle/bundle_format.h"
 #include "runtime/backend/backend_loader.h"
+#include "trtf/config/cli_support.h"
+#include "trtf/config/config_bundle.h"
+#include "trtf/config/schema_registry.h"
 #include "trtf/runtime/pipeline_plugin.h"
 #include "trtf/runtime/pipeline_registry.h"
 #include "trtf/runtime/trt_backend.h"
 #include "utils/json_helpers.h"
 
+#include <exception>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -62,6 +67,42 @@ std::string normalize_legacy_strategy(const std::string& strategy, const std::st
     return strategy;
 }
 
+IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy)
+{
+    auto* plugin = PipelineRegistry::instance().lookup(strategy);
+    if (plugin != nullptr) return plugin;
+    std::string available;
+    for (const auto& s : PipelineRegistry::instance().registered_strategies())
+    {
+        if (!available.empty()) available += ", ";
+        available += s;
+    }
+    throw std::runtime_error(
+        "No plugin registered for runtime_strategy: " + strategy +
+        " (available: " + available + ")");
+}
+
+std::optional<config::ConfigBundle> try_resolve_runtime_config(
+    const std::string& config_text,
+    const std::string& bundle_path,
+    const std::string& config_path,
+    const std::vector<std::string>& set_tokens)
+{
+    try
+    {
+        auto resolution = config::resolve_pipeline_config(
+            config_text, config_path, set_tokens);
+        config::write_effective_config_next_to(resolution.bundle, bundle_path);
+        return std::move(resolution.bundle);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[trtf.config] Failed to resolve runtime config: "
+                  << e.what() << "\n          Proceeding with schema defaults.\n";
+        return std::nullopt;
+    }
+}
+
 #endif // TRTF_HAS_TRT
 
 } // namespace
@@ -94,26 +135,29 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
     IBackend* backend = BackendLoader::load(backend_name);
 
-    // Look up plugin in registry
-    auto* plugin = PipelineRegistry::instance().lookup(strategy);
-    if (!plugin) {
-        auto registered = PipelineRegistry::instance().registered_strategies();
-        std::string available;
-        for (const auto& s : registered) {
-            if (!available.empty())
-                available += ", ";
-            available += s;
-        }
-        throw std::runtime_error("No plugin registered for runtime_strategy: " + strategy +
-                                 " (available: " + available + ")");
-    }
+    auto* plugin = lookup_plugin_or_throw(strategy);
 
     // Parse base config and dispatch to plugin
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy; // use normalized strategy
 
-    PipelineContext ctx{bundle,      base_cfg, config_text,        hf_python,
-                        bundle_path, backend,  runtime_cache_path, cuda_graphs};
+    // Resolve the layered runtime config (BUNDLE_DEFAULT + SESSION_REQUEST).
+    // Best-effort: a malformed input prints to stderr and falls back to
+    // schema defaults so plugin construction isn't blocked.
+    std::optional<config::ConfigBundle> resolved =
+        try_resolve_runtime_config(config_text, bundle_path, /*config_path=*/"",
+                                   /*set_tokens=*/{});
+
+    PipelineContext ctx{bundle,
+                        base_cfg,
+                        config_text,
+                        hf_python,
+                        bundle_path,
+                        backend,
+                        runtime_cache_path,
+                        cuda_graphs,
+                        /*kv_cache_size_bytes=*/0,
+                        resolved ? &*resolved : nullptr};
     auto pipeline = plugin->create(ctx);
 
     std::cerr << "[trtf] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
