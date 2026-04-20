@@ -187,17 +187,18 @@ imports, `cli.py`, and all internal imports updated.
       ("triattention")` returns a non-null schema with exactly the 24
       expected fields. Also constructs the schema directly via
       `make_triattention_schema()` for diagnostic independence.
-- [~] Cluster A — runtime consumes the schema
+- [x] Cluster A — runtime consumes the schema
   - [x] Plumb `ConfigBundle` through `PipelineContext`, build it in
     `pipeline_factory.cpp` by merging bundle `defaults:` + optional
-    CLI session contribution (commit TBD). Unknown-namespace defaults
-    are dropped with a diagnostic so old bundles keep loading.
+    CLI session contribution (commit `f5a2ac7a`). Unknown-namespace
+    defaults are dropped with a diagnostic so old bundles keep loading.
     `effective_config.json` is now emitted next to the bundle path at
     pipeline construction time.
-  - [ ] Swap `triattention_override_*` helpers and the
+  - [x] Swap `triattention_override_*` helpers and the
     `parse_triattention_bundle_config` override suffix for
-    `ctx.runtime_config->get<...>("triattention", "…")` queries.
-  - [ ] Delete the TRTF_TRIATTN_* env-var readers and the helpers.
+    `ctx.runtime_config->get<...>("triattention", "…")` queries
+    (commit TBD).
+  - [x] Delete the TRTF_TRIATTN_* env-var readers and the helpers.
 - [ ] Cluster B: `decode_policy.*` (build-time layer only)
 - [ ] Cluster C: `text_trace.*`
 - [ ] Cluster D: `profile.*` (dynamic KV profile rows)
@@ -356,6 +357,58 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 10 (2026-04-20)
+- Cluster A migration complete: TriAttention now reads its config from
+  the registry only. TRTF_TRIATTN_* env vars deleted entirely; the only
+  supported input channels are bundle `defaults:`, CLI `--config <file>`,
+  and `--set triattention.<field>=<value>`.
+- `include/trtf/runtime/triattention_kv_cache.h`:
+  * `TriAttentionConfig` grows 12 debug/profile fields (debug, profile,
+    runtime_bucket_rows, disable_gpu_selection, disable_gpu_compaction,
+    disable_gpu_state, zero_tail, dump_keep_path, dump_compaction_index,
+    abort_after_dump, dump_score_cache, dump_score_values) — all
+    populated once at construction from the registry.
+  * `parse_triattention_bundle_config(config_json, max_cache_length,
+    runtime_config=nullptr)` signature grows an optional
+    `ConfigBundle*` parameter; legacy JSON path still works for
+    pre-migration bundles that lack `defaults:`.
+- `src/runtime/core/triattention_kv_cache.cpp`:
+  * Deleted `triattention_debug_enabled`, `triattention_profile_enabled`,
+    `triattention_disable_gpu_{selection,compaction,state}`,
+    `triattention_dump_{keep_path,compaction_index,score_cache_enabled,
+    score_values_enabled}`, `triattention_abort_after_dump`,
+    `triattention_zero_tail_enabled`, `triattention_runtime_bucket_rows`.
+  * Deleted `triattention_override_{enabled,int,bool,score_aggregation}`.
+  * Two new helpers: `overlay_core_runtime_from_registry` and
+    `fill_debug_from_registry` — apply-if-non-default-layer semantics
+    via templated `apply_layer_value<T>`. Session/platform/bundle_default
+    layers win; schema_default reads are skipped so legacy JSON values
+    keep precedence for unset fields.
+  * All ~20 scattered `triattention_*_enabled()` call sites rewritten
+    to read `config_.<field>` directly.
+- `src/runtime/plugins/decoder_plugin.cpp`:
+  * Single call site updated to pass `ctx.runtime_config` through to
+    `parse_triattention_bundle_config`.
+- Gates: full build clean with `-Wall -Wextra -Wpedantic`. All 7
+  relevant ctests pass — `test_triattention_kv_cache`,
+  `test_config_schema_registry`, `test_config_cli_support`,
+  `test_config_schemas_triattention`, `test_pipeline_registry`, both
+  C ABI regression tests. CCN on the new helpers is ≤ 3
+  (the 69/68/64/49 reported by the gate are pre-existing functions —
+  `compact_existing_cache`, `parse_triattention_stats_json`,
+  `select_keep_indices_host/gpu` — grandfathered; the refactor only
+  adds low-complexity helpers).
+- The env-var grep `grep -rnE 'TRTF_TRIATTN_' src/ include/` now
+  returns only comment matches (documentation of what was removed).
+- Commit: pending end-of-tick.
+- Next tick (11) — Python builder side: extend
+  `trtf_build/trtf_build/engine_builder.py` (or the relevant plugin)
+  to populate the bundle `defaults:` block for `triattention.*` when
+  the user supplies `--config` / `--set` at build time. Without that,
+  new bundles won't carry TriAttention config in the generic
+  registry-compatible slot. After that, Cluster B (`decode_policy.*`)
+  starts — smaller since it's essentially just `force_manual_attention`.
 
 ### Tick 9 (2026-04-20)
 - Plumbing commit: ConfigBundle now flows from LoadOptions → factory →

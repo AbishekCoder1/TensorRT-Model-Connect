@@ -1,5 +1,7 @@
 #include "trtf/runtime/triattention_kv_cache.h"
 
+#include "trtf/config/config_bundle.h"
+#include "trtf/config/schema_registry.h"
 #include "trtf/runtime/trt_module.h"
 #ifdef TRTF_HAS_CUDA_KERNELS
 #include "runtime/core/triattention_kernels.h"
@@ -153,89 +155,53 @@ float complex_abs(float real, float imag) {
     return std::sqrt(std::max(real * real + imag * imag, kAbsFloor));
 }
 
-bool triattention_debug_enabled() {
-    const char* value = std::getenv("TRTF_TRIATTN_DEBUG");
-    return value != nullptr && value[0] == '1';
+// --- Registry-backed value reader ------------------------------------------
+//
+// apply_layer_value_<T> overlays a value from the runtime config onto an
+// out-param IFF the registry has a non-default layer value for the field
+// (i.e. something above SchemaDefault contributed). When the source is
+// SchemaDefault we leave the out-param alone so legacy bundle-JSON values
+// keep precedence for fields the caller never touched from the CLI.
+//
+// Previously this file contained a cluster of std::getenv readers
+// (triattention_debug_enabled, triattention_profile_enabled, etc.) plus
+// override helpers that patched TriAttentionConfig with
+// TRTF_TRIATTN_OVERRIDE_* values. All of them are deleted here — values
+// now flow through the config registry exclusively.
+template <typename T>
+bool registry_has_value(const ::trtf::config::ConfigBundle& bundle,
+                         const std::string& field)
+{
+    try
+    {
+        return bundle.source_of("triattention", field)
+               != ::trtf::config::Layer::SchemaDefault;
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
 }
 
-bool triattention_profile_enabled() {
-    const char* value = std::getenv("TRTF_TRIATTN_PROFILE");
-    return value != nullptr && value[0] == '1';
+template <typename T>
+void apply_layer_value(const ::trtf::config::ConfigBundle& bundle,
+                        const std::string& field, T& out)
+{
+    if (!registry_has_value<T>(bundle, field)) return;
+    try { out = bundle.get<T>("triattention", field); }
+    catch (const std::exception&) { /* type mismatch — skip */ }
 }
 
-bool triattention_disable_gpu_selection() {
-    const char* value = std::getenv("TRTF_TRIATTN_DISABLE_GPU_SELECT");
-    return value != nullptr && value[0] == '1';
-}
-
-bool triattention_disable_gpu_compaction() {
-    const char* value = std::getenv("TRTF_TRIATTN_DISABLE_GPU_COMPACT");
-    return value != nullptr && value[0] == '1';
-}
-
-bool triattention_disable_gpu_state() {
-    const char* value = std::getenv("TRTF_TRIATTN_DISABLE_GPU_STATE");
-    return value != nullptr && value[0] == '1';
-}
-
-const char* triattention_dump_keep_path() {
-    return std::getenv("TRTF_TRIATTN_DUMP_KEEP_PATH");
-}
-
-int32_t triattention_dump_compaction_index() {
-    const char* value = std::getenv("TRTF_TRIATTN_DUMP_COMPACTION_INDEX");
-    if (value == nullptr || value[0] == '\0')
-        return 0;
-    return std::max(0, std::atoi(value));
-}
-
-bool triattention_abort_after_dump() {
-    const char* value = std::getenv("TRTF_TRIATTN_ABORT_AFTER_DUMP");
-    return value != nullptr && value[0] == '1';
-}
-
-bool triattention_dump_score_cache_enabled() {
-    const char* value = std::getenv("TRTF_TRIATTN_DUMP_SCORE_CACHE");
-    return value != nullptr && value[0] == '1';
-}
-
-bool triattention_dump_score_values_enabled() {
-    const char* value = std::getenv("TRTF_TRIATTN_DUMP_SCORE_VALUES");
-    return value != nullptr && value[0] == '1';
-}
-
-bool triattention_zero_tail_enabled() {
-    const char* value = std::getenv("TRTF_TRIATTN_ZERO_TAIL");
-    return value != nullptr && value[0] == '1';
-}
-
-bool triattention_override_enabled(bool current) {
-    const char* value = std::getenv("TRTF_TRIATTN_FORCE_ENABLE");
-    if (value == nullptr || value[0] == '\0')
-        return current;
-    return value[0] == '1';
-}
-
-int32_t triattention_override_int(const char* env_name, int32_t current) {
-    const char* value = std::getenv(env_name);
-    if (value == nullptr || value[0] == '\0')
-        return current;
-    return std::atoi(value);
-}
-
-bool triattention_override_bool(const char* env_name, bool current) {
-    const char* value = std::getenv(env_name);
-    if (value == nullptr || value[0] == '\0')
-        return current;
-    return value[0] == '1';
-}
-
-TriAttentionScoreAggregation triattention_override_score_aggregation(
-    const char* env_name, TriAttentionScoreAggregation current) {
-    const char* value = std::getenv(env_name);
-    if (value == nullptr || value[0] == '\0')
-        return current;
-    return parse_score_aggregation(value);
+void apply_aggregation_from_registry(const ::trtf::config::ConfigBundle& bundle,
+                                      const std::string& field,
+                                      TriAttentionScoreAggregation& out)
+{
+    if (!registry_has_value<std::string>(bundle, field)) return;
+    try
+    {
+        out = parse_score_aggregation(bundle.get<std::string>("triattention", field));
+    }
+    catch (const std::exception&) { /* keep previous value */ }
 }
 
 using Clock = std::chrono::steady_clock;
@@ -264,54 +230,91 @@ int32_t round_up_rows(int32_t value, int32_t bucket, int32_t maximum) {
     return std::min(rounded, maximum);
 }
 
-int32_t triattention_runtime_bucket_rows(int32_t /*divide_length*/) {
-    const char* value = std::getenv("TRTF_TRIATTN_RUNTIME_BUCKET_ROWS");
-    if (value != nullptr && value[0] != '\0')
-        return std::max(std::atoi(value), 1);
-    return 32;
+} // namespace
+
+namespace {
+
+// Overlay core-runtime fields from the registry on top of whatever the
+// legacy JSON path produced. Session > Platform > BundleDefault > BuildTime
+// win; SchemaDefault reads are skipped so JSON-only bundles keep their
+// values.
+void overlay_core_runtime_from_registry(
+    TriAttentionConfig& cfg, const ::trtf::config::ConfigBundle& bundle)
+{
+    apply_layer_value<bool>(bundle,         "enabled",             cfg.enabled);
+    apply_layer_value<std::int32_t>(bundle, "kv_budget",           cfg.kv_budget);
+    apply_layer_value<std::int32_t>(bundle, "divide_length",       cfg.divide_length);
+    apply_layer_value<std::int32_t>(bundle, "recent_window",       cfg.recent_window);
+    apply_aggregation_from_registry(bundle, "score_aggregation",      cfg.score_aggregation);
+    apply_aggregation_from_registry(bundle, "per_layer_aggregation",  cfg.per_layer_aggregation);
+    apply_layer_value<bool>(bundle,         "count_prompt_tokens", cfg.count_prompt_tokens);
+    apply_layer_value<bool>(bundle,         "protect_prefill",     cfg.protect_prefill);
+    apply_layer_value<bool>(bundle,         "disable_mlr",         cfg.disable_mlr);
+    apply_layer_value<bool>(bundle,         "disable_trig",        cfg.disable_trig);
+    apply_layer_value<std::string>(bundle,  "stats_section",       cfg.stats_section);
+    apply_layer_value<std::int32_t>(bundle, "offset_max_length",   cfg.offset_max_length);
+}
+
+// Populate the debug/profile fields from the registry. These have no
+// legacy JSON representation — they previously came from
+// TRTF_TRIATTN_* env vars, which are now gone.
+void fill_debug_from_registry(
+    TriAttentionConfig& cfg, const ::trtf::config::ConfigBundle& bundle)
+{
+    apply_layer_value<bool>(bundle,         "debug",                  cfg.debug);
+    apply_layer_value<bool>(bundle,         "profile",                cfg.profile);
+    apply_layer_value<std::int32_t>(bundle, "runtime_bucket_rows",    cfg.runtime_bucket_rows);
+    apply_layer_value<bool>(bundle,         "disable_gpu_selection",  cfg.disable_gpu_selection);
+    apply_layer_value<bool>(bundle,         "disable_gpu_compaction", cfg.disable_gpu_compaction);
+    apply_layer_value<bool>(bundle,         "disable_gpu_state",      cfg.disable_gpu_state);
+    apply_layer_value<bool>(bundle,         "zero_tail",              cfg.zero_tail);
+    apply_layer_value<std::string>(bundle,  "dump_keep_path",         cfg.dump_keep_path);
+    apply_layer_value<std::int32_t>(bundle, "dump_compaction_index",  cfg.dump_compaction_index);
+    apply_layer_value<bool>(bundle,         "abort_after_dump",       cfg.abort_after_dump);
+    apply_layer_value<bool>(bundle,         "dump_score_cache",       cfg.dump_score_cache);
+    apply_layer_value<bool>(bundle,         "dump_score_values",      cfg.dump_score_values);
 }
 
 } // namespace
 
-TriAttentionConfig parse_triattention_bundle_config(const std::string& config_json,
-                                                    int32_t max_cache_length) {
+TriAttentionConfig parse_triattention_bundle_config(
+    const std::string& config_json,
+    int32_t max_cache_length,
+    const ::trtf::config::ConfigBundle* runtime_config) {
     TriAttentionConfig cfg;
-    if (config_json.find("\"triattention\"") == std::string::npos)
-        return cfg;
 
-    json root = json::parse(config_json);
-    auto it = root.find("triattention");
-    if (it == root.end() || !it->is_object())
-        return cfg;
+    // Legacy bundle path: pull core fields from the root-level
+    // "triattention" object. New bundles route the same values through
+    // the generic `defaults:` block which becomes the BundleDefault layer
+    // in runtime_config.
+    if (config_json.find("\"triattention\"") != std::string::npos) {
+        json root = json::parse(config_json);
+        auto it = root.find("triattention");
+        if (it != root.end() && it->is_object()) {
+            cfg.enabled = it->value("enabled", false);
+            cfg.kv_budget = it->value("kv_budget", max_cache_length);
+            cfg.divide_length = it->value("divide_length", 128);
+            cfg.recent_window = it->value("recent_window", 128);
+            cfg.score_aggregation =
+                parse_score_aggregation(it->value("score_aggregation", std::string("mean")));
+            cfg.per_layer_aggregation =
+                parse_score_aggregation(it->value("per_layer_aggregation", std::string("mean")));
+            cfg.count_prompt_tokens = it->value("count_prompt_tokens", true);
+            cfg.protect_prefill = it->value("protect_prefill", true);
+            cfg.disable_mlr = it->value("disable_mlr", false);
+            cfg.disable_trig = it->value("disable_trig", false);
+            cfg.stats_section = it->value("stats_section", std::string("triattention_stats.json"));
+            cfg.offset_max_length = it->value("offset_max_length", 65536);
+        }
+    }
 
-    cfg.enabled = it->value("enabled", false);
-    cfg.kv_budget = it->value("kv_budget", max_cache_length);
-    cfg.divide_length = it->value("divide_length", 128);
-    cfg.recent_window = it->value("recent_window", 128);
-    cfg.score_aggregation =
-        parse_score_aggregation(it->value("score_aggregation", std::string("mean")));
-    cfg.per_layer_aggregation =
-        parse_score_aggregation(it->value("per_layer_aggregation", std::string("mean")));
-    cfg.count_prompt_tokens = it->value("count_prompt_tokens", true);
-    cfg.protect_prefill = it->value("protect_prefill", true);
-    cfg.disable_mlr = it->value("disable_mlr", false);
-    cfg.disable_trig = it->value("disable_trig", false);
-    cfg.stats_section = it->value("stats_section", std::string("triattention_stats.json"));
-    cfg.offset_max_length = it->value("offset_max_length", 65536);
-
-    cfg.enabled = triattention_override_enabled(cfg.enabled);
-    cfg.kv_budget = triattention_override_int("TRTF_TRIATTN_OVERRIDE_KV_BUDGET", cfg.kv_budget);
-    cfg.divide_length =
-        triattention_override_int("TRTF_TRIATTN_OVERRIDE_DIVIDE_LENGTH", cfg.divide_length);
-    cfg.recent_window =
-        triattention_override_int("TRTF_TRIATTN_OVERRIDE_RECENT_WINDOW", cfg.recent_window);
-    cfg.per_layer_aggregation = triattention_override_score_aggregation(
-        "TRTF_TRIATTN_OVERRIDE_PER_LAYER_AGGREGATION", cfg.per_layer_aggregation);
-    cfg.count_prompt_tokens =
-        triattention_override_bool("TRTF_TRIATTN_OVERRIDE_COUNT_PROMPT_TOKENS",
-                                   cfg.count_prompt_tokens);
-    cfg.protect_prefill =
-        triattention_override_bool("TRTF_TRIATTN_OVERRIDE_PROTECT_PREFILL", cfg.protect_prefill);
+    // Overlay registry-supplied values. Session/platform/bundle-default
+    // layers win; SchemaDefault reads are skipped. Debug fields come
+    // exclusively from the registry (no legacy JSON path).
+    if (runtime_config != nullptr) {
+        overlay_core_runtime_from_registry(cfg, *runtime_config);
+        fill_debug_from_registry(cfg, *runtime_config);
+    }
 
     if (!cfg.enabled)
         return cfg;
@@ -641,8 +644,8 @@ TriAttentionKvCache::TriAttentionKvCache(int32_t num_layers, int32_t num_kv_head
             std::iota(heads.begin(), heads.end(), 0);
         }
     }
-    profile_enabled_ = triattention_profile_enabled();
-    if (triattention_debug_enabled()) {
+    profile_enabled_ = config_.profile;
+    if (config_.debug) {
         std::cerr << "[trtf.triattention] init kv_budget=" << config_.kv_budget
                   << " divide_length=" << config_.divide_length
                   << " recent_window=" << config_.recent_window
@@ -680,7 +683,7 @@ TriAttentionKvCache::TriAttentionKvCache(int32_t num_layers, int32_t num_kv_head
         head_positions.reserve(static_cast<std::size_t>(max_length_));
 
 #ifdef TRTF_HAS_CUDA_KERNELS
-    if (!triattention_disable_gpu_state())
+    if (!config_.disable_gpu_state)
         initialize_gpu_state();
 #endif
     reset();
@@ -796,7 +799,7 @@ void TriAttentionKvCache::initialize_gpu_state() {
 }
 
 bool TriAttentionKvCache::can_use_gpu_selection() const {
-    if (triattention_disable_gpu_selection())
+    if (config_.disable_gpu_selection)
         return false;
     if (!candidate_indices_device_.ok() || !keep_indices_device_.ok() || !positions_device_.ok() ||
         !inv_freq_device_.ok() ||
@@ -828,7 +831,7 @@ void TriAttentionKvCache::build_attention_mask(std::vector<float>& mask) const {
 int32_t TriAttentionKvCache::preferred_cache_rows() const {
     if (!dynamic_binding_enabled_)
         return max_length_;
-    const int32_t bucket_rows = triattention_runtime_bucket_rows(config_.divide_length);
+    const int32_t bucket_rows = config_.runtime_bucket_rows;
     return round_up_rows(std::max(cache_length_, 1), bucket_rows, max_length_);
 }
 
@@ -1096,7 +1099,7 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
         static_cast<std::size_t>(cache_head_count_),
         std::vector<float>(static_cast<std::size_t>(total_tokens), 0.0F));
     std::vector<float> layer_aggregate_dump;
-    if (triattention_dump_score_values_enabled()) {
+    if (config_.dump_score_values) {
         layer_aggregate_dump.assign(
             static_cast<std::size_t>(num_layers_) * static_cast<std::size_t>(cache_head_count_) *
                 static_cast<std::size_t>(total_tokens),
@@ -1287,8 +1290,8 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
     }
     if (profile != nullptr)
         profile->score_ms += elapsed_ms(score_start);
-    if (triattention_dump_score_values_enabled()) {
-        const char* dump_path = triattention_dump_keep_path();
+    if (config_.dump_score_values) {
+        const char* dump_path = config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
         if (dump_path != nullptr && dump_path[0] != '\0') {
             std::vector<float> packed_aggregate(
                 static_cast<std::size_t>(cache_head_count_) * static_cast<std::size_t>(total_tokens),
@@ -1616,8 +1619,8 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
     std::vector<std::string> value_cache_files;
     std::vector<std::string> post_score_cache_files;
     std::vector<std::string> post_value_cache_files;
-    if (triattention_dump_score_cache_enabled()) {
-        const char* dump_path = triattention_dump_keep_path();
+    if (config_.dump_score_cache) {
+        const char* dump_path = config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
         if (dump_path != nullptr && dump_path[0] != '\0') {
             for (int32_t layer = 0; layer < num_layers_; ++layer) {
                 auto dump_cache = [&](const DeviceTensor& tensor, const char* pattern,
@@ -1665,7 +1668,7 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
     for (int32_t layer = 0; layer < num_layers_; ++layer) {
         bool keep_uploaded = false;
 #ifdef TRTF_HAS_CUDA_KERNELS
-        if (!triattention_disable_gpu_compaction() && keep_count > 0 && keep_indices_device_.ok()) {
+        if (!config_.disable_gpu_compaction && keep_count > 0 && keep_indices_device_.ok()) {
             const auto keep_bytes =
                 static_cast<std::size_t>(keep_indices.size()) * sizeof(int32_t);
             keep_uploaded = cudaMemcpyAsync(keep_indices_device_.data(), keep_indices.data(), keep_bytes,
@@ -1725,7 +1728,7 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
                 repack_bytes += head_block_bytes * 2U;
             }
         }
-        if (triattention_zero_tail_enabled() && old_cache_length > keep_count) {
+        if (config_.zero_tail && old_cache_length > keep_count) {
             const auto tail_offset = static_cast<std::size_t>(keep_count) * row_bytes;
             const auto tail_bytes =
                 static_cast<std::size_t>(old_cache_length - keep_count) * row_bytes;
@@ -1744,8 +1747,8 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
         cudaEventDestroy(repack_start);
         cudaEventDestroy(repack_stop);
     }
-    if (triattention_dump_score_cache_enabled()) {
-        const char* dump_path = triattention_dump_keep_path();
+    if (config_.dump_score_cache) {
+        const char* dump_path = config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
         if (dump_path != nullptr && dump_path[0] != '\0') {
             for (int32_t layer = 0; layer < num_layers_; ++layer) {
                 auto dump_cache = [&](const DeviceTensor& tensor, const char* pattern,
@@ -1803,7 +1806,7 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
         }
     }
     const auto& representative_positions = new_positions_by_head.front();
-    if (triattention_debug_enabled()) {
+    if (config_.debug) {
         const int32_t prefix_limit =
             prompt_end_position_ > 0 ? prompt_end_position_ : planned_prompt_length_;
         int32_t kept_prefix = 0;
@@ -1863,8 +1866,8 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
                   << (static_cast<double>(profile_ptr->repack_bytes) / (1024.0 * 1024.0))
                   << " repack_calls=" << profile_ptr->repack_calls << '\n';
     }
-    const char* dump_path = triattention_dump_keep_path();
-    const int32_t dump_compaction_index = triattention_dump_compaction_index();
+    const char* dump_path = config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
+    const int32_t dump_compaction_index = config_.dump_compaction_index;
     if (dump_path != nullptr && dump_path[0] != '\0' &&
         (dump_compaction_index <= 0 || dump_compaction_index == (compaction_count_ + (profile_ptr == nullptr ? 1 : 0)))) {
         json dump;
@@ -1900,7 +1903,7 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
                 {"repack_ms", profile_ptr->repack_ms},
             };
         }
-        if (triattention_dump_score_cache_enabled()) {
+        if (config_.dump_score_cache) {
             dump["score_cache_shape"] = {
                 static_cast<int32_t>(cache_positions_.size()),
                 cache_head_count_,
@@ -1921,7 +1924,7 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
         out << dump.dump(2);
         out << '\n';
         out.close();
-        if (triattention_abort_after_dump()) {
+        if (config_.abort_after_dump) {
             throw std::runtime_error("TriAttention aborted after keep dump");
         }
     }

@@ -38,6 +38,25 @@ struct TriAttentionConfig {
     bool disable_trig{false};
     std::string stats_section{"triattention_stats.json"};
     int32_t offset_max_length{65536};
+
+    // Debug / profile knobs — previously read ad-hoc via std::getenv
+    // (TRTF_TRIATTN_DEBUG, TRTF_TRIATTN_PROFILE, TRTF_TRIATTN_DISABLE_GPU_*,
+    // TRTF_TRIATTN_DUMP_*, TRTF_TRIATTN_ZERO_TAIL,
+    // TRTF_TRIATTN_RUNTIME_BUCKET_ROWS). Now populated once at
+    // construction from the registry-supplied ConfigBundle; the runtime
+    // reads these struct fields instead of hitting the environment.
+    bool debug{false};
+    bool profile{false};
+    int32_t runtime_bucket_rows{32};
+    bool disable_gpu_selection{false};
+    bool disable_gpu_compaction{false};
+    bool disable_gpu_state{false};
+    bool zero_tail{false};
+    std::string dump_keep_path{};
+    int32_t dump_compaction_index{0};
+    bool abort_after_dump{false};
+    bool dump_score_cache{false};
+    bool dump_score_values{false};
 };
 
 struct TriAttentionHeadStats {
@@ -77,8 +96,19 @@ struct TriAttentionCompactionProfile {
     int32_t sampled_heads{0};
 };
 
-TriAttentionConfig parse_triattention_bundle_config(const std::string& config_json,
-                                                    int32_t max_cache_length);
+// Forward declaration — full type in trtf/config/config_bundle.h.
+namespace config { class ConfigBundle; }
+
+// Build a TriAttentionConfig from the bundle's JSON plus (optionally) the
+// session-resolved ConfigBundle. Legacy bundles without the generic
+// `defaults:` block still parse through the JSON path; when ``runtime_config``
+// has a non-default layer value for a field, that value wins. Environment
+// variables (TRTF_TRIATTN_*) are no longer read — callers supply values via
+// the registry (CLI --set / --config or bundle defaults:).
+TriAttentionConfig parse_triattention_bundle_config(
+    const std::string& config_json,
+    int32_t max_cache_length,
+    const config::ConfigBundle* runtime_config = nullptr);
 
 TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
                                                 int32_t num_attention_heads,

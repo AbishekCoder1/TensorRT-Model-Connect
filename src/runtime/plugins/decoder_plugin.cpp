@@ -205,8 +205,8 @@ class DecoderPlugin final : public IPipelinePlugin {
 
         cudaStream_t stream = shared_stream->get();
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
-        TriAttentionConfig tri_cfg =
-            parse_triattention_bundle_config(ctx.config_json, ctx.config.max_cache_length);
+        TriAttentionConfig tri_cfg = parse_triattention_bundle_config(
+            ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
         const int32_t kv_dim = cache_row_dim_from_engine(*shared_engine, kv_names.cache_k.front());
         const auto sizing =
             resolve_kv_cache_runtime_sizing(ctx, *shared_engine, kv_names, cache_dtype, tri_cfg, kv_dim);
