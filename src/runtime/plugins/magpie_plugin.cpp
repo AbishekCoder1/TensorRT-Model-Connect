@@ -4,7 +4,11 @@
 #include "runtime/pipelines/magpie_pipeline.h"
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/config/config_bundle.h"
 #include "trtf/runtime/pipeline_registry.h"
+
+#include <cstdint>
+#include <exception>
 
 #if TRTF_HAS_TRT
 
@@ -46,6 +50,40 @@ class MagpiePlugin final : public IPipelinePlugin {
 
         auto magpie_cfg = build_magpie_config(ctx.config_json, ctx.config);
         int32_t kv_dim = compute_magpie_kv_dim(ctx.config, magpie_cfg);
+
+        // audio_magpie.* namespace (replaces TRTF_MAGPIE_{GREEDY,CFG_SCALE,
+        // TEMPERATURE,FINISHED_LIMIT,SEED} env vars). Only apply non-default
+        // registry values so pre-migration bundles keep their config-derived
+        // defaults for fields the caller never touched.
+        if (ctx.runtime_config != nullptr) {
+            try {
+                if (ctx.runtime_config->source_of("audio_magpie", "greedy")
+                    != ::trtf::config::Layer::SchemaDefault)
+                    magpie_cfg.greedy = ctx.runtime_config->get<bool>(
+                        "audio_magpie", "greedy");
+                float cfg_scale = ctx.runtime_config->get<float>(
+                    "audio_magpie", "cfg_scale");
+                if (cfg_scale > 0.0F) magpie_cfg.cfg_scale = cfg_scale;
+                float temp = ctx.runtime_config->get<float>(
+                    "audio_magpie", "temperature");
+                if (temp > 0.0F) magpie_cfg.temperature = temp;
+                std::int32_t finished_limit = ctx.runtime_config->get<std::int32_t>(
+                    "audio_magpie", "finished_limit");
+                if (finished_limit >= 0) {
+                    magpie_cfg.finished_limit_with_eot = finished_limit;
+                    magpie_cfg.enable_finished_limit_stop = (finished_limit > 0);
+                }
+                magpie_cfg.seed = ctx.runtime_config->get<std::int64_t>(
+                    "audio_magpie", "seed");
+            } catch (const std::exception&) {
+                // Schema not registered or type mismatch — leave defaults.
+            }
+        }
+        int32_t kv_dim = (ctx.config.attention_size > 0)
+                             ? ctx.config.attention_size
+                             : ((ctx.config.num_heads > 0 && ctx.config.head_dim > 0)
+                                    ? ctx.config.num_heads * ctx.config.head_dim
+                                    : magpie_cfg.hidden_size);
 
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> decoder_state = std::make_unique<KvCache>(

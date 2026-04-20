@@ -43,8 +43,10 @@ Classifier-Free Guidance (CFG):
       The TRT runtime keeps this disabled by default so short-form generation
       matches NeMo's standard do_tts() stop behavior. It can still be enabled
       explicitly via environment override for debugging.
-  All can be overridden at runtime via env vars:
-    TRTF_MAGPIE_TEMPERATURE=0.6  TRTF_MAGPIE_CFG_SCALE=2.5  TRTF_MAGPIE_FINISHED_LIMIT=10
+  All can be adjusted at runtime via the config registry, e.g.
+    trtf run ... --set audio_magpie.temperature=0.6 \\
+                 --set audio_magpie.cfg_scale=2.5 \\
+                 --set audio_magpie.finished_limit=10
   Or via CLI flags:
     ./build/trtf generate-audio bundle.trtfb --prompt "text" --output out.wav --cfg-scale 2.5 --greedy
 """
@@ -482,21 +484,22 @@ class MagpieTTSPlugin:
         weights["_hidden_size"] = hidden
         weights["_num_codebooks"] = num_codebooks
         weights["_codebook_size"] = codebook_size
-        # Allow overriding max_source_positions via env var for cross-attention
-        # optimization. Smaller values reduce decoder cross-attention compute
-        # proportionally (e.g., 256 vs 2048 = 8x less cross-attn work).
-        import os
-        env_max_pos = os.environ.get("TRTF_MAGPIE_MAX_SOURCE_POS")
-        if env_max_pos is not None:
-            override = int(env_max_pos)
-            if override < max_positions:
-                print(f"[trtf-build]   Overriding max_source_positions: "
-                      f"{max_positions} -> {override}", file=sys.stderr)
-                max_positions = override
-                # Truncate encoder position embedding to new size
-                if "encoder.position_embeddings.weight" in state_dict:
-                    pe = _to_np(state_dict["encoder.position_embeddings.weight"])
-                    state_dict["encoder.position_embeddings.weight"] = pe[:max_positions]
+        # audio_magpie.max_source_positions — build-time cap on the encoder
+        # position embedding (smaller = proportionally less cross-attention
+        # compute, e.g. 256 vs 2048 ≈ 8× less). Supplied through --set or a
+        # config profile; the engine builder stashes the resolved value on
+        # config.raw["_audio_magpie_max_source_positions"] before dispatching
+        # to this family. 0 means "keep the model default".
+        override_max_pos = int(config.raw.get(
+            "_audio_magpie_max_source_positions", 0))
+        if 0 < override_max_pos < max_positions:
+            print(f"[trtf-build]   Shrinking max_source_positions: "
+                  f"{max_positions} -> {override_max_pos}", file=sys.stderr)
+            max_positions = override_max_pos
+            # Truncate encoder position embedding to new size
+            if "encoder.position_embeddings.weight" in state_dict:
+                pe = _to_np(state_dict["encoder.position_embeddings.weight"])
+                state_dict["encoder.position_embeddings.weight"] = pe[:max_positions]
 
         weights["_max_source_positions"] = max_positions
         weights["_text_vocab_size"] = text_vocab_size

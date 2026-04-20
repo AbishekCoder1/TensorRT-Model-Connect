@@ -457,6 +457,10 @@ def build_bundle(
     # is stashed on config.raw so every family's build_engine signature
     # stays stable; standard_decoder_builder reads it from there.
     force_manual_attention: bool = False,
+    # audio_magpie.* build-time fields. max_source_positions replaces
+    # the TRTF_MAGPIE_MAX_SOURCE_POS env var; passed to families via
+    # config.raw, same passthrough pattern.
+    audio_magpie_max_source_positions: int = 0,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -491,6 +495,7 @@ def build_bundle(
     # --config (see trtf_build.runtime_config). Underscore-prefixed to mark
     # internal passthrough, same convention as _dynamic_kv_opt_length.
     config.raw["_decode_policy_force_manual_attention"] = force_manual_attention
+    config.raw["_audio_magpie_max_source_positions"] = audio_magpie_max_source_positions
     print(f"[trtf-build] Model: {config.model_type} "
           f"(layers={config.num_hidden_layers}, hidden={config.hidden_size}, "
           f"vocab={config.vocab_size})", file=sys.stderr)
@@ -1040,6 +1045,7 @@ def build(
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
     force_manual_attention: bool = False,
+    audio_magpie_max_source_positions: int = 0,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -1077,4 +1083,5 @@ def build(
                  triattention_protect_prefill=triattention_protect_prefill,
                  triattention_disable_mlr=triattention_disable_mlr,
                  triattention_disable_trig=triattention_disable_trig,
-                 force_manual_attention=force_manual_attention)
+                 force_manual_attention=force_manual_attention,
+                 audio_magpie_max_source_positions=audio_magpie_max_source_positions)

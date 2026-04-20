@@ -148,6 +148,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 "decode_policy", "force_manual_attention"))
         except KeyError:
             force_manual_attention = False
+        try:
+            audio_magpie_max_source_positions = int(resolved_bundle.get(
+                "audio_magpie", "max_source_positions"))
+        except KeyError:
+            audio_magpie_max_source_positions = 0
+    else:
+        audio_magpie_max_source_positions = 0
 
     try:
         build(
@@ -176,6 +183,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_disable_mlr=getattr(args, "triattention_disable_mlr", False),
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
             force_manual_attention=force_manual_attention,
+            audio_magpie_max_source_positions=audio_magpie_max_source_positions,
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

@@ -84,13 +84,6 @@ void upload_magpie_prev_codes_to_device([[maybe_unused]] CudaBuffer& d_prev,
 #endif
 }
 
-void maybe_enable_magpie_greedy(MagpieTTSConfig& cfg) {
-    const char* env = std::getenv("TRTF_MAGPIE_GREEDY");
-    if (env != nullptr && std::string(env) == "1") {
-        cfg.greedy = true;
-    }
-}
-
 } // anonymous namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1980,32 +1973,12 @@ void MagpiePipeline::log_pipeline_profiling(int32_t num_frames, int32_t num_samp
 // ---------------------------------------------------------------------------
 
 void MagpiePipeline::apply_env_overrides() {
-    maybe_enable_magpie_greedy(config_);
-
-    const char* env_cfg = std::getenv("TRTF_MAGPIE_CFG_SCALE");
-    if (env_cfg != nullptr) {
-        float val = std::atof(env_cfg);
-        if (val > 0.0F)
-            config_.cfg_scale = val;
-    }
-    const char* env_temp = std::getenv("TRTF_MAGPIE_TEMPERATURE");
-    if (env_temp != nullptr) {
-        float val = std::atof(env_temp);
-        if (val > 0.0F)
-            config_.temperature = val;
-    }
-    const char* env_limit = std::getenv("TRTF_MAGPIE_FINISHED_LIMIT");
-    if (env_limit != nullptr) {
-        int32_t val = std::atoi(env_limit);
-        if (val >= 0) {
-            config_.finished_limit_with_eot = val;
-            config_.enable_finished_limit_stop = (val > 0);
-        }
-    }
-    const char* env_seed = std::getenv("TRTF_MAGPIE_SEED");
-    if (env_seed != nullptr) {
-        rng_.seed(static_cast<std::mt19937::result_type>(std::atol(env_seed)));
-    }
+    // All values now arrive pre-populated from the audio_magpie.* namespace
+    // (magpie_plugin does the ctx.runtime_config reads at construction).
+    // Formerly this method read TRTF_MAGPIE_{GREEDY,CFG_SCALE,TEMPERATURE,
+    // FINISHED_LIMIT,SEED} directly — those env vars are deleted.
+    if (config_.seed >= 0)
+        rng_.seed(static_cast<std::mt19937::result_type>(config_.seed));
 }
 
 void MagpiePipeline::ensure_cfg_resources() {

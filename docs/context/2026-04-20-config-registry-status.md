@@ -248,10 +248,7 @@ imports, `cli.py`, and all internal imports updated.
 ### Deferred env vars (not in cluster plan)
 
 - ~~`TRTF_BARK_*`~~ — migrated to `audio_bark.*` in tick 15.
-- `TRTF_MAGPIE_GREEDY`, `TRTF_MAGPIE_CFG_SCALE`, `TRTF_MAGPIE_TEMPERATURE`,
-  `TRTF_MAGPIE_FINISHED_LIMIT`, `TRTF_MAGPIE_SEED`,
-  `TRTF_MAGPIE_MAX_SOURCE_POS` — magpie_pipeline family-specific;
-  needs audio.magpie.* schema.
+- ~~`TRTF_MAGPIE_*`~~ — migrated to `audio_magpie.*` in tick 16.
 - `TRTF_DATA_DIR`, `TRTF_TRT_LOG_STDERR`, `TRTF_TRT_LOG_MIN_SEVERITY` —
   infrastructure env vars read before pipeline construction. Can't
   route through the registry without a bootstrap-config mechanism.
@@ -426,6 +423,40 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 16 (2026-04-20)
+- New `audio_magpie.*` cluster: 6 fields (greedy, cfg_scale, temperature,
+  finished_limit, seed, max_source_positions). Sixth schema in the
+  registry. First schema with mixed allowlists — runtime fields are
+  session/platform; `max_source_positions` is build/bundle.
+- Replaces six env vars:
+    * TRTF_MAGPIE_GREEDY, TRTF_MAGPIE_CFG_SCALE, TRTF_MAGPIE_TEMPERATURE,
+      TRTF_MAGPIE_FINISHED_LIMIT, TRTF_MAGPIE_SEED (runtime, in
+      magpie_pipeline.cpp).
+    * TRTF_MAGPIE_MAX_SOURCE_POS (build-time, in
+      trtf_build/trtf_build/families/magpie_tts.py).
+- C++ side: `MagpieTTSConfig` gains `seed` (int64_t). `apply_env_overrides`
+  shrinks to a single RNG-seed statement (all other fields arrive
+  pre-populated from the registry via magpie_plugin). The file-scope
+  `maybe_enable_magpie_greedy` helper and the four inline env-var reads
+  in `apply_env_overrides` are deleted.
+- `magpie_plugin.cpp` — reads all six fields (well, five session fields;
+  max_source_positions is build-time and flows via the Python path).
+  Session fields use "apply only if non-default source" so pre-migration
+  bundles keep their JSON-derived defaults.
+- Python side: `engine_builder.build`/`build_bundle` gain
+  `audio_magpie_max_source_positions` kwarg; stashes on
+  `config.raw["_audio_magpie_max_source_positions"]`.
+  `families/magpie_tts.py` reads from `config.raw` instead of
+  `os.environ.get`; comment in the file docstring updated to the
+  `--set audio_magpie.X=Y` form.
+- `cli.py` — extracts `audio_magpie.max_source_positions` from the
+  resolved ConfigBundle, passes to `build()`.
+- Gates: 11 relevant ctests pass (config trio + triattention +
+  magpie trio + bark + both C ABI regressions); 76 Python tests pass;
+  full build clean. `grep TRTF_MAGPIE_ src/ trtf_build/` returns only
+  documentation comments.
+- Commit: pending end-of-tick.
 
 ### Tick 15 (2026-04-20)
 - New `audio_bark.*` cluster: 3 fields (dump_path, greedy, seed),
