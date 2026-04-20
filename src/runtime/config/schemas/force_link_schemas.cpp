@@ -15,12 +15,14 @@
 namespace trtf::config::schemas {
 
 extern volatile int kForceLink_triattention;
+extern volatile int kForceLink_decode_policy;
 
 // Pointer array referencing every anchor symbol. The array itself has
 // external linkage so the linker must keep it; each element inside it
 // forces the corresponding schema TU to be pulled in.
 volatile int* const kAllSchemaAnchors[] = {
     &kForceLink_triattention,
+    &kForceLink_decode_policy,
 };
 
 } // namespace trtf::config::schemas

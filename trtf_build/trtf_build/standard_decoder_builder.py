@@ -103,6 +103,11 @@ def build_standard_decoder_engine(
     attention_window = max_cache_length + 1
     dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
     dynamic_kv_opt_rows = int(config.raw.get("_dynamic_kv_opt_length", max_cache_length))
+    # Build-time decode policy. engine_builder stashes the resolved value on
+    # config.raw before dispatching to the family plugin, so we don't have
+    # to thread a new kwarg through every family's build_engine signature.
+    # Previously this was TRTF_FORCE_MANUAL_DECODER_ATTENTION env var.
+    force_manual_attention = bool(config.raw.get("_decode_policy_force_manual_attention", False))
     dynamic_kv_opt_rows = max(1, min(dynamic_kv_opt_rows, max_cache_length))
     raw_profile_rows = config.raw.get("_dynamic_kv_profile_rows")
     if raw_profile_rows:
@@ -410,6 +415,7 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             ffi_attention_kernel=ffi_attention_kernel,
             dynamic_kv_cache=dynamic_kv_cache,
+            force_manual_attention=force_manual_attention,
         )
 
         hidden_state = result["hidden"]
@@ -541,6 +547,7 @@ def _add_decoder_layer(
     interleaved_rope: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
+    force_manual_attention: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
 
@@ -566,6 +573,7 @@ def _add_decoder_layer(
         interleaved_rope=interleaved_rope,
         ffi_attention_kernel=ffi_attention_kernel,
         dynamic_kv_cache=dynamic_kv_cache,
+        force_manual_attention=force_manual_attention,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]

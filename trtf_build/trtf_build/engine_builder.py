@@ -452,6 +452,11 @@ def build_bundle(
     triattention_protect_prefill: bool = True,
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
+    # decode_policy.* namespace. force_manual_attention replaces the
+    # TRTF_FORCE_MANUAL_DECODER_ATTENTION env var (now deleted). Value
+    # is stashed on config.raw so every family's build_engine signature
+    # stays stable; standard_decoder_builder reads it from there.
+    force_manual_attention: bool = False,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -480,6 +485,12 @@ def build_bundle(
 
     # 1. Parse config
     config = ModelConfig.from_dir(model_dir_path)
+    # Stash resolved decode_policy.* values for standard_decoder_builder and
+    # family plugins — keeps the build_engine protocol signature untouched
+    # while letting build-time config flow in from the CLI's --set /
+    # --config (see trtf_build.runtime_config). Underscore-prefixed to mark
+    # internal passthrough, same convention as _dynamic_kv_opt_length.
+    config.raw["_decode_policy_force_manual_attention"] = force_manual_attention
     print(f"[trtf-build] Model: {config.model_type} "
           f"(layers={config.num_hidden_layers}, hidden={config.hidden_size}, "
           f"vocab={config.vocab_size})", file=sys.stderr)
@@ -1028,6 +1039,7 @@ def build(
     triattention_protect_prefill: bool = True,
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
+    force_manual_attention: bool = False,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -1064,4 +1076,5 @@ def build(
                  triattention_count_prompt_tokens=triattention_count_prompt_tokens,
                  triattention_protect_prefill=triattention_protect_prefill,
                  triattention_disable_mlr=triattention_disable_mlr,
-                 triattention_disable_trig=triattention_disable_trig)
+                 triattention_disable_trig=triattention_disable_trig,
+                 force_manual_attention=force_manual_attention)

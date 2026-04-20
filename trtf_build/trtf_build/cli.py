@@ -125,6 +125,30 @@ def _cmd_build(args: argparse.Namespace) -> int:
     save_fp8_scales = getattr(args, 'save_fp8_scales', None)
     quantize = canonicalize_quant_format(args.quantize)
 
+    # Resolve the registry-backed build-time config up front (before build),
+    # so namespaces like decode_policy.* can feed kwargs directly. Importing
+    # runtime_config triggers registration of any schema modules declared
+    # under trtf_build.runtime_config.schemas.
+    cli_cfg = getattr(args, "config", None)
+    cli_sets = getattr(args, "set_flags", None) or []
+    force_manual_attention = False
+    resolved_bundle = None
+    if cli_cfg or cli_sets:
+        from .runtime_config import resolve_cli_config
+        from .runtime_config.schemas import load_all as _load_schemas
+        _load_schemas()
+        try:
+            resolved_bundle = resolve_cli_config(
+                config_path=cli_cfg, set_tokens=cli_sets)
+        except (ValueError, FileNotFoundError, KeyError) as exc:
+            print(f"Error resolving config: {exc}", file=sys.stderr)
+            return 1
+        try:
+            force_manual_attention = bool(resolved_bundle.get(
+                "decode_policy", "force_manual_attention"))
+        except KeyError:
+            force_manual_attention = False
+
     try:
         build(
             model_id_or_path=build_model_ref,
@@ -151,40 +175,19 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_protect_prefill=getattr(args, "triattention_protect_prefill", True),
             triattention_disable_mlr=getattr(args, "triattention_disable_mlr", False),
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
+            force_manual_attention=force_manual_attention,
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
     # Emit effective_config.json alongside the bundle when the caller
-    # supplied --config/--set. Silently skipped otherwise so existing
-    # callers are unaffected. Until Phase 4 registers real schemas, a
-    # clear warning replaces the would-be no-op resolve.
-    cli_cfg = getattr(args, "config", None)
-    cli_sets = getattr(args, "set_flags", None) or []
-    if cli_cfg or cli_sets:
-        from .runtime_config import (
-            registered_namespaces, resolve_cli_config,
-            write_effective_config_next_to,
-        )
-        if not registered_namespaces():
-            print(
-                "[trtf-build] --config/--set accepted but no config schemas "
-                "are registered yet; values have no effect. Phase 4 cluster "
-                "migrations add schemas.",
-                file=sys.stderr,
-            )
-        else:
-            try:
-                bundle = resolve_cli_config(
-                    config_path=cli_cfg, set_tokens=cli_sets,
-                )
-            except (ValueError, FileNotFoundError, KeyError) as exc:
-                print(f"Error resolving config: {exc}", file=sys.stderr)
-                return 1
-            path = write_effective_config_next_to(bundle, args.output)
-            print(f"[trtf-build] Wrote effective config: {path}",
-                  file=sys.stderr)
+    # supplied --config/--set. The ConfigBundle was already resolved above
+    # (so build() could consume namespaced kwargs); here we just serialize.
+    if resolved_bundle is not None:
+        from .runtime_config import write_effective_config_next_to
+        path = write_effective_config_next_to(resolved_bundle, args.output)
+        print(f"[trtf-build] Wrote effective config: {path}", file=sys.stderr)
     return 0
 
 

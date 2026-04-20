@@ -140,6 +140,7 @@ add_library(trtf_core
   src/runtime/config/cli_support.cpp
   src/runtime/config/schemas/force_link_schemas.cpp
   src/runtime/config/schemas/triattention.cpp
+  src/runtime/config/schemas/decode_policy.cpp
   # Registry (factory + plugin dispatch)
   src/runtime/registry/pipeline_factory.cpp
   src/runtime/registry/pipeline_registry.cpp

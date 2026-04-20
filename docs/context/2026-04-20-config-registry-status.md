@@ -199,7 +199,22 @@ imports, `cli.py`, and all internal imports updated.
     `ctx.runtime_config->get<...>("triattention", "…")` queries
     (commit TBD).
   - [x] Delete the TRTF_TRIATTN_* env-var readers and the helpers.
-- [ ] Cluster B: `decode_policy.*` (build-time layer only)
+- [x] Cluster B: `decode_policy.*` (build-time layer only) — commit TBD
+  - Single field `force_manual_attention` (bool). BUILD_TIME +
+    BUNDLE_DEFAULT allowlist only.
+  - `TRTF_FORCE_MANUAL_DECODER_ATTENTION` env-var read in
+    `graph_blocks.py` deleted. Replaced with `force_manual_attention`
+    kwarg threaded through `add_attention_block` / `_add_decoder_layer`.
+  - `engine_builder.build` gains the kwarg; stashes on `config.raw
+    ["_decode_policy_force_manual_attention"]` (same passthrough
+    pattern as `_dynamic_kv_opt_length`). `build_standard_decoder_engine`
+    reads from there. Keeps family-plugin `build_engine` protocol
+    signatures untouched, no 50-file churn.
+  - `trtf_build/cli.py` resolves the registry up front when
+    `--config`/`--set` is supplied, extracts
+    `decode_policy.force_manual_attention`, passes as kwarg.
+  - Cross-language schema match test auto-detects the new namespace
+    (regex-based); no code change in the test.
 - [ ] Cluster C: `text_trace.*`
 - [ ] Cluster D: `profile.*` (dynamic KV profile rows)
 - [ ] Cluster E: `platform.*`
@@ -357,6 +372,52 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 11 (2026-04-20)
+- Phase 4 Cluster B (`decode_policy.*`) closed.
+- Python schema
+  (`trtf_build/trtf_build/runtime_config/schemas/decode_policy.py`)
+  declares one field: `force_manual_attention` (bool, default False,
+  `{BUILD_TIME, BUNDLE_DEFAULT}` layer allowlist only — session /
+  platform cannot retroactively toggle an already-baked engine graph).
+- C++ mirror (`include/trtf/config/schemas/decode_policy.h` +
+  `src/runtime/config/schemas/decode_policy.cpp`) + force-link anchor
+  entry in `force_link_schemas.cpp`. Second schema to land; the anchor
+  pattern continues to be a one-line edit per new cluster.
+- Reader migration (`trtf_build/trtf_build/graph_blocks.py`):
+  `force_manual_attention = os.getenv(...)` deleted; replaced with a
+  new `force_manual_attention: bool = False` kwarg on
+  `add_attention_block`. `import os` dropped (unused).
+- Plumbing through `standard_decoder_builder.py`:
+  `_add_decoder_layer` gains the kwarg and forwards it;
+  `build_standard_decoder_engine` reads the resolved value from
+  `config.raw["_decode_policy_force_manual_attention"]` — same
+  passthrough convention as `_dynamic_kv_opt_length` so family-plugin
+  `build_engine` protocol signatures stay untouched (no 50-file
+  churn).
+- Engine builder entry (`engine_builder.py`): `build_bundle` and
+  `build` gain `force_manual_attention: bool = False`.
+  `build_bundle` stashes the value on `config.raw` before dispatching
+  to the family plugin.
+- CLI wiring (`trtf_build/trtf_build/cli.py`): resolves the
+  ConfigBundle up front (before `build()`), imports
+  `runtime_config.schemas.load_all()` so schemas are registered,
+  reads `decode_policy.force_manual_attention` from the bundle via
+  `bundle.get(...)`, passes through to `build()`. The
+  effective-config dump now just serializes the already-resolved
+  bundle at the end.
+- Gates: 5 C++ config+cabi ctests pass; 68 Python tests pass
+  (cli_support + schemas_crosslang + existing cli); full build clean.
+  Env-var grep `grep -rnE 'TRTF_FORCE_MANUAL_DECODER_ATTENTION' src/ trtf_build/`
+  returns zero matches.
+- Commit: pending end-of-tick.
+- Next tick (12) — Cluster C (`text_trace.*`). Inventory:
+  `TRTF_TEXT_STEP_TRACE_PATH`, plus any sibling step-trace env vars
+  read in `src/runtime/pipelines/text_generation_pipeline.cpp`.
+  Similar shape to Cluster A but smaller (2-3 fields). The main piece
+  of work is plumbing the resolved values from the text-generation
+  pipeline constructor — they're session-level knobs, so all layers
+  apply.
 
 ### Tick 10 (2026-04-20)
 - Cluster A migration complete: TriAttention now reads its config from

@@ -19,8 +19,6 @@ residual, DeepStack injection, MoE routing, etc.).
 
 from __future__ import annotations
 
-import os
-
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -133,6 +131,10 @@ def add_attention_block(
     interleaved_rope: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
+    # Build-time decode policy; resolved by engine_builder from the
+    # decode_policy.* config namespace. No env-var fallback — that was
+    # TRTF_FORCE_MANUAL_DECODER_ATTENTION, now deleted.
+    force_manual_attention: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
@@ -198,7 +200,6 @@ def add_attention_block(
         and sin_half_tensor is not None
         and alibi_slopes_tensor is None  # ALiBi still uses manual path
     )
-    force_manual_attention = os.getenv("TRTF_FORCE_MANUAL_DECODER_ATTENTION") == "1"
     use_native_attention = use_native_rope and not force_manual_attention
 
     if use_native_rope:
