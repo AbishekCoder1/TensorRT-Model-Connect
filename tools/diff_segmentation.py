@@ -6,7 +6,7 @@ engine (via SegmentationTrtRunner) and HF transformers SegformerForSemanticSegme
 Usage:
     python3 tools/diff_segmentation.py \
       --model nvidia/segformer-b0-finetuned-ade-512-512 \
-      --image test_image.jpg --atol 0.5
+      --image tests/assets/test_image.jpg --atol 0.5
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def main():
                 print(f"[diff_seg] FAIL: max_diff={max_diff} > atol={args.atol}")
                 sys.exit(1)
             else:
-                print(f"[diff_seg] PASS")
+                print("[diff_seg] PASS")
                 sys.exit(0)
 
     print("[diff_seg] HF-only mode (no bundle comparison)")
