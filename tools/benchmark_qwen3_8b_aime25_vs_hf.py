@@ -54,6 +54,25 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Extra KEY=VALUE env override for the TriAttention TRT run (repeatable)",
     )
+    # Generic config surface. No per-knob flags. Forwards to the trtf
+    # binary via --config / --set; dense- and tri-specific setters layer on
+    # top of the shared --config for asymmetric runs.
+    parser.add_argument(
+        "--config", default=None, metavar="FILE",
+        help="Shared config profile (.json). Applied to both dense and tri runs.",
+    )
+    parser.add_argument(
+        "--set", action="append", default=[], dest="shared_set", metavar="NS.FIELD=VALUE",
+        help="Shared session-layer override, applied to both dense and tri runs (repeatable).",
+    )
+    parser.add_argument(
+        "--dense-set", action="append", default=[], metavar="NS.FIELD=VALUE",
+        help="Session-layer override applied only to the dense run (repeatable).",
+    )
+    parser.add_argument(
+        "--tri-set", action="append", default=[], metavar="NS.FIELD=VALUE",
+        help="Session-layer override applied only to the tri run (repeatable).",
+    )
     args = parser.parse_args()
     if not args.run_hf_reference and (not args.dense_bundle or not args.tri_bundle):
         parser.error("--dense-bundle and --tri-bundle are required unless --run-hf-reference is set")
@@ -421,6 +440,17 @@ def main() -> None:
     if not enable_thinking:
         dense_cmd.append("--no-thinking")
         tri_cmd.append("--no-thinking")
+
+    # Generic config surface: --config applies to both runs; per-run --set
+    # overlays on top. No per-knob flags — new runtime knobs flow through
+    # here without any edit to the benchmark.
+    if args.config:
+        dense_cmd.extend(["--config", args.config])
+        tri_cmd.extend(["--config", args.config])
+    for token in args.shared_set + args.dense_set:
+        dense_cmd.extend(["--set", token])
+    for token in args.shared_set + args.tri_set:
+        tri_cmd.extend(["--set", token])
     if args.run_hf_reference:
         run_hf_reference(
             dataset_path=dataset_path,

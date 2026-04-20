@@ -114,14 +114,17 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
 
 ### Phase 2 — CLI supply (serial)
 - [x] `--config` + `--set` on `trtf_build/trtf_build/cli.py` (commit `4daa555e`)
-- [x] `--config` + `--set` on `examples/trtf_cli.cpp` (commit TBD)
-- [ ] Same on `tools/benchmark_qwen3_8b_aime25_vs_hf.py`
+- [x] `--config` + `--set` on `examples/trtf_cli.cpp` (commit `3bf3fbb8`)
+- [x] `--config` + `--set` on `examples/trtf_dataset_benchmark.cpp` (commit TBD)
+- [x] `--config` / `--set` / `--dense-set` / `--tri-set` on
+      `tools/benchmark_qwen3_8b_aime25_vs_hf.py` (commit TBD)
 - [ ] C ABI `trtf_create_pipeline_ex` gains `const char* config_json`
-  - Deferred to tick 6: the C ABI struct is covered by
-    `test_c_abi_runtime_regression` and adding a field at the end is a
-    technical ABI break. Need to decide whether to version-bump or
-    version-gate the struct. Not a blocker for Phase 3/4 since the C++
-    CLI already threads config through on its own side.
+  - Deferred further: the C++ CLI and dataset benchmark both thread
+    config through without needing the C ABI. The ABI extension is only
+    load-bearing for external callers of the .so, which don't exist in
+    this branch yet. When it lands, it will come with a versioned v2
+    entry point so `test_c_abi_runtime_regression` keeps passing
+    against the v1 struct layout.
 
 **D8 — Python package renamed to `runtime_config/` (deviation from prompt).**
 The prompt specified `trtf_build/trtf_build/config/` but Python already has
@@ -296,14 +299,38 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   triattention.kv_budget=4096` smoke prints the expected
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
+- Commit: `3bf3fbb8`.
+
+### Tick 6 (2026-04-20)
+- `examples/trtf_dataset_benchmark.cpp` — argv parser gains `--config
+  <file>` and `--set ns.field=value` (repeatable). When either flag is
+  supplied and schemas are registered, writes `effective_config.json`
+  next to the bundle path. Same no-schemas-yet pre-Phase-4 message as
+  the main CLI.
+- `tools/benchmark_qwen3_8b_aime25_vs_hf.py` — four new flags, all in
+  the generic config-registry shape:
+    * `--config <file>` — shared config profile, applied to both runs.
+    * `--set NS.FIELD=VALUE` — shared session-layer override (repeatable).
+    * `--dense-set NS.FIELD=VALUE` — dense-run-only override.
+    * `--tri-set NS.FIELD=VALUE` — tri-run-only override.
+  Both dense and tri cmdlines are extended in-place with `--config` +
+  `(shared + per-run)` `--set` tokens. No per-knob flags were added; the
+  existing `--dense-env` / `--tri-env` env-var pass-throughs stay until
+  Phase 4 Cluster A removes the TRTF_* env vars they target.
+- Gates: `trtf_dataset_benchmark --config /nope.json` smoke prints the
+  expected "schemas not registered yet" message; benchmark `--help`
+  shows all four new flags; both C++ config tests still pass; CCN gate
+  passes (the only new C++ code is the argv-walking block and a
+  `resolve_cli_config` call — same patterns as `trtf_cli.cpp`).
 - Commit: pending end-of-tick.
-- Next tick (6) — finish Phase 2 tail work then enter Phase 3:
-    * `tools/benchmark_qwen3_8b_aime25_vs_hf.py`: swap the `--tri-env`
-      forest for `--config` / `--set` that flow through to both trtf-build
-      and the trtf binary.
-    * `trtf_create_pipeline_ex` C ABI extension — keep old signature,
-      add a v2 entry point with `config_json` (so
-      `test_c_abi_runtime_regression` keeps passing against the v1
-      struct layout).
-    * Phase 3: bundle `defaults:` block — builder writes, runtime reads
-      as the lowest-priority layer. Qwen3-0.6B round-trip smoke test.
+- Next tick (7) — start Phase 3 (bundle `defaults:` block):
+    * Builder writes `defaults:` into `config.json` from a
+      `ConfigBundle` assembled at build time (BUILD_TIME layer in the
+      build-time call; BUNDLE_DEFAULT layer when the runtime loads).
+    * Runtime reads the `defaults:` section and feeds it into
+      `ConfigBundle::build` as a `BundleDefault` `LayerContribution`.
+    * Absent section is treated as an empty map (old bundles keep working).
+    * Smoke test: build a Qwen3-0.6B bundle, inspect, assert the
+      `defaults:` block round-trips.
+  After Phase 3 closes, parallelize Phase 4 across clusters (Cluster A
+  is the big one — 17 TriAttention fields + codegen).

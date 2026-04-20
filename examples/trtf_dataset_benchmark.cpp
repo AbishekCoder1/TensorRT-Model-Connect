@@ -1,4 +1,6 @@
 #include "trtf/pipeline.h"
+#include "trtf/config/cli_support.h"
+#include "trtf/config/schema_registry.h"
 
 #include <algorithm>
 #include <cctype>
@@ -290,6 +292,8 @@ int main(int argc, char** argv) {
     bool enable_thinking = true;
     bool stop_on_answer = false;
     int32_t stop_check_interval = 16;
+    std::string config_path;
+    std::vector<std::string> set_tokens;
 
     for (int i = 4; i < argc; ++i) {
         std::string arg = argv[i];
@@ -298,7 +302,11 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("Missing value for " + flag);
             return argv[++i];
         };
-        if (arg == "--max-new-tokens") {
+        if (arg == "--config") {
+            config_path = need_value(arg);
+        } else if (arg == "--set") {
+            set_tokens.emplace_back(need_value(arg));
+        } else if (arg == "--max-new-tokens") {
             max_new_tokens = std::stoi(need_value(arg));
         } else if (arg == "--hf-python") {
             load_options.hf_python = need_value(arg);
@@ -324,6 +332,23 @@ int main(int argc, char** argv) {
             stop_check_interval = std::stoi(need_value(arg));
         } else {
             throw std::runtime_error("Unknown argument: " + arg);
+        }
+    }
+
+    // Generic config surface (no per-knob flags). Pre-Phase-4, schemas
+    // aren't registered yet; the flags are accepted and effective_config
+    // is written when applicable.
+    if (!config_path.empty() || !set_tokens.empty()) {
+        if (trtf::config::SchemaRegistry::instance().registered_namespaces().empty()) {
+            std::cerr << "[trtf_dataset_benchmark] --config/--set accepted but no "
+                         "config schemas are registered yet; values have no effect. "
+                         "Phase 4 cluster migrations add schemas." << std::endl;
+        } else {
+            auto bundle = trtf::config::resolve_cli_config(config_path, set_tokens);
+            std::string out_path = trtf::config::write_effective_config_next_to(
+                bundle, bundle_path);
+            std::cerr << "[trtf_dataset_benchmark] Wrote effective config: "
+                      << out_path << std::endl;
         }
     }
 
