@@ -335,22 +335,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Generic config surface (no per-knob flags). Pre-Phase-4, schemas
-    // aren't registered yet; the flags are accepted and effective_config
-    // is written when applicable.
-    if (!config_path.empty() || !set_tokens.empty()) {
-        if (trtf::config::SchemaRegistry::instance().registered_namespaces().empty()) {
-            std::cerr << "[trtf_dataset_benchmark] --config/--set accepted but no "
-                         "config schemas are registered yet; values have no effect. "
-                         "Phase 4 cluster migrations add schemas." << std::endl;
-        } else {
-            auto bundle = trtf::config::resolve_cli_config(config_path, set_tokens);
-            std::string out_path = trtf::config::write_effective_config_next_to(
-                bundle, bundle_path);
-            std::cerr << "[trtf_dataset_benchmark] Wrote effective config: "
-                      << out_path << std::endl;
-        }
-    }
+    // Generic config surface (no per-knob flags). Forward the inputs to
+    // LoadOptions so pipeline_factory actually resolves them into the
+    // ConfigBundle attached to PipelineContext. (Without this, plugins
+    // only see schema defaults and the --set values silently no-op.)
+    load_options.config_path = config_path;
+    load_options.set_tokens = set_tokens;
 
     auto samples = load_samples(dataset_path);
     auto pipeline = trtf::load(bundle_path, load_options);

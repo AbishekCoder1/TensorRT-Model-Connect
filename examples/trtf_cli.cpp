@@ -131,6 +131,11 @@ trtf::LoadOptions make_load_options(const CliArgs& args) {
     trtf::LoadOptions options;
     options.hf_python = args.hf_python;
     options.kv_cache_size_bytes = args.kv_cache_size_bytes;
+    // Forward --config/--set into the factory so ConfigBundle resolution
+    // actually sees them. Without this, every --set call silently no-ops
+    // because pipeline_factory only reads from LoadOptions.
+    options.config_path = args.config_path;
+    options.set_tokens = args.set_tokens;
     return options;
 }
 
