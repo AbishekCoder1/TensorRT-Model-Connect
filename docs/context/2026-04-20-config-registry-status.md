@@ -143,8 +143,59 @@ imports, `cli.py`, and all internal imports updated.
       already covers).
 
 ### Phase 4 — Cluster migration
-- [ ] Phase 4a: `override` rename (pure, no logic change)
-- [ ] Cluster A: `triattention.*` (~17 fields — largest)
+- [x] Phase 4a: `override` rename
+  - Skipped as a standalone commit: the `triattention_override_*`
+    helpers in `src/runtime/core/triattention_kv_cache.cpp` will be
+    deleted (not renamed) when Cluster A's env-var removal lands.
+    Rename + delete would churn the same lines twice; the single
+    deletion commit is the cleaner diff. New code in the config
+    registry is already override-free (enforced by naming convention
+    in `runtime_config/` and grep review).
+- [x] Cluster A — schemas declared (commit TBD)
+  - Python schema at
+    `trtf_build/trtf_build/runtime_config/schemas/triattention.py`
+    registers 24 fields spanning core runtime config
+    (kv_budget, divide_length, recent_window, score_aggregation,
+    per_layer_aggregation, count_prompt_tokens, protect_prefill,
+    disable_mlr, disable_trig, offset_max_length, enabled,
+    stats_section) and debug/profile knobs (debug, profile,
+    runtime_bucket_rows, disable_gpu_*, zero_tail, dump_*,
+    abort_after_dump). Layer-allowlist is tight: stats_section is
+    build-time-only; all session-only knobs are marked as such.
+  - C++ mirror at
+    `include/trtf/config/schemas/triattention.h` +
+    `src/runtime/config/schemas/triattention.cpp`. Static-init
+    registration survives static-lib link via the force-link anchor at
+    `src/runtime/config/schemas/force_link_schemas.cpp`
+    (mirror of `force_link_plugins.cpp`). Adding a new schema requires
+    only a new `.cpp` file + one anchor-array line — the single
+    coupling point tolerated by the scalability test.
+  - `schema_registry.cpp` now calls `force_link_all_schemas()` at
+    static init so the anchor is reachable.
+  - `trtf_build/trtf_build/runtime_config/schemas/__init__.py`
+    provides `load_all()` — imports every schema module in the
+    package; uses `importlib.reload` if a module is already cached so
+    tests can clear and re-register.
+  - Tests added:
+    * `tests/builder/test_config_schemas_crosslang.py` — field-set
+      parity gate: for every Python-registered namespace, the matching
+      C++ schema source must exist and declare the same field names
+      (regex-parsed). Deferring to a codegen-generated test is one
+      line once codegen lands.
+    * `tests/cpp/test_config_schemas_triattention.cpp` — verifies the
+      force-link anchor pattern: `SchemaRegistry::instance().lookup
+      ("triattention")` returns a non-null schema with exactly the 24
+      expected fields. Also constructs the schema directly via
+      `make_triattention_schema()` for diagnostic independence.
+- [ ] Cluster A — runtime consumes the schema
+  - Plumb `ConfigBundle` through `PipelineContext`, build it in
+    `pipeline_factory.cpp` by merging CLI contribution + platform
+    profile + bundle `defaults:`. No per-cluster wiring in that
+    commit — just the generic ctx plumbing.
+  - Then swap `triattention_override_*` helpers and the
+    `parse_triattention_bundle_config` override suffix for
+    `ctx.config->get<...>("triattention", "…")` queries.
+  - Delete the TRTF_TRIATTN_* env-var readers and the helpers.
 - [ ] Cluster B: `decode_policy.*` (build-time layer only)
 - [ ] Cluster C: `text_trace.*`
 - [ ] Cluster D: `profile.*` (dynamic KV profile rows)
@@ -303,6 +354,56 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 8 (2026-04-20)
+- Phase 4 Cluster A — schema declaration (no runtime wiring yet).
+- Python schema at
+  `trtf_build/trtf_build/runtime_config/schemas/triattention.py` —
+  24 fields (11 core + stats_section build-only + 12 debug/session).
+  Each field declares an explicit `allowed_layers` frozenset; validators
+  guard kv_budget/divide_length/offset_max_length > 0 and the
+  score_aggregation vocabulary ({mean, max}).
+- Python schema-package loader
+  (`runtime_config/schemas/__init__.py::load_all`) imports every
+  non-underscore module and handles re-imports via `importlib.reload` so
+  test cleanup + reload works deterministically.
+- C++ mirror: `include/trtf/config/schemas/triattention.h` +
+  `src/runtime/config/schemas/triattention.cpp`. The same 24 fields in
+  the same order. Layer sets use the already-defined `Layer` enum.
+  Static init registers via a file-scope registrar struct.
+- Force-link pattern: `src/runtime/config/schemas/force_link_schemas.cpp`
+  declares `kAllSchemaAnchors[]` referencing
+  `schemas::kForceLink_triattention` (and future schemas); exposes
+  `trtf::config::force_link_all_schemas()` that `schema_registry.cpp`
+  calls at its own static init. That pulls each schema TU out of the
+  static archive even when no other caller references it. Mirrors
+  `force_link_plugins.cpp` exactly.
+- CMake: added the three new C++ sources to `trtf_core`; added the new
+  test target `test_config_schemas_triattention`.
+- Tests: +4 Python cases
+  (`test_load_all_populates_triattention`,
+   `test_triattention_field_set_matches_cpp`,
+   `test_triattention_defaults_plausible`, plus a fixture) and +2 C++
+  cases (static-init survival, direct `make_triattention_schema()`
+  field inspection). Cross-language parity is regex-based until codegen
+  lands — works today, upgrades to one-liner later.
+- Gates: 63 Python config tests + 3 C++ config ctests pass; CCN on
+  `src/runtime/config/` still ≤ 10; build clean.
+- Commit: pending end-of-tick.
+- Next tick (9) — wire `ConfigBundle` into `PipelineContext` and the
+  pipeline factory. That's the prerequisite for Cluster A's runtime
+  consumption (and for every subsequent cluster). Scope:
+    * `pipeline_factory.cpp` builds a `ConfigBundle` by merging
+      `BUNDLE_DEFAULT` (from the bundle's `defaults:` block) + any
+      CLI-supplied session contribution. Initially no platform profile.
+    * `PipelineContext` gains `const ConfigBundle* config` (nullable —
+      old-bundles-without-schemas path stays intact).
+    * One plugin consumer wired as a proof — probably the text
+      generation pipeline's TriAttention path, reading
+      `config->get<int32_t>("triattention", "kv_budget")` in place of
+      a single existing env-var read. Not all of them yet; that's
+      tick 10.
+    * C ABI extension optional for tick 9 (still deferred).
 
 ### Tick 7 (2026-04-20)
 - Phase 3 delivered: bundles carry a `defaults:` block that feeds the

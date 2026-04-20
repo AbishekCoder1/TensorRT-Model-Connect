@@ -5,9 +5,16 @@
 
 namespace trtf::config {
 
+// Force-link all schema TUs so the linker doesn't strip static-init
+// registrations when trtf_core is consumed as a static archive. Mirrors
+// the PipelineRegistry pattern in src/runtime/registry/pipeline_registry.cpp.
+extern volatile int* const* force_link_all_schemas();
+static volatile int* const* kSchemaAnchor = force_link_all_schemas();
+
 SchemaRegistry& SchemaRegistry::instance()
 {
     static SchemaRegistry registry;
+    (void) kSchemaAnchor;  // keep the reference alive under aggressive GC
     return registry;
 }
 

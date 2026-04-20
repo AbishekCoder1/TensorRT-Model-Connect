@@ -134,10 +134,12 @@ add_library(trtf_core
   src/utils/wav_reader.cpp
   src/utils/image_reader.cpp
   src/runtime/core/hybrid_state.cpp
-  # Config (schema registry + layered resolution + CLI surface)
+  # Config (schema registry + layered resolution + CLI surface + schemas)
   src/runtime/config/schema_registry.cpp
   src/runtime/config/config_bundle.cpp
   src/runtime/config/cli_support.cpp
+  src/runtime/config/schemas/force_link_schemas.cpp
+  src/runtime/config/schemas/triattention.cpp
   # Registry (factory + plugin dispatch)
   src/runtime/registry/pipeline_factory.cpp
   src/runtime/registry/pipeline_registry.cpp
@@ -513,6 +515,7 @@ trtf_add_test(test_cli_args            NO_SRC_INCLUDE)
 trtf_add_test(test_chat_template)
 trtf_add_test(test_config_schema_registry)
 trtf_add_test(test_config_cli_support)
+trtf_add_test(test_config_schemas_triattention)
 
 # TRT runtime core
 trtf_add_test(test_decode_runtime)
