@@ -236,8 +236,21 @@ Each cluster: schema file, plugin queries registry, env-var readers
 deleted (hard removal per CLAUDE.md style — no shims), tests updated.
 
 ### Phase 5 — Acceptance
-- [ ] Scalability test: `tests/config/test_isolation_demo.{cpp,py}`
+- [x] Scalability test: `tests/builder/test_config_isolation_demo.py`
+  (commit TBD) — 8 tests: register/defaults/set-routes/config-file-routes/
+  validator/allowlist/effective-config/scalability-claim-doc. All pass.
+  Demonstrates the architectural contract: adding a new feature needs
+  only its own schema file + a test; no edits to CLI parser, any shared
+  dispatcher, or any central registry-of-registries. Two tolerated
+  "shared" edits are the force_link_schemas.cpp anchor line and the
+  CMakeLists.txt source listing — same pattern as the existing
+  PipelineRegistry's force_link_plugins.cpp.
 - [ ] `grep -rnE 'TRTF_[A-Z_]+' src/ trtf_build/ tools/ examples/ scripts/` == 0
+  - Current: TRTF_TRIATTN_* gone; TRTF_FORCE_MANUAL_DECODER_ATTENTION gone;
+    TRTF_TEXT_STEP_TRACE_* gone. Remaining: TRTF_DISABLE_CUDA_GRAPH,
+    TRTF_GPU_ARGMAX, TRTF_MAGPIE_*, TRTF_BARK_*, TRTF_TRT_LOG_*,
+    TRTF_DATA_DIR. These belong to clusters D/E and a future runtime.*
+    cluster that hasn't been scoped yet.
 - [ ] Qwen3-0.6B smoke (new, D6)
 - [ ] AIME25 iter3 numbers within exit bounds
 - [ ] `ctest` + `pytest tests/builder/` + `tests/config/` pass
@@ -385,6 +398,40 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 13 (2026-04-20)
+- Phase 5.a delivered: the scalability acceptance test.
+- `tests/builder/test_config_isolation_demo.py` — 8 tests registering
+  an inline `demo_feature` schema with three fields (int32, string, bool)
+  across three allowlists. Verifies:
+    * Registration works via the public entry point alone.
+    * Schema defaults flow through `resolve_cli_config` without any
+      contribution.
+    * `--set demo_feature.<field>=<value>` routes through the generic
+      CLI helper without any edit to `cli.py`.
+    * `--config <file>` JSON profile routes the same way;
+      `--set` beats `--config` within the session layer.
+    * Validator rejects out-of-vocabulary values.
+    * Layer allowlist rejects contributions from non-permitted layers.
+    * `effective_config.json` dumps the new namespace with both
+      non-default sources and schema-default sources recorded.
+    * A documentation assertion pins the exact per-feature file
+      footprint: three new files (schema.py, schema.h, schema.cpp, plus
+      a test file) and two shared edits (force_link_schemas.cpp anchor
+      line and CMakeLists.txt source listing). Any future refactor
+      exceeding that surface is a coupling point by definition.
+- Pragmatic note: the scalability test registers its demo schema inline
+  (at test time) rather than via a standalone file, to avoid polluting
+  the production schema registry or the cross-language match test. The
+  architectural claim is the same: the registry + CLI + bundle merge
+  chain handles any namespace without special-casing.
+- Gate: 8/8 tests pass in 0.04s; no new C++ code (Python-only test).
+- Commit: pending end-of-tick.
+- Next tick (14) — Cluster D (`profile.dynamic_kv_profile_rows`) and
+  the small stragglers (`TRTF_TRT_LOG_*`, `TRTF_DATA_DIR`,
+  `TRTF_BARK_*`, `TRTF_MAGPIE_*`, `TRTF_DISABLE_CUDA_GRAPH`,
+  `TRTF_GPU_ARGMAX`). Focus is completeness of the env-var sweep for
+  gate 5.b; the scalability contract is already ratified.
 
 ### Tick 12 (2026-04-20)
 - Phase 4 Cluster C (`text_trace.*`) closed.
