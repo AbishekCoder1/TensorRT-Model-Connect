@@ -113,10 +113,15 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
     Cluster A (same reasoning as codegen).
 
 ### Phase 2 — CLI supply (serial)
-- [x] `--config` + `--set` on `trtf_build/trtf_build/cli.py` (commit TBD)
-- [ ] `--config` + `--set` on `examples/trtf_cli.cpp`
+- [x] `--config` + `--set` on `trtf_build/trtf_build/cli.py` (commit `4daa555e`)
+- [x] `--config` + `--set` on `examples/trtf_cli.cpp` (commit TBD)
 - [ ] Same on `tools/benchmark_qwen3_8b_aime25_vs_hf.py`
 - [ ] C ABI `trtf_create_pipeline_ex` gains `const char* config_json`
+  - Deferred to tick 6: the C ABI struct is covered by
+    `test_c_abi_runtime_regression` and adding a field at the end is a
+    technical ABI break. Need to decide whether to version-bump or
+    version-gate the struct. Not a blocker for Phase 3/4 since the C++
+    CLI already threads config through on its own side.
 
 **D8 — Python package renamed to `runtime_config/` (deviation from prompt).**
 The prompt specified `trtf_build/trtf_build/config/` but Python already has
@@ -246,10 +251,59 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   rerun); `trtf-build build --help` now shows `--config` and
   `--set` in the help text; 81 existing builder/cli tests still pass,
   confirming no regression from the package rename.
+- Commit: `4daa555e`.
+
+### Tick 5 (2026-04-20)
+- `include/trtf/config/cli_support.h` + `src/runtime/config/cli_support.cpp` —
+  C++ mirror of the Python CLI supply helpers. Same public surface:
+  `parse_set_token`, `coerce_scalar`, `load_layered_file`,
+  `build_cli_contribution`, `resolve_cli_config`,
+  `write_effective_config_next_to`, plus a minimal scoped JSON parser
+  (`parse_layered_json`) that accepts `{namespace: {field: scalar}}`
+  shape with `//`-to-EOL comments, and `bundle_to_effective_json` for
+  serialization.
+- JSON parser decisions: the C++ loader accepts only `.json` (yaml-cpp
+  isn't in the container; `.yaml`/`.yml` files raise a clear message
+  telling the caller to convert or route through the Python wrapper).
+  Scalars: string / int64 / double / bool / null. Null maps to an
+  empty `std::any`, so `has_value()` is the canonical "null was
+  present" check.
+- `examples/trtf_cli.cpp` — argv parser gains `--config <file>` and
+  `--set ns.field=value` (repeatable). A single `apply_cli_config()`
+  helper runs once from `main()`, resolves the contributions, and
+  writes `effective_config.json` next to the bundle path. No per-knob
+  flags were added. Pre-Phase-4 (no schemas registered) the flags are
+  accepted and a clear message prints; existing invocations unaffected.
+- `tests/cpp/test_config_cli_support.cpp` — 27 test cases mirroring the
+  Python cli_support tests plus the JSON parser (empty object, simple
+  object, mixed scalar kinds, malformed input) and the
+  `bundle_to_effective_json` + `write_effective_config_next_to`
+  round-trip. Registered in CMakeLists.txt via `trtf_add_test`.
+- Refactor pass during the tick: several helpers exceeded the CCN gate
+  after first draft. Split `parse_scalar` into
+  `parse_bool_literal`/`parse_null_literal`/`parse_number_literal`,
+  split `parse_string`'s escape switch into `decode_string_escape`,
+  extracted `append_json_escaped_string`/`try_append_numeric` from
+  `append_json_scalar`, split `coerce_scalar` into
+  `coerce_integer`/`coerce_floating`/`coerce_boolean`, and split
+  `is_number_continuation` predicates into named helpers
+  (`is_digit`/`is_dot_or_exp`/`is_sign_char`/`prev_was_exp`). All
+  functions in `src/runtime/config/` now under CCN 10.
+- Gates: C++ test suite passes `test_config_cli_support` (27 cases) and
+  `test_config_schema_registry` (21 cases); 82 Python tests
+  (cli_support + schema_registry + existing cli) pass; 11 relevant
+  non-GPU C++ ctests pass (no regressions); `./build/trtf run --set
+  triattention.kv_budget=4096` smoke prints the expected
+  "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
+  src/runtime/config --max-ccn 10` passes.
 - Commit: pending end-of-tick.
-- Next tick (5) — Phase 2 C++/CABI:
-    * `examples/trtf_cli.cpp`: add the same two-flag surface.
-    * JSON profile loader in C++ (reuse `src/utils/json_helpers.cpp`).
-    * `src/cabi/api/trtf_c.cpp` `trtf_create_pipeline_ex` gains
-      `const char* config_json` (nullable; existing callers unaffected).
-    * Tests: C++ CLI parser test mirroring the Python test file.
+- Next tick (6) — finish Phase 2 tail work then enter Phase 3:
+    * `tools/benchmark_qwen3_8b_aime25_vs_hf.py`: swap the `--tri-env`
+      forest for `--config` / `--set` that flow through to both trtf-build
+      and the trtf binary.
+    * `trtf_create_pipeline_ex` C ABI extension — keep old signature,
+      add a v2 entry point with `config_json` (so
+      `test_c_abi_runtime_regression` keeps passing against the v1
+      struct layout).
+    * Phase 3: bundle `defaults:` block — builder writes, runtime reads
+      as the lowest-priority layer. Qwen3-0.6B round-trip smoke test.

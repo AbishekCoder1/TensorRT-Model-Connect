@@ -11,6 +11,8 @@
 
 #include "stb_image_write.h"
 #include "trtf/bundle.h"
+#include "trtf/config/cli_support.h"
+#include "trtf/config/schema_registry.h"
 #include "trtf/pipeline.h"
 #include "trtf/trtf_io.hpp"
 
@@ -69,6 +71,11 @@ struct CliArgs {
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
+    // Generic config surface — see include/trtf/config/cli_support.h. No
+    // per-knob flags may be added beyond these two; features add a schema
+    // and consume values through the registry.
+    std::string config_path;
+    std::vector<std::string> set_tokens;
 };
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
@@ -339,12 +346,21 @@ CliArgs parse_args(int argc, char** argv) {
             args.is_foreground = false;
             continue;
         }
+<<<<<<< HEAD
         if (arg == "--runtime-cache" && need_value(arg)) {
             args.runtime_cache = argv[++i];
             continue;
         }
         if (arg == "--cuda-graphs") {
             args.cuda_graphs = true;
+=======
+        if (arg == "--config" && need_value(arg)) {
+            args.config_path = argv[++i];
+            continue;
+        }
+        if (arg == "--set" && need_value(arg)) {
+            args.set_tokens.emplace_back(argv[++i]);
+>>>>>>> db1f9e35 (config-registry: tick 5 — C++ --config/--set + JSON parser + 27-case test)
             continue;
         }
 
@@ -916,6 +932,34 @@ int cmd_inspect(const CliArgs& args) {
 
 } // namespace
 
+// Resolve --config/--set and emit effective_config.json next to the
+// bundle. No-op when neither flag was used. Pre-Phase-4 (no schemas
+// registered for the relevant namespaces yet) the flags are accepted
+// and a clear message prints — existing invocations are unaffected.
+int apply_cli_config(const CliArgs& args) {
+    if (args.config_path.empty() && args.set_tokens.empty())
+        return EXIT_SUCCESS;
+    if (trtf::config::SchemaRegistry::instance().registered_namespaces().empty()) {
+        std::cerr << "[trtf] --config/--set accepted but no config schemas are "
+                     "registered yet; values have no effect. Phase 4 cluster "
+                     "migrations add schemas." << '\n';
+        return EXIT_SUCCESS;
+    }
+    try {
+        auto bundle = trtf::config::resolve_cli_config(
+            args.config_path, args.set_tokens);
+        if (!args.bundle_path.empty()) {
+            std::string path = trtf::config::write_effective_config_next_to(
+                bundle, args.bundle_path);
+            std::cerr << "[trtf] Wrote effective config: " << path << '\n';
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error resolving config: " << e.what() << '\n';
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}
+
 int main(int argc, char** argv) {
     const CliArgs args = parse_args(argc, argv);
 
@@ -928,6 +972,8 @@ int main(int argc, char** argv) {
         print_usage();
         return EXIT_FAILURE;
     }
+    if (int rc = apply_cli_config(args); rc != EXIT_SUCCESS)
+        return rc;
 
     if (args.command == "version")
         return cmd_version();
