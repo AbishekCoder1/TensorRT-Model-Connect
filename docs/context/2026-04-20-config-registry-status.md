@@ -100,8 +100,8 @@ static-init registrars. The accepted bar:
 Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
 
 ### Phase 1 — Foundation
-- [~] Tick 1: state file + C++ header skeleton
-- [ ] Tick 2: C++ `.cpp` + merge + unit tests
+- [x] Tick 1: state file + C++ header skeleton  (commit `cbe4bae6`)
+- [x] Tick 2: C++ `.cpp` + merge + unit tests   (commit TBD)
 - [ ] Tick 3: Python mirror + codegen + cross-lang test + `effective_config.json`
 
 ### Phase 2 — CLI supply (serial)
@@ -146,5 +146,27 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
 - State file written with decisions D1–D7.
 - C++ header skeleton `include/trtf/config/schema_registry.h` landed.
 - No `.cpp`, no Python mirror, no codegen yet — intentional scope cap.
+- Commit: `cbe4bae6`.
+
+### Tick 2 (2026-04-20)
+- `src/runtime/config/schema_registry.cpp` — singleton + registration rules.
+  Rejects at static-init: empty namespace, empty fields, empty allowlist,
+  `SchemaDefault` in allowlist, duplicate namespace.
+- `include/trtf/config/config_bundle.h` + `src/runtime/config/config_bundle.cpp` —
+  layered merge engine. Priority order:
+  `SessionRequest > PlatformProfile > BundleDefault > BuildTime > SchemaDefault`.
+  Two-phase build: (1) validate every contribution against schema and
+  allowlist, (2) pick highest-priority value per field, fall back to
+  schema default. Each resolved value carries its source layer for
+  `effective_config.json` provenance.
+- `tests/cpp/test_config_schema_registry.cpp` — 21 tests covering
+  registration rules, layer-priority merge (session/platform/bundle/build
+  and default fallback), allowlist violations, unknown-namespace /
+  unknown-field / validator-rejection errors, typed `get<T>` / `get_any`
+  access, and provenance via `ConfigBundle::all()`.
+- CMakeLists.txt: two new source files in `trtf_core`, one new test target.
+- Gates passed: build clean with `-Wall -Wextra -Wpedantic`; all 21
+  tests pass; CCN p90=7, max=9 over 13 functions (≤ 10 required).
 - Commit: pending end-of-tick.
-- Next tick: C++ `.cpp` + layered merge + unit tests.
+- Next tick (3): Python mirror + codegen scaffolding + cross-language
+  field-set match test + `effective_config.json` writer.
