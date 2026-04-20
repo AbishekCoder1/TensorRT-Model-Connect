@@ -581,6 +581,99 @@ std::string bundle_to_effective_json(const ConfigBundle& bundle)
     return os.str();
 }
 
+namespace {
+
+bool is_json_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+std::size_t skip_json_ws(const std::string& text, std::size_t p)
+{
+    while (p < text.size() && is_json_space(text[p])) ++p;
+    return p;
+}
+
+// Starting at a '{' at index `start`, scan forward honoring string literals
+// and return the index just past the matching close '}'. Returns
+// std::string::npos on unbalanced or missing close.
+std::size_t match_object_end(const std::string& text, std::size_t start)
+{
+    int depth = 0;
+    bool in_string = false;
+    for (std::size_t p = start; p < text.size(); ++p)
+    {
+        char c = text[p];
+        if (in_string)
+        {
+            if (c == '\\' && p + 1 < text.size()) { ++p; continue; }
+            if (c == '"') in_string = false;
+            continue;
+        }
+        if (c == '"') { in_string = true; continue; }
+        if (c == '{') ++depth;
+        else if (c == '}' && --depth == 0)
+            return p + 1;
+    }
+    return std::string::npos;
+}
+
+// Confirm that a "<key>" match at `pattern_end` is actually followed by
+// a colon and then an object open-brace. Returns the index of the '{' on
+// success, std::string::npos otherwise.
+std::size_t find_object_open_after_key(const std::string& text, std::size_t pattern_end)
+{
+    std::size_t p = skip_json_ws(text, pattern_end);
+    if (p >= text.size() || text[p] != ':') return std::string::npos;
+    p = skip_json_ws(text, p + 1);
+    if (p >= text.size() || text[p] != '{') return std::string::npos;
+    return p;
+}
+
+// Locate the object value for ``"<key>":`` in a JSON text and return the
+// substring from the opening '{' to its matching close '}' (inclusive).
+// Returns empty string if the key is absent or the value isn't an object.
+// Honors string-literal escaping so that '{' or '}' inside quoted values
+// don't confuse brace matching.
+std::string find_object_value_for_key(const std::string& text, const std::string& key)
+{
+    const std::string pattern = "\"" + key + "\"";
+    std::size_t pos = 0;
+    while ((pos = text.find(pattern, pos)) != std::string::npos)
+    {
+        std::size_t open = find_object_open_after_key(text, pos + pattern.size());
+        if (open == std::string::npos)
+        {
+            // Not a key (or value isn't an object). Skip past and keep
+            // looking — handles the case where the literal appears inside
+            // another string value.
+            pos += pattern.size();
+            continue;
+        }
+        std::size_t end = match_object_end(text, open);
+        if (end == std::string::npos) return {};
+        return text.substr(open, end - open);
+    }
+    return {};
+}
+
+} // namespace
+
+LayeredFileValues extract_bundle_defaults(const std::string& header_json)
+{
+    std::string sub = find_object_value_for_key(header_json, "defaults");
+    if (sub.empty()) return {};
+    return parse_layered_json(sub);
+}
+
+LayerContribution bundle_defaults_contribution(const std::string& header_json)
+{
+    LayerContribution out;
+    out.layer = Layer::BundleDefault;
+    out.values = extract_bundle_defaults(header_json);
+    return out;
+}
+
 std::string write_effective_config_next_to(
     const ConfigBundle& bundle, const std::string& artifact_path,
     const std::string& suffix)

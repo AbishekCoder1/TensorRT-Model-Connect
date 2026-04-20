@@ -37,6 +37,12 @@ class BundleInfo:
     quantization: str = "none"
     tokenizer_add_special_tokens: bool = False
     io_map: dict | None = None  # tensor name mapping; None = TRT API defaults
+    # Namespaced defaults produced at build time. When non-empty, serialized
+    # into the header as `defaults: {namespace: {field: value, ...}}` and
+    # read back at runtime as the BUNDLE_DEFAULT layer — the lowest-priority
+    # input to the config registry merge. None/empty → no block emitted, so
+    # old readers continue to work untouched.
+    defaults: dict | None = None
 
 
 @dataclass
@@ -83,6 +89,7 @@ def write_bundle(
            if info.quantization != "none" else {}),
         "tokenizer_add_special_tokens": int(info.tokenizer_add_special_tokens),
         **({"io_map": info.io_map} if info.io_map else {}),
+        **({"defaults": info.defaults} if info.defaults else {}),
         "sections": {
             s["name"]: {"offset": s["offset"], "size": s["size"]}
             for s in section_meta

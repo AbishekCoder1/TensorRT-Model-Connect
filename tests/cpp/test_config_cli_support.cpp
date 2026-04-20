@@ -390,6 +390,73 @@ void test_write_effective_config_next_to_places_file(std::string tmp_dir)
           "write_effective: sibling filename");
 }
 
+// ---- bundle defaults: block ------------------------------------------------
+
+void test_extract_bundle_defaults_finds_block()
+{
+    std::string header = R"({
+        "model_id": "demo",
+        "vocab_size": 100,
+        "defaults": {
+            "triattention": { "kv_budget": 4096, "protect_prefill": true },
+            "decode_policy": { "force_manual_attention": false }
+        },
+        "sections": {}
+    })";
+    auto out = trtf::config::extract_bundle_defaults(header);
+    check(out.size() == 2, "extract_defaults: two namespaces");
+    check(std::any_cast<std::int64_t>(out.at("triattention").at("kv_budget")) == 4096,
+          "extract_defaults: kv_budget");
+    check(std::any_cast<bool>(out.at("triattention").at("protect_prefill")) == true,
+          "extract_defaults: protect_prefill");
+    check(std::any_cast<bool>(out.at("decode_policy").at("force_manual_attention")) == false,
+          "extract_defaults: force_manual_attention");
+}
+
+void test_extract_bundle_defaults_absent_block()
+{
+    std::string header = R"({ "model_id": "x", "sections": {} })";
+    auto out = trtf::config::extract_bundle_defaults(header);
+    check(out.empty(), "extract_defaults: absent => empty");
+}
+
+void test_extract_bundle_defaults_key_in_string_not_confused()
+{
+    // "defaults" appears inside a string literal; must be ignored.
+    std::string header = R"({
+        "comment": "default key: defaults",
+        "defaults": { "ns": { "f": 1 } }
+    })";
+    auto out = trtf::config::extract_bundle_defaults(header);
+    check(out.size() == 1 && out.count("ns") == 1,
+          "extract_defaults: skips key-like string literal");
+}
+
+void test_bundle_defaults_contribution_produces_bundle_default_layer()
+{
+    register_demo_schema();
+    std::string header = R"({ "defaults": { "triattention": { "kv_budget": 4096 } } })";
+    auto contrib = trtf::config::bundle_defaults_contribution(header);
+    check(contrib.layer == Layer::BundleDefault, "contrib: layer");
+    check(std::any_cast<std::int64_t>(
+              contrib.values.at("triattention").at("kv_budget")) == 4096,
+          "contrib: kv_budget");
+
+    // Merge: session beats bundle default; bundle default fills gaps.
+    LayerContribution session;
+    session.layer = Layer::SessionRequest;
+    session.values["triattention"]["kv_budget"] = std::any{std::int32_t{8192}};
+    auto merged = trtf::config::ConfigBundle::build({contrib, session});
+    check(merged.get<std::int32_t>("triattention", "kv_budget") == 8192,
+          "merge: session wins");
+    check(merged.source_of("triattention", "kv_budget") == Layer::SessionRequest,
+          "merge: session source");
+
+    auto without_session = trtf::config::ConfigBundle::build({contrib});
+    check(without_session.source_of("triattention", "kv_budget") == Layer::BundleDefault,
+          "merge: bundle default fills gap");
+}
+
 } // namespace
 
 int main()
@@ -424,6 +491,12 @@ int main()
     test_resolve_session_beats_platform();
 
     test_bundle_to_effective_json_contains_source();
+
+    test_extract_bundle_defaults_finds_block();
+    test_extract_bundle_defaults_absent_block();
+    test_extract_bundle_defaults_key_in_string_not_confused();
+    test_bundle_defaults_contribution_produces_bundle_default_layer();
+
     // Writing to a temp dir — resolve at runtime.
     {
         namespace fs = std::filesystem;

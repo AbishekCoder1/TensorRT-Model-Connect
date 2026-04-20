@@ -354,3 +354,104 @@ def test_write_effective_config_next_to_uses_suffix(tmp_path: Path):
     assert loaded["triattention"]["kv_budget"] == {
         "value": 8192, "source": "session_request",
     }
+
+
+# ---- bundle defaults: block -----------------------------------------------
+
+
+def test_bundle_defaults_contribution_reads_block():
+    from trtf_build.runtime_config import bundle_defaults_contribution
+    header = json.dumps({
+        "model_id": "demo",
+        "vocab_size": 100,
+        "defaults": {
+            "triattention": {"kv_budget": 4096, "protect_prefill": True},
+        },
+        "sections": {},
+    })
+    contrib = bundle_defaults_contribution(header)
+    assert contrib.layer == Layer.BUNDLE_DEFAULT
+    assert contrib.values == {
+        "triattention": {"kv_budget": 4096, "protect_prefill": True},
+    }
+
+
+def test_bundle_defaults_contribution_absent_block_is_empty():
+    from trtf_build.runtime_config import bundle_defaults_contribution
+    header = json.dumps({"model_id": "demo", "sections": {}})
+    contrib = bundle_defaults_contribution(header)
+    assert contrib.layer == Layer.BUNDLE_DEFAULT
+    assert contrib.values == {}
+
+
+def test_bundle_defaults_contribution_accepts_mapping():
+    from trtf_build.runtime_config import bundle_defaults_contribution
+    parsed = {"defaults": {"ns": {"field": 1}}, "sections": {}}
+    contrib = bundle_defaults_contribution(parsed)
+    assert contrib.values == {"ns": {"field": 1}}
+
+
+def test_bundle_defaults_feeds_bundle_default_layer(tmp_path: Path):
+    from trtf_build.runtime_config import bundle_defaults_contribution
+    _register_demo_schema()
+    header = json.dumps({"defaults": {"triattention": {"kv_budget": 4096}}})
+    defaults_contrib = bundle_defaults_contribution(header)
+    # Session value beats bundle_default; bundle_default beats schema default.
+    bundle = ConfigBundle.build(
+        [defaults_contrib] + [LayerContribution(
+            layer=Layer.SESSION_REQUEST,
+            values={"triattention": {"kv_budget": 8192}},
+        )]
+    )
+    assert bundle.get("triattention", "kv_budget") == 8192
+    assert bundle.source_of("triattention", "kv_budget") == Layer.SESSION_REQUEST
+    # Without session override, bundle default wins.
+    bundle2 = ConfigBundle.build([defaults_contrib])
+    assert bundle2.get("triattention", "kv_budget") == 4096
+    assert bundle2.source_of("triattention", "kv_budget") == Layer.BUNDLE_DEFAULT
+
+
+def test_bundle_writer_round_trip_with_defaults(tmp_path: Path):
+    """End-to-end: Python builder writes a .trtfb, reader gets defaults back."""
+    pytest.importorskip("struct")
+    from trtf_build.bundle_writer import BundleInfo, BundleSection, BUNDLE_MAGIC, write_bundle
+    import struct
+
+    path = tmp_path / "bundle.trtfb"
+    info = BundleInfo(
+        model_id="demo", vocab_size=100, hidden_size=16, num_layers=1,
+        defaults={"triattention": {"kv_budget": 4096, "protect_prefill": True}},
+    )
+    write_bundle(path, info, [BundleSection(name="dummy", data=b"\x00\x00")])
+
+    # Re-parse the header JSON directly to confirm round-trip.
+    raw = path.read_bytes()
+    assert raw.startswith(BUNDLE_MAGIC)
+    header_len = struct.unpack("<Q", raw[8:16])[0]
+    header_text = raw[16:16 + header_len].decode("utf-8")
+    header = json.loads(header_text)
+    assert header["defaults"] == {
+        "triattention": {"kv_budget": 4096, "protect_prefill": True},
+    }
+
+    # Feed into the registry helper.
+    from trtf_build.runtime_config import bundle_defaults_contribution
+    contrib = bundle_defaults_contribution(header_text)
+    assert contrib.values == {
+        "triattention": {"kv_budget": 4096, "protect_prefill": True},
+    }
+
+
+def test_bundle_writer_omits_defaults_when_empty(tmp_path: Path):
+    """No defaults: block → old readers unaffected."""
+    from trtf_build.bundle_writer import BundleInfo, BundleSection, BUNDLE_MAGIC, write_bundle
+    import struct
+
+    path = tmp_path / "bundle.trtfb"
+    info = BundleInfo(model_id="demo", vocab_size=100, hidden_size=16, num_layers=1)
+    write_bundle(path, info, [BundleSection(name="dummy", data=b"\x00\x00")])
+
+    raw = path.read_bytes()
+    header_len = struct.unpack("<Q", raw[8:16])[0]
+    header = json.loads(raw[16:16 + header_len].decode("utf-8"))
+    assert "defaults" not in header

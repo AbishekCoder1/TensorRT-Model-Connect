@@ -215,3 +215,32 @@ def write_effective_config(
         json.dump(bundle.to_effective_dict(), handle, indent=2, sort_keys=False)
         handle.write("\n")
     return resolved_path
+
+
+# ---- bundle defaults: block helpers --------------------------------------
+
+
+def bundle_defaults_contribution(
+    header_json_or_text: str | Mapping[str, Any],
+) -> LayerContribution:
+    """Read the bundle's ``defaults:`` block and wrap it as a BundleDefault layer.
+
+    Accepts either a raw JSON string (the bundle header text) or an
+    already-parsed mapping. An absent or empty ``defaults`` produces an
+    empty contribution — old bundles without the block load unchanged.
+    """
+    if isinstance(header_json_or_text, str):
+        parsed = json.loads(header_json_or_text) if header_json_or_text.strip() else {}
+    else:
+        parsed = dict(header_json_or_text)
+
+    defaults = parsed.get("defaults") if isinstance(parsed, dict) else None
+    if not isinstance(defaults, dict):
+        defaults = {}
+
+    values: Dict[str, Dict[str, Any]] = {}
+    for ns, body in defaults.items():
+        if not isinstance(ns, str) or not isinstance(body, dict):
+            continue
+        values[ns] = {str(k): v for k, v in body.items()}
+    return LayerContribution(layer=Layer.BUNDLE_DEFAULT, values=values)

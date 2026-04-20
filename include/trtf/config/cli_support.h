@@ -97,4 +97,17 @@ std::string write_effective_config_next_to(
 // ordering so two identical bundles produce byte-identical output.
 std::string bundle_to_effective_json(const ConfigBundle& bundle);
 
+// Scan a bundle's header JSON text for the ``"defaults": { ... }`` object
+// value and return its contents as a parsed LayeredFileValues. Returns an
+// empty map when the key is absent, so old bundles with no ``defaults:``
+// block continue to load unchanged.
+//
+// This is intentionally a targeted scanner rather than a general JSON DOM:
+// the header already has many top-level fields (``model_id``, ``sections``,
+// …) and we only need the ``defaults`` subtree.
+LayeredFileValues extract_bundle_defaults(const std::string& header_json);
+
+// Convenience: wrap ``extract_bundle_defaults`` as a BundleDefault layer.
+LayerContribution bundle_defaults_contribution(const std::string& header_json);
+
 } // namespace trtf::config

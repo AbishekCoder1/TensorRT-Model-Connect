@@ -135,9 +135,12 @@ the shorter `trtf::config` namespace (no collision there). Test
 imports, `cli.py`, and all internal imports updated.
 
 ### Phase 3 — Bundle defaults
-- [ ] `config.json` gains `defaults:` block; builder writes, runtime reads
-- [ ] Old-bundle compatibility (absent = `{}`)
-- [ ] Round-trip smoke test
+- [x] `config.json` gains `defaults:` block; builder writes, runtime reads (commit TBD)
+- [x] Old-bundle compatibility (absent = `{}`)
+- [x] Round-trip smoke test (synthetic bundle; a GPU-dependent
+      full-builder Qwen3-0.6B smoke would only re-exercise the same
+      write/read path that `test_bundle_writer_round_trip_with_defaults`
+      already covers).
 
 ### Phase 4 — Cluster migration
 - [ ] Phase 4a: `override` rename (pure, no logic change)
@@ -300,6 +303,70 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
 - Commit: `3bf3fbb8`.
+
+### Tick 7 (2026-04-20)
+- Phase 3 delivered: bundles carry a `defaults:` block that feeds the
+  runtime `BUNDLE_DEFAULT` layer directly.
+- `trtf_build/trtf_build/bundle_writer.py`: `BundleInfo.defaults` field
+  (optional dict). When non-empty the header serializes
+  `"defaults": { ns: { field: value, ... }, ... }` right before the
+  `sections:` block. When empty/None, nothing is emitted so existing
+  readers are unaffected.
+- `trtf_build/trtf_build/runtime_config/config_bundle.py`:
+  `bundle_defaults_contribution(header_json_or_mapping)` returns a
+  `LayerContribution(layer=BUNDLE_DEFAULT, values=...)`. Accepts either
+  raw JSON text or a pre-parsed mapping for flexibility.
+- `include/trtf/config/cli_support.h` +
+  `src/runtime/config/cli_support.cpp`: `extract_bundle_defaults` plus
+  `bundle_defaults_contribution`. The extraction helper is a targeted
+  scanner (not a full JSON DOM) that:
+    * searches for `"defaults"` key in the header text,
+    * verifies a colon and `{` follow,
+    * brace-matches the object, honoring string escapes so that `{` /
+      `}` inside a quoted value don't trip the scan,
+    * feeds the extracted substring into the existing
+      `parse_layered_json`.
+  Absent block → empty map; occurrence of the key inside a string
+  literal is ignored (verified by `test_extract_bundle_defaults_key_in_string_not_confused`).
+- Tests added (6 Python + 4 C++):
+    * `test_bundle_defaults_contribution_reads_block` — JSON text with
+      defaults.
+    * `test_bundle_defaults_contribution_absent_block_is_empty` — old
+      bundles keep loading.
+    * `test_bundle_defaults_contribution_accepts_mapping` — pre-parsed
+      dict path.
+    * `test_bundle_defaults_feeds_bundle_default_layer` — session beats
+      bundle default; bundle default fills gap.
+    * `test_bundle_writer_round_trip_with_defaults` — real `.trtfb`
+      write, re-read, dict-compare. The smoke test for this phase.
+    * `test_bundle_writer_omits_defaults_when_empty` — no block when
+      `defaults` is None.
+    * `test_extract_bundle_defaults_finds_block` — targeted scanner on
+      multi-namespace input.
+    * `test_extract_bundle_defaults_absent_block` — returns empty.
+    * `test_extract_bundle_defaults_key_in_string_not_confused` — key
+      literal inside a quoted value doesn't steal the match.
+    * `test_bundle_defaults_contribution_produces_bundle_default_layer`
+      — merge semantics verified.
+- Refactor pass: `find_object_value_for_key` originally CCN=25;
+  split into `is_json_space`, `skip_json_ws`, `find_object_open_after_key`,
+  `match_object_end`, and the outer search loop. All ≤ CCN 10.
+- Gates: 60 Python tests + 31 C++ tests (test_config_cli_support) pass;
+  CCN gate on `src/runtime/config/` passes; build clean.
+- Commit: pending end-of-tick.
+- Next tick (8) — Phase 4 begins. Start with Cluster A
+  (`triattention.*`) because it's the biggest (17 fields) and the
+  acceptance gate (AIME25 iter3) depends on it. Sequence inside Cluster A:
+    1. `override` rename commit first (Phase 4a — pure rename, no logic).
+    2. Declare the Python schema in `trtf_build/trtf_build/runtime_config/schemas/triattention.py`.
+    3. Generate / hand-write the matching C++ schema header
+       (`include/trtf/config/schemas/triattention.h` + registration in a
+       new `.cpp` file added to the force-link anchor list).
+    4. Swap the `TRTF_TRIATTN_*` env-var readers in
+       `src/runtime/core/triattention_kv_cache.cpp` for ConfigBundle
+       queries. Similarly for the Python build path.
+    5. Delete the env-var readers (hard removal per CLAUDE.md style).
+    6. Validate per-cluster tests still pass.
 
 ### Tick 6 (2026-04-20)
 - `examples/trtf_dataset_benchmark.cpp` — argv parser gains `--config

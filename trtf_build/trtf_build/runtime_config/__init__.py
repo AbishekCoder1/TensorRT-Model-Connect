@@ -32,6 +32,7 @@ from trtf_build.runtime_config.config_bundle import (
     ConfigBundle,
     LayerContribution,
     ResolvedValue,
+    bundle_defaults_contribution,
     write_effective_config,
 )
 from trtf_build.runtime_config.cli_support import (
@@ -53,6 +54,7 @@ __all__ = [
     "Schema",
     "SchemaRegistry",
     "build_cli_contribution",
+    "bundle_defaults_contribution",
     "clear_for_testing",
     "coerce_scalar",
     "load_layered_file",
