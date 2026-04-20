@@ -152,10 +152,40 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_disable_mlr=getattr(args, "triattention_disable_mlr", False),
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
         )
-        return 0
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
+
+    # Emit effective_config.json alongside the bundle when the caller
+    # supplied --config/--set. Silently skipped otherwise so existing
+    # callers are unaffected. Until Phase 4 registers real schemas, a
+    # clear warning replaces the would-be no-op resolve.
+    cli_cfg = getattr(args, "config", None)
+    cli_sets = getattr(args, "set_flags", None) or []
+    if cli_cfg or cli_sets:
+        from .runtime_config import (
+            registered_namespaces, resolve_cli_config,
+            write_effective_config_next_to,
+        )
+        if not registered_namespaces():
+            print(
+                "[trtf-build] --config/--set accepted but no config schemas "
+                "are registered yet; values have no effect. Phase 4 cluster "
+                "migrations add schemas.",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                bundle = resolve_cli_config(
+                    config_path=cli_cfg, set_tokens=cli_sets,
+                )
+            except (ValueError, FileNotFoundError, KeyError) as exc:
+                print(f"Error resolving config: {exc}", file=sys.stderr)
+                return 1
+            path = write_effective_config_next_to(bundle, args.output)
+            print(f"[trtf-build] Wrote effective config: {path}",
+                  file=sys.stderr)
+    return 0
 
 
 def _resolve_build_model_metadata(model_ref: str, method_name: str) -> tuple[str, str]:
@@ -543,6 +573,19 @@ def main() -> None:
                          help="Disable TriAttention's magnitude-based additive term")
     build_p.add_argument("--triattention-disable-trig", action="store_true",
                          help="Disable TriAttention's trig scoring term")
+
+    # Generic two-flag config surface. New features register a namespaced
+    # schema and are consumed through these flags without growing the CLI.
+    # Adding a new feature MUST NOT add a new flag here.
+    build_p.add_argument(
+        "--config", default=None, metavar="FILE",
+        help="Config profile file (.json/.yaml). Contributes to the session "
+             "layer; combine with --set for ad-hoc overrides.")
+    build_p.add_argument(
+        "--set", action="append", dest="set_flags", default=None,
+        metavar="NS.FIELD=VALUE",
+        help="Set one config field for this session (repeatable). Uses the "
+             "schema's declared type; unknown namespaces/fields fail fast.")
 
     # trtf-build inspect <bundle.trtfb>
     inspect_p = subparsers.add_parser("inspect",

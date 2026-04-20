@@ -113,10 +113,18 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
     Cluster A (same reasoning as codegen).
 
 ### Phase 2 — CLI supply (serial)
+- [x] `--config` + `--set` on `trtf_build/trtf_build/cli.py` (commit TBD)
 - [ ] `--config` + `--set` on `examples/trtf_cli.cpp`
 - [ ] Same on `tools/benchmark_qwen3_8b_aime25_vs_hf.py`
-- [ ] Same on `trtf_build/trtf_build/cli.py`
 - [ ] C ABI `trtf_create_pipeline_ex` gains `const char* config_json`
+
+**D8 — Python package renamed to `runtime_config/` (deviation from prompt).**
+The prompt specified `trtf_build/trtf_build/config/` but Python already has
+`trtf_build/trtf_build/config.py` (`ModelConfig` — HF config.json parsing,
+unrelated concern). The two can't coexist without `ModelConfig` moving
+into the package, which is beyond this refactor's scope. C++ side keeps
+the shorter `trtf::config` namespace (no collision there). Test
+imports, `cli.py`, and all internal imports updated.
 
 ### Phase 3 — Bundle defaults
 - [ ] `config.json` gains `defaults:` block; builder writes, runtime reads
@@ -200,15 +208,48 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
 - Gates passed: all 23 Python tests pass; registry/bundle tests run in
   0.06s (no GPU, no TRT, no network).
 - Commit: pending end-of-tick.
-- Next tick (4) — Phase 1 closed. Entering Phase 2: CLI supply.
-  Priorities:
-    * Add `--config <path>` + `--set ns.field=value` to `trtf_build/cli.py`
-      (Python side — exercises the Python registry end to end).
-    * Then C++ CLI in `examples/trtf_cli.cpp` (reads JSON profile,
-      applies overrides via `--set`, produces `LayerContribution`s,
-      calls `ConfigBundle::build`).
-    * C ABI `trtf_create_pipeline_ex` gains a `const char* config_json`
-      parameter (nullable).
-  No per-knob flags; every existing `TRTF_*` env var eventually becomes
-  a namespaced schema field consumed via `--set ns.field=value` or via
-  a profile YAML/JSON file.
+- Commit: `f014d1f9`.
+
+### Tick 4 (2026-04-20)
+- `trtf_build/trtf_build/runtime_config/cli_support.py` — the two-flag
+  CLI surface's Python side. `load_layered_file` handles both JSON and
+  YAML (YAML only if PyYAML is present; raises a clear message
+  otherwise). `parse_set_token` / `parse_set_tokens` enforce the
+  `ns.field=value` shape with first-`=` split so values can legitimately
+  contain `=`. `coerce_scalar` drives type conversion from the schema's
+  declared `type_tag` (int/float/bool/string/path), rejecting mismatches
+  with the field name in the message. `build_cli_contribution` merges
+  `--config` + `--set` into one `SESSION_REQUEST` layer (`--set` wins
+  within that layer, preserving the "no collisions within the same
+  layer" invariant by resolving them before hand-off). `resolve_cli_config`
+  is the end-to-end helper for entry points, accepting
+  `extra_contributions` so callers can inject a platform profile or
+  bundle `defaults:` block alongside the session layer.
+- Python package renamed `config/` → `runtime_config/` (see D8).
+- `trtf_build/trtf_build/cli.py` build subparser gains `--config FILE`
+  and `--set NS.FIELD=VALUE` (repeatable). When either flag is provided
+  and at least one schema is registered, the builder writes an
+  `effective_config.json` file next to the output bundle. When schemas
+  aren't registered yet (current state, pre-Phase-4), the CLI accepts
+  the flags and prints a clear message — existing users are unaffected.
+- `tests/builder/test_config_cli_support.py` — 25 tests covering token
+  parsing (missing `=`, missing `.`, empty parts, repeated `=` in
+  value, last-write-wins), scalar coercion (int/float/bool vocab,
+  string, error surfaces), JSON and YAML file loading (missing,
+  unsupported extension, non-mapping top-level, non-dict namespace
+  body), merge semantics (config only, set-only, set beats config,
+  unknown namespace, unknown field, coercion error surfacing field
+  name), full `resolve_cli_config` end-to-end including an
+  `extra_contributions` platform layer, and the
+  `write_effective_config_next_to` artifact placement.
+- Gates: 54/54 tests pass (25 new + 23 mirror + 6 from schema-registry
+  rerun); `trtf-build build --help` now shows `--config` and
+  `--set` in the help text; 81 existing builder/cli tests still pass,
+  confirming no regression from the package rename.
+- Commit: pending end-of-tick.
+- Next tick (5) — Phase 2 C++/CABI:
+    * `examples/trtf_cli.cpp`: add the same two-flag surface.
+    * JSON profile loader in C++ (reuse `src/utils/json_helpers.cpp`).
+    * `src/cabi/api/trtf_c.cpp` `trtf_create_pipeline_ex` gains
+      `const char* config_json` (nullable; existing callers unaffected).
+    * Tests: C++ CLI parser test mirroring the Python test file.

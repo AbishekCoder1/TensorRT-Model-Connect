@@ -18,7 +18,7 @@ The bundle provides defaults, not ground truth. The runtime never
 inside this package.
 """
 
-from trtf_build.config.schema_registry import (
+from trtf_build.runtime_config.schema_registry import (
     ConfigField,
     Layer,
     Schema,
@@ -28,11 +28,20 @@ from trtf_build.config.schema_registry import (
     register_schema,
     registered_namespaces,
 )
-from trtf_build.config.config_bundle import (
+from trtf_build.runtime_config.config_bundle import (
     ConfigBundle,
     LayerContribution,
     ResolvedValue,
     write_effective_config,
+)
+from trtf_build.runtime_config.cli_support import (
+    build_cli_contribution,
+    coerce_scalar,
+    load_layered_file,
+    parse_set_token,
+    parse_set_tokens,
+    resolve_cli_config,
+    write_effective_config_next_to,
 )
 
 __all__ = [
@@ -43,9 +52,16 @@ __all__ = [
     "ResolvedValue",
     "Schema",
     "SchemaRegistry",
+    "build_cli_contribution",
     "clear_for_testing",
+    "coerce_scalar",
+    "load_layered_file",
     "lookup",
+    "parse_set_token",
+    "parse_set_tokens",
     "register_schema",
     "registered_namespaces",
+    "resolve_cli_config",
     "write_effective_config",
+    "write_effective_config_next_to",
 ]

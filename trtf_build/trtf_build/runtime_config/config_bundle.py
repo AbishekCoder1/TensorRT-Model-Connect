@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from trtf_build.config.schema_registry import (
+from trtf_build.runtime_config.schema_registry import (
     Layer,
     Schema,
     SchemaRegistry,
