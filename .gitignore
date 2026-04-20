@@ -17,6 +17,12 @@ cmake-build-*/
 /coverage/
 /artifacts/
 
+# Stray inference output at repo root
+/*.wav
+/*.png
+/*.jpg
+/flux2-outputs/
+
 # CMake/Ninja generated files
 CMakeFiles/
 CMakeCache.txt
