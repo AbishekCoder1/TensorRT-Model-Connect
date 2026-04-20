@@ -95,7 +95,7 @@ class TestCmdBuildValidation:
         """_cmd_build returns 1 when model is empty."""
         from trtf_build.cli import _cmd_build
         args = argparse.Namespace(model="", output="out.trtfb", quantize=None, quant_scales=None, quant_calibration_samples=512,
-                                  max_cache_length=256, verbose=False)
+                                  max_cache_length=256, verbose=False, _skip_profile_resolution=True)
         result = _cmd_build(args)
         assert result == 1
 
@@ -103,7 +103,7 @@ class TestCmdBuildValidation:
         """_cmd_build returns 1 when output is empty."""
         from trtf_build.cli import _cmd_build
         args = argparse.Namespace(model="some-model", output="", quantize=None, quant_scales=None, quant_calibration_samples=512,
-                                  max_cache_length=256, verbose=False)
+                                  max_cache_length=256, verbose=False, _skip_profile_resolution=True)
         result = _cmd_build(args)
         assert result == 1
 
@@ -204,8 +204,10 @@ class TestCmdBuildMocked:
                 output=str(tmp_path / "out.trtfb"),
                 max_cache_length=512,
                 precision="fp32",
+                method="trt",
                 quantize=None, quant_scales=None, quant_calibration_samples=512,
                 verbose=True,
+                _skip_profile_resolution=True,
             )
             result = _cmd_build(args)
             assert result == 0
@@ -233,14 +235,14 @@ class TestCmdBuildMocked:
         try:
             args = argparse.Namespace(
                 model="some-model", output=str(tmp_path / "out.trtfb"),
-                max_cache_length=256, precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=True)
+                max_cache_length=256, precision="fp32", method="trt", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=True, _skip_profile_resolution=True)
             _cmd_build(args)
             assert received_verbose == [True]
 
             received_verbose.clear()
             args = argparse.Namespace(
                 model="some-model", output=str(tmp_path / "out.trtfb"),
-                max_cache_length=256, precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False)
+                max_cache_length=256, precision="fp32", method="trt", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False, _skip_profile_resolution=True)
             _cmd_build(args)
             assert received_verbose == [False]
         finally:
@@ -266,9 +268,11 @@ class TestCmdBuildMocked:
                     output=str(tmp_path / "out.trtfb"),
                     max_cache_length=cache_len,
                     precision="fp32",
+                    method="trt",
                     quantize=None, quant_scales=None,
                     quant_calibration_samples=512,
-                    verbose=False)
+                    verbose=False,
+                    _skip_profile_resolution=True)
                 _cmd_build(args)
             assert received_cache == [128, 1024, 4096]
         finally:
@@ -290,11 +294,69 @@ class TestCmdBuildMocked:
                 output=str(tmp_path / "out.trtfb"),
                 max_cache_length=256,
                 precision="fp32",
-                verbose=False)
+                method="trt",
+                verbose=False,
+                _skip_profile_resolution=True)
             result = _cmd_build(args)
             assert result == 1
         finally:
             eb.build = original_build
+
+    def test_build_reexecs_into_declared_python_profile(self, monkeypatch, tmp_path):
+        """Chronos-family builds should re-exec into their declared Python profile."""
+        import trtf_build.cli as cli
+        import trtf_build.python_profiles as profile_mod
+
+        captured: dict[str, object] = {}
+
+        monkeypatch.setattr(
+            cli,
+            "_resolve_build_model_metadata",
+            lambda model_ref, method_name: ("/tmp/resolved-model", "chronos_bolt"),
+        )
+        monkeypatch.setattr(
+            profile_mod,
+            "resolve_profile_python",
+            lambda profile_name, base_python: "/tmp/chronos-profile/bin/python",
+        )
+
+        def _fake_run(cmd, env=None, **kwargs):
+            captured["cmd"] = cmd
+            captured["env"] = env or {}
+            return argparse.Namespace(returncode=0)
+
+        monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+
+        args = argparse.Namespace(
+            model="amazon/chronos-bolt-tiny",
+            output=str(tmp_path / "out.trtfb"),
+            max_cache_length=256,
+            precision="fp32",
+            quantize=None,
+            quant_scales=None,
+            quant_calibration_samples=512,
+            verbose=False,
+            method="trt",
+            _skip_profile_resolution=False,
+        )
+
+        with patch.object(
+            sys,
+            "argv",
+            ["trtf-build", "build", "amazon/chronos-bolt-tiny", "-o", str(tmp_path / "out.trtfb")],
+        ):
+            assert cli._cmd_build(args) == 0
+
+        assert captured["cmd"] == [
+            "/tmp/chronos-profile/bin/python",
+            "-m",
+            "trtf_build.__main__",
+            "build",
+            "amazon/chronos-bolt-tiny",
+            "-o",
+            str(tmp_path / "out.trtfb"),
+        ]
+        assert captured["env"]["TRTF_ACTIVE_PYTHON_PROFILE"] == "chronos"
 
 
 class TestFriendlyDownloadErrors:

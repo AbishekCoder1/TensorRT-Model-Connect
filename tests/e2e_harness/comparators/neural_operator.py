@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Dict, List
+from functools import reduce
+from operator import mul
+from typing import Any, Dict
 
 from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
 
@@ -58,6 +60,65 @@ def _max_pointwise_error(trt_field: Any, ref_field: Any) -> float:
         return max(abs(a - b) for a, b in zip(trt_field, ref_field))
 
     return float("inf")
+
+
+def _declared_shape(data: Dict[str, Any]) -> tuple[int, ...] | None:
+    raw = data.get("output_shape")
+    if not isinstance(raw, list) or not raw:
+        return None
+    try:
+        shape = tuple(int(dim) for dim in raw)
+    except (TypeError, ValueError):
+        return None
+    if any(dim < 0 for dim in shape):
+        return None
+    return shape
+
+
+def _numel_for_shape(shape: tuple[int, ...] | None) -> int | None:
+    if not shape:
+        return None
+    return reduce(mul, shape, 1)
+
+
+def _reshape_like_reference(trt_field: Any, trt_data: Dict[str, Any], ref_data: Dict[str, Any]) -> tuple[Any, Any, str | None]:
+    np = _try_import_numpy()
+    if np is None:
+        return trt_field, _load_field(ref_data), None
+
+    ref_field = _load_field(ref_data)
+    if trt_field is None or ref_field is None:
+        return trt_field, ref_field, None
+
+    trt_arr = np.asarray(trt_field, dtype=np.float64)
+    ref_arr = np.asarray(ref_field, dtype=np.float64)
+    ref_shape = _declared_shape(ref_data)
+    trt_shape = _declared_shape(trt_data)
+
+    if ref_shape is not None:
+        expected_numel = _numel_for_shape(ref_shape)
+        if expected_numel is not None and trt_arr.size != expected_numel:
+            return trt_arr, ref_arr, (
+                f"TRT output element count {trt_arr.size} does not match "
+                f"reference shape {list(ref_shape)} ({expected_numel} elements)"
+            )
+        if trt_arr.shape != ref_shape and expected_numel == trt_arr.size:
+            trt_arr = trt_arr.reshape(ref_shape)
+        if ref_arr.shape != ref_shape and expected_numel == ref_arr.size:
+            ref_arr = ref_arr.reshape(ref_shape)
+
+    if trt_shape is not None and ref_shape is not None and trt_shape != ref_shape:
+        return trt_arr, ref_arr, (
+            f"Declared output shapes differ: TRT {list(trt_shape)} vs ref {list(ref_shape)}"
+        )
+
+    if trt_arr.shape != ref_arr.shape:
+        return trt_arr, ref_arr, (
+            f"Output tensor shapes differ after normalization: TRT "
+            f"{list(trt_arr.shape)} vs ref {list(ref_arr.shape)}"
+        )
+
+    return trt_arr, ref_arr, None
 
 
 def _load_field(data: Dict[str, Any], key: str = "output_field_path") -> Any:
@@ -112,6 +173,16 @@ class NeuralOperatorComparator:
                 status=StageStatus.ERROR.value,
                 metrics={},
                 message=f"Missing field data from {', '.join(missing)}",
+            )
+
+        trt_field, ref_field, shape_error = _reshape_like_reference(
+            trt_field, trt.data, ref.data)
+        if shape_error is not None:
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.FAILED.value,
+                metrics={},
+                message=shape_error,
             )
 
         rel_l2 = _relative_l2(trt_field, ref_field)

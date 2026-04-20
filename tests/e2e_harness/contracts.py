@@ -119,6 +119,12 @@ class ReferenceFamily(enum.Enum):
     DIFFUSERS_IMAGE_GEN = "diffusers_image_gen"
     DIFFUSERS_VIDEO_GEN = "diffusers_video_gen"
 
+    # --- Time series ---
+    TIME_SERIES_POINT_FORECAST = "time_series_point_forecast"
+    TIME_SERIES_QUANTILE_FORECAST = "time_series_quantile_forecast"
+    TIME_SERIES_CLASSIFICATION = "time_series_classification"
+    TIME_SERIES_REGRESSION = "time_series_regression"
+
 
 class ArtifactType(enum.Enum):
     """Type of artifact produced by a pipeline stage.
@@ -202,6 +208,12 @@ class UserContract(enum.Enum):
     DIFFUSION_IMAGE = "diffusion_image"
     DIFFUSION_VIDEO = "diffusion_video"
 
+    # --- Time series ---
+    TIME_SERIES_POINT_FORECAST = "time_series_point_forecast"
+    TIME_SERIES_QUANTILE_FORECAST = "time_series_quantile_forecast"
+    TIME_SERIES_CLASSIFICATION = "time_series_classification"
+    TIME_SERIES_REGRESSION = "time_series_regression"
+
     # --- Weak / parity contracts ---
     CONTINUATION_PARITY = "continuation_parity"
     REPRESENTATION_PARITY = "representation_parity"
@@ -237,7 +249,8 @@ class PreflightRequirement:
             - "gpu_memory_min_gb": args must contain "min_gb".
             - "hf_auth_token_present": no args needed.
             - "asset_exists": args must contain "path".
-            - "python_module_available": args must contain "module".
+            - "python_module_available": args must contain "module" and may
+              optionally contain "phase" ("build", "runtime", "reference").
         args: Parameters specific to the requirement kind.
         gating: If True (default), an unmet requirement causes PRECHECK_FAIL.
             If False, the requirement is advisory and logged but does not block.
@@ -352,6 +365,8 @@ class E2ECase:
             the profile defaults.
         determinism: Settings for determinism/reproducibility checks
             (e.g. {"reruns": 2, "seed": 42}).
+        execution_profiles: Named Python environment profiles for the build,
+            runtime, and reference phases.
         metadata: Arbitrary extra fields (notes, trust_remote_code, etc.).
     """
 
@@ -372,6 +387,7 @@ class E2ECase:
     comparison_profile: str = "default"
     threshold_overrides: Dict[str, float] = field(default_factory=dict)
     determinism: Dict[str, Any] = field(default_factory=dict)
+    execution_profiles: Dict[str, str] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -493,7 +509,13 @@ class RunContext:
         case: The E2ECase being executed.
         artifacts_dir: Directory for writing stage outputs and logs.
         binary_path: Path to the C++ trtf binary.
-        hf_python: Path to the Python interpreter with HF tokenizers.
+        hf_python: Base Python interpreter used for the default "base" profile.
+        build_python: Resolved Python interpreter for bundle build.
+        runtime_python: Resolved Python interpreter for TRT-side Python helpers.
+        reference_python: Resolved Python interpreter for reference backends.
+        build_profile: Symbolic profile name selected for build.
+        runtime_profile: Symbolic profile name selected for runtime helpers.
+        reference_profile: Symbolic profile name selected for references.
         ld_library_path: LD_LIBRARY_PATH with TRT/CUDA libs.
         engine_dir: Directory containing .trtfb bundles.
         rebuild: If True, force rebuild bundles from HF.
@@ -504,10 +526,34 @@ class RunContext:
     artifacts_dir: str = ""
     binary_path: str = ""
     hf_python: str = ""
+    build_python: str = ""
+    runtime_python: str = ""
+    reference_python: str = ""
+    build_profile: str = "base"
+    runtime_profile: str = "base"
+    reference_profile: str = "base"
     ld_library_path: str = ""
     engine_dir: str = ""
     rebuild: bool = False
     verbose: bool = False
+
+    def build_python_path(self) -> str:
+        """Interpreter for bundle build subprocesses."""
+        return self.build_python or self.hf_python
+
+    def runtime_python_path(self) -> str:
+        """Interpreter for TRT-side Python helper subprocesses."""
+        return self.runtime_python or self.hf_python
+
+    def reference_python_path(self) -> str:
+        """Interpreter for reference backend subprocesses."""
+        return self.reference_python or self.hf_python
+
+    def runtime_cli_hf_python(self) -> str:
+        """Optional --hf-python value for the C++ CLI."""
+        if str(self.case.runtime_strategy or "") not in {"speech_to_speech"}:
+            return ""
+        return self.runtime_python_path()
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +791,14 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     "z-image-turbo": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
     # 5.26 DIFFUSERS_VIDEO_GEN
     "wan21-t2v-1.3b": ReferenceFamily.DIFFUSERS_VIDEO_GEN.value,
+    # 5.27 TIME_SERIES_POINT_FORECAST
+    "patchtst-granite-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
+    "patchtsmixer-granite-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
+    "timesfm-2.0-500m-official": ReferenceFamily.TIME_SERIES_POINT_FORECAST.value,
+    # 5.28 TIME_SERIES_QUANTILE_FORECAST
+    "chronos-bolt-tiny-official": ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value,
+    # 5.29 TIME_SERIES_REGRESSION
+    "patchtst-etth1-regression-distribution": ReferenceFamily.TIME_SERIES_REGRESSION.value,
 }
 
 # Reference family -> user contract mapping.
@@ -776,6 +830,10 @@ REFERENCE_FAMILY_TO_USER_CONTRACT: Dict[str, str] = {
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: UserContract.PROMPTED_MASK.value,
     ReferenceFamily.DIFFUSERS_IMAGE_GEN.value: UserContract.DIFFUSION_IMAGE.value,
     ReferenceFamily.DIFFUSERS_VIDEO_GEN.value: UserContract.DIFFUSION_VIDEO.value,
+    ReferenceFamily.TIME_SERIES_POINT_FORECAST.value: UserContract.TIME_SERIES_POINT_FORECAST.value,
+    ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value: UserContract.TIME_SERIES_QUANTILE_FORECAST.value,
+    ReferenceFamily.TIME_SERIES_CLASSIFICATION.value: UserContract.TIME_SERIES_CLASSIFICATION.value,
+    ReferenceFamily.TIME_SERIES_REGRESSION.value: UserContract.TIME_SERIES_REGRESSION.value,
 }
 
 # Reference family -> default comparison mode mapping.
@@ -807,6 +865,10 @@ REFERENCE_FAMILY_TO_COMPARISON_MODE: Dict[str, str] = {
     ReferenceFamily.PROMPTED_SEGMENTATION_SAM.value: ComparisonMode.MASK_OVERLAP.value,
     ReferenceFamily.DIFFUSERS_IMAGE_GEN.value: ComparisonMode.MEDIA_SIMILARITY.value,
     ReferenceFamily.DIFFUSERS_VIDEO_GEN.value: ComparisonMode.MEDIA_SIMILARITY.value,
+    ReferenceFamily.TIME_SERIES_POINT_FORECAST.value: ComparisonMode.NUMERIC_TENSOR.value,
+    ReferenceFamily.TIME_SERIES_QUANTILE_FORECAST.value: ComparisonMode.NUMERIC_TENSOR.value,
+    ReferenceFamily.TIME_SERIES_CLASSIFICATION.value: ComparisonMode.NUMERIC_TENSOR.value,
+    ReferenceFamily.TIME_SERIES_REGRESSION.value: ComparisonMode.NUMERIC_TENSOR.value,
 }
 
 RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
@@ -828,6 +890,10 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "reranking": "reranking",
     "encoder_only": "encoder_only_nlp",
     "neural_operator": "neural_operator",
+    "patchtst_torchtrt": "neural_operator",
+    "patchtsmixer_torchtrt": "neural_operator",
+    "timesfm_torchtrt": "neural_operator",
+    "chronos_bolt_torchtrt": "neural_operator",
     "diffusion": "diffusion_media_generation",      # legacy alias
     "diffusion_flux": "diffusion_media_generation",
     "diffusion_wan": "diffusion_media_generation",

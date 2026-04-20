@@ -69,6 +69,7 @@ def test_neural_operator_runner_uses_solve_entrypoint_and_supported_flags(monkey
         inputs={"field_input": [0.1, 0.2, 0.3]},
     )
     ctx = _make_ctx(case, tmp_path)
+    ctx.hf_python = str(tmp_path / "python")
 
     captured: dict = {}
 
@@ -86,8 +87,33 @@ def test_neural_operator_runner_uses_solve_entrypoint_and_supported_flags(monkey
     assert "--field-input" in cmd
     assert "--input-field" not in cmd
     assert "--output-field" not in cmd
+    assert "--hf-python" not in cmd
     assert out.metadata["input_mode"] == "field"
     assert out.data["output_field"] == [1.0, 2.0, 3.0]
+
+
+def test_neural_operator_runner_accepts_branch_only_inputs(monkeypatch, tmp_path):
+    case = _make_case(
+        "neural_operator",
+        inputs={"branch_input": [0.1, 0.2, 0.3]},
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="Output [3]: 1 2 3\n", stderr="")
+
+    monkeypatch.setattr(neural_operator.subprocess, "run", _fake_run)
+
+    out = neural_operator.NeuralOperatorRunner().run_stage(
+        case, StageSpec(name="full_inference"), ctx)
+
+    cmd = captured["cmd"]
+    assert "--branch-input" in cmd
+    assert "--trunk-input" not in cmd
+    assert out.metadata["input_mode"] == "branch"
 
 
 def test_omni_runner_thinker_stage_drops_unsupported_stage_flag(monkeypatch, tmp_path):

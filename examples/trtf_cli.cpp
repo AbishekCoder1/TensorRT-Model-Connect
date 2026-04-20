@@ -14,6 +14,7 @@
 #include "trtf/trtf_io.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <sstream>
@@ -39,6 +41,9 @@ struct CliArgs {
     std::string document;
     std::string audio_in;
     std::string audio_out;
+    std::string field_input;
+    std::string branch_input;
+    std::string trunk_input;
     int tail_frames{0};
     float point_x{0.5F};
     float point_y{0.5F};
@@ -78,6 +83,8 @@ void print_usage() {
            "  trtf embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtf rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"
+           "  trtf solve           <bundle.trtfb> --field-input CSV\n"
+           "  trtf solve           <bundle.trtfb> --branch-input CSV [--trunk-input CSV]\n"
            "  trtf transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] "
            "[--hf-python PATH]\n"
            "  trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
@@ -106,8 +113,8 @@ CliArgs parse_args(int argc, char** argv) {
     }
 
     static const char* known_cmds[] = {
-        "run",    "inspect", "generate-video", "segment", "generate-audio", "serve-audio",
-        "encode", "embed",   "rerank",         "speak",   "transcribe",     nullptr};
+        "run",   "inspect", "generate-video", "segment", "generate-audio", "serve-audio", "encode",
+        "embed", "rerank",  "solve",          "speak",   "transcribe",     nullptr};
     bool valid = false;
     for (const char** p = known_cmds; *p; ++p)
         if (args.command == *p) {
@@ -194,6 +201,18 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--document" && need_value(arg)) {
             args.document = argv[++i];
+            continue;
+        }
+        if (arg == "--field-input" && need_value(arg)) {
+            args.field_input = argv[++i];
+            continue;
+        }
+        if (arg == "--branch-input" && need_value(arg)) {
+            args.branch_input = argv[++i];
+            continue;
+        }
+        if (arg == "--trunk-input" && need_value(arg)) {
+            args.trunk_input = argv[++i];
             continue;
         }
         if (arg == "--audio-in" && need_value(arg)) {
@@ -647,6 +666,66 @@ int cmd_rerank(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+std::vector<float> parse_numeric_csv(const std::string& csv) {
+    std::vector<float> values;
+    std::string token;
+    token.reserve(csv.size());
+
+    auto flush_token = [&]() {
+        if (token.empty())
+            return;
+        values.push_back(std::stof(token));
+        token.clear();
+    };
+
+    for (char ch : csv) {
+        if (ch == ',' || std::isspace(static_cast<unsigned char>(ch))) {
+            flush_token();
+            continue;
+        }
+        token.push_back(ch);
+    }
+    flush_token();
+    return values;
+}
+
+int cmd_solve(const CliArgs& args) {
+    if (args.bundle_path.empty()) {
+        std::cerr << "Error: solve requires a .trtfb bundle file\n";
+        return EXIT_FAILURE;
+    }
+
+    const bool has_field = !args.field_input.empty();
+    const bool has_branch = !args.branch_input.empty();
+    const bool has_trunk = !args.trunk_input.empty();
+    if (!has_field && !has_branch) {
+        std::cerr << "Error: solve requires --field-input or --branch-input\n";
+        return EXIT_FAILURE;
+    }
+    if (has_field && (has_branch || has_trunk)) {
+        std::cerr << "Error: solve accepts either --field-input or --branch-input/--trunk-input\n";
+        return EXIT_FAILURE;
+    }
+
+    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
+    std::vector<float> branch = parse_numeric_csv(has_field ? args.field_input : args.branch_input);
+    std::vector<float> trunk =
+        has_field ? std::vector<float>{} : parse_numeric_csv(args.trunk_input);
+
+    auto result = pipeline->solve(
+        branch.empty() ? nullptr : branch.data(), static_cast<int32_t>(branch.size()),
+        trunk.empty() ? nullptr : trunk.data(), static_cast<int32_t>(trunk.size()));
+
+    // Use double precision formatting so the text round-trip preserves the
+    // exact float32 value as faithfully as possible for E2E parity checks.
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10);
+    std::cout << "Output [" << result.dim << "]:";
+    for (int32_t i = 0; i < result.dim; ++i)
+        std::cout << ' ' << result.data[static_cast<std::size_t>(i)];
+    std::cout << '\n';
+    return EXIT_SUCCESS;
+}
+
 int cmd_transcribe(const CliArgs& args) {
     if (args.bundle_path.empty() || args.audio_in.empty()) {
         std::cerr << "Error: transcribe requires bundle + --audio\n";
@@ -756,6 +835,8 @@ int main(int argc, char** argv) {
         return cmd_embed(args);
     if (args.command == "rerank")
         return cmd_rerank(args);
+    if (args.command == "solve")
+        return cmd_solve(args);
     if (args.command == "speak")
         return cmd_speak(args);
     if (args.command == "transcribe")

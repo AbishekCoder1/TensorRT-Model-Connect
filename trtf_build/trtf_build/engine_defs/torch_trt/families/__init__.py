@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import pkgutil
 from pathlib import Path
+from typing import Any
 
 from .base import TorchTrtFamilyPlugin
 
@@ -28,9 +29,22 @@ for _finder, _name, _ispkg in pkgutil.iter_modules([_pkg_dir]):
         ALL_PLUGINS.append(_plugin)
 
 
-def find_plugin(model_type: str) -> TorchTrtFamilyPlugin | None:
-    """Find the first plugin that matches the given model_type."""
+def find_plugin(model_ref: Any) -> TorchTrtFamilyPlugin | None:
+    """Find the first plugin that matches the given model reference.
+
+    `model_ref` is usually either:
+    - a raw `model_type` string, or
+    - a parsed `ModelConfig`
+
+    Most plugins only key off `model_type`. A few models, such as
+    Chronos-Bolt, need additional config fields (`architectures`,
+    `chronos_config`) to disambiguate them from generic T5 checkpoints.
+    """
+    model_type = str(getattr(model_ref, "model_type", model_ref))
     for p in ALL_PLUGINS:
+        matches_config = getattr(p, "matches_config", None)
+        if callable(matches_config) and matches_config(model_ref):
+            return p
         if p.matches(model_type):
             return p
     return None

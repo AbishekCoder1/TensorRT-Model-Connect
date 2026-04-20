@@ -17,7 +17,6 @@ import os
 import shutil
 import struct
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -152,8 +151,9 @@ class SpeechToTextRunner:
             "--audio", audio_input,
             "--max-new-tokens", str(max_new_tokens),
         ]
-        if ctx.hf_python:
-            cmd.extend(["--hf-python", ctx.hf_python])
+        runtime_cli_python = ctx.runtime_cli_hf_python()
+        if runtime_cli_python:
+            cmd.extend(["--hf-python", runtime_cli_python])
 
         env = {**os.environ, "LD_LIBRARY_PATH": ld_path}
 
@@ -244,8 +244,9 @@ class TextToAudioRunner:
                 "--prompt", prompt,
                 "--output", wav_path,
             ]
-            if ctx.hf_python:
-                cmd.extend(["--hf-python", ctx.hf_python])
+            runtime_cli_python = ctx.runtime_cli_hf_python()
+            if runtime_cli_python:
+                cmd.extend(["--hf-python", runtime_cli_python])
 
             max_tokens = case.inputs.get("max_new_tokens", 0)
             if max_tokens > 0:
@@ -291,7 +292,6 @@ class TextToAudioRunner:
 
                 # Read WAV duration (handles both float32 and int16 formats)
                 try:
-                    import numpy as np
                     with open(wav_path, "rb") as f:
                         f.read(4)  # RIFF
                         f.read(4)  # size

@@ -47,8 +47,9 @@ class OmniMultimodalRunner:
                           "skipped": True, **stage_meta},
             )
 
-        if ctx.hf_python:
-            cmd.extend(["--hf-python", ctx.hf_python])
+        runtime_cli_python = ctx.runtime_cli_hf_python()
+        if runtime_cli_python:
+            cmd.extend(["--hf-python", runtime_cli_python])
 
         env = dict(os.environ)
         if ctx.ld_library_path:
@@ -104,8 +105,9 @@ class CompositePipelineRunner:
 
         cmd, stage_meta = _build_composite_command(case, stage, ctx)
 
-        if ctx.hf_python:
-            cmd.extend(["--hf-python", ctx.hf_python])
+        runtime_cli_python = ctx.runtime_cli_hf_python()
+        if runtime_cli_python:
+            cmd.extend(["--hf-python", runtime_cli_python])
 
         env = dict(os.environ)
         if ctx.ld_library_path:

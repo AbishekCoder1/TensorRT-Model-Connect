@@ -135,3 +135,56 @@ class TestManifestValidation:
         }
         with pytest.raises(TypeError, match="max_new_tokens"):
             _validate_manifest(data, "test.json")
+
+    def test_execution_profiles_must_be_object(self, tmp_path):
+        data = {
+            "name": "test",
+            "hf_id": "org/m",
+            "family": "qwen",
+            "execution_profiles": "chronos",
+        }
+        with pytest.raises(TypeError, match="execution_profiles"):
+            _validate_manifest(data, "test.json")
+
+    def test_execution_profiles_reject_unknown_phase(self, tmp_path):
+        data = {
+            "name": "test",
+            "hf_id": "org/m",
+            "family": "qwen",
+            "execution_profiles": {"build": "chronos", "verify": "chronos"},
+        }
+        with pytest.raises(ValueError, match="unsupported phase"):
+            _validate_manifest(data, "test.json")
+
+    def test_load_manifest_applies_family_default_execution_profiles(self, tmp_path):
+        path = self._write_manifest(
+            tmp_path,
+            {
+                "name": "chronos-case",
+                "hf_id": "amazon/chronos-bolt-tiny",
+                "family": "chronos_bolt",
+                "runtime_strategy": "chronos_bolt_torchtrt",
+                "reference_backend": "torch_reference",
+            },
+        )
+        case = load_manifest(path)
+        assert case.execution_profiles["build"] == "chronos"
+        assert case.execution_profiles["runtime"] == "base"
+        assert case.execution_profiles["reference"] == "chronos"
+
+    def test_load_manifest_preserves_execution_profile_overrides(self, tmp_path):
+        path = self._write_manifest(
+            tmp_path,
+            {
+                "name": "chronos-case",
+                "hf_id": "amazon/chronos-bolt-tiny",
+                "family": "chronos_bolt",
+                "runtime_strategy": "chronos_bolt_torchtrt",
+                "reference_backend": "torch_reference",
+                "execution_profiles": {"runtime": "custom-runtime"},
+            },
+        )
+        case = load_manifest(path)
+        assert case.execution_profiles["build"] == "chronos"
+        assert case.execution_profiles["runtime"] == "custom-runtime"
+        assert case.execution_profiles["reference"] == "chronos"

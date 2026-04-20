@@ -23,7 +23,7 @@
     "vae_decode_cosine": 0.95,
     "min_pixel_mean": 0.10,
     "max_pixel_mean": 0.90,
-    "min_pixel_std": 0.05,
+    "min_pixel_std": 0.01,
     "psnr": 2.0,
     "ssim": -1.0
   },

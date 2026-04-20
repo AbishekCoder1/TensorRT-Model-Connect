@@ -176,8 +176,9 @@ class TextGenerationCausalRunner:
             "--prompt", prompt,
             "--max-new-tokens", str(max_new_tokens),
         ]
-        if ctx.hf_python:
-            cmd.extend(["--hf-python", ctx.hf_python])
+        runtime_cli_python = ctx.runtime_cli_hf_python()
+        if runtime_cli_python:
+            cmd.extend(["--hf-python", runtime_cli_python])
 
         if case is not None:
             contract_config = case.metadata.get("contract_config", {})
@@ -242,8 +243,6 @@ class TextGenerationCausalRunner:
         logits_path = str(
             Path(model_dir) / f"trt_{phase}_logits.npy"
         )
-        max_cache_length = case.inputs.get("max_cache_length", 256)
-        runtime_strategy = case.runtime_strategy
 
         script = textwrap.dedent(f"""\
             import sys, json, numpy as np
@@ -295,7 +294,7 @@ class TextGenerationCausalRunner:
                 print(f"OK steps={{len(logits_list)}} vocab={{max_len}}")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.runtime_python_path() or sys.executable
         logger.info("Debug runner (%s): collecting logits for %s", phase, case.name)
         t0 = time.monotonic()
         try:

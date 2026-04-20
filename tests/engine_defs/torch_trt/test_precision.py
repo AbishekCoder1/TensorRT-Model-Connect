@@ -388,6 +388,7 @@ class TestPluginDtypePropagation:
             call_kwargs = mock_load.call_args[1]
             assert call_kwargs["dtype"] == torch.float32, \
                 f"from_pretrained called with dtype={call_kwargs['dtype']}, expected float32"
+            assert call_kwargs["attn_implementation"] == "eager"
 
     @requires_torch
     def test_qwen_plugin_default_dtype_is_fp16(self):
@@ -408,6 +409,7 @@ class TestPluginDtypePropagation:
             call_kwargs = mock_load.call_args[1]
             assert call_kwargs["dtype"] == torch.float16, \
                 f"Default dtype should be float16, got {call_kwargs['dtype']}"
+            assert call_kwargs["attn_implementation"] == "eager"
 
     @requires_torch
     def test_qwen_plugin_fp32_is_different_from_default(self):
@@ -443,6 +445,24 @@ class TestPluginDtypePropagation:
             "fp32 and default should produce different dtypes"
         assert fp32_dtype == torch.float32
         assert default_dtype == torch.float16
+
+    @requires_torch
+    def test_qwen_plugin_forces_eager_attention(self):
+        """Qwen plugin should disable fused attention kernels during export."""
+        from trtf_build.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
+
+        plugin = QwenTorchTrtPlugin()
+        mock_model = MagicMock()
+        mock_model.eval.return_value = mock_model
+
+        with patch("transformers.AutoModelForCausalLM.from_pretrained",
+                    return_value=mock_model) as mock_load:
+            plugin.load_model(
+                "/fake/path",
+                SimpleNamespace(model_type="qwen3"),
+                max_cache_length=256,
+            )
+            assert mock_load.call_args[1]["attn_implementation"] == "eager"
 
 
 # ---------------------------------------------------------------------------

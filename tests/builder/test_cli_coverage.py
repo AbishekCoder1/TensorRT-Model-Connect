@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import builtins
+import importlib
 import json
 import struct
 import sys
@@ -249,3 +250,117 @@ def test_main_unknown_command_prints_help_and_exits_one(monkeypatch):
 
     assert exc.value.code == 1
     assert help_calls["count"] == 1
+
+
+def test_auto_select_build_backend_prefers_raw_trt(tmp_path, monkeypatch):
+    """Intent: auto backend selection should prefer native TRT over Torch-TRT.
+    Preconditions: a local config matches both a raw plugin and a torch-trt plugin.
+    Postconditions: _auto_select_build_backend returns "trt".
+    """
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({"model_type": "qwen2"}), encoding="utf-8")
+
+    import trtf_build.engine_builder as engine_builder
+    import trtf_build.engine_defs as engine_defs
+
+    monkeypatch.setattr(engine_builder, "_resolve_model", lambda model_ref: str(model_dir))
+    monkeypatch.setattr(engine_builder, "find_plugin", lambda model_type: object())
+    monkeypatch.setattr(engine_builder, "find_diffusion_plugin", lambda pipeline_class: None)
+    monkeypatch.setattr(engine_defs, "get_engine_def", lambda name: object())
+
+    method, resolved = cli._auto_select_build_backend(str(model_dir))
+
+    assert method == "trt"
+    assert resolved == str(model_dir)
+
+
+def test_auto_select_build_backend_falls_back_to_torchtrt(tmp_path, monkeypatch):
+    """Intent: auto backend selection should fall back when raw TRT is unsupported.
+    Preconditions: a local config has no raw plugin but has a torch-trt family plugin.
+    Postconditions: _auto_select_build_backend returns "torchtrt".
+    """
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({"model_type": "patchtst"}), encoding="utf-8")
+
+    import trtf_build.engine_builder as engine_builder
+    import trtf_build.engine_defs as engine_defs
+    torchtrt_families = importlib.import_module("trtf_build.engine_defs.torch_trt.families")
+
+    monkeypatch.setattr(engine_builder, "_resolve_model", lambda model_ref: str(model_dir))
+    monkeypatch.setattr(engine_builder, "find_plugin", lambda model_type: None)
+    monkeypatch.setattr(engine_builder, "find_diffusion_plugin", lambda pipeline_class: None)
+    monkeypatch.setattr(engine_defs, "get_engine_def", lambda name: object())
+    monkeypatch.setattr(torchtrt_families, "find_plugin", lambda config: object())
+
+    method, resolved = cli._auto_select_build_backend(str(model_dir))
+
+    assert method == "torchtrt"
+    assert resolved == str(model_dir)
+
+
+def test_auto_select_build_backend_prefers_config_specific_torchtrt_over_generic_raw(
+    tmp_path,
+    monkeypatch,
+):
+    """Intent: config-specific Torch-TRT families should override generic raw matches.
+    Preconditions: the config looks like Chronos-Bolt, raw matching only sees generic T5, and torch-trt exposes a matches_config specialization.
+    Postconditions: _auto_select_build_backend returns "torchtrt".
+    """
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "t5",
+                "architectures": ["ChronosBoltModelForForecasting"],
+                "chronos_config": {"prediction_length": 4},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    import trtf_build.engine_builder as engine_builder
+    import trtf_build.engine_defs as engine_defs
+    torchtrt_families = importlib.import_module("trtf_build.engine_defs.torch_trt.families")
+
+    class GenericRawPlugin:
+        pass
+
+    class ChronosTorchTrtPlugin:
+        @staticmethod
+        def matches_config(config):
+            return "ChronosBoltModelForForecasting" in (config.architectures or [])
+
+    monkeypatch.setattr(engine_builder, "_resolve_model", lambda model_ref: str(model_dir))
+    monkeypatch.setattr(engine_builder, "find_plugin", lambda model_type: GenericRawPlugin())
+    monkeypatch.setattr(engine_builder, "find_diffusion_plugin", lambda pipeline_class: None)
+    monkeypatch.setattr(engine_defs, "get_engine_def", lambda name: object())
+    monkeypatch.setattr(torchtrt_families, "find_plugin", lambda config: ChronosTorchTrtPlugin())
+
+    method, resolved = cli._auto_select_build_backend(str(model_dir))
+
+    assert method == "torchtrt"
+    assert resolved == str(model_dir)
+
+
+def test_auto_select_build_backend_errors_when_fallback_backend_missing(tmp_path, monkeypatch):
+    """Intent: auto backend selection should fail clearly when only Torch-TRT could support the model.
+    Preconditions: a local config has no raw plugin and the Torch-TRT backend is unavailable.
+    Postconditions: _auto_select_build_backend raises a RuntimeError mentioning torch_tensorrt.
+    """
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({"model_type": "patchtst"}), encoding="utf-8")
+
+    import trtf_build.engine_builder as engine_builder
+    import trtf_build.engine_defs as engine_defs
+
+    monkeypatch.setattr(engine_builder, "_resolve_model", lambda model_ref: str(model_dir))
+    monkeypatch.setattr(engine_builder, "find_plugin", lambda model_type: None)
+    monkeypatch.setattr(engine_builder, "find_diffusion_plugin", lambda pipeline_class: None)
+    monkeypatch.setattr(engine_defs, "get_engine_def", lambda name: None)
+
+    with pytest.raises(RuntimeError, match="torch_tensorrt"):
+        cli._auto_select_build_backend(str(model_dir))

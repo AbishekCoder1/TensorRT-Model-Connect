@@ -70,13 +70,10 @@ class NemoReference:
         """Run MagpieTTS inference via NeMo as ground-truth reference."""
         model_id = case.hf_id
         prompt = case.inputs.get("prompt", "Hello, this is a test.")
-        max_new_tokens = case.inputs.get("max_new_tokens", 750)
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
 
         # Env vars for deterministic inference
         env_overrides = case.metadata.get("env", {})
-        cfg_scale = env_overrides.get("TRTF_MAGPIE_CFG_SCALE", "2.5")
-        temperature = env_overrides.get("TRTF_MAGPIE_TEMPERATURE", "0.6")
         seed = env_overrides.get("TRTF_MAGPIE_SEED", "42")
 
         artifacts_dir = ctx.artifacts_dir or tempfile.mkdtemp()

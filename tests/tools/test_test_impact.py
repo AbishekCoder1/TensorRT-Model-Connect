@@ -183,6 +183,26 @@ class TestFamilyPlugin:
         assert match.rule == "family_base"
         assert len(match.models) == len(imap.all_model_names)
 
+    def test_torchtrt_family_only_change(self, mock_repo):
+        """Torch-TRT family plugin change maps only to that family's manifests."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "patchtst-granite-official.json",
+            {
+                "name": "patchtst-granite-official",
+                "family": "patchtst",
+                "runtime_strategy": "patchtst_torchtrt",
+                "hf_id": "ibm-granite/granite-timeseries-patchtst",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        match = test_impact.classify_file(
+            "trtf_build/trtf_build/engine_defs/torch_trt/families/patchtst.py",
+            imap,
+        )
+        assert match.rule == "torchtrt_family_plugin"
+        assert match.models == ["patchtst-granite-official"]
+
 
 # ---------------------------------------------------------------------------
 # Shared module tests (broad impact)
@@ -494,6 +514,26 @@ class TestHarness:
             "tests/e2e_harness/orchestrator.py", imap)
         assert match.rule == "harness_shared"
         assert len(match.models) == len(imap.all_model_names)
+
+    def test_torch_reference_includes_neural_operator_models(self, mock_repo):
+        """torch_reference.py includes neural_operator-backed time-series manifests."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        _write_json(
+            models_dir / "patchtst-granite-official.json",
+            {
+                "name": "patchtst-granite-official",
+                "family": "patchtst",
+                "runtime_strategy": "patchtst_torchtrt",
+                "hf_id": "ibm-granite/granite-timeseries-patchtst",
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+        match = test_impact.classify_file(
+            "tests/e2e_harness/references/torch_reference.py",
+            imap,
+        )
+        assert match.rule == "harness_reference"
+        assert "patchtst-granite-official" in match.models
 
     def test_test_e2e_entrypoint(self, imap):
         """tests/test_e2e.py -> ALL models."""

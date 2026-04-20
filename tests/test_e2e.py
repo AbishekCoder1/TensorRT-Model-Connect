@@ -35,6 +35,10 @@ import pytest
 from tests.e2e_harness.contracts import E2EStatus, RunContext, StageStatus
 from tests.e2e_harness.manifest_loader import get_case_by_name, load_all_manifests
 from tests.e2e_harness.orchestrator import E2EOrchestrator
+from tests.e2e_harness.python_profiles import (
+    resolve_case_profile_names,
+    resolve_case_python_profiles,
+)
 
 # ---------------------------------------------------------------------------
 # Path resolution
@@ -305,12 +309,21 @@ def test_e2e(case_name: str, request) -> None:
     # Build run context
     config = request.config
     artifacts_dir = config.getoption("--e2e-artifacts-dir", default=None) or "/tmp/e2e_artifacts"
+    base_python = _resolve_hf_python(config)
+    profile_names = resolve_case_profile_names(case)
+    profile_paths = resolve_case_python_profiles(case, base_python)
 
     ctx = RunContext(
         case=case,
         artifacts_dir=artifacts_dir,
         binary_path=_resolve_binary(config),
-        hf_python=_resolve_hf_python(config),
+        hf_python=base_python,
+        build_python=profile_paths["build"],
+        runtime_python=profile_paths["runtime"],
+        reference_python=profile_paths["reference"],
+        build_profile=profile_names["build"],
+        runtime_profile=profile_names["runtime"],
+        reference_profile=profile_names["reference"],
         ld_library_path=_resolve_ld_library_path(),
         engine_dir=_resolve_engine_dir(config),
         rebuild=config.getoption("--rebuild-engines", default=False),

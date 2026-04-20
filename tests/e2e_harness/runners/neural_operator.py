@@ -46,9 +46,6 @@ class NeuralOperatorRunner:
         cmd = [ctx.binary_path, "solve", bundle_path, *solve_args]
         output_path = case.inputs.get("output_field")
 
-        if ctx.hf_python:
-            cmd.extend(["--hf-python", ctx.hf_python])
-
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -123,21 +120,18 @@ def _build_solve_input_args(inputs: dict) -> tuple[list[str] | None, str, str]:
     branch_input = inputs.get("branch_input")
     trunk_input = inputs.get("trunk_input")
     if branch_input is not None or trunk_input is not None:
-        if branch_input is None or trunk_input is None:
-            return None, "branch_trunk", (
-                "Neural operator requires both branch_input and trunk_input "
-                "when using DeepONet mode"
-            )
         branch_csv = _normalize_numeric_values(branch_input)
-        trunk_csv = _normalize_numeric_values(trunk_input)
-        if not branch_csv or not trunk_csv:
-            return None, "branch_trunk", (
-                "Neural operator branch/trunk inputs must be non-empty"
-            )
-        return [
-            "--branch-input", branch_csv,
-            "--trunk-input", trunk_csv,
-        ], "branch_trunk", ""
+        if not branch_csv:
+            return None, "branch_trunk", "Neural operator branch_input must be non-empty"
+        args = ["--branch-input", branch_csv]
+        mode = "branch"
+        if trunk_input is not None:
+            trunk_csv = _normalize_numeric_values(trunk_input)
+            if not trunk_csv:
+                return None, "branch_trunk", "Neural operator trunk_input must be non-empty"
+            args.extend(["--trunk-input", trunk_csv])
+            mode = "branch_trunk"
+        return args, mode, ""
 
     field_input = inputs.get("field_input")
     if field_input is None:

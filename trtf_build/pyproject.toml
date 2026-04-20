@@ -11,6 +11,8 @@ dependencies = [
     "safetensors>=0.4",
     "numpy>=1.24",
     "ml_dtypes>=0.4",
+    "onnx>=1.16",
+    "onnxscript>=0.2",
     "transformers>=4.40",
 ]
 # TensorRT must be installed separately for your CUDA version:
@@ -18,6 +20,7 @@ dependencies = [
 #   pip install tensorrt>=10.0        # for CUDA 13.x (default)
 
 [project.optional-dependencies]
+chronos = ["chronos-forecasting>=2.2.2"]
 test = ["pytest>=7.0", "torch>=2.0"]
 
 [project.scripts]
@@ -26,3 +29,5 @@ trtf-build = "trtf_build.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 
+[tool.setuptools.package-data]
+trtf_build = ["python_profiles.toml", "python_profile_requirements/*.txt"]

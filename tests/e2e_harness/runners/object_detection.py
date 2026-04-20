@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -97,8 +96,9 @@ class ObjectDetectionRunner:
             "--output-json", str(json_output_path),
             "--score-threshold", str(score_threshold),
         ]
-        if ctx.hf_python:
-            cmd.extend(["--hf-python", str(ctx.hf_python)])
+        runtime_cli_python = ctx.runtime_cli_hf_python()
+        if runtime_cli_python:
+            cmd.extend(["--hf-python", str(runtime_cli_python)])
 
         env = dict(os.environ)
         if ctx.ld_library_path:

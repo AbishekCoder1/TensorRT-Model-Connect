@@ -13,6 +13,10 @@ extern volatile int kForceLink_SsmPlugin;
 extern volatile int kForceLink_RwkvPlugin;
 extern volatile int kForceLink_HybridPlugin;
 extern volatile int kForceLink_EncoderPlugin;
+extern volatile int kForceLink_PatchTSTPlugin;
+extern volatile int kForceLink_PatchTSMixerPlugin;
+extern volatile int kForceLink_TimesFmPlugin;
+extern volatile int kForceLink_ChronosBoltPlugin;
 extern volatile int kForceLink_SegmentationPlugin;
 extern volatile int kForceLink_ObjectDetectionPlugin;
 extern volatile int kForceLink_VLPlugin;
@@ -38,6 +42,10 @@ volatile int* force_link_all_plugins() {
         &kForceLink_RwkvPlugin,
         &kForceLink_HybridPlugin,
         &kForceLink_EncoderPlugin,
+        &kForceLink_PatchTSTPlugin,
+        &kForceLink_PatchTSMixerPlugin,
+        &kForceLink_TimesFmPlugin,
+        &kForceLink_ChronosBoltPlugin,
         &kForceLink_SegmentationPlugin,
         &kForceLink_ObjectDetectionPlugin,
         &kForceLink_VLPlugin,

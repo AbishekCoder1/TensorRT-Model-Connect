@@ -40,6 +40,7 @@ class QwenTorchTrtPlugin:
             model_dir,
             dtype=dtype,
             device_map="cuda",
+            attn_implementation="eager",
         )
         model.eval()
         return model

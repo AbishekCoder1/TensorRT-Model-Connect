@@ -44,6 +44,10 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "reranking": "reranking",
     "encoder_only": "encoder_only_nlp",
     "neural_operator": "neural_operator",
+    "patchtst_torchtrt": "neural_operator",
+    "patchtsmixer_torchtrt": "neural_operator",
+    "timesfm_torchtrt": "neural_operator",
+    "chronos_bolt_torchtrt": "neural_operator",
     "diffusion": "diffusion_media_generation",
     "diffusion_flux": "diffusion_media_generation",
     "diffusion_wan": "diffusion_media_generation",
@@ -70,6 +74,10 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "magpie_plugin": ["text_to_audio_magpie"],
     "speech_plugin": ["speech_to_speech"],
     "encoder_plugin": ["encoder_only", "embedding", "reranking", "neural_operator"],
+    "patchtst_plugin": ["patchtst_torchtrt"],
+    "patchtsmixer_plugin": ["patchtsmixer_torchtrt"],
+    "timesfm_plugin": ["timesfm_torchtrt"],
+    "chronos_bolt_plugin": ["chronos_bolt_torchtrt"],
     "segmentation_plugin": ["segmentation", "prompted_segmentation"],
     "object_detection_plugin": ["object_detection"],
     "omni_plugin": ["omni_multimodal"],
@@ -101,6 +109,10 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
         "encoder_only", "embedding", "reranking", "neural_operator",
         "object_detection",
     ],
+    "patchtst_pipeline": ["patchtst_torchtrt"],
+    "patchtsmixer_pipeline": ["patchtsmixer_torchtrt"],
+    "timesfm_pipeline": ["timesfm_torchtrt"],
+    "chronos_bolt_pipeline": ["chronos_bolt_torchtrt"],
     "flux_pipeline": ["diffusion_flux"],
     "wan_pipeline": ["diffusion_wan"],
     "pixart_pipeline": ["diffusion_pixart"],
@@ -150,7 +162,7 @@ REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
         "segmentation", "prompted_segmentation", "object_detection",
     ],
     "hf_diffusers": ["diffusion_media_generation"],
-    "torch_reference": ["speech_to_speech", "omni_multimodal"],
+    "torch_reference": ["speech_to_speech", "omni_multimodal", "neural_operator"],
 }
 
 # Shared C++ helper -> affected task_strategies
@@ -428,6 +440,18 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     m = re.match(r"trtf_build/trtf_build/families/((__init__|base)\.py)$", path)
     if m:
         return RuleMatch("family_base", list(imap.all_model_names), unit_tiers, rebuild)
+
+    # Rule 1c: Torch-TRT family plugin (not __init__ or base)
+    m = re.match(r"trtf_build/trtf_build/engine_defs/torch_trt/families/(\w+)\.py$", path)
+    if m and m.group(1) not in ("__init__", "base"):
+        family = m.group(1)
+        models = imap.family_to_models.get(family, [])
+        return RuleMatch("torchtrt_family_plugin", sorted(models), unit_tiers, rebuild)
+
+    # Rule 1d: Torch-TRT family __init__.py or base.py -> ALL models
+    m = re.match(r"trtf_build/trtf_build/engine_defs/torch_trt/families/((__init__|base)\.py)$", path)
+    if m:
+        return RuleMatch("torchtrt_family_base", list(imap.all_model_names), unit_tiers, rebuild)
 
     # Rule 2: Specialized builder (auto-detected via import scan)
     m = re.match(r"trtf_build/trtf_build/(\w+)\.py$", path)
@@ -799,12 +823,19 @@ def validate_map(imap: ImpactMap, repo_root: Path) -> List[str]:
     errors: List[str] = []
     warnings: List[str] = []
     families_dir = repo_root / "trtf_build" / "trtf_build" / "families"
+    torchtrt_families_dir = (
+        repo_root / "trtf_build" / "trtf_build" / "engine_defs" / "torch_trt" / "families"
+    )
 
     # 1. Every family in a manifest has a corresponding .py plugin file
     for family in imap.family_to_models:
-        plugin_file = families_dir / f"{family}.py"
-        if not plugin_file.exists():
-            errors.append(f"Family '{family}' in manifests has no plugin file: {plugin_file}")
+        raw_plugin_file = families_dir / f"{family}.py"
+        torchtrt_plugin_file = torchtrt_families_dir / f"{family}.py"
+        if not raw_plugin_file.exists() and not torchtrt_plugin_file.exists():
+            errors.append(
+                f"Family '{family}' in manifests has no plugin file: "
+                f"{raw_plugin_file} or {torchtrt_plugin_file}"
+            )
 
     # 2. Every family plugin .py has at least one manifest (warn only)
     if families_dir.is_dir():

@@ -21,11 +21,11 @@ Lifecycle per case:
 
 from __future__ import annotations
 
-import importlib
 import logging
 import os
 import shlex
 import subprocess
+import sys
 import time
 import traceback
 from datetime import datetime, timezone
@@ -45,6 +45,7 @@ from .contracts import (
     ThresholdProfile,
 )
 from . import save_full_stderr
+from .python_profiles import profile_env_var
 from .registry import get_comparator, get_contract_plugin, get_reference, get_runner
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,10 @@ _MIGRATED_RUNTIME_STRATEGIES = frozenset({
     "speech_to_speech",
     "omni_multimodal",
     "diffusion",
+    "patchtst_torchtrt",
+    "patchtsmixer_torchtrt",
+    "timesfm_torchtrt",
+    "chronos_bolt_torchtrt",
 })
 _NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
 _LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"
@@ -140,13 +145,34 @@ def _check_asset_exists(ctx: RunContext, req: PreflightRequirement) -> tuple[boo
 def _check_python_module(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, str]:
     """Check that a Python module is importable."""
     module = req.args.get("module", "")
+    phase = str(req.args.get("phase", "reference") or "reference")
     if not module:
         return False, "Module name not specified"
     try:
-        importlib.import_module(module)
-        return True, f"Module {module} available"
-    except ImportError:
-        return False, f"Module {module} not available"
+        python = {
+            "build": ctx.build_python_path(),
+            "runtime": ctx.runtime_python_path(),
+            "reference": ctx.reference_python_path(),
+        }.get(phase, ctx.reference_python_path())
+        python = python or sys.executable
+        result = subprocess.run(
+            [
+                python,
+                "-c",
+                (
+                    "import importlib.util, sys; "
+                    f"sys.exit(0 if importlib.util.find_spec({module!r}) else 1)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return True, f"Module {module} available in {phase} profile"
+        return False, f"Module {module} not available in {phase} profile"
+    except Exception as exc:
+        return False, f"Module check failed in {phase} profile: {exc}"
 
 
 _PREFLIGHT_CHECKERS = {
@@ -218,18 +244,24 @@ def _resolve_bundle(
 
     # Build the bundle
     hf_id = case.hf_id
+    if hf_id and not os.path.isabs(hf_id):
+        project_root = Path(__file__).resolve().parents[2]
+        candidate = project_root / hf_id
+        if candidate.exists():
+            hf_id = str(candidate)
     max_cache = case.inputs.get("max_cache_length", 256)
 
     build_args = case.metadata.get("build_args", {})
-    use_torch_trt = build_args.get("torch_trt", False)
+    build_method = _manifest_build_method(build_args)
 
+    build_python = ctx.build_python_path() or sys.executable
     cmd = [
-        "trtf-build", "build",
+        build_python, "-m", "trtf_build.__main__", "build",
         hf_id, "-o", str(bundle_path),
         "--max-cache-length", str(max_cache),
     ]
-    if use_torch_trt:
-        cmd.append("--torch-trt")
+    if build_method:
+        cmd.extend(["--method", build_method])
     precision = case.metadata.get("precision", "fp32")
     if precision != "fp32":
         cmd.extend(["--precision", precision])
@@ -244,9 +276,12 @@ def _resolve_bundle(
 
     logger.info("Building bundle: %s", " ".join(cmd))
     t0 = time.monotonic()
+    env = os.environ.copy()
+    if ctx.build_profile and ctx.build_profile != "base":
+        env["TRTF_ACTIVE_PYTHON_PROFILE"] = ctx.build_profile
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=3600)
+            cmd, capture_output=True, text=True, timeout=3600, env=env)
         elapsed = time.monotonic() - t0
     except subprocess.TimeoutExpired:
         return None, None, f"Bundle build timed out for {hf_id}", {
@@ -519,10 +554,13 @@ def _build_repro_commands(
     max_cache = case.inputs.get("max_cache_length", 256)
     bundle_target = bundle_path or str(Path(ctx.engine_dir) / case.bundle)
     build_parts = [
-        "trtf-build", "build", case.hf_id,
+        ctx.build_python_path() or "python", "-m", "trtf_build.__main__", "build", case.hf_id,
         "-o", bundle_target,
         "--max-cache-length", str(max_cache),
     ]
+    build_method = _manifest_build_method(case.metadata.get("build_args", {}))
+    if build_method:
+        build_parts.extend(["--method", build_method])
     if case.metadata.get("trust_remote_code"):
         build_parts.append("--trust-remote-code")
     repro["build_bundle"] = " ".join(build_parts)
@@ -532,7 +570,20 @@ def _build_repro_commands(
         image = (case.inputs.get("image") or case.inputs.get("test_image")
                  or case.inputs.get("image_path"))
         task_strategy = case.task_strategy or ""
-        if task_strategy == "diffusion_media_generation":
+        if task_strategy == "neural_operator":
+            infer_parts = [ctx.binary_path, "solve", bundle_path]
+            branch_input = case.inputs.get("branch_input")
+            trunk_input = case.inputs.get("trunk_input")
+            if branch_input is not None or trunk_input is not None:
+                if branch_input is not None:
+                    infer_parts.extend(["--branch-input", _csv_arg(branch_input)])
+                if trunk_input is not None:
+                    infer_parts.extend(["--trunk-input", _csv_arg(trunk_input)])
+            else:
+                field_input = case.inputs.get("field_input")
+                if field_input is not None:
+                    infer_parts.extend(["--field-input", _csv_arg(field_input)])
+        elif task_strategy == "diffusion_media_generation":
             infer_parts = [
                 ctx.binary_path, "generate-video", bundle_path,
                 "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
@@ -563,8 +614,9 @@ def _build_repro_commands(
             ]
             if image:
                 infer_parts.extend(["--image", str(image)])
-        if ctx.hf_python:
-            infer_parts.extend(["--hf-python", ctx.hf_python])
+        runtime_cli_python = ctx.runtime_cli_hf_python()
+        if runtime_cli_python and task_strategy != "neural_operator":
+            infer_parts.extend(["--hf-python", runtime_cli_python])
         repro["trt_inference"] = " ".join(infer_parts)
 
     # Rerun this exact test case
@@ -575,6 +627,21 @@ def _build_repro_commands(
         "--hf-python", ctx.hf_python or "python",
     ]
     repro["rerun_test"] = " ".join(rerun_parts)
+
+    profile_exports: list[str] = []
+    for profile_name, python in (
+        (ctx.build_profile, ctx.build_python_path()),
+        (ctx.runtime_profile, ctx.runtime_python_path()),
+        (ctx.reference_profile, ctx.reference_python_path()),
+    ):
+        if profile_name == "base" or not python:
+            continue
+        env_var = profile_env_var(profile_name)
+        export_cmd = f"export {env_var}={python}"
+        if export_cmd not in profile_exports:
+            profile_exports.append(export_cmd)
+    if profile_exports:
+        repro["profile_env"] = "\n".join(profile_exports)
 
     # Rerun with forced rebuild
     rebuild_parts = list(rerun_parts) + ["--rebuild-engines"]
@@ -593,6 +660,28 @@ def _shell_quote(s: str) -> str:
         escaped = s.replace("'", "'\\''")
         return f"'{escaped}'"
     return s
+
+
+def _csv_arg(value: Any) -> str:
+    """Serialize numeric E2E inputs into the CLI CSV form used by solve()."""
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(v) for v in value)
+    return str(value)
+
+
+def _manifest_build_method(build_args: dict[str, Any]) -> str | None:
+    """Translate manifest build args to a CLI --method value.
+
+    Returning None means "use the CLI default", which is now auto-selection.
+    """
+    backend = str(build_args.get("backend", build_args.get("method", "")) or "").lower()
+    if backend in {"torchtrt", "torch_trt"} or build_args.get("torch_trt", False):
+        return "torchtrt"
+    if backend == "trt":
+        return "trt"
+    if backend == "auto":
+        return None
+    return None
 
 
 class E2EOrchestrator:
@@ -617,7 +706,7 @@ class E2EOrchestrator:
         sink = FileArtifactSink(artifacts_dir, case)
 
         # Collect environment fingerprint
-        env_fp = sink.ensure_env_fingerprint()
+        env_fp = sink.ensure_env_fingerprint(ctx)
 
         # skip_reason: TRT inference still runs; only reference/comparison is skipped.
         skip_reason = case.metadata.get("skip_reason")
@@ -682,6 +771,12 @@ class E2EOrchestrator:
             artifacts_dir=artifacts_dir,
             binary_path=ctx.binary_path,
             hf_python=ctx.hf_python,
+            build_python=ctx.build_python,
+            runtime_python=ctx.runtime_python,
+            reference_python=ctx.reference_python,
+            build_profile=ctx.build_profile,
+            runtime_profile=ctx.runtime_profile,
+            reference_profile=ctx.reference_profile,
             ld_library_path=ctx.ld_library_path,
             engine_dir=ctx.engine_dir,
             rebuild=ctx.rebuild,
@@ -709,7 +804,9 @@ class E2EOrchestrator:
             case.metadata["_ctx"] = {
                 "engine_dir": ctx.engine_dir,
                 "binary_path": ctx.binary_path,
-                "hf_python": ctx.hf_python,
+                "hf_python": ctx.runtime_cli_hf_python(),
+                "runtime_python": ctx.runtime_python_path(),
+                "reference_python": ctx.reference_python_path(),
                 "artifacts_dir": artifacts_dir,
             }
 

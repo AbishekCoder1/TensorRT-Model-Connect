@@ -89,7 +89,10 @@ class PixArtTorchTrtPlugin:
         from pathlib import Path
         from ..bundle_writer import BundleSection
         from ..strategies.diffusion import (
-            T5EncoderWrapper, PixArtDiTWrapper, VAEDecoderWrapper,
+            T5EncoderWrapper,
+            PixArtDiTWrapper,
+            VAEDecoderWrapper,
+            _TrtSafeAttnProcessor,
         )
 
         model_path = Path(model_dir)
@@ -200,6 +203,7 @@ class PixArtTorchTrtPlugin:
         )
         vae_model.eval()
 
+        vae_model.set_attn_processor(_TrtSafeAttnProcessor())
         vae_wrapper = VAEDecoderWrapper(vae_model, self._VAE_SCALING_FACTOR)
         vae_wrapper.eval()
 

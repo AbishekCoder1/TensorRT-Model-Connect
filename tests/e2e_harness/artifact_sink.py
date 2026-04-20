@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import platform
 import subprocess
 import sys
@@ -26,6 +25,7 @@ from .contracts import (
     CompareResult,
     E2ECase,
     E2EResult,
+    RunContext,
     StageOutput,
 )
 
@@ -110,7 +110,45 @@ def validate_artifact_schema(
     return errors
 
 
-def _collect_env_fingerprint() -> dict[str, Any]:
+def _probe_python_environment(python: str) -> dict[str, Any]:
+    """Collect package/version info for a specific Python interpreter."""
+    if not python:
+        return {}
+
+    script = r"""
+import importlib
+import json
+import sys
+
+result = {
+    "python_executable": sys.executable,
+    "python_version": sys.version,
+}
+for module_name in ("torch", "transformers", "diffusers", "chronos", "tensorrt"):
+    try:
+        module = importlib.import_module(module_name)
+        result[f"{module_name}_version"] = getattr(module, "__version__", "unknown")
+    except Exception:
+        continue
+print(json.dumps(result))
+"""
+    try:
+        result = subprocess.run(
+            [python, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return {"requested_python": python, "probe_error": result.stderr.strip()}
+        payload = json.loads(result.stdout)
+        payload["requested_python"] = python
+        return payload
+    except Exception as exc:
+        return {"requested_python": python, "probe_error": str(exc)}
+
+
+def _collect_env_fingerprint(ctx: RunContext | None = None) -> dict[str, Any]:
     """Collect environment fingerprint: GPU, CUDA, TRT, Python versions."""
     fp: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -182,6 +220,22 @@ def _collect_env_fingerprint() -> dict[str, Any]:
     except Exception:
         fp["transformers_version"] = "unknown"
 
+    if ctx is not None:
+        fp["python_profiles"] = {
+            "build": {
+                "profile": ctx.build_profile,
+                **_probe_python_environment(ctx.build_python_path()),
+            },
+            "runtime": {
+                "profile": ctx.runtime_profile,
+                **_probe_python_environment(ctx.runtime_python_path()),
+            },
+            "reference": {
+                "profile": ctx.reference_profile,
+                **_probe_python_environment(ctx.reference_python_path()),
+            },
+        }
+
     return fp
 
 
@@ -219,6 +273,7 @@ def _case_to_dict(case: E2ECase) -> dict[str, Any]:
         "comparison_profile": case.comparison_profile,
         "threshold_overrides": case.threshold_overrides,
         "determinism": case.determinism,
+        "execution_profiles": case.execution_profiles,
         "metadata": case.metadata,
     }
 
@@ -275,10 +330,10 @@ class FileArtifactSink:
         """Root directory for this model's artifacts."""
         return self._base
 
-    def ensure_env_fingerprint(self) -> dict[str, Any]:
+    def ensure_env_fingerprint(self, ctx: RunContext | None = None) -> dict[str, Any]:
         """Collect and cache environment fingerprint (in memory only)."""
         if self._env_fp is None:
-            self._env_fp = _collect_env_fingerprint()
+            self._env_fp = _collect_env_fingerprint(ctx)
         return self._env_fp
 
     def log_command(

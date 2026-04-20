@@ -42,7 +42,7 @@ class CustomPythonReference:
             )
             script_path = os.path.join(project_root, script_path)
 
-        python = ctx.hf_python or "python3"
+        python = ctx.reference_python_path() or "python3"
 
         cmd = [
             python, script_path,

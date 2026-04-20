@@ -23,11 +23,22 @@ from .contracts import (
     RUNTIME_TO_TASK_STRATEGY,
     StageSpec,
 )
+from .python_profiles import PROFILE_PHASES, normalize_execution_profiles
 
 logger = logging.getLogger(__name__)
 
 # Default manifest directory (relative to project root)
 _DEFAULT_MODELS_DIR = Path(__file__).resolve().parent.parent / "e2e" / "models"
+
+_TORCHTRT_RUNTIME_STRATEGIES = frozenset({
+    "torchtrt_decoder",
+    "torchtrt_diffusion",
+    "diffusion_pixart_torchtrt",
+    "patchtst_torchtrt",
+    "patchtsmixer_torchtrt",
+    "timesfm_torchtrt",
+    "chronos_bolt_torchtrt",
+})
 
 # ---------------------------------------------------------------------------
 # Reference backend defaults per task strategy
@@ -222,12 +233,19 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             gating=True,
         ))
 
-    # Torch-TRT models need torch_tensorrt
+    # Torch-TRT-backed models need torch_tensorrt, even when the manifest
+    # relies on CLI auto-selection instead of forcing --method torchtrt.
     build_args = manifest.get("build_args", {})
-    if build_args.get("torch_trt", False):
+    backend = str(build_args.get("backend", build_args.get("method", "")) or "").lower()
+    runtime_strategy = str(manifest.get("runtime_strategy", "") or "")
+    if (
+        build_args.get("torch_trt", False)
+        or backend in {"torchtrt", "torch_trt"}
+        or runtime_strategy in _TORCHTRT_RUNTIME_STRATEGIES
+    ):
         reqs.append(PreflightRequirement(
             kind="python_module_available",
-            args={"module": "torch_tensorrt"},
+            args={"module": "torch_tensorrt", "phase": "build"},
             gating=True,
         ))
 
@@ -235,12 +253,19 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
     if task_strategy == "diffusion_media_generation":
         reqs.append(PreflightRequirement(
             kind="python_module_available",
-            args={"module": "diffusers"},
+            args={"module": "diffusers", "phase": "build"},
             gating=True,
         ))
         reqs.append(PreflightRequirement(
             kind="python_module_available",
-            args={"module": "ftfy"},
+            args={"module": "ftfy", "phase": "build"},
+            gating=True,
+        ))
+
+    if runtime_strategy == "chronos_bolt_torchtrt":
+        reqs.append(PreflightRequirement(
+            kind="python_module_available",
+            args={"module": "chronos", "phase": "build"},
             gating=True,
         ))
 
@@ -282,6 +307,10 @@ def _build_inputs(manifest: dict) -> dict:
     """Extract input specification from manifest."""
     inputs: dict[str, Any] = {}
 
+    explicit_inputs = manifest.get("inputs")
+    if isinstance(explicit_inputs, dict):
+        inputs.update(explicit_inputs)
+
     # Text prompt
     prompt = manifest.get("prompt") or manifest.get("test_prompt", "")
     if prompt:
@@ -320,6 +349,11 @@ def _build_inputs(manifest: dict) -> dict:
     if manifest.get("image_height"):
         inputs["image_height"] = manifest["image_height"]
         inputs["image_width"] = manifest.get("image_width", manifest["image_height"])
+
+    # Numeric tensor inputs for neural-operator / one-shot dense models
+    for key in ("field_input", "branch_input", "trunk_input", "output_field"):
+        if key in manifest:
+            inputs[key] = manifest[key]
 
     return inputs
 
@@ -367,6 +401,20 @@ def _build_determinism(manifest: dict) -> dict:
     }
 
 
+def _build_execution_profiles(
+    manifest: dict,
+    *,
+    reference_backend: str = "",
+) -> dict[str, str]:
+    """Extract execution profile selections from the manifest."""
+    return normalize_execution_profiles(
+        manifest.get("execution_profiles"),
+        family=str(manifest.get("family", "") or ""),
+        runtime_strategy=str(manifest.get("runtime_strategy", "") or ""),
+        reference_backend=reference_backend or str(manifest.get("reference_backend", "") or ""),
+    )
+
+
 def _build_metadata(manifest: dict) -> dict:
     """Collect all non-standard fields into metadata."""
     standard_fields = {
@@ -382,6 +430,7 @@ def _build_metadata(manifest: dict) -> dict:
         "num_inference_steps", "build_args", "preflight_requirements",
         "stages", "comparison_profile", "threshold_overrides", "determinism",
         "inputs", "metadata", "reference_family", "user_contract", "ci_lane",
+        "execution_profiles",
     }
 
     meta = manifest.get("metadata", {}).copy()
@@ -400,7 +449,7 @@ def _build_metadata(manifest: dict) -> dict:
         meta["precision"] = manifest["precision"]
 
     # Propagate build_args so the orchestrator can select the correct backend
-    # (e.g. --torch-trt flag for torch-trt models vs raw TRT default).
+    # (e.g. --method torchtrt for torch-trt models vs raw TRT default).
     if "build_args" in manifest:
         meta["build_args"] = manifest["build_args"]
 
@@ -453,6 +502,10 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "omni_multimodal",
     "neural_operator",
     "torchtrt_decoder",
+    "patchtst_torchtrt",
+    "patchtsmixer_torchtrt",
+    "timesfm_torchtrt",
+    "chronos_bolt_torchtrt",
 })
 
 
@@ -503,6 +556,25 @@ def _validate_manifest(raw: dict, path: str) -> None:
             f"{sorted(_KNOWN_RUNTIME_STRATEGIES)}",
             stacklevel=2,
         )
+
+    execution_profiles = raw.get("execution_profiles")
+    if execution_profiles is not None:
+        if not isinstance(execution_profiles, dict):
+            raise TypeError(
+                f"Manifest {path!r}: 'execution_profiles' must be an object, "
+                f"got {type(execution_profiles).__name__}"
+            )
+        for phase, profile in execution_profiles.items():
+            if phase not in PROFILE_PHASES:
+                raise ValueError(
+                    f"Manifest {path!r}: execution_profiles contains unsupported "
+                    f"phase {phase!r}; expected one of {PROFILE_PHASES}"
+                )
+            if not isinstance(profile, str) or not profile.strip():
+                raise TypeError(
+                    f"Manifest {path!r}: execution_profiles[{phase!r}] must be "
+                    f"a non-empty string"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +629,10 @@ def load_manifest(
         comparison_profile=raw.get("comparison_profile", "default"),
         threshold_overrides=_build_threshold_overrides(raw),
         determinism=_build_determinism(raw),
+        execution_profiles=_build_execution_profiles(
+            raw,
+            reference_backend=reference_backend,
+        ),
         metadata=metadata,
     )
 

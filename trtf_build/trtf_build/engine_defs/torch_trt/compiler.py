@@ -17,7 +17,9 @@ No LibTorch dependency at runtime — the engine is a pure TRT .plan file.
 
 from __future__ import annotations
 
+import contextlib
 import gc
+import io
 import json
 import logging
 import sys
@@ -80,7 +82,7 @@ from .strategies.decoder import StatelessCacheWrapper, patch_static_cache_scatte
 _NORMALIZE_STRATEGY: dict[str, str] = {
     "torchtrt_decoder": "decoder_kv_cache",
     "torchtrt_encoder": "encoder_only",
-    "torchtrt_diffusion": "diffusion_pixart",
+    "torchtrt_diffusion": "diffusion_pixart_torchtrt",
     "decoder": "decoder_kv_cache",
     "encoder_only": "encoder_only",
     "diffusion": "diffusion_pixart",
@@ -201,7 +203,7 @@ def compile_model(
         print("[torch-trt] Running torch.export ...", file=sys.stderr)
 
     t0 = time.monotonic()
-    with torch.no_grad():
+    with torch.no_grad(), _math_sdpa_only():
         exported = torch.export.export(
             wrapper,
             args=example_args,
@@ -228,6 +230,7 @@ def compile_model(
         exported,
         inputs=conversion_inputs,
         use_explicit_typing=True,
+        disable_tf32=True,
         workspace_size=workspace_size,
         min_block_size=1,
         truncate_double=True,
@@ -242,6 +245,93 @@ def compile_model(
               f"[{t3-t2:.1f}s]", file=sys.stderr)
 
     return engine_bytes
+
+
+@contextlib.contextmanager
+def _math_sdpa_only():
+    """Force PyTorch export paths to use math SDPA kernels.
+
+    Torch-TRT cannot currently lower several fused SDPA variants selected by
+    PyTorch 2.11 on GB300, including cuDNN attention and CPU flash attention.
+    Constraining export to the math backend keeps the traced graph in terms of
+    TRT-lowerable matmul/softmax ops.
+    """
+    attention_mod = getattr(torch.nn, "attention", None)
+    if attention_mod is not None:
+        sdpa_kernel = getattr(attention_mod, "sdpa_kernel", None)
+        sdp_backend = getattr(attention_mod, "SDPBackend", None)
+        math_backend = getattr(sdp_backend, "MATH", None) if sdp_backend else None
+        if sdpa_kernel is not None and math_backend is not None:
+            with sdpa_kernel([math_backend]):
+                yield
+            return
+
+    yield
+
+
+def _build_engine_from_onnx_bytes(
+    onnx_bytes: bytes,
+    *,
+    verbose: bool = False,
+    workspace_size: int = 1 << 30,
+) -> bytes:
+    """Build a TRT engine from serialized ONNX bytes with TF32 disabled."""
+    import tensorrt as trt
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+        | 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    )
+    parser = trt.OnnxParser(network, logger)
+
+    if not parser.parse(onnx_bytes):
+        errors = [str(parser.get_error(i)) for i in range(parser.num_errors)]
+        raise RuntimeError("ONNX parsing failed:\n" + "\n".join(errors))
+
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_size)
+    if hasattr(config, "clear_flag") and hasattr(trt, "BuilderFlag"):
+        config.clear_flag(trt.BuilderFlag.TF32)
+
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError("TensorRT engine build from ONNX failed")
+    return bytes(plan)
+
+
+def compile_model_via_onnx(
+    wrapper: nn.Module,
+    example_args: tuple,
+    *,
+    input_names: list[str],
+    output_names: list[str],
+    opset_version: int = 18,
+    verbose: bool = False,
+) -> bytes:
+    """Export a wrapped model to ONNX, then build a TRT engine via ONNX parser."""
+    if verbose:
+        print("[onnx-trt] Exporting to ONNX ...", file=sys.stderr)
+
+    onnx_buffer = io.BytesIO()
+    with torch.no_grad(), _math_sdpa_only():
+        torch.onnx.export(
+            wrapper,
+            example_args,
+            onnx_buffer,
+            opset_version=opset_version,
+            dynamo=False,
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=None,
+        )
+    onnx_bytes = onnx_buffer.getvalue()
+    if verbose:
+        print(f"[onnx-trt] ONNX export complete "
+              f"({len(onnx_bytes) / (1024 * 1024):.1f} MB)", file=sys.stderr)
+
+    return _build_engine_from_onnx_bytes(onnx_bytes, verbose=verbose)
 
 
 def _inspect_engine(engine_bytes: bytes) -> dict:
@@ -396,7 +486,7 @@ def build_bundle(
           f"vocab={config.vocab_size})", file=sys.stderr)
 
     # 2. Find family plugin
-    plugin = find_plugin(config.model_type)
+    plugin = find_plugin(config)
     if plugin is None:
         supported = ", ".join(p.name for p in ALL_PLUGINS)
         raise ValueError(
@@ -451,10 +541,19 @@ def build_bundle(
         # 8. Compile to raw TRT engine
         print(f"[torch-trt] Compiling (precision={precision}, "
               f"cache={max_cache_length}) ...", file=sys.stderr)
-        engine_bytes = compile_model(
-            wrapper, export_args,
-            verbose=verbose,
-        )
+        if strategy.name == "timesfm":
+            engine_bytes = compile_model_via_onnx(
+                wrapper,
+                export_args,
+                input_names=["past_values", "past_values_padding", "freq"],
+                output_names=["mean_predictions", "full_predictions"],
+                verbose=verbose,
+            )
+        else:
+            engine_bytes = compile_model(
+                wrapper, export_args,
+                verbose=verbose,
+            )
         t3 = time.monotonic()
         print(f"[torch-trt] Compiled [{t3 - t2:.1f}s] "
               f"({len(engine_bytes) / (1024 * 1024):.1f} MB)", file=sys.stderr)
@@ -506,6 +605,8 @@ def build_bundle(
                 if filename == "config.json":
                     cfg_dict = json.loads(data)
                     cfg_dict["runtime_strategy"] = normalized_strategy
+                    if normalized_strategy == "decoder_kv_cache":
+                        cfg_dict["io_map"] = _decoder_io_map(config.num_hidden_layers)
                     cfg_dict["torchtrt_io_map"] = io_map
                     data = json.dumps(cfg_dict, indent=2).encode("utf-8")
                 sections.append(BundleSection(filename, data))

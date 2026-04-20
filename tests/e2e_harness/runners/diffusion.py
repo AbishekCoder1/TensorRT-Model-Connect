@@ -14,6 +14,7 @@ All GPU work runs in subprocesses for memory isolation.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import shutil
@@ -70,6 +71,43 @@ def _resolve_bundle_path(case: E2ECase, ctx: RunContext) -> str:
     return os.path.join(ctx.engine_dir, bundle_name)
 
 
+def _resolve_cached_model_ref(hf_id: str) -> str:
+    """Prefer a local snapshot and patch known-bad tokenizer configs in /tmp."""
+    if not hf_id:
+        return hf_id
+    local_path = Path(hf_id)
+    if local_path.exists():
+        return hf_id
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot = Path(snapshot_download(hf_id, local_files_only=True))
+    except Exception:
+        return hf_id
+
+    tok_cfg = snapshot / "tokenizer" / "tokenizer_config.json"
+    if not tok_cfg.exists():
+        return str(snapshot)
+
+    try:
+        cfg = json.loads(tok_cfg.read_text())
+    except Exception:
+        return str(snapshot)
+
+    if not isinstance(cfg.get("extra_special_tokens"), list):
+        return str(snapshot)
+
+    patched_root = Path(tempfile.gettempdir()) / "trtf_hf_patched" / hashlib.sha256(
+        str(snapshot).encode("utf-8")).hexdigest()
+    patched_cfg = patched_root / "tokenizer" / "tokenizer_config.json"
+    if not patched_cfg.exists():
+        shutil.copytree(snapshot, patched_root, dirs_exist_ok=True)
+        patched = json.loads(patched_cfg.read_text())
+        patched.pop("extra_special_tokens", None)
+        patched_cfg.write_text(json.dumps(patched, indent=2))
+    return str(patched_root)
+
+
 class DiffusionMediaRunner:
     """TRT strategy runner for diffusion media generation pipelines."""
 
@@ -109,13 +147,12 @@ class DiffusionMediaRunner:
         bundle_path = _resolve_bundle_path(case, ctx)
         script = TOOLS_DIR / "debug_diffusion_pipeline.py"
         model_id = case.hf_id
-        num_steps = case.inputs.get("num_inference_steps", 10)
 
         cmd = [
             sys.executable, str(script),
             "--bundle", bundle_path,
             "--model-id", model_id,
-            "--num-steps", str(num_steps),
+            "--num-steps", str(case.inputs.get("num_inference_steps", 10)),
         ]
 
         t0 = time.monotonic()
@@ -148,6 +185,8 @@ class DiffusionMediaRunner:
     ) -> StageOutput:
         """Run T5 text encoding stage via debug_diffusion_pipeline subprocess."""
         bundle_path = _resolve_bundle_path(case, ctx)
+        model_ref = _resolve_cached_model_ref(case.hf_id)
+        max_length = 120 if case.family == "pixart" else 512
 
         # Run as a subprocess that loads the TRT T5 engine and encodes text
         prompt_text = case.inputs.get("prompt", "A cat sitting on a beach")
@@ -155,19 +194,21 @@ class DiffusionMediaRunner:
             import sys
             sys.path.insert(0, {str(TOOLS_DIR)!r})
             import numpy as np
-            from diffusion_helpers import load_bundle_config
             from trtf_build.diffusion_runner import DiffusionRunner
 
             runner = DiffusionRunner({bundle_path!r})
             prompt_text = {prompt_text!r}
+            model_ref = {model_ref!r}
+            max_length = {max_length}
 
             from transformers import AutoTokenizer
             try:
-                tokenizer = AutoTokenizer.from_pretrained({case.hf_id!r})
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_ref, subfolder="tokenizer", use_fast=False)
             except (ValueError, OSError):
-                tokenizer = AutoTokenizer.from_pretrained({case.hf_id!r}, subfolder="tokenizer")
+                tokenizer = AutoTokenizer.from_pretrained(model_ref, use_fast=False)
             tokens = tokenizer(prompt_text, return_tensors="np", padding="max_length",
-                               max_length=512, truncation=True)
+                               max_length=max_length, truncation=True)
             input_ids = tokens["input_ids"].astype(np.int32)
             text_output = runner.encode_text(input_ids)
             import os as _os
@@ -180,7 +221,7 @@ class DiffusionMediaRunner:
             print("mean=" + format(float(text_output.mean()), ".6f"))
             print("std=" + format(float(text_output.std()), ".6f"))
         """)
-        python = ctx.hf_python or sys.executable
+        python = ctx.runtime_python_path() or sys.executable
         t0 = time.monotonic()
         result = subprocess.run(
             [python, "-c", script_code],
@@ -246,8 +287,9 @@ class DiffusionMediaRunner:
                 "--output", frame_dir,
                 "--num-steps", str(num_steps),
             ]
-            if ctx.hf_python:
-                cmd.extend(["--hf-python", ctx.hf_python])
+            runtime_cli_python = ctx.runtime_cli_hf_python()
+            if runtime_cli_python:
+                cmd.extend(["--hf-python", runtime_cli_python])
 
             env = {**os.environ, "LD_LIBRARY_PATH": ld_path}
 
@@ -322,8 +364,7 @@ class DiffusionMediaRunner:
         bundle_path = _resolve_bundle_path(case, ctx)
         model_id = case.hf_id
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
-        num_steps = case.inputs.get("num_inference_steps", 10)
-        python = ctx.hf_python or sys.executable
+        python = ctx.runtime_python_path() or sys.executable
 
         script_code = f"""
 import sys, json, time
@@ -451,7 +492,7 @@ np.save("/tmp/crossover_ref_t5_trt_dit.npy", dit_out)
         bundle_path = _resolve_bundle_path(case, ctx)
         model_id = case.hf_id
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
-        python = ctx.hf_python or sys.executable
+        python = ctx.runtime_python_path() or sys.executable
 
         script_code = f"""
 import sys, json

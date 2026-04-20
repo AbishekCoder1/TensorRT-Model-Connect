@@ -16,13 +16,24 @@ _strategies: dict[str, BuildStrategy] | None = None
 
 
 def _init_registry() -> dict[str, BuildStrategy]:
+    from .chronos_bolt import ChronosBoltBuildStrategy
     from .decoder import DecoderBuildStrategy
+    from .patchtst import PatchTSTBuildStrategy
+    from .patchtsmixer import PatchTSMixerBuildStrategy
     from .encoder_only import EncoderOnlyBuildStrategy
     from .diffusion import DiffusionBuildStrategy
+    from .timesfm import TimesFmBuildStrategy
 
     strategies: dict[str, BuildStrategy] = {}
-    for cls in (DecoderBuildStrategy, EncoderOnlyBuildStrategy,
-                DiffusionBuildStrategy):
+    for cls in (
+        DecoderBuildStrategy,
+        EncoderOnlyBuildStrategy,
+        DiffusionBuildStrategy,
+        PatchTSTBuildStrategy,
+        PatchTSMixerBuildStrategy,
+        TimesFmBuildStrategy,
+        ChronosBoltBuildStrategy,
+    ):
         s = cls()
         strategies[s.name] = s
     return strategies

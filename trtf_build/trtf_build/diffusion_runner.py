@@ -11,18 +11,16 @@ from __future__ import annotations
 import json
 import struct
 import sys
-from pathlib import Path
-from typing import Any
 
 import numpy as np
 
 try:
     import tensorrt as trt
     try:
-        from cuda import cuda, cudart
+        from cuda import cudart
     except ImportError:
         # cuda-python >= 13.x uses cuda.bindings
-        from cuda.bindings import driver as cuda, runtime as cudart
+        from cuda.bindings import runtime as cudart
     HAS_CUDA = True
 except ImportError:
     HAS_CUDA = False
@@ -69,7 +67,10 @@ class DiffusionRunner:
         scheduler_kwargs = {}
         if "flow_shift" in self.config:
             scheduler_kwargs["shift"] = self.config["flow_shift"]
-        self.scheduler = get_scheduler(scheduler_name, **scheduler_kwargs)
+        try:
+            self.scheduler = get_scheduler(scheduler_name, **scheduler_kwargs)
+        except ValueError:
+            self.scheduler = None
 
         # CUDA stream
         self.stream = _check_cuda(cudart.cudaStreamCreate())
@@ -194,29 +195,46 @@ class DiffusionRunner:
         if not te_names:
             raise RuntimeError("No text encoder engine in bundle")
 
-        # Build attention mask: 0.0 for valid tokens, -1e9 for padding.
-        # Padding tokens have id == 0 (T5/UMT5 pad_token_id).
-        ids_flat = input_ids.flatten()
-        attn_mask = np.where(ids_flat != 0, 0.0, -1e9).astype(np.float32)
-        attn_mask = attn_mask.reshape(input_ids.shape)
+        te_engine = self._engines[te_names[0]]
+        input_shape = tuple(max(1, s) for s in te_engine.get_tensor_shape("input_ids"))
+        seq_len = input_shape[1] if len(input_shape) >= 2 else input_ids.shape[1]
+
+        padded_ids = np.zeros((1, seq_len), dtype=np.int32)
+        copy_len = min(seq_len, input_ids.shape[1])
+        padded_ids[:, :copy_len] = input_ids[:, :copy_len].astype(np.int32)
+
+        # Match the engine's expected attention-mask dtype/semantics.
+        ids_flat = padded_ids.flatten()
+        mask_dtype = trt.nptype(te_engine.get_tensor_dtype("attention_mask"))
+        if np.issubdtype(mask_dtype, np.integer):
+            attn_mask = (padded_ids != 0).astype(mask_dtype)
+        else:
+            attn_mask = np.where(ids_flat != 0, 1.0, 0.0).astype(mask_dtype)
+            attn_mask = attn_mask.reshape(padded_ids.shape)
 
         # Run first (primary) text encoder
         results = self._run_engine(te_names[0], {
-            "input_ids": input_ids,
+            "input_ids": padded_ids,
             "attention_mask": attn_mask,
         })
-        embeddings = results["text_embeddings"]
+        embeddings = results.get("text_embeddings")
+        if embeddings is None:
+            embeddings = results.get("output0")
+        if embeddings is None:
+            output_names = [name for name in results]
+            if not output_names:
+                raise RuntimeError("Text encoder engine has no outputs")
+            embeddings = results[output_names[0]]
 
-        # Zero out padding positions in the T5 output.
-        # Even with attention masking, T5 produces non-zero output at padding
-        # positions (via residual connections). These non-zero values dilute the
-        # text signal in DiT cross-attention which has no masking.
-        # Note: T5 engine may output fewer tokens than input (engine's built
-        # max_sequence_length). Truncate mask to match actual output length.
-        out_seq_len = embeddings.shape[1]
-        valid_mask = (ids_flat[:out_seq_len] != 0).astype(np.float32)
-        valid_mask = valid_mask.reshape(1, out_seq_len, 1)
-        embeddings = embeddings * valid_mask
+        # Wan-style diffusion paths have no text attention mask in the DiT and
+        # benefit from zeroing padding rows. PixArt passes an explicit
+        # encoder_attention_mask to the denoiser, so keep the raw T5 outputs to
+        # match the C++ pixart_torchtrt pipeline and HF reference.
+        if self.config.get("runtime_strategy") != "diffusion_pixart_torchtrt":
+            out_seq_len = embeddings.shape[1]
+            valid_mask = (ids_flat[:out_seq_len] != 0).astype(np.float32)
+            valid_mask = valid_mask.reshape(1, out_seq_len, 1)
+            embeddings = embeddings * valid_mask
 
         # Truncate to actual content length + padding matching HF's convention.
         # HF WanPipeline uses max_sequence_length=226 by default.
@@ -246,6 +264,9 @@ class DiffusionRunner:
         Returns:
             Denoised latents [1, C, T, H, W].
         """
+        if self.scheduler is None:
+            raise RuntimeError(
+                f"Unsupported scheduler for DiffusionRunner: {self.config.get('scheduler', '')}")
         self.scheduler.set_timesteps(num_inference_steps)
         timesteps = self.scheduler.timesteps
 
@@ -257,7 +278,6 @@ class DiffusionRunner:
 
         _, c, t_lat, h_lat, w_lat = latents.shape
         pt, ph, pw = patch_size
-        num_patches = (t_lat // pt) * (h_lat // ph) * (w_lat // pw)
         text_seq_len = text_embeddings.shape[1]
 
         for step_idx, timestep in enumerate(timesteps):
@@ -493,7 +513,6 @@ class DiffusionRunner:
 
         Returns [1, dim * 6] for DiT block modulation.
         """
-        dim = self.config.get("dit_dim", 1536)
         freq_dim = self.config.get("freq_dim", 256)
 
         # Sinusoidal embedding
@@ -519,8 +538,6 @@ class DiffusionRunner:
 
         Returns (cos, sin) each of shape [num_patches, head_dim].
         """
-        num_patches = nt * nh * nw
-
         # Split head_dim into temporal, height, width components
         # Wan uses: t_dim = head_dim - 2*(head_dim//6), h_dim = w_dim = head_dim//6
         h_dim = w_dim = 2 * (head_dim // 6)

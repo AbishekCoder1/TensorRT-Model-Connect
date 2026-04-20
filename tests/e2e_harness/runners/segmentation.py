@@ -14,11 +14,9 @@ individually by checking for ``plugins`` after ``plugin``).
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -97,8 +95,9 @@ class SegmentationRunner:
             "--image", str(image_path),
             "--output", str(output_path),
         ]
-        if ctx.hf_python:
-            cmd.extend(["--hf-python", str(ctx.hf_python)])
+        runtime_cli_python = ctx.runtime_cli_hf_python()
+        if runtime_cli_python:
+            cmd.extend(["--hf-python", str(runtime_cli_python)])
 
         env = dict(os.environ)
         if ctx.ld_library_path:
@@ -230,8 +229,9 @@ class PromptedSegmentationRunner:
         ]
         if not is_foreground:
             cmd.append("--background")
-        if ctx.hf_python:
-            cmd.extend(["--hf-python", str(ctx.hf_python)])
+        runtime_cli_python = ctx.runtime_cli_hf_python()
+        if runtime_cli_python:
+            cmd.extend(["--hf-python", str(runtime_cli_python)])
 
         env = dict(os.environ)
         if ctx.ld_library_path:

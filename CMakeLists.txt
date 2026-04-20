@@ -143,6 +143,10 @@ add_library(trtf_core
   src/runtime/plugins/rwkv_plugin.cpp
   src/runtime/plugins/hybrid_plugin.cpp
   src/runtime/plugins/encoder_plugin.cpp
+  src/runtime/plugins/patchtst_plugin.cpp
+  src/runtime/plugins/patchtsmixer_plugin.cpp
+  src/runtime/plugins/timesfm_plugin.cpp
+  src/runtime/plugins/chronos_bolt_plugin.cpp
   src/runtime/plugins/segmentation_plugin.cpp
   src/runtime/plugins/object_detection_plugin.cpp
   src/runtime/plugins/vl_plugin.cpp
@@ -163,6 +167,10 @@ add_library(trtf_core
   src/runtime/pipelines/text_generation_pipeline.cpp
   src/runtime/pipelines/recurrent_pipeline.cpp
   src/runtime/pipelines/encoder_pipeline.cpp
+  src/runtime/pipelines/patchtst_pipeline.cpp
+  src/runtime/pipelines/patchtsmixer_pipeline.cpp
+  src/runtime/pipelines/timesfm_pipeline.cpp
+  src/runtime/pipelines/chronos_bolt_pipeline.cpp
   src/runtime/pipelines/segment_pipeline.cpp
   src/runtime/pipelines/sam_pipeline.cpp
   src/runtime/pipelines/vl_pipeline.cpp

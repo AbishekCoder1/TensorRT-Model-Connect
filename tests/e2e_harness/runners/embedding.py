@@ -38,8 +38,9 @@ class EmbeddingRunner:
         if image_path:
             cmd.extend(["--image", image_path])
 
-        if ctx.hf_python:
-            cmd.extend(["--hf-python", ctx.hf_python])
+        runtime_cli_python = ctx.runtime_cli_hf_python()
+        if runtime_cli_python:
+            cmd.extend(["--hf-python", runtime_cli_python])
 
         env = dict(os.environ)
         if ctx.ld_library_path:

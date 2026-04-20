@@ -16,11 +16,10 @@ from __future__ import annotations
 import io
 import sys
 
-import numpy as np
 import tensorrt as trt
 
 
-def build_vision_engine_from_onnx(
+def build_engine_from_onnx(
     onnx_bytes: bytes,
     *,
     verbose: bool = False,
@@ -60,6 +59,15 @@ def build_vision_engine_from_onnx(
         raise RuntimeError("TensorRT vision engine build failed")
 
     return bytes(plan)
+
+
+def build_vision_engine_from_onnx(
+    onnx_bytes: bytes,
+    *,
+    verbose: bool = False,
+) -> bytes:
+    """Backward-compatible alias for the generic ONNX -> TRT builder."""
+    return build_engine_from_onnx(onnx_bytes, verbose=verbose)
 
 
 def trace_hf_vision_encoder(

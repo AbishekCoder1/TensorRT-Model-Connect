@@ -39,6 +39,22 @@ def _torch_dtype_for_case(case: E2ECase) -> str:
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 
+def _resolve_cached_model_ref(hf_id: str) -> str:
+    """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
+    if not hf_id:
+        return hf_id
+    p = Path(hf_id)
+    if p.exists():
+        return hf_id
+
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(hf_id, local_files_only=True)
+    except Exception:
+        return hf_id
+
+
 class HfTransformersReference:
     """Run HuggingFace Transformers inference as the reference oracle."""
 
@@ -89,6 +105,7 @@ class HfTransformersReference:
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         contract_config = case.metadata.get("contract_config", {})
@@ -100,6 +117,7 @@ class HfTransformersReference:
             from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
 
             hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
             prompt = {prompt!r}
             max_new_tokens = {max_new_tokens}
             trust_remote_code = {trust_remote_code!r}
@@ -109,7 +127,7 @@ class HfTransformersReference:
             enable_thinking = {enable_thinking!r}
 
             tokenizer = AutoTokenizer.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
+                model_ref, trust_remote_code=trust_remote_code)
             if use_chat_template:
                 messages = [{{"role": "user", "content": prompt}}]
                 try:
@@ -131,13 +149,13 @@ class HfTransformersReference:
             }}
             # Detect encoder-decoder models by checking config
             from transformers import AutoConfig
-            _cfg = AutoConfig.from_pretrained(hf_id, trust_remote_code=trust_remote_code)
+            _cfg = AutoConfig.from_pretrained(model_ref, trust_remote_code=trust_remote_code)
             is_seq2seq = getattr(_cfg, "is_encoder_decoder", False)
 
             if is_seq2seq:
-                model = AutoModelForSeq2SeqLM.from_pretrained(hf_id, **load_kwargs)
+                model = AutoModelForSeq2SeqLM.from_pretrained(model_ref, **load_kwargs)
             else:
-                model = AutoModelForCausalLM.from_pretrained(hf_id, **load_kwargs)
+                model = AutoModelForCausalLM.from_pretrained(model_ref, **load_kwargs)
             model.eval()
 
             ids_tensor = torch.tensor([input_ids], dtype=torch.long)
@@ -190,7 +208,7 @@ class HfTransformersReference:
             print(f"OK steps={{len(all_logits)}} vocab={{max_len}}")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -341,7 +359,7 @@ class HfTransformersReference:
             print("OK")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -443,7 +461,7 @@ class HfTransformersReference:
             print("OK")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -513,7 +531,7 @@ class HfTransformersReference:
             print(f"OK classes={{class_map.max() + 1}}")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -608,7 +626,7 @@ class HfTransformersReference:
             print("OK")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -703,7 +721,7 @@ class HfTransformersReference:
             print(f"OK text={{text[:100]!r}}")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -807,7 +825,7 @@ class HfTransformersReference:
             print(f"OK text={{text[:100]!r}}")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -891,7 +909,7 @@ class HfTransformersReference:
             print(f"OK detections={{len(detections)}}")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -1006,7 +1024,7 @@ class HfTransformersReference:
             print(f"OK seed={{seed}} rms={{rms:.4f}} duration={{duration:.2f}}s")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -1122,7 +1140,7 @@ class HfTransformersReference:
             print(f"OK text={{text[:100]!r}}")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
@@ -1225,7 +1243,7 @@ class HfTransformersReference:
             print(f"OK masks={{mask_np.shape[0]}} iou={{iou_scores}}")
         """)
 
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path

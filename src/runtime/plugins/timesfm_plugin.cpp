@@ -1,0 +1,42 @@
+// TimesFmPlugin: handles "timesfm_torchtrt" bundles.
+// Loads a single TRT engine and routes solve() through TimesFmPipeline.
+
+#include "runtime/pipelines/timesfm_pipeline.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/pipeline_registry.h"
+#include "utils/json_helpers.h"
+
+#if TRTF_HAS_TRT
+
+namespace trtf {
+
+class TimesFmPlugin final : public IPipelinePlugin {
+  public:
+    std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        auto loaded =
+            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "timesfm engine");
+
+        int32_t default_freq = extract_json_int(ctx.config_json, "timesfm_default_freq", 0);
+        if (default_freq == 0)
+            default_freq = extract_json_int(ctx.config_json, "freq", 0);
+
+        int32_t prediction_length =
+            extract_json_int(ctx.config_json, "timesfm_prediction_length", 0);
+        if (prediction_length <= 0)
+            prediction_length = extract_json_int(ctx.config_json, "prediction_length", 0);
+        if (prediction_length <= 0)
+            prediction_length = extract_json_int(ctx.config_json, "forecast_horizon", 0);
+
+        return std::make_unique<TimesFmPipeline>(std::move(loaded.module), default_freq,
+                                                 prediction_length, ctx.bundle.info.model_id);
+    }
+};
+
+volatile int kForceLink_TimesFmPlugin = 0;
+
+} // namespace trtf
+
+static trtf::TimesFmPlugin g_TimesFmPlugin_instance;
+static trtf::PluginRegistrar g_TimesFmPlugin_reg("timesfm_torchtrt", &g_TimesFmPlugin_instance);
+
+#endif // TRTF_HAS_TRT

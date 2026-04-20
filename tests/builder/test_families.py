@@ -36,48 +36,52 @@ def _discover_plugin_names_from_filesystem() -> set[str]:
     body and whose class name is referenced in a module-level
     ``plugin = ClassName()`` assignment.
     """
-    families_dir = Path(__file__).resolve().parent.parent.parent / (
-        "trtf_build" / Path("trtf_build") / "families"
-    )
     names: set[str] = set()
-    for py_file in sorted(families_dir.glob("*.py")):
-        if py_file.name.startswith("_") or py_file.stem == "base":
-            continue
-        try:
-            tree = ast.parse(py_file.read_text(), filename=str(py_file))
-        except SyntaxError:
-            continue
+    repo_root = Path(__file__).resolve().parent.parent.parent / "trtf_build" / Path("trtf_build")
+    plugin_dirs = [
+        repo_root / "families",
+        repo_root / "engine_defs" / "torch_trt" / "families",
+    ]
 
-        # 1) Find the class name referenced in  ``plugin = ClassName(...)``
-        plugin_class_name: str | None = None
-        for node in ast.iter_child_nodes(tree):
-            if (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == "plugin"
-                and isinstance(node.value, ast.Call)
-                and isinstance(node.value.func, ast.Name)
-            ):
-                plugin_class_name = node.value.func.id
-                break
-        if plugin_class_name is None:
-            continue
+    for families_dir in plugin_dirs:
+        for py_file in sorted(families_dir.glob("*.py")):
+            if py_file.name.startswith("_") or py_file.stem == "base":
+                continue
+            try:
+                tree = ast.parse(py_file.read_text(), filename=str(py_file))
+            except SyntaxError:
+                continue
 
-        # 2) Find that class and extract its ``name`` string attribute.
-        for node in ast.iter_child_nodes(tree):
-            if isinstance(node, ast.ClassDef) and node.name == plugin_class_name:
-                for item in node.body:
-                    if (
-                        isinstance(item, ast.Assign)
-                        and len(item.targets) == 1
-                        and isinstance(item.targets[0], ast.Name)
-                        and item.targets[0].id == "name"
-                        and isinstance(item.value, ast.Constant)
-                        and isinstance(item.value.value, str)
-                    ):
-                        names.add(item.value.value)
-                break
+            # 1) Find the class name referenced in  ``plugin = ClassName(...)``
+            plugin_class_name: str | None = None
+            for node in ast.iter_child_nodes(tree):
+                if (
+                    isinstance(node, ast.Assign)
+                    and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "plugin"
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                ):
+                    plugin_class_name = node.value.func.id
+                    break
+            if plugin_class_name is None:
+                continue
+
+            # 2) Find that class and extract its ``name`` string attribute.
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, ast.ClassDef) and node.name == plugin_class_name:
+                    for item in node.body:
+                        if (
+                            isinstance(item, ast.Assign)
+                            and len(item.targets) == 1
+                            and isinstance(item.targets[0], ast.Name)
+                            and item.targets[0].id == "name"
+                            and isinstance(item.value, ast.Constant)
+                            and isinstance(item.value.value, str)
+                        ):
+                            names.add(item.value.value)
+                    break
     return names
 
 
@@ -229,7 +233,7 @@ class TestPluginDiscovery:
                 invalid.append(f"{manifest_path.name}: family={family!r}")
 
         assert not invalid, (
-            f"Manifests referencing unknown family plugins:\n"
+            "Manifests referencing unknown family plugins:\n"
             + "\n".join(f"  {entry}" for entry in invalid))
 
 

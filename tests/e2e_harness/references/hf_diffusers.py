@@ -9,9 +9,11 @@ Supports Wan-style text-to-video pipelines with per-stage extraction
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,6 +43,43 @@ def _ref_subprocess_env() -> dict:
         preload = f"{sys_cublas}:{sys_cublaslt}"
         env["LD_PRELOAD"] = f"{preload}:{existing}" if existing else preload
     return env
+
+
+def _resolve_cached_model_ref(hf_id: str) -> str:
+    """Prefer a local snapshot and patch tokenizer configs incompatible with current transformers."""
+    if not hf_id:
+        return hf_id
+    local_path = Path(hf_id)
+    if local_path.exists():
+        return hf_id
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot = Path(snapshot_download(hf_id, local_files_only=True))
+    except Exception:
+        return hf_id
+
+    tok_cfg = snapshot / "tokenizer" / "tokenizer_config.json"
+    if not tok_cfg.exists():
+        return str(snapshot)
+
+    try:
+        cfg = json.loads(tok_cfg.read_text())
+    except Exception:
+        return str(snapshot)
+
+    if not isinstance(cfg.get("extra_special_tokens"), list):
+        return str(snapshot)
+
+    patched_root = Path(tempfile.gettempdir()) / "trtf_hf_patched" / hashlib.sha256(
+        str(snapshot).encode("utf-8")).hexdigest()
+    patched_cfg = patched_root / "tokenizer" / "tokenizer_config.json"
+    if not patched_cfg.exists():
+        shutil.copytree(snapshot, patched_root, dirs_exist_ok=True)
+        patched = json.loads(patched_cfg.read_text())
+        patched.pop("extra_special_tokens", None)
+        patched_cfg.write_text(json.dumps(patched, indent=2))
+    return str(patched_root)
 
 
 
@@ -85,8 +124,10 @@ class HfDiffusersReference:
         is not available.
         """
         model_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(model_id)
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
+        max_length = 120 if case.family == "pixart" else 512
 
         # Save to artifacts_dir so the file persists for comparator access
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
@@ -99,8 +140,10 @@ import torch, numpy as np, sys
 import transformers
 
 model_id = {model_id!r}
+model_ref = {model_ref!r}
 prompt = {prompt!r}
 output_path = {output_path!r}
+max_length = {max_length}
 
 transformers.logging.set_verbosity_error()
 
@@ -140,13 +183,13 @@ for cls_name in ["WanPipeline", "FluxPipeline", "DiffusionPipeline"]:
             # so we fall back to low_cpu_mem_usage=True.
             try:
                 pipe = cls.from_pretrained(
-                    model_id, torch_dtype=torch.float32, low_cpu_mem_usage=False)
+                    model_ref, torch_dtype=torch.float32, low_cpu_mem_usage=False)
             except ValueError as e:
                 if "keep_in_fp32_modules" not in str(e):
                     raise
-                pipe = cls.from_pretrained(model_id, **load_kwargs)
+                pipe = cls.from_pretrained(model_ref, **load_kwargs)
         else:
-            pipe = cls.from_pretrained(model_id, **load_kwargs)
+            pipe = cls.from_pretrained(model_ref, **load_kwargs)
         if cls_name == "WanPipeline":
             _retie_wan_text_encoder(pipe)
         print(f"Loaded {{cls_name}}", file=sys.stderr)
@@ -173,9 +216,12 @@ if text_encoder is None or tokenizer is None:
     sys.exit(1)
 
 tokens = tokenizer(prompt, return_tensors="pt", padding="max_length",
-                    max_length=512, truncation=True)
+                    max_length=max_length, truncation=True)
 with torch.no_grad():
-    t5_out = text_encoder(tokens.input_ids)[0]
+    t5_out = text_encoder(
+        input_ids=tokens.input_ids,
+        attention_mask=tokens.attention_mask,
+    )[0]
 
 np.save(output_path, t5_out.numpy())
 print(f"shape={{list(t5_out.shape)}}")
@@ -255,9 +301,10 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
     ) -> StageOutput:
         """Run full HF diffusers pipeline to generate reference frames."""
         model_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(model_id)
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
-        python = ctx.hf_python or sys.executable
+        python = ctx.reference_python_path() or sys.executable
 
         # Save frames to artifacts_dir so they persist for comparator access
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
@@ -277,6 +324,7 @@ transformers.logging.set_verbosity_error()
 
 family = {family!r}
 model_id = {model_id!r}
+model_ref = {model_ref!r}
 prompt = {prompt!r}
 num_steps = {num_steps}
 frames_dir = {frames_dir!r}
@@ -285,7 +333,7 @@ seed = 42
 # Use float32 for reference (avoids CUBLAS errors on GB300 with bf16/fp16)
 if family in ("flux",):
     from diffusers import FluxPipeline
-    pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
+    pipe = FluxPipeline.from_pretrained(model_ref, torch_dtype=torch.float32)
     pipe.to("cuda")
     output = pipe(
         prompt=prompt,
@@ -296,7 +344,7 @@ if family in ("flux",):
     frames = output.images
 elif family in ("z_image",):
     from diffusers import DiffusionPipeline
-    pipe = DiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
+    pipe = DiffusionPipeline.from_pretrained(model_ref, torch_dtype=torch.float32)
     pipe.to("cuda")
     output = pipe(
         prompt=prompt,
@@ -307,7 +355,7 @@ elif family in ("z_image",):
     frames = output.images
 elif family in ("pixart",):
     from diffusers import PixArtSigmaPipeline
-    pipe = PixArtSigmaPipeline.from_pretrained(model_id, torch_dtype=torch.float32)
+    pipe = PixArtSigmaPipeline.from_pretrained(model_ref, torch_dtype=torch.float32)
     pipe.to("cuda")
     output = pipe(
         prompt=prompt,
@@ -322,12 +370,12 @@ else:
     from diffusers import WanPipeline
     try:
         pipe = WanPipeline.from_pretrained(
-            model_id, torch_dtype=torch.float32, low_cpu_mem_usage=False)
+            model_ref, torch_dtype=torch.float32, low_cpu_mem_usage=False)
     except ValueError as e:
         if "keep_in_fp32_modules" not in str(e):
             raise
         pipe = WanPipeline.from_pretrained(
-            model_id, torch_dtype=torch.float32, low_cpu_mem_usage=True)
+            model_ref, torch_dtype=torch.float32, low_cpu_mem_usage=True)
     if hasattr(pipe, "text_encoder"):
         te = pipe.text_encoder
         if hasattr(te, "tie_weights"):
