@@ -15,5 +15,6 @@ ignore = [
 
 [lint.per-file-ignores]
 "tests/**" = ["F811"]
+"tmp/**" = ["E", "W", "F"]  # !135 triattention scratch scripts
 
 [format]
