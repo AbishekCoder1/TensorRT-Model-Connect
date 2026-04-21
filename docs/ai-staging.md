@@ -11,6 +11,8 @@ The branch has three invariants:
 
 Human promotion to `master` stays explicit: after the AI queue is clean, create a
 normal MR from `ai-staging` to `master` and let the full pipeline run there.
+This promotion MR may be filed by a schedule, but it is still reviewed and
+merged by a human.
 
 ## CI Policy
 
@@ -70,6 +72,36 @@ To retarget only after reviewing the list:
 
 ```bash
 python3 tools/ai_staging.py retarget
+```
+
+## Scheduled Promotion MR
+
+The repository includes a lightweight scheduled CI path for filing a promotion
+MR from `ai-staging` to `master`. It does not merge automatically.
+
+Configure a GitLab pipeline schedule on the `master` branch with these
+variables:
+
+- `AI_STAGING_PROMOTE=1`
+- `AI_STAGING_BOT_TOKEN=<masked project access token with API scope>`
+
+The scheduled pipeline runs only `ai-staging-promotion-mr`; normal nightly
+build, coverage, graph, and E2E jobs are skipped for this maintenance schedule.
+The scheduled job uses the GitLab REST API directly with `AI_STAGING_BOT_TOKEN`;
+it does not require `glab` on the runner.
+
+The job is idempotent:
+
+- If `origin/ai-staging` and `origin/master` have identical trees, it exits
+  without filing an MR.
+- If an open `ai-staging -> master` MR already exists, it reports that MR and
+  exits.
+- Otherwise it creates `chore: promote ai-staging to master` for human review.
+
+Equivalent local command:
+
+```bash
+python3 tools/ai_staging.py promote
 ```
 
 Use `--source-prefix` more than once if another AI branch prefix is introduced:

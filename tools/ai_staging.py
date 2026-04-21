@@ -9,7 +9,9 @@ import os
 import shlex
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +28,7 @@ class Config:
     project: str
     source_prefixes: tuple[str, ...]
     dry_run: bool
+    require_api_token: bool
 
 
 def run(
@@ -77,6 +80,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         project=encoded_project_path(project),
         source_prefixes=prefixes,
         dry_run=args.dry_run,
+        require_api_token=getattr(args, "require_api_token", False),
     )
 
 
@@ -146,6 +150,42 @@ def sync_branch(cfg: Config, *, push: bool) -> None:
         run(["git", "push", cfg.remote, f"HEAD:refs/heads/{cfg.branch}"], dry_run=cfg.dry_run)
 
 
+def infer_gitlab_server_url(remote: str) -> str:
+    remote_url = git(["remote", "get-url", remote])
+    if "://" in remote_url:
+        parsed = urllib.parse.urlparse(remote_url)
+        if parsed.hostname:
+            return f"https://{parsed.hostname}"
+    if "@" in remote_url and ":" in remote_url:
+        host = remote_url.split("@", 1)[1].split(":", 1)[0]
+        if host:
+            return f"https://{host}"
+    raise SystemExit(
+        f"Could not infer GitLab server URL from remote URL: {remote_url!r}. "
+        "Set CI_API_V4_URL."
+    )
+
+
+def gitlab_api_base_url(cfg: Config) -> str:
+    if os.environ.get("CI_API_V4_URL"):
+        return os.environ["CI_API_V4_URL"].rstrip("/")
+    return infer_gitlab_server_url(cfg.remote).rstrip("/") + "/api/v4"
+
+
+def gitlab_token_header() -> tuple[str, str] | None:
+    token = os.environ.get("AI_STAGING_BOT_TOKEN")
+    if token:
+        return "PRIVATE-TOKEN", token
+    return None
+
+
+def missing_token_message() -> str:
+    return (
+        "AI_STAGING_BOT_TOKEN is required for GitLab REST API access. "
+        "Create a masked CI/CD variable with a project access token that has API scope."
+    )
+
+
 def glab_api_json(path: str, *, method: str | None = None, fields: dict[str, str] | None = None) -> Any:
     cmd = ["glab", "api"]
     if method:
@@ -157,6 +197,56 @@ def glab_api_json(path: str, *, method: str | None = None, fields: dict[str, str
     if not result.stdout.strip():
         return None
     return json.loads(result.stdout)
+
+
+def http_api_json(
+    cfg: Config,
+    path: str,
+    *,
+    method: str | None = None,
+    fields: dict[str, str] | None = None,
+) -> Any:
+    token_header = gitlab_token_header()
+    if not token_header:
+        raise SystemExit(missing_token_message())
+
+    data = urllib.parse.urlencode(fields or {}).encode() if fields else None
+    request_method = method or ("POST" if data else "GET")
+    url = gitlab_api_base_url(cfg) + path
+    print(f"+ {request_method} {url}", file=sys.stderr)
+    request = urllib.request.Request(url, data=data, method=request_method)
+    request.add_header(*token_header)
+    if data:
+        request.add_header("Content-Type", "application/x-www-form-urlencoded")
+
+    try:
+        with urllib.request.urlopen(request) as response:
+            payload = response.read().decode()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        raise SystemExit(f"GitLab API failed: HTTP {exc.code} {exc.reason}: {body}") from exc
+
+    if not payload.strip():
+        return None
+    return json.loads(payload)
+
+
+def gitlab_api_json(
+    cfg: Config,
+    path: str,
+    *,
+    method: str | None = None,
+    fields: dict[str, str] | None = None,
+) -> Any:
+    is_write = (method or "").upper() in {"POST", "PUT", "PATCH", "DELETE"} or bool(fields)
+    if cfg.dry_run and is_write:
+        print(f"+ DRY RUN GitLab API {method or 'POST'} {path} {fields or {}}", file=sys.stderr)
+        return None
+    if gitlab_token_header():
+        return http_api_json(cfg, path, method=method, fields=fields)
+    if cfg.require_api_token:
+        raise SystemExit(missing_token_message())
+    return glab_api_json(path, method=method, fields=fields)
 
 
 def is_draft(mr: dict[str, Any]) -> bool:
@@ -171,7 +261,7 @@ def list_open_mrs(cfg: Config) -> list[dict[str, Any]]:
             f"/projects/{cfg.project}/merge_requests"
             f"?state=opened&per_page=100&page={page}&order_by=created_at&sort=asc"
         )
-        batch = glab_api_json(path)
+        batch = gitlab_api_json(cfg, path)
         if not isinstance(batch, list):
             raise SystemExit(f"Unexpected GitLab API response for page {page}: {batch!r}")
         if not batch:
@@ -253,7 +343,8 @@ def cmd_retarget(args: argparse.Namespace) -> int:
         changed += 1
         if cfg.dry_run:
             continue
-        glab_api_json(
+        gitlab_api_json(
+            cfg,
             f"/projects/{cfg.project}/merge_requests/{iid}",
             method="PUT",
             fields={"target_branch": cfg.branch},
@@ -269,6 +360,98 @@ def cmd_full_cycle(args: argparse.Namespace) -> int:
     if args.retarget:
         return cmd_retarget(args)
     print("retarget step skipped; pass --retarget to update matching merge requests")
+    return 0
+
+
+def branch_has_tree_diff(cfg: Config, target_branch: str) -> bool:
+    fetch_branch(cfg, target_branch)
+    fetch_branch(cfg, cfg.branch)
+    result = run(
+        ["git", "diff", "--quiet", f"{cfg.remote}/{target_branch}", f"{cfg.remote}/{cfg.branch}"],
+        check=False,
+    )
+    if result.returncode == 0:
+        return False
+    if result.returncode == 1:
+        return True
+    raise SystemExit(f"git diff failed with exit code {result.returncode}")
+
+
+def branch_contains_target(cfg: Config, target_branch: str) -> bool:
+    result = run(
+        ["git", "merge-base", "--is-ancestor", f"{cfg.remote}/{target_branch}", f"{cfg.remote}/{cfg.branch}"],
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def find_promotion_mr(cfg: Config, target_branch: str) -> dict[str, Any] | None:
+    query = urllib.parse.urlencode(
+        {
+            "state": "opened",
+            "source_branch": cfg.branch,
+            "target_branch": target_branch,
+            "per_page": "1",
+        }
+    )
+    response = gitlab_api_json(cfg, f"/projects/{cfg.project}/merge_requests?{query}")
+    if not isinstance(response, list):
+        raise SystemExit(f"Unexpected GitLab API response while finding promotion MR: {response!r}")
+    return response[0] if response else None
+
+
+def promotion_description(cfg: Config, target_branch: str, *, is_up_to_date: bool) -> str:
+    status = (
+        f"`{cfg.remote}/{cfg.branch}` contains `{cfg.remote}/{target_branch}`."
+        if is_up_to_date
+        else f"WARNING: `{cfg.remote}/{cfg.branch}` does not contain `{cfg.remote}/{target_branch}`. "
+        "Review carefully before merging."
+    )
+    return "\n".join(
+        [
+            f"Scheduled promotion MR from `{cfg.branch}` to `{target_branch}`.",
+            "",
+            "This MR is filed automatically for human review. It does not auto-merge.",
+            "",
+            status,
+            "",
+            "Review checklist:",
+            "",
+            "- Full MR pipeline is green.",
+            "- Diff contains only expected AI staging changes.",
+            f"- `{cfg.branch}` is up to date with `{target_branch}` before merge.",
+        ]
+    )
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    cfg = config_from_args(args)
+    target_branch = args.target_branch
+    if not branch_has_tree_diff(cfg, target_branch):
+        print(f"No tree diff between {cfg.remote}/{target_branch} and {cfg.remote}/{cfg.branch}; no MR needed.")
+        return 0
+
+    is_up_to_date = branch_contains_target(cfg, target_branch)
+    existing = find_promotion_mr(cfg, target_branch)
+    if existing:
+        print(f"Promotion MR already exists: !{existing['iid']} {existing['web_url']}")
+        return 0
+
+    fields = {
+        "source_branch": cfg.branch,
+        "target_branch": target_branch,
+        "title": f"chore: promote {cfg.branch} to {target_branch}",
+        "description": promotion_description(cfg, target_branch, is_up_to_date=is_up_to_date),
+        "remove_source_branch": "false",
+        "squash": "false",
+    }
+    mr = gitlab_api_json(cfg, f"/projects/{cfg.project}/merge_requests", method="POST", fields=fields)
+    if cfg.dry_run:
+        print(f"would create promotion MR from {cfg.branch} to {target_branch}")
+        return 0
+    if not isinstance(mr, dict):
+        raise SystemExit(f"Unexpected GitLab API response while creating promotion MR: {mr!r}")
+    print(f"Created promotion MR: !{mr['iid']} {mr['web_url']}")
     return 0
 
 
@@ -314,6 +497,15 @@ def build_parser() -> argparse.ArgumentParser:
     full_cycle.add_argument("--all-targets", action="store_true", help="retarget regardless of current target branch")
     full_cycle.add_argument("--skip-drafts", action="store_true", help="exclude draft merge requests")
     full_cycle.set_defaults(func=cmd_full_cycle)
+
+    promote = subparsers.add_parser("promote", help="file an ai-staging to master promotion MR for human review")
+    promote.add_argument(
+        "--require-api-token",
+        action="store_true",
+        help="require AI_STAGING_BOT_TOKEN and never fall back to local glab authentication",
+    )
+    promote.add_argument("--target-branch", default=os.environ.get("AI_STAGING_PROMOTION_TARGET", "master"))
+    promote.set_defaults(func=cmd_promote)
 
     return parser
 

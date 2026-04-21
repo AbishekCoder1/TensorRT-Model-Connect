@@ -37,6 +37,8 @@ variables:
   CPP_COVERAGE_MIN_FUNCTION: "46"
   CPP_COVERAGE_MIN_BRANCH: "21"
   AI_STAGING_BRANCH: "ai-staging"
+  AI_STAGING_PROMOTE: "0"
+  AI_STAGING_PROMOTION_TARGET: "master"
 
 workflow:
   auto_cancel:
@@ -57,10 +59,19 @@ default:
     - chmod +x ./build/trtf 2>/dev/null || true
 
 .ai-staging-rules: &ai_staging_rules
+  - if: '$CI_PIPELINE_SOURCE == "schedule" && $AI_STAGING_PROMOTE == "1"'
+    when: never
   - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $AI_STAGING_BRANCH'
   - if: '$CI_COMMIT_BRANCH == $AI_STAGING_BRANCH'
 
+.not-ai-staging-promotion-rules: &not_ai_staging_promotion_rules
+  - if: '$CI_PIPELINE_SOURCE == "schedule" && $AI_STAGING_PROMOTE == "1"'
+    when: never
+  - when: on_success
+
 .not-ai-staging-rules: &not_ai_staging_rules
+  - if: '$CI_PIPELINE_SOURCE == "schedule" && $AI_STAGING_PROMOTE == "1"'
+    when: never
   - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $AI_STAGING_BRANCH'
     when: never
   - if: '$CI_COMMIT_BRANCH == $AI_STAGING_BRANCH'
@@ -98,10 +109,22 @@ impact-analysis:
     expire_in: 1 day
   timeout: 5m
 
+ai-staging-promotion-mr:
+  stage: analyze
+  before_script: []
+  variables:
+    GIT_DEPTH: "0"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $AI_STAGING_PROMOTE == "1"'
+  script:
+    - python3 tools/ai_staging.py promote --require-api-token --target-branch "$AI_STAGING_PROMOTION_TARGET"
+  timeout: 5m
+
 # ── Build ──────────────────────────────────────────────────────────────────────
 
 build-all:
   stage: build
+  rules: *not_ai_staging_promotion_rules
   script:
     - |
       cmake -S . -B build -G Ninja \
@@ -140,6 +163,7 @@ check-cyclomatic-complexity:
 lint-check:
   stage: tier1-unit
   needs: [build-all]
+  rules: *not_ai_staging_promotion_rules
   script:
     - pip install --quiet ruff clang-format
     # Only lint files changed in this MR (codebase has pre-existing violations)
@@ -280,6 +304,8 @@ coverage-cpp:
     - job: build-all
       artifacts: false
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $AI_STAGING_PROMOTE == "1"'
+      when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $AI_STAGING_BRANCH'
       when: never
     - if: '$CI_COMMIT_BRANCH == $AI_STAGING_BRANCH'
@@ -401,6 +427,8 @@ test-e2e-selective:
     expire_in: 2 days
   timeout: 4h
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $AI_STAGING_PROMOTE == "1"'
+      when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $AI_STAGING_BRANCH'
       when: never
     - if: '$CI_COMMIT_BRANCH == $AI_STAGING_BRANCH'
@@ -455,6 +483,8 @@ test-e2e-nightly:
     expire_in: 7 days
   timeout: 6h
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $AI_STAGING_PROMOTE == "1"'
+      when: never
     - if: $CI_PIPELINE_SOURCE == "schedule"
 
 # ── Nightly: Coverage Map Generation ──────────────────────────────────────────
@@ -478,4 +508,6 @@ generate-coverage-map:
     expire_in: 30 days
   timeout: 90m
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $AI_STAGING_PROMOTE == "1"'
+      when: never
     - if: $CI_PIPELINE_SOURCE == "schedule"
