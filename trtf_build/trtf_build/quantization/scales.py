@@ -55,7 +55,14 @@ class QuantScaleMap:
     dynamic: bool = False  # True for NVFP4/MXFP8 (runtime scales)
 
     def get(self, weight_name: str) -> LayerScales | None:
-        return self.scales.get(weight_name)
+        exact = self.scales.get(weight_name)
+        if exact is not None:
+            return exact
+        suffix = f"/{weight_name}"
+        for key, scales in self.scales.items():
+            if key.endswith(suffix):
+                return scales
+        return None
 
     def to_json(self) -> str:
         obj: dict[str, Any] = {

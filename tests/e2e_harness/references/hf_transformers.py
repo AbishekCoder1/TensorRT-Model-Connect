@@ -126,6 +126,9 @@ class HfTransformersReference:
             use_chat_template = {use_chat_template!r}
             enable_thinking = {enable_thinking!r}
 
+            def _np(t):
+                return t.detach().float().cpu().numpy()
+
             tokenizer = AutoTokenizer.from_pretrained(
                 model_ref, trust_remote_code=trust_remote_code)
             if use_chat_template:
@@ -172,12 +175,12 @@ class HfTransformersReference:
                     decoder_ids = torch.tensor([generated_token_ids], dtype=torch.long)
                     outputs = model(ids_tensor, decoder_input_ids=decoder_ids)
                     for i in range(outputs.logits.shape[1]):
-                        all_logits.append(outputs.logits[0, i].numpy())
+                        all_logits.append(_np(outputs.logits[0, i]))
                     text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
                 else:
                     # Decoder-only: step-by-step autoregressive
                     outputs = model(ids_tensor)
-                    prefill_logits = outputs.logits[0].numpy()
+                    prefill_logits = _np(outputs.logits[0])
                     for i in range(len(input_ids)):
                         all_logits.append(prefill_logits[i])
 
@@ -192,7 +195,7 @@ class HfTransformersReference:
                         gen_ids.append(next_token)
                         ids_tensor = torch.tensor([gen_ids], dtype=torch.long)
                         outputs = model(ids_tensor)
-                        all_logits.append(outputs.logits[0, -1].numpy())
+                        all_logits.append(_np(outputs.logits[0, -1]))
                     text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
 
             with open(text_path, "w") as f:
@@ -344,15 +347,15 @@ class HfTransformersReference:
 
             # CLS token embedding from last_hidden_state
             if hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
-                cls_embedding = outputs.last_hidden_state[0, 0].numpy().tolist()
+                cls_embedding = outputs.last_hidden_state[0, 0].float().cpu().numpy().tolist()
             else:
                 first_out = outputs[0]
                 if first_out.ndim == 3:
-                    cls_embedding = first_out[0, 0].numpy().tolist()
+                    cls_embedding = first_out[0, 0].float().cpu().numpy().tolist()
                 elif first_out.ndim == 2:
-                    cls_embedding = first_out[0].numpy().tolist()
+                    cls_embedding = first_out[0].float().cpu().numpy().tolist()
                 else:
-                    cls_embedding = first_out.numpy().tolist()
+                    cls_embedding = first_out.float().cpu().numpy().tolist()
             result = {{"cls_embedding": cls_embedding}}
             with open(output_path, "w") as f:
                 json.dump(result, f)
@@ -453,7 +456,7 @@ class HfTransformersReference:
             mask = inputs["attention_mask"].unsqueeze(-1).float()
             pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
             pooled = torch.nn.functional.normalize(pooled, p=2, dim=-1)
-            embedding = pooled[0].numpy().tolist()
+            embedding = pooled[0].float().cpu().numpy().tolist()
 
             result = {{"embedding": embedding}}
             with open(output_path, "w") as f:
@@ -525,7 +528,7 @@ class HfTransformersReference:
             inputs = processor(images=image, return_tensors="pt")
             with torch.no_grad():
                 outputs = model(**inputs)
-            logits = outputs.logits[0].numpy()
+            logits = outputs.logits[0].float().cpu().numpy()
             class_map = np.argmax(logits, axis=0).astype(np.int32)
             np.save(output_path, class_map)
             print(f"OK classes={{class_map.max() + 1}}")
@@ -619,7 +622,7 @@ class HfTransformersReference:
                                truncation=True)
             with torch.no_grad():
                 outputs = model(**inputs)
-            scores = outputs.logits[0].tolist()
+            scores = outputs.logits[0].float().cpu().tolist()
             result = {{"scores": scores}}
             with open(output_path, "w") as f:
                 json.dump(result, f)

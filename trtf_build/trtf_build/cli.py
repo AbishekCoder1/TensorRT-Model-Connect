@@ -100,6 +100,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     # Default TRT Network API path
     from .engine_builder import build
+    from .quantization import canonicalize_quant_format
 
     # FP8 quantization: --fp8-scales (pre-computed) or --fp8 (auto-calibrate)
     fp8_scales = None
@@ -116,6 +117,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print("[trtf-build] FP8 auto-calibration enabled", file=sys.stderr)
 
     save_fp8_scales = getattr(args, 'save_fp8_scales', None)
+    quantize = canonicalize_quant_format(args.quantize)
 
     try:
         build(
@@ -123,7 +125,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             output_path=args.output,
             max_cache_length=args.max_cache_length,
             precision=args.precision,
-            quantize=args.quantize,
+            quantize=quantize,
             quant_scales=args.quant_scales,
             quant_calibration_samples=args.quant_calibration_samples,
             verbose=args.verbose,
@@ -419,7 +421,7 @@ def main() -> None:
                          default="fp32",
                          help="Engine precision (default: fp32)")
     build_p.add_argument("--quantize",
-                         choices=["fp8", "int8", "int4", "nvfp4", "w4a8"],
+                         choices=["fp8", "int8", "int8_sq", "int4", "int4_awq", "nvfp4", "w4a8"],
                          default=None,
                          help="Quantization format (default: none)")
     build_p.add_argument("--quant-scales",

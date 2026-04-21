@@ -265,6 +265,20 @@ def _resolve_bundle(
     precision = case.metadata.get("precision", "fp32")
     if precision != "fp32":
         cmd.extend(["--precision", precision])
+    quantization = case.metadata.get("quantization", {})
+    if isinstance(quantization, dict):
+        quant_format = quantization.get("format")
+        if quant_format and quant_format != "none":
+            cmd.extend(["--quantize", str(quant_format)])
+            scale_artifact = quantization.get("scale_artifact")
+            if scale_artifact:
+                cmd.extend(["--quant-scales", str(scale_artifact)])
+            calibration_samples = quantization.get("calibration_samples")
+            if calibration_samples is not None:
+                cmd.extend([
+                    "--quant-calibration-samples",
+                    str(calibration_samples),
+                ])
     if case.metadata.get("trust_remote_code"):
         cmd.append("--trust-remote-code")
     fp8_scales = case.metadata.get("fp8_scales")

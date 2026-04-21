@@ -421,6 +421,7 @@ def _build_metadata(manifest: dict) -> dict:
         "name", "hf_id", "model_id", "bundle", "family", "runtime_strategy",
         "task_strategy", "reference_backend", "oracle_level", "prompt",
         "test_prompt", "max_new_tokens", "max_cache_length", "precision",
+        "quantization",
         "logit_atol", "layer_atol", "trust_remote_code", "skip", "test_image",
         "test_input_audio", "speech_reference_tokens", "speech_test_max_frames",
         "speech_min_token_match", "speech_min_frame_exact", "speech_min_rms",
@@ -447,6 +448,9 @@ def _build_metadata(manifest: dict) -> dict:
     # the trtf-build CLI when building bundles.
     if "precision" in manifest:
         meta["precision"] = manifest["precision"]
+
+    if "quantization" in manifest:
+        meta["quantization"] = manifest["quantization"]
 
     # Propagate build_args so the orchestrator can select the correct backend
     # (e.g. --method torchtrt for torch-trt models vs raw TRT default).

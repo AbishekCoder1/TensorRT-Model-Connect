@@ -31,6 +31,20 @@ def _check_cuda(status):
         raise RuntimeError(f"CUDA error: {status}")
 
 
+def _trt_nptype_safe(dtype: trt.DataType):
+    """Resolve TRT dtype to a NumPy dtype, including BF16 fallback."""
+    try:
+        return trt.nptype(dtype)
+    except TypeError:
+        if dtype == trt.bfloat16:
+            return np.uint16
+        raise
+
+
+def _trt_itemsize(dtype: trt.DataType) -> int:
+    return np.dtype(_trt_nptype_safe(dtype)).itemsize
+
+
 class TrtRunner:
     """Device-resident TRT inference runner for debugging and diff testing.
 
@@ -65,7 +79,7 @@ class TrtRunner:
 
         # Detect cache element size from engine dtype (fp16=2, fp32=4)
         cache_dtype = self.engine.get_tensor_dtype("cache_k_0")
-        self._cache_elem_bytes = np.dtype(trt.nptype(cache_dtype)).itemsize
+        self._cache_elem_bytes = _trt_itemsize(cache_dtype)
 
         # Create CUDA stream
         err, self.stream = cudart.cudaStreamCreate()
@@ -182,7 +196,7 @@ class TrtRunner:
         for name in self._debug_output_names:
             shape = self._output_shapes[name]
             dtype_trt = self.engine.get_tensor_dtype(name)
-            dtype_np = trt.nptype(dtype_trt)
+            dtype_np = _trt_nptype_safe(dtype_trt)
             nbytes = int(np.prod(shape)) * np.dtype(dtype_np).itemsize
             err, d_ptr = cudart.cudaMalloc(nbytes)
             _check_cuda(err)
@@ -530,7 +544,7 @@ class MambaTrtRunner:
         for name in self._debug_output_names:
             shape = self._output_shapes[name]
             dtype_trt = self.engine.get_tensor_dtype(name)
-            dtype_np = trt.nptype(dtype_trt)
+            dtype_np = _trt_nptype_safe(dtype_trt)
             nbytes = int(np.prod(shape)) * np.dtype(dtype_np).itemsize
             err, d_ptr = cudart.cudaMalloc(nbytes)
             _check_cuda(err)
@@ -896,7 +910,7 @@ class WhisperTrtRunner:
         self.hidden_size = hidden_size
 
         cache_dtype = self.dec_engine.get_tensor_dtype("cache_k_0")
-        self._cache_elem_bytes = np.dtype(trt.nptype(cache_dtype)).itemsize
+        self._cache_elem_bytes = _trt_itemsize(cache_dtype)
 
         err, self.stream = cudart.cudaStreamCreate()
         _check_cuda(err)
@@ -1118,7 +1132,7 @@ class HybridTrtRunner:
             cache_shape = tuple(self.engine.get_tensor_shape("cache_k_0"))
             self.attention_size = cache_shape[1]
             cache_dtype = self.engine.get_tensor_dtype("cache_k_0")
-            self._cache_elem_bytes = np.dtype(trt.nptype(cache_dtype)).itemsize
+            self._cache_elem_bytes = _trt_itemsize(cache_dtype)
         else:
             self.attention_size = 0
             self._cache_elem_bytes = 4
@@ -1205,7 +1219,7 @@ class HybridTrtRunner:
         for name in self._debug_output_names:
             shape = self._output_shapes[name]
             dtype_trt = self.engine.get_tensor_dtype(name)
-            dtype_np = trt.nptype(dtype_trt)
+            dtype_np = _trt_nptype_safe(dtype_trt)
             nbytes = int(np.prod(shape)) * np.dtype(dtype_np).itemsize
             err, d_ptr = cudart.cudaMalloc(nbytes)
             _check_cuda(err)
@@ -1435,7 +1449,7 @@ class Seq2SeqTrtRunner:
         self.hidden_size = hidden_size
 
         cache_dtype = self.dec_engine.get_tensor_dtype("cache_k_0")
-        self._cache_elem_bytes = np.dtype(trt.nptype(cache_dtype)).itemsize
+        self._cache_elem_bytes = _trt_itemsize(cache_dtype)
 
         err, self.stream = cudart.cudaStreamCreate()
         _check_cuda(err)
@@ -1775,7 +1789,7 @@ class VisionTrtRunner:
             mode = self.engine.get_tensor_mode(name)
             shape = tuple(self.engine.get_tensor_shape(name))
             dtype_trt = self.engine.get_tensor_dtype(name)
-            dtype_np = trt.nptype(dtype_trt)
+            dtype_np = _trt_nptype_safe(dtype_trt)
             nbytes = int(np.prod(shape)) * np.dtype(dtype_np).itemsize
 
             err, d_ptr = cudart.cudaMalloc(nbytes)
@@ -2153,7 +2167,7 @@ class SegmentationTrtRunner:
             mode = self.engine.get_tensor_mode(name)
             shape = tuple(self.engine.get_tensor_shape(name))
             dtype_trt = self.engine.get_tensor_dtype(name)
-            dtype_np = trt.nptype(dtype_trt)
+            dtype_np = _trt_nptype_safe(dtype_trt)
             nbytes = int(np.prod(shape)) * np.dtype(dtype_np).itemsize
 
             err, d_ptr = cudart.cudaMalloc(nbytes)

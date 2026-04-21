@@ -84,6 +84,16 @@ def _np_to_trt_dtype(dtype: np.dtype):
     return trt.float32
 
 
+def _cast_output_dtype(
+    network: "trt.INetworkDefinition",
+    tensor: "trt.ITensor",
+    target_dtype: "trt.DataType",
+) -> "trt.ITensor":
+    if tensor.dtype == target_dtype:
+        return tensor
+    return network.add_cast(tensor, target_dtype).get_output(0)
+
+
 class FP8Format:
     """FP8 E4M3 per-tensor quantization.
 
@@ -110,7 +120,7 @@ class FP8Format:
         import tensorrt as trt
         from .. import graph_ops
 
-        out_trt_dtype = _np_to_trt_dtype(dtype)
+        out_trt_dtype = activation.dtype
 
         # Weight Q/DQ: constant -> quantize(FP8) -> dequantize(work_dtype)
         weight_const = graph_ops.add_constant(
@@ -138,7 +148,7 @@ class FP8Format:
         mm = network.add_matrix_multiply(
             dq_a.get_output(0), trt.MatrixOperation.NONE,
             dq_w.get_output(0), trt.MatrixOperation.NONE)
-        return mm.get_output(0)
+        return _cast_output_dtype(network, mm.get_output(0), out_trt_dtype)
 
     def wrap_conv2d(
         self,
@@ -158,7 +168,7 @@ class FP8Format:
         import tensorrt as trt
         from .. import graph_ops
 
-        out_trt_dtype = _np_to_trt_dtype(dtype)
+        out_trt_dtype = activation.dtype
 
         # Weight Q/DQ: constant -> quantize(FP8) -> dequantize(work_dtype)
         w_scale = np.array(
@@ -192,7 +202,7 @@ class FP8Format:
         conv.padding_nd = padding
         if groups > 1:
             conv.num_groups = groups
-        return conv.get_output(0)
+        return _cast_output_dtype(network, conv.get_output(0), out_trt_dtype)
 
 
 class INT8SmoothQuantFormat:
@@ -216,7 +226,7 @@ class INT8SmoothQuantFormat:
         import tensorrt as trt
         from .. import graph_ops
 
-        out_trt_dtype = _np_to_trt_dtype(dtype)
+        out_trt_dtype = activation.dtype
 
         # Weight Q/DQ: per-channel (axis=1 for [in, out] layout)
         weight_const = graph_ops.add_constant(
@@ -245,7 +255,7 @@ class INT8SmoothQuantFormat:
         mm = network.add_matrix_multiply(
             dq_a.get_output(0), trt.MatrixOperation.NONE,
             dq_w.get_output(0), trt.MatrixOperation.NONE)
-        return mm.get_output(0)
+        return _cast_output_dtype(network, mm.get_output(0), out_trt_dtype)
 
     def wrap_conv2d(
         self,
@@ -265,7 +275,7 @@ class INT8SmoothQuantFormat:
         import tensorrt as trt
         from .. import graph_ops
 
-        out_trt_dtype = _np_to_trt_dtype(dtype)
+        out_trt_dtype = activation.dtype
 
         # Weight Q/DQ: per-channel (axis=0 for conv [OC, IC, kH, kW])
         w_const = graph_ops.add_constant(
@@ -301,7 +311,7 @@ class INT8SmoothQuantFormat:
         conv.padding_nd = padding
         if groups > 1:
             conv.num_groups = groups
-        return conv.get_output(0)
+        return _cast_output_dtype(network, conv.get_output(0), out_trt_dtype)
 
 
 class INT4AWQFormat:
@@ -325,7 +335,7 @@ class INT4AWQFormat:
         import tensorrt as trt
         from .. import graph_ops
 
-        out_trt_dtype = _np_to_trt_dtype(dtype)
+        out_trt_dtype = activation.dtype
         block_size = scales.block_size or 128
 
         # Weight Q/DQ: INT4 with block quantization
@@ -344,7 +354,7 @@ class INT4AWQFormat:
         mm = network.add_matrix_multiply(
             activation, trt.MatrixOperation.NONE,
             dq_w.get_output(0), trt.MatrixOperation.NONE)
-        return mm.get_output(0)
+        return _cast_output_dtype(network, mm.get_output(0), out_trt_dtype)
 
     def wrap_conv2d(
         self,
@@ -364,7 +374,7 @@ class INT4AWQFormat:
         import tensorrt as trt
         from .. import graph_ops
 
-        out_trt_dtype = _np_to_trt_dtype(dtype)
+        out_trt_dtype = activation.dtype
         block_size = scales.block_size or 128
 
         # Weight Q/DQ: INT4 with block quantization
@@ -389,7 +399,7 @@ class INT4AWQFormat:
         conv.padding_nd = padding
         if groups > 1:
             conv.num_groups = groups
-        return conv.get_output(0)
+        return _cast_output_dtype(network, conv.get_output(0), out_trt_dtype)
 
 
 class NVFP4Format:
@@ -413,7 +423,7 @@ class NVFP4Format:
         import tensorrt as trt
         from .. import graph_ops
 
-        out_trt_dtype = _np_to_trt_dtype(dtype)
+        out_trt_dtype = activation.dtype
         block_size = scales.block_size or 16
 
         # Weight: static FP4 quantization with block shape
@@ -439,7 +449,7 @@ class NVFP4Format:
         mm = network.add_matrix_multiply(
             dq_a.get_output(0), trt.MatrixOperation.NONE,
             dq_w.get_output(0), trt.MatrixOperation.NONE)
-        return mm.get_output(0)
+        return _cast_output_dtype(network, mm.get_output(0), out_trt_dtype)
 
     def wrap_conv2d(
         self,
@@ -459,7 +469,7 @@ class NVFP4Format:
         import tensorrt as trt
         from .. import graph_ops
 
-        out_trt_dtype = _np_to_trt_dtype(dtype)
+        out_trt_dtype = activation.dtype
         block_size = scales.block_size or 16
 
         # Weight: static FP4 quantization with block shape
@@ -492,7 +502,7 @@ class NVFP4Format:
         conv.padding_nd = padding
         if groups > 1:
             conv.num_groups = groups
-        return conv.get_output(0)
+        return _cast_output_dtype(network, conv.get_output(0), out_trt_dtype)
 
 
 class W4A8Format:
@@ -516,7 +526,7 @@ class W4A8Format:
         import tensorrt as trt
         from .. import graph_ops
 
-        out_trt_dtype = _np_to_trt_dtype(dtype)
+        out_trt_dtype = activation.dtype
         block_size = scales.block_size or 128
 
         # Weight: INT4 block quantization
@@ -544,7 +554,7 @@ class W4A8Format:
         mm = network.add_matrix_multiply(
             dq_a.get_output(0), trt.MatrixOperation.NONE,
             dq_w.get_output(0), trt.MatrixOperation.NONE)
-        return mm.get_output(0)
+        return _cast_output_dtype(network, mm.get_output(0), out_trt_dtype)
 
     def wrap_conv2d(
         self,
@@ -564,7 +574,7 @@ class W4A8Format:
         import tensorrt as trt
         from .. import graph_ops
 
-        out_trt_dtype = _np_to_trt_dtype(dtype)
+        out_trt_dtype = activation.dtype
         block_size = scales.block_size or 128
 
         # Weight: INT4 block quantization
@@ -599,4 +609,4 @@ class W4A8Format:
         conv.padding_nd = padding
         if groups > 1:
             conv.num_groups = groups
-        return conv.get_output(0)
+        return _cast_output_dtype(network, conv.get_output(0), out_trt_dtype)

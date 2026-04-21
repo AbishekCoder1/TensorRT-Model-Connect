@@ -20,6 +20,17 @@ def _np_to_trt_dtype(dtype: np.dtype):
         return trt.float16
     return trt.float32
 
+
+def _cast_back_to_trt_dtype(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    target_dtype: trt.DataType,
+) -> trt.ITensor:
+    """Cast a tensor back to the original TRT runtime dtype after FP32 compute."""
+    if tensor.dtype == target_dtype:
+        return tensor
+    return network.add_cast(tensor, target_dtype).get_output(0)
+
 def layer_tensor_name(stem: str, layer: int) -> str:
     return f"{stem}_{layer}"
 
@@ -46,11 +57,12 @@ def add_matmul_rhs_constant(
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
     rhs = add_constant(network, (lhs_width, rhs_width), rhs_weights, dtype=dtype)
+    rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,
         rhs, trt.MatrixOperation.NONE,
     )
-    return mm.get_output(0)
+    return _cast_back_to_trt_dtype(network, mm.get_output(0), lhs.dtype)
 
 
 def add_bias_sum(
@@ -62,8 +74,9 @@ def add_bias_sum(
 ) -> trt.ITensor:
     """Element-wise add a [1, width] bias."""
     bias_t = add_constant(network, (1, width), bias, dtype=dtype)
+    bias_t = _cast_back_to_trt_dtype(network, bias_t, inp.dtype)
     s = network.add_elementwise(inp, bias_t, trt.ElementWiseOperation.SUM)
-    return s.get_output(0)
+    return _cast_back_to_trt_dtype(network, s.get_output(0), inp.dtype)
 
 
 def add_rms_norm(
@@ -80,6 +93,7 @@ def add_rms_norm(
     norm computation for numerical stability, then casts back.
     """
     need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
         eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
@@ -97,7 +111,7 @@ def add_rms_norm(
         normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
     result = scaled.get_output(0)
     if need_cast:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
     return result
 
 
@@ -116,6 +130,7 @@ def add_rms_norm_per_head(
     norm computation for numerical stability, then casts back.
     """
     need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
     reshape_in = network.add_shuffle(inp)
     reshape_in.reshape_dims = (num_heads, head_dim)
 
@@ -138,7 +153,7 @@ def add_rms_norm_per_head(
 
     result = scaled.get_output(0)
     if need_cast:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
     reshape_out = network.add_shuffle(result)
     reshape_out.reshape_dims = (1, num_heads * head_dim)
     return reshape_out.get_output(0)
@@ -159,6 +174,7 @@ def add_l2_norm(
     norm computation for numerical stability, then casts back.
     """
     need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
     sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
@@ -177,7 +193,7 @@ def add_l2_norm(
         inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
     result = normalized.get_output(0)
     if need_cast:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
     return result
 
 
@@ -375,6 +391,7 @@ def add_layer_norm(
     norm computation for numerical stability, then casts back.
     """
     need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
         eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
@@ -408,7 +425,7 @@ def add_layer_norm(
         scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
     result = result.get_output(0)
     if need_cast:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
     return result
 
 
@@ -537,6 +554,9 @@ def add_apply_rope(
     """Apply rotary position embedding: x*cos + rotate_half(x)*sin."""
     cos_gather = network.add_gather(cos_table, position_id, 0)
     sin_gather = network.add_gather(sin_table, position_id, 0)
+    cos = _cast_back_to_trt_dtype(network, cos_gather.get_output(0), inp.dtype)
+    sin = _cast_back_to_trt_dtype(network, sin_gather.get_output(0), inp.dtype)
+    rotate_half_matrix = _cast_back_to_trt_dtype(network, rotate_half_matrix, inp.dtype)
 
     rotated = network.add_matrix_multiply(
         inp, trt.MatrixOperation.NONE,
@@ -544,14 +564,14 @@ def add_apply_rope(
     )
 
     x_cos = network.add_elementwise(
-        inp, cos_gather.get_output(0), trt.ElementWiseOperation.PROD)
+        inp, cos, trt.ElementWiseOperation.PROD)
     rot_sin = network.add_elementwise(
-        rotated.get_output(0), sin_gather.get_output(0),
+        rotated.get_output(0), sin,
         trt.ElementWiseOperation.PROD)
     result = network.add_elementwise(
         x_cos.get_output(0), rot_sin.get_output(0),
         trt.ElementWiseOperation.SUM)
-    return result.get_output(0)
+    return _cast_back_to_trt_dtype(network, result.get_output(0), inp.dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -621,13 +641,14 @@ def add_self_attention_block(
 
     # Softmax over last dim — FP32 precision boundary for numerical stability
     softmax_inp = scaled.get_output(0)
+    softmax_output_dtype = softmax_inp.dtype
     if dtype != np.float32:
         softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
     softmax = network.add_softmax(softmax_inp)
     softmax.axes = 1 << 2  # last dim
     attn_weights = softmax.get_output(0)
     if dtype != np.float32:
-        attn_weights = network.add_cast(attn_weights, _np_to_trt_dtype(dtype)).get_output(0)
+        attn_weights = _cast_back_to_trt_dtype(network, attn_weights, softmax_output_dtype)
 
     # Context: [num_heads, seq, head_dim]
     context = network.add_matrix_multiply(
@@ -746,13 +767,14 @@ def add_self_attention_block_with_rope(
 
     # Softmax over last dim — FP32 precision boundary for numerical stability
     softmax_inp = scaled.get_output(0)
+    softmax_output_dtype = softmax_inp.dtype
     if dtype != np.float32:
         softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
     softmax = network.add_softmax(softmax_inp)
     softmax.axes = 1 << 2  # last dim
     attn_weights = softmax.get_output(0)
     if dtype != np.float32:
-        attn_weights = network.add_cast(attn_weights, _np_to_trt_dtype(dtype)).get_output(0)
+        attn_weights = _cast_back_to_trt_dtype(network, attn_weights, softmax_output_dtype)
 
     # Context: [num_heads, seq, head_dim]
     context = network.add_matrix_multiply(
@@ -875,13 +897,14 @@ def add_windowed_self_attention_with_rope(
 
     # Softmax — FP32 precision boundary for numerical stability
     softmax_inp = scaled.get_output(0)
+    softmax_output_dtype = softmax_inp.dtype
     if dtype != np.float32:
         softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
     softmax = network.add_softmax(softmax_inp)
     softmax.axes = 1 << 2
     attn_weights = softmax.get_output(0)
     if dtype != np.float32:
-        attn_weights = network.add_cast(attn_weights, _np_to_trt_dtype(dtype)).get_output(0)
+        attn_weights = _cast_back_to_trt_dtype(network, attn_weights, softmax_output_dtype)
 
     context = network.add_matrix_multiply(
         attn_weights, trt.MatrixOperation.NONE,
@@ -1040,6 +1063,7 @@ def add_group_norm(
     need_cast = (dtype != np.float32)
     ndims = len(inp.shape)
     group_size = num_channels // num_groups
+    output_dtype = inp.dtype
 
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
@@ -1142,7 +1166,7 @@ def add_group_norm(
     result = network.add_elementwise(
         scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM).get_output(0)
     if need_cast:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
     return result
 
 
@@ -1429,6 +1453,7 @@ def add_l2_channel_norm(
     norm computation for numerical stability, then casts back.
     """
     need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
     # L2 norm over channel dim: ||x||_2 = sqrt(sum(x^2, dim=1))
@@ -1458,7 +1483,7 @@ def add_l2_channel_norm(
         normalized.get_output(0), scale_t,
         trt.ElementWiseOperation.PROD).get_output(0)
     if need_cast:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
     return result
 
 
@@ -1555,6 +1580,7 @@ def add_adaptive_layernorm(
     norm computation for numerical stability, then casts back.
     """
     need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
         scale = network.add_cast(scale, trt.float32).get_output(0)
@@ -1591,7 +1617,7 @@ def add_adaptive_layernorm(
         scaled.get_output(0), shift,
         trt.ElementWiseOperation.SUM).get_output(0)
     if need_cast:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
     return result
 
 
@@ -1662,13 +1688,14 @@ def add_cross_attention(
 
     # Softmax — FP32 precision boundary for numerical stability
     softmax_inp = scaled.get_output(0)
+    softmax_output_dtype = softmax_inp.dtype
     if dtype != np.float32:
         softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
     softmax = network.add_softmax(softmax_inp)
     softmax.axes = 1 << 2
     attn_weights = softmax.get_output(0)
     if dtype != np.float32:
-        attn_weights = network.add_cast(attn_weights, _np_to_trt_dtype(dtype)).get_output(0)
+        attn_weights = _cast_back_to_trt_dtype(network, attn_weights, softmax_output_dtype)
 
     # Context: softmax @ V
     context = network.add_matrix_multiply(
@@ -1806,6 +1833,7 @@ def add_batch_norm_2d(
     norm computation for numerical stability, then casts back.
     """
     need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
     # Fuse into scale + shift
@@ -1825,7 +1853,7 @@ def add_batch_norm_2d(
         scaled.get_output(0), shift_t,
         trt.ElementWiseOperation.SUM).get_output(0)
     if need_cast:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
     return result
 
 
@@ -2142,6 +2170,7 @@ def add_layer_norm_no_affine(
     norm computation for numerical stability, then casts back.
     """
     need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
         eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
@@ -2163,7 +2192,7 @@ def add_layer_norm_no_affine(
         trt.ElementWiseOperation.PROD)
     result = normalized.get_output(0)
     if need_cast:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
     return result
 
 
@@ -2217,7 +2246,7 @@ def add_layer_norm_native(
     norm.compute_precision = trt.float32
     result = norm.get_output(0)
     if dtype != np.float32:
-        result = network.add_cast(result, _np_to_trt_dtype(dtype)).get_output(0)
+        result = _cast_back_to_trt_dtype(network, result, inp.dtype)
     return result
 
 

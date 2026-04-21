@@ -154,6 +154,11 @@ def build_standard_decoder_engine(
         mask_cast = network.add_cast(attention_mask, work_trt_dtype)
         attention_mask = mask_cast.get_output(0)
 
+    def _cast_work_dtype(tensor: trt.ITensor) -> trt.ITensor:
+        if tensor.dtype == work_trt_dtype:
+            return tensor
+        return network.add_cast(tensor, work_trt_dtype).get_output(0)
+
     # ---------------------------------------------------------------
     # Shared constants
     # ---------------------------------------------------------------
@@ -189,12 +194,15 @@ def build_standard_decoder_engine(
         cos_tensor = graph_ops.add_constant(
             network, (attention_window, attention_size), cos_table_np,
             dtype=work_np_dtype)
+        cos_tensor = _cast_work_dtype(cos_tensor)
         sin_tensor = graph_ops.add_constant(
             network, (attention_window, attention_size), sin_table_np,
             dtype=work_np_dtype)
+        sin_tensor = _cast_work_dtype(sin_tensor)
         rotate_half_tensor = graph_ops.add_constant(
             network, (attention_size, attention_size), rotate_half_np,
             dtype=work_np_dtype)
+        rotate_half_tensor = _cast_work_dtype(rotate_half_tensor)
 
         # Half-dim tables for native IRotaryEmbeddingLayer.
         # Shape [attention_window, rotary_ndims // 2]; TRT broadcasts across heads.
@@ -210,8 +218,10 @@ def build_standard_decoder_engine(
                 partial_rotary_factor, interleaved=interleaved_rope)
             cos_half_tensor = graph_ops.add_constant(
                 network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
+            cos_half_tensor = _cast_work_dtype(cos_half_tensor)
             sin_half_tensor = graph_ops.add_constant(
                 network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
+            sin_half_tensor = _cast_work_dtype(sin_half_tensor)
     elif position_type == "learned":
         pos_embed_np = weights["position_embedding"]
         position_embed_table = graph_ops.add_constant(
@@ -280,6 +290,12 @@ def build_standard_decoder_engine(
             hidden_state, pos_gather.get_output(0),
             trt.ElementWiseOperation.SUM)
         hidden_state = pos_add.get_output(0)
+
+    # In BF16 mode many embedding/position constants are still materialized from
+    # float16 storage. Normalize the decoder's main hidden stream back to the
+    # requested runtime dtype before entering the layer stack.
+    if hidden_state.dtype != work_trt_dtype:
+        hidden_state = network.add_cast(hidden_state, work_trt_dtype).get_output(0)
 
     # Optional embedding LayerNorm (e.g. BLOOM) — use native INormalizationLayer
     embed_norm = weights.get("embedding_norm")

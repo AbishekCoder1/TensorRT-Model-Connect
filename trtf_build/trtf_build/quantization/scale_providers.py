@@ -7,11 +7,13 @@ pre-computed JSON files or extracting from pre-quantized checkpoints.
 
 from __future__ import annotations
 
-import json
 import logging
+import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from ..fp8_calibrate import extract_scales_from_state_dict
+from .adapters import AutoCausalLMCalibrationAdapter, CalibrationAdapter
 from .formats import QuantFormat
 from .scales import LayerScales, QuantScaleMap
 
@@ -19,6 +21,17 @@ if TYPE_CHECKING:
     from ..config import ModelConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _matches_exclude_pattern(weight_name: str, patterns: list[str]) -> bool:
+    for pattern in patterns:
+        if fnmatch.fnmatch(weight_name, pattern):
+            return True
+        if "/" in weight_name:
+            _, suffix = weight_name.split("/", 1)
+            if fnmatch.fnmatch(suffix, pattern):
+                return True
+    return False
 
 
 class ScaleProvider(Protocol):
@@ -30,6 +43,7 @@ class ScaleProvider(Protocol):
         config: ModelConfig,
         quant_format: QuantFormat,
         exclude_patterns: list[str],
+        adapter: CalibrationAdapter | None = None,
     ) -> QuantScaleMap:
         """Return per-layer scales for the given format."""
         ...
@@ -52,6 +66,7 @@ class PrecomputedJsonProvider:
         config: ModelConfig,
         quant_format: QuantFormat,
         exclude_patterns: list[str],
+        adapter: CalibrationAdapter | None = None,
     ) -> QuantScaleMap:
         logger.info("Loading pre-computed scales from %s", self.json_path)
         return QuantScaleMap.load(self.json_path)
@@ -60,9 +75,8 @@ class PrecomputedJsonProvider:
 class ModelOptCalibrationProvider:
     """Run ModelOpt PTQ calibration to compute scales.
 
-    Works for ANY model — ModelOpt operates at the nn.Linear level and
-    does not require model-specific recipes. Generic configs like
-    FP8_DEFAULT_CFG, INT8_SMOOTHQUANT_CFG, INT4_AWQ_CFG work universally.
+    ModelOpt format configs are shared, but model loading and calibration
+    batches are delegated through a family-specific calibration adapter.
     """
 
     # Map our format names to ModelOpt config names
@@ -97,6 +111,7 @@ class ModelOptCalibrationProvider:
         config: ModelConfig,
         quant_format: QuantFormat,
         exclude_patterns: list[str],
+        adapter: CalibrationAdapter | None = None,
     ) -> QuantScaleMap:
         try:
             import modelopt.torch.quantization as mtq
@@ -117,24 +132,20 @@ class ModelOptCalibrationProvider:
             mtq_config_name, self.num_samples)
 
         import re
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        model = AutoModelForCausalLM.from_pretrained(
-            model_dir, torch_dtype=torch.float16, device_map="auto")
-        tokenizer = AutoTokenizer.from_pretrained(model_dir)
-
-        # Build calibration data
-        prompts = self.calibration_prompts or self._default_prompts()
-        calib_ids = [
-            tokenizer(p, return_tensors="pt", truncation=True,
-                      max_length=256).input_ids.to(model.device)
-            for p in prompts[:self.num_samples]
-        ]
+        adapter = adapter or AutoCausalLMCalibrationAdapter()
+        model, aux = adapter.load_calibration_model(model_dir, config)
 
         def forward_loop(m):
-            for ids in calib_ids:
-                m(ids)
+            for batch in adapter.iter_calibration_batches(
+                m,
+                aux,
+                model_dir=model_dir,
+                config=config,
+                num_samples=self.num_samples,
+                calibration_prompts=self.calibration_prompts,
+            ):
+                adapter.run_calibration_batch(m, batch)
 
         # Disable quantization on excluded layers
         exclude_re = re.compile("|".join(
@@ -151,54 +162,42 @@ class ModelOptCalibrationProvider:
 
         # Extract scales from state dict
         maxbound = self._MAXBOUND.get(quant_format.name, 448.0)
-        return self._extract_scales(
-            quantized.state_dict(), exclude_re, maxbound)
+        return self._build_scale_map(
+            quantized.state_dict(),
+            adapter=adapter,
+            exclude_re=exclude_re,
+            exclude_patterns=exclude_patterns,
+            maxbound=maxbound,
+        )
 
-    def _extract_scales(
+    def _build_scale_map(
         self,
         state_dict: dict,
+        *,
+        adapter: CalibrationAdapter,
         exclude_re,
+        exclude_patterns: list[str],
         maxbound: float,
     ) -> QuantScaleMap:
-        """Convert ModelOpt amax values to scales."""
-        import re
-
-        amax_entries: dict[str, dict[str, float]] = {}
-        for key, val in state_dict.items():
-            if "_quantizer._amax" not in key:
-                continue
-            # e.g., "model.layers.0.self_attn.q_proj.input_quantizer._amax"
-            layer_name = key.rsplit(".", 2)[0]  # strip ".XXX_quantizer._amax"
-            quant_type = "input" if "input_quantizer" in key else "weight"
-            amax = float(val.max())
-            if layer_name not in amax_entries:
-                amax_entries[layer_name] = {}
-            amax_entries[layer_name][f"{quant_type}_scale"] = amax / maxbound
-
-        # Convert to our weight naming convention
+        raw_scales = extract_scales_from_state_dict(
+            state_dict,
+            exclude_pattern=exclude_re,
+            maxbound=maxbound,
+        )
         scales: dict[str, LayerScales] = {}
-        for layer_name, scale_dict in amax_entries.items():
-            if exclude_re and exclude_re.search(layer_name):
+        for layer_name, scale_dict in raw_scales.items():
+            mapped = adapter.map_layer_name(layer_name)
+            if mapped is None:
                 continue
-            if "input_scale" in scale_dict and "weight_scale" in scale_dict:
-                scales[layer_name] = LayerScales(
-                    input_scale=scale_dict["input_scale"],
-                    weight_scale=scale_dict["weight_scale"],
-                )
+            if _matches_exclude_pattern(mapped, exclude_patterns):
+                continue
+            scales[mapped] = LayerScales(
+                input_scale=scale_dict["input_scale"],
+                weight_scale=scale_dict["weight_scale"],
+            )
 
         logger.info("Extracted scales for %d layers", len(scales))
         return QuantScaleMap(scales=scales)
-
-    @staticmethod
-    def _default_prompts() -> list[str]:
-        """Small default calibration set for decoder models."""
-        return [
-            "The quick brown fox jumps over the lazy dog.",
-            "In a recent study, researchers found that",
-            "The capital of France is Paris, which is known for",
-            "Machine learning models can be trained using",
-            "Once upon a time in a land far away,",
-        ] * 100  # repeat to get 500 samples
 
 
 class DynamicQuantizationProvider:
@@ -214,6 +213,7 @@ class DynamicQuantizationProvider:
         config: ModelConfig,
         quant_format: QuantFormat,
         exclude_patterns: list[str],
+        adapter: CalibrationAdapter | None = None,
     ) -> QuantScaleMap:
         logger.info("Using dynamic quantization (runtime scales)")
         return QuantScaleMap(scales={}, dynamic=True)
@@ -232,6 +232,7 @@ class PreQuantizedCheckpointProvider:
         config: ModelConfig,
         quant_format: QuantFormat,
         exclude_patterns: list[str],
+        adapter: CalibrationAdapter | None = None,
     ) -> QuantScaleMap:
         quant_config = config.raw.get("quantization_config", {})
         quant_method = quant_config.get("quant_method", "")

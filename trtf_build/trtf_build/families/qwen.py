@@ -4,11 +4,47 @@ from __future__ import annotations
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict, load_standard_weights
+from ..quantization.adapters import StandardDecoderCalibrationAdapter
 from ..standard_decoder_builder import build_standard_decoder_engine
 
 
 class QwenPlugin:
     name = "qwen"
+
+    _CALIBRATION_PROMPTS = [
+        "What is the capital of France? Answer in one sentence.",
+        "Summarize why photosynthesis is important for life on Earth.",
+        "Translate 'Good morning, how are you?' into Chinese.",
+        "Write a Python function that checks whether a string is a palindrome.",
+        "Explain the difference between RAM and storage in simple terms.",
+        "What causes the seasons to change on Earth?",
+        "Give three bullet points about the benefits of exercise.",
+        "Write a short email asking to reschedule a meeting.",
+        "What is the derivative of x^2 + 3x + 1?",
+        "Solve this: If a train travels 60 miles in 1.5 hours, what is its average speed?",
+        "Describe the plot of Romeo and Juliet in three sentences.",
+        "What is the purpose of unit testing in software engineering?",
+        "List five countries in South America.",
+        "Explain what a GPU does in machine learning.",
+        "Write a haiku about the ocean.",
+        "What is the boiling point of water at sea level?",
+        "Compare democracy and monarchy in two sentences.",
+        "Generate a SQL query to select all users created in the last 7 days.",
+        "What is Newton's second law?",
+        "Describe how to make a peanut butter sandwich.",
+        "Why do programmers use version control?",
+        "Name three applications of linear algebra.",
+        "What is the tallest mountain in the world?",
+        "Explain recursion to a beginner.",
+        "What is the difference between a list and a tuple in Python?",
+        "Write a short product description for wireless headphones.",
+        "How does a solar panel generate electricity?",
+        "What are the main themes of 1984 by George Orwell?",
+        "Give a one-paragraph summary of the water cycle.",
+        "Write a polite response declining an invitation.",
+        "What is the role of the mitochondria in a cell?",
+        "Convert the fraction 3/4 into a percentage.",
+    ]
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
@@ -36,6 +72,26 @@ class QwenPlugin:
         return build_standard_decoder_engine(
             config, weights, max_cache_length, precision=precision,
             quant_ctx=quant_ctx, verbose=verbose)
+
+    def calibration_data(self, format_name: str) -> list[str] | None:
+        return list(self._CALIBRATION_PROMPTS)
+
+    def quant_exclude_patterns(self, format_name: str) -> list[str]:
+        patterns = [
+            "embedding", "final_norm", "w_out", "lm_head",
+            "*.input_norm", "*.post_attn_norm", "*_norm*",
+        ]
+        if format_name == "fp8":
+            patterns.extend([
+                "layer.*.w_o",
+                "layer.*.w_gate",
+                "layer.*.w_up",
+                "layer.*.w_down",
+            ])
+        return patterns
+
+    def quant_adapter(self, format_name: str) -> StandardDecoderCalibrationAdapter:
+        return StandardDecoderCalibrationAdapter(family=self.name)
 
 
 plugin = QwenPlugin()

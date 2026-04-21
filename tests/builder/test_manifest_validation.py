@@ -188,3 +188,23 @@ class TestManifestValidation:
         assert case.execution_profiles["build"] == "chronos"
         assert case.execution_profiles["runtime"] == "custom-runtime"
         assert case.execution_profiles["reference"] == "chronos"
+
+    def test_quantization_block_propagates_to_metadata(self, tmp_path):
+        """Quantization manifests should preserve the generic quant block."""
+        path = self._write_manifest(tmp_path, {
+            "name": "qwen3-test-fp8",
+            "hf_id": "Qwen/Qwen3-0.6B",
+            "family": "qwen",
+            "runtime_strategy": "decoder_kv_cache",
+            "precision": "bf16",
+            "quantization": {
+                "format": "fp8",
+                "scale_source": "precomputed",
+                "scale_artifact": "scales/qwen3-fp8.json",
+                "calibration_samples": 16,
+            },
+        })
+        case = load_manifest(path)
+        assert case.metadata["precision"] == "bf16"
+        assert case.metadata["quantization"]["format"] == "fp8"
+        assert case.metadata["quantization"]["scale_artifact"] == "scales/qwen3-fp8.json"

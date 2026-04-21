@@ -412,19 +412,29 @@ def build_bundle(
 
     # 3b. Build quantization context (if requested)
     quant_ctx = None
+    quant_plan = None
     if quantize:
-        from .quantization import build_quant_context
-        exclude_patterns = (plugin.quant_exclude_patterns(quantize)
+        from .quantization import QuantPlan, build_quant_context
+        quant_plan = QuantPlan.from_build_args(
+            precision=precision,
+            quantize=quantize,
+            quant_scales=quant_scales,
+            quant_calibration_samples=quant_calibration_samples,
+        )
+        exclude_patterns = (plugin.quant_exclude_patterns(quant_plan.quant_format)
                             if hasattr(plugin, 'quant_exclude_patterns') else None)
         quant_ctx = build_quant_context(
-            format_name=quantize,
+            format_name=quant_plan.quant_format,
             model_dir=str(model_dir_path),
             config=config,
             exclude_patterns=exclude_patterns,
             scales_json=quant_scales,
             num_calibration_samples=quant_calibration_samples,
+            plugin=plugin,
+            quant_plan=quant_plan,
         )
-        print(f"[trtf-build] Quantization: {quantize}", file=sys.stderr)
+        print(f"[trtf-build] Quantization: {quant_plan.quant_format}",
+              file=sys.stderr)
 
     # 4. Build TRT engine
     print(f"[trtf-build] Building TRT engine (cache={max_cache_length}) ...",
@@ -488,7 +498,7 @@ def build_bundle(
         max_cache_length=max_cache_length,
         runtime_strategy=getattr(plugin, "runtime_strategy", ""),
         precision=precision,
-        quantization=quantize or "none",
+        quantization=(quant_plan.quant_format if quant_plan else "none"),
         tokenizer_add_special_tokens=tokenizer_add_special_tokens,
     )
 
@@ -529,8 +539,8 @@ def build_bundle(
                 if runtime_strategy:
                     cfg_dict["runtime_strategy"] = runtime_strategy
                 cfg_dict["precision"] = precision
-                if quantize:
-                    cfg_dict["quantization"] = {"format": quantize}
+                if quant_plan is not None:
+                    cfg_dict["quantization"] = quant_plan.as_config_dict()
                 embed_input = getattr(plugin, "embed_input", False)
                 if embed_input:
                     cfg_dict["embed_input"] = True

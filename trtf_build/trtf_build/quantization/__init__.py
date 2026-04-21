@@ -11,12 +11,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from .adapters import resolve_calibration_adapter
 from .context import QuantContext
 from .formats import QuantFormat
+from .plan import QuantPlan, canonicalize_quant_format
 from .profile import QuantProfile
 from .registry import get_format, list_formats, register_format
 from .scales import LayerScales, QuantScaleMap
-from .scale_providers import (
+from .scale_providers import (  # noqa: F401
     DynamicQuantizationProvider,
     ModelOptCalibrationProvider,
     PrecomputedJsonProvider,
@@ -31,10 +33,12 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "QuantContext",
     "QuantFormat",
+    "QuantPlan",
     "QuantProfile",
     "QuantScaleMap",
     "LayerScales",
     "build_quant_context",
+    "canonicalize_quant_format",
     "get_format",
     "list_formats",
     "register_format",
@@ -42,7 +46,7 @@ __all__ = [
 
 
 def build_quant_context(
-    format_name: str,
+    format_name: str | None,
     model_dir: str,
     config: ModelConfig,
     exclude_patterns: list[str] | None = None,
@@ -50,6 +54,8 @@ def build_quant_context(
     scales_json: str | None = None,
     num_calibration_samples: int = 512,
     calibration_prompts: list[str] | None = None,
+    plugin: object | None = None,
+    quant_plan: QuantPlan | None = None,
 ) -> QuantContext:
     """Construct a QuantContext from high-level parameters.
 
@@ -68,26 +74,41 @@ def build_quant_context(
     Returns:
         QuantContext ready to thread through graph_blocks.
     """
-    fmt = get_format(format_name)
+    plan = quant_plan or QuantPlan.from_build_args(
+        precision="fp32",
+        quantize=format_name,
+        quant_scales=scales_json,
+        quant_calibration_samples=num_calibration_samples,
+    )
+    if not plan.enabled or plan.quant_format is None:
+        raise ValueError("build_quant_context requires a quantized plan")
+
+    fmt = get_format(plan.quant_format)
 
     if exclude_patterns is None:
         exclude_patterns = _default_exclude_patterns()
+    if calibration_prompts is None and plugin is not None:
+        calibration_data = getattr(plugin, "calibration_data", None)
+        if callable(calibration_data):
+            calibration_prompts = calibration_data(plan.quant_format)
+
+    adapter = resolve_calibration_adapter(plugin, plan.quant_format)
 
     # Select scale provider
-    if scales_json:
-        provider = PrecomputedJsonProvider(scales_json)
-    elif format_name == "nvfp4":
+    if plan.scale_source == "precomputed" and plan.scale_artifact:
+        provider = PrecomputedJsonProvider(plan.scale_artifact)
+    elif plan.scale_source == "dynamic":
         # NVFP4 uses dynamic quantization (runtime scales)
         provider = DynamicQuantizationProvider()
     else:
         # Auto-calibrate with ModelOpt
         provider = ModelOptCalibrationProvider(
-            num_samples=num_calibration_samples,
+            num_samples=plan.calibration_samples,
             calibration_prompts=calibration_prompts,
         )
 
     scale_map = provider.acquire_scales(
-        model_dir, config, fmt, exclude_patterns)
+        model_dir, config, fmt, exclude_patterns, adapter=adapter)
 
     profile = QuantProfile(
         format=fmt,
@@ -98,7 +119,7 @@ def build_quant_context(
     logger.info(
         "Built quantization context: format=%s, %d layers quantized, "
         "%d excluded patterns",
-        format_name, len(scale_map.scales), len(exclude_patterns))
+        plan.quant_format, len(scale_map.scales), len(exclude_patterns))
 
     return QuantContext(profile=profile)
 

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-import numpy as np
-
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict
 
 if TYPE_CHECKING:
     from ..quantization.context import QuantContext
+    from ..quantization.adapters import CalibrationAdapter
 
 
 class FamilyPlugin(Protocol):
@@ -62,6 +61,10 @@ class FamilyPlugin(Protocol):
 
     def calibration_data(self, format_name: str) -> list[str] | None:
         """Calibration prompts. None = default dataset."""
+        return None
+
+    def quant_adapter(self, format_name: str) -> CalibrationAdapter | None:
+        """Return a family-specific calibration adapter when needed."""
         return None
 
     # ------------------------------------------------------------------

@@ -13,6 +13,15 @@ from .formats import QuantFormat
 from .scales import QuantScaleMap
 
 
+def _matches_exclude_pattern(weight_name: str, pattern: str) -> bool:
+    if fnmatch.fnmatch(weight_name, pattern):
+        return True
+    if "/" in weight_name:
+        _, suffix = weight_name.split("/", 1)
+        return fnmatch.fnmatch(suffix, pattern)
+    return False
+
+
 @dataclass
 class QuantProfile:
     """Complete quantization configuration for one model build."""
@@ -29,8 +38,8 @@ class QuantProfile:
         2. It has scales in the scale_map, OR the scale_map is dynamic.
         """
         for pattern in self.exclude_patterns:
-            if fnmatch.fnmatch(weight_name, pattern):
+            if _matches_exclude_pattern(weight_name, pattern):
                 return False
         if self.scale_map.dynamic:
             return True
-        return weight_name in self.scale_map.scales
+        return self.scale_map.get(weight_name) is not None

@@ -10,7 +10,9 @@ import numpy as np
 import pytest
 
 from trtf_build.quantization import get_format, list_formats, QuantScaleMap, LayerScales
+from trtf_build.quantization.plan import QuantPlan, canonicalize_quant_format
 from trtf_build.quantization.formats import QuantFormat
+from trtf_build.quantization.profile import QuantProfile
 
 
 class TestFormatRegistry:
@@ -47,6 +49,41 @@ class TestScaleMapJsonRoundTrip:
         m = QuantScaleMap(scales={}, dynamic=True)
         restored = QuantScaleMap.from_json(m.to_json())
         assert restored.dynamic is True
+
+    def test_family_scoped_keys_resolve_by_suffix(self):
+        m = QuantScaleMap(scales={
+            "qwen/layer.0.w_q": LayerScales(input_scale=0.25, weight_scale=0.5),
+        })
+        entry = m.get("layer.0.w_q")
+        assert entry is not None
+        assert abs(entry.input_scale - 0.25) < 1e-6
+
+
+class TestQuantPlan:
+    def test_aliases_canonicalize(self):
+        assert canonicalize_quant_format("int8") == "int8_sq"
+        assert canonicalize_quant_format("int4") == "int4_awq"
+        assert canonicalize_quant_format("fp8") == "fp8"
+
+    def test_plan_infers_scale_source(self):
+        plan = QuantPlan.from_build_args(
+            precision="bf16",
+            quantize="int8",
+            quant_scales=None,
+            quant_calibration_samples=32,
+        )
+        assert plan.quant_format == "int8_sq"
+        assert plan.scale_source == "modelopt"
+        assert plan.calibration_samples == 32
+
+    def test_plan_uses_precomputed_source(self):
+        plan = QuantPlan.from_build_args(
+            precision="fp16",
+            quantize="fp8",
+            quant_scales="/tmp/scales.json",
+        )
+        assert plan.scale_source == "precomputed"
+        assert plan.scale_artifact == "/tmp/scales.json"
 
 
 class TestQuantFormatProtocol:
@@ -87,3 +124,83 @@ class TestPreQuantizedCheckpointProvider:
         result = provider.acquire_scales(str(tmp_path), config, get_format("int4_awq"), [])
         assert isinstance(result, QuantScaleMap)
         assert len(result.scales) == 0  # no safetensors files present
+
+
+class _FakeAdapter:
+    def map_layer_name(self, layer_name: str) -> str | None:
+        if layer_name == "skip.this":
+            return None
+        return f"qwen/{layer_name}"
+
+
+class TestModelOptScaleMapping:
+    def test_family_adapter_maps_layer_names(self):
+        from trtf_build.quantization.scale_providers import ModelOptCalibrationProvider
+
+        provider = ModelOptCalibrationProvider()
+        state_dict = {
+            "layer.0.w_q.input_quantizer._amax": np.array(44.8, dtype=np.float32),
+            "layer.0.w_q.weight_quantizer._amax": np.array(22.4, dtype=np.float32),
+            "skip.this.input_quantizer._amax": np.array(1.0, dtype=np.float32),
+            "skip.this.weight_quantizer._amax": np.array(1.0, dtype=np.float32),
+        }
+
+        scale_map = provider._build_scale_map(
+            state_dict,
+            adapter=_FakeAdapter(),
+            exclude_re=None,
+            exclude_patterns=[],
+            maxbound=448.0,
+        )
+
+        assert "qwen/layer.0.w_q" in scale_map.scales
+        assert "qwen/skip.this" not in scale_map.scales
+        assert abs(scale_map.scales["qwen/layer.0.w_q"].input_scale - 0.1) < 1e-6
+
+    def test_family_adapter_exclude_patterns_apply_after_mapping(self):
+        from trtf_build.quantization.scale_providers import ModelOptCalibrationProvider
+
+        provider = ModelOptCalibrationProvider()
+        state_dict = {
+            "model.layers.0.self_attn.q_proj.input_quantizer._amax": np.array(44.8, dtype=np.float32),
+            "model.layers.0.self_attn.q_proj.weight_quantizer._amax": np.array(22.4, dtype=np.float32),
+            "model.layers.0.self_attn.o_proj.input_quantizer._amax": np.array(44.8, dtype=np.float32),
+            "model.layers.0.self_attn.o_proj.weight_quantizer._amax": np.array(22.4, dtype=np.float32),
+        }
+
+        from trtf_build.quantization.adapters import StandardDecoderCalibrationAdapter
+        scale_map = provider._build_scale_map(
+            state_dict,
+            adapter=StandardDecoderCalibrationAdapter(family="qwen"),
+            exclude_re=None,
+            exclude_patterns=["layer.*.w_o"],
+            maxbound=448.0,
+        )
+
+        assert "qwen/layer.0.w_q" in scale_map.scales
+        assert "qwen/layer.0.w_o" not in scale_map.scales
+
+    def test_standard_decoder_adapter_maps_qwen_names(self):
+        from trtf_build.quantization.adapters import StandardDecoderCalibrationAdapter
+
+        adapter = StandardDecoderCalibrationAdapter(family="qwen")
+
+        assert adapter.map_layer_name("model.layers.0.self_attn.q_proj") == "qwen/layer.0.w_q"
+        assert adapter.map_layer_name("model.layers.12.self_attn.o_proj") == "qwen/layer.12.w_o"
+        assert adapter.map_layer_name("model.layers.7.mlp.gate_proj") == "qwen/layer.7.w_gate"
+        assert adapter.map_layer_name("model.layers.7.mlp.up_proj") == "qwen/layer.7.w_up"
+        assert adapter.map_layer_name("model.layers.7.mlp.down_proj") == "qwen/layer.7.w_down"
+        assert adapter.map_layer_name("model.layers.0.input_layernorm") is None
+
+
+class TestQuantProfileExclusions:
+    def test_family_scoped_weight_name_matches_builder_local_exclude_pattern(self):
+        profile = QuantProfile(
+            format=get_format("fp8"),
+            scale_map=QuantScaleMap(scales={
+                "qwen/layer.0.w_o": LayerScales(input_scale=0.25, weight_scale=0.5),
+            }),
+            exclude_patterns=["layer.*.w_o"],
+        )
+
+        assert profile.should_quantize("qwen/layer.0.w_o") is False
