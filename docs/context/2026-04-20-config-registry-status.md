@@ -524,8 +524,16 @@ Phase 5 gate status:
   (b) ✅  Runtime env-var grep (getenv / os.environ for TRTF_*) returns
       zero matches. Naive grep finds only explanatory code comments
       and compile-time CMake defines (TRTF_HAS_TRT, TRTF_SOURCE_DIR).
-  (c) ⏭  AIME25 iter3 — deferred to user kickoff (10–12h GPU run);
-      Qwen3-0.6B smoke validates the end-to-end path.
+  (c) ✅  AIME25 iter3 (Qwen3-8B, 30 samples) completed 2026-04-20 22:31.
+      Accuracy reproduces iter2 byte-for-byte per lane:
+        dense 20/30 = 66.7%  (iter2: 20/30 = 66.7%, gate 19-21)
+        tri   21/30 = 70.0%  (iter2: 21/30 = 70.0%, gate 20-22)
+        hf    20/30 = 66.7%  (iter2: 20/30 = 66.7%, gate 19-21)
+      All 90 per-sample token counts match iter2 exactly; the config
+      registry produces bit-identical decode streams to the pre-
+      refactor env-var path. Tri wall-tok/s 54.40 vs iter2 17.74
+      (iter3 has dedicated GPUs; iter2 shared 3 lanes). Artifact:
+      artifacts/triattention/loop/iter3/summary.{json,md}.
   (d) ✅  ctest + pytest passing.
   (e) ✅  CCN ≤ 10 on all new `src/runtime/config/` sources.
 
