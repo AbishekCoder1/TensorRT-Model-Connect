@@ -36,12 +36,14 @@ variables:
   CPP_COVERAGE_MIN_LINE: "36"
   CPP_COVERAGE_MIN_FUNCTION: "46"
   CPP_COVERAGE_MIN_BRANCH: "21"
+  AI_STAGING_BRANCH: "ai-staging"
 
 workflow:
   auto_cancel:
     on_new_commit: conservative
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $AI_STAGING_BRANCH
     - if: $CI_PIPELINE_SOURCE == "web"
     - if: $CI_PIPELINE_SOURCE == "schedule"
 
@@ -54,10 +56,22 @@ default:
     - pip install --no-deps -e trtf_build/
     - chmod +x ./build/trtf 2>/dev/null || true
 
+.ai-staging-rules: &ai_staging_rules
+  - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $AI_STAGING_BRANCH'
+  - if: '$CI_COMMIT_BRANCH == $AI_STAGING_BRANCH'
+
+.not-ai-staging-rules: &not_ai_staging_rules
+  - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $AI_STAGING_BRANCH'
+    when: never
+  - if: '$CI_COMMIT_BRANCH == $AI_STAGING_BRANCH'
+    when: never
+  - when: on_success
+
 # ── Analyze: Test Impact Analysis (fast, no GPU) ────────────────────────────
 
 impact-analysis:
   stage: analyze
+  rules: *not_ai_staging_rules
   before_script: []
   script:
     - python3 tools/test_impact.py --validate
@@ -109,6 +123,7 @@ build-all:
 check-family-coverage:
   stage: tier1-unit
   needs: [build-all]
+  rules: *not_ai_staging_rules
   script:
     - python scripts/check_family_coverage.py
   timeout: 15m
@@ -116,6 +131,7 @@ check-family-coverage:
 check-cyclomatic-complexity:
   stage: tier1-unit
   needs: [build-all]
+  rules: *not_ai_staging_rules
   script:
     - lizard --version
     - python tools/check_cyclomatic_complexity.py src --max-ccn ${CCM_MAX_CCN:-10} --top 20
@@ -128,23 +144,37 @@ lint-check:
     - pip install --quiet ruff clang-format
     # Only lint files changed in this MR (codebase has pre-existing violations)
     - |
-      CHANGED_PY=$(git diff --diff-filter=d --name-only ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} -- '*.py' || true)
+      git fetch origin master --quiet || true
+      BASE_REF=${CI_MERGE_REQUEST_DIFF_BASE_SHA:-origin/master}
+      CHANGED_PY=$(git diff --diff-filter=d --name-only "$BASE_REF"...HEAD -- '*.py' || true)
       if [ -n "$CHANGED_PY" ]; then
         echo "Checking Python lint on changed files:"
         echo "$CHANGED_PY"
         echo "$CHANGED_PY" | xargs ruff check --config ruff.toml
       fi
     - |
-      CHANGED_CPP=$(git diff --diff-filter=d --name-only ${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD~1} -- '*.cpp' '*.h' || true)
+      BASE_REF=${CI_MERGE_REQUEST_DIFF_BASE_SHA:-origin/master}
+      CHANGED_CPP=$(git diff --diff-filter=d --name-only "$BASE_REF"...HEAD -- '*.cpp' '*.h' || true)
       if [ -n "$CHANGED_CPP" ]; then
         echo "Checking C++ formatting on changed files:"
         echo "$CHANGED_CPP" | xargs clang-format --dry-run --Werror
       fi
   timeout: 5m
 
+ai-staging-sanity:
+  stage: tier1-unit
+  needs: [build-all]
+  rules: *ai_staging_rules
+  script:
+    - ./build/trtf --help >/tmp/trtf-help.txt
+    - ctest --test-dir build --output-on-failure
+    - python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v --ignore=tests/builder/test_cli.py --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py -n auto
+  timeout: 40m
+
 test-cpp-unit:
   stage: tier1-unit
   needs: [build-all, impact-analysis]
+  rules: *not_ai_staging_rules
   script:
     - |
       if ! python3 -c "import json; d=json.load(open('impact.json')); exit(0 if 'cpp' in d['unit_tiers'] else 1)"; then
@@ -174,6 +204,7 @@ test-cpp-unit:
 test-python-builder:
   stage: tier1-unit
   needs: [build-all, impact-analysis]
+  rules: *not_ai_staging_rules
   script:
     - python -m pip install --disable-pip-version-check --quiet "pytest-cov>=6.0"
     - mkdir -p coverage
@@ -249,6 +280,10 @@ coverage-cpp:
     - job: build-all
       artifacts: false
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $AI_STAGING_BRANCH'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $AI_STAGING_BRANCH'
+      when: never
     # Always run in scheduled (nightly) pipelines and manual web triggers.
     - if: $CI_PIPELINE_SOURCE == "schedule"
     - if: $CI_PIPELINE_SOURCE == "web"
@@ -283,6 +318,7 @@ coverage-cpp:
 
 test-graph-ops:
   stage: tier2-graph-ops
+  rules: *not_ai_staging_rules
   # No `needs:` — relies on stage ordering to gate on the full tier1-unit stage.
   # Any tier1 failure (lint, complexity, coverage, unit tests) automatically
   # blocks this job without listing each dependency explicitly.
@@ -365,6 +401,10 @@ test-e2e-selective:
     expire_in: 2 days
   timeout: 4h
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == $AI_STAGING_BRANCH'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $AI_STAGING_BRANCH'
+      when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
 # ── Nightly: Full E2E Suite (all 68 models, scheduled) ──────────────────────
