@@ -1053,43 +1053,67 @@ int32_t TriAttentionKvCache::compaction_trigger_length() const {
     return std::min(max_length_, std::max(base_trigger, slack_trigger));
 }
 
+std::vector<int32_t> TriAttentionKvCache::broadcast_reserved_for_empty_budget(
+    int32_t keep_budget, const std::vector<int32_t>& reserved) const {
+    std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
+    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head)
+        std::copy(reserved.begin(), reserved.end(),
+                  keep.begin() + static_cast<std::ptrdiff_t>(cache_head * keep_budget));
+    return keep;
+}
+
+void TriAttentionKvCache::precompute_trig_phases(std::vector<std::vector<float>>& cos_phase,
+                                                 std::vector<std::vector<float>>& sin_phase,
+                                                 int32_t half_dim,
+                                                 TriAttentionCompactionProfile* profile) const {
+    if (config_.disable_trig)
+        return;
+    const auto trig_start = Clock::now();
+    cos_phase.assign(offsets_.size(), std::vector<float>(static_cast<std::size_t>(half_dim)));
+    sin_phase.assign(offsets_.size(), std::vector<float>(static_cast<std::size_t>(half_dim)));
+    // TriAttention scoring must use the true absolute decode position, not the
+    // compacted cache length. Once earlier compactions have dropped rows,
+    // total_tokens no longer matches the model's current RoPE position, and
+    // reusing it here corrupts later-round scoring.
+    const float round_start = static_cast<float>(absolute_position_);
+    for (std::size_t o = 0; o < offsets_.size(); ++o) {
+        for (int32_t d = 0; d < half_dim; ++d) {
+            const float phase =
+                (round_start + offsets_[o]) * stats_.inv_freq[static_cast<std::size_t>(d)];
+            cos_phase[o][static_cast<std::size_t>(d)] = std::cos(phase);
+            sin_phase[o][static_cast<std::size_t>(d)] = std::sin(phase);
+        }
+    }
+    if (profile != nullptr)
+        profile->trig_prep_ms += elapsed_ms(trig_start);
+}
+
+bool TriAttentionKvCache::layer_stats_shapes_valid(const TriAttentionHeadStats& layer_stats,
+                                                   int32_t half_dim) const {
+    if (layer_stats.q_mean_real.empty() || layer_stats.q_mean_imag.empty() ||
+        layer_stats.q_abs_mean.empty() || layer_stats.freq_scale_sq.empty())
+        return false;
+    const auto expected_stats_size =
+        static_cast<std::size_t>(stats_.stats_head_count) * static_cast<std::size_t>(half_dim);
+    return layer_stats.q_mean_real.size() == expected_stats_size &&
+           layer_stats.q_mean_imag.size() == expected_stats_size &&
+           layer_stats.q_abs_mean.size() == expected_stats_size &&
+           layer_stats.freq_scale_sq.size() == expected_stats_size;
+}
+
 std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
     int32_t keep_budget, const std::vector<int32_t>& reserved,
     const std::vector<int32_t>& candidates, TriAttentionCompactionProfile* profile) const {
     const int32_t need = std::max(0, keep_budget - static_cast<int32_t>(reserved.size()));
-    if (need <= 0) {
-        std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
-        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head)
-            std::copy(reserved.begin(), reserved.end(),
-                      keep.begin() + static_cast<std::ptrdiff_t>(cache_head * keep_budget));
-        return keep;
-    }
-    std::vector<std::vector<float>> cos_phase;
-    std::vector<std::vector<float>> sin_phase;
+    if (need <= 0)
+        return broadcast_reserved_for_empty_budget(keep_budget, reserved);
     const int32_t half_dim = stats_.head_dim / 2;
     const int32_t total_tokens = static_cast<int32_t>(cache_positions_.size());
     if (half_dim <= 0 || total_tokens <= 0)
         return {};
-    if (!config_.disable_trig) {
-        const auto trig_start = Clock::now();
-        cos_phase.assign(offsets_.size(), std::vector<float>(static_cast<std::size_t>(half_dim)));
-        sin_phase.assign(offsets_.size(), std::vector<float>(static_cast<std::size_t>(half_dim)));
-        // TriAttention scoring must use the true absolute decode position, not
-        // the compacted cache length. Once earlier compactions have dropped
-        // rows, `total_tokens` no longer matches the model's current RoPE
-        // position, and reusing it here corrupts later-round scoring.
-        const float round_start = static_cast<float>(absolute_position_);
-        for (std::size_t o = 0; o < offsets_.size(); ++o) {
-            for (int32_t d = 0; d < half_dim; ++d) {
-                const float phase =
-                    (round_start + offsets_[o]) * stats_.inv_freq[static_cast<std::size_t>(d)];
-                cos_phase[o][static_cast<std::size_t>(d)] = std::cos(phase);
-                sin_phase[o][static_cast<std::size_t>(d)] = std::sin(phase);
-            }
-        }
-        if (profile != nullptr)
-            profile->trig_prep_ms += elapsed_ms(trig_start);
-    }
+    std::vector<std::vector<float>> cos_phase;
+    std::vector<std::vector<float>> sin_phase;
+    precompute_trig_phases(cos_phase, sin_phase, half_dim, profile);
 
     const auto score_start = Clock::now();
     std::vector<std::vector<float>> aggregated_scores(
@@ -1113,20 +1137,8 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
         const auto& layer_stats = stats_.layer_stats[static_cast<std::size_t>(layer)];
         const auto& sampled_heads =
             stats_.sampled_score_heads_by_layer[static_cast<std::size_t>(layer)];
-        if (layer_stats.q_mean_real.empty() || layer_stats.q_mean_imag.empty() ||
-            layer_stats.q_abs_mean.empty() || layer_stats.freq_scale_sq.empty()) {
+        if (sampled_heads.empty() || !layer_stats_shapes_valid(layer_stats, half_dim))
             continue;
-        }
-        if (sampled_heads.empty())
-            continue;
-        const auto expected_stats_size =
-            static_cast<std::size_t>(stats_.stats_head_count) * static_cast<std::size_t>(half_dim);
-        if (layer_stats.q_mean_real.size() != expected_stats_size ||
-            layer_stats.q_mean_imag.size() != expected_stats_size ||
-            layer_stats.q_abs_mean.size() != expected_stats_size ||
-            layer_stats.freq_scale_sq.size() != expected_stats_size) {
-            continue;
-        }
 
         const auto layer_cache = copy_cache_rows_to_host(cache_k_[static_cast<std::size_t>(layer)],
                                                          cache_length_, profile);

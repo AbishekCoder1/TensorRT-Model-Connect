@@ -205,6 +205,13 @@ class TriAttentionKvCache : public IInferenceState {
     select_keep_indices_host(int32_t keep_budget, const std::vector<int32_t>& reserved,
                              const std::vector<int32_t>& candidates,
                              TriAttentionCompactionProfile* profile = nullptr) const;
+    std::vector<int32_t>
+    broadcast_reserved_for_empty_budget(int32_t keep_budget,
+                                        const std::vector<int32_t>& reserved) const;
+    void precompute_trig_phases(std::vector<std::vector<float>>& cos_phase,
+                                std::vector<std::vector<float>>& sin_phase, int32_t half_dim,
+                                TriAttentionCompactionProfile* profile) const;
+    bool layer_stats_shapes_valid(const TriAttentionHeadStats& layer_stats, int32_t half_dim) const;
     std::vector<float>
     copy_cache_rows_to_host(const DeviceTensor& tensor, int32_t rows,
                             TriAttentionCompactionProfile* profile = nullptr) const;
