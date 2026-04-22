@@ -152,6 +152,10 @@ class TriAttentionKvCache : public IInferenceState {
     int32_t prompt_end_position() const { return prompt_end_position_; }
 
   private:
+    void validate_shapes();
+    void normalize_sampled_heads();
+    void log_init_debug() const;
+    void allocate_layer_tensors();
     int32_t compaction_trigger_length() const;
     int32_t compaction_keep_budget(int32_t total_tokens) const;
     int32_t count_prefix_rows() const;

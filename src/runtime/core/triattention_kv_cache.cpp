@@ -577,58 +577,47 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
     return stats;
 }
 
-TriAttentionKvCache::TriAttentionKvCache(int32_t num_layers, int32_t num_kv_heads,
-                                         int32_t max_length, int32_t kv_dim, cudaStream_t stream,
-                                         TriAttentionConfig config, TriAttentionStats stats,
-                                         DType cache_dtype, KvCacheNames names)
-    : num_layers_(num_layers), num_kv_heads_(num_kv_heads), max_length_(max_length),
-      kv_dim_(kv_dim), stream_(stream), cache_dtype_(cache_dtype),
-      cache_element_size_(dtype_size(cache_dtype)), names_(std::move(names)),
-      config_(std::move(config)), stats_(std::move(stats)),
-      offsets_(make_offsets(config_.offset_max_length)) {
-    if (config_.kv_budget < 1 || config_.kv_budget > max_length_) {
-        throw std::runtime_error("TriAttention kv_budget must be within [1, max_length]");
-    }
-    if (stats_.head_dim <= 0 || (stats_.head_dim % 2) != 0) {
-        throw std::runtime_error("TriAttention stats head_dim must be a positive even number");
-    }
-    if (num_kv_heads_ <= 0) {
-        throw std::runtime_error("TriAttention num_kv_heads must be positive");
-    }
+namespace {
+void require_ta(bool cond, const char* msg) {
+    if (!cond)
+        throw std::runtime_error(msg);
+}
+} // namespace
+
+void TriAttentionKvCache::validate_shapes() {
+    require_ta(config_.kv_budget >= 1 && config_.kv_budget <= max_length_,
+               "TriAttention kv_budget must be within [1, max_length]");
+    require_ta(stats_.head_dim > 0 && (stats_.head_dim % 2) == 0,
+               "TriAttention stats head_dim must be a positive even number");
+    require_ta(num_kv_heads_ > 0, "TriAttention num_kv_heads must be positive");
     query_head_count_ = kv_dim_ / stats_.head_dim;
-    if (query_head_count_ <= 0 || (kv_dim_ % stats_.head_dim) != 0) {
-        throw std::runtime_error("TriAttention kv_dim must be divisible by head_dim");
-    }
-    if ((query_head_count_ % num_kv_heads_) != 0) {
-        throw std::runtime_error("TriAttention expanded cache heads must be divisible by kv heads");
-    }
-    if (stats_.num_attention_heads <= 0 || stats_.num_key_value_heads <= 0 ||
-        (stats_.num_attention_heads % stats_.num_key_value_heads) != 0) {
-        throw std::runtime_error(
-            "TriAttention stats attention head count must be divisible by kv heads");
-    }
+    require_ta(query_head_count_ > 0 && (kv_dim_ % stats_.head_dim) == 0,
+               "TriAttention kv_dim must be divisible by head_dim");
+    require_ta((query_head_count_ % num_kv_heads_) == 0,
+               "TriAttention expanded cache heads must be divisible by kv heads");
+    require_ta(stats_.num_attention_heads > 0 && stats_.num_key_value_heads > 0 &&
+                   (stats_.num_attention_heads % stats_.num_key_value_heads) == 0,
+               "TriAttention stats attention head count must be divisible by kv heads");
     query_group_size_ = query_head_count_ / num_kv_heads_;
     cache_head_count_ = num_kv_heads_;
-    if (stats_.stats_head_count <= 0 || (stats_.stats_head_count % cache_head_count_) != 0) {
-        throw std::runtime_error(
-            "TriAttention stats_head_count must be divisible by runtime kv heads");
-    }
+    require_ta(stats_.stats_head_count > 0 && (stats_.stats_head_count % cache_head_count_) == 0,
+               "TriAttention stats_head_count must be divisible by runtime kv heads");
     score_group_size_ = stats_.stats_head_count / cache_head_count_;
-    if (score_group_size_ <= 0) {
-        throw std::runtime_error("TriAttention score_group_size must be positive");
-    }
-    if (stats_.sampled_score_heads_by_layer.size() != static_cast<std::size_t>(num_layers_)) {
+    require_ta(score_group_size_ > 0, "TriAttention score_group_size must be positive");
+}
+
+void TriAttentionKvCache::normalize_sampled_heads() {
+    if (stats_.sampled_score_heads_by_layer.size() != static_cast<std::size_t>(num_layers_))
         stats_.sampled_score_heads_by_layer.assign(static_cast<std::size_t>(num_layers_), {});
-    }
-    bool any_sampled_heads = false;
+
     const int32_t dense_head_upper_bound = stats_.stats_head_count;
+    bool any_sampled_heads = false;
     for (auto& heads : stats_.sampled_score_heads_by_layer) {
         std::sort(heads.begin(), heads.end());
         heads.erase(std::unique(heads.begin(), heads.end()), heads.end());
         for (const int32_t head : heads) {
-            if (head < 0 || head >= dense_head_upper_bound) {
+            if (head < 0 || head >= dense_head_upper_bound)
                 throw std::runtime_error("TriAttention sampled score head index is out of range");
-            }
         }
         any_sampled_heads = any_sampled_heads || !heads.empty();
     }
@@ -638,41 +627,57 @@ TriAttentionKvCache::TriAttentionKvCache(int32_t num_layers, int32_t num_kv_head
             std::iota(heads.begin(), heads.end(), 0);
         }
     }
-    profile_enabled_ = config_.profile;
-    if (config_.debug) {
-        std::cerr << "[trtf.triattention] init kv_budget=" << config_.kv_budget
-                  << " divide_length=" << config_.divide_length
-                  << " recent_window=" << config_.recent_window << " per_layer_aggregation="
-                  << score_aggregation_name(config_.per_layer_aggregation)
-                  << " count_prompt_tokens=" << (config_.count_prompt_tokens ? 1 : 0)
-                  << " protect_prefill=" << (config_.protect_prefill ? 1 : 0)
-                  << " disable_mlr=" << (config_.disable_mlr ? 1 : 0)
-                  << " disable_trig=" << (config_.disable_trig ? 1 : 0)
-                  << " kv_heads=" << num_kv_heads_ << " query_heads=" << query_head_count_
-                  << " cache_heads=" << cache_head_count_ << " score_group=" << score_group_size_
-                  << " layers_with_stats=" << stats_.layer_stats.size() << '\n';
-    }
+}
 
-    maybe_generate_default_names(num_layers_, names_);
+void TriAttentionKvCache::log_init_debug() const {
+    if (!config_.debug)
+        return;
+    std::cerr << "[trtf.triattention] init kv_budget=" << config_.kv_budget
+              << " divide_length=" << config_.divide_length
+              << " recent_window=" << config_.recent_window
+              << " per_layer_aggregation=" << score_aggregation_name(config_.per_layer_aggregation)
+              << " count_prompt_tokens=" << (config_.count_prompt_tokens ? 1 : 0)
+              << " protect_prefill=" << (config_.protect_prefill ? 1 : 0)
+              << " disable_mlr=" << (config_.disable_mlr ? 1 : 0)
+              << " disable_trig=" << (config_.disable_trig ? 1 : 0) << " kv_heads=" << num_kv_heads_
+              << " query_heads=" << query_head_count_ << " cache_heads=" << cache_head_count_
+              << " score_group=" << score_group_size_
+              << " layers_with_stats=" << stats_.layer_stats.size() << '\n';
+}
 
+void TriAttentionKvCache::allocate_layer_tensors() {
     cache_k_.reserve(static_cast<std::size_t>(num_layers_));
     cache_v_.reserve(static_cast<std::size_t>(num_layers_));
     present_k_.reserve(static_cast<std::size_t>(num_layers_));
     present_v_.reserve(static_cast<std::size_t>(num_layers_));
-
     for (int32_t i = 0; i < num_layers_; ++i) {
         cache_k_.emplace_back(std::vector<int64_t>{max_length_, kv_dim_}, cache_dtype_, stream_);
         cache_v_.emplace_back(std::vector<int64_t>{max_length_, kv_dim_}, cache_dtype_, stream_);
         present_k_.emplace_back(std::vector<int64_t>{1, kv_dim_}, cache_dtype_, stream_);
         present_v_.emplace_back(std::vector<int64_t>{1, kv_dim_}, cache_dtype_, stream_);
     }
-
     mask_buf_.resize(static_cast<std::size_t>(max_length_) + 1U);
     cache_positions_.reserve(static_cast<std::size_t>(max_length_));
     cache_positions_per_head_.resize(static_cast<std::size_t>(cache_head_count_));
     for (auto& head_positions : cache_positions_per_head_)
         head_positions.reserve(static_cast<std::size_t>(max_length_));
+}
 
+TriAttentionKvCache::TriAttentionKvCache(int32_t num_layers, int32_t num_kv_heads,
+                                         int32_t max_length, int32_t kv_dim, cudaStream_t stream,
+                                         TriAttentionConfig config, TriAttentionStats stats,
+                                         DType cache_dtype, KvCacheNames names)
+    : num_layers_(num_layers), num_kv_heads_(num_kv_heads), max_length_(max_length),
+      kv_dim_(kv_dim), stream_(stream), cache_dtype_(cache_dtype),
+      cache_element_size_(dtype_size(cache_dtype)), names_(std::move(names)),
+      config_(std::move(config)), stats_(std::move(stats)),
+      offsets_(make_offsets(config_.offset_max_length)) {
+    validate_shapes();
+    normalize_sampled_heads();
+    profile_enabled_ = config_.profile;
+    log_init_debug();
+    maybe_generate_default_names(num_layers_, names_);
+    allocate_layer_tensors();
 #ifdef TRTF_HAS_CUDA_KERNELS
     if (!config_.disable_gpu_state)
         initialize_gpu_state();
@@ -963,7 +968,7 @@ std::vector<char> TriAttentionKvCache::build_reserve_mask(int32_t total_tokens,
 }
 
 std::vector<int32_t> TriAttentionKvCache::broadcast_indices_per_head(std::vector<int32_t> rows,
-                                                                    int32_t row_count) const {
+                                                                     int32_t row_count) const {
     std::sort(rows.begin(), rows.end());
     std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * row_count));
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
