@@ -176,16 +176,26 @@ void TrtModule::set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t 
     }
 }
 
+namespace {
+void* allocate_and_zero(std::size_t nbytes, cudaStream_t stream) {
+    void* ptr = nullptr;
+    if (nbytes == 0)
+        return ptr;
+    if (cudaMalloc(&ptr, nbytes) != cudaSuccess)
+        return nullptr;
+    cudaMemsetAsync(ptr, 0, nbytes, stream);
+    return ptr;
+}
+} // namespace
+
 void TrtModule::allocate_single_input(nvinfer1::ICudaEngine* engine, const char* name,
                                       int32_t num_profiles, bool skip_allocation) {
-    auto trt_shape = engine->getTensorShape(name);
-    auto dtype = from_trt_dtype(engine->getTensorDataType(name));
+    const auto trt_shape = engine->getTensorShape(name);
+    const auto dtype = from_trt_dtype(engine->getTensorDataType(name));
+    const bool is_dynamic = has_dynamic_shapes_ && num_profiles > 0 && dims_are_dynamic(trt_shape);
 
-    // Determine allocation shape (max) and initial runtime shape (opt).
     nvinfer1::Dims alloc_dims = trt_shape;
     nvinfer1::Dims init_dims = trt_shape;
-    bool is_dynamic = has_dynamic_shapes_ && num_profiles > 0 && dims_are_dynamic(trt_shape);
-
     if (is_dynamic) {
         alloc_dims =
             engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kMAX);
@@ -193,7 +203,7 @@ void TrtModule::allocate_single_input(nvinfer1::ICudaEngine* engine, const char*
     }
 
     std::vector<int64_t> alloc_shape;
-    std::size_t alloc_nbytes = compute_alloc_bytes(alloc_dims, dtype, alloc_shape);
+    const std::size_t alloc_nbytes = compute_alloc_bytes(alloc_dims, dtype, alloc_shape);
     std::vector<int64_t> init_shape = alloc_shape;
     std::size_t init_nbytes = alloc_nbytes;
     if (is_dynamic)
@@ -206,18 +216,10 @@ void TrtModule::allocate_single_input(nvinfer1::ICudaEngine* engine, const char*
     entry.is_input = true;
     entry.shape = init_shape;
     entry.is_external = skip_allocation;
-
-    if (!skip_allocation && alloc_nbytes > 0) {
-        auto err = cudaMalloc(&entry.d_ptr, alloc_nbytes);
-        if (err != cudaSuccess)
-            entry.d_ptr = nullptr;
-        else
-            cudaMemsetAsync(entry.d_ptr, 0, alloc_nbytes, stream_);
-    }
-
+    if (!skip_allocation)
+        entry.d_ptr = allocate_and_zero(alloc_nbytes, stream_);
     if (entry.d_ptr)
         ctx_->setTensorAddress(name, entry.d_ptr);
-
     if (is_dynamic)
         ctx_->setInputShape(name, init_dims);
 
@@ -352,29 +354,7 @@ void TrtModule::enable_cuda_graph() {
     cuda_graph_.reset(); // Force re-capture on next execution
 }
 
-void TrtModule::reset_execution_context() {
-    if (engine_ == nullptr)
-        return;
-
-    delete ctx_;
-    ctx_ = engine_->createExecutionContext();
-    if (!ctx_) {
-        throw std::runtime_error("[trt_module] Failed to recreate execution context");
-    }
-
-    const int32_t num_profiles = engine_->getNbOptimizationProfiles();
-    if (num_profiles > 0) {
-        if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
-            delete ctx_;
-            ctx_ = nullptr;
-            throw std::runtime_error("[trt_module] Failed to reset optimization profile");
-        }
-        cudaStreamSynchronize(stream_);
-    }
-
-    if (use_cuda_graph_)
-        cuda_graph_.reset();
-
+void TrtModule::rebind_buffers_after_reset() {
     for (auto& [name, entry] : buffers_) {
         if (entry.d_ptr)
             ctx_->setTensorAddress(name.c_str(), entry.d_ptr);
@@ -384,6 +364,27 @@ void TrtModule::reset_execution_context() {
             entry.nbytes = 0;
         }
     }
+}
+
+void TrtModule::reset_execution_context() {
+    if (engine_ == nullptr)
+        return;
+    delete ctx_;
+    ctx_ = engine_->createExecutionContext();
+    if (!ctx_)
+        throw std::runtime_error("[trt_module] Failed to recreate execution context");
+
+    if (engine_->getNbOptimizationProfiles() > 0) {
+        if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
+            delete ctx_;
+            ctx_ = nullptr;
+            throw std::runtime_error("[trt_module] Failed to reset optimization profile");
+        }
+        cudaStreamSynchronize(stream_);
+    }
+    if (use_cuda_graph_)
+        cuda_graph_.reset();
+    rebind_buffers_after_reset();
 }
 
 void TrtModule::forward_async(const TensorMap& inputs) {

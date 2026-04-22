@@ -60,18 +60,7 @@ void apply_text_trace_config_from_registry(const std::string& path, int32_t star
 
 namespace {
 
-void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t decoder_idx,
-                             int32_t rows_before, int32_t rows_after,
-                             const std::vector<float>& logits) {
-    const auto& cfg = step_trace_config();
-    if (!cfg.enabled || position_before < cfg.start_position ||
-        position_before > cfg.end_position) {
-        return;
-    }
-    if (logits.empty())
-        return;
-
-    const int32_t top_n = std::min<int32_t>(cfg.top_k, static_cast<int32_t>(logits.size()));
+std::vector<int32_t> top_logit_indices(const std::vector<float>& logits, int32_t top_n) {
     std::vector<int32_t> order(logits.size());
     std::iota(order.begin(), order.end(), 0);
     std::partial_sort(
@@ -82,11 +71,13 @@ void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t 
             }
             return lhs < rhs;
         });
+    return order;
+}
 
-    std::ofstream out(cfg.path, std::ios::app);
-    if (!out)
-        return;
-
+void write_step_trace_line(std::ostream& out, int32_t position_before, int32_t token_id,
+                           int32_t decoder_idx, int32_t rows_before, int32_t rows_after,
+                           const std::vector<float>& logits, const std::vector<int32_t>& order,
+                           int32_t top_n) {
     out << "{\"position_before\":" << position_before << ",\"token_id\":" << token_id
         << ",\"decoder_idx\":" << decoder_idx << ",\"rows_before\":" << rows_before
         << ",\"rows_after\":" << rows_after << ",\"argmax_token\":" << order.front()
@@ -104,6 +95,23 @@ void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t 
         out << logits[static_cast<std::size_t>(order[static_cast<std::size_t>(i)])];
     }
     out << "]}\n";
+}
+
+void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t decoder_idx,
+                             int32_t rows_before, int32_t rows_after,
+                             const std::vector<float>& logits) {
+    const auto& cfg = step_trace_config();
+    if (!cfg.enabled || position_before < cfg.start_position || position_before > cfg.end_position)
+        return;
+    if (logits.empty())
+        return;
+    const int32_t top_n = std::min<int32_t>(cfg.top_k, static_cast<int32_t>(logits.size()));
+    const auto order = top_logit_indices(logits, top_n);
+    std::ofstream out(cfg.path, std::ios::app);
+    if (!out)
+        return;
+    write_step_trace_line(out, position_before, token_id, decoder_idx, rows_before, rows_after,
+                          logits, order, top_n);
 }
 
 bool contains_boxed_answer(const std::string& text) {
