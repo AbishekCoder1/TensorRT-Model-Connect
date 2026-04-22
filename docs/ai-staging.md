@@ -17,16 +17,21 @@ merged by a human.
 ## CI Policy
 
 Pipelines for MRs targeting `ai-staging`, and direct pushes to `ai-staging`, run
-only the low-cost gate:
+only the low-cost CPU-tagged gate:
 
-- `build-all`
-- `lint-check`
+- `ai-staging-build`
+- `ai-staging-lint-check`
 - `ai-staging-sanity`
 
-The sanity job runs the CLI help check, the full C++ CTest unit suite, and the
-CPU Python builder/tool test suite. Expensive impact analysis, coverage, graph,
-and E2E jobs are skipped for `ai-staging`. Full CI still runs for normal MRs,
-scheduled pipelines, web pipelines, and the final promotion MR to `master`.
+The sanity path hides GPUs with `CUDA_VISIBLE_DEVICES=""`, builds on the `cpu`
+runner, runs the CLI help check, runs CTest with CUDA/TensorRT execution tests
+excluded, and runs pytest with `gpu`, `trt`, and `e2e` tests deselected.
+CPU-tagged jobs set the local development image pull policy to
+`if-not-present` so a runner with `trtf-dev-gb300:latest` already loaded does
+not fail while trying to pull that local image from a registry.
+Expensive impact analysis, coverage, graph, and E2E jobs are skipped for
+`ai-staging`. Full CI still runs for normal MRs, scheduled pipelines, web
+pipelines, and the final promotion MR to `master`.
 
 New AI agent branches should be created from `origin/ai-staging`. That keeps the
 source branch CI configuration aligned with the target branch. Existing AI
@@ -40,6 +45,23 @@ lands. Retargeting an old branch to `ai-staging` is not enough by itself.
 
 ## Operating Cycle
 
+For the autonomous operator, start Claude Code normally and use:
+
+```text
+/loop 20m /ai-staging-operator
+```
+
+Each loop tick runs one bounded cycle and exits. The loop wrapper provides
+persistence.
+
+Preflight the GitLab setup with:
+
+```bash
+python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging preflight
+```
+
+Manual branch maintenance still uses the lower-level command below.
+
 Run this from a clean checkout:
 
 ```bash
@@ -50,8 +72,8 @@ That command:
 
 1. Creates `origin/ai-staging` from `origin/master` if it is missing.
 2. Fetches `origin/master` and `origin/ai-staging`.
-3. Checks out the local `ai-staging` branch.
-4. Merges `origin/master` into `ai-staging`.
+3. Creates a detached temporary worktree from `origin/ai-staging`.
+4. Merges `origin/master` into that temporary worktree.
 5. Pushes the updated branch when `--push` is present.
 6. Retargets open `agent-2-*` MRs from `master` to `ai-staging` when
    `--retarget` is present.
@@ -85,6 +107,13 @@ variables:
 - `AI_STAGING_PROMOTE=1`
 - `AI_STAGING_BOT_TOKEN=<masked project access token with API scope>`
 
+`AI_STAGING_PROMOTE` may be a schedule variable. `AI_STAGING_BOT_TOKEN` should
+be a masked protected project CI/CD variable so the scheduled job can use it
+without exposing the token value.
+
+Use a cadence such as `0 */4 * * *` for every four hours or `0 */2 * * *` for
+every two hours.
+
 The scheduled pipeline runs only `ai-staging-promotion-mr`; normal nightly
 build, coverage, graph, and E2E jobs are skipped for this maintenance schedule.
 The scheduled job uses the GitLab REST API directly with `AI_STAGING_BOT_TOKEN`;
@@ -94,9 +123,15 @@ The job is idempotent:
 
 - If `origin/ai-staging` and `origin/master` have identical trees, it exits
   without filing an MR.
-- If an open `ai-staging -> master` MR already exists, it reports that MR and
-  exits.
+- If an open `ai-staging -> master` MR already exists, it updates the MR title
+  and description from the current tree diff.
 - Otherwise it creates `chore: promote ai-staging to master` for human review.
+
+The promotion MR description includes the source and target SHAs, up-to-date
+state, staged commit subjects, net file changes, changed paths, diffstat, and a
+review checklist. Individual AI-generated MRs should also include task scope,
+verification, risk, rollback, and non-goals so the aggregate promotion is
+reviewable.
 
 Equivalent local command:
 

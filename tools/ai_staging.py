@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import shlex
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,6 +21,7 @@ from typing import Any
 DEFAULT_BRANCH = "ai-staging"
 DEFAULT_REMOTE = "origin"
 DEFAULT_SOURCE_PREFIXES = ("agent-2-",)
+AI_STAGING_MR_LABELS = "ai-generated,ai:staging-mr"
 
 
 @dataclass(frozen=True)
@@ -37,15 +40,25 @@ def run(
     check: bool = True,
     capture: bool = True,
     dry_run: bool = False,
+    cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    print("+ " + shlex.join(cmd), file=sys.stderr)
+    location = f"(cd {shlex.quote(cwd)} && " if cwd else ""
+    suffix = ")" if cwd else ""
+    print("+ " + location + shlex.join(cmd) + suffix, file=sys.stderr)
     if dry_run:
         return subprocess.CompletedProcess(cmd, 0, "", "")
-    return subprocess.run(cmd, check=check, capture_output=capture, text=True)
+    result = subprocess.run(cmd, check=False, capture_output=capture, text=True, cwd=cwd)
+    if check and result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        message = f"Command failed with exit code {result.returncode}: {shlex.join(cmd)}"
+        if details:
+            message += "\n" + details
+        raise SystemExit(message)
+    return result
 
 
-def git(args: list[str], *, check: bool = True, dry_run: bool = False) -> str:
-    result = run(["git", *args], check=check, capture=True, dry_run=dry_run)
+def git(args: list[str], *, check: bool = True, dry_run: bool = False, cwd: str | None = None) -> str:
+    result = run(["git", *args], check=check, capture=True, dry_run=dry_run, cwd=cwd)
     return result.stdout.strip()
 
 
@@ -130,24 +143,44 @@ def sync_branch(cfg: Config, *, push: bool) -> None:
     assert_clean_worktree()
     ensure_branch(cfg)
 
-    if local_branch_exists(cfg.branch):
-        git(["switch", cfg.branch], dry_run=cfg.dry_run)
-        git(["merge", "--ff-only", f"{cfg.remote}/{cfg.branch}"], dry_run=cfg.dry_run)
-    else:
-        git(["switch", "--track", "-c", cfg.branch, f"{cfg.remote}/{cfg.branch}"], dry_run=cfg.dry_run)
+    if cfg.dry_run:
+        print(f"would sync {cfg.remote}/{cfg.branch} with {cfg.remote}/master")
+        if push:
+            print(f"would push synced HEAD to {cfg.remote}/{cfg.branch}")
+        return
 
+    worktree_path = tempfile.mkdtemp(prefix=f"{cfg.branch}-sync-")
+    keep_worktree = False
     contains_master = run(
-        ["git", "merge-base", "--is-ancestor", f"{cfg.remote}/master", "HEAD"],
+        ["git", "worktree", "add", "--detach", worktree_path, f"{cfg.remote}/{cfg.branch}"],
         check=False,
-        dry_run=cfg.dry_run,
     )
-    if contains_master.returncode == 0:
-        print(f"{cfg.branch} already contains {cfg.remote}/master")
-    else:
-        git(["merge", "--no-edit", f"{cfg.remote}/master"], dry_run=cfg.dry_run)
+    if contains_master.returncode != 0:
+        shutil.rmtree(worktree_path, ignore_errors=True)
+        details = (contains_master.stderr or contains_master.stdout or "").strip()
+        raise SystemExit(f"Could not create temporary sync worktree at {worktree_path}.\n{details}")
 
-    if push:
-        run(["git", "push", cfg.remote, f"HEAD:refs/heads/{cfg.branch}"], dry_run=cfg.dry_run)
+    try:
+        contains_master = run(
+            ["git", "merge-base", "--is-ancestor", f"{cfg.remote}/master", "HEAD"],
+            check=False,
+            cwd=worktree_path,
+        )
+        if contains_master.returncode == 0:
+            print(f"{cfg.branch} already contains {cfg.remote}/master")
+        else:
+            git(["merge", "--no-edit", f"{cfg.remote}/master"], cwd=worktree_path)
+
+        if push:
+            run(["git", "push", cfg.remote, f"HEAD:refs/heads/{cfg.branch}"], cwd=worktree_path)
+    except BaseException:
+        keep_worktree = True
+        print(f"Preserving failed sync worktree for inspection: {worktree_path}", file=sys.stderr)
+        raise
+    finally:
+        if not keep_worktree:
+            run(["git", "worktree", "remove", "--force", worktree_path], check=False)
+            shutil.rmtree(worktree_path, ignore_errors=True)
 
 
 def infer_gitlab_server_url(remote: str) -> str:
@@ -347,7 +380,7 @@ def cmd_retarget(args: argparse.Namespace) -> int:
             cfg,
             f"/projects/{cfg.project}/merge_requests/{iid}",
             method="PUT",
-            fields={"target_branch": cfg.branch},
+            fields={"target_branch": cfg.branch, "add_labels": AI_STAGING_MR_LABELS},
         )
 
     print(f"retargeted {changed} merge request(s)" if not cfg.dry_run else f"would retarget {changed} merge request(s)")
@@ -385,6 +418,67 @@ def branch_contains_target(cfg: Config, target_branch: str) -> bool:
     return result.returncode == 0
 
 
+def git_lines(args: list[str]) -> list[str]:
+    output = git(args)
+    return output.splitlines() if output else []
+
+
+def limited_lines(lines: list[str], *, limit: int) -> list[str]:
+    if len(lines) <= limit:
+        return lines
+    omitted = len(lines) - limit
+    return [*lines[:limit], f"... ({omitted} more line(s) omitted)"]
+
+
+def status_counts(name_status_lines: list[str]) -> dict[str, int]:
+    counts = {"added": 0, "modified": 0, "deleted": 0, "renamed": 0, "other": 0}
+    for line in name_status_lines:
+        status = line.split("\t", 1)[0]
+        if status == "A":
+            counts["added"] += 1
+        elif status == "M":
+            counts["modified"] += 1
+        elif status == "D":
+            counts["deleted"] += 1
+        elif status.startswith("R"):
+            counts["renamed"] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
+def promotion_change_summary(cfg: Config, target_branch: str) -> dict[str, Any]:
+    base = f"{cfg.remote}/{target_branch}"
+    head = f"{cfg.remote}/{cfg.branch}"
+    rev_range = f"{base}..{head}"
+    symmetric_range = f"{base}...{head}"
+
+    target_sha = git(["rev-parse", "--short=12", base])
+    source_sha = git(["rev-parse", "--short=12", head])
+    commits = git_lines(
+        [
+            "log",
+            "--cherry-pick",
+            "--right-only",
+            "--no-merges",
+            "--pretty=format:%h %s",
+            symmetric_range,
+        ]
+    )
+    name_status = git_lines(["diff", "--name-status", "--find-renames", rev_range])
+    diffstat = git_lines(["diff", "--stat", "--find-renames", rev_range])
+    counts = status_counts(name_status)
+
+    return {
+        "target_sha": target_sha,
+        "source_sha": source_sha,
+        "commits": commits,
+        "name_status": name_status,
+        "diffstat": diffstat,
+        "counts": counts,
+    }
+
+
 def find_promotion_mr(cfg: Config, target_branch: str) -> dict[str, Any] | None:
     query = urllib.parse.urlencode(
         {
@@ -401,25 +495,69 @@ def find_promotion_mr(cfg: Config, target_branch: str) -> dict[str, Any] | None:
 
 
 def promotion_description(cfg: Config, target_branch: str, *, is_up_to_date: bool) -> str:
+    summary = promotion_change_summary(cfg, target_branch)
+    counts = summary["counts"]
+    commits = limited_lines(summary["commits"], limit=40)
+    changed_paths = limited_lines(summary["name_status"], limit=80)
+    diffstat = limited_lines(summary["diffstat"], limit=80)
     status = (
         f"`{cfg.remote}/{cfg.branch}` contains `{cfg.remote}/{target_branch}`."
         if is_up_to_date
         else f"WARNING: `{cfg.remote}/{cfg.branch}` does not contain `{cfg.remote}/{target_branch}`. "
         "Review carefully before merging."
     )
+    commit_block = "\n".join(f"- `{line.split(' ', 1)[0]}` {line.split(' ', 1)[1] if ' ' in line else ''}" for line in commits)
+    if not commit_block:
+        commit_block = "- No unique non-merge commit subjects found; review the tree diff below."
+    changed_paths_block = "\n".join(changed_paths) if changed_paths else "No changed paths."
+    diffstat_block = "\n".join(diffstat) if diffstat else "No diffstat."
+
     return "\n".join(
         [
-            f"Scheduled promotion MR from `{cfg.branch}` to `{target_branch}`.",
+            f"Scheduled promotion MR from `{cfg.branch}` to `{target_branch}` for human review.",
             "",
-            "This MR is filed automatically for human review. It does not auto-merge.",
+            f"This MR does not auto-merge. It promotes the current AI staging tree into `{target_branch}` after the full MR pipeline is green.",
+            "",
+            "Branch state:",
+            "",
+            f"- Source: `{cfg.remote}/{cfg.branch}` @ `{summary['source_sha']}`",
+            f"- Target: `{cfg.remote}/{target_branch}` @ `{summary['target_sha']}`",
+            f"- Up to date with target: {'yes' if is_up_to_date else 'no'}",
             "",
             status,
+            "",
+            "What is being promoted:",
+            "",
+            commit_block,
+            "",
+            "Net file change summary:",
+            "",
+            f"- Added: {counts['added']}",
+            f"- Modified: {counts['modified']}",
+            f"- Deleted: {counts['deleted']}",
+            f"- Renamed: {counts['renamed']}",
+            f"- Other: {counts['other']}",
+            "",
+            "Changed paths:",
+            "",
+            "```text",
+            changed_paths_block,
+            "```",
+            "",
+            "Diffstat:",
+            "",
+            "```text",
+            diffstat_block,
+            "```",
             "",
             "Review checklist:",
             "",
             "- Full MR pipeline is green.",
             "- Diff contains only expected AI staging changes.",
             f"- `{cfg.branch}` is up to date with `{target_branch}` before merge.",
+            "- Individual AI-generated MRs included in this promotion have task scope, verification, and risk notes in their descriptions.",
+            "",
+            "Reviewer note: the tree diff and changed paths above are authoritative. Commit subjects are included as a readable summary, but may include staging-history commits when earlier promotions were squashed.",
         ]
     )
 
@@ -433,15 +571,28 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
     is_up_to_date = branch_contains_target(cfg, target_branch)
     existing = find_promotion_mr(cfg, target_branch)
+    description = promotion_description(cfg, target_branch, is_up_to_date=is_up_to_date)
     if existing:
-        print(f"Promotion MR already exists: !{existing['iid']} {existing['web_url']}")
+        fields = {
+            "title": f"chore: promote {cfg.branch} to {target_branch}",
+            "description": description,
+            "remove_source_branch": "false",
+            "squash": "false",
+        }
+        gitlab_api_json(
+            cfg,
+            f"/projects/{cfg.project}/merge_requests/{existing['iid']}",
+            method="PUT",
+            fields=fields,
+        )
+        print(f"Updated promotion MR: !{existing['iid']} {existing['web_url']}")
         return 0
 
     fields = {
         "source_branch": cfg.branch,
         "target_branch": target_branch,
         "title": f"chore: promote {cfg.branch} to {target_branch}",
-        "description": promotion_description(cfg, target_branch, is_up_to_date=is_up_to_date),
+        "description": description,
         "remove_source_branch": "false",
         "squash": "false",
     }

@@ -37,8 +37,17 @@ try:
 except ImportError:
     pass
 
-requires_trt = pytest.mark.skipif(
-    not _TRT_AVAILABLE, reason="TensorRT + CUDA not available"
+def _gpu_trt_skipif(condition: bool, reason: str):
+    def decorator(obj):
+        obj = pytest.mark.skipif(condition, reason=reason)(obj)
+        obj = pytest.mark.gpu(obj)
+        obj = pytest.mark.trt(obj)
+        return obj
+    return decorator
+
+
+requires_trt = _gpu_trt_skipif(
+    not _TRT_AVAILABLE, "TensorRT + CUDA not available"
 )
 
 

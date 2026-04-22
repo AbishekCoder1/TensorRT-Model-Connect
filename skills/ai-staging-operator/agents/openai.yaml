@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Staging Operator"
+  short_description: "Run one bounded /loop-safe AI staging cycle."
+  default_prompt: "Run one full bounded AI staging operator cycle for this repository, then stop and report concise status."
