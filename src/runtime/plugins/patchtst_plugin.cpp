@@ -58,8 +58,8 @@ std::string infer_task_type(const std::string& json) {
 class PatchTSTPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto loaded =
-            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
+        auto loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "engine_plan");
         const std::string task_type = infer_task_type(ctx.config_json);
         const int32_t context_length =
             extract_json_int(ctx.config_json, "context_length", ctx.config.max_cache_length);

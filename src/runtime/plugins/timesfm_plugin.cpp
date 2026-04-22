@@ -13,8 +13,8 @@ namespace trtf {
 class TimesFmPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto loaded =
-            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "timesfm engine");
+        auto loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "timesfm engine");
 
         int32_t default_freq = extract_json_int(ctx.config_json, "timesfm_default_freq", 0);
         if (default_freq == 0)

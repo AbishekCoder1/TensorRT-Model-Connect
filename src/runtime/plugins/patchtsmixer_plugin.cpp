@@ -12,8 +12,8 @@ namespace trtf {
 class PatchTSMixerPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto loaded =
-            load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"), "engine_plan");
+        auto loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "engine_plan");
         auto cfg = parse_patchtsmixer_config(ctx.config_json, ctx.config.max_cache_length);
         return std::make_unique<PatchTSMixerPipeline>(std::move(loaded.module), std::move(cfg),
                                                       ctx.bundle.info.model_id);

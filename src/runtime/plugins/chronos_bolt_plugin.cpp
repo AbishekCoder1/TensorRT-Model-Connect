@@ -21,8 +21,8 @@ namespace trtf {
 class ChronosBoltPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        auto loaded = load_trt_module_from_plan(find_section(ctx.bundle, "engine_plan"),
-                                                "chronos_bolt forecast");
+        auto loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "chronos_bolt forecast");
 
         const auto& json = ctx.config_json;
         int32_t context_length =
