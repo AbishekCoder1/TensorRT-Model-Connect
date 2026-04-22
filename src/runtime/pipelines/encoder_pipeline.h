@@ -3,8 +3,8 @@
 // EncoderPipeline: single-pass encoder models (BERT, embedding, reranking).
 
 #include "trtf/pipeline.h"
-#include "trtf/tokenizer.h"
 #include "trtf/runtime/trt_module.h"
+#include "trtf/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
@@ -14,10 +14,9 @@
 namespace trtf {
 
 class EncoderPipeline final : public IPipeline {
-public:
+  public:
     EncoderPipeline(std::unique_ptr<TrtModule> encoder, std::string mode,
-                    std::shared_ptr<ITokenizer> tokenizer = nullptr,
-                    std::string model_id_str = "");
+                    std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
 
     EmbeddingResult embed(const std::string& text) override;
     EmbeddingResult encode(const std::string& text) override;
@@ -29,9 +28,9 @@ public:
     // Token-ID-based encoding (for unit tests and internal callers).
     EmbeddingResult encode_ids(const std::vector<int32_t>& input_ids);
 
-private:
+  private:
     std::unique_ptr<TrtModule> encoder_;
-    std::string mode_;  // "encoder_only", "embedding", "reranking"
+    std::string mode_; // "encoder_only", "embedding", "reranking"
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
 };

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "runtime/core/cuda_common.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -7,8 +9,6 @@
 #include <iostream>
 #include <memory>
 #include <string>
-
-#include "runtime/core/cuda_common.h"
 
 #if TRTF_HAS_TRT
 #include <NvInfer.h>

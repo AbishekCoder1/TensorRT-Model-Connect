@@ -47,10 +47,12 @@ class SpeechPlugin final : public IPipelinePlugin {
         if (!depth_state->ok())
             throw std::runtime_error("SpeechPipeline: failed to create depth KvCache");
 
-        auto mimi_encoder = extract_optional_module(
-            ctx.backend, find_section(ctx.bundle, "mimi_encoder_plan"), "speech mimi_encoder", opts);
-        auto mimi_decoder = extract_optional_module(
-            ctx.backend, find_section(ctx.bundle, "mimi_decoder_plan"), "speech mimi_decoder", opts);
+        auto mimi_encoder =
+            extract_optional_module(ctx.backend, find_section(ctx.bundle, "mimi_encoder_plan"),
+                                    "speech mimi_encoder", opts);
+        auto mimi_decoder =
+            extract_optional_module(ctx.backend, find_section(ctx.bundle, "mimi_decoder_plan"),
+                                    "speech mimi_decoder", opts);
 
         return std::make_unique<SpeechPipeline>(
             std::move(mimi_encoder), std::move(temporal_loaded.module), std::move(temporal_state),

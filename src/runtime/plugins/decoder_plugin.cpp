@@ -21,8 +21,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
 
-        auto loaded =
-            load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "engine_plan"), "engine_plan", opts);
+        auto loaded = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "engine_plan"), "engine_plan", opts);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         // Build KvCacheNames from IoMap patterns.

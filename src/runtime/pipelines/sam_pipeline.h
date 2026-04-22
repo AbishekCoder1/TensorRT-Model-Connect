@@ -14,9 +14,8 @@
 namespace trtf {
 
 class SamPipeline final : public IPipeline {
-public:
-    SamPipeline(std::unique_ptr<TrtModule> image_encoder,
-                std::unique_ptr<TrtModule> mask_decoder,
+  public:
+    SamPipeline(std::unique_ptr<TrtModule> image_encoder, std::unique_ptr<TrtModule> mask_decoder,
                 std::string model_id_str = "");
 
     SegmentResult segment(const float* pixels, int32_t height, int32_t width) override;
@@ -24,7 +23,7 @@ public:
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "SamPipeline"; }
 
-private:
+  private:
     std::unique_ptr<TrtModule> image_encoder_;
     std::unique_ptr<TrtModule> mask_decoder_;
     std::string model_id_;

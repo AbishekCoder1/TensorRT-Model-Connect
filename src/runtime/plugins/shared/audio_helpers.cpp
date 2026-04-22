@@ -13,8 +13,7 @@ namespace {
 
 // Parse speech_text_prompt_ids from JSON (array of ints).
 // Mirrors the logic from fast_path_config.cpp's parse_speech_text_prompt_ids.
-std::vector<int32_t> parse_speech_text_prompt_ids(const std::string& config_text)
-{
+std::vector<int32_t> parse_speech_text_prompt_ids(const std::string& config_text) {
     std::vector<int32_t> prompt_ids;
     const std::size_t pos = config_text.find("\"speech_text_prompt_ids\"");
     if (pos == std::string::npos)
@@ -27,8 +26,7 @@ std::vector<int32_t> parse_speech_text_prompt_ids(const std::string& config_text
 
     std::string arr = config_text.substr(bracket + 1, end_bracket - bracket - 1);
     std::size_t p = 0;
-    while (p < arr.size())
-    {
+    while (p < arr.size()) {
         const std::size_t num_start = arr.find_first_of("0123456789", p);
         if (num_start == std::string::npos)
             break;
@@ -43,20 +41,17 @@ std::vector<int32_t> parse_speech_text_prompt_ids(const std::string& config_text
 
 } // namespace
 
-std::unique_ptr<KvCache> make_coarse_kv_cache(
-    const std::string& json, const BaseConfig& base, cudaStream_t stream,
-    DType cache_dtype)
-{
+std::unique_ptr<KvCache> make_coarse_kv_cache(const std::string& json, const BaseConfig& base,
+                                              cudaStream_t stream, DType cache_dtype) {
     int32_t hidden = extract_json_int(json, "coarse_hidden_size", base.hidden_size);
     int32_t layers = extract_json_int(json, "coarse_num_layers", base.num_layers);
-    int32_t heads  = extract_json_int(json, "coarse_num_heads", base.num_heads);
-    int32_t hd     = (heads > 0) ? hidden / heads : 128;
+    int32_t heads = extract_json_int(json, "coarse_num_heads", base.num_heads);
+    int32_t hd = (heads > 0) ? hidden / heads : 128;
     int32_t max_cache = extract_json_int(json, "coarse_max_cache_length", base.max_cache_length);
     return std::make_unique<KvCache>(layers, max_cache, heads * hd, stream, cache_dtype);
 }
 
-MagpieTTSConfig build_magpie_config(const std::string& json, const BaseConfig& base)
-{
+MagpieTTSConfig build_magpie_config(const std::string& json, const BaseConfig& base) {
     MagpieTTSConfig magpie_cfg;
     magpie_cfg.sample_rate = extract_json_int(json, "sample_rate", 22050);
     int32_t mh = extract_json_int(json, "magpie_hidden_size", base.hidden_size);
@@ -73,85 +68,70 @@ MagpieTTSConfig build_magpie_config(const std::string& json, const BaseConfig& b
     magpie_cfg.xa_d_head = extract_json_int(json, "magpie_xa_d_head", 128);
     magpie_cfg.temperature = extract_json_float(json, "magpie_temperature", 0.6F);
     magpie_cfg.cfg_scale = extract_json_float(json, "magpie_cfg_scale", 2.5F);
-    magpie_cfg.finished_limit_with_eot = extract_json_int(json, "magpie_finished_limit_with_eot", 0);
+    magpie_cfg.finished_limit_with_eot =
+        extract_json_int(json, "magpie_finished_limit_with_eot", 0);
     return magpie_cfg;
 }
 
-int32_t compute_kv_dim_kv_heads(const BaseConfig& base, int32_t default_dim)
-{
-    if (base.attention_size > 0) return base.attention_size;
-    if (base.num_kv_heads > 0 && base.head_dim > 0) return base.num_kv_heads * base.head_dim;
+int32_t compute_kv_dim_kv_heads(const BaseConfig& base, int32_t default_dim) {
+    if (base.attention_size > 0)
+        return base.attention_size;
+    if (base.num_kv_heads > 0 && base.head_dim > 0)
+        return base.num_kv_heads * base.head_dim;
     return default_dim;
 }
 
-void allocate_cross_kv_buffers(
-    int32_t num_layers, std::size_t buf_size,
-    std::vector<CudaBuffer>& cross_k, std::vector<CudaBuffer>& cross_v)
-{
+void allocate_cross_kv_buffers(int32_t num_layers, std::size_t buf_size,
+                               std::vector<CudaBuffer>& cross_k, std::vector<CudaBuffer>& cross_v) {
     cross_k.reserve(static_cast<std::size_t>(num_layers));
     cross_v.reserve(static_cast<std::size_t>(num_layers));
-    for (int32_t i = 0; i < num_layers; ++i)
-    {
+    for (int32_t i = 0; i < num_layers; ++i) {
         cross_k.emplace_back(buf_size);
         cross_v.emplace_back(buf_size);
     }
 }
 
-std::vector<std::unique_ptr<TrtModule>> load_depth_engines(
-    IBackend* backend,
-    const BundleFile& bundle,
-    const ModuleCreateOptions& options)
-{
+std::vector<std::unique_ptr<TrtModule>> load_depth_engines(IBackend* backend,
+                                                           const BundleFile& bundle,
+                                                           const ModuleCreateOptions& options) {
     std::vector<std::unique_ptr<TrtModule>> depth_engines;
     auto depth_plans = find_sections_by_prefix(bundle, "depth_engine_plan_");
-    if (!depth_plans.empty())
-    {
-        for (std::size_t i = 0; i < depth_plans.size(); ++i)
-        {
+    if (!depth_plans.empty()) {
+        for (std::size_t i = 0; i < depth_plans.size(); ++i) {
             auto m = extract_optional_module(
-                backend,
-                depth_plans[i],
-                ("speech depth_" + std::to_string(i)).c_str(),
-                options);
-            if (m) depth_engines.push_back(std::move(m));
+                backend, depth_plans[i], ("speech depth_" + std::to_string(i)).c_str(), options);
+            if (m)
+                depth_engines.push_back(std::move(m));
         }
     }
-    if (depth_engines.empty())
-    {
+    if (depth_engines.empty()) {
         auto* fallback = find_section(bundle, "depth_engine_plan");
         auto m = extract_optional_module(backend, fallback, "speech depth", options);
-        if (m) depth_engines.push_back(std::move(m));
+        if (m)
+            depth_engines.push_back(std::move(m));
     }
     return depth_engines;
 }
 
-std::shared_ptr<ITokenizer> make_ipa_tok(const BundleFile& bundle)
-{
+std::shared_ptr<ITokenizer> make_ipa_tok(const BundleFile& bundle) {
     auto* phoneme = find_section(bundle, "magpie_ipa_phoneme_dict");
     auto* vocab = find_section(bundle, "magpie_ipa_vocab");
     auto* heteronyms = find_section(bundle, "magpie_ipa_heteronyms");
     auto* config = find_section(bundle, "magpie_ipa_config");
-    if (!has_section_data(phoneme) || !has_section_data(vocab))
-    {
+    if (!has_section_data(phoneme) || !has_section_data(vocab)) {
         throw std::runtime_error(
             "Bundle missing IPA tokenizer sections (magpie_ipa_phoneme_dict, "
             "magpie_ipa_vocab). Rebuild the bundle with the latest trtf-build.");
     }
-    return CreateIpaTokenizer(
-        phoneme->data(), phoneme->size(),
-        has_section_data(heteronyms) ? heteronyms->data() : nullptr,
-        has_section_data(heteronyms) ? heteronyms->size() : 0,
-        vocab->data(), vocab->size(),
-        has_section_data(config) ? config->data() : nullptr,
-        has_section_data(config) ? config->size() : 0);
+    return CreateIpaTokenizer(phoneme->data(), phoneme->size(),
+                              has_section_data(heteronyms) ? heteronyms->data() : nullptr,
+                              has_section_data(heteronyms) ? heteronyms->size() : 0, vocab->data(),
+                              vocab->size(), has_section_data(config) ? config->data() : nullptr,
+                              has_section_data(config) ? config->size() : 0);
 }
 
-SpeechConfig build_speech_config_from_bundle(
-    const BundleFile& bundle,
-    const std::string& json,
-    const BaseConfig& base,
-    const std::string& hf_python)
-{
+SpeechConfig build_speech_config_from_bundle(const BundleFile& bundle, const std::string& json,
+                                             const BaseConfig& base, const std::string& hf_python) {
     SpeechConfig sc;
     sc.sample_rate = extract_json_int(json, "sample_rate", 24000);
     sc.temporal_hidden_size = base.hidden_size;
@@ -184,14 +164,11 @@ SpeechConfig build_speech_config_from_bundle(
     return sc;
 }
 
-int32_t safe_embed_dim(const std::vector<float>& data, int32_t divisor)
-{
-    return (divisor > 0 && !data.empty())
-        ? static_cast<int32_t>(data.size()) / divisor : 0;
+int32_t safe_embed_dim(const std::vector<float>& data, int32_t divisor) {
+    return (divisor > 0 && !data.empty()) ? static_cast<int32_t>(data.size()) / divisor : 0;
 }
 
-void infer_speech_vocab_sizes(SpeechConfig& sc, const std::string& json, const BaseConfig& base)
-{
+void infer_speech_vocab_sizes(SpeechConfig& sc, const std::string& json, const BaseConfig& base) {
     const int32_t h = base.hidden_size;
     int32_t depth_hidden = extract_json_int(json, "depth_hidden_size", base.hidden_size);
     const int32_t dh = extract_json_int(json, "fine_hidden_size", depth_hidden);
@@ -199,37 +176,41 @@ void infer_speech_vocab_sizes(SpeechConfig& sc, const std::string& json, const B
     sc.audio_vocab_size = safe_embed_dim(sc.audio_embeddings, n_codebooks * h);
     sc.temporal_text_vocab = safe_embed_dim(sc.temporal_text_embedding, h);
     sc.depth_text_vocab = safe_embed_dim(sc.depth_text_embedding, dh);
-    sc.num_depformer_emb = safe_embed_dim(sc.depth_audio_embeddings,
-        sc.audio_vocab_size * dh);
+    sc.num_depformer_emb = safe_embed_dim(sc.depth_audio_embeddings, sc.audio_vocab_size * dh);
     sc.temporal_hidden_for_proj = (!sc.depth_projection.empty() && h > 0) ? h : 0;
 }
 
-BaseConfig make_depth_engine_config(const std::string& json, const BaseConfig& base)
-{
+BaseConfig make_depth_engine_config(const std::string& json, const BaseConfig& base) {
     // Resolve fine_* fields first (used as fallbacks for speech_depth_*)
-    int32_t fine_num_layers = extract_json_int(json, "fine_num_layers",
-        extract_json_int(json, "depth_num_layers", 6));
-    int32_t fine_hidden_size = extract_json_int(json, "fine_hidden_size",
-        extract_json_int(json, "depth_hidden_size", base.hidden_size));
-    int32_t fine_num_heads = extract_json_int(json, "fine_num_heads",
-        extract_json_int(json, "depth_num_attention_heads", base.num_heads));
+    int32_t fine_num_layers =
+        extract_json_int(json, "fine_num_layers", extract_json_int(json, "depth_num_layers", 6));
+    int32_t fine_hidden_size = extract_json_int(
+        json, "fine_hidden_size", extract_json_int(json, "depth_hidden_size", base.hidden_size));
+    int32_t fine_num_heads =
+        extract_json_int(json, "fine_num_heads",
+                         extract_json_int(json, "depth_num_attention_heads", base.num_heads));
 
     BaseConfig dc;
     dc.num_layers = extract_json_int(json, "speech_depth_num_layers", fine_num_layers);
-    if (dc.num_layers <= 0) dc.num_layers = fine_num_layers;
+    if (dc.num_layers <= 0)
+        dc.num_layers = fine_num_layers;
     dc.hidden_size = extract_json_int(json, "speech_depth_hidden_size", fine_hidden_size);
-    if (dc.hidden_size <= 0) dc.hidden_size = fine_hidden_size;
+    if (dc.hidden_size <= 0)
+        dc.hidden_size = fine_hidden_size;
     dc.num_heads = extract_json_int(json, "speech_depth_num_heads", fine_num_heads);
-    if (dc.num_heads <= 0) dc.num_heads = fine_num_heads;
-    dc.num_kv_heads = extract_json_int(json, "speech_depth_num_kv_heads",
-        extract_json_int(json, "depth_num_key_value_heads", dc.num_heads));
-    if (dc.num_kv_heads <= 0) dc.num_kv_heads = dc.num_heads;
+    if (dc.num_heads <= 0)
+        dc.num_heads = fine_num_heads;
+    dc.num_kv_heads =
+        extract_json_int(json, "speech_depth_num_kv_heads",
+                         extract_json_int(json, "depth_num_key_value_heads", dc.num_heads));
+    if (dc.num_kv_heads <= 0)
+        dc.num_kv_heads = dc.num_heads;
     dc.vocab_size = extract_json_int(json, "speech_codebook_size",
-        extract_json_int(json, "codebook_size", 2048));
+                                     extract_json_int(json, "codebook_size", 2048));
     dc.head_dim = dc.hidden_size / std::max(dc.num_heads, 1);
     dc.attention_size = dc.num_heads * dc.head_dim;
-    int32_t n_codebooks = extract_json_int(json, "speech_num_codebooks",
-        extract_json_int(json, "num_codebooks", 8));
+    int32_t n_codebooks =
+        extract_json_int(json, "speech_num_codebooks", extract_json_int(json, "num_codebooks", 8));
     dc.max_cache_length = n_codebooks + 2;
     return dc;
 }

@@ -5,16 +5,16 @@
 // strategy plugins can reuse TRT module loading, tokenizer creation,
 // KV-dim computation, and data-section conversion utilities.
 
-#include "trtf/tokenizer.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/runtime/trt_backend.h"
-#include "trtf/runtime/inference_state.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/pipeline_plugin.h"
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/pipelines/recurrent_pipeline.h"
+#include "trtf/runtime/inference_state.h"
+#include "trtf/runtime/kv_cache.h"
+#include "trtf/runtime/pipeline_plugin.h"
+#include "trtf/runtime/trt_backend.h"
+#include "trtf/runtime/trt_module.h"
+#include "trtf/tokenizer.h"
 
 #include <memory>
 #include <string>
@@ -32,8 +32,7 @@ struct LoadedModule {
 
 // Load a TRT engine from a serialized plan via the backend. Throws on failure.
 LoadedModule load_trt_module_from_plan(IBackend* backend, const std::vector<char>* plan,
-                                       const char* label,
-                                       const ModuleCreateOptions& options = {});
+                                       const char* label, const ModuleCreateOptions& options = {});
 
 // Like load_trt_module_from_plan but returns empty LoadedModule on failure
 // instead of throwing (for optional engines).

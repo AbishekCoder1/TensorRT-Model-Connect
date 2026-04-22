@@ -30,18 +30,15 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
 
 // --- Construction ---
 
-TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine,
-                             nvinfer1::IExecutionContext* ctx,
-                             cudaStream_t stream,
-                             int32_t profile_idx)
+TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
+                             cudaStream_t stream, int32_t profile_idx)
     : ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
     if (profile_idx_ > 0) {
         if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
-            std::cerr << "[trt_module] Failed to set optimization profile " << profile_idx_
-                      << "\n";
+            std::cerr << "[trt_module] Failed to set optimization profile " << profile_idx_ << "\n";
             delete ctx_;
             ctx_ = nullptr;
             return;

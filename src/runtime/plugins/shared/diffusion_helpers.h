@@ -1,7 +1,7 @@
 #pragma once
-#include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/domains/diffusion/diffusion_types.h"
 #include "runtime/domains/diffusion/diffusion_preprocessor_weights_helpers.h"
+#include "runtime/domains/diffusion/diffusion_types.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
 #include "utils/json_helpers.h"
 
 #if TRTF_HAS_TRT
@@ -20,11 +20,9 @@ struct DiffusionParts {
     std::shared_ptr<ITokenizer> tokenizer;
 };
 
-DiffusionParts load_diffusion_parts(
-    IBackend* backend,
-    const BundleFile& bundle,
-    const std::string& json,
-    const ModuleCreateOptions& options = {});
+DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
+                                    const std::string& json,
+                                    const ModuleCreateOptions& options = {});
 
 } // namespace trtf
 

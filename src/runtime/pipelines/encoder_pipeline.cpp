@@ -9,8 +9,7 @@ namespace trtf {
 namespace {
 
 // Infer the hidden dimension from the last axis of the first output tensor.
-int32_t infer_output_hidden_dim(const TrtModule& module)
-{
+int32_t infer_output_hidden_dim(const TrtModule& module) {
     for (const auto& info : module.output_info())
         if (!info.shape.empty())
             return static_cast<int32_t>(info.shape.back());
@@ -19,9 +18,7 @@ int32_t infer_output_hidden_dim(const TrtModule& module)
 
 // Mean-pool [seq_len, hidden] over the first actual_len positions,
 // then L2-normalize. Returns the pooled vector of size hidden.
-std::vector<float> mean_pool_and_normalize(
-    const float* data, int32_t actual_len, int32_t hidden)
-{
+std::vector<float> mean_pool_and_normalize(const float* data, int32_t actual_len, int32_t hidden) {
     std::vector<float> pooled(static_cast<std::size_t>(hidden), 0.0f);
     const float inv_len = 1.0f / static_cast<float>(actual_len);
     for (int32_t s = 0; s < actual_len; ++s)
@@ -42,8 +39,7 @@ std::vector<float> mean_pool_and_normalize(
 }
 
 // Check whether the engine's attention_mask input expects int32.
-bool engine_mask_is_int32(const TrtModule& module)
-{
+bool engine_mask_is_int32(const TrtModule& module) {
     for (const auto& info : module.input_info())
         if (info.name == "attention_mask")
             return info.dtype == DType::kInt32;
@@ -54,21 +50,15 @@ bool engine_mask_is_int32(const TrtModule& module)
 
 // ─── EncoderPipeline ───
 
-EncoderPipeline::EncoderPipeline(
-    std::unique_ptr<TrtModule> encoder, std::string mode,
-    std::shared_ptr<ITokenizer> tokenizer,
-    std::string model_id_str)
-    : encoder_(std::move(encoder))
-    , mode_(std::move(mode))
-    , tokenizer_(std::move(tokenizer))
-    , model_id_(std::move(model_id_str))
-{
+EncoderPipeline::EncoderPipeline(std::unique_ptr<TrtModule> encoder, std::string mode,
+                                 std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+    : encoder_(std::move(encoder)), mode_(std::move(mode)), tokenizer_(std::move(tokenizer)),
+      model_id_(std::move(model_id_str)) {
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("EncoderPipeline: invalid encoder module");
 }
 
-EmbeddingResult EncoderPipeline::embed(const std::string& text)
-{
+EmbeddingResult EncoderPipeline::embed(const std::string& text) {
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
     auto ids = tokenizer_->encode(text);
@@ -90,8 +80,7 @@ EmbeddingResult EncoderPipeline::embed(const std::string& text)
     return raw;
 }
 
-EmbeddingResult EncoderPipeline::encode(const std::string& text)
-{
+EmbeddingResult EncoderPipeline::encode(const std::string& text) {
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
     auto ids = tokenizer_->encode(text);
@@ -101,16 +90,14 @@ EmbeddingResult EncoderPipeline::encode(const std::string& text)
     // matrix [max_seq, hidden]. This matches HF model.encode() behavior for
     // encoder-only models (BERT, RoBERTa, etc.).
     const int32_t hidden = infer_output_hidden_dim(*encoder_);
-    if (hidden > 0 && raw.dim > hidden)
-    {
+    if (hidden > 0 && raw.dim > hidden) {
         raw.data.resize(static_cast<std::size_t>(hidden));
         raw.dim = hidden;
     }
     return raw;
 }
 
-float EncoderPipeline::rerank(const std::string& query, const std::string& document)
-{
+float EncoderPipeline::rerank(const std::string& query, const std::string& document) {
     if (!tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
     std::string combined = query + " [SEP] " + document;
@@ -119,8 +106,7 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
     return result.data.empty() ? 0.0f : result.data[0];
 }
 
-EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids)
-{
+EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
     const auto n = input_ids.size();
     std::vector<int32_t> mask_i32(n, 1);
     std::vector<float> mask_f32(n, 1.0f);
@@ -133,14 +119,11 @@ EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_id
 
     // Match the engine's expected dtype for the attention mask.
     Tensor mask_t;
-    if (engine_mask_is_int32(*encoder_))
-    {
+    if (engine_mask_is_int32(*encoder_)) {
         mask_t.data = mask_i32.data();
         mask_t.shape = {static_cast<int64_t>(n)};
         mask_t.dtype = DType::kInt32;
-    }
-    else
-    {
+    } else {
         mask_t.data = mask_f32.data();
         mask_t.shape = {static_cast<int64_t>(n)};
         mask_t.dtype = DType::kFloat32;
@@ -153,14 +136,10 @@ EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_id
     auto outputs = encoder_->forward(inputs);
 
     EmbeddingResult result;
-    for (auto& [name, tensor] : outputs)
-    {
-        if (name.find("logits") != std::string::npos ||
-            name.find("embed") != std::string::npos ||
-            name.find("output") != std::string::npos ||
-            name.find("hidden") != std::string::npos ||
-            name.find("score") != std::string::npos)
-        {
+    for (auto& [name, tensor] : outputs) {
+        if (name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
+            name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
+            name.find("score") != std::string::npos) {
             auto n = tensor.numel();
             result.data.resize(static_cast<std::size_t>(n));
             std::memcpy(result.data.data(), tensor.data, n * sizeof(float));

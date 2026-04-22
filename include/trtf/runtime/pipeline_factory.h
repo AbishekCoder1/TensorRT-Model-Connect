@@ -14,12 +14,11 @@
 namespace trtf {
 
 class PipelineFactory {
-public:
-    static std::unique_ptr<IPipeline> from_bundle(
-        const std::string& bundle_path,
-        const std::string& hf_python = "",
-        const std::string& runtime_cache_path = "",
-        bool cuda_graphs = false);
+  public:
+    static std::unique_ptr<IPipeline> from_bundle(const std::string& bundle_path,
+                                                  const std::string& hf_python = "",
+                                                  const std::string& runtime_cache_path = "",
+                                                  bool cuda_graphs = false);
 };
 
 } // namespace trtf

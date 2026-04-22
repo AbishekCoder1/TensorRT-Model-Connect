@@ -4,8 +4,7 @@
 
 namespace trtf {
 
-DiffusionConfig make_diffusion_config(const std::string& json)
-{
+DiffusionConfig make_diffusion_config(const std::string& json) {
     DiffusionConfig dc;
     std::string sched = extract_json_string(json, "scheduler", "flow_match_euler");
     dc.scheduler = sched.empty() ? "flow_match_euler" : sched;
@@ -40,30 +39,26 @@ DiffusionConfig make_diffusion_config(const std::string& json)
     return dc;
 }
 
-DiffusionParts load_diffusion_parts(
-    IBackend* backend,
-    const BundleFile& bundle,
-    const std::string& json,
-    const ModuleCreateOptions& options)
-{
+DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
+                                    const std::string& json, const ModuleCreateOptions& options) {
     DiffusionParts parts;
 
-    parts.denoiser = load_trt_module_from_plan(
-        backend, find_section(bundle, "denoiser_plan"), "denoiser_plan", options);
-    parts.vae = load_trt_module_from_plan(
-        backend, find_section(bundle, "vae_decoder_plan"), "vae_decoder_plan", options);
+    parts.denoiser = load_trt_module_from_plan(backend, find_section(bundle, "denoiser_plan"),
+                                               "denoiser_plan", options);
+    parts.vae = load_trt_module_from_plan(backend, find_section(bundle, "vae_decoder_plan"),
+                                          "vae_decoder_plan", options);
 
     auto te_plans = find_sections_by_prefix(bundle, "text_encoder_");
     for (std::size_t i = 0; i < te_plans.size(); ++i) {
         std::string label = "text_encoder_" + std::to_string(i);
-        parts.text_encoders.push_back(load_trt_module_from_plan(
-            backend, te_plans[i], label.c_str(), options));
+        parts.text_encoders.push_back(
+            load_trt_module_from_plan(backend, te_plans[i], label.c_str(), options));
     }
     if (parts.text_encoders.empty()) {
         auto* plan = find_section(bundle, "engine_plan");
         if (plan && !plan->empty()) {
-            parts.text_encoders.push_back(load_trt_module_from_plan(
-                backend, plan, "text_encoder_0", options));
+            parts.text_encoders.push_back(
+                load_trt_module_from_plan(backend, plan, "text_encoder_0", options));
         }
     }
 

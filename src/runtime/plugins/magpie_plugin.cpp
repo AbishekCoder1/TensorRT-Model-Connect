@@ -12,8 +12,7 @@ namespace trtf {
 
 namespace {
 
-int32_t compute_magpie_kv_dim(const BaseConfig& base_cfg, const MagpieTTSConfig& magpie_cfg)
-{
+int32_t compute_magpie_kv_dim(const BaseConfig& base_cfg, const MagpieTTSConfig& magpie_cfg) {
     if (base_cfg.attention_size > 0)
         return base_cfg.attention_size;
     if (base_cfg.num_heads > 0 && base_cfg.head_dim > 0)
@@ -81,9 +80,9 @@ class MagpiePlugin final : public IPipelinePlugin {
         if (codec_module)
             codec_module->keep_alive(shared_stream);
 
-        auto lt_module = extract_optional_module(
-            ctx.backend, find_section(ctx.bundle, "lt_engine_plan"), "magpie local transformer",
-            opts);
+        auto lt_module =
+            extract_optional_module(ctx.backend, find_section(ctx.bundle, "lt_engine_plan"),
+                                    "magpie local transformer", opts);
         if (lt_module)
             lt_module->keep_alive(shared_stream);
 

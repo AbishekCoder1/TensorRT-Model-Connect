@@ -11,23 +11,20 @@
 namespace nvinfer1 {
 
 //! Strategy for CUDA graph capture.
-enum class CudaGraphStrategy : int32_t
-{
-    kWHOLE_GRAPH_CAPTURE = 0,  //!< Capture the entire inference graph.
+enum class CudaGraphStrategy : int32_t {
+    kWHOLE_GRAPH_CAPTURE = 0, //!< Capture the entire inference graph.
 };
 
 //! Strategy for dynamic shape kernel specialization.
-enum class DynamicShapesKernelSpecializationStrategy : int32_t
-{
-    kLAZY = 0,   //!< Async background JIT (default).
-    kEAGER = 1,  //!< Blocking JIT.
-    kNONE = 2,   //!< Fallback kernels only.
+enum class DynamicShapesKernelSpecializationStrategy : int32_t {
+    kLAZY = 0,  //!< Async background JIT (default).
+    kEAGER = 1, //!< Blocking JIT.
+    kNONE = 2,  //!< Fallback kernels only.
 };
 
 //! Opaque runtime cache for JIT-compiled kernels.
-class IRuntimeCache
-{
-public:
+class IRuntimeCache {
+  public:
     virtual ~IRuntimeCache() noexcept = default;
 
     //! Deserialize a previously saved cache.

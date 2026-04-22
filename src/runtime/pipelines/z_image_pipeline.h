@@ -3,10 +3,10 @@
 // ZImagePipeline: Z-Image diffusion pipeline with Qwen3 text encoder,
 // denoiser, and VAE. Uses TrtModule::forward() for all GPU work.
 
-#include "trtf/pipeline.h"
-#include "trtf/tokenizer.h"
-#include "trtf/runtime/trt_module.h"
 #include "runtime/domains/diffusion/diffusion_types.h"
+#include "trtf/pipeline.h"
+#include "trtf/runtime/trt_module.h"
+#include "trtf/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
@@ -34,17 +34,12 @@ struct ZImagePreprocessorWeights {
 };
 
 class ZImagePipeline final : public IPipeline {
-public:
-    ZImagePipeline(
-        std::unique_ptr<TrtModule> text_encoder,
-        std::unique_ptr<TrtModule> denoiser,
-        std::unique_ptr<TrtModule> vae,
-        DiffusionConfig config,
-        PreprocessorWeights weights,
-        ZImagePreprocessorWeights z_weights,
-        std::shared_ptr<ITokenizer> tokenizer,
-        std::string model_id_str,
-        std::string bundle_path);
+  public:
+    ZImagePipeline(std::unique_ptr<TrtModule> text_encoder, std::unique_ptr<TrtModule> denoiser,
+                   std::unique_ptr<TrtModule> vae, DiffusionConfig config,
+                   PreprocessorWeights weights, ZImagePreprocessorWeights z_weights,
+                   std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
+                   std::string bundle_path);
 
     ~ZImagePipeline() override;
 
@@ -53,28 +48,20 @@ public:
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "ZImagePipeline"; }
 
-private:
+  private:
     bool run_text_encoder(const std::vector<int32_t>& input_ids,
                           std::vector<float>& text_embeddings);
-    bool run_denoiser(const std::vector<float>& hidden,
-                      const std::vector<float>& encoder_hidden,
-                      const std::vector<float>& temb,
-                      const std::vector<float>& cos_vals,
-                      const std::vector<float>& sin_vals,
-                      std::vector<float>& output);
+    bool run_denoiser(const std::vector<float>& hidden, const std::vector<float>& encoder_hidden,
+                      const std::vector<float>& temb, const std::vector<float>& cos_vals,
+                      const std::vector<float>& sin_vals, std::vector<float>& output);
 
-    void project_caption(const std::vector<float>& text_emb,
-                         int32_t actual_len, int32_t padded_len,
+    void project_caption(const std::vector<float>& text_emb, int32_t actual_len, int32_t padded_len,
                          std::vector<float>& projected) const;
-    void compute_3d_rope(int32_t cap_padded_len, int32_t num_patches,
-                         int32_t nh, int32_t nw,
-                         std::vector<float>& cos_out,
-                         std::vector<float>& sin_out) const;
-    void patchify_2d(const std::vector<float>& latents,
-                     int32_t c, int32_t h, int32_t w,
+    void compute_3d_rope(int32_t cap_padded_len, int32_t num_patches, int32_t nh, int32_t nw,
+                         std::vector<float>& cos_out, std::vector<float>& sin_out) const;
+    void patchify_2d(const std::vector<float>& latents, int32_t c, int32_t h, int32_t w,
                      std::vector<float>& patches) const;
-    void unpatchify_2d(const std::vector<float>& patches,
-                       int32_t c, int32_t h, int32_t w,
+    void unpatchify_2d(const std::vector<float>& patches, int32_t c, int32_t h, int32_t w,
                        std::vector<float>& output) const;
 
     std::unique_ptr<TrtModule> text_encoder_;

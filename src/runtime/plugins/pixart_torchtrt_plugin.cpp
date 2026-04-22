@@ -20,12 +20,13 @@ class PixArtTorchTrtPlugin final : public IPipelinePlugin {
         opts.cuda_graphs = ctx.cuda_graphs;
 
         // Load the three component engines
-        auto te = load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "text_encoder_0_plan"),
-                                            "text_encoder_0_plan", opts);
-        auto denoiser = load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "denoiser_plan"),
-                                                  "denoiser_plan", opts);
-        auto vae = load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "vae_decoder_plan"),
-                                             "vae_decoder_plan", opts);
+        auto te =
+            load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, "text_encoder_0_plan"),
+                                      "text_encoder_0_plan", opts);
+        auto denoiser = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "denoiser_plan"), "denoiser_plan", opts);
+        auto vae = load_trt_module_from_plan(
+            ctx.backend, find_section(ctx.bundle, "vae_decoder_plan"), "vae_decoder_plan", opts);
 
         auto config = make_diffusion_config(ctx.config_json);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);

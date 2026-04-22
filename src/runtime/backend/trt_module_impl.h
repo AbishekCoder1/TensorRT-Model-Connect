@@ -6,9 +6,8 @@
 #include "trtf/runtime/trt_module.h"
 
 #include <NvInfer.h>
-#include <cuda_runtime_api.h>
-
 #include <cstddef>
+#include <cuda_runtime_api.h>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -19,13 +18,11 @@ namespace trtf {
 class CudaGraphExec;
 
 class TrtModuleImpl final : public ITrtModule {
-public:
+  public:
     // Backend creates engine + context, passes them in.
     // The engine must outlive this module (caller manages lifetime via keep_alive).
-    TrtModuleImpl(nvinfer1::ICudaEngine* engine,
-                  nvinfer1::IExecutionContext* ctx,
-                  cudaStream_t stream,
-                  int32_t profile_idx = 0);
+    TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
+                  cudaStream_t stream, int32_t profile_idx = 0);
     ~TrtModuleImpl() override;
 
     TrtModuleImpl(const TrtModuleImpl&) = delete;
@@ -50,7 +47,7 @@ public:
     bool ok() const override { return ctx_ != nullptr; }
     void keep_alive(std::shared_ptr<void> resource) override;
 
-private:
+  private:
     struct BufferEntry {
         void* d_ptr{nullptr};
         std::vector<int64_t> shape;
@@ -74,8 +71,10 @@ private:
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
     void free_buffers();
     void detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io);
-    void allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io, int32_t num_profiles);
-    void allocate_single_input(nvinfer1::ICudaEngine* engine, const char* name, int32_t num_profiles);
+    void allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
+                                int32_t num_profiles);
+    void allocate_single_input(nvinfer1::ICudaEngine* engine, const char* name,
+                               int32_t num_profiles);
     void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
     void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                   nvinfer1::OptProfileSelector selector);

@@ -17,7 +17,7 @@
 namespace trtf {
 
 class ITrtModule {
-public:
+  public:
     virtual ~ITrtModule() = default;
 
     // Forward passes

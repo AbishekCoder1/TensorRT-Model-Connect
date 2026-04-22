@@ -9,7 +9,7 @@
 namespace trtf {
 
 class CudaStream final {
-public:
+  public:
     CudaStream();
     ~CudaStream();
     CudaStream(const CudaStream&) = delete;
@@ -18,13 +18,14 @@ public:
     CudaStream& operator=(CudaStream&& other) noexcept;
     bool ok() const;
     cudaStream_t get() const;
-private:
+
+  private:
     cudaStream_t mStream{nullptr};
     cudaError_t mStatus{cudaSuccess};
 };
 
 class CudaBuffer final {
-public:
+  public:
     explicit CudaBuffer(std::size_t bytes);
     ~CudaBuffer();
     CudaBuffer(const CudaBuffer&) = delete;
@@ -34,7 +35,8 @@ public:
     bool ok() const;
     void* data() const;
     std::size_t size() const;
-private:
+
+  private:
     void* mPtr{nullptr};
     std::size_t mBytes{0};
     cudaError_t mStatus{cudaSuccess};

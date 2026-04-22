@@ -64,8 +64,8 @@ class VLPlugin final : public IPipelinePlugin {
         // Try to load the vision encoder engine from the bundle.
         std::unique_ptr<TrtModule> vision_module;
         auto vision_loaded = try_load_trt_module_from_plan(
-            ctx.backend,
-            find_section(ctx.bundle, "vision_engine_plan"), "vision_engine_plan", opts);
+            ctx.backend, find_section(ctx.bundle, "vision_engine_plan"), "vision_engine_plan",
+            opts);
         if (vision_loaded.module && vision_loaded.module->ok()) {
             vision_loaded.module->keep_alive(shared_stream);
             vision_module = std::move(vision_loaded.module);

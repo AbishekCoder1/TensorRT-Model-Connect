@@ -30,7 +30,7 @@ class ITrtModule;
 using TrtModule = ITrtModule;
 
 class IInferenceState {
-public:
+  public:
     virtual ~IInferenceState() = default;
 
     // --- Lifecycle ---

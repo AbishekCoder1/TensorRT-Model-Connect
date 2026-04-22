@@ -24,8 +24,8 @@
 // Requires TRT + CUDA GPU. Skips gracefully without TRT.
 // =============================================================================
 
-#include "runtime/core/trt_common.h"
 #include "runtime/backend/trt_module_impl.h"
+#include "runtime/core/trt_common.h"
 #include "test_helpers.h"
 #include "trtf/runtime/tensor.h"
 #include "trtf/runtime/trt_module.h"
@@ -103,9 +103,8 @@ static void run_and_read(trtf::ITrtModule& module, const float* input, float* ou
     cudaMemcpy(output, module.device_ptr("y"), 4 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
-static std::unique_ptr<trtf::TrtModuleImpl> make_module(nvinfer1::ICudaEngine* engine,
-                                                        cudaStream_t stream,
-                                                        int32_t profile_idx = 0) {
+static std::unique_ptr<trtf::TrtModuleImpl>
+make_module(nvinfer1::ICudaEngine* engine, cudaStream_t stream, int32_t profile_idx = 0) {
     auto* ctx = engine->createExecutionContext();
     return std::make_unique<trtf::TrtModuleImpl>(engine, ctx, stream, profile_idx);
 }

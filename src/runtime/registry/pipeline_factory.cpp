@@ -1,9 +1,10 @@
 #include "trtf/runtime/pipeline_factory.h"
+
+#include "bundle/bundle_format.h"
+#include "runtime/backend/backend_loader.h"
 #include "trtf/runtime/pipeline_plugin.h"
 #include "trtf/runtime/pipeline_registry.h"
 #include "trtf/runtime/trt_backend.h"
-#include "runtime/backend/backend_loader.h"
-#include "bundle/bundle_format.h"
 #include "utils/json_helpers.h"
 
 #include <iostream>
@@ -65,10 +66,10 @@ std::string normalize_legacy_strategy(const std::string& strategy, const std::st
 
 } // namespace
 
-std::unique_ptr<IPipeline> PipelineFactory::from_bundle(
-    const std::string& bundle_path, const std::string& hf_python,
-    const std::string& runtime_cache_path, bool cuda_graphs)
-{
+std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
+                                                        const std::string& hf_python,
+                                                        const std::string& runtime_cache_path,
+                                                        bool cuda_graphs) {
 #if TRTF_HAS_TRT
     BundleFile bundle = ReadBundleFile(bundle_path);
     if (bundle.sections.empty())
@@ -111,8 +112,8 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy; // use normalized strategy
 
-    PipelineContext ctx{bundle, base_cfg, config_text, hf_python, bundle_path,
-                        backend, runtime_cache_path, cuda_graphs};
+    PipelineContext ctx{bundle,      base_cfg, config_text,        hf_python,
+                        bundle_path, backend,  runtime_cache_path, cuda_graphs};
     auto pipeline = plugin->create(ctx);
 
     std::cerr << "[trtf] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
@@ -128,8 +129,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(
 }
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python,
-                                const std::string& runtime_cache_path, bool cuda_graphs)
-{
+                                const std::string& runtime_cache_path, bool cuda_graphs) {
     return PipelineFactory::from_bundle(bundle_path, hf_python, runtime_cache_path, cuda_graphs);
 }
 

@@ -42,8 +42,7 @@ class OmniPlugin final : public IPipelinePlugin {
         std::unique_ptr<TrtModule> talker_module;
         std::unique_ptr<IInferenceState> talker_state;
         auto talker_loaded = try_load_trt_module_from_plan(
-            ctx.backend,
-            find_section(ctx.bundle, "talker_engine_plan"), "talker", opts);
+            ctx.backend, find_section(ctx.bundle, "talker_engine_plan"), "talker", opts);
         if (talker_loaded.module && talker_loaded.module->ok()) {
             talker_module = std::move(talker_loaded.module);
             int32_t talker_kv_dim = omni_talker_hidden_size;
@@ -57,8 +56,7 @@ class OmniPlugin final : public IPipelinePlugin {
         // Code2Wav (optional)
         std::unique_ptr<TrtModule> code2wav_module;
         auto code2wav_loaded = try_load_trt_module_from_plan(
-            ctx.backend,
-            find_section(ctx.bundle, "code2wav_engine_plan"), "code2wav", opts);
+            ctx.backend, find_section(ctx.bundle, "code2wav_engine_plan"), "code2wav", opts);
         if (code2wav_loaded.module && code2wav_loaded.module->ok())
             code2wav_module = std::move(code2wav_loaded.module);
 

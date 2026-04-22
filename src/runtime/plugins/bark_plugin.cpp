@@ -84,15 +84,13 @@ class BarkPlugin final : public IPipelinePlugin {
 
         // Optional codec engine
         auto codec_loaded = try_load_trt_module_from_plan(
-            ctx.backend,
-            find_section(ctx.bundle, "codec_engine_plan"), "bark codec", opts);
+            ctx.backend, find_section(ctx.bundle, "codec_engine_plan"), "bark codec", opts);
         if (codec_loaded.module && codec_loaded.module->ok())
             pipeline->set_codec_module(std::move(codec_loaded.module));
 
         // Optional fine engine
         auto fine_loaded = try_load_trt_module_from_plan(
-            ctx.backend,
-            find_section(ctx.bundle, "fine_engine_plan"), "bark fine", opts);
+            ctx.backend, find_section(ctx.bundle, "fine_engine_plan"), "bark fine", opts);
         if (fine_loaded.module && fine_loaded.module->ok()) {
             pipeline->set_fine_module(std::move(fine_loaded.module));
             auto fe = section_to_floats(find_section(ctx.bundle, "fine_embed"));

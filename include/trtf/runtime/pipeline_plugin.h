@@ -59,12 +59,12 @@ BaseConfig parse_base_config(const std::string& config_text, int32_t max_cache_l
 struct PipelineContext {
     const BundleFile& bundle;
     const BaseConfig& config;
-    const std::string& config_json; // raw JSON text from bundle
-    const std::string& hf_python;   // path to HF Python interpreter
-    const std::string& bundle_path; // filesystem path to .trtfb file
-    IBackend* backend;                 // Backend for creating ITrtModule instances
+    const std::string& config_json;        // raw JSON text from bundle
+    const std::string& hf_python;          // path to HF Python interpreter
+    const std::string& bundle_path;        // filesystem path to .trtfb file
+    IBackend* backend;                     // Backend for creating ITrtModule instances
     const std::string& runtime_cache_path; // RTX: JIT kernel cache file path
-    bool cuda_graphs;                  // RTX: whole-graph CUDA capture
+    bool cuda_graphs;                      // RTX: whole-graph CUDA capture
 };
 
 // Plugin interface. Each plugin registers itself with the PipelineRegistry

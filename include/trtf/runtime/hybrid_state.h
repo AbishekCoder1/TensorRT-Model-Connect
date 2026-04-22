@@ -13,7 +13,7 @@
 namespace trtf {
 
 class HybridState : public IInferenceState {
-public:
+  public:
     HybridState(std::unique_ptr<KvCache> kv, std::unique_ptr<RecurrentState> ssm);
 
     // --- IInferenceState overrides ---
@@ -35,7 +35,7 @@ public:
     RecurrentState* recurrent_state() { return ssm_.get(); }
     const RecurrentState* recurrent_state() const { return ssm_.get(); }
 
-private:
+  private:
     std::unique_ptr<KvCache> kv_;
     std::unique_ptr<RecurrentState> ssm_;
 };

@@ -25,13 +25,13 @@ class ITrtModule;
 using TrtModule = ITrtModule;
 
 class RecurrentState : public IInferenceState {
-public:
+  public:
     // Specification for one named state tensor per layer.
     struct TensorSpec {
-        std::string name;              // Input tensor name prefix, e.g. "conv_state"
+        std::string name; // Input tensor name prefix, e.g. "conv_state"
         std::vector<int64_t> shape;
-        std::string output_prefix;     // Output tensor name prefix, e.g. "present_conv"
-                                       // If empty, defaults to "present_" + name.
+        std::string output_prefix; // Output tensor name prefix, e.g. "present_conv"
+                                   // If empty, defaults to "present_" + name.
     };
 
     // Allocate state buffers for all layers.
@@ -46,7 +46,7 @@ public:
     void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
     void advance(int32_t n_tokens = 1) override;
     int32_t position() const override { return position_; }
-    int32_t max_length() const override { return -1; }  // unbounded
+    int32_t max_length() const override { return -1; } // unbounded
     int32_t num_layers() const override { return num_layers_; }
     bool needs_attention_mask() const override { return false; }
     std::size_t device_memory_bytes() const override;
@@ -56,7 +56,7 @@ public:
     // --- RecurrentState-specific methods ---
     const std::vector<TensorSpec>& specs() const { return specs_; }
 
-private:
+  private:
     std::vector<TensorSpec> specs_;
     // state_[spec_index][layer_index] -> DeviceTensor
     std::vector<std::vector<DeviceTensor>> state_;

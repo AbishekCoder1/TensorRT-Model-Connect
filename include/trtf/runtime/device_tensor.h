@@ -7,17 +7,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include <cuda_runtime_api.h>
-
 namespace trtf {
 
 class DeviceTensor {
-public:
+  public:
     // Allocate GPU memory for the given shape and dtype.
     DeviceTensor(std::vector<int64_t> shape, DType dtype, cudaStream_t stream);
 
@@ -34,7 +33,7 @@ public:
     // --- Transfers ---
     bool copy_from_host(const void* src);
     bool copy_to_host(void* dst) const;
-    bool copy_from(const DeviceTensor& other);  // D2D
+    bool copy_from(const DeviceTensor& other); // D2D
 
     // --- Static factories ---
     static DeviceTensor zeros(std::vector<int64_t> shape, DType dtype, cudaStream_t stream);
@@ -50,7 +49,7 @@ public:
     std::size_t nbytes() const;
     cudaStream_t stream() const { return stream_; }
 
-private:
+  private:
     void* ptr_{nullptr};
     std::vector<int64_t> shape_;
     DType dtype_{DType::kFloat32};

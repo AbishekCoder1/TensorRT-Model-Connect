@@ -3,13 +3,13 @@
 // VLPipeline: vision-language generation (Qwen2.5-VL, Qwen3-VL, InternVL3, Phi4).
 // Composes: vision_encoder TrtModule + text_decoder TrtModule + KvCache.
 
+#include "runtime/domains/multimodal/image_preprocessor.h"
 #include "trtf/pipeline.h"
-#include "trtf/tokenizer.h"
-#include "trtf/runtime/trt_module.h"
 #include "trtf/runtime/inference_state.h"
 #include "trtf/runtime/kv_cache.h"
 #include "trtf/runtime/sampler.h"
-#include "runtime/domains/multimodal/image_preprocessor.h"
+#include "trtf/runtime/trt_module.h"
+#include "trtf/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
@@ -29,23 +29,17 @@ struct VLConfig {
 };
 
 class VLPipeline final : public IPipeline {
-public:
-    VLPipeline(
-        std::unique_ptr<TrtModule> text_decoder,
-        std::unique_ptr<TrtModule> vision_encoder,
-        std::unique_ptr<IInferenceState> state,
-        VLConfig config,
-        VLPreprocessConfig vl_preprocess,
-        cudaStream_t stream,
-        std::shared_ptr<ITokenizer> tokenizer = nullptr,
-        std::string model_id_str = "",
-        std::unique_ptr<ISampler> sampler = nullptr);
+  public:
+    VLPipeline(std::unique_ptr<TrtModule> text_decoder, std::unique_ptr<TrtModule> vision_encoder,
+               std::unique_ptr<IInferenceState> state, VLConfig config,
+               VLPreprocessConfig vl_preprocess, cudaStream_t stream,
+               std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "",
+               std::unique_ptr<ISampler> sampler = nullptr);
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
-    TextResult generate(const std::string& prompt, const float* image_pixels,
-                        int32_t image_height, int32_t image_width,
-                        const GenerateConfig& cfg = {}) override;
+    TextResult generate(const std::string& prompt, const float* image_pixels, int32_t image_height,
+                        int32_t image_width, const GenerateConfig& cfg = {}) override;
 
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "VLPipeline"; }
@@ -54,8 +48,7 @@ public:
     struct GenerationResult {
         std::vector<int32_t> token_ids;
     };
-    GenerationResult generate_ids(const std::vector<int32_t>& input_ids,
-                                  const GenerateConfig& cfg);
+    GenerationResult generate_ids(const std::vector<int32_t>& input_ids, const GenerateConfig& cfg);
 
     // VL preprocessing config (public for testing).
     const VLPreprocessConfig& vl_preprocess_config() const { return vl_preprocess_; }
@@ -63,7 +56,7 @@ public:
 
     static int32_t argmax(const std::vector<float>& logits);
 
-private:
+  private:
     std::unique_ptr<TrtModule> text_decoder_;
     std::unique_ptr<TrtModule> vision_encoder_;
     std::unique_ptr<IInferenceState> state_;
@@ -74,36 +67,26 @@ private:
     std::string model_id_;
     std::unique_ptr<ISampler> sampler_;
 
-    std::vector<int32_t> generate_from_ids(
-        const std::vector<int32_t>& input_ids,
-        int32_t max_new_tokens,
-        const SamplingParams& params);
+    std::vector<int32_t> generate_from_ids(const std::vector<int32_t>& input_ids,
+                                           int32_t max_new_tokens, const SamplingParams& params);
 
     // VL generation with vision features injected at image token positions.
-    std::vector<int32_t> generate_vl_from_ids(
-        const std::vector<int32_t>& input_ids,
-        const std::vector<float>& image_features,
-        int32_t num_features,
-        int32_t feature_dim,
-        int32_t max_new_tokens,
-        const SamplingParams& params);
+    std::vector<int32_t> generate_vl_from_ids(const std::vector<int32_t>& input_ids,
+                                              const std::vector<float>& image_features,
+                                              int32_t num_features, int32_t feature_dim,
+                                              int32_t max_new_tokens, const SamplingParams& params);
 
     std::pair<int32_t, int32_t> resolve_gen_limits(const GenerateConfig& cfg) const;
 
     void run_text_step(int32_t token_id, std::vector<float>& logits);
 
     // Run a text step with optional vision embedding override.
-    void run_text_step_with_embed(
-        int32_t token_id,
-        const float* input_embed,
-        float use_input_embed,
-        std::vector<float>& logits);
+    void run_text_step_with_embed(int32_t token_id, const float* input_embed, float use_input_embed,
+                                  std::vector<float>& logits);
 
     // Run vision encoder on preprocessed pixel values.
-    bool run_vision_encoder(
-        const float* pixel_values,
-        std::size_t pixel_count,
-        std::vector<float>& image_features);
+    bool run_vision_encoder(const float* pixel_values, std::size_t pixel_count,
+                            std::vector<float>& image_features);
 };
 
 } // namespace trtf

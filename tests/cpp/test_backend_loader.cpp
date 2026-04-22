@@ -7,7 +7,10 @@
 static int failures = 0;
 
 static void check(bool cond, const char* name) {
-    if (!cond) { std::cerr << "FAIL: " << name << std::endl; ++failures; }
+    if (!cond) {
+        std::cerr << "FAIL: " << name << std::endl;
+        ++failures;
+    }
 }
 
 int main() {

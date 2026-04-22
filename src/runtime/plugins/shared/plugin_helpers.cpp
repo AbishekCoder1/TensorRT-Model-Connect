@@ -1,6 +1,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/trt_backend.h"
 
+#include "trtf/runtime/trt_backend.h"
 #include "utils/json_helpers.h"
 
 #include <cstring>
@@ -136,8 +136,7 @@ LoadedModule load_trt_module_from_plan(IBackend* backend, const std::vector<char
 }
 
 LoadedModule try_load_trt_module_from_plan(IBackend* backend, const std::vector<char>* plan,
-                                           const char* label,
-                                           const ModuleCreateOptions& options) {
+                                           const char* label, const ModuleCreateOptions& options) {
     if (!plan || plan->empty())
         return LoadedModule{};
     try {

@@ -13,20 +13,20 @@ bool trt_log_to_stderr_enabled();
 nvinfer1::ILogger::Severity trt_log_stderr_min_severity();
 
 class TrtLogger final : public nvinfer1::ILogger {
-public:
+  public:
     void log(Severity severity, const char* msg) noexcept override;
     const std::string& last_error() const;
     void clear_error();
 
-private:
+  private:
     std::string mLastError;
 };
 
 template <typename T>
 struct TrtDeleter {
-    void operator()(T* ptr) const noexcept
-    {
-        if (ptr) delete ptr;
+    void operator()(T* ptr) const noexcept {
+        if (ptr)
+            delete ptr;
     }
 };
 

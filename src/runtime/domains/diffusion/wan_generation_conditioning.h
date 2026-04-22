@@ -14,46 +14,35 @@
 namespace trtf {
 namespace diffusion {
 
-struct WanConditioningInputs
-{
+struct WanConditioningInputs {
     std::vector<float> encoder_attn_mask;
     std::vector<int32_t> null_ids;
 };
 
-struct WanTextConditioning
-{
+struct WanTextConditioning {
     std::vector<float> text_projected;
     std::vector<float> null_text;
 };
 
-inline WanConditioningInputs make_wan_conditioning_inputs(
-    const DiffusionConfig& config,
-    const WanLayout& layout,
-    const std::vector<int32_t>& input_ids)
-{
+inline WanConditioningInputs make_wan_conditioning_inputs(const DiffusionConfig& config,
+                                                          const WanLayout& layout,
+                                                          const std::vector<int32_t>& input_ids) {
     WanConditioningInputs inputs;
     inputs.null_ids.assign(static_cast<std::size_t>(layout.seq_len), 0);
-    if (!inputs.null_ids.empty())
-    {
+    if (!inputs.null_ids.empty()) {
         inputs.null_ids[0] = 1;
     }
 
-    if (!config.use_rope)
-    {
-        inputs.encoder_attn_mask.assign(
-            static_cast<std::size_t>(layout.seq_len),
-            -10000.0F);
+    if (!config.use_rope) {
+        inputs.encoder_attn_mask.assign(static_cast<std::size_t>(layout.seq_len), -10000.0F);
         for (std::size_t index = 0;
              index < input_ids.size() && index < static_cast<std::size_t>(layout.seq_len);
-             ++index)
-        {
-            if (input_ids[index] != 0)
-            {
+             ++index) {
+            if (input_ids[index] != 0) {
                 inputs.encoder_attn_mask[index] = 0.0F;
             }
         }
-        if (!input_ids.empty() && !inputs.encoder_attn_mask.empty())
-        {
+        if (!input_ids.empty() && !inputs.encoder_attn_mask.empty()) {
             inputs.encoder_attn_mask[0] = 0.0F;
         }
     }
@@ -62,52 +51,39 @@ inline WanConditioningInputs make_wan_conditioning_inputs(
 }
 
 template <typename RunT5EncoderFn, typename ProjectTextFn>
-bool build_wan_text_conditioning(
-    const std::vector<int32_t>& input_ids,
-    const WanConditioningInputs& inputs,
-    int32_t seq_len,
-    std::string& error,
-    RunT5EncoderFn&& run_t5_encoder,
-    ProjectTextFn&& project_text,
-    WanTextConditioning& conditioning)
-{
+bool build_wan_text_conditioning(const std::vector<int32_t>& input_ids,
+                                 const WanConditioningInputs& inputs, int32_t seq_len,
+                                 std::string& error, RunT5EncoderFn&& run_t5_encoder,
+                                 ProjectTextFn&& project_text, WanTextConditioning& conditioning) {
     std::vector<float> text_embeddings;
-    if (!run_t5_encoder(input_ids, text_embeddings, error))
-    {
+    if (!run_t5_encoder(input_ids, text_embeddings, error)) {
         return false;
     }
     project_text(text_embeddings, seq_len, conditioning.text_projected);
 
     std::vector<float> null_embeddings;
-    if (!run_t5_encoder(inputs.null_ids, null_embeddings, error))
-    {
+    if (!run_t5_encoder(inputs.null_ids, null_embeddings, error)) {
         return false;
     }
     project_text(null_embeddings, seq_len, conditioning.null_text);
     return true;
 }
 
-inline std::vector<float> make_wan_initial_latents(
-    std::size_t latent_count,
-    uint32_t seed = 42U)
-{
+inline std::vector<float> make_wan_initial_latents(std::size_t latent_count, uint32_t seed = 42U) {
     constexpr double kPi = 3.14159265358979323846;
     std::mt19937 rng(seed);
     std::uniform_real_distribution<double> dist(0.0, 1.0);
     std::vector<float> latents(latent_count, 0.0F);
-    for (std::size_t index = 0; index < latents.size(); index += 2)
-    {
+    for (std::size_t index = 0; index < latents.size(); index += 2) {
         double u1 = dist(rng);
         double u2 = dist(rng);
-        if (u1 < 1e-12)
-        {
+        if (u1 < 1e-12) {
             u1 = 1e-12;
         }
         const double radius = std::sqrt(-2.0 * std::log(u1));
         const double theta = 2.0 * kPi * u2;
         latents[index] = static_cast<float>(radius * std::cos(theta));
-        if (index + 1 < latents.size())
-        {
+        if (index + 1 < latents.size()) {
             latents[index + 1] = static_cast<float>(radius * std::sin(theta));
         }
     }

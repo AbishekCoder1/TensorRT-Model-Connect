@@ -3,6 +3,8 @@
 // MagpiePipeline: Magpie TTS encoder-decoder pipeline with optional CFG.
 // Uses TrtModule(encoder) + TrtModule(decoder) + KvCache + TrtModule(codec).
 
+#include "runtime/core/trt_common.h"
+#include "runtime/domains/audio/audio_configs.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/pipeline.h"
 #include "trtf/runtime/inference_state.h"
@@ -11,16 +13,12 @@
 #include "trtf/tokenizer.h"
 
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <functional>
 #include <memory>
 #include <random>
 #include <string>
 #include <vector>
-
-#include "runtime/core/trt_common.h"
-#include "runtime/domains/audio/audio_configs.h"
-
-#include <cuda_runtime_api.h>
 
 namespace trtf {
 

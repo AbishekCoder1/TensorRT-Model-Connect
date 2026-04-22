@@ -2,9 +2,10 @@
 // Compiled into libtrtf_backend_trt.so. Links libnvinfer.so.
 
 #include "trtf/runtime/trt_backend.h"
-#include "trt_module_impl.h"
-#include "trt_logger.h"
+
 #include "runtime/core/cuda_common.h"
+#include "trt_logger.h"
+#include "trt_module_impl.h"
 
 #include <NvInfer.h>
 #include <iostream>
@@ -14,16 +15,14 @@
 namespace trtf {
 
 class TrtBackend final : public IBackend {
-public:
+  public:
     TrtBackend() : runtime_(create_trt_runtime()) {
         if (!runtime_)
             throw std::runtime_error("[trtf] Failed to create TRT runtime");
     }
 
-    std::unique_ptr<ITrtModule> create_module(
-        const void* plan_data, size_t plan_size,
-        const ModuleCreateOptions& options) override
-    {
+    std::unique_ptr<ITrtModule> create_module(const void* plan_data, size_t plan_size,
+                                              const ModuleCreateOptions& options) override {
         auto* engine = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine)
             throw std::runtime_error("[trtf] Failed to deserialize engine (TRT)");
@@ -64,19 +63,21 @@ public:
 
     const char* name() const override { return "trt"; }
 
-private:
+  private:
     TrtUniquePtr<nvinfer1::IRuntime> runtime_;
 };
 
 } // namespace trtf
 
-extern "C" trtf::IBackend* trtf_create_backend()
-{
-    try { return new trtf::TrtBackend(); }
-    catch (const std::exception& e) {
+extern "C" trtf::IBackend* trtf_create_backend() {
+    try {
+        return new trtf::TrtBackend();
+    } catch (const std::exception& e) {
         std::cerr << "[trtf] TRT backend init failed: " << e.what() << std::endl;
         return nullptr;
     }
 }
 
-extern "C" void trtf_destroy_backend(trtf::IBackend* b) { delete b; }
+extern "C" void trtf_destroy_backend(trtf::IBackend* b) {
+    delete b;
+}

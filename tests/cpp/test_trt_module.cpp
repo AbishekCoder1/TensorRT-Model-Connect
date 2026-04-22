@@ -27,9 +27,9 @@
 // Requires TRT + CUDA GPU. Skips gracefully without TRT.
 // =============================================================================
 
-#include "trtf/runtime/trt_module.h"
 #include "runtime/backend/trt_module_impl.h"
 #include "trtf/runtime/tensor.h"
+#include "trtf/runtime/trt_module.h"
 
 #include <cstdint>
 #include <cstring>

@@ -1,17 +1,17 @@
 // FluxPlugin: handles "diffusion_flux" strategy.
 // FLUX diffusion pipeline with T5 + CLIP text encoders, denoiser, and VAE.
 
-#include "trtf/runtime/pipeline_registry.h"
-#include "runtime/plugins/shared/plugin_helpers.h"
-#include "runtime/plugins/shared/diffusion_helpers.h"
 #include "runtime/pipelines/flux_pipeline.h"
+#include "runtime/plugins/shared/diffusion_helpers.h"
+#include "runtime/plugins/shared/plugin_helpers.h"
+#include "trtf/runtime/pipeline_registry.h"
 
 #if TRTF_HAS_TRT
 
 namespace trtf {
 
 class FluxPlugin final : public IPipelinePlugin {
-public:
+  public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         ModuleCreateOptions opts;
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
@@ -28,14 +28,9 @@ public:
         auto clip_tok = create_clip_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<FluxPipeline>(
-            std::move(te_modules),
-            std::move(parts.denoiser.module),
-            std::move(parts.vae.module),
-            std::move(parts.config),
-            std::move(parts.weights),
-            std::move(parts.tokenizer),
-            std::move(clip_tok),
-            ctx.bundle.info.model_id);
+            std::move(te_modules), std::move(parts.denoiser.module), std::move(parts.vae.module),
+            std::move(parts.config), std::move(parts.weights), std::move(parts.tokenizer),
+            std::move(clip_tok), ctx.bundle.info.model_id);
     }
 };
 
