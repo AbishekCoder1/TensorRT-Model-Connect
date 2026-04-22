@@ -4,6 +4,7 @@
   "hf_id": "nvidia/magpie_tts_multilingual_357m",
   "bundle": "magpie-tts-357m.trtfb",
   "family": "magpie_tts",
+  "skip": "pre-existing: magpie decoder is fixed-shape [max_length, kv_dim] but KvCache now runs a dynamic-row-binding path inherited from the native TriAttention feature, and its attention_mask rank (3-D for magpie, 2-D/1-D elsewhere) isn't parameterised. Test fails at setInputShape on the first decoder step. Unrelated to the config-registry / CCN refactor — track in a follow-up KvCache seam.",
   "runtime_strategy": "text_to_audio_magpie",
   "reference_backend": "nemo",
   "test_type": "audio",
