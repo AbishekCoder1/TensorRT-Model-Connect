@@ -1,13 +1,16 @@
 """Reranking strategy runner — TRT inference for reranking models.
 
-Runs the C++ binary with ``trtf rerank`` to produce relevance scores.
+Runs the C++ binary with ``trtf rerank`` to produce a relevance score for a
+single (prompt, document) pair. The binary prints ``Relevance score: <float>``
+on stdout; this runner parses that single score and wraps it as a one-element
+``scores`` list so the reranking comparator contract is satisfied.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
+import re
 import subprocess
 import time
 
@@ -15,6 +18,8 @@ from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
+
+_SCORE_RE = re.compile(r"Relevance score:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
 
 
 class RerankingRunner:
@@ -28,12 +33,20 @@ class RerankingRunner:
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
         bundle_path = os.path.join(ctx.engine_dir, case.bundle)
-        query = case.inputs.get("prompt", "")
-        passages = case.inputs.get("passages", [])
+        prompt = case.inputs.get("prompt", "")
+        document = case.inputs.get("document", "")
 
-        cmd = [ctx.binary_path, "rerank", bundle_path, "--query", query]
-        if passages:
-            cmd.extend(["--passages"] + list(passages))
+        if not prompt or not document:
+            raise ValueError(
+                "Reranking requires both 'prompt' and 'document' in "
+                f"manifest inputs (case={case.name!r})"
+            )
+
+        cmd = [
+            ctx.binary_path, "rerank", bundle_path,
+            "--prompt", prompt,
+            "--document", document,
+        ]
 
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:
@@ -60,11 +73,11 @@ class RerankingRunner:
                 msg += f" (full stderr: {log_path})"
             raise RuntimeError(msg)
 
-        scores = _parse_scores(result.stdout.strip())
+        score = _parse_score(result.stdout)
 
         return StageOutput(
             stage_name=stage.name,
-            data={"scores": scores},
+            data={"scores": [score]},
             timing_s=elapsed,
             metadata={
                 "command": cmd,
@@ -73,37 +86,22 @@ class RerankingRunner:
         )
 
 
-def _parse_scores(stdout: str) -> list[float]:
-    """Parse relevance scores from C++ binary output."""
-    # Try JSON first
-    try:
-        data = json.loads(stdout)
-        if isinstance(data, list):
-            return [float(x) for x in data]
-        if isinstance(data, dict) and "scores" in data:
-            return [float(x) for x in data["scores"]]
-    except (json.JSONDecodeError, ValueError):
-        pass
+def _parse_score(stdout: str) -> float:
+    """Parse the single relevance score from ``trtf rerank`` stdout."""
+    match = _SCORE_RE.search(stdout)
+    if match:
+        return float(match.group(1))
 
-    # Try one-score-per-line or whitespace-separated
-    scores: list[float] = []
-    for line in stdout.splitlines():
+    for line in reversed(stdout.splitlines()):
         line = line.strip()
         if not line:
             continue
         try:
-            scores.append(float(line))
+            return float(line)
         except ValueError:
-            # Try whitespace-separated on this line
-            try:
-                scores.extend(float(x) for x in line.split())
-            except ValueError:
-                continue
+            continue
 
-    if scores:
-        return scores
-
-    raise ValueError(f"Could not parse scores from output: {stdout[:500]}")
+    raise ValueError(f"Could not parse relevance score from output: {stdout[:500]}")
 
 
 plugin = RerankingRunner()

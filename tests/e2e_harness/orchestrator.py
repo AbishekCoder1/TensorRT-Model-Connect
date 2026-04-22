@@ -722,8 +722,15 @@ class E2EOrchestrator:
         # Collect environment fingerprint
         env_fp = sink.ensure_env_fingerprint(ctx)
 
-        # skip_reason: TRT inference still runs; only reference/comparison is skipped.
-        skip_reason = case.metadata.get("skip_reason")
+        # Partial skip: TRT inference still runs; only HF reference/comparison
+        # is skipped. Driven by manifest `skip_comparison` (see manifest_loader).
+        # `skip_reason` is kept as a legacy fallback — when the manifest-level
+        # `skip` is set, test_e2e.py short-circuits with pytest.skip before
+        # this orchestrator even runs, so this path is normally unreachable.
+        skip_reason = (
+            case.metadata.get("skip_comparison_reason")
+            or case.metadata.get("skip_reason")
+        )
 
         # 1. Preflight
         t0 = time.monotonic()

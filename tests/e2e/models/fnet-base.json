@@ -11,8 +11,6 @@
   "logit_atol": 0.001,
   "layer_atol": 0.05,
   "trust_remote_code": false,
-  "skip_text_match": true,
-  "skip_logit_comparison": true,
   "notes": "FNet with 2D DFT via matrix multiplication; larger TRT-HF delta expected due to DFT approximation",
   "core": false,
   "threshold_overrides": {

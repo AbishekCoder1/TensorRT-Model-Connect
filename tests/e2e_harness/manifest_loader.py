@@ -422,7 +422,8 @@ def _build_metadata(manifest: dict) -> dict:
         "task_strategy", "reference_backend", "oracle_level", "prompt",
         "test_prompt", "max_new_tokens", "max_cache_length", "precision",
         "quantization",
-        "logit_atol", "layer_atol", "trust_remote_code", "skip", "test_image",
+        "logit_atol", "layer_atol", "trust_remote_code", "skip",
+        "skip_comparison", "test_image",
         "test_input_audio", "speech_reference_tokens", "speech_test_max_frames",
         "speech_min_token_match", "speech_min_frame_exact", "speech_min_rms",
         "point_x", "point_y", "num_expected_masks", "min_pixel_agreement",
@@ -614,6 +615,13 @@ def load_manifest(
     if known_limitation:
         metadata["known_limitations"] = [known_limitation]
         metadata["skip_reason"] = raw["skip"]
+
+    # Partial skip: run TRT but skip HF reference/comparison.
+    if raw.get("skip_comparison"):
+        reason = raw["skip_comparison"]
+        if isinstance(reason, bool):
+            reason = "comparison skipped"
+        metadata["skip_comparison_reason"] = reason
 
     return E2ECase(
         name=raw["name"],

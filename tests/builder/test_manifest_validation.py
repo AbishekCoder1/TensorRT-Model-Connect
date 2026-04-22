@@ -208,3 +208,48 @@ class TestManifestValidation:
         assert case.metadata["precision"] == "bf16"
         assert case.metadata["quantization"]["format"] == "fp8"
         assert case.metadata["quantization"]["scale_artifact"] == "scales/qwen3-fp8.json"
+
+    def test_skip_comparison_populates_metadata(self, tmp_path):
+        """skip_comparison should set skip_comparison_reason without setting skip_reason."""
+        path = self._write_manifest(tmp_path, {
+            "name": "rerank-test",
+            "hf_id": "org/rerank",
+            "family": "eagle_vlm",
+            "runtime_strategy": "reranking",
+            "skip_comparison": "reference shape mismatch",
+        })
+        case = load_manifest(path)
+        assert case.metadata["skip_comparison_reason"] == "reference shape mismatch"
+        # Partial skip must NOT set skip_reason (that would trigger full pytest.skip)
+        assert "skip_reason" not in case.metadata
+
+    def test_skip_comparison_does_not_exempt_required_fields(self, tmp_path):
+        """skip_comparison still requires hf_id + family (unlike skip)."""
+        path = self._write_manifest(tmp_path, {
+            "name": "rerank-test",
+            "skip_comparison": "reference shape mismatch",
+        })
+        with pytest.raises(ValueError, match="hf_id"):
+            _validate_manifest(json.load(open(path)), path)
+
+    def test_skip_comparison_bool_defaults_reason(self, tmp_path):
+        """skip_comparison: true should produce a default reason string."""
+        path = self._write_manifest(tmp_path, {
+            "name": "rerank-test",
+            "hf_id": "org/rerank",
+            "family": "eagle_vlm",
+            "runtime_strategy": "reranking",
+            "skip_comparison": True,
+        })
+        case = load_manifest(path)
+        assert case.metadata["skip_comparison_reason"]
+
+    def test_skip_and_skip_comparison_are_independent(self, tmp_path):
+        """`skip` still takes precedence (full skip); `skip_comparison` alone is partial."""
+        path_full = self._write_manifest(tmp_path, {
+            "name": "full-skip",
+            "skip": "broken",
+        })
+        case_full = load_manifest(path_full)
+        assert case_full.metadata["skip_reason"] == "broken"
+        assert "skip_comparison_reason" not in case_full.metadata

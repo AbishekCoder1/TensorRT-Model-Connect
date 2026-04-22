@@ -11,8 +11,6 @@
   "logit_atol": 0.025,
   "layer_atol": 0.05,
   "trust_remote_code": false,
-  "skip_text_match": true,
-  "skip_logit_comparison": true,
   "notes": "Encoder-only model with hybrid attention + span-based dynamic convolution. Outputs hidden states, not logits.",
   "core": false,
   "threshold_overrides": {

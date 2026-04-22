@@ -1,0 +1,19 @@
+{
+  "name": "nemotron-rerank-vl-1b-v2",
+  "trace_id": "IT-E2E-EGRK-01",
+  "hf_id": "nvidia/llama-nemotron-rerank-vl-1b-v2",
+  "bundle": "nemotron-rerank-vl-1b-v2.trtfb",
+  "family": "eagle_vlm",
+  "runtime_strategy": "reranking",
+  "max_cache_length": 256,
+  "inputs": {
+    "prompt": "What is the capital of France?",
+    "document": "Paris is the capital and most populous city of France."
+  },
+  "prompt": "What is the capital of France?",
+  "max_new_tokens": 1,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05,
+  "trust_remote_code": true,
+  "skip_comparison": "trtf rerank returns a single (prompt, document) relevance score while the HF AutoModelForSequenceClassification reference returns a logits list — the harness has no comparator for that shape yet, so TRT runs but comparison is skipped"
+}

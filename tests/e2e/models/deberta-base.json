@@ -10,8 +10,6 @@
   "logit_atol": 0.001,
   "layer_atol": 0.05,
   "trust_remote_code": false,
-  "skip_text_match": true,
-  "skip_logit_comparison": true,
   "notes": "Encoder-only model with disentangled attention. Outputs hidden states, not logits.",
   "core": false
 }
