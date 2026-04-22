@@ -92,7 +92,7 @@ void apply_platform_config(const config::ConfigBundle& bundle)
     try
     {
         const std::string source = bundle.get<std::string>("platform", "source_dir");
-        if (!source.empty()) set_source_dir_override(source);
+        if (!source.empty()) set_source_dir(source);
         const bool verbose_stderr = bundle.get<bool>("platform", "trt_log_stderr");
         const std::string severity = bundle.get<std::string>("platform", "trt_log_min_severity");
         configure_trt_logger(verbose_stderr, severity);

@@ -6,14 +6,14 @@ namespace trtf {
 
 // Returns the project source directory. Resolution:
 // 1. platform.source_dir registry value (if non-empty and set via
-//    set_source_dir_override from pipeline_factory)
+//    set_source_dir from pipeline_factory)
 // 2. TRTF_SOURCE_DIR compile-time define
 std::string source_dir();
 
-// Set the runtime source-dir override. Called by pipeline_factory after
+// Set the runtime runtime source-dir setting. Called by pipeline_factory after
 // resolving the platform.* registry namespace. Replaces the old
 // TRTF_DATA_DIR env var.
-void set_source_dir_override(const std::string& value);
+void set_source_dir(const std::string& value);
 
 // Returns path to scripts/ directory.
 std::string scripts_dir();
