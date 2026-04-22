@@ -237,75 +237,95 @@ TextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
     return GenerationResult{generate_from_ids(input_ids, max_new, sp, cfg).token_ids};
 }
 
-TextGenerationPipeline::TimedGenResult
-TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
-                                          int32_t max_new_tokens, const SamplingParams& params,
-                                          const GenerateConfig& cfg, bool collect_timing) {
-    using Clock = std::chrono::steady_clock;
-
-    if (max_new_tokens == 0 || input_ids.empty()) {
-        return TimedGenResult{input_ids, 0.0, 0.0};
+std::unique_ptr<ISampler> TextGenerationPipeline::make_step_sampler(const SamplingParams& params) {
+    const bool greedy_params =
+        (params.temperature < 1e-6F) ||
+        (params.top_k <= 1 && params.top_p >= 1.0F && params.min_p <= 0.0F && params.seed < 0);
+    if (prefer_gpu_greedy_ && greedy_params) {
+        if (auto gpu = create_gpu_greedy_sampler(stream_))
+            return gpu;
     }
+    return create_sampler(params);
+}
 
-    // Create a per-call sampler if none was injected at construction time.
-    ISampler* active_sampler = sampler_.get();
-    std::unique_ptr<ISampler> local_sampler;
-    if (!active_sampler) {
-        const bool greedy_params =
-            (params.temperature < 1e-6F) ||
-            (params.top_k <= 1 && params.top_p >= 1.0F && params.min_p <= 0.0F && params.seed < 0);
-        if (prefer_gpu_greedy_ && greedy_params)
-            local_sampler = create_gpu_greedy_sampler(stream_);
-        if (!local_sampler)
-            local_sampler = create_sampler(params);
-        active_sampler = local_sampler.get();
-    }
-    active_sampler->reset();
-
-    state_->reset();
-    state_bound_ = false;
-    for (auto& decoder_ctx : decoders_) {
-        decoder_ctx.module->reset_execution_context();
-    }
-    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
-
-    std::vector<float> logits;
-    const bool gpu_sampling = (active_sampler->logits_location() == LogitsLocation::DEVICE);
-
-    auto t0 = Clock::now();
-
-    // Prefill: process all input tokens except the last.
+void TextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
+                                         std::vector<float>& logits, bool gpu_sampling) {
     for (std::size_t i = 0; i + 1 < input_ids.size(); ++i) {
         if (gpu_sampling)
             run_step_device(input_ids[i]);
         else
             run_step(input_ids[i], logits);
     }
-
-    // Start decode from last input token
-    int32_t current_token = input_ids.back();
+    const int32_t last_token = input_ids.back();
     if (gpu_sampling)
-        run_step_device(current_token);
+        run_step_device(last_token);
     else
-        run_step(current_token, logits);
+        run_step(last_token, logits);
     state_->mark_prefill_complete();
+}
 
-    auto t1 = Clock::now();
+TextGenerationPipeline::TimedGenResult
+TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
+                                          int32_t max_new_tokens, const SamplingParams& params,
+                                          const GenerateConfig& cfg, bool collect_timing) {
+    using Clock = std::chrono::steady_clock;
+    if (max_new_tokens == 0 || input_ids.empty())
+        return TimedGenResult{input_ids, 0.0, 0.0};
 
-    // Decode: autoregressive loop
+    ISampler* active_sampler = sampler_.get();
+    std::unique_ptr<ISampler> local_sampler;
+    if (!active_sampler) {
+        local_sampler = make_step_sampler(params);
+        active_sampler = local_sampler.get();
+    }
+    active_sampler->reset();
+
+    state_->reset();
+    state_bound_ = false;
+    for (auto& decoder_ctx : decoders_)
+        decoder_ctx.module->reset_execution_context();
+    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
+
+    std::vector<float> logits;
+    const bool gpu_sampling = (active_sampler->logits_location() == LogitsLocation::DEVICE);
+    const auto t0 = Clock::now();
+    run_prefill(input_ids, logits, gpu_sampling);
+    const auto t1 = Clock::now();
+
     std::vector<int32_t> output = input_ids;
-    int32_t decode_steps =
-        run_decode_loop(active_sampler, params, output, logits, max_new_tokens, gpu_sampling, cfg,
-                        static_cast<int32_t>(input_ids.size()));
+    run_decode_loop(active_sampler, params, output, logits, max_new_tokens, gpu_sampling, cfg,
+                    static_cast<int32_t>(input_ids.size()));
+    const auto t2 = Clock::now();
 
-    auto t2 = Clock::now();
-
-    double prefill_ms =
+    const double prefill_ms =
         collect_timing ? std::chrono::duration<double, std::milli>(t1 - t0).count() : 0.0;
-    double decode_ms =
+    const double decode_ms =
         collect_timing ? std::chrono::duration<double, std::milli>(t2 - t1).count() : 0.0;
-
     return TimedGenResult{std::move(output), prefill_ms, decode_ms};
+}
+
+bool TextGenerationPipeline::should_stop_on_answer(const std::vector<int32_t>& output,
+                                                   int32_t prompt_token_count,
+                                                   const GenerateConfig& cfg, int32_t steps,
+                                                   int32_t stop_interval, bool is_eos) const {
+    if (!cfg.stop_on_boxed_answer || !tokenizer_)
+        return false;
+    if ((steps % stop_interval) != 0 && !is_eos)
+        return false;
+    std::vector<int32_t> new_tokens(output.begin() + prompt_token_count, output.end());
+    const std::string decoded = tokenizer_->decode(new_tokens);
+    return contains_boxed_answer(decoded) || contains_final_answer(decoded);
+}
+
+void TextGenerationPipeline::log_decode_summary(int32_t steps, double ms) const {
+    if (steps <= 0 || !trt_log_to_stderr_enabled())
+        return;
+    const double tps = steps * 1000.0 / ms;
+    const bool cuda_graph_on =
+        active_decoder_index_ >= 0 &&
+        decoders_[static_cast<std::size_t>(active_decoder_index_)].module->cuda_graph_active();
+    std::cerr << "[trtf] Decode: " << steps << " tokens, " << ms << " ms, " << tps << " tok/s"
+              << (cuda_graph_on ? " [CUDA Graph ON]" : "") << '\n';
 }
 
 int32_t TextGenerationPipeline::run_decode_loop(ISampler* sampler, const SamplingParams& params,
@@ -315,21 +335,17 @@ int32_t TextGenerationPipeline::run_decode_loop(ISampler* sampler, const Samplin
                                                 int32_t prompt_token_count) {
     const int32_t vocab_size =
         gpu_sampling ? config_.vocab_size : static_cast<int32_t>(logits.size());
-    auto decode_start = std::chrono::steady_clock::now();
-    int32_t steps = 0;
     const int32_t stop_interval = std::max(cfg.stop_check_interval, 1);
+    const auto decode_start = std::chrono::steady_clock::now();
+    int32_t steps = 0;
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         const float* sample_ptr = gpu_sampling ? d_logits_ptr_ : logits.data();
-        SampleResult result = sampler->sample(sample_ptr, vocab_size, params);
+        const SampleResult result = sampler->sample(sample_ptr, vocab_size, params);
         output.push_back(result.token_id);
         ++steps;
-        if (cfg.stop_on_boxed_answer && tokenizer_ &&
-            ((steps % stop_interval) == 0 || result.is_eos)) {
-            std::vector<int32_t> new_tokens(output.begin() + prompt_token_count, output.end());
-            const std::string decoded = tokenizer_->decode(new_tokens);
-            if (contains_boxed_answer(decoded) || contains_final_answer(decoded))
-                break;
-        }
+        if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval,
+                                  result.is_eos))
+            break;
         if (result.is_eos)
             break;
         if (gpu_sampling)
@@ -337,16 +353,9 @@ int32_t TextGenerationPipeline::run_decode_loop(ISampler* sampler, const Samplin
         else
             run_step(result.token_id, logits);
     }
-    auto decode_end = std::chrono::steady_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(decode_end - decode_start).count();
-    if (steps > 0 && trt_log_to_stderr_enabled()) {
-        double tps = steps * 1000.0 / ms;
-        const bool cuda_graph_on =
-            active_decoder_index_ >= 0 &&
-            decoders_[static_cast<std::size_t>(active_decoder_index_)].module->cuda_graph_active();
-        std::cerr << "[trtf] Decode: " << steps << " tokens, " << ms << " ms, " << tps << " tok/s"
-                  << (cuda_graph_on ? " [CUDA Graph ON]" : "") << '\n';
-    }
+    const auto decode_end = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(decode_end - decode_start).count();
+    log_decode_summary(steps, ms);
     return steps;
 }
 

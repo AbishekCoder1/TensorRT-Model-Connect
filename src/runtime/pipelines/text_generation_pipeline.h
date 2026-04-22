@@ -112,6 +112,14 @@ class TextGenerationPipeline final : public IPipeline {
                             int32_t prompt_token_count);
     int32_t select_decoder_index(int32_t desired_rows) const;
     TrtModule& bind_decoder_for_step();
+
+    std::unique_ptr<ISampler> make_step_sampler(const SamplingParams& params);
+    void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
+                     bool gpu_sampling);
+    bool should_stop_on_answer(const std::vector<int32_t>& output, int32_t prompt_token_count,
+                               const GenerateConfig& cfg, int32_t steps, int32_t stop_interval,
+                               bool is_eos) const;
+    void log_decode_summary(int32_t steps, double ms) const;
 };
 
 } // namespace trtf
