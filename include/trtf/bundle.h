@@ -19,7 +19,7 @@ struct BundleInfo {
     int32_t num_attention_heads{1};
     int32_t num_key_value_heads{1};
     int32_t max_cache_length{32};
-    std::string runtime_strategy;  // e.g. "decoder_kv_cache", "diffusion", etc.
+    std::string runtime_strategy; // e.g. "decoder_kv_cache", "diffusion", etc.
 };
 
 // Read metadata without loading the engine.

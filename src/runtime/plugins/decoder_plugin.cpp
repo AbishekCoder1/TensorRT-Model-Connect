@@ -6,8 +6,8 @@
 #include "runtime/pipelines/text_generation_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/config/config_bundle.h"
-#include "trtf/runtime/triattention_kv_cache.h"
 #include "trtf/runtime/pipeline_registry.h"
+#include "trtf/runtime/triattention_kv_cache.h"
 #include "utils/json_helpers.h"
 
 #include <cstdint>
@@ -28,7 +28,8 @@ struct KvCacheRuntimeSizing {
     bool clamped_to_bundle_max{false};
 };
 
-int32_t cache_row_dim_from_engine(const nvinfer1::ICudaEngine& engine, const std::string& tensor_name) {
+int32_t cache_row_dim_from_engine(const nvinfer1::ICudaEngine& engine,
+                                  const std::string& tensor_name) {
     auto dims = engine.getTensorShape(tensor_name.c_str());
     if (dims.nbDims >= 2 && dims.d[1] > 0)
         return dims.d[1];
@@ -37,7 +38,8 @@ int32_t cache_row_dim_from_engine(const nvinfer1::ICudaEngine& engine, const std
         if (dims.nbDims >= 2 && dims.d[1] > 0)
             return dims.d[1];
     }
-    throw std::runtime_error("Unable to infer KV row width from engine tensor '" + tensor_name + "'");
+    throw std::runtime_error("Unable to infer KV row width from engine tensor '" + tensor_name +
+                             "'");
 }
 
 bool cache_input_is_dynamic(const nvinfer1::ICudaEngine& engine, const std::string& tensor_name) {
@@ -53,10 +55,10 @@ bool cache_input_supports_runtime_rows(const nvinfer1::ICudaEngine& engine,
     if (num_profiles <= 0)
         return false;
     for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
-        const auto min_dims =
-            engine.getProfileShape(tensor_name.c_str(), profile_idx, nvinfer1::OptProfileSelector::kMIN);
-        const auto max_dims =
-            engine.getProfileShape(tensor_name.c_str(), profile_idx, nvinfer1::OptProfileSelector::kMAX);
+        const auto min_dims = engine.getProfileShape(tensor_name.c_str(), profile_idx,
+                                                     nvinfer1::OptProfileSelector::kMIN);
+        const auto max_dims = engine.getProfileShape(tensor_name.c_str(), profile_idx,
+                                                     nvinfer1::OptProfileSelector::kMAX);
         if (min_dims.nbDims >= 1 && max_dims.nbDims >= 1 && min_dims.d[0] < max_dims.d[0])
             return true;
     }
@@ -83,13 +85,10 @@ std::string format_bytes(std::uint64_t bytes) {
     return oss.str();
 }
 
-KvCacheRuntimeSizing resolve_kv_cache_runtime_sizing(
-    const PipelineContext& ctx,
-    const nvinfer1::ICudaEngine& engine,
-    const KvCacheNames& kv_names,
-    DType cache_dtype,
-    const TriAttentionConfig& tri_cfg,
-    int32_t kv_dim) {
+KvCacheRuntimeSizing
+resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const nvinfer1::ICudaEngine& engine,
+                                const KvCacheNames& kv_names, DType cache_dtype,
+                                const TriAttentionConfig& tri_cfg, int32_t kv_dim) {
     KvCacheRuntimeSizing sizing;
     const auto elem_bytes = static_cast<std::uint64_t>(dtype_size(cache_dtype));
     sizing.row_bytes = static_cast<std::uint64_t>(ctx.config.num_layers) *
@@ -176,8 +175,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         if (!trt_runtime) {
             throw std::runtime_error("Failed to create TRT runtime for engine_plan");
         }
-        auto engine =
-            TrtUniquePtr<nvinfer1::ICudaEngine>(trt_runtime->deserializeCudaEngine(plan->data(), plan->size()));
+        auto engine = TrtUniquePtr<nvinfer1::ICudaEngine>(
+            trt_runtime->deserializeCudaEngine(plan->data(), plan->size()));
         if (!engine) {
             throw std::runtime_error("Failed to deserialize engine_plan");
         }
@@ -225,8 +224,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         TriAttentionConfig tri_cfg = parse_triattention_bundle_config(
             ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
         const int32_t kv_dim = cache_row_dim_from_engine(*shared_engine, kv_names.cache_k.front());
-        const auto sizing =
-            resolve_kv_cache_runtime_sizing(ctx, *shared_engine, kv_names, cache_dtype, tri_cfg, kv_dim);
+        const auto sizing = resolve_kv_cache_runtime_sizing(ctx, *shared_engine, kv_names,
+                                                            cache_dtype, tri_cfg, kv_dim);
 
         auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
         if (profile_rows.empty())
@@ -234,14 +233,14 @@ class DecoderPlugin final : public IPipelinePlugin {
         const int32_t num_profiles = shared_engine->getNbOptimizationProfiles();
         std::vector<TextGenerationPipeline::DecoderContext> decoders;
         decoders.reserve(static_cast<std::size_t>(num_profiles > 0 ? num_profiles : 1));
-        for (int32_t profile_idx = 0; profile_idx < num_profiles &&
-                                     profile_idx < static_cast<int32_t>(profile_rows.size());
+        for (int32_t profile_idx = 0;
+             profile_idx < num_profiles && profile_idx < static_cast<int32_t>(profile_rows.size());
              ++profile_idx) {
             const int32_t profile_max_rows = profile_rows[static_cast<std::size_t>(profile_idx)];
             if (profile_idx > 0 && profile_max_rows > sizing.runtime_rows)
                 break;
-            decoders.push_back(
-                TextGenerationPipeline::DecoderContext{profile_max_rows, make_decoder(profile_idx)});
+            decoders.push_back(TextGenerationPipeline::DecoderContext{profile_max_rows,
+                                                                      make_decoder(profile_idx)});
         }
         if (decoders.empty()) {
             decoders.push_back(TextGenerationPipeline::DecoderContext{
@@ -264,8 +263,8 @@ class DecoderPlugin final : public IPipelinePlugin {
                 ctx.config.num_layers, ctx.config.num_kv_heads, sizing.runtime_rows, kv_dim, stream,
                 std::move(tri_cfg), std::move(tri_stats), cache_dtype, std::move(kv_names));
         } else {
-            state = std::make_unique<KvCache>(ctx.config.num_layers, sizing.runtime_rows,
-                                              kv_dim, stream, cache_dtype, std::move(kv_names));
+            state = std::make_unique<KvCache>(ctx.config.num_layers, sizing.runtime_rows, kv_dim,
+                                              stream, cache_dtype, std::move(kv_names));
         }
         if (!state->ok())
             throw std::runtime_error("Failed to create KvCache");
@@ -273,9 +272,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         std::cerr << "[trtf] KV cache rows=" << sizing.runtime_rows
                   << " (bundle max=" << ctx.config.max_cache_length
                   << ", row=" << format_bytes(sizing.row_bytes)
-                  << ", cache=" << format_bytes(sizing.cache_bytes)
-                  << ", state=" << format_bytes(static_cast<std::uint64_t>(state->device_memory_bytes()))
-                  << ")";
+                  << ", cache=" << format_bytes(sizing.cache_bytes) << ", state="
+                  << format_bytes(static_cast<std::uint64_t>(state->device_memory_bytes())) << ")";
         if (sizing.override_applied) {
             std::cerr << " [requested=" << format_bytes(ctx.kv_cache_size_bytes) << "]";
             if (sizing.clamped_to_bundle_max)
@@ -294,10 +292,10 @@ class DecoderPlugin final : public IPipelinePlugin {
         // runtime.* namespace (replaces TRTF_DISABLE_CUDA_GRAPH, TRTF_GPU_ARGMAX).
         if (ctx.runtime_config != nullptr) {
             try {
-                tgc.disable_cuda_graph = ctx.runtime_config->get<bool>(
-                    "runtime", "disable_cuda_graph");
-                tgc.prefer_gpu_greedy = ctx.runtime_config->get<bool>(
-                    "runtime", "prefer_gpu_greedy");
+                tgc.disable_cuda_graph =
+                    ctx.runtime_config->get<bool>("runtime", "disable_cuda_graph");
+                tgc.prefer_gpu_greedy =
+                    ctx.runtime_config->get<bool>("runtime", "prefer_gpu_greedy");
             } catch (const std::exception&) {
                 // Schema not registered or type mismatch — stay at defaults.
             }
@@ -311,8 +309,8 @@ class DecoderPlugin final : public IPipelinePlugin {
             tgc.chat_template_format = detect_chat_template_format(chat_tpl);
         }
 
-        return std::make_unique<TextGenerationPipeline>(std::move(decoders), std::move(state),
-                                                        tgc, stream, std::move(tokenizer),
+        return std::make_unique<TextGenerationPipeline>(std::move(decoders), std::move(state), tgc,
+                                                        stream, std::move(tokenizer),
                                                         ctx.bundle.info.model_id);
     }
 };

@@ -4,9 +4,10 @@
 // Trace ID:       UT-TOK-CPP-05
 // Architecture:   ARCH-TOK-001
 // Unit Design:    UD-TOK-01
-// Intent:         BPE tokenizer correctness: array/string merge formats, pre-tokenizer configs, special tokens, round-trip
-// Preconditions:  None (CPU-only, inline JSON vocab definitions)
-// Postconditions: Encode produces correct token IDs, decode recovers original text, special tokens handled correctly
+// Intent:         BPE tokenizer correctness: array/string merge formats, pre-tokenizer configs,
+// special tokens, round-trip Preconditions:  None (CPU-only, inline JSON vocab definitions)
+// Postconditions: Encode produces correct token IDs, decode recovers original text, special tokens
+// handled correctly
 // =============================================================================
 
 #include "trtf/tokenizer.h"
@@ -17,15 +18,11 @@
 
 static int failures = 0;
 
-void check(bool condition, const std::string& name)
-{
-    if (!condition)
-    {
+void check(bool condition, const std::string& name) {
+    if (!condition) {
         std::cerr << "FAIL: " << name << std::endl;
         failures++;
-    }
-    else
-    {
+    } else {
         std::cerr << "PASS: " << name << std::endl;
     }
 }
@@ -259,8 +256,7 @@ static const char* kLlamaStyleJson = R"({
   ]
 })";
 
-int main()
-{
+int main() {
     std::cerr << "Running BPE tokenizer tests...\n\n";
     std::string json(kArrayMergesJson);
 
@@ -328,8 +324,7 @@ int main()
         // "hello" → h,e,l,l,o → he,l,l,o → he,ll,o → [he(4), ll(5), o(3)]
         auto ids = tok->encode("hello");
         check(!ids.empty(), "encode_hello_nonempty");
-        check(ids.size() == 3 && ids[0] == 4 && ids[1] == 5 && ids[2] == 3,
-              "encode_hello_ids");
+        check(ids.size() == 3 && ids[0] == 4 && ids[1] == 5 && ids[2] == 3, "encode_hello_ids");
 
         auto empty_ids = tok->encode("");
         check(empty_ids.empty(), "encode_empty");
@@ -498,12 +493,13 @@ int main()
         {
             auto ids = tok->encode("don't");
             check(ids.size() == 4, "contraction_dont_size");
-            check(ids.size() == 4
-                  && ids[0] == 3 && ids[1] == 9 && ids[2] == 8 && ids[3] == 21,
+            check(ids.size() == 4 && ids[0] == 3 && ids[1] == 9 && ids[2] == 8 && ids[3] == 21,
                   "contraction_dont_ids");
             // Verify the cross-boundary merge (n'=24) did NOT fire
             bool has_cross = false;
-            for (auto id : ids) if (id == 24) has_cross = true;
+            for (auto id : ids)
+                if (id == 24)
+                    has_cross = true;
             check(!has_cross, "contraction_dont_no_cross_merge");
         }
 
@@ -513,8 +509,7 @@ int main()
         //   Total: [20,22]
         {
             auto ids = tok->encode("he's");
-            check(ids.size() == 2 && ids[0] == 20 && ids[1] == 22,
-                  "contraction_hes_ids");
+            check(ids.size() == 2 && ids[0] == 20 && ids[1] == 22, "contraction_hes_ids");
         }
 
         // "he'm" → pre-tokenize ["he", "'m"]
@@ -523,8 +518,7 @@ int main()
         //   Total: [20,23]
         {
             auto ids = tok->encode("he'm");
-            check(ids.size() == 2 && ids[0] == 20 && ids[1] == 23,
-                  "contraction_hem_ids");
+            check(ids.size() == 2 && ids[0] == 20 && ids[1] == 23, "contraction_hem_ids");
         }
     }
 
@@ -545,7 +539,9 @@ int main()
             check(ids.size() == 3 && ids[0] == 9 && ids[1] == 19 && ids[2] == 1,
                   "word_boundary_o_b");
             bool has_cross = false;
-            for (auto id : ids) if (id == 25) has_cross = true;
+            for (auto id : ids)
+                if (id == 25)
+                    has_cross = true;
             check(!has_cross, "word_boundary_no_cross_merge");
         }
     }
@@ -564,11 +560,12 @@ int main()
         // If pre-tokenization FAILS: c,1,2,3 → c+1 (rank 6) fires → [26,15,16]
         {
             auto ids = tok->encode("c123");
-            check(ids.size() == 4
-                  && ids[0] == 2 && ids[1] == 14 && ids[2] == 15 && ids[3] == 16,
+            check(ids.size() == 4 && ids[0] == 2 && ids[1] == 14 && ids[2] == 15 && ids[3] == 16,
                   "digit_boundary_c123");
             bool has_cross = false;
-            for (auto id : ids) if (id == 26) has_cross = true;
+            for (auto id : ids)
+                if (id == 26)
+                    has_cross = true;
             check(!has_cross, "digit_boundary_no_cross_merge");
         }
     }
@@ -587,10 +584,11 @@ int main()
         // If pre-tokenization FAILS: o,! → o+! (rank 7) fires → [27]
         {
             auto ids = tok->encode("o!");
-            check(ids.size() == 2 && ids[0] == 9 && ids[1] == 18,
-                  "punct_boundary_o_bang");
+            check(ids.size() == 2 && ids[0] == 9 && ids[1] == 18, "punct_boundary_o_bang");
             bool has_cross = false;
-            for (auto id : ids) if (id == 27) has_cross = true;
+            for (auto id : ids)
+                if (id == 27)
+                    has_cross = true;
             check(!has_cross, "punct_boundary_no_cross_merge");
         }
     }
@@ -610,8 +608,7 @@ int main()
         //   Total: [0,19,19,1]
         {
             auto ids = tok->encode("a  b");
-            check(ids.size() == 4
-                  && ids[0] == 0 && ids[1] == 19 && ids[2] == 19 && ids[3] == 1,
+            check(ids.size() == 4 && ids[0] == 0 && ids[1] == 19 && ids[2] == 19 && ids[3] == 1,
                   "whitespace_double_space");
         }
 
@@ -619,8 +616,7 @@ int main()
         //   " a": SPACE,a → [19,0]
         {
             auto ids = tok->encode(" a");
-            check(ids.size() == 2 && ids[0] == 19 && ids[1] == 0,
-                  "whitespace_leading_space");
+            check(ids.size() == 2 && ids[0] == 19 && ids[1] == 0, "whitespace_leading_space");
         }
     }
 
@@ -635,8 +631,7 @@ int main()
         //   byte: h,e,l,l,o → merge h+e → he,l,l,o → [20,6,6,9]
         {
             auto ids = tok->encode("hello");
-            check(ids.size() == 4
-                  && ids[0] == 20 && ids[1] == 6 && ids[2] == 6 && ids[3] == 9,
+            check(ids.size() == 4 && ids[0] == 20 && ids[1] == 6 && ids[2] == 6 && ids[3] == 9,
                   "within_boundary_hello");
         }
 
@@ -762,8 +757,7 @@ int main()
         //   Result: [8,9,3] = [he,ll,o]
         {
             auto ids = tok->encode("hello");
-            check(ids.size() == 3 && ids[0] == 8 && ids[1] == 9 && ids[2] == 3,
-                  "metaspace_hello");
+            check(ids.size() == 3 && ids[0] == 8 && ids[1] == 9 && ids[2] == 3, "metaspace_hello");
         }
 
         // "hello world" → space dropped → h,e,l,l,o,w,o,r,l,d
@@ -794,8 +788,7 @@ int main()
         //   No more merges possible. Result: [8,9,13,16] = [he,ll,ow,orld]
         {
             auto ids = tok->encode("hello world");
-            check(ids.size() == 4 && ids[0] == 8 && ids[1] == 9
-                  && ids[2] == 13 && ids[3] == 16,
+            check(ids.size() == 4 && ids[0] == 8 && ids[1] == 9 && ids[2] == 13 && ids[3] == 16,
                   "metaspace_hello_world");
         }
 
@@ -881,8 +874,7 @@ int main()
         // "hello" → no added tokens match, normal BPE
         {
             auto ids = tok->encode("hello");
-            check(ids.size() >= 2 && ids[0] == 8 && ids[1] == 9,
-                  "added_tokens_no_match");
+            check(ids.size() >= 2 && ids[0] == 8 && ids[1] == 9, "added_tokens_no_match");
         }
 
         // Special added tokens ARE matched during encoding (matching HF behavior).
@@ -890,8 +882,7 @@ int main()
         // The special flag only controls decode filtering, not encode matching.
         {
             auto ids = tok->encode("<eos>");
-            check(ids.size() == 1 && ids[0] == 14,
-                  "added_tokens_special_matched_in_encode");
+            check(ids.size() == 1 && ids[0] == 14, "added_tokens_special_matched_in_encode");
         }
     }
 
@@ -917,8 +908,7 @@ int main()
         } catch (const std::exception& e) {
             threw = true;
             std::string msg = e.what();
-            check(msg.find("Unsupported") != std::string::npos,
-                  "unsupported_pretok_error_message");
+            check(msg.find("Unsupported") != std::string::npos, "unsupported_pretok_error_message");
         }
         check(threw, "unsupported_pretok_throws");
 
@@ -938,8 +928,8 @@ int main()
         })";
 
         // This should default to GPT-2, not throw (unrecognized regex → fallback)
-        auto tok = trtf::CreateBpeTokenizer(
-            unknown_regex_json.data(), unknown_regex_json.size(), false);
+        auto tok =
+            trtf::CreateBpeTokenizer(unknown_regex_json.data(), unknown_regex_json.size(), false);
         check(tok != nullptr, "unknown_regex_falls_back_to_gpt2");
     }
 
@@ -984,14 +974,20 @@ int main()
 
         std::string no_vocab = R"({"model":{"type":"BPE","merges":[]}})";
         bool threw = false;
-        try { trtf::CreateBpeTokenizer(no_vocab.data(), no_vocab.size(), false); }
-        catch (const std::exception&) { threw = true; }
+        try {
+            trtf::CreateBpeTokenizer(no_vocab.data(), no_vocab.size(), false);
+        } catch (const std::exception&) {
+            threw = true;
+        }
         check(threw, "missing_vocab_throws");
 
         std::string no_merges = R"({"model":{"type":"BPE","vocab":{"a":0}}})";
         threw = false;
-        try { trtf::CreateBpeTokenizer(no_merges.data(), no_merges.size(), false); }
-        catch (const std::exception&) { threw = true; }
+        try {
+            trtf::CreateBpeTokenizer(no_merges.data(), no_merges.size(), false);
+        } catch (const std::exception&) {
+            threw = true;
+        }
         check(threw, "missing_merges_throws");
     }
 
@@ -1062,9 +1058,9 @@ int main()
             auto ids = tok->encode("a'b");
             // Should have at least 3 tokens: a, ', b
             check(ids.size() == 3, "non_contraction_apost_size");
-            check(ids[0] == 0, "non_contraction_apost_a");  // a=0
+            check(ids[0] == 0, "non_contraction_apost_a");      // a=0
             check(ids[1] == 17, "non_contraction_apost_quote"); // '=17
-            check(ids[2] == 1, "non_contraction_apost_b");  // b=1
+            check(ids[2] == 1, "non_contraction_apost_b");      // b=1
         }
 
         // "'" alone → single punct token
@@ -1142,8 +1138,8 @@ int main()
             ]
           }
         })";
-        auto tok_double = trtf::CreateBpeTokenizer(
-            q_double_nl_json.data(), q_double_nl_json.size(), false);
+        auto tok_double =
+            trtf::CreateBpeTokenizer(q_double_nl_json.data(), q_double_nl_json.size(), false);
         check(tok_double != nullptr, "qwen3_double_nl_create");
         {
             auto ids = tok_double->encode(".\n\n");
@@ -1162,8 +1158,7 @@ int main()
         //   byte-encode: 1,2,3 → [14,15,16]
         {
             auto ids = tok->encode("123");
-            check(ids.size() == 3
-                  && ids[0] == 14 && ids[1] == 15 && ids[2] == 16,
+            check(ids.size() == 3 && ids[0] == 14 && ids[1] == 15 && ids[2] == 16,
                   "digit_run_no_prefix_gpt2");
         }
 
@@ -1459,22 +1454,18 @@ int main()
         })";
 
         // With add_special_tokens=true: BOS should be prepended
-        auto tok_sp = trtf::CreateBpeTokenizer(
-            seq_pp_json.data(), seq_pp_json.size(), true);
+        auto tok_sp = trtf::CreateBpeTokenizer(seq_pp_json.data(), seq_pp_json.size(), true);
         check(tok_sp != nullptr, "seq_pp_create_with_special");
         {
             auto ids = tok_sp->encode("hello");
-            check(ids.size() >= 2 && ids[0] == 100,
-                  "seq_pp_bos_prepended");
+            check(ids.size() >= 2 && ids[0] == 100, "seq_pp_bos_prepended");
         }
 
         // With add_special_tokens=false: no BOS
-        auto tok_no_sp = trtf::CreateBpeTokenizer(
-            seq_pp_json.data(), seq_pp_json.size(), false);
+        auto tok_no_sp = trtf::CreateBpeTokenizer(seq_pp_json.data(), seq_pp_json.size(), false);
         {
             auto ids = tok_no_sp->encode("hello");
-            check(!ids.empty() && ids[0] != 100,
-                  "seq_pp_no_bos_without_special");
+            check(!ids.empty() && ids[0] != 100, "seq_pp_no_bos_without_special");
         }
     }
 
@@ -1521,8 +1512,7 @@ int main()
           }
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(
-            multi_bos_json.data(), multi_bos_json.size(), true);
+        auto tok = trtf::CreateBpeTokenizer(multi_bos_json.data(), multi_bos_json.size(), true);
         check(tok != nullptr, "multi_bos_create");
         {
             auto ids = tok->encode("hello");
@@ -1534,8 +1524,7 @@ int main()
         }
 
         // Without special tokens: no BOS/EOS
-        auto tok_ns = trtf::CreateBpeTokenizer(
-            multi_bos_json.data(), multi_bos_json.size(), false);
+        auto tok_ns = trtf::CreateBpeTokenizer(multi_bos_json.data(), multi_bos_json.size(), false);
         {
             auto ids = tok_ns->encode("hello");
             check(!ids.empty() && ids[0] != 200 && ids.back() != 202,
@@ -1579,8 +1568,7 @@ int main()
         // Single special token should be matched directly
         {
             auto ids = tok->encode("<|im_start|>");
-            check(ids.size() == 1 && ids[0] == 100,
-                  "vl_single_special_token");
+            check(ids.size() == 1 && ids[0] == 100, "vl_single_special_token");
         }
 
         // Multiple image pads
@@ -1600,10 +1588,9 @@ int main()
 
         // VL prompt with vision tokens
         {
-            auto ids = tok->encode(
-                "<|vision_start|><|image_pad|><|image_pad|><|vision_end|>");
-            check(ids.size() == 4 && ids[0] == 102 && ids[1] == 104
-                  && ids[2] == 104 && ids[3] == 103,
+            auto ids = tok->encode("<|vision_start|><|image_pad|><|image_pad|><|vision_end|>");
+            check(ids.size() == 4 && ids[0] == 102 && ids[1] == 104 && ids[2] == 104 &&
+                      ids[3] == 103,
                   "vl_vision_token_sequence");
         }
 
@@ -1651,8 +1638,7 @@ int main()
           }
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(
-            nested_json.data(), nested_json.size(), true);
+        auto tok = trtf::CreateBpeTokenizer(nested_json.data(), nested_json.size(), true);
         check(tok != nullptr, "nested_pp_create");
         {
             auto ids = tok->encode("a");
@@ -1662,8 +1648,7 @@ int main()
         }
     }
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << "\n" << failures << " test(s) failed\n";
         return 1;
     }

@@ -53,10 +53,8 @@
 
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
@@ -79,19 +77,15 @@ struct CliArgs {
     std::string error_message;
 };
 
-std::optional<std::uint64_t> parse_byte_size(const std::string& text)
-{
+std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
     if (text.empty())
         return std::nullopt;
 
     std::size_t value_end = 0;
     double value = 0.0;
-    try
-    {
+    try {
         value = std::stod(text, &value_end);
-    }
-    catch (...)
-    {
+    } catch (...) {
         return std::nullopt;
     }
     if (value <= 0.0)
@@ -131,103 +125,133 @@ std::optional<std::uint64_t> parse_byte_size(const std::string& text)
     return static_cast<std::uint64_t>(bytes + 0.5L);
 }
 
-CliArgs parse_args(int argc, const char** argv)
-{
+CliArgs parse_args(int argc, const char** argv) {
     CliArgs args;
 
-    if (argc < 2)
-    {
+    if (argc < 2) {
         args.show_help = true;
         return args;
     }
 
     args.command = argv[1];
 
-    if (args.command == "version" || args.command == "--version" || args.command == "-v")
-    {
+    if (args.command == "version" || args.command == "--version" || args.command == "-v") {
         args.command = "version";
         return args;
     }
 
-    if (args.command == "help" || args.command == "--help" || args.command == "-h")
-    {
+    if (args.command == "help" || args.command == "--help" || args.command == "-h") {
         args.show_help = true;
         return args;
     }
 
-    if (args.command != "run" && args.command != "inspect" && args.command != "detect")
-    {
+    if (args.command != "run" && args.command != "inspect" && args.command != "detect") {
         args.parse_error = true;
         args.error_message = "Unknown command: " + args.command;
         return args;
     }
 
-    for (int i = 2; i < argc; ++i)
-    {
+    for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
 
-        if (arg == "--prompt" || arg == "-p")
-        {
-            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+        if (arg == "--prompt" || arg == "-p") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
             args.prompt = argv[++i];
             continue;
         }
-        if (arg == "--max-new-tokens")
-        {
-            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+        if (arg == "--max-new-tokens") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
             args.max_new_tokens = std::atoi(argv[++i]);
             continue;
         }
-        if (arg == "--hf-python")
-        {
-            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+        if (arg == "--hf-python") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
             args.hf_python = argv[++i];
             continue;
         }
-        if (arg == "--kv-cache-size" || arg == "--kv_cache_size")
-        {
-            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+        if (arg == "--kv-cache-size" || arg == "--kv_cache_size") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
             auto parsed = parse_byte_size(argv[++i]);
-            if (!parsed.has_value()) { args.parse_error = true; args.error_message = "--kv-cache-size expects a positive size"; return args; }
+            if (!parsed.has_value()) {
+                args.parse_error = true;
+                args.error_message = "--kv-cache-size expects a positive size";
+                return args;
+            }
             args.kv_cache_size_bytes = *parsed;
             continue;
         }
-        if (arg.rfind("--kv-cache-size=", 0) == 0 || arg.rfind("--kv_cache_size=", 0) == 0)
-        {
+        if (arg.rfind("--kv-cache-size=", 0) == 0 || arg.rfind("--kv_cache_size=", 0) == 0) {
             auto parsed = parse_byte_size(arg.substr(arg.find('=') + 1));
-            if (!parsed.has_value()) { args.parse_error = true; args.error_message = "--kv-cache-size expects a positive size"; return args; }
+            if (!parsed.has_value()) {
+                args.parse_error = true;
+                args.error_message = "--kv-cache-size expects a positive size";
+                return args;
+            }
             args.kv_cache_size_bytes = *parsed;
             continue;
         }
-        if (arg == "--image")
-        {
-            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+        if (arg == "--image") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
             args.image_path = argv[++i];
             continue;
         }
-        if (arg == "--output" || arg == "--output-json" || arg == "-o")
-        {
-            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+        if (arg == "--output" || arg == "--output-json" || arg == "-o") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
             args.output_path = argv[++i];
             continue;
         }
-        if (arg == "--threshold" || arg == "--score-threshold")
-        {
-            if (i + 1 >= argc) { args.parse_error = true; args.error_message = arg + " requires a value"; return args; }
+        if (arg == "--threshold" || arg == "--score-threshold") {
+            if (i + 1 >= argc) {
+                args.parse_error = true;
+                args.error_message = arg + " requires a value";
+                return args;
+            }
             args.conf_threshold = static_cast<float>(std::atof(argv[++i]));
             continue;
         }
-        if (arg[0] == '-') { args.parse_error = true; args.error_message = "Unknown flag: " + arg; return args; }
+        if (arg[0] == '-') {
+            args.parse_error = true;
+            args.error_message = "Unknown flag: " + arg;
+            return args;
+        }
 
-        if (args.model_or_bundle.empty()) { args.model_or_bundle = arg; }
-        else { args.parse_error = true; args.error_message = "Unexpected positional argument: " + arg; return args; }
+        if (args.model_or_bundle.empty()) {
+            args.model_or_bundle = arg;
+        } else {
+            args.parse_error = true;
+            args.error_message = "Unexpected positional argument: " + arg;
+            return args;
+        }
     }
 
     return args;
 }
 
-CliArgs parse(std::vector<const char*> argv_vec)
-{
+CliArgs parse(std::vector<const char*> argv_vec) {
     return parse_args(static_cast<int>(argv_vec.size()), argv_vec.data());
 }
 
@@ -240,8 +264,7 @@ CliArgs parse(std::vector<const char*> argv_vec)
 // Mechanism: Calls parse(), checks command=="run", model_or_bundle=="bundle.trtfb",
 //   and prompt=="hello world".
 // -----------------------------------------------------------------------------
-static void test_run_with_prompt()
-{
+static void test_run_with_prompt() {
     auto args = parse({"trtf", "run", "bundle.trtfb", "--prompt", "hello world"});
     check(args.command == "run", "run command");
     check(args.model_or_bundle == "bundle.trtfb", "run bundle path");
@@ -254,8 +277,7 @@ static void test_run_with_prompt()
 // Setup: Simulated argv with "run" + "--max-new-tokens 50".
 // Mechanism: Calls parse(), checks max_new_tokens==50.
 // -----------------------------------------------------------------------------
-static void test_run_max_tokens()
-{
+static void test_run_max_tokens() {
     auto args = parse({"trtf", "run", "bundle.trtfb", "--prompt", "hi", "--max-new-tokens", "50"});
     check(args.max_new_tokens == 50, "run max_new_tokens");
 }
@@ -266,9 +288,9 @@ static void test_run_max_tokens()
 // Setup: Simulated argv with "run" + "--hf-python /usr/bin/python3".
 // Mechanism: Calls parse(), checks no parse error and hf_python=="/usr/bin/python3".
 // -----------------------------------------------------------------------------
-static void test_hf_python_flag()
-{
-    auto args = parse({"trtf", "run", "bundle.trtfb", "--prompt", "hi", "--hf-python", "/usr/bin/python3"});
+static void test_hf_python_flag() {
+    auto args =
+        parse({"trtf", "run", "bundle.trtfb", "--prompt", "hi", "--hf-python", "/usr/bin/python3"});
     check(!args.parse_error, "hf-python no parse error");
     check(args.hf_python == "/usr/bin/python3", "hf-python value");
 }
@@ -280,8 +302,7 @@ static void test_hf_python_flag()
 // Mechanism: Calls parse(), checks command=="inspect" and
 //   model_or_bundle=="file.trtfb".
 // -----------------------------------------------------------------------------
-static void test_inspect_subcommand()
-{
+static void test_inspect_subcommand() {
     auto args = parse({"trtf", "inspect", "file.trtfb"});
     check(args.command == "inspect", "inspect command");
     check(args.model_or_bundle == "file.trtfb", "inspect file path");
@@ -293,8 +314,7 @@ static void test_inspect_subcommand()
 // Setup: Simulated argv: {"trtf"} (argc==1, no subcommand).
 // Mechanism: Calls parse(), checks show_help==true.
 // -----------------------------------------------------------------------------
-static void test_no_args_shows_usage()
-{
+static void test_no_args_shows_usage() {
     auto args = parse({"trtf"});
     check(args.show_help, "no args shows help");
 }
@@ -304,8 +324,7 @@ static void test_no_args_shows_usage()
 // Setup: Simulated argv: {"trtf", "--help"}.
 // Mechanism: Calls parse(), checks show_help==true.
 // -----------------------------------------------------------------------------
-static void test_help_flag()
-{
+static void test_help_flag() {
     auto args = parse({"trtf", "--help"});
     check(args.show_help, "--help shows help");
 }
@@ -315,8 +334,7 @@ static void test_help_flag()
 // Setup: Simulated argv: {"trtf", "version"}.
 // Mechanism: Calls parse(), checks command=="version".
 // -----------------------------------------------------------------------------
-static void test_version_subcommand()
-{
+static void test_version_subcommand() {
     auto args = parse({"trtf", "version"});
     check(args.command == "version", "version command");
 }
@@ -328,8 +346,7 @@ static void test_version_subcommand()
 // Mechanism: Calls parse(), checks parse_error==true and error_message contains
 //   "--bogus".
 // -----------------------------------------------------------------------------
-static void test_unknown_flag_errors()
-{
+static void test_unknown_flag_errors() {
     auto args = parse({"trtf", "run", "bundle.trtfb", "--bogus"});
     check(args.parse_error, "unknown flag causes error");
     check(args.error_message.find("--bogus") != std::string::npos, "error message mentions flag");
@@ -342,8 +359,7 @@ static void test_unknown_flag_errors()
 // Mechanism: Calls parse(), checks parse_error==true and error_message contains
 //   "foobar".
 // -----------------------------------------------------------------------------
-static void test_unknown_command_errors()
-{
+static void test_unknown_command_errors() {
     auto args = parse({"trtf", "foobar"});
     check(args.parse_error, "unknown command causes error");
     check(args.error_message.find("foobar") != std::string::npos, "error message mentions command");
@@ -356,36 +372,31 @@ static void test_unknown_command_errors()
 // Mechanism: Calls parse(), checks every field matches the expected value
 //   and no parse error occurred.
 // -----------------------------------------------------------------------------
-static void test_all_run_flags_combined()
-{
-    auto args = parse({"trtf", "run", "bundle.trtfb", "--prompt", "hello",
-        "--max-new-tokens", "10",
-        "--hf-python", "/usr/bin/python3",
-        "--kv-cache-size", "2GiB"});
+static void test_all_run_flags_combined() {
+    auto args = parse({"trtf", "run", "bundle.trtfb", "--prompt", "hello", "--max-new-tokens", "10",
+                       "--hf-python", "/usr/bin/python3", "--kv-cache-size", "2GiB"});
     check(!args.parse_error, "combined flags no parse error");
     check(args.model_or_bundle == "bundle.trtfb", "combined bundle path");
     check(args.prompt == "hello", "combined prompt");
     check(args.max_new_tokens == 10, "combined max_new_tokens");
     check(args.hf_python == "/usr/bin/python3", "combined hf-python");
-    check(args.kv_cache_size_bytes == (2ULL * 1024ULL * 1024ULL * 1024ULL), "combined kv-cache-size");
+    check(args.kv_cache_size_bytes == (2ULL * 1024ULL * 1024ULL * 1024ULL),
+          "combined kv-cache-size");
 }
 
-static void test_kv_cache_size_flag()
-{
+static void test_kv_cache_size_flag() {
     auto args = parse({"trtf", "run", "bundle.trtfb", "--kv-cache-size", "90GB"});
     check(!args.parse_error, "kv-cache-size no parse error");
     check(args.kv_cache_size_bytes == 90000000000ULL, "kv-cache-size parsed");
 }
 
-static void test_kv_cache_size_alias_flag()
-{
+static void test_kv_cache_size_alias_flag() {
     auto args = parse({"trtf", "run", "bundle.trtfb", "--kv_cache_size", "90GB"});
     check(!args.parse_error, "kv_cache_size alias no parse error");
     check(args.kv_cache_size_bytes == 90000000000ULL, "kv_cache_size alias parsed");
 }
 
-static void test_kv_cache_size_equals_flag()
-{
+static void test_kv_cache_size_equals_flag() {
     auto args = parse({"trtf", "run", "bundle.trtfb", "--kv-cache-size=90GB"});
     check(!args.parse_error, "kv-cache-size equals no parse error");
     check(args.kv_cache_size_bytes == 90000000000ULL, "kv-cache-size equals parsed");
@@ -396,12 +407,9 @@ static void test_kv_cache_size_equals_flag()
 // Setup: Simulated argv with detect + --output-json + --score-threshold.
 // Mechanism: Calls parse(), checks parsed command and values.
 // -----------------------------------------------------------------------------
-static void test_detect_alias_flags()
-{
-    auto args = parse({"trtf", "detect", "bundle.trtfb",
-        "--image", "img.jpg",
-        "--output-json", "det.json",
-        "--score-threshold", "0.25"});
+static void test_detect_alias_flags() {
+    auto args = parse({"trtf", "detect", "bundle.trtfb", "--image", "img.jpg", "--output-json",
+                       "det.json", "--score-threshold", "0.25"});
     check(!args.parse_error, "detect aliases no parse error");
     check(args.command == "detect", "detect command");
     check(args.image_path == "img.jpg", "detect image path");
@@ -415,20 +423,15 @@ static void test_detect_alias_flags()
 // Setup: Simulated argv with detect + aliases + unknown flag.
 // Mechanism: Calls parse(), checks parse_error and unknown flag message.
 // -----------------------------------------------------------------------------
-static void test_detect_unknown_flag_still_errors()
-{
-    auto args = parse({"trtf", "detect", "bundle.trtfb",
-        "--image", "img.jpg",
-        "--output-json", "det.json",
-        "--score-threshold", "0.25",
-        "--not-a-real-flag"});
+static void test_detect_unknown_flag_still_errors() {
+    auto args = parse({"trtf", "detect", "bundle.trtfb", "--image", "img.jpg", "--output-json",
+                       "det.json", "--score-threshold", "0.25", "--not-a-real-flag"});
     check(args.parse_error, "detect unknown flag causes error");
     check(args.error_message.find("--not-a-real-flag") != std::string::npos,
           "detect unknown flag message mentions flag");
 }
 
-int main()
-{
+int main() {
     test_run_with_prompt();
     test_run_max_tokens();
     test_hf_python_flag();
@@ -445,8 +448,7 @@ int main()
     test_detect_alias_flags();
     test_detect_unknown_flag_still_errors();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

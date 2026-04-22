@@ -55,18 +55,20 @@ static FilteredDistribution build_filtered_distribution(const float* logits, int
     FilteredDistribution dist;
     dist.indices.resize(static_cast<std::size_t>(n));
     std::iota(dist.indices.begin(), dist.indices.end(), 0);
-    std::partial_sort(
-        dist.indices.begin(), dist.indices.begin() + k, dist.indices.end(), [&](int32_t a, int32_t b) {
-            return logits[static_cast<std::size_t>(a)] > logits[static_cast<std::size_t>(b)];
-        });
+    std::partial_sort(dist.indices.begin(), dist.indices.begin() + k, dist.indices.end(),
+                      [&](int32_t a, int32_t b) {
+                          return logits[static_cast<std::size_t>(a)] >
+                                 logits[static_cast<std::size_t>(b)];
+                      });
 
     const float max_logit = logits[static_cast<std::size_t>(dist.indices[0])];
     dist.probs.resize(static_cast<std::size_t>(k));
     float sum = 0.0F;
     for (int32_t i = 0; i < k; ++i) {
         const float scaled =
-            (logits[static_cast<std::size_t>(dist.indices[static_cast<std::size_t>(i)])] - max_logit)
-            / params.temperature;
+            (logits[static_cast<std::size_t>(dist.indices[static_cast<std::size_t>(i)])] -
+             max_logit) /
+            params.temperature;
         dist.probs[static_cast<std::size_t>(i)] = std::exp(scaled);
         sum += dist.probs[static_cast<std::size_t>(i)];
     }
@@ -217,7 +219,8 @@ class TopKSampler final : public ISampler {
 #if TRTF_HAS_LIBTORCH_MULTINOMIAL && TRTF_HAS_CUDA_KERNELS
 class TorchCudaMultinomialSampler final : public ISampler {
   public:
-    explicit TorchCudaMultinomialSampler(uint64_t initial_seed) : initial_seed_(initial_seed == 0 ? 1 : initial_seed) {
+    explicit TorchCudaMultinomialSampler(uint64_t initial_seed)
+        : initial_seed_(initial_seed == 0 ? 1 : initial_seed) {
         cudaMalloc(&d_token_id_, sizeof(int32_t));
     }
 
@@ -247,13 +250,16 @@ class TorchCudaMultinomialSampler final : public ISampler {
         ensure_execution_policy(vocab_size);
         ensure_device_buffers(dist.keep);
 
-        cudaMemcpyAsync(d_indices_, dist.indices.data(), static_cast<std::size_t>(dist.keep) * sizeof(int32_t),
+        cudaMemcpyAsync(d_indices_, dist.indices.data(),
+                        static_cast<std::size_t>(dist.keep) * sizeof(int32_t),
                         cudaMemcpyHostToDevice, stream_);
-        cudaMemcpyAsync(d_probs_, dist.probs.data(), static_cast<std::size_t>(dist.keep) * sizeof(float),
-                        cudaMemcpyHostToDevice, stream_);
+        cudaMemcpyAsync(d_probs_, dist.probs.data(),
+                        static_cast<std::size_t>(dist.keep) * sizeof(float), cudaMemcpyHostToDevice,
+                        stream_);
         gpu_sparse_torch_multinomial_exact(d_indices_, d_probs_, dist.keep, initial_seed_,
                                            current_offset_, total_threads_, d_token_id_, stream_);
-        cudaMemcpyAsync(&h_token_id_, d_token_id_, sizeof(int32_t), cudaMemcpyDeviceToHost, stream_);
+        cudaMemcpyAsync(&h_token_id_, d_token_id_, sizeof(int32_t), cudaMemcpyDeviceToHost,
+                        stream_);
         cudaStreamSynchronize(stream_);
         current_offset_ += counter_offset_;
 

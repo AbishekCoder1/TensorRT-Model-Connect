@@ -123,7 +123,8 @@ void KvCache::bind_to(TrtModule& module) {
     has_position_input_ = module.has_input(names_.position_id);
     dynamic_binding_enabled_ = module.has_dynamic_shapes();
     bound_cache_rows_ = 0;
-    const int32_t initial_cache_rows = dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;
+    const int32_t initial_cache_rows =
+        dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;
     const std::vector<int64_t> cache_shape{initial_cache_rows, kv_dim_};
 
     for (int32_t i = 0; i < num_layers_; ++i) {

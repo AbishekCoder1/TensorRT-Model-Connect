@@ -91,8 +91,7 @@ static void test_torch_multinomial_matches_known_hf_sequence() {
     params.seed = 1235;
 
     auto sampler = trtf::create_sampler(params);
-    check(std::string(sampler->sampler_type()) == "torch_multinomial",
-          "torch sampler enabled");
+    check(std::string(sampler->sampler_type()) == "torch_multinomial", "torch sampler enabled");
 
     const float step0[] = {46.041664F, 43.75F, 43.541664F};
     const float step1[] = {46.875F, 45.416664F};

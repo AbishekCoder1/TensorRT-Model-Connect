@@ -32,11 +32,11 @@ namespace trtf::config {
 // happens during layer merge: a layer attempting to set a field outside its
 // allowlist is a fail-fast error with the exact namespace/field name.
 enum class Layer : std::uint8_t {
-    SchemaDefault = 0,    // Hard-coded fallback baked into the schema.
-    BuildTime = 1,        // Set at bundle build time; baked into defaults:.
-    BundleDefault = 2,    // Read from the bundle's defaults: block.
-    PlatformProfile = 3,  // --config <file> specifying a platform.
-    SessionRequest = 4,   // --config <file> or --set for this invocation.
+    SchemaDefault = 0,   // Hard-coded fallback baked into the schema.
+    BuildTime = 1,       // Set at bundle build time; baked into defaults:.
+    BundleDefault = 2,   // Read from the bundle's defaults: block.
+    PlatformProfile = 3, // --config <file> specifying a platform.
+    SessionRequest = 4,  // --config <file> or --set for this invocation.
 };
 
 // Metadata for one field inside a namespaced schema. The validator is
@@ -64,7 +64,7 @@ struct Schema {
 // holds no values — it is a metadata catalog. Value resolution is handled by
 // ConfigBundle (see schema_registry.cpp, not yet implemented this tick).
 class SchemaRegistry {
-public:
+  public:
     static SchemaRegistry& instance();
 
     // Register a schema for a namespace. Called at static-init time by
@@ -84,7 +84,7 @@ public:
     // call this between cases. Not part of the production lifecycle.
     void clear_for_testing();
 
-private:
+  private:
     SchemaRegistry() = default;
     std::unordered_map<std::string, Schema> schemas_;
 };
@@ -92,8 +92,7 @@ private:
 // Helper: registers a schema at static-init time. The macro below expands to
 // a file-scope instance of this struct.
 struct SchemaRegistrar {
-    SchemaRegistrar(Schema schema)
-    {
+    SchemaRegistrar(Schema schema) {
         SchemaRegistry::instance().register_schema(std::move(schema));
     }
 };
@@ -115,10 +114,10 @@ struct SchemaRegistrar {
 // registry. Duplicate namespaces throw at static-init time, which surfaces
 // as a crash at process start — exactly what you want for a registration
 // collision between parallel agents.
-#define REGISTER_CONFIG_SCHEMA(schema_literal)                                \
-    namespace {                                                               \
-    static ::trtf::config::SchemaRegistrar g_config_schema_registrar_##__COUNTER__( \
-        schema_literal);                                                      \
+#define REGISTER_CONFIG_SCHEMA(schema_literal)                                                     \
+    namespace {                                                                                    \
+    static ::trtf::config::SchemaRegistrar                                                         \
+        g_config_schema_registrar_##__COUNTER__(schema_literal);                                   \
     }
 
 } // namespace trtf::config

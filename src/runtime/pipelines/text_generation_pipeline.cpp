@@ -45,17 +45,15 @@ const StepTraceConfig& step_trace_config() {
 // tracing disabled. When a non-empty path is supplied, this truncates the
 // target file so repeated runs don't concatenate. Not re-entrant; the
 // caller serializes creation.
-void apply_text_trace_config_from_registry(
-    const std::string& path, int32_t start_position, int32_t end_position, int32_t top_k)
-{
+void apply_text_trace_config_from_registry(const std::string& path, int32_t start_position,
+                                           int32_t end_position, int32_t top_k) {
     StepTraceConfig& cfg = mutable_step_trace_config();
     cfg.path = path;
     cfg.enabled = !path.empty();
     cfg.start_position = start_position;
     cfg.end_position = end_position;
     cfg.top_k = std::max(int32_t{1}, top_k);
-    if (cfg.enabled)
-    {
+    if (cfg.enabled) {
         std::ofstream clear(cfg.path, std::ios::trunc);
     }
 }
@@ -66,7 +64,8 @@ void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t 
                              int32_t rows_before, int32_t rows_after,
                              const std::vector<float>& logits) {
     const auto& cfg = step_trace_config();
-    if (!cfg.enabled || position_before < cfg.start_position || position_before > cfg.end_position) {
+    if (!cfg.enabled || position_before < cfg.start_position ||
+        position_before > cfg.end_position) {
         return;
     }
     if (logits.empty())
@@ -75,15 +74,14 @@ void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t 
     const int32_t top_n = std::min<int32_t>(cfg.top_k, static_cast<int32_t>(logits.size()));
     std::vector<int32_t> order(logits.size());
     std::iota(order.begin(), order.end(), 0);
-    std::partial_sort(order.begin(), order.begin() + top_n, order.end(),
-                      [&logits](int32_t lhs, int32_t rhs) {
-                          if (logits[static_cast<std::size_t>(lhs)] !=
-                              logits[static_cast<std::size_t>(rhs)]) {
-                              return logits[static_cast<std::size_t>(lhs)] >
-                                     logits[static_cast<std::size_t>(rhs)];
-                          }
-                          return lhs < rhs;
-                      });
+    std::partial_sort(
+        order.begin(), order.begin() + top_n, order.end(), [&logits](int32_t lhs, int32_t rhs) {
+            if (logits[static_cast<std::size_t>(lhs)] != logits[static_cast<std::size_t>(rhs)]) {
+                return logits[static_cast<std::size_t>(lhs)] >
+                       logits[static_cast<std::size_t>(rhs)];
+            }
+            return lhs < rhs;
+        });
 
     std::ofstream out(cfg.path, std::ios::app);
     if (!out)
@@ -91,9 +89,9 @@ void maybe_append_step_trace(int32_t position_before, int32_t token_id, int32_t 
 
     out << "{\"position_before\":" << position_before << ",\"token_id\":" << token_id
         << ",\"decoder_idx\":" << decoder_idx << ",\"rows_before\":" << rows_before
-        << ",\"rows_after\":" << rows_after
-        << ",\"argmax_token\":" << order.front() << ",\"argmax_logit\":"
-        << logits[static_cast<std::size_t>(order.front())] << ",\"top_ids\":[";
+        << ",\"rows_after\":" << rows_after << ",\"argmax_token\":" << order.front()
+        << ",\"argmax_logit\":" << logits[static_cast<std::size_t>(order.front())]
+        << ",\"top_ids\":[";
     for (int32_t i = 0; i < top_n; ++i) {
         if (i > 0)
             out << ',';
@@ -288,9 +286,9 @@ TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
 
     // Decode: autoregressive loop
     std::vector<int32_t> output = input_ids;
-    int32_t decode_steps = run_decode_loop(active_sampler, params, output, logits, max_new_tokens,
-                                           gpu_sampling, cfg,
-                                           static_cast<int32_t>(input_ids.size()));
+    int32_t decode_steps =
+        run_decode_loop(active_sampler, params, output, logits, max_new_tokens, gpu_sampling, cfg,
+                        static_cast<int32_t>(input_ids.size()));
 
     auto t2 = Clock::now();
 

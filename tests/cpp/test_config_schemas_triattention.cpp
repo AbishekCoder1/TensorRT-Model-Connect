@@ -24,50 +24,65 @@ namespace {
 
 int g_failures = 0;
 
-void check(bool condition, const char* name)
-{
-    if (!condition) { std::cerr << "FAIL: " << name << '\n'; ++g_failures; }
+void check(bool condition, const char* name) {
+    if (!condition) {
+        std::cerr << "FAIL: " << name << '\n';
+        ++g_failures;
+    }
 }
 
 using trtf::config::Layer;
 using trtf::config::Schema;
 using trtf::config::SchemaRegistry;
 
-void test_static_init_registered_triattention()
-{
+void test_static_init_registered_triattention() {
     // The force-link anchor in src/runtime/config/schemas/force_link_schemas.cpp
     // pulls triattention.cpp into the binary even in a static-lib link, so
     // its static-init registration should have run by the time main() starts.
     const Schema* schema = SchemaRegistry::instance().lookup("triattention");
     check(schema != nullptr, "static-init: triattention is registered");
-    if (schema == nullptr) return;
+    if (schema == nullptr)
+        return;
 
     // Spot-check a handful of expected fields.
     const std::set<std::string> expected = {
-        "enabled", "kv_budget", "divide_length", "recent_window",
-        "score_aggregation", "per_layer_aggregation", "count_prompt_tokens",
-        "protect_prefill", "disable_mlr", "disable_trig",
-        "offset_max_length", "stats_section",
-        "debug", "profile", "runtime_bucket_rows",
-        "disable_gpu_selection", "disable_gpu_compaction", "disable_gpu_state",
-        "zero_tail", "dump_keep_path", "dump_compaction_index",
-        "abort_after_dump", "dump_score_cache", "dump_score_values",
+        "enabled",
+        "kv_budget",
+        "divide_length",
+        "recent_window",
+        "score_aggregation",
+        "per_layer_aggregation",
+        "count_prompt_tokens",
+        "protect_prefill",
+        "disable_mlr",
+        "disable_trig",
+        "offset_max_length",
+        "stats_section",
+        "debug",
+        "profile",
+        "runtime_bucket_rows",
+        "disable_gpu_selection",
+        "disable_gpu_compaction",
+        "disable_gpu_state",
+        "zero_tail",
+        "dump_keep_path",
+        "dump_compaction_index",
+        "abort_after_dump",
+        "dump_score_cache",
+        "dump_score_values",
     };
     std::set<std::string> actual;
-    for (const auto& f : schema->fields) actual.insert(f.name);
+    for (const auto& f : schema->fields)
+        actual.insert(f.name);
 
-    for (const auto& name : expected)
-    {
-        if (actual.count(name) == 0)
-        {
+    for (const auto& name : expected) {
+        if (actual.count(name) == 0) {
             std::cerr << "FAIL: missing expected field: " << name << '\n';
             ++g_failures;
         }
     }
-    for (const auto& name : actual)
-    {
-        if (expected.count(name) == 0)
-        {
+    for (const auto& name : actual) {
+        if (expected.count(name) == 0) {
             std::cerr << "FAIL: unexpected field in schema: " << name << '\n';
             ++g_failures;
         }
@@ -75,8 +90,7 @@ void test_static_init_registered_triattention()
     check(actual.size() == expected.size(), "triattention: field count matches");
 }
 
-void test_make_triattention_schema_standalone()
-{
+void test_make_triattention_schema_standalone() {
     // Construct without using the singleton — helps diagnose whether a
     // failure in the other test is a registration problem or a declaration
     // problem.
@@ -85,10 +99,9 @@ void test_make_triattention_schema_standalone()
     check(schema.fields.size() >= 20, "make_schema: at least 20 fields");
     // kv_budget field must be int32 with default 4096 and allow Bundle+Session.
     const auto it = std::find_if(schema.fields.begin(), schema.fields.end(),
-        [](const auto& f) { return f.name == "kv_budget"; });
+                                 [](const auto& f) { return f.name == "kv_budget"; });
     check(it != schema.fields.end(), "make_schema: kv_budget present");
-    if (it != schema.fields.end())
-    {
+    if (it != schema.fields.end()) {
         check(it->type == "int32", "make_schema: kv_budget type");
         check(it->allowed_layers.count(Layer::SessionRequest) != 0,
               "make_schema: kv_budget allows session");
@@ -101,12 +114,10 @@ void test_make_triattention_schema_standalone()
 
 } // namespace
 
-int main()
-{
+int main() {
     test_static_init_registered_triattention();
     test_make_triattention_schema_standalone();
-    if (g_failures != 0)
-    {
+    if (g_failures != 0) {
         std::cerr << g_failures << " test(s) failed\n";
         return 1;
     }

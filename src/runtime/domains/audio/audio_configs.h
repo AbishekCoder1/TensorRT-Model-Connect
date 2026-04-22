@@ -38,7 +38,7 @@ struct MagpieTTSConfig {
     // audio_magpie.* namespace replaces the TRTF_MAGPIE_{GREEDY, CFG_SCALE,
     // TEMPERATURE, FINISHED_LIMIT, SEED} env vars. magpie_plugin populates
     // these from ctx.runtime_config at construction.
-    int64_t seed{-1};  // -1 -> leave RNG at constructed state
+    int64_t seed{-1}; // -1 -> leave RNG at constructed state
 };
 
 /// Configuration for the SpeechToSpeech (PersonaPlex) pipeline.
@@ -62,20 +62,20 @@ struct SpeechConfig {
     // Temporal-to-depth projection matrix [depth_hidden, temporal_hidden]
     // Loaded from bundle 'depth_projection' section.
     std::vector<float> depth_projection;
-    int32_t temporal_hidden_for_proj{0};  // temporal_hidden (cols of projection)
+    int32_t temporal_hidden_for_proj{0}; // temporal_hidden (cols of projection)
 
     // Per-codebook audio embedding tables for temporal transformer input.
     // Layout: [num_codebooks, audio_vocab_size, temporal_hidden_size] as float32.
     // The temporal input for each frame is the SUM of all codebook embeddings.
     std::vector<float> audio_embeddings;
-    int32_t audio_vocab_size{2049};  // per-codebook vocab (Mimi: 2049)
+    int32_t audio_vocab_size{2049}; // per-codebook vocab (Mimi: 2049)
 
     // Temporal text embedding table [text_vocab, temporal_hidden] as float32.
     // The official Moshi code sums text_emb(text_token) + audio embeddings.
     // During generation, the text token is the PAD token (text_padding_id).
     std::vector<float> temporal_text_embedding;
     int32_t temporal_text_vocab{0};
-    int32_t text_padding_id{3};  // PAD token for text during generation
+    int32_t text_padding_id{3}; // PAD token for text during generation
 
     // Depth decoder text embedding table [depth_text_vocab, depth_hidden] as float32.
     // Used at depth position 0 (text token step) before audio codebook generation.
@@ -98,12 +98,12 @@ struct SpeechConfig {
     // Length = num_codebooks + 1 (text + 16 audio).
     // delay[k]=0: token from current frame; delay[k]=1: token from previous frame.
     std::vector<int32_t> delays;
-    int32_t text_initial_token_id{32000};  // BOS for text stream at first step
-    int32_t audio_initial_token_id{2048};  // BOS for audio streams at first step
+    int32_t text_initial_token_id{32000}; // BOS for text stream at first step
+    int32_t audio_initial_token_id{2048}; // BOS for audio streams at first step
 
     // Depth decoder sampling parameters (greedy if temperature <= 0)
-    float depth_temperature{0.0F};  // 0 = greedy, 0.8 = official PersonaPlex
-    int32_t depth_top_k{0};         // 0 = greedy, 250 = official PersonaPlex
+    float depth_temperature{0.0F}; // 0 = greedy, 0.8 = official PersonaPlex
+    int32_t depth_top_k{0};        // 0 = greedy, 250 = official PersonaPlex
 
     // Optional text EOS token used to stop long-form speech generation early.
     // -1 disables EOS-based early stop.

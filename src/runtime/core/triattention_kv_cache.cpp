@@ -9,18 +9,17 @@
 
 #if TRTF_HAS_TRT
 
-#include <nlohmann/json.hpp>
-
 #include <algorithm>
-#include <chrono>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <cstdlib>
-#include <iostream>
+#include <cstring>
 #include <fstream>
+#include <iostream>
+#include <nlohmann/json.hpp>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -86,14 +85,13 @@ float fp16_to_float(uint16_t bits) {
                 --exponent;
             }
             mantissa &= 0x03FFU;
-            out_bits = sign | (static_cast<uint32_t>(exponent + (127 - 15)) << 23) |
-                       (mantissa << 13);
+            out_bits =
+                sign | (static_cast<uint32_t>(exponent + (127 - 15)) << 23) | (mantissa << 13);
         }
     } else if (exponent == 0x1FU) {
         out_bits = sign | 0x7F800000U | (mantissa << 13);
     } else {
-        out_bits = sign | (static_cast<uint32_t>(exponent + (127 - 15)) << 23) |
-                   (mantissa << 13);
+        out_bits = sign | (static_cast<uint32_t>(exponent + (127 - 15)) << 23) | (mantissa << 13);
     }
 
     float out = 0.0F;
@@ -169,39 +167,33 @@ float complex_abs(float real, float imag) {
 // TRTF_TRIATTN_OVERRIDE_* values. All of them are deleted here — values
 // now flow through the config registry exclusively.
 template <typename T>
-bool registry_has_value(const ::trtf::config::ConfigBundle& bundle,
-                         const std::string& field)
-{
-    try
-    {
-        return bundle.source_of("triattention", field)
-               != ::trtf::config::Layer::SchemaDefault;
-    }
-    catch (const std::exception&)
-    {
+bool registry_has_value(const ::trtf::config::ConfigBundle& bundle, const std::string& field) {
+    try {
+        return bundle.source_of("triattention", field) != ::trtf::config::Layer::SchemaDefault;
+    } catch (const std::exception&) {
         return false;
     }
 }
 
 template <typename T>
-void apply_layer_value(const ::trtf::config::ConfigBundle& bundle,
-                        const std::string& field, T& out)
-{
-    if (!registry_has_value<T>(bundle, field)) return;
-    try { out = bundle.get<T>("triattention", field); }
-    catch (const std::exception&) { /* type mismatch — skip */ }
+void apply_layer_value(const ::trtf::config::ConfigBundle& bundle, const std::string& field,
+                       T& out) {
+    if (!registry_has_value<T>(bundle, field))
+        return;
+    try {
+        out = bundle.get<T>("triattention", field);
+    } catch (const std::exception&) { /* type mismatch — skip */
+    }
 }
 
 void apply_aggregation_from_registry(const ::trtf::config::ConfigBundle& bundle,
-                                      const std::string& field,
-                                      TriAttentionScoreAggregation& out)
-{
-    if (!registry_has_value<std::string>(bundle, field)) return;
-    try
-    {
+                                     const std::string& field, TriAttentionScoreAggregation& out) {
+    if (!registry_has_value<std::string>(bundle, field))
+        return;
+    try {
         out = parse_score_aggregation(bundle.get<std::string>("triattention", field));
+    } catch (const std::exception&) { /* keep previous value */
     }
-    catch (const std::exception&) { /* keep previous value */ }
 }
 
 using Clock = std::chrono::steady_clock;
@@ -238,49 +230,45 @@ namespace {
 // legacy JSON path produced. Session > Platform > BundleDefault > BuildTime
 // win; SchemaDefault reads are skipped so JSON-only bundles keep their
 // values.
-void overlay_core_runtime_from_registry(
-    TriAttentionConfig& cfg, const ::trtf::config::ConfigBundle& bundle)
-{
-    apply_layer_value<bool>(bundle,         "enabled",             cfg.enabled);
-    apply_layer_value<std::int32_t>(bundle, "kv_budget",           cfg.kv_budget);
-    apply_layer_value<std::int32_t>(bundle, "divide_length",       cfg.divide_length);
-    apply_layer_value<std::int32_t>(bundle, "recent_window",       cfg.recent_window);
-    apply_aggregation_from_registry(bundle, "score_aggregation",      cfg.score_aggregation);
-    apply_aggregation_from_registry(bundle, "per_layer_aggregation",  cfg.per_layer_aggregation);
-    apply_layer_value<bool>(bundle,         "count_prompt_tokens", cfg.count_prompt_tokens);
-    apply_layer_value<bool>(bundle,         "protect_prefill",     cfg.protect_prefill);
-    apply_layer_value<bool>(bundle,         "disable_mlr",         cfg.disable_mlr);
-    apply_layer_value<bool>(bundle,         "disable_trig",        cfg.disable_trig);
-    apply_layer_value<std::string>(bundle,  "stats_section",       cfg.stats_section);
-    apply_layer_value<std::int32_t>(bundle, "offset_max_length",   cfg.offset_max_length);
+void overlay_core_runtime_from_registry(TriAttentionConfig& cfg,
+                                        const ::trtf::config::ConfigBundle& bundle) {
+    apply_layer_value<bool>(bundle, "enabled", cfg.enabled);
+    apply_layer_value<std::int32_t>(bundle, "kv_budget", cfg.kv_budget);
+    apply_layer_value<std::int32_t>(bundle, "divide_length", cfg.divide_length);
+    apply_layer_value<std::int32_t>(bundle, "recent_window", cfg.recent_window);
+    apply_aggregation_from_registry(bundle, "score_aggregation", cfg.score_aggregation);
+    apply_aggregation_from_registry(bundle, "per_layer_aggregation", cfg.per_layer_aggregation);
+    apply_layer_value<bool>(bundle, "count_prompt_tokens", cfg.count_prompt_tokens);
+    apply_layer_value<bool>(bundle, "protect_prefill", cfg.protect_prefill);
+    apply_layer_value<bool>(bundle, "disable_mlr", cfg.disable_mlr);
+    apply_layer_value<bool>(bundle, "disable_trig", cfg.disable_trig);
+    apply_layer_value<std::string>(bundle, "stats_section", cfg.stats_section);
+    apply_layer_value<std::int32_t>(bundle, "offset_max_length", cfg.offset_max_length);
 }
 
 // Populate the debug/profile fields from the registry. These have no
 // legacy JSON representation — they previously came from
 // TRTF_TRIATTN_* env vars, which are now gone.
-void fill_debug_from_registry(
-    TriAttentionConfig& cfg, const ::trtf::config::ConfigBundle& bundle)
-{
-    apply_layer_value<bool>(bundle,         "debug",                  cfg.debug);
-    apply_layer_value<bool>(bundle,         "profile",                cfg.profile);
-    apply_layer_value<std::int32_t>(bundle, "runtime_bucket_rows",    cfg.runtime_bucket_rows);
-    apply_layer_value<bool>(bundle,         "disable_gpu_selection",  cfg.disable_gpu_selection);
-    apply_layer_value<bool>(bundle,         "disable_gpu_compaction", cfg.disable_gpu_compaction);
-    apply_layer_value<bool>(bundle,         "disable_gpu_state",      cfg.disable_gpu_state);
-    apply_layer_value<bool>(bundle,         "zero_tail",              cfg.zero_tail);
-    apply_layer_value<std::string>(bundle,  "dump_keep_path",         cfg.dump_keep_path);
-    apply_layer_value<std::int32_t>(bundle, "dump_compaction_index",  cfg.dump_compaction_index);
-    apply_layer_value<bool>(bundle,         "abort_after_dump",       cfg.abort_after_dump);
-    apply_layer_value<bool>(bundle,         "dump_score_cache",       cfg.dump_score_cache);
-    apply_layer_value<bool>(bundle,         "dump_score_values",      cfg.dump_score_values);
+void fill_debug_from_registry(TriAttentionConfig& cfg, const ::trtf::config::ConfigBundle& bundle) {
+    apply_layer_value<bool>(bundle, "debug", cfg.debug);
+    apply_layer_value<bool>(bundle, "profile", cfg.profile);
+    apply_layer_value<std::int32_t>(bundle, "runtime_bucket_rows", cfg.runtime_bucket_rows);
+    apply_layer_value<bool>(bundle, "disable_gpu_selection", cfg.disable_gpu_selection);
+    apply_layer_value<bool>(bundle, "disable_gpu_compaction", cfg.disable_gpu_compaction);
+    apply_layer_value<bool>(bundle, "disable_gpu_state", cfg.disable_gpu_state);
+    apply_layer_value<bool>(bundle, "zero_tail", cfg.zero_tail);
+    apply_layer_value<std::string>(bundle, "dump_keep_path", cfg.dump_keep_path);
+    apply_layer_value<std::int32_t>(bundle, "dump_compaction_index", cfg.dump_compaction_index);
+    apply_layer_value<bool>(bundle, "abort_after_dump", cfg.abort_after_dump);
+    apply_layer_value<bool>(bundle, "dump_score_cache", cfg.dump_score_cache);
+    apply_layer_value<bool>(bundle, "dump_score_values", cfg.dump_score_values);
 }
 
 } // namespace
 
-TriAttentionConfig parse_triattention_bundle_config(
-    const std::string& config_json,
-    int32_t max_cache_length,
-    const ::trtf::config::ConfigBundle* runtime_config) {
+TriAttentionConfig
+parse_triattention_bundle_config(const std::string& config_json, int32_t max_cache_length,
+                                 const ::trtf::config::ConfigBundle* runtime_config) {
     TriAttentionConfig cfg;
 
     // Legacy bundle path: pull core fields from the root-level
@@ -334,8 +322,7 @@ TriAttentionConfig parse_triattention_bundle_config(
 
 TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
                                                 int32_t num_attention_heads,
-                                                int32_t num_key_value_heads,
-                                                int32_t num_layers) {
+                                                int32_t num_key_value_heads, int32_t num_layers) {
     TriAttentionStats stats;
     json root = json::parse(stats_json);
 
@@ -343,8 +330,7 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
     stats.rope_style = parse_rope_style(root.value("rope_style", std::string("half")));
     stats.rope_theta = root.value("rope_theta", 10000.0F);
     stats.num_attention_heads = std::max(root.value("num_attention_heads", num_attention_heads), 1);
-    stats.num_key_value_heads =
-        std::max(root.value("num_key_value_heads", num_key_value_heads), 1);
+    stats.num_key_value_heads = std::max(root.value("num_key_value_heads", num_key_value_heads), 1);
     stats.stats_head_count = std::max(root.value("stats_head_count", 0), 0);
     stats.num_layers = std::max(root.value("num_layers", num_layers), 1);
 
@@ -357,7 +343,8 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
         const int32_t half_dim = stats.head_dim / 2;
         stats.inv_freq.reserve(static_cast<std::size_t>(half_dim));
         for (int32_t i = 0; i < half_dim; ++i) {
-            const float exponent = (2.0F * static_cast<float>(i)) / static_cast<float>(stats.head_dim);
+            const float exponent =
+                (2.0F * static_cast<float>(i)) / static_cast<float>(stats.head_dim);
             stats.inv_freq.push_back(1.0F / std::pow(stats.rope_theta, exponent));
         }
     }
@@ -380,8 +367,7 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
                     throw std::runtime_error("TriAttention sampled head layer is out of range");
                 if (head < 0 || head >= head_upper_bound)
                     throw std::runtime_error("TriAttention sampled head index is out of range");
-                auto& heads =
-                    stats.sampled_score_heads_by_layer[static_cast<std::size_t>(layer)];
+                auto& heads = stats.sampled_score_heads_by_layer[static_cast<std::size_t>(layer)];
                 heads.push_back(head);
             }
         }
@@ -445,8 +431,7 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
                 static_cast<int32_t>(q_mean_imag.size()) != inferred_stats_heads ||
                 static_cast<int32_t>(q_abs_mean.size()) != inferred_stats_heads ||
                 static_cast<int32_t>(freq_scale_sq.size()) != inferred_stats_heads) {
-                throw std::runtime_error(
-                    "TriAttention layer_stats head count is inconsistent");
+                throw std::runtime_error("TriAttention layer_stats head count is inconsistent");
             }
 
             auto& layer_stats = stats.layer_stats[static_cast<std::size_t>(layer)];
@@ -457,10 +442,14 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
             layer_stats.q_abs_mean.resize(flat_size);
             layer_stats.freq_scale_sq.resize(flat_size);
             for (int32_t score_head = 0; score_head < inferred_stats_heads; ++score_head) {
-                if (static_cast<int32_t>(q_mean_real[static_cast<std::size_t>(score_head)].size()) != half_dim ||
-                    static_cast<int32_t>(q_mean_imag[static_cast<std::size_t>(score_head)].size()) != half_dim ||
-                    static_cast<int32_t>(q_abs_mean[static_cast<std::size_t>(score_head)].size()) != half_dim ||
-                    static_cast<int32_t>(freq_scale_sq[static_cast<std::size_t>(score_head)].size()) != half_dim) {
+                if (static_cast<int32_t>(
+                        q_mean_real[static_cast<std::size_t>(score_head)].size()) != half_dim ||
+                    static_cast<int32_t>(
+                        q_mean_imag[static_cast<std::size_t>(score_head)].size()) != half_dim ||
+                    static_cast<int32_t>(q_abs_mean[static_cast<std::size_t>(score_head)].size()) !=
+                        half_dim ||
+                    static_cast<int32_t>(
+                        freq_scale_sq[static_cast<std::size_t>(score_head)].size()) != half_dim) {
                     throw std::runtime_error(
                         "TriAttention layer_stats frequency count does not match head_dim / 2");
                 }
@@ -468,14 +457,15 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
                     static_cast<std::size_t>(score_head) * static_cast<std::size_t>(half_dim);
                 for (int32_t d = 0; d < half_dim; ++d) {
                     const auto dst = base + static_cast<std::size_t>(d);
-                    layer_stats.q_mean_real[dst] =
-                        q_mean_real[static_cast<std::size_t>(score_head)][static_cast<std::size_t>(d)];
-                    layer_stats.q_mean_imag[dst] =
-                        q_mean_imag[static_cast<std::size_t>(score_head)][static_cast<std::size_t>(d)];
-                    layer_stats.q_abs_mean[dst] =
-                        q_abs_mean[static_cast<std::size_t>(score_head)][static_cast<std::size_t>(d)];
+                    layer_stats.q_mean_real[dst] = q_mean_real[static_cast<std::size_t>(score_head)]
+                                                              [static_cast<std::size_t>(d)];
+                    layer_stats.q_mean_imag[dst] = q_mean_imag[static_cast<std::size_t>(score_head)]
+                                                              [static_cast<std::size_t>(d)];
+                    layer_stats.q_abs_mean[dst] = q_abs_mean[static_cast<std::size_t>(score_head)]
+                                                            [static_cast<std::size_t>(d)];
                     layer_stats.freq_scale_sq[dst] =
-                        freq_scale_sq[static_cast<std::size_t>(score_head)][static_cast<std::size_t>(d)];
+                        freq_scale_sq[static_cast<std::size_t>(score_head)]
+                                     [static_cast<std::size_t>(d)];
                 }
             }
             any_stats = true;
@@ -546,8 +536,7 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
         }
 
         auto& layer_stats = stats.layer_stats[static_cast<std::size_t>(layer)];
-        const auto base =
-            static_cast<std::size_t>(head) * static_cast<std::size_t>(half_dim);
+        const auto base = static_cast<std::size_t>(head) * static_cast<std::size_t>(half_dim);
         for (int32_t d = 0; d < half_dim; ++d) {
             const auto idx = base + static_cast<std::size_t>(d);
             layer_stats.q_mean_real[idx] += q_mean_real[static_cast<std::size_t>(d)];
@@ -587,10 +576,10 @@ TriAttentionKvCache::TriAttentionKvCache(int32_t num_layers, int32_t num_kv_head
                                          int32_t max_length, int32_t kv_dim, cudaStream_t stream,
                                          TriAttentionConfig config, TriAttentionStats stats,
                                          DType cache_dtype, KvCacheNames names)
-    : num_layers_(num_layers), num_kv_heads_(num_kv_heads), max_length_(max_length), kv_dim_(kv_dim),
-      stream_(stream),
-      cache_dtype_(cache_dtype), cache_element_size_(dtype_size(cache_dtype)),
-      names_(std::move(names)), config_(std::move(config)), stats_(std::move(stats)),
+    : num_layers_(num_layers), num_kv_heads_(num_kv_heads), max_length_(max_length),
+      kv_dim_(kv_dim), stream_(stream), cache_dtype_(cache_dtype),
+      cache_element_size_(dtype_size(cache_dtype)), names_(std::move(names)),
+      config_(std::move(config)), stats_(std::move(stats)),
       offsets_(make_offsets(config_.offset_max_length)) {
     if (config_.kv_budget < 1 || config_.kv_budget > max_length_) {
         throw std::runtime_error("TriAttention kv_budget must be within [1, max_length]");
@@ -648,17 +637,14 @@ TriAttentionKvCache::TriAttentionKvCache(int32_t num_layers, int32_t num_kv_head
     if (config_.debug) {
         std::cerr << "[trtf.triattention] init kv_budget=" << config_.kv_budget
                   << " divide_length=" << config_.divide_length
-                  << " recent_window=" << config_.recent_window
-                  << " per_layer_aggregation="
+                  << " recent_window=" << config_.recent_window << " per_layer_aggregation="
                   << score_aggregation_name(config_.per_layer_aggregation)
                   << " count_prompt_tokens=" << (config_.count_prompt_tokens ? 1 : 0)
                   << " protect_prefill=" << (config_.protect_prefill ? 1 : 0)
                   << " disable_mlr=" << (config_.disable_mlr ? 1 : 0)
                   << " disable_trig=" << (config_.disable_trig ? 1 : 0)
-                  << " kv_heads=" << num_kv_heads_
-                  << " query_heads=" << query_head_count_
-                  << " cache_heads=" << cache_head_count_
-                  << " score_group=" << score_group_size_
+                  << " kv_heads=" << num_kv_heads_ << " query_heads=" << query_head_count_
+                  << " cache_heads=" << cache_head_count_ << " score_group=" << score_group_size_
                   << " layers_with_stats=" << stats_.layer_stats.size() << '\n';
     }
 
@@ -696,10 +682,10 @@ void TriAttentionKvCache::initialize_gpu_state() {
         return;
 
     candidate_indices_device_ = DeviceTensor({max_length_}, DType::kInt32, stream_);
-    keep_indices_device_ =
-        DeviceTensor({static_cast<int64_t>(cache_head_count_) * max_length_}, DType::kInt32, stream_);
-    positions_device_ =
-        DeviceTensor({static_cast<int64_t>(cache_head_count_) * max_length_}, DType::kInt32, stream_);
+    keep_indices_device_ = DeviceTensor({static_cast<int64_t>(cache_head_count_) * max_length_},
+                                        DType::kInt32, stream_);
+    positions_device_ = DeviceTensor({static_cast<int64_t>(cache_head_count_) * max_length_},
+                                     DType::kInt32, stream_);
     inv_freq_device_ =
         DeviceTensor({static_cast<int64_t>(stats_.inv_freq.size())}, DType::kFloat32, stream_);
     cos_phase_device_ =
@@ -738,14 +724,14 @@ void TriAttentionKvCache::initialize_gpu_state() {
 
         std::vector<int32_t> head_offsets(static_cast<std::size_t>(gpu.score_head_count));
         std::vector<int32_t> head_cache_indices(static_cast<std::size_t>(gpu.score_head_count));
-        std::vector<float> q_mean_real(
-            static_cast<std::size_t>(gpu.score_head_count) * static_cast<std::size_t>(half_dim));
-        std::vector<float> q_mean_imag(
-            static_cast<std::size_t>(gpu.score_head_count) * static_cast<std::size_t>(half_dim));
-        std::vector<float> q_abs_mean(
-            static_cast<std::size_t>(gpu.score_head_count) * static_cast<std::size_t>(half_dim));
-        std::vector<float> freq_scale_sq(
-            static_cast<std::size_t>(gpu.score_head_count) * static_cast<std::size_t>(half_dim));
+        std::vector<float> q_mean_real(static_cast<std::size_t>(gpu.score_head_count) *
+                                       static_cast<std::size_t>(half_dim));
+        std::vector<float> q_mean_imag(static_cast<std::size_t>(gpu.score_head_count) *
+                                       static_cast<std::size_t>(half_dim));
+        std::vector<float> q_abs_mean(static_cast<std::size_t>(gpu.score_head_count) *
+                                      static_cast<std::size_t>(half_dim));
+        std::vector<float> freq_scale_sq(static_cast<std::size_t>(gpu.score_head_count) *
+                                         static_cast<std::size_t>(half_dim));
         gpu.host_cache_head_indices.resize(static_cast<std::size_t>(gpu.score_head_count));
 
         for (int32_t sampled_idx = 0; sampled_idx < gpu.score_head_count; ++sampled_idx) {
@@ -766,27 +752,22 @@ void TriAttentionKvCache::initialize_gpu_state() {
                         q_mean_imag.begin() + static_cast<std::ptrdiff_t>(dst_base));
             std::copy_n(host.q_abs_mean.begin() + static_cast<std::ptrdiff_t>(src_base), half_dim,
                         q_abs_mean.begin() + static_cast<std::ptrdiff_t>(dst_base));
-            std::copy_n(host.freq_scale_sq.begin() + static_cast<std::ptrdiff_t>(src_base), half_dim,
-                        freq_scale_sq.begin() + static_cast<std::ptrdiff_t>(dst_base));
+            std::copy_n(host.freq_scale_sq.begin() + static_cast<std::ptrdiff_t>(src_base),
+                        half_dim, freq_scale_sq.begin() + static_cast<std::ptrdiff_t>(dst_base));
         }
 
         gpu.head_offsets = DeviceTensor({gpu.score_head_count}, DType::kInt32, stream_);
         gpu.head_cache_indices = DeviceTensor({gpu.score_head_count}, DType::kInt32, stream_);
-        gpu.q_mean_real =
-            DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
-                         DType::kFloat32, stream_);
-        gpu.q_mean_imag =
-            DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
-                         DType::kFloat32, stream_);
-        gpu.q_abs_mean =
-            DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
-                         DType::kFloat32, stream_);
-        gpu.freq_scale_sq =
-            DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
-                         DType::kFloat32, stream_);
-        gpu.scores =
-            DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * max_length_},
-                         DType::kFloat32, stream_);
+        gpu.q_mean_real = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
+                                       DType::kFloat32, stream_);
+        gpu.q_mean_imag = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
+                                       DType::kFloat32, stream_);
+        gpu.q_abs_mean = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
+                                      DType::kFloat32, stream_);
+        gpu.freq_scale_sq = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
+                                         DType::kFloat32, stream_);
+        gpu.scores = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * max_length_},
+                                  DType::kFloat32, stream_);
 
         gpu.head_offsets.copy_from_host(head_offsets.data());
         gpu.head_cache_indices.copy_from_host(head_cache_indices.data());
@@ -802,17 +783,16 @@ bool TriAttentionKvCache::can_use_gpu_selection() const {
     if (config_.disable_gpu_selection)
         return false;
     if (!candidate_indices_device_.ok() || !keep_indices_device_.ok() || !positions_device_.ok() ||
-        !inv_freq_device_.ok() ||
-        !cos_phase_device_.ok() || !sin_phase_device_.ok()) {
+        !inv_freq_device_.ok() || !cos_phase_device_.ok() || !sin_phase_device_.ok()) {
         return false;
     }
     if (!scratch_k_device_.ok() || !scratch_v_device_.ok())
         return false;
     for (const auto& layer : layer_gpu_stats_) {
         if (layer.score_head_count > 0 &&
-            (!layer.head_offsets.ok() || !layer.head_cache_indices.ok() || !layer.q_mean_real.ok() ||
-             !layer.q_mean_imag.ok() ||
-             !layer.q_abs_mean.ok() || !layer.freq_scale_sq.ok() || !layer.scores.ok())) {
+            (!layer.head_offsets.ok() || !layer.head_cache_indices.ok() ||
+             !layer.q_mean_real.ok() || !layer.q_mean_imag.ok() || !layer.q_abs_mean.ok() ||
+             !layer.freq_scale_sq.ok() || !layer.scores.ok())) {
             return false;
         }
     }
@@ -895,9 +875,9 @@ void TriAttentionKvCache::bind_to(TrtModule& module) {
     }
 }
 
-std::vector<float> TriAttentionKvCache::copy_cache_rows_to_host(const DeviceTensor& tensor,
-                                                                int32_t rows,
-                                                                TriAttentionCompactionProfile* profile) const {
+std::vector<float>
+TriAttentionKvCache::copy_cache_rows_to_host(const DeviceTensor& tensor, int32_t rows,
+                                             TriAttentionCompactionProfile* profile) const {
     const auto count = static_cast<std::size_t>(rows) * static_cast<std::size_t>(kv_dim_);
     std::vector<float> out(count, 0.0F);
     if (rows <= 0)
@@ -952,8 +932,9 @@ int32_t TriAttentionKvCache::count_prefix_rows() const {
     return count;
 }
 
-std::vector<int32_t> TriAttentionKvCache::select_keep_indices(
-    int32_t keep_budget, TriAttentionCompactionProfile* profile) {
+std::vector<int32_t>
+TriAttentionKvCache::select_keep_indices(int32_t keep_budget,
+                                         TriAttentionCompactionProfile* profile) {
     const int32_t total_tokens = static_cast<int32_t>(cache_positions_.size());
     const int32_t old_budget = std::min(std::max(keep_budget, 0), total_tokens);
     if (total_tokens <= old_budget) {
@@ -1026,20 +1007,18 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices(
 }
 
 int32_t TriAttentionKvCache::compaction_keep_budget(int32_t total_tokens) const {
-    const int32_t logical_budget =
-        std::min(std::max(config_.kv_budget, 0), max_length_);
+    const int32_t logical_budget = std::min(std::max(config_.kv_budget, 0), max_length_);
     int32_t total_budget = logical_budget;
     if (!config_.count_prompt_tokens)
         total_budget = std::min(max_length_, logical_budget + count_prefix_rows());
-    if (!config_.count_prompt_tokens ||
-        prompt_end_position_ > 0 || planned_prompt_length_ <= absolute_position_) {
+    if (!config_.count_prompt_tokens || prompt_end_position_ > 0 ||
+        planned_prompt_length_ <= absolute_position_) {
         return std::min(total_budget, total_tokens);
     }
 
     const int32_t remaining_prompt_tokens =
         std::max(planned_prompt_length_ - absolute_position_, 0);
-    const int32_t slack_budget =
-        std::clamp(max_length_ - remaining_prompt_tokens, 0, max_length_);
+    const int32_t slack_budget = std::clamp(max_length_ - remaining_prompt_tokens, 0, max_length_);
     return std::min(std::max(total_budget, slack_budget), total_tokens);
 }
 
@@ -1056,8 +1035,7 @@ int32_t TriAttentionKvCache::compaction_trigger_length() const {
 
 std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
     int32_t keep_budget, const std::vector<int32_t>& reserved,
-    const std::vector<int32_t>& candidates,
-    TriAttentionCompactionProfile* profile) const {
+    const std::vector<int32_t>& candidates, TriAttentionCompactionProfile* profile) const {
     const int32_t need = std::max(0, keep_budget - static_cast<int32_t>(reserved.size()));
     if (need <= 0) {
         std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
@@ -1084,8 +1062,7 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
         for (std::size_t o = 0; o < offsets_.size(); ++o) {
             for (int32_t d = 0; d < half_dim; ++d) {
                 const float phase =
-                    (round_start + offsets_[o]) *
-                    stats_.inv_freq[static_cast<std::size_t>(d)];
+                    (round_start + offsets_[o]) * stats_.inv_freq[static_cast<std::size_t>(d)];
                 cos_phase[o][static_cast<std::size_t>(d)] = std::cos(phase);
                 sin_phase[o][static_cast<std::size_t>(d)] = std::sin(phase);
             }
@@ -1100,10 +1077,10 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
         std::vector<float>(static_cast<std::size_t>(total_tokens), 0.0F));
     std::vector<float> layer_aggregate_dump;
     if (config_.dump_score_values) {
-        layer_aggregate_dump.assign(
-            static_cast<std::size_t>(num_layers_) * static_cast<std::size_t>(cache_head_count_) *
-                static_cast<std::size_t>(total_tokens),
-            std::numeric_limits<float>::quiet_NaN());
+        layer_aggregate_dump.assign(static_cast<std::size_t>(num_layers_) *
+                                        static_cast<std::size_t>(cache_head_count_) *
+                                        static_cast<std::size_t>(total_tokens),
+                                    std::numeric_limits<float>::quiet_NaN());
     }
     std::vector<float> global_fallback_sum(static_cast<std::size_t>(total_tokens), 0.0F);
     int32_t global_fallback_count = 0;
@@ -1131,16 +1108,15 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
             continue;
         }
 
-        const auto layer_cache =
-            copy_cache_rows_to_host(cache_k_[static_cast<std::size_t>(layer)], cache_length_, profile);
+        const auto layer_cache = copy_cache_rows_to_host(cache_k_[static_cast<std::size_t>(layer)],
+                                                         cache_length_, profile);
         if (profile != nullptr) {
             profile->sampled_layers += 1;
             profile->sampled_heads += static_cast<int32_t>(sampled_heads.size());
         }
 
         std::vector<std::vector<float>> layer_scores(
-            sampled_heads.size(),
-            std::vector<float>(static_cast<std::size_t>(total_tokens), 0.0F));
+            sampled_heads.size(), std::vector<float>(static_cast<std::size_t>(total_tokens), 0.0F));
         std::vector<std::vector<int32_t>> sampled_by_cache_head(
             static_cast<std::size_t>(cache_head_count_));
         for (int32_t sampled_idx = 0; sampled_idx < static_cast<int32_t>(sampled_heads.size());
@@ -1155,8 +1131,8 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
             sampled_by_cache_head[static_cast<std::size_t>(cache_head)].push_back(sampled_idx);
 
             for (int32_t row = 0; row < total_tokens; ++row) {
-                const float* row_ptr =
-                    layer_cache.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(kv_dim_);
+                const float* row_ptr = layer_cache.data() + static_cast<std::size_t>(row) *
+                                                                static_cast<std::size_t>(kv_dim_);
                 float additive = 0.0F;
                 std::vector<float> trig_sums(offsets_.size(), 0.0F);
 
@@ -1185,10 +1161,9 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
 
                     if (!config_.disable_trig) {
                         for (std::size_t o = 0; o < offsets_.size(); ++o) {
-                            trig_sums[o] +=
-                                freq_scale_sq
-                                * (prod_real * cos_phase[o][static_cast<std::size_t>(d)]
-                                   - prod_imag * sin_phase[o][static_cast<std::size_t>(d)]);
+                            trig_sums[o] += freq_scale_sq *
+                                            (prod_real * cos_phase[o][static_cast<std::size_t>(d)] -
+                                             prod_imag * sin_phase[o][static_cast<std::size_t>(d)]);
                         }
                     }
                 }
@@ -1206,8 +1181,8 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
             }
 
             if (!scores.empty()) {
-                const float mean = std::accumulate(scores.begin(), scores.end(), 0.0F)
-                                   / static_cast<float>(scores.size());
+                const float mean = std::accumulate(scores.begin(), scores.end(), 0.0F) /
+                                   static_cast<float>(scores.size());
                 const float stddev = score_full_stddev_or_one(scores, mean);
                 for (float& value : scores)
                     value = (value - mean) / stddev;
@@ -1223,8 +1198,7 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
 
         for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
             auto& aggregate = aggregated_scores[static_cast<std::size_t>(cache_head)];
-            const auto& sampled_group =
-                sampled_by_cache_head[static_cast<std::size_t>(cache_head)];
+            const auto& sampled_group = sampled_by_cache_head[static_cast<std::size_t>(cache_head)];
             if (sampled_group.empty())
                 continue;
             const bool first_layer_for_cache_head =
@@ -1239,19 +1213,18 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
             }
             for (int32_t row = 0; row < total_tokens; ++row) {
                 float reduced = layer_scores[static_cast<std::size_t>(sampled_group.front())]
-                                           [static_cast<std::size_t>(row)];
+                                            [static_cast<std::size_t>(row)];
                 for (std::size_t group_idx = 1; group_idx < sampled_group.size(); ++group_idx) {
                     reduced = std::max(
-                        reduced,
-                        layer_scores[static_cast<std::size_t>(sampled_group[group_idx])]
-                                   [static_cast<std::size_t>(row)]);
+                        reduced, layer_scores[static_cast<std::size_t>(sampled_group[group_idx])]
+                                             [static_cast<std::size_t>(row)]);
                 }
                 if (config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax) {
                     if (first_layer_for_cache_head) {
                         aggregate[static_cast<std::size_t>(row)] = reduced;
                     } else {
-                        aggregate[static_cast<std::size_t>(row)] = std::max(
-                            aggregate[static_cast<std::size_t>(row)], reduced);
+                        aggregate[static_cast<std::size_t>(row)] =
+                            std::max(aggregate[static_cast<std::size_t>(row)], reduced);
                     }
                 } else {
                     aggregate[static_cast<std::size_t>(row)] += reduced;
@@ -1265,8 +1238,7 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
     }
     if (contributing_layers <= 0)
         return {};
-    const bool per_layer_max =
-        config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax;
+    const bool per_layer_max = config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax;
     std::vector<float> global_fallback_mean(static_cast<std::size_t>(total_tokens), 0.0F);
     if (global_fallback_count > 0) {
         for (int32_t row = 0; row < total_tokens; ++row) {
@@ -1291,17 +1263,17 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
     if (profile != nullptr)
         profile->score_ms += elapsed_ms(score_start);
     if (config_.dump_score_values) {
-        const char* dump_path = config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
+        const char* dump_path =
+            config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
         if (dump_path != nullptr && dump_path[0] != '\0') {
-            std::vector<float> packed_aggregate(
-                static_cast<std::size_t>(cache_head_count_) * static_cast<std::size_t>(total_tokens),
-                0.0F);
+            std::vector<float> packed_aggregate(static_cast<std::size_t>(cache_head_count_) *
+                                                    static_cast<std::size_t>(total_tokens),
+                                                0.0F);
             for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-                std::copy(
-                    aggregated_scores[static_cast<std::size_t>(cache_head)].begin(),
-                    aggregated_scores[static_cast<std::size_t>(cache_head)].end(),
-                    packed_aggregate.begin() +
-                        static_cast<std::size_t>(cache_head) * static_cast<std::size_t>(total_tokens));
+                std::copy(aggregated_scores[static_cast<std::size_t>(cache_head)].begin(),
+                          aggregated_scores[static_cast<std::size_t>(cache_head)].end(),
+                          packed_aggregate.begin() + static_cast<std::size_t>(cache_head) *
+                                                         static_cast<std::size_t>(total_tokens));
             }
 
             {
@@ -1315,8 +1287,9 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
                 char path_buf[1024];
                 std::snprintf(path_buf, sizeof(path_buf), "%s.layeragg.bin", dump_path);
                 std::ofstream out(path_buf, std::ios::binary);
-                out.write(reinterpret_cast<const char*>(layer_aggregate_dump.data()),
-                          static_cast<std::streamsize>(layer_aggregate_dump.size() * sizeof(float)));
+                out.write(
+                    reinterpret_cast<const char*>(layer_aggregate_dump.data()),
+                    static_cast<std::streamsize>(layer_aggregate_dump.size() * sizeof(float)));
             }
         }
     }
@@ -1324,8 +1297,8 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
     std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
     const auto combine_start = Clock::now();
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-        auto* out =
-            keep.data() + static_cast<std::size_t>(cache_head) * static_cast<std::size_t>(keep_budget);
+        auto* out = keep.data() +
+                    static_cast<std::size_t>(cache_head) * static_cast<std::size_t>(keep_budget);
         std::copy(reserved.begin(), reserved.end(), out);
         std::vector<std::pair<float, int32_t>> ranked;
         ranked.reserve(candidates.size());
@@ -1353,8 +1326,7 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
 #ifdef TRTF_HAS_CUDA_KERNELS
 std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
     int32_t keep_budget, const std::vector<int32_t>& reserved,
-    const std::vector<int32_t>& candidates,
-    TriAttentionCompactionProfile* profile) {
+    const std::vector<int32_t>& candidates, TriAttentionCompactionProfile* profile) {
     const int32_t need = std::max(0, keep_budget - static_cast<int32_t>(reserved.size()));
     if (need <= 0) {
         std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
@@ -1382,10 +1354,10 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
     const int32_t half_dim = stats_.head_dim / 2;
     if (!config_.disable_trig) {
         const auto trig_start = Clock::now();
-        std::vector<float> cos_phase(
-            static_cast<std::size_t>(num_offsets) * static_cast<std::size_t>(half_dim));
-        std::vector<float> sin_phase(
-            static_cast<std::size_t>(num_offsets) * static_cast<std::size_t>(half_dim));
+        std::vector<float> cos_phase(static_cast<std::size_t>(num_offsets) *
+                                     static_cast<std::size_t>(half_dim));
+        std::vector<float> sin_phase(static_cast<std::size_t>(num_offsets) *
+                                     static_cast<std::size_t>(half_dim));
         // Keep GPU scoring aligned with the host path and upstream selector:
         // use the request's absolute decode position for the trig phase.
         const float round_start = static_cast<float>(absolute_position_);
@@ -1393,9 +1365,8 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
             for (int32_t d = 0; d < half_dim; ++d) {
                 const std::size_t idx =
                     static_cast<std::size_t>(o) * static_cast<std::size_t>(half_dim) + d;
-                const float phase =
-                    (round_start + offsets_[static_cast<std::size_t>(o)]) *
-                    stats_.inv_freq[static_cast<std::size_t>(d)];
+                const float phase = (round_start + offsets_[static_cast<std::size_t>(o)]) *
+                                    stats_.inv_freq[static_cast<std::size_t>(d)];
                 cos_phase[idx] = std::cos(phase);
                 sin_phase[idx] = std::sin(phase);
             }
@@ -1433,9 +1404,9 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
         }
 
         const bool launched = triattention_score_candidates_gpu(
-            cache_k_[static_cast<std::size_t>(layer)].data(), cache_dtype_, kv_dim_, stats_.head_dim,
-            stats_.rope_style, static_cast<const int32_t*>(candidate_indices_device_.data()), total_tokens,
-            nullptr,
+            cache_k_[static_cast<std::size_t>(layer)].data(), cache_dtype_, kv_dim_,
+            stats_.head_dim, stats_.rope_style,
+            static_cast<const int32_t*>(candidate_indices_device_.data()), total_tokens, nullptr,
             static_cast<const float*>(inv_freq_device_.data()),
             static_cast<const float*>(cos_phase_device_.data()),
             static_cast<const float*>(sin_phase_device_.data()), num_offsets,
@@ -1451,19 +1422,19 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
         if (!launched)
             return select_keep_indices_host(keep_budget, reserved, candidates, profile);
 
-        std::vector<float> host_scores(
-            static_cast<std::size_t>(gpu.score_head_count) * static_cast<std::size_t>(total_tokens));
+        std::vector<float> host_scores(static_cast<std::size_t>(gpu.score_head_count) *
+                                       static_cast<std::size_t>(total_tokens));
         const auto score_bytes = host_scores.size() * sizeof(float);
-        if (cudaMemcpyAsync(host_scores.data(), gpu.scores.data(), score_bytes, cudaMemcpyDeviceToHost,
-                            stream_) != cudaSuccess) {
+        if (cudaMemcpyAsync(host_scores.data(), gpu.scores.data(), score_bytes,
+                            cudaMemcpyDeviceToHost, stream_) != cudaSuccess) {
             return select_keep_indices_host(keep_budget, reserved, candidates, profile);
         }
         if (cudaStreamSynchronize(stream_) != cudaSuccess)
             return select_keep_indices_host(keep_budget, reserved, candidates, profile);
 
         for (int32_t score_head = 0; score_head < gpu.score_head_count; ++score_head) {
-            float* score_row = host_scores.data() +
-                               static_cast<std::size_t>(score_head) * total_tokens;
+            float* score_row =
+                host_scores.data() + static_cast<std::size_t>(score_head) * total_tokens;
             float mean = 0.0F;
             for (int32_t row = 0; row < total_tokens; ++row)
                 mean += score_row[row];
@@ -1473,23 +1444,22 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
                 const float delta = score_row[row] - mean;
                 var += delta * delta;
             }
-            const float denom =
-                total_tokens > 1 ? static_cast<float>(total_tokens - 1) : 1.0F;
+            const float denom = total_tokens > 1 ? static_cast<float>(total_tokens - 1) : 1.0F;
             const float stddev = std::sqrt(std::max(var / denom, 0.0F));
             const float std_safe = stddev < kEps ? 1.0F : stddev;
             for (int32_t row = 0; row < total_tokens; ++row)
                 score_row[row] = (score_row[row] - mean) / std_safe;
         }
         for (int32_t score_head = 0; score_head < gpu.score_head_count; ++score_head) {
-            const float* score_row = host_scores.data() +
-                                     static_cast<std::size_t>(score_head) * total_tokens;
+            const float* score_row =
+                host_scores.data() + static_cast<std::size_t>(score_head) * total_tokens;
             for (int32_t row = 0; row < total_tokens; ++row)
                 global_fallback_sum[static_cast<std::size_t>(row)] += score_row[row];
             ++global_fallback_count;
         }
         for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-            float* aggregate_row = aggregated_scores.data() +
-                                  static_cast<std::size_t>(cache_head) * total_tokens;
+            float* aggregate_row =
+                aggregated_scores.data() + static_cast<std::size_t>(cache_head) * total_tokens;
             std::vector<int32_t> sampled_group;
             sampled_group.reserve(static_cast<std::size_t>(gpu.score_head_count));
             for (int32_t score_head = 0; score_head < gpu.score_head_count; ++score_head) {
@@ -1506,9 +1476,9 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
                                 static_cast<std::size_t>(row)];
                 for (std::size_t group_idx = 1; group_idx < sampled_group.size(); ++group_idx) {
                     reduced = std::max(
-                        reduced,
-                        host_scores[static_cast<std::size_t>(sampled_group[group_idx]) * total_tokens +
-                                    static_cast<std::size_t>(row)]);
+                        reduced, host_scores[static_cast<std::size_t>(sampled_group[group_idx]) *
+                                                 total_tokens +
+                                             static_cast<std::size_t>(row)]);
                 }
                 if (config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax) {
                     if (first_layer_for_cache_head) {
@@ -1536,8 +1506,8 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
         }
     }
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-        float* score_row = aggregated_scores.data() +
-                           static_cast<std::size_t>(cache_head) * total_tokens;
+        float* score_row =
+            aggregated_scores.data() + static_cast<std::size_t>(cache_head) * total_tokens;
         const int32_t head_layer_count =
             contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)];
         if (head_layer_count > 0) {
@@ -1556,10 +1526,10 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
     const auto combine_start = Clock::now();
     std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-        const float* score_row = aggregated_scores.data() +
-                                 static_cast<std::size_t>(cache_head) * total_tokens;
-        auto* out =
-            keep.data() + static_cast<std::size_t>(cache_head) * static_cast<std::size_t>(keep_budget);
+        const float* score_row =
+            aggregated_scores.data() + static_cast<std::size_t>(cache_head) * total_tokens;
+        auto* out = keep.data() +
+                    static_cast<std::size_t>(cache_head) * static_cast<std::size_t>(keep_budget);
         std::copy(reserved.begin(), reserved.end(), out);
         std::vector<std::pair<float, int32_t>> ranked;
         ranked.reserve(candidates.size());
@@ -1567,8 +1537,7 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
             ranked.emplace_back(score_row[row], row);
         }
         const int32_t top_n = std::min<int32_t>(need, ranked.size());
-        std::partial_sort(ranked.begin(), ranked.begin() + top_n,
-                          ranked.end(),
+        std::partial_sort(ranked.begin(), ranked.begin() + top_n, ranked.end(),
                           [](const auto& a, const auto& b) {
                               if (a.first != b.first)
                                   return a.first > b.first;
@@ -1620,19 +1589,20 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
     std::vector<std::string> post_score_cache_files;
     std::vector<std::string> post_value_cache_files;
     if (config_.dump_score_cache) {
-        const char* dump_path = config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
+        const char* dump_path =
+            config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
         if (dump_path != nullptr && dump_path[0] != '\0') {
             for (int32_t layer = 0; layer < num_layers_; ++layer) {
                 auto dump_cache = [&](const DeviceTensor& tensor, const char* pattern,
                                       std::vector<std::string>& out_files) {
                     const auto host_cache = copy_cache_rows_to_host(
                         tensor, static_cast<int32_t>(cache_positions_.size()), nullptr);
-                    std::vector<float> packed(
-                        static_cast<std::size_t>(cache_positions_.size()) *
-                            static_cast<std::size_t>(cache_head_count_) *
-                            static_cast<std::size_t>(stats_.head_dim),
-                        0.0F);
-                    for (int32_t row = 0; row < static_cast<int32_t>(cache_positions_.size()); ++row) {
+                    std::vector<float> packed(static_cast<std::size_t>(cache_positions_.size()) *
+                                                  static_cast<std::size_t>(cache_head_count_) *
+                                                  static_cast<std::size_t>(stats_.head_dim),
+                                              0.0F);
+                    for (int32_t row = 0; row < static_cast<int32_t>(cache_positions_.size());
+                         ++row) {
                         const float* row_ptr =
                             host_cache.data() +
                             static_cast<std::size_t>(row) * static_cast<std::size_t>(kv_dim_);
@@ -1640,11 +1610,10 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
                             const int32_t head_offset =
                                 cache_head * query_group_size_ * stats_.head_dim;
                             float* dst =
-                                packed.data() +
-                                (static_cast<std::size_t>(row) *
-                                     static_cast<std::size_t>(cache_head_count_) +
-                                 static_cast<std::size_t>(cache_head)) *
-                                    static_cast<std::size_t>(stats_.head_dim);
+                                packed.data() + (static_cast<std::size_t>(row) *
+                                                     static_cast<std::size_t>(cache_head_count_) +
+                                                 static_cast<std::size_t>(cache_head)) *
+                                                    static_cast<std::size_t>(stats_.head_dim);
                             std::copy_n(row_ptr + head_offset, stats_.head_dim, dst);
                         }
                     }
@@ -1669,10 +1638,10 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
         bool keep_uploaded = false;
 #ifdef TRTF_HAS_CUDA_KERNELS
         if (!config_.disable_gpu_compaction && keep_count > 0 && keep_indices_device_.ok()) {
-            const auto keep_bytes =
-                static_cast<std::size_t>(keep_indices.size()) * sizeof(int32_t);
-            keep_uploaded = cudaMemcpyAsync(keep_indices_device_.data(), keep_indices.data(), keep_bytes,
-                                            cudaMemcpyHostToDevice, stream_) == cudaSuccess;
+            const auto keep_bytes = static_cast<std::size_t>(keep_indices.size()) * sizeof(int32_t);
+            keep_uploaded =
+                cudaMemcpyAsync(keep_indices_device_.data(), keep_indices.data(), keep_bytes,
+                                cudaMemcpyHostToDevice, stream_) == cudaSuccess;
         }
 #endif
         bool used_gpu_compaction = false;
@@ -1691,13 +1660,13 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
                 const bool copy_k =
                     compact_k &&
                     (cudaMemcpyAsync(cache_k_[static_cast<std::size_t>(layer)].data(),
-                                     scratch_k_device_.data(), compact_bytes, cudaMemcpyDeviceToDevice,
-                                     stream_) == cudaSuccess);
+                                     scratch_k_device_.data(), compact_bytes,
+                                     cudaMemcpyDeviceToDevice, stream_) == cudaSuccess);
                 const bool copy_v =
                     compact_v &&
                     (cudaMemcpyAsync(cache_v_[static_cast<std::size_t>(layer)].data(),
-                                     scratch_v_device_.data(), compact_bytes, cudaMemcpyDeviceToDevice,
-                                     stream_) == cudaSuccess);
+                                     scratch_v_device_.data(), compact_bytes,
+                                     cudaMemcpyDeviceToDevice, stream_) == cudaSuccess);
                 used_gpu_compaction = compact_k && compact_v && copy_k && copy_v;
                 if (used_gpu_compaction) {
                     repack_calls += 4;
@@ -1748,17 +1717,17 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
         cudaEventDestroy(repack_stop);
     }
     if (config_.dump_score_cache) {
-        const char* dump_path = config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
+        const char* dump_path =
+            config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
         if (dump_path != nullptr && dump_path[0] != '\0') {
             for (int32_t layer = 0; layer < num_layers_; ++layer) {
                 auto dump_cache = [&](const DeviceTensor& tensor, const char* pattern,
                                       std::vector<std::string>& out_files) {
                     const auto host_cache = copy_cache_rows_to_host(tensor, keep_count, nullptr);
-                    std::vector<float> packed(
-                        static_cast<std::size_t>(keep_count) *
-                            static_cast<std::size_t>(cache_head_count_) *
-                            static_cast<std::size_t>(stats_.head_dim),
-                        0.0F);
+                    std::vector<float> packed(static_cast<std::size_t>(keep_count) *
+                                                  static_cast<std::size_t>(cache_head_count_) *
+                                                  static_cast<std::size_t>(stats_.head_dim),
+                                              0.0F);
                     for (int32_t row = 0; row < keep_count; ++row) {
                         const float* row_ptr =
                             host_cache.data() +
@@ -1767,11 +1736,10 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
                             const int32_t head_offset =
                                 cache_head * query_group_size_ * stats_.head_dim;
                             float* dst =
-                                packed.data() +
-                                (static_cast<std::size_t>(row) *
-                                     static_cast<std::size_t>(cache_head_count_) +
-                                 static_cast<std::size_t>(cache_head)) *
-                                    static_cast<std::size_t>(stats_.head_dim);
+                                packed.data() + (static_cast<std::size_t>(row) *
+                                                     static_cast<std::size_t>(cache_head_count_) +
+                                                 static_cast<std::size_t>(cache_head)) *
+                                                    static_cast<std::size_t>(stats_.head_dim);
                             std::copy_n(row_ptr + head_offset, stats_.head_dim, dst);
                         }
                     }
@@ -1825,13 +1793,13 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
             if (keep_mask[static_cast<std::size_t>(i)] == 0)
                 dropped_positions.push_back(cache_positions_[static_cast<std::size_t>(i)]);
         }
-        const int32_t first_pos = representative_positions.empty() ? -1 : representative_positions.front();
-        const int32_t last_pos = representative_positions.empty() ? -1 : representative_positions.back();
+        const int32_t first_pos =
+            representative_positions.empty() ? -1 : representative_positions.front();
+        const int32_t last_pos =
+            representative_positions.empty() ? -1 : representative_positions.back();
         std::cerr << "[trtf.triattention] compact abs_pos=" << absolute_position_
-                  << " old_rows=" << cache_length_
-                  << " kept_rows=" << keep_count
-                  << " kept_prefix=" << kept_prefix
-                  << " first_pos=" << first_pos
+                  << " old_rows=" << cache_length_ << " kept_rows=" << keep_count
+                  << " kept_prefix=" << kept_prefix << " first_pos=" << first_pos
                   << " last_pos=" << last_pos;
         if (!dropped_positions.empty()) {
             std::cerr << " dropped_pos=";
@@ -1846,10 +1814,8 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
     ++compaction_count_;
     if (profile_ptr != nullptr) {
         std::cerr << "[trtf.triattention.profile] compact#" << compaction_count_
-                  << " abs_pos=" << absolute_position_
-                  << " old_rows=" << cache_length_
-                  << " kept_rows=" << keep_count
-                  << " reserved=" << profile_ptr->reserved_count
+                  << " abs_pos=" << absolute_position_ << " old_rows=" << cache_length_
+                  << " kept_rows=" << keep_count << " reserved=" << profile_ptr->reserved_count
                   << " candidates=" << profile_ptr->candidate_count
                   << " sampled_layers=" << profile_ptr->sampled_layers
                   << " sampled_heads=" << profile_ptr->sampled_heads
@@ -1859,19 +1825,21 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
                   << " score_ms=" << profile_ptr->score_ms
                   << " combine_ms=" << profile_ptr->combine_ms
                   << " select_ms=" << profile_ptr->select_ms
-                  << " repack_ms=" << profile_ptr->repack_ms
-                  << " host_copy_mb="
+                  << " repack_ms=" << profile_ptr->repack_ms << " host_copy_mb="
                   << (static_cast<double>(profile_ptr->host_copy_bytes) / (1024.0 * 1024.0))
                   << " repack_mb="
                   << (static_cast<double>(profile_ptr->repack_bytes) / (1024.0 * 1024.0))
                   << " repack_calls=" << profile_ptr->repack_calls << '\n';
     }
-    const char* dump_path = config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
+    const char* dump_path =
+        config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
     const int32_t dump_compaction_index = config_.dump_compaction_index;
     if (dump_path != nullptr && dump_path[0] != '\0' &&
-        (dump_compaction_index <= 0 || dump_compaction_index == (compaction_count_ + (profile_ptr == nullptr ? 1 : 0)))) {
+        (dump_compaction_index <= 0 ||
+         dump_compaction_index == (compaction_count_ + (profile_ptr == nullptr ? 1 : 0)))) {
         json dump;
-        dump["compaction_index"] = profile_ptr != nullptr ? compaction_count_ : (compaction_count_ + 1);
+        dump["compaction_index"] =
+            profile_ptr != nullptr ? compaction_count_ : (compaction_count_ + 1);
         dump["absolute_position"] = absolute_position_;
         dump["cache_length_before"] = static_cast<int32_t>(cache_positions_.size());
         dump["keep_count"] = keep_count;
@@ -1886,7 +1854,8 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
         dump["new_positions_by_head"] = new_positions_by_head;
         std::vector<std::vector<int32_t>> keep_by_head(static_cast<std::size_t>(cache_head_count_));
         for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-            auto begin = keep_indices.begin() + static_cast<std::ptrdiff_t>(cache_head * keep_count);
+            auto begin =
+                keep_indices.begin() + static_cast<std::ptrdiff_t>(cache_head * keep_count);
             auto end = begin + keep_count;
             keep_by_head[static_cast<std::size_t>(cache_head)] = std::vector<int32_t>(begin, end);
         }

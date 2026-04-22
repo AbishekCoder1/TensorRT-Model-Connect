@@ -10,28 +10,21 @@
 
 namespace trtf::config::schemas {
 
-Schema make_audio_bark_schema()
-{
+Schema make_audio_bark_schema() {
     const std::set<Layer> session = {Layer::SessionRequest, Layer::PlatformProfile};
     return Schema{
         "audio_bark",
         {
-            ConfigField{"dump_path", "string", std::any{std::string{}},
-                        session, nullptr},
-            ConfigField{"greedy",    "bool",   std::any{false},
-                        session, nullptr},
-            ConfigField{"seed",      "int64",  std::any{std::int64_t{-1}},
-                        session, nullptr},
+            ConfigField{"dump_path", "string", std::any{std::string{}}, session, nullptr},
+            ConfigField{"greedy", "bool", std::any{false}, session, nullptr},
+            ConfigField{"seed", "int64", std::any{std::int64_t{-1}}, session, nullptr},
         },
     };
 }
 
 namespace {
 struct AudioBarkRegistrar {
-    AudioBarkRegistrar()
-    {
-        SchemaRegistry::instance().register_schema(make_audio_bark_schema());
-    }
+    AudioBarkRegistrar() { SchemaRegistry::instance().register_schema(make_audio_bark_schema()); }
 };
 AudioBarkRegistrar g_audio_bark_registrar{};
 } // namespace

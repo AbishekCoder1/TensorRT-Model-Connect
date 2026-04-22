@@ -54,7 +54,9 @@ struct BaseConfig {
 BaseConfig parse_base_config(const std::string& config_text, int32_t max_cache_length_override);
 
 // Forward declaration; full type in trtf/config/config_bundle.h.
-namespace config { class ConfigBundle; }
+namespace config {
+class ConfigBundle;
+}
 
 // Context passed to each plugin's create() method. Non-owning references
 // to the bundle and parsed base config. The BundleFile must outlive the

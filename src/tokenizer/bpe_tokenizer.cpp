@@ -2,8 +2,8 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cstdio>
 #include <climits>
+#include <cstdio>
 #include <cstring>
 #include <list>
 #include <nlohmann/json.hpp>
@@ -21,8 +21,7 @@ namespace {
 // ─── UTF-8 helpers ───
 
 // Decode one UTF-8 codepoint from s starting at pos, advance pos.
-inline char32_t utf8_to_char32(const std::string& s, size_t& pos)
-{
+inline char32_t utf8_to_char32(const std::string& s, size_t& pos) {
     unsigned char c = static_cast<unsigned char>(s[pos]);
     if (c < 0x80) {
         ++pos;
@@ -53,8 +52,7 @@ inline char32_t utf8_to_char32(const std::string& s, size_t& pos)
     return 0xFFFD;
 }
 
-inline std::string utf32_to_utf8(char32_t cp)
-{
+inline std::string utf32_to_utf8(char32_t cp) {
     std::string r;
     if (cp <= 0x7F) {
         r.push_back(static_cast<char>(cp));
@@ -75,30 +73,37 @@ inline std::string utf32_to_utf8(char32_t cp)
 }
 
 // Read one UTF-8 codepoint from raw bytes, advance ptr. Returns 0xFFFD on error.
-inline char32_t read_utf8(const char*& p, const char* end)
-{
-    if (p >= end) return 0xFFFD;
+inline char32_t read_utf8(const char*& p, const char* end) {
+    if (p >= end)
+        return 0xFFFD;
     unsigned char c = static_cast<unsigned char>(*p);
-    if (c < 0x80) { ++p; return c; }
+    if (c < 0x80) {
+        ++p;
+        return c;
+    }
     if ((c & 0xE0) == 0xC0 && p + 1 < end) {
-        char32_t cp = (static_cast<char32_t>(c & 0x1F) << 6) |
-                      (static_cast<unsigned char>(p[1]) & 0x3F);
-        p += 2; return cp;
+        char32_t cp =
+            (static_cast<char32_t>(c & 0x1F) << 6) | (static_cast<unsigned char>(p[1]) & 0x3F);
+        p += 2;
+        return cp;
     }
     if ((c & 0xF0) == 0xE0 && p + 2 < end) {
         char32_t cp = (static_cast<char32_t>(c & 0x0F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 6) |
                       (static_cast<unsigned char>(p[2]) & 0x3F);
-        p += 3; return cp;
+        p += 3;
+        return cp;
     }
     if ((c & 0xF8) == 0xF0 && p + 3 < end) {
         char32_t cp = (static_cast<char32_t>(c & 0x07) << 18) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[2]) & 0x3F) << 6) |
                       (static_cast<unsigned char>(p[3]) & 0x3F);
-        p += 4; return cp;
+        p += 4;
+        return cp;
     }
-    ++p; return 0xFFFD;
+    ++p;
+    return 0xFFFD;
 }
 
 // ─── GPT-2 byte encoder: byte value <-> Unicode codepoint ───
@@ -109,27 +114,27 @@ struct ByteEncoderTables {
     // Unicode codepoint -> byte value
     std::unordered_map<char32_t, uint8_t> cp_to_byte;
 
-    ByteEncoderTables()
-    {
+    ByteEncoderTables() {
         // GPT-2 byte encoder: printable bytes map to themselves,
         // others map to 256+ to avoid control chars.
         bool direct[256] = {};
-        for (int b = 33; b <= 126; ++b) direct[b] = true;   // !"#$...~
-        for (int b = 161; b <= 172; ++b) direct[b] = true;  // non-breaking space area
-        for (int b = 174; b <= 255; ++b) direct[b] = true;  // extended latin
+        for (int b = 33; b <= 126; ++b)
+            direct[b] = true; // !"#$...~
+        for (int b = 161; b <= 172; ++b)
+            direct[b] = true; // non-breaking space area
+        for (int b = 174; b <= 255; ++b)
+            direct[b] = true; // extended latin
 
         int n = 0;
         for (int b = 0; b < 256; ++b) {
-            char32_t cp = direct[b] ? static_cast<char32_t>(b)
-                                    : static_cast<char32_t>(256 + n++);
+            char32_t cp = direct[b] ? static_cast<char32_t>(b) : static_cast<char32_t>(256 + n++);
             byte_to_utf8[b] = utf32_to_utf8(cp);
             cp_to_byte[cp] = static_cast<uint8_t>(b);
         }
     }
 };
 
-static const ByteEncoderTables& byte_tables()
-{
+static const ByteEncoderTables& byte_tables() {
     static ByteEncoderTables tables;
     return tables;
 }
@@ -142,7 +147,8 @@ static const ByteEncoderTables& byte_tables()
 //   'contractions| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
 //
 // Qwen3 (used by Qwen3, LLaMA-3, Mistral, Phi):
-//   (?i:contractions)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+//   (?i:contractions)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}|
+//   ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
 //
 // Key differences: Qwen3 allows any non-CR/LF/letter/digit as optional prefix before
 // letters, matches single digits, and has explicit newline handling.
@@ -153,80 +159,77 @@ enum class Variant { kGpt2, kQwen3, kBloom, kDeepSeek };
 
 // ── Character classification ──
 
-struct UnicodeRange { char32_t lo, hi; };
-
-constexpr UnicodeRange kLetterRanges[] = {
-    {'A', 'Z'}, {'a', 'z'},
-    {0xB5, 0xB5},                    // µ (micro sign, treated as letter)
-    {0xC0, 0xD6}, {0xD8, 0xF6}, {0xF8, 0x1BA},  // Latin-1 + Extended A/B
-    {0x1BC, 0x1BF}, {0x1C4, 0x293}, {0x295, 0x2AF}, // Latin Extended B cont.
-    {0x370, 0x373}, {0x376, 0x377}, {0x37B, 0x37D}, {0x37F, 0x37F}, // Greek
-    {0x386, 0x386}, {0x388, 0x38A}, {0x38C, 0x38C}, {0x38E, 0x3A1},
-    {0x3A3, 0x3F5}, {0x3F7, 0x481}, {0x48A, 0x52F}, // Greek + Cyrillic
-    {0x531, 0x556}, {0x559, 0x559},  // Armenian
-    {0x560, 0x588},                   // Armenian lowercase
-    {0x600, 0x6FF},                   // Arabic
-    {0x900, 0x97F},                   // Devanagari
-    {0xE00, 0xE7F},                   // Thai
-    {0x10A0, 0x10C5},                 // Georgian
-    {0x13A0, 0x13F5},                 // Cherokee
-    {0x1C90, 0x1CBA}, {0x1CBD, 0x1CBF}, // Georgian Extended
-    {0x1D00, 0x1D2B}, {0x1D6B, 0x1D77}, {0x1D79, 0x1D9A}, // Phonetic Extensions
-    {0x1E00, 0x1F15}, {0x1F18, 0x1F1D}, {0x1F20, 0x1F45}, // Latin Ext. Additional + Greek Ext.
-    {0x2C00, 0x2C5F},                 // Glagolitic
-    {0x3040, 0x309F},                 // Hiragana
-    {0x30A0, 0x30FF},                 // Katakana
-    {0x3400, 0x4DBF},                 // CJK Extension A
-    {0x4E00, 0x9FFF},                 // CJK Unified Ideographs
-    {0xAC00, 0xD7AF},                 // Hangul Syllables
-    {0xFB00, 0xFDFF},                 // Alphabetic Presentation Forms + Arabic Forms
-    {0x10000, 0x1007F},               // Linear B Syllabary
+struct UnicodeRange {
+    char32_t lo, hi;
 };
 
-inline bool is_letter(char32_t cp)
-{
+constexpr UnicodeRange kLetterRanges[] = {
+    {'A', 'Z'},         {'a', 'z'},       {0xB5, 0xB5},   // µ (micro sign, treated as letter)
+    {0xC0, 0xD6},       {0xD8, 0xF6},     {0xF8, 0x1BA},  // Latin-1 + Extended A/B
+    {0x1BC, 0x1BF},     {0x1C4, 0x293},   {0x295, 0x2AF}, // Latin Extended B cont.
+    {0x370, 0x373},     {0x376, 0x377},   {0x37B, 0x37D},   {0x37F, 0x37F}, // Greek
+    {0x386, 0x386},     {0x388, 0x38A},   {0x38C, 0x38C},   {0x38E, 0x3A1},
+    {0x3A3, 0x3F5},     {0x3F7, 0x481},   {0x48A, 0x52F},   // Greek + Cyrillic
+    {0x531, 0x556},     {0x559, 0x559},                     // Armenian
+    {0x560, 0x588},                                         // Armenian lowercase
+    {0x600, 0x6FF},                                         // Arabic
+    {0x900, 0x97F},                                         // Devanagari
+    {0xE00, 0xE7F},                                         // Thai
+    {0x10A0, 0x10C5},                                       // Georgian
+    {0x13A0, 0x13F5},                                       // Cherokee
+    {0x1C90, 0x1CBA},   {0x1CBD, 0x1CBF},                   // Georgian Extended
+    {0x1D00, 0x1D2B},   {0x1D6B, 0x1D77}, {0x1D79, 0x1D9A}, // Phonetic Extensions
+    {0x1E00, 0x1F15},   {0x1F18, 0x1F1D}, {0x1F20, 0x1F45}, // Latin Ext. Additional + Greek Ext.
+    {0x2C00, 0x2C5F},                                       // Glagolitic
+    {0x3040, 0x309F},                                       // Hiragana
+    {0x30A0, 0x30FF},                                       // Katakana
+    {0x3400, 0x4DBF},                                       // CJK Extension A
+    {0x4E00, 0x9FFF},                                       // CJK Unified Ideographs
+    {0xAC00, 0xD7AF},                                       // Hangul Syllables
+    {0xFB00, 0xFDFF},   // Alphabetic Presentation Forms + Arabic Forms
+    {0x10000, 0x1007F}, // Linear B Syllabary
+};
+
+inline bool is_letter(char32_t cp) {
     for (const auto& r : kLetterRanges) {
-        if (cp >= r.lo && cp <= r.hi) return true;
+        if (cp >= r.lo && cp <= r.hi)
+            return true;
     }
     return false;
 }
 
-inline bool is_digit(char32_t cp)
-{
+inline bool is_digit(char32_t cp) {
     return (cp >= '0' && cp <= '9');
 }
 
-inline bool is_whitespace(char32_t cp)
-{
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r'
-        || cp == 0x0B || cp == 0x0C    // VT, FF
-        || cp == 0xA0                   // non-breaking space
-        || cp == 0x2000 || cp == 0x200A // en space through hair space
-        || cp == 0x3000;               // ideographic space
+inline bool is_whitespace(char32_t cp) {
+    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
+           || cp == 0xA0                   // non-breaking space
+           || cp == 0x2000 || cp == 0x200A // en space through hair space
+           || cp == 0x3000;                // ideographic space
 }
 
 // BLOOM punctuation set: .,!?...
 constexpr char32_t kBloomPunct[] = {
-    '.', ',', '!', '?',
-    0x2026,  // ellipsis
-    0x3002,  // ideographic full stop
-    0xFF0C,  // fullwidth comma
-    0x3001,  // ideographic comma
-    0x0964,  // Devanagari danda
-    0x06D4,  // Arabic full stop
-    0x060C,  // Arabic comma
+    '.',    ',', '!', '?',
+    0x2026, // ellipsis
+    0x3002, // ideographic full stop
+    0xFF0C, // fullwidth comma
+    0x3001, // ideographic comma
+    0x0964, // Devanagari danda
+    0x06D4, // Arabic full stop
+    0x060C, // Arabic comma
 };
 
-inline bool is_bloom_punct(char32_t cp)
-{
+inline bool is_bloom_punct(char32_t cp) {
     for (auto c : kBloomPunct) {
-        if (cp == c) return true;
+        if (cp == c)
+            return true;
     }
     return false;
 }
 
-inline bool is_newline(char32_t cp)
-{
+inline bool is_newline(char32_t cp) {
     return cp == '\n' || cp == '\r';
 }
 
@@ -234,8 +237,7 @@ inline bool is_newline(char32_t cp)
 // GPT-2/BLOOM: only space (0x20)
 // Qwen3: any char except CR, LF, letter, digit
 // DeepSeek: any whitespace (\s?)
-inline bool is_prefix(char32_t cp, Variant v)
-{
+inline bool is_prefix(char32_t cp, Variant v) {
     if (v == Variant::kQwen3) {
         return !is_newline(cp) && !is_letter(cp) && !is_digit(cp);
     }
@@ -246,58 +248,58 @@ inline bool is_prefix(char32_t cp, Variant v)
 }
 
 // BLOOM word char: not whitespace and not BLOOM punctuation
-inline bool is_bloom_word_char(char32_t cp)
-{
+inline bool is_bloom_word_char(char32_t cp) {
     return !is_whitespace(cp) && !is_bloom_punct(cp);
 }
 
 // ── Scanning helpers (advance pointer past matching chars) ──
 
-inline void scan_letters(const char*& p, const char* end)
-{
+inline void scan_letters(const char*& p, const char* end) {
     while (p < end) {
         const char* peek = p;
-        if (!is_letter(read_utf8(peek, end))) break;
+        if (!is_letter(read_utf8(peek, end)))
+            break;
         p = peek;
     }
 }
 
-inline void scan_digits(const char*& p, const char* end, int max_group = 0)
-{
+inline void scan_digits(const char*& p, const char* end, int max_group = 0) {
     int count = 0;
     while (p < end) {
-        if (max_group > 0 && count >= max_group) break;
+        if (max_group > 0 && count >= max_group)
+            break;
         const char* peek = p;
-        if (!is_digit(read_utf8(peek, end))) break;
+        if (!is_digit(read_utf8(peek, end)))
+            break;
         p = peek;
         ++count;
     }
 }
 
-inline void scan_others(const char*& p, const char* end)
-{
+inline void scan_others(const char*& p, const char* end) {
     while (p < end) {
         const char* peek = p;
         char32_t nc = read_utf8(peek, end);
-        if (is_whitespace(nc) || is_letter(nc) || is_digit(nc)) break;
+        if (is_whitespace(nc) || is_letter(nc) || is_digit(nc))
+            break;
         p = peek;
     }
 }
 
-inline void scan_newlines(const char*& p, const char* end)
-{
+inline void scan_newlines(const char*& p, const char* end) {
     while (p < end) {
         const char* peek = p;
-        if (!is_newline(read_utf8(peek, end))) break;
+        if (!is_newline(read_utf8(peek, end)))
+            break;
         p = peek;
     }
 }
 
-inline void scan_all_whitespace(const char*& p, const char* end)
-{
+inline void scan_all_whitespace(const char*& p, const char* end) {
     while (p < end) {
         const char* peek = p;
-        if (!is_whitespace(read_utf8(peek, end))) break;
+        if (!is_whitespace(read_utf8(peek, end)))
+            break;
         p = peek;
     }
 }
@@ -306,8 +308,7 @@ inline void scan_all_whitespace(const char*& p, const char* end)
 // Consume any leading whitespace up to the first newline, then consume the
 // contiguous newline run itself, but stop before whitespace that follows the
 // last newline.
-inline void scan_qwen3_newline_chunk(char32_t first_cp, const char*& p, const char* end)
-{
+inline void scan_qwen3_newline_chunk(char32_t first_cp, const char*& p, const char* end) {
     bool saw_newline = is_newline(first_cp);
     while (p < end) {
         const char* peek = p;
@@ -324,30 +325,30 @@ inline void scan_qwen3_newline_chunk(char32_t first_cp, const char*& p, const ch
             }
             break;
         }
-        if (!is_newline(nc)) break;
+        if (!is_newline(nc))
+            break;
         p = peek;
     }
 }
 
-inline void scan_bloom_words(const char*& p, const char* end)
-{
+inline void scan_bloom_words(const char*& p, const char* end) {
     while (p < end) {
         const char* peek = p;
-        if (!is_bloom_word_char(read_utf8(peek, end))) break;
+        if (!is_bloom_word_char(read_utf8(peek, end)))
+            break;
         p = peek;
     }
 }
 
 // Emit whitespace run, leaving last ws char for next token's optional prefix
-inline void emit_whitespace_leave_last(const char*& p, const char* end,
-                                       const char* start,
-                                       std::vector<std::string>& result)
-{
+inline void emit_whitespace_leave_last(const char*& p, const char* end, const char* start,
+                                       std::vector<std::string>& result) {
     const char* last_ws_start = start;
     while (p < end) {
         const char* peek = p;
         char32_t nc = read_utf8(peek, end);
-        if (!is_whitespace(nc)) break;
+        if (!is_whitespace(nc))
+            break;
         last_ws_start = p;
         p = peek;
     }
@@ -359,30 +360,29 @@ inline void emit_whitespace_leave_last(const char*& p, const char* end,
 
 // ── Contraction matching ──
 
-inline bool is_two_char_contraction(char c1, char c2)
-{
-    return (c1 == 'r' && c2 == 'e')
-        || (c1 == 'v' && c2 == 'e')
-        || (c1 == 'l' && c2 == 'l');
+inline bool is_two_char_contraction(char c1, char c2) {
+    return (c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l');
 }
 
 // Returns length of contraction suffix after apostrophe ('s 't 'm 'd 're 've 'll)
-inline int match_contraction_suffix(const char* p, const char* end)
-{
-    if (p >= end) return 0;
+inline int match_contraction_suffix(const char* p, const char* end) {
+    if (p >= end)
+        return 0;
     char c = *p;
-    if (c == 's' || c == 't' || c == 'm' || c == 'd') return 1;
-    if (p + 1 < end && is_two_char_contraction(c, p[1])) return 2;
+    if (c == 's' || c == 't' || c == 'm' || c == 'd')
+        return 1;
+    if (p + 1 < end && is_two_char_contraction(c, p[1]))
+        return 2;
     return 0;
 }
 
 // ── GPT-2/Qwen3 pre-tokenize dispatch helpers ──
 
 // Handle apostrophe: either contraction or "other" chars run
-inline bool try_contraction(char32_t cp, const char*& p, const char* end,
-                            const char* start, std::vector<std::string>& result)
-{
-    if (cp != '\'') return false;
+inline bool try_contraction(char32_t cp, const char*& p, const char* end, const char* start,
+                            std::vector<std::string>& result) {
+    if (cp != '\'')
+        return false;
     int suffix = match_contraction_suffix(p, end);
     if (suffix > 0) {
         p += suffix;
@@ -394,11 +394,10 @@ inline bool try_contraction(char32_t cp, const char*& p, const char* end,
 }
 
 // Handle optional prefix + letter/digit/other run
-inline bool try_prefix_run(char32_t cp, const char*& p, const char* end,
-                           const char* start, Variant variant,
-                           std::vector<std::string>& result)
-{
-    if (!is_prefix(cp, variant) || p >= end) return false;
+inline bool try_prefix_run(char32_t cp, const char*& p, const char* end, const char* start,
+                           Variant variant, std::vector<std::string>& result) {
+    if (!is_prefix(cp, variant) || p >= end)
+        return false;
     const char* after_prefix = p;
     char32_t next_cp = read_utf8(p, end);
 
@@ -421,7 +420,8 @@ inline bool try_prefix_run(char32_t cp, const char*& p, const char* end,
     }
     if (!is_whitespace(next_cp)) {
         scan_others(p, end);
-        if (variant == Variant::kQwen3) scan_newlines(p, end);
+        if (variant == Variant::kQwen3)
+            scan_newlines(p, end);
         result.emplace_back(start, p);
         return true;
     }
@@ -431,26 +431,27 @@ inline bool try_prefix_run(char32_t cp, const char*& p, const char* end,
 }
 
 // Check if a whitespace run contains any newline character
-inline bool has_newline_in_ws(char32_t first_cp, const char* p, const char* end)
-{
-    if (is_newline(first_cp)) return true;
+inline bool has_newline_in_ws(char32_t first_cp, const char* p, const char* end) {
+    if (is_newline(first_cp))
+        return true;
     const char* scan = p;
     while (scan < end) {
         const char* peek = scan;
         char32_t nc = read_utf8(peek, end);
-        if (!is_whitespace(nc)) break;
-        if (is_newline(nc)) return true;
+        if (!is_whitespace(nc))
+            break;
+        if (is_newline(nc))
+            return true;
         scan = peek;
     }
     return false;
 }
 
 // Handle whitespace (Qwen3 newline sequences + general whitespace)
-inline bool try_whitespace_run(char32_t cp, const char*& p, const char* end,
-                               const char* start, Variant variant,
-                               std::vector<std::string>& result)
-{
-    if (!is_whitespace(cp)) return false;
+inline bool try_whitespace_run(char32_t cp, const char*& p, const char* end, const char* start,
+                               Variant variant, std::vector<std::string>& result) {
+    if (!is_whitespace(cp))
+        return false;
 
     // Qwen3: \s*[\r\n]+ — newline sequences take priority
     if (variant == Variant::kQwen3 && has_newline_in_ws(cp, p, end)) {
@@ -465,11 +466,8 @@ inline bool try_whitespace_run(char32_t cp, const char*& p, const char* end,
 }
 
 // Handle letter or digit run (no prefix)
-inline bool try_simple_run(char32_t cp, const char*& p, const char* end,
-                           const char* start, Variant variant,
-                           std::vector<std::string>& result,
-                           int digit_group = 0)
-{
+inline bool try_simple_run(char32_t cp, const char*& p, const char* end, const char* start,
+                           Variant variant, std::vector<std::string>& result, int digit_group = 0) {
     if (is_letter(cp)) {
         scan_letters(p, end);
         result.emplace_back(start, p);
@@ -477,7 +475,8 @@ inline bool try_simple_run(char32_t cp, const char*& p, const char* end,
     }
     if (is_digit(cp)) {
         if (variant == Variant::kQwen3) {
-            if (digit_group > 1) scan_digits(p, end, digit_group - 1);
+            if (digit_group > 1)
+                scan_digits(p, end, digit_group - 1);
         } else {
             scan_digits(p, end);
         }
@@ -490,10 +489,10 @@ inline bool try_simple_run(char32_t cp, const char*& p, const char* end,
 // ── Main pre-tokenize functions ──
 
 std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
-                                      int digit_group = 0)
-{
+                                      int digit_group = 0) {
     std::vector<std::string> result;
-    if (text.empty()) return result;
+    if (text.empty())
+        return result;
 
     const char* p = text.data();
     const char* end = p + text.size();
@@ -502,10 +501,14 @@ std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
         const char* start = p;
         char32_t cp = read_utf8(p, end);
 
-        if (try_contraction(cp, p, end, start, result)) continue;
-        if (try_prefix_run(cp, p, end, start, variant, result)) continue;
-        if (try_whitespace_run(cp, p, end, start, variant, result)) continue;
-        if (try_simple_run(cp, p, end, start, variant, result, digit_group)) continue;
+        if (try_contraction(cp, p, end, start, result))
+            continue;
+        if (try_prefix_run(cp, p, end, start, variant, result))
+            continue;
+        if (try_whitespace_run(cp, p, end, start, variant, result))
+            continue;
+        if (try_simple_run(cp, p, end, start, variant, result, digit_group))
+            continue;
 
         // Other chars (punctuation/symbols)
         scan_others(p, end);
@@ -523,11 +526,10 @@ std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
 // ── BLOOM pre-tokenize helpers ──
 
 // Handle optional leading space + word chars for BLOOM
-inline bool try_bloom_space_word(char32_t cp, const char*& p, const char* end,
-                                 const char* start,
-                                 std::vector<std::string>& result)
-{
-    if (cp != ' ') return false;
+inline bool try_bloom_space_word(char32_t cp, const char*& p, const char* end, const char* start,
+                                 std::vector<std::string>& result) {
+    if (cp != ' ')
+        return false;
     if (p >= end) {
         result.emplace_back(start, p);
         return true;
@@ -547,10 +549,10 @@ inline bool try_bloom_space_word(char32_t cp, const char*& p, const char* end,
 // BLOOM pre-tokenizer: " ?[^(\s|[.,!?...])]+".
 // Simpler than GPT-2: optional space + non-whitespace-non-punct chars.
 // Punctuation chars become individual tokens.
-std::vector<std::string> bloom_pre_tokenize(const std::string& text)
-{
+std::vector<std::string> bloom_pre_tokenize(const std::string& text) {
     std::vector<std::string> result;
-    if (text.empty()) return result;
+    if (text.empty())
+        return result;
 
     const char* p = text.data();
     const char* end = p + text.size();
@@ -559,7 +561,8 @@ std::vector<std::string> bloom_pre_tokenize(const std::string& text)
         const char* start = p;
         char32_t cp = read_utf8(p, end);
 
-        if (try_bloom_space_word(cp, p, end, start, result)) continue;
+        if (try_bloom_space_word(cp, p, end, start, result))
+            continue;
 
         if (is_whitespace(cp)) {
             emit_whitespace_leave_last(p, end, start, result);
@@ -594,20 +597,17 @@ std::vector<std::string> bloom_pre_tokenize(const std::string& text)
 // ─── BpeTokenizer implementation ───
 
 class BpeTokenizer final : public ITokenizer {
-public:
-    static std::unique_ptr<BpeTokenizer> Create(
-        const char* tokenizer_json_data,
-        std::size_t tokenizer_json_size,
-        bool add_special_tokens = false)
-    {
+  public:
+    static std::unique_ptr<BpeTokenizer> Create(const char* tokenizer_json_data,
+                                                std::size_t tokenizer_json_size,
+                                                bool add_special_tokens = false) {
         auto tokenizer = std::unique_ptr<BpeTokenizer>(new BpeTokenizer());
         tokenizer->mAddSpecialTokens = add_special_tokens;
         tokenizer->parse_tokenizer_json(tokenizer_json_data, tokenizer_json_size);
         return tokenizer;
     }
 
-    void encode_segment(const std::string& text, std::vector<int32_t>& result) const
-    {
+    void encode_segment(const std::string& text, std::vector<int32_t>& result) const {
         if (mIsSentencePiece) {
             encode_sentencepiece(text, result);
         } else if (mIsMetaspace) {
@@ -617,10 +617,10 @@ public:
         }
     }
 
-    std::vector<int32_t> encode(const std::string& text) const override
-    {
+    std::vector<int32_t> encode(const std::string& text) const override {
         std::vector<int32_t> result;
-        if (text.empty()) return result;
+        if (text.empty())
+            return result;
 
         if (mAddSpecialTokens) {
             for (int32_t bos_id : mPostBosIds)
@@ -643,8 +643,7 @@ public:
         return result;
     }
 
-    std::string decode(const std::vector<int32_t>& ids) const override
-    {
+    std::string decode(const std::vector<int32_t>& ids) const override {
         std::string joined = join_vocab_tokens(ids);
         switch (mDecoderType) {
         case DecoderType::kByteLevel:
@@ -657,38 +656,36 @@ public:
         return byte_decode(joined);
     }
 
-    int32_t id_for_token(std::string_view token) const override
-    {
+    int32_t id_for_token(std::string_view token) const override {
         auto it = mTokenToId.find(std::string(token));
         return it != mTokenToId.end() ? it->second : -1;
     }
 
-    std::string token_for_id(int32_t id) const override
-    {
+    std::string token_for_id(int32_t id) const override {
         if (id >= 0 && static_cast<size_t>(id) < mVocab.size()) {
             return mVocab[id];
         }
         return "";
     }
 
-private:
+  private:
     BpeTokenizer() = default;
 
     enum class DecoderType { kByteLevel, kMetaspace, kSequence };
 
     // ─── Added token segmentation ───
 
-    struct Segment { std::string text; int32_t added_id; /* -1 = normal */ };
+    struct Segment {
+        std::string text;
+        int32_t added_id; /* -1 = normal */
+    };
 
-    std::pair<int32_t, size_t> find_longest_added_token(
-        const std::string& text, size_t pos) const
-    {
+    std::pair<int32_t, size_t> find_longest_added_token(const std::string& text, size_t pos) const {
         int32_t best_id = -1;
         size_t best_len = 0;
         for (const auto& [content, id] : mAddedTokenPatterns) {
-            if (pos + content.size() <= text.size()
-                && content.size() > best_len
-                && text.compare(pos, content.size(), content) == 0) {
+            if (pos + content.size() <= text.size() && content.size() > best_len &&
+                text.compare(pos, content.size(), content) == 0) {
                 best_id = id;
                 best_len = content.size();
             }
@@ -696,8 +693,7 @@ private:
         return {best_id, best_len};
     }
 
-    std::vector<Segment> split_added_tokens(const std::string& text) const
-    {
+    std::vector<Segment> split_added_tokens(const std::string& text) const {
         std::vector<Segment> segments;
         if (mAddedTokenPatterns.empty()) {
             segments.push_back({text, -1});
@@ -724,9 +720,7 @@ private:
 
     // Metaspace encode (DeepSeek style): raw UTF-8 char split, BPE merge.
     // Spaces are dropped (not in vocab), Ġ (U+0120) used as separator.
-    void encode_metaspace(const std::string& text,
-                          std::vector<int32_t>& result) const
-    {
+    void encode_metaspace(const std::string& text, std::vector<int32_t>& result) const {
         std::vector<std::string> chars;
         const char* cp = text.data();
         const char* ce = cp + text.size();
@@ -750,8 +744,7 @@ private:
     // SentencePiece-style encode: replace spaces with ▁, split to chars, BPE merge.
     // Used for Metaspace pre-tokenizer and Sequence decoder models (LLaMA, Mistral, Phi-3).
     // Normalize text for SentencePiece: replace spaces with ▁, handle prepend
-    std::string normalize_sentencepiece(const std::string& text) const
-    {
+    std::string normalize_sentencepiece(const std::string& text) const {
         static const std::string sp = "\xe2\x96\x81"; // U+2581
         std::string out;
         if (mSentencePiecePrependAlways) {
@@ -761,16 +754,13 @@ private:
             out += (c == ' ') ? sp : std::string(1, c);
         }
         // Metaspace prepend_scheme=first: prepend if not already starting with ▁
-        if (!mSentencePiecePrependAlways
-            && (out.empty() || out.compare(0, sp.size(), sp) != 0)) {
+        if (!mSentencePiecePrependAlways && (out.empty() || out.compare(0, sp.size(), sp) != 0)) {
             out = sp + out;
         }
         return out;
     }
 
-    void encode_sentencepiece(const std::string& text,
-                              std::vector<int32_t>& result) const
-    {
+    void encode_sentencepiece(const std::string& text, std::vector<int32_t>& result) const {
         std::string normalized = normalize_sentencepiece(text);
 
         // Split into UTF-8 characters
@@ -799,9 +789,7 @@ private:
     }
 
     // For byte_fallback: replace chars not in vocab with <0xXX> byte tokens
-    std::vector<std::string> apply_byte_fallback_encode(
-        std::vector<std::string> chars) const
-    {
+    std::vector<std::string> apply_byte_fallback_encode(std::vector<std::string> chars) const {
         std::vector<std::string> result;
         for (auto& ch : chars) {
             if (mTokenToId.count(ch)) {
@@ -818,17 +806,14 @@ private:
         return result;
     }
 
-    void encode_bytelevel(const std::string& text,
-                          std::vector<int32_t>& result) const
-    {
+    void encode_bytelevel(const std::string& text, std::vector<int32_t>& result) const {
         std::vector<std::string> words;
         if (!mUsePreTokenizer) {
             words = fallback_pre_tokenize(text);
         } else if (mPreTokenizerVariant == pretok::Variant::kBloom) {
             words = pretok::bloom_pre_tokenize(text);
         } else {
-            words = pretok::pre_tokenize(text, mPreTokenizerVariant,
-                                         mPreTokenizerDigitGroup);
+            words = pretok::pre_tokenize(text, mPreTokenizerVariant, mPreTokenizerDigitGroup);
         }
 
         for (const auto& word : words) {
@@ -845,11 +830,11 @@ private:
 
     // ─── Decoding helpers ───
 
-    std::string join_vocab_tokens(const std::vector<int32_t>& ids) const
-    {
+    std::string join_vocab_tokens(const std::vector<int32_t>& ids) const {
         std::string joined;
         for (int32_t id : ids) {
-            if (mSpecialIds.count(id)) continue;
+            if (mSpecialIds.count(id))
+                continue;
             if (id >= 0 && static_cast<size_t>(id) < mVocab.size()) {
                 joined += mVocab[id];
             }
@@ -857,14 +842,13 @@ private:
         return joined;
     }
 
-    std::string decode_metaspace(const std::string& joined) const
-    {
+    std::string decode_metaspace(const std::string& joined) const {
         std::string result;
         const std::string g_char = utf32_to_utf8(0x0120);
         size_t pos = 0;
         while (pos < joined.size()) {
-            if (pos + g_char.size() <= joined.size()
-                && joined.compare(pos, g_char.size(), g_char) == 0) {
+            if (pos + g_char.size() <= joined.size() &&
+                joined.compare(pos, g_char.size(), g_char) == 0) {
                 result.push_back(' ');
                 pos += g_char.size();
             } else {
@@ -880,8 +864,7 @@ private:
 
     // ─── Sequence decoder (SentencePiece BPE models: LLaMA, Mistral, Phi-3) ───
 
-    std::string decode_sequence(const std::string& joined) const
-    {
+    std::string decode_sequence(const std::string& joined) const {
         std::string text = joined;
         // Step 1: Apply Replace operations (e.g. ▁ → space)
         for (const auto& rep : mSeqDecoderReplaces) {
@@ -899,18 +882,15 @@ private:
         return text;
     }
 
-    static std::string string_replace_all(
-        const std::string& input,
-        const std::string& from,
-        const std::string& to)
-    {
-        if (from.empty()) return input;
+    static std::string string_replace_all(const std::string& input, const std::string& from,
+                                          const std::string& to) {
+        if (from.empty())
+            return input;
         std::string result;
         result.reserve(input.size());
         size_t pos = 0;
         while (pos < input.size()) {
-            if (pos + from.size() <= input.size()
-                && input.compare(pos, from.size(), from) == 0) {
+            if (pos + from.size() <= input.size() && input.compare(pos, from.size(), from) == 0) {
                 result += to;
                 pos += from.size();
             } else {
@@ -921,28 +901,31 @@ private:
         return result;
     }
 
-    static int hex_char_value(char c)
-    {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    static int hex_char_value(char c) {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'a' && c <= 'f')
+            return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F')
+            return c - 'A' + 10;
         return -1;
     }
 
     // Try to parse <0xXX> at position pos. Returns parsed byte or -1.
-    static int try_parse_byte_token(const std::string& text, size_t pos)
-    {
-        if (pos + 6 > text.size()) return -1;
-        if (text[pos] != '<' || text[pos + 1] != '0'
-            || text[pos + 2] != 'x' || text[pos + 5] != '>') return -1;
+    static int try_parse_byte_token(const std::string& text, size_t pos) {
+        if (pos + 6 > text.size())
+            return -1;
+        if (text[pos] != '<' || text[pos + 1] != '0' || text[pos + 2] != 'x' ||
+            text[pos + 5] != '>')
+            return -1;
         int h = hex_char_value(text[pos + 3]);
         int l = hex_char_value(text[pos + 4]);
-        if (h < 0 || l < 0) return -1;
+        if (h < 0 || l < 0)
+            return -1;
         return (h << 4) | l;
     }
 
-    static std::string apply_byte_fallback(const std::string& text)
-    {
+    static std::string apply_byte_fallback(const std::string& text) {
         std::string result;
         result.reserve(text.size());
         size_t pos = 0;
@@ -961,8 +944,7 @@ private:
 
     // ─── Byte-level encoding ───
 
-    static std::vector<std::string> byte_encode(const std::string& text)
-    {
+    static std::vector<std::string> byte_encode(const std::string& text) {
         const auto& tables = byte_tables();
         std::vector<std::string> result;
         result.reserve(text.size());
@@ -972,8 +954,7 @@ private:
         return result;
     }
 
-    static std::string byte_decode(const std::string& text)
-    {
+    static std::string byte_decode(const std::string& text) {
         const auto& tables = byte_tables();
         std::string result;
         result.reserve(text.size());
@@ -994,10 +975,10 @@ private:
 
     // ─── Fallback pre-tokenizer (when no GPT-2 pattern available) ───
 
-    static std::vector<std::string> fallback_pre_tokenize(const std::string& text)
-    {
+    static std::vector<std::string> fallback_pre_tokenize(const std::string& text) {
         std::vector<std::string> result;
-        if (text.empty()) return result;
+        if (text.empty())
+            return result;
         result.push_back(text);
         return result;
     }
@@ -1010,12 +991,11 @@ private:
         std::string second;
     };
 
-    MergeCandidate find_best_merge(const std::vector<std::string>& tokens) const
-    {
+    MergeCandidate find_best_merge(const std::vector<std::string>& tokens) const {
         MergeCandidate best{INT_MAX, "", ""};
         for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-            auto it = mMergeRank.find(std::make_pair(
-                std::cref(tokens[i]), std::cref(tokens[i + 1])));
+            auto it =
+                mMergeRank.find(std::make_pair(std::cref(tokens[i]), std::cref(tokens[i + 1])));
             if (it != mMergeRank.end() && it->second < best.rank) {
                 best = {it->second, tokens[i], tokens[i + 1]};
             }
@@ -1023,17 +1003,14 @@ private:
         return best;
     }
 
-    static std::vector<std::string> merge_all_pairs(
-        std::vector<std::string> tokens,
-        const std::string& first, const std::string& second)
-    {
+    static std::vector<std::string> merge_all_pairs(std::vector<std::string> tokens,
+                                                    const std::string& first,
+                                                    const std::string& second) {
         std::string merged = first + second;
         std::vector<std::string> result;
         result.reserve(tokens.size());
         for (size_t i = 0; i < tokens.size(); ++i) {
-            if (i + 1 < tokens.size()
-                && tokens[i] == first
-                && tokens[i + 1] == second) {
+            if (i + 1 < tokens.size() && tokens[i] == first && tokens[i + 1] == second) {
                 result.push_back(merged);
                 ++i; // skip next
             } else {
@@ -1044,15 +1021,17 @@ private:
     }
 
     // Optimized: merge ALL occurrences of the best pair per pass.
-    std::vector<std::string> apply_merges(std::vector<std::string> tokens) const
-    {
-        if (tokens.size() <= 1) return tokens;
+    std::vector<std::string> apply_merges(std::vector<std::string> tokens) const {
+        if (tokens.size() <= 1)
+            return tokens;
 
         while (true) {
             auto best = find_best_merge(tokens);
-            if (best.rank == INT_MAX) break;
+            if (best.rank == INT_MAX)
+                break;
             tokens = merge_all_pairs(std::move(tokens), best.first, best.second);
-            if (tokens.size() <= 1) break;
+            if (tokens.size() <= 1)
+                break;
         }
 
         return tokens;
@@ -1060,13 +1039,11 @@ private:
 
     // ─── JSON parsing helpers ───
 
-    static bool is_eos_content(const std::string& s)
-    {
+    static bool is_eos_content(const std::string& s) {
         return s == "<|endoftext|>" || s == "</s>" || s == "<|end_of_text|>";
     }
 
-    void parse_vocab(const nlohmann::json& j)
-    {
+    void parse_vocab(const nlohmann::json& j) {
         auto& vocab_obj = j["model"]["vocab"];
         size_t vocab_size = vocab_obj.size();
         mVocab.resize(vocab_size);
@@ -1080,8 +1057,7 @@ private:
         }
     }
 
-    void parse_merges(const nlohmann::json& j)
-    {
+    void parse_merges(const nlohmann::json& j) {
         if (!j["model"].contains("merges"))
             throw std::runtime_error("Invalid tokenizer.json: missing model.merges");
 
@@ -1093,13 +1069,15 @@ private:
 
             if (merges_arr[i].is_array()) {
                 auto arr = merges_arr[i].get<std::vector<std::string>>();
-                if (arr.size() != 2) continue;
+                if (arr.size() != 2)
+                    continue;
                 first = std::move(arr[0]);
                 second = std::move(arr[1]);
             } else if (merges_arr[i].is_string()) {
                 std::string merge_str = merges_arr[i].get<std::string>();
                 auto space_pos = merge_str.find(' ');
-                if (space_pos == std::string::npos) continue;
+                if (space_pos == std::string::npos)
+                    continue;
                 first = merge_str.substr(0, space_pos);
                 second = merge_str.substr(space_pos + 1);
             } else {
@@ -1111,9 +1089,9 @@ private:
         }
     }
 
-    void parse_added_tokens(const nlohmann::json& j)
-    {
-        if (!j.contains("added_tokens")) return;
+    void parse_added_tokens(const nlohmann::json& j) {
+        if (!j.contains("added_tokens"))
+            return;
         for (auto& tok : j["added_tokens"]) {
             std::string content = tok["content"].get<std::string>();
             int32_t id = tok["id"].get<int32_t>();
@@ -1129,7 +1107,8 @@ private:
             if (tok.value("special", false)) {
                 mSpecialTokens[content] = id;
                 mSpecialIds.insert(id);
-                if (is_eos_content(content)) mEosId = id;
+                if (is_eos_content(content))
+                    mEosId = id;
             }
             // All added tokens (special and non-special) participate in pre-split
             // matching during encode, matching HuggingFace's AddedToken behavior.
@@ -1139,37 +1118,35 @@ private:
         }
         // Sort by length descending for longest-match-first
         std::sort(mAddedTokenPatterns.begin(), mAddedTokenPatterns.end(),
-            [](const auto& a, const auto& b) {
-                return a.first.size() > b.first.size();
-            });
+                  [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
     }
 
     // Parse digit group size from regex pattern like \p{N}{1,3} → 3.
     // Returns 0 if no digit grouping found (single digit or unlimited).
-    static int parse_digit_group(const std::string& regex)
-    {
+    static int parse_digit_group(const std::string& regex) {
         // Search for "\p{N}{" — the standalone grouped variant, not [^\p{N}]
         auto pos = regex.find("\\p{N}{");
-        if (pos == std::string::npos) return 0;
+        if (pos == std::string::npos)
+            return 0;
         auto open = pos + 6; // after "\\p{N}{"
         auto close = regex.find('}', open);
-        if (close == std::string::npos) return 0;
+        if (close == std::string::npos)
+            return 0;
         auto comma = regex.find(',', open);
-        if (comma == std::string::npos || comma >= close) return 0;
+        if (comma == std::string::npos || comma >= close)
+            return 0;
         return std::stoi(regex.substr(comma + 1, close - comma - 1));
     }
 
     // Classify a single Split regex string into a pre-tokenizer variant.
-    static pretok::Variant classify_split_regex(
-        const std::string& regex, int& digit_group_out)
-    {
-        if (regex.find("[^\r\n") != std::string::npos
-            || regex.find("[^\\r\\n") != std::string::npos) {
+    static pretok::Variant classify_split_regex(const std::string& regex, int& digit_group_out) {
+        if (regex.find("[^\r\n") != std::string::npos ||
+            regex.find("[^\\r\\n") != std::string::npos) {
             digit_group_out = parse_digit_group(regex);
             return pretok::Variant::kQwen3;
         }
-        if (regex.find("[^(\\s") != std::string::npos
-            || regex.find("[^(\\\\s") != std::string::npos) {
+        if (regex.find("[^(\\s") != std::string::npos ||
+            regex.find("[^(\\\\s") != std::string::npos) {
             return pretok::Variant::kBloom;
         }
         if (regex.find("\\s?[A-Za-z") != std::string::npos) {
@@ -1179,26 +1156,27 @@ private:
     }
 
     // Detect variant from the Split regex inside a Sequence pre_tokenizer.
-    static pretok::Variant detect_split_variant(
-        const nlohmann::json& pt, int& digit_group_out)
-    {
+    static pretok::Variant detect_split_variant(const nlohmann::json& pt, int& digit_group_out) {
         digit_group_out = 0;
-        if (!pt.contains("pretokenizers")) return pretok::Variant::kGpt2;
+        if (!pt.contains("pretokenizers"))
+            return pretok::Variant::kGpt2;
         for (auto& sub : pt["pretokenizers"]) {
-            if (sub.value("type", "") != "Split") continue;
-            if (!sub.contains("pattern") || !sub["pattern"].contains("Regex")) continue;
-            return classify_split_regex(
-                sub["pattern"]["Regex"].get<std::string>(), digit_group_out);
+            if (sub.value("type", "") != "Split")
+                continue;
+            if (!sub.contains("pattern") || !sub["pattern"].contains("Regex"))
+                continue;
+            return classify_split_regex(sub["pattern"]["Regex"].get<std::string>(),
+                                        digit_group_out);
         }
         return pretok::Variant::kGpt2;
     }
 
-    void detect_pre_tokenizer(const nlohmann::json& j)
-    {
+    void detect_pre_tokenizer(const nlohmann::json& j) {
         mUsePreTokenizer = true;
         mPreTokenizerVariant = pretok::Variant::kGpt2;
 
-        if (!j.contains("pre_tokenizer") || j["pre_tokenizer"].is_null()) return;
+        if (!j.contains("pre_tokenizer") || j["pre_tokenizer"].is_null())
+            return;
         auto& pt = j["pre_tokenizer"];
         std::string pt_type = pt.value("type", "");
 
@@ -1218,20 +1196,21 @@ private:
         }
     }
 
-    DecoderType classify_decoder_type(const nlohmann::json& j) const
-    {
+    DecoderType classify_decoder_type(const nlohmann::json& j) const {
         if (!j.contains("decoder") || j["decoder"].is_null()) {
             return mIsMetaspace ? DecoderType::kMetaspace : DecoderType::kByteLevel;
         }
         std::string dt = j["decoder"].value("type", "");
-        if (dt == "ByteLevel") return DecoderType::kByteLevel;
-        if (dt == "Metaspace") return DecoderType::kMetaspace;
-        if (dt == "Sequence") return DecoderType::kSequence;
+        if (dt == "ByteLevel")
+            return DecoderType::kByteLevel;
+        if (dt == "Metaspace")
+            return DecoderType::kMetaspace;
+        if (dt == "Sequence")
+            return DecoderType::kSequence;
         return mIsMetaspace ? DecoderType::kMetaspace : DecoderType::kByteLevel;
     }
 
-    void detect_decoder(const nlohmann::json& j)
-    {
+    void detect_decoder(const nlohmann::json& j) {
         mDecoderType = classify_decoder_type(j);
         if (mDecoderType == DecoderType::kSequence) {
             parse_sequence_decoder(j["decoder"]);
@@ -1239,12 +1218,10 @@ private:
         // SentencePiece encode: vocab uses ▁ (U+2581) for spaces.
         // Detect by: (1) ▁ in vocabulary, or (2) normalizer prepends ▁.
         static const std::string spiece_marker = "\xe2\x96\x81"; // U+2581
-        mIsSentencePiece = mTokenToId.count(spiece_marker) > 0
-                        || mSentencePiecePrependAlways;
+        mIsSentencePiece = mTokenToId.count(spiece_marker) > 0 || mSentencePiecePrependAlways;
     }
 
-    void parse_seq_decoder_replace(const nlohmann::json& sub)
-    {
+    void parse_seq_decoder_replace(const nlohmann::json& sub) {
         SeqDecoderReplace rep;
         if (sub.contains("pattern") && sub["pattern"].contains("String")) {
             rep.pattern = sub["pattern"]["String"].get<std::string>();
@@ -1255,9 +1232,9 @@ private:
         }
     }
 
-    void parse_sequence_decoder(const nlohmann::json& dec)
-    {
-        if (!dec.contains("decoders")) return;
+    void parse_sequence_decoder(const nlohmann::json& dec) {
+        if (!dec.contains("decoders"))
+            return;
         for (auto& sub : dec["decoders"]) {
             std::string sub_type = sub.value("type", "");
             if (sub_type == "Replace") {
@@ -1273,8 +1250,7 @@ private:
         }
     }
 
-    void parse_tokenizer_json(const char* json_data, std::size_t json_size)
-    {
+    void parse_tokenizer_json(const char* json_data, std::size_t json_size) {
         nlohmann::json j;
         try {
             j = nlohmann::json::parse(json_data, json_data + json_size);
@@ -1309,9 +1285,9 @@ private:
     }
 
     // Detect normalizer: check for Prepend (always prepend ▁) vs none
-    void detect_normalizer(const nlohmann::json& j)
-    {
-        if (!j.contains("normalizer") || j["normalizer"].is_null()) return;
+    void detect_normalizer(const nlohmann::json& j) {
+        if (!j.contains("normalizer") || j["normalizer"].is_null())
+            return;
         auto& norm = j["normalizer"];
         std::string norm_type = norm.value("type", "");
         if (norm_type == "Sequence" && norm.contains("normalizers")) {
@@ -1324,9 +1300,9 @@ private:
     }
 
     // Parse post_processor to extract BOS/EOS tokens for add_special_tokens
-    void parse_post_processor(const nlohmann::json& j)
-    {
-        if (!j.contains("post_processor") || j["post_processor"].is_null()) return;
+    void parse_post_processor(const nlohmann::json& j) {
+        if (!j.contains("post_processor") || j["post_processor"].is_null())
+            return;
         auto& pp = j["post_processor"];
         std::string pp_type = pp.value("type", "");
 
@@ -1341,9 +1317,9 @@ private:
     }
 
     // Iterate Sequence post_processor's processors array to find TemplateProcessing
-    void parse_sequence_post_processor(const nlohmann::json& pp)
-    {
-        if (!pp.contains("processors")) return;
+    void parse_sequence_post_processor(const nlohmann::json& pp) {
+        if (!pp.contains("processors"))
+            return;
         for (auto& sub : pp["processors"]) {
             if (sub.value("type", "") == "TemplateProcessing") {
                 parse_template_post_processor(sub);
@@ -1353,8 +1329,7 @@ private:
     }
 
     // RobertaProcessing: {"type":"RobertaProcessing","cls":["<s>",0],"sep":["</s>",2],...}
-    void parse_roberta_post_processor(const nlohmann::json& pp)
-    {
+    void parse_roberta_post_processor(const nlohmann::json& pp) {
         if (pp.contains("cls") && pp["cls"].is_array() && pp["cls"].size() >= 2) {
             int32_t cls_id = pp["cls"][1].get<int32_t>();
             mPostBosIds.push_back(cls_id);
@@ -1365,18 +1340,19 @@ private:
         }
     }
 
-    int32_t resolve_special_token_id(const nlohmann::json& entry) const
-    {
-        if (!entry.contains("SpecialToken")) return -1;
+    int32_t resolve_special_token_id(const nlohmann::json& entry) const {
+        if (!entry.contains("SpecialToken"))
+            return -1;
         std::string token_id = entry["SpecialToken"].value("id", "");
-        if (token_id.empty()) return -1;
+        if (token_id.empty())
+            return -1;
         auto it = mSpecialTokens.find(token_id);
         return it != mSpecialTokens.end() ? it->second : -1;
     }
 
-    void parse_template_post_processor(const nlohmann::json& pp)
-    {
-        if (!pp.contains("single")) return;
+    void parse_template_post_processor(const nlohmann::json& pp) {
+        if (!pp.contains("single"))
+            return;
         bool seen_sequence = false;
         for (auto& entry : pp["single"]) {
             if (entry.contains("Sequence")) {
@@ -1384,7 +1360,8 @@ private:
                 continue;
             }
             int32_t id = resolve_special_token_id(entry);
-            if (id < 0) continue;
+            if (id < 0)
+                continue;
             if (seen_sequence) {
                 mPostEosIds.push_back(id);
             } else {
@@ -1409,7 +1386,7 @@ private:
     std::unordered_map<std::pair<std::string, std::string>, int, PairHash> mMergeRank;
 
     std::unordered_map<std::string, int32_t> mSpecialTokens;
-    std::unordered_set<int32_t> mSpecialIds;  // O(1) lookup in decode()
+    std::unordered_set<int32_t> mSpecialIds; // O(1) lookup in decode()
     int32_t mEosId = -1;
 
     // Non-special added tokens: matched before pre-tokenization (longest first)
@@ -1417,9 +1394,10 @@ private:
 
     bool mAddSpecialTokens = false;
     bool mUsePreTokenizer = true;
-    bool mIsMetaspace = false;  // legacy, kept for detect_pre_tokenizer
+    bool mIsMetaspace = false; // legacy, kept for detect_pre_tokenizer
     bool mIsSentencePiece = false;
-    bool mSentencePiecePrependAlways = false; // true for Normalizer Prepend, false for Metaspace first
+    bool mSentencePiecePrependAlways =
+        false; // true for Normalizer Prepend, false for Metaspace first
     bool mByteFallback = false;
 
     // Post-processor: BOS/EOS token IDs to add when add_special_tokens=true
@@ -1432,7 +1410,10 @@ private:
     DecoderType mDecoderType = DecoderType::kByteLevel;
 
     // Sequence decoder config (parsed from tokenizer.json decoder field)
-    struct SeqDecoderReplace { std::string pattern; std::string content; };
+    struct SeqDecoderReplace {
+        std::string pattern;
+        std::string content;
+    };
     std::vector<SeqDecoderReplace> mSeqDecoderReplaces;
     bool mSeqDecoderByteFallback = false;
     bool mSeqDecoderStripLeft = false;
@@ -1440,11 +1421,9 @@ private:
 
 } // namespace
 
-std::unique_ptr<ITokenizer> CreateBpeTokenizer(
-    const char* tokenizer_json_data,
-    std::size_t tokenizer_json_size,
-    bool add_special_tokens)
-{
+std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
+                                               std::size_t tokenizer_json_size,
+                                               bool add_special_tokens) {
     return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
 }
 

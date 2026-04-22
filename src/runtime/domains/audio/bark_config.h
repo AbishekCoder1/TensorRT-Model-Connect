@@ -15,7 +15,7 @@ struct BarkConfig {
     int32_t text_encoding_offset{10048};
     int32_t semantic_pad_token{10000};
     int32_t semantic_infer_token{129599};
-    int32_t semantic_vocab_size{10000};  // valid semantic token range [0, 10000)
+    int32_t semantic_vocab_size{10000}; // valid semantic token range [0, 10000)
     int32_t text_pad_token{129595};     // HF text_pad_token for masked positions
 
     // Coarse model constants
@@ -31,27 +31,27 @@ struct BarkConfig {
     int32_t sliding_window_len{60};
 
     // Codec (EnCodec) engine config
-    int32_t codec_seq_length{0};       // max frames the codec engine was compiled for
+    int32_t codec_seq_length{0};        // max frames the codec engine was compiled for
     int32_t codec_upsample_factor{320}; // total upsample ratio (8*5*4*2)
-    int32_t codec_n_codebooks{8};      // number of codebooks in codec engine input
+    int32_t codec_n_codebooks{8};       // number of codebooks in codec engine input
 
     // Fine model config
     int32_t fine_hidden_size{768};
     int32_t fine_n_lm_heads{7};
-    int32_t fine_codebook_size{1056};  // vocab per codebook (fine model)
-    int32_t fine_seq_length{0};        // 0 = no fine engine
+    int32_t fine_codebook_size{1056}; // vocab per codebook (fine model)
+    int32_t fine_seq_length{0};       // 0 = no fine engine
 
     // Sampling parameters
     float semantic_temperature{0.7F};
     float coarse_temperature{0.7F};
     int32_t top_k{50};
-    float min_eos_p{0.0F};  // 0 = disabled (matching HF bark-small default)
-    bool greedy{false};  // if true, use argmax instead of sampling
+    float min_eos_p{0.0F}; // 0 = disabled (matching HF bark-small default)
+    bool greedy{false};    // if true, use argmax instead of sampling
 
     // audio.bark.* namespace replaces TRTF_BARK_{DUMP,GREEDY,SEED}.
     // bark_plugin populates these from ctx.runtime_config.
-    std::string dump_path{};     // empty -> no token dump
-    int64_t     seed{-1};        // -1 -> use default-constructed RNG state
+    std::string dump_path{}; // empty -> no token dump
+    int64_t seed{-1};        // -1 -> use default-constructed RNG state
 };
 
 } // namespace trtf

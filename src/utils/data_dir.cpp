@@ -17,36 +17,30 @@ static std::string& mutable_source_dir() {
     return value;
 }
 
-void set_source_dir(const std::string& value)
-{
+void set_source_dir(const std::string& value) {
     mutable_source_dir() = value;
 }
 
-std::string source_dir()
-{
+std::string source_dir() {
     const auto& configured_value = mutable_source_dir();
     if (!configured_value.empty())
         return configured_value;
     return TRTF_SOURCE_DIR;
 }
 
-std::string scripts_dir()
-{
+std::string scripts_dir() {
     return source_dir() + "/scripts";
 }
 
-std::string models_dir()
-{
+std::string models_dir() {
     return source_dir() + "/models";
 }
 
-std::string script_path(const char* script_name)
-{
+std::string script_path(const char* script_name) {
     return scripts_dir() + "/" + script_name;
 }
 
-std::string model_path(const char* relative_path)
-{
+std::string model_path(const char* relative_path) {
     return models_dir() + "/" + relative_path;
 }
 

@@ -58,9 +58,7 @@ class IInferenceState {
     // Provide the total prompt length before prefill starts.
     // Cache policies that distinguish prompt and decode tokens can use this
     // to protect prompt tokens even if compression triggers during prefill.
-    virtual void set_prompt_length(int32_t prompt_length) {
-        (void) prompt_length;
-    }
+    virtual void set_prompt_length(int32_t prompt_length) { (void)prompt_length; }
 
     // Mark the transition from prompt prefill to autoregressive decoding.
     // State types that do not distinguish the phases can ignore this.

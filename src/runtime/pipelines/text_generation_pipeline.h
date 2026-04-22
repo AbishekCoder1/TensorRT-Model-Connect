@@ -39,9 +39,8 @@ struct TextGenConfig {
 // Called by decoder_plugin::create() before constructing the pipeline.
 // Replaces the TRTF_TEXT_STEP_TRACE_* env vars (deleted). Empty `path`
 // keeps tracing disabled; a non-empty path truncates the target file.
-void apply_text_trace_config_from_registry(
-    const std::string& path, std::int32_t start_position,
-    std::int32_t end_position, std::int32_t top_k);
+void apply_text_trace_config_from_registry(const std::string& path, std::int32_t start_position,
+                                           std::int32_t end_position, std::int32_t top_k);
 
 class TextGenerationPipeline final : public IPipeline {
   public:
@@ -109,8 +108,8 @@ class TextGenerationPipeline final : public IPipeline {
     // Decode loop (extracted for CCN).
     int32_t run_decode_loop(ISampler* sampler, const SamplingParams& params,
                             std::vector<int32_t>& output, std::vector<float>& logits,
-                            int32_t max_new_tokens, bool gpu_sampling,
-                            const GenerateConfig& cfg, int32_t prompt_token_count);
+                            int32_t max_new_tokens, bool gpu_sampling, const GenerateConfig& cfg,
+                            int32_t prompt_token_count);
     int32_t select_decoder_index(int32_t desired_rows) const;
     TrtModule& bind_decoder_for_step();
 };

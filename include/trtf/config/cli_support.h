@@ -53,8 +53,8 @@ std::any coerce_scalar(const std::string& raw, const std::string& type_tag,
 //
 // Return: nested map namespace → field → value (as std::any holding one
 // of: bool, int64_t, double, std::string, std::nullptr_t).
-using LayeredFileValues = std::unordered_map<
-    std::string, std::unordered_map<std::string, std::any>>;
+using LayeredFileValues =
+    std::unordered_map<std::string, std::unordered_map<std::string, std::any>>;
 
 LayeredFileValues parse_layered_json(std::string_view text);
 
@@ -71,27 +71,26 @@ LayeredFileValues load_layered_file(const std::string& path);
 // Each namespace/field is validated against the registered schemas;
 // unknown namespace or field fails fast. --set values are coerced from
 // strings according to the field's declared type_tag.
-LayerContribution build_cli_contribution(
-    const LayeredFileValues& config_file_values,
-    const std::vector<std::string>& set_tokens,
-    Layer layer = Layer::SessionRequest,
-    const SchemaRegistry& registry = SchemaRegistry::instance());
+LayerContribution
+build_cli_contribution(const LayeredFileValues& config_file_values,
+                       const std::vector<std::string>& set_tokens,
+                       Layer layer = Layer::SessionRequest,
+                       const SchemaRegistry& registry = SchemaRegistry::instance());
 
 // End-to-end helper: parse/load flags → merge → build a ConfigBundle.
 // `extra_contributions` lets callers inject platform / bundle-default /
 // build-time layers alongside the session layer.
-ConfigBundle resolve_cli_config(
-    const std::string& config_path,               // empty → skip file
-    const std::vector<std::string>& set_tokens,   // may be empty
-    const std::vector<LayerContribution>& extra_contributions = {},
-    const SchemaRegistry& registry = SchemaRegistry::instance());
+ConfigBundle resolve_cli_config(const std::string& config_path,             // empty → skip file
+                                const std::vector<std::string>& set_tokens, // may be empty
+                                const std::vector<LayerContribution>& extra_contributions = {},
+                                const SchemaRegistry& registry = SchemaRegistry::instance());
 
 // Write the effective-config JSON alongside an artifact. For artifact
 // ``foo/bar.trtfb`` and default suffix the output is
 // ``foo/bar.effective_config.json``. Returns the written path.
-std::string write_effective_config_next_to(
-    const ConfigBundle& bundle, const std::string& artifact_path,
-    const std::string& suffix = ".effective_config.json");
+std::string write_effective_config_next_to(const ConfigBundle& bundle,
+                                           const std::string& artifact_path,
+                                           const std::string& suffix = ".effective_config.json");
 
 // Low-level: serialize a bundle to JSON text. Stable field/namespace
 // ordering so two identical bundles produce byte-identical output.
@@ -117,9 +116,9 @@ LayerContribution bundle_defaults_contribution(const std::string& header_json);
 // Emits one stderr line per dropped namespace (informational — not an
 // error). Mutates ``contrib`` in place and returns the list of
 // dropped namespace names for diagnostics.
-std::vector<std::string> filter_to_registered_namespaces(
-    LayerContribution& contrib,
-    const SchemaRegistry& registry = SchemaRegistry::instance());
+std::vector<std::string>
+filter_to_registered_namespaces(LayerContribution& contrib,
+                                const SchemaRegistry& registry = SchemaRegistry::instance());
 
 // High-level helper used by PipelineFactory. Takes the bundle's raw
 // header JSON plus the session-layer CLI inputs and produces a merged
@@ -130,10 +129,9 @@ struct PipelineConfigResolution {
     ConfigBundle bundle;
     std::vector<LayerContribution> contributions;
 };
-PipelineConfigResolution resolve_pipeline_config(
-    const std::string& header_json,
-    const std::string& config_path,
-    const std::vector<std::string>& set_tokens,
-    const SchemaRegistry& registry = SchemaRegistry::instance());
+PipelineConfigResolution
+resolve_pipeline_config(const std::string& header_json, const std::string& config_path,
+                        const std::vector<std::string>& set_tokens,
+                        const SchemaRegistry& registry = SchemaRegistry::instance());
 
 } // namespace trtf::config

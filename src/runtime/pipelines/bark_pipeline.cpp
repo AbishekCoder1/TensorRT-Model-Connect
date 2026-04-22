@@ -1,5 +1,10 @@
 #include "runtime/pipelines/bark_pipeline.h"
 
+<<<<<<< HEAD
+=======
+#if TRTF_HAS_TRT
+
+>>>>>>> e50da5cd (style: clang-format all MR-changed C++ files)
 #include "runtime/core/trt_decode_runtime.h"
 #include "runtime/domains/audio/bark_generation_plan.h"
 #include "trtf/tokenizer.h"
@@ -78,21 +83,20 @@ void mask_coarse_logits_for_codebook(std::vector<float>& logits, int32_t codeboo
 // Replaces the TRTF_BARK_DUMP env var. Value flows in through the
 // ``audio_bark.dump_path`` schema field.
 void maybe_dump_tokens(const std::string& dump_path, const char* suffix,
-                       const std::vector<int32_t>& tokens)
-{
-    if (dump_path.empty()) return;
+                       const std::vector<int32_t>& tokens) {
+    if (dump_path.empty())
+        return;
     std::ofstream dump(dump_path + suffix);
-    for (int32_t token : tokens)
-    {
+    for (int32_t token : tokens) {
         dump << token << "\n";
     }
 }
 
 // Seed the sampler RNG from audio_bark.seed. A value of -1 (default)
 // means "leave the RNG at its constructed state." Replaces TRTF_BARK_SEED.
-void maybe_seed_bark_rng(std::mt19937& rng, std::int64_t seed)
-{
-    if (seed < 0) return;
+void maybe_seed_bark_rng(std::mt19937& rng, std::int64_t seed) {
+    if (seed < 0)
+        return;
     const auto converted = static_cast<std::mt19937::result_type>(seed);
     rng.seed(converted);
     std::cerr << "[trtf] Bark: sampler seed=" << converted << std::endl;
@@ -425,8 +429,8 @@ std::vector<int32_t> BarkPipeline::run_semantic(const std::vector<int32_t>& text
         run_step_with_token(*semantic_, *semantic_state_, token, logits);
     }
 
-    std::cerr << "[trtf] Bark semantic: generated " << semantic_tokens.size()
-              << " tokens" << std::endl;
+    std::cerr << "[trtf] Bark semantic: generated " << semantic_tokens.size() << " tokens"
+              << std::endl;
     maybe_dump_tokens(config_.dump_path, ".sem_tokens", semantic_tokens);
     return semantic_tokens;
 }
@@ -492,8 +496,7 @@ std::vector<int32_t> BarkPipeline::run_coarse(const std::vector<int32_t>& semant
         }
     }
 
-    std::cerr << "[trtf] Bark coarse: generated " << x_coarse.size()
-              << " tokens" << std::endl;
+    std::cerr << "[trtf] Bark coarse: generated " << x_coarse.size() << " tokens" << std::endl;
     maybe_dump_tokens(config_.dump_path, ".coarse_tokens", x_coarse);
     return x_coarse;
 }

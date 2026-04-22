@@ -66,12 +66,10 @@ class BarkPlugin final : public IPipelinePlugin {
         // audio_bark.* namespace (replaces TRTF_BARK_{DUMP,GREEDY,SEED}).
         if (ctx.runtime_config != nullptr) {
             try {
-                bark_cfg.dump_path = ctx.runtime_config->get<std::string>(
-                    "audio_bark", "dump_path");
-                bark_cfg.greedy = ctx.runtime_config->get<bool>(
-                    "audio_bark", "greedy");
-                bark_cfg.seed = ctx.runtime_config->get<std::int64_t>(
-                    "audio_bark", "seed");
+                bark_cfg.dump_path =
+                    ctx.runtime_config->get<std::string>("audio_bark", "dump_path");
+                bark_cfg.greedy = ctx.runtime_config->get<bool>("audio_bark", "greedy");
+                bark_cfg.seed = ctx.runtime_config->get<std::int64_t>("audio_bark", "seed");
             } catch (const std::exception&) {
                 // Schema not registered or type mismatch — stay at defaults.
             }

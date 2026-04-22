@@ -13,14 +13,12 @@
 
 namespace trtf {
 
-enum class TriAttentionScoreAggregation
-{
+enum class TriAttentionScoreAggregation {
     kMean,
     kMax,
 };
 
-enum class TriAttentionRopeStyle
-{
+enum class TriAttentionRopeStyle {
     kHalf,
     kInterleaved,
 };
@@ -97,7 +95,9 @@ struct TriAttentionCompactionProfile {
 };
 
 // Forward declaration — full type in trtf/config/config_bundle.h.
-namespace config { class ConfigBundle; }
+namespace config {
+class ConfigBundle;
+}
 
 // Build a TriAttentionConfig from the bundle's JSON plus (optionally) the
 // session-resolved ConfigBundle. Legacy bundles without the generic
@@ -105,23 +105,22 @@ namespace config { class ConfigBundle; }
 // has a non-default layer value for a field, that value wins. Environment
 // variables (TRTF_TRIATTN_*) are no longer read — callers supply values via
 // the registry (CLI --set / --config or bundle defaults:).
-TriAttentionConfig parse_triattention_bundle_config(
-    const std::string& config_json,
-    int32_t max_cache_length,
-    const config::ConfigBundle* runtime_config = nullptr);
+TriAttentionConfig
+parse_triattention_bundle_config(const std::string& config_json, int32_t max_cache_length,
+                                 const config::ConfigBundle* runtime_config = nullptr);
 
 TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
                                                 int32_t num_attention_heads,
-                                                int32_t num_key_value_heads,
-                                                int32_t num_layers);
+                                                int32_t num_key_value_heads, int32_t num_layers);
 
 class TrtModule;
 
 class TriAttentionKvCache : public IInferenceState {
   public:
-    TriAttentionKvCache(int32_t num_layers, int32_t num_kv_heads, int32_t max_length, int32_t kv_dim,
-                        cudaStream_t stream, TriAttentionConfig config, TriAttentionStats stats,
-                        DType cache_dtype = DType::kFloat32, KvCacheNames names = {});
+    TriAttentionKvCache(int32_t num_layers, int32_t num_kv_heads, int32_t max_length,
+                        int32_t kv_dim, cudaStream_t stream, TriAttentionConfig config,
+                        TriAttentionStats stats, DType cache_dtype = DType::kFloat32,
+                        KvCacheNames names = {});
 
     void reset() override;
     void bind_to(TrtModule& module) override;
@@ -159,12 +158,13 @@ class TriAttentionKvCache : public IInferenceState {
     void compact_existing_cache(bool reserve_slot_for_append = false);
     std::vector<int32_t> select_keep_indices(int32_t keep_budget,
                                              TriAttentionCompactionProfile* profile = nullptr);
-    std::vector<int32_t> select_keep_indices_host(int32_t keep_budget,
-                                                  const std::vector<int32_t>& reserved,
-                                                  const std::vector<int32_t>& candidates,
-                                                  TriAttentionCompactionProfile* profile = nullptr) const;
-    std::vector<float> copy_cache_rows_to_host(const DeviceTensor& tensor, int32_t rows,
-                                               TriAttentionCompactionProfile* profile = nullptr) const;
+    std::vector<int32_t>
+    select_keep_indices_host(int32_t keep_budget, const std::vector<int32_t>& reserved,
+                             const std::vector<int32_t>& candidates,
+                             TriAttentionCompactionProfile* profile = nullptr) const;
+    std::vector<float>
+    copy_cache_rows_to_host(const DeviceTensor& tensor, int32_t rows,
+                            TriAttentionCompactionProfile* profile = nullptr) const;
     void sync_shared_positions_from_head0();
 #ifdef TRTF_HAS_CUDA_KERNELS
     struct LayerGpuStats {

@@ -11,10 +11,10 @@
 
 namespace trtf::config::schemas {
 
-Schema make_decode_policy_schema()
-{
+Schema make_decode_policy_schema() {
     const std::set<Layer> build_and_bundle = {
-        Layer::BuildTime, Layer::BundleDefault,
+        Layer::BuildTime,
+        Layer::BundleDefault,
     };
     return Schema{
         "decode_policy",
@@ -23,8 +23,11 @@ Schema make_decode_policy_schema()
             // into the engine graph — session/platform layers cannot
             // retroactively toggle it.
             ConfigField{
-                "force_manual_attention", "bool",
-                std::any{false}, build_and_bundle, nullptr,
+                "force_manual_attention",
+                "bool",
+                std::any{false},
+                build_and_bundle,
+                nullptr,
             },
         },
     };
@@ -32,8 +35,7 @@ Schema make_decode_policy_schema()
 
 namespace {
 struct DecodePolicyRegistrar {
-    DecodePolicyRegistrar()
-    {
+    DecodePolicyRegistrar() {
         SchemaRegistry::instance().register_schema(make_decode_policy_schema());
     }
 };

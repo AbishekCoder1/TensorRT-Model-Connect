@@ -69,36 +69,32 @@ std::string normalize_legacy_strategy(const std::string& strategy, const std::st
     return strategy;
 }
 
-IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy)
-{
+IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy) {
     auto* plugin = PipelineRegistry::instance().lookup(strategy);
-    if (plugin != nullptr) return plugin;
+    if (plugin != nullptr)
+        return plugin;
     std::string available;
-    for (const auto& s : PipelineRegistry::instance().registered_strategies())
-    {
-        if (!available.empty()) available += ", ";
+    for (const auto& s : PipelineRegistry::instance().registered_strategies()) {
+        if (!available.empty())
+            available += ", ";
         available += s;
     }
-    throw std::runtime_error(
-        "No plugin registered for runtime_strategy: " + strategy +
-        " (available: " + available + ")");
+    throw std::runtime_error("No plugin registered for runtime_strategy: " + strategy +
+                             " (available: " + available + ")");
 }
 
 // Apply platform.* values to their process-wide sinks. Replaces the old
 // TRTF_DATA_DIR and TRTF_TRT_LOG_{STDERR,MIN_SEVERITY} env-var reads.
 // Called from try_resolve_runtime_config once a bundle has resolved.
-void apply_platform_config(const config::ConfigBundle& bundle)
-{
-    try
-    {
+void apply_platform_config(const config::ConfigBundle& bundle) {
+    try {
         const std::string source = bundle.get<std::string>("platform", "source_dir");
-        if (!source.empty()) set_source_dir(source);
+        if (!source.empty())
+            set_source_dir(source);
         const bool verbose_stderr = bundle.get<bool>("platform", "trt_log_stderr");
         const std::string severity = bundle.get<std::string>("platform", "trt_log_min_severity");
         configure_trt_logger(verbose_stderr, severity);
-    }
-    catch (const std::exception&)
-    {
+    } catch (const std::exception&) {
         // Schema absent or type mismatch — leave sinks at defaults.
     }
 }
@@ -116,11 +112,9 @@ std::optional<config::ConfigBundle> try_resolve_runtime_config(
         config::write_effective_config_next_to(resolution.bundle, bundle_path);
         apply_platform_config(resolution.bundle);
         return std::move(resolution.bundle);
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "[trtf.config] Failed to resolve runtime config: "
-                  << e.what() << "\n          Proceeding with schema defaults.\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[trtf.config] Failed to resolve runtime config: " << e.what()
+                  << "\n          Proceeding with schema defaults.\n";
         return std::nullopt;
     }
 }

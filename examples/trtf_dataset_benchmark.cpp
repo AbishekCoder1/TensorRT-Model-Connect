@@ -1,6 +1,6 @@
-#include "trtf/pipeline.h"
 #include "trtf/config/cli_support.h"
 #include "trtf/config/schema_registry.h"
+#include "trtf/pipeline.h"
 
 #include <algorithm>
 #include <cctype>
@@ -198,16 +198,13 @@ std::optional<std::string> normalize_answer_value(std::string value) {
 
 std::optional<std::string> extract_answer_from_text(const std::string& text) {
     static const std::regex boxed_re(R"(\\boxed\{([^}]*)\})");
-    static const std::regex final_re(R"(Final answer:\s*([^\n\r]+))",
-                                     std::regex_constants::icase);
-    static const std::regex answer_re(
-        R"((?:the\s+)?(?:final\s+)?answer\s*(?:is|=|:)\s*(-?\d+))",
-        std::regex_constants::icase);
+    static const std::regex final_re(R"(Final answer:\s*([^\n\r]+))", std::regex_constants::icase);
+    static const std::regex answer_re(R"((?:the\s+)?(?:final\s+)?answer\s*(?:is|=|:)\s*(-?\d+))",
+                                      std::regex_constants::icase);
     static const std::regex discourse_quantity_re(
         R"((?:therefore|thus|hence|so),?\s+(?:the\s+)?(?:answer|area|sum|difference|product|remainder|probability|count|number|value|total)[^\n\r]{0,64}?(?:is|=)\s*(-?\d+))",
         std::regex_constants::icase);
-    static const std::regex mn_re(R"(m\s*\+\s*n\s*=\s*(-?\d+))",
-                                  std::regex_constants::icase);
+    static const std::regex mn_re(R"(m\s*\+\s*n\s*=\s*(-?\d+))", std::regex_constants::icase);
     static const std::regex int_re("-?\\d+");
 
     std::smatch match;
@@ -367,8 +364,7 @@ int main(int argc, char** argv) {
     for (std::size_t sample_idx = 0; sample_idx < samples.size(); ++sample_idx) {
         const auto& sample = samples[sample_idx];
         if (seed >= 0) {
-            const int32_t seed_index =
-                sample.seed_index.value_or(static_cast<int32_t>(sample_idx));
+            const int32_t seed_index = sample.seed_index.value_or(static_cast<int32_t>(sample_idx));
             cfg.seed = seed + seed_index;
         }
         auto wall_start = std::chrono::steady_clock::now();
@@ -386,17 +382,16 @@ int main(int argc, char** argv) {
         output << "{\"sample_id\":\"" << json_escape(sample.sample_id) << "\""
                << ",\"gold_answer\":\"" << json_escape(sample.answer) << "\""
                << ",\"pred_answer\":\"" << json_escape(pred_answer) << "\""
-               << ",\"generated_tokens\":" << generated_tokens
-               << ",\"prefill_ms\":" << std::fixed << std::setprecision(6) << result.prefill_ms
-               << ",\"decode_ms\":" << std::fixed << std::setprecision(6) << result.decode_ms
-               << ",\"wall_ms\":" << std::fixed << std::setprecision(6) << wall_ms
-               << ",\"tokens_per_sec\":" << std::fixed << std::setprecision(6) << tok_per_sec
-               << ",\"text\":\"" << json_escape(result.text) << "\"}\n";
+               << ",\"generated_tokens\":" << generated_tokens << ",\"prefill_ms\":" << std::fixed
+               << std::setprecision(6) << result.prefill_ms << ",\"decode_ms\":" << std::fixed
+               << std::setprecision(6) << result.decode_ms << ",\"wall_ms\":" << std::fixed
+               << std::setprecision(6) << wall_ms << ",\"tokens_per_sec\":" << std::fixed
+               << std::setprecision(6) << tok_per_sec << ",\"text\":\"" << json_escape(result.text)
+               << "\"}\n";
         output.flush();
 
         std::cerr << "[trtf.dataset_benchmark] sample=" << sample.sample_id
-                  << " generated_tokens=" << generated_tokens
-                  << " decode_ms=" << result.decode_ms
+                  << " generated_tokens=" << generated_tokens << " decode_ms=" << result.decode_ms
                   << " tok/s=" << tok_per_sec << '\n';
     }
 

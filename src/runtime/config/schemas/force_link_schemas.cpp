@@ -26,12 +26,8 @@ extern volatile int kForceLink_platform;
 // external linkage so the linker must keep it; each element inside it
 // forces the corresponding schema TU to be pulled in.
 volatile int* const kAllSchemaAnchors[] = {
-    &kForceLink_triattention,
-    &kForceLink_decode_policy,
-    &kForceLink_text_trace,
-    &kForceLink_runtime,
-    &kForceLink_audio_bark,
-    &kForceLink_audio_magpie,
+    &kForceLink_triattention, &kForceLink_decode_policy, &kForceLink_text_trace,
+    &kForceLink_runtime,      &kForceLink_audio_bark,    &kForceLink_audio_magpie,
     &kForceLink_platform,
 };
 
@@ -40,8 +36,7 @@ volatile int* const kAllSchemaAnchors[] = {
 namespace trtf::config {
 
 // Called from schema_registry.cpp during static init.
-volatile int* const* force_link_all_schemas()
-{
+volatile int* const* force_link_all_schemas() {
     return trtf::config::schemas::kAllSchemaAnchors;
 }
 

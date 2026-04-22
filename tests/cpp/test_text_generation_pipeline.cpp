@@ -23,6 +23,10 @@
 #include "runtime/pipelines/text_generation_pipeline.h"
 #include "trtf/runtime/kv_cache.h"
 #include "trtf/runtime/trt_module.h"
+<<<<<<< HEAD
+=======
+#include "trtf/tokenizer.h"
+>>>>>>> e50da5cd (style: clang-format all MR-changed C++ files)
 // pipeline_interface.h was removed; GenerateConfig is in trtf/pipeline.h
 // (already included transitively via text_generation_pipeline.h)
 
@@ -32,7 +36,10 @@
 #include <vector>
 
 #if TRTF_HAS_TRT
+<<<<<<< HEAD
 #include "runtime/backend/trt_module_impl.h"
+=======
+>>>>>>> e50da5cd (style: clang-format all MR-changed C++ files)
 #include "runtime/core/trt_common.h"
 
 #include <NvInfer.h>
@@ -310,10 +317,10 @@ static void test_zero_max_tokens() {
     cudaStreamDestroy(stream);
 }
 
-static void test_stop_on_boxed_answer()
-{
+static void test_stop_on_boxed_answer() {
     auto engine = build_mock_decoder();
-    if (!engine) return;
+    if (!engine)
+        return;
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);

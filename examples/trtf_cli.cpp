@@ -27,7 +27,6 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <limits>
 #include <numeric>
 #include <optional>
 #include <sstream>
@@ -248,8 +247,7 @@ CliArgs parse_args(int argc, char** argv) {
             auto parsed = parse_byte_size(argv[++i]);
             if (!parsed.has_value()) {
                 args.parse_error = true;
-                args.error_message =
-                    "--kv-cache-size expects a positive size like 90GB or 90GiB";
+                args.error_message = "--kv-cache-size expects a positive size like 90GB or 90GiB";
                 return args;
             }
             args.kv_cache_size_bytes = *parsed;
@@ -260,8 +258,7 @@ CliArgs parse_args(int argc, char** argv) {
             auto parsed = parse_byte_size(arg.substr(eq + 1));
             if (!parsed.has_value()) {
                 args.parse_error = true;
-                args.error_message =
-                    "--kv-cache-size expects a positive size like 90GB or 90GiB";
+                args.error_message = "--kv-cache-size expects a positive size like 90GB or 90GiB";
                 return args;
             }
             args.kv_cache_size_bytes = *parsed;
@@ -351,21 +348,12 @@ CliArgs parse_args(int argc, char** argv) {
             args.is_foreground = false;
             continue;
         }
-<<<<<<< HEAD
         if (arg == "--runtime-cache" && need_value(arg)) {
             args.runtime_cache = argv[++i];
             continue;
         }
         if (arg == "--cuda-graphs") {
             args.cuda_graphs = true;
-=======
-        if (arg == "--config" && need_value(arg)) {
-            args.config_path = argv[++i];
-            continue;
-        }
-        if (arg == "--set" && need_value(arg)) {
-            args.set_tokens.emplace_back(argv[++i]);
->>>>>>> db1f9e35 (config-registry: tick 5 — C++ --config/--set + JSON parser + 27-case test)
             continue;
         }
 
@@ -947,15 +935,15 @@ int apply_cli_config(const CliArgs& args) {
     if (trtf::config::SchemaRegistry::instance().registered_namespaces().empty()) {
         std::cerr << "[trtf] --config/--set accepted but no config schemas are "
                      "registered yet; values have no effect. Phase 4 cluster "
-                     "migrations add schemas." << '\n';
+                     "migrations add schemas."
+                  << '\n';
         return EXIT_SUCCESS;
     }
     try {
-        auto bundle = trtf::config::resolve_cli_config(
-            args.config_path, args.set_tokens);
+        auto bundle = trtf::config::resolve_cli_config(args.config_path, args.set_tokens);
         if (!args.bundle_path.empty()) {
-            std::string path = trtf::config::write_effective_config_next_to(
-                bundle, args.bundle_path);
+            std::string path =
+                trtf::config::write_effective_config_next_to(bundle, args.bundle_path);
             std::cerr << "[trtf] Wrote effective config: " << path << '\n';
         }
     } catch (const std::exception& e) {

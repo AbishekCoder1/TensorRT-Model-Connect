@@ -15,8 +15,7 @@
 
 static int failures = 0;
 
-static void check(bool condition, const char* name)
-{
+static void check(bool condition, const char* name) {
     if (!condition) {
         std::cerr << "FAIL: " << name << '\n';
         ++failures;
@@ -28,8 +27,7 @@ static void check(bool condition, const char* name)
 namespace {
 
 trtf::TriAttentionConfig make_config(int32_t kv_budget, int32_t recent_window = 1,
-                                     bool protect_prefill = false)
-{
+                                     bool protect_prefill = false) {
     trtf::TriAttentionConfig cfg;
     cfg.enabled = true;
     cfg.kv_budget = kv_budget;
@@ -42,8 +40,7 @@ trtf::TriAttentionConfig make_config(int32_t kv_budget, int32_t recent_window = 
     return cfg;
 }
 
-trtf::TriAttentionStats make_stats()
-{
+trtf::TriAttentionStats make_stats() {
     trtf::TriAttentionStats stats;
     stats.head_dim = 4;
     stats.rope_style = trtf::TriAttentionRopeStyle::kHalf;
@@ -62,15 +59,13 @@ trtf::TriAttentionStats make_stats()
     return stats;
 }
 
-void write_present_row(trtf::TriAttentionKvCache& cache, const std::vector<float>& row)
-{
+void write_present_row(trtf::TriAttentionKvCache& cache, const std::vector<float>& row) {
     cache.present_k(0).copy_from_host(row.data());
     cache.present_v(0).copy_from_host(row.data());
     cudaStreamSynchronize(cache.present_k(0).stream());
 }
 
-void test_absolute_position_and_mask()
-{
+void test_absolute_position_and_mask() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -96,8 +91,7 @@ void test_absolute_position_and_mask()
     cudaStreamDestroy(stream);
 }
 
-void test_score_based_compaction()
-{
+void test_score_based_compaction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -121,8 +115,7 @@ void test_score_based_compaction()
     cudaStreamDestroy(stream);
 }
 
-void test_protect_prefill()
-{
+void test_protect_prefill() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -151,8 +144,7 @@ void test_protect_prefill()
     cudaStreamDestroy(stream);
 }
 
-void test_prefill_protection_during_overflow()
-{
+void test_prefill_protection_during_overflow() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -173,8 +165,7 @@ void test_prefill_protection_during_overflow()
     cudaStreamDestroy(stream);
 }
 
-void test_slack_window_delays_compaction()
-{
+void test_slack_window_delays_compaction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -201,8 +192,7 @@ void test_slack_window_delays_compaction()
     cudaStreamDestroy(stream);
 }
 
-void test_prefill_overflow_uses_physical_slack()
-{
+void test_prefill_overflow_uses_physical_slack() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -232,8 +222,7 @@ void test_prefill_overflow_uses_physical_slack()
     cudaStreamDestroy(stream);
 }
 
-void test_slack_window_uses_full_logical_budget()
-{
+void test_slack_window_uses_full_logical_budget() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -255,8 +244,7 @@ void test_slack_window_uses_full_logical_budget()
     cudaStreamDestroy(stream);
 }
 
-void test_bundle_parsing()
-{
+void test_bundle_parsing() {
     const std::string config_json = R"json(
 {
   "triattention": {
@@ -311,8 +299,7 @@ void test_bundle_parsing()
     check(stats.layer_stats.size() == 1, "stats parse layer stats");
     check(stats.stats_head_count == 2, "stats parse score head count");
     check(stats.inv_freq.size() == 2 && stats.inv_freq[1] == 0.1F, "stats parse inv_freq");
-    check(stats.sampled_score_heads_by_layer.size() == 1,
-          "stats parse sampled-head layer mapping");
+    check(stats.sampled_score_heads_by_layer.size() == 1, "stats parse sampled-head layer mapping");
     check(stats.sampled_score_heads_by_layer[0].size() == 1 &&
               stats.sampled_score_heads_by_layer[0][0] == 1,
           "stats preserve actual sampled score heads");
@@ -322,8 +309,7 @@ void test_bundle_parsing()
 
 #endif // TRTF_HAS_TRT
 
-int main()
-{
+int main() {
 #if TRTF_HAS_TRT
     test_absolute_position_and_mask();
     test_score_based_compaction();

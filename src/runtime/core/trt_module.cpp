@@ -57,8 +57,8 @@ TrtModule::~TrtModule() {
 
 TrtModule::TrtModule(TrtModule&& other) noexcept
     : engine_(other.engine_), ctx_(other.ctx_), stream_(other.stream_),
-      profile_idx_(other.profile_idx_),
-      has_dynamic_shapes_(other.has_dynamic_shapes_), keep_alive_(std::move(other.keep_alive_)),
+      profile_idx_(other.profile_idx_), has_dynamic_shapes_(other.has_dynamic_shapes_),
+      keep_alive_(std::move(other.keep_alive_)),
       external_inputs_(std::move(other.external_inputs_)), buffers_(std::move(other.buffers_)),
       host_output_staging_(std::move(other.host_output_staging_)),
       output_device_tensors_(std::move(other.output_device_tensors_)) {
@@ -378,7 +378,8 @@ void TrtModule::reset_execution_context() {
     for (auto& [name, entry] : buffers_) {
         if (entry.d_ptr)
             ctx_->setTensorAddress(name.c_str(), entry.d_ptr);
-        if (entry.is_input && has_dynamic_shapes_ && dims_are_dynamic(engine_->getTensorShape(name.c_str()))) {
+        if (entry.is_input && has_dynamic_shapes_ &&
+            dims_are_dynamic(engine_->getTensorShape(name.c_str()))) {
             entry.shape.clear();
             entry.nbytes = 0;
         }

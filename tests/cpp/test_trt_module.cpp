@@ -100,7 +100,8 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_dynamic_identity_engine()
 
     uint32_t flags =
         1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(flags));
+    auto network =
+        trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(flags));
     auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 

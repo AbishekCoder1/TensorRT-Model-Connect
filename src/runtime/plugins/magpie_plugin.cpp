@@ -57,24 +57,22 @@ class MagpiePlugin final : public IPipelinePlugin {
         // defaults for fields the caller never touched.
         if (ctx.runtime_config != nullptr) {
             try {
-                if (ctx.runtime_config->source_of("audio_magpie", "greedy")
-                    != ::trtf::config::Layer::SchemaDefault)
-                    magpie_cfg.greedy = ctx.runtime_config->get<bool>(
-                        "audio_magpie", "greedy");
-                float cfg_scale = ctx.runtime_config->get<float>(
-                    "audio_magpie", "cfg_scale");
-                if (cfg_scale > 0.0F) magpie_cfg.cfg_scale = cfg_scale;
-                float temp = ctx.runtime_config->get<float>(
-                    "audio_magpie", "temperature");
-                if (temp > 0.0F) magpie_cfg.temperature = temp;
-                std::int32_t finished_limit = ctx.runtime_config->get<std::int32_t>(
-                    "audio_magpie", "finished_limit");
+                if (ctx.runtime_config->source_of("audio_magpie", "greedy") !=
+                    ::trtf::config::Layer::SchemaDefault)
+                    magpie_cfg.greedy = ctx.runtime_config->get<bool>("audio_magpie", "greedy");
+                float cfg_scale = ctx.runtime_config->get<float>("audio_magpie", "cfg_scale");
+                if (cfg_scale > 0.0F)
+                    magpie_cfg.cfg_scale = cfg_scale;
+                float temp = ctx.runtime_config->get<float>("audio_magpie", "temperature");
+                if (temp > 0.0F)
+                    magpie_cfg.temperature = temp;
+                std::int32_t finished_limit =
+                    ctx.runtime_config->get<std::int32_t>("audio_magpie", "finished_limit");
                 if (finished_limit >= 0) {
                     magpie_cfg.finished_limit_with_eot = finished_limit;
                     magpie_cfg.enable_finished_limit_stop = (finished_limit > 0);
                 }
-                magpie_cfg.seed = ctx.runtime_config->get<std::int64_t>(
-                    "audio_magpie", "seed");
+                magpie_cfg.seed = ctx.runtime_config->get<std::int64_t>("audio_magpie", "seed");
             } catch (const std::exception&) {
                 // Schema not registered or type mismatch — leave defaults.
             }

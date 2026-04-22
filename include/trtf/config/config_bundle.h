@@ -46,7 +46,7 @@ struct ResolvedValue {
 
 // Immutable resolved configuration for one session.
 class ConfigBundle {
-public:
+  public:
     using NamespaceMap = std::unordered_map<std::string, ResolvedValue>;
     using ResolvedMap = std::unordered_map<std::string, NamespaceMap>;
 
@@ -55,37 +55,30 @@ public:
     // Merge contributions against the given registry (default: singleton).
     // Throws std::invalid_argument on allowlist violations, unknown
     // namespace/field contributions, or validator failures.
-    static ConfigBundle build(
-        const std::vector<LayerContribution>& contributions,
-        const SchemaRegistry& registry = SchemaRegistry::instance());
+    static ConfigBundle build(const std::vector<LayerContribution>& contributions,
+                              const SchemaRegistry& registry = SchemaRegistry::instance());
 
     // Typed access. Throws std::out_of_range if namespace/field unknown,
     // std::bad_any_cast if the requested type does not match the stored type.
     template <typename T>
-    T get(const std::string& namespace_name, const std::string& field) const
-    {
+    T get(const std::string& namespace_name, const std::string& field) const {
         const std::any& val = get_any(namespace_name, field);
-        try
-        {
+        try {
             return std::any_cast<T>(val);
-        }
-        catch (const std::bad_any_cast&)
-        {
+        } catch (const std::bad_any_cast&) {
             throw std::bad_any_cast();
         }
     }
 
     // Untyped access — used by effective_config.json serialization.
-    const std::any& get_any(const std::string& namespace_name,
-                            const std::string& field) const;
-    Layer source_of(const std::string& namespace_name,
-                    const std::string& field) const;
+    const std::any& get_any(const std::string& namespace_name, const std::string& field) const;
+    Layer source_of(const std::string& namespace_name, const std::string& field) const;
 
     // All resolved values. Key order is unspecified; serialization code
     // sorts as needed for stable output.
     const ResolvedMap& all() const { return resolved_; }
 
-private:
+  private:
     ResolvedMap resolved_;
 };
 
