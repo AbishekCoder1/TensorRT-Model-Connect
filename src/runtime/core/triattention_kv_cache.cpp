@@ -1574,6 +1574,130 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
 }
 #endif
 
+void TriAttentionKvCache::dump_cache_rows_to_file(const DeviceTensor& tensor, int32_t rows,
+                                                  const std::string& path,
+                                                  std::vector<std::string>& out_files) {
+    const auto host_cache = copy_cache_rows_to_host(tensor, rows, nullptr);
+    std::vector<float> packed(static_cast<std::size_t>(rows) *
+                                  static_cast<std::size_t>(cache_head_count_) *
+                                  static_cast<std::size_t>(stats_.head_dim),
+                              0.0F);
+    for (int32_t row = 0; row < rows; ++row) {
+        const float* row_ptr =
+            host_cache.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(kv_dim_);
+        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
+            const int32_t head_offset = cache_head * query_group_size_ * stats_.head_dim;
+            float* dst = packed.data() + (static_cast<std::size_t>(row) *
+                                              static_cast<std::size_t>(cache_head_count_) +
+                                          static_cast<std::size_t>(cache_head)) *
+                                             static_cast<std::size_t>(stats_.head_dim);
+            std::copy_n(row_ptr + head_offset, stats_.head_dim, dst);
+        }
+    }
+    std::ofstream score_out(path, std::ios::binary);
+    score_out.write(reinterpret_cast<const char*>(packed.data()),
+                    static_cast<std::streamsize>(packed.size() * sizeof(float)));
+    out_files.emplace_back(path);
+}
+
+void TriAttentionKvCache::maybe_dump_score_cache(int32_t rows, const char* k_pattern,
+                                                 const char* v_pattern,
+                                                 std::vector<std::string>& score_files,
+                                                 std::vector<std::string>& value_files) {
+    if (!config_.dump_score_cache)
+        return;
+    const char* dump_path =
+        config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
+    if (dump_path == nullptr || dump_path[0] == '\0')
+        return;
+    char path_buf[1024];
+    for (int32_t layer = 0; layer < num_layers_; ++layer) {
+        std::snprintf(path_buf, sizeof(path_buf), k_pattern, dump_path, layer);
+        dump_cache_rows_to_file(cache_k_[static_cast<std::size_t>(layer)], rows, path_buf,
+                                score_files);
+        std::snprintf(path_buf, sizeof(path_buf), v_pattern, dump_path, layer);
+        dump_cache_rows_to_file(cache_v_[static_cast<std::size_t>(layer)], rows, path_buf,
+                                value_files);
+    }
+}
+
+bool TriAttentionKvCache::compact_layer_on_gpu(int32_t layer,
+                                               const std::vector<int32_t>& keep_indices,
+                                               int32_t keep_count, std::size_t row_bytes,
+                                               int64_t& repack_calls, std::size_t& repack_bytes) {
+#ifdef TRTF_HAS_CUDA_KERNELS
+    if (config_.disable_gpu_compaction || keep_count <= 0 || !keep_indices_device_.ok())
+        return false;
+    if (!scratch_k_device_.ok() || !scratch_v_device_.ok())
+        return false;
+    const auto keep_bytes = static_cast<std::size_t>(keep_indices.size()) * sizeof(int32_t);
+    if (cudaMemcpyAsync(keep_indices_device_.data(), keep_indices.data(), keep_bytes,
+                        cudaMemcpyHostToDevice, stream_) != cudaSuccess)
+        return false;
+    const bool compact_k = triattention_compact_rows_gpu(
+        cache_k_[static_cast<std::size_t>(layer)].data(), scratch_k_device_.data(), cache_dtype_,
+        kv_dim_, static_cast<const int32_t*>(keep_indices_device_.data()), keep_count,
+        stats_.head_dim, cache_head_count_, query_group_size_, stream_);
+    const bool compact_v = triattention_compact_rows_gpu(
+        cache_v_[static_cast<std::size_t>(layer)].data(), scratch_v_device_.data(), cache_dtype_,
+        kv_dim_, static_cast<const int32_t*>(keep_indices_device_.data()), keep_count,
+        stats_.head_dim, cache_head_count_, query_group_size_, stream_);
+    if (!compact_k || !compact_v)
+        return false;
+    const auto compact_bytes = static_cast<std::size_t>(keep_count) * row_bytes;
+    if (cudaMemcpyAsync(cache_k_[static_cast<std::size_t>(layer)].data(), scratch_k_device_.data(),
+                        compact_bytes, cudaMemcpyDeviceToDevice, stream_) != cudaSuccess)
+        return false;
+    if (cudaMemcpyAsync(cache_v_[static_cast<std::size_t>(layer)].data(), scratch_v_device_.data(),
+                        compact_bytes, cudaMemcpyDeviceToDevice, stream_) != cudaSuccess)
+        return false;
+    repack_calls += 4;
+    repack_bytes += compact_bytes * 2U;
+    return true;
+#else
+    (void)layer;
+    (void)keep_indices;
+    (void)keep_count;
+    (void)row_bytes;
+    (void)repack_calls;
+    (void)repack_bytes;
+    return false;
+#endif
+}
+
+void TriAttentionKvCache::compact_layer_on_host(int32_t layer,
+                                                const std::vector<int32_t>& keep_indices,
+                                                int32_t keep_count, std::size_t row_bytes,
+                                                std::size_t head_block_bytes,
+                                                int32_t old_cache_length, int64_t& repack_calls,
+                                                std::size_t& repack_bytes) {
+    auto* ck = static_cast<uint8_t*>(cache_k_[static_cast<std::size_t>(layer)].data());
+    auto* cv = static_cast<uint8_t*>(cache_v_[static_cast<std::size_t>(layer)].data());
+    for (int32_t dst = 0; dst < keep_count; ++dst) {
+        const auto dst_offset = static_cast<std::size_t>(dst) * row_bytes;
+        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
+            const int32_t src =
+                keep_indices[static_cast<std::size_t>(cache_head * keep_count + dst)];
+            const auto src_offset = static_cast<std::size_t>(src) * row_bytes +
+                                    static_cast<std::size_t>(cache_head) * head_block_bytes;
+            const auto head_offset =
+                dst_offset + static_cast<std::size_t>(cache_head) * head_block_bytes;
+            cudaMemcpyAsync(ck + head_offset, ck + src_offset, head_block_bytes,
+                            cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(cv + head_offset, cv + src_offset, head_block_bytes,
+                            cudaMemcpyDeviceToDevice, stream_);
+            repack_calls += 2;
+            repack_bytes += head_block_bytes * 2U;
+        }
+    }
+    if (config_.zero_tail && old_cache_length > keep_count) {
+        const auto tail_offset = static_cast<std::size_t>(keep_count) * row_bytes;
+        const auto tail_bytes = static_cast<std::size_t>(old_cache_length - keep_count) * row_bytes;
+        cudaMemsetAsync(ck + tail_offset, 0, tail_bytes, stream_);
+        cudaMemsetAsync(cv + tail_offset, 0, tail_bytes, stream_);
+    }
+}
+
 void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
     const int32_t trigger_length = compaction_trigger_length();
     if (cache_length_ < trigger_length)
@@ -1608,122 +1732,14 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
     std::vector<std::string> value_cache_files;
     std::vector<std::string> post_score_cache_files;
     std::vector<std::string> post_value_cache_files;
-    if (config_.dump_score_cache) {
-        const char* dump_path =
-            config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
-        if (dump_path != nullptr && dump_path[0] != '\0') {
-            for (int32_t layer = 0; layer < num_layers_; ++layer) {
-                auto dump_cache = [&](const DeviceTensor& tensor, const char* pattern,
-                                      std::vector<std::string>& out_files) {
-                    const auto host_cache = copy_cache_rows_to_host(
-                        tensor, static_cast<int32_t>(cache_positions_.size()), nullptr);
-                    std::vector<float> packed(static_cast<std::size_t>(cache_positions_.size()) *
-                                                  static_cast<std::size_t>(cache_head_count_) *
-                                                  static_cast<std::size_t>(stats_.head_dim),
-                                              0.0F);
-                    for (int32_t row = 0; row < static_cast<int32_t>(cache_positions_.size());
-                         ++row) {
-                        const float* row_ptr =
-                            host_cache.data() +
-                            static_cast<std::size_t>(row) * static_cast<std::size_t>(kv_dim_);
-                        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-                            const int32_t head_offset =
-                                cache_head * query_group_size_ * stats_.head_dim;
-                            float* dst =
-                                packed.data() + (static_cast<std::size_t>(row) *
-                                                     static_cast<std::size_t>(cache_head_count_) +
-                                                 static_cast<std::size_t>(cache_head)) *
-                                                    static_cast<std::size_t>(stats_.head_dim);
-                            std::copy_n(row_ptr + head_offset, stats_.head_dim, dst);
-                        }
-                    }
-
-                    char path_buf[1024];
-                    std::snprintf(path_buf, sizeof(path_buf), pattern, dump_path, layer);
-                    std::ofstream score_out(path_buf, std::ios::binary);
-                    score_out.write(reinterpret_cast<const char*>(packed.data()),
-                                    static_cast<std::streamsize>(packed.size() * sizeof(float)));
-                    score_out.close();
-                    out_files.emplace_back(path_buf);
-                };
-
-                dump_cache(cache_k_[static_cast<std::size_t>(layer)], "%s.layer%02d.bin",
-                           score_cache_files);
-                dump_cache(cache_v_[static_cast<std::size_t>(layer)], "%s.v.layer%02d.bin",
-                           value_cache_files);
-            }
-        }
-    }
+    maybe_dump_score_cache(static_cast<int32_t>(cache_positions_.size()), "%s.layer%02d.bin",
+                           "%s.v.layer%02d.bin", score_cache_files, value_cache_files);
     for (int32_t layer = 0; layer < num_layers_; ++layer) {
-        bool keep_uploaded = false;
-#ifdef TRTF_HAS_CUDA_KERNELS
-        if (!config_.disable_gpu_compaction && keep_count > 0 && keep_indices_device_.ok()) {
-            const auto keep_bytes = static_cast<std::size_t>(keep_indices.size()) * sizeof(int32_t);
-            keep_uploaded =
-                cudaMemcpyAsync(keep_indices_device_.data(), keep_indices.data(), keep_bytes,
-                                cudaMemcpyHostToDevice, stream_) == cudaSuccess;
-        }
-#endif
-        bool used_gpu_compaction = false;
-#ifdef TRTF_HAS_CUDA_KERNELS
-        if (keep_uploaded) {
-            if (scratch_k_device_.ok() && scratch_v_device_.ok()) {
-                const bool compact_k = triattention_compact_rows_gpu(
-                    cache_k_[static_cast<std::size_t>(layer)].data(), scratch_k_device_.data(),
-                    cache_dtype_, kv_dim_, static_cast<const int32_t*>(keep_indices_device_.data()),
-                    keep_count, stats_.head_dim, cache_head_count_, query_group_size_, stream_);
-                const bool compact_v = triattention_compact_rows_gpu(
-                    cache_v_[static_cast<std::size_t>(layer)].data(), scratch_v_device_.data(),
-                    cache_dtype_, kv_dim_, static_cast<const int32_t*>(keep_indices_device_.data()),
-                    keep_count, stats_.head_dim, cache_head_count_, query_group_size_, stream_);
-                const auto compact_bytes = static_cast<std::size_t>(keep_count) * row_bytes;
-                const bool copy_k =
-                    compact_k &&
-                    (cudaMemcpyAsync(cache_k_[static_cast<std::size_t>(layer)].data(),
-                                     scratch_k_device_.data(), compact_bytes,
-                                     cudaMemcpyDeviceToDevice, stream_) == cudaSuccess);
-                const bool copy_v =
-                    compact_v &&
-                    (cudaMemcpyAsync(cache_v_[static_cast<std::size_t>(layer)].data(),
-                                     scratch_v_device_.data(), compact_bytes,
-                                     cudaMemcpyDeviceToDevice, stream_) == cudaSuccess);
-                used_gpu_compaction = compact_k && compact_v && copy_k && copy_v;
-                if (used_gpu_compaction) {
-                    repack_calls += 4;
-                    repack_bytes += compact_bytes * 2U;
-                }
-            }
-        }
-#endif
-        if (used_gpu_compaction)
+        if (compact_layer_on_gpu(layer, keep_indices, keep_count, row_bytes, repack_calls,
+                                 repack_bytes))
             continue;
-
-        auto* ck = static_cast<uint8_t*>(cache_k_[static_cast<std::size_t>(layer)].data());
-        auto* cv = static_cast<uint8_t*>(cache_v_[static_cast<std::size_t>(layer)].data());
-        for (int32_t dst = 0; dst < keep_count; ++dst) {
-            const auto dst_offset = static_cast<std::size_t>(dst) * row_bytes;
-            for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-                const int32_t src =
-                    keep_indices[static_cast<std::size_t>(cache_head * keep_count + dst)];
-                const auto src_offset = static_cast<std::size_t>(src) * row_bytes +
-                                        static_cast<std::size_t>(cache_head) * head_block_bytes;
-                const auto head_offset =
-                    dst_offset + static_cast<std::size_t>(cache_head) * head_block_bytes;
-                cudaMemcpyAsync(ck + head_offset, ck + src_offset, head_block_bytes,
-                                cudaMemcpyDeviceToDevice, stream_);
-                cudaMemcpyAsync(cv + head_offset, cv + src_offset, head_block_bytes,
-                                cudaMemcpyDeviceToDevice, stream_);
-                repack_calls += 2;
-                repack_bytes += head_block_bytes * 2U;
-            }
-        }
-        if (config_.zero_tail && old_cache_length > keep_count) {
-            const auto tail_offset = static_cast<std::size_t>(keep_count) * row_bytes;
-            const auto tail_bytes =
-                static_cast<std::size_t>(old_cache_length - keep_count) * row_bytes;
-            cudaMemsetAsync(ck + tail_offset, 0, tail_bytes, stream_);
-            cudaMemsetAsync(cv + tail_offset, 0, tail_bytes, stream_);
-        }
+        compact_layer_on_host(layer, keep_indices, keep_count, row_bytes, head_block_bytes,
+                              old_cache_length, repack_calls, repack_bytes);
     }
     if (profile_ptr != nullptr) {
         cudaEventRecord(repack_stop, stream_);
@@ -1736,50 +1752,8 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
         cudaEventDestroy(repack_start);
         cudaEventDestroy(repack_stop);
     }
-    if (config_.dump_score_cache) {
-        const char* dump_path =
-            config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
-        if (dump_path != nullptr && dump_path[0] != '\0') {
-            for (int32_t layer = 0; layer < num_layers_; ++layer) {
-                auto dump_cache = [&](const DeviceTensor& tensor, const char* pattern,
-                                      std::vector<std::string>& out_files) {
-                    const auto host_cache = copy_cache_rows_to_host(tensor, keep_count, nullptr);
-                    std::vector<float> packed(static_cast<std::size_t>(keep_count) *
-                                                  static_cast<std::size_t>(cache_head_count_) *
-                                                  static_cast<std::size_t>(stats_.head_dim),
-                                              0.0F);
-                    for (int32_t row = 0; row < keep_count; ++row) {
-                        const float* row_ptr =
-                            host_cache.data() +
-                            static_cast<std::size_t>(row) * static_cast<std::size_t>(kv_dim_);
-                        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-                            const int32_t head_offset =
-                                cache_head * query_group_size_ * stats_.head_dim;
-                            float* dst =
-                                packed.data() + (static_cast<std::size_t>(row) *
-                                                     static_cast<std::size_t>(cache_head_count_) +
-                                                 static_cast<std::size_t>(cache_head)) *
-                                                    static_cast<std::size_t>(stats_.head_dim);
-                            std::copy_n(row_ptr + head_offset, stats_.head_dim, dst);
-                        }
-                    }
-
-                    char path_buf[1024];
-                    std::snprintf(path_buf, sizeof(path_buf), pattern, dump_path, layer);
-                    std::ofstream score_out(path_buf, std::ios::binary);
-                    score_out.write(reinterpret_cast<const char*>(packed.data()),
-                                    static_cast<std::streamsize>(packed.size() * sizeof(float)));
-                    score_out.close();
-                    out_files.emplace_back(path_buf);
-                };
-
-                dump_cache(cache_k_[static_cast<std::size_t>(layer)], "%s.post.layer%02d.bin",
-                           post_score_cache_files);
-                dump_cache(cache_v_[static_cast<std::size_t>(layer)], "%s.post.v.layer%02d.bin",
-                           post_value_cache_files);
-            }
-        }
-    }
+    maybe_dump_score_cache(keep_count, "%s.post.layer%02d.bin", "%s.post.v.layer%02d.bin",
+                           post_score_cache_files, post_value_cache_files);
 
     std::vector<std::vector<int32_t>> new_positions_by_head(
         static_cast<std::size_t>(cache_head_count_));

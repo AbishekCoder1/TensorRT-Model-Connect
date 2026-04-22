@@ -160,6 +160,18 @@ class TriAttentionKvCache : public IInferenceState {
     int32_t compaction_keep_budget(int32_t total_tokens) const;
     int32_t count_prefix_rows() const;
     void compact_existing_cache(bool reserve_slot_for_append = false);
+    void dump_cache_rows_to_file(const DeviceTensor& tensor, int32_t rows, const std::string& path,
+                                 std::vector<std::string>& out_files);
+    void maybe_dump_score_cache(int32_t rows, const char* k_pattern, const char* v_pattern,
+                                std::vector<std::string>& score_files,
+                                std::vector<std::string>& value_files);
+    bool compact_layer_on_gpu(int32_t layer, const std::vector<int32_t>& keep_indices,
+                              int32_t keep_count, std::size_t row_bytes, int64_t& repack_calls,
+                              std::size_t& repack_bytes);
+    void compact_layer_on_host(int32_t layer, const std::vector<int32_t>& keep_indices,
+                               int32_t keep_count, std::size_t row_bytes,
+                               std::size_t head_block_bytes, int32_t old_cache_length,
+                               int64_t& repack_calls, std::size_t& repack_bytes);
     std::vector<int32_t> select_keep_indices(int32_t keep_budget,
                                              TriAttentionCompactionProfile* profile = nullptr);
     std::vector<char> build_reserve_mask(int32_t total_tokens, int32_t old_budget) const;
