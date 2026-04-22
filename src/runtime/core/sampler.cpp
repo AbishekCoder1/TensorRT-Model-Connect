@@ -47,12 +47,8 @@ struct FilteredDistribution {
     int32_t keep{0};
 };
 
-static FilteredDistribution build_filtered_distribution(const float* logits, int32_t vocab_size,
-                                                        const SamplingParams& params) {
-    const int32_t n = vocab_size;
-    const int32_t k = std::min(std::max(params.top_k, 1), n);
-
-    FilteredDistribution dist;
+static void topk_indices_and_softmax(FilteredDistribution& dist, const float* logits, int32_t n,
+                                     int32_t k, float temperature) {
     dist.indices.resize(static_cast<std::size_t>(n));
     std::iota(dist.indices.begin(), dist.indices.end(), 0);
     std::partial_sort(dist.indices.begin(), dist.indices.begin() + k, dist.indices.end(),
@@ -60,7 +56,6 @@ static FilteredDistribution build_filtered_distribution(const float* logits, int
                           return logits[static_cast<std::size_t>(a)] >
                                  logits[static_cast<std::size_t>(b)];
                       });
-
     const float max_logit = logits[static_cast<std::size_t>(dist.indices[0])];
     dist.probs.resize(static_cast<std::size_t>(k));
     float sum = 0.0F;
@@ -68,53 +63,71 @@ static FilteredDistribution build_filtered_distribution(const float* logits, int
         const float scaled =
             (logits[static_cast<std::size_t>(dist.indices[static_cast<std::size_t>(i)])] -
              max_logit) /
-            params.temperature;
+            temperature;
         dist.probs[static_cast<std::size_t>(i)] = std::exp(scaled);
         sum += dist.probs[static_cast<std::size_t>(i)];
     }
-
     if (sum > 0.0F) {
         for (int32_t i = 0; i < k; ++i)
             dist.probs[static_cast<std::size_t>(i)] /= sum;
     } else {
+        const float uniform = 1.0F / static_cast<float>(k);
         for (int32_t i = 0; i < k; ++i)
-            dist.probs[static_cast<std::size_t>(i)] = 1.0F / static_cast<float>(k);
+            dist.probs[static_cast<std::size_t>(i)] = uniform;
     }
+}
 
-    int32_t keep = k;
+static int32_t apply_min_p(const FilteredDistribution& dist, int32_t k, float min_p) {
+    if (min_p <= 0.0F)
+        return k;
     const float max_prob = dist.probs.empty() ? 1.0F : dist.probs[0];
-    if (params.min_p > 0.0F && max_prob > 0.0F) {
-        const float min_prob = params.min_p * max_prob;
-        keep = 0;
-        while (keep < k && dist.probs[static_cast<std::size_t>(keep)] >= min_prob)
-            ++keep;
-        keep = std::max(keep, 1);
-    }
-    if (params.top_p < 1.0F) {
-        float cumulative = 0.0F;
-        int32_t top_p_keep = 0;
-        while (top_p_keep < keep) {
-            cumulative += dist.probs[static_cast<std::size_t>(top_p_keep)];
-            ++top_p_keep;
-            if (cumulative >= params.top_p)
-                break;
-        }
-        keep = std::max(top_p_keep, 1);
-    }
+    if (max_prob <= 0.0F)
+        return k;
+    const float min_prob = min_p * max_prob;
+    int32_t keep = 0;
+    while (keep < k && dist.probs[static_cast<std::size_t>(keep)] >= min_prob)
+        ++keep;
+    return std::max(keep, 1);
+}
 
-    if (keep < k) {
-        float kept_sum = 0.0F;
+static int32_t apply_top_p(const FilteredDistribution& dist, int32_t keep, float top_p) {
+    if (top_p >= 1.0F)
+        return keep;
+    float cumulative = 0.0F;
+    int32_t top_p_keep = 0;
+    while (top_p_keep < keep) {
+        cumulative += dist.probs[static_cast<std::size_t>(top_p_keep)];
+        ++top_p_keep;
+        if (cumulative >= top_p)
+            break;
+    }
+    return std::max(top_p_keep, 1);
+}
+
+static void renormalize_kept_prefix(FilteredDistribution& dist, int32_t keep) {
+    float kept_sum = 0.0F;
+    for (int32_t i = 0; i < keep; ++i)
+        kept_sum += dist.probs[static_cast<std::size_t>(i)];
+    if (kept_sum > 0.0F) {
         for (int32_t i = 0; i < keep; ++i)
-            kept_sum += dist.probs[static_cast<std::size_t>(i)];
-        if (kept_sum > 0.0F) {
-            for (int32_t i = 0; i < keep; ++i)
-                dist.probs[static_cast<std::size_t>(i)] /= kept_sum;
-        } else {
-            for (int32_t i = 0; i < keep; ++i)
-                dist.probs[static_cast<std::size_t>(i)] = 1.0F / static_cast<float>(keep);
-        }
+            dist.probs[static_cast<std::size_t>(i)] /= kept_sum;
+    } else {
+        const float uniform = 1.0F / static_cast<float>(keep);
+        for (int32_t i = 0; i < keep; ++i)
+            dist.probs[static_cast<std::size_t>(i)] = uniform;
     }
+}
 
+static FilteredDistribution build_filtered_distribution(const float* logits, int32_t vocab_size,
+                                                        const SamplingParams& params) {
+    const int32_t n = vocab_size;
+    const int32_t k = std::min(std::max(params.top_k, 1), n);
+    FilteredDistribution dist;
+    topk_indices_and_softmax(dist, logits, n, k, params.temperature);
+    int32_t keep = apply_min_p(dist, k, params.min_p);
+    keep = apply_top_p(dist, keep, params.top_p);
+    if (keep < k)
+        renormalize_kept_prefix(dist, keep);
     dist.keep = keep;
     return dist;
 }
