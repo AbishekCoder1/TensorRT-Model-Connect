@@ -26,6 +26,35 @@ int32_t compute_magpie_kv_dim(const BaseConfig& base_cfg, const MagpieTTSConfig&
 
 } // namespace
 
+// audio_magpie.* registry overlay — replaces the TRTF_MAGPIE_{GREEDY,
+// CFG_SCALE,TEMPERATURE,FINISHED_LIMIT,SEED} env vars. Only apply
+// non-default registry values so pre-migration bundles keep their
+// config-derived defaults for fields the caller never touched.
+static void apply_magpie_registry_overlay(MagpieTTSConfig& magpie_cfg,
+                                          const config::ConfigBundle* cfg) {
+    if (cfg == nullptr)
+        return;
+    try {
+        if (cfg->source_of("audio_magpie", "greedy") != config::Layer::SchemaDefault)
+            magpie_cfg.greedy = cfg->get<bool>("audio_magpie", "greedy");
+        const float cfg_scale = cfg->get<float>("audio_magpie", "cfg_scale");
+        if (cfg_scale > 0.0F)
+            magpie_cfg.cfg_scale = cfg_scale;
+        const float temp = cfg->get<float>("audio_magpie", "temperature");
+        if (temp > 0.0F)
+            magpie_cfg.temperature = temp;
+        const std::int32_t finished_limit =
+            cfg->get<std::int32_t>("audio_magpie", "finished_limit");
+        if (finished_limit >= 0) {
+            magpie_cfg.finished_limit_with_eot = finished_limit;
+            magpie_cfg.enable_finished_limit_stop = (finished_limit > 0);
+        }
+        magpie_cfg.seed = cfg->get<std::int64_t>("audio_magpie", "seed");
+    } catch (const std::exception&) {
+        // Schema not registered or type mismatch — leave defaults.
+    }
+}
+
 class MagpiePlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
@@ -51,32 +80,7 @@ class MagpiePlugin final : public IPipelinePlugin {
         auto magpie_cfg = build_magpie_config(ctx.config_json, ctx.config);
         int32_t kv_dim = compute_magpie_kv_dim(ctx.config, magpie_cfg);
 
-        // audio_magpie.* namespace (replaces TRTF_MAGPIE_{GREEDY,CFG_SCALE,
-        // TEMPERATURE,FINISHED_LIMIT,SEED} env vars). Only apply non-default
-        // registry values so pre-migration bundles keep their config-derived
-        // defaults for fields the caller never touched.
-        if (ctx.runtime_config != nullptr) {
-            try {
-                if (ctx.runtime_config->source_of("audio_magpie", "greedy") !=
-                    ::trtf::config::Layer::SchemaDefault)
-                    magpie_cfg.greedy = ctx.runtime_config->get<bool>("audio_magpie", "greedy");
-                float cfg_scale = ctx.runtime_config->get<float>("audio_magpie", "cfg_scale");
-                if (cfg_scale > 0.0F)
-                    magpie_cfg.cfg_scale = cfg_scale;
-                float temp = ctx.runtime_config->get<float>("audio_magpie", "temperature");
-                if (temp > 0.0F)
-                    magpie_cfg.temperature = temp;
-                std::int32_t finished_limit =
-                    ctx.runtime_config->get<std::int32_t>("audio_magpie", "finished_limit");
-                if (finished_limit >= 0) {
-                    magpie_cfg.finished_limit_with_eot = finished_limit;
-                    magpie_cfg.enable_finished_limit_stop = (finished_limit > 0);
-                }
-                magpie_cfg.seed = ctx.runtime_config->get<std::int64_t>("audio_magpie", "seed");
-            } catch (const std::exception&) {
-                // Schema not registered or type mismatch — leave defaults.
-            }
-        }
+        apply_magpie_registry_overlay(magpie_cfg, ctx.runtime_config);
         int32_t kv_dim = (ctx.config.attention_size > 0)
                              ? ctx.config.attention_size
                              : ((ctx.config.num_heads > 0 && ctx.config.head_dim > 0)
