@@ -183,16 +183,6 @@ def test_validator_rejects_invalid_demo_value():
 
 def test_allowlist_rejects_wrong_layer():
     _register_demo_feature_schema()
-    platform_contrib = LayerContribution(
-        layer=Layer.PLATFORM_PROFILE,
-        values={"demo_feature": {"enabled": True}},
-    )
-    # demo_feature.enabled disallows PLATFORM_PROFILE in this schema.
-    # Wait — we actually allow PLATFORM_PROFILE for `enabled`. Use a field
-    # that doesn't. `mode` is session-only; prove platform layer rejected.
-    # Actually both `mode` and `enabled` allow PLATFORM_PROFILE via _SESSION.
-    # Rebuild a contribution targeting a layer that's not allowed: BUNDLE_DEFAULT
-    # isn't in _SESSION.
     bad_contrib = LayerContribution(
         layer=Layer.BUNDLE_DEFAULT,
         values={"demo_feature": {"mode": "fast"}},

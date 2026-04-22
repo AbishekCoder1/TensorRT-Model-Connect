@@ -40,7 +40,6 @@ import pytest
 try:
     from trtf_build.runtime_config import (
         clear_for_testing,
-        registered_namespaces,
         lookup,
     )
     from trtf_build.runtime_config.schemas import load_all

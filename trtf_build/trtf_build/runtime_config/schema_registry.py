@@ -8,7 +8,7 @@ registry stores it. Value resolution happens elsewhere (see
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 

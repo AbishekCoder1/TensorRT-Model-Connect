@@ -444,7 +444,7 @@ def test_bundle_writer_round_trip_with_defaults(tmp_path: Path):
 
 def test_bundle_writer_omits_defaults_when_empty(tmp_path: Path):
     """No defaults: block → old readers unaffected."""
-    from trtf_build.bundle_writer import BundleInfo, BundleSection, BUNDLE_MAGIC, write_bundle
+    from trtf_build.bundle_writer import BundleInfo, BundleSection, write_bundle
     import struct
 
     path = tmp_path / "bundle.trtfb"

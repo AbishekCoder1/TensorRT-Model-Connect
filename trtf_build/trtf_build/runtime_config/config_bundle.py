@@ -13,18 +13,15 @@ per session answers "what did I actually run with?".
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from trtf_build.runtime_config.schema_registry import (
     Layer,
-    Schema,
     SchemaRegistry,
     _singleton_for_testing,
     layer_name,
-    registered_namespaces,
-    lookup,
 )
 
 

@@ -34,7 +34,6 @@ try:
         Layer,
         LayerContribution,
         Schema,
-        SchemaRegistry,
         clear_for_testing,
         lookup,
         register_schema,

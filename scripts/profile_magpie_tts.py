@@ -10,7 +10,6 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 import time
 
 
@@ -82,16 +81,14 @@ def profile_cpp_binary(bundle_path: str, trtf_binary: str, prompt: str,
 def profile_with_cuda_events(bundle_path: str, prompt: str,
                              max_new_tokens: int, greedy: bool):
     """Profile using Python debug runner with CUDA event timing."""
-    try:
-        import torch
-        import numpy as np
-    except ImportError:
-        print("ERROR: torch/numpy not available for CUDA event profiling")
-        return None
+    import importlib.util
 
-    # Check if we can import trtf_build
+    for mod in ("torch", "numpy"):
+        if importlib.util.find_spec(mod) is None:
+            print(f"ERROR: {mod} not available for CUDA event profiling")
+            return None
+
     try:
-        import trtf_build
         from trtf_build.debug_runner import MagpieTrtRunner
     except ImportError:
         print("ERROR: trtf_build not available; trying direct import")
@@ -122,7 +119,7 @@ def profile_with_cuda_events(bundle_path: str, prompt: str,
 
     # Run the full pipeline with per-stage timing
     t0 = time.perf_counter()
-    result = runner.generate(input_ids, max_new_tokens=max_new_tokens)
+    runner.generate(input_ids, max_new_tokens=max_new_tokens)
     t_gen = time.perf_counter() - t0
     print(f"Total generate: {t_gen:.3f}s")
 
