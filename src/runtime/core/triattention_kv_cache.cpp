@@ -1621,38 +1621,52 @@ void TriAttentionKvCache::maybe_dump_score_cache(int32_t rows, const char* k_pat
     }
 }
 
-bool TriAttentionKvCache::compact_layer_on_gpu(int32_t layer,
-                                               const std::vector<int32_t>& keep_indices,
-                                               int32_t keep_count, std::size_t row_bytes,
-                                               int64_t& repack_calls, std::size_t& repack_bytes) {
 #ifdef TRTF_HAS_CUDA_KERNELS
+bool TriAttentionKvCache::gpu_compaction_upload_keep(int32_t keep_count,
+                                                     const std::vector<int32_t>& keep_indices) {
     if (config_.disable_gpu_compaction || keep_count <= 0 || !keep_indices_device_.ok())
         return false;
     if (!scratch_k_device_.ok() || !scratch_v_device_.ok())
         return false;
     const auto keep_bytes = static_cast<std::size_t>(keep_indices.size()) * sizeof(int32_t);
-    if (cudaMemcpyAsync(keep_indices_device_.data(), keep_indices.data(), keep_bytes,
-                        cudaMemcpyHostToDevice, stream_) != cudaSuccess)
-        return false;
-    const bool compact_k = triattention_compact_rows_gpu(
+    return cudaMemcpyAsync(keep_indices_device_.data(), keep_indices.data(), keep_bytes,
+                           cudaMemcpyHostToDevice, stream_) == cudaSuccess;
+}
+
+bool TriAttentionKvCache::gpu_compact_one_layer(int32_t layer, int32_t keep_count,
+                                                std::size_t row_bytes) {
+    const bool ok_k = triattention_compact_rows_gpu(
         cache_k_[static_cast<std::size_t>(layer)].data(), scratch_k_device_.data(), cache_dtype_,
         kv_dim_, static_cast<const int32_t*>(keep_indices_device_.data()), keep_count,
         stats_.head_dim, cache_head_count_, query_group_size_, stream_);
-    const bool compact_v = triattention_compact_rows_gpu(
+    const bool ok_v = triattention_compact_rows_gpu(
         cache_v_[static_cast<std::size_t>(layer)].data(), scratch_v_device_.data(), cache_dtype_,
         kv_dim_, static_cast<const int32_t*>(keep_indices_device_.data()), keep_count,
         stats_.head_dim, cache_head_count_, query_group_size_, stream_);
-    if (!compact_k || !compact_v)
+    if (!ok_k || !ok_v)
         return false;
-    const auto compact_bytes = static_cast<std::size_t>(keep_count) * row_bytes;
-    if (cudaMemcpyAsync(cache_k_[static_cast<std::size_t>(layer)].data(), scratch_k_device_.data(),
-                        compact_bytes, cudaMemcpyDeviceToDevice, stream_) != cudaSuccess)
+    const auto bytes = static_cast<std::size_t>(keep_count) * row_bytes;
+    const bool copy_k =
+        cudaMemcpyAsync(cache_k_[static_cast<std::size_t>(layer)].data(), scratch_k_device_.data(),
+                        bytes, cudaMemcpyDeviceToDevice, stream_) == cudaSuccess;
+    const bool copy_v =
+        cudaMemcpyAsync(cache_v_[static_cast<std::size_t>(layer)].data(), scratch_v_device_.data(),
+                        bytes, cudaMemcpyDeviceToDevice, stream_) == cudaSuccess;
+    return copy_k && copy_v;
+}
+#endif
+
+bool TriAttentionKvCache::compact_layer_on_gpu(int32_t layer,
+                                               const std::vector<int32_t>& keep_indices,
+                                               int32_t keep_count, std::size_t row_bytes,
+                                               int64_t& repack_calls, std::size_t& repack_bytes) {
+#ifdef TRTF_HAS_CUDA_KERNELS
+    if (!gpu_compaction_upload_keep(keep_count, keep_indices))
         return false;
-    if (cudaMemcpyAsync(cache_v_[static_cast<std::size_t>(layer)].data(), scratch_v_device_.data(),
-                        compact_bytes, cudaMemcpyDeviceToDevice, stream_) != cudaSuccess)
+    if (!gpu_compact_one_layer(layer, keep_count, row_bytes))
         return false;
     repack_calls += 4;
-    repack_bytes += compact_bytes * 2U;
+    repack_bytes += static_cast<std::size_t>(keep_count) * row_bytes * 2U;
     return true;
 #else
     (void)layer;
@@ -1741,159 +1755,202 @@ void TriAttentionKvCache::compact_existing_cache(bool reserve_slot_for_append) {
         compact_layer_on_host(layer, keep_indices, keep_count, row_bytes, head_block_bytes,
                               old_cache_length, repack_calls, repack_bytes);
     }
-    if (profile_ptr != nullptr) {
-        cudaEventRecord(repack_stop, stream_);
-        cudaEventSynchronize(repack_stop);
-        float repack_ms = 0.0F;
-        cudaEventElapsedTime(&repack_ms, repack_start, repack_stop);
-        profile_ptr->repack_ms = static_cast<double>(repack_ms);
-        profile_ptr->repack_calls = repack_calls;
-        profile_ptr->repack_bytes = repack_bytes;
-        cudaEventDestroy(repack_start);
-        cudaEventDestroy(repack_stop);
-    }
+    finalize_repack_profile(profile_ptr, repack_start, repack_stop, repack_calls, repack_bytes);
     maybe_dump_score_cache(keep_count, "%s.post.layer%02d.bin", "%s.post.v.layer%02d.bin",
                            post_score_cache_files, post_value_cache_files);
 
-    std::vector<std::vector<int32_t>> new_positions_by_head(
-        static_cast<std::size_t>(cache_head_count_));
-    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-        auto& out = new_positions_by_head[static_cast<std::size_t>(cache_head)];
-        const auto& old_positions = cache_positions_per_head_[static_cast<std::size_t>(cache_head)];
-        out.reserve(static_cast<std::size_t>(keep_count));
-        for (int32_t dst = 0; dst < keep_count; ++dst) {
-            const int32_t idx =
-                keep_indices[static_cast<std::size_t>(cache_head * keep_count + dst)];
-            out.push_back(old_positions[static_cast<std::size_t>(idx)]);
-        }
-    }
-    const auto& representative_positions = new_positions_by_head.front();
-    if (config_.debug) {
-        const int32_t prefix_limit =
-            prompt_end_position_ > 0 ? prompt_end_position_ : planned_prompt_length_;
-        int32_t kept_prefix = 0;
-        for (int32_t pos : representative_positions) {
-            if (prefix_limit > 0 && pos < prefix_limit)
-                ++kept_prefix;
-        }
-        std::vector<int32_t> dropped_positions;
-        dropped_positions.reserve(static_cast<std::size_t>(cache_length_ - keep_count));
-        std::vector<char> keep_mask(static_cast<std::size_t>(cache_length_), 0);
-        for (int32_t dst = 0; dst < keep_count; ++dst) {
-            const int32_t idx = keep_indices[static_cast<std::size_t>(dst)];
-            keep_mask[static_cast<std::size_t>(idx)] = 1;
-        }
-        for (int32_t i = 0; i < cache_length_; ++i) {
-            if (keep_mask[static_cast<std::size_t>(i)] == 0)
-                dropped_positions.push_back(cache_positions_[static_cast<std::size_t>(i)]);
-        }
-        const int32_t first_pos =
-            representative_positions.empty() ? -1 : representative_positions.front();
-        const int32_t last_pos =
-            representative_positions.empty() ? -1 : representative_positions.back();
-        std::cerr << "[trtf.triattention] compact abs_pos=" << absolute_position_
-                  << " old_rows=" << cache_length_ << " kept_rows=" << keep_count
-                  << " kept_prefix=" << kept_prefix << " first_pos=" << first_pos
-                  << " last_pos=" << last_pos;
-        if (!dropped_positions.empty()) {
-            std::cerr << " dropped_pos=";
-            for (std::size_t i = 0; i < dropped_positions.size(); ++i) {
-                if (i > 0)
-                    std::cerr << ',';
-                std::cerr << dropped_positions[i];
-            }
-        }
-        std::cerr << '\n';
-    }
+    auto new_positions_by_head = build_new_positions_by_head(keep_indices, keep_count);
+    log_compact_debug(new_positions_by_head.front(), keep_indices, keep_count);
     ++compaction_count_;
-    if (profile_ptr != nullptr) {
-        std::cerr << "[trtf.triattention.profile] compact#" << compaction_count_
-                  << " abs_pos=" << absolute_position_ << " old_rows=" << cache_length_
-                  << " kept_rows=" << keep_count << " reserved=" << profile_ptr->reserved_count
-                  << " candidates=" << profile_ptr->candidate_count
-                  << " sampled_layers=" << profile_ptr->sampled_layers
-                  << " sampled_heads=" << profile_ptr->sampled_heads
-                  << " host_copy_ms=" << profile_ptr->host_copy_ms
-                  << " host_convert_ms=" << profile_ptr->host_convert_ms
-                  << " trig_prep_ms=" << profile_ptr->trig_prep_ms
-                  << " score_ms=" << profile_ptr->score_ms
-                  << " combine_ms=" << profile_ptr->combine_ms
-                  << " select_ms=" << profile_ptr->select_ms
-                  << " repack_ms=" << profile_ptr->repack_ms << " host_copy_mb="
-                  << (static_cast<double>(profile_ptr->host_copy_bytes) / (1024.0 * 1024.0))
-                  << " repack_mb="
-                  << (static_cast<double>(profile_ptr->repack_bytes) / (1024.0 * 1024.0))
-                  << " repack_calls=" << profile_ptr->repack_calls << '\n';
-    }
-    const char* dump_path =
-        config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
-    const int32_t dump_compaction_index = config_.dump_compaction_index;
-    if (dump_path != nullptr && dump_path[0] != '\0' &&
-        (dump_compaction_index <= 0 ||
-         dump_compaction_index == (compaction_count_ + (profile_ptr == nullptr ? 1 : 0)))) {
-        json dump;
-        dump["compaction_index"] =
-            profile_ptr != nullptr ? compaction_count_ : (compaction_count_ + 1);
-        dump["absolute_position"] = absolute_position_;
-        dump["cache_length_before"] = static_cast<int32_t>(cache_positions_.size());
-        dump["keep_count"] = keep_count;
-        dump["prompt_end_position"] = prompt_end_position_;
-        dump["planned_prompt_length"] = planned_prompt_length_;
-        dump["protect_prefill"] = config_.protect_prefill;
-        dump["recent_window"] = config_.recent_window;
-        dump["kv_budget"] = config_.kv_budget;
-        dump["count_prompt_tokens"] = config_.count_prompt_tokens;
-        dump["cache_positions"] = cache_positions_;
-        dump["cache_positions_per_head"] = cache_positions_per_head_;
-        dump["new_positions_by_head"] = new_positions_by_head;
-        std::vector<std::vector<int32_t>> keep_by_head(static_cast<std::size_t>(cache_head_count_));
-        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-            auto begin =
-                keep_indices.begin() + static_cast<std::ptrdiff_t>(cache_head * keep_count);
-            auto end = begin + keep_count;
-            keep_by_head[static_cast<std::size_t>(cache_head)] = std::vector<int32_t>(begin, end);
-        }
-        dump["keep_indices_by_head"] = keep_by_head;
-        if (profile_ptr != nullptr) {
-            dump["profile"] = {
-                {"reserved_count", profile_ptr->reserved_count},
-                {"candidate_count", profile_ptr->candidate_count},
-                {"sampled_layers", profile_ptr->sampled_layers},
-                {"sampled_heads", profile_ptr->sampled_heads},
-                {"score_ms", profile_ptr->score_ms},
-                {"combine_ms", profile_ptr->combine_ms},
-                {"select_ms", profile_ptr->select_ms},
-                {"repack_ms", profile_ptr->repack_ms},
-            };
-        }
-        if (config_.dump_score_cache) {
-            dump["score_cache_shape"] = {
-                static_cast<int32_t>(cache_positions_.size()),
-                cache_head_count_,
-                stats_.head_dim,
-            };
-            dump["score_cache_dtype"] = "float32";
-            dump["score_cache_files"] = score_cache_files;
-            dump["value_cache_files"] = value_cache_files;
-            dump["post_score_cache_shape"] = {
-                keep_count,
-                cache_head_count_,
-                stats_.head_dim,
-            };
-            dump["post_score_cache_files"] = post_score_cache_files;
-            dump["post_value_cache_files"] = post_value_cache_files;
-        }
-        std::ofstream out(dump_path);
-        out << dump.dump(2);
-        out << '\n';
-        out.close();
-        if (config_.abort_after_dump) {
-            throw std::runtime_error("TriAttention aborted after keep dump");
-        }
-    }
+    log_compact_profile(profile_ptr, keep_count);
+    emit_keep_dump_json(keep_indices, keep_count, new_positions_by_head, profile_ptr,
+                        score_cache_files, value_cache_files, post_score_cache_files,
+                        post_value_cache_files);
     cache_positions_per_head_ = std::move(new_positions_by_head);
     sync_shared_positions_from_head0();
     cache_length_ = keep_count;
+}
+
+void TriAttentionKvCache::finalize_repack_profile(TriAttentionCompactionProfile* profile_ptr,
+                                                  cudaEvent_t repack_start, cudaEvent_t repack_stop,
+                                                  int64_t repack_calls,
+                                                  std::size_t repack_bytes) const {
+    if (profile_ptr == nullptr)
+        return;
+    cudaEventRecord(repack_stop, stream_);
+    cudaEventSynchronize(repack_stop);
+    float repack_ms = 0.0F;
+    cudaEventElapsedTime(&repack_ms, repack_start, repack_stop);
+    profile_ptr->repack_ms = static_cast<double>(repack_ms);
+    profile_ptr->repack_calls = repack_calls;
+    profile_ptr->repack_bytes = repack_bytes;
+    cudaEventDestroy(repack_start);
+    cudaEventDestroy(repack_stop);
+}
+
+std::vector<std::vector<int32_t>>
+TriAttentionKvCache::build_new_positions_by_head(const std::vector<int32_t>& keep_indices,
+                                                 int32_t keep_count) const {
+    std::vector<std::vector<int32_t>> out(static_cast<std::size_t>(cache_head_count_));
+    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
+        auto& head_out = out[static_cast<std::size_t>(cache_head)];
+        const auto& old_positions = cache_positions_per_head_[static_cast<std::size_t>(cache_head)];
+        head_out.reserve(static_cast<std::size_t>(keep_count));
+        for (int32_t dst = 0; dst < keep_count; ++dst) {
+            const int32_t idx =
+                keep_indices[static_cast<std::size_t>(cache_head * keep_count + dst)];
+            head_out.push_back(old_positions[static_cast<std::size_t>(idx)]);
+        }
+    }
+    return out;
+}
+
+std::vector<int32_t>
+TriAttentionKvCache::collect_dropped_positions(const std::vector<int32_t>& keep_indices,
+                                               int32_t keep_count) const {
+    std::vector<char> keep_mask(static_cast<std::size_t>(cache_length_), 0);
+    for (int32_t dst = 0; dst < keep_count; ++dst) {
+        const int32_t idx = keep_indices[static_cast<std::size_t>(dst)];
+        keep_mask[static_cast<std::size_t>(idx)] = 1;
+    }
+    std::vector<int32_t> dropped;
+    for (int32_t i = 0; i < cache_length_; ++i) {
+        if (keep_mask[static_cast<std::size_t>(i)] == 0)
+            dropped.push_back(cache_positions_[static_cast<std::size_t>(i)]);
+    }
+    return dropped;
+}
+
+int32_t TriAttentionKvCache::count_prefix_positions(
+    const std::vector<int32_t>& representative_positions) const {
+    const int32_t prefix_limit =
+        prompt_end_position_ > 0 ? prompt_end_position_ : planned_prompt_length_;
+    if (prefix_limit <= 0)
+        return 0;
+    int32_t kept = 0;
+    for (int32_t pos : representative_positions) {
+        if (pos < prefix_limit)
+            ++kept;
+    }
+    return kept;
+}
+
+void TriAttentionKvCache::log_compact_debug(const std::vector<int32_t>& representative_positions,
+                                            const std::vector<int32_t>& keep_indices,
+                                            int32_t keep_count) const {
+    if (!config_.debug)
+        return;
+    const int32_t kept_prefix = count_prefix_positions(representative_positions);
+    const auto dropped_positions = collect_dropped_positions(keep_indices, keep_count);
+    const int32_t first_pos =
+        representative_positions.empty() ? -1 : representative_positions.front();
+    const int32_t last_pos =
+        representative_positions.empty() ? -1 : representative_positions.back();
+    std::cerr << "[trtf.triattention] compact abs_pos=" << absolute_position_
+              << " old_rows=" << cache_length_ << " kept_rows=" << keep_count
+              << " kept_prefix=" << kept_prefix << " first_pos=" << first_pos
+              << " last_pos=" << last_pos;
+    if (!dropped_positions.empty()) {
+        std::cerr << " dropped_pos=";
+        for (std::size_t i = 0; i < dropped_positions.size(); ++i) {
+            if (i > 0)
+                std::cerr << ',';
+            std::cerr << dropped_positions[i];
+        }
+    }
+    std::cerr << '\n';
+}
+
+void TriAttentionKvCache::log_compact_profile(const TriAttentionCompactionProfile* profile_ptr,
+                                              int32_t keep_count) const {
+    if (profile_ptr == nullptr)
+        return;
+    std::cerr << "[trtf.triattention.profile] compact#" << compaction_count_
+              << " abs_pos=" << absolute_position_ << " old_rows=" << cache_length_
+              << " kept_rows=" << keep_count << " reserved=" << profile_ptr->reserved_count
+              << " candidates=" << profile_ptr->candidate_count
+              << " sampled_layers=" << profile_ptr->sampled_layers
+              << " sampled_heads=" << profile_ptr->sampled_heads
+              << " host_copy_ms=" << profile_ptr->host_copy_ms
+              << " host_convert_ms=" << profile_ptr->host_convert_ms
+              << " trig_prep_ms=" << profile_ptr->trig_prep_ms
+              << " score_ms=" << profile_ptr->score_ms << " combine_ms=" << profile_ptr->combine_ms
+              << " select_ms=" << profile_ptr->select_ms << " repack_ms=" << profile_ptr->repack_ms
+              << " host_copy_mb="
+              << (static_cast<double>(profile_ptr->host_copy_bytes) / (1024.0 * 1024.0))
+              << " repack_mb="
+              << (static_cast<double>(profile_ptr->repack_bytes) / (1024.0 * 1024.0))
+              << " repack_calls=" << profile_ptr->repack_calls << '\n';
+}
+
+bool TriAttentionKvCache::should_emit_keep_dump(
+    const TriAttentionCompactionProfile* profile_ptr) const {
+    if (config_.dump_keep_path.empty())
+        return false;
+    const int32_t dump_compaction_index = config_.dump_compaction_index;
+    if (dump_compaction_index <= 0)
+        return true;
+    return dump_compaction_index == (compaction_count_ + (profile_ptr == nullptr ? 1 : 0));
+}
+
+void TriAttentionKvCache::emit_keep_dump_json(
+    const std::vector<int32_t>& keep_indices, int32_t keep_count,
+    const std::vector<std::vector<int32_t>>& new_positions_by_head,
+    const TriAttentionCompactionProfile* profile_ptr,
+    const std::vector<std::string>& score_cache_files,
+    const std::vector<std::string>& value_cache_files,
+    const std::vector<std::string>& post_score_cache_files,
+    const std::vector<std::string>& post_value_cache_files) {
+    if (!should_emit_keep_dump(profile_ptr))
+        return;
+    json dump;
+    dump["compaction_index"] = profile_ptr != nullptr ? compaction_count_ : (compaction_count_ + 1);
+    dump["absolute_position"] = absolute_position_;
+    dump["cache_length_before"] = static_cast<int32_t>(cache_positions_.size());
+    dump["keep_count"] = keep_count;
+    dump["prompt_end_position"] = prompt_end_position_;
+    dump["planned_prompt_length"] = planned_prompt_length_;
+    dump["protect_prefill"] = config_.protect_prefill;
+    dump["recent_window"] = config_.recent_window;
+    dump["kv_budget"] = config_.kv_budget;
+    dump["count_prompt_tokens"] = config_.count_prompt_tokens;
+    dump["cache_positions"] = cache_positions_;
+    dump["cache_positions_per_head"] = cache_positions_per_head_;
+    dump["new_positions_by_head"] = new_positions_by_head;
+    std::vector<std::vector<int32_t>> keep_by_head(static_cast<std::size_t>(cache_head_count_));
+    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
+        auto begin = keep_indices.begin() + static_cast<std::ptrdiff_t>(cache_head * keep_count);
+        keep_by_head[static_cast<std::size_t>(cache_head)] =
+            std::vector<int32_t>(begin, begin + keep_count);
+    }
+    dump["keep_indices_by_head"] = keep_by_head;
+    if (profile_ptr != nullptr) {
+        dump["profile"] = {
+            {"reserved_count", profile_ptr->reserved_count},
+            {"candidate_count", profile_ptr->candidate_count},
+            {"sampled_layers", profile_ptr->sampled_layers},
+            {"sampled_heads", profile_ptr->sampled_heads},
+            {"score_ms", profile_ptr->score_ms},
+            {"combine_ms", profile_ptr->combine_ms},
+            {"select_ms", profile_ptr->select_ms},
+            {"repack_ms", profile_ptr->repack_ms},
+        };
+    }
+    if (config_.dump_score_cache) {
+        dump["score_cache_shape"] = {static_cast<int32_t>(cache_positions_.size()),
+                                     cache_head_count_, stats_.head_dim};
+        dump["score_cache_dtype"] = "float32";
+        dump["score_cache_files"] = score_cache_files;
+        dump["value_cache_files"] = value_cache_files;
+        dump["post_score_cache_shape"] = {keep_count, cache_head_count_, stats_.head_dim};
+        dump["post_score_cache_files"] = post_score_cache_files;
+        dump["post_value_cache_files"] = post_value_cache_files;
+    }
+    std::ofstream out(config_.dump_keep_path);
+    out << dump.dump(2);
+    out << '\n';
+    if (config_.abort_after_dump)
+        throw std::runtime_error("TriAttention aborted after keep dump");
 }
 
 void TriAttentionKvCache::advance(int32_t n_tokens) {

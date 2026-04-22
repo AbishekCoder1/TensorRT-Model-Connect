@@ -168,10 +168,34 @@ class TriAttentionKvCache : public IInferenceState {
     bool compact_layer_on_gpu(int32_t layer, const std::vector<int32_t>& keep_indices,
                               int32_t keep_count, std::size_t row_bytes, int64_t& repack_calls,
                               std::size_t& repack_bytes);
+#ifdef TRTF_HAS_CUDA_KERNELS
+    bool gpu_compaction_upload_keep(int32_t keep_count, const std::vector<int32_t>& keep_indices);
+    bool gpu_compact_one_layer(int32_t layer, int32_t keep_count, std::size_t row_bytes);
+#endif
     void compact_layer_on_host(int32_t layer, const std::vector<int32_t>& keep_indices,
                                int32_t keep_count, std::size_t row_bytes,
                                std::size_t head_block_bytes, int32_t old_cache_length,
                                int64_t& repack_calls, std::size_t& repack_bytes);
+    void finalize_repack_profile(TriAttentionCompactionProfile* profile_ptr,
+                                 cudaEvent_t repack_start, cudaEvent_t repack_stop,
+                                 int64_t repack_calls, std::size_t repack_bytes) const;
+    std::vector<std::vector<int32_t>>
+    build_new_positions_by_head(const std::vector<int32_t>& keep_indices, int32_t keep_count) const;
+    void log_compact_debug(const std::vector<int32_t>& representative_positions,
+                           const std::vector<int32_t>& keep_indices, int32_t keep_count) const;
+    std::vector<int32_t> collect_dropped_positions(const std::vector<int32_t>& keep_indices,
+                                                   int32_t keep_count) const;
+    int32_t count_prefix_positions(const std::vector<int32_t>& representative_positions) const;
+    void log_compact_profile(const TriAttentionCompactionProfile* profile_ptr,
+                             int32_t keep_count) const;
+    bool should_emit_keep_dump(const TriAttentionCompactionProfile* profile_ptr) const;
+    void emit_keep_dump_json(const std::vector<int32_t>& keep_indices, int32_t keep_count,
+                             const std::vector<std::vector<int32_t>>& new_positions_by_head,
+                             const TriAttentionCompactionProfile* profile_ptr,
+                             const std::vector<std::string>& score_cache_files,
+                             const std::vector<std::string>& value_cache_files,
+                             const std::vector<std::string>& post_score_cache_files,
+                             const std::vector<std::string>& post_value_cache_files);
     std::vector<int32_t> select_keep_indices(int32_t keep_budget,
                                              TriAttentionCompactionProfile* profile = nullptr);
     std::vector<char> build_reserve_mask(int32_t total_tokens, int32_t old_budget) const;
