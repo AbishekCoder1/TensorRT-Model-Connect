@@ -19,7 +19,8 @@ from typing import Any
 DEFAULT_REMOTE = "origin"
 DEFAULT_TARGET = "ai-staging"
 DEFAULT_PROMOTION_TARGET = "master"
-DEFAULT_SOURCE_PREFIXES = ("agent-2-",)
+DEFAULT_SOURCE_PREFIXES = ("ai-task-",)
+ACTIVE_PIPELINE_STATUSES = {"created", "waiting_for_resource", "preparing", "pending", "running"}
 
 LABELS: dict[str, tuple[str, str]] = {
     "ai:task": ("#1F75CB", "Work item generated for AI implementation."),
@@ -29,11 +30,12 @@ LABELS: dict[str, tuple[str, str]] = {
     "ai-generated": ("#5319E7", "Merge request was produced by an AI agent."),
     "ai:staging-mr": ("#0052CC", "AI-generated merge request targeting ai-staging."),
     "ai:sanity-pending": ("#BFDADC", "MR is waiting for sanity CI."),
-    "ai:sanity-failed": ("#D93F0B", "MR failed sanity CI and needs repair."),
+    "ai:sanity-failed": ("#D93F0B", "MR failed minimal CI and needs rework."),
     "ai:sanity-green": ("#0E8A16", "MR sanity CI is green."),
     "ai:autopilot": ("#006B75", "MR is eligible for ai-staging autopilot."),
     "ai:staged": ("#0E8A16", "AI change has landed in ai-staging."),
     "ai:staging-failed": ("#D93F0B", "ai-staging full CI failed."),
+    "ai:needs-rework": ("#D93F0B", "Task or MR needs another implementation pass."),
     "ai:dropped": ("#B60205", "AI task or MR was dropped as low-value or invalid."),
     "ai:needs-human": ("#D93F0B", "Human decision is required."),
     "ai:promotion": ("#5319E7", "ai-staging to master promotion MR."),
@@ -266,12 +268,59 @@ def mr_details(cfg: Config, iid: int) -> dict[str, Any]:
     return data
 
 
+def issue_details(cfg: Config, iid: int) -> dict[str, Any]:
+    data = api(cfg, f"/projects/{cfg.project}/issues/{iid}")
+    if not isinstance(data, dict):
+        raise SystemExit(f"Unexpected issue response for #{iid}: {data!r}")
+    return data
+
+
 def approvals_left(cfg: Config, iid: int) -> int | None:
     data = api(cfg, f"/projects/{cfg.project}/merge_requests/{iid}/approvals")
     if not isinstance(data, dict):
         return None
     value = data.get("approvals_left")
     return int(value) if value is not None else None
+
+
+def update_labels(
+    cfg: Config,
+    resource: str,
+    iid: int,
+    *,
+    add: set[str],
+    remove: set[str],
+    extra_fields: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    item = issue_details(cfg, iid) if resource == "issues" else mr_details(cfg, iid)
+    labels = set(item.get("labels") or [])
+    labels.difference_update(remove)
+    labels.update(add)
+    fields = {"labels": csv_labels(sorted(labels)), **(extra_fields or {})}
+    updated = api(cfg, f"/projects/{cfg.project}/{resource}/{iid}", method="PUT", fields=fields)
+    return updated if isinstance(updated, dict) else None
+
+
+def create_note(cfg: Config, resource: str, iid: int, body: str) -> None:
+    api(cfg, f"/projects/{cfg.project}/{resource}/{iid}/notes", method="POST", fields={"body": body})
+
+
+def related_mrs_for_issue(cfg: Config, issue_iid: int) -> list[dict[str, Any]]:
+    data = api(cfg, f"/projects/{cfg.project}/issues/{issue_iid}/related_merge_requests")
+    if not isinstance(data, list):
+        raise SystemExit(f"Unexpected related MR response for #{issue_iid}: {data!r}")
+    return data
+
+
+def closing_issue_iids_for_mr(cfg: Config, mr_iid: int) -> list[int]:
+    try:
+        data = api(cfg, f"/projects/{cfg.project}/merge_requests/{mr_iid}/closes_issues")
+    except SystemExit as exc:
+        print(f"warning: could not inspect closing issues for !{mr_iid}: {exc}", file=sys.stderr)
+        return []
+    if not isinstance(data, list):
+        return []
+    return [int(issue["iid"]) for issue in data if issue.get("iid") is not None]
 
 
 def cmd_ensure_labels(args: argparse.Namespace) -> int:
@@ -336,7 +385,13 @@ def cmd_validate_task(args: argparse.Namespace) -> int:
 
 def cmd_next_task(args: argparse.Namespace) -> int:
     cfg = config_from_args(args)
-    tasks = list_task_issues(cfg, ["ai:task", "ai:ready"])
+    by_iid: dict[int, dict[str, Any]] = {}
+    for issue in [
+        *list_task_issues(cfg, ["ai:task", "ai:ready"]),
+        *list_task_issues(cfg, ["ai:task", "ai:needs-rework"]),
+    ]:
+        by_iid[int(issue["iid"])] = issue
+    tasks = list(by_iid.values())
     candidates = [
         issue
         for issue in tasks
@@ -363,6 +418,7 @@ def cmd_claim_task(args: argparse.Namespace) -> int:
         raise SystemExit(f"Unexpected issue response: {issue!r}")
     labels = set(issue.get("labels") or [])
     labels.discard("ai:ready")
+    labels.discard("ai:needs-rework")
     labels.update({"ai:claimed", "ai:implementing"})
     updated = api(
         cfg,
@@ -377,6 +433,83 @@ def cmd_claim_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_related_mrs(args: argparse.Namespace) -> int:
+    cfg = config_from_args(args)
+    details = [mr_details(cfg, int(item["iid"])) for item in related_mrs_for_issue(cfg, args.issue)]
+    if args.json:
+        print(json.dumps(details, indent=2, sort_keys=True))
+        return 0
+
+    if not details:
+        print(f"No related MRs for issue #{args.issue}.")
+        return 0
+    for mr in details:
+        pipeline = mr.get("head_pipeline") or {}
+        print(
+            f"!{mr['iid']} "
+            f"{mr.get('state', '-'):<8} "
+            f"target={mr.get('target_branch', '-')} "
+            f"source={mr.get('source_branch', '-')} "
+            f"pipeline={pipeline.get('status') or '-'} "
+            f"{mr.get('web_url')}"
+        )
+    return 0
+
+
+def cmd_mark_rework(args: argparse.Namespace) -> int:
+    cfg = config_from_args(args)
+    if not args.mr and not args.issue:
+        raise SystemExit("mark-rework requires --mr, --issue, or both")
+
+    issue_iids = list(dict.fromkeys(args.issue or []))
+    mr_url = None
+    if args.mr:
+        mr = mr_details(cfg, args.mr)
+        mr_url = str(mr.get("web_url") or f"!{args.mr}")
+        pipeline_status = ((mr.get("head_pipeline") or {}).get("status") or "none").lower()
+        if args.skip_if_active_pipeline and pipeline_status in ACTIVE_PIPELINE_STATUSES:
+            print(f"skipped !{args.mr}: active head pipeline is {pipeline_status}")
+            return 0
+        update_labels(
+            cfg,
+            "merge_requests",
+            args.mr,
+            add={"ai:needs-rework"},
+            remove={"ai:sanity-pending", "ai:sanity-failed", "ai:sanity-green", "ai:autopilot"},
+        )
+        if not issue_iids:
+            issue_iids = closing_issue_iids_for_mr(cfg, args.mr)
+        note = "Marked `ai:needs-rework` for another implementation pass."
+        if args.reason:
+            note += f"\n\nReason: {args.reason}"
+        create_note(cfg, "merge_requests", args.mr, note)
+        print(f"marked MR !{args.mr} as ai:needs-rework")
+
+    if not issue_iids:
+        print("warning: no linked issue was found; pass --issue explicitly", file=sys.stderr)
+        return 0
+
+    for issue_iid in issue_iids:
+        issue = issue_details(cfg, issue_iid)
+        extra_fields = {"state_event": "reopen"} if issue.get("state") != "opened" else None
+        update_labels(
+            cfg,
+            "issues",
+            issue_iid,
+            add={"ai:task", "ai:needs-rework"},
+            remove={"ai:ready", "ai:claimed", "ai:implementing", "ai:dropped", "ai:needs-human"},
+            extra_fields=extra_fields,
+        )
+        note = "Marked `ai:needs-rework` for another implementation pass."
+        if mr_url:
+            note += f"\n\nRelated MR: {mr_url}"
+        if args.reason:
+            note += f"\n\nReason: {args.reason}"
+        create_note(cfg, "issues", issue_iid, note)
+        print(f"marked issue #{issue_iid} as ai:needs-rework")
+    return 0
+
+
 def classify_mr(cfg: Config, mr: dict[str, Any]) -> str:
     labels = set(mr.get("labels") or [])
     if "ai:staging-mr" not in labels:
@@ -388,7 +521,7 @@ def classify_mr(cfg: Config, mr: dict[str, Any]) -> str:
     if pipeline_status == "success" and merge_status == "mergeable" and left in (None, 0):
         return "ready-for-autopilot"
     if pipeline_status in {"failed", "canceled"}:
-        return "needs-sanity-repair"
+        return "needs-rework"
     if merge_status in {"conflict", "need_rebase"}:
         return "needs-rebase-or-conflict-resolution"
     if pipeline_status in {"pending", "running", "created", "preparing"}:
@@ -643,7 +776,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--acceptance", action="append", required=True)
     create.add_argument("--verification", action="append", required=True)
     create.add_argument("--non-goal", action="append", required=True)
-    create.add_argument("--risk", default="Low. Cleanup-only or locally verifiable.")
+    create.add_argument("--risk", default="Low. Narrow, locally verifiable, and rollback is obvious.")
     create.add_argument("--label", action="append", default=[])
     create.set_defaults(func=cmd_create_task)
 
@@ -659,6 +792,18 @@ def build_parser() -> argparse.ArgumentParser:
     claim = subparsers.add_parser("claim-task", help="mark a task issue as claimed/in progress")
     claim.add_argument("issue", type=int)
     claim.set_defaults(func=cmd_claim_task)
+
+    related = subparsers.add_parser("related-mrs", help="list merge requests related to an issue")
+    related.add_argument("issue", type=int)
+    related.add_argument("--json", action="store_true")
+    related.set_defaults(func=cmd_related_mrs)
+
+    rework = subparsers.add_parser("mark-rework", help="mark an issue/MR for another implementation pass")
+    rework.add_argument("--mr", type=int, help="merge request IID to mark")
+    rework.add_argument("--issue", type=int, action="append", default=[], help="issue IID to mark; repeatable")
+    rework.add_argument("--reason", default="")
+    rework.add_argument("--skip-if-active-pipeline", action="store_true")
+    rework.set_defaults(func=cmd_mark_rework)
 
     dashboard = subparsers.add_parser("dashboard", help="summarize AI tasks, ai-staging MRs, and promotion MRs")
     dashboard.add_argument("--limit", type=int, default=50)

@@ -1,13 +1,13 @@
 ---
 name: gitlab-ai-staging-autopilot
-description: Use when autonomously managing GitLab merge requests targeting the AI staging branch. Lists MRs targeting ai-staging, waits for successful minimal CI, rebases onto the current target branch, pushes clean rebases with ci.skip, pushes target-wins conflict resolutions with a new pipeline, and merges only after explicit safety checks instead of GitLab native auto-merge.
+description: Use when autonomously managing GitLab merge requests targeting the AI staging branch. Lists generated MRs targeting ai-staging, waits for successful minimal CI, rebases onto the current target branch, merges clean rebases by exact SHA, and marks rebase conflicts for implementation rework instead of resolving them.
 ---
 
 # GitLab AI Staging Autopilot
 
 ## Purpose
 
-Run an autonomous queue loop for low-value AI-generated MRs targeting `ai-staging`.
+Run an autonomous queue loop for low-risk AI-generated MRs targeting `ai-staging`.
 
 This skill intentionally avoids GitLab native auto-merge. In this project, auto-merge can merge immediately while CI is pending because `Pipelines must succeed` is disabled at the project level.
 
@@ -22,8 +22,8 @@ Treat the target branch as ground truth.
 - Require `approvals_left == 0` when the approvals API is available.
 - Rebase the source branch onto the latest target branch before merging.
 - If the rebase is clean, push the rebased source branch with `ci.skip` and an explicit `--force-with-lease` against the fetched source SHA, then merge by exact SHA.
-- If the rebase conflicts, resolve conflicts in favor of the target branch by default, push with an explicit `--force-with-lease` and without `ci.skip`, and do not merge until the new pipeline succeeds in a later loop.
-- If conflict resolution makes the MR empty, close or skip it rather than merging a no-op.
+- If the rebase conflicts, abort the rebase, mark the MR and linked issue `ai:needs-rework`, and leave the fix to `/implement`.
+- If the rebased source branch is empty against the target, close or skip it rather than merging a no-op.
 - Preserve source branches unless the user explicitly says deletion is acceptable.
 
 ## Quick Start
@@ -34,7 +34,7 @@ From a clean checkout of this repository:
 python3 skills/gitlab-ai-staging-autopilot/scripts/ai_staging_autopilot.py \
   --project yifeif/trt-transformers \
   --target ai-staging \
-  --source-prefix agent-2- \
+  --source-prefix ai-task- \
   --required-label ai:staging-mr \
   --once
 ```
@@ -55,10 +55,9 @@ The script uses `glab api` for GitLab API calls and normal `git` for fetch, reba
    - Push the rebased source branch with `git push -o ci.skip --force-with-lease=<source-ref>:<fetched-source-sha>`.
    - Merge the MR through the GitLab API using the exact rebased SHA.
 8. On a rebase conflict:
-   - Resolve conflicted paths in favor of the target branch.
-   - Continue or skip empty commits.
-   - Push the resolved branch without `ci.skip`.
-   - Leave the MR open for CI to run.
+   - Abort the rebase.
+   - Mark the MR and linked issue `ai:needs-rework`.
+   - Leave the MR open for `/implement` to repair.
 9. Refetch and repeat on the next loop.
 
 ## Failure Handling
@@ -69,7 +68,7 @@ Stop and report instead of guessing when:
 - The source branch is not in the same project.
 - The push is rejected.
 - The merge API rejects the exact SHA.
-- Conflict resolution cannot continue cleanly.
 - The working tree is dirty before starting.
 
-For conflicts, prefer dropping conflicting AI changes over modifying target-branch behavior. The target branch is the integration truth.
+For conflicts, do not modify target-branch behavior and do not hand-resolve in
+this lane. The implementation worker owns rework.

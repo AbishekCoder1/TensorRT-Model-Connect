@@ -15,13 +15,18 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 
 DEFAULT_BRANCH = "ai-staging"
 DEFAULT_REMOTE = "origin"
-DEFAULT_SOURCE_PREFIXES = ("agent-2-",)
+DEFAULT_SOURCE_PREFIXES = ("ai-task-",)
+DEFAULT_PROMOTION_PREFIX = "ai-staging-promotion"
 AI_STAGING_MR_LABELS = "ai-generated,ai:staging-mr"
+AI_PROMOTION_MR_LABELS = "ai:promotion"
+ACTIVE_PIPELINE_STATUSES = {"created", "waiting_for_resource", "preparing", "pending", "running"}
+FAILED_PIPELINE_STATUSES = {"failed", "canceled"}
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,10 @@ def fetch_branch(cfg: Config, branch: str) -> None:
     )
 
 
+def remote_ref(cfg: Config, branch: str) -> str:
+    return f"{cfg.remote}/{branch}"
+
+
 def remote_branch_exists(cfg: Config, branch: str) -> bool:
     output = git(["ls-remote", "--heads", cfg.remote, branch])
     return bool(output)
@@ -121,21 +130,21 @@ def assert_clean_worktree() -> None:
     status = git(["status", "--porcelain"])
     if status:
         raise SystemExit(
-            "Refusing to sync with local changes present. Commit, stash, or use a clean worktree.\n"
+            "Refusing to operate with local changes present. Commit, stash, or use a clean worktree.\n"
             + status
         )
 
 
-def ensure_branch(cfg: Config) -> bool:
-    fetch_branch(cfg, "master")
+def ensure_branch(cfg: Config, *, source_branch: str = "master") -> bool:
+    fetch_branch(cfg, source_branch)
     if remote_branch_exists(cfg, cfg.branch):
         print(f"{cfg.remote} branch exists: {cfg.branch}")
         fetch_branch(cfg, cfg.branch)
         return False
 
-    source = f"refs/remotes/{cfg.remote}/master:refs/heads/{cfg.branch}"
+    source = f"refs/remotes/{cfg.remote}/{source_branch}:refs/heads/{cfg.branch}"
     run(["git", "push", cfg.remote, source], dry_run=cfg.dry_run)
-    print(f"created {cfg.remote}/{cfg.branch} from {cfg.remote}/master")
+    print(f"created {cfg.remote}/{cfg.branch} from {cfg.remote}/{source_branch}")
     return True
 
 
@@ -282,6 +291,23 @@ def gitlab_api_json(
     return glab_api_json(path, method=method, fields=fields)
 
 
+def gitlab_paginated(cfg: Config, path: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    separator = "&" if "?" in path else "?"
+    page = 1
+    while True:
+        batch = gitlab_api_json(cfg, f"{path}{separator}per_page=100&page={page}")
+        if not isinstance(batch, list):
+            raise SystemExit(f"Unexpected paginated GitLab API response for {path}: {batch!r}")
+        if not batch:
+            break
+        items.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    return items
+
+
 def is_draft(mr: dict[str, Any]) -> bool:
     return bool(mr.get("draft") or mr.get("work_in_progress"))
 
@@ -396,11 +422,12 @@ def cmd_full_cycle(args: argparse.Namespace) -> int:
     return 0
 
 
-def branch_has_tree_diff(cfg: Config, target_branch: str) -> bool:
+def branch_has_tree_diff(cfg: Config, target_branch: str, *, source_branch: str | None = None) -> bool:
+    source_branch = source_branch or cfg.branch
     fetch_branch(cfg, target_branch)
-    fetch_branch(cfg, cfg.branch)
+    fetch_branch(cfg, source_branch)
     result = run(
-        ["git", "diff", "--quiet", f"{cfg.remote}/{target_branch}", f"{cfg.remote}/{cfg.branch}"],
+        ["git", "diff", "--quiet", remote_ref(cfg, target_branch), remote_ref(cfg, source_branch)],
         check=False,
     )
     if result.returncode == 0:
@@ -410,9 +437,10 @@ def branch_has_tree_diff(cfg: Config, target_branch: str) -> bool:
     raise SystemExit(f"git diff failed with exit code {result.returncode}")
 
 
-def branch_contains_target(cfg: Config, target_branch: str) -> bool:
+def branch_contains_target(cfg: Config, target_branch: str, *, source_branch: str | None = None) -> bool:
+    source_branch = source_branch or cfg.branch
     result = run(
-        ["git", "merge-base", "--is-ancestor", f"{cfg.remote}/{target_branch}", f"{cfg.remote}/{cfg.branch}"],
+        ["git", "merge-base", "--is-ancestor", remote_ref(cfg, target_branch), remote_ref(cfg, source_branch)],
         check=False,
     )
     return result.returncode == 0
@@ -447,9 +475,10 @@ def status_counts(name_status_lines: list[str]) -> dict[str, int]:
     return counts
 
 
-def promotion_change_summary(cfg: Config, target_branch: str) -> dict[str, Any]:
-    base = f"{cfg.remote}/{target_branch}"
-    head = f"{cfg.remote}/{cfg.branch}"
+def promotion_change_summary(cfg: Config, target_branch: str, *, source_branch: str | None = None) -> dict[str, Any]:
+    source_branch = source_branch or cfg.branch
+    base = remote_ref(cfg, target_branch)
+    head = remote_ref(cfg, source_branch)
     rev_range = f"{base}..{head}"
     symmetric_range = f"{base}...{head}"
 
@@ -479,11 +508,12 @@ def promotion_change_summary(cfg: Config, target_branch: str) -> dict[str, Any]:
     }
 
 
-def find_promotion_mr(cfg: Config, target_branch: str) -> dict[str, Any] | None:
+def find_promotion_mr(cfg: Config, target_branch: str, *, source_branch: str | None = None) -> dict[str, Any] | None:
+    source_branch = source_branch or cfg.branch
     query = urllib.parse.urlencode(
         {
             "state": "opened",
-            "source_branch": cfg.branch,
+            "source_branch": source_branch,
             "target_branch": target_branch,
             "per_page": "1",
         }
@@ -494,16 +524,25 @@ def find_promotion_mr(cfg: Config, target_branch: str) -> dict[str, Any] | None:
     return response[0] if response else None
 
 
-def promotion_description(cfg: Config, target_branch: str, *, is_up_to_date: bool) -> str:
-    summary = promotion_change_summary(cfg, target_branch)
+def promotion_description(
+    cfg: Config,
+    target_branch: str,
+    *,
+    is_up_to_date: bool,
+    source_branch: str | None = None,
+    summary_source_branch: str | None = None,
+    rotation: dict[str, str] | None = None,
+) -> str:
+    source_branch = source_branch or cfg.branch
+    summary = promotion_change_summary(cfg, target_branch, source_branch=summary_source_branch or source_branch)
     counts = summary["counts"]
     commits = limited_lines(summary["commits"], limit=40)
     changed_paths = limited_lines(summary["name_status"], limit=80)
     diffstat = limited_lines(summary["diffstat"], limit=80)
     status = (
-        f"`{cfg.remote}/{cfg.branch}` contains `{cfg.remote}/{target_branch}`."
+        f"`{remote_ref(cfg, source_branch)}` contains `{remote_ref(cfg, target_branch)}`."
         if is_up_to_date
-        else f"WARNING: `{cfg.remote}/{cfg.branch}` does not contain `{cfg.remote}/{target_branch}`. "
+        else f"WARNING: `{remote_ref(cfg, source_branch)}` does not contain `{remote_ref(cfg, target_branch)}`. "
         "Review carefully before merging."
     )
     commit_block = "\n".join(f"- `{line.split(' ', 1)[0]}` {line.split(' ', 1)[1] if ' ' in line else ''}" for line in commits)
@@ -512,17 +551,29 @@ def promotion_description(cfg: Config, target_branch: str, *, is_up_to_date: boo
     changed_paths_block = "\n".join(changed_paths) if changed_paths else "No changed paths."
     diffstat_block = "\n".join(diffstat) if diffstat else "No diffstat."
 
+    rotation_lines = []
+    if rotation:
+        rotation_lines = [
+            "",
+            "Rotation state:",
+            "",
+            f"- Snapshot branch: `{remote_ref(cfg, source_branch)}`",
+            f"- Snapshot was cut from `{remote_ref(cfg, cfg.branch)}` @ `{rotation['staging_sha']}`",
+            f"- `{remote_ref(cfg, cfg.branch)}` was reset to `{remote_ref(cfg, target_branch)}` @ `{rotation['target_sha']}` for future AI MRs",
+        ]
+
     return "\n".join(
         [
-            f"Scheduled promotion MR from `{cfg.branch}` to `{target_branch}` for human review.",
+            f"Promotion MR from `{source_branch}` to `{target_branch}` for human review.",
             "",
             f"This MR does not auto-merge. It promotes the current AI staging tree into `{target_branch}` after the full MR pipeline is green.",
             "",
             "Branch state:",
             "",
-            f"- Source: `{cfg.remote}/{cfg.branch}` @ `{summary['source_sha']}`",
-            f"- Target: `{cfg.remote}/{target_branch}` @ `{summary['target_sha']}`",
+            f"- Source: `{remote_ref(cfg, source_branch)}` @ `{summary['source_sha']}`",
+            f"- Target: `{remote_ref(cfg, target_branch)}` @ `{summary['target_sha']}`",
             f"- Up to date with target: {'yes' if is_up_to_date else 'no'}",
+            *rotation_lines,
             "",
             status,
             "",
@@ -554,12 +605,87 @@ def promotion_description(cfg: Config, target_branch: str, *, is_up_to_date: boo
             "",
             "- Full MR pipeline is green.",
             "- Diff contains only expected AI staging changes.",
-            f"- `{cfg.branch}` is up to date with `{target_branch}` before merge.",
+            f"- `{source_branch}` is up to date with `{target_branch}` before merge.",
             "- Individual AI-generated MRs included in this promotion have task scope, verification, and risk notes in their descriptions.",
             "",
             "Reviewer note: the tree diff and changed paths above are authoritative. Commit subjects are included as a readable summary, but may include staging-history commits when earlier promotions were squashed.",
         ]
     )
+
+
+def timestamped_snapshot_branch(prefix: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"{prefix.rstrip('-')}-{timestamp}"
+
+
+def push_snapshot_branch(cfg: Config, snapshot_branch: str, *, source_branch: str) -> None:
+    source_ref = f"refs/remotes/{cfg.remote}/{source_branch}:refs/heads/{snapshot_branch}"
+    run(["git", "push", cfg.remote, source_ref], dry_run=cfg.dry_run)
+    action = "would create" if cfg.dry_run else "created"
+    print(f"{action} snapshot branch {cfg.remote}/{snapshot_branch} from {cfg.remote}/{source_branch}")
+
+
+def reset_remote_branch_to_target(
+    cfg: Config,
+    *,
+    branch: str,
+    target_branch: str,
+    expected_old_sha: str,
+) -> None:
+    target_ref = f"refs/remotes/{cfg.remote}/{target_branch}:refs/heads/{branch}"
+    lease = f"--force-with-lease=refs/heads/{branch}:{expected_old_sha}"
+    run(["git", "push", lease, cfg.remote, target_ref], dry_run=cfg.dry_run)
+    action = "would reset" if cfg.dry_run else "reset"
+    print(f"{action} {cfg.remote}/{branch} to {cfg.remote}/{target_branch}")
+
+
+def create_or_update_promotion_mr(
+    cfg: Config,
+    *,
+    source_branch: str,
+    target_branch: str,
+    title: str,
+    description: str,
+    labels: str | None = AI_PROMOTION_MR_LABELS,
+) -> dict[str, Any] | None:
+    if cfg.dry_run:
+        print(f"would create or update promotion MR from {source_branch} to {target_branch}: {title}")
+        return None
+
+    existing = find_promotion_mr(cfg, target_branch, source_branch=source_branch)
+    if existing:
+        fields = {
+            "title": title,
+            "description": description,
+            "remove_source_branch": "false",
+            "squash": "false",
+        }
+        if labels:
+            fields["add_labels"] = labels
+        updated = gitlab_api_json(
+            cfg,
+            f"/projects/{cfg.project}/merge_requests/{existing['iid']}",
+            method="PUT",
+            fields=fields,
+        )
+        print(f"Updated promotion MR: !{existing['iid']} {existing['web_url']}")
+        return updated if isinstance(updated, dict) else existing
+
+    fields = {
+        "source_branch": source_branch,
+        "target_branch": target_branch,
+        "title": title,
+        "description": description,
+        "remove_source_branch": "false",
+        "squash": "false",
+    }
+    if labels:
+        fields["labels"] = labels
+    mr = gitlab_api_json(cfg, f"/projects/{cfg.project}/merge_requests", method="POST", fields=fields)
+    if not isinstance(mr, dict):
+        raise SystemExit(f"Unexpected GitLab API response while creating promotion MR: {mr!r}")
+    print(f"Created promotion MR: !{mr['iid']} {mr['web_url']}")
+    return mr
 
 
 def cmd_promote(args: argparse.Namespace) -> int:
@@ -570,39 +696,240 @@ def cmd_promote(args: argparse.Namespace) -> int:
         return 0
 
     is_up_to_date = branch_contains_target(cfg, target_branch)
-    existing = find_promotion_mr(cfg, target_branch)
     description = promotion_description(cfg, target_branch, is_up_to_date=is_up_to_date)
-    if existing:
-        fields = {
-            "title": f"chore: promote {cfg.branch} to {target_branch}",
-            "description": description,
-            "remove_source_branch": "false",
-            "squash": "false",
-        }
-        gitlab_api_json(
-            cfg,
-            f"/projects/{cfg.project}/merge_requests/{existing['iid']}",
-            method="PUT",
-            fields=fields,
-        )
-        print(f"Updated promotion MR: !{existing['iid']} {existing['web_url']}")
+    create_or_update_promotion_mr(
+        cfg,
+        source_branch=cfg.branch,
+        target_branch=target_branch,
+        title=f"chore: promote {cfg.branch} to {target_branch}",
+        description=description,
+    )
+    return 0
+
+
+def cmd_rotate_promotion(args: argparse.Namespace) -> int:
+    cfg = config_from_args(args)
+    target_branch = args.target_branch
+    assert_clean_worktree()
+    ensure_branch(cfg, source_branch=target_branch)
+    has_tree_diff = branch_has_tree_diff(cfg, target_branch)
+
+    staging_ref = remote_ref(cfg, cfg.branch)
+    target_ref = remote_ref(cfg, target_branch)
+    staging_sha = git(["rev-parse", staging_ref])
+    target_sha = git(["rev-parse", target_ref])
+
+    if not has_tree_diff:
+        if staging_sha != target_sha:
+            reset_remote_branch_to_target(
+                cfg,
+                branch=cfg.branch,
+                target_branch=target_branch,
+                expected_old_sha=staging_sha,
+            )
+        else:
+            print(f"{staging_ref} already matches {target_ref}; no promotion MR needed.")
         return 0
 
-    fields = {
-        "source_branch": cfg.branch,
-        "target_branch": target_branch,
-        "title": f"chore: promote {cfg.branch} to {target_branch}",
-        "description": description,
-        "remove_source_branch": "false",
-        "squash": "false",
-    }
-    mr = gitlab_api_json(cfg, f"/projects/{cfg.project}/merge_requests", method="POST", fields=fields)
-    if cfg.dry_run:
-        print(f"would create promotion MR from {cfg.branch} to {target_branch}")
+    snapshot_branch = args.snapshot_branch or timestamped_snapshot_branch(args.snapshot_prefix)
+    if remote_branch_exists(cfg, snapshot_branch):
+        raise SystemExit(f"Snapshot branch already exists: {cfg.remote}/{snapshot_branch}")
+
+    push_snapshot_branch(cfg, snapshot_branch, source_branch=cfg.branch)
+    summary_source_branch = cfg.branch if cfg.dry_run else snapshot_branch
+    if not cfg.dry_run:
+        fetch_branch(cfg, snapshot_branch)
+
+    reset_remote_branch_to_target(
+        cfg,
+        branch=cfg.branch,
+        target_branch=target_branch,
+        expected_old_sha=staging_sha,
+    )
+
+    is_up_to_date = branch_contains_target(cfg, target_branch, source_branch=summary_source_branch)
+    description = promotion_description(
+        cfg,
+        target_branch,
+        source_branch=snapshot_branch,
+        summary_source_branch=summary_source_branch,
+        is_up_to_date=is_up_to_date,
+        rotation={"staging_sha": staging_sha[:12], "target_sha": target_sha[:12]},
+    )
+    create_or_update_promotion_mr(
+        cfg,
+        source_branch=snapshot_branch,
+        target_branch=target_branch,
+        title=f"chore: promote {snapshot_branch} to {target_branch}",
+        description=description,
+    )
+    return 0
+
+
+def normalized_snapshot_prefix(prefix: str) -> str:
+    return f"{prefix.rstrip('-')}-"
+
+
+def list_open_promotion_mrs(cfg: Config, *, target_branch: str, snapshot_prefix: str) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode(
+        {
+            "state": "opened",
+            "target_branch": target_branch,
+            "order_by": "created_at",
+            "sort": "asc",
+        }
+    )
+    mrs = gitlab_paginated(cfg, f"/projects/{cfg.project}/merge_requests?{query}")
+    return [
+        mr
+        for mr in mrs
+        if str(mr.get("source_branch") or "").startswith(normalized_snapshot_prefix(snapshot_prefix))
+    ]
+
+
+def failed_jobs_for_pipeline(cfg: Config, pipeline_id: int) -> list[dict[str, Any]]:
+    jobs = gitlab_paginated(cfg, f"/projects/{cfg.project}/pipelines/{pipeline_id}/jobs")
+    return [job for job in jobs if job.get("status") in FAILED_PIPELINE_STATUSES]
+
+
+def format_failed_jobs(jobs: list[dict[str, Any]], *, limit: int = 10) -> str:
+    if not jobs:
+        return "no failed jobs found"
+    lines = []
+    for job in jobs[:limit]:
+        lines.append(
+            f"{job.get('stage', '-')}/{job.get('name', '-')} "
+            f"status={job.get('status', '-')} "
+            f"url={job.get('web_url', '-')}"
+        )
+    if len(jobs) > limit:
+        lines.append(f"... {len(jobs) - limit} more failed job(s)")
+    return "\n".join(lines)
+
+
+def safe_tmp_prefix(value: str) -> str:
+    return "".join(char if char.isalnum() or char in "._-" else "-" for char in value)
+
+
+def clean_rebase_promotion_branch(cfg: Config, *, source_branch: str, target_branch: str) -> bool:
+    fetch_branch(cfg, target_branch)
+    fetch_branch(cfg, source_branch)
+    old_sha = git(["rev-parse", remote_ref(cfg, source_branch)])
+    worktree_path = tempfile.mkdtemp(prefix=f"{safe_tmp_prefix(source_branch)}-rebase-")
+    keep_worktree = False
+    added = run(
+        ["git", "worktree", "add", "--detach", worktree_path, remote_ref(cfg, source_branch)],
+        check=False,
+    )
+    if added.returncode != 0:
+        shutil.rmtree(worktree_path, ignore_errors=True)
+        details = (added.stderr or added.stdout or "").strip()
+        raise SystemExit(f"Could not create temporary promotion rebase worktree at {worktree_path}.\n{details}")
+
+    try:
+        rebased = run(["git", "rebase", remote_ref(cfg, target_branch)], check=False, cwd=worktree_path)
+        if rebased.returncode != 0:
+            run(["git", "rebase", "--abort"], check=False, cwd=worktree_path)
+            print(f"! promotion rebase conflict: {cfg.remote}/{source_branch} onto {cfg.remote}/{target_branch}")
+            return False
+
+        lease = f"--force-with-lease=refs/heads/{source_branch}:{old_sha}"
+        run(
+            ["git", "push", lease, cfg.remote, f"HEAD:refs/heads/{source_branch}"],
+            dry_run=cfg.dry_run,
+            cwd=worktree_path,
+        )
+        action = "would rebase" if cfg.dry_run else "rebased"
+        print(f"{action} {cfg.remote}/{source_branch} onto {cfg.remote}/{target_branch}")
+        return True
+    except BaseException:
+        keep_worktree = True
+        print(f"Preserving failed promotion rebase worktree for inspection: {worktree_path}", file=sys.stderr)
+        raise
+    finally:
+        if not keep_worktree:
+            run(["git", "worktree", "remove", "--force", worktree_path], check=False)
+            shutil.rmtree(worktree_path, ignore_errors=True)
+
+
+def cmd_babysit_promotion(args: argparse.Namespace) -> int:
+    cfg = config_from_args(args)
+    target_branch = args.target_branch
+    assert_clean_worktree()
+    fetch_branch(cfg, target_branch)
+    promotion_mrs = list_open_promotion_mrs(
+        cfg,
+        target_branch=target_branch,
+        snapshot_prefix=args.snapshot_prefix,
+    )
+    if not promotion_mrs:
+        print(f"No open promotion MRs targeting {target_branch} with prefix {normalized_snapshot_prefix(args.snapshot_prefix)}")
         return 0
-    if not isinstance(mr, dict):
-        raise SystemExit(f"Unexpected GitLab API response while creating promotion MR: {mr!r}")
-    print(f"Created promotion MR: !{mr['iid']} {mr['web_url']}")
+
+    actions = 0
+    for mr in promotion_mrs:
+        source_branch = str(mr.get("source_branch") or "")
+        iid = int(mr["iid"])
+        pipeline = mr.get("head_pipeline") or {}
+        pipeline_status = str(pipeline.get("status") or "none")
+        pipeline_id = pipeline.get("id")
+
+        if not remote_branch_exists(cfg, source_branch):
+            print(f"!{iid}: source branch missing: {cfg.remote}/{source_branch}")
+            continue
+
+        fetch_branch(cfg, source_branch)
+        up_to_date = branch_contains_target(cfg, target_branch, source_branch=source_branch)
+        print(
+            f"!{iid}: source={source_branch} pipeline={pipeline_status} "
+            f"up_to_date_with_{target_branch}={'yes' if up_to_date else 'no'} {mr.get('web_url', '')}"
+        )
+
+        if not up_to_date and pipeline_status not in ACTIVE_PIPELINE_STATUSES:
+            if actions >= args.max_rebases:
+                print(f"!{iid}: skipped rebase; max rebases reached for this cycle")
+                continue
+            rebased = clean_rebase_promotion_branch(
+                cfg,
+                source_branch=source_branch,
+                target_branch=target_branch,
+            )
+            actions += 1
+            if rebased:
+                fetch_branch(cfg, source_branch)
+                description = promotion_description(
+                    cfg,
+                    target_branch,
+                    source_branch=source_branch,
+                    is_up_to_date=True,
+                )
+                create_or_update_promotion_mr(
+                    cfg,
+                    source_branch=source_branch,
+                    target_branch=target_branch,
+                    title=f"chore: promote {source_branch} to {target_branch}",
+                    description=description,
+                )
+            else:
+                print(f"!{iid}: needs human rebase/conflict review")
+            continue
+
+        if pipeline_status in ACTIVE_PIPELINE_STATUSES:
+            print(f"!{iid}: waiting for full MR pipeline")
+        elif pipeline_status == "success":
+            print(f"!{iid}: ready for human review")
+        elif pipeline_status in FAILED_PIPELINE_STATUSES:
+            if pipeline_id is None:
+                print(f"!{iid}: promotion pipeline {pipeline_status}; no pipeline id available")
+            else:
+                jobs = failed_jobs_for_pipeline(cfg, int(pipeline_id))
+                print(
+                    f"!{iid}: promotion pipeline {pipeline_status}; "
+                    f"repair {source_branch} and push a new full pipeline. Failed jobs:\n{format_failed_jobs(jobs)}"
+                )
+        else:
+            print(f"!{iid}: promotion pipeline status is {pipeline_status}; no action")
+
     return 0
 
 
@@ -613,7 +940,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--source-prefix",
         action="append",
-        help="AI source branch prefix to include. May be repeated. Default: agent-2-",
+        help="AI source branch prefix to include. May be repeated. Default: ai-task-",
     )
     parser.add_argument("--dry-run", action="store_true", help="print writes without performing them")
 
@@ -657,6 +984,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     promote.add_argument("--target-branch", default=os.environ.get("AI_STAGING_PROMOTION_TARGET", "master"))
     promote.set_defaults(func=cmd_promote)
+
+    rotate = subparsers.add_parser(
+        "rotate-promotion",
+        help="snapshot ai-staging to a timestamped branch, reset ai-staging to master, and file a promotion MR",
+    )
+    rotate.add_argument(
+        "--require-api-token",
+        action="store_true",
+        help="require AI_STAGING_BOT_TOKEN and never fall back to local glab authentication",
+    )
+    rotate.add_argument("--target-branch", default=os.environ.get("AI_STAGING_PROMOTION_TARGET", "master"))
+    rotate.add_argument("--snapshot-prefix", default=DEFAULT_PROMOTION_PREFIX)
+    rotate.add_argument("--snapshot-branch", help="explicit snapshot branch name; default is <prefix>-YYYYmmdd-HHMMSS UTC")
+    rotate.set_defaults(func=cmd_rotate_promotion)
+
+    babysit = subparsers.add_parser(
+        "babysit-promotion",
+        help="watch open promotion MRs, clean-rebase outdated snapshot branches, and report full-CI status",
+    )
+    babysit.add_argument(
+        "--require-api-token",
+        action="store_true",
+        help="require AI_STAGING_BOT_TOKEN and never fall back to local glab authentication",
+    )
+    babysit.add_argument("--target-branch", default=os.environ.get("AI_STAGING_PROMOTION_TARGET", "master"))
+    babysit.add_argument("--snapshot-prefix", default=DEFAULT_PROMOTION_PREFIX)
+    babysit.add_argument(
+        "--max-rebases",
+        type=int,
+        default=1,
+        help="maximum clean promotion-branch rebases to push in one cycle",
+    )
+    babysit.set_defaults(func=cmd_babysit_promotion)
 
     return parser
 

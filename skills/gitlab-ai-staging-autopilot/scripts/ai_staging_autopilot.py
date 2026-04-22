@@ -215,47 +215,83 @@ def unmerged_paths() -> list[str]:
     return [path for path in result.stdout.split("\0") if path]
 
 
-def resolve_conflicts_target_wins() -> int:
-    paths = unmerged_paths()
-    if not paths:
-        return 0
-
-    resolved = 0
-    for path in paths:
-        checkout = run(["git", "checkout", "--ours", "--", path], check=False)
-        if checkout.returncode == 0:
-            run(["git", "add", "--", path], check=False)
-        else:
-            run(["git", "rm", "-f", "--ignore-unmatch", "--", path], check=False)
-        resolved += 1
-    return resolved
+def abort_rebase() -> None:
+    if not rebase_in_progress():
+        return
+    abort = run(["git", "rebase", "--abort"], check=False)
+    if abort.returncode != 0:
+        raise SystemExit("Could not abort conflicted rebase:\n" + ((abort.stdout or "") + (abort.stderr or "")))
 
 
-def continue_rebase_target_wins(max_rounds: int = 50) -> bool:
-    had_conflict = False
-    for _ in range(max_rounds):
-        if not rebase_in_progress():
-            return had_conflict
+def csv_labels(labels: set[str]) -> str:
+    return ",".join(sorted(labels))
 
-        resolved = resolve_conflicts_target_wins()
-        if resolved:
-            had_conflict = True
 
-        cont = run(["git", "rebase", "--continue"], check=False, env={"GIT_EDITOR": "true"})
-        if cont.returncode == 0:
-            continue
+def update_resource_labels(
+    cfg: Config,
+    resource: str,
+    iid: int,
+    *,
+    current_labels: list[str],
+    add: set[str],
+    remove: set[str],
+    extra_fields: dict[str, str] | None = None,
+) -> None:
+    labels = set(current_labels)
+    labels.difference_update(remove)
+    labels.update(add)
+    fields = {"labels": csv_labels(labels), **(extra_fields or {})}
+    api(cfg, f"/projects/{cfg.project}/{resource}/{iid}", method="PUT", fields=fields)
 
-        combined = (cont.stdout or "") + (cont.stderr or "")
-        if "No changes" in combined or "previous cherry-pick is now empty" in combined:
-            skip = run(["git", "rebase", "--skip"], check=False)
-            if skip.returncode == 0:
-                continue
 
-        if unmerged_paths():
-            continue
-        raise SystemExit("Could not continue rebase:\n" + combined)
+def create_note(cfg: Config, resource: str, iid: int, body: str) -> None:
+    api(cfg, f"/projects/{cfg.project}/{resource}/{iid}/notes", method="POST", fields={"body": body})
 
-    raise SystemExit("Rebase conflict resolution exceeded iteration limit")
+
+def closing_issues(cfg: Config, iid: int) -> list[dict[str, Any]]:
+    try:
+        issues = api(cfg, f"/projects/{cfg.project}/merge_requests/{iid}/closes_issues")
+    except subprocess.CalledProcessError as exc:
+        log(f"!{iid}: warning: could not inspect closing issues: {exc}")
+        return []
+    return issues if isinstance(issues, list) else []
+
+
+def mark_rework(cfg: Config, iid: int, reason: str) -> None:
+    mr = mr_details(cfg, iid)
+    update_resource_labels(
+        cfg,
+        "merge_requests",
+        iid,
+        current_labels=list(mr.get("labels") or []),
+        add={"ai:needs-rework"},
+        remove={"ai:sanity-pending", "ai:sanity-failed", "ai:sanity-green", "ai:autopilot"},
+    )
+    create_note(cfg, "merge_requests", iid, f"Marked `ai:needs-rework`.\n\nReason: {reason}")
+
+    linked = closing_issues(cfg, iid)
+    if not linked:
+        log(f"!{iid}: warning: no linked closing issue found for rework")
+        return
+
+    for issue in linked:
+        issue_iid = int(issue["iid"])
+        extra = {"state_event": "reopen"} if issue.get("state") != "opened" else None
+        update_resource_labels(
+            cfg,
+            "issues",
+            issue_iid,
+            current_labels=list(issue.get("labels") or []),
+            add={"ai:task", "ai:needs-rework"},
+            remove={"ai:ready", "ai:claimed", "ai:implementing", "ai:dropped", "ai:needs-human"},
+            extra_fields=extra,
+        )
+        create_note(
+            cfg,
+            "issues",
+            issue_iid,
+            f"Marked `ai:needs-rework` from MR !{iid}.\n\nReason: {reason}",
+        )
 
 
 def branch_is_empty_against_target(cfg: Config) -> bool:
@@ -318,9 +354,15 @@ def process_mr(cfg: Config, mr: dict[str, Any]) -> str:
     git(["switch", "-C", work_branch, f"{cfg.remote}/{source}"])
 
     rebase = run(["git", "rebase", "--empty=drop", f"{cfg.remote}/{cfg.target}"], check=False)
-    had_conflict = False
     if rebase.returncode != 0:
-        had_conflict = continue_rebase_target_wins()
+        combined = (rebase.stdout or "") + (rebase.stderr or "")
+        if rebase_in_progress() or unmerged_paths():
+            abort_rebase()
+            reason = f"Autopilot hit a rebase conflict against {cfg.target}."
+            mark_rework(cfg, iid, reason)
+            log(f"!{iid}: marked ai:needs-rework because rebase conflicted")
+            return "marked-rework"
+        raise SystemExit(f"!{iid}: rebase failed without a conflict to hand back:\n{combined}")
 
     if branch_is_empty_against_target(cfg):
         if cfg.close_empty:
@@ -328,14 +370,6 @@ def process_mr(cfg: Config, mr: dict[str, Any]) -> str:
             return "closed-empty"
         log(f"!{iid}: empty after rebase; leaving open for review")
         return "empty"
-
-    if had_conflict:
-        sha = push_source(cfg, source, skip_ci=False, expected_sha=source_remote_sha)
-        if cfg.dry_run:
-            log(f"!{iid}: DRY RUN would push target-wins conflict resolution at {sha} without ci.skip")
-            return "dry-run-conflict-resolution"
-        log(f"!{iid}: pushed target-wins conflict resolution at {sha}; waiting for new CI")
-        return "pushed-conflict-resolution"
 
     sha = push_source(cfg, source, skip_ci=True, expected_sha=source_remote_sha)
     if cfg.dry_run:
@@ -378,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
         project=encoded_project(project),
         remote=args.remote,
         target=args.target,
-        source_prefixes=tuple(args.source_prefix or ["agent-2-"]),
+        source_prefixes=tuple(args.source_prefix or ["ai-task-"]),
         required_labels=tuple(args.required_label or ["ai:staging-mr"]),
         dry_run=args.dry_run,
         max_actions=1 if args.once else args.max_actions,

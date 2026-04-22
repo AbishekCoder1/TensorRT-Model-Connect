@@ -1,1 +1,0 @@
-Use ai-staging-operator. Run one full bounded cycle for yifeif/trt-transformers with target ai-staging and promotion target master. Do not use --dangerously-skip-permissions. Stop after the cycle and report concise status.

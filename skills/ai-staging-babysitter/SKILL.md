@@ -1,65 +1,46 @@
 ---
 name: ai-staging-babysitter
-description: Use when maintaining the aggregate ai-staging branch after AI MRs have merged. Keeps ai-staging synced with master, monitors full CI or promotion MR CI, reverts/drops bad low-value AI changes, and ensures a human-review promotion MR exists.
+description: Use when rotating the aggregate ai-staging branch for human review. Snapshots ai-staging to a timestamped promotion branch, resets ai-staging to master for future AI MRs, and opens a human-review promotion MR from the snapshot branch to master.
 ---
 
 # AI Staging Babysitter
 
 ## Purpose
 
-Keep `ai-staging` healthy and ready for human review as an aggregate branch.
+Rotate `ai-staging` into a human-review promotion branch.
 
-This agent owns branch health after individual AI MRs have merged. It does not implement new tasks and does not repair individual source MRs unless reverting or dropping a staged AI change.
+This agent owns only the aggregate staging rotation. It does not implement tasks, repair source MRs, or merge promotion MRs.
 
 ## Policy
 
-`master` is ground truth. AI-generated changes are disposable.
+`master` is ground truth. `ai-staging` is a temporary accumulation branch for generated MRs.
 
-If `ai-staging` conflicts with `master`, prefer `master`. If full CI fails because of a low-value AI cleanup and the fix is not obvious, revert that AI change from `ai-staging` rather than asking a human to debug it.
+On each rotation, snapshot the current `ai-staging` tree into a timestamped branch, then reset `ai-staging` to `master` with `--force-with-lease`. The snapshot branch is what humans review.
 
 ## Workflow
 
-1. Check system state:
+1. Rotate `ai-staging`:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging dashboard
+python3 tools/ai_staging.py \
+  --project yifeif/trt-transformers \
+  --branch ai-staging \
+  rotate-promotion \
+  --target-branch master
 ```
 
-2. Sync `master` into `ai-staging` using existing staging tooling:
+This command must:
 
-```bash
-python3 tools/ai_staging.py sync-branch --push
-```
+- create `origin/ai-staging-promotion-<UTC timestamp>` from current `origin/ai-staging` when there is a tree diff from `origin/master`
+- reset `origin/ai-staging` to current `origin/master` with `--force-with-lease`
+- create a human-review MR from the snapshot branch to `master`
+- do nothing except exact reset when `ai-staging` has no tree diff from `master`
 
-3. Ensure the scheduled promotion MR exists or create/update it:
-
-```bash
-python3 tools/ai_staging.py promote --target-branch master
-```
-
-The promotion MR description must be generated from the current tree diff, not
-hand-written from memory. It must state source and target SHAs, whether
-`ai-staging` contains `master`, staged commit subjects, net file changes,
-changed paths, diffstat, and a review checklist.
-
-4. Monitor full CI on either:
-
-```text
-ai-staging branch pipeline
-or ai-staging -> master promotion MR pipeline
-```
-
-5. If full CI fails:
-   - identify the first bad AI commit or MR
-   - revert it on `ai-staging`
-   - push `ai-staging`
-   - rerun full CI
-
-6. Leave the promotion MR for human review only when full CI is green and the diff is understandable.
+2. Report only the snapshot branch, reset result, promotion MR URL/status, and blockers.
 
 ## Boundaries
 
 - Never push to `master`.
 - Never merge the promotion MR unless explicitly instructed.
-- Never require a human to resolve individual AI cleanup conflicts.
-- Prefer dropping AI changes over weakening CI or changing production behavior.
+- Never hand-edit `ai-staging`; use the rotation tool.
+- Never use plain force push; reset `ai-staging` only with `--force-with-lease`.

@@ -6,13 +6,13 @@ AI-generated work should target this branch first, not `origin/master`.
 The branch has three invariants:
 
 - `origin/ai-staging` exists at all times.
-- `origin/master` is always merged into `origin/ai-staging`.
-- AI-generated source branches, currently `agent-2-*`, open MRs against `ai-staging`.
+- `origin/ai-staging` is reset to current `origin/master` at each staging rotation.
+- AI-generated source branches, currently `ai-task-*`, open MRs against `ai-staging`.
 
-Human promotion to `master` stays explicit: after the AI queue is clean, create a
-normal MR from `ai-staging` to `master` and let the full pipeline run there.
-This promotion MR may be filed by a schedule, but it is still reviewed and
-merged by a human.
+Human promotion to `master` stays explicit. The staging rotation snapshots the
+current `ai-staging` tree to a timestamped `ai-staging-promotion-*` branch,
+resets `ai-staging` to `master` for the next batch, and opens a normal MR from
+the snapshot branch to `master`.
 
 ## CI Policy
 
@@ -40,19 +40,16 @@ branches created from old `master` may need to be rebased or merged onto
 
 GitLab evaluates merge-request pipeline configuration from the source branch
 SHA. The AI staging CI rules therefore must also exist on `master`, and existing
-`agent-2-*` branches must be rebased or otherwise updated after the CI change
+`ai-task-*` branches must be rebased or otherwise updated after the CI change
 lands. Retargeting an old branch to `ai-staging` is not enough by itself.
 
 ## Operating Cycle
 
-For the autonomous operator, start Claude Code normally and use:
-
-```text
-/loop 20m /ai-staging-operator
-```
-
-Each loop tick runs one bounded cycle and exits. The loop wrapper provides
-persistence.
+Use the multi-worker local pipeline playbook in
+`docs/ai-local-pipeline.md`. That mode opens five persistent Claude Code
+windows in tmux and starts `/loop` with `/discovery`, `/implement`, `/merge`,
+`/staging`, and `/promotion`. GitLab issues, MRs, labels, pipelines, and
+branches remain the durable source of truth.
 
 Preflight the GitLab setup with:
 
@@ -60,7 +57,7 @@ Preflight the GitLab setup with:
 python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging preflight
 ```
 
-Manual branch maintenance still uses the lower-level command below.
+Manual branch setup still uses the lower-level command below.
 
 Run this from a clean checkout:
 
@@ -68,14 +65,14 @@ Run this from a clean checkout:
 python3 tools/ai_staging.py full-cycle --push --retarget
 ```
 
-That command:
+That legacy setup command:
 
 1. Creates `origin/ai-staging` from `origin/master` if it is missing.
 2. Fetches `origin/master` and `origin/ai-staging`.
 3. Creates a detached temporary worktree from `origin/ai-staging`.
 4. Merges `origin/master` into that temporary worktree.
 5. Pushes the updated branch when `--push` is present.
-6. Retargets open `agent-2-*` MRs from `master` to `ai-staging` when
+6. Retargets open `ai-task-*` MRs from `master` to `ai-staging` when
    `--retarget` is present.
 
 For a read-only preview:
@@ -96,62 +93,54 @@ To retarget only after reviewing the list:
 python3 tools/ai_staging.py retarget
 ```
 
-## Scheduled Promotion MR
+## Promotion Rotation
 
-The repository includes a lightweight scheduled CI path for filing a promotion
-MR from `ai-staging` to `master`. It does not merge automatically.
+The local staging loop files promotion MRs. It does not merge automatically.
 
-Configure a GitLab pipeline schedule on the `master` branch with these
-variables:
-
-- `AI_STAGING_PROMOTE=1`
-- `AI_STAGING_BOT_TOKEN=<masked project access token with API scope>`
-
-`AI_STAGING_PROMOTE` may be a schedule variable. `AI_STAGING_BOT_TOKEN` should
-be a masked protected project CI/CD variable so the scheduled job can use it
-without exposing the token value.
-
-Use a cadence such as `0 */4 * * *` for every four hours or `0 */2 * * *` for
-every two hours.
-
-The scheduled pipeline runs only `ai-staging-promotion-mr`; normal nightly
-build, coverage, graph, and E2E jobs are skipped for this maintenance schedule.
-The scheduled job uses the GitLab REST API directly with `AI_STAGING_BOT_TOKEN`;
-it does not require `glab` on the runner.
-
-The job is idempotent:
-
-- If `origin/ai-staging` and `origin/master` have identical trees, it exits
-  without filing an MR.
-- If an open `ai-staging -> master` MR already exists, it updates the MR title
-  and description from the current tree diff.
-- Otherwise it creates `chore: promote ai-staging to master` for human review.
-
-The promotion MR description includes the source and target SHAs, up-to-date
-state, staged commit subjects, net file changes, changed paths, diffstat, and a
-review checklist. Individual AI-generated MRs should also include task scope,
-verification, risk, rollback, and non-goals so the aggregate promotion is
-reviewable.
-
-Equivalent local command:
+Run:
 
 ```bash
-python3 tools/ai_staging.py promote
+python3 tools/ai_staging.py --project yifeif/trt-transformers --branch ai-staging rotate-promotion --target-branch master
 ```
 
-Use `--source-prefix` more than once if another AI branch prefix is introduced:
+The command is idempotent:
+
+- If `origin/ai-staging` has no tree diff from `origin/master`, it does not file
+  a promotion MR.
+- If there is a tree diff, it creates `origin/ai-staging-promotion-<UTC timestamp>`
+  from current `origin/ai-staging`.
+- It resets `origin/ai-staging` to current `origin/master` with
+  `--force-with-lease`.
+- It opens a human-review MR from the timestamped snapshot branch to `master`.
+
+The promotion MR description is generated from the actual
+`origin/master..origin/<snapshot>` tree diff and includes source and target
+SHAs, staged commit subjects, net file changes, changed paths, diffstat, and a
+review checklist.
+
+## Promotion Babysitting
+
+Promotion MRs run the normal full CI. The promotion babysitter may modify only
+the timestamped promotion source branch to make that full CI green.
+
+Run:
 
 ```bash
-python3 tools/ai_staging.py --source-prefix agent-2- --source-prefix agent-3- list
+python3 tools/ai_staging.py --project yifeif/trt-transformers --branch ai-staging babysit-promotion --target-branch master --max-rebases 1
 ```
+
+The command lists open promotion MRs, clean-rebases outdated promotion source
+branches onto `origin/master`, refreshes the generated MR description after a
+clean rebase, and prints failed full-CI jobs. The `/promotion` Claude command
+uses that status to repair exactly one failed promotion source branch per cycle
+and push a new full pipeline.
 
 ## Conflict Handling
 
-If syncing `ai-staging` with `master` conflicts, stop the cycle and resolve the
-branch manually. Do not retarget additional MRs until `origin/master` is again
-merged into `origin/ai-staging` and the minimal pipeline is green.
+If a generated MR conflicts with current `ai-staging`, the merge lane marks it
+`ai:needs-rework` and leaves repair to the implementation lane.
 
-If the final `ai-staging -> master` promotion MR fails full CI, fix forward on a
-normal branch targeting `ai-staging`, then rerun the promotion MR. Avoid direct
-fixes on `master`; this preserves the integration branch as the single staging
-surface for AI-generated cleanup work.
+If a promotion source branch conflicts with current `master`, the promotion
+babysitter resolves only obvious mechanical conflicts. Non-trivial conflicts are
+reported for human review. Promotion fixes are pushed to the timestamped
+promotion source branch, never to `master`.
