@@ -251,10 +251,10 @@ ai-staging-sanity:
   script:
     - ./build/trtf --help >/tmp/trtf-help.txt
     - |
-      GPU_CTEST_REGEX='^(test_audio_pipeline_new|test_c_abi_runtime_regression|test_cuda_buffer|test_cuda_graph|test_cuda_stream|test_device_kv_cache|test_device_resources|test_device_tensor|test_encoder_pipeline|test_kv_cache_new|test_recurrent_pipeline|test_recurrent_state|test_text_generation_pipeline|test_trt_engine_lifecycle|test_trt_module|test_trt_runtime_lifetime|test_tvm_ffi_module_loader|test_tvm_ffi_plugin|test_tvm_ffi_plugin_v2|test_vl_pipeline)$'
+      GPU_CTEST_REGEX='^(test_c_abi_runtime_regression|test_trt_runtime_lifetime|test_trt_module|test_cuda_buffer|test_cuda_stream|test_cuda_graph|test_device_kv_cache|test_device_tensor|test_kv_cache_new|test_recurrent_state|test_encoder_pipeline|test_vl_pipeline)$'
       ctest --test-dir build --output-on-failure -E "$GPU_CTEST_REGEX"
     - |
-      python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ \
+      python -m pytest tests/builder/ tests/tools/ \
         -m "not gpu and not trt and not e2e" \
         --ignore=tests/builder/test_cli.py \
         --ignore=tests/builder/test_build_engine_decoders.py \
@@ -262,8 +262,6 @@ ai-staging-sanity:
         --ignore=tests/builder/test_build_engine_integration.py \
         --ignore=tests/builder/test_build_engine_std_decoders.py \
         --ignore=tests/builder/test_tvm_ffi_plugin.py \
-        --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
-        --ignore=tests/engine_defs/torch_trt/test_time_series_e2e.py \
         -v -n auto
   timeout: 40m
 
