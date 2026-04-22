@@ -111,6 +111,7 @@ impact-analysis:
 
 ai-staging-promotion-mr:
   stage: analyze
+  tags: [cpu]
   before_script: []
   variables:
     GIT_DEPTH: "0"
