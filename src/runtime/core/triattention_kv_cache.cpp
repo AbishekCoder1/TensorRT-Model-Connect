@@ -264,38 +264,54 @@ void fill_debug_from_registry(TriAttentionConfig& cfg, const ::trtf::config::Con
     apply_layer_value<bool>(bundle, "dump_score_values", cfg.dump_score_values);
 }
 
+static void fill_core_from_legacy_json(TriAttentionConfig& cfg, const std::string& config_json,
+                                       int32_t max_cache_length) {
+    if (config_json.find("\"triattention\"") == std::string::npos)
+        return;
+    const json root = json::parse(config_json);
+    const auto it = root.find("triattention");
+    if (it == root.end() || !it->is_object())
+        return;
+    cfg.enabled = it->value("enabled", false);
+    cfg.kv_budget = it->value("kv_budget", max_cache_length);
+    cfg.divide_length = it->value("divide_length", 128);
+    cfg.recent_window = it->value("recent_window", 128);
+    cfg.score_aggregation =
+        parse_score_aggregation(it->value("score_aggregation", std::string("mean")));
+    cfg.per_layer_aggregation =
+        parse_score_aggregation(it->value("per_layer_aggregation", std::string("mean")));
+    cfg.count_prompt_tokens = it->value("count_prompt_tokens", true);
+    cfg.protect_prefill = it->value("protect_prefill", true);
+    cfg.disable_mlr = it->value("disable_mlr", false);
+    cfg.disable_trig = it->value("disable_trig", false);
+    cfg.stats_section = it->value("stats_section", std::string("triattention_stats.json"));
+    cfg.offset_max_length = it->value("offset_max_length", 65536);
+}
+
+static void validate_triattention_config(const TriAttentionConfig& cfg, int32_t max_cache_length) {
+    if (cfg.kv_budget < 1)
+        throw std::runtime_error("TriAttention kv_budget must be >= 1");
+    if (cfg.kv_budget > max_cache_length)
+        throw std::runtime_error("TriAttention kv_budget cannot exceed engine max_cache_length");
+    if (cfg.divide_length < 1)
+        throw std::runtime_error("TriAttention divide_length must be >= 1");
+    if (cfg.recent_window < 0)
+        throw std::runtime_error("TriAttention recent_window must be >= 0");
+    if (cfg.offset_max_length < 1)
+        throw std::runtime_error("TriAttention offset_max_length must be >= 1");
+}
+
 } // namespace
 
 TriAttentionConfig
 parse_triattention_bundle_config(const std::string& config_json, int32_t max_cache_length,
                                  const ::trtf::config::ConfigBundle* runtime_config) {
     TriAttentionConfig cfg;
-
     // Legacy bundle path: pull core fields from the root-level
     // "triattention" object. New bundles route the same values through
     // the generic `defaults:` block which becomes the BundleDefault layer
     // in runtime_config.
-    if (config_json.find("\"triattention\"") != std::string::npos) {
-        json root = json::parse(config_json);
-        auto it = root.find("triattention");
-        if (it != root.end() && it->is_object()) {
-            cfg.enabled = it->value("enabled", false);
-            cfg.kv_budget = it->value("kv_budget", max_cache_length);
-            cfg.divide_length = it->value("divide_length", 128);
-            cfg.recent_window = it->value("recent_window", 128);
-            cfg.score_aggregation =
-                parse_score_aggregation(it->value("score_aggregation", std::string("mean")));
-            cfg.per_layer_aggregation =
-                parse_score_aggregation(it->value("per_layer_aggregation", std::string("mean")));
-            cfg.count_prompt_tokens = it->value("count_prompt_tokens", true);
-            cfg.protect_prefill = it->value("protect_prefill", true);
-            cfg.disable_mlr = it->value("disable_mlr", false);
-            cfg.disable_trig = it->value("disable_trig", false);
-            cfg.stats_section = it->value("stats_section", std::string("triattention_stats.json"));
-            cfg.offset_max_length = it->value("offset_max_length", 65536);
-        }
-    }
-
+    fill_core_from_legacy_json(cfg, config_json, max_cache_length);
     // Overlay registry-supplied values. Session/platform/bundle-default
     // layers win; SchemaDefault reads are skipped. Debug fields come
     // exclusively from the registry (no legacy JSON path).
@@ -303,20 +319,9 @@ parse_triattention_bundle_config(const std::string& config_json, int32_t max_cac
         overlay_core_runtime_from_registry(cfg, *runtime_config);
         fill_debug_from_registry(cfg, *runtime_config);
     }
-
     if (!cfg.enabled)
         return cfg;
-    if (cfg.kv_budget < 1)
-        throw std::runtime_error("TriAttention kv_budget must be >= 1");
-    if (cfg.kv_budget > max_cache_length) {
-        throw std::runtime_error("TriAttention kv_budget cannot exceed engine max_cache_length");
-    }
-    if (cfg.divide_length < 1)
-        throw std::runtime_error("TriAttention divide_length must be >= 1");
-    if (cfg.recent_window < 0)
-        throw std::runtime_error("TriAttention recent_window must be >= 0");
-    if (cfg.offset_max_length < 1)
-        throw std::runtime_error("TriAttention offset_max_length must be >= 1");
+    validate_triattention_config(cfg, max_cache_length);
     return cfg;
 }
 
@@ -779,22 +784,28 @@ void TriAttentionKvCache::initialize_gpu_state() {
     cudaStreamSynchronize(stream_);
 }
 
+bool TriAttentionKvCache::core_selection_buffers_ready() const {
+    return candidate_indices_device_.ok() && keep_indices_device_.ok() &&
+           positions_device_.ok() && inv_freq_device_.ok() && cos_phase_device_.ok() &&
+           sin_phase_device_.ok() && scratch_k_device_.ok() && scratch_v_device_.ok();
+}
+
+bool TriAttentionKvCache::layer_gpu_stats_ready(const LayerGpuStats& layer) {
+    if (layer.score_head_count == 0)
+        return true;
+    return layer.head_offsets.ok() && layer.head_cache_indices.ok() &&
+           layer.q_mean_real.ok() && layer.q_mean_imag.ok() && layer.q_abs_mean.ok() &&
+           layer.freq_scale_sq.ok() && layer.scores.ok();
+}
+
 bool TriAttentionKvCache::can_use_gpu_selection() const {
     if (config_.disable_gpu_selection)
         return false;
-    if (!candidate_indices_device_.ok() || !keep_indices_device_.ok() || !positions_device_.ok() ||
-        !inv_freq_device_.ok() || !cos_phase_device_.ok() || !sin_phase_device_.ok()) {
-        return false;
-    }
-    if (!scratch_k_device_.ok() || !scratch_v_device_.ok())
+    if (!core_selection_buffers_ready())
         return false;
     for (const auto& layer : layer_gpu_stats_) {
-        if (layer.score_head_count > 0 &&
-            (!layer.head_offsets.ok() || !layer.head_cache_indices.ok() ||
-             !layer.q_mean_real.ok() || !layer.q_mean_imag.ok() || !layer.q_abs_mean.ok() ||
-             !layer.freq_scale_sq.ok() || !layer.scores.ok())) {
+        if (!layer_gpu_stats_ready(layer))
             return false;
-        }
     }
     return true;
 }

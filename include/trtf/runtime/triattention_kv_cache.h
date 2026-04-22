@@ -181,6 +181,8 @@ class TriAttentionKvCache : public IInferenceState {
 
     void initialize_gpu_state();
     bool can_use_gpu_selection() const;
+    bool core_selection_buffers_ready() const;
+    static bool layer_gpu_stats_ready(const LayerGpuStats& layer);
     std::vector<int32_t> select_keep_indices_gpu(int32_t keep_budget,
                                                  const std::vector<int32_t>& reserved,
                                                  const std::vector<int32_t>& candidates,
