@@ -112,7 +112,7 @@ def _make_metric(ccn: int, nloc: int = 10, function: str = "fn") -> ccm.Function
         token=0,
         param=0,
         length=nloc,
-        location=f"src/x.cpp:1",
+        location="src/x.cpp:1",
         file="src/x.cpp",
         function=function,
         signature=f"{function}()",
