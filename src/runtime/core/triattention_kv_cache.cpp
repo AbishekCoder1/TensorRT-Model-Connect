@@ -681,11 +681,7 @@ TriAttentionKvCache::TriAttentionKvCache(int32_t num_layers, int32_t num_kv_head
 }
 
 #ifdef TRTF_HAS_CUDA_KERNELS
-void TriAttentionKvCache::initialize_gpu_state() {
-    const int32_t half_dim = stats_.head_dim / 2;
-    if (half_dim <= 0 || offsets_.empty() || stats_.layer_stats.empty() || query_head_count_ <= 0)
-        return;
-
+void TriAttentionKvCache::allocate_core_selection_buffers(int32_t half_dim) {
     candidate_indices_device_ = DeviceTensor({max_length_}, DType::kInt32, stream_);
     keep_indices_device_ = DeviceTensor({static_cast<int64_t>(cache_head_count_) * max_length_},
                                         DType::kInt32, stream_);
@@ -703,99 +699,102 @@ void TriAttentionKvCache::initialize_gpu_state() {
     scratch_v_device_ = DeviceTensor({max_length_, kv_dim_}, cache_dtype_, stream_);
     if (inv_freq_device_.ok())
         inv_freq_device_.copy_from_host(stats_.inv_freq.data());
+}
 
+void TriAttentionKvCache::build_layer_gpu_stats(int32_t layer, int32_t half_dim) {
+    const auto& host = stats_.layer_stats[static_cast<std::size_t>(layer)];
+    const auto& sampled_heads =
+        stats_.sampled_score_heads_by_layer[static_cast<std::size_t>(layer)];
+    auto& gpu = layer_gpu_stats_[static_cast<std::size_t>(layer)];
+    gpu.score_head_count = static_cast<int32_t>(sampled_heads.size());
+    gpu.host_cache_head_indices.clear();
+    if (host.q_mean_real.empty() || host.q_mean_imag.empty() || host.q_abs_mean.empty())
+        return;
+    if (gpu.score_head_count <= 0)
+        return;
+    const auto expected_stats_size =
+        static_cast<std::size_t>(stats_.stats_head_count) * static_cast<std::size_t>(half_dim);
+    if (host.q_mean_real.size() != expected_stats_size ||
+        host.q_mean_imag.size() != expected_stats_size ||
+        host.q_abs_mean.size() != expected_stats_size ||
+        host.freq_scale_sq.size() != expected_stats_size)
+        return;
+
+    const auto n_heads = static_cast<std::size_t>(gpu.score_head_count);
+    const auto flat = n_heads * static_cast<std::size_t>(half_dim);
+    std::vector<int32_t> head_offsets(n_heads);
+    std::vector<int32_t> head_cache_indices(n_heads);
+    std::vector<float> q_mean_real(flat), q_mean_imag(flat), q_abs_mean(flat), freq_scale_sq(flat);
+    gpu.host_cache_head_indices.resize(n_heads);
+
+    for (int32_t sampled_idx = 0; sampled_idx < gpu.score_head_count; ++sampled_idx) {
+        const int32_t score_head = sampled_heads[static_cast<std::size_t>(sampled_idx)];
+        const int32_t cache_head = std::min(cache_head_count_ - 1, score_head / score_group_size_);
+        head_cache_indices[static_cast<std::size_t>(sampled_idx)] = cache_head;
+        gpu.host_cache_head_indices[static_cast<std::size_t>(sampled_idx)] = cache_head;
+        head_offsets[static_cast<std::size_t>(sampled_idx)] =
+            cache_head * query_group_size_ * stats_.head_dim;
+        const auto src_base =
+            static_cast<std::size_t>(score_head) * static_cast<std::size_t>(half_dim);
+        const auto dst_base =
+            static_cast<std::size_t>(sampled_idx) * static_cast<std::size_t>(half_dim);
+        std::copy_n(host.q_mean_real.begin() + static_cast<std::ptrdiff_t>(src_base), half_dim,
+                    q_mean_real.begin() + static_cast<std::ptrdiff_t>(dst_base));
+        std::copy_n(host.q_mean_imag.begin() + static_cast<std::ptrdiff_t>(src_base), half_dim,
+                    q_mean_imag.begin() + static_cast<std::ptrdiff_t>(dst_base));
+        std::copy_n(host.q_abs_mean.begin() + static_cast<std::ptrdiff_t>(src_base), half_dim,
+                    q_abs_mean.begin() + static_cast<std::ptrdiff_t>(dst_base));
+        std::copy_n(host.freq_scale_sq.begin() + static_cast<std::ptrdiff_t>(src_base), half_dim,
+                    freq_scale_sq.begin() + static_cast<std::ptrdiff_t>(dst_base));
+    }
+
+    gpu.head_offsets = DeviceTensor({gpu.score_head_count}, DType::kInt32, stream_);
+    gpu.head_cache_indices = DeviceTensor({gpu.score_head_count}, DType::kInt32, stream_);
+    gpu.q_mean_real = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
+                                   DType::kFloat32, stream_);
+    gpu.q_mean_imag = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
+                                   DType::kFloat32, stream_);
+    gpu.q_abs_mean = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
+                                  DType::kFloat32, stream_);
+    gpu.freq_scale_sq = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
+                                     DType::kFloat32, stream_);
+    gpu.scores = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * max_length_},
+                              DType::kFloat32, stream_);
+
+    gpu.head_offsets.copy_from_host(head_offsets.data());
+    gpu.head_cache_indices.copy_from_host(head_cache_indices.data());
+    gpu.q_mean_real.copy_from_host(q_mean_real.data());
+    gpu.q_mean_imag.copy_from_host(q_mean_imag.data());
+    gpu.q_abs_mean.copy_from_host(q_abs_mean.data());
+    gpu.freq_scale_sq.copy_from_host(freq_scale_sq.data());
+}
+
+void TriAttentionKvCache::initialize_gpu_state() {
+    const int32_t half_dim = stats_.head_dim / 2;
+    if (half_dim <= 0 || offsets_.empty() || stats_.layer_stats.empty() || query_head_count_ <= 0)
+        return;
+    allocate_core_selection_buffers(half_dim);
     layer_gpu_stats_.resize(static_cast<std::size_t>(num_layers_));
     for (int32_t layer = 0; layer < num_layers_; ++layer) {
         if (layer >= static_cast<int32_t>(stats_.layer_stats.size()))
             break;
-        const auto& host = stats_.layer_stats[static_cast<std::size_t>(layer)];
-        const auto& sampled_heads =
-            stats_.sampled_score_heads_by_layer[static_cast<std::size_t>(layer)];
-        auto& gpu = layer_gpu_stats_[static_cast<std::size_t>(layer)];
-        gpu.score_head_count = static_cast<int32_t>(sampled_heads.size());
-        gpu.host_cache_head_indices.clear();
-        if (host.q_mean_real.empty() || host.q_mean_imag.empty() || host.q_abs_mean.empty())
-            continue;
-        if (gpu.score_head_count <= 0)
-            continue;
-        const auto expected_stats_size =
-            static_cast<std::size_t>(stats_.stats_head_count) * static_cast<std::size_t>(half_dim);
-        if (host.q_mean_real.size() != expected_stats_size ||
-            host.q_mean_imag.size() != expected_stats_size ||
-            host.q_abs_mean.size() != expected_stats_size ||
-            host.freq_scale_sq.size() != expected_stats_size) {
-            continue;
-        }
-
-        std::vector<int32_t> head_offsets(static_cast<std::size_t>(gpu.score_head_count));
-        std::vector<int32_t> head_cache_indices(static_cast<std::size_t>(gpu.score_head_count));
-        std::vector<float> q_mean_real(static_cast<std::size_t>(gpu.score_head_count) *
-                                       static_cast<std::size_t>(half_dim));
-        std::vector<float> q_mean_imag(static_cast<std::size_t>(gpu.score_head_count) *
-                                       static_cast<std::size_t>(half_dim));
-        std::vector<float> q_abs_mean(static_cast<std::size_t>(gpu.score_head_count) *
-                                      static_cast<std::size_t>(half_dim));
-        std::vector<float> freq_scale_sq(static_cast<std::size_t>(gpu.score_head_count) *
-                                         static_cast<std::size_t>(half_dim));
-        gpu.host_cache_head_indices.resize(static_cast<std::size_t>(gpu.score_head_count));
-
-        for (int32_t sampled_idx = 0; sampled_idx < gpu.score_head_count; ++sampled_idx) {
-            const int32_t score_head = sampled_heads[static_cast<std::size_t>(sampled_idx)];
-            const int32_t cache_head =
-                std::min(cache_head_count_ - 1, score_head / score_group_size_);
-            head_cache_indices[static_cast<std::size_t>(sampled_idx)] = cache_head;
-            gpu.host_cache_head_indices[static_cast<std::size_t>(sampled_idx)] = cache_head;
-            head_offsets[static_cast<std::size_t>(sampled_idx)] =
-                cache_head * query_group_size_ * stats_.head_dim;
-            const auto src_base =
-                static_cast<std::size_t>(score_head) * static_cast<std::size_t>(half_dim);
-            const auto dst_base =
-                static_cast<std::size_t>(sampled_idx) * static_cast<std::size_t>(half_dim);
-            std::copy_n(host.q_mean_real.begin() + static_cast<std::ptrdiff_t>(src_base), half_dim,
-                        q_mean_real.begin() + static_cast<std::ptrdiff_t>(dst_base));
-            std::copy_n(host.q_mean_imag.begin() + static_cast<std::ptrdiff_t>(src_base), half_dim,
-                        q_mean_imag.begin() + static_cast<std::ptrdiff_t>(dst_base));
-            std::copy_n(host.q_abs_mean.begin() + static_cast<std::ptrdiff_t>(src_base), half_dim,
-                        q_abs_mean.begin() + static_cast<std::ptrdiff_t>(dst_base));
-            std::copy_n(host.freq_scale_sq.begin() + static_cast<std::ptrdiff_t>(src_base),
-                        half_dim, freq_scale_sq.begin() + static_cast<std::ptrdiff_t>(dst_base));
-        }
-
-        gpu.head_offsets = DeviceTensor({gpu.score_head_count}, DType::kInt32, stream_);
-        gpu.head_cache_indices = DeviceTensor({gpu.score_head_count}, DType::kInt32, stream_);
-        gpu.q_mean_real = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
-                                       DType::kFloat32, stream_);
-        gpu.q_mean_imag = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
-                                       DType::kFloat32, stream_);
-        gpu.q_abs_mean = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
-                                      DType::kFloat32, stream_);
-        gpu.freq_scale_sq = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * half_dim},
-                                         DType::kFloat32, stream_);
-        gpu.scores = DeviceTensor({static_cast<int64_t>(gpu.score_head_count) * max_length_},
-                                  DType::kFloat32, stream_);
-
-        gpu.head_offsets.copy_from_host(head_offsets.data());
-        gpu.head_cache_indices.copy_from_host(head_cache_indices.data());
-        gpu.q_mean_real.copy_from_host(q_mean_real.data());
-        gpu.q_mean_imag.copy_from_host(q_mean_imag.data());
-        gpu.q_abs_mean.copy_from_host(q_abs_mean.data());
-        gpu.freq_scale_sq.copy_from_host(freq_scale_sq.data());
+        build_layer_gpu_stats(layer, half_dim);
     }
     cudaStreamSynchronize(stream_);
 }
 
 bool TriAttentionKvCache::core_selection_buffers_ready() const {
-    return candidate_indices_device_.ok() && keep_indices_device_.ok() &&
-           positions_device_.ok() && inv_freq_device_.ok() && cos_phase_device_.ok() &&
-           sin_phase_device_.ok() && scratch_k_device_.ok() && scratch_v_device_.ok();
+    return candidate_indices_device_.ok() && keep_indices_device_.ok() && positions_device_.ok() &&
+           inv_freq_device_.ok() && cos_phase_device_.ok() && sin_phase_device_.ok() &&
+           scratch_k_device_.ok() && scratch_v_device_.ok();
 }
 
 bool TriAttentionKvCache::layer_gpu_stats_ready(const LayerGpuStats& layer) {
     if (layer.score_head_count == 0)
         return true;
-    return layer.head_offsets.ok() && layer.head_cache_indices.ok() &&
-           layer.q_mean_real.ok() && layer.q_mean_imag.ok() && layer.q_abs_mean.ok() &&
-           layer.freq_scale_sq.ok() && layer.scores.ok();
+    return layer.head_offsets.ok() && layer.head_cache_indices.ok() && layer.q_mean_real.ok() &&
+           layer.q_mean_imag.ok() && layer.q_abs_mean.ok() && layer.freq_scale_sq.ok() &&
+           layer.scores.ok();
 }
 
 bool TriAttentionKvCache::can_use_gpu_selection() const {
@@ -943,29 +942,15 @@ int32_t TriAttentionKvCache::count_prefix_rows() const {
     return count;
 }
 
-std::vector<int32_t>
-TriAttentionKvCache::select_keep_indices(int32_t keep_budget,
-                                         TriAttentionCompactionProfile* profile) {
-    const int32_t total_tokens = static_cast<int32_t>(cache_positions_.size());
-    const int32_t old_budget = std::min(std::max(keep_budget, 0), total_tokens);
-    if (total_tokens <= old_budget) {
-        std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * total_tokens));
-        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-            auto begin = keep.begin() + static_cast<std::ptrdiff_t>(cache_head * total_tokens);
-            std::iota(begin, begin + total_tokens, 0);
-        }
-        return keep;
-    }
-
+std::vector<char> TriAttentionKvCache::build_reserve_mask(int32_t total_tokens,
+                                                          int32_t old_budget) const {
+    std::vector<char> reserve_mask(static_cast<std::size_t>(total_tokens), 0);
     const int32_t reserve_recent =
         std::min({std::max(config_.recent_window, 0), total_tokens, old_budget});
-    std::vector<char> reserve_mask(static_cast<std::size_t>(total_tokens), 0);
-
     if (reserve_recent > 0) {
         for (int32_t i = total_tokens - reserve_recent; i < total_tokens; ++i)
             reserve_mask[static_cast<std::size_t>(i)] = 1;
     }
-
     const int32_t prefix_limit =
         prompt_end_position_ > 0 ? prompt_end_position_ : planned_prompt_length_;
     if ((config_.protect_prefill || !config_.count_prompt_tokens) && prefix_limit > 0) {
@@ -974,9 +959,33 @@ TriAttentionKvCache::select_keep_indices(int32_t keep_budget,
                 reserve_mask[static_cast<std::size_t>(i)] = 1;
         }
     }
+    return reserve_mask;
+}
 
-    std::vector<int32_t> reserved;
-    std::vector<int32_t> candidates;
+std::vector<int32_t> TriAttentionKvCache::broadcast_indices_per_head(std::vector<int32_t> rows,
+                                                                    int32_t row_count) const {
+    std::sort(rows.begin(), rows.end());
+    std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * row_count));
+    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
+        std::copy(rows.begin(), rows.begin() + row_count,
+                  keep.begin() + static_cast<std::ptrdiff_t>(cache_head * row_count));
+    }
+    return keep;
+}
+
+std::vector<int32_t>
+TriAttentionKvCache::select_keep_indices(int32_t keep_budget,
+                                         TriAttentionCompactionProfile* profile) {
+    const int32_t total_tokens = static_cast<int32_t>(cache_positions_.size());
+    const int32_t old_budget = std::min(std::max(keep_budget, 0), total_tokens);
+    if (total_tokens <= old_budget) {
+        std::vector<int32_t> identity(static_cast<std::size_t>(total_tokens));
+        std::iota(identity.begin(), identity.end(), 0);
+        return broadcast_indices_per_head(std::move(identity), total_tokens);
+    }
+
+    const auto reserve_mask = build_reserve_mask(total_tokens, old_budget);
+    std::vector<int32_t> reserved, candidates;
     reserved.reserve(static_cast<std::size_t>(total_tokens));
     candidates.reserve(static_cast<std::size_t>(total_tokens));
     for (int32_t i = 0; i < total_tokens; ++i) {
@@ -992,23 +1001,10 @@ TriAttentionKvCache::select_keep_indices(int32_t keep_budget,
 
     if (static_cast<int32_t>(reserved.size()) >= old_budget) {
         reserved.resize(static_cast<std::size_t>(old_budget));
-        std::sort(reserved.begin(), reserved.end());
-        std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * old_budget));
-        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-            std::copy(reserved.begin(), reserved.end(),
-                      keep.begin() + static_cast<std::ptrdiff_t>(cache_head * old_budget));
-        }
-        return keep;
+        return broadcast_indices_per_head(std::move(reserved), old_budget);
     }
-    if (candidates.empty()) {
-        std::sort(reserved.begin(), reserved.end());
-        std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * old_budget));
-        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-            std::copy(reserved.begin(), reserved.end(),
-                      keep.begin() + static_cast<std::ptrdiff_t>(cache_head * old_budget));
-        }
-        return keep;
-    }
+    if (candidates.empty())
+        return broadcast_indices_per_head(std::move(reserved), old_budget);
 
 #ifdef TRTF_HAS_CUDA_KERNELS
     if (can_use_gpu_selection())

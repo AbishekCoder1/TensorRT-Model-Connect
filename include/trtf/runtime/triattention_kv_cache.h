@@ -158,6 +158,9 @@ class TriAttentionKvCache : public IInferenceState {
     void compact_existing_cache(bool reserve_slot_for_append = false);
     std::vector<int32_t> select_keep_indices(int32_t keep_budget,
                                              TriAttentionCompactionProfile* profile = nullptr);
+    std::vector<char> build_reserve_mask(int32_t total_tokens, int32_t old_budget) const;
+    std::vector<int32_t> broadcast_indices_per_head(std::vector<int32_t> rows,
+                                                    int32_t row_count) const;
     std::vector<int32_t>
     select_keep_indices_host(int32_t keep_budget, const std::vector<int32_t>& reserved,
                              const std::vector<int32_t>& candidates,
@@ -180,6 +183,8 @@ class TriAttentionKvCache : public IInferenceState {
     };
 
     void initialize_gpu_state();
+    void allocate_core_selection_buffers(int32_t half_dim);
+    void build_layer_gpu_stats(int32_t layer, int32_t half_dim);
     bool can_use_gpu_selection() const;
     bool core_selection_buffers_ready() const;
     static bool layer_gpu_stats_ready(const LayerGpuStats& layer);
