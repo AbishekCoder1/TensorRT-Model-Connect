@@ -14,10 +14,10 @@
 //                 profile parser accepts the scoped shape.
 // =============================================================================
 
+#include "test_helpers.h"
 #include "trtf/config/cli_support.h"
 #include "trtf/config/config_bundle.h"
 #include "trtf/config/schema_registry.h"
-#include "test_helpers.h"
 
 #include <any>
 #include <cstdint>

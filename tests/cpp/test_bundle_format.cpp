@@ -31,64 +31,57 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdlib.h>
 #include <string>
 #include <vector>
 
-#include <stdlib.h>
-
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
 
-static std::filesystem::path make_temp_dir()
-{
+static std::filesystem::path make_temp_dir() {
     char pattern[] = "/tmp/trtfb_test_XXXXXX";
     char* dir = mkdtemp(pattern);
-    if (dir == nullptr)
-    {
+    if (dir == nullptr) {
         throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
     }
     return std::filesystem::path(dir);
 }
 
 // Helper: write a minimal valid .trtfb file manually (bypasses WriteBundleFile).
-static void write_minimal_bundle(const std::string& path, const std::string& header_json)
-{
+static void write_minimal_bundle(const std::string& path, const std::string& header_json) {
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(trtf::kBundleMagic), 8);
     uint64_t len = header_json.size();
     unsigned char bytes[8];
-    for (int i = 0; i < 8; ++i) bytes[i] = static_cast<unsigned char>((len >> (8 * i)) & 0xFF);
+    for (int i = 0; i < 8; ++i)
+        bytes[i] = static_cast<unsigned char>((len >> (8 * i)) & 0xFF);
     out.write(reinterpret_cast<const char*>(bytes), 8);
     out.write(header_json.data(), static_cast<std::streamsize>(header_json.size()));
 }
 
 // Helper: write a bundle with sections
 static void write_bundle_with_sections(const std::string& path, const std::string& header_json,
-    const std::vector<std::vector<char>>& section_data)
-{
+                                       const std::vector<std::vector<char>>& section_data) {
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(trtf::kBundleMagic), 8);
     uint64_t len = header_json.size();
     unsigned char bytes[8];
-    for (int i = 0; i < 8; ++i) bytes[i] = static_cast<unsigned char>((len >> (8 * i)) & 0xFF);
+    for (int i = 0; i < 8; ++i)
+        bytes[i] = static_cast<unsigned char>((len >> (8 * i)) & 0xFF);
     out.write(reinterpret_cast<const char*>(bytes), 8);
     out.write(header_json.data(), static_cast<std::streamsize>(header_json.size()));
-    for (const auto& data : section_data)
-    {
+    for (const auto& data : section_data) {
         out.write(data.data(), static_cast<std::streamsize>(data.size()));
     }
 }
 
-static void test_read_valid_bundle()
-{
+static void test_read_valid_bundle() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "test.trtfb").string();
 
@@ -134,8 +127,7 @@ static void test_read_valid_bundle()
     trtf_test::remove_all_safe(tmp);
 }
 
-static void test_magic_validation()
-{
+static void test_magic_validation() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "bad.trtfb").string();
 
@@ -144,24 +136,20 @@ static void test_magic_validation()
     out.close();
 
     bool threw = false;
-    try
-    {
+    try {
         trtf::ReadBundleFile(path);
-    }
-    catch (const std::runtime_error& e)
-    {
+    } catch (const std::runtime_error& e) {
         threw = true;
         const std::string msg = e.what();
         check(msg.find("magic") != std::string::npos || msg.find("Invalid") != std::string::npos,
-            "magic error message is descriptive");
+              "magic error message is descriptive");
     }
     check(threw, "invalid magic throws");
 
     trtf_test::remove_all_safe(tmp);
 }
 
-static void test_empty_sections()
-{
+static void test_empty_sections() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "empty.trtfb").string();
 
@@ -175,8 +163,7 @@ static void test_empty_sections()
     trtf_test::remove_all_safe(tmp);
 }
 
-static void test_is_bundle_valid()
-{
+static void test_is_bundle_valid() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "valid.trtfb").string();
 
@@ -186,8 +173,7 @@ static void test_is_bundle_valid()
     trtf_test::remove_all_safe(tmp);
 }
 
-static void test_is_bundle_invalid()
-{
+static void test_is_bundle_invalid() {
     const auto tmp = make_temp_dir();
 
     const auto text_path = (tmp / "readme.txt").string();
@@ -199,8 +185,7 @@ static void test_is_bundle_invalid()
     trtf_test::remove_all_safe(tmp);
 }
 
-static void test_inspect_returns_metadata()
-{
+static void test_inspect_returns_metadata() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "inspect.trtfb").string();
 
@@ -222,8 +207,7 @@ static void test_inspect_returns_metadata()
     trtf_test::remove_all_safe(tmp);
 }
 
-static void test_truncated_bundle_throws()
-{
+static void test_truncated_bundle_throws() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "truncated.trtfb").string();
 
@@ -232,18 +216,16 @@ static void test_truncated_bundle_throws()
         out.write(reinterpret_cast<const char*>(trtf::kBundleMagic), 8);
         uint64_t len = 1000;
         unsigned char bytes[8];
-        for (int i = 0; i < 8; ++i) bytes[i] = static_cast<unsigned char>((len >> (8 * i)) & 0xFF);
+        for (int i = 0; i < 8; ++i)
+            bytes[i] = static_cast<unsigned char>((len >> (8 * i)) & 0xFF);
         out.write(reinterpret_cast<const char*>(bytes), 8);
         out.write("short", 5);
     }
 
     bool threw = false;
-    try
-    {
+    try {
         trtf::ReadBundleFile(path);
-    }
-    catch (const std::runtime_error&)
-    {
+    } catch (const std::runtime_error&) {
         threw = true;
     }
     check(threw, "truncated bundle throws");
@@ -251,8 +233,7 @@ static void test_truncated_bundle_throws()
     trtf_test::remove_all_safe(tmp);
 }
 
-int main()
-{
+int main() {
     test_read_valid_bundle();
     test_magic_validation();
     test_empty_sections();
@@ -261,8 +242,7 @@ int main()
     test_inspect_returns_metadata();
     test_truncated_bundle_throws();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

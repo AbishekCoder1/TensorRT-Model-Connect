@@ -12,8 +12,8 @@
 #include <fstream>
 #include <ftw.h>
 #include <stdexcept>
-#include <unistd.h>
 #include <string>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -39,37 +39,30 @@ inline int remove_all_safe(const std::string& path) {
 // on destruction. Prevents env var state leaks between tests if a test fails
 // early or throws.
 class EnvVarGuard {
-public:
+  public:
     // If value is non-null, setenv to that value; if null, unsetenv.
-    explicit EnvVarGuard(const std::string& name, const char* value = nullptr)
-        : name_(name)
-    {
+    explicit EnvVarGuard(const std::string& name, const char* value = nullptr) : name_(name) {
         const char* old = std::getenv(name.c_str());
         had_value_ = (old != nullptr);
-        if (had_value_) old_value_ = old;
-        if (value)
-        {
+        if (had_value_)
+            old_value_ = old;
+        if (value) {
             setenv(name.c_str(), value, 1);
-        }
-        else
-        {
+        } else {
             unsetenv(name.c_str());
         }
     }
-    ~EnvVarGuard()
-    {
-        if (had_value_)
-        {
+    ~EnvVarGuard() {
+        if (had_value_) {
             setenv(name_.c_str(), old_value_.c_str(), 1);
-        }
-        else
-        {
+        } else {
             unsetenv(name_.c_str());
         }
     }
     EnvVarGuard(const EnvVarGuard&) = delete;
     EnvVarGuard& operator=(const EnvVarGuard&) = delete;
-private:
+
+  private:
     std::string name_;
     std::string old_value_;
     bool had_value_;
@@ -79,25 +72,24 @@ private:
 // recursively on destruction. Prevents temp directory leaks if a test fails
 // early or throws.
 class TempDirGuard {
-public:
-    TempDirGuard()
-    {
+  public:
+    TempDirGuard() {
         char tmpl[] = "/tmp/trtf_test_XXXXXX";
         char* result = mkdtemp(tmpl);
-        if (!result) throw std::runtime_error("mkdtemp failed");
+        if (!result)
+            throw std::runtime_error("mkdtemp failed");
         path_ = result;
     }
-    ~TempDirGuard()
-    {
-        if (!path_.empty())
-        {
+    ~TempDirGuard() {
+        if (!path_.empty()) {
             remove_all_safe(path_);
         }
     }
     const std::string& path() const { return path_; }
     TempDirGuard(const TempDirGuard&) = delete;
     TempDirGuard& operator=(const TempDirGuard&) = delete;
-private:
+
+  private:
     std::string path_;
 };
 
@@ -107,95 +99,82 @@ struct TensorSpec {
     std::vector<float> data;
 };
 
-inline std::filesystem::path make_temp_dir_or_throw(const char* pattern)
-{
+inline std::filesystem::path make_temp_dir_or_throw(const char* pattern) {
     char buffer[256];
     std::strncpy(buffer, pattern, sizeof(buffer));
     buffer[sizeof(buffer) - 1] = '\0';
     char* created = mkdtemp(buffer);
-    if (created == nullptr)
-    {
+    if (created == nullptr) {
         throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
     }
     return std::filesystem::path(created);
 }
 
-inline void write_file(const std::filesystem::path& path, const std::string& content)
-{
+inline void write_file(const std::filesystem::path& path, const std::string& content) {
     std::ofstream out(path);
-    if (!out)
-    {
+    if (!out) {
         throw std::runtime_error("Failed to open file for writing: " + path.string());
     }
     out << content;
 }
 
-inline void write_u64_le(std::ofstream& out, uint64_t value)
-{
+inline void write_u64_le(std::ofstream& out, uint64_t value) {
     unsigned char bytes[8];
-    for (int i = 0; i < 8; ++i)
-    {
+    for (int i = 0; i < 8; ++i) {
         bytes[i] = static_cast<unsigned char>((value >> (8 * i)) & 0xFFU);
     }
     out.write(reinterpret_cast<const char*>(bytes), 8);
 }
 
-inline void write_safetensors_f32(const std::filesystem::path& path, const std::vector<TensorSpec>& specs)
-{
+inline void write_safetensors_f32(const std::filesystem::path& path,
+                                  const std::vector<TensorSpec>& specs) {
     std::string header = "{";
     uint64_t offset = 0;
-    for (std::size_t i = 0; i < specs.size(); ++i)
-    {
+    for (std::size_t i = 0; i < specs.size(); ++i) {
         const auto& spec = specs[i];
         const uint64_t bytes = static_cast<uint64_t>(spec.data.size() * sizeof(float));
-        if (i != 0)
-        {
+        if (i != 0) {
             header += ",";
         }
         header += "\"" + spec.name + "\":{\"dtype\":\"F32\",\"shape\":[";
-        for (std::size_t d = 0; d < spec.shape.size(); ++d)
-        {
-            if (d != 0)
-            {
+        for (std::size_t d = 0; d < spec.shape.size(); ++d) {
+            if (d != 0) {
                 header += ",";
             }
             header += std::to_string(spec.shape[d]);
         }
-        header += "],\"data_offsets\":[" + std::to_string(offset) + "," + std::to_string(offset + bytes) + "]}";
+        header += "],\"data_offsets\":[" + std::to_string(offset) + "," +
+                  std::to_string(offset + bytes) + "]}";
         offset += bytes;
     }
     header += "}";
 
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out)
-    {
+    if (!out) {
         throw std::runtime_error("Failed to write safetensors file: " + path.string());
     }
 
     write_u64_le(out, static_cast<uint64_t>(header.size()));
     out.write(header.data(), static_cast<std::streamsize>(header.size()));
-    for (const auto& spec : specs)
-    {
+    for (const auto& spec : specs) {
         out.write(reinterpret_cast<const char*>(spec.data.data()),
-            static_cast<std::streamsize>(spec.data.size() * sizeof(float)));
+                  static_cast<std::streamsize>(spec.data.size() * sizeof(float)));
     }
 }
 
 // Writes a model.safetensors.index.json file mapping tensor names to shard filenames.
-inline void write_safetensors_index(const std::filesystem::path& path,
-    const std::vector<std::pair<std::string, std::string>>& weight_map)
-{
+inline void
+write_safetensors_index(const std::filesystem::path& path,
+                        const std::vector<std::pair<std::string, std::string>>& weight_map) {
     std::ofstream out(path, std::ios::trunc);
-    if (!out)
-    {
+    if (!out) {
         throw std::runtime_error("Failed to write safetensors index file: " + path.string());
     }
 
     out << "{\n";
     out << "  \"metadata\": {},\n";
     out << "  \"weight_map\": {\n";
-    for (std::size_t i = 0; i < weight_map.size(); ++i)
-    {
+    for (std::size_t i = 0; i < weight_map.size(); ++i) {
         out << "    \"" << weight_map[i].first << "\": \"" << weight_map[i].second << "\"";
         out << (i + 1 == weight_map.size() ? "\n" : ",\n");
     }
@@ -203,58 +182,65 @@ inline void write_safetensors_index(const std::filesystem::path& path,
     out << "}\n";
 }
 
-// Creates a standard decoder model checkpoint (embedding, per-layer attention+MLP, final_norm, lm_head).
-// Suitable for LLaMA, Mistral, Yi, etc. Pass include_qk_norm=true for Qwen3.
-inline void write_standard_decoder_checkpoint(const std::filesystem::path& dir,
-    int32_t vocab, int32_t hidden, int32_t q_hidden, int32_t kv_hidden,
-    int32_t mlp, int32_t layers, bool include_qk_norm)
-{
-    std::vector<float> embedding(static_cast<std::size_t>(vocab) * static_cast<std::size_t>(hidden), 0.0F);
-    for (int32_t i = 0; i < hidden; ++i)
-    {
-        embedding[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) + static_cast<std::size_t>(i)] = 1.0F;
+// Creates a standard decoder model checkpoint (embedding, per-layer attention+MLP, final_norm,
+// lm_head). Suitable for LLaMA, Mistral, Yi, etc. Pass include_qk_norm=true for Qwen3.
+inline void write_standard_decoder_checkpoint(const std::filesystem::path& dir, int32_t vocab,
+                                              int32_t hidden, int32_t q_hidden, int32_t kv_hidden,
+                                              int32_t mlp, int32_t layers, bool include_qk_norm) {
+    std::vector<float> embedding(static_cast<std::size_t>(vocab) * static_cast<std::size_t>(hidden),
+                                 0.0F);
+    for (int32_t i = 0; i < hidden; ++i) {
+        embedding[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) +
+                  static_cast<std::size_t>(i)] = 1.0F;
     }
 
-    std::vector<float> q_proj(static_cast<std::size_t>(q_hidden) * static_cast<std::size_t>(hidden), 0.0F);
-    for (int32_t i = 0; i < hidden; ++i)
-    {
-        q_proj[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) + static_cast<std::size_t>(i)] = 1.0F;
+    std::vector<float> q_proj(static_cast<std::size_t>(q_hidden) * static_cast<std::size_t>(hidden),
+                              0.0F);
+    for (int32_t i = 0; i < hidden; ++i) {
+        q_proj[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) +
+               static_cast<std::size_t>(i)] = 1.0F;
     }
 
-    std::vector<float> o_proj(static_cast<std::size_t>(hidden) * static_cast<std::size_t>(q_hidden), 0.0F);
-    for (int32_t i = 0; i < hidden; ++i)
-    {
-        o_proj[static_cast<std::size_t>(i) * static_cast<std::size_t>(q_hidden) + static_cast<std::size_t>(i)] = 1.0F;
+    std::vector<float> o_proj(static_cast<std::size_t>(hidden) * static_cast<std::size_t>(q_hidden),
+                              0.0F);
+    for (int32_t i = 0; i < hidden; ++i) {
+        o_proj[static_cast<std::size_t>(i) * static_cast<std::size_t>(q_hidden) +
+               static_cast<std::size_t>(i)] = 1.0F;
     }
 
-    std::vector<float> k_proj(static_cast<std::size_t>(kv_hidden) * static_cast<std::size_t>(hidden), 0.0F);
-    std::vector<float> v_proj(static_cast<std::size_t>(kv_hidden) * static_cast<std::size_t>(hidden), 0.0F);
-    for (int32_t i = 0; i < kv_hidden; ++i)
-    {
-        k_proj[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) + static_cast<std::size_t>(i)] = 1.0F;
-        v_proj[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) + static_cast<std::size_t>(i)] = 1.0F;
+    std::vector<float> k_proj(
+        static_cast<std::size_t>(kv_hidden) * static_cast<std::size_t>(hidden), 0.0F);
+    std::vector<float> v_proj(
+        static_cast<std::size_t>(kv_hidden) * static_cast<std::size_t>(hidden), 0.0F);
+    for (int32_t i = 0; i < kv_hidden; ++i) {
+        k_proj[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) +
+               static_cast<std::size_t>(i)] = 1.0F;
+        v_proj[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) +
+               static_cast<std::size_t>(i)] = 1.0F;
     }
 
     std::vector<float> norm(static_cast<std::size_t>(hidden), 1.0F);
     const int32_t head_dim = q_hidden / 2; // assumes num_attention_heads=2
     std::vector<float> qk_norm(static_cast<std::size_t>(head_dim), 1.0F);
-    std::vector<float> up_proj(static_cast<std::size_t>(mlp) * static_cast<std::size_t>(hidden), 0.0F);
-    std::vector<float> gate_proj(static_cast<std::size_t>(mlp) * static_cast<std::size_t>(hidden), 0.0F);
-    std::vector<float> down_proj(static_cast<std::size_t>(hidden) * static_cast<std::size_t>(mlp), 0.0F);
-    std::vector<float> lm_head(static_cast<std::size_t>(vocab) * static_cast<std::size_t>(hidden), -1.0F);
-    for (int32_t i = 0; i < vocab && i < hidden; ++i)
-    {
-        lm_head[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) + static_cast<std::size_t>(i)] = 1.0F;
+    std::vector<float> up_proj(static_cast<std::size_t>(mlp) * static_cast<std::size_t>(hidden),
+                               0.0F);
+    std::vector<float> gate_proj(static_cast<std::size_t>(mlp) * static_cast<std::size_t>(hidden),
+                                 0.0F);
+    std::vector<float> down_proj(static_cast<std::size_t>(hidden) * static_cast<std::size_t>(mlp),
+                                 0.0F);
+    std::vector<float> lm_head(static_cast<std::size_t>(vocab) * static_cast<std::size_t>(hidden),
+                               -1.0F);
+    for (int32_t i = 0; i < vocab && i < hidden; ++i) {
+        lm_head[static_cast<std::size_t>(i) * static_cast<std::size_t>(hidden) +
+                static_cast<std::size_t>(i)] = 1.0F;
     }
 
     std::vector<TensorSpec> tensors;
     tensors.push_back({"model.embed_tokens.weight", {vocab, hidden}, embedding});
-    for (int32_t layer = 0; layer < layers; ++layer)
-    {
+    for (int32_t layer = 0; layer < layers; ++layer) {
         const std::string prefix = "model.layers." + std::to_string(layer) + ".";
         tensors.push_back({prefix + "input_layernorm.weight", {hidden}, norm});
-        if (include_qk_norm)
-        {
+        if (include_qk_norm) {
             tensors.push_back({prefix + "self_attn.q_norm.weight", {head_dim}, qk_norm});
             tensors.push_back({prefix + "self_attn.k_norm.weight", {head_dim}, qk_norm});
         }

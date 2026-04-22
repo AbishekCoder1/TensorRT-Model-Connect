@@ -4,9 +4,9 @@
 // Trace ID:       UT-AUD-CPP-17
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-AUD-01
-// Intent:         WAV reader: read/write round-trip for PCM int16 and IEEE float32, linear resampling
-// Preconditions:  Synthetic WAV files written to temp directory
-// Postconditions: Read samples match written values, sample rate preserved, resample produces correct length
+// Intent:         WAV reader: read/write round-trip for PCM int16 and IEEE float32, linear
+// resampling Preconditions:  Synthetic WAV files written to temp directory Postconditions: Read
+// samples match written values, sample rate preserved, resample produces correct length
 // =============================================================================
 
 // Test suite: WAV reader utility.
@@ -20,8 +20,8 @@
 //   - utils/wav_reader.h: read_wav, resample_linear
 //   - No TRT, GPU, or CUDA required.
 
-#include "utils/wav_reader.h"
 #include "test_helpers.h"
+#include "utils/wav_reader.h"
 
 #include <cmath>
 #include <cstdint>
@@ -29,33 +29,30 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <stdlib.h>
 #include <string>
 #include <vector>
 
-#include <stdlib.h>
-
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
 
-static std::filesystem::path make_temp_dir()
-{
+static std::filesystem::path make_temp_dir() {
     char pattern[] = "/tmp/trtf_wav_test_XXXXXX";
     char* dir = mkdtemp(pattern);
-    if (dir == nullptr) throw std::runtime_error("mkdtemp failed");
+    if (dir == nullptr)
+        throw std::runtime_error("mkdtemp failed");
     return std::filesystem::path(dir);
 }
 
 // Write a minimal WAV file with PCM int16 mono data.
-static void write_pcm16_wav(const std::string& path, const std::vector<int16_t>& samples, uint32_t sample_rate)
-{
+static void write_pcm16_wav(const std::string& path, const std::vector<int16_t>& samples,
+                            uint32_t sample_rate) {
     std::ofstream out(path, std::ios::binary);
     const uint32_t data_size = static_cast<uint32_t>(samples.size() * sizeof(int16_t));
     const uint32_t file_size = 36 + data_size;
@@ -70,7 +67,7 @@ static void write_pcm16_wav(const std::string& path, const std::vector<int16_t>&
     out.write("fmt ", 4);
     uint32_t fmt_size = 16;
     out.write(reinterpret_cast<const char*>(&fmt_size), 4);
-    uint16_t fmt_tag = 1;  // PCM
+    uint16_t fmt_tag = 1; // PCM
     out.write(reinterpret_cast<const char*>(&fmt_tag), 2);
     out.write(reinterpret_cast<const char*>(&channels), 2);
     out.write(reinterpret_cast<const char*>(&sample_rate), 4);
@@ -84,8 +81,8 @@ static void write_pcm16_wav(const std::string& path, const std::vector<int16_t>&
 }
 
 // Write a minimal WAV file with IEEE float32 mono data.
-static void write_float32_wav(const std::string& path, const std::vector<float>& samples, uint32_t sample_rate)
-{
+static void write_float32_wav(const std::string& path, const std::vector<float>& samples,
+                              uint32_t sample_rate) {
     std::ofstream out(path, std::ios::binary);
     const uint32_t data_size = static_cast<uint32_t>(samples.size() * sizeof(float));
     const uint32_t file_size = 36 + data_size;
@@ -100,7 +97,7 @@ static void write_float32_wav(const std::string& path, const std::vector<float>&
     out.write("fmt ", 4);
     uint32_t fmt_size = 16;
     out.write(reinterpret_cast<const char*>(&fmt_size), 4);
-    uint16_t fmt_tag = 3;  // IEEE float
+    uint16_t fmt_tag = 3; // IEEE float
     out.write(reinterpret_cast<const char*>(&fmt_tag), 2);
     out.write(reinterpret_cast<const char*>(&channels), 2);
     out.write(reinterpret_cast<const char*>(&sample_rate), 4);
@@ -114,8 +111,8 @@ static void write_float32_wav(const std::string& path, const std::vector<float>&
 }
 
 // Write a stereo PCM16 WAV file.
-static void write_stereo_pcm16_wav(const std::string& path, const std::vector<int16_t>& samples, uint32_t sample_rate)
-{
+static void write_stereo_pcm16_wav(const std::string& path, const std::vector<int16_t>& samples,
+                                   uint32_t sample_rate) {
     std::ofstream out(path, std::ios::binary);
     const uint32_t data_size = static_cast<uint32_t>(samples.size() * sizeof(int16_t));
     const uint32_t file_size = 36 + data_size;
@@ -143,8 +140,7 @@ static void write_stereo_pcm16_wav(const std::string& path, const std::vector<in
               static_cast<std::streamsize>(data_size));
 }
 
-int main()
-{
+int main() {
     auto tmp = make_temp_dir();
 
     // Test 1: Read PCM int16 mono WAV
@@ -203,14 +199,16 @@ int main()
     // Test 6: Invalid file throws
     {
         bool caught = false;
-        try { trtf::read_wav("/nonexistent/file.wav"); }
-        catch (...) { caught = true; }
+        try {
+            trtf::read_wav("/nonexistent/file.wav");
+        } catch (...) {
+            caught = true;
+        }
         check(caught, "invalid_file: throws");
     }
 
     trtf_test::remove_all_safe(tmp);
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
     }
     return failures;
