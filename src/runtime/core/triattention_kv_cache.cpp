@@ -36,6 +36,11 @@ constexpr float kMaskedScore = -1.0e4F;
 constexpr float kEps = 1.0e-6F;
 constexpr float kAbsFloor = 1.0e-8F;
 
+void require_ta(bool cond, const char* msg) {
+    if (!cond)
+        throw std::runtime_error(msg);
+}
+
 TriAttentionScoreAggregation parse_score_aggregation(const std::string& value) {
     if (value == "mean")
         return TriAttentionScoreAggregation::kMean;
@@ -325,12 +330,10 @@ parse_triattention_bundle_config(const std::string& config_json, int32_t max_cac
     return cfg;
 }
 
-TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
-                                                int32_t num_attention_heads,
-                                                int32_t num_key_value_heads, int32_t num_layers) {
-    TriAttentionStats stats;
-    json root = json::parse(stats_json);
+namespace {
 
+void fill_stats_header(TriAttentionStats& stats, const json& root, int32_t num_attention_heads,
+                       int32_t num_key_value_heads, int32_t num_layers) {
     stats.head_dim = root.value("head_dim", 0);
     stats.rope_style = parse_rope_style(root.value("rope_style", std::string("half")));
     stats.rope_theta = root.value("rope_theta", 10000.0F);
@@ -338,10 +341,11 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
     stats.num_key_value_heads = std::max(root.value("num_key_value_heads", num_key_value_heads), 1);
     stats.stats_head_count = std::max(root.value("stats_head_count", 0), 0);
     stats.num_layers = std::max(root.value("num_layers", num_layers), 1);
+    require_ta(stats.head_dim > 0 && (stats.head_dim % 2) == 0,
+               "TriAttention stats head_dim must be a positive even number");
+}
 
-    if (stats.head_dim <= 0 || (stats.head_dim % 2) != 0)
-        throw std::runtime_error("TriAttention stats head_dim must be a positive even number");
-
+void fill_stats_inv_freq(TriAttentionStats& stats, const json& root) {
     if (root.contains("inv_freq")) {
         stats.inv_freq = parse_float_array(root["inv_freq"], "inv_freq");
     } else {
@@ -353,204 +357,171 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
             stats.inv_freq.push_back(1.0F / std::pow(stats.rope_theta, exponent));
         }
     }
+    require_ta(static_cast<int32_t>(stats.inv_freq.size()) == stats.head_dim / 2,
+               "TriAttention inv_freq size does not match head_dim / 2");
+}
 
-    const int32_t half_dim = stats.head_dim / 2;
-    if (static_cast<int32_t>(stats.inv_freq.size()) != half_dim) {
-        throw std::runtime_error("TriAttention inv_freq size does not match head_dim / 2");
+void append_sampled_heads_from_array(TriAttentionStats& stats, const json& sampled_root,
+                                     int32_t head_upper_bound) {
+    for (const auto& item : sampled_root) {
+        require_ta(item.is_array() && item.size() == 2,
+                   "TriAttention sampled_heads entries must be [layer, head]");
+        const int32_t layer = item[0].get<int32_t>();
+        const int32_t head = item[1].get<int32_t>();
+        require_ta(layer >= 0 && layer < stats.num_layers,
+                   "TriAttention sampled head layer is out of range");
+        require_ta(head >= 0 && head < head_upper_bound,
+                   "TriAttention sampled head index is out of range");
+        stats.sampled_score_heads_by_layer[static_cast<std::size_t>(layer)].push_back(head);
     }
+}
 
-    auto populate_sampled_heads = [&](int32_t head_upper_bound) {
-        stats.sampled_score_heads_by_layer.assign(static_cast<std::size_t>(stats.num_layers), {});
-        if (root.contains("sampled_heads") && root["sampled_heads"].is_array()) {
-            for (const auto& item : root["sampled_heads"]) {
-                if (!item.is_array() || item.size() != 2)
-                    throw std::runtime_error(
-                        "TriAttention sampled_heads entries must be [layer, head]");
-                const int32_t layer = item[0].get<int32_t>();
-                const int32_t head = item[1].get<int32_t>();
-                if (layer < 0 || layer >= stats.num_layers)
-                    throw std::runtime_error("TriAttention sampled head layer is out of range");
-                if (head < 0 || head >= head_upper_bound)
-                    throw std::runtime_error("TriAttention sampled head index is out of range");
-                auto& heads = stats.sampled_score_heads_by_layer[static_cast<std::size_t>(layer)];
-                heads.push_back(head);
-            }
-        }
+void populate_sampled_heads(TriAttentionStats& stats, const json& root, int32_t head_upper_bound) {
+    stats.sampled_score_heads_by_layer.assign(static_cast<std::size_t>(stats.num_layers), {});
+    if (root.contains("sampled_heads") && root["sampled_heads"].is_array())
+        append_sampled_heads_from_array(stats, root["sampled_heads"], head_upper_bound);
 
-        bool any_sampled = false;
-        for (auto& heads : stats.sampled_score_heads_by_layer) {
-            std::sort(heads.begin(), heads.end());
-            heads.erase(std::unique(heads.begin(), heads.end()), heads.end());
-            any_sampled = any_sampled || !heads.empty();
-        }
-
-        if (any_sampled)
-            return;
-
-        for (auto& heads : stats.sampled_score_heads_by_layer) {
-            heads.resize(static_cast<std::size_t>(head_upper_bound));
-            std::iota(heads.begin(), heads.end(), 0);
-        }
-    };
-
-    const auto infer_sampled_head_upper_bound = [&]() -> int32_t {
-        if (!root.contains("sampled_heads") || !root["sampled_heads"].is_array())
-            return 0;
-        int32_t upper_bound = 0;
-        for (const auto& item : root["sampled_heads"]) {
-            if (!item.is_array() || item.size() != 2)
-                continue;
-            upper_bound = std::max(upper_bound, item[1].get<int32_t>() + 1);
-        }
-        return upper_bound;
-    };
-
-    if (root.contains("layer_stats") && root["layer_stats"].is_object() &&
-        !root["layer_stats"].empty()) {
-        stats.layer_stats.resize(static_cast<std::size_t>(stats.num_layers));
-        int32_t inferred_stats_heads = stats.stats_head_count;
-        bool any_stats = false;
-        for (int32_t layer = 0; layer < stats.num_layers; ++layer) {
-            auto layer_it = root["layer_stats"].find(std::to_string(layer));
-            if (layer_it == root["layer_stats"].end() || !layer_it->is_object())
-                continue;
-
-            const auto q_mean_real =
-                parse_float_matrix((*layer_it)["q_mean_real"], "layer_stats.q_mean_real");
-            const auto q_mean_imag =
-                parse_float_matrix((*layer_it)["q_mean_imag"], "layer_stats.q_mean_imag");
-            const auto q_abs_mean =
-                parse_float_matrix((*layer_it)["q_abs_mean"], "layer_stats.q_abs_mean");
-
-            const int32_t row_count = static_cast<int32_t>(q_mean_real.size());
-            if (inferred_stats_heads <= 0)
-                inferred_stats_heads = row_count;
-            std::vector<std::vector<float>> freq_scale_sq(
-                static_cast<std::size_t>(inferred_stats_heads),
-                std::vector<float>(static_cast<std::size_t>(half_dim), 1.0F));
-            if (layer_it->contains("freq_scale_sq")) {
-                freq_scale_sq =
-                    parse_float_matrix((*layer_it)["freq_scale_sq"], "layer_stats.freq_scale_sq");
-            }
-            if (row_count != inferred_stats_heads ||
-                static_cast<int32_t>(q_mean_imag.size()) != inferred_stats_heads ||
-                static_cast<int32_t>(q_abs_mean.size()) != inferred_stats_heads ||
-                static_cast<int32_t>(freq_scale_sq.size()) != inferred_stats_heads) {
-                throw std::runtime_error("TriAttention layer_stats head count is inconsistent");
-            }
-
-            auto& layer_stats = stats.layer_stats[static_cast<std::size_t>(layer)];
-            const auto flat_size =
-                static_cast<std::size_t>(inferred_stats_heads) * static_cast<std::size_t>(half_dim);
-            layer_stats.q_mean_real.resize(flat_size);
-            layer_stats.q_mean_imag.resize(flat_size);
-            layer_stats.q_abs_mean.resize(flat_size);
-            layer_stats.freq_scale_sq.resize(flat_size);
-            for (int32_t score_head = 0; score_head < inferred_stats_heads; ++score_head) {
-                if (static_cast<int32_t>(
-                        q_mean_real[static_cast<std::size_t>(score_head)].size()) != half_dim ||
-                    static_cast<int32_t>(
-                        q_mean_imag[static_cast<std::size_t>(score_head)].size()) != half_dim ||
-                    static_cast<int32_t>(q_abs_mean[static_cast<std::size_t>(score_head)].size()) !=
-                        half_dim ||
-                    static_cast<int32_t>(
-                        freq_scale_sq[static_cast<std::size_t>(score_head)].size()) != half_dim) {
-                    throw std::runtime_error(
-                        "TriAttention layer_stats frequency count does not match head_dim / 2");
-                }
-                const auto base =
-                    static_cast<std::size_t>(score_head) * static_cast<std::size_t>(half_dim);
-                for (int32_t d = 0; d < half_dim; ++d) {
-                    const auto dst = base + static_cast<std::size_t>(d);
-                    layer_stats.q_mean_real[dst] = q_mean_real[static_cast<std::size_t>(score_head)]
-                                                              [static_cast<std::size_t>(d)];
-                    layer_stats.q_mean_imag[dst] = q_mean_imag[static_cast<std::size_t>(score_head)]
-                                                              [static_cast<std::size_t>(d)];
-                    layer_stats.q_abs_mean[dst] = q_abs_mean[static_cast<std::size_t>(score_head)]
-                                                            [static_cast<std::size_t>(d)];
-                    layer_stats.freq_scale_sq[dst] =
-                        freq_scale_sq[static_cast<std::size_t>(score_head)]
-                                     [static_cast<std::size_t>(d)];
-                }
-            }
-            any_stats = true;
-        }
-
-        if (any_stats) {
-            stats.stats_head_count = std::max(inferred_stats_heads, 1);
-            populate_sampled_heads(stats.stats_head_count);
-            return stats;
-        }
+    bool any_sampled = false;
+    for (auto& heads : stats.sampled_score_heads_by_layer) {
+        std::sort(heads.begin(), heads.end());
+        heads.erase(std::unique(heads.begin(), heads.end()), heads.end());
+        any_sampled = any_sampled || !heads.empty();
     }
+    if (any_sampled)
+        return;
+    for (auto& heads : stats.sampled_score_heads_by_layer) {
+        heads.resize(static_cast<std::size_t>(head_upper_bound));
+        std::iota(heads.begin(), heads.end(), 0);
+    }
+}
 
-    if (!root.contains("sampled_heads") || !root["sampled_heads"].is_array()) {
-        throw std::runtime_error("TriAttention stats payload is missing sampled_heads");
+int32_t infer_sampled_head_upper_bound(const json& root) {
+    if (!root.contains("sampled_heads") || !root["sampled_heads"].is_array())
+        return 0;
+    int32_t upper_bound = 0;
+    for (const auto& item : root["sampled_heads"]) {
+        if (!item.is_array() || item.size() != 2)
+            continue;
+        upper_bound = std::max(upper_bound, item[1].get<int32_t>() + 1);
     }
-    if (!root.contains("stats") || !root["stats"].is_object()) {
-        throw std::runtime_error("TriAttention stats payload is missing stats object");
-    }
+    return upper_bound;
+}
 
-    if (stats.num_attention_heads % stats.num_key_value_heads != 0) {
-        throw std::runtime_error("TriAttention num_attention_heads must be divisible by "
-                                 "num_key_value_heads");
+void copy_dense_head_row(TriAttentionHeadStats& dst,
+                         const std::vector<std::vector<float>>& q_mean_real,
+                         const std::vector<std::vector<float>>& q_mean_imag,
+                         const std::vector<std::vector<float>>& q_abs_mean,
+                         const std::vector<std::vector<float>>& freq_scale_sq, int32_t score_head,
+                         int32_t half_dim) {
+    const std::size_t src_idx = static_cast<std::size_t>(score_head);
+    require_ta(static_cast<int32_t>(q_mean_real[src_idx].size()) == half_dim &&
+                   static_cast<int32_t>(q_mean_imag[src_idx].size()) == half_dim &&
+                   static_cast<int32_t>(q_abs_mean[src_idx].size()) == half_dim &&
+                   static_cast<int32_t>(freq_scale_sq[src_idx].size()) == half_dim,
+               "TriAttention layer_stats frequency count does not match head_dim / 2");
+    const auto base = src_idx * static_cast<std::size_t>(half_dim);
+    for (int32_t d = 0; d < half_dim; ++d) {
+        const auto dst_idx = base + static_cast<std::size_t>(d);
+        dst.q_mean_real[dst_idx] = q_mean_real[src_idx][static_cast<std::size_t>(d)];
+        dst.q_mean_imag[dst_idx] = q_mean_imag[src_idx][static_cast<std::size_t>(d)];
+        dst.q_abs_mean[dst_idx] = q_abs_mean[src_idx][static_cast<std::size_t>(d)];
+        dst.freq_scale_sq[dst_idx] = freq_scale_sq[src_idx][static_cast<std::size_t>(d)];
     }
-    if (stats.stats_head_count <= 0) {
-        stats.stats_head_count =
-            std::max({infer_sampled_head_upper_bound(), stats.num_key_value_heads, 1});
-    }
-    populate_sampled_heads(stats.stats_head_count);
+}
+
+bool fill_layer_stats_from_dense(TriAttentionHeadStats& dst, const json& layer_node,
+                                 int32_t& inferred_stats_heads, int32_t half_dim) {
+    const auto q_mean_real =
+        parse_float_matrix(layer_node["q_mean_real"], "layer_stats.q_mean_real");
+    const auto q_mean_imag =
+        parse_float_matrix(layer_node["q_mean_imag"], "layer_stats.q_mean_imag");
+    const auto q_abs_mean = parse_float_matrix(layer_node["q_abs_mean"], "layer_stats.q_abs_mean");
+    const int32_t row_count = static_cast<int32_t>(q_mean_real.size());
+    if (inferred_stats_heads <= 0)
+        inferred_stats_heads = row_count;
+    std::vector<std::vector<float>> freq_scale_sq(
+        static_cast<std::size_t>(inferred_stats_heads),
+        std::vector<float>(static_cast<std::size_t>(half_dim), 1.0F));
+    if (layer_node.contains("freq_scale_sq"))
+        freq_scale_sq =
+            parse_float_matrix(layer_node["freq_scale_sq"], "layer_stats.freq_scale_sq");
+    require_ta(row_count == inferred_stats_heads &&
+                   static_cast<int32_t>(q_mean_imag.size()) == inferred_stats_heads &&
+                   static_cast<int32_t>(q_abs_mean.size()) == inferred_stats_heads &&
+                   static_cast<int32_t>(freq_scale_sq.size()) == inferred_stats_heads,
+               "TriAttention layer_stats head count is inconsistent");
+    const auto flat_size =
+        static_cast<std::size_t>(inferred_stats_heads) * static_cast<std::size_t>(half_dim);
+    dst.q_mean_real.resize(flat_size);
+    dst.q_mean_imag.resize(flat_size);
+    dst.q_abs_mean.resize(flat_size);
+    dst.freq_scale_sq.resize(flat_size);
+    for (int32_t score_head = 0; score_head < inferred_stats_heads; ++score_head)
+        copy_dense_head_row(dst, q_mean_real, q_mean_imag, q_abs_mean, freq_scale_sq, score_head,
+                            half_dim);
+    return true;
+}
+
+bool try_parse_dense_layer_stats(TriAttentionStats& stats, const json& root, int32_t half_dim) {
+    if (!root.contains("layer_stats") || !root["layer_stats"].is_object() ||
+        root["layer_stats"].empty())
+        return false;
     stats.layer_stats.resize(static_cast<std::size_t>(stats.num_layers));
-    std::vector<int32_t> group_counts(
-        static_cast<std::size_t>(stats.num_layers * stats.stats_head_count), 0);
+    int32_t inferred_stats_heads = stats.stats_head_count;
+    bool any_stats = false;
+    for (int32_t layer = 0; layer < stats.num_layers; ++layer) {
+        auto layer_it = root["layer_stats"].find(std::to_string(layer));
+        if (layer_it == root["layer_stats"].end() || !layer_it->is_object())
+            continue;
+        fill_layer_stats_from_dense(stats.layer_stats[static_cast<std::size_t>(layer)], *layer_it,
+                                    inferred_stats_heads, half_dim);
+        any_stats = true;
+    }
+    if (!any_stats)
+        return false;
+    stats.stats_head_count = std::max(inferred_stats_heads, 1);
+    populate_sampled_heads(stats, root, stats.stats_head_count);
+    return true;
+}
+
+void init_layer_stats_empty(TriAttentionStats& stats, int32_t half_dim) {
+    stats.layer_stats.resize(static_cast<std::size_t>(stats.num_layers));
+    const auto flat_size =
+        static_cast<std::size_t>(stats.stats_head_count) * static_cast<std::size_t>(half_dim);
     for (auto& layer : stats.layer_stats) {
-        const auto flat_size =
-            static_cast<std::size_t>(stats.stats_head_count) * static_cast<std::size_t>(half_dim);
         layer.q_mean_real.assign(flat_size, 0.0F);
         layer.q_mean_imag.assign(flat_size, 0.0F);
         layer.q_abs_mean.assign(flat_size, 0.0F);
         layer.freq_scale_sq.assign(flat_size, 1.0F);
     }
+}
 
-    const auto& raw_stats = root["stats"];
-    for (const auto& item : root["sampled_heads"]) {
-        if (!item.is_array() || item.size() != 2) {
-            throw std::runtime_error("TriAttention sampled_heads entries must be [layer, head]");
-        }
-        const int32_t layer = item.at(0).get<int32_t>();
-        const int32_t head = item.at(1).get<int32_t>();
-        if (layer < 0 || layer >= stats.num_layers)
-            continue;
-        if (head < 0 || head >= stats.stats_head_count)
-            continue;
-
-        const std::string key = sampled_head_key(layer, head);
-        auto stats_it = raw_stats.find(key);
-        if (stats_it == raw_stats.end() || !stats_it->is_object()) {
-            throw std::runtime_error("TriAttention stats payload is missing entry " + key);
-        }
-
-        const auto q_mean_real = parse_float_array((*stats_it)["q_mean_real"], "q_mean_real");
-        const auto q_mean_imag = parse_float_array((*stats_it)["q_mean_imag"], "q_mean_imag");
-        const auto q_abs_mean = parse_float_array((*stats_it)["q_abs_mean"], "q_abs_mean");
-
-        if (static_cast<int32_t>(q_mean_real.size()) != half_dim ||
-            static_cast<int32_t>(q_mean_imag.size()) != half_dim ||
-            static_cast<int32_t>(q_abs_mean.size()) != half_dim) {
-            throw std::runtime_error("TriAttention stats entry " + key +
-                                     " does not match head_dim / 2");
-        }
-
-        auto& layer_stats = stats.layer_stats[static_cast<std::size_t>(layer)];
-        const auto base = static_cast<std::size_t>(head) * static_cast<std::size_t>(half_dim);
-        for (int32_t d = 0; d < half_dim; ++d) {
-            const auto idx = base + static_cast<std::size_t>(d);
-            layer_stats.q_mean_real[idx] += q_mean_real[static_cast<std::size_t>(d)];
-            layer_stats.q_mean_imag[idx] += q_mean_imag[static_cast<std::size_t>(d)];
-            layer_stats.q_abs_mean[idx] += q_abs_mean[static_cast<std::size_t>(d)];
-        }
-        ++group_counts[static_cast<std::size_t>(layer * stats.stats_head_count + head)];
+void accumulate_sparse_entry(TriAttentionStats& stats, const json& raw_stats, int32_t layer,
+                             int32_t head, int32_t half_dim, std::vector<int32_t>& group_counts) {
+    const std::string key = sampled_head_key(layer, head);
+    auto stats_it = raw_stats.find(key);
+    require_ta(stats_it != raw_stats.end() && stats_it->is_object(),
+               "TriAttention stats payload is missing entry");
+    const auto q_mean_real = parse_float_array((*stats_it)["q_mean_real"], "q_mean_real");
+    const auto q_mean_imag = parse_float_array((*stats_it)["q_mean_imag"], "q_mean_imag");
+    const auto q_abs_mean = parse_float_array((*stats_it)["q_abs_mean"], "q_abs_mean");
+    require_ta(static_cast<int32_t>(q_mean_real.size()) == half_dim &&
+                   static_cast<int32_t>(q_mean_imag.size()) == half_dim &&
+                   static_cast<int32_t>(q_abs_mean.size()) == half_dim,
+               "TriAttention sparse stats entry does not match head_dim / 2");
+    auto& layer_stats = stats.layer_stats[static_cast<std::size_t>(layer)];
+    const auto base = static_cast<std::size_t>(head) * static_cast<std::size_t>(half_dim);
+    for (int32_t d = 0; d < half_dim; ++d) {
+        const auto idx = base + static_cast<std::size_t>(d);
+        layer_stats.q_mean_real[idx] += q_mean_real[static_cast<std::size_t>(d)];
+        layer_stats.q_mean_imag[idx] += q_mean_imag[static_cast<std::size_t>(d)];
+        layer_stats.q_abs_mean[idx] += q_abs_mean[static_cast<std::size_t>(d)];
     }
+    ++group_counts[static_cast<std::size_t>(layer * stats.stats_head_count + head)];
+}
 
+bool finalize_sparse_stats(TriAttentionStats& stats, const std::vector<int32_t>& group_counts,
+                           int32_t half_dim) {
     bool any_stats = false;
     for (int32_t layer = 0; layer < stats.num_layers; ++layer) {
         auto& layer_stats = stats.layer_stats[static_cast<std::size_t>(layer)];
@@ -570,19 +541,56 @@ TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
             }
         }
     }
+    return any_stats;
+}
 
-    if (!any_stats)
-        throw std::runtime_error("TriAttention stats payload has no usable sampled heads");
+void parse_sparse_stats(TriAttentionStats& stats, const json& root, int32_t half_dim) {
+    require_ta(root.contains("sampled_heads") && root["sampled_heads"].is_array(),
+               "TriAttention stats payload is missing sampled_heads");
+    require_ta(root.contains("stats") && root["stats"].is_object(),
+               "TriAttention stats payload is missing stats object");
+    require_ta(stats.num_attention_heads % stats.num_key_value_heads == 0,
+               "TriAttention num_attention_heads must be divisible by num_key_value_heads");
+    if (stats.stats_head_count <= 0) {
+        stats.stats_head_count =
+            std::max({infer_sampled_head_upper_bound(root), stats.num_key_value_heads, 1});
+    }
+    populate_sampled_heads(stats, root, stats.stats_head_count);
+    init_layer_stats_empty(stats, half_dim);
 
+    std::vector<int32_t> group_counts(
+        static_cast<std::size_t>(stats.num_layers * stats.stats_head_count), 0);
+    const auto& raw_stats = root["stats"];
+    for (const auto& item : root["sampled_heads"]) {
+        require_ta(item.is_array() && item.size() == 2,
+                   "TriAttention sampled_heads entries must be [layer, head]");
+        const int32_t layer = item.at(0).get<int32_t>();
+        const int32_t head = item.at(1).get<int32_t>();
+        if (layer < 0 || layer >= stats.num_layers)
+            continue;
+        if (head < 0 || head >= stats.stats_head_count)
+            continue;
+        accumulate_sparse_entry(stats, raw_stats, layer, head, half_dim, group_counts);
+    }
+    require_ta(finalize_sparse_stats(stats, group_counts, half_dim),
+               "TriAttention stats payload has no usable sampled heads");
+}
+
+} // namespace
+
+TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
+                                                int32_t num_attention_heads,
+                                                int32_t num_key_value_heads, int32_t num_layers) {
+    TriAttentionStats stats;
+    const json root = json::parse(stats_json);
+    fill_stats_header(stats, root, num_attention_heads, num_key_value_heads, num_layers);
+    fill_stats_inv_freq(stats, root);
+    const int32_t half_dim = stats.head_dim / 2;
+    if (try_parse_dense_layer_stats(stats, root, half_dim))
+        return stats;
+    parse_sparse_stats(stats, root, half_dim);
     return stats;
 }
-
-namespace {
-void require_ta(bool cond, const char* msg) {
-    if (!cond)
-        throw std::runtime_error(msg);
-}
-} // namespace
 
 void TriAttentionKvCache::validate_shapes() {
     require_ta(config_.kv_budget >= 1 && config_.kv_budget <= max_length_,
