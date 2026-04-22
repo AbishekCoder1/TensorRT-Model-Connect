@@ -5,16 +5,35 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <ftw.h>
 #include <stdexcept>
+#include <unistd.h>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace trtf_test {
+
+// POSIX-based recursive remove. Avoids std::filesystem::remove_all, which on
+// the aarch64 CI image has been observed to trampoline into libtorch's
+// symbol-interposed std::filesystem implementation and segfault during
+// test-teardown. Uses nftw() which only calls plain libc unlink/rmdir.
+inline int remove_all_safe(const std::string& path) {
+    if (path.empty())
+        return 0;
+    auto cb = [](const char* fpath, const struct stat* /*sb*/, int typeflag,
+                 struct FTW* /*ftwbuf*/) -> int {
+        if (typeflag == FTW_DP)
+            return rmdir(fpath) == 0 ? 0 : -1;
+        return std::remove(fpath) == 0 ? 0 : -1;
+    };
+    return nftw(path.c_str(), cb, 16, FTW_DEPTH | FTW_PHYS);
+}
 
 // RAII guard that saves an environment variable on construction and restores it
 // on destruction. Prevents env var state leaks between tests if a test fails
@@ -72,7 +91,7 @@ public:
     {
         if (!path_.empty())
         {
-            std::filesystem::remove_all(path_);
+            remove_all_safe(path_);
         }
     }
     const std::string& path() const { return path_; }

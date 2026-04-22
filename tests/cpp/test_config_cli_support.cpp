@@ -17,6 +17,7 @@
 #include "trtf/config/cli_support.h"
 #include "trtf/config/config_bundle.h"
 #include "trtf/config/schema_registry.h"
+#include "test_helpers.h"
 
 #include <any>
 #include <cstdint>
@@ -510,7 +511,7 @@ int main() {
     {
         namespace fs = std::filesystem;
         fs::path tmp = fs::temp_directory_path() / "test_resolve_pipeline";
-        fs::remove_all(tmp);
+        trtf_test::remove_all_safe(tmp.string());
         fs::create_directories(tmp);
         test_resolve_pipeline_config_merges_bundle_and_session(tmp.string());
     }
@@ -519,7 +520,7 @@ int main() {
     {
         namespace fs = std::filesystem;
         fs::path tmp = fs::temp_directory_path() / "test_config_cli_support_write";
-        fs::remove_all(tmp);
+        trtf_test::remove_all_safe(tmp.string());
         fs::create_directories(tmp);
         test_write_effective_config_next_to_places_file(tmp.string());
     }

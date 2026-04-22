@@ -21,6 +21,7 @@
 //   - No TRT, GPU, or CUDA required.
 
 #include "utils/wav_reader.h"
+#include "test_helpers.h"
 
 #include <cmath>
 #include <cstdint>
@@ -207,7 +208,7 @@ int main()
         check(caught, "invalid_file: throws");
     }
 
-    std::filesystem::remove_all(tmp);
+    trtf_test::remove_all_safe(tmp);
     if (failures > 0)
     {
         std::cerr << failures << " test(s) FAILED\n";

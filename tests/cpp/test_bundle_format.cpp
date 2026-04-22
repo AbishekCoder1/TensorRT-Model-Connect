@@ -24,6 +24,7 @@
 //   - No TRT, GPU, or CUDA required.
 
 #include "bundle/bundle_format.h"
+#include "test_helpers.h"
 
 #include <cerrno>
 #include <cstring>
@@ -130,7 +131,7 @@ static void test_read_valid_bundle()
     check(loaded.sections[1].name == "tokenizer_json", "read section 1 name");
     check(loaded.sections[1].data == tok_data, "read section 1 data");
 
-    std::filesystem::remove_all(tmp);
+    trtf_test::remove_all_safe(tmp);
 }
 
 static void test_magic_validation()
@@ -156,7 +157,7 @@ static void test_magic_validation()
     }
     check(threw, "invalid magic throws");
 
-    std::filesystem::remove_all(tmp);
+    trtf_test::remove_all_safe(tmp);
 }
 
 static void test_empty_sections()
@@ -171,7 +172,7 @@ static void test_empty_sections()
     check(loaded.info.model_id == "empty", "empty sections model_id");
     check(loaded.sections.empty(), "empty sections count");
 
-    std::filesystem::remove_all(tmp);
+    trtf_test::remove_all_safe(tmp);
 }
 
 static void test_is_bundle_valid()
@@ -182,7 +183,7 @@ static void test_is_bundle_valid()
     write_minimal_bundle(path, R"({"model_id": "valid"})");
     check(trtf::IsBundle(path), "IsBundle true for valid file");
 
-    std::filesystem::remove_all(tmp);
+    trtf_test::remove_all_safe(tmp);
 }
 
 static void test_is_bundle_invalid()
@@ -195,7 +196,7 @@ static void test_is_bundle_invalid()
     check(!trtf::IsBundle(tmp.string()), "IsBundle false for directory");
     check(!trtf::IsBundle((tmp / "nonexistent").string()), "IsBundle false for nonexistent");
 
-    std::filesystem::remove_all(tmp);
+    trtf_test::remove_all_safe(tmp);
 }
 
 static void test_inspect_returns_metadata()
@@ -218,7 +219,7 @@ static void test_inspect_returns_metadata()
     check(info.vocab_size == 50000, "inspect vocab_size");
     check(info.num_layers == 12, "inspect num_layers");
 
-    std::filesystem::remove_all(tmp);
+    trtf_test::remove_all_safe(tmp);
 }
 
 static void test_truncated_bundle_throws()
@@ -247,7 +248,7 @@ static void test_truncated_bundle_throws()
     }
     check(threw, "truncated bundle throws");
 
-    std::filesystem::remove_all(tmp);
+    trtf_test::remove_all_safe(tmp);
 }
 
 int main()
