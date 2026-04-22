@@ -1101,6 +1101,289 @@ bool TriAttentionKvCache::layer_stats_shapes_valid(const TriAttentionHeadStats& 
            layer_stats.freq_scale_sq.size() == expected_stats_size;
 }
 
+void TriAttentionKvCache::extract_k_rot(const float* row_ptr, int32_t head_offset, int32_t d,
+                                        int32_t half_dim, float& k_rot_real,
+                                        float& k_rot_imag) const {
+    if (stats_.rope_style == TriAttentionRopeStyle::kInterleaved) {
+        k_rot_real = row_ptr[head_offset + (2 * d)];
+        k_rot_imag = row_ptr[head_offset + (2 * d) + 1];
+    } else {
+        k_rot_real = row_ptr[head_offset + d];
+        k_rot_imag = row_ptr[head_offset + half_dim + d];
+    }
+}
+
+float TriAttentionKvCache::reduce_trig_sums(const std::vector<float>& trig_sums) const {
+    if (trig_sums.empty())
+        return 0.0F;
+    if (config_.score_aggregation == TriAttentionScoreAggregation::kMax)
+        return *std::max_element(trig_sums.begin(), trig_sums.end());
+    const float sum = std::accumulate(trig_sums.begin(), trig_sums.end(), 0.0F);
+    return sum / static_cast<float>(trig_sums.size());
+}
+
+float TriAttentionKvCache::score_one_row(const float* row_ptr,
+                                         const TriAttentionHeadStats& layer_stats,
+                                         std::size_t stats_base, int32_t head_offset,
+                                         int32_t half_dim,
+                                         const std::vector<std::vector<float>>& cos_phase,
+                                         const std::vector<std::vector<float>>& sin_phase) const {
+    float additive = 0.0F;
+    std::vector<float> trig_sums(config_.disable_trig ? 0U : offsets_.size(), 0.0F);
+    for (int32_t d = 0; d < half_dim; ++d) {
+        float k_rot_real = 0.0F;
+        float k_rot_imag = 0.0F;
+        extract_k_rot(row_ptr, head_offset, d, half_dim, k_rot_real, k_rot_imag);
+        const auto idx = stats_base + static_cast<std::size_t>(d);
+        const float q_real = layer_stats.q_mean_real[idx];
+        const float q_imag = layer_stats.q_mean_imag[idx];
+        const float q_abs = layer_stats.q_abs_mean[idx];
+        const float freq_scale_sq = layer_stats.freq_scale_sq[idx];
+        const float q_mean_abs = complex_abs(q_real, q_imag);
+        const float k_abs = complex_abs(k_rot_real, k_rot_imag);
+        const float extra_coef = config_.disable_mlr ? q_abs : (q_abs - q_mean_abs);
+        additive += k_abs * extra_coef * freq_scale_sq;
+        if (config_.disable_trig)
+            continue;
+        const float prod_real = q_real * k_rot_real + q_imag * k_rot_imag;
+        const float prod_imag = q_imag * k_rot_real - q_real * k_rot_imag;
+        for (std::size_t o = 0; o < offsets_.size(); ++o) {
+            trig_sums[o] += freq_scale_sq * (prod_real * cos_phase[o][static_cast<std::size_t>(d)] -
+                                             prod_imag * sin_phase[o][static_cast<std::size_t>(d)]);
+        }
+    }
+    return reduce_trig_sums(trig_sums) + additive;
+}
+
+void TriAttentionKvCache::score_rows_for_head(
+    std::vector<float>& scores, const std::vector<float>& layer_cache,
+    const TriAttentionHeadStats& layer_stats, int32_t score_head, int32_t cache_head,
+    int32_t half_dim, int32_t total_tokens, const std::vector<std::vector<float>>& cos_phase,
+    const std::vector<std::vector<float>>& sin_phase) const {
+    const int32_t head_offset = cache_head * query_group_size_ * stats_.head_dim;
+    const auto stats_base =
+        static_cast<std::size_t>(score_head) * static_cast<std::size_t>(half_dim);
+    for (int32_t row = 0; row < total_tokens; ++row) {
+        const float* row_ptr =
+            layer_cache.data() + static_cast<std::size_t>(row) * static_cast<std::size_t>(kv_dim_);
+        scores[static_cast<std::size_t>(row)] = score_one_row(
+            row_ptr, layer_stats, stats_base, head_offset, half_dim, cos_phase, sin_phase);
+    }
+}
+
+void TriAttentionKvCache::standardize_scores(std::vector<float>& scores) const {
+    if (scores.empty())
+        return;
+    const float mean =
+        std::accumulate(scores.begin(), scores.end(), 0.0F) / static_cast<float>(scores.size());
+    const float stddev = score_full_stddev_or_one(scores, mean);
+    for (float& value : scores)
+        value = (value - mean) / stddev;
+}
+
+void TriAttentionKvCache::accumulate_layer_fallback(
+    const std::vector<std::vector<float>>& layer_scores, std::vector<float>& global_fallback_sum,
+    int32_t& global_fallback_count, int32_t total_tokens) const {
+    for (const auto& scores : layer_scores) {
+        for (int32_t row = 0; row < total_tokens; ++row)
+            global_fallback_sum[static_cast<std::size_t>(row)] +=
+                scores[static_cast<std::size_t>(row)];
+        ++global_fallback_count;
+    }
+}
+
+void TriAttentionKvCache::reduce_group_into_aggregate(
+    int32_t cache_head, int32_t total_tokens, const std::vector<std::vector<float>>& layer_scores,
+    const std::vector<int32_t>& sampled_group, std::vector<float>& aggregate,
+    bool first_layer_for_cache_head, float* layer_dump) const {
+    const bool use_max = config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax;
+    (void)cache_head;
+    for (int32_t row = 0; row < total_tokens; ++row) {
+        float reduced = layer_scores[static_cast<std::size_t>(sampled_group.front())]
+                                    [static_cast<std::size_t>(row)];
+        for (std::size_t group_idx = 1; group_idx < sampled_group.size(); ++group_idx) {
+            reduced =
+                std::max(reduced, layer_scores[static_cast<std::size_t>(sampled_group[group_idx])]
+                                              [static_cast<std::size_t>(row)]);
+        }
+        if (use_max) {
+            aggregate[static_cast<std::size_t>(row)] =
+                first_layer_for_cache_head
+                    ? reduced
+                    : std::max(aggregate[static_cast<std::size_t>(row)], reduced);
+        } else {
+            aggregate[static_cast<std::size_t>(row)] += reduced;
+        }
+        if (layer_dump != nullptr)
+            layer_dump[static_cast<std::size_t>(row)] = reduced;
+    }
+}
+
+void TriAttentionKvCache::accumulate_layer_to_aggregate(
+    int32_t layer, int32_t total_tokens, const std::vector<std::vector<float>>& layer_scores,
+    const std::vector<std::vector<int32_t>>& sampled_by_cache_head,
+    std::vector<std::vector<float>>& aggregated_scores,
+    std::vector<int32_t>& contributing_layers_by_cache_head,
+    std::vector<float>& layer_aggregate_dump) const {
+    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
+        const auto& sampled_group = sampled_by_cache_head[static_cast<std::size_t>(cache_head)];
+        if (sampled_group.empty())
+            continue;
+        const bool first_layer_for_cache_head =
+            contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)] == 0;
+        float* layer_dump = nullptr;
+        if (!layer_aggregate_dump.empty()) {
+            layer_dump =
+                layer_aggregate_dump.data() +
+                (static_cast<std::size_t>(layer) * static_cast<std::size_t>(cache_head_count_) +
+                 static_cast<std::size_t>(cache_head)) *
+                    static_cast<std::size_t>(total_tokens);
+        }
+        reduce_group_into_aggregate(cache_head, total_tokens, layer_scores, sampled_group,
+                                    aggregated_scores[static_cast<std::size_t>(cache_head)],
+                                    first_layer_for_cache_head, layer_dump);
+        ++contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)];
+    }
+}
+
+std::vector<float>
+TriAttentionKvCache::compute_fallback_mean(const std::vector<float>& global_fallback_sum,
+                                           int32_t global_fallback_count,
+                                           int32_t total_tokens) const {
+    std::vector<float> mean(static_cast<std::size_t>(total_tokens), 0.0F);
+    if (global_fallback_count <= 0)
+        return mean;
+    const float inv_count = 1.0F / static_cast<float>(global_fallback_count);
+    for (int32_t row = 0; row < total_tokens; ++row)
+        mean[static_cast<std::size_t>(row)] =
+            global_fallback_sum[static_cast<std::size_t>(row)] * inv_count;
+    return mean;
+}
+
+void TriAttentionKvCache::finalize_per_head_aggregate(
+    std::vector<std::vector<float>>& aggregated_scores,
+    const std::vector<int32_t>& contributing_layers_by_cache_head,
+    const std::vector<float>& global_fallback_mean) const {
+    const bool per_layer_max = config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax;
+    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
+        auto& scores = aggregated_scores[static_cast<std::size_t>(cache_head)];
+        const int32_t head_layer_count =
+            contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)];
+        if (head_layer_count <= 0) {
+            scores = global_fallback_mean;
+            continue;
+        }
+        if (per_layer_max)
+            continue;
+        const float inv = 1.0F / static_cast<float>(head_layer_count);
+        for (float& value : scores)
+            value *= inv;
+    }
+}
+
+void TriAttentionKvCache::maybe_dump_score_values(
+    const std::vector<std::vector<float>>& aggregated_scores,
+    const std::vector<float>& layer_aggregate_dump, int32_t total_tokens) const {
+    if (!config_.dump_score_values)
+        return;
+    const char* dump_path =
+        config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
+    if (dump_path == nullptr || dump_path[0] == '\0')
+        return;
+    std::vector<float> packed_aggregate(
+        static_cast<std::size_t>(cache_head_count_) * static_cast<std::size_t>(total_tokens), 0.0F);
+    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
+        std::copy(aggregated_scores[static_cast<std::size_t>(cache_head)].begin(),
+                  aggregated_scores[static_cast<std::size_t>(cache_head)].end(),
+                  packed_aggregate.begin() + static_cast<std::size_t>(cache_head) *
+                                                 static_cast<std::size_t>(total_tokens));
+    }
+    char path_buf[1024];
+    std::snprintf(path_buf, sizeof(path_buf), "%s.agg.bin", dump_path);
+    std::ofstream out_agg(path_buf, std::ios::binary);
+    out_agg.write(reinterpret_cast<const char*>(packed_aggregate.data()),
+                  static_cast<std::streamsize>(packed_aggregate.size() * sizeof(float)));
+    if (layer_aggregate_dump.empty())
+        return;
+    std::snprintf(path_buf, sizeof(path_buf), "%s.layeragg.bin", dump_path);
+    std::ofstream out_layer(path_buf, std::ios::binary);
+    out_layer.write(reinterpret_cast<const char*>(layer_aggregate_dump.data()),
+                    static_cast<std::streamsize>(layer_aggregate_dump.size() * sizeof(float)));
+}
+
+std::vector<int32_t> TriAttentionKvCache::build_keep_indices_per_head(
+    const std::vector<std::vector<float>>& aggregated_scores, const std::vector<int32_t>& reserved,
+    const std::vector<int32_t>& candidates, int32_t keep_budget, int32_t need) const {
+    std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
+    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
+        auto* out = keep.data() +
+                    static_cast<std::size_t>(cache_head) * static_cast<std::size_t>(keep_budget);
+        std::copy(reserved.begin(), reserved.end(), out);
+        std::vector<std::pair<float, int32_t>> ranked;
+        ranked.reserve(candidates.size());
+        const auto& scores = aggregated_scores[static_cast<std::size_t>(cache_head)];
+        for (const int32_t row : candidates)
+            ranked.emplace_back(scores[static_cast<std::size_t>(row)], row);
+        const int32_t top_n = std::min<int32_t>(need, ranked.size());
+        std::partial_sort(ranked.begin(), ranked.begin() + top_n, ranked.end(),
+                          [](const auto& a, const auto& b) {
+                              if (a.first != b.first)
+                                  return a.first > b.first;
+                              return a.second < b.second;
+                          });
+        for (int32_t i = 0; i < top_n; ++i)
+            out[static_cast<std::size_t>(reserved.size() + i)] =
+                ranked[static_cast<std::size_t>(i)].second;
+        std::sort(out, out + keep_budget);
+    }
+    return keep;
+}
+
+bool TriAttentionKvCache::process_layer_for_host_selection(
+    int32_t layer, int32_t half_dim, int32_t total_tokens,
+    const std::vector<std::vector<float>>& cos_phase,
+    const std::vector<std::vector<float>>& sin_phase,
+    std::vector<std::vector<float>>& aggregated_scores, std::vector<float>& global_fallback_sum,
+    int32_t& global_fallback_count, std::vector<int32_t>& contributing_layers_by_cache_head,
+    std::vector<float>& layer_aggregate_dump, TriAttentionCompactionProfile* profile) const {
+    if (layer < 0 || layer >= static_cast<int32_t>(stats_.layer_stats.size()))
+        return false;
+    const auto& layer_stats = stats_.layer_stats[static_cast<std::size_t>(layer)];
+    const auto& sampled_heads =
+        stats_.sampled_score_heads_by_layer[static_cast<std::size_t>(layer)];
+    if (sampled_heads.empty() || !layer_stats_shapes_valid(layer_stats, half_dim))
+        return false;
+
+    const auto layer_cache =
+        copy_cache_rows_to_host(cache_k_[static_cast<std::size_t>(layer)], cache_length_, profile);
+    if (profile != nullptr) {
+        profile->sampled_layers += 1;
+        profile->sampled_heads += static_cast<int32_t>(sampled_heads.size());
+    }
+
+    std::vector<std::vector<float>> layer_scores(
+        sampled_heads.size(), std::vector<float>(static_cast<std::size_t>(total_tokens), 0.0F));
+    std::vector<std::vector<int32_t>> sampled_by_cache_head(
+        static_cast<std::size_t>(cache_head_count_));
+    for (int32_t sampled_idx = 0; sampled_idx < static_cast<int32_t>(sampled_heads.size());
+         ++sampled_idx) {
+        const int32_t score_head = sampled_heads[static_cast<std::size_t>(sampled_idx)];
+        const int32_t cache_head = std::min(cache_head_count_ - 1, score_head / score_group_size_);
+        sampled_by_cache_head[static_cast<std::size_t>(cache_head)].push_back(sampled_idx);
+        auto& scores = layer_scores[static_cast<std::size_t>(sampled_idx)];
+        score_rows_for_head(scores, layer_cache, layer_stats, score_head, cache_head, half_dim,
+                            total_tokens, cos_phase, sin_phase);
+        standardize_scores(scores);
+    }
+
+    accumulate_layer_fallback(layer_scores, global_fallback_sum, global_fallback_count,
+                              total_tokens);
+    accumulate_layer_to_aggregate(layer, total_tokens, layer_scores, sampled_by_cache_head,
+                                  aggregated_scores, contributing_layers_by_cache_head,
+                                  layer_aggregate_dump);
+    return true;
+}
+
 std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
     int32_t keep_budget, const std::vector<int32_t>& reserved,
     const std::vector<int32_t>& candidates, TriAttentionCompactionProfile* profile) const {
@@ -1132,224 +1415,25 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
         static_cast<std::size_t>(cache_head_count_), 0);
     int32_t contributing_layers = 0;
     for (int32_t layer = 0; layer < num_layers_; ++layer) {
-        if (layer < 0 || layer >= static_cast<int32_t>(stats_.layer_stats.size()))
-            continue;
-        const auto& layer_stats = stats_.layer_stats[static_cast<std::size_t>(layer)];
-        const auto& sampled_heads =
-            stats_.sampled_score_heads_by_layer[static_cast<std::size_t>(layer)];
-        if (sampled_heads.empty() || !layer_stats_shapes_valid(layer_stats, half_dim))
-            continue;
-
-        const auto layer_cache = copy_cache_rows_to_host(cache_k_[static_cast<std::size_t>(layer)],
-                                                         cache_length_, profile);
-        if (profile != nullptr) {
-            profile->sampled_layers += 1;
-            profile->sampled_heads += static_cast<int32_t>(sampled_heads.size());
-        }
-
-        std::vector<std::vector<float>> layer_scores(
-            sampled_heads.size(), std::vector<float>(static_cast<std::size_t>(total_tokens), 0.0F));
-        std::vector<std::vector<int32_t>> sampled_by_cache_head(
-            static_cast<std::size_t>(cache_head_count_));
-        for (int32_t sampled_idx = 0; sampled_idx < static_cast<int32_t>(sampled_heads.size());
-             ++sampled_idx) {
-            const int32_t score_head = sampled_heads[static_cast<std::size_t>(sampled_idx)];
-            const int32_t cache_head =
-                std::min(cache_head_count_ - 1, score_head / score_group_size_);
-            const int32_t head_offset = cache_head * query_group_size_ * stats_.head_dim;
-            const auto stats_base =
-                static_cast<std::size_t>(score_head) * static_cast<std::size_t>(half_dim);
-            auto& scores = layer_scores[static_cast<std::size_t>(sampled_idx)];
-            sampled_by_cache_head[static_cast<std::size_t>(cache_head)].push_back(sampled_idx);
-
-            for (int32_t row = 0; row < total_tokens; ++row) {
-                const float* row_ptr = layer_cache.data() + static_cast<std::size_t>(row) *
-                                                                static_cast<std::size_t>(kv_dim_);
-                float additive = 0.0F;
-                std::vector<float> trig_sums(offsets_.size(), 0.0F);
-
-                for (int32_t d = 0; d < half_dim; ++d) {
-                    float k_rot_real = 0.0F;
-                    float k_rot_imag = 0.0F;
-                    if (stats_.rope_style == TriAttentionRopeStyle::kInterleaved) {
-                        k_rot_real = row_ptr[head_offset + (2 * d)];
-                        k_rot_imag = row_ptr[head_offset + (2 * d) + 1];
-                    } else {
-                        k_rot_real = row_ptr[head_offset + d];
-                        k_rot_imag = row_ptr[head_offset + half_dim + d];
-                    }
-
-                    const auto idx = stats_base + static_cast<std::size_t>(d);
-                    const float q_real = layer_stats.q_mean_real[idx];
-                    const float q_imag = layer_stats.q_mean_imag[idx];
-                    const float q_abs = layer_stats.q_abs_mean[idx];
-                    const float freq_scale_sq = layer_stats.freq_scale_sq[idx];
-                    const float q_mean_abs = complex_abs(q_real, q_imag);
-                    const float k_abs = complex_abs(k_rot_real, k_rot_imag);
-                    const float prod_real = q_real * k_rot_real + q_imag * k_rot_imag;
-                    const float prod_imag = q_imag * k_rot_real - q_real * k_rot_imag;
-                    const float extra_coef = config_.disable_mlr ? q_abs : (q_abs - q_mean_abs);
-                    additive += k_abs * extra_coef * freq_scale_sq;
-
-                    if (!config_.disable_trig) {
-                        for (std::size_t o = 0; o < offsets_.size(); ++o) {
-                            trig_sums[o] += freq_scale_sq *
-                                            (prod_real * cos_phase[o][static_cast<std::size_t>(d)] -
-                                             prod_imag * sin_phase[o][static_cast<std::size_t>(d)]);
-                        }
-                    }
-                }
-
-                float trig_term = 0.0F;
-                if (!config_.disable_trig && !trig_sums.empty()) {
-                    if (config_.score_aggregation == TriAttentionScoreAggregation::kMax) {
-                        trig_term = *std::max_element(trig_sums.begin(), trig_sums.end());
-                    } else {
-                        const float sum = std::accumulate(trig_sums.begin(), trig_sums.end(), 0.0F);
-                        trig_term = sum / static_cast<float>(trig_sums.size());
-                    }
-                }
-                scores[static_cast<std::size_t>(row)] = trig_term + additive;
-            }
-
-            if (!scores.empty()) {
-                const float mean = std::accumulate(scores.begin(), scores.end(), 0.0F) /
-                                   static_cast<float>(scores.size());
-                const float stddev = score_full_stddev_or_one(scores, mean);
-                for (float& value : scores)
-                    value = (value - mean) / stddev;
-            }
-        }
-
-        for (const auto& scores : layer_scores) {
-            for (int32_t row = 0; row < total_tokens; ++row)
-                global_fallback_sum[static_cast<std::size_t>(row)] +=
-                    scores[static_cast<std::size_t>(row)];
-            ++global_fallback_count;
-        }
-
-        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-            auto& aggregate = aggregated_scores[static_cast<std::size_t>(cache_head)];
-            const auto& sampled_group = sampled_by_cache_head[static_cast<std::size_t>(cache_head)];
-            if (sampled_group.empty())
-                continue;
-            const bool first_layer_for_cache_head =
-                contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)] == 0;
-            float* layer_dump = nullptr;
-            if (!layer_aggregate_dump.empty()) {
-                layer_dump =
-                    layer_aggregate_dump.data() +
-                    (static_cast<std::size_t>(layer) * static_cast<std::size_t>(cache_head_count_) +
-                     static_cast<std::size_t>(cache_head)) *
-                        static_cast<std::size_t>(total_tokens);
-            }
-            for (int32_t row = 0; row < total_tokens; ++row) {
-                float reduced = layer_scores[static_cast<std::size_t>(sampled_group.front())]
-                                            [static_cast<std::size_t>(row)];
-                for (std::size_t group_idx = 1; group_idx < sampled_group.size(); ++group_idx) {
-                    reduced = std::max(
-                        reduced, layer_scores[static_cast<std::size_t>(sampled_group[group_idx])]
-                                             [static_cast<std::size_t>(row)]);
-                }
-                if (config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax) {
-                    if (first_layer_for_cache_head) {
-                        aggregate[static_cast<std::size_t>(row)] = reduced;
-                    } else {
-                        aggregate[static_cast<std::size_t>(row)] =
-                            std::max(aggregate[static_cast<std::size_t>(row)], reduced);
-                    }
-                } else {
-                    aggregate[static_cast<std::size_t>(row)] += reduced;
-                }
-                if (layer_dump != nullptr)
-                    layer_dump[static_cast<std::size_t>(row)] = reduced;
-            }
-            ++contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)];
-        }
-        ++contributing_layers;
+        if (process_layer_for_host_selection(
+                layer, half_dim, total_tokens, cos_phase, sin_phase, aggregated_scores,
+                global_fallback_sum, global_fallback_count, contributing_layers_by_cache_head,
+                layer_aggregate_dump, profile))
+            ++contributing_layers;
     }
     if (contributing_layers <= 0)
         return {};
-    const bool per_layer_max = config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax;
-    std::vector<float> global_fallback_mean(static_cast<std::size_t>(total_tokens), 0.0F);
-    if (global_fallback_count > 0) {
-        for (int32_t row = 0; row < total_tokens; ++row) {
-            global_fallback_mean[static_cast<std::size_t>(row)] =
-                global_fallback_sum[static_cast<std::size_t>(row)] /
-                static_cast<float>(global_fallback_count);
-        }
-    }
-    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-        auto& scores = aggregated_scores[static_cast<std::size_t>(cache_head)];
-        const int32_t head_layer_count =
-            contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)];
-        if (head_layer_count > 0) {
-            if (!per_layer_max) {
-                for (float& value : scores)
-                    value /= static_cast<float>(head_layer_count);
-            }
-        } else {
-            scores = global_fallback_mean;
-        }
-    }
+    const auto global_fallback_mean =
+        compute_fallback_mean(global_fallback_sum, global_fallback_count, total_tokens);
+    finalize_per_head_aggregate(aggregated_scores, contributing_layers_by_cache_head,
+                                global_fallback_mean);
     if (profile != nullptr)
         profile->score_ms += elapsed_ms(score_start);
-    if (config_.dump_score_values) {
-        const char* dump_path =
-            config_.dump_keep_path.empty() ? nullptr : config_.dump_keep_path.c_str();
-        if (dump_path != nullptr && dump_path[0] != '\0') {
-            std::vector<float> packed_aggregate(static_cast<std::size_t>(cache_head_count_) *
-                                                    static_cast<std::size_t>(total_tokens),
-                                                0.0F);
-            for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-                std::copy(aggregated_scores[static_cast<std::size_t>(cache_head)].begin(),
-                          aggregated_scores[static_cast<std::size_t>(cache_head)].end(),
-                          packed_aggregate.begin() + static_cast<std::size_t>(cache_head) *
-                                                         static_cast<std::size_t>(total_tokens));
-            }
+    maybe_dump_score_values(aggregated_scores, layer_aggregate_dump, total_tokens);
 
-            {
-                char path_buf[1024];
-                std::snprintf(path_buf, sizeof(path_buf), "%s.agg.bin", dump_path);
-                std::ofstream out(path_buf, std::ios::binary);
-                out.write(reinterpret_cast<const char*>(packed_aggregate.data()),
-                          static_cast<std::streamsize>(packed_aggregate.size() * sizeof(float)));
-            }
-            if (!layer_aggregate_dump.empty()) {
-                char path_buf[1024];
-                std::snprintf(path_buf, sizeof(path_buf), "%s.layeragg.bin", dump_path);
-                std::ofstream out(path_buf, std::ios::binary);
-                out.write(
-                    reinterpret_cast<const char*>(layer_aggregate_dump.data()),
-                    static_cast<std::streamsize>(layer_aggregate_dump.size() * sizeof(float)));
-            }
-        }
-    }
-
-    std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
     const auto combine_start = Clock::now();
-    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-        auto* out = keep.data() +
-                    static_cast<std::size_t>(cache_head) * static_cast<std::size_t>(keep_budget);
-        std::copy(reserved.begin(), reserved.end(), out);
-        std::vector<std::pair<float, int32_t>> ranked;
-        ranked.reserve(candidates.size());
-        const auto& scores = aggregated_scores[static_cast<std::size_t>(cache_head)];
-        for (const int32_t row : candidates) {
-            ranked.emplace_back(scores[static_cast<std::size_t>(row)], row);
-        }
-        const int32_t top_n = std::min<int32_t>(need, ranked.size());
-        std::partial_sort(ranked.begin(), ranked.begin() + top_n, ranked.end(),
-                          [](const auto& a, const auto& b) {
-                              if (a.first != b.first)
-                                  return a.first > b.first;
-                              return a.second < b.second;
-                          });
-        for (int32_t i = 0; i < top_n; ++i)
-            out[static_cast<std::size_t>(reserved.size() + i)] =
-                ranked[static_cast<std::size_t>(i)].second;
-        std::sort(out, out + keep_budget);
-    }
+    auto keep =
+        build_keep_indices_per_head(aggregated_scores, reserved, candidates, keep_budget, need);
     if (profile != nullptr)
         profile->combine_ms += elapsed_ms(combine_start);
     return keep;

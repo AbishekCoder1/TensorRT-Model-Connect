@@ -212,6 +212,57 @@ class TriAttentionKvCache : public IInferenceState {
                                 std::vector<std::vector<float>>& sin_phase, int32_t half_dim,
                                 TriAttentionCompactionProfile* profile) const;
     bool layer_stats_shapes_valid(const TriAttentionHeadStats& layer_stats, int32_t half_dim) const;
+    void extract_k_rot(const float* row_ptr, int32_t head_offset, int32_t d, int32_t half_dim,
+                       float& k_rot_real, float& k_rot_imag) const;
+    float reduce_trig_sums(const std::vector<float>& trig_sums) const;
+    float score_one_row(const float* row_ptr, const TriAttentionHeadStats& layer_stats,
+                        std::size_t stats_base, int32_t head_offset, int32_t half_dim,
+                        const std::vector<std::vector<float>>& cos_phase,
+                        const std::vector<std::vector<float>>& sin_phase) const;
+    void score_rows_for_head(std::vector<float>& scores, const std::vector<float>& layer_cache,
+                             const TriAttentionHeadStats& layer_stats, int32_t score_head,
+                             int32_t cache_head, int32_t half_dim, int32_t total_tokens,
+                             const std::vector<std::vector<float>>& cos_phase,
+                             const std::vector<std::vector<float>>& sin_phase) const;
+    void standardize_scores(std::vector<float>& scores) const;
+    void accumulate_layer_fallback(const std::vector<std::vector<float>>& layer_scores,
+                                   std::vector<float>& global_fallback_sum,
+                                   int32_t& global_fallback_count, int32_t total_tokens) const;
+    void reduce_group_into_aggregate(int32_t cache_head, int32_t total_tokens,
+                                     const std::vector<std::vector<float>>& layer_scores,
+                                     const std::vector<int32_t>& sampled_group,
+                                     std::vector<float>& aggregate, bool first_layer_for_cache_head,
+                                     float* layer_dump) const;
+    void
+    accumulate_layer_to_aggregate(int32_t layer, int32_t total_tokens,
+                                  const std::vector<std::vector<float>>& layer_scores,
+                                  const std::vector<std::vector<int32_t>>& sampled_by_cache_head,
+                                  std::vector<std::vector<float>>& aggregated_scores,
+                                  std::vector<int32_t>& contributing_layers_by_cache_head,
+                                  std::vector<float>& layer_aggregate_dump) const;
+    std::vector<float> compute_fallback_mean(const std::vector<float>& global_fallback_sum,
+                                             int32_t global_fallback_count,
+                                             int32_t total_tokens) const;
+    void finalize_per_head_aggregate(std::vector<std::vector<float>>& aggregated_scores,
+                                     const std::vector<int32_t>& contributing_layers_by_cache_head,
+                                     const std::vector<float>& global_fallback_mean) const;
+    void maybe_dump_score_values(const std::vector<std::vector<float>>& aggregated_scores,
+                                 const std::vector<float>& layer_aggregate_dump,
+                                 int32_t total_tokens) const;
+    std::vector<int32_t>
+    build_keep_indices_per_head(const std::vector<std::vector<float>>& aggregated_scores,
+                                const std::vector<int32_t>& reserved,
+                                const std::vector<int32_t>& candidates, int32_t keep_budget,
+                                int32_t need) const;
+    bool process_layer_for_host_selection(int32_t layer, int32_t half_dim, int32_t total_tokens,
+                                          const std::vector<std::vector<float>>& cos_phase,
+                                          const std::vector<std::vector<float>>& sin_phase,
+                                          std::vector<std::vector<float>>& aggregated_scores,
+                                          std::vector<float>& global_fallback_sum,
+                                          int32_t& global_fallback_count,
+                                          std::vector<int32_t>& contributing_layers_by_cache_head,
+                                          std::vector<float>& layer_aggregate_dump,
+                                          TriAttentionCompactionProfile* profile) const;
     std::vector<float>
     copy_cache_rows_to_host(const DeviceTensor& tensor, int32_t rows,
                             TriAttentionCompactionProfile* profile = nullptr) const;
