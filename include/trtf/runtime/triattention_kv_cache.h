@@ -286,6 +286,39 @@ class TriAttentionKvCache : public IInferenceState {
     bool can_use_gpu_selection() const;
     bool core_selection_buffers_ready() const;
     static bool layer_gpu_stats_ready(const LayerGpuStats& layer);
+    enum class GpuLayerResult { kSkipped, kContributed, kFailed };
+    GpuLayerResult process_layer_for_gpu_selection(
+        int32_t layer, int32_t total_tokens, int32_t num_offsets,
+        std::vector<float>& aggregated_scores, std::vector<float>& global_fallback_sum,
+        int32_t& global_fallback_count, std::vector<int32_t>& contributing_layers_by_cache_head,
+        TriAttentionCompactionProfile* profile);
+    void standardize_score_rows(float* rows, int32_t num_rows, int32_t total_tokens) const;
+    void accumulate_flat_fallback(const float* rows, int32_t num_rows, int32_t total_tokens,
+                                  std::vector<float>& fallback_sum, int32_t& fallback_count) const;
+    void aggregate_gpu_layer_into_cache_heads(
+        const std::vector<float>& host_scores, const LayerGpuStats& gpu, int32_t total_tokens,
+        std::vector<float>& aggregated_scores,
+        std::vector<int32_t>& contributing_layers_by_cache_head) const;
+    bool upload_candidate_indices_identity(int32_t total_tokens);
+    bool upload_gpu_trig_phases(int32_t num_offsets, int32_t half_dim,
+                                TriAttentionCompactionProfile* profile);
+    bool run_gpu_selection_over_layers(int32_t total_tokens, int32_t num_offsets,
+                                       std::vector<float>& aggregated_scores,
+                                       std::vector<float>& global_fallback_sum,
+                                       int32_t& global_fallback_count,
+                                       std::vector<int32_t>& contributing_layers_by_cache_head,
+                                       int32_t& contributing_layers,
+                                       TriAttentionCompactionProfile* profile);
+    void
+    finalize_flat_per_head_aggregate(std::vector<float>& aggregated_scores,
+                                     const std::vector<int32_t>& contributing_layers_by_cache_head,
+                                     const std::vector<float>& global_fallback_mean,
+                                     int32_t total_tokens) const;
+    std::vector<int32_t> build_keep_from_flat_aggregate(const std::vector<float>& aggregated_scores,
+                                                        const std::vector<int32_t>& reserved,
+                                                        const std::vector<int32_t>& candidates,
+                                                        int32_t keep_budget, int32_t need,
+                                                        int32_t total_tokens) const;
     std::vector<int32_t> select_keep_indices_gpu(int32_t keep_budget,
                                                  const std::vector<int32_t>& reserved,
                                                  const std::vector<int32_t>& candidates,

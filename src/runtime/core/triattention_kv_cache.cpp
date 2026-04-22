@@ -1440,206 +1440,186 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
 }
 
 #ifdef TRTF_HAS_CUDA_KERNELS
-std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
-    int32_t keep_budget, const std::vector<int32_t>& reserved,
-    const std::vector<int32_t>& candidates, TriAttentionCompactionProfile* profile) {
-    const int32_t need = std::max(0, keep_budget - static_cast<int32_t>(reserved.size()));
-    if (need <= 0) {
-        std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
-        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head)
-            std::copy(reserved.begin(), reserved.end(),
-                      keep.begin() + static_cast<std::ptrdiff_t>(cache_head * keep_budget));
-        return keep;
+void TriAttentionKvCache::standardize_score_rows(float* rows, int32_t num_rows,
+                                                 int32_t total_tokens) const {
+    for (int32_t r = 0; r < num_rows; ++r) {
+        float* score_row = rows + static_cast<std::size_t>(r) * total_tokens;
+        float mean = 0.0F;
+        for (int32_t row = 0; row < total_tokens; ++row)
+            mean += score_row[row];
+        mean /= static_cast<float>(total_tokens);
+        float var = 0.0F;
+        for (int32_t row = 0; row < total_tokens; ++row) {
+            const float delta = score_row[row] - mean;
+            var += delta * delta;
+        }
+        const float denom = total_tokens > 1 ? static_cast<float>(total_tokens - 1) : 1.0F;
+        const float stddev = std::sqrt(std::max(var / denom, 0.0F));
+        const float std_safe = stddev < kEps ? 1.0F : stddev;
+        for (int32_t row = 0; row < total_tokens; ++row)
+            score_row[row] = (score_row[row] - mean) / std_safe;
     }
-    if (candidates.empty())
-        return select_keep_indices_host(keep_budget, reserved, candidates, profile);
+}
 
-    const int32_t total_tokens = static_cast<int32_t>(cache_positions_.size());
-    if (total_tokens <= 0)
-        return {};
+void TriAttentionKvCache::accumulate_flat_fallback(const float* rows, int32_t num_rows,
+                                                   int32_t total_tokens,
+                                                   std::vector<float>& fallback_sum,
+                                                   int32_t& fallback_count) const {
+    for (int32_t r = 0; r < num_rows; ++r) {
+        const float* score_row = rows + static_cast<std::size_t>(r) * total_tokens;
+        for (int32_t row = 0; row < total_tokens; ++row)
+            fallback_sum[static_cast<std::size_t>(row)] += score_row[row];
+        ++fallback_count;
+    }
+}
 
+void TriAttentionKvCache::aggregate_gpu_layer_into_cache_heads(
+    const std::vector<float>& host_scores, const LayerGpuStats& gpu, int32_t total_tokens,
+    std::vector<float>& aggregated_scores,
+    std::vector<int32_t>& contributing_layers_by_cache_head) const {
+    const bool use_max = config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax;
+    for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
+        std::vector<int32_t> sampled_group;
+        sampled_group.reserve(static_cast<std::size_t>(gpu.score_head_count));
+        for (int32_t score_head = 0; score_head < gpu.score_head_count; ++score_head) {
+            if (gpu.host_cache_head_indices[static_cast<std::size_t>(score_head)] == cache_head)
+                sampled_group.push_back(score_head);
+        }
+        if (sampled_group.empty())
+            continue;
+        float* aggregate_row =
+            aggregated_scores.data() + static_cast<std::size_t>(cache_head) * total_tokens;
+        const bool first_layer =
+            contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)] == 0;
+        for (int32_t row = 0; row < total_tokens; ++row) {
+            float reduced =
+                host_scores[static_cast<std::size_t>(sampled_group.front()) * total_tokens +
+                            static_cast<std::size_t>(row)];
+            for (std::size_t group_idx = 1; group_idx < sampled_group.size(); ++group_idx) {
+                reduced = std::max(
+                    reduced,
+                    host_scores[static_cast<std::size_t>(sampled_group[group_idx]) * total_tokens +
+                                static_cast<std::size_t>(row)]);
+            }
+            aggregate_row[row] =
+                use_max ? (first_layer ? reduced : std::max(aggregate_row[row], reduced))
+                        : aggregate_row[row] + reduced;
+        }
+        ++contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)];
+    }
+}
+
+TriAttentionKvCache::GpuLayerResult TriAttentionKvCache::process_layer_for_gpu_selection(
+    int32_t layer, int32_t total_tokens, int32_t num_offsets, std::vector<float>& aggregated_scores,
+    std::vector<float>& global_fallback_sum, int32_t& global_fallback_count,
+    std::vector<int32_t>& contributing_layers_by_cache_head,
+    TriAttentionCompactionProfile* profile) {
+    if (layer < 0 || layer >= static_cast<int32_t>(layer_gpu_stats_.size()))
+        return GpuLayerResult::kSkipped;
+    auto& gpu = layer_gpu_stats_[static_cast<std::size_t>(layer)];
+    if (gpu.score_head_count <= 0)
+        return GpuLayerResult::kSkipped;
+    if (profile != nullptr) {
+        profile->sampled_layers += 1;
+        profile->sampled_heads += gpu.score_head_count;
+    }
+    const bool launched = triattention_score_candidates_gpu(
+        cache_k_[static_cast<std::size_t>(layer)].data(), cache_dtype_, kv_dim_, stats_.head_dim,
+        stats_.rope_style, static_cast<const int32_t*>(candidate_indices_device_.data()),
+        total_tokens, nullptr, static_cast<const float*>(inv_freq_device_.data()),
+        static_cast<const float*>(cos_phase_device_.data()),
+        static_cast<const float*>(sin_phase_device_.data()), num_offsets,
+        static_cast<const int32_t*>(gpu.head_offsets.data()),
+        static_cast<const int32_t*>(gpu.head_cache_indices.data()),
+        static_cast<const float*>(gpu.q_mean_real.data()),
+        static_cast<const float*>(gpu.q_mean_imag.data()),
+        static_cast<const float*>(gpu.q_abs_mean.data()),
+        static_cast<const float*>(gpu.freq_scale_sq.data()), gpu.score_head_count,
+        config_.disable_mlr, config_.disable_trig,
+        config_.score_aggregation == TriAttentionScoreAggregation::kMax,
+        static_cast<float*>(gpu.scores.data()), stream_);
+    if (!launched)
+        return GpuLayerResult::kFailed;
+    std::vector<float> host_scores(static_cast<std::size_t>(gpu.score_head_count) *
+                                   static_cast<std::size_t>(total_tokens));
+    const auto score_bytes = host_scores.size() * sizeof(float);
+    if (cudaMemcpyAsync(host_scores.data(), gpu.scores.data(), score_bytes, cudaMemcpyDeviceToHost,
+                        stream_) != cudaSuccess)
+        return GpuLayerResult::kFailed;
+    if (cudaStreamSynchronize(stream_) != cudaSuccess)
+        return GpuLayerResult::kFailed;
+    standardize_score_rows(host_scores.data(), gpu.score_head_count, total_tokens);
+    accumulate_flat_fallback(host_scores.data(), gpu.score_head_count, total_tokens,
+                             global_fallback_sum, global_fallback_count);
+    aggregate_gpu_layer_into_cache_heads(host_scores, gpu, total_tokens, aggregated_scores,
+                                         contributing_layers_by_cache_head);
+    return GpuLayerResult::kContributed;
+}
+
+bool TriAttentionKvCache::upload_candidate_indices_identity(int32_t total_tokens) {
     std::vector<int32_t> score_rows(static_cast<std::size_t>(total_tokens));
     std::iota(score_rows.begin(), score_rows.end(), 0);
-    const auto score_row_bytes = static_cast<std::size_t>(total_tokens) * sizeof(int32_t);
-    if (cudaMemcpyAsync(candidate_indices_device_.data(), score_rows.data(), score_row_bytes,
-                        cudaMemcpyHostToDevice, stream_) != cudaSuccess) {
-        return select_keep_indices_host(keep_budget, reserved, candidates, profile);
-    }
+    const auto bytes = static_cast<std::size_t>(total_tokens) * sizeof(int32_t);
+    return cudaMemcpyAsync(candidate_indices_device_.data(), score_rows.data(), bytes,
+                           cudaMemcpyHostToDevice, stream_) == cudaSuccess;
+}
 
-    const int32_t num_offsets = static_cast<int32_t>(offsets_.size());
-    const int32_t half_dim = stats_.head_dim / 2;
-    if (!config_.disable_trig) {
-        const auto trig_start = Clock::now();
-        std::vector<float> cos_phase(static_cast<std::size_t>(num_offsets) *
-                                     static_cast<std::size_t>(half_dim));
-        std::vector<float> sin_phase(static_cast<std::size_t>(num_offsets) *
-                                     static_cast<std::size_t>(half_dim));
-        // Keep GPU scoring aligned with the host path and upstream selector:
-        // use the request's absolute decode position for the trig phase.
-        const float round_start = static_cast<float>(absolute_position_);
-        for (int32_t o = 0; o < num_offsets; ++o) {
-            for (int32_t d = 0; d < half_dim; ++d) {
-                const std::size_t idx =
-                    static_cast<std::size_t>(o) * static_cast<std::size_t>(half_dim) + d;
-                const float phase = (round_start + offsets_[static_cast<std::size_t>(o)]) *
-                                    stats_.inv_freq[static_cast<std::size_t>(d)];
-                cos_phase[idx] = std::cos(phase);
-                sin_phase[idx] = std::sin(phase);
-            }
-        }
-
-        const auto phase_bytes = cos_phase.size() * sizeof(float);
-        if (cudaMemcpyAsync(cos_phase_device_.data(), cos_phase.data(), phase_bytes,
-                            cudaMemcpyHostToDevice, stream_) != cudaSuccess ||
-            cudaMemcpyAsync(sin_phase_device_.data(), sin_phase.data(), phase_bytes,
-                            cudaMemcpyHostToDevice, stream_) != cudaSuccess) {
-            return select_keep_indices_host(keep_budget, reserved, candidates, profile);
-        }
-        if (profile != nullptr)
-            profile->trig_prep_ms += elapsed_ms(trig_start);
-    }
-
-    const auto score_start = Clock::now();
-    std::vector<float> aggregated_scores(
-        static_cast<std::size_t>(cache_head_count_) * static_cast<std::size_t>(total_tokens), 0.0F);
-    std::vector<float> global_fallback_sum(static_cast<std::size_t>(total_tokens), 0.0F);
-    int32_t global_fallback_count = 0;
-    std::vector<int32_t> contributing_layers_by_cache_head(
-        static_cast<std::size_t>(cache_head_count_), 0);
-    int32_t contributing_layers = 0;
-    for (int32_t layer = 0; layer < num_layers_; ++layer) {
-        if (layer < 0 || layer >= static_cast<int32_t>(layer_gpu_stats_.size()))
-            continue;
-        auto& gpu = layer_gpu_stats_[static_cast<std::size_t>(layer)];
-        if (gpu.score_head_count <= 0)
-            continue;
-
-        if (profile != nullptr) {
-            profile->sampled_layers += 1;
-            profile->sampled_heads += gpu.score_head_count;
-        }
-
-        const bool launched = triattention_score_candidates_gpu(
-            cache_k_[static_cast<std::size_t>(layer)].data(), cache_dtype_, kv_dim_,
-            stats_.head_dim, stats_.rope_style,
-            static_cast<const int32_t*>(candidate_indices_device_.data()), total_tokens, nullptr,
-            static_cast<const float*>(inv_freq_device_.data()),
-            static_cast<const float*>(cos_phase_device_.data()),
-            static_cast<const float*>(sin_phase_device_.data()), num_offsets,
-            static_cast<const int32_t*>(gpu.head_offsets.data()),
-            static_cast<const int32_t*>(gpu.head_cache_indices.data()),
-            static_cast<const float*>(gpu.q_mean_real.data()),
-            static_cast<const float*>(gpu.q_mean_imag.data()),
-            static_cast<const float*>(gpu.q_abs_mean.data()),
-            static_cast<const float*>(gpu.freq_scale_sq.data()), gpu.score_head_count,
-            config_.disable_mlr, config_.disable_trig,
-            config_.score_aggregation == TriAttentionScoreAggregation::kMax,
-            static_cast<float*>(gpu.scores.data()), stream_);
-        if (!launched)
-            return select_keep_indices_host(keep_budget, reserved, candidates, profile);
-
-        std::vector<float> host_scores(static_cast<std::size_t>(gpu.score_head_count) *
-                                       static_cast<std::size_t>(total_tokens));
-        const auto score_bytes = host_scores.size() * sizeof(float);
-        if (cudaMemcpyAsync(host_scores.data(), gpu.scores.data(), score_bytes,
-                            cudaMemcpyDeviceToHost, stream_) != cudaSuccess) {
-            return select_keep_indices_host(keep_budget, reserved, candidates, profile);
-        }
-        if (cudaStreamSynchronize(stream_) != cudaSuccess)
-            return select_keep_indices_host(keep_budget, reserved, candidates, profile);
-
-        for (int32_t score_head = 0; score_head < gpu.score_head_count; ++score_head) {
-            float* score_row =
-                host_scores.data() + static_cast<std::size_t>(score_head) * total_tokens;
-            float mean = 0.0F;
-            for (int32_t row = 0; row < total_tokens; ++row)
-                mean += score_row[row];
-            mean /= static_cast<float>(total_tokens);
-            float var = 0.0F;
-            for (int32_t row = 0; row < total_tokens; ++row) {
-                const float delta = score_row[row] - mean;
-                var += delta * delta;
-            }
-            const float denom = total_tokens > 1 ? static_cast<float>(total_tokens - 1) : 1.0F;
-            const float stddev = std::sqrt(std::max(var / denom, 0.0F));
-            const float std_safe = stddev < kEps ? 1.0F : stddev;
-            for (int32_t row = 0; row < total_tokens; ++row)
-                score_row[row] = (score_row[row] - mean) / std_safe;
-        }
-        for (int32_t score_head = 0; score_head < gpu.score_head_count; ++score_head) {
-            const float* score_row =
-                host_scores.data() + static_cast<std::size_t>(score_head) * total_tokens;
-            for (int32_t row = 0; row < total_tokens; ++row)
-                global_fallback_sum[static_cast<std::size_t>(row)] += score_row[row];
-            ++global_fallback_count;
-        }
-        for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
-            float* aggregate_row =
-                aggregated_scores.data() + static_cast<std::size_t>(cache_head) * total_tokens;
-            std::vector<int32_t> sampled_group;
-            sampled_group.reserve(static_cast<std::size_t>(gpu.score_head_count));
-            for (int32_t score_head = 0; score_head < gpu.score_head_count; ++score_head) {
-                if (gpu.host_cache_head_indices[static_cast<std::size_t>(score_head)] == cache_head)
-                    sampled_group.push_back(score_head);
-            }
-            if (sampled_group.empty())
-                continue;
-            const bool first_layer_for_cache_head =
-                contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)] == 0;
-            for (int32_t row = 0; row < total_tokens; ++row) {
-                float reduced =
-                    host_scores[static_cast<std::size_t>(sampled_group.front()) * total_tokens +
-                                static_cast<std::size_t>(row)];
-                for (std::size_t group_idx = 1; group_idx < sampled_group.size(); ++group_idx) {
-                    reduced = std::max(
-                        reduced, host_scores[static_cast<std::size_t>(sampled_group[group_idx]) *
-                                                 total_tokens +
-                                             static_cast<std::size_t>(row)]);
-                }
-                if (config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax) {
-                    if (first_layer_for_cache_head) {
-                        aggregate_row[row] = reduced;
-                    } else {
-                        aggregate_row[row] = std::max(aggregate_row[row], reduced);
-                    }
-                } else {
-                    aggregate_row[row] += reduced;
-                }
-            }
-            ++contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)];
-        }
-        ++contributing_layers;
-    }
-    if (contributing_layers <= 0)
-        return select_keep_indices_host(keep_budget, reserved, candidates, profile);
-
-    std::vector<float> global_fallback_mean(static_cast<std::size_t>(total_tokens), 0.0F);
-    if (global_fallback_count > 0) {
-        for (int32_t row = 0; row < total_tokens; ++row) {
-            global_fallback_mean[static_cast<std::size_t>(row)] =
-                global_fallback_sum[static_cast<std::size_t>(row)] /
-                static_cast<float>(global_fallback_count);
+bool TriAttentionKvCache::upload_gpu_trig_phases(int32_t num_offsets, int32_t half_dim,
+                                                 TriAttentionCompactionProfile* profile) {
+    if (config_.disable_trig)
+        return true;
+    const auto trig_start = Clock::now();
+    std::vector<float> cos_phase(static_cast<std::size_t>(num_offsets) *
+                                 static_cast<std::size_t>(half_dim));
+    std::vector<float> sin_phase(static_cast<std::size_t>(num_offsets) *
+                                 static_cast<std::size_t>(half_dim));
+    const float round_start = static_cast<float>(absolute_position_);
+    for (int32_t o = 0; o < num_offsets; ++o) {
+        for (int32_t d = 0; d < half_dim; ++d) {
+            const std::size_t idx =
+                static_cast<std::size_t>(o) * static_cast<std::size_t>(half_dim) + d;
+            const float phase = (round_start + offsets_[static_cast<std::size_t>(o)]) *
+                                stats_.inv_freq[static_cast<std::size_t>(d)];
+            cos_phase[idx] = std::cos(phase);
+            sin_phase[idx] = std::sin(phase);
         }
     }
+    const auto phase_bytes = cos_phase.size() * sizeof(float);
+    const bool ok_cos = cudaMemcpyAsync(cos_phase_device_.data(), cos_phase.data(), phase_bytes,
+                                        cudaMemcpyHostToDevice, stream_) == cudaSuccess;
+    const bool ok_sin = cudaMemcpyAsync(sin_phase_device_.data(), sin_phase.data(), phase_bytes,
+                                        cudaMemcpyHostToDevice, stream_) == cudaSuccess;
+    if (profile != nullptr)
+        profile->trig_prep_ms += elapsed_ms(trig_start);
+    return ok_cos && ok_sin;
+}
+
+void TriAttentionKvCache::finalize_flat_per_head_aggregate(
+    std::vector<float>& aggregated_scores,
+    const std::vector<int32_t>& contributing_layers_by_cache_head,
+    const std::vector<float>& global_fallback_mean, int32_t total_tokens) const {
+    const bool per_layer_max = config_.per_layer_aggregation == TriAttentionScoreAggregation::kMax;
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
         float* score_row =
             aggregated_scores.data() + static_cast<std::size_t>(cache_head) * total_tokens;
         const int32_t head_layer_count =
             contributing_layers_by_cache_head[static_cast<std::size_t>(cache_head)];
-        if (head_layer_count > 0) {
-            if (config_.per_layer_aggregation != TriAttentionScoreAggregation::kMax) {
-                for (int32_t row = 0; row < total_tokens; ++row)
-                    score_row[row] /= static_cast<float>(head_layer_count);
-            }
-        } else {
+        if (head_layer_count <= 0) {
             std::copy(global_fallback_mean.begin(), global_fallback_mean.end(), score_row);
+            continue;
         }
+        if (per_layer_max)
+            continue;
+        const float inv = 1.0F / static_cast<float>(head_layer_count);
+        for (int32_t row = 0; row < total_tokens; ++row)
+            score_row[row] *= inv;
     }
+}
 
-    if (profile != nullptr)
-        profile->score_ms += elapsed_ms(score_start);
-
-    const auto combine_start = Clock::now();
+std::vector<int32_t> TriAttentionKvCache::build_keep_from_flat_aggregate(
+    const std::vector<float>& aggregated_scores, const std::vector<int32_t>& reserved,
+    const std::vector<int32_t>& candidates, int32_t keep_budget, int32_t need,
+    int32_t total_tokens) const {
     std::vector<int32_t> keep(static_cast<std::size_t>(cache_head_count_ * keep_budget));
     for (int32_t cache_head = 0; cache_head < cache_head_count_; ++cache_head) {
         const float* score_row =
@@ -1649,9 +1629,8 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
         std::copy(reserved.begin(), reserved.end(), out);
         std::vector<std::pair<float, int32_t>> ranked;
         ranked.reserve(candidates.size());
-        for (const int32_t row : candidates) {
+        for (const int32_t row : candidates)
             ranked.emplace_back(score_row[row], row);
-        }
         const int32_t top_n = std::min<int32_t>(need, ranked.size());
         std::partial_sort(ranked.begin(), ranked.begin() + top_n, ranked.end(),
                           [](const auto& a, const auto& b) {
@@ -1664,6 +1643,71 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
                 ranked[static_cast<std::size_t>(i)].second;
         std::sort(out, out + keep_budget);
     }
+    return keep;
+}
+
+bool TriAttentionKvCache::run_gpu_selection_over_layers(
+    int32_t total_tokens, int32_t num_offsets, std::vector<float>& aggregated_scores,
+    std::vector<float>& global_fallback_sum, int32_t& global_fallback_count,
+    std::vector<int32_t>& contributing_layers_by_cache_head, int32_t& contributing_layers,
+    TriAttentionCompactionProfile* profile) {
+    for (int32_t layer = 0; layer < num_layers_; ++layer) {
+        const auto status = process_layer_for_gpu_selection(
+            layer, total_tokens, num_offsets, aggregated_scores, global_fallback_sum,
+            global_fallback_count, contributing_layers_by_cache_head, profile);
+        if (status == GpuLayerResult::kFailed)
+            return false;
+        if (status == GpuLayerResult::kContributed)
+            ++contributing_layers;
+    }
+    return true;
+}
+
+std::vector<int32_t> TriAttentionKvCache::select_keep_indices_gpu(
+    int32_t keep_budget, const std::vector<int32_t>& reserved,
+    const std::vector<int32_t>& candidates, TriAttentionCompactionProfile* profile) {
+    const int32_t need = std::max(0, keep_budget - static_cast<int32_t>(reserved.size()));
+    if (need <= 0)
+        return broadcast_reserved_for_empty_budget(keep_budget, reserved);
+    if (candidates.empty())
+        return select_keep_indices_host(keep_budget, reserved, candidates, profile);
+
+    const int32_t total_tokens = static_cast<int32_t>(cache_positions_.size());
+    if (total_tokens <= 0)
+        return {};
+    if (!upload_candidate_indices_identity(total_tokens))
+        return select_keep_indices_host(keep_budget, reserved, candidates, profile);
+
+    const int32_t num_offsets = static_cast<int32_t>(offsets_.size());
+    const int32_t half_dim = stats_.head_dim / 2;
+    if (!upload_gpu_trig_phases(num_offsets, half_dim, profile))
+        return select_keep_indices_host(keep_budget, reserved, candidates, profile);
+
+    const auto score_start = Clock::now();
+    std::vector<float> aggregated_scores(
+        static_cast<std::size_t>(cache_head_count_) * static_cast<std::size_t>(total_tokens), 0.0F);
+    std::vector<float> global_fallback_sum(static_cast<std::size_t>(total_tokens), 0.0F);
+    int32_t global_fallback_count = 0;
+    std::vector<int32_t> contributing_layers_by_cache_head(
+        static_cast<std::size_t>(cache_head_count_), 0);
+    int32_t contributing_layers = 0;
+    if (!run_gpu_selection_over_layers(
+            total_tokens, num_offsets, aggregated_scores, global_fallback_sum,
+            global_fallback_count, contributing_layers_by_cache_head, contributing_layers, profile))
+        return select_keep_indices_host(keep_budget, reserved, candidates, profile);
+    if (contributing_layers <= 0)
+        return select_keep_indices_host(keep_budget, reserved, candidates, profile);
+
+    const auto global_fallback_mean =
+        compute_fallback_mean(global_fallback_sum, global_fallback_count, total_tokens);
+    finalize_flat_per_head_aggregate(aggregated_scores, contributing_layers_by_cache_head,
+                                     global_fallback_mean, total_tokens);
+    if (profile != nullptr)
+        profile->score_ms += elapsed_ms(score_start);
+
+    const auto combine_start = Clock::now();
+    auto keep = build_keep_from_flat_aggregate(aggregated_scores, reserved, candidates, keep_budget,
+                                               need, total_tokens);
     if (profile != nullptr)
         profile->combine_ms += elapsed_ms(combine_start);
     return keep;
