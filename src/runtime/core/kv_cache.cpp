@@ -79,8 +79,37 @@ int32_t KvCache::preferred_cache_rows() const {
     return round_up_rows(std::max(position_, 1), kRuntimeBucketRows, max_length_);
 }
 
+void KvCache::rebind_cache_rows(int32_t cache_rows) {
+    if (!dynamic_binding_enabled_ || bound_module_ == nullptr || cache_rows == bound_cache_rows_)
+        return;
+    const std::vector<int64_t> cache_shape{cache_rows, kv_dim_};
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto li = static_cast<std::size_t>(i);
+        bound_module_->bind_external(names_.cache_k[li], cache_k_[li].data(), cache_shape);
+        bound_module_->bind_external(names_.cache_v[li], cache_v_[li].data(), cache_shape);
+    }
+    bound_cache_rows_ = cache_rows;
+}
+
+// Match the engine-declared rank for attention_mask. Different engine families
+// wire the causal mask with different shapes:
+//   * static decoder (cache-full, e.g. legacy builds): [max_length + 1]
+//   * dynamic decoder (standard + triattention):       [1, mask_width]
+//   * magpie TTS decoder (3-D with query dim):         [1, 1, mask_width]
+// The tensor content is identical (width = current mask_width); only the
+// leading broadcast dimensions change.
+std::vector<int64_t> KvCache::mask_shape_for_engine(int32_t mask_width,
+                                                    std::size_t mask_buf_size) const {
+    const int32_t mask_rank =
+        bound_module_ != nullptr ? bound_module_->input_rank(names_.attention_mask) : 0;
+    if (mask_rank == 3)
+        return {1, 1, mask_width};
+    if (mask_rank == 2 || (mask_rank == 0 && dynamic_binding_enabled_))
+        return {1, mask_width};
+    return {static_cast<int64_t>(mask_buf_size)};
+}
+
 void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
-    // Position input (discovered during bind_to).
     if (has_position_input_) {
         pos_buf_ = position_;
         Tensor pos_t;
@@ -93,15 +122,7 @@ void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
     const int32_t valid = std::max(0, std::min(position_, max_length_));
     const int32_t cache_rows = dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;
     const int32_t mask_width = dynamic_binding_enabled_ ? (cache_rows + 1) : (max_length_ + 1);
-    if (dynamic_binding_enabled_ && bound_module_ != nullptr && cache_rows != bound_cache_rows_) {
-        const std::vector<int64_t> cache_shape{cache_rows, kv_dim_};
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            const auto li = static_cast<std::size_t>(i);
-            bound_module_->bind_external(names_.cache_k[li], cache_k_[li].data(), cache_shape);
-            bound_module_->bind_external(names_.cache_v[li], cache_v_[li].data(), cache_shape);
-        }
-        bound_cache_rows_ = cache_rows;
-    }
+    rebind_cache_rows(cache_rows);
 
     // Dense causal mask: 0.0 = visible, -1e4 = masked.
     std::fill(mask_buf_.begin(), mask_buf_.begin() + mask_width, kMaskedScore);
@@ -111,22 +132,7 @@ void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
 
     Tensor mask_t;
     mask_t.data = mask_buf_.data();
-    // Match the engine-declared rank for attention_mask. Different engine
-    // families wire the causal mask with different shapes:
-    //   * static decoder (cache-full, e.g. legacy builds): [max_length + 1]
-    //   * dynamic decoder (standard + triattention):       [1, mask_width]
-    //   * magpie TTS decoder (3-D with query dim):         [1, 1, mask_width]
-    // The tensor content is identical (width = current mask_width); only the
-    // leading broadcast dimensions change.
-    const int32_t mask_rank =
-        bound_module_ != nullptr ? bound_module_->input_rank(names_.attention_mask) : 0;
-    if (mask_rank == 3) {
-        mask_t.shape = {1, 1, mask_width};
-    } else if (mask_rank == 2 || (mask_rank == 0 && dynamic_binding_enabled_)) {
-        mask_t.shape = {1, mask_width};
-    } else {
-        mask_t.shape = {static_cast<int64_t>(mask_buf_.size())};
-    }
+    mask_t.shape = mask_shape_for_engine(mask_width, mask_buf_.size());
     mask_t.dtype = DType::kFloat32;
     inputs[names_.attention_mask] = mask_t;
 }

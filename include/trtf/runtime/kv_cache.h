@@ -63,6 +63,9 @@ class KvCache : public IInferenceState {
     DeviceTensor& cache_v(int32_t layer) { return cache_v_[static_cast<std::size_t>(layer)]; }
 
   private:
+    void rebind_cache_rows(int32_t cache_rows);
+    std::vector<int64_t> mask_shape_for_engine(int32_t mask_width, std::size_t mask_buf_size) const;
+
     std::vector<DeviceTensor> cache_k_;   // [num_layers], shape [max_length, kv_dim]
     std::vector<DeviceTensor> cache_v_;   // [num_layers]
     std::vector<DeviceTensor> present_k_; // [num_layers], shape [1, kv_dim] (single step output)
