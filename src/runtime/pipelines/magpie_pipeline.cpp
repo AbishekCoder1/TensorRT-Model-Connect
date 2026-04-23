@@ -546,7 +546,9 @@ bool MagpiePipeline::prefill_context_sequential(DecoderLoopState& state, int32_t
 
             Tensor embed_tensor;
             embed_tensor.data = embed_buf.data();
-            embed_tensor.shape = {static_cast<int64_t>(hidden)};
+            // Engine declares input_embed as [-1, hidden] (2-D); the
+            // decoder expects rank 2 even for single-frame steps.
+            embed_tensor.shape = {1, static_cast<int64_t>(hidden)};
             embed_tensor.dtype = DType::kFloat32;
 
             Tensor use_embed_tensor;

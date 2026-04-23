@@ -877,7 +877,8 @@ void TriAttentionKvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
 void TriAttentionKvCache::bind_to(TrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
-    dynamic_binding_enabled_ = module.has_dynamic_shapes();
+    dynamic_binding_enabled_ =
+        !names_.cache_k.empty() && module.input_is_dynamic(names_.cache_k.front());
     bound_cache_rows_ = 0;
     const int32_t initial_cache_rows =
         dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;

@@ -111,9 +111,22 @@ void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
 
     Tensor mask_t;
     mask_t.data = mask_buf_.data();
-    mask_t.shape = dynamic_binding_enabled_
-                       ? std::vector<int64_t>{1, mask_width}
-                       : std::vector<int64_t>{static_cast<int64_t>(mask_buf_.size())};
+    // Match the engine-declared rank for attention_mask. Different engine
+    // families wire the causal mask with different shapes:
+    //   * static decoder (cache-full, e.g. legacy builds): [max_length + 1]
+    //   * dynamic decoder (standard + triattention):       [1, mask_width]
+    //   * magpie TTS decoder (3-D with query dim):         [1, 1, mask_width]
+    // The tensor content is identical (width = current mask_width); only the
+    // leading broadcast dimensions change.
+    const int32_t mask_rank =
+        bound_module_ != nullptr ? bound_module_->input_rank(names_.attention_mask) : 0;
+    if (mask_rank == 3) {
+        mask_t.shape = {1, 1, mask_width};
+    } else if (mask_rank == 2 || (mask_rank == 0 && dynamic_binding_enabled_)) {
+        mask_t.shape = {1, mask_width};
+    } else {
+        mask_t.shape = {static_cast<int64_t>(mask_buf_.size())};
+    }
     mask_t.dtype = DType::kFloat32;
     inputs[names_.attention_mask] = mask_t;
 }
@@ -121,7 +134,12 @@ void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
 void KvCache::bind_to(TrtModule& module) {
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
-    dynamic_binding_enabled_ = module.has_dynamic_shapes();
+    // Enable dynamic row binding only when cache_k[0] itself is dynamic.
+    // Static-shape engines (e.g. magpie TTS decoder with fixed
+    // [max_length, kv_dim] cache) reject setInputShape on cache inputs even
+    // when other inputs in the same engine are dynamic.
+    dynamic_binding_enabled_ =
+        !names_.cache_k.empty() && module.input_is_dynamic(names_.cache_k.front());
     bound_cache_rows_ = 0;
     const int32_t initial_cache_rows =
         dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;

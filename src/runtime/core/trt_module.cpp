@@ -113,7 +113,10 @@ std::vector<int64_t> TrtModule::dims_to_shape(const nvinfer1::Dims& dims) {
 
 void TrtModule::update_dynamic_shape(const std::string& name, BufferEntry& entry,
                                      const std::vector<int64_t>& new_shape) {
-    if (!has_dynamic_shapes_ || new_shape == entry.shape)
+    // Skip statically-shaped inputs: TRT rejects setInputShape on them even
+    // when the engine as a whole advertises dynamic shapes via optimization
+    // profiles.
+    if (!has_dynamic_shapes_ || !entry.is_dynamic || new_shape == entry.shape)
         return;
     if (use_cuda_graph_)
         cuda_graph_.reset();
@@ -216,6 +219,7 @@ void TrtModule::allocate_single_input(nvinfer1::ICudaEngine* engine, const char*
     entry.is_input = true;
     entry.shape = init_shape;
     entry.is_external = skip_allocation;
+    entry.is_dynamic = is_dynamic;
     if (!skip_allocation)
         entry.d_ptr = allocate_and_zero(alloc_nbytes, stream_);
     if (entry.d_ptr)
@@ -531,6 +535,18 @@ bool TrtModule::has_input(const std::string& name) const {
 bool TrtModule::has_output(const std::string& name) const {
     auto it = buffers_.find(name);
     return it != buffers_.end() && !it->second.is_input;
+}
+
+bool TrtModule::input_is_dynamic(const std::string& name) const {
+    auto it = buffers_.find(name);
+    return it != buffers_.end() && it->second.is_input && it->second.is_dynamic;
+}
+
+int32_t TrtModule::input_rank(const std::string& name) const {
+    auto it = buffers_.find(name);
+    if (it == buffers_.end() || !it->second.is_input)
+        return 0;
+    return static_cast<int32_t>(it->second.shape.size());
 }
 
 // --- Direct buffer access ---
