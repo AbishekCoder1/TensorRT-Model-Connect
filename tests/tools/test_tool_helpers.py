@@ -9,7 +9,6 @@ Postconditions: Cosine similarity matches mathematical expectations including ze
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 
 def _import_tool_helpers():

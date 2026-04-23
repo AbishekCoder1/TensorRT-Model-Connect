@@ -9,7 +9,6 @@ Postconditions: Identical layers show zero diff, within-tolerance layers pass, a
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 
 class TestLayerDiffLogic:

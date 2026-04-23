@@ -8,7 +8,6 @@ Postconditions: Exact matches, whitespace-stripped matches, and word-level diver
 
 from __future__ import annotations
 
-import pytest
 
 
 class TestTextComparison:
