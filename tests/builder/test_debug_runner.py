@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import struct
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
