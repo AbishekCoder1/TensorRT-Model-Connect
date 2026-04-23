@@ -9,7 +9,6 @@ Postconditions: Qwen VL model types are correctly identified and cosine similari
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 
 class TestIsQwenVl:

@@ -12,7 +12,6 @@ import json
 import struct
 
 import numpy as np
-import pytest
 
 
 def _import_diffusion_helpers():
