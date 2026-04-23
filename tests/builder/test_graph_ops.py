@@ -18,7 +18,7 @@ import pytest
 pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
 from trtf_build import graph_ops
 
-from tests.builder.conftest import requires_trt, run_trt_graph
+from tests.builder.conftest import requires_trt
 
 
 # ===================================================================
