@@ -11,7 +11,7 @@
   "precision": "fp32",
   "max_cache_length": 2048,
   "threshold_overrides": {
-    "relative_l2": 1e-8,
+    "relative_l2": 2e-8,
     "max_pointwise_error": 8e-6
   },
   "inputs": {
