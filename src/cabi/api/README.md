@@ -6,4 +6,4 @@ Focus areas:
 - Handle validation and error mapping
 - Bundle open/close lifecycle
 - Pipeline creation and command dispatch
-- Builder-based runtime composition into `PipelineRouter`
+- Registry-based runtime composition via `PipelineFactory::from_bundle` (strategy → `IPipelinePlugin` → concrete `IPipeline`)
