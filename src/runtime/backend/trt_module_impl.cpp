@@ -49,10 +49,14 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
 }
 
 void TrtModuleImpl::bind_external(const std::string& name, void* ptr,
-                                  const std::vector<int64_t>& /*shape*/) {
-    // Minimal stub: route through the 1-arg overload. Dynamic-shape fidelity
-    // will be restored when the backend grows per-tensor shape tracking.
+                                  const std::vector<int64_t>& shape) {
     bind_external(name, ptr);
+    if (shape.empty())
+        return;
+    auto it = buffers_.find(name);
+    if (it == buffers_.end())
+        return;
+    update_dynamic_shape(name, it->second, shape);
 }
 
 int32_t TrtModuleImpl::input_rank(const std::string& name) const {
@@ -62,8 +66,9 @@ int32_t TrtModuleImpl::input_rank(const std::string& name) const {
     return static_cast<int32_t>(it->second.shape.size());
 }
 
-bool TrtModuleImpl::input_is_dynamic(const std::string& /*name*/) const {
-    return has_dynamic_shapes_;
+bool TrtModuleImpl::input_is_dynamic(const std::string& name) const {
+    auto it = buffers_.find(name);
+    return it != buffers_.end() && it->second.is_input && it->second.is_dynamic;
 }
 
 void TrtModuleImpl::reset_execution_context() {
@@ -81,14 +86,27 @@ void TrtModuleImpl::reset_execution_context() {
         }
         cudaStreamSynchronize(stream_);
     }
-    if (use_cuda_graph_)
+    if (use_cuda_graph_ && cuda_graph_)
         cuda_graph_->reset();
-    // Rebind every buffer into the fresh context: a brand-new
-    // IExecutionContext starts with no tensor addresses set, so both internal
-    // and external buffers must be re-announced before the next enqueueV3.
+    // A fresh IExecutionContext starts with neither tensor addresses nor
+    // dynamic input shapes set, so both must be re-announced. The pipeline
+    // will also re-bind external-input shapes via state_->bind_to() right
+    // after this reset, but internal dynamic inputs (attention_mask,
+    // position_id) only get their shapes set inside forward_async, which
+    // early-returns when the BufferEntry's cached shape already matches
+    // the incoming tensor shape. Re-applying the cached shape here keeps
+    // the context in sync so the next enqueueV3 doesn't fail with
+    // "Not all shapes are specified".
     for (auto& [name, entry] : buffers_) {
         if (entry.d_ptr && ctx_)
             ctx_->setTensorAddress(name.c_str(), entry.d_ptr);
+        if (entry.is_dynamic && ctx_ && !entry.shape.empty()) {
+            nvinfer1::Dims dims;
+            dims.nbDims = static_cast<int32_t>(entry.shape.size());
+            for (int32_t d = 0; d < dims.nbDims; ++d)
+                dims.d[d] = entry.shape[d];
+            ctx_->setInputShape(name.c_str(), dims);
+        }
     }
 }
 
@@ -120,8 +138,14 @@ std::vector<int64_t> TrtModuleImpl::dims_to_shape(const nvinfer1::Dims& dims) {
 
 void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& entry,
                                          const std::vector<int64_t>& new_shape) {
-    if (!has_dynamic_shapes_ || new_shape == entry.shape)
+    // Skip static inputs: TRT rejects setInputShape on them even when the
+    // engine as a whole advertises dynamic shapes via optimization profiles.
+    if (!has_dynamic_shapes_ || !entry.is_dynamic || new_shape == entry.shape)
         return;
+    // Any captured CUDA graph was baked against the OLD shape; force a
+    // re-capture on the next enqueue so the new shape actually takes.
+    if (use_cuda_graph_ && cuda_graph_)
+        cuda_graph_->reset();
     nvinfer1::Dims dims;
     dims.nbDims = static_cast<int32_t>(new_shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
@@ -160,7 +184,7 @@ void TrtModuleImpl::set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int3
         if (engine->getTensorIOMode(name) != nvinfer1::TensorIOMode::kINPUT)
             continue;
         if (dims_are_dynamic(engine->getTensorShape(name))) {
-            auto dims = engine->getProfileShape(name, 0, selector);
+            auto dims = engine->getProfileShape(name, profile_idx_, selector);
             ctx_->setInputShape(name, dims);
         }
     }
@@ -177,8 +201,8 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const c
     bool is_dynamic = has_dynamic_shapes_ && num_profiles > 0 && dims_are_dynamic(trt_shape);
 
     if (is_dynamic) {
-        alloc_dims = engine->getProfileShape(name, 0, nvinfer1::OptProfileSelector::kMAX);
-        init_dims = engine->getProfileShape(name, 0, nvinfer1::OptProfileSelector::kOPT);
+        alloc_dims = engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kMAX);
+        init_dims = engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kOPT);
     }
 
     std::vector<int64_t> shape;
@@ -188,6 +212,7 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const c
     entry.dtype = dtype;
     entry.nbytes = nbytes;
     entry.is_input = true;
+    entry.is_dynamic = is_dynamic;
     entry.shape = is_dynamic ? dims_to_shape(init_dims) : shape;
 
     if (nbytes > 0) {

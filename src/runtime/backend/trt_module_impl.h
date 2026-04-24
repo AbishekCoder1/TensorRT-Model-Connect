@@ -60,6 +60,7 @@ class TrtModuleImpl final : public ITrtModule {
         std::size_t nbytes{0};
         bool is_input{true};
         bool is_external{false};
+        bool is_dynamic{false};
     };
 
     nvinfer1::ICudaEngine* engine_{nullptr};
