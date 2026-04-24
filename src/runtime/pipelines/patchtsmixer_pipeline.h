@@ -9,7 +9,6 @@
 #include <memory>
 #include <string>
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -43,4 +42,3 @@ class PatchTSMixerPipeline final : public IPipeline {
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

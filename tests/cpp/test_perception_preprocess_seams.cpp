@@ -40,7 +40,6 @@ void check_close(float actual, float expected, float tolerance, const char* name
     }
 }
 
-#if TRTF_HAS_TRT
 
 trtf::runtime::adapters::io::DecodedImage make_two_pixel_image()
 {
@@ -124,17 +123,14 @@ void test_sam_image_plan_tracks_resize_and_padding()
     check_close(plan.pixel_values[3], 0.0F, 1e-6F, "sam image plan right padding stays zero");
 }
 
-#endif // TRTF_HAS_TRT
 
 } // namespace
 
 int main()
 {
-#if TRTF_HAS_TRT
     test_segmentation_preprocess_normalizes_decoded_image();
     test_segmentation_preprocess_rejects_empty_image();
     test_sam_image_plan_tracks_resize_and_padding();
-#endif
 
     if (g_failures != 0)
     {

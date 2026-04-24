@@ -7,10 +7,8 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <NvInfer.h>
 #include <NvInferRuntime.h>
-#endif
 
 namespace trtf {
 
@@ -18,7 +16,6 @@ namespace trtf {
 // Pure string logic — no TRT dependency.
 std::string expand_layer_name(const std::string& pattern, int32_t layer);
 
-#if TRTF_HAS_TRT
 
 constexpr int32_t kDefaultMaxCacheLength = 32;
 constexpr float kMaskedScore = -1.0e4F;
@@ -52,6 +49,5 @@ bool has_all_required_tensors(const DecoderStepEngine& engine);
 
 std::string layer_tensor_name(const char* stem, int32_t layer);
 
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

@@ -15,7 +15,6 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -83,4 +82,3 @@ class PixArtPipeline final : public IPipeline {
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

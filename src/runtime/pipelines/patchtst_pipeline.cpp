@@ -1,6 +1,5 @@
 #include "runtime/pipelines/patchtst_pipeline.h"
 
-#if TRTF_HAS_TRT
 
 #include <algorithm>
 #include <cstddef>
@@ -166,4 +165,3 @@ EmbeddingResult PatchTSTPipeline::solve(const float* branch_input, int32_t branc
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

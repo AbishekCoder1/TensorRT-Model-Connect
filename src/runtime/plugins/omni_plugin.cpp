@@ -7,7 +7,6 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -89,4 +88,3 @@ volatile int kForceLink_OmniPlugin = 0;
 static trtf::OmniPlugin g_OmniPlugin_instance;
 static trtf::PluginRegistrar g_OmniPlugin_reg("omni_multimodal", &g_OmniPlugin_instance);
 
-#endif // TRTF_HAS_TRT

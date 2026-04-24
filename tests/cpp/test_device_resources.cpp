@@ -43,10 +43,8 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -59,7 +57,6 @@ static void check(bool condition, const char* test_name)
     }
 }
 
-#if TRTF_HAS_TRT
 
 static trtf::TrtLogger g_logger;
 
@@ -332,7 +329,6 @@ static bool test_run_decoder_step_device_skip_d2h()
     return logits.empty();
 }
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
@@ -345,14 +341,10 @@ int main()
         all_passed &= ok;
     };
 
-#if TRTF_HAS_TRT
     run("device_resources_construction",          test_device_resources_construction);
     run("run_decoder_step_device_basic",           test_run_decoder_step_device_basic);
     run("run_decoder_step_device_skip_bind",       test_run_decoder_step_device_skip_bind);
     run("run_decoder_step_device_skip_d2h",        test_run_decoder_step_device_skip_d2h);
-#else
-    std::cerr << "TRT not available, skipping all tests\n";
-#endif
 
     if (all_passed)
     {

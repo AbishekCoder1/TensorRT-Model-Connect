@@ -7,7 +7,6 @@
 #include "runtime/core/triattention_kernels.h"
 #endif
 
-#if TRTF_HAS_TRT
 
 #include <algorithm>
 #include <cassert>
@@ -2205,4 +2204,3 @@ bool TriAttentionKvCache::ok() const {
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

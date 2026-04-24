@@ -34,7 +34,6 @@ CacheRowUpdatePlan plan_cache_row_update(
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 
 namespace {
 
@@ -847,6 +846,5 @@ bool run_decoder_step_device(
                                       skip_logits_d2h, skip_sync, fail);
 }
 
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

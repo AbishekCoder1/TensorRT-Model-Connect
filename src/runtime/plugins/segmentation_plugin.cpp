@@ -6,7 +6,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -50,4 +49,3 @@ static trtf::PluginRegistrar g_SegmentationPlugin_reg1("segmentation",
 static trtf::PluginRegistrar g_SegmentationPlugin_reg2("prompted_segmentation",
                                                        &g_SegmentationPlugin_instance);
 
-#endif // TRTF_HAS_TRT

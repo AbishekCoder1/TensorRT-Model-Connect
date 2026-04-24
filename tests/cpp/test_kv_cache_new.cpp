@@ -25,9 +25,7 @@
 #include <iostream>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -40,7 +38,6 @@ static void check(bool condition, const char* test_name)
     }
 }
 
-#if TRTF_HAS_TRT
 
 static void test_construction()
 {
@@ -168,20 +165,15 @@ static void test_max_position_clamp()
     cudaStreamDestroy(stream);
 }
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
-#if TRTF_HAS_TRT
     test_construction();
     test_attention_mask_at_position_0();
     test_advance_and_position();
     test_reset();
     test_direct_access();
     test_max_position_clamp();
-#else
-    std::cerr << "TRT not available, skipping KvCache tests\n";
-#endif
 
     if (failures > 0) std::cerr << failures << " test(s) FAILED\n";
     return failures;

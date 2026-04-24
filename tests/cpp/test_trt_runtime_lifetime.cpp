@@ -35,7 +35,6 @@ void check(bool condition, const char* test_name)
 
 void test_runtime_factory_logger_lifetime()
 {
-#if TRTF_HAS_TRT
     for (int i = 0; i < 20; ++i)
     {
         auto runtime = trtf::create_trt_runtime();
@@ -51,9 +50,6 @@ void test_runtime_factory_logger_lifetime()
             runtime->deserializeCudaEngine(nullptr, static_cast<std::size_t>(0)));
         check(!engine, "deserialize invalid blob returns null engine");
     }
-#else
-    std::cerr << "SKIP: TRTF_HAS_TRT=0\n";
-#endif
 }
 
 } // namespace

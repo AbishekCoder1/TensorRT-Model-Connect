@@ -5,7 +5,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -28,4 +27,3 @@ static trtf::PatchTSMixerPlugin g_PatchTSMixerPlugin_instance;
 static trtf::PluginRegistrar g_PatchTSMixerPlugin_reg("patchtsmixer_torchtrt",
                                                       &g_PatchTSMixerPlugin_instance);
 
-#endif // TRTF_HAS_TRT

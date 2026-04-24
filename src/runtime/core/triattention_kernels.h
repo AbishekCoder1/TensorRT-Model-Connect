@@ -5,13 +5,10 @@
 
 #include <cstdint>
 
-#if TRTF_HAS_TRT
 #include <cuda_runtime_api.h>
-#endif
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 
 bool triattention_score_candidates_gpu(
     const void* d_cache, DType cache_dtype, int32_t kv_dim, int32_t head_dim,
@@ -28,6 +25,5 @@ bool triattention_compact_rows_gpu(const void* d_src, void* d_scratch, DType cac
                                    int32_t keep_count, int32_t head_dim, int32_t num_kv_heads,
                                    int32_t query_group_size, cudaStream_t stream);
 
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

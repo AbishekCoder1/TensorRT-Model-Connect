@@ -1,6 +1,5 @@
 #include "runtime/pipelines/chronos_bolt_pipeline.h"
 
-#if TRTF_HAS_TRT
 
 #include <algorithm>
 #include <cmath>
@@ -102,4 +101,3 @@ EmbeddingResult ChronosBoltPipeline::solve(const float* branch_input, int32_t br
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

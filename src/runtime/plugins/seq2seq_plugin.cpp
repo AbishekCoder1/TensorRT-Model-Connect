@@ -8,7 +8,6 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-#if TRTF_HAS_TRT
 
 #include <algorithm>
 #include <cstring>
@@ -244,4 +243,3 @@ static trtf::Seq2SeqPlugin g_Seq2SeqPlugin_instance;
 static trtf::PluginRegistrar g_Seq2SeqPlugin_reg("seq2seq_encoder_decoder",
                                                  &g_Seq2SeqPlugin_instance);
 
-#endif // TRTF_HAS_TRT

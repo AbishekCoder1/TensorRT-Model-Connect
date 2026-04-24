@@ -1,6 +1,5 @@
 #include "runtime/pipelines/patchtsmixer_pipeline.h"
 
-#if TRTF_HAS_TRT
 
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "utils/json_helpers.h"
@@ -181,4 +180,3 @@ EmbeddingResult PatchTSMixerPipeline::solve(const float* branch_input, int32_t b
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

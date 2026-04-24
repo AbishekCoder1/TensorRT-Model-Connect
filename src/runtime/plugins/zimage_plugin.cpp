@@ -13,7 +13,6 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 namespace {
@@ -103,4 +102,3 @@ volatile int kForceLink_ZImagePlugin = 0;
 static trtf::ZImagePlugin g_ZImagePlugin_instance;
 static trtf::PluginRegistrar g_ZImagePlugin_reg("diffusion_zimage", &g_ZImagePlugin_instance);
 
-#endif // TRTF_HAS_TRT

@@ -10,7 +10,6 @@
 
 #include <algorithm>
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -76,4 +75,3 @@ volatile int kForceLink_HybridPlugin = 0;
 static trtf::HybridPlugin g_HybridPlugin_instance;
 static trtf::PluginRegistrar g_HybridPlugin_reg("hybrid_mamba_attention", &g_HybridPlugin_instance);
 
-#endif // TRTF_HAS_TRT

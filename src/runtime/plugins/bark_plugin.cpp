@@ -12,7 +12,6 @@
 #include <exception>
 #include <string>
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -127,4 +126,3 @@ volatile int kForceLink_BarkPlugin = 0;
 static trtf::BarkPlugin g_BarkPlugin_instance;
 static trtf::PluginRegistrar g_BarkPlugin_reg("text_to_audio_bark", &g_BarkPlugin_instance);
 
-#endif // TRTF_HAS_TRT

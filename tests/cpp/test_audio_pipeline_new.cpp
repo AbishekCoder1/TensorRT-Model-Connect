@@ -73,7 +73,6 @@
 #include <string_view>
 #include <vector>
 
-#if TRTF_HAS_TRT
 
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
@@ -89,7 +88,6 @@
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
 
-#endif // TRTF_HAS_TRT
 
 static int failures = 0;
 static void check(bool c, const char* n) {
@@ -99,7 +97,6 @@ static void check(bool c, const char* n) {
     }
 }
 
-#if TRTF_HAS_TRT
 
 static trtf::TrtLogger g_logger;
 
@@ -780,10 +777,8 @@ static void test_whisper_cross_kv_invalid_plan() {
     check(!error.empty(), "cross_kv_invalid: error message set");
 }
 
-#endif // TRTF_HAS_TRT
 
 int main() {
-#if TRTF_HAS_TRT
     test_whisper_transcribe();
     test_whisper_constructor_validates_encoder();
     test_whisper_with_cross_kv();
@@ -798,9 +793,6 @@ int main() {
     test_magpie_validates_modules();
     test_whisper_cross_kv_stats();
     test_whisper_cross_kv_invalid_plan();
-#else
-    std::cerr << "TRT not available, skipping audio pipeline tests\n";
-#endif
     if (failures > 0)
         std::cerr << failures << " test(s) FAILED\n";
     return failures;

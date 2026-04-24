@@ -9,7 +9,6 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-#if TRTF_HAS_TRT
 
 #include <memory>
 #include <stdexcept>
@@ -49,4 +48,3 @@ static trtf::ChronosBoltPlugin g_ChronosBoltPlugin_instance;
 static trtf::PluginRegistrar g_ChronosBoltPlugin_reg("chronos_bolt_torchtrt",
                                                      &g_ChronosBoltPlugin_instance);
 
-#endif // TRTF_HAS_TRT

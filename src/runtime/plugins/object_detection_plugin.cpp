@@ -5,7 +5,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -34,4 +33,3 @@ static trtf::ObjectDetectionPlugin g_ObjectDetectionPlugin_instance;
 static trtf::PluginRegistrar g_ObjectDetectionPlugin_reg("object_detection",
                                                          &g_ObjectDetectionPlugin_instance);
 
-#endif // TRTF_HAS_TRT

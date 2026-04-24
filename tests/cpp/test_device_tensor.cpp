@@ -26,9 +26,7 @@
 #include <iostream>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -41,7 +39,6 @@ static void check(bool condition, const char* test_name)
     }
 }
 
-#if TRTF_HAS_TRT
 
 static void test_basic_allocation()
 {
@@ -172,20 +169,15 @@ static void test_int32_dtype()
     cudaStreamDestroy(stream);
 }
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
-#if TRTF_HAS_TRT
     test_basic_allocation();
     test_h2d_d2h_roundtrip();
     test_d2d_copy();
     test_zeros_factory();
     test_move_semantics();
     test_int32_dtype();
-#else
-    std::cerr << "TRT not available, skipping DeviceTensor tests\n";
-#endif
 
     if (failures > 0)
     {

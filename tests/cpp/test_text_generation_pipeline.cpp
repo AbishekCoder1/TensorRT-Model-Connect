@@ -37,7 +37,6 @@
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -48,7 +47,6 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
-#if TRTF_HAS_TRT
 
 static trtf::TrtLogger g_logger;
 
@@ -318,7 +316,8 @@ static void test_stop_on_boxed_answer() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModule>(engine.get(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(
+        engine.get(), engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
     auto tokenizer = std::make_shared<MockTokenizer>();
     auto sampler = std::make_unique<SequenceSampler>(std::vector<int32_t>{1, 2, 3, 4});
@@ -345,19 +344,14 @@ static void test_stop_on_boxed_answer() {
     cudaStreamDestroy(stream);
 }
 
-#endif // TRTF_HAS_TRT
 
 int main() {
-#if TRTF_HAS_TRT
     test_argmax();
     test_pipeline_construction();
     test_generate_stops_at_eos();
     test_generate_max_tokens();
     test_zero_max_tokens();
     test_stop_on_boxed_answer();
-#else
-    std::cerr << "TRT not available, skipping TextGenerationPipeline tests\n";
-#endif
 
     if (failures > 0)
         std::cerr << failures << " test(s) FAILED\n";

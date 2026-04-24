@@ -6,7 +6,6 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -39,4 +38,3 @@ volatile int kForceLink_TimesFmPlugin = 0;
 static trtf::TimesFmPlugin g_TimesFmPlugin_instance;
 static trtf::PluginRegistrar g_TimesFmPlugin_reg("timesfm_torchtrt", &g_TimesFmPlugin_instance);
 
-#endif // TRTF_HAS_TRT

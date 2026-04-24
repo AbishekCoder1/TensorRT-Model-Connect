@@ -7,7 +7,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 
 const char* trt_severity_name(nvinfer1::ILogger::Severity severity) {
     switch (severity) {
@@ -174,6 +173,5 @@ void CudaGraphExec::reset() {
     }
 }
 
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

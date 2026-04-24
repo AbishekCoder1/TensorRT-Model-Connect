@@ -9,7 +9,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 
 namespace {
 
@@ -312,6 +311,5 @@ bool run_vision_encoder_with_deepstack(
     return run_and_copy_outputs(engine, stream, state.output_copies, error);
 }
 
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

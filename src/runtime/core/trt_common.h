@@ -10,14 +10,11 @@
 #include <memory>
 #include <string>
 
-#if TRTF_HAS_TRT
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#endif
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 
 const char* trt_severity_name(nvinfer1::ILogger::Severity severity);
 bool trt_log_to_stderr_enabled();
@@ -92,6 +89,5 @@ class CudaGraphExec final {
     cudaGraph_t graph_{nullptr};
     cudaGraphExec_t exec_{nullptr};
 };
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

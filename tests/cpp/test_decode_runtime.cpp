@@ -53,7 +53,6 @@
 #include <stdexcept>
 #include <vector>
 
-#if TRTF_HAS_TRT
 
 namespace {
 
@@ -527,11 +526,9 @@ bool test_mask_full_cache()
 
 } // namespace
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
-#if TRTF_HAS_TRT
     bool all_passed = true;
     std::cout << "test_decode_runtime:" << std::endl;
 
@@ -570,8 +567,4 @@ int main()
     }
     std::cerr << "test_decode_runtime FAILED" << std::endl;
     return 1;
-#else
-    std::cout << "test_decode_runtime: SKIPPED (TRTF_HAS_TRT=0)" << std::endl;
-    return 0;
-#endif
 }

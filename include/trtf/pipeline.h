@@ -215,9 +215,21 @@ class IPipeline {
 };
 
 // --- Factory ---
+// LoadOptions bundles every knob the factory understands. Users who only want
+// the defaults can still call the positional overload below.
+struct LoadOptions {
+    std::string hf_python;
+    std::string runtime_cache_path;
+    bool cuda_graphs{false};
+    std::uint64_t kv_cache_size_bytes{0}; // 0 = use bundle's max_cache_length
+    std::string config_path;              // --config <file> (empty = none)
+    std::vector<std::string> set_tokens;  // --set ns.field=value (repeatable)
+};
+
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python = "",
                                 const std::string& runtime_cache_path = "",
                                 bool cuda_graphs = false);
+std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options);
 
 } // namespace trtf
 

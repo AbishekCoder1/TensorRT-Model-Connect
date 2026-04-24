@@ -32,7 +32,7 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
 
 TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
                              cudaStream_t stream, int32_t profile_idx)
-    : ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
+    : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
@@ -46,6 +46,49 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
         cudaStreamSynchronize(stream_);
     }
     allocate_buffers(engine);
+}
+
+void TrtModuleImpl::bind_external(const std::string& name, void* ptr,
+                                  const std::vector<int64_t>& /*shape*/) {
+    // Minimal stub: route through the 1-arg overload. Dynamic-shape fidelity
+    // will be restored when the backend grows per-tensor shape tracking.
+    bind_external(name, ptr);
+}
+
+int32_t TrtModuleImpl::input_rank(const std::string& name) const {
+    auto it = buffers_.find(name);
+    if (it == buffers_.end() || !it->second.is_input)
+        return 0;
+    return static_cast<int32_t>(it->second.shape.size());
+}
+
+bool TrtModuleImpl::input_is_dynamic(const std::string& /*name*/) const {
+    return has_dynamic_shapes_;
+}
+
+void TrtModuleImpl::reset_execution_context() {
+    if (engine_ == nullptr)
+        return;
+    delete ctx_;
+    ctx_ = engine_->createExecutionContext();
+    if (!ctx_)
+        throw std::runtime_error("[trt_module] Failed to recreate execution context");
+    if (engine_->getNbOptimizationProfiles() > 0) {
+        if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
+            delete ctx_;
+            ctx_ = nullptr;
+            throw std::runtime_error("[trt_module] Failed to reset optimization profile");
+        }
+        cudaStreamSynchronize(stream_);
+    }
+    if (use_cuda_graph_)
+        cuda_graph_->reset();
+    // Rebind any externally-provided buffers into the fresh context.
+    for (auto& [name, entry] : buffers_) {
+        if (entry.is_external && entry.d_ptr && ctx_) {
+            ctx_->setTensorAddress(name.c_str(), entry.d_ptr);
+        }
+    }
 }
 
 TrtModuleImpl::~TrtModuleImpl() {

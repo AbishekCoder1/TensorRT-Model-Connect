@@ -16,7 +16,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 
 // Tokenizer helpers.
 
@@ -349,6 +348,5 @@ void load_ffi_kernels_from_bundle(const BundleFile& bundle) {
 #endif
 }
 
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

@@ -31,9 +31,7 @@
 
 #include <iostream>
 
-#if TRTF_HAS_TRT
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -46,7 +44,6 @@ static void check(bool condition, const char* test_name)
     }
 }
 
-#if TRTF_HAS_TRT
 
 // -----------------------------------------------------------------------------
 // Intention:  Verify that a default-constructed CudaStream creates a valid
@@ -132,11 +129,9 @@ static void test_distinct_streams()
     check(a.get() != b.get(), "distinct: different handles");
 }
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
-#if TRTF_HAS_TRT
     test_default_construction();
     test_stream_is_usable();
     test_move_constructor();
@@ -150,8 +145,4 @@ int main()
     }
     std::cerr << "All CudaStream tests passed.\n";
     return 0;
-#else
-    std::cout << "test_cuda_stream: SKIPPED (TRTF_HAS_TRT=0)" << std::endl;
-    return 0;
-#endif
 }

@@ -42,7 +42,6 @@
 #include <iostream>
 #include <string>
 
-#if TRTF_HAS_TRT
 
 static int failures = 0;
 
@@ -143,11 +142,9 @@ static void test_min_severity_returns_valid()
     check(valid, "min_severity valid enum");
 }
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
-#if TRTF_HAS_TRT
     test_severity_name_error();
     test_severity_name_warning();
     test_severity_name_info();
@@ -167,8 +164,5 @@ int main()
         return 1;
     }
     std::cerr << "All trt_logger tests passed.\n";
-#else
-    std::cerr << "test_trt_logger: TRTF_HAS_TRT=0, skipping TRT-dependent tests.\n";
-#endif
     return 0;
 }

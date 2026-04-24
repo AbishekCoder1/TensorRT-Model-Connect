@@ -22,7 +22,6 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
 
 #include <cuda_runtime_api.h>
 
@@ -327,4 +326,3 @@ volatile int kForceLink_T5Plugin = 0;
 static trtf::T5Plugin g_T5Plugin_instance;
 static trtf::PluginRegistrar g_T5Plugin_reg("text_to_text", &g_T5Plugin_instance);
 
-#endif // TRTF_HAS_TRT

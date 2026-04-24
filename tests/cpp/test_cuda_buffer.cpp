@@ -35,9 +35,7 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -50,7 +48,6 @@ static void check(bool condition, const char* test_name)
     }
 }
 
-#if TRTF_HAS_TRT
 
 // -----------------------------------------------------------------------------
 // Intention:  Verify that a zero-size CudaBuffer reports ok()=true with a null
@@ -207,11 +204,9 @@ static void test_large_buffer_roundtrip()
     check(all_match, "large_roundtrip: all data matches");
 }
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
-#if TRTF_HAS_TRT
     test_zero_size_buffer();
     test_nonzero_size_buffer();
     test_move_constructor();
@@ -226,8 +221,4 @@ int main()
     }
     std::cerr << "All CudaBuffer tests passed.\n";
     return 0;
-#else
-    std::cout << "test_cuda_buffer: SKIPPED (TRTF_HAS_TRT=0)" << std::endl;
-    return 0;
-#endif
 }

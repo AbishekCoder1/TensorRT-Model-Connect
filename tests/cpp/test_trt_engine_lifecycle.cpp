@@ -32,7 +32,6 @@
 #include <iostream>
 #include <string>
 
-#if TRTF_HAS_TRT
 
 static int failures = 0;
 
@@ -107,11 +106,9 @@ static void test_constants()
     check(trtf::kMaskedScore == -1.0e4F, "kMaskedScore == -1.0e4");
 }
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
-#if TRTF_HAS_TRT
     test_layer_tensor_name_zero();
     test_layer_tensor_name_mid();
     test_layer_tensor_name_large();
@@ -127,8 +124,5 @@ int main()
         return 1;
     }
     std::cerr << "All trt_engine_lifecycle tests passed.\n";
-#else
-    std::cerr << "test_trt_engine_lifecycle: TRTF_HAS_TRT=0, skipping TRT-dependent tests.\n";
-#endif
     return 0;
 }

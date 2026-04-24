@@ -9,7 +9,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 
 // Device-resident KV cache for standard attention-based decoders.
 // Keeps the entire KV cache on GPU. Only small inputs (token_id, position_id,
@@ -82,6 +81,5 @@ bool run_decoder_step_device(const DecoderStepEngine& engine, DeviceKvCache& cac
                              bool skip_logits_d2h = false, bool skip_sync = false,
                              bool skip_bind = false);
 
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

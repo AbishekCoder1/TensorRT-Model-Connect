@@ -35,10 +35,8 @@
 #include <iostream>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -49,7 +47,6 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
-#if TRTF_HAS_TRT
 
 static trtf::TrtLogger g_logger;
 
@@ -379,10 +376,8 @@ static void test_env_var_disable_pipeline_logic() {
     }
 }
 
-#endif // TRTF_HAS_TRT
 
 int main() {
-#if TRTF_HAS_TRT
     // CudaGraphExec unit tests
     test_default_state();
     test_capture_and_replay();
@@ -404,8 +399,4 @@ int main() {
     }
     std::cerr << "All CUDA Graph tests passed.\n";
     return 0;
-#else
-    std::cout << "test_cuda_graph: SKIPPED (TRTF_HAS_TRT=0)" << std::endl;
-    return 0;
-#endif
 }

@@ -1,6 +1,7 @@
 // DecoderPlugin: handles "decoder_kv_cache" and "decoder_moe" strategies.
 // Standard attention-based decoder with device-resident KV cache.
 
+#include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/chat_template.h"
 #include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/pipelines/text_generation_pipeline.h"
@@ -14,7 +15,6 @@
 #include <limits>
 #include <sstream>
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -235,8 +235,16 @@ class DecoderPlugin final : public IPipelinePlugin {
         std::shared_ptr<CudaStream> shared_stream,
         const std::vector<std::string>& external_input_names, int32_t runtime_rows) {
         auto make_decoder = [&](int32_t profile_idx) -> std::unique_ptr<TrtModule> {
-            auto module = std::make_unique<TrtModule>(shared_engine.get(), shared_stream->get(),
-                                                      profile_idx, external_input_names);
+            // See notes in the sibling build_decoder_contexts factory on why
+            // TriAttention instantiates TrtModuleImpl directly instead of
+            // routing through IBackend::create_module.
+            (void)external_input_names;
+            auto* trt_ctx = shared_engine->createExecutionContext();
+            if (!trt_ctx)
+                throw std::runtime_error("Failed to create TRT execution context for profile " +
+                                         std::to_string(profile_idx));
+            auto module = std::make_unique<TrtModuleImpl>(
+                shared_engine.get(), trt_ctx, shared_stream->get(), profile_idx);
             if (!module || !module->ok())
                 throw std::runtime_error("Failed to create TrtModule for engine_plan (profile " +
                                          std::to_string(profile_idx) + ")");
@@ -343,4 +351,3 @@ static trtf::DecoderPlugin g_DecoderPlugin_instance;
 static trtf::PluginRegistrar g_DecoderPlugin_reg1("decoder_kv_cache", &g_DecoderPlugin_instance);
 static trtf::PluginRegistrar g_DecoderPlugin_reg2("decoder_moe", &g_DecoderPlugin_instance);
 
-#endif // TRTF_HAS_TRT

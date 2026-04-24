@@ -22,7 +22,6 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
 
 #include <cuda_runtime_api.h>
 
@@ -307,4 +306,3 @@ volatile int kForceLink_MarianPlugin = 0;
 static trtf::MarianPlugin g_MarianPlugin_instance;
 static trtf::PluginRegistrar g_MarianPlugin_reg("marian_translation", &g_MarianPlugin_instance);
 
-#endif // TRTF_HAS_TRT

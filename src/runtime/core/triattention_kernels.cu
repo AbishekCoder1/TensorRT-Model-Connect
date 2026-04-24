@@ -1,6 +1,5 @@
 #include "runtime/core/triattention_kernels.h"
 
-#if TRTF_HAS_TRT
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -299,4 +298,3 @@ bool triattention_compact_rows_gpu(const void* d_src, void* d_scratch, DType cac
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

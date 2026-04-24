@@ -6,7 +6,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -38,4 +37,3 @@ volatile int kForceLink_WanPlugin = 0;
 static trtf::WanPlugin g_WanPlugin_instance;
 static trtf::PluginRegistrar g_WanPlugin_reg("diffusion_wan", &g_WanPlugin_instance);
 
-#endif // TRTF_HAS_TRT

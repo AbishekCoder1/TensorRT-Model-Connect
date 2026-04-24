@@ -5,7 +5,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 
 // Declared in each plugin .cpp
 extern volatile int kForceLink_DecoderPlugin;
@@ -66,6 +65,5 @@ volatile int* force_link_all_plugins() {
     return kPluginAnchors[0];
 }
 
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

@@ -9,9 +9,7 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -22,7 +20,6 @@ static void check(bool condition, const char* name) {
     }
 }
 
-#if TRTF_HAS_TRT
 
 namespace {
 
@@ -307,10 +304,8 @@ void test_bundle_parsing() {
 
 } // namespace
 
-#endif // TRTF_HAS_TRT
 
 int main() {
-#if TRTF_HAS_TRT
     test_absolute_position_and_mask();
     test_score_based_compaction();
     test_protect_prefill();
@@ -319,9 +314,6 @@ int main() {
     test_prefill_overflow_uses_physical_slack();
     test_slack_window_uses_full_logical_budget();
     test_bundle_parsing();
-#else
-    std::cerr << "TRT not available, skipping TriAttentionKvCache tests\n";
-#endif
 
     if (failures > 0)
         std::cerr << failures << " test(s) FAILED\n";

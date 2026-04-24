@@ -4,7 +4,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "utils/json_helpers.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -26,4 +25,3 @@ DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

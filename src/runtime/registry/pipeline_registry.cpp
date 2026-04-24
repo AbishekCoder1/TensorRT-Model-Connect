@@ -5,11 +5,9 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 // Force-link all plugin TUs so the linker doesn't strip self-registering statics.
 extern volatile int* force_link_all_plugins();
 static volatile int* kPluginAnchor = force_link_all_plugins();
-#endif
 
 PipelineRegistry& PipelineRegistry::instance()
 {

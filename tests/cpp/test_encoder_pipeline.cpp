@@ -33,13 +33,11 @@
 #include <string_view>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 static void check(bool c, const char* n) {
@@ -49,7 +47,6 @@ static void check(bool c, const char* n) {
     }
 }
 
-#if TRTF_HAS_TRT
 
 static trtf::TrtLogger g_logger;
 
@@ -671,10 +668,8 @@ static void test_segment_mask_named_output() {
     cudaStreamDestroy(stream);
 }
 
-#endif
 
 int main() {
-#if TRTF_HAS_TRT
     test_encoder_pipeline();
     test_encoder_embed_mode();
     test_encoder_encode_mode();
@@ -692,9 +687,6 @@ int main() {
     test_segment_mask_named_output();
     test_sam_pipeline();
     test_sam_validates();
-#else
-    std::cerr << "TRT not available, skipping\n";
-#endif
     if (failures > 0)
         std::cerr << failures << " FAILED\n";
     return failures;

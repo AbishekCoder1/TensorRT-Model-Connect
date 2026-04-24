@@ -1,6 +1,5 @@
 #include "runtime/pipelines/timesfm_pipeline.h"
 
-#if TRTF_HAS_TRT
 
 #include <algorithm>
 #include <cmath>
@@ -172,4 +171,3 @@ EmbeddingResult TimesFmPipeline::solve(const float* branch_input, int32_t branch
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

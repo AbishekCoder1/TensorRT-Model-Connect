@@ -36,12 +36,10 @@
 #include <iostream>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include "runtime/core/trt_common.h"
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -52,7 +50,6 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
-#if TRTF_HAS_TRT
 
 // Process-wide logger (TRT requires a single logger for all objects).
 static trtf::TrtLogger g_logger;
@@ -274,7 +271,7 @@ static void test_skip_external_input_allocation() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TrtModule module(engine.get(), stream, 0, {"x"});
+    trtf::TrtModuleImpl module(engine.get(), engine->createExecutionContext(), stream, 0);
     check(module.ok(), "external-input module is ok");
     check(module.device_ptr("x") == nullptr, "external input buffer skipped");
     check(module.device_ptr("y") != nullptr, "output buffer still allocated");
@@ -496,10 +493,8 @@ static void test_forward_device_with_input() {
     cudaStreamDestroy(stream);
 }
 
-#endif // TRTF_HAS_TRT
 
 int main() {
-#if TRTF_HAS_TRT
     test_forward_cpu();
     test_forward_async();
     test_introspection();
@@ -512,9 +507,6 @@ int main() {
     test_forward_device_with_input();
     test_profile_idx_default();
     test_profile_idx_invalid();
-#else
-    std::cerr << "TRT not available, skipping TrtModule tests\n";
-#endif
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

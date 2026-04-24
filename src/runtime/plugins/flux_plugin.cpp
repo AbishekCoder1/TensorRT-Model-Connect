@@ -6,7 +6,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -41,4 +40,3 @@ volatile int kForceLink_FluxPlugin = 0;
 static trtf::FluxPlugin g_FluxPlugin_instance;
 static trtf::PluginRegistrar g_FluxPlugin_reg("diffusion_flux", &g_FluxPlugin_instance);
 
-#endif // TRTF_HAS_TRT

@@ -22,7 +22,6 @@ namespace trtf {
 
 namespace {
 
-#if TRTF_HAS_TRT
 
 // Rewrite legacy ambiguous strategy strings from old bundles into their
 // unambiguous per-model equivalents. New bundles already use the split strings.
@@ -119,7 +118,6 @@ std::optional<config::ConfigBundle> try_resolve_runtime_config(
     }
 }
 
-#endif // TRTF_HAS_TRT
 
 } // namespace
 
@@ -127,7 +125,6 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                                                         const std::string& hf_python,
                                                         const std::string& runtime_cache_path,
                                                         bool cuda_graphs) {
-#if TRTF_HAS_TRT
     BundleFile bundle = ReadBundleFile(bundle_path);
     if (bundle.sections.empty())
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
@@ -179,18 +176,62 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     std::cerr << "[trtf] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
               << std::endl;
     return pipeline;
-#else
-    (void)bundle_path;
-    (void)hf_python;
-    (void)runtime_cache_path;
-    (void)cuda_graphs;
-    throw std::runtime_error("Bundle loading requires TRT support (compile with TRT)");
-#endif
+}
+
+std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
+                                                        const LoadOptions& options) {
+    BundleFile bundle = ReadBundleFile(bundle_path);
+    if (bundle.sections.empty())
+        throw std::runtime_error("Failed to read bundle: " + bundle_path);
+
+    std::string config_text;
+    for (const auto& section : bundle.sections) {
+        if (section.name == "config.json" && !section.data.empty()) {
+            config_text.assign(section.data.begin(), section.data.end());
+            break;
+        }
+    }
+
+    std::string strategy = extract_json_string(config_text, "runtime_strategy", "decoder_kv_cache");
+    if (strategy.empty())
+        strategy = "decoder_kv_cache";
+    strategy = normalize_legacy_strategy(strategy, config_text);
+
+    std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
+    IBackend* backend = BackendLoader::load(backend_name);
+
+    auto* plugin = lookup_plugin_or_throw(strategy);
+
+    BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
+    base_cfg.runtime_strategy = strategy;
+
+    std::optional<config::ConfigBundle> resolved = try_resolve_runtime_config(
+        config_text, bundle_path, options.config_path, options.set_tokens);
+
+    PipelineContext ctx{bundle,
+                        base_cfg,
+                        config_text,
+                        options.hf_python,
+                        bundle_path,
+                        backend,
+                        options.runtime_cache_path,
+                        options.cuda_graphs,
+                        options.kv_cache_size_bytes,
+                        resolved ? &*resolved : nullptr};
+    auto pipeline = plugin->create(ctx);
+
+    std::cerr << "[trtf] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
+              << std::endl;
+    return pipeline;
 }
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python,
                                 const std::string& runtime_cache_path, bool cuda_graphs) {
     return PipelineFactory::from_bundle(bundle_path, hf_python, runtime_cache_path, cuda_graphs);
+}
+
+std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options) {
+    return PipelineFactory::from_bundle(bundle_path, options);
 }
 
 } // namespace trtf

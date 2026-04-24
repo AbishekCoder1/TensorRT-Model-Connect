@@ -43,9 +43,7 @@
 #include <iostream>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -95,7 +93,6 @@ static void test_cache_row_update_plan_edge_cases()
     check(single_slot_plan.next_cache_length == 1, "plan_edge_single_slot: next length");
 }
 
-#if TRTF_HAS_TRT
 
 // Helper: Create a DecoderStepEngine with test parameters (null TRT engine/context).
 static trtf::DecoderStepEngine make_test_engine(
@@ -356,7 +353,6 @@ static void test_multi_layer_distinct_pointers()
     check(k0 != v0, "multi_layer: k0 != v0");
 }
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
@@ -364,7 +360,6 @@ int main()
     test_cache_row_update_plan_shift_mode();
     test_cache_row_update_plan_edge_cases();
 
-#if TRTF_HAS_TRT
     test_construction();
     test_prepare_step_progression();
     test_position_clamping_no_position_input();
@@ -379,13 +374,4 @@ int main()
     }
     std::cerr << "All DeviceKvCache tests passed.\n";
     return 0;
-#else
-    if (failures > 0)
-    {
-        std::cerr << failures << " test(s) FAILED\n";
-        return 1;
-    }
-    std::cout << "test_device_kv_cache: partial run (TRTF_HAS_TRT=0; GPU-path tests skipped)" << std::endl;
-    return 0;
-#endif
 }

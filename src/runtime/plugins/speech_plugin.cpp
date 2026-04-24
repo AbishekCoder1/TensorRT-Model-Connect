@@ -6,7 +6,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -70,4 +69,3 @@ volatile int kForceLink_SpeechPlugin = 0;
 static trtf::SpeechPlugin g_SpeechPlugin_instance;
 static trtf::PluginRegistrar g_SpeechPlugin_reg("speech_to_speech", &g_SpeechPlugin_instance);
 
-#endif // TRTF_HAS_TRT

@@ -1,6 +1,5 @@
 #include "runtime/plugins/shared/audio_helpers.h"
 
-#if TRTF_HAS_TRT
 
 #include <algorithm>
 #include <cstring>
@@ -217,4 +216,3 @@ BaseConfig make_depth_engine_config(const std::string& json, const BaseConfig& b
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

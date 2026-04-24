@@ -40,7 +40,6 @@ static void check(bool c, const char* n)
     if (!c) { std::cerr << "FAIL: " << n << '\n'; ++failures; }
 }
 
-#if TRTF_HAS_TRT
 
 static void test_flux_construction()
 {
@@ -125,18 +124,13 @@ static void test_flux_with_custom_config()
           "FluxPipeline custom config pipeline_type");
 }
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
-#if TRTF_HAS_TRT
     test_flux_construction();
     test_wan_construction();
     test_zimage_construction();
     test_flux_with_custom_config();
-#else
-    std::cerr << "TRT not available, skipping diffusion pipeline tests\n";
-#endif
     if (failures > 0) std::cerr << failures << " test(s) FAILED\n";
     return failures;
 }

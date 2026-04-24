@@ -8,7 +8,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -45,4 +44,3 @@ static trtf::PixArtTorchTrtPlugin g_PixArtTorchTrtPlugin_instance;
 static trtf::PluginRegistrar g_PixArtTorchTrtPlugin_reg("diffusion_pixart_torchtrt",
                                                         &g_PixArtTorchTrtPlugin_instance);
 
-#endif // TRTF_HAS_TRT

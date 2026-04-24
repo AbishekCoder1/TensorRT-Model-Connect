@@ -10,7 +10,6 @@
 #include <cstdint>
 #include <exception>
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -78,14 +77,8 @@ class MagpiePlugin final : public IPipelinePlugin {
         cudaStream_t stream = enc_loaded.module->stream();
 
         auto magpie_cfg = build_magpie_config(ctx.config_json, ctx.config);
-        int32_t kv_dim = compute_magpie_kv_dim(ctx.config, magpie_cfg);
-
         apply_magpie_registry_overlay(magpie_cfg, ctx.runtime_config);
-        int32_t kv_dim = (ctx.config.attention_size > 0)
-                             ? ctx.config.attention_size
-                             : ((ctx.config.num_heads > 0 && ctx.config.head_dim > 0)
-                                    ? ctx.config.num_heads * ctx.config.head_dim
-                                    : magpie_cfg.hidden_size);
+        int32_t kv_dim = compute_magpie_kv_dim(ctx.config, magpie_cfg);
 
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<IInferenceState> decoder_state = std::make_unique<KvCache>(
@@ -153,4 +146,3 @@ volatile int kForceLink_MagpiePlugin = 0;
 static trtf::MagpiePlugin g_MagpiePlugin_instance;
 static trtf::PluginRegistrar g_MagpiePlugin_reg("text_to_audio_magpie", &g_MagpiePlugin_instance);
 
-#endif // TRTF_HAS_TRT

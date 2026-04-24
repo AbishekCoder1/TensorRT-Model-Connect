@@ -44,6 +44,11 @@ class TrtModuleImpl final : public ITrtModule {
     bool has_output(const std::string& name) const override;
     void* device_ptr(const std::string& name) const override;
     void bind_external(const std::string& name, void* ptr) override;
+    void bind_external(const std::string& name, void* ptr,
+                       const std::vector<int64_t>& shape) override;
+    int32_t input_rank(const std::string& name) const override;
+    bool input_is_dynamic(const std::string& name) const override;
+    void reset_execution_context() override;
     bool ok() const override { return ctx_ != nullptr; }
     void keep_alive(std::shared_ptr<void> resource) override;
 
@@ -57,6 +62,7 @@ class TrtModuleImpl final : public ITrtModule {
         bool is_external{false};
     };
 
+    nvinfer1::ICudaEngine* engine_{nullptr};
     nvinfer1::IExecutionContext* ctx_{nullptr};
     cudaStream_t stream_{nullptr};
     int32_t profile_idx_{0};

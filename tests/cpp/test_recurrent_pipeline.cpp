@@ -29,13 +29,11 @@
 #include <iostream>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -46,7 +44,6 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
-#if TRTF_HAS_TRT
 
 static trtf::TrtLogger g_logger;
 
@@ -233,17 +230,12 @@ static void test_argmax_recurrent() {
     check(trtf::RecurrentPipeline::argmax(v) == 1, "argmax = 1");
 }
 
-#endif
 
 int main() {
-#if TRTF_HAS_TRT
     test_argmax_recurrent();
     test_mamba_pipeline();
     test_rwkv_pipeline();
     test_hybrid_pipeline();
-#else
-    std::cerr << "TRT not available, skipping\n";
-#endif
     if (failures > 0)
         std::cerr << failures << " FAILED\n";
     return failures;

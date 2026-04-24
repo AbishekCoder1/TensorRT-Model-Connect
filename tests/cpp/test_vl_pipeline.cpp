@@ -36,13 +36,11 @@
 #include <string_view>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 static void check(bool c, const char* n) {
@@ -52,7 +50,6 @@ static void check(bool c, const char* n) {
     }
 }
 
-#if TRTF_HAS_TRT
 
 static trtf::TrtLogger g_logger;
 
@@ -609,10 +606,8 @@ static void test_vl_generate_with_tokenizer() {
     cudaStreamDestroy(stream);
 }
 
-#endif
 
 int main() {
-#if TRTF_HAS_TRT
     test_vl_text_only();
     test_vl_text_only_max_tokens();
     test_vl_validates_decoder();
@@ -624,9 +619,6 @@ int main() {
     test_vl_generate_with_vision_encoder();
     test_vl_generate_with_embed_decoder();
     test_vl_generate_with_tokenizer();
-#else
-    std::cerr << "TRT not available, skipping\n";
-#endif
     if (failures > 0)
         std::cerr << failures << " FAILED\n";
     return failures;

@@ -9,7 +9,6 @@
 #include <utility>
 #include <vector>
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -112,8 +111,6 @@ parse_triattention_bundle_config(const std::string& config_json, int32_t max_cac
 TriAttentionStats parse_triattention_stats_json(const std::string& stats_json,
                                                 int32_t num_attention_heads,
                                                 int32_t num_key_value_heads, int32_t num_layers);
-
-class TrtModule;
 
 class TriAttentionKvCache : public IInferenceState {
   public:
@@ -373,4 +370,3 @@ class TriAttentionKvCache : public IInferenceState {
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

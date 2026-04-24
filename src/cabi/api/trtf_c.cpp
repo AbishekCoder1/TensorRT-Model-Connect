@@ -101,11 +101,7 @@ const char* trtf_version(void) {
 }
 
 int trtf_has_trt(void) {
-#if TRTF_HAS_TRT
     return 1;
-#else
-    return 0;
-#endif
 }
 
 } // extern "C"

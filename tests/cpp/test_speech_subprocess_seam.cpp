@@ -115,7 +115,6 @@ void test_output_plan_large_target_clamps_to_max_output()
     check(plan.total_iters == 65, "output plan: large target total iters");
 }
 
-#if TRTF_HAS_TRT
 
 class FakeSubprocessRunner final : public trtf::ISubprocessRunner {
 public:
@@ -212,7 +211,6 @@ void test_tokenize_runtime_empty_stdout_stays_empty()
     check(result.stderr_data == "warnings only", "empty stdout: stderr preserved");
 }
 
-#endif // TRTF_HAS_TRT
 
 } // namespace
 
@@ -223,13 +221,9 @@ int main()
     test_output_plan_small_inputs_do_not_go_negative();
     test_output_plan_large_target_clamps_to_max_output();
 
-#if TRTF_HAS_TRT
     test_tokenize_runtime_success_parses_tokens();
     test_tokenize_runtime_failure_propagates_rc_and_stderr();
     test_tokenize_runtime_empty_stdout_stays_empty();
-#else
-    std::cerr << "test_speech_subprocess_seam: TRTF_HAS_TRT=0, skipping TRT-dependent subprocess tests.\n";
-#endif
 
     if (failures != 0)
         return 1;

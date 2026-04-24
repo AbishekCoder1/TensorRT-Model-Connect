@@ -11,7 +11,6 @@
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
 #include "runtime/domains/diffusion/wan_generation_conditioning.h"
 
-#if TRTF_HAS_TRT
 
 #include <algorithm>
 #include <cmath>
@@ -1232,4 +1231,3 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

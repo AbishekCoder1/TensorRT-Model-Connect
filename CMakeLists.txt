@@ -104,6 +104,10 @@ add_library(trtf_core
   src/runtime/core/gpu_matmul.cpp
   src/runtime/core/cuda_common.cpp
   src/runtime/backend/backend_loader.cpp
+  # TriAttention's decoder plugin instantiates TrtModuleImpl directly to keep
+  # ICudaEngine* access for multi-profile row-dim introspection; we therefore
+  # compile the concrete backend impl into the main binary as well as the DSO.
+  src/runtime/backend/trt_module_impl.cpp
   src/runtime/core/trt_engine_lifecycle.cpp
   src/runtime/core/trt_decode_runtime.cpp
   src/runtime/core/sampler.cpp
@@ -476,6 +480,9 @@ target_link_libraries(trtf_dataset_benchmark PRIVATE trtf_core)
 target_include_directories(trtf_dataset_benchmark PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/stb
 )
+if(TRTF_ENABLE_TRT AND TRTF_TRT_LIBRARY)
+  target_link_libraries(trtf_dataset_benchmark PRIVATE ${TRTF_TRT_LIBRARY})
+endif()
 
 enable_testing()
 

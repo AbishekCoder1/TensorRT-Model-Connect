@@ -161,19 +161,14 @@ void expect_invalid_bundle_creation_fails(const std::string& bundle_path, const 
 
 void test_invalid_plan_bundle_reports_error()
 {
-#if TRTF_HAS_TRT
     trtf_test::TempDirGuard dir;
     const std::filesystem::path bundle_path = std::filesystem::path(dir.path()) / "invalid_engine_plan.trtfb";
     write_invalid_engine_bundle(bundle_path);
     expect_invalid_bundle_creation_fails(bundle_path.string(), "invalid plan bundle returns nullptr");
-#else
-    std::cerr << "SKIP: TRTF_HAS_TRT=0\n";
-#endif
 }
 
 void test_missing_engine_plan_bundle_reports_error()
 {
-#if TRTF_HAS_TRT
     trtf_test::TempDirGuard dir;
     const std::filesystem::path bundle_path = std::filesystem::path(dir.path()) / "missing_engine_plan.trtfb";
 
@@ -198,14 +193,10 @@ void test_missing_engine_plan_bundle_reports_error()
                                           "Bundle missing engine plan", "Bundle missing"}),
             "migrated strategy defaults to new runtime and reports engine_plan guard");
     }
-#else
-    std::cerr << "SKIP: TRTF_HAS_TRT=0\n";
-#endif
 }
 
 void test_diffusion_bundle_missing_required_section_reports_error()
 {
-#if TRTF_HAS_TRT
     trtf_test::TempDirGuard dir;
     const std::filesystem::path bundle_path = std::filesystem::path(dir.path()) / "diffusion_missing_sections.trtfb";
 
@@ -230,14 +221,10 @@ void test_diffusion_bundle_missing_required_section_reports_error()
                                           "Bundle missing"}),
             "migrated diffusion strategy defaults to new runtime and reports denoiser guard");
     }
-#else
-    std::cerr << "SKIP: TRTF_HAS_TRT=0\n";
-#endif
 }
 
 void test_unknown_strategy_reports_new_runtime_unsupported_strategy_error()
 {
-#if TRTF_HAS_TRT
     trtf_test::TempDirGuard dir;
     const std::filesystem::path bundle_path = std::filesystem::path(dir.path()) / "unknown_strategy_missing_engine_plan.trtfb";
 
@@ -263,14 +250,10 @@ void test_unknown_strategy_reports_new_runtime_unsupported_strategy_error()
                                           "Unknown runtime_strategy", "No plugin registered"}),
             "unknown strategy fails through the new runtime unsupported-strategy guard");
     }
-#else
-    std::cerr << "SKIP: TRTF_HAS_TRT=0\n";
-#endif
 }
 
 void test_invalid_plan_bundle_repeatable()
 {
-#if TRTF_HAS_TRT
     trtf_test::TempDirGuard dir;
     const std::filesystem::path bundle_path = std::filesystem::path(dir.path()) / "invalid_engine_plan_loop.trtfb";
     write_invalid_engine_bundle(bundle_path);
@@ -279,9 +262,6 @@ void test_invalid_plan_bundle_repeatable()
     {
         expect_invalid_bundle_creation_fails(bundle_path.string(), "invalid plan bundle repeated returns nullptr");
     }
-#else
-    std::cerr << "SKIP: TRTF_HAS_TRT=0\n";
-#endif
 }
 
 } // namespace

@@ -22,7 +22,6 @@
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 
 // A loaded TRT engine, ready for inference.
 // The stream is owned internally by the module — callers get it via module->stream().
@@ -110,6 +109,5 @@ std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(const BundleFile& 
 // No-op if the bundle has no kernel_manifest.json section (non-FFI bundles).
 void load_ffi_kernels_from_bundle(const BundleFile& bundle);
 
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

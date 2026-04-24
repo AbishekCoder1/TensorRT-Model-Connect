@@ -33,7 +33,6 @@ void check(bool condition, const char* test_name)
     }
 }
 
-#if TRTF_HAS_TRT
 
 #if NV_TENSORRT_MAJOR >= 10
 
@@ -464,13 +463,11 @@ void test_has_all_required_tensors_missing_per_layer_tensor_fails()
 
 #endif // NV_TENSORRT_MAJOR >= 10
 
-#endif // TRTF_HAS_TRT
 
 } // namespace
 
 int main()
 {
-#if TRTF_HAS_TRT
 #if NV_TENSORRT_MAJOR >= 10
     test_has_io_tensor_true_false_and_null_name();
     test_has_all_required_tensors_false_when_missing_base_tensors();
@@ -480,9 +477,6 @@ int main()
 #else
     std::cerr << "test_trt_engine_lifecycle_fake_engine: skipping, fake ICudaEngine is only implemented for "
                  "NV_TENSORRT_MAJOR >= 10.\n";
-#endif
-#else
-    std::cerr << "test_trt_engine_lifecycle_fake_engine: TRTF_HAS_TRT=0, skipping TRT-dependent tests.\n";
 #endif
 
     if (failures > 0)

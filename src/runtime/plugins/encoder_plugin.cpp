@@ -5,7 +5,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -38,4 +37,3 @@ static trtf::PluginRegistrar g_EncoderPlugin_reg2("embedding", &g_EncoderPlugin_
 static trtf::PluginRegistrar g_EncoderPlugin_reg3("reranking", &g_EncoderPlugin_instance);
 static trtf::PluginRegistrar g_EncoderPlugin_reg4("neural_operator", &g_EncoderPlugin_instance);
 
-#endif // TRTF_HAS_TRT

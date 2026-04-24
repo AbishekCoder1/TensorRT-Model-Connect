@@ -7,14 +7,11 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <NvInfer.h>
 #include <NvInferRuntime.h>
-#endif
 
 namespace trtf {
 
-#if TRTF_HAS_TRT
 
 struct VisionStepEngine {
     TrtUniquePtr<nvinfer1::ICudaEngine> engine;
@@ -44,6 +41,5 @@ bool run_vision_encoder_with_deepstack(
     std::vector<std::vector<float>>& deepstack_features,
     std::string& error);
 
-#endif // TRTF_HAS_TRT
 
 } // namespace trtf

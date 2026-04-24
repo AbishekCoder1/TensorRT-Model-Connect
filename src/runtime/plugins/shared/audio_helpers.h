@@ -3,7 +3,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "utils/json_helpers.h"
 
-#if TRTF_HAS_TRT
 
 namespace trtf {
 
@@ -35,4 +34,3 @@ int32_t safe_embed_dim(const std::vector<float>& data, int32_t divisor);
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT

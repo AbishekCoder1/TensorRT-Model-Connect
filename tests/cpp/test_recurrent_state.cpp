@@ -25,9 +25,7 @@
 #include <iostream>
 #include <vector>
 
-#if TRTF_HAS_TRT
 #include <cuda_runtime_api.h>
-#endif
 
 static int failures = 0;
 
@@ -40,7 +38,6 @@ static void check(bool condition, const char* test_name)
     }
 }
 
-#if TRTF_HAS_TRT
 
 static void test_mamba_spec()
 {
@@ -123,18 +120,13 @@ static void test_advance()
     cudaStreamDestroy(stream);
 }
 
-#endif // TRTF_HAS_TRT
 
 int main()
 {
-#if TRTF_HAS_TRT
     test_mamba_spec();
     test_rwkv_spec();
     test_reset();
     test_advance();
-#else
-    std::cerr << "TRT not available, skipping RecurrentState tests\n";
-#endif
 
     if (failures > 0) std::cerr << failures << " test(s) FAILED\n";
     return failures;
