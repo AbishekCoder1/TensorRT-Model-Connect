@@ -1,10 +1,5 @@
 #include "runtime/pipelines/bark_pipeline.h"
 
-<<<<<<< HEAD
-=======
-#if TRTF_HAS_TRT
-
->>>>>>> e50da5cd (style: clang-format all MR-changed C++ files)
 #include "runtime/core/trt_decode_runtime.h"
 #include "runtime/domains/audio/bark_generation_plan.h"
 #include "trtf/tokenizer.h"
