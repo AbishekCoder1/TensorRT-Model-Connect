@@ -29,6 +29,18 @@ struct TextGenConfig {
     ChatTemplateFormat chat_template_format{ChatTemplateFormat::kNone};
     std::string token_id_name{"token_id"};
     std::string logits_output_name{"logits"};
+
+    // Dual-profile unified engine: when a prefill TrtModule (same engine,
+    // different optimization profile) is attached, the pipeline runs the
+    // whole prompt through it at profile 0 (batched-MHA kernels at opt
+    // Sq), copies the per-layer K/V into the shared decode KV cache, and
+    // switches to profile 1 (GEMV fast-path at Sq=1) for autoregressive
+    // decode. The I/O names are shared by both profiles.
+    std::string present_k_pattern{"present_k_{i}"};
+    std::string present_v_pattern{"present_v_{i}"};
+    int32_t prefill_max_length{0};
+    int32_t num_layers{0};
+    int32_t kv_dim{0};
 };
 
 class TextGenerationPipeline final : public IPipeline {
@@ -37,7 +49,8 @@ class TextGenerationPipeline final : public IPipeline {
                            std::unique_ptr<IInferenceState> state, TextGenConfig config,
                            cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
                            std::string model_id_str = "",
-                           std::unique_ptr<ISampler> sampler = nullptr);
+                           std::unique_ptr<ISampler> sampler = nullptr,
+                           std::unique_ptr<TrtModule> prefill = nullptr);
 
     // Public API: takes raw text, returns typed result.
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
@@ -56,6 +69,7 @@ class TextGenerationPipeline final : public IPipeline {
 
   private:
     std::unique_ptr<TrtModule> decoder_;
+    std::unique_ptr<TrtModule> prefill_;
     std::unique_ptr<IInferenceState> state_;
     TextGenConfig config_;
     cudaStream_t stream_;
@@ -84,6 +98,19 @@ class TextGenerationPipeline final : public IPipeline {
     int32_t run_decode_loop(ISampler* sampler, const SamplingParams& params,
                             std::vector<int32_t>& output, std::vector<float>& logits,
                             int32_t max_new_tokens, bool gpu_sampling);
+
+    // Run the batched prefill engine on the whole prompt: populate the decode
+    // KV cache from the prefill outputs and return the last-token logits in
+    // ``logits`` (host side). Returns true on success; false if the prefill
+    // engine cannot handle this prompt length (caller falls back).
+    bool run_prefill_batched(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
+
+    // Dispatch prompt through the batched prefill engine when available +
+    // supported; otherwise run the token-by-token fallback on the decode
+    // engine. Post-condition: KV cache is populated and ``logits`` holds
+    // host-side logits for the last prompt token (when not gpu_sampling).
+    void run_prefill_stage(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
+                           bool gpu_sampling);
 };
 
 } // namespace trtf

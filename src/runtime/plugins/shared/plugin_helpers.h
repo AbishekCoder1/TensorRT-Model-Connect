@@ -47,6 +47,23 @@ std::unique_ptr<ITrtModule> extract_optional_module(IBackend* backend,
                                                     const char* label,
                                                     const ModuleCreateOptions& options = {});
 
+// Dual-profile TRT module group: one engine, two IExecutionContexts (one
+// per optimization profile). Both modules share the same engine (weights
+// live once in GPU memory) and CUDA stream. Use `decode->stream()` to
+// obtain the shared stream.
+struct DualProfileModules {
+    std::unique_ptr<ITrtModule> prefill; // profile 0 — batched Sq (null if single-profile)
+    std::unique_ptr<ITrtModule> decode;  // profile 1, or the only profile if single-profile
+};
+
+// Load an engine from a serialized plan via the backend and create two
+// execution contexts — one per optimization profile — sharing the engine.
+// When the engine has fewer than 2 profiles, `prefill` is left null and
+// `decode` holds the single-profile context (legacy bundles).
+DualProfileModules load_dual_profile_modules(IBackend* backend, const std::vector<char>* plan,
+                                             const char* label,
+                                             const ModuleCreateOptions& options = {});
+
 // Detect whether the bundle's config requests add_special_tokens for the tokenizer.
 bool detect_add_special_tokens(const BundleFile& bundle);
 

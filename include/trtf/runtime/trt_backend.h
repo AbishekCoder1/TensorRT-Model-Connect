@@ -21,6 +21,15 @@ struct ModuleCreateOptions {
     bool cuda_graphs{false};            // RTX: whole-graph CUDA capture
 };
 
+// Two modules created from a single engine, one per optimization profile.
+// Both share the engine (weights live once on GPU) and the same CUDA stream.
+// When the engine has fewer than two profiles, `prefill` is null and `decode`
+// holds the only context.
+struct BackendDualProfileModules {
+    std::unique_ptr<ITrtModule> prefill; // profile 0 — batched-Sq prefill (null if single-profile)
+    std::unique_ptr<ITrtModule> decode;  // profile 1, or the only profile if single-profile
+};
+
 // Per-DSO backend. Holds shared state (TRT runtime, RTX runtime cache).
 // One IBackend creates all ITrtModule instances for a pipeline.
 class IBackend {
@@ -30,6 +39,13 @@ class IBackend {
     // Deserialize an engine plan and create a module.
     virtual std::unique_ptr<ITrtModule> create_module(const void* plan_data, size_t plan_size,
                                                       const ModuleCreateOptions& options) = 0;
+
+    // Deserialize once, create two execution contexts sharing the engine —
+    // profile 0 for prefill, profile 1 for decode. Falls back to single-
+    // profile (prefill=null) when the engine only has one profile.
+    virtual BackendDualProfileModules
+    create_dual_profile_modules(const void* plan_data, size_t plan_size,
+                                const ModuleCreateOptions& options) = 0;
 
     // Backend identity: "trt" or "trt_rtx"
     virtual const char* name() const = 0;

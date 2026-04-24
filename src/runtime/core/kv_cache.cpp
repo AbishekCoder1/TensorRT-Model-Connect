@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <stdexcept>
 
 namespace trtf {
 
@@ -60,27 +61,42 @@ void KvCache::build_attention_mask(std::vector<float>& mask) const {
     mask.back() = 0.0f;
 }
 
-void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
-    // Position input (discovered during bind_to).
+void KvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
+    if (seq_len <= 0)
+        seq_len = 1;
+
+    // Position IDs: (seq_len,) int32 — positions [position_, position_+seq_len).
     if (has_position_input_) {
-        pos_buf_ = position_;
+        pos_buf_vec_.resize(static_cast<std::size_t>(seq_len));
+        for (int32_t i = 0; i < seq_len; ++i)
+            pos_buf_vec_[static_cast<std::size_t>(i)] = position_ + i;
         Tensor pos_t;
-        pos_t.data = &pos_buf_;
-        pos_t.shape = {1};
+        pos_t.data = pos_buf_vec_.data();
+        pos_t.shape = {static_cast<int64_t>(seq_len)};
         pos_t.dtype = DType::kInt32;
         inputs[names_.position_id] = pos_t;
     }
 
-    // Dense causal mask: 0.0 = visible, -1e4 = masked.
+    // Attention mask: (seq_len, max_length_ + seq_len) float32. Columns
+    // [0, valid) are visible cache entries, [valid, max_length_) are stale
+    // cache slots (masked). Columns [max_length_, max_length_ + seq_len)
+    // are the new tokens — causal: token i sees tokens 0..i.
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
-    for (int32_t i = 0; i < valid; ++i)
-        mask_buf_[static_cast<std::size_t>(i)] = 0.0f;
-    mask_buf_.back() = 0.0f;
+    const int32_t kv_len = max_length_ + seq_len;
+    const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
+    mask_buf_.assign(total, kMaskedScore);
+    for (int32_t i = 0; i < seq_len; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * static_cast<std::size_t>(kv_len);
+        for (int32_t j = 0; j < valid; ++j)
+            mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
+        for (int32_t j = 0; j <= i; ++j)
+            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+                0.0f;
+    }
 
     Tensor mask_t;
     mask_t.data = mask_buf_.data();
-    mask_t.shape = {static_cast<int64_t>(mask_buf_.size())};
+    mask_t.shape = {static_cast<int64_t>(seq_len), static_cast<int64_t>(kv_len)};
     mask_t.dtype = DType::kFloat32;
     inputs[names_.attention_mask] = mask_t;
 }
@@ -94,6 +110,15 @@ void KvCache::bind_to(TrtModule& module) {
         module.bind_external(names_.cache_v[li], cache_v_[li].data());
         module.bind_external(names_.present_k[li], present_k_[li].data());
         module.bind_external(names_.present_v[li], present_v_[li].data());
+    }
+}
+
+void KvCache::bind_cache_inputs(TrtModule& module) {
+    has_position_input_ = module.has_input(names_.position_id);
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        module.bind_external(names_.cache_k[li], cache_k_[li].data());
+        module.bind_external(names_.cache_v[li], cache_v_[li].data());
     }
 }
 
@@ -135,6 +160,30 @@ void KvCache::advance(int32_t n_tokens) {
         }
         // position_ stays at max_length_ (cache is full, all slots visible)
     }
+}
+
+void KvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
+                               const std::vector<const void*>& prefill_v, int32_t seq_len) {
+    if (seq_len <= 0) {
+        return;
+    }
+    if (seq_len > max_length_) {
+        throw std::runtime_error("KvCache::write_prefill_kv: seq_len exceeds max_length");
+    }
+    if (static_cast<int32_t>(prefill_k.size()) != num_layers_ ||
+        static_cast<int32_t>(prefill_v.size()) != num_layers_) {
+        throw std::runtime_error("KvCache::write_prefill_kv: per-layer pointer count mismatch");
+    }
+    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        cudaMemcpyAsync(cache_k_[li].data(), prefill_k[li], block_bytes, cudaMemcpyDeviceToDevice,
+                        stream_);
+        cudaMemcpyAsync(cache_v_[li].data(), prefill_v[li], block_bytes, cudaMemcpyDeviceToDevice,
+                        stream_);
+    }
+    position_ = seq_len;
 }
 
 void KvCache::reset() {

@@ -61,6 +61,49 @@ class TrtBackend final : public IBackend {
         return module;
     }
 
+    BackendDualProfileModules
+    create_dual_profile_modules(const void* plan_data, size_t plan_size,
+                                const ModuleCreateOptions& options) override {
+        auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
+        if (!engine_raw)
+            throw std::runtime_error("[trtf] Failed to deserialize engine (TRT)");
+        std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
+                                                      [](nvinfer1::ICudaEngine* p) { delete p; });
+
+        cudaStream_t stream = options.stream;
+        std::shared_ptr<void> stream_owner;
+        if (!stream) {
+            auto owned = std::make_shared<CudaStream>();
+            if (!owned->ok())
+                throw std::runtime_error("[trtf] Failed to create CUDA stream");
+            stream = owned->get();
+            stream_owner = owned;
+        }
+
+        const int32_t nprofiles = engine->getNbOptimizationProfiles();
+        auto make_ctx_module = [&](int32_t profile_idx) -> std::unique_ptr<ITrtModule> {
+            auto* ctx = engine->createExecutionContext();
+            if (!ctx)
+                throw std::runtime_error("[trtf] Failed to create TRT execution context");
+            auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx);
+            if (!mod->ok())
+                throw std::runtime_error("[trtf] TrtModuleImpl creation failed");
+            mod->keep_alive(engine);
+            if (stream_owner)
+                mod->keep_alive(stream_owner);
+            return mod;
+        };
+
+        BackendDualProfileModules out;
+        if (nprofiles < 2) {
+            out.decode = make_ctx_module(0);
+            return out;
+        }
+        out.prefill = make_ctx_module(0);
+        out.decode = make_ctx_module(1);
+        return out;
+    }
+
     const char* name() const override { return "trt"; }
 
   private:

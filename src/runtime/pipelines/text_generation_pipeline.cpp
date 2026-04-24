@@ -1,6 +1,8 @@
 #include "runtime/pipelines/text_generation_pipeline.h"
 
 #include "runtime/core/trt_common.h"
+#include "runtime/core/trt_engine_lifecycle.h"
+#include "trtf/runtime/kv_cache.h"
 
 #include <algorithm>
 #include <chrono>
@@ -9,6 +11,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace trtf {
 
@@ -19,24 +22,27 @@ bool env_flag_set(const char* name) {
 }
 } // namespace
 
-TextGenerationPipeline::TextGenerationPipeline(std::unique_ptr<TrtModule> decoder,
-                                               std::unique_ptr<IInferenceState> state,
-                                               TextGenConfig config, cudaStream_t stream,
-                                               std::shared_ptr<ITokenizer> tokenizer,
-                                               std::string model_id_str,
-                                               std::unique_ptr<ISampler> sampler)
-    : decoder_(std::move(decoder)), state_(std::move(state)), config_(config), stream_(stream),
-      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      sampler_(std::move(sampler)), logits_output_name_(config.logits_output_name) {
+TextGenerationPipeline::TextGenerationPipeline(
+    std::unique_ptr<TrtModule> decoder, std::unique_ptr<IInferenceState> state,
+    TextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+    std::string model_id_str, std::unique_ptr<ISampler> sampler, std::unique_ptr<TrtModule> prefill)
+    : decoder_(std::move(decoder)), prefill_(std::move(prefill)), state_(std::move(state)),
+      config_(config), stream_(stream), tokenizer_(std::move(tokenizer)),
+      model_id_(std::move(model_id_str)), sampler_(std::move(sampler)),
+      logits_output_name_(config.logits_output_name) {
     if (!decoder_ || !decoder_->ok()) {
         throw std::runtime_error("TextGenerationPipeline: invalid decoder module");
     }
     if (!state_ || !state_->ok()) {
         throw std::runtime_error("TextGenerationPipeline: invalid inference state");
     }
+    // prefill_ is an optional module — the plugin loader only hands us a
+    // fully-constructed one (nullptr otherwise), so no separate ok() check.
 
     // CUDA Graphs: capture TRT kernels on first step, replay on subsequent steps.
     // Disable with TRTF_DISABLE_CUDA_GRAPH=1.
+    // Not enabled on the prefill module — it uses dynamic shapes, which
+    // CUDA Graphs cannot capture.
     if (!env_flag_set("TRTF_DISABLE_CUDA_GRAPH"))
         decoder_->enable_cuda_graph();
 
@@ -119,28 +125,34 @@ TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
 
     state_->reset();
     state_->bind_to(*decoder_);
+    // Bind shared cache buffers on the prefill context too so the
+    // batched-sequence engine reads/writes the same KvCache memory as
+    // the decode context. Present K/V are NOT bound for prefill — they'd
+    // need a (Sq, kv_dim) buffer which doesn't fit KvCache's one-row
+    // present slot; the runtime reads prefill outputs directly from the
+    // prefill module's own allocations via device_ptr().
+    if (prefill_) {
+        auto* kv = dynamic_cast<KvCache*>(state_.get());
+        if (kv)
+            kv->bind_cache_inputs(*prefill_);
+    }
 
     std::vector<float> logits;
     const bool gpu_sampling = (active_sampler->logits_location() == LogitsLocation::DEVICE);
 
     auto t0 = Clock::now();
 
-    // Prefill: process all input tokens except the last.
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i) {
-        if (gpu_sampling)
-            run_step_device(input_ids[i]);
-        else
-            run_step(input_ids[i], logits);
-    }
-
-    // Start decode from last input token
-    int32_t current_token = input_ids.back();
-    if (gpu_sampling)
-        run_step_device(current_token);
-    else
-        run_step(current_token, logits);
+    // Dispatch the prompt through either the batched prefill engine (when
+    // available + supported) or the legacy token-by-token fallback. After
+    // this call, the KV cache is populated and `logits` holds the logits
+    // for the last prompt token.
+    run_prefill_stage(input_ids, logits, gpu_sampling);
 
     auto t1 = Clock::now();
+    if (trt_log_to_stderr_enabled()) {
+        double pms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::cerr << "[trtf] Prefill: " << input_ids.size() << " tokens, " << pms << " ms\n";
+    }
 
     // Decode: autoregressive loop
     std::vector<int32_t> output = input_ids;
@@ -233,6 +245,99 @@ void TextGenerationPipeline::run_step_device(int32_t token_id) {
     d_logits_ptr_ = static_cast<const float*>(decoder_->device_ptr(logits_output_name_));
 
     state_->advance();
+}
+
+namespace {
+
+// Check preconditions for running the batched prefill engine. Returns the
+// KvCache* when all checks pass, nullptr otherwise. Kept narrow so the main
+// run_prefill_batched body stays simple enough for the CCN gate.
+KvCache* prefill_preflight(TrtModule* prefill, const TextGenConfig& cfg, IInferenceState* state,
+                           int32_t sq) {
+    if (prefill == nullptr || sq <= 0)
+        return nullptr;
+    if (cfg.prefill_max_length > 0 && sq > cfg.prefill_max_length)
+        return nullptr;
+    if (cfg.num_layers <= 0 || cfg.vocab_size <= 0)
+        return nullptr;
+    return dynamic_cast<KvCache*>(state);
+}
+
+// Gather per-layer prefill present-K/V device pointers. Returns false if any
+// layer name is not present in the prefill module (caller falls back).
+bool gather_prefill_kv_pointers(TrtModule& prefill, const TextGenConfig& cfg,
+                                std::vector<const void*>& pk, std::vector<const void*>& pv) {
+    pk.resize(static_cast<std::size_t>(cfg.num_layers));
+    pv.resize(static_cast<std::size_t>(cfg.num_layers));
+    for (int32_t i = 0; i < cfg.num_layers; ++i) {
+        const auto li = static_cast<std::size_t>(i);
+        pk[li] = prefill.device_ptr(expand_layer_name(cfg.present_k_pattern, i));
+        pv[li] = prefill.device_ptr(expand_layer_name(cfg.present_v_pattern, i));
+        if (pk[li] == nullptr || pv[li] == nullptr)
+            return false;
+    }
+    return true;
+}
+
+} // namespace
+
+void TextGenerationPipeline::run_prefill_stage(const std::vector<int32_t>& input_ids,
+                                               std::vector<float>& logits, bool gpu_sampling) {
+    if (prefill_ && !gpu_sampling && run_prefill_batched(input_ids, logits))
+        return;
+
+    // Fallback: token-by-token prefill on the decode engine, then one decode
+    // step on the last input token to produce its logits.
+    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i) {
+        if (gpu_sampling)
+            run_step_device(input_ids[i]);
+        else
+            run_step(input_ids[i], logits);
+    }
+    const int32_t current_token = input_ids.back();
+    if (gpu_sampling)
+        run_step_device(current_token);
+    else
+        run_step(current_token, logits);
+}
+
+bool TextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
+                                                 std::vector<float>& logits) {
+    const auto sq = static_cast<int32_t>(input_ids.size());
+    KvCache* kv = prefill_preflight(prefill_.get(), config_, state_.get(), sq);
+    if (kv == nullptr)
+        return false;
+
+    TensorMap inputs;
+    Tensor tok_t{const_cast<int32_t*>(input_ids.data()), {static_cast<int64_t>(sq)}, DType::kInt32};
+    inputs[config_.token_id_name] = tok_t;
+    // KvCache builds position_id (seq_len,) and the causal-with-cache
+    // attention_mask (seq_len, max_cache + seq_len).
+    kv->prepare_step(inputs, sq);
+
+    TensorMap outputs = prefill_->forward(inputs);
+    auto logits_it = outputs.find(config_.logits_output_name);
+    if (logits_it == outputs.end())
+        return false;
+
+    // The dual-profile builder slices hidden_state to the last row before
+    // the LM head, so the logits output is always (1, vocab) regardless
+    // of the active profile's Sq — matching the contract of the legacy
+    // single-token decode engine.
+    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
+    const auto& lt = logits_it->second;
+    if (static_cast<std::size_t>(lt.numel()) < vocab)
+        return false;
+    logits.resize(vocab);
+    std::memcpy(logits.data(), lt.data, vocab * sizeof(float));
+
+    std::vector<const void*> pk, pv;
+    if (!gather_prefill_kv_pointers(*prefill_, config_, pk, pv))
+        return false;
+    kv->write_prefill_kv(pk, pv, sq);
+    if (trt_log_to_stderr_enabled())
+        std::cerr << "[trtf] Batched prefill (profile 0): " << sq << " tokens in one call\n";
+    return true;
 }
 
 int32_t TextGenerationPipeline::argmax(const std::vector<float>& logits) {

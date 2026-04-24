@@ -61,6 +61,19 @@ class KvCache : public IInferenceState {
     DeviceTensor& cache_k(int32_t layer) { return cache_k_[static_cast<std::size_t>(layer)]; }
     DeviceTensor& cache_v(int32_t layer) { return cache_v_[static_cast<std::size_t>(layer)]; }
 
+    // Write per-layer KV produced by a batched prefill engine into the cache
+    // at positions [0, seq_len). Device-to-device copy on this cache's stream;
+    // advances position_ to seq_len. Requires seq_len <= max_length.
+    void write_prefill_kv(const std::vector<const void*>& prefill_k,
+                          const std::vector<const void*>& prefill_v, int32_t seq_len);
+
+    // Bind only the cache_k/v INPUT pointers to `module`. Used for the
+    // prefill TrtModule whose present_k/v outputs have shape (Sq, kv_dim)
+    // — too big for KvCache's single-row present buffer. The caller reads
+    // the prefill outputs directly from the module's own allocations and
+    // copies them via write_prefill_kv().
+    void bind_cache_inputs(TrtModule& module);
+
   private:
     std::vector<DeviceTensor> cache_k_;   // [num_layers], shape [max_length, kv_dim]
     std::vector<DeviceTensor> cache_v_;   // [num_layers]
@@ -73,7 +86,7 @@ class KvCache : public IInferenceState {
     cudaStream_t stream_{nullptr};
     // Buffers owned by this object — Tensor.data in prepare_step() points here.
     std::vector<float> mask_buf_;
-    int32_t pos_buf_{0};
+    std::vector<int32_t> pos_buf_vec_;
     bool has_position_input_{false};
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};
