@@ -263,27 +263,12 @@ static void test_device_ptr() {
     cudaStreamDestroy(stream);
 }
 
-static void test_skip_external_input_allocation() {
-    auto engine = build_dynamic_identity_engine();
-    if (!engine)
-        return;
-
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-
-    trtf::TrtModuleImpl module(engine.get(), engine->createExecutionContext(), stream, 0);
-    check(module.ok(), "external-input module is ok");
-    check(module.device_ptr("x") == nullptr, "external input buffer skipped");
-    check(module.device_ptr("y") != nullptr, "output buffer still allocated");
-
-    float* external = nullptr;
-    cudaMalloc(reinterpret_cast<void**>(&external), 2 * 4 * sizeof(float));
-    module.bind_external("x", external, {2, 4});
-    check(module.device_ptr("x") == external, "external input bind uses provided pointer");
-
-    cudaFree(external);
-    cudaStreamDestroy(stream);
-}
+// NOTE: the pre-rebase TrtModule constructor accepted an `external_inputs`
+// list that skipped allocation for those inputs. The post-abstraction
+// TrtModuleImpl always allocates and lets `bind_external` swap the pointer
+// (which frees the original buffer). `test_bind_external` below covers the
+// post-rebase path; the explicit "skip at construction" test was removed
+// when its premise no longer existed.
 
 static void test_bind_external() {
     auto engine = build_identity_engine();
@@ -499,7 +484,6 @@ int main() {
     test_forward_async();
     test_introspection();
     test_device_ptr();
-    test_skip_external_input_allocation();
     test_bind_external();
     test_unique_ptr_ownership();
     test_keep_alive();

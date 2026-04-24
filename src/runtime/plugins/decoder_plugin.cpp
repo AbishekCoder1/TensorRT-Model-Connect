@@ -230,46 +230,49 @@ class DecoderPlugin final : public IPipelinePlugin {
                                     kv_names.cache_v.end());
     }
 
+    static std::unique_ptr<TrtModule> make_decoder_module(
+        std::shared_ptr<nvinfer1::ICudaEngine> shared_engine,
+        std::shared_ptr<CudaStream> shared_stream, int32_t profile_idx) {
+        // TriAttention instantiates TrtModuleImpl directly (not via
+        // IBackend::create_module) because the runtime needs ICudaEngine*
+        // access for multi-profile row-dim introspection.
+        auto* trt_ctx = shared_engine->createExecutionContext();
+        if (!trt_ctx)
+            throw std::runtime_error("Failed to create TRT execution context for profile " +
+                                     std::to_string(profile_idx));
+        auto module = std::make_unique<TrtModuleImpl>(
+            shared_engine.get(), trt_ctx, shared_stream->get(), profile_idx);
+        if (!module || !module->ok())
+            throw std::runtime_error("Failed to create TrtModule for engine_plan (profile " +
+                                     std::to_string(profile_idx) + ")");
+        module->keep_alive(shared_engine);
+        module->keep_alive(shared_stream);
+        return module;
+    }
+
     static std::vector<TextGenerationPipeline::DecoderContext> build_decoder_contexts(
         const PipelineContext& ctx, std::shared_ptr<nvinfer1::ICudaEngine> shared_engine,
         std::shared_ptr<CudaStream> shared_stream,
         const std::vector<std::string>& external_input_names, int32_t runtime_rows) {
-        auto make_decoder = [&](int32_t profile_idx) -> std::unique_ptr<TrtModule> {
-            // See notes in the sibling build_decoder_contexts factory on why
-            // TriAttention instantiates TrtModuleImpl directly instead of
-            // routing through IBackend::create_module.
-            (void)external_input_names;
-            auto* trt_ctx = shared_engine->createExecutionContext();
-            if (!trt_ctx)
-                throw std::runtime_error("Failed to create TRT execution context for profile " +
-                                         std::to_string(profile_idx));
-            auto module = std::make_unique<TrtModuleImpl>(
-                shared_engine.get(), trt_ctx, shared_stream->get(), profile_idx);
-            if (!module || !module->ok())
-                throw std::runtime_error("Failed to create TrtModule for engine_plan (profile " +
-                                         std::to_string(profile_idx) + ")");
-            module->keep_alive(shared_engine);
-            module->keep_alive(shared_stream);
-            return module;
-        };
+        (void)external_input_names;
         auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
         if (profile_rows.empty())
             profile_rows.push_back(ctx.config.max_cache_length);
         const int32_t num_profiles = shared_engine->getNbOptimizationProfiles();
+        const int32_t loop_bound = std::min(num_profiles, static_cast<int32_t>(profile_rows.size()));
         std::vector<TextGenerationPipeline::DecoderContext> decoders;
         decoders.reserve(static_cast<std::size_t>(num_profiles > 0 ? num_profiles : 1));
-        for (int32_t profile_idx = 0;
-             profile_idx < num_profiles && profile_idx < static_cast<int32_t>(profile_rows.size());
-             ++profile_idx) {
+        for (int32_t profile_idx = 0; profile_idx < loop_bound; ++profile_idx) {
             const int32_t profile_max_rows = profile_rows[static_cast<std::size_t>(profile_idx)];
             if (profile_idx > 0 && profile_max_rows > runtime_rows)
                 break;
-            decoders.push_back(TextGenerationPipeline::DecoderContext{profile_max_rows,
-                                                                      make_decoder(profile_idx)});
+            decoders.push_back(TextGenerationPipeline::DecoderContext{
+                profile_max_rows, make_decoder_module(shared_engine, shared_stream, profile_idx)});
         }
         if (decoders.empty())
-            decoders.push_back(TextGenerationPipeline::DecoderContext{ctx.config.max_cache_length,
-                                                                      make_decoder(0)});
+            decoders.push_back(TextGenerationPipeline::DecoderContext{
+                ctx.config.max_cache_length,
+                make_decoder_module(shared_engine, shared_stream, 0)});
         return decoders;
     }
 

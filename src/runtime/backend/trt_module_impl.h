@@ -88,6 +88,8 @@ class TrtModuleImpl final : public ITrtModule {
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,
                               const std::vector<int64_t>& new_shape);
     void execute_enqueue();
+    void recreate_context_with_profile();
+    void rebind_buffer_to_context(const std::string& name, const BufferEntry& entry);
     static bool dims_are_dynamic(const nvinfer1::Dims& dims);
     static std::vector<int64_t> dims_to_shape(const nvinfer1::Dims& dims);
     static std::size_t compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,

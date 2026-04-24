@@ -71,9 +71,7 @@ bool TrtModuleImpl::input_is_dynamic(const std::string& name) const {
     return it != buffers_.end() && it->second.is_input && it->second.is_dynamic;
 }
 
-void TrtModuleImpl::reset_execution_context() {
-    if (engine_ == nullptr)
-        return;
+void TrtModuleImpl::recreate_context_with_profile() {
     delete ctx_;
     ctx_ = engine_->createExecutionContext();
     if (!ctx_)
@@ -86,28 +84,31 @@ void TrtModuleImpl::reset_execution_context() {
         }
         cudaStreamSynchronize(stream_);
     }
+}
+
+void TrtModuleImpl::rebind_buffer_to_context(const std::string& name, const BufferEntry& entry) {
+    // Fresh IExecutionContexts have neither tensor addresses nor dynamic
+    // input shapes set; replay both from our cached BufferEntry so the next
+    // enqueueV3 doesn't fail with "Not all shapes are specified".
+    if (entry.d_ptr)
+        ctx_->setTensorAddress(name.c_str(), entry.d_ptr);
+    if (!entry.is_dynamic || entry.shape.empty())
+        return;
+    nvinfer1::Dims dims;
+    dims.nbDims = static_cast<int32_t>(entry.shape.size());
+    for (int32_t d = 0; d < dims.nbDims; ++d)
+        dims.d[d] = entry.shape[d];
+    ctx_->setInputShape(name.c_str(), dims);
+}
+
+void TrtModuleImpl::reset_execution_context() {
+    if (engine_ == nullptr)
+        return;
+    recreate_context_with_profile();
     if (use_cuda_graph_ && cuda_graph_)
         cuda_graph_->reset();
-    // A fresh IExecutionContext starts with neither tensor addresses nor
-    // dynamic input shapes set, so both must be re-announced. The pipeline
-    // will also re-bind external-input shapes via state_->bind_to() right
-    // after this reset, but internal dynamic inputs (attention_mask,
-    // position_id) only get their shapes set inside forward_async, which
-    // early-returns when the BufferEntry's cached shape already matches
-    // the incoming tensor shape. Re-applying the cached shape here keeps
-    // the context in sync so the next enqueueV3 doesn't fail with
-    // "Not all shapes are specified".
-    for (auto& [name, entry] : buffers_) {
-        if (entry.d_ptr && ctx_)
-            ctx_->setTensorAddress(name.c_str(), entry.d_ptr);
-        if (entry.is_dynamic && ctx_ && !entry.shape.empty()) {
-            nvinfer1::Dims dims;
-            dims.nbDims = static_cast<int32_t>(entry.shape.size());
-            for (int32_t d = 0; d < dims.nbDims; ++d)
-                dims.d[d] = entry.shape[d];
-            ctx_->setInputShape(name.c_str(), dims);
-        }
-    }
+    for (auto& [name, entry] : buffers_)
+        rebind_buffer_to_context(name, entry);
 }
 
 TrtModuleImpl::~TrtModuleImpl() {
