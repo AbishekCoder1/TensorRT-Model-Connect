@@ -733,9 +733,9 @@ def build_bundle(
                 runtime_strategy = getattr(plugin, "runtime_strategy", None)
                 if runtime_strategy:
                     cfg_dict["runtime_strategy"] = runtime_strategy
-                cfg_dict["engine_backend"] = "trt_rtx" if rtx else "trt"
                 elif triattention_cfg is not None:
                     cfg_dict["runtime_strategy"] = "decoder_kv_cache"
+                cfg_dict["engine_backend"] = "trt_rtx" if rtx else "trt"
                 cfg_dict["precision"] = precision
                 if quant_plan is not None:
                     cfg_dict["quantization"] = quant_plan.as_config_dict()
@@ -1073,7 +1073,7 @@ def build(
                  quant_scales=quant_scales,
                  quant_calibration_samples=quant_calibration_samples,
                  verbose=verbose,
-                 rtx=rtx)
+                 rtx=rtx,
                  triattention_stats_path=triattention_stats_path,
                  triattention_kv_budget=triattention_kv_budget,
                  triattention_divide_length=triattention_divide_length,

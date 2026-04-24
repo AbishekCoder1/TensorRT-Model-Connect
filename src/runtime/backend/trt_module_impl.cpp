@@ -83,11 +83,12 @@ void TrtModuleImpl::reset_execution_context() {
     }
     if (use_cuda_graph_)
         cuda_graph_->reset();
-    // Rebind any externally-provided buffers into the fresh context.
+    // Rebind every buffer into the fresh context: a brand-new
+    // IExecutionContext starts with no tensor addresses set, so both internal
+    // and external buffers must be re-announced before the next enqueueV3.
     for (auto& [name, entry] : buffers_) {
-        if (entry.is_external && entry.d_ptr && ctx_) {
+        if (entry.d_ptr && ctx_)
             ctx_->setTensorAddress(name.c_str(), entry.d_ptr);
-        }
     }
 }
 
