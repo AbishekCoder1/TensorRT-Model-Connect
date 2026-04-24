@@ -356,6 +356,14 @@ CliArgs parse_args(int argc, char** argv) {
             args.cuda_graphs = true;
             continue;
         }
+        if (arg == "--config" && need_value(arg)) {
+            args.config_path = argv[++i];
+            continue;
+        }
+        if (arg == "--set" && need_value(arg)) {
+            args.set_tokens.emplace_back(argv[++i]);
+            continue;
+        }
 
         if (args.parse_error)
             return args;
@@ -391,7 +399,7 @@ int cmd_run(const CliArgs& args) {
     }
 
     auto pipeline =
-        trtf::load(args.bundle_path, args.hf_python, args.runtime_cache, args.cuda_graphs);
+        trtf::load(args.bundle_path, make_load_options(args));
     if (!pipeline) {
         std::cerr << "Error: failed to load bundle\n";
         return EXIT_FAILURE;
@@ -512,7 +520,7 @@ int cmd_generate_video(const CliArgs& args) {
         args.output_dir.empty() ? "/tmp/trtf_generate_video" : args.output_dir;
 
     auto pipeline =
-        trtf::load(args.bundle_path, args.hf_python, args.runtime_cache, args.cuda_graphs);
+        trtf::load(args.bundle_path, make_load_options(args));
 
     trtf::GenerateConfig cfg;
     cfg.num_steps = args.num_steps;
@@ -562,7 +570,7 @@ int cmd_segment(const CliArgs& args) {
     }
 
     auto pipeline =
-        trtf::load(args.bundle_path, args.hf_python, args.runtime_cache, args.cuda_graphs);
+        trtf::load(args.bundle_path, make_load_options(args));
 
     // Load image (HWC float32 in [0,1])
     auto image = trtf::io::read_image(args.image_path);
@@ -640,7 +648,7 @@ int cmd_serve_audio(const CliArgs& args) {
 
     std::cerr << "[serve-audio] Loading bundle: " << args.bundle_path << std::endl;
     auto pipeline =
-        trtf::load(args.bundle_path, args.hf_python, args.runtime_cache, args.cuda_graphs);
+        trtf::load(args.bundle_path, make_load_options(args));
     std::cerr << "[serve-audio] Ready. Reading prompts from stdin (one per line)..." << std::endl;
 
     trtf::GenerateConfig cfg;
@@ -688,7 +696,7 @@ int cmd_generate_audio(const CliArgs& args) {
     }
 
     auto pipeline =
-        trtf::load(args.bundle_path, args.hf_python, args.runtime_cache, args.cuda_graphs);
+        trtf::load(args.bundle_path, make_load_options(args));
 
     trtf::GenerateConfig cfg;
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 0;
@@ -735,7 +743,7 @@ int cmd_encode(const CliArgs& args) {
     }
 
     auto pipeline =
-        trtf::load(args.bundle_path, args.hf_python, args.runtime_cache, args.cuda_graphs);
+        trtf::load(args.bundle_path, make_load_options(args));
     auto result = pipeline->encode(args.prompt);
 
     std::cerr << "Hidden states dim: " << result.dim << std::endl;
@@ -756,7 +764,7 @@ int cmd_embed(const CliArgs& args) {
     }
 
     auto pipeline =
-        trtf::load(args.bundle_path, args.hf_python, args.runtime_cache, args.cuda_graphs);
+        trtf::load(args.bundle_path, make_load_options(args));
     auto result = pipeline->embed(args.prompt);
 
     std::cerr << "Embedding dim: " << result.dim << std::endl;
@@ -777,7 +785,7 @@ int cmd_rerank(const CliArgs& args) {
     }
 
     auto pipeline =
-        trtf::load(args.bundle_path, args.hf_python, args.runtime_cache, args.cuda_graphs);
+        trtf::load(args.bundle_path, make_load_options(args));
     float score = pipeline->rerank(args.prompt, args.document);
     std::cout << "Relevance score: " << score << '\n';
     return EXIT_SUCCESS;
@@ -850,7 +858,7 @@ int cmd_transcribe(const CliArgs& args) {
     }
 
     auto pipeline =
-        trtf::load(args.bundle_path, args.hf_python, args.runtime_cache, args.cuda_graphs);
+        trtf::load(args.bundle_path, make_load_options(args));
 
     auto audio = trtf::io::read_wav(args.audio_in);
     int32_t max_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 224;
@@ -869,7 +877,7 @@ int cmd_speak(const CliArgs& args) {
     }
 
     auto pipeline =
-        trtf::load(args.bundle_path, args.hf_python, args.runtime_cache, args.cuda_graphs);
+        trtf::load(args.bundle_path, make_load_options(args));
 
     auto audio = trtf::io::read_wav(args.audio_in);
 
