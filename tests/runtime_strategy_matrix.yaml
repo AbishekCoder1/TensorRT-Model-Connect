@@ -21,6 +21,14 @@
       "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
       "diff_framework_check_classes": ["DiffusionComponentsTest"]
     },
+    "diffusion_ltx": {
+      "task_strategy": "diffusion_media_generation",
+      "cli_commands": ["generate-video"],
+      "runner_class": "tests.e2e_harness.runners.diffusion.DiffusionMediaRunner",
+      "comparator_class": "tests.e2e_harness.comparators.diffusion.DiffusionComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_ltx']."
+    },
     "embedding": {
       "task_strategy": "embedding",
       "cli_commands": ["embed"],

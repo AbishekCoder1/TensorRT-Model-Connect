@@ -196,6 +196,30 @@ class DiffusionComparator:
             if not std_ok:
                 all_pass = False
 
+        ref_frame_stats = ref.data.get("frame_stats", {})
+        if ref_frame_stats:
+            ref_pixel_mean = ref_frame_stats.get("mean", 0.5)
+            ref_pixel_std = ref_frame_stats.get("std", 0.0)
+
+            min_mean = thresholds.get("min_pixel_mean", 0.15)
+            max_mean = thresholds.get("max_pixel_mean", 0.85)
+            ref_mean_ok = min_mean <= ref_pixel_mean <= max_mean
+            metrics["reference_pixel_mean_range"] = MetricResult(
+                value=ref_pixel_mean, threshold=None, operator="in_range",
+                passed=ref_mean_ok, note=f"[{min_mean}, {max_mean}]",
+            )
+            if not ref_mean_ok:
+                all_pass = False
+
+            min_std = thresholds.get("min_pixel_std", 0.05)
+            ref_std_ok = ref_pixel_std >= min_std
+            metrics["reference_pixel_std_min"] = MetricResult(
+                value=ref_pixel_std, threshold=min_std,
+                operator=">=", passed=ref_std_ok,
+            )
+            if not ref_std_ok:
+                all_pass = False
+
         frames_dir = trt.data.get("frames_dir", "")
         if frames_dir:
             temporal_cs = _compute_temporal_consistency(frames_dir)

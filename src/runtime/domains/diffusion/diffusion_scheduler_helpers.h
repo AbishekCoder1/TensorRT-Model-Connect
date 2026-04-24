@@ -10,11 +10,8 @@
 namespace trtf {
 namespace diffusion {
 
-inline int32_t resolve_requested_steps(
-    int32_t requested,
-    int32_t fallback,
-    bool zero_uses_fallback)
-{
+inline int32_t resolve_requested_steps(int32_t requested, int32_t fallback,
+                                       bool zero_uses_fallback) {
     if (requested < 0) {
         return fallback;
     }
@@ -24,10 +21,7 @@ inline int32_t resolve_requested_steps(
     return requested;
 }
 
-inline float resolve_requested_guidance(
-    float requested,
-    float fallback)
-{
+inline float resolve_requested_guidance(float requested, float fallback) {
     return requested < 0.0F ? fallback : requested;
 }
 
@@ -37,6 +31,9 @@ struct FlowMatchEulerConfig {
     bool use_dynamic_shifting{false};
     float base_shift{0.5F};
     float max_shift{1.15F};
+    int32_t base_image_seq_len{256};
+    int32_t max_image_seq_len{4096};
+    float shift_terminal{0.0F};
     int32_t image_seq_len{4096};
     bool use_empirical_mu{false};
     bool use_zero_sigma_min{false};
@@ -49,15 +46,11 @@ struct FlowMatchEulerPlan {
     bool used_dynamic_shifting{false};
 };
 
-inline double apply_flow_match_shift(double sigma, double shift)
-{
+inline double apply_flow_match_shift(double sigma, double shift) {
     return shift * sigma / (1.0 + (shift - 1.0) * sigma);
 }
 
-inline double compute_dynamic_mu(
-    const FlowMatchEulerConfig& config,
-    int32_t num_steps)
-{
+inline double compute_dynamic_mu(const FlowMatchEulerConfig& config, int32_t num_steps) {
     if (config.use_empirical_mu) {
         // FLUX.2 empirical mu formula (compute_empirical_mu in diffusers).
         const double a1 = 8.73809524e-05;
@@ -75,21 +68,83 @@ inline double compute_dynamic_mu(
         return a * static_cast<double>(num_steps) + b;
     }
 
-    // FLUX.1 linear mu formula.
-    const double base_seq = 256.0;
-    const double max_seq = 4096.0;
-    const double m = (static_cast<double>(config.max_shift) -
-                      static_cast<double>(config.base_shift)) /
-                     (max_seq - base_seq);
-    const double b = static_cast<double>(config.base_shift) -
-                     m * base_seq;
+    // Diffusers linear mu formula. FLUX defaults to 256/4096, while
+    // LTX-Video uses 1024/4096.
+    const double base_seq = static_cast<double>(config.base_image_seq_len);
+    const double max_seq = static_cast<double>(config.max_image_seq_len);
+    const double m =
+        (static_cast<double>(config.max_shift) - static_cast<double>(config.base_shift)) /
+        (max_seq - base_seq);
+    const double b = static_cast<double>(config.base_shift) - m * base_seq;
     return static_cast<double>(config.image_seq_len) * m + b;
 }
 
-inline FlowMatchEulerPlan build_flow_match_euler_plan(
-    int32_t num_steps,
-    const FlowMatchEulerConfig& config)
-{
+inline void fill_dynamic_shift_schedule(FlowMatchEulerPlan& plan, int32_t num_steps,
+                                        const FlowMatchEulerConfig& config, double N) {
+    plan.used_dynamic_shifting = true;
+    plan.dynamic_mu = compute_dynamic_mu(config, num_steps);
+
+    const double sigma_max = 1.0;
+    const double sigma_min = 1.0 / static_cast<double>(std::max(num_steps, 1));
+    const double exp_mu = std::exp(plan.dynamic_mu);
+
+    for (int32_t i = 0; i < num_steps; ++i) {
+        const double frac =
+            static_cast<double>(i) / static_cast<double>(std::max(num_steps - 1, 1));
+        const double raw_sigma = sigma_max + frac * (sigma_min - sigma_max);
+        const double raw_sigma_clamped = std::max(raw_sigma, 1e-10);
+        const auto idx = static_cast<std::size_t>(i);
+        plan.sigmas[idx] = exp_mu / (exp_mu + (1.0 / raw_sigma_clamped - 1.0));
+        plan.timesteps[idx] = static_cast<float>(plan.sigmas[idx] * N);
+    }
+}
+
+inline void fill_shifted_linear_schedule(FlowMatchEulerPlan& plan, int32_t num_steps,
+                                         const FlowMatchEulerConfig& config, double N) {
+    const double shift = static_cast<double>(config.shift);
+    const double raw_sigma_min = config.use_zero_sigma_min ? 0.0 : 1.0 / N;
+    const double sigma_min =
+        config.use_zero_sigma_min ? 0.0 : apply_flow_match_shift(raw_sigma_min, shift);
+    const double t_min = config.use_zero_sigma_min ? 0.0 : sigma_min * N;
+
+    for (int32_t i = 0; i < num_steps; ++i) {
+        const double frac =
+            static_cast<double>(i) / static_cast<double>(std::max(num_steps - 1, 1));
+        double sigma = (N + frac * (t_min - N)) / N;
+        if (config.use_zero_sigma_min || std::abs(config.shift - 1.0F) > 1e-6F) {
+            sigma = apply_flow_match_shift(sigma, shift);
+        }
+        const auto idx = static_cast<std::size_t>(i);
+        plan.sigmas[idx] = sigma;
+        plan.timesteps[idx] = static_cast<float>(sigma * N);
+    }
+}
+
+inline void apply_terminal_shift(FlowMatchEulerPlan& plan, int32_t num_steps,
+                                 const FlowMatchEulerConfig& config, double N) {
+    if (config.shift_terminal <= 0.0F || plan.sigmas.empty()) {
+        return;
+    }
+    const double terminal = static_cast<double>(config.shift_terminal);
+    const double one_minus_last = 1.0 - plan.sigmas[static_cast<std::size_t>(num_steps - 1)];
+    const double denom = 1.0 - terminal;
+    if (std::abs(denom) <= 1e-12) {
+        return;
+    }
+    const double scale = one_minus_last / denom;
+    if (std::abs(scale) <= 1e-12) {
+        return;
+    }
+    for (int32_t i = 0; i < num_steps; ++i) {
+        const auto idx = static_cast<std::size_t>(i);
+        auto& sigma = plan.sigmas[idx];
+        sigma = 1.0 - ((1.0 - sigma) / scale);
+        plan.timesteps[idx] = static_cast<float>(sigma * N);
+    }
+}
+
+inline FlowMatchEulerPlan build_flow_match_euler_plan(int32_t num_steps,
+                                                      const FlowMatchEulerConfig& config) {
     FlowMatchEulerPlan plan;
     plan.sigmas.resize(static_cast<std::size_t>(std::max(num_steps, 0)) + 1, 0.0);
     plan.timesteps.resize(static_cast<std::size_t>(std::max(num_steps, 0)), 0.0F);
@@ -100,47 +155,11 @@ inline FlowMatchEulerPlan build_flow_match_euler_plan(
 
     const double N = static_cast<double>(config.num_train_timesteps);
     if (config.use_dynamic_shifting) {
-        plan.used_dynamic_shifting = true;
-        plan.dynamic_mu = compute_dynamic_mu(config, num_steps);
-
-        const double sigma_max = 1.0;
-        const double sigma_min =
-            1.0 / static_cast<double>(std::max(num_steps, 1));
-        const double exp_mu = std::exp(plan.dynamic_mu);
-
-        for (int32_t i = 0; i < num_steps; ++i) {
-            const double frac = static_cast<double>(i) /
-                static_cast<double>(std::max(num_steps - 1, 1));
-            const double raw_sigma = sigma_max + frac * (sigma_min - sigma_max);
-            const double raw_sigma_clamped = std::max(raw_sigma, 1e-10);
-            plan.sigmas[static_cast<std::size_t>(i)] = exp_mu /
-                (exp_mu + (1.0 / raw_sigma_clamped - 1.0));
-            plan.timesteps[static_cast<std::size_t>(i)] =
-                static_cast<float>(plan.sigmas[static_cast<std::size_t>(i)] * N);
-        }
-        return plan;
+        fill_dynamic_shift_schedule(plan, num_steps, config, N);
+    } else {
+        fill_shifted_linear_schedule(plan, num_steps, config, N);
     }
-
-    const double shift = static_cast<double>(config.shift);
-    const double raw_sigma_min = config.use_zero_sigma_min ? 0.0 : 1.0 / N;
-    const double sigma_min = config.use_zero_sigma_min
-        ? 0.0
-        : apply_flow_match_shift(raw_sigma_min, shift);
-    const double t_max = N;
-    const double t_min = config.use_zero_sigma_min ? 0.0 : sigma_min * N;
-
-    for (int32_t i = 0; i < num_steps; ++i) {
-        const double frac = static_cast<double>(i) /
-            static_cast<double>(std::max(num_steps - 1, 1));
-        const double t = t_max + frac * (t_min - t_max);
-        double sigma = t / N;
-        if (config.use_zero_sigma_min || std::abs(config.shift - 1.0F) > 1e-6F) {
-            sigma = apply_flow_match_shift(sigma, shift);
-        }
-        plan.sigmas[static_cast<std::size_t>(i)] = sigma;
-        plan.timesteps[static_cast<std::size_t>(i)] =
-            static_cast<float>(sigma * N);
-    }
+    apply_terminal_shift(plan, num_steps, config, N);
     return plan;
 }
 
@@ -152,20 +171,25 @@ struct FlowMatchEulerState {
     bool use_dynamic_shifting{false};
     float base_shift{0.5F};
     float max_shift{1.15F};
+    int32_t base_image_seq_len{256};
+    int32_t max_image_seq_len{4096};
+    float shift_terminal{0.0F};
     int32_t image_seq_len{4096};
     bool use_empirical_mu{false};
     bool use_zero_sigma_min{false};
     double last_dynamic_mu{0.0};
     bool last_used_dynamic_shifting{false};
 
-    void set_timesteps(int32_t num_steps)
-    {
+    void set_timesteps(int32_t num_steps) {
         FlowMatchEulerConfig config;
         config.num_train_timesteps = num_train_timesteps;
         config.shift = shift;
         config.use_dynamic_shifting = use_dynamic_shifting;
         config.base_shift = base_shift;
         config.max_shift = max_shift;
+        config.base_image_seq_len = base_image_seq_len;
+        config.max_image_seq_len = max_image_seq_len;
+        config.shift_terminal = shift_terminal;
         config.image_seq_len = image_seq_len;
         config.use_empirical_mu = use_empirical_mu;
         config.use_zero_sigma_min = use_zero_sigma_min;
@@ -177,20 +201,14 @@ struct FlowMatchEulerState {
         last_used_dynamic_shifting = plan.used_dynamic_shifting;
     }
 
-    void step(
-        const float* velocity,
-        const float* sample,
-        float* output,
-        std::size_t count,
-        int32_t step_index) const
-    {
+    void step(const float* velocity, const float* sample, float* output, std::size_t count,
+              int32_t step_index) const {
         const double sigma = sigmas[static_cast<std::size_t>(step_index)];
         const double sigma_next = sigmas[static_cast<std::size_t>(step_index) + 1];
         const double dt = sigma_next - sigma;
         for (std::size_t i = 0; i < count; ++i) {
-            output[i] = static_cast<float>(
-                static_cast<double>(sample[i]) +
-                dt * static_cast<double>(velocity[i]));
+            output[i] = static_cast<float>(static_cast<double>(sample[i]) +
+                                           dt * static_cast<double>(velocity[i]));
         }
     }
 };

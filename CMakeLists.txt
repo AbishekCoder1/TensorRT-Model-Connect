@@ -199,6 +199,7 @@ add_library(trtf_core
   src/runtime/pipelines/sam_pipeline.cpp
   src/runtime/pipelines/vl_pipeline.cpp
   src/runtime/pipelines/flux_pipeline.cpp
+  src/runtime/pipelines/ltx_video_pipeline.cpp
   src/runtime/pipelines/wan_pipeline.cpp
   src/runtime/pipelines/z_image_pipeline.cpp
   src/runtime/pipelines/whisper_pipeline.cpp
@@ -654,6 +655,7 @@ trtf_add_test(test_diffusion_generation_plan)
 trtf_add_test(test_diffusion_denoising_step_seam)
 trtf_add_test(test_flow_match_scheduler)
 trtf_add_test(test_diffusion_math)
+trtf_add_test(test_ltx_video_pipeline)
 
 # Recurrent (Mamba / RWKV)
 trtf_add_test(test_recurrent_step_contracts)

@@ -42,6 +42,7 @@ def _ref_subprocess_env() -> dict:
         existing = env.get("LD_PRELOAD", "")
         preload = f"{sys_cublas}:{sys_cublaslt}"
         env["LD_PRELOAD"] = f"{preload}:{existing}" if existing else preload
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     return env
 
 
@@ -82,6 +83,12 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     return str(patched_root)
 
 
+def _ltx_initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
+    if ctx.artifacts_dir:
+        base_dir = _case_artifact_dir(ctx.artifacts_dir, case.name)
+    else:
+        base_dir = os.path.join(tempfile.gettempdir(), "trtf_ltx_latents", case.name)
+    return os.path.join(base_dir, "initial_latents.raw")
 
 
 class HfDiffusersReference:
@@ -128,6 +135,7 @@ class HfDiffusersReference:
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         python = ctx.reference_python_path() or sys.executable
         max_length = 120 if case.family == "pixart" else 512
+        model_type = str(case.metadata.get("model_type", "")).lower()
 
         # Save to artifacts_dir so the file persists for comparator access
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
@@ -169,7 +177,10 @@ def _retie_wan_text_encoder(pipe):
 
 # Try pipeline classes in order: Wan, Flux, generic DiffusionPipeline
 pipe = None
-for cls_name in ["WanPipeline", "FluxPipeline", "DiffusionPipeline"]:
+pipeline_order = ["WanPipeline", "FluxPipeline", "DiffusionPipeline"]
+if {model_type!r} in ("flux.2", "flux2"):
+    pipeline_order = ["Flux2Pipeline", "WanPipeline", "FluxPipeline", "DiffusionPipeline"]
+for cls_name in pipeline_order:
     try:
         import diffusers
         diffusers.logging.set_verbosity_error()
@@ -310,6 +321,8 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         video_width = case.inputs.get("video_width", 832)
         video_num_frames = case.inputs.get("video_num_frames", 17)
         python = ctx.reference_python_path() or sys.executable
+        ltx_initial_latents_raw = _ltx_initial_latents_path(case, ctx)
+        model_type = str(case.metadata.get("model_type", "")).lower()
 
         # Save frames to artifacts_dir so they persist for comparator access
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
@@ -328,6 +341,7 @@ import transformers
 transformers.logging.set_verbosity_error()
 
 family = {family!r}
+model_type = {model_type!r}
 model_id = {model_id!r}
 model_ref = {model_ref!r}
 prompt = {prompt!r}
@@ -338,19 +352,35 @@ video_height = {video_height}
 video_width = {video_width}
 video_num_frames = {video_num_frames}
 frames_dir = {frames_dir!r}
-seed = 42
+seed = {int(case.inputs.get("seed", case.determinism.get("seed", 42)))}
+ltx_guidance_scale = {float(case.inputs.get("guidance_scale", 3.0))}
+wan_guidance_scale = {float(case.inputs.get("guidance_scale", 5.0))}
+ltx_initial_latents_raw = {ltx_initial_latents_raw!r}
 
-# Use float32 for reference (avoids CUBLAS errors on GB300 with bf16/fp16)
 if family in ("flux",):
-    from diffusers import FluxPipeline
-    pipe = FluxPipeline.from_pretrained(model_ref, torch_dtype=torch.float32)
+    if model_type in ("flux.2", "flux2"):
+        from diffusers import Flux2Pipeline
+        # FLUX.2's model card recommends bf16 for diffusers inference; full
+        # float32 can OOM on CI runners after TensorRT engine rebuilds.
+        flux_dtype = torch.bfloat16
+        pipe = Flux2Pipeline.from_pretrained(
+            model_ref, torch_dtype=flux_dtype, low_cpu_mem_usage=True)
+    else:
+        from diffusers import FluxPipeline
+        # Keep legacy FLUX.1 reference in float32; bf16/fp16 can trip GB300
+        # cuBLAS issues in older diffusers/torch combinations.
+        flux_dtype = torch.float32
+        pipe = FluxPipeline.from_pretrained(model_ref, torch_dtype=flux_dtype)
     pipe.to("cuda")
-    output = pipe(
+    kwargs = dict(
         prompt=prompt,
         num_inference_steps=num_steps,
         height=image_height, width=image_width,
         generator=torch.Generator("cuda").manual_seed(seed),
     )
+    if model_type in ("flux.2", "flux2"):
+        kwargs["guidance_scale"] = 3.5
+    output = pipe(**kwargs)
     frames = output.images
 elif family in ("z_image",):
     from diffusers import DiffusionPipeline
@@ -374,6 +404,32 @@ elif family in ("pixart",):
         generator=torch.Generator("cuda").manual_seed(seed),
     )
     frames = output.images
+elif family in ("ltx_video",):
+    from diffusers import LTXPipeline
+    pipe = LTXPipeline.from_pretrained(model_ref, torch_dtype=torch.float32)
+    pipe.to("cuda")
+    ltx_latents = None
+    if os.path.exists(ltx_initial_latents_raw):
+        packed = np.fromfile(ltx_initial_latents_raw, dtype=np.float32)
+        channels = int(pipe.transformer.config.in_channels)
+        if packed.size % channels != 0:
+            raise RuntimeError(
+                f"invalid LTX initial latent size {{packed.size}} for {{channels}} channels")
+        ltx_latents = torch.from_numpy(
+            packed.reshape(1, packed.size // channels, channels)).to(
+                device="cuda", dtype=torch.float32)
+    output = pipe(
+        prompt=prompt,
+        negative_prompt="worst quality, inconsistent motion, blurry, jittery, distorted",
+        num_inference_steps=num_steps,
+        height=video_height,
+        width=video_width,
+        num_frames=video_num_frames,
+        guidance_scale=ltx_guidance_scale,
+        latents=ltx_latents,
+        generator=torch.Generator("cuda").manual_seed(seed),
+    )
+    frames = output.frames[0]
 else:
     # Default: Wan-style text-to-video
     import ftfy  # noqa: F401 — required by WanPipeline prompt cleaning
@@ -402,7 +458,7 @@ else:
         height=video_height,
         width=video_width,
         num_frames=video_num_frames,
-        guidance_scale=5.0,
+        guidance_scale=wan_guidance_scale,
         generator=torch.Generator("cuda").manual_seed(seed),
     )
     frames = output.frames[0]

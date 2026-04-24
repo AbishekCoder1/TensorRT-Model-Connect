@@ -70,6 +70,8 @@ def test_repro_commands_use_generate_video_for_diffusion(tmp_path) -> None:
         inputs={
             "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
             "num_inference_steps": 28,
+            "guidance_scale": 3.0,
+            "seed": 42,
         },
         stages=[],
     )
@@ -84,3 +86,5 @@ def test_repro_commands_use_generate_video_for_diffusion(tmp_path) -> None:
     assert " generate-video " in f" {cmd} "
     assert "--output /tmp/trtf_frames" in cmd
     assert "--num-steps 28" in cmd
+    assert "--guidance-scale 3.0" in cmd
+    assert "--seed 42" in cmd

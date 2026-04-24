@@ -28,6 +28,7 @@ set(TRTF_PIPELINE_PLUGINS
   "speech_plugin.cpp|register_speech_plugin"
   "omni_plugin.cpp|register_omni_plugin"
   "flux_plugin.cpp|register_flux_plugin"
+  "ltx_video_plugin.cpp|register_ltx_video_plugin"
   "wan_plugin.cpp|register_wan_plugin"
   "zimage_plugin.cpp|register_zimage_plugin"
   "t5_plugin.cpp|register_t5_plugin"

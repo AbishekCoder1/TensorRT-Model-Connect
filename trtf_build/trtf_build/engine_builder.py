@@ -383,30 +383,35 @@ def _get_gpu_name() -> str:
 def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     """Detect whether the HF tokenizer adds special tokens (BOS/EOS) by default.
 
-    Reads tokenizer_config.json to check add_bos_token / add_special_tokens.
-    Falls back to checking if the tokenizer's encode() adds a BOS token.
+    The C++ runtime calls the native tokenizer with a single add-special flag,
+    so this mirrors the default HF ``tokenizer.encode(text)`` behavior.
+    tokenizer_config.json is only a fallback because some tokenizers expose
+    stale add_bos/add_eos fields while still adding a post-processor token by
+    default.
     """
-    # Check tokenizer_config.json for explicit add_bos_token
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+        ids_default = tok.encode("hello")
+        ids_without = tok.encode("hello", add_special_tokens=False)
+        return ids_default != ids_without
+    except Exception:
+        pass
+
+    # Fallback for lightweight/unit-test environments without a loadable tokenizer.
     tok_config_path = model_dir / "tokenizer_config.json"
     if tok_config_path.exists():
         try:
             tok_cfg = json.load(open(tok_config_path))
-            # Explicit add_bos_token field (used by Llama, Nemotron, etc.)
-            if "add_bos_token" in tok_cfg:
-                return bool(tok_cfg["add_bos_token"])
+            if bool(tok_cfg.get("add_bos_token", False)):
+                return True
+            if bool(tok_cfg.get("add_eos_token", False)):
+                return True
         except Exception:
             pass
 
-    # Fallback: instantiate the tokenizer and check if encode adds BOS
-    try:
-        from transformers import AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
-        # Encode with and without special tokens, compare
-        ids_with = tok.encode("hello", add_special_tokens=True)
-        ids_without = tok.encode("hello", add_special_tokens=False)
-        return ids_with != ids_without
-    except Exception:
-        return False
+    return False
 
 
 def _ensure_tokenizer_json(model_dir: Path) -> None:
@@ -866,6 +871,8 @@ def build_bundle(
                 if trt_abi:
                     cfg_dict["trt_abi"] = trt_abi
                 cfg_dict["precision"] = precision
+                cfg_dict["tokenizer_add_special_tokens"] = int(
+                    tokenizer_add_special_tokens)
                 if quant_plan is not None:
                     cfg_dict["quantization"] = quant_plan.as_config_dict()
                 elif quantize:
@@ -996,6 +1003,9 @@ def _build_diffusion_bundle(
     config.raw["max_cache_length"] = max_cache_length
     if diffusion_overrides:
         config.raw.update(diffusion_overrides)
+    config.raw["_source_model_ref"] = getattr(
+        build_bundle, "_model_id_or_path_orig", str(model_dir_path)
+    )
 
     print(f"[trtf-build] Family: {plugin.name}", file=sys.stderr)
 
@@ -1090,11 +1100,14 @@ def _build_diffusion_bundle(
     sections = []
 
     # Text encoder plans
-    for i, (enc_name, enc_plan) in enumerate(components["text_encoders"]):
-        sections.append(BundleSection(
-            f"text_encoder_{i}_plan", enc_plan))
-        print(f"  text_encoder_{i} ({enc_name}): "
-              f"{len(enc_plan) / (1024 * 1024):.1f} MB", file=sys.stderr)
+    text_encoders = components.get("text_encoders", [])
+    for i, (enc_name, enc_plan) in enumerate(text_encoders):
+        sections.append(BundleSection(f"text_encoder_{i}_plan", enc_plan))
+        print(
+            f"  text_encoder_{i} ({enc_name}): "
+            f"{len(enc_plan) / (1024 * 1024):.1f} MB",
+            file=sys.stderr,
+        )
 
     # Denoiser plan
     denoiser_plan = components["denoiser"]
@@ -1206,6 +1219,7 @@ def _build_diffusion_bundle(
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         runtime_strategy=getattr(plugin, "runtime_strategy", "diffusion"),
         precision=precision,
+        max_cache_length=max_cache_length,
     )
 
     write_t0 = time.monotonic()

@@ -40,6 +40,9 @@ void log_trt_load_timing(const char* label, double load_deserialize_ms, std::siz
 // Tokenizer helpers.
 
 bool detect_add_special_tokens(const BundleFile& bundle) {
+    if (bundle.info.tokenizer_add_special_tokens_present)
+        return bundle.info.tokenizer_add_special_tokens;
+
     auto* config_data = find_section(bundle, "config.json");
     if (!config_data)
         return true;

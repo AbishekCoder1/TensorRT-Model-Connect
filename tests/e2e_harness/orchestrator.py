@@ -46,7 +46,7 @@ from .contracts import (
     StageStatus,
     ThresholdProfile,
 )
-from . import save_full_stderr
+from . import _case_artifact_dir, save_full_stderr
 from .python_profiles import profile_env_var
 from .registry import get_comparator, get_contract_plugin, get_reference, get_runner
 
@@ -662,6 +662,14 @@ def _build_repro_commands(
                 "--output", "/tmp/trtf_frames",
                 "--num-steps", str(case.inputs.get("num_inference_steps", 30)),
             ]
+            guidance_scale = case.inputs.get("guidance_scale")
+            if guidance_scale is not None:
+                infer_parts.extend(["--guidance-scale", str(guidance_scale)])
+            if "seed" in case.inputs:
+                infer_parts.extend(["--seed", str(case.inputs["seed"])])
+            if case.family == "ltx_video" and ctx.artifacts_dir:
+                latent_path = Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "initial_latents.raw"
+                infer_parts.extend(["--initial-latents-raw", str(latent_path)])
         elif task_strategy == "prompted_segmentation":
             infer_parts = [
                 ctx.binary_path, "segment-sam", bundle_path,

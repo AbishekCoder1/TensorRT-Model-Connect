@@ -121,6 +121,8 @@ static void test_read_valid_bundle() {
     check(loaded.info.num_attention_heads == 16, "read num_attention_heads");
     check(loaded.info.num_key_value_heads == 4, "read num_key_value_heads");
     check(loaded.info.max_cache_length == 2048, "read max_cache_length");
+    check(!loaded.info.tokenizer_add_special_tokens_present,
+          "read missing tokenizer_add_special_tokens present flag");
     check(loaded.sections.size() == 2, "read section count");
     check(loaded.sections[0].name == "engine_plan", "read section 0 name");
     check(loaded.sections[0].data == plan_data, "read section 0 data");
@@ -210,6 +212,24 @@ static void test_inspect_returns_metadata() {
     trtf_test::remove_all_safe(tmp);
 }
 
+static void test_tokenizer_add_special_tokens_header() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "tokenizer_flag.trtfb").string();
+
+    const std::string json = R"({
+  "model_id": "tokenizer-flag",
+  "tokenizer_add_special_tokens": 0,
+  "sections": {}
+})";
+    write_minimal_bundle(path, json);
+
+    const auto loaded = trtf::ReadBundleFile(path);
+    check(loaded.info.tokenizer_add_special_tokens_present, "tokenizer_add_special_tokens present");
+    check(!loaded.info.tokenizer_add_special_tokens, "tokenizer_add_special_tokens false");
+
+    trtf_test::remove_all_safe(tmp);
+}
+
 static void test_truncated_bundle_throws() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "truncated.trtfb").string();
@@ -243,6 +263,7 @@ int main() {
     test_is_bundle_valid();
     test_is_bundle_invalid();
     test_inspect_returns_metadata();
+    test_tokenizer_add_special_tokens_header();
     test_truncated_bundle_throws();
 
     if (failures > 0) {

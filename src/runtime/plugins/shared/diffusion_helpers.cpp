@@ -12,6 +12,9 @@ DiffusionConfig make_diffusion_config(const std::string& json) {
     dc.use_dynamic_shifting = extract_json_int(json, "use_dynamic_shifting", 0) != 0;
     dc.base_shift = extract_json_float(json, "base_shift", 0.5F);
     dc.max_shift = extract_json_float(json, "max_shift", 1.15F);
+    dc.base_image_seq_len = extract_json_int(json, "base_image_seq_len", 256);
+    dc.max_image_seq_len = extract_json_int(json, "max_image_seq_len", 4096);
+    dc.shift_terminal = extract_json_float(json, "shift_terminal", 0.0F);
     dc.video_height = extract_json_int(json, "video_height", 480);
     dc.video_width = extract_json_int(json, "video_width", 832);
     dc.video_num_frames = extract_json_int(json, "video_num_frames", 81);
@@ -24,8 +27,9 @@ DiffusionConfig make_diffusion_config(const std::string& json) {
     dc.text_seq_len = extract_json_int(json, "text_seq_len", 512);
     dc.text_encoder_dim = extract_json_int(json, "text_encoder_dim", 4096);
     dc.num_vae_caches = extract_json_int(json, "num_vae_caches", 0);
-    dc.latents_mean = extract_json_float_array(json, "latents_mean");
-    dc.latents_std = extract_json_float_array(json, "latents_std");
+    const auto latent_stat_count = static_cast<std::size_t>(dc.z_dim > 0 ? dc.z_dim : 16);
+    dc.latents_mean = extract_json_float_array(json, "latents_mean", latent_stat_count);
+    dc.latents_std = extract_json_float_array(json, "latents_std", latent_stat_count);
     dc.patch_size = extract_json_int_array(json, "patch_size");
     dc.axes_dims_rope = extract_json_int_array(json, "axes_dims_rope");
     dc.rope_theta = extract_json_float(json, "rope_theta", 10000.0F);

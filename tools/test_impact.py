@@ -52,6 +52,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "chronos_bolt_torchtrt": "neural_operator",
     "diffusion": "diffusion_media_generation",
     "diffusion_flux": "diffusion_media_generation",
+    "diffusion_ltx": "diffusion_media_generation",
     "diffusion_wan": "diffusion_media_generation",
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",
@@ -85,6 +86,7 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "object_detection_plugin": ["object_detection"],
     "omni_plugin": ["omni_multimodal"],
     "flux_plugin": ["diffusion_flux"],
+    "ltx_video_plugin": ["diffusion_ltx"],
     "wan_plugin": ["diffusion_wan"],
     "pixart_plugin": ["diffusion_pixart"],
     "pixart_torchtrt_plugin": ["diffusion_pixart_torchtrt"],
@@ -118,13 +120,14 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
     "timesfm_pipeline": ["timesfm_torchtrt"],
     "chronos_bolt_pipeline": ["chronos_bolt_torchtrt"],
     "flux_pipeline": ["diffusion_flux"],
+    "ltx_video_pipeline": ["diffusion_ltx"],
     "wan_pipeline": ["diffusion_wan"],
     "pixart_pipeline": ["diffusion_pixart"],
     "pixart_torchtrt_pipeline": ["diffusion_pixart_torchtrt"],
     "z_image_pipeline": ["diffusion_zimage"],
     "diffusion_pipeline": [
-        "diffusion_flux", "diffusion_wan", "diffusion_pixart", "diffusion_zimage",
-        "diffusion_pixart_torchtrt",
+        "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
+        "diffusion_zimage", "diffusion_pixart_torchtrt",
     ],
 }
 
@@ -172,7 +175,8 @@ REFERENCE_TASK_STRATEGIES: Dict[str, List[str]] = {
 # Shared C++ helper -> affected task_strategies
 SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     "diffusion_helpers": [
-        "diffusion_flux", "diffusion_wan", "diffusion_pixart", "diffusion_zimage",
+        "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
+        "diffusion_zimage",
     ],
     "audio_helpers": [
         "speech_to_text", "speech_to_text_rnnt", "text_to_audio_bark",

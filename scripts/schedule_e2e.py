@@ -31,10 +31,11 @@ from pathlib import Path
 
 # Strategies that are inherently GPU-heavy regardless of param count.
 _HEAVY_STRATEGIES = frozenset({
-    "diffusion",
     "vision_language",
     "speech_to_speech",
 })
+
+_EXCLUSIVE_GPU_RESOURCE = "exclusive_gpu"
 
 
 def _param_billions(hf_id: str) -> float | None:
@@ -55,11 +56,12 @@ def classify_size(manifest: dict) -> str:
     Large = likely to use significant GPU memory (>= 3B params, or heavy
     strategy like diffusion/VL/speech-to-speech).
     """
-    strategy = manifest.get("runtime_strategy", "")
-    hf_id = manifest.get("hf_id", "")
+    strategy = str(manifest.get("runtime_strategy", "") or "")
+    hf_id = str(manifest.get("hf_id", "") or "")
 
-    # Heavy strategies are always large
-    if strategy in _HEAVY_STRATEGIES:
+    # Heavy strategies are always large. Diffusion strategies are named by
+    # backend family, e.g. diffusion_flux and diffusion_ltx.
+    if strategy == "diffusion" or strategy.startswith("diffusion_") or strategy in _HEAVY_STRATEGIES:
         return "large"
 
     # MoE with real weights (not the 15M toy)
@@ -78,11 +80,18 @@ def classify_size(manifest: dict) -> str:
         return "large"
 
     # bark-large has "bark" in the name but no size suffix — treat as large
-    name = manifest.get("name", "")
+    name = str(manifest.get("name", "") or "")
     if "bark-large" in name:
         return "large"
 
     return "small"
+
+
+def classify_parallel_resource(manifest: dict) -> str:
+    """Return the requested parallel scheduling resource tier."""
+    if manifest.get("e2e_parallel_resource") == _EXCLUSIVE_GPU_RESOURCE:
+        return _EXCLUSIVE_GPU_RESOURCE
+    return "shared"
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +125,7 @@ def schedule(
             continue
 
     # Classify
+    exclusive_tests: list[str] = []
     large_tests: list[str] = []
     small_tests: list[str] = []
     for tid in test_ids:
@@ -123,23 +133,40 @@ def schedule(
         match = re.search(r"\[(.+?)\]", tid)
         name = match.group(1) if match else ""
         m = manifests.get(name, {})
-        if classify_size(m) == "large":
+        if classify_parallel_resource(m) == _EXCLUSIVE_GPU_RESOURCE:
+            exclusive_tests.append(tid)
+        elif classify_size(m) == "large":
             large_tests.append(tid)
         else:
             small_tests.append(tid)
 
+    # Reserve whole GPUs for exclusive tests. This keeps high-memory build
+    # cases from colliding with unrelated workers while preserving parallelism
+    # on the remaining GPUs.
+    result: dict[str, list[list[str]]] = {}
+    reserved_gpu_count = min(len(exclusive_tests), num_gpus)
+    for i, tid in enumerate(exclusive_tests):
+        gpu_id = i % max(reserved_gpu_count, 1)
+        result.setdefault(str(gpu_id), [[]])
+        result[str(gpu_id)][0].append(tid)
+
+    shared_gpu_ids = list(range(reserved_gpu_count, num_gpus))
+    if not shared_gpu_ids:
+        shared_gpu_ids = list(range(num_gpus))
+        for gpu_id in shared_gpu_ids:
+            result.setdefault(str(gpu_id), [[]])
+
     # Round-robin large across GPUs, then small across GPUs
-    gpu_large: list[list[str]] = [[] for _ in range(num_gpus)]
-    gpu_small: list[list[str]] = [[] for _ in range(num_gpus)]
+    gpu_large: dict[int, list[str]] = {gpu_id: [] for gpu_id in shared_gpu_ids}
+    gpu_small: dict[int, list[str]] = {gpu_id: [] for gpu_id in shared_gpu_ids}
 
     for i, tid in enumerate(large_tests):
-        gpu_large[i % num_gpus].append(tid)
+        gpu_large[shared_gpu_ids[i % len(shared_gpu_ids)]].append(tid)
     for i, tid in enumerate(small_tests):
-        gpu_small[i % num_gpus].append(tid)
+        gpu_small[shared_gpu_ids[i % len(shared_gpu_ids)]].append(tid)
 
     # For each GPU: interleave large/small, then distribute across workers
-    result: dict[str, list[list[str]]] = {}
-    for gpu_id in range(num_gpus):
+    for gpu_id in shared_gpu_ids:
         L = gpu_large[gpu_id]
         S = gpu_small[gpu_id]
 
@@ -160,7 +187,11 @@ def schedule(
             workers[i % workers_per_gpu].append(tid)
 
         # Drop empty workers
-        result[str(gpu_id)] = [w for w in workers if w]
+        shared_workers = [w for w in workers if w]
+        if str(gpu_id) in result:
+            result[str(gpu_id)][0].extend([tid for worker in shared_workers for tid in worker])
+        else:
+            result[str(gpu_id)] = shared_workers
 
     return result
 
@@ -212,17 +243,23 @@ def main() -> None:
     for gpu_id, workers in sorted(assignments.items(), key=lambda x: int(x[0])):
         n_tests = sum(len(w) for w in workers)
         n_large = 0
+        n_exclusive = 0
         for w in workers:
             for tid in w:
                 match = re.search(r"\[(.+?)\]", tid)
                 name = match.group(1) if match else ""
-                if classify_size(manifests.get(name, {})) == "large":
+                manifest = manifests.get(name, {})
+                if classify_parallel_resource(manifest) == _EXCLUSIVE_GPU_RESOURCE:
+                    n_exclusive += 1
+                if classify_size(manifest) == "large":
                     n_large += 1
         n_small = n_tests - n_large
         total_large += n_large
         total_small += n_small
         print(f"  GPU {gpu_id}: {n_tests} tests ({n_large}L + {n_small}S) "
-              f"across {len(workers)} workers", file=sys.stderr)
+              f"across {len(workers)} workers"
+              f"{f' [{n_exclusive} exclusive]' if n_exclusive else ''}",
+              file=sys.stderr)
     print(f"  Total: {total_large} large + {total_small} small", file=sys.stderr)
 
     # Output JSON to stdout

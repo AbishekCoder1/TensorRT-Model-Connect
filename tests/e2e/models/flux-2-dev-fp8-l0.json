@@ -6,6 +6,7 @@
   "model_type": "flux.2",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
+  "e2e_parallel_resource": "exclusive_gpu",
   "ci_tier": "l0_only",
   "precision": "fp16",
   "reference_family": "diffusers_image_gen",

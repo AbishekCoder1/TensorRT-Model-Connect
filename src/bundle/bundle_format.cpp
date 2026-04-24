@@ -140,6 +140,12 @@ BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& secti
     info.num_key_value_heads = extract_json_int(json, "num_key_value_heads", 1);
     info.max_cache_length = extract_json_int(json, "max_cache_length", 32);
     info.runtime_strategy = extract_json_string(json, "runtime_strategy", "decoder_kv_cache");
+    const int32_t tokenizer_add_special =
+        extract_json_int(json, "tokenizer_add_special_tokens", -1);
+    if (tokenizer_add_special >= 0) {
+        info.tokenizer_add_special_tokens = (tokenizer_add_special != 0);
+        info.tokenizer_add_special_tokens_present = true;
+    }
 
     sections_out.clear();
     parse_sections_table(json, sections_out);

@@ -238,6 +238,11 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     // Parse base config and dispatch to plugin
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy; // use normalized strategy
+    if (!base_cfg.tokenizer_add_special_tokens_present &&
+        bundle.info.tokenizer_add_special_tokens_present) {
+        base_cfg.tokenizer_add_special_tokens = bundle.info.tokenizer_add_special_tokens;
+        base_cfg.tokenizer_add_special_tokens_present = true;
+    }
 
     // Resolve the layered runtime config (BUNDLE_DEFAULT + SESSION_REQUEST).
     // Best-effort: a malformed input prints to stderr and falls back to

@@ -108,6 +108,76 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     return str(patched_root)
 
 
+def _ltx_initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
+    if ctx.artifacts_dir:
+        base_dir = _case_artifact_dir(ctx.artifacts_dir, case.name)
+    else:
+        base_dir = os.path.join(tempfile.gettempdir(), "trtf_ltx_latents", case.name)
+    return os.path.join(base_dir, "initial_latents.raw")
+
+
+def _ensure_ltx_initial_latents(case: E2ECase, ctx: RunContext, bundle_path: str) -> str | None:
+    if case.family != "ltx_video":
+        return None
+
+    output_path = _ltx_initial_latents_path(case, ctx)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    seed = int(case.inputs.get("seed", case.determinism.get("seed", 42)))
+    script = textwrap.dedent(f"""\
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, {str(TOOLS_DIR)!r})
+        import torch
+        from diffusion_helpers import load_bundle_config
+
+        cfg = load_bundle_config({bundle_path!r})
+        video_num_frames = int({int(case.inputs.get("video_num_frames", 0))} or cfg.get("video_num_frames", 9))
+        video_height = int({int(case.inputs.get("video_height", 0))} or cfg.get("video_height", 256))
+        video_width = int({int(case.inputs.get("video_width", 0))} or cfg.get("video_width", 256))
+        z_dim = int(cfg.get("z_dim", 128))
+        scale_t = max(int(cfg.get("scale_factor_temporal", 8)), 1)
+        scale_s = max(int(cfg.get("scale_factor_spatial", 32)), 1)
+        pt, ph, pw = [int(v) for v in cfg.get("patch_size", [1, 1, 1])]
+        t_lat = (video_num_frames - 1) // scale_t + 1
+        h_lat = video_height // scale_s
+        w_lat = video_width // scale_s
+        if t_lat % pt or h_lat % ph or w_lat % pw:
+            raise RuntimeError(f"latent shape {{t_lat}}x{{h_lat}}x{{w_lat}} is not divisible by patch {{pt}}x{{ph}}x{{pw}}")
+
+        generator = torch.Generator("cuda").manual_seed({seed})
+        latents = torch.randn(
+            (1, z_dim, t_lat, h_lat, w_lat),
+            generator=generator,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        latents = latents.reshape(
+            1, -1, t_lat // pt, pt, h_lat // ph, ph, w_lat // pw, pw
+        ).permute(0, 2, 4, 6, 1, 3, 5, 7).flatten(4, 7).flatten(1, 3).contiguous()
+
+        out = Path({output_path!r})
+        out.parent.mkdir(parents=True, exist_ok=True)
+        latents.cpu().numpy().astype("<f4", copy=False).tofile(out)
+        print(str(out))
+    """)
+
+    python = ctx.runtime_python_path() or sys.executable
+    result = subprocess.run(
+        [python, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env={**os.environ, "LD_LIBRARY_PATH": _build_ld_library_path(ctx)},
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "failed to create shared LTX initial latents: "
+            + (result.stderr or result.stdout or "").strip()
+        )
+    return output_path
+
+
 class DiffusionMediaRunner:
     """TRT strategy runner for diffusion media generation pipelines."""
 
@@ -279,6 +349,16 @@ class DiffusionMediaRunner:
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
         ld_path = _build_ld_library_path(ctx)
+        try:
+            initial_latents_raw = _ensure_ltx_initial_latents(case, ctx, bundle_path)
+        except Exception as exc:
+            return StageOutput(
+                stage_name=stage.name,
+                data={"returncode": 1, "stderr": str(exc), "num_frames": 0},
+                text="",
+                timing_s=0.0,
+                metadata={"command": "create_ltx_initial_latents"},
+            )
 
         with tempfile.TemporaryDirectory(prefix="trtf_frames_") as frame_dir:
             cmd = [
@@ -287,6 +367,13 @@ class DiffusionMediaRunner:
                 "--output", frame_dir,
                 "--num-steps", str(num_steps),
             ]
+            if initial_latents_raw:
+                cmd.extend(["--initial-latents-raw", initial_latents_raw])
+            guidance_scale = case.inputs.get("guidance_scale")
+            if guidance_scale is not None:
+                cmd.extend(["--guidance-scale", str(guidance_scale)])
+            if "seed" in case.inputs:
+                cmd.extend(["--seed", str(case.inputs["seed"])])
             runtime_cli_python = ctx.runtime_cli_hf_python()
             if runtime_cli_python:
                 cmd.extend(["--hf-python", runtime_cli_python])

@@ -307,6 +307,9 @@ _POSITIVE_MATCH_CASES = [
     # Wan T2V (diffusion)
     ("wan_t2v", "wan_t2v"),
     ("wan", "wan_t2v"),
+    # LTX-Video (diffusion T2V)
+    ("ltx_video", "ltx_video"),
+    ("ltx-video", "ltx_video"),
     # Bark (text-to-audio)
     ("bark", "bark"),
     # SegFormer (segmentation)

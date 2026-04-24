@@ -338,8 +338,8 @@ def _build_inputs(manifest: dict) -> dict:
         manifest.get("build_args", {}).get("max_cache_length", 256),
     )
 
-    # Sampling parameters (optional, default to greedy)
-    for key in ("temperature", "top_p", "top_k", "min_p", "seed"):
+    # Generation parameters (optional, default to each runtime's configured value)
+    for key in ("temperature", "top_p", "top_k", "min_p", "seed", "guidance_scale"):
         if key in manifest:
             inputs[key] = manifest[key]
 
@@ -496,6 +496,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "speech_to_speech",
     "diffusion",                  # legacy alias
     "diffusion_flux",
+    "diffusion_ltx",
     "diffusion_wan",
     "diffusion_zimage",
     "diffusion_pixart",

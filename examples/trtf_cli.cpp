@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -43,6 +44,7 @@ struct CliArgs {
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
     std::string output_dir;
+    std::string initial_latents_raw;
     std::string document;
     std::string audio_in;
     std::string audio_out;
@@ -166,7 +168,7 @@ void print_usage() {
            "                       Loads bundle once, reads prompts from stdin, streams PCM to "
            "stdout.\n"
            "  trtf generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] "
-           "[--guidance-scale S]\n"
+           "[--guidance-scale S] [--initial-latents-raw PATH]\n"
            "  trtf embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtf rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"
@@ -305,6 +307,10 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if ((arg == "--output" || arg == "-o") && need_value(arg)) {
             args.output_dir = argv[++i];
+            continue;
+        }
+        if (arg == "--initial-latents-raw" && need_value(arg)) {
+            args.initial_latents_raw = argv[++i];
             continue;
         }
         if (arg == "--num-steps" && need_value(arg)) {
@@ -459,6 +465,34 @@ void print_text_timing(const trtf::TextResult& result) {
     std::cerr << line.str() << '\n';
 }
 
+std::optional<std::vector<float>> read_float32_raw_file(const std::string& path,
+                                                        std::string& error) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+        error = "failed to open " + path;
+        return std::nullopt;
+    }
+    const auto end_pos = in.tellg();
+    if (end_pos < 0) {
+        error = "failed to size " + path;
+        return std::nullopt;
+    }
+    const auto bytes = static_cast<std::size_t>(end_pos);
+    if (bytes % sizeof(float) != 0U) {
+        error = path + " size is not a multiple of float32";
+        return std::nullopt;
+    }
+
+    std::vector<float> values(bytes / sizeof(float));
+    in.seekg(0, std::ios::beg);
+    if (!values.empty() &&
+        !in.read(reinterpret_cast<char*>(values.data()), static_cast<std::streamsize>(bytes))) {
+        error = "failed to read " + path;
+        return std::nullopt;
+    }
+    return values;
+}
+
 int cmd_run(const CliArgs& args) {
     if (args.bundle_path.empty()) {
         std::cerr << "Error: run requires a .trtfb bundle file\n";
@@ -488,7 +522,8 @@ int cmd_run(const CliArgs& args) {
     const std::string ptype = pipeline->pipeline_type();
     const bool is_diffusion =
         (ptype.find("Diffusion") != std::string::npos || ptype.find("Flux") != std::string::npos ||
-         ptype.find("Wan") != std::string::npos || ptype.find("ZImage") != std::string::npos);
+         ptype.find("Wan") != std::string::npos || ptype.find("ZImage") != std::string::npos ||
+         ptype.find("LTX") != std::string::npos);
 
     if (args.benchmark > 0) {
         // Benchmark mode: warmup, then N timed iterations.
@@ -596,6 +631,16 @@ int cmd_generate_video(const CliArgs& args) {
     trtf::GenerateConfig cfg;
     cfg.num_steps = args.num_steps;
     cfg.guidance_scale = args.guidance_scale;
+    cfg.seed = args.seed;
+    if (!args.initial_latents_raw.empty()) {
+        std::string error;
+        auto latents = read_float32_raw_file(args.initial_latents_raw, error);
+        if (!latents) {
+            std::cerr << "Error: " << error << '\n';
+            return EXIT_FAILURE;
+        }
+        cfg.initial_latents = std::move(*latents);
+    }
 
     auto result = pipeline->generate_image(args.prompt, cfg);
     std::cout << "Generated image: " << result.width << "x" << result.height << " ("

@@ -900,6 +900,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "chronos_bolt_torchtrt": "neural_operator",
     "diffusion": "diffusion_media_generation",      # legacy alias
     "diffusion_flux": "diffusion_media_generation",
+    "diffusion_ltx": "diffusion_media_generation",
     "diffusion_wan": "diffusion_media_generation",
     "diffusion_zimage": "diffusion_media_generation",
     "diffusion_pixart": "diffusion_media_generation",

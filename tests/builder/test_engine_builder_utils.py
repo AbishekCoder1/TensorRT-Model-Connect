@@ -12,6 +12,9 @@ Postconditions: HF directories are correctly identified, tokenizer special-token
 from __future__ import annotations
 
 import json
+import sys
+import types
+from pathlib import Path
 
 import pytest
 
@@ -62,6 +65,30 @@ class TestDetectTokenizerAddSpecialTokens:
         (tmp_path / "tokenizer_config.json").write_text(
             json.dumps({"add_bos_token": False}))
         assert _detect_tokenizer_add_special_tokens(tmp_path) is False
+
+    def test_default_encode_differs_despite_false_config(self, tmp_path, monkeypatch):
+        (tmp_path / "tokenizer_config.json").write_text(
+            json.dumps({"add_bos_token": False, "add_eos_token": False}))
+
+        class FakeTokenizer:
+            def encode(self, text, add_special_tokens=True):
+                ids = [101]
+                return ids + [102] if add_special_tokens else ids
+
+        class FakeAutoTokenizer:
+            @staticmethod
+            def from_pretrained(path, trust_remote_code=True):
+                assert Path(path) == tmp_path
+                assert trust_remote_code is True
+                return FakeTokenizer()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "transformers",
+            types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+        )
+
+        assert _detect_tokenizer_add_special_tokens(tmp_path) is True
 
     def test_no_tokenizer_config(self, tmp_path):
         # No tokenizer_config.json and no transformers — should return False

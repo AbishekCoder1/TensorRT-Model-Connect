@@ -88,8 +88,9 @@ struct GenerateConfig {
     float top_p{1.0f}; // 1.0 = disabled, 0.0 = greedy, (0,1) = nucleus
     float min_p{0.0f}; // 0.0 = disabled; filters tokens below min_p * max_prob
     int32_t seed{-1};
-    float guidance_scale{-1.0f}; // diffusion
-    int32_t num_steps{-1};       // diffusion
+    float guidance_scale{-1.0f};        // diffusion
+    int32_t num_steps{-1};              // diffusion
+    std::vector<float> initial_latents; // diffusion: optional packed initial latents
     int32_t eos_token_id{-1};
     int32_t tail_frames{0};           // speech-to-speech: extra frames after input
     bool use_chat_template{false};    ///< Apply chat template before tokenization
