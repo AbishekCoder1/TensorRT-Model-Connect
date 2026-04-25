@@ -58,9 +58,9 @@ Key files:
 | `src/runtime/registry/pipeline_registry.cpp` | Registry implementation |
 | `include/trtf/runtime/pipeline_plugin.h` | `IPipelinePlugin`, `BaseConfig`, `PipelineContext` |
 | `src/runtime/registry/pipeline_plugin.cpp` | `parse_base_config()` |
-| `src/runtime/plugins/*.cpp` | 20 self-registering plugin files (25 strategies) |
+| `src/runtime/plugins/*.cpp` | Self-registering plugin files (25 strategies) |
 | `src/runtime/plugins/shared/` | Shared helpers: `plugin_helpers`, `diffusion_helpers`, `audio_helpers` |
-| `src/runtime/plugins/force_link_plugins.cpp` | Linker anchors for static-init plugins |
+| `cmake/trtf_pipeline_plugins.cmake` | Plugin source/anchor manifest |
 | `src/cabi/api/trtf_c.cpp` | C ABI entry point, calls `PipelineFactory::from_bundle()` |
 | `src/runtime/pipelines/*.h/*.cpp` | 14 concrete `IPipeline` implementations |
 
@@ -151,7 +151,6 @@ src/runtime/plugins/
   flux_plugin.cpp             # diffusion_flux
   wan_plugin.cpp              # diffusion_wan, diffusion_pixart
   zimage_plugin.cpp           # diffusion_zimage
-  force_link_plugins.cpp      # linker anchors
   shared/                     # plugin_helpers, diffusion_helpers, audio_helpers
 ```
 
@@ -173,7 +172,7 @@ All phases have been **completed**.
 
 ### Phase 3: Migrate strategies to plugins -- DONE
 
-- All 25 strategies migrated to 20 self-registering plugin files in `src/runtime/plugins/`.
+- All 25 strategies migrated to self-registering plugin files in `src/runtime/plugins/`.
 - Shared helpers factored into `src/runtime/plugins/shared/`.
 
 ### Phase 4: Simplify pipeline_factory.cpp -- DONE
@@ -183,8 +182,8 @@ All phases have been **completed**.
 
 ### Phase 5: Plugin self-registration -- DONE
 
-- Each plugin registers via `PluginRegistrar` at static-init time.
-- `force_link_all_plugins()` in `src/runtime/plugins/force_link_plugins.cpp` ensures linker retention.
+- Each plugin registers via `REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK` at static-init time.
+- `cmake/trtf_pipeline_plugins.cmake` drives source inclusion and generated linker retention.
 - External out-of-tree plugins are now architecturally possible.
 
 ## 5. C ABI Stability Constraint

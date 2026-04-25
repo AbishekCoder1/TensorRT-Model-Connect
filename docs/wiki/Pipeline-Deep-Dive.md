@@ -133,20 +133,19 @@ caches, and returning a fully constructed pipeline.
 
 ### Self-Registration
 
-Plugins register themselves at static-init time via `PluginRegistrar`:
+Plugins register themselves at static-init time via the registry macro:
 
 ```cpp
-// In decoder_plugin.cpp (file scope, outside any namespace):
-static trtf::DecoderPlugin g_DecoderPlugin_instance;
-static trtf::PluginRegistrar g_DecoderPlugin_reg1("decoder_kv_cache", &g_DecoderPlugin_instance);
-static trtf::PluginRegistrar g_DecoderPlugin_reg2("decoder_moe", &g_DecoderPlugin_instance);
+// In decoder_plugin.cpp, inside namespace trtf:
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_DecoderPlugin, DecoderPlugin,
+                                         "decoder_kv_cache", "decoder_moe");
 ```
 
-The `REGISTER_PIPELINE_PLUGIN` and `REGISTER_PIPELINE_PLUGIN_MULTI` macros in
-`pipeline_registry.h` provide convenience wrappers for this pattern.
+The `REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK` macro in `pipeline_registry.h`
+combines static registration with the force-link symbol expected by the manifest.
 
-A `force_link_all_plugins()` function in `src/runtime/plugins/force_link_plugins.cpp`
-ensures the linker does not strip self-registering statics from the binary.
+`cmake/trtf_pipeline_plugins.cmake` generates the force-link source that keeps
+self-registering plugin translation units in the binary.
 
 ### 25 Registered Strategies (20 plugin files, 14 pipeline implementations)
 
@@ -594,7 +593,7 @@ each plugin reads only the fields it requires.
 | Pipeline registry | `include/trtf/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp` |
 | Plugin interface + BaseConfig | `include/trtf/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
 | Plugin shared helpers | `src/runtime/plugins/shared/plugin_helpers.h`, `.cpp` |
-| Force-link anchors | `src/runtime/plugins/force_link_plugins.cpp` |
+| Plugin source/anchor manifest | `cmake/trtf_pipeline_plugins.cmake` |
 | IPipeline interface | `include/trtf/pipeline.h` |
 | TextGenerationPipeline | `src/runtime/pipelines/text_generation_pipeline.h`, `.cpp` |
 | RecurrentPipeline | `src/runtime/pipelines/recurrent_pipeline.h`, `.cpp` |

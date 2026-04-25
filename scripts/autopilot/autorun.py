@@ -147,9 +147,9 @@ WORKER_PROMPT = textwrap.dedent("""\
        - whisper_plugin.cpp (encoder-decoder speech-to-text)
        - encoder_plugin.cpp (encoder-only)
        - shared/plugin_helpers.h (TrtModule loading, tokenizer, helpers)
-    2. Create your plugin .cpp file with REGISTER_PIPELINE_PLUGIN macro.
-    3. Add force-link anchor in force_link_plugins.cpp.
-    4. Add the .cpp to CMakeLists.txt.
+    2. Create your plugin .cpp file with REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK.
+    3. Add one source/symbol entry to cmake/trtf_pipeline_plugins.cmake.
+    4. Reconfigure so CMake generates linker anchors and adds the source.
     5. Rebuild: `docker exec trtf-dev-gb300-{agent_id} cmake --build build -j`
     6. Test: `docker exec trtf-dev-gb300-{agent_id} ./build/trtf run /tmp/{family_name}.trtfb --prompt "test" --max-new-tokens 5`
 
@@ -209,7 +209,7 @@ WORKER_PROMPT = textwrap.dedent("""\
       copy-paste is better than tight coupling. Each plugin must be self-contained.
     - Do NOT edit shared framework files (checkpoint_mapper.py, standard_decoder_builder.py,
       pipeline_factory.cpp, pipeline_registry.cpp). You CAN add new plugin files and
-      edit CMakeLists.txt and force_link_plugins.cpp to register your new plugin.
+      edit cmake/trtf_pipeline_plugins.cmake to register your new plugin.
     - Do NOT skip C++ runtime implementation. The model must work end-to-end.
     - The final test is: `./build/trtf run <bundle> --prompt "..." --max-new-tokens N`
       must produce correct output. If it doesn't, keep fixing.

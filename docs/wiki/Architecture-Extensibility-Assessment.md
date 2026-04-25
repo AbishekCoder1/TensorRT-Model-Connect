@@ -72,10 +72,9 @@ The C++ runtime supports multiple state management patterns via the plugin regis
 
 New state types require:
 1. A new plugin `.cpp` file in `src/runtime/plugins/` implementing `IPipelinePlugin`
-2. Self-registration via `PluginRegistrar` at file scope
-3. A force-link anchor in `force_link_plugins.cpp`
+2. Self-registration via `REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK`
+3. A source/symbol entry in `cmake/trtf_pipeline_plugins.cmake`
 4. A new or existing pipeline class in `src/runtime/pipelines/`
-5. Adding the `.cpp` to `CMakeLists.txt`
 
 No edits to `pipeline_factory.cpp` are needed -- the registry handles dispatch automatically.
 

@@ -276,7 +276,7 @@ Based on the diagnosis:
   (only if values are very close to threshold AND the model also nearly-fails on master)
 - **C++ compilation error:** Fix the relevant source in `src/`
 - **Test code error:** Fix the test
-- **Missing registration:** Check `force_link_plugins.cpp`, `CMakeLists.txt`
+- **Missing registration:** Check `cmake/trtf_pipeline_plugins.cmake` and the plugin's registration macro
 
 ##### Step 6: Validate locally before pushing (Tier 1)
 

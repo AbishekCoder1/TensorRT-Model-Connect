@@ -350,14 +350,6 @@ class TestCppScope:
         assert "flux-schnell" in match.models
         assert "flux-2-dev-fp8" not in match.models
 
-    def test_cpp_force_link(self, imap):
-        """force_link_plugins.cpp -> no E2E models (linker anchors only)."""
-        match = test_impact.classify_file(
-            "src/runtime/plugins/force_link_plugins.cpp", imap)
-        assert match.rule == "cpp_force_link"
-        assert match.models == []
-        assert match.rebuild_cpp is True
-
     def test_scoped_cpp_helper_gpu_matmul(self, imap):
         """gpu_matmul.cpp -> only the pipelines that reference it."""
         match = test_impact.classify_file(

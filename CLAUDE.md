@@ -615,7 +615,7 @@ src/                                 # C++ bundle-only runtime
       wan_plugin.cpp                 # diffusion_wan, diffusion_pixart
       zimage_plugin.cpp              # diffusion_zimage
       t5_plugin.cpp                  # text_to_text (encoder-decoder seq2seq)
-      force_link_plugins.cpp         # Linker anchors for static lib
+      cmake/trtf_pipeline_plugins.cmake # Plugin source/anchor manifest
     pipelines/                       # Pipeline implementations (one class per file, fully isolated)
       text_generation_pipeline.h/cpp # TextGenerationPipeline: standard decoder + MoE
       recurrent_pipeline.h/cpp       # RecurrentPipeline: SSM, RWKV, hybrid (via IStateManager)
@@ -970,22 +970,18 @@ When a model family requires fundamentally different runtime behavior (new state
    };
    } // namespace trtf
 
-   // Self-register at static-init time (file scope):
-   REGISTER_PIPELINE_PLUGIN("my_strategy", trtf::MyPlugin);
+   // Self-register at static-init time (inside namespace trtf):
+   REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_MyPlugin, MyPlugin, "my_strategy");
    // Or for multiple strategies:
-   // REGISTER_PIPELINE_PLUGIN_MULTI(trtf::MyPlugin, "strategy_a", "strategy_b");
+   // REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_MyPlugin, MyPlugin,
+   //                                          "strategy_a", "strategy_b");
    ```
 
-2. **Add force-link anchor** in the plugin file and in `force_link_plugins.cpp`:
-   ```cpp
-   // In your plugin .cpp (file scope):
-   volatile int kForceLink_MyPlugin = 0;
+2. **Add one manifest entry** to `cmake/trtf_pipeline_plugins.cmake`:
+   `my_plugin.cpp|kForceLink_MyPlugin`.
 
-   // In force_link_plugins.cpp, add to the extern block and pointer array:
-   extern volatile int kForceLink_MyPlugin;
-   ```
-
-3. **Add the `.cpp` to CMakeLists.txt** in the runtime sources list.
+3. Reconfigure/rebuild. The manifest adds the `.cpp` to `trtf_core` and
+   generates the linker anchors.
 
 4. **Create or reuse a pipeline class** in `src/runtime/pipelines/` that implements `IPipeline`.
 

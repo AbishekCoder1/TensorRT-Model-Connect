@@ -115,7 +115,7 @@ TriAttentionRegistrar g_triattention_registrar{};
 } // namespace
 } // namespace trtf::config::schemas
 
-// Force-link anchor. Referenced by force_link_schemas.cpp so that static
+// Force-link anchor. Referenced by generated linker anchors so that static
 // libraries preserve this TU (and its static-init) in the final binary.
 namespace trtf::config::schemas {
 volatile int kForceLink_triattention = 0;

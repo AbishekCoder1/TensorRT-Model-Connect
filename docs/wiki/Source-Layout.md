@@ -133,7 +133,7 @@ Self-registering pipeline plugins. Each plugin handles one or more `runtime_stra
 | `wan_plugin.cpp` | `diffusion_wan`, `diffusion_pixart` |
 | `whisper_plugin.cpp` | `speech_to_text` |
 | `zimage_plugin.cpp` | `diffusion_zimage` |
-| `force_link_plugins.cpp` | Linker anchors for static lib |
+| `cmake/trtf_pipeline_plugins.cmake` | Plugin source/anchor manifest |
 
 Shared helpers in `plugins/shared/`: `plugin_helpers.h/cpp` (ITrtModule loading via backend, tokenizer creation, KV-dim), `diffusion_helpers.h/cpp`, `audio_helpers.h/cpp`.
 

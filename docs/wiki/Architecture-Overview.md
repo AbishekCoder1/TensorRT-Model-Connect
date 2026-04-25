@@ -204,18 +204,17 @@ The factory is the single entry point for creating pipelines from bundles. It pe
 6. `parse_base_config()` -- parse universal config fields into `BaseConfig`.
 7. `plugin->create(ctx)` -- delegate pipeline construction to the plugin.
 
-**Self-registering plugin architecture**: Each plugin file in `src/runtime/plugins/` defines a class implementing `IPipelinePlugin` and registers it at static-init time via `PluginRegistrar`:
+**Self-registering plugin architecture**: Each plugin file in `src/runtime/plugins/` defines a class implementing `IPipelinePlugin` and registers it at static-init time via `REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK`:
 
 ```cpp
-// At file scope in each plugin .cpp (outside any namespace):
-static trtf::DecoderPlugin g_DecoderPlugin_instance;
-static trtf::PluginRegistrar g_DecoderPlugin_reg1("decoder_kv_cache", &g_DecoderPlugin_instance);
-static trtf::PluginRegistrar g_DecoderPlugin_reg2("decoder_moe", &g_DecoderPlugin_instance);
+// Inside namespace trtf in each plugin .cpp:
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_DecoderPlugin, DecoderPlugin,
+                                         "decoder_kv_cache", "decoder_moe");
 ```
 
 `PipelineRegistry` is a singleton mapping strategy strings to `IPipelinePlugin*` instances. Adding a new strategy requires only a new `.cpp` file -- no edits to `pipeline_factory.cpp` or any central dispatch logic.
 
-There are 20 plugin files (19 functional plugins + `force_link_plugins.cpp` for linker anchors) registering 25 strategy strings:
+The plugin manifest `cmake/trtf_pipeline_plugins.cmake` lists each plugin source and force-link symbol. Functional plugin files register 25 strategy strings:
 
 | Plugin File | Strategies Registered |
 |-------------|----------------------|
@@ -238,7 +237,7 @@ There are 20 plugin files (19 functional plugins + `force_link_plugins.cpp` for 
 | `flux_plugin.cpp` | `diffusion_flux` |
 | `wan_plugin.cpp` | `diffusion_wan`, `diffusion_pixart` |
 | `zimage_plugin.cpp` | `diffusion_zimage` |
-| `force_link_plugins.cpp` | (linker anchors only -- ensures plugin .o files are not stripped from static library) |
+| `cmake/trtf_pipeline_plugins.cmake` | source/anchor manifest for generated linker retention |
 
 ### 4.4 Configuration
 
@@ -608,7 +607,7 @@ All paths below are relative to the repository root and have been verified to ex
 | `src/runtime/plugins/flux_plugin.cpp` | diffusion_flux |
 | `src/runtime/plugins/wan_plugin.cpp` | diffusion_wan, diffusion_pixart |
 | `src/runtime/plugins/zimage_plugin.cpp` | diffusion_zimage |
-| `src/runtime/plugins/force_link_plugins.cpp` | Linker anchors for all plugins |
+| `cmake/trtf_pipeline_plugins.cmake` | Plugin source/anchor manifest |
 | `src/runtime/plugins/shared/plugin_helpers.h` | Shared plugin helpers (TrtModule loading, tokenizer, KV) |
 
 ### C++ Runtime -- Implementation

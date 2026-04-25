@@ -551,10 +551,6 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
     m = re.match(r"src/runtime/plugins/(\w+)\.cpp$", path)
     if m:
         plugin_stem = m.group(1)
-        if plugin_stem == "force_link_plugins":
-            # Linker anchors only — actual model impact comes from the
-            # individual plugin .cpp files which are classified separately.
-            return RuleMatch("cpp_force_link", [], unit_tiers, rebuild)
         strategies = CPP_PLUGIN_STRATEGIES.get(plugin_stem, [])
         if strategies:
             models = _drop_fp8_scale_models(
