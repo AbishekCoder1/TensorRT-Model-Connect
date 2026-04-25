@@ -110,23 +110,51 @@ std::vector<int64_t> KvCache::mask_shape_for_engine(int32_t mask_width,
     return {static_cast<int64_t>(mask_buf_size)};
 }
 
-void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
-    if (has_position_input_) {
-        pos_buf_vec_.resize(1);
-        pos_buf_vec_[0] = position_;
-        Tensor pos_t;
-        pos_t.data = pos_buf_vec_.data();
-        pos_t.shape = {1};
-        pos_t.dtype = DType::kInt32;
-        inputs[names_.position_id] = pos_t;
-    }
+void KvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
+    if (!has_position_input_)
+        return;
+    pos_buf_vec_.resize(static_cast<std::size_t>(seq_len));
+    for (int32_t i = 0; i < seq_len; ++i)
+        pos_buf_vec_[static_cast<std::size_t>(i)] = position_ + i;
+    Tensor pos_t;
+    pos_t.data = pos_buf_vec_.data();
+    pos_t.shape = {static_cast<int64_t>(seq_len)};
+    pos_t.dtype = DType::kInt32;
+    inputs[names_.position_id] = pos_t;
+}
 
+void KvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
+    // Batched prefill mask: (seq_len, max_length + seq_len). Columns
+    // [0, valid) are visible cache, [valid, max_length) are stale slots,
+    // [max_length, max_length+seq_len) are the new tokens — causal so
+    // token i sees tokens 0..i.
+    const int32_t valid = std::max(0, std::min(position_, max_length_));
+    const int32_t kv_len = max_length_ + seq_len;
+    const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
+    mask_buf_.assign(total, kMaskedScore);
+    for (int32_t i = 0; i < seq_len; ++i) {
+        const std::size_t row = static_cast<std::size_t>(i) * static_cast<std::size_t>(kv_len);
+        for (int32_t j = 0; j < valid; ++j)
+            mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
+        for (int32_t j = 0; j <= i; ++j)
+            mask_buf_[row + static_cast<std::size_t>(max_length_) +
+                      static_cast<std::size_t>(j)] = 0.0f;
+    }
+    Tensor mask_t;
+    mask_t.data = mask_buf_.data();
+    mask_t.shape = {static_cast<int64_t>(seq_len), static_cast<int64_t>(kv_len)};
+    mask_t.dtype = DType::kFloat32;
+    inputs[names_.attention_mask] = mask_t;
+}
+
+void KvCache::write_decode_mask(TensorMap& inputs) {
     const int32_t valid = std::max(0, std::min(position_, max_length_));
     const int32_t cache_rows = dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;
     const int32_t mask_width = dynamic_binding_enabled_ ? (cache_rows + 1) : (max_length_ + 1);
     rebind_cache_rows(cache_rows);
 
-    // Dense causal mask: 0.0 = visible, -1e4 = masked.
+    if (mask_buf_.size() < static_cast<std::size_t>(mask_width))
+        mask_buf_.assign(static_cast<std::size_t>(mask_width), kMaskedScore);
     std::fill(mask_buf_.begin(), mask_buf_.begin() + mask_width, kMaskedScore);
     for (int32_t i = 0; i < valid; ++i)
         mask_buf_[static_cast<std::size_t>(i)] = 0.0f;
@@ -137,6 +165,16 @@ void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
     mask_t.shape = mask_shape_for_engine(mask_width, mask_buf_.size());
     mask_t.dtype = DType::kFloat32;
     inputs[names_.attention_mask] = mask_t;
+}
+
+void KvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
+    if (seq_len <= 0)
+        seq_len = 1;
+    write_position_input(inputs, seq_len);
+    if (seq_len > 1)
+        write_batched_mask(inputs, seq_len);
+    else
+        write_decode_mask(inputs);
 }
 
 void KvCache::bind_to(TrtModule& module) {

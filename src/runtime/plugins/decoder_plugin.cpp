@@ -166,8 +166,18 @@ class DecoderPlugin final : public IPipelinePlugin {
         const auto sizing = resolve_kv_cache_runtime_sizing(ctx, *shared_engine, kv_names,
                                                             cache_dtype, tri_cfg, kv_dim);
 
+        const int32_t prefill_max_length =
+            detect_prefill_max_length(*shared_engine, io.token_id);
+        const int32_t first_decode_profile = prefill_max_length > 0 ? 1 : 0;
+
+        std::unique_ptr<TrtModule> prefill_module;
+        if (prefill_max_length > 0) {
+            prefill_module = make_decoder_module(shared_engine, shared_stream, /*profile_idx=*/0);
+        }
+
         auto decoders = build_decoder_contexts(ctx, shared_engine, shared_stream,
-                                               external_input_names, sizing.runtime_rows);
+                                               external_input_names, sizing.runtime_rows,
+                                               first_decode_profile);
         auto state =
             build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
         log_kv_cache_sizing(ctx, sizing, state.get());
@@ -175,10 +185,19 @@ class DecoderPlugin final : public IPipelinePlugin {
         TextGenConfig tgc;
         populate_text_gen_config(ctx, tgc, io, decoders.front(), ctx.runtime_config);
         apply_chat_template_format(ctx.bundle, tgc);
+        // Wire batched prefill: the pipeline forwards the whole prompt
+        // through `prefill_module` (TRT optimization profile 0) and copies
+        // per-layer K/V into the shared cache via write_prefill_kv.
+        tgc.prefill_max_length = prefill_max_length;
+        tgc.num_layers = ctx.config.num_layers;
+        tgc.kv_dim = kv_dim;
+        tgc.present_k_pattern = io.present_k_pattern;
+        tgc.present_v_pattern = io.present_v_pattern;
 
         return std::make_unique<TextGenerationPipeline>(std::move(decoders), std::move(state), tgc,
                                                         stream, std::move(tokenizer),
-                                                        ctx.bundle.info.model_id);
+                                                        ctx.bundle.info.model_id, nullptr,
+                                                        std::move(prefill_module));
     }
 
   private:
@@ -250,29 +269,48 @@ class DecoderPlugin final : public IPipelinePlugin {
         return module;
     }
 
+    // Returns the prefill optimization profile's MAX seq-len if the engine
+    // ships with a "prefill" profile (i.e. profile 0 lets `token_id` be
+    // multi-row); 0 otherwise. Bundles built by the dual-profile decoder
+    // builder put prefill at profile 0; legacy bundles only have single-
+    // token decode profiles (Sq=1 across all profiles).
+    static int32_t detect_prefill_max_length(const nvinfer1::ICudaEngine& engine,
+                                             const std::string& token_id_name) {
+        if (engine.getNbOptimizationProfiles() <= 0)
+            return 0;
+        const auto max_dims = engine.getProfileShape(token_id_name.c_str(), 0,
+                                                     nvinfer1::OptProfileSelector::kMAX);
+        if (max_dims.nbDims <= 0)
+            return 0;
+        return max_dims.d[0] > 1 ? static_cast<int32_t>(max_dims.d[0]) : 0;
+    }
+
     static std::vector<TextGenerationPipeline::DecoderContext> build_decoder_contexts(
         const PipelineContext& ctx, std::shared_ptr<nvinfer1::ICudaEngine> shared_engine,
         std::shared_ptr<CudaStream> shared_stream,
-        const std::vector<std::string>& external_input_names, int32_t runtime_rows) {
+        const std::vector<std::string>& external_input_names, int32_t runtime_rows,
+        int32_t first_decode_profile) {
         (void)external_input_names;
         auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
         if (profile_rows.empty())
             profile_rows.push_back(ctx.config.max_cache_length);
         const int32_t num_profiles = shared_engine->getNbOptimizationProfiles();
-        const int32_t loop_bound = std::min(num_profiles, static_cast<int32_t>(profile_rows.size()));
+        const int32_t profile_count = num_profiles - first_decode_profile;
+        const int32_t loop_bound = std::min(profile_count, static_cast<int32_t>(profile_rows.size()));
         std::vector<TextGenerationPipeline::DecoderContext> decoders;
-        decoders.reserve(static_cast<std::size_t>(num_profiles > 0 ? num_profiles : 1));
-        for (int32_t profile_idx = 0; profile_idx < loop_bound; ++profile_idx) {
-            const int32_t profile_max_rows = profile_rows[static_cast<std::size_t>(profile_idx)];
-            if (profile_idx > 0 && profile_max_rows > runtime_rows)
+        decoders.reserve(static_cast<std::size_t>(loop_bound > 0 ? loop_bound : 1));
+        for (int32_t i = 0; i < loop_bound; ++i) {
+            const int32_t profile_max_rows = profile_rows[static_cast<std::size_t>(i)];
+            if (i > 0 && profile_max_rows > runtime_rows)
                 break;
+            const int32_t profile_idx = first_decode_profile + i;
             decoders.push_back(TextGenerationPipeline::DecoderContext{
                 profile_max_rows, make_decoder_module(shared_engine, shared_stream, profile_idx)});
         }
         if (decoders.empty())
             decoders.push_back(TextGenerationPipeline::DecoderContext{
                 ctx.config.max_cache_length,
-                make_decoder_module(shared_engine, shared_stream, 0)});
+                make_decoder_module(shared_engine, shared_stream, first_decode_profile)});
         return decoders;
     }
 

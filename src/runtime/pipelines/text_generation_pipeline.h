@@ -33,6 +33,17 @@ struct TextGenConfig {
     // decoder_plugin::create() populates these from ctx.runtime_config.
     bool disable_cuda_graph{false};
     bool prefer_gpu_greedy{false};
+
+    // Batched-prefill plumbing — populated when the bundle ships with a
+    // dedicated prefill optimization profile. The runtime forwards the
+    // whole prompt through `prefill_module` once (writing per-layer K/V
+    // into the shared cache via write_prefill_kv) before falling back to
+    // the per-token decode loop.
+    std::string present_k_pattern{"present_k_{i}"};
+    std::string present_v_pattern{"present_v_{i}"};
+    int32_t prefill_max_length{0};
+    int32_t num_layers{0};
+    int32_t kv_dim{0};
 };
 
 // Populate the process-wide step-trace state from the resolved ConfigBundle.
@@ -58,7 +69,8 @@ class TextGenerationPipeline final : public IPipeline {
                            std::unique_ptr<IInferenceState> state, TextGenConfig config,
                            cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
                            std::string model_id_str = "",
-                           std::unique_ptr<ISampler> sampler = nullptr);
+                           std::unique_ptr<ISampler> sampler = nullptr,
+                           std::unique_ptr<TrtModule> prefill = nullptr);
 
     // Public API: takes raw text, returns typed result.
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
@@ -77,6 +89,7 @@ class TextGenerationPipeline final : public IPipeline {
 
   private:
     std::vector<DecoderContext> decoders_;
+    std::unique_ptr<TrtModule> prefill_;
     std::unique_ptr<IInferenceState> state_;
     TextGenConfig config_;
     cudaStream_t stream_;
@@ -116,6 +129,9 @@ class TextGenerationPipeline final : public IPipeline {
     std::unique_ptr<ISampler> make_step_sampler(const SamplingParams& params);
     void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
                      bool gpu_sampling);
+    // Returns true if the batched prefill engine handled the prompt; false
+    // means caller must fall back to the per-token decode loop.
+    bool run_prefill_batched(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
     bool should_stop_on_answer(const std::vector<int32_t>& output, int32_t prompt_token_count,
                                const GenerateConfig& cfg, int32_t steps, int32_t stop_interval,
                                bool is_eos) const;

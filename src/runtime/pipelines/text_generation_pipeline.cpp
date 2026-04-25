@@ -1,6 +1,8 @@
 #include "runtime/pipelines/text_generation_pipeline.h"
 
 #include "runtime/core/trt_common.h"
+#include "runtime/core/trt_engine_lifecycle.h"
+#include "trtf/runtime/kv_cache.h"
 
 #include <algorithm>
 #include <chrono>
@@ -157,10 +159,12 @@ TextGenerationPipeline::TextGenerationPipeline(std::vector<DecoderContext> decod
                                                TextGenConfig config, cudaStream_t stream,
                                                std::shared_ptr<ITokenizer> tokenizer,
                                                std::string model_id_str,
-                                               std::unique_ptr<ISampler> sampler)
-    : decoders_(std::move(decoders)), state_(std::move(state)), config_(std::move(config)),
-      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      sampler_(std::move(sampler)), logits_output_name_(config_.logits_output_name) {
+                                               std::unique_ptr<ISampler> sampler,
+                                               std::unique_ptr<TrtModule> prefill)
+    : decoders_(std::move(decoders)), prefill_(std::move(prefill)), state_(std::move(state)),
+      config_(std::move(config)), stream_(stream), tokenizer_(std::move(tokenizer)),
+      model_id_(std::move(model_id_str)), sampler_(std::move(sampler)),
+      logits_output_name_(config_.logits_output_name) {
     if (decoders_.empty()) {
         throw std::runtime_error("TextGenerationPipeline: no decoder modules");
     }
@@ -248,8 +252,85 @@ std::unique_ptr<ISampler> TextGenerationPipeline::make_step_sampler(const Sampli
     return create_sampler(params);
 }
 
+// Helper: gather per-layer present_k/present_v device pointers from the
+// prefill TrtModule. Returns false if any layer's tensor is missing — in
+// that case the caller falls back to the per-token decode loop.
+namespace {
+bool gather_prefill_kv_pointers(TrtModule& prefill, const TextGenConfig& cfg,
+                                std::vector<const void*>& pk, std::vector<const void*>& pv) {
+    pk.resize(static_cast<std::size_t>(cfg.num_layers));
+    pv.resize(static_cast<std::size_t>(cfg.num_layers));
+    for (int32_t i = 0; i < cfg.num_layers; ++i) {
+        const auto li = static_cast<std::size_t>(i);
+        pk[li] = prefill.device_ptr(expand_layer_name(cfg.present_k_pattern, i));
+        pv[li] = prefill.device_ptr(expand_layer_name(cfg.present_v_pattern, i));
+        if (pk[li] == nullptr || pv[li] == nullptr)
+            return false;
+    }
+    return true;
+}
+
+bool batched_prefill_supported(const TrtModule* prefill, const TextGenConfig& cfg, int32_t sq,
+                               IInferenceState* state) {
+    if (prefill == nullptr || sq <= 0)
+        return false;
+    if (cfg.prefill_max_length > 0 && sq > cfg.prefill_max_length)
+        return false;
+    if (cfg.num_layers <= 0 || cfg.vocab_size <= 0)
+        return false;
+    return dynamic_cast<KvCache*>(state) != nullptr;
+}
+} // namespace
+
+bool TextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
+                                                 std::vector<float>& logits) {
+    const auto sq = static_cast<int32_t>(input_ids.size());
+    if (!batched_prefill_supported(prefill_.get(), config_, sq, state_.get()))
+        return false;
+    auto* kv = static_cast<KvCache*>(state_.get());
+
+    // The prefill module shares the same external KV cache buffers as the
+    // decode module(s), so we rebind the cache_k/cache_v inputs onto the
+    // prefill execution context before running.
+    kv->bind_cache_inputs(*prefill_);
+
+    TensorMap inputs;
+    Tensor tok_t;
+    tok_t.data = const_cast<int32_t*>(input_ids.data());
+    tok_t.shape = {static_cast<int64_t>(sq)};
+    tok_t.dtype = DType::kInt32;
+    inputs[config_.token_id_name] = tok_t;
+    state_->prepare_step(inputs, sq);
+
+    TensorMap outputs = prefill_->forward(inputs);
+    auto logits_it = outputs.find(config_.logits_output_name);
+    if (logits_it == outputs.end())
+        return false;
+
+    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
+    const auto& lt = logits_it->second;
+    if (static_cast<std::size_t>(lt.numel()) < vocab)
+        return false;
+    logits.resize(vocab);
+    std::memcpy(logits.data(), lt.data, vocab * sizeof(float));
+
+    std::vector<const void*> pk, pv;
+    if (!gather_prefill_kv_pointers(*prefill_, config_, pk, pv))
+        return false;
+    kv->write_prefill_kv(pk, pv, sq);
+    if (trt_log_to_stderr_enabled())
+        std::cerr << "[trtf] Batched prefill (profile 0): " << sq << " tokens in one call\n";
+    return true;
+}
+
 void TextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                          std::vector<float>& logits, bool gpu_sampling) {
+    // Fast path: batched prefill engine writes K/V for the whole prompt in
+    // one forward and returns last-token logits on host.
+    if (!gpu_sampling && run_prefill_batched(input_ids, logits)) {
+        state_->mark_prefill_complete();
+        return;
+    }
     for (std::size_t i = 0; i + 1 < input_ids.size(); ++i) {
         if (gpu_sampling)
             run_step_device(input_ids[i]);

@@ -244,14 +244,40 @@ def build_dual_profile_decoder_engine(
     max_prefill_length: int | None = None,
     interleaved_rope: bool = False,
     verbose: bool = False,
+    dynamic_kv_profile_rows: list[int] | None = None,
 ) -> bytes:
-    """Build a dual-profile prefill+decode engine with two optimization profiles."""
+    """Build a dual-profile prefill+decode engine with two optimization profiles.
+
+    When ``dynamic_kv_profile_rows`` is provided, the engine carries one
+    prefill profile (profile 0) followed by N decode profiles (profile 1..N),
+    one per bucket — letting TriAttention pick the smallest active KV cache
+    bucket at runtime while still benefitting from batched-prefill on the
+    prompt. The cache_k/cache_v inputs are declared dynamic so each profile
+    can constrain their row count independently.
+    """
     _supports_config(config, weights)
 
     if max_prefill_length is None:
         max_prefill_length = max_cache_length
     max_prefill_length = max(1, min(max_prefill_length, max_cache_length))
     opt_prefill_length = max(1, min(opt_prefill_length, max_prefill_length))
+
+    multi_bucket_decode = bool(dynamic_kv_profile_rows)
+    if multi_bucket_decode:
+        # Sanitize: clamp, dedupe, sort. Always include max_cache_length so
+        # the runtime can fall back to the full bucket once compaction
+        # restores the cache to <= max_cache_length rows.
+        decode_buckets: list[int] = []
+        seen = set()
+        for raw in dynamic_kv_profile_rows or []:
+            clamped = max(1, min(int(raw), max_cache_length))
+            if clamped not in seen:
+                seen.add(clamped)
+                decode_buckets.append(clamped)
+        decode_buckets.sort()
+        if not decode_buckets:
+            decode_buckets = [max_cache_length]
+            multi_bucket_decode = False
 
     attention_size = weights.get("_attention_size", config.attention_size)
     mlp_size = weights.get("_mlp_size", config.intermediate_size)
@@ -280,15 +306,20 @@ def build_dual_profile_decoder_engine(
     position_id = network.add_input("position_id", trt.int32, (-1,))
     attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
 
+    cache_shape: tuple[int, int]
+    if multi_bucket_decode:
+        cache_shape = (-1, attention_size)
+    else:
+        cache_shape = (max_cache_length, attention_size)
     cache_k_inputs = []
     cache_v_inputs = []
     for i in range(num_layers):
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
-            work_trt_dtype, (max_cache_length, attention_size))
+            work_trt_dtype, cache_shape)
         cv = network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
-            work_trt_dtype, (max_cache_length, attention_size))
+            work_trt_dtype, cache_shape)
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
 
@@ -299,7 +330,10 @@ def build_dual_profile_decoder_engine(
         attention_mask_work = attention_mask
 
     # Two optimization profiles (same graph, different Sq)
-    def _add_profile(opt_sq: int, max_sq: int, fixed: bool = False):
+    def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False,
+                     cache_rows_min: int | None = None,
+                     cache_rows_opt: int | None = None,
+                     cache_rows_max: int | None = None):
         prof = builder.create_optimization_profile()
         min_sq = opt_sq if fixed else 1
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
@@ -309,12 +343,33 @@ def build_dual_profile_decoder_engine(
             (min_sq, max_cache_length + min_sq),
             (opt_sq, max_cache_length + opt_sq),
             (max_sq, max_cache_length + max_sq))
+        if multi_bucket_decode:
+            cmn = cache_rows_min if cache_rows_min is not None else 1
+            cop = cache_rows_opt if cache_rows_opt is not None else max_cache_length
+            cmx = cache_rows_max if cache_rows_max is not None else max_cache_length
+            for i in range(num_layers):
+                for name in (graph_ops.layer_tensor_name("cache_k", i),
+                             graph_ops.layer_tensor_name("cache_v", i)):
+                    prof.set_shape(
+                        name,
+                        (cmn, attention_size),
+                        (cop, attention_size),
+                        (cmx, attention_size))
         trt_config.add_optimization_profile(prof)
 
     # Profile 0: prefill (TRT picks batched MHA kernel at opt=opt_prefill_length)
-    _add_profile(opt_prefill_length, max_prefill_length, fixed=False)
-    # Profile 1: decode (Sq=1 everywhere; GEMV fast-path)
-    _add_profile(1, 1, fixed=True)
+    _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
+                 cache_rows_min=1, cache_rows_opt=max_cache_length,
+                 cache_rows_max=max_cache_length)
+    if multi_bucket_decode:
+        # Profiles 1..N: decode (Sq=1) at increasing cache buckets.
+        for bucket in decode_buckets:
+            _add_profile(1, 1, fixed=True,
+                         cache_rows_min=1, cache_rows_opt=bucket,
+                         cache_rows_max=bucket)
+    else:
+        # Profile 1: decode (Sq=1 everywhere; GEMV fast-path)
+        _add_profile(1, 1, fixed=True)
 
     # ---- Shared constants -----------------------------------------------
     embedding_table = graph_ops.add_constant(
