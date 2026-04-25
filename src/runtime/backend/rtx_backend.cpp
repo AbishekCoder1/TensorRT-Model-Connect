@@ -106,6 +106,50 @@ class RtxBackend final : public IBackend {
         return module;
     }
 
+    BackendDualProfileModules
+    create_dual_profile_modules(const void* plan_data, size_t plan_size,
+                                const ModuleCreateOptions& options) override {
+        auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
+        if (!engine_raw)
+            throw std::runtime_error("[trtf] Failed to deserialize engine (RTX)");
+        std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
+                                                      [](nvinfer1::ICudaEngine* p) { delete p; });
+
+        StreamSetup stream_setup = resolve_stream(options.stream);
+
+        const int32_t nprofiles = engine->getNbOptimizationProfiles();
+        auto make_ctx_module = [&](int32_t profile_idx) -> std::unique_ptr<ITrtModule> {
+            auto* rt_config = engine->createRuntimeConfig();
+            if (!rt_config)
+                throw std::runtime_error("[trtf] Failed to create RTX runtime config");
+            if (options.runtime_cache_path && options.runtime_cache_path[0] != '\0')
+                ensure_runtime_cache(rt_config, options.runtime_cache_path);
+            if (options.cuda_graphs)
+                rt_config->setCudaGraphStrategy(nvinfer1::CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE);
+            auto* ctx = engine->createExecutionContext(rt_config);
+            delete rt_config;
+            if (!ctx)
+                throw std::runtime_error("[trtf] Failed to create RTX execution context");
+            auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream_setup.stream,
+                                                       profile_idx);
+            if (!mod->ok())
+                throw std::runtime_error("[trtf] TrtModuleImpl creation failed (RTX)");
+            mod->keep_alive(engine);
+            if (stream_setup.owner)
+                mod->keep_alive(stream_setup.owner);
+            return mod;
+        };
+
+        BackendDualProfileModules out;
+        if (nprofiles < 2) {
+            out.decode = make_ctx_module(0);
+            return out;
+        }
+        out.prefill = make_ctx_module(0);
+        out.decode = make_ctx_module(1);
+        return out;
+    }
+
     const char* name() const override { return "trt_rtx"; }
 
   private:

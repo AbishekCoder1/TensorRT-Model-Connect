@@ -753,9 +753,7 @@ class E2EOrchestrator:
             return result
 
         # 2. Resolve or build bundle
-        t0 = time.monotonic()
         bundle_path, build_time, build_err, build_info = _resolve_bundle(case, ctx)
-        timing["build_s"] = time.monotonic() - t0
         if build_time is not None:
             timing["bundle_build_s"] = build_time
 

@@ -162,6 +162,26 @@ std::unique_ptr<ITrtModule> extract_optional_module(IBackend* backend,
     return nullptr;
 }
 
+// Dual-profile module loading (delegated to IBackend).
+
+DualProfileModules load_dual_profile_modules(IBackend* backend, const std::vector<char>* plan,
+                                             const char* label,
+                                             const ModuleCreateOptions& options) {
+    if (!plan || plan->empty())
+        throw std::runtime_error(std::string("Bundle missing ") + label);
+    if (!backend)
+        throw std::runtime_error("No backend loaded");
+
+    auto pair = backend->create_dual_profile_modules(plan->data(), plan->size(), options);
+    if (!pair.decode || !pair.decode->ok())
+        throw std::runtime_error(std::string("Failed to create dual-profile modules for ") + label);
+
+    DualProfileModules out;
+    out.prefill = std::move(pair.prefill);
+    out.decode = std::move(pair.decode);
+    return out;
+}
+
 // Config helpers.
 
 int32_t compute_kv_dim(const BaseConfig& cfg) {

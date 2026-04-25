@@ -489,6 +489,9 @@ test-e2e-selective:
           --project-dir . \
           --title "E2E Report - MR !${CI_MERGE_REQUEST_IID:-manual}" \
           || true
+        if [ -f e2e_artifacts/e2e_report.html ] && [ -n "${CI_JOB_URL:-}" ]; then
+          echo "HTML report: ${CI_JOB_URL}/artifacts/file/e2e_artifacts/e2e_report.html"
+        fi
       fi
   artifacts:
     paths:
@@ -545,6 +548,9 @@ test-e2e-nightly:
           --project-dir . \
           --title "Nightly E2E Report - $(date +%Y-%m-%d)" \
           || true
+        if [ -f e2e_artifacts/e2e_report.html ] && [ -n "${CI_JOB_URL:-}" ]; then
+          echo "HTML report: ${CI_JOB_URL}/artifacts/file/e2e_artifacts/e2e_report.html"
+        fi
       fi
   artifacts:
     paths:

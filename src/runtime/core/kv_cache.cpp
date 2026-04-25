@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <stdexcept>
 
 namespace trtf {
 
@@ -111,9 +112,10 @@ std::vector<int64_t> KvCache::mask_shape_for_engine(int32_t mask_width,
 
 void KvCache::prepare_step(TensorMap& inputs, int32_t /*seq_len*/) {
     if (has_position_input_) {
-        pos_buf_ = position_;
+        pos_buf_vec_.resize(1);
+        pos_buf_vec_[0] = position_;
         Tensor pos_t;
-        pos_t.data = &pos_buf_;
+        pos_t.data = pos_buf_vec_.data();
         pos_t.shape = {1};
         pos_t.dtype = DType::kInt32;
         inputs[names_.position_id] = pos_t;
@@ -164,6 +166,37 @@ void KvCache::bind_to(TrtModule& module) {
         module.bind_external(names_.present_k[li], present_k_[li].data());
         module.bind_external(names_.present_v[li], present_v_[li].data());
     }
+}
+
+void KvCache::bind_cache_inputs(TrtModule& module) {
+    has_position_input_ = module.has_input(names_.position_id);
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        module.bind_external(names_.cache_k[li], cache_k_[li].data());
+        module.bind_external(names_.cache_v[li], cache_v_[li].data());
+    }
+}
+
+void KvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
+                               const std::vector<const void*>& prefill_v, int32_t seq_len) {
+    if (seq_len <= 0)
+        return;
+    if (seq_len > max_length_)
+        throw std::runtime_error("KvCache::write_prefill_kv: seq_len exceeds max_length");
+    if (static_cast<int32_t>(prefill_k.size()) != num_layers_ ||
+        static_cast<int32_t>(prefill_v.size()) != num_layers_) {
+        throw std::runtime_error("KvCache::write_prefill_kv: per-layer pointer count mismatch");
+    }
+    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        cudaMemcpyAsync(cache_k_[li].data(), prefill_k[li], block_bytes, cudaMemcpyDeviceToDevice,
+                        stream_);
+        cudaMemcpyAsync(cache_v_[li].data(), prefill_v[li], block_bytes, cudaMemcpyDeviceToDevice,
+                        stream_);
+    }
+    position_ = seq_len;
 }
 
 void KvCache::advance(int32_t n_tokens) {

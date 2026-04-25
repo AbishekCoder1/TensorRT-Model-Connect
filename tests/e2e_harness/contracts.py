@@ -470,7 +470,7 @@ class E2EResult:
         oracle_level: Oracle strength for this run (from the case).
         stages: Per-stage comparison results.
         determinism: Results of determinism reruns (if any).
-        timing: Phase-level timing (build_s, trt_run_s, ref_run_s, etc.).
+        timing: Phase-level timing (bundle_build_s, trt_run_s, ref_run_s, etc.).
         env_fingerprint: Environment info (GPU, driver, TRT version, etc.).
         timestamp: ISO 8601 timestamp of when this result was produced.
         repro_commands: Shell commands to reproduce each phase of the test.
