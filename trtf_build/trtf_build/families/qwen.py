@@ -85,15 +85,20 @@ class QwenPlugin:
             return build_standard_decoder_engine(
                 config, weights, max_cache_length, precision=precision,
                 quant_ctx=quant_ctx, verbose=verbose)
-        # TriAttention / dynamic-KV-cache: emit prefill profile + N decode
-        # bucket profiles in the same engine. The runtime picks profile 0
-        # for batched prefill, then routes per-step to the smallest decode
-        # profile that fits the live cache rows.
-        dynamic_rows = config.raw.get("_dynamic_kv_profile_rows")
+        # TriAttention / dynamic-KV-cache: the dual-profile builder's
+        # attention graph hard-codes the prefill-style mask layout
+        # `(Sq, max_cache_length + Sq)` and rejects per-bucket decode
+        # profiles whose mask shape is `(1, bucket_rows + 1)`. Until that
+        # graph is generalized, fall back to the standard multi-bucket
+        # decode builder for TriAttention bundles (decode speedup retained,
+        # batched prefill is a follow-up).
+        if config.raw.get("dynamic_kv_cache"):
+            return build_standard_decoder_engine(
+                config, weights, max_cache_length, precision=precision,
+                quant_ctx=quant_ctx, verbose=verbose)
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
-            precision=precision, verbose=verbose,
-            dynamic_kv_profile_rows=dynamic_rows)
+            precision=precision, verbose=verbose)
 
     def calibration_data(self, format_name: str) -> list[str] | None:
         return list(self._CALIBRATION_PROMPTS)
