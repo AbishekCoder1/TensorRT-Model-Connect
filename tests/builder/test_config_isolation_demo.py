@@ -33,7 +33,7 @@ The entire production-surface diff for landing a new feature is:
 
     - One new schema file under runtime_config/schemas/
     - One corresponding C++ schema source under src/runtime/config/schemas/
-      plus one anchor line in force_link_schemas.cpp
+      plus one manifest line in cmake/trtf_config_schemas.cmake
     - One test file here
 
 No edits to cli.py, engine_builder.py, pipeline_factory.cpp, or any
@@ -232,14 +232,11 @@ def test_scalability_claim_documented():
         "tests/builder/test_config_<name>_or_similar.py",
     ]
     expected_modified_files_per_feature = [
-        # One anchor line in the force-link list — the only shared edit
-        # tolerated (documented as D7 in the config-registry status file).
-        "src/runtime/config/schemas/force_link_schemas.cpp",
-        # CMake list of trtf_core sources must learn the new .cpp.
-        "CMakeLists.txt",
+        # One manifest entry drives both compilation and generated force-link anchors.
+        "cmake/trtf_config_schemas.cmake",
     ]
     # No runtime change outside the feature's own consumer code.
     # This is an assertion-as-documentation; keep these lists in sync
     # with the config-registry status doc.
     assert len(expected_new_files_per_feature) >= 3
-    assert len(expected_modified_files_per_feature) <= 2
+    assert len(expected_modified_files_per_feature) == 1

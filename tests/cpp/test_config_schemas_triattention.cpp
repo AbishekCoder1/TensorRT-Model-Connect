@@ -36,9 +36,9 @@ using trtf::config::Schema;
 using trtf::config::SchemaRegistry;
 
 void test_static_init_registered_triattention() {
-    // The force-link anchor in src/runtime/config/schemas/force_link_schemas.cpp
-    // pulls triattention.cpp into the binary even in a static-lib link, so
-    // its static-init registration should have run by the time main() starts.
+    // The generated schema force-link anchor pulls triattention.cpp into the
+    // binary even in a static-lib link, so its static-init registration should
+    // have run by the time main() starts.
     const Schema* schema = SchemaRegistry::instance().lookup("triattention");
     check(schema != nullptr, "static-init: triattention is registered");
     if (schema == nullptr)

@@ -95,6 +95,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 # --- Bundle-only runtime library ---
 # PIC needed because trtf_core is linked into backend DSOs (shared libs).
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+include(cmake/trtf_config_schemas.cmake)
 include(cmake/trtf_pipeline_plugins.cmake)
 add_library(trtf_core
   src/bundle/bundle_format.cpp
@@ -143,14 +144,8 @@ add_library(trtf_core
   src/runtime/config/schema_registry.cpp
   src/runtime/config/config_bundle.cpp
   src/runtime/config/cli_support.cpp
-  src/runtime/config/schemas/force_link_schemas.cpp
-  src/runtime/config/schemas/triattention.cpp
-  src/runtime/config/schemas/decode_policy.cpp
-  src/runtime/config/schemas/text_trace.cpp
-  src/runtime/config/schemas/runtime.cpp
-  src/runtime/config/schemas/audio_bark.cpp
-  src/runtime/config/schemas/audio_magpie.cpp
-  src/runtime/config/schemas/platform.cpp
+  ${TRTF_CONFIG_SCHEMA_FORCE_LINK_SOURCE}
+  ${TRTF_CONFIG_SCHEMA_SOURCES}
   # Registry (factory + plugin dispatch)
   src/runtime/registry/pipeline_factory.cpp
   src/runtime/registry/pipeline_registry.cpp
