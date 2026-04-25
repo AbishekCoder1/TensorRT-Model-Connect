@@ -18,10 +18,7 @@ class PatchTSMixerPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_PatchTSMixerPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_PatchTSMixerPlugin, PatchTSMixerPlugin,
+                                         "patchtsmixer_torchtrt");
 
 } // namespace trtf
-
-static trtf::PatchTSMixerPlugin g_PatchTSMixerPlugin_instance;
-static trtf::PluginRegistrar g_PatchTSMixerPlugin_reg("patchtsmixer_torchtrt",
-                                                      &g_PatchTSMixerPlugin_instance);

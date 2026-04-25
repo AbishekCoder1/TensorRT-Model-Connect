@@ -32,9 +32,6 @@ class FluxPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_FluxPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_FluxPlugin, FluxPlugin, "diffusion_flux");
 
 } // namespace trtf
-
-static trtf::FluxPlugin g_FluxPlugin_instance;
-static trtf::PluginRegistrar g_FluxPlugin_reg("diffusion_flux", &g_FluxPlugin_instance);

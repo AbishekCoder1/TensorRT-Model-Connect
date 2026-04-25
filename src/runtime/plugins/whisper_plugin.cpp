@@ -71,9 +71,6 @@ class WhisperPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_WhisperPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_WhisperPlugin, WhisperPlugin, "speech_to_text");
 
 } // namespace trtf
-
-static trtf::WhisperPlugin g_WhisperPlugin_instance;
-static trtf::PluginRegistrar g_WhisperPlugin_reg("speech_to_text", &g_WhisperPlugin_instance);

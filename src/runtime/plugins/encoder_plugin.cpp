@@ -26,12 +26,7 @@ class EncoderPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_EncoderPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_EncoderPlugin, EncoderPlugin, "encoder_only",
+                                         "embedding", "reranking", "neural_operator");
 
 } // namespace trtf
-
-static trtf::EncoderPlugin g_EncoderPlugin_instance;
-static trtf::PluginRegistrar g_EncoderPlugin_reg1("encoder_only", &g_EncoderPlugin_instance);
-static trtf::PluginRegistrar g_EncoderPlugin_reg2("embedding", &g_EncoderPlugin_instance);
-static trtf::PluginRegistrar g_EncoderPlugin_reg3("reranking", &g_EncoderPlugin_instance);
-static trtf::PluginRegistrar g_EncoderPlugin_reg4("neural_operator", &g_EncoderPlugin_instance);

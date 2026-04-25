@@ -138,9 +138,7 @@ class MagpiePlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_MagpiePlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_MagpiePlugin, MagpiePlugin,
+                                         "text_to_audio_magpie");
 
 } // namespace trtf
-
-static trtf::MagpiePlugin g_MagpiePlugin_instance;
-static trtf::PluginRegistrar g_MagpiePlugin_reg("text_to_audio_magpie", &g_MagpiePlugin_instance);

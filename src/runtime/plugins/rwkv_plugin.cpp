@@ -38,9 +38,6 @@ class RwkvPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_RwkvPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_RwkvPlugin, RwkvPlugin, "rwkv_recurrent");
 
 } // namespace trtf
-
-static trtf::RwkvPlugin g_RwkvPlugin_instance;
-static trtf::PluginRegistrar g_RwkvPlugin_reg("rwkv_recurrent", &g_RwkvPlugin_instance);

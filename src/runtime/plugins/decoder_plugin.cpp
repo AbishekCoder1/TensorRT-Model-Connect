@@ -383,10 +383,7 @@ class DecoderPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_DecoderPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_DecoderPlugin, DecoderPlugin,
+                                         "decoder_kv_cache", "decoder_moe");
 
 } // namespace trtf
-
-static trtf::DecoderPlugin g_DecoderPlugin_instance;
-static trtf::PluginRegistrar g_DecoderPlugin_reg1("decoder_kv_cache", &g_DecoderPlugin_instance);
-static trtf::PluginRegistrar g_DecoderPlugin_reg2("decoder_moe", &g_DecoderPlugin_instance);

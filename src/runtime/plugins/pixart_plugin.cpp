@@ -31,9 +31,6 @@ class PixArtPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_PixArtPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_PixArtPlugin, PixArtPlugin, "diffusion_pixart");
 
 } // namespace trtf
-
-static trtf::PixArtPlugin g_PixArtPlugin_instance;
-static trtf::PluginRegistrar g_PixArtPlugin_reg("diffusion_pixart", &g_PixArtPlugin_instance);

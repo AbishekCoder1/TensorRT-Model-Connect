@@ -29,9 +29,6 @@ class WanPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_WanPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_WanPlugin, WanPlugin, "diffusion_wan");
 
 } // namespace trtf
-
-static trtf::WanPlugin g_WanPlugin_instance;
-static trtf::PluginRegistrar g_WanPlugin_reg("diffusion_wan", &g_WanPlugin_instance);

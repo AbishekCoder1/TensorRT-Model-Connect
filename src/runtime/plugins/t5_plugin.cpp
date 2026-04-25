@@ -317,9 +317,6 @@ class T5Plugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_T5Plugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_T5Plugin, T5Plugin, "text_to_text");
 
 } // namespace trtf
-
-static trtf::T5Plugin g_T5Plugin_instance;
-static trtf::PluginRegistrar g_T5Plugin_reg("text_to_text", &g_T5Plugin_instance);

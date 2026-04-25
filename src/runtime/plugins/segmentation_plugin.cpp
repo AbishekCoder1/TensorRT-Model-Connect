@@ -38,12 +38,7 @@ class SegmentationPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_SegmentationPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_SegmentationPlugin, SegmentationPlugin,
+                                         "segmentation", "prompted_segmentation");
 
 } // namespace trtf
-
-static trtf::SegmentationPlugin g_SegmentationPlugin_instance;
-static trtf::PluginRegistrar g_SegmentationPlugin_reg1("segmentation",
-                                                       &g_SegmentationPlugin_instance);
-static trtf::PluginRegistrar g_SegmentationPlugin_reg2("prompted_segmentation",
-                                                       &g_SegmentationPlugin_instance);

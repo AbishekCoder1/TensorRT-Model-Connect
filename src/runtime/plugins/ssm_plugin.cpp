@@ -42,9 +42,6 @@ class SsmPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_SsmPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_SsmPlugin, SsmPlugin, "ssm_recurrent");
 
 } // namespace trtf
-
-static trtf::SsmPlugin g_SsmPlugin_instance;
-static trtf::PluginRegistrar g_SsmPlugin_reg("ssm_recurrent", &g_SsmPlugin_instance);

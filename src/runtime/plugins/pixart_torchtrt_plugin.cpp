@@ -35,10 +35,7 @@ class PixArtTorchTrtPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_PixArtTorchTrtPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_PixArtTorchTrtPlugin, PixArtTorchTrtPlugin,
+                                         "diffusion_pixart_torchtrt");
 
 } // namespace trtf
-
-static trtf::PixArtTorchTrtPlugin g_PixArtTorchTrtPlugin_instance;
-static trtf::PluginRegistrar g_PixArtTorchTrtPlugin_reg("diffusion_pixart_torchtrt",
-                                                        &g_PixArtTorchTrtPlugin_instance);

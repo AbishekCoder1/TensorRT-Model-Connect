@@ -39,10 +39,7 @@ class ChronosBoltPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_ChronosBoltPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_ChronosBoltPlugin, ChronosBoltPlugin,
+                                         "chronos_bolt_torchtrt");
 
 } // namespace trtf
-
-static trtf::ChronosBoltPlugin g_ChronosBoltPlugin_instance;
-static trtf::PluginRegistrar g_ChronosBoltPlugin_reg("chronos_bolt_torchtrt",
-                                                     &g_ChronosBoltPlugin_instance);

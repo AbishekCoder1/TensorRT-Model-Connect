@@ -234,10 +234,7 @@ class Seq2SeqPlugin final : public IPipelinePlugin {
     }
 };
 
-volatile int kForceLink_Seq2SeqPlugin = 0;
+REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_Seq2SeqPlugin, Seq2SeqPlugin,
+                                         "seq2seq_encoder_decoder");
 
 } // namespace trtf
-
-static trtf::Seq2SeqPlugin g_Seq2SeqPlugin_instance;
-static trtf::PluginRegistrar g_Seq2SeqPlugin_reg("seq2seq_encoder_decoder",
-                                                 &g_Seq2SeqPlugin_instance);
