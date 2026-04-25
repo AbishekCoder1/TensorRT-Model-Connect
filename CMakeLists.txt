@@ -95,6 +95,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 # --- Bundle-only runtime library ---
 # PIC needed because trtf_core is linked into backend DSOs (shared libs).
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+include(cmake/trtf_pipeline_plugins.cmake)
 add_library(trtf_core
   src/bundle/bundle_format.cpp
   src/bundle/bundle_view.cpp
@@ -158,33 +159,8 @@ add_library(trtf_core
   src/runtime/plugins/shared/plugin_helpers.cpp
   src/runtime/plugins/shared/diffusion_helpers.cpp
   src/runtime/plugins/shared/audio_helpers.cpp
-  src/runtime/plugins/force_link_plugins.cpp
-  # Pipeline plugins (self-registering via REGISTER_PIPELINE_PLUGIN)
-  src/runtime/plugins/decoder_plugin.cpp
-  src/runtime/plugins/ssm_plugin.cpp
-  src/runtime/plugins/rwkv_plugin.cpp
-  src/runtime/plugins/hybrid_plugin.cpp
-  src/runtime/plugins/encoder_plugin.cpp
-  src/runtime/plugins/patchtst_plugin.cpp
-  src/runtime/plugins/patchtsmixer_plugin.cpp
-  src/runtime/plugins/timesfm_plugin.cpp
-  src/runtime/plugins/chronos_bolt_plugin.cpp
-  src/runtime/plugins/segmentation_plugin.cpp
-  src/runtime/plugins/object_detection_plugin.cpp
-  src/runtime/plugins/vl_plugin.cpp
-  src/runtime/plugins/whisper_plugin.cpp
-  src/runtime/plugins/bark_plugin.cpp
-  src/runtime/plugins/magpie_plugin.cpp
-  src/runtime/plugins/speech_plugin.cpp
-  src/runtime/plugins/omni_plugin.cpp
-  src/runtime/plugins/flux_plugin.cpp
-  src/runtime/plugins/wan_plugin.cpp
-  src/runtime/plugins/zimage_plugin.cpp
-  src/runtime/plugins/t5_plugin.cpp
-  src/runtime/plugins/marian_plugin.cpp
-  src/runtime/plugins/seq2seq_plugin.cpp
-  src/runtime/plugins/pixart_plugin.cpp
-  src/runtime/plugins/pixart_torchtrt_plugin.cpp
+  ${TRTF_PIPELINE_PLUGIN_FORCE_LINK_SOURCE}
+  ${TRTF_PIPELINE_PLUGIN_SOURCES}
   # Pipeline implementations
   src/runtime/pipelines/text_generation_pipeline.cpp
   src/runtime/pipelines/recurrent_pipeline.cpp
