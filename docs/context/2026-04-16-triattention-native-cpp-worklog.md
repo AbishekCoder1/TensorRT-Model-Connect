@@ -458,13 +458,9 @@ Prompt recipe:
 - `min_p=0.0`
 - `seed=1234`
 
-Artifacts:
-
-- copied probe inputs and outputs:
-  `artifacts/triattention/apple-fullkv-plain/`
-- compact summary:
-  `artifacts/triattention/apple-fullkv-plain/summary.md`
-  `artifacts/triattention/apple-fullkv-plain/summary.json`
+The raw probe inputs and outputs were generated under the ignored
+`artifacts/triattention/` tree. The checked-in record keeps only the summarized
+numbers below so benchmark outputs do not become source files.
 
 Dense full-KV results:
 
