@@ -1572,8 +1572,7 @@ otherwise.
 To get a faster upstream control than the original shard worker, a dedicated
 single-sample upstream harness was added:
 
-- script:
-  `tmp/run_upstream_triattention_single.py`
+- script: local scratch harness `run_upstream_triattention_single.py`
 
 It loads the same local Qwen3-8B snapshot, applies the official
 `apply_triattention_patch()`, and stops generation once a boxed answer appears
@@ -1695,7 +1694,7 @@ same token prefix can then be replayed teacher-forced through:
 
 using the new helper:
 
-- `tmp/trace_hf_teacher_forced.py`
+- local scratch helper `trace_hf_teacher_forced.py`
 
 The goal of that replay is to decide whether the remaining gap is:
 
@@ -1733,7 +1732,7 @@ simplest “just move from `6144` to `8192`” explanation for the sample9 miss.
 
 The new teacher-forced replay helper:
 
-- `tmp/trace_hf_teacher_forced.py`
+- local scratch helper `trace_hf_teacher_forced.py`
 
 was first used to compare the native sample9 trace against dense HF and the
 upstream Python patch around the first `6144/1024` compaction boundary:
@@ -1850,7 +1849,7 @@ bug in the replay harness itself.
 
 The root cause was in:
 
-- `tmp/trace_hf_teacher_forced.py`
+- local scratch helper `trace_hf_teacher_forced.py`
 
 That helper always:
 
@@ -1880,8 +1879,8 @@ HF prompt prefill.
 
 ### Corrected sample9 replay: native, dense HF, and upstream all stay aligned
 
-After fixing `tmp/trace_hf_teacher_forced.py`, sample9 was rerun on the exact
-same native token trace and window:
+After fixing the local scratch helper `trace_hf_teacher_forced.py`, sample9
+was rerun on the exact same native token trace and window:
 
 - native trace:
   `tmp/aime25_9_hybrid6144_fulltrace_0_7180.jsonl`
