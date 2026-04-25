@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-
 namespace trtf {
 
 class PatchTSTPipeline final : public IPipeline {
@@ -36,4 +35,3 @@ class PatchTSTPipeline final : public IPipeline {
 };
 
 } // namespace trtf
-

@@ -9,7 +9,6 @@
 #include <memory>
 #include <string>
 
-
 namespace trtf {
 
 struct PatchTSMixerConfig {
@@ -41,4 +40,3 @@ class PatchTSMixerPipeline final : public IPipeline {
 };
 
 } // namespace trtf
-

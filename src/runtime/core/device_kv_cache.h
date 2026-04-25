@@ -9,7 +9,6 @@
 
 namespace trtf {
 
-
 // Device-resident KV cache for standard attention-based decoders.
 // Keeps the entire KV cache on GPU. Only small inputs (token_id, position_id,
 // mask) are transferred H2D per step; cache updates are D2D memcpy.
@@ -80,6 +79,5 @@ bool run_decoder_step_device(const DecoderStepEngine& engine, DeviceKvCache& cac
                              float deepstack_active = 0.0F, bool input_embed_device_ready = false,
                              bool skip_logits_d2h = false, bool skip_sync = false,
                              bool skip_bind = false);
-
 
 } // namespace trtf

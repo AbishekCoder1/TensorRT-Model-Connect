@@ -22,7 +22,6 @@
 
 namespace trtf {
 
-
 // A loaded TRT engine, ready for inference.
 // The stream is owned internally by the module — callers get it via module->stream().
 struct LoadedModule {
@@ -125,6 +124,5 @@ std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(const BundleFile& 
 // Must be called BEFORE deserializing any TRT engine that uses FFI plugins.
 // No-op if the bundle has no kernel_manifest.json section (non-FFI bundles).
 void load_ffi_kernels_from_bundle(const BundleFile& bundle);
-
 
 } // namespace trtf

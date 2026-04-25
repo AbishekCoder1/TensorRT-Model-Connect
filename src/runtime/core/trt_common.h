@@ -2,19 +2,17 @@
 
 #include "runtime/core/cuda_common.h"
 
+#include <NvInfer.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <memory>
 #include <string>
 
-#include <NvInfer.h>
-#include <cuda_runtime_api.h>
-
 namespace trtf {
-
 
 const char* trt_severity_name(nvinfer1::ILogger::Severity severity);
 bool trt_log_to_stderr_enabled();

@@ -9,7 +9,6 @@
 #include <utility>
 #include <vector>
 
-
 namespace trtf {
 
 enum class TriAttentionScoreAggregation {
@@ -369,4 +368,3 @@ class TriAttentionKvCache : public IInferenceState {
 };
 
 } // namespace trtf
-

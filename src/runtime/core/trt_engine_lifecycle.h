@@ -2,20 +2,18 @@
 
 #include "runtime/core/trt_common.h"
 
+#include <NvInfer.h>
+#include <NvInferRuntime.h>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <NvInfer.h>
-#include <NvInferRuntime.h>
 
 namespace trtf {
 
 // Expand a layer-name pattern by replacing {i}, {2i}, {2i+1}, {2i+2} tokens.
 // Pure string logic — no TRT dependency.
 std::string expand_layer_name(const std::string& pattern, int32_t layer);
-
 
 constexpr int32_t kDefaultMaxCacheLength = 32;
 constexpr float kMaskedScore = -1.0e4F;
@@ -48,6 +46,5 @@ bool has_io_tensor(const nvinfer1::ICudaEngine& engine, const std::string& tenso
 bool has_all_required_tensors(const DecoderStepEngine& engine);
 
 std::string layer_tensor_name(const char* stem, int32_t layer);
-
 
 } // namespace trtf

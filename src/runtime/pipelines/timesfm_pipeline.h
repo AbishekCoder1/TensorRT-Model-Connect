@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-
 namespace trtf {
 
 class TimesFmPipeline final : public IPipeline {
@@ -37,4 +36,3 @@ class TimesFmPipeline final : public IPipeline {
 };
 
 } // namespace trtf
-

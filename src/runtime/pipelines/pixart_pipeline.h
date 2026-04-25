@@ -15,7 +15,6 @@
 #include <string>
 #include <vector>
 
-
 namespace trtf {
 
 class PixArtPipeline final : public IPipeline {
@@ -81,4 +80,3 @@ class PixArtPipeline final : public IPipeline {
 };
 
 } // namespace trtf
-

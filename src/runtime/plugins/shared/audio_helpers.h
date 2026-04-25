@@ -3,7 +3,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "utils/json_helpers.h"
 
-
 namespace trtf {
 
 std::unique_ptr<KvCache> make_coarse_kv_cache(const std::string& json, const BaseConfig& base,
@@ -33,4 +32,3 @@ int32_t compute_kv_dim_kv_heads(const BaseConfig& base, int32_t default_dim);
 int32_t safe_embed_dim(const std::vector<float>& data, int32_t divisor);
 
 } // namespace trtf
-

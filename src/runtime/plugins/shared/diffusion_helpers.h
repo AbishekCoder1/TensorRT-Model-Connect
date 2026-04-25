@@ -4,7 +4,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "utils/json_helpers.h"
 
-
 namespace trtf {
 
 DiffusionConfig make_diffusion_config(const std::string& json);
@@ -24,4 +23,3 @@ DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
                                     const ModuleCreateOptions& options = {});
 
 } // namespace trtf
-
