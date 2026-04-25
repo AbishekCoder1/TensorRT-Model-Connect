@@ -6,6 +6,8 @@
 # CMake consumes this list for both compilation and generated linker anchors,
 # so a plugin is added in one place instead of editing parallel source lists.
 
+include("${CMAKE_CURRENT_LIST_DIR}/trtf_force_link_manifest.cmake")
+
 set(TRTF_PIPELINE_PLUGINS
   "decoder_plugin.cpp|kForceLink_DecoderPlugin"
   "ssm_plugin.cpp|kForceLink_SsmPlugin"
@@ -34,42 +36,15 @@ set(TRTF_PIPELINE_PLUGINS
   "pixart_torchtrt_plugin.cpp|kForceLink_PixArtTorchTrtPlugin"
 )
 
-set(TRTF_PIPELINE_PLUGIN_SOURCES)
-set(TRTF_PIPELINE_PLUGIN_FORCE_LINK_DECLS)
-set(TRTF_PIPELINE_PLUGIN_FORCE_LINK_ANCHORS)
-
-foreach(_trtf_plugin IN LISTS TRTF_PIPELINE_PLUGINS)
-  string(REPLACE "|" ";" _trtf_plugin_fields "${_trtf_plugin}")
-  list(LENGTH _trtf_plugin_fields _trtf_plugin_field_count)
-  if(NOT _trtf_plugin_field_count EQUAL 2)
-    message(FATAL_ERROR "Invalid TRTF pipeline plugin entry: ${_trtf_plugin}")
-  endif()
-
-  list(GET _trtf_plugin_fields 0 _trtf_plugin_source)
-  list(GET _trtf_plugin_fields 1 _trtf_plugin_symbol)
-
-  set(_trtf_plugin_path "${PROJECT_SOURCE_DIR}/src/runtime/plugins/${_trtf_plugin_source}")
-  if(NOT EXISTS "${_trtf_plugin_path}")
-    message(FATAL_ERROR "TRTF pipeline plugin source does not exist: ${_trtf_plugin_path}")
-  endif()
-
-  list(APPEND TRTF_PIPELINE_PLUGIN_SOURCES
-    "${_trtf_plugin_path}")
-  string(APPEND TRTF_PIPELINE_PLUGIN_FORCE_LINK_DECLS
-    "extern volatile int ${_trtf_plugin_symbol};\n")
-  string(APPEND TRTF_PIPELINE_PLUGIN_FORCE_LINK_ANCHORS
-    "        &${_trtf_plugin_symbol},\n")
-endforeach()
-
 set(TRTF_PIPELINE_PLUGIN_FORCE_LINK_SOURCE
   "${PROJECT_BINARY_DIR}/generated/force_link_plugins.cpp")
-file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/generated")
-configure_file(
+trtf_configure_force_link_manifest(
+  TRTF_PIPELINE_PLUGINS
+  "${PROJECT_SOURCE_DIR}/src/runtime/plugins"
   "${CMAKE_CURRENT_LIST_DIR}/force_link_plugins.cpp.in"
   "${TRTF_PIPELINE_PLUGIN_FORCE_LINK_SOURCE}"
-  @ONLY
-)
-set_source_files_properties(
-  "${TRTF_PIPELINE_PLUGIN_FORCE_LINK_SOURCE}"
-  PROPERTIES GENERATED TRUE
+  TRTF_PIPELINE_PLUGIN_SOURCES
+  TRTF_PIPELINE_PLUGIN_FORCE_LINK_DECLS
+  TRTF_PIPELINE_PLUGIN_FORCE_LINK_ANCHORS
+  "        "
 )
