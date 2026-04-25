@@ -35,14 +35,14 @@
 #include <vector>
 
 static int failures = 0;
-static void check(bool c, const char* n)
-{
-    if (!c) { std::cerr << "FAIL: " << n << '\n'; ++failures; }
+static void check(bool c, const char* n) {
+    if (!c) {
+        std::cerr << "FAIL: " << n << '\n';
+        ++failures;
+    }
 }
 
-
-static void test_flux_construction()
-{
+static void test_flux_construction() {
     // FluxPipeline constructor computes latent layout from DiffusionConfig defaults:
     //   h_latent = video_height(480) / scale_factor_spatial(8) = 60
     //   w_latent = video_width(832)  / scale_factor_spatial(8) = 104
@@ -53,39 +53,31 @@ static void test_flux_construction()
     trtf::FluxPipeline pipeline(
         /*text_encoders=*/{},
         /*denoiser=*/nullptr,
-        /*vae=*/nullptr,
-        cfg, weights,
+        /*vae=*/nullptr, cfg, weights,
         /*tokenizer=*/nullptr,
         /*clip_tokenizer=*/nullptr,
         /*model_id_str=*/"test-flux");
 
-    check(std::string(pipeline.pipeline_type()) == "FluxPipeline",
-          "FluxPipeline pipeline_type");
-    check(std::string(pipeline.model_id()) == "test-flux",
-          "FluxPipeline model_id");
+    check(std::string(pipeline.pipeline_type()) == "FluxPipeline", "FluxPipeline pipeline_type");
+    check(std::string(pipeline.model_id()) == "test-flux", "FluxPipeline model_id");
 }
 
-static void test_wan_construction()
-{
+static void test_wan_construction() {
     trtf::DiffusionConfig cfg;
     trtf::PreprocessorWeights weights;
 
     trtf::WanPipeline pipeline(
         /*text_encoder=*/nullptr,
         /*denoiser=*/nullptr,
-        /*vae=*/nullptr,
-        cfg, weights,
+        /*vae=*/nullptr, cfg, weights,
         /*tokenizer=*/nullptr,
         /*model_id_str=*/"test-wan");
 
-    check(std::string(pipeline.pipeline_type()) == "WanPipeline",
-          "WanPipeline pipeline_type");
-    check(std::string(pipeline.model_id()) == "test-wan",
-          "WanPipeline model_id");
+    check(std::string(pipeline.pipeline_type()) == "WanPipeline", "WanPipeline pipeline_type");
+    check(std::string(pipeline.model_id()) == "test-wan", "WanPipeline model_id");
 }
 
-static void test_zimage_construction()
-{
+static void test_zimage_construction() {
     trtf::DiffusionConfig cfg;
     trtf::PreprocessorWeights weights;
     trtf::ZImagePreprocessorWeights z_weights;
@@ -93,44 +85,38 @@ static void test_zimage_construction()
     trtf::ZImagePipeline pipeline(
         /*text_encoder=*/nullptr,
         /*denoiser=*/nullptr,
-        /*vae=*/nullptr,
-        cfg, weights, z_weights,
+        /*vae=*/nullptr, cfg, weights, z_weights,
         /*tokenizer=*/nullptr,
         /*model_id_str=*/"test-zimage",
         /*bundle_path=*/"/tmp/test.trtfb");
 
     check(std::string(pipeline.pipeline_type()) == "ZImagePipeline",
           "ZImagePipeline pipeline_type");
-    check(std::string(pipeline.model_id()) == "test-zimage",
-          "ZImagePipeline model_id");
+    check(std::string(pipeline.model_id()) == "test-zimage", "ZImagePipeline model_id");
 }
 
-static void test_flux_with_custom_config()
-{
+static void test_flux_with_custom_config() {
     // Test FluxPipeline with non-default config to exercise the latent layout
     // computation path with patch_size override.
     trtf::DiffusionConfig cfg;
     cfg.video_height = 256;
-    cfg.video_width  = 256;
+    cfg.video_width = 256;
     cfg.scale_factor_spatial = 8;
-    cfg.patch_size = {1, 2, 2};  // ph=2, pw=2
+    cfg.patch_size = {1, 2, 2}; // ph=2, pw=2
 
-    trtf::FluxPipeline pipeline(
-        {}, nullptr, nullptr,
-        cfg, trtf::PreprocessorWeights{},
-        nullptr, nullptr, "test-flux-custom");
+    trtf::FluxPipeline pipeline({}, nullptr, nullptr, cfg, trtf::PreprocessorWeights{}, nullptr,
+                                nullptr, "test-flux-custom");
 
     check(std::string(pipeline.pipeline_type()) == "FluxPipeline",
           "FluxPipeline custom config pipeline_type");
 }
 
-
-int main()
-{
+int main() {
     test_flux_construction();
     test_wan_construction();
     test_zimage_construction();
     test_flux_with_custom_config();
-    if (failures > 0) std::cerr << failures << " test(s) FAILED\n";
+    if (failures > 0)
+        std::cerr << failures << " test(s) FAILED\n";
     return failures;
 }

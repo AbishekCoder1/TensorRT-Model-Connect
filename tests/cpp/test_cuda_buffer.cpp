@@ -31,23 +31,19 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <string>
 #include <vector>
 
-#include <cuda_runtime_api.h>
-
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
-
 
 // -----------------------------------------------------------------------------
 // Intention:  Verify that a zero-size CudaBuffer reports ok()=true with a null
@@ -55,8 +51,7 @@ static void check(bool condition, const char* test_name)
 // Setup:      Construct CudaBuffer with size=0.
 // Mechanism:  Check ok(), data()==nullptr, size()==0.
 // -----------------------------------------------------------------------------
-static void test_zero_size_buffer()
-{
+static void test_zero_size_buffer() {
     trtf::CudaBuffer buf(0);
     check(buf.ok(), "zero_size: ok()=true");
     check(buf.data() == nullptr, "zero_size: data()=nullptr");
@@ -69,8 +64,7 @@ static void test_zero_size_buffer()
 // Setup:      Construct CudaBuffer with size=1024.
 // Mechanism:  Check ok(), data()!=nullptr, size()==1024.
 // -----------------------------------------------------------------------------
-static void test_nonzero_size_buffer()
-{
+static void test_nonzero_size_buffer() {
     trtf::CudaBuffer buf(1024);
     check(buf.ok(), "nonzero_size: ok()=true");
     check(buf.data() != nullptr, "nonzero_size: data()!=nullptr");
@@ -84,8 +78,7 @@ static void test_nonzero_size_buffer()
 // Mechanism:  After move, source should have data()==nullptr and size()==0.
 //             Destination should have the original pointer and size.
 // -----------------------------------------------------------------------------
-static void test_move_constructor()
-{
+static void test_move_constructor() {
     trtf::CudaBuffer src(512);
     check(src.ok(), "move_ctor: src ok before move");
     void* original_ptr = src.data();
@@ -106,8 +99,7 @@ static void test_move_constructor()
 // Mechanism:  After move assignment, source should be null/empty, destination
 //             should have the source's original pointer and size.
 // -----------------------------------------------------------------------------
-static void test_move_assignment()
-{
+static void test_move_assignment() {
     trtf::CudaBuffer src(256);
     trtf::CudaBuffer dst(128);
     check(src.ok(), "move_assign: src ok before move");
@@ -132,8 +124,7 @@ static void test_move_assignment()
 // Mechanism:  Write {1.0, 2.0, 3.0, 4.0} via cudaMemcpy H2D, then read back
 //             via cudaMemcpy D2H and verify values match.
 // -----------------------------------------------------------------------------
-static void test_data_roundtrip()
-{
+static void test_data_roundtrip() {
     const std::vector<float> host_data = {1.0F, 2.0F, 3.0F, 4.0F};
     const std::size_t bytes = host_data.size() * sizeof(float);
 
@@ -151,13 +142,11 @@ static void test_data_roundtrip()
     check(err == cudaSuccess, "roundtrip: cudaMemcpy D2H succeeded");
 
     bool data_matches = true;
-    for (std::size_t i = 0; i < host_data.size(); ++i)
-    {
-        if (readback[i] != host_data[i])
-        {
+    for (std::size_t i = 0; i < host_data.size(); ++i) {
+        if (readback[i] != host_data[i]) {
             data_matches = false;
-            std::cerr << "roundtrip: mismatch at [" << i << "]: expected "
-                      << host_data[i] << " got " << readback[i] << '\n';
+            std::cerr << "roundtrip: mismatch at [" << i << "]: expected " << host_data[i]
+                      << " got " << readback[i] << '\n';
         }
     }
     check(data_matches, "roundtrip: data matches after H2D->D2H");
@@ -169,8 +158,7 @@ static void test_data_roundtrip()
 // Setup:      Allocate 1 MB buffer, fill with incrementing bytes, read back.
 // Mechanism:  Write 1 MB of data H2D, then read back D2H and compare.
 // -----------------------------------------------------------------------------
-static void test_large_buffer_roundtrip()
-{
+static void test_large_buffer_roundtrip() {
     const std::size_t num_floats = 256 * 1024; // 1 MB
     const std::size_t bytes = num_floats * sizeof(float);
 
@@ -178,8 +166,7 @@ static void test_large_buffer_roundtrip()
     check(buf.ok(), "large_roundtrip: buffer ok");
 
     std::vector<float> host_data(num_floats);
-    for (std::size_t i = 0; i < num_floats; ++i)
-    {
+    for (std::size_t i = 0; i < num_floats; ++i) {
         host_data[i] = static_cast<float>(i);
     }
 
@@ -191,22 +178,18 @@ static void test_large_buffer_roundtrip()
     check(err == cudaSuccess, "large_roundtrip: D2H succeeded");
 
     bool all_match = true;
-    for (std::size_t i = 0; i < num_floats; ++i)
-    {
-        if (readback[i] != host_data[i])
-        {
+    for (std::size_t i = 0; i < num_floats; ++i) {
+        if (readback[i] != host_data[i]) {
             all_match = false;
-            std::cerr << "large_roundtrip: mismatch at index " << i
-                      << ": expected " << host_data[i] << " got " << readback[i] << '\n';
+            std::cerr << "large_roundtrip: mismatch at index " << i << ": expected " << host_data[i]
+                      << " got " << readback[i] << '\n';
             break;
         }
     }
     check(all_match, "large_roundtrip: all data matches");
 }
 
-
-int main()
-{
+int main() {
     test_zero_size_buffer();
     test_nonzero_size_buffer();
     test_move_constructor();
@@ -214,8 +197,7 @@ int main()
     test_data_roundtrip();
     test_large_buffer_roundtrip();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

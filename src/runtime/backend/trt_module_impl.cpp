@@ -202,7 +202,8 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const c
     bool is_dynamic = has_dynamic_shapes_ && num_profiles > 0 && dims_are_dynamic(trt_shape);
 
     if (is_dynamic) {
-        alloc_dims = engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kMAX);
+        alloc_dims =
+            engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kMAX);
         init_dims = engine->getProfileShape(name, profile_idx_, nvinfer1::OptProfileSelector::kOPT);
     }
 

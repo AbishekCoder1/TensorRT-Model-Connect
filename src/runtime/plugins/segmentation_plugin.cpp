@@ -6,7 +6,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-
 namespace trtf {
 
 class SegmentationPlugin final : public IPipelinePlugin {
@@ -48,4 +47,3 @@ static trtf::PluginRegistrar g_SegmentationPlugin_reg1("segmentation",
                                                        &g_SegmentationPlugin_instance);
 static trtf::PluginRegistrar g_SegmentationPlugin_reg2("prompted_segmentation",
                                                        &g_SegmentationPlugin_instance);
-

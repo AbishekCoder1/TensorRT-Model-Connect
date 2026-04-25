@@ -6,7 +6,6 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-
 #include <cctype>
 #include <vector>
 
@@ -79,4 +78,3 @@ volatile int kForceLink_PatchTSTPlugin = 0;
 
 static trtf::PatchTSTPlugin g_PatchTSTPlugin_instance;
 static trtf::PluginRegistrar g_PatchTSTPlugin_reg("patchtst_torchtrt", &g_PatchTSTPlugin_instance);
-

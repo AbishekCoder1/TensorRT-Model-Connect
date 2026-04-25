@@ -9,7 +9,6 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -47,4 +46,3 @@ volatile int kForceLink_ChronosBoltPlugin = 0;
 static trtf::ChronosBoltPlugin g_ChronosBoltPlugin_instance;
 static trtf::PluginRegistrar g_ChronosBoltPlugin_reg("chronos_bolt_torchtrt",
                                                      &g_ChronosBoltPlugin_instance);
-

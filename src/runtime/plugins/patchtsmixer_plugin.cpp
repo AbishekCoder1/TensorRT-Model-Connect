@@ -5,7 +5,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-
 namespace trtf {
 
 class PatchTSMixerPlugin final : public IPipelinePlugin {
@@ -26,4 +25,3 @@ volatile int kForceLink_PatchTSMixerPlugin = 0;
 static trtf::PatchTSMixerPlugin g_PatchTSMixerPlugin_instance;
 static trtf::PluginRegistrar g_PatchTSMixerPlugin_reg("patchtsmixer_torchtrt",
                                                       &g_PatchTSMixerPlugin_instance);
-

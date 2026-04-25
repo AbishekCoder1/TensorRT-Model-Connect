@@ -10,7 +10,6 @@
 
 #include <algorithm>
 
-
 namespace trtf {
 
 class HybridPlugin final : public IPipelinePlugin {
@@ -74,4 +73,3 @@ volatile int kForceLink_HybridPlugin = 0;
 
 static trtf::HybridPlugin g_HybridPlugin_instance;
 static trtf::PluginRegistrar g_HybridPlugin_reg("hybrid_mamba_attention", &g_HybridPlugin_instance);
-

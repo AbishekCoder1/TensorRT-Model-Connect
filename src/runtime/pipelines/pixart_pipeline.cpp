@@ -11,7 +11,6 @@
 #include "runtime/domains/diffusion/diffusion_scheduler_helpers.h"
 #include "runtime/domains/diffusion/wan_generation_conditioning.h"
 
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -1230,4 +1229,3 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
 }
 
 } // namespace trtf
-

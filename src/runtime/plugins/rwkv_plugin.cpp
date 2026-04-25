@@ -5,7 +5,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-
 namespace trtf {
 
 class RwkvPlugin final : public IPipelinePlugin {
@@ -45,4 +44,3 @@ volatile int kForceLink_RwkvPlugin = 0;
 
 static trtf::RwkvPlugin g_RwkvPlugin_instance;
 static trtf::PluginRegistrar g_RwkvPlugin_reg("rwkv_recurrent", &g_RwkvPlugin_instance);
-

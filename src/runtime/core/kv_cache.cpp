@@ -137,8 +137,8 @@ void KvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j <= i; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) +
-                      static_cast<std::size_t>(j)] = 0.0f;
+            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+                0.0f;
     }
     Tensor mask_t;
     mask_t.data = mask_buf_.data();

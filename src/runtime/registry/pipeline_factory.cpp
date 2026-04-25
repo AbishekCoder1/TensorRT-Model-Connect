@@ -22,7 +22,6 @@ namespace trtf {
 
 namespace {
 
-
 // Rewrite legacy ambiguous strategy strings from old bundles into their
 // unambiguous per-model equivalents. New bundles already use the split strings.
 bool json_field_is_truthy(const std::string& config_text, const char* key) {
@@ -98,16 +97,12 @@ void apply_platform_config(const config::ConfigBundle& bundle) {
     }
 }
 
-std::optional<config::ConfigBundle> try_resolve_runtime_config(
-    const std::string& config_text,
-    const std::string& bundle_path,
-    const std::string& config_path,
-    const std::vector<std::string>& set_tokens)
-{
-    try
-    {
-        auto resolution = config::resolve_pipeline_config(
-            config_text, config_path, set_tokens);
+std::optional<config::ConfigBundle>
+try_resolve_runtime_config(const std::string& config_text, const std::string& bundle_path,
+                           const std::string& config_path,
+                           const std::vector<std::string>& set_tokens) {
+    try {
+        auto resolution = config::resolve_pipeline_config(config_text, config_path, set_tokens);
         config::write_effective_config_next_to(resolution.bundle, bundle_path);
         apply_platform_config(resolution.bundle);
         return std::move(resolution.bundle);
@@ -117,7 +112,6 @@ std::optional<config::ConfigBundle> try_resolve_runtime_config(
         return std::nullopt;
     }
 }
-
 
 } // namespace
 

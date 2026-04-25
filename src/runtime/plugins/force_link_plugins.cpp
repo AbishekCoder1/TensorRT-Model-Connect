@@ -5,7 +5,6 @@
 
 namespace trtf {
 
-
 // Declared in each plugin .cpp
 extern volatile int kForceLink_DecoderPlugin;
 extern volatile int kForceLink_SsmPlugin;
@@ -64,6 +63,5 @@ volatile int* force_link_all_plugins() {
     };
     return kPluginAnchors[0];
 }
-
 
 } // namespace trtf

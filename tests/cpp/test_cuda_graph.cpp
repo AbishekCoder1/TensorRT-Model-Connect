@@ -30,13 +30,12 @@
 #include "trtf/runtime/tensor.h"
 #include "trtf/runtime/trt_module.h"
 
+#include <NvInfer.h>
 #include <cmath>
 #include <cstring>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <vector>
-
-#include <NvInfer.h>
-#include <cuda_runtime_api.h>
 
 static int failures = 0;
 
@@ -46,7 +45,6 @@ static void check(bool condition, const char* test_name) {
         ++failures;
     }
 }
-
 
 static trtf::TrtLogger g_logger;
 
@@ -375,7 +373,6 @@ static void test_env_var_disable_pipeline_logic() {
         check(should_enable, "env_pipeline: unset allows enable");
     }
 }
-
 
 int main() {
     // CudaGraphExec unit tests

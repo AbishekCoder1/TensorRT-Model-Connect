@@ -10,7 +10,6 @@
 
 #include <iostream>
 
-
 namespace trtf {
 
 class VLPlugin final : public IPipelinePlugin {
@@ -98,4 +97,3 @@ volatile int kForceLink_VLPlugin = 0;
 
 static trtf::VLPlugin g_VLPlugin_instance;
 static trtf::PluginRegistrar g_VLPlugin_reg("vision_language", &g_VLPlugin_instance);
-

@@ -1,6 +1,5 @@
 #include "runtime/pipelines/timesfm_pipeline.h"
 
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -170,4 +169,3 @@ EmbeddingResult TimesFmPipeline::solve(const float* branch_input, int32_t branch
 }
 
 } // namespace trtf
-

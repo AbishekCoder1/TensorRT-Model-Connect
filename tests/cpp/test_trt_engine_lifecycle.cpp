@@ -32,58 +32,48 @@
 #include <iostream>
 #include <string>
 
-
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
 
-static void test_layer_tensor_name_zero()
-{
+static void test_layer_tensor_name_zero() {
     const std::string result = trtf::layer_tensor_name("cache_k", 0);
     check(result == "cache_k_0", "layer_tensor_name cache_k_0");
 }
 
-static void test_layer_tensor_name_mid()
-{
+static void test_layer_tensor_name_mid() {
     const std::string result = trtf::layer_tensor_name("present_v", 23);
     check(result == "present_v_23", "layer_tensor_name present_v_23");
 }
 
-static void test_layer_tensor_name_large()
-{
+static void test_layer_tensor_name_large() {
     const std::string result = trtf::layer_tensor_name("cache_k", 127);
     check(result == "cache_k_127", "layer_tensor_name cache_k_127");
 }
 
-static void test_layer_tensor_name_single_digit()
-{
+static void test_layer_tensor_name_single_digit() {
     const std::string result = trtf::layer_tensor_name("state", 7);
     check(result == "state_7", "layer_tensor_name state_7");
 }
 
 // Intent: negative layer indices should preserve sign in formatted names.
-static void test_layer_tensor_name_negative_index()
-{
+static void test_layer_tensor_name_negative_index() {
     const std::string result = trtf::layer_tensor_name("cache_v", -3);
     check(result == "cache_v_-3", "layer_tensor_name cache_v_-3");
 }
 
-static void test_layer_tensor_name_empty_stem()
-{
+static void test_layer_tensor_name_empty_stem() {
     const std::string result = trtf::layer_tensor_name("", 5);
     check(result == "_5", "layer_tensor_name empty_stem _5");
 }
 
 // Intent: validate deterministic default fields on DecoderStepEngine.
-static void test_decoder_step_engine_defaults()
-{
+static void test_decoder_step_engine_defaults() {
     trtf::DecoderStepEngine engine;
     check(engine.token_input_name == "token_id", "default token_input_name");
     check(engine.position_input_name == "position_id", "default position_input_name");
@@ -100,15 +90,12 @@ static void test_decoder_step_engine_defaults()
     check(engine.id_eos == 0, "default id_eos == 0");
 }
 
-static void test_constants()
-{
+static void test_constants() {
     check(trtf::kDefaultMaxCacheLength == 32, "kDefaultMaxCacheLength == 32");
     check(trtf::kMaskedScore == -1.0e4F, "kMaskedScore == -1.0e4");
 }
 
-
-int main()
-{
+int main() {
     test_layer_tensor_name_zero();
     test_layer_tensor_name_mid();
     test_layer_tensor_name_large();
@@ -118,8 +105,7 @@ int main()
     test_decoder_step_engine_defaults();
     test_constants();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

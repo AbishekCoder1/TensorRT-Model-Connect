@@ -154,13 +154,10 @@ TextGenerationPipeline::TextGenerationPipeline(std::unique_ptr<TrtModule> decode
                              std::move(config), stream, std::move(tokenizer),
                              std::move(model_id_str), std::move(sampler)) {}
 
-TextGenerationPipeline::TextGenerationPipeline(std::vector<DecoderContext> decoders,
-                                               std::unique_ptr<IInferenceState> state,
-                                               TextGenConfig config, cudaStream_t stream,
-                                               std::shared_ptr<ITokenizer> tokenizer,
-                                               std::string model_id_str,
-                                               std::unique_ptr<ISampler> sampler,
-                                               std::unique_ptr<TrtModule> prefill)
+TextGenerationPipeline::TextGenerationPipeline(
+    std::vector<DecoderContext> decoders, std::unique_ptr<IInferenceState> state,
+    TextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+    std::string model_id_str, std::unique_ptr<ISampler> sampler, std::unique_ptr<TrtModule> prefill)
     : decoders_(std::move(decoders)), prefill_(std::move(prefill)), state_(std::move(state)),
       config_(std::move(config)), stream_(stream), tokenizer_(std::move(tokenizer)),
       model_id_(std::move(model_id_str)), sampler_(std::move(sampler)),

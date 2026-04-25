@@ -24,23 +24,18 @@ namespace {
 
 int failures = 0;
 
-void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
 
-void test_runtime_factory_logger_lifetime()
-{
-    for (int i = 0; i < 20; ++i)
-    {
+void test_runtime_factory_logger_lifetime() {
+    for (int i = 0; i < 20; ++i) {
         auto runtime = trtf::create_trt_runtime();
         check(static_cast<bool>(runtime), "create_trt_runtime returns non-null");
-        if (!runtime)
-        {
+        if (!runtime) {
             continue;
         }
 
@@ -54,15 +49,12 @@ void test_runtime_factory_logger_lifetime()
 
 } // namespace
 
-int main()
-{
+int main() {
     test_runtime_factory_logger_lifetime();
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }
     std::cerr << "All TRT runtime lifetime tests passed.\n";
     return 0;
 }
-

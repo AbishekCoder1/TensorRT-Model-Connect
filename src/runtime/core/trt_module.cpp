@@ -1,6 +1,5 @@
 #include "trtf/runtime/trt_module.h"
 
-
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -587,4 +586,3 @@ void TrtModule::bind_external(const std::string& name, void* external_device_ptr
 }
 
 } // namespace trtf
-

@@ -16,7 +16,6 @@
 
 namespace trtf {
 
-
 // Tokenizer helpers.
 
 bool detect_add_special_tokens(const BundleFile& bundle) {
@@ -367,6 +366,5 @@ void load_ffi_kernels_from_bundle(const BundleFile& bundle) {
     (void)bundle;
 #endif
 }
-
 
 } // namespace trtf

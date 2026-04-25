@@ -40,36 +40,33 @@
 #include "runtime/core/trt_decode_runtime.h"
 
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <vector>
 
-#include <cuda_runtime_api.h>
-
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
 
-static void test_cache_row_update_plan_append_mode()
-{
+static void test_cache_row_update_plan_append_mode() {
     constexpr std::size_t row_bytes = 16;
-    const trtf::detail::CacheRowUpdatePlan plan = trtf::detail::plan_cache_row_update(2, 4, row_bytes);
+    const trtf::detail::CacheRowUpdatePlan plan =
+        trtf::detail::plan_cache_row_update(2, 4, row_bytes);
 
     check(!plan.shift_existing_rows, "plan_append: append mode");
     check(plan.append_offset_bytes == 2 * row_bytes, "plan_append: append offset");
     check(plan.next_cache_length == 3, "plan_append: next length");
 }
 
-static void test_cache_row_update_plan_shift_mode()
-{
+static void test_cache_row_update_plan_shift_mode() {
     constexpr std::size_t row_bytes = 16;
-    const trtf::detail::CacheRowUpdatePlan plan = trtf::detail::plan_cache_row_update(4, 4, row_bytes);
+    const trtf::detail::CacheRowUpdatePlan plan =
+        trtf::detail::plan_cache_row_update(4, 4, row_bytes);
 
     check(plan.shift_existing_rows, "plan_shift: shift mode");
     check(plan.shift_source_offset_bytes == row_bytes, "plan_shift: shift source offset");
@@ -78,27 +75,25 @@ static void test_cache_row_update_plan_shift_mode()
     check(plan.next_cache_length == 4, "plan_shift: next length");
 }
 
-static void test_cache_row_update_plan_edge_cases()
-{
+static void test_cache_row_update_plan_edge_cases() {
     constexpr std::size_t row_bytes = 32;
 
-    const trtf::detail::CacheRowUpdatePlan overflow_plan = trtf::detail::plan_cache_row_update(9, 4, row_bytes);
+    const trtf::detail::CacheRowUpdatePlan overflow_plan =
+        trtf::detail::plan_cache_row_update(9, 4, row_bytes);
     check(overflow_plan.shift_existing_rows, "plan_edge_overflow: uses shift mode");
     check(overflow_plan.next_cache_length == 4, "plan_edge_overflow: next length clamped");
 
-    const trtf::detail::CacheRowUpdatePlan single_slot_plan = trtf::detail::plan_cache_row_update(1, 1, row_bytes);
+    const trtf::detail::CacheRowUpdatePlan single_slot_plan =
+        trtf::detail::plan_cache_row_update(1, 1, row_bytes);
     check(single_slot_plan.shift_existing_rows, "plan_edge_single_slot: uses shift mode");
     check(single_slot_plan.shift_copy_bytes == 0, "plan_edge_single_slot: zero shift bytes");
     check(single_slot_plan.tail_offset_bytes == 0, "plan_edge_single_slot: zero tail offset");
     check(single_slot_plan.next_cache_length == 1, "plan_edge_single_slot: next length");
 }
 
-
 // Helper: Create a DecoderStepEngine with test parameters (null TRT engine/context).
-static trtf::DecoderStepEngine make_test_engine(
-    int32_t max_cache, int32_t num_layers, int32_t cache_state_size,
-    bool requires_position)
-{
+static trtf::DecoderStepEngine make_test_engine(int32_t max_cache, int32_t num_layers,
+                                                int32_t cache_state_size, bool requires_position) {
     trtf::DecoderStepEngine engine;
     engine.max_cache_length = max_cache;
     engine.num_layers = num_layers;
@@ -117,8 +112,7 @@ static trtf::DecoderStepEngine make_test_engine(
 // Setup:      max_cache=8, 2 layers, cache_state_size=4.
 // Mechanism:  Check ok(), cache pointers are non-null.
 // -----------------------------------------------------------------------------
-static void test_construction()
-{
+static void test_construction() {
     auto engine = make_test_engine(8, 2, 4, false);
     trtf::DeviceKvCache cache(engine);
     check(cache.ok(), "construction: ok()=true");
@@ -138,8 +132,7 @@ static void test_construction()
 //             mask width == max_cache (4). Position increments on each call
 //             because we call update_after_step() which increments cache_length.
 // -----------------------------------------------------------------------------
-static void test_prepare_step_progression()
-{
+static void test_prepare_step_progression() {
     auto engine = make_test_engine(4, 1, 2, false);
     trtf::DeviceKvCache cache(engine);
     trtf::CudaStream stream;
@@ -203,8 +196,7 @@ static void test_prepare_step_progression()
 // Setup:      max_cache=4, fill cache beyond capacity.
 // Mechanism:  After 6 steps, position_id should be clamped at 3 (max-1).
 // -----------------------------------------------------------------------------
-static void test_position_clamping_no_position_input()
-{
+static void test_position_clamping_no_position_input() {
     auto engine = make_test_engine(4, 1, 2, false);
     trtf::DeviceKvCache cache(engine);
     trtf::CudaStream stream;
@@ -215,8 +207,7 @@ static void test_position_clamping_no_position_input()
     present_v.emplace_back(2 * sizeof(float));
 
     // Run 6 steps (exceeds max_cache=4)
-    for (int i = 0; i < 6; ++i)
-    {
+    for (int i = 0; i < 6; ++i) {
         int32_t position_id{};
         std::vector<float> mask;
         cache.prepare_step(position_id, mask);
@@ -234,10 +225,8 @@ static void test_position_clamping_no_position_input()
     check(position_id == 3, "clamp_no_pos: position_id=3");
 
     // All mask slots should be visible (cache full)
-    for (int i = 0; i < 4; ++i)
-    {
-        check(mask[static_cast<std::size_t>(i)] == 0.0F,
-              "clamp_no_pos: all mask slots visible");
+    for (int i = 0; i < 4; ++i) {
+        check(mask[static_cast<std::size_t>(i)] == 0.0F, "clamp_no_pos: all mask slots visible");
     }
 
     cudaStreamSynchronize(stream.get());
@@ -249,8 +238,7 @@ static void test_position_clamping_no_position_input()
 // Setup:      max_cache=4, requires_position=true, fill cache beyond capacity.
 // Mechanism:  After 6 steps, position_id should be clamped at 4 (max).
 // -----------------------------------------------------------------------------
-static void test_position_clamping_with_position_input()
-{
+static void test_position_clamping_with_position_input() {
     auto engine = make_test_engine(4, 1, 2, true);
     trtf::DeviceKvCache cache(engine);
     trtf::CudaStream stream;
@@ -260,8 +248,7 @@ static void test_position_clamping_with_position_input()
     present_k.emplace_back(2 * sizeof(float));
     present_v.emplace_back(2 * sizeof(float));
 
-    for (int i = 0; i < 6; ++i)
-    {
+    for (int i = 0; i < 6; ++i) {
         int32_t position_id{};
         std::vector<float> mask;
         cache.prepare_step(position_id, mask);
@@ -288,23 +275,20 @@ static void test_position_clamping_with_position_input()
 // Mechanism:  After reset, position_id should be 0 and mask should have only 1
 //             visible slot.
 // -----------------------------------------------------------------------------
-static void test_reset()
-{
+static void test_reset() {
     auto engine = make_test_engine(8, 2, 4, false);
     trtf::DeviceKvCache cache(engine);
     trtf::CudaStream stream;
 
     std::vector<trtf::CudaBuffer> present_k;
     std::vector<trtf::CudaBuffer> present_v;
-    for (int i = 0; i < 2; ++i)
-    {
+    for (int i = 0; i < 2; ++i) {
         present_k.emplace_back(4 * sizeof(float));
         present_v.emplace_back(4 * sizeof(float));
     }
 
     // Advance 3 steps
-    for (int i = 0; i < 3; ++i)
-    {
+    for (int i = 0; i < 3; ++i) {
         int32_t pid{};
         std::vector<float> mask;
         cache.prepare_step(pid, mask);
@@ -332,8 +316,7 @@ static void test_reset()
 // Setup:      max_cache=4, 3 layers.
 // Mechanism:  Check that cache_k and cache_v pointers differ across layers.
 // -----------------------------------------------------------------------------
-static void test_multi_layer_distinct_pointers()
-{
+static void test_multi_layer_distinct_pointers() {
     auto engine = make_test_engine(4, 3, 8, false);
     trtf::DeviceKvCache cache(engine);
     check(cache.ok(), "multi_layer: ok()");
@@ -353,9 +336,7 @@ static void test_multi_layer_distinct_pointers()
     check(k0 != v0, "multi_layer: k0 != v0");
 }
 
-
-int main()
-{
+int main() {
     test_cache_row_update_plan_append_mode();
     test_cache_row_update_plan_shift_mode();
     test_cache_row_update_plan_edge_cases();
@@ -367,8 +348,7 @@ int main()
     test_reset();
     test_multi_layer_distinct_pointers();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

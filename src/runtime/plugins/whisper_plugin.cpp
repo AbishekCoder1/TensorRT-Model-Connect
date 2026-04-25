@@ -7,7 +7,6 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-
 namespace trtf {
 
 class WhisperPlugin final : public IPipelinePlugin {
@@ -78,4 +77,3 @@ volatile int kForceLink_WhisperPlugin = 0;
 
 static trtf::WhisperPlugin g_WhisperPlugin_instance;
 static trtf::PluginRegistrar g_WhisperPlugin_reg("speech_to_text", &g_WhisperPlugin_instance);
-

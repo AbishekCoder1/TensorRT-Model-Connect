@@ -6,7 +6,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-
 namespace trtf {
 
 class SpeechPlugin final : public IPipelinePlugin {
@@ -68,4 +67,3 @@ volatile int kForceLink_SpeechPlugin = 0;
 
 static trtf::SpeechPlugin g_SpeechPlugin_instance;
 static trtf::PluginRegistrar g_SpeechPlugin_reg("speech_to_speech", &g_SpeechPlugin_instance);
-

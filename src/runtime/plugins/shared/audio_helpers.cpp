@@ -1,6 +1,5 @@
 #include "runtime/plugins/shared/audio_helpers.h"
 
-
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -215,4 +214,3 @@ BaseConfig make_depth_engine_config(const std::string& json, const BaseConfig& b
 }
 
 } // namespace trtf
-

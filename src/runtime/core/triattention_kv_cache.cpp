@@ -7,7 +7,6 @@
 #include "runtime/core/triattention_kernels.h"
 #endif
 
-
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -2203,4 +2202,3 @@ bool TriAttentionKvCache::ok() const {
 }
 
 } // namespace trtf
-

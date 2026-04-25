@@ -28,18 +28,16 @@
 // =============================================================================
 
 #include "runtime/backend/trt_module_impl.h"
+#include "runtime/core/trt_common.h"
 #include "trtf/runtime/tensor.h"
 #include "trtf/runtime/trt_module.h"
 
+#include <NvInfer.h>
 #include <cstdint>
 #include <cstring>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <vector>
-
-#include "runtime/core/trt_common.h"
-
-#include <NvInfer.h>
-#include <cuda_runtime_api.h>
 
 static int failures = 0;
 
@@ -49,7 +47,6 @@ static void check(bool condition, const char* test_name) {
         ++failures;
     }
 }
-
 
 // Process-wide logger (TRT requires a single logger for all objects).
 static trtf::TrtLogger g_logger;
@@ -477,7 +474,6 @@ static void test_forward_device_with_input() {
 
     cudaStreamDestroy(stream);
 }
-
 
 int main() {
     test_forward_cpu();

@@ -8,7 +8,6 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-
 #include <algorithm>
 #include <cstring>
 #include <cuda_runtime_api.h>
@@ -242,4 +241,3 @@ volatile int kForceLink_Seq2SeqPlugin = 0;
 static trtf::Seq2SeqPlugin g_Seq2SeqPlugin_instance;
 static trtf::PluginRegistrar g_Seq2SeqPlugin_reg("seq2seq_encoder_decoder",
                                                  &g_Seq2SeqPlugin_instance);
-

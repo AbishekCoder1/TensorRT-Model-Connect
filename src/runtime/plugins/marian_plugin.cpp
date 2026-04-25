@@ -17,13 +17,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cuda_runtime_api.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-
-#include <cuda_runtime_api.h>
 
 namespace trtf {
 
@@ -305,4 +303,3 @@ volatile int kForceLink_MarianPlugin = 0;
 
 static trtf::MarianPlugin g_MarianPlugin_instance;
 static trtf::PluginRegistrar g_MarianPlugin_reg("marian_translation", &g_MarianPlugin_instance);
-

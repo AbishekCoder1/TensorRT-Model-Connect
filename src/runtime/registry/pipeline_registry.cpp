@@ -9,14 +9,12 @@ namespace trtf {
 extern volatile int* force_link_all_plugins();
 static volatile int* kPluginAnchor = force_link_all_plugins();
 
-PipelineRegistry& PipelineRegistry::instance()
-{
+PipelineRegistry& PipelineRegistry::instance() {
     static PipelineRegistry registry;
     return registry;
 }
 
-void PipelineRegistry::register_plugin(const std::string& strategy, IPipelinePlugin* plugin)
-{
+void PipelineRegistry::register_plugin(const std::string& strategy, IPipelinePlugin* plugin) {
     if (!plugin)
         throw std::invalid_argument("Cannot register null plugin for strategy: " + strategy);
     if (strategy.empty())
@@ -24,14 +22,12 @@ void PipelineRegistry::register_plugin(const std::string& strategy, IPipelinePlu
     registry_[strategy] = plugin;
 }
 
-IPipelinePlugin* PipelineRegistry::lookup(const std::string& strategy) const
-{
+IPipelinePlugin* PipelineRegistry::lookup(const std::string& strategy) const {
     auto it = registry_.find(strategy);
     return (it != registry_.end()) ? it->second : nullptr;
 }
 
-std::vector<std::string> PipelineRegistry::registered_strategies() const
-{
+std::vector<std::string> PipelineRegistry::registered_strategies() const {
     std::vector<std::string> result;
     result.reserve(registry_.size());
     for (const auto& kv : registry_)

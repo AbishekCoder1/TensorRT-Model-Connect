@@ -22,7 +22,6 @@ std::string expand_layer_name(const std::string& pattern, int32_t layer) {
     return result;
 }
 
-
 namespace {
 
 bool has_required_base_tensors(const DecoderStepEngine& engine) {
@@ -91,6 +90,5 @@ bool has_all_required_tensors(const DecoderStepEngine& engine) {
 std::string layer_tensor_name(const char* stem, int32_t layer) {
     return std::string(stem) + "_" + std::to_string(layer);
 }
-
 
 } // namespace trtf

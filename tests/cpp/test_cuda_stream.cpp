@@ -29,21 +29,17 @@
 
 #include "runtime/core/trt_common.h"
 
-#include <iostream>
-
 #include <cuda_runtime_api.h>
+#include <iostream>
 
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
-
 
 // -----------------------------------------------------------------------------
 // Intention:  Verify that a default-constructed CudaStream creates a valid
@@ -51,8 +47,7 @@ static void check(bool condition, const char* test_name)
 // Setup:      Default-construct a CudaStream.
 // Mechanism:  Check ok()==true and get()!=nullptr.
 // -----------------------------------------------------------------------------
-static void test_default_construction()
-{
+static void test_default_construction() {
     trtf::CudaStream stream;
     check(stream.ok(), "default_ctor: ok()=true");
     check(stream.get() != nullptr, "default_ctor: get()!=nullptr");
@@ -63,8 +58,7 @@ static void test_default_construction()
 // Setup:      Default-construct a CudaStream, then synchronize it.
 // Mechanism:  cudaStreamSynchronize should return cudaSuccess on a valid stream.
 // -----------------------------------------------------------------------------
-static void test_stream_is_usable()
-{
+static void test_stream_is_usable() {
     trtf::CudaStream stream;
     check(stream.ok(), "usable: stream ok");
     cudaError_t err = cudaStreamSynchronize(stream.get());
@@ -78,8 +72,7 @@ static void test_stream_is_usable()
 // Mechanism:  After move, source.get() should be nullptr. Destination should
 //             have the original handle.
 // -----------------------------------------------------------------------------
-static void test_move_constructor()
-{
+static void test_move_constructor() {
     trtf::CudaStream src;
     check(src.ok(), "move_ctor: src ok before move");
     cudaStream_t original_handle = src.get();
@@ -98,8 +91,7 @@ static void test_move_constructor()
 // Mechanism:  After move assignment, source should have nullptr handle,
 //             destination should have the source's original handle.
 // -----------------------------------------------------------------------------
-static void test_move_assignment()
-{
+static void test_move_assignment() {
     trtf::CudaStream src;
     trtf::CudaStream dst;
     check(src.ok(), "move_assign: src ok before move");
@@ -120,8 +112,7 @@ static void test_move_assignment()
 // Setup:      Create two CudaStreams.
 // Mechanism:  Their get() pointers should differ.
 // -----------------------------------------------------------------------------
-static void test_distinct_streams()
-{
+static void test_distinct_streams() {
     trtf::CudaStream a;
     trtf::CudaStream b;
     check(a.ok(), "distinct: a ok");
@@ -129,17 +120,14 @@ static void test_distinct_streams()
     check(a.get() != b.get(), "distinct: different handles");
 }
 
-
-int main()
-{
+int main() {
     test_default_construction();
     test_stream_is_usable();
     test_move_constructor();
     test_move_assignment();
     test_distinct_streams();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

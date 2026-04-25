@@ -42,87 +42,73 @@
 #include <iostream>
 #include <string>
 
-
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
 
-static void test_severity_name_error()
-{
+static void test_severity_name_error() {
     const char* name = trtf::trt_severity_name(nvinfer1::ILogger::Severity::kERROR);
     check(std::string(name) == "ERROR", "severity_name ERROR");
 }
 
-static void test_severity_name_warning()
-{
+static void test_severity_name_warning() {
     const char* name = trtf::trt_severity_name(nvinfer1::ILogger::Severity::kWARNING);
     check(std::string(name) == "WARNING", "severity_name WARNING");
 }
 
-static void test_severity_name_info()
-{
+static void test_severity_name_info() {
     const char* name = trtf::trt_severity_name(nvinfer1::ILogger::Severity::kINFO);
     check(std::string(name) == "INFO", "severity_name INFO");
 }
 
-static void test_severity_name_verbose()
-{
+static void test_severity_name_verbose() {
     const char* name = trtf::trt_severity_name(nvinfer1::ILogger::Severity::kVERBOSE);
     check(std::string(name) == "VERBOSE", "severity_name VERBOSE");
 }
 
-static void test_severity_name_internal_error()
-{
+static void test_severity_name_internal_error() {
     const char* name = trtf::trt_severity_name(nvinfer1::ILogger::Severity::kINTERNAL_ERROR);
     check(std::string(name) == "INTERNAL_ERROR", "severity_name INTERNAL_ERROR");
 }
 
-static void test_logger_stores_error()
-{
+static void test_logger_stores_error() {
     trtf::TrtLogger logger;
     logger.log(nvinfer1::ILogger::Severity::kERROR, "test error message");
     check(logger.last_error() == "test error message", "logger stores error");
 }
 
-static void test_logger_clear_error()
-{
+static void test_logger_clear_error() {
     trtf::TrtLogger logger;
     logger.log(nvinfer1::ILogger::Severity::kERROR, "first error");
     logger.clear_error();
     check(logger.last_error().empty(), "logger clear_error");
 }
 
-static void test_logger_ignores_info()
-{
+static void test_logger_ignores_info() {
     trtf::TrtLogger logger;
     logger.log(nvinfer1::ILogger::Severity::kINFO, "info message");
     check(logger.last_error().empty(), "logger ignores info");
 }
 
-static void test_logger_overwrites_error()
-{
+static void test_logger_overwrites_error() {
     trtf::TrtLogger logger;
     logger.log(nvinfer1::ILogger::Severity::kERROR, "first");
     logger.log(nvinfer1::ILogger::Severity::kERROR, "second");
     check(logger.last_error() == "second", "logger overwrites error");
 }
 
-static void test_logger_null_msg()
-{
+static void test_logger_null_msg() {
     trtf::TrtLogger logger;
     logger.log(nvinfer1::ILogger::Severity::kERROR, nullptr);
     check(logger.last_error().empty(), "logger null msg ignored");
 }
 
-static void test_log_to_stderr_returns_bool()
-{
+static void test_log_to_stderr_returns_bool() {
     // Just verify the function returns without crashing and gives a bool.
     const bool result = trtf::trt_log_to_stderr_enabled();
     // The result depends on TRTF_TRT_LOG_STDERR env var at static init time.
@@ -130,21 +116,18 @@ static void test_log_to_stderr_returns_bool()
     check(result == trtf::trt_log_to_stderr_enabled(), "log_to_stderr consistent");
 }
 
-static void test_min_severity_returns_valid()
-{
+static void test_min_severity_returns_valid() {
     const auto sev = trtf::trt_log_stderr_min_severity();
     // Verify the returned severity is one of the valid enum values.
-    const bool valid = (sev == nvinfer1::ILogger::Severity::kINTERNAL_ERROR
-        || sev == nvinfer1::ILogger::Severity::kERROR
-        || sev == nvinfer1::ILogger::Severity::kWARNING
-        || sev == nvinfer1::ILogger::Severity::kINFO
-        || sev == nvinfer1::ILogger::Severity::kVERBOSE);
+    const bool valid =
+        (sev == nvinfer1::ILogger::Severity::kINTERNAL_ERROR ||
+         sev == nvinfer1::ILogger::Severity::kERROR ||
+         sev == nvinfer1::ILogger::Severity::kWARNING ||
+         sev == nvinfer1::ILogger::Severity::kINFO || sev == nvinfer1::ILogger::Severity::kVERBOSE);
     check(valid, "min_severity valid enum");
 }
 
-
-int main()
-{
+int main() {
     test_severity_name_error();
     test_severity_name_warning();
     test_severity_name_info();
@@ -158,8 +141,7 @@ int main()
     test_log_to_stderr_returns_bool();
     test_min_severity_returns_valid();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

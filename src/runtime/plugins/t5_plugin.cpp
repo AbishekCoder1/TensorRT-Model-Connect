@@ -17,13 +17,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cuda_runtime_api.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-
-#include <cuda_runtime_api.h>
 
 namespace trtf {
 
@@ -325,4 +323,3 @@ volatile int kForceLink_T5Plugin = 0;
 
 static trtf::T5Plugin g_T5Plugin_instance;
 static trtf::PluginRegistrar g_T5Plugin_reg("text_to_text", &g_T5Plugin_instance);
-

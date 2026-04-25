@@ -5,11 +5,10 @@
 #include "trtf/runtime/triattention_kv_cache.h"
 
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <string>
 #include <vector>
-
-#include <cuda_runtime_api.h>
 
 static int failures = 0;
 
@@ -19,7 +18,6 @@ static void check(bool condition, const char* name) {
         ++failures;
     }
 }
-
 
 namespace {
 
@@ -303,7 +301,6 @@ void test_bundle_parsing() {
 }
 
 } // namespace
-
 
 int main() {
     test_absolute_position_and_mask();

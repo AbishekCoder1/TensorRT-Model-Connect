@@ -35,28 +35,24 @@
 //   TRT + CUDA required.
 
 #include "runtime/core/device_kv_cache.h"
-#include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/core/trt_common.h"
+#include "runtime/core/trt_engine_lifecycle.h"
 
+#include <NvInfer.h>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <string>
 #include <vector>
 
-#include <NvInfer.h>
-#include <cuda_runtime_api.h>
-
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
-
 
 static trtf::TrtLogger g_logger;
 
@@ -68,63 +64,59 @@ static trtf::TrtLogger g_logger;
 //             attention_mask [4] float32
 //   Outputs: logits [4] float32 — constant [0.1, 0.2, 0.9, 0.3], argmax=2
 // ---------------------------------------------------------------------------
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_engine_for_resources()
-{
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(
-        nvinfer1::createInferBuilder(g_logger));
-    if (!builder) return nullptr;
+static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_engine_for_resources() {
+    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    if (!builder)
+        return nullptr;
 
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(
-        builder->createNetworkV2(0));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(
-        builder->createBuilderConfig());
+    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     // Inputs (must be present for binding to succeed)
-    auto* tok_inp  = network->addInput("token_id",
-        nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
-    auto* mask_inp = network->addInput("attention_mask",
-        nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {4}});
+    auto* tok_inp =
+        network->addInput("token_id", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
+    auto* mask_inp =
+        network->addInput("attention_mask", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {4}});
 
     // Constant logits output: argmax = index 2
     float const_logits[4] = {0.1f, 0.2f, 0.9f, 0.3f};
     auto* const_w = network->addConstant(
-        nvinfer1::Dims{1, {4}},
-        nvinfer1::Weights{nvinfer1::DataType::kFLOAT, const_logits, 4});
-    if (!const_w) return nullptr;
+        nvinfer1::Dims{1, {4}}, nvinfer1::Weights{nvinfer1::DataType::kFLOAT, const_logits, 4});
+    if (!const_w)
+        return nullptr;
 
     auto* logits_out = const_w->getOutput(0);
     logits_out->setName("logits");
     network->markOutput(*logits_out);
 
     // Mark inputs as "used" via identity (prevents TRT from pruning them)
-    auto* id_tok  = network->addIdentity(*tok_inp);
+    auto* id_tok = network->addIdentity(*tok_inp);
     id_tok->getOutput(0)->setName("_tok_unused");
     auto* id_mask = network->addIdentity(*mask_inp);
     id_mask->getOutput(0)->setName("_mask_unused");
 
     auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
-    if (!plan) return nullptr;
+    if (!plan)
+        return nullptr;
 
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(
-        nvinfer1::createInferRuntime(g_logger));
+    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
     return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
 // Build a populated DecoderStepEngine (no cache layers) from the mock engine.
-static trtf::DecoderStepEngine make_step_engine(nvinfer1::ICudaEngine* raw_engine)
-{
+static trtf::DecoderStepEngine make_step_engine(nvinfer1::ICudaEngine* raw_engine) {
     trtf::DecoderStepEngine eng;
     eng.engine.reset(raw_engine);
     eng.context.reset(raw_engine->createExecutionContext());
-    eng.num_layers        = 0;   // No KV-cache tensors required
-    eng.vocab_size        = 4;
-    eng.hidden_size       = 0;
-    eng.cache_state_size  = 0;
+    eng.num_layers = 0; // No KV-cache tensors required
+    eng.vocab_size = 4;
+    eng.hidden_size = 0;
+    eng.cache_state_size = 0;
     eng.attention_mask_size = 4;
-    eng.max_cache_length  = 4;
+    eng.max_cache_length = 4;
     eng.requires_position_input = false;
     // token_input_name / mask_input_name / logits_output_name use defaults
     return eng;
@@ -135,25 +127,21 @@ static trtf::DecoderStepEngine make_step_engine(nvinfer1::ICudaEngine* raw_engin
 // Preconditions:  Real TRT engine built in-process; CUDA GPU available
 // Postconditions: ok()==true; mandatory device buffers are allocated
 // ---------------------------------------------------------------------------
-static bool test_device_resources_construction()
-{
+static bool test_device_resources_construction() {
     auto raw = build_engine_for_resources();
-    if (!raw)
-    {
+    if (!raw) {
         std::cerr << "WARNING: Could not build mock engine, skipping\n";
-        return true;  // not a test failure — just unavailable TRT
+        return true; // not a test failure — just unavailable TRT
     }
 
     auto eng = make_step_engine(raw.release());
-    if (!eng.context)
-    {
+    if (!eng.context) {
         std::cerr << "WARNING: createExecutionContext failed, skipping\n";
         return true;
     }
 
     trtf::DeviceResources res(eng);
-    if (!res.ok())
-    {
+    if (!res.ok()) {
         std::cerr << "device_resources_construction: ok() returned false\n";
         return false;
     }
@@ -166,32 +154,27 @@ static bool test_device_resources_construction()
 // Postconditions: logits has vocab_size=4 elements; argmax of output is 2;
 //                 error string is empty on success
 // ---------------------------------------------------------------------------
-static bool test_run_decoder_step_device_basic()
-{
+static bool test_run_decoder_step_device_basic() {
     auto raw = build_engine_for_resources();
-    if (!raw)
-    {
+    if (!raw) {
         std::cerr << "WARNING: Could not build mock engine, skipping\n";
         return true;
     }
 
     auto eng = make_step_engine(raw.release());
-    if (!eng.context)
-    {
+    if (!eng.context) {
         std::cerr << "WARNING: createExecutionContext failed, skipping\n";
         return true;
     }
 
     trtf::DeviceKvCache cache(eng);
-    if (!cache.ok())
-    {
+    if (!cache.ok()) {
         std::cerr << "run_decoder_step_device_basic: cache.ok() = false\n";
         return false;
     }
 
     trtf::DeviceResources res(eng);
-    if (!res.ok())
-    {
+    if (!res.ok()) {
         std::cerr << "run_decoder_step_device_basic: res.ok() = false\n";
         return false;
     }
@@ -199,48 +182,39 @@ static bool test_run_decoder_step_device_basic()
     std::vector<float> logits;
     std::string error;
 
-    const bool ok = trtf::run_decoder_step_device(
-        eng, cache, res,
-        /*token_id=*/1,
-        logits,
-        error,
-        /*input_embed_host=*/nullptr,
-        /*embed_dim=*/0,
-        /*use_input_embed=*/0.0F,
-        /*deepstack_embeds_host=*/{},
-        /*deepstack_active=*/0.0F,
-        /*input_embed_device_ready=*/false,
-        /*skip_logits_d2h=*/false,
-        /*skip_sync=*/false,
-        /*skip_bind=*/false);
+    const bool ok = trtf::run_decoder_step_device(eng, cache, res,
+                                                  /*token_id=*/1, logits, error,
+                                                  /*input_embed_host=*/nullptr,
+                                                  /*embed_dim=*/0,
+                                                  /*use_input_embed=*/0.0F,
+                                                  /*deepstack_embeds_host=*/{},
+                                                  /*deepstack_active=*/0.0F,
+                                                  /*input_embed_device_ready=*/false,
+                                                  /*skip_logits_d2h=*/false,
+                                                  /*skip_sync=*/false,
+                                                  /*skip_bind=*/false);
 
-    if (!ok)
-    {
+    if (!ok) {
         std::cerr << "run_decoder_step_device_basic: step failed: " << error << '\n';
         return false;
     }
-    if (logits.size() != 4)
-    {
-        std::cerr << "run_decoder_step_device_basic: logits.size()="
-                  << logits.size() << " expected 4\n";
+    if (logits.size() != 4) {
+        std::cerr << "run_decoder_step_device_basic: logits.size()=" << logits.size()
+                  << " expected 4\n";
         return false;
     }
 
     // Find argmax: expect index 2 (logit 0.9 is largest)
     int32_t argmax = 0;
     float best = logits[0];
-    for (int32_t i = 1; i < 4; ++i)
-    {
-        if (logits[static_cast<std::size_t>(i)] > best)
-        {
+    for (int32_t i = 1; i < 4; ++i) {
+        if (logits[static_cast<std::size_t>(i)] > best) {
             best = logits[static_cast<std::size_t>(i)];
             argmax = i;
         }
     }
-    if (argmax != 2)
-    {
-        std::cerr << "run_decoder_step_device_basic: argmax=" << argmax
-                  << " expected 2\n";
+    if (argmax != 2) {
+        std::cerr << "run_decoder_step_device_basic: argmax=" << argmax << " expected 2\n";
         return false;
     }
     return true;
@@ -252,39 +226,35 @@ static bool test_run_decoder_step_device_basic()
 // Preconditions:  Same engine as above; cache updated by first step
 // Postconditions: second step also returns valid logits
 // ---------------------------------------------------------------------------
-static bool test_run_decoder_step_device_skip_bind()
-{
+static bool test_run_decoder_step_device_skip_bind() {
     auto raw = build_engine_for_resources();
-    if (!raw)
-    {
+    if (!raw) {
         std::cerr << "WARNING: Could not build mock engine, skipping\n";
         return true;
     }
 
     auto eng = make_step_engine(raw.release());
-    if (!eng.context) return true;
+    if (!eng.context)
+        return true;
 
     trtf::DeviceKvCache cache(eng);
     trtf::DeviceResources res(eng);
-    if (!res.ok()) return false;
+    if (!res.ok())
+        return false;
 
     std::vector<float> logits;
     std::string error;
 
     // First step: bind tensor addresses
-    if (!trtf::run_decoder_step_device(
-            eng, cache, res, 1, logits, error,
-            nullptr, 0, 0.0F, {}, 0.0F, false, false, false, /*skip_bind=*/false))
-    {
+    if (!trtf::run_decoder_step_device(eng, cache, res, 1, logits, error, nullptr, 0, 0.0F, {},
+                                       0.0F, false, false, false, /*skip_bind=*/false)) {
         std::cerr << "step_skip_bind: step 1 failed: " << error << '\n';
         return false;
     }
 
     // Second step: skip rebind (addresses haven't changed)
-    if (!trtf::run_decoder_step_device(
-            eng, cache, res, 1, logits, error,
-            nullptr, 0, 0.0F, {}, 0.0F, false, false, false, /*skip_bind=*/true))
-    {
+    if (!trtf::run_decoder_step_device(eng, cache, res, 1, logits, error, nullptr, 0, 0.0F, {},
+                                       0.0F, false, false, false, /*skip_bind=*/true)) {
         std::cerr << "step_skip_bind: step 2 (skip_bind) failed: " << error << '\n';
         return false;
     }
@@ -298,30 +268,30 @@ static bool test_run_decoder_step_device_skip_bind()
 // Preconditions:  Same engine; skip_logits_d2h=true
 // Postconditions: logits vector is empty (no D2H copy); step returns true
 // ---------------------------------------------------------------------------
-static bool test_run_decoder_step_device_skip_d2h()
-{
+static bool test_run_decoder_step_device_skip_d2h() {
     auto raw = build_engine_for_resources();
-    if (!raw) return true;
+    if (!raw)
+        return true;
 
     auto eng = make_step_engine(raw.release());
-    if (!eng.context) return true;
+    if (!eng.context)
+        return true;
 
     trtf::DeviceKvCache cache(eng);
     trtf::DeviceResources res(eng);
-    if (!res.ok()) return false;
+    if (!res.ok())
+        return false;
 
     std::vector<float> logits;
     std::string error;
 
-    const bool ok = trtf::run_decoder_step_device(
-        eng, cache, res, 1, logits, error,
-        nullptr, 0, 0.0F, {}, 0.0F, false,
-        /*skip_logits_d2h=*/true,
-        /*skip_sync=*/false,
-        /*skip_bind=*/false);
+    const bool ok = trtf::run_decoder_step_device(eng, cache, res, 1, logits, error, nullptr, 0,
+                                                  0.0F, {}, 0.0F, false,
+                                                  /*skip_logits_d2h=*/true,
+                                                  /*skip_sync=*/false,
+                                                  /*skip_bind=*/false);
 
-    if (!ok)
-    {
+    if (!ok) {
         std::cerr << "step_skip_d2h: step failed: " << error << '\n';
         return false;
     }
@@ -329,9 +299,7 @@ static bool test_run_decoder_step_device_skip_d2h()
     return logits.empty();
 }
 
-
-int main()
-{
+int main() {
     bool all_passed = true;
     std::cout << "test_device_resources:" << std::endl;
 
@@ -341,13 +309,12 @@ int main()
         all_passed &= ok;
     };
 
-    run("device_resources_construction",          test_device_resources_construction);
-    run("run_decoder_step_device_basic",           test_run_decoder_step_device_basic);
-    run("run_decoder_step_device_skip_bind",       test_run_decoder_step_device_skip_bind);
-    run("run_decoder_step_device_skip_d2h",        test_run_decoder_step_device_skip_d2h);
+    run("device_resources_construction", test_device_resources_construction);
+    run("run_decoder_step_device_basic", test_run_decoder_step_device_basic);
+    run("run_decoder_step_device_skip_bind", test_run_decoder_step_device_skip_bind);
+    run("run_decoder_step_device_skip_d2h", test_run_decoder_step_device_skip_d2h);
 
-    if (all_passed)
-    {
+    if (all_passed) {
         std::cout << "test_device_resources passed" << std::endl;
         return 0;
     }

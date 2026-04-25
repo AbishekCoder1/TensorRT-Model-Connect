@@ -22,32 +22,27 @@
 #include "trtf/runtime/recurrent_state.h"
 
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <vector>
 
-#include <cuda_runtime_api.h>
-
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
 
-
-static void test_mamba_spec()
-{
+static void test_mamba_spec() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
     // Mamba: 2 state tensors per layer (conv + ssm)
     std::vector<trtf::RecurrentState::TensorSpec> specs = {
-        {"conv_state", {96}},  // d_inner * (conv_kernel - 1) = 32 * 3
-        {"ssm_state", {512}},  // state_size * d_inner = 16 * 32
+        {"conv_state", {96}}, // d_inner * (conv_kernel - 1) = 32 * 3
+        {"ssm_state", {512}}, // state_size * d_inner = 16 * 32
     };
 
     trtf::RecurrentState state(4, specs, stream);
@@ -60,18 +55,14 @@ static void test_mamba_spec()
     cudaStreamDestroy(stream);
 }
 
-static void test_rwkv_spec()
-{
+static void test_rwkv_spec() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
     // RWKV: 5 state tensors per layer
     std::vector<trtf::RecurrentState::TensorSpec> specs = {
-        {"attn_state", {128}},
-        {"ff_state", {128}},
-        {"num_state", {128}},
-        {"den_state", {128}},
-        {"max_state", {128}},
+        {"attn_state", {128}}, {"ff_state", {128}},  {"num_state", {128}},
+        {"den_state", {128}},  {"max_state", {128}},
     };
 
     trtf::RecurrentState state(6, specs, stream);
@@ -82,8 +73,7 @@ static void test_rwkv_spec()
     cudaStreamDestroy(stream);
 }
 
-static void test_reset()
-{
+static void test_reset() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -98,8 +88,7 @@ static void test_reset()
     cudaStreamDestroy(stream);
 }
 
-static void test_advance()
-{
+static void test_advance() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -114,20 +103,20 @@ static void test_advance()
     check(state.ok(), "ok after advance");
 
     // Multiple advances
-    for (int i = 0; i < 5; ++i) state.advance();
+    for (int i = 0; i < 5; ++i)
+        state.advance();
     check(state.ok(), "ok after 5 advances");
 
     cudaStreamDestroy(stream);
 }
 
-
-int main()
-{
+int main() {
     test_mamba_spec();
     test_rwkv_spec();
     test_reset();
     test_advance();
 
-    if (failures > 0) std::cerr << failures << " test(s) FAILED\n";
+    if (failures > 0)
+        std::cerr << failures << " test(s) FAILED\n";
     return failures;
 }

@@ -5,7 +5,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-
 namespace trtf {
 
 class ObjectDetectionPlugin final : public IPipelinePlugin {
@@ -32,4 +31,3 @@ volatile int kForceLink_ObjectDetectionPlugin = 0;
 static trtf::ObjectDetectionPlugin g_ObjectDetectionPlugin_instance;
 static trtf::PluginRegistrar g_ObjectDetectionPlugin_reg("object_detection",
                                                          &g_ObjectDetectionPlugin_instance);
-

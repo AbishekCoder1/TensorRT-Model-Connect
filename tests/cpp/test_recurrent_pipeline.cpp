@@ -25,15 +25,14 @@
 // pipeline_interface.h was removed; GenerateConfig is in trtf/pipeline.h
 // (already included transitively via recurrent_pipeline.h)
 
-#include <cstdint>
-#include <iostream>
-#include <vector>
-
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 
 #include <NvInfer.h>
+#include <cstdint>
 #include <cuda_runtime_api.h>
+#include <iostream>
+#include <vector>
 
 static int failures = 0;
 
@@ -43,7 +42,6 @@ static void check(bool condition, const char* test_name) {
         ++failures;
     }
 }
-
 
 static trtf::TrtLogger g_logger;
 
@@ -229,7 +227,6 @@ static void test_argmax_recurrent() {
     std::vector<float> v = {-1.0f, 5.0f, 3.0f};
     check(trtf::RecurrentPipeline::argmax(v) == 1, "argmax = 1");
 }
-
 
 int main() {
     test_argmax_recurrent();

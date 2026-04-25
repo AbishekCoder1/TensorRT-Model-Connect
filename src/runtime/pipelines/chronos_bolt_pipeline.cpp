@@ -1,6 +1,5 @@
 #include "runtime/pipelines/chronos_bolt_pipeline.h"
 
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -100,4 +99,3 @@ EmbeddingResult ChronosBoltPipeline::solve(const float* branch_input, int32_t br
 }
 
 } // namespace trtf
-

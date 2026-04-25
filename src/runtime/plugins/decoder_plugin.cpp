@@ -15,7 +15,6 @@
 #include <limits>
 #include <sstream>
 
-
 namespace trtf {
 
 namespace {
@@ -166,8 +165,7 @@ class DecoderPlugin final : public IPipelinePlugin {
         const auto sizing = resolve_kv_cache_runtime_sizing(ctx, *shared_engine, kv_names,
                                                             cache_dtype, tri_cfg, kv_dim);
 
-        const int32_t prefill_max_length =
-            detect_prefill_max_length(*shared_engine, io.token_id);
+        const int32_t prefill_max_length = detect_prefill_max_length(*shared_engine, io.token_id);
         const int32_t first_decode_profile = prefill_max_length > 0 ? 1 : 0;
 
         std::unique_ptr<TrtModule> prefill_module;
@@ -175,9 +173,9 @@ class DecoderPlugin final : public IPipelinePlugin {
             prefill_module = make_decoder_module(shared_engine, shared_stream, /*profile_idx=*/0);
         }
 
-        auto decoders = build_decoder_contexts(ctx, shared_engine, shared_stream,
-                                               external_input_names, sizing.runtime_rows,
-                                               first_decode_profile);
+        auto decoders =
+            build_decoder_contexts(ctx, shared_engine, shared_stream, external_input_names,
+                                   sizing.runtime_rows, first_decode_profile);
         auto state =
             build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
         log_kv_cache_sizing(ctx, sizing, state.get());
@@ -194,10 +192,9 @@ class DecoderPlugin final : public IPipelinePlugin {
         tgc.present_k_pattern = io.present_k_pattern;
         tgc.present_v_pattern = io.present_v_pattern;
 
-        return std::make_unique<TextGenerationPipeline>(std::move(decoders), std::move(state), tgc,
-                                                        stream, std::move(tokenizer),
-                                                        ctx.bundle.info.model_id, nullptr,
-                                                        std::move(prefill_module));
+        return std::make_unique<TextGenerationPipeline>(
+            std::move(decoders), std::move(state), tgc, stream, std::move(tokenizer),
+            ctx.bundle.info.model_id, nullptr, std::move(prefill_module));
     }
 
   private:
@@ -249,9 +246,9 @@ class DecoderPlugin final : public IPipelinePlugin {
                                     kv_names.cache_v.end());
     }
 
-    static std::unique_ptr<TrtModule> make_decoder_module(
-        std::shared_ptr<nvinfer1::ICudaEngine> shared_engine,
-        std::shared_ptr<CudaStream> shared_stream, int32_t profile_idx) {
+    static std::unique_ptr<TrtModule>
+    make_decoder_module(std::shared_ptr<nvinfer1::ICudaEngine> shared_engine,
+                        std::shared_ptr<CudaStream> shared_stream, int32_t profile_idx) {
         // TriAttention instantiates TrtModuleImpl directly (not via
         // IBackend::create_module) because the runtime needs ICudaEngine*
         // access for multi-profile row-dim introspection.
@@ -259,8 +256,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         if (!trt_ctx)
             throw std::runtime_error("Failed to create TRT execution context for profile " +
                                      std::to_string(profile_idx));
-        auto module = std::make_unique<TrtModuleImpl>(
-            shared_engine.get(), trt_ctx, shared_stream->get(), profile_idx);
+        auto module = std::make_unique<TrtModuleImpl>(shared_engine.get(), trt_ctx,
+                                                      shared_stream->get(), profile_idx);
         if (!module || !module->ok())
             throw std::runtime_error("Failed to create TrtModule for engine_plan (profile " +
                                      std::to_string(profile_idx) + ")");
@@ -278,25 +275,27 @@ class DecoderPlugin final : public IPipelinePlugin {
                                              const std::string& token_id_name) {
         if (engine.getNbOptimizationProfiles() <= 0)
             return 0;
-        const auto max_dims = engine.getProfileShape(token_id_name.c_str(), 0,
-                                                     nvinfer1::OptProfileSelector::kMAX);
+        const auto max_dims =
+            engine.getProfileShape(token_id_name.c_str(), 0, nvinfer1::OptProfileSelector::kMAX);
         if (max_dims.nbDims <= 0)
             return 0;
         return max_dims.d[0] > 1 ? static_cast<int32_t>(max_dims.d[0]) : 0;
     }
 
-    static std::vector<TextGenerationPipeline::DecoderContext> build_decoder_contexts(
-        const PipelineContext& ctx, std::shared_ptr<nvinfer1::ICudaEngine> shared_engine,
-        std::shared_ptr<CudaStream> shared_stream,
-        const std::vector<std::string>& external_input_names, int32_t runtime_rows,
-        int32_t first_decode_profile) {
+    static std::vector<TextGenerationPipeline::DecoderContext>
+    build_decoder_contexts(const PipelineContext& ctx,
+                           std::shared_ptr<nvinfer1::ICudaEngine> shared_engine,
+                           std::shared_ptr<CudaStream> shared_stream,
+                           const std::vector<std::string>& external_input_names,
+                           int32_t runtime_rows, int32_t first_decode_profile) {
         (void)external_input_names;
         auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
         if (profile_rows.empty())
             profile_rows.push_back(ctx.config.max_cache_length);
         const int32_t num_profiles = shared_engine->getNbOptimizationProfiles();
         const int32_t profile_count = num_profiles - first_decode_profile;
-        const int32_t loop_bound = std::min(profile_count, static_cast<int32_t>(profile_rows.size()));
+        const int32_t loop_bound =
+            std::min(profile_count, static_cast<int32_t>(profile_rows.size()));
         std::vector<TextGenerationPipeline::DecoderContext> decoders;
         decoders.reserve(static_cast<std::size_t>(loop_bound > 0 ? loop_bound : 1));
         for (int32_t i = 0; i < loop_bound; ++i) {
@@ -391,4 +390,3 @@ volatile int kForceLink_DecoderPlugin = 0;
 static trtf::DecoderPlugin g_DecoderPlugin_instance;
 static trtf::PluginRegistrar g_DecoderPlugin_reg1("decoder_kv_cache", &g_DecoderPlugin_instance);
 static trtf::PluginRegistrar g_DecoderPlugin_reg2("decoder_moe", &g_DecoderPlugin_instance);
-

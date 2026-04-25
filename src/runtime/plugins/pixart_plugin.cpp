@@ -8,7 +8,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-
 namespace trtf {
 
 class PixArtPlugin final : public IPipelinePlugin {
@@ -38,4 +37,3 @@ volatile int kForceLink_PixArtPlugin = 0;
 
 static trtf::PixArtPlugin g_PixArtPlugin_instance;
 static trtf::PluginRegistrar g_PixArtPlugin_reg("diffusion_pixart", &g_PixArtPlugin_instance);
-

@@ -1,6 +1,5 @@
 #include "runtime/pipelines/patchtst_pipeline.h"
 
-
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
@@ -164,4 +163,3 @@ EmbeddingResult PatchTSTPipeline::solve(const float* branch_input, int32_t branc
 }
 
 } // namespace trtf
-

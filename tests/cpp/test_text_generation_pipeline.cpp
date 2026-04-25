@@ -27,16 +27,15 @@
 // pipeline_interface.h was removed; GenerateConfig is in trtf/pipeline.h
 // (already included transitively via text_generation_pipeline.h)
 
-#include <cstdint>
-#include <iostream>
-#include <string>
-#include <vector>
-
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 
 #include <NvInfer.h>
+#include <cstdint>
 #include <cuda_runtime_api.h>
+#include <iostream>
+#include <string>
+#include <vector>
 
 static int failures = 0;
 
@@ -46,7 +45,6 @@ static void check(bool condition, const char* test_name) {
         ++failures;
     }
 }
-
 
 static trtf::TrtLogger g_logger;
 
@@ -316,8 +314,8 @@ static void test_stop_on_boxed_answer() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModuleImpl>(
-        engine.get(), engine->createExecutionContext(), stream);
+    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+                                                        engine->createExecutionContext(), stream);
     auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
     auto tokenizer = std::make_shared<MockTokenizer>();
     auto sampler = std::make_unique<SequenceSampler>(std::vector<int32_t>{1, 2, 3, 4});
@@ -343,7 +341,6 @@ static void test_stop_on_boxed_answer() {
 
     cudaStreamDestroy(stream);
 }
-
 
 int main() {
     test_argmax();

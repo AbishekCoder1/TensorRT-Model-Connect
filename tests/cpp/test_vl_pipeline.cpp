@@ -25,22 +25,20 @@
 // Test suite: VLPipeline — vision-language generation
 // =============================================================================
 
+#include "runtime/backend/trt_module_impl.h"
+#include "runtime/core/trt_common.h"
 #include "runtime/pipelines/vl_pipeline.h"
 #include "trtf/runtime/kv_cache.h"
 #include "trtf/runtime/trt_module.h"
 #include "trtf/tokenizer.h"
 
+#include <NvInfer.h>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include "runtime/backend/trt_module_impl.h"
-#include "runtime/core/trt_common.h"
-
-#include <NvInfer.h>
-#include <cuda_runtime_api.h>
 
 static int failures = 0;
 static void check(bool c, const char* n) {
@@ -49,7 +47,6 @@ static void check(bool c, const char* n) {
         ++failures;
     }
 }
-
 
 static trtf::TrtLogger g_logger;
 
@@ -605,7 +602,6 @@ static void test_vl_generate_with_tokenizer() {
 
     cudaStreamDestroy(stream);
 }
-
 
 int main() {
     test_vl_text_only();

@@ -10,7 +10,6 @@
 #include <cstdint>
 #include <exception>
 
-
 namespace trtf {
 
 namespace {
@@ -145,4 +144,3 @@ volatile int kForceLink_MagpiePlugin = 0;
 
 static trtf::MagpiePlugin g_MagpiePlugin_instance;
 static trtf::PluginRegistrar g_MagpiePlugin_reg("text_to_audio_magpie", &g_MagpiePlugin_instance);
-

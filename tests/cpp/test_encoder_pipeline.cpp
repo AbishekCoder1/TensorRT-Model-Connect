@@ -20,24 +20,22 @@
 // Test suite: EncoderPipeline + SegmentPipeline + SamPipeline
 // =============================================================================
 
+#include "runtime/backend/trt_module_impl.h"
+#include "runtime/core/trt_common.h"
 #include "runtime/pipelines/encoder_pipeline.h"
 #include "runtime/pipelines/sam_pipeline.h"
 #include "runtime/pipelines/segment_pipeline.h"
 #include "trtf/runtime/trt_module.h"
 #include "trtf/tokenizer.h"
 
+#include <NvInfer.h>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include "runtime/backend/trt_module_impl.h"
-#include "runtime/core/trt_common.h"
-
-#include <NvInfer.h>
-#include <cuda_runtime_api.h>
 
 static int failures = 0;
 static void check(bool c, const char* n) {
@@ -46,7 +44,6 @@ static void check(bool c, const char* n) {
         ++failures;
     }
 }
-
 
 static trtf::TrtLogger g_logger;
 
@@ -667,7 +664,6 @@ static void test_segment_mask_named_output() {
 
     cudaStreamDestroy(stream);
 }
-
 
 int main() {
     test_encoder_pipeline();

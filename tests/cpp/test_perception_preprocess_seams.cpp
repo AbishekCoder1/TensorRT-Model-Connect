@@ -6,7 +6,8 @@
 // Unit Design:    UD-SEG-01
 // Intent:         Perception preprocessing seams: segmentation normalization, SAM resize/padding
 // Preconditions:  Decoded image data (valid and empty)
-// Postconditions: Normalization produces correct float values, empty images rejected, SAM plan tracks resize
+// Postconditions: Normalization produces correct float values, empty images rejected, SAM plan
+// tracks resize
 // =============================================================================
 
 #include "runtime/domains/perception/sam_image_preprocess_seam.h"
@@ -22,40 +23,32 @@ namespace {
 
 int g_failures = 0;
 
-void check(bool condition, const char* name)
-{
-    if (!condition)
-    {
+void check(bool condition, const char* name) {
+    if (!condition) {
         std::cerr << "FAIL: " << name << '\n';
         ++g_failures;
     }
 }
 
-void check_close(float actual, float expected, float tolerance, const char* name)
-{
-    if (std::fabs(actual - expected) > tolerance)
-    {
+void check_close(float actual, float expected, float tolerance, const char* name) {
+    if (std::fabs(actual - expected) > tolerance) {
         std::cerr << "FAIL: " << name << " actual=" << actual << " expected=" << expected << '\n';
         ++g_failures;
     }
 }
 
-
-trtf::runtime::adapters::io::DecodedImage make_two_pixel_image()
-{
+trtf::runtime::adapters::io::DecodedImage make_two_pixel_image() {
     trtf::runtime::adapters::io::DecodedImage image;
     image.width = 2;
     image.height = 1;
     image.channels = 3;
     image.pixels = {
-        255, 0, 0,
-        0, 255, 0,
+        255, 0, 0, 0, 255, 0,
     };
     return image;
 }
 
-void test_segmentation_preprocess_normalizes_decoded_image()
-{
+void test_segmentation_preprocess_normalizes_decoded_image() {
     trtf::SegmentationConfig config;
     config.input_image_h = 1;
     config.input_image_w = 2;
@@ -64,8 +57,7 @@ void test_segmentation_preprocess_normalizes_decoded_image()
 
     const auto pixel_values = trtf::preprocess_segmentation_image(make_two_pixel_image(), config);
     check(pixel_values.size() == 6, "segmentation preprocess size");
-    if (pixel_values.size() != 6)
-    {
+    if (pixel_values.size() != 6) {
         return;
     }
 
@@ -75,30 +67,24 @@ void test_segmentation_preprocess_normalizes_decoded_image()
     check_close(pixel_values[3], 1.0F, 1e-6F, "segmentation preprocess green channel pixel 1");
 }
 
-void test_segmentation_preprocess_rejects_empty_image()
-{
+void test_segmentation_preprocess_rejects_empty_image() {
     bool threw = false;
-    try
-    {
+    try {
         trtf::SegmentationConfig config;
-        (void) trtf::preprocess_segmentation_image({}, config);
-    }
-    catch (const std::runtime_error&)
-    {
+        (void)trtf::preprocess_segmentation_image({}, config);
+    } catch (const std::runtime_error&) {
         threw = true;
     }
     check(threw, "segmentation preprocess rejects empty image");
 }
 
-void test_sam_image_plan_tracks_resize_and_padding()
-{
+void test_sam_image_plan_tracks_resize_and_padding() {
     trtf::runtime::adapters::io::DecodedImage image;
     image.width = 1;
     image.height = 2;
     image.channels = 3;
     image.pixels = {
-        255, 0, 0,
-        255, 0, 0,
+        255, 0, 0, 255, 0, 0,
     };
 
     trtf::SamConfig config;
@@ -111,29 +97,27 @@ void test_sam_image_plan_tracks_resize_and_padding()
     check(plan.original_width == 1 && plan.original_height == 2, "sam image plan original dims");
     check(plan.rescaled_width == 2 && plan.rescaled_height == 4, "sam image plan rescaled dims");
     check(plan.pixel_values.size() == 48, "sam image plan output size");
-    if (plan.pixel_values.size() != 48)
-    {
+    if (plan.pixel_values.size() != 48) {
         return;
     }
 
     const std::size_t red_plane_offset = 0;
     const std::size_t green_plane_offset = 16;
-    check_close(plan.pixel_values[red_plane_offset], 1.0F, 1e-6F, "sam image plan red data preserved");
-    check_close(plan.pixel_values[green_plane_offset], 0.0F, 1e-6F, "sam image plan green data preserved");
+    check_close(plan.pixel_values[red_plane_offset], 1.0F, 1e-6F,
+                "sam image plan red data preserved");
+    check_close(plan.pixel_values[green_plane_offset], 0.0F, 1e-6F,
+                "sam image plan green data preserved");
     check_close(plan.pixel_values[3], 0.0F, 1e-6F, "sam image plan right padding stays zero");
 }
 
-
 } // namespace
 
-int main()
-{
+int main() {
     test_segmentation_preprocess_normalizes_decoded_image();
     test_segmentation_preprocess_rejects_empty_image();
     test_sam_image_plan_tracks_resize_and_padding();
 
-    if (g_failures != 0)
-    {
+    if (g_failures != 0) {
         std::cerr << g_failures << " perception preprocess seam test(s) failed\n";
         return 1;
     }

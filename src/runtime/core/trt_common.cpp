@@ -7,7 +7,6 @@
 
 namespace trtf {
 
-
 const char* trt_severity_name(nvinfer1::ILogger::Severity severity) {
     switch (severity) {
     case nvinfer1::ILogger::Severity::kINTERNAL_ERROR:
@@ -172,6 +171,5 @@ void CudaGraphExec::reset() {
         graph_ = nullptr;
     }
 }
-
 
 } // namespace trtf

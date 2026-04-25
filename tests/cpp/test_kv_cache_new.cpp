@@ -22,25 +22,20 @@
 #include "trtf/runtime/kv_cache.h"
 
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <vector>
 
-#include <cuda_runtime_api.h>
-
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
 
-
-static void test_construction()
-{
+static void test_construction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -53,8 +48,7 @@ static void test_construction()
     cudaStreamDestroy(stream);
 }
 
-static void test_attention_mask_at_position_0()
-{
+static void test_attention_mask_at_position_0() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -72,8 +66,7 @@ static void test_attention_mask_at_position_0()
     cudaStreamDestroy(stream);
 }
 
-static void test_advance_and_position()
-{
+static void test_advance_and_position() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -99,8 +92,7 @@ static void test_advance_and_position()
     cudaStreamDestroy(stream);
 }
 
-static void test_reset()
-{
+static void test_reset() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -121,8 +113,7 @@ static void test_reset()
     cudaStreamDestroy(stream);
 }
 
-static void test_direct_access()
-{
+static void test_direct_access() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -138,15 +129,15 @@ static void test_direct_access()
     cudaStreamDestroy(stream);
 }
 
-static void test_max_position_clamp()
-{
+static void test_max_position_clamp() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
     trtf::KvCache cache(1, 4, 2, stream);
 
     // Advance past max_length
-    for (int i = 0; i < 10; ++i) cache.advance();
+    for (int i = 0; i < 10; ++i)
+        cache.advance();
 
     // With sliding-window shift, position stays at max_length once full
     // (all slots visible, new entries written at tail after shift)
@@ -156,8 +147,7 @@ static void test_max_position_clamp()
     // Verify mask: all max_length slots + current slot should be visible
     std::vector<float> mask;
     cache.build_attention_mask(mask);
-    for (int i = 0; i < cache.max_length(); ++i)
-    {
+    for (int i = 0; i < cache.max_length(); ++i) {
         check(mask[i] == 0.0f, "full cache: all cached slots visible");
     }
     check(mask.back() == 0.0f, "full cache: current slot visible");
@@ -165,9 +155,7 @@ static void test_max_position_clamp()
     cudaStreamDestroy(stream);
 }
 
-
-int main()
-{
+int main() {
     test_construction();
     test_attention_mask_at_position_0();
     test_advance_and_position();
@@ -175,6 +163,7 @@ int main()
     test_direct_access();
     test_max_position_clamp();
 
-    if (failures > 0) std::cerr << failures << " test(s) FAILED\n";
+    if (failures > 0)
+        std::cerr << failures << " test(s) FAILED\n";
     return failures;
 }

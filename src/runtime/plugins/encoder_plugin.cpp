@@ -5,7 +5,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtf/runtime/pipeline_registry.h"
 
-
 namespace trtf {
 
 class EncoderPlugin final : public IPipelinePlugin {
@@ -36,4 +35,3 @@ static trtf::PluginRegistrar g_EncoderPlugin_reg1("encoder_only", &g_EncoderPlug
 static trtf::PluginRegistrar g_EncoderPlugin_reg2("embedding", &g_EncoderPlugin_instance);
 static trtf::PluginRegistrar g_EncoderPlugin_reg3("reranking", &g_EncoderPlugin_instance);
 static trtf::PluginRegistrar g_EncoderPlugin_reg4("neural_operator", &g_EncoderPlugin_instance);
-

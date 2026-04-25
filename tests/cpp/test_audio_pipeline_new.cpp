@@ -61,19 +61,6 @@
 // For full E2E validation with real models, see tests/test_e2e.py.
 // =============================================================================
 
-#include "runtime/pipelines/bark_pipeline.h"
-#include "runtime/pipelines/magpie_pipeline.h"
-#include "runtime/pipelines/omni_pipeline.h"
-#include "runtime/pipelines/speech_pipeline.h"
-#include "runtime/pipelines/whisper_pipeline.h"
-
-#include <cstdint>
-#include <iostream>
-#include <string>
-#include <string_view>
-#include <vector>
-
-
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/domains/audio/audio_configs.h"
@@ -81,13 +68,22 @@
 #include "runtime/domains/audio/whisper_config.h"
 #include "runtime/domains/audio/whisper_cross_kv_apply.h"
 #include "runtime/domains/audio/whisper_cross_kv_plan.h"
+#include "runtime/pipelines/bark_pipeline.h"
+#include "runtime/pipelines/magpie_pipeline.h"
+#include "runtime/pipelines/omni_pipeline.h"
+#include "runtime/pipelines/speech_pipeline.h"
+#include "runtime/pipelines/whisper_pipeline.h"
 #include "trtf/runtime/kv_cache.h"
 #include "trtf/runtime/trt_module.h"
 #include "trtf/tokenizer.h"
 
 #include <NvInfer.h>
+#include <cstdint>
 #include <cuda_runtime_api.h>
-
+#include <iostream>
+#include <string>
+#include <string_view>
+#include <vector>
 
 static int failures = 0;
 static void check(bool c, const char* n) {
@@ -96,7 +92,6 @@ static void check(bool c, const char* n) {
         ++failures;
     }
 }
-
 
 static trtf::TrtLogger g_logger;
 
@@ -776,7 +771,6 @@ static void test_whisper_cross_kv_invalid_plan() {
     check(!ok, "cross_kv_invalid: buffer_bytes=0 returns false");
     check(!error.empty(), "cross_kv_invalid: error message set");
 }
-
 
 int main() {
     test_whisper_transcribe();

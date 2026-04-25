@@ -4,9 +4,9 @@
 // Trace ID:       UT-CUDA-CPP-03
 // Architecture:   ARCH-MOD-001
 // Unit Design:    UD-TRT-CORE-01
-// Intent:         DeviceTensor allocation, H2D/D2H transfers, D2D copy, zeros factory, move semantics
-// Preconditions:  CUDA GPU available
-// Postconditions: Tensor allocates, transfers data correctly, moves without leak
+// Intent:         DeviceTensor allocation, H2D/D2H transfers, D2D copy, zeros factory, move
+// semantics Preconditions:  CUDA GPU available Postconditions: Tensor allocates, transfers data
+// correctly, moves without leak
 // =============================================================================
 
 // =============================================================================
@@ -23,25 +23,20 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <vector>
 
-#include <cuda_runtime_api.h>
-
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
 }
 
-
-static void test_basic_allocation()
-{
+static void test_basic_allocation() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -58,8 +53,7 @@ static void test_basic_allocation()
     cudaStreamDestroy(stream);
 }
 
-static void test_h2d_d2h_roundtrip()
-{
+static void test_h2d_d2h_roundtrip() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -82,8 +76,7 @@ static void test_h2d_d2h_roundtrip()
     cudaStreamDestroy(stream);
 }
 
-static void test_d2d_copy()
-{
+static void test_d2d_copy() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -106,8 +99,7 @@ static void test_d2d_copy()
     cudaStreamDestroy(stream);
 }
 
-static void test_zeros_factory()
-{
+static void test_zeros_factory() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -125,8 +117,7 @@ static void test_zeros_factory()
     cudaStreamDestroy(stream);
 }
 
-static void test_move_semantics()
-{
+static void test_move_semantics() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -147,8 +138,7 @@ static void test_move_semantics()
     cudaStreamDestroy(stream);
 }
 
-static void test_int32_dtype()
-{
+static void test_int32_dtype() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
@@ -169,9 +159,7 @@ static void test_int32_dtype()
     cudaStreamDestroy(stream);
 }
 
-
-int main()
-{
+int main() {
     test_basic_allocation();
     test_h2d_d2h_roundtrip();
     test_d2d_copy();
@@ -179,8 +167,7 @@ int main()
     test_move_semantics();
     test_int32_dtype();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
     }
     return failures;

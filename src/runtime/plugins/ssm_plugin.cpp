@@ -6,7 +6,6 @@
 #include "trtf/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-
 namespace trtf {
 
 class SsmPlugin final : public IPipelinePlugin {
@@ -49,4 +48,3 @@ volatile int kForceLink_SsmPlugin = 0;
 
 static trtf::SsmPlugin g_SsmPlugin_instance;
 static trtf::PluginRegistrar g_SsmPlugin_reg("ssm_recurrent", &g_SsmPlugin_instance);
-

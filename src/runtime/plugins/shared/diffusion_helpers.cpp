@@ -1,6 +1,5 @@
 #include "runtime/plugins/shared/diffusion_helpers.h"
 
-
 namespace trtf {
 
 DiffusionConfig make_diffusion_config(const std::string& json) {
@@ -72,4 +71,3 @@ DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
 }
 
 } // namespace trtf
-
