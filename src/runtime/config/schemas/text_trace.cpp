@@ -41,14 +41,5 @@ Schema make_text_trace_schema() {
     };
 }
 
-namespace {
-struct TextTraceRegistrar {
-    TextTraceRegistrar() { SchemaRegistry::instance().register_schema(make_text_trace_schema()); }
-};
-TextTraceRegistrar g_text_trace_registrar{};
-} // namespace
-} // namespace trtf::config::schemas
-
-namespace trtf::config::schemas {
-volatile int kForceLink_text_trace = 0;
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_text_trace, make_text_trace_schema);
 } // namespace trtf::config::schemas

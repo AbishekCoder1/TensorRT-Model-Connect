@@ -41,16 +41,5 @@ Schema make_audio_magpie_schema() {
     };
 }
 
-namespace {
-struct AudioMagpieRegistrar {
-    AudioMagpieRegistrar() {
-        SchemaRegistry::instance().register_schema(make_audio_magpie_schema());
-    }
-};
-AudioMagpieRegistrar g_audio_magpie_registrar{};
-} // namespace
-} // namespace trtf::config::schemas
-
-namespace trtf::config::schemas {
-volatile int kForceLink_audio_magpie = 0;
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_audio_magpie, make_audio_magpie_schema);
 } // namespace trtf::config::schemas

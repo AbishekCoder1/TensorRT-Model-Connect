@@ -33,17 +33,5 @@ Schema make_decode_policy_schema() {
     };
 }
 
-namespace {
-struct DecodePolicyRegistrar {
-    DecodePolicyRegistrar() {
-        SchemaRegistry::instance().register_schema(make_decode_policy_schema());
-    }
-};
-DecodePolicyRegistrar g_decode_policy_registrar{};
-} // namespace
-} // namespace trtf::config::schemas
-
-// Force-link anchor.
-namespace trtf::config::schemas {
-volatile int kForceLink_decode_policy = 0;
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_decode_policy, make_decode_policy_schema);
 } // namespace trtf::config::schemas

@@ -103,20 +103,5 @@ Schema make_triattention_schema() {
 } // namespace trtf::config::schemas
 
 namespace trtf::config::schemas {
-// Static-init registration. Wrapped in an anonymous namespace so there are
-// no symbol collisions between schema files.
-namespace {
-struct TriAttentionRegistrar {
-    TriAttentionRegistrar() {
-        SchemaRegistry::instance().register_schema(make_triattention_schema());
-    }
-};
-TriAttentionRegistrar g_triattention_registrar{};
-} // namespace
-} // namespace trtf::config::schemas
-
-// Force-link anchor. Referenced by generated linker anchors so that static
-// libraries preserve this TU (and its static-init) in the final binary.
-namespace trtf::config::schemas {
-volatile int kForceLink_triattention = 0;
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_triattention, make_triattention_schema);
 } // namespace trtf::config::schemas

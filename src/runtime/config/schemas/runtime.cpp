@@ -19,14 +19,5 @@ Schema make_runtime_schema() {
     };
 }
 
-namespace {
-struct RuntimeRegistrar {
-    RuntimeRegistrar() { SchemaRegistry::instance().register_schema(make_runtime_schema()); }
-};
-RuntimeRegistrar g_runtime_registrar{};
-} // namespace
-} // namespace trtf::config::schemas
-
-namespace trtf::config::schemas {
-volatile int kForceLink_runtime = 0;
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_runtime, make_runtime_schema);
 } // namespace trtf::config::schemas

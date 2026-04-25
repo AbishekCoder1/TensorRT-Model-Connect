@@ -31,14 +31,5 @@ Schema make_platform_schema() {
     };
 }
 
-namespace {
-struct PlatformRegistrar {
-    PlatformRegistrar() { SchemaRegistry::instance().register_schema(make_platform_schema()); }
-};
-PlatformRegistrar g_platform_registrar{};
-} // namespace
-} // namespace trtf::config::schemas
-
-namespace trtf::config::schemas {
-volatile int kForceLink_platform = 0;
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_platform, make_platform_schema);
 } // namespace trtf::config::schemas

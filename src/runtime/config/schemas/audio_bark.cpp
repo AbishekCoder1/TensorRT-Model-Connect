@@ -22,14 +22,5 @@ Schema make_audio_bark_schema() {
     };
 }
 
-namespace {
-struct AudioBarkRegistrar {
-    AudioBarkRegistrar() { SchemaRegistry::instance().register_schema(make_audio_bark_schema()); }
-};
-AudioBarkRegistrar g_audio_bark_registrar{};
-} // namespace
-} // namespace trtf::config::schemas
-
-namespace trtf::config::schemas {
-volatile int kForceLink_audio_bark = 0;
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_audio_bark, make_audio_bark_schema);
 } // namespace trtf::config::schemas

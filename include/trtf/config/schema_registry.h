@@ -120,4 +120,17 @@ struct SchemaRegistrar {
         g_config_schema_registrar_##__COUNTER__(schema_literal);                                   \
     }
 
+// Register a schema factory and define its force-link symbol in one place.
+// The symbol name must match cmake/trtf_config_schemas.cmake.
+#define REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(ForceLinkSymbol, FactoryFn)                 \
+    namespace {                                                                                    \
+    struct ForceLinkSymbol##_SchemaRegistrar {                                                     \
+        ForceLinkSymbol##_SchemaRegistrar() {                                                      \
+            ::trtf::config::SchemaRegistry::instance().register_schema(FactoryFn());               \
+        }                                                                                          \
+    };                                                                                             \
+    static ForceLinkSymbol##_SchemaRegistrar g_##ForceLinkSymbol##_schema_registrar;               \
+    }                                                                                              \
+    volatile int ForceLinkSymbol = 0
+
 } // namespace trtf::config
