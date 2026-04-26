@@ -527,6 +527,7 @@ def build_bundle(
     # config.raw, same passthrough pattern.
     audio_magpie_max_source_positions: int = 0,
     diffusion_overrides: dict | None = None,
+    build_timing_path: str | None = None,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -539,7 +540,7 @@ def build_bundle(
     _setup_trt_import(rtx)
     model_dir_path = Path(model_dir)
     t0 = time.monotonic()
-    build_timing = _new_build_timing()
+    build_timing = _new_build_timing(build_timing_path)
     build_timing["model_dir"] = str(model_dir_path)
     build_timing["output_path"] = str(output_path)
     _write_build_timing(build_timing)
@@ -1225,6 +1226,7 @@ def build(
     force_manual_attention: bool = False,
     audio_magpie_max_source_positions: int = 0,
     diffusion_overrides: dict | None = None,
+    build_timing_path: str | None = None,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -1264,4 +1266,5 @@ def build(
                  triattention_disable_trig=triattention_disable_trig,
                  force_manual_attention=force_manual_attention,
                  audio_magpie_max_source_positions=audio_magpie_max_source_positions,
-                 diffusion_overrides=diffusion_overrides)
+                 diffusion_overrides=diffusion_overrides,
+                 build_timing_path=build_timing_path)

@@ -184,6 +184,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
             force_manual_attention=force_manual_attention,
             audio_magpie_max_source_positions=audio_magpie_max_source_positions,
+            build_timing_path=getattr(args, "build_timing_json", None),
             diffusion_overrides={
                 key: value
                 for key, value in {
@@ -608,6 +609,9 @@ def main() -> None:
                          help="Disable TriAttention's magnitude-based additive term")
     build_p.add_argument("--triattention-disable-trig", action="store_true",
                          help="Disable TriAttention's trig scoring term")
+    build_p.add_argument(
+        "--build-timing-json", default=None,
+        help="Write structured build timing JSON to this path")
 
     # Generic two-flag config surface. New features register a namespaced
     # schema and are consumed through these flags without growing the CLI.

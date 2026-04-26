@@ -4,20 +4,22 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
-import os
 from pathlib import Path
 import time
 from typing import Iterator
 
 
-BUILD_TIMING_ENV = "TRTF_BUILD_TIMING_JSON"
+_OUTPUT_PATH_KEY = "_output_path"
 
 
-def new_build_timing() -> dict:
-    return {
+def new_build_timing(output_path: str | Path | None = None) -> dict:
+    timing = {
         "schema_version": 1,
         "phases": {},
     }
+    if output_path is not None:
+        timing[_OUTPUT_PATH_KEY] = str(output_path)
+    return timing
 
 
 def add_build_timing(timing: dict | None, key: str, seconds: float) -> None:
@@ -27,16 +29,20 @@ def add_build_timing(timing: dict | None, key: str, seconds: float) -> None:
     phases[key] = float(phases.get(key, 0.0)) + float(seconds)
 
 
-def write_build_timing(timing: dict | None) -> None:
+def write_build_timing(
+    timing: dict | None,
+    output_path: str | Path | None = None,
+) -> None:
     if timing is None:
         return
-    path = os.environ.get(BUILD_TIMING_ENV, "").strip()
+    path = str(output_path or timing.get(_OUTPUT_PATH_KEY, "")).strip()
     if not path:
         return
     try:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(timing, indent=2, sort_keys=True), encoding="utf-8")
+        payload = {k: v for k, v in timing.items() if k != _OUTPUT_PATH_KEY}
+        p.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
         # Timing should never make a build fail.
         pass

@@ -77,7 +77,6 @@ _MIGRATED_RUNTIME_STRATEGIES = frozenset({
 })
 _NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
 _LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"
-_BUILD_TIMING_ENV = "TRTF_BUILD_TIMING_JSON"
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +312,7 @@ def _resolve_bundle(
     else:
         build_timing_path = Path(ctx.engine_dir) / f"{case.name}.build_timing.json"
     build_timing_path.parent.mkdir(parents=True, exist_ok=True)
-    env[_BUILD_TIMING_ENV] = str(build_timing_path)
+    cmd.extend(["--build-timing-json", str(build_timing_path)])
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=3600, env=env)
