@@ -197,17 +197,17 @@ def _build_bench_cmd(
     Returns (shell_command, metric_name).
     metric_name is 'tok/s', 'pipeline_ms', or 'rtf'.
     """
-    env = "TRTF_TRT_LOG_STDERR=1"
+    config_flags = "--set platform.trt_log_stderr=true"
     if gpu_argmax:
-        env += " TRTF_GPU_ARGMAX=1"
+        config_flags += " --set runtime.prefer_gpu_greedy=true"
     binary = "/tmp/build/trtf"
     hf = "--hf-python /opt/venv/bin/python"
 
     if mode == "decode" or pipeline_type in (
         "text_to_text", "vision_language", "seq2seq_encoder_decoder", "marian_translation"):
         # Autoregressive: trtf run → tok/s
-        cmd = (f'{env} {binary} run {bundle} '
-               f'--prompt "{prompt}" --max-new-tokens {max_tokens} {hf} 2>&1')
+        cmd = (f'{binary} run {bundle} '
+               f'--prompt "{prompt}" --max-new-tokens {max_tokens} {hf} {config_flags} 2>&1')
         return cmd, "tok/s"
 
     elif pipeline_type == "speech_to_text":

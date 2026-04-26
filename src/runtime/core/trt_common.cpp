@@ -4,6 +4,7 @@
 #include "runtime/core/trt_common.h"
 
 #include <algorithm>
+#include <cctype>
 
 namespace trtf {
 
@@ -24,9 +25,8 @@ const char* trt_severity_name(nvinfer1::ILogger::Severity severity) {
     }
 }
 
-// Process-wide TRT-logger state. Populated once from a call to
-// configure_trt_logger_from_registry() (invoked by the pipeline factory
-// when it resolves a ConfigBundle that has the platform.* namespace).
+// Process-wide TRT-logger state. Populated by configure_trt_logger() after
+// pipeline_factory resolves a ConfigBundle that has the platform.* namespace.
 // Defaults: verbose stderr stream is off; warnings and errors always
 // surface via the short "[trt] ..." path in TrtLogger::log.
 namespace {

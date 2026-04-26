@@ -311,7 +311,7 @@ and skip gracefully (exit 0).
 |------|---------------|:--:|
 | `test_trt_engine_lifecycle.cpp` | `layer_tensor_name`, constants | TRT |
 | `test_trt_engine_lifecycle_fake_engine.cpp` | Engine lifecycle with fake engines | TRT |
-| `test_trt_logger.cpp` | Severity names, error storage, env-var controls | TRT |
+| `test_trt_logger.cpp` | Severity names, error storage, explicit config controls | TRT |
 | `test_trt_module.cpp` | TrtModule construction, tensor binding, lifecycle | TRT |
 | `test_trt_runtime_lifetime.cpp` | TRT runtime lifetime management | TRT |
 | `test_decode_runtime.cpp` | Argmax, mask building | TRT |

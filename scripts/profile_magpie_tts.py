@@ -19,14 +19,13 @@ def profile_cpp_binary(bundle_path: str, trtf_binary: str, prompt: str,
     env = os.environ.copy()
     if greedy:
         env["TRTF_MAGPIE_GREEDY"] = "1"
-    # Enable verbose TRT logging for timing
-    env["TRTF_TRT_LOG_STDERR"] = "1"
 
     cmd = [
         trtf_binary, "generate-audio", bundle_path,
         "--prompt", prompt,
         "--output", "/tmp/magpie_profile_output.wav",
         "--max-new-tokens", str(max_new_tokens),
+        "--set", "platform.trt_log_stderr=true",
     ]
 
     results = []

@@ -5,8 +5,6 @@
 #include <NvInfer.h>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
 #include <memory>

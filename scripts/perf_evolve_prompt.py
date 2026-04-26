@@ -144,9 +144,10 @@ def build_evolve_prompt(
     Use the C++ binary for decode throughput (captures CUDA Graph benefits):
     ```bash
     docker exec {container} bash -c \\
-        'TRTF_TRT_LOG_STDERR=1 ./build/trtf run /tmp/evolve_test.trtfb \\
+        './build/trtf run /tmp/evolve_test.trtfb \\
          --prompt "The capital of France is" --max-new-tokens 100 \\
-         --hf-python /opt/venv/bin/python 2>&1 | grep "Decode:"'
+         --hf-python /opt/venv/bin/python \\
+         --set platform.trt_log_stderr=true 2>&1 | grep "Decode:"'
     ```
     Parse the output: `Decode: N tokens, X ms, Y tok/s [CUDA Graph ON]`
 
@@ -310,7 +311,7 @@ def _build_knowledge_base() -> str:
 
     | Technique | Level | Impact | How | Notes |
     |-----------|-------|--------|-----|-------|
-    | **GPU argmax** | L1 Runtime | **+30%** (0.6B), +7% (7B) | `TRTF_GPU_ARGMAX=1` | Eliminates D2H logit copy |
+    | **GPU argmax** | L1 Runtime | **+30%** (0.6B), +7% (7B) | `--set runtime.prefer_gpu_greedy=true` | Eliminates D2H logit copy |
     | **FP16** | L2 Precision | **+80% combined** | `--precision fp16` | Halves weights + kernel time |
     | CUDA Graphs | L1 Runtime | +10-15% | Enabled by default | Eliminates launch overhead |
     | BF16 | L2 Precision | ~FP16 | `--precision bf16` | Better numerical stability |
@@ -371,7 +372,7 @@ def _build_search_space(focus_area: str | None = None) -> str:
 
         **GPU-side Argmax (+30% for <1B models, +7% for 7B+) — opt-in**
 
-        Already implemented. Enable: `TRTF_GPU_ARGMAX=1`.
+        Already implemented. Enable: `--set runtime.prefer_gpu_greedy=true`.
         Eliminates D2H transfer of full logit vector (151K × 4B = 0.6MB per token).
         GPU kernel does parallel reduction, copies back only 4-byte token ID.
         Output is bit-identical to CPU argmax.
@@ -383,9 +384,11 @@ def _build_search_space(focus_area: str | None = None) -> str:
 
         **Benchmark with both enabled:**
         ```bash
-        TRTF_TRT_LOG_STDERR=1 TRTF_GPU_ARGMAX=1 ./build/trtf run /tmp/test.trtfb \\
+        ./build/trtf run /tmp/test.trtfb \\
             --prompt "The capital of France is" --max-new-tokens 100 \\
-            --hf-python /opt/venv/bin/python 2>&1 | grep "Decode:"
+            --hf-python /opt/venv/bin/python \\
+            --set platform.trt_log_stderr=true \\
+            --set runtime.prefer_gpu_greedy=true 2>&1 | grep "Decode:"
         ```
         """))
 

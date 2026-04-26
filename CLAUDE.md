@@ -221,8 +221,8 @@ preprocessing, CLI argument parsing, and helper utilities.
 | `test_text_parsers.cpp` | String/file parsing helpers | No |
 | `test_json_helpers.cpp` | JSON extraction helpers | No |
 | `test_cli_args.cpp` | CLI argument parsing | No |
-| `test_data_dir.cpp` | Source/scripts dir resolution, env overrides | No |
-| `test_trt_logger.cpp` | Severity names, error storage, env-var controls | TRT headers |
+| `test_data_dir.cpp` | Source/scripts dir resolution, config override | No |
+| `test_trt_logger.cpp` | Severity names, error storage, explicit config controls | TRT headers |
 | `test_trt_engine_lifecycle.cpp` | layer_tensor_name, constants | TRT headers |
 | `test_bundle_helpers.cpp` | find_bundle_sections for all bundle types | TRT headers |
 | `test_image_preprocessor.cpp` | All 4 strategies, config parsing, prompt formatting | No |
@@ -485,10 +485,12 @@ For vision-language models, pass `--image` with the path to an image file. The V
 
 For TRT-RTX bundles, `--runtime-cache PATH` persists JIT compilation results to disk (speeds up subsequent runs), and `--cuda-graphs` enables CUDA graph capture/replay for reduced kernel launch overhead.
 
-## Key environment variables
+## Runtime configuration
 
-- `TRTF_TRT_LOG_STDERR=1` / `TRTF_TRT_LOG_MIN_SEVERITY` - TRT logger controls
-- `TRTF_BACKEND_DIR` - override directory for backend DSO search (default: same directory as the `trtf` binary)
+Runtime knobs flow through bundle metadata and the generic config surface:
+`--config <file>` and repeated `--set namespace.field=value` overrides.
+TensorRT logger controls live under `platform.trt_log_stderr` and
+`platform.trt_log_min_severity`.
 
 ## Architecture
 
@@ -590,7 +592,6 @@ src/                                 # C++ bundle-only runtime
     backend/                         # Backend DSO implementations (dlopen-loaded)
       backend_loader.h/cpp           # dlopen dispatch, DSO caching
       trt_module_impl.h/cpp          # TrtModuleImpl : ITrtModule (compiled into both DSOs)
-      trt_logger.h/cpp               # TrtLogger (DSO-internal, moved from trt_common)
       trt_backend.cpp                # Standard TRT IBackend → libtrtf_backend_trt.so
       rtx_backend.cpp                # TRT-RTX IBackend → libtrtf_backend_trt_rtx.so
     plugins/                         # Self-registering pipeline plugins (strategy → pipeline factories)

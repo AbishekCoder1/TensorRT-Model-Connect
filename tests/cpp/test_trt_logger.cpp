@@ -4,20 +4,19 @@
 // Trace ID:       UT-LOG-CPP-01
 // Architecture:   ARCH-MOD-001
 // Unit Design:    UD-TRT-CORE-01
-// Intent:         TRT logger severity names, error storage, env-var controls
+// Intent:         TRT logger severity names, error storage, explicit config controls
 // Preconditions:  TRT headers available
 // Postconditions: Logger stores errors and respects severity settings
 // =============================================================================
 
 // =============================================================================
-// test_trt_logger.cpp — Unit tests for TRT logger env-var helpers
+// test_trt_logger.cpp — Unit tests for TRT logger helpers
 // =============================================================================
 //
 // Purpose:
-//   Validates the environment-variable helper functions from trt_common.h/cpp
-//   that control TRT logging behavior. When TRTF_HAS_TRT is enabled, tests
-//   trt_log_to_stderr_enabled() and trt_log_stderr_min_severity(). When TRT
-//   headers are unavailable, the test reports a skip (exit 0).
+//   Validates the helper functions from trt_common.h/cpp that control TRT
+//   logging behavior. Runtime configuration flows through configure_trt_logger()
+//   after platform.* schema resolution, not through process environment.
 //
 // Dependencies:
 //   - runtime/core/trt_common.h (trt_log_to_stderr_enabled,
@@ -25,20 +24,10 @@
 //
 // Environment:
 //   CPU-only. No GPU or CUDA runtime required.
-//   Env vars TRTF_TRT_LOG_STDERR and TRTF_TRT_LOG_MIN_SEVERITY are tested.
-//
-// Note:
-//   The functions trt_log_to_stderr_enabled() and trt_log_stderr_min_severity()
-//   use static local variables that are initialized once. Because of this
-//   one-shot initialization, we cannot test multiple env-var values in the
-//   same process. Instead we test the value that was set at process start.
-//   The CMake test infrastructure can run separate processes with different
-//   env settings if needed.
 // =============================================================================
 
 #include "runtime/core/trt_common.h"
 
-#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -108,12 +97,20 @@ static void test_logger_null_msg() {
     check(logger.last_error().empty(), "logger null msg ignored");
 }
 
-static void test_log_to_stderr_returns_bool() {
-    // Just verify the function returns without crashing and gives a bool.
-    const bool result = trtf::trt_log_to_stderr_enabled();
-    // The result depends on TRTF_TRT_LOG_STDERR env var at static init time.
-    // We just verify it is callable and returns a consistent value.
-    check(result == trtf::trt_log_to_stderr_enabled(), "log_to_stderr consistent");
+static void test_log_config_defaults_and_updates() {
+    trtf::configure_trt_logger(false, "INFO");
+    check(!trtf::trt_log_to_stderr_enabled(), "log_to_stderr default false");
+    check(trtf::trt_log_stderr_min_severity() == nvinfer1::ILogger::Severity::kINFO,
+          "min_severity default INFO");
+
+    trtf::configure_trt_logger(true, "warning");
+    check(trtf::trt_log_to_stderr_enabled(), "log_to_stderr configured true");
+    check(trtf::trt_log_stderr_min_severity() == nvinfer1::ILogger::Severity::kWARNING,
+          "min_severity configured case-insensitive WARNING");
+
+    trtf::configure_trt_logger(true, "not-a-severity");
+    check(trtf::trt_log_stderr_min_severity() == nvinfer1::ILogger::Severity::kINFO,
+          "unknown min_severity falls back to INFO");
 }
 
 static void test_min_severity_returns_valid() {
@@ -138,7 +135,7 @@ int main() {
     test_logger_ignores_info();
     test_logger_overwrites_error();
     test_logger_null_msg();
-    test_log_to_stderr_returns_bool();
+    test_log_config_defaults_and_updates();
     test_min_severity_returns_valid();
 
     if (failures > 0) {

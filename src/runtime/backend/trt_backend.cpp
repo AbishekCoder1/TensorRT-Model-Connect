@@ -4,7 +4,7 @@
 #include "trtf/runtime/trt_backend.h"
 
 #include "runtime/core/cuda_common.h"
-#include "trt_logger.h"
+#include "runtime/core/trt_common.h"
 #include "trt_module_impl.h"
 
 #include <NvInfer.h>
