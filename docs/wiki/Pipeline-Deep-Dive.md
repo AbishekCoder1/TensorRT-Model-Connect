@@ -131,21 +131,21 @@ parsing its own strategy-specific config fields from the raw JSON, extracting
 needed sections from the bundle, loading TRT engines, creating tokenizers and
 caches, and returning a fully constructed pipeline.
 
-### Self-Registration
+### Manifest Registration
 
-Plugins register themselves at static-init time via the registry macro:
+Plugins expose a registrar function via the registry macro:
 
 ```cpp
 // In decoder_plugin.cpp, inside namespace trtf:
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_DecoderPlugin, DecoderPlugin,
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_decoder_plugin, DecoderPlugin,
                                          "decoder_kv_cache", "decoder_moe");
 ```
 
-The `REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK` macro in `pipeline_registry.h`
-combines static registration with the force-link symbol expected by the manifest.
+The `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST` macro in `pipeline_registry.h`
+defines the function expected by the manifest-generated registrar source.
 
-`cmake/trtf_pipeline_plugins.cmake` generates the force-link source that keeps
-self-registering plugin translation units in the binary.
+`cmake/trtf_pipeline_plugins.cmake` generates the source that calls every
+listed registrar explicitly.
 
 ### 25 Registered Strategies (20 plugin files, 14 pipeline implementations)
 

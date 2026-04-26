@@ -41,5 +41,5 @@ Schema make_text_trace_schema() {
     };
 }
 
-REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_text_trace, make_text_trace_schema);
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_text_trace_schema, make_text_trace_schema);
 } // namespace trtf::config::schemas

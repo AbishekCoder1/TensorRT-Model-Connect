@@ -118,6 +118,6 @@ class BarkPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_BarkPlugin, BarkPlugin, "text_to_audio_bark");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_bark_plugin, BarkPlugin, "text_to_audio_bark");
 
 } // namespace trtf

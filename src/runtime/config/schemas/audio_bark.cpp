@@ -22,5 +22,5 @@ Schema make_audio_bark_schema() {
     };
 }
 
-REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_audio_bark, make_audio_bark_schema);
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_audio_bark_schema, make_audio_bark_schema);
 } // namespace trtf::config::schemas

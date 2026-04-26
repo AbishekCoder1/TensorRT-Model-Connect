@@ -94,6 +94,6 @@ class ZImagePlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_ZImagePlugin, ZImagePlugin, "diffusion_zimage");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_zimage_plugin, ZImagePlugin, "diffusion_zimage");
 
 } // namespace trtf

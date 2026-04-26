@@ -4,7 +4,7 @@ Status of non-standard architecture support. MoE, Mamba/SSM, vision-language (Qw
 
 ## Executive Summary
 
-With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by a C++ plugin in `src/runtime/plugins/`. New strategy/state types require a new C++ plugin file in `src/runtime/plugins/` with self-registration via `PluginRegistrar` -- no edits to `pipeline_factory.cpp` are needed.
+With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by a C++ plugin in `src/runtime/plugins/`. New strategy/state types require a new C++ plugin file in `src/runtime/plugins/` plus one manifest entry in `cmake/trtf_pipeline_plugins.cmake` -- no edits to `pipeline_factory.cpp` are needed.
 
 As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support are **fully implemented**. The standard decoder builder is parameterized to support LayerNorm, GELU, learned positions, and multiple activations. The VL image preprocessor supports 4 strategies with configurable interpolation. The diffusion pipeline supports text-to-video with T5 encoding, DiT denoising, and causal 3D VAE decoding.
 
@@ -62,7 +62,7 @@ Write a Python family plugin that composes the shared builders (`t5_encoder_buil
 
 ### Different state management (done for Mamba/SSM/RWKV/Hybrid)
 
-The C++ runtime supports multiple state management patterns via the plugin registry. Each plugin in `src/runtime/plugins/` self-registers for one or more `runtime_strategy` strings. 25 strategies are currently registered across 20 plugin files:
+The C++ runtime supports multiple state management patterns via the plugin registry. Each plugin in `src/runtime/plugins/` exposes a manifest-listed registrar for one or more `runtime_strategy` strings. 25 strategies are currently registered across 20 plugin files:
 - `decoder_kv_cache` / `decoder_moe` -> `decoder_plugin.cpp` -> `TextGenerationPipeline` + `KvCache`
 - `ssm_recurrent` -> `ssm_plugin.cpp` -> `RecurrentPipeline` + `RecurrentStateManager`
 - `rwkv_recurrent` -> `rwkv_plugin.cpp` -> `RecurrentPipeline` + `RecurrentStateManager`
@@ -72,7 +72,7 @@ The C++ runtime supports multiple state management patterns via the plugin regis
 
 New state types require:
 1. A new plugin `.cpp` file in `src/runtime/plugins/` implementing `IPipelinePlugin`
-2. Self-registration via `REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK`
+2. Manifest registration via `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`
 3. A source/symbol entry in `cmake/trtf_pipeline_plugins.cmake`
 4. A new or existing pipeline class in `src/runtime/pipelines/`
 

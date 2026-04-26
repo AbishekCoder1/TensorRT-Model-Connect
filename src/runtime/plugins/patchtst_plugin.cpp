@@ -72,7 +72,7 @@ class PatchTSTPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_PatchTSTPlugin, PatchTSTPlugin,
-                                         "patchtst_torchtrt");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_patchtst_plugin, PatchTSTPlugin,
+                                       "patchtst_torchtrt");
 
 } // namespace trtf

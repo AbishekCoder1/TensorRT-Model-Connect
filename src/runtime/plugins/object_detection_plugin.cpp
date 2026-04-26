@@ -24,7 +24,7 @@ class ObjectDetectionPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_ObjectDetectionPlugin, ObjectDetectionPlugin,
-                                         "object_detection");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_object_detection_plugin, ObjectDetectionPlugin,
+                                       "object_detection");
 
 } // namespace trtf

@@ -71,6 +71,6 @@ class WhisperPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_WhisperPlugin, WhisperPlugin, "speech_to_text");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_whisper_plugin, WhisperPlugin, "speech_to_text");
 
 } // namespace trtf

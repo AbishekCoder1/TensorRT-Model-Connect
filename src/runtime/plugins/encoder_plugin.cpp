@@ -26,7 +26,7 @@ class EncoderPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_EncoderPlugin, EncoderPlugin, "encoder_only",
-                                         "embedding", "reranking", "neural_operator");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_encoder_plugin, EncoderPlugin, "encoder_only",
+                                       "embedding", "reranking", "neural_operator");
 
 } // namespace trtf

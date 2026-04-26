@@ -29,6 +29,6 @@ class WanPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_WanPlugin, WanPlugin, "diffusion_wan");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_wan_plugin, WanPlugin, "diffusion_wan");
 
 } // namespace trtf

@@ -17,7 +17,7 @@
 >
 > The plugin-registry architecture described in this document has been
 > fully implemented. The `PipelineRegistry` singleton, `IPipelinePlugin`
-> interface, `PluginRegistrar` self-registration, and `BaseConfig` parsing
+> interface, manifest registration, and `BaseConfig` parsing
 > are all in the codebase. `PipelineFactory::from_bundle()` is now a thin
 > ~124 LOC wrapper that delegates to registry-resolved plugins.
 > See [Pipeline Deep Dive](Pipeline-Deep-Dive.md) for implementation details.
@@ -54,11 +54,11 @@ Key files:
 |------|------|
 | `include/trtf/runtime/pipeline_factory.h` | `PipelineFactory::from_bundle()` declaration |
 | `src/runtime/registry/pipeline_factory.cpp` | Thin dispatch: read strategy, lookup plugin, delegate (~124 LOC) |
-| `include/trtf/runtime/pipeline_registry.h` | `PipelineRegistry` singleton, `PluginRegistrar`, macros |
+| `include/trtf/runtime/pipeline_registry.h` | `PipelineRegistry` singleton, manifest registration macro |
 | `src/runtime/registry/pipeline_registry.cpp` | Registry implementation |
 | `include/trtf/runtime/pipeline_plugin.h` | `IPipelinePlugin`, `BaseConfig`, `PipelineContext` |
 | `src/runtime/registry/pipeline_plugin.cpp` | `parse_base_config()` |
-| `src/runtime/plugins/*.cpp` | Self-registering plugin files (25 strategies) |
+| `src/runtime/plugins/*.cpp` | Manifest-registered plugin files (25 strategies) |
 | `src/runtime/plugins/shared/` | Shared helpers: `plugin_helpers`, `diffusion_helpers`, `audio_helpers` |
 | `cmake/trtf_pipeline_plugins.cmake` | Plugin source/anchor manifest |
 | `src/cabi/api/trtf_c.cpp` | C ABI entry point, calls `PipelineFactory::from_bundle()` |
@@ -124,7 +124,7 @@ struct BaseConfig {
 
 Each plugin is a single `.cpp` file in `src/runtime/plugins/` that:
 
-- Registers itself via `PluginRegistrar` at static-init time (file scope)
+- Exposes a manifest-listed registrar function
 - Parses strategy-specific config from raw JSON in `create()`
 - Extracts bundle sections via `find_section()`
 - Loads TRT engines, creates tokenizers and caches
@@ -162,7 +162,7 @@ All phases have been **completed**.
 
 - Defined `IPipelinePlugin` interface in `include/trtf/runtime/pipeline_plugin.h`.
 - Implemented `PipelineRegistry` singleton in `include/trtf/runtime/pipeline_registry.h`.
-- Added `PluginRegistrar` helper and `REGISTER_PIPELINE_PLUGIN` / `REGISTER_PIPELINE_PLUGIN_MULTI` macros.
+- Added `PipelineRegistry` and initial registration macros.
 
 ### Phase 2: Decompose FastPathModelConfig -- DONE
 
@@ -172,7 +172,7 @@ All phases have been **completed**.
 
 ### Phase 3: Migrate strategies to plugins -- DONE
 
-- All 25 strategies migrated to self-registering plugin files in `src/runtime/plugins/`.
+- All 25 strategies migrated to manifest-registered plugin files in `src/runtime/plugins/`.
 - Shared helpers factored into `src/runtime/plugins/shared/`.
 
 ### Phase 4: Simplify pipeline_factory.cpp -- DONE
@@ -180,10 +180,10 @@ All phases have been **completed**.
 - `PipelineFactory::from_bundle()` is now ~124 LOC: read strategy, normalize legacy strings, lookup plugin, delegate.
 - No `resolve_family()` enum, no `StrategyFamily`, no `create_*_pipeline()` functions.
 
-### Phase 5: Plugin self-registration -- DONE
+### Phase 5: Plugin manifest registration -- DONE
 
-- Each plugin registers via `REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK` at static-init time.
-- `cmake/trtf_pipeline_plugins.cmake` drives source inclusion and generated linker retention.
+- Each plugin exposes a registrar function via `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`.
+- `cmake/trtf_pipeline_plugins.cmake` drives source inclusion and generated registrar calls.
 - External out-of-tree plugins are now architecturally possible.
 
 ## 5. C ABI Stability Constraint
@@ -219,4 +219,4 @@ Additionally, each new plugin should have:
 - This is **not** the current architecture. See [Architecture Overview](Architecture-Overview.md).
 - This is **not** an approved migration plan with a schedule. It is a design target.
 - This does **not** describe PipelineRouter, PipelineServices, StrategyBuilder, or service-composed runtime patterns. Those concepts do not exist in the codebase and are not part of this target.
-- This document now describes the **implemented** plugin-registry architecture. The migration is complete. `PipelineFactory::from_bundle()` is a thin wrapper that delegates to 20 self-registering plugins handling 25 strategies across 84 model manifests.
+- This document now describes the **implemented** plugin-registry architecture. The migration is complete. `PipelineFactory::from_bundle()` is a thin wrapper that delegates to 20 manifest-registered plugins handling 25 strategies across 84 model manifests.

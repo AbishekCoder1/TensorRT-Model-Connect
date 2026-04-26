@@ -19,5 +19,5 @@ Schema make_runtime_schema() {
     };
 }
 
-REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_runtime, make_runtime_schema);
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_runtime_schema, make_runtime_schema);
 } // namespace trtf::config::schemas

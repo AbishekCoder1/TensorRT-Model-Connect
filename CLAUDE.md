@@ -509,7 +509,7 @@ The system is split into two stages:
 
 All pipelines interact with TRT engines through `ITrtModule`, a pure virtual interface declared in `include/trtf/runtime/trt_module.h`. The concrete implementation (`TrtModuleImpl`) lives inside the backend DSOs. Each DSO exports an `IBackend` factory that creates `ITrtModule` instances with backend-specific options (e.g., runtime cache path, CUDA graph enablement).
 
-**Plugin registry dispatch:** The `runtime_strategy` field in the bundle's `config.json` selects the backend via `PipelineRegistry` — a singleton that maps strategy strings to self-registering `IPipelinePlugin` instances. Each plugin lives in its own `.cpp` file under `src/runtime/plugins/` and registers at static-init time via the `REGISTER_PIPELINE_PLUGIN` macro. The registry and factory live in `src/runtime/registry/` — `pipeline_factory.cpp` is ~124 LOC: it reads the bundle, extracts the strategy, normalizes legacy strategy strings (e.g. `"diffusion"` → `"diffusion_flux"`), looks up the plugin, and calls `plugin->create(ctx)`. No switch/case, no edits needed when adding new strategies.
+**Plugin registry dispatch:** The `runtime_strategy` field in the bundle's `config.json` selects the backend via `PipelineRegistry` — a singleton that maps strategy strings to `IPipelinePlugin` instances. Each plugin lives in its own `.cpp` file under `src/runtime/plugins/`; the CMake manifest generates explicit registrar calls for those plugins. The registry and factory live in `src/runtime/registry/` — `pipeline_factory.cpp` is ~124 LOC: it reads the bundle, extracts the strategy, normalizes legacy strategy strings (e.g. `"diffusion"` → `"diffusion_flux"`), looks up the plugin, and calls `plugin->create(ctx)`. No switch/case, no edits needed when adding new strategies.
 
 **Runtime strategies (17 registered):**
 | Strategy | Plugin | Pipeline |
@@ -578,7 +578,7 @@ trtf_build/                          # Python package (engine builder)
 include/trtf/runtime/                # Public C++ headers (plugin system)
   pipeline_factory.h                 # PipelineFactory::from_bundle()
   pipeline_plugin.h                  # IPipelinePlugin interface, BaseConfig, PipelineContext
-  pipeline_registry.h                # PipelineRegistry singleton, REGISTER_PIPELINE_PLUGIN macro
+  pipeline_registry.h                # PipelineRegistry singleton, manifest registration macro
   trt_module.h                       # ITrtModule pure virtual interface (forward, forward_device, bind)
   trt_backend.h                      # IBackend interface + ModuleCreateOptions
 src/                                 # C++ bundle-only runtime
@@ -590,7 +590,7 @@ src/                                 # C++ bundle-only runtime
     registry/                        # Factory + plugin dispatch
       pipeline_factory.cpp           # Registry-based dispatch (~124 LOC, no switch/case)
       pipeline_plugin.cpp            # BaseConfig parsing (parse_base_config)
-      pipeline_registry.cpp          # Singleton registry + force_link_all_plugins() call
+      pipeline_registry.cpp          # Singleton registry + generated plugin registration
     backend/                         # Backend DSO implementations (dlopen-loaded)
       backend_loader.h/cpp           # dlopen dispatch, DSO caching
       trt_module_impl.h/cpp          # TrtModuleImpl : ITrtModule (compiled into both DSOs)
@@ -973,18 +973,18 @@ When a model family requires fundamentally different runtime behavior (new state
    };
    } // namespace trtf
 
-   // Self-register at static-init time (inside namespace trtf):
-   REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_MyPlugin, MyPlugin, "my_strategy");
+   // Register through the generated plugin manifest (inside namespace trtf):
+   REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_my_plugin, MyPlugin, "my_strategy");
    // Or for multiple strategies:
-   // REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_MyPlugin, MyPlugin,
+   // REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_my_plugin, MyPlugin,
    //                                          "strategy_a", "strategy_b");
    ```
 
 2. **Add one manifest entry** to `cmake/trtf_pipeline_plugins.cmake`:
-   `my_plugin.cpp|kForceLink_MyPlugin`.
+   `my_plugin.cpp|register_my_plugin`.
 
 3. Reconfigure/rebuild. The manifest adds the `.cpp` to `trtf_core` and
-   generates the linker anchors.
+   generates the explicit registrar call.
 
 4. **Create or reuse a pipeline class** in `src/runtime/pipelines/` that implements `IPipeline`.
 

@@ -8,7 +8,7 @@
 #                 feature's schema diverge, runtime merges silently produce
 #                 different results — this test catches that at PR time.
 # Preconditions:  trtf test binary built (so the registry state reflects
-#                 static-init registrations).
+#                 generated manifest registrations).
 # Postconditions: For every namespace registered on either side, field
 #                 names and types match. Missing namespaces on one side
 #                 fail the test.

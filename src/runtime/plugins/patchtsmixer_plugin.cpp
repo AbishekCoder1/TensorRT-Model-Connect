@@ -18,7 +18,7 @@ class PatchTSMixerPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_PatchTSMixerPlugin, PatchTSMixerPlugin,
-                                         "patchtsmixer_torchtrt");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_patchtsmixer_plugin, PatchTSMixerPlugin,
+                                       "patchtsmixer_torchtrt");
 
 } // namespace trtf

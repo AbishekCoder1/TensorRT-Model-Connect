@@ -1,13 +1,13 @@
 #pragma once
 
 // Config schema registry: singleton that maps namespace strings to schema
-// definitions. Features self-register their schemas at static-init time via
-// the REGISTER_CONFIG_SCHEMA macro. Mirrors the PipelineRegistry pattern so
-// parallel agents can add features in isolation without touching any shared
-// dispatcher, CLI parser, or registry-of-registries.
+// definitions. Built-in schemas register through the generated CMake manifest
+// source. Mirrors the PipelineRegistry pattern so parallel agents can add
+// features in isolation without touching any shared dispatcher, CLI parser, or
+// registry-of-registries.
 //
 // Design contract (see docs/context/2026-04-20-config-registry-status.md):
-//   - Static init: registers *schemas* (field metadata + defaults). No values.
+//   - Registration: catalogs *schemas* (field metadata + defaults). No values.
 //   - Session start: the pipeline factory resolves a ConfigBundle by merging
 //     layers (session > platform > bundle defaults > schema defaults) against
 //     registered schemas, then attaches it to PipelineContext.
@@ -67,9 +67,9 @@ class SchemaRegistry {
   public:
     static SchemaRegistry& instance();
 
-    // Register a schema for a namespace. Called at static-init time by
-    // REGISTER_CONFIG_SCHEMA. Throws on duplicate namespace, empty namespace,
-    // or empty field list.
+    // Register a schema for a namespace. Built-in schemas arrive through
+    // generated manifest registrar calls. Throws on duplicate namespace, empty
+    // namespace, or empty field list.
     void register_schema(Schema schema);
 
     // Look up the schema for a namespace. Returns nullptr if the namespace
@@ -89,16 +89,17 @@ class SchemaRegistry {
     std::unordered_map<std::string, Schema> schemas_;
 };
 
-// Helper: registers a schema at static-init time. The macro below expands to
-// a file-scope instance of this struct.
+// Legacy helper for ad hoc tests or local extensions that still rely on
+// file-scope registration. Built-in schemas use manifest registration below.
 struct SchemaRegistrar {
     SchemaRegistrar(Schema schema) {
         SchemaRegistry::instance().register_schema(std::move(schema));
     }
 };
 
-// Register a schema for a namespace. Usage (at file scope, typically in a
-// generated header or a hand-written schema source):
+// Legacy macro: register a schema for a namespace at process startup. Usage
+// (at file scope, typically in a generated header or a hand-written schema
+// source):
 //
 //   REGISTER_CONFIG_SCHEMA(::trtf::config::Schema{
 //       "triattention",
@@ -111,21 +112,19 @@ struct SchemaRegistrar {
 //   });
 //
 // The schema object is a temporary; the registrar copies/moves it into the
-// registry. Duplicate namespaces throw at static-init time, which surfaces
-// as a crash at process start — exactly what you want for a registration
-// collision between parallel agents.
+// registry. Duplicate namespaces throw at process start, which surfaces a
+// registration collision between parallel agents immediately.
 #define REGISTER_CONFIG_SCHEMA(schema_literal)                                                     \
     namespace {                                                                                    \
     static ::trtf::config::SchemaRegistrar                                                         \
         g_config_schema_registrar_##__COUNTER__(schema_literal);                                   \
     }
 
-// Register a schema factory and define its force-link symbol in one place.
-// The symbol name must match cmake/trtf_config_schemas.cmake.
-#define REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(ForceLinkSymbol, FactoryFn)                 \
-    namespace {                                                                                    \
-    static ::trtf::config::SchemaRegistrar g_##ForceLinkSymbol##_schema_registrar(FactoryFn());    \
-    }                                                                                              \
-    volatile int ForceLinkSymbol = 0
+// Define a schema factory registration function consumed by the generated
+// manifest source. The function name must match cmake/trtf_config_schemas.cmake.
+#define REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(RegisterFunction, FactoryFn)                  \
+    void RegisterFunction(::trtf::config::SchemaRegistry& registry) {                              \
+        registry.register_schema(FactoryFn());                                                     \
+    }
 
 } // namespace trtf::config

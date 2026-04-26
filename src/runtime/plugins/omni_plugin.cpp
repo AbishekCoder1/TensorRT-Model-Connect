@@ -80,6 +80,6 @@ class OmniPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_OmniPlugin, OmniPlugin, "omni_multimodal");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_omni_plugin, OmniPlugin, "omni_multimodal");
 
 } // namespace trtf

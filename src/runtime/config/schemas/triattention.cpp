@@ -103,5 +103,6 @@ Schema make_triattention_schema() {
 } // namespace trtf::config::schemas
 
 namespace trtf::config::schemas {
-REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_triattention, make_triattention_schema);
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_triattention_schema,
+                                             make_triattention_schema);
 } // namespace trtf::config::schemas

@@ -39,7 +39,7 @@ class ChronosBoltPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_ChronosBoltPlugin, ChronosBoltPlugin,
-                                         "chronos_bolt_torchtrt");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_chronos_bolt_plugin, ChronosBoltPlugin,
+                                       "chronos_bolt_torchtrt");
 
 } // namespace trtf

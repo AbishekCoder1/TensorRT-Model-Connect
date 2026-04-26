@@ -234,7 +234,7 @@ class Seq2SeqPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_Seq2SeqPlugin, Seq2SeqPlugin,
-                                         "seq2seq_encoder_decoder");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_seq2seq_plugin, Seq2SeqPlugin,
+                                       "seq2seq_encoder_decoder");
 
 } // namespace trtf

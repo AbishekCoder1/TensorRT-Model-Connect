@@ -61,6 +61,6 @@ class SpeechPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_SpeechPlugin, SpeechPlugin, "speech_to_speech");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_speech_plugin, SpeechPlugin, "speech_to_speech");
 
 } // namespace trtf

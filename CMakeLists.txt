@@ -144,7 +144,7 @@ add_library(trtf_core
   src/runtime/config/schema_registry.cpp
   src/runtime/config/config_bundle.cpp
   src/runtime/config/cli_support.cpp
-  ${TRTF_CONFIG_SCHEMA_FORCE_LINK_SOURCE}
+  ${TRTF_CONFIG_SCHEMA_REGISTRATION_SOURCE}
   ${TRTF_CONFIG_SCHEMA_SOURCES}
   # Registry (factory + plugin dispatch)
   src/runtime/registry/pipeline_factory.cpp
@@ -154,7 +154,7 @@ add_library(trtf_core
   src/runtime/plugins/shared/plugin_helpers.cpp
   src/runtime/plugins/shared/diffusion_helpers.cpp
   src/runtime/plugins/shared/audio_helpers.cpp
-  ${TRTF_PIPELINE_PLUGIN_FORCE_LINK_SOURCE}
+  ${TRTF_PIPELINE_PLUGIN_REGISTRATION_SOURCE}
   ${TRTF_PIPELINE_PLUGIN_SOURCES}
   # Pipeline implementations
   src/runtime/pipelines/text_generation_pipeline.cpp

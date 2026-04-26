@@ -30,7 +30,6 @@ class TimesFmPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_TimesFmPlugin, TimesFmPlugin,
-                                         "timesfm_torchtrt");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_timesfm_plugin, TimesFmPlugin, "timesfm_torchtrt");
 
 } // namespace trtf

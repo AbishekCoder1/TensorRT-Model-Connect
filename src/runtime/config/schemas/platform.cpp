@@ -31,5 +31,5 @@ Schema make_platform_schema() {
     };
 }
 
-REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_platform, make_platform_schema);
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_platform_schema, make_platform_schema);
 } // namespace trtf::config::schemas

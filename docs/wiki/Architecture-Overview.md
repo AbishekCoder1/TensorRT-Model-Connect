@@ -25,10 +25,10 @@ This document defines the software architectural design for the trt-transformers
 The scope covers:
 
 - The Python builder package (`trtf_build/`) and its plugin-based family architecture.
-- The C++ runtime and its self-registering plugin-based pipeline dispatch.
+- The C++ runtime and its manifest-registered plugin-based pipeline dispatch.
 - The `.trtfb` bundle format that bridges the two phases.
 - Core runtime abstractions: `TrtModule`, `KvCache`, `RecurrentState`.
-- All 14 concrete pipeline implementations and 25 runtime strategies dispatched via a self-registering plugin registry.
+- All 14 concrete pipeline implementations and 25 runtime strategies dispatched via a manifest-registered plugin registry.
 
 ---
 
@@ -200,21 +200,21 @@ The factory is the single entry point for creating pipelines from bundles. It pe
 2. Extract `config.json` section from the bundle.
 3. `extract_json_string()` -- read the `runtime_strategy` field.
 4. `normalize_legacy_strategy()` -- rewrite legacy ambiguous strategy strings (e.g., `"diffusion"` to `"diffusion_wan"`, `"text_to_audio"` to `"text_to_audio_bark"`).
-5. `PipelineRegistry::instance().lookup(strategy)` -- look up the self-registered plugin.
+5. `PipelineRegistry::instance().lookup(strategy)` -- look up the manifest-registered plugin.
 6. `parse_base_config()` -- parse universal config fields into `BaseConfig`.
 7. `plugin->create(ctx)` -- delegate pipeline construction to the plugin.
 
-**Self-registering plugin architecture**: Each plugin file in `src/runtime/plugins/` defines a class implementing `IPipelinePlugin` and registers it at static-init time via `REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK`:
+**Manifest-registered plugin architecture**: Each plugin file in `src/runtime/plugins/` defines a class implementing `IPipelinePlugin` and exposes a registrar function via `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`:
 
 ```cpp
 // Inside namespace trtf in each plugin .cpp:
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_DecoderPlugin, DecoderPlugin,
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_decoder_plugin, DecoderPlugin,
                                          "decoder_kv_cache", "decoder_moe");
 ```
 
-`PipelineRegistry` is a singleton mapping strategy strings to `IPipelinePlugin*` instances. Adding a new strategy requires only a new `.cpp` file -- no edits to `pipeline_factory.cpp` or any central dispatch logic.
+`PipelineRegistry` is a singleton mapping strategy strings to `IPipelinePlugin*` instances. Adding a new strategy requires only a new `.cpp` file plus one manifest entry -- no edits to `pipeline_factory.cpp` or any central dispatch logic.
 
-The plugin manifest `cmake/trtf_pipeline_plugins.cmake` lists each plugin source and force-link symbol. Functional plugin files register 25 strategy strings:
+The plugin manifest `cmake/trtf_pipeline_plugins.cmake` lists each plugin source and registrar function. Functional plugin files register 25 strategy strings:
 
 | Plugin File | Strategies Registered |
 |-------------|----------------------|
@@ -504,7 +504,7 @@ The former `FastPathModelConfig` monolithic struct has been replaced by `BaseCon
 
 ### 10.2 (Resolved) Centralized Pipeline Factory
 
-The former centralized `pipeline_factory.cpp` (~700 LOC) has been replaced by a registry-based dispatch (`src/runtime/registry/pipeline_factory.cpp`, ~124 LOC). Each strategy plugin self-registers via `PluginRegistrar` at static-init time. Adding a new strategy requires only a new `.cpp` file -- no edits to the factory or any central dispatch logic. This item is resolved.
+The former centralized `pipeline_factory.cpp` (~700 LOC) has been replaced by a registry-based dispatch (`src/runtime/registry/pipeline_factory.cpp`, ~124 LOC). Each strategy plugin exposes a registrar function listed in `cmake/trtf_pipeline_plugins.cmake`; the generated registrar source calls those functions explicitly. Adding a new strategy requires a new `.cpp` file and one manifest entry -- no edits to the factory or any central dispatch logic. This item is resolved.
 
 ### 10.3 Legacy Audio Backends
 
@@ -524,7 +524,7 @@ Some items below have been implemented (marked accordingly); the remaining items
 
 ### 11.1 (Implemented) Plugin Registry for C++ Runtime
 
-**STATUS: IMPLEMENTED.** The centralized `pipeline_factory.cpp` dispatch has been replaced by a `PipelineRegistry` singleton with self-registering `IPipelinePlugin` instances. See Section 4.3 for details.
+**STATUS: IMPLEMENTED.** The centralized `pipeline_factory.cpp` dispatch has been replaced by a `PipelineRegistry` singleton populated by generated manifest registrar calls. See Section 4.3 for details.
 
 ### 11.2 (Implemented) BaseConfig Decomposition
 
@@ -575,7 +575,7 @@ All paths below are relative to the repository root and have been verified to ex
 | `include/trtf/runtime/tensor.h` | Tensor, TensorMap, TensorInfo types |
 | `include/trtf/runtime/device_tensor.h` | DeviceTensor, DeviceTensorMap types |
 | `include/trtf/runtime/pipeline_factory.h` | PipelineFactory |
-| `include/trtf/runtime/pipeline_registry.h` | PipelineRegistry singleton, PluginRegistrar, REGISTER_PIPELINE_PLUGIN macro |
+| `include/trtf/runtime/pipeline_registry.h` | PipelineRegistry singleton, manifest registration macro |
 | `include/trtf/runtime/pipeline_plugin.h` | IPipelinePlugin interface, BaseConfig, PipelineContext |
 | `include/trtf/runtime/tokenizer_interface.h` | ITokenizer abstract interface (re-exported by `tokenizer.h`) |
 | `include/trtf/runtime/domains/audio/speech_decode_stop_policy.h` | Speech decode stop policy for audio pipelines |

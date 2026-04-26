@@ -317,6 +317,6 @@ class T5Plugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_T5Plugin, T5Plugin, "text_to_text");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_t5_plugin, T5Plugin, "text_to_text");
 
 } // namespace trtf

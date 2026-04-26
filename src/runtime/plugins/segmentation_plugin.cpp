@@ -38,7 +38,7 @@ class SegmentationPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_SegmentationPlugin, SegmentationPlugin,
-                                         "segmentation", "prompted_segmentation");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_segmentation_plugin, SegmentationPlugin,
+                                       "segmentation", "prompted_segmentation");
 
 } // namespace trtf

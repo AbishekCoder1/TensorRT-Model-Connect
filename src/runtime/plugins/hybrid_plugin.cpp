@@ -67,7 +67,7 @@ class HybridPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_HybridPlugin, HybridPlugin,
-                                         "hybrid_mamba_attention");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_hybrid_plugin, HybridPlugin,
+                                       "hybrid_mamba_attention");
 
 } // namespace trtf

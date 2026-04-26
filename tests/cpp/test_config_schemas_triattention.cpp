@@ -4,8 +4,8 @@
 // Trace ID:       UT-CFG-TRIATTN-CPP-01
 // Architecture:   ARCH-CFG-001
 // Unit Design:    UD-CFG-REG-01
-// Intent:         Verify the triattention schema static-init registration
-//                 survives the static-library link (force-link anchor works).
+// Intent:         Verify the triattention schema manifest registration
+//                 survives the static-library link.
 // Preconditions:  libtrtf_core linked; no prior SchemaRegistry mutation.
 // Postconditions: SchemaRegistry::instance().lookup("triattention") returns
 //                 a schema whose field set matches the declared fields.
@@ -35,12 +35,11 @@ using trtf::config::Layer;
 using trtf::config::Schema;
 using trtf::config::SchemaRegistry;
 
-void test_static_init_registered_triattention() {
-    // The generated schema force-link anchor pulls triattention.cpp into the
-    // binary even in a static-lib link, so its static-init registration should
-    // have run by the time main() starts.
+void test_manifest_registered_triattention() {
+    // The generated schema registrar references triattention.cpp directly,
+    // so it is linked and registered before the lookup below.
     const Schema* schema = SchemaRegistry::instance().lookup("triattention");
-    check(schema != nullptr, "static-init: triattention is registered");
+    check(schema != nullptr, "manifest: triattention is registered");
     if (schema == nullptr)
         return;
 
@@ -115,7 +114,7 @@ void test_make_triattention_schema_standalone() {
 } // namespace
 
 int main() {
-    test_static_init_registered_triattention();
+    test_manifest_registered_triattention();
     test_make_triattention_schema_standalone();
     if (g_failures != 0) {
         std::cerr << g_failures << " test(s) failed\n";

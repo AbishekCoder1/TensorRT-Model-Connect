@@ -5,15 +5,17 @@
 
 namespace trtf::config {
 
-// Force-link all schema TUs so the linker doesn't strip static-init
-// registrations when trtf_core is consumed as a static archive. Mirrors
-// the PipelineRegistry pattern in src/runtime/registry/pipeline_registry.cpp.
-extern volatile int* const* force_link_all_schemas();
-static volatile int* const* kSchemaAnchor = force_link_all_schemas();
+namespace schemas {
+void register_all_config_schemas(SchemaRegistry& registry);
+}
 
 SchemaRegistry& SchemaRegistry::instance() {
     static SchemaRegistry registry;
-    (void)kSchemaAnchor; // keep the reference alive under aggressive GC
+    static const bool registered = [] {
+        schemas::register_all_config_schemas(registry);
+        return true;
+    }();
+    (void)registered;
     return registry;
 }
 
@@ -31,7 +33,7 @@ void SchemaRegistry::register_schema(Schema schema) {
         }
         if (field.allowed_layers.count(Layer::SchemaDefault) != 0) {
             // SchemaDefault is the fallback, not a contribution. Rejecting at
-            // registration surfaces schema authoring mistakes at static-init.
+            // registration surfaces schema authoring mistakes at startup.
             throw std::invalid_argument(
                 "Field " + schema.namespace_name + "." + field.name +
                 " declares SchemaDefault in allowed_layers; that layer is reserved for "
@@ -45,8 +47,8 @@ void SchemaRegistry::register_schema(Schema schema) {
         }
     }
     if (schemas_.count(schema.namespace_name) != 0) {
-        // Duplicate namespace = two agents claimed the same name. Crash at
-        // static-init so the collision is visible immediately.
+        // Duplicate namespace = two agents claimed the same name. Surface the
+        // collision immediately during registry population.
         throw std::invalid_argument("Duplicate config schema for namespace: " +
                                     schema.namespace_name);
     }

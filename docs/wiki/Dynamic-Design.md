@@ -127,9 +127,9 @@ sequenceDiagram
 - `src/runtime/registry/pipeline_registry.cpp` -- `PipelineRegistry` singleton
 - `src/runtime/registry/pipeline_plugin.cpp` -- `parse_base_config()`
 - `include/trtf/runtime/pipeline_factory.h` -- `PipelineFactory` class declaration
-- `include/trtf/runtime/pipeline_registry.h` -- `PipelineRegistry`, `PluginRegistrar`, macros
+- `include/trtf/runtime/pipeline_registry.h` -- `PipelineRegistry`, manifest registration macro
 - `include/trtf/runtime/pipeline_plugin.h` -- `IPipelinePlugin`, `BaseConfig`, `PipelineContext`
-- `src/runtime/plugins/` -- 20 self-registering plugin files (25 strategies total)
+- `src/runtime/plugins/` -- 20 manifest-registered plugin files (25 strategies total)
 - `src/bundle/bundle_format.cpp` -- `ReadBundleFile()`, `HasBundleMagic()`
 
 ---

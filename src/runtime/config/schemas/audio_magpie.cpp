@@ -41,5 +41,6 @@ Schema make_audio_magpie_schema() {
     };
 }
 
-REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_audio_magpie, make_audio_magpie_schema);
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_audio_magpie_schema,
+                                             make_audio_magpie_schema);
 } // namespace trtf::config::schemas

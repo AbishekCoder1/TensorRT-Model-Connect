@@ -265,7 +265,7 @@ classDiagram
 
 - `PipelineRegistry` -- singleton that maps strategy strings to `IPipelinePlugin*` instances.
 - `IPipelinePlugin` -- interface with `create(PipelineContext&) -> unique_ptr<IPipeline>`.
-- `PluginRegistrar` -- helper struct for static-init self-registration.
+- `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST` -- helper macro for manifest registration functions.
 - `BaseConfig` -- universal ~10-field config struct parsed by `parse_base_config()`.
 - `PipelineContext` -- non-owning struct passed to each plugin: `{bundle, config, config_json, hf_python, bundle_path}`.
 - 20 concrete plugin files in `src/runtime/plugins/` register 25 strategies total.
@@ -315,7 +315,7 @@ classDiagram
 |---|---|
 | **Files** | `include/trtf/runtime/pipeline_factory.h`, `src/runtime/registry/pipeline_factory.cpp`, `include/trtf/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp`, `include/trtf/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
 | **Purpose** | Sole creation path for all pipelines. `PipelineFactory::from_bundle()` reads a `.trtfb`, parses `BaseConfig`, and delegates to the registry-resolved `IPipelinePlugin`. |
-| **Dispatch** | `PipelineRegistry` singleton maps `runtime_strategy` strings to self-registered `IPipelinePlugin` instances. Each plugin (in `src/runtime/plugins/`) handles one or more strategies. Plugins self-register at static-init time via `PluginRegistrar`. 25 strategies are registered across 20 plugin files. |
+| **Dispatch** | `PipelineRegistry` singleton maps `runtime_strategy` strings to manifest-registered `IPipelinePlugin` instances. Each plugin (in `src/runtime/plugins/`) handles one or more strategies and exposes a registrar function listed in `cmake/trtf_pipeline_plugins.cmake`. 25 strategies are registered across 20 plugin files. |
 | **Strategy mapping** | `decoder_kv_cache`/`decoder_moe` -> `TextGenerationPipeline`; `ssm_recurrent`/`rwkv_recurrent`/`hybrid_mamba_attention` -> `RecurrentPipeline`; `encoder_only`/`embedding`/`reranking`/`neural_operator` -> `EncoderPipeline`; `vision_language` -> `VLPipeline`; `segmentation` -> `SegmentPipeline`; `prompted_segmentation` -> `SamPipeline`; `object_detection` -> `EncoderPipeline`; `speech_to_text` -> `WhisperPipeline`; `text_to_audio_bark` -> `BarkPipeline`; `text_to_audio_magpie` -> `MagpiePipeline`; `speech_to_speech` -> `SpeechPipeline`; `omni_multimodal` -> `OmniPipeline`; `text_to_text` -> `T5Pipeline`; `marian_translation` -> `MarianPipeline`; `seq2seq_encoder_decoder` -> `Seq2SeqPipeline`; `diffusion_flux` -> `FluxPipeline`; `diffusion_wan`/`diffusion_pixart` -> `WanPipeline`; `diffusion_zimage` -> `ZImagePipeline`. |
 
 ### UD-MOD-01: TRT Module

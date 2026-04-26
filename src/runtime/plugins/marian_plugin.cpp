@@ -297,7 +297,6 @@ class MarianPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_MarianPlugin, MarianPlugin,
-                                         "marian_translation");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_marian_plugin, MarianPlugin, "marian_translation");
 
 } // namespace trtf

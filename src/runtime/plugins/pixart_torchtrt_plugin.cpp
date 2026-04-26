@@ -35,7 +35,7 @@ class PixArtTorchTrtPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_PixArtTorchTrtPlugin, PixArtTorchTrtPlugin,
-                                         "diffusion_pixart_torchtrt");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_pixart_torchtrt_plugin, PixArtTorchTrtPlugin,
+                                       "diffusion_pixart_torchtrt");
 
 } // namespace trtf

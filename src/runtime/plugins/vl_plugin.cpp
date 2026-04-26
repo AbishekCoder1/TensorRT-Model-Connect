@@ -91,6 +91,6 @@ class VLPlugin final : public IPipelinePlugin {
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK(kForceLink_VLPlugin, VLPlugin, "vision_language");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_vl_plugin, VLPlugin, "vision_language");
 
 } // namespace trtf

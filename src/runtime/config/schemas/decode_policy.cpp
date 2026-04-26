@@ -33,5 +33,6 @@ Schema make_decode_policy_schema() {
     };
 }
 
-REGISTER_CONFIG_SCHEMA_FACTORY_WITH_FORCE_LINK(kForceLink_decode_policy, make_decode_policy_schema);
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_decode_policy_schema,
+                                             make_decode_policy_schema);
 } // namespace trtf::config::schemas
