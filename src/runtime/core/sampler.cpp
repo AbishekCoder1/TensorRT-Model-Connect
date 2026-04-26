@@ -19,10 +19,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 #include <numeric>
-#include <string_view>
 #include <vector>
 
 namespace trtf {
@@ -166,18 +164,6 @@ static FilteredDistribution build_filtered_distribution(const float* logits, int
         renormalize_kept_prefix(dist, keep);
     dist.keep = keep;
     return dist;
-}
-
-static bool use_torch_multinomial_sampler() {
-#if TRTF_HAS_LIBTORCH_MULTINOMIAL
-    const char* env = std::getenv("TRTF_USE_TORCH_MULTINOMIAL");
-    if (env == nullptr)
-        return true;
-    const std::string_view value(env);
-    return value != "0" && value != "false" && value != "FALSE";
-#else
-    return false;
-#endif
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -436,7 +422,8 @@ SamplingParams sampling_params_from_config(const GenerateConfig& cfg, int32_t de
     return p;
 }
 
-std::unique_ptr<ISampler> create_sampler(const SamplingParams& params) {
+std::unique_ptr<ISampler> create_sampler(const SamplingParams& params,
+                                         const SamplerFactoryOptions& options) {
     // Greedy when sampling is fully disabled and no explicit random seed is set.
     const float top_p = sanitized_top_p(params.top_p);
     const float min_p = sanitized_min_p(params.min_p);
@@ -447,12 +434,16 @@ std::unique_ptr<ISampler> create_sampler(const SamplingParams& params) {
     uint64_t seed = (params.seed >= 0) ? static_cast<uint64_t>(params.seed)
                                        : 42ULL; // deterministic default for reproducibility
 #if TRTF_HAS_LIBTORCH_MULTINOMIAL && TRTF_HAS_CUDA_KERNELS
-    if (use_torch_multinomial_sampler())
+    if (options.prefer_torch_cuda_multinomial)
         return std::make_unique<TorchCudaMultinomialSampler>(seed);
 #endif
 
     // TopK sampler with xorshift64 RNG
     return std::make_unique<TopKSampler>(seed);
+}
+
+std::unique_ptr<ISampler> create_sampler(const SamplingParams& params) {
+    return create_sampler(params, SamplerFactoryOptions{});
 }
 
 std::unique_ptr<ISampler> create_gpu_greedy_sampler(void* stream) {

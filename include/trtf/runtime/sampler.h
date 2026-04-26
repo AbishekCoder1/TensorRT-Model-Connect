@@ -28,6 +28,11 @@ struct SamplingParams {
     int32_t eos_token_id{-1};
 };
 
+/// Factory options for choosing concrete sampler implementations.
+struct SamplerFactoryOptions {
+    bool prefer_torch_cuda_multinomial{true};
+};
+
 /// Where the sampler expects logits to live.
 enum class LogitsLocation {
     HOST,   // Sampler reads from CPU memory (current default)
@@ -73,8 +78,11 @@ SamplingParams sampling_params_from_config(const GenerateConfig& cfg, int32_t de
 
 /// Factory: create sampler from SamplingParams.
 /// - top_k <= 1 && top_p/min_p disabled && seed == -1 => GreedySampler
-/// - otherwise => TopKSampler
+/// - otherwise => TorchCudaMultinomialSampler when compiled in and preferred,
+///   falling back to TopKSampler
 std::unique_ptr<ISampler> create_sampler(const SamplingParams& params);
+std::unique_ptr<ISampler> create_sampler(const SamplingParams& params,
+                                         const SamplerFactoryOptions& options);
 
 /// Factory: create a GPU-side greedy sampler (on-device argmax).
 /// Requires CUDA kernels (TRTF_HAS_CUDA_KERNELS). Returns nullptr if unavailable.

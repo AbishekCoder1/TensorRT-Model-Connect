@@ -6,7 +6,6 @@
 #include "trtf/runtime/sampler.h"
 
 #include <cmath>
-#include <cstdlib>
 #include <iostream>
 #include <set>
 #include <string>
@@ -155,6 +154,16 @@ static void test_sampler_reset_replays_seeded_sequence() {
     check(first == second, "sampler reset replays seeded sequence");
 }
 
+static void test_create_sampler_can_force_host_topk() {
+    trtf::SamplingParams params;
+    params.top_k = 4;
+    params.seed = 123;
+    trtf::SamplerFactoryOptions options;
+    options.prefer_torch_cuda_multinomial = false;
+    auto sampler = trtf::create_sampler(params, options);
+    check(std::string(sampler->sampler_type()) == "top_k", "factory can force host top_k");
+}
+
 static void test_top_p_truncates_tail_tokens() {
     const float logits[] = {10.0F, 9.0F, -10.0F};
     trtf::SamplingParams params;
@@ -183,10 +192,8 @@ static void test_min_p_drops_low_probability_tail() {
     }
 }
 
-#if TRTF_HAS_LIBTORCH_MULTINOMIAL
+#if TRTF_HAS_LIBTORCH_MULTINOMIAL && TRTF_HAS_CUDA_KERNELS
 static void test_torch_multinomial_matches_known_hf_sequence() {
-    setenv("TRTF_USE_TORCH_MULTINOMIAL", "1", 1);
-
     trtf::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 20;
@@ -208,13 +215,9 @@ static void test_torch_multinomial_matches_known_hf_sequence() {
     check(result0.token_id == 0, "torch sampler step0 matches HF");
     check(result1.token_id == 0, "torch sampler step1 matches HF");
     check(result2.token_id == 0, "torch sampler step2 matches HF");
-
-    unsetenv("TRTF_USE_TORCH_MULTINOMIAL");
 }
 
 static void test_torch_multinomial_uses_full_vocab_semantics() {
-    setenv("TRTF_USE_TORCH_MULTINOMIAL", "1", 1);
-
     trtf::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 2;
@@ -232,13 +235,9 @@ static void test_torch_multinomial_uses_full_vocab_semantics() {
 
     auto result = sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params);
     check(result.token_id == 419, "torch sampler matches full-vocab CUDA multinomial");
-
-    unsetenv("TRTF_USE_TORCH_MULTINOMIAL");
 }
 
 static void test_torch_multinomial_advances_offset_like_full_vocab_cuda() {
-    setenv("TRTF_USE_TORCH_MULTINOMIAL", "1", 1);
-
     trtf::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 2;
@@ -259,13 +258,9 @@ static void test_torch_multinomial_advances_offset_like_full_vocab_cuda() {
         auto result = sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params);
         check(result.token_id == token, "torch sampler preserves full-vocab offset progression");
     }
-
-    unsetenv("TRTF_USE_TORCH_MULTINOMIAL");
 }
 
 static void test_torch_multinomial_matches_live_step_three_way_case() {
-    setenv("TRTF_USE_TORCH_MULTINOMIAL", "1", 1);
-
     trtf::SamplingParams params;
     params.temperature = 0.6F;
     params.top_k = 20;
@@ -284,8 +279,6 @@ static void test_torch_multinomial_matches_live_step_three_way_case() {
 
     auto result = sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params);
     check(result.token_id == 2014, "torch sampler matches three-way live-step synthetic case");
-
-    unsetenv("TRTF_USE_TORCH_MULTINOMIAL");
 }
 #endif
 
@@ -298,9 +291,10 @@ int main() {
     test_top_p_zero_is_greedy();
     test_invalid_sampling_values_are_sanitized();
     test_sampler_reset_replays_seeded_sequence();
+    test_create_sampler_can_force_host_topk();
     test_top_p_truncates_tail_tokens();
     test_min_p_drops_low_probability_tail();
-#if TRTF_HAS_LIBTORCH_MULTINOMIAL
+#if TRTF_HAS_LIBTORCH_MULTINOMIAL && TRTF_HAS_CUDA_KERNELS
     test_torch_multinomial_matches_known_hf_sequence();
     test_torch_multinomial_uses_full_vocab_semantics();
     test_torch_multinomial_advances_offset_like_full_vocab_cuda();
