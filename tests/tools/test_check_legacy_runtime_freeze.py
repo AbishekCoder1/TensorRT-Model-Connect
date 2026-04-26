@@ -95,3 +95,26 @@ def test_is_protected_does_not_match_prefix_without_trailing_slash() -> None:
     # slash, nothing after) should not match.
     assert check_legacy_runtime_freeze.is_protected("src/cabi/pipeline") is False
     assert check_legacy_runtime_freeze.is_protected("src/cabi/pipeline_notes.md") is False
+
+
+def test_main_blocks_explicit_protected_file_list(capsys) -> None:
+    rc = check_legacy_runtime_freeze.main(
+        ["--files", "src/cabi/pipeline/foo.cpp", "src/runtime/plugins/decoder_plugin.cpp"]
+    )
+
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "src/cabi/pipeline/foo.cpp" in captured.err
+    assert "--allow-override" in captured.err
+
+
+def test_main_allow_override_is_explicit_flag(capsys) -> None:
+    rc = check_legacy_runtime_freeze.main(
+        ["--allow-override", "--files", "src/cabi/pipeline/foo.cpp"]
+    )
+
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "override enabled via --allow-override" in captured.err

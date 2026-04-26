@@ -8,7 +8,6 @@ to prevent accidental reintroduction of the deleted compatibility assembly.
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +19,6 @@ PROTECTED_PREFIXES = (
     "src/cabi/registry/",
     "src/cabi/factories/",
 )
-OVERRIDE_ENV = "TRTF_ALLOW_LEGACY_TOUCH"
 
 
 def run_git(args: list[str]) -> str:
@@ -47,7 +45,7 @@ def changed_files_from_base(base_ref: str) -> list[str]:
     return [line.strip() for line in diff_output.splitlines() if line.strip()]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Block accidental reintroduction of deleted legacy runtime files."
     )
@@ -64,17 +62,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-override",
         action="store_true",
-        help=f"Allow override via {OVERRIDE_ENV}=1.",
+        help="Allow protected legacy-path changes for explicit archival or cleanup work.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
 
-    if args.allow_override and os.getenv(OVERRIDE_ENV) in {"1", "true", "TRUE", "on", "ON"}:
+    if args.allow_override:
         print(
-            f"[legacy-freeze] override enabled via {OVERRIDE_ENV}; skipping deleted-path failure.",
+            "[legacy-freeze] override enabled via --allow-override; skipping deleted-path failure.",
             file=sys.stderr,
         )
         return 0
@@ -97,7 +95,7 @@ def main() -> int:
         "[legacy-freeze] the compatibility factory/runtime path has been deleted. "
         "Do not reintroduce files under src/cabi/pipeline, src/cabi/factories, or "
         "src/cabi/registry. If this branch is explicitly performing archival or cleanup "
-        f"work, rerun with {OVERRIDE_ENV}=1 and record that justification in the task doc.",
+        "work, rerun with --allow-override and record that justification in the task doc.",
         file=sys.stderr,
     )
     return 1
