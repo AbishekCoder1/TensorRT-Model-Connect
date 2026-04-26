@@ -28,14 +28,12 @@ AutoencoderKL Decoder Architecture (FLUX style):
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+import time
 
 import numpy as np
 import tensorrt as trt
 
-if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-
+from .build_timing import add_trt_compile_timing
 
 # ---------------------------------------------------------------------------
 # Weight loading
@@ -116,8 +114,6 @@ def _load_flux_vae_weights(vae_dir: str) -> dict[str, np.ndarray]:
     weights["decoder.conv_in.weight"] = _load("decoder.conv_in.weight")
     weights["decoder.conv_in.bias"] = _load("decoder.conv_in.bias")
 
-    last_ch = block_out_channels[-1]  # 512
-
     # mid_block: 2 resnets + 1 attention
     for i in range(2):
         p = f"decoder.mid_block.resnets.{i}"
@@ -140,10 +136,8 @@ def _load_flux_vae_weights(vae_dir: str) -> dict[str, np.ndarray]:
 
     # up_blocks (4 blocks in reversed channel order)
     num_blocks = len(block_out_channels)
-    reversed_channels = list(reversed(block_out_channels))
 
     for block_idx in range(num_blocks):
-        out_ch = reversed_channels[block_idx]
         num_resnets = layers_per_block + 1
 
         for res_idx in range(num_resnets):
@@ -502,6 +496,8 @@ def build_flux_vae_decoder_engine(
     shift_factor: float = 0.1159,
     patch_size: tuple[int, int] = (1, 1),
     verbose: bool = False,
+    build_timing: dict | None = None,
+    timing_component: str = "vae_decoder",
 ) -> bytes:
     """Build FLUX AutoencoderKL decoder TRT engine using TRT Python API.
 
@@ -515,9 +511,14 @@ def build_flux_vae_decoder_engine(
     The engine applies: x = latents / scaling_factor + shift_factor,
     then runs through the full decoder network.
     """
+    from .build_timing import timed_weight_loading
+
+    total_t0 = time.monotonic()
+    weights_before = _timing_phase(build_timing, "weights_loading_s")
     patch_h, patch_w = patch_size
     print(f"[flux-vae] Loading VAE weights from {vae_dir} ...", file=sys.stderr)
-    weights = _load_flux_vae_weights(vae_dir)
+    with timed_weight_loading(build_timing, timing_component):
+        weights = _load_flux_vae_weights(vae_dir)
 
     # Read architecture params from loaded config
     block_out_channels = weights["_block_out_channels"].tolist()
@@ -527,7 +528,6 @@ def build_flux_vae_decoder_engine(
     num_blocks = len(block_out_channels)
     reversed_channels = list(reversed(block_out_channels))
     last_ch = block_out_channels[-1]
-    first_ch = block_out_channels[0]
     eps = 1e-6
 
     h_out = h_lat * 8 * patch_h
@@ -681,5 +681,19 @@ def build_flux_vae_decoder_engine(
         raise RuntimeError("TRT engine serialization failed for VAE decoder")
 
     plan_bytes = bytes(plan)
+    weights_after = _timing_phase(build_timing, "weights_loading_s")
+    compile_elapsed = max(
+        0.0, time.monotonic() - total_t0 - max(0.0, weights_after - weights_before))
+    add_trt_compile_timing(build_timing, timing_component, compile_elapsed)
     print(f"[flux-vae] Engine built: {len(plan_bytes) / 1e6:.1f} MB", file=sys.stderr)
     return plan_bytes
+
+
+def _timing_phase(timing: dict | None, key: str) -> float:
+    if timing is None:
+        return 0.0
+    phases = timing.setdefault("phases", {})
+    try:
+        return float(phases.get(key, 0.0))
+    except (TypeError, ValueError):
+        return 0.0

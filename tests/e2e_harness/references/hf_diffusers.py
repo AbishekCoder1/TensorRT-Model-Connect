@@ -304,6 +304,11 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         model_ref = _resolve_cached_model_ref(model_id)
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
+        image_height = case.inputs.get("image_height", 1024)
+        image_width = case.inputs.get("image_width", image_height)
+        video_height = case.inputs.get("video_height", 480)
+        video_width = case.inputs.get("video_width", 832)
+        video_num_frames = case.inputs.get("video_num_frames", 17)
         python = ctx.reference_python_path() or sys.executable
 
         # Save frames to artifacts_dir so they persist for comparator access
@@ -327,6 +332,11 @@ model_id = {model_id!r}
 model_ref = {model_ref!r}
 prompt = {prompt!r}
 num_steps = {num_steps}
+image_height = {image_height}
+image_width = {image_width}
+video_height = {video_height}
+video_width = {video_width}
+video_num_frames = {video_num_frames}
 frames_dir = {frames_dir!r}
 seed = 42
 
@@ -338,7 +348,7 @@ if family in ("flux",):
     output = pipe(
         prompt=prompt,
         num_inference_steps=num_steps,
-        height=1024, width=1024,
+        height=image_height, width=image_width,
         generator=torch.Generator("cuda").manual_seed(seed),
     )
     frames = output.images
@@ -349,7 +359,7 @@ elif family in ("z_image",):
     output = pipe(
         prompt=prompt,
         num_inference_steps=num_steps,
-        height=1024, width=1024,
+        height=image_height, width=image_width,
         generator=torch.Generator("cuda").manual_seed(seed),
     )
     frames = output.images
@@ -360,7 +370,7 @@ elif family in ("pixart",):
     output = pipe(
         prompt=prompt,
         num_inference_steps=num_steps,
-        height=1024, width=1024,
+        height=image_height, width=image_width,
         generator=torch.Generator("cuda").manual_seed(seed),
     )
     frames = output.images
@@ -389,7 +399,9 @@ else:
     output = pipe(
         prompt=prompt,
         num_inference_steps=num_steps,
-        num_frames=17,
+        height=video_height,
+        width=video_width,
+        num_frames=video_num_frames,
         guidance_scale=5.0,
         generator=torch.Generator("cuda").manual_seed(seed),
     )

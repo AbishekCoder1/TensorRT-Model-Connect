@@ -113,11 +113,13 @@ class PixArtPlugin:
         *, precision: str = "fp32", verbose: bool = False, **_kwargs,
     ) -> dict:
         """Build all three component engines."""
+        from ..build_timing import timed_trt_compile, timed_weight_loading
         from ..t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
         from ..standard_dit_builder import build_standard_dit_engine
         from ..vae_2d_builder import build_vae_2d_decoder_engine
         import json
         from pathlib import Path
+        build_timing = _kwargs.get("build_timing")
 
         text_encoder_dir = weights["_text_encoder_dir"]
         transformer_dir = weights["_transformer_dir"]
@@ -129,7 +131,7 @@ class PixArtPlugin:
         head_dim = tc.get("attention_head_dim", self._DIT_HEAD_DIM)
         dit_dim = num_heads * head_dim
         num_layers = tc.get("num_layers", self._DIT_NUM_LAYERS)
-        in_channels = tc.get("in_channels", self._DIT_IN_CHANNELS)
+        tc.get("in_channels", self._DIT_IN_CHANNELS)
         patch_size = tc.get("patch_size", self._DIT_PATCH_SIZE)
         cross_attn_dim = tc.get("cross_attention_dim", dit_dim)
         ffn_dim = dit_dim * 4  # PixArt uses 4x multiplier
@@ -161,53 +163,57 @@ class PixArtPlugin:
 
         # 1. T5 text encoder
         print("[pixart] Loading T5 encoder weights ...", file=sys.stderr)
-        t5_weights = load_t5_weights(
-            text_encoder_dir,
-            d_model=t5_d_model,
-            num_heads=t5_num_heads,
-            d_kv=t5_d_kv,
-            d_ff=t5_d_ff,
-            num_layers=t5_num_layers,
-            vocab_size=t5_vocab_size,
-        )
-        t5_plan = build_t5_encoder_engine(
-            t5_weights,
-            d_model=t5_d_model,
-            num_heads=t5_num_heads,
-            d_kv=t5_d_kv,
-            d_ff=t5_d_ff,
-            num_layers=t5_num_layers,
-            vocab_size=t5_vocab_size,
-            max_seq_len=self._T5_MAX_SEQ_LEN,
-            verbose=verbose,
-        )
+        with timed_weight_loading(build_timing, "t5_encoder"):
+            t5_weights = load_t5_weights(
+                text_encoder_dir,
+                d_model=t5_d_model,
+                num_heads=t5_num_heads,
+                d_kv=t5_d_kv,
+                d_ff=t5_d_ff,
+                num_layers=t5_num_layers,
+                vocab_size=t5_vocab_size,
+            )
+        with timed_trt_compile(build_timing, "t5_encoder"):
+            t5_plan = build_t5_encoder_engine(
+                t5_weights,
+                d_model=t5_d_model,
+                num_heads=t5_num_heads,
+                d_kv=t5_d_kv,
+                d_ff=t5_d_ff,
+                num_layers=t5_num_layers,
+                vocab_size=t5_vocab_size,
+                max_seq_len=self._T5_MAX_SEQ_LEN,
+                verbose=verbose,
+            )
 
         # 2. DiT denoiser (no RoPE — uses fixed sinusoidal position embeddings)
         print("[pixart] Loading PixArt DiT weights ...", file=sys.stderr)
-        dit_weights = _load_pixart_dit_weights(
-            transformer_dir,
-            dim=dit_dim,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            ffn_dim=ffn_dim,
-            cross_attn_dim=cross_attn_dim,
-        )
+        with timed_weight_loading(build_timing, "pixart_dit"):
+            dit_weights = _load_pixart_dit_weights(
+                transformer_dir,
+                dim=dit_dim,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                ffn_dim=ffn_dim,
+                cross_attn_dim=cross_attn_dim,
+            )
 
-        dit_plan = build_standard_dit_engine(
-            dit_weights,
-            dim=dit_dim,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            ffn_dim=ffn_dim,
-            context_dim=cross_attn_dim,
-            num_patches=num_patches,
-            text_seq_len=self._T5_MAX_SEQ_LEN,
-            qk_norm=False,
-            cross_attn_norm=False,
-            ffn_activation="gelu_approximate",
-            use_rope=False,
-            verbose=verbose,
-        )
+        with timed_trt_compile(build_timing, "pixart_dit"):
+            dit_plan = build_standard_dit_engine(
+                dit_weights,
+                dim=dit_dim,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                ffn_dim=ffn_dim,
+                context_dim=cross_attn_dim,
+                num_patches=num_patches,
+                text_seq_len=self._T5_MAX_SEQ_LEN,
+                qk_norm=False,
+                cross_attn_norm=False,
+                ffn_activation="gelu_approximate",
+                use_rope=False,
+                verbose=verbose,
+            )
 
         # 3. VAE decoder
         print("[pixart] Building VAE decoder engine ...", file=sys.stderr)
@@ -219,6 +225,8 @@ class PixArtPlugin:
             scaling_factor=self._VAE_SCALING_FACTOR,
             shift_factor=0.0,
             verbose=verbose,
+            build_timing=build_timing,
+            timing_component="vae_decoder",
         )
 
         # 4. Serialize preprocessor weights

@@ -1,5 +1,3 @@
-import pytest
-
 def pytest_addoption(parser):
     opts = [
         ('--engine-dir', dict(default=None, help='Engine directory')),
@@ -8,6 +6,8 @@ def pytest_addoption(parser):
         ('--rebuild-engines', dict(action='store_true', default=False, help='Rebuild bundles')),
         ('--e2e-task-strategy', dict(default=None, help='Filter by task strategy')),
         ('--e2e-artifacts-dir', dict(default=None, help='Artifacts output dir')),
+        ('--e2e-exclude-ci-tier', dict(action='append', default=[],
+                                      help='Exclude manifests with this ci_tier')),
     ]
     for name, kw in opts:
         try:

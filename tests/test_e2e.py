@@ -204,6 +204,12 @@ def pytest_addoption(parser):
         pass
     try:
         parser.addoption(
+            "--e2e-exclude-ci-tier", action="append", default=[],
+            help="Exclude manifests with this ci_tier value; may be repeated")
+    except ValueError:
+        pass
+    try:
+        parser.addoption(
             "--e2e-partition-id", type=int, default=None,
             help="Agent partition ID (0-based) for parallel execution")
     except ValueError:
@@ -230,14 +236,23 @@ def _get_case_names(config=None) -> list[str]:
     core_only = False
     partition_id = None
     partition_size = None
+    excluded_ci_tiers = set()
 
     if config is not None:
         strategy_filter = config.getoption("--e2e-task-strategy", default=None)
         core_only = config.getoption("--e2e-core-only", default=False)
         partition_id = config.getoption("--e2e-partition-id", default=None)
         partition_size = config.getoption("--e2e-partition-size", default=None)
+        excluded_ci_tiers = set(
+            config.getoption("--e2e-exclude-ci-tier", default=[]) or [])
 
     cases = load_all_manifests(task_strategy_filter=strategy_filter)
+
+    if excluded_ci_tiers:
+        cases = [
+            c for c in cases
+            if str(c.metadata.get("ci_tier", "")) not in excluded_ci_tiers
+        ]
 
     # Filter to core models only
     if core_only:

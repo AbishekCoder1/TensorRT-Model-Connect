@@ -15,9 +15,19 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
+
+from .build_timing import add_trt_compile_timing
+
+
+class _TimedWeightReaders(list):
+    def __init__(self, readers: list, build_timing: dict | None, component: str):
+        super().__init__(readers)
+        self.build_timing = build_timing
+        self.component = component
 
 
 # ---------------------------------------------------------------------------
@@ -58,12 +68,17 @@ def _open_vae_safetensors(model_dir: str) -> list:
 
 def _get_weight(readers: list, name: str) -> np.ndarray:
     """Get a tensor from safetensors readers as float32 numpy."""
-    for r in readers:
-        if name in r.keys():
-            t = r.get_tensor(name)
-            if hasattr(t, "numpy"):
-                return t.float().numpy()
-            return np.array(t, dtype=np.float32)
+    from .build_timing import timed_weight_loading
+
+    timing = getattr(readers, "build_timing", None)
+    component = getattr(readers, "component", "vae_decoder")
+    with timed_weight_loading(timing, component):
+        for r in readers:
+            if name in r.keys():
+                t = r.get_tensor(name)
+                if hasattr(t, "numpy"):
+                    return t.float().numpy()
+                return np.array(t, dtype=np.float32)
     raise KeyError(f"Weight not found: {name}")
 
 
@@ -339,6 +354,8 @@ def build_vae_2d_decoder_engine(
     scaling_factor: float = 0.3611,
     shift_factor: float = 0.1159,
     verbose: bool = False,
+    build_timing: dict | None = None,
+    timing_component: str = "vae_decoder",
 ) -> bytes:
     """Build a TRT engine for AutoencoderKL decoder using the TensorRT Python API.
 
@@ -354,11 +371,14 @@ def build_vae_2d_decoder_engine(
     import tensorrt as trt
     from .graph_ops import add_conv2d, add_silu
 
+    total_t0 = time.monotonic()
+    weights_before = _timing_phase(build_timing, "weights_loading_s")
     h_out = h_lat * 8
     w_out = w_lat * 8
 
     print(f"[vae-2d] Loading VAE weights from {model_dir} ...", file=sys.stderr)
-    readers = _open_vae_safetensors(model_dir)
+    readers = _TimedWeightReaders(
+        _open_vae_safetensors(model_dir), build_timing, timing_component)
 
     # Reversed block_out_channels for decoder (up path)
     reversed_channels = list(reversed(_BLOCK_OUT_CHANNELS))  # [512, 512, 256, 128]
@@ -479,8 +499,22 @@ def build_vae_2d_decoder_engine(
         raise RuntimeError("TRT engine build failed for VAE decoder")
 
     plan_bytes = bytes(plan)
+    weights_after = _timing_phase(build_timing, "weights_loading_s")
+    compile_elapsed = max(
+        0.0, time.monotonic() - total_t0 - max(0.0, weights_after - weights_before))
+    add_trt_compile_timing(build_timing, timing_component, compile_elapsed)
     print(f"[vae-2d] Engine built: {len(plan_bytes) / 1e6:.1f} MB", file=sys.stderr)
     return plan_bytes
+
+
+def _timing_phase(timing: dict | None, key: str) -> float:
+    if timing is None:
+        return 0.0
+    phases = timing.setdefault("phases", {})
+    try:
+        return float(phases.get(key, 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # ---------------------------------------------------------------------------

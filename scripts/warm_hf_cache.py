@@ -55,6 +55,13 @@ parser.add_argument(
          "models are skipped (no network call). Intended for MR CI selective "
          "warm.",
 )
+parser.add_argument(
+    "--exclude-ci-tier",
+    action="append",
+    default=[],
+    help="Exclude manifests with this ci_tier value. Intended for nightly mode "
+         "to skip MR-only representative manifests.",
+)
 args = parser.parse_args()
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -68,12 +75,15 @@ if args.models_file:
         print(f"ERROR: --models-file {p} not found", file=sys.stderr)
         sys.exit(1)
     filter_names = {line.strip() for line in p.read_text().splitlines() if line.strip()}
+excluded_ci_tiers = set(args.exclude_ci_tier or [])
 
 entries: list[tuple[str, str]] = []
 for m in manifests:
     d = json.loads(m.read_text())
     name = d.get("name", m.stem)
     if d.get("skip"):
+        continue
+    if filter_names is None and d.get("ci_tier") in excluded_ci_tiers:
         continue
     if not d.get("hf_id"):
         continue

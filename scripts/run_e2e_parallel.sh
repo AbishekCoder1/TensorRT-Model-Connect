@@ -22,6 +22,7 @@
 #   --num-gpus N             Number of GPUs to use  (default: auto-detect)
 #   --workers-per-gpu N      Concurrent workers per GPU (default: 4)
 #   --task-strategy STR      Filter by task strategy
+#   --exclude-ci-tier STR    Exclude manifests with this ci_tier in full mode
 #   --progress-interval N    Progress print interval in seconds (default: 30)
 #   All other args are passed through to pytest (e.g., --rebuild-engines)
 #
@@ -51,6 +52,7 @@ fi
 # Passthrough args (e.g., --rebuild-engines, --task-strategy ...)
 EXTRA_ARGS=()
 FILTER_ARGS=()
+COLLECT_ARGS=()
 MODELS_FILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -63,6 +65,10 @@ while [ $# -gt 0 ]; do
         --progress-interval)  PROGRESS_INTERVAL="$2"; shift 2 ;;
         --task-strategy)
             FILTER_ARGS+=(--e2e-task-strategy "$2")
+            shift 2
+            ;;
+        --exclude-ci-tier)
+            COLLECT_ARGS+=(--e2e-exclude-ci-tier "$2")
             shift 2
             ;;
         --models-file)
@@ -93,6 +99,7 @@ echo "  HF Python:       $HF_PYTHON"
 echo "  Progress every:  ${PROGRESS_INTERVAL}s"
 echo "  Extra args:      ${EXTRA_ARGS[*]:-none}"
 echo "  Filter:          ${FILTER_ARGS[*]:-all models}"
+echo "  Collect args:    ${COLLECT_ARGS[*]:-none}"
 echo "  Models file:     ${MODELS_FILE:-none (collect all)}"
 echo ""
 
@@ -106,7 +113,7 @@ if [ -n "$MODELS_FILE" ] && [ -f "$MODELS_FILE" ]; then
     echo "  Models file:     $MODELS_FILE ($(echo "$TESTS" | wc -l) models)"
 else
     # Full mode: collect all tests via pytest
-    TESTS=$("$HF_PYTHON" -m pytest tests/test_e2e.py --co -q "${FILTER_ARGS[@]}" 2>/dev/null \
+    TESTS=$("$HF_PYTHON" -m pytest tests/test_e2e.py --co -q "${FILTER_ARGS[@]}" "${COLLECT_ARGS[@]}" 2>/dev/null \
         | grep "test_e2e\[" | sort)
 fi
 TOTAL=$(echo "$TESTS" | wc -l)

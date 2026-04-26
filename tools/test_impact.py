@@ -9,6 +9,7 @@ Usage:
     python3 tools/test_impact.py [--base REF] [--head REF] [--json] [--verbose]
     python3 tools/test_impact.py --files path/to/file1.py,path/to/file2.cpp
     python3 tools/test_impact.py --validate
+    python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/plugins/decoder_plugin.cpp
     python3 tools/test_impact.py --files trtf_build/trtf_build/families/qwen.py --cap 15
 """
 
@@ -218,10 +219,12 @@ class ImpactMap:
     all_model_names: List[str]
     all_model_names_set: Set[str]
     core_models: List[str]
+    model_metadata: Dict[str, Dict]
     builder_to_families: Dict[str, List[str]]       # parent module -> families
     manifest_field_to_models: Dict[str, List[str]]
     e2e_data_file_to_models: Dict[str, List[str]]
     path_scope_overrides: Dict[str, List[str]]
+    l0_replacement_by_model: Dict[str, str]
 
 
 @dataclass
@@ -235,6 +238,7 @@ class ImpactResult:
     cpp_tests: List[str] = field(default_factory=list)
     tools_tests: List[str] = field(default_factory=list)
     fallback_tiers: List[str] = field(default_factory=list)
+    l0_replacements: List[Dict[str, str]] = field(default_factory=list)
 
 # ---------------------------------------------------------------------------
 # Impact map construction
@@ -286,6 +290,8 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     e2e_data_file_to_models_sets: Dict[str, Set[str]] = {}
     all_model_names: List[str] = []
     core_models: List[str] = []
+    model_metadata: Dict[str, Dict] = {}
+    l0_replacement_by_model: Dict[str, str] = {}
 
     for manifest_path in sorted(models_dir.glob("*.json")):
         try:
@@ -299,6 +305,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         is_core = data.get("core", False)
 
         all_model_names.append(name)
+        model_metadata[name] = data
 
         if family:
             family_to_models.setdefault(family, []).append(name)
@@ -309,6 +316,9 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
                 task_strategy_to_models.setdefault(task_strategy, []).append(name)
         if is_core:
             core_models.append(name)
+        l0_replacement = data.get("l0_replacement")
+        if isinstance(l0_replacement, str) and l0_replacement:
+            l0_replacement_by_model[name] = l0_replacement
         fp8_scales = data.get("fp8_scales")
         if isinstance(fp8_scales, str) and fp8_scales:
             manifest_field_to_models_sets.setdefault("fp8_scales", set()).add(name)
@@ -352,6 +362,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         all_model_names=sorted(all_model_names),
         all_model_names_set=set(all_model_names),
         core_models=sorted(core_models),
+        model_metadata=model_metadata,
         builder_to_families=builder_to_families,
         manifest_field_to_models={
             key: sorted(models)
@@ -362,6 +373,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
             for path, models in e2e_data_file_to_models_sets.items()
         },
         path_scope_overrides=path_scope_overrides,
+        l0_replacement_by_model=l0_replacement_by_model,
     )
 
 # ---------------------------------------------------------------------------
@@ -378,6 +390,36 @@ def _models_for_runtime_strategies(
     return sorted(models)
 
 
+def _drop_fp8_scale_models(models: List[str], imap: ImpactMap) -> List[str]:
+    """Drop FP8-scale variants when a runtime-only rule has a representative.
+
+    FP8-scale manifests exercise builder quantization and FP8 scale plumbing.
+    Known runtime C++ changes consume a built bundle through the same artifact
+    contract, so a non-FP8 model with the same family/runtime/HF id can stand in
+    for L0. FP8 stays covered by FP8-specific changes and nightly.
+    """
+    fp8_models = set(imap.manifest_field_to_models.get("fp8_scales", []))
+    selected = set(models)
+    kept: List[str] = []
+    for model in models:
+        if model not in fp8_models:
+            kept.append(model)
+            continue
+        fp8_meta = imap.model_metadata.get(model, {})
+        has_representative = False
+        for candidate in selected - fp8_models:
+            candidate_meta = imap.model_metadata.get(candidate, {})
+            if all(
+                fp8_meta.get(field) == candidate_meta.get(field)
+                for field in ("family", "runtime_strategy", "hf_id")
+            ):
+                has_representative = True
+                break
+        if not has_representative:
+            kept.append(model)
+    return sorted(kept)
+
+
 def _models_for_task_strategies(
     task_strategies: List[str], imap: ImpactMap,
 ) -> List[str]:
@@ -385,6 +427,39 @@ def _models_for_task_strategies(
     for ts in task_strategies:
         models.update(imap.task_strategy_to_models.get(ts, []))
     return sorted(models)
+
+
+def _apply_l0_replacements(
+    models: List[str],
+    imap: ImpactMap,
+    exact_models: Set[str],
+) -> tuple[List[str], List[Dict[str, str]]]:
+    """Replace nightly-only scale models with their L0 representatives.
+
+    Direct edits to a nightly-only scale model still use the L0 representative:
+    the large model's artifact contract is covered by nightly, while MR L0 keeps
+    the same plugin/runtime path at smaller scale.
+    """
+    del exact_models  # Retained in the signature to keep call sites stable.
+    selected: Set[str] = set()
+    replacements: List[Dict[str, str]] = []
+    for model in models:
+        replacement = imap.l0_replacement_by_model.get(model)
+        if replacement:
+            selected.add(replacement)
+            replacements.append({
+                "model": model,
+                "replacement": replacement,
+                "reason": str(
+                    imap.model_metadata.get(model, {}).get(
+                        "l0_replacement_reason",
+                        "nightly-only scale coverage; L0 uses a smaller representative",
+                    )
+                ),
+            })
+        else:
+            selected.add(model)
+    return sorted(selected), replacements
 
 
 def _infer_unit_tiers(path: str) -> List[str]:
@@ -482,9 +557,15 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
             return RuleMatch("cpp_force_link", [], unit_tiers, rebuild)
         strategies = CPP_PLUGIN_STRATEGIES.get(plugin_stem, [])
         if strategies:
+            models = _drop_fp8_scale_models(
+                _models_for_runtime_strategies(strategies, imap), imap)
+            if plugin_stem == "flux_plugin":
+                return RuleMatch(
+                    "cpp_plugin_flux_runtime",
+                    models, unit_tiers, rebuild,
+                )
             return RuleMatch(
-                "cpp_plugin", _models_for_runtime_strategies(strategies, imap),
-                unit_tiers, rebuild,
+                "cpp_plugin", models, unit_tiers, rebuild,
             )
         # Unknown plugin -> all models (safety)
         return RuleMatch("cpp_plugin_unknown", list(imap.all_model_names), unit_tiers, rebuild)
@@ -495,9 +576,15 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
         pipeline_stem = m.group(1)
         strategies = CPP_PIPELINE_STRATEGIES.get(pipeline_stem, [])
         if strategies:
+            models = _drop_fp8_scale_models(
+                _models_for_runtime_strategies(strategies, imap), imap)
+            if pipeline_stem == "flux_pipeline":
+                return RuleMatch(
+                    "cpp_pipeline_flux_runtime",
+                    models, unit_tiers, rebuild,
+                )
             return RuleMatch(
-                "cpp_pipeline", _models_for_runtime_strategies(strategies, imap),
-                unit_tiers, rebuild,
+                "cpp_pipeline", models, unit_tiers, rebuild,
             )
         return RuleMatch("cpp_pipeline_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
@@ -511,14 +598,19 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
         if runtime_strategies:
             return RuleMatch(
                 "cpp_shared_helper",
-                _models_for_runtime_strategies(runtime_strategies, imap),
+                _drop_fp8_scale_models(
+                    _models_for_runtime_strategies(runtime_strategies, imap), imap),
                 unit_tiers, rebuild,
             )
         return RuleMatch("cpp_shared_helper_unknown", list(imap.all_model_names), unit_tiers, rebuild)
 
     # Rule 6b: Scoped C++ helper/source used by a subset of pipelines
     if path in imap.path_scope_overrides:
-        return RuleMatch("cpp_scoped_helper", imap.path_scope_overrides[path], unit_tiers, rebuild)
+        return RuleMatch(
+            "cpp_scoped_helper",
+            _drop_fp8_scale_models(imap.path_scope_overrides[path], imap),
+            unit_tiers, rebuild,
+        )
 
     # Rule 7: Any other C++ source/header
     if path.startswith("src/") or path.startswith("include/"):
@@ -630,20 +722,25 @@ def analyze_impact(
     base: Optional[str] = None,
     head: Optional[str] = None,
     repo_root: Optional[Path] = None,
+    e2e_suite: str = "l0",
 ) -> ImpactResult:
     """Analyze impact of all changed files and return aggregated result."""
     all_models: Set[str] = set()
+    exact_models: Set[str] = set()
     all_tiers: Set[str] = set()
     rebuild_cpp = False
     matched_rules: List[Dict] = []
 
     for fpath in changed_files:
         match = classify_file(fpath, imap)
+        diff_text = None
         if base and head and repo_root:
             diff_text = get_file_diff(base, head, repo_root, fpath)
-            if diff_text:
-                match = maybe_refine_match_with_diff(fpath, match, diff_text, imap)
+        if diff_text:
+            match = maybe_refine_match_with_diff(fpath, match, diff_text, imap)
         all_models.update(match.models)
+        if match.rule in ("manifest", "e2e_data_file"):
+            exact_models.update(match.models)
         all_tiers.update(match.unit_tiers)
         rebuild_cpp = rebuild_cpp or match.rebuild_cpp
         matched_rules.append({
@@ -653,10 +750,16 @@ def analyze_impact(
         })
 
     e2e_models = sorted(all_models)
+    l0_replacements: List[Dict[str, str]] = []
+    if e2e_suite == "l0":
+        e2e_models, l0_replacements = _apply_l0_replacements(
+            e2e_models, imap, exact_models,
+        )
     cap_applied = False
     if cap is not None and len(e2e_models) > cap:
         e2e_models = sorted(imap.core_models)
         cap_applied = True
+        l0_replacements = []
 
     # Coverage-map-based unit test selection
     builder_tests: List[str] = []
@@ -682,6 +785,7 @@ def analyze_impact(
         cpp_tests=cpp_tests,
         tools_tests=tools_tests,
         fallback_tiers=fallback_tiers,
+        l0_replacements=l0_replacements,
     )
 
 # ---------------------------------------------------------------------------
@@ -867,7 +971,23 @@ def validate_map(imap: ImpactMap, repo_root: Path) -> List[str]:
                 f"(not in RUNTIME_TO_TASK_STRATEGY)"
             )
 
-    # 5. Every rule pattern matches at least one real file (spot checks)
+    # 5. L0 replacements must preserve the execution contract they stand in for.
+    for model, replacement in sorted(imap.l0_replacement_by_model.items()):
+        src = imap.model_metadata.get(model, {})
+        dst = imap.model_metadata.get(replacement)
+        if dst is None:
+            errors.append(
+                f"L0 replacement for '{model}' points to unknown model '{replacement}'"
+            )
+            continue
+        for field_name in ("family", "runtime_strategy", "precision", "quantization"):
+            if src.get(field_name) != dst.get(field_name):
+                errors.append(
+                    f"L0 replacement '{replacement}' for '{model}' does not preserve "
+                    f"{field_name}: {src.get(field_name)!r} != {dst.get(field_name)!r}"
+                )
+
+    # 6. Every rule pattern matches at least one real file (spot checks)
     spot_checks = {
         "families_dir": families_dir.is_dir(),
         "models_dir": (repo_root / "tests" / "e2e" / "models").is_dir(),
@@ -902,6 +1022,10 @@ def format_human(result: ImpactResult) -> str:
     lines.append(f"# C++ rebuild needed: {'yes' if result.rebuild_cpp else 'no'}")
     if result.cap_applied:
         lines.append("# WARNING: Cap applied -- running core models only.")
+    if result.l0_replacements:
+        lines.append(f"# L0 replacements applied ({len(result.l0_replacements)} models):")
+        for repl in result.l0_replacements:
+            lines.append(f"#   {repl['model']} -> {repl['replacement']}")
     return "\n".join(lines)
 
 
@@ -916,6 +1040,7 @@ def format_json(result: ImpactResult) -> str:
         "cpp_tests": result.cpp_tests,
         "tools_tests": result.tools_tests,
         "fallback_tiers": result.fallback_tiers,
+        "l0_replacements": result.l0_replacements,
     }, indent=2)
 
 # ---------------------------------------------------------------------------
@@ -935,6 +1060,9 @@ def main() -> int:
                         help="Explicit comma-separated file list (overrides git diff)")
     parser.add_argument("--cap", type=int, default=None,
                         help="If affected models > N, limit to core set + warn")
+    parser.add_argument("--e2e-suite", choices=("l0", "nightly"), default="l0",
+                        help="E2E selection policy: l0 applies configured "
+                             "large-model replacements; nightly keeps exact models")
     parser.add_argument("--json", action="store_true", dest="json_output",
                         help="Output structured JSON for CI consumption")
     parser.add_argument("--validate", action="store_true",
@@ -1019,6 +1147,7 @@ def main() -> int:
             base=args.base,
             head=args.head,
             repo_root=repo_root,
+            e2e_suite=args.e2e_suite,
         )
 
     if args.verbose:

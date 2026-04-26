@@ -15,6 +15,7 @@ All GPU work runs in subprocesses to prevent OOM when testing multiple models.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import subprocess
 import sys
@@ -63,6 +64,37 @@ class TextGenerationCausalRunner:
         bundle_path = str(Path(ctx.engine_dir) / case.bundle)
         prompt = case.inputs.get("prompt", "The capital of France is")
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
+        has_contract = "contract_config" in case.metadata
+        is_acceptance = case.ci_lane == "acceptance"
+
+        use_single_process_debug = bool(
+            case.metadata.get("single_process_debug_generation", False)
+        ) and not (has_contract and is_acceptance)
+        if use_single_process_debug:
+            logits_path, debug_time, debug_meta = self._run_debug_runner_logits(
+                ctx, bundle_path, prompt, max_new_tokens, case, phase="full"
+            )
+            text = str(debug_meta.get("full_text") or debug_meta.get("generated_text") or "")
+            cpp_rc = int(debug_meta.get("returncode", -1))
+            data = {
+                "cpp_text": text,
+                "cpp_returncode": cpp_rc,
+                "prompt": prompt,
+                "runner_mode": "single_process_debug_generation",
+            }
+            if logits_path:
+                data["logits_path"] = logits_path
+            return StageOutput(
+                stage_name=stage.name,
+                data=data,
+                text=text,
+                logits=logits_path,
+                timing_s=debug_time,
+                metadata={
+                    "cpp": {"skipped": "single_process_debug_generation"},
+                    "debug_runner": debug_meta,
+                },
+            )
 
         # C++ binary inference
         cpp_text, cpp_time, cpp_meta = self._run_cpp_binary(
@@ -71,8 +103,6 @@ class TextGenerationCausalRunner:
 
         # Debug runner for per-step logits — skip in acceptance lane when
         # a contract plugin handles verification (only needs text, not logits)
-        has_contract = "contract_config" in case.metadata
-        is_acceptance = case.ci_lane == "acceptance"
         skip_debug = has_contract and is_acceptance
 
         if skip_debug:
@@ -270,6 +300,20 @@ class TextGenerationCausalRunner:
 
             # Run full generate (we always need prefill internally)
             results = runner.generate(input_ids, max_new_tokens)
+            generated_tokens = []
+            if len(results) > 0 and max_new_tokens > 0:
+                start = max(len(input_ids) - 1, 0)
+                for i in range(max_new_tokens):
+                    idx = start + i
+                    if idx >= len(results):
+                        break
+                    generated_tokens.append(
+                        int(np.argmax(results[idx]["logits"].flatten()))
+                    )
+            full_ids = input_ids + generated_tokens
+            generated_text = tokenizer.decode(
+                generated_tokens, skip_special_tokens=True)
+            full_text = tokenizer.decode(full_ids, skip_special_tokens=True)
 
             # Select phase slice
             n_input = len(input_ids)
@@ -292,6 +336,11 @@ class TextGenerationCausalRunner:
                     padded[i, :l.shape[0]] = l
                 np.save(logits_path, padded)
                 print(f"OK steps={{len(logits_list)}} vocab={{max_len}}")
+            print("TRTF_DEBUG_META " + json.dumps({{
+                "generated_text": generated_text,
+                "full_text": full_text,
+                "generated_token_count": len(generated_tokens),
+            }}))
         """)
 
         python = ctx.runtime_python_path() or sys.executable
@@ -316,6 +365,14 @@ class TextGenerationCausalRunner:
             "stderr": result.stderr,
             "phase": phase,
         }
+        for line in result.stdout.splitlines():
+            if line.startswith("TRTF_DEBUG_META "):
+                try:
+                    parsed = json.loads(line[len("TRTF_DEBUG_META "):])
+                    if isinstance(parsed, dict):
+                        meta.update(parsed)
+                except json.JSONDecodeError:
+                    meta["debug_meta_parse_error"] = line
         if result.returncode != 0:
             truncated, log_path = save_full_stderr(
                 result.stderr, ctx.artifacts_dir or "",

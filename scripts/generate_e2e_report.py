@@ -281,6 +281,148 @@ def _render_timing_table(timing: Dict[str, float]) -> str:
     )
 
 
+def _sum_timing_prefix(
+    timing: Dict[str, Any],
+    prefixes: Tuple[str, ...],
+    exclude: Tuple[str, ...] = (),
+) -> float:
+    total = 0.0
+    for key, value in timing.items():
+        if key in exclude or not any(key.startswith(prefix) for prefix in prefixes):
+            continue
+        if value is None:
+            continue
+        try:
+            total += float(value)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _normalize_detailed_timing(result: Dict[str, Any]) -> Dict[str, float]:
+    """Return normalized timing categories for the per-model timing table."""
+    timing = result.get("timing", {}) or {}
+    details: Dict[str, float] = {}
+
+    persisted = result.get("detailed_timing", {}) or {}
+    for key, value in persisted.items():
+        if value is None:
+            continue
+        try:
+            details[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+    inference = _sum_timing_prefix(
+        timing, ("trt_",), exclude=("trt_compile_s", "trt_build_s")
+    )
+    if inference:
+        details.setdefault("inference_s", inference)
+
+    reference = _sum_timing_prefix(timing, ("ref_",))
+    if reference:
+        details.setdefault("reference_s", reference)
+
+    comparison = _sum_timing_prefix(timing, ("compare_", "contract_"))
+    if comparison:
+        details.setdefault("comparison_s", comparison)
+
+    preflight = timing.get("preflight_s")
+    if preflight is not None:
+        try:
+            details.setdefault("preflight_s", float(preflight))
+        except (TypeError, ValueError):
+            pass
+
+    return details
+
+
+def _format_seconds(value: Any) -> str:
+    if value is None:
+        return "&mdash;"
+    try:
+        return f"{float(value):.2f}s"
+    except (TypeError, ValueError):
+        return "&mdash;"
+
+
+def _format_component_weight_label(key: str) -> str:
+    component = key.removeprefix("weights_loading_").removesuffix("_s")
+    return "Weights loading: " + component.replace("_", " ")
+
+
+def _format_component_compile_label(key: str) -> str:
+    component = key.removeprefix("trt_compile_").removesuffix("_s")
+    return "TRT compile: " + component.replace("_", " ")
+
+
+def _render_detailed_timing_table(result: Dict[str, Any]) -> str:
+    details = _normalize_detailed_timing(result)
+    required_rows = [
+        ("weights_loading_s", "Weights loading"),
+        ("trt_compile_s", "TRT compile"),
+        ("inference_s", "Inference"),
+        ("comparison_s", "Comparison"),
+    ]
+    optional_rows = [
+        ("quantization_context_s", "Quantization context"),
+        ("fp8_calibration_s", "FP8 calibration"),
+        ("fp8_scales_write_s", "FP8 scales write"),
+        ("tokenizer_special_tokens_detection_s", "Tokenizer special-token detection"),
+        ("tokenizer_json_ensure_s", "Tokenizer JSON ensure"),
+        ("bundle_write_s", "Bundle write"),
+        ("reference_s", "Reference"),
+        ("preflight_s", "Preflight"),
+    ]
+
+    rows: List[str] = []
+    for key, label in required_rows:
+        rows.append(
+            f"<tr><td>{_esc(label)}</td><td>{_format_seconds(details.get(key))}</td></tr>"
+        )
+    for key in sorted(details):
+        if not key.startswith("weights_loading_") or key == "weights_loading_s":
+            continue
+        label = _format_component_weight_label(key)
+        rows.append(
+            f"<tr><td>{_esc(label)}</td><td>{_format_seconds(details.get(key))}</td></tr>"
+        )
+    compile_summary_keys = {
+        "trt_compile_s",
+        "trt_compile_main_engine_s",
+        "trt_compile_vision_engine_s",
+        "trt_compile_extra_engines_s",
+        "trt_compile_diffusion_components_s",
+    }
+    for key in sorted(details):
+        if not key.startswith("trt_compile_") or key in compile_summary_keys:
+            continue
+        label = _format_component_compile_label(key)
+        rows.append(
+            f"<tr><td>{_esc(label)}</td><td>{_format_seconds(details.get(key))}</td></tr>"
+        )
+    for key, label in optional_rows:
+        if key in details:
+            rows.append(
+                f"<tr><td>{_esc(label)}</td><td>{_format_seconds(details.get(key))}</td></tr>"
+            )
+
+    return (
+        '<table class="timing-table detailed-timing-table">'
+        "<thead><tr><th>Phase</th><th>Time</th></tr></thead>"
+        "<tbody>" + "\n".join(rows) + "</tbody></table>"
+    )
+
+
+def _render_timing_sections(result: Dict[str, Any]) -> str:
+    parts = ["<h4>Detailed Timing</h4>", _render_detailed_timing_table(result)]
+    raw_timing = _render_timing_table(result.get("timing", {}) or {})
+    if raw_timing:
+        parts.append("<h4>Raw Timing Phases</h4>")
+        parts.append(raw_timing)
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Repro commands
 # ---------------------------------------------------------------------------
@@ -359,7 +501,7 @@ def render_text_model(result: Dict[str, Any]) -> str:
     parts.append(_render_text_comparison(trt_text, ref_text))
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
-    parts.append(_render_timing_table(result.get("timing", {})))
+    parts.append(_render_timing_sections(result))
     return "\n".join(parts)
 
 
@@ -393,7 +535,7 @@ def render_vl_model(result: Dict[str, Any], project_dir: Optional[Path]) -> str:
     parts.append(_render_text_comparison(trt_text, ref_text))
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
-    parts.append(_render_timing_table(result.get("timing", {})))
+    parts.append(_render_timing_sections(result))
     return "\n".join(parts)
 
 
@@ -420,7 +562,7 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
             if uri:
                 parts.append(f'<img src="{uri}" class="frame-img" />')
             else:
-                parts.append(f"<span class='missing'>Frame too large</span>")
+                parts.append("<span class='missing'>Frame too large</span>")
         parts.append("</div>")
 
     # Reference frames (side-by-side if available)
@@ -442,7 +584,7 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
 
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
-    parts.append(_render_timing_table(result.get("timing", {})))
+    parts.append(_render_timing_sections(result))
     return "\n".join(parts)
 
 
@@ -486,7 +628,7 @@ def render_audio_model(result: Dict[str, Any]) -> str:
 
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
-    parts.append(_render_timing_table(result.get("timing", {})))
+    parts.append(_render_timing_sections(result))
     return "\n".join(parts)
 
 
@@ -531,7 +673,7 @@ def render_segmentation_model(
 
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
-    parts.append(_render_timing_table(result.get("timing", {})))
+    parts.append(_render_timing_sections(result))
     return "\n".join(parts)
 
 
@@ -550,7 +692,7 @@ def render_generic_model(result: Dict[str, Any]) -> str:
         parts.append(_render_text_comparison(trt_text, ref_text))
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
-    parts.append(_render_timing_table(result.get("timing", {})))
+    parts.append(_render_timing_sections(result))
     return "\n".join(parts)
 
 
@@ -639,12 +781,31 @@ def _key_metric(result: Dict[str, Any]) -> str:
     return ""
 
 
-def _total_time(result: Dict[str, Any]) -> str:
+def _total_time_seconds(result: Dict[str, Any]) -> Optional[float]:
     timing = result.get("timing", {})
     if not timing:
+        return None
+    total = 0.0
+    for value in timing.values():
+        if value is None:
+            continue
+        try:
+            total += float(value)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _total_time(result: Dict[str, Any]) -> str:
+    total = _total_time_seconds(result)
+    if total is None:
         return ""
-    total = sum(float(v) for v in timing.values() if v is not None)
     return f"{total:.1f}s"
+
+
+def _total_time_sort_key(result: Dict[str, Any]) -> float:
+    total = _total_time_seconds(result)
+    return total if total is not None else -1.0
 
 
 def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
@@ -679,7 +840,8 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
     )
 
     rows: List[str] = []
-    for r in results:
+    sorted_results = sorted(results, key=_total_time_sort_key, reverse=True)
+    for r in sorted_results:
         name = r.get("case_name", "unknown")
         status = r.get("status", "error")
         cc = r.get("case_config", {})

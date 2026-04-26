@@ -74,6 +74,13 @@ class FluxPlugin:
     _FLUX2_VAE_PATCH_SIZE = (2, 2)
     _FLUX2_TEXT_SEQ_LEN = 512
 
+    def _flux2_text_seq_len(self, config: ModelConfig) -> int:
+        text_seq_len = int(config.raw.get(
+            "text_seq_len",
+            config.raw.get("max_cache_length", self._FLUX2_TEXT_SEQ_LEN),
+        ))
+        return max(1, min(text_seq_len, self._FLUX2_TEXT_SEQ_LEN))
+
     # Mistral 3 text encoder defaults for FLUX.2
     _MISTRAL_HIDDEN = 5120
     _MISTRAL_NUM_HEADS = 32
@@ -143,7 +150,7 @@ class FluxPlugin:
     def build_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, precision: str = "fp32", verbose: bool = False,
-        fp8_scales: dict | None = None,
+        fp8_scales: dict | None = None, build_timing: dict | None = None,
     ) -> dict:
         """Build all component engines.
 
@@ -161,16 +168,18 @@ class FluxPlugin:
         if _is_flux2(tc):
             return self._build_flux2_components(
                 model_dir, config, weights, tc=tc, verbose=verbose,
-                fp8_scales=fp8_scales)
+                fp8_scales=fp8_scales, build_timing=build_timing)
 
         return self._build_flux1_components(
-            model_dir, config, weights, tc=tc, verbose=verbose)
+            model_dir, config, weights, tc=tc, verbose=verbose,
+            build_timing=build_timing)
 
     def _build_flux1_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, tc: dict, verbose: bool = False,
+        *, tc: dict, verbose: bool = False, build_timing: dict | None = None,
     ) -> dict:
         """Build FLUX.1 component engines (CLIP + T5 + DiT + VAE)."""
+        from ..build_timing import timed_trt_compile, timed_weight_loading
         from ..t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
         from ..clip_encoder_builder import build_clip_encoder_engine, load_clip_weights
         from ..flux_dit_builder import build_flux_dit_engine, load_flux_dit_weights
@@ -215,45 +224,54 @@ class FluxPlugin:
                 arch = clip_cfg.get("architectures", [""])[0]
                 if "CLIP" in arch or clip_cfg.get("model_type") == "clip_text_model":
                     print("[flux] Loading CLIP encoder weights ...", file=sys.stderr)
-                    clip_weights = load_clip_weights(
-                        clip_dir,
-                        hidden_size=clip_cfg.get("hidden_size", self._CLIP_HIDDEN),
-                        num_layers=clip_cfg.get("num_hidden_layers", self._CLIP_LAYERS),
-                    )
-                    clip_plan = build_clip_encoder_engine(
-                        clip_weights,
-                        hidden_size=clip_cfg.get("hidden_size", self._CLIP_HIDDEN),
-                        num_heads=clip_cfg.get("num_attention_heads", self._CLIP_HEADS),
-                        intermediate_size=clip_cfg.get("intermediate_size", self._CLIP_INTERMEDIATE),
-                        num_layers=clip_cfg.get("num_hidden_layers", self._CLIP_LAYERS),
-                        vocab_size=clip_cfg.get("vocab_size", self._CLIP_VOCAB),
-                        max_seq_len=clip_cfg.get("max_position_embeddings", self._CLIP_MAX_SEQ),
-                        verbose=verbose,
-                    )
+                    with timed_weight_loading(build_timing, "clip_encoder"):
+                        clip_weights = load_clip_weights(
+                            clip_dir,
+                            hidden_size=clip_cfg.get("hidden_size", self._CLIP_HIDDEN),
+                            num_layers=clip_cfg.get(
+                                "num_hidden_layers", self._CLIP_LAYERS),
+                        )
+                    with timed_trt_compile(build_timing, "clip_encoder"):
+                        clip_plan = build_clip_encoder_engine(
+                            clip_weights,
+                            hidden_size=clip_cfg.get("hidden_size", self._CLIP_HIDDEN),
+                            num_heads=clip_cfg.get(
+                                "num_attention_heads", self._CLIP_HEADS),
+                            intermediate_size=clip_cfg.get(
+                                "intermediate_size", self._CLIP_INTERMEDIATE),
+                            num_layers=clip_cfg.get(
+                                "num_hidden_layers", self._CLIP_LAYERS),
+                            vocab_size=clip_cfg.get("vocab_size", self._CLIP_VOCAB),
+                            max_seq_len=clip_cfg.get(
+                                "max_position_embeddings", self._CLIP_MAX_SEQ),
+                            verbose=verbose,
+                        )
                     text_encoders.append(("clip", clip_plan))
                 else:
                     # text_encoder is T5 (FLUX.2-klein only has T5)
                     print("[flux] text_encoder is T5, loading ...", file=sys.stderr)
-                    t5_weights = load_t5_weights(
-                        clip_dir,
-                        d_model=clip_cfg.get("d_model", self._T5_D_MODEL),
-                        num_heads=clip_cfg.get("num_heads", self._T5_NUM_HEADS),
-                        d_kv=clip_cfg.get("d_kv", self._T5_D_KV),
-                        d_ff=clip_cfg.get("d_ff", self._T5_D_FF),
-                        num_layers=clip_cfg.get("num_layers", self._T5_NUM_LAYERS),
-                        vocab_size=clip_cfg.get("vocab_size", self._T5_VOCAB_SIZE),
-                    )
-                    t5_plan = build_t5_encoder_engine(
-                        t5_weights,
-                        d_model=clip_cfg.get("d_model", self._T5_D_MODEL),
-                        num_heads=clip_cfg.get("num_heads", self._T5_NUM_HEADS),
-                        d_kv=clip_cfg.get("d_kv", self._T5_D_KV),
-                        d_ff=clip_cfg.get("d_ff", self._T5_D_FF),
-                        num_layers=clip_cfg.get("num_layers", self._T5_NUM_LAYERS),
-                        vocab_size=clip_cfg.get("vocab_size", self._T5_VOCAB_SIZE),
-                        max_seq_len=self._T5_MAX_SEQ_LEN,
-                        verbose=verbose,
-                    )
+                    with timed_weight_loading(build_timing, "t5_encoder"):
+                        t5_weights = load_t5_weights(
+                            clip_dir,
+                            d_model=clip_cfg.get("d_model", self._T5_D_MODEL),
+                            num_heads=clip_cfg.get("num_heads", self._T5_NUM_HEADS),
+                            d_kv=clip_cfg.get("d_kv", self._T5_D_KV),
+                            d_ff=clip_cfg.get("d_ff", self._T5_D_FF),
+                            num_layers=clip_cfg.get("num_layers", self._T5_NUM_LAYERS),
+                            vocab_size=clip_cfg.get("vocab_size", self._T5_VOCAB_SIZE),
+                        )
+                    with timed_trt_compile(build_timing, "t5_encoder"):
+                        t5_plan = build_t5_encoder_engine(
+                            t5_weights,
+                            d_model=clip_cfg.get("d_model", self._T5_D_MODEL),
+                            num_heads=clip_cfg.get("num_heads", self._T5_NUM_HEADS),
+                            d_kv=clip_cfg.get("d_kv", self._T5_D_KV),
+                            d_ff=clip_cfg.get("d_ff", self._T5_D_FF),
+                            num_layers=clip_cfg.get("num_layers", self._T5_NUM_LAYERS),
+                            vocab_size=clip_cfg.get("vocab_size", self._T5_VOCAB_SIZE),
+                            max_seq_len=self._T5_MAX_SEQ_LEN,
+                            verbose=verbose,
+                        )
                     text_encoders.append(("t5", t5_plan))
 
         # 2. T5 text encoder (sequence output for cross-attention)
@@ -272,48 +290,52 @@ class FluxPlugin:
             t5_num_layers = t5_cfg.get("num_layers", self._T5_NUM_LAYERS)
             t5_vocab_size = t5_cfg.get("vocab_size", self._T5_VOCAB_SIZE)
 
-            t5_weights = load_t5_weights(
-                t5_dir,
-                d_model=t5_d_model,
-                num_heads=t5_num_heads,
-                d_kv=t5_d_kv,
-                d_ff=t5_d_ff,
-                num_layers=t5_num_layers,
-                vocab_size=t5_vocab_size,
-            )
-            t5_plan = build_t5_encoder_engine(
-                t5_weights,
-                d_model=t5_d_model,
-                num_heads=t5_num_heads,
-                d_kv=t5_d_kv,
-                d_ff=t5_d_ff,
-                num_layers=t5_num_layers,
-                vocab_size=t5_vocab_size,
-                max_seq_len=self._T5_MAX_SEQ_LEN,
-                verbose=verbose,
-            )
+            with timed_weight_loading(build_timing, "t5_encoder"):
+                t5_weights = load_t5_weights(
+                    t5_dir,
+                    d_model=t5_d_model,
+                    num_heads=t5_num_heads,
+                    d_kv=t5_d_kv,
+                    d_ff=t5_d_ff,
+                    num_layers=t5_num_layers,
+                    vocab_size=t5_vocab_size,
+                )
+            with timed_trt_compile(build_timing, "t5_encoder"):
+                t5_plan = build_t5_encoder_engine(
+                    t5_weights,
+                    d_model=t5_d_model,
+                    num_heads=t5_num_heads,
+                    d_kv=t5_d_kv,
+                    d_ff=t5_d_ff,
+                    num_layers=t5_num_layers,
+                    vocab_size=t5_vocab_size,
+                    max_seq_len=self._T5_MAX_SEQ_LEN,
+                    verbose=verbose,
+                )
             text_encoders.append(("t5", t5_plan))
 
         # 3. FLUX DiT denoiser
         print("[flux] Loading FLUX DiT weights ...", file=sys.stderr)
-        dit_weights = load_flux_dit_weights(
-            transformer_dir,
-            dim=dit_dim,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            num_single_layers=num_single_layers,
-        )
+        with timed_weight_loading(build_timing, "flux_dit"):
+            dit_weights = load_flux_dit_weights(
+                transformer_dir,
+                dim=dit_dim,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                num_single_layers=num_single_layers,
+            )
 
-        dit_plan = build_flux_dit_engine(
-            dit_weights,
-            dim=dit_dim,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            num_single_layers=num_single_layers,
-            num_img_tokens=num_img_tokens,
-            text_seq_len=self._T5_MAX_SEQ_LEN,
-            verbose=verbose,
-        )
+        with timed_trt_compile(build_timing, "flux_dit"):
+            dit_plan = build_flux_dit_engine(
+                dit_weights,
+                dim=dit_dim,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                num_single_layers=num_single_layers,
+                num_img_tokens=num_img_tokens,
+                text_seq_len=self._T5_MAX_SEQ_LEN,
+                verbose=verbose,
+            )
 
         # 4. VAE decoder - native TRT engine
         from ..flux_vae_builder import build_flux_vae_decoder_engine
@@ -325,6 +347,8 @@ class FluxPlugin:
             scaling_factor=self._VAE_SCALING_FACTOR,
             shift_factor=self._VAE_SHIFT_FACTOR,
             verbose=verbose,
+            build_timing=build_timing,
+            timing_component="vae_decoder",
         )
 
         # 5. Serialize preprocessor weights
@@ -340,8 +364,10 @@ class FluxPlugin:
     def _build_flux2_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, tc: dict, verbose: bool = False, fp8_scales: dict | None = None,
+        build_timing: dict | None = None,
     ) -> dict:
         """Build FLUX.2 component engines (Mistral + Flux2 DiT + VAE32)."""
+        from ..build_timing import timed_trt_compile, timed_weight_loading
         from ..mistral_encoder_builder import (
             build_mistral_encoder_engine, load_mistral_encoder_weights)
         from ..flux2_dit_builder import build_flux2_dit_engine, load_flux2_dit_weights
@@ -380,7 +406,7 @@ class FluxPlugin:
         w_lat = img_w // 8
         pack_size = 2
         num_img_tokens = (h_lat // pack_size) * (w_lat // pack_size)
-        text_seq_len = self._FLUX2_TEXT_SEQ_LEN
+        text_seq_len = self._flux2_text_seq_len(config)
 
         print(f"[flux] FLUX.2 spatial: img={img_h}x{img_w}, "
               f"h_lat={h_lat}x{w_lat}, img_tokens={num_img_tokens}",
@@ -406,31 +432,33 @@ class FluxPlugin:
 
             print(f"[flux] Loading Mistral 3 encoder ({m_hidden}d, {m_num_layers}L) ...",
                   file=sys.stderr)
-            mistral_weights = load_mistral_encoder_weights(
-                te_dir,
-                hidden_size=m_hidden,
-                num_heads=m_heads,
-                num_kv_heads=m_kv_heads,
-                head_dim=m_head_dim,
-                intermediate_size=m_intermediate,
-                num_layers=m_num_layers,
-                vocab_size=m_vocab,
-            )
+            with timed_weight_loading(build_timing, "mistral_encoder"):
+                mistral_weights = load_mistral_encoder_weights(
+                    te_dir,
+                    hidden_size=m_hidden,
+                    num_heads=m_heads,
+                    num_kv_heads=m_kv_heads,
+                    head_dim=m_head_dim,
+                    intermediate_size=m_intermediate,
+                    num_layers=m_num_layers,
+                    vocab_size=m_vocab,
+                )
             m_rope_theta = tc_text.get("rope_theta", 1000000000.0)
-            mistral_plan = build_mistral_encoder_engine(
-                mistral_weights,
-                hidden_size=m_hidden,
-                num_heads=m_heads,
-                num_kv_heads=m_kv_heads,
-                head_dim=m_head_dim,
-                intermediate_size=m_intermediate,
-                num_layers=m_num_layers,
-                vocab_size=m_vocab,
-                max_seq_len=text_seq_len,
-                extract_layers=m_extract,
-                rope_theta=m_rope_theta,
-                verbose=verbose,
-            )
+            with timed_trt_compile(build_timing, "mistral_encoder"):
+                mistral_plan = build_mistral_encoder_engine(
+                    mistral_weights,
+                    hidden_size=m_hidden,
+                    num_heads=m_heads,
+                    num_kv_heads=m_kv_heads,
+                    head_dim=m_head_dim,
+                    intermediate_size=m_intermediate,
+                    num_layers=m_num_layers,
+                    vocab_size=m_vocab,
+                    max_seq_len=text_seq_len,
+                    extract_layers=m_extract,
+                    rope_theta=m_rope_theta,
+                    verbose=verbose,
+                )
             text_encoders.append(("mistral", mistral_plan))
 
         # Free GPU memory from encoder build before DiT (monolithic Myelin
@@ -457,13 +485,14 @@ class FluxPlugin:
 
         # 2. FLUX.2 DiT denoiser
         print("[flux] Loading FLUX.2 DiT weights ...", file=sys.stderr)
-        dit_weights = load_flux2_dit_weights(
-            transformer_dir,
-            dim=dit_dim,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            num_single_layers=num_single_layers,
-        )
+        with timed_weight_loading(build_timing, "flux2_dit"):
+            dit_weights = load_flux2_dit_weights(
+                transformer_dir,
+                dim=dit_dim,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                num_single_layers=num_single_layers,
+            )
 
         # FP8 mode: use STRONGLY_TYPED + BF16 base when scales are provided
         _strongly_typed = fp8_scales is not None
@@ -475,23 +504,24 @@ class FluxPlugin:
         text_encoder_dim = len(self._MISTRAL_EXTRACT_LAYERS) * m_hidden
         _freq_dim = tc.get("timestep_guidance_channels", 256)
 
-        dit_plan = build_flux2_dit_engine(
-            dit_weights,
-            dim=dit_dim,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            num_single_layers=num_single_layers,
-            num_img_tokens=num_img_tokens,
-            text_seq_len=text_seq_len,
-            mlp_ratio=mlp_ratio,
-            packed_channels=packed_channels,
-            t5_dim=text_encoder_dim,
-            freq_dim=_freq_dim,
-            verbose=verbose,
-            strongly_typed=_strongly_typed,
-            cast_dtype=_cast_dtype,
-            fp8_scales=fp8_scales,
-        )
+        with timed_trt_compile(build_timing, "flux2_dit"):
+            dit_plan = build_flux2_dit_engine(
+                dit_weights,
+                dim=dit_dim,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                num_single_layers=num_single_layers,
+                num_img_tokens=num_img_tokens,
+                text_seq_len=text_seq_len,
+                mlp_ratio=mlp_ratio,
+                packed_channels=packed_channels,
+                t5_dim=text_encoder_dim,
+                freq_dim=_freq_dim,
+                verbose=verbose,
+                strongly_typed=_strongly_typed,
+                cast_dtype=_cast_dtype,
+                fp8_scales=fp8_scales,
+            )
 
         # 3. VAE decoder (32 latent ch → 3ch image at 8x upsampling)
         # Use identity scaling (1.0/0.0) since BN denorm is handled in C++ runtime
@@ -503,6 +533,8 @@ class FluxPlugin:
             scaling_factor=1.0,
             shift_factor=0.0,
             verbose=verbose,
+            build_timing=build_timing,
+            timing_component="vae_decoder",
         )
 
         # 4. Load VAE BN stats (FLUX.2 uses BN denorm instead of scaling)
@@ -512,14 +544,15 @@ class FluxPlugin:
         _vae_st_files = sorted(_Path(vae_dir).glob("*.safetensors"))
         if _vae_st_files:
             from safetensors import safe_open as _safe_open
-            for _f in _vae_st_files:
-                with _safe_open(str(_f), framework="numpy") as _r:
-                    if "bn.running_mean" in _r.keys():
-                        _vae_weights["bn.running_mean"] = _r.get_tensor(
-                            "bn.running_mean").astype(_np.float32)
-                    if "bn.running_var" in _r.keys():
-                        _vae_weights["bn.running_var"] = _r.get_tensor(
-                            "bn.running_var").astype(_np.float32)
+            with timed_weight_loading(build_timing, "vae_bn"):
+                for _f in _vae_st_files:
+                    with _safe_open(str(_f), framework="numpy") as _r:
+                        if "bn.running_mean" in _r.keys():
+                            _vae_weights["bn.running_mean"] = _r.get_tensor(
+                                "bn.running_mean").astype(_np.float32)
+                        if "bn.running_var" in _r.keys():
+                            _vae_weights["bn.running_var"] = _r.get_tensor(
+                                "bn.running_var").astype(_np.float32)
 
         # 5. Serialize preprocessor weights
         preprocessor_weights = _serialize_flux2_preprocessor(
@@ -557,7 +590,8 @@ class FluxPlugin:
         return {
             "diffusion_backend_type": "flux_2d",
             "scheduler": "flow_match_euler",
-            "num_inference_steps": 28 if guidance_embeds else 4,
+            "num_inference_steps": config.raw.get(
+                "num_inference_steps", 28 if guidance_embeds else 4),
             "guidance_scale": 3.5 if guidance_embeds else 0.0,
             "flow_shift": 3.0,
             "use_dynamic_shifting": 1,
@@ -603,7 +637,7 @@ class FluxPlugin:
         return {
             "diffusion_backend_type": "flux_2d",
             "scheduler": "flow_match_euler",
-            "num_inference_steps": 28,
+            "num_inference_steps": config.raw.get("num_inference_steps", 28),
             "guidance_scale": 3.5,
             "flow_shift": 3.0,
             "use_dynamic_shifting": 1,
@@ -623,7 +657,7 @@ class FluxPlugin:
             "scale_factor_temporal": 1,
             "scale_factor_spatial": 8,
             "freq_dim": tc.get("timestep_guidance_channels", 256),
-            "text_seq_len": self._FLUX2_TEXT_SEQ_LEN,
+            "text_seq_len": self._flux2_text_seq_len(config),
             "text_encoder_dim": text_encoder_dim,
             "vae_scaling_factor": vae_scaling,
             "vae_shift_factor": vae_shift,
@@ -670,7 +704,7 @@ class FluxPlugin:
         h_packed = (img_h // 8) // 2
         w_packed = (img_w // 8) // 2
         num_img = h_packed * w_packed
-        text_seq = self._FLUX2_TEXT_SEQ_LEN
+        text_seq = self._flux2_text_seq_len(config)
         packed_ch = 32 * 4  # z_dim * 2x2 patch
         # Encoder dim = Mistral hidden * num_extract_layers (5120 * 3 = 15360)
         encoder_dim = tc.get("joint_attention_dim",

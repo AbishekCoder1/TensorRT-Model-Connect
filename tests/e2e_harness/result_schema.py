@@ -129,6 +129,9 @@ def serialize_result(result: E2EResult) -> Dict[str, Any]:
     if result.timing:
         d["timing"] = dict(result.timing)
 
+    if result.detailed_timing:
+        d["detailed_timing"] = dict(result.detailed_timing)
+
     if result.commands:
         d["commands"] = result.commands
 
@@ -166,6 +169,7 @@ def deserialize_result(data: Dict[str, Any]) -> E2EResult:
         stages=stages,
         determinism=data.get("determinism", {}),
         timing=data.get("timing", {}),
+        detailed_timing=data.get("detailed_timing", {}),
         env_fingerprint=data.get("env_fingerprint", {}),
         timestamp=data.get("timestamp", ""),
         repro_commands=data.get("repro_commands", {}),

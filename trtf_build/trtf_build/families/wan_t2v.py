@@ -79,9 +79,11 @@ class WanT2VPlugin:
         *, precision: str = "fp32", verbose: bool = False, **_kwargs,
     ) -> dict:
         """Build all three component engines."""
+        from ..build_timing import timed_trt_compile, timed_weight_loading
         from ..t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
         from ..standard_dit_builder import build_standard_dit_engine, load_dit_weights
         from ..causal_vae_3d_builder import build_causal_vae_3d_engine, load_vae_weights
+        build_timing = _kwargs.get("build_timing")
 
         text_encoder_dir = weights["_text_encoder_dir"]
         transformer_dir = weights["_transformer_dir"]
@@ -101,77 +103,83 @@ class WanT2VPlugin:
         # 1. T5 text encoder
         import sys
         print("[wan-t2v] Loading T5 encoder weights ...", file=sys.stderr)
-        t5_weights = load_t5_weights(
-            text_encoder_dir,
-            d_model=self._T5_D_MODEL,
-            num_heads=self._T5_NUM_HEADS,
-            d_kv=self._T5_D_KV,
-            d_ff=self._T5_D_FF,
-            num_layers=self._T5_NUM_LAYERS,
-            vocab_size=self._T5_VOCAB_SIZE,
-        )
-        t5_plan = build_t5_encoder_engine(
-            t5_weights,
-            d_model=self._T5_D_MODEL,
-            num_heads=self._T5_NUM_HEADS,
-            d_kv=self._T5_D_KV,
-            d_ff=self._T5_D_FF,
-            num_layers=self._T5_NUM_LAYERS,
-            vocab_size=self._T5_VOCAB_SIZE,
-            max_seq_len=self._T5_MAX_SEQ_LEN,
-            verbose=verbose,
-        )
+        with timed_weight_loading(build_timing, "t5_encoder"):
+            t5_weights = load_t5_weights(
+                text_encoder_dir,
+                d_model=self._T5_D_MODEL,
+                num_heads=self._T5_NUM_HEADS,
+                d_kv=self._T5_D_KV,
+                d_ff=self._T5_D_FF,
+                num_layers=self._T5_NUM_LAYERS,
+                vocab_size=self._T5_VOCAB_SIZE,
+            )
+        with timed_trt_compile(build_timing, "t5_encoder"):
+            t5_plan = build_t5_encoder_engine(
+                t5_weights,
+                d_model=self._T5_D_MODEL,
+                num_heads=self._T5_NUM_HEADS,
+                d_kv=self._T5_D_KV,
+                d_ff=self._T5_D_FF,
+                num_layers=self._T5_NUM_LAYERS,
+                vocab_size=self._T5_VOCAB_SIZE,
+                max_seq_len=self._T5_MAX_SEQ_LEN,
+                verbose=verbose,
+            )
 
         # 2. DiT denoiser
         print("[wan-t2v] Loading DiT weights ...", file=sys.stderr)
-        dit_weights = load_dit_weights(
-            transformer_dir,
-            dim=self._DIT_DIM,
-            num_heads=self._DIT_NUM_HEADS,
-            num_layers=self._DIT_NUM_LAYERS,
-            ffn_dim=self._DIT_FFN_DIM,
-            context_dim=self._DIT_CONTEXT_DIM,
-        )
+        with timed_weight_loading(build_timing, "dit"):
+            dit_weights = load_dit_weights(
+                transformer_dir,
+                dim=self._DIT_DIM,
+                num_heads=self._DIT_NUM_HEADS,
+                num_layers=self._DIT_NUM_LAYERS,
+                ffn_dim=self._DIT_FFN_DIM,
+                context_dim=self._DIT_CONTEXT_DIM,
+            )
         # Note: context_dim=dim (1536) because the text embedding projection
         # (4096->1536) is handled externally in the runner, so cross-attn
         # K/V weights are [dim, dim].
-        dit_plan = build_standard_dit_engine(
-            dit_weights,
-            dim=self._DIT_DIM,
-            num_heads=self._DIT_NUM_HEADS,
-            num_layers=self._DIT_NUM_LAYERS,
-            ffn_dim=self._DIT_FFN_DIM,
-            context_dim=self._DIT_DIM,
-            num_patches=num_patches,
-            text_seq_len=self._T5_MAX_SEQ_LEN,
-            qk_norm=True,
-            cross_attn_norm=True,
-            ffn_activation="gelu_new",
-            verbose=verbose,
-        )
+        with timed_trt_compile(build_timing, "dit"):
+            dit_plan = build_standard_dit_engine(
+                dit_weights,
+                dim=self._DIT_DIM,
+                num_heads=self._DIT_NUM_HEADS,
+                num_layers=self._DIT_NUM_LAYERS,
+                ffn_dim=self._DIT_FFN_DIM,
+                context_dim=self._DIT_DIM,
+                num_patches=num_patches,
+                text_seq_len=self._T5_MAX_SEQ_LEN,
+                qk_norm=True,
+                cross_attn_norm=True,
+                ffn_activation="gelu_new",
+                verbose=verbose,
+            )
 
         # 3. Causal 3D VAE decoder
         print("[wan-t2v] Loading VAE decoder weights ...", file=sys.stderr)
-        vae_weights = load_vae_weights(
-            vae_dir,
-            z_dim=self._VAE_Z_DIM,
-            base_dim=self._VAE_BASE_DIM,
-            dim_mult=self._VAE_DIM_MULT,
-            num_res_blocks=self._VAE_NUM_RES_BLOCKS,
-            norm_type="l2_channel_norm",
-        )
-        vae_plan = build_causal_vae_3d_engine(
-            vae_weights,
-            z_dim=self._VAE_Z_DIM,
-            base_dim=self._VAE_BASE_DIM,
-            dim_mult=self._VAE_DIM_MULT,
-            num_res_blocks=self._VAE_NUM_RES_BLOCKS,
-            temporal_upsample=self._VAE_TEMPORAL_UPSAMPLE,
-            h_lat=h_lat,
-            w_lat=w_lat,
-            norm_type="l2_channel_norm",
-            verbose=verbose,
-        )
+        with timed_weight_loading(build_timing, "vae_decoder"):
+            vae_weights = load_vae_weights(
+                vae_dir,
+                z_dim=self._VAE_Z_DIM,
+                base_dim=self._VAE_BASE_DIM,
+                dim_mult=self._VAE_DIM_MULT,
+                num_res_blocks=self._VAE_NUM_RES_BLOCKS,
+                norm_type="l2_channel_norm",
+            )
+        with timed_trt_compile(build_timing, "vae_decoder"):
+            vae_plan = build_causal_vae_3d_engine(
+                vae_weights,
+                z_dim=self._VAE_Z_DIM,
+                base_dim=self._VAE_BASE_DIM,
+                dim_mult=self._VAE_DIM_MULT,
+                num_res_blocks=self._VAE_NUM_RES_BLOCKS,
+                temporal_upsample=self._VAE_TEMPORAL_UPSAMPLE,
+                h_lat=h_lat,
+                w_lat=w_lat,
+                norm_type="l2_channel_norm",
+                verbose=verbose,
+            )
 
         # 4. Extract preprocessor weights for C++ runtime
         #    These are the DiT weights that are NOT in the TRT engine graph:
@@ -197,7 +205,7 @@ class WanT2VPlugin:
         return {
             "diffusion_backend_type": "wan_3d",
             "scheduler": "flow_match_euler",
-            "num_inference_steps": 50,
+            "num_inference_steps": config.raw.get("num_inference_steps", 50),
             "guidance_scale": 5.0,
             "flow_shift": 3.0,
             "video_height": video_height,

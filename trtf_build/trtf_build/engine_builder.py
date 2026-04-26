@@ -8,6 +8,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .build_timing import (
+    add_build_timing as _add_build_timing,
+    new_build_timing as _new_build_timing,
+    write_build_timing as _write_build_timing,
+)
 from .config import ModelConfig
 from .families import find_plugin, find_diffusion_plugin, _ALL_PLUGINS
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
@@ -15,6 +20,7 @@ from .triattention_export import (
     TriAttentionBundleConfig,
     export_triattention_stats_section,
 )
+
 
 def _setup_trt_import(rtx: bool) -> None:
     """If rtx=True, monkeypatch sys.modules so 'import tensorrt' resolves to tensorrt_rtx."""
@@ -29,6 +35,36 @@ def _setup_trt_import(rtx: bool) -> None:
         )
     sys.modules["tensorrt"] = tensorrt_rtx
     print("[trtf-build] Using TensorRT-RTX backend", file=sys.stderr)
+
+
+def _build_timing_phase(timing: dict, key: str) -> float:
+    phases = timing.setdefault("phases", {})
+    try:
+        return float(phases.get(key, 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _compile_time_excluding_component_weight_load(
+    components_elapsed: float,
+    weights_before_components: float,
+    build_timing: dict,
+) -> float:
+    weights_after_components = _build_timing_phase(build_timing, "weights_loading_s")
+    component_weight_elapsed = max(
+        0.0, weights_after_components - weights_before_components)
+    return max(0.0, components_elapsed - component_weight_elapsed)
+
+
+def _untracked_compile_time(
+    measured_compile_elapsed: float,
+    compile_before_components: float,
+    build_timing: dict,
+) -> float:
+    compile_after_components = _build_timing_phase(build_timing, "trt_compile_s")
+    tracked_compile_elapsed = max(
+        0.0, compile_after_components - compile_before_components)
+    return max(0.0, measured_compile_elapsed - tracked_compile_elapsed)
 
 
 # Standard HF file patterns to download (matches what the builder needs).
@@ -461,6 +497,7 @@ def build_bundle(
     # the TRTF_MAGPIE_MAX_SOURCE_POS env var; passed to families via
     # config.raw, same passthrough pattern.
     audio_magpie_max_source_positions: int = 0,
+    diffusion_overrides: dict | None = None,
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -473,6 +510,10 @@ def build_bundle(
     _setup_trt_import(rtx)
     model_dir_path = Path(model_dir)
     t0 = time.monotonic()
+    build_timing = _new_build_timing()
+    build_timing["model_dir"] = str(model_dir_path)
+    build_timing["output_path"] = str(output_path)
+    _write_build_timing(build_timing)
 
     # Detect diffusers format (model_index.json present)
     is_diffusers = (model_dir_path / "model_index.json").exists()
@@ -484,7 +525,9 @@ def build_bundle(
             model_dir_path, output_path, max_cache_length,
             precision=precision, verbose=verbose, t0=t0,
             fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales,
-            rtx=rtx)
+            rtx=rtx,
+            diffusion_overrides=diffusion_overrides,
+            build_timing=build_timing)
         return
 
     # 1. Parse config
@@ -513,33 +556,44 @@ def build_bundle(
     # 3. Load weights
     t1 = time.monotonic()
     print("[trtf-build] Loading weights ...", file=sys.stderr)
-    weights = plugin.load_weights(str(model_dir_path), config)
-    t2 = time.monotonic()
-    print(f"[trtf-build] Weights loaded [{t2 - t1:.1f}s]", file=sys.stderr)
+    try:
+        weights = plugin.load_weights(str(model_dir_path), config)
+    finally:
+        weights_elapsed = time.monotonic() - t1
+        _add_build_timing(build_timing, "weights_loading_s", weights_elapsed)
+        _write_build_timing(build_timing)
+    print(f"[trtf-build] Weights loaded [{weights_elapsed:.1f}s]", file=sys.stderr)
 
     # 3b. Build quantization context (if requested)
     quant_ctx = None
     quant_plan = None
     if quantize:
+        quant_t0 = time.monotonic()
         from .quantization import QuantPlan, build_quant_context
-        quant_plan = QuantPlan.from_build_args(
-            precision=precision,
-            quantize=quantize,
-            quant_scales=quant_scales,
-            quant_calibration_samples=quant_calibration_samples,
-        )
-        exclude_patterns = (plugin.quant_exclude_patterns(quant_plan.quant_format)
-                            if hasattr(plugin, 'quant_exclude_patterns') else None)
-        quant_ctx = build_quant_context(
-            format_name=quant_plan.quant_format,
-            model_dir=str(model_dir_path),
-            config=config,
-            exclude_patterns=exclude_patterns,
-            scales_json=quant_scales,
-            num_calibration_samples=quant_calibration_samples,
-            plugin=plugin,
-            quant_plan=quant_plan,
-        )
+        try:
+            quant_plan = QuantPlan.from_build_args(
+                precision=precision,
+                quantize=quantize,
+                quant_scales=quant_scales,
+                quant_calibration_samples=quant_calibration_samples,
+            )
+            exclude_patterns = (plugin.quant_exclude_patterns(quant_plan.quant_format)
+                                if hasattr(plugin, 'quant_exclude_patterns') else None)
+            quant_ctx = build_quant_context(
+                format_name=quant_plan.quant_format,
+                model_dir=str(model_dir_path),
+                config=config,
+                exclude_patterns=exclude_patterns,
+                scales_json=quant_scales,
+                num_calibration_samples=quant_calibration_samples,
+                plugin=plugin,
+                quant_plan=quant_plan,
+            )
+        finally:
+            _add_build_timing(
+                build_timing, "quantization_context_s",
+                time.monotonic() - quant_t0)
+            _write_build_timing(build_timing)
         print(f"[trtf-build] Quantization: {quant_plan.quant_format}",
               file=sys.stderr)
 
@@ -637,10 +691,17 @@ def build_bundle(
         extra_kwargs['precision'] = precision
     if 'quant_ctx' in sig.parameters:
         extra_kwargs['quant_ctx'] = quant_ctx
-    engine_plan = plugin.build_engine(
-        config, weights, max_cache_length, verbose=verbose, **extra_kwargs)
-    t3 = time.monotonic()
-    print(f"[trtf-build] Engine built [{t3 - t2:.1f}s] "
+    engine_t0 = time.monotonic()
+    try:
+        engine_plan = plugin.build_engine(
+            config, weights, max_cache_length, verbose=verbose,
+            **extra_kwargs)
+    finally:
+        engine_elapsed = time.monotonic() - engine_t0
+        _add_build_timing(build_timing, "trt_compile_s", engine_elapsed)
+        _add_build_timing(build_timing, "trt_compile_main_engine_s", engine_elapsed)
+        _write_build_timing(build_timing)
+    print(f"[trtf-build] Engine built [{engine_elapsed:.1f}s] "
           f"({len(engine_plan) / (1024 * 1024):.1f} MB)", file=sys.stderr)
 
     # 4b. Build vision engine (optional, VL models only)
@@ -649,11 +710,18 @@ def build_bundle(
     if build_vision is not None:
         print("[trtf-build] Building vision encoder engine ...",
               file=sys.stderr)
-        vision_plan = build_vision(
-            str(model_dir_path), config, weights, verbose=verbose)
+        vision_t0 = time.monotonic()
+        try:
+            vision_plan = build_vision(
+                str(model_dir_path), config, weights, verbose=verbose)
+        finally:
+            vision_elapsed = time.monotonic() - vision_t0
+            _add_build_timing(build_timing, "trt_compile_s", vision_elapsed)
+            _add_build_timing(
+                build_timing, "trt_compile_vision_engine_s", vision_elapsed)
+            _write_build_timing(build_timing)
         if vision_plan is not None:
-            t3b = time.monotonic()
-            print(f"[trtf-build] Vision engine built [{t3b - t3:.1f}s] "
+            print(f"[trtf-build] Vision engine built [{vision_elapsed:.1f}s] "
                   f"({len(vision_plan) / (1024 * 1024):.1f} MB)",
                   file=sys.stderr)
 
@@ -662,15 +730,30 @@ def build_bundle(
     build_extra = getattr(plugin, 'build_extra_engines', None)
     if build_extra is not None:
         print("[trtf-build] Building extra engines ...", file=sys.stderr)
-        extra_engines = build_extra(
-            config, weights, max_cache_length, verbose=verbose) or {}
+        extra_t0 = time.monotonic()
+        try:
+            extra_engines = build_extra(
+                config, weights, max_cache_length, verbose=verbose) or {}
+        finally:
+            extra_elapsed = time.monotonic() - extra_t0
+            _add_build_timing(build_timing, "trt_compile_s", extra_elapsed)
+            _add_build_timing(
+                build_timing, "trt_compile_extra_engines_s", extra_elapsed)
+            _write_build_timing(build_timing)
+        print(f"[trtf-build] Extra engines built [{extra_elapsed:.1f}s]",
+              file=sys.stderr)
         for ename, eplan in extra_engines.items():
             print(f"[trtf-build]   {ename}: {len(eplan) / (1024 * 1024):.1f} MB",
                   file=sys.stderr)
 
     # 5. Detect tokenizer special-tokens behavior from HF config
+    tokenizer_t0 = time.monotonic()
     tokenizer_add_special_tokens = _detect_tokenizer_add_special_tokens(
         model_dir_path)
+    _add_build_timing(
+        build_timing, "tokenizer_special_tokens_detection_s",
+        time.monotonic() - tokenizer_t0)
+    _write_build_timing(build_timing)
 
     # 6. Write bundle
     info = BundleInfo(
@@ -712,7 +795,12 @@ def build_bundle(
     # Skip for non-text models (segmentation, audio) that don't use tokenizers.
     runtime_strategy = getattr(plugin, "runtime_strategy", "")
     if runtime_strategy not in ("segmentation", "neural_operator", "object_detection", "prompted_segmentation"):
+        tokenizer_json_t0 = time.monotonic()
         _ensure_tokenizer_json(model_dir_path)
+        _add_build_timing(
+            build_timing, "tokenizer_json_ensure_s",
+            time.monotonic() - tokenizer_json_t0)
+        _write_build_timing(build_timing)
 
     # Inject encoder_only config overrides
     if runtime_strategy == "encoder_only":
@@ -816,8 +904,12 @@ def build_bundle(
         manifest_json = _json.dumps({"kernels": manifest_entries}).encode("utf-8")
         sections.append(BundleSection("kernel_manifest.json", manifest_json))
 
+    write_t0 = time.monotonic()
     write_bundle(output_path, info, sections)
+    _add_build_timing(build_timing, "bundle_write_s", time.monotonic() - write_t0)
     t4 = time.monotonic()
+    build_timing["total_s"] = t4 - t0
+    _write_build_timing(build_timing)
     print(f"[trtf-build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
           file=sys.stderr)
 
@@ -833,9 +925,12 @@ def _build_diffusion_bundle(
     fp8_scales: dict | None = None,
     save_fp8_scales: str | None = None,
     rtx: bool = False,
+    diffusion_overrides: dict | None = None,
+    build_timing: dict | None = None,
 ) -> None:
     """Build a diffusion model bundle from a diffusers-format directory."""
-    _setup_trt_import(rtx)
+    if build_timing is None:
+        build_timing = _new_build_timing()
     # Parse model_index.json to determine pipeline type
     model_index = json.loads(
         (model_dir_path / "model_index.json").read_text())
@@ -857,12 +952,21 @@ def _build_diffusion_bundle(
 
     model_type = getattr(plugin, 'name', pipeline_class.lower())
     config = ModelConfig(model_type=model_type, raw=model_index)
+    config.raw["max_cache_length"] = max_cache_length
+    if diffusion_overrides:
+        config.raw.update(diffusion_overrides)
 
     print(f"[trtf-build] Family: {plugin.name}", file=sys.stderr)
 
     # Load weights (lightweight — just paths for diffusion)
     t1 = time.monotonic()
-    weights = plugin.load_weights(str(model_dir_path), config)
+    try:
+        weights = plugin.load_weights(str(model_dir_path), config)
+    finally:
+        weights_elapsed = time.monotonic() - t1
+        _add_build_timing(build_timing, "weights_loading_s", weights_elapsed)
+        _write_build_timing(build_timing)
+    print(f"[trtf-build] Weights loaded [{weights_elapsed:.1f}s]", file=sys.stderr)
 
     # Propagate transformer config to ModelConfig so get_diffusion_config can access it
     if "_transformer_config" in weights:
@@ -877,14 +981,26 @@ def _build_diffusion_bundle(
                 f"Use --fp8-scales with a pre-computed scales JSON instead.")
         print(f"[trtf-build] Running FP8 auto-calibration for {plugin.name} ...",
               file=sys.stderr)
-        fp8_scales = calibrate_fn(str(model_dir_path), config)
+        calibrate_t0 = time.monotonic()
+        try:
+            fp8_scales = calibrate_fn(str(model_dir_path), config)
+        finally:
+            _add_build_timing(
+                build_timing, "fp8_calibration_s",
+                time.monotonic() - calibrate_t0)
+            _write_build_timing(build_timing)
         print(f"[trtf-build] Calibrated {len(fp8_scales)} layers",
               file=sys.stderr)
 
     # Save FP8 scales to JSON if requested
     if save_fp8_scales and isinstance(fp8_scales, dict):
+        save_scales_t0 = time.monotonic()
         with open(save_fp8_scales, "w") as _sf:
             json.dump(fp8_scales, _sf, indent=2)
+        _add_build_timing(
+            build_timing, "fp8_scales_write_s",
+            time.monotonic() - save_scales_t0)
+        _write_build_timing(build_timing)
         print(f"[trtf-build] Saved FP8 scales to {save_fp8_scales} "
               f"({len(fp8_scales)} layers)", file=sys.stderr)
 
@@ -894,15 +1010,32 @@ def _build_diffusion_bundle(
         raise ValueError(
             f"Plugin {plugin.name} does not support build_components()")
 
-    components = build_components(
-        str(model_dir_path), config, weights, verbose=verbose,
-        fp8_scales=fp8_scales)
+    components_t0 = time.monotonic()
+    weights_before_components = _build_timing_phase(
+        build_timing, "weights_loading_s")
+    compile_before_components = _build_timing_phase(build_timing, "trt_compile_s")
+    try:
+        components = build_components(
+            str(model_dir_path), config, weights, verbose=verbose,
+            fp8_scales=fp8_scales, build_timing=build_timing)
+    finally:
+        components_elapsed = time.monotonic() - components_t0
+        compile_elapsed = _compile_time_excluding_component_weight_load(
+            components_elapsed, weights_before_components, build_timing)
+        untracked_compile_elapsed = _untracked_compile_time(
+            compile_elapsed, compile_before_components, build_timing)
+        _add_build_timing(
+            build_timing, "trt_compile_s", untracked_compile_elapsed)
+        _add_build_timing(
+            build_timing, "trt_compile_diffusion_components_s",
+            compile_elapsed)
+        _write_build_timing(build_timing)
     if components is None:
         raise ValueError(
             f"Plugin {plugin.name}.build_components() returned None")
 
-    t3 = time.monotonic()
-    print(f"[trtf-build] All engines built [{t3 - t1:.1f}s]", file=sys.stderr)
+    print(f"[trtf-build] All engines built [{components_elapsed:.1f}s]",
+          file=sys.stderr)
 
     # Assemble bundle sections
     sections = []
@@ -958,10 +1091,15 @@ def _build_diffusion_bundle(
     # Ensure tokenizer.json exists for diffusion tokenizer directories.
     # SentencePiece-only tokenizers (T5, PixArt) may lack tokenizer.json
     # which the native C++ tokenizer needs.
+    tokenizer_json_t0 = time.monotonic()
     for tok_subdir in ("tokenizer_2", "tokenizer"):
         tok_dir = model_dir_path / tok_subdir
         if tok_dir.is_dir() and not (tok_dir / "tokenizer.json").exists():
             _ensure_tokenizer_json(tok_dir)
+    _add_build_timing(
+        build_timing, "tokenizer_json_ensure_s",
+        time.monotonic() - tokenizer_json_t0)
+    _write_build_timing(build_timing)
 
     # Embed tokenizer files from tokenizer subdirectories.
     # Multi-encoder models (FLUX, SD3) have tokenizer/ (CLIP) and
@@ -1014,8 +1152,12 @@ def _build_diffusion_bundle(
         precision=precision,
     )
 
+    write_t0 = time.monotonic()
     write_bundle(output_path, info, sections)
+    _add_build_timing(build_timing, "bundle_write_s", time.monotonic() - write_t0)
     t4 = time.monotonic()
+    build_timing["total_s"] = t4 - t0
+    _write_build_timing(build_timing)
     print(f"[trtf-build] Bundle saved: {output_path} [{t4 - t0:.1f}s total]",
           file=sys.stderr)
 
@@ -1046,6 +1188,7 @@ def build(
     triattention_disable_trig: bool = False,
     force_manual_attention: bool = False,
     audio_magpie_max_source_positions: int = 0,
+    diffusion_overrides: dict | None = None,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -1084,4 +1227,5 @@ def build(
                  triattention_disable_mlr=triattention_disable_mlr,
                  triattention_disable_trig=triattention_disable_trig,
                  force_manual_attention=force_manual_attention,
-                 audio_magpie_max_source_positions=audio_magpie_max_source_positions)
+                 audio_magpie_max_source_positions=audio_magpie_max_source_positions,
+                 diffusion_overrides=diffusion_overrides)

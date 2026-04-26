@@ -17,9 +17,7 @@ import json
 import struct
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
-
-import pytest
+from typing import Any, Dict
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +47,7 @@ def _make_result(
     ref_text: str = "Hello world! The",
     metrics: Dict[str, Any] | None = None,
     timing: Dict[str, float] | None = None,
+    detailed_timing: Dict[str, float] | None = None,
     failure_type: str | None = None,
     repro_commands: Dict[str, str] | None = None,
     artifacts: Dict[str, Any] | None = None,
@@ -116,6 +115,7 @@ def _make_result(
             },
         },
         "timing": timing,
+        "detailed_timing": detailed_timing or {},
         "repro_commands": repro_commands or {},
         "artifacts": artifacts or {},
     }
@@ -353,9 +353,127 @@ class TestRenderReport:
         mod = _import_report()
         r = _make_result(timing={"build_s": 10.0, "trt_generate_s": 5.5})
         html = mod.render_report([r])
+        assert "Detailed Timing" in html
+        assert "Weights loading" in html
+        assert "TRT compile" in html
+        assert "Inference" in html
+        assert "Comparison" in html
+        assert "Raw Timing Phases" in html
         assert "10.00s" in html
         assert "5.50s" in html
         assert "15.50s" in html  # total
+
+    def test_detailed_timing_rendered_from_result(self):
+        mod = _import_report()
+        r = _make_result(
+            timing={"bundle_build_s": 20.0, "trt_generate_s": 3.0, "contract_generate_s": 0.5},
+            detailed_timing={
+                "weights_loading_s": 4.0,
+                "trt_compile_s": 15.0,
+                "inference_s": 3.0,
+                "comparison_s": 0.5,
+            },
+        )
+        html = mod.render_report([r])
+        assert "Weights loading" in html
+        assert "4.00s" in html
+        assert "TRT compile" in html
+        assert "15.00s" in html
+        assert "Comparison" in html
+        assert "0.50s" in html
+
+    def test_component_weight_and_compile_rows_rendered(self):
+        mod = _import_report()
+        r = _make_result(
+            detailed_timing={
+                "weights_loading_s": 13.0,
+                "weights_loading_qwen3_encoder_s": 8.0,
+                "weights_loading_z_image_dit_s": 5.0,
+                "trt_compile_s": 88.0,
+                "trt_compile_qwen3_encoder_s": 30.0,
+                "trt_compile_z_image_dit_s": 50.0,
+            },
+        )
+        html = mod.render_report([r])
+        assert "Weights loading: qwen3 encoder" in html
+        assert "8.00s" in html
+        assert "Weights loading: z image dit" in html
+        assert "5.00s" in html
+        assert "TRT compile: qwen3 encoder" in html
+        assert "30.00s" in html
+        assert "TRT compile: z image dit" in html
+        assert "50.00s" in html
+
+    def test_detailed_timing_table_does_not_overlap_compile_breakdown(self):
+        mod = _import_report()
+        r = _make_result(
+            detailed_timing={
+                "weights_loading_s": 1.0,
+                "trt_compile_s": 10.0,
+                "trt_compile_main_engine_s": 6.0,
+                "trt_compile_vision_engine_s": 4.0,
+                "inference_s": 2.0,
+                "comparison_s": 0.1,
+            },
+        )
+        html = mod.render_report([r])
+        assert "TRT compile</td><td>10.00s" in html
+        assert "TRT compile: main engine" not in html
+        assert "TRT compile: vision engine" not in html
+
+    def test_detailed_timing_table_excludes_overlapping_build_summaries(self):
+        mod = _import_report()
+        r = _make_result(
+            timing={"bundle_build_s": 30.0},
+            detailed_timing={
+                "weights_loading_s": 1.0,
+                "trt_compile_s": 20.0,
+                "build_total_s": 25.0,
+                "bundle_total_s": 30.0,
+                "build_overhead_s": 4.0,
+                "inference_s": 2.0,
+                "comparison_s": 0.1,
+            },
+        )
+        html = mod.render_report([r])
+        assert "Weights loading" in html
+        assert "TRT compile</td><td>20.00s" in html
+        assert "Bundle build total" not in html
+        assert "Build overhead" not in html
+
+    def test_detailed_timing_uses_structured_result_only(self, tmp_path):
+        mod = _import_report()
+        r = _make_result(
+            timing={
+                "bundle_build_s": 30.0,
+                "trt_generate_s": 3.0,
+                "ref_generate_s": 2.0,
+                "compare_generate_s": 0.2,
+            },
+            detailed_timing={
+                "weights_loading_s": 4.5,
+                "trt_compile_s": 20.0,
+                "bundle_write_s": 1.0,
+            },
+        )
+        model_dir = _write_result(tmp_path, "test-model", r)
+        (model_dir / "e2e_run.log").write_text(
+            "\n".join([
+                "[trtf-build] Weights loaded [999.0s]",
+                "[trtf-build] Engine built [888.0s] (10.0 MB)",
+            ]),
+            encoding="utf-8",
+        )
+        loaded = mod.load_all_results(tmp_path)[0]
+        html = mod.render_report([loaded])
+        assert "4.50s" in html
+        assert "20.00s" in html
+        assert "999.00s" not in html
+        assert "888.00s" not in html
+        assert "Bundle write" in html
+        assert "1.00s" in html
+        assert "3.00s" in html
+        assert "0.20s" in html
 
     def test_env_section_rendered(self):
         mod = _import_report()
@@ -674,3 +792,18 @@ class TestSummaryDashboard:
         assert "1 Failed" in html
         assert "1 Skipped" in html
         assert "3 Total" in html
+
+    def test_summary_rows_sorted_by_total_time_descending(self):
+        mod = _import_report()
+        results = [
+            _make_result(name="fast", timing={"build_s": 1.0}),
+            _make_result(name="slow", timing={"build_s": 3.0, "trt_generate_s": 2.0}),
+            _make_result(name="medium", timing={"build_s": 2.0}),
+            _make_result(name="missing", timing={}),
+        ]
+
+        html = mod.render_summary_dashboard(results)
+
+        assert html.index('href="#model-slow"') < html.index('href="#model-medium"')
+        assert html.index('href="#model-medium"') < html.index('href="#model-fast"')
+        assert html.index('href="#model-fast"') < html.index('href="#model-missing"')

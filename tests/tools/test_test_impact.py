@@ -71,6 +71,8 @@ def mock_repo(tmp_path):
          "hf_id": "openai/whisper-tiny", "core": True},
         {"name": "flux-schnell", "family": "flux", "runtime_strategy": "diffusion_flux",
          "hf_id": "bf/FLUX", "core": True},
+        {"name": "flux-2-dev", "family": "flux", "runtime_strategy": "diffusion_flux",
+         "hf_id": "bf/FLUX2"},
         {"name": "flux-2-dev-fp8", "family": "flux", "runtime_strategy": "diffusion_flux",
          "hf_id": "bf/FLUX2", "fp8_scales": "flux2-fp8-scales.json"},
         {"name": "mamba-130m", "family": "mamba", "runtime_strategy": "ssm_recurrent",
@@ -330,6 +332,24 @@ class TestCppScope:
         assert "qwen3-0.6b" in match.models
         assert "bert-base" not in match.models
 
+    def test_flux_pipeline_runtime_scope_uses_non_fp8_l0_representative(self, imap):
+        """flux_pipeline.cpp is runtime-only, so FLUX.2 BF16 covers FP8 contract."""
+        match = test_impact.classify_file(
+            "src/runtime/pipelines/flux_pipeline.cpp", imap)
+        assert match.rule == "cpp_pipeline_flux_runtime"
+        assert "flux-2-dev" in match.models
+        assert "flux-schnell" in match.models
+        assert "flux-2-dev-fp8" not in match.models
+
+    def test_flux_plugin_runtime_scope_uses_non_fp8_l0_representative(self, imap):
+        """flux_plugin.cpp is runtime-only, so it does not duplicate FP8 builder coverage."""
+        match = test_impact.classify_file(
+            "src/runtime/plugins/flux_plugin.cpp", imap)
+        assert match.rule == "cpp_plugin_flux_runtime"
+        assert "flux-2-dev" in match.models
+        assert "flux-schnell" in match.models
+        assert "flux-2-dev-fp8" not in match.models
+
     def test_cpp_force_link(self, imap):
         """force_link_plugins.cpp -> no E2E models (linker anchors only)."""
         match = test_impact.classify_file(
@@ -344,6 +364,8 @@ class TestCppScope:
             "src/runtime/core/gpu_matmul.cpp", imap)
         assert match.rule == "cpp_scoped_helper"
         assert "flux-schnell" in match.models
+        assert "flux-2-dev" in match.models
+        assert "flux-2-dev-fp8" not in match.models
         assert "qwen3-0.6b" not in match.models
 
     def test_scoped_cpp_helper_diffusion_seam(self, imap):
@@ -352,6 +374,8 @@ class TestCppScope:
             "src/runtime/domains/diffusion/diffusion_denoising_step_seam.h", imap)
         assert match.rule == "cpp_scoped_helper"
         assert "flux-schnell" in match.models
+        assert "flux-2-dev" in match.models
+        assert "flux-2-dev-fp8" not in match.models
         assert "qwen3-0.6b" not in match.models
 
 
@@ -652,6 +676,65 @@ class TestAggregation:
         ], imap)
         assert "qwen3-0.6b" in result.e2e_models
         assert "builder" in result.unit_tiers
+
+    def test_l0_replaces_nightly_only_model(self, mock_repo):
+        """MR L0 substitutes configured scale-only models with representatives."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        qwen4b = json.loads((models_dir / "qwen3-4b.json").read_text())
+        qwen4b["ci_tier"] = "nightly_only"
+        qwen4b["l0_replacement"] = "qwen3-0.6b"
+        qwen4b["l0_replacement_reason"] = "scale-only coverage"
+        _write_json(models_dir / "qwen3-4b.json", qwen4b)
+
+        imap = test_impact.build_impact_map(mock_repo)
+        result = test_impact.analyze_impact(
+            ["trtf_build/trtf_build/families/qwen.py"], imap)
+
+        assert result.e2e_models == ["qwen3-0.6b"]
+        assert result.l0_replacements == [{
+            "model": "qwen3-4b",
+            "replacement": "qwen3-0.6b",
+            "reason": "scale-only coverage",
+        }]
+
+    def test_nightly_keeps_exact_impacted_models(self, mock_repo):
+        """Nightly policy does not apply MR L0 replacements."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        qwen4b = json.loads((models_dir / "qwen3-4b.json").read_text())
+        qwen4b["ci_tier"] = "nightly_only"
+        qwen4b["l0_replacement"] = "qwen3-0.6b"
+        _write_json(models_dir / "qwen3-4b.json", qwen4b)
+
+        imap = test_impact.build_impact_map(mock_repo)
+        result = test_impact.analyze_impact(
+            ["trtf_build/trtf_build/families/qwen.py"], imap,
+            e2e_suite="nightly",
+        )
+
+        assert sorted(result.e2e_models) == ["qwen3-0.6b", "qwen3-4b"]
+        assert result.l0_replacements == []
+
+    def test_manifest_change_uses_l0_replacement_for_nightly_only_model(
+        self, mock_repo,
+    ):
+        """Direct nightly-only manifest edits still keep MR L0 at representative scale."""
+        models_dir = mock_repo / "tests" / "e2e" / "models"
+        qwen4b = json.loads((models_dir / "qwen3-4b.json").read_text())
+        qwen4b["ci_tier"] = "nightly_only"
+        qwen4b["l0_replacement"] = "qwen3-0.6b"
+        qwen4b["l0_replacement_reason"] = "scale-only coverage"
+        _write_json(models_dir / "qwen3-4b.json", qwen4b)
+
+        imap = test_impact.build_impact_map(mock_repo)
+        result = test_impact.analyze_impact(
+            ["tests/e2e/models/qwen3-4b.json"], imap)
+
+        assert result.e2e_models == ["qwen3-0.6b"]
+        assert result.l0_replacements == [{
+            "model": "qwen3-4b",
+            "replacement": "qwen3-0.6b",
+            "reason": "scale-only coverage",
+        }]
 
 
 # ---------------------------------------------------------------------------

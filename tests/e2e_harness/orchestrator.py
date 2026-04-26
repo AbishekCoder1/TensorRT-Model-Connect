@@ -21,6 +21,7 @@ Lifecycle per case:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shlex
@@ -76,6 +77,7 @@ _MIGRATED_RUNTIME_STRATEGIES = frozenset({
 })
 _NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
 _LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"
+_BUILD_TIMING_ENV = "TRTF_BUILD_TIMING_JSON"
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +262,18 @@ def _resolve_bundle(
         hf_id, "-o", str(bundle_path),
         "--max-cache-length", str(max_cache),
     ]
+    diffusion_build_args = {
+        "image_height": "--image-height",
+        "image_width": "--image-width",
+        "video_height": "--video-height",
+        "video_width": "--video-width",
+        "video_num_frames": "--video-num-frames",
+        "num_inference_steps": "--num-inference-steps",
+    }
+    for input_key, cli_arg in diffusion_build_args.items():
+        value = case.inputs.get(input_key)
+        if value is not None:
+            cmd.extend([cli_arg, str(value)])
     if build_method:
         cmd.extend(["--method", build_method])
     precision = case.metadata.get("precision", "fp32")
@@ -293,23 +307,44 @@ def _resolve_bundle(
     env = os.environ.copy()
     if ctx.build_profile and ctx.build_profile != "base":
         env["TRTF_ACTIVE_PYTHON_PROFILE"] = ctx.build_profile
+    build_timing_path: Path | None = None
+    if ctx.artifacts_dir:
+        build_timing_path = Path(ctx.artifacts_dir) / case.name / "build_timing.json"
+    else:
+        build_timing_path = Path(ctx.engine_dir) / f"{case.name}.build_timing.json"
+    build_timing_path.parent.mkdir(parents=True, exist_ok=True)
+    env[_BUILD_TIMING_ENV] = str(build_timing_path)
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=3600, env=env)
         elapsed = time.monotonic() - t0
     except subprocess.TimeoutExpired:
-        return None, None, f"Bundle build timed out for {hf_id}", {
+        build_timing = _load_build_timing(build_timing_path)
+        build_info = {
             "command": cmd,
             "returncode": -1,
             "stdout": "",
             "stderr": "timeout",
         }
+        if build_timing:
+            build_info["timing"] = build_timing
+            build_info["timing_path"] = str(build_timing_path)
+        return None, None, f"Bundle build timed out for {hf_id}", {
+            **build_info,
+        }
     except Exception as e:
-        return None, None, f"Bundle build failed for {hf_id}: {e}", {
+        build_timing = _load_build_timing(build_timing_path)
+        build_info = {
             "command": cmd,
             "returncode": -1,
             "stdout": "",
             "stderr": str(e),
+        }
+        if build_timing:
+            build_info["timing"] = build_timing
+            build_info["timing_path"] = str(build_timing_path)
+        return None, None, f"Bundle build failed for {hf_id}: {e}", {
+            **build_info,
         }
 
     build_info: dict[str, Any] = {
@@ -318,6 +353,10 @@ def _resolve_bundle(
         "stdout": result.stdout,
         "stderr": result.stderr,
     }
+    build_timing = _load_build_timing(build_timing_path)
+    if build_timing:
+        build_info["timing"] = build_timing
+        build_info["timing_path"] = str(build_timing_path)
 
     if result.returncode != 0:
         truncated, log_path = save_full_stderr(
@@ -698,6 +737,84 @@ def _manifest_build_method(build_args: dict[str, Any]) -> str | None:
     return None
 
 
+def _load_build_timing(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _structured_build_detail_timing(build_info: dict[str, Any]) -> dict[str, float]:
+    """Extract detailed build timings from the structured build timing JSON."""
+    raw_timing = build_info.get("timing", {})
+    if not isinstance(raw_timing, dict):
+        return {}
+    phases = raw_timing.get("phases", {})
+    if not isinstance(phases, dict):
+        return {}
+
+    details: dict[str, float] = {}
+    for key, value in phases.items():
+        if value is None:
+            continue
+        try:
+            details[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+    return details
+
+
+def _sum_timing(
+    timing: dict[str, float],
+    prefixes: tuple[str, ...],
+    *,
+    exclude: tuple[str, ...] = (),
+) -> float:
+    return sum(
+        float(value)
+        for key, value in timing.items()
+        if (
+            value is not None
+            and key not in exclude
+            and any(key.startswith(prefix) for prefix in prefixes)
+        )
+    )
+
+
+def _build_detailed_timing(
+    timing: dict[str, float],
+    build_info: dict[str, Any] | None,
+) -> dict[str, float]:
+    """Build normalized timing categories for the HTML report."""
+    details = _structured_build_detail_timing(build_info or {})
+
+    inference = _sum_timing(
+        timing,
+        ("trt_",),
+        exclude=("trt_compile_s", "trt_build_s"),
+    )
+    if inference:
+        details["inference_s"] = inference
+
+    reference = _sum_timing(timing, ("ref_",))
+    if reference:
+        details["reference_s"] = reference
+
+    comparison = _sum_timing(timing, ("compare_", "contract_"))
+    if comparison:
+        details["comparison_s"] = comparison
+
+    preflight = timing.get("preflight_s")
+    if preflight is not None:
+        details["preflight_s"] = float(preflight)
+
+    return details
+
+
 class E2EOrchestrator:
     """Coordinates the full E2E lifecycle for one model case.
 
@@ -746,6 +863,7 @@ class E2EOrchestrator:
                 stages={},
                 determinism={"preflight": preflight_details},
                 timing=timing,
+                detailed_timing=_build_detailed_timing(timing, {}),
                 env_fingerprint=env_fp,
                 timestamp=timestamp,
             )
@@ -766,6 +884,15 @@ class E2EOrchestrator:
                 stderr=build_info.get("stderr", ""),
                 label="build",
             )
+            timing_path = build_info.get("timing_path")
+            if isinstance(timing_path, str) and timing_path:
+                try:
+                    sink.register_artifact(
+                        "build_timing_json",
+                        str(Path(timing_path).relative_to(sink.base_dir)),
+                    )
+                except ValueError:
+                    sink.register_artifact("build_timing_json", timing_path)
 
         if bundle_path is None:
             repro = _build_repro_commands(case, ctx, None, build_info)
@@ -777,6 +904,7 @@ class E2EOrchestrator:
                 stages={},
                 determinism={"build_error": build_err},
                 timing=timing,
+                detailed_timing=_build_detailed_timing(timing, build_info),
                 env_fingerprint=env_fp,
                 timestamp=timestamp,
                 repro_commands=repro,
@@ -1112,6 +1240,7 @@ class E2EOrchestrator:
             stages=stage_results,
             determinism=determinism_results,
             timing=timing,
+            detailed_timing=_build_detailed_timing(timing, build_info),
             env_fingerprint=env_fp,
             timestamp=timestamp,
             repro_commands=repro,

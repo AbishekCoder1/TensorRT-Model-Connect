@@ -1,16 +1,16 @@
 {
-  "name": "gpt-oss-20b",
-  "trace_id": "IT-E2E-GOSS-01",
+  "name": "gpt-oss-20b-l0",
+  "trace_id": "IT-E2E-GOSS-L0-01",
   "hf_id": "openai/gpt-oss-20b",
-  "bundle": "gpt-oss-20b.trtfb",
+  "bundle": "gpt-oss-20b-l0.trtfb",
   "family": "gpt_oss",
   "runtime_strategy": "decoder_moe",
-  "ci_tier": "nightly_only",
-  "l0_replacement": "gpt-oss-20b-l0",
-  "l0_replacement_reason": "GPT-OSS-20B full 256-token cache and 20-token decode mainly adds decode scale coverage; gpt-oss-20b-l0 preserves the same checkpoint, gpt_oss family, decoder_moe runtime, runner, comparator, chat artifact contract, and full cache budget with a shorter decode budget.",
+  "ci_tier": "l0_only",
+  "reference_family": "chat_instruct_template",
+  "user_contract": "chat_response",
   "max_cache_length": 256,
   "prompt": "<|start|>system<|message|>You are a helpful assistant.<|end|><|start|>user<|message|>What is the capital of France?<|end|><|start|>assistant",
-  "max_new_tokens": 20,
+  "max_new_tokens": 8,
   "logit_atol": 0.5,
   "trust_remote_code": false,
   "threshold_overrides": {
@@ -20,5 +20,6 @@
     "unstable_topk_hit_rate": 0.75,
     "token_agreement_rate": 0.25,
     "normalized_text_edit_distance": 0.80
-  }
+  },
+  "notes": "MR L0 repro for GPT-OSS-20B. Uses the same checkpoint, decoder_moe runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget."
 }

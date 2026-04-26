@@ -471,6 +471,8 @@ class E2EResult:
         stages: Per-stage comparison results.
         determinism: Results of determinism reruns (if any).
         timing: Phase-level timing (bundle_build_s, trt_run_s, ref_run_s, etc.).
+        detailed_timing: Normalized timing categories for report tables
+            (weights_loading_s, trt_compile_s, inference_s, comparison_s, etc.).
         env_fingerprint: Environment info (GPU, driver, TRT version, etc.).
         timestamp: ISO 8601 timestamp of when this result was produced.
         repro_commands: Shell commands to reproduce each phase of the test.
@@ -488,6 +490,7 @@ class E2EResult:
     stages: Dict[str, CompareResult] = field(default_factory=dict)
     determinism: Dict[str, Any] = field(default_factory=dict)
     timing: Dict[str, float] = field(default_factory=dict)
+    detailed_timing: Dict[str, float] = field(default_factory=dict)
     env_fingerprint: Dict[str, str] = field(default_factory=dict)
     timestamp: str = ""
     repro_commands: Dict[str, str] = field(default_factory=dict)

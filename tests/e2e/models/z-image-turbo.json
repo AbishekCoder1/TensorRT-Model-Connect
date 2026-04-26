@@ -6,6 +6,9 @@
   "model_type": "z_image",
   "family": "z_image",
   "runtime_strategy": "diffusion_zimage",
+  "ci_tier": "nightly_only",
+  "l0_replacement": "z-image-turbo-l0",
+  "l0_replacement_reason": "Z-Image-Turbo full 1024px/4-step run mainly adds image-scale coverage; z-image-turbo-l0 preserves the same checkpoint, z_image model type, Qwen3 encoder, ZImage DiT/VAE path, diffusion_zimage runtime, runner, comparator, full 256-token cache shape, 4-step denoising loop, and image artifact contract at 512px.",
   "description": "Z-Image-Turbo text-to-image (Qwen3 encoder + ZImage DiT + VAE)",
   "build_args": {
     "max_cache_length": 256

@@ -123,7 +123,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print("[trtf-build] FP8 auto-calibration enabled", file=sys.stderr)
 
     save_fp8_scales = getattr(args, 'save_fp8_scales', None)
-    quantize = canonicalize_quant_format(args.quantize)
+    quantize = canonicalize_quant_format(getattr(args, "quantize", None))
 
     # Resolve the registry-backed build-time config up front (before build),
     # so namespaces like decode_policy.* can feed kwargs directly. Importing
@@ -184,6 +184,18 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
             force_manual_attention=force_manual_attention,
             audio_magpie_max_source_positions=audio_magpie_max_source_positions,
+            diffusion_overrides={
+                key: value
+                for key, value in {
+                    "image_height": getattr(args, "image_height", None),
+                    "image_width": getattr(args, "image_width", None),
+                    "video_height": getattr(args, "video_height", None),
+                    "video_width": getattr(args, "video_width", None),
+                    "video_num_frames": getattr(args, "video_num_frames", None),
+                    "num_inference_steps": getattr(args, "num_inference_steps", None),
+                }.items()
+                if value is not None
+            },
         )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -524,6 +536,18 @@ def main() -> None:
         help="Comma-separated dynamic-KV optimization profile upper bounds "
              "(overrides the builder's default profile schedule)",
     )
+    build_p.add_argument("--image-height", type=int, default=None,
+                         help="Diffusion image height override")
+    build_p.add_argument("--image-width", type=int, default=None,
+                         help="Diffusion image width override")
+    build_p.add_argument("--video-height", type=int, default=None,
+                         help="Diffusion video height override")
+    build_p.add_argument("--video-width", type=int, default=None,
+                         help="Diffusion video width override")
+    build_p.add_argument("--video-num-frames", type=int, default=None,
+                         help="Diffusion video frame count override")
+    build_p.add_argument("--num-inference-steps", type=int, default=None,
+                         help="Diffusion denoising step count override")
     build_p.add_argument("--precision", choices=["fp32", "fp16", "bf16"],
                          default="fp32",
                          help="Engine precision (default: fp32)")

@@ -14,5 +14,10 @@
   "max_cache_length": 256,
   "prompt": "What is the capital of France? Answer in one word.",
   "max_new_tokens": 10,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "threshold_overrides": {
+    "logit_cosine_p5": 0.2,
+    "logit_rel_l2_p95": 1.5
+  },
+  "notes": "FP8 quantization can perturb raw logit distributions while preserving decoded output agreement. Keep default token agreement and normalized edit distance gates for output confidence."
 }

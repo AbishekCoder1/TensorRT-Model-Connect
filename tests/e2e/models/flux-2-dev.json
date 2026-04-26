@@ -6,6 +6,9 @@
   "model_type": "flux.2",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
+  "ci_tier": "nightly_only",
+  "l0_replacement": "flux-2-dev-l0",
+  "l0_replacement_reason": "FLUX.2-dev full 1024px/28-step run mainly adds image-scale and denoising-loop scale coverage; flux-2-dev-l0 preserves the same checkpoint, full 256-token Mistral 3 text encoder path, flux.2 model type, Flux2 DiT, 32-channel VAE, diffusion_flux runtime, runner, comparator, and image artifact contract at 512px/20 steps.",
   "description": "FLUX.2-dev text-to-image (Mistral 3 encoder, Flux2 DiT, 32ch VAE)",
   "build_args": {
     "max_cache_length": 256

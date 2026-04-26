@@ -1,0 +1,19 @@
+{
+  "name": "deepseek-ocr-l0",
+  "trace_id": "IT-E2E-DSOCR-L0-01",
+  "hf_id": "deepseek-ai/DeepSeek-OCR-2",
+  "bundle": "deepseek-ocr-l0.trtfb",
+  "family": "deepseek_ocr",
+  "runtime_strategy": "vision_language",
+  "ci_tier": "l0_only",
+  "reference_family": "ocr_markdown",
+  "user_contract": "ocr_text",
+  "max_cache_length": 4096,
+  "prompt": "Extract the text from this image.",
+  "max_new_tokens": 80,
+  "logit_atol": 0.001,
+  "test_image": "tests/e2e/data/orc_test_img.jpeg",
+  "trust_remote_code": true,
+  "reference_backend": "invariant_only",
+  "notes": "MR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, vision_language runtime, invariant comparator, OCR text artifact contract, and full cache budget with shorter decode budget."
+}

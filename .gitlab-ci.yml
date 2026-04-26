@@ -427,7 +427,7 @@ test-graph-ops:
 # Replaces the old tier3-smoke + tier4-full-e2e pipeline.
 # Runs ONLY the E2E models affected by this MR's changes.
 # - Family plugin change: tests only that family's models (~5 min)
-# - Shared module change: tests all 68 models (~2-3 hours)
+# - Shared module change: tests the affected L0 model set
 # - Docs/tools-only change: skips entirely (0 min)
 
 test-e2e-selective:
@@ -508,9 +508,9 @@ test-e2e-selective:
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 
-# ── Nightly: Full E2E Suite (all 68 models, scheduled) ──────────────────────
+# ── Nightly: Full E2E Suite (all models, scheduled) ─────────────────────────
 # Runs every night on master via GitLab CI schedule. Force-rebuilds all
-# bundles and tests all 68 models — the gold-standard regression gate.
+# bundles and tests every model — the gold-standard regression gate.
 # Configure in GitLab: Settings > CI/CD > Pipeline schedules
 #   Branch: master, Cron: 0 2 * * * (2 AM daily)
 
@@ -525,11 +525,11 @@ test-e2e-nightly:
   #             from_pretrained() and snapshot_download() calls resolve from
   #             the local cache populated in phase 1, zero network requests.
   script:
-    - "echo '=== Nightly Full E2E: all 68 models ==='"
+    - "echo '=== Nightly Full E2E: all models ==='"
     - nvidia-smi
     - |
       echo "=== Phase 1: warming HF cache (online, sequential) ==="
-      python scripts/warm_hf_cache.py
+      python scripts/warm_hf_cache.py --exclude-ci-tier l0_only
     - export HF_HUB_OFFLINE=1
     - |
       echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
@@ -538,6 +538,7 @@ test-e2e-nightly:
         --result-dir e2e_artifacts \
         --trtf-binary ./build/trtf \
         --workers-per-gpu 4 \
+        --exclude-ci-tier l0_only \
         --rebuild-engines
   after_script:
     - |

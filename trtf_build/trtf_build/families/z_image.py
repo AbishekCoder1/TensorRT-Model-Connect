@@ -106,11 +106,13 @@ class ZImagePlugin:
         *, precision: str = "fp32", verbose: bool = False, **_kwargs,
     ) -> dict:
         """Build REAL TRT engines for all Z-Image components."""
+        from ..build_timing import timed_trt_compile, timed_weight_loading
         from ..qwen3_encoder_builder import (
             build_qwen3_encoder_engine, load_qwen3_encoder_weights)
         from ..z_image_dit_builder import (
             build_z_image_dit_engine, load_z_image_dit_weights)
         from ..vae_2d_builder import build_vae_2d_decoder_engine
+        build_timing = _kwargs.get("build_timing")
 
         text_encoder_dir = weights["_text_encoder_dir"]
         transformer_dir = weights["_transformer_dir"]
@@ -134,53 +136,57 @@ class ZImagePlugin:
 
         # 1. Qwen3 text encoder
         print("[z-image] Loading Qwen3 text encoder weights ...", file=sys.stderr)
-        te_weights = load_qwen3_encoder_weights(
-            text_encoder_dir,
-            hidden_size=self._TEXT_HIDDEN,
-            num_layers=self._TEXT_NUM_LAYERS,
-            num_heads=self._TEXT_NUM_HEADS,
-            num_kv_heads=self._TEXT_NUM_KV_HEADS,
-            intermediate_size=self._TEXT_INTERMEDIATE,
-            vocab_size=self._TEXT_VOCAB,
-        )
-        te_plan = build_qwen3_encoder_engine(
-            te_weights,
-            hidden_size=self._TEXT_HIDDEN,
-            num_layers=self._TEXT_NUM_LAYERS,
-            num_heads=self._TEXT_NUM_HEADS,
-            num_kv_heads=self._TEXT_NUM_KV_HEADS,
-            head_dim=self._TEXT_HEAD_DIM,
-            intermediate_size=self._TEXT_INTERMEDIATE,
-            vocab_size=self._TEXT_VOCAB,
-            max_seq_len=self._TEXT_MAX_SEQ_LEN,
-            rope_theta=self._TEXT_ROPE_THETA,
-            output_layer=self._TEXT_OUTPUT_LAYER,
-            verbose=verbose,
-        )
+        with timed_weight_loading(build_timing, "qwen3_encoder"):
+            te_weights = load_qwen3_encoder_weights(
+                text_encoder_dir,
+                hidden_size=self._TEXT_HIDDEN,
+                num_layers=self._TEXT_NUM_LAYERS,
+                num_heads=self._TEXT_NUM_HEADS,
+                num_kv_heads=self._TEXT_NUM_KV_HEADS,
+                intermediate_size=self._TEXT_INTERMEDIATE,
+                vocab_size=self._TEXT_VOCAB,
+            )
+        with timed_trt_compile(build_timing, "qwen3_encoder"):
+            te_plan = build_qwen3_encoder_engine(
+                te_weights,
+                hidden_size=self._TEXT_HIDDEN,
+                num_layers=self._TEXT_NUM_LAYERS,
+                num_heads=self._TEXT_NUM_HEADS,
+                num_kv_heads=self._TEXT_NUM_KV_HEADS,
+                head_dim=self._TEXT_HEAD_DIM,
+                intermediate_size=self._TEXT_INTERMEDIATE,
+                vocab_size=self._TEXT_VOCAB,
+                max_seq_len=self._TEXT_MAX_SEQ_LEN,
+                rope_theta=self._TEXT_ROPE_THETA,
+                output_layer=self._TEXT_OUTPUT_LAYER,
+                verbose=verbose,
+            )
 
         # 2. Z-Image DiT denoiser
         print("[z-image] Loading Z-Image DiT weights ...", file=sys.stderr)
-        dit_weights = load_z_image_dit_weights(
-            transformer_dir,
-            dim=self._DIT_DIM,
-            num_heads=self._DIT_NUM_HEADS,
-            num_layers=self._DIT_NUM_LAYERS,
-            num_refiner_layers=self._DIT_NUM_REFINER_LAYERS,
-            ffn_dim=self._DIT_FFN_DIM,
-        )
-        dit_plan = build_z_image_dit_engine(
-            dit_weights,
-            dim=self._DIT_DIM,
-            num_heads=self._DIT_NUM_HEADS,
-            num_layers=self._DIT_NUM_LAYERS,
-            num_refiner_layers=self._DIT_NUM_REFINER_LAYERS,
-            ffn_dim=self._DIT_FFN_DIM,
-            num_patches=num_patches,
-            text_seq_len=self._TEXT_MAX_SEQ_LEN,
-            head_dim=self._DIT_HEAD_DIM,
-            adaln_embed_dim=self._ADALN_EMBED_DIM,
-            verbose=verbose,
-        )
+        with timed_weight_loading(build_timing, "z_image_dit"):
+            dit_weights = load_z_image_dit_weights(
+                transformer_dir,
+                dim=self._DIT_DIM,
+                num_heads=self._DIT_NUM_HEADS,
+                num_layers=self._DIT_NUM_LAYERS,
+                num_refiner_layers=self._DIT_NUM_REFINER_LAYERS,
+                ffn_dim=self._DIT_FFN_DIM,
+            )
+        with timed_trt_compile(build_timing, "z_image_dit"):
+            dit_plan = build_z_image_dit_engine(
+                dit_weights,
+                dim=self._DIT_DIM,
+                num_heads=self._DIT_NUM_HEADS,
+                num_layers=self._DIT_NUM_LAYERS,
+                num_refiner_layers=self._DIT_NUM_REFINER_LAYERS,
+                ffn_dim=self._DIT_FFN_DIM,
+                num_patches=num_patches,
+                text_seq_len=self._TEXT_MAX_SEQ_LEN,
+                head_dim=self._DIT_HEAD_DIM,
+                adaln_embed_dim=self._ADALN_EMBED_DIM,
+                verbose=verbose,
+            )
 
         # 3. VAE decoder
         print("[z-image] Building VAE decoder engine ...", file=sys.stderr)
@@ -192,6 +198,8 @@ class ZImagePlugin:
             scaling_factor=self._VAE_SCALING_FACTOR,
             shift_factor=self._VAE_SHIFT_FACTOR,
             verbose=verbose,
+            build_timing=build_timing,
+            timing_component="vae_decoder",
         )
 
         # 4. Serialize preprocessor weights for C++ runtime
@@ -207,11 +215,6 @@ class ZImagePlugin:
     def get_diffusion_config(self, config: ModelConfig) -> dict:
         image_height = config.raw.get("image_height", 1024)
         image_width = config.raw.get("image_width", 1024)
-
-        # Correct latent dimensions
-        h_lat = 2 * (image_height // (self._VAE_SCALE_FACTOR * 2))
-        w_lat = 2 * (image_width // (self._VAE_SCALE_FACTOR * 2))
-        num_patches = (h_lat // 2) * (w_lat // 2)
 
         # HF scheduler config has shift=3.0 and use_dynamic_shifting=False.
         # The pipeline calculates mu and passes it to set_timesteps(mu=mu),
