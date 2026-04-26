@@ -23,6 +23,7 @@ from pathlib import Path
 
 from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..runtime_config import runtime_config_get, runtime_config_set_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -39,25 +40,6 @@ def _find_trt_lib_dir() -> str:
     except ImportError:
         pass
     return ""
-
-
-# Legacy TRTF_* env-var name -> "<namespace>.<field>" for the config registry.
-# The runtime stopped reading these env vars after the config-registry
-# migration; the runner translates them into --set tokens so existing
-# manifests still drive the same overrides.
-_LEGACY_ENV_TO_SET: dict = {
-    "TRTF_MAGPIE_GREEDY": "audio_magpie.greedy",
-    "TRTF_MAGPIE_CFG_SCALE": "audio_magpie.cfg_scale",
-    "TRTF_MAGPIE_TEMPERATURE": "audio_magpie.temperature",
-    "TRTF_MAGPIE_FINISHED_LIMIT": "audio_magpie.finished_limit",
-    "TRTF_MAGPIE_SEED": "audio_magpie.seed",
-    "TRTF_BARK_SEED": "audio_bark.seed",
-    "TRTF_BARK_DUMP": "audio_bark.dump_path",
-}
-
-
-def _legacy_env_to_set_token(name: str) -> str:
-    return _LEGACY_ENV_TO_SET.get(name, "")
 
 
 def _build_ld_library_path(ctx: RunContext) -> str:
@@ -272,23 +254,15 @@ class TextToAudioRunner:
                 cmd.extend(["--max-new-tokens", str(max_tokens)])
 
             env = {**os.environ, "LD_LIBRARY_PATH": ld_path}
-            # Merge per-model env vars from manifest and translate legacy
-            # TRTF_MAGPIE_*/TRTF_BARK_* names into --set audio_magpie./audio_bark.
-            # tokens — the runtime no longer reads those env vars after the
-            # config-registry migration, so the manifest overrides would
-            # silently no-op without this translation.
-            manifest_env = case.inputs.get("env") or case.metadata.get("env") or {}
-            env.update(manifest_env)
-            for key, value in list(manifest_env.items()):
-                field = _legacy_env_to_set_token(key)
-                if field:
-                    cmd.extend(["--set", f"{field}={value}"])
+            runtime_tokens = runtime_config_set_tokens(case)
+            for token in runtime_tokens:
+                cmd.extend(["--set", token])
             # Keep Bark TRT sampling reproducible in CI unless explicitly overridden.
-            if case.family == "bark" and not any(
-                c.startswith("audio_bark.seed=") for c in cmd
-            ):
+            bark_seed = runtime_config_get(case, "audio_bark.seed")
+            if case.family == "bark" and bark_seed is None:
                 seed = case.determinism.get("seed")
                 if seed is not None:
+                    bark_seed = int(seed)
                     cmd.extend(["--set", f"audio_bark.seed={int(seed)}"])
             # Dump intermediate tokens for diversity/degeneration checks.
             bark_dump_prefix = os.path.join(tmpdir, "bark_dump")
@@ -308,8 +282,8 @@ class TextToAudioRunner:
                 "stdout": result.stdout,
                 "stderr": stderr_truncated,
             }
-            if case.family == "bark" and "TRTF_BARK_SEED" in env:
-                data["trt_seed"] = env["TRTF_BARK_SEED"]
+            if case.family == "bark" and bark_seed is not None:
+                data["trt_seed"] = str(bark_seed)
             if stderr_log:
                 data["stderr_log"] = stderr_log
 
@@ -454,7 +428,6 @@ class SpeechToSpeechRunner:
             env = {
                 **os.environ,
                 "LD_LIBRARY_PATH": ld_path,
-                "TRTF_S2S_DUMP_TOKENS": tokens_path,
             }
 
             t0 = time.monotonic()

@@ -26,6 +26,7 @@ import numpy as np
 
 from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..runtime_config import runtime_config_get
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +73,7 @@ class NemoReference:
         prompt = case.inputs.get("prompt", "Hello, this is a test.")
         python = ctx.reference_python_path() or sys.executable
 
-        # Env vars for deterministic inference
-        env_overrides = case.metadata.get("env", {})
-        seed = env_overrides.get("TRTF_MAGPIE_SEED", "42")
+        seed = runtime_config_get(case, "audio_magpie.seed", 42)
 
         artifacts_dir = ctx.artifacts_dir or tempfile.mkdtemp()
         model_dir = Path(artifacts_dir) / case.name
@@ -151,7 +150,6 @@ class NemoReference:
         """)
 
         env = os.environ.copy()
-        env.update(env_overrides)
 
         t0 = time.monotonic()
         try:

@@ -233,7 +233,7 @@ class TextToAudioComparator:
             except Exception:
                 pass
 
-        # Token diversity: if TRTF_BARK_DUMP produced a .sem_tokens file,
+        # Token diversity: if audio_bark.dump_path produced a .sem_tokens file,
         # verify the tokens aren't degenerate (>80% same value = stuck model).
         sem_dump = trt.data.get("sem_tokens_path", "")
         if sem_dump:

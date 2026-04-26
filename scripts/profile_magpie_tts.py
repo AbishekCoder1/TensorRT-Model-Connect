@@ -17,8 +17,6 @@ def profile_cpp_binary(bundle_path: str, trtf_binary: str, prompt: str,
                        max_new_tokens: int, num_runs: int, greedy: bool):
     """Run the C++ binary and capture timing from stderr."""
     env = os.environ.copy()
-    if greedy:
-        env["TRTF_MAGPIE_GREEDY"] = "1"
 
     cmd = [
         trtf_binary, "generate-audio", bundle_path,
@@ -27,6 +25,8 @@ def profile_cpp_binary(bundle_path: str, trtf_binary: str, prompt: str,
         "--max-new-tokens", str(max_new_tokens),
         "--set", "platform.trt_log_stderr=true",
     ]
+    if greedy:
+        cmd.extend(["--set", "audio_magpie.greedy=true"])
 
     results = []
     for run_idx in range(num_runs):

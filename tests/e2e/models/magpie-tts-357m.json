@@ -12,10 +12,12 @@
   "max_new_tokens": 750,
   "logit_atol": 1e-2,
   "trust_remote_code": false,
-  "env": {
-    "TRTF_MAGPIE_CFG_SCALE": "2.5",
-    "TRTF_MAGPIE_TEMPERATURE": "0.6",
-    "TRTF_MAGPIE_SEED": "42"
+  "runtime_config": {
+    "audio_magpie": {
+      "cfg_scale": 2.5,
+      "temperature": 0.6,
+      "seed": 42
+    }
   },
   "preflight_requirements": [
     {

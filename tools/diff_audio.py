@@ -4,7 +4,7 @@
 Staged comparison to isolate audio quality issues:
 
   Stage 1: C++ sampling smoke test
-    Run the C++ binary with sampling (no TRTF_BARK_GREEDY) and check that
+    Run the C++ binary with sampling and check that
     the output waveform has speech-level energy (RMS > threshold).
 
   Stage 2: Token distribution comparison
@@ -14,7 +14,7 @@ Staged comparison to isolate audio quality issues:
     valid tokens in the expected ranges.
 
   Stage 3: Codec comparison
-    Take coarse tokens from C++ (dumped via TRTF_BARK_DUMP), run them through
+    Take coarse tokens from C++ (dumped via audio_bark.dump_path), run them through
     both TRT codec (via C++ binary) and HF EnCodec, and compare waveforms
     sample-by-sample.
 
@@ -195,14 +195,6 @@ def run_cpp_bark(binary: str, bundle: str, prompt: str, output_wav: str,
             f"{trt_lib}:/usr/local/cuda/lib64:"
             + env.get("LD_LIBRARY_PATH", ""))
 
-    if greedy:
-        env["TRTF_BARK_GREEDY"] = "1"
-    elif "TRTF_BARK_GREEDY" in env:
-        del env["TRTF_BARK_GREEDY"]
-
-    if dump_dir:
-        env["TRTF_BARK_DUMP"] = dump_dir
-
     cmd = [
         binary, "generate-audio", bundle,
         "--prompt", prompt,
@@ -212,6 +204,10 @@ def run_cpp_bark(binary: str, bundle: str, prompt: str, output_wav: str,
         cmd += ["--hf-python", hf_python]
     if max_tokens > 0:
         cmd += ["--max-new-tokens", str(max_tokens)]
+    if greedy:
+        cmd += ["--set", "audio_bark.greedy=true"]
+    if dump_dir:
+        cmd += ["--set", f"audio_bark.dump_path={dump_dir}"]
 
     print(f"  Running: {' '.join(cmd)}", file=sys.stderr)
     result = subprocess.run(cmd, env=env, capture_output=True, text=True)
@@ -310,7 +306,7 @@ def stage2_token_comparison(args) -> bool:
     cpp_sem = None
     cpp_coarse = None
 
-    # --- C++ side: run with TRTF_BARK_DUMP ---
+    # --- C++ side: run with audio_bark.dump_path ---
     with tempfile.TemporaryDirectory(prefix="diff_audio_") as tmpdir:
         wav_path = os.path.join(tmpdir, "bark_cpp.wav")
         dump_prefix = os.path.join(tmpdir, "bark_dump")

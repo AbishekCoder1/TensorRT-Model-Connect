@@ -11,11 +11,17 @@ from __future__ import annotations
 import subprocess
 
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
-from tests.e2e_harness.runners import neural_operator, object_detection, omni, segmentation
+from tests.e2e_harness.runners import (
+    audio_speech,
+    neural_operator,
+    object_detection,
+    omni,
+    segmentation,
+)
 
 
-def _make_case(task_strategy: str, inputs: dict | None = None) -> E2ECase:
-    return E2ECase(
+def _make_case(task_strategy: str, inputs: dict | None = None, **overrides) -> E2ECase:
+    defaults = dict(
         name="case-a",
         hf_id="dummy/model",
         family="dummy",
@@ -24,6 +30,8 @@ def _make_case(task_strategy: str, inputs: dict | None = None) -> E2ECase:
         bundle="case-a.trtfb",
         inputs=inputs or {},
     )
+    defaults.update(overrides)
+    return E2ECase(**defaults)
 
 
 def _make_ctx(case: E2ECase, tmp_path) -> RunContext:
@@ -114,6 +122,45 @@ def test_neural_operator_runner_accepts_branch_only_inputs(monkeypatch, tmp_path
     assert "--branch-input" in cmd
     assert "--trunk-input" not in cmd
     assert out.metadata["input_mode"] == "branch"
+
+
+def test_audio_runner_maps_runtime_config_to_set_flags(monkeypatch, tmp_path):
+    case = _make_case(
+        "text_to_audio",
+        inputs={"prompt": "hello", "max_new_tokens": 12},
+        family="magpie_tts",
+        runtime_strategy="text_to_audio_magpie",
+        metadata={
+            "runtime_config": {
+                "audio_magpie": {
+                    "cfg_scale": 2.5,
+                    "temperature": 0.6,
+                    "seed": 42,
+                }
+            }
+        },
+    )
+    ctx = _make_ctx(case, tmp_path)
+
+    captured: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env", {})
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(audio_speech.subprocess, "run", _fake_run)
+
+    out = audio_speech.TextToAudioRunner().run_stage(
+        case, StageSpec(name="generate"), ctx)
+
+    cmd = captured["cmd"]
+    assert "--set" in cmd
+    assert "audio_magpie.cfg_scale=2.5" in cmd
+    assert "audio_magpie.temperature=0.6" in cmd
+    assert "audio_magpie.seed=42" in cmd
+    assert "TRTF_MAGPIE_SEED" not in captured["env"]
+    assert out.metadata["command"] == cmd
 
 
 def test_omni_runner_thinker_stage_drops_unsupported_stage_flag(monkeypatch, tmp_path):
