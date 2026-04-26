@@ -386,11 +386,9 @@ def main() -> None:
     use_chat_template = not args.no_chat_template
     enable_thinking = not args.no_thinking
 
-    dense_env = base_env | {"CUDA_VISIBLE_DEVICES": args.dense_gpu, "TRTF_GPU_ARGMAX": "1"}
+    dense_env = base_env | {"CUDA_VISIBLE_DEVICES": args.dense_gpu}
     tri_env = base_env | {
         "CUDA_VISIBLE_DEVICES": args.tri_gpu,
-        "TRTF_GPU_ARGMAX": "1",
-        "TRTF_TRIATTN_PROFILE": "1",
     }
     dense_env |= parse_extra_env(args.dense_env)
     tri_env |= parse_extra_env(args.tri_env)
@@ -447,9 +445,11 @@ def main() -> None:
     if args.config:
         dense_cmd.extend(["--config", args.config])
         tri_cmd.extend(["--config", args.config])
-    for token in args.shared_set + args.dense_set:
+    dense_defaults = ["runtime.prefer_gpu_greedy=true"]
+    tri_defaults = ["runtime.prefer_gpu_greedy=true", "triattention.profile=true"]
+    for token in dense_defaults + args.shared_set + args.dense_set:
         dense_cmd.extend(["--set", token])
-    for token in args.shared_set + args.tri_set:
+    for token in tri_defaults + args.shared_set + args.tri_set:
         tri_cmd.extend(["--set", token])
     if args.run_hf_reference:
         run_hf_reference(
