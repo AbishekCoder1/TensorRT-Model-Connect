@@ -19,6 +19,9 @@ Usage:
     # With artifacts:
     pytest tests/test_e2e.py --e2e-artifacts-dir /tmp/e2e_artifacts
 
+    # With platform-specific waives:
+    pytest tests/test_e2e.py --e2e-platform GB300
+
     # With legacy options (compat with tests/e2e/conftest.py):
     pytest tests/test_e2e.py --engine-dir /mnt/storage/engines --trtf-binary ./build/trtf
 """
@@ -103,11 +106,11 @@ def _resolve_ld_library_path() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _load_waives() -> dict[str, tuple[str, str]]:
+def _load_waives(platform: str = "") -> dict[str, tuple[str, str]]:
     """Load waives.txt and return model-name -> (action, reason) mapping.
 
     Supports platform-specific prefixes like "GB300/model-name".
-    The current platform is read from the TRTF_PLATFORM environment variable.
+    The current platform is supplied by --e2e-platform.
 
     Returns:
         Dict mapping model-name to ("SKIP"|"XFAIL", reason).
@@ -117,7 +120,7 @@ def _load_waives() -> dict[str, tuple[str, str]]:
     if not _WAIVES_FILE.is_file():
         return waives
 
-    platform = os.environ.get("TRTF_PLATFORM", "").strip()
+    platform = platform.strip()
 
     with open(_WAIVES_FILE) as f:
         for line in f:
@@ -148,78 +151,6 @@ def _load_waives() -> dict[str, tuple[str, str]]:
             waives[model_name] = (action, reason)
 
     return waives
-
-
-# ---------------------------------------------------------------------------
-# CLI options
-# ---------------------------------------------------------------------------
-
-
-def pytest_addoption(parser):
-    """Register CLI options for the unified E2E harness."""
-    # Try adding; skip if already registered (e.g. conftest.py also adds these)
-    try:
-        parser.addoption(
-            "--engine-dir", default=None,
-            help="Directory containing .trtfb bundles")
-    except ValueError:
-        pass
-    try:
-        parser.addoption(
-            "--trtf-binary", default=None,
-            help="Path to the C++ trtf binary")
-    except ValueError:
-        pass
-    try:
-        parser.addoption(
-            "--hf-python", default=None,
-            help="Python interpreter with HuggingFace tokenizers")
-    except ValueError:
-        pass
-    try:
-        parser.addoption(
-            "--rebuild-engines", action="store_true", default=False,
-            help="Force rebuild of all engine bundles")
-    except ValueError:
-        pass
-
-    # New harness-specific options
-    try:
-        parser.addoption(
-            "--e2e-task-strategy", default=None,
-            help="Filter models by task_strategy (e.g. text_generation_causal)")
-    except ValueError:
-        pass
-    try:
-        parser.addoption(
-            "--e2e-artifacts-dir", default=None,
-            help="Directory for E2E artifacts output")
-    except ValueError:
-        pass
-    try:
-        parser.addoption(
-            "--e2e-core-only", action="store_true", default=False,
-            help="Only run core models (marked with core: true in manifest)")
-    except ValueError:
-        pass
-    try:
-        parser.addoption(
-            "--e2e-exclude-ci-tier", action="append", default=[],
-            help="Exclude manifests with this ci_tier value; may be repeated")
-    except ValueError:
-        pass
-    try:
-        parser.addoption(
-            "--e2e-partition-id", type=int, default=None,
-            help="Agent partition ID (0-based) for parallel execution")
-    except ValueError:
-        pass
-    try:
-        parser.addoption(
-            "--e2e-partition-size", type=int, default=None,
-            help="Total number of partitions for parallel execution")
-    except ValueError:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +233,8 @@ def test_e2e(case_name: str, request) -> None:
         pytest.skip("No model manifests found")
 
     # Apply waives before running
-    waives = _load_waives()
+    config = request.config
+    waives = _load_waives(config.getoption("--e2e-platform", default=""))
     if case_name in waives:
         action, reason = waives[case_name]
         if action == "SKIP":
@@ -322,7 +254,6 @@ def test_e2e(case_name: str, request) -> None:
         pytest.skip(skip_reason)
 
     # Build run context
-    config = request.config
     artifacts_dir = config.getoption("--e2e-artifacts-dir", default=None) or "/tmp/e2e_artifacts"
     base_python = _resolve_hf_python(config)
     profile_names = resolve_case_profile_names(case)
