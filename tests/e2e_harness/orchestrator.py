@@ -305,7 +305,7 @@ def _resolve_bundle(
     t0 = time.monotonic()
     env = os.environ.copy()
     if ctx.build_profile and ctx.build_profile != "base":
-        env["TRTF_ACTIVE_PYTHON_PROFILE"] = ctx.build_profile
+        cmd.extend(["--active-python-profile", ctx.build_profile])
     build_timing_path: Path | None = None
     if ctx.artifacts_dir:
         build_timing_path = Path(ctx.artifacts_dir) / case.name / "build_timing.json"

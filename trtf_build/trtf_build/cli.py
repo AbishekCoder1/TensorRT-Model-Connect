@@ -250,7 +250,6 @@ def _maybe_reexec_build_in_profile(
 ) -> int | None:
     """Re-exec build under a declared Python profile when the family requires it."""
     from .python_profiles import (
-        ACTIVE_PROFILE_ENV,
         DEFAULT_PROFILE,
         resolve_profile_python,
     )
@@ -259,7 +258,7 @@ def _maybe_reexec_build_in_profile(
     if required_profile == DEFAULT_PROFILE:
         return None
 
-    active_profile = os.environ.get(ACTIVE_PROFILE_ENV, "").strip()
+    active_profile = str(getattr(args, "active_python_profile", "") or "").strip()
     if active_profile == required_profile:
         return None
 
@@ -269,8 +268,14 @@ def _maybe_reexec_build_in_profile(
         return None
 
     env = os.environ.copy()
-    env[ACTIVE_PROFILE_ENV] = required_profile
-    cmd = [target_python, "-m", "trtf_build.__main__"] + sys.argv[1:]
+    cmd = [
+        target_python,
+        "-m",
+        "trtf_build.__main__",
+        *sys.argv[1:],
+        "--active-python-profile",
+        required_profile,
+    ]
     print(
         f"[trtf-build] Switching build to Python profile {required_profile!r}: "
         f"{target_python}",
@@ -612,6 +617,8 @@ def main() -> None:
     build_p.add_argument(
         "--build-timing-json", default=None,
         help="Write structured build timing JSON to this path")
+    build_p.add_argument(
+        "--active-python-profile", default="", help=argparse.SUPPRESS)
 
     # Generic two-flag config surface. New features register a namespaced
     # schema and are consumed through these flags without growing the CLI.

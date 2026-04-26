@@ -428,6 +428,7 @@ class TestCmdBuildMocked:
             verbose=False,
             method="trt",
             _skip_profile_resolution=False,
+            active_python_profile="",
         )
 
         with patch.object(
@@ -445,8 +446,10 @@ class TestCmdBuildMocked:
             "amazon/chronos-bolt-tiny",
             "-o",
             str(tmp_path / "out.trtfb"),
+            "--active-python-profile",
+            "chronos",
         ]
-        assert captured["env"]["TRTF_ACTIVE_PYTHON_PROFILE"] == "chronos"
+        assert all("ACTIVE_PYTHON_PROFILE" not in key for key in captured["env"])
 
 
 class TestFriendlyDownloadErrors:

@@ -17,7 +17,6 @@ from typing import Any, Mapping
 
 PROFILE_PHASES = ("build", "runtime", "reference")
 DEFAULT_PROFILE = "base"
-ACTIVE_PROFILE_ENV = "TRTF_ACTIVE_PYTHON_PROFILE"
 PROFILE_ROOT_ENV = "TRTF_PYTHON_PROFILE_ROOT"
 LEGACY_PROFILE_ROOT_ENV = "TRTF_E2E_PROFILE_ROOT"
 DEFAULT_PROFILE_ROOT = "/tmp/trtf-python-profiles"
