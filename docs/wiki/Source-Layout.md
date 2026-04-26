@@ -92,7 +92,7 @@ Backend DSO implementations. The main binary does not link libnvinfer -- it dlop
 
 | File | Purpose |
 |------|---------|
-| `backend_loader.h/cpp` | `BackendLoader::load()` -- reads `engine_backend` from bundle config, dlopen's matching DSO, caches handle |
+| `backend_loader.h/cpp` | `BackendLoader::load()` -- dlopen's backend DSOs from the executable directory, explicit search dirs, or loader path; caches handles |
 | `trt_module_impl.h/cpp` | `TrtModuleImpl` : `ITrtModule` -- shared engine wrapper compiled into both DSOs |
 | `trt_backend.cpp` | Standard TRT `IBackend` impl. Links libnvinfer. Produces `libtrtf_backend_trt.so` |
 | `rtx_backend.cpp` | TRT-RTX `IBackend` impl. Links libtensorrt_rtx. Adds `IRuntimeCache` + `CudaGraphStrategy`. Produces `libtrtf_backend_trt_rtx.so` |

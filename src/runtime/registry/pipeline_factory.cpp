@@ -192,7 +192,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     strategy = normalize_legacy_strategy(strategy, config_text);
 
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
-    IBackend* backend = BackendLoader::load(backend_name);
+    IBackend* backend = BackendLoader::load(backend_name, options.backend_search_paths);
 
     auto* plugin = lookup_plugin_or_throw(strategy);
 

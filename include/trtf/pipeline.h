@@ -221,9 +221,10 @@ struct LoadOptions {
     std::string hf_python;
     std::string runtime_cache_path;
     bool cuda_graphs{false};
-    std::uint64_t kv_cache_size_bytes{0}; // 0 = use bundle's max_cache_length
-    std::string config_path;              // --config <file> (empty = none)
-    std::vector<std::string> set_tokens;  // --set ns.field=value (repeatable)
+    std::uint64_t kv_cache_size_bytes{0};          // 0 = use bundle's max_cache_length
+    std::string config_path;                       // --config <file> (empty = none)
+    std::vector<std::string> set_tokens;           // --set ns.field=value (repeatable)
+    std::vector<std::string> backend_search_paths; // Extra directories for backend DSOs
 };
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python = "",

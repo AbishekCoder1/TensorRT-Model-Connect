@@ -17,7 +17,7 @@ int main() {
     // Loading a nonexistent backend should throw
     bool threw = false;
     try {
-        trtf::BackendLoader::load("nonexistent_backend_xyz");
+        trtf::BackendLoader::load("nonexistent_backend_xyz", {"/tmp/trtf-missing-backends"});
     } catch (const std::runtime_error& e) {
         threw = true;
         std::string msg = e.what();
@@ -25,6 +25,12 @@ int main() {
               "error mentions backend name");
         check(msg.find("libtrtf_backend_nonexistent_backend_xyz.so") != std::string::npos,
               "error mentions DSO name");
+        check(msg.find("/tmp/trtf-missing-backends/libtrtf_backend_nonexistent_backend_xyz.so") !=
+                  std::string::npos,
+              "error mentions explicit backend search dir");
+        check(msg.find("TRTF_BACKEND_DIR") == std::string::npos, "error does not mention env var");
+        check(msg.find("backend_search_paths") != std::string::npos,
+              "error mentions explicit search paths");
     }
     check(threw, "missing backend throws runtime_error");
 

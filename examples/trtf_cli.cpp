@@ -71,6 +71,7 @@ struct CliArgs {
     bool no_thinking{false};
     int chunk_frames{32};
     std::string runtime_cache;
+    std::vector<std::string> backend_search_paths;
     bool cuda_graphs{false};
     bool show_help{false};
     bool parse_error{false};
@@ -133,12 +134,15 @@ std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
 trtf::LoadOptions make_load_options(const CliArgs& args) {
     trtf::LoadOptions options;
     options.hf_python = args.hf_python;
+    options.runtime_cache_path = args.runtime_cache;
+    options.cuda_graphs = args.cuda_graphs;
     options.kv_cache_size_bytes = args.kv_cache_size_bytes;
     // Forward --config/--set into the factory so ConfigBundle resolution
     // actually sees them. Without this, every --set call silently no-ops
     // because pipeline_factory only reads from LoadOptions.
     options.config_path = args.config_path;
     options.set_tokens = args.set_tokens;
+    options.backend_search_paths = args.backend_search_paths;
     return options;
 }
 
@@ -171,6 +175,7 @@ void print_usage() {
            "  trtf version\n"
            "\n"
            "Options:\n"
+           "  --backend-dir PATH    Extra directory to search for libtrtf_backend_*.so\n"
            "  --runtime-cache PATH   TRT-RTX JIT kernel cache file (speeds up repeat runs)\n"
            "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n";
 }
@@ -375,6 +380,10 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--runtime-cache" && need_value(arg)) {
             args.runtime_cache = argv[++i];
+            continue;
+        }
+        if (arg == "--backend-dir" && need_value(arg)) {
+            args.backend_search_paths.emplace_back(argv[++i]);
             continue;
         }
         if (arg == "--cuda-graphs") {
@@ -854,7 +863,7 @@ int cmd_solve(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto pipeline = trtf::load(args.bundle_path, args.hf_python);
+    auto pipeline = trtf::load(args.bundle_path, make_load_options(args));
     std::vector<float> branch = parse_numeric_csv(has_field ? args.field_input : args.branch_input);
     std::vector<float> trunk =
         has_field ? std::vector<float>{} : parse_numeric_csv(args.trunk_input);

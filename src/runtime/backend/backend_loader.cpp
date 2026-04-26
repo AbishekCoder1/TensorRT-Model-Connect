@@ -8,6 +8,7 @@
 #include <string>
 #include <unistd.h>
 #include <unordered_map>
+#include <vector>
 
 namespace trtf {
 
@@ -71,7 +72,18 @@ void* try_open_backend_dso(const std::string& path, const std::string& label, st
     return handle;
 }
 
-void* open_backend_dso(const std::string& dso_name, std::string& tried) {
+std::string join_path(const std::string& dir, const std::string& dso_name) {
+    if (dir.empty()) {
+        return dso_name;
+    }
+    if (dir.back() == '/') {
+        return dir + dso_name;
+    }
+    return dir + "/" + dso_name;
+}
+
+void* open_backend_dso(const std::string& dso_name, const std::vector<std::string>& search_dirs,
+                       std::string& tried) {
     const std::string exe_path = exe_dir();
     if (!exe_path.empty()) {
         void* handle =
@@ -81,10 +93,12 @@ void* open_backend_dso(const std::string& dso_name, std::string& tried) {
         }
     }
 
-    const char* env = std::getenv("TRTF_BACKEND_DIR");
-    if (env && env[0] != '\0') {
-        const std::string env_path = std::string(env) + "/" + dso_name;
-        void* handle = try_open_backend_dso(env_path, env_path, tried);
+    for (const std::string& dir : search_dirs) {
+        if (dir.empty()) {
+            continue;
+        }
+        const std::string path = join_path(dir, dso_name);
+        void* handle = try_open_backend_dso(path, path, tried);
         if (handle) {
             return handle;
         }
@@ -112,6 +126,11 @@ CachedBackend create_backend(const std::string& dso_name, void* handle) {
 } // namespace
 
 IBackend* BackendLoader::load(const std::string& backend_name) {
+    return load(backend_name, {});
+}
+
+IBackend* BackendLoader::load(const std::string& backend_name,
+                              const std::vector<std::string>& search_dirs) {
     std::lock_guard<std::mutex> lock(g_mu);
 
     auto it = g_cache.find(backend_name);
@@ -122,7 +141,7 @@ IBackend* BackendLoader::load(const std::string& backend_name) {
 
     std::string dso_name = "libtrtf_backend_" + backend_name + ".so";
     std::string tried;
-    void* handle = open_backend_dso(dso_name, tried);
+    void* handle = open_backend_dso(dso_name, search_dirs, tried);
 
     if (!handle) {
         throw std::runtime_error("Backend \"" + backend_name +
@@ -133,7 +152,8 @@ IBackend* BackendLoader::load(const std::string& backend_name) {
                                  "To use " +
                                  backend_name + " bundles, ensure " + dso_name +
                                  " is next to the trtf binary,\n"
-                                 "in TRTF_BACKEND_DIR, or in LD_LIBRARY_PATH.");
+                                 "in a LoadOptions::backend_search_paths / --backend-dir "
+                                 "directory, or in LD_LIBRARY_PATH.");
     }
 
     CachedBackend entry = create_backend(dso_name, handle);

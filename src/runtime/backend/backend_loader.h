@@ -5,6 +5,7 @@
 #include "trtf/runtime/trt_backend.h"
 
 #include <string>
+#include <vector>
 
 namespace trtf {
 
@@ -14,6 +15,8 @@ class BackendLoader {
     // Caches: second call with same name returns same IBackend*.
     // Throws std::runtime_error if DSO not found or factory missing.
     static IBackend* load(const std::string& backend_name);
+    static IBackend* load(const std::string& backend_name,
+                          const std::vector<std::string>& search_dirs);
 };
 
 } // namespace trtf

@@ -484,6 +484,8 @@ python3 tools/perf_compare.py \
 For vision-language models, pass `--image` with the path to an image file. The VL bundle must have been built from a VL model (e.g. Qwen2.5-VL) and contains both a text decoder and vision encoder engine.
 
 For TRT-RTX bundles, `--runtime-cache PATH` persists JIT compilation results to disk (speeds up subsequent runs), and `--cuda-graphs` enables CUDA graph capture/replay for reduced kernel launch overhead.
+If backend DSOs are not next to the `trtf` executable or visible through the
+platform loader path, pass `--backend-dir PATH` explicitly.
 
 ## Runtime configuration
 
