@@ -32,6 +32,8 @@ from ..checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
     _expand_kv_projection,
+    _expand_kv_bias,
+    _target_np_dtype,
 )
 from ..standard_decoder_builder import build_standard_decoder_engine
 
@@ -43,7 +45,7 @@ class NemotronPlugin:
         return model_type.lower() == "nemotron"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self, model_dir: str, config: ModelConfig, *, precision: str = "fp32",
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -57,6 +59,7 @@ class NemotronPlugin:
 
         q_dim = num_heads * head_dim
         kv_dim = num_kv_heads * head_dim
+        target_dtype = _target_np_dtype(precision)
 
         weights = WeightDict()
 
@@ -64,7 +67,7 @@ class NemotronPlugin:
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
-        weights["embedding"] = embedding.astype(np.float32)
+        weights["embedding"] = embedding.astype(target_dtype)
 
         mlp_size = 0
         attention_size = 0
@@ -106,16 +109,18 @@ class NemotronPlugin:
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
 
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
-            o_t = _transpose_2d(o_raw, "o_proj")
+            q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
+            k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
+            v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
+            o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
 
             # GQA expansion for K, V
             k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads,
+                precision=precision)
             v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads,
+                precision=precision)
 
             weights[f"{prefix}.w_q"] = q_t
             weights[f"{prefix}.w_k"] = k_expanded
@@ -128,22 +133,18 @@ class NemotronPlugin:
                 bias_key = f"{hf_prefix}.self_attn.{proj}.bias"
                 short = proj[0]  # q, k, v
                 if _has_tensor(readers, bias_key):
-                    raw = _load_tensor(readers, bias_key).astype(np.float32)
+                    raw = _load_tensor(readers, bias_key).astype(target_dtype)
                     if short in ("k", "v") and dim == kv_dim and kv_dim != q_dim:
-                        expanded = np.zeros(q_dim, dtype=np.float32)
-                        for qh in range(num_heads):
-                            kvh = min(num_kv_heads - 1,
-                                      qh // (num_heads // num_kv_heads))
-                            expanded[qh * head_dim:(qh + 1) * head_dim] = \
-                                raw[kvh * head_dim:(kvh + 1) * head_dim]
-                        weights[f"{prefix}.{short}_bias"] = expanded
+                        weights[f"{prefix}.{short}_bias"] = _expand_kv_bias(
+                            raw, q_dim, num_heads, num_kv_heads,
+                            precision=precision)
                     else:
                         weights[f"{prefix}.{short}_bias"] = raw
 
             o_bias_key = f"{hf_prefix}.self_attn.o_proj.bias"
             if _has_tensor(readers, o_bias_key):
                 weights[f"{prefix}.o_bias"] = _load_tensor(
-                    readers, o_bias_key).astype(np.float32)
+                    readers, o_bias_key).astype(target_dtype)
 
             # 2-projection MLP: up_proj → relu² → down_proj
             # Maps to gelu_fc MLP type: up_proj → w_fc1, down_proj → w_fc2
@@ -152,18 +153,20 @@ class NemotronPlugin:
             if mlp_size == 0:
                 mlp_size = up_raw.shape[0]
 
-            weights[f"{prefix}.w_fc1"] = _transpose_2d(up_raw, "up_proj")
-            weights[f"{prefix}.w_fc2"] = _transpose_2d(down_raw, "down_proj")
+            weights[f"{prefix}.w_fc1"] = _transpose_2d(
+                up_raw, "up_proj", precision=precision)
+            weights[f"{prefix}.w_fc2"] = _transpose_2d(
+                down_raw, "down_proj", precision=precision)
 
             # Optional MLP biases (mlp_bias=True in config)
             up_bias_key = f"{hf_prefix}.mlp.up_proj.bias"
             down_bias_key = f"{hf_prefix}.mlp.down_proj.bias"
             if _has_tensor(readers, up_bias_key):
                 weights[f"{prefix}.fc1_bias"] = _load_tensor(
-                    readers, up_bias_key).astype(np.float32)
+                    readers, up_bias_key).astype(target_dtype)
             if _has_tensor(readers, down_bias_key):
                 weights[f"{prefix}.fc2_bias"] = _load_tensor(
-                    readers, down_bias_key).astype(np.float32)
+                    readers, down_bias_key).astype(target_dtype)
 
         # Final LayerNorm1P (+1 gamma offset)
         final_norm_key = "model.norm.weight"
@@ -182,9 +185,11 @@ class NemotronPlugin:
         lm_head_key = "lm_head.weight"
         if _has_tensor(readers, lm_head_key):
             weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+                _load_tensor(readers, lm_head_key), "lm_head",
+                precision=precision)
         else:
-            weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
+            weights["w_out"] = _transpose_2d(
+                embedding.copy(), "embedding_tied", precision=precision)
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]

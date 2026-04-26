@@ -65,7 +65,7 @@ def _diffusion_model_by_name(name):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_diffusion_bundle(hf_id, bundle_path, build_args):
+def _build_diffusion_bundle(hf_id, bundle_path, build_args, precision="fp32"):
     """Build a diffusion .trtfb bundle as a subprocess."""
     cmd = [
         "trtf-build", "build",
@@ -73,6 +73,8 @@ def _build_diffusion_bundle(hf_id, bundle_path, build_args):
     ]
     max_cache = build_args.get("max_cache_length", 256)
     cmd.extend(["--max-cache-length", str(max_cache)])
+    if precision != "fp32":
+        cmd.extend(["--precision", str(precision)])
 
     t0 = time.monotonic()
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
@@ -258,7 +260,9 @@ def diffusion_entry(request, engine_dir):
     # Build the bundle
     hf_id = entry["hf_id"]
     build_args = entry.get("build_args", {})
-    build_time = _build_diffusion_bundle(hf_id, bundle_path, build_args)
+    precision = entry.get("precision", "fp32")
+    build_time = _build_diffusion_bundle(
+        hf_id, bundle_path, build_args, precision)
 
     entry["bundle_path"] = str(bundle_path)
     entry["was_cached"] = False

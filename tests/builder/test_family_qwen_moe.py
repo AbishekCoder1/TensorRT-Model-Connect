@@ -155,7 +155,7 @@ class TestQwen3MoePlugin:
         assert "layer.0.w_down" in weights
         # Should NOT have router or expert keys
         assert "layer.0.router" not in weights
-        assert "layer.0.expert.0.w_gate" not in weights
+        assert "layer.0.experts.w_gate" not in weights
 
     def test_load_weights_moe_layer_keys(self, tmp_path):
         """MoE layer (layer 1) should have router and expert keys but no shared expert (Qwen3-MoE)."""
@@ -169,10 +169,15 @@ class TestQwen3MoePlugin:
 
         # Layer 1 is MoE
         assert "layer.1.router" in weights
-        for e in range(self.NUM_EXPERTS):
-            assert f"layer.1.expert.{e}.w_gate" in weights
-            assert f"layer.1.expert.{e}.w_up" in weights
-            assert f"layer.1.expert.{e}.w_down" in weights
+        assert "layer.1.experts.w_gate" in weights
+        assert "layer.1.experts.w_up" in weights
+        assert "layer.1.experts.w_down" in weights
+        assert weights["layer.1.experts.w_gate"].shape == (
+            self.NUM_EXPERTS, self.HIDDEN, self.MOE_INTER)
+        assert weights["layer.1.experts.w_up"].shape == (
+            self.NUM_EXPERTS, self.HIDDEN, self.MOE_INTER)
+        assert weights["layer.1.experts.w_down"].shape == (
+            self.NUM_EXPERTS, self.MOE_INTER, self.HIDDEN)
         # Qwen3-MoE: no shared experts
         assert "layer.1.shared_expert.w_gate" not in weights
         assert "layer.1.shared_expert.w_up" not in weights
@@ -224,13 +229,11 @@ class TestQwen3MoePlugin:
         assert weights["layer.1.router"].shape == (
             self.HIDDEN, self.NUM_EXPERTS)
 
-        # Expert gate: [moe_inter, hidden] -> [hidden, moe_inter]
-        assert weights["layer.1.expert.0.w_gate"].shape == (
-            self.HIDDEN, self.MOE_INTER)
-
-        # Expert down: [hidden, moe_inter] -> [moe_inter, hidden]
-        assert weights["layer.1.expert.0.w_down"].shape == (
-            self.MOE_INTER, self.HIDDEN)
+        # Packed expert tensors preserve the same per-expert transpose.
+        assert weights["layer.1.experts.w_gate"].shape == (
+            self.NUM_EXPERTS, self.HIDDEN, self.MOE_INTER)
+        assert weights["layer.1.experts.w_down"].shape == (
+            self.NUM_EXPERTS, self.MOE_INTER, self.HIDDEN)
 
         # Dense layer gate: [dense_inter, hidden] -> [hidden, dense_inter]
         assert weights["layer.0.w_gate"].shape == (
@@ -288,14 +291,14 @@ class TestQwen3MoePlugin:
         gate_raw = tensors[
             "model.layers.1.mlp.experts.0.gate_proj.weight"]
         np.testing.assert_allclose(
-            weights["layer.1.expert.0.w_gate"],
+            weights["layer.1.experts.w_gate"][0],
             gate_raw.T.astype(np.float32), atol=1e-6)
 
         # Check expert 2 down weight (layer 1)
         down_raw = tensors[
             "model.layers.1.mlp.experts.2.down_proj.weight"]
         np.testing.assert_allclose(
-            weights["layer.1.expert.2.w_down"],
+            weights["layer.1.experts.w_down"][2],
             down_raw.T.astype(np.float32), atol=1e-6)
 
     def test_no_shared_expert_keys_for_qwen3_moe(self, tmp_path):
@@ -380,6 +383,26 @@ class TestQwen3MoePlugin:
             assert f"layer.{i}.router" in weights
             assert f"layer.{i}.shared_expert.w_gate" not in weights
             assert f"layer.{i}.w_gate" not in weights
+            assert f"layer.{i}.experts.w_gate" in weights
+
+    def test_fp16_load_uses_packed_fp16_expert_weights(self, tmp_path):
+        """Large MoE matrices should honor fp16 load precision."""
+        from trtf_build.families.qwen_moe import plugin
+
+        tensors = self._make_tensors()
+        _write_config(tmp_path, self._make_config())
+        _write_safetensors(tmp_path, tensors)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg, precision="fp16")
+
+        assert weights["embedding"].dtype == np.float16
+        assert weights["layer.0.w_gate"].dtype == np.float16
+        assert weights["layer.1.router"].dtype == np.float16
+        assert weights["layer.1.experts.w_gate"].dtype == np.float16
+        assert weights["layer.1.experts.w_up"].dtype == np.float16
+        assert weights["layer.1.experts.w_down"].dtype == np.float16
+        assert weights["final_norm"].dtype == np.float32
 
     def test_plugin_discovery(self):
         """Plugin should be discoverable via find_plugin."""

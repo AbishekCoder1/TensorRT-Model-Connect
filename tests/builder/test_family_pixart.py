@@ -254,6 +254,7 @@ def test_build_components_uses_transformer_and_t5_configs(
         str(model_dir),
         _cfg(image_height=256, image_width=384),
         weights,
+        precision="fp16",
         verbose=False,
     )
 
@@ -263,6 +264,7 @@ def test_build_components_uses_transformer_and_t5_configs(
     assert out["preprocessor_weights"] == b"pixart-pre"
 
     # h_lat=32, w_lat=48, patch_size=4 -> 96 patches.
+    assert calls["load_t5_weights"][1]["precision"] == "fp16"
     assert calls["build_standard_dit_engine"][1]["num_patches"] == 96
     assert calls["build_standard_dit_engine"][1]["context_dim"] == 64
     assert calls["_serialize_preprocessor_weights"][0][1] == 1024

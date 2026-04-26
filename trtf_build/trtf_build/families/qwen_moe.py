@@ -42,6 +42,7 @@ from ..checkpoint_mapper import (
     _open_safetensors,
     _load_tensor,
     _has_tensor,
+    _target_np_dtype,
     _transpose_2d,
     _expand_kv_projection,
 )
@@ -58,10 +59,12 @@ class Qwen3MoePlugin:
         return model_type.lower() in ("qwen3_moe", "qwen2_moe")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self, model_dir: str, config: ModelConfig, *,
+        precision: str = "fp32",
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
+        weight_dtype = _target_np_dtype(precision)
 
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -99,7 +102,7 @@ class Qwen3MoePlugin:
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
-        weights["embedding"] = embedding.astype(np.float32)
+        weights["embedding"] = embedding.astype(weight_dtype)
 
         attention_size = 0
 
@@ -129,17 +132,19 @@ class Qwen3MoePlugin:
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
 
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
-            o_t = _transpose_2d(o_raw, "o_proj")
+            q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
+            k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
+            v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
+            o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
             del q_raw, k_raw, v_raw, o_raw
 
             # GQA expansion for K, V
             k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads,
+                precision=precision)
             v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads,
+                precision=precision)
             del k_t, v_t
 
             weights[f"{prefix}.w_q"] = q_t
@@ -173,21 +178,35 @@ class Qwen3MoePlugin:
                     readers, f"{hf_prefix}.mlp.down_proj.weight")
 
                 weights[f"{prefix}.w_gate"] = _transpose_2d(
-                    gate_raw, "gate_proj")
+                    gate_raw, "gate_proj", precision=precision)
                 weights[f"{prefix}.w_up"] = _transpose_2d(
-                    up_raw, "up_proj")
+                    up_raw, "up_proj", precision=precision)
                 weights[f"{prefix}.w_down"] = _transpose_2d(
-                    down_raw, "down_proj")
+                    down_raw, "down_proj", precision=precision)
                 del gate_raw, up_raw, down_raw
             else:
                 # MoE layer: router + per-expert + shared expert
                 router_raw = _load_tensor(
                     readers, f"{hf_prefix}.mlp.gate.weight")
                 weights[f"{prefix}.router"] = _transpose_2d(
-                    router_raw, "router")
+                    router_raw, "router", precision=precision)
                 del router_raw
 
-                # Per-expert weights
+                # Pack expert weights per layer so the TRT graph can use a
+                # handful of batched matmuls instead of one branch per expert.
+                expert_w_gate = np.empty(
+                    (num_experts, hidden, moe_intermediate_size),
+                    dtype=weight_dtype,
+                )
+                expert_w_up = np.empty(
+                    (num_experts, hidden, moe_intermediate_size),
+                    dtype=weight_dtype,
+                )
+                expert_w_down = np.empty(
+                    (num_experts, moe_intermediate_size, hidden),
+                    dtype=weight_dtype,
+                )
+
                 for e in range(num_experts):
                     exp_hf = f"{hf_prefix}.mlp.experts.{e}"
                     gate_raw = _load_tensor(
@@ -197,13 +216,17 @@ class Qwen3MoePlugin:
                     down_raw = _load_tensor(
                         readers, f"{exp_hf}.down_proj.weight")
 
-                    weights[f"{prefix}.expert.{e}.w_gate"] = _transpose_2d(
-                        gate_raw, f"expert_{e}_gate")
-                    weights[f"{prefix}.expert.{e}.w_up"] = _transpose_2d(
-                        up_raw, f"expert_{e}_up")
-                    weights[f"{prefix}.expert.{e}.w_down"] = _transpose_2d(
-                        down_raw, f"expert_{e}_down")
+                    expert_w_gate[e] = _transpose_2d(
+                        gate_raw, f"expert_{e}_gate", precision=precision)
+                    expert_w_up[e] = _transpose_2d(
+                        up_raw, f"expert_{e}_up", precision=precision)
+                    expert_w_down[e] = _transpose_2d(
+                        down_raw, f"expert_{e}_down", precision=precision)
                     del gate_raw, up_raw, down_raw
+
+                weights[f"{prefix}.experts.w_gate"] = expert_w_gate
+                weights[f"{prefix}.experts.w_up"] = expert_w_up
+                weights[f"{prefix}.experts.w_down"] = expert_w_down
 
                 # Shared expert weights (Qwen2.5-MoE only)
                 if has_shared_expert:
@@ -216,11 +239,11 @@ class Qwen3MoePlugin:
                         readers, f"{shared_hf}.down_proj.weight")
 
                     weights[f"{prefix}.shared_expert.w_gate"] = _transpose_2d(
-                        s_gate_raw, "shared_gate")
+                        s_gate_raw, "shared_gate", precision=precision)
                     weights[f"{prefix}.shared_expert.w_up"] = _transpose_2d(
-                        s_up_raw, "shared_up")
+                        s_up_raw, "shared_up", precision=precision)
                     weights[f"{prefix}.shared_expert.w_down"] = _transpose_2d(
-                        s_down_raw, "shared_down")
+                        s_down_raw, "shared_down", precision=precision)
                     del s_gate_raw, s_up_raw, s_down_raw
 
                     # Shared expert gate (sigmoid gating weight)
@@ -229,7 +252,7 @@ class Qwen3MoePlugin:
                     if _has_tensor(readers, shared_gate_key):
                         sg_raw = _load_tensor(readers, shared_gate_key)
                         weights[f"{prefix}.shared_expert_gate"] = (
-                            sg_raw.astype(np.float32))
+                            sg_raw.astype(weight_dtype))
                         del sg_raw
 
         # Final norm
@@ -244,10 +267,11 @@ class Qwen3MoePlugin:
         lm_head_key = "lm_head.weight"
         if _has_tensor(readers, lm_head_key):
             weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+                _load_tensor(readers, lm_head_key), "lm_head",
+                precision=precision)
         else:
             weights["w_out"] = _transpose_2d(
-                embedding.copy(), "embedding_tied")
+                embedding.copy(), "embedding_tied", precision=precision)
 
         # Metadata for engine builder
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
@@ -293,6 +317,16 @@ class Qwen3MoePlugin:
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
+        if precision == "fp16":
+            work_np_dtype = np.float16
+            work_trt_dtype = trt.float16
+        elif precision == "bf16":
+            work_np_dtype = np.float16
+            work_trt_dtype = trt.bfloat16
+        else:
+            work_np_dtype = np.float32
+            work_trt_dtype = trt.float32
+
         # -----------------------------------------------------------
         # Inputs
         # -----------------------------------------------------------
@@ -306,18 +340,23 @@ class Qwen3MoePlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, attention_size))
+                work_trt_dtype, (max_cache_length, attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, attention_size))
+                work_trt_dtype, (max_cache_length, attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
+
+        if work_trt_dtype != trt.float32:
+            attention_mask = network.add_cast(
+                attention_mask, work_trt_dtype).get_output(0)
 
         # -----------------------------------------------------------
         # Shared constants
         # -----------------------------------------------------------
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
 
         cos_table_np = graph_ops.make_rope_table(
             attention_window, attention_size, num_heads,
@@ -329,19 +368,24 @@ class Qwen3MoePlugin:
             attention_size, num_heads)
 
         cos_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), cos_table_np)
+            network, (attention_window, attention_size), cos_table_np,
+            dtype=work_np_dtype)
         sin_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), sin_table_np)
+            network, (attention_window, attention_size), sin_table_np,
+            dtype=work_np_dtype)
         rotate_half_tensor = graph_ops.add_constant(
-            network, (attention_size, attention_size), rotate_half_np)
+            network, (attention_size, attention_size), rotate_half_np,
+            dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
         attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
         attn_scale_tensor = graph_ops.add_constant(
             network, (1, 1, 1),
-            np.array([attn_scale], dtype=np.float32))
+            np.array([attn_scale], dtype=work_np_dtype),
+            dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # Embedding lookup
@@ -388,6 +432,7 @@ class Qwen3MoePlugin:
                 dense_intermediate=dense_intermediate,
                 top_k=top_k,
                 has_shared_expert=has_shared_expert,
+                dtype=work_np_dtype,
             )
 
             hidden_state = result["hidden"]
@@ -409,15 +454,20 @@ class Qwen3MoePlugin:
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = _apply_norm(
                 network, hidden_state, hidden, final_norm,
-                None, eps_tensor, "rmsnorm")
+                None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"])
-        b_out = np.zeros(vocab, dtype=np.float32)
-        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+            network, hidden_state, hidden, vocab, weights["w_out"],
+            dtype=work_np_dtype)
+        b_out = np.zeros(vocab, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(
+            network, logits, vocab, b_out, dtype=work_np_dtype)
+
+        if work_trt_dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -445,7 +495,8 @@ class Qwen3MoePlugin:
                   f"shared_inter={shared_expert_intermediate}, "
                   f"dense_inter={dense_intermediate}, "
                   f"dense_layers={sorted(mlp_only_set)}, "
-                  f"cache={max_cache_length}) ...", file=sys.stderr)
+                  f"cache={max_cache_length}, precision={precision}) ...",
+                  file=sys.stderr)
 
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
@@ -462,12 +513,14 @@ def _add_swiglu_expert(
     w_gate: np.ndarray,
     w_up: np.ndarray,
     w_down: np.ndarray,
+    *,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
     gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate)
+        network, inp, hidden_size, intermediate_size, w_gate, dtype=dtype)
     up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up)
+        network, inp, hidden_size, intermediate_size, w_up, dtype=dtype)
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(
@@ -476,8 +529,62 @@ def _add_swiglu_expert(
         swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
     down = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down)
+        network, gated.get_output(0), intermediate_size, hidden_size, w_down,
+        dtype=dtype)
     return down
+
+
+def _add_packed_swiglu_experts(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    hidden_size: int,
+    w_gate: np.ndarray,
+    w_up: np.ndarray,
+    w_down: np.ndarray,
+    *,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Compute all expert outputs with three batched matmuls.
+
+    Returns a tensor of shape [num_experts, 1, hidden_size].
+    """
+    num_experts, _, intermediate_size = w_gate.shape
+
+    inp_3d = network.add_shuffle(inp)
+    inp_3d.reshape_dims = (1, 1, hidden_size)
+
+    expert_scale = graph_ops.add_constant(
+        network, (num_experts, 1, 1),
+        np.ones((num_experts, 1, 1), dtype=dtype),
+        dtype=dtype,
+    )
+    batched_inp = network.add_elementwise(
+        inp_3d.get_output(0), expert_scale,
+        trt.ElementWiseOperation.PROD).get_output(0)
+
+    gate_w = graph_ops.add_constant(network, w_gate.shape, w_gate, dtype=dtype)
+    up_w = graph_ops.add_constant(network, w_up.shape, w_up, dtype=dtype)
+    down_w = graph_ops.add_constant(network, w_down.shape, w_down, dtype=dtype)
+
+    gate = network.add_matrix_multiply(
+        batched_inp, trt.MatrixOperation.NONE,
+        gate_w, trt.MatrixOperation.NONE)
+    up = network.add_matrix_multiply(
+        batched_inp, trt.MatrixOperation.NONE,
+        up_w, trt.MatrixOperation.NONE)
+
+    sigmoid = network.add_activation(gate.get_output(0), trt.ActivationType.SIGMOID)
+    swish = network.add_elementwise(
+        gate.get_output(0), sigmoid.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(
+        swish.get_output(0), up.get_output(0),
+        trt.ElementWiseOperation.PROD)
+
+    down = network.add_matrix_multiply(
+        gated.get_output(0), trt.MatrixOperation.NONE,
+        down_w, trt.MatrixOperation.NONE)
+    return down.get_output(0)
 
 
 def _add_qwen3_moe_block(
@@ -491,6 +598,7 @@ def _add_qwen3_moe_block(
     shared_expert_intermediate: int,
     top_k: int,
     has_shared_expert: bool = True,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Add Qwen MoE block with top-k softmax routing and optional shared expert.
 
@@ -504,7 +612,7 @@ def _add_qwen3_moe_block(
     # 1. Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, num_experts,
-        weights[f"{prefix}.router"])
+        weights[f"{prefix}.router"], dtype=dtype)
 
     # 2. Softmax over router logits
     sm = network.add_softmax(router_logits)
@@ -523,20 +631,14 @@ def _add_qwen3_moe_block(
         top_values, sum_val.get_output(0),
         trt.ElementWiseOperation.DIV)  # [1, top_k]
 
-    # 5. Compute ALL routed expert outputs and stack
-    expert_outputs = []
-    for e in range(num_experts):
-        exp_out = _add_swiglu_expert(
-            network, inp, hidden_size, moe_intermediate,
-            weights[f"{prefix}.expert.{e}.w_gate"],
-            weights[f"{prefix}.expert.{e}.w_up"],
-            weights[f"{prefix}.expert.{e}.w_down"],
-        )
-        expert_outputs.append(exp_out)
-
-    stacked = network.add_concatenation(expert_outputs)
-    stacked.axis = 0
-    stacked_out = stacked.get_output(0)  # [num_experts, hidden_size]
+    # 5. Compute all expert outputs with three packed batched matmuls.
+    expert_outputs = _add_packed_swiglu_experts(
+        network, inp, hidden_size,
+        weights[f"{prefix}.experts.w_gate"],
+        weights[f"{prefix}.experts.w_up"],
+        weights[f"{prefix}.experts.w_down"],
+        dtype=dtype,
+    )
 
     # 6. Gather selected experts, scale, and sum
     routed_result = None
@@ -549,19 +651,23 @@ def _add_qwen3_moe_block(
         w_slice = network.add_slice(
             norm_weights.get_output(0),
             start=(0, k), shape=(1, 1), stride=(1, 1))
+        w_reshape = network.add_shuffle(w_slice.get_output(0))
+        w_reshape.reshape_dims = (1, 1, 1)
 
         expert_out = network.add_gather(
-            stacked_out, idx_flat.get_output(0), 0)
+            expert_outputs, idx_flat.get_output(0), 0)
 
         scaled_expert = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
+            expert_out.get_output(0), w_reshape.get_output(0),
             trt.ElementWiseOperation.PROD)
+        scaled_flat = network.add_shuffle(scaled_expert.get_output(0))
+        scaled_flat.reshape_dims = (1, hidden_size)
 
         if routed_result is None:
-            routed_result = scaled_expert.get_output(0)
+            routed_result = scaled_flat.get_output(0)
         else:
             sum_layer = network.add_elementwise(
-                routed_result, scaled_expert.get_output(0),
+                routed_result, scaled_flat.get_output(0),
                 trt.ElementWiseOperation.SUM)
             routed_result = sum_layer.get_output(0)
 
@@ -575,6 +681,7 @@ def _add_qwen3_moe_block(
         weights[f"{prefix}.shared_expert.w_gate"],
         weights[f"{prefix}.shared_expert.w_up"],
         weights[f"{prefix}.shared_expert.w_down"],
+        dtype=dtype,
     )
 
     # 8. Gate shared expert with sigmoid
@@ -584,7 +691,8 @@ def _add_qwen3_moe_block(
         # gate = sigmoid(inp @ shared_expert_gate^T) where inp is [1, hidden]
         # shared_gate_w stored as raw [1, hidden], use as matmul constant
         gate_score = graph_ops.add_matmul_rhs_constant(
-            network, inp, hidden_size, 1, shared_gate_w.reshape(-1, 1))
+            network, inp, hidden_size, 1, shared_gate_w.reshape(-1, 1),
+            dtype=dtype)
         gate_sigmoid = network.add_activation(
             gate_score, trt.ActivationType.SIGMOID)
         shared_gated = network.add_elementwise(
@@ -628,6 +736,7 @@ def _add_qwen3_moe_decoder_layer(
     dense_intermediate: int,
     top_k: int,
     has_shared_expert: bool = True,
+    dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """Add one Qwen MoE decoder layer: attention + (dense MLP or MoE)."""
 
@@ -642,6 +751,7 @@ def _add_qwen3_moe_decoder_layer(
         rotate_half_tensor=rotate_half_tensor,
         attn_scale_tensor=attn_scale_tensor, eps_tensor=eps_tensor,
         norm_type="rmsnorm", position_type="rope",
+        dtype=dtype,
     )
     attn_out = attn["attn_out"]
 
@@ -653,7 +763,7 @@ def _add_qwen3_moe_decoder_layer(
     norm2 = _apply_norm(
         network, residual1.get_output(0), hidden_size,
         weights[f"{prefix}.post_attn_norm"],
-        None, eps_tensor, "rmsnorm")
+        None, eps_tensor, "rmsnorm", dtype=dtype)
 
     # MLP: either dense SwiGLU or MoE (with optional shared expert)
     if is_dense:
@@ -662,13 +772,15 @@ def _add_qwen3_moe_decoder_layer(
             weights=weights,
             prefix=prefix,
             hidden_size=hidden_size,
-            mlp_size=dense_intermediate)
+            mlp_size=dense_intermediate,
+            dtype=dtype)
     else:
         mlp_out = _add_qwen3_moe_block(
             network, norm2, weights, prefix,
             hidden_size, num_experts, moe_intermediate,
             shared_expert_intermediate, top_k,
-            has_shared_expert=has_shared_expert)
+            has_shared_expert=has_shared_expert,
+            dtype=dtype)
 
     # Residual connection
     residual2 = network.add_elementwise(

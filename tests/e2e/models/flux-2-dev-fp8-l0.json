@@ -7,6 +7,7 @@
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
   "ci_tier": "l0_only",
+  "precision": "fp16",
   "reference_family": "diffusers_image_gen",
   "user_contract": "diffusion_image",
   "description": "FLUX.2-dev FP8 L0 representative at 384px with full text shape and reduced denoising steps",

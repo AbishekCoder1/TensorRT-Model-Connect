@@ -196,6 +196,9 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
     fake_cm._open_safetensors = lambda _path: tensors  # type: ignore[attr-defined]
     fake_cm._load_tensor = lambda readers, name: readers[name]  # type: ignore[attr-defined]
     fake_cm._has_tensor = lambda readers, name: name in readers  # type: ignore[attr-defined]
+    fake_cm._target_np_dtype = (  # type: ignore[attr-defined]
+        lambda precision: np.float16 if precision == "fp16" else np.float32
+    )
 
     with patch.dict(sys.modules, {"trtf_build.checkpoint_mapper": fake_cm}):
         weights = mod.load_t5_weights(
@@ -219,3 +222,22 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
     assert "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight" in weights
     assert "encoder.block.1.layer.0.SelfAttention.relative_attention_bias.weight" not in weights
     assert weights["encoder.final_layer_norm.weight"].dtype == np.float32
+
+    with patch.dict(sys.modules, {"trtf_build.checkpoint_mapper": fake_cm}):
+        fp16_weights = mod.load_t5_weights(
+            model_dir="unused",
+            d_model=4,
+            num_heads=2,
+            d_kv=2,
+            d_ff=6,
+            num_layers=2,
+            vocab_size=7,
+            precision="fp16",
+        )
+
+    assert fp16_weights["shared.weight"].dtype == np.float16
+    assert (
+        fp16_weights["encoder.block.0.layer.0.SelfAttention.q.weight"].dtype
+        == np.float16
+    )
+    assert fp16_weights["encoder.block.0.layer.0.layer_norm.weight"].dtype == np.float32

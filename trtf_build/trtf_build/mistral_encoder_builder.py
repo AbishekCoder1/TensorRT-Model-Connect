@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 def load_mistral_encoder_weights(
     model_dir: str,
     *,
+    precision: str = "fp32",
     hidden_size: int = 5120,
     num_heads: int = 32,
     num_kv_heads: int = 8,
@@ -49,12 +50,16 @@ def load_mistral_encoder_weights(
     as used in FLUX.2-dev).  Weights are stored under the canonical ``model.``
     prefix regardless of the source prefix.
     """
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
     from .checkpoint_mapper import (
-        WeightDict, _open_safetensors, _load_tensor, _has_tensor)
+        WeightDict, _open_safetensors, _load_tensor, _has_tensor,
+        _target_np_dtype, _transpose_2d)
 
     model_path = Path(model_dir)
     readers = _open_safetensors(model_path)
+    weight_dtype = _target_np_dtype(precision)
 
     # Auto-detect weight prefix
     if _has_tensor(readers, "model.embed_tokens.weight"):
@@ -77,21 +82,23 @@ def load_mistral_encoder_weights(
         return canonical
 
     weights = WeightDict()
+    max_workers = min(8, max(1, os.cpu_count() or 1))
 
     # Embedding table
     embed = _load_tensor(readers, _src("model.embed_tokens.weight"))
-    weights["model.embed_tokens.weight"] = embed.astype(np.float32)
+    weights["model.embed_tokens.weight"] = embed.astype(weight_dtype)
 
     q_size = num_heads * head_dim
     kv_size = num_kv_heads * head_dim
 
-    for i in range(num_layers):
+    def _load_layer(i):
+        layer = WeightDict()
         prefix = f"model.layers.{i}"
 
         # RMSNorm weights (no transpose needed — 1-D)
-        weights[f"{prefix}.input_layernorm.weight"] = _load_tensor(
+        layer[f"{prefix}.input_layernorm.weight"] = _load_tensor(
             readers, _src(f"{prefix}.input_layernorm.weight")).astype(np.float32)
-        weights[f"{prefix}.post_attention_layernorm.weight"] = _load_tensor(
+        layer[f"{prefix}.post_attention_layernorm.weight"] = _load_tensor(
             readers, _src(f"{prefix}.post_attention_layernorm.weight")).astype(np.float32)
 
         # Self-attention projections — transpose [out, in] -> [in, out]
@@ -102,17 +109,24 @@ def load_mistral_encoder_weights(
         ]:
             key = f"{prefix}.self_attn.{proj}.weight"
             w = _load_tensor(readers, _src(key))
-            weights[key] = np.ascontiguousarray(w.T, dtype=np.float32)
+            layer[key] = _transpose_2d(w, key, precision=precision)
 
         o_key = f"{prefix}.self_attn.o_proj.weight"
         w_o = _load_tensor(readers, _src(o_key))
-        weights[o_key] = np.ascontiguousarray(w_o.T, dtype=np.float32)
+        layer[o_key] = _transpose_2d(w_o, o_key, precision=precision)
 
         # MLP projections — transpose [out, in] -> [in, out]
         for proj in ("gate_proj", "up_proj", "down_proj"):
             key = f"{prefix}.mlp.{proj}.weight"
             w = _load_tensor(readers, _src(key))
-            weights[key] = np.ascontiguousarray(w.T, dtype=np.float32)
+            layer[key] = _transpose_2d(w, key, precision=precision)
+
+        return layer
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_load_layer, i) for i in range(num_layers)]
+        for future in as_completed(futures):
+            weights.update(future.result())
 
     # Final RMSNorm
     weights["model.norm.weight"] = _load_tensor(
@@ -124,6 +138,7 @@ def load_mistral_encoder_weights(
 def build_mistral_encoder_engine(
     weights: WeightDict,
     *,
+    precision: str = "fp32",
     hidden_size: int = 5120,
     num_heads: int = 32,
     num_kv_heads: int = 8,
@@ -176,23 +191,38 @@ def build_mistral_encoder_engine(
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 128 << 30)
 
+    if precision == "fp16":
+        work_np_dtype = np.float16
+        work_trt_dtype = trt.float16
+    elif precision == "bf16":
+        work_np_dtype = np.float16
+        work_trt_dtype = trt.bfloat16
+    else:
+        work_np_dtype = np.float32
+        work_trt_dtype = trt.float32
+
     # --- Inputs ---
     input_ids = network.add_input(
         "input_ids", trt.int32, (1, max_seq_len))
     attention_mask_input = network.add_input(
         "attention_mask", trt.float32, (1, max_seq_len))
+    if work_trt_dtype != trt.float32:
+        attention_mask_input = network.add_cast(
+            attention_mask_input, work_trt_dtype).get_output(0)
 
     # --- Constants ---
     eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([eps], dtype=np.float32))
+        network, (1, 1), np.array([eps], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     attn_scale_val = 1.0 / np.sqrt(head_dim)
     attn_scale = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale_val], dtype=np.float32))
+        network, (1, 1, 1), np.array([attn_scale_val], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     # Embedding table [vocab_size, hidden_size]
     embed_table = graph_ops.add_constant(
         network, (vocab_size, hidden_size),
-        weights["model.embed_tokens.weight"])
+        weights["model.embed_tokens.weight"], dtype=work_np_dtype)
 
     # --- Embedding lookup ---
     flatten_ids = network.add_shuffle(input_ids)
@@ -203,12 +233,14 @@ def build_mistral_encoder_engine(
 
     # --- Attention mask: causal + padding ---
     # Build causal mask: upper triangular with -1e9 above diagonal
-    causal_mask_np = np.zeros((max_seq_len, max_seq_len), dtype=np.float32)
+    mask_value = -1e9 if work_np_dtype == np.float32 else np.finfo(work_np_dtype).min
+    causal_mask_np = np.zeros((max_seq_len, max_seq_len), dtype=work_np_dtype)
     for i in range(max_seq_len):
         for j in range(i + 1, max_seq_len):
-            causal_mask_np[i, j] = -1e9
+            causal_mask_np[i, j] = mask_value
     causal_mask = graph_ops.add_constant(
-        network, (1, max_seq_len, max_seq_len), causal_mask_np)
+        network, (1, max_seq_len, max_seq_len), causal_mask_np,
+        dtype=work_np_dtype)
 
     # Combine with padding mask: reshape [1, max_seq_len] -> [1, 1, max_seq_len]
     attn_mask_3d = network.add_shuffle(attention_mask_input)
@@ -223,9 +255,9 @@ def build_mistral_encoder_engine(
     # Tile cos/sin from [seq, head_dim] to [seq, q_size] for Q
     # and [seq, kv_size] for K (different num_heads)
     rope_cos_const = graph_ops.add_constant(
-        network, (max_seq_len, head_dim), rope_cos_np)
+        network, (max_seq_len, head_dim), rope_cos_np, dtype=work_np_dtype)
     rope_sin_const = graph_ops.add_constant(
-        network, (max_seq_len, head_dim), rope_sin_np)
+        network, (max_seq_len, head_dim), rope_sin_np, dtype=work_np_dtype)
 
     # Tile for Q heads: [seq, head_dim] -> [seq, q_size] via repeat
     q_rope_cos_parts = [rope_cos_const] * num_heads
@@ -247,11 +279,11 @@ def build_mistral_encoder_engine(
     q_rot_half_np = graph_ops.make_rotate_half_matrix(
         q_size, num_heads, interleaved=True)
     q_rot_half = graph_ops.add_constant(
-        network, (q_size, q_size), q_rot_half_np)
+        network, (q_size, q_size), q_rot_half_np, dtype=work_np_dtype)
     k_rot_half_np = graph_ops.make_rotate_half_matrix(
         kv_size, num_kv_heads, interleaved=True)
     k_rot_half = graph_ops.add_constant(
-        network, (kv_size, kv_size), k_rot_half_np)
+        network, (kv_size, kv_size), k_rot_half_np, dtype=work_np_dtype)
 
     # Collected hidden states for extraction
     extracted = []
@@ -265,7 +297,8 @@ def build_mistral_encoder_engine(
         # Pre-norm (RMSNorm)
         norm1_gamma = weights[f"{prefix}.input_layernorm.weight"]
         normed = graph_ops.add_rms_norm(
-            network, hidden, hidden_size, norm1_gamma, eps_t)
+            network, hidden, hidden_size, norm1_gamma, eps_t,
+            dtype=work_np_dtype)
 
         # Q/K/V projections
         w_q = weights[f"{prefix}.self_attn.q_proj.weight"]
@@ -274,11 +307,11 @@ def build_mistral_encoder_engine(
         w_o = weights[f"{prefix}.self_attn.o_proj.weight"]
 
         q = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden_size, q_size, w_q)
+            network, normed, hidden_size, q_size, w_q, dtype=work_np_dtype)
         k = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden_size, kv_size, w_k)
+            network, normed, hidden_size, kv_size, w_k, dtype=work_np_dtype)
         v = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden_size, kv_size, w_v)
+            network, normed, hidden_size, kv_size, w_v, dtype=work_np_dtype)
 
         # Apply RoPE to Q: q = q * cos + rotate_half(q) * sin
         q_rot = network.add_matrix_multiply(
@@ -326,10 +359,12 @@ def build_mistral_encoder_engine(
         if gqa_ratio > 1:
             k_expanded = _tile_kv_heads(
                 network, k_heads.get_output(0),
-                num_kv_heads, gqa_ratio, max_seq_len, head_dim)
+                num_kv_heads, gqa_ratio, max_seq_len, head_dim,
+                dtype=work_np_dtype)
             v_expanded = _tile_kv_heads(
                 network, v_heads.get_output(0),
-                num_kv_heads, gqa_ratio, max_seq_len, head_dim)
+                num_kv_heads, gqa_ratio, max_seq_len, head_dim,
+                dtype=work_np_dtype)
         else:
             k_expanded = k_heads.get_output(0)
             v_expanded = v_heads.get_output(0)
@@ -365,7 +400,8 @@ def build_mistral_encoder_engine(
 
         # O projection
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, context_flat.get_output(0), q_size, hidden_size, w_o)
+            network, context_flat.get_output(0), q_size, hidden_size, w_o,
+            dtype=work_np_dtype)
 
         # Residual
         hidden = network.add_elementwise(
@@ -377,7 +413,8 @@ def build_mistral_encoder_engine(
         # Pre-norm (RMSNorm)
         norm2_gamma = weights[f"{prefix}.post_attention_layernorm.weight"]
         ffn_normed = graph_ops.add_rms_norm(
-            network, hidden, hidden_size, norm2_gamma, eps_t)
+            network, hidden, hidden_size, norm2_gamma, eps_t,
+            dtype=work_np_dtype)
 
         # SwiGLU: silu(gate_proj(x)) * up_proj(x), then down_proj
         w_gate = weights[f"{prefix}.mlp.gate_proj.weight"]
@@ -385,12 +422,15 @@ def build_mistral_encoder_engine(
         w_down = weights[f"{prefix}.mlp.down_proj.weight"]
 
         gate = graph_ops.add_matmul_rhs_constant(
-            network, ffn_normed, hidden_size, intermediate_size, w_gate)
+            network, ffn_normed, hidden_size, intermediate_size, w_gate,
+            dtype=work_np_dtype)
         up = graph_ops.add_matmul_rhs_constant(
-            network, ffn_normed, hidden_size, intermediate_size, w_up)
+            network, ffn_normed, hidden_size, intermediate_size, w_up,
+            dtype=work_np_dtype)
 
         # SiLU activation on gate
-        gate_activated = graph_ops.add_activation(network, gate, "silu")
+        gate_activated = graph_ops.add_activation(
+            network, gate, "silu", dtype=work_np_dtype)
 
         # gate * up
         gated = network.add_elementwise(
@@ -400,7 +440,7 @@ def build_mistral_encoder_engine(
         # down_proj
         ffn_out = graph_ops.add_matmul_rhs_constant(
             network, gated.get_output(0),
-            intermediate_size, hidden_size, w_down)
+            intermediate_size, hidden_size, w_down, dtype=work_np_dtype)
 
         # Residual
         hidden = network.add_elementwise(
@@ -414,7 +454,8 @@ def build_mistral_encoder_engine(
     # --- Final RMSNorm ---
     final_norm_gamma = weights["model.norm.weight"]
     hidden = graph_ops.add_rms_norm(
-        network, hidden, hidden_size, final_norm_gamma, eps_t)
+        network, hidden, hidden_size, final_norm_gamma, eps_t,
+        dtype=work_np_dtype)
 
     # --- Multi-layer concatenation ---
     # Concatenate extracted hidden states along the feature dimension:
@@ -447,7 +488,7 @@ def build_mistral_encoder_engine(
         f"(hidden={hidden_size}, layers={num_layers}, "
         f"heads={num_heads}/{num_kv_heads}, head_dim={head_dim}, "
         f"seq={max_seq_len}, extract={list(extract_layers)}, "
-        f"concat_dim={concat_dim}) ...",
+        f"concat_dim={concat_dim}, precision={precision}) ...",
         file=sys.stderr)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
@@ -483,24 +524,22 @@ def _tile_kv_heads(
     gqa_ratio: int,
     seq_len: int,
     head_dim: int,
+    *,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Tile KV heads from [num_kv_heads, seq, head_dim] to [num_heads, seq, head_dim].
 
-    Each KV head is repeated gqa_ratio times via concatenation so that the
-    result has num_kv_heads * gqa_ratio = num_heads total heads.
+    Broadcast-multiplies by an all-ones tensor to keep the TRT graph small.
     """
-    # Slice each KV head and repeat it gqa_ratio times
-    slices = []
-    for kv_idx in range(num_kv_heads):
-        head_slice = network.add_slice(
-            kv_tensor,
-            start=(kv_idx, 0, 0),
-            shape=(1, seq_len, head_dim),
-            stride=(1, 1, 1),
-        )
-        for _ in range(gqa_ratio):
-            slices.append(head_slice.get_output(0))
-
-    concat = network.add_concatenation(slices)
-    concat.axis = 0  # head dimension
-    return concat.get_output(0)
+    reshape_in = network.add_shuffle(kv_tensor)
+    reshape_in.reshape_dims = (num_kv_heads, 1, seq_len, head_dim)
+    ones = graph_ops.add_constant(
+        network, (1, gqa_ratio, 1, 1),
+        np.ones((1, gqa_ratio, 1, 1), dtype=dtype),
+        dtype=dtype,
+    )
+    tiled = network.add_elementwise(
+        reshape_in.get_output(0), ones, trt.ElementWiseOperation.PROD)
+    reshape_out = network.add_shuffle(tiled.get_output(0))
+    reshape_out.reshape_dims = (num_kv_heads * gqa_ratio, seq_len, head_dim)
+    return reshape_out.get_output(0)

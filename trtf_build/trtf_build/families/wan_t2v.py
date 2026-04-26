@@ -112,6 +112,7 @@ class WanT2VPlugin:
                 d_ff=self._T5_D_FF,
                 num_layers=self._T5_NUM_LAYERS,
                 vocab_size=self._T5_VOCAB_SIZE,
+                precision=precision,
             )
         with timed_trt_compile(build_timing, "t5_encoder"):
             t5_plan = build_t5_encoder_engine(

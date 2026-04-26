@@ -19,7 +19,6 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_ops
-from . import graph_blocks
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
@@ -271,6 +270,7 @@ def build_t5_encoder_engine(
 def load_t5_weights(
     model_dir: str,
     *,
+    precision: str = "fp32",
     d_model: int = 4096,
     num_heads: int = 64,
     d_kv: int = 64,
@@ -283,17 +283,26 @@ def load_t5_weights(
     Expects: model_dir/model.safetensors (or sharded) with HF T5 weight keys.
     Returns WeightDict with transposed projections for TRT matmul.
     """
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
-    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+    from .checkpoint_mapper import (
+        WeightDict,
+        _has_tensor,
+        _load_tensor,
+        _open_safetensors,
+        _target_np_dtype,
+    )
 
     model_path = Path(model_dir)
     readers = _open_safetensors(model_path)
+    target_dtype = _target_np_dtype(precision)
 
     weights = WeightDict()
 
     # Embedding
     embed = _load_tensor(readers, "shared.weight")
-    weights["shared.weight"] = embed.astype(np.float32)
+    weights["shared.weight"] = embed.astype(target_dtype)
 
     # Relative attention bias — UMT5 has per-layer bias, T5 has only layer 0
     for i in range(num_layers):
@@ -301,29 +310,44 @@ def load_t5_weights(
         if _has_tensor(readers, bias_key):
             weights[bias_key] = _load_tensor(readers, bias_key).astype(np.float32)
 
-    for i in range(num_layers):
+    def _load_layer(i: int) -> tuple[int, WeightDict]:
         prefix = f"encoder.block.{i}"
+        layer = WeightDict()
 
         # Self-attention weights (transpose for TRT matmul)
         for proj in ("q", "k", "v", "o"):
             key = f"{prefix}.layer.0.SelfAttention.{proj}.weight"
             w = _load_tensor(readers, key)
             # HF shape: [out, in] -> transpose to [in, out]
-            weights[key] = np.ascontiguousarray(w.T, dtype=np.float32)
+            layer[key] = np.ascontiguousarray(w.T, dtype=target_dtype)
 
         # Self-attention layer norm
         norm_key = f"{prefix}.layer.0.layer_norm.weight"
-        weights[norm_key] = _load_tensor(readers, norm_key).astype(np.float32)
+        layer[norm_key] = _load_tensor(readers, norm_key).astype(np.float32)
 
         # FFN weights (transpose for TRT matmul)
         for proj in ("wi_0", "wi_1", "wo"):
             key = f"{prefix}.layer.1.DenseReluDense.{proj}.weight"
             w = _load_tensor(readers, key)
-            weights[key] = np.ascontiguousarray(w.T, dtype=np.float32)
+            layer[key] = np.ascontiguousarray(w.T, dtype=target_dtype)
 
         # FFN layer norm
         norm_key = f"{prefix}.layer.1.layer_norm.weight"
-        weights[norm_key] = _load_tensor(readers, norm_key).astype(np.float32)
+        layer[norm_key] = _load_tensor(readers, norm_key).astype(np.float32)
+
+        return i, layer
+
+    layer_results: list[tuple[int, WeightDict] | None] = [None] * num_layers
+    max_workers = min(8, max(1, os.cpu_count() or 1))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_load_layer, i) for i in range(num_layers)]
+        for future in as_completed(futures):
+            i, layer = future.result()
+            layer_results[i] = (i, layer)
+
+    for result in layer_results:
+        if result is not None:
+            weights.update(result[1])
 
     # Final layer norm
     weights["encoder.final_layer_norm.weight"] = _load_tensor(

@@ -7,6 +7,8 @@ standard_decoder_builder.py. All projections are transposed from HF
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -50,21 +52,37 @@ def _expand_kv_projection(
     precision: str = "fp32",
 ) -> np.ndarray:
     """Expand GQA K/V projection from [hidden, kv_hidden] to [hidden, target_hidden]."""
+    target_dtype = _target_np_dtype(precision)
     if kv_hidden == target_hidden:
-        return transposed
+        return np.ascontiguousarray(transposed, dtype=target_dtype)
 
     head_dim = target_hidden // num_heads
     group_size = num_heads // num_kv_heads
+    per_head = transposed.reshape(hidden, num_kv_heads, head_dim)
+    expanded = np.repeat(per_head, group_size, axis=1)
+    return np.ascontiguousarray(
+        expanded.reshape(hidden, target_hidden),
+        dtype=target_dtype,
+    )
 
-    out = np.zeros((hidden, target_hidden), dtype=_target_np_dtype(precision))
-    for row in range(hidden):
-        for col in range(target_hidden):
-            q_head = col // head_dim
-            offset = col % head_dim
-            kv_head = min(num_kv_heads - 1, q_head // group_size)
-            src_col = kv_head * head_dim + offset
-            out[row, col] = transposed[row, src_col]
-    return out
+
+def _expand_kv_bias(
+    raw: np.ndarray,
+    target_hidden: int,
+    num_heads: int,
+    num_kv_heads: int,
+    precision: str = "fp32",
+) -> np.ndarray:
+    """Expand GQA K/V bias from [kv_hidden] to [target_hidden]."""
+    target_dtype = _target_np_dtype(precision)
+    if raw.shape[0] == target_hidden:
+        return np.ascontiguousarray(raw, dtype=target_dtype)
+
+    head_dim = target_hidden // num_heads
+    group_size = num_heads // num_kv_heads
+    per_head = raw.reshape(num_kv_heads, head_dim)
+    expanded = np.repeat(per_head, group_size, axis=0)
+    return np.ascontiguousarray(expanded.reshape(target_hidden), dtype=target_dtype)
 
 
 def _repeat_head_norm(norm: np.ndarray, num_heads: int) -> np.ndarray:
@@ -111,6 +129,7 @@ def load_standard_weights(
     num_layers = config.num_hidden_layers
     num_heads = config.num_attention_heads
     num_kv_heads = config.num_key_value_heads
+    target_dtype = _target_np_dtype(precision)
 
     weights = WeightDict()
 
@@ -118,21 +137,19 @@ def load_standard_weights(
     embedding = _load_tensor(readers, "model.embed_tokens.weight")
     assert embedding.shape == (vocab, hidden), (
         f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
-    weights["embedding"] = embedding.astype(_target_np_dtype(precision))
+    weights["embedding"] = embedding.astype(target_dtype)
 
-    mlp_size = 0
-    attention_size = 0
-
-    for layer_idx in range(num_layers):
+    def _load_layer(layer_idx: int) -> tuple[int, WeightDict, int, int]:
         prefix = f"layer.{layer_idx}"
+        layer = WeightDict()
 
         # Norms
         input_norm = _load_tensor(
             readers, _layer_key(layer_idx, "input_layernorm.weight"))
         post_norm = _load_tensor(
             readers, _layer_key(layer_idx, "post_attention_layernorm.weight"))
-        weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
-        weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
+        layer[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
+        layer[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
         # Q/K/V/O projections
         q_raw = _load_tensor(
@@ -146,17 +163,9 @@ def load_standard_weights(
 
         q_hidden = q_raw.shape[0]
         kv_hidden = k_raw.shape[0]
-        if attention_size == 0:
-            attention_size = q_hidden
-        if mlp_size == 0:
-            gate_raw = _load_tensor(
-                readers, _layer_key(layer_idx, "mlp.gate_proj.weight"))
-            mlp_size = gate_raw.shape[0]
-        else:
-            gate_raw = _load_tensor(
-                readers, _layer_key(layer_idx, "mlp.gate_proj.weight"))
-
-        head_dim = q_hidden // num_heads
+        gate_raw = _load_tensor(
+            readers, _layer_key(layer_idx, "mlp.gate_proj.weight"))
+        layer_mlp_size = gate_raw.shape[0]
 
         # Transpose all projections [out, in] -> [in, out]
         q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
@@ -172,52 +181,44 @@ def load_standard_weights(
             v_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads,
             precision=precision)
 
-        weights[f"{prefix}.w_q"] = q_t
-        weights[f"{prefix}.w_k"] = k_expanded
-        weights[f"{prefix}.w_v"] = v_expanded
-        weights[f"{prefix}.w_o"] = o_t
+        layer[f"{prefix}.w_q"] = q_t
+        layer[f"{prefix}.w_k"] = k_expanded
+        layer[f"{prefix}.w_v"] = v_expanded
+        layer[f"{prefix}.w_o"] = o_t
 
         # Optional QKV biases (Qwen2 style)
         q_bias_key = _layer_key(layer_idx, "self_attn.q_proj.bias")
         k_bias_key = _layer_key(layer_idx, "self_attn.k_proj.bias")
         v_bias_key = _layer_key(layer_idx, "self_attn.v_proj.bias")
         if _has_tensor(readers, q_bias_key):
-            weights[f"{prefix}.q_bias"] = _load_tensor(
-                readers, q_bias_key).astype(_target_np_dtype(precision))
+            layer[f"{prefix}.q_bias"] = _load_tensor(
+                readers, q_bias_key).astype(target_dtype)
         if _has_tensor(readers, k_bias_key):
-            raw = _load_tensor(readers, k_bias_key).astype(_target_np_dtype(precision))
+            raw = _load_tensor(readers, k_bias_key).astype(target_dtype)
             if raw.shape[0] == kv_hidden and kv_hidden != q_hidden:
-                expanded = np.zeros(q_hidden, dtype=_target_np_dtype(precision))
-                for qh in range(num_heads):
-                    kvh = min(num_kv_heads - 1,
-                              qh // (num_heads // num_kv_heads))
-                    expanded[qh * head_dim:(qh + 1) * head_dim] = \
-                        raw[kvh * head_dim:(kvh + 1) * head_dim]
-                weights[f"{prefix}.k_bias"] = expanded
+                layer[f"{prefix}.k_bias"] = _expand_kv_bias(
+                    raw, q_hidden, num_heads, num_kv_heads,
+                    precision=precision)
             else:
-                weights[f"{prefix}.k_bias"] = raw
+                layer[f"{prefix}.k_bias"] = raw
         if _has_tensor(readers, v_bias_key):
-            raw = _load_tensor(readers, v_bias_key).astype(_target_np_dtype(precision))
+            raw = _load_tensor(readers, v_bias_key).astype(target_dtype)
             if raw.shape[0] == kv_hidden and kv_hidden != q_hidden:
-                expanded = np.zeros(q_hidden, dtype=_target_np_dtype(precision))
-                for qh in range(num_heads):
-                    kvh = min(num_kv_heads - 1,
-                              qh // (num_heads // num_kv_heads))
-                    expanded[qh * head_dim:(qh + 1) * head_dim] = \
-                        raw[kvh * head_dim:(kvh + 1) * head_dim]
-                weights[f"{prefix}.v_bias"] = expanded
+                layer[f"{prefix}.v_bias"] = _expand_kv_bias(
+                    raw, q_hidden, num_heads, num_kv_heads,
+                    precision=precision)
             else:
-                weights[f"{prefix}.v_bias"] = raw
+                layer[f"{prefix}.v_bias"] = raw
 
         # Optional per-head q/k norm (Qwen3 style)
         q_norm_key = _layer_key(layer_idx, "self_attn.q_norm.weight")
         k_norm_key = _layer_key(layer_idx, "self_attn.k_norm.weight")
         if _has_tensor(readers, q_norm_key):
-            weights[f"{prefix}.q_norm"] = _repeat_head_norm(
+            layer[f"{prefix}.q_norm"] = _repeat_head_norm(
                 _load_tensor(readers, q_norm_key).astype(np.float32),
                 num_heads)
         if _has_tensor(readers, k_norm_key):
-            weights[f"{prefix}.k_norm"] = _repeat_head_norm(
+            layer[f"{prefix}.k_norm"] = _repeat_head_norm(
                 _load_tensor(readers, k_norm_key).astype(np.float32),
                 num_heads)
 
@@ -227,9 +228,34 @@ def load_standard_weights(
         down_raw = _load_tensor(
             readers, _layer_key(layer_idx, "mlp.down_proj.weight"))
 
-        weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj", precision=precision)
-        weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj", precision=precision)
-        weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj", precision=precision)
+        layer[f"{prefix}.w_gate"] = _transpose_2d(
+            gate_raw, "gate_proj", precision=precision)
+        layer[f"{prefix}.w_up"] = _transpose_2d(
+            up_raw, "up_proj", precision=precision)
+        layer[f"{prefix}.w_down"] = _transpose_2d(
+            down_raw, "down_proj", precision=precision)
+
+        return layer_idx, layer, q_hidden, layer_mlp_size
+
+    layer_results: list[tuple[int, WeightDict, int, int] | None] = [None] * num_layers
+    max_workers = min(8, max(1, os.cpu_count() or 1))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_load_layer, i) for i in range(num_layers)]
+        for future in as_completed(futures):
+            layer_idx, layer, attention_size, mlp_size = future.result()
+            layer_results[layer_idx] = (layer_idx, layer, attention_size, mlp_size)
+
+    attention_size = 0
+    mlp_size = 0
+    for result in layer_results:
+        if result is None:
+            continue
+        _layer_idx, layer, layer_attention_size, layer_mlp_size = result
+        weights.update(layer)
+        if attention_size == 0:
+            attention_size = layer_attention_size
+        if mlp_size == 0:
+            mlp_size = layer_mlp_size
 
     # Final norm
     final_norm_key = "model.norm.weight"
@@ -283,68 +309,113 @@ class _TorchBinReader:
         return self._state[name]
 
 
+class _ReaderCollection(list):
+    """Reader list with a cached tensor-name -> reader lookup table."""
+
+    def __init__(self, readers: list, *, tensor_map: dict[str, object] | None = None):
+        super().__init__(readers)
+        if tensor_map is None:
+            tensor_map = {}
+            for reader in readers:
+                for key in reader.keys():
+                    tensor_map[key] = reader
+        self.tensor_map = tensor_map
+
+
 def _open_safetensors(model_dir: Path) -> list:
     """Open all safetensor shards (or pytorch .bin) in a model directory."""
     fw = _detect_framework()
     single = model_dir / "model.safetensors"
     if single.exists():
-        return [safe_open(str(single), framework=fw)]
+        return _ReaderCollection([safe_open(str(single), framework=fw)])
 
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():
         import json
         index = json.loads(index_path.read_text())
-        shard_files = sorted(set(index.get("weight_map", {}).values()))
-        return [
-            safe_open(str(model_dir / f), framework=fw)
-            for f in shard_files
-        ]
+        weight_map = index.get("weight_map", {})
+        shard_files = sorted(set(weight_map.values()))
+        readers_by_file = {
+            shard: safe_open(str(model_dir / shard), framework=fw)
+            for shard in shard_files
+        }
+        tensor_map = {
+            name: readers_by_file[shard]
+            for name, shard in weight_map.items()
+        }
+        return _ReaderCollection(
+            [readers_by_file[shard] for shard in shard_files],
+            tensor_map=tensor_map,
+        )
 
     # Diffusers format: diffusion_pytorch_model.safetensors
     diff_single = model_dir / "diffusion_pytorch_model.safetensors"
     if diff_single.exists():
-        return [safe_open(str(diff_single), framework=fw)]
+        return _ReaderCollection([safe_open(str(diff_single), framework=fw)])
 
     diff_index = model_dir / "diffusion_pytorch_model.safetensors.index.json"
     if diff_index.exists():
         import json
         index = json.loads(diff_index.read_text())
-        shard_files = sorted(set(index.get("weight_map", {}).values()))
-        return [
-            safe_open(str(model_dir / f), framework=fw)
-            for f in shard_files
-        ]
+        weight_map = index.get("weight_map", {})
+        shard_files = sorted(set(weight_map.values()))
+        readers_by_file = {
+            shard: safe_open(str(model_dir / shard), framework=fw)
+            for shard in shard_files
+        }
+        tensor_map = {
+            name: readers_by_file[shard]
+            for name, shard in weight_map.items()
+        }
+        return _ReaderCollection(
+            [readers_by_file[shard] for shard in shard_files],
+            tensor_map=tensor_map,
+        )
 
     # Fallback: pytorch_model.bin (older HF models)
     bin_single = model_dir / "pytorch_model.bin"
     if bin_single.exists():
-        return [_TorchBinReader(bin_single)]
+        return _ReaderCollection([_TorchBinReader(bin_single)])
 
     raise FileNotFoundError(
         f"No model.safetensors, index.json, or pytorch_model.bin in {model_dir}")
 
 
 def _has_tensor(readers: list, name: str) -> bool:
+    tensor_map = getattr(readers, "tensor_map", None)
+    if tensor_map is not None:
+        return name in tensor_map
     for r in readers:
         if name in r.keys():
             return True
     return False
 
 
+def _to_numpy_fp32(t) -> np.ndarray:
+    """Convert a safetensors/torch tensor to numpy float32 with minimal copies."""
+    if hasattr(t, "numpy"):
+        dtype = getattr(t, "dtype", None)
+        if str(dtype) == "torch.float32":
+            return t.numpy()
+        return t.float().numpy()
+
+    dtype_str = str(t.dtype)
+    if t.dtype == np.uint16 or dtype_str == "bfloat16":
+        t = t.view(np.uint16).astype(np.uint32) << 16
+        return t.view(np.float32)
+    if dtype_str == "float16":
+        return t.astype(np.float32)
+    return np.asarray(t, dtype=np.float32)
+
+
 def _load_tensor(readers: list, name: str) -> np.ndarray:
+    tensor_map = getattr(readers, "tensor_map", None)
+    if tensor_map is not None:
+        reader = tensor_map.get(name)
+        if reader is None:
+            raise KeyError(f"Tensor not found: {name}")
+        return _to_numpy_fp32(reader.get_tensor(name))
     for r in readers:
         if name in r.keys():
-            t = r.get_tensor(name)
-            # If loaded via torch framework, convert to numpy float32
-            if hasattr(t, "numpy"):
-                # torch.Tensor — handles BF16 natively
-                return t.float().numpy()
-            # numpy path — handle BF16 via uint16 bit-shift
-            dtype_str = str(t.dtype)
-            if t.dtype == np.uint16 or dtype_str == "bfloat16":
-                t = t.view(np.uint16).astype(np.uint32) << 16
-                t = t.view(np.float32)
-            elif dtype_str == "float16":
-                t = t.astype(np.float32)
-            return t.astype(np.float32)
+            return _to_numpy_fp32(r.get_tensor(name))
     raise KeyError(f"Tensor not found: {name}")

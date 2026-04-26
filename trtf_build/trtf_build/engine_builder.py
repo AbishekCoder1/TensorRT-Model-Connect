@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 import time
@@ -194,6 +195,34 @@ def _raise_friendly_download_error(model_id: str, exc: Exception) -> None:
     raise RuntimeError(
         f"Failed to download '{model_id}' from HuggingFace Hub: {exc}"
     ) from exc
+
+
+def _call_supports_kwarg(func, name: str) -> bool:
+    """Return True when a callable explicitly accepts a kwarg or **kwargs."""
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    if name in sig.parameters:
+        return True
+    return any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in sig.parameters.values()
+    )
+
+
+def _load_plugin_weights(
+    plugin,
+    model_dir: str,
+    config: ModelConfig,
+    *,
+    precision: str,
+):
+    """Call plugin.load_weights(), forwarding precision when supported."""
+    kwargs = {}
+    if _call_supports_kwarg(plugin.load_weights, "precision"):
+        kwargs["precision"] = precision
+    return plugin.load_weights(model_dir, config, **kwargs)
 
 
 def _is_hf_model_dir(path: Path) -> bool:
@@ -557,7 +586,8 @@ def build_bundle(
     t1 = time.monotonic()
     print("[trtf-build] Loading weights ...", file=sys.stderr)
     try:
-        weights = plugin.load_weights(str(model_dir_path), config)
+        weights = _load_plugin_weights(
+            plugin, str(model_dir_path), config, precision=precision)
     finally:
         weights_elapsed = time.monotonic() - t1
         _add_build_timing(build_timing, "weights_loading_s", weights_elapsed)
@@ -684,12 +714,10 @@ def build_bundle(
     print(f"[trtf-build] Building TRT engine (cache={max_cache_length}) ...",
           file=sys.stderr)
     # Pass precision/quant_ctx only if the plugin accepts them (not all do).
-    import inspect
-    sig = inspect.signature(plugin.build_engine)
     extra_kwargs = {}
-    if 'precision' in sig.parameters:
+    if _call_supports_kwarg(plugin.build_engine, 'precision'):
         extra_kwargs['precision'] = precision
-    if 'quant_ctx' in sig.parameters:
+    if _call_supports_kwarg(plugin.build_engine, 'quant_ctx'):
         extra_kwargs['quant_ctx'] = quant_ctx
     engine_t0 = time.monotonic()
     try:
@@ -961,7 +989,8 @@ def _build_diffusion_bundle(
     # Load weights (lightweight — just paths for diffusion)
     t1 = time.monotonic()
     try:
-        weights = plugin.load_weights(str(model_dir_path), config)
+        weights = _load_plugin_weights(
+            plugin, str(model_dir_path), config, precision=precision)
     finally:
         weights_elapsed = time.monotonic() - t1
         _add_build_timing(build_timing, "weights_loading_s", weights_elapsed)
@@ -1015,9 +1044,16 @@ def _build_diffusion_bundle(
         build_timing, "weights_loading_s")
     compile_before_components = _build_timing_phase(build_timing, "trt_compile_s")
     try:
+        build_components_kwargs = {
+            "verbose": verbose,
+            "fp8_scales": fp8_scales,
+        }
+        if _call_supports_kwarg(build_components, "precision"):
+            build_components_kwargs["precision"] = precision
+        if _call_supports_kwarg(build_components, "build_timing"):
+            build_components_kwargs["build_timing"] = build_timing
         components = build_components(
-            str(model_dir_path), config, weights, verbose=verbose,
-            fp8_scales=fp8_scales, build_timing=build_timing)
+            str(model_dir_path), config, weights, **build_components_kwargs)
     finally:
         components_elapsed = time.monotonic() - components_t0
         compile_elapsed = _compile_time_excluding_component_weight_load(

@@ -172,6 +172,7 @@ class PixArtPlugin:
                 d_ff=t5_d_ff,
                 num_layers=t5_num_layers,
                 vocab_size=t5_vocab_size,
+                precision=precision,
             )
         with timed_trt_compile(build_timing, "t5_encoder"):
             t5_plan = build_t5_encoder_engine(

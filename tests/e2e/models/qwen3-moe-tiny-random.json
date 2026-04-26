@@ -6,6 +6,7 @@
   "family": "qwen_moe",
   "runtime_strategy": "decoder_moe",
   "ci_tier": "l0_only",
+  "precision": "fp16",
   "max_cache_length": 128,
   "prompt": "What is the largest planet in our solar system? Answer in one word.",
   "max_new_tokens": 10,

@@ -339,6 +339,219 @@ def test_build_components_treats_text_encoder_as_t5_when_not_clip(
     assert calls["clip_load"] == 0
 
 
+def test_build_flux2_components_forwards_precision_to_mistral(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Intent: ensure FLUX.2 build path forwards precision into the Mistral sub-builders.
+
+    Preconditions: FLUX.2 builder modules are replaced with deterministic stubs.
+    Postconditions: Mistral load/build receive fp16 precision and DiT stays on fp16 cast dtype.
+    """
+    calls: dict[str, object] = {}
+
+    model_dir = tmp_path / "flux2_model"
+    (model_dir / "text_encoder").mkdir(parents=True)
+    (model_dir / "transformer").mkdir(parents=True)
+    (model_dir / "vae").mkdir(parents=True)
+
+    def load_mistral_encoder_weights(path, **kwargs):
+        calls["mistral_load"] = (path, kwargs)
+        return {"mistral": np.array([1], dtype=np.float16)}
+
+    def build_mistral_encoder_engine(weights, **kwargs):
+        calls["mistral_build"] = (weights, kwargs)
+        return b"mistral-plan"
+
+    def load_flux2_dit_weights(path, **kwargs):
+        calls["dit_load"] = (path, kwargs)
+        return {"dit": np.array([2], dtype=np.float32)}
+
+    def build_flux2_dit_engine(weights, **kwargs):
+        calls["dit_build"] = (weights, kwargs)
+        return b"dit-plan"
+
+    def build_flux_vae_decoder_engine(path, **kwargs):
+        calls["vae_build"] = (path, kwargs)
+        return b"vae-plan"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "trtf_build.mistral_encoder_builder",
+        _module(
+            "trtf_build.mistral_encoder_builder",
+            load_mistral_encoder_weights=load_mistral_encoder_weights,
+            build_mistral_encoder_engine=build_mistral_encoder_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "trtf_build.flux2_dit_builder",
+        _module(
+            "trtf_build.flux2_dit_builder",
+            load_flux2_dit_weights=load_flux2_dit_weights,
+            build_flux2_dit_engine=build_flux2_dit_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "trtf_build.flux_vae_builder",
+        _module(
+            "trtf_build.flux_vae_builder",
+            build_flux_vae_decoder_engine=build_flux_vae_decoder_engine,
+        ),
+    )
+    monkeypatch.setattr(
+        flux_mod,
+        "_serialize_flux2_preprocessor",
+        lambda *_a, **_k: b"flux2-preproc",
+    )
+
+    weights = {
+        "_text_encoder_dir": str(model_dir / "text_encoder"),
+        "_transformer_dir": str(model_dir / "transformer"),
+        "_vae_dir": str(model_dir / "vae"),
+        "_transformer_config": {
+            "_class_name": "Flux2Transformer2DModel",
+            "num_attention_heads": 48,
+            "attention_head_dim": 128,
+            "num_layers": 8,
+            "num_single_layers": 48,
+            "timestep_guidance_channels": 256,
+        },
+        "_text_encoder_config": {
+            "text_config": {
+                "hidden_size": 5120,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "intermediate_size": 32768,
+                "num_hidden_layers": 40,
+                "vocab_size": 131072,
+                "rope_theta": 1000000000.0,
+            }
+        },
+        "_vae_config": {
+            "latent_channels": 32,
+        },
+    }
+
+    out = flux_mod.plugin.build_components(
+        str(model_dir),
+        _cfg(image_height=1024, image_width=1024),
+        weights,
+        precision="fp16",
+        verbose=False,
+    )
+
+    assert out["text_encoders"] == [("mistral", b"mistral-plan")]
+    assert out["denoiser"] == b"dit-plan"
+    assert out["vae_decoder"] == b"vae-plan"
+    assert out["preprocessor_weights"] == b"flux2-preproc"
+    assert calls["mistral_load"][1]["precision"] == "fp16"
+    assert calls["mistral_build"][1]["precision"] == "fp16"
+    assert calls["dit_load"][1]["fp8_scales"] is None
+    assert calls["dit_build"][1]["cast_dtype"] == "fp16"
+
+
+def test_build_flux2_components_forwards_fp8_scales_to_dit_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Intent: ensure FLUX.2 FP8 scales are available during DiT weight loading."""
+    calls: dict[str, object] = {}
+
+    model_dir = tmp_path / "flux2_model"
+    (model_dir / "text_encoder").mkdir(parents=True)
+    (model_dir / "transformer").mkdir(parents=True)
+    (model_dir / "vae").mkdir(parents=True)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "trtf_build.mistral_encoder_builder",
+        _module(
+            "trtf_build.mistral_encoder_builder",
+            load_mistral_encoder_weights=lambda *_a, **_k: {},
+            build_mistral_encoder_engine=lambda *_a, **_k: b"mistral-plan",
+        ),
+    )
+
+    def load_flux2_dit_weights(path, **kwargs):
+        calls["dit_load"] = (path, kwargs)
+        return {"dit": np.array([2], dtype=np.float32)}
+
+    def build_flux2_dit_engine(weights, **kwargs):
+        calls["dit_build"] = (weights, kwargs)
+        return b"dit-plan"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "trtf_build.flux2_dit_builder",
+        _module(
+            "trtf_build.flux2_dit_builder",
+            load_flux2_dit_weights=load_flux2_dit_weights,
+            build_flux2_dit_engine=build_flux2_dit_engine,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "trtf_build.flux_vae_builder",
+        _module(
+            "trtf_build.flux_vae_builder",
+            build_flux_vae_decoder_engine=lambda *_a, **_k: b"vae-plan",
+        ),
+    )
+    monkeypatch.setattr(
+        flux_mod,
+        "_serialize_flux2_preprocessor",
+        lambda *_a, **_k: b"flux2-preproc",
+    )
+
+    weights = {
+        "_text_encoder_dir": str(model_dir / "text_encoder"),
+        "_transformer_dir": str(model_dir / "transformer"),
+        "_vae_dir": str(model_dir / "vae"),
+        "_transformer_config": {
+            "_class_name": "Flux2Transformer2DModel",
+            "num_attention_heads": 48,
+            "attention_head_dim": 128,
+            "num_layers": 8,
+            "num_single_layers": 48,
+            "timestep_guidance_channels": 256,
+        },
+        "_text_encoder_config": {
+            "text_config": {
+                "hidden_size": 5120,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "intermediate_size": 32768,
+                "num_hidden_layers": 40,
+                "vocab_size": 131072,
+            }
+        },
+        "_vae_config": {"latent_channels": 32},
+    }
+    fp8_scales = {
+        "transformer_blocks.0.attn.to_q": {
+            "input_scale": 0.1,
+            "weight_scale": 0.2,
+        }
+    }
+
+    flux_mod.plugin.build_components(
+        str(model_dir),
+        _cfg(image_height=1024, image_width=1024),
+        weights,
+        fp8_scales=fp8_scales,
+        verbose=False,
+    )
+
+    assert calls["dit_load"][1]["fp8_scales"] is fp8_scales
+    assert calls["dit_build"][1]["fp8_scales"] is fp8_scales
+    assert calls["dit_build"][1]["cast_dtype"] == "bf16"
+
+
 def test_get_diffusion_config_guidance_toggle() -> None:
     """Intent: verify guidance-dependent scheduler defaults in diffusion config.
 

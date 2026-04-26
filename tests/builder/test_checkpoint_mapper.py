@@ -21,6 +21,8 @@ from trtf_build.checkpoint_mapper import (
     _transpose_2d,
     _expand_kv_projection,
     _repeat_head_norm,
+    _has_tensor,
+    _load_tensor,
     load_standard_weights,
 )
 from trtf_build.config import ModelConfig
@@ -97,7 +99,7 @@ class TestExpandKvProjection:
         hidden = 32
         num_heads = 4
         num_kv_heads = 4
-        head_dim = 8
+        head_dim = 8  # noqa: F841
         kv_hidden = 32
         target_hidden = 32
 
@@ -105,6 +107,37 @@ class TestExpandKvProjection:
         result = _expand_kv_projection(
             arr, hidden, kv_hidden, target_hidden, num_heads, num_kv_heads)
         np.testing.assert_array_equal(result, arr)
+
+    def test_gqa_expansion_fp16_contiguous(self):
+        """Expanded output keeps the requested dtype and contiguous layout."""
+        hidden = 16
+        num_heads = 4
+        num_kv_heads = 2
+        head_dim = hidden // num_heads
+        kv_hidden = num_kv_heads * head_dim
+        target_hidden = num_heads * head_dim
+
+        transposed = np.arange(hidden * kv_hidden, dtype=np.float32).reshape(
+            hidden, kv_hidden)
+        result = _expand_kv_projection(
+            transposed,
+            hidden,
+            kv_hidden,
+            target_hidden,
+            num_heads,
+            num_kv_heads,
+            precision="fp16",
+        )
+
+        expected = np.repeat(
+            transposed.reshape(hidden, num_kv_heads, head_dim),
+            num_heads // num_kv_heads,
+            axis=1,
+        ).reshape(hidden, target_hidden).astype(np.float16)
+
+        assert result.dtype == np.float16
+        assert result.flags["C_CONTIGUOUS"]
+        np.testing.assert_array_equal(result, expected)
 
 
 class TestRepeatHeadNorm:
@@ -120,6 +153,48 @@ class TestRepeatHeadNorm:
         norm = np.array([5.0, 6.0], dtype=np.float32)
         result = _repeat_head_norm(norm, num_heads=1)
         np.testing.assert_array_equal(result, norm)
+
+
+class TestReaderLookup:
+    class _FakeReader:
+        def __init__(self, tensors):
+            self.tensors = tensors
+            self.key_calls = 0
+
+        def keys(self):
+            self.key_calls += 1
+            return list(self.tensors.keys())
+
+        def get_tensor(self, name):
+            return self.tensors[name]
+
+    class _FakeReaders(list):
+        pass
+
+    def test_has_tensor_uses_cached_tensor_map(self):
+        r1 = self._FakeReader({"a": np.array([1], dtype=np.float32)})
+        r2 = self._FakeReader({"b": np.array([2], dtype=np.float32)})
+        readers = self._FakeReaders([r1, r2])
+        readers.tensor_map = {"a": r1, "b": r2}
+
+        assert _has_tensor(readers, "b")
+        assert not _has_tensor(readers, "missing")
+        assert r1.key_calls == 0
+        assert r2.key_calls == 0
+
+    def test_load_tensor_uses_cached_tensor_map(self):
+        target = np.arange(4, dtype=np.float32)
+        r1 = self._FakeReader({"a": np.array([1], dtype=np.float32)})
+        r2 = self._FakeReader({"b": target})
+        readers = self._FakeReaders([r1, r2])
+        readers.tensor_map = {"a": r1, "b": r2}
+
+        loaded = _load_tensor(readers, "b")
+
+        np.testing.assert_array_equal(loaded, target)
+        assert np.shares_memory(loaded, target)
+        assert r1.key_calls == 0
+        assert r2.key_calls == 0
 
 
 class TestLoadStandardWeights:
@@ -200,6 +275,11 @@ class TestLoadStandardWeights:
         assert "layer.1.input_norm" in weights
         assert "final_norm" in weights
         assert "w_out" in weights
+
+        fp16_weights = load_standard_weights(model_dir, cfg, precision="fp16")
+        assert fp16_weights["embedding"].dtype == np.float16
+        assert fp16_weights["layer.0.w_q"].dtype == np.float16
+        assert fp16_weights["layer.0.input_norm"].dtype == np.float32
 
     def test_transpose_applied(self, tmp_path):
         """Verify projections are transposed from [out, in] to [in, out]."""
@@ -525,7 +605,7 @@ class TestLoadStandardWeightsExtended:
         num_heads = 8
         num_kv_heads = 2
         head_dim = hidden // num_heads  # 2
-        kv_hidden = num_kv_heads * head_dim  # 4
+        kv_hidden = num_kv_heads * head_dim  # 4  # noqa: F841
 
         config = {
             "model_type": "qwen2",

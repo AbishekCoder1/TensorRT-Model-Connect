@@ -165,7 +165,8 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
         "_vae_dir": "/model/vae",
     }
 
-    out = wan_mod.plugin.build_components("/model", cfg, weights, verbose=True)
+    out = wan_mod.plugin.build_components(
+        "/model", cfg, weights, precision="fp16", verbose=True)
 
     assert out["text_encoders"] == [("t5", b"t5-plan")]
     assert out["denoiser"] == b"dit-plan"
@@ -174,6 +175,7 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
 
     # Preconditions ensure 64x80 and 9 frames.
     # Postcondition: num_patches = 60 using Wan's latent+patching math.
+    assert calls["load_t5_weights"]["precision"] == "fp16"
     assert calls["build_standard_dit_engine"]["num_patches"] == 60
     assert calls["build_standard_dit_engine"]["context_dim"] == wan_mod.plugin._DIT_DIM
 

@@ -576,3 +576,63 @@ class TestBuildBundleOrchestration:
         section_map = {section.name: section.data for section in sections}
         cfg = json.loads(section_map["config.json"].decode("utf-8"))
         assert cfg["dynamic_kv_profile_rows"] == [3072, 6144, 12288]
+
+    def test_load_weights_precision_forwarded_when_supported(self, tmp_path):
+        """build_bundle forwards precision to load_weights when supported."""
+        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        output_path = str(tmp_path / "output.trtfb")
+        seen = {}
+
+        class _Plugin:
+            name = "qwen"
+            runtime_strategy = ""
+
+            def load_weights(self, model_dir, config, *, precision="fp32"):
+                seen["precision"] = precision
+                return {}
+
+            def build_engine(self, config, weights, max_cache_length, *, precision="fp32", verbose=False):
+                return b"PLAN"
+
+        plugin = _Plugin()
+
+        with patch("trtf_build.engine_builder.find_plugin", return_value=plugin):
+            with patch("trtf_build.engine_builder._get_trt_version", return_value="10.0"):
+                with patch("trtf_build.engine_builder._get_gpu_name", return_value=""):
+                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
+                        with patch("trtf_build.engine_builder.write_bundle"):
+                            build_bundle(
+                                str(model_dir),
+                                output_path,
+                                precision="fp16",
+                            )
+
+        assert seen["precision"] == "fp16"
+
+    def test_load_weights_precision_not_forwarded_when_unsupported(self, tmp_path):
+        """build_bundle remains compatible with plugins that do not accept precision."""
+        model_dir = self._make_model_dir(tmp_path, model_type="qwen3")
+        output_path = str(tmp_path / "output.trtfb")
+
+        class _Plugin:
+            name = "qwen"
+            runtime_strategy = ""
+
+            def load_weights(self, model_dir, config):
+                return {}
+
+            def build_engine(self, config, weights, max_cache_length, *, precision="fp32", verbose=False):
+                return b"PLAN"
+
+        plugin = _Plugin()
+
+        with patch("trtf_build.engine_builder.find_plugin", return_value=plugin):
+            with patch("trtf_build.engine_builder._get_trt_version", return_value="10.0"):
+                with patch("trtf_build.engine_builder._get_gpu_name", return_value=""):
+                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
+                        with patch("trtf_build.engine_builder.write_bundle"):
+                            build_bundle(
+                                str(model_dir),
+                                output_path,
+                                precision="fp16",
+                            )

@@ -153,7 +153,7 @@ def model_entry(request, engine_dir):
 # Built-bundle fixture (for full-pipeline tests)
 # ---------------------------------------------------------------------------
 
-def _build_bundle(hf_id, bundle_path, max_cache_length):
+def _build_bundle(hf_id, bundle_path, max_cache_length, precision="fp32"):
     """Build a .trtfb bundle as a subprocess to isolate GPU memory.
 
     Returns build time in seconds.
@@ -163,6 +163,8 @@ def _build_bundle(hf_id, bundle_path, max_cache_length):
         hf_id, "-o", str(bundle_path),
         "--max-cache-length", str(max_cache_length),
     ]
+    if precision != "fp32":
+        cmd.extend(["--precision", str(precision)])
     t0 = time.monotonic()
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
     elapsed = time.monotonic() - t0
@@ -239,7 +241,8 @@ def built_bundle(request, engine_dir):
     # Build the bundle
     hf_id = entry["hf_id"]
     max_cache = entry.get("max_cache_length", 256)
-    build_time = _build_bundle(hf_id, bundle_path, max_cache)
+    precision = entry.get("precision", "fp32")
+    build_time = _build_bundle(hf_id, bundle_path, max_cache, precision)
 
     entry["bundle_path"] = str(bundle_path)
     return {

@@ -64,6 +64,8 @@ _FP8_SCALES = {}    # Per-layer FP8 scales: {layer_name: {input_scale, weight_sc
 # Hold references to weight arrays to prevent GC during engine build
 _weight_refs = []
 
+_FP8_WEIGHT_SUFFIX = ".weight.fp8_tn"
+
 
 def _to_compute_dtype(network, tensor):
     """Cast to compute dtype if not already."""
@@ -91,10 +93,24 @@ def _make_reduced_weights(data_fp32, shape):
     """Create TRT Weights in the current reduced precision dtype."""
     if _CAST_DTYPE == trt.bfloat16:
         import ml_dtypes
-        bf16_arr = np.ascontiguousarray(data_fp32.astype(ml_dtypes.bfloat16))
+        if (
+            isinstance(data_fp32, np.ndarray)
+            and data_fp32.dtype == ml_dtypes.bfloat16
+            and data_fp32.flags.c_contiguous
+        ):
+            bf16_arr = data_fp32
+        else:
+            bf16_arr = np.ascontiguousarray(data_fp32.astype(ml_dtypes.bfloat16))
         return trt.Weights(trt.bfloat16, bf16_arr.ctypes.data, bf16_arr.size), bf16_arr
     else:
-        fp16_arr = np.ascontiguousarray(data_fp32.astype(np.float16))
+        if (
+            isinstance(data_fp32, np.ndarray)
+            and data_fp32.dtype == np.float16
+            and data_fp32.flags.c_contiguous
+        ):
+            fp16_arr = data_fp32
+        else:
+            fp16_arr = np.ascontiguousarray(data_fp32, dtype=np.float16)
         return trt.Weights(fp16_arr), fp16_arr
 
 
@@ -105,8 +121,33 @@ def _add_constant_reduced(network, shape, values_fp32):
     return network.add_constant(shape, w).get_output(0)
 
 
+def _fp8_weight_key(prefix: str) -> str:
+    return f"{prefix}{_FP8_WEIGHT_SUFFIX}"
+
+
+def _convert_weight_to_fp8_tn(rhs_weights, wt_scale):
+    """Convert [in, out] FP32/BF16 weight storage to FP8 TN [out, in]."""
+    import ml_dtypes
+
+    rhs_tn = np.ascontiguousarray(rhs_weights.T.astype(np.float32))
+    return np.ascontiguousarray(
+        (rhs_tn / wt_scale).astype(ml_dtypes.float8_e4m3fn))
+
+
+def _maybe_preconvert_fp8_weight(weights, prefix: str, rhs_weights,
+                                 fp8_scales=None):
+    scale_map = _FP8_SCALES if fp8_scales is None else fp8_scales
+    scale = scale_map.get(prefix, {})
+    wt_scale = scale.get("weight_scale")
+    if wt_scale is None:
+        return
+    weights[_fp8_weight_key(prefix)] = _convert_weight_to_fp8_tn(
+        rhs_weights, wt_scale)
+
+
 def _matmul_reduced_precision(network, lhs, lhs_width, rhs_width, rhs_weights,
-                              inp_scale=None, wt_scale=None):
+                              inp_scale=None, wt_scale=None,
+                              fp8_weight_tn=None):
     """Matmul in reduced precision. Input/output stay in _CAST_DTYPE.
 
     If inp_scale/wt_scale are provided and _FP8_MODE is True, inserts FP8 Q/DQ
@@ -125,8 +166,6 @@ def _matmul_reduced_precision(network, lhs, lhs_width, rhs_width, rhs_weights,
         #
         # Myelin's dequantize_fc() fuses: DQ(A8) + DQ(W8) → MatMul into
         # a single FP8 FC kernel regardless of the DQ output type.
-        import ml_dtypes
-
         dq_out_type = _CAST_DTYPE if _ALL_BF16 else trt.float32
 
         # Q/DQ on input (activation)
@@ -137,8 +176,9 @@ def _matmul_reduced_precision(network, lhs, lhs_width, rhs_width, rhs_weights,
 
         # Weight: FP8 constant + DQ (TN layout)
         # Quantize: fp8_val = round(weight / scale), then DQ recovers: fp8_val * scale ≈ weight
-        rhs_tn = np.ascontiguousarray(rhs_weights.T.astype(np.float32))
-        rhs_fp8 = (rhs_tn / wt_scale).astype(ml_dtypes.float8_e4m3fn)
+        rhs_fp8 = fp8_weight_tn
+        if rhs_fp8 is None:
+            rhs_fp8 = _convert_weight_to_fp8_tn(rhs_weights, wt_scale)
         rhs_fp8_const = network.add_constant(
             (rhs_width, lhs_width),
             trt.Weights(trt.DataType.FP8, rhs_fp8.ctypes.data, rhs_fp8.size))
@@ -402,7 +442,6 @@ def build_flux2_dit_engine(
     mod_img_w = weights.get("double_stream_modulation_img")
     mod_txt_w = weights.get("double_stream_modulation_txt")
     mod_single_w = weights.get("single_stream_modulation")
-
     # ===================== Joint Transformer Blocks =====================
     for layer_idx in range(num_layers):
         p = f"transformer_blocks.{layer_idx}"
@@ -527,7 +566,9 @@ def build_flux2_dit_engine(
         _fused_inp_s = _FP8_SCALES.get(f"{p}.attn.to_qkv_mlp_proj", {}).get("input_scale")
         _fused_wt_s = _FP8_SCALES.get(f"{p}.attn.to_qkv_mlp_proj", {}).get("weight_scale")
         fused = _matmul_reduced_precision(network, normed_cat, dim, fused_out_dim, fused_w,
-                                           inp_scale=_fused_inp_s, wt_scale=_fused_wt_s)
+                                           inp_scale=_fused_inp_s, wt_scale=_fused_wt_s,
+                                           fp8_weight_tn=weights.get(_fp8_weight_key(
+                                               f"{p}.attn.to_qkv_mlp_proj")))
         fused_b = weights.get(f"{p}.attn.to_qkv_mlp_proj.bias")
         if fused_b is not None:
             fused = _bias_sum_reduced(network, fused, fused_out_dim, fused_b)
@@ -564,7 +605,9 @@ def build_flux2_dit_engine(
         _to_wt_s = _FP8_SCALES.get(f"{p}.attn.to_out", {}).get("weight_scale")
         in_features = dim + ffn_dim
         combined = _matmul_reduced_precision(network, cat_attn_mlp.get_output(0), in_features, dim, to_out_w,
-                                              inp_scale=_to_inp_s, wt_scale=_to_wt_s)
+                                              inp_scale=_to_inp_s, wt_scale=_to_wt_s,
+                                              fp8_weight_tn=weights.get(_fp8_weight_key(
+                                                  f"{p}.attn.to_out")))
         to_out_b = weights.get(f"{p}.attn.to_out.bias")
         if to_out_b is not None:
             combined = _bias_sum_reduced(network, combined, dim, to_out_b)
@@ -741,7 +784,8 @@ def _linear(network, inp, in_dim, out_dim, weights, prefix, bf16=False):
     if bf16 or _ALL_BF16 or _FP8_MODE:
         out = _matmul_reduced_precision(
             network, inp, in_dim, out_dim, weights[f"{prefix}.weight"],
-            inp_scale=fp8_inp_s, wt_scale=fp8_wt_s)
+            inp_scale=fp8_inp_s, wt_scale=fp8_wt_s,
+            fp8_weight_tn=weights.get(_fp8_weight_key(prefix)))
         b = weights.get(f"{prefix}.bias")
         if b is not None:
             out = _bias_sum_reduced(network, out, out_dim, b)
@@ -919,7 +963,9 @@ def _swiglu_ffn(network, inp, dim, weights, prefix, bf16=False):
 
     if bf16 or _ALL_BF16 or _FP8_MODE:
         fc1 = _matmul_reduced_precision(network, inp, dim, double_ffn_dim, fc1_w,
-                                         inp_scale=fc1_inp_s, wt_scale=fc1_wt_s)
+                                         inp_scale=fc1_inp_s, wt_scale=fc1_wt_s,
+                                         fp8_weight_tn=weights.get(
+                                             _fp8_weight_key(f"{prefix}.linear_in")))
         fc1_b = weights.get(f"{prefix}.linear_in.bias")
         if fc1_b is not None:
             fc1 = _bias_sum_reduced(network, fc1, double_ffn_dim, fc1_b)
@@ -943,7 +989,9 @@ def _swiglu_ffn(network, inp, dim, weights, prefix, bf16=False):
     fc2_wt_s = _FP8_SCALES.get(f"{prefix}.linear_out", {}).get("weight_scale")
     if bf16 or _ALL_BF16 or _FP8_MODE:
         fc2 = _matmul_reduced_precision(network, gated, ffn_dim, dim, fc2_w,
-                                         inp_scale=fc2_inp_s, wt_scale=fc2_wt_s)
+                                         inp_scale=fc2_inp_s, wt_scale=fc2_wt_s,
+                                         fp8_weight_tn=weights.get(
+                                             _fp8_weight_key(f"{prefix}.linear_out")))
         fc2_b = weights.get(f"{prefix}.linear_out.bias")
         if fc2_b is not None:
             fc2 = _bias_sum_reduced(network, fc2, dim, fc2_b)
@@ -962,13 +1010,17 @@ def load_flux2_dit_weights(
     num_heads: int = 48,
     num_layers: int = 8,
     num_single_layers: int = 48,
+    fp8_scales: dict | None = None,
 ) -> "WeightDict":
     """Load FLUX.2-dev DiT weights from diffusers-format transformer directory."""
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
     from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
 
     readers = _open_safetensors(Path(model_dir))
     weights = WeightDict()
+    max_workers = min(8, max(1, os.cpu_count() or 1))
 
     def _t(name):
         w = _load_tensor(readers, name)
@@ -987,82 +1039,107 @@ def load_flux2_dit_weights(
             return _t(name)
         return None
 
-    # --- Joint transformer blocks ---
-    for i in range(num_layers):
+    def _preconvert_fp8_block(block):
+        if not fp8_scales:
+            return
+        for key, value in list(block.items()):
+            if not key.endswith(".weight"):
+                continue
+            prefix = key[:-len(".weight")]
+            _maybe_preconvert_fp8_weight(block, prefix, value, fp8_scales)
+
+    def _load_joint_block(i):
+        block = WeightDict()
         p = f"transformer_blocks.{i}"
-        print(f"  [flux2-dit] Loading joint block {i} weights ...", file=sys.stderr)
 
         # Attention projections (image)
         for proj in ("to_q", "to_k", "to_v"):
-            weights[f"{p}.attn.{proj}.weight"] = _t(f"{p}.attn.{proj}.weight")
+            block[f"{p}.attn.{proj}.weight"] = _t(f"{p}.attn.{proj}.weight")
             b = _maybe_f(f"{p}.attn.{proj}.bias")
             if b is not None:
-                weights[f"{p}.attn.{proj}.bias"] = b
-        weights[f"{p}.attn.to_out.0.weight"] = _t(f"{p}.attn.to_out.0.weight")
+                block[f"{p}.attn.{proj}.bias"] = b
+        block[f"{p}.attn.to_out.0.weight"] = _t(f"{p}.attn.to_out.0.weight")
         b = _maybe_f(f"{p}.attn.to_out.0.bias")
         if b is not None:
-            weights[f"{p}.attn.to_out.0.bias"] = b
+            block[f"{p}.attn.to_out.0.bias"] = b
 
         # Attention projections (text "added")
         for proj in ("add_q_proj", "add_k_proj", "add_v_proj"):
-            weights[f"{p}.attn.{proj}.weight"] = _t(f"{p}.attn.{proj}.weight")
+            block[f"{p}.attn.{proj}.weight"] = _t(f"{p}.attn.{proj}.weight")
             b = _maybe_f(f"{p}.attn.{proj}.bias")
             if b is not None:
-                weights[f"{p}.attn.{proj}.bias"] = b
-        weights[f"{p}.attn.to_add_out.weight"] = _t(f"{p}.attn.to_add_out.weight")
+                block[f"{p}.attn.{proj}.bias"] = b
+        block[f"{p}.attn.to_add_out.weight"] = _t(f"{p}.attn.to_add_out.weight")
         b = _maybe_f(f"{p}.attn.to_add_out.bias")
         if b is not None:
-            weights[f"{p}.attn.to_add_out.bias"] = b
+            block[f"{p}.attn.to_add_out.bias"] = b
 
         # QK norms
         for norm in ("norm_q", "norm_k", "norm_added_q", "norm_added_k"):
             w = _maybe_f(f"{p}.attn.{norm}.weight")
             if w is not None:
-                weights[f"{p}.attn.{norm}.weight"] = w
+                block[f"{p}.attn.{norm}.weight"] = w
 
         # FFN (image) — linear_in / linear_out naming
-        weights[f"{p}.ff.linear_in.weight"] = _t(f"{p}.ff.linear_in.weight")
+        block[f"{p}.ff.linear_in.weight"] = _t(f"{p}.ff.linear_in.weight")
         b = _maybe_f(f"{p}.ff.linear_in.bias")
         if b is not None:
-            weights[f"{p}.ff.linear_in.bias"] = b
-        weights[f"{p}.ff.linear_out.weight"] = _t(f"{p}.ff.linear_out.weight")
+            block[f"{p}.ff.linear_in.bias"] = b
+        block[f"{p}.ff.linear_out.weight"] = _t(f"{p}.ff.linear_out.weight")
         b = _maybe_f(f"{p}.ff.linear_out.bias")
         if b is not None:
-            weights[f"{p}.ff.linear_out.bias"] = b
+            block[f"{p}.ff.linear_out.bias"] = b
 
         # FFN (text context) — linear_in / linear_out naming
-        weights[f"{p}.ff_context.linear_in.weight"] = _t(f"{p}.ff_context.linear_in.weight")
+        block[f"{p}.ff_context.linear_in.weight"] = _t(f"{p}.ff_context.linear_in.weight")
         b = _maybe_f(f"{p}.ff_context.linear_in.bias")
         if b is not None:
-            weights[f"{p}.ff_context.linear_in.bias"] = b
-        weights[f"{p}.ff_context.linear_out.weight"] = _t(f"{p}.ff_context.linear_out.weight")
+            block[f"{p}.ff_context.linear_in.bias"] = b
+        block[f"{p}.ff_context.linear_out.weight"] = _t(f"{p}.ff_context.linear_out.weight")
         b = _maybe_f(f"{p}.ff_context.linear_out.bias")
         if b is not None:
-            weights[f"{p}.ff_context.linear_out.bias"] = b
+            block[f"{p}.ff_context.linear_out.bias"] = b
 
-    # --- Single transformer blocks ---
-    for i in range(num_single_layers):
+        _preconvert_fp8_block(block)
+        return block
+
+    def _load_single_block(i):
+        block = WeightDict()
         p = f"single_transformer_blocks.{i}"
-        if i % 8 == 0:
-            print(f"  [flux2-dit] Loading single block {i} weights ...", file=sys.stderr)
 
         # Fused QKV + MLP projection
-        weights[f"{p}.attn.to_qkv_mlp_proj.weight"] = _t(f"{p}.attn.to_qkv_mlp_proj.weight")
+        block[f"{p}.attn.to_qkv_mlp_proj.weight"] = _t(f"{p}.attn.to_qkv_mlp_proj.weight")
         b = _maybe_f(f"{p}.attn.to_qkv_mlp_proj.bias")
         if b is not None:
-            weights[f"{p}.attn.to_qkv_mlp_proj.bias"] = b
+            block[f"{p}.attn.to_qkv_mlp_proj.bias"] = b
 
         # QK norms
         for norm in ("norm_q", "norm_k"):
             w = _maybe_f(f"{p}.attn.{norm}.weight")
             if w is not None:
-                weights[f"{p}.attn.{norm}.weight"] = w
+                block[f"{p}.attn.{norm}.weight"] = w
 
         # attn.to_out: projects concatenated [attn, mlp] back to dim
-        weights[f"{p}.attn.to_out.weight"] = _t(f"{p}.attn.to_out.weight")
+        block[f"{p}.attn.to_out.weight"] = _t(f"{p}.attn.to_out.weight")
         b = _maybe_f(f"{p}.attn.to_out.bias")
         if b is not None:
-            weights[f"{p}.attn.to_out.bias"] = b
+            block[f"{p}.attn.to_out.bias"] = b
+
+        _preconvert_fp8_block(block)
+        return block
+
+    print(f"  [flux2-dit] Loading {num_layers} joint and {num_single_layers} single blocks "
+          f"with {max_workers} workers ...", file=sys.stderr)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_load_joint_block, i) for i in range(num_layers)]
+        futures += [executor.submit(_load_single_block, i) for i in range(num_single_layers)]
+        for future in as_completed(futures):
+            weights.update(future.result())
+
+    fp8_count = sum(1 for key in weights if key.endswith(_FP8_WEIGHT_SUFFIX))
+    if fp8_count:
+        print(f"  [flux2-dit] Preconverted {fp8_count} FP8 weights in load workers",
+              file=sys.stderr)
 
     # --- Global ---
     weights["norm_out.linear.weight"] = _t("norm_out.linear.weight")

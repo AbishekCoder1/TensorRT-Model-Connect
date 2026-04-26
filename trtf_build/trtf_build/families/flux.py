@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict
@@ -168,15 +169,17 @@ class FluxPlugin:
         if _is_flux2(tc):
             return self._build_flux2_components(
                 model_dir, config, weights, tc=tc, verbose=verbose,
-                fp8_scales=fp8_scales, build_timing=build_timing)
+                fp8_scales=fp8_scales, precision=precision,
+                build_timing=build_timing)
 
         return self._build_flux1_components(
             model_dir, config, weights, tc=tc, verbose=verbose,
-            build_timing=build_timing)
+            precision=precision, build_timing=build_timing)
 
     def _build_flux1_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, tc: dict, verbose: bool = False, build_timing: dict | None = None,
+        *, tc: dict, precision: str = "fp32", verbose: bool = False,
+        build_timing: dict | None = None,
     ) -> dict:
         """Build FLUX.1 component engines (CLIP + T5 + DiT + VAE)."""
         from ..build_timing import timed_trt_compile, timed_weight_loading
@@ -259,6 +262,7 @@ class FluxPlugin:
                             d_ff=clip_cfg.get("d_ff", self._T5_D_FF),
                             num_layers=clip_cfg.get("num_layers", self._T5_NUM_LAYERS),
                             vocab_size=clip_cfg.get("vocab_size", self._T5_VOCAB_SIZE),
+                            precision=precision,
                         )
                     with timed_trt_compile(build_timing, "t5_encoder"):
                         t5_plan = build_t5_encoder_engine(
@@ -299,6 +303,7 @@ class FluxPlugin:
                     d_ff=t5_d_ff,
                     num_layers=t5_num_layers,
                     vocab_size=t5_vocab_size,
+                    precision=precision,
                 )
             with timed_trt_compile(build_timing, "t5_encoder"):
                 t5_plan = build_t5_encoder_engine(
@@ -363,7 +368,8 @@ class FluxPlugin:
 
     def _build_flux2_components(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, tc: dict, verbose: bool = False, fp8_scales: dict | None = None,
+        *, tc: dict, precision: str = "fp32", verbose: bool = False,
+        fp8_scales: dict | None = None,
         build_timing: dict | None = None,
     ) -> dict:
         """Build FLUX.2 component engines (Mistral + Flux2 DiT + VAE32)."""
@@ -411,6 +417,7 @@ class FluxPlugin:
         print(f"[flux] FLUX.2 spatial: img={img_h}x{img_w}, "
               f"h_lat={h_lat}x{w_lat}, img_tokens={num_img_tokens}",
               file=sys.stderr)
+        build_start = time.perf_counter()
 
         text_encoders = []
 
@@ -435,6 +442,7 @@ class FluxPlugin:
             with timed_weight_loading(build_timing, "mistral_encoder"):
                 mistral_weights = load_mistral_encoder_weights(
                     te_dir,
+                    precision=precision,
                     hidden_size=m_hidden,
                     num_heads=m_heads,
                     num_kv_heads=m_kv_heads,
@@ -447,6 +455,7 @@ class FluxPlugin:
             with timed_trt_compile(build_timing, "mistral_encoder"):
                 mistral_plan = build_mistral_encoder_engine(
                     mistral_weights,
+                    precision=precision,
                     hidden_size=m_hidden,
                     num_heads=m_heads,
                     num_kv_heads=m_kv_heads,
@@ -492,11 +501,13 @@ class FluxPlugin:
                 num_heads=num_heads,
                 num_layers=num_layers,
                 num_single_layers=num_single_layers,
+                fp8_scales=fp8_scales,
             )
 
         # FP8 mode: use STRONGLY_TYPED + BF16 base when scales are provided
         _strongly_typed = fp8_scales is not None
-        _cast_dtype = "bf16" if fp8_scales is not None else "fp16"
+        _cast_dtype = "bf16" if fp8_scales is not None else (
+            "bf16" if precision == "bf16" else "fp16")
 
         # packed_channels = z_dim * patch_h * patch_w (2x2 packing)
         packed_channels = vae_latent_channels * 4
@@ -525,6 +536,7 @@ class FluxPlugin:
 
         # 3. VAE decoder (32 latent ch → 3ch image at 8x upsampling)
         # Use identity scaling (1.0/0.0) since BN denorm is handled in C++ runtime
+        t0 = time.perf_counter()
         vae_plan = build_flux_vae_decoder_engine(
             vae_dir,
             latent_channels=vae_latent_channels,
@@ -536,6 +548,8 @@ class FluxPlugin:
             build_timing=build_timing,
             timing_component="vae_decoder",
         )
+        print(f"[flux] FLUX.2 VAE engine built [{time.perf_counter() - t0:.1f}s]",
+              file=sys.stderr)
 
         # 4. Load VAE BN stats (FLUX.2 uses BN denorm instead of scaling)
         import numpy as _np
@@ -563,6 +577,9 @@ class FluxPlugin:
             with open(_te_tmp.name, "rb") as _f:
                 text_encoders[0] = (text_encoders[0][0], _f.read())
             os.unlink(_te_tmp.name)
+
+        print(f"[flux] FLUX.2 components built [{time.perf_counter() - build_start:.1f}s]",
+              file=sys.stderr)
 
         return {
             "text_encoders": text_encoders,

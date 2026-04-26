@@ -130,9 +130,25 @@ def test_open_safetensors_index_diffusion_and_bin_branches(
 
     opened: list[str] = []
 
+    class _FakeReader:
+        """Minimal safe_open substitute: stringifies the same way the
+        assertions expect (``f"reader:{name}"``) and exposes an empty
+        ``.keys()`` so _ReaderCollection's tensor-map build doesn't crash."""
+
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def __eq__(self, other: object) -> bool:
+            return other == f"reader:{self._name}"
+
+        __hash__ = None  # type: ignore[assignment]
+
+        def keys(self) -> list[str]:
+            return []
+
     def fake_safe_open(path: str, framework: str):
         opened.append(f"{Path(path).name}:{framework}")
-        return f"reader:{Path(path).name}"
+        return _FakeReader(Path(path).name)
 
     monkeypatch.setattr(cm, "safe_open", fake_safe_open)
 
@@ -167,7 +183,20 @@ def test_open_safetensors_index_diffusion_and_bin_branches(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "pytorch_model.bin").write_bytes(b"x")
-    monkeypatch.setattr(cm, "_TorchBinReader", lambda p: f"bin:{Path(p).name}")
+
+    class _FakeBinReader:
+        def __init__(self, p: Path) -> None:
+            self._name = Path(p).name
+
+        def __eq__(self, other: object) -> bool:
+            return other == f"bin:{self._name}"
+
+        __hash__ = None  # type: ignore[assignment]
+
+        def keys(self) -> list[str]:
+            return []
+
+    monkeypatch.setattr(cm, "_TorchBinReader", _FakeBinReader)
     readers = cm._open_safetensors(bin_dir)
     assert readers == ["bin:pytorch_model.bin"]
 
