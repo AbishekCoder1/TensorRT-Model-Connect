@@ -100,8 +100,8 @@ def profile_with_cuda_events(bundle_path: str, prompt: str,
     # MagpieTrtRunner is a Python-side debug harness that doesn't go
     # through the C++ pipeline factory, so the audio_magpie.greedy schema
     # field isn't consulted here. The harness should expose a `greedy`
-    # kwarg if it needs this knob; for the time being the env-var stub
-    # is gone along with the rest of the TRTF_MAGPIE_* migration.
+    # kwarg if it needs this knob; for the time being this script only
+    # applies greedy mode to the C++ CLI path.
     _ = greedy  # acknowledged; no runtime consumer in this harness
 
     # Load bundle and create runner

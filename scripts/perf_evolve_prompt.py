@@ -368,7 +368,8 @@ def _build_search_space(focus_area: str | None = None) -> str:
         **CUDA Graphs (+10-15%) — ENABLED BY DEFAULT**
 
         Already implemented in `trt_module.cpp`. Captures TRT kernel sequence on
-        first decode step, replays on subsequent steps. Disable: `TRTF_DISABLE_CUDA_GRAPH=1`.
+        first decode step, replays on subsequent steps. Disable:
+        `--set runtime.disable_cuda_graph=true`.
 
         **GPU-side Argmax (+30% for <1B models, +7% for 7B+) — opt-in**
 

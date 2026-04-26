@@ -45,7 +45,7 @@ class BottleneckResult:
 TECHNIQUES = {
     "gpu_argmax": {
         "name": "GPU-side argmax",
-        "env": "TRTF_GPU_ARGMAX=1",
+        "cli": "--set runtime.prefer_gpu_greedy=true",
         "impact_small_model": "+30%",
         "impact_large_model": "+7%",
     },
@@ -56,7 +56,7 @@ TECHNIQUES = {
     },
     "cuda_graphs": {
         "name": "CUDA Graphs",
-        "env": "enabled by default",
+        "cli": "enabled by default",
         "impact": "+10-15%",
     },
     "bf16": {
@@ -294,7 +294,7 @@ def classify_from_nsys(
         tech = TECHNIQUES[tech_key]
         techniques.append({
             "name": tech["name"],
-            "how": tech.get("env", tech.get("cli", "")),
+            "how": tech.get("cli", ""),
             "impact": tech.get("impact", tech.get("impact_small_model", "")),
         })
 
@@ -368,7 +368,7 @@ def classify_from_l1(
         tech = TECHNIQUES[tech_key]
         techniques.append({
             "name": tech["name"],
-            "how": tech.get("env", tech.get("cli", "")),
+            "how": tech.get("cli", ""),
             "impact": tech.get("impact", tech.get("impact_small_model", "")),
         })
 
@@ -413,7 +413,7 @@ def suggest_next_technique(
         if tech["name"].lower() not in tried and tech_key not in tried:
             return {
                 "name": tech["name"],
-                "how": tech.get("env", tech.get("cli", "")),
+                "how": tech.get("cli", ""),
                 "reason": f"Next priority for {classification}-bound workload",
             }
 

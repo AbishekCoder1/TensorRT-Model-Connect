@@ -85,7 +85,7 @@ class TuneResult:
     # After optimization
     optimized_tps: float = 0
     optimized_precision: str = ""
-    optimized_env: str = ""
+    optimized_runtime_flags: str = ""
     speedup: float = 0
     # SOL (both rooflines)
     sol_tps: float = 0
@@ -577,7 +577,7 @@ def auto_tune_model(
     # Try all precision variants
     best_tps = result.baseline_tps
     best_precision = "fp32"
-    best_env = ""
+    best_runtime_flags = ""
     all_results = []
 
     for precision in ("fp16", "bf16"):
@@ -610,16 +610,16 @@ def auto_tune_model(
             if best_tps <= 0 or tps < best_tps:
                 best_tps = tps
                 best_precision = prec
-                best_env = "TRTF_GPU_ARGMAX=1" if argmax else ""
+                best_runtime_flags = "--set runtime.prefer_gpu_greedy=true" if argmax else ""
         else:
             if tps > best_tps:
                 best_tps = tps
                 best_precision = prec
-                best_env = "TRTF_GPU_ARGMAX=1" if argmax else ""
+                best_runtime_flags = "--set runtime.prefer_gpu_greedy=true" if argmax else ""
 
     result.optimized_tps = best_tps
     result.optimized_precision = best_precision
-    result.optimized_env = best_env
+    result.optimized_runtime_flags = best_runtime_flags
     if result.baseline_tps > 0 and best_tps > 0:
         if lower_is_better:
             result.speedup = result.baseline_tps / best_tps  # ms ratio (baseline/optimized)
@@ -628,7 +628,7 @@ def auto_tune_model(
     else:
         result.speedup = 0
 
-    argmax_label = " + GPU argmax" if result.optimized_env else ""
+    argmax_label = " + GPU argmax" if result.optimized_runtime_flags else ""
     print(f"[optimize] Best: {best_tps:.1f} {metric_unit} "
           f"({result.optimized_precision.upper()}{argmax_label}, "
           f"{result.speedup:.2f}x vs baseline)")
@@ -682,7 +682,7 @@ def auto_tune_model(
     print(f"  Baseline:       {result.baseline_tps:.1f} {metric_unit} (FP32)")
     print(f"  Optimized:      {result.optimized_tps:.1f} {metric_unit} "
           f"({result.optimized_precision.upper()}"
-          f"{' + GPU argmax' if result.optimized_env else ''})")
+          f"{' + GPU argmax' if result.optimized_runtime_flags else ''})")
     print(f"  Speedup:        {result.speedup:.2f}x")
     print(f"  SOL (FP32):     BW={result.bw_sol_tps:.0f}  "
           f"Compute={result.compute_sol_tps:.0f}  "

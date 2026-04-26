@@ -7,7 +7,7 @@
 // Intent:         CudaGraphExec RAII wrapper + TrtModule CUDA Graph capture/replay
 // Preconditions:  CUDA GPU available, TRT engine buildable
 // Postconditions: CudaGraphExec captures/replays correctly; TrtModule produces
-//                 identical output with and without CUDA Graphs; env var disables
+//                 identical output with and without CUDA Graphs
 // =============================================================================
 
 // =============================================================================
@@ -19,14 +19,12 @@
 //    move semantics, double-reset safety)
 // 2. TrtModule::enable_cuda_graph() — first call captures, subsequent replays
 // 3. CUDA Graph output matches normal execution
-// 4. TRTF_DISABLE_CUDA_GRAPH env var control
 //
 // Requires TRT + CUDA GPU. Skips gracefully without TRT.
 // =============================================================================
 
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
-#include "test_helpers.h"
 #include "trtf/runtime/tensor.h"
 #include "trtf/runtime/trt_module.h"
 
@@ -322,58 +320,6 @@ static void test_module_enable_after_normal_run() {
     cudaStreamDestroy(stream);
 }
 
-static void test_env_var_disable() {
-    // TRTF_DISABLE_CUDA_GRAPH=1 should prevent auto-enable in TextGenerationPipeline.
-    // Here we test the env var logic directly: enable_cuda_graph sets the flag,
-    // but the pipeline constructor reads the env var. We test the TrtModule flag.
-    auto engine = build_identity_engine();
-    if (!engine)
-        return;
-
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-
-    auto module = make_module(engine.get(), stream);
-    check(!module->cuda_graph_active(), "env_disable: not active by default");
-
-    module->enable_cuda_graph();
-    check(module->cuda_graph_active(), "env_disable: active after enable");
-
-    // Verify it still works correctly
-    float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    float out[4] = {0};
-    run_and_read(*module, input, out);
-    check(out[0] == 1.0f, "env_disable: output correct");
-
-    cudaStreamDestroy(stream);
-}
-
-static void test_env_var_disable_pipeline_logic() {
-    // Simulate the TextGenerationPipeline constructor logic:
-    // if TRTF_DISABLE_CUDA_GRAPH=1, don't call enable_cuda_graph()
-    {
-        trtf_test::EnvVarGuard guard("TRTF_DISABLE_CUDA_GRAPH", "1");
-        const char* disable_env = std::getenv("TRTF_DISABLE_CUDA_GRAPH");
-        bool should_enable =
-            (disable_env == nullptr || disable_env[0] == '0' || disable_env[0] == '\0');
-        check(!should_enable, "env_pipeline: DISABLE=1 prevents enable");
-    }
-    {
-        trtf_test::EnvVarGuard guard("TRTF_DISABLE_CUDA_GRAPH", "0");
-        const char* disable_env = std::getenv("TRTF_DISABLE_CUDA_GRAPH");
-        bool should_enable =
-            (disable_env == nullptr || disable_env[0] == '0' || disable_env[0] == '\0');
-        check(should_enable, "env_pipeline: DISABLE=0 allows enable");
-    }
-    {
-        trtf_test::EnvVarGuard guard("TRTF_DISABLE_CUDA_GRAPH", nullptr); // unset
-        const char* disable_env = std::getenv("TRTF_DISABLE_CUDA_GRAPH");
-        bool should_enable =
-            (disable_env == nullptr || disable_env[0] == '0' || disable_env[0] == '\0');
-        check(should_enable, "env_pipeline: unset allows enable");
-    }
-}
-
 int main() {
     // CudaGraphExec unit tests
     test_default_state();
@@ -387,9 +333,6 @@ int main() {
     test_module_cuda_graph_correctness();
     test_module_cuda_graph_multiple_runs();
     test_module_enable_after_normal_run();
-    test_env_var_disable();
-    test_env_var_disable_pipeline_logic();
-
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
