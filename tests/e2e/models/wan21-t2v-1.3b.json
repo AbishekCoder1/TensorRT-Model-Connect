@@ -8,7 +8,7 @@
   "runtime_strategy": "diffusion_wan",
   "ci_tier": "nightly_only",
   "l0_replacement": "wan21-t2v-1.3b-l0",
-  "l0_replacement_reason": "Wan2.1 1.3B full 480x832x17-frame/30-step run mainly adds spatial, frame-count, and denoising-loop scale coverage; wan21-t2v-1.3b-l0 preserves the same checkpoint, wan_t2v model type, T5 encoder, Wan DiT, causal 3D VAE, diffusion_wan runtime, runner, comparator, full 256-token cache shape, and video artifact contract at 384x672 with fewer frames and 15 inference steps.",
+  "l0_replacement_reason": "Wan2.1 scale stays nightly; wan21-t2v-1.3b-l0 keeps the Wan video path at 384x672, 5 frames, and 15 steps for MR L0.",
   "description": "Wan2.1 Text-to-Video 1.3B (diffusers format)",
   "build_args": {
     "max_cache_length": 256

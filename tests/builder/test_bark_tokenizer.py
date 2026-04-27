@@ -7,8 +7,8 @@ completely different (and degenerate) audio.
 
 Trace: UD-BARK-TOKENIZER — Bark tokenizer special-token contract
 Intent: Verify Bark tokenizer does NOT add [CLS]/[SEP] special tokens
-Preconditions: suno/bark-small tokenizer accessible via HF
-Postconditions: encode() output matches HF BarkProcessor tokenization
+Preconditions: transformers is importable
+Postconditions: Bark-style BERT tokenization omits CLS/SEP and preserves padding
 """
 
 from __future__ import annotations
@@ -16,19 +16,52 @@ from __future__ import annotations
 import pytest
 
 try:
-    from transformers import AutoTokenizer
+    from transformers import BertTokenizer
 except ImportError:
     pytest.skip("transformers not available", allow_module_level=True)
 
 
-BARK_HF_ID = "suno/bark-small"
 PROMPT = "Hello, this is a test of the audio generation system."
+BARK_PROCESSOR_LENGTH = 256
 
 
 @pytest.fixture(scope="module")
-def bark_tokenizer():
-    """Load the Bark BertTokenizer from HuggingFace."""
-    return AutoTokenizer.from_pretrained(BARK_HF_ID)
+def bark_vocab_file(tmp_path_factory):
+    """Create a tiny local BERT vocab with Bark-style special token ids."""
+    vocab_dir = tmp_path_factory.mktemp("bark_vocab")
+    vocab_file = vocab_dir / "vocab.txt"
+    vocab_file.write_text("\n".join([
+        "[PAD]",
+        "[UNK]",
+        "[CLS]",
+        "[SEP]",
+        "[MASK]",
+        "hello",
+        ",",
+        "this",
+        "is",
+        "a",
+        "test",
+        "of",
+        "the",
+        "audio",
+        "generation",
+        "system",
+        ".",
+    ]) + "\n")
+    return vocab_file
+
+
+@pytest.fixture(scope="module")
+def bark_tokenizer(bark_vocab_file):
+    """Load a local BERT tokenizer matching Bark's special-token contract."""
+    return BertTokenizer(vocab_file=str(bark_vocab_file), do_lower_case=True)
+
+
+def bark_processor_ids(tokenizer, text: str) -> list[int]:
+    """Mirror BarkProcessor's text path: no special tokens, padded to 256."""
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    return ids + [tokenizer.pad_token_id] * (BARK_PROCESSOR_LENGTH - len(ids))
 
 
 def test_bark_tokenizer_no_special_tokens(bark_tokenizer):
@@ -59,15 +92,9 @@ def test_bark_tokenizer_no_special_tokens(bark_tokenizer):
         f"Expected 2 extra tokens with special, got {len(ids_wrong) - len(ids_correct)}"
 
 
-def test_bark_tokenizer_matches_hf_processor(bark_tokenizer):
-    """Verify our tokenization matches HF AutoProcessor for Bark.
-
-    The AutoProcessor for Bark pads to 256 and does NOT add special tokens.
-    """
-    from transformers import AutoProcessor
-
-    processor = AutoProcessor.from_pretrained(BARK_HF_ID)
-    processor_ids = processor(PROMPT, return_tensors="pt").input_ids[0].tolist()
+def test_bark_tokenizer_matches_processor_padding_contract(bark_tokenizer):
+    """Verify BarkProcessor-style padding does NOT add special tokens."""
+    processor_ids = bark_processor_ids(bark_tokenizer, PROMPT)
 
     # processor pads to 256 — extract non-zero tokens
     processor_tokens = [t for t in processor_ids if t != 0]

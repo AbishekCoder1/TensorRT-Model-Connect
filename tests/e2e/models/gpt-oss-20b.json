@@ -7,7 +7,7 @@
   "runtime_strategy": "decoder_moe",
   "ci_tier": "nightly_only",
   "l0_replacement": "gpt-oss-20b-l0",
-  "l0_replacement_reason": "GPT-OSS-20B full 256-token cache and 20-token decode mainly adds decode scale coverage; gpt-oss-20b-l0 preserves the same checkpoint, gpt_oss family, decoder_moe runtime, runner, comparator, chat artifact contract, and full cache budget with a shorter decode budget.",
+  "l0_replacement_reason": "GPT-OSS-20B scale stays nightly; gpt-oss-20b-l0 keeps the GPT-OSS MoE path with shorter decode for MR L0.",
   "max_cache_length": 256,
   "prompt": "<|start|>system<|message|>You are a helpful assistant.<|end|><|start|>user<|message|>What is the capital of France?<|end|><|start|>assistant",
   "max_new_tokens": 20,

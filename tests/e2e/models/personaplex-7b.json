@@ -7,7 +7,7 @@
   "runtime_strategy": "speech_to_speech",
   "ci_tier": "nightly_only",
   "l0_replacement": "personaplex-7b-l0",
-  "l0_replacement_reason": "PersonaPlex full 512-token cache and 300-frame speech run mainly adds long-generation coverage; personaplex-7b-l0 preserves the same checkpoint, personaplex family, speech_to_speech runtime, runner, comparator, speech artifact contract, and full cache budget with a shorter speech frame budget.",
+  "l0_replacement_reason": "PersonaPlex scale stays nightly; personaplex-7b-l0 keeps the speech path with shorter generation for MR L0.",
   "test_type": "audio",
   "max_cache_length": 512,
   "test_input_audio": "data/Recording.wav",

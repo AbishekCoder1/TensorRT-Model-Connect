@@ -421,8 +421,20 @@ class FluxPlugin:
 
         text_encoders = []
 
-        # 1. Mistral 3 text encoder
+        # Gather Mistral 3 text encoder metadata before building components.
+        # The DiT is the largest FLUX.2 compile, so build it before the text
+        # encoder to avoid carrying prior TensorRT builder allocations into
+        # DiT serialization.
         te_dir = weights.get("_text_encoder_dir")
+        m_hidden = self._MISTRAL_HIDDEN
+        m_heads = self._MISTRAL_NUM_HEADS
+        m_kv_heads = self._MISTRAL_NUM_KV_HEADS
+        m_head_dim = self._MISTRAL_HEAD_DIM
+        m_intermediate = self._MISTRAL_INTERMEDIATE
+        m_num_layers = self._MISTRAL_NUM_LAYERS
+        m_vocab = 131072
+        m_extract = self._MISTRAL_EXTRACT_LAYERS
+        m_rope_theta = 1000000000.0
         if te_dir:
             tec = weights.get("_text_encoder_config", {})
             # Mistral3ForConditionalGeneration nests text model params under text_config
@@ -436,63 +448,9 @@ class FluxPlugin:
             m_num_layers = tc_text.get("num_hidden_layers", self._MISTRAL_NUM_LAYERS)
             m_vocab = tc_text.get("vocab_size", 131072)
             m_extract = self._MISTRAL_EXTRACT_LAYERS
-
-            print(f"[flux] Loading Mistral 3 encoder ({m_hidden}d, {m_num_layers}L) ...",
-                  file=sys.stderr)
-            with timed_weight_loading(build_timing, "mistral_encoder"):
-                mistral_weights = load_mistral_encoder_weights(
-                    te_dir,
-                    precision=precision,
-                    hidden_size=m_hidden,
-                    num_heads=m_heads,
-                    num_kv_heads=m_kv_heads,
-                    head_dim=m_head_dim,
-                    intermediate_size=m_intermediate,
-                    num_layers=m_num_layers,
-                    vocab_size=m_vocab,
-                )
             m_rope_theta = tc_text.get("rope_theta", 1000000000.0)
-            with timed_trt_compile(build_timing, "mistral_encoder"):
-                mistral_plan = build_mistral_encoder_engine(
-                    mistral_weights,
-                    precision=precision,
-                    hidden_size=m_hidden,
-                    num_heads=m_heads,
-                    num_kv_heads=m_kv_heads,
-                    head_dim=m_head_dim,
-                    intermediate_size=m_intermediate,
-                    num_layers=m_num_layers,
-                    vocab_size=m_vocab,
-                    max_seq_len=text_seq_len,
-                    extract_layers=m_extract,
-                    rope_theta=m_rope_theta,
-                    verbose=verbose,
-                )
-            text_encoders.append(("mistral", mistral_plan))
 
-        # Free GPU memory from encoder build before DiT (monolithic Myelin
-        # compilation needs ~48 GB scratch).  Write the encoder plan to a temp
-        # file so Python can release the bytes object.
-        import gc
-        import os
-        import tempfile
-        _te_tmp = None
-        if text_encoders:
-            _te_tmp = tempfile.NamedTemporaryFile(suffix=".plan", delete=False)
-            _te_tmp.write(text_encoders[0][1])  # write plan bytes
-            _te_tmp.close()
-            text_encoders[0] = (text_encoders[0][0], None)  # release bytes
-        mistral_weights = None  # type: ignore[assignment]
-        mistral_plan = None  # type: ignore[assignment]
-        gc.collect()
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
-
-        # 2. FLUX.2 DiT denoiser
+        # 1. FLUX.2 DiT denoiser
         print("[flux] Loading FLUX.2 DiT weights ...", file=sys.stderr)
         with timed_weight_loading(build_timing, "flux2_dit"):
             dit_weights = load_flux2_dit_weights(
@@ -533,6 +491,72 @@ class FluxPlugin:
                 cast_dtype=_cast_dtype,
                 fp8_scales=fp8_scales,
             )
+
+        # Spill the large DiT plan before building the remaining components so
+        # only one TensorRT component build holds plan bytes at a time.
+        import gc
+        import os
+        import tempfile
+        _dit_tmp = tempfile.NamedTemporaryFile(suffix=".plan", delete=False)
+        _dit_tmp.write(dit_plan)
+        _dit_tmp.close()
+        dit_plan = None  # type: ignore[assignment]
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+
+        # 2. Mistral 3 text encoder
+        _te_tmp = None
+        if te_dir:
+            print(f"[flux] Loading Mistral 3 encoder ({m_hidden}d, {m_num_layers}L) ...",
+                  file=sys.stderr)
+            with timed_weight_loading(build_timing, "mistral_encoder"):
+                mistral_weights = load_mistral_encoder_weights(
+                    te_dir,
+                    precision=precision,
+                    hidden_size=m_hidden,
+                    num_heads=m_heads,
+                    num_kv_heads=m_kv_heads,
+                    head_dim=m_head_dim,
+                    intermediate_size=m_intermediate,
+                    num_layers=m_num_layers,
+                    vocab_size=m_vocab,
+                )
+            with timed_trt_compile(build_timing, "mistral_encoder"):
+                mistral_plan = build_mistral_encoder_engine(
+                    mistral_weights,
+                    precision=precision,
+                    hidden_size=m_hidden,
+                    num_heads=m_heads,
+                    num_kv_heads=m_kv_heads,
+                    head_dim=m_head_dim,
+                    intermediate_size=m_intermediate,
+                    num_layers=m_num_layers,
+                    vocab_size=m_vocab,
+                    max_seq_len=text_seq_len,
+                    extract_layers=m_extract,
+                    rope_theta=m_rope_theta,
+                    verbose=verbose,
+                )
+            text_encoders.append(("mistral", mistral_plan))
+
+            _te_tmp = tempfile.NamedTemporaryFile(suffix=".plan", delete=False)
+            _te_tmp.write(text_encoders[0][1])  # write plan bytes
+            _te_tmp.close()
+            text_encoders[0] = (text_encoders[0][0], None)  # release bytes
+            mistral_weights = None  # type: ignore[assignment]
+            mistral_plan = None  # type: ignore[assignment]
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
 
         # 3. VAE decoder (32 latent ch → 3ch image at 8x upsampling)
         # Use identity scaling (1.0/0.0) since BN denorm is handled in C++ runtime
@@ -577,6 +601,9 @@ class FluxPlugin:
             with open(_te_tmp.name, "rb") as _f:
                 text_encoders[0] = (text_encoders[0][0], _f.read())
             os.unlink(_te_tmp.name)
+        with open(_dit_tmp.name, "rb") as _f:
+            dit_plan = _f.read()
+        os.unlink(_dit_tmp.name)
 
         print(f"[flux] FLUX.2 components built [{time.perf_counter() - build_start:.1f}s]",
               file=sys.stderr)
