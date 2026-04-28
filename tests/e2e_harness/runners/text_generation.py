@@ -98,7 +98,7 @@ class TextGenerationCausalRunner:
 
         # C++ binary inference
         cpp_text, cpp_time, cpp_meta = self._run_cpp_binary(
-            ctx, bundle_path, prompt, max_new_tokens, case=case
+            ctx, bundle_path, prompt, max_new_tokens, case=case, inputs=case.inputs
         )
 
         # Debug runner for per-step logits — skip in acceptance lane when
@@ -199,6 +199,7 @@ class TextGenerationCausalRunner:
         prompt: str,
         max_new_tokens: int,
         case: E2ECase | None = None,
+        inputs: dict | None = None,
     ) -> tuple[str, float, dict]:
         """Run the C++ trtf binary as a subprocess. Returns (text, time_s, meta)."""
         cmd = [
@@ -209,6 +210,17 @@ class TextGenerationCausalRunner:
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:
             cmd.extend(["--hf-python", runtime_cli_python])
+        if inputs:
+            if inputs.get("temperature", 1.0) != 1.0:
+                cmd.extend(["--temperature", str(inputs["temperature"])])
+            if inputs.get("top_p", 1.0) < 1.0 - 1e-6:
+                cmd.extend(["--top-p", str(inputs["top_p"])])
+            if inputs.get("min_p", 0.0) > 1e-6:
+                cmd.extend(["--min-p", str(inputs["min_p"])])
+            if inputs.get("top_k", 1) != 1:
+                cmd.extend(["--top-k", str(inputs["top_k"])])
+            if inputs.get("seed", -1) >= 0:
+                cmd.extend(["--seed", str(inputs["seed"])])
 
         if case is not None:
             contract_config = case.metadata.get("contract_config", {})

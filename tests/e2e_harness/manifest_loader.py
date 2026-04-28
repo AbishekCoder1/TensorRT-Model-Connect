@@ -338,6 +338,11 @@ def _build_inputs(manifest: dict) -> dict:
         manifest.get("build_args", {}).get("max_cache_length", 256),
     )
 
+    # Sampling parameters (optional, default to greedy)
+    for key in ("temperature", "top_p", "top_k", "min_p", "seed"):
+        if key in manifest:
+            inputs[key] = manifest[key]
+
     # Diffusion-specific
     if manifest.get("video_num_frames"):
         inputs["video_num_frames"] = manifest["video_num_frames"]
@@ -432,7 +437,7 @@ def _build_metadata(manifest: dict) -> dict:
         "num_inference_steps", "build_args", "preflight_requirements",
         "stages", "comparison_profile", "threshold_overrides", "determinism",
         "inputs", "metadata", "reference_family", "user_contract", "ci_lane",
-        "execution_profiles",
+        "execution_profiles", "temperature", "top_p", "top_k", "min_p", "seed",
     }
 
     meta = manifest.get("metadata", {}).copy()

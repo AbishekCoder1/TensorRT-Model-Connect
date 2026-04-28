@@ -11,21 +11,18 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-import tempfile
-from pathlib import Path
 
 from ..contracts import (
     CompareResult, E2ECase, MetricResult, StageOutput, ThresholdProfile,
 )
 from .base import (
-    normalize_text, levenshtein_ned, make_pass, make_fail, make_error,
+    normalize_text, levenshtein_ned, make_pass, make_fail,
 )
 
 logger = logging.getLogger(__name__)
 
 # Whisper bundle preference order for ASR round-trip
 _WHISPER_BUNDLES = [
-    "whisper-tiny.trtfb",
     "whisper-tiny-fp16.trtfb",
     "whisper-small.trtfb",
     "whisper-large-v3-turbo.trtfb",

@@ -20,9 +20,9 @@ namespace trtf {
 /// Sampling parameters -- controls token selection behavior.
 struct SamplingParams {
     float temperature{1.0f};
-    int32_t top_k{1};  // 1 = greedy
-    float top_p{1.0f}; // 1.0 = disabled
-    float min_p{0.0f}; // 0.0 = disabled
+    int32_t top_k{1};  // 1 = greedy unless top_p is active; <=0 = no top-k limit
+    float top_p{1.0f}; // 1.0 = disabled; 0.0 = greedy; (0,1) = nucleus
+    float min_p{0.0f}; // 0.0 = disabled; filters tokens below min_p * max_prob
     float repetition_penalty{1.0f};
     int32_t seed{-1}; // -1 = deterministic (argmax)
     int32_t eos_token_id{-1};
@@ -72,7 +72,7 @@ struct GenerateConfig; // defined in trtf/pipeline.h
 SamplingParams sampling_params_from_config(const GenerateConfig& cfg, int32_t default_eos = -1);
 
 /// Factory: create sampler from SamplingParams.
-/// - top_k == 1 && seed == -1 => GreedySampler
+/// - top_k <= 1 && top_p/min_p disabled && seed == -1 => GreedySampler
 /// - otherwise => TopKSampler
 std::unique_ptr<ISampler> create_sampler(const SamplingParams& params);
 

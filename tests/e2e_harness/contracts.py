@@ -771,7 +771,6 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     # 5.17 OCR_MARKDOWN
     "deepseek-ocr": ReferenceFamily.OCR_MARKDOWN.value,
     # 5.18 ASR_WHISPER
-    "whisper-tiny": ReferenceFamily.ASR_WHISPER.value,
     "whisper-tiny-fp16": ReferenceFamily.ASR_WHISPER.value,
     "whisper-large-v3-turbo": ReferenceFamily.ASR_WHISPER.value,
     # 5.19 ASR_CANARY

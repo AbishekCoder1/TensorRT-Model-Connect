@@ -67,8 +67,8 @@ def mock_repo(tmp_path):
          "hf_id": "meta/llama-7b"},
         {"name": "bert-base", "family": "bert", "runtime_strategy": "encoder_only",
          "hf_id": "bert-base", "core": True},
-        {"name": "whisper-tiny", "family": "whisper", "runtime_strategy": "speech_to_text",
-         "hf_id": "openai/whisper-tiny", "core": True},
+        {"name": "whisper-tiny-fp16", "family": "whisper", "runtime_strategy": "speech_to_text",
+         "hf_id": "openai/whisper-tiny", "precision": "fp16", "core": True},
         {"name": "flux-schnell", "family": "flux", "runtime_strategy": "diffusion_flux",
          "hf_id": "bf/FLUX", "core": True},
         {"name": "flux-2-dev", "family": "flux", "runtime_strategy": "diffusion_flux",
@@ -298,7 +298,7 @@ class TestCppScope:
         match = test_impact.classify_file(
             "src/runtime/plugins/shared/audio_helpers.h", imap)
         assert match.rule == "cpp_shared_helper"
-        assert "whisper-tiny" in match.models
+        assert "whisper-tiny-fp16" in match.models
         assert "bark-small" in match.models
         assert "bert-base" not in match.models
 

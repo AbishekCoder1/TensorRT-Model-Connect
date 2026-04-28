@@ -56,6 +56,11 @@ struct CliArgs {
     int max_new_tokens{0};
     int benchmark{0}; // >0: run N timed iterations after warmup
     int warmup{1};    // number of warmup iterations before timing
+    float temperature{1.0F};
+    float top_p{1.0F};
+    float min_p{0.0F};
+    int top_k{1};
+    int seed{-1};
     int num_steps{-1};
     float guidance_scale{-1.0F};
     float conf_threshold{-1.0F};
@@ -70,9 +75,8 @@ struct CliArgs {
     bool show_help{false};
     bool parse_error{false};
     std::string error_message;
-    // Generic config surface — see include/trtf/config/cli_support.h. No
-    // per-knob flags may be added beyond these two; features add a schema
-    // and consume values through the registry.
+    // Generic config surface — see include/trtf/config/cli_support.h.
+    // New feature knobs should generally prefer these over adding flags.
     std::string config_path;
     std::vector<std::string> set_tokens;
 };
@@ -142,7 +146,8 @@ void print_usage() {
     std::cerr
         << "Usage:\n"
            "  trtf run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
-           "[--max-new-tokens N] [--benchmark N] [--warmup N] [--hf-python PATH] "
+           "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
+           "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
            "[--kv-cache-size SIZE] [--chat-template] [--no-thinking]\n"
            "  trtf encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtf segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
@@ -231,6 +236,26 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--warmup" && need_value(arg)) {
             args.warmup = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--temperature" && need_value(arg)) {
+            args.temperature = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--top-p" && need_value(arg)) {
+            args.top_p = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--min-p" && need_value(arg)) {
+            args.min_p = static_cast<float>(std::atof(argv[++i]));
+            continue;
+        }
+        if (arg == "--top-k" && need_value(arg)) {
+            args.top_k = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--seed" && need_value(arg)) {
+            args.seed = std::atoi(argv[++i]);
             continue;
         }
         if (arg == "--tail-frames" && need_value(arg)) {
@@ -411,6 +436,11 @@ int cmd_run(const CliArgs& args) {
     cfg.guidance_scale = args.guidance_scale;
     cfg.use_chat_template = args.chat_template;
     cfg.enable_thinking = !args.no_thinking;
+    cfg.temperature = args.greedy ? 0.0F : args.temperature;
+    cfg.top_p = args.top_p;
+    cfg.min_p = args.min_p;
+    cfg.top_k = args.top_k;
+    cfg.seed = args.seed;
 
     // Detect diffusion pipelines — they use generate_image(), not generate().
     const std::string ptype = pipeline->pipeline_type();

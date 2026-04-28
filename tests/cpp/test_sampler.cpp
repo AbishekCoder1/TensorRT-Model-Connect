@@ -8,6 +8,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <set>
+#include <string>
+#include <vector>
 
 static int failures = 0;
 
@@ -49,6 +52,107 @@ static void test_create_sampler_greedy_only_when_sampling_disabled() {
     const std::string sampler_type = sampler->sampler_type();
     check(sampler_type == "top_k" || sampler_type == "torch_multinomial",
           "top_p forces sampling path");
+}
+
+static void test_top_p_alone_uses_full_vocab() {
+    trtf::SamplingParams params;
+    params.temperature = 1.0F;
+    params.top_k = 1;
+    params.top_p = 0.95F;
+    params.min_p = 0.0F;
+    params.seed = 99;
+    auto sampler = trtf::create_sampler(params);
+
+    const std::vector<float> logits = {1.0F, 1.0F, 1.0F, 1.0F, 1.0F};
+    std::set<int32_t> seen;
+    for (int i = 0; i < 500; ++i) {
+        auto result = sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params);
+        seen.insert(result.token_id);
+    }
+    check(seen.size() >= 2, "top_p alone uses full vocab when top_k default is 1");
+}
+
+static void test_top_k_zero_means_no_topk_limit() {
+    trtf::SamplingParams params;
+    params.temperature = 1.0F;
+    params.top_k = 0;
+    params.top_p = 0.95F;
+    params.min_p = 0.0F;
+    params.seed = 17;
+    auto sampler = trtf::create_sampler(params);
+
+    const std::vector<float> logits = {1.0F, 1.0F, 1.0F, 1.0F, 1.0F};
+    std::set<int32_t> seen;
+    for (int i = 0; i < 500; ++i) {
+        auto result = sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params);
+        seen.insert(result.token_id);
+    }
+    check(seen.size() >= 2, "top_k zero means no top-k limit");
+}
+
+static void test_min_p_without_top_p_keeps_default_top_k() {
+    trtf::SamplingParams params;
+    params.temperature = 1.0F;
+    params.top_k = 1;
+    params.top_p = 1.0F;
+    params.min_p = 0.5F;
+    params.seed = 33;
+    auto sampler = trtf::create_sampler(params);
+
+    const float logits[] = {5.0F, 4.0F, 4.0F, 4.0F};
+    for (int i = 0; i < 64; ++i) {
+        auto result = sampler->sample(logits, 4, params);
+        check(result.token_id == 0, "min_p without top_p keeps default top_k=1 behavior");
+    }
+}
+
+static void test_top_p_zero_is_greedy() {
+    const float logits[] = {0.1F, 5.0F, 2.3F, 0.7F};
+    trtf::SamplingParams params;
+    params.temperature = 1.0F;
+    params.top_k = 4;
+    params.top_p = 0.0F;
+    params.min_p = 0.0F;
+    params.seed = 7;
+    auto sampler = trtf::create_sampler(params);
+    auto result = sampler->sample(logits, 4, params);
+    check(result.token_id == 1, "top_p zero is greedy");
+}
+
+static void test_invalid_sampling_values_are_sanitized() {
+    const float logits[] = {0.1F, 5.0F, 2.3F, 0.7F};
+    trtf::SamplingParams params;
+    params.temperature = -1.0F;
+    params.top_k = 4;
+    params.top_p = 1.5F;
+    params.min_p = -0.2F;
+    params.seed = 7;
+    auto sampler = trtf::create_sampler(params);
+    auto result = sampler->sample(logits, 4, params);
+    check(result.token_id == 1, "invalid sampling values are sanitized");
+}
+
+static void test_sampler_reset_replays_seeded_sequence() {
+    trtf::SamplingParams params;
+    params.temperature = 1.0F;
+    params.top_k = 0;
+    params.top_p = 0.95F;
+    params.min_p = 0.0F;
+    params.seed = 123;
+    auto sampler = trtf::create_sampler(params);
+
+    const std::vector<float> logits = {1.0F, 0.9F, 0.8F, 0.7F, 0.6F};
+    std::vector<int32_t> first;
+    std::vector<int32_t> second;
+    for (int i = 0; i < 32; ++i)
+        first.push_back(
+            sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params).token_id);
+    sampler->reset();
+    for (int i = 0; i < 32; ++i)
+        second.push_back(
+            sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params).token_id);
+
+    check(first == second, "sampler reset replays seeded sequence");
 }
 
 static void test_top_p_truncates_tail_tokens() {
@@ -188,6 +292,12 @@ static void test_torch_multinomial_matches_live_step_three_way_case() {
 int main() {
     test_sampling_params_from_config();
     test_create_sampler_greedy_only_when_sampling_disabled();
+    test_top_p_alone_uses_full_vocab();
+    test_top_k_zero_means_no_topk_limit();
+    test_min_p_without_top_p_keeps_default_top_k();
+    test_top_p_zero_is_greedy();
+    test_invalid_sampling_values_are_sanitized();
+    test_sampler_reset_replays_seeded_sequence();
     test_top_p_truncates_tail_tokens();
     test_min_p_drops_low_probability_tail();
 #if TRTF_HAS_LIBTORCH_MULTINOMIAL

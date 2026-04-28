@@ -4,8 +4,8 @@
 // TextGenerationPipeline::argmax() and select_argmax_token(), producing
 // bit-identical token sequences.
 //
-// TopKSampler wraps the same temperature-scaled top-k logic as
-// sample_token_topk(), with internal xorshift64 RNG state.
+// TopKSampler handles temperature, top-k, top-p, and min-p sampling on host
+// logits, with internal xorshift64 RNG state.
 
 #include "trtf/runtime/sampler.h"
 
@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <numeric>
 #include <string_view>
 #include <vector>
@@ -47,6 +48,36 @@ struct FilteredDistribution {
     int32_t keep{0};
 };
 
+static constexpr float kSamplingEpsilon = 1e-6F;
+
+static float sanitized_temperature(float temperature) {
+    if (!std::isfinite(temperature))
+        return 1.0F;
+    return std::max(temperature, 0.0F);
+}
+
+static float sanitized_top_p(float top_p) {
+    if (!std::isfinite(top_p))
+        return 1.0F;
+    return std::min(std::max(top_p, 0.0F), 1.0F);
+}
+
+static float sanitized_min_p(float min_p) {
+    if (!std::isfinite(min_p))
+        return 0.0F;
+    return std::min(std::max(min_p, 0.0F), 1.0F);
+}
+
+static bool top_p_enabled(float top_p) {
+    return top_p > 0.0F && top_p < 1.0F - kSamplingEpsilon;
+}
+
+static bool greedy_equivalent(const SamplingParams& params) {
+    const float temperature = sanitized_temperature(params.temperature);
+    const float top_p = sanitized_top_p(params.top_p);
+    return temperature < kSamplingEpsilon || top_p <= 0.0F;
+}
+
 static void topk_indices_and_softmax(FilteredDistribution& dist, const float* logits, int32_t n,
                                      int32_t k, float temperature) {
     dist.indices.resize(static_cast<std::size_t>(n));
@@ -64,7 +95,7 @@ static void topk_indices_and_softmax(FilteredDistribution& dist, const float* lo
             (logits[static_cast<std::size_t>(dist.indices[static_cast<std::size_t>(i)])] -
              max_logit) /
             temperature;
-        dist.probs[static_cast<std::size_t>(i)] = std::exp(scaled);
+        dist.probs[static_cast<std::size_t>(i)] = std::isfinite(scaled) ? std::exp(scaled) : 0.0F;
         sum += dist.probs[static_cast<std::size_t>(i)];
     }
     if (sum > 0.0F) {
@@ -91,7 +122,7 @@ static int32_t apply_min_p(const FilteredDistribution& dist, int32_t k, float mi
 }
 
 static int32_t apply_top_p(const FilteredDistribution& dist, int32_t keep, float top_p) {
-    if (top_p >= 1.0F)
+    if (!top_p_enabled(top_p))
         return keep;
     float cumulative = 0.0F;
     int32_t top_p_keep = 0;
@@ -121,11 +152,16 @@ static void renormalize_kept_prefix(FilteredDistribution& dist, int32_t keep) {
 static FilteredDistribution build_filtered_distribution(const float* logits, int32_t vocab_size,
                                                         const SamplingParams& params) {
     const int32_t n = vocab_size;
-    const int32_t k = std::min(std::max(params.top_k, 1), n);
+    const float temperature = sanitized_temperature(params.temperature);
+    const float top_p = sanitized_top_p(params.top_p);
+    const float min_p = sanitized_min_p(params.min_p);
+    const bool full_vocab_for_top_p = top_p_enabled(top_p) && params.top_k <= 1;
+    const int32_t k =
+        (params.top_k <= 0 || full_vocab_for_top_p) ? n : std::min(std::max(params.top_k, 1), n);
     FilteredDistribution dist;
-    topk_indices_and_softmax(dist, logits, n, k, params.temperature);
-    int32_t keep = apply_min_p(dist, k, params.min_p);
-    keep = apply_top_p(dist, keep, params.top_p);
+    topk_indices_and_softmax(dist, logits, n, k, temperature);
+    int32_t keep = apply_min_p(dist, k, min_p);
+    keep = apply_top_p(dist, keep, top_p);
     if (keep < k)
         renormalize_kept_prefix(dist, keep);
     dist.keep = keep;
@@ -187,10 +223,7 @@ class TopKSampler final : public ISampler {
             return result;
         }
 
-        const float temperature = params.temperature;
-
-        // Fallback to argmax if temperature is near zero
-        if (temperature < 1e-6F)
+        if (greedy_equivalent(params))
             return argmax_over_logits(logits, vocab_size, params.eos_token_id);
 
         const FilteredDistribution dist = build_filtered_distribution(logits, vocab_size, params);
@@ -207,14 +240,16 @@ class TopKSampler final : public ISampler {
             cumulative += dist.probs[static_cast<std::size_t>(i)];
             if (u < cumulative) {
                 result.token_id = dist.indices[static_cast<std::size_t>(i)];
-                result.logprob = std::log(dist.probs[static_cast<std::size_t>(i)]);
+                result.logprob = std::log(std::max(dist.probs[static_cast<std::size_t>(i)],
+                                                   std::numeric_limits<float>::min()));
                 result.is_eos = (result.token_id == params.eos_token_id);
                 return result;
             }
         }
 
         result.token_id = dist.indices[static_cast<std::size_t>(dist.keep - 1)];
-        result.logprob = std::log(dist.probs[static_cast<std::size_t>(dist.keep - 1)]);
+        result.logprob = std::log(std::max(dist.probs[static_cast<std::size_t>(dist.keep - 1)],
+                                           std::numeric_limits<float>::min()));
         result.is_eos = (result.token_id == params.eos_token_id);
         return result;
     }
@@ -256,7 +291,7 @@ class TorchCudaMultinomialSampler final : public ISampler {
             return result;
         }
 
-        if (params.temperature < 1e-6F)
+        if (greedy_equivalent(params))
             return argmax_over_logits(logits, vocab_size, params.eos_token_id);
 
         const FilteredDistribution dist = build_filtered_distribution(logits, vocab_size, params);
@@ -284,7 +319,7 @@ class TorchCudaMultinomialSampler final : public ISampler {
                 break;
             }
         }
-        result.logprob = std::log(std::max(picked_prob, 1e-20F));
+        result.logprob = std::log(std::max(picked_prob, std::numeric_limits<float>::min()));
         result.is_eos = (result.token_id == params.eos_token_id);
         return result;
     }
@@ -403,7 +438,9 @@ SamplingParams sampling_params_from_config(const GenerateConfig& cfg, int32_t de
 
 std::unique_ptr<ISampler> create_sampler(const SamplingParams& params) {
     // Greedy when sampling is fully disabled and no explicit random seed is set.
-    if (params.top_k <= 1 && params.top_p >= 1.0F && params.min_p <= 0.0F && params.seed < 0) {
+    const float top_p = sanitized_top_p(params.top_p);
+    const float min_p = sanitized_min_p(params.min_p);
+    if (params.top_k <= 1 && top_p >= 1.0F - kSamplingEpsilon && min_p <= 0.0F && params.seed < 0) {
         return std::make_unique<GreedySampler>();
     }
 

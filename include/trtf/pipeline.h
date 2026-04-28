@@ -59,9 +59,9 @@ struct TextEmbedding {
 struct GenerateConfig {
     int32_t max_new_tokens{128};
     float temperature{1.0f};
-    int32_t top_k{1}; // 1 = greedy
-    float top_p{1.0f};
-    float min_p{0.0f};
+    int32_t top_k{1};  // 1 = greedy unless top_p is active; <=0 = no top-k limit
+    float top_p{1.0f}; // 1.0 = disabled, 0.0 = greedy, (0,1) = nucleus
+    float min_p{0.0f}; // 0.0 = disabled; filters tokens below min_p * max_prob
     int32_t seed{-1};
     float guidance_scale{-1.0f}; // diffusion
     int32_t num_steps{-1};       // diffusion
