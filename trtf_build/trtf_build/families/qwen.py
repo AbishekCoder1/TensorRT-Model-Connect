@@ -1,17 +1,16 @@
 """Qwen family plugin — Qwen, Qwen2, Qwen3, QwQ (text-only, not VL).
 
-Uses the dual-profile decoder builder that produces a single engine with two
-optimization profiles (profile 0 = prefill at opt Sq=64, profile 1 =
-decode at Sq=1). The runtime picks a profile per phase so TensorRT
-selects its batched MHA kernels (e.g. `_gemm_mha_v2`) for prefill and
-the GEMV fast-path (`_gemv_mha_v1`) for decode, from the same engine.
+Calls the standard decoder builder, which now dispatches to the
+dual-profile builder by default (one engine, two optimization profiles —
+profile 0 = batched prefill, profile 1 = single-token decode). Quantized
+and TriAttention (``dynamic_kv_cache``) bundles fall back to the legacy
+single-profile graph automatically inside the standard builder.
 """
 
 from __future__ import annotations
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict, load_standard_weights
-from ..dual_profile_decoder_builder import build_dual_profile_decoder_engine
 from ..quantization.adapters import StandardDecoderCalibrationAdapter
 from ..standard_decoder_builder import build_standard_decoder_engine
 
@@ -77,28 +76,9 @@ class QwenPlugin:
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
     ) -> bytes:
-        # Quantized builds (fp8, int8) rely on the standard single-profile
-        # builder which wires quant_ctx through Q/DQ insertion. The
-        # dual-profile builder doesn't support quantization yet, so for
-        # those paths we fall back to legacy token-by-token prefill.
-        if quant_ctx is not None:
-            return build_standard_decoder_engine(
-                config, weights, max_cache_length, precision=precision,
-                quant_ctx=quant_ctx, verbose=verbose)
-        # TriAttention / dynamic-KV-cache: the dual-profile builder's
-        # attention graph hard-codes the prefill-style mask layout
-        # `(Sq, max_cache_length + Sq)` and rejects per-bucket decode
-        # profiles whose mask shape is `(1, bucket_rows + 1)`. Until that
-        # graph is generalized, fall back to the standard multi-bucket
-        # decode builder for TriAttention bundles (decode speedup retained,
-        # batched prefill is a follow-up).
-        if config.raw.get("dynamic_kv_cache"):
-            return build_standard_decoder_engine(
-                config, weights, max_cache_length, precision=precision,
-                quant_ctx=quant_ctx, verbose=verbose)
-        return build_dual_profile_decoder_engine(
-            config, weights, max_cache_length,
-            precision=precision, verbose=verbose)
+        return build_standard_decoder_engine(
+            config, weights, max_cache_length, precision=precision,
+            quant_ctx=quant_ctx, verbose=verbose)
 
     def calibration_data(self, format_name: str) -> list[str] | None:
         return list(self._CALIBRATION_PROMPTS)

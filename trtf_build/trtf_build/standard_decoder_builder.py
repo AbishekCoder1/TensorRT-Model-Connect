@@ -24,6 +24,7 @@ import tensorrt as trt
 from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
+from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
@@ -93,6 +94,48 @@ def build_standard_decoder_engine(
     Returns:
         Serialized engine plan bytes.
     """
+    import os as _os
+    # Dispatch to the dual-profile builder by default (one engine, two
+    # optimization profiles — Profile 0 = batched prefill, Profile 1 =
+    # single-token decode). The legacy single-profile graph below stays
+    # in place for paths the dual-profile builder does not yet cover:
+    #
+    #   - quant_ctx is not None        (fp8 / int8 Q/DQ insertion)
+    #   - embed_input=True             (VL prefill replacement)
+    #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
+    #   - hidden_state_output=True     (speech / Bark hidden output)
+    #   - config.raw.dynamic_kv_cache  (TriAttention multi-bucket decode)
+    #
+    # ``TRTF_NO_DUAL_PROFILE=1`` is an internal escape hatch (perf A/B,
+    # bisects against the legacy graph). It is *not* intended as a
+    # supported user-facing flag.
+    #
+    # All other text-generation families fall through to dual-profile so
+    # prefill picks batched MHA kernels (e.g. ``_gemm_mha_v2``) while
+    # decode keeps the GEMV fast-path (``_gemv_mha_v1``).
+    _dual_profile_disabled_for = (
+        quant_ctx is not None
+        or embed_input
+        or debug_layer_outputs
+        or hidden_state_output
+        or bool(config.raw.get("dynamic_kv_cache", False))
+        or _os.environ.get("TRTF_NO_DUAL_PROFILE") == "1"
+    )
+    if not _dual_profile_disabled_for:
+        return build_dual_profile_decoder_engine(
+            config, weights, max_cache_length,
+            precision=precision,
+            norm_type=norm_type,
+            mlp_type=mlp_type,
+            position_type=position_type,
+            activation=activation,
+            partial_rotary_factor=partial_rotary_factor,
+            interleaved_rope=interleaved_rope,
+            parallel_residual=parallel_residual,
+            scale_attn_weights=scale_attn_weights,
+            verbose=verbose,
+        )
+
     attention_size: int = weights.get("_attention_size", config.attention_size)
     mlp_size: int = weights.get("_mlp_size", config.intermediate_size)
     hidden = config.hidden_size
