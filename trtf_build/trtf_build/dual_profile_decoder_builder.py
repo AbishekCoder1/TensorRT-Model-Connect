@@ -276,16 +276,20 @@ def _to_heads_4d(
     head_dim: int,
     tag: str,
 ) -> trt.ITensor:
-    """(S, num_heads * head_dim) -> (1, num_heads, S, head_dim)."""
-    r1 = network.add_shuffle(x)
-    r1.name = tag + "_s_h_d"
-    r1.reshape_dims = (-1, num_heads, head_dim)
-    r1.second_transpose = trt.Permutation([1, 0, 2])
+    """(S, num_heads * head_dim) -> (1, num_heads, S, head_dim).
 
-    r2 = network.add_shuffle(r1.get_output(0))
-    r2.name = tag + "_1_h_s_d"
-    r2.reshape_dims = (1, num_heads, -1, head_dim)
-    return r2.get_output(0)
+    Collapses the original two-shuffle chain (reshape -> transpose ->
+    reshape) into a single IShuffleLayer that does reshape + permute in
+    one step. For Sq=1 (decode profile) the transpose between two
+    singleton dims is a no-op, so TRT folds the shuffle out entirely
+    and the per-step decode kernel-launch overhead matches the legacy
+    single-profile graph.
+    """
+    s = network.add_shuffle(x)
+    s.name = tag + "_to_4d"
+    s.reshape_dims = (1, -1, num_heads, head_dim)
+    s.second_transpose = trt.Permutation([0, 2, 1, 3])
+    return s.get_output(0)
 
 
 def _apply_rope_native_multi(
@@ -308,19 +312,19 @@ def _apply_rope_native_multi(
     """
     attention_size = num_heads * head_dim
 
-    # (Sq, H * D) -> (Sq, H, D) -> transpose -> (H, Sq, D) -> add batch -> (1, H, Sq, D)
-    r1 = network.add_shuffle(inp)
-    r1.reshape_dims = (-1, num_heads, head_dim)
-    r1.second_transpose = trt.Permutation([1, 0, 2])
-    r2 = network.add_shuffle(r1.get_output(0))
-    r2.reshape_dims = (1, num_heads, -1, head_dim)
+    # (Sq, H * D) -> (1, Sq, H, D) -> transpose to (1, H, Sq, D) in ONE shuffle.
+    # For Sq=1 the transpose is between singleton dims and TRT folds the
+    # whole shuffle out, so the decode profile pays no extra kernel.
+    pre = network.add_shuffle(inp)
+    pre.reshape_dims = (1, -1, num_heads, head_dim)
+    pre.second_transpose = trt.Permutation([0, 2, 1, 3])
 
     # position_id (Sq,) -> (1, Sq)
     pos_2d = network.add_shuffle(position_id)
     pos_2d.reshape_dims = (1, -1)
 
     rope = network.add_rotary_embedding(
-        r2.get_output(0),
+        pre.get_output(0),
         cos_half_2d,
         sin_half_2d,
         interleaved,
@@ -328,11 +332,11 @@ def _apply_rope_native_multi(
     )
     rope.set_input(3, pos_2d.get_output(0))
 
-    # (1, H, Sq, D) -> (H, Sq, D) -> transpose -> (Sq, H, D) -> (Sq, H * D)
-    flatten = network.add_shuffle(rope.get_output(0))
-    flatten.first_transpose = trt.Permutation([0, 2, 1, 3])  # (1, Sq, H, D)
-    flatten.reshape_dims = (-1, attention_size)
-    return flatten.get_output(0)
+    # (1, H, Sq, D) -> (Sq, H * D) in ONE shuffle (transpose + reshape).
+    post = network.add_shuffle(rope.get_output(0))
+    post.first_transpose = trt.Permutation([0, 2, 1, 3])
+    post.reshape_dims = (-1, attention_size)
+    return post.get_output(0)
 
 
 def _from_heads_4d(
