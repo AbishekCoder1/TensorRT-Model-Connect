@@ -93,8 +93,16 @@ def _rms_norm_multi(
     eps: float,
     dtype: np.dtype,
 ) -> trt.ITensor:
-    """RMSNorm on (Sq, hidden) — reduces along the hidden dim."""
-    need_cast = dtype != np.float32
+    """RMSNorm on (Sq, hidden) — reduces along the hidden dim.
+
+    FP32 precision boundary: when ``inp`` isn't already fp32 we cast to fp32
+    for numerical stability and then cast back to the original input dtype
+    (recovered from ``inp.dtype`` so bf16 stays bf16 — the ``dtype`` numpy
+    type stores both fp16 and bf16 weights as np.float16, so it can't be
+    used to disambiguate the runtime tensor type).
+    """
+    work_trt_dtype = inp.dtype
+    need_cast = work_trt_dtype != trt.float32
     x = inp
     if need_cast:
         x = network.add_cast(x, trt.float32).get_output(0)
@@ -116,8 +124,7 @@ def _rms_norm_multi(
         normed.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
     out = scaled.get_output(0)
     if need_cast:
-        trt_dtype = trt.float16 if dtype == np.float16 else trt.float32
-        out = network.add_cast(out, trt_dtype).get_output(0)
+        out = network.add_cast(out, work_trt_dtype).get_output(0)
     return out
 
 
@@ -130,8 +137,13 @@ def _layer_norm_multi(
     eps: float,
     dtype: np.dtype,
 ) -> trt.ITensor:
-    """LayerNorm on (Sq, hidden): gamma * (x - mean) / sqrt(var + eps) + beta."""
-    need_cast = dtype != np.float32
+    """LayerNorm on (Sq, hidden): gamma * (x - mean) / sqrt(var + eps) + beta.
+
+    Same fp32 precision boundary as ``_rms_norm_multi``; cast-back uses
+    ``inp.dtype`` so bf16 inputs stay bf16.
+    """
+    work_trt_dtype = inp.dtype
+    need_cast = work_trt_dtype != trt.float32
     x = inp
     if need_cast:
         x = network.add_cast(x, trt.float32).get_output(0)
@@ -163,8 +175,7 @@ def _layer_norm_multi(
         scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
     out = summed.get_output(0)
     if need_cast:
-        trt_dtype = trt.float16 if dtype == np.float16 else trt.float32
-        out = network.add_cast(out, trt_dtype).get_output(0)
+        out = network.add_cast(out, work_trt_dtype).get_output(0)
     return out
 
 
@@ -195,11 +206,12 @@ def _rms_norm_per_head_multi(
     dtype: np.dtype,
 ) -> trt.ITensor:
     """Per-head RMSNorm for (Sq, num_heads * head_dim) input."""
+    work_trt_dtype = inp.dtype
     reshape_in = network.add_shuffle(inp)
     reshape_in.reshape_dims = (-1, num_heads, head_dim)
     x = reshape_in.get_output(0)
 
-    need_cast = dtype != np.float32
+    need_cast = work_trt_dtype != trt.float32
     if need_cast:
         x = network.add_cast(x, trt.float32).get_output(0)
 
@@ -222,8 +234,7 @@ def _rms_norm_per_head_multi(
         normed.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
     out = scaled.get_output(0)
     if need_cast:
-        trt_dtype = trt.float16 if dtype == np.float16 else trt.float32
-        out = network.add_cast(out, trt_dtype).get_output(0)
+        out = network.add_cast(out, work_trt_dtype).get_output(0)
     flat = network.add_shuffle(out)
     flat.reshape_dims = (-1, num_heads * head_dim)
     return flat.get_output(0)
