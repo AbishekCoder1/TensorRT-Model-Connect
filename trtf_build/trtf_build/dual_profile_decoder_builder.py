@@ -18,9 +18,11 @@ Scope: covers the same architectural variants the legacy
 GeluFC MLP; RoPE (full / partial / interleaved), learned absolute, or
 ALiBi position; sequential or parallel residual; optional q/k_norm,
 QKV/output/MLP biases, and a Bloom-style embedding LayerNorm. Quantized
-builds (``quant_ctx``), per-layer debug outputs, hidden-state outputs,
-and the VL ``embed_input`` path stay on ``standard_decoder_builder`` for
-now and are dispatched there from inside ``build_standard_decoder_engine``.
+builds (fp8 / int8 ``quant_ctx``) thread Q/DQ insertion through every
+projection matmul via ``QuantContext.maybe_quantized_matmul``. Per-layer
+debug outputs, hidden-state outputs, and the VL ``embed_input`` path stay
+on ``standard_decoder_builder`` for now and are dispatched there from
+inside ``build_standard_decoder_engine``.
 
 Tensor contract (matches the C++ runtime KvCache naming):
   Inputs (dynamic shapes — Sq varies by profile)
@@ -48,6 +50,34 @@ from . import graph_ops
 if TYPE_CHECKING:
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
+    from .quantization.context import QuantContext
+
+
+def _make_matmul_fn(
+    network: trt.INetworkDefinition,
+    dtype: np.dtype,
+    quant_ctx: "QuantContext | None",
+):
+    """Mirror of ``graph_blocks._make_matmul_fn`` for the dual-profile path.
+
+    Returns a callable ``(lhs, lhs_w, rhs_w, rhs_weights, weight_name) -> ITensor``
+    that routes through ``QuantContext.maybe_quantized_matmul`` when present
+    and falls back to a plain ``add_matmul_rhs_constant`` otherwise. The
+    ``weight_name`` is the dotted weight key (e.g. ``layer.0.w_q``) used by
+    the quantization profile to look up scales and the per-layer exclude
+    pattern.
+    """
+    if quant_ctx is None:
+        def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
+            return graph_ops.add_matmul_rhs_constant(
+                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
+        return matmul
+
+    def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
+        return quant_ctx.maybe_quantized_matmul(
+            network, lhs, lhs_w, rhs_w, rhs_weights, weight_name,
+            dtype=dtype)
+    return matmul
 
 
 # ---------------------------------------------------------------------------
@@ -447,26 +477,23 @@ def _swiglu_mlp(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     *,
+    matmul,
     weights: "WeightDict",
     prefix: str,
     hidden: int,
     mlp_size: int,
-    work_np_dtype: np.dtype,
 ) -> trt.ITensor:
-    gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden, mlp_size,
-        weights[f"{prefix}.w_gate"], dtype=work_np_dtype)
-    up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden, mlp_size,
-        weights[f"{prefix}.w_up"], dtype=work_np_dtype)
+    gate = matmul(inp, hidden, mlp_size,
+                  weights[f"{prefix}.w_gate"], f"{prefix}.w_gate")
+    up = matmul(inp, hidden, mlp_size,
+                weights[f"{prefix}.w_up"], f"{prefix}.w_up")
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(
         gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
     gated = network.add_elementwise(
         swish.get_output(0), up, trt.ElementWiseOperation.PROD)
-    mlp_out = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), mlp_size, hidden,
-        weights[f"{prefix}.w_down"], dtype=work_np_dtype)
+    mlp_out = matmul(gated.get_output(0), mlp_size, hidden,
+                     weights[f"{prefix}.w_down"], f"{prefix}.w_down")
     return mlp_out
 
 
@@ -474,6 +501,7 @@ def _gelu_fc_mlp(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     *,
+    matmul,
     weights: "WeightDict",
     prefix: str,
     hidden: int,
@@ -481,16 +509,14 @@ def _gelu_fc_mlp(
     activation: str,
     work_np_dtype: np.dtype,
 ) -> trt.ITensor:
-    fc1 = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden, mlp_size,
-        weights[f"{prefix}.w_fc1"], dtype=work_np_dtype)
+    fc1 = matmul(inp, hidden, mlp_size,
+                 weights[f"{prefix}.w_fc1"], f"{prefix}.w_fc1")
     fc1_bias = weights.get(f"{prefix}.fc1_bias")
     if fc1_bias is not None:
         fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias, dtype=work_np_dtype)
     activated = graph_ops.add_activation(network, fc1, activation, dtype=work_np_dtype)
-    fc2 = graph_ops.add_matmul_rhs_constant(
-        network, activated, mlp_size, hidden,
-        weights[f"{prefix}.w_fc2"], dtype=work_np_dtype)
+    fc2 = matmul(activated, mlp_size, hidden,
+                 weights[f"{prefix}.w_fc2"], f"{prefix}.w_fc2")
     fc2_bias = weights.get(f"{prefix}.fc2_bias")
     if fc2_bias is not None:
         fc2 = graph_ops.add_bias_sum(network, fc2, hidden, fc2_bias, dtype=work_np_dtype)
@@ -527,6 +553,7 @@ def build_dual_profile_decoder_engine(
     precision: str = "fp16",
     opt_prefill_length: int = 64,
     max_prefill_length: int | None = None,
+    quant_ctx: "QuantContext | None" = None,
     norm_type: str = "rmsnorm",
     mlp_type: str = "swiglu",
     position_type: str = "rope",
@@ -544,6 +571,10 @@ def build_dual_profile_decoder_engine(
     ``partial_rotary_factor`` / ``interleaved_rope`` / ``parallel_residual`` /
     ``scale_attn_weights`` mirror the same parameters on
     ``build_standard_decoder_engine``.
+
+    ``quant_ctx`` (optional) routes every projection matmul through
+    ``QuantContext.maybe_quantized_matmul`` for fp8 / int8 Q/DQ insertion;
+    when ``None`` the matmuls are plain fp16 / bf16 / fp32.
 
     When ``dynamic_kv_profile_rows`` is provided, the engine carries one
     prefill profile (profile 0) followed by N decode profiles (profile 1..N),
@@ -749,6 +780,9 @@ def build_dual_profile_decoder_engine(
     # Attention scale.
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
 
+    # Quantization-aware matmul (passes weight_name through to QuantContext).
+    matmul = _make_matmul_fn(network, work_np_dtype, quant_ctx)
+
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)
     hidden_state = emb.get_output(0)  # (Sq, hidden)
@@ -798,15 +832,12 @@ def build_dual_profile_decoder_engine(
             config.rms_norm_eps, norm_type, work_np_dtype)
 
         # Q / K / V projections.
-        q = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, attention_size,
-            weights[f"{prefix}.w_q"], dtype=work_np_dtype)
-        k = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, attention_size,
-            weights[f"{prefix}.w_k"], dtype=work_np_dtype)
-        v = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, attention_size,
-            weights[f"{prefix}.w_v"], dtype=work_np_dtype)
+        q = matmul(normed, hidden, attention_size,
+                   weights[f"{prefix}.w_q"], f"{prefix}.w_q")
+        k = matmul(normed, hidden, attention_size,
+                   weights[f"{prefix}.w_k"], f"{prefix}.w_k")
+        v = matmul(normed, hidden, attention_size,
+                   weights[f"{prefix}.w_v"], f"{prefix}.w_v")
 
         # Optional QKV biases (Qwen2 / GPT-2 / OPT / Bloom / Falcon / etc.).
         q_bias = weights.get(f"{prefix}.q_bias")
@@ -875,9 +906,8 @@ def build_dual_profile_decoder_engine(
             head_dim=head_dim, scale=attn_scale)
         context = _from_heads_4d(network, ctx_4d, attention_size, f"{prefix}.ctx")
 
-        attn_out = graph_ops.add_matmul_rhs_constant(
-            network, context, attention_size, hidden,
-            weights[f"{prefix}.w_o"], dtype=work_np_dtype)
+        attn_out = matmul(context, attention_size, hidden,
+                          weights[f"{prefix}.w_o"], f"{prefix}.w_o")
         o_bias = weights.get(f"{prefix}.o_bias")
         if o_bias is not None:
             attn_out = graph_ops.add_bias_sum(
@@ -908,15 +938,14 @@ def build_dual_profile_decoder_engine(
         if mlp_type == "gelu_fc":
             mlp_out = _gelu_fc_mlp(
                 network, norm2,
-                weights=weights, prefix=prefix,
+                matmul=matmul, weights=weights, prefix=prefix,
                 hidden=hidden, mlp_size=mlp_size,
                 activation=activation, work_np_dtype=work_np_dtype)
         else:
             mlp_out = _swiglu_mlp(
                 network, norm2,
-                weights=weights, prefix=prefix,
-                hidden=hidden, mlp_size=mlp_size,
-                work_np_dtype=work_np_dtype)
+                matmul=matmul, weights=weights, prefix=prefix,
+                hidden=hidden, mlp_size=mlp_size)
 
         # Final residual.
         if parallel_residual:

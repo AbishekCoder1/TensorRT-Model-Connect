@@ -97,11 +97,14 @@ def build_standard_decoder_engine(
     import os as _os
     # Dispatch to the dual-profile builder by default (one engine, two
     # optimization profiles — Profile 0 = batched prefill, Profile 1 =
-    # single-token decode). The legacy single-profile graph below stays
-    # in place for paths the dual-profile builder does not yet cover:
+    # single-token decode). Quantized builds (``quant_ctx``) thread Q/DQ
+    # insertion through every projection matmul via
+    # ``QuantContext.maybe_quantized_matmul``, so they share the dispatch.
     #
-    #   - quant_ctx is not None        (fp8 / int8 Q/DQ insertion)
-    #   - embed_input=True             (VL prefill replacement)
+    # The legacy single-profile graph below stays in place for paths the
+    # dual-profile builder does not yet cover:
+    #
+    #   - embed_input=True             (VL prefill replacement, Bark sub-engines)
     #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
     #   - hidden_state_output=True     (speech / Bark hidden output)
     #   - config.raw.dynamic_kv_cache  (TriAttention multi-bucket decode)
@@ -109,13 +112,8 @@ def build_standard_decoder_engine(
     # ``TRTF_NO_DUAL_PROFILE=1`` is an internal escape hatch (perf A/B,
     # bisects against the legacy graph). It is *not* intended as a
     # supported user-facing flag.
-    #
-    # All other text-generation families fall through to dual-profile so
-    # prefill picks batched MHA kernels (e.g. ``_gemm_mha_v2``) while
-    # decode keeps the GEMV fast-path (``_gemv_mha_v1``).
     _dual_profile_disabled_for = (
-        quant_ctx is not None
-        or embed_input
+        embed_input
         or debug_layer_outputs
         or hidden_state_output
         or bool(config.raw.get("dynamic_kv_cache", False))
@@ -125,6 +123,7 @@ def build_standard_decoder_engine(
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
+            quant_ctx=quant_ctx,
             norm_type=norm_type,
             mlp_type=mlp_type,
             position_type=position_type,
