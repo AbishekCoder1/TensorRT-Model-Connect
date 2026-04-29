@@ -53,6 +53,29 @@ if TYPE_CHECKING:
     from .quantization.context import QuantContext
 
 
+def _const_in_work_dtype(
+    network: trt.INetworkDefinition,
+    shape: tuple,
+    values: np.ndarray,
+    work_np_dtype: np.dtype,
+    work_trt_dtype: trt.DataType,
+) -> trt.ITensor:
+    """Create a constant in work_np_dtype storage and cast it to work_trt_dtype.
+
+    Needed for bf16 builds: the dual-profile builder stores bf16 weights
+    on disk as fp16 (work_np_dtype = np.float16), but the runtime tensor
+    must be bfloat16 to match the rest of the graph. ``add_constant``
+    alone produces an fp16 constant — we need an explicit cast to
+    bfloat16 so layers like IRotaryEmbeddingLayer (which require all
+    inputs to share a dtype) accept it. fp16 / fp32 builds are no-ops
+    because work_np_dtype maps directly to work_trt_dtype.
+    """
+    const = graph_ops.add_constant(network, shape, values, dtype=work_np_dtype)
+    if const.dtype != work_trt_dtype:
+        const = network.add_cast(const, work_trt_dtype).get_output(0)
+    return const
+
+
 def _make_matmul_fn(
     network: trt.INetworkDefinition,
     dtype: np.dtype,
@@ -707,8 +730,9 @@ def build_dual_profile_decoder_engine(
         _add_profile(1, 1, fixed=True)
 
     # ---- Shared constants ------------------------------------------------
-    embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
+    embedding_table = _const_in_work_dtype(
+        network, (vocab, hidden), weights["embedding"],
+        work_np_dtype, work_trt_dtype)
 
     # RoPE tables (only when position_type == "rope"). Built for the worst
     # case key length max_cache_length + max_prefill_length, since RoPE is
@@ -738,13 +762,13 @@ def build_dual_profile_decoder_engine(
         rotate_half_np = graph_ops.make_rotate_half_matrix(
             attention_size, num_heads, partial_rotary_factor,
             interleaved=interleaved_rope)
-        cos_table = graph_ops.add_constant(
-            network, cos_np.shape, cos_np, dtype=work_np_dtype)
-        sin_table = graph_ops.add_constant(
-            network, sin_np.shape, sin_np, dtype=work_np_dtype)
-        rotate_half = graph_ops.add_constant(
+        cos_table = _const_in_work_dtype(
+            network, cos_np.shape, cos_np, work_np_dtype, work_trt_dtype)
+        sin_table = _const_in_work_dtype(
+            network, sin_np.shape, sin_np, work_np_dtype, work_trt_dtype)
+        rotate_half = _const_in_work_dtype(
             network, (attention_size, attention_size), rotate_half_np,
-            dtype=work_np_dtype)
+            work_np_dtype, work_trt_dtype)
 
         # IRotaryEmbeddingLayer requires rotary_embedding_dim >= 2 and even.
         # Tiny synthetic configs (head_dim=4 with partial rotary producing an
@@ -756,18 +780,21 @@ def build_dual_profile_decoder_engine(
             sin_half_np = graph_ops.make_rope_table_half_dim(
                 kmax, head_dim, config.rope_theta, False,
                 partial_rotary_factor, interleaved=interleaved_rope)
-            cos_half_table = graph_ops.add_constant(
-                network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
-            sin_half_table = graph_ops.add_constant(
-                network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
+            cos_half_table = _const_in_work_dtype(
+                network, cos_half_np.shape, cos_half_np,
+                work_np_dtype, work_trt_dtype)
+            sin_half_table = _const_in_work_dtype(
+                network, sin_half_np.shape, sin_half_np,
+                work_np_dtype, work_trt_dtype)
             use_native_rope = True
 
     # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
     position_embed_table: trt.ITensor | None = None
     if position_type == "learned":
         pos_embed_np = weights["position_embedding"]
-        position_embed_table = graph_ops.add_constant(
-            network, pos_embed_np.shape, pos_embed_np, dtype=work_np_dtype)
+        position_embed_table = _const_in_work_dtype(
+            network, pos_embed_np.shape, pos_embed_np,
+            work_np_dtype, work_trt_dtype)
 
     # ALiBi slopes + cache-slot positions for multi-row mask augmentation.
     alibi_slopes_tensor: trt.ITensor | None = None
