@@ -89,6 +89,31 @@ class TrtRunner:
             raise RuntimeError("Failed to deserialize TRT engine")
         self.context = self.engine.create_execution_context()
 
+        # Dual-profile engines (built by build_dual_profile_decoder_engine)
+        # carry one prefill profile (profile 0, Sq dynamic) followed by one
+        # decode profile (profile 1, Sq=1). For per-step decode runs the
+        # debug_runner must select the decode profile and call
+        # set_input_shape on every dynamic input before each execute. We
+        # detect dual-profile via num_optimization_profiles > 1 and the
+        # presence of -1 dims on token_id / position_id / attention_mask.
+        self._dynamic_inputs: list[str] = []
+        self._is_dual_profile = self.engine.num_optimization_profiles > 1
+        for input_name in ("token_id", "position_id", "attention_mask"):
+            try:
+                shape = tuple(self.engine.get_tensor_shape(input_name))
+            except Exception:
+                continue
+            if any(d < 0 for d in shape):
+                self._dynamic_inputs.append(input_name)
+        if self._is_dual_profile:
+            # Profile 1 = decode (Sq=1). step() always runs single-token, so
+            # we lock the context to that profile once and never switch.
+            err, decode_stream = cudart.cudaStreamCreate()
+            _check_cuda(err)
+            self.context.set_optimization_profile_async(1, decode_stream)
+            cudart.cudaStreamSynchronize(decode_stream)
+            cudart.cudaStreamDestroy(decode_stream)
+
         # Auto-detect attention_size from cache_k_0 shape
         if attention_size is None:
             cache_shape = tuple(self.engine.get_tensor_shape("cache_k_0"))
@@ -343,6 +368,16 @@ class TrtRunner:
 
         for name in self._debug_output_names:
             self.context.set_tensor_address(name, self._d_debug[name])
+
+        # Dual-profile engines need explicit shapes for the dynamic
+        # inputs every step. step() is single-token decode, so all three
+        # shapes are fixed: Sq=1 and K = max_cache_length + 1.
+        if self._dynamic_inputs:
+            for name in self._dynamic_inputs:
+                if name == "attention_mask":
+                    self.context.set_input_shape(name, (1, attention_window))
+                else:
+                    self.context.set_input_shape(name, (1,))
 
         # Execute
         self.context.execute_async_v3(stream)
