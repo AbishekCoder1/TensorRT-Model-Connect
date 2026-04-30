@@ -82,6 +82,8 @@ class OmniMultimodalRunner:
             metadata={
                 "command": cmd,
                 "returncode": result.returncode,
+                "stdout": result.stdout or "",
+                "stderr": result.stderr or "",
                 **stage_meta,
             },
         )
@@ -140,6 +142,8 @@ class CompositePipelineRunner:
             metadata={
                 "command": cmd,
                 "returncode": result.returncode,
+                "stdout": result.stdout or "",
+                "stderr": result.stderr or "",
                 **stage_meta,
             },
         )

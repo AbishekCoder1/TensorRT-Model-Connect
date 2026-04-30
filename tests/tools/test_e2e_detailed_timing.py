@@ -9,6 +9,10 @@ if str(TRTF_BUILD_ROOT) not in sys.path:
     sys.path.insert(0, str(TRTF_BUILD_ROOT))
 
 from tests.e2e_harness.orchestrator import _build_detailed_timing  # noqa: E402
+from tests.e2e_harness.runners.text_generation import (  # noqa: E402
+    _extract_trtf_load_timing,
+    _extract_trtf_timing,
+)
 from trtf_build.engine_builder import (  # noqa: E402
     _compile_time_excluding_component_weight_load,
     _untracked_compile_time,
@@ -20,6 +24,8 @@ def test_detailed_timing_uses_actual_phase_measurements_without_overlap():
         {
             "bundle_build_s": 30.0,
             "trt_generate_s": 3.0,
+            "trt_engine_generate_s": 1.2,
+            "trt_load_deserialize_generate_s": 0.8,
             "trt_compile_s": 99.0,
             "ref_generate_s": 2.0,
             "contract_generate_s": 0.3,
@@ -43,13 +49,52 @@ def test_detailed_timing_uses_actual_phase_measurements_without_overlap():
     assert details["trt_compile_s"] == 20.0
     assert details["trt_compile_main_engine_s"] == 20.0
     assert details["bundle_write_s"] == 0.4
-    assert details["inference_s"] == 3.0
+    assert details["inference_s"] == 1.2
+    assert details["trt_load_deserialization_s"] == 0.8
+    assert details["trt_validation_s"] == 3.0
     assert details["reference_s"] == 2.0
     assert details["comparison_s"] == 0.5
     assert details["preflight_s"] == 0.1
     assert "build_total_s" not in details
     assert "bundle_total_s" not in details
     assert "build_overhead_s" not in details
+
+
+def test_detailed_timing_does_not_treat_trt_wall_time_as_inference():
+    details = _build_detailed_timing(
+        {
+            "trt_generate_s": 3.0,
+            "trt_load_deserialize_generate_s": 0.8,
+            "ref_generate_s": 2.0,
+        },
+        {},
+    )
+
+    assert "inference_s" not in details
+    assert details["trt_load_deserialization_s"] == 0.8
+    assert details["trt_validation_s"] == 3.0
+    assert details["reference_s"] == 2.0
+
+
+def test_text_runner_extracts_engine_timing_from_cli_stderr():
+    timing = _extract_trtf_timing(
+        "noise\n[trtf.timing] prefill_ms=12.500000 decode_ms=7.250000 total_ms=19.750000\n"
+    )
+
+    assert timing["trt_engine_prefill_s"] == 0.0125
+    assert timing["trt_engine_decode_s"] == 0.00725
+    assert timing["trt_engine_s"] == 0.01975
+
+
+def test_text_runner_extracts_load_deserialize_timing_from_cli_stderr():
+    timing = _extract_trtf_load_timing(
+        "\n".join([
+            "[trtf.load_timing] label=\"engine_plan\" load_deserialize_ms=10.500000 plan_bytes=4",
+            "[trtf.load_timing] label=\"extra\" load_deserialize_ms=2.250000 plan_bytes=8",
+        ])
+    )
+
+    assert timing["trt_load_deserialize_s"] == 0.01275
 
 
 def test_diffusion_compile_time_excludes_component_weight_loading():
@@ -111,3 +156,24 @@ def test_component_weight_timings_are_preserved_in_detailed_timing():
     assert details["trt_compile_s"] == 88.0
     assert details["trt_compile_qwen3_encoder_s"] == 30.0
     assert details["trt_compile_z_image_dit_s"] == 50.0
+
+
+def test_component_runtime_timings_are_preserved_in_detailed_timing():
+    details = _build_detailed_timing(
+        {
+            "trt_engine_end_to_end_s": 0.75,
+            "trt_component_engine_end_to_end_denoiser_plan_s": 0.6,
+            "trt_component_engine_end_to_end_vae_decoder_plan_s": 0.15,
+            "trt_load_deserialize_end_to_end_s": 3.0,
+            "trt_component_load_deserialize_end_to_end_denoiser_plan_s": 2.5,
+            "trt_component_load_deserialize_end_to_end_vae_decoder_plan_s": 0.5,
+        },
+        {},
+    )
+
+    assert details["inference_s"] == 0.75
+    assert details["trt_load_deserialization_s"] == 3.0
+    assert details["trt_component_engine_end_to_end_denoiser_plan_s"] == 0.6
+    assert details["trt_component_engine_end_to_end_vae_decoder_plan_s"] == 0.15
+    assert details["trt_component_load_deserialize_end_to_end_denoiser_plan_s"] == 2.5
+    assert details["trt_component_load_deserialize_end_to_end_vae_decoder_plan_s"] == 0.5

@@ -32,7 +32,6 @@ import tensorrt as trt
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict
 from .. import graph_ops
-from ..standard_decoder_builder import build_standard_decoder_engine
 
 
 def _load_bark_state_dict(model_dir: str) -> dict:
@@ -41,7 +40,7 @@ def _load_bark_state_dict(model_dir: str) -> dict:
     model_path = Path(model_dir) / "pytorch_model.bin"
     if not model_path.exists():
         # Try safetensors
-        from ..checkpoint_mapper import _open_safetensors, _load_tensor
+        from ..checkpoint_mapper import _open_safetensors
         readers = _open_safetensors(Path(model_dir))
         state_dict = {}
         for reader in readers:
@@ -718,12 +717,6 @@ def _build_bark_decoder_engine(
     eps_t = graph_ops.add_constant(
         network, (1, 1), np.array([1e-5], dtype=np.float32))
 
-    # RoPE tables not needed (learned positions)
-    # cos/sin tables for apply_rope
-    cos_table = None
-    sin_table = None
-    rotate_half_matrix = None
-
     present_k_outputs = []
     present_v_outputs = []
 
@@ -751,8 +744,6 @@ def _build_bark_decoder_engine(
         # K -> present_k: [1, attention_size]
         # Gather from cache
         attn_scale = 1.0 / np.sqrt(head_dim)
-        scale_c = graph_ops.add_constant(
-            network, (1, 1), np.array([attn_scale], dtype=np.float32))
 
         # present_k = k (single new row)
         present_k = k
@@ -768,51 +759,17 @@ def _build_bark_decoder_engine(
             [cache_v_inputs[layer_idx], present_v])
         full_v.axis = 0
 
-        # Multi-head: q [1, attn] -> [num_heads, 1, head_dim]
-        q_h = network.add_shuffle(q)
-        q_h.reshape_dims = (1, num_heads, head_dim)
-        q_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        # full_k [attn_window, attn] -> [num_heads, attn_window, head_dim]
-        k_h = network.add_shuffle(full_k.get_output(0))
-        k_h.reshape_dims = (attention_window, num_heads, head_dim)
-        k_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        v_h = network.add_shuffle(full_v.get_output(0))
-        v_h.reshape_dims = (attention_window, num_heads, head_dim)
-        v_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        # Score: [heads, 1, head_dim] @ [heads, head_dim, window] -> [heads, 1, window]
-        score = network.add_matrix_multiply(
-            q_h.get_output(0), trt.MatrixOperation.NONE,
-            k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        scaled = network.add_elementwise(
-            score.get_output(0), graph_ops.add_constant(
-                network, (1, 1, 1), np.array([attn_scale], dtype=np.float32)),
-            trt.ElementWiseOperation.PROD)
-
-        # Add attention mask: [1, attention_window] -> broadcast to [heads, 1, window]
-        mask_3d = network.add_shuffle(attention_mask)
-        mask_3d.reshape_dims = (1, 1, attention_window)
-        masked = network.add_elementwise(
-            scaled.get_output(0), mask_3d.get_output(0),
-            trt.ElementWiseOperation.SUM)
-
-        softmax = network.add_softmax(masked.get_output(0))
-        softmax.axes = 1 << 2
-
-        ctx = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_h.get_output(0), trt.MatrixOperation.NONE)
-
-        # Reshape: [heads, 1, head_dim] -> [1, attention_size]
-        ctx_flat = network.add_shuffle(ctx.get_output(0))
-        ctx_flat.first_transpose = trt.Permutation([1, 0, 2])
-        ctx_flat.reshape_dims = (1, attention_size)
+        mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
+        ctx_flat = graph_ops.add_attention_from_rows(
+            network, q, full_k.get_output(0), full_v.get_output(0),
+            num_heads=num_heads, head_dim=head_dim,
+            q_seq=1, kv_seq=attention_window,
+            mask=mask_4d,
+            scale=attn_scale)
 
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, ctx_flat.get_output(0), attention_size, hidden,
+            network, ctx_flat, attention_size, hidden,
             weights[f"{lp}.w_o"])
         attn_out = graph_ops.add_bias_sum(
             network, attn_out, hidden, weights[f"{lp}.b_o"])
@@ -968,50 +925,22 @@ def _build_bark_fine_engine(
             if b is not None:
                 ref = {"q": q, "k": k, "v": v}[tensor_ref]
                 ref_out = graph_ops.add_bias_sum(network, ref, attention_size, b)
-                if tensor_ref == "q": q = ref_out
-                elif tensor_ref == "k": k = ref_out
-                else: v = ref_out
+                if tensor_ref == "q":
+                    q = ref_out
+                elif tensor_ref == "k":
+                    k = ref_out
+                else:
+                    v = ref_out
 
-        # Reshape for multi-head: [S, A] -> [H, S, D]
-        q_h = network.add_shuffle(q)
-        q_h.reshape_dims = (seq_length, num_heads, head_dim)
-        q_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        k_h = network.add_shuffle(k)
-        k_h.reshape_dims = (seq_length, num_heads, head_dim)
-        k_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        v_h = network.add_shuffle(v)
-        v_h.reshape_dims = (seq_length, num_heads, head_dim)
-        v_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        # Scores: [H, S, D] @ [H, D, S] -> [H, S, S]
-        score = network.add_matrix_multiply(
-            q_h.get_output(0), trt.MatrixOperation.NONE,
-            k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        scale_c = graph_ops.add_constant(
-            network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
-        scaled = network.add_elementwise(
-            score.get_output(0), scale_c,
-            trt.ElementWiseOperation.PROD)
-
-        # No causal mask — bidirectional attention
-        softmax = network.add_softmax(scaled.get_output(0))
-        softmax.axes = 1 << 2  # softmax over last dim (key positions)
-
-        # Context: [H, S, S] @ [H, S, D] -> [H, S, D]
-        ctx = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_h.get_output(0), trt.MatrixOperation.NONE)
-
-        # Reshape back: [H, S, D] -> [S, A]
-        ctx_flat = network.add_shuffle(ctx.get_output(0))
-        ctx_flat.first_transpose = trt.Permutation([1, 0, 2])
-        ctx_flat.reshape_dims = (seq_length, attention_size)
+        ctx_flat = graph_ops.add_attention_from_rows(
+            network, q, k, v,
+            num_heads=num_heads, head_dim=head_dim,
+            q_seq=seq_length, kv_seq=seq_length,
+            scale=attn_scale)
 
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, ctx_flat.get_output(0), attention_size, hidden,
+            network, ctx_flat, attention_size, hidden,
             weights[f"{lp}.w_o"])
         o_bias = weights.get(f"{lp}.o_bias")
         if o_bias is not None:

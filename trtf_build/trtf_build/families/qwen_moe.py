@@ -358,35 +358,22 @@ class Qwen3MoePlugin:
             network, (vocab, hidden), weights["embedding"],
             dtype=work_np_dtype)
 
-        cos_table_np = graph_ops.make_rope_table(
-            attention_window, attention_size, num_heads,
-            config.rope_theta, True)
-        sin_table_np = graph_ops.make_rope_table(
-            attention_window, attention_size, num_heads,
-            config.rope_theta, False)
-        rotate_half_np = graph_ops.make_rotate_half_matrix(
-            attention_size, num_heads)
-
-        cos_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), cos_table_np,
-            dtype=work_np_dtype)
-        sin_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), sin_table_np,
-            dtype=work_np_dtype)
-        rotate_half_tensor = graph_ops.add_constant(
-            network, (attention_size, attention_size), rotate_half_np,
-            dtype=work_np_dtype)
+        if head_dim < 2 or head_dim % 2 != 0:
+            raise ValueError(
+                "Qwen MoE RoPE requires an even head_dim >= 2 for TRT native RoPE")
+        cos_half_np = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, True)
+        sin_half_np = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, False)
+        cos_half_tensor = graph_ops.add_constant(
+            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
+        sin_half_tensor = graph_ops.add_constant(
+            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
             np.array([config.rms_norm_eps], dtype=work_np_dtype),
             dtype=work_np_dtype)
-        attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
-        attn_scale_tensor = graph_ops.add_constant(
-            network, (1, 1, 1),
-            np.array([attn_scale], dtype=work_np_dtype),
-            dtype=work_np_dtype)
-
         # -----------------------------------------------------------
         # Embedding lookup
         # -----------------------------------------------------------
@@ -413,10 +400,8 @@ class Qwen3MoePlugin:
                 cache_v=cache_v_inputs[layer_idx],
                 attention_mask=attention_mask,
                 position_id=position_id,
-                cos_tensor=cos_tensor,
-                sin_tensor=sin_tensor,
-                rotate_half_tensor=rotate_half_tensor,
-                attn_scale_tensor=attn_scale_tensor,
+                cos_half_tensor=cos_half_tensor,
+                sin_half_tensor=sin_half_tensor,
                 eps_tensor=eps_tensor,
                 weights=weights,
                 prefix=prefix,
@@ -717,10 +702,8 @@ def _add_qwen3_moe_decoder_layer(
     cache_v: trt.ITensor,
     attention_mask: trt.ITensor,
     position_id: trt.ITensor,
-    cos_tensor: trt.ITensor,
-    sin_tensor: trt.ITensor,
-    rotate_half_tensor: trt.ITensor,
-    attn_scale_tensor: trt.ITensor,
+    cos_half_tensor: trt.ITensor,
+    sin_half_tensor: trt.ITensor,
     eps_tensor: trt.ITensor,
     weights: WeightDict,
     prefix: str,
@@ -747,11 +730,12 @@ def _add_qwen3_moe_decoder_layer(
         hidden_size=hidden_size, attention_size=attention_size,
         num_heads=num_heads, head_dim=head_dim,
         max_cache_length=max_cache_length,
-        cos_tensor=cos_tensor, sin_tensor=sin_tensor,
-        rotate_half_tensor=rotate_half_tensor,
-        attn_scale_tensor=attn_scale_tensor, eps_tensor=eps_tensor,
+        eps_tensor=eps_tensor,
         norm_type="rmsnorm", position_type="rope",
         dtype=dtype,
+        cos_half_tensor=cos_half_tensor,
+        sin_half_tensor=sin_half_tensor,
+        rotary_embedding_dim=head_dim,
     )
     attn_out = attn["attn_out"]
 

@@ -33,30 +33,14 @@ except ImportError:
 
 
 def _add_layernorm_no_bias(network, inp, hidden_size, gamma, eps):
-    """LayerNorm without bias: gamma * (x - mean) / sqrt(var + eps).
+    """LayerNorm without bias via TRT native normalization.
 
     ModernBERT uses nn.LayerNorm(bias=False) which still mean-centers,
     unlike RMSNorm which does not.
     """
-    eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
-    gamma_t = graph_ops.add_constant(network, (1, hidden_size), gamma)
-
-    mean = network.add_reduce(inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    centered = network.add_elementwise(
-        inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
-    sq = network.add_elementwise(
-        centered.get_output(0), centered.get_output(0), trt.ElementWiseOperation.PROD)
-    var = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    denom = network.add_elementwise(
-        var.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(
-        centered.get_output(0), recip.get_output(0), trt.ElementWiseOperation.PROD)
-    scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    return scaled.get_output(0)
+    beta = np.zeros(hidden_size, dtype=np.float32)
+    return graph_ops.add_layer_norm_native(
+        network, inp, hidden_size, gamma, beta, eps)
 
 
 class ModernbertPlugin:
@@ -168,7 +152,8 @@ class ModernbertPlugin:
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network()
+        network = builder.create_network(
+            1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
         trt_config.clear_flag(trt.BuilderFlag.TF32)
@@ -177,12 +162,7 @@ class ModernbertPlugin:
         input_ids = network.add_input("input_ids", trt.int32, (max_seq,))
         attention_mask_input = network.add_input("attention_mask", trt.int32, (max_seq,))
 
-        # Attention scale constant
-        attn_scale = graph_ops.add_constant(
-            network, (1, 1, 1),
-            np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=np.float32))
-
-        # Attention mask: [seq] int -> [1, 1, seq] additive float mask
+        # Attention mask: [seq] int -> [1, 1, 1, seq] additive float mask.
         mask_float = network.add_cast(attention_mask_input, trt.float32)
         ones_c = graph_ops.add_constant(network, (1,), np.array([1.0], dtype=np.float32))
         neg_large = graph_ops.add_constant(network, (1,), np.array([-1e10], dtype=np.float32))
@@ -190,27 +170,25 @@ class ModernbertPlugin:
             ones_c, mask_float.get_output(0), trt.ElementWiseOperation.SUB)
         pad_penalty = network.add_elementwise(
             inv_mask.get_output(0), neg_large, trt.ElementWiseOperation.PROD)
-        pad_mask_3d = network.add_shuffle(pad_penalty.get_output(0))
-        pad_mask_3d.reshape_dims = (1, 1, max_seq)
+        pad_mask_4d = network.add_shuffle(pad_penalty.get_output(0))
+        pad_mask_4d.reshape_dims = (1, 1, 1, max_seq)
 
         # Pre-compute RoPE tables for both theta values
         rope_tables = {}
         for theta in set([full_theta, sliding_theta]):
             cos = graph_ops.add_constant(
-                network, (max_seq, hidden),
-                graph_ops.make_rope_table(max_seq, hidden, num_heads, theta, cosine=True))
+                network, (max_seq, head_dim // 2),
+                graph_ops.make_rope_table_half_dim(
+                    max_seq, head_dim, theta, cosine=True))
             sin = graph_ops.add_constant(
-                network, (max_seq, hidden),
-                graph_ops.make_rope_table(max_seq, hidden, num_heads, theta, cosine=False))
+                network, (max_seq, head_dim // 2),
+                graph_ops.make_rope_table_half_dim(
+                    max_seq, head_dim, theta, cosine=False))
             rope_tables[theta] = (cos, sin)
 
-        rotate_half = graph_ops.add_constant(
-            network, (hidden, hidden),
-            graph_ops.make_rotate_half_matrix(hidden, num_heads))
-
         pos_indices = graph_ops.add_constant(
-            network, (max_seq,), np.arange(max_seq, dtype=np.float32))
-        pos_int = network.add_cast(pos_indices, trt.int32)
+            network, (max_seq,), np.arange(max_seq, dtype=np.int32),
+            dtype=np.int32)
 
         # Embedding
         embed_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"])
@@ -248,42 +226,23 @@ class ModernbertPlugin:
             v = graph_ops.add_matmul_rhs_constant(network, attn_input, hidden, hidden, weights[f"{prefix}.w_v"])
 
             # RoPE
-            q = graph_ops.add_apply_rope(network, q, pos_int.get_output(0), cos_table, sin_table, rotate_half)
-            k = graph_ops.add_apply_rope(network, k, pos_int.get_output(0), cos_table, sin_table, rotate_half)
+            q = graph_ops.add_apply_rope_native(
+                network, q, num_heads, head_dim,
+                cos_table, sin_table, pos_indices, head_dim,
+                sequence_length=max_seq)
+            k = graph_ops.add_apply_rope_native(
+                network, k, num_heads, head_dim,
+                cos_table, sin_table, pos_indices, head_dim,
+                sequence_length=max_seq)
 
-            # Multi-head reshape
-            q_heads = network.add_shuffle(q)
-            q_heads.reshape_dims = (max_seq, num_heads, head_dim)
-            q_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-            k_heads = network.add_shuffle(k)
-            k_heads.reshape_dims = (max_seq, num_heads, head_dim)
-            k_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-            v_heads = network.add_shuffle(v)
-            v_heads.reshape_dims = (max_seq, num_heads, head_dim)
-            v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-            # Attention
-            score = network.add_matrix_multiply(
-                q_heads.get_output(0), trt.MatrixOperation.NONE,
-                k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-            scaled = network.add_elementwise(
-                score.get_output(0), attn_scale, trt.ElementWiseOperation.PROD)
-            masked = network.add_elementwise(
-                scaled.get_output(0), pad_mask_3d.get_output(0), trt.ElementWiseOperation.SUM)
-            softmax = network.add_softmax(masked.get_output(0))
-            softmax.axes = 1 << 2
-
-            context = network.add_matrix_multiply(
-                softmax.get_output(0), trt.MatrixOperation.NONE,
-                v_heads.get_output(0), trt.MatrixOperation.NONE)
-            context_flat = network.add_shuffle(context.get_output(0))
-            context_flat.first_transpose = trt.Permutation([1, 0, 2])
-            context_flat.reshape_dims = (max_seq, hidden)
+            context_flat = graph_ops.add_attention_from_rows(
+                network, q, k, v,
+                num_heads=num_heads, head_dim=head_dim,
+                q_seq=max_seq, kv_seq=max_seq,
+                mask=pad_mask_4d.get_output(0))
 
             attn_out = graph_ops.add_matmul_rhs_constant(
-                network, context_flat.get_output(0), hidden, hidden, weights[f"{prefix}.w_o"])
+                network, context_flat, hidden, hidden, weights[f"{prefix}.w_o"])
 
             # Residual
             res1 = network.add_elementwise(hidden_state, attn_out, trt.ElementWiseOperation.SUM)

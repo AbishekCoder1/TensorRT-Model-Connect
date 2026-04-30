@@ -426,6 +426,14 @@ int cmd_version() {
     return EXIT_SUCCESS;
 }
 
+void print_text_timing(const trtf::TextResult& result) {
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(6) << "[trtf.timing] prefill_ms=" << result.prefill_ms
+         << " decode_ms=" << result.decode_ms
+         << " total_ms=" << (result.prefill_ms + result.decode_ms);
+    std::cerr << line.str() << '\n';
+}
+
 int cmd_run(const CliArgs& args) {
     if (args.bundle_path.empty()) {
         std::cerr << "Error: run requires a .trtfb bundle file\n";
@@ -459,7 +467,6 @@ int cmd_run(const CliArgs& args) {
 
     if (args.benchmark > 0) {
         // Benchmark mode: warmup, then N timed iterations.
-        cfg.collect_timing = true;
         const int warmup_n = args.warmup > 0 ? args.warmup : 1;
         const int bench_n = args.benchmark;
 
@@ -540,9 +547,11 @@ int cmd_run(const CliArgs& args) {
 
         auto result =
             pipeline->generate(prompt, image.pixels.data(), image.height, image.width, cfg);
+        print_text_timing(result);
         std::cout << result.text << '\n';
     } else {
         auto result = pipeline->generate(prompt, cfg);
+        print_text_timing(result);
         std::cout << result.text << '\n';
     }
     return EXIT_SUCCESS;

@@ -354,19 +354,16 @@ void test_extract_bundle_defaults_finds_block() {
         "model_id": "demo",
         "vocab_size": 100,
         "defaults": {
-            "triattention": { "kv_budget": 4096, "protect_prefill": true },
-            "decode_policy": { "force_manual_attention": false }
+            "triattention": { "kv_budget": 4096, "protect_prefill": true }
         },
         "sections": {}
     })";
     auto out = trtf::config::extract_bundle_defaults(header);
-    check(out.size() == 2, "extract_defaults: two namespaces");
+    check(out.size() == 1, "extract_defaults: one namespace");
     check(std::any_cast<std::int64_t>(out.at("triattention").at("kv_budget")) == 4096,
           "extract_defaults: kv_budget");
     check(std::any_cast<bool>(out.at("triattention").at("protect_prefill")) == true,
           "extract_defaults: protect_prefill");
-    check(std::any_cast<bool>(out.at("decode_policy").at("force_manual_attention")) == false,
-          "extract_defaults: force_manual_attention");
 }
 
 void test_extract_bundle_defaults_absent_block() {

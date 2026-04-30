@@ -227,7 +227,6 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         kv_hidden = k_raw.shape[0]
         if attention_size == 0:
             attention_size = q_hidden
-        head_dim = q_hidden // num_heads
 
         q_t = _transpose_2d(q_raw, "q_proj")
         k_t = _transpose_2d(k_raw, "k_proj")
@@ -367,26 +366,19 @@ def _build_qwen3_vl_decoder(
     embedding_table = graph_ops.add_constant(
         network, (vocab, hidden), weights["embedding"])
 
-    cos_table_np = graph_ops.make_rope_table(
-        attention_window, attention_size, num_heads,
-        config.rope_theta, True)
-    sin_table_np = graph_ops.make_rope_table(
-        attention_window, attention_size, num_heads,
-        config.rope_theta, False)
-    rotate_half_np = graph_ops.make_rotate_half_matrix(
-        attention_size, num_heads)
-
-    cos_tensor = graph_ops.add_constant(
-        network, (attention_window, attention_size), cos_table_np)
-    sin_tensor = graph_ops.add_constant(
-        network, (attention_window, attention_size), sin_table_np)
-    rotate_half_tensor = graph_ops.add_constant(
-        network, (attention_size, attention_size), rotate_half_np)
+    if head_dim < 2 or head_dim % 2 != 0:
+        raise ValueError(
+            "Qwen VL RoPE requires an even head_dim >= 2 for TRT native RoPE")
+    cos_half_np = graph_ops.make_rope_table_half_dim(
+        attention_window, head_dim, config.rope_theta, True)
+    sin_half_np = graph_ops.make_rope_table_half_dim(
+        attention_window, head_dim, config.rope_theta, False)
+    cos_half_tensor = graph_ops.add_constant(
+        network, cos_half_np.shape, cos_half_np)
+    sin_half_tensor = graph_ops.add_constant(
+        network, sin_half_np.shape, sin_half_np)
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
-    attn_scale_tensor = graph_ops.add_constant(
-        network, (1, 1, 1),
-        np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=np.float32))
 
     # --- Embedding (with input_embed override for VL) ---
     gather = network.add_gather(embedding_table, token_id, 0)
@@ -429,10 +421,11 @@ def _build_qwen3_vl_decoder(
             hidden_size=hidden, attention_size=attention_size,
             num_heads=num_heads, head_dim=head_dim,
             max_cache_length=max_cache_length,
-            cos_tensor=cos_tensor, sin_tensor=sin_tensor,
-            rotate_half_tensor=rotate_half_tensor,
-            attn_scale_tensor=attn_scale_tensor, eps_tensor=eps_tensor,
+            eps_tensor=eps_tensor,
             norm_type="rmsnorm", position_type="rope",
+            cos_half_tensor=cos_half_tensor,
+            sin_half_tensor=sin_half_tensor,
+            rotary_embedding_dim=head_dim,
         )
 
         attn_out = attn["attn_out"]

@@ -88,6 +88,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
 mkdir -p "$RESULT_DIR" "$ENGINE_DIR"
+rm -f "$RESULT_DIR"/console-gpu*-w*.log \
+      "$RESULT_DIR"/junit-gpu*-w*.xml \
+      "$RESULT_DIR"/junit.xml
 
 echo "=== E2E Parallel Test Runner ==="
 echo "  GPUs:            $NUM_GPUS"
@@ -201,7 +204,7 @@ format_duration() {
 }
 
 collect_test_progress() {
-    local done=0 pass=0 fail=0 skip=0 xfail=0
+    local done=0 pass=0 fail=0 skip=0 xfail=0 xpass=0
     local files=()
     local f status
 
@@ -210,7 +213,7 @@ collect_test_progress() {
     done
 
     if [ "${#files[@]}" -eq 0 ]; then
-        echo "0 0 0 0 0"
+        echo "0 0 0 0 0 0"
         return
     fi
 
@@ -221,33 +224,46 @@ collect_test_progress() {
             PASSED) pass=$((pass + 1)) ;;
             SKIPPED) skip=$((skip + 1)) ;;
             XFAIL) xfail=$((xfail + 1)) ;;
-            FAILED|ERROR|XPASS) fail=$((fail + 1)) ;;
+            XPASS) xpass=$((xpass + 1)) ;;
+            FAILED|ERROR) fail=$((fail + 1)) ;;
         esac
     done < <(
         awk '
             /test_e2e\[/ {
+                node = ""
+                status = ""
                 for (i = 1; i <= NF; i++) {
-                    if ($i ~ /^(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)$/) {
-                        print $i
-                        break
+                    if ($i ~ /^tests\/test_e2e\.py::test_e2e\[/) {
+                        node = $i
                     }
+                    if ($i ~ /^(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)$/) {
+                        status = $i
+                    }
+                }
+                if (node != "" && status != "") {
+                    status_by_node[node] = status
+                }
+            }
+            END {
+                for (node in status_by_node) {
+                    print status_by_node[node]
                 }
             }
         ' "${files[@]}" 2>/dev/null || true
     )
 
-    echo "$done $pass $fail $skip $xfail"
+    echo "$done $pass $fail $skip $xfail $xpass"
 }
 
 print_progress() {
     local workers_done="$1"
     local workers_running="$2"
-    local elapsed now done pass fail skip xfail pct eta
+    local elapsed now done pass fail skip xfail xpass pct eta
     local eta_str=""
 
     now=$(date +%s)
     elapsed=$(( now - START_TIME ))
-    read -r done pass fail skip xfail < <(collect_test_progress)
+    read -r done pass fail skip xfail xpass < <(collect_test_progress)
     pct=$(awk -v d="$done" -v t="$TOTAL" 'BEGIN { if (t == 0) printf "0.0"; else printf "%.1f", (100.0 * d / t) }')
 
     if [ "$done" -gt 0 ] && [ "$done" -lt "$TOTAL" ]; then
@@ -255,7 +271,7 @@ print_progress() {
         eta_str=" | ETA $(format_duration "$eta")"
     fi
 
-    echo "[progress $(date +%H:%M:%S)] tests ${done}/${TOTAL} (${pct}%) pass=${pass} fail=${fail} skip=${skip} xfail=${xfail} | workers ${workers_done}/${TOTAL_WORKERS} done, ${workers_running} running | elapsed $(format_duration "$elapsed")${eta_str}"
+    echo "[progress $(date +%H:%M:%S)] tests ${done}/${TOTAL} (${pct}%) pass=${pass} fail=${fail} skip=${skip} xfail=${xfail} xpass=${xpass} | workers ${workers_done}/${TOTAL_WORKERS} done, ${workers_running} running | elapsed $(format_duration "$elapsed")${eta_str}"
 }
 
 # --- Wait and collect exit codes ----------------------------------------------

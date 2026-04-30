@@ -47,12 +47,16 @@ class _FakeLayer:
         self.axes = None
         self.axis = None
         self.output_types: list[tuple[int, object]] = []
+        self.inputs: list[tuple[int, object]] = []
 
     def get_output(self, _index: int) -> _FakeTensor:
         return self._output
 
     def set_output_type(self, index: int, dtype: object) -> None:
         self.output_types.append((index, dtype))
+
+    def set_input(self, index: int, tensor: object) -> None:
+        self.inputs.append((index, tensor))
 
 
 class _FakeNetwork:
@@ -113,6 +117,15 @@ class _FakeNetwork:
     def add_concatenation(self, *args, **kwargs) -> _FakeLayer:
         return self._record("add_concatenation", *args, **kwargs)
 
+    def add_normalization_v2(self, *args, **kwargs) -> _FakeLayer:
+        return self._record("add_normalization_v2", *args, **kwargs)
+
+    def add_attention(self, *args, **kwargs) -> _FakeLayer:
+        return self._record("add_attention", *args, **kwargs)
+
+    def add_rotary_embedding(self, *args, **kwargs) -> _FakeLayer:
+        return self._record("add_rotary_embedding", *args, **kwargs)
+
     def mark_output(self, tensor: _FakeTensor) -> None:
         self.calls.append(("mark_output", (tensor,), {}))
         self.outputs.append(tensor)
@@ -171,11 +184,14 @@ def _make_fake_trt() -> types.SimpleNamespace:
         UnaryOperation=types.SimpleNamespace(SQRT="sqrt", RECIP="recip"),
         MatrixOperation=types.SimpleNamespace(NONE="none", TRANSPOSE="transpose"),
         ActivationType=types.SimpleNamespace(SIGMOID="sigmoid"),
+        AttentionNormalizationOp=types.SimpleNamespace(SOFTMAX="softmax"),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
         BuilderFlag=types.SimpleNamespace(TF32="tf32"),
         NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         Permutation=lambda dims: tuple(dims),
         float32="float32",
+        float16="float16",
+        bfloat16="bfloat16",
         int32="int32",
     )
 
@@ -340,7 +356,7 @@ def test_build_clip_encoder_engine_success_uses_fake_builder_and_marks_outputs(m
 
     constant_payloads: list[tuple[tuple[int, ...], np.ndarray]] = []
 
-    def _fake_add_constant(_network, shape, values):
+    def _fake_add_constant(_network, shape, values, **_kwargs):
         constant_payloads.append((tuple(shape), np.asarray(values)))
         return _FakeTensor(f"const_{len(constant_payloads)}")
 
@@ -366,7 +382,7 @@ def test_build_clip_encoder_engine_success_uses_fake_builder_and_marks_outputs(m
     assert builder.config.cleared_flags == []
     assert [t.name for t in builder.network.outputs] == ["text_embeddings", "pooled_output"]
     assert [t.dtype for t in builder.network.outputs] == ["float32", "float32"]
-    assert any(shape == (1, 3, 3) for shape, _ in constant_payloads)
+    assert any(shape == (1, 1, 3, 3) for shape, _ in constant_payloads)
 
 
 @pytest.mark.unit
@@ -470,7 +486,7 @@ def test_build_t5_encoder_engine_success_exercises_relative_bias_fallback(monkey
     bucket_indices = np.array([[0, 1], [2, 3]], dtype=np.int32)
     constant_payloads: list[tuple[tuple[int, ...], np.ndarray]] = []
 
-    def _fake_add_constant(_network, shape, values):
+    def _fake_add_constant(_network, shape, values, **_kwargs):
         constant_payloads.append((tuple(shape), np.asarray(values)))
         return _FakeTensor(f"const_{len(constant_payloads)}")
 
@@ -648,19 +664,21 @@ def test_build_qwen3_encoder_engine_success_with_gqa_and_negative_output_layer(m
     """Intent: verify Qwen3 builder success path with GQA and negative output-layer selection.
 
     Preconditions: num_kv_heads differs from num_heads and graph ops return fake tensors.
-    Postconditions: Engine bytes are returned, output tensor is marked, and GQA concat ops are emitted.
+    Postconditions: Engine bytes are returned, output tensor is marked, and native GQA is requested.
     """
     fake_trt = _make_fake_trt()
     mod = _import_qwen3_with_fake_trt(fake_trt)
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
-    monkeypatch.setattr(
-        mod.graph_ops,
-        "make_rotate_half_matrix",
-        lambda total_dim, _heads, interleaved=False: np.eye(total_dim, dtype=np.float32),
-    )
     monkeypatch.setattr(mod.graph_ops, "add_rms_norm", _fake_tensor_fn("rms"))
     monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("mm"))
+    attention_calls: list[dict[str, object]] = []
+
+    def fake_attention_from_rows(*_args, **kwargs):
+        attention_calls.append(kwargs)
+        return _FakeTensor("native_gqa_attention")
+
+    monkeypatch.setattr(mod.graph_ops, "add_attention_from_rows", fake_attention_from_rows)
 
     weights = _make_qwen3_weights(
         hidden_size=4,
@@ -691,7 +709,9 @@ def test_build_qwen3_encoder_engine_success_with_gqa_and_negative_output_layer(m
     assert builder.config.cleared_flags == []
     assert [t.name for t in builder.network.outputs] == ["text_embeddings"]
     assert [t.dtype for t in builder.network.outputs] == ["float32"]
-    assert sum(1 for op, _args, _kwargs in builder.network.calls if op == "add_concatenation") >= 2
+    assert attention_calls
+    assert all(call["num_kv_heads"] == 1 for call in attention_calls)
+    assert not any(op == "add_concatenation" for op, _args, _kwargs in builder.network.calls)
 
 
 @pytest.mark.unit
@@ -705,11 +725,6 @@ def test_build_qwen3_encoder_engine_output_layer_overflow_falls_back_to_final_hi
     mod = _import_qwen3_with_fake_trt(fake_trt)
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
-    monkeypatch.setattr(
-        mod.graph_ops,
-        "make_rotate_half_matrix",
-        lambda total_dim, _heads, interleaved=False: np.eye(total_dim, dtype=np.float32),
-    )
     monkeypatch.setattr(mod.graph_ops, "add_rms_norm", _fake_tensor_fn("rms"))
     monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("mm"))
 
@@ -751,11 +766,6 @@ def test_build_qwen3_encoder_engine_raises_when_builder_returns_none(monkeypatch
     mod = _import_qwen3_with_fake_trt(fake_trt)
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
-    monkeypatch.setattr(
-        mod.graph_ops,
-        "make_rotate_half_matrix",
-        lambda total_dim, _heads, interleaved=False: np.eye(total_dim, dtype=np.float32),
-    )
     monkeypatch.setattr(mod.graph_ops, "add_rms_norm", _fake_tensor_fn("rms"))
     monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("mm"))
 

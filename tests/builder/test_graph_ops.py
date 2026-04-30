@@ -146,7 +146,7 @@ class TestMakeRopeTable:
 
 
 # ===================================================================
-# 4. make_rotate_half_matrix (pure numpy, no TRT)
+# 4. RoPE reference helpers
 # ===================================================================
 
 def _hf_rotate_half(x: np.ndarray) -> np.ndarray:
@@ -155,66 +155,23 @@ def _hf_rotate_half(x: np.ndarray) -> np.ndarray:
     return np.concatenate([-x2, x1], axis=-1)
 
 
-def _hf_rotate_every_two(x: np.ndarray) -> np.ndarray:
-    x1 = x[..., ::2]
-    x2 = x[..., 1::2]
-    stacked = np.stack([-x2, x1], axis=-1)
-    return stacked.reshape(x.shape)
-
-
-class TestMakeRotateHalfMatrix:
-    @pytest.mark.parametrize("hidden,heads", [(64, 4), (128, 8), (768, 12)])
-    def test_rotated_half(self, hidden, heads):
-        rng = np.random.RandomState(42)
-        mat = graph_ops.make_rotate_half_matrix(hidden, heads)
-        x = rng.randn(1, hidden).astype(np.float32)
-        ours = x @ mat
-        hd = hidden // heads
-        ref_parts = [_hf_rotate_half(x[:, h*hd:(h+1)*hd]) for h in range(heads)]
-        ref = np.concatenate(ref_parts, axis=-1)
-        np.testing.assert_allclose(ours, ref, atol=1e-6)
-
-    @pytest.mark.parametrize("hidden,heads", [(64, 4), (128, 8)])
-    def test_interleaved(self, hidden, heads):
-        rng = np.random.RandomState(42)
-        mat = graph_ops.make_rotate_half_matrix(hidden, heads, interleaved=True)
-        x = rng.randn(1, hidden).astype(np.float32)
-        ours = x @ mat
-        hd = hidden // heads
-        ref_parts = [
-            _hf_rotate_every_two(x[:, h*hd:(h+1)*hd]) for h in range(heads)]
-        ref = np.concatenate(ref_parts, axis=-1)
-        np.testing.assert_allclose(ours, ref, atol=1e-6)
-
-    def test_partial_rotary_standard(self):
-        rng = np.random.RandomState(42)
-        mat = graph_ops.make_rotate_half_matrix(64, 4, partial_rotary_factor=0.5)
-        x = rng.randn(1, 64).astype(np.float32)
-        ours = x @ mat
-        hd = 16
-        rotary = 8
-        for h in range(4):
-            base = h * hd
-            ref_rot = _hf_rotate_half(x[:, base:base+rotary])
-            np.testing.assert_allclose(ours[:, base:base+rotary], ref_rot, atol=1e-6)
-            np.testing.assert_allclose(
-                ours[:, base+rotary:base+hd], x[:, base+rotary:base+hd], atol=1e-6)
-
-    def test_partial_rotary_interleaved(self):
-        rng = np.random.RandomState(42)
-        mat = graph_ops.make_rotate_half_matrix(
-            64, 4, partial_rotary_factor=0.5, interleaved=True)
-        x = rng.randn(1, 64).astype(np.float32)
-        ours = x @ mat
-        hd = 16
-        rotary = 8
-        for h in range(4):
-            base = h * hd
-            ref_rot = _hf_rotate_every_two(x[:, base:base+rotary])
-            np.testing.assert_allclose(
-                ours[:, base:base+rotary], ref_rot, atol=1e-6)
-            np.testing.assert_allclose(
-                ours[:, base+rotary:base+hd], x[:, base+rotary:base+hd], atol=1e-6)
+def _apply_rope_rows_reference(
+    x: np.ndarray,
+    cos_table: np.ndarray,
+    sin_table: np.ndarray,
+    heads: int,
+) -> np.ndarray:
+    head_dim = x.shape[-1] // heads
+    out = np.empty_like(x)
+    for head in range(heads):
+        start = head * head_dim
+        end = start + head_dim
+        x_head = x[:, start:end]
+        out[:, start:end] = (
+            x_head * cos_table[:, start:end]
+            + _hf_rotate_half(x_head) * sin_table[:, start:end]
+        )
+    return out
 
 
 # ===================================================================
@@ -428,94 +385,6 @@ class TestAddActivation:
             graph_ops.add_activation(network, inp, "swish_unknown")
 
 
-# 13. add_apply_rope
-@requires_trt
-class TestAddApplyRope:
-    @pytest.mark.parametrize("interleaved", [False, True])
-    @pytest.mark.parametrize("pos", [0, 3, 7])
-    def test_vs_hf_reference(self, trt_runner, interleaved, pos):
-        rng = np.random.RandomState(42)
-        hidden, heads, head_dim, max_len = 64, 4, 16, 8
-
-        x_np = rng.randn(1, hidden).astype(np.float32)
-        cos_tbl = graph_ops.make_rope_table(
-            max_len, hidden, heads, 10000.0, True, interleaved=interleaved)
-        sin_tbl = graph_ops.make_rope_table(
-            max_len, hidden, heads, 10000.0, False, interleaved=interleaved)
-        rot_mat = graph_ops.make_rotate_half_matrix(
-            hidden, heads, interleaved=interleaved)
-
-        def build(net, inp, ct=cos_tbl, st=sin_tbl, rm=rot_mat):
-            cos_t = graph_ops.add_constant(net, ct.shape, ct)
-            sin_t = graph_ops.add_constant(net, st.shape, st)
-            rot_t = graph_ops.add_constant(net, rm.shape, rm)
-            out = graph_ops.add_apply_rope(
-                net, inp["x"], inp["pos"], cos_t, sin_t, rot_t)
-            return {"out": out}
-
-        pos_np = np.array([pos], dtype=np.int32)
-        result = trt_runner(build, {"x": x_np, "pos": pos_np})
-        trt_out = result["out"].flatten()
-
-        cos_row = cos_tbl[pos]
-        sin_row = sin_tbl[pos]
-        ref_parts = []
-        for h in range(heads):
-            s, e = h * head_dim, (h + 1) * head_dim
-            xh, ch, sh = x_np[0, s:e], cos_row[s:e], sin_row[s:e]
-            if interleaved:
-                x1, x2 = xh[::2], xh[1::2]
-                rotated = np.stack([-x2, x1], axis=-1).reshape(xh.shape)
-                ref_parts.append(xh * ch + rotated * sh)
-            else:
-                half = head_dim // 2
-                rotated = np.concatenate([-xh[half:], xh[:half]])
-                ref_parts.append(xh * ch + rotated * sh)
-        ref = np.concatenate(ref_parts)
-        np.testing.assert_allclose(trt_out, ref, atol=1e-5)
-
-    def test_partial_rotary(self, trt_runner):
-        rng = np.random.RandomState(42)
-        hidden, heads, head_dim, max_len = 64, 4, 16, 8
-        pf = 0.5
-
-        x_np = rng.randn(1, hidden).astype(np.float32)
-        cos_tbl = graph_ops.make_rope_table(
-            max_len, hidden, heads, 10000.0, True, partial_rotary_factor=pf)
-        sin_tbl = graph_ops.make_rope_table(
-            max_len, hidden, heads, 10000.0, False, partial_rotary_factor=pf)
-        rot_mat = graph_ops.make_rotate_half_matrix(
-            hidden, heads, partial_rotary_factor=pf)
-
-        def build(net, inp):
-            cos_t = graph_ops.add_constant(net, cos_tbl.shape, cos_tbl)
-            sin_t = graph_ops.add_constant(net, sin_tbl.shape, sin_tbl)
-            rot_t = graph_ops.add_constant(net, rot_mat.shape, rot_mat)
-            out = graph_ops.add_apply_rope(
-                net, inp["x"], inp["pos"], cos_t, sin_t, rot_t)
-            return {"out": out}
-
-        pos_np = np.array([3], dtype=np.int32)
-        result = trt_runner(build, {"x": x_np, "pos": pos_np})
-        trt_out = result["out"].flatten()
-
-        rotary_nd = int(head_dim * pf)
-        cos_row, sin_row = cos_tbl[3], sin_tbl[3]
-        ref_parts = []
-        for h in range(heads):
-            s = h * head_dim
-            xh = x_np[0, s:s+head_dim]
-            ch = cos_row[s:s+head_dim]
-            sh = sin_row[s:s+head_dim]
-            half = rotary_nd // 2
-            xr = xh[:rotary_nd]
-            rotated = np.concatenate([-xr[half:], xr[:half]])
-            roped = xr * ch[:rotary_nd] + rotated * sh[:rotary_nd]
-            ref_parts.append(np.concatenate([roped, xh[rotary_nd:]]))
-        ref = np.concatenate(ref_parts)
-        np.testing.assert_allclose(trt_out, ref, atol=1e-5)
-
-
 # ===================================================================
 # 14. add_self_attention_block (TRT)
 # ===================================================================
@@ -627,8 +496,6 @@ class TestAddSelfAttentionBlockWithRope:
 
         cos_table = graph_ops.make_rope_table(seq, hidden, heads, 10000.0, True)
         sin_table = graph_ops.make_rope_table(seq, hidden, heads, 10000.0, False)
-        rot_mat = graph_ops.make_rotate_half_matrix(hidden, heads)
-
         def build(net, inp):
             out = graph_ops.add_self_attention_block_with_rope(
                 net, inp["x"], w_q, w_k, w_v, w_o,
@@ -644,9 +511,8 @@ class TestAddSelfAttentionBlockWithRope:
         k = x_np @ w_k
         v = x_np @ w_v
 
-        # Apply RoPE via matrix multiply
-        q_roped = q * cos_table + (q @ rot_mat) * sin_table
-        k_roped = k * cos_table + (k @ rot_mat) * sin_table
+        q_roped = _apply_rope_rows_reference(q, cos_table, sin_table, heads)
+        k_roped = _apply_rope_rows_reference(k, cos_table, sin_table, heads)
 
         scale = 1.0 / np.sqrt(head_dim)
         q_h = q_roped.reshape(seq, heads, head_dim).transpose(1, 0, 2)

@@ -3,9 +3,12 @@
 #include "trtf/runtime/trt_backend.h"
 #include "utils/json_helpers.h"
 
+#include <chrono>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -15,6 +18,24 @@
 #endif
 
 namespace trtf {
+
+namespace {
+
+using SteadyClock = std::chrono::steady_clock;
+
+double elapsed_ms(SteadyClock::time_point start, SteadyClock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+} // namespace
+
+void log_trt_load_timing(const char* label, double load_deserialize_ms, std::size_t plan_bytes) {
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(6) << "[trtf.load_timing] label=\""
+         << (label ? label : "engine") << "\" load_deserialize_ms=" << load_deserialize_ms
+         << " plan_bytes=" << plan_bytes;
+    std::cerr << line.str() << '\n';
+}
 
 // Tokenizer helpers.
 
@@ -133,9 +154,13 @@ LoadedModule load_trt_module_from_plan(IBackend* backend, const std::vector<char
         throw std::runtime_error("No backend loaded");
 
     LoadedModule result;
+    const auto t0 = SteadyClock::now();
     result.module = backend->create_module(plan->data(), plan->size(), options);
+    const auto t1 = SteadyClock::now();
+    log_trt_load_timing(label, elapsed_ms(t0, t1), plan->size());
     if (!result.module || !result.module->ok())
         throw std::runtime_error(std::string("Failed to create ITrtModule for ") + label);
+    result.module->set_timing_label(label ? label : "engine");
     return result;
 }
 
@@ -171,13 +196,20 @@ DualProfileModules load_dual_profile_modules(IBackend* backend, const std::vecto
     if (!backend)
         throw std::runtime_error("No backend loaded");
 
+    const auto t0 = SteadyClock::now();
     auto pair = backend->create_dual_profile_modules(plan->data(), plan->size(), options);
+    const auto t1 = SteadyClock::now();
+    log_trt_load_timing(label, elapsed_ms(t0, t1), plan->size());
     if (!pair.decode || !pair.decode->ok())
         throw std::runtime_error(std::string("Failed to create dual-profile modules for ") + label);
 
     DualProfileModules out;
     out.prefill = std::move(pair.prefill);
     out.decode = std::move(pair.decode);
+    if (out.prefill)
+        out.prefill->set_timing_label(std::string(label ? label : "engine") + ":prefill");
+    if (out.decode)
+        out.decode->set_timing_label(std::string(label ? label : "engine") + ":decode");
     return out;
 }
 

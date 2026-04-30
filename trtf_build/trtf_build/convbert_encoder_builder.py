@@ -53,7 +53,8 @@ def build_convbert_encoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     trt_config.clear_flag(trt.BuilderFlag.TF32)
@@ -70,7 +71,6 @@ def build_convbert_encoder_engine(
     # pipeline doesn't provide this input, and inference is single-segment.
     tt_zeros = network.add_constant(
         (S,), trt.Weights(np.zeros(S, dtype=np.int32)))
-    tt_zeros.get_output(0).dtype = trt.int32
     token_type_ids = tt_zeros.get_output(0)
 
     # -------------------------------------------------------------------
@@ -82,9 +82,6 @@ def build_convbert_encoder_engine(
         network, weights["position_embedding"].shape, weights["position_embedding"])
     token_type_table = graph_ops.add_constant(
         network, (type_vocab_size, embedding_size), weights["token_type_embedding"])
-
-    attn_scale = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([1.0 / np.sqrt(max(head_size, 1))], dtype=np.float32))
 
     # Additive attention mask: [1, 1, S]
     mask_float = network.add_cast(attention_mask_input, trt.float32)
@@ -137,7 +134,6 @@ def build_convbert_encoder_engine(
             all_head_size=all_head_size,
             conv_kernel_size=conv_kernel_size,
             seq_length=S,
-            attn_scale=attn_scale,
             attn_mask=attn_mask,
             hidden_act=hidden_act,
             eps=eps,
@@ -173,28 +169,9 @@ def _add_seq_layer_norm(
     beta: np.ndarray,
     eps: float,
 ) -> trt.ITensor:
-    """LayerNorm over [seq_len, hidden] -> [seq_len, hidden]."""
-    gamma_t = graph_ops.add_constant(network, (1, hidden_size), gamma)
-    beta_t = graph_ops.add_constant(network, (1, hidden_size), beta)
-    eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
-
-    mean = network.add_reduce(inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    centered = network.add_elementwise(
-        inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
-    sq = network.add_elementwise(
-        centered.get_output(0), centered.get_output(0), trt.ElementWiseOperation.PROD)
-    var = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    denom_in = network.add_elementwise(
-        var.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(
-        centered.get_output(0), recip.get_output(0), trt.ElementWiseOperation.PROD)
-    scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    result = network.add_elementwise(
-        scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
-    return result.get_output(0)
+    """LayerNorm over [seq_len, hidden] using TRT native normalization."""
+    return graph_ops.add_layer_norm_native(
+        network, inp, hidden_size, gamma, beta, eps)
 
 
 def _add_separable_conv1d(
@@ -347,7 +324,6 @@ def _add_convbert_layer(
     all_head_size: int,
     conv_kernel_size: int,
     seq_length: int,
-    attn_scale: trt.ITensor,
     attn_mask: trt.ITensor,
     hidden_act: str,
     eps: float,
@@ -369,39 +345,21 @@ def _add_convbert_layer(
 
     mixed_query = q  # save for conv branch
 
-    # Reshape: [seq, all_head_size] -> [new_num_heads, seq, head_size]
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (S, new_num_heads, head_size)
-    q_heads.second_transpose = trt.Permutation([1, 0, 2])
+    # Key padding mask broadcasts across every query row.
+    mask_row = network.add_shuffle(attn_mask)
+    mask_row.reshape_dims = (1, S)
+    zero_col = graph_ops.add_constant(
+        network, (S, 1), np.zeros((S, 1), dtype=np.float32))
+    mask_2d = network.add_elementwise(
+        zero_col, mask_row.get_output(0), trt.ElementWiseOperation.SUM)
+    mask_4d = graph_ops.add_2d_mask_to_4d(network, mask_2d.get_output(0))
 
-    k_heads = network.add_shuffle(k)
-    k_heads.reshape_dims = (S, new_num_heads, head_size)
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
+    context = graph_ops.add_attention_from_rows(
+        network, q, k, v,
+        num_heads=new_num_heads, head_dim=head_size,
+        q_seq=S, kv_seq=S, mask=mask_4d)
 
-    v_heads = network.add_shuffle(v)
-    v_heads.reshape_dims = (S, new_num_heads, head_size)
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention scores
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-    scaled_score = network.add_elementwise(
-        score.get_output(0), attn_scale, trt.ElementWiseOperation.PROD)
-
-    masked = network.add_elementwise(
-        scaled_score.get_output(0), attn_mask, trt.ElementWiseOperation.SUM)
-
-    softmax = network.add_softmax(masked.get_output(0))
-    softmax.axes = 1 << 2
-
-    context_heads = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    # [new_num_heads, seq, head_size] -> [seq, new_num_heads, head_size]
-    context_perm = network.add_shuffle(context_heads.get_output(0))
-    context_perm.first_transpose = trt.Permutation([1, 0, 2])
+    context_perm = network.add_shuffle(context)
     context_perm.reshape_dims = (S, new_num_heads, head_size)
 
     # === Branch 2: Span-based dynamic convolution ===

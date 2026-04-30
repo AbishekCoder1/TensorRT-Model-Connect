@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,47 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_STAGES = {"full_generation", "prefill", "decode"}
+_TRTF_TIMING_RE = re.compile(
+    r"^\[trtf\.timing\]\s+"
+    r"prefill_ms=(?P<prefill_ms>[-+0-9.eE]+)\s+"
+    r"decode_ms=(?P<decode_ms>[-+0-9.eE]+)\s+"
+    r"total_ms=(?P<total_ms>[-+0-9.eE]+)\s*$",
+    re.MULTILINE,
+)
+_TRTF_LOAD_TIMING_RE = re.compile(
+    r"^\[trtf\.load_timing\]\s+.*?"
+    r"load_deserialize_ms=(?P<load_deserialize_ms>[-+0-9.eE]+)",
+    re.MULTILINE,
+)
+
+
+def _extract_trtf_timing(stderr: str) -> dict[str, float]:
+    match = _TRTF_TIMING_RE.search(stderr or "")
+    if match is None:
+        return {}
+    try:
+        prefill_ms = float(match.group("prefill_ms"))
+        decode_ms = float(match.group("decode_ms"))
+        total_ms = float(match.group("total_ms"))
+    except ValueError:
+        return {}
+    return {
+        "trt_engine_prefill_s": prefill_ms / 1000.0,
+        "trt_engine_decode_s": decode_ms / 1000.0,
+        "trt_engine_s": total_ms / 1000.0,
+    }
+
+
+def _extract_trtf_load_timing(stderr: str) -> dict[str, float]:
+    total_ms = 0.0
+    found = False
+    for match in _TRTF_LOAD_TIMING_RE.finditer(stderr or ""):
+        try:
+            total_ms += float(match.group("load_deserialize_ms"))
+            found = True
+        except ValueError:
+            continue
+    return {"trt_load_deserialize_s": total_ms / 1000.0} if found else {}
 
 
 class TextGenerationCausalRunner:
@@ -253,6 +295,8 @@ class TextGenerationCausalRunner:
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
+        meta.update(_extract_trtf_timing(result.stderr))
+        meta.update(_extract_trtf_load_timing(result.stderr))
         if result.returncode != 0:
             truncated, log_path = save_full_stderr(
                 result.stderr, ctx.artifacts_dir or "", "cpp_binary")

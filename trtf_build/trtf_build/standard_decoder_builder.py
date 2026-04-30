@@ -145,11 +145,6 @@ def build_standard_decoder_engine(
     attention_window = max_cache_length + 1
     dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
     dynamic_kv_opt_rows = int(config.raw.get("_dynamic_kv_opt_length", max_cache_length))
-    # Build-time decode policy. engine_builder stashes the resolved value on
-    # config.raw before dispatching to the family plugin, so we don't have
-    # to thread a new kwarg through every family's build_engine signature.
-    # Previously this was TRTF_FORCE_MANUAL_DECODER_ATTENTION env var.
-    force_manual_attention = bool(config.raw.get("_decode_policy_force_manual_attention", False))
     dynamic_kv_opt_rows = max(1, min(dynamic_kv_opt_rows, max_cache_length))
     raw_profile_rows = config.raw.get("_dynamic_kv_profile_rows")
     if raw_profile_rows:
@@ -265,62 +260,32 @@ def build_standard_decoder_engine(
         network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
 
     # RoPE tables (only needed when position_type == "rope")
-    cos_tensor = None
-    sin_tensor = None
-    rotate_half_tensor = None
     position_embed_table = None
     alibi_slopes_tensor = None
     alibi_indices_tensor = None
 
     # Native RoPE tensors for IRotaryEmbeddingLayer (TRT 10+).
-    # Shape: [attention_window, rotary_ndims // 2] — one entry per position,
-    # half the rotating dimension (IRotaryEmbeddingLayer broadcasts per-head).
+    # Shape: [attention_window, rotary_ndims // 2].
     cos_half_tensor = None
     sin_half_tensor = None
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
 
     if position_type == "rope":
-        cos_table_np = graph_ops.make_rope_table(
-            attention_window, attention_size, num_heads, config.rope_theta, True,
+        if rotary_embedding_dim < 2 or rotary_embedding_dim % 2 != 0:
+            raise ValueError(
+                "TRT native RoPE requires an even rotary_embedding_dim >= 2")
+        cos_half_np = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, True,
             partial_rotary_factor, interleaved=interleaved_rope)
-        sin_table_np = graph_ops.make_rope_table(
-            attention_window, attention_size, num_heads, config.rope_theta, False,
+        sin_half_np = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, False,
             partial_rotary_factor, interleaved=interleaved_rope)
-        rotate_half_np = graph_ops.make_rotate_half_matrix(
-            attention_size, num_heads, partial_rotary_factor,
-            interleaved=interleaved_rope)
-
-        cos_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), cos_table_np,
-            dtype=work_np_dtype)
-        cos_tensor = _cast_work_dtype(cos_tensor)
-        sin_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), sin_table_np,
-            dtype=work_np_dtype)
-        sin_tensor = _cast_work_dtype(sin_tensor)
-        rotate_half_tensor = graph_ops.add_constant(
-            network, (attention_size, attention_size), rotate_half_np,
-            dtype=work_np_dtype)
-        rotate_half_tensor = _cast_work_dtype(rotate_half_tensor)
-
-        # Half-dim tables for native IRotaryEmbeddingLayer.
-        # Shape [attention_window, rotary_ndims // 2]; TRT broadcasts across heads.
-        # IRotaryEmbeddingLayer requires rotary_embedding_dim >= 2 and even;
-        # fall back to manual RoPE for degenerate configs (e.g. tiny synthetic
-        # models with partial_rotary_factor producing an odd dim).
-        if rotary_embedding_dim >= 2 and rotary_embedding_dim % 2 == 0:
-            cos_half_np = graph_ops.make_rope_table_half_dim(
-                attention_window, head_dim, config.rope_theta, True,
-                partial_rotary_factor, interleaved=interleaved_rope)
-            sin_half_np = graph_ops.make_rope_table_half_dim(
-                attention_window, head_dim, config.rope_theta, False,
-                partial_rotary_factor, interleaved=interleaved_rope)
-            cos_half_tensor = graph_ops.add_constant(
-                network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
-            cos_half_tensor = _cast_work_dtype(cos_half_tensor)
-            sin_half_tensor = graph_ops.add_constant(
-                network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
-            sin_half_tensor = _cast_work_dtype(sin_half_tensor)
+        cos_half_tensor = graph_ops.add_constant(
+            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
+        cos_half_tensor = _cast_work_dtype(cos_half_tensor)
+        sin_half_tensor = graph_ops.add_constant(
+            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
+        sin_half_tensor = _cast_work_dtype(sin_half_tensor)
     elif position_type == "learned":
         pos_embed_np = weights["position_embedding"]
         position_embed_table = graph_ops.add_constant(
@@ -329,22 +294,18 @@ def build_standard_decoder_engine(
         alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads)
         alibi_slopes_tensor = graph_ops.add_constant(
             network, (num_heads, 1, 1),
-            alibi_slopes_np.reshape(num_heads, 1, 1), dtype=work_np_dtype)
+            alibi_slopes_np.reshape(num_heads, 1, 1), dtype=np.float32)
         # Cache position indices [0, 1, ..., max_cache_length-1].
         # The current token's position (position_id) is appended at runtime.
         alibi_indices_tensor = graph_ops.add_constant(
             network, (max_cache_length,),
-            np.arange(max_cache_length, dtype=work_np_dtype),
-            dtype=work_np_dtype)
+            np.arange(max_cache_length, dtype=np.float32),
+            dtype=np.float32)
 
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
         dtype=work_np_dtype)
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
-    attn_scale_tensor = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=work_np_dtype),
-        dtype=work_np_dtype)
-
     # ---------------------------------------------------------------
     # Embedding lookup (with optional embed_input override for VL)
     # ---------------------------------------------------------------
@@ -410,7 +371,7 @@ def build_standard_decoder_engine(
         _mark_debug_output(network, hidden_state, "debug_embed")
 
     # FFI attention kernel: set by the perf agent on their branch.
-    # Default: None (use decomposed attention).
+    # Default: None (use native TRT attention).
     ffi_attention_kernel = None
 
     # ---------------------------------------------------------------
@@ -429,11 +390,9 @@ def build_standard_decoder_engine(
             cache_v=cache_v_inputs[layer_idx],
             attention_mask=attention_mask,
             position_id=position_id,
-            cos_tensor=cos_tensor,
-            sin_tensor=sin_tensor,
-            rotate_half_tensor=rotate_half_tensor,
-            attn_scale_tensor=attn_scale_tensor,
+            attention_scale=attn_scale,
             eps_tensor=eps_tensor,
+            eps=config.rms_norm_eps,
             weights=weights,
             prefix=prefix,
             hidden_size=hidden,
@@ -457,7 +416,6 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             ffi_attention_kernel=ffi_attention_kernel,
             dynamic_kv_cache=dynamic_kv_cache,
-            force_manual_attention=force_manual_attention,
         )
 
         hidden_state = result["hidden"]
@@ -476,7 +434,7 @@ def build_standard_decoder_engine(
         hidden_state = _apply_norm(
             network, hidden_state, hidden, final_norm,
             weights.get("final_norm_beta"), eps_tensor, norm_type,
-            dtype=work_np_dtype)
+            dtype=work_np_dtype, eps=config.rms_norm_eps)
 
     # Optional: mark hidden state as extra output for speech pipelines
     if hidden_state_output:
@@ -546,11 +504,12 @@ def _apply_norm(
     eps_tensor: trt.ITensor,
     norm_type: str,
     dtype: np.dtype = np.float32,
+    eps: float | None = None,
 ) -> trt.ITensor:
     """Dispatch to RMSNorm or LayerNorm based on norm_type."""
     return graph_blocks.apply_norm(
         network, inp, hidden_size, gamma, beta, eps_tensor, norm_type,
-        dtype=dtype)
+        dtype=dtype, eps=eps)
 
 
 def _add_decoder_layer(
@@ -561,10 +520,7 @@ def _add_decoder_layer(
     cache_v: trt.ITensor,
     attention_mask: trt.ITensor,
     position_id: trt.ITensor,
-    cos_tensor: trt.ITensor | None,
-    sin_tensor: trt.ITensor | None,
-    rotate_half_tensor: trt.ITensor | None,
-    attn_scale_tensor: trt.ITensor,
+    attention_scale: float | None,
     eps_tensor: trt.ITensor,
     weights: WeightDict,
     prefix: str,
@@ -589,7 +545,7 @@ def _add_decoder_layer(
     interleaved_rope: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
-    force_manual_attention: bool = False,
+    eps: float | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
 
@@ -600,9 +556,8 @@ def _add_decoder_layer(
         hidden_size=hidden_size, attention_size=attention_size,
         num_heads=num_heads, head_dim=head_dim,
         max_cache_length=max_cache_length,
-        cos_tensor=cos_tensor, sin_tensor=sin_tensor,
-        rotate_half_tensor=rotate_half_tensor,
-        attn_scale_tensor=attn_scale_tensor, eps_tensor=eps_tensor,
+        attention_scale=attention_scale,
+        eps_tensor=eps_tensor, eps=eps,
         norm_type=norm_type, position_type=position_type,
         alibi_slopes_tensor=alibi_slopes_tensor,
         alibi_indices_tensor=alibi_indices_tensor,
@@ -615,7 +570,6 @@ def _add_decoder_layer(
         interleaved_rope=interleaved_rope,
         ffi_attention_kernel=ffi_attention_kernel,
         dynamic_kv_cache=dynamic_kv_cache,
-        force_manual_attention=force_manual_attention,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]
@@ -629,7 +583,7 @@ def _add_decoder_layer(
                 network, hidden, hidden_size,
                 post_attn_norm_w,
                 weights.get(f"{prefix}.post_attn_norm_beta"),
-                eps_tensor, norm_type, dtype=dtype)
+                eps_tensor, norm_type, dtype=dtype, eps=eps)
         else:
             norm2 = attn["normed"]
     else:
@@ -639,7 +593,7 @@ def _add_decoder_layer(
             network, residual1.get_output(0), hidden_size,
             weights[f"{prefix}.post_attn_norm"],
             weights.get(f"{prefix}.post_attn_norm_beta"),
-            eps_tensor, norm_type, dtype=dtype)
+            eps_tensor, norm_type, dtype=dtype, eps=eps)
 
     # MLP
     if mlp_type == "gelu_fc":

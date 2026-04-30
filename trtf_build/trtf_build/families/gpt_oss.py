@@ -302,36 +302,32 @@ class GptOssPlugin:
             yarn_beta_fast = float(rope_params.get("beta_fast", 32.0))
             yarn_beta_slow = float(rope_params.get("beta_slow", 1.0))
 
-            cos_table_np = graph_ops.make_yarn_rope_table(
-                attention_window, attention_size, num_heads,
+            cos_half_np = graph_ops.make_yarn_rope_table_half_dim(
+                attention_window, head_dim,
                 config.rope_theta, True,
                 scaling_factor=yarn_factor,
                 original_max_position_embeddings=yarn_orig_max,
                 beta_fast=yarn_beta_fast,
                 beta_slow=yarn_beta_slow)
-            sin_table_np = graph_ops.make_yarn_rope_table(
-                attention_window, attention_size, num_heads,
+            sin_half_np = graph_ops.make_yarn_rope_table_half_dim(
+                attention_window, head_dim,
                 config.rope_theta, False,
                 scaling_factor=yarn_factor,
                 original_max_position_embeddings=yarn_orig_max,
                 beta_fast=yarn_beta_fast,
                 beta_slow=yarn_beta_slow)
         else:
-            cos_table_np = graph_ops.make_rope_table(
-                attention_window, attention_size, num_heads,
+            cos_half_np = graph_ops.make_rope_table_half_dim(
+                attention_window, head_dim,
                 config.rope_theta, True)
-            sin_table_np = graph_ops.make_rope_table(
-                attention_window, attention_size, num_heads,
+            sin_half_np = graph_ops.make_rope_table_half_dim(
+                attention_window, head_dim,
                 config.rope_theta, False)
-        rotate_half_np = graph_ops.make_rotate_half_matrix(
-            attention_size, num_heads)
 
-        cos_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), cos_table_np)
-        sin_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), sin_table_np)
-        rotate_half_tensor = graph_ops.add_constant(
-            network, (attention_size, attention_size), rotate_half_np)
+        cos_half_tensor = graph_ops.add_constant(
+            network, cos_half_np.shape, cos_half_np)
+        sin_half_tensor = graph_ops.add_constant(
+            network, sin_half_np.shape, sin_half_np)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
@@ -366,9 +362,8 @@ class GptOssPlugin:
                 cache_v=cache_v_inputs[layer_idx],
                 attention_mask=attention_mask,
                 position_id=position_id,
-                cos_tensor=cos_tensor,
-                sin_tensor=sin_tensor,
-                rotate_half_tensor=rotate_half_tensor,
+                cos_half_tensor=cos_half_tensor,
+                sin_half_tensor=sin_half_tensor,
                 attn_scale_tensor=attn_scale_tensor,
                 eps_tensor=eps_tensor,
                 weights=weights,
@@ -627,9 +622,8 @@ def _add_gpt_oss_attention(
     num_heads: int,
     head_dim: int,
     max_cache_length: int,
-    cos_tensor: trt.ITensor,
-    sin_tensor: trt.ITensor,
-    rotate_half_tensor: trt.ITensor,
+    cos_half_tensor: trt.ITensor,
+    sin_half_tensor: trt.ITensor,
     attn_scale_tensor: trt.ITensor,
 ) -> dict[str, trt.ITensor]:
     """GPT-OSS attention with attention sinks.
@@ -669,11 +663,13 @@ def _add_gpt_oss_attention(
     if v_bias is not None:
         v = graph_ops.add_bias_sum(network, v, attention_size, v_bias)
 
-    # RoPE
-    q = graph_ops.add_apply_rope(
-        network, q, position_id, cos_tensor, sin_tensor, rotate_half_tensor)
-    k = graph_ops.add_apply_rope(
-        network, k, position_id, cos_tensor, sin_tensor, rotate_half_tensor)
+    # Native RoPE
+    q = graph_ops.add_apply_rope_native(
+        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        position_id, head_dim)
+    k = graph_ops.add_apply_rope_native(
+        network, k, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        position_id, head_dim)
 
     # Save present K/V
     present_k = k
@@ -692,37 +688,46 @@ def _add_gpt_oss_attention(
         [cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
 
-    # Multi-head reshape
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (num_heads, 1, head_dim)
-
-    k_heads = network.add_shuffle(all_k.get_output(0))
-    k_heads.reshape_dims = (attention_window, num_heads, head_dim)
-    v_heads = network.add_shuffle(all_v.get_output(0))
-    v_heads.reshape_dims = (attention_window, num_heads, head_dim)
-
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention scores: Q @ K^T * scale
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-    scaled = network.add_elementwise(
-        score.get_output(0), attn_scale_tensor,
-        trt.ElementWiseOperation.PROD)
-
-    # Apply causal mask: [num_heads, 1, attention_window]
-    mask3d = network.add_shuffle(attention_mask)
-    mask3d.reshape_dims = (1, 1, attention_window)
-    masked = network.add_elementwise(
-        scaled.get_output(0), mask3d.get_output(0),
-        trt.ElementWiseOperation.SUM)
-    # masked: [num_heads, 1, attention_window]
-
-    # --- Attention sinks ---
+    # Native attention is valid when no learned attention sink logits are
+    # present. Sink logits append an extra softmax column and must stay manual.
     sinks = weights.get(f"{prefix}.sinks")
-    if sinks is not None:
+    if sinks is None:
+        mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
+        context_flat = graph_ops.add_attention_from_rows(
+            network, q, all_k.get_output(0), all_v.get_output(0),
+            num_heads=num_heads, head_dim=head_dim,
+            q_seq=1, kv_seq=attention_window,
+            mask=mask_4d)
+    else:
+        # Multi-head reshape
+        q_heads = network.add_shuffle(q)
+        q_heads.reshape_dims = (num_heads, 1, head_dim)
+
+        k_heads = network.add_shuffle(all_k.get_output(0))
+        k_heads.reshape_dims = (attention_window, num_heads, head_dim)
+        v_heads = network.add_shuffle(all_v.get_output(0))
+        v_heads.reshape_dims = (attention_window, num_heads, head_dim)
+
+        k_heads.second_transpose = trt.Permutation([1, 0, 2])
+        v_heads.second_transpose = trt.Permutation([1, 0, 2])
+
+        # Attention scores: Q @ K^T * scale
+        score = network.add_matrix_multiply(
+            q_heads.get_output(0), trt.MatrixOperation.NONE,
+            k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
+        scaled = network.add_elementwise(
+            score.get_output(0), attn_scale_tensor,
+            trt.ElementWiseOperation.PROD)
+
+        # Apply causal mask: [num_heads, 1, attention_window]
+        mask3d = network.add_shuffle(attention_mask)
+        mask3d.reshape_dims = (1, 1, attention_window)
+        masked = network.add_elementwise(
+            scaled.get_output(0), mask3d.get_output(0),
+            trt.ElementWiseOperation.SUM)
+        # masked: [num_heads, 1, attention_window]
+
+        # --- Attention sinks ---
         # sinks: [num_heads] -> reshape to [num_heads, 1, 1]
         sinks_const = graph_ops.add_constant(
             network, (num_heads, 1, 1), sinks.reshape(num_heads, 1, 1))
@@ -750,19 +755,14 @@ def _add_gpt_oss_attention(
             shape=(num_heads, 1, attention_window),
             stride=(1, 1, 1))
         attn_probs = scores.get_output(0)
-    else:
-        # No sinks: standard softmax
-        softmax = network.add_softmax(masked.get_output(0))
-        softmax.axes = 1 << 2
-        attn_probs = softmax.get_output(0)
 
-    # Context: attn_probs @ V
-    context_heads = network.add_matrix_multiply(
-        attn_probs, trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
+        # Context: attn_probs @ V
+        context_heads = network.add_matrix_multiply(
+            attn_probs, trt.MatrixOperation.NONE,
+            v_heads.get_output(0), trt.MatrixOperation.NONE)
 
-    context_flat = network.add_shuffle(context_heads.get_output(0))
-    context_flat.reshape_dims = (1, attention_size)
+        context_flat = network.add_shuffle(context_heads.get_output(0))
+        context_flat.reshape_dims = (1, attention_size)
 
     # Output projection with bias
     attn_out = graph_ops.add_matmul_rhs_constant(
@@ -788,9 +788,8 @@ def _add_gpt_oss_decoder_layer(
     cache_v: trt.ITensor,
     attention_mask: trt.ITensor,
     position_id: trt.ITensor,
-    cos_tensor: trt.ITensor,
-    sin_tensor: trt.ITensor,
-    rotate_half_tensor: trt.ITensor,
+    cos_half_tensor: trt.ITensor,
+    sin_half_tensor: trt.ITensor,
     attn_scale_tensor: trt.ITensor,
     eps_tensor: trt.ITensor,
     weights: WeightDict,
@@ -819,8 +818,7 @@ def _add_gpt_oss_decoder_layer(
         hidden_size=hidden_size, attention_size=attention_size,
         num_heads=num_heads, head_dim=head_dim,
         max_cache_length=max_cache_length,
-        cos_tensor=cos_tensor, sin_tensor=sin_tensor,
-        rotate_half_tensor=rotate_half_tensor,
+        cos_half_tensor=cos_half_tensor, sin_half_tensor=sin_half_tensor,
         attn_scale_tensor=attn_scale_tensor,
     )
 

@@ -10,7 +10,6 @@ include("${CMAKE_CURRENT_LIST_DIR}/trtf_registration_manifest.cmake")
 
 set(TRTF_CONFIG_SCHEMAS
   "triattention.cpp|register_triattention_schema"
-  "decode_policy.cpp|register_decode_policy_schema"
   "text_trace.cpp|register_text_trace_schema"
   "runtime.cpp|register_runtime_schema"
   "audio_bark.cpp|register_audio_bark_schema"

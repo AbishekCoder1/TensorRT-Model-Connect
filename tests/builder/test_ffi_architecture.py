@@ -1,19 +1,15 @@
-"""Tests for FFI kernel architecture: attention extraction, kernel setup, .so bundling.
+"""Tests for FFI kernel architecture: kernel setup and .so bundling.
 
 Intent:
     Validates the refactored FFI kernel architecture:
-    1. Decomposed decoder attention extracted to graph_ops produces correct output
-    2. FFI decoder attention extracted to graph_ops builds a valid engine
-    3. Kernel .so files round-trip through the bundle format
-    4. FlashInfer kernel setup returns a valid (name, so_path) pair
+    1. Kernel .so files round-trip through the bundle format
+    2. FlashInfer kernel setup returns a valid (name, so_path) pair
 
 Preconditions:
-    - Tests 1-2: TensorRT + CUDA available
-    - Test 3: No special deps (pure Python)
-    - Test 4: FlashInfer + TVM-FFI + CUDA available
+    - Bundle tests: No special deps (pure Python)
+    - FlashInfer tests: FlashInfer + TVM-FFI + CUDA available
 
 Postconditions:
-    - Extracted attention functions match the inline implementations
     - Bundle kernel manifest + .so sections survive write/read round-trip
     - FlashInfer setup produces a registered kernel + valid .so path
 
@@ -27,21 +23,12 @@ import struct
 import tempfile
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 try:
     import trtf_build  # noqa: F401
 except ImportError:
     pytest.skip("trtf_build not importable", allow_module_level=True)
-
-
-def _trt_available():
-    try:
-        import tensorrt as trt  # noqa: F401
-        return True
-    except ImportError:
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -168,104 +155,7 @@ class TestBundleKernelManifest:
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Decomposed attention extraction (TRT required)
-# ---------------------------------------------------------------------------
-
-
-class TestDecomposedAttentionExtraction:
-    """Verify add_decoder_attention_decomposed() produces correct output."""
-
-    @pytest.mark.trt
-    @pytest.mark.skipif(not _trt_available(), reason="TRT not available")
-    def test_decomposed_attention_output_shape(self, trt_runner):
-        """Decomposed attention returns [1, attention_size] tensor."""
-        from trtf_build import graph_ops
-
-        num_heads = 4
-        head_dim = 8
-        attention_size = num_heads * head_dim
-        max_cache = 16
-        attention_window = max_cache + 1
-
-        np.random.seed(42)
-        inputs = {
-            "q": np.random.randn(1, attention_size).astype(np.float32),
-            "all_k": np.random.randn(attention_window, attention_size).astype(np.float32),
-            "all_v": np.random.randn(attention_window, attention_size).astype(np.float32),
-            "attention_mask": np.zeros((1, attention_window), dtype=np.float32),
-            "attn_scale": np.array([1.0 / np.sqrt(head_dim)], dtype=np.float32).reshape(1, 1, 1),
-        }
-
-        def build_fn(network, trt_inputs):
-            import tensorrt as trt
-            scale_const = network.add_constant(
-                (1, 1, 1), trt.Weights(inputs["attn_scale"]))
-            out = graph_ops.add_decoder_attention_decomposed(
-                network,
-                trt_inputs["q"], trt_inputs["all_k"], trt_inputs["all_v"],
-                trt_inputs["attention_mask"],
-                num_heads=num_heads, head_dim=head_dim,
-                attention_window=attention_window,
-                attn_scale_tensor=scale_const.get_output(0))
-            return {"output": out}
-
-        result = trt_runner(build_fn, inputs)
-        assert result["output"].shape == (1, attention_size)
-        # Output should be finite (no NaN/Inf)
-        assert np.all(np.isfinite(result["output"]))
-
-    @pytest.mark.trt
-    @pytest.mark.skipif(not _trt_available(), reason="TRT not available")
-    def test_decomposed_attention_numerics(self, trt_runner):
-        """Verify decomposed attention matches manual softmax(Q@K^T/scale)@V."""
-        from trtf_build import graph_ops
-
-        num_heads = 2
-        head_dim = 4
-        attention_size = num_heads * head_dim
-        attention_window = 3
-
-        np.random.seed(123)
-        q = np.random.randn(1, attention_size).astype(np.float32)
-        k = np.random.randn(attention_window, attention_size).astype(np.float32)
-        v = np.random.randn(attention_window, attention_size).astype(np.float32)
-        mask = np.zeros((1, attention_window), dtype=np.float32)
-        scale = 1.0 / np.sqrt(head_dim)
-
-        # Reference: manual numpy computation
-        q_h = q.reshape(num_heads, 1, head_dim)
-        k_h = k.reshape(attention_window, num_heads, head_dim).transpose(1, 0, 2)
-        v_h = v.reshape(attention_window, num_heads, head_dim).transpose(1, 0, 2)
-        scores = np.matmul(q_h, k_h.transpose(0, 2, 1)) * scale
-        scores += mask.reshape(1, 1, attention_window)
-        probs = np.exp(scores - scores.max(axis=-1, keepdims=True))
-        probs = probs / probs.sum(axis=-1, keepdims=True)
-        ref = np.matmul(probs, v_h).reshape(1, attention_size)
-
-        inputs = {
-            "q": q, "all_k": k, "all_v": v, "attention_mask": mask,
-            "attn_scale": np.array([scale], dtype=np.float32).reshape(1, 1, 1),
-        }
-
-        def build_fn(network, trt_inputs):
-            import tensorrt as trt
-            scale_const = network.add_constant(
-                (1, 1, 1), trt.Weights(inputs["attn_scale"]))
-            out = graph_ops.add_decoder_attention_decomposed(
-                network,
-                trt_inputs["q"], trt_inputs["all_k"], trt_inputs["all_v"],
-                trt_inputs["attention_mask"],
-                num_heads=num_heads, head_dim=head_dim,
-                attention_window=attention_window,
-                attn_scale_tensor=scale_const.get_output(0))
-            return {"output": out}
-
-        result = trt_runner(build_fn, inputs)
-        np.testing.assert_allclose(result["output"], ref, atol=1e-4, rtol=1e-3)
-
-
-# ---------------------------------------------------------------------------
-# Test 3: FlashInfer kernel setup (FlashInfer + TVM-FFI required)
+# Test 2: FlashInfer kernel setup (FlashInfer + TVM-FFI required)
 # ---------------------------------------------------------------------------
 
 
@@ -320,7 +210,7 @@ class TestFlashInferKernelSetup:
 
 
 # ---------------------------------------------------------------------------
-# Test 4: Engine builder kernel_artifacts parameter
+# Test 3: Engine builder kernel_artifacts parameter
 # ---------------------------------------------------------------------------
 
 

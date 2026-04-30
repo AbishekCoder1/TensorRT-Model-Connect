@@ -84,11 +84,18 @@ def apply_norm(
     eps_tensor: trt.ITensor,
     norm_type: str,
     dtype: np.dtype = np.float32,
+    eps: float | None = None,
 ) -> trt.ITensor:
     """Dispatch to RMSNorm or LayerNorm based on norm_type."""
     if norm_type == "layernorm":
         if beta is None:
             beta = np.zeros(hidden_size, dtype=np.float32)
+        if eps is not None:
+            return graph_ops.add_layer_norm_native(
+                network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
+        # Native INormalizationLayer requires a build-time scalar epsilon.
+        # Some callers only pass epsilon as an ITensor, so keep the manual
+        # shared fallback until those builders thread the scalar too.
         return graph_ops.add_layer_norm(
             network, inp, hidden_size, gamma, beta, eps_tensor, dtype=dtype)
     else:
@@ -111,11 +118,9 @@ def add_attention_block(
     num_heads: int,
     head_dim: int,
     max_cache_length: int,
-    cos_tensor: trt.ITensor | None,
-    sin_tensor: trt.ITensor | None,
-    rotate_half_tensor: trt.ITensor | None,
-    attn_scale_tensor: trt.ITensor,
     eps_tensor: trt.ITensor,
+    attention_scale: float | None = None,
+    eps: float | None = None,
     norm_type: str = "rmsnorm",
     position_type: str = "rope",
     alibi_slopes_tensor: trt.ITensor | None = None,
@@ -123,30 +128,24 @@ def add_attention_block(
     dtype: np.dtype = np.float32,
     quant_ctx: QuantContext | None = None,
     layer_prefix: str = "",
-    # TRT 10 native API tensors (optional — when provided, replaces manual
-    # rotate-half RoPE and the score/softmax/V chain with fused kernels).
+    # TRT 10 native API tensors.
     cos_half_tensor: trt.ITensor | None = None,
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
-    # Build-time decode policy; resolved by engine_builder from the
-    # decode_policy.* config namespace. No env-var fallback — that was
-    # TRTF_FORCE_MANUAL_DECODER_ATTENTION, now deleted.
-    force_manual_attention: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
     Returns {"normed": ..., "attn_out": ..., "present_k": ..., "present_v": ...}.
     Does NOT apply residual -- callers compose the residual pattern.
 
-    When ``cos_half_tensor`` / ``sin_half_tensor`` are provided the function
-    uses TRT 10 native APIs:
-      - IRotaryEmbeddingLayer  (replaces the rotate-half matmul+elementwise chain)
-      - IAttention             (replaces the Q@K^T → scale → mask → softmax → @V chain)
-    Otherwise it falls back to the manual primitive implementation, which is
-    used for ALiBi and other callers that have not yet been updated.
+    This function uses TRT 10 native APIs for the basic transformer primitives:
+      - IRotaryEmbeddingLayer for RoPE
+      - IAttention for scaled dot-product attention
+    ALiBi is represented as a per-head additive attention mask and still uses
+    native IAttention.
     """
     matmul = _make_matmul_fn(network, dtype, quant_ctx)
     attention_window = max_cache_length + 1
@@ -160,7 +159,7 @@ def add_attention_block(
         network, hidden, hidden_size,
         weights[f"{prefix}.input_norm"],
         weights.get(f"{prefix}.input_norm_beta"),
-        eps_tensor, norm_type, dtype=dtype)
+        eps_tensor, norm_type, dtype=dtype, eps=eps)
 
     # QKV projections
     q = matmul(normed, hidden_size, attention_size,
@@ -192,32 +191,28 @@ def add_attention_block(
             network, k, num_heads, head_dim, k_norm, eps_tensor, dtype=dtype)
 
     # ------------------------------------------------------------------ #
-    # RoPE — native IRotaryEmbeddingLayer or manual rotate-half fallback  #
+    # RoPE via native IRotaryEmbeddingLayer                              #
     # ------------------------------------------------------------------ #
-    use_native_rope = (
-        position_type == "rope"
-        and cos_half_tensor is not None
-        and sin_half_tensor is not None
-        and alibi_slopes_tensor is None  # ALiBi still uses manual path
-    )
-    use_native_attention = use_native_rope and not force_manual_attention
+    use_native_attention = ffi_attention_kernel is None
 
-    if use_native_rope:
+    if position_type == "rope":
+        if cos_half_tensor is None or sin_half_tensor is None:
+            raise ValueError(
+                "RoPE attention requires half-dimension cos/sin tensors for "
+                "TRT native IRotaryEmbeddingLayer")
+        rope_dim = rotary_embedding_dim or head_dim
+        if rope_dim < 2 or rope_dim % 2 != 0:
+            raise ValueError(
+                "TRT native IRotaryEmbeddingLayer requires an even "
+                "rotary_embedding_dim >= 2")
         q = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
             cos_half_tensor, sin_half_tensor, position_id,
-            rotary_embedding_dim or head_dim, interleaved_rope)
+            rope_dim, interleaved_rope)
         k = graph_ops.add_apply_rope_native(
             network, k, num_heads, head_dim,
             cos_half_tensor, sin_half_tensor, position_id,
-            rotary_embedding_dim or head_dim, interleaved_rope)
-    elif position_type == "rope" and cos_tensor is not None:
-        q = graph_ops.add_apply_rope(
-            network, q, position_id, cos_tensor, sin_tensor,
-            rotate_half_tensor)
-        k = graph_ops.add_apply_rope(
-            network, k, position_id, cos_tensor, sin_tensor,
-            rotate_half_tensor)
+            rope_dim, interleaved_rope)
 
     # Save present K/V (before concatenation, this is the raw projection output)
     present_k = k
@@ -238,68 +233,39 @@ def add_attention_block(
     all_v.axis = 0
 
     # ------------------------------------------------------------------ #
-    # Attention core — native IAttention, FFI kernel, or manual fallback  #
+    # Attention core — native IAttention or FFI kernel                    #
     # ------------------------------------------------------------------ #
     if use_native_attention:
-        # Reshape Q/K/V to [B=1, H, S, D] for IAttention.
-        #
-        # Q layout: [1, H*D] — heads are contiguous, so reshape directly.
-        q_4d = network.add_shuffle(q)
-        q_4d.reshape_dims = (1, num_heads, 1, head_dim)
+        kv_seq = None if dynamic_kv_cache else attention_window
+        if alibi_slopes_tensor is not None:
+            if alibi_indices_tensor is None:
+                raise ValueError("ALiBi attention requires cache position indices")
+            if dynamic_kv_cache:
+                raise ValueError("dynamic_kv_cache is not supported for ALiBi attention")
+            mask_4d = graph_ops.add_alibi_mask_4d(
+                network,
+                attention_mask,
+                position_id,
+                alibi_slopes_tensor,
+                alibi_indices_tensor,
+                num_heads,
+            )
+        else:
+            mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
 
-        # K/V layout: [attention_window, H*D] — each row has all heads interleaved.
-        # Direct reshape to [1, H, S, D] would mis-map heads and positions.
-        # Correct: reshape to [S, H, D], transpose to [H, S, D], add batch dim.
-        kv_3d_k = network.add_shuffle(all_k.get_output(0))
-        kv_3d_k.reshape_dims = (
-            (-1, num_heads, head_dim)
-            if dynamic_kv_cache
-            else (attention_window, num_heads, head_dim)
-        )
-        kv_3d_k.second_transpose = trt.Permutation([1, 0, 2])
-        all_k_4d = network.add_shuffle(kv_3d_k.get_output(0))
-        all_k_4d.reshape_dims = (
-            (1, num_heads, -1, head_dim)
-            if dynamic_kv_cache
-            else (1, num_heads, attention_window, head_dim)
-        )
-
-        kv_3d_v = network.add_shuffle(all_v.get_output(0))
-        kv_3d_v.reshape_dims = (
-            (-1, num_heads, head_dim)
-            if dynamic_kv_cache
-            else (attention_window, num_heads, head_dim)
-        )
-        kv_3d_v.second_transpose = trt.Permutation([1, 0, 2])
-        all_v_4d = network.add_shuffle(kv_3d_v.get_output(0))
-        all_v_4d.reshape_dims = (
-            (1, num_heads, -1, head_dim)
-            if dynamic_kv_cache
-            else (1, num_heads, attention_window, head_dim)
-        )
-
-        # Reshape mask [1, attention_window] → [1, 1, 1, attention_window]
-        # for broadcast across the head dimension.
-        mask_4d = network.add_shuffle(attention_mask)
-        mask_4d.reshape_dims = (
-            (1, 1, 1, -1)
-            if dynamic_kv_cache
-            else (1, 1, 1, attention_window)
-        )
-
-        ctx_4d = graph_ops._add_attention_core(
+        context = graph_ops.add_attention_from_rows(
             network,
-            q_4d.get_output(0),
-            all_k_4d.get_output(0),
-            all_v_4d.get_output(0),
+            q,
+            all_k.get_output(0),
+            all_v.get_output(0),
+            num_heads=num_heads,
+            head_dim=head_dim,
+            q_seq=1,
+            kv_seq=kv_seq,
             causal=False,
-            mask=mask_4d.get_output(0),
+            mask=mask_4d,
+            scale=attention_scale,
         )
-
-        # Reshape [1, num_heads, 1, head_dim] → [1, attention_size]
-        context_flat = network.add_shuffle(ctx_4d)
-        context_flat.reshape_dims = (1, attention_size)
-        context = context_flat.get_output(0)
     elif ffi_attention_kernel is not None:
         # Fused attention kernel via TVM-FFI plugin
         context = graph_ops.add_decoder_attention_ffi(
@@ -307,104 +273,6 @@ def add_attention_block(
             kernel_name=ffi_attention_kernel,
             num_heads=num_heads, head_dim=head_dim,
             attention_window=attention_window)
-    elif not dynamic_kv_cache:
-        # Standard decomposed attention path (master's extracted helper).
-        context = graph_ops.add_decoder_attention_decomposed(
-            network, q, all_k.get_output(0), all_v.get_output(0),
-            attention_mask,
-            num_heads=num_heads, head_dim=head_dim,
-            attention_window=attention_window,
-            attn_scale_tensor=attn_scale_tensor,
-            alibi_slopes_tensor=alibi_slopes_tensor,
-            alibi_indices_tensor=alibi_indices_tensor,
-            position_id=position_id)
-    else:
-        # TriAttention dynamic-KV path: identical decomposition but the K/V
-        # and mask reshapes use -1 so the engine accepts runtime-variable
-        # cache lengths. Keep inline until the extracted helper also
-        # supports a dynamic profile.
-        q_heads = network.add_shuffle(q)
-        q_heads.reshape_dims = (num_heads, 1, head_dim)
-
-        k_heads = network.add_shuffle(all_k.get_output(0))
-        k_heads.reshape_dims = (-1, num_heads, head_dim)
-        v_heads = network.add_shuffle(all_v.get_output(0))
-        v_heads.reshape_dims = (-1, num_heads, head_dim)
-
-        k_heads.second_transpose = trt.Permutation([1, 0, 2])
-        v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        score_q = q_heads.get_output(0)
-        score_k = k_heads.get_output(0)
-        attn_scale_value = attn_scale_tensor
-        if score_q.dtype != trt.float32:
-            score_q = network.add_cast(score_q, trt.float32).get_output(0)
-            score_k = network.add_cast(score_k, trt.float32).get_output(0)
-            attn_scale_value = network.add_cast(attn_scale_value, trt.float32).get_output(0)
-
-        score = network.add_matrix_multiply(
-            score_q, trt.MatrixOperation.NONE,
-            score_k, trt.MatrixOperation.TRANSPOSE)
-
-        scaled = network.add_elementwise(
-            score.get_output(0), attn_scale_value,
-            trt.ElementWiseOperation.PROD)
-
-        if alibi_slopes_tensor is not None and alibi_indices_tensor is not None:
-            pos_float = network.add_cast(position_id, trt.float32)
-            pos_1d = network.add_shuffle(pos_float.get_output(0))
-            pos_1d.reshape_dims = (1,)
-            full_indices = network.add_concatenation(
-                [alibi_indices_tensor, pos_1d.get_output(0)])
-            full_indices.axis = 0
-            idx_3d = network.add_shuffle(full_indices.get_output(0))
-            idx_3d.reshape_dims = (1, 1, attention_window)
-            pos_reshaped = network.add_shuffle(pos_float.get_output(0))
-            pos_reshaped.reshape_dims = (1, 1, 1)
-            rel_pos = network.add_elementwise(
-                idx_3d.get_output(0), pos_reshaped.get_output(0),
-                trt.ElementWiseOperation.SUB)
-            alibi_slopes_value = alibi_slopes_tensor
-            if alibi_slopes_value.dtype != rel_pos.get_output(0).dtype:
-                alibi_slopes_value = network.add_cast(
-                    alibi_slopes_value, rel_pos.get_output(0).dtype).get_output(0)
-            alibi_bias = network.add_elementwise(
-                alibi_slopes_value, rel_pos.get_output(0),
-                trt.ElementWiseOperation.PROD)
-            scaled = network.add_elementwise(
-                scaled.get_output(0), alibi_bias.get_output(0),
-                trt.ElementWiseOperation.SUM)
-
-        mask3d = network.add_shuffle(attention_mask)
-        mask3d.reshape_dims = (1, 1, -1)
-
-        mask_value = mask3d.get_output(0)
-        if mask_value.dtype != scaled.get_output(0).dtype:
-            mask_value = network.add_cast(mask_value, scaled.get_output(0).dtype).get_output(0)
-
-        mask_value = mask3d.get_output(0)
-        if mask_value.dtype != scaled.get_output(0).dtype:
-            mask_value = network.add_cast(mask_value, scaled.get_output(0).dtype).get_output(0)
-
-        masked = network.add_elementwise(
-            scaled.get_output(0), mask_value,
-            trt.ElementWiseOperation.SUM)
-
-        softmax = network.add_softmax(masked.get_output(0))
-        softmax.axes = 1 << 2
-
-        softmax_out = softmax.get_output(0)
-        v_value = v_heads.get_output(0)
-        if softmax_out.dtype != v_value.dtype:
-            softmax_out = network.add_cast(softmax_out, v_value.dtype).get_output(0)
-
-        context_heads = network.add_matrix_multiply(
-            softmax_out, trt.MatrixOperation.NONE,
-            v_value, trt.MatrixOperation.NONE)
-
-        context_flat = network.add_shuffle(context_heads.get_output(0))
-        context_flat.reshape_dims = (1, attention_size)
-        context = context_flat.get_output(0)
 
     # Output projection
     attn_out = matmul(context,
@@ -618,14 +486,12 @@ def add_dit_block(
     # --- Cross-attention (no AdaLN, uses standard LayerNorm) ---
     cross_norm_gamma = weights.get(f"{prefix}.norm_cross.gamma")
     if cross_norm_gamma is not None:
-        eps_t = graph_ops.add_constant(
-            network, (1, 1), np.array([eps], dtype=np.float32), dtype=dtype)
-        cross_normed = graph_ops.add_layer_norm(
+        cross_normed = graph_ops.add_layer_norm_native(
             network, hidden, hidden_size,
             cross_norm_gamma,
             weights.get(f"{prefix}.norm_cross.beta",
                         np.zeros(hidden_size, dtype=np.float32)),
-            eps_t, dtype=dtype)
+            eps, dtype=dtype)
     else:
         cross_normed = hidden
 
@@ -845,26 +711,23 @@ def add_vae_spatial_attention(
     k = k_slice.get_output(0)
     v = v_slice.get_output(0)
 
-    # Attention: score = Q @ K^T / sqrt(C)  -> [BT, HW, HW]
-    score = network.add_matrix_multiply(
-        q, trt.MatrixOperation.NONE,
-        k, trt.MatrixOperation.TRANSPOSE)
-
-    scale_const = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32), dtype=dtype)
-    scaled = network.add_elementwise(
-        score.get_output(0), scale_const, trt.ElementWiseOperation.PROD)
-
-    softmax = network.add_softmax(scaled.get_output(0))
-    softmax.axes = 1 << 2  # last dim
-
-    # Context = softmax @ V  -> [BT, HW, C]
-    context = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v, trt.MatrixOperation.NONE)
+    # Native attention over spatial positions for each B*T frame.
+    q_4d = network.add_shuffle(q)
+    q_4d.reshape_dims = (bt, 1, hw, c)
+    k_4d = network.add_shuffle(k)
+    k_4d.reshape_dims = (bt, 1, hw, c)
+    v_4d = network.add_shuffle(v)
+    v_4d.reshape_dims = (bt, 1, hw, c)
+    context = graph_ops.add_attention_core(
+        network,
+        q_4d.get_output(0),
+        k_4d.get_output(0),
+        v_4d.get_output(0),
+        scale=attn_scale,
+    )
 
     # Flatten context to 2D for output projection: [BT*HW, C]
-    ctx_flat = network.add_shuffle(context.get_output(0))
+    ctx_flat = network.add_shuffle(context)
     ctx_flat.reshape_dims = (bt * hw, c)
 
     # Output projection: [BT*HW, C] @ [C, C] -> [BT*HW, C]

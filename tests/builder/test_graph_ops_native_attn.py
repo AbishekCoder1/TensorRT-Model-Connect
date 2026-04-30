@@ -319,6 +319,52 @@ class TestAddApplyRopeNative:
         np.testing.assert_allclose(result, ref, atol=1e-3,
                                    err_msg=f"pos={pos}: native RoPE mismatch")
 
+    @requires_trt
+    def test_multi_token_matches_ref(self):
+        num_heads, head_dim, sq = 4, 32, 4
+        attention_size = num_heads * head_dim
+        max_S = 32
+        rope_theta = 10000.0
+
+        cos_half_np = graph_ops.make_rope_table_half_dim(
+            max_S, head_dim, rope_theta, True)
+        sin_half_np = graph_ops.make_rope_table_half_dim(
+            max_S, head_dim, rope_theta, False)
+
+        rng = np.random.default_rng(123)
+        x = rng.standard_normal((sq, attention_size)).astype(np.float32)
+        pos_arr = np.array([0, 3, 7, 11], dtype=np.int32)
+
+        def build(network, trt_inputs):
+            cos_t = graph_ops.add_constant(
+                network, cos_half_np.shape, cos_half_np)
+            sin_t = graph_ops.add_constant(
+                network, sin_half_np.shape, sin_half_np)
+            out = graph_ops.add_apply_rope_native(
+                network, trt_inputs["x"],
+                num_heads, head_dim,
+                cos_t, sin_t,
+                trt_inputs["pos"],
+                head_dim, interleaved=False,
+                sequence_length=None)
+            return {"out": out}
+
+        result = _run_strongly_typed(
+            build, {"x": x, "pos": pos_arr})["out"]
+
+        rows = []
+        for row, pos in enumerate(pos_arr):
+            cos_full = np.concatenate([cos_half_np[pos], cos_half_np[pos]])
+            sin_full = np.concatenate([sin_half_np[pos], sin_half_np[pos]])
+            rows.append(
+                _ref_rope(
+                    x[row:row + 1], cos_full, sin_full,
+                    num_heads, head_dim))
+        ref = np.concatenate(rows, axis=0)
+
+        np.testing.assert_allclose(result, ref, atol=1e-3,
+                                   err_msg="multi-token native RoPE mismatch")
+
 
 # ---------------------------------------------------------------------------
 # 4. _add_attention_core — TRT test vs. numpy SDPA reference

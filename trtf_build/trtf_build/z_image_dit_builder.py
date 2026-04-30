@@ -43,7 +43,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_ops
-from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor
 
 
 def load_z_image_dit_weights(
@@ -200,40 +200,30 @@ def build_z_image_dit_engine(
         network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
     ones_t = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
 
-    # Build rotate-half matrix for RoPE (interleaved pairs)
-    rot_half_np = graph_ops.make_rotate_half_matrix(
-        head_dim * num_heads, num_heads, interleaved=True)
-    rot_half = graph_ops.add_constant(
-        network, (num_heads * head_dim, num_heads * head_dim), rot_half_np)
-
-    # Tile RoPE from [total_seq, head_dim] to [total_seq, num_heads * head_dim]
-    cos_expand = _tile_rope_for_heads(network, rope_cos, num_heads, total_seq, head_dim)
-    sin_expand = _tile_rope_for_heads(network, rope_sin, num_heads, total_seq, head_dim)
-
     noise = noise_inp
     caption = caption_inp
 
     # --- Noise refiner (on noise only, with AdaLN) ---
-    noise_cos = _slice_rope(network, cos_expand, 0, num_patches, num_heads * head_dim)
-    noise_sin = _slice_rope(network, sin_expand, 0, num_patches, num_heads * head_dim)
+    noise_cos = _slice_rope(network, rope_cos, 0, num_patches, head_dim)
+    noise_sin = _slice_rope(network, rope_sin, 0, num_patches, head_dim)
     for i in range(num_refiner_layers):
         tp = f"noise_refiner.{i}"
         noise = _add_adaln_dit_block(
             network, noise, weights, tp, temb_inp,
             dim, num_heads, head_dim, ffn_dim, adaln_embed_dim,
-            num_patches, eps_t, scale_t, rot_half,
+            num_patches, eps_t, scale_t,
             noise_cos, noise_sin, ones_t,
         )
 
     # --- Context refiner (on caption only, no AdaLN) ---
-    cap_cos = _slice_rope(network, cos_expand, num_patches, text_seq_len, num_heads * head_dim)
-    cap_sin = _slice_rope(network, sin_expand, num_patches, text_seq_len, num_heads * head_dim)
+    cap_cos = _slice_rope(network, rope_cos, num_patches, text_seq_len, head_dim)
+    cap_sin = _slice_rope(network, rope_sin, num_patches, text_seq_len, head_dim)
     for i in range(num_refiner_layers):
         tp = f"context_refiner.{i}"
         caption = _add_plain_dit_block(
             network, caption, weights, tp,
             dim, num_heads, head_dim, ffn_dim, text_seq_len,
-            eps_t, scale_t, rot_half, cap_cos, cap_sin,
+            eps_t, scale_t, cap_cos, cap_sin,
         )
 
     # --- Main layers (unified: noise + caption concatenated) ---
@@ -299,8 +289,10 @@ def build_z_image_dit_engine(
         k = _per_head_rms_norm(network, k, num_heads, head_dim, k_norm_tiled, eps_t, total_seq)
 
         # Apply RoPE (full unified sequence)
-        q = _apply_rope(network, q, cos_expand, sin_expand, rot_half)
-        k = _apply_rope(network, k, cos_expand, sin_expand, rot_half)
+        q = _apply_native_rope_from_full_cache(
+            network, q, rope_cos, rope_sin, num_heads, head_dim, total_seq)
+        k = _apply_native_rope_from_full_cache(
+            network, k, rope_cos, rope_sin, num_heads, head_dim, total_seq)
 
         # Multi-head attention
         attn_out = _multi_head_attention(
@@ -418,93 +410,40 @@ def build_z_image_dit_engine(
     return bytes(plan)
 
 
-def _tile_rope_for_heads(network, rope, num_heads, seq_len, head_dim):
-    """Tile [seq, head_dim] -> [seq, num_heads * head_dim]."""
-    if num_heads == 1:
-        return rope
-    parts = [rope] * num_heads
-    concat = network.add_concatenation(parts)
-    concat.axis = 1
-    return concat.get_output(0)
-
-
 def _slice_rope(network, rope, start_seq, length, rope_dim):
     """Slice RoPE along sequence dimension."""
     s = network.add_slice(rope, start=(start_seq, 0), shape=(length, rope_dim), stride=(1, 1))
     return s.get_output(0)
 
 
-def _apply_rope(network, x, cos_t, sin_t, rot_half):
-    """Apply RoPE: x * cos + rotate_half(x) * sin."""
-    x_rot = network.add_matrix_multiply(
-        x, trt.MatrixOperation.NONE, rot_half, trt.MatrixOperation.NONE)
-    x_cos = network.add_elementwise(x, cos_t, trt.ElementWiseOperation.PROD)
-    x_sin = network.add_elementwise(
-        x_rot.get_output(0), sin_t, trt.ElementWiseOperation.PROD)
-    return network.add_elementwise(
-        x_cos.get_output(0), x_sin.get_output(0),
-        trt.ElementWiseOperation.SUM).get_output(0)
+def _apply_native_rope_from_full_cache(
+    network, x, cos_t, sin_t, num_heads, head_dim, seq_len,
+):
+    """Apply TRT native RoPE using runtime full-dimension cos/sin rows."""
+    return graph_ops.add_apply_rope_native_from_full_cache(
+        network, x, num_heads, head_dim, cos_t, sin_t,
+        seq_len, interleaved=True)
 
 
 def _per_head_rms_norm(network, inp, num_heads, head_dim, gamma, eps_t, seq_len):
     """Per-head RMSNorm: [seq, num_heads * head_dim] -> reshape -> norm -> reshape."""
-    r1 = network.add_shuffle(inp)
-    r1.reshape_dims = (seq_len * num_heads, head_dim)
-
-    reshaped = r1.get_output(0)
-    sq = network.add_elementwise(reshaped, reshaped, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    denom = network.add_elementwise(mean.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(
-        reshaped, recip.get_output(0), trt.ElementWiseOperation.PROD)
-
-    gamma_t = graph_ops.add_constant(network, (1, head_dim), gamma[0:1])
-    scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-
-    r2 = network.add_shuffle(scaled.get_output(0))
-    r2.reshape_dims = (seq_len, num_heads * head_dim)
-    return r2.get_output(0)
+    return graph_ops.add_rms_norm_per_head(
+        network, inp, num_heads, head_dim, gamma, eps_t,
+        sequence_length=seq_len)
 
 
 def _multi_head_attention(network, q, k, v, num_heads, head_dim, q_seq, kv_seq, scale_t):
     """Standard multi-head attention."""
-    q_h = network.add_shuffle(q)
-    q_h.reshape_dims = (q_seq, num_heads, head_dim)
-    q_h.second_transpose = trt.Permutation([1, 0, 2])
-
-    k_h = network.add_shuffle(k)
-    k_h.reshape_dims = (kv_seq, num_heads, head_dim)
-    k_h.second_transpose = trt.Permutation([1, 0, 2])
-
-    v_h = network.add_shuffle(v)
-    v_h.reshape_dims = (kv_seq, num_heads, head_dim)
-    v_h.second_transpose = trt.Permutation([1, 0, 2])
-
-    score = network.add_matrix_multiply(
-        q_h.get_output(0), trt.MatrixOperation.NONE,
-        k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
-    scaled = network.add_elementwise(
-        score.get_output(0), scale_t, trt.ElementWiseOperation.PROD)
-    softmax = network.add_softmax(scaled.get_output(0))
-    softmax.axes = 1 << 2
-
-    ctx = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_h.get_output(0), trt.MatrixOperation.NONE)
-
-    ctx_flat = network.add_shuffle(ctx.get_output(0))
-    ctx_flat.first_transpose = trt.Permutation([1, 0, 2])
-    ctx_flat.reshape_dims = (q_seq, num_heads * head_dim)
-    return ctx_flat.get_output(0)
+    return graph_ops.add_attention_from_rows(
+        network, q, k, v,
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=q_seq, kv_seq=kv_seq)
 
 
 def _add_plain_dit_block(
     network, x, weights, prefix,
     dim, num_heads, head_dim, ffn_dim, seq_len,
-    eps_t, scale_t, rot_half, cos_t, sin_t,
+    eps_t, scale_t, cos_t, sin_t,
 ):
     """Plain DiT block (no AdaLN): pre-norm attention + post-norm + SwiGLU FFN.
 
@@ -528,8 +467,10 @@ def _add_plain_dit_block(
     k = _per_head_rms_norm(network, k, num_heads, head_dim, k_norm, eps_t, seq_len)
 
     # RoPE
-    q = _apply_rope(network, q, cos_t, sin_t, rot_half)
-    k = _apply_rope(network, k, cos_t, sin_t, rot_half)
+    q = _apply_native_rope_from_full_cache(
+        network, q, cos_t, sin_t, num_heads, head_dim, seq_len)
+    k = _apply_native_rope_from_full_cache(
+        network, k, cos_t, sin_t, num_heads, head_dim, seq_len)
 
     # Attention
     attn_out = _multi_head_attention(network, q, k, v, num_heads, head_dim, seq_len, seq_len, scale_t)
@@ -562,7 +503,7 @@ def _add_plain_dit_block(
 def _add_adaln_dit_block(
     network, x, weights, prefix, temb,
     dim, num_heads, head_dim, ffn_dim, adaln_embed_dim,
-    seq_len, eps_t, scale_t, rot_half, cos_t, sin_t, ones_t,
+    seq_len, eps_t, scale_t, cos_t, sin_t, ones_t,
 ):
     """AdaLN DiT block (noise_refiner): 4-chunk modulation + tanh gating + attention + SwiGLU.
 
@@ -613,8 +554,10 @@ def _add_adaln_dit_block(
     q = _per_head_rms_norm(network, q, num_heads, head_dim, q_norm, eps_t, seq_len)
     k = _per_head_rms_norm(network, k, num_heads, head_dim, k_norm, eps_t, seq_len)
 
-    q = _apply_rope(network, q, cos_t, sin_t, rot_half)
-    k = _apply_rope(network, k, cos_t, sin_t, rot_half)
+    q = _apply_native_rope_from_full_cache(
+        network, q, cos_t, sin_t, num_heads, head_dim, seq_len)
+    k = _apply_native_rope_from_full_cache(
+        network, k, cos_t, sin_t, num_heads, head_dim, seq_len)
 
     attn_out = _multi_head_attention(network, q, k, v, num_heads, head_dim, seq_len, seq_len, scale_t)
     attn_out = graph_ops.add_matmul_rhs_constant(network, attn_out, dim, dim, weights[f"{prefix}.to_out"])

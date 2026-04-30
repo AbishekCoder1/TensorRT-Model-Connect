@@ -71,6 +71,8 @@ class EncoderOnlyRunner:
             metadata={
                 "command": cmd,
                 "returncode": result.returncode,
+                "stdout": result.stdout or "",
+                "stderr": result.stderr or "",
             },
         )
 

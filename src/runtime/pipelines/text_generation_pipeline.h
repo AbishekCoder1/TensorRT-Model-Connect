@@ -102,15 +102,14 @@ class TextGenerationPipeline final : public IPipeline {
     int32_t active_decoder_index_{-1};
     bool state_bound_{false};
 
-    // Internal: generate from token IDs with sampling parameters and optional timing.
+    // Internal: generate from token IDs with sampling parameters and timing.
     struct TimedGenResult {
         std::vector<int32_t> token_ids;
         double prefill_ms{0.0};
         double decode_ms{0.0};
     };
     TimedGenResult generate_from_ids(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
-                                     const SamplingParams& params, const GenerateConfig& cfg,
-                                     bool collect_timing = false);
+                                     const SamplingParams& params, const GenerateConfig& cfg);
 
     // Run one decoder step: token_id → logits (D2H to host). Updates cache.
     void run_step(int32_t token_id, std::vector<float>& logits);

@@ -316,10 +316,6 @@ class NemotronHPlugin:
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
             np.array([config.rms_norm_eps], dtype=np.float32))
-        attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
-        attn_scale_tensor = graph_ops.add_constant(
-            network, (1, 1, 1),
-            np.array([attn_scale], dtype=np.float32))
 
         # --- Embedding ---
         gather = network.add_gather(embedding_table, token_id, 0)
@@ -388,10 +384,6 @@ class NemotronHPlugin:
                     num_heads=num_heads,
                     head_dim=head_dim,
                     max_cache_length=max_cache_length,
-                    cos_tensor=None,
-                    sin_tensor=None,
-                    rotate_half_tensor=None,
-                    attn_scale_tensor=attn_scale_tensor,
                     eps_tensor=eps_tensor,
                     position_type="none",
                 )

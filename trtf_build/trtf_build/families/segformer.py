@@ -85,10 +85,6 @@ class SegformerPlugin:
         raw = config.raw
         num_encoder_blocks = raw.get("depths", [2, 2, 2, 2])
         sr_ratios = raw.get("sr_ratios", [8, 4, 2, 1])
-        hidden_sizes = raw.get("hidden_sizes", [32, 64, 160, 256])
-        num_attention_heads = raw.get("num_attention_heads", [1, 2, 5, 8])
-        num_classes = raw.get("num_labels", 150)
-        decoder_hidden_size = raw.get("decoder_hidden_size", 256)
 
         # Resolve actual image size from preprocessor_config.json
         image_size = _resolve_image_size(model_dir)
@@ -99,8 +95,6 @@ class SegformerPlugin:
         # 4 encoder stages
         for stage_idx in range(4):
             n_blocks = num_encoder_blocks[stage_idx]
-            hidden = hidden_sizes[stage_idx]
-            n_heads = num_attention_heads[stage_idx]
             sr = sr_ratios[stage_idx]
 
             # Overlap patch embedding
@@ -272,7 +266,6 @@ class SegformerPlugin:
             patch_size = patch_sizes[stage_idx]
             stride = strides[stage_idx]
             padding = patch_size // 2
-            in_channels = 3 if stage_idx == 0 else hidden_sizes[stage_idx - 1]
 
             # --- Overlap Patch Embedding ---
             # Conv2d: [1, C_in, H, W] -> [1, hidden, H', W']
@@ -383,40 +376,15 @@ class SegformerPlugin:
                 v = graph_ops.add_bias_sum(network, v, hidden,
                     weights[f"{w_prefix}.attn.v.bias"])
 
-                # Multi-head attention
-                q_h = network.add_shuffle(q)
-                q_h.reshape_dims = (seq_len, n_heads, head_dim)
-                q_h.second_transpose = trt.Permutation([1, 0, 2])
-
-                k_h = network.add_shuffle(k)
-                k_h.reshape_dims = (kv_seq_len, n_heads, head_dim)
-                k_h.second_transpose = trt.Permutation([1, 0, 2])
-
-                v_h = network.add_shuffle(v)
-                v_h.reshape_dims = (kv_seq_len, n_heads, head_dim)
-                v_h.second_transpose = trt.Permutation([1, 0, 2])
-
-                score = network.add_matrix_multiply(
-                    q_h.get_output(0), trt.MatrixOperation.NONE,
-                    k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
-                scale_c = graph_ops.add_constant(
-                    network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
-                scaled = network.add_elementwise(
-                    score.get_output(0), scale_c, trt.ElementWiseOperation.PROD)
-                softmax = network.add_softmax(scaled.get_output(0))
-                softmax.axes = 1 << 2
-
-                ctx = network.add_matrix_multiply(
-                    softmax.get_output(0), trt.MatrixOperation.NONE,
-                    v_h.get_output(0), trt.MatrixOperation.NONE)
-
-                ctx_flat = network.add_shuffle(ctx.get_output(0))
-                ctx_flat.first_transpose = trt.Permutation([1, 0, 2])
-                ctx_flat.reshape_dims = (seq_len, hidden)
+                ctx_flat = graph_ops.add_attention_from_rows(
+                    network, q, k, v,
+                    num_heads=n_heads, head_dim=head_dim,
+                    q_seq=seq_len, kv_seq=kv_seq_len,
+                    scale=attn_scale)
 
                 # Output projection
                 attn_out = graph_ops.add_matmul_rhs_constant(
-                    network, ctx_flat.get_output(0), hidden, hidden,
+                    network, ctx_flat, hidden, hidden,
                     weights[f"{w_prefix}.attn.o.weight"])
                 attn_out = graph_ops.add_bias_sum(
                     network, attn_out, hidden,
@@ -546,8 +514,6 @@ class SegformerPlugin:
         # The fuse conv weights are trained with this reversed layout.
         concat = network.add_concatenation(projected[::-1])
         concat.axis = 1  # [1, 4*D, target_H, target_W]
-
-        total_ch = 4 * decoder_hidden_size
 
         # Fuse conv (1x1): [1, 4*D, H, W] -> [1, D, H, W]
         fuse_w = weights["decode_head.fuse.weight"]

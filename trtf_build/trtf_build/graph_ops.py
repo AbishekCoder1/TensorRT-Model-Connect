@@ -91,6 +91,9 @@ def add_rms_norm(
 
     FP32 precision boundary: when dtype != float32, casts to FP32 before
     norm computation for numerical stability, then casts back.
+
+    TRT's native normalization API implements mean-centered LayerNorm, not
+    RMSNorm, so this remains a manual shared implementation.
     """
     need_cast = (dtype != np.float32)
     output_dtype = inp.dtype
@@ -123,31 +126,45 @@ def add_rms_norm_per_head(
     gamma: np.ndarray,
     eps_tensor: trt.ITensor,
     dtype: np.dtype = np.float32,
+    sequence_length: int | None = 1,
 ) -> trt.ITensor:
-    """Per-head RMSNorm: reshape to [num_heads, head_dim], norm, reshape back.
+    """Per-head RMSNorm for [Sq, num_heads * head_dim] tensors.
 
     FP32 precision boundary: when dtype != float32, casts to FP32 before
     norm computation for numerical stability, then casts back.
+    ``sequence_length=None`` means runtime-dynamic Sq.
+    ``gamma`` may be [num_heads * head_dim] or [head_dim] broadcast to heads.
     """
     need_cast = (dtype != np.float32)
     output_dtype = inp.dtype
+    seq_dim = -1 if sequence_length is None else sequence_length
     reshape_in = network.add_shuffle(inp)
-    reshape_in.reshape_dims = (num_heads, head_dim)
+    reshape_in.reshape_dims = (seq_dim, num_heads, head_dim)
 
     reshaped = reshape_in.get_output(0)
     if need_cast:
         reshaped = network.add_cast(reshaped, trt.float32).get_output(0)
         eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
+    eps_3d = network.add_shuffle(eps_tensor)
+    eps_3d.reshape_dims = (1, 1, 1)
     sq = network.add_elementwise(reshaped, reshaped, trt.ElementWiseOperation.PROD)
     mean = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 2, keep_dims=True)
     denom_in = network.add_elementwise(
-        mean.get_output(0), eps_tensor, trt.ElementWiseOperation.SUM)
+        mean.get_output(0), eps_3d.get_output(0), trt.ElementWiseOperation.SUM)
     sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(
         reshaped, recip.get_output(0), trt.ElementWiseOperation.PROD)
-    gamma_t = add_constant(network, (num_heads, head_dim), gamma, dtype=np.float32)
+    gamma_arr = np.asarray(gamma, dtype=np.float32)
+    if gamma_arr.size == head_dim:
+        gamma_t = add_constant(
+            network, (1, 1, head_dim), gamma_arr.reshape(1, 1, head_dim),
+            dtype=np.float32)
+    else:
+        gamma_t = add_constant(
+            network, (1, num_heads, head_dim),
+            gamma_arr.reshape(num_heads, head_dim), dtype=np.float32)
     scaled = network.add_elementwise(
         normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
 
@@ -155,7 +172,7 @@ def add_rms_norm_per_head(
     if need_cast:
         result = _cast_back_to_trt_dtype(network, result, output_dtype)
     reshape_out = network.add_shuffle(result)
-    reshape_out.reshape_dims = (1, num_heads * head_dim)
+    reshape_out.reshape_dims = (seq_dim, num_heads * head_dim)
     return reshape_out.get_output(0)
 
 
@@ -322,58 +339,45 @@ def make_yarn_rope_table(
     return table
 
 
-def make_rotate_half_matrix(
-    hidden_size: int,
-    num_attention_heads: int,
-    partial_rotary_factor: float = 1.0,
+def make_yarn_rope_table_half_dim(
+    max_cache_length: int,
+    head_dim: int,
+    rope_theta: float,
+    cosine: bool,
+    scaling_factor: float,
+    original_max_position_embeddings: int,
+    beta_fast: float,
+    beta_slow: float,
     interleaved: bool = False,
 ) -> np.ndarray:
-    """Build the rotate-half permutation matrix [hidden_size, hidden_size].
+    """Build a YaRN RoPE table for TRT native IRotaryEmbeddingLayer.
 
-    Args:
-        interleaved: If True, pair adjacent dims (d, d+1): (-x1,x0,-x3,x2,...).
-            If False (default), pair halves (d, d+half): (-x_half..,-x_end.., x0..,x_half..).
+    Returns [max_cache_length, head_dim // 2], matching the half-dimension
+    cache layout required by IRotaryEmbeddingLayer.
     """
-    matrix = np.zeros((hidden_size, hidden_size), dtype=np.float32)
-    if (hidden_size <= 0 or num_attention_heads <= 0
-            or hidden_size % num_attention_heads != 0):
-        np.fill_diagonal(matrix, 1.0)
-        return matrix
+    half = head_dim // 2
+    default = 1.0 if cosine else 0.0
+    if max_cache_length <= 0 or half <= 0 or rope_theta <= 0.0:
+        return np.full((max(max_cache_length, 1), max(half, 1)),
+                       default, dtype=np.float32)
 
-    head_dim = hidden_size // num_attention_heads
-    rotary_ndims = int(head_dim * partial_rotary_factor)
-    half_rotary = rotary_ndims // 2
+    freq_extra = 1.0 / (
+        rope_theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim))
+    freq_inter = freq_extra / scaling_factor
 
-    for head in range(num_attention_heads):
-        base = head * head_dim
+    low = max(int(np.floor(_yarn_correction_dim(
+        beta_fast, head_dim, rope_theta, original_max_position_embeddings))), 0)
+    high = min(int(np.ceil(_yarn_correction_dim(
+        beta_slow, head_dim, rope_theta, original_max_position_embeddings))), half - 1)
+    ramp = np.clip((np.arange(half, dtype=np.float64) - low) / max(high - low, 1), 0.0, 1.0)
+    inv_freq = freq_inter * ramp + freq_extra * (1 - ramp)
 
-        if interleaved:
-            # Pair adjacent dims: (0,1), (2,3), ...
-            # rotate_every_two: (-x1, x0, -x3, x2, ...)
-            # Matrix convention: rotated = inp @ matrix
-            # rotated[j] = sum(inp[i] * matrix[i, j])
-            for i in range(half_rotary):
-                d_even = base + 2 * i
-                d_odd = base + 2 * i + 1
-                matrix[d_odd, d_even] = -1.0    # rotated[even] = -inp[odd]
-                matrix[d_even, d_odd] = 1.0      # rotated[odd]  =  inp[even]
-        else:
-            # Pair halves: (0, half), (1, half+1), ...
-            for i in range(half_rotary):
-                out_left = base + i
-                out_right = base + half_rotary + i
-                matrix[out_left, out_right] = 1.0
-                matrix[out_right, out_left] = -1.0
-
-        if rotary_ndims % 2 != 0:
-            tail = base + 2 * half_rotary
-            matrix[tail, tail] = 1.0
-
-        # Non-rotary dims: identity (pass through, since sin=0 for these)
-        for d in range(rotary_ndims, head_dim):
-            matrix[base + d, base + d] = 1.0
-
-    return matrix
+    table = np.full((max_cache_length, half), default, dtype=np.float32)
+    for pos in range(max_cache_length):
+        for d in range(half):
+            angle = pos * inv_freq[d]
+            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
+    return table
 
 
 def add_layer_norm(
@@ -562,37 +566,6 @@ def compute_alibi_slopes(num_heads: int) -> np.ndarray:
         return np.array(slopes_a + slopes_b, dtype=np.float32)
 
 
-def add_apply_rope(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    position_id: trt.ITensor,
-    cos_table: trt.ITensor,
-    sin_table: trt.ITensor,
-    rotate_half_matrix: trt.ITensor,
-) -> trt.ITensor:
-    """Apply rotary position embedding: x*cos + rotate_half(x)*sin."""
-    cos_gather = network.add_gather(cos_table, position_id, 0)
-    sin_gather = network.add_gather(sin_table, position_id, 0)
-    cos = _cast_back_to_trt_dtype(network, cos_gather.get_output(0), inp.dtype)
-    sin = _cast_back_to_trt_dtype(network, sin_gather.get_output(0), inp.dtype)
-    rotate_half_matrix = _cast_back_to_trt_dtype(network, rotate_half_matrix, inp.dtype)
-
-    rotated = network.add_matrix_multiply(
-        inp, trt.MatrixOperation.NONE,
-        rotate_half_matrix, trt.MatrixOperation.NONE,
-    )
-
-    x_cos = network.add_elementwise(
-        inp, cos, trt.ElementWiseOperation.PROD)
-    rot_sin = network.add_elementwise(
-        rotated.get_output(0), sin,
-        trt.ElementWiseOperation.PROD)
-    result = network.add_elementwise(
-        x_cos.get_output(0), rot_sin.get_output(0),
-        trt.ElementWiseOperation.SUM)
-    return _cast_back_to_trt_dtype(network, result.get_output(0), inp.dtype)
-
-
 # ---------------------------------------------------------------------------
 # Vision encoder graph ops
 # ---------------------------------------------------------------------------
@@ -619,7 +592,6 @@ def add_self_attention_block(
     Output: [seq_length, hidden_size]
     """
     head_dim = hidden_size // num_heads
-    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     # Q, K, V projections: [seq, hidden] @ [hidden, hidden] = [seq, hidden]
     q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q, dtype=dtype)
@@ -633,55 +605,14 @@ def add_self_attention_block(
     if v_bias is not None:
         v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
 
-    # Reshape to [num_heads, seq, head_dim]
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    q_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    k_heads = network.add_shuffle(k)
-    k_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    v_heads = network.add_shuffle(v)
-    v_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention scores: [num_heads, seq, head_dim] @ [num_heads, head_dim, seq]
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-    # Scale
-    scale_const = add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32), dtype=dtype)
-    scaled = network.add_elementwise(
-        score.get_output(0), scale_const,
-        trt.ElementWiseOperation.PROD)
-
-    # Softmax over last dim — FP32 precision boundary for numerical stability
-    softmax_inp = scaled.get_output(0)
-    softmax_output_dtype = softmax_inp.dtype
-    if dtype != np.float32:
-        softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
-    softmax = network.add_softmax(softmax_inp)
-    softmax.axes = 1 << 2  # last dim
-    attn_weights = softmax.get_output(0)
-    if dtype != np.float32:
-        attn_weights = _cast_back_to_trt_dtype(network, attn_weights, softmax_output_dtype)
-
-    # Context: [num_heads, seq, head_dim]
-    context = network.add_matrix_multiply(
-        attn_weights, trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    # Reshape back to [seq, hidden]
-    context_flat = network.add_shuffle(context.get_output(0))
-    context_flat.first_transpose = trt.Permutation([1, 0, 2])
-    context_flat.reshape_dims = (seq_length, hidden_size)
+    context_flat = add_attention_from_rows(
+        network, q, k, v,
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=seq_length, kv_seq=seq_length)
 
     # Output projection
     out = add_matmul_rhs_constant(
-        network, context_flat.get_output(0), hidden_size, hidden_size, w_o, dtype=dtype)
+        network, context_flat, hidden_size, hidden_size, w_o, dtype=dtype)
     if o_bias is not None:
         out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
 
@@ -716,7 +647,6 @@ def add_self_attention_block_with_rope(
     Output: [seq_length, hidden_size]
     """
     head_dim = hidden_size // num_heads
-    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     # Q, K, V projections: [seq, hidden] @ [hidden, hidden] = [seq, hidden]
     q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q, dtype=dtype)
@@ -730,84 +660,29 @@ def add_self_attention_block_with_rope(
     if v_bias is not None:
         v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
 
-    # Apply RoPE using precomputed per-position cos/sin tables.
-    # q_rot = q * cos + rotate_half(q) * sin  (element-wise per position)
-    cos_const = add_constant(network, (seq_length, hidden_size), cos_table, dtype=dtype)
-    sin_const = add_constant(network, (seq_length, hidden_size), sin_table, dtype=dtype)
+    rope_dim = head_dim
+    cos_half = cos_table[:, : rope_dim // 2]
+    sin_half = sin_table[:, : rope_dim // 2]
+    cos_const = add_constant(
+        network, (1, seq_length, rope_dim // 2), cos_half.reshape(1, seq_length, -1), dtype=dtype)
+    sin_const = add_constant(
+        network, (1, seq_length, rope_dim // 2), sin_half.reshape(1, seq_length, -1), dtype=dtype)
 
-    # Build rotate-half matrix for this hidden_size/num_heads config
-    rot_half_np = make_rotate_half_matrix(hidden_size, num_heads)
-    rot_half_const = add_constant(network, (hidden_size, hidden_size), rot_half_np, dtype=dtype)
+    q = add_apply_rope_native_sequence(
+        network, q, num_heads, head_dim, cos_const, sin_const,
+        rotary_embedding_dim=rope_dim, sequence_length=seq_length)
+    k = add_apply_rope_native_sequence(
+        network, k, num_heads, head_dim, cos_const, sin_const,
+        rotary_embedding_dim=rope_dim, sequence_length=seq_length)
 
-    # Apply RoPE to Q
-    q_rot = network.add_matrix_multiply(
-        q, trt.MatrixOperation.NONE, rot_half_const, trt.MatrixOperation.NONE)
-    q_cos = network.add_elementwise(q, cos_const, trt.ElementWiseOperation.PROD)
-    q_sin = network.add_elementwise(
-        q_rot.get_output(0), sin_const, trt.ElementWiseOperation.PROD)
-    q = network.add_elementwise(
-        q_cos.get_output(0), q_sin.get_output(0), trt.ElementWiseOperation.SUM)
-    q = q.get_output(0)
-
-    # Apply RoPE to K
-    k_rot = network.add_matrix_multiply(
-        k, trt.MatrixOperation.NONE, rot_half_const, trt.MatrixOperation.NONE)
-    k_cos = network.add_elementwise(k, cos_const, trt.ElementWiseOperation.PROD)
-    k_sin = network.add_elementwise(
-        k_rot.get_output(0), sin_const, trt.ElementWiseOperation.PROD)
-    k = network.add_elementwise(
-        k_cos.get_output(0), k_sin.get_output(0), trt.ElementWiseOperation.SUM)
-    k = k.get_output(0)
-
-    # Reshape to [num_heads, seq, head_dim]
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    q_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    k_heads = network.add_shuffle(k)
-    k_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    v_heads = network.add_shuffle(v)
-    v_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention scores: [num_heads, seq, head_dim] @ [num_heads, head_dim, seq]
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-    # Scale
-    scale_const = add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32), dtype=dtype)
-    scaled = network.add_elementwise(
-        score.get_output(0), scale_const,
-        trt.ElementWiseOperation.PROD)
-
-    # Softmax over last dim — FP32 precision boundary for numerical stability
-    softmax_inp = scaled.get_output(0)
-    softmax_output_dtype = softmax_inp.dtype
-    if dtype != np.float32:
-        softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
-    softmax = network.add_softmax(softmax_inp)
-    softmax.axes = 1 << 2  # last dim
-    attn_weights = softmax.get_output(0)
-    if dtype != np.float32:
-        attn_weights = _cast_back_to_trt_dtype(network, attn_weights, softmax_output_dtype)
-
-    # Context: [num_heads, seq, head_dim]
-    context = network.add_matrix_multiply(
-        attn_weights, trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    # Reshape back to [seq, hidden]
-    context_flat = network.add_shuffle(context.get_output(0))
-    context_flat.first_transpose = trt.Permutation([1, 0, 2])
-    context_flat.reshape_dims = (seq_length, hidden_size)
+    context_flat = add_attention_from_rows(
+        network, q, k, v,
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=seq_length, kv_seq=seq_length)
 
     # Output projection
     out = add_matmul_rhs_constant(
-        network, context_flat.get_output(0), hidden_size, hidden_size, w_o, dtype=dtype)
+        network, context_flat, hidden_size, hidden_size, w_o, dtype=dtype)
     if o_bias is not None:
         out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
 
@@ -859,82 +734,47 @@ def add_windowed_self_attention_with_rope(
     if v_bias is not None:
         v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
 
-    # RoPE: same as full attention
-    cos_const = add_constant(network, (seq_length, hidden_size), cos_table, dtype=dtype)
-    sin_const = add_constant(network, (seq_length, hidden_size), sin_table, dtype=dtype)
-    rot_half_np = make_rotate_half_matrix(hidden_size, num_heads)
-    rot_half_const = add_constant(network, (hidden_size, hidden_size), rot_half_np, dtype=dtype)
+    rope_dim = head_dim
+    cos_half = cos_table[:, : rope_dim // 2]
+    sin_half = sin_table[:, : rope_dim // 2]
+    cos_const = add_constant(
+        network, (1, seq_length, rope_dim // 2), cos_half.reshape(1, seq_length, -1), dtype=dtype)
+    sin_const = add_constant(
+        network, (1, seq_length, rope_dim // 2), sin_half.reshape(1, seq_length, -1), dtype=dtype)
 
-    q_rot = network.add_matrix_multiply(
-        q, trt.MatrixOperation.NONE, rot_half_const, trt.MatrixOperation.NONE)
-    q_cos = network.add_elementwise(q, cos_const, trt.ElementWiseOperation.PROD)
-    q_sin = network.add_elementwise(
-        q_rot.get_output(0), sin_const, trt.ElementWiseOperation.PROD)
-    q = network.add_elementwise(
-        q_cos.get_output(0), q_sin.get_output(0), trt.ElementWiseOperation.SUM)
-    q = q.get_output(0)
-
-    k_rot = network.add_matrix_multiply(
-        k, trt.MatrixOperation.NONE, rot_half_const, trt.MatrixOperation.NONE)
-    k_cos = network.add_elementwise(k, cos_const, trt.ElementWiseOperation.PROD)
-    k_sin = network.add_elementwise(
-        k_rot.get_output(0), sin_const, trt.ElementWiseOperation.PROD)
-    k = network.add_elementwise(
-        k_cos.get_output(0), k_sin.get_output(0), trt.ElementWiseOperation.SUM)
-    k = k.get_output(0)
+    q = add_apply_rope_native_sequence(
+        network, q, num_heads, head_dim, cos_const, sin_const,
+        rotary_embedding_dim=rope_dim, sequence_length=seq_length)
+    k = add_apply_rope_native_sequence(
+        network, k, num_heads, head_dim, cos_const, sin_const,
+        rotary_embedding_dim=rope_dim, sequence_length=seq_length)
 
     # Reshape to [num_windows, win_seq, num_heads, head_dim]
-    # then transpose to [num_windows, num_heads, win_seq, head_dim]
-    # then merge first two dims: [num_windows * num_heads, win_seq, head_dim]
+    # then transpose to [num_windows, num_heads, win_seq, head_dim].
     q_win = network.add_shuffle(q)
     q_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
     q_win.second_transpose = trt.Permutation([0, 2, 1, 3])
-    q_flat = network.add_shuffle(q_win.get_output(0))
-    q_flat.reshape_dims = (num_windows * num_heads, win_seq, head_dim)
 
     k_win = network.add_shuffle(k)
     k_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
     k_win.second_transpose = trt.Permutation([0, 2, 1, 3])
-    k_flat = network.add_shuffle(k_win.get_output(0))
-    k_flat.reshape_dims = (num_windows * num_heads, win_seq, head_dim)
 
     v_win = network.add_shuffle(v)
     v_win.reshape_dims = (num_windows, win_seq, num_heads, head_dim)
     v_win.second_transpose = trt.Permutation([0, 2, 1, 3])
-    v_flat = network.add_shuffle(v_win.get_output(0))
-    v_flat.reshape_dims = (num_windows * num_heads, win_seq, head_dim)
 
-    # Attention: [NW*NH, win_seq, head_dim] @ [NW*NH, head_dim, win_seq]
-    score = network.add_matrix_multiply(
-        q_flat.get_output(0), trt.MatrixOperation.NONE,
-        k_flat.get_output(0), trt.MatrixOperation.TRANSPOSE)
+    context = add_attention_core(
+        network,
+        q_win.get_output(0),
+        k_win.get_output(0),
+        v_win.get_output(0),
+        scale=attn_scale,
+    )
 
-    scale_const = add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32), dtype=dtype)
-    scaled = network.add_elementwise(
-        score.get_output(0), scale_const, trt.ElementWiseOperation.PROD)
-
-    # Softmax — FP32 precision boundary for numerical stability
-    softmax_inp = scaled.get_output(0)
-    softmax_output_dtype = softmax_inp.dtype
-    if dtype != np.float32:
-        softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
-    softmax = network.add_softmax(softmax_inp)
-    softmax.axes = 1 << 2
-    attn_weights = softmax.get_output(0)
-    if dtype != np.float32:
-        attn_weights = _cast_back_to_trt_dtype(network, attn_weights, softmax_output_dtype)
-
-    context = network.add_matrix_multiply(
-        attn_weights, trt.MatrixOperation.NONE,
-        v_flat.get_output(0), trt.MatrixOperation.NONE)
-
-    # Reshape back: [NW*NH, win_seq, head_dim] → [NW, NH, win_seq, head_dim]
-    # → [NW, win_seq, NH, head_dim] → [seq_length, hidden_size]
-    ctx_unflat = network.add_shuffle(context.get_output(0))
-    ctx_unflat.reshape_dims = (num_windows, num_heads, win_seq, head_dim)
-    ctx_unflat.second_transpose = trt.Permutation([0, 2, 1, 3])
-    ctx_flat = network.add_shuffle(ctx_unflat.get_output(0))
+    # Reshape back: [NW, NH, win_seq, head_dim]
+    # -> [NW, win_seq, NH, head_dim] -> [seq_length, hidden_size]
+    ctx_flat = network.add_shuffle(context)
+    ctx_flat.first_transpose = trt.Permutation([0, 2, 1, 3])
     ctx_flat.reshape_dims = (seq_length, hidden_size)
 
     # Output projection
@@ -1666,7 +1506,6 @@ def add_cross_attention(
     Output:  [q_seq_len, hidden_size]
     """
     head_dim = hidden_size // num_heads
-    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     # Q projection: [q_seq, hidden] @ [hidden, hidden] = [q_seq, hidden]
     q = add_matmul_rhs_constant(network, query, hidden_size, hidden_size, w_q, dtype=dtype)
@@ -1681,54 +1520,14 @@ def add_cross_attention(
     if v_bias is not None:
         v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
 
-    # Reshape to multi-head: [seq, hidden] -> [num_heads, seq, head_dim]
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (q_seq_len, num_heads, head_dim)
-    q_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    k_heads = network.add_shuffle(k)
-    k_heads.reshape_dims = (kv_seq_len, num_heads, head_dim)
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    v_heads = network.add_shuffle(v)
-    v_heads.reshape_dims = (kv_seq_len, num_heads, head_dim)
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention: Q @ K^T
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-    scale_const = add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32), dtype=dtype)
-    scaled = network.add_elementwise(
-        score.get_output(0), scale_const,
-        trt.ElementWiseOperation.PROD)
-
-    # Softmax — FP32 precision boundary for numerical stability
-    softmax_inp = scaled.get_output(0)
-    softmax_output_dtype = softmax_inp.dtype
-    if dtype != np.float32:
-        softmax_inp = network.add_cast(softmax_inp, trt.float32).get_output(0)
-    softmax = network.add_softmax(softmax_inp)
-    softmax.axes = 1 << 2
-    attn_weights = softmax.get_output(0)
-    if dtype != np.float32:
-        attn_weights = _cast_back_to_trt_dtype(network, attn_weights, softmax_output_dtype)
-
-    # Context: softmax @ V
-    context = network.add_matrix_multiply(
-        attn_weights, trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    # Reshape back: [num_heads, q_seq, head_dim] → [q_seq, hidden]
-    context_flat = network.add_shuffle(context.get_output(0))
-    context_flat.first_transpose = trt.Permutation([1, 0, 2])
-    context_flat.reshape_dims = (q_seq_len, hidden_size)
+    context_flat = add_attention_from_rows(
+        network, q, k, v,
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=q_seq_len, kv_seq=kv_seq_len)
 
     # Output projection
     out = add_matmul_rhs_constant(
-        network, context_flat.get_output(0), hidden_size, hidden_size, w_o, dtype=dtype)
+        network, context_flat, hidden_size, hidden_size, w_o, dtype=dtype)
     if o_bias is not None:
         out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
 
@@ -2187,6 +1986,10 @@ def add_layer_norm_no_affine(
 
     FP32 precision boundary: when dtype != float32, casts to FP32 before
     norm computation for numerical stability, then casts back.
+
+    Builders that have a scalar epsilon should prefer add_layer_norm_native
+    with all-ones gamma and all-zeros beta. This helper is the shared fallback
+    for call sites that only thread epsilon as an ITensor.
     """
     need_cast = (dtype != np.float32)
     output_dtype = inp.dtype
@@ -2224,7 +2027,7 @@ add_gelu_tanh = add_gelu_new
 #
 # Three primitives replace manual primitive chains:
 #   add_layer_norm_native  → INormalizationLayer  (replaces add_layer_norm)
-#   add_apply_rope_native  → IRotaryEmbeddingLayer (replaces add_apply_rope)
+#   add_apply_rope_native  → IRotaryEmbeddingLayer
 #   add_attention_core     → IAttention           (replaces score+softmax+V)
 # ---------------------------------------------------------------------------
 
@@ -2240,9 +2043,9 @@ def add_layer_norm_native(
     """LayerNorm via TRT native INormalizationLayer (add_normalization_v2).
 
     Replaces the manual reduce/elementwise chain in add_layer_norm with a
-    single fused layer that TRT can optimize end-to-end.  Compute precision
-    is forced to FP32 for numerical stability, with the result cast back to
-    ``dtype`` if needed.
+    single fused layer that TRT can optimize end-to-end. In strongly typed
+    networks, input/scale/bias must have identical tensor types; compute
+    precision is set to FP32 for numerical stability.
 
     Note: INormalizationLayer computes (x - mean) / sqrt(var + eps) * gamma + beta.
     This is LayerNorm, NOT RMSNorm.  Use add_rms_norm for RMSNorm models.
@@ -2253,20 +2056,19 @@ def add_layer_norm_native(
         gamma:       Scale weights [hidden_size].
         beta:        Bias weights [hidden_size].
         eps:         Numerical stability epsilon (scalar, not a tensor).
-        dtype:       Working dtype for gamma/beta constants.
+        dtype:       Storage dtype for gamma/beta constants before TRT cast.
     """
-    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
-    beta_t = add_constant(network, (1, hidden_size), beta, dtype=np.float32)
+    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=dtype)
+    beta_t = add_constant(network, (1, hidden_size), beta, dtype=dtype)
+    gamma_t = _cast_back_to_trt_dtype(network, gamma_t, inp.dtype)
+    beta_t = _cast_back_to_trt_dtype(network, beta_t, inp.dtype)
     # axesMask bit i selects axis i as a reduction axis.
     # For a [..., H] tensor the hidden dim is the last axis.
     # With rank-2 input [1, H], axis 1 → mask = 1 << 1 = 2.
     norm = network.add_normalization_v2(inp, gamma_t, beta_t, 1 << 1)
     norm.epsilon = eps
     norm.compute_precision = trt.float32
-    result = norm.get_output(0)
-    if dtype != np.float32:
-        result = _cast_back_to_trt_dtype(network, result, inp.dtype)
-    return result
+    return norm.get_output(0)
 
 
 def make_rope_table_half_dim(
@@ -2315,6 +2117,178 @@ def make_rope_table_half_dim(
     return table
 
 
+def reshape_rows_to_heads_4d(
+    network: trt.INetworkDefinition,
+    x: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    sequence_length: int | None = None,
+    tag: str | None = None,
+) -> trt.ITensor:
+    """Reshape [S, H * D] rows into [1, H, S, D].
+
+    The transpose is required for S > 1 because each input row contains all
+    heads for one token. ``sequence_length=None`` means runtime-dynamic S.
+    """
+    seq_dim = -1 if sequence_length is None else sequence_length
+    r1 = network.add_shuffle(x)
+    if tag:
+        r1.name = tag + "_s_h_d"
+    r1.reshape_dims = (seq_dim, num_heads, head_dim)
+    r1.second_transpose = trt.Permutation([1, 0, 2])
+
+    r2 = network.add_shuffle(r1.get_output(0))
+    if tag:
+        r2.name = tag + "_1_h_s_d"
+    r2.reshape_dims = (1, num_heads, seq_dim, head_dim)
+    return r2.get_output(0)
+
+
+def reshape_heads_4d_to_rows(
+    network: trt.INetworkDefinition,
+    x_4d: trt.ITensor,
+    attention_size: int,
+    sequence_length: int | None = None,
+    tag: str | None = None,
+) -> trt.ITensor:
+    """Reshape [1, H, S, D] back to [S, H * D]."""
+    seq_dim = -1 if sequence_length is None else sequence_length
+    out = network.add_shuffle(x_4d)
+    if tag:
+        out.name = tag + "_s_h_d"
+    out.first_transpose = trt.Permutation([0, 2, 1, 3])
+    out.reshape_dims = (seq_dim, attention_size)
+    return out.get_output(0)
+
+
+def tile_rope_for_heads(
+    network: trt.INetworkDefinition,
+    rope: trt.ITensor,
+    num_heads: int,
+) -> trt.ITensor:
+    """Tile a runtime RoPE table [S, D] to [S, H * D]."""
+    if num_heads == 1:
+        return rope
+    concat = network.add_concatenation([rope] * num_heads)
+    concat.axis = 1
+    return concat.get_output(0)
+
+
+def add_2d_mask_to_4d(
+    network: trt.INetworkDefinition,
+    mask_2d: trt.ITensor,
+) -> trt.ITensor:
+    """Reshape additive attention mask [Sq, K] to [1, 1, Sq, K]."""
+    mask_shape = network.add_shape(mask_2d).get_output(0)
+    ones = add_constant(
+        network, (2,), np.array([1, 1], dtype=np.int64), dtype=np.int64)
+    target = network.add_concatenation([ones, mask_shape])
+    target.axis = 0
+    mask_4d = network.add_shuffle(mask_2d)
+    mask_4d.set_input(1, target.get_output(0))
+    return mask_4d.get_output(0)
+
+
+def add_3d_mask_to_4d(
+    network: trt.INetworkDefinition,
+    mask_3d: trt.ITensor,
+) -> trt.ITensor:
+    """Reshape additive attention mask [B, Sq, K] to [B, 1, Sq, K]."""
+    mask_shape = network.add_shape(mask_3d).get_output(0)
+    batch = network.add_slice(mask_shape, start=(0,), shape=(1,), stride=(1,))
+    sq_size = network.add_slice(mask_shape, start=(1,), shape=(1,), stride=(1,))
+    k_size = network.add_slice(mask_shape, start=(2,), shape=(1,), stride=(1,))
+    one = add_constant(
+        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    target = network.add_concatenation(
+        [batch.get_output(0), one, sq_size.get_output(0), k_size.get_output(0)])
+    target.axis = 0
+    mask_4d = network.add_shuffle(mask_3d)
+    mask_4d.set_input(1, target.get_output(0))
+    return mask_4d.get_output(0)
+
+
+def add_alibi_mask_4d(
+    network: trt.INetworkDefinition,
+    mask_2d: trt.ITensor,
+    position_id: trt.ITensor,
+    alibi_slopes_tensor: trt.ITensor,
+    cache_position_indices: trt.ITensor,
+    num_heads: int,
+    target_dtype: trt.DataType | None = None,
+) -> trt.ITensor:
+    """Build a per-head ALiBi additive mask for native IAttention.
+
+    Args:
+        mask_2d: [Sq, K] additive mask.
+        position_id: [Sq] query positions.
+        alibi_slopes_tensor: [H, 1, 1] per-head slopes.
+        cache_position_indices: [cache_rows] key positions for cached rows.
+        target_dtype: Optional dtype for the returned mask. Defaults to
+            ``mask_2d.dtype``.
+
+    Returns:
+        [1, H, Sq, K] additive mask containing both ``mask_2d`` and
+        ``slope[h] * (key_pos[k] - query_pos[q])``.
+    """
+    pos_float = network.add_cast(position_id, trt.float32).get_output(0)
+    cache_positions = cache_position_indices
+    if cache_positions.dtype != trt.float32:
+        cache_positions = network.add_cast(cache_positions, trt.float32).get_output(0)
+
+    key_pos = network.add_concatenation([cache_positions, pos_float])
+    key_pos.axis = 0
+
+    mask_shape = network.add_shape(mask_2d).get_output(0)
+    one_const = add_constant(
+        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    sq_size = network.add_slice(mask_shape, start=(0,), shape=(1,), stride=(1,))
+    k_size = network.add_slice(mask_shape, start=(1,), shape=(1,), stride=(1,))
+    sq_size_t = sq_size.get_output(0)
+    k_size_t = k_size.get_output(0)
+
+    key_pos_shape = network.add_concatenation([one_const, k_size_t])
+    key_pos_shape.axis = 0
+    key_pos_2d = network.add_shuffle(key_pos.get_output(0))
+    key_pos_2d.set_input(1, key_pos_shape.get_output(0))
+
+    query_pos_shape = network.add_concatenation([sq_size_t, one_const])
+    query_pos_shape.axis = 0
+    query_pos_2d = network.add_shuffle(pos_float)
+    query_pos_2d.set_input(1, query_pos_shape.get_output(0))
+
+    rel_pos = network.add_elementwise(
+        key_pos_2d.get_output(0), query_pos_2d.get_output(0),
+        trt.ElementWiseOperation.SUB)
+
+    one_const2 = add_constant(
+        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    rel_shape = network.add_concatenation([one_const, one_const2, sq_size_t, k_size_t])
+    rel_shape.axis = 0
+    rel_4d = network.add_shuffle(rel_pos.get_output(0))
+    rel_4d.set_input(1, rel_shape.get_output(0))
+
+    slopes = alibi_slopes_tensor
+    if slopes.dtype != trt.float32:
+        slopes = network.add_cast(slopes, trt.float32).get_output(0)
+    slopes_4d = network.add_shuffle(slopes)
+    slopes_4d.reshape_dims = (1, num_heads, 1, 1)
+
+    alibi_bias = network.add_elementwise(
+        slopes_4d.get_output(0), rel_4d.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    alibi_bias_t = alibi_bias.get_output(0)
+
+    mask_4d = add_2d_mask_to_4d(network, mask_2d)
+    out_dtype = target_dtype or mask_4d.dtype
+    if alibi_bias_t.dtype != out_dtype:
+        alibi_bias_t = network.add_cast(alibi_bias_t, out_dtype).get_output(0)
+
+    combined = network.add_elementwise(
+        mask_4d, alibi_bias_t, trt.ElementWiseOperation.SUM)
+    return combined.get_output(0)
+
+
 def add_apply_rope_native(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -2325,46 +2299,47 @@ def add_apply_rope_native(
     position_id: trt.ITensor,
     rotary_embedding_dim: int,
     interleaved: bool = False,
+    sequence_length: int | None = 1,
 ) -> trt.ITensor:
     """Apply RoPE via TRT native IRotaryEmbeddingLayer.
 
-    Replaces the manual matmul+elementwise chain in add_apply_rope with a
-    single fused layer.  Used for single-token decoder steps where Q or K
-    has shape [1, num_heads * head_dim].
+    Handles both single-token decoder steps and dynamic-Sq prefill/decode
+    graphs without a manual rotate-half matmul chain.
 
     Shape contract (IRotaryEmbeddingLayer with position_ids):
-      input:           [1, num_heads, 1, head_dim]   (reshaped internally)
+      input:           [1, num_heads, Sq, head_dim]  (reshaped internally)
       cos_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
       sin_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
-      position_id:     [1] int32, reshaped to [1, 1] (B=1, S=1) internally
+      position_id:     [Sq] int32, reshaped to [1, Sq] internally
       interleaved:     False → rotate-half (LLaMA/Qwen)
                        True  → adjacent-pair (CodeGen/GPT-J)
 
     Args:
-        inp:                  [1, num_heads * head_dim].
+        inp:                  [Sq, num_heads * head_dim].
         num_heads:            Number of attention heads.
         head_dim:             Per-head dimension.
         cos_cache_2d:         Pre-built 2-D cos table constant.
         sin_cache_2d:         Pre-built 2-D sin table constant.
-        position_id:          Runtime position index, shape [1] int32.
+        position_id:          Runtime position indices, shape [Sq] int32.
         rotary_embedding_dim: Number of head dims that participate in RoPE.
         interleaved:          Frequency layout (see above).
+        sequence_length:      Static Sq, or None for runtime-dynamic Sq.
 
     Returns:
-        [1, num_heads * head_dim] with RoPE applied.
+        [Sq, num_heads * head_dim] with RoPE applied.
     """
     attention_size = num_heads * head_dim
 
-    # Reshape [1, attention_size] → [1, num_heads, 1, head_dim]
-    inp_4d = network.add_shuffle(inp)
-    inp_4d.reshape_dims = (1, num_heads, 1, head_dim)
+    inp_4d = reshape_rows_to_heads_4d(
+        network, inp, num_heads, head_dim, sequence_length)
 
-    # Reshape position_id [1] → [1, 1]  (batch=1, seq=1)
+    # Reshape position_id [Sq] -> [1, Sq] (batch=1).
+    seq_dim = -1 if sequence_length is None else sequence_length
     pos_2d = network.add_shuffle(position_id)
-    pos_2d.reshape_dims = (1, 1)
+    pos_2d.reshape_dims = (1, seq_dim)
 
     rope = network.add_rotary_embedding(
-        inp_4d.get_output(0),
+        inp_4d,
         cos_cache_2d,
         sin_cache_2d,
         interleaved,
@@ -2372,19 +2347,85 @@ def add_apply_rope_native(
     )
     rope.set_input(3, pos_2d.get_output(0))
 
-    # Reshape [1, num_heads, 1, head_dim] → [1, attention_size]
-    out_2d = network.add_shuffle(rope.get_output(0))
-    out_2d.reshape_dims = (1, attention_size)
-    return out_2d.get_output(0)
+    return reshape_heads_4d_to_rows(
+        network, rope.get_output(0), attention_size, sequence_length)
 
 
-def _add_attention_core(
+def add_apply_rope_native_sequence(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    cos_cache_3d: trt.ITensor,
+    sin_cache_3d: trt.ITensor,
+    rotary_embedding_dim: int,
+    interleaved: bool = False,
+    sequence_length: int | None = None,
+) -> trt.ITensor:
+    """Apply native RoPE with per-position caches [1, Sq, rotary_dim / 2]."""
+    attention_size = num_heads * head_dim
+    inp_4d = reshape_rows_to_heads_4d(
+        network, inp, num_heads, head_dim, sequence_length)
+    rope = network.add_rotary_embedding(
+        inp_4d,
+        cos_cache_3d,
+        sin_cache_3d,
+        interleaved,
+        rotary_embedding_dim,
+    )
+    return reshape_heads_4d_to_rows(
+        network, rope.get_output(0), attention_size, sequence_length)
+
+
+def add_apply_rope_native_from_full_cache(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    cos_cache_full: trt.ITensor,
+    sin_cache_full: trt.ITensor,
+    sequence_length: int,
+    interleaved: bool = False,
+    rotary_embedding_dim: int | None = None,
+) -> trt.ITensor:
+    """Apply native RoPE from per-head full-dim cos/sin caches [Sq, D]."""
+    rope_dim = head_dim if rotary_embedding_dim is None else rotary_embedding_dim
+    half = rope_dim // 2
+    stride = 2 if interleaved else 1
+    cos_half = network.add_slice(
+        cos_cache_full,
+        start=(0, 0),
+        shape=(sequence_length, half),
+        stride=(1, stride))
+    sin_half = network.add_slice(
+        sin_cache_full,
+        start=(0, 0),
+        shape=(sequence_length, half),
+        stride=(1, stride))
+    cos_3d = network.add_shuffle(cos_half.get_output(0))
+    cos_3d.reshape_dims = (1, sequence_length, half)
+    sin_3d = network.add_shuffle(sin_half.get_output(0))
+    sin_3d.reshape_dims = (1, sequence_length, half)
+    return add_apply_rope_native_sequence(
+        network,
+        inp,
+        num_heads,
+        head_dim,
+        cos_3d.get_output(0),
+        sin_3d.get_output(0),
+        rotary_embedding_dim=rope_dim,
+        interleaved=interleaved,
+        sequence_length=sequence_length)
+
+
+def add_attention_core(
     network: trt.INetworkDefinition,
     q_4d: trt.ITensor,
     k_4d: trt.ITensor,
     v_4d: trt.ITensor,
     causal: bool = False,
     mask: trt.ITensor | None = None,
+    scale: float | None = None,
 ) -> trt.ITensor:
     """Scaled dot-product attention via TRT native IAttention layer.
 
@@ -2405,17 +2446,19 @@ def _add_attention_core(
         mask:    Optional additive float mask [B, H, q_seq, kv_seq] added
                  to scaled logits before softmax.  Cannot be used with
                  causal=True.
+        scale:   Optional Q pre-scale factor.  Defaults to 1/sqrt(D).
 
     Returns:
         Context tensor [B, H, q_seq, D].
     """
-    # Pre-scale Q by 1/sqrt(D): TRT IAttention does not apply this itself.
+    # Pre-scale Q: TRT IAttention does not apply score scaling itself.
     # Match the scale constant's dtype to Q's dtype: in strongly-typed networks
     # a FP32 constant mixed with a FP16/BF16 Q causes add_elementwise to emit
     # a type-mismatch error and produce a tensor with corrupted dimensions,
     # which makes add_attention return None.
-    head_dim = q_4d.shape[-1]
-    scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    if scale is None:
+        head_dim = q_4d.shape[-1]
+        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
     # Use FP16 weights directly for FP16; BF16 has no numpy native type so
     # create as FP32 and cast; FP32 falls through to the default.
     scale_np_dtype = np.float16 if q_4d.dtype == trt.float16 else np.float32
@@ -2438,93 +2481,50 @@ def _add_attention_core(
     return attn.get_output(0)
 
 
-# ---------------------------------------------------------------------------
-# Decoder attention implementations
-# ---------------------------------------------------------------------------
-
-def add_decoder_attention_decomposed(
+def add_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
-    all_k: trt.ITensor,
-    all_v: trt.ITensor,
-    attention_mask: trt.ITensor,
+    k: trt.ITensor,
+    v: trt.ITensor,
     *,
     num_heads: int,
     head_dim: int,
-    attention_window: int,
-    attn_scale_tensor: trt.ITensor,
-    alibi_slopes_tensor: trt.ITensor | None = None,
-    alibi_indices_tensor: trt.ITensor | None = None,
-    position_id: trt.ITensor | None = None,
+    num_kv_heads: int | None = None,
+    q_seq: int | None,
+    kv_seq: int | None,
+    causal: bool = False,
+    mask: trt.ITensor | None = None,
+    scale: float | None = None,
+    tag: str | None = None,
 ) -> trt.ITensor:
-    """Decomposed decoder attention: Q@K^T -> scale -> mask -> softmax -> @V.
+    """Native IAttention for row-major [S, H * D] Q/K/V tensors.
 
-    Inputs:
-        q:              [1, attention_size]  (attention_size = num_heads * head_dim)
-        all_k, all_v:   [attention_window, attention_size]
-        attention_mask:  [1, attention_window]
-    Returns:
-        context:        [1, attention_size]
+    ``num_kv_heads`` can be smaller than ``num_heads`` for GQA/MQA. TRT
+    native IAttention supports this directly, so callers should not expand K/V
+    heads unless the model semantics require per-query-head K/V values.
     """
     attention_size = num_heads * head_dim
+    kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+    q_4d = reshape_rows_to_heads_4d(
+        network, q, num_heads, head_dim, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".q")
+    k_4d = reshape_rows_to_heads_4d(
+        network, k, kv_heads, head_dim, sequence_length=kv_seq,
+        tag=None if tag is None else tag + ".k")
+    v_4d = reshape_rows_to_heads_4d(
+        network, v, kv_heads, head_dim, sequence_length=kv_seq,
+        tag=None if tag is None else tag + ".v")
+    if scale is None:
+        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    ctx_4d = add_attention_core(
+        network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale)
+    return reshape_heads_4d_to_rows(
+        network, ctx_4d, attention_size, sequence_length=q_seq,
+        tag=None if tag is None else tag + ".ctx")
 
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (num_heads, 1, head_dim)
 
-    k_heads = network.add_shuffle(all_k)
-    k_heads.reshape_dims = (attention_window, num_heads, head_dim)
-    v_heads = network.add_shuffle(all_v)
-    v_heads.reshape_dims = (attention_window, num_heads, head_dim)
-
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-    scaled = network.add_elementwise(
-        score.get_output(0), attn_scale_tensor,
-        trt.ElementWiseOperation.PROD)
-
-    if alibi_slopes_tensor is not None and alibi_indices_tensor is not None:
-        pos_float = network.add_cast(position_id, trt.float32)
-        pos_1d = network.add_shuffle(pos_float.get_output(0))
-        pos_1d.reshape_dims = (1,)
-        full_indices = network.add_concatenation(
-            [alibi_indices_tensor, pos_1d.get_output(0)])
-        full_indices.axis = 0
-        idx_3d = network.add_shuffle(full_indices.get_output(0))
-        idx_3d.reshape_dims = (1, 1, attention_window)
-        pos_reshaped = network.add_shuffle(pos_float.get_output(0))
-        pos_reshaped.reshape_dims = (1, 1, 1)
-        rel_pos = network.add_elementwise(
-            idx_3d.get_output(0), pos_reshaped.get_output(0),
-            trt.ElementWiseOperation.SUB)
-        alibi_bias = network.add_elementwise(
-            alibi_slopes_tensor, rel_pos.get_output(0),
-            trt.ElementWiseOperation.PROD)
-        scaled = network.add_elementwise(
-            scaled.get_output(0), alibi_bias.get_output(0),
-            trt.ElementWiseOperation.SUM)
-
-    mask3d = network.add_shuffle(attention_mask)
-    mask3d.reshape_dims = (1, 1, attention_window)
-
-    masked = network.add_elementwise(
-        scaled.get_output(0), mask3d.get_output(0),
-        trt.ElementWiseOperation.SUM)
-
-    softmax = network.add_softmax(masked.get_output(0))
-    softmax.axes = 1 << 2
-
-    context_heads = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    context_flat = network.add_shuffle(context_heads.get_output(0))
-    context_flat.reshape_dims = (1, attention_size)
-    return context_flat.get_output(0)
+# Backward-compatible name used by existing tests and call sites.
+_add_attention_core = add_attention_core
 
 
 def add_decoder_attention_ffi(
@@ -2540,7 +2540,6 @@ def add_decoder_attention_ffi(
 ) -> trt.ITensor:
     """Decoder attention via TVM-FFI kernel (FlashInfer, CuTe, etc).
 
-    Same input/output contract as add_decoder_attention_decomposed.
     The kernel must be registered as a TVM-FFI global before engine build.
 
     Inputs:

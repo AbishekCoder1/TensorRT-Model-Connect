@@ -354,7 +354,6 @@ int main(int argc, char** argv) {
     cfg.top_p = top_p;
     cfg.min_p = min_p;
     cfg.seed = seed;
-    cfg.collect_timing = true;
     cfg.use_chat_template = use_chat_template;
     cfg.enable_thinking = enable_thinking;
     cfg.stop_on_boxed_answer = stop_on_answer;

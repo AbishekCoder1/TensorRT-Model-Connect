@@ -103,7 +103,6 @@ def build_qwen3_encoder_engine(
         output_layer = num_layers + output_layer  # e.g., 36 + (-2) = 34
 
     kv_dim = num_kv_heads * head_dim
-    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -118,51 +117,33 @@ def build_qwen3_encoder_engine(
 
     # Constants
     eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
-    scale_t = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
 
     # Embedding
     embed_table = graph_ops.add_constant(
         network, (vocab_size, hidden_size), weights["embed_tokens"])
     hidden = network.add_gather(embed_table, input_ids, 0).get_output(0)
 
-    # Build RoPE cos/sin tables
-    rope_cos_np = _build_rope_table(max_seq_len, num_heads, head_dim, rope_theta, cosine=True)
-    rope_sin_np = _build_rope_table(max_seq_len, num_heads, head_dim, rope_theta, cosine=False)
-    rope_cos = graph_ops.add_constant(
-        network, (max_seq_len, num_heads * head_dim), rope_cos_np)
-    rope_sin = graph_ops.add_constant(
-        network, (max_seq_len, num_heads * head_dim), rope_sin_np)
+    if head_dim < 2 or head_dim % 2 != 0:
+        raise ValueError(
+            "Qwen3 encoder RoPE requires an even head_dim >= 2 for TRT native RoPE")
+    rope_cos_half_np = graph_ops.make_rope_table_half_dim(
+        max_seq_len, head_dim, rope_theta, True)
+    rope_sin_half_np = graph_ops.make_rope_table_half_dim(
+        max_seq_len, head_dim, rope_theta, False)
+    rope_cos_half = graph_ops.add_constant(
+        network, rope_cos_half_np.shape, rope_cos_half_np)
+    rope_sin_half = graph_ops.add_constant(
+        network, rope_sin_half_np.shape, rope_sin_half_np)
+    rope_position_ids = graph_ops.add_constant(
+        network, (max_seq_len,), np.arange(max_seq_len, dtype=np.int32),
+        dtype=np.int32)
 
-    # Build rotate-half matrix
-    rot_half_np = graph_ops.make_rotate_half_matrix(
-        num_heads * head_dim, num_heads, interleaved=False)
-    rot_half = graph_ops.add_constant(
-        network, (num_heads * head_dim, num_heads * head_dim), rot_half_np)
-
-    # KV-head RoPE tables (if GQA)
-    if num_kv_heads != num_heads:
-        kv_rope_cos_np = _build_rope_table(max_seq_len, num_kv_heads, head_dim, rope_theta, cosine=True)
-        kv_rope_sin_np = _build_rope_table(max_seq_len, num_kv_heads, head_dim, rope_theta, cosine=False)
-        kv_rope_cos = graph_ops.add_constant(
-            network, (max_seq_len, num_kv_heads * head_dim), kv_rope_cos_np)
-        kv_rope_sin = graph_ops.add_constant(
-            network, (max_seq_len, num_kv_heads * head_dim), kv_rope_sin_np)
-        kv_rot_half_np = graph_ops.make_rotate_half_matrix(
-            num_kv_heads * head_dim, num_kv_heads, interleaved=False)
-        kv_rot_half = graph_ops.add_constant(
-            network, (num_kv_heads * head_dim, num_kv_heads * head_dim), kv_rot_half_np)
-    else:
-        kv_rope_cos = rope_cos
-        kv_rope_sin = rope_sin
-        kv_rot_half = rot_half
-
-    # Build attention mask: [seq_len] -> [1, seq_len] for broadcast in softmax
+    # Build attention mask for native IAttention. attn_mask input is 0.0 for
+    # valid tokens and -1e9 for padding; [1, 1, 1, S] broadcasts across heads
+    # and query positions.
     # We mask padded positions with -1e9
-    # attn_mask input: 0.0 for valid tokens, -1e9 for padding
-    # Reshape for broadcast: [1, 1, seq_len] for [num_heads, seq_len, seq_len]
     mask_reshape = network.add_shuffle(attn_mask)
-    mask_reshape.reshape_dims = (1, 1, max_seq_len)
+    mask_reshape.reshape_dims = (1, 1, 1, max_seq_len)
 
     for layer_idx in range(num_layers):
         if layer_idx == output_layer:
@@ -195,56 +176,27 @@ def build_qwen3_encoder_engine(
         q = _add_per_head_rms_norm(network, q, num_heads, head_dim, q_norm_tiled, eps_t, max_seq_len)
         k = _add_per_head_rms_norm(network, k, num_kv_heads, head_dim, k_norm_tiled, eps_t, max_seq_len)
 
-        # Apply RoPE
-        q = _apply_rope(network, q, rope_cos, rope_sin, rot_half)
-        k = _apply_rope(network, k, kv_rope_cos, kv_rope_sin, kv_rot_half)
+        q = graph_ops.add_apply_rope_native(
+            network, q, num_heads, head_dim,
+            rope_cos_half, rope_sin_half, rope_position_ids,
+            head_dim, sequence_length=max_seq_len)
+        k = graph_ops.add_apply_rope_native(
+            network, k, num_kv_heads, head_dim,
+            rope_cos_half, rope_sin_half, rope_position_ids,
+            head_dim, sequence_length=max_seq_len)
 
-        # GQA: expand K,V from num_kv_heads to num_heads
-        if num_kv_heads != num_heads:
-            repeat = num_heads // num_kv_heads
-            k = _expand_kv_heads(network, k, num_kv_heads, head_dim, repeat, max_seq_len)
-            v = _expand_kv_heads(network, v, num_kv_heads, head_dim, repeat, max_seq_len)
-
-        # Multi-head attention: [seq, dim] -> [heads, seq, head_dim]
-        q_h = network.add_shuffle(q)
-        q_h.reshape_dims = (max_seq_len, num_heads, head_dim)
-        q_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        k_h = network.add_shuffle(k)
-        k_h.reshape_dims = (max_seq_len, num_heads, head_dim)
-        k_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        v_h = network.add_shuffle(v)
-        v_h.reshape_dims = (max_seq_len, num_heads, head_dim)
-        v_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        # Scores: Q @ K^T -> [heads, seq, seq]
-        score = network.add_matrix_multiply(
-            q_h.get_output(0), trt.MatrixOperation.NONE,
-            k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        scaled_score = network.add_elementwise(
-            score.get_output(0), scale_t, trt.ElementWiseOperation.PROD)
-
-        # Apply padding mask (broadcast from [1, 1, seq] to [heads, seq, seq])
-        masked = network.add_elementwise(
-            scaled_score.get_output(0), mask_reshape.get_output(0),
-            trt.ElementWiseOperation.SUM)
-
-        softmax = network.add_softmax(masked.get_output(0))
-        softmax.axes = 1 << 2
-
-        # Context
-        ctx = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_h.get_output(0), trt.MatrixOperation.NONE)
-
-        ctx_flat = network.add_shuffle(ctx.get_output(0))
-        ctx_flat.first_transpose = trt.Permutation([1, 0, 2])
-        ctx_flat.reshape_dims = (max_seq_len, num_heads * head_dim)
+        ctx_flat = graph_ops.add_attention_from_rows(
+            network, q, k, v,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            q_seq=max_seq_len, kv_seq=max_seq_len,
+            mask=mask_reshape.get_output(0),
+            tag=f"layer.{layer_idx}.attn")
 
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, ctx_flat.get_output(0), num_heads * head_dim, hidden_size,
+            network, ctx_flat, num_heads * head_dim, hidden_size,
             weights[f"layer.{layer_idx}.o_proj"])
 
         # Residual
@@ -300,31 +252,6 @@ def build_qwen3_encoder_engine(
     return bytes(plan)
 
 
-def _build_rope_table(
-    max_seq_len: int,
-    num_heads: int,
-    head_dim: int,
-    theta: float,
-    cosine: bool,
-) -> np.ndarray:
-    """Build RoPE cos/sin table [max_seq_len, num_heads * head_dim]."""
-    total_dim = num_heads * head_dim
-    half = head_dim // 2
-    table = np.full((max_seq_len, total_dim), 1.0 if cosine else 0.0, dtype=np.float32)
-
-    for pos in range(max_seq_len):
-        for head in range(num_heads):
-            for d in range(head_dim):
-                freq_idx = d % half
-                exponent = (2.0 * freq_idx) / head_dim
-                inv_freq = theta ** (-exponent)
-                angle = pos * inv_freq
-                val = np.cos(angle) if cosine else np.sin(angle)
-                table[pos, head * head_dim + d] = val
-
-    return table
-
-
 def _add_per_head_rms_norm(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -335,74 +262,6 @@ def _add_per_head_rms_norm(
     seq_len: int,
 ) -> trt.ITensor:
     """Per-head RMSNorm for sequence input [seq_len, num_heads * head_dim]."""
-    total_dim = num_heads * head_dim
-
-    # Reshape: [seq_len, total_dim] -> [seq_len * num_heads, head_dim]
-    r1 = network.add_shuffle(inp)
-    r1.reshape_dims = (seq_len * num_heads, head_dim)
-
-    reshaped = r1.get_output(0)
-    sq = network.add_elementwise(reshaped, reshaped, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    denom = network.add_elementwise(
-        mean.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(
-        reshaped, recip.get_output(0), trt.ElementWiseOperation.PROD)
-
-    # Apply gamma [num_heads, head_dim] -> tile for [seq_len * num_heads, head_dim]
-    gamma_t = graph_ops.add_constant(network, (1, head_dim), gamma[0:1])  # same for all heads
-    scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-
-    # Reshape back: [seq_len * num_heads, head_dim] -> [seq_len, total_dim]
-    r2 = network.add_shuffle(scaled.get_output(0))
-    r2.reshape_dims = (seq_len, total_dim)
-    return r2.get_output(0)
-
-
-def _apply_rope(
-    network: trt.INetworkDefinition,
-    x: trt.ITensor,
-    cos_table: trt.ITensor,
-    sin_table: trt.ITensor,
-    rot_half: trt.ITensor,
-) -> trt.ITensor:
-    """Apply RoPE: x * cos + rotate_half(x) * sin."""
-    x_rot = network.add_matrix_multiply(
-        x, trt.MatrixOperation.NONE,
-        rot_half, trt.MatrixOperation.NONE)
-    x_cos = network.add_elementwise(
-        x, cos_table, trt.ElementWiseOperation.PROD)
-    x_sin = network.add_elementwise(
-        x_rot.get_output(0), sin_table, trt.ElementWiseOperation.PROD)
-    result = network.add_elementwise(
-        x_cos.get_output(0), x_sin.get_output(0),
-        trt.ElementWiseOperation.SUM)
-    return result.get_output(0)
-
-
-def _expand_kv_heads(
-    network: trt.INetworkDefinition,
-    kv: trt.ITensor,
-    num_kv_heads: int,
-    head_dim: int,
-    repeat: int,
-    seq_len: int,
-) -> trt.ITensor:
-    """Expand KV from [seq, kv_heads * head_dim] to [seq, num_heads * head_dim]."""
-    # Reshape to [seq, kv_heads, head_dim]
-    r1 = network.add_shuffle(kv)
-    r1.reshape_dims = (seq_len, num_kv_heads, 1, head_dim)
-
-    # Tile along new axis: [seq, kv_heads, repeat, head_dim]
-    parts = [r1.get_output(0)] * repeat
-    concat = network.add_concatenation(parts)
-    concat.axis = 2
-
-    # Reshape to [seq, num_heads * head_dim]
-    r2 = network.add_shuffle(concat.get_output(0))
-    r2.reshape_dims = (seq_len, num_kv_heads * repeat * head_dim)
-    return r2.get_output(0)
+    return graph_ops.add_rms_norm_per_head(
+        network, inp, num_heads, head_dim, gamma, eps_t,
+        sequence_length=seq_len)

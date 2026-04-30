@@ -49,6 +49,7 @@ class TrtModuleImpl final : public ITrtModule {
     int32_t input_rank(const std::string& name) const override;
     bool input_is_dynamic(const std::string& name) const override;
     void reset_execution_context() override;
+    void set_timing_label(std::string label) override;
     bool ok() const override { return ctx_ != nullptr; }
     void keep_alive(std::shared_ptr<void> resource) override;
 
@@ -62,6 +63,10 @@ class TrtModuleImpl final : public ITrtModule {
         bool is_external{false};
         bool is_dynamic{false};
     };
+    struct TimingEvent {
+        cudaEvent_t start{nullptr};
+        cudaEvent_t stop{nullptr};
+    };
 
     nvinfer1::ICudaEngine* engine_{nullptr};
     nvinfer1::IExecutionContext* ctx_{nullptr};
@@ -74,6 +79,8 @@ class TrtModuleImpl final : public ITrtModule {
     std::unordered_map<std::string, BufferEntry> buffers_;
     std::unordered_map<std::string, std::vector<uint8_t>> host_output_staging_;
     std::unordered_map<std::string, DeviceTensor> output_device_tensors_;
+    std::string timing_label_{"engine"};
+    std::vector<TimingEvent> timing_events_;
 
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
     void free_buffers();
@@ -88,6 +95,10 @@ class TrtModuleImpl final : public ITrtModule {
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,
                               const std::vector<int64_t>& new_shape);
     void execute_enqueue();
+    void flush_timing_events();
+    bool begin_timing_event(TimingEvent& event);
+    void finish_timing_event(TimingEvent event);
+    void record_timed_enqueue();
     void recreate_context_with_profile();
     void rebind_buffer_to_context(const std::string& name, const BufferEntry& entry);
     static bool dims_are_dynamic(const nvinfer1::Dims& dims);

@@ -218,7 +218,7 @@ TextResult TextGenerationPipeline::generate(const std::string& prompt, const Gen
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
 
     auto sp = sampling_params_from_config(cfg, eos);
-    auto timed = generate_from_ids(input_ids, max_new, sp, cfg, cfg.collect_timing);
+    auto timed = generate_from_ids(input_ids, max_new, sp, cfg);
 
     // Decode only the NEW tokens (skip input)
     std::vector<int32_t> new_tokens(timed.token_ids.begin() +
@@ -345,7 +345,7 @@ void TextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
 TextGenerationPipeline::TimedGenResult
 TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
                                           int32_t max_new_tokens, const SamplingParams& params,
-                                          const GenerateConfig& cfg, bool collect_timing) {
+                                          const GenerateConfig& cfg) {
     using Clock = std::chrono::steady_clock;
     if (max_new_tokens == 0 || input_ids.empty())
         return TimedGenResult{input_ids, 0.0, 0.0};
@@ -375,10 +375,8 @@ TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
                     static_cast<int32_t>(input_ids.size()));
     const auto t2 = Clock::now();
 
-    const double prefill_ms =
-        collect_timing ? std::chrono::duration<double, std::milli>(t1 - t0).count() : 0.0;
-    const double decode_ms =
-        collect_timing ? std::chrono::duration<double, std::milli>(t2 - t1).count() : 0.0;
+    const double prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double decode_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
     return TimedGenResult{std::move(output), prefill_ms, decode_ms};
 }
 

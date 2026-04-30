@@ -52,42 +52,48 @@ def _make_fake_trt() -> types.SimpleNamespace:
 
 def _import_with_fake_trt(module_name: str):
     """Import a trtf_build submodule while tensorrt is mocked."""
+    sentinel = object()
+    old_trt = sys.modules.get("tensorrt", sentinel)
     sys.modules.pop(module_name, None)
-    with patch.dict(sys.modules, {"tensorrt": _make_fake_trt()}):
+    sys.modules["tensorrt"] = _make_fake_trt()
+    try:
         return importlib.import_module(module_name)
+    finally:
+        if old_trt is sentinel:
+            sys.modules.pop("tensorrt", None)
+        else:
+            sys.modules["tensorrt"] = old_trt
 
 
 @pytest.mark.unit
-def test_qwen3_build_rope_table_has_expected_identities() -> None:
-    """Intent: validate deterministic RoPE table construction math.
+def test_qwen3_native_rope_table_has_expected_identities() -> None:
+    """Intent: validate deterministic shared native RoPE table construction math.
 
     Preconditions: Qwen3 helper module is importable with fake trt.
-    Postconditions: cos/sin tables satisfy position-0 identity and trig invariants.
+    Postconditions: half-dim cos/sin tables satisfy position-0 identity and trig invariants.
     """
     mod = _import_with_fake_trt("trtf_build.qwen3_encoder_builder")
 
-    cos = mod._build_rope_table(
-        max_seq_len=3,
-        num_heads=1,
+    cos = mod.graph_ops.make_rope_table_half_dim(
+        max_cache_length=3,
         head_dim=4,
-        theta=10000.0,
+        rope_theta=10000.0,
         cosine=True,
     )
-    sin = mod._build_rope_table(
-        max_seq_len=3,
-        num_heads=1,
+    sin = mod.graph_ops.make_rope_table_half_dim(
+        max_cache_length=3,
         head_dim=4,
-        theta=10000.0,
+        rope_theta=10000.0,
         cosine=False,
     )
 
-    assert cos.shape == (3, 4)
-    assert sin.shape == (3, 4)
-    np.testing.assert_allclose(cos[0], np.ones((4,), dtype=np.float32))
-    np.testing.assert_allclose(sin[0], np.zeros((4,), dtype=np.float32))
-    np.testing.assert_allclose(cos[1] ** 2 + sin[1] ** 2, np.ones((4,), dtype=np.float32), atol=1e-5)
-    assert cos[1, 0] == pytest.approx(cos[1, 2], abs=1e-7)
-    assert sin[1, 1] == pytest.approx(sin[1, 3], abs=1e-7)
+    assert cos.shape == (3, 2)
+    assert sin.shape == (3, 2)
+    np.testing.assert_allclose(cos[0], np.ones((2,), dtype=np.float32))
+    np.testing.assert_allclose(sin[0], np.zeros((2,), dtype=np.float32))
+    np.testing.assert_allclose(cos[1] ** 2 + sin[1] ** 2, np.ones((2,), dtype=np.float32), atol=1e-5)
+    assert cos[1, 0] == pytest.approx(np.cos(1.0), abs=1e-7)
+    assert sin[1, 1] == pytest.approx(np.sin(0.01), abs=1e-7)
 
 
 @pytest.mark.unit

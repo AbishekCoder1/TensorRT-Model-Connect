@@ -16,6 +16,7 @@
 #include "trtf/runtime/trt_module.h"
 #include "trtf/tokenizer.h"
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,6 +32,9 @@ struct LoadedModule {
 // Load a TRT engine from a serialized plan via the backend. Throws on failure.
 LoadedModule load_trt_module_from_plan(IBackend* backend, const std::vector<char>* plan,
                                        const char* label, const ModuleCreateOptions& options = {});
+
+// Emit a parseable runtime load/deserialization timing line.
+void log_trt_load_timing(const char* label, double load_deserialize_ms, std::size_t plan_bytes);
 
 // Like load_trt_module_from_plan but returns empty LoadedModule on failure
 // instead of throwing (for optional engines).

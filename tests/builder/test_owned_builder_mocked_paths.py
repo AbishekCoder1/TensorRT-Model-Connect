@@ -40,11 +40,14 @@ def _make_fake_trt_base() -> types.SimpleNamespace:
         UnaryOperation=types.SimpleNamespace(SQRT="sqrt", RECIP="recip"),
         MatrixOperation=types.SimpleNamespace(NONE="none", TRANSPOSE="transpose"),
         ActivationType=types.SimpleNamespace(SIGMOID="sigmoid", TANH="tanh"),
+        AttentionNormalizationOp=types.SimpleNamespace(SOFTMAX="softmax"),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
         BuilderFlag=types.SimpleNamespace(TF32="tf32"),
         NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         Permutation=lambda dims: tuple(dims),
         float32="float32",
+        float16="float16",
+        bfloat16="bfloat16",
         int32="int32",
     )
 
@@ -88,17 +91,18 @@ def test_encodec_fuse_weight_norm_matches_manual_formula() -> None:
 
 @pytest.mark.unit
 def test_encoder_seq_layer_norm_uses_native_normalization() -> None:
-    """Intent: verify layer-norm helper uses TRT native add_normalization.
+    """Intent: verify layer-norm helper uses TRT native add_normalization_v2.
 
-    Preconditions: Fake network implements add_normalization API.
+    Preconditions: Fake network implements add_normalization_v2 API.
     Postconditions: Function returns tensor from native normalization layer
         with correct epsilon and axis mask.
     """
     mod = _import_with_fake_trt("trtf_build.encoder_builder")
 
     class _FakeTensor:
-        def __init__(self, name: str):
+        def __init__(self, name: str, dtype=np.float32):
             self.name = name
+            self.dtype = dtype
 
     class _FakeNormLayer:
         def __init__(self):
@@ -112,7 +116,7 @@ def test_encoder_seq_layer_norm_uses_native_normalization() -> None:
         def __init__(self):
             self.norm_calls: list[tuple] = []
 
-        def add_normalization(self, inp, gamma, beta, axis_mask):
+        def add_normalization_v2(self, inp, gamma, beta, axis_mask):
             self.norm_calls.append((inp, gamma, beta, axis_mask))
             return _FakeNormLayer()
 
@@ -120,7 +124,7 @@ def test_encoder_seq_layer_norm_uses_native_normalization() -> None:
 
     def _fake_add_constant(_network, shape, values, **_kw):
         add_constant_calls.append((tuple(shape), tuple(np.asarray(values).shape)))
-        return _FakeTensor(f"const_{len(add_constant_calls)}")
+        return _FakeTensor(f"const_{len(add_constant_calls)}", _kw.get("dtype", np.float32))
 
     with patch.object(mod.graph_ops, "add_constant", side_effect=_fake_add_constant):
         net = _FakeNetwork()

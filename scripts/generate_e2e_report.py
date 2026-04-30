@@ -19,6 +19,7 @@ import argparse
 import base64
 import html
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +29,24 @@ _MAX_EMBED_BYTES = 10 * 1024 * 1024
 
 # Number of evenly-spaced frames to embed for diffusion models.
 _MAX_DIFFUSION_FRAMES = 6
+
+_TRTF_TIMING_RE = re.compile(
+    r"^\[trtf\.timing\]\s+"
+    r"prefill_ms=(?P<prefill_ms>[-+0-9.eE]+)\s+"
+    r"decode_ms=(?P<decode_ms>[-+0-9.eE]+)\s+"
+    r"total_ms=(?P<total_ms>[-+0-9.eE]+)\s*$",
+    re.MULTILINE,
+)
+_TRTF_LOAD_TIMING_RE = re.compile(
+    r"^\[trtf\.load_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
+    r"load_deserialize_ms=(?P<ms>[-+0-9.eE]+)",
+    re.MULTILINE,
+)
+_TRTF_ENGINE_TIMING_RE = re.compile(
+    r"^\[trtf\.engine_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
+    r"execute_ms=(?P<ms>[-+0-9.eE]+)",
+    re.MULTILINE,
+)
 
 # ---------------------------------------------------------------------------
 # Modality classification
@@ -285,10 +304,13 @@ def _sum_timing_prefix(
     timing: Dict[str, Any],
     prefixes: Tuple[str, ...],
     exclude: Tuple[str, ...] = (),
+    exclude_prefixes: Tuple[str, ...] = (),
 ) -> float:
     total = 0.0
     for key, value in timing.items():
         if key in exclude or not any(key.startswith(prefix) for prefix in prefixes):
+            continue
+        if any(key.startswith(prefix) for prefix in exclude_prefixes):
             continue
         if value is None:
             continue
@@ -299,13 +321,155 @@ def _sum_timing_prefix(
     return total
 
 
+def _timing_label_key(label: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", label.strip().lower()).strip("_")
+    return cleaned or "engine"
+
+
+def _read_stage_log(ref: Any, art_dir: Path) -> str:
+    if not isinstance(ref, str) or not ref:
+        return ""
+    raw_path = Path(ref)
+    candidates = [raw_path]
+    if not raw_path.is_absolute():
+        candidates.extend([
+            art_dir / raw_path,
+            art_dir / raw_path.name,
+            art_dir.parent / raw_path.name,
+        ])
+    for path in candidates:
+        if path.is_file():
+            try:
+                return path.read_text(errors="replace")
+            except OSError:
+                return ""
+    return ""
+
+
+def _stage_text_blobs(result: Dict[str, Any]) -> List[Tuple[str, List[str]]]:
+    art_dir = Path(result.get("_artifact_dir") or ".")
+    stage_blobs: List[Tuple[str, List[str]]] = []
+    for stage_key, stage in (result.get("stage_outputs") or {}).items():
+        if not str(stage_key).startswith("trt_") or not isinstance(stage, dict):
+            continue
+        stage_name = str(stage.get("stage_name") or str(stage_key).removeprefix("trt_"))
+        blobs: List[str] = []
+
+        def visit(value: Any) -> None:
+            if isinstance(value, str):
+                blobs.append(value)
+            elif isinstance(value, dict):
+                for key, child in value.items():
+                    if key.endswith("_log") or key == "stderr_log":
+                        log_text = _read_stage_log(child, art_dir)
+                        if log_text:
+                            blobs.append(log_text)
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(stage.get("metadata") or {})
+        visit(stage.get("data") or {})
+        if stage.get("text"):
+            blobs.append(str(stage["text"]))
+        stage_blobs.append((stage_name, blobs))
+    return stage_blobs
+
+
+def _extract_labeled_timing(
+    pattern: re.Pattern[str],
+    blobs: List[str],
+) -> Dict[str, float]:
+    timings: Dict[str, float] = {}
+    for text in blobs:
+        for match in pattern.finditer(text or ""):
+            try:
+                seconds = float(match.group("ms")) / 1000.0
+            except (TypeError, ValueError):
+                continue
+            key = _timing_label_key(match.group("label"))
+            timings[key] = timings.get(key, 0.0) + seconds
+    return timings
+
+
+def _extract_cli_generation_timing(blobs: List[str]) -> float | None:
+    for text in blobs:
+        match = _TRTF_TIMING_RE.search(text or "")
+        if match is None:
+            continue
+        try:
+            return float(match.group("total_ms")) / 1000.0
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _augment_timing_from_stage_outputs(result: Dict[str, Any], timing: Dict[str, Any]) -> None:
+    for stage_name, blobs in _stage_text_blobs(result):
+        engine_components = _extract_labeled_timing(_TRTF_ENGINE_TIMING_RE, blobs)
+        if engine_components:
+            timing.setdefault(f"trt_engine_{stage_name}_s", sum(engine_components.values()))
+            for label, value in engine_components.items():
+                timing.setdefault(f"trt_component_engine_{stage_name}_{label}_s", value)
+        else:
+            cli_engine = _extract_cli_generation_timing(blobs)
+            if cli_engine is not None:
+                timing.setdefault(f"trt_engine_{stage_name}_s", cli_engine)
+
+        load_components = _extract_labeled_timing(_TRTF_LOAD_TIMING_RE, blobs)
+        if load_components:
+            timing.setdefault(
+                f"trt_load_deserialize_{stage_name}_s",
+                sum(load_components.values()),
+            )
+            for label, value in load_components.items():
+                timing.setdefault(
+                    f"trt_component_load_deserialize_{stage_name}_{label}_s",
+                    value,
+                )
+
+
 def _normalize_detailed_timing(result: Dict[str, Any]) -> Dict[str, float]:
     """Return normalized timing categories for the per-model timing table."""
-    timing = result.get("timing", {}) or {}
+    timing = dict(result.get("timing", {}) or {})
+    _augment_timing_from_stage_outputs(result, timing)
     details: Dict[str, float] = {}
+    persisted_inference: float | None = None
 
     persisted = result.get("detailed_timing", {}) or {}
     for key, value in persisted.items():
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if key == "inference_s":
+            persisted_inference = numeric
+        else:
+            details[key] = numeric
+
+    inference = _sum_timing_prefix(timing, ("trt_engine_",))
+    trt_validation = _sum_timing_prefix(
+        timing,
+        ("trt_",),
+        exclude=("trt_compile_s", "trt_build_s"),
+        exclude_prefixes=("trt_engine_", "trt_load_deserialize_", "trt_component_"),
+    )
+
+    if inference:
+        details["inference_s"] = inference
+    elif persisted_inference is not None and not trt_validation:
+        details["inference_s"] = persisted_inference
+
+    load_deserialize = _sum_timing_prefix(timing, ("trt_load_deserialize_",))
+    if load_deserialize:
+        details.setdefault("trt_load_deserialization_s", load_deserialize)
+
+    for key, value in timing.items():
+        if not key.startswith(("trt_component_engine_", "trt_component_load_deserialize_")):
+            continue
         if value is None:
             continue
         try:
@@ -313,11 +477,8 @@ def _normalize_detailed_timing(result: Dict[str, Any]) -> Dict[str, float]:
         except (TypeError, ValueError):
             continue
 
-    inference = _sum_timing_prefix(
-        timing, ("trt_",), exclude=("trt_compile_s", "trt_build_s")
-    )
-    if inference:
-        details.setdefault("inference_s", inference)
+    if trt_validation:
+        details.setdefault("trt_validation_s", trt_validation)
 
     reference = _sum_timing_prefix(timing, ("ref_",))
     if reference:
@@ -341,71 +502,206 @@ def _format_seconds(value: Any) -> str:
     if value is None:
         return "&mdash;"
     try:
-        return f"{float(value):.2f}s"
+        seconds = float(value)
+        if 0.0 < abs(seconds) < 0.01:
+            return f"{seconds * 1000.0:.2f}ms"
+        return f"{seconds:.2f}s"
     except (TypeError, ValueError):
         return "&mdash;"
 
 
 def _format_component_weight_label(key: str) -> str:
     component = key.removeprefix("weights_loading_").removesuffix("_s")
-    return "Weights loading: " + component.replace("_", " ")
+    return component.replace("_", " ")
 
 
 def _format_component_compile_label(key: str) -> str:
     component = key.removeprefix("trt_compile_").removesuffix("_s")
-    return "TRT compile: " + component.replace("_", " ")
+    return component.replace("_", " ")
+
+
+def _format_stage_component_label(prefix: str, key: str) -> str:
+    stem = key.removeprefix(prefix).removesuffix("_s")
+    parts = stem.split("_")
+    stage = "unknown"
+    label_parts: list[str] = []
+    for idx in range(len(parts), 0, -1):
+        candidate = "_".join(parts[:idx])
+        if candidate in {
+            "audio_encode",
+            "crossover_ref_t5_trt_dit",
+            "crossover_trt_t5_ref_dit",
+            "debug_pipeline",
+            "dit_step",
+            "full_generation",
+            "full_inference",
+            "end_to_end",
+            "end_to_end_video",
+            "frame_quality",
+            "generate",
+            "t5_encode",
+            "talker_decode",
+            "thinker_decode",
+            "vae_decode",
+            "vision_encode",
+            "prefill",
+            "decode",
+            "generate_audio",
+            "speech_to_text",
+            "speech_to_speech",
+        }:
+            stage = candidate
+            label_parts = parts[idx:]
+            break
+    if not label_parts:
+        label_parts = parts
+    component = " ".join(label_parts).replace(" plan", "")
+    stage_label = stage.replace("_", " ")
+    return f"{component} ({stage_label})" if component else stage_label
+
+
+def _sum_child_values(children: List[Tuple[str, Any]]) -> float | None:
+    if not children:
+        return None
+    total = 0.0
+    found = False
+    for _, value in children:
+        if value is None:
+            continue
+        try:
+            total += float(value)
+            found = True
+        except (TypeError, ValueError):
+            continue
+    return total if found else None
+
+
+def _append_overhead_child(
+    children: List[Tuple[str, Any]],
+    parent_value: Any,
+    label: str,
+) -> None:
+    try:
+        parent = float(parent_value)
+    except (TypeError, ValueError):
+        return
+    child_sum = _sum_child_values(children) or 0.0
+    remainder = parent - child_sum
+    if remainder > 0.005:
+        children.append((label, remainder))
+
+
+def _render_timing_breakdown(
+    label: str,
+    children: List[Tuple[str, Any]],
+) -> str:
+    if not children:
+        return _esc(label)
+
+    rows = []
+    for child_label, child_value in children:
+        rows.append(
+            '<div class="timing-breakdown-row">'
+            f"<span>{_esc(child_label)}</span>"
+            f"<span>{_format_seconds(child_value)}</span>"
+            "</div>"
+        )
+    return (
+        '<details class="timing-expand">'
+        f"<summary>{_esc(label)}</summary>"
+        '<div class="timing-breakdown">'
+        + "\n".join(rows)
+        + "</div></details>"
+    )
+
+
+def _render_detailed_timing_row(
+    label: str,
+    value: Any,
+    children: List[Tuple[str, Any]] | None = None,
+) -> str:
+    label_html = _render_timing_breakdown(label, children or [])
+    return f"<tr><td>{label_html}</td><td>{_format_seconds(value)}</td></tr>"
 
 
 def _render_detailed_timing_table(result: Dict[str, Any]) -> str:
     details = _normalize_detailed_timing(result)
-    required_rows = [
-        ("weights_loading_s", "Weights loading"),
-        ("trt_compile_s", "TRT compile"),
-        ("inference_s", "Inference"),
-        ("comparison_s", "Comparison"),
-    ]
     optional_rows = [
+        ("bundle_write_s", "Bundle write"),
         ("quantization_context_s", "Quantization context"),
         ("fp8_calibration_s", "FP8 calibration"),
         ("fp8_scales_write_s", "FP8 scales write"),
-        ("tokenizer_special_tokens_detection_s", "Tokenizer special-token detection"),
-        ("tokenizer_json_ensure_s", "Tokenizer JSON ensure"),
-        ("bundle_write_s", "Bundle write"),
         ("reference_s", "Reference"),
         ("preflight_s", "Preflight"),
     ]
 
-    rows: List[str] = []
-    for key, label in required_rows:
-        rows.append(
-            f"<tr><td>{_esc(label)}</td><td>{_format_seconds(details.get(key))}</td></tr>"
+    weight_children = [
+        (_format_component_weight_label(key), details.get(key))
+        for key in sorted(details)
+        if key.startswith("weights_loading_") and key != "weights_loading_s"
+    ]
+    _append_overhead_child(weight_children, details.get("weights_loading_s"), "unattributed")
+    compile_children = [
+        (_format_component_compile_label(key), details.get(key))
+        for key in sorted(details)
+        if (
+            key.startswith("trt_compile_")
+            and key != "trt_compile_s"
+            and key != "trt_compile_diffusion_components_s"
         )
-    for key in sorted(details):
-        if not key.startswith("weights_loading_") or key == "weights_loading_s":
-            continue
-        label = _format_component_weight_label(key)
-        rows.append(
-            f"<tr><td>{_esc(label)}</td><td>{_format_seconds(details.get(key))}</td></tr>"
+    ]
+    _append_overhead_child(compile_children, details.get("trt_compile_s"), "unattributed")
+
+    engine_component_children = [
+        (
+            "engine execution: "
+            + _format_stage_component_label("trt_component_engine_", key),
+            details.get(key),
         )
-    compile_summary_keys = {
-        "trt_compile_s",
-        "trt_compile_main_engine_s",
-        "trt_compile_vision_engine_s",
-        "trt_compile_extra_engines_s",
-        "trt_compile_diffusion_components_s",
-    }
-    for key in sorted(details):
-        if not key.startswith("trt_compile_") or key in compile_summary_keys:
-            continue
-        label = _format_component_compile_label(key)
-        rows.append(
-            f"<tr><td>{_esc(label)}</td><td>{_format_seconds(details.get(key))}</td></tr>"
+        for key in sorted(details)
+        if key.startswith("trt_component_engine_")
+    ]
+    if not engine_component_children and "inference_s" in details:
+        engine_component_children = [("TRT engine execution", details.get("inference_s"))]
+
+    load_component_children = [
+        (
+            "load/deserialization: "
+            + _format_stage_component_label("trt_component_load_deserialize_", key),
+            details.get(key),
         )
+        for key in sorted(details)
+        if key.startswith("trt_component_load_deserialize_")
+    ]
+    if not load_component_children and "trt_load_deserialization_s" in details:
+        load_component_children = [
+            ("TRT engine load/deserialization", details.get("trt_load_deserialization_s"))
+        ]
+
+    inference_children = engine_component_children + load_component_children
+    inference_total = _sum_child_values(inference_children)
+
+    rows: List[str] = [
+        _render_detailed_timing_row(
+            "Weights loading",
+            details.get("weights_loading_s"),
+            weight_children,
+        ),
+        _render_detailed_timing_row(
+            "TRT compile",
+            details.get("trt_compile_s"),
+            compile_children,
+        ),
+        _render_detailed_timing_row(
+            "Inference",
+            inference_total,
+            inference_children,
+        ),
+        _render_detailed_timing_row("Comparison", details.get("comparison_s")),
+    ]
     for key, label in optional_rows:
         if key in details:
-            rows.append(
-                f"<tr><td>{_esc(label)}</td><td>{_format_seconds(details.get(key))}</td></tr>"
-            )
+            rows.append(_render_detailed_timing_row(label, details.get(key)))
 
     return (
         '<table class="timing-table detailed-timing-table">'
@@ -942,6 +1238,18 @@ details { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
 details[open] { border-color: #94a3b8; }
 summary { padding: 12px 16px; cursor: pointer; font-size: 1em; }
 summary:hover { background: #f8fafc; }
+.timing-expand, .timing-expand[open] { background: transparent; border: 0;
+  border-radius: 0; margin: 0; }
+.timing-expand summary { padding: 0; font-size: inherit; font-weight: 600;
+  line-height: 1.35; }
+.timing-expand summary:hover { background: transparent; }
+.timing-breakdown { margin-top: 6px; display: grid; gap: 3px; color: #475569;
+  font-size: 0.92em; }
+.timing-breakdown-row { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px; align-items: baseline; }
+.timing-breakdown-row span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.timing-breakdown-row span:last-child { white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
 .model-body { padding: 12px 16px; }
 .failure-info { color: #dc2626; margin-bottom: 8px; }
 .text-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;

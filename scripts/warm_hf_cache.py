@@ -30,6 +30,7 @@ but do not block CI.
 """
 
 import argparse
+import fnmatch
 import json
 import pathlib
 import sys
@@ -42,6 +43,40 @@ try:
 except ImportError:
     print("ERROR: huggingface_hub not available", file=sys.stderr)
     sys.exit(1)
+
+# Keep this intentionally aligned with trtf_build.engine_builder._HF_ALLOW_PATTERNS
+# without importing engine_builder here; that import pulls in the whole builder
+# plugin registry before the cache warm script needs it.
+_HF_ALLOW_PATTERNS = [
+    "config.json",
+    "generation_config.json",
+    "preprocessor_config.json",
+    "model.safetensors",
+    "model-*.safetensors",
+    "model.safetensors-*.safetensors",
+    "model.safetensors.index.json",
+    "pytorch_model.bin",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "*.model",
+    "model_index.json",
+    "*/config.json",
+    "*/model.safetensors",
+    "*/model-*.safetensors",
+    "*/model.safetensors.index.json",
+    "*/diffusion_pytorch_model.safetensors",
+    "*/diffusion_pytorch_model-*.safetensors",
+    "*/diffusion_pytorch_model.safetensors.index.json",
+    "scheduler/*",
+    "tokenizer/*",
+]
+
+_HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
+_ENTRYPOINT_PATTERNS = ["config.json", "model_index.json", "*/config.json"]
+_WEIGHT_PATTERNS = ["*.safetensors", "*.bin", "*.nemo"]
 
 parser = argparse.ArgumentParser(
     description=__doc__,
@@ -93,17 +128,53 @@ for m in manifests:
 
 
 def _is_cached(hf_id: str) -> bool:
-    """Return True if the model has at least one local snapshot.
+    """Return True if the model has a usable local snapshot.
 
-    Checks the HF cache directory structure without making any network call.
-    Respects HF_HOME / HUGGINGFACE_HUB_CACHE environment variables via the
-    huggingface_hub constants module.
+    A snapshot directory alone is not enough: partial cache entries can contain
+    only config/tokenizer metadata. The offline build phase needs at least one
+    HF entrypoint config and at least one local weight artifact.
     """
     cache_dir = pathlib.Path(hf_constants.HF_HUB_CACHE)
     # HF cache layout: models--{org}--{model}/snapshots/{sha}/
     repo_dir = cache_dir / ("models--" + hf_id.replace("/", "--"))
     snapshots_dir = repo_dir / "snapshots"
-    return snapshots_dir.is_dir() and any(snapshots_dir.iterdir())
+    if not snapshots_dir.is_dir():
+        return False
+
+    snapshot_paths = [
+        path for path in snapshots_dir.iterdir()
+        if path.is_dir()
+    ]
+    ref_main = repo_dir / "refs" / "main"
+    if ref_main.is_file():
+        commit = ref_main.read_text().strip()
+        main_snapshot = snapshots_dir / commit
+        if main_snapshot.is_dir():
+            snapshot_paths = [main_snapshot] + [
+                path for path in snapshot_paths
+                if path != main_snapshot
+            ]
+
+    return any(_snapshot_has_required_files(path) for path in snapshot_paths)
+
+
+def _snapshot_has_required_files(snapshot_dir: pathlib.Path) -> bool:
+    files = [
+        str(path.relative_to(snapshot_dir))
+        for path in snapshot_dir.rglob("*")
+        if path.is_file()
+    ]
+    has_entrypoint = any(
+        fnmatch.fnmatch(name, pattern)
+        for name in files
+        for pattern in _ENTRYPOINT_PATTERNS
+    )
+    has_weights = any(
+        fnmatch.fnmatch(name, pattern)
+        for name in files
+        for pattern in _WEIGHT_PATTERNS
+    )
+    return has_entrypoint and has_weights
 
 
 selective = filter_names is not None
@@ -120,7 +191,14 @@ for i, (name, hf_id) in enumerate(entries, 1):
         continue
 
     try:
-        snapshot_download(hf_id)
+        local_dir = snapshot_download(
+            hf_id,
+            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
+        )
+        if not _snapshot_has_required_files(pathlib.Path(local_dir)):
+            raise RuntimeError(
+                "downloaded snapshot is still missing a config/model_index "
+                "entrypoint or local weight artifact")
         print(f"  [{i:3d}/{len(entries)}] {name}  OK")
     except HfHubHTTPError as e:
         print(f"  [{i:3d}/{len(entries)}] {name}  WARN (HTTP {e.response.status_code}): {e}")

@@ -360,10 +360,6 @@ class DeepSeekV2Plugin:
         embedding_table = graph_ops.add_constant(
             network, (vocab, hidden), weights["embedding"])
 
-        # RoPE tables -- only for the rope dimensions (qk_rope_head_dim per head)
-        # Shape: [attention_window, num_heads * qk_rope_head_dim]
-        rope_total = num_heads * qk_rope_head_dim
-
         # DeepSeek-V2 uses complex (interleaved) RoPE: adjacent dims (d, d+1)
         # share a frequency, matching HF's apply_rotary_emb with torch.polar.
         rope_scaling = config.raw.get("rope_scaling")
@@ -374,35 +370,28 @@ class DeepSeekV2Plugin:
                 beta_fast=rope_scaling["beta_fast"],
                 beta_slow=rope_scaling["beta_slow"],
             )
-            cos_table_np = graph_ops.make_yarn_rope_table(
-                attention_window, rope_total, num_heads,
+            cos_half_np = graph_ops.make_yarn_rope_table_half_dim(
+                attention_window, qk_rope_head_dim,
                 config.rope_theta, True, **yarn_kwargs, interleaved=True)
-            sin_table_np = graph_ops.make_yarn_rope_table(
-                attention_window, rope_total, num_heads,
+            sin_half_np = graph_ops.make_yarn_rope_table_half_dim(
+                attention_window, qk_rope_head_dim,
                 config.rope_theta, False, **yarn_kwargs, interleaved=True)
         else:
-            cos_table_np = graph_ops.make_rope_table(
-                attention_window, rope_total, num_heads,
+            cos_half_np = graph_ops.make_rope_table_half_dim(
+                attention_window, qk_rope_head_dim,
                 config.rope_theta, True, interleaved=True)
-            sin_table_np = graph_ops.make_rope_table(
-                attention_window, rope_total, num_heads,
+            sin_half_np = graph_ops.make_rope_table_half_dim(
+                attention_window, qk_rope_head_dim,
                 config.rope_theta, False, interleaved=True)
-        rotate_half_np = graph_ops.make_rotate_half_matrix(
-            rope_total, num_heads, interleaved=True)
 
-        cos_tensor = graph_ops.add_constant(
-            network, (attention_window, rope_total), cos_table_np)
-        sin_tensor = graph_ops.add_constant(
-            network, (attention_window, rope_total), sin_table_np)
-        rotate_half_tensor = graph_ops.add_constant(
-            network, (rope_total, rope_total), rotate_half_np)
+        cos_half_tensor = graph_ops.add_constant(
+            network, cos_half_np.shape, cos_half_np)
+        sin_half_tensor = graph_ops.add_constant(
+            network, sin_half_np.shape, sin_half_np)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
             np.array([config.rms_norm_eps], dtype=np.float32))
-        attn_scale_tensor = graph_ops.add_constant(
-            network, (1, 1, 1),
-            np.array([attn_scale], dtype=np.float32))
 
         # -----------------------------------------------------------
         # Embedding lookup
@@ -434,10 +423,9 @@ class DeepSeekV2Plugin:
                 cache_v=cache_v_inputs[layer_idx],
                 attention_mask=attention_mask,
                 position_id=position_id,
-                cos_tensor=cos_tensor,
-                sin_tensor=sin_tensor,
-                rotate_half_tensor=rotate_half_tensor,
-                attn_scale_tensor=attn_scale_tensor,
+                cos_half_tensor=cos_half_tensor,
+                sin_half_tensor=sin_half_tensor,
+                attn_scale=attn_scale,
                 eps_tensor=eps_tensor,
                 weights=weights,
                 prefix=prefix,
@@ -537,10 +525,9 @@ def _add_mla_attention_block(
     cache_v: trt.ITensor,
     attention_mask: trt.ITensor,
     position_id: trt.ITensor,
-    cos_tensor: trt.ITensor,
-    sin_tensor: trt.ITensor,
-    rotate_half_tensor: trt.ITensor,
-    attn_scale_tensor: trt.ITensor,
+    cos_half_tensor: trt.ITensor,
+    sin_half_tensor: trt.ITensor,
+    attn_scale: float,
     eps_tensor: trt.ITensor,
     weights: WeightDict,
     prefix: str,
@@ -616,10 +603,17 @@ def _add_mla_attention_block(
     q_rope_flat = network.add_shuffle(q_rope_slice.get_output(0))
     q_rope_flat.reshape_dims = (1, rope_total)
 
-    # Apply RoPE to Q_rope
-    q_rope_roped = graph_ops.add_apply_rope(
-        network, q_rope_flat.get_output(0), position_id,
-        cos_tensor, sin_tensor, rotate_half_tensor)
+    # Apply native RoPE to Q_rope
+    q_rope_roped = graph_ops.add_apply_rope_native(
+        network,
+        q_rope_flat.get_output(0),
+        num_heads,
+        qk_rope_head_dim,
+        cos_half_tensor,
+        sin_half_tensor,
+        position_id,
+        qk_rope_head_dim,
+        interleaved=True)
 
     # Reshape back to [num_heads, qk_rope_head_dim]
     q_rope_heads = network.add_shuffle(q_rope_roped)
@@ -682,26 +676,24 @@ def _add_mla_attention_block(
         stride=(1, 1))
     v_heads = v_slice.get_output(0)
 
-    # Step 4: Apply RoPE to k_rope_pass, then broadcast to all heads
-    # Tile k_rope_pass to all heads: [1, qk_rope_head_dim] -> [1, rope_total]
-    k_rope_copies = []
-    for _ in range(num_heads):
-        k_rope_copies.append(k_rope_pass)
+    # Step 4: Apply native RoPE to the shared K-rope head, then broadcast.
+    k_rope_roped = graph_ops.add_apply_rope_native(
+        network,
+        k_rope_pass,
+        1,
+        qk_rope_head_dim,
+        cos_half_tensor,
+        sin_half_tensor,
+        position_id,
+        qk_rope_head_dim,
+        interleaved=True)
+    k_rope_copies = [k_rope_roped for _ in range(num_heads)]
     k_rope_broadcast = network.add_concatenation(k_rope_copies)
-    k_rope_broadcast.axis = 1  # [1, num_heads * qk_rope_head_dim]
-    k_rope_full = k_rope_broadcast.get_output(0)
-
-    # Apply RoPE to the broadcast k_rope
-    k_rope_roped = graph_ops.add_apply_rope(
-        network, k_rope_full, position_id,
-        cos_tensor, sin_tensor, rotate_half_tensor)
-
-    # Reshape to [num_heads, qk_rope_head_dim]
-    k_rope_heads = network.add_shuffle(k_rope_roped)
-    k_rope_heads.reshape_dims = (num_heads, qk_rope_head_dim)
+    k_rope_broadcast.axis = 0
+    k_rope_heads = k_rope_broadcast.get_output(0)
 
     # Assemble full K: [num_heads, k_head_dim] = [K_nope, K_rope]
-    k_full_cat = network.add_concatenation([k_nope, k_rope_heads.get_output(0)])
+    k_full_cat = network.add_concatenation([k_nope, k_rope_heads])
     k_full_cat.axis = 1
 
     # Step 5: Pad V to match K head dim for uniform cache
@@ -735,70 +727,39 @@ def _add_mla_attention_block(
     all_v = network.add_concatenation([cache_v, v_flat.get_output(0)])
     all_v.axis = 0
 
-    # Reshape for multi-head attention
-    # Q: already [num_heads, k_head_dim], reshape to [num_heads, 1, k_head_dim]
-    q_3d = network.add_shuffle(q_full_cat.get_output(0))
-    q_3d.reshape_dims = (num_heads, 1, k_head_dim)
-
-    # K: [attention_window, attention_size] -> [attention_window, num_heads, k_head_dim]
-    #    -> transpose to [num_heads, attention_window, k_head_dim]
-    k_heads_3d = network.add_shuffle(all_k.get_output(0))
-    k_heads_3d.reshape_dims = (attention_window, num_heads, k_head_dim)
-    k_heads_3d.second_transpose = trt.Permutation([1, 0, 2])
-
-    # V: [attention_window, attention_size] -> [attention_window, num_heads, k_head_dim]
-    #    -> transpose to [num_heads, attention_window, k_head_dim]
-    v_heads_3d = network.add_shuffle(all_v.get_output(0))
-    v_heads_3d.reshape_dims = (attention_window, num_heads, k_head_dim)
-    v_heads_3d.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention scores: Q @ K^T -> [num_heads, 1, attention_window]
-    score = network.add_matrix_multiply(
-        q_3d.get_output(0), trt.MatrixOperation.NONE,
-        k_heads_3d.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-    # Scale
-    scaled = network.add_elementwise(
-        score.get_output(0), attn_scale_tensor,
-        trt.ElementWiseOperation.PROD)
-
-    # Mask (reshape to [1, 1, attention_window])
-    mask3d = network.add_shuffle(attention_mask)
-    mask3d.reshape_dims = (1, 1, attention_window)
-
-    masked = network.add_elementwise(
-        scaled.get_output(0), mask3d.get_output(0),
-        trt.ElementWiseOperation.SUM)
-
-    # Softmax
-    softmax = network.add_softmax(masked.get_output(0))
-    softmax.axes = 1 << 2
-
-    # Context: softmax @ V -> [num_heads, 1, k_head_dim]
-    context_heads = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_heads_3d.get_output(0), trt.MatrixOperation.NONE)
-    # context_heads: [num_heads, 1, k_head_dim]
+    q_flat = network.add_shuffle(q_full_cat.get_output(0))
+    q_flat.reshape_dims = (1, attention_size)
+    mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
+    attn_context = graph_ops.add_attention_from_rows(
+        network,
+        q_flat.get_output(0),
+        all_k.get_output(0),
+        all_v.get_output(0),
+        num_heads=num_heads,
+        head_dim=k_head_dim,
+        q_seq=1,
+        kv_seq=attention_window,
+        mask=mask_4d,
+        scale=attn_scale)
 
     # Slice out only the v_head_dim portion (remove zero-padding)
     if pad_size > 0:
+        context_heads = network.add_shuffle(attn_context)
+        context_heads.reshape_dims = (num_heads, k_head_dim)
         context_sliced = network.add_slice(
             context_heads.get_output(0),
-            start=(0, 0, 0),
-            shape=(num_heads, 1, v_head_dim),
-            stride=(1, 1, 1))
+            start=(0, 0),
+            shape=(num_heads, v_head_dim),
+            stride=(1, 1))
         context_for_proj = context_sliced.get_output(0)
-    else:
-        context_for_proj = context_heads.get_output(0)
-
-    # Flatten context to [1, num_heads * v_head_dim]
-    v_total = num_heads * v_head_dim
-    context_flat = network.add_shuffle(context_for_proj)
-    context_flat.reshape_dims = (1, v_total)
+        context_flat = network.add_shuffle(context_for_proj)
+        context_flat.reshape_dims = (1, num_heads * v_head_dim)
+        attn_context = context_flat.get_output(0)
 
     # Output projection: [1, num_heads * v_head_dim] -> [1, hidden_size]
+    v_total = num_heads * v_head_dim
     attn_out = graph_ops.add_matmul_rhs_constant(
-        network, context_flat.get_output(0),
+        network, attn_context,
         v_total, hidden_size,
         weights[f"{prefix}.w_o"])
 
@@ -970,10 +931,9 @@ def _add_deepseek_v2_decoder_layer(
     cache_v: trt.ITensor,
     attention_mask: trt.ITensor,
     position_id: trt.ITensor,
-    cos_tensor: trt.ITensor,
-    sin_tensor: trt.ITensor,
-    rotate_half_tensor: trt.ITensor,
-    attn_scale_tensor: trt.ITensor,
+    cos_half_tensor: trt.ITensor,
+    sin_half_tensor: trt.ITensor,
+    attn_scale: float,
     eps_tensor: trt.ITensor,
     weights: WeightDict,
     prefix: str,
@@ -1012,10 +972,9 @@ def _add_deepseek_v2_decoder_layer(
         cache_v=cache_v,
         attention_mask=attention_mask,
         position_id=position_id,
-        cos_tensor=cos_tensor,
-        sin_tensor=sin_tensor,
-        rotate_half_tensor=rotate_half_tensor,
-        attn_scale_tensor=attn_scale_tensor,
+        cos_half_tensor=cos_half_tensor,
+        sin_half_tensor=sin_half_tensor,
+        attn_scale=attn_scale,
         eps_tensor=eps_tensor,
         weights=weights,
         prefix=prefix,
@@ -1070,4 +1029,3 @@ def _add_deepseek_v2_decoder_layer(
 
 
 plugin = DeepSeekV2Plugin()
-

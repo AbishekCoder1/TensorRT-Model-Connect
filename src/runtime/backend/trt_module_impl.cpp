@@ -4,8 +4,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace trtf {
 
@@ -112,12 +115,17 @@ void TrtModuleImpl::reset_execution_context() {
 }
 
 TrtModuleImpl::~TrtModuleImpl() {
+    flush_timing_events();
     free_buffers();
     delete ctx_;
 }
 
 void TrtModuleImpl::keep_alive(std::shared_ptr<void> resource) {
     keep_alive_.push_back(std::move(resource));
+}
+
+void TrtModuleImpl::set_timing_label(std::string label) {
+    timing_label_ = label.empty() ? std::string("engine") : std::move(label);
 }
 
 // --- Buffer allocation helpers ---
@@ -376,8 +384,44 @@ void TrtModuleImpl::forward_async(const TensorMap& inputs) {
 }
 
 void TrtModuleImpl::execute_enqueue() {
+    record_timed_enqueue();
+}
+
+bool TrtModuleImpl::begin_timing_event(TimingEvent& event) {
+    if (cudaEventCreate(&event.start) != cudaSuccess)
+        return false;
+    if (cudaEventCreate(&event.stop) != cudaSuccess) {
+        cudaEventDestroy(event.start);
+        event.start = nullptr;
+        return false;
+    }
+    if (cudaEventRecord(event.start, stream_) == cudaSuccess)
+        return true;
+    cudaEventDestroy(event.start);
+    cudaEventDestroy(event.stop);
+    event.start = nullptr;
+    event.stop = nullptr;
+    return false;
+}
+
+void TrtModuleImpl::finish_timing_event(TimingEvent event) {
+    if (event.start && event.stop && cudaEventRecord(event.stop, stream_) == cudaSuccess) {
+        timing_events_.push_back(event);
+        return;
+    }
+    if (event.start)
+        cudaEventDestroy(event.start);
+    if (event.stop)
+        cudaEventDestroy(event.stop);
+}
+
+void TrtModuleImpl::record_timed_enqueue() {
+    TimingEvent timing_event;
+    const bool timing_ok = begin_timing_event(timing_event);
     if (use_cuda_graph_ && cuda_graph_->ready()) {
         cuda_graph_->launch(stream_);
+        if (timing_ok)
+            finish_timing_event(timing_event);
         return;
     }
     if (use_cuda_graph_) {
@@ -390,9 +434,40 @@ void TrtModuleImpl::execute_enqueue() {
         } else {
             cuda_graph_->launch(stream_);
         }
+        if (timing_ok)
+            finish_timing_event(timing_event);
         return;
     }
     ctx_->enqueueV3(stream_);
+    if (timing_ok)
+        finish_timing_event(timing_event);
+}
+
+void TrtModuleImpl::flush_timing_events() {
+    if (timing_events_.empty())
+        return;
+    double total_ms = 0.0;
+    int32_t launches = 0;
+    for (auto& event : timing_events_) {
+        if (event.stop && cudaEventSynchronize(event.stop) == cudaSuccess) {
+            float elapsed_ms = 0.0F;
+            if (cudaEventElapsedTime(&elapsed_ms, event.start, event.stop) == cudaSuccess) {
+                total_ms += static_cast<double>(elapsed_ms);
+                ++launches;
+            }
+        }
+        if (event.start)
+            cudaEventDestroy(event.start);
+        if (event.stop)
+            cudaEventDestroy(event.stop);
+    }
+    timing_events_.clear();
+    if (launches <= 0)
+        return;
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(6) << "[trtf.engine_timing] label=\"" << timing_label_
+         << "\" execute_ms=" << total_ms << " launches=" << launches;
+    std::cerr << line.str() << '\n';
 }
 
 void TrtModuleImpl::sync() {

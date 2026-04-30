@@ -448,31 +448,21 @@ class Qwen35Plugin:
             network, (1, 1),
             np.array([config.rms_norm_eps], dtype=np.float32))
 
-        # Attention constants
-        attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
-        attn_scale_tensor = graph_ops.add_constant(
-            network, (1, 1, 1),
-            np.array([attn_scale], dtype=np.float32))
-
         rope_theta: float = weights["_rope_theta"]
+        rotary_embedding_dim = int(head_dim * partial_rotary_factor)
 
         # RoPE tables for full attention layers (partial rotary)
-        cos_table = graph_ops.make_rope_table(
-            attention_window, attn_size, num_heads, rope_theta,
+        cos_half = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, rope_theta,
             cosine=True, partial_rotary_factor=partial_rotary_factor)
-        sin_table = graph_ops.make_rope_table(
-            attention_window, attn_size, num_heads, rope_theta,
+        sin_half = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, rope_theta,
             cosine=False, partial_rotary_factor=partial_rotary_factor)
-        rotate_half = graph_ops.make_rotate_half_matrix(
-            attn_size, num_heads,
-            partial_rotary_factor=partial_rotary_factor)
 
-        cos_tensor = graph_ops.add_constant(
-            network, cos_table.shape, cos_table)
-        sin_tensor = graph_ops.add_constant(
-            network, sin_table.shape, sin_table)
-        rotate_half_tensor = graph_ops.add_constant(
-            network, rotate_half.shape, rotate_half)
+        cos_half_tensor = graph_ops.add_constant(
+            network, cos_half.shape, cos_half)
+        sin_half_tensor = graph_ops.add_constant(
+            network, sin_half.shape, sin_half)
 
         # --- Embedding ---
         gather = network.add_gather(embedding_table, token_id, 0)
@@ -524,10 +514,8 @@ class Qwen35Plugin:
                     cache_v=cache_v_inputs[attn_counter],
                     attention_mask=attention_mask,
                     position_id=position_id,
-                    cos_tensor=cos_tensor,
-                    sin_tensor=sin_tensor,
-                    rotate_half_tensor=rotate_half_tensor,
-                    attn_scale_tensor=attn_scale_tensor,
+                    cos_half_tensor=cos_half_tensor,
+                    sin_half_tensor=sin_half_tensor,
                     eps_tensor=eps_tensor,
                     weights=weights,
                     prefix=prefix,
@@ -535,6 +523,7 @@ class Qwen35Plugin:
                     attn_size=attn_size,
                     num_heads=num_heads,
                     head_dim=head_dim,
+                    rotary_embedding_dim=rotary_embedding_dim,
                     max_cache_length=max_cache_length,
                     mlp_size=mlp_size,
                 )
@@ -965,10 +954,8 @@ def _add_full_attention_layer(
     cache_v: trt.ITensor,
     attention_mask: trt.ITensor,
     position_id: trt.ITensor,
-    cos_tensor: trt.ITensor,
-    sin_tensor: trt.ITensor,
-    rotate_half_tensor: trt.ITensor,
-    attn_scale_tensor: trt.ITensor,
+    cos_half_tensor: trt.ITensor,
+    sin_half_tensor: trt.ITensor,
     eps_tensor: trt.ITensor,
     weights: WeightDict,
     prefix: str,
@@ -976,6 +963,7 @@ def _add_full_attention_layer(
     attn_size: int,
     num_heads: int,
     head_dim: int,
+    rotary_embedding_dim: int,
     max_cache_length: int,
     mlp_size: int,
 ) -> dict[str, trt.ITensor]:
@@ -1019,13 +1007,13 @@ def _add_full_attention_layer(
         k = graph_ops.add_rms_norm_per_head(
             network, k, num_heads, head_dim, k_norm, eps_tensor)
 
-    # RoPE
-    q = graph_ops.add_apply_rope(
-        network, q, position_id, cos_tensor, sin_tensor,
-        rotate_half_tensor)
-    k = graph_ops.add_apply_rope(
-        network, k, position_id, cos_tensor, sin_tensor,
-        rotate_half_tensor)
+    # Native RoPE
+    q = graph_ops.add_apply_rope_native(
+        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        position_id, rotary_embedding_dim)
+    k = graph_ops.add_apply_rope_native(
+        network, k, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        position_id, rotary_embedding_dim)
 
     # Save present K/V
     present_k = k
@@ -1045,49 +1033,16 @@ def _add_full_attention_layer(
         [cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
 
-    # Multi-head attention
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (num_heads, 1, head_dim)
-
-    k_heads = network.add_shuffle(all_k.get_output(0))
-    k_heads.reshape_dims = (attention_window, num_heads, head_dim)
-    v_heads = network.add_shuffle(all_v.get_output(0))
-    v_heads.reshape_dims = (attention_window, num_heads, head_dim)
-
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention scores
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-    scaled = network.add_elementwise(
-        score.get_output(0), attn_scale_tensor,
-        trt.ElementWiseOperation.PROD)
-
-    # Mask
-    mask3d = network.add_shuffle(attention_mask)
-    mask3d.reshape_dims = (1, 1, attention_window)
-    masked = network.add_elementwise(
-        scaled.get_output(0), mask3d.get_output(0),
-        trt.ElementWiseOperation.SUM)
-
-    # Softmax
-    softmax = network.add_softmax(masked.get_output(0))
-    softmax.axes = 1 << 2
-
-    # Context
-    context_heads = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    context_flat = network.add_shuffle(context_heads.get_output(0))
-    context_flat.reshape_dims = (1, attn_size)
+    mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
+    context_flat = graph_ops.add_attention_from_rows(
+        network, q, all_k.get_output(0), all_v.get_output(0),
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=1, kv_seq=attention_window,
+        mask=mask_4d)
 
     # Gate: applied BEFORE o_proj (HF order)
     gate_attn_w = weights.get(f"{prefix}.w_gate_attn")
-    attn_out = context_flat.get_output(0)
+    attn_out = context_flat
     if gate_attn_w is not None:
         gate = graph_ops.add_matmul_rhs_constant(
             network, normed, hidden_size, attn_size, gate_attn_w)

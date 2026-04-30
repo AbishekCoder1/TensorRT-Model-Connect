@@ -171,21 +171,8 @@ plugin = DebertaPlugin()
 
 
 def _add_seq_layer_norm(network, inp, hidden_size, gamma, beta, eps):
-    gamma_t = graph_ops.add_constant(network, (1, hidden_size), gamma)
-    beta_t = graph_ops.add_constant(network, (1, hidden_size), beta)
-    eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
-
-    mean = network.add_reduce(inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    centered = network.add_elementwise(inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
-    sq = network.add_elementwise(centered.get_output(0), centered.get_output(0), trt.ElementWiseOperation.PROD)
-    var = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    denom_in = network.add_elementwise(var.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(centered.get_output(0), recip.get_output(0), trt.ElementWiseOperation.PROD)
-    scaled = network.add_elementwise(normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    result = network.add_elementwise(scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
-    return result.get_output(0)
+    return graph_ops.add_layer_norm_native(
+        network, inp, hidden_size, gamma, beta, eps)
 
 
 def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=False):
@@ -210,7 +197,8 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     trt_config.clear_flag(trt.BuilderFlag.TF32)
@@ -355,6 +343,10 @@ def _add_deberta_layer(*, network, hidden, weights, prefix, hidden_size, interme
         p2c_transposed.first_transpose = trt.Permutation([0, 2, 1])
         attention_scores = network.add_elementwise(attention_scores, p2c_transposed.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
 
+    # DeBERTa disentangled attention injects content-to-position and
+    # position-to-content logits before softmax. Those terms are
+    # query/content-dependent, so native IAttention's mask input is
+    # insufficient here.
     masked = network.add_elementwise(attention_scores, attn_mask, trt.ElementWiseOperation.SUM)
     softmax = network.add_softmax(masked.get_output(0))
     softmax.axes = 1 << 2

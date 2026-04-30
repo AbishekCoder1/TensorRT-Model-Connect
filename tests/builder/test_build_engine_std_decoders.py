@@ -210,7 +210,7 @@ class TestGPTNeoXBuildEngine:
             "model_type": "gpt_neox",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
             "num_hidden_layers": self.LAYERS, "num_attention_heads": self.HEADS,
-            "rotary_pct": 0.25,
+            "rotary_pct": 0.5,
         }
         _write_config(tmp_path, config)
         _write_safetensors(tmp_path, self._make(

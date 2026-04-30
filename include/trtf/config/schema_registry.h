@@ -27,8 +27,8 @@
 namespace trtf::config {
 
 // Which config layers are permitted to set a field. Schema declarations use
-// this to express intent like "force_manual_attention is build-time only" or
-// "kv_budget may come from session, platform, or bundle defaults." Enforcement
+// this to express intent like "kv_budget may come from session, platform, or
+// bundle defaults." Enforcement
 // happens during layer merge: a layer attempting to set a field outside its
 // allowlist is a fail-fast error with the exact namespace/field name.
 enum class Layer : std::uint8_t {

@@ -76,6 +76,8 @@ class NeuralOperatorRunner:
             metadata={
                 "command": cmd,
                 "returncode": result.returncode,
+                "stdout": result.stdout or "",
+                "stderr": result.stderr or "",
                 "input_mode": input_mode,
             },
         )

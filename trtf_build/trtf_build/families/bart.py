@@ -34,7 +34,6 @@ from ..checkpoint_mapper import (
     _transpose_2d,
 )
 from .. import graph_ops
-from .. import graph_blocks
 
 
 class BartPlugin:
@@ -48,7 +47,6 @@ class BartPlugin:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
         raw = config.raw
-        hidden = config.hidden_size
         enc_layers = raw.get("encoder_layers", config.num_hidden_layers)
         dec_layers = raw.get("decoder_layers", config.num_hidden_layers)
         enc_heads = raw.get("encoder_attention_heads", config.num_attention_heads)
@@ -166,14 +164,20 @@ class BartPlugin:
 
     def build_engine(self, config, weights, max_cache_length, *, verbose=False, debug_layer_outputs=False):
         self._max_cache_length = max_cache_length
-        dec_layers = weights["_dec_layers"]; dec_heads = weights["_dec_heads"]
-        dec_ffn = weights["_dec_ffn"]; normalize_embedding = weights["_normalize_embedding"]
-        hidden = config.hidden_size; vocab = config.vocab_size
-        head_dim = hidden // dec_heads; attention_window = max_cache_length + 1
+        dec_layers = weights["_dec_layers"]
+        dec_heads = weights["_dec_heads"]
+        dec_ffn = weights["_dec_ffn"]
+        normalize_embedding = weights["_normalize_embedding"]
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        head_dim = hidden // dec_heads
+        attention_window = max_cache_length + 1
         max_enc_seq = max_cache_length
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-        builder = trt.Builder(logger); network = builder.create_network()
+        builder = trt.Builder(logger)
+        network = builder.create_network(
+            1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
         trt_config.clear_flag(trt.BuilderFlag.TF32)
@@ -195,21 +199,21 @@ class BartPlugin:
         embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["shared_embedding"])
         pos_embed_np = weights["dec_pos_embedding"]
         pos_embedding_table = graph_ops.add_constant(network, pos_embed_np.shape, pos_embed_np)
-        eps_tensor = graph_ops.add_constant(network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
-        attn_scale_tensor = graph_ops.add_constant(network, (1, 1, 1), np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=np.float32))
 
         tok_embed = network.add_gather(embedding_table, token_id, 0).get_output(0)
         # Position offset=2 for BART
         offset_weights = trt.Weights(np.array([2], dtype=np.int32))
         offset_layer = network.add_constant((1,), offset_weights)
-        offset_layer.get_output(0).dtype = trt.int32
         offset_const = offset_layer.get_output(0)
         offset_pos = network.add_elementwise(position_id, offset_const, trt.ElementWiseOperation.SUM).get_output(0)
         pos_embed = network.add_gather(pos_embedding_table, offset_pos, 0).get_output(0)
         hidden_state = network.add_elementwise(tok_embed, pos_embed, trt.ElementWiseOperation.SUM).get_output(0)
 
         if normalize_embedding:
-            hidden_state = graph_ops.add_layer_norm(network, hidden_state, hidden, weights["dec_embed_norm"], weights["dec_embed_norm_beta"], eps_tensor)
+            hidden_state = graph_ops.add_layer_norm_native(
+                network, hidden_state, hidden,
+                weights["dec_embed_norm"], weights["dec_embed_norm_beta"],
+                config.rms_norm_eps)
 
         if debug_layer_outputs:
             _mark_debug_output(network, hidden_state, "debug_embed")
@@ -221,8 +225,8 @@ class BartPlugin:
                 network=network, hidden=hidden_state,
                 cache_k=cache_k_inputs[layer_idx], cache_v=cache_v_inputs[layer_idx],
                 cross_k=cross_k_inputs[layer_idx], cross_v=cross_v_inputs[layer_idx],
-                attention_mask=attention_mask, attn_scale_tensor=attn_scale_tensor,
-                eps_tensor=eps_tensor, weights=weights, prefix=prefix,
+                attention_mask=attention_mask, eps=config.rms_norm_eps,
+                weights=weights, prefix=prefix,
                 hidden_size=hidden, num_heads=dec_heads, head_dim=head_dim,
                 ffn_dim=dec_ffn, max_cache_length=max_cache_length, max_enc_seq=max_enc_seq)
             hidden_state = result["hidden"]
@@ -233,17 +237,20 @@ class BartPlugin:
 
         logits = graph_ops.add_matmul_rhs_constant(network, hidden_state, hidden, vocab, weights["w_out"])
         logits = graph_ops.add_bias_sum(network, logits, vocab, np.zeros(vocab, dtype=np.float32))
-        logits.name = "logits"; network.mark_output(logits)
+        logits.name = "logits"
+        network.mark_output(logits)
 
         for i in range(dec_layers):
             present_k_outputs[i].name = graph_ops.layer_tensor_name("present_k", i)
             present_v_outputs[i].name = graph_ops.layer_tensor_name("present_v", i)
-            network.mark_output(present_k_outputs[i]); network.mark_output(present_v_outputs[i])
+            network.mark_output(present_k_outputs[i])
+            network.mark_output(present_v_outputs[i])
 
         if verbose:
             print(f"[trtf-build] Building BART decoder ({dec_layers}L, h={hidden}, heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length})", file=sys.stderr)
         plan = builder.build_serialized_network(network, trt_config)
-        if plan is None: raise RuntimeError("TensorRT decoder engine build failed")
+        if plan is None:
+            raise RuntimeError("TensorRT decoder engine build failed")
         return bytes(plan)
 
     def build_vision_engine(self, model_dir, config, weights, *, verbose=False):
@@ -269,19 +276,23 @@ class BartPlugin:
 
 
 def _build_bart_encoder(config, weights, *, max_cache_length=256, verbose=False):
-    enc_layers = weights["_enc_layers"]; enc_heads = weights["_enc_heads"]
-    enc_ffn = weights["_enc_ffn"]; max_pos = weights["_max_position_embeddings"]
+    enc_layers = weights["_enc_layers"]
+    enc_heads = weights["_enc_heads"]
+    enc_ffn = weights["_enc_ffn"]
+    weights["_max_position_embeddings"]
     normalize_embedding = weights["_normalize_embedding"]
-    hidden = config.hidden_size; vocab = config.vocab_size
+    hidden = config.hidden_size
+    vocab = config.vocab_size
     max_enc_seq = max_cache_length
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger); network = builder.create_network()
+    builder = trt.Builder(logger)
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     tc.clear_flag(trt.BuilderFlag.TF32)
 
-    eps_tensor = graph_ops.add_constant(network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
     input_ids = network.add_input("input_ids", trt.int32, (max_enc_seq,))
     attention_mask = network.add_input("attention_mask", trt.float32, (max_enc_seq,))
 
@@ -293,21 +304,22 @@ def _build_bart_encoder(config, weights, *, max_cache_length=256, verbose=False)
     # Position indices [2, 3, ..., max_enc_seq+1] for offset=2
     pos_indices = np.arange(2, max_enc_seq + 2, dtype=np.int32)
     pos_idx_layer = network.add_constant((max_enc_seq,), trt.Weights(pos_indices))
-    pos_idx_layer.get_output(0).dtype = trt.int32
     pos_indices_const = pos_idx_layer.get_output(0)
     pos_embed = network.add_gather(pos_embedding_table, pos_indices_const, 0).get_output(0)
 
     hs = network.add_elementwise(tok_embed, pos_embed, trt.ElementWiseOperation.SUM).get_output(0)
 
     if normalize_embedding:
-        hs = graph_ops.add_layer_norm(network, hs, hidden, weights["enc_embed_norm"], weights["enc_embed_norm_beta"], eps_tensor)
+        hs = graph_ops.add_layer_norm_native(
+            network, hs, hidden,
+            weights["enc_embed_norm"], weights["enc_embed_norm_beta"],
+            config.rms_norm_eps)
 
-    # Reshape attention mask [max_enc_seq] -> [1, 1, max_enc_seq] for broadcasting
-    enc_mask_3d = network.add_shuffle(attention_mask)
-    enc_mask_3d.reshape_dims = (1, 1, max_enc_seq)
+    # Reshape attention mask [max_enc_seq] -> [1, 1, 1, max_enc_seq]
+    # for native IAttention broadcast across heads and query positions.
+    enc_mask_4d = network.add_shuffle(attention_mask)
+    enc_mask_4d.reshape_dims = (1, 1, 1, max_enc_seq)
     head_dim = hidden // enc_heads
-    attn_scale_np = np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=np.float32)
-    attn_scale_c = graph_ops.add_constant(network, (1, 1, 1), attn_scale_np)
 
     for li in range(enc_layers):
         pfx = f"enc_layer.{li}"
@@ -315,37 +327,42 @@ def _build_bart_encoder(config, weights, *, max_cache_length=256, verbose=False)
         q = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, hidden, weights[f"{pfx}.w_q"]), hidden, weights[f"{pfx}.b_q"])
         k = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, hidden, weights[f"{pfx}.w_k"]), hidden, weights[f"{pfx}.b_k"])
         v = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, hidden, weights[f"{pfx}.w_v"]), hidden, weights[f"{pfx}.b_v"])
-        q_h = network.add_shuffle(q); q_h.reshape_dims = (max_enc_seq, enc_heads, head_dim); q_h.second_transpose = trt.Permutation([1, 0, 2])
-        k_h = network.add_shuffle(k); k_h.reshape_dims = (max_enc_seq, enc_heads, head_dim); k_h.second_transpose = trt.Permutation([1, 0, 2])
-        v_h = network.add_shuffle(v); v_h.reshape_dims = (max_enc_seq, enc_heads, head_dim); v_h.second_transpose = trt.Permutation([1, 0, 2])
-        score = network.add_matrix_multiply(q_h.get_output(0), trt.MatrixOperation.NONE, k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        scaled = network.add_elementwise(score.get_output(0), attn_scale_c, trt.ElementWiseOperation.PROD)
-        masked = network.add_elementwise(scaled.get_output(0), enc_mask_3d.get_output(0), trt.ElementWiseOperation.SUM)
-        sm = network.add_softmax(masked.get_output(0)); sm.axes = 1 << 2
-        ctx = network.add_matrix_multiply(sm.get_output(0), trt.MatrixOperation.NONE, v_h.get_output(0), trt.MatrixOperation.NONE)
-        ctx_flat = network.add_shuffle(ctx.get_output(0)); ctx_flat.first_transpose = trt.Permutation([1, 0, 2]); ctx_flat.reshape_dims = (max_enc_seq, hidden)
-        attn = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ctx_flat.get_output(0), hidden, hidden, weights[f"{pfx}.w_o"]), hidden, weights[f"{pfx}.b_o"])
+        ctx_flat = graph_ops.add_attention_from_rows(
+            network, q, k, v,
+            num_heads=enc_heads, head_dim=head_dim,
+            q_seq=max_enc_seq, kv_seq=max_enc_seq,
+            mask=enc_mask_4d.get_output(0))
+        attn = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ctx_flat, hidden, hidden, weights[f"{pfx}.w_o"]), hidden, weights[f"{pfx}.b_o"])
         hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
-        hs = graph_ops.add_layer_norm(network, hs, hidden, weights[f"{pfx}.attn_norm"], weights[f"{pfx}.attn_norm_beta"], eps_tensor)
+        hs = graph_ops.add_layer_norm_native(
+            network, hs, hidden,
+            weights[f"{pfx}.attn_norm"], weights[f"{pfx}.attn_norm_beta"],
+            config.rms_norm_eps)
 
         fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, enc_ffn, weights[f"{pfx}.w_fc1"]), enc_ffn, weights[f"{pfx}.b_fc1"])
         act = graph_ops.add_activation(network, fc1, "gelu_new")
         fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"]), hidden, weights[f"{pfx}.b_fc2"])
         hs = network.add_elementwise(hs, fc2, trt.ElementWiseOperation.SUM).get_output(0)
-        hs = graph_ops.add_layer_norm(network, hs, hidden, weights[f"{pfx}.ffn_norm"], weights[f"{pfx}.ffn_norm_beta"], eps_tensor)
+        hs = graph_ops.add_layer_norm_native(
+            network, hs, hidden,
+            weights[f"{pfx}.ffn_norm"], weights[f"{pfx}.ffn_norm_beta"],
+            config.rms_norm_eps)
 
-    hs.name = "encoder_output"; network.mark_output(hs)
+    hs.name = "encoder_output"
+    network.mark_output(hs)
     if verbose:
         print(f"[trtf-build] Building BART encoder ({enc_layers}L, h={hidden}, heads={enc_heads}, seq={max_enc_seq})", file=sys.stderr)
     plan = builder.build_serialized_network(network, tc)
-    if plan is None: raise RuntimeError("TensorRT encoder engine build failed")
+    if plan is None:
+        raise RuntimeError("TensorRT encoder engine build failed")
     return bytes(plan)
 
 
 def _add_bart_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v,
-    attention_mask, attn_scale_tensor, eps_tensor, weights, prefix,
+    attention_mask, eps, weights, prefix,
     hidden_size, num_heads, head_dim, ffn_dim, max_cache_length, max_enc_seq):
-    attention_size = hidden_size; attention_window = max_cache_length + 1
+    attention_size = hidden_size
+    attention_window = max_cache_length + 1
 
     # Self-attention (no pre-norm for post-LN BART)
     q = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_q"]), attention_size, weights[f"{prefix}.q_bias"])
@@ -353,43 +370,46 @@ def _add_bart_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross
     v = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_v"]), attention_size, weights[f"{prefix}.v_bias"])
     present_k, present_v = k, v
 
-    kr = network.add_shuffle(k); kr.reshape_dims = (1, attention_size)
-    vr = network.add_shuffle(v); vr.reshape_dims = (1, attention_size)
-    ak = network.add_concatenation([cache_k, kr.get_output(0)]); ak.axis = 0
-    av = network.add_concatenation([cache_v, vr.get_output(0)]); av.axis = 0
+    kr = network.add_shuffle(k)
+    kr.reshape_dims = (1, attention_size)
+    vr = network.add_shuffle(v)
+    vr.reshape_dims = (1, attention_size)
+    ak = network.add_concatenation([cache_k, kr.get_output(0)])
+    ak.axis = 0
+    av = network.add_concatenation([cache_v, vr.get_output(0)])
+    av.axis = 0
 
-    qh = network.add_shuffle(q); qh.reshape_dims = (num_heads, 1, head_dim)
-    kh = network.add_shuffle(ak.get_output(0)); kh.reshape_dims = (attention_window, num_heads, head_dim); kh.second_transpose = trt.Permutation([1, 0, 2])
-    vh = network.add_shuffle(av.get_output(0)); vh.reshape_dims = (attention_window, num_heads, head_dim); vh.second_transpose = trt.Permutation([1, 0, 2])
-
-    sc = network.add_elementwise(network.add_matrix_multiply(qh.get_output(0), trt.MatrixOperation.NONE, kh.get_output(0), trt.MatrixOperation.TRANSPOSE).get_output(0), attn_scale_tensor, trt.ElementWiseOperation.PROD)
-    m3 = network.add_shuffle(attention_mask); m3.reshape_dims = (1, 1, attention_window)
-    ma = network.add_elementwise(sc.get_output(0), m3.get_output(0), trt.ElementWiseOperation.SUM)
-    sm = network.add_softmax(ma.get_output(0)); sm.axes = 1 << 2
-    ct = network.add_matrix_multiply(sm.get_output(0), trt.MatrixOperation.NONE, vh.get_output(0), trt.MatrixOperation.NONE)
-    cf = network.add_shuffle(ct.get_output(0)); cf.reshape_dims = (1, attention_size)
-    sa = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cf.get_output(0), attention_size, hidden_size, weights[f"{prefix}.w_o"]), hidden_size, weights[f"{prefix}.o_bias"])
+    m4 = network.add_shuffle(attention_mask)
+    m4.reshape_dims = (1, 1, 1, attention_window)
+    cf = graph_ops.add_attention_from_rows(
+        network, q, ak.get_output(0), av.get_output(0),
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=1, kv_seq=attention_window,
+        mask=m4.get_output(0))
+    sa = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cf, attention_size, hidden_size, weights[f"{prefix}.w_o"]), hidden_size, weights[f"{prefix}.o_bias"])
     # Residual + post-norm
     psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
-    psa = graph_ops.add_layer_norm(network, psa, hidden_size, weights[f"{prefix}.input_norm"], weights[f"{prefix}.input_norm_beta"], eps_tensor)
+    psa = graph_ops.add_layer_norm_native(
+        network, psa, hidden_size,
+        weights[f"{prefix}.input_norm"], weights[f"{prefix}.input_norm_beta"],
+        eps)
 
     # Cross-attention (no pre-norm)
     cq = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, psa, hidden_size, attention_size, weights[f"{prefix}.cross_w_q"]), attention_size, weights[f"{prefix}.cross_b_q"])
     ck_proj = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cross_k, hidden_size, attention_size, weights[f"{prefix}.cross_w_k"]), attention_size, weights[f"{prefix}.cross_b_k"])
     cv_proj = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cross_v, hidden_size, attention_size, weights[f"{prefix}.cross_w_v"]), attention_size, weights[f"{prefix}.cross_b_v"])
 
-    cqh = network.add_shuffle(cq); cqh.reshape_dims = (num_heads, 1, head_dim)
-    ckh = network.add_shuffle(ck_proj); ckh.reshape_dims = (max_enc_seq, num_heads, head_dim); ckh.second_transpose = trt.Permutation([1, 0, 2])
-    cvh = network.add_shuffle(cv_proj); cvh.reshape_dims = (max_enc_seq, num_heads, head_dim); cvh.second_transpose = trt.Permutation([1, 0, 2])
-
-    cs = network.add_elementwise(network.add_matrix_multiply(cqh.get_output(0), trt.MatrixOperation.NONE, ckh.get_output(0), trt.MatrixOperation.TRANSPOSE).get_output(0), attn_scale_tensor, trt.ElementWiseOperation.PROD)
-    csm = network.add_softmax(cs.get_output(0)); csm.axes = 1 << 2
-    cc = network.add_matrix_multiply(csm.get_output(0), trt.MatrixOperation.NONE, cvh.get_output(0), trt.MatrixOperation.NONE)
-    ccf = network.add_shuffle(cc.get_output(0)); ccf.reshape_dims = (1, attention_size)
-    ca = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ccf.get_output(0), attention_size, hidden_size, weights[f"{prefix}.cross_w_o"]), hidden_size, weights[f"{prefix}.cross_b_o"])
+    ccf = graph_ops.add_attention_from_rows(
+        network, cq, ck_proj, cv_proj,
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=1, kv_seq=max_enc_seq)
+    ca = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"]), hidden_size, weights[f"{prefix}.cross_b_o"])
     # Residual + post-norm
     pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
-    pca = graph_ops.add_layer_norm(network, pca, hidden_size, weights[f"{prefix}.cross_attn_norm"], weights[f"{prefix}.cross_attn_norm_beta"], eps_tensor)
+    pca = graph_ops.add_layer_norm_native(
+        network, pca, hidden_size,
+        weights[f"{prefix}.cross_attn_norm"],
+        weights[f"{prefix}.cross_attn_norm_beta"], eps)
 
     # MLP (no pre-norm, GELU)
     fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, pca, hidden_size, ffn_dim, weights[f"{prefix}.w_fc1"]), ffn_dim, weights[f"{prefix}.fc1_bias"])
@@ -397,14 +417,20 @@ def _add_bart_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross
     fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"]), hidden_size, weights[f"{prefix}.fc2_bias"])
     # Residual + post-norm
     out = network.add_elementwise(pca, fc2, trt.ElementWiseOperation.SUM).get_output(0)
-    out = graph_ops.add_layer_norm(network, out, hidden_size, weights[f"{prefix}.post_attn_norm"], weights[f"{prefix}.post_attn_norm_beta"], eps_tensor)
+    out = graph_ops.add_layer_norm_native(
+        network, out, hidden_size,
+        weights[f"{prefix}.post_attn_norm"],
+        weights[f"{prefix}.post_attn_norm_beta"], eps)
 
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
 
 
 def _mark_debug_output(network, tensor, name):
-    identity = network.add_identity(tensor); out = identity.get_output(0)
-    out.name = name; network.mark_output(out); out.dtype = trt.float32
+    out = tensor
+    if out.dtype != trt.float32:
+        out = network.add_cast(out, trt.float32).get_output(0)
+    out.name = name
+    network.mark_output(out)
 
 
 plugin = BartPlugin()

@@ -29,7 +29,6 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_ops
-from . import graph_blocks
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
@@ -93,7 +92,6 @@ def build_standard_dit_engine(
         Serialized TRT engine plan bytes.
     """
     head_dim = dim // num_heads
-    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -126,23 +124,14 @@ def build_standard_dit_engine(
     # Constants
     eps_t = graph_ops.add_constant(
         network, (1, 1), np.array([eps], dtype=np.float32))
-    scale_const = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
 
     # RoPE inputs and precomputation (only when use_rope=True)
-    cos_expand = sin_expand = rot_half_const = None
+    rotary_cos = rotary_sin = None
     if use_rope:
         rotary_cos = network.add_input(
             "rotary_cos", trt.float32, (num_patches, head_dim))
         rotary_sin = network.add_input(
             "rotary_sin", trt.float32, (num_patches, head_dim))
-
-        rot_half_np = graph_ops.make_rotate_half_matrix(head_dim * num_heads, num_heads, interleaved=True)
-        rot_half_const = graph_ops.add_constant(
-            network, (head_dim * num_heads, head_dim * num_heads), rot_half_np)
-
-        cos_expand = _tile_rope_for_heads(network, rotary_cos, num_heads, num_patches, head_dim)
-        sin_expand = _tile_rope_for_heads(network, rotary_sin, num_heads, num_patches, head_dim)
 
     hidden = hidden_inp
 
@@ -210,62 +199,25 @@ def build_standard_dit_engine(
 
         # Apply RoPE to Q and K (skip when use_rope=False)
         if use_rope:
-            q_rot = network.add_matrix_multiply(
-                q, trt.MatrixOperation.NONE,
-                rot_half_const, trt.MatrixOperation.NONE)
-            q_cos = network.add_elementwise(
-                q, cos_expand, trt.ElementWiseOperation.PROD)
-            q_sin = network.add_elementwise(
-                q_rot.get_output(0), sin_expand,
-                trt.ElementWiseOperation.PROD)
-            q = network.add_elementwise(
-                q_cos.get_output(0), q_sin.get_output(0),
-                trt.ElementWiseOperation.SUM).get_output(0)
-
-            k_rot = network.add_matrix_multiply(
-                k, trt.MatrixOperation.NONE,
-                rot_half_const, trt.MatrixOperation.NONE)
-            k_cos = network.add_elementwise(
-                k, cos_expand, trt.ElementWiseOperation.PROD)
-            k_sin = network.add_elementwise(
-                k_rot.get_output(0), sin_expand,
-                trt.ElementWiseOperation.PROD)
-            k = network.add_elementwise(
-                k_cos.get_output(0), k_sin.get_output(0),
-                trt.ElementWiseOperation.SUM).get_output(0)
+            q = graph_ops.add_apply_rope_native_from_full_cache(
+                network, q, num_heads, head_dim,
+                rotary_cos, rotary_sin, num_patches,
+                interleaved=True)
+            k = graph_ops.add_apply_rope_native_from_full_cache(
+                network, k, num_heads, head_dim,
+                rotary_cos, rotary_sin, num_patches,
+                interleaved=True)
 
         # Multi-head attention
-        q_heads = network.add_shuffle(q)
-        q_heads.reshape_dims = (num_patches, num_heads, head_dim)
-        q_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        k_heads = network.add_shuffle(k)
-        k_heads.reshape_dims = (num_patches, num_heads, head_dim)
-        k_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        v_heads = network.add_shuffle(v)
-        v_heads.reshape_dims = (num_patches, num_heads, head_dim)
-        v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        score = network.add_matrix_multiply(
-            q_heads.get_output(0), trt.MatrixOperation.NONE,
-            k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        scaled = network.add_elementwise(
-            score.get_output(0), scale_const,
-            trt.ElementWiseOperation.PROD)
-        softmax = network.add_softmax(scaled.get_output(0))
-        softmax.axes = 1 << 2
-        context = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-        context_flat = network.add_shuffle(context.get_output(0))
-        context_flat.first_transpose = trt.Permutation([1, 0, 2])
-        context_flat.reshape_dims = (num_patches, dim)
+        context_flat = graph_ops.add_attention_from_rows(
+            network, q, k, v,
+            num_heads=num_heads, head_dim=head_dim,
+            q_seq=num_patches, kv_seq=num_patches,
+            tag=f"{prefix}.attn1")
 
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, context_flat.get_output(0), dim, dim,
+            network, context_flat, dim, dim,
             weights[f"{prefix}.attn1.to_out.0.weight"])
         o_bias = weights.get(f"{prefix}.attn1.to_out.0.bias")
         if o_bias is not None:
@@ -348,41 +300,20 @@ def build_standard_dit_engine(
                     network, cross_k, dim, ck_norm, eps_t)
 
         # Cross multi-head attention (no RoPE)
-        cq_heads = network.add_shuffle(cross_q)
-        cq_heads.reshape_dims = (num_patches, num_heads, head_dim)
-        cq_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        ck_heads = network.add_shuffle(cross_k)
-        ck_heads.reshape_dims = (text_seq_len, num_heads, head_dim)
-        ck_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        cv_heads = network.add_shuffle(cross_v)
-        cv_heads.reshape_dims = (text_seq_len, num_heads, head_dim)
-        cv_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        c_score = network.add_matrix_multiply(
-            cq_heads.get_output(0), trt.MatrixOperation.NONE,
-            ck_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        c_scaled = network.add_elementwise(
-            c_score.get_output(0), scale_const,
-            trt.ElementWiseOperation.PROD)
-        # Apply cross-attention mask if available (mask padding tokens)
+        cross_mask_4d = None
         if cross_attn_mask is not None:
-            c_scaled = network.add_elementwise(
-                c_scaled.get_output(0), cross_attn_mask,
-                trt.ElementWiseOperation.SUM)
-        c_softmax = network.add_softmax(c_scaled.get_output(0))
-        c_softmax.axes = 1 << 2
-        c_context = network.add_matrix_multiply(
-            c_softmax.get_output(0), trt.MatrixOperation.NONE,
-            cv_heads.get_output(0), trt.MatrixOperation.NONE)
-
-        c_context_flat = network.add_shuffle(c_context.get_output(0))
-        c_context_flat.first_transpose = trt.Permutation([1, 0, 2])
-        c_context_flat.reshape_dims = (num_patches, dim)
+            cross_mask = network.add_shuffle(cross_attn_mask)
+            cross_mask.reshape_dims = (1, 1, 1, text_seq_len)
+            cross_mask_4d = cross_mask.get_output(0)
+        c_context_flat = graph_ops.add_attention_from_rows(
+            network, cross_q, cross_k, cross_v,
+            num_heads=num_heads, head_dim=head_dim,
+            q_seq=num_patches, kv_seq=text_seq_len,
+            mask=cross_mask_4d,
+            tag=f"{prefix}.attn2")
 
         cross_out = graph_ops.add_matmul_rhs_constant(
-            network, c_context_flat.get_output(0), dim, dim,
+            network, c_context_flat, dim, dim,
             weights[f"{prefix}.attn2.to_out.0.weight"])
         co_bias = weights.get(f"{prefix}.attn2.to_out.0.bias")
         if co_bias is not None:
@@ -473,26 +404,6 @@ def build_standard_dit_engine(
     if plan is None:
         raise RuntimeError("TRT engine serialization failed for DiT")
     return bytes(plan)
-
-
-def _tile_rope_for_heads(
-    network: trt.INetworkDefinition,
-    rope: trt.ITensor,
-    num_heads: int,
-    seq_len: int,
-    head_dim: int,
-) -> trt.ITensor:
-    """Tile RoPE [seq_len, head_dim] -> [seq_len, num_heads * head_dim].
-
-    Each head gets the same cos/sin frequencies.
-    """
-    if num_heads == 1:
-        return rope
-    # Use concatenation to tile
-    parts = [rope] * num_heads
-    concat = network.add_concatenation(parts)
-    concat.axis = 1  # concat along head_dim axis
-    return concat.get_output(0)
 
 
 def load_dit_weights(

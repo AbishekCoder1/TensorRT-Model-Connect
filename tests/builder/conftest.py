@@ -107,7 +107,8 @@ def run_trt_graph(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarr
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
     config.clear_flag(trt.BuilderFlag.TF32)

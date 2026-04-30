@@ -5,7 +5,7 @@ Per-session sampling / debug knobs for the Bark TTS pipeline. Replaces
 
 Using ``audio_bark`` (underscore) instead of ``audio.bark`` because the
 current registry keys the namespace on a single string without dotted
-sub-paths — matching how ``triattention``, ``decode_policy``, etc. work.
+sub-paths, matching how other runtime config namespaces work.
 """
 
 from __future__ import annotations

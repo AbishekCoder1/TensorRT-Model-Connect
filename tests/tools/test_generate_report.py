@@ -51,6 +51,7 @@ def _make_result(
     failure_type: str | None = None,
     repro_commands: Dict[str, str] | None = None,
     artifacts: Dict[str, Any] | None = None,
+    stage_outputs: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Build a synthetic result.json dict."""
     if metrics is None:
@@ -98,7 +99,7 @@ def _make_result(
                 "message": "All metrics passed",
             }
         },
-        "stage_outputs": {
+        "stage_outputs": stage_outputs or {
             "trt_generate": {
                 "stage_name": "generate",
                 "timing_s": 2.5,
@@ -358,15 +359,56 @@ class TestRenderReport:
         assert "TRT compile" in html
         assert "Inference" in html
         assert "Comparison" in html
+        assert "TRT validation wall time" not in html
         assert "Raw Timing Phases" in html
         assert "10.00s" in html
         assert "5.50s" in html
         assert "15.50s" in html  # total
 
+    def test_raw_trt_engine_timing_is_inference(self):
+        mod = _import_report()
+        r = _make_result(
+            timing={
+                "trt_generate_s": 5.5,
+                "trt_engine_generate_s": 1.25,
+                "trt_load_deserialize_generate_s": 0.75,
+            }
+        )
+        details = mod._normalize_detailed_timing(r)
+        assert details["inference_s"] == 1.25
+        assert details["trt_load_deserialization_s"] == 0.75
+        assert details["trt_validation_s"] == 5.5
+
+    def test_raw_trt_wall_time_is_not_inference(self):
+        mod = _import_report()
+        r = _make_result(
+            timing={"trt_generate_s": 5.5, "trt_load_deserialize_generate_s": 0.75},
+            detailed_timing={"inference_s": 5.5},
+        )
+        details = mod._normalize_detailed_timing(r)
+        assert "inference_s" not in details
+        assert details["trt_load_deserialization_s"] == 0.75
+        assert details["trt_validation_s"] == 5.5
+
+    def test_raw_trt_engine_timing_overrides_persisted_inference(self):
+        mod = _import_report()
+        r = _make_result(
+            timing={"trt_generate_s": 5.5, "trt_engine_generate_s": 1.25},
+            detailed_timing={"inference_s": 5.5},
+        )
+        details = mod._normalize_detailed_timing(r)
+        assert details["inference_s"] == 1.25
+
     def test_detailed_timing_rendered_from_result(self):
         mod = _import_report()
         r = _make_result(
-            timing={"bundle_build_s": 20.0, "trt_generate_s": 3.0, "contract_generate_s": 0.5},
+            timing={
+                "bundle_build_s": 20.0,
+                "trt_generate_s": 3.0,
+                "trt_engine_generate_s": 3.0,
+                "trt_load_deserialize_generate_s": 1.0,
+                "contract_generate_s": 0.5,
+            },
             detailed_timing={
                 "weights_loading_s": 4.0,
                 "trt_compile_s": 15.0,
@@ -379,8 +421,13 @@ class TestRenderReport:
         assert "4.00s" in html
         assert "TRT compile" in html
         assert "15.00s" in html
+        assert "TRT engine execution" in html
+        assert "TRT engine load/deserialization" in html
+        assert "4.00s" in html
+        assert "1.00s" in html
         assert "Comparison" in html
         assert "0.50s" in html
+        assert "TRT validation wall time" not in html
 
     def test_component_weight_and_compile_rows_rendered(self):
         mod = _import_report()
@@ -395,16 +442,20 @@ class TestRenderReport:
             },
         )
         html = mod.render_report([r])
-        assert "Weights loading: qwen3 encoder" in html
+        assert "<summary>Weights loading</summary>" in html
+        assert "qwen3 encoder" in html
         assert "8.00s" in html
-        assert "Weights loading: z image dit" in html
+        assert "z image dit" in html
         assert "5.00s" in html
-        assert "TRT compile: qwen3 encoder" in html
+        assert "<summary>TRT compile</summary>" in html
+        assert "qwen3 encoder" in html
         assert "30.00s" in html
-        assert "TRT compile: z image dit" in html
+        assert "z image dit" in html
         assert "50.00s" in html
+        assert "unattributed" in html
+        assert "8.00s" in html
 
-    def test_detailed_timing_table_does_not_overlap_compile_breakdown(self):
+    def test_detailed_timing_table_folds_compile_breakdown(self):
         mod = _import_report()
         r = _make_result(
             detailed_timing={
@@ -417,9 +468,66 @@ class TestRenderReport:
             },
         )
         html = mod.render_report([r])
-        assert "TRT compile</td><td>10.00s" in html
-        assert "TRT compile: main engine" not in html
-        assert "TRT compile: vision engine" not in html
+        assert "<summary>TRT compile</summary>" in html
+        assert "10.00s" in html
+        assert "main engine" in html
+        assert "vision engine" in html
+
+    def test_detailed_timing_table_folds_component_inference_breakdown(self):
+        mod = _import_report()
+        r = _make_result(
+            timing={
+                "trt_end_to_end_s": 9.0,
+                "trt_engine_end_to_end_s": 0.75,
+                "trt_component_engine_end_to_end_denoiser_plan_s": 0.6,
+                "trt_component_engine_end_to_end_vae_decoder_plan_s": 0.15,
+                "trt_load_deserialize_end_to_end_s": 3.0,
+                "trt_component_load_deserialize_end_to_end_denoiser_plan_s": 2.5,
+                "trt_component_load_deserialize_end_to_end_vae_decoder_plan_s": 0.5,
+            },
+            detailed_timing={
+                "weights_loading_s": 1.0,
+                "trt_compile_s": 2.0,
+                "comparison_s": 0.1,
+            },
+        )
+        html = mod.render_report([r])
+        assert "<summary>Inference</summary>" in html
+        assert "engine execution: denoiser (end to end)" in html
+        assert "engine execution: vae decoder (end to end)" in html
+        assert "load/deserialization: denoiser (end to end)" in html
+        assert "load/deserialization: vae decoder (end to end)" in html
+        assert "3.75s" in html
+        assert "TRT validation wall time" not in html
+
+    def test_detailed_timing_table_recovers_runtime_timings_from_stage_outputs(self):
+        mod = _import_report()
+        r = _make_result(
+            timing={"trt_end_to_end_s": 9.0},
+            detailed_timing={
+                "weights_loading_s": 1.0,
+                "trt_compile_s": 2.0,
+                "tokenizer_json_ensure_s": 0.0,
+            },
+            stage_outputs={
+                "trt_end_to_end": {
+                    "stage_name": "end_to_end",
+                    "data": {
+                        "stderr": "\n".join([
+                            '[trtf.load_timing] label="denoiser_plan" '
+                            "load_deserialize_ms=2500.000000 plan_bytes=1",
+                            '[trtf.engine_timing] label="denoiser_plan" '
+                            "execute_ms=600.000000 launches=20",
+                        ]),
+                    },
+                },
+            },
+        )
+        html = mod.render_report([r])
+        assert "engine execution: denoiser (end to end)" in html
+        assert "load/deserialization: denoiser (end to end)" in html
+        assert "3.10s" in html
+        assert "Tokenizer JSON ensure" not in html
 
     def test_detailed_timing_table_excludes_overlapping_build_summaries(self):
         mod = _import_report()
@@ -437,7 +545,8 @@ class TestRenderReport:
         )
         html = mod.render_report([r])
         assert "Weights loading" in html
-        assert "TRT compile</td><td>20.00s" in html
+        assert "TRT compile" in html
+        assert "20.00s" in html
         assert "Bundle build total" not in html
         assert "Build overhead" not in html
 

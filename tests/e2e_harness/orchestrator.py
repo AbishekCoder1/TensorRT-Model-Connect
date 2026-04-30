@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -50,6 +51,24 @@ from .python_profiles import profile_env_var
 from .registry import get_comparator, get_contract_plugin, get_reference, get_runner
 
 logger = logging.getLogger(__name__)
+
+_TRTF_TIMING_RE = re.compile(
+    r"^\[trtf\.timing\]\s+"
+    r"prefill_ms=(?P<prefill_ms>[-+0-9.eE]+)\s+"
+    r"decode_ms=(?P<decode_ms>[-+0-9.eE]+)\s+"
+    r"total_ms=(?P<total_ms>[-+0-9.eE]+)\s*$",
+    re.MULTILINE,
+)
+_TRTF_LOAD_TIMING_RE = re.compile(
+    r"^\[trtf\.load_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
+    r"load_deserialize_ms=(?P<ms>[-+0-9.eE]+)",
+    re.MULTILINE,
+)
+_TRTF_ENGINE_TIMING_RE = re.compile(
+    r"^\[trtf\.engine_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
+    r"execute_ms=(?P<ms>[-+0-9.eE]+)",
+    re.MULTILINE,
+)
 
 _MIGRATED_RUNTIME_STRATEGIES = frozenset({
     "decoder_kv_cache",
@@ -772,6 +791,7 @@ def _sum_timing(
     prefixes: tuple[str, ...],
     *,
     exclude: tuple[str, ...] = (),
+    exclude_prefixes: tuple[str, ...] = (),
 ) -> float:
     return sum(
         float(value)
@@ -779,9 +799,160 @@ def _sum_timing(
         if (
             value is not None
             and key not in exclude
+            and not any(key.startswith(prefix) for prefix in exclude_prefixes)
             and any(key.startswith(prefix) for prefix in prefixes)
         )
     )
+
+
+def _timing_label_key(label: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", label.strip().lower()).strip("_")
+    return cleaned or "engine"
+
+
+def _read_log_ref(ref: Any) -> str:
+    if not isinstance(ref, str) or not ref:
+        return ""
+    raw_path = Path(ref)
+    candidates = [raw_path]
+    if raw_path.name:
+        candidates.append(Path.cwd() / raw_path.name)
+    for path in candidates:
+        if path.is_file():
+            try:
+                return path.read_text(errors="replace")
+            except OSError:
+                return ""
+    return ""
+
+
+def _stage_text_blobs(output: StageOutput) -> list[str]:
+    blobs: list[str] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, str):
+            blobs.append(value)
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                if key.endswith("_log") or key == "stderr_log":
+                    log_text = _read_log_ref(child)
+                    if log_text:
+                        blobs.append(log_text)
+                visit(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child)
+
+    visit(output.metadata or {})
+    visit(output.data or {})
+    if output.text:
+        blobs.append(str(output.text))
+    return blobs
+
+
+def _extract_labeled_timing(
+    pattern: re.Pattern[str],
+    blobs: list[str],
+) -> dict[str, float]:
+    timings: dict[str, float] = {}
+    for text in blobs:
+        for match in pattern.finditer(text or ""):
+            try:
+                seconds = float(match.group("ms")) / 1000.0
+            except (TypeError, ValueError):
+                continue
+            key = _timing_label_key(match.group("label"))
+            timings[key] = timings.get(key, 0.0) + seconds
+    return timings
+
+
+def _extract_cli_generation_timing(blobs: list[str]) -> float | None:
+    for text in blobs:
+        match = _TRTF_TIMING_RE.search(text or "")
+        if match is None:
+            continue
+        try:
+            return float(match.group("total_ms")) / 1000.0
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _collect_trt_stage_timing(output: StageOutput, stage_name: str) -> dict[str, float]:
+    timings: dict[str, float] = {}
+    blobs = _stage_text_blobs(output)
+
+    engine_components = _extract_labeled_timing(_TRTF_ENGINE_TIMING_RE, blobs)
+    if engine_components:
+        total = sum(engine_components.values())
+        timings[f"trt_engine_{stage_name}_s"] = total
+        for label, value in engine_components.items():
+            timings[f"trt_component_engine_{stage_name}_{label}_s"] = value
+    else:
+        engine_time_s = _extract_cli_generation_timing(blobs)
+        if engine_time_s is None:
+            engine_time_s = _extract_trt_engine_time_s(output)
+        if engine_time_s is not None:
+            timings[f"trt_engine_{stage_name}_s"] = engine_time_s
+
+    load_components = _extract_labeled_timing(_TRTF_LOAD_TIMING_RE, blobs)
+    if load_components:
+        total = sum(load_components.values())
+        timings[f"trt_load_deserialize_{stage_name}_s"] = total
+        for label, value in load_components.items():
+            timings[f"trt_component_load_deserialize_{stage_name}_{label}_s"] = value
+    else:
+        load_deserialize_s = _extract_trt_load_deserialize_time_s(output)
+        if load_deserialize_s is not None:
+            timings[f"trt_load_deserialize_{stage_name}_s"] = load_deserialize_s
+
+    return timings
+
+
+def _extract_trt_engine_time_s(output: StageOutput) -> float | None:
+    metadata = output.metadata or {}
+    candidates: list[Any] = [
+        metadata.get("trt_engine_s"),
+        metadata.get("engine_s"),
+    ]
+    cpp_meta = metadata.get("cpp")
+    if isinstance(cpp_meta, dict):
+        candidates.extend([
+            cpp_meta.get("trt_engine_s"),
+            cpp_meta.get("engine_s"),
+        ])
+
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _extract_trt_load_deserialize_time_s(output: StageOutput) -> float | None:
+    metadata = output.metadata or {}
+    candidates: list[Any] = [
+        metadata.get("trt_load_deserialize_s"),
+        metadata.get("load_deserialize_s"),
+    ]
+    cpp_meta = metadata.get("cpp")
+    if isinstance(cpp_meta, dict):
+        candidates.extend([
+            cpp_meta.get("trt_load_deserialize_s"),
+            cpp_meta.get("load_deserialize_s"),
+        ])
+
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _build_detailed_timing(
@@ -791,13 +962,32 @@ def _build_detailed_timing(
     """Build normalized timing categories for the HTML report."""
     details = _structured_build_detail_timing(build_info or {})
 
-    inference = _sum_timing(
+    inference = _sum_timing(timing, ("trt_engine_",))
+    if inference:
+        details["inference_s"] = inference
+
+    load_deserialize = _sum_timing(timing, ("trt_load_deserialize_",))
+    if load_deserialize:
+        details["trt_load_deserialization_s"] = load_deserialize
+
+    for key, value in timing.items():
+        if not key.startswith(("trt_component_engine_", "trt_component_load_deserialize_")):
+            continue
+        if value is None:
+            continue
+        try:
+            details[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+    trt_validation = _sum_timing(
         timing,
         ("trt_",),
         exclude=("trt_compile_s", "trt_build_s"),
+        exclude_prefixes=("trt_engine_", "trt_load_deserialize_", "trt_component_"),
     )
-    if inference:
-        details["inference_s"] = inference
+    if trt_validation:
+        details["trt_validation_s"] = trt_validation
 
     reference = _sum_timing(timing, ("ref_",))
     if reference:
@@ -985,6 +1175,7 @@ class E2EOrchestrator:
                 try:
                     trt_output = runner.run_stage(case, stage, ctx_with_bundle)
                     timing[f"trt_{stage_name}_s"] = time.monotonic() - t0
+                    timing.update(_collect_trt_stage_timing(trt_output, stage_name))
                     sink.write_stage_output(stage_name, trt_output, prefix="trt")
                     _log_stage_subprocess(sink, stage_name, trt_output, "trt")
                     _auto_register_artifacts(sink, trt_output, "trt")

@@ -34,7 +34,6 @@ Weight key mapping (HF -> engine):
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -102,15 +101,9 @@ class SamPlugin:
         sam_cfg = _resolve_sam_config(config.raw)
         config.raw["_sam_config"] = sam_cfg
 
-        hidden = sam_cfg["hidden_size"]
         num_layers = sam_cfg["num_hidden_layers"]
-        num_heads = sam_cfg["num_attention_heads"]
-        head_dim = hidden // num_heads
-        mlp_dim = sam_cfg["mlp_dim"]
-        decoder_hidden = sam_cfg["decoder_hidden_size"]
         decoder_depth = sam_cfg["decoder_depth"]
         num_multimask = sam_cfg["num_multimask_outputs"]
-        image_embedding_size = sam_cfg["image_embedding_size"]
 
         weights = WeightDict()
 
@@ -661,7 +654,6 @@ class SamPlugin:
         # Formula: coords = 2*grid - 1, B = coords @ positional_embedding,
         #          PE = cat(sin(2*pi*B), cos(2*pi*B))
         shared_pe = weights["prompt.shared_image_pe"]  # [2, num_pos_feats]
-        num_pos_feats = shared_pe.shape[1]  # 128 for hidden=256
         # Build grid: [H, W, 2] with values in [0,1]
         grid = np.zeros((image_embedding_size, image_embedding_size, 2),
                         dtype=np.float32)
@@ -677,11 +669,6 @@ class SamPlugin:
         B = 2.0 * np.pi * B
         image_pe_flat = np.concatenate(
             [np.sin(B), np.cos(B)], axis=-1).astype(np.float32)  # [H*W, 256]
-        # Reshape to [1, C, H, W] for NCHW format
-        image_pe_nhwc = image_pe_flat.reshape(
-            1, image_embedding_size, image_embedding_size, decoder_hidden)
-        image_pe_nchw = image_pe_nhwc.transpose(0, 3, 1, 2)  # [1, C, H, W]
-
         image_pe_flat_c = graph_ops.add_constant(
             network, (img_seq, decoder_hidden), image_pe_flat)
 
@@ -1079,39 +1066,14 @@ class SamPlugin:
         v = graph_ops.add_bias_sum(
             network, v, proj, weights[f"{prefix}.v.bias"])
 
-        # Multi-head reshape
-        q_h = network.add_shuffle(q)
-        q_h.reshape_dims = (q_seq, num_heads, p_head_dim)
-        q_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        k_h = network.add_shuffle(k)
-        k_h.reshape_dims = (kv_seq, num_heads, p_head_dim)
-        k_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        v_h = network.add_shuffle(v)
-        v_h.reshape_dims = (kv_seq, num_heads, p_head_dim)
-        v_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        score = network.add_matrix_multiply(
-            q_h.get_output(0), trt.MatrixOperation.NONE,
-            k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        scale_c = graph_ops.add_constant(
-            network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
-        scaled = network.add_elementwise(
-            score.get_output(0), scale_c, trt.ElementWiseOperation.PROD)
-        softmax = network.add_softmax(scaled.get_output(0))
-        softmax.axes = 1 << 2
-
-        ctx = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_h.get_output(0), trt.MatrixOperation.NONE)
-
-        ctx_flat = network.add_shuffle(ctx.get_output(0))
-        ctx_flat.first_transpose = trt.Permutation([1, 0, 2])
-        ctx_flat.reshape_dims = (q_seq, proj)
+        ctx_flat = graph_ops.add_attention_from_rows(
+            network, q, k, v,
+            num_heads=num_heads, head_dim=p_head_dim,
+            q_seq=q_seq, kv_seq=kv_seq,
+            scale=attn_scale)
 
         out = graph_ops.add_matmul_rhs_constant(
-            network, ctx_flat.get_output(0), proj, hidden,
+            network, ctx_flat, proj, hidden,
             weights[f"{prefix}.o.weight"])
         out = graph_ops.add_bias_sum(
             network, out, hidden, weights[f"{prefix}.o.bias"])
@@ -1284,6 +1246,8 @@ class SamPlugin:
                 scaled.get_output(0), rel_bias_flat.get_output(0),
                 trt.ElementWiseOperation.SUM)
 
+        # Relative 2D positional bias is generated from Q before softmax, so
+        # this is not representable as a static/native IAttention mask.
         softmax = network.add_softmax(scaled.get_output(0))
         softmax.axes = 1 << 2
 
@@ -1362,10 +1326,6 @@ class SamPlugin:
         Returns:
             [num_heads, height*width, height*width] numpy array
         """
-        # Get relative position embeddings for h and w axes
-        rp_h = SamPlugin._get_rel_pos(height, height, rel_pos_h)  # [H, H, head_dim]
-        rp_w = SamPlugin._get_rel_pos(width, width, rel_pos_w)    # [W, W, head_dim]
-
         seq_len = height * width
         # The query is reshaped as [num_heads, H, W, head_dim] in HF
         # We need to compute: rel_h[h_q, h_k] + rel_w[w_q, w_k] for each (q,k) pair

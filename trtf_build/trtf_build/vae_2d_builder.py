@@ -229,6 +229,7 @@ def _add_self_attention_2d(network, inp, weights, prefix: str,
     [out, in] in safetensors; we reshape to [out, in, 1, 1] for 1x1 Conv2d.
     """
     import tensorrt as trt
+    from . import graph_ops
     from .graph_ops import add_conv2d
 
     residual = inp
@@ -277,30 +278,23 @@ def _add_self_attention_2d(network, inp, weights, prefix: str,
     v_t = network.add_shuffle(v_r.get_output(0))
     v_t.second_transpose = (0, 2, 1)  # [1, seq, ch]
 
-    # Attention: softmax(Q @ K^T / sqrt(ch)) @ V
-    # Q @ K^T: [1, seq, ch] x [1, ch, seq] = [1, seq, seq]
-    qk = network.add_matrix_multiply(
-        q_t.get_output(0), trt.MatrixOperation.NONE,
-        k_t.get_output(0), trt.MatrixOperation.TRANSPOSE)
+    q_4d = network.add_shuffle(q_t.get_output(0))
+    q_4d.reshape_dims = (1, 1, seq_len, ch)
+    k_4d = network.add_shuffle(k_t.get_output(0))
+    k_4d.reshape_dims = (1, 1, seq_len, ch)
+    v_4d = network.add_shuffle(v_t.get_output(0))
+    v_4d.reshape_dims = (1, 1, seq_len, ch)
+    attn_out = graph_ops.add_attention_core(
+        network,
+        q_4d.get_output(0),
+        k_4d.get_output(0),
+        v_4d.get_output(0),
+        scale=1.0 / np.sqrt(ch))
 
-    # Scale by 1/sqrt(ch)
-    from .graph_ops import add_constant
-    scale = add_constant(network, (1, 1, 1),
-                         np.array([1.0 / np.sqrt(ch)], dtype=np.float32))
-    qk_scaled = network.add_elementwise(
-        qk.get_output(0), scale, trt.ElementWiseOperation.PROD)
-
-    # Softmax over last dim
-    sm = network.add_softmax(qk_scaled.get_output(0))
-    sm.axes = 1 << 2  # last dim of [1, seq, seq]
-
-    # attn @ V: [1, seq, seq] x [1, seq, ch] = [1, seq, ch]
-    attn_out = network.add_matrix_multiply(
-        sm.get_output(0), trt.MatrixOperation.NONE,
-        v_t.get_output(0), trt.MatrixOperation.NONE)
-
-    # Reshape back: [1, seq, ch] -> [1, ch, seq] -> [1, ch, H, W]
-    attn_tr = network.add_shuffle(attn_out.get_output(0))
+    # Reshape back: [1, 1, seq, ch] -> [1, seq, ch] -> [1, ch, seq] -> [1, ch, H, W]
+    attn_3d = network.add_shuffle(attn_out)
+    attn_3d.reshape_dims = (1, seq_len, ch)
+    attn_tr = network.add_shuffle(attn_3d.get_output(0))
     attn_tr.second_transpose = (0, 2, 1)  # [1, ch, seq]
     attn_4d = network.add_shuffle(attn_tr.get_output(0))
     attn_4d.reshape_dims = (1, ch, h, w)

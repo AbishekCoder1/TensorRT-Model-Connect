@@ -11,6 +11,7 @@
 #include "trtf/runtime/triattention_kv_cache.h"
 #include "utils/json_helpers.h"
 
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <sstream>
@@ -216,6 +217,7 @@ class DecoderPlugin final : public IPipelinePlugin {
         auto* plan = find_section(ctx.bundle, "engine_plan");
         if (plan == nullptr || plan->empty())
             throw std::runtime_error("engine_plan section is missing");
+        const auto t0 = std::chrono::steady_clock::now();
         auto trt_runtime = create_trt_runtime();
         if (!trt_runtime)
             throw std::runtime_error("Failed to create TRT runtime for engine_plan");
@@ -223,6 +225,9 @@ class DecoderPlugin final : public IPipelinePlugin {
             trt_runtime->deserializeCudaEngine(plan->data(), plan->size()));
         if (!engine)
             throw std::runtime_error("Failed to deserialize engine_plan");
+        const auto t1 = std::chrono::steady_clock::now();
+        const double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        log_trt_load_timing("engine_plan", load_ms, plan->size());
         nvinfer1::ICudaEngine* raw_engine = engine.release();
         return std::shared_ptr<nvinfer1::ICudaEngine>(raw_engine,
                                                       [](nvinfer1::ICudaEngine* p) { delete p; });
@@ -261,6 +266,7 @@ class DecoderPlugin final : public IPipelinePlugin {
         if (!module || !module->ok())
             throw std::runtime_error("Failed to create TrtModule for engine_plan (profile " +
                                      std::to_string(profile_idx) + ")");
+        module->set_timing_label(profile_idx == 0 ? "engine_plan:prefill" : "engine_plan:decode");
         module->keep_alive(shared_engine);
         module->keep_alive(shared_stream);
         return module;

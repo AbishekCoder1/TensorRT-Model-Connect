@@ -126,12 +126,11 @@ def _cmd_build(args: argparse.Namespace) -> int:
     quantize = canonicalize_quant_format(getattr(args, "quantize", None))
 
     # Resolve the registry-backed build-time config up front (before build),
-    # so namespaces like decode_policy.* can feed kwargs directly. Importing
+    # so build-time namespaces can feed kwargs directly. Importing
     # runtime_config triggers registration of any schema modules declared
     # under trtf_build.runtime_config.schemas.
     cli_cfg = getattr(args, "config", None)
     cli_sets = getattr(args, "set_flags", None) or []
-    force_manual_attention = False
     resolved_bundle = None
     if cli_cfg or cli_sets:
         from .runtime_config import resolve_cli_config
@@ -143,11 +142,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
         except (ValueError, FileNotFoundError, KeyError) as exc:
             print(f"Error resolving config: {exc}", file=sys.stderr)
             return 1
-        try:
-            force_manual_attention = bool(resolved_bundle.get(
-                "decode_policy", "force_manual_attention"))
-        except KeyError:
-            force_manual_attention = False
         try:
             audio_magpie_max_source_positions = int(resolved_bundle.get(
                 "audio_magpie", "max_source_positions"))
@@ -182,7 +176,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
             triattention_protect_prefill=getattr(args, "triattention_protect_prefill", True),
             triattention_disable_mlr=getattr(args, "triattention_disable_mlr", False),
             triattention_disable_trig=getattr(args, "triattention_disable_trig", False),
-            force_manual_attention=force_manual_attention,
             audio_magpie_max_source_positions=audio_magpie_max_source_positions,
             build_timing_path=getattr(args, "build_timing_json", None),
             diffusion_overrides={

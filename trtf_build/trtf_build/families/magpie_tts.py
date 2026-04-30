@@ -750,7 +750,8 @@ class MagpieTTSPlugin:
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network()
+        network = builder.create_network(
+            1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
         trt_config.clear_flag(trt.BuilderFlag.TF32)
@@ -827,9 +828,6 @@ class MagpieTTSPlugin:
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1), np.array([1e-5], dtype=np.float32))
-        sa_scale_tensor = graph_ops.add_constant(
-            network, (1, 1, 1),
-            np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=np.float32))
         xa_scale_tensor = graph_ops.add_constant(
             network, (1, 1, 1),
             np.array([1.0 / np.sqrt(max(xa_d_head, 1))], dtype=np.float32))
@@ -850,7 +848,6 @@ class MagpieTTSPlugin:
                 cross_k=cross_k_inputs[layer_idx],
                 cross_v=cross_v_inputs[layer_idx],
                 attention_mask=attention_mask,
-                sa_scale_tensor=sa_scale_tensor,
                 xa_scale_tensor=xa_scale_tensor,
                 eps_tensor=eps_tensor, weights=weights, prefix=prefix,
                 hidden_size=hidden, num_heads=dec_heads, head_dim=head_dim,
@@ -1060,11 +1057,11 @@ def _build_magpie_encoder(weights: WeightDict, *, verbose: bool = False) -> byte
     hidden = weights["_hidden_size"]
     max_pos = weights["_max_source_positions"]
     enc_kernel_size = weights.get("_enc_kernel_size", 3)
-    head_dim = hidden // enc_heads
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     tc.clear_flag(trt.BuilderFlag.TF32)
@@ -1092,19 +1089,6 @@ def _build_magpie_encoder(weights: WeightDict, *, verbose: bool = False) -> byte
         text_embed.get_output(0), pos_embed_table,
         trt.ElementWiseOperation.SUM).get_output(0)
 
-    # Build causal mask constant: lower-triangular [1, max_pos, max_pos]
-    # 0.0 for allowed positions, -1e9 for masked (future) positions
-    causal_mask_np = np.zeros((max_pos, max_pos), dtype=np.float32)
-    for i in range(max_pos):
-        for j in range(i + 1, max_pos):
-            causal_mask_np[i, j] = -1e9
-    causal_mask = graph_ops.add_constant(
-        network, (1, max_pos, max_pos), causal_mask_np)
-
-    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
-    attn_scale_const = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
-
     # Encoder self-attention layers (CAUSAL, no KV cache)
     for li in range(enc_layers):
         pfx = f"enc_layer.{li}"
@@ -1123,9 +1107,7 @@ def _build_magpie_encoder(weights: WeightDict, *, verbose: bool = False) -> byte
             w_v=weights[f"{pfx}.w_v"],
             w_o=weights[f"{pfx}.w_o"],
             hidden_size=hidden, num_heads=enc_heads,
-            seq_length=max_pos,
-            attn_scale_const=attn_scale_const,
-            causal_mask=causal_mask)
+            seq_length=max_pos)
 
         # Residual
         hs = network.add_elementwise(
@@ -1173,7 +1155,6 @@ def _build_magpie_encoder(weights: WeightDict, *, verbose: bool = False) -> byte
 def _add_causal_self_attention(
     network, hidden, *, w_q, w_k, w_v, w_o,
     hidden_size, num_heads, seq_length,
-    attn_scale_const, causal_mask,
 ):
     """Full-sequence causal self-attention (no KV cache).
 
@@ -1192,51 +1173,15 @@ def _add_causal_self_attention(
     v = graph_ops.add_matmul_rhs_constant(
         network, hidden, hidden_size, hidden_size, w_v)
 
-    # Reshape to [num_heads, seq, head_dim]
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    q_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    k_heads = network.add_shuffle(k)
-    k_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    v_heads = network.add_shuffle(v)
-    v_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention scores: [num_heads, seq, head_dim] @ [num_heads, head_dim, seq]
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-    # Scale
-    scaled = network.add_elementwise(
-        score.get_output(0), attn_scale_const,
-        trt.ElementWiseOperation.PROD)
-
-    # Apply causal mask: [1, seq, seq] broadcasts to [num_heads, seq, seq]
-    masked = network.add_elementwise(
-        scaled.get_output(0), causal_mask,
-        trt.ElementWiseOperation.SUM)
-
-    # Softmax over last dim
-    softmax = network.add_softmax(masked.get_output(0))
-    softmax.axes = 1 << 2
-
-    # Context: [num_heads, seq, head_dim]
-    context = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    # Reshape back to [seq, hidden]
-    context_flat = network.add_shuffle(context.get_output(0))
-    context_flat.first_transpose = trt.Permutation([1, 0, 2])
-    context_flat.reshape_dims = (seq_length, hidden_size)
+    context_flat = graph_ops.add_attention_from_rows(
+        network, q, k, v,
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=seq_length, kv_seq=seq_length,
+        causal=True)
 
     # Output projection
     out = graph_ops.add_matmul_rhs_constant(
-        network, context_flat.get_output(0), hidden_size, hidden_size, w_o)
+        network, context_flat, hidden_size, hidden_size, w_o)
 
     return out
 
@@ -1321,7 +1266,7 @@ def _add_conv1d_ffn(
 
 def _add_magpie_decoder_layer(
     *, network, hidden, cache_k, cache_v, cross_k, cross_v,
-    attention_mask, sa_scale_tensor, xa_scale_tensor, eps_tensor,
+    attention_mask, xa_scale_tensor, eps_tensor,
     weights, prefix,
     hidden_size, num_heads, head_dim, ffn_dim, max_cache_length,
     max_source_positions, xa_n_heads, xa_d_head,
@@ -1366,41 +1311,16 @@ def _add_magpie_decoder_layer(
     av = network.add_concatenation([cache_v, v])
     av.axis = 0
 
-    # Multi-head reshape (dynamic seq_len via -1 inference)
-    # Q: [seq_len, attn] -> [seq_len, heads, dim] -> [heads, seq_len, dim]
-    qh = network.add_shuffle(q)
-    qh.reshape_dims = (-1, num_heads, head_dim)
-    qh.second_transpose = trt.Permutation([1, 0, 2])
-    # K: [max_cache+seq_len, attn] -> [heads, max_cache+seq_len, dim]
-    kh = network.add_shuffle(ak.get_output(0))
-    kh.reshape_dims = (-1, num_heads, head_dim)
-    kh.second_transpose = trt.Permutation([1, 0, 2])
-    vh = network.add_shuffle(av.get_output(0))
-    vh.reshape_dims = (-1, num_heads, head_dim)
-    vh.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention scores: [heads, seq_len, max_cache+seq_len]
-    sc = network.add_elementwise(
-        network.add_matrix_multiply(
-            qh.get_output(0), trt.MatrixOperation.NONE,
-            kh.get_output(0), trt.MatrixOperation.TRANSPOSE).get_output(0),
-        sa_scale_tensor, trt.ElementWiseOperation.PROD)
-    # Mask is already 3D: [1, seq_len, max_cache+seq_len] — broadcasts over heads
-    ma = network.add_elementwise(
-        sc.get_output(0), attention_mask, trt.ElementWiseOperation.SUM)
-    sm = network.add_softmax(ma.get_output(0))
-    sm.axes = 1 << 2
-    # Context: [heads, seq_len, dim] -> [seq_len, heads, dim] -> [seq_len, attn]
-    ct = network.add_matrix_multiply(
-        sm.get_output(0), trt.MatrixOperation.NONE,
-        vh.get_output(0), trt.MatrixOperation.NONE)
-    cf = network.add_shuffle(ct.get_output(0))
-    cf.first_transpose = trt.Permutation([1, 0, 2])
-    cf.reshape_dims = (-1, attention_size)
+    mask_4d = graph_ops.add_3d_mask_to_4d(network, attention_mask)
+    cf = graph_ops.add_attention_from_rows(
+        network, q, ak.get_output(0), av.get_output(0),
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=None, kv_seq=None,
+        mask=mask_4d)
 
     # Output projection + residual
     sa = graph_ops.add_matmul_rhs_constant(
-        network, cf.get_output(0), attention_size, hidden_size,
+        network, cf, attention_size, hidden_size,
         weights[f"{prefix}.w_o"])
     psa = network.add_elementwise(
         hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
@@ -1426,7 +1346,9 @@ def _add_magpie_decoder_layer(
         network, cn_memory, hidden_size, xa_attention_size,
         weights[f"{prefix}.cross_w_v"])
 
-    # Cross-attention (xa_n_heads=1, dynamic seq_len)
+    # Cross-attention stays decomposed because the engine exposes attention
+    # probabilities for alignment and optionally reweights them with a prior.
+    # Native IAttention only returns context.
     # Q: [seq_len, xa_size] -> [xa_heads, seq_len, xa_d_head]
     cqh = network.add_shuffle(cq)
     cqh.reshape_dims = (-1, xa_n_heads, xa_d_head)
@@ -1524,7 +1446,8 @@ def _build_local_transformer_engine(  # pragma: no cover
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
 
@@ -1572,38 +1495,20 @@ def _build_local_transformer_engine(  # pragma: no cover
     av = network.add_concatenation([cache_v, present_v])
     av.axis = 0
 
-    qh = network.add_shuffle(q_slice.get_output(0))
-    qh.reshape_dims = (1, 1, lt_d_head)
-    kh = network.add_shuffle(ak.get_output(0))
-    kh.reshape_dims = (attention_window, 1, lt_d_head)
-    kh.second_transpose = trt.Permutation([1, 0, 2])
-    vh = network.add_shuffle(av.get_output(0))
-    vh.reshape_dims = (attention_window, 1, lt_d_head)
-    vh.second_transpose = trt.Permutation([1, 0, 2])
-
-    scale_val = 1.0 / np.sqrt(lt_d_head)
-    scale_tensor = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([scale_val], dtype=np.float32))
-
-    sc = network.add_elementwise(
-        network.add_matrix_multiply(
-            qh.get_output(0), trt.MatrixOperation.NONE,
-            kh.get_output(0), trt.MatrixOperation.TRANSPOSE).get_output(0),
-        scale_tensor, trt.ElementWiseOperation.PROD)
-    m3 = network.add_shuffle(attention_mask)
-    m3.reshape_dims = (1, 1, attention_window)
-    ma = network.add_elementwise(
-        sc.get_output(0), m3.get_output(0), trt.ElementWiseOperation.SUM)
-    sm = network.add_softmax(ma.get_output(0))
-    sm.axes = 1 << 2
-    ct = network.add_matrix_multiply(
-        sm.get_output(0), trt.MatrixOperation.NONE,
-        vh.get_output(0), trt.MatrixOperation.NONE)
-    cf = network.add_shuffle(ct.get_output(0))
-    cf.reshape_dims = (1, lt_hidden)
+    mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
+    cf = graph_ops.add_attention_from_rows(
+        network,
+        q_slice.get_output(0),
+        ak.get_output(0),
+        av.get_output(0),
+        num_heads=1,
+        head_dim=lt_d_head,
+        q_seq=1,
+        kv_seq=attention_window,
+        mask=mask_4d)
 
     sa = graph_ops.add_matmul_rhs_constant(
-        network, cf.get_output(0), lt_hidden, lt_hidden,
+        network, cf, lt_hidden, lt_hidden,
         weights["lt_o_net"])
     psa = network.add_elementwise(
         hidden_state, sa, trt.ElementWiseOperation.SUM).get_output(0)

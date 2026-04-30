@@ -517,11 +517,6 @@ def build_bundle(
     triattention_protect_prefill: bool = True,
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
-    # decode_policy.* namespace. force_manual_attention replaces the
-    # TRTF_FORCE_MANUAL_DECODER_ATTENTION env var (now deleted). Value
-    # is stashed on config.raw so every family's build_engine signature
-    # stays stable; standard_decoder_builder reads it from there.
-    force_manual_attention: bool = False,
     # audio_magpie.* build-time fields. max_source_positions replaces
     # the TRTF_MAGPIE_MAX_SOURCE_POS env var; passed to families via
     # config.raw, same passthrough pattern.
@@ -562,12 +557,6 @@ def build_bundle(
 
     # 1. Parse config
     config = ModelConfig.from_dir(model_dir_path)
-    # Stash resolved decode_policy.* values for standard_decoder_builder and
-    # family plugins — keeps the build_engine protocol signature untouched
-    # while letting build-time config flow in from the CLI's --set /
-    # --config (see trtf_build.runtime_config). Underscore-prefixed to mark
-    # internal passthrough, same convention as _dynamic_kv_opt_length.
-    config.raw["_decode_policy_force_manual_attention"] = force_manual_attention
     config.raw["_audio_magpie_max_source_positions"] = audio_magpie_max_source_positions
     print(f"[trtf-build] Model: {config.model_type} "
           f"(layers={config.num_hidden_layers}, hidden={config.hidden_size}, "
@@ -1223,7 +1212,6 @@ def build(
     triattention_protect_prefill: bool = True,
     triattention_disable_mlr: bool = False,
     triattention_disable_trig: bool = False,
-    force_manual_attention: bool = False,
     audio_magpie_max_source_positions: int = 0,
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
@@ -1264,7 +1252,6 @@ def build(
                  triattention_protect_prefill=triattention_protect_prefill,
                  triattention_disable_mlr=triattention_disable_mlr,
                  triattention_disable_trig=triattention_disable_trig,
-                 force_manual_attention=force_manual_attention,
                  audio_magpie_max_source_positions=audio_magpie_max_source_positions,
                  diffusion_overrides=diffusion_overrides,
                  build_timing_path=build_timing_path)

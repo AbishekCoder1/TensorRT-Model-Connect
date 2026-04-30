@@ -27,17 +27,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-try:
-    from safetensors.numpy import save_file
-except (ImportError, ModuleNotFoundError):
-    pytest.skip("safetensors not available", allow_module_level=True)
+pytest.importorskip("safetensors.numpy")
+pytest.importorskip("trtf_build.config")
 
-try:
-    from trtf_build.config import ModelConfig
-except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
-
-from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
+from tests.builder.family_plugin_tester import FamilyPluginTester
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
@@ -58,7 +51,7 @@ class GPTNeoXPluginTester(FamilyPluginTester):
 
     def get_config_dict(self) -> dict:
         d = super().get_config_dict()
-        d["rotary_pct"] = 0.25
+        d["rotary_pct"] = 0.5
         d["use_parallel_residual"] = True
         return d
 
@@ -74,7 +67,6 @@ class GPTNeoXPluginTester(FamilyPluginTester):
           - LM head: embed_out.weight
         """
         s = self.spec
-        head_dim = s.hidden_size // s.num_attention_heads
         rng = np.random.RandomState(42)
 
         def rand(*shape: int) -> np.ndarray:

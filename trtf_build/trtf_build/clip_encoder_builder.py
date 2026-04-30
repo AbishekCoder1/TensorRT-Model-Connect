@@ -74,14 +74,10 @@ def build_clip_encoder_engine(
     for i in range(max_seq_len):
         for j in range(i + 1):
             causal_np[i, j] = 0.0
-    # Expand to [1, seq, seq] for broadcast with [num_heads, seq, seq]
+    # Expand to [1, 1, seq, seq] for native IAttention.
     causal_const = graph_ops.add_constant(
-        network, (1, max_seq_len, max_seq_len), causal_np[np.newaxis])
-
-    eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
-    scale_const = graph_ops.add_constant(
-        network, (1, 1, 1),
-        np.array([1.0 / np.sqrt(head_dim)], dtype=np.float32))
+        network, (1, 1, max_seq_len, max_seq_len),
+        causal_np[np.newaxis, np.newaxis])
 
     for i in range(num_layers):
         p = f"text_model.encoder.layers.{i}"
@@ -89,7 +85,8 @@ def build_clip_encoder_engine(
         # Pre-LN (layer_norm1)
         ln1_w = weights[f"{p}.layer_norm1.weight"]
         ln1_b = weights[f"{p}.layer_norm1.bias"]
-        normed = graph_ops.add_layer_norm(network, hidden, hidden_size, ln1_w, ln1_b, eps_t)
+        normed = graph_ops.add_layer_norm_native(
+            network, hidden, hidden_size, ln1_w, ln1_b, eps)
 
         # Self-attention
         q = graph_ops.add_matmul_rhs_constant(
@@ -110,43 +107,15 @@ def build_clip_encoder_engine(
         v = graph_ops.add_bias_sum(network, v, hidden_size,
             weights[f"{p}.self_attn.v_proj.bias"])
 
-        # Reshape for multi-head: [seq, D] -> [num_heads, seq, head_dim]
-        q_h = network.add_shuffle(q)
-        q_h.reshape_dims = (max_seq_len, num_heads, head_dim)
-        q_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        k_h = network.add_shuffle(k)
-        k_h.reshape_dims = (max_seq_len, num_heads, head_dim)
-        k_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        v_h = network.add_shuffle(v)
-        v_h.reshape_dims = (max_seq_len, num_heads, head_dim)
-        v_h.second_transpose = trt.Permutation([1, 0, 2])
-
-        # Attention: Q @ K^T * scale + causal_mask
-        score = network.add_matrix_multiply(
-            q_h.get_output(0), trt.MatrixOperation.NONE,
-            k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        scaled = network.add_elementwise(
-            score.get_output(0), scale_const,
-            trt.ElementWiseOperation.PROD)
-        masked = network.add_elementwise(
-            scaled.get_output(0), causal_const,
-            trt.ElementWiseOperation.SUM)
-        softmax = network.add_softmax(masked.get_output(0))
-        softmax.axes = 1 << 2  # last dim
-        context = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_h.get_output(0), trt.MatrixOperation.NONE)
-
-        # Reshape back: [num_heads, seq, head_dim] -> [seq, D]
-        context_flat = network.add_shuffle(context.get_output(0))
-        context_flat.first_transpose = trt.Permutation([1, 0, 2])
-        context_flat.reshape_dims = (max_seq_len, hidden_size)
+        context_flat = graph_ops.add_attention_from_rows(
+            network, q, k, v,
+            num_heads=num_heads, head_dim=head_dim,
+            q_seq=max_seq_len, kv_seq=max_seq_len,
+            mask=causal_const)
 
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, context_flat.get_output(0), hidden_size, hidden_size,
+            network, context_flat, hidden_size, hidden_size,
             weights[f"{p}.self_attn.out_proj.weight"])
         attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size,
             weights[f"{p}.self_attn.out_proj.bias"])
@@ -159,7 +128,8 @@ def build_clip_encoder_engine(
         # Pre-LN (layer_norm2)
         ln2_w = weights[f"{p}.layer_norm2.weight"]
         ln2_b = weights[f"{p}.layer_norm2.bias"]
-        normed2 = graph_ops.add_layer_norm(network, hidden, hidden_size, ln2_w, ln2_b, eps_t)
+        normed2 = graph_ops.add_layer_norm_native(
+            network, hidden, hidden_size, ln2_w, ln2_b, eps)
 
         # MLP: fc1 -> quick_gelu -> fc2
         fc1 = graph_ops.add_matmul_rhs_constant(
@@ -193,8 +163,8 @@ def build_clip_encoder_engine(
     # Final layer norm
     final_ln_w = weights["text_model.final_layer_norm.weight"]
     final_ln_b = weights["text_model.final_layer_norm.bias"]
-    hidden = graph_ops.add_layer_norm(
-        network, hidden, hidden_size, final_ln_w, final_ln_b, eps_t)
+    hidden = graph_ops.add_layer_norm_native(
+        network, hidden, hidden_size, final_ln_w, final_ln_b, eps)
 
     # Outputs
     cast_hidden = network.add_cast(hidden, trt.float32)

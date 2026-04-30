@@ -47,17 +47,16 @@ if TYPE_CHECKING:
 
 # --- Helpers for STRONGLY_TYPED reduced-precision networks ---
 #
-# Strategy: match PyTorch behavior — run the ENTIRE network in BF16/FP16.
-# PyTorch with dtype=bfloat16 keeps everything in BF16 (norms, softmax,
-# residuals, gates, matmuls). Only I/O boundaries cast FP32↔BF16.
+# Strategy: strongly typed reduced-precision network. BF16 can safely keep
+# normalization reductions in reduced precision; FP16 must compute those
+# reductions in FP32 to avoid overflow in FLUX.2 AdaLN/QK norms.
 #
 # cast_dtype controls the reduced precision type:
 #   trt.float16  — FP16 (10-bit mantissa, max 65504)
 #   trt.bfloat16 — BF16 (7-bit mantissa, FP32 dynamic range)
 
-# Module-level settings, configured by build_flux2_dit_engine
+# Module-level settings, configured by build_flux2_dit_engine.
 _CAST_DTYPE = trt.float16
-_ALL_BF16 = False  # When True, entire network runs in _CAST_DTYPE
 _FP8_MODE = False   # When True, uses FP8 Q/DQ with TN layout for matmuls
 _FP8_SCALES = {}    # Per-layer FP8 scales: {layer_name: {input_scale, weight_scale}}
 
@@ -69,7 +68,7 @@ _FP8_WEIGHT_SUFFIX = ".weight.fp8_tn"
 
 def _to_compute_dtype(network, tensor):
     """Cast to compute dtype if not already."""
-    if not _ALL_BF16 or tensor.dtype == _CAST_DTYPE:
+    if tensor.dtype == _CAST_DTYPE:
         return tensor
     return network.add_cast(tensor, _CAST_DTYPE).get_output(0)
 
@@ -87,6 +86,11 @@ def _np_reduced_dtype():
         import ml_dtypes
         return ml_dtypes.bfloat16
     return np.float16
+
+
+def _fp16_compute() -> bool:
+    """True when strongly typed FLUX.2 is using FP16 as its compute dtype."""
+    return _CAST_DTYPE == trt.float16
 
 
 def _make_reduced_weights(data_fp32, shape):
@@ -166,13 +170,11 @@ def _matmul_reduced_precision(network, lhs, lhs_width, rhs_width, rhs_weights,
         #
         # Myelin's dequantize_fc() fuses: DQ(A8) + DQ(W8) → MatMul into
         # a single FP8 FC kernel regardless of the DQ output type.
-        dq_out_type = _CAST_DTYPE if _ALL_BF16 else trt.float32
-
         # Q/DQ on input (activation)
-        lhs_ready = _to_compute_dtype(network, lhs) if _ALL_BF16 else _to_fp32(network, lhs)
+        lhs_ready = _to_compute_dtype(network, lhs)
         s_inp = network.add_constant((), trt.Weights(np.array(inp_scale, dtype=np.float32)))
         q_inp = network.add_quantize(lhs_ready, s_inp.get_output(0), trt.DataType.FP8)
-        dq_inp = network.add_dequantize(q_inp.get_output(0), s_inp.get_output(0), dq_out_type)
+        dq_inp = network.add_dequantize(q_inp.get_output(0), s_inp.get_output(0), _CAST_DTYPE)
 
         # Weight: FP8 constant + DQ (TN layout)
         # Quantize: fp8_val = round(weight / scale), then DQ recovers: fp8_val * scale ≈ weight
@@ -184,7 +186,7 @@ def _matmul_reduced_precision(network, lhs, lhs_width, rhs_width, rhs_weights,
             trt.Weights(trt.DataType.FP8, rhs_fp8.ctypes.data, rhs_fp8.size))
         _weight_refs.append(rhs_fp8)
         s_wt = network.add_constant((), trt.Weights(np.array(wt_scale, dtype=np.float32)))
-        dq_wt = network.add_dequantize(rhs_fp8_const.get_output(0), s_wt.get_output(0), dq_out_type)
+        dq_wt = network.add_dequantize(rhs_fp8_const.get_output(0), s_wt.get_output(0), _CAST_DTYPE)
 
         # MatMul with TN layout (opB=TRANSPOSE) — required for FP8 fusion
         mm = network.add_matrix_multiply(
@@ -192,8 +194,7 @@ def _matmul_reduced_precision(network, lhs, lhs_width, rhs_width, rhs_weights,
             dq_wt.get_output(0), trt.MatrixOperation.TRANSPOSE)
         return mm.get_output(0)
 
-    # BF16/FP16 path (also used for non-quantized matmuls in FP8 mode,
-    # since _ALL_BF16 is True when FP8 is active)
+    # BF16/FP16 path, also used for non-quantized matmuls in FP8 mode.
     lhs_cast = _to_compute_dtype(network, lhs)
     w, arr_ref = _make_reduced_weights(rhs_weights, (lhs_width, rhs_width))
     _weight_refs.append(arr_ref)
@@ -201,19 +202,14 @@ def _matmul_reduced_precision(network, lhs, lhs_width, rhs_width, rhs_weights,
     mm = network.add_matrix_multiply(
         lhs_cast, trt.MatrixOperation.NONE,
         rhs.get_output(0), trt.MatrixOperation.NONE)
-    if not _ALL_BF16:
-        return network.add_cast(mm.get_output(0), trt.float32).get_output(0)
     return mm.get_output(0)
 
 
 def _bias_sum_reduced(network, inp, width, bias):
     """Bias addition in compute dtype."""
-    if _ALL_BF16:
-        bias_t = _add_constant_reduced(network, (1, width), bias)
-        return network.add_elementwise(
-            inp, bias_t, trt.ElementWiseOperation.SUM).get_output(0)
-    inp_fp32 = _to_fp32(network, inp)
-    return graph_ops.add_bias_sum(network, inp_fp32, width, bias)
+    bias_t = _add_constant_reduced(network, (1, width), bias)
+    return network.add_elementwise(
+        inp, bias_t, trt.ElementWiseOperation.SUM).get_output(0)
 
 
 def build_flux2_dit_engine(
@@ -231,32 +227,27 @@ def build_flux2_dit_engine(
     freq_dim: int = 256,
     eps: float = 1e-6,
     verbose: bool = False,
-    strongly_typed: bool = False,
     cast_dtype: str = "fp16",
     fp8_scales: dict | None = None,
 ) -> bytes:
     """Build FLUX.2-dev DiT denoiser TRT engine plan.
 
     Args:
-        strongly_typed: Use STRONGLY_TYPED network (explicit type control).
         cast_dtype: Reduced precision for matmuls — "fp16" or "bf16".
         fp8_scales: Per-layer FP8 scales dict {layer_name: {input_scale, weight_scale}}.
             When provided, uses FP8 Q/DQ with TN layout for matmul fusion.
     """
-    global _CAST_DTYPE, _ALL_BF16, _FP8_MODE, _FP8_SCALES, _weight_refs
+    global _CAST_DTYPE, _FP8_MODE, _FP8_SCALES, _weight_refs
     _CAST_DTYPE = trt.bfloat16 if cast_dtype == "bf16" else trt.float16
     _FP8_MODE = fp8_scales is not None
-    # FP8 mode: keep ALL_BF16=True so the entire network runs in BF16 as
-    # the "base" type.  Linear layers get FP8 Q/DQ (DQ outputs BF16),
-    # attention uses TRT's add_attention API (BF16 FMHA).
+    # FP8 mode uses the selected reduced precision as the base type. Linear
+    # layers get FP8 Q/DQ and attention uses TRT's native IAttention API.
     # This avoids FP32 intermediates that bloat activation memory 15× and
     # prevents explicit Cast nodes from fragmenting Myelin compilation.
-    _ALL_BF16 = strongly_typed
     _FP8_SCALES = fp8_scales or {}
     _weight_refs = []  # clear from previous builds
 
     head_dim = dim // num_heads
-    attn_scale = 1.0 / np.sqrt(head_dim)
     ffn_dim = int(dim * mlp_ratio)
     total_seq = text_seq_len + num_img_tokens
 
@@ -265,14 +256,10 @@ def build_flux2_dit_engine(
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 128 << 30)
 
-    if strongly_typed:
-        network = builder.create_network(
-            1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    else:
-        config.clear_flag(trt.BuilderFlag.TF32)
-        network = builder.create_network()
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
-    print(f"  [flux2-dit] Network: strongly_typed={strongly_typed}, "
+    print(f"  [flux2-dit] Network: strongly_typed=True, "
           f"cast_dtype={cast_dtype}, fp8={_FP8_MODE}",
           file=sys.stderr)
 
@@ -292,47 +279,21 @@ def build_flux2_dit_engine(
     rotary_sin = network.add_input(
         "rotary_sin", trt.float32, (total_seq, head_dim))
 
-    # Constants — in BF16 when _ALL_BF16
-    if _ALL_BF16:
-        eps_t = _add_constant_reduced(network, (1, 1), np.array([eps], dtype=np.float32))
-        scale_const = _add_constant_reduced(
-            network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
-    else:
-        eps_np = np.array([eps], dtype=np.float32)
-        eps_t = graph_ops.add_constant(network, (1, 1), eps_np)
-        scale_const = graph_ops.add_constant(
-            network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+    eps_t = _add_constant_reduced(network, (1, 1), np.array([eps], dtype=np.float32))
 
-    # Build rotate-half matrix for RoPE
-    rot_half_np = graph_ops.make_rotate_half_matrix(
-        head_dim * num_heads, num_heads, interleaved=True)
-    if _ALL_BF16:
-        rot_half_const = _add_constant_reduced(
-            network, (head_dim * num_heads, head_dim * num_heads), rot_half_np)
-    else:
-        rot_half_const = graph_ops.add_constant(
-            network, (head_dim * num_heads, head_dim * num_heads), rot_half_np)
-
-    # Expand RoPE cos/sin from [total_seq, head_dim] to [total_seq, dim]
-    # Cast FP32 inputs to BF16 at the boundary
-    if _ALL_BF16:
-        rotary_cos = network.add_cast(rotary_cos, _CAST_DTYPE).get_output(0)
-        rotary_sin = network.add_cast(rotary_sin, _CAST_DTYPE).get_output(0)
-    cos_expand = _tile_rope_for_heads(network, rotary_cos, num_heads, total_seq, head_dim)
-    sin_expand = _tile_rope_for_heads(network, rotary_sin, num_heads, total_seq, head_dim)
+    # Cast FP32 inputs to the reduced compute dtype at the boundary.
+    rotary_cos = network.add_cast(rotary_cos, _CAST_DTYPE).get_output(0)
+    rotary_sin = network.add_cast(rotary_sin, _CAST_DTYPE).get_output(0)
 
     # Split RoPE for text and image
-    txt_cos = network.add_slice(cos_expand, (0, 0), (text_seq_len, dim), (1, 1)).get_output(0)
-    txt_sin = network.add_slice(sin_expand, (0, 0), (text_seq_len, dim), (1, 1)).get_output(0)
-    img_cos = network.add_slice(cos_expand, (text_seq_len, 0), (num_img_tokens, dim), (1, 1)).get_output(0)
-    img_sin = network.add_slice(sin_expand, (text_seq_len, 0), (num_img_tokens, dim), (1, 1)).get_output(0)
+    txt_cos = network.add_slice(rotary_cos, (0, 0), (text_seq_len, head_dim), (1, 1)).get_output(0)
+    txt_sin = network.add_slice(rotary_sin, (0, 0), (text_seq_len, head_dim), (1, 1)).get_output(0)
+    img_cos = network.add_slice(rotary_cos, (text_seq_len, 0), (num_img_tokens, head_dim), (1, 1)).get_output(0)
+    img_sin = network.add_slice(rotary_sin, (text_seq_len, 0), (num_img_tokens, head_dim), (1, 1)).get_output(0)
 
-    # Cast FP32 inputs → BF16 at boundary (all internal ops stay BF16)
-    hidden = hidden_inp
-    encoder_hidden = encoder_inp
-    if _ALL_BF16:
-        hidden = _to_compute_dtype(network, hidden)
-        encoder_hidden = _to_compute_dtype(network, encoder_hidden)
+    # Cast FP32 inputs to the reduced compute dtype at the boundary.
+    hidden = _to_compute_dtype(network, hidden_inp)
+    encoder_hidden = _to_compute_dtype(network, encoder_inp)
 
     # --- x_embedder: packed latents [num_img_tokens, packed_channels] → [num_img_tokens, dim] ---
     x_emb_w = weights.get("x_embedder.weight")  # [packed_channels, dim]
@@ -359,10 +320,7 @@ def build_flux2_dit_engine(
     half_freq = freq_dim // 2
     freq_np = 1.0 / (10000.0 ** (np.arange(half_freq, dtype=np.float32) / half_freq))
     # freq_const shape [1, half_freq]
-    if _ALL_BF16:
-        freq_const = _add_constant_reduced(network, (1, half_freq), freq_np)
-    else:
-        freq_const = graph_ops.add_constant(network, (1, half_freq), freq_np)
+    freq_const = _add_constant_reduced(network, (1, half_freq), freq_np)
 
     def _build_sinusoidal_embedding(scalar_inp):
         """Build sinusoidal embedding: scalar → [1, freq_dim]."""
@@ -370,8 +328,7 @@ def build_flux2_dit_engine(
         s1000 = graph_ops.add_constant(network, (1,), np.array([1000.0], dtype=np.float32))
         scaled = network.add_elementwise(
             scalar_inp, s1000, trt.ElementWiseOperation.PROD).get_output(0)
-        if _ALL_BF16:
-            scaled = _to_compute_dtype(network, scaled)
+        scaled = _to_compute_dtype(network, scaled)
         # Reshape to [1, 1] for broadcast multiply
         scaled_2d = network.add_shuffle(scaled)
         scaled_2d.reshape_dims = (1, 1)
@@ -459,22 +416,24 @@ def build_flux2_dit_engine(
 
         # --- AdaLN-Zero for image ---
         normed_hidden = _adaln_modulate(
-            network, hidden, scale_msa, shift_msa, dim, eps_t, num_img_tokens)
+            network, hidden, scale_msa, shift_msa, dim, eps_t,
+            num_img_tokens, eps)
 
         # --- AdaLN-Zero for text ---
         normed_encoder = _adaln_modulate(
-            network, encoder_hidden, c_scale_msa, c_shift_msa, dim, eps_t, text_seq_len)
+            network, encoder_hidden, c_scale_msa, c_shift_msa, dim, eps_t,
+            text_seq_len, eps)
 
         # --- Joint Attention (BF16 projections) ---
         # Image QKV
-        q_img = _linear(network, normed_hidden, dim, dim, weights, f"{p}.attn.to_q", bf16=True)
-        k_img = _linear(network, normed_hidden, dim, dim, weights, f"{p}.attn.to_k", bf16=True)
-        v_img = _linear(network, normed_hidden, dim, dim, weights, f"{p}.attn.to_v", bf16=True)
+        q_img = _linear(network, normed_hidden, dim, dim, weights, f"{p}.attn.to_q")
+        k_img = _linear(network, normed_hidden, dim, dim, weights, f"{p}.attn.to_k")
+        v_img = _linear(network, normed_hidden, dim, dim, weights, f"{p}.attn.to_v")
 
         # Text QKV (added projections)
-        q_txt = _linear(network, normed_encoder, dim, dim, weights, f"{p}.attn.add_q_proj", bf16=True)
-        k_txt = _linear(network, normed_encoder, dim, dim, weights, f"{p}.attn.add_k_proj", bf16=True)
-        v_txt = _linear(network, normed_encoder, dim, dim, weights, f"{p}.attn.add_v_proj", bf16=True)
+        q_txt = _linear(network, normed_encoder, dim, dim, weights, f"{p}.attn.add_q_proj")
+        k_txt = _linear(network, normed_encoder, dim, dim, weights, f"{p}.attn.add_k_proj")
+        v_txt = _linear(network, normed_encoder, dim, dim, weights, f"{p}.attn.add_v_proj")
 
         # QK norm
         q_img = _rms_norm_per_head_seq(network, q_img, num_heads, head_dim, weights[f"{p}.attn.norm_q.weight"], eps_t, num_img_tokens)
@@ -483,12 +442,16 @@ def build_flux2_dit_engine(
         k_txt = _rms_norm_per_head_seq(network, k_txt, num_heads, head_dim, weights[f"{p}.attn.norm_added_k.weight"], eps_t, text_seq_len)
 
         # Apply RoPE to image Q, K
-        q_img = _apply_rope(network, q_img, img_cos, img_sin, rot_half_const)
-        k_img = _apply_rope(network, k_img, img_cos, img_sin, rot_half_const)
+        q_img = _apply_native_rope_from_full_cache(
+            network, q_img, img_cos, img_sin, num_heads, head_dim, num_img_tokens)
+        k_img = _apply_native_rope_from_full_cache(
+            network, k_img, img_cos, img_sin, num_heads, head_dim, num_img_tokens)
 
         # Apply RoPE to text Q, K
-        q_txt = _apply_rope(network, q_txt, txt_cos, txt_sin, rot_half_const)
-        k_txt = _apply_rope(network, k_txt, txt_cos, txt_sin, rot_half_const)
+        q_txt = _apply_native_rope_from_full_cache(
+            network, q_txt, txt_cos, txt_sin, num_heads, head_dim, text_seq_len)
+        k_txt = _apply_native_rope_from_full_cache(
+            network, k_txt, txt_cos, txt_sin, num_heads, head_dim, text_seq_len)
 
         # Concatenate: [text, image] for joint attention
         q_cat = network.add_concatenation([q_txt, q_img])
@@ -498,24 +461,23 @@ def build_flux2_dit_engine(
         v_cat = network.add_concatenation([v_txt, v_img])
         v_cat.axis = 0
 
-        # Multi-head attention (BF16 Q@K^T and softmax@V, FP32 softmax)
+        # Multi-head attention via TRT native IAttention.
         attn_out = _mha(network, q_cat.get_output(0), k_cat.get_output(0),
-                       v_cat.get_output(0), num_heads, head_dim, total_seq,
-                       scale_const, bf16=True)
+                        v_cat.get_output(0), num_heads, head_dim, total_seq)
 
         # Split attention output back into text and image
         txt_attn = network.add_slice(attn_out, (0, 0), (text_seq_len, dim), (1, 1)).get_output(0)
         img_attn = network.add_slice(attn_out, (text_seq_len, 0), (num_img_tokens, dim), (1, 1)).get_output(0)
 
         # Image output projection + gate + residual (BF16 projection)
-        img_attn_proj = _linear(network, img_attn, dim, dim, weights, f"{p}.attn.to_out.0", bf16=True)
+        img_attn_proj = _linear(network, img_attn, dim, dim, weights, f"{p}.attn.to_out.0")
         img_attn_gated = _gate_1d(network, img_attn_proj, gate_msa, num_img_tokens)
         hidden = network.add_elementwise(
             hidden, img_attn_gated,
             trt.ElementWiseOperation.SUM).get_output(0)
 
         # Text output projection + gate + residual
-        txt_attn_proj = _linear(network, txt_attn, dim, dim, weights, f"{p}.attn.to_add_out", bf16=True)
+        txt_attn_proj = _linear(network, txt_attn, dim, dim, weights, f"{p}.attn.to_add_out")
         txt_attn_gated = _gate_1d(network, txt_attn_proj, c_gate_msa, text_seq_len)
         encoder_hidden = network.add_elementwise(
             encoder_hidden, txt_attn_gated,
@@ -523,8 +485,9 @@ def build_flux2_dit_engine(
 
         # --- Image FFN (linear_in / linear_out naming) ---
         normed_ff = _adaln_modulate(
-            network, hidden, scale_mlp, shift_mlp, dim, eps_t, num_img_tokens)
-        ff_out = _swiglu_ffn(network, normed_ff, dim, weights, f"{p}.ff", bf16=True)
+            network, hidden, scale_mlp, shift_mlp, dim, eps_t,
+            num_img_tokens, eps)
+        ff_out = _swiglu_ffn(network, normed_ff, dim, weights, f"{p}.ff")
         ff_gated = _gate_1d(network, ff_out, gate_mlp, num_img_tokens)
         hidden = network.add_elementwise(
             hidden, ff_gated,
@@ -532,8 +495,9 @@ def build_flux2_dit_engine(
 
         # --- Text FFN (linear_in / linear_out naming) ---
         normed_ctx_ff = _adaln_modulate(
-            network, encoder_hidden, c_scale_mlp, c_shift_mlp, dim, eps_t, text_seq_len)
-        ctx_ff_out = _swiglu_ffn(network, normed_ctx_ff, dim, weights, f"{p}.ff_context", bf16=True)
+            network, encoder_hidden, c_scale_mlp, c_shift_mlp, dim, eps_t,
+            text_seq_len, eps)
+        ctx_ff_out = _swiglu_ffn(network, normed_ctx_ff, dim, weights, f"{p}.ff_context")
         ctx_ff_gated = _gate_1d(network, ctx_ff_out, c_gate_mlp, text_seq_len)
         encoder_hidden = network.add_elementwise(
             encoder_hidden, ctx_ff_gated,
@@ -557,7 +521,8 @@ def build_flux2_dit_engine(
 
         # AdaLN-Zero modulation
         normed_cat = _adaln_modulate(
-            network, residual, scale_msa_s, shift_msa_s, dim, eps_t, total_seq)
+            network, residual, scale_msa_s, shift_msa_s, dim, eps_t,
+            total_seq, eps)
 
         # --- Fused QKV + MLP projection ---
         # to_qkv_mlp_proj: [dim, 3*dim + 2*ffn_dim]  (gated MLP: gate + value)
@@ -590,11 +555,12 @@ def build_flux2_dit_engine(
         k_s = _rms_norm_per_head_seq(network, k_s, num_heads, head_dim, weights[f"{p}.attn.norm_k.weight"], eps_t, total_seq)
 
         # Apply RoPE (full sequence: text + image cos/sin)
-        q_s = _apply_rope(network, q_s, cos_expand, sin_expand, rot_half_const)
-        k_s = _apply_rope(network, k_s, cos_expand, sin_expand, rot_half_const)
+        q_s = _apply_native_rope_from_full_cache(
+            network, q_s, rotary_cos, rotary_sin, num_heads, head_dim, total_seq)
+        k_s = _apply_native_rope_from_full_cache(
+            network, k_s, rotary_cos, rotary_sin, num_heads, head_dim, total_seq)
 
-        attn_out_s = _mha(network, q_s, k_s, v_s, num_heads, head_dim,
-                         total_seq, scale_const, bf16=True)
+        attn_out_s = _mha(network, q_s, k_s, v_s, num_heads, head_dim, total_seq)
 
         # Concatenate attn + mlp -> to_out projection
         cat_attn_mlp = network.add_concatenation([attn_out_s, mlp_hidden])
@@ -640,7 +606,8 @@ def build_flux2_dit_engine(
     final_shift = network.add_slice(final_proj, (dim,), (dim,), (1,)).get_output(0)
 
     output = _adaln_modulate(
-        network, hidden, final_scale, final_shift, dim, eps_t, num_img_tokens)
+        network, hidden, final_scale, final_shift, dim, eps_t,
+        num_img_tokens, eps)
 
     # proj_out: [num_img_tokens, dim] -> [num_img_tokens, out_channels]
     proj_out_w = weights["proj_out.weight"]
@@ -677,16 +644,6 @@ def build_flux2_dit_engine(
 # Helper functions
 # ============================================================================
 
-def _tile_rope_for_heads(network, rope, num_heads, seq_len, head_dim):
-    """Tile [seq, head_dim] -> [seq, num_heads * head_dim]."""
-    if num_heads == 1:
-        return rope
-    parts = [rope] * num_heads
-    concat = network.add_concatenation(parts)
-    concat.axis = 1
-    return concat.get_output(0)
-
-
 def _matmul_bias_1d(network, inp, in_dim, out_dim, weight, bias):
     """Matmul + bias for 1D input: [in_dim] -> [out_dim]."""
     inp_2d = network.add_shuffle(inp)
@@ -703,15 +660,9 @@ def _matmul_bias_1d_opt(network, inp, in_dim, out_dim, weight, bias=None):
     """Matmul + optional bias for 1D input: [in_dim] -> [out_dim]."""
     inp_2d = network.add_shuffle(inp)
     inp_2d.reshape_dims = (1, in_dim)
-    if _ALL_BF16:
-        out = _matmul_reduced_precision(network, inp_2d.get_output(0), in_dim, out_dim, weight)
-        if bias is not None:
-            out = _bias_sum_reduced(network, out, out_dim, bias)
-    else:
-        out = graph_ops.add_matmul_rhs_constant(
-            network, inp_2d.get_output(0), in_dim, out_dim, weight)
-        if bias is not None:
-            out = graph_ops.add_bias_sum(network, out, out_dim, bias)
+    out = _matmul_reduced_precision(network, inp_2d.get_output(0), in_dim, out_dim, weight)
+    if bias is not None:
+        out = _bias_sum_reduced(network, out, out_dim, bias)
     flat = network.add_shuffle(out)
     flat.reshape_dims = (out_dim,)
     return flat.get_output(0)
@@ -735,12 +686,25 @@ def _chunk_3(network, tensor, dim):
     return chunks
 
 
-def _adaln_modulate(network, x, scale, shift, dim, eps_t, seq_len):
+def _adaln_modulate(network, x, scale, shift, dim, eps_t, seq_len, eps=1e-6):
     """AdaLN: LayerNorm(x) * (1 + scale) + shift.
     x: [seq_len, dim], scale/shift: [dim] (1D from chunk).
-    When _ALL_BF16: all ops stay in BF16 (matching PyTorch behavior)."""
-    if _ALL_BF16:
-        # BF16 LayerNorm: mean/var/normalize all in BF16
+    In strongly typed FP16, keep LayerNorm and modulation in FP32; pure FP16
+    reductions overflow on FLUX.2 and can collapse the decoded image."""
+    fp16_norm = _fp16_compute()
+    if fp16_norm:
+        normed = graph_ops.add_layer_norm_native(
+            network,
+            x,
+            dim,
+            np.ones((dim,), dtype=np.float32),
+            np.zeros((dim,), dtype=np.float32),
+            eps,
+            dtype=np.float16,
+        )
+        normed = _to_fp32(network, normed)
+    else:
+        # BF16 LayerNorm: mean/var/normalize stay in BF16.
         mean = network.add_reduce(x, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
         centered = network.add_elementwise(
             x, mean.get_output(0), trt.ElementWiseOperation.SUB)
@@ -753,48 +717,46 @@ def _adaln_modulate(network, x, scale, shift, dim, eps_t, seq_len):
         recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
         normed = network.add_elementwise(
             centered.get_output(0), recip.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
-    else:
-        normed = graph_ops.add_layer_norm_no_affine(network, x, dim, eps_t)
-
     scale_2d = network.add_shuffle(scale)
     scale_2d.reshape_dims = (1, dim)
     shift_2d = network.add_shuffle(shift)
     shift_2d.reshape_dims = (1, dim)
+    scale_value = scale_2d.get_output(0)
+    shift_value = shift_2d.get_output(0)
 
-    if _ALL_BF16:
-        one_const = _add_constant_reduced(network, (1, 1), np.array([1.0], dtype=np.float32))
+    if fp16_norm:
+        scale_value = _to_fp32(network, scale_value)
+        shift_value = _to_fp32(network, shift_value)
+        one_const = graph_ops.add_constant(
+            network, (1, 1), np.array([1.0], dtype=np.float32))
     else:
-        one_const = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+        one_const = _add_constant_reduced(network, (1, 1), np.array([1.0], dtype=np.float32))
     scale_plus_1 = network.add_elementwise(
-        one_const, scale_2d.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
+        one_const, scale_value, trt.ElementWiseOperation.SUM).get_output(0)
 
     scaled = network.add_elementwise(
         normed, scale_plus_1, trt.ElementWiseOperation.PROD)
     shifted = network.add_elementwise(
-        scaled.get_output(0), shift_2d.get_output(0), trt.ElementWiseOperation.SUM)
-    return shifted.get_output(0)
+        scaled.get_output(0), shift_value, trt.ElementWiseOperation.SUM)
+    result = shifted.get_output(0)
+    if fp16_norm:
+        result = network.add_cast(result, _CAST_DTYPE).get_output(0)
+    return result
 
 
-def _linear(network, inp, in_dim, out_dim, weights, prefix, bf16=False):
-    """Linear projection with optional bias. bf16=True for reduced-precision matmul."""
+def _linear(network, inp, in_dim, out_dim, weights, prefix):
+    """Linear projection with optional bias in reduced precision."""
     # Look up FP8 scales for this layer
     fp8_inp_s = _FP8_SCALES.get(prefix, {}).get("input_scale")
     fp8_wt_s = _FP8_SCALES.get(prefix, {}).get("weight_scale")
 
-    if bf16 or _ALL_BF16 or _FP8_MODE:
-        out = _matmul_reduced_precision(
-            network, inp, in_dim, out_dim, weights[f"{prefix}.weight"],
-            inp_scale=fp8_inp_s, wt_scale=fp8_wt_s,
-            fp8_weight_tn=weights.get(_fp8_weight_key(prefix)))
-        b = weights.get(f"{prefix}.bias")
-        if b is not None:
-            out = _bias_sum_reduced(network, out, out_dim, b)
-    else:
-        out = graph_ops.add_matmul_rhs_constant(
-            network, inp, in_dim, out_dim, weights[f"{prefix}.weight"])
-        b = weights.get(f"{prefix}.bias")
-        if b is not None:
-            out = graph_ops.add_bias_sum(network, out, out_dim, b)
+    out = _matmul_reduced_precision(
+        network, inp, in_dim, out_dim, weights[f"{prefix}.weight"],
+        inp_scale=fp8_inp_s, wt_scale=fp8_wt_s,
+        fp8_weight_tn=weights.get(_fp8_weight_key(prefix)))
+    b = weights.get(f"{prefix}.bias")
+    if b is not None:
+        out = _bias_sum_reduced(network, out, out_dim, b)
     return out
 
 
@@ -804,6 +766,18 @@ def _rms_norm_per_head_seq(network, x, num_heads, head_dim, weight, eps_t, seq_l
     Reshapes to [seq_len, num_heads, head_dim], applies RMS norm on head_dim axis,
     then reshapes back to [seq_len, dim].
     """
+    if _fp16_compute():
+        return graph_ops.add_rms_norm_per_head(
+            network,
+            x,
+            num_heads,
+            head_dim,
+            weight,
+            eps_t,
+            dtype=np.float16,
+            sequence_length=seq_len,
+        )
+
     dim = num_heads * head_dim
 
     # Reshape [seq_len, dim] -> [seq_len * num_heads, head_dim]
@@ -823,10 +797,7 @@ def _rms_norm_per_head_seq(network, x, num_heads, head_dim, weight, eps_t, seq_l
         reshaped_out, recip.get_output(0), trt.ElementWiseOperation.PROD)
 
     # Apply per-head gamma [1, head_dim]
-    if _ALL_BF16:
-        gamma_t = _add_constant_reduced(network, (1, head_dim), weight)
-    else:
-        gamma_t = graph_ops.add_constant(network, (1, head_dim), weight)
+    gamma_t = _add_constant_reduced(network, (1, head_dim), weight)
     scaled = network.add_elementwise(
         normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
 
@@ -836,109 +807,21 @@ def _rms_norm_per_head_seq(network, x, num_heads, head_dim, weight, eps_t, seq_l
     return reshape_back.get_output(0)
 
 
-def _apply_rope(network, x, cos_vals, sin_vals, rot_half_const):
-    """Apply rotary position embedding."""
-    x_rot = network.add_matrix_multiply(
-        x, trt.MatrixOperation.NONE,
-        rot_half_const, trt.MatrixOperation.NONE)
-    x_cos = network.add_elementwise(
-        x, cos_vals, trt.ElementWiseOperation.PROD)
-    x_sin = network.add_elementwise(
-        x_rot.get_output(0), sin_vals, trt.ElementWiseOperation.PROD)
-    return network.add_elementwise(
-        x_cos.get_output(0), x_sin.get_output(0),
-        trt.ElementWiseOperation.SUM).get_output(0)
+def _apply_native_rope_from_full_cache(
+    network, x, cos_vals, sin_vals, num_heads, head_dim, seq_len,
+):
+    """Apply TRT native RoPE using runtime full-dimension cos/sin rows."""
+    return graph_ops.add_apply_rope_native_from_full_cache(
+        network, x, num_heads, head_dim, cos_vals, sin_vals,
+        seq_len, interleaved=True)
 
 
-def _mha(network, q, k, v, num_heads, head_dim, seq_len, scale_const, bf16=False):
-    """Multi-head attention: returns [seq_len, dim].
-
-    When _ALL_BF16 (includes FP8 mode): uses TRT's native add_attention API
-    with BF16 Q/K/V -> fused into FMHA kernel.  This avoids explicit Q@K^T +
-    softmax + softmax@V matmuls with FP32 casts that would create backend
-    boundaries fragmenting Myelin compilation.
-    """
-    dim = num_heads * head_dim
-
-    if _ALL_BF16:
-        # Pre-scale Q by 1/sqrt(head_dim) before add_attention, because
-        # add_attention(SOFTMAX) does NOT apply the scaling internally.
-        # scale_const is (1,1,1) for 3D matmul paths; reshape to (1,1) for 2D Q
-        scale_2d = network.add_shuffle(scale_const)
-        scale_2d.reshape_dims = (1, 1)
-        q_scaled = network.add_elementwise(
-            q, scale_2d.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
-
-        # Reshape to 4D for add_attention: [1, num_heads, seq_len, head_dim]
-        q_h = network.add_shuffle(q_scaled)
-        q_h.reshape_dims = (1, seq_len, num_heads, head_dim)
-        q_h.second_transpose = (0, 2, 1, 3)
-
-        k_h = network.add_shuffle(k)
-        k_h.reshape_dims = (1, seq_len, num_heads, head_dim)
-        k_h.second_transpose = (0, 2, 1, 3)
-
-        v_h = network.add_shuffle(v)
-        v_h.reshape_dims = (1, seq_len, num_heads, head_dim)
-        v_h.second_transpose = (0, 2, 1, 3)
-
-        attn = network.add_attention(
-            q_h.get_output(0), k_h.get_output(0), v_h.get_output(0),
-            trt.AttentionNormalizationOp.SOFTMAX, False)
-
-        # Flatten back: [1, num_heads, seq_len, head_dim] -> [seq_len, dim]
-        flat = network.add_shuffle(attn.get_output(0))
-        flat.first_transpose = (0, 2, 1, 3)
-        flat.reshape_dims = (seq_len, dim)
-        return flat.get_output(0)
-
-    # Non-STRONGLY_TYPED paths: explicit matmuls
-    q_h = network.add_shuffle(q)
-    q_h.reshape_dims = (seq_len, num_heads, head_dim)
-    q_h.second_transpose = trt.Permutation([1, 0, 2])
-
-    k_h = network.add_shuffle(k)
-    k_h.reshape_dims = (seq_len, num_heads, head_dim)
-    k_h.second_transpose = trt.Permutation([1, 0, 2])
-
-    v_h = network.add_shuffle(v)
-    v_h.reshape_dims = (seq_len, num_heads, head_dim)
-    v_h.second_transpose = trt.Permutation([1, 0, 2])
-
-    if bf16:
-        q_cast = network.add_cast(q_h.get_output(0), _CAST_DTYPE).get_output(0)
-        k_cast = network.add_cast(k_h.get_output(0), _CAST_DTYPE).get_output(0)
-        score_cast = network.add_matrix_multiply(
-            q_cast, trt.MatrixOperation.NONE,
-            k_cast, trt.MatrixOperation.TRANSPOSE)
-        score = network.add_cast(score_cast.get_output(0), trt.float32)
-        scaled = network.add_elementwise(
-            score.get_output(0), scale_const, trt.ElementWiseOperation.PROD)
-        softmax = network.add_softmax(scaled.get_output(0))
-        softmax.axes = 1 << 2
-        sm_cast = network.add_cast(softmax.get_output(0), _CAST_DTYPE).get_output(0)
-        v_cast = network.add_cast(v_h.get_output(0), _CAST_DTYPE).get_output(0)
-        ctx_cast = network.add_matrix_multiply(
-            sm_cast, trt.MatrixOperation.NONE,
-            v_cast, trt.MatrixOperation.NONE)
-        context = network.add_cast(ctx_cast.get_output(0), trt.float32)
-    else:
-        score = network.add_matrix_multiply(
-            q_h.get_output(0), trt.MatrixOperation.NONE,
-            k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        scaled = network.add_elementwise(
-            score.get_output(0), scale_const, trt.ElementWiseOperation.PROD)
-        softmax = network.add_softmax(scaled.get_output(0))
-        softmax.axes = 1 << 2
-        context = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_h.get_output(0), trt.MatrixOperation.NONE)
-
-    ctx_out = context.get_output(0)
-    flat = network.add_shuffle(ctx_out)
-    flat.first_transpose = trt.Permutation([1, 0, 2])
-    flat.reshape_dims = (seq_len, dim)
-    return flat.get_output(0)
+def _mha(network, q, k, v, num_heads, head_dim, seq_len):
+    """Multi-head attention via TRT native IAttention."""
+    return graph_ops.add_attention_from_rows(
+        network, q, k, v,
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=seq_len, kv_seq=seq_len)
 
 
 def _gate_1d(network, x, gate, seq_len):
@@ -951,8 +834,8 @@ def _gate_1d(network, x, gate, seq_len):
         x, gate_2d.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
 
 
-def _swiglu_ffn(network, inp, dim, weights, prefix, bf16=False):
-    """SwiGLU FFN. bf16=True or _ALL_BF16: reduced-precision matmuls."""
+def _swiglu_ffn(network, inp, dim, weights, prefix):
+    """SwiGLU FFN in reduced precision."""
     fc1_w = weights[f"{prefix}.linear_in.weight"]
     double_ffn_dim = fc1_w.shape[1]  # 2 * ffn_dim
     ffn_dim = double_ffn_dim // 2
@@ -961,19 +844,13 @@ def _swiglu_ffn(network, inp, dim, weights, prefix, bf16=False):
     fc1_inp_s = _FP8_SCALES.get(f"{prefix}.linear_in", {}).get("input_scale")
     fc1_wt_s = _FP8_SCALES.get(f"{prefix}.linear_in", {}).get("weight_scale")
 
-    if bf16 or _ALL_BF16 or _FP8_MODE:
-        fc1 = _matmul_reduced_precision(network, inp, dim, double_ffn_dim, fc1_w,
-                                         inp_scale=fc1_inp_s, wt_scale=fc1_wt_s,
-                                         fp8_weight_tn=weights.get(
-                                             _fp8_weight_key(f"{prefix}.linear_in")))
-        fc1_b = weights.get(f"{prefix}.linear_in.bias")
-        if fc1_b is not None:
-            fc1 = _bias_sum_reduced(network, fc1, double_ffn_dim, fc1_b)
-    else:
-        fc1 = graph_ops.add_matmul_rhs_constant(network, inp, dim, double_ffn_dim, fc1_w)
-        fc1_b = weights.get(f"{prefix}.linear_in.bias")
-        if fc1_b is not None:
-            fc1 = graph_ops.add_bias_sum(network, fc1, double_ffn_dim, fc1_b)
+    fc1 = _matmul_reduced_precision(network, inp, dim, double_ffn_dim, fc1_w,
+                                     inp_scale=fc1_inp_s, wt_scale=fc1_wt_s,
+                                     fp8_weight_tn=weights.get(
+                                         _fp8_weight_key(f"{prefix}.linear_in")))
+    fc1_b = weights.get(f"{prefix}.linear_in.bias")
+    if fc1_b is not None:
+        fc1 = _bias_sum_reduced(network, fc1, double_ffn_dim, fc1_b)
 
     # Split into x1 and x2 (SwiGLU: silu(x1) * x2)
     seq_len = inp.shape[0]
@@ -987,19 +864,13 @@ def _swiglu_ffn(network, inp, dim, weights, prefix, bf16=False):
     fc2_w = weights[f"{prefix}.linear_out.weight"]
     fc2_inp_s = _FP8_SCALES.get(f"{prefix}.linear_out", {}).get("input_scale")
     fc2_wt_s = _FP8_SCALES.get(f"{prefix}.linear_out", {}).get("weight_scale")
-    if bf16 or _ALL_BF16 or _FP8_MODE:
-        fc2 = _matmul_reduced_precision(network, gated, ffn_dim, dim, fc2_w,
-                                         inp_scale=fc2_inp_s, wt_scale=fc2_wt_s,
-                                         fp8_weight_tn=weights.get(
-                                             _fp8_weight_key(f"{prefix}.linear_out")))
-        fc2_b = weights.get(f"{prefix}.linear_out.bias")
-        if fc2_b is not None:
-            fc2 = _bias_sum_reduced(network, fc2, dim, fc2_b)
-    else:
-        fc2 = graph_ops.add_matmul_rhs_constant(network, gated, ffn_dim, dim, fc2_w)
-        fc2_b = weights.get(f"{prefix}.linear_out.bias")
-        if fc2_b is not None:
-            fc2 = graph_ops.add_bias_sum(network, fc2, dim, fc2_b)
+    fc2 = _matmul_reduced_precision(network, gated, ffn_dim, dim, fc2_w,
+                                     inp_scale=fc2_inp_s, wt_scale=fc2_wt_s,
+                                     fp8_weight_tn=weights.get(
+                                         _fp8_weight_key(f"{prefix}.linear_out")))
+    fc2_b = weights.get(f"{prefix}.linear_out.bias")
+    if fc2_b is not None:
+        fc2 = _bias_sum_reduced(network, fc2, dim, fc2_b)
     return fc2
 
 

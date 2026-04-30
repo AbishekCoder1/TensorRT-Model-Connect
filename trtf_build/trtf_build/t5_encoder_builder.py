@@ -162,48 +162,20 @@ def build_t5_encoder_engine(
         v = graph_ops.add_matmul_rhs_constant(
             network, normed, d_model, attention_size, w_v)
 
-        # Reshape to [num_heads, seq, d_kv]
-        q_heads = network.add_shuffle(q)
-        q_heads.reshape_dims = (max_seq_len, num_heads, d_kv)
-        q_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        k_heads = network.add_shuffle(k)
-        k_heads.reshape_dims = (max_seq_len, num_heads, d_kv)
-        k_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        v_heads = network.add_shuffle(v)
-        v_heads.reshape_dims = (max_seq_len, num_heads, d_kv)
-        v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        # Attention: Q @ K^T / sqrt(d_kv) + rel_bias
-        score = network.add_matrix_multiply(
-            q_heads.get_output(0), trt.MatrixOperation.NONE,
-            k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-        # Note: T5 does NOT scale by 1/sqrt(d_kv) — the scale is baked into
-        # the initialization. We add it for numerical stability matching HF.
-        # Actually, HF T5 does NOT scale. We follow HF behavior: no scaling.
-
-        # Add per-layer relative position bias + attention mask
-        biased = network.add_elementwise(
-            score.get_output(0), per_layer_bias[layer_idx],
-            trt.ElementWiseOperation.SUM)
-
-        softmax = network.add_softmax(biased.get_output(0))
-        softmax.axes = 1 << 2
-
-        context = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-        # Reshape back: [num_heads, seq, d_kv] -> [seq, attention_size]
-        context_flat = network.add_shuffle(context.get_output(0))
-        context_flat.first_transpose = trt.Permutation([1, 0, 2])
-        context_flat.reshape_dims = (max_seq_len, attention_size)
+        # T5 attention is intentionally unscaled; relative position bias and
+        # padding mask are folded into the native IAttention additive mask.
+        mask_4d = network.add_shuffle(per_layer_bias[layer_idx])
+        mask_4d.reshape_dims = (1, num_heads, max_seq_len, max_seq_len)
+        context_flat = graph_ops.add_attention_from_rows(
+            network, q, k, v,
+            num_heads=num_heads, head_dim=d_kv,
+            q_seq=max_seq_len, kv_seq=max_seq_len,
+            mask=mask_4d.get_output(0),
+            scale=1.0)
 
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, context_flat.get_output(0),
+            network, context_flat,
             attention_size, d_model, w_o)
 
         # Residual

@@ -103,407 +103,23 @@ def _make_matmul_fn(
     return matmul
 
 
-# ---------------------------------------------------------------------------
-# Norm helpers — multi-row Sq variants of RMSNorm / LayerNorm.
-# ---------------------------------------------------------------------------
-
-
-def _rms_norm_multi(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    hidden: int,
-    gamma: np.ndarray,
-    eps: float,
-    dtype: np.dtype,
-) -> trt.ITensor:
-    """RMSNorm on (Sq, hidden) — reduces along the hidden dim.
-
-    FP32 precision boundary: when ``inp`` isn't already fp32 we cast to fp32
-    for numerical stability and then cast back to the original input dtype
-    (recovered from ``inp.dtype`` so bf16 stays bf16 — the ``dtype`` numpy
-    type stores both fp16 and bf16 weights as np.float16, so it can't be
-    used to disambiguate the runtime tensor type).
-    """
-    work_trt_dtype = inp.dtype
-    need_cast = work_trt_dtype != trt.float32
-    x = inp
-    if need_cast:
-        x = network.add_cast(x, trt.float32).get_output(0)
-    sq = network.add_elementwise(x, x, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([[eps]], dtype=np.float32), dtype=np.float32)
-    denom = network.add_elementwise(
-        mean.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
-    rsqrt = network.add_unary(
-        network.add_unary(denom.get_output(0), trt.UnaryOperation.SQRT).get_output(0),
-        trt.UnaryOperation.RECIP)
-    normed = network.add_elementwise(
-        x, rsqrt.get_output(0), trt.ElementWiseOperation.PROD)
-    gamma_t = graph_ops.add_constant(
-        network, (1, hidden), gamma.reshape(1, hidden), dtype=np.float32)
-    scaled = network.add_elementwise(
-        normed.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    out = scaled.get_output(0)
-    if need_cast:
-        out = network.add_cast(out, work_trt_dtype).get_output(0)
-    return out
-
-
-def _layer_norm_multi(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    hidden: int,
-    gamma: np.ndarray,
-    beta: np.ndarray,
-    eps: float,
-    dtype: np.dtype,
-) -> trt.ITensor:
-    """LayerNorm on (Sq, hidden): gamma * (x - mean) / sqrt(var + eps) + beta.
-
-    Same fp32 precision boundary as ``_rms_norm_multi``; cast-back uses
-    ``inp.dtype`` so bf16 inputs stay bf16.
-    """
-    work_trt_dtype = inp.dtype
-    need_cast = work_trt_dtype != trt.float32
-    x = inp
-    if need_cast:
-        x = network.add_cast(x, trt.float32).get_output(0)
-    mean = network.add_reduce(
-        x, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    centered = network.add_elementwise(
-        x, mean.get_output(0), trt.ElementWiseOperation.SUB)
-    sq = network.add_elementwise(
-        centered.get_output(0), centered.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    var = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([[eps]], dtype=np.float32), dtype=np.float32)
-    denom_in = network.add_elementwise(
-        var.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(
-        centered.get_output(0), recip.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    gamma_t = graph_ops.add_constant(
-        network, (1, hidden), gamma.reshape(1, hidden), dtype=np.float32)
-    scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    beta_t = graph_ops.add_constant(
-        network, (1, hidden), beta.reshape(1, hidden), dtype=np.float32)
-    summed = network.add_elementwise(
-        scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
-    out = summed.get_output(0)
-    if need_cast:
-        out = network.add_cast(out, work_trt_dtype).get_output(0)
-    return out
-
-
 def _norm_multi(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     hidden: int,
     gamma: np.ndarray,
     beta: np.ndarray | None,
-    eps: float,
+    eps_tensor: trt.ITensor,
     norm_type: str,
     dtype: np.dtype,
 ) -> trt.ITensor:
     if norm_type == "layernorm":
         if beta is None:
             beta = np.zeros(hidden, dtype=np.float32)
-        return _layer_norm_multi(network, inp, hidden, gamma, beta, eps, dtype)
-    return _rms_norm_multi(network, inp, hidden, gamma, eps, dtype)
-
-
-def _rms_norm_per_head_multi(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    num_heads: int,
-    head_dim: int,
-    gamma: np.ndarray,
-    eps: float,
-    dtype: np.dtype,
-) -> trt.ITensor:
-    """Per-head RMSNorm for (Sq, num_heads * head_dim) input."""
-    work_trt_dtype = inp.dtype
-    reshape_in = network.add_shuffle(inp)
-    reshape_in.reshape_dims = (-1, num_heads, head_dim)
-    x = reshape_in.get_output(0)
-
-    need_cast = work_trt_dtype != trt.float32
-    if need_cast:
-        x = network.add_cast(x, trt.float32).get_output(0)
-
-    sq = network.add_elementwise(x, x, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 2, keep_dims=True)
-    eps_t = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([[[eps]]], dtype=np.float32), dtype=np.float32)
-    denom = network.add_elementwise(
-        mean.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
-    rsqrt = network.add_unary(
-        network.add_unary(denom.get_output(0), trt.UnaryOperation.SQRT).get_output(0),
-        trt.UnaryOperation.RECIP)
-    normed = network.add_elementwise(
-        x, rsqrt.get_output(0), trt.ElementWiseOperation.PROD)
-    gamma_t = graph_ops.add_constant(
-        network, (1, num_heads, head_dim),
-        gamma.reshape(num_heads, head_dim), dtype=np.float32)
-    scaled = network.add_elementwise(
-        normed.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    out = scaled.get_output(0)
-    if need_cast:
-        out = network.add_cast(out, work_trt_dtype).get_output(0)
-    flat = network.add_shuffle(out)
-    flat.reshape_dims = (-1, num_heads * head_dim)
-    return flat.get_output(0)
-
-
-# ---------------------------------------------------------------------------
-# Reshape helpers — convert between (Sq, num_heads * head_dim) and
-# (1, num_heads, Sq, head_dim) for IAttention.
-# ---------------------------------------------------------------------------
-
-
-def _to_heads_4d(
-    network: trt.INetworkDefinition,
-    x: trt.ITensor,
-    num_heads: int,
-    head_dim: int,
-    tag: str,
-) -> trt.ITensor:
-    """(S, num_heads * head_dim) -> (1, num_heads, S, head_dim).
-
-    Collapses the original two-shuffle chain (reshape -> transpose ->
-    reshape) into a single IShuffleLayer that does reshape + permute in
-    one step. For Sq=1 (decode profile) the transpose between two
-    singleton dims is a no-op, so TRT folds the shuffle out entirely
-    and the per-step decode kernel-launch overhead matches the legacy
-    single-profile graph.
-    """
-    s = network.add_shuffle(x)
-    s.name = tag + "_to_4d"
-    s.reshape_dims = (1, -1, num_heads, head_dim)
-    s.second_transpose = trt.Permutation([0, 2, 1, 3])
-    return s.get_output(0)
-
-
-def _apply_rope_native_multi(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    num_heads: int,
-    head_dim: int,
-    cos_half_2d: trt.ITensor,
-    sin_half_2d: trt.ITensor,
-    position_id: trt.ITensor,
-    rotary_embedding_dim: int,
-    interleaved: bool,
-) -> trt.ITensor:
-    """Apply RoPE via TRT's IRotaryEmbeddingLayer for dynamic Sq.
-
-    Reshapes (Sq, num_heads * head_dim) -> (1, num_heads, Sq, head_dim),
-    runs the fused rotary layer, then reshapes back. position_id is
-    (Sq,) -> (1, Sq). This picks up the fused RoPE kernel under both
-    optimization profiles (Sq=1 decode and Sq=opt prefill).
-    """
-    attention_size = num_heads * head_dim
-
-    # (Sq, H * D) -> (1, Sq, H, D) -> transpose to (1, H, Sq, D) in ONE shuffle.
-    # For Sq=1 the transpose is between singleton dims and TRT folds the
-    # whole shuffle out, so the decode profile pays no extra kernel.
-    pre = network.add_shuffle(inp)
-    pre.reshape_dims = (1, -1, num_heads, head_dim)
-    pre.second_transpose = trt.Permutation([0, 2, 1, 3])
-
-    # position_id (Sq,) -> (1, Sq)
-    pos_2d = network.add_shuffle(position_id)
-    pos_2d.reshape_dims = (1, -1)
-
-    rope = network.add_rotary_embedding(
-        pre.get_output(0),
-        cos_half_2d,
-        sin_half_2d,
-        interleaved,
-        rotary_embedding_dim,
-    )
-    rope.set_input(3, pos_2d.get_output(0))
-
-    # (1, H, Sq, D) -> (Sq, H * D) in ONE shuffle (transpose + reshape).
-    post = network.add_shuffle(rope.get_output(0))
-    post.first_transpose = trt.Permutation([0, 2, 1, 3])
-    post.reshape_dims = (-1, attention_size)
-    return post.get_output(0)
-
-
-def _from_heads_4d(
-    network: trt.INetworkDefinition,
-    ctx_4d: trt.ITensor,
-    attention_size: int,
-    tag: str,
-) -> trt.ITensor:
-    """(1, num_heads, S, head_dim) -> (S, num_heads * head_dim)."""
-    squeeze = network.add_shuffle(ctx_4d)
-    squeeze.name = tag + "_h_s_d"
-    squeeze.first_transpose = trt.Permutation([0, 2, 1, 3])  # (1, S, H, D)
-    squeeze.reshape_dims = (-1, attention_size)
-    return squeeze.get_output(0)
-
-
-# ---------------------------------------------------------------------------
-# Mask helpers.
-# ---------------------------------------------------------------------------
-
-
-def _mask_to_4d(
-    network: trt.INetworkDefinition,
-    mask_2d: trt.ITensor,
-) -> trt.ITensor:
-    """(Sq, K) -> (1, 1, Sq, K) via shape-tensor-driven shuffle."""
-    shp = network.add_shape(mask_2d).get_output(0)  # [2] int64
-    ones = graph_ops.add_constant(
-        network, (2,), np.array([1, 1], dtype=np.int64), dtype=np.int64)
-    concat = network.add_concatenation([ones, shp])
-    concat.axis = 0
-    target = concat.get_output(0)
-    shuffle = network.add_shuffle(mask_2d)
-    shuffle.set_input(1, target)
-    return shuffle.get_output(0)
-
-
-def _alibi_mask_4d(
-    network: trt.INetworkDefinition,
-    mask_2d: trt.ITensor,
-    position_id: trt.ITensor,
-    alibi_slopes_tensor: trt.ITensor,
-    cache_position_indices_fp32: trt.ITensor,
-    num_heads: int,
-    work_trt_dtype: trt.DataType,
-) -> trt.ITensor:
-    """Build a (1, num_heads, Sq, K) ALiBi-augmented attention mask.
-
-    Adds ``slope[h] * (key_pos[k] - query_pos[q])`` to the 2D additive
-    mask so softmax sees both the causal/padding mask AND the ALiBi
-    linear bias in one tensor. Dynamic Sq and K are recovered from the
-    mask's shape at runtime.
-
-    The KV cache is laid out as ``[max_cache_length, attention_size]``
-    where slot ``k`` (for ``k < max_cache_length``) holds the K/V at
-    position ``k``. The current-step K/V live in slots
-    ``[max_cache_length, max_cache_length + Sq)`` and their positions
-    come from ``position_id``. So the per-key position vector is::
-
-        key_pos = concat([0, 1, ..., max_cache_length - 1], position_id)
-
-    which has shape ``(max_cache_length + Sq,)`` — exactly the K
-    dimension of the attention mask.
-    """
-    pos_float = network.add_cast(position_id, trt.float32).get_output(0)  # (Sq,)
-
-    # Per-key positions: (max_cache + Sq,) fp32.
-    key_pos_concat = network.add_concatenation([cache_position_indices_fp32, pos_float])
-    key_pos_concat.axis = 0
-    key_pos_t = key_pos_concat.get_output(0)
-
-    # mask shape [2] int64 -> Sq (axis 0) and K (axis 1).
-    mask_shape = network.add_shape(mask_2d).get_output(0)  # [2]
-    one_const = graph_ops.add_constant(
-        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
-    sq_size = network.add_slice(mask_shape, start=(0,), shape=(1,), stride=(1,))
-    sq_size_t = sq_size.get_output(0)  # [1] = Sq
-    k_size = network.add_slice(mask_shape, start=(1,), shape=(1,), stride=(1,))
-    k_size_t = k_size.get_output(0)  # [1] = K
-
-    # Reshape key_pos (K,) -> (1, K), and pos_float (Sq,) -> (Sq, 1) for
-    # broadcast subtraction.
-    one_k_shape = network.add_concatenation([one_const, k_size_t])
-    one_k_shape.axis = 0
-    key_pos_2d = network.add_shuffle(key_pos_t)
-    key_pos_2d.set_input(1, one_k_shape.get_output(0))
-
-    sq_one_shape = network.add_concatenation([sq_size_t, one_const])
-    sq_one_shape.axis = 0
-    pos_2d = network.add_shuffle(pos_float)
-    pos_2d.set_input(1, sq_one_shape.get_output(0))
-
-    # rel_pos[q, k] = key_pos[k] - position_id[q] (float32).
-    rel_pos = network.add_elementwise(
-        key_pos_2d.get_output(0), pos_2d.get_output(0),
-        trt.ElementWiseOperation.SUB)
-
-    # Reshape to (1, 1, Sq, K) for broadcast with slopes (1, H, 1, 1).
-    one_const2 = graph_ops.add_constant(
-        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
-    rel_4d_shape = network.add_concatenation([one_const, one_const2, sq_size_t, k_size_t])
-    rel_4d_shape.axis = 0
-    rel_4d = network.add_shuffle(rel_pos.get_output(0))
-    rel_4d.set_input(1, rel_4d_shape.get_output(0))
-
-    # alibi_slopes_tensor is (num_heads, 1, 1). Reshape to (1, H, 1, 1).
-    slopes_4d = network.add_shuffle(alibi_slopes_tensor)
-    slopes_4d.reshape_dims = (1, num_heads, 1, 1)
-
-    # bias = slopes * rel_pos -> (1, H, Sq, K).
-    alibi_bias = network.add_elementwise(
-        slopes_4d.get_output(0), rel_4d.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    alibi_bias_t = alibi_bias.get_output(0)
-    if work_trt_dtype != trt.float32:
-        alibi_bias_t = network.add_cast(alibi_bias_t, work_trt_dtype).get_output(0)
-
-    # Broadcast 2D mask (Sq, K) to (1, 1, Sq, K) via shape-tensor shuffle.
-    mask_4d = _mask_to_4d(network, mask_2d)
-
-    # Add ALiBi bias to the additive mask.
-    summed = network.add_elementwise(
-        mask_4d, alibi_bias_t, trt.ElementWiseOperation.SUM)
-    return summed.get_output(0)
-
-
-# ---------------------------------------------------------------------------
-# Attention core — IAttention with explicit (additive) mask.
-# ---------------------------------------------------------------------------
-
-
-def _attention_core(
-    network: trt.INetworkDefinition,
-    q_4d: trt.ITensor,
-    k_4d: trt.ITensor,
-    v_4d: trt.ITensor,
-    mask_4d: trt.ITensor,
-    *,
-    head_dim: int,
-    scale: float,
-) -> trt.ITensor:
-    """IAttention with explicit mask (no causal flag — mask carries causality)."""
-    if q_4d.dtype == trt.float16:
-        scale_t = graph_ops.add_constant(
-            network, (1, 1, 1, 1),
-            np.array([[[[scale]]]], dtype=np.float16), dtype=np.float16)
-    else:
-        scale_t = graph_ops.add_constant(
-            network, (1, 1, 1, 1),
-            np.array([[[[scale]]]], dtype=np.float32), dtype=np.float32)
-        if q_4d.dtype == trt.bfloat16:
-            scale_t = network.add_cast(scale_t, trt.bfloat16).get_output(0)
-    q_scaled = network.add_elementwise(q_4d, scale_t, trt.ElementWiseOperation.PROD)
-
-    attn = network.add_attention(
-        q_scaled.get_output(0), k_4d, v_4d,
-        trt.AttentionNormalizationOp.SOFTMAX, False)
-    attn.mask = mask_4d
-    # Allow TRT to decompose into primitives when no fused MHA kernel is
-    # available for this (dtype, head_dim, seq) combination. On real
-    # targets (fp16, head_dim=128, opt Sq=64) TRT still picks the named
-    # _mha_v2 kernel from profile 0 — verified via
-    # ``trtexec --useProfile=0 --dumpProfile`` on Qwen3-0.6B. The
-    # fallback path keeps tiny unit-test configs (head_dim=4, fp32)
-    # buildable since TRT has no fused kernel for those shapes.
-    attn.decomposable = True
-    return attn.get_output(0)
+        return graph_ops.add_layer_norm(
+            network, inp, hidden, gamma, beta, eps_tensor, dtype=dtype)
+    return graph_ops.add_rms_norm(
+        network, inp, hidden, gamma, eps_tensor, dtype=dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -740,57 +356,27 @@ def build_dual_profile_decoder_engine(
 
     # RoPE tables (only when position_type == "rope"). Built for the worst
     # case key length max_cache_length + max_prefill_length, since RoPE is
-    # gathered by position_id at runtime.
-    #
-    # Two table representations: the half-dim (max_S, rotary_dim // 2) tables
-    # feed TRT's IRotaryEmbeddingLayer (fused kernel — both profiles pick it
-    # up); the full-attention-size tables and rotate_half matrix back the
-    # manual rotate-half fallback for tiny/odd configs that the native layer
-    # cannot accept.
-    cos_table: trt.ITensor | None = None
-    sin_table: trt.ITensor | None = None
-    rotate_half: trt.ITensor | None = None
+    # gathered by position_id at runtime. The half-dim tables feed TRT's
+    # native IRotaryEmbeddingLayer.
     cos_half_table: trt.ITensor | None = None
     sin_half_table: trt.ITensor | None = None
-    use_native_rope = False
     if position_type == "rope":
         kmax = max_cache_length + max_prefill_length
-        cos_np = graph_ops.make_rope_table(
-            kmax, attention_size, num_heads,
-            config.rope_theta, True, partial_rotary_factor,
-            interleaved=interleaved_rope)
-        sin_np = graph_ops.make_rope_table(
-            kmax, attention_size, num_heads,
-            config.rope_theta, False, partial_rotary_factor,
-            interleaved=interleaved_rope)
-        rotate_half_np = graph_ops.make_rotate_half_matrix(
-            attention_size, num_heads, partial_rotary_factor,
-            interleaved=interleaved_rope)
-        cos_table = _const_in_work_dtype(
-            network, cos_np.shape, cos_np, work_np_dtype, work_trt_dtype)
-        sin_table = _const_in_work_dtype(
-            network, sin_np.shape, sin_np, work_np_dtype, work_trt_dtype)
-        rotate_half = _const_in_work_dtype(
-            network, (attention_size, attention_size), rotate_half_np,
+        if rotary_embedding_dim < 2 or rotary_embedding_dim % 2 != 0:
+            raise ValueError(
+                "TRT native RoPE requires an even rotary_embedding_dim >= 2")
+        cos_half_np = graph_ops.make_rope_table_half_dim(
+            kmax, head_dim, config.rope_theta, True,
+            partial_rotary_factor, interleaved=interleaved_rope)
+        sin_half_np = graph_ops.make_rope_table_half_dim(
+            kmax, head_dim, config.rope_theta, False,
+            partial_rotary_factor, interleaved=interleaved_rope)
+        cos_half_table = _const_in_work_dtype(
+            network, cos_half_np.shape, cos_half_np,
             work_np_dtype, work_trt_dtype)
-
-        # IRotaryEmbeddingLayer requires rotary_embedding_dim >= 2 and even.
-        # Tiny synthetic configs (head_dim=4 with partial rotary producing an
-        # odd dim) still fall back to the manual rotate-half path.
-        if rotary_embedding_dim >= 2 and rotary_embedding_dim % 2 == 0:
-            cos_half_np = graph_ops.make_rope_table_half_dim(
-                kmax, head_dim, config.rope_theta, True,
-                partial_rotary_factor, interleaved=interleaved_rope)
-            sin_half_np = graph_ops.make_rope_table_half_dim(
-                kmax, head_dim, config.rope_theta, False,
-                partial_rotary_factor, interleaved=interleaved_rope)
-            cos_half_table = _const_in_work_dtype(
-                network, cos_half_np.shape, cos_half_np,
-                work_np_dtype, work_trt_dtype)
-            sin_half_table = _const_in_work_dtype(
-                network, sin_half_np.shape, sin_half_np,
-                work_np_dtype, work_trt_dtype)
-            use_native_rope = True
+        sin_half_table = _const_in_work_dtype(
+            network, sin_half_np.shape, sin_half_np,
+            work_np_dtype, work_trt_dtype)
 
     # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
     position_embed_table: trt.ITensor | None = None
@@ -806,7 +392,7 @@ def build_dual_profile_decoder_engine(
     if position_type == "alibi":
         alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads)
         # Slopes live as fp32 so the (key_pos - q_pos) math stays in fp32;
-        # _alibi_mask_4d casts the final bias to work_trt_dtype before adding
+        # add_alibi_mask_4d casts the final bias to work_trt_dtype before adding
         # to the additive mask.
         alibi_slopes_tensor = graph_ops.add_constant(
             network, (num_heads, 1, 1),
@@ -818,6 +404,15 @@ def build_dual_profile_decoder_engine(
         alibi_cache_positions_fp32 = graph_ops.add_constant(
             network, (max_cache_length,),
             np.arange(max_cache_length, dtype=np.float32), dtype=np.float32)
+
+    eps_tensor = graph_ops.add_constant(
+        network, (1, 1),
+        np.array([[config.rms_norm_eps]], dtype=np.float32),
+        dtype=np.float32)
+    eps_tensor_per_head = graph_ops.add_constant(
+        network, (1, 1, 1),
+        np.array([[[config.rms_norm_eps]]], dtype=np.float32),
+        dtype=np.float32)
 
     # Attention scale.
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
@@ -846,19 +441,19 @@ def build_dual_profile_decoder_engine(
     if embed_norm is not None:
         embed_norm_beta = weights.get(
             "embedding_norm_beta", np.zeros(hidden, dtype=np.float32))
-        hidden_state = _layer_norm_multi(
+        hidden_state = _norm_multi(
             network, hidden_state, hidden, embed_norm, embed_norm_beta,
-            config.rms_norm_eps, work_np_dtype)
+            eps_tensor, "layernorm", work_np_dtype)
 
     # Build the 4D additive mask once — shared across layers. ALiBi
     # variants augment the mask with per-head linear bias.
     if position_type == "alibi":
-        mask_4d = _alibi_mask_4d(
+        mask_4d = graph_ops.add_alibi_mask_4d(
             network, attention_mask_work, position_id,
             alibi_slopes_tensor, alibi_cache_positions_fp32,
-            num_heads, work_trt_dtype)
+            num_heads, target_dtype=work_trt_dtype)
     else:
-        mask_4d = _mask_to_4d(network, attention_mask_work)
+        mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask_work)
 
     present_k_outs: list[trt.ITensor] = []
     present_v_outs: list[trt.ITensor] = []
@@ -871,7 +466,7 @@ def build_dual_profile_decoder_engine(
             network, hidden_state, hidden,
             weights[f"{prefix}.input_norm"],
             weights.get(f"{prefix}.input_norm_beta"),
-            config.rms_norm_eps, norm_type, work_np_dtype)
+            eps_tensor, norm_type, work_np_dtype)
 
         # Q / K / V projections.
         q = matmul(normed, hidden, attention_size,
@@ -898,34 +493,30 @@ def build_dual_profile_decoder_engine(
         # Optional per-head q/k norm (Qwen3).
         q_norm = weights.get(f"{prefix}.q_norm")
         if q_norm is not None:
-            q = _rms_norm_per_head_multi(
+            q = graph_ops.add_rms_norm_per_head(
                 network, q, num_heads, head_dim, q_norm,
-                config.rms_norm_eps, work_np_dtype)
+                eps_tensor_per_head, dtype=work_np_dtype,
+                sequence_length=None)
         k_norm = weights.get(f"{prefix}.k_norm")
         if k_norm is not None:
-            k = _rms_norm_per_head_multi(
+            k = graph_ops.add_rms_norm_per_head(
                 network, k, num_heads, head_dim, k_norm,
-                config.rms_norm_eps, work_np_dtype)
+                eps_tensor_per_head, dtype=work_np_dtype,
+                sequence_length=None)
 
-        # Position embedding (RoPE only — learned was applied above; ALiBi
-        # is added into the attention mask). Prefer the fused
-        # IRotaryEmbeddingLayer when the rotary dim is even and >= 2 so
-        # both profiles pick up the optimized RoPE kernel.
+        # Position embedding (RoPE only; learned was applied above and ALiBi
+        # is added into the attention mask).
         if position_type == "rope":
-            if use_native_rope:
-                q = _apply_rope_native_multi(
-                    network, q, num_heads, head_dim,
-                    cos_half_table, sin_half_table, position_id,
-                    rotary_embedding_dim, interleaved_rope)
-                k = _apply_rope_native_multi(
-                    network, k, num_heads, head_dim,
-                    cos_half_table, sin_half_table, position_id,
-                    rotary_embedding_dim, interleaved_rope)
-            else:
-                q = graph_ops.add_apply_rope(
-                    network, q, position_id, cos_table, sin_table, rotate_half)
-                k = graph_ops.add_apply_rope(
-                    network, k, position_id, cos_table, sin_table, rotate_half)
+            q = graph_ops.add_apply_rope_native(
+                network, q, num_heads, head_dim,
+                cos_half_table, sin_half_table, position_id,
+                rotary_embedding_dim, interleaved_rope,
+                sequence_length=None)
+            k = graph_ops.add_apply_rope_native(
+                network, k, num_heads, head_dim,
+                cos_half_table, sin_half_table, position_id,
+                rotary_embedding_dim, interleaved_rope,
+                sequence_length=None)
 
         # Present K / V (this step's raw K / V), shape (Sq, attn_size).
         present_k_outs.append(k)
@@ -937,16 +528,22 @@ def build_dual_profile_decoder_engine(
         all_v_cat = network.add_concatenation([cache_v_inputs[layer_idx], v])
         all_v_cat.axis = 0
 
-        q_4d = _to_heads_4d(network, q, num_heads, head_dim, f"{prefix}.q")
-        k_4d = _to_heads_4d(network, all_k_cat.get_output(0), num_heads, head_dim,
-                            f"{prefix}.k")
-        v_4d = _to_heads_4d(network, all_v_cat.get_output(0), num_heads, head_dim,
-                            f"{prefix}.v")
+        q_4d = graph_ops.reshape_rows_to_heads_4d(
+            network, q, num_heads, head_dim, sequence_length=None,
+            tag=f"{prefix}.q")
+        k_4d = graph_ops.reshape_rows_to_heads_4d(
+            network, all_k_cat.get_output(0), num_heads, head_dim,
+            sequence_length=None, tag=f"{prefix}.k")
+        v_4d = graph_ops.reshape_rows_to_heads_4d(
+            network, all_v_cat.get_output(0), num_heads, head_dim,
+            sequence_length=None, tag=f"{prefix}.v")
 
-        ctx_4d = _attention_core(
-            network, q_4d, k_4d, v_4d, mask_4d,
-            head_dim=head_dim, scale=attn_scale)
-        context = _from_heads_4d(network, ctx_4d, attention_size, f"{prefix}.ctx")
+        ctx_4d = graph_ops.add_attention_core(
+            network, q_4d, k_4d, v_4d, causal=False, mask=mask_4d,
+            scale=attn_scale)
+        context = graph_ops.reshape_heads_4d_to_rows(
+            network, ctx_4d, attention_size, sequence_length=None,
+            tag=f"{prefix}.ctx")
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")
@@ -964,7 +561,7 @@ def build_dual_profile_decoder_engine(
                     network, hidden_state, hidden,
                     post_attn_norm_w,
                     weights.get(f"{prefix}.post_attn_norm_beta"),
-                    config.rms_norm_eps, norm_type, work_np_dtype)
+                    eps_tensor, norm_type, work_np_dtype)
             else:
                 norm2 = normed
         else:
@@ -974,7 +571,7 @@ def build_dual_profile_decoder_engine(
                 network, residual1.get_output(0), hidden,
                 weights[f"{prefix}.post_attn_norm"],
                 weights.get(f"{prefix}.post_attn_norm_beta"),
-                config.rms_norm_eps, norm_type, work_np_dtype)
+                eps_tensor, norm_type, work_np_dtype)
 
         # MLP — SwiGLU (Llama-style) or GeluFC (GPT-2-style).
         if mlp_type == "gelu_fc":
@@ -1006,7 +603,7 @@ def build_dual_profile_decoder_engine(
         hidden_state = _norm_multi(
             network, hidden_state, hidden, final_norm,
             weights.get("final_norm_beta"),
-            config.rms_norm_eps, norm_type, work_np_dtype)
+            eps_tensor, norm_type, work_np_dtype)
 
     # Only the LAST prompt token's logits matter for the next-token sample,
     # so slice hidden_state from (Sq, hidden) to (1, hidden) before the LM

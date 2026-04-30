@@ -48,7 +48,6 @@ def build_flux_dit_engine(
 ) -> bytes:
     """Build FLUX DiT denoiser TRT engine plan."""
     head_dim = dim // num_heads
-    attn_scale = 1.0 / np.sqrt(head_dim)
     ffn_dim = int(dim * mlp_ratio)  # For GELU-approximate FFN
     total_seq = text_seq_len + num_img_tokens
 
@@ -74,24 +73,12 @@ def build_flux_dit_engine(
     # Constants
     eps_np = np.array([eps], dtype=np.float32)
     eps_t = graph_ops.add_constant(network, (1, 1), eps_np)
-    scale_const = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
-
-    # Build rotate-half matrix for RoPE
-    rot_half_np = graph_ops.make_rotate_half_matrix(
-        head_dim * num_heads, num_heads, interleaved=True)
-    rot_half_const = graph_ops.add_constant(
-        network, (head_dim * num_heads, head_dim * num_heads), rot_half_np)
-
-    # Expand RoPE cos/sin from [total_seq, head_dim] to [total_seq, dim]
-    cos_expand = _tile_rope_for_heads(network, rotary_cos, num_heads, total_seq, head_dim)
-    sin_expand = _tile_rope_for_heads(network, rotary_sin, num_heads, total_seq, head_dim)
 
     # Split RoPE for text and image
-    txt_cos = network.add_slice(cos_expand, (0, 0), (text_seq_len, dim), (1, 1)).get_output(0)
-    txt_sin = network.add_slice(sin_expand, (0, 0), (text_seq_len, dim), (1, 1)).get_output(0)
-    img_cos = network.add_slice(cos_expand, (text_seq_len, 0), (num_img_tokens, dim), (1, 1)).get_output(0)
-    img_sin = network.add_slice(sin_expand, (text_seq_len, 0), (num_img_tokens, dim), (1, 1)).get_output(0)
+    txt_cos = network.add_slice(rotary_cos, (0, 0), (text_seq_len, head_dim), (1, 1)).get_output(0)
+    txt_sin = network.add_slice(rotary_sin, (0, 0), (text_seq_len, head_dim), (1, 1)).get_output(0)
+    img_cos = network.add_slice(rotary_cos, (text_seq_len, 0), (num_img_tokens, head_dim), (1, 1)).get_output(0)
+    img_sin = network.add_slice(rotary_sin, (text_seq_len, 0), (num_img_tokens, head_dim), (1, 1)).get_output(0)
 
     hidden = hidden_inp
     encoder_hidden = encoder_inp
@@ -145,12 +132,16 @@ def build_flux_dit_engine(
         k_txt = _rms_norm_per_head_seq(network, k_txt, num_heads, head_dim, weights[f"{p}.attn.norm_added_k.weight"], eps_t, text_seq_len)
 
         # Apply RoPE to image Q, K
-        q_img = _apply_rope(network, q_img, img_cos, img_sin, rot_half_const)
-        k_img = _apply_rope(network, k_img, img_cos, img_sin, rot_half_const)
+        q_img = _apply_native_rope_from_full_cache(
+            network, q_img, img_cos, img_sin, num_heads, head_dim, num_img_tokens)
+        k_img = _apply_native_rope_from_full_cache(
+            network, k_img, img_cos, img_sin, num_heads, head_dim, num_img_tokens)
 
         # Apply RoPE to text Q, K
-        q_txt = _apply_rope(network, q_txt, txt_cos, txt_sin, rot_half_const)
-        k_txt = _apply_rope(network, k_txt, txt_cos, txt_sin, rot_half_const)
+        q_txt = _apply_native_rope_from_full_cache(
+            network, q_txt, txt_cos, txt_sin, num_heads, head_dim, text_seq_len)
+        k_txt = _apply_native_rope_from_full_cache(
+            network, k_txt, txt_cos, txt_sin, num_heads, head_dim, text_seq_len)
 
         # Concatenate: [text, image] for joint attention
         q_cat = network.add_concatenation([q_txt, q_img])
@@ -162,8 +153,7 @@ def build_flux_dit_engine(
 
         # Multi-head attention
         attn_out = _mha(network, q_cat.get_output(0), k_cat.get_output(0),
-                       v_cat.get_output(0), num_heads, head_dim, total_seq,
-                       scale_const)
+                        v_cat.get_output(0), num_heads, head_dim, total_seq)
 
         # Split attention output back into text and image
         txt_attn = network.add_slice(attn_out, (0, 0), (text_seq_len, dim), (1, 1)).get_output(0)
@@ -243,11 +233,12 @@ def build_flux_dit_engine(
         k_s = _rms_norm_per_head_seq(network, k_s, num_heads, head_dim, weights[f"{p}.attn.norm_k.weight"], eps_t, total_seq)
 
         # Apply RoPE (full sequence: text + image cos/sin)
-        q_s = _apply_rope(network, q_s, cos_expand, sin_expand, rot_half_const)
-        k_s = _apply_rope(network, k_s, cos_expand, sin_expand, rot_half_const)
+        q_s = _apply_native_rope_from_full_cache(
+            network, q_s, rotary_cos, rotary_sin, num_heads, head_dim, total_seq)
+        k_s = _apply_native_rope_from_full_cache(
+            network, k_s, rotary_cos, rotary_sin, num_heads, head_dim, total_seq)
 
-        attn_out_s = _mha(network, q_s, k_s, v_s, num_heads, head_dim,
-                         total_seq, scale_const)
+        attn_out_s = _mha(network, q_s, k_s, v_s, num_heads, head_dim, total_seq)
 
         # Concatenate attn + mlp -> proj_out
         cat_attn_mlp = network.add_concatenation([attn_out_s, mlp_hidden])
@@ -316,16 +307,6 @@ def build_flux_dit_engine(
 # ============================================================================
 # Helper functions
 # ============================================================================
-
-def _tile_rope_for_heads(network, rope, num_heads, seq_len, head_dim):
-    """Tile [seq, head_dim] -> [seq, num_heads * head_dim]."""
-    if num_heads == 1:
-        return rope
-    parts = [rope] * num_heads
-    concat = network.add_concatenation(parts)
-    concat.axis = 1
-    return concat.get_output(0)
-
 
 def _matmul_bias_1d(network, inp, in_dim, out_dim, weight, bias):
     """Matmul + bias for 1D input: [in_dim] -> [out_dim]."""
@@ -400,81 +381,26 @@ def _rms_norm_per_head_seq(network, x, num_heads, head_dim, weight, eps_t, seq_l
     Reshapes to [seq_len, num_heads, head_dim], applies RMS norm on head_dim axis,
     then reshapes back to [seq_len, dim].
     """
-    dim = num_heads * head_dim
-
-    # Reshape [seq_len, dim] -> [seq_len * num_heads, head_dim]
-    reshaped = network.add_shuffle(x)
-    reshaped.reshape_dims = (seq_len * num_heads, head_dim)
-
-    # RMS norm on last axis (head_dim)
-    reshaped_out = reshaped.get_output(0)
-    sq = network.add_elementwise(reshaped_out, reshaped_out, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    denom_in = network.add_elementwise(
-        mean.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(
-        reshaped_out, recip.get_output(0), trt.ElementWiseOperation.PROD)
-
-    # Apply per-head gamma [1, head_dim]
-    gamma_t = graph_ops.add_constant(network, (1, head_dim), weight)
-    scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-
-    # Reshape back to [seq_len, dim]
-    reshape_back = network.add_shuffle(scaled.get_output(0))
-    reshape_back.reshape_dims = (seq_len, dim)
-    return reshape_back.get_output(0)
+    return graph_ops.add_rms_norm_per_head(
+        network, x, num_heads, head_dim, weight, eps_t,
+        sequence_length=seq_len)
 
 
-def _apply_rope(network, x, cos_vals, sin_vals, rot_half_const):
-    """Apply rotary position embedding."""
-    x_rot = network.add_matrix_multiply(
-        x, trt.MatrixOperation.NONE,
-        rot_half_const, trt.MatrixOperation.NONE)
-    x_cos = network.add_elementwise(
-        x, cos_vals, trt.ElementWiseOperation.PROD)
-    x_sin = network.add_elementwise(
-        x_rot.get_output(0), sin_vals, trt.ElementWiseOperation.PROD)
-    return network.add_elementwise(
-        x_cos.get_output(0), x_sin.get_output(0),
-        trt.ElementWiseOperation.SUM).get_output(0)
+def _apply_native_rope_from_full_cache(
+    network, x, cos_vals, sin_vals, num_heads, head_dim, seq_len,
+):
+    """Apply TRT native RoPE using runtime full-dimension cos/sin rows."""
+    return graph_ops.add_apply_rope_native_from_full_cache(
+        network, x, num_heads, head_dim, cos_vals, sin_vals,
+        seq_len, interleaved=True)
 
 
-def _mha(network, q, k, v, num_heads, head_dim, seq_len, scale_const):
+def _mha(network, q, k, v, num_heads, head_dim, seq_len):
     """Multi-head attention: returns [seq_len, dim]."""
-    dim = num_heads * head_dim
-
-    q_h = network.add_shuffle(q)
-    q_h.reshape_dims = (seq_len, num_heads, head_dim)
-    q_h.second_transpose = trt.Permutation([1, 0, 2])
-
-    k_h = network.add_shuffle(k)
-    k_h.reshape_dims = (seq_len, num_heads, head_dim)
-    k_h.second_transpose = trt.Permutation([1, 0, 2])
-
-    v_h = network.add_shuffle(v)
-    v_h.reshape_dims = (seq_len, num_heads, head_dim)
-    v_h.second_transpose = trt.Permutation([1, 0, 2])
-
-    score = network.add_matrix_multiply(
-        q_h.get_output(0), trt.MatrixOperation.NONE,
-        k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
-    scaled = network.add_elementwise(
-        score.get_output(0), scale_const,
-        trt.ElementWiseOperation.PROD)
-    softmax = network.add_softmax(scaled.get_output(0))
-    softmax.axes = 1 << 2
-    context = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_h.get_output(0), trt.MatrixOperation.NONE)
-
-    flat = network.add_shuffle(context.get_output(0))
-    flat.first_transpose = trt.Permutation([1, 0, 2])
-    flat.reshape_dims = (seq_len, dim)
-    return flat.get_output(0)
+    return graph_ops.add_attention_from_rows(
+        network, q, k, v,
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=seq_len, kv_seq=seq_len)
 
 
 def _gate_1d(network, x, gate, seq_len):

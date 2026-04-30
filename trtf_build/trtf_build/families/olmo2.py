@@ -90,7 +90,7 @@ class Olmo2Plugin:
             if attention_size == 0:
                 attention_size = q_hidden
 
-            head_dim = q_hidden // num_heads
+            q_hidden // num_heads
 
             q_t = _transpose_2d(q_raw, "q_proj")
             k_t = _transpose_2d(k_raw, "k_proj")
@@ -166,7 +166,8 @@ class Olmo2Plugin:
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
-        network = builder.create_network()
+        network = builder.create_network(
+            1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
         trt_config.clear_flag(trt.BuilderFlag.TF32)
@@ -193,25 +194,18 @@ class Olmo2Plugin:
         embedding_table = graph_ops.add_constant(
             network, (vocab, hidden), weights["embedding"])
 
-        cos_table_np = graph_ops.make_rope_table(
-            attention_window, attention_size, num_heads, config.rope_theta, True)
-        sin_table_np = graph_ops.make_rope_table(
-            attention_window, attention_size, num_heads, config.rope_theta, False)
-        rotate_half_np = graph_ops.make_rotate_half_matrix(
-            attention_size, num_heads)
+        cos_table_np = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, True)
+        sin_table_np = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, False)
 
         cos_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), cos_table_np)
+            network, cos_table_np.shape, cos_table_np)
         sin_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), sin_table_np)
-        rotate_half_tensor = graph_ops.add_constant(
-            network, (attention_size, attention_size), rotate_half_np)
+            network, sin_table_np.shape, sin_table_np)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
-        attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
-        attn_scale_tensor = graph_ops.add_constant(
-            network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
 
         # Embedding lookup
         gather = network.add_gather(embedding_table, token_id, 0)
@@ -247,12 +241,12 @@ class Olmo2Plugin:
                     network, k, attention_size, k_norm_w, eps_tensor)
 
             # RoPE
-            q = graph_ops.add_apply_rope(
-                network, q, position_id, cos_tensor, sin_tensor,
-                rotate_half_tensor)
-            k = graph_ops.add_apply_rope(
-                network, k, position_id, cos_tensor, sin_tensor,
-                rotate_half_tensor)
+            q = graph_ops.add_apply_rope_native(
+                network, q, num_heads, head_dim,
+                cos_tensor, sin_tensor, position_id, head_dim)
+            k = graph_ops.add_apply_rope_native(
+                network, k, num_heads, head_dim,
+                cos_tensor, sin_tensor, position_id, head_dim)
 
             # Save present K/V
             present_k = k
@@ -271,50 +265,18 @@ class Olmo2Plugin:
                 [cache_v_inputs[layer_idx], v_reshape.get_output(0)])
             all_v.axis = 0
 
-            # Standard decomposed attention
-            q_heads = network.add_shuffle(q)
-            q_heads.reshape_dims = (num_heads, 1, head_dim)
-
-            k_heads = network.add_shuffle(all_k.get_output(0))
-            k_heads.reshape_dims = (attention_window, num_heads, head_dim)
-            k_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-            scores = network.add_matrix_multiply(
-                q_heads.get_output(0),
-                trt.MatrixOperation.NONE,
-                k_heads.get_output(0),
-                trt.MatrixOperation.TRANSPOSE)
-
-            scaled = network.add_elementwise(
-                scores.get_output(0), attn_scale_tensor,
-                trt.ElementWiseOperation.PROD)
-
             mask_reshape = network.add_shuffle(attention_mask)
-            mask_reshape.reshape_dims = (1, 1, attention_window)
+            mask_reshape.reshape_dims = (1, 1, 1, attention_window)
 
-            masked = network.add_elementwise(
-                scaled.get_output(0), mask_reshape.get_output(0),
-                trt.ElementWiseOperation.SUM)
-
-            softmax = network.add_softmax(masked.get_output(0))
-            softmax.axes = 1 << 2
-
-            v_heads = network.add_shuffle(all_v.get_output(0))
-            v_heads.reshape_dims = (attention_window, num_heads, head_dim)
-            v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-            context = network.add_matrix_multiply(
-                softmax.get_output(0),
-                trt.MatrixOperation.NONE,
-                v_heads.get_output(0),
-                trt.MatrixOperation.NONE)
-
-            context_flat = network.add_shuffle(context.get_output(0))
-            context_flat.reshape_dims = (1, attention_size)
+            context_flat = graph_ops.add_attention_from_rows(
+                network, q, all_k.get_output(0), all_v.get_output(0),
+                num_heads=num_heads, head_dim=head_dim,
+                q_seq=1, kv_seq=attention_window,
+                mask=mask_reshape.get_output(0))
 
             # Output projection
             attn_out = graph_ops.add_matmul_rhs_constant(
-                network, context_flat.get_output(0),
+                network, context_flat,
                 attention_size, hidden, weights[f"{prefix}.w_o"])
 
             # ---- Post-attention norm ----

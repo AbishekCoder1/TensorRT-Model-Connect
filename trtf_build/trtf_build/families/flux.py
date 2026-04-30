@@ -462,8 +462,6 @@ class FluxPlugin:
                 fp8_scales=fp8_scales,
             )
 
-        # FP8 mode: use STRONGLY_TYPED + BF16 base when scales are provided
-        _strongly_typed = fp8_scales is not None
         _cast_dtype = "bf16" if fp8_scales is not None else (
             "bf16" if precision == "bf16" else "fp16")
 
@@ -487,7 +485,6 @@ class FluxPlugin:
                 t5_dim=text_encoder_dim,
                 freq_dim=_freq_dim,
                 verbose=verbose,
-                strongly_typed=_strongly_typed,
                 cast_dtype=_cast_dtype,
                 fp8_scales=fp8_scales,
             )

@@ -404,38 +404,23 @@ def _add_self_attention_2d(
     k_flat = _proj("to_k")
     v_flat = _proj("to_v")
 
-    # Reshape to [B, HW, C] for batched attention
+    # Reshape to [B, 1, HW, C] for native single-head attention.
     q_r = network.add_shuffle(q_flat)
-    q_r.reshape_dims = (b, hw, c)
+    q_r.reshape_dims = (b, 1, hw, c)
     k_r = network.add_shuffle(k_flat)
-    k_r.reshape_dims = (b, hw, c)
+    k_r.reshape_dims = (b, 1, hw, c)
     v_r = network.add_shuffle(v_flat)
-    v_r.reshape_dims = (b, hw, c)
+    v_r.reshape_dims = (b, 1, hw, c)
 
-    q = q_r.get_output(0)
-    k = k_r.get_output(0)
-    v = v_r.get_output(0)
-
-    # Attention: score = Q @ K^T / sqrt(C) -> [B, HW, HW]
-    score = network.add_matrix_multiply(
-        q, trt.MatrixOperation.NONE,
-        k, trt.MatrixOperation.TRANSPOSE)
-    scale_const = network.add_constant(
-        (1, 1, 1),
-        trt.Weights(np.array([attn_scale], dtype=np.float32)))
-    scaled = network.add_elementwise(
-        score.get_output(0), scale_const.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    softmax = network.add_softmax(scaled.get_output(0))
-    softmax.axes = 1 << 2  # last dim
-
-    # Context = softmax @ V -> [B, HW, C]
-    context = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v, trt.MatrixOperation.NONE)
+    context = graph_ops.add_attention_core(
+        network,
+        q_r.get_output(0),
+        k_r.get_output(0),
+        v_r.get_output(0),
+        scale=attn_scale)
 
     # Flatten context to 2D for output projection: [B*HW, C]
-    ctx_flat = network.add_shuffle(context.get_output(0))
+    ctx_flat = network.add_shuffle(context)
     ctx_flat.reshape_dims = (b * hw, c)
 
     # Output projection: [B*HW, C] @ [C, C] -> [B*HW, C]

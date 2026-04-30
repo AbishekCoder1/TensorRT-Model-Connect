@@ -166,10 +166,14 @@ class WhisperPlugin:
         return weights
 
     def build_engine(self, config: ModelConfig, weights: WeightDict, max_cache_length: int, *, precision: str = "fp32", quant_ctx=None, verbose: bool = False, debug_layer_outputs: bool = False) -> bytes:
-        dec_layers = weights["_dec_layers"]; dec_heads = weights["_dec_heads"]
-        dec_ffn = weights["_dec_ffn"]; max_source_positions = weights["_max_source_positions"]
-        hidden = config.hidden_size; vocab = config.vocab_size
-        head_dim = hidden // dec_heads; attention_window = max_cache_length + 1
+        dec_layers = weights["_dec_layers"]
+        dec_heads = weights["_dec_heads"]
+        dec_ffn = weights["_dec_ffn"]
+        max_source_positions = weights["_max_source_positions"]
+        hidden = config.hidden_size
+        vocab = config.vocab_size
+        head_dim = hidden // dec_heads
+        attention_window = max_cache_length + 1
 
         # Precision configuration
         if precision == "fp16":
@@ -183,7 +187,8 @@ class WhisperPlugin:
             work_trt_dtype = trt.float32
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-        builder = trt.Builder(logger); network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        builder = trt.Builder(logger)
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
@@ -206,8 +211,6 @@ class WhisperPlugin:
         pos_embed_np = weights["dec_pos_embedding"]
         pos_embedding_table = graph_ops.add_constant(network, pos_embed_np.shape, pos_embed_np, dtype=work_np_dtype)
         eps_tensor = graph_ops.add_constant(network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype), dtype=work_np_dtype)
-        attn_scale_tensor = graph_ops.add_constant(network, (1, 1, 1), np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=work_np_dtype), dtype=work_np_dtype)
-
         # Cast attention mask to work dtype for elementwise compatibility
         if work_trt_dtype != trt.float32:
             attention_mask = network.add_cast(attention_mask, work_trt_dtype).get_output(0)
@@ -227,8 +230,7 @@ class WhisperPlugin:
                 network=network, hidden=hidden_state,
                 cache_k=cache_k_inputs[layer_idx], cache_v=cache_v_inputs[layer_idx],
                 cross_k=cross_k_inputs[layer_idx], cross_v=cross_v_inputs[layer_idx],
-                attention_mask=attention_mask, attn_scale_tensor=attn_scale_tensor,
-                eps_tensor=eps_tensor, weights=weights, prefix=prefix,
+                attention_mask=attention_mask, eps_tensor=eps_tensor, weights=weights, prefix=prefix,
                 hidden_size=hidden, num_heads=dec_heads, head_dim=head_dim,
                 ffn_dim=dec_ffn, max_cache_length=max_cache_length,
                 max_source_positions=max_source_positions,
@@ -246,17 +248,20 @@ class WhisperPlugin:
         # Logits output: always FP32 for accurate argmax/sampling
         if work_trt_dtype != trt.float32:
             logits = network.add_cast(logits, trt.float32).get_output(0)
-        logits.name = "logits"; network.mark_output(logits)
+        logits.name = "logits"
+        network.mark_output(logits)
 
         for i in range(dec_layers):
             present_k_outputs[i].name = graph_ops.layer_tensor_name("present_k", i)
             present_v_outputs[i].name = graph_ops.layer_tensor_name("present_v", i)
-            network.mark_output(present_k_outputs[i]); network.mark_output(present_v_outputs[i])
+            network.mark_output(present_k_outputs[i])
+            network.mark_output(present_v_outputs[i])
 
         if verbose:
             print(f"[trtf-build] Building Whisper decoder ({dec_layers}L, h={hidden}, heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length}, precision={precision})", file=sys.stderr)
         plan = builder.build_serialized_network(network, trt_config)
-        if plan is None: raise RuntimeError("TensorRT decoder engine build failed")
+        if plan is None:
+            raise RuntimeError("TensorRT decoder engine build failed")
         return bytes(plan)
 
     def build_vision_engine(self, model_dir: str, config: ModelConfig, weights: WeightDict, *, precision: str = "fp32", verbose: bool = False) -> bytes | None:
@@ -328,10 +333,13 @@ class WhisperPlugin:
 
 
 def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
-    enc_layers = weights["_enc_layers"]; enc_heads = weights["_enc_heads"]
-    enc_ffn = weights["_enc_ffn"]; num_mel_bins = weights["_num_mel_bins"]
+    enc_layers = weights["_enc_layers"]
+    enc_heads = weights["_enc_heads"]
+    enc_ffn = weights["_enc_ffn"]
+    num_mel_bins = weights["_num_mel_bins"]
     max_source_positions = weights["_max_source_positions"]
-    hidden = config.hidden_size; mel_length = max_source_positions * 2
+    hidden = config.hidden_size
+    mel_length = max_source_positions * 2
 
     # Precision configuration
     if precision == "fp16":
@@ -345,7 +353,8 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
         work_trt_dtype = trt.float32
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger); network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
@@ -354,30 +363,37 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
 
     # TRT requires 2D+ convolutions; reshape 1D conv weights [out, in, k] -> [out, in, 1, k]
     # and input from [1, C, L] -> [1, C, 1, L]
-    ri = network.add_shuffle(mel_input); ri.reshape_dims = (1, num_mel_bins, 1, mel_length)
+    ri = network.add_shuffle(mel_input)
+    ri.reshape_dims = (1, num_mel_bins, 1, mel_length)
     conv1_w = weights["enc_conv1_weight"]
     conv1_w_4d = np.ascontiguousarray(conv1_w.reshape(conv1_w.shape[0], conv1_w.shape[1], 1, conv1_w.shape[2]), dtype=work_np_dtype)
     c1 = network.add_convolution_nd(ri.get_output(0), num_output_maps=hidden, kernel_shape=(1, 3),
         kernel=trt.Weights(conv1_w_4d),
         bias=trt.Weights(np.ascontiguousarray(weights["enc_conv1_bias"], dtype=work_np_dtype)))
-    c1.stride_nd = (1, 1); c1.padding_nd = (0, 1)
+    c1.stride_nd = (1, 1)
+    c1.padding_nd = (0, 1)
     # Conv1 output: [1, hidden, 1, mel_length]. Squeeze to 2D for GELU, then back to 4D.
-    c1_sq = network.add_shuffle(c1.get_output(0)); c1_sq.reshape_dims = (hidden, mel_length)
+    c1_sq = network.add_shuffle(c1.get_output(0))
+    c1_sq.reshape_dims = (hidden, mel_length)
     c1o_2d = graph_ops.add_activation(network, c1_sq.get_output(0), "gelu_new", dtype=work_np_dtype)
-    c1_unsq = network.add_shuffle(c1o_2d); c1_unsq.reshape_dims = (1, hidden, 1, mel_length)
+    c1_unsq = network.add_shuffle(c1o_2d)
+    c1_unsq.reshape_dims = (1, hidden, 1, mel_length)
 
     conv2_w = weights["enc_conv2_weight"]
     conv2_w_4d = np.ascontiguousarray(conv2_w.reshape(conv2_w.shape[0], conv2_w.shape[1], 1, conv2_w.shape[2]), dtype=work_np_dtype)
     c2 = network.add_convolution_nd(c1_unsq.get_output(0), num_output_maps=hidden, kernel_shape=(1, 3),
         kernel=trt.Weights(conv2_w_4d),
         bias=trt.Weights(np.ascontiguousarray(weights["enc_conv2_bias"], dtype=work_np_dtype)))
-    c2.stride_nd = (1, 2); c2.padding_nd = (0, 1)
+    c2.stride_nd = (1, 2)
+    c2.padding_nd = (0, 1)
     # Conv2 output: [1, hidden, 1, max_source_positions]. Squeeze to 2D for GELU.
-    c2_sq = network.add_shuffle(c2.get_output(0)); c2_sq.reshape_dims = (hidden, max_source_positions)
+    c2_sq = network.add_shuffle(c2.get_output(0))
+    c2_sq.reshape_dims = (hidden, max_source_positions)
     c2o_2d = graph_ops.add_activation(network, c2_sq.get_output(0), "gelu_new", dtype=work_np_dtype)
 
     # Transpose to [max_source_positions, hidden]
-    cr = network.add_shuffle(c2o_2d); cr.first_transpose = trt.Permutation([1, 0])
+    cr = network.add_shuffle(c2o_2d)
+    cr.first_transpose = trt.Permutation([1, 0])
     hs = cr.get_output(0)
 
     # [C2] Use LEARNED positional embeddings (not sinusoidal)
@@ -407,19 +423,23 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
     # Encoder output: always FP32 for downstream compatibility
     if work_trt_dtype != trt.float32:
         hs = network.add_cast(hs, trt.float32).get_output(0)
-    hs.name = "encoder_output"; network.mark_output(hs)
+    hs.name = "encoder_output"
+    network.mark_output(hs)
 
-    if verbose: print(f"[trtf-build] Building Whisper encoder ({enc_layers}L, h={hidden}, heads={enc_heads}, mel={num_mel_bins}, precision={precision})", file=sys.stderr)
+    if verbose:
+        print(f"[trtf-build] Building Whisper encoder ({enc_layers}L, h={hidden}, heads={enc_heads}, mel={num_mel_bins}, precision={precision})", file=sys.stderr)
     plan = builder.build_serialized_network(network, tc)
-    if plan is None: raise RuntimeError("TensorRT encoder engine build failed")
+    if plan is None:
+        raise RuntimeError("TensorRT encoder engine build failed")
     return bytes(plan)
 
 
 def _add_whisper_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v,
-    attention_mask, attn_scale_tensor, eps_tensor, weights, prefix,
+    attention_mask, eps_tensor, weights, prefix,
     hidden_size, num_heads, head_dim, ffn_dim, max_cache_length, max_source_positions,
     dtype=np.float32):
-    attention_size = hidden_size; attention_window = max_cache_length + 1
+    attention_size = hidden_size
+    attention_window = max_cache_length + 1
 
     # Self-attention
     normed = graph_ops.add_layer_norm(network, hidden, hidden_size, weights[f"{prefix}.input_norm"], weights[f"{prefix}.input_norm_beta"], eps_tensor, dtype=dtype)
@@ -428,22 +448,22 @@ def _add_whisper_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cr
     v = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, normed, hidden_size, attention_size, weights[f"{prefix}.w_v"], dtype=dtype), attention_size, weights[f"{prefix}.v_bias"], dtype=dtype)
     present_k, present_v = k, v
 
-    kr = network.add_shuffle(k); kr.reshape_dims = (1, attention_size)
-    vr = network.add_shuffle(v); vr.reshape_dims = (1, attention_size)
-    ak = network.add_concatenation([cache_k, kr.get_output(0)]); ak.axis = 0
-    av = network.add_concatenation([cache_v, vr.get_output(0)]); av.axis = 0
+    kr = network.add_shuffle(k)
+    kr.reshape_dims = (1, attention_size)
+    vr = network.add_shuffle(v)
+    vr.reshape_dims = (1, attention_size)
+    ak = network.add_concatenation([cache_k, kr.get_output(0)])
+    ak.axis = 0
+    av = network.add_concatenation([cache_v, vr.get_output(0)])
+    av.axis = 0
 
-    qh = network.add_shuffle(q); qh.reshape_dims = (num_heads, 1, head_dim)
-    kh = network.add_shuffle(ak.get_output(0)); kh.reshape_dims = (attention_window, num_heads, head_dim); kh.second_transpose = trt.Permutation([1, 0, 2])
-    vh = network.add_shuffle(av.get_output(0)); vh.reshape_dims = (attention_window, num_heads, head_dim); vh.second_transpose = trt.Permutation([1, 0, 2])
-
-    sc = network.add_elementwise(network.add_matrix_multiply(qh.get_output(0), trt.MatrixOperation.NONE, kh.get_output(0), trt.MatrixOperation.TRANSPOSE).get_output(0), attn_scale_tensor, trt.ElementWiseOperation.PROD)
-    m3 = network.add_shuffle(attention_mask); m3.reshape_dims = (1, 1, attention_window)
-    ma = network.add_elementwise(sc.get_output(0), m3.get_output(0), trt.ElementWiseOperation.SUM)
-    sm = network.add_softmax(ma.get_output(0)); sm.axes = 1 << 2
-    ct = network.add_matrix_multiply(sm.get_output(0), trt.MatrixOperation.NONE, vh.get_output(0), trt.MatrixOperation.NONE)
-    cf = network.add_shuffle(ct.get_output(0)); cf.reshape_dims = (1, attention_size)
-    sa = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cf.get_output(0), attention_size, hidden_size, weights[f"{prefix}.w_o"], dtype=dtype), hidden_size, weights[f"{prefix}.o_bias"], dtype=dtype)
+    mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
+    cf = graph_ops.add_attention_from_rows(
+        network, q, ak.get_output(0), av.get_output(0),
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=1, kv_seq=attention_window,
+        mask=mask_4d)
+    sa = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cf, attention_size, hidden_size, weights[f"{prefix}.w_o"], dtype=dtype), hidden_size, weights[f"{prefix}.o_bias"], dtype=dtype)
     psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
 
     # Cross-attention
@@ -465,15 +485,11 @@ def _add_whisper_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cr
         graph_ops.add_matmul_rhs_constant(network, cross_v_typed, hidden_size, attention_size, weights[f"{prefix}.cross_w_v"], dtype=dtype),
         attention_size, weights[f"{prefix}.cross_b_v"], dtype=dtype)
 
-    cqh = network.add_shuffle(cq); cqh.reshape_dims = (num_heads, 1, head_dim)
-    ckh = network.add_shuffle(ck_proj); ckh.reshape_dims = (max_source_positions, num_heads, head_dim); ckh.second_transpose = trt.Permutation([1, 0, 2])
-    cvh = network.add_shuffle(cv_proj); cvh.reshape_dims = (max_source_positions, num_heads, head_dim); cvh.second_transpose = trt.Permutation([1, 0, 2])
-
-    cs = network.add_elementwise(network.add_matrix_multiply(cqh.get_output(0), trt.MatrixOperation.NONE, ckh.get_output(0), trt.MatrixOperation.TRANSPOSE).get_output(0), attn_scale_tensor, trt.ElementWiseOperation.PROD)
-    csm = network.add_softmax(cs.get_output(0)); csm.axes = 1 << 2
-    cc = network.add_matrix_multiply(csm.get_output(0), trt.MatrixOperation.NONE, cvh.get_output(0), trt.MatrixOperation.NONE)
-    ccf = network.add_shuffle(cc.get_output(0)); ccf.reshape_dims = (1, attention_size)
-    ca = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ccf.get_output(0), attention_size, hidden_size, weights[f"{prefix}.cross_w_o"], dtype=dtype), hidden_size, weights[f"{prefix}.cross_b_o"], dtype=dtype)
+    ccf = _add_whisper_cross_attention_decomposed(
+        network, cq, ck_proj, cv_proj,
+        num_heads=num_heads, head_dim=head_dim,
+        max_source_positions=max_source_positions)
+    ca = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"], dtype=dtype), hidden_size, weights[f"{prefix}.cross_b_o"], dtype=dtype)
     pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
 
     # GELU MLP
@@ -483,11 +499,62 @@ def _add_whisper_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cr
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
 
 
+def _add_whisper_cross_attention_decomposed(
+    network,
+    q,
+    k,
+    v,
+    *,
+    num_heads: int,
+    head_dim: int,
+    max_source_positions: int,
+):
+    """Whisper decoder cross-attention as decomposed SDPA.
+
+    TRT 10.16 native IAttention selects an inaccurate fused MHA v2 tactic for
+    Whisper's FP16 single-query, long-KV cross-attention shape
+    [1, H, 1, D] x [1, H, 1500, D]. The equivalent primitive SDPA graph still
+    fuses in TRT, but selects the accurate MHA v1 tactic, so keep this local
+    decomposed path until the native tactic issue is fixed.
+    """
+    attention_size = num_heads * head_dim
+    qh = network.add_shuffle(q)
+    qh.reshape_dims = (num_heads, 1, head_dim)
+    kh = network.add_shuffle(k)
+    kh.reshape_dims = (max_source_positions, num_heads, head_dim)
+    kh.second_transpose = trt.Permutation([1, 0, 2])
+    vh = network.add_shuffle(v)
+    vh.reshape_dims = (max_source_positions, num_heads, head_dim)
+    vh.second_transpose = trt.Permutation([1, 0, 2])
+
+    scores = network.add_matrix_multiply(
+        qh.get_output(0), trt.MatrixOperation.NONE,
+        kh.get_output(0), trt.MatrixOperation.TRANSPOSE)
+    scale_np_dtype = np.float16 if q.dtype == trt.float16 else np.float32
+    scale = graph_ops.add_constant(
+        network, (1, 1, 1),
+        np.array([[[1.0 / np.sqrt(head_dim)]]], dtype=scale_np_dtype),
+        dtype=scale_np_dtype)
+    if q.dtype == trt.bfloat16:
+        scale = network.add_cast(scale, trt.bfloat16).get_output(0)
+    scaled = network.add_elementwise(
+        scores.get_output(0), scale, trt.ElementWiseOperation.PROD)
+    probs = network.add_softmax(scaled.get_output(0))
+    probs.axes = 1 << 2
+    context = network.add_matrix_multiply(
+        probs.get_output(0), trt.MatrixOperation.NONE,
+        vh.get_output(0), trt.MatrixOperation.NONE)
+    out = network.add_shuffle(context.get_output(0))
+    out.reshape_dims = (1, attention_size)
+    return out.get_output(0)
+
+
 def _mark_debug_output(network, tensor, name):
     identity = network.add_identity(tensor)
     cast = network.add_cast(identity.get_output(0), trt.float32)
     out = cast.get_output(0)
-    out.name = name; network.mark_output(out)
+    out.name = name
+    network.mark_output(out)
 
 
 plugin = WhisperPlugin()

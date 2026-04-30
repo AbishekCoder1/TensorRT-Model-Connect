@@ -59,6 +59,9 @@ class ITrtModule {
     // calls start from a known-good context. Default is no-op.
     virtual void reset_execution_context() {}
 
+    // Human-readable label used for automatic runtime timing logs.
+    virtual void set_timing_label(std::string /*label*/) {}
+
     virtual bool ok() const = 0;
     virtual void keep_alive(std::shared_ptr<void> resource) = 0;
 };

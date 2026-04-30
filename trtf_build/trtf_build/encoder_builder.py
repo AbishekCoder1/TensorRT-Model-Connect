@@ -24,7 +24,6 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_ops
-from . import graph_blocks
 from .config import ModelConfig
 
 if TYPE_CHECKING:
@@ -50,7 +49,6 @@ def build_encoder_engine(
         Serialized engine plan bytes.
     """
     hidden = config.hidden_size
-    vocab = config.vocab_size
     num_layers = config.num_hidden_layers
     num_heads = config.num_attention_heads
     head_dim = hidden // num_heads
@@ -80,7 +78,6 @@ def build_encoder_engine(
     # pipeline doesn't provide this input, and inference is single-segment.
     tt_zeros = network.add_constant(
         (max_seq_length,), trt.Weights(np.zeros(max_seq_length, dtype=np.int32)))
-    tt_zeros.get_output(0).dtype = trt.int32
     token_type_ids = tt_zeros.get_output(0)
 
     # -------------------------------------------------------------------
@@ -94,7 +91,7 @@ def build_encoder_engine(
     token_type_table = graph_ops.add_constant(
         network, (type_vocab_size, embedding_size), weights["token_type_embedding"])
 
-    eps_tensor = graph_ops.add_constant(
+    graph_ops.add_constant(
         network, (1, 1), np.array([eps], dtype=np.float32))
     attn_scale_tensor = graph_ops.add_constant(
         network, (1, 1, 1), np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=np.float32))
@@ -219,20 +216,10 @@ def _add_seq_layer_norm(
 ) -> trt.ITensor:
     """LayerNorm over sequence of vectors: [seq_len, hidden] -> [seq_len, hidden].
 
-    Uses TRT's native fused normalization layer for higher numerical precision
-    (single kernel, no intermediate rounding from 6 separate ops).
+    Uses the shared TRT native normalization helper.
     """
-    # gamma/beta must match input ndims for add_normalization.
-    # Input is [seq_len, hidden], so constants are [1, hidden].
-    gamma_t = graph_ops.add_constant(network, (1, hidden_size), gamma)
-    beta_t = graph_ops.add_constant(network, (1, hidden_size), beta)
-
-    # TRT native fused LayerNorm: normalizes over the axes specified by axis_mask.
-    # For [seq_len, hidden], normalize over axis 1 (hidden dimension).
-    norm_layer = network.add_normalization(
-        inp, gamma_t, beta_t, 1 << 1)  # axis_mask = bit 1 = hidden dim
-    norm_layer.epsilon = eps
-    return norm_layer.get_output(0)
+    return graph_ops.add_layer_norm_native(
+        network, inp, hidden_size, gamma, beta, eps)
 
 
 def _add_encoder_layer(
@@ -279,59 +266,31 @@ def _add_encoder_layer(
     k = graph_ops.add_bias_sum(network, k, attention_size, weights[f"{prefix}.k_bias"])
     v = graph_ops.add_bias_sum(network, v, attention_size, weights[f"{prefix}.v_bias"])
 
-    # Reshape for multi-head attention: [seq_len, hidden] -> [num_heads, seq_len, head_dim]
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    q_heads.second_transpose = trt.Permutation([1, 0, 2])  # [num_heads, seq_len, head_dim]
-
-    k_heads = network.add_shuffle(k)
-    k_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    v_heads = network.add_shuffle(v)
-    v_heads.reshape_dims = (seq_length, num_heads, head_dim)
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Attention scores: Q @ K^T -> [num_heads, seq_len, seq_len]
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-    # Scale
-    scaled = network.add_elementwise(
-        score.get_output(0), attn_scale_tensor,
-        trt.ElementWiseOperation.PROD)
-
-    # Add relative position bias if present (MPNet/T5-style)
-    scores_with_bias = scaled.get_output(0)
+    # Add relative position bias if present (MPNet/T5-style). IAttention
+    # applies scaling internally through graph_ops.add_attention_from_rows, so
+    # the mask contains only additive bias/masking terms.
+    additive_mask = attn_mask
     if rel_pos_bias is not None:
-        scores_with_bias = network.add_elementwise(
-            scores_with_bias, rel_pos_bias,
-            trt.ElementWiseOperation.SUM).get_output(0)
+        additive_mask = network.add_elementwise(
+            rel_pos_bias, attn_mask, trt.ElementWiseOperation.SUM).get_output(0)
 
-    # Apply attention mask: add -1e10 penalty for padding positions
-    # attn_mask shape [1, 1, seq_len] broadcasts over [num_heads, seq_len, seq_len]
-    masked = network.add_elementwise(
-        scores_with_bias, attn_mask,
-        trt.ElementWiseOperation.SUM)
+    mask_4d = network.add_shuffle(additive_mask)
+    mask_4d.reshape_dims = (
+        (1, num_heads, seq_length, seq_length)
+        if rel_pos_bias is not None
+        else (1, 1, 1, seq_length)
+    )
 
-    # Softmax over last dimension (bidirectional, masked)
-    softmax = network.add_softmax(masked.get_output(0))
-    softmax.axes = 1 << 2  # last dim (seq_len)
-
-    # Context: softmax @ V -> [num_heads, seq_len, head_dim]
-    context_heads = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    # Reshape back: [num_heads, seq_len, head_dim] -> [seq_len, attention_size]
-    context_flat = network.add_shuffle(context_heads.get_output(0))
-    context_flat.first_transpose = trt.Permutation([1, 0, 2])  # [seq_len, num_heads, head_dim]
-    context_flat.reshape_dims = (seq_length, attention_size)
+    context_flat = graph_ops.add_attention_from_rows(
+        network, q, k, v,
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=seq_length, kv_seq=seq_length,
+        mask=mask_4d.get_output(0),
+        tag=prefix + ".attn")
 
     # Output projection
     attn_out = graph_ops.add_matmul_rhs_constant(
-        network, context_flat.get_output(0),
+        network, context_flat,
         attention_size, hidden_size,
         weights[f"{prefix}.w_o"])
     attn_out = graph_ops.add_bias_sum(

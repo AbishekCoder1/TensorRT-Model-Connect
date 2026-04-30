@@ -72,7 +72,6 @@ class DeepSeekOCRPlugin:
         num_heads = config.num_attention_heads
         num_kv_heads = config.num_key_value_heads
         head_dim = config.head_dim
-        intermediate_size = config.intermediate_size
 
         q_dim = num_heads * head_dim
         kv_dim = num_kv_heads * head_dim
@@ -314,29 +313,22 @@ class DeepSeekOCRPlugin:
         embedding_table = graph_ops.add_constant(
             network, (vocab, hidden), weights["embedding"])
 
-        cos_table_np = graph_ops.make_rope_table(
-            attention_window, attention_size, num_heads,
-            config.rope_theta, True)
-        sin_table_np = graph_ops.make_rope_table(
-            attention_window, attention_size, num_heads,
-            config.rope_theta, False)
-        rotate_half_np = graph_ops.make_rotate_half_matrix(
-            attention_size, num_heads)
-
-        cos_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), cos_table_np)
-        sin_tensor = graph_ops.add_constant(
-            network, (attention_window, attention_size), sin_table_np)
-        rotate_half_tensor = graph_ops.add_constant(
-            network, (attention_size, attention_size), rotate_half_np)
+        if head_dim < 2 or head_dim % 2 != 0:
+            raise ValueError(
+                "DeepSeek OCR decoder RoPE requires an even head_dim >= 2 "
+                "for TRT native RoPE")
+        cos_half_np = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, True)
+        sin_half_np = graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, False)
+        cos_half_tensor = graph_ops.add_constant(
+            network, cos_half_np.shape, cos_half_np)
+        sin_half_tensor = graph_ops.add_constant(
+            network, sin_half_np.shape, sin_half_np)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
             np.array([config.rms_norm_eps], dtype=np.float32))
-        attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
-        attn_scale_tensor = graph_ops.add_constant(
-            network, (1, 1, 1),
-            np.array([attn_scale], dtype=np.float32))
 
         # -----------------------------------------------------------
         # Embedding with input_embed override for VL
@@ -383,10 +375,8 @@ class DeepSeekOCRPlugin:
                 cache_v=cache_v_inputs[layer_idx],
                 attention_mask=attention_mask,
                 position_id=position_id,
-                cos_tensor=cos_tensor,
-                sin_tensor=sin_tensor,
-                rotate_half_tensor=rotate_half_tensor,
-                attn_scale_tensor=attn_scale_tensor,
+                cos_half_tensor=cos_half_tensor,
+                sin_half_tensor=sin_half_tensor,
                 eps_tensor=eps_tensor,
                 weights=weights,
                 prefix=prefix,
@@ -681,10 +671,8 @@ def _add_decoder_layer(
     cache_v: trt.ITensor,
     attention_mask: trt.ITensor,
     position_id: trt.ITensor,
-    cos_tensor: trt.ITensor,
-    sin_tensor: trt.ITensor,
-    rotate_half_tensor: trt.ITensor,
-    attn_scale_tensor: trt.ITensor,
+    cos_half_tensor: trt.ITensor,
+    sin_half_tensor: trt.ITensor,
     eps_tensor: trt.ITensor,
     weights: WeightDict,
     prefix: str,
@@ -722,13 +710,12 @@ def _add_decoder_layer(
         network, norm1, hidden_size, attention_size,
         weights[f"{prefix}.w_v"])
 
-    # Apply RoPE
-    q = graph_ops.add_apply_rope(
-        network, q, position_id, cos_tensor, sin_tensor,
-        rotate_half_tensor)
-    k = graph_ops.add_apply_rope(
-        network, k, position_id, cos_tensor, sin_tensor,
-        rotate_half_tensor)
+    q = graph_ops.add_apply_rope_native(
+        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        position_id, head_dim)
+    k = graph_ops.add_apply_rope_native(
+        network, k, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        position_id, head_dim)
 
     # Save present K/V
     present_k = k
@@ -748,52 +735,16 @@ def _add_decoder_layer(
         [cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
 
-    # Multi-head attention
-    q_heads = network.add_shuffle(q)
-    q_heads.reshape_dims = (num_heads, 1, head_dim)
-
-    k_heads = network.add_shuffle(all_k.get_output(0))
-    k_heads.reshape_dims = (attention_window, num_heads, head_dim)
-    v_heads = network.add_shuffle(all_v.get_output(0))
-    v_heads.reshape_dims = (attention_window, num_heads, head_dim)
-
-    k_heads.second_transpose = trt.Permutation([1, 0, 2])
-    v_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-    # Q @ K^T
-    score = network.add_matrix_multiply(
-        q_heads.get_output(0), trt.MatrixOperation.NONE,
-        k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-    # Scale
-    scaled = network.add_elementwise(
-        score.get_output(0), attn_scale_tensor,
-        trt.ElementWiseOperation.PROD)
-
-    # Mask
-    mask3d = network.add_shuffle(attention_mask)
-    mask3d.reshape_dims = (1, 1, attention_window)
-
-    masked = network.add_elementwise(
-        scaled.get_output(0), mask3d.get_output(0),
-        trt.ElementWiseOperation.SUM)
-
-    # Softmax
-    softmax = network.add_softmax(masked.get_output(0))
-    softmax.axes = 1 << 2
-
-    # Context: softmax @ V
-    context_heads = network.add_matrix_multiply(
-        softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-    # Reshape to [1, attention_size]
-    context_flat = network.add_shuffle(context_heads.get_output(0))
-    context_flat.reshape_dims = (1, attention_size)
+    mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
+    context_flat = graph_ops.add_attention_from_rows(
+        network, q, all_k.get_output(0), all_v.get_output(0),
+        num_heads=num_heads, head_dim=head_dim,
+        q_seq=1, kv_seq=attention_window,
+        mask=mask_4d)
 
     # Output projection
     attn_out = graph_ops.add_matmul_rhs_constant(
-        network, context_flat.get_output(0),
+        network, context_flat,
         attention_size, hidden_size,
         weights[f"{prefix}.w_o"])
 
@@ -1021,6 +972,8 @@ def _build_sam_attention(
             scaled.get_output(0), rel_bias_flat.get_output(0),
             trt.ElementWiseOperation.SUM)
 
+    # SAM-style 2D relative bias is query-dependent and is added before
+    # softmax, which native IAttention cannot model as an additive mask.
     softmax = network.add_softmax(scaled.get_output(0))
     softmax.axes = 1 << 2
     ctx = network.add_matrix_multiply(
@@ -1050,12 +1003,6 @@ def _build_sam_attention(
 
         # Crop back to original size if padded
         if pad_h > 0 or pad_w > 0:
-            starts = graph_ops.add_constant(
-                network, (4,), np.array([0, 0, 0, 0], dtype=np.int32))
-            sizes = graph_ops.add_constant(
-                network, (4,), np.array([1, grid_size, grid_size, hidden], dtype=np.int32))
-            strides = graph_ops.add_constant(
-                network, (4,), np.array([1, 1, 1, 1], dtype=np.int32))
             crop = network.add_slice(
                 out_merged.get_output(0),
                 start=(0, 0, 0, 0),
@@ -1419,45 +1366,24 @@ def _build_deepseek_ocr_vision_engine(
     enc_2d = network.add_shuffle(enc_input)
     enc_2d.reshape_dims = (qwen2_total_seq, qwen2_hidden)
 
-    # Precompute RoPE tables for Qwen2 (bidirectional, position 0..511)
-    cos_np = graph_ops.make_rope_table(
-        qwen2_total_seq, qwen2_q_dim, qwen2_heads, rope_theta, True)
-    sin_np = graph_ops.make_rope_table(
-        qwen2_total_seq, qwen2_q_dim, qwen2_heads, rope_theta, False)
-    rotate_half_np = graph_ops.make_rotate_half_matrix(
-        qwen2_q_dim, qwen2_heads)
-
-    # For bidirectional: each token at its own position
-    # Position IDs: [0, 1, 2, ..., 511]
-    # Pre-gather the cos/sin tables: [512, q_dim]
-    cos_gathered = cos_np[:qwen2_total_seq]  # [512, 896]
-    sin_gathered = sin_np[:qwen2_total_seq]  # [512, 896]
-    cos_c = graph_ops.add_constant(
-        network, (qwen2_total_seq, qwen2_q_dim), cos_gathered)
-    sin_c = graph_ops.add_constant(
-        network, (qwen2_total_seq, qwen2_q_dim), sin_gathered)
-    rot_half_c = graph_ops.add_constant(
-        network, (qwen2_q_dim, qwen2_q_dim), rotate_half_np)
-
-    # Also need RoPE tables for KV (128-dim with 2 KV heads)
-    cos_kv_np = graph_ops.make_rope_table(
-        qwen2_total_seq, qwen2_kv_dim, qwen2_kv_heads, rope_theta, True)
-    sin_kv_np = graph_ops.make_rope_table(
-        qwen2_total_seq, qwen2_kv_dim, qwen2_kv_heads, rope_theta, False)
-    rotate_half_kv_np = graph_ops.make_rotate_half_matrix(
-        qwen2_kv_dim, qwen2_kv_heads)
-    cos_kv_c = graph_ops.add_constant(
-        network, (qwen2_total_seq, qwen2_kv_dim), cos_kv_np[:qwen2_total_seq])
-    sin_kv_c = graph_ops.add_constant(
-        network, (qwen2_total_seq, qwen2_kv_dim), sin_kv_np[:qwen2_total_seq])
-    rot_half_kv_c = graph_ops.add_constant(
-        network, (qwen2_kv_dim, qwen2_kv_dim), rotate_half_kv_np)
+    # Precompute native RoPE half-dim caches for Qwen2 positions 0..511.
+    cos_half_np = graph_ops.make_rope_table_half_dim(
+        qwen2_total_seq, qwen2_head_dim, rope_theta, True)
+    sin_half_np = graph_ops.make_rope_table_half_dim(
+        qwen2_total_seq, qwen2_head_dim, rope_theta, False)
+    cos_half_c = graph_ops.add_constant(
+        network, cos_half_np.shape, cos_half_np)
+    sin_half_c = graph_ops.add_constant(
+        network, sin_half_np.shape, sin_half_np)
+    position_ids_c = graph_ops.add_constant(
+        network,
+        (qwen2_total_seq,),
+        np.arange(qwen2_total_seq, dtype=np.int32),
+        dtype=np.int32)
 
     enc_state = enc_2d.get_output(0)  # [512, 896]
 
     attn_scale = 1.0 / np.sqrt(qwen2_head_dim)
-    attn_scale_c = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
 
     # Standard causal mask (lower-triangular). HF Qwen2 SDPA uses is_causal=True
     # which creates this mask internally. All tokens attend only to preceding tokens.
@@ -1494,104 +1420,29 @@ def _build_deepseek_ocr_vision_engine(
             network, norm1, qwen2_hidden, qwen2_kv_dim, vw[f"{wp}.w_v"])
         v = graph_ops.add_bias_sum(network, v, qwen2_kv_dim, vw[f"{wp}.v_bias"])
 
-        # Apply RoPE (bidirectional, all positions at once)
-        # Q RoPE: [512, 896] * cos + rotate_half([512, 896]) * sin
-        q_cos = network.add_elementwise(
-            q, cos_c, trt.ElementWiseOperation.PROD)
-        q_rotated = network.add_matrix_multiply(
-            q, trt.MatrixOperation.NONE,
-            rot_half_c, trt.MatrixOperation.NONE)
-        q_sin = network.add_elementwise(
-            q_rotated.get_output(0), sin_c, trt.ElementWiseOperation.PROD)
-        q_rope = network.add_elementwise(
-            q_cos.get_output(0), q_sin.get_output(0),
-            trt.ElementWiseOperation.SUM).get_output(0)
+        q_rope = graph_ops.add_apply_rope_native(
+            network, q, qwen2_heads, qwen2_head_dim,
+            cos_half_c, sin_half_c, position_ids_c, qwen2_head_dim,
+            sequence_length=qwen2_total_seq)
+        k_rope = graph_ops.add_apply_rope_native(
+            network, k, qwen2_kv_heads, qwen2_head_dim,
+            cos_half_c, sin_half_c, position_ids_c, qwen2_head_dim,
+            sequence_length=qwen2_total_seq)
 
-        # K RoPE: [512, 128]
-        k_cos = network.add_elementwise(
-            k, cos_kv_c, trt.ElementWiseOperation.PROD)
-        k_rotated = network.add_matrix_multiply(
-            k, trt.MatrixOperation.NONE,
-            rot_half_kv_c, trt.MatrixOperation.NONE)
-        k_sin = network.add_elementwise(
-            k_rotated.get_output(0), sin_kv_c, trt.ElementWiseOperation.PROD)
-        k_rope = network.add_elementwise(
-            k_cos.get_output(0), k_sin.get_output(0),
-            trt.ElementWiseOperation.SUM).get_output(0)
-
-        # GQA: expand K,V from [512, 128] to [512, 896]
-        # Each of 2 KV heads serves 7 Q heads
-        group_size = qwen2_heads // qwen2_kv_heads  # 7
-        # Reshape K: [512, 2, 64] -> repeat each head 7x -> [512, 14, 64] -> [512, 896]
-        k_3d = network.add_shuffle(k_rope)
-        k_3d.reshape_dims = (qwen2_total_seq, qwen2_kv_heads, 1, qwen2_head_dim)
-        # Use a constant to tile: ones [1, 1, group_size, 1]
-        # Multiply then reshape
-        # Simpler: build expanded constant via numpy
-        # Actually, we can use the pre-expanded approach like standard decoder
-        # But here we have the full sequence, not single token. Let's use a gather-based
-        # approach or just manually expand via slicing and concatenation.
-        # Simplest: use a repeat pattern constant
-        k_expanded_parts = []
-        v_3d = network.add_shuffle(v)
-        v_3d.reshape_dims = (qwen2_total_seq, qwen2_kv_heads, qwen2_head_dim)
-        k_3d_r = network.add_shuffle(k_rope)
-        k_3d_r.reshape_dims = (qwen2_total_seq, qwen2_kv_heads, qwen2_head_dim)
-
-        # Build GQA expansion via index gather
-        # Create index tensor: [0,0,0,0,0,0,0, 1,1,1,1,1,1,1] for 14 heads -> 2 kv_heads
-        gqa_indices = np.array(
-            [i // group_size for i in range(qwen2_heads)], dtype=np.int32)
-        gqa_weights = trt.Weights(np.ascontiguousarray(gqa_indices, dtype=np.int32))
-        gqa_idx_layer = network.add_constant((qwen2_heads,), gqa_weights)
-        gqa_idx_c = gqa_idx_layer.get_output(0)
-
-        # K expand: [seq, kv_heads, head_dim] -> gather on axis=1 with gqa_indices
-        k_expanded = network.add_gather(
-            k_3d_r.get_output(0), gqa_idx_c, 1)  # [seq, num_heads, head_dim]
-        v_expanded = network.add_gather(
-            v_3d.get_output(0), gqa_idx_c, 1)  # [seq, num_heads, head_dim]
-
-        # Multi-head attention (bidirectional, no mask)
-        # Q: [512, 896] -> [512, 14, 64] -> transpose [14, 512, 64]
-        q_heads = network.add_shuffle(q_rope)
-        q_heads.reshape_dims = (qwen2_total_seq, qwen2_heads, qwen2_head_dim)
-        q_heads.second_transpose = trt.Permutation([1, 0, 2])
-
-        # K: [seq, num_heads, head_dim] -> [num_heads, seq, head_dim]
-        k_heads = network.add_shuffle(k_expanded.get_output(0))
-        k_heads.first_transpose = trt.Permutation([1, 0, 2])
-        v_heads = network.add_shuffle(v_expanded.get_output(0))
-        v_heads.first_transpose = trt.Permutation([1, 0, 2])
-
-        # Q @ K^T: [14, 512, 64] @ [14, 64, 512] -> [14, 512, 512]
-        score = network.add_matrix_multiply(
-            q_heads.get_output(0), trt.MatrixOperation.NONE,
-            k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        scaled_score = network.add_elementwise(
-            score.get_output(0), attn_scale_c,
-            trt.ElementWiseOperation.PROD)
-
-        # Mixed mask: bidirectional for images, causal for queries
-        masked_score = network.add_elementwise(
-            scaled_score.get_output(0), qwen2_mask_c,
-            trt.ElementWiseOperation.SUM)
-        softmax = network.add_softmax(masked_score.get_output(0))
-        softmax.axes = 1 << 2
-
-        # Context: [14, 512, 512] @ [14, 512, 64] -> [14, 512, 64]
-        ctx = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_heads.get_output(0), trt.MatrixOperation.NONE)
-
-        # Reshape: [14, 512, 64] -> [512, 14, 64] -> [512, 896]
-        ctx_flat = network.add_shuffle(ctx.get_output(0))
-        ctx_flat.first_transpose = trt.Permutation([1, 0, 2])
-        ctx_flat.reshape_dims = (qwen2_total_seq, qwen2_q_dim)
+        mask_4d = graph_ops.add_3d_mask_to_4d(network, qwen2_mask_c)
+        ctx_flat = graph_ops.add_attention_from_rows(
+            network, q_rope, k_rope, v,
+            num_heads=qwen2_heads,
+            num_kv_heads=qwen2_kv_heads,
+            head_dim=qwen2_head_dim,
+            q_seq=qwen2_total_seq,
+            kv_seq=qwen2_total_seq,
+            mask=mask_4d,
+            scale=attn_scale)
 
         # Output projection: [512, 896] @ [896, 896] -> [512, 896]
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, ctx_flat.get_output(0),
+            network, ctx_flat,
             qwen2_q_dim, qwen2_hidden, vw[f"{wp}.w_o"])
 
         # Residual

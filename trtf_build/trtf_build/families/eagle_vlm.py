@@ -96,7 +96,6 @@ class EagleVLMPlugin:
         vc = config.raw.get("vision_config", {})
         image_size = vc.get("image_size", 384)
         patch_size = vc.get("patch_size", 14)
-        num_patches = (image_size // patch_size) ** 2
 
         # After 2x2 pixel_shuffle merge, the num_vision_tokens is reduced by 4
         merge_size = 2
@@ -187,7 +186,6 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         kv_hidden = k_raw.shape[0]
         if attention_size == 0:
             attention_size = q_hidden
-        head_dim = q_hidden // num_heads
 
         q_t = _transpose_2d(q_raw, "q_proj")
         k_t = _transpose_2d(k_raw, "k_proj")
@@ -359,45 +357,42 @@ def _build_eagle_engine(
     hidden_state = merged.get_output(0)
 
     # --- RoPE tables ---
+    if head_dim < 2 or head_dim % 2 != 0:
+        raise ValueError(
+            "Eagle VLM RoPE requires an even head_dim >= 2 for TRT native RoPE")
     # Check for Llama3 RoPE scaling (from rope_parameters in llm_config)
     rope_params = config.raw.get("llm_config", {}).get("rope_parameters", {})
     rope_type = rope_params.get("rope_type", "")
     if rope_type == "llama3":
-        cos_table_np = _make_llama3_rope_table(
-            seq_length, attention_size, num_heads, config.rope_theta, True,
+        cos_half_np = _make_llama3_rope_table_half_dim(
+            seq_length, head_dim, config.rope_theta, True,
             factor=rope_params.get("factor", 1.0),
             low_freq_factor=rope_params.get("low_freq_factor", 1.0),
             high_freq_factor=rope_params.get("high_freq_factor", 1.0),
             original_max_position_embeddings=rope_params.get(
                 "original_max_position_embeddings", 8192))
-        sin_table_np = _make_llama3_rope_table(
-            seq_length, attention_size, num_heads, config.rope_theta, False,
+        sin_half_np = _make_llama3_rope_table_half_dim(
+            seq_length, head_dim, config.rope_theta, False,
             factor=rope_params.get("factor", 1.0),
             low_freq_factor=rope_params.get("low_freq_factor", 1.0),
             high_freq_factor=rope_params.get("high_freq_factor", 1.0),
             original_max_position_embeddings=rope_params.get(
                 "original_max_position_embeddings", 8192))
     else:
-        cos_table_np = graph_ops.make_rope_table(
-            seq_length, attention_size, num_heads,
-            config.rope_theta, True)
-        sin_table_np = graph_ops.make_rope_table(
-            seq_length, attention_size, num_heads,
-            config.rope_theta, False)
-    rotate_half_np = graph_ops.make_rotate_half_matrix(
-        attention_size, num_heads)
-
-    cos_tensor = graph_ops.add_constant(
-        network, (seq_length, attention_size), cos_table_np)
-    sin_tensor = graph_ops.add_constant(
-        network, (seq_length, attention_size), sin_table_np)
-    rotate_half_tensor = graph_ops.add_constant(
-        network, (attention_size, attention_size), rotate_half_np)
+        cos_half_np = graph_ops.make_rope_table_half_dim(
+            seq_length, head_dim, config.rope_theta, True)
+        sin_half_np = graph_ops.make_rope_table_half_dim(
+            seq_length, head_dim, config.rope_theta, False)
+    cos_half_tensor = graph_ops.add_constant(
+        network, cos_half_np.shape, cos_half_np)
+    sin_half_tensor = graph_ops.add_constant(
+        network, sin_half_np.shape, sin_half_np)
+    rope_position_ids = graph_ops.add_constant(
+        network, (seq_length,), np.arange(seq_length, dtype=np.int32),
+        dtype=np.int32)
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
-    attn_scale_tensor = graph_ops.add_constant(
-        network, (1, 1, 1),
-        np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=np.float32))
+    attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     # --- Build padding attention mask from attention_mask input ---
     # attention_mask is [seq_length] with 1=real, 0=padding.
@@ -417,9 +412,13 @@ def _build_eagle_engine(
     pad_penalty = network.add_elementwise(
         inv_mask.get_output(0), neg_large,
         trt.ElementWiseOperation.PROD)  # [seq_length]: 0.0 for real, -1e10 for pad
-    # Reshape to [1, 1, seq_length] for broadcasting across [num_heads, seq_length, seq_length]
-    pad_mask_reshape = network.add_shuffle(pad_penalty.get_output(0))
-    pad_mask_reshape.reshape_dims = (1, 1, seq_length)
+    pad_mask_row = network.add_shuffle(pad_penalty.get_output(0))
+    pad_mask_row.reshape_dims = (1, seq_length)
+    query_zeros = graph_ops.add_constant(
+        network, (seq_length, 1), np.zeros((seq_length, 1), dtype=np.float32))
+    pad_mask_2d = network.add_elementwise(
+        query_zeros, pad_mask_row.get_output(0), trt.ElementWiseOperation.SUM)
+    pad_mask_4d = graph_ops.add_2d_mask_to_4d(network, pad_mask_2d.get_output(0))
 
     # --- Encoder layers (no KV cache -- full self-attention over seq_length) ---
     # Single-pass encoder: process all positions at once.
@@ -445,82 +444,25 @@ def _build_eagle_engine(
         v = graph_ops.add_matmul_rhs_constant(
             network, norm1, hidden, attention_size, weights[f"{prefix}.w_v"])
 
-        # RoPE: apply to all positions at once
-        # q, k are [seq_length, attention_size]
-        # cos/sin are [seq_length, attention_size]
-        # For batched RoPE, multiply element-wise
-        q_cos = network.add_elementwise(
-            q, cos_tensor, trt.ElementWiseOperation.PROD)
-        q_rot = network.add_matrix_multiply(
-            q, trt.MatrixOperation.NONE,
-            rotate_half_tensor, trt.MatrixOperation.NONE)
-        q_sin = network.add_elementwise(
-            q_rot.get_output(0), sin_tensor, trt.ElementWiseOperation.PROD)
-        q_rope = network.add_elementwise(
-            q_cos.get_output(0), q_sin.get_output(0),
-            trt.ElementWiseOperation.SUM)
+        q_rope = graph_ops.add_apply_rope_native(
+            network, q, num_heads, head_dim,
+            cos_half_tensor, sin_half_tensor, rope_position_ids,
+            head_dim, sequence_length=seq_length)
+        k_rope = graph_ops.add_apply_rope_native(
+            network, k, num_heads, head_dim,
+            cos_half_tensor, sin_half_tensor, rope_position_ids,
+            head_dim, sequence_length=seq_length)
 
-        k_cos = network.add_elementwise(
-            k, cos_tensor, trt.ElementWiseOperation.PROD)
-        k_rot = network.add_matrix_multiply(
-            k, trt.MatrixOperation.NONE,
-            rotate_half_tensor, trt.MatrixOperation.NONE)
-        k_sin = network.add_elementwise(
-            k_rot.get_output(0), sin_tensor, trt.ElementWiseOperation.PROD)
-        k_rope = network.add_elementwise(
-            k_cos.get_output(0), k_sin.get_output(0),
-            trt.ElementWiseOperation.SUM)
-
-        # Reshape for multi-head attention
-        # q_rope: [seq_length, attention_size] -> [num_heads, seq_length, head_dim]
-        q_reshaped = network.add_shuffle(q_rope.get_output(0))
-        q_reshaped.reshape_dims = (seq_length, num_heads, head_dim)
-        q_reshaped.second_transpose = (1, 0, 2)  # [num_heads, seq_length, head_dim]
-
-        k_reshaped = network.add_shuffle(k_rope.get_output(0))
-        k_reshaped.reshape_dims = (seq_length, num_heads, head_dim)
-        k_reshaped.second_transpose = (1, 0, 2)
-
-        v_reshaped = network.add_shuffle(v.get_output(0) if hasattr(v, 'get_output') else v)
-        v_reshaped.reshape_dims = (seq_length, num_heads, head_dim)
-        v_reshaped.second_transpose = (1, 0, 2)
-
-        # Attention scores: Q @ K^T / sqrt(head_dim)
-        # [num_heads, seq_length, head_dim] @ [num_heads, head_dim, seq_length]
-        scores = network.add_matrix_multiply(
-            q_reshaped.get_output(0), trt.MatrixOperation.NONE,
-            k_reshaped.get_output(0), trt.MatrixOperation.TRANSPOSE)
-
-        # Scale
-        scaled = network.add_elementwise(
-            scores.get_output(0), attn_scale_tensor,
-            trt.ElementWiseOperation.PROD)
-
-        # Bidirectional attention with padding mask:
-        # Add padding mask so real tokens don't attend to padding positions.
-        # pad_mask_reshape is [1, 1, seq_length], broadcasts over [num_heads, seq_length, seq_length]
-        masked = network.add_elementwise(
-            scaled.get_output(0), pad_mask_reshape.get_output(0),
-            trt.ElementWiseOperation.SUM)
-
-        # Softmax
-        softmax = network.add_softmax(masked.get_output(0))
-        softmax.axes = 1 << 2  # along last dim (seq_length)
-
-        # Attention output: softmax @ V
-        # [num_heads, seq_length, seq_length] @ [num_heads, seq_length, head_dim]
-        attn_out = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_reshaped.get_output(0), trt.MatrixOperation.NONE)
-
-        # Reshape back: [num_heads, seq_length, head_dim] -> [seq_length, attention_size]
-        attn_concat = network.add_shuffle(attn_out.get_output(0))
-        attn_concat.first_transpose = (1, 0, 2)  # [seq_length, num_heads, head_dim]
-        attn_concat.reshape_dims = (seq_length, attention_size)
+        attn_concat = graph_ops.add_attention_from_rows(
+            network, q_rope, k_rope, v,
+            num_heads=num_heads, head_dim=head_dim,
+            q_seq=seq_length, kv_seq=seq_length,
+            mask=pad_mask_4d,
+            scale=attn_scale)
 
         # Output projection
         proj_out = graph_ops.add_matmul_rhs_constant(
-            network, attn_concat.get_output(0), attention_size, hidden,
+            network, attn_concat, attention_size, hidden,
             weights[f"{prefix}.w_o"])
 
         # Residual
@@ -606,7 +548,6 @@ def _build_siglip_vision_engine(
     vision_hidden = vision_config.get("hidden_size", 1152)
     num_vision_layers = vision_config.get("num_hidden_layers", 27)
     num_vision_heads = vision_config.get("num_attention_heads", 16)
-    vision_mlp_size = vision_config.get("intermediate_size", 4304)
     layer_norm_eps = vision_config.get("layer_norm_eps", 1e-6)
 
     num_patches_h = image_size // patch_size
@@ -782,43 +723,10 @@ def _build_siglip_vision_engine(
                 network, normed, vision_hidden, vision_hidden,
                 np.ascontiguousarray(v_w.T))
 
-        # Multi-head attention
-        q_mh = network.add_shuffle(q_out)
-        q_mh.reshape_dims = (num_patches, num_vision_heads, head_dim)
-        q_mh.second_transpose = (1, 0, 2)
-
-        k_mh = network.add_shuffle(k_out)
-        k_mh.reshape_dims = (num_patches, num_vision_heads, head_dim)
-        k_mh.second_transpose = (1, 0, 2)
-
-        v_mh = network.add_shuffle(v_out)
-        v_mh.reshape_dims = (num_patches, num_vision_heads, head_dim)
-        v_mh.second_transpose = (1, 0, 2)
-
-        scale_val = 1.0 / np.sqrt(head_dim)
-        scale_const = graph_ops.add_constant(
-            network, (1, 1, 1),
-            np.array([scale_val], dtype=np.float32))
-
-        scores = network.add_matrix_multiply(
-            q_mh.get_output(0), trt.MatrixOperation.NONE,
-            k_mh.get_output(0), trt.MatrixOperation.TRANSPOSE)
-        scaled = network.add_elementwise(
-            scores.get_output(0), scale_const,
-            trt.ElementWiseOperation.PROD)
-
-        # No causal mask for vision (bidirectional attention)
-        softmax = network.add_softmax(scaled.get_output(0))
-        softmax.axes = 1 << 2
-
-        attn_out = network.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE,
-            v_mh.get_output(0), trt.MatrixOperation.NONE)
-
-        # Reshape back
-        concat = network.add_shuffle(attn_out.get_output(0))
-        concat.first_transpose = (1, 0, 2)
-        concat.reshape_dims = (num_patches, vision_hidden)
+        concat = graph_ops.add_attention_from_rows(
+            network, q_out, k_out, v_out,
+            num_heads=num_vision_heads, head_dim=head_dim,
+            q_seq=num_patches, kv_seq=num_patches)
 
         # Output projection
         out_key = f"{lp}.self_attn.out_proj.weight"
@@ -830,10 +738,10 @@ def _build_siglip_vision_engine(
         if out_key in weights:
             out_w = weights[out_key].astype(np.float32)
             proj = graph_ops.add_matmul_rhs_constant(
-                network, concat.get_output(0), vision_hidden, vision_hidden,
+                network, concat, vision_hidden, vision_hidden,
                 np.ascontiguousarray(out_w.T))
         else:
-            proj = concat.get_output(0)
+            proj = concat
 
         # Residual
         res1 = network.add_elementwise(
@@ -1051,10 +959,9 @@ def _add_layer_norm_vision(
     return shifted.get_output(0)
 
 
-def _make_llama3_rope_table(
+def _make_llama3_rope_table_half_dim(
     max_seq_length: int,
-    attention_size: int,
-    num_heads: int,
+    head_dim: int,
     rope_theta: float,
     cosine: bool,
     factor: float,
@@ -1062,14 +969,13 @@ def _make_llama3_rope_table(
     high_freq_factor: float,
     original_max_position_embeddings: int,
 ) -> np.ndarray:
-    """Build Llama3-style RoPE table with frequency scaling.
+    """Build Llama3-style native RoPE table with frequency scaling.
 
     Llama3 RoPE applies frequency-dependent scaling to inv_freq:
     - High-frequency dims (short wavelength): no scaling
     - Low-frequency dims (long wavelength): scale by 1/factor
     - Mid-frequency dims: smooth interpolation
     """
-    head_dim = attention_size // num_heads
     half_dim = head_dim // 2
 
     # Standard inv_freq
@@ -1091,21 +997,17 @@ def _make_llama3_rope_table(
                 high_freq_factor - low_freq_factor)
             scaled_inv_freq[i] = (1 - smooth) * freq / factor + smooth * freq
 
-    # Build table [max_seq_length, attention_size]
+    # Build table [max_seq_length, head_dim // 2] for IRotaryEmbeddingLayer.
     table = np.full(
-        (max_seq_length, attention_size),
+        (max_seq_length, half_dim),
         1.0 if cosine else 0.0,
         dtype=np.float32,
     )
 
     for pos in range(max_seq_length):
-        for head in range(num_heads):
-            for dim in range(head_dim):
-                freq_idx = dim % half_dim
-                angle = pos * scaled_inv_freq[freq_idx]
-                value = float(np.cos(angle) if cosine else np.sin(angle))
-                offset = head * head_dim + dim
-                table[pos, offset] = value
+        for dim in range(half_dim):
+            angle = pos * scaled_inv_freq[dim]
+            table[pos, dim] = float(np.cos(angle) if cosine else np.sin(angle))
 
     return table
 
