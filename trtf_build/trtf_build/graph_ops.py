@@ -434,22 +434,31 @@ def add_gelu_new(
     inp: trt.ITensor,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """GELU (tanh approximation): 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))."""
+    """GELU (tanh approximation): 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3))).
+
+    Constants are cast to ``inp.dtype`` so the elementwise ops are valid in
+    a STRONGLY_TYPED network when ``inp`` is bf16 (storage np_dtype is
+    fp16, runtime trt_dtype is bfloat16) or any other non-matching combo.
+    """
+    target_dtype = inp.dtype
+
+    def _const(name, value):
+        c = add_constant(network, (1, 1), np.array([value], dtype=np.float32), dtype=dtype)
+        return _cast_back_to_trt_dtype(network, c, target_dtype)
+
     # x^3
     x_sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
     x_cu = network.add_elementwise(
         x_sq.get_output(0), inp, trt.ElementWiseOperation.PROD)
     # 0.044715 * x^3
-    coeff = add_constant(network, (1, 1), np.array([0.044715], dtype=np.float32), dtype=dtype)
+    coeff = _const("coeff", 0.044715)
     scaled_cube = network.add_elementwise(
         x_cu.get_output(0), coeff, trt.ElementWiseOperation.PROD)
     # x + 0.044715 * x^3
     inner_sum = network.add_elementwise(
         inp, scaled_cube.get_output(0), trt.ElementWiseOperation.SUM)
     # sqrt(2/pi) * (x + 0.044715 * x^3)
-    sqrt_2_over_pi = add_constant(
-        network, (1, 1),
-        np.array([np.sqrt(2.0 / np.pi)], dtype=np.float32), dtype=dtype)
+    sqrt_2_over_pi = _const("sqrt_2_over_pi", np.sqrt(2.0 / np.pi))
     tanh_arg = network.add_elementwise(
         sqrt_2_over_pi, inner_sum.get_output(0),
         trt.ElementWiseOperation.PROD)
@@ -457,11 +466,11 @@ def add_gelu_new(
     tanh_l = network.add_activation(
         tanh_arg.get_output(0), trt.ActivationType.TANH)
     # 1 + tanh(...)
-    one = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32), dtype=dtype)
+    one = _const("one", 1.0)
     one_plus_tanh = network.add_elementwise(
         one, tanh_l.get_output(0), trt.ElementWiseOperation.SUM)
     # 0.5 * x
-    half = add_constant(network, (1, 1), np.array([0.5], dtype=np.float32), dtype=dtype)
+    half = _const("half", 0.5)
     half_x = network.add_elementwise(
         half, inp, trt.ElementWiseOperation.PROD)
     # 0.5 * x * (1 + tanh(...))
@@ -476,15 +485,25 @@ def add_gelu_erf(
     inp: trt.ITensor,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """GELU (exact, erf-based): 0.5 * x * (1 + erf(x / sqrt(2)))."""
-    inv_sqrt2 = add_constant(network, (1, 1), np.array([1.0 / np.sqrt(2.0)], dtype=np.float32), dtype=dtype)
+    """GELU (exact, erf-based): 0.5 * x * (1 + erf(x / sqrt(2))).
+
+    Constants are cast to ``inp.dtype`` for the same STRONGLY_TYPED reason
+    documented on ``add_gelu_new``.
+    """
+    target_dtype = inp.dtype
+
+    def _const(value):
+        c = add_constant(network, (1, 1), np.array([value], dtype=np.float32), dtype=dtype)
+        return _cast_back_to_trt_dtype(network, c, target_dtype)
+
+    inv_sqrt2 = _const(1.0 / np.sqrt(2.0))
     x_scaled = network.add_elementwise(
         inp, inv_sqrt2, trt.ElementWiseOperation.PROD)
     erf_out = network.add_unary(x_scaled.get_output(0), trt.UnaryOperation.ERF)
-    one = add_constant(network, (1, 1), np.array([1.0], dtype=np.float32), dtype=dtype)
+    one = _const(1.0)
     one_plus_erf = network.add_elementwise(
         one, erf_out.get_output(0), trt.ElementWiseOperation.SUM)
-    half = add_constant(network, (1, 1), np.array([0.5], dtype=np.float32), dtype=dtype)
+    half = _const(0.5)
     half_x = network.add_elementwise(
         half, inp, trt.ElementWiseOperation.PROD)
     result = network.add_elementwise(
