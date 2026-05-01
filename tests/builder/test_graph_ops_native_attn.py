@@ -424,6 +424,33 @@ class TestAddAttentionCore:
                                    err_msg=f"B={B} H={H} q={q_S} kv={kv_S} D={D}")
 
     @requires_trt
+    def test_fp32_accumulation_accepts_fp16_inputs(self):
+        """FP16 Q/K/V can opt into a FP32 IAttention boundary and cast back."""
+        B, H, q_S, kv_S, D = 1, 4, 1, 64, 32
+        rng = np.random.default_rng(3)
+        q = rng.standard_normal((B, H, q_S, D)).astype(np.float16)
+        k = rng.standard_normal((B, H, kv_S, D)).astype(np.float16)
+        v = rng.standard_normal((B, H, kv_S, D)).astype(np.float16)
+
+        def build(network, trt_inputs):
+            ctx = graph_ops._add_attention_core(
+                network,
+                trt_inputs["q"], trt_inputs["k"], trt_inputs["v"],
+                causal=False,
+                fp32_accumulation=True)
+            return {"out": ctx}
+
+        out = _run_strongly_typed(
+            build, {"q": q, "k": k, "v": v})["out"]
+        ref = _ref_sdpa(
+            q.astype(np.float32),
+            k.astype(np.float32),
+            v.astype(np.float32))
+
+        assert out.dtype == np.float16
+        np.testing.assert_allclose(out.astype(np.float32), ref, atol=1e-3)
+
+    @requires_trt
     def test_causal_equals_no_mask_for_single_query(self):
         """For q_S=1 causal and non-causal are equivalent — both should match."""
         B, H, D, kv_S = 1, 4, 16, 8

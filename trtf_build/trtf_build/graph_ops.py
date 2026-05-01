@@ -2426,6 +2426,7 @@ def add_attention_core(
     causal: bool = False,
     mask: trt.ITensor | None = None,
     scale: float | None = None,
+    fp32_accumulation: bool = False,
 ) -> trt.ITensor:
     """Scaled dot-product attention via TRT native IAttention layer.
 
@@ -2447,10 +2448,23 @@ def add_attention_core(
                  to scaled logits before softmax.  Cannot be used with
                  causal=True.
         scale:   Optional Q pre-scale factor.  Defaults to 1/sqrt(D).
+        fp32_accumulation:
+                 Cast Q/K/V to FP32 before IAttention, then cast the context
+                 back to the original Q dtype.  TRT may still select a
+                 Half-input fused MHA tactic after optimizing the casts, while
+                 keeping the IAttention accumulation/output boundary in FP32.
 
     Returns:
         Context tensor [B, H, q_seq, D].
     """
+    output_dtype = q_4d.dtype
+    if fp32_accumulation and output_dtype != trt.float32:
+        q_4d = network.add_cast(q_4d, trt.float32).get_output(0)
+        k_4d = network.add_cast(k_4d, trt.float32).get_output(0)
+        v_4d = network.add_cast(v_4d, trt.float32).get_output(0)
+        if mask is not None and mask.dtype != trt.float32:
+            mask = network.add_cast(mask, trt.float32).get_output(0)
+
     # Pre-scale Q: TRT IAttention does not apply score scaling itself.
     # Match the scale constant's dtype to Q's dtype: in strongly-typed networks
     # a FP32 constant mixed with a FP16/BF16 Q causes add_elementwise to emit
@@ -2478,7 +2492,7 @@ def add_attention_core(
     attn.decomposable = True
     if mask is not None and not causal:
         attn.mask = mask
-    return attn.get_output(0)
+    return _cast_back_to_trt_dtype(network, attn.get_output(0), output_dtype)
 
 
 def add_attention_from_rows(
@@ -2495,6 +2509,7 @@ def add_attention_from_rows(
     causal: bool = False,
     mask: trt.ITensor | None = None,
     scale: float | None = None,
+    fp32_accumulation: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -2517,7 +2532,8 @@ def add_attention_from_rows(
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
     ctx_4d = add_attention_core(
-        network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale)
+        network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,
+        fp32_accumulation=fp32_accumulation)
     return reshape_heads_4d_to_rows(
         network, ctx_4d, attention_size, sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx")

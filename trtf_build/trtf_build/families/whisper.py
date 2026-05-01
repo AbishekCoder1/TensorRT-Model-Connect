@@ -485,10 +485,12 @@ def _add_whisper_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cr
         graph_ops.add_matmul_rhs_constant(network, cross_v_typed, hidden_size, attention_size, weights[f"{prefix}.cross_w_v"], dtype=dtype),
         attention_size, weights[f"{prefix}.cross_b_v"], dtype=dtype)
 
-    ccf = _add_whisper_cross_attention_decomposed(
+    ccf = graph_ops.add_attention_from_rows(
         network, cq, ck_proj, cv_proj,
         num_heads=num_heads, head_dim=head_dim,
-        max_source_positions=max_source_positions)
+        q_seq=1, kv_seq=max_source_positions,
+        fp32_accumulation=True,
+        tag=f"{prefix}.cross_attn")
     ca = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"], dtype=dtype), hidden_size, weights[f"{prefix}.cross_b_o"], dtype=dtype)
     pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
 
@@ -497,57 +499,6 @@ def _add_whisper_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cr
     mlp = graph_blocks.add_gelu_fc_mlp(network, fn, weights=weights, prefix=prefix, hidden_size=hidden_size, mlp_size=ffn_dim, activation="gelu_new", dtype=dtype)
     out = network.add_elementwise(pca, mlp, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
-
-
-def _add_whisper_cross_attention_decomposed(
-    network,
-    q,
-    k,
-    v,
-    *,
-    num_heads: int,
-    head_dim: int,
-    max_source_positions: int,
-):
-    """Whisper decoder cross-attention as decomposed SDPA.
-
-    TRT 10.16 native IAttention selects an inaccurate fused MHA v2 tactic for
-    Whisper's FP16 single-query, long-KV cross-attention shape
-    [1, H, 1, D] x [1, H, 1500, D]. The equivalent primitive SDPA graph still
-    fuses in TRT, but selects the accurate MHA v1 tactic, so keep this local
-    decomposed path until the native tactic issue is fixed.
-    """
-    attention_size = num_heads * head_dim
-    qh = network.add_shuffle(q)
-    qh.reshape_dims = (num_heads, 1, head_dim)
-    kh = network.add_shuffle(k)
-    kh.reshape_dims = (max_source_positions, num_heads, head_dim)
-    kh.second_transpose = trt.Permutation([1, 0, 2])
-    vh = network.add_shuffle(v)
-    vh.reshape_dims = (max_source_positions, num_heads, head_dim)
-    vh.second_transpose = trt.Permutation([1, 0, 2])
-
-    scores = network.add_matrix_multiply(
-        qh.get_output(0), trt.MatrixOperation.NONE,
-        kh.get_output(0), trt.MatrixOperation.TRANSPOSE)
-    scale_np_dtype = np.float16 if q.dtype == trt.float16 else np.float32
-    scale = graph_ops.add_constant(
-        network, (1, 1, 1),
-        np.array([[[1.0 / np.sqrt(head_dim)]]], dtype=scale_np_dtype),
-        dtype=scale_np_dtype)
-    if q.dtype == trt.bfloat16:
-        scale = network.add_cast(scale, trt.bfloat16).get_output(0)
-    scaled = network.add_elementwise(
-        scores.get_output(0), scale, trt.ElementWiseOperation.PROD)
-    probs = network.add_softmax(scaled.get_output(0))
-    probs.axes = 1 << 2
-    context = network.add_matrix_multiply(
-        probs.get_output(0), trt.MatrixOperation.NONE,
-        vh.get_output(0), trt.MatrixOperation.NONE)
-    out = network.add_shuffle(context.get_output(0))
-    out.reshape_dims = (1, attention_size)
-    return out.get_output(0)
-
 
 def _mark_debug_output(network, tensor, name):
     identity = network.add_identity(tensor)
