@@ -32,6 +32,7 @@ but do not block CI.
 import argparse
 import fnmatch
 import json
+import os
 import pathlib
 import sys
 import time
@@ -60,6 +61,7 @@ _HF_ALLOW_PATTERNS = [
     "tokenizer_config.json",
     "vocab.json",
     "merges.txt",
+    "normalizer.json",
     "special_tokens_map.json",
     "*.model",
     "model_index.json",
@@ -77,6 +79,10 @@ _HF_ALLOW_PATTERNS = [
 _HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
 _ENTRYPOINT_PATTERNS = ["config.json", "model_index.json", "*/config.json"]
 _WEIGHT_PATTERNS = ["*.safetensors", "*.bin", "*.nemo"]
+_TTS_ASR_VERIFIER_MODEL = os.environ.get(
+    "TRTF_TTS_ASR_MODEL",
+    "openai/whisper-large-v3-turbo",
+)
 
 parser = argparse.ArgumentParser(
     description=__doc__,
@@ -113,6 +119,7 @@ if args.models_file:
 excluded_ci_tiers = set(args.exclude_ci_tier or [])
 
 entries: list[tuple[str, str]] = []
+needs_tts_asr_verifier = False
 for m in manifests:
     d = json.loads(m.read_text())
     name = d.get("name", m.stem)
@@ -125,6 +132,11 @@ for m in manifests:
     if filter_names is not None and name not in filter_names:
         continue
     entries.append((name, d["hf_id"]))
+    if str(d.get("runtime_strategy", "")).startswith("text_to_audio"):
+        needs_tts_asr_verifier = True
+
+if needs_tts_asr_verifier and _TTS_ASR_VERIFIER_MODEL not in {hf_id for _, hf_id in entries}:
+    entries.append(("tts-asr-verifier", _TTS_ASR_VERIFIER_MODEL))
 
 
 def _is_cached(hf_id: str) -> bool:

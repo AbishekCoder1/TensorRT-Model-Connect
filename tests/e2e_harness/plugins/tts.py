@@ -2,15 +2,18 @@
 
 Verifies TTS output via:
 1. Audio health checks (WAV exists, non-silence, duration)
-2. ASR round-trip: feed TRT audio into Whisper TRT, compare transcript
+2. ASR round-trip: feed TRT audio into HF Whisper, compare transcript
    against input prompt. This is the primary user contract — the audio
    must contain the correct spoken content.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
+import sys
+import textwrap
 
 from ..contracts import (
     CompareResult, E2ECase, MetricResult, StageOutput, ThresholdProfile,
@@ -21,50 +24,114 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
-# Whisper bundle preference order for ASR round-trip
-_WHISPER_BUNDLES = [
-    "whisper-tiny-fp16.trtfb",
-    "whisper-small.trtfb",
-    "whisper-large-v3-turbo.trtfb",
-]
-
-
-def _find_whisper_bundle(engine_dir: str) -> str | None:
-    """Find a Whisper TRT bundle in the engine directory."""
-    for name in _WHISPER_BUNDLES:
-        path = os.path.join(engine_dir, name)
-        if os.path.isfile(path):
-            return path
-    return None
+_DEFAULT_HF_WHISPER_MODEL = "openai/whisper-large-v3-turbo"
+_HF_ASR_TIMEOUT_S = 600
 
 
 def _run_asr_roundtrip(
     wav_path: str,
-    trtf_binary: str,
-    whisper_bundle: str,
-    hf_python: str = "",
-) -> str | None:
-    """Run TRT Whisper on a WAV file and return the transcript.
+    python: str,
+    model_id: str,
+    max_new_tokens: int = 256,
+) -> dict[str, str] | None:
+    """Run HF Whisper on a WAV file and return transcript metadata."""
+    script = textwrap.dedent(
+        """
+        import json
 
-    Uses the C++ trtf binary (not Python/PyTorch) to avoid cuBLAS issues
-    on Blackwell GPUs.
-    """
-    cmd = [trtf_binary, "transcribe", whisper_bundle, "--audio", wav_path]
-    if hf_python:
-        cmd.extend(["--hf-python", hf_python])
+        import numpy as np
+        import scipy.io.wavfile as wavfile
+        import torch
+        from scipy.signal import resample
+        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+
+        wav_path = %(wav_path)r
+        model_id = %(model_id)r
+        max_new_tokens = %(max_new_tokens)d
+
+        sample_rate, audio = wavfile.read(wav_path)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+
+        if np.issubdtype(audio.dtype, np.integer):
+            info = np.iinfo(audio.dtype)
+            audio = audio.astype(np.float32) / max(abs(info.min), info.max)
+        else:
+            audio = audio.astype(np.float32)
+
+        processor = AutoProcessor.from_pretrained(model_id)
+        target_sample_rate = getattr(processor.feature_extractor, "sampling_rate", 16000)
+        if sample_rate != target_sample_rate:
+            target_len = int(round(len(audio) * float(target_sample_rate) / float(sample_rate)))
+            audio = resample(audio, target_len).astype(np.float32)
+            sample_rate = target_sample_rate
+
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        torch_dtype = torch.float16 if device.startswith("cuda") else torch.float32
+
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+        )
+        model.to(device)
+        model.eval()
+
+        inputs = processor(audio, sampling_rate=sample_rate, return_tensors="pt")
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        inputs = {
+            k: (v.to(torch_dtype) if torch.is_floating_point(v) else v)
+            for k, v in inputs.items()
+        }
+
+        with torch.no_grad():
+            generated_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
+
+        transcript = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        print(json.dumps({
+            "transcript": transcript,
+            "backend": "hf_transformers",
+            "model": model_id,
+            "device": device,
+        }))
+        """
+        % {
+            "wav_path": wav_path,
+            "model_id": model_id,
+            "max_new_tokens": max_new_tokens,
+        }
+    )
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120,
+            [python, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=_HF_ASR_TIMEOUT_S,
         )
-        if result.returncode == 0:
-            # Transcript is on stdout (last non-empty line, strip leading space)
-            lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
-            return lines[-1] if lines else None
-        logger.warning("Whisper ASR failed (rc=%d): %s", result.returncode, result.stderr[-500:])
+        if result.returncode != 0:
+            logger.warning(
+                "HF Whisper ASR failed (rc=%d, model=%s): %s",
+                result.returncode,
+                model_id,
+                result.stderr[-1000:],
+            )
+            return None
+
+        for line in reversed(result.stdout.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            transcript = data.get("transcript")
+            if isinstance(transcript, str):
+                return {k: str(v) for k, v in data.items()}
+        logger.warning("HF Whisper ASR produced no parseable transcript (model=%s)", model_id)
         return None
     except Exception as e:
-        logger.warning("Whisper ASR subprocess failed: %s", e)
+        logger.warning("HF Whisper ASR subprocess failed (model=%s): %s", model_id, e)
         return None
 
 
@@ -116,19 +183,26 @@ class TTSPlugin:
         # --- ASR round-trip (primary contract) ---
         input_prompt = case.inputs.get("prompt", "")
         asr_transcript = None
+        asr_info: dict[str, str] | None = None
+        asr_model = str(
+            case.metadata.get("tts_asr_model")
+            or os.environ.get("TRTF_TTS_ASR_MODEL")
+            or _DEFAULT_HF_WHISPER_MODEL
+        )
 
         if has_wav and input_prompt:
             # Runtime paths injected by the orchestrator
             ctx = case.metadata.get("_ctx", {})
-            engine_dir = ctx.get("engine_dir", "")
-            binary_path = ctx.get("binary_path", "")
-            hf_python = ctx.get("hf_python", "")
+            asr_python = (
+                ctx.get("reference_python")
+                or ctx.get("hf_python")
+                or ctx.get("runtime_python")
+                or sys.executable
+            )
 
-            whisper_bundle = _find_whisper_bundle(engine_dir) if engine_dir else None
-
-            if whisper_bundle and os.path.isfile(binary_path):
-                asr_transcript = _run_asr_roundtrip(
-                    trt_wav, binary_path, whisper_bundle, hf_python)
+            asr_info = _run_asr_roundtrip(trt_wav, asr_python, asr_model)
+            if asr_info:
+                asr_transcript = asr_info.get("transcript")
 
         if asr_transcript is not None:
             norm_transcript = normalize_text(asr_transcript)
@@ -144,12 +218,23 @@ class TTSPlugin:
             metrics["asr_ned"] = MetricResult(
                 value=ned, threshold=ned_threshold, operator="<=",
                 passed=ned <= ned_threshold,
-                note=f"transcript: '{asr_transcript[:80]}...'" if len(asr_transcript) > 80 else f"transcript: '{asr_transcript}'")
+                note=(
+                    f"backend={asr_info.get('backend', 'hf_transformers')} "
+                    f"model={asr_info.get('model', asr_model)} "
+                    f"device={asr_info.get('device', 'unknown')}; "
+                    f"transcript: '{asr_transcript[:80]}...'"
+                    if len(asr_transcript) > 80
+                    else
+                    f"backend={asr_info.get('backend', 'hf_transformers')} "
+                    f"model={asr_info.get('model', asr_model)} "
+                    f"device={asr_info.get('device', 'unknown')}; "
+                    f"transcript: '{asr_transcript}'"
+                ))
         elif has_wav and input_prompt:
-            # Whisper not available — note but don't fail
             metrics["asr_roundtrip"] = MetricResult(
-                value=0.0, threshold=0.0, operator=">=",
-                passed=True, note="Whisper bundle not found — ASR round-trip skipped")
+                value=0.0, threshold=1.0, operator="==",
+                passed=False,
+                note=f"HF Whisper ASR failed or unavailable; model={asr_model}")
 
         all_passed = all(m.passed for m in metrics.values())
         rule = "audio health + ASR round-trip transcript recovery"

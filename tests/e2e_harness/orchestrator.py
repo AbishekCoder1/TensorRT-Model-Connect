@@ -1153,7 +1153,7 @@ class E2EOrchestrator:
                 logger.warning("Contract plugin configure_reference failed: %s", e)
 
             # Expose runtime paths so plugins can invoke auxiliary binaries
-            # (e.g., TTS plugin uses Whisper TRT for ASR round-trip)
+            # and reference Python tools for contract checks.
             case.metadata["_ctx"] = {
                 "engine_dir": ctx.engine_dir,
                 "binary_path": ctx.binary_path,
