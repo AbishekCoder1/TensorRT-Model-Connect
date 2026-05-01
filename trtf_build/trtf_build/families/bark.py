@@ -31,6 +31,7 @@ import tensorrt as trt
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict
+from ..build_timing import timed_trt_compile
 from .. import graph_ops
 
 
@@ -461,14 +462,16 @@ class BarkPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         verbose: bool = False,
+        build_timing: dict | None = None,
     ) -> dict:
         """Build coarse, fine, codec engines + embedding tables for C++ runtime."""
         coarse_cfg = weights["_coarse_cfg"]
         fine_cfg = weights["_fine_cfg"]
 
-        coarse_plan = _build_bark_standard_engine(
-            weights, "coarse", coarse_cfg, max_cache_length,
-            embed_input=True, verbose=verbose)
+        with timed_trt_compile(build_timing, "extra_bark_coarse_decoder"):
+            coarse_plan = _build_bark_standard_engine(
+                weights, "coarse", coarse_cfg, max_cache_length,
+                embed_input=True, verbose=verbose)
 
         result = {
             "coarse_engine_plan": coarse_plan,
@@ -512,8 +515,9 @@ class BarkPlugin:
             print(f"[trtf-build]   Building fine engine "
                   f"(seq_length={fine_seq_length}) ...",
                   file=sys.stderr)
-        fine_plan = _build_bark_fine_engine(
-            weights, fine_cfg, seq_length=fine_seq_length, verbose=verbose)
+        with timed_trt_compile(build_timing, "extra_bark_fine_decoder"):
+            fine_plan = _build_bark_fine_engine(
+                weights, fine_cfg, seq_length=fine_seq_length, verbose=verbose)
         result["fine_engine_plan"] = fine_plan
 
         # Add fine embedding tables as a single concatenated section.
@@ -543,8 +547,9 @@ class BarkPlugin:
                       f"(max_frames={max_codec_frames}) ...",
                       file=sys.stderr)
 
-            codec_plan = build_encodec_decoder_engine(
-                state_dict, seq_length=max_codec_frames, verbose=verbose)
+            with timed_trt_compile(build_timing, "extra_encodec_audio_decoder"):
+                codec_plan = build_encodec_decoder_engine(
+                    state_dict, seq_length=max_codec_frames, verbose=verbose)
             result["codec_engine_plan"] = codec_plan
 
         return result

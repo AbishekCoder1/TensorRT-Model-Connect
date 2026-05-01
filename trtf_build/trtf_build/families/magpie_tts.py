@@ -63,6 +63,7 @@ import tensorrt as trt
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict
+from ..build_timing import timed_trt_compile
 from .. import graph_ops
 
 
@@ -938,6 +939,7 @@ class MagpieTTSPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         verbose: bool = False,
+        build_timing: dict | None = None,
     ) -> dict:
         """Build extra bundle sections: codec engine + embedding tables."""
         result = {}
@@ -980,7 +982,8 @@ class MagpieTTSPlugin:
                 print(f"[trtf-build]   Building local transformer engine "
                       f"(hidden={lt_hidden}, 1 layer, {num_cb} codebooks) ...",
                       file=sys.stderr)
-            lt_plan = _build_local_transformer_engine(weights, verbose=verbose)
+            with timed_trt_compile(build_timing, "extra_magpie_local_transformer"):
+                lt_plan = _build_local_transformer_engine(weights, verbose=verbose)
             result["lt_engine_plan"] = lt_plan
             result["lt_in_projection"] = np.concatenate([
                 weights["lt_in_proj_w"].ravel(),
@@ -1007,8 +1010,9 @@ class MagpieTTSPlugin:
                       file=sys.stderr)
 
             from ..nanocodec_builder import build_nanocodec_decoder_engine
-            codec_plan = build_nanocodec_decoder_engine(
-                codec_sd, max_frames=max_codec_frames, verbose=verbose)
+            with timed_trt_compile(build_timing, "extra_nanocodec_audio_decoder"):
+                codec_plan = build_nanocodec_decoder_engine(
+                    codec_sd, max_frames=max_codec_frames, verbose=verbose)
             result["codec_engine_plan"] = codec_plan
 
         # Extract and bake IPA tokenizer assets (native C++ tokenizer)

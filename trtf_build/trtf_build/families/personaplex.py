@@ -51,7 +51,6 @@ Real weight key structure (nvidia/personaplex-7b-v1):
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -70,6 +69,7 @@ from ..checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from ..build_timing import timed_trt_compile
 
 # Conditionally import graph_ops -- it needs TRT
 try:
@@ -209,15 +209,6 @@ class PersonaPlexPlugin:
 
         # Infer config from weight shapes
         inferred = _infer_config_from_weights(readers)
-        hidden = inferred["hidden_size"]
-        num_layers = inferred["num_hidden_layers"]
-        num_heads = inferred["num_attention_heads"]
-        intermediate_size = inferred["intermediate_size"]
-        num_codebooks = inferred["num_codebooks"]
-        depth_hidden = inferred["depth_hidden"]
-        depth_num_layers = inferred["depth_num_layers"]
-        depth_num_heads = inferred["depth_num_heads"]
-        depth_intermediate = inferred["depth_intermediate"]
 
         weights = WeightDict()
 
@@ -308,6 +299,7 @@ class PersonaPlexPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         verbose: bool = False,
+        build_timing: dict | None = None,
     ) -> dict[str, bytes]:
         """Build additional engines: Depth Transformer, Mimi encoder, Mimi decoder.
 
@@ -321,7 +313,6 @@ class PersonaPlexPlugin:
         depth_head_dim = weights["_depth_head_dim"]
         depth_intermediate = weights["_depth_intermediate"]
         num_codebooks = weights["_num_codebooks"]
-        codebook_size = weights["_codebook_size"]
 
         # --- Per-codebook Depth Transformer engines ---
         # The depth transformer has per-codebook attention (Q,K,V,O), MLP, and
@@ -359,21 +350,19 @@ class PersonaPlexPlugin:
                 print(f"[trtf-build] Building depth engine for codebook {cb} "
                       f"({len(depth_weights)} weights)", file=sys.stderr)
 
-            depth_plan = build_standard_decoder_engine(
-                depth_config, depth_weights, depth_cache_len,
-                norm_type="rmsnorm",
-                mlp_type="swiglu",
-                position_type="learned",
-                embed_input=True,
-                verbose=verbose)
+            with timed_trt_compile(
+                build_timing, f"extra_speech_depth_codebook_{cb:02d}"
+            ):
+                depth_plan = build_standard_decoder_engine(
+                    depth_config, depth_weights, depth_cache_len,
+                    norm_type="rmsnorm",
+                    mlp_type="swiglu",
+                    position_type="learned",
+                    embed_input=True,
+                    verbose=verbose)
 
             # Section name: depth_engine_plan_0 ... depth_engine_plan_15
             extras[f"depth_engine_plan_{cb}"] = depth_plan
-
-        # Also store the old "depth_engine_plan" pointing to cb0 for
-        # backward compatibility (won't be used when per-cb engines exist)
-        if "depth_engine_plan_0" in extras:
-            extras["depth_engine_plan"] = extras["depth_engine_plan_0"]
 
         # --- Per-codebook temporal-to-depth projection matrices ---
         # Store all depformer_in.{cb}.weight [depth_hidden, temporal_hidden] for C++.
@@ -399,7 +388,6 @@ class PersonaPlexPlugin:
         # emb.{0-15}.weight: [audio_vocab, temporal_hidden] = [2049, 4096]
         # Concatenated: [num_codebooks, audio_vocab, temporal_hidden] as float32.
         audio_vocab = weights["_audio_vocab"]
-        temporal_hidden = weights["_hidden_size"]
         emb_parts = []
         for cb in range(num_codebooks):
             key = f"audio_emb.{cb}"
@@ -456,7 +444,8 @@ class PersonaPlexPlugin:
                       f"({all_dep_emb.nbytes / (1024*1024):.1f} MB)", file=sys.stderr)
 
         # --- Mimi Encoder engine (placeholder) ---
-        mimi_enc_plan = _build_mimi_encoder_engine(weights, verbose=verbose)
+        with timed_trt_compile(build_timing, "extra_mimi_audio_encoder"):
+            mimi_enc_plan = _build_mimi_encoder_engine(weights, verbose=verbose)
         if mimi_enc_plan is not None:
             extras["mimi_encoder_plan"] = mimi_enc_plan
 
@@ -466,9 +455,10 @@ class PersonaPlexPlugin:
         # and decodes only tokens[:, 1:9] (the first 8 audio codebooks,
         # i.e., the moshi stream).
         mimi_dec_codebooks = 8  # Mimi native: 1 semantic + 7 acoustic
-        mimi_dec_plan = _build_mimi_decoder_engine(
-            weights, verbose=verbose, num_input_codebooks=mimi_dec_codebooks,
-            num_frames=320)
+        with timed_trt_compile(build_timing, "extra_mimi_audio_decoder"):
+            mimi_dec_plan = _build_mimi_decoder_engine(
+                weights, verbose=verbose, num_input_codebooks=mimi_dec_codebooks,
+                num_frames=320)
         if mimi_dec_plan is not None:
             extras["mimi_decoder_plan"] = mimi_dec_plan
 
@@ -527,10 +517,7 @@ def _load_temporal_weights(
     """
     hidden = inferred["hidden_size"]
     num_layers = inferred["num_hidden_layers"]
-    num_heads = inferred["num_attention_heads"]
     intermediate_size = inferred["intermediate_size"]
-    text_vocab = inferred["text_vocab"]
-    text_out_vocab = inferred["text_out_vocab"]
 
     # For the temporal transformer's text embedding:
     # Use text_emb as the token embedding (vocab -> hidden lookup)
@@ -615,7 +602,6 @@ def _load_depth_weights(
     """
     depth_hidden = inferred["depth_hidden"]
     depth_num_layers = inferred["depth_num_layers"]
-    depth_num_heads = inferred["depth_num_heads"]
     depth_intermediate = inferred["depth_intermediate"]
     num_codebooks = inferred["num_codebooks"]
     num_depformer_emb = inferred["num_depformer_emb"]
@@ -1547,7 +1533,6 @@ def _build_mimi_decoder_engine(
     ]
 
     for i, (up_idx, res_idx, ratio) in enumerate(dec_layer_map):
-        in_ch = channels[i]
         out_ch = channels[i + 1]
 
         # ConvTranspose1d upsample

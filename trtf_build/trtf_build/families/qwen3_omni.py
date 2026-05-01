@@ -52,6 +52,7 @@ from ..checkpoint_mapper import (
     _transpose_2d,
     _expand_kv_projection,
 )
+from ..build_timing import timed_trt_compile
 from .. import graph_ops
 from .. import graph_blocks
 from ..standard_decoder_builder import _mark_debug_output
@@ -753,6 +754,7 @@ class Qwen3OmniPlugin:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         verbose: bool = False,
+        build_timing: dict | None = None,
     ) -> dict:
         """Build audio encoder, Talker, and Code2Wav engines."""
         result = {}
@@ -763,8 +765,9 @@ class Qwen3OmniPlugin:
             if verbose:
                 print("[trtf-build]   Building audio encoder engine ...",
                       file=sys.stderr)
-            audio_plan = _build_audio_encoder_engine(
-                weights, audio_cfg, verbose=verbose)
+            with timed_trt_compile(build_timing, "extra_omni_audio_encoder"):
+                audio_plan = _build_audio_encoder_engine(
+                    weights, audio_cfg, verbose=verbose)
             if audio_plan is not None:
                 result["audio_encoder_plan"] = audio_plan
 
@@ -774,9 +777,10 @@ class Qwen3OmniPlugin:
             if verbose:
                 print("[trtf-build]   Building Talker engine ...",
                       file=sys.stderr)
-            talker_plan = _build_talker_engine(
-                weights, talker_cfg, config, max_cache_length,
-                verbose=verbose)
+            with timed_trt_compile(build_timing, "extra_omni_talker_decoder"):
+                talker_plan = _build_talker_engine(
+                    weights, talker_cfg, config, max_cache_length,
+                    verbose=verbose)
             if talker_plan is not None:
                 result["talker_engine_plan"] = talker_plan
 
@@ -786,8 +790,9 @@ class Qwen3OmniPlugin:
             if verbose:
                 print("[trtf-build]   Building Code2Wav engine ...",
                       file=sys.stderr)
-            code2wav_plan = _build_code2wav_engine(
-                weights, code2wav_cfg, verbose=verbose)
+            with timed_trt_compile(build_timing, "extra_omni_code2wav_decoder"):
+                code2wav_plan = _build_code2wav_engine(
+                    weights, code2wav_cfg, verbose=verbose)
             if code2wav_plan is not None:
                 result["code2wav_engine_plan"] = code2wav_plan
 

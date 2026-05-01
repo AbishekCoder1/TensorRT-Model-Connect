@@ -8,7 +8,11 @@ TRTF_BUILD_ROOT = REPO_ROOT / "trtf_build"
 if str(TRTF_BUILD_ROOT) not in sys.path:
     sys.path.insert(0, str(TRTF_BUILD_ROOT))
 
-from tests.e2e_harness.orchestrator import _build_detailed_timing  # noqa: E402
+from tests.e2e_harness.contracts import StageOutput  # noqa: E402
+from tests.e2e_harness.orchestrator import (  # noqa: E402
+    _build_detailed_timing,
+    _collect_trt_stage_timing,
+)
 from tests.e2e_harness.runners.text_generation import (  # noqa: E402
     _extract_trtf_load_timing,
     _extract_trtf_timing,
@@ -95,6 +99,30 @@ def test_text_runner_extracts_load_deserialize_timing_from_cli_stderr():
     )
 
     assert timing["trt_load_deserialize_s"] == 0.01275
+
+
+def test_orchestrator_does_not_double_count_saved_stderr_log(tmp_path):
+    log_text = "\n".join([
+        '[trtf.load_timing] label="engine_plan" load_deserialize_ms=10.500000 plan_bytes=4',
+        '[trtf.engine_timing] label="engine_plan" execute_ms=3.250000 launches=1',
+    ])
+    log_path = tmp_path / "generate_stderr.log"
+    log_path.write_text(log_text, encoding="utf-8")
+    timing = _collect_trt_stage_timing(
+        StageOutput(
+            stage_name="generate",
+            data={
+                "stderr": log_text,
+                "stderr_log": str(log_path),
+            },
+        ),
+        "generate",
+    )
+
+    assert timing["trt_load_deserialize_generate_s"] == 0.0105
+    assert timing["trt_component_load_deserialize_generate_engine_plan_s"] == 0.0105
+    assert timing["trt_engine_generate_s"] == 0.00325
+    assert timing["trt_component_engine_generate_engine_plan_s"] == 0.00325
 
 
 def test_diffusion_compile_time_excludes_component_weight_loading():

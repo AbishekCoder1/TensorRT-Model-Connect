@@ -749,12 +749,18 @@ def build_bundle(
     if build_extra is not None:
         print("[trtf-build] Building extra engines ...", file=sys.stderr)
         extra_t0 = time.monotonic()
+        compile_before_extra = _build_timing_phase(build_timing, "trt_compile_s")
         try:
+            build_extra_kwargs = {"verbose": verbose}
+            if _call_supports_kwarg(build_extra, "build_timing"):
+                build_extra_kwargs["build_timing"] = build_timing
             extra_engines = build_extra(
-                config, weights, max_cache_length, verbose=verbose) or {}
+                config, weights, max_cache_length, **build_extra_kwargs) or {}
         finally:
             extra_elapsed = time.monotonic() - extra_t0
-            _add_build_timing(build_timing, "trt_compile_s", extra_elapsed)
+            untracked_extra_elapsed = _untracked_compile_time(
+                extra_elapsed, compile_before_extra, build_timing)
+            _add_build_timing(build_timing, "trt_compile_s", untracked_extra_elapsed)
             _add_build_timing(
                 build_timing, "trt_compile_extra_engines_s", extra_elapsed)
             _write_build_timing(build_timing)

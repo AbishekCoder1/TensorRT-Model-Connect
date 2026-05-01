@@ -39,7 +39,8 @@ _TRTF_TIMING_RE = re.compile(
 )
 _TRTF_LOAD_TIMING_RE = re.compile(
     r"^\[trtf\.load_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
-    r"load_deserialize_ms=(?P<ms>[-+0-9.eE]+)",
+    r"load_deserialize_ms=(?P<ms>[-+0-9.eE]+)"
+    r"(?:\s+plan_bytes=(?P<plan_bytes>[0-9]+))?",
     re.MULTILINE,
 )
 _TRTF_ENGINE_TIMING_RE = re.compile(
@@ -354,16 +355,33 @@ def _stage_text_blobs(result: Dict[str, Any]) -> List[Tuple[str, List[str]]]:
             continue
         stage_name = str(stage.get("stage_name") or str(stage_key).removeprefix("trt_"))
         blobs: List[str] = []
+        seen_blobs: set[str] = set()
+
+        def append_blob(text: str) -> None:
+            if not text:
+                return
+            key = text if len(text) < 10000 else f"{len(text)}:{text[:2000]}:{text[-2000:]}"
+            if key in seen_blobs:
+                return
+            seen_blobs.add(key)
+            blobs.append(text)
 
         def visit(value: Any) -> None:
             if isinstance(value, str):
-                blobs.append(value)
+                append_blob(value)
             elif isinstance(value, dict):
+                log_bases: set[str] = set()
                 for key, child in value.items():
                     if key.endswith("_log") or key == "stderr_log":
                         log_text = _read_stage_log(child, art_dir)
                         if log_text:
-                            blobs.append(log_text)
+                            append_blob(log_text)
+                        log_bases.add("stderr" if key == "stderr_log" else key[:-4])
+                for key, child in value.items():
+                    if key.endswith("_log") or key == "stderr_log":
+                        continue
+                    if key in log_bases or (key == "stderr_truncated" and "stderr" in log_bases):
+                        continue
                     visit(child)
             elif isinstance(value, list):
                 for child in value:
@@ -393,6 +411,31 @@ def _extract_labeled_timing(
     return timings
 
 
+def _extract_labeled_load_stats(blobs: List[str]) -> Dict[str, Tuple[int, int]]:
+    stats: Dict[str, Tuple[int, int]] = {}
+    for text in blobs:
+        for match in _TRTF_LOAD_TIMING_RE.finditer(text or ""):
+            key = _timing_label_key(match.group("label"))
+            try:
+                plan_bytes = int(match.group("plan_bytes") or 0)
+            except (TypeError, ValueError):
+                plan_bytes = 0
+            count, total_bytes = stats.get(key, (0, 0))
+            stats[key] = (count + 1, total_bytes + plan_bytes)
+    return stats
+
+
+def _collect_load_component_stats(result: Dict[str, Any]) -> Dict[str, Tuple[int, int]]:
+    grouped: Dict[str, Tuple[int, int]] = {}
+    for stage_name, blobs in _stage_text_blobs(result):
+        for label, (count, plan_bytes) in _extract_labeled_load_stats(blobs).items():
+            key = f"trt_component_load_deserialize_{stage_name}_{label}_s"
+            component = _format_component_only_label("trt_component_load_deserialize_", key)
+            old_count, old_bytes = grouped.get(component, (0, 0))
+            grouped[component] = (old_count + count, old_bytes + plan_bytes)
+    return grouped
+
+
 def _extract_cli_generation_timing(blobs: List[str]) -> float | None:
     for text in blobs:
         match = _TRTF_TIMING_RE.search(text or "")
@@ -409,25 +452,19 @@ def _augment_timing_from_stage_outputs(result: Dict[str, Any], timing: Dict[str,
     for stage_name, blobs in _stage_text_blobs(result):
         engine_components = _extract_labeled_timing(_TRTF_ENGINE_TIMING_RE, blobs)
         if engine_components:
-            timing.setdefault(f"trt_engine_{stage_name}_s", sum(engine_components.values()))
+            timing[f"trt_engine_{stage_name}_s"] = sum(engine_components.values())
             for label, value in engine_components.items():
-                timing.setdefault(f"trt_component_engine_{stage_name}_{label}_s", value)
+                timing[f"trt_component_engine_{stage_name}_{label}_s"] = value
         else:
             cli_engine = _extract_cli_generation_timing(blobs)
             if cli_engine is not None:
-                timing.setdefault(f"trt_engine_{stage_name}_s", cli_engine)
+                timing[f"trt_engine_{stage_name}_s"] = cli_engine
 
         load_components = _extract_labeled_timing(_TRTF_LOAD_TIMING_RE, blobs)
         if load_components:
-            timing.setdefault(
-                f"trt_load_deserialize_{stage_name}_s",
-                sum(load_components.values()),
-            )
+            timing[f"trt_load_deserialize_{stage_name}_s"] = sum(load_components.values())
             for label, value in load_components.items():
-                timing.setdefault(
-                    f"trt_component_load_deserialize_{stage_name}_{label}_s",
-                    value,
-                )
+                timing[f"trt_component_load_deserialize_{stage_name}_{label}_s"] = value
 
 
 def _normalize_detailed_timing(result: Dict[str, Any]) -> Dict[str, float]:
@@ -465,7 +502,7 @@ def _normalize_detailed_timing(result: Dict[str, Any]) -> Dict[str, float]:
 
     load_deserialize = _sum_timing_prefix(timing, ("trt_load_deserialize_",))
     if load_deserialize:
-        details.setdefault("trt_load_deserialization_s", load_deserialize)
+        details["trt_load_deserialization_s"] = load_deserialize
 
     for key, value in timing.items():
         if not key.startswith(("trt_component_engine_", "trt_component_load_deserialize_")):
@@ -510,6 +547,17 @@ def _format_seconds(value: Any) -> str:
         return "&mdash;"
 
 
+def _format_bytes(num_bytes: int) -> str:
+    value = float(num_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if abs(value) < 1024.0 or unit == "GiB":
+            if unit == "B":
+                return f"{int(value)} B"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} GiB"
+
+
 def _format_component_weight_label(key: str) -> str:
     component = key.removeprefix("weights_loading_").removesuffix("_s")
     return component.replace("_", " ")
@@ -517,10 +565,11 @@ def _format_component_weight_label(key: str) -> str:
 
 def _format_component_compile_label(key: str) -> str:
     component = key.removeprefix("trt_compile_").removesuffix("_s")
+    component = component.removeprefix("extra_")
     return component.replace("_", " ")
 
 
-def _format_stage_component_label(prefix: str, key: str) -> str:
+def _split_stage_component_label(prefix: str, key: str) -> Tuple[str, str]:
     stem = key.removeprefix(prefix).removesuffix("_s")
     parts = stem.split("_")
     stage = "unknown"
@@ -557,7 +606,37 @@ def _format_stage_component_label(prefix: str, key: str) -> str:
         label_parts = parts
     component = " ".join(label_parts).replace(" plan", "")
     stage_label = stage.replace("_", " ")
+    return stage_label, component
+
+
+def _format_stage_component_label(prefix: str, key: str) -> str:
+    stage_label, component = _split_stage_component_label(prefix, key)
     return f"{component} ({stage_label})" if component else stage_label
+
+
+def _format_component_only_label(prefix: str, key: str) -> str:
+    _, component = _split_stage_component_label(prefix, key)
+    return component or "engine"
+
+
+def _aggregate_component_timings(
+    details: Dict[str, float],
+    prefix: str,
+) -> List[Tuple[str, float]]:
+    grouped: Dict[str, float] = {}
+    for key in sorted(details):
+        if not key.startswith(prefix):
+            continue
+        value = details.get(key)
+        if value is None:
+            continue
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            continue
+        label = _format_component_only_label(prefix, key)
+        grouped[label] = grouped.get(label, 0.0) + seconds
+    return sorted(grouped.items())
 
 
 def _sum_child_values(children: List[Tuple[str, Any]]) -> float | None:
@@ -589,6 +668,37 @@ def _append_overhead_child(
     remainder = parent - child_sum
     if remainder > 0.005:
         children.append((label, remainder))
+
+
+def _format_load_component_label(component: str, stats: Dict[str, Tuple[int, int]]) -> str:
+    count, plan_bytes = stats.get(component, (0, 0))
+    if count <= 0:
+        return component
+    if plan_bytes <= 0:
+        suffix = f"{count} loads" if count > 1 else "1 load"
+    elif count == 1:
+        suffix = f"{_format_bytes(plan_bytes)} plan"
+    else:
+        suffix = f"{count} loads, {_format_bytes(plan_bytes)} total plan bytes"
+    return f"{component} ({suffix})"
+
+
+def _has_extra_compile_breakdown(details: Dict[str, float]) -> bool:
+    return any(
+        key.startswith("trt_compile_extra_")
+        and key != "trt_compile_extra_engines_s"
+        for key in details
+    )
+
+
+def _is_compile_child_key(key: str, details: Dict[str, float]) -> bool:
+    if not key.startswith("trt_compile_"):
+        return False
+    if key in {"trt_compile_s", "trt_compile_diffusion_components_s"}:
+        return False
+    if key == "trt_compile_extra_engines_s" and _has_extra_compile_breakdown(details):
+        return False
+    return True
 
 
 def _render_timing_breakdown(
@@ -626,6 +736,7 @@ def _render_detailed_timing_row(
 
 def _render_detailed_timing_table(result: Dict[str, Any]) -> str:
     details = _normalize_detailed_timing(result)
+    load_component_stats = _collect_load_component_stats(result)
     optional_rows = [
         ("bundle_write_s", "Bundle write"),
         ("quantization_context_s", "Quantization context"),
@@ -644,34 +755,28 @@ def _render_detailed_timing_table(result: Dict[str, Any]) -> str:
     compile_children = [
         (_format_component_compile_label(key), details.get(key))
         for key in sorted(details)
-        if (
-            key.startswith("trt_compile_")
-            and key != "trt_compile_s"
-            and key != "trt_compile_diffusion_components_s"
-        )
+        if _is_compile_child_key(key, details)
     ]
     _append_overhead_child(compile_children, details.get("trt_compile_s"), "unattributed")
 
     engine_component_children = [
         (
-            "engine execution: "
-            + _format_stage_component_label("trt_component_engine_", key),
-            details.get(key),
+            "engine execution: " + label,
+            value,
         )
-        for key in sorted(details)
-        if key.startswith("trt_component_engine_")
+        for label, value in _aggregate_component_timings(
+            details, "trt_component_engine_")
     ]
     if not engine_component_children and "inference_s" in details:
         engine_component_children = [("TRT engine execution", details.get("inference_s"))]
 
     load_component_children = [
         (
-            "load/deserialization: "
-            + _format_stage_component_label("trt_component_load_deserialize_", key),
-            details.get(key),
+            "load/deserialization: " + _format_load_component_label(label, load_component_stats),
+            value,
         )
-        for key in sorted(details)
-        if key.startswith("trt_component_load_deserialize_")
+        for label, value in _aggregate_component_timings(
+            details, "trt_component_load_deserialize_")
     ]
     if not load_component_children and "trt_load_deserialization_s" in details:
         load_component_children = [
@@ -714,8 +819,12 @@ def _render_timing_sections(result: Dict[str, Any]) -> str:
     parts = ["<h4>Detailed Timing</h4>", _render_detailed_timing_table(result)]
     raw_timing = _render_timing_table(result.get("timing", {}) or {})
     if raw_timing:
-        parts.append("<h4>Raw Timing Phases</h4>")
-        parts.append(raw_timing)
+        parts.append(
+            '<details class="raw-timing-section">'
+            "<summary>Raw Timing Phases</summary>"
+            f"{raw_timing}"
+            "</details>"
+        )
     return "\n".join(parts)
 
 

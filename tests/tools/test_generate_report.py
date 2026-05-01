@@ -360,7 +360,7 @@ class TestRenderReport:
         assert "Inference" in html
         assert "Comparison" in html
         assert "TRT validation wall time" not in html
-        assert "Raw Timing Phases" in html
+        assert "<summary>Raw Timing Phases</summary>" in html
         assert "10.00s" in html
         assert "5.50s" in html
         assert "15.50s" in html  # total
@@ -493,12 +493,37 @@ class TestRenderReport:
         )
         html = mod.render_report([r])
         assert "<summary>Inference</summary>" in html
-        assert "engine execution: denoiser (end to end)" in html
-        assert "engine execution: vae decoder (end to end)" in html
-        assert "load/deserialization: denoiser (end to end)" in html
-        assert "load/deserialization: vae decoder (end to end)" in html
+        assert "engine execution: denoiser" in html
+        assert "engine execution: vae decoder" in html
+        assert "load/deserialization: denoiser" in html
+        assert "load/deserialization: vae decoder" in html
         assert "3.75s" in html
         assert "TRT validation wall time" not in html
+
+    def test_detailed_timing_table_sums_component_inference_across_stages(self):
+        mod = _import_report()
+        r = _make_result(
+            timing={
+                "trt_engine_prefill_s": 0.25,
+                "trt_engine_decode_s": 0.75,
+                "trt_component_engine_prefill_engine_plan_s": 0.25,
+                "trt_component_engine_decode_engine_plan_s": 0.75,
+                "trt_load_deserialize_prefill_s": 0.10,
+                "trt_load_deserialize_decode_s": 0.20,
+                "trt_component_load_deserialize_prefill_engine_plan_s": 0.10,
+                "trt_component_load_deserialize_decode_engine_plan_s": 0.20,
+            },
+            detailed_timing={
+                "weights_loading_s": 1.0,
+                "trt_compile_s": 2.0,
+            },
+        )
+        html = mod.render_report([r])
+        assert "engine execution: engine" in html
+        assert "load/deserialization: engine" in html
+        assert "1.00s" in html
+        assert "0.30s" in html
+        assert "1.30s" in html
 
     def test_detailed_timing_table_recovers_runtime_timings_from_stage_outputs(self):
         mod = _import_report()
@@ -524,10 +549,85 @@ class TestRenderReport:
             },
         )
         html = mod.render_report([r])
-        assert "engine execution: denoiser (end to end)" in html
-        assert "load/deserialization: denoiser (end to end)" in html
+        assert "engine execution: denoiser" in html
+        assert "load/deserialization: denoiser (1 B plan)" in html
         assert "3.10s" in html
         assert "Tokenizer JSON ensure" not in html
+
+    def test_detailed_timing_does_not_double_count_saved_stderr_log(self, tmp_path):
+        mod = _import_report()
+        log_text = "\n".join([
+            '[trtf.load_timing] label="denoiser_plan" '
+            "load_deserialize_ms=2500.000000 plan_bytes=1024",
+            '[trtf.engine_timing] label="denoiser_plan" '
+            "execute_ms=600.000000 launches=20",
+        ])
+        log_path = tmp_path / "end_to_end_stderr.log"
+        log_path.write_text(log_text, encoding="utf-8")
+        r = _make_result(
+            timing={"trt_end_to_end_s": 9.0},
+            stage_outputs={
+                "trt_end_to_end": {
+                    "stage_name": "end_to_end",
+                    "data": {
+                        "stderr": log_text,
+                        "stderr_log": str(log_path),
+                    },
+                },
+            },
+        )
+        r["_artifact_dir"] = str(tmp_path)
+        details = mod._normalize_detailed_timing(r)
+        assert details["trt_load_deserialization_s"] == 2.5
+        assert details["inference_s"] == 0.6
+
+    def test_detailed_timing_table_sums_load_plan_sizes_across_stages(self):
+        mod = _import_report()
+        r = _make_result(
+            timing={},
+            stage_outputs={
+                "trt_prefill": {
+                    "stage_name": "prefill",
+                    "data": {
+                        "stderr": (
+                            '[trtf.load_timing] label="engine_plan" '
+                            "load_deserialize_ms=100.000000 plan_bytes=1073741824"
+                        ),
+                    },
+                },
+                "trt_decode": {
+                    "stage_name": "decode",
+                    "data": {
+                        "stderr": (
+                            '[trtf.load_timing] label="engine_plan" '
+                            "load_deserialize_ms=200.000000 plan_bytes=2147483648"
+                        ),
+                    },
+                },
+            },
+        )
+        html = mod.render_report([r])
+        assert "load/deserialization: engine (2 loads, 3.0 GiB total plan bytes)" in html
+        assert "0.30s" in html
+
+    def test_detailed_timing_table_replaces_generic_extra_compile_with_components(self):
+        mod = _import_report()
+        r = _make_result(
+            detailed_timing={
+                "weights_loading_s": 1.0,
+                "trt_compile_s": 20.0,
+                "trt_compile_main_engine_s": 5.0,
+                "trt_compile_extra_engines_s": 15.0,
+                "trt_compile_extra_speech_depth_codebook_00_s": 4.0,
+                "trt_compile_extra_mimi_audio_decoder_s": 9.0,
+                "trt_compile_extra_mimi_audio_encoder_s": 2.0,
+            },
+        )
+        html = mod.render_report([r])
+        assert "speech depth codebook 00" in html
+        assert "mimi audio decoder" in html
+        assert "mimi audio encoder" in html
+        assert "extra engines" not in html
 
     def test_detailed_timing_table_excludes_overlapping_build_summaries(self):
         mod = _import_report()

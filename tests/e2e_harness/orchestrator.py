@@ -828,16 +828,33 @@ def _read_log_ref(ref: Any) -> str:
 
 def _stage_text_blobs(output: StageOutput) -> list[str]:
     blobs: list[str] = []
+    seen_blobs: set[str] = set()
+
+    def append_blob(text: str) -> None:
+        if not text:
+            return
+        key = text if len(text) < 10000 else f"{len(text)}:{text[:2000]}:{text[-2000:]}"
+        if key in seen_blobs:
+            return
+        seen_blobs.add(key)
+        blobs.append(text)
 
     def visit(value: Any) -> None:
         if isinstance(value, str):
-            blobs.append(value)
+            append_blob(value)
         elif isinstance(value, dict):
+            log_bases: set[str] = set()
             for key, child in value.items():
                 if key.endswith("_log") or key == "stderr_log":
                     log_text = _read_log_ref(child)
                     if log_text:
-                        blobs.append(log_text)
+                        append_blob(log_text)
+                    log_bases.add("stderr" if key == "stderr_log" else key[:-4])
+            for key, child in value.items():
+                if key.endswith("_log") or key == "stderr_log":
+                    continue
+                if key in log_bases or (key == "stderr_truncated" and "stderr" in log_bases):
+                    continue
                 visit(child)
         elif isinstance(value, (list, tuple)):
             for child in value:
