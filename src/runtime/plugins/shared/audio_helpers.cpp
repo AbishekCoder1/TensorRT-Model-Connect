@@ -72,10 +72,10 @@ MagpieTTSConfig build_magpie_config(const std::string& json, const BaseConfig& b
 }
 
 int32_t compute_kv_dim_kv_heads(const BaseConfig& base, int32_t default_dim) {
-    if (base.attention_size > 0)
-        return base.attention_size;
     if (base.num_kv_heads > 0 && base.head_dim > 0)
         return base.num_kv_heads * base.head_dim;
+    if (base.attention_size > 0)
+        return base.attention_size;
     return default_dim;
 }
 

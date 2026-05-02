@@ -165,12 +165,12 @@ class TestPhi4MultimodalPlugin:
         heads = self.HEADS
         head_dim = hidden // heads
         q_dim = heads * head_dim
+        kv_dim = self.KV_HEADS * head_dim
 
         # Q should be [hidden, q_dim] after transpose
         assert weights["layer.0.w_q"].shape == (hidden, q_dim)
-        # K and V should be [hidden, q_dim] after GQA expansion
-        assert weights["layer.0.w_k"].shape == (hidden, q_dim)
-        assert weights["layer.0.w_v"].shape == (hidden, q_dim)
+        assert weights["layer.0.w_k"].shape == (hidden, kv_dim)
+        assert weights["layer.0.w_v"].shape == (hidden, kv_dim)
 
     def test_fused_gate_up_split(self, tmp_path):
         """Verify fused gate_up is correctly split into gate and up."""
@@ -225,16 +225,16 @@ class TestPhi4MultimodalPlugin:
 
 
 # =========================================================================
-# GQA expansion
+# Compact GQA/MQA K/V
 # =========================================================================
 
 class TestPhi4MultimodalGQA:
-    """Test GQA expansion when num_kv_heads != num_heads."""
+    """Test compact GQA when num_kv_heads != num_heads."""
 
     VOCAB, HIDDEN, LAYERS = 64, 32, 1
     HEADS, KV_HEADS, MLP = 8, 4, 64
 
-    def test_gqa_kv_expansion(self, tmp_path):
+    def test_gqa_kv_stays_compact(self, tmp_path):
         from trtf_build.families.phi4_multimodal import plugin
 
         hidden = self.HIDDEN
@@ -274,9 +274,8 @@ class TestPhi4MultimodalGQA:
         mc = ModelConfig.from_dir(tmp_path)
         weights = plugin.load_weights(str(tmp_path), mc)
 
-        # After GQA expansion, K and V should have q_dim columns
-        assert weights["layer.0.w_k"].shape == (hidden, q_dim)
-        assert weights["layer.0.w_v"].shape == (hidden, q_dim)
+        assert weights["layer.0.w_k"].shape == (hidden, kv_dim)
+        assert weights["layer.0.w_v"].shape == (hidden, kv_dim)
 
 
 # =========================================================================

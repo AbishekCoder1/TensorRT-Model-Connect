@@ -34,7 +34,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from .. import graph_ops
 from .. import graph_blocks
@@ -57,14 +56,8 @@ class PhiMoEPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        num_heads = config.num_attention_heads
-        num_kv_heads = config.num_key_value_heads
-        head_dim = config.head_dim
         num_experts = config.raw.get("num_local_experts", 16)
         intermediate_size = config.intermediate_size  # per-expert intermediate
-
-        q_dim = num_heads * head_dim
-        kv_dim = num_kv_heads * head_dim
 
         weights = WeightDict()
 
@@ -119,16 +112,9 @@ class PhiMoEPlugin:
             o_t = _transpose_2d(o_raw, "o_proj")
             del q_raw, k_raw, v_raw, o_raw
 
-            # GQA expansion for K, V
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-            del k_t, v_t
-
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
 
             # Attention biases
@@ -139,17 +125,6 @@ class PhiMoEPlugin:
                 bias_key = f"{hf_prefix}.self_attn.{proj}.bias"
                 if _has_tensor(readers, bias_key):
                     raw = _load_tensor(readers, bias_key).astype(np.float32)
-                    # Expand GQA K/V biases
-                    if tag in ("k_bias", "v_bias"):
-                        if raw.shape[0] == kv_dim and kv_dim != q_dim:
-                            expanded = np.zeros(q_dim, dtype=np.float32)
-                            group_size = num_heads // num_kv_heads
-                            for qh in range(num_heads):
-                                kvh = min(num_kv_heads - 1,
-                                          qh // group_size)
-                                expanded[qh * head_dim:(qh + 1) * head_dim] = \
-                                    raw[kvh * head_dim:(kvh + 1) * head_dim]
-                            raw = expanded
                     weights[f"{prefix}.{tag}"] = raw
 
             # Router weight
@@ -231,7 +206,10 @@ class PhiMoEPlugin:
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
         num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
         head_dim = attention_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
         attention_window = max_cache_length + 1
         norm_type = "layernorm"
         jitter_eps = config.raw.get("router_jitter_noise", 0.01)
@@ -255,10 +233,10 @@ class PhiMoEPlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, attention_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, attention_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
@@ -268,9 +246,7 @@ class PhiMoEPlugin:
         embedding_table = graph_ops.add_constant(
             network, (vocab, hidden), weights["embedding"])
 
-        if head_dim < 2 or head_dim % 2 != 0:
-            raise ValueError(
-                "Phi MoE RoPE requires an even head_dim >= 2 for TRT native RoPE")
+        graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, True)
         sin_half_np = graph_ops.make_rope_table_half_dim(
@@ -315,7 +291,9 @@ class PhiMoEPlugin:
                 prefix=prefix,
                 hidden_size=hidden,
                 attention_size=attention_size,
+                kv_attention_size=kv_attention_size,
                 num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 max_cache_length=max_cache_length,
                 num_experts=num_experts,
@@ -632,7 +610,9 @@ def _add_moe_decoder_layer(
     prefix: str,
     hidden_size: int,
     attention_size: int,
+    kv_attention_size: int,
     num_heads: int,
+    num_kv_heads: int,
     head_dim: int,
     max_cache_length: int,
     num_experts: int,
@@ -648,7 +628,8 @@ def _add_moe_decoder_layer(
         network, hidden, cache_k, cache_v, attention_mask, position_id,
         weights=weights, prefix=prefix,
         hidden_size=hidden_size, attention_size=attention_size,
-        num_heads=num_heads, head_dim=head_dim,
+        kv_attention_size=kv_attention_size,
+        num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
         max_cache_length=max_cache_length,
         eps_tensor=eps_tensor,
         norm_type=norm_type, position_type="rope",

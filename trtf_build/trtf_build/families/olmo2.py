@@ -31,7 +31,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 
 
@@ -52,9 +51,6 @@ class Olmo2Plugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        num_heads = config.num_attention_heads
-        num_kv_heads = config.num_key_value_heads
-
         weights = WeightDict()
 
         # Embedding
@@ -86,26 +82,19 @@ class Olmo2Plugin:
             o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
 
             q_hidden = q_raw.shape[0]
-            kv_hidden = k_raw.shape[0]
             if attention_size == 0:
                 attention_size = q_hidden
-
-            q_hidden // num_heads
 
             q_t = _transpose_2d(q_raw, "q_proj")
             k_t = _transpose_2d(k_raw, "k_proj")
             v_t = _transpose_2d(v_raw, "v_proj")
             o_t = _transpose_2d(o_raw, "o_proj")
 
-            # GQA expansion
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads)
+            # Compact GQA/MQA K/V
 
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
 
             # QK normalization -- OLMo-2 q_norm/k_norm are already
@@ -161,7 +150,10 @@ class Olmo2Plugin:
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
         num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
         head_dim = attention_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
         attention_window = max_cache_length + 1
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -183,10 +175,10 @@ class Olmo2Plugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, attention_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, attention_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
@@ -223,10 +215,10 @@ class Olmo2Plugin:
                 network, hidden_state, hidden, attention_size,
                 weights[f"{prefix}.w_q"])
             k = graph_ops.add_matmul_rhs_constant(
-                network, hidden_state, hidden, attention_size,
+                network, hidden_state, hidden, kv_attention_size,
                 weights[f"{prefix}.w_k"])
             v = graph_ops.add_matmul_rhs_constant(
-                network, hidden_state, hidden, attention_size,
+                network, hidden_state, hidden, kv_attention_size,
                 weights[f"{prefix}.w_v"])
 
             # QK RMSNorm (full-dim, NOT per-head -- OLMo-2 applies norm
@@ -238,14 +230,14 @@ class Olmo2Plugin:
             k_norm_w = weights.get(f"{prefix}.k_norm")
             if k_norm_w is not None:
                 k = graph_ops.add_rms_norm(
-                    network, k, attention_size, k_norm_w, eps_tensor)
+                    network, k, kv_attention_size, k_norm_w, eps_tensor)
 
             # RoPE
             q = graph_ops.add_apply_rope_native(
                 network, q, num_heads, head_dim,
                 cos_tensor, sin_tensor, position_id, head_dim)
             k = graph_ops.add_apply_rope_native(
-                network, k, num_heads, head_dim,
+                network, k, num_kv_heads, head_dim,
                 cos_tensor, sin_tensor, position_id, head_dim)
 
             # Save present K/V
@@ -254,9 +246,9 @@ class Olmo2Plugin:
 
             # Cache concat
             k_reshape = network.add_shuffle(k)
-            k_reshape.reshape_dims = (1, attention_size)
+            k_reshape.reshape_dims = (1, kv_attention_size)
             v_reshape = network.add_shuffle(v)
-            v_reshape.reshape_dims = (1, attention_size)
+            v_reshape.reshape_dims = (1, kv_attention_size)
 
             all_k = network.add_concatenation(
                 [cache_k_inputs[layer_idx], k_reshape.get_output(0)])
@@ -271,6 +263,7 @@ class Olmo2Plugin:
             context_flat = graph_ops.add_attention_from_rows(
                 network, q, all_k.get_output(0), all_v.get_output(0),
                 num_heads=num_heads, head_dim=head_dim,
+                num_kv_heads=num_kv_heads,
                 q_seq=1, kv_seq=attention_window,
                 mask=mask_reshape.get_output(0))
 

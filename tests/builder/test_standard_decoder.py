@@ -101,6 +101,7 @@ class TestTensorNamingContract:
             vocab_size=vocab,
             num_hidden_layers=num_layers,
             num_attention_heads=num_heads,
+            num_key_value_heads=num_heads,
             rms_norm_eps=1e-5,
             rope_theta=10000.0,
         )
@@ -207,6 +208,7 @@ class TestTensorNamingContract:
             vocab_size=vocab,
             num_hidden_layers=num_layers,
             num_attention_heads=num_heads,
+            num_key_value_heads=num_heads,
             rms_norm_eps=1e-5,
             rope_theta=10000.0,
         )
@@ -238,6 +240,7 @@ class TestTensorNamingContract:
             vocab_size=vocab,
             num_hidden_layers=num_layers,
             num_attention_heads=num_heads,
+            num_key_value_heads=num_heads,
             rms_norm_eps=1e-5,
             rope_theta=10000.0,
         )
@@ -278,6 +281,7 @@ class TestTensorNamingContract:
             vocab_size=vocab,
             num_hidden_layers=num_layers,
             num_attention_heads=num_heads,
+            num_key_value_heads=num_heads,
             rms_norm_eps=1e-5,
             rope_theta=10000.0,
         )

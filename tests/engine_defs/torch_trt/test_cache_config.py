@@ -2,7 +2,7 @@
 
 Validates:
   - build_attention_mask(): correct mask shape, values, step progression
-  - make_cache_tensors(): correct shapes/dtypes for GQA-expanded cache
+  - make_cache_tensors(): correct shapes/dtypes for compact GQA/MQA cache
   - make_export_args(): complete tuple matching StatelessCacheWrapper.forward()
 """
 
@@ -67,17 +67,17 @@ class TestBuildAttentionMask:
 
 @requires_torch
 class TestMakeCacheTensors:
-    """Tests for make_cache_tensors() — flat list of GQA-expanded cache tensors."""
+    """Tests for make_cache_tensors() — flat list of compact KV cache tensors."""
 
     def test_count_and_shape(self, sample_config):
-        # sample_config: num_hidden_layers=2, num_attention_heads=4, head_dim=16
+        # sample_config: num_hidden_layers=2, num_key_value_heads=2, head_dim=16
         cache = make_cache_tensors(sample_config, max_cache_length=32, device="cpu")
         # 2 layers * 2 (k + v) = 4 tensors
         assert len(cache) == 4
-        # Each: [max_cache_length, attention_size] where attention_size = num_heads * head_dim
-        attention_size = 4 * 16  # num_attention_heads * head_dim = 64
+        # Each: [max_cache_length, kv_dim] where kv_dim = num_kv_heads * head_dim
+        kv_dim = 2 * 16
         for i, t in enumerate(cache):
-            assert t.shape == (32, attention_size), f"cache[{i}] shape mismatch"
+            assert t.shape == (32, kv_dim), f"cache[{i}] shape mismatch"
             assert t.dtype == torch.float32, f"cache[{i}] dtype mismatch"
 
     def test_zeros(self, sample_config):
@@ -85,8 +85,8 @@ class TestMakeCacheTensors:
         for t in cache:
             assert (t == 0).all()
 
-    def test_gqa_expansion(self):
-        """Cache uses num_attention_heads (expanded), not num_key_value_heads."""
+    def test_gqa_compact_cache(self):
+        """Cache uses num_key_value_heads, not expanded query heads."""
         config = ModelConfig(
             model_type="qwen3",
             raw={
@@ -99,10 +99,8 @@ class TestMakeCacheTensors:
         )
         cache = make_cache_tensors(config, max_cache_length=64, device="cpu")
         assert len(cache) == 2  # 1 layer * 2 (k + v)
-        # attention_size = num_attention_heads * head_dim = 16 * 64 = 1024
-        assert cache[0].shape == (64, 1024)
-        # NOT num_kv_heads * head_dim = 2 * 64 = 128
-        assert cache[0].shape != (64, 128)
+        assert cache[0].shape == (64, 128)
+        assert cache[0].shape != (64, 1024)
 
     def test_different_cache_lengths(self, sample_config):
         for cache_len in [8, 32, 256]:
@@ -160,10 +158,10 @@ class TestMakeExportArgs:
     def test_cache_tensors(self, sample_config):
         args = make_export_args(sample_config, max_cache_length=32, device="cpu")
         # cache tensors start at index 3
-        attention_size = 4 * 16  # num_heads * head_dim
+        kv_dim = 2 * 16
         for i in range(3, len(args)):
             t = args[i]
-            assert t.shape == (32, attention_size), f"cache[{i-3}] shape"
+            assert t.shape == (32, kv_dim), f"cache[{i-3}] shape"
             assert t.dtype == torch.float32, f"cache[{i-3}] dtype"
 
     def test_precision_ignored(self, sample_config):

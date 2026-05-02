@@ -38,17 +38,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-try:
-    from safetensors.numpy import save_file
-except (ImportError, ModuleNotFoundError):
-    pytest.skip("safetensors not available", allow_module_level=True)
+pytest.importorskip("safetensors.numpy", reason="safetensors not available")
+pytest.importorskip("trtf_build.config", reason="trtf_build requires tensorrt")
 
-try:
-    from trtf_build.config import ModelConfig
-except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
-
-from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
+from tests.builder.family_plugin_tester import FamilyPluginTester
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
@@ -357,32 +350,28 @@ class TestPhiMoEEngine(FamilyPluginTestMixin):
             f"expected ({s.vocab_size},)"
         )
 
-    def test_gqa_kv_expansion(self, tester, tmp_path):
-        """Validate that K/V projections are GQA-expanded to full attention size.
+    def test_gqa_kv_stays_compact(self, tester, tmp_path):
+        """Validate that K/V projections stay at compact KV width.
 
         Intention:
             Phi-MoE uses GQA where num_key_value_heads may be less than
-            num_attention_heads. The plugin must expand K/V projections from
-            [hidden, kv_dim] to [hidden, attention_size] by repeating head
-            groups. If not expanded, the attention matmul will have shape
-            mismatches.
-
-            With default TinyModelSpec (num_kv_heads == num_heads), this
-            verifies the identity expansion path still produces correct shapes.
+            num_attention_heads. The plugin must keep K/V projections compact
+            and let TRT native attention consume num_kv_heads directly.
 
         Setup:
             1. Create synthetic model directory and load weights.
-            2. Verify w_k and w_v have shape [hidden, hidden] (fully expanded).
+            2. Verify w_k and w_v have shape [hidden, kv_dim].
         """
         config, weights, _ = tester.prepare_config_and_weights(tmp_path)
         s = tester.spec
+        kv_dim = s.num_key_value_heads * s.head_dim
         w_k = weights["layer.0.w_k"]
         w_v = weights["layer.0.w_v"]
-        assert w_k.shape == (s.hidden_size, s.hidden_size), (
+        assert w_k.shape == (s.hidden_size, kv_dim), (
             f"w_k shape {w_k.shape} != expected "
-            f"({s.hidden_size}, {s.hidden_size}) after GQA expansion"
+            f"({s.hidden_size}, {kv_dim})"
         )
-        assert w_v.shape == (s.hidden_size, s.hidden_size), (
+        assert w_v.shape == (s.hidden_size, kv_dim), (
             f"w_v shape {w_v.shape} != expected "
-            f"({s.hidden_size}, {s.hidden_size}) after GQA expansion"
+            f"({s.hidden_size}, {kv_dim})"
         )

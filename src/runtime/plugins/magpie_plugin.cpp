@@ -15,10 +15,10 @@ namespace trtf {
 namespace {
 
 int32_t compute_magpie_kv_dim(const BaseConfig& base_cfg, const MagpieTTSConfig& magpie_cfg) {
+    if (base_cfg.num_kv_heads > 0 && base_cfg.head_dim > 0)
+        return base_cfg.num_kv_heads * base_cfg.head_dim;
     if (base_cfg.attention_size > 0)
         return base_cfg.attention_size;
-    if (base_cfg.num_heads > 0 && base_cfg.head_dim > 0)
-        return base_cfg.num_heads * base_cfg.head_dim;
     return magpie_cfg.hidden_size;
 }
 

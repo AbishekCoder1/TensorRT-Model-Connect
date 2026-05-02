@@ -216,11 +216,10 @@ DualProfileModules load_dual_profile_modules(IBackend* backend, const std::vecto
 // Config helpers.
 
 int32_t compute_kv_dim(const BaseConfig& cfg) {
-    if (cfg.attention_size > 0)
-        return cfg.attention_size;
     int32_t hd = (cfg.head_dim > 0) ? cfg.head_dim
                                     : ((cfg.num_heads > 0) ? cfg.hidden_size / cfg.num_heads : 128);
-    return cfg.num_heads * hd;
+    int32_t kv_heads = (cfg.num_kv_heads > 0) ? cfg.num_kv_heads : cfg.num_heads;
+    return kv_heads * hd;
 }
 
 DType cache_dtype_from_precision(const std::string& precision) {

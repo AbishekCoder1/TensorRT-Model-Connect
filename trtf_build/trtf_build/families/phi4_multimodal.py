@@ -18,7 +18,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from ..standard_decoder_builder import build_standard_decoder_engine
 
@@ -94,16 +93,9 @@ class Phi4MultimodalPlugin:
             v_t = _transpose_2d(v_raw, "v_proj")
             del q_raw, k_raw, v_raw
 
-            # GQA expansion for K, V
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-            del k_t, v_t
-
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
 
             # Output projection (base_layer)
             o_raw = _load_tensor(

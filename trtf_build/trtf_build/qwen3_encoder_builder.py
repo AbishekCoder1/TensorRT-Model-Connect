@@ -123,9 +123,7 @@ def build_qwen3_encoder_engine(
         network, (vocab_size, hidden_size), weights["embed_tokens"])
     hidden = network.add_gather(embed_table, input_ids, 0).get_output(0)
 
-    if head_dim < 2 or head_dim % 2 != 0:
-        raise ValueError(
-            "Qwen3 encoder RoPE requires an even head_dim >= 2 for TRT native RoPE")
+    graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
     rope_cos_half_np = graph_ops.make_rope_table_half_dim(
         max_seq_len, head_dim, rope_theta, True)
     rope_sin_half_np = graph_ops.make_rope_table_half_dim(

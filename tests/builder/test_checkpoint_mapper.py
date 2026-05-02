@@ -3,9 +3,9 @@
 Uses synthetic safetensors files. No TRT needed.
 
 Trace: ARCH-CHK-001, UD-CHK-01
-Intent: Validate weight transform helpers (transpose, GQA expansion, head norm repeat) and full weight loading from synthetic safetensors.
+Intent: Validate weight transform helpers (transpose, compact GQA/MQA K/V, head norm repeat) and full weight loading from synthetic safetensors.
 Preconditions: trtf_build and safetensors are importable; no TRT or GPU required.
-Postconditions: Weight shapes, dtypes, and values are correct after transpose, KV expansion, head norm repeat, and end-to-end load_standard_weights.
+Postconditions: Weight shapes, dtypes, and values are correct after transpose, compact K/V load, head norm repeat, and end-to-end load_standard_weights.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ import pytest
 pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
 from trtf_build.checkpoint_mapper import (
     _transpose_2d,
-    _expand_kv_projection,
     _repeat_head_norm,
     _has_tensor,
     _load_tensor,
@@ -56,88 +55,6 @@ class TestTranspose2d:
         result = _transpose_2d(arr, "test")
         assert result.dtype == np.float32
         assert result.flags["C_CONTIGUOUS"]
-
-
-class TestExpandKvProjection:
-    def test_no_expansion_needed(self):
-        """When kv_hidden == target_hidden, return unchanged."""
-        arr = np.random.randn(64, 64).astype(np.float32)
-        result = _expand_kv_projection(
-            arr, hidden=64, kv_hidden=64, target_hidden=64,
-            num_heads=8, num_kv_heads=8)
-        np.testing.assert_array_equal(result, arr)
-
-    def test_gqa_expansion_8q_2kv(self):
-        """GQA: 8 query heads, 2 KV heads => group_size=4."""
-        hidden = 64
-        num_heads = 8
-        num_kv_heads = 2
-        head_dim = 8  # 64 / 8
-        kv_hidden = num_kv_heads * head_dim  # 16
-        target_hidden = num_heads * head_dim  # 64
-
-        # Create KV projection [hidden, kv_hidden]
-        rng = np.random.RandomState(42)
-        transposed = rng.randn(hidden, kv_hidden).astype(np.float32)
-
-        result = _expand_kv_projection(
-            transposed, hidden, kv_hidden, target_hidden,
-            num_heads, num_kv_heads)
-
-        assert result.shape == (hidden, target_hidden)
-
-        # Verify: heads 0-3 should share KV head 0, heads 4-7 share KV head 1
-        for row in range(hidden):
-            for qh in range(num_heads):
-                kvh = qh // 4  # group_size = 4
-                for d in range(head_dim):
-                    assert result[row, qh * head_dim + d] == \
-                        transposed[row, kvh * head_dim + d]
-
-    def test_gqa_expansion_4q_4kv_noop(self):
-        """When num_heads == num_kv_heads (MHA), no expansion."""
-        hidden = 32
-        num_heads = 4
-        num_kv_heads = 4
-        head_dim = 8  # noqa: F841
-        kv_hidden = 32
-        target_hidden = 32
-
-        arr = np.random.randn(hidden, kv_hidden).astype(np.float32)
-        result = _expand_kv_projection(
-            arr, hidden, kv_hidden, target_hidden, num_heads, num_kv_heads)
-        np.testing.assert_array_equal(result, arr)
-
-    def test_gqa_expansion_fp16_contiguous(self):
-        """Expanded output keeps the requested dtype and contiguous layout."""
-        hidden = 16
-        num_heads = 4
-        num_kv_heads = 2
-        head_dim = hidden // num_heads
-        kv_hidden = num_kv_heads * head_dim
-        target_hidden = num_heads * head_dim
-
-        transposed = np.arange(hidden * kv_hidden, dtype=np.float32).reshape(
-            hidden, kv_hidden)
-        result = _expand_kv_projection(
-            transposed,
-            hidden,
-            kv_hidden,
-            target_hidden,
-            num_heads,
-            num_kv_heads,
-            precision="fp16",
-        )
-
-        expected = np.repeat(
-            transposed.reshape(hidden, num_kv_heads, head_dim),
-            num_heads // num_kv_heads,
-            axis=1,
-        ).reshape(hidden, target_hidden).astype(np.float16)
-
-        assert result.dtype == np.float16
-        assert result.flags["C_CONTIGUOUS"]
-        np.testing.assert_array_equal(result, expected)
 
 
 class TestRepeatHeadNorm:
@@ -304,8 +221,8 @@ class TestLoadStandardWeights:
         # w_out: [hidden, vocab] = [16, 32]
         assert weights["w_out"].shape == (16, 32)
 
-    def test_gqa_kv_expansion(self, tmp_path):
-        """Verify GQA K/V projections are expanded."""
+    def test_gqa_kv_stays_compact(self, tmp_path):
+        """Verify GQA K/V projections stay at compact KV width."""
         config = {
             "model_type": "qwen3",
             "vocab_size": 32,
@@ -319,9 +236,9 @@ class TestLoadStandardWeights:
         cfg = ModelConfig.from_dir(model_dir)
         weights = load_standard_weights(model_dir, cfg)
 
-        # K and V should be expanded from kv_hidden=8 to attention_size=16
-        assert weights["layer.0.w_k"].shape == (16, 16)
-        assert weights["layer.0.w_v"].shape == (16, 16)
+        assert weights["layer.0.w_k"].shape == (16, 8)
+        assert weights["layer.0.w_v"].shape == (16, 8)
+        assert weights["_kv_attention_size"] == 8
 
     def test_tied_embeddings_fallback(self, tmp_path):
         """When lm_head.weight is missing, w_out = transposed embedding."""
@@ -366,7 +283,7 @@ class TestLoadStandardWeights:
             weights["w_out"], embedding.T, atol=1e-6)
 
     def test_metadata_keys(self, tmp_path):
-        """Verify _attention_size and _mlp_size metadata."""
+        """Verify attention, KV attention, and MLP metadata."""
         config = {
             "model_type": "qwen3",
             "vocab_size": 32,
@@ -380,6 +297,7 @@ class TestLoadStandardWeights:
         weights = load_standard_weights(model_dir, cfg)
 
         assert weights["_attention_size"] == 16
+        assert weights["_kv_attention_size"] == 16
         assert weights["_mlp_size"] == 32
 
 
@@ -443,15 +361,10 @@ class TestLoadStandardWeightsExtended:
 
         return tensors
 
-    # --- GQA expansion value correctness ---
+    # --- Compact GQA value correctness ---
 
-    def test_gqa_expansion_values_correct(self, tmp_path):
-        """Verify GQA K/V expansion produces correct repeated head values.
-
-        Query heads in the same group should share identical K/V weight columns.
-        group_size = num_heads / num_kv_heads = 4, so heads 0-3 share one KV
-        head and heads 4-7 share the other.
-        """
+    def test_gqa_compact_values_correct(self, tmp_path):
+        """Verify compact GQA K/V values are only transposed, not repeated."""
         hidden = 16
         num_heads = 8
         num_kv_heads = 2
@@ -473,23 +386,12 @@ class TestLoadStandardWeightsExtended:
         cfg = ModelConfig.from_dir(model_dir)
         weights = load_standard_weights(model_dir, cfg)
 
-        # K and V should be expanded from [hidden, kv_hidden=4] to [hidden, hidden=16]
-        assert weights["layer.0.w_k"].shape == (hidden, hidden)
-        assert weights["layer.0.w_v"].shape == (hidden, hidden)
-
-        # Verify the expansion pattern: all query heads in the same group
-        # share identical weight columns.
-        k_weight = weights["layer.0.w_k"]
-        group_size = num_heads // num_kv_heads  # 4
-        for group in range(num_kv_heads):
-            # First head in the group as reference
-            ref_start = group * group_size * head_dim
-            for member in range(1, group_size):
-                member_start = (group * group_size + member) * head_dim
-                for d in range(head_dim):
-                    np.testing.assert_equal(
-                        k_weight[:, member_start + d],
-                        k_weight[:, ref_start + d])
+        kv_hidden = num_kv_heads * head_dim
+        assert weights["layer.0.w_k"].shape == (hidden, kv_hidden)
+        assert weights["layer.0.w_v"].shape == (hidden, kv_hidden)
+        np.testing.assert_array_equal(
+            weights["layer.0.w_k"],
+            tensors["model.layers.0.self_attn.k_proj.weight"].T)
 
     # --- Tied embeddings ---
 
@@ -599,13 +501,13 @@ class TestLoadStandardWeightsExtended:
         assert "layer.0.k_bias" not in weights
         assert "layer.0.v_bias" not in weights
 
-    def test_gqa_bias_expansion(self, tmp_path):
-        """K/V biases are GQA-expanded when num_kv_heads < num_heads."""
+    def test_gqa_biases_stay_compact(self, tmp_path):
+        """K/V biases stay at compact KV width when num_kv_heads < num_heads."""
         hidden = 16
         num_heads = 8
         num_kv_heads = 2
         head_dim = hidden // num_heads  # 2
-        kv_hidden = num_kv_heads * head_dim  # 4  # noqa: F841
+        kv_hidden = num_kv_heads * head_dim
 
         config = {
             "model_type": "qwen2",
@@ -624,21 +526,12 @@ class TestLoadStandardWeightsExtended:
         cfg = ModelConfig.from_dir(model_dir)
         weights = load_standard_weights(model_dir, cfg)
 
-        # q_bias stays at hidden size (no expansion for Q)
+        # q_bias stays at query attention size.
         assert weights["layer.0.q_bias"].shape == (hidden,)
-        # k_bias and v_bias should be expanded from kv_hidden to hidden
-        assert weights["layer.0.k_bias"].shape == (hidden,)
-        assert weights["layer.0.v_bias"].shape == (hidden,)
-
-        # Verify expansion pattern: each KV head bias repeated for its group
+        assert weights["layer.0.k_bias"].shape == (kv_hidden,)
+        assert weights["layer.0.v_bias"].shape == (kv_hidden,)
         k_bias_raw = tensors["model.layers.0.self_attn.k_proj.bias"]
-        k_bias_expanded = weights["layer.0.k_bias"]
-        group_size = num_heads // num_kv_heads
-        for qh in range(num_heads):
-            kvh = qh // group_size
-            for d in range(head_dim):
-                assert k_bias_expanded[qh * head_dim + d] == \
-                    k_bias_raw[kvh * head_dim + d]
+        np.testing.assert_array_equal(weights["layer.0.k_bias"], k_bias_raw)
 
     # --- Error paths ---
 
@@ -711,14 +604,8 @@ class TestLoadStandardWeightsExtended:
         with pytest.raises(FileNotFoundError):
             load_standard_weights(tmp_path, cfg)
 
-    def test_single_kv_head_expansion(self, tmp_path):
-        """GQA with num_heads=8, num_kv_heads=1: KV weights repeated 8x.
-
-        This is the extreme MQA (multi-query attention) case where a single
-        KV head is shared across all query heads. The expansion should
-        produce output where every query head slice is identical to the
-        single source KV head.
-        """
+    def test_single_kv_head_stays_compact(self, tmp_path):
+        """MQA keeps the single KV head compact."""
         hidden = 16
         num_heads = 8
         num_kv_heads = 1
@@ -741,35 +628,14 @@ class TestLoadStandardWeightsExtended:
         cfg = ModelConfig.from_dir(model_dir)
         weights = load_standard_weights(model_dir, cfg)
 
-        # K and V should be expanded from [hidden, kv_hidden=2] to [hidden, hidden=16]
-        assert weights["layer.0.w_k"].shape == (hidden, hidden)
-        assert weights["layer.0.w_v"].shape == (hidden, hidden)
+        assert weights["layer.0.w_k"].shape == (hidden, kv_hidden)
+        assert weights["layer.0.w_v"].shape == (hidden, kv_hidden)
 
-        # Verify the expansion pattern: all 8 query head slices must be
-        # identical to the single source KV head.
-        k_weight = weights["layer.0.w_k"]
-
-        # Get the raw K projection before expansion.
-        # Raw shape in safetensors is [kv_hidden, hidden] = [2, 16];
-        # after transpose it's [hidden, kv_hidden] = [16, 2].
         k_raw_transposed = tensors[
             "model.layers.0.self_attn.k_proj.weight"].T.astype(np.float32)
         assert k_raw_transposed.shape == (hidden, kv_hidden)
+        np.testing.assert_array_equal(weights["layer.0.w_k"], k_raw_transposed)
 
-        # Each of the 8 head slices (columns [qh*2 : qh*2+2]) should equal
-        # the single source head (columns [0:2] of the raw transposed weight).
-        for qh in range(num_heads):
-            head_slice = k_weight[:, qh * head_dim:(qh + 1) * head_dim]
-            np.testing.assert_array_equal(
-                head_slice, k_raw_transposed,
-                err_msg=f"Query head {qh} K slice differs from source KV head")
-
-        # Same check for V weights.
-        v_weight = weights["layer.0.w_v"]
         v_raw_transposed = tensors[
             "model.layers.0.self_attn.v_proj.weight"].T.astype(np.float32)
-        for qh in range(num_heads):
-            head_slice = v_weight[:, qh * head_dim:(qh + 1) * head_dim]
-            np.testing.assert_array_equal(
-                head_slice, v_raw_transposed,
-                err_msg=f"Query head {qh} V slice differs from source KV head")
+        np.testing.assert_array_equal(weights["layer.0.w_v"], v_raw_transposed)

@@ -53,7 +53,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from .. import graph_ops
 from .. import graph_blocks
@@ -82,7 +81,6 @@ class NemotronHPlugin:
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
         num_heads = config.num_attention_heads
-        num_kv_heads = config.num_key_value_heads
         head_dim = config.head_dim
         raw = config.raw
 
@@ -106,8 +104,6 @@ class NemotronHPlugin:
 
         # Attention dimensions
         q_dim = num_heads * head_dim
-        kv_dim = num_kv_heads * head_dim
-
         weights = WeightDict()
 
         # Embedding
@@ -200,15 +196,11 @@ class NemotronHPlugin:
                 v_t = _transpose_2d(v_raw, "v_proj")
                 o_t = _transpose_2d(o_raw, "o_proj")
 
-                # GQA expansion
-                k_expanded = _expand_kv_projection(
-                    k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-                v_expanded = _expand_kv_projection(
-                    v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+                # Compact GQA/MQA K/V
 
                 weights[f"{prefix}.w_q"] = q_t
-                weights[f"{prefix}.w_k"] = k_expanded
-                weights[f"{prefix}.w_v"] = v_expanded
+                weights[f"{prefix}.w_k"] = k_t
+                weights[f"{prefix}.w_v"] = v_t
                 weights[f"{prefix}.w_o"] = o_t
 
                 attn_count += 1
@@ -271,7 +263,10 @@ class NemotronHPlugin:
         mlp_size: int = weights["_mlp_size"]
 
         num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
         head_dim = attention_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
         attention_window = max_cache_length + 1
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -303,10 +298,10 @@ class NemotronHPlugin:
         for ai in range(num_attn):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", ai),
-                trt.float32, (max_cache_length, attention_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", ai),
-                trt.float32, (max_cache_length, attention_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
@@ -381,7 +376,9 @@ class NemotronHPlugin:
                     prefix=prefix,
                     hidden_size=hidden,
                     attention_size=attention_size,
+                    kv_attention_size=kv_attention_size,
                     num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
                     head_dim=head_dim,
                     max_cache_length=max_cache_length,
                     eps_tensor=eps_tensor,

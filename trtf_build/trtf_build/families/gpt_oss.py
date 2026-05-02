@@ -36,9 +36,9 @@ from ..config import ModelConfig
 from ..checkpoint_mapper import (
     WeightDict,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from .. import graph_ops
+from .. import graph_blocks
 from ..standard_decoder_builder import _apply_norm, _mark_debug_output
 
 
@@ -78,13 +78,7 @@ class GptOssPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        num_heads = config.num_attention_heads
-        num_kv_heads = config.num_key_value_heads
-        head_dim = config.head_dim
         num_experts = config.raw.get("num_local_experts", 32)
-
-        q_dim = num_heads * head_dim
-        kv_dim = num_kv_heads * head_dim
 
         weights = WeightDict()
 
@@ -121,15 +115,11 @@ class GptOssPlugin:
             v_t = _transpose_2d(v_raw, "v_proj")
             o_t = _transpose_2d(o_raw, "o_proj")
 
-            # GQA expansion for K, V
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+            # Keep compact GQA/MQA K/V
 
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
 
             # Attention biases
@@ -138,28 +128,10 @@ class GptOssPlugin:
             weights[f"{prefix}.o_bias"] = state[
                 f"{hf}.self_attn.o_proj.bias"].astype(np.float32)
 
-            # K/V biases with GQA expansion
-            k_bias_raw = state[
+            weights[f"{prefix}.k_bias"] = state[
                 f"{hf}.self_attn.k_proj.bias"].astype(np.float32)
-            v_bias_raw = state[
+            weights[f"{prefix}.v_bias"] = state[
                 f"{hf}.self_attn.v_proj.bias"].astype(np.float32)
-            if kv_dim != q_dim:
-                k_bias_exp = np.zeros(q_dim, dtype=np.float32)
-                v_bias_exp = np.zeros(q_dim, dtype=np.float32)
-                group_size = num_heads // num_kv_heads
-                for qh in range(num_heads):
-                    kvh = min(num_kv_heads - 1, qh // group_size)
-                    s = qh * head_dim
-                    e = (qh + 1) * head_dim
-                    ks = kvh * head_dim
-                    ke = (kvh + 1) * head_dim
-                    k_bias_exp[s:e] = k_bias_raw[ks:ke]
-                    v_bias_exp[s:e] = v_bias_raw[ks:ke]
-                weights[f"{prefix}.k_bias"] = k_bias_exp
-                weights[f"{prefix}.v_bias"] = v_bias_exp
-            else:
-                weights[f"{prefix}.k_bias"] = k_bias_raw
-                weights[f"{prefix}.v_bias"] = v_bias_raw
 
             # Attention sinks (per-head learned parameter for softmax normalization)
             sinks_key = f"{hf}.self_attn.sinks"
@@ -254,7 +226,10 @@ class GptOssPlugin:
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
         num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
         head_dim = attention_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
         attention_window = max_cache_length + 1
 
         logger = trt.Logger(
@@ -278,10 +253,10 @@ class GptOssPlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, attention_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, attention_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
@@ -370,7 +345,9 @@ class GptOssPlugin:
                 prefix=prefix,
                 hidden_size=hidden,
                 attention_size=attention_size,
+                kv_attention_size=kv_attention_size,
                 num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 max_cache_length=max_cache_length,
                 num_experts=num_experts,
@@ -619,7 +596,9 @@ def _add_gpt_oss_attention(
     prefix: str,
     hidden_size: int,
     attention_size: int,
+    kv_attention_size: int,
     num_heads: int,
+    num_kv_heads: int,
     head_dim: int,
     max_cache_length: int,
     cos_half_tensor: trt.ITensor,
@@ -647,10 +626,10 @@ def _add_gpt_oss_attention(
         network, normed, hidden_size, attention_size,
         weights[f"{prefix}.w_q"])
     k = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, attention_size,
+        network, normed, hidden_size, kv_attention_size,
         weights[f"{prefix}.w_k"])
     v = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, attention_size,
+        network, normed, hidden_size, kv_attention_size,
         weights[f"{prefix}.w_v"])
 
     q_bias = weights.get(f"{prefix}.q_bias")
@@ -658,17 +637,17 @@ def _add_gpt_oss_attention(
         q = graph_ops.add_bias_sum(network, q, attention_size, q_bias)
     k_bias = weights.get(f"{prefix}.k_bias")
     if k_bias is not None:
-        k = graph_ops.add_bias_sum(network, k, attention_size, k_bias)
+        k = graph_ops.add_bias_sum(network, k, kv_attention_size, k_bias)
     v_bias = weights.get(f"{prefix}.v_bias")
     if v_bias is not None:
-        v = graph_ops.add_bias_sum(network, v, attention_size, v_bias)
+        v = graph_ops.add_bias_sum(network, v, kv_attention_size, v_bias)
 
     # Native RoPE
     q = graph_ops.add_apply_rope_native(
         network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
         position_id, head_dim)
     k = graph_ops.add_apply_rope_native(
-        network, k, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
         position_id, head_dim)
 
     # Save present K/V
@@ -677,9 +656,9 @@ def _add_gpt_oss_attention(
 
     # Reshape and concat with cache
     k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, attention_size)
+    k_reshape.reshape_dims = (1, kv_attention_size)
     v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, attention_size)
+    v_reshape.reshape_dims = (1, kv_attention_size)
 
     all_k = network.add_concatenation(
         [cache_k, k_reshape.get_output(0)])
@@ -696,6 +675,7 @@ def _add_gpt_oss_attention(
         context_flat = graph_ops.add_attention_from_rows(
             network, q, all_k.get_output(0), all_v.get_output(0),
             num_heads=num_heads, head_dim=head_dim,
+            num_kv_heads=num_kv_heads,
             q_seq=1, kv_seq=attention_window,
             mask=mask_4d)
     else:
@@ -704,17 +684,40 @@ def _add_gpt_oss_attention(
         q_heads.reshape_dims = (num_heads, 1, head_dim)
 
         k_heads = network.add_shuffle(all_k.get_output(0))
-        k_heads.reshape_dims = (attention_window, num_heads, head_dim)
+        k_heads.reshape_dims = (attention_window, num_kv_heads, head_dim)
         v_heads = network.add_shuffle(all_v.get_output(0))
-        v_heads.reshape_dims = (attention_window, num_heads, head_dim)
+        v_heads.reshape_dims = (attention_window, num_kv_heads, head_dim)
 
         k_heads.second_transpose = trt.Permutation([1, 0, 2])
         v_heads.second_transpose = trt.Permutation([1, 0, 2])
+        k_heads_t = k_heads.get_output(0)
+        v_heads_t = v_heads.get_output(0)
+        if num_kv_heads != num_heads:
+            group_size = num_heads // num_kv_heads
+            k_slices = []
+            v_slices = []
+            for kvh in range(num_kv_heads):
+                ks = network.add_slice(
+                    k_heads_t, start=(kvh, 0, 0),
+                    shape=(1, attention_window, head_dim),
+                    stride=(1, 1, 1))
+                vs = network.add_slice(
+                    v_heads_t, start=(kvh, 0, 0),
+                    shape=(1, attention_window, head_dim),
+                    stride=(1, 1, 1))
+                k_slices.extend([ks.get_output(0)] * group_size)
+                v_slices.extend([vs.get_output(0)] * group_size)
+            k_expand = network.add_concatenation(k_slices)
+            k_expand.axis = 0
+            v_expand = network.add_concatenation(v_slices)
+            v_expand.axis = 0
+            k_heads_t = k_expand.get_output(0)
+            v_heads_t = v_expand.get_output(0)
 
         # Attention scores: Q @ K^T * scale
         score = network.add_matrix_multiply(
             q_heads.get_output(0), trt.MatrixOperation.NONE,
-            k_heads.get_output(0), trt.MatrixOperation.TRANSPOSE)
+            k_heads_t, trt.MatrixOperation.TRANSPOSE)
         scaled = network.add_elementwise(
             score.get_output(0), attn_scale_tensor,
             trt.ElementWiseOperation.PROD)
@@ -759,7 +762,7 @@ def _add_gpt_oss_attention(
         # Context: attn_probs @ V
         context_heads = network.add_matrix_multiply(
             attn_probs, trt.MatrixOperation.NONE,
-            v_heads.get_output(0), trt.MatrixOperation.NONE)
+            v_heads_t, trt.MatrixOperation.NONE)
 
         context_flat = network.add_shuffle(context_heads.get_output(0))
         context_flat.reshape_dims = (1, attention_size)
@@ -796,7 +799,9 @@ def _add_gpt_oss_decoder_layer(
     prefix: str,
     hidden_size: int,
     attention_size: int,
+    kv_attention_size: int,
     num_heads: int,
+    num_kv_heads: int,
     head_dim: int,
     max_cache_length: int,
     num_experts: int,
@@ -816,7 +821,8 @@ def _add_gpt_oss_decoder_layer(
         network, normed, cache_k, cache_v, attention_mask, position_id,
         weights=weights, prefix=prefix,
         hidden_size=hidden_size, attention_size=attention_size,
-        num_heads=num_heads, head_dim=head_dim,
+        kv_attention_size=kv_attention_size,
+        num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
         max_cache_length=max_cache_length,
         cos_half_tensor=cos_half_tensor, sin_half_tensor=sin_half_tensor,
         attn_scale_tensor=attn_scale_tensor,

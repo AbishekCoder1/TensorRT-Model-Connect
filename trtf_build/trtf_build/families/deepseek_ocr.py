@@ -45,7 +45,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from .. import graph_ops
 from .. import graph_blocks
@@ -69,13 +68,6 @@ class DeepSeekOCRPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        num_heads = config.num_attention_heads
-        num_kv_heads = config.num_key_value_heads
-        head_dim = config.head_dim
-
-        q_dim = num_heads * head_dim
-        kv_dim = num_kv_heads * head_dim
-
         # MoE config from raw
         raw = config.raw
         n_routed_experts = raw.get("n_routed_experts", 64)
@@ -133,16 +125,9 @@ class DeepSeekOCRPlugin:
             o_t = _transpose_2d(o_raw, "o_proj")
             del q_raw, k_raw, v_raw, o_raw
 
-            # GQA expansion if needed
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-            del k_t, v_t
-
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
 
             # MLP: dense or MoE depending on layer
@@ -272,7 +257,10 @@ class DeepSeekOCRPlugin:
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
         num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
         head_dim = attention_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
         attention_window = max_cache_length + 1
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -300,10 +288,10 @@ class DeepSeekOCRPlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, attention_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, attention_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
@@ -313,10 +301,7 @@ class DeepSeekOCRPlugin:
         embedding_table = graph_ops.add_constant(
             network, (vocab, hidden), weights["embedding"])
 
-        if head_dim < 2 or head_dim % 2 != 0:
-            raise ValueError(
-                "DeepSeek OCR decoder RoPE requires an even head_dim >= 2 "
-                "for TRT native RoPE")
+        graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, True)
         sin_half_np = graph_ops.make_rope_table_half_dim(
@@ -382,7 +367,9 @@ class DeepSeekOCRPlugin:
                 prefix=prefix,
                 hidden_size=hidden,
                 attention_size=attention_size,
+                kv_attention_size=kv_attention_size,
                 num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 max_cache_length=max_cache_length,
                 is_moe_layer=is_moe_layer,
@@ -678,7 +665,9 @@ def _add_decoder_layer(
     prefix: str,
     hidden_size: int,
     attention_size: int,
+    kv_attention_size: int,
     num_heads: int,
+    num_kv_heads: int,
     head_dim: int,
     max_cache_length: int,
     is_moe_layer: bool,
@@ -704,17 +693,17 @@ def _add_decoder_layer(
         network, norm1, hidden_size, attention_size,
         weights[f"{prefix}.w_q"])
     k = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, attention_size,
+        network, norm1, hidden_size, kv_attention_size,
         weights[f"{prefix}.w_k"])
     v = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, attention_size,
+        network, norm1, hidden_size, kv_attention_size,
         weights[f"{prefix}.w_v"])
 
     q = graph_ops.add_apply_rope_native(
         network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
         position_id, head_dim)
     k = graph_ops.add_apply_rope_native(
-        network, k, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
         position_id, head_dim)
 
     # Save present K/V
@@ -723,9 +712,9 @@ def _add_decoder_layer(
 
     # Reshape for cache concatenation
     k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, attention_size)
+    k_reshape.reshape_dims = (1, kv_attention_size)
     v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, attention_size)
+    v_reshape.reshape_dims = (1, kv_attention_size)
 
     # Concatenate with cache
     all_k = network.add_concatenation(
@@ -738,7 +727,7 @@ def _add_decoder_layer(
     mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
     context_flat = graph_ops.add_attention_from_rows(
         network, q, all_k.get_output(0), all_v.get_output(0),
-        num_heads=num_heads, head_dim=head_dim,
+        num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
         q_seq=1, kv_seq=attention_window,
         mask=mask_4d)
 

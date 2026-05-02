@@ -405,7 +405,7 @@ class TestStablelmPlugin:
 class TestStarcoder2Plugin:
     """Starcoder2 plugin: standard decoder for code generation."""
 
-    VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 4, 32
+    VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 2, 32
 
     @staticmethod
     def _make_tensors(vocab, hidden, layers, heads, kv_heads, mlp):
@@ -457,6 +457,12 @@ class TestStarcoder2Plugin:
 
         assert "embedding" in weights
         assert "final_norm" in weights
+        kv_hidden = self.KV_HEADS * (self.HIDDEN // self.HEADS)
+        assert weights["_kv_attention_size"] == kv_hidden
+        assert weights["layer.0.w_k"].shape == (self.HIDDEN, kv_hidden)
+        assert weights["layer.0.w_v"].shape == (self.HIDDEN, kv_hidden)
+        assert weights["layer.0.k_bias"].shape == (kv_hidden,)
+        assert weights["layer.0.v_bias"].shape == (kv_hidden,)
 
     def test_matches(self):
         from trtf_build.families.starcoder2 import plugin

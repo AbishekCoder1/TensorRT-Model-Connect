@@ -71,11 +71,11 @@ static void test_decoder_config_basic() {
 
 // -----------------------------------------------------------------------------
 // Intention: Verify that decoder with GQA (num_kv_heads < num_heads)
-//            computes attention_size from num_attention_heads * head_dim, not
-//            num_kv_heads * head_dim. This matches the raw TRT cache format
-//            where GQA heads are expanded.
+//            computes attention_size from num_attention_heads * head_dim.
+//            The raw KV cache width is inferred from engine tensors and uses
+//            num_key_value_heads * head_dim.
 // Setup:     Config with num_attention_heads=16, num_key_value_heads=2 (GQA 8:1).
-// Mechanism: Assert attention_size = 16 * 64 = 1024, not 2 * 64 = 128.
+// Mechanism: Assert attention_size = 16 * 64 = 1024.
 // -----------------------------------------------------------------------------
 static void test_decoder_gqa_attention_size() {
     const std::string config = R"({
@@ -89,10 +89,9 @@ static void test_decoder_gqa_attention_size() {
     })";
 
     const auto cfg = trtf::parse_base_config(config, 128);
-    // attention_size must use num_heads (expanded), not num_kv_heads (compact)
+    // attention_size remains the query projection width.
     check(cfg.attention_size == 16 * 64,
           "decoder GQA: attention_size = num_heads * head_dim = 1024");
-    check(cfg.attention_size != 2 * 64, "decoder GQA: attention_size != num_kv_heads * head_dim");
 }
 
 // -----------------------------------------------------------------------------

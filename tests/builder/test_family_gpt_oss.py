@@ -68,12 +68,12 @@ def _install_fake_hf_loader(
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
 
-def test_load_weights_expands_kv_biases_and_unpacks_experts(
+def test_load_weights_keeps_kv_biases_compact_and_unpacks_experts(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Intent: verify expanded KV-bias and packed-expert de-interleave branches.
+    """Intent: verify compact KV-bias and packed-expert de-interleave branches.
     Preconditions: q_dim != kv_dim and packed expert tensors are present.
-    Postconditions: K/V biases expand to q_dim and expert tensors split by even/odd layout.
+    Postconditions: K/V biases stay at kv_dim and expert tensors split by even/odd layout.
     """
     cfg = ModelConfig(
         model_type="gpt_oss",
@@ -123,14 +123,12 @@ def test_load_weights_expands_kv_biases_and_unpacks_experts(
     assert call_log[0]["torch_dtype"] == "fake-bfloat16"
     assert call_log[0]["low_cpu_mem_usage"] is True
 
-    expected_k_bias = np.array(
-        [11.0, 12.0, 11.0, 12.0, 21.0, 22.0, 21.0, 22.0], dtype=np.float32
-    )
-    expected_v_bias = np.array(
-        [31.0, 32.0, 31.0, 32.0, 41.0, 42.0, 41.0, 42.0], dtype=np.float32
-    )
-    np.testing.assert_allclose(weights["layer.0.k_bias"], expected_k_bias)
-    np.testing.assert_allclose(weights["layer.0.v_bias"], expected_v_bias)
+    np.testing.assert_allclose(
+        weights["layer.0.k_bias"],
+        state["model.layers.0.self_attn.k_proj.bias"])
+    np.testing.assert_allclose(
+        weights["layer.0.v_bias"],
+        state["model.layers.0.self_attn.v_proj.bias"])
 
     gate_up = state["model.layers.0.mlp.experts.gate_up_proj"]
     gate_up_bias = state["model.layers.0.mlp.experts.gate_up_proj_bias"]

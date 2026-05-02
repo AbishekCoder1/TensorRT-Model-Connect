@@ -22,7 +22,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from ..standard_decoder_builder import build_standard_decoder_engine
 
@@ -43,13 +42,6 @@ class StableLMPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        num_heads = config.num_attention_heads
-        num_kv_heads = config.num_key_value_heads
-        head_dim = config.head_dim
-
-        q_dim = num_heads * head_dim
-        kv_dim = num_kv_heads * head_dim
-
         weights = WeightDict()
 
         # Embedding
@@ -98,15 +90,11 @@ class StableLMPlugin:
             v_t = _transpose_2d(v_raw, "v_proj")
             o_t = _transpose_2d(o_raw, "o_proj")
 
-            # GQA expansion for K, V
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+            # Keep compact GQA/MQA K/V
 
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
 
             # Optional QKV biases
@@ -117,29 +105,11 @@ class StableLMPlugin:
                 weights[f"{prefix}.q_bias"] = _load_tensor(
                     readers, q_bias_key).astype(np.float32)
             if _has_tensor(readers, k_bias_key):
-                raw = _load_tensor(readers, k_bias_key).astype(np.float32)
-                if raw.shape[0] == kv_dim and kv_dim != q_dim:
-                    expanded = np.zeros(q_dim, dtype=np.float32)
-                    for qh in range(num_heads):
-                        kvh = min(num_kv_heads - 1,
-                                  qh // (num_heads // num_kv_heads))
-                        expanded[qh * head_dim:(qh + 1) * head_dim] = \
-                            raw[kvh * head_dim:(kvh + 1) * head_dim]
-                    weights[f"{prefix}.k_bias"] = expanded
-                else:
-                    weights[f"{prefix}.k_bias"] = raw
+                weights[f"{prefix}.k_bias"] = _load_tensor(
+                    readers, k_bias_key).astype(np.float32)
             if _has_tensor(readers, v_bias_key):
-                raw = _load_tensor(readers, v_bias_key).astype(np.float32)
-                if raw.shape[0] == kv_dim and kv_dim != q_dim:
-                    expanded = np.zeros(q_dim, dtype=np.float32)
-                    for qh in range(num_heads):
-                        kvh = min(num_kv_heads - 1,
-                                  qh // (num_heads // num_kv_heads))
-                        expanded[qh * head_dim:(qh + 1) * head_dim] = \
-                            raw[kvh * head_dim:(kvh + 1) * head_dim]
-                    weights[f"{prefix}.v_bias"] = expanded
-                else:
-                    weights[f"{prefix}.v_bias"] = raw
+                weights[f"{prefix}.v_bias"] = _load_tensor(
+                    readers, v_bias_key).astype(np.float32)
 
             # SwiGLU MLP (gate/up/down)
             gate_raw = _load_tensor(

@@ -242,8 +242,8 @@ class TestQwen3MoePlugin:
         # LM head: [vocab, hidden] -> [hidden, vocab]
         assert weights["w_out"].shape == (self.HIDDEN, self.VOCAB)
 
-    def test_gqa_expansion(self, tmp_path):
-        """K/V should be GQA-expanded from kv_dim to q_dim."""
+    def test_gqa_kv_stays_compact(self, tmp_path):
+        """K/V should stay compact at kv_dim."""
         from trtf_build.families.qwen_moe import plugin
 
         _write_config(tmp_path, self._make_config())
@@ -252,11 +252,12 @@ class TestQwen3MoePlugin:
         cfg = ModelConfig.from_dir(tmp_path)
         weights = plugin.load_weights(str(tmp_path), cfg)
 
+        kv_dim = self.KV_HEADS * (self.HIDDEN // self.HEADS)
         for i in range(self.LAYERS):
             assert weights[f"layer.{i}.w_k"].shape == (
-                self.HIDDEN, self.HIDDEN)
+                self.HIDDEN, kv_dim)
             assert weights[f"layer.{i}.w_v"].shape == (
-                self.HIDDEN, self.HIDDEN)
+                self.HIDDEN, kv_dim)
 
     def test_metadata_keys(self, tmp_path):
         """Metadata should be stored correctly."""

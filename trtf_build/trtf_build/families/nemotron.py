@@ -31,8 +31,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
-    _expand_kv_bias,
     _target_np_dtype,
 )
 from ..standard_decoder_builder import build_standard_decoder_engine
@@ -114,17 +112,11 @@ class NemotronPlugin:
             v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
             o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
 
-            # GQA expansion for K, V
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads,
-                precision=precision)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads,
-                precision=precision)
+            # Keep compact GQA/MQA K/V
 
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
 
             # Optional attention biases (attention_bias=True in config)
@@ -133,13 +125,8 @@ class NemotronPlugin:
                 bias_key = f"{hf_prefix}.self_attn.{proj}.bias"
                 short = proj[0]  # q, k, v
                 if _has_tensor(readers, bias_key):
-                    raw = _load_tensor(readers, bias_key).astype(target_dtype)
-                    if short in ("k", "v") and dim == kv_dim and kv_dim != q_dim:
-                        weights[f"{prefix}.{short}_bias"] = _expand_kv_bias(
-                            raw, q_dim, num_heads, num_kv_heads,
-                            precision=precision)
-                    else:
-                        weights[f"{prefix}.{short}_bias"] = raw
+                    weights[f"{prefix}.{short}_bias"] = _load_tensor(
+                        readers, bias_key).astype(target_dtype)
 
             o_bias_key = f"{hf_prefix}.self_attn.o_proj.bias"
             if _has_tensor(readers, o_bias_key):

@@ -44,7 +44,6 @@ from ..checkpoint_mapper import (
     _has_tensor,
     _target_np_dtype,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from .. import graph_ops
 from .. import graph_blocks
@@ -71,8 +70,6 @@ class Qwen3MoePlugin:
         num_layers = config.num_hidden_layers
         num_heads = config.num_attention_heads
         num_kv_heads = config.num_key_value_heads
-        head_dim = config.head_dim
-
         raw = config.raw
         num_experts = raw.get("num_experts", 128)
         num_experts_per_tok = raw.get("num_experts_per_tok", 8)
@@ -92,9 +89,6 @@ class Qwen3MoePlugin:
                 readers,
                 "model.layers.0.mlp.shared_expert.gate_proj.weight"
             ).shape[0]
-
-        q_dim = num_heads * head_dim
-        kv_dim = num_kv_heads * head_dim
 
         weights = WeightDict()
 
@@ -138,24 +132,15 @@ class Qwen3MoePlugin:
             o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
             del q_raw, k_raw, v_raw, o_raw
 
-            # GQA expansion for K, V
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads,
-                precision=precision)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads,
-                precision=precision)
-            del k_t, v_t
-
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
 
             # Per-head Q/K RMSNorm (Qwen3 MoE)
             # HF stores [head_dim] weights shared across all heads;
             # graph_ops.add_rms_norm_per_head expects [num_heads * head_dim].
-            # K is GQA-expanded to num_heads before this point, so both
+            # K is keep compacted to num_heads before this point, so both
             # Q and K norm tile to num_heads.
             q_norm_key = f"{hf_prefix}.self_attn.q_norm.weight"
             if _has_tensor(readers, q_norm_key):
@@ -164,7 +149,7 @@ class Qwen3MoePlugin:
             k_norm_key = f"{hf_prefix}.self_attn.k_norm.weight"
             if _has_tensor(readers, k_norm_key):
                 kn = _load_tensor(readers, k_norm_key).astype(np.float32)
-                weights[f"{prefix}.k_norm"] = np.tile(kn, num_heads)
+                weights[f"{prefix}.k_norm"] = np.tile(kn, num_kv_heads)
 
             is_dense = layer_idx in mlp_only_layers
 
@@ -307,7 +292,10 @@ class Qwen3MoePlugin:
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
         num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
         head_dim = attention_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
         attention_window = max_cache_length + 1
 
         logger = trt.Logger(
@@ -340,10 +328,10 @@ class Qwen3MoePlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                work_trt_dtype, (max_cache_length, attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                work_trt_dtype, (max_cache_length, attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
@@ -358,9 +346,7 @@ class Qwen3MoePlugin:
             network, (vocab, hidden), weights["embedding"],
             dtype=work_np_dtype)
 
-        if head_dim < 2 or head_dim % 2 != 0:
-            raise ValueError(
-                "Qwen MoE RoPE requires an even head_dim >= 2 for TRT native RoPE")
+        graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, True)
         sin_half_np = graph_ops.make_rope_table_half_dim(
@@ -407,7 +393,9 @@ class Qwen3MoePlugin:
                 prefix=prefix,
                 hidden_size=hidden,
                 attention_size=attention_size,
+                kv_attention_size=kv_attention_size,
                 num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 max_cache_length=max_cache_length,
                 is_dense=is_dense,
@@ -709,7 +697,9 @@ def _add_qwen3_moe_decoder_layer(
     prefix: str,
     hidden_size: int,
     attention_size: int,
+    kv_attention_size: int,
     num_heads: int,
+    num_kv_heads: int,
     head_dim: int,
     max_cache_length: int,
     is_dense: bool,
@@ -728,7 +718,8 @@ def _add_qwen3_moe_decoder_layer(
         network, hidden, cache_k, cache_v, attention_mask, position_id,
         weights=weights, prefix=prefix,
         hidden_size=hidden_size, attention_size=attention_size,
-        num_heads=num_heads, head_dim=head_dim,
+        kv_attention_size=kv_attention_size,
+        num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
         max_cache_length=max_cache_length,
         eps_tensor=eps_tensor,
         norm_type="rmsnorm", position_type="rope",

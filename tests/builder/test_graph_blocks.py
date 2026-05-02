@@ -28,6 +28,28 @@ except (ImportError, ModuleNotFoundError):
 from tests.builder.conftest import requires_trt
 
 
+class TestInferKvAttentionSize:
+    def test_returns_compact_width(self):
+        weights = {"layer.0.w_k": np.zeros((16, 8), dtype=np.float32)}
+
+        assert graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=2, head_dim=4) == 8
+
+    def test_rejects_expanded_kv_width(self):
+        weights = {"layer.0.w_k": np.zeros((16, 16), dtype=np.float32)}
+
+        with pytest.raises(ValueError, match="compact K/V width 8"):
+            graph_blocks.infer_kv_attention_size(
+                weights, num_kv_heads=2, head_dim=4)
+
+    def test_rejects_mismatched_metadata(self):
+        weights = {"_kv_attention_size": 16}
+
+        with pytest.raises(ValueError, match="_kv_attention_size=16"):
+            graph_blocks.infer_kv_attention_size(
+                weights, num_kv_heads=2, head_dim=4)
+
+
 # ===================================================================
 # 1. apply_norm (TRT)
 # ===================================================================

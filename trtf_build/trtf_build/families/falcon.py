@@ -22,7 +22,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from ..standard_decoder_builder import build_standard_decoder_engine
 
@@ -148,15 +147,11 @@ class FalconPlugin:
             v_t = _transpose_2d(v_raw, "v_proj")
             o_t = _transpose_2d(o_raw, "o_proj")
 
-            # GQA expansion for K, V
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+            # Keep compact GQA/MQA K/V
 
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
 
             # QKV biases (fused or separate)

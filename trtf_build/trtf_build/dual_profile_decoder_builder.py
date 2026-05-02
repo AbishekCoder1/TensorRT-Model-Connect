@@ -29,12 +29,12 @@ Tensor contract (matches the C++ runtime KvCache naming):
     token_id        int32   (-1,)
     position_id     int32   (-1,)
     attention_mask  float32 (-1, -1)                 # (Sq, max_cache + Sq)
-    cache_k_i       fp16/f32 (max_cache, attn_size)  # static
-    cache_v_i       fp16/f32 (max_cache, attn_size)  # static
+    cache_k_i       fp16/f32 (max_cache, kv_size)    # static
+    cache_v_i       fp16/f32 (max_cache, kv_size)    # static
   Outputs
     logits          float32 (1, vocab)               # last-row sliced inside the engine
-    present_k_i     fp16/f32 (-1, attn_size)         # (Sq, attn_size)
-    present_v_i     fp16/f32 (-1, attn_size)         # (Sq, attn_size)
+    present_k_i     fp16/f32 (-1, kv_size)           # (Sq, kv_size)
+    present_v_i     fp16/f32 (-1, kv_size)           # (Sq, kv_size)
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_ops
+from . import graph_blocks
 
 if TYPE_CHECKING:
     from .config import ModelConfig
@@ -264,7 +265,10 @@ def build_dual_profile_decoder_engine(
     vocab = config.vocab_size
     num_layers = config.num_hidden_layers
     num_heads = config.num_attention_heads
+    num_kv_heads = config.num_key_value_heads
     head_dim = attention_size // num_heads
+    kv_attention_size = graph_blocks.infer_kv_attention_size(
+        weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -288,9 +292,9 @@ def build_dual_profile_decoder_engine(
 
     cache_shape: tuple[int, int]
     if multi_bucket_decode:
-        cache_shape = (-1, attention_size)
+        cache_shape = (-1, kv_attention_size)
     else:
-        cache_shape = (max_cache_length, attention_size)
+        cache_shape = (max_cache_length, kv_attention_size)
     cache_k_inputs: list[trt.ITensor] = []
     cache_v_inputs: list[trt.ITensor] = []
     for i in range(num_layers):
@@ -333,9 +337,9 @@ def build_dual_profile_decoder_engine(
                              graph_ops.layer_tensor_name("cache_v", i)):
                     prof.set_shape(
                         name,
-                        (cmn, attention_size),
-                        (cop, attention_size),
-                        (cmx, attention_size))
+                        (cmn, kv_attention_size),
+                        (cop, kv_attention_size),
+                        (cmx, kv_attention_size))
         trt_config.add_optimization_profile(prof)
 
     _add_profile(opt_prefill_length, max_prefill_length, fixed=False,
@@ -362,9 +366,7 @@ def build_dual_profile_decoder_engine(
     sin_half_table: trt.ITensor | None = None
     if position_type == "rope":
         kmax = max_cache_length + max_prefill_length
-        if rotary_embedding_dim < 2 or rotary_embedding_dim % 2 != 0:
-            raise ValueError(
-                "TRT native RoPE requires an even rotary_embedding_dim >= 2")
+        graph_ops.validate_native_rope_dim(rotary_embedding_dim)
         cos_half_np = graph_ops.make_rope_table_half_dim(
             kmax, head_dim, config.rope_theta, True,
             partial_rotary_factor, interleaved=interleaved_rope)
@@ -471,9 +473,9 @@ def build_dual_profile_decoder_engine(
         # Q / K / V projections.
         q = matmul(normed, hidden, attention_size,
                    weights[f"{prefix}.w_q"], f"{prefix}.w_q")
-        k = matmul(normed, hidden, attention_size,
+        k = matmul(normed, hidden, kv_attention_size,
                    weights[f"{prefix}.w_k"], f"{prefix}.w_k")
-        v = matmul(normed, hidden, attention_size,
+        v = matmul(normed, hidden, kv_attention_size,
                    weights[f"{prefix}.w_v"], f"{prefix}.w_v")
 
         # Optional QKV biases (Qwen2 / GPT-2 / OPT / Bloom / Falcon / etc.).
@@ -484,11 +486,11 @@ def build_dual_profile_decoder_engine(
         k_bias = weights.get(f"{prefix}.k_bias")
         if k_bias is not None:
             k = graph_ops.add_bias_sum(
-                network, k, attention_size, k_bias, dtype=work_np_dtype)
+                network, k, kv_attention_size, k_bias, dtype=work_np_dtype)
         v_bias = weights.get(f"{prefix}.v_bias")
         if v_bias is not None:
             v = graph_ops.add_bias_sum(
-                network, v, attention_size, v_bias, dtype=work_np_dtype)
+                network, v, kv_attention_size, v_bias, dtype=work_np_dtype)
 
         # Optional per-head q/k norm (Qwen3).
         q_norm = weights.get(f"{prefix}.q_norm")
@@ -500,7 +502,7 @@ def build_dual_profile_decoder_engine(
         k_norm = weights.get(f"{prefix}.k_norm")
         if k_norm is not None:
             k = graph_ops.add_rms_norm_per_head(
-                network, k, num_heads, head_dim, k_norm,
+                network, k, num_kv_heads, head_dim, k_norm,
                 eps_tensor_per_head, dtype=work_np_dtype,
                 sequence_length=None)
 
@@ -513,7 +515,7 @@ def build_dual_profile_decoder_engine(
                 rotary_embedding_dim, interleaved_rope,
                 sequence_length=None)
             k = graph_ops.add_apply_rope_native(
-                network, k, num_heads, head_dim,
+                network, k, num_kv_heads, head_dim,
                 cos_half_table, sin_half_table, position_id,
                 rotary_embedding_dim, interleaved_rope,
                 sequence_length=None)
@@ -528,22 +530,12 @@ def build_dual_profile_decoder_engine(
         all_v_cat = network.add_concatenation([cache_v_inputs[layer_idx], v])
         all_v_cat.axis = 0
 
-        q_4d = graph_ops.reshape_rows_to_heads_4d(
-            network, q, num_heads, head_dim, sequence_length=None,
-            tag=f"{prefix}.q")
-        k_4d = graph_ops.reshape_rows_to_heads_4d(
-            network, all_k_cat.get_output(0), num_heads, head_dim,
-            sequence_length=None, tag=f"{prefix}.k")
-        v_4d = graph_ops.reshape_rows_to_heads_4d(
-            network, all_v_cat.get_output(0), num_heads, head_dim,
-            sequence_length=None, tag=f"{prefix}.v")
-
-        ctx_4d = graph_ops.add_attention_core(
-            network, q_4d, k_4d, v_4d, causal=False, mask=mask_4d,
-            scale=attn_scale)
-        context = graph_ops.reshape_heads_4d_to_rows(
-            network, ctx_4d, attention_size, sequence_length=None,
-            tag=f"{prefix}.ctx")
+        context = graph_ops.add_attention_from_rows(
+            network, q, all_k_cat.get_output(0), all_v_cat.get_output(0),
+            num_heads=num_heads, head_dim=head_dim,
+            num_kv_heads=num_kv_heads,
+            q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
+            scale=attn_scale, tag=f"{prefix}.attn")
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")
@@ -653,6 +645,7 @@ def build_dual_profile_decoder_engine(
     if verbose:
         print(f"[trtf-build] Building dual-profile engine "
               f"(layers={num_layers}, hidden={hidden}, attn={attention_size}, "
+              f"kv={kv_attention_size}, "
               f"mlp={mlp_size}, cache={max_cache_length}, "
               f"opt_prefill={opt_prefill_length}, max_prefill={max_prefill_length}, "
               f"norm={norm_type}, mlp_type={mlp_type}, pos={position_type}, "

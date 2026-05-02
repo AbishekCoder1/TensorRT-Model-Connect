@@ -1,9 +1,9 @@
 """Coverage-focused tests for checkpoint_mapper helper branches.
 
 Trace: ARCH-CHK-001, UD-CHK-02
-Intent: Validate edge-case branches in checkpoint_mapper including q/k norm expansion, final norm fallback, QKV bias loading, and GQA head repetition.
+Intent: Validate edge-case branches in checkpoint_mapper including q/k norm tiling, final norm fallback, QKV bias loading, and compact GQA/MQA K/V shapes.
 Preconditions: trtf_build and safetensors are importable; no TRT or GPU required.
-Postconditions: Optional norm weights are expanded per-head, missing final norm defaults to ones, biases are loaded when present, and GQA expansion produces correct shapes.
+Postconditions: Optional norm weights are tiled per-head, missing final norm defaults to ones, biases are loaded when present, and compact K/V shapes are preserved.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def test_load_standard_weights_qk_norm_and_final_norm_fallback(tmp_path: Path) -
     """Intent: cover optional q/k norm branches and missing final norm fallback.
 
     Preconditions: model.safetensors includes q_norm/k_norm and excludes model.norm.weight.
-    Postconditions: q_norm/k_norm are expanded per head and final_norm defaults to ones.
+    Postconditions: q_norm/k_norm are tiled per head and final_norm defaults to ones.
     """
     hidden = 8
     cfg_json = _base_config(hidden)

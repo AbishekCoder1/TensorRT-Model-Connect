@@ -241,12 +241,14 @@ class TestMakeRopeTableHalfDim:
         rotary_ndims = int(head_dim * factor)
         assert cos.shape == (max_S, rotary_ndims // 2)
 
-    def test_degenerate_inputs(self):
-        """Zero or invalid inputs should return default table without crash."""
+    def test_degenerate_length(self):
+        """Zero length should return a default table without crashing."""
         t = graph_ops.make_rope_table_half_dim(0, 64, 10000.0, True)
         assert t.shape[1] == 32  # head_dim // 2
-        t2 = graph_ops.make_rope_table_half_dim(8, 0, 10000.0, True)
-        assert t2 is not None  # should not raise
+
+    def test_invalid_rotary_dim_raises(self):
+        with pytest.raises(ValueError, match="TRT native RoPE requires"):
+            graph_ops.make_rope_table_half_dim(8, 0, 10000.0, True)
 
 
 # ---------------------------------------------------------------------------

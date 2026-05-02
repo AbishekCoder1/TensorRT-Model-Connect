@@ -122,8 +122,8 @@ def test_load_weights_mixed_layer_routing_and_fallbacks(
     assert "layer.1.w_q" not in weights
 
     assert weights["layer.2.w_q"].shape == (8, 8)
-    assert weights["layer.2.w_k"].shape == (8, 8)
-    assert weights["layer.2.w_v"].shape == (8, 8)
+    assert weights["layer.2.w_k"].shape == (8, 4)
+    assert weights["layer.2.w_v"].shape == (8, 4)
     assert weights["layer.2.w_o"].shape == (8, 8)
 
     np.testing.assert_allclose(weights["final_norm"], np.ones(8, dtype=np.float32))

@@ -42,49 +42,6 @@ def _transpose_2d(arr: np.ndarray, name: str, precision: str = "fp32") -> np.nda
     return np.ascontiguousarray(arr.T, dtype=_target_np_dtype(precision))
 
 
-def _expand_kv_projection(
-    transposed: np.ndarray,
-    hidden: int,
-    kv_hidden: int,
-    target_hidden: int,
-    num_heads: int,
-    num_kv_heads: int,
-    precision: str = "fp32",
-) -> np.ndarray:
-    """Expand GQA K/V projection from [hidden, kv_hidden] to [hidden, target_hidden]."""
-    target_dtype = _target_np_dtype(precision)
-    if kv_hidden == target_hidden:
-        return np.ascontiguousarray(transposed, dtype=target_dtype)
-
-    head_dim = target_hidden // num_heads
-    group_size = num_heads // num_kv_heads
-    per_head = transposed.reshape(hidden, num_kv_heads, head_dim)
-    expanded = np.repeat(per_head, group_size, axis=1)
-    return np.ascontiguousarray(
-        expanded.reshape(hidden, target_hidden),
-        dtype=target_dtype,
-    )
-
-
-def _expand_kv_bias(
-    raw: np.ndarray,
-    target_hidden: int,
-    num_heads: int,
-    num_kv_heads: int,
-    precision: str = "fp32",
-) -> np.ndarray:
-    """Expand GQA K/V bias from [kv_hidden] to [target_hidden]."""
-    target_dtype = _target_np_dtype(precision)
-    if raw.shape[0] == target_hidden:
-        return np.ascontiguousarray(raw, dtype=target_dtype)
-
-    head_dim = target_hidden // num_heads
-    group_size = num_heads // num_kv_heads
-    per_head = raw.reshape(num_kv_heads, head_dim)
-    expanded = np.repeat(per_head, group_size, axis=0)
-    return np.ascontiguousarray(expanded.reshape(target_hidden), dtype=target_dtype)
-
-
 def _repeat_head_norm(norm: np.ndarray, num_heads: int) -> np.ndarray:
     """Repeat per-head norm [head_dim] -> [num_heads * head_dim]."""
     return np.tile(norm, num_heads).astype(np.float32)
@@ -96,14 +53,14 @@ class WeightDict(dict):
     Keys follow the convention used by standard_decoder_builder.py:
       - embedding: [vocab, hidden]
       - layer.{i}.input_norm: [hidden]
-      - layer.{i}.w_q: [hidden, attention_size]  (transposed, GQA-expanded)
-      - layer.{i}.w_k: [hidden, attention_size]
-      - layer.{i}.w_v: [hidden, attention_size]
+      - layer.{i}.w_q: [hidden, attention_size]
+      - layer.{i}.w_k: [hidden, kv_attention_size]
+      - layer.{i}.w_v: [hidden, kv_attention_size]
       - layer.{i}.q_bias: [attention_size]       (optional)
-      - layer.{i}.k_bias: [attention_size]       (optional, GQA-expanded)
-      - layer.{i}.v_bias: [attention_size]        (optional, GQA-expanded)
+      - layer.{i}.k_bias: [kv_attention_size]    (optional)
+      - layer.{i}.v_bias: [kv_attention_size]    (optional)
       - layer.{i}.q_norm: [attention_size]        (optional)
-      - layer.{i}.k_norm: [attention_size]        (optional)
+      - layer.{i}.k_norm: [kv_attention_size]     (optional)
       - layer.{i}.w_o: [attention_size, hidden]
       - layer.{i}.post_attn_norm: [hidden]
       - layer.{i}.w_gate: [hidden, mlp_size]
@@ -162,7 +119,6 @@ def load_standard_weights(
             readers, _layer_key(layer_idx, "self_attn.o_proj.weight"))
 
         q_hidden = q_raw.shape[0]
-        kv_hidden = k_raw.shape[0]
         gate_raw = _load_tensor(
             readers, _layer_key(layer_idx, "mlp.gate_proj.weight"))
         layer_mlp_size = gate_raw.shape[0]
@@ -173,17 +129,9 @@ def load_standard_weights(
         v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
         o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
 
-        # GQA expansion for K, V
-        k_expanded = _expand_kv_projection(
-            k_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads,
-            precision=precision)
-        v_expanded = _expand_kv_projection(
-            v_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads,
-            precision=precision)
-
         layer[f"{prefix}.w_q"] = q_t
-        layer[f"{prefix}.w_k"] = k_expanded
-        layer[f"{prefix}.w_v"] = v_expanded
+        layer[f"{prefix}.w_k"] = k_t
+        layer[f"{prefix}.w_v"] = v_t
         layer[f"{prefix}.w_o"] = o_t
 
         # Optional QKV biases (Qwen2 style)
@@ -194,21 +142,11 @@ def load_standard_weights(
             layer[f"{prefix}.q_bias"] = _load_tensor(
                 readers, q_bias_key).astype(target_dtype)
         if _has_tensor(readers, k_bias_key):
-            raw = _load_tensor(readers, k_bias_key).astype(target_dtype)
-            if raw.shape[0] == kv_hidden and kv_hidden != q_hidden:
-                layer[f"{prefix}.k_bias"] = _expand_kv_bias(
-                    raw, q_hidden, num_heads, num_kv_heads,
-                    precision=precision)
-            else:
-                layer[f"{prefix}.k_bias"] = raw
+            layer[f"{prefix}.k_bias"] = _load_tensor(
+                readers, k_bias_key).astype(target_dtype)
         if _has_tensor(readers, v_bias_key):
-            raw = _load_tensor(readers, v_bias_key).astype(target_dtype)
-            if raw.shape[0] == kv_hidden and kv_hidden != q_hidden:
-                layer[f"{prefix}.v_bias"] = _expand_kv_bias(
-                    raw, q_hidden, num_heads, num_kv_heads,
-                    precision=precision)
-            else:
-                layer[f"{prefix}.v_bias"] = raw
+            layer[f"{prefix}.v_bias"] = _load_tensor(
+                readers, v_bias_key).astype(target_dtype)
 
         # Optional per-head q/k norm (Qwen3 style)
         q_norm_key = _layer_key(layer_idx, "self_attn.q_norm.weight")
@@ -220,7 +158,7 @@ def load_standard_weights(
         if _has_tensor(readers, k_norm_key):
             layer[f"{prefix}.k_norm"] = _repeat_head_norm(
                 _load_tensor(readers, k_norm_key).astype(np.float32),
-                num_heads)
+                num_kv_heads)
 
         # MLP projections
         up_raw = _load_tensor(
@@ -246,6 +184,7 @@ def load_standard_weights(
             layer_results[layer_idx] = (layer_idx, layer, attention_size, mlp_size)
 
     attention_size = 0
+    kv_attention_size = 0
     mlp_size = 0
     for result in layer_results:
         if result is None:
@@ -254,6 +193,8 @@ def load_standard_weights(
         weights.update(layer)
         if attention_size == 0:
             attention_size = layer_attention_size
+            first_k = layer[f"layer.{_layer_idx}.w_k"]
+            kv_attention_size = int(first_k.shape[1])
         if mlp_size == 0:
             mlp_size = layer_mlp_size
 
@@ -276,6 +217,7 @@ def load_standard_weights(
                                          precision=precision)
 
     weights["_attention_size"] = attention_size  # type: ignore[assignment]
+    weights["_kv_attention_size"] = kv_attention_size  # type: ignore[assignment]
     weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
 
     return weights

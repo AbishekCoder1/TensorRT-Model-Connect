@@ -251,10 +251,12 @@ class TestPhiPlugin:
                 weights[f"layer.{i}.w_q"],
                 q_raw.T.astype(np.float32), atol=1e-6)
 
-            # K is transposed then GQA-expanded to [hidden, q_dim]
-            assert weights[f"layer.{i}.w_k"].shape == (self.HIDDEN, self.Q_DIM)
-            # V similarly
-            assert weights[f"layer.{i}.w_v"].shape == (self.HIDDEN, self.Q_DIM)
+            np.testing.assert_allclose(
+                weights[f"layer.{i}.w_k"],
+                k_raw.T.astype(np.float32), atol=1e-6)
+            np.testing.assert_allclose(
+                weights[f"layer.{i}.w_v"],
+                v_raw.T.astype(np.float32), atol=1e-6)
 
     def test_gate_up_split(self, tmp_path):
         """Fused gate_up should be correctly split into gate and up."""
@@ -905,7 +907,7 @@ class TestLlamaPlugin:
     VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 2, 32
 
     def test_load_weights(self, tmp_path):
-        """LLaMA uses load_standard_weights — verify GQA expansion."""
+        """LLaMA uses load_standard_weights — verify compact GQA K/V."""
         from trtf_build.families.llama import plugin
 
         head_dim = self.HIDDEN // self.HEADS  # 4
@@ -927,19 +929,17 @@ class TestLlamaPlugin:
         cfg = ModelConfig.from_dir(tmp_path)
         weights = plugin.load_weights(str(tmp_path), cfg)
 
-        # GQA expansion: K/V go from [hidden, kv_hidden] to [hidden, q_hidden]
+        # K/V stay compact at [hidden, kv_hidden].
         for i in range(self.LAYERS):
             assert weights[f"layer.{i}.w_k"].shape == (
-                self.HIDDEN, self.HIDDEN)
+                self.HIDDEN, kv_hidden)
             assert weights[f"layer.{i}.w_v"].shape == (
-                self.HIDDEN, self.HIDDEN)
+                self.HIDDEN, kv_hidden)
 
     def test_tied_embeddings(self, tmp_path):
         """When lm_head.weight is missing, w_out = transposed embedding."""
         from trtf_build.families.llama import plugin
 
-        head_dim = self.HIDDEN // self.HEADS
-        kv_hidden = self.KV_HEADS * head_dim
         config = {
             "model_type": "llama",
             "vocab_size": self.VOCAB,
@@ -1473,9 +1473,9 @@ class TestInternVLPlugin:
 
         for i in range(self.LAYERS):
             assert f"layer.{i}.q_bias" in weights
-            # k_bias should be GQA-expanded to attention_size
             assert f"layer.{i}.k_bias" in weights
-            assert weights[f"layer.{i}.k_bias"].shape == (self.HIDDEN,)
+            kv_dim = self.KV_HEADS * (self.HIDDEN // self.HEADS)
+            assert weights[f"layer.{i}.k_bias"].shape == (kv_dim,)
 
     def test_vision_weights_not_in_text(self, tmp_path):
         """Vision and projector keys should NOT appear in text weight dict."""
@@ -1608,7 +1608,7 @@ class TestInternVLPlugin:
 class TestEagleVLMPlugin:
     """Eagle VLM plugin — Llama backbone for embedding/reranking."""
 
-    VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 4, 32
+    VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 2, 32
 
     @staticmethod
     def _make_tensors(vocab, hidden, layers, heads, kv_heads, mlp,
@@ -1667,6 +1667,10 @@ class TestEagleVLMPlugin:
         assert "layer.0.w_gate" in weights
         assert "layer.0.input_norm" in weights
         assert "final_norm" in weights
+        kv_hidden = self.KV_HEADS * (self.HIDDEN // self.HEADS)
+        assert weights["_kv_attention_size"] == kv_hidden
+        assert weights["layer.0.w_k"].shape == (self.HIDDEN, kv_hidden)
+        assert weights["layer.0.w_v"].shape == (self.HIDDEN, kv_hidden)
         # No score head for embedding
         assert "score_weight" not in weights
 
@@ -1764,7 +1768,7 @@ class TestEagleVLMPlugin:
 
 
 # =========================================================================
-# GLM-4 — fused gate_up_proj split, Q/K/V biases with GQA expansion
+# GLM-4 — fused gate_up_proj split, compact Q/K/V biases
 # =========================================================================
 
 class TestGlmPlugin:
@@ -1827,9 +1831,36 @@ class TestGlmPlugin:
             weights["layer.0.w_up"],
             up_raw.T.astype(np.float32), atol=1e-6)
 
-    def test_qkv_biases_with_gqa_expansion(self, tmp_path):
-        """Q/K/V biases should be loaded; K/V biases GQA-expanded."""
+    def test_qkv_biases_stay_compact(self, tmp_path):
+        """Q/K/V biases should be loaded; K/V biases stay compact."""
         from trtf_build.families.glm import plugin
+
+        config = {
+            "model_type": "glm",
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": 1,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+        }
+        tensors = self._make_tensors()
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), cfg)
+
+        np.testing.assert_allclose(
+            weights["layer.0.q_bias"],
+            tensors["model.layers.0.self_attn.q_proj.bias"].astype(np.float32))
+        np.testing.assert_allclose(
+            weights["layer.0.k_bias"],
+            tensors["model.layers.0.self_attn.k_proj.bias"].astype(np.float32))
+        np.testing.assert_allclose(
+            weights["layer.0.v_bias"],
+            tensors["model.layers.0.self_attn.v_proj.bias"].astype(np.float32))
+        assert weights["layer.0.k_bias"].shape == (self.KV_DIM,)
+        assert weights["layer.0.v_bias"].shape == (self.KV_DIM,)
 
 class TestCanaryPlugin:
     """Canary encoder-decoder ASR plugin loads from synthetic .nemo archive."""
@@ -1942,11 +1973,8 @@ class TestCanaryPlugin:
 
     def test_load_weights_keys(self, tmp_path):
         """Canary load_weights extracts correct keys from .nemo archive."""
-        try:
-            import torch
-            import yaml
-        except ImportError:
-            pytest.skip("torch/yaml required for canary test")
+        pytest.importorskip("torch", reason="torch required for canary test")
+        pytest.importorskip("yaml", reason="yaml required for canary test")
 
         from trtf_build.families.canary import plugin
 

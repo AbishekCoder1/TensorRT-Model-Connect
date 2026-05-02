@@ -28,7 +28,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from ..standard_decoder_builder import build_standard_decoder_engine
 from .. import graph_ops
@@ -224,7 +223,6 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
 
         q_hidden = q_raw.shape[0]
-        kv_hidden = k_raw.shape[0]
         if attention_size == 0:
             attention_size = q_hidden
 
@@ -233,14 +231,10 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         v_t = _transpose_2d(v_raw, "v_proj")
         o_t = _transpose_2d(o_raw, "o_proj")
 
-        k_expanded = _expand_kv_projection(
-            k_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads)
-        v_expanded = _expand_kv_projection(
-            v_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads)
 
         weights[f"{prefix}.w_q"] = q_t
-        weights[f"{prefix}.w_k"] = k_expanded
-        weights[f"{prefix}.w_v"] = v_expanded
+        weights[f"{prefix}.w_k"] = k_t
+        weights[f"{prefix}.w_v"] = v_t
         weights[f"{prefix}.w_o"] = o_t
 
         # Optional per-head q/k norms (Qwen3)
@@ -252,7 +246,7 @@ def _load_qwen3_vl_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         k_norm_key = f"{hf_prefix}.self_attn.k_norm.weight"
         if _has_tensor(readers, k_norm_key):
             k_norm = _load_tensor(readers, k_norm_key).astype(np.float32)
-            weights[f"{prefix}.k_norm"] = np.tile(k_norm, num_heads)
+            weights[f"{prefix}.k_norm"] = np.tile(k_norm, num_kv_heads)
 
         # SwiGLU MLP
         gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
@@ -319,7 +313,10 @@ def _build_qwen3_vl_decoder(
     vocab = config.vocab_size
     num_layers = config.num_hidden_layers
     num_heads = config.num_attention_heads
+    num_kv_heads = config.num_key_value_heads
     head_dim = attention_size // num_heads
+    kv_attention_size = graph_blocks.infer_kv_attention_size(
+        weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -355,10 +352,10 @@ def _build_qwen3_vl_decoder(
     for i in range(num_layers):
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
-            trt.float32, (max_cache_length, attention_size))
+            trt.float32, (max_cache_length, kv_attention_size))
         cv = network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
-            trt.float32, (max_cache_length, attention_size))
+            trt.float32, (max_cache_length, kv_attention_size))
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
 
@@ -366,9 +363,7 @@ def _build_qwen3_vl_decoder(
     embedding_table = graph_ops.add_constant(
         network, (vocab, hidden), weights["embedding"])
 
-    if head_dim < 2 or head_dim % 2 != 0:
-        raise ValueError(
-            "Qwen VL RoPE requires an even head_dim >= 2 for TRT native RoPE")
+    graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
     cos_half_np = graph_ops.make_rope_table_half_dim(
         attention_window, head_dim, config.rope_theta, True)
     sin_half_np = graph_ops.make_rope_table_half_dim(
@@ -419,7 +414,9 @@ def _build_qwen3_vl_decoder(
             cache_v_inputs[layer_idx], attention_mask, position_id,
             weights=weights, prefix=prefix,
             hidden_size=hidden, attention_size=attention_size,
+            kv_attention_size=kv_attention_size,
             num_heads=num_heads, head_dim=head_dim,
+            num_kv_heads=num_kv_heads,
             max_cache_length=max_cache_length,
             eps_tensor=eps_tensor,
             norm_type="rmsnorm", position_type="rope",

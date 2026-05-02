@@ -5,8 +5,8 @@ I/O format (DeviceKvCache):
   - token_id:       int32 [1]
   - position_id:    int32 [1]
   - attention_mask:  float32 [1, max_cache_length + 1]
-  - cache_kv_0..N:  float32 [max_cache_length, attention_size]
-                    where attention_size = num_heads * head_dim (expanded GQA)
+  - cache_kv_0..N:  float32 [max_cache_length, kv_dim]
+                    where kv_dim = num_key_value_heads * head_dim
 
 Key exports:
     make_export_args() — builds the example_args tuple for torch.export
@@ -44,8 +44,8 @@ def make_cache_tensors(
     """Create zeroed KV cache tensors in raw TRT format.
 
     Returns a flat list: [cache_k_0, cache_v_0, cache_k_1, cache_v_1, ...]
-    Each tensor has shape [max_cache_length, attention_size] float32,
-    where attention_size = num_heads * head_dim (expanded GQA heads).
+    Each tensor has shape [max_cache_length, kv_dim] float32, where
+    kv_dim = num_key_value_heads * head_dim.
 
     Args:
         config: HF PretrainedConfig or ModelConfig with num_hidden_layers,
@@ -53,12 +53,13 @@ def make_cache_tensors(
     """
     num_layers = config.num_hidden_layers
     num_heads = getattr(config, 'num_attention_heads', 1)
+    num_kv_heads = getattr(config, 'num_key_value_heads', num_heads)
     head_dim = getattr(config, 'head_dim',
                        getattr(config, 'hidden_size', 64) //
                        max(num_heads, 1))
-    attention_size = num_heads * head_dim
+    kv_dim = num_kv_heads * head_dim
 
-    cache_shape = (max_cache_length, attention_size)
+    cache_shape = (max_cache_length, kv_dim)
     tensors = []
     for _ in range(num_layers):
         tensors.append(torch.zeros(cache_shape, dtype=torch.float32, device=device))  # k
@@ -82,7 +83,7 @@ def make_export_args(
       - token_id:      int32 [1]
       - position_id:   int32 [1]
       - attention_mask: float32 [1, max_cache_length + 1]
-      - cache_kv_N:    float32 [max_cache_length, attention_size]
+      - cache_kv_N:    float32 [max_cache_length, kv_dim]
 
     Args:
         config: HF PretrainedConfig or ModelConfig.
@@ -97,7 +98,7 @@ def make_export_args(
     position_id = torch.zeros(1, dtype=torch.int32, device=device)
     attention_mask = build_attention_mask(0, max_cache_length, device=device)
 
-    # Cache tensors — float32, expanded GQA heads
+    # Cache tensors — float32, compact GQA/MQA KV heads.
     cache_tensors = make_cache_tensors(config, max_cache_length, device=device)
 
     return (token_id, position_id, attention_mask, *cache_tensors)

@@ -57,17 +57,17 @@ class StatelessCacheWrapper(nn.Module):
       - token_id:      int32 [1]
       - position_id:   int32 [1]
       - attention_mask: float32 [1, max_cache_length + 1]
-      - cache_kv_{2i}: float32 [max_cache_length, attention_size]  (keys layer i)
-      - cache_kv_{2i+1}: float32 [max_cache_length, attention_size]  (values layer i)
-    where attention_size = num_heads * head_dim (GQA heads expanded).
+      - cache_kv_{2i}: float32 [max_cache_length, kv_dim]  (keys layer i)
+      - cache_kv_{2i+1}: float32 [max_cache_length, kv_dim]  (values layer i)
+    where kv_dim = num_key_value_heads * head_dim.
 
     Produces outputs matching the raw TRT engine convention:
       - output0:       float32 [1, vocab_size]  (logits)
-      - output{2i+1}:  float32 [1, attention_size]  (present_k layer i)
-      - output{2i+2}:  float32 [1, attention_size]  (present_v layer i)
+      - output{2i+1}:  float32 [1, kv_dim]  (present_k layer i)
+      - output{2i+2}:  float32 [1, kv_dim]  (present_v layer i)
 
-    Internally converts between the raw TRT format (fp32 I/O) and HF's native
-    format (int64, compact KV heads, 4D shapes) at the configured compute dtype.
+    Internally converts between raw TRT fp32 I/O and HF's native 4D cache
+    format at the configured compute dtype.
     """
 
     def __init__(
@@ -88,8 +88,8 @@ class StatelessCacheWrapper(nn.Module):
             config, 'head_dim',
             config.hidden_size // config.num_attention_heads)
         self.max_cache_length = max_cache_length
-        self.group_size = config.num_attention_heads // config.num_key_value_heads
         self.attention_size = config.num_attention_heads * self.head_dim
+        self.kv_dim = config.num_key_value_heads * self.head_dim
 
     def forward(self, token_id, position_id, attention_mask, *cache_kv):
         from transformers.cache_utils import StaticCache
@@ -111,22 +111,19 @@ class StatelessCacheWrapper(nn.Module):
         hf_mask = hf_mask.scatter(1, idx, 0.0)  # unmask current cache position
         hf_mask = hf_mask.to(compute_dtype).unsqueeze(1).unsqueeze(1)  # [1, 1, 1, max_cache_length]
 
-        # cache_kv: float32 [max_cache_length, attention_size] -> compute_dtype [1, num_kv_heads, max_cache_length, head_dim]
+        # cache_kv: float32 [max_cache_length, kv_dim] -> compute_dtype [1, num_kv_heads, max_cache_length, head_dim]
         cache = StaticCache(
             self.config, max_cache_len=self.max_cache_length,
             dtype=compute_dtype, device=token_id.device)
 
         for i in range(self.num_layers):
-            raw_k = cache_kv[2 * i]   # [max_cache_length, attention_size]
+            raw_k = cache_kv[2 * i]   # [max_cache_length, kv_dim]
             raw_v = cache_kv[2 * i + 1]
 
-            # Reshape to [max_cache_length, num_heads, head_dim]
-            k_expanded = raw_k.view(self.max_cache_length, self.num_heads, self.head_dim)
-            v_expanded = raw_v.view(self.max_cache_length, self.num_heads, self.head_dim)
-
-            # GQA compaction: take first head of each group
-            k_compact = k_expanded[:, ::self.group_size, :]
-            v_compact = v_expanded[:, ::self.group_size, :]
+            k_compact = raw_k.view(
+                self.max_cache_length, self.num_kv_heads, self.head_dim)
+            v_compact = raw_v.view(
+                self.max_cache_length, self.num_kv_heads, self.head_dim)
 
             # Reshape to HF format: [1, num_kv_heads, max_cache_length, head_dim] compute_dtype
             layer = cache.layers[i]
@@ -149,7 +146,7 @@ class StatelessCacheWrapper(nn.Module):
         # logits: [1, 1, vocab_size] -> [1, vocab_size] float32
         logits = outputs.logits.squeeze(1).to(torch.float32)
 
-        # present KV: [1, num_kv_heads, 1, head_dim] -> [1, attention_size] float32
+        # present KV: [1, num_kv_heads, 1, head_dim] -> [1, kv_dim] float32
         present_outputs = []
         updated_cache = outputs.past_key_values
         for i in range(self.num_layers):
@@ -158,11 +155,8 @@ class StatelessCacheWrapper(nn.Module):
             new_k = updated_cache.layers[i].keys.gather(2, idx)
             new_v = updated_cache.layers[i].values.gather(2, idx)
 
-            # GQA expansion: repeat_interleave to match raw TRT's expanded heads
-            new_k_expanded = new_k.repeat_interleave(self.group_size, dim=1)
-            new_v_expanded = new_v.repeat_interleave(self.group_size, dim=1)
-            present_outputs.append(new_k_expanded.reshape(1, self.attention_size).to(torch.float32))
-            present_outputs.append(new_v_expanded.reshape(1, self.attention_size).to(torch.float32))
+            present_outputs.append(new_k.reshape(1, self.kv_dim).to(torch.float32))
+            present_outputs.append(new_v.reshape(1, self.kv_dim).to(torch.float32))
 
         return (logits, *present_outputs)
 

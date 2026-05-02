@@ -141,7 +141,10 @@ def build_standard_decoder_engine(
     vocab = config.vocab_size
     num_layers = config.num_hidden_layers
     num_heads = config.num_attention_heads
+    num_kv_heads = config.num_key_value_heads
     head_dim = attention_size // num_heads
+    kv_attention_size = graph_blocks.infer_kv_attention_size(
+        weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
     dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
     dynamic_kv_opt_rows = int(config.raw.get("_dynamic_kv_opt_length", max_cache_length))
@@ -202,11 +205,13 @@ def build_standard_decoder_engine(
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
             work_trt_dtype,
-            (-1, attention_size) if dynamic_kv_cache else (max_cache_length, attention_size))
+            (-1, kv_attention_size) if dynamic_kv_cache else (
+                max_cache_length, kv_attention_size))
         cv = network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
             work_trt_dtype,
-            (-1, attention_size) if dynamic_kv_cache else (max_cache_length, attention_size))
+            (-1, kv_attention_size) if dynamic_kv_cache else (
+                max_cache_length, kv_attention_size))
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
 
@@ -223,8 +228,8 @@ def build_standard_decoder_engine(
                                   (1, profile_rows + 1),
                                   (1, profile_rows + 1))
                 for i in range(num_layers):
-                    min_cache_shape = (min_rows, attention_size)
-                    cache_shape = (profile_rows, attention_size)
+                    min_cache_shape = (min_rows, kv_attention_size)
+                    cache_shape = (profile_rows, kv_attention_size)
                     profile.set_shape(graph_ops.layer_tensor_name("cache_k", i),
                                       min_cache_shape, cache_shape, cache_shape)
                     profile.set_shape(graph_ops.layer_tensor_name("cache_v", i),
@@ -236,11 +241,13 @@ def build_standard_decoder_engine(
                               (1, attention_window))
             for i in range(num_layers):
                 profile.set_shape(graph_ops.layer_tensor_name("cache_k", i),
-                                  (1, attention_size), (dynamic_kv_opt_rows, attention_size),
-                                  (max_cache_length, attention_size))
+                                  (1, kv_attention_size),
+                                  (dynamic_kv_opt_rows, kv_attention_size),
+                                  (max_cache_length, kv_attention_size))
                 profile.set_shape(graph_ops.layer_tensor_name("cache_v", i),
-                                  (1, attention_size), (dynamic_kv_opt_rows, attention_size),
-                                  (max_cache_length, attention_size))
+                                  (1, kv_attention_size),
+                                  (dynamic_kv_opt_rows, kv_attention_size),
+                                  (max_cache_length, kv_attention_size))
             trt_config.add_optimization_profile(profile)
 
     # Cast attention mask to work dtype for elementwise compatibility
@@ -271,9 +278,7 @@ def build_standard_decoder_engine(
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
 
     if position_type == "rope":
-        if rotary_embedding_dim < 2 or rotary_embedding_dim % 2 != 0:
-            raise ValueError(
-                "TRT native RoPE requires an even rotary_embedding_dim >= 2")
+        graph_ops.validate_native_rope_dim(rotary_embedding_dim)
         cos_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, True,
             partial_rotary_factor, interleaved=interleaved_rope)
@@ -397,8 +402,10 @@ def build_standard_decoder_engine(
             prefix=prefix,
             hidden_size=hidden,
             attention_size=attention_size,
+            kv_attention_size=kv_attention_size,
             mlp_size=mlp_size,
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             max_cache_length=max_cache_length,
             norm_type=norm_type,
@@ -484,7 +491,8 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     if verbose:
         print(f"[trtf-build] Building TRT engine ({num_layers} layers, "
-              f"hidden={hidden}, attn={attention_size}, mlp={mlp_size}, "
+              f"hidden={hidden}, attn={attention_size}, kv={kv_attention_size}, "
+              f"mlp={mlp_size}, "
               f"cache={max_cache_length}, precision={precision}) ...",
               file=sys.stderr)
 
@@ -526,8 +534,10 @@ def _add_decoder_layer(
     prefix: str,
     hidden_size: int,
     attention_size: int,
+    kv_attention_size: int,
     mlp_size: int,
     num_heads: int,
+    num_kv_heads: int,
     head_dim: int,
     max_cache_length: int,
     norm_type: str = "rmsnorm",
@@ -554,7 +564,8 @@ def _add_decoder_layer(
         network, hidden, cache_k, cache_v, attention_mask, position_id,
         weights=weights, prefix=prefix,
         hidden_size=hidden_size, attention_size=attention_size,
-        num_heads=num_heads, head_dim=head_dim,
+        kv_attention_size=kv_attention_size,
+        num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
         max_cache_length=max_cache_length,
         attention_scale=attention_scale,
         eps_tensor=eps_tensor, eps=eps,

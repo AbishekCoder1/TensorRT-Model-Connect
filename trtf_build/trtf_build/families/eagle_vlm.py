@@ -29,7 +29,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 
 if TYPE_CHECKING:
@@ -133,8 +132,8 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
     hidden = config.hidden_size
     vocab = config.vocab_size
     num_layers = config.num_hidden_layers
-    num_heads = config.num_attention_heads
     num_kv_heads = config.num_key_value_heads
+    kv_attention_size = num_kv_heads * config.head_dim
 
     weights = WeightDict()
 
@@ -183,7 +182,6 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
 
         q_hidden = q_raw.shape[0]
-        kv_hidden = k_raw.shape[0]
         if attention_size == 0:
             attention_size = q_hidden
 
@@ -192,14 +190,10 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         v_t = _transpose_2d(v_raw, "v_proj")
         o_t = _transpose_2d(o_raw, "o_proj")
 
-        k_expanded = _expand_kv_projection(
-            k_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads)
-        v_expanded = _expand_kv_projection(
-            v_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads)
 
         weights[f"{prefix}.w_q"] = q_t
-        weights[f"{prefix}.w_k"] = k_expanded
-        weights[f"{prefix}.w_v"] = v_expanded
+        weights[f"{prefix}.w_k"] = k_t
+        weights[f"{prefix}.w_v"] = v_t
         weights[f"{prefix}.w_o"] = o_t
 
         # SwiGLU MLP
@@ -244,6 +238,7 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
     weights["w_out"] = np.zeros((hidden, 1), dtype=np.float32)
 
     weights["_attention_size"] = attention_size
+    weights["_kv_attention_size"] = kv_attention_size
     weights["_mlp_size"] = mlp_size
 
     return weights
@@ -309,7 +304,10 @@ def _build_eagle_engine(
     vocab = config.vocab_size
     num_layers = config.num_hidden_layers
     num_heads = config.num_attention_heads
+    num_kv_heads = config.num_key_value_heads
     head_dim = attention_size // num_heads
+    kv_attention_size = graph_blocks.infer_kv_attention_size(
+        weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     seq_length = max_cache_length  # max sequence length for the encoder
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -357,9 +355,7 @@ def _build_eagle_engine(
     hidden_state = merged.get_output(0)
 
     # --- RoPE tables ---
-    if head_dim < 2 or head_dim % 2 != 0:
-        raise ValueError(
-            "Eagle VLM RoPE requires an even head_dim >= 2 for TRT native RoPE")
+    graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
     # Check for Llama3 RoPE scaling (from rope_parameters in llm_config)
     rope_params = config.raw.get("llm_config", {}).get("rope_parameters", {})
     rope_type = rope_params.get("rope_type", "")
@@ -440,22 +436,23 @@ def _build_eagle_engine(
         q = graph_ops.add_matmul_rhs_constant(
             network, norm1, hidden, attention_size, weights[f"{prefix}.w_q"])
         k = graph_ops.add_matmul_rhs_constant(
-            network, norm1, hidden, attention_size, weights[f"{prefix}.w_k"])
+            network, norm1, hidden, kv_attention_size, weights[f"{prefix}.w_k"])
         v = graph_ops.add_matmul_rhs_constant(
-            network, norm1, hidden, attention_size, weights[f"{prefix}.w_v"])
+            network, norm1, hidden, kv_attention_size, weights[f"{prefix}.w_v"])
 
         q_rope = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
             cos_half_tensor, sin_half_tensor, rope_position_ids,
             head_dim, sequence_length=seq_length)
         k_rope = graph_ops.add_apply_rope_native(
-            network, k, num_heads, head_dim,
+            network, k, num_kv_heads, head_dim,
             cos_half_tensor, sin_half_tensor, rope_position_ids,
             head_dim, sequence_length=seq_length)
 
         attn_concat = graph_ops.add_attention_from_rows(
             network, q_rope, k_rope, v,
             num_heads=num_heads, head_dim=head_dim,
+            num_kv_heads=num_kv_heads,
             q_seq=seq_length, kv_seq=seq_length,
             mask=pad_mask_4d,
             scale=attn_scale)

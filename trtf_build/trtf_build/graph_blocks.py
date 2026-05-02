@@ -54,6 +54,30 @@ def _make_matmul_fn(network, dtype, quant_ctx):
         return matmul
 
 
+def infer_kv_attention_size(
+    weights: dict,
+    *,
+    prefix: str = "layer.0",
+    num_kv_heads: int,
+    head_dim: int,
+) -> int:
+    """Validate and return the compact K/V row width."""
+    expected = int(num_kv_heads * head_dim)
+    explicit = weights.get("_kv_attention_size")
+    if explicit is not None and int(explicit) != expected:
+        raise ValueError(
+            f"Compact K/V cache width must be num_kv_heads * head_dim "
+            f"({expected}), got _kv_attention_size={int(explicit)}")
+    w_k = weights.get(f"{prefix}.w_k")
+    if isinstance(w_k, np.ndarray) and w_k.ndim == 2:
+        actual = int(w_k.shape[1])
+        if actual != expected:
+            raise ValueError(
+                f"{prefix}.w_k must use compact K/V width {expected}, "
+                f"got {actual}")
+    return expected
+
+
 def cast_to_fp32(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,
@@ -119,6 +143,8 @@ def add_attention_block(
     head_dim: int,
     max_cache_length: int,
     eps_tensor: trt.ITensor,
+    kv_attention_size: int | None = None,
+    num_kv_heads: int | None = None,
     attention_scale: float | None = None,
     eps: float | None = None,
     norm_type: str = "rmsnorm",
@@ -149,6 +175,10 @@ def add_attention_block(
     """
     matmul = _make_matmul_fn(network, dtype, quant_ctx)
     attention_window = max_cache_length + 1
+    if num_kv_heads is None:
+        num_kv_heads = num_heads
+    if kv_attention_size is None:
+        kv_attention_size = num_kv_heads * head_dim
 
     # Weight name for quant scale lookup — use layer_prefix if provided,
     # otherwise fall back to the weights-dict prefix.
@@ -164,9 +194,9 @@ def add_attention_block(
     # QKV projections
     q = matmul(normed, hidden_size, attention_size,
                weights[f"{prefix}.w_q"], f"{_lp}.w_q")
-    k = matmul(normed, hidden_size, attention_size,
+    k = matmul(normed, hidden_size, kv_attention_size,
                weights[f"{prefix}.w_k"], f"{_lp}.w_k")
-    v = matmul(normed, hidden_size, attention_size,
+    v = matmul(normed, hidden_size, kv_attention_size,
                weights[f"{prefix}.w_v"], f"{_lp}.w_v")
 
     # Optional QKV biases
@@ -175,10 +205,10 @@ def add_attention_block(
         q = graph_ops.add_bias_sum(network, q, attention_size, q_bias, dtype=dtype)
     k_bias = weights.get(f"{prefix}.k_bias")
     if k_bias is not None:
-        k = graph_ops.add_bias_sum(network, k, attention_size, k_bias, dtype=dtype)
+        k = graph_ops.add_bias_sum(network, k, kv_attention_size, k_bias, dtype=dtype)
     v_bias = weights.get(f"{prefix}.v_bias")
     if v_bias is not None:
-        v = graph_ops.add_bias_sum(network, v, attention_size, v_bias, dtype=dtype)
+        v = graph_ops.add_bias_sum(network, v, kv_attention_size, v_bias, dtype=dtype)
 
     # Optional per-head q/k norm
     q_norm = weights.get(f"{prefix}.q_norm")
@@ -188,7 +218,7 @@ def add_attention_block(
     k_norm = weights.get(f"{prefix}.k_norm")
     if k_norm is not None:
         k = graph_ops.add_rms_norm_per_head(
-            network, k, num_heads, head_dim, k_norm, eps_tensor, dtype=dtype)
+            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype)
 
     # ------------------------------------------------------------------ #
     # RoPE via native IRotaryEmbeddingLayer                              #
@@ -201,16 +231,13 @@ def add_attention_block(
                 "RoPE attention requires half-dimension cos/sin tensors for "
                 "TRT native IRotaryEmbeddingLayer")
         rope_dim = rotary_embedding_dim or head_dim
-        if rope_dim < 2 or rope_dim % 2 != 0:
-            raise ValueError(
-                "TRT native IRotaryEmbeddingLayer requires an even "
-                "rotary_embedding_dim >= 2")
+        rope_dim = graph_ops.validate_native_rope_dim(rope_dim)
         q = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
             cos_half_tensor, sin_half_tensor, position_id,
             rope_dim, interleaved_rope)
         k = graph_ops.add_apply_rope_native(
-            network, k, num_heads, head_dim,
+            network, k, num_kv_heads, head_dim,
             cos_half_tensor, sin_half_tensor, position_id,
             rope_dim, interleaved_rope)
 
@@ -220,9 +247,9 @@ def add_attention_block(
 
     # Reshape current K, V for concatenation
     k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, attention_size)
+    k_reshape.reshape_dims = (1, kv_attention_size)
     v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, attention_size)
+    v_reshape.reshape_dims = (1, kv_attention_size)
 
     # Concatenate with cache
     all_k = network.add_concatenation(
@@ -260,6 +287,7 @@ def add_attention_block(
             all_v.get_output(0),
             num_heads=num_heads,
             head_dim=head_dim,
+            num_kv_heads=num_kv_heads,
             q_seq=1,
             kv_seq=kv_seq,
             causal=False,
@@ -267,6 +295,10 @@ def add_attention_block(
             scale=attention_scale,
         )
     elif ffi_attention_kernel is not None:
+        if num_kv_heads != num_heads:
+            raise ValueError(
+                "FFI decoder attention requires num_kv_heads == num_heads; "
+                "use TRT native attention for compact GQA/MQA KV cache")
         # Fused attention kernel via TVM-FFI plugin
         context = graph_ops.add_decoder_attention_ffi(
             network, q, all_k.get_output(0), all_v.get_output(0),

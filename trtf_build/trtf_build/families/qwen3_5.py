@@ -13,7 +13,7 @@ Key architecture details:
   DeltaNet layers (24 layers):
     - in_proj_qkv -> conv1d step -> SiLU -> split Q[nkv×dim], K[nkv×dim], V[nheads×dim]
     - L2-norm Q and K
-    - GQA-expand Q,K from num_kv_heads -> num_heads
+    - keep compact Q,K from num_kv_heads -> num_heads
     - Delta rule state update: state [nheads, head_dim, head_dim]
     - Gated RMSNorm with separate gate projection (in_proj_z)
     - Decay: -exp(A_log) * softplus(a_proj(x) + dt_bias) per head
@@ -41,8 +41,8 @@ Weight key mapping (HF -> engine):
   model.language_model.layers.{i}.linear_attn.o_proj.weight       -> deltanet_out_proj
   --- Full attention layers ---
   model.language_model.layers.{i}.self_attn.q_proj.weight         -> split: w_q + w_gate_attn
-  model.language_model.layers.{i}.self_attn.k_proj.weight         -> w_k (GQA-expanded)
-  model.language_model.layers.{i}.self_attn.v_proj.weight         -> w_v (GQA-expanded)
+  model.language_model.layers.{i}.self_attn.k_proj.weight         -> w_k (keep compacted)
+  model.language_model.layers.{i}.self_attn.v_proj.weight         -> w_v (keep compacted)
   model.language_model.layers.{i}.self_attn.o_proj.weight         -> w_o
   model.language_model.layers.{i}.self_attn.q_norm.weight         -> q_norm ((1+w) tiled)
   model.language_model.layers.{i}.self_attn.k_norm.weight         -> k_norm ((1+w) tiled)
@@ -71,7 +71,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from .. import graph_ops
 from .. import graph_blocks
@@ -326,19 +325,15 @@ class Qwen35Plugin:
         weights[f"{prefix}.w_q"] = _transpose_2d(q_part, "q_proj")
         weights[f"{prefix}.w_gate_attn"] = _transpose_2d(gate_part, "gate_proj")
 
-        # k_proj: [kv_size, hidden] -> GQA-expand
+        # k_proj: [kv_size, hidden] -> keep compact
         k_raw = _load_tensor(readers, f"{attn_prefix}.k_proj.weight")
         k_t = _transpose_2d(k_raw, "k_proj")
-        k_expanded = _expand_kv_projection(
-            k_t, hidden, kv_size, attn_size, num_heads, num_kv_heads)
-        weights[f"{prefix}.w_k"] = k_expanded
+        weights[f"{prefix}.w_k"] = k_t
 
-        # v_proj: [kv_size, hidden] -> GQA-expand
+        # v_proj: [kv_size, hidden] -> keep compact
         v_raw = _load_tensor(readers, f"{attn_prefix}.v_proj.weight")
         v_t = _transpose_2d(v_raw, "v_proj")
-        v_expanded = _expand_kv_projection(
-            v_t, hidden, kv_size, attn_size, num_heads, num_kv_heads)
-        weights[f"{prefix}.w_v"] = v_expanded
+        weights[f"{prefix}.w_v"] = v_t
 
         # o_proj: [hidden, attn_size] -> transpose
         o_raw = _load_tensor(readers, f"{attn_prefix}.o_proj.weight")
@@ -356,7 +351,7 @@ class Qwen35Plugin:
             k_norm_raw = _load_tensor(readers, k_norm_key).astype(np.float32)
             k_norm_centered = 1.0 + k_norm_raw
             weights[f"{prefix}.k_norm"] = np.tile(
-                k_norm_centered, num_heads)
+                k_norm_centered, num_kv_heads)
 
     def _load_mlp_weights(
         self, readers, weights, prefix, hf_prefix,
@@ -400,7 +395,10 @@ class Qwen35Plugin:
         partial_rotary_factor: float = weights["_partial_rotary_factor"]
 
         num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
         head_dim = attn_size // num_heads
+        kv_attention_size = graph_blocks.infer_kv_attention_size(
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
         attention_window = max_cache_length + 1
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -434,10 +432,10 @@ class Qwen35Plugin:
         for ai in range(num_attn):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", ai),
-                trt.float32, (max_cache_length, attn_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", ai),
-                trt.float32, (max_cache_length, attn_size))
+                trt.float32, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
@@ -521,7 +519,9 @@ class Qwen35Plugin:
                     prefix=prefix,
                     hidden_size=hidden,
                     attn_size=attn_size,
+                    kv_attention_size=kv_attention_size,
                     num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
                     head_dim=head_dim,
                     rotary_embedding_dim=rotary_embedding_dim,
                     max_cache_length=max_cache_length,
@@ -651,7 +651,7 @@ def _add_deltanet_layer(
 
     DeltaNet uses delta-rule linear attention with:
       - Conv1d on QKV projection output
-      - L2-normalized Q,K with GQA expansion
+      - L2-normalized Q,K with Compact GQA/MQA K/V
       - Per-head decay (A_log + softplus(a + dt_bias))
       - Per-head beta (write strength via sigmoid)
       - Delta rule state update: S' = decay*S + outer(k, (v - S@k)*beta)
@@ -659,7 +659,7 @@ def _add_deltanet_layer(
 
     Returns: {hidden, present_conv, present_ssm}
     """
-    qk_dim = num_kv_heads * head_dim  # Q and K dimension before GQA expansion
+    qk_dim = num_kv_heads * head_dim  # Q and K dimension before Compact GQA/MQA K/V
 
     # ===== 1. RMSNorm =====
     normed = graph_ops.add_rms_norm(
@@ -746,7 +746,7 @@ def _add_deltanet_layer(
     k_heads_in.reshape_dims = (num_kv_heads, head_dim)
     k_normed = graph_ops.add_l2_norm(network, k_heads_in.get_output(0), 1, eps=1e-6)
 
-    # ===== 6. GQA-expand Q,K from num_kv_heads -> num_heads =====
+    # ===== 6. keep compact Q,K from num_kv_heads -> num_heads =====
     heads_per_group = num_heads // num_kv_heads
 
     if heads_per_group > 1:
@@ -768,12 +768,12 @@ def _add_deltanet_layer(
         k_3d.reshape_dims = (num_kv_heads, 1, head_dim)
         k_tiled = network.add_elementwise(
             k_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD)
-        k_expanded_s = network.add_shuffle(k_tiled.get_output(0))
-        k_expanded_s.reshape_dims = (num_heads, head_dim)
-        k_expanded = k_expanded_s.get_output(0)
+        k_t_s = network.add_shuffle(k_tiled.get_output(0))
+        k_t_s.reshape_dims = (num_heads, head_dim)
+        k_t = k_t_s.get_output(0)
     else:
         q_expanded = q_normed
-        k_expanded = k_normed
+        k_t = k_normed
 
     # V: [1, d_inner] -> [num_heads, head_dim]
     v_heads = network.add_shuffle(v_raw)
@@ -828,7 +828,7 @@ def _add_deltanet_layer(
 
     # 9b. kv_mem = state^T @ k: read old value for this key
     # [H, V, K] @ [H, K, 1] = [H, V, 1]  (transpose state to swap K/V axes)
-    k_col = network.add_shuffle(k_expanded)
+    k_col = network.add_shuffle(k_t)
     k_col.reshape_dims = (num_heads, head_dim, 1)
     kv_old_3d = network.add_matrix_multiply(
         decayed_state.get_output(0), trt.MatrixOperation.TRANSPOSE,
@@ -845,7 +845,7 @@ def _add_deltanet_layer(
 
     # 9d. state_new = decayed_state + outer(k, delta)
     # outer: k[:, :, None] * delta[:, None, :] = [H, K, 1] @ [H, 1, V] = [H, K, V]
-    k_col2 = network.add_shuffle(k_expanded)
+    k_col2 = network.add_shuffle(k_t)
     k_col2.reshape_dims = (num_heads, head_dim, 1)
     v_delta_row = network.add_shuffle(v_delta.get_output(0))
     v_delta_row.reshape_dims = (num_heads, 1, head_dim)
@@ -961,7 +961,9 @@ def _add_full_attention_layer(
     prefix: str,
     hidden_size: int,
     attn_size: int,
+    kv_attention_size: int,
     num_heads: int,
+    num_kv_heads: int,
     head_dim: int,
     rotary_embedding_dim: int,
     max_cache_length: int,
@@ -991,10 +993,10 @@ def _add_full_attention_layer(
         network, normed, hidden_size, attn_size,
         weights[f"{prefix}.w_q"])
     k = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, attn_size,
+        network, normed, hidden_size, kv_attention_size,
         weights[f"{prefix}.w_k"])
     v = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, attn_size,
+        network, normed, hidden_size, kv_attention_size,
         weights[f"{prefix}.w_v"])
 
     # Per-head QK norm
@@ -1005,14 +1007,14 @@ def _add_full_attention_layer(
     k_norm = weights.get(f"{prefix}.k_norm")
     if k_norm is not None:
         k = graph_ops.add_rms_norm_per_head(
-            network, k, num_heads, head_dim, k_norm, eps_tensor)
+            network, k, num_kv_heads, head_dim, k_norm, eps_tensor)
 
     # Native RoPE
     q = graph_ops.add_apply_rope_native(
         network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
         position_id, rotary_embedding_dim)
     k = graph_ops.add_apply_rope_native(
-        network, k, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
+        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
         position_id, rotary_embedding_dim)
 
     # Save present K/V
@@ -1021,9 +1023,9 @@ def _add_full_attention_layer(
 
     # Reshape K, V for concatenation
     k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, attn_size)
+    k_reshape.reshape_dims = (1, kv_attention_size)
     v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, attn_size)
+    v_reshape.reshape_dims = (1, kv_attention_size)
 
     # Concatenate with cache
     all_k = network.add_concatenation(
@@ -1036,7 +1038,7 @@ def _add_full_attention_layer(
     mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
     context_flat = graph_ops.add_attention_from_rows(
         network, q, all_k.get_output(0), all_v.get_output(0),
-        num_heads=num_heads, head_dim=head_dim,
+        num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
         q_seq=1, kv_seq=attention_window,
         mask=mask_4d)
 

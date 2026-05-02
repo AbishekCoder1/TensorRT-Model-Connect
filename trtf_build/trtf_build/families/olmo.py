@@ -21,7 +21,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from ..standard_decoder_builder import build_standard_decoder_engine
 
@@ -41,8 +40,6 @@ class OlmoPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        num_heads = config.num_attention_heads
-        num_kv_heads = config.num_key_value_heads
 
         weights = WeightDict()
 
@@ -93,7 +90,6 @@ class OlmoPlugin:
                 readers, f"{hf_prefix}.self_attn.o_proj.weight")
 
             q_hidden = q_raw.shape[0]
-            kv_hidden = k_raw.shape[0]
             if attention_size == 0:
                 attention_size = q_hidden
 
@@ -102,15 +98,11 @@ class OlmoPlugin:
             v_t = _transpose_2d(v_raw, "v_proj")
             o_t = _transpose_2d(o_raw, "o_proj")
 
-            # GQA expansion if needed
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_hidden, q_hidden, num_heads, num_kv_heads)
+            # Keep compact GQA/MQA K/V
 
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
 
             # MLP

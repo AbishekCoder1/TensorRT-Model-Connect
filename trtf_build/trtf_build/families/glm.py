@@ -15,8 +15,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
-    _expand_kv_bias,
     _target_np_dtype,
 )
 from ..standard_decoder_builder import build_standard_decoder_engine
@@ -38,12 +36,6 @@ class GlmPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        num_heads = config.num_attention_heads
-        num_kv_heads = config.num_key_value_heads
-        head_dim = config.head_dim
-
-        q_dim = num_heads * head_dim
-        kv_dim = num_kv_heads * head_dim
         target_dtype = _target_np_dtype(precision)
 
         weights = WeightDict()
@@ -80,17 +72,11 @@ class GlmPlugin:
             k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
             v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
 
-            # GQA expansion for K, V
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads,
-                precision=precision)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads,
-                precision=precision)
+            # Keep compact GQA/MQA K/V
 
             layer[f"{prefix}.w_q"] = q_t
-            layer[f"{prefix}.w_k"] = k_expanded
-            layer[f"{prefix}.w_v"] = v_expanded
+            layer[f"{prefix}.w_k"] = k_t
+            layer[f"{prefix}.w_v"] = v_t
 
             # Q/K/V biases (GLM-4 has biases on Q, K, V but NOT O)
             q_bias_key = f"{hf_prefix}.self_attn.q_proj.bias"
@@ -100,21 +86,11 @@ class GlmPlugin:
                 layer[f"{prefix}.q_bias"] = _load_tensor(
                     readers, q_bias_key).astype(target_dtype)
             if _has_tensor(readers, k_bias_key):
-                raw = _load_tensor(readers, k_bias_key).astype(target_dtype)
-                if raw.shape[0] == kv_dim and kv_dim != q_dim:
-                    layer[f"{prefix}.k_bias"] = _expand_kv_bias(
-                        raw, q_dim, num_heads, num_kv_heads,
-                        precision=precision)
-                else:
-                    layer[f"{prefix}.k_bias"] = raw
+                layer[f"{prefix}.k_bias"] = _load_tensor(
+                    readers, k_bias_key).astype(target_dtype)
             if _has_tensor(readers, v_bias_key):
-                raw = _load_tensor(readers, v_bias_key).astype(target_dtype)
-                if raw.shape[0] == kv_dim and kv_dim != q_dim:
-                    layer[f"{prefix}.v_bias"] = _expand_kv_bias(
-                        raw, q_dim, num_heads, num_kv_heads,
-                        precision=precision)
-                else:
-                    layer[f"{prefix}.v_bias"] = raw
+                layer[f"{prefix}.v_bias"] = _load_tensor(
+                    readers, v_bias_key).astype(target_dtype)
 
             # Output projection (no bias in GLM-4)
             o_raw = _load_tensor(

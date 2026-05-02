@@ -20,7 +20,6 @@ from ..checkpoint_mapper import (
     _load_tensor,
     _has_tensor,
     _transpose_2d,
-    _expand_kv_projection,
 )
 from ..standard_decoder_builder import build_standard_decoder_engine
 
@@ -40,11 +39,9 @@ class StarCoder2Plugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
-        num_heads = config.num_attention_heads
         num_kv_heads = config.num_key_value_heads
         head_dim = config.head_dim
 
-        q_dim = num_heads * head_dim
         kv_dim = num_kv_heads * head_dim
 
         weights = WeightDict()
@@ -95,15 +92,11 @@ class StarCoder2Plugin:
             v_t = _transpose_2d(v_raw, "v_proj")
             o_t = _transpose_2d(o_raw, "o_proj")
 
-            # GQA expansion
-            k_expanded = _expand_kv_projection(
-                k_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
-            v_expanded = _expand_kv_projection(
-                v_t, hidden, kv_dim, q_dim, num_heads, num_kv_heads)
+            # Compact GQA/MQA K/V
 
             weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_expanded
-            weights[f"{prefix}.w_v"] = v_expanded
+            weights[f"{prefix}.w_k"] = k_t
+            weights[f"{prefix}.w_v"] = v_t
             weights[f"{prefix}.w_o"] = o_t
 
             # QKV biases
@@ -116,22 +109,8 @@ class StarCoder2Plugin:
 
             weights[f"{prefix}.q_bias"] = q_bias.astype(np.float32)
 
-            # Expand KV biases for GQA
-            if kv_dim != q_dim:
-                k_bias_exp = np.zeros(q_dim, dtype=np.float32)
-                v_bias_exp = np.zeros(q_dim, dtype=np.float32)
-                for qh in range(num_heads):
-                    kvh = min(num_kv_heads - 1,
-                              qh // (num_heads // num_kv_heads))
-                    k_bias_exp[qh * head_dim:(qh + 1) * head_dim] = \
-                        k_bias_raw[kvh * head_dim:(kvh + 1) * head_dim]
-                    v_bias_exp[qh * head_dim:(qh + 1) * head_dim] = \
-                        v_bias_raw[kvh * head_dim:(kvh + 1) * head_dim]
-                weights[f"{prefix}.k_bias"] = k_bias_exp
-                weights[f"{prefix}.v_bias"] = v_bias_exp
-            else:
-                weights[f"{prefix}.k_bias"] = k_bias_raw.astype(np.float32)
-                weights[f"{prefix}.v_bias"] = v_bias_raw.astype(np.float32)
+            weights[f"{prefix}.k_bias"] = k_bias_raw.astype(np.float32)
+            weights[f"{prefix}.v_bias"] = v_bias_raw.astype(np.float32)
 
             # Output projection bias
             o_bias_key = f"{hf_prefix}.self_attn.o_proj.bias"
@@ -180,6 +159,7 @@ class StarCoder2Plugin:
             weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        weights["_kv_attention_size"] = kv_dim  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
 
         return weights

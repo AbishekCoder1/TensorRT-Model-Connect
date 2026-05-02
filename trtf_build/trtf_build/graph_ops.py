@@ -307,6 +307,7 @@ def make_yarn_rope_table(
         return table
 
     head_dim = hidden_size // num_attention_heads
+    head_dim = validate_native_rope_dim(head_dim, field_name="head_dim")
     half = head_dim // 2
     if half <= 0 or rope_theta <= 0.0:
         return table
@@ -355,6 +356,7 @@ def make_yarn_rope_table_half_dim(
     Returns [max_cache_length, head_dim // 2], matching the half-dimension
     cache layout required by IRotaryEmbeddingLayer.
     """
+    head_dim = validate_native_rope_dim(head_dim, field_name="head_dim")
     half = head_dim // 2
     default = 1.0 if cosine else 0.0
     if max_cache_length <= 0 or half <= 0 or rope_theta <= 0.0:
@@ -2071,6 +2073,20 @@ def add_layer_norm_native(
     return norm.get_output(0)
 
 
+def validate_native_rope_dim(
+    rotary_embedding_dim: int,
+    *,
+    field_name: str = "rotary_embedding_dim",
+) -> int:
+    """Validate the dimension contract required by TRT native RoPE."""
+    rotary_embedding_dim = int(rotary_embedding_dim)
+    if rotary_embedding_dim < 2 or rotary_embedding_dim % 2 != 0:
+        raise ValueError(
+            f"TRT native RoPE requires {field_name} to be an even value >= 2; "
+            f"got {rotary_embedding_dim}")
+    return rotary_embedding_dim
+
+
 def make_rope_table_half_dim(
     max_cache_length: int,
     head_dim: int,
@@ -2099,9 +2115,10 @@ def make_rope_table_half_dim(
         Float32 array [max_cache_length, rotary_ndims // 2].
     """
     rotary_ndims = int(head_dim * partial_rotary_factor)
+    rotary_ndims = validate_native_rope_dim(rotary_ndims)
     half = rotary_ndims // 2
     default = 1.0 if cosine else 0.0
-    if max_cache_length <= 0 or half <= 0 or rope_theta <= 0.0:
+    if max_cache_length <= 0 or rope_theta <= 0.0:
         return np.full((max(max_cache_length, 1), max(half, 1)),
                        default, dtype=np.float32)
     table = np.full((max_cache_length, half), default, dtype=np.float32)
@@ -2328,6 +2345,7 @@ def add_apply_rope_native(
     Returns:
         [Sq, num_heads * head_dim] with RoPE applied.
     """
+    rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
     attention_size = num_heads * head_dim
 
     inp_4d = reshape_rows_to_heads_4d(
@@ -2363,6 +2381,7 @@ def add_apply_rope_native_sequence(
     sequence_length: int | None = None,
 ) -> trt.ITensor:
     """Apply native RoPE with per-position caches [1, Sq, rotary_dim / 2]."""
+    rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
     attention_size = num_heads * head_dim
     inp_4d = reshape_rows_to_heads_4d(
         network, inp, num_heads, head_dim, sequence_length)
@@ -2390,6 +2409,7 @@ def add_apply_rope_native_from_full_cache(
 ) -> trt.ITensor:
     """Apply native RoPE from per-head full-dim cos/sin caches [Sq, D]."""
     rope_dim = head_dim if rotary_embedding_dim is None else rotary_embedding_dim
+    rope_dim = validate_native_rope_dim(rope_dim)
     half = rope_dim // 2
     stride = 2 if interleaved else 1
     cos_half = network.add_slice(

@@ -16,6 +16,9 @@ description: >-
 - Basic TensorRT primitives should go through shared helpers in
   `graph_ops.py` or `graph_blocks.py` when the tensor contract and semantics
   match.
+- TRT `IAttentionLayer` supports GQA/MQA. Do not expand K/V projections or
+  biases to query-head width solely for attention; prefer compact K/V cache
+  width `num_key_value_heads * head_dim`.
 - Do not force reuse for general utility functions or model-specific building
   parts. A builder may keep local logic for custom dataflow, ordering, cache
   handling, bias terms, multimodal/task-specific behavior, or other architecture
@@ -28,7 +31,10 @@ description: >-
 1. Check network creation with `rg -n "create_network\\("`; every builder path
    should pass `NetworkDefinitionCreationFlag.STRONGLY_TYPED`.
 2. Prefer shared helpers for exact duplicates of basic TRT primitive logic.
-3. Extend a shared helper only when the change represents a reusable primitive
+3. For decoder GQA/MQA paths, verify K/V projection weights, K/V bias tensors,
+   and cache tensors stay at compact K/V width unless a non-attention primitive
+   explicitly requires a different layout.
+4. Extend a shared helper only when the change represents a reusable primitive
    contract. Do not introduce broad abstractions solely to collapse legitimate
    model-specific variants.
-4. Validate with `git diff --check` and targeted compile/tests when available.
+5. Validate with `git diff --check` and targeted compile/tests when available.

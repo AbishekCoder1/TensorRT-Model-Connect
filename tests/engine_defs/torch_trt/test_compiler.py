@@ -86,18 +86,19 @@ class TestStatelessCacheWrapper:
             vocab_size=vocab_size,
         )
 
-    def test_init_computes_group_size(self):
+    def test_init_computes_compact_kv_dim(self):
         config = self._make_config(num_heads=16, num_kv_heads=2)
         model = MagicMock()
         wrapper = StatelessCacheWrapper(model, config, max_cache_length=32)
-        assert wrapper.group_size == 8  # 16 / 2
         assert wrapper.attention_size == 16 * 16  # num_heads * head_dim
+        assert wrapper.kv_dim == 2 * 16
+        assert not hasattr(wrapper, "group_size")
 
-    def test_init_mha_group_size_one(self):
+    def test_init_mha_kv_dim_matches_attention_size(self):
         config = self._make_config(num_heads=4, num_kv_heads=4)
         model = MagicMock()
         wrapper = StatelessCacheWrapper(model, config, max_cache_length=32)
-        assert wrapper.group_size == 1
+        assert wrapper.kv_dim == wrapper.attention_size
 
     def test_init_stores_cache_params(self):
         config = self._make_config(num_layers=28, num_heads=16, head_dim=64)
@@ -120,14 +121,15 @@ class TestStatelessCacheWrapper:
         assert params[:3] == ["token_id", "position_id", "attention_mask"]
         assert params[3] == "cache_kv"
 
-    def test_attention_size_gqa_expanded(self):
-        """attention_size uses all heads, not just KV heads."""
+    def test_attention_and_kv_size_for_gqa(self):
+        """attention_size uses query heads; kv_dim uses KV heads."""
         config = self._make_config(num_heads=16, num_kv_heads=2, head_dim=64)
         model = MagicMock()
         wrapper = StatelessCacheWrapper(model, config, max_cache_length=32)
         # Must be num_heads * head_dim, not num_kv_heads * head_dim
         assert wrapper.attention_size == 16 * 64  # 1024
         assert wrapper.attention_size != 2 * 64   # 128
+        assert wrapper.kv_dim == 2 * 64
 
 
 @requires_torch
