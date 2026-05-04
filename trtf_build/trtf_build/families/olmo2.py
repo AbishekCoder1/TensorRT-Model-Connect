@@ -140,7 +140,8 @@ class Olmo2Plugin:
     ) -> bytes:
         """Build TRT engine with OLMo-2 post-norm residual layout."""
         import sys
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
         from .. import graph_blocks
 

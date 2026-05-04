@@ -100,7 +100,8 @@ def _add_group_norm_4d(
     Reshapes to [N, G, Gs, H, W], normalizes over (Gs, H, W), reshapes back,
     then applies affine transform.
     """
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     from .graph_ops import add_constant
 
     n, c, h, w = inp.shape
@@ -167,7 +168,8 @@ def _add_group_norm_4d(
 def _add_resnet_block_2d(network, inp, weights, prefix: str,
                          in_ch: int, out_ch: int, h: int, w: int):
     """ResNetBlock2D: norm1 -> SiLU -> conv1 -> norm2 -> SiLU -> conv2 + shortcut."""
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     from .graph_ops import add_conv2d, add_silu
 
     # norm1 -> SiLU -> conv1
@@ -228,7 +230,8 @@ def _add_self_attention_2d(network, inp, weights, prefix: str,
     Uses 1 attention head (head_dim = ch). Q/K/V are Linear layers stored as
     [out, in] in safetensors; we reshape to [out, in, 1, 1] for 1x1 Conv2d.
     """
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     from . import graph_ops
     from .graph_ops import add_conv2d
 
@@ -315,7 +318,8 @@ def _add_self_attention_2d(network, inp, weights, prefix: str,
 def _add_upsample_2d(network, inp, weights, prefix: str,
                       ch: int, h: int, w: int):
     """Nearest-neighbor 2x upsample + Conv2d(3x3, pad=1)."""
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     from .graph_ops import add_conv2d
 
     n, c = inp.shape[0], inp.shape[1]
@@ -362,7 +366,8 @@ def build_vae_2d_decoder_engine(
     Input tensor:  "latent_input"    [1, latent_channels, h_lat, w_lat]
     Output tensor: "decoder_output"  [1, 3, h_out, w_out]
     """
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     from .graph_ops import add_conv2d, add_silu
 
     total_t0 = time.monotonic()
@@ -525,7 +530,8 @@ def build_vae_2d_placeholder(
 
     Used when the real VAE can't be built (no weights available).
     """
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
 
     h_out = h_lat * 8
     w_out = w_lat * 8

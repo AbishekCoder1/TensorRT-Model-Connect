@@ -7,7 +7,8 @@ shapes must be identical so the C++ runtime can consume the built engine.
 from __future__ import annotations
 
 import numpy as np
-import tensorrt as trt
+from trtf_build import trt_compat
+trt = trt_compat.get_trt()
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from .build_timing import (
 from .config import ModelConfig
 from .families import find_plugin, find_diffusion_plugin, _ALL_PLUGINS
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
+from . import trt_compat
 from .triattention_export import (
     TriAttentionBundleConfig,
     export_triattention_stats_section,
@@ -25,17 +26,10 @@ from .triattention_export import (
 
 
 def _setup_trt_import(rtx: bool) -> None:
-    """If rtx=True, monkeypatch sys.modules so 'import tensorrt' resolves to tensorrt_rtx."""
+    """Select the TensorRT Python backend before any TRT API is touched."""
     if not rtx:
         return
-    try:
-        import tensorrt_rtx
-    except ImportError:
-        raise ImportError(
-            "TensorRT-RTX is required for --rtx builds. "
-            "Install it with: pip install tensorrt_rtx"
-        )
-    sys.modules["tensorrt"] = tensorrt_rtx
+    trt_compat.configure_backend(rtx=True)
     print("[trtf-build] Using TensorRT-RTX backend", file=sys.stderr)
 
 
@@ -363,11 +357,7 @@ def _resolve_nemo_archive(nemo_path: Path) -> str:
 
 
 def _get_trt_version() -> str:
-    try:
-        import tensorrt as trt
-        return trt.__version__
-    except Exception:
-        return "unknown"
+    return trt_compat.tensorrt_version() or "unknown"
 
 
 def _trt_abi_from_version(version: str) -> str:
@@ -544,6 +534,16 @@ def build_bundle(
         verbose: Print detailed logs.
     """
     _setup_trt_import(rtx)
+    try:
+        print(
+            f"[trtf-build] Builder TensorRT resolved: {trt_compat.resolved_summary()}",
+            file=sys.stderr,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "TensorRT Python bindings are required for raw TRT builds. "
+            "Install a matching tensorrt package in the active Python environment."
+        ) from exc
     model_dir_path = Path(model_dir)
     t0 = time.monotonic()
     build_timing = _new_build_timing(build_timing_path)

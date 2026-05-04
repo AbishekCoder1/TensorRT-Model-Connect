@@ -294,7 +294,8 @@ def _build_eagle_engine(
     Unlike the standard decoder, this is a SINGLE forward pass encoder
     (no autoregressive loop, no KV cache).
     """
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     from .. import graph_ops
     from .. import graph_blocks
 
@@ -537,7 +538,8 @@ def _build_siglip_vision_engine(
     Input: pixel_values [3, H, W]
     Output: vision_features [num_patches, vision_hidden_size]
     """
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     from .. import graph_ops
 
     image_size = vision_config.get("image_size", 384)
@@ -923,7 +925,8 @@ def _build_siglip_vision_engine(
 def _add_layer_norm_vision(
     network, inp, hidden_size, gamma, beta, eps_tensor):
     """Add LayerNorm for vision transformer."""
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     from .. import graph_ops
 
     gamma_const = graph_ops.add_constant(

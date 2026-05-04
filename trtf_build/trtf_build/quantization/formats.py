@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import numpy as np
 
 if TYPE_CHECKING:
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
 
 from .scales import LayerScales
 
@@ -78,7 +79,8 @@ class QuantFormat(Protocol):
 
 def _np_to_trt_dtype(dtype: np.dtype):
     """Convert numpy dtype to TRT DataType."""
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     if dtype == np.float16:
         return trt.float16
     return trt.float32
@@ -117,7 +119,8 @@ class FP8Format:
         rhs_width: int,
         dtype: np.dtype,
     ) -> trt.ITensor:
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
 
         out_trt_dtype = activation.dtype
@@ -165,7 +168,8 @@ class FP8Format:
         groups: int = 1,
         dtype: np.dtype,
     ) -> trt.ITensor:
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
 
         out_trt_dtype = activation.dtype
@@ -223,7 +227,8 @@ class INT8SmoothQuantFormat:
         rhs_width: int,
         dtype: np.dtype,
     ) -> trt.ITensor:
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
 
         out_trt_dtype = activation.dtype
@@ -272,7 +277,8 @@ class INT8SmoothQuantFormat:
         groups: int = 1,
         dtype: np.dtype,
     ) -> trt.ITensor:
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
 
         out_trt_dtype = activation.dtype
@@ -332,7 +338,8 @@ class INT4AWQFormat:
         rhs_width: int,
         dtype: np.dtype,
     ) -> trt.ITensor:
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
 
         out_trt_dtype = activation.dtype
@@ -371,7 +378,8 @@ class INT4AWQFormat:
         groups: int = 1,
         dtype: np.dtype,
     ) -> trt.ITensor:
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
 
         out_trt_dtype = activation.dtype
@@ -420,7 +428,8 @@ class NVFP4Format:
         rhs_width: int,
         dtype: np.dtype,
     ) -> trt.ITensor:
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
 
         out_trt_dtype = activation.dtype
@@ -466,7 +475,8 @@ class NVFP4Format:
         groups: int = 1,
         dtype: np.dtype,
     ) -> trt.ITensor:
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
 
         out_trt_dtype = activation.dtype
@@ -523,7 +533,8 @@ class W4A8Format:
         rhs_width: int,
         dtype: np.dtype,
     ) -> trt.ITensor:
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
 
         out_trt_dtype = activation.dtype
@@ -571,7 +582,8 @@ class W4A8Format:
         groups: int = 1,
         dtype: np.dtype,
     ) -> trt.ITensor:
-        import tensorrt as trt
+        from trtf_build import trt_compat
+        trt = trt_compat.get_trt()
         from .. import graph_ops
 
         out_trt_dtype = activation.dtype

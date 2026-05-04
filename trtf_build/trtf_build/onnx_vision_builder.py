@@ -16,7 +16,8 @@ from __future__ import annotations
 import io
 import sys
 
-import tensorrt as trt
+from trtf_build import trt_compat
+trt = trt_compat.get_trt()
 
 
 def build_engine_from_onnx(
@@ -36,8 +37,11 @@ def build_engine_from_onnx(
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-        | 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        trt_compat.network_creation_flags(
+            explicit_batch=True,
+            strongly_typed=True,
+        )
+    )
     parser = trt.OnnxParser(network, logger)
 
     if not parser.parse(onnx_bytes):

@@ -4,7 +4,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 import numpy as np
-import tensorrt as trt
+from trtf_build import trt_compat
+trt = trt_compat.get_trt()
 from ..checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor, _transpose_2d
 from .. import graph_ops
 

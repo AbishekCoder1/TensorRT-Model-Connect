@@ -53,6 +53,7 @@ import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 
 from .config import ModelConfig  # noqa: E402
+from ... import trt_compat  # noqa: E402
 
 PRECISION_DTYPE_MAP: dict[str, torch.dtype] = {
     "fp16": torch.float16,
@@ -112,11 +113,7 @@ def _get_torchtrt_version() -> str:
 
 
 def _get_trt_version() -> str:
-    try:
-        import tensorrt
-        return tensorrt.__version__
-    except ImportError:
-        return ""
+    return trt_compat.tensorrt_version()
 
 
 def _trt_abi_from_version(version: str) -> str:
@@ -284,13 +281,16 @@ def _build_engine_from_onnx_bytes(
     workspace_size: int = 1 << 30,
 ) -> bytes:
     """Build a TRT engine from serialized ONNX bytes with TF32 disabled."""
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-        | 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+        trt_compat.network_creation_flags(
+            explicit_batch=True,
+            strongly_typed=True,
+        )
     )
     parser = trt.OnnxParser(network, logger)
 
@@ -344,7 +344,8 @@ def compile_model_via_onnx(
 
 def _inspect_engine(engine_bytes: bytes) -> dict:
     """Inspect a TRT engine and return I/O tensor name mapping."""
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     logger = trt.Logger(trt.Logger.WARNING)
     rt = trt.Runtime(logger)
     engine = rt.deserialize_cuda_engine(engine_bytes)
@@ -495,6 +496,10 @@ def build_bundle(
     model_dir_path = Path(model_dir)
     compute_dtype = precision_to_dtype(precision)
     t0 = time.monotonic()
+    print(
+        f"[torch-trt] Builder TensorRT resolved: {trt_compat.resolved_summary()}",
+        file=sys.stderr,
+    )
 
     # 1. Parse config (supports both config.json and model_index.json)
     config = _parse_model_config(model_dir_path)

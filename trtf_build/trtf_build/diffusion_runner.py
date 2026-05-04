@@ -14,14 +14,16 @@ import sys
 
 import numpy as np
 
+from trtf_build import trt_compat
+
+trt = trt_compat.get_trt() if trt_compat.is_available() else None
 try:
-    import tensorrt as trt
     try:
         from cuda import cudart
     except ImportError:
         # cuda-python >= 13.x uses cuda.bindings
         from cuda.bindings import runtime as cudart
-    HAS_CUDA = True
+    HAS_CUDA = trt is not None
 except ImportError:
     HAS_CUDA = False
 

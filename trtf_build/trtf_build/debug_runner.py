@@ -12,10 +12,9 @@ import warnings
 from typing import Any
 
 import numpy as np
-try:
-    import tensorrt as trt
-except ImportError:  # pragma: no cover - exercised in TRT-free test envs
-    trt = None  # type: ignore[assignment]
+from trtf_build import trt_compat
+
+trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
 from .triattention_runtime import TriAttentionRuntimeConfig, TriAttentionSelector
 

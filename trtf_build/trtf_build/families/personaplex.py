@@ -56,10 +56,9 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    import tensorrt as trt
-except ImportError:
-    trt = None
+from trtf_build import trt_compat
+
+trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import (
@@ -977,7 +976,11 @@ def _build_mimi_encoder_engine(
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED) | 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+        trt_compat.network_creation_flags(
+            explicit_batch=True,
+            strongly_typed=True,
+        )
+    )
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
@@ -1309,7 +1312,11 @@ def _build_mimi_decoder_engine(
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED) | 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+        trt_compat.network_creation_flags(
+            explicit_batch=True,
+            strongly_typed=True,
+        )
+    )
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 

@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
 
 from .profile import QuantProfile
 from .scales import LayerScales

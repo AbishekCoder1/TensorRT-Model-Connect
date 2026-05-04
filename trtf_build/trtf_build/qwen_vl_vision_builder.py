@@ -23,7 +23,8 @@ import sys
 from typing import TYPE_CHECKING
 
 import numpy as np
-import tensorrt as trt
+from trtf_build import trt_compat
+trt = trt_compat.get_trt()
 
 from . import graph_ops
 

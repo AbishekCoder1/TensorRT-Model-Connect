@@ -26,10 +26,9 @@ from ..checkpoint_mapper import (
 )
 from .. import graph_ops
 
-try:
-    import tensorrt as trt
-except ImportError:
-    trt = None  # type: ignore[assignment]
+from trtf_build import trt_compat
+
+trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
 
 def _add_layernorm_no_bias(network, inp, hidden_size, gamma, eps):

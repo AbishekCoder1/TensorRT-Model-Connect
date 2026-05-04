@@ -40,7 +40,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import tensorrt as trt
+from trtf_build import trt_compat
+trt = trt_compat.get_trt()
 
 from . import graph_ops
 from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor

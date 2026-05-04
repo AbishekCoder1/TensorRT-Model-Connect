@@ -883,7 +883,8 @@ def _build_vae_placeholder(latent_channels, h_lat, w_lat, verbose):
     using diffusers AutoencoderKL. This placeholder engine exists
     only to satisfy the bundle format requirement for a vae_decoder_plan.
     """
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)

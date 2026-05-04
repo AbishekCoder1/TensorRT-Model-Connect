@@ -98,13 +98,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 traceback.print_exc()
             return 1
 
-    # RTX monkeypatch MUST happen before any tensorrt import (graph_ops, etc.)
+    # RTX selection MUST happen before any TensorRT API is touched.
     if getattr(args, 'rtx', False):
-        import tensorrt_rtx
-        sys.modules["tensorrt"] = tensorrt_rtx
+        from . import trt_compat
+        trt_compat.configure_backend(rtx=True)
         print("[trtf-build] Using TensorRT-RTX backend", file=sys.stderr)
 
-    # Raw TRT path (this triggers import of graph_ops which does 'import tensorrt')
+    # Raw TRT path imports builder modules that bind trt_compat.get_trt().
     from .engine_builder import build
     from .quantization import canonicalize_quant_format
 
@@ -486,27 +486,27 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 
 def _cmd_version(_args: argparse.Namespace) -> int:
     print(f"trtf-build {__version__}")
-    try:
-        import tensorrt as trt
-        print(f"TensorRT:  {trt.__version__}")
-    except ImportError:
+    from . import trt_compat
+    trt_version = trt_compat.module_version("tensorrt")
+    if trt_version:
+        print(f"TensorRT:  {trt_version}")
+    else:
         print("TensorRT:  not installed")
-    try:
-        import tensorrt_rtx as trt_rtx
-        print(f"TensorRT-RTX: {trt_rtx.__version__}")
-    except ImportError:
+    trt_rtx_version = trt_compat.module_version("tensorrt_rtx")
+    if trt_rtx_version:
+        print(f"TensorRT-RTX: {trt_rtx_version}")
+    else:
         print("TensorRT-RTX: not installed")
     return 0
 
 
 def main() -> None:
-    # RTX monkeypatch MUST happen before ANY trtf_build module is imported,
-    # because graph_ops.py does 'import tensorrt as trt' at module level.
+    # RTX selection MUST happen before ANY trtf_build module touches TRT.
     # We do an early argv scan before argparse touches anything.
     if "--rtx" in sys.argv:
         try:
-            import tensorrt_rtx
-            sys.modules["tensorrt"] = tensorrt_rtx
+            from . import trt_compat
+            trt_compat.configure_backend(rtx=True)
             print("[trtf-build] Using TensorRT-RTX backend", file=sys.stderr)
         except ImportError:
             print("Error: --rtx requires tensorrt_rtx. Install: pip install tensorrt-rtx",

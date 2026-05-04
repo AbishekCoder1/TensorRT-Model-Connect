@@ -27,7 +27,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import tensorrt as trt
+from trtf_build import trt_compat
+trt = trt_compat.get_trt()
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict

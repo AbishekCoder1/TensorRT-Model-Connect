@@ -207,7 +207,8 @@ def build_causal_vae_3d_engine(
     Output temporal dim = scale_factor_temporal (4 for Wan2.1). The caller
     trims extra frames from frame-0 to get the correct total count.
     """
-    import tensorrt as trt
+    from trtf_build import trt_compat
+    trt = trt_compat.get_trt()
     from . import graph_ops, graph_blocks
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
