@@ -231,8 +231,9 @@ class DecoderPlugin final : public IPipelinePlugin {
             throw std::runtime_error("No backend loaded");
 
         auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
-        const int32_t profile_candidates =
-            static_cast<int32_t>(std::max<std::size_t>(profile_rows.size() + 1, 1));
+        const int32_t profile_candidates = profile_rows.empty()
+                                               ? 2
+                                               : static_cast<int32_t>(profile_rows.size() + 1);
         std::vector<int32_t> profile_indices;
         profile_indices.reserve(static_cast<std::size_t>(profile_candidates));
         for (int32_t i = 0; i < profile_candidates; ++i)

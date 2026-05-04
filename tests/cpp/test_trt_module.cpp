@@ -92,8 +92,10 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_dynamic_identity_engine()
     if (!builder)
         return nullptr;
 
-    uint32_t flags =
-        1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+    uint32_t flags = 0;
+#if NV_TENSORRT_MAJOR < 10
+    flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+#endif
     auto network =
         trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(flags));
     auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
