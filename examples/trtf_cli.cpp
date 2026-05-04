@@ -67,9 +67,13 @@ struct CliArgs {
     float cfg_scale{-1.0F};
     bool greedy{false};
     bool stream{false};
+    bool pad_and_drop_preencoded{false};
     bool chat_template{false};
     bool no_thinking{false};
     int chunk_frames{32};
+    int chunk_ms{160};
+    int att_context_left{70};
+    int att_context_right{13};
     std::string runtime_cache;
     std::vector<std::string> backend_search_paths;
     bool cuda_graphs{false};
@@ -169,7 +173,8 @@ void print_usage() {
            "  trtf solve           <bundle.trtfb> --field-input CSV\n"
            "  trtf solve           <bundle.trtfb> --branch-input CSV [--trunk-input CSV]\n"
            "  trtf transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] "
-           "[--hf-python PATH]\n"
+           "[--stream] [--chunk-ms N] [--att-context-size L,R] "
+           "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
            "  trtf speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
            "  trtf inspect         <bundle.trtfb>\n"
            "  trtf version\n"
@@ -326,8 +331,28 @@ CliArgs parse_args(int argc, char** argv) {
             args.stream = true;
             continue;
         }
+        if (arg == "--pad-and-drop-preencoded") {
+            args.pad_and_drop_preencoded = true;
+            continue;
+        }
         if (arg == "--chunk-frames" && i + 1 < argc) {
             args.chunk_frames = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--chunk-ms" && need_value(arg)) {
+            args.chunk_ms = std::atoi(argv[++i]);
+            continue;
+        }
+        if (arg == "--att-context-size" && need_value(arg)) {
+            const std::string value = argv[++i];
+            const auto comma = value.find(',');
+            if (comma == std::string::npos) {
+                args.parse_error = true;
+                args.error_message = "--att-context-size expects L,R";
+                return args;
+            }
+            args.att_context_left = std::atoi(value.substr(0, comma).c_str());
+            args.att_context_right = std::atoi(value.substr(comma + 1).c_str());
             continue;
         }
         if (arg == "--document" && need_value(arg)) {
@@ -901,6 +926,37 @@ int cmd_transcribe(const CliArgs& args) {
 
     auto audio = trtf::io::read_wav(args.audio_in);
     int32_t max_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 224;
+
+    if (args.stream) {
+        trtf::TranscriptionStreamConfig cfg;
+        cfg.input_sample_rate = audio.sample_rate;
+        cfg.max_new_tokens = max_tokens;
+        cfg.att_context_left = args.att_context_left;
+        cfg.att_context_right = args.att_context_right;
+        cfg.use_cache = true;
+        cfg.use_feature_cache = true;
+        cfg.pad_and_drop_preencoded = args.pad_and_drop_preencoded;
+
+        auto stream = pipeline->create_transcription_stream(cfg);
+        const int32_t chunk_ms = args.chunk_ms > 0 ? args.chunk_ms : 160;
+        const int32_t samples_per_chunk =
+            std::max<int32_t>(1, static_cast<int32_t>(
+                                     static_cast<int64_t>(audio.sample_rate) * chunk_ms / 1000));
+        trtf::TranscriptionStreamResult result;
+        for (std::size_t offset = 0; offset < audio.samples.size();) {
+            const auto remaining = audio.samples.size() - offset;
+            const auto take =
+                std::min<std::size_t>(remaining, static_cast<std::size_t>(samples_per_chunk));
+            const bool is_final = (offset + take) >= audio.samples.size();
+            result = stream->accept_audio(audio.samples.data() + offset,
+                                          static_cast<int32_t>(take), is_final);
+            offset += take;
+        }
+        if (audio.samples.empty())
+            result = stream->finish();
+        std::cout << result.text << '\n';
+        return EXIT_SUCCESS;
+    }
 
     auto result =
         pipeline->transcribe(audio.samples.data(), static_cast<int32_t>(audio.samples.size()),

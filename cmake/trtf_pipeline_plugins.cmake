@@ -22,6 +22,7 @@ set(TRTF_PIPELINE_PLUGINS
   "object_detection_plugin.cpp|register_object_detection_plugin"
   "vl_plugin.cpp|register_vl_plugin"
   "whisper_plugin.cpp|register_whisper_plugin"
+  "rnnt_plugin.cpp|register_rnnt_plugin"
   "bark_plugin.cpp|register_bark_plugin"
   "magpie_plugin.cpp|register_magpie_plugin"
   "speech_plugin.cpp|register_speech_plugin"

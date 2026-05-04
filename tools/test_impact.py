@@ -34,6 +34,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "hybrid_mamba_attention": "text_generation_causal",
     "vision_language": "vision_language_generation",
     "speech_to_text": "speech_to_text",
+    "speech_to_text_rnnt": "speech_to_text",
     "text_to_audio": "text_to_audio",
     "text_to_audio_bark": "text_to_audio",
     "text_to_audio_magpie": "text_to_audio",
@@ -71,6 +72,7 @@ CPP_PLUGIN_STRATEGIES: Dict[str, List[str]] = {
     "hybrid_plugin": ["hybrid_mamba_attention"],
     "vl_plugin": ["vision_language"],
     "whisper_plugin": ["speech_to_text"],
+    "rnnt_plugin": ["speech_to_text_rnnt"],
     "bark_plugin": ["text_to_audio_bark"],
     "magpie_plugin": ["text_to_audio_magpie"],
     "speech_plugin": ["speech_to_speech"],
@@ -99,6 +101,7 @@ CPP_PIPELINE_STRATEGIES: Dict[str, List[str]] = {
     "vl_pipeline": ["vision_language"],
     # Audio/speech pipelines — each has its own .cpp file (no shared audio_pipeline.cpp):
     "whisper_pipeline": ["speech_to_text"],
+    "rnnt_pipeline": ["speech_to_text_rnnt"],
     "bark_pipeline": ["text_to_audio_bark"],
     "magpie_pipeline": ["text_to_audio_magpie"],
     "speech_pipeline": ["speech_to_speech"],
@@ -172,8 +175,8 @@ SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
         "diffusion_flux", "diffusion_wan", "diffusion_pixart", "diffusion_zimage",
     ],
     "audio_helpers": [
-        "speech_to_text", "text_to_audio_bark", "text_to_audio_magpie",
-        "speech_to_speech", "omni_multimodal",
+        "speech_to_text", "speech_to_text_rnnt", "text_to_audio_bark",
+        "text_to_audio_magpie", "speech_to_speech", "omni_multimodal",
     ],
 }
 

@@ -171,12 +171,32 @@ def _compute_enc_seq_len(mel_length: int) -> int:
     return t
 
 
+def _compute_causal_enc_seq_len(mel_length: int) -> int:
+    t = mel_length
+    for _ in range(3):
+        t = t // 2 + 1
+    return t
+
+
 # ---------------------------------------------------------------------------
 # Encoder TRT graph helpers
 # ---------------------------------------------------------------------------
 
 def _build_subsampling(network, mel_input, weights, sub_ch, hidden,
                        num_mel_bins, mel_length):
+    causal_downsampling = bool(weights.get("_causal_downsampling", False))
+
+    def add_subsample_conv(inp, weight, bias, out_channels, *, groups=1):
+        if causal_downsampling:
+            pad = network.add_padding_nd(inp, pre_padding=(2, 2), post_padding=(1, 1))
+            inp = pad.get_output(0)
+            padding = (0, 0)
+        else:
+            padding = (1, 1)
+        return graph_ops.add_conv2d(
+            network, inp, weight=weight, bias=bias, out_channels=out_channels,
+            kernel_size=(3, 3), stride=(2, 2), padding=padding, groups=groups)
+
     # NeMo ConformerEncoder passes audio as [B, T, F] to pre_encode.
     # MaskedConvSequential.forward unsqueezes to [B, 1, T, F].
     # So Conv2d input is [1, 1, mel_length, mel_bins] (time=H, features=W).
@@ -187,24 +207,21 @@ def _build_subsampling(network, mel_input, weights, sub_ch, hidden,
     ri.reshape_dims = (1, 1, mel_length, num_mel_bins)  # [1, 1, T, F]
     x = ri.get_output(0)
     # Standard Conv2d with symmetric padding + ReLU (NOT SiLU, NOT causal)
-    x = graph_ops.add_conv2d(network, x,
-        weight=weights["enc_sub_conv0_w"], bias=weights["enc_sub_conv0_b"],
-        out_channels=sub_ch, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
+    x = add_subsample_conv(
+        x, weights["enc_sub_conv0_w"], weights["enc_sub_conv0_b"], sub_ch)
     x = graph_ops.add_activation(network, x, "relu")
     for s in range(2):
-        x = graph_ops.add_conv2d(network, x,
-            weight=weights[f"enc_sub_dw{s}_w"], bias=weights[f"enc_sub_dw{s}_b"],
-            out_channels=sub_ch, kernel_size=(3, 3), stride=(2, 2),
-            padding=(1, 1), groups=sub_ch)
+        x = add_subsample_conv(
+            x, weights[f"enc_sub_dw{s}_w"], weights[f"enc_sub_dw{s}_b"], sub_ch,
+            groups=sub_ch)
         x = graph_ops.add_conv2d(network, x,
             weight=weights[f"enc_sub_pw{s}_w"], bias=weights[f"enc_sub_pw{s}_b"],
             out_channels=sub_ch, kernel_size=(1, 1))
         x = graph_ops.add_activation(network, x, "relu")
     # After convs: [1, C, T_out, F_out] where T=time, F=features
-    time_out, feat_out = mel_length, num_mel_bins
-    for _ in range(3):
-        time_out = (time_out + 2 - 3) // 2 + 1
-        feat_out = (feat_out + 2 - 3) // 2 + 1
+    time_out = int(weights.get("_enc_seq", _compute_enc_seq_len(mel_length)))
+    sub_out_in = int(weights["enc_sub_out_w"].shape[0])
+    feat_out = sub_out_in // sub_ch
     # NeMo: x.transpose(1,2).reshape(B,T,-1) on [B,C,T,F]
     # = permute(0,2,1,3) → [B,T,C,F], reshape → [T, C*F]
     tr = network.add_shuffle(x)
@@ -292,7 +309,48 @@ def _add_rel_pos_attention(network, hs, weights, pfx, hidden, H, D, S,
             weights[f"{pfx}.w_o"]), hidden, weights[f"{pfx}.b_o"])
 
 
-def _add_conv_module(network, hs, weights, pfx, hidden, kern, S, eps):
+def _add_causal_depthwise_conv1d(network, x, weights, pfx, hidden, kern):
+    pad = kern - 1
+    if pad > 0:
+        zeros = graph_ops.add_constant(
+            network, (1, hidden, pad), np.zeros((1, hidden, pad), dtype=np.float32))
+        cat = network.add_concatenation([zeros, x])
+        cat.axis = 2
+        x = cat.get_output(0)
+    return graph_ops.add_conv1d(
+        network, x,
+        weight=weights[f"{pfx}.cdw_w"], bias=weights[f"{pfx}.cdw_b"],
+        out_channels=hidden, kernel_size=kern, groups=hidden)
+
+
+def _add_conv_norm(network, x, weights, pfx, hidden, S, eps, conv_norm_type):
+    if conv_norm_type == "layer_norm":
+        r1 = network.add_shuffle(x)
+        r1.reshape_dims = (hidden, S)
+        r2 = network.add_shuffle(r1.get_output(0))
+        r2.first_transpose = trt.Permutation([1, 0])
+        normed = graph_ops.add_layer_norm(
+            network, r2.get_output(0), hidden, weights[f"{pfx}.bn_w"],
+            weights[f"{pfx}.bn_b"], eps)
+        r3 = network.add_shuffle(normed)
+        r3.first_transpose = trt.Permutation([1, 0])
+        r4 = network.add_shuffle(r3.get_output(0))
+        r4.reshape_dims = (1, hidden, S)
+        return r4.get_output(0)
+
+    bn = network.add_shuffle(x)
+    bn.reshape_dims = (1, hidden, 1, S)
+    x = graph_ops.add_batch_norm_2d(
+        network, bn.get_output(0), hidden,
+        gamma=weights[f"{pfx}.bn_w"], beta=weights[f"{pfx}.bn_b"],
+        running_mean=weights[f"{pfx}.bn_m"], running_var=weights[f"{pfx}.bn_v"])
+    bo = network.add_shuffle(x)
+    bo.reshape_dims = (1, hidden, S)
+    return bo.get_output(0)
+
+
+def _add_conv_module(network, hs, weights, pfx, hidden, kern, S, eps,
+                     conv_norm_type="batch_norm", conv_context_size="symmetric"):
     normed = graph_ops.add_layer_norm(network, hs, hidden,
         weights[f"{pfx}.norm_conv"], weights[f"{pfx}.norm_conv_b"], eps)
     r1 = network.add_shuffle(normed)
@@ -306,17 +364,14 @@ def _add_conv_module(network, hs, weights, pfx, hidden, kern, S, eps):
     xb = network.add_slice(x, start=(0,hidden,0), shape=(1,hidden,S), stride=(1,1,1)).get_output(0)
     gate = network.add_activation(xb, trt.ActivationType.SIGMOID).get_output(0)
     x = network.add_elementwise(xa, gate, trt.ElementWiseOperation.PROD).get_output(0)
-    x = graph_ops.add_conv1d(network, x,
-        weight=weights[f"{pfx}.cdw_w"], bias=weights[f"{pfx}.cdw_b"],
-        out_channels=hidden, kernel_size=kern, padding=kern//2, groups=hidden)
-    bn = network.add_shuffle(x)
-    bn.reshape_dims = (1, hidden, 1, S)
-    x = graph_ops.add_batch_norm_2d(network, bn.get_output(0), hidden,
-        gamma=weights[f"{pfx}.bn_w"], beta=weights[f"{pfx}.bn_b"],
-        running_mean=weights[f"{pfx}.bn_m"], running_var=weights[f"{pfx}.bn_v"])
-    bo = network.add_shuffle(x)
-    bo.reshape_dims = (1, hidden, S)
-    x = graph_ops.add_activation(network, bo.get_output(0), "silu")
+    if conv_context_size == "causal":
+        x = _add_causal_depthwise_conv1d(network, x, weights, pfx, hidden, kern)
+    else:
+        x = graph_ops.add_conv1d(network, x,
+            weight=weights[f"{pfx}.cdw_w"], bias=weights[f"{pfx}.cdw_b"],
+            out_channels=hidden, kernel_size=kern, padding=kern//2, groups=hidden)
+    x = _add_conv_norm(network, x, weights, pfx, hidden, S, eps, conv_norm_type)
+    x = graph_ops.add_activation(network, x, "silu")
     x = graph_ops.add_conv1d(network, x,
         weight=weights[f"{pfx}.cpw2_w"], bias=weights[f"{pfx}.cpw2_b"],
         out_channels=hidden, kernel_size=1)
@@ -342,12 +397,15 @@ def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps):
 
 
 def _add_conformer_block(network, hs, weights, pfx, hidden, H, D, ffn,
-                         kern, S, rpe, eps, enc_mask=None):
+                         kern, S, rpe, eps, enc_mask=None,
+                         conv_norm_type="batch_norm", conv_context_size="symmetric"):
     ffn1 = _add_half_ffn(network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps)
     hs = network.add_elementwise(hs, ffn1, trt.ElementWiseOperation.SUM).get_output(0)
     attn = _add_rel_pos_attention(network, hs, weights, pfx, hidden, H, D, S, rpe, eps, enc_mask)
     hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
-    conv = _add_conv_module(network, hs, weights, pfx, hidden, kern, S, eps)
+    conv = _add_conv_module(
+        network, hs, weights, pfx, hidden, kern, S, eps,
+        conv_norm_type=conv_norm_type, conv_context_size=conv_context_size)
     hs = network.add_elementwise(hs, conv, trt.ElementWiseOperation.SUM).get_output(0)
     ffn2 = _add_half_ffn(network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps)
     hs = network.add_elementwise(hs, ffn2, trt.ElementWiseOperation.SUM).get_output(0)
@@ -748,6 +806,8 @@ def _build_encoder(config, weights, *, verbose=False):
     ml = weights["_mel_length"]
     es = weights["_enc_seq"]
     sc = weights["_sub_ch"]
+    conv_norm_type = str(weights.get("_conv_norm_type", "batch_norm")).lower()
+    conv_context_size = str(weights.get("_conv_context_size", "symmetric")).lower()
 
     log = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     b = trt.Builder(log)
@@ -759,13 +819,16 @@ def _build_encoder(config, weights, *, verbose=False):
     mel = net.add_input("mel_features", trt.float32, (mb, ml))
     # Encoder attention mask: [1, 1, enc_seq] — 0.0 for valid, -10000.0 for padded.
     # Applied additively to self-attention scores before softmax.
-    enc_mask = net.add_input("encoder_mask", trt.float32, (1, 1, es))
+    mask_shape = (1, es, es) if bool(weights.get("_encoder_attention_mask_2d", False)) else (1, 1, es)
+    enc_mask = net.add_input("encoder_mask", trt.float32, mask_shape)
 
     hs = _build_subsampling(net, mel, weights, sc, h, mb, ml)
     for li in range(el):
         pfx = f"el.{li}"
         rpe = graph_ops.add_constant(net, (2*es-1, eh, hd), weights[f"{pfx}.rpe_proj"])
-        hs = _add_conformer_block(net, hs, weights, pfx, h, eh, hd, ef, k, es, rpe, eps, enc_mask)
+        hs = _add_conformer_block(
+            net, hs, weights, pfx, h, eh, hd, ef, k, es, rpe, eps, enc_mask,
+            conv_norm_type=conv_norm_type, conv_context_size=conv_context_size)
 
     hs.name = "encoder_output"
     net.mark_output(hs)

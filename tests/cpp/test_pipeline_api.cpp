@@ -124,6 +124,20 @@ static void test_ipipeline_default_virtuals()
     try { pipeline.transcribe(nullptr, 0); } catch (const std::runtime_error&) { threw = true; }
     check(threw, "default transcribe throws");
 
+    // Default streaming transcription should throw
+    threw = false;
+    try { pipeline.create_transcription_stream(); } catch (const std::runtime_error&) { threw = true; }
+    check(threw, "default create_transcription_stream throws");
+
+    threw = false;
+    try {
+        trtf::TranscriptionStreamConfig cfg;
+        pipeline.transcribe_streaming(nullptr, 0, cfg);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "default transcribe_streaming throws");
+
     // Default speak should throw
     threw = false;
     try { pipeline.speak(nullptr, 0); } catch (const std::runtime_error&) { threw = true; }

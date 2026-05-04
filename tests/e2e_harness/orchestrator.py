@@ -86,6 +86,7 @@ _MIGRATED_RUNTIME_STRATEGIES = frozenset({
     "neural_operator",
     "text_to_audio",
     "speech_to_text",
+    "speech_to_text_rnnt",
     "speech_to_speech",
     "omni_multimodal",
     "diffusion",

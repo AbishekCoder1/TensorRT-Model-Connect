@@ -661,9 +661,9 @@ class HfTransformersReference:
     def _run_speech_to_text_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
-        """Run speech-to-text reference (Whisper via HF, Canary via NeMo)."""
+        """Run speech-to-text reference (Whisper via HF, NeMo ASR via NeMo)."""
         family = case.metadata.get("family", case.family)
-        if family == "canary":
+        if family in {"canary", "nemotron_speech_streaming"}:
             return self._run_canary_ref(case, stage, ctx)
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()

@@ -171,6 +171,7 @@ add_library(trtf_core
   src/runtime/pipelines/wan_pipeline.cpp
   src/runtime/pipelines/z_image_pipeline.cpp
   src/runtime/pipelines/whisper_pipeline.cpp
+  src/runtime/pipelines/rnnt_pipeline.cpp
   src/runtime/pipelines/bark_pipeline.cpp
   src/runtime/pipelines/magpie_pipeline.cpp
   src/runtime/pipelines/speech_pipeline.cpp
@@ -595,6 +596,8 @@ trtf_add_test(test_recurrent_step_contracts)
 trtf_add_test(test_audio_bundle_validation)
 trtf_add_test(test_whisper_host_plan)
 trtf_add_test(test_whisper_decode_policy)
+trtf_add_test(test_rnnt_decode_policy)
+trtf_add_test(test_rnnt_streaming_contract)
 trtf_add_test(test_wav_reader)
 trtf_add_test(test_audio_types)
 trtf_add_test(test_mel_spectrogram)

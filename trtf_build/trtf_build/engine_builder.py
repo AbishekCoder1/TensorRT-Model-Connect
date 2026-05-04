@@ -310,10 +310,13 @@ def _resolve_nemo_archive(nemo_path: Path) -> str:
                 break
 
     # Determine model_type from NeMo config
-    target = cfg.get("target", "")
+    target = cfg.get("target", "") or cfg.get("_target_", "")
     model_type = "unknown"
     if "MagpieTTS" in target or "magpietts" in target.lower():
         model_type = "magpie_tts"
+    elif ("EncDecRNNT" in target or "Transducer" in target
+          or "rnnt" in target.lower()):
+        model_type = "nemotron_speech_streaming"
     elif "EncDecMultiTaskModel" in target or "canary" in target.lower():
         model_type = "canary"
     elif cfg.get("model_type", ""):

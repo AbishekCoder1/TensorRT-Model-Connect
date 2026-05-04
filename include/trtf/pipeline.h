@@ -40,6 +40,31 @@ struct AudioResult {
     int32_t sample_rate{24000};
 };
 
+struct TranscriptionStreamConfig {
+    // NeMo cache-aware streaming contract for FastConformer-RNNT:
+    // att_context_size=[left,right], measured in 80 ms encoder frames.
+    // Supported Nemotron right contexts are {0, 1, 6, 13}, giving
+    // chunk sizes of 80 ms, 160 ms, 560 ms, and 1120 ms respectively.
+    int32_t input_sample_rate{16000};
+    int32_t max_new_tokens{224};
+    int32_t att_context_left{70};
+    int32_t att_context_right{13};
+    bool use_cache{true};         // Reuse encoder attention/conv caches between chunks.
+    bool use_feature_cache{true}; // Reuse mel/pre-encoder overlap between chunks.
+    bool emit_partial_results{true};
+    bool online_normalization{false};
+    bool pad_and_drop_preencoded{false};
+};
+
+struct TranscriptionStreamResult {
+    std::string text;
+    std::vector<int32_t> token_ids;
+    bool is_final{false};
+    int32_t chunk_index{0};
+    int64_t accepted_samples{0};
+    int32_t sample_rate{16000};
+};
+
 struct EmbeddingResult {
     std::vector<float> data;
     int32_t dim{0};
@@ -71,6 +96,24 @@ struct GenerateConfig {
     bool enable_thinking{true};       ///< Qwen3: if false, disable thinking mode
     bool stop_on_boxed_answer{false}; ///< Stop once generated text contains a full \boxed{...}
     int32_t stop_check_interval{16};  ///< Token interval for answer-stop checks
+};
+
+class ITranscriptionStream {
+  public:
+    virtual ~ITranscriptionStream() = default;
+
+    // Append one mono float32 audio chunk. Set is_final=true for the last
+    // chunk, or call finish() after the final accept_audio().
+    virtual TranscriptionStreamResult accept_audio(const float* audio_samples, int32_t num_samples,
+                                                   bool is_final = false) = 0;
+
+    // Flush pending right-context/audio tail and return the final transcript.
+    virtual TranscriptionStreamResult finish() = 0;
+
+    // Clear hypotheses, encoder caches, feature cache, and accepted audio.
+    virtual void reset() = 0;
+
+    virtual TranscriptionStreamConfig config() const = 0;
 };
 
 // --- Pipeline interface ---
@@ -149,6 +192,31 @@ class IPipeline {
         (void)max_tokens;
         (void)input_sample_rate;
         throw std::runtime_error(std::string(pipeline_type()) + " does not support transcribe()");
+    }
+
+    // -- Streaming transcription (cache-aware ASR) --
+    virtual std::unique_ptr<ITranscriptionStream>
+    create_transcription_stream(const TranscriptionStreamConfig& cfg = {}) {
+        (void)cfg;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support streaming transcription");
+    }
+
+    using TranscriptionChunkCallback = std::function<void(const TranscriptionStreamResult&)>;
+    virtual TextResult transcribe_streaming(const float* audio_samples, int32_t num_samples,
+                                            const TranscriptionStreamConfig& cfg,
+                                            TranscriptionChunkCallback callback = nullptr) {
+        auto stream = create_transcription_stream(cfg);
+        auto chunk = stream->accept_audio(audio_samples, num_samples, false);
+        if (callback && (!chunk.text.empty() || !chunk.token_ids.empty()))
+            callback(chunk);
+        auto final = stream->finish();
+        if (callback)
+            callback(final);
+        TextResult out;
+        out.text = std::move(final.text);
+        out.token_ids = std::move(final.token_ids);
+        return out;
     }
 
     // -- Speech to speech --

@@ -149,6 +149,14 @@
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['speech_to_text']."
     },
+    "speech_to_text_rnnt": {
+      "task_strategy": "speech_to_text",
+      "cli_commands": ["transcribe"],
+      "runner_class": "tests.e2e_harness.runners.audio_speech.SpeechToTextRunner",
+      "comparator_class": "tests.e2e_harness.comparators.speech_to_text.SpeechToTextComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['speech_to_text_rnnt']."
+    },
     "ssm_recurrent": {
       "task_strategy": "text_generation_causal",
       "cli_commands": ["run"],

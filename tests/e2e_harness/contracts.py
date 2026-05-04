@@ -775,6 +775,7 @@ MODEL_REFERENCE_FAMILY: Dict[str, str] = {
     "whisper-large-v3-turbo": ReferenceFamily.ASR_WHISPER.value,
     # 5.19 ASR_CANARY
     "canary-1b-v2": ReferenceFamily.ASR_CANARY.value,
+    "nemotron-speech-streaming-en-0.6b": ReferenceFamily.ASR_CANARY.value,
     # 5.20 TTS_BARK
     "bark-small": ReferenceFamily.TTS_BARK.value,
     "bark-large": ReferenceFamily.TTS_BARK.value,
@@ -881,6 +882,7 @@ RUNTIME_TO_TASK_STRATEGY: Dict[str, str] = {
     "hybrid_mamba_attention": "text_generation_causal",
     "vision_language": "vision_language_generation",
     "speech_to_text": "speech_to_text",
+    "speech_to_text_rnnt": "speech_to_text",
     "text_to_audio": "text_to_audio",              # legacy alias
     "text_to_audio_bark": "text_to_audio",
     "text_to_audio_magpie": "text_to_audio",

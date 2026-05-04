@@ -489,6 +489,7 @@ _KNOWN_RUNTIME_STRATEGIES = frozenset({
     "hybrid_mamba_attention",
     "vision_language",
     "speech_to_text",
+    "speech_to_text_rnnt",
     "text_to_audio",              # legacy alias
     "text_to_audio_bark",
     "text_to_audio_magpie",

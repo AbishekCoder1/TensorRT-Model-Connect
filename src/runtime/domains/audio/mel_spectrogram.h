@@ -33,4 +33,15 @@ MelResult extract_mel_spectrogram(
     int32_t n_fft, int32_t hop_length,
     int32_t chunk_length_s, int32_t sample_rate);
 
+// Extract NeMo ASR-style log-mel features.
+//
+// Matches AudioToMelSpectrogramPreprocessor for the Nemotron RNNT config:
+// center=True STFT, win_length < n_fft, preemphasis, power mel projection,
+// natural log with additive guard, and no feature normalization.
+MelResult extract_nemo_mel_spectrogram(
+    const float* samples, int32_t n_samples,
+    const float* mel_filters, int32_t n_freq_bins, int32_t n_mel_bins,
+    int32_t n_fft, int32_t win_length, int32_t hop_length,
+    int32_t chunk_length_s, int32_t sample_rate, float preemph);
+
 } // namespace trtf

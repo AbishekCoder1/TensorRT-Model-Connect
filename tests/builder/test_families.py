@@ -371,6 +371,10 @@ _POSITIVE_MATCH_CASES = [
     ("canary", "canary"),
     ("canary_asr", "canary"),
     ("enc_dec_multi_task", "canary"),
+    # Nemotron Speech Streaming (FastConformer cache-aware RNNT ASR)
+    ("nemotron_speech_streaming", "nemotron_speech_streaming"),
+    ("nemotron_asr_streaming", "nemotron_speech_streaming"),
+    ("fastconformer_cacheaware_rnnt", "nemotron_speech_streaming"),
     # Autopilot-generated families
     ("electra", "electra"),
     ("modernbert", "modernbert"),
@@ -531,6 +535,10 @@ class TestRuntimeStrategy:
     def test_canary_strategy(self):
         plugin = find_plugin("canary")
         assert getattr(plugin, "runtime_strategy", None) == "speech_to_text"
+
+    def test_nemotron_speech_streaming_strategy(self):
+        plugin = find_plugin("nemotron_speech_streaming")
+        assert getattr(plugin, "runtime_strategy", None) == "speech_to_text_rnnt"
 
     def test_standard_decoder_no_strategy(self):
         """Standard decoder plugins have no runtime_strategy (defaults to decoder_kv_cache)."""
