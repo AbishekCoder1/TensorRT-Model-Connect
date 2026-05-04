@@ -68,21 +68,18 @@ bool copy_async_or_fail(void* dst, const void* src, std::size_t bytes, cudaMemcp
 }
 
 template <typename FailFn>
-bool bind_tensor_or_fail(nvinfer1::IExecutionContext& context, const std::string& tensor_name,
-                         void* device_ptr, std::string_view error_message, const FailFn& fail) {
-    if (!context.setTensorAddress(tensor_name.c_str(), device_ptr)) {
+bool bind_tensor_or_fail(TrtModule* module, const std::string& tensor_name, void* device_ptr,
+                         std::string_view error_message, const FailFn& fail) {
+    if (module == nullptr)
         return fail(error_message);
-    }
+    module->bind_external(tensor_name, device_ptr);
     return true;
 }
 
 template <typename FailFn>
-bool bind_tensor_or_fail(nvinfer1::IExecutionContext& context, const char* tensor_name,
-                         void* device_ptr, std::string_view error_message, const FailFn& fail) {
-    if (!context.setTensorAddress(tensor_name, device_ptr)) {
-        return fail(error_message);
-    }
-    return true;
+bool bind_tensor_or_fail(TrtModule* module, const char* tensor_name, void* device_ptr,
+                         std::string_view error_message, const FailFn& fail) {
+    return bind_tensor_or_fail(module, std::string(tensor_name), device_ptr, error_message, fail);
 }
 
 template <typename FailFn>
@@ -112,7 +109,7 @@ bool transfer_input_embed_inputs(const DecoderStepEngine& engine, DeviceResource
                                  const float* input_embed_host, int32_t embed_dim,
                                  float& use_input_embed, bool input_embed_device_ready,
                                  cudaStream_t stream, const FailFn& fail) {
-    if (!has_io_tensor(*engine.engine, "input_embed")) {
+    if (engine.module == nullptr || !has_io_tensor(*engine.module, "input_embed")) {
         return true;
     }
 
@@ -144,7 +141,7 @@ bool transfer_deepstack_inputs(const DecoderStepEngine& engine, DeviceResources&
     if (resources.d_deepstack_embeds.empty()) {
         return true;
     }
-    if (!has_io_tensor(*engine.engine, "deepstack_active")) {
+    if (engine.module == nullptr || !has_io_tensor(*engine.module, "deepstack_active")) {
         return true;
     }
 
@@ -194,46 +191,46 @@ template <typename FailFn>
 bool bind_core_tensors(const DecoderStepEngine& engine, DeviceResources& resources,
                        const FailFn& fail) {
     // token_id may be absent in embed-only models (e.g. MagpieTTS) that only use input_embed.
-    if (has_io_tensor(*engine.engine, engine.token_input_name)) {
-        if (!bind_tensor_or_fail(*engine.context, engine.token_input_name,
+    if (engine.module != nullptr && has_io_tensor(*engine.module, engine.token_input_name)) {
+        if (!bind_tensor_or_fail(engine.module, engine.token_input_name,
                                  resources.d_token_id.data(), "bind token_id failed", fail)) {
             return false;
         }
     }
 
     if (engine.requires_position_input) {
-        if (!bind_tensor_or_fail(*engine.context, engine.position_input_name,
+        if (!bind_tensor_or_fail(engine.module, engine.position_input_name,
                                  resources.d_position_id.data(), "bind position_id failed", fail)) {
             return false;
         }
     }
 
-    if (!bind_tensor_or_fail(*engine.context, engine.mask_input_name, resources.d_mask.data(),
+    if (!bind_tensor_or_fail(engine.module, engine.mask_input_name, resources.d_mask.data(),
                              "bind attention_mask failed", fail)) {
         return false;
     }
 
-    return bind_tensor_or_fail(*engine.context, engine.logits_output_name,
+    return bind_tensor_or_fail(engine.module, engine.logits_output_name,
                                resources.d_logits.data(), "bind logits failed", fail);
 }
 
 template <typename FailFn>
 bool bind_input_embed_tensors(const DecoderStepEngine& engine, DeviceResources& resources,
                               const FailFn& fail) {
-    if (!has_io_tensor(*engine.engine, "input_embed")) {
+    if (engine.module == nullptr || !has_io_tensor(*engine.module, "input_embed")) {
         return true;
     }
 
-    if (!bind_tensor_or_fail(*engine.context, "input_embed", resources.d_input_embed.data(),
+    if (!bind_tensor_or_fail(engine.module, "input_embed", resources.d_input_embed.data(),
                              "bind input_embed failed", fail)) {
         return false;
     }
 
-    if (!has_io_tensor(*engine.engine, "use_input_embed")) {
+    if (!has_io_tensor(*engine.module, "use_input_embed")) {
         return true;
     }
 
-    return bind_tensor_or_fail(*engine.context, "use_input_embed",
+    return bind_tensor_or_fail(engine.module, "use_input_embed",
                                resources.d_use_input_embed.data(), "bind use_input_embed failed",
                                fail);
 }
@@ -243,10 +240,10 @@ bool bind_deepstack_tensors(const DecoderStepEngine& engine, DeviceResources& re
                             const FailFn& fail) {
     for (std::size_t di = 0; di < resources.d_deepstack_embeds.size(); ++di) {
         std::string ds_name = "deepstack_embed_" + std::to_string(di);
-        if (!has_io_tensor(*engine.engine, ds_name)) {
+        if (engine.module == nullptr || !has_io_tensor(*engine.module, ds_name)) {
             continue;
         }
-        if (!bind_tensor_or_fail(*engine.context, ds_name, resources.d_deepstack_embeds[di].data(),
+        if (!bind_tensor_or_fail(engine.module, ds_name, resources.d_deepstack_embeds[di].data(),
                                  "bind deepstack_embed failed", fail)) {
             return false;
         }
@@ -255,10 +252,10 @@ bool bind_deepstack_tensors(const DecoderStepEngine& engine, DeviceResources& re
     if (resources.d_deepstack_active.size() == 0) {
         return true;
     }
-    if (!has_io_tensor(*engine.engine, "deepstack_active")) {
+    if (engine.module == nullptr || !has_io_tensor(*engine.module, "deepstack_active")) {
         return true;
     }
-    return bind_tensor_or_fail(*engine.context, "deepstack_active",
+    return bind_tensor_or_fail(engine.module, "deepstack_active",
                                resources.d_deepstack_active.data(), "bind deepstack_active failed",
                                fail);
 }
@@ -268,20 +265,20 @@ bool bind_cache_tensors(const DecoderStepEngine& engine, DeviceKvCache& cache,
                         DeviceResources& resources, const FailFn& fail) {
     for (int32_t layer = 0; layer < engine.num_layers; ++layer) {
         const auto idx = static_cast<std::size_t>(layer);
-        if (!bind_tensor_or_fail(*engine.context, engine.cache_k_input_names[idx],
+        if (!bind_tensor_or_fail(engine.module, engine.cache_k_input_names[idx],
                                  cache.cache_k_device_ptr(layer), "bind cache_k failed", fail)) {
             return false;
         }
-        if (!bind_tensor_or_fail(*engine.context, engine.cache_v_input_names[idx],
+        if (!bind_tensor_or_fail(engine.module, engine.cache_v_input_names[idx],
                                  cache.cache_v_device_ptr(layer), "bind cache_v failed", fail)) {
             return false;
         }
-        if (!bind_tensor_or_fail(*engine.context, engine.present_k_output_names[idx],
+        if (!bind_tensor_or_fail(engine.module, engine.present_k_output_names[idx],
                                  resources.d_present_k[idx].data(), "bind present_k failed",
                                  fail)) {
             return false;
         }
-        if (!bind_tensor_or_fail(*engine.context, engine.present_v_output_names[idx],
+        if (!bind_tensor_or_fail(engine.module, engine.present_v_output_names[idx],
                                  resources.d_present_v[idx].data(), "bind present_v failed",
                                  fail)) {
             return false;
@@ -310,9 +307,10 @@ bool execute_and_collect_logits(const DecoderStepEngine& engine, DeviceKvCache& 
                                 DeviceResources& resources, std::vector<float>& logits,
                                 cudaStream_t stream, bool skip_logits_d2h, bool skip_sync,
                                 const FailFn& fail) {
-    if (!engine.context->enqueueV3(stream)) {
+    if (engine.module == nullptr) {
         return fail("enqueueV3 failed");
     }
+    engine.module->forward_async({});
 
     cache.update_after_step(resources.d_present_k, resources.d_present_v, stream);
 
@@ -347,14 +345,13 @@ DeviceKvCache::DeviceKvCache(const DecoderStepEngine& engine)
       mPositionLimit(mIncludeCurrentSlot ? mMaxCacheLength : std::max(mMaxCacheLength - 1, 0)) {
     // Detect cache element size from the engine's cache_k_0 tensor dtype.
     // FP16 engines will have kHALF cache tensors; FP32 engines will have kFLOAT.
-    if (!engine.cache_k_input_names.empty() &&
-        has_io_tensor(*engine.engine, engine.cache_k_input_names[0])) {
-        auto trt_dtype = engine.engine->getTensorDataType(engine.cache_k_input_names[0].c_str());
-        switch (trt_dtype) {
-        case nvinfer1::DataType::kHALF:
+    if (engine.module != nullptr && !engine.cache_k_input_names.empty() &&
+        has_io_tensor(*engine.module, engine.cache_k_input_names[0])) {
+        switch (engine.module->tensor_dtype(engine.cache_k_input_names[0])) {
+        case DType::kFloat16:
             mCacheElementSize = 2;
             break;
-        case nvinfer1::DataType::kBF16:
+        case DType::kBFloat16:
             mCacheElementSize = 2;
             break;
         default:
@@ -460,19 +457,22 @@ DeviceResources::DeviceResources(const DecoderStepEngine& engine)
     : d_token_id(sizeof(int32_t)), d_position_id(sizeof(int32_t)),
       d_mask(static_cast<std::size_t>(engine.attention_mask_size) * sizeof(float)),
       d_logits(static_cast<std::size_t>(engine.vocab_size) * sizeof(float)),
-      d_input_embed(has_io_tensor(*engine.engine, "input_embed")
+      d_input_embed(engine.module != nullptr && has_io_tensor(*engine.module, "input_embed")
                         ? static_cast<std::size_t>(std::max(engine.hidden_size, 1)) * sizeof(float)
                         : 0),
-      d_use_input_embed(has_io_tensor(*engine.engine, "input_embed") ? sizeof(float) : 0),
-      d_deepstack_active(has_io_tensor(*engine.engine, "deepstack_active") ? sizeof(float) : 0) {
+      d_use_input_embed(engine.module != nullptr && has_io_tensor(*engine.module, "input_embed")
+                            ? sizeof(float)
+                            : 0),
+      d_deepstack_active(engine.module != nullptr && has_io_tensor(*engine.module, "deepstack_active")
+                             ? sizeof(float)
+                             : 0) {
     // Detect cache element size from the engine's present_k_0 tensor dtype.
     std::size_t cache_elem_size = sizeof(float);
-    if (!engine.present_k_output_names.empty() &&
-        has_io_tensor(*engine.engine, engine.present_k_output_names[0])) {
-        auto trt_dtype = engine.engine->getTensorDataType(engine.present_k_output_names[0].c_str());
-        switch (trt_dtype) {
-        case nvinfer1::DataType::kHALF:
-        case nvinfer1::DataType::kBF16:
+    if (engine.module != nullptr && !engine.present_k_output_names.empty() &&
+        has_io_tensor(*engine.module, engine.present_k_output_names[0])) {
+        switch (engine.module->tensor_dtype(engine.present_k_output_names[0])) {
+        case DType::kFloat16:
+        case DType::kBFloat16:
             cache_elem_size = 2;
             break;
         default:
@@ -495,7 +495,7 @@ DeviceResources::DeviceResources(const DecoderStepEngine& engine)
         static_cast<std::size_t>(std::max(engine.hidden_size, 1)) * sizeof(float);
     for (int32_t i = 0;; ++i) {
         std::string name = "deepstack_embed_" + std::to_string(i);
-        if (!has_io_tensor(*engine.engine, name))
+        if (engine.module == nullptr || !has_io_tensor(*engine.module, name))
             break;
         d_deepstack_embeds.emplace_back(embed_bytes);
     }
@@ -543,7 +543,7 @@ bool run_decoder_step_device(const DecoderStepEngine& engine, DeviceKvCache& cac
         return false;
     };
 
-    cudaStream_t stream = resources.stream.get();
+    cudaStream_t stream = engine.module != nullptr ? engine.module->stream() : resources.stream.get();
 
     // 1. Prepare step: compute position_id and mask on CPU
     StepInputs step_inputs;

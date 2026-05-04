@@ -49,10 +49,10 @@ std::unique_ptr<ITrtModule> extract_optional_module(IBackend* backend,
                                                     const char* label,
                                                     const ModuleCreateOptions& options = {});
 
-// Dual-profile TRT module group: one engine, two IExecutionContexts (one
-// per optimization profile). Both modules share the same engine (weights
-// live once in GPU memory) and CUDA stream. Use `decode->stream()` to
-// obtain the shared stream.
+// Dual-profile TRT module group: one shared backend engine, two module
+// contexts (one per optimization profile). Weights live once in GPU memory
+// and both modules share the CUDA stream. Use `decode->stream()` to obtain
+// the shared stream.
 struct DualProfileModules {
     std::unique_ptr<ITrtModule> prefill; // profile 0 — batched Sq (null if single-profile)
     std::unique_ptr<ITrtModule> decode;  // profile 1, or the only profile if single-profile

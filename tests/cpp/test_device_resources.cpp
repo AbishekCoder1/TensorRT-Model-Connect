@@ -35,6 +35,9 @@
 //   TRT + CUDA required.
 
 #include "runtime/core/device_kv_cache.h"
+#include "runtime/backend/trt_logger.h"
+#include "runtime/backend/trt_module_impl.h"
+#include "runtime/core/cuda_common.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/core/trt_engine_lifecycle.h"
 
@@ -42,6 +45,7 @@
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -106,11 +110,41 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_engine_for_resources() {
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
+struct StepFixture {
+    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> engine;
+    trtf::CudaStream stream;
+    std::unique_ptr<trtf::TrtModuleImpl> module;
+    trtf::DecoderStepEngine step;
+};
+
 // Build a populated DecoderStepEngine (no cache layers) from the mock engine.
-static trtf::DecoderStepEngine make_step_engine(nvinfer1::ICudaEngine* raw_engine) {
-    trtf::DecoderStepEngine eng;
-    eng.engine.reset(raw_engine);
-    eng.context.reset(raw_engine->createExecutionContext());
+static std::unique_ptr<StepFixture> make_step_fixture() {
+    auto engine = build_engine_for_resources();
+    if (!engine) {
+        std::cerr << "WARNING: Could not build mock engine, skipping\n";
+        return nullptr;
+    }
+
+    auto fixture = std::make_unique<StepFixture>();
+    fixture->engine = std::move(engine);
+    if (!fixture->stream.ok()) {
+        std::cerr << "WARNING: CUDA stream creation failed, skipping\n";
+        return nullptr;
+    }
+    auto* context = fixture->engine->createExecutionContext();
+    if (!context) {
+        std::cerr << "WARNING: createExecutionContext failed, skipping\n";
+        return nullptr;
+    }
+    fixture->module = std::make_unique<trtf::TrtModuleImpl>(
+        fixture->engine.get(), context, fixture->stream.get(), /*profile_idx=*/0);
+    if (!fixture->module->ok()) {
+        std::cerr << "WARNING: TrtModuleImpl creation failed, skipping\n";
+        return nullptr;
+    }
+
+    auto& eng = fixture->step;
+    eng.module = fixture->module.get();
     eng.num_layers = 0; // No KV-cache tensors required
     eng.vocab_size = 4;
     eng.hidden_size = 0;
@@ -119,7 +153,7 @@ static trtf::DecoderStepEngine make_step_engine(nvinfer1::ICudaEngine* raw_engin
     eng.max_cache_length = 4;
     eng.requires_position_input = false;
     // token_input_name / mask_input_name / logits_output_name use defaults
-    return eng;
+    return fixture;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,19 +162,11 @@ static trtf::DecoderStepEngine make_step_engine(nvinfer1::ICudaEngine* raw_engin
 // Postconditions: ok()==true; mandatory device buffers are allocated
 // ---------------------------------------------------------------------------
 static bool test_device_resources_construction() {
-    auto raw = build_engine_for_resources();
-    if (!raw) {
-        std::cerr << "WARNING: Could not build mock engine, skipping\n";
+    auto fixture = make_step_fixture();
+    if (!fixture)
         return true; // not a test failure — just unavailable TRT
-    }
 
-    auto eng = make_step_engine(raw.release());
-    if (!eng.context) {
-        std::cerr << "WARNING: createExecutionContext failed, skipping\n";
-        return true;
-    }
-
-    trtf::DeviceResources res(eng);
+    trtf::DeviceResources res(fixture->step);
     if (!res.ok()) {
         std::cerr << "device_resources_construction: ok() returned false\n";
         return false;
@@ -155,17 +181,10 @@ static bool test_device_resources_construction() {
 //                 error string is empty on success
 // ---------------------------------------------------------------------------
 static bool test_run_decoder_step_device_basic() {
-    auto raw = build_engine_for_resources();
-    if (!raw) {
-        std::cerr << "WARNING: Could not build mock engine, skipping\n";
+    auto fixture = make_step_fixture();
+    if (!fixture)
         return true;
-    }
-
-    auto eng = make_step_engine(raw.release());
-    if (!eng.context) {
-        std::cerr << "WARNING: createExecutionContext failed, skipping\n";
-        return true;
-    }
+    auto& eng = fixture->step;
 
     trtf::DeviceKvCache cache(eng);
     if (!cache.ok()) {
@@ -227,15 +246,10 @@ static bool test_run_decoder_step_device_basic() {
 // Postconditions: second step also returns valid logits
 // ---------------------------------------------------------------------------
 static bool test_run_decoder_step_device_skip_bind() {
-    auto raw = build_engine_for_resources();
-    if (!raw) {
-        std::cerr << "WARNING: Could not build mock engine, skipping\n";
+    auto fixture = make_step_fixture();
+    if (!fixture)
         return true;
-    }
-
-    auto eng = make_step_engine(raw.release());
-    if (!eng.context)
-        return true;
+    auto& eng = fixture->step;
 
     trtf::DeviceKvCache cache(eng);
     trtf::DeviceResources res(eng);
@@ -269,13 +283,10 @@ static bool test_run_decoder_step_device_skip_bind() {
 // Postconditions: logits vector is empty (no D2H copy); step returns true
 // ---------------------------------------------------------------------------
 static bool test_run_decoder_step_device_skip_d2h() {
-    auto raw = build_engine_for_resources();
-    if (!raw)
+    auto fixture = make_step_fixture();
+    if (!fixture)
         return true;
-
-    auto eng = make_step_engine(raw.release());
-    if (!eng.context)
-        return true;
+    auto& eng = fixture->step;
 
     trtf::DeviceKvCache cache(eng);
     trtf::DeviceResources res(eng);

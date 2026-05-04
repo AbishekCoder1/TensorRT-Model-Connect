@@ -27,6 +27,7 @@
 // =============================================================================
 
 #include "runtime/core/trt_common.h"
+#include "runtime/backend/trt_logger.h"
 
 #include <iostream>
 #include <string>
@@ -41,27 +42,27 @@ static void check(bool condition, const char* test_name) {
 }
 
 static void test_severity_name_error() {
-    const char* name = trtf::trt_severity_name(nvinfer1::ILogger::Severity::kERROR);
+    const char* name = trtf::trt_severity_name(trtf::TrtLogSeverity::kError);
     check(std::string(name) == "ERROR", "severity_name ERROR");
 }
 
 static void test_severity_name_warning() {
-    const char* name = trtf::trt_severity_name(nvinfer1::ILogger::Severity::kWARNING);
+    const char* name = trtf::trt_severity_name(trtf::TrtLogSeverity::kWarning);
     check(std::string(name) == "WARNING", "severity_name WARNING");
 }
 
 static void test_severity_name_info() {
-    const char* name = trtf::trt_severity_name(nvinfer1::ILogger::Severity::kINFO);
+    const char* name = trtf::trt_severity_name(trtf::TrtLogSeverity::kInfo);
     check(std::string(name) == "INFO", "severity_name INFO");
 }
 
 static void test_severity_name_verbose() {
-    const char* name = trtf::trt_severity_name(nvinfer1::ILogger::Severity::kVERBOSE);
+    const char* name = trtf::trt_severity_name(trtf::TrtLogSeverity::kVerbose);
     check(std::string(name) == "VERBOSE", "severity_name VERBOSE");
 }
 
 static void test_severity_name_internal_error() {
-    const char* name = trtf::trt_severity_name(nvinfer1::ILogger::Severity::kINTERNAL_ERROR);
+    const char* name = trtf::trt_severity_name(trtf::TrtLogSeverity::kInternalError);
     check(std::string(name) == "INTERNAL_ERROR", "severity_name INTERNAL_ERROR");
 }
 
@@ -100,16 +101,16 @@ static void test_logger_null_msg() {
 static void test_log_config_defaults_and_updates() {
     trtf::configure_trt_logger(false, "INFO");
     check(!trtf::trt_log_to_stderr_enabled(), "log_to_stderr default false");
-    check(trtf::trt_log_stderr_min_severity() == nvinfer1::ILogger::Severity::kINFO,
+    check(trtf::trt_log_stderr_min_severity() == trtf::TrtLogSeverity::kInfo,
           "min_severity default INFO");
 
     trtf::configure_trt_logger(true, "warning");
     check(trtf::trt_log_to_stderr_enabled(), "log_to_stderr configured true");
-    check(trtf::trt_log_stderr_min_severity() == nvinfer1::ILogger::Severity::kWARNING,
+    check(trtf::trt_log_stderr_min_severity() == trtf::TrtLogSeverity::kWarning,
           "min_severity configured case-insensitive WARNING");
 
     trtf::configure_trt_logger(true, "not-a-severity");
-    check(trtf::trt_log_stderr_min_severity() == nvinfer1::ILogger::Severity::kINFO,
+    check(trtf::trt_log_stderr_min_severity() == trtf::TrtLogSeverity::kInfo,
           "unknown min_severity falls back to INFO");
 }
 
@@ -117,10 +118,9 @@ static void test_min_severity_returns_valid() {
     const auto sev = trtf::trt_log_stderr_min_severity();
     // Verify the returned severity is one of the valid enum values.
     const bool valid =
-        (sev == nvinfer1::ILogger::Severity::kINTERNAL_ERROR ||
-         sev == nvinfer1::ILogger::Severity::kERROR ||
-         sev == nvinfer1::ILogger::Severity::kWARNING ||
-         sev == nvinfer1::ILogger::Severity::kINFO || sev == nvinfer1::ILogger::Severity::kVERBOSE);
+        (sev == trtf::TrtLogSeverity::kInternalError || sev == trtf::TrtLogSeverity::kError ||
+         sev == trtf::TrtLogSeverity::kWarning || sev == trtf::TrtLogSeverity::kInfo ||
+         sev == trtf::TrtLogSeverity::kVerbose);
     check(valid, "min_severity valid enum");
 }
 

@@ -1,11 +1,8 @@
 #pragma once
 
-#include "runtime/core/trt_common.h"
+#include "trtf/runtime/trt_module.h"
 
-#include <NvInfer.h>
-#include <NvInferRuntime.h>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,8 +16,7 @@ constexpr int32_t kDefaultMaxCacheLength = 32;
 constexpr float kMaskedScore = -1.0e4F;
 
 struct DecoderStepEngine {
-    TrtUniquePtr<nvinfer1::ICudaEngine> engine;
-    TrtUniquePtr<nvinfer1::IExecutionContext> context;
+    TrtModule* module{nullptr};
 
     std::string token_input_name{"token_id"};
     std::string position_input_name{"position_id"};
@@ -42,7 +38,7 @@ struct DecoderStepEngine {
     int32_t id_eos{0};
 };
 
-bool has_io_tensor(const nvinfer1::ICudaEngine& engine, const std::string& tensor_name);
+bool has_io_tensor(const TrtModule& module, const std::string& tensor_name);
 bool has_all_required_tensors(const DecoderStepEngine& engine);
 
 std::string layer_tensor_name(const char* stem, int32_t layer);

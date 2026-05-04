@@ -5,7 +5,7 @@
 // CudaGraphStrategy, and DynamicShapesKernelSpecializationStrategy.
 
 #include "runtime/core/cuda_common.h"
-#include "runtime/core/trt_common.h"
+#include "runtime/backend/trt_logger.h"
 #include "trt_module_impl.h"
 #include "trtf/runtime/trt_backend.h"
 
@@ -147,6 +147,46 @@ class RtxBackend final : public IBackend {
         }
         out.prefill = make_ctx_module(0);
         out.decode = make_ctx_module(1);
+        return out;
+    }
+
+    BackendProfileModules
+    create_profile_modules(const void* plan_data, size_t plan_size,
+                           const ModuleCreateOptions& options,
+                           const std::vector<int32_t>& profile_indices) override {
+        auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
+        if (!engine_raw)
+            throw std::runtime_error("[trtf] Failed to deserialize engine (RTX)");
+        std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
+                                                      [](nvinfer1::ICudaEngine* p) { delete p; });
+
+        StreamSetup stream_setup = resolve_stream(options.stream);
+        const int32_t nprofiles = engine->getNbOptimizationProfiles();
+        BackendProfileModules out;
+        out.modules.reserve(profile_indices.size());
+        for (int32_t profile_idx : profile_indices) {
+            if (profile_idx < 0 || profile_idx >= nprofiles)
+                continue;
+            auto* rt_config = engine->createRuntimeConfig();
+            if (!rt_config)
+                throw std::runtime_error("[trtf] Failed to create RTX runtime config");
+            if (options.runtime_cache_path && options.runtime_cache_path[0] != '\0')
+                ensure_runtime_cache(rt_config, options.runtime_cache_path);
+            if (options.cuda_graphs)
+                rt_config->setCudaGraphStrategy(nvinfer1::CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE);
+            auto* ctx = engine->createExecutionContext(rt_config);
+            delete rt_config;
+            if (!ctx)
+                throw std::runtime_error("[trtf] Failed to create RTX execution context");
+            auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream_setup.stream,
+                                                       profile_idx);
+            if (!mod->ok())
+                throw std::runtime_error("[trtf] TrtModuleImpl creation failed (RTX)");
+            mod->keep_alive(engine);
+            if (stream_setup.owner)
+                mod->keep_alive(stream_setup.owner);
+            out.modules.push_back(BackendProfileModule{profile_idx, std::move(mod)});
+        }
         return out;
     }
 

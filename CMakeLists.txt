@@ -16,9 +16,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(GNUInstallDirs)
 
-option(TRTF_ENABLE_TRT "Enable TensorRT backend integration" ON)
+option(TRTF_ENABLE_TRT "Enable TensorRT backend DSO integration" ON)
+option(TRTF_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
 
-# TensorRT is mandatory — the container image must provide TRT and CUDA.
+# CUDA is required by the core runtime. TensorRT is optional at core build time:
+# concrete TRT runtimes live in backend DSOs.
 set(_trtf_default_search_paths
   /usr/include/x86_64-linux-gnu
   /usr/include/aarch64-linux-gnu
@@ -66,19 +68,16 @@ find_library(TRTF_CUDART_LIBRARY
   PATH_SUFFIXES "" lib lib64
 )
 
-if(NOT TRTF_TRT_INCLUDE_DIR OR NOT TRTF_TRT_LIBRARY)
-  message(FATAL_ERROR
-    "TensorRT is required but not found.\n"
-    "  TRTF_TRT_INCLUDE_DIR=${TRTF_TRT_INCLUDE_DIR}\n"
-    "  TRTF_TRT_LIBRARY=${TRTF_TRT_LIBRARY}\n"
-    "Ensure the container image has libnvinfer-headers-dev and tensorrt_libs installed.")
-endif()
-
 if(NOT TRTF_CUDA_INCLUDE_DIR OR NOT TRTF_CUDART_LIBRARY)
   message(FATAL_ERROR
     "CUDA dev dependencies are required but not found.\n"
     "  TRTF_CUDA_INCLUDE_DIR=${TRTF_CUDA_INCLUDE_DIR}\n"
     "  TRTF_CUDART_LIBRARY=${TRTF_CUDART_LIBRARY}")
+endif()
+
+set(_trtf_can_build_trt_backend FALSE)
+if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY)
+  set(_trtf_can_build_trt_backend TRUE)
 endif()
 
 # --- nlohmann/json for BPE tokenizer JSON parsing ---
@@ -106,10 +105,6 @@ add_library(trtf_core
   src/runtime/core/gpu_matmul.cpp
   src/runtime/core/cuda_common.cpp
   src/runtime/backend/backend_loader.cpp
-  # TriAttention's decoder plugin instantiates TrtModuleImpl directly to keep
-  # ICudaEngine* access for multi-profile row-dim introspection; we therefore
-  # compile the concrete backend impl into the main binary as well as the DSO.
-  src/runtime/backend/trt_module_impl.cpp
   src/runtime/core/trt_engine_lifecycle.cpp
   src/runtime/core/trt_decode_runtime.cpp
   src/runtime/core/sampler.cpp
@@ -228,23 +223,19 @@ target_include_directories(trtf_core SYSTEM PRIVATE
 
 target_link_libraries(trtf_core PRIVATE ${CMAKE_DL_LIBS})
 
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
-  target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=1)
-  target_include_directories(trtf_core SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  # TRT symbols come from the backend DSOs. trtf_core only needs CUDA runtime,
-  # cuBLAS for gpu_matmul, and dlopen support.
-  find_library(TRTF_CUBLAS_LIBRARY NAMES cublas libcublas.so
-    PATHS ${_trtf_default_search_paths} PATH_SUFFIXES "" lib lib64)
-  target_link_libraries(trtf_core PRIVATE ${TRTF_CUDART_LIBRARY}
-    $<$<BOOL:${TRTF_CUBLAS_LIBRARY}>:${TRTF_CUBLAS_LIBRARY}>)
-  message(STATUS "TensorRT backend enabled")
-  message(STATUS "  TRT include: ${TRTF_TRT_INCLUDE_DIR}")
-  message(STATUS "  TRT library: ${TRTF_TRT_LIBRARY}")
-  message(STATUS "  CUDA include: ${TRTF_CUDA_INCLUDE_DIR}")
-  message(STATUS "  CUDART lib : ${TRTF_CUDART_LIBRARY}")
+target_compile_definitions(trtf_core PRIVATE TRTF_HAS_TRT=0)
+target_include_directories(trtf_core SYSTEM PRIVATE ${TRTF_CUDA_INCLUDE_DIR})
+find_library(TRTF_CUBLAS_LIBRARY NAMES cublas libcublas.so
+  PATHS ${_trtf_default_search_paths} PATH_SUFFIXES "" lib lib64)
+target_link_libraries(trtf_core PRIVATE ${TRTF_CUDART_LIBRARY}
+  $<$<BOOL:${TRTF_CUBLAS_LIBRARY}>:${TRTF_CUBLAS_LIBRARY}>)
+message(STATUS "Core runtime: TensorRT-free (backend DSOs are dlopen-loaded)")
+message(STATUS "  CUDA include: ${TRTF_CUDA_INCLUDE_DIR}")
+message(STATUS "  CUDART lib : ${TRTF_CUDART_LIBRARY}")
+if(_trtf_can_build_trt_backend)
+  message(STATUS "  Standard TRT backend SDK detected: ${TRTF_TRT_LIBRARY}")
 else()
-  target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TRT=0)
-  message(STATUS "TensorRT backend disabled (missing TensorRT or CUDA dev dependencies)")
+  message(STATUS "  Standard TRT backend SDK not detected; libtrtf_backend_trt.so will be skipped")
 endif()
 
 # --- libtorch multinomial bridge (optional) ---
@@ -321,7 +312,7 @@ option(TRTF_ENABLE_TVM_FFI "Enable TVM-FFI kernel bridge plugin" ON)
 
 set(_trtf_has_tvm_ffi FALSE)
 
-if(TRTF_ENABLE_TVM_FFI AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY)
+if(TRTF_ENABLE_TVM_FFI)
   find_path(TRTF_TVM_FFI_INCLUDE_DIR tvm/ffi/c_api.h
     PATHS ${_trtf_default_search_paths}
     PATH_SUFFIXES "" include
@@ -335,14 +326,12 @@ if(TRTF_ENABLE_TVM_FFI AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY)
   if(TRTF_TVM_FFI_INCLUDE_DIR AND TRTF_TVM_FFI_LIBRARY)
     set(_trtf_has_tvm_ffi TRUE)
     target_sources(trtf_core PRIVATE
-      src/plugins/tvm_ffi_kernel_plugin.cpp
-      src/plugins/tvm_ffi_kernel_creator.cpp
       src/plugins/tvm_ffi_module_loader.cpp
     )
     target_compile_definitions(trtf_core PUBLIC TRTF_HAS_TVM_FFI=1)
     target_include_directories(trtf_core SYSTEM PRIVATE ${TRTF_TVM_FFI_INCLUDE_DIR})
     target_link_libraries(trtf_core PRIVATE ${TRTF_TVM_FFI_LIBRARY})
-    message(STATUS "TVM-FFI kernel bridge enabled")
+    message(STATUS "TVM-FFI module loader enabled")
     message(STATUS "  TVM-FFI include: ${TRTF_TVM_FFI_INCLUDE_DIR}")
     message(STATUS "  TVM-FFI library: ${TRTF_TVM_FFI_LIBRARY}")
   endif()
@@ -353,9 +342,8 @@ if(NOT _trtf_has_tvm_ffi)
   message(STATUS "TVM-FFI kernel bridge disabled")
 endif()
 
-# Build the TVM-FFI plugin as a standalone shared library for dynamic loading
-# via IPluginRegistry::loadLibrary(). This avoids static-lib registry issues.
-if(_trtf_has_tvm_ffi)
+# Build the TVM-FFI TensorRT plugin as a standalone shared library.
+if(_trtf_has_tvm_ffi AND _trtf_can_build_trt_backend)
   add_library(trtf_tvm_ffi_plugin SHARED
     src/plugins/tvm_ffi_kernel_plugin.cpp
     src/plugins/tvm_ffi_kernel_creator.cpp
@@ -373,8 +361,9 @@ if(_trtf_has_tvm_ffi)
 endif()
 
 # --- Backend DSO: standard TRT ---
-if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_INCLUDE_DIR AND TRTF_CUDART_LIBRARY)
+if(TRTF_BUILD_BACKEND_TRT AND _trtf_can_build_trt_backend)
   add_library(trtf_backend_trt SHARED
+    src/runtime/backend/trt_logger.cpp
     src/runtime/backend/trt_module_impl.cpp
     src/runtime/backend/trt_backend.cpp
   )
@@ -390,8 +379,19 @@ if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_I
   target_link_libraries(trtf_backend_trt PRIVATE
     trtf_core ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY}
   )
+  if(_trtf_has_tvm_ffi)
+    target_sources(trtf_backend_trt PRIVATE
+      src/plugins/tvm_ffi_kernel_plugin.cpp
+      src/plugins/tvm_ffi_kernel_creator.cpp
+    )
+    target_include_directories(trtf_backend_trt SYSTEM PRIVATE ${TRTF_TVM_FFI_INCLUDE_DIR})
+    target_link_libraries(trtf_backend_trt PRIVATE ${TRTF_TVM_FFI_LIBRARY})
+  endif()
   target_compile_options(trtf_backend_trt PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_definitions(trtf_backend_trt PRIVATE TRTF_HAS_TRT=1)
+  target_compile_definitions(trtf_backend_trt PRIVATE
+    TRTF_HAS_TRT=1
+    TRTF_HAS_TVM_FFI=$<BOOL:${_trtf_has_tvm_ffi}>
+  )
   set_target_properties(trtf_backend_trt PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
   )
@@ -400,6 +400,8 @@ if(TRTF_ENABLE_TRT AND TRTF_TRT_INCLUDE_DIR AND TRTF_TRT_LIBRARY AND TRTF_CUDA_I
     ${nlohmann_json_SOURCE_DIR}/include
   )
   message(STATUS "TRT backend DSO: enabled (libtrtf_backend_trt.so)")
+elseif(TRTF_BUILD_BACKEND_TRT)
+  message(STATUS "TRT backend DSO: disabled (missing libnvinfer or headers)")
 endif()
 
 # --- Backend DSO: TRT-RTX (optional) ---
@@ -410,6 +412,7 @@ if(TRTF_BUILD_BACKEND_RTX)
   set(TRT_RTX_INCLUDE_DIR "${TRTF_RTX_INCLUDE_DIR}")
   if(TENSORRT_RTX_LIB AND TRT_RTX_INCLUDE_DIR)
     add_library(trtf_backend_rtx SHARED
+      src/runtime/backend/trt_logger.cpp
       src/runtime/backend/trt_module_impl.cpp
       src/runtime/backend/rtx_backend.cpp
     )
@@ -425,8 +428,19 @@ if(TRTF_BUILD_BACKEND_RTX)
     target_link_libraries(trtf_backend_rtx PRIVATE
       trtf_core ${TENSORRT_RTX_LIB} ${TRTF_CUDART_LIBRARY}
     )
+    if(_trtf_has_tvm_ffi)
+      target_sources(trtf_backend_rtx PRIVATE
+        src/plugins/tvm_ffi_kernel_plugin.cpp
+        src/plugins/tvm_ffi_kernel_creator.cpp
+      )
+      target_include_directories(trtf_backend_rtx SYSTEM PRIVATE ${TRTF_TVM_FFI_INCLUDE_DIR})
+      target_link_libraries(trtf_backend_rtx PRIVATE ${TRTF_TVM_FFI_LIBRARY})
+    endif()
     target_compile_options(trtf_backend_rtx PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_definitions(trtf_backend_rtx PRIVATE TRTF_HAS_TRT=1)
+    target_compile_definitions(trtf_backend_rtx PRIVATE
+      TRTF_HAS_TRT=1
+      TRTF_HAS_TVM_FFI=$<BOOL:${_trtf_has_tvm_ffi}>
+    )
     set_target_properties(trtf_backend_rtx PROPERTIES
       OUTPUT_NAME trtf_backend_trt_rtx
       LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -443,27 +457,25 @@ endif()
 add_executable(trtf examples/trtf_cli.cpp)
 target_link_libraries(trtf PRIVATE trtf_core)
 target_include_directories(trtf PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb ${PROJECT_SOURCE_DIR}/src)
-if(TRTF_ENABLE_TRT AND TRTF_TRT_LIBRARY)
-  target_link_libraries(trtf PRIVATE ${TRTF_TRT_LIBRARY})
-endif()
 
 add_executable(trtf_dataset_benchmark examples/trtf_dataset_benchmark.cpp)
 target_link_libraries(trtf_dataset_benchmark PRIVATE trtf_core)
 target_include_directories(trtf_dataset_benchmark PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/stb
 )
-if(TRTF_ENABLE_TRT AND TRTF_TRT_LIBRARY)
-  target_link_libraries(trtf_dataset_benchmark PRIVATE ${TRTF_TRT_LIBRARY})
-endif()
 
 enable_testing()
 
 # --- Test helper function ---
 # Usage:
-#   trtf_add_test(test_name)               -- links trtf_core, adds src/ include, adds TRT if available
-#   trtf_add_test(test_name NO_SRC_INCLUDE) -- links trtf_core, no src/ include, adds TRT if available
+#   trtf_add_test(test_name)               -- links trtf_core, adds src/ include
+#   trtf_add_test(test_name REQUIRES_TRT)  -- also links TensorRT test deps
 function(trtf_add_test TEST_NAME)
-  cmake_parse_arguments(ARG "NO_SRC_INCLUDE" "" "EXTRA_INCLUDES" ${ARGN})
+  cmake_parse_arguments(ARG "NO_SRC_INCLUDE;REQUIRES_TRT" "" "EXTRA_INCLUDES" ${ARGN})
+  if(ARG_REQUIRES_TRT AND NOT _trtf_can_build_trt_backend)
+    message(STATUS "Skipping ${TEST_NAME}: TensorRT SDK not available")
+    return()
+  endif()
   add_executable(${TEST_NAME} tests/cpp/${TEST_NAME}.cpp)
   target_link_libraries(${TEST_NAME} PRIVATE trtf_core)
   if(NOT ARG_NO_SRC_INCLUDE)
@@ -472,10 +484,15 @@ function(trtf_add_test TEST_NAME)
   if(ARG_EXTRA_INCLUDES)
     target_include_directories(${TEST_NAME} PRIVATE ${ARG_EXTRA_INCLUDES})
   endif()
-  target_include_directories(${TEST_NAME} SYSTEM PRIVATE
-    ${TRTF_TRT_INCLUDE_DIR} ${TRTF_CUDA_INCLUDE_DIR})
-  target_link_libraries(${TEST_NAME} PRIVATE
-    ${TRTF_TRT_LIBRARY} ${TRTF_CUDART_LIBRARY})
+  target_include_directories(${TEST_NAME} SYSTEM PRIVATE ${TRTF_CUDA_INCLUDE_DIR})
+  target_link_libraries(${TEST_NAME} PRIVATE ${TRTF_CUDART_LIBRARY})
+  if(ARG_REQUIRES_TRT)
+    target_compile_definitions(${TEST_NAME} PRIVATE TRTF_HAS_TRT=1)
+    target_include_directories(${TEST_NAME} SYSTEM PRIVATE ${TRTF_TRT_INCLUDE_DIR})
+    target_link_libraries(${TEST_NAME} PRIVATE ${TRTF_TRT_LIBRARY})
+  else()
+    target_compile_definitions(${TEST_NAME} PRIVATE TRTF_HAS_TRT=0)
+  endif()
   add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
 endfunction()
 
@@ -503,33 +520,33 @@ trtf_add_test(test_config_cli_support)
 trtf_add_test(test_config_schemas_triattention)
 
 # TRT runtime core
-trtf_add_test(test_decode_runtime)
+trtf_add_test(test_decode_runtime REQUIRES_TRT)
 trtf_add_test(test_sampler)
 trtf_add_test(test_plugin_helpers)
-trtf_add_test(test_trt_logger)
+trtf_add_test(test_trt_logger REQUIRES_TRT)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_trt_logger PRIVATE trtf_backend_trt)
 endif()
-trtf_add_test(test_trt_runtime_lifetime)
+trtf_add_test(test_trt_runtime_lifetime REQUIRES_TRT)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_trt_runtime_lifetime PRIVATE trtf_backend_trt)
 endif()
 trtf_add_test(test_trt_engine_lifecycle)
 trtf_add_test(test_trt_engine_lifecycle_fake_engine)
-trtf_add_test(test_trt_module)
+trtf_add_test(test_trt_module REQUIRES_TRT)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_trt_module PRIVATE trtf_backend_trt)
 endif()
 
 # CUDA / device
-trtf_add_test(test_cuda_buffer)
-trtf_add_test(test_cuda_stream)
-trtf_add_test(test_cuda_graph)
+trtf_add_test(test_cuda_buffer REQUIRES_TRT)
+trtf_add_test(test_cuda_stream REQUIRES_TRT)
+trtf_add_test(test_cuda_graph REQUIRES_TRT)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_cuda_graph PRIVATE trtf_backend_trt)
 endif()
 trtf_add_test(test_device_kv_cache)
-trtf_add_test(test_device_resources)
+trtf_add_test(test_device_resources REQUIRES_TRT)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_device_resources PRIVATE trtf_backend_trt)
 endif()
@@ -540,24 +557,24 @@ trtf_add_test(test_recurrent_state)
 
 # Pipelines (public API)
 trtf_add_test(test_pipeline_api                NO_SRC_INCLUDE)
-trtf_add_test(test_text_generation_pipeline)
+trtf_add_test(test_text_generation_pipeline REQUIRES_TRT)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_text_generation_pipeline PRIVATE trtf_backend_trt)
 endif()
-trtf_add_test(test_recurrent_pipeline)
+trtf_add_test(test_recurrent_pipeline REQUIRES_TRT)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_recurrent_pipeline PRIVATE trtf_backend_trt)
 endif()
-trtf_add_test(test_encoder_pipeline)
+trtf_add_test(test_encoder_pipeline REQUIRES_TRT)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_encoder_pipeline PRIVATE trtf_backend_trt)
 endif()
-trtf_add_test(test_vl_pipeline)
+trtf_add_test(test_vl_pipeline REQUIRES_TRT)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_vl_pipeline PRIVATE trtf_backend_trt)
 endif()
 trtf_add_test(test_diffusion_pipeline_new)
-trtf_add_test(test_audio_pipeline_new)
+trtf_add_test(test_audio_pipeline_new REQUIRES_TRT)
 if(TARGET trtf_backend_trt)
   target_link_libraries(test_audio_pipeline_new PRIVATE trtf_backend_trt)
 endif()
@@ -636,22 +653,22 @@ trtf_add_test(test_io_map)
 trtf_add_test(test_torchtrt_decoder)
 
 # TVM-FFI plugin
-trtf_add_test(test_tvm_ffi_plugin)
-if(_trtf_has_tvm_ffi)
+trtf_add_test(test_tvm_ffi_plugin REQUIRES_TRT)
+if(TARGET test_tvm_ffi_plugin AND _trtf_has_tvm_ffi)
   target_include_directories(test_tvm_ffi_plugin SYSTEM PRIVATE ${TRTF_TVM_FFI_INCLUDE_DIR})
   target_link_libraries(test_tvm_ffi_plugin PRIVATE ${TRTF_TVM_FFI_LIBRARY})
 endif()
 
 # TVM-FFI plugin V2 (self-contained test with IPluginV2DynamicExt)
-trtf_add_test(test_tvm_ffi_plugin_v2 NO_SRC_INCLUDE)
+trtf_add_test(test_tvm_ffi_plugin_v2 NO_SRC_INCLUDE REQUIRES_TRT)
 
 # TVM-FFI module loader (loads FlashInfer .so from C++)
-trtf_add_test(test_tvm_ffi_module_loader)
-if(_trtf_has_tvm_ffi)
+trtf_add_test(test_tvm_ffi_module_loader REQUIRES_TRT)
+if(TARGET test_tvm_ffi_module_loader AND _trtf_has_tvm_ffi)
   target_include_directories(test_tvm_ffi_module_loader SYSTEM PRIVATE ${TRTF_TVM_FFI_INCLUDE_DIR})
   target_link_libraries(test_tvm_ffi_module_loader PRIVATE ${TRTF_TVM_FFI_LIBRARY})
 endif()
-if(_trtf_has_tvm_ffi)
+if(TARGET test_tvm_ffi_plugin_v2 AND _trtf_has_tvm_ffi)
   target_include_directories(test_tvm_ffi_plugin_v2 SYSTEM PRIVATE ${TRTF_TVM_FFI_INCLUDE_DIR})
   target_link_libraries(test_tvm_ffi_plugin_v2 PRIVATE ${TRTF_TVM_FFI_LIBRARY})
 endif()

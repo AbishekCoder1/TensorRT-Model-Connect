@@ -15,7 +15,7 @@
 // TensorRT stores ILogger by reference; if logger dies too early, later TRT
 // calls can crash with "pure virtual method called".
 
-#include "runtime/core/trt_common.h"
+#include "runtime/backend/trt_logger.h"
 
 #include <cstddef>
 #include <iostream>

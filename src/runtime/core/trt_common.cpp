@@ -5,24 +5,24 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iostream>
 
 namespace trtf {
 
-const char* trt_severity_name(nvinfer1::ILogger::Severity severity) {
+const char* trt_severity_name(TrtLogSeverity severity) {
     switch (severity) {
-    case nvinfer1::ILogger::Severity::kINTERNAL_ERROR:
+    case TrtLogSeverity::kInternalError:
         return "INTERNAL_ERROR";
-    case nvinfer1::ILogger::Severity::kERROR:
+    case TrtLogSeverity::kError:
         return "ERROR";
-    case nvinfer1::ILogger::Severity::kWARNING:
+    case TrtLogSeverity::kWarning:
         return "WARNING";
-    case nvinfer1::ILogger::Severity::kINFO:
+    case TrtLogSeverity::kInfo:
         return "INFO";
-    case nvinfer1::ILogger::Severity::kVERBOSE:
+    case TrtLogSeverity::kVerbose:
         return "VERBOSE";
-    default:
-        return "UNKNOWN";
     }
+    return "UNKNOWN";
 }
 
 // Process-wide TRT-logger state. Populated by configure_trt_logger() after
@@ -32,7 +32,7 @@ const char* trt_severity_name(nvinfer1::ILogger::Severity severity) {
 namespace {
 struct TrtLogState {
     bool verbose_stderr_enabled{false};
-    nvinfer1::ILogger::Severity verbose_min_severity{nvinfer1::ILogger::Severity::kINFO};
+    TrtLogSeverity verbose_min_severity{TrtLogSeverity::kInfo};
 };
 TrtLogState& mutable_trt_log_state() {
     static TrtLogState state;
@@ -44,7 +44,7 @@ bool trt_log_to_stderr_enabled() {
     return mutable_trt_log_state().verbose_stderr_enabled;
 }
 
-nvinfer1::ILogger::Severity trt_log_stderr_min_severity() {
+TrtLogSeverity trt_log_stderr_min_severity() {
     return mutable_trt_log_state().verbose_min_severity;
 }
 
@@ -58,46 +58,15 @@ void configure_trt_logger(bool verbose_stderr, const std::string& min_severity) 
     std::transform(upper.begin(), upper.end(), upper.begin(),
                    [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
     if (upper == "INTERNAL_ERROR")
-        state.verbose_min_severity = nvinfer1::ILogger::Severity::kINTERNAL_ERROR;
+        state.verbose_min_severity = TrtLogSeverity::kInternalError;
     else if (upper == "ERROR")
-        state.verbose_min_severity = nvinfer1::ILogger::Severity::kERROR;
+        state.verbose_min_severity = TrtLogSeverity::kError;
     else if (upper == "WARNING")
-        state.verbose_min_severity = nvinfer1::ILogger::Severity::kWARNING;
+        state.verbose_min_severity = TrtLogSeverity::kWarning;
     else if (upper == "VERBOSE")
-        state.verbose_min_severity = nvinfer1::ILogger::Severity::kVERBOSE;
+        state.verbose_min_severity = TrtLogSeverity::kVerbose;
     else
-        state.verbose_min_severity = nvinfer1::ILogger::Severity::kINFO;
-}
-
-void TrtLogger::log(Severity severity, const char* msg) noexcept {
-    if (severity <= Severity::kERROR && msg != nullptr) {
-        mLastError = msg;
-    }
-
-    if (msg == nullptr) {
-        return;
-    }
-
-    if (trt_log_to_stderr_enabled() && severity <= trt_log_stderr_min_severity()) {
-        std::cerr << "TRT_LOG[" << trt_severity_name(severity) << "] " << msg << '\n';
-    } else if (severity <= Severity::kWARNING) {
-        // Always show warnings and errors even without verbose logging
-        // (whether or not platform.trt_log_stderr was set).
-        std::cerr << "[trt] " << trt_severity_name(severity) << ": " << msg << '\n';
-    }
-}
-
-const std::string& TrtLogger::last_error() const {
-    return mLastError;
-}
-
-void TrtLogger::clear_error() {
-    mLastError.clear();
-}
-
-TrtUniquePtr<nvinfer1::IRuntime> create_trt_runtime() {
-    static TrtLogger logger;
-    return TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
+        state.verbose_min_severity = TrtLogSeverity::kInfo;
 }
 
 CudaGraphExec::~CudaGraphExec() {

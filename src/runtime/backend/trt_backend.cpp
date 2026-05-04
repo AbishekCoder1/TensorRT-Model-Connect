@@ -4,7 +4,7 @@
 #include "trtf/runtime/trt_backend.h"
 
 #include "runtime/core/cuda_common.h"
-#include "runtime/core/trt_common.h"
+#include "runtime/backend/trt_logger.h"
 #include "trt_module_impl.h"
 
 #include <NvInfer.h>
@@ -101,6 +101,46 @@ class TrtBackend final : public IBackend {
         }
         out.prefill = make_ctx_module(0);
         out.decode = make_ctx_module(1);
+        return out;
+    }
+
+    BackendProfileModules
+    create_profile_modules(const void* plan_data, size_t plan_size,
+                           const ModuleCreateOptions& options,
+                           const std::vector<int32_t>& profile_indices) override {
+        auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
+        if (!engine_raw)
+            throw std::runtime_error("[trtf] Failed to deserialize engine (TRT)");
+        std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
+                                                      [](nvinfer1::ICudaEngine* p) { delete p; });
+
+        cudaStream_t stream = options.stream;
+        std::shared_ptr<void> stream_owner;
+        if (!stream) {
+            auto owned = std::make_shared<CudaStream>();
+            if (!owned->ok())
+                throw std::runtime_error("[trtf] Failed to create CUDA stream");
+            stream = owned->get();
+            stream_owner = owned;
+        }
+
+        const int32_t nprofiles = engine->getNbOptimizationProfiles();
+        BackendProfileModules out;
+        out.modules.reserve(profile_indices.size());
+        for (int32_t profile_idx : profile_indices) {
+            if (profile_idx < 0 || profile_idx >= nprofiles)
+                continue;
+            auto* ctx = engine->createExecutionContext();
+            if (!ctx)
+                throw std::runtime_error("[trtf] Failed to create TRT execution context");
+            auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx);
+            if (!mod->ok())
+                throw std::runtime_error("[trtf] TrtModuleImpl creation failed");
+            mod->keep_alive(engine);
+            if (stream_owner)
+                mod->keep_alive(stream_owner);
+            out.modules.push_back(BackendProfileModule{profile_idx, std::move(mod)});
+        }
         return out;
     }
 

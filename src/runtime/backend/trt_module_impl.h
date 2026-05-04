@@ -3,6 +3,7 @@
 // TrtModuleImpl: concrete ITrtModule backed by a TRT engine.
 // Compiled inside backend DSOs only (libtrtf_backend_trt.so / _rtx.so).
 
+#include "runtime/backend/trt_logger.h"
 #include "trtf/runtime/trt_module.h"
 
 #include <NvInfer.h>
@@ -42,6 +43,11 @@ class TrtModuleImpl final : public ITrtModule {
     std::vector<TensorInfo> output_info() const override;
     bool has_input(const std::string& name) const override;
     bool has_output(const std::string& name) const override;
+    DType tensor_dtype(const std::string& name) const override;
+    std::vector<int64_t> tensor_shape(const std::string& name) const override;
+    std::vector<int64_t> input_profile_shape(const std::string& name, int32_t profile_idx,
+                                             ProfileShapeSelector selector) const override;
+    int32_t optimization_profile_count() const override;
     void* device_ptr(const std::string& name) const override;
     void bind_external(const std::string& name, void* ptr) override;
     void bind_external(const std::string& name, void* ptr,

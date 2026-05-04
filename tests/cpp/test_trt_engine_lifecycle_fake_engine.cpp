@@ -4,20 +4,20 @@
 // Trace ID:       UT-ENG-CPP-03
 // Architecture:   ARCH-MOD-001
 // Unit Design:    UD-TRT-CORE-01
-// Intent:         TRT engine lifecycle with fake engine: IO tensor queries, required tensor
-// validation Preconditions:  TRT headers available, fake engine with known tensor names
-// Postconditions: has_io_tensor returns correct bool, has_all_required_tensors validates base+layer
-// tensors
+// Intent:         Engine lifecycle validation against a fake backend-neutral
+//                 module with known tensor names.
+// Preconditions:  No TensorRT SDK required.
+// Postconditions: has_io_tensor returns correct bool, has_all_required_tensors
+//                 validates base+layer tensors.
 // =============================================================================
 
 #include "runtime/core/trt_engine_lifecycle.h"
 
 #include <algorithm>
-#include <cstddef>
 #include <cstdint>
 #include <iostream>
-#include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -32,210 +32,50 @@ void check(bool condition, const char* test_name) {
     }
 }
 
-#if NV_TENSORRT_MAJOR >= 10
-
-class FakeCudaEngineImpl final : public nvinfer1::apiv::VCudaEngine {
+class FakeModule final : public trtf::ITrtModule {
   public:
-    explicit FakeCudaEngineImpl(std::vector<std::optional<std::string>> io_tensor_names)
-        : mIOTensorNames(std::move(io_tensor_names)) {}
-
-    nvinfer1::ICudaEngine* getPImpl() noexcept override { return nullptr; }
-
-    int32_t getTensorRTVersion() const noexcept { return NV_TENSORRT_VERSION; }
-
-    int32_t getNbLayers() const noexcept override { return 0; }
-
-    nvinfer1::IHostMemory* serialize() const noexcept override { return nullptr; }
-
-    nvinfer1::IExecutionContext*
-    createExecutionContext(nvinfer1::ExecutionContextAllocationStrategy) noexcept override {
-        return nullptr;
+    explicit FakeModule(std::vector<std::string> tensor_names) {
+        for (auto& name : tensor_names)
+            names_.insert(std::move(name));
     }
 
-    nvinfer1::IExecutionContext* createExecutionContextWithoutDeviceMemory() noexcept override {
-        return nullptr;
+    trtf::TensorMap forward(const trtf::TensorMap&) override { return {}; }
+    trtf::DeviceTensorMap forward_device(const trtf::DeviceTensorMap&) override { return {}; }
+    void forward_device_async(const trtf::DeviceTensorMap&) override {}
+    void forward_async(const trtf::TensorMap&) override {}
+    void sync() override {}
+    cudaStream_t stream() const override { return nullptr; }
+    void enable_cuda_graph() override {}
+    bool cuda_graph_active() const override { return false; }
+    int32_t profile_idx() const override { return 0; }
+    std::vector<trtf::TensorInfo> input_info() const override { return {}; }
+    std::vector<trtf::TensorInfo> output_info() const override { return {}; }
+    bool has_input(const std::string& name) const override { return names_.count(name) != 0; }
+    bool has_output(const std::string& name) const override { return names_.count(name) != 0; }
+    trtf::DType tensor_dtype(const std::string&) const override { return trtf::DType::kFloat32; }
+    std::vector<int64_t> tensor_shape(const std::string&) const override { return {}; }
+    std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
+                                             trtf::ProfileShapeSelector) const override {
+        return {};
     }
-
-    std::size_t getDeviceMemorySize() const noexcept override { return 0; }
-
-    bool isRefittable() const noexcept override { return false; }
-
-    char const* getName() const noexcept override { return "fake_engine"; }
-
-    int32_t getNbOptimizationProfiles() const noexcept override { return 1; }
-
-    int32_t const* getProfileTensorValues(char const*, int32_t,
-                                          nvinfer1::OptProfileSelector) const noexcept override {
-        return nullptr;
-    }
-
-    nvinfer1::EngineCapability getEngineCapability() const noexcept override {
-        return static_cast<nvinfer1::EngineCapability>(0);
-    }
-
-    void setErrorRecorder(nvinfer1::IErrorRecorder* recorder) noexcept override {
-        mErrorRecorder = recorder;
-    }
-
-    nvinfer1::IErrorRecorder* getErrorRecorder() const noexcept override { return mErrorRecorder; }
-
-    bool hasImplicitBatchDimension() const noexcept override { return false; }
-
-    nvinfer1::TacticSources getTacticSources() const noexcept override {
-        return static_cast<nvinfer1::TacticSources>(0);
-    }
-
-    nvinfer1::ProfilingVerbosity getProfilingVerbosity() const noexcept override {
-        return static_cast<nvinfer1::ProfilingVerbosity>(0);
-    }
-
-    nvinfer1::IEngineInspector* createEngineInspector() const noexcept override { return nullptr; }
-
-    nvinfer1::Dims getTensorShape(char const*) const noexcept override { return nvinfer1::Dims{}; }
-
-    nvinfer1::DataType getTensorDataType(char const*) const noexcept override {
-        return static_cast<nvinfer1::DataType>(0);
-    }
-
-    nvinfer1::TensorLocation getTensorLocation(char const*) const noexcept override {
-        return static_cast<nvinfer1::TensorLocation>(0);
-    }
-
-    bool isShapeInferenceIO(char const*) const noexcept override { return false; }
-
-    nvinfer1::TensorIOMode getTensorIOMode(char const*) const noexcept override {
-        return static_cast<nvinfer1::TensorIOMode>(0);
-    }
-
-    int32_t getTensorBytesPerComponent(char const*) const noexcept override { return 4; }
-
-    int32_t getTensorComponentsPerElement(char const*) const noexcept override { return 1; }
-
-    nvinfer1::TensorFormat getTensorFormat(char const*) const noexcept override {
-        return static_cast<nvinfer1::TensorFormat>(0);
-    }
-
-    char const* getTensorFormatDesc(char const*) const noexcept override { return ""; }
-
-    int32_t getTensorVectorizedDim(char const*) const noexcept override { return -1; }
-
-    nvinfer1::Dims getProfileShape(char const*, int32_t,
-                                   nvinfer1::OptProfileSelector) const noexcept override {
-        return nvinfer1::Dims{};
-    }
-
-    int32_t getNbIOTensors() const noexcept override {
-        return static_cast<int32_t>(mIOTensorNames.size());
-    }
-
-    char const* getIOTensorName(int32_t index) const noexcept override {
-        if (index < 0 || static_cast<std::size_t>(index) >= mIOTensorNames.size()) {
-            return nullptr;
-        }
-        const std::optional<std::string>& maybe_name =
-            mIOTensorNames[static_cast<std::size_t>(index)];
-        if (!maybe_name.has_value()) {
-            return nullptr;
-        }
-        return maybe_name->c_str();
-    }
-
-    nvinfer1::HardwareCompatibilityLevel getHardwareCompatibilityLevel() const noexcept override {
-        return static_cast<nvinfer1::HardwareCompatibilityLevel>(0);
-    }
-
-    int32_t getNbAuxStreams() const noexcept override { return 0; }
-
-    int32_t getTensorBytesPerComponentV2(char const*, int32_t) const noexcept override { return 4; }
-
-    int32_t getTensorComponentsPerElementV2(char const*, int32_t) const noexcept override {
-        return 1;
-    }
-
-    nvinfer1::TensorFormat getTensorFormatV2(char const*, int32_t) const noexcept override {
-        return static_cast<nvinfer1::TensorFormat>(0);
-    }
-
-    char const* getTensorFormatDescV2(char const*, int32_t) const noexcept override { return ""; }
-
-    int32_t getTensorVectorizedDimV2(char const*, int32_t) const noexcept override { return -1; }
-
-    nvinfer1::ISerializationConfig* createSerializationConfig() noexcept override {
-        return nullptr;
-    }
-
-    nvinfer1::IHostMemory*
-    serializeWithConfig(nvinfer1::ISerializationConfig&) const noexcept override {
-        return nullptr;
-    }
-
-    std::size_t getDeviceMemorySizeForProfile(int32_t) const noexcept override { return 0; }
-
-    nvinfer1::IRefitter* createRefitter(nvinfer1::ILogger&) noexcept override { return nullptr; }
-
-    bool setWeightStreamingBudget(int64_t) noexcept override { return false; }
-
-    int64_t getWeightStreamingBudget() const noexcept override { return 0; }
-
-    int64_t getMinimumWeightStreamingBudget() const noexcept override { return 0; }
-
-    int64_t getStreamableWeightsSize() const noexcept override { return 0; }
-
-    bool isDebugTensor(char const*) const noexcept override { return false; }
-
-    bool setWeightStreamingBudgetV2(int64_t) noexcept override { return false; }
-
-    int64_t getWeightStreamingBudgetV2() const noexcept override { return 0; }
-
-    int64_t getWeightStreamingAutomaticBudget() const noexcept override { return 0; }
-
-    int64_t getWeightStreamingScratchMemorySize() const noexcept override { return 0; }
-
-    int64_t getDeviceMemorySizeV2() const noexcept override { return 0; }
-
-    int64_t getDeviceMemorySizeForProfileV2(int32_t) const noexcept override { return 0; }
-
-    int64_t const* getProfileTensorValuesV2(char const*, int32_t,
-                                            nvinfer1::OptProfileSelector) const noexcept override {
-        return nullptr;
-    }
-
-    nvinfer1::IExecutionContext*
-    createExecutionContextWithRuntimeConfig(nvinfer1::IRuntimeConfig*) noexcept override {
-        return nullptr;
-    }
-
-    nvinfer1::IRuntimeConfig* createRuntimeConfig() noexcept override { return nullptr; }
-
-    int64_t getEngineStat(nvinfer1::EngineStat) const noexcept override { return 0; }
-
-    char const* getAliasedInputTensor(char const*) const noexcept override { return nullptr; }
+    int32_t optimization_profile_count() const override { return 1; }
+    void* device_ptr(const std::string&) const override { return nullptr; }
+    void bind_external(const std::string&, void*) override {}
+    bool ok() const override { return true; }
+    void keep_alive(std::shared_ptr<void>) override {}
 
   private:
-    std::vector<std::optional<std::string>> mIOTensorNames;
-    nvinfer1::IErrorRecorder* mErrorRecorder{nullptr};
+    std::unordered_set<std::string> names_;
 };
 
-class FakeCudaEngine final : public nvinfer1::ICudaEngine {
-  public:
-    explicit FakeCudaEngine(std::vector<std::optional<std::string>> io_tensor_names)
-        : mImplStorage(std::move(io_tensor_names)) {
-        mImpl = &mImplStorage;
-    }
-
-  private:
-    FakeCudaEngineImpl mImplStorage;
-};
-
-std::vector<std::optional<std::string>> make_required_tensor_names(int32_t num_layers,
-                                                                   bool include_position_input) {
-    std::vector<std::optional<std::string>> names;
+std::vector<std::string> make_required_tensor_names(int32_t num_layers,
+                                                    bool include_position_input) {
+    std::vector<std::string> names;
     names.emplace_back("token_id");
     names.emplace_back("attention_mask");
     names.emplace_back("logits");
-    if (include_position_input) {
+    if (include_position_input)
         names.emplace_back("position_id");
-    }
     for (int32_t i = 0; i < num_layers; ++i) {
         names.emplace_back(trtf::layer_tensor_name("cache_k", i));
         names.emplace_back(trtf::layer_tensor_name("cache_v", i));
@@ -245,20 +85,14 @@ std::vector<std::optional<std::string>> make_required_tensor_names(int32_t num_l
     return names;
 }
 
-void remove_name(std::vector<std::optional<std::string>>& names, const std::string& target) {
-    names.erase(std::remove_if(names.begin(), names.end(),
-                               [&](const std::optional<std::string>& value) {
-                                   return value.has_value() && *value == target;
-                               }),
-                names.end());
+void remove_name(std::vector<std::string>& names, const std::string& target) {
+    names.erase(std::remove(names.begin(), names.end(), target), names.end());
 }
 
-trtf::DecoderStepEngine
-make_decoder_step_engine(std::vector<std::optional<std::string>> io_tensor_names,
-                         int32_t num_layers, bool requires_position_input) {
+trtf::DecoderStepEngine make_decoder_step_engine(FakeModule& module, int32_t num_layers,
+                                                 bool requires_position_input) {
     trtf::DecoderStepEngine engine;
-    engine.engine =
-        trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(new FakeCudaEngine(std::move(io_tensor_names)));
+    engine.module = &module;
     engine.num_layers = num_layers;
     engine.requires_position_input = requires_position_input;
 
@@ -275,74 +109,68 @@ make_decoder_step_engine(std::vector<std::optional<std::string>> io_tensor_names
     return engine;
 }
 
-void test_has_io_tensor_true_false_and_null_name() {
-    FakeCudaEngine fake_engine(
-        {std::nullopt, std::string("token_id"), std::string("attention_mask")});
-    check(trtf::has_io_tensor(fake_engine, "token_id"),
+void test_has_io_tensor_true_false() {
+    FakeModule module({"token_id", "attention_mask"});
+    check(trtf::has_io_tensor(module, "token_id"),
           "has_io_tensor returns true for existing name");
-    check(!trtf::has_io_tensor(fake_engine, "logits"),
+    check(!trtf::has_io_tensor(module, "logits"),
           "has_io_tensor returns false for missing name");
-    check(!trtf::has_io_tensor(fake_engine, ""), "has_io_tensor ignores null tensor names");
+    check(!trtf::has_io_tensor(module, ""), "has_io_tensor returns false for empty name");
 }
 
 void test_has_all_required_tensors_false_when_missing_base_tensors() {
-    std::vector<std::optional<std::string>> names =
-        make_required_tensor_names(/*num_layers=*/2, true);
+    std::vector<std::string> names = make_required_tensor_names(/*num_layers=*/2, true);
     remove_name(names, "attention_mask");
+    FakeModule module(std::move(names));
     trtf::DecoderStepEngine engine =
-        make_decoder_step_engine(std::move(names), /*num_layers=*/2, true);
+        make_decoder_step_engine(module, /*num_layers=*/2, true);
     check(!trtf::has_all_required_tensors(engine),
           "has_all_required_tensors fails when base tensor is missing");
 }
 
 void test_has_all_required_tensors_true_with_all_base_and_layer_tensors() {
-    trtf::DecoderStepEngine engine = make_decoder_step_engine(
-        make_required_tensor_names(/*num_layers=*/2, /*include_position_input=*/true),
-        /*num_layers=*/2, true);
+    FakeModule module(make_required_tensor_names(/*num_layers=*/2,
+                                                /*include_position_input=*/true));
+    trtf::DecoderStepEngine engine =
+        make_decoder_step_engine(module, /*num_layers=*/2, true);
     check(trtf::has_all_required_tensors(engine),
           "has_all_required_tensors passes when all tensors are present");
 }
 
 void test_has_all_required_tensors_requires_position_input_branch() {
-    trtf::DecoderStepEngine no_position_required = make_decoder_step_engine(
-        make_required_tensor_names(/*num_layers=*/1, /*include_position_input=*/false),
-        /*num_layers=*/1, false);
+    FakeModule no_position_module(make_required_tensor_names(
+        /*num_layers=*/1, /*include_position_input=*/false));
+    trtf::DecoderStepEngine no_position_required =
+        make_decoder_step_engine(no_position_module, /*num_layers=*/1, false);
     check(trtf::has_all_required_tensors(no_position_required),
           "requires_position_input=false does not require position tensor");
 
-    trtf::DecoderStepEngine position_required_missing = make_decoder_step_engine(
-        make_required_tensor_names(/*num_layers=*/1, /*include_position_input=*/false),
-        /*num_layers=*/1, true);
+    FakeModule missing_position_module(make_required_tensor_names(
+        /*num_layers=*/1, /*include_position_input=*/false));
+    trtf::DecoderStepEngine position_required_missing =
+        make_decoder_step_engine(missing_position_module, /*num_layers=*/1, true);
     check(!trtf::has_all_required_tensors(position_required_missing),
           "requires_position_input=true fails without position tensor");
 }
 
 void test_has_all_required_tensors_missing_per_layer_tensor_fails() {
-    std::vector<std::optional<std::string>> names =
-        make_required_tensor_names(/*num_layers=*/3, true);
+    std::vector<std::string> names = make_required_tensor_names(/*num_layers=*/3, true);
     remove_name(names, trtf::layer_tensor_name("present_v", 1));
+    FakeModule module(std::move(names));
     trtf::DecoderStepEngine engine =
-        make_decoder_step_engine(std::move(names), /*num_layers=*/3, true);
+        make_decoder_step_engine(module, /*num_layers=*/3, true);
     check(!trtf::has_all_required_tensors(engine),
           "has_all_required_tensors fails when a per-layer tensor is missing");
 }
 
-#endif // NV_TENSORRT_MAJOR >= 10
-
 } // namespace
 
 int main() {
-#if NV_TENSORRT_MAJOR >= 10
-    test_has_io_tensor_true_false_and_null_name();
+    test_has_io_tensor_true_false();
     test_has_all_required_tensors_false_when_missing_base_tensors();
     test_has_all_required_tensors_true_with_all_base_and_layer_tensors();
     test_has_all_required_tensors_requires_position_input_branch();
     test_has_all_required_tensors_missing_per_layer_tensor_fails();
-#else
-    std::cerr << "test_trt_engine_lifecycle_fake_engine: skipping, fake ICudaEngine is only "
-                 "implemented for "
-                 "NV_TENSORRT_MAJOR >= 10.\n";
-#endif
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

@@ -1,7 +1,6 @@
 // DecoderPlugin: handles "decoder_kv_cache" and "decoder_moe" strategies.
 // Standard attention-based decoder with device-resident KV cache.
 
-#include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/chat_template.h"
 #include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/pipelines/text_generation_pipeline.h"
@@ -11,10 +10,14 @@
 #include "trtf/runtime/triattention_kv_cache.h"
 #include "utils/json_helpers.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <iostream>
 #include <limits>
+#include <memory>
 #include <sstream>
+#include <vector>
 
 namespace trtf {
 
@@ -28,38 +31,50 @@ struct KvCacheRuntimeSizing {
     bool clamped_to_bundle_max{false};
 };
 
-int32_t cache_row_dim_from_engine(const nvinfer1::ICudaEngine& engine,
-                                  const std::string& tensor_name) {
-    auto dims = engine.getTensorShape(tensor_name.c_str());
-    if (dims.nbDims >= 2 && dims.d[1] > 0)
-        return dims.d[1];
-    if (engine.getNbOptimizationProfiles() > 0) {
-        dims = engine.getProfileShape(tensor_name.c_str(), 0, nvinfer1::OptProfileSelector::kMAX);
-        if (dims.nbDims >= 2 && dims.d[1] > 0)
-            return dims.d[1];
+int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
+    if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
+        return -1;
+    const int64_t value = shape[static_cast<std::size_t>(dim)];
+    if (value <= 0 || value > std::numeric_limits<int32_t>::max())
+        return -1;
+    return static_cast<int32_t>(value);
+}
+
+int32_t cache_row_dim_from_module(const TrtModule& module, const std::string& tensor_name) {
+    const int32_t static_dim = dim_at(module.tensor_shape(tensor_name), 1);
+    if (static_dim > 0)
+        return static_dim;
+    const int32_t profile_count = module.optimization_profile_count();
+    for (int32_t profile_idx = 0; profile_idx < profile_count; ++profile_idx) {
+        const int32_t profile_dim =
+            dim_at(module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax),
+                   1);
+        if (profile_dim > 0)
+            return profile_dim;
     }
     throw std::runtime_error("Unable to infer KV row width from engine tensor '" + tensor_name +
                              "'");
 }
 
-bool cache_input_is_dynamic(const nvinfer1::ICudaEngine& engine, const std::string& tensor_name) {
-    const auto dims = engine.getTensorShape(tensor_name.c_str());
-    return dims.nbDims >= 1 && dims.d[0] == -1;
+bool cache_input_is_dynamic(const TrtModule& module, const std::string& tensor_name) {
+    const auto shape = module.tensor_shape(tensor_name);
+    return !shape.empty() && shape[0] == -1;
 }
 
-bool cache_input_supports_runtime_rows(const nvinfer1::ICudaEngine& engine,
-                                       const std::string& tensor_name) {
-    if (!cache_input_is_dynamic(engine, tensor_name))
+bool cache_input_supports_runtime_rows(const TrtModule& module, const std::string& tensor_name) {
+    if (!cache_input_is_dynamic(module, tensor_name))
         return false;
-    const int32_t num_profiles = engine.getNbOptimizationProfiles();
+    const int32_t num_profiles = module.optimization_profile_count();
     if (num_profiles <= 0)
         return false;
     for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
-        const auto min_dims = engine.getProfileShape(tensor_name.c_str(), profile_idx,
-                                                     nvinfer1::OptProfileSelector::kMIN);
-        const auto max_dims = engine.getProfileShape(tensor_name.c_str(), profile_idx,
-                                                     nvinfer1::OptProfileSelector::kMAX);
-        if (min_dims.nbDims >= 1 && max_dims.nbDims >= 1 && min_dims.d[0] < max_dims.d[0])
+        const int32_t min_rows =
+            dim_at(module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMin),
+                   0);
+        const int32_t max_rows =
+            dim_at(module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax),
+                   0);
+        if (min_rows > 0 && max_rows > min_rows)
             return true;
     }
     return false;
@@ -86,7 +101,7 @@ std::string format_bytes(std::uint64_t bytes) {
 }
 
 KvCacheRuntimeSizing
-resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const nvinfer1::ICudaEngine& engine,
+resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& module,
                                 const KvCacheNames& kv_names, DType cache_dtype,
                                 const TriAttentionConfig& tri_cfg, int32_t kv_dim) {
     KvCacheRuntimeSizing sizing;
@@ -103,7 +118,7 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const nvinfer1::ICud
     if (ctx.kv_cache_size_bytes == 0)
         return sizing;
 
-    if (!cache_input_supports_runtime_rows(engine, kv_names.cache_k.front())) {
+    if (!cache_input_supports_runtime_rows(module, kv_names.cache_k.front())) {
         throw std::runtime_error(
             "This bundle was not built with runtime-resizable KV cache support. "
             "Rebuild with trtf-build --dynamic-kv-cache to use --kv-cache-size.");
@@ -147,36 +162,31 @@ class DecoderPlugin final : public IPipelinePlugin {
         load_ffi_kernels_from_bundle(ctx.bundle);
         apply_text_trace_from_registry(ctx.runtime_config);
 
-        auto shared_engine = load_shared_engine(ctx);
-        auto shared_stream = std::make_shared<CudaStream>();
-        if (!shared_stream->ok())
-            throw std::runtime_error("Failed to create CUDA stream");
-
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
         const auto& io = ctx.config.io_map;
         KvCacheNames kv_names;
-        std::vector<std::string> external_input_names;
-        build_kv_names_and_externals(ctx, io, kv_names, external_input_names);
+        build_kv_names(ctx, io, kv_names);
 
-        cudaStream_t stream = shared_stream->get();
         const DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         TriAttentionConfig tri_cfg = parse_triattention_bundle_config(
             ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
-        const int32_t kv_dim = cache_row_dim_from_engine(*shared_engine, kv_names.cache_k.front());
-        const auto sizing = resolve_kv_cache_runtime_sizing(ctx, *shared_engine, kv_names,
+
+        auto profile_modules = load_decoder_profile_modules(ctx);
+        if (profile_modules.modules.empty())
+            throw std::runtime_error("No decoder engine profiles were loaded");
+        TrtModule& metadata_module = *profile_modules.modules.front().module;
+
+        const int32_t kv_dim = cache_row_dim_from_module(metadata_module, kv_names.cache_k.front());
+        const auto sizing = resolve_kv_cache_runtime_sizing(ctx, metadata_module, kv_names,
                                                             cache_dtype, tri_cfg, kv_dim);
 
-        const int32_t prefill_max_length = detect_prefill_max_length(*shared_engine, io.token_id);
+        const int32_t prefill_max_length = detect_prefill_max_length(metadata_module, io.token_id);
         const int32_t first_decode_profile = prefill_max_length > 0 ? 1 : 0;
 
         std::unique_ptr<TrtModule> prefill_module;
-        if (prefill_max_length > 0) {
-            prefill_module = make_decoder_module(shared_engine, shared_stream, /*profile_idx=*/0);
-        }
-
-        auto decoders =
-            build_decoder_contexts(ctx, shared_engine, shared_stream, external_input_names,
-                                   sizing.runtime_rows, first_decode_profile);
+        auto decoders = build_decoder_contexts(ctx, std::move(profile_modules), sizing.runtime_rows,
+                                               first_decode_profile, prefill_module);
+        cudaStream_t stream = decoders.front().module->stream();
         auto state =
             build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
         log_kv_cache_sizing(ctx, sizing, state.get());
@@ -213,29 +223,40 @@ class DecoderPlugin final : public IPipelinePlugin {
         }
     }
 
-    static std::shared_ptr<nvinfer1::ICudaEngine> load_shared_engine(const PipelineContext& ctx) {
+    static BackendProfileModules load_decoder_profile_modules(const PipelineContext& ctx) {
         auto* plan = find_section(ctx.bundle, "engine_plan");
         if (plan == nullptr || plan->empty())
             throw std::runtime_error("engine_plan section is missing");
+        if (ctx.backend == nullptr)
+            throw std::runtime_error("No backend loaded");
+
+        auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
+        const int32_t profile_candidates =
+            static_cast<int32_t>(std::max<std::size_t>(profile_rows.size() + 1, 1));
+        std::vector<int32_t> profile_indices;
+        profile_indices.reserve(static_cast<std::size_t>(profile_candidates));
+        for (int32_t i = 0; i < profile_candidates; ++i)
+            profile_indices.push_back(i);
+
+        ModuleCreateOptions opts;
+        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
+        opts.cuda_graphs = ctx.cuda_graphs;
+
         const auto t0 = std::chrono::steady_clock::now();
-        auto trt_runtime = create_trt_runtime();
-        if (!trt_runtime)
-            throw std::runtime_error("Failed to create TRT runtime for engine_plan");
-        auto engine = TrtUniquePtr<nvinfer1::ICudaEngine>(
-            trt_runtime->deserializeCudaEngine(plan->data(), plan->size()));
-        if (!engine)
-            throw std::runtime_error("Failed to deserialize engine_plan");
+        auto modules =
+            ctx.backend->create_profile_modules(plan->data(), plan->size(), opts, profile_indices);
         const auto t1 = std::chrono::steady_clock::now();
         const double load_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         log_trt_load_timing("engine_plan", load_ms, plan->size());
-        nvinfer1::ICudaEngine* raw_engine = engine.release();
-        return std::shared_ptr<nvinfer1::ICudaEngine>(raw_engine,
-                                                      [](nvinfer1::ICudaEngine* p) { delete p; });
+        for (auto& entry : modules.modules) {
+            entry.module->set_timing_label(entry.profile_idx == 0 ? "engine_plan:profile0"
+                                                                  : "engine_plan:decode");
+        }
+        return modules;
     }
 
-    static void build_kv_names_and_externals(const PipelineContext& ctx, const IoMap& io,
-                                             KvCacheNames& kv_names,
-                                             std::vector<std::string>& external_input_names) {
+    static void build_kv_names(const PipelineContext& ctx, const IoMap& io,
+                               KvCacheNames& kv_names) {
         kv_names.position_id = io.position_id;
         kv_names.attention_mask = io.attention_mask;
         for (int32_t i = 0; i < ctx.config.num_layers; ++i) {
@@ -244,32 +265,6 @@ class DecoderPlugin final : public IPipelinePlugin {
             kv_names.present_k.push_back(expand_layer_name(io.present_k_pattern, i));
             kv_names.present_v.push_back(expand_layer_name(io.present_v_pattern, i));
         }
-        external_input_names.reserve(kv_names.cache_k.size() + kv_names.cache_v.size());
-        external_input_names.insert(external_input_names.end(), kv_names.cache_k.begin(),
-                                    kv_names.cache_k.end());
-        external_input_names.insert(external_input_names.end(), kv_names.cache_v.begin(),
-                                    kv_names.cache_v.end());
-    }
-
-    static std::unique_ptr<TrtModule>
-    make_decoder_module(std::shared_ptr<nvinfer1::ICudaEngine> shared_engine,
-                        std::shared_ptr<CudaStream> shared_stream, int32_t profile_idx) {
-        // TriAttention instantiates TrtModuleImpl directly (not via
-        // IBackend::create_module) because the runtime needs ICudaEngine*
-        // access for multi-profile row-dim introspection.
-        auto* trt_ctx = shared_engine->createExecutionContext();
-        if (!trt_ctx)
-            throw std::runtime_error("Failed to create TRT execution context for profile " +
-                                     std::to_string(profile_idx));
-        auto module = std::make_unique<TrtModuleImpl>(shared_engine.get(), trt_ctx,
-                                                      shared_stream->get(), profile_idx);
-        if (!module || !module->ok())
-            throw std::runtime_error("Failed to create TrtModule for engine_plan (profile " +
-                                     std::to_string(profile_idx) + ")");
-        module->set_timing_label(profile_idx == 0 ? "engine_plan:prefill" : "engine_plan:decode");
-        module->keep_alive(shared_engine);
-        module->keep_alive(shared_stream);
-        return module;
     }
 
     // Returns the prefill optimization profile's MAX seq-len if the engine
@@ -277,45 +272,44 @@ class DecoderPlugin final : public IPipelinePlugin {
     // multi-row); 0 otherwise. Bundles built by the dual-profile decoder
     // builder put prefill at profile 0; legacy bundles only have single-
     // token decode profiles (Sq=1 across all profiles).
-    static int32_t detect_prefill_max_length(const nvinfer1::ICudaEngine& engine,
+    static int32_t detect_prefill_max_length(const TrtModule& module,
                                              const std::string& token_id_name) {
-        if (engine.getNbOptimizationProfiles() <= 0)
+        if (module.optimization_profile_count() <= 0)
             return 0;
-        const auto max_dims =
-            engine.getProfileShape(token_id_name.c_str(), 0, nvinfer1::OptProfileSelector::kMAX);
-        if (max_dims.nbDims <= 0)
-            return 0;
-        return max_dims.d[0] > 1 ? static_cast<int32_t>(max_dims.d[0]) : 0;
+        const int32_t max_tokens =
+            dim_at(module.input_profile_shape(token_id_name, 0, ProfileShapeSelector::kMax), 0);
+        return max_tokens > 1 ? max_tokens : 0;
     }
 
     static std::vector<TextGenerationPipeline::DecoderContext>
-    build_decoder_contexts(const PipelineContext& ctx,
-                           std::shared_ptr<nvinfer1::ICudaEngine> shared_engine,
-                           std::shared_ptr<CudaStream> shared_stream,
-                           const std::vector<std::string>& external_input_names,
-                           int32_t runtime_rows, int32_t first_decode_profile) {
-        (void)external_input_names;
+    build_decoder_contexts(const PipelineContext& ctx, BackendProfileModules profile_modules,
+                           int32_t runtime_rows, int32_t first_decode_profile,
+                           std::unique_ptr<TrtModule>& prefill_module) {
         auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
         if (profile_rows.empty())
             profile_rows.push_back(ctx.config.max_cache_length);
-        const int32_t num_profiles = shared_engine->getNbOptimizationProfiles();
-        const int32_t profile_count = num_profiles - first_decode_profile;
-        const int32_t loop_bound =
-            std::min(profile_count, static_cast<int32_t>(profile_rows.size()));
         std::vector<TextGenerationPipeline::DecoderContext> decoders;
-        decoders.reserve(static_cast<std::size_t>(loop_bound > 0 ? loop_bound : 1));
-        for (int32_t i = 0; i < loop_bound; ++i) {
-            const int32_t profile_max_rows = profile_rows[static_cast<std::size_t>(i)];
-            if (i > 0 && profile_max_rows > runtime_rows)
+        decoders.reserve(profile_modules.modules.size());
+        for (auto& entry : profile_modules.modules) {
+            if (entry.profile_idx == 0 && first_decode_profile == 1) {
+                entry.module->set_timing_label("engine_plan:prefill");
+                prefill_module = std::move(entry.module);
+                continue;
+            }
+            if (entry.profile_idx < first_decode_profile)
+                continue;
+            const int32_t row_idx = entry.profile_idx - first_decode_profile;
+            if (row_idx >= static_cast<int32_t>(profile_rows.size()))
+                continue;
+            const int32_t profile_max_rows = profile_rows[static_cast<std::size_t>(row_idx)];
+            if (row_idx > 0 && profile_max_rows > runtime_rows)
                 break;
-            const int32_t profile_idx = first_decode_profile + i;
-            decoders.push_back(TextGenerationPipeline::DecoderContext{
-                profile_max_rows, make_decoder_module(shared_engine, shared_stream, profile_idx)});
+            entry.module->set_timing_label("engine_plan:decode");
+            decoders.push_back(
+                TextGenerationPipeline::DecoderContext{profile_max_rows, std::move(entry.module)});
         }
         if (decoders.empty())
-            decoders.push_back(TextGenerationPipeline::DecoderContext{
-                ctx.config.max_cache_length,
-                make_decoder_module(shared_engine, shared_stream, first_decode_profile)});
+            throw std::runtime_error("No decoder profile available for engine_plan");
         return decoders;
     }
 

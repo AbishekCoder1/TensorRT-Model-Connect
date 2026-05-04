@@ -16,6 +16,12 @@
 
 namespace trtf {
 
+enum class ProfileShapeSelector {
+    kMin,
+    kOpt,
+    kMax,
+};
+
 class ITrtModule {
   public:
     virtual ~ITrtModule() = default;
@@ -36,6 +42,11 @@ class ITrtModule {
     virtual std::vector<TensorInfo> output_info() const = 0;
     virtual bool has_input(const std::string& name) const = 0;
     virtual bool has_output(const std::string& name) const = 0;
+    virtual DType tensor_dtype(const std::string& name) const = 0;
+    virtual std::vector<int64_t> tensor_shape(const std::string& name) const = 0;
+    virtual std::vector<int64_t> input_profile_shape(const std::string& name, int32_t profile_idx,
+                                                     ProfileShapeSelector selector) const = 0;
+    virtual int32_t optimization_profile_count() const = 0;
 
     // Direct buffer access (KV cache binding)
     virtual void* device_ptr(const std::string& name) const = 0;

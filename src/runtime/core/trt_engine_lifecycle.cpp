@@ -25,13 +25,16 @@ std::string expand_layer_name(const std::string& pattern, int32_t layer) {
 namespace {
 
 bool has_required_base_tensors(const DecoderStepEngine& engine) {
-    if (!has_io_tensor(*engine.engine, engine.token_input_name)) {
+    if (engine.module == nullptr) {
         return false;
     }
-    if (!has_io_tensor(*engine.engine, engine.mask_input_name)) {
+    if (!has_io_tensor(*engine.module, engine.token_input_name)) {
         return false;
     }
-    if (!has_io_tensor(*engine.engine, engine.logits_output_name)) {
+    if (!has_io_tensor(*engine.module, engine.mask_input_name)) {
+        return false;
+    }
+    if (!has_io_tensor(*engine.module, engine.logits_output_name)) {
         return false;
     }
 
@@ -39,16 +42,19 @@ bool has_required_base_tensors(const DecoderStepEngine& engine) {
 }
 
 bool has_required_layer_tensors(const DecoderStepEngine& engine, std::size_t layer_idx) {
-    if (!has_io_tensor(*engine.engine, engine.cache_k_input_names[layer_idx])) {
+    if (engine.module == nullptr) {
         return false;
     }
-    if (!has_io_tensor(*engine.engine, engine.cache_v_input_names[layer_idx])) {
+    if (!has_io_tensor(*engine.module, engine.cache_k_input_names[layer_idx])) {
         return false;
     }
-    if (!has_io_tensor(*engine.engine, engine.present_k_output_names[layer_idx])) {
+    if (!has_io_tensor(*engine.module, engine.cache_v_input_names[layer_idx])) {
         return false;
     }
-    if (!has_io_tensor(*engine.engine, engine.present_v_output_names[layer_idx])) {
+    if (!has_io_tensor(*engine.module, engine.present_k_output_names[layer_idx])) {
+        return false;
+    }
+    if (!has_io_tensor(*engine.module, engine.present_v_output_names[layer_idx])) {
         return false;
     }
 
@@ -57,15 +63,8 @@ bool has_required_layer_tensors(const DecoderStepEngine& engine, std::size_t lay
 
 } // namespace
 
-bool has_io_tensor(const nvinfer1::ICudaEngine& engine, const std::string& tensor_name) {
-    const int32_t count = engine.getNbIOTensors();
-    for (int32_t i = 0; i < count; ++i) {
-        const char* candidate = engine.getIOTensorName(i);
-        if (candidate != nullptr && tensor_name == candidate) {
-            return true;
-        }
-    }
-    return false;
+bool has_io_tensor(const TrtModule& module, const std::string& tensor_name) {
+    return module.has_input(tensor_name) || module.has_output(tensor_name);
 }
 
 bool has_all_required_tensors(const DecoderStepEngine& engine) {
@@ -74,7 +73,7 @@ bool has_all_required_tensors(const DecoderStepEngine& engine) {
     }
 
     if (engine.requires_position_input) {
-        if (!has_io_tensor(*engine.engine, engine.position_input_name)) {
+        if (engine.module == nullptr || !has_io_tensor(*engine.module, engine.position_input_name)) {
             return false;
         }
     }

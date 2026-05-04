@@ -10,6 +10,7 @@
 #include <cuda_runtime_api.h>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace trtf {
 
@@ -30,6 +31,15 @@ struct BackendDualProfileModules {
     std::unique_ptr<ITrtModule> decode;  // profile 1, or the only profile if single-profile
 };
 
+struct BackendProfileModule {
+    int32_t profile_idx{0};
+    std::unique_ptr<ITrtModule> module;
+};
+
+struct BackendProfileModules {
+    std::vector<BackendProfileModule> modules;
+};
+
 // Per-DSO backend. Holds shared state (TRT runtime, RTX runtime cache).
 // One IBackend creates all ITrtModule instances for a pipeline.
 class IBackend {
@@ -46,6 +56,13 @@ class IBackend {
     virtual BackendDualProfileModules
     create_dual_profile_modules(const void* plan_data, size_t plan_size,
                                 const ModuleCreateOptions& options) = 0;
+
+    // Deserialize once and create one execution context per requested profile.
+    // Returned modules share engine weights and stream ownership.
+    virtual BackendProfileModules
+    create_profile_modules(const void* plan_data, size_t plan_size,
+                           const ModuleCreateOptions& options,
+                           const std::vector<int32_t>& profile_indices) = 0;
 
     // Backend identity: "trt" or "trt_rtx"
     virtual const char* name() const = 0;

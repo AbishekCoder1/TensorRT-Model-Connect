@@ -1,19 +1,15 @@
 #pragma once
 
-#include "runtime/core/trt_common.h"
+#include "trtf/runtime/trt_module.h"
 
-#include <NvInfer.h>
-#include <NvInferRuntime.h>
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <vector>
 
 namespace trtf {
 
 struct VisionStepEngine {
-    TrtUniquePtr<nvinfer1::ICudaEngine> engine;
-    TrtUniquePtr<nvinfer1::IExecutionContext> context;
+    TrtModule* module{nullptr};
 
     std::string pixel_input_name{"pixel_values"};
     std::string features_output_name{"image_features"};

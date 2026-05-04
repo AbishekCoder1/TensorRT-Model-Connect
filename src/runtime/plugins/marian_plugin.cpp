@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cuda_runtime_api.h>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>

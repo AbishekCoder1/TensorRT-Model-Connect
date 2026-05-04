@@ -1,6 +1,6 @@
 #include "runtime/domains/multimodal/vision_engine.h"
 
-#include "runtime/core/trt_common.h"
+#include "runtime/core/cuda_common.h"
 #include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/domains/multimodal/vision_execution_plan.h"
 
@@ -23,7 +23,7 @@ bool fail_with(std::string& error, std::string_view stage) {
 }
 
 bool validate_engine(const VisionStepEngine& engine, std::string& error) {
-    if (engine.engine && engine.context) {
+    if (engine.module != nullptr && engine.module->ok()) {
         return true;
     }
     return fail_with(error, "vision engine not initialized");
@@ -31,12 +31,7 @@ bool validate_engine(const VisionStepEngine& engine, std::string& error) {
 
 bool bind_input_tensor(const VisionStepEngine& engine, const std::string& name,
                        const void* host_ptr, std::size_t bytes, CudaStream& stream,
-                       VisionRunState& state, bool allow_host_tensor) {
-    if (allow_host_tensor &&
-        engine.engine->getTensorLocation(name.c_str()) == nvinfer1::TensorLocation::kHOST) {
-        return engine.context->setTensorAddress(name.c_str(), const_cast<void*>(host_ptr));
-    }
-
+                       VisionRunState& state, bool /*allow_host_tensor*/) {
     auto buffer = std::make_unique<CudaBuffer>(bytes);
     if (!buffer->ok()) {
         return false;
@@ -45,27 +40,18 @@ bool bind_input_tensor(const VisionStepEngine& engine, const std::string& name,
         cudaSuccess) {
         return false;
     }
-    if (!engine.context->setTensorAddress(name.c_str(), buffer->data())) {
-        return false;
-    }
+    engine.module->bind_external(name, buffer->data());
     state.device_buffers.push_back(std::move(buffer));
     return true;
 }
 
 bool bind_output_tensor(const VisionStepEngine& engine, const std::string& name, void* host_ptr,
-                        std::size_t bytes, VisionRunState& state, bool allow_host_tensor) {
-    if (allow_host_tensor &&
-        engine.engine->getTensorLocation(name.c_str()) == nvinfer1::TensorLocation::kHOST) {
-        return engine.context->setTensorAddress(name.c_str(), host_ptr);
-    }
-
+                        std::size_t bytes, VisionRunState& state, bool /*allow_host_tensor*/) {
     auto buffer = std::make_unique<CudaBuffer>(bytes);
     if (!buffer->ok()) {
         return false;
     }
-    if (!engine.context->setTensorAddress(name.c_str(), buffer->data())) {
-        return false;
-    }
+    engine.module->bind_external(name, buffer->data());
     state.output_copies.push_back(VisionPendingCopy{host_ptr, buffer->data(), bytes});
     state.device_buffers.push_back(std::move(buffer));
     return true;
@@ -75,7 +61,13 @@ bool run_and_copy_outputs(const VisionStepEngine& engine, CudaStream& stream,
                           const std::vector<VisionPendingCopy>& output_copies, std::string& error) {
     return run_vision_copy_plan(
         output_copies, error,
-        [&engine, &stream]() { return engine.context->enqueueV3(stream.get()); },
+        [&engine, &stream]() {
+            if (cudaStreamSynchronize(stream.get()) != cudaSuccess)
+                return false;
+            engine.module->forward_async({});
+            engine.module->sync();
+            return true;
+        },
         [&stream](const VisionPendingCopy& copy) {
             return cudaMemcpyAsync(copy.host_ptr, copy.device_ptr, copy.bytes,
                                    cudaMemcpyDeviceToHost, stream.get()) == cudaSuccess;
@@ -109,7 +101,7 @@ bool bind_deepstack_outputs(const VisionStepEngine& engine, std::size_t output_c
                             std::string& error) {
     deepstack_features.clear();
     for (const std::string& ds_name : collect_vision_deepstack_output_names(
-             [&engine](const std::string& name) { return has_io_tensor(*engine.engine, name); })) {
+             [&engine](const std::string& name) { return has_io_tensor(*engine.module, name); })) {
         deepstack_features.emplace_back(output_count, 0.0F);
         if (bind_output_tensor(engine, ds_name, deepstack_features.back().data(), output_bytes,
                                state, false)) {

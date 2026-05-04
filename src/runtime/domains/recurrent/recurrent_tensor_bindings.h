@@ -1,6 +1,7 @@
 #pragma once
 
-#include "runtime/core/trt_common.h"
+#include "runtime/core/cuda_common.h"
+#include "runtime/core/trt_engine_lifecycle.h"
 
 #include <array>
 #include <cstddef>
@@ -41,12 +42,6 @@ bool bind_input_tensor(
     const void* host_ptr,
     std::size_t bytes)
 {
-    const auto location = engine.engine->getTensorLocation(name.c_str());
-    if (location == nvinfer1::TensorLocation::kHOST)
-    {
-        return engine.context->setTensorAddress(name.c_str(), const_cast<void*>(host_ptr));
-    }
-
     auto buffer = std::make_unique<CudaBuffer>(bytes);
     if (!buffer->ok())
     {
@@ -56,10 +51,7 @@ bool bind_input_tensor(
     {
         return false;
     }
-    if (!engine.context->setTensorAddress(name.c_str(), buffer->data()))
-    {
-        return false;
-    }
+    engine.module->bind_external(name, buffer->data());
 
     device_buffers.push_back(std::move(buffer));
     return true;
@@ -74,21 +66,12 @@ bool bind_output_tensor(
     void* host_ptr,
     std::size_t bytes)
 {
-    const auto location = engine.engine->getTensorLocation(name.c_str());
-    if (location == nvinfer1::TensorLocation::kHOST)
-    {
-        return engine.context->setTensorAddress(name.c_str(), host_ptr);
-    }
-
     auto buffer = std::make_unique<CudaBuffer>(bytes);
     if (!buffer->ok())
     {
         return false;
     }
-    if (!engine.context->setTensorAddress(name.c_str(), buffer->data()))
-    {
-        return false;
-    }
+    engine.module->bind_external(name, buffer->data());
 
     output_copies.push_back(PendingCopy{host_ptr, buffer->data(), bytes});
     device_buffers.push_back(std::move(buffer));
@@ -117,11 +100,13 @@ bool execute_recurrent_step(
     const std::vector<PendingCopy>& output_copies,
     std::string& error)
 {
-    if (!engine.context->enqueueV3(stream.get()))
+    if (cudaStreamSynchronize(stream.get()) != cudaSuccess)
     {
-        error = "enqueueV3 failed";
+        error = "cudaStreamSynchronize failed";
         return false;
     }
+    engine.module->forward_async({});
+    engine.module->sync();
     if (!copy_outputs_to_host(output_copies, stream))
     {
         error = "cudaMemcpyAsync output failed";

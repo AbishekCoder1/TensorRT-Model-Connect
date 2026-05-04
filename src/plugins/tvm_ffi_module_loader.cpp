@@ -1,6 +1,6 @@
 // Load TVM-FFI modules from .so files — pure C++ via TVM-FFI C ABI.
 
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTF_HAS_TVM_FFI
 
 #include "plugins/tvm_ffi_module_loader.h"
 
@@ -114,4 +114,4 @@ bool load_tvm_ffi_module_func(const std::string& so_path, const std::string& fun
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#endif // TRTF_HAS_TVM_FFI

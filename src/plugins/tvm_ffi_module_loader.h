@@ -4,7 +4,7 @@
 // This enables the C++ runtime to use JIT-compiled FlashInfer kernels
 // without Python — pure C++ via the TVM-FFI C ABI.
 
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTF_HAS_TVM_FFI
 
 #include <string>
 
@@ -26,4 +26,4 @@ bool load_tvm_ffi_module_func(const std::string& so_path, const std::string& fun
 
 } // namespace trtf
 
-#endif // TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#endif // TRTF_HAS_TVM_FFI

@@ -567,6 +567,53 @@ bool TrtModuleImpl::has_output(const std::string& name) const {
     return it != buffers_.end() && !it->second.is_input;
 }
 
+DType TrtModuleImpl::tensor_dtype(const std::string& name) const {
+    auto it = buffers_.find(name);
+    if (it == buffers_.end())
+        return DType::kFloat32;
+    return it->second.dtype;
+}
+
+std::vector<int64_t> TrtModuleImpl::tensor_shape(const std::string& name) const {
+    auto it = buffers_.find(name);
+    if (it == buffers_.end())
+        return {};
+    return it->second.shape;
+}
+
+namespace {
+
+nvinfer1::OptProfileSelector to_trt_selector(ProfileShapeSelector selector) {
+    switch (selector) {
+    case ProfileShapeSelector::kMin:
+        return nvinfer1::OptProfileSelector::kMIN;
+    case ProfileShapeSelector::kOpt:
+        return nvinfer1::OptProfileSelector::kOPT;
+    case ProfileShapeSelector::kMax:
+        return nvinfer1::OptProfileSelector::kMAX;
+    }
+    return nvinfer1::OptProfileSelector::kOPT;
+}
+
+} // namespace
+
+std::vector<int64_t> TrtModuleImpl::input_profile_shape(const std::string& name,
+                                                        int32_t profile_idx,
+                                                        ProfileShapeSelector selector) const {
+    if (engine_ == nullptr || !has_input(name))
+        return {};
+    if (profile_idx < 0 || profile_idx >= engine_->getNbOptimizationProfiles())
+        return {};
+    const auto dims = engine_->getProfileShape(name.c_str(), profile_idx, to_trt_selector(selector));
+    if (dims.nbDims < 0)
+        return {};
+    return dims_to_shape(dims);
+}
+
+int32_t TrtModuleImpl::optimization_profile_count() const {
+    return engine_ != nullptr ? engine_->getNbOptimizationProfiles() : 0;
+}
+
 // --- Direct buffer access ---
 
 void* TrtModuleImpl::device_ptr(const std::string& name) const {
