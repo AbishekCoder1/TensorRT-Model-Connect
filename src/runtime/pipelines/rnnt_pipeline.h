@@ -29,9 +29,8 @@ class RnntPipeline final : public IPipeline {
                  std::map<int32_t, std::string> streaming_encoder_sections, IBackend* backend,
                  ModuleCreateOptions module_options,
                  std::map<int32_t, std::string> streaming_first_encoder_sections,
-                 std::string bundle_path,
-                 RnntConfig config, MelFilterbank mel_fb, cudaStream_t stream,
-                 std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                 std::string bundle_path, RnntConfig config, MelFilterbank mel_fb,
+                 cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
                  std::string model_id_str = "");
 
     ~RnntPipeline() override;

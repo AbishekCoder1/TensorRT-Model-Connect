@@ -53,6 +53,34 @@ bool rnnt_stream_debug_enabled() {
     return v && std::string(v) != "0";
 }
 
+void validate_rnnt_module(const std::unique_ptr<TrtModule>& module, const char* name) {
+    if (!module || !module->ok())
+        throw std::runtime_error(std::string("RnntPipeline: invalid ") + name + " module");
+}
+
+void validate_rnnt_core_config(const RnntConfig& config, const MelFilterbank& mel_fb) {
+    if (mel_fb.data.empty())
+        throw std::runtime_error("RnntPipeline: missing mel filterbank bundle section");
+    if (config.encoder_hidden_size <= 0 || config.pred_hidden_size <= 0 ||
+        config.pred_num_layers <= 0)
+        throw std::runtime_error("RnntPipeline: invalid RNNT dimensions in config");
+    if (config.blank_id < 0)
+        throw std::runtime_error("RnntPipeline: invalid blank token id");
+}
+
+bool has_streaming_encoder_sections(const std::map<int32_t, std::string>& steady_sections,
+                                    const std::map<int32_t, std::string>& first_sections) {
+    return !steady_sections.empty() || !first_sections.empty();
+}
+
+void validate_rnnt_streaming_config(const RnntConfig& config, bool has_streaming_sections) {
+    if (!has_streaming_sections)
+        return;
+    if (config.encoder_layers <= 0 || config.streaming_cache_left <= 0 ||
+        config.streaming_time_cache <= 0)
+        throw std::runtime_error("RnntPipeline: invalid RNNT streaming dimensions in config");
+}
+
 void print_vector_stats(const char* label, const std::vector<float>& values) {
     if (values.empty()) {
         std::cerr << "[rnnt.stream] " << label << " empty\n";
@@ -62,8 +90,8 @@ void print_vector_stats(const char* label, const std::vector<float>& values) {
     double sum_abs = 0.0;
     for (float v : values)
         sum_abs += std::abs(static_cast<double>(v));
-    std::cerr << "[rnnt.stream] " << label << " count=" << values.size()
-              << " min=" << *min_it << " max=" << *max_it
+    std::cerr << "[rnnt.stream] " << label << " count=" << values.size() << " min=" << *min_it
+              << " max=" << *max_it
               << " mean_abs=" << (sum_abs / static_cast<double>(values.size())) << "\n";
 }
 
@@ -102,9 +130,8 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         if (is_final)
             return finish();
 
-        const int32_t required_mel =
-            use_first_step_plan() ? schedule_.first_shift_mel_frames
-                                  : schedule_.next_shift_mel_frames;
+        const int32_t required_mel = use_first_step_plan() ? schedule_.first_shift_mel_frames
+                                                           : schedule_.next_shift_mel_frames;
         if (available_mel_frames() - next_mel_start_ < required_mel)
             return make_result(false);
 
@@ -140,6 +167,33 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
   private:
     bool use_first_step_plan() const {
         return next_mel_start_ == 0 && !cfg_.pad_and_drop_preencoded;
+    }
+
+    int32_t token_limit() const { return cfg_.max_new_tokens > 0 ? cfg_.max_new_tokens : 256; }
+
+    bool token_limit_reached() const {
+        return static_cast<int32_t>(emitted_.size()) >= token_limit();
+    }
+
+    int32_t current_shift_mel_frames(bool first_step) const {
+        return first_step ? schedule_.first_shift_mel_frames : schedule_.next_shift_mel_frames;
+    }
+
+    int32_t current_pre_encode_cache_mel_frames(bool first_step) const {
+        return first_step ? schedule_.first_pre_encode_cache_mel_frames
+                          : schedule_.next_pre_encode_cache_mel_frames;
+    }
+
+    int32_t current_drop_extra_pre_encoded(bool first_step) const {
+        return first_step ? 0 : schedule_.drop_extra_pre_encoded;
+    }
+
+    bool should_process_chunk(int32_t remaining, int32_t shift, bool final) const {
+        if (remaining <= 0)
+            return false;
+        if (!final && remaining < shift)
+            return false;
+        return true;
     }
 
     int32_t available_mel_frames() const {
@@ -213,6 +267,60 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         return out;
     }
 
+    int32_t valid_query_frames_for_chunk(int32_t valid_new_frames, bool first_step) const {
+        const int32_t valid_total_mel =
+            current_pre_encode_cache_mel_frames(first_step) + valid_new_frames;
+        const int32_t drop_extra = current_drop_extra_pre_encoded(first_step);
+        int32_t valid_query_frames =
+            subsampled_frame_count(valid_total_mel, pipeline_.config_.causal_downsampling) -
+            drop_extra;
+        return std::max(0, std::min(valid_query_frames, schedule_.valid_encoder_frames));
+    }
+
+    void trace_streaming_chunk(const std::vector<float>& enc, std::size_t before_tokens,
+                               int32_t valid_new_frames, int32_t valid_query_frames) const {
+        std::cerr << "[rnnt.stream] chunk=" << chunk_index_ << " mel_start=" << next_mel_start_
+                  << " valid_new_mel=" << valid_new_frames << " valid_query=" << valid_query_frames
+                  << " cache_len=" << cache_last_channel_len_
+                  << " emitted_delta=" << (emitted_.size() - before_tokens)
+                  << " emitted_total=" << emitted_.size() << "\n";
+        print_vector_stats("encoder", enc);
+    }
+
+    bool process_next_chunk(const MelResult& mel, int32_t actual_mel_frames, bool final) {
+        const bool first_step = use_first_step_plan();
+        const int32_t shift = current_shift_mel_frames(first_step);
+        const int32_t remaining = actual_mel_frames - next_mel_start_;
+        if (!should_process_chunk(remaining, shift, final))
+            return false;
+
+        const int32_t valid_new_frames = std::min(shift, remaining);
+        const int32_t valid_query_frames =
+            valid_query_frames_for_chunk(valid_new_frames, first_step);
+        if (valid_query_frames <= 0)
+            return false;
+
+        auto chunk = make_chunk_mel(mel, next_mel_start_, valid_new_frames, first_step);
+        std::vector<float> next_channel;
+        std::vector<float> next_time;
+        const auto before_tokens = emitted_.size();
+        auto enc = pipeline_.run_streaming_encoder(
+            cfg_.att_context_right, chunk, cache_last_channel_, cache_last_time_,
+            cache_last_channel_len_, valid_query_frames, first_step, next_channel, next_time);
+        pipeline_.decode_encoder_frames(enc, valid_query_frames, token_limit(), pred_output_,
+                                        state_h_, state_c_, emitted_);
+        if (rnnt_stream_debug_enabled())
+            trace_streaming_chunk(enc, before_tokens, valid_new_frames, valid_query_frames);
+
+        cache_last_channel_ = std::move(next_channel);
+        cache_last_time_ = std::move(next_time);
+        cache_last_channel_len_ =
+            std::min(pipeline_.config_.streaming_cache_left,
+                     cache_last_channel_len_ + schedule_.valid_encoder_frames);
+        next_mel_start_ += valid_new_frames;
+        return valid_new_frames == shift;
+    }
+
     TranscriptionStreamResult process_ready(bool final) {
         if (audio_.empty())
             return make_result(final);
@@ -221,59 +329,8 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         if (mel.data.empty())
             return make_result(final);
 
-        while (static_cast<int32_t>(emitted_.size()) <
-               (cfg_.max_new_tokens > 0 ? cfg_.max_new_tokens : 256)) {
-            const bool first_step = use_first_step_plan();
-            const int32_t shift =
-                first_step ? schedule_.first_shift_mel_frames : schedule_.next_shift_mel_frames;
-            const int32_t remaining = actual_mel_frames - next_mel_start_;
-            if (remaining <= 0)
-                break;
-            if (!final && remaining < shift)
-                break;
-
-            const int32_t valid_new_frames = std::min(shift, remaining);
-            const int32_t pre_encode_cache =
-                first_step ? schedule_.first_pre_encode_cache_mel_frames
-                           : schedule_.next_pre_encode_cache_mel_frames;
-            const int32_t drop_extra =
-                first_step ? 0 : schedule_.drop_extra_pre_encoded;
-            const int32_t valid_total_mel = pre_encode_cache + valid_new_frames;
-            int32_t valid_query_frames =
-                subsampled_frame_count(valid_total_mel, pipeline_.config_.causal_downsampling) -
-                drop_extra;
-            valid_query_frames =
-                std::max(0, std::min(valid_query_frames, schedule_.valid_encoder_frames));
-            if (valid_query_frames <= 0)
-                break;
-
-            auto chunk = make_chunk_mel(mel, next_mel_start_, valid_new_frames, first_step);
-            std::vector<float> next_channel;
-            std::vector<float> next_time;
-            const auto before_tokens = emitted_.size();
-            auto enc = pipeline_.run_streaming_encoder(
-                cfg_.att_context_right, chunk, cache_last_channel_, cache_last_time_,
-                cache_last_channel_len_, valid_query_frames, first_step, next_channel, next_time);
-            pipeline_.decode_encoder_frames(
-                enc, valid_query_frames, cfg_.max_new_tokens > 0 ? cfg_.max_new_tokens : 256,
-                pred_output_, state_h_, state_c_, emitted_);
-            if (rnnt_stream_debug_enabled()) {
-                std::cerr << "[rnnt.stream] chunk=" << chunk_index_
-                          << " mel_start=" << next_mel_start_
-                          << " valid_new_mel=" << valid_new_frames
-                          << " valid_query=" << valid_query_frames
-                          << " cache_len=" << cache_last_channel_len_
-                          << " emitted_delta=" << (emitted_.size() - before_tokens)
-                          << " emitted_total=" << emitted_.size() << "\n";
-                print_vector_stats("encoder", enc);
-            }
-            cache_last_channel_ = std::move(next_channel);
-            cache_last_time_ = std::move(next_time);
-            cache_last_channel_len_ = std::min(
-                pipeline_.config_.streaming_cache_left,
-                cache_last_channel_len_ + schedule_.valid_encoder_frames);
-            next_mel_start_ += valid_new_frames;
-            if (valid_new_frames < shift)
+        while (!token_limit_reached()) {
+            if (!process_next_chunk(mel, actual_mel_frames, final))
                 break;
         }
         return make_result(final);
@@ -309,40 +366,27 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
     TranscriptionStreamResult final_;
 };
 
-RnntPipeline::RnntPipeline(std::unique_ptr<TrtModule> encoder,
-                           std::unique_ptr<TrtModule> predictor,
+RnntPipeline::RnntPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> predictor,
                            std::unique_ptr<TrtModule> joint,
                            std::map<int32_t, std::string> streaming_encoder_sections,
                            IBackend* backend, ModuleCreateOptions module_options,
                            std::map<int32_t, std::string> streaming_first_encoder_sections,
                            std::string bundle_path, RnntConfig config, MelFilterbank mel_fb,
-                           cudaStream_t stream,
-                           std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+                           cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+                           std::string model_id_str)
     : encoder_(std::move(encoder)), predictor_(std::move(predictor)), joint_(std::move(joint)),
       streaming_encoder_sections_(std::move(streaming_encoder_sections)),
       streaming_first_encoder_sections_(std::move(streaming_first_encoder_sections)),
       backend_(backend), module_options_(module_options), bundle_path_(std::move(bundle_path)),
-      config_(std::move(config)),
-      mel_fb_(std::make_unique<MelFilterbank>(std::move(mel_fb))), stream_(stream),
-      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
-    if (!encoder_ || !encoder_->ok())
-        throw std::runtime_error("RnntPipeline: invalid encoder module");
-    if (!predictor_ || !predictor_->ok())
-        throw std::runtime_error("RnntPipeline: invalid predictor module");
-    if (!joint_ || !joint_->ok())
-        throw std::runtime_error("RnntPipeline: invalid joint module");
-    if (!mel_fb_ || mel_fb_->data.empty())
-        throw std::runtime_error("RnntPipeline: missing mel filterbank bundle section");
-    if (config_.encoder_hidden_size <= 0 || config_.pred_hidden_size <= 0 ||
-        config_.pred_num_layers <= 0)
-        throw std::runtime_error("RnntPipeline: invalid RNNT dimensions in config");
-    if ((!streaming_encoder_sections_.empty() || !streaming_first_encoder_sections_.empty() ||
-         !streaming_encoders_.empty() || !streaming_first_encoders_.empty()) &&
-        (config_.encoder_layers <= 0 || config_.streaming_cache_left <= 0 ||
-         config_.streaming_time_cache <= 0))
-        throw std::runtime_error("RnntPipeline: invalid RNNT streaming dimensions in config");
-    if (config_.blank_id < 0)
-        throw std::runtime_error("RnntPipeline: invalid blank token id");
+      config_(std::move(config)), mel_fb_(std::make_unique<MelFilterbank>(std::move(mel_fb))),
+      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
+    validate_rnnt_module(encoder_, "encoder");
+    validate_rnnt_module(predictor_, "predictor");
+    validate_rnnt_module(joint_, "joint");
+    validate_rnnt_core_config(config_, *mel_fb_);
+    validate_rnnt_streaming_config(
+        config_, has_streaming_encoder_sections(streaming_encoder_sections_,
+                                                streaming_first_encoder_sections_));
 }
 
 RnntPipeline::~RnntPipeline() = default;
@@ -401,8 +445,8 @@ TextResult RnntPipeline::transcribe(const float* audio_data, int32_t num_samples
     const int32_t token_limit = max_new_tokens > 0 ? max_new_tokens : 256;
     emitted.reserve(static_cast<std::size_t>(token_limit));
 
-    decode_encoder_frames(encoder_output, encoder_frames, token_limit, pred_output, state_h, state_c,
-                          emitted);
+    decode_encoder_frames(encoder_output, encoder_frames, token_limit, pred_output, state_h,
+                          state_c, emitted);
 
     TextResult out;
     out.token_ids = std::move(emitted);
@@ -420,16 +464,16 @@ std::vector<float> RnntPipeline::extract_padded_mel(const float* audio_data, int
     if (input_sample_rate > 0 && input_sample_rate != config_.sample_rate) {
         std::cerr << "[rnnt] Resampling audio from " << input_sample_rate << " Hz to "
                   << config_.sample_rate << " Hz" << std::endl;
-        resampled = resample_linear(audio_data, num_samples, input_sample_rate, config_.sample_rate);
+        resampled =
+            resample_linear(audio_data, num_samples, input_sample_rate, config_.sample_rate);
         samples_ptr = resampled.data();
         samples_count = static_cast<int32_t>(resampled.size());
     }
 
     MelResult mel = extract_nemo_mel_spectrogram(
-        samples_ptr, samples_count, mel_fb_->data.data(), mel_fb_->n_freq_bins,
-        mel_fb_->n_mel_bins, config_.mel_n_fft, config_.mel_win_length,
-        config_.mel_hop_length, config_.mel_chunk_length, config_.sample_rate,
-        config_.mel_preemph);
+        samples_ptr, samples_count, mel_fb_->data.data(), mel_fb_->n_freq_bins, mel_fb_->n_mel_bins,
+        config_.mel_n_fft, config_.mel_win_length, config_.mel_hop_length, config_.mel_chunk_length,
+        config_.sample_rate, config_.mel_preemph);
     actual_frames = std::min(mel.n_frames, std::max(0, samples_count / config_.mel_hop_length));
     if (mel.data.empty())
         return {};
@@ -447,23 +491,24 @@ std::vector<float> RnntPipeline::extract_padded_mel(const float* audio_data, int
 
 std::vector<float> RnntPipeline::run_encoder(const std::vector<float>& mel, int32_t actual_frames) {
     TensorMap inputs;
-    inputs["mel_features"] = make_tensor(const_cast<float*>(mel.data()),
-                                         {config_.num_mel_bins, config_.mel_length},
-                                         DType::kFloat32);
+    inputs["mel_features"] =
+        make_tensor(const_cast<float*>(mel.data()), {config_.num_mel_bins, config_.mel_length},
+                    DType::kFloat32);
 
     std::vector<float> encoder_mask;
     if (encoder_->has_input("encoder_mask")) {
         const int32_t max_frames = std::max(
-            1, config_.encoder_seq_len > 0 ? config_.encoder_seq_len
-                                           : subsampled_frame_count(config_.mel_length,
-                                                                    config_.causal_downsampling));
+            1, config_.encoder_seq_len > 0
+                   ? config_.encoder_seq_len
+                   : subsampled_frame_count(config_.mel_length, config_.causal_downsampling));
         int32_t actual_encoder_frames =
             std::max(1, subsampled_frame_count(actual_frames, config_.causal_downsampling));
         actual_encoder_frames = std::min(actual_encoder_frames, max_frames);
         encoder_mask.assign(static_cast<std::size_t>(max_frames) * max_frames, -10000.0F);
         for (int32_t q = 0; q < actual_encoder_frames; ++q) {
             const int32_t k_begin = std::max(0, q - config_.att_context_left);
-            const int32_t k_end = std::min(actual_encoder_frames - 1, q + config_.att_context_right);
+            const int32_t k_end =
+                std::min(actual_encoder_frames - 1, q + config_.att_context_right);
             for (int32_t k = k_begin; k <= k_end; ++k)
                 encoder_mask[static_cast<std::size_t>(q) * max_frames + k] = 0.0F;
         }
@@ -493,11 +538,11 @@ TrtModule& RnntPipeline::streaming_encoder_for(int32_t right_context, bool first
         throw std::runtime_error("RnntPipeline: missing streaming encoder plan for requested "
                                  "att_context_size");
     if (bundle_path_.empty())
-        throw std::runtime_error("RnntPipeline: missing bundle path for lazy streaming encoder load");
+        throw std::runtime_error(
+            "RnntPipeline: missing bundle path for lazy streaming encoder load");
 
     const std::string label = std::string("rnnt streaming encoder ") +
-                              (first_step ? "first ctx" : "ctx") +
-                              std::to_string(right_context);
+                              (first_step ? "first ctx" : "ctx") + std::to_string(right_context);
     BundleFile bundle = ReadBundleFile(bundle_path_);
     const auto* plan = find_section(bundle, section_it->second);
     auto loaded = load_trt_module_from_plan(backend_, plan, label.c_str(), module_options_);
@@ -519,18 +564,14 @@ std::vector<float> RnntPipeline::run_streaming_encoder(
     const int32_t query_frames = schedule.valid_encoder_frames;
     const int32_t cache_frames = config_.streaming_cache_left;
     const int32_t key_frames = cache_frames + query_frames;
-    const int32_t mel_frames = first_step
-                                   ? schedule.first_pre_encode_cache_mel_frames +
-                                         schedule.first_shift_mel_frames
-                                   : schedule.next_pre_encode_cache_mel_frames +
-                                         schedule.next_shift_mel_frames;
+    const int32_t mel_frames =
+        first_step ? schedule.first_pre_encode_cache_mel_frames + schedule.first_shift_mel_frames
+                   : schedule.next_pre_encode_cache_mel_frames + schedule.next_shift_mel_frames;
 
-    std::vector<float> encoder_mask(static_cast<std::size_t>(query_frames) * key_frames,
-                                    -10000.0F);
+    std::vector<float> encoder_mask(static_cast<std::size_t>(query_frames) * key_frames, -10000.0F);
     const int32_t valid_cache_begin = cache_frames - std::max(0, cache_last_channel_len);
     for (int32_t q = 0; q < valid_query_frames; ++q) {
-        const int32_t key_end =
-            cache_frames + std::min(valid_query_frames - 1, q + right_context);
+        const int32_t key_end = cache_frames + std::min(valid_query_frames - 1, q + right_context);
         for (int32_t k = valid_cache_begin; k <= key_end; ++k) {
             if (k >= 0 && k < key_frames)
                 encoder_mask[static_cast<std::size_t>(q) * key_frames + k] = 0.0F;
@@ -540,14 +581,13 @@ std::vector<float> RnntPipeline::run_streaming_encoder(
     TensorMap inputs;
     inputs["mel_features"] = make_tensor(const_cast<float*>(mel.data()),
                                          {config_.num_mel_bins, mel_frames}, DType::kFloat32);
-    inputs["cache_last_channel"] = make_tensor(const_cast<float*>(cache_last_channel.data()),
-                                               {config_.encoder_layers, cache_frames,
-                                                config_.encoder_hidden_size},
-                                               DType::kFloat32);
-    inputs["cache_last_time"] = make_tensor(const_cast<float*>(cache_last_time.data()),
-                                            {config_.encoder_layers, config_.encoder_hidden_size,
-                                             config_.streaming_time_cache},
-                                            DType::kFloat32);
+    inputs["cache_last_channel"] = make_tensor(
+        const_cast<float*>(cache_last_channel.data()),
+        {config_.encoder_layers, cache_frames, config_.encoder_hidden_size}, DType::kFloat32);
+    inputs["cache_last_time"] = make_tensor(
+        const_cast<float*>(cache_last_time.data()),
+        {config_.encoder_layers, config_.encoder_hidden_size, config_.streaming_time_cache},
+        DType::kFloat32);
     inputs["encoder_mask"] =
         make_tensor(encoder_mask.data(), {1, query_frames, key_frames}, DType::kFloat32);
 
@@ -559,8 +599,7 @@ std::vector<float> RnntPipeline::run_streaming_encoder(
         throw std::runtime_error("RnntPipeline: streaming encoder missing required outputs");
 
     const auto* enc_src = static_cast<const float*>(enc_it->second.data);
-    const auto enc_count =
-        static_cast<std::size_t>(query_frames) * config_.encoder_hidden_size;
+    const auto enc_count = static_cast<std::size_t>(query_frames) * config_.encoder_hidden_size;
     std::vector<float> enc(enc_src, enc_src + enc_count);
 
     const auto* ch_src = static_cast<const float*>(ch_it->second.data);
@@ -573,8 +612,7 @@ std::vector<float> RnntPipeline::run_streaming_encoder(
 void RnntPipeline::decode_encoder_frames(const std::vector<float>& encoder_output,
                                          int32_t frame_count, int32_t token_limit,
                                          std::vector<float>& pred_output,
-                                         std::vector<float>& state_h,
-                                         std::vector<float>& state_c,
+                                         std::vector<float>& state_h, std::vector<float>& state_c,
                                          std::vector<int32_t>& emitted) {
     for (int32_t frame = 0;
          frame < frame_count && static_cast<int32_t>(emitted.size()) < token_limit; ++frame) {

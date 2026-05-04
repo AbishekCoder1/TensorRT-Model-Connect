@@ -53,9 +53,11 @@ inline bool is_supported_nemotron_att_context(int32_t left, int32_t right) {
     return left == 70 && (right == 0 || right == 1 || right == 6 || right == 13);
 }
 
-inline RnntStreamingSchedule make_nemotron_streaming_schedule(
-    int32_t att_context_left, int32_t att_context_right, int32_t sample_rate = 16000,
-    int32_t mel_hop_length = 160, int32_t subsampling_factor = 8) {
+inline RnntStreamingSchedule make_nemotron_streaming_schedule(int32_t att_context_left,
+                                                              int32_t att_context_right,
+                                                              int32_t sample_rate = 16000,
+                                                              int32_t mel_hop_length = 160,
+                                                              int32_t subsampling_factor = 8) {
     if (!is_supported_nemotron_att_context(att_context_left, att_context_right))
         throw std::invalid_argument("Nemotron RNNT streaming supports att_context_size "
                                     "[70,0], [70,1], [70,6], or [70,13]");

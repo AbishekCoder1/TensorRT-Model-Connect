@@ -939,17 +939,16 @@ int cmd_transcribe(const CliArgs& args) {
 
         auto stream = pipeline->create_transcription_stream(cfg);
         const int32_t chunk_ms = args.chunk_ms > 0 ? args.chunk_ms : 160;
-        const int32_t samples_per_chunk =
-            std::max<int32_t>(1, static_cast<int32_t>(
-                                     static_cast<int64_t>(audio.sample_rate) * chunk_ms / 1000));
+        const int32_t samples_per_chunk = std::max<int32_t>(
+            1, static_cast<int32_t>(static_cast<int64_t>(audio.sample_rate) * chunk_ms / 1000));
         trtf::TranscriptionStreamResult result;
         for (std::size_t offset = 0; offset < audio.samples.size();) {
             const auto remaining = audio.samples.size() - offset;
             const auto take =
                 std::min<std::size_t>(remaining, static_cast<std::size_t>(samples_per_chunk));
             const bool is_final = (offset + take) >= audio.samples.size();
-            result = stream->accept_audio(audio.samples.data() + offset,
-                                          static_cast<int32_t>(take), is_final);
+            result = stream->accept_audio(audio.samples.data() + offset, static_cast<int32_t>(take),
+                                          is_final);
             offset += take;
         }
         if (audio.samples.empty())
