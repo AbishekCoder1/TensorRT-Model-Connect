@@ -22,6 +22,7 @@ try:
         _detect_tokenizer_add_special_tokens,
         _resolve_model,
         _get_trt_version,
+        _trt_abi_from_version,
         _get_gpu_name,
         _HF_ALLOW_PATTERNS,
         _ensure_tokenizer_json,
@@ -96,6 +97,15 @@ class TestGetTrtVersion:
         assert isinstance(result, str)
         # Should either be a version string or "unknown"
         assert result == "unknown" or "." in result
+
+
+class TestTrtAbiFromVersion:
+    def test_extracts_major_minor(self):
+        assert _trt_abi_from_version("10.15.0.6") == "10.15"
+        assert _trt_abi_from_version("11.0") == "11.0"
+
+    def test_unknown_returns_empty(self):
+        assert _trt_abi_from_version("unknown") == ""
 
 
 class TestGetGpuName:

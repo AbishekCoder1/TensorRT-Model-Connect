@@ -18,6 +18,8 @@ include(GNUInstallDirs)
 
 option(TRTF_ENABLE_TRT "Enable TensorRT backend DSO integration" ON)
 option(TRTF_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
+set(TRTF_TRT_BACKEND_ABI "" CACHE STRING
+  "TensorRT ABI suffix for the standard backend DSO, e.g. 10_15. Empty means auto-detect from headers.")
 
 # CUDA is required by the core runtime. TensorRT is optional at core build time:
 # concrete TRT runtimes live in backend DSOs.
@@ -52,7 +54,7 @@ find_path(TRTF_TRT_INCLUDE_DIR NvInferRuntime.h
 )
 
 find_library(TRTF_TRT_LIBRARY
-  NAMES nvinfer libnvinfer.so.10 nvinfer.so.10
+  NAMES nvinfer libnvinfer.so.11 nvinfer.so.11 libnvinfer.so.10 nvinfer.so.10
   PATHS ${_trtf_default_search_paths}
   PATH_SUFFIXES "" lib lib64
 )
@@ -67,6 +69,39 @@ find_library(TRTF_CUDART_LIBRARY
   PATHS ${_trtf_default_search_paths}
   PATH_SUFFIXES "" lib lib64
 )
+
+function(_trtf_header_define_value OUT_VAR DEFINE_NAME)
+  set(${OUT_VAR} "" PARENT_SCOPE)
+  if(NOT TRTF_TRT_INCLUDE_DIR OR NOT EXISTS "${TRTF_TRT_INCLUDE_DIR}/NvInferVersion.h")
+    return()
+  endif()
+  file(READ "${TRTF_TRT_INCLUDE_DIR}/NvInferVersion.h" _trtf_version_header)
+  string(REGEX MATCH "#define[ \t]+${DEFINE_NAME}[ \t]+([A-Za-z0-9_]+)"
+    _trtf_define_match "${_trtf_version_header}")
+  if(NOT _trtf_define_match)
+    return()
+  endif()
+  set(_trtf_value "${CMAKE_MATCH_1}")
+  if(NOT _trtf_value MATCHES "^[0-9]+$")
+    string(REGEX MATCH "#define[ \t]+${_trtf_value}[ \t]+([0-9]+)"
+      _trtf_alias_match "${_trtf_version_header}")
+    if(_trtf_alias_match)
+      set(_trtf_value "${CMAKE_MATCH_1}")
+    endif()
+  endif()
+  if(_trtf_value MATCHES "^[0-9]+$")
+    set(${OUT_VAR} "${_trtf_value}" PARENT_SCOPE)
+  endif()
+endfunction()
+
+if(NOT TRTF_TRT_BACKEND_ABI AND TRTF_TRT_INCLUDE_DIR)
+  _trtf_header_define_value(_trtf_header_trt_major NV_TENSORRT_MAJOR)
+  _trtf_header_define_value(_trtf_header_trt_minor NV_TENSORRT_MINOR)
+  if(_trtf_header_trt_major AND _trtf_header_trt_minor)
+    set(TRTF_TRT_BACKEND_ABI "${_trtf_header_trt_major}_${_trtf_header_trt_minor}"
+      CACHE STRING "TensorRT ABI suffix for the standard backend DSO" FORCE)
+  endif()
+endif()
 
 if(NOT TRTF_CUDA_INCLUDE_DIR OR NOT TRTF_CUDART_LIBRARY)
   message(FATAL_ERROR
@@ -105,6 +140,7 @@ add_library(trtf_core
   src/runtime/core/gpu_matmul.cpp
   src/runtime/core/cuda_common.cpp
   src/runtime/backend/backend_loader.cpp
+  src/runtime/backend/trt_version.cpp
   src/runtime/core/trt_engine_lifecycle.cpp
   src/runtime/core/trt_decode_runtime.cpp
   src/runtime/core/sampler.cpp
@@ -391,15 +427,27 @@ if(TRTF_BUILD_BACKEND_TRT AND _trtf_can_build_trt_backend)
   target_compile_definitions(trtf_backend_trt PRIVATE
     TRTF_HAS_TRT=1
     TRTF_HAS_TVM_FFI=$<BOOL:${_trtf_has_tvm_ffi}>
+    TRTF_TRT_BACKEND_ABI_STRING=\"${TRTF_TRT_BACKEND_ABI}\"
   )
   set_target_properties(trtf_backend_trt PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
   )
+  if(TRTF_TRT_BACKEND_ABI)
+    add_custom_command(TARGET trtf_backend_trt POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:trtf_backend_trt>
+        "${CMAKE_BINARY_DIR}/libtrtf_backend_trt_${TRTF_TRT_BACKEND_ABI}.so"
+      COMMENT "Writing TensorRT ABI backend alias libtrtf_backend_trt_${TRTF_TRT_BACKEND_ABI}.so"
+    )
+  endif()
   # Also add nlohmann_json include for trt_module_impl (uses DType from tensor.h)
   target_include_directories(trtf_backend_trt SYSTEM PRIVATE
     ${nlohmann_json_SOURCE_DIR}/include
   )
   message(STATUS "TRT backend DSO: enabled (libtrtf_backend_trt.so)")
+  if(TRTF_TRT_BACKEND_ABI)
+    message(STATUS "TRT backend DSO ABI alias: libtrtf_backend_trt_${TRTF_TRT_BACKEND_ABI}.so")
+  endif()
 elseif(TRTF_BUILD_BACKEND_TRT)
   message(STATUS "TRT backend DSO: disabled (missing libnvinfer or headers)")
 endif()
@@ -504,6 +552,7 @@ trtf_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtf_add_test(test_bundle_view)
 trtf_add_test(test_pipeline_registry)
 trtf_add_test(test_backend_loader)
+trtf_add_test(test_trt_version)
 
 # C ABI
 trtf_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
@@ -683,6 +732,18 @@ install(TARGETS trtf_core
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
+
+if(TARGET trtf_backend_trt)
+  install(TARGETS trtf_backend_trt
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+  if(TRTF_TRT_BACKEND_ABI)
+    install(FILES "${CMAKE_BINARY_DIR}/libtrtf_backend_trt_${TRTF_TRT_BACKEND_ABI}.so"
+      DESTINATION ${CMAKE_INSTALL_LIBDIR}
+      OPTIONAL
+    )
+  endif()
+endif()
 
 # Install public headers
 install(DIRECTORY include/trtf/

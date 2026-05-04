@@ -1007,6 +1007,8 @@ int cmd_inspect(const CliArgs& args) {
         if (!info.precision.empty())
             std::cout << "Precision:          " << info.precision << '\n';
         std::cout << "TRT version:        " << info.trt_version << '\n';
+        if (!info.trt_abi.empty())
+            std::cout << "TRT ABI:            " << info.trt_abi << '\n';
         std::cout << "GPU:                " << info.gpu_name << '\n';
         std::cout << "Created:            " << info.created_at << '\n';
         std::cout << "Vocab size:         " << info.vocab_size << '\n';
@@ -1069,32 +1071,37 @@ int main(int argc, char** argv) {
     if (int rc = apply_cli_config(args); rc != EXIT_SUCCESS)
         return rc;
 
-    if (args.command == "version")
-        return cmd_version();
-    if (args.command == "run")
-        return cmd_run(args);
-    if (args.command == "encode")
-        return cmd_encode(args);
-    if (args.command == "segment")
-        return cmd_segment(args);
-    if (args.command == "generate-audio")
-        return cmd_generate_audio(args);
-    if (args.command == "serve-audio")
-        return cmd_serve_audio(args);
-    if (args.command == "generate-video")
-        return cmd_generate_video(args);
-    if (args.command == "embed")
-        return cmd_embed(args);
-    if (args.command == "rerank")
-        return cmd_rerank(args);
-    if (args.command == "solve")
-        return cmd_solve(args);
-    if (args.command == "speak")
-        return cmd_speak(args);
-    if (args.command == "transcribe")
-        return cmd_transcribe(args);
-    if (args.command == "inspect")
-        return cmd_inspect(args);
+    try {
+        if (args.command == "version")
+            return cmd_version();
+        if (args.command == "run")
+            return cmd_run(args);
+        if (args.command == "encode")
+            return cmd_encode(args);
+        if (args.command == "segment")
+            return cmd_segment(args);
+        if (args.command == "generate-audio")
+            return cmd_generate_audio(args);
+        if (args.command == "serve-audio")
+            return cmd_serve_audio(args);
+        if (args.command == "generate-video")
+            return cmd_generate_video(args);
+        if (args.command == "embed")
+            return cmd_embed(args);
+        if (args.command == "rerank")
+            return cmd_rerank(args);
+        if (args.command == "solve")
+            return cmd_solve(args);
+        if (args.command == "speak")
+            return cmd_speak(args);
+        if (args.command == "transcribe")
+            return cmd_transcribe(args);
+        if (args.command == "inspect")
+            return cmd_inspect(args);
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << '\n';
+        return EXIT_FAILURE;
+    }
 
     print_usage();
     return EXIT_FAILURE;

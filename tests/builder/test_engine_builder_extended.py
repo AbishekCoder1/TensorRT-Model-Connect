@@ -285,6 +285,7 @@ class TestBuildBundleOrchestration:
                             assert info.model_type == "qwen3"
                             assert info.family == "qwen"
                             assert info.trt_version == "10.3.0"
+                            assert info.trt_abi == "10.3"
                             assert info.gpu_name == "NVIDIA H100"
                             assert info.vocab_size == 100
                             assert info.hidden_size == 64

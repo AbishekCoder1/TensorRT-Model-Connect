@@ -10,9 +10,34 @@
 #include <NvInfer.h>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 
+#ifndef TRTF_TRT_BACKEND_ABI_STRING
+#define TRTF_TRT_BACKEND_ABI_STRING ""
+#endif
+
 namespace trtf {
+
+namespace {
+
+std::string trt_runtime_version_string() {
+    std::ostringstream oss;
+    oss << getInferLibMajorVersion() << "." << getInferLibMinorVersion() << "."
+        << getInferLibPatchVersion() << "." << getInferLibBuildVersion();
+    return oss.str();
+}
+
+std::string trt_backend_abi_string() {
+    const std::string configured = TRTF_TRT_BACKEND_ABI_STRING;
+    if (!configured.empty())
+        return configured;
+    std::ostringstream oss;
+    oss << NV_TENSORRT_MAJOR << "." << NV_TENSORRT_MINOR;
+    return oss.str();
+}
+
+} // namespace
 
 class TrtBackend final : public IBackend {
   public:
@@ -163,4 +188,14 @@ extern "C" trtf::IBackend* trtf_create_backend() {
 
 extern "C" void trtf_destroy_backend(trtf::IBackend* b) {
     delete b;
+}
+
+extern "C" const char* trtf_backend_abi() {
+    static const std::string abi = trtf::trt_backend_abi_string();
+    return abi.c_str();
+}
+
+extern "C" const char* trtf_backend_runtime_version() {
+    static const std::string version = trtf::trt_runtime_version_string();
+    return version.c_str();
 }

@@ -24,6 +24,7 @@ class BundleInfo:
     model_type: str = ""
     family: str = ""
     trt_version: str = ""
+    trt_abi: str = ""
     gpu_name: str = ""
     created_at: str = ""
     vocab_size: int = 0
@@ -74,6 +75,7 @@ def write_bundle(
         "model_type": info.model_type,
         "family": info.family,
         "trt_version": info.trt_version,
+        "trt_abi": info.trt_abi,
         "gpu_name": info.gpu_name,
         "created_at": info.created_at,
         "vocab_size": info.vocab_size,

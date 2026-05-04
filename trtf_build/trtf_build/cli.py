@@ -456,6 +456,7 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
             ("Model type", "model_type"),
             ("Family", "family"),
             ("TRT version", "trt_version"),
+            ("TRT ABI", "trt_abi"),
             ("GPU", "gpu_name"),
             ("Created", "created_at"),
             ("Vocab size", "vocab_size"),

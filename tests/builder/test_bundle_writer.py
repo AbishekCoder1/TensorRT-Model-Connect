@@ -150,6 +150,7 @@ class TestWriteBundle:
             model_type="llama",
             family="llama",
             trt_version="10.1.0",
+            trt_abi="10.1",
             gpu_name="NVIDIA RTX 4090",
             created_at="2026-02-16T12:00:00Z",
             vocab_size=32000,
@@ -164,6 +165,7 @@ class TestWriteBundle:
 
         header, _ = self._read_bundle(out_path)
         assert header["trt_version"] == "10.1.0"
+        assert header["trt_abi"] == "10.1"
         assert header["gpu_name"] == "NVIDIA RTX 4090"
         assert header["created_at"] == "2026-02-16T12:00:00Z"
         assert header["num_attention_heads"] == 32

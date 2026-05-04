@@ -90,6 +90,7 @@ static void test_read_valid_bundle() {
   "model_type": "qwen3",
   "family": "qwen",
   "trt_version": "10.15.0",
+  "trt_abi": "10.15",
   "gpu_name": "GeForce RTX 4090",
   "created_at": "2026-02-14T12:00:00Z",
   "vocab_size": 151936,
@@ -112,6 +113,8 @@ static void test_read_valid_bundle() {
     check(loaded.info.model_id == "test-model", "read model_id");
     check(loaded.info.model_type == "qwen3", "read model_type");
     check(loaded.info.family == "qwen", "read family");
+    check(loaded.info.trt_version == "10.15.0", "read trt_version");
+    check(loaded.info.trt_abi == "10.15", "read trt_abi");
     check(loaded.info.vocab_size == 151936, "read vocab_size");
     check(loaded.info.hidden_size == 1024, "read hidden_size");
     check(loaded.info.num_layers == 28, "read num_layers");

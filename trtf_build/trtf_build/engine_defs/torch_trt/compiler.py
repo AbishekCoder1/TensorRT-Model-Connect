@@ -22,6 +22,7 @@ import gc
 import io
 import json
 import logging
+import re
 import sys
 import time
 import warnings
@@ -116,6 +117,13 @@ def _get_trt_version() -> str:
         return tensorrt.__version__
     except ImportError:
         return ""
+
+
+def _trt_abi_from_version(version: str) -> str:
+    match = re.search(r"(\d+)\.(\d+)", version or "")
+    if not match:
+        return ""
+    return f"{match.group(1)}.{match.group(2)}"
 
 
 def _get_gpu_name() -> str:
@@ -403,12 +411,19 @@ def _build_multi_engine_bundle(
     raw_runtime_strategy = result["runtime_strategy"]
     normalized_strategy = _normalize_runtime_strategy(raw_runtime_strategy)
     diffusion_config = result.get("diffusion_config", {})
+    trt_version = _get_trt_version()
+    trt_abi = _trt_abi_from_version(trt_version)
 
     # Build config.json for the bundle (using normalized strategy)
     bundle_config = {
         "runtime_strategy": normalized_strategy,
+        "engine_backend": "trt",
+        "build_backend": "torch_trt",
+        "trt_version": trt_version,
         **diffusion_config,
     }
+    if trt_abi:
+        bundle_config["trt_abi"] = trt_abi
     config_data = json.dumps(bundle_config, indent=2).encode("utf-8")
 
     # Assemble all sections: engine plans + config
@@ -433,6 +448,8 @@ def _build_multi_engine_bundle(
         family=plugin.name,
         torch_version=_get_torch_version(),
         torchtrt_version=_get_torchtrt_version(),
+        trt_version=trt_version,
+        trt_abi=trt_abi,
         gpu_name=_get_gpu_name(),
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         precision=precision,
@@ -570,12 +587,16 @@ def build_bundle(
 
         # 11. Write .trtfb bundle (normalize strategy to standard C++ name)
         normalized_strategy = _normalize_runtime_strategy(strategy.runtime_strategy)
+        trt_version = _get_trt_version()
+        trt_abi = _trt_abi_from_version(trt_version)
         info = TtrtBundleInfo(
             model_id=model_dir_path.name,
             model_type=config.model_type,
             family=plugin.name,
             torch_version=_get_torch_version(),
             torchtrt_version=_get_torchtrt_version(),
+            trt_version=trt_version,
+            trt_abi=trt_abi,
             gpu_name=_get_gpu_name(),
             created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             vocab_size=config.vocab_size,
@@ -605,6 +626,11 @@ def build_bundle(
                 if filename == "config.json":
                     cfg_dict = json.loads(data)
                     cfg_dict["runtime_strategy"] = normalized_strategy
+                    cfg_dict["engine_backend"] = "trt"
+                    cfg_dict["build_backend"] = "torch_trt"
+                    cfg_dict["trt_version"] = trt_version
+                    if trt_abi:
+                        cfg_dict["trt_abi"] = trt_abi
                     if normalized_strategy == "decoder_kv_cache":
                         cfg_dict["io_map"] = _decoder_io_map(config.num_hidden_layers)
                     cfg_dict["torchtrt_io_map"] = io_map

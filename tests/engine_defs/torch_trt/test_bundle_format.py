@@ -40,6 +40,8 @@ class TestWriteBundle:
             family="qwen",
             torch_version="2.6.0",
             torchtrt_version="2.6.0",
+            trt_version="10.15.0",
+            trt_abi="10.15",
             vocab_size=32000,
             hidden_size=1024,
             num_layers=28,
@@ -58,6 +60,8 @@ class TestWriteBundle:
         assert header["model_id"] == "test-model"
         assert header["model_type"] == "qwen3"
         assert header["family"] == "qwen"
+        assert header["trt_version"] == "10.15.0"
+        assert header["trt_abi"] == "10.15"
         assert header["vocab_size"] == 32000
         assert header["precision"] == "fp16"
         assert header["runtime_strategy"] == "torchtrt_decoder"

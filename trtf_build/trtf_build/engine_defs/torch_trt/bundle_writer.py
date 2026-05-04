@@ -30,6 +30,8 @@ class TtrtBundleInfo:
     family: str = ""
     torch_version: str = ""
     torchtrt_version: str = ""
+    trt_version: str = ""
+    trt_abi: str = ""
     gpu_name: str = ""
     created_at: str = ""
     vocab_size: int = 0
@@ -73,6 +75,8 @@ def write_bundle(
         "family": info.family,
         "torch_version": info.torch_version,
         "torchtrt_version": info.torchtrt_version,
+        "trt_version": info.trt_version,
+        "trt_abi": info.trt_abi,
         "gpu_name": info.gpu_name,
         "created_at": info.created_at,
         "vocab_size": info.vocab_size,

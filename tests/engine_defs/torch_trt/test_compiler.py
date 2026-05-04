@@ -21,6 +21,7 @@ try:
         _parse_model_config,
         _get_torch_version,
         _get_torchtrt_version,
+        _trt_abi_from_version,
         StatelessCacheWrapper,
         patch_static_cache_scatter,
     )
@@ -68,6 +69,10 @@ class TestGetVersions:
         assert isinstance(ver, str)
         # Could be a version string or "not installed"
         assert len(ver) > 0
+
+    def test_trt_abi_from_version(self):
+        assert _trt_abi_from_version("10.16.0") == "10.16"
+        assert _trt_abi_from_version("") == ""
 
 
 @requires_torch

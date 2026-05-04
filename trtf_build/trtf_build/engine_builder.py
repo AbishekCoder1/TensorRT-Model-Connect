@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -367,6 +368,13 @@ def _get_trt_version() -> str:
         return trt.__version__
     except Exception:
         return "unknown"
+
+
+def _trt_abi_from_version(version: str) -> str:
+    match = re.search(r"(\d+)\.(\d+)", version or "")
+    if not match:
+        return ""
+    return f"{match.group(1)}.{match.group(2)}"
 
 
 def _get_gpu_name() -> str:
@@ -783,11 +791,14 @@ def build_bundle(
     _write_build_timing(build_timing)
 
     # 6. Write bundle
+    trt_version = _get_trt_version()
+    trt_abi = _trt_abi_from_version(trt_version)
     info = BundleInfo(
         model_id=model_dir_path.name,
         model_type=config.model_type,
         family=plugin.name,
-        trt_version=_get_trt_version(),
+        trt_version=trt_version,
+        trt_abi=trt_abi,
         gpu_name=_get_gpu_name(),
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         vocab_size=config.vocab_size,
@@ -851,6 +862,9 @@ def build_bundle(
                 elif triattention_cfg is not None:
                     cfg_dict["runtime_strategy"] = "decoder_kv_cache"
                 cfg_dict["engine_backend"] = "trt_rtx" if rtx else "trt"
+                cfg_dict["trt_version"] = trt_version
+                if trt_abi:
+                    cfg_dict["trt_abi"] = trt_abi
                 cfg_dict["precision"] = precision
                 if quant_plan is not None:
                     cfg_dict["quantization"] = quant_plan.as_config_dict()
@@ -1101,6 +1115,9 @@ def _build_diffusion_bundle(
         print(f"  preprocessor_weights: {len(pp_data) / (1024):.1f} KB",
               file=sys.stderr)
 
+    trt_version = _get_trt_version()
+    trt_abi = _trt_abi_from_version(trt_version)
+
     # Build config.json with diffusion config injected
     _effective_precision = "bf16" if fp8_scales else precision
     cfg_dict = {
@@ -1108,8 +1125,11 @@ def _build_diffusion_bundle(
         "runtime_strategy": getattr(plugin, "runtime_strategy", "diffusion"),
         "precision": _effective_precision,
         "engine_backend": "trt_rtx" if rtx else "trt",
+        "trt_version": trt_version,
         "num_text_encoders": len(components["text_encoders"]),
     }
+    if trt_abi:
+        cfg_dict["trt_abi"] = trt_abi
     if fp8_scales:
         cfg_dict["quantization"] = {"format": "fp8"}
 
@@ -1180,7 +1200,8 @@ def _build_diffusion_bundle(
         model_id=model_dir_path.name,
         model_type=model_type,
         family=plugin.name,
-        trt_version=_get_trt_version(),
+        trt_version=trt_version,
+        trt_abi=trt_abi,
         gpu_name=_get_gpu_name(),
         created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         runtime_strategy=getattr(plugin, "runtime_strategy", "diffusion"),

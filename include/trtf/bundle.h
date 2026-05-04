@@ -11,6 +11,7 @@ struct BundleInfo {
     std::string family;
     std::string precision;
     std::string trt_version;
+    std::string trt_abi;
     std::string gpu_name;
     std::string created_at;
     int32_t vocab_size{0};
