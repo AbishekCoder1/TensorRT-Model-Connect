@@ -34,10 +34,10 @@
 //   - runtime/core/trt_common.h
 //   TRT + CUDA required.
 
-#include "runtime/core/device_kv_cache.h"
 #include "runtime/backend/trt_logger.h"
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/cuda_common.h"
+#include "runtime/core/device_kv_cache.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/core/trt_engine_lifecycle.h"
 

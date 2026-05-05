@@ -4,8 +4,8 @@
 // Uses the RTX-specific NvInfer.h headers which declare IRuntimeCache,
 // CudaGraphStrategy, and DynamicShapesKernelSpecializationStrategy.
 
-#include "runtime/core/cuda_common.h"
 #include "runtime/backend/trt_logger.h"
+#include "runtime/core/cuda_common.h"
 #include "trt_module_impl.h"
 #include "trtf/runtime/trt_backend.h"
 
@@ -150,8 +150,7 @@ class RtxBackend final : public IBackend {
             if (profile_idx < 0 || profile_idx >= nprofiles)
                 continue;
             out.modules.push_back(BackendProfileModule{
-                profile_idx,
-                create_profile_module(engine, stream_setup, options, profile_idx)});
+                profile_idx, create_profile_module(engine, stream_setup, options, profile_idx)});
         }
         return out;
     }
@@ -165,8 +164,7 @@ class RtxBackend final : public IBackend {
 
     std::unique_ptr<ITrtModule>
     create_profile_module(const std::shared_ptr<nvinfer1::ICudaEngine>& engine,
-                          const StreamSetup& stream_setup,
-                          const ModuleCreateOptions& options,
+                          const StreamSetup& stream_setup, const ModuleCreateOptions& options,
                           int32_t profile_idx) {
         auto* rt_config = engine->createRuntimeConfig();
         if (!rt_config)
@@ -181,8 +179,8 @@ class RtxBackend final : public IBackend {
         if (!ctx)
             throw std::runtime_error("[trtf] Failed to create RTX execution context");
 
-        auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream_setup.stream,
-                                                   profile_idx);
+        auto mod =
+            std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream_setup.stream, profile_idx);
         if (!mod->ok())
             throw std::runtime_error("[trtf] TrtModuleImpl creation failed (RTX)");
         mod->keep_alive(engine);

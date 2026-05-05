@@ -604,7 +604,8 @@ std::vector<int64_t> TrtModuleImpl::input_profile_shape(const std::string& name,
         return {};
     if (profile_idx < 0 || profile_idx >= engine_->getNbOptimizationProfiles())
         return {};
-    const auto dims = engine_->getProfileShape(name.c_str(), profile_idx, to_trt_selector(selector));
+    const auto dims =
+        engine_->getProfileShape(name.c_str(), profile_idx, to_trt_selector(selector));
     if (dims.nbDims < 0)
         return {};
     return dims_to_shape(dims);

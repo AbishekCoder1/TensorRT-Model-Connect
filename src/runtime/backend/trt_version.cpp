@@ -10,9 +10,9 @@
 #include <link.h>
 #include <sstream>
 #include <string>
-#include <utility>
 #include <unistd.h>
 #include <unordered_set>
+#include <utility>
 
 namespace trtf {
 
@@ -97,8 +97,8 @@ std::vector<std::string> split_colon_list(const char* value) {
     std::size_t start = 0;
     while (start <= text.size()) {
         const std::size_t end = text.find(':', start);
-        std::string item = text.substr(start, end == std::string::npos ? std::string::npos
-                                                                        : end - start);
+        std::string item =
+            text.substr(start, end == std::string::npos ? std::string::npos : end - start);
         if (!item.empty())
             out.push_back(std::move(item));
         if (end == std::string::npos)
@@ -137,8 +137,7 @@ void append_python_tensorrt_lib_dirs(const char* root_env, std::vector<std::stri
             const std::string name = entry.path().filename().string();
             if (name.rfind("python", 0) != 0)
                 continue;
-            const fs::path candidate =
-                entry.path() / "site-packages" / "tensorrt_libs";
+            const fs::path candidate = entry.path() / "site-packages" / "tensorrt_libs";
             if (fs::is_directory(candidate, ec))
                 dirs.push_back(candidate.string());
         }
@@ -251,9 +250,7 @@ void append_diagnostic(std::string* diagnostics, std::string message) {
 
 void append_dlopen_error(std::string* diagnostics, const std::string& candidate) {
     const char* error = dlerror();
-    append_diagnostic(
-        diagnostics,
-        candidate + ": " + (error ? error : "unknown dlopen error"));
+    append_diagnostic(diagnostics, candidate + ": " + (error ? error : "unknown dlopen error"));
 }
 
 TrtLibrarySearchStep match_loaded_trt_library(const TrtVersion& required_version,
@@ -270,8 +267,7 @@ TrtLibrarySearchStep match_loaded_trt_library(const TrtVersion& required_version
                               format_trt_version(lib.version) + " (ABI " +
                               trt_abi_string(lib.version) + ")";
         if (!abi_matches) {
-            message += " does not match required ABI " +
-                       trt_abi_string(required_version);
+            message += " does not match required ABI " + trt_abi_string(required_version);
             all_match = false;
         } else if (!match) {
             match = TrtLibraryMatch{lib.version, lib.path, true};
@@ -289,19 +285,18 @@ TrtLibrarySearchStep match_rtld_default_trt_library(const TrtVersion& required_v
     if (trt_abi_matches(required_version, *default_version))
         return {TrtLibraryMatch{*default_version, "", true}, true};
 
-    append_diagnostic(diagnostics,
-                      "RTLD_DEFAULT: already loaded TensorRT " +
-                          format_trt_version(*default_version) + " (ABI " +
-                          trt_abi_string(*default_version) +
-                          ") does not match required ABI " +
-                          trt_abi_string(required_version));
+    append_diagnostic(diagnostics, "RTLD_DEFAULT: already loaded TensorRT " +
+                                       format_trt_version(*default_version) + " (ABI " +
+                                       trt_abi_string(*default_version) +
+                                       ") does not match required ABI " +
+                                       trt_abi_string(required_version));
     return {std::nullopt, true};
 }
 
-std::optional<TrtLibraryMatch> match_candidate_trt_libraries(
-    const TrtVersion& required_version,
-    const std::vector<std::string>& search_dirs,
-    std::string* diagnostics) {
+std::optional<TrtLibraryMatch>
+match_candidate_trt_libraries(const TrtVersion& required_version,
+                              const std::vector<std::string>& search_dirs,
+                              std::string* diagnostics) {
     for (const auto& candidate : nvinfer_candidates(search_dirs)) {
         dlerror();
         void* handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -313,19 +308,17 @@ std::optional<TrtLibraryMatch> match_candidate_trt_libraries(
         auto version = version_from_symbol_scope(handle, candidate);
         dlclose(handle);
         if (!version) {
-            append_diagnostic(diagnostics,
-                              candidate + ": missing TensorRT version symbols");
+            append_diagnostic(diagnostics, candidate + ": missing TensorRT version symbols");
             continue;
         }
 
         if (trt_abi_matches(required_version, *version))
             return TrtLibraryMatch{*version, candidate, false};
 
-        append_diagnostic(diagnostics,
-                          candidate + ": TensorRT " + format_trt_version(*version) +
-                              " (ABI " + trt_abi_string(*version) +
-                              ") does not match required ABI " +
-                              trt_abi_string(required_version));
+        append_diagnostic(diagnostics, candidate + ": TensorRT " + format_trt_version(*version) +
+                                           " (ABI " + trt_abi_string(*version) +
+                                           ") does not match required ABI " +
+                                           trt_abi_string(required_version));
     }
     return std::nullopt;
 }
@@ -436,8 +429,8 @@ std::optional<TrtVersion> detect_installed_trt_version(const std::vector<std::st
         if (!handle) {
             if (diagnostics) {
                 const char* error = dlerror();
-                *diagnostics += "  " + candidate + ": " +
-                                (error ? error : "unknown dlopen error") + "\n";
+                *diagnostics +=
+                    "  " + candidate + ": " + (error ? error : "unknown dlopen error") + "\n";
             }
             continue;
         }

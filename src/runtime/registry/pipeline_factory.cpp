@@ -120,10 +120,10 @@ std::optional<TrtVersion> required_trt_version_for_bundle(const BundleFile& bund
 void throw_trt_mismatch(const std::string& bundle_path, const TrtVersion& required,
                         const TrtVersion& actual, const std::string& actual_label) {
     throw std::runtime_error("TensorRT version mismatch for bundle " + bundle_path +
-                             ": bundle was built with TensorRT " +
-                             format_trt_version(required) + " (ABI " +
-                             trt_abi_string(required) + "), but " + actual_label + " is " +
-                             format_trt_version(actual) + " (ABI " + trt_abi_string(actual) +
+                             ": bundle was built with TensorRT " + format_trt_version(required) +
+                             " (ABI " + trt_abi_string(required) + "), but " + actual_label +
+                             " is " + format_trt_version(actual) + " (ABI " +
+                             trt_abi_string(actual) +
                              "). Rebuild the bundle with the installed TensorRT version or "
                              "install a matching TensorRT runtime/backend DSO.");
 }
@@ -139,8 +139,7 @@ void enforce_trt_compatibility(const std::string& bundle_path,
 }
 
 IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& config_text,
-                                  const std::string& bundle_path,
-                                  const std::string& backend_name,
+                                  const std::string& bundle_path, const std::string& backend_name,
                                   const std::vector<std::string>& backend_search_paths) {
     const std::string logical_backend = backend_name.empty() ? "trt" : backend_name;
     if (!is_standard_trt_backend_name(logical_backend)) {
@@ -154,11 +153,10 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
         auto matched =
             find_trt_library_for_version(*required, backend_search_paths, &detection_diagnostics);
         if (!matched) {
-            throw std::runtime_error("TensorRT runtime for bundle " + bundle_path +
-                                     " is not available: bundle requires TensorRT ABI " +
-                                     trt_abi_string(*required) +
-                                     ". Searched candidate libnvinfer paths:\n" +
-                                     detection_diagnostics);
+            throw std::runtime_error(
+                "TensorRT runtime for bundle " + bundle_path +
+                " is not available: bundle requires TensorRT ABI " + trt_abi_string(*required) +
+                ". Searched candidate libnvinfer paths:\n" + detection_diagnostics);
         }
         installed = matched->version;
         if (!matched->already_loaded)
@@ -171,11 +169,11 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
     const auto candidates = trt_backend_candidates(logical_backend, required, installed);
     std::string loaded_backend_name;
     BackendLoadMetadata metadata;
-    IBackend* backend = BackendLoader::load_first_available(
-        candidates, backend_search_paths, &loaded_backend_name, &metadata);
+    IBackend* backend = BackendLoader::load_first_available(candidates, backend_search_paths,
+                                                            &loaded_backend_name, &metadata);
 
-    enforce_trt_compatibility(
-        bundle_path, required, parse_trt_abi_tag(metadata.trt_abi), "selected backend DSO ABI");
+    enforce_trt_compatibility(bundle_path, required, parse_trt_abi_tag(metadata.trt_abi),
+                              "selected backend DSO ABI");
     enforce_trt_compatibility(bundle_path, required,
                               parse_trt_version(metadata.trt_runtime_version),
                               "selected backend TensorRT runtime");
@@ -233,8 +231,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
 
     // Load backend DSO based on bundle metadata
     std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
-    IBackend* backend =
-        load_backend_for_bundle(bundle, config_text, bundle_path, backend_name, {});
+    IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name, {});
 
     auto* plugin = lookup_plugin_or_throw(strategy);
 

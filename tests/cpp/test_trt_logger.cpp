@@ -26,8 +26,8 @@
 //   CPU-only. No GPU or CUDA runtime required.
 // =============================================================================
 
-#include "runtime/core/trt_common.h"
 #include "runtime/backend/trt_logger.h"
+#include "runtime/core/trt_common.h"
 
 #include <iostream>
 #include <string>

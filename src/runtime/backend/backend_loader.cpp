@@ -6,9 +6,9 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
-#include <unistd.h>
 #include <vector>
 
 namespace trtf {
@@ -144,8 +144,7 @@ CachedBackend create_backend(const std::string& requested_name, const std::strin
     metadata.dso_name = dso_name;
     metadata.backend_name = backend->name() ? backend->name() : "";
     metadata.trt_abi = optional_string_symbol(handle, "trtf_backend_abi");
-    metadata.trt_runtime_version =
-        optional_string_symbol(handle, "trtf_backend_runtime_version");
+    metadata.trt_runtime_version = optional_string_symbol(handle, "trtf_backend_runtime_version");
 
     return CachedBackend{handle, backend, std::move(metadata)};
 }
@@ -156,16 +155,14 @@ std::string backend_dso_name(const std::string& backend_name) {
 
 void populate_load_outputs(const std::string& backend_name,
                            const BackendLoadMetadata& cached_metadata,
-                           std::string* loaded_backend_name,
-                           BackendLoadMetadata* metadata) {
+                           std::string* loaded_backend_name, BackendLoadMetadata* metadata) {
     if (loaded_backend_name)
         *loaded_backend_name = backend_name;
     if (metadata)
         *metadata = cached_metadata;
 }
 
-IBackend* load_cached_backend(const std::string& backend_name,
-                              std::string* loaded_backend_name,
+IBackend* load_cached_backend(const std::string& backend_name, std::string* loaded_backend_name,
                               BackendLoadMetadata* metadata) {
     auto it = g_cache.find(backend_name);
     if (it == g_cache.end())
@@ -177,8 +174,7 @@ IBackend* load_cached_backend(const std::string& backend_name,
 
 IBackend* load_backend_candidate(const std::string& backend_name,
                                  const std::vector<std::string>& search_dirs,
-                                 std::string& all_tried,
-                                 std::string* loaded_backend_name,
+                                 std::string& all_tried, std::string* loaded_backend_name,
                                  BackendLoadMetadata* metadata) {
     const std::string dso_name = backend_dso_name(backend_name);
     std::string tried;

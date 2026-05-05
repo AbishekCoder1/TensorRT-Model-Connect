@@ -46,9 +46,8 @@ int32_t cache_row_dim_from_module(const TrtModule& module, const std::string& te
         return static_dim;
     const int32_t profile_count = module.optimization_profile_count();
     for (int32_t profile_idx = 0; profile_idx < profile_count; ++profile_idx) {
-        const int32_t profile_dim =
-            dim_at(module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax),
-                   1);
+        const int32_t profile_dim = dim_at(
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 1);
         if (profile_dim > 0)
             return profile_dim;
     }
@@ -68,12 +67,10 @@ bool cache_input_supports_runtime_rows(const TrtModule& module, const std::strin
     if (num_profiles <= 0)
         return false;
     for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
-        const int32_t min_rows =
-            dim_at(module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMin),
-                   0);
-        const int32_t max_rows =
-            dim_at(module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax),
-                   0);
+        const int32_t min_rows = dim_at(
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMin), 0);
+        const int32_t max_rows = dim_at(
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 0);
         if (min_rows > 0 && max_rows > min_rows)
             return true;
     }
@@ -231,9 +228,8 @@ class DecoderPlugin final : public IPipelinePlugin {
             throw std::runtime_error("No backend loaded");
 
         auto profile_rows = extract_json_int_array(ctx.config_json, "dynamic_kv_profile_rows", 16);
-        const int32_t profile_candidates = profile_rows.empty()
-                                               ? 2
-                                               : static_cast<int32_t>(profile_rows.size() + 1);
+        const int32_t profile_candidates =
+            profile_rows.empty() ? 2 : static_cast<int32_t>(profile_rows.size() + 1);
         std::vector<int32_t> profile_indices;
         profile_indices.reserve(static_cast<std::size_t>(profile_candidates));
         for (int32_t i = 0; i < profile_candidates; ++i)

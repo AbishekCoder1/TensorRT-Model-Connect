@@ -111,10 +111,8 @@ trtf::DecoderStepEngine make_decoder_step_engine(FakeModule& module, int32_t num
 
 void test_has_io_tensor_true_false() {
     FakeModule module({"token_id", "attention_mask"});
-    check(trtf::has_io_tensor(module, "token_id"),
-          "has_io_tensor returns true for existing name");
-    check(!trtf::has_io_tensor(module, "logits"),
-          "has_io_tensor returns false for missing name");
+    check(trtf::has_io_tensor(module, "token_id"), "has_io_tensor returns true for existing name");
+    check(!trtf::has_io_tensor(module, "logits"), "has_io_tensor returns false for missing name");
     check(!trtf::has_io_tensor(module, ""), "has_io_tensor returns false for empty name");
 }
 
@@ -122,17 +120,15 @@ void test_has_all_required_tensors_false_when_missing_base_tensors() {
     std::vector<std::string> names = make_required_tensor_names(/*num_layers=*/2, true);
     remove_name(names, "attention_mask");
     FakeModule module(std::move(names));
-    trtf::DecoderStepEngine engine =
-        make_decoder_step_engine(module, /*num_layers=*/2, true);
+    trtf::DecoderStepEngine engine = make_decoder_step_engine(module, /*num_layers=*/2, true);
     check(!trtf::has_all_required_tensors(engine),
           "has_all_required_tensors fails when base tensor is missing");
 }
 
 void test_has_all_required_tensors_true_with_all_base_and_layer_tensors() {
     FakeModule module(make_required_tensor_names(/*num_layers=*/2,
-                                                /*include_position_input=*/true));
-    trtf::DecoderStepEngine engine =
-        make_decoder_step_engine(module, /*num_layers=*/2, true);
+                                                 /*include_position_input=*/true));
+    trtf::DecoderStepEngine engine = make_decoder_step_engine(module, /*num_layers=*/2, true);
     check(trtf::has_all_required_tensors(engine),
           "has_all_required_tensors passes when all tensors are present");
 }
@@ -157,8 +153,7 @@ void test_has_all_required_tensors_missing_per_layer_tensor_fails() {
     std::vector<std::string> names = make_required_tensor_names(/*num_layers=*/3, true);
     remove_name(names, trtf::layer_tensor_name("present_v", 1));
     FakeModule module(std::move(names));
-    trtf::DecoderStepEngine engine =
-        make_decoder_step_engine(module, /*num_layers=*/3, true);
+    trtf::DecoderStepEngine engine = make_decoder_step_engine(module, /*num_layers=*/3, true);
     check(!trtf::has_all_required_tensors(engine),
           "has_all_required_tensors fails when a per-layer tensor is missing");
 }

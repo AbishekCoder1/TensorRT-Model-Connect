@@ -43,9 +43,8 @@ find_trt_library_for_version(const TrtVersion& required_version,
                              const std::vector<std::string>& search_dirs = {},
                              std::string* diagnostics = nullptr);
 
-std::vector<std::string>
-trt_backend_candidates(const std::string& backend_name,
-                       const std::optional<TrtVersion>& required_version,
-                       const std::optional<TrtVersion>& installed_version);
+std::vector<std::string> trt_backend_candidates(const std::string& backend_name,
+                                                const std::optional<TrtVersion>& required_version,
+                                                const std::optional<TrtVersion>& installed_version);
 
 } // namespace trtf

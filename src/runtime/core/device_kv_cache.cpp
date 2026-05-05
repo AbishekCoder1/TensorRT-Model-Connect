@@ -210,8 +210,8 @@ bool bind_core_tensors(const DecoderStepEngine& engine, DeviceResources& resourc
         return false;
     }
 
-    return bind_tensor_or_fail(engine.module, engine.logits_output_name,
-                               resources.d_logits.data(), "bind logits failed", fail);
+    return bind_tensor_or_fail(engine.module, engine.logits_output_name, resources.d_logits.data(),
+                               "bind logits failed", fail);
 }
 
 template <typename FailFn>
@@ -230,9 +230,8 @@ bool bind_input_embed_tensors(const DecoderStepEngine& engine, DeviceResources& 
         return true;
     }
 
-    return bind_tensor_or_fail(engine.module, "use_input_embed",
-                               resources.d_use_input_embed.data(), "bind use_input_embed failed",
-                               fail);
+    return bind_tensor_or_fail(engine.module, "use_input_embed", resources.d_use_input_embed.data(),
+                               "bind use_input_embed failed", fail);
 }
 
 template <typename FailFn>
@@ -463,7 +462,8 @@ DeviceResources::DeviceResources(const DecoderStepEngine& engine)
       d_use_input_embed(engine.module != nullptr && has_io_tensor(*engine.module, "input_embed")
                             ? sizeof(float)
                             : 0),
-      d_deepstack_active(engine.module != nullptr && has_io_tensor(*engine.module, "deepstack_active")
+      d_deepstack_active(engine.module != nullptr &&
+                                 has_io_tensor(*engine.module, "deepstack_active")
                              ? sizeof(float)
                              : 0) {
     // Detect cache element size from the engine's present_k_0 tensor dtype.
@@ -543,7 +543,8 @@ bool run_decoder_step_device(const DecoderStepEngine& engine, DeviceKvCache& cac
         return false;
     };
 
-    cudaStream_t stream = engine.module != nullptr ? engine.module->stream() : resources.stream.get();
+    cudaStream_t stream =
+        engine.module != nullptr ? engine.module->stream() : resources.stream.get();
 
     // 1. Prepare step: compute position_id and mask on CPU
     StepInputs step_inputs;

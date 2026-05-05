@@ -73,7 +73,8 @@ bool has_all_required_tensors(const DecoderStepEngine& engine) {
     }
 
     if (engine.requires_position_input) {
-        if (engine.module == nullptr || !has_io_tensor(*engine.module, engine.position_input_name)) {
+        if (engine.module == nullptr ||
+            !has_io_tensor(*engine.module, engine.position_input_name)) {
             return false;
         }
     }
