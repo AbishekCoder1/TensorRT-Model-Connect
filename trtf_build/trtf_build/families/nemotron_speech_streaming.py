@@ -18,7 +18,7 @@ import math
 from pathlib import Path
 
 import numpy as np
-import tensorrt as trt
+from trtf_build import trt_compat
 
 from .. import graph_ops
 from ..checkpoint_mapper import WeightDict, _transpose_2d
@@ -35,6 +35,9 @@ from .canary import (
     _relative_pe,
     _to_np,
 )
+
+
+trt = trt_compat.get_trt()
 
 
 def _cfg_int(*values, default: int) -> int:
