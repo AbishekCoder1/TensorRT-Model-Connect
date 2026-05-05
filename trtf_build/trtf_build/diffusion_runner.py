@@ -15,8 +15,10 @@ import sys
 import numpy as np
 
 from trtf_build import trt_compat
+from .schedulers import get_scheduler
 
 trt = trt_compat.get_trt() if trt_compat.is_available() else None
+
 try:
     try:
         from cuda import cudart
@@ -26,8 +28,6 @@ try:
     HAS_CUDA = trt is not None
 except ImportError:
     HAS_CUDA = False
-
-from .schedulers import get_scheduler
 
 
 def _check_cuda(status):

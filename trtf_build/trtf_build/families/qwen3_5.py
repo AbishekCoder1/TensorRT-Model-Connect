@@ -63,7 +63,6 @@ from pathlib import Path
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import (
@@ -76,6 +75,8 @@ from ..checkpoint_mapper import (
 from .. import graph_ops
 from .. import graph_blocks
 
+
+trt = trt_compat.get_trt()
 
 def _parse_layer_types(raw_types: list[str]) -> list[str]:
     """Normalize layer type strings to 'deltanet' or 'attention'."""

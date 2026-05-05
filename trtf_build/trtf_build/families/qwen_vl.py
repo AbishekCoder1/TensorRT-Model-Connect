@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import (
@@ -33,6 +32,8 @@ from ..checkpoint_mapper import (
 from ..standard_decoder_builder import build_standard_decoder_engine
 from .. import graph_ops
 from .. import graph_blocks
+
+trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
     pass

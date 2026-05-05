@@ -12,7 +12,6 @@ Postconditions: HF directories are correctly identified, tokenizer special-token
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -28,7 +27,6 @@ try:
         _ensure_tokenizer_json,
         build_bundle,
     )
-    from trtf_build.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("trtf_build not importable", allow_module_level=True)
 

@@ -26,8 +26,47 @@ struct LoadedNvinfer {
     TrtVersion version;
 };
 
+struct TrtLibrarySearchStep {
+    std::optional<TrtLibraryMatch> match;
+    bool definitive = false;
+};
+
 bool is_digit(char c) {
     return std::isdigit(static_cast<unsigned char>(c)) != 0;
+}
+
+bool consume_digits(const std::string& text, std::size_t* pos) {
+    const std::size_t start = *pos;
+    while (*pos < text.size() && is_digit(text[*pos]))
+        ++(*pos);
+    return *pos > start;
+}
+
+std::size_t first_digit_pos(const std::string& text) {
+    std::size_t pos = 0;
+    while (pos < text.size() && !is_digit(text[pos]))
+        ++pos;
+    return pos;
+}
+
+std::optional<int> parse_int_component(const std::string& text, std::size_t* pos) {
+    if (*pos >= text.size() || !is_digit(text[*pos]))
+        return std::nullopt;
+
+    const std::size_t start = *pos;
+    consume_digits(text, pos);
+    try {
+        return std::stoi(text.substr(start, *pos - start));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+bool consume_dot_separator(const std::string& text, std::size_t* pos) {
+    if (*pos >= text.size() || text[*pos] != '.')
+        return false;
+    ++(*pos);
+    return true;
 }
 
 std::string exe_dir() {
@@ -196,44 +235,116 @@ bool looks_like_versioned_trt_backend(const std::string& backend_name) {
         return false;
 
     std::size_t pos = std::strlen(prefix);
-    if (pos >= backend_name.size() || !is_digit(backend_name[pos]))
+    if (!consume_digits(backend_name, &pos))
         return false;
-    while (pos < backend_name.size() && is_digit(backend_name[pos]))
-        ++pos;
     if (pos >= backend_name.size() || backend_name[pos] != '_')
         return false;
     ++pos;
-    if (pos >= backend_name.size() || !is_digit(backend_name[pos]))
-        return false;
-    while (pos < backend_name.size() && is_digit(backend_name[pos]))
-        ++pos;
-    return pos == backend_name.size();
+    return consume_digits(backend_name, &pos) && pos == backend_name.size();
+}
+
+void append_diagnostic(std::string* diagnostics, std::string message) {
+    if (diagnostics == nullptr)
+        return;
+    *diagnostics += "  " + std::move(message) + "\n";
+}
+
+void append_dlopen_error(std::string* diagnostics, const std::string& candidate) {
+    const char* error = dlerror();
+    append_diagnostic(
+        diagnostics,
+        candidate + ": " + (error ? error : "unknown dlopen error"));
+}
+
+TrtLibrarySearchStep match_loaded_trt_library(const TrtVersion& required_version,
+                                              std::string* diagnostics) {
+    const auto loaded = loaded_nvinfer_versions();
+    if (loaded.empty())
+        return {};
+
+    std::optional<TrtLibraryMatch> match;
+    bool all_match = true;
+    for (const auto& lib : loaded) {
+        const bool abi_matches = trt_abi_matches(required_version, lib.version);
+        std::string message = "already loaded " + lib.path + ": TensorRT " +
+                              format_trt_version(lib.version) + " (ABI " +
+                              trt_abi_string(lib.version) + ")";
+        if (!abi_matches) {
+            message += " does not match required ABI " +
+                       trt_abi_string(required_version);
+            all_match = false;
+        } else if (!match) {
+            match = TrtLibraryMatch{lib.version, lib.path, true};
+        }
+        append_diagnostic(diagnostics, std::move(message));
+    }
+    return {all_match ? match : std::nullopt, true};
+}
+
+TrtLibrarySearchStep match_rtld_default_trt_library(const TrtVersion& required_version,
+                                                    std::string* diagnostics) {
+    auto default_version = version_from_symbol_scope(RTLD_DEFAULT, "RTLD_DEFAULT");
+    if (!default_version)
+        return {};
+    if (trt_abi_matches(required_version, *default_version))
+        return {TrtLibraryMatch{*default_version, "", true}, true};
+
+    append_diagnostic(diagnostics,
+                      "RTLD_DEFAULT: already loaded TensorRT " +
+                          format_trt_version(*default_version) + " (ABI " +
+                          trt_abi_string(*default_version) +
+                          ") does not match required ABI " +
+                          trt_abi_string(required_version));
+    return {std::nullopt, true};
+}
+
+std::optional<TrtLibraryMatch> match_candidate_trt_libraries(
+    const TrtVersion& required_version,
+    const std::vector<std::string>& search_dirs,
+    std::string* diagnostics) {
+    for (const auto& candidate : nvinfer_candidates(search_dirs)) {
+        dlerror();
+        void* handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!handle) {
+            append_dlopen_error(diagnostics, candidate);
+            continue;
+        }
+
+        auto version = version_from_symbol_scope(handle, candidate);
+        dlclose(handle);
+        if (!version) {
+            append_diagnostic(diagnostics,
+                              candidate + ": missing TensorRT version symbols");
+            continue;
+        }
+
+        if (trt_abi_matches(required_version, *version))
+            return TrtLibraryMatch{*version, candidate, false};
+
+        append_diagnostic(diagnostics,
+                          candidate + ": TensorRT " + format_trt_version(*version) +
+                              " (ABI " + trt_abi_string(*version) +
+                              ") does not match required ABI " +
+                              trt_abi_string(required_version));
+    }
+    return std::nullopt;
 }
 
 } // namespace
 
 std::optional<TrtVersion> parse_trt_version(const std::string& text) {
-    std::size_t pos = 0;
-    while (pos < text.size() && !is_digit(text[pos]))
-        ++pos;
+    std::size_t pos = first_digit_pos(text);
     if (pos == text.size())
         return std::nullopt;
 
     std::vector<int> components;
     while (pos < text.size() && components.size() < 4) {
-        if (!is_digit(text[pos]))
+        auto component = parse_int_component(text, &pos);
+        if (!component)
             break;
-        const std::size_t start = pos;
-        while (pos < text.size() && is_digit(text[pos]))
-            ++pos;
-        try {
-            components.push_back(std::stoi(text.substr(start, pos - start)));
-        } catch (...) {
-            return std::nullopt;
-        }
-        if (pos >= text.size() || text[pos] != '.')
+        components.push_back(*component);
+        if (!consume_dot_separator(text, &pos))
             break;
-        ++pos;
     }
 
     if (components.size() < 2)
@@ -350,81 +461,15 @@ find_trt_library_for_version(const TrtVersion& required_version,
     if (diagnostics)
         diagnostics->clear();
 
-    const auto loaded = loaded_nvinfer_versions();
-    if (!loaded.empty()) {
-        std::optional<TrtLibraryMatch> match;
-        bool all_match = true;
-        for (const auto& lib : loaded) {
-            const bool abi_matches = trt_abi_matches(required_version, lib.version);
-            if (diagnostics) {
-                *diagnostics += "  already loaded " + lib.path + ": TensorRT " +
-                                format_trt_version(lib.version) + " (ABI " +
-                                trt_abi_string(lib.version) + ")";
-                if (!abi_matches) {
-                    *diagnostics += " does not match required ABI " +
-                                    trt_abi_string(required_version);
-                }
-                *diagnostics += "\n";
-            }
-            if (abi_matches) {
-                if (!match)
-                    match = TrtLibraryMatch{lib.version, lib.path, true};
-            } else {
-                all_match = false;
-            }
-        }
-        if (match && all_match)
-            return match;
-        return std::nullopt;
-    }
+    const auto loaded = match_loaded_trt_library(required_version, diagnostics);
+    if (loaded.definitive)
+        return loaded.match;
 
-    if (auto default_version = version_from_symbol_scope(RTLD_DEFAULT, "RTLD_DEFAULT")) {
-        if (trt_abi_matches(required_version, *default_version)) {
-            return TrtLibraryMatch{*default_version, "", true};
-        }
-        if (diagnostics) {
-            *diagnostics += "  RTLD_DEFAULT: already loaded TensorRT " +
-                            format_trt_version(*default_version) + " (ABI " +
-                            trt_abi_string(*default_version) +
-                            ") does not match required ABI " +
-                            trt_abi_string(required_version) + "\n";
-        }
-        return std::nullopt;
-    }
+    const auto default_scope = match_rtld_default_trt_library(required_version, diagnostics);
+    if (default_scope.definitive)
+        return default_scope.match;
 
-    for (const auto& candidate : nvinfer_candidates(search_dirs)) {
-        dlerror();
-        void* handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
-        if (!handle) {
-            if (diagnostics) {
-                const char* error = dlerror();
-                *diagnostics += "  " + candidate + ": " +
-                                (error ? error : "unknown dlopen error") + "\n";
-            }
-            continue;
-        }
-
-        auto version = version_from_symbol_scope(handle, candidate);
-        dlclose(handle);
-        if (!version) {
-            if (diagnostics)
-                *diagnostics += "  " + candidate + ": missing TensorRT version symbols\n";
-            continue;
-        }
-
-        if (trt_abi_matches(required_version, *version)) {
-            return TrtLibraryMatch{*version, candidate, false};
-        }
-
-        if (diagnostics) {
-            *diagnostics += "  " + candidate + ": TensorRT " + format_trt_version(*version) +
-                            " (ABI " + trt_abi_string(*version) +
-                            ") does not match required ABI " +
-                            trt_abi_string(required_version) + "\n";
-        }
-    }
-
-    return std::nullopt;
+    return match_candidate_trt_libraries(required_version, search_dirs, diagnostics);
 }
 
 std::vector<std::string>

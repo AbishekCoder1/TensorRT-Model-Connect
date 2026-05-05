@@ -20,10 +20,11 @@ import sys
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from . import graph_ops
 
+
+trt = trt_compat.get_trt()
 
 def _fuse_weight_norm(g: np.ndarray, v: np.ndarray) -> np.ndarray:
     """Fuse weight_norm: weight = g * v / ||v||_2.

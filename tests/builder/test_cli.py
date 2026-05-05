@@ -318,6 +318,8 @@ class TestCmdBuildMocked:
                 quant_scales=None,
                 quant_calibration_samples=512,
                 verbose=False,
+                method="trt",
+                _skip_profile_resolution=True,
             )
             _cmd_build(args)
             assert received == [True]
@@ -362,6 +364,7 @@ class TestCmdBuildMocked:
                 triattention_disable_mlr=False,
                 triattention_disable_trig=False,
                 method="trt",
+                _skip_profile_resolution=True,
             )
             _cmd_build(args)
             assert received == [[32, 64, 128]]

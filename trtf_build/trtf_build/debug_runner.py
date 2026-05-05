@@ -14,9 +14,10 @@ from typing import Any
 import numpy as np
 from trtf_build import trt_compat
 
-trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
 from .triattention_runtime import TriAttentionRuntimeConfig, TriAttentionSelector
+
+trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
 # cuda-python >= 13 uses cuda.bindings.runtime; older versions use cuda.cudart.
 try:

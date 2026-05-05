@@ -57,7 +57,7 @@ def is_available(module_name: str | None = None) -> bool:
     """Return whether the selected TensorRT Python module can be imported."""
     name = module_name or _backend_module_name
     if name in sys.modules:
-        return True
+        return sys.modules[name] is not None
     try:
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError):
@@ -67,6 +67,9 @@ def is_available(module_name: str | None = None) -> bool:
 def load_module() -> ModuleType:
     """Import and return the selected TensorRT Python module."""
     global _module
+    if _backend_module_name in sys.modules and sys.modules[_backend_module_name] is None:
+        _module = None
+        raise ImportError(f"{_backend_module_name} is not available")
     active = sys.modules.get(_backend_module_name)
     if active is not None and active is not _module:
         _module = active
@@ -83,7 +86,7 @@ def module_version(module_name: str | None = None) -> str:
             if module_name is None
             else importlib.import_module(module_name)
         )
-    except ImportError:
+    except (ImportError, AttributeError):
         return ""
     return str(getattr(module, "__version__", ""))
 
@@ -107,7 +110,7 @@ def module_file(module_name: str | None = None) -> str:
             if module_name is None
             else importlib.import_module(module_name)
         )
-    except ImportError:
+    except (ImportError, AttributeError):
         return ""
     return str(getattr(module, "__file__", "") or "")
 

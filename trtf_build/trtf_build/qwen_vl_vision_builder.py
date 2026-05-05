@@ -24,9 +24,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from . import graph_ops
+
+trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
@@ -254,8 +255,6 @@ def build_qwen_vl_vision_engine(
 
     # Windowed vs full attention config
     vit_merger_window_size = window_size // merge_size // patch_size
-    llm_grid_h = grid_h // merge_size
-    llm_grid_w = grid_w // merge_size
     # Number of merged groups per window (e.g. 4x4 = 16)
     merged_per_window = vit_merger_window_size * vit_merger_window_size
     # Number of patches per window (e.g. 16 * 4 = 64)

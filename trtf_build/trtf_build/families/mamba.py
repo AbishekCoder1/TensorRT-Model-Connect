@@ -36,7 +36,6 @@ from pathlib import Path
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import (
@@ -48,6 +47,8 @@ from ..checkpoint_mapper import (
 )
 from .. import graph_ops
 
+
+trt = trt_compat.get_trt()
 
 class MambaPlugin:
     name = "mamba"
@@ -204,9 +205,6 @@ class MambaPlugin:
         state_size: int = weights["_state_size"]
         conv_kernel: int = weights["_conv_kernel"]
         dt_rank: int = weights["_dt_rank"]
-
-        conv_state_size = d_inner * conv_kernel
-        ssm_state_size = d_inner * state_size
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)

@@ -28,8 +28,9 @@ from .. import graph_ops
 
 from trtf_build import trt_compat
 
-trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
+
+trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
 def _add_layernorm_no_bias(network, inp, hidden_size, gamma, eps):
     """LayerNorm without bias via TRT native normalization.

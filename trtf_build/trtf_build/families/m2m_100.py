@@ -24,7 +24,6 @@ from pathlib import Path
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import (
@@ -37,6 +36,8 @@ from ..checkpoint_mapper import (
 from .. import graph_ops
 from .. import graph_blocks
 
+
+trt = trt_compat.get_trt()
 
 def _make_sinusoidal_pos_embed(num_positions: int, embedding_dim: int,
                                  padding_idx: int = 1) -> np.ndarray:

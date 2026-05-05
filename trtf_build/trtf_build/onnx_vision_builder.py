@@ -17,8 +17,9 @@ import io
 import sys
 
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
+
+trt = trt_compat.get_trt()
 
 def build_engine_from_onnx(
     onnx_bytes: bytes,

@@ -21,9 +21,10 @@ import sys
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from . import graph_ops
+
+trt = trt_compat.get_trt()
 
 # ---------------------------------------------------------------------------
 # Architecture constants (NanoCodec 22kHz / 1.89kbps / 21.5fps)

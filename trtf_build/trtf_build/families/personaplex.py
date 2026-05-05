@@ -58,7 +58,6 @@ import numpy as np
 
 from trtf_build import trt_compat
 
-trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import (
@@ -69,6 +68,8 @@ from ..checkpoint_mapper import (
     _transpose_2d,
 )
 from ..build_timing import timed_trt_compile
+
+trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
 # Conditionally import graph_ops -- it needs TRT
 try:

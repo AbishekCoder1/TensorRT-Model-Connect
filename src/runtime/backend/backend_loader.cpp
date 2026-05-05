@@ -150,6 +150,88 @@ CachedBackend create_backend(const std::string& requested_name, const std::strin
     return CachedBackend{handle, backend, std::move(metadata)};
 }
 
+std::string backend_dso_name(const std::string& backend_name) {
+    return "libtrtf_backend_" + backend_name + ".so";
+}
+
+void populate_load_outputs(const std::string& backend_name,
+                           const BackendLoadMetadata& cached_metadata,
+                           std::string* loaded_backend_name,
+                           BackendLoadMetadata* metadata) {
+    if (loaded_backend_name)
+        *loaded_backend_name = backend_name;
+    if (metadata)
+        *metadata = cached_metadata;
+}
+
+IBackend* load_cached_backend(const std::string& backend_name,
+                              std::string* loaded_backend_name,
+                              BackendLoadMetadata* metadata) {
+    auto it = g_cache.find(backend_name);
+    if (it == g_cache.end())
+        return nullptr;
+
+    populate_load_outputs(backend_name, it->second.metadata, loaded_backend_name, metadata);
+    return it->second.backend;
+}
+
+IBackend* load_backend_candidate(const std::string& backend_name,
+                                 const std::vector<std::string>& search_dirs,
+                                 std::string& all_tried,
+                                 std::string* loaded_backend_name,
+                                 BackendLoadMetadata* metadata) {
+    const std::string dso_name = backend_dso_name(backend_name);
+    std::string tried;
+    void* handle = open_backend_dso(dso_name, search_dirs, tried);
+    if (!handle) {
+        all_tried += "Candidate \"" + backend_name + "\" (" + dso_name + "):\n" + tried;
+        return nullptr;
+    }
+
+    CachedBackend entry = create_backend(backend_name, dso_name, handle);
+    IBackend* backend = entry.backend;
+    g_cache[backend_name] = entry;
+    populate_load_outputs(backend_name, g_cache[backend_name].metadata, loaded_backend_name,
+                          metadata);
+    std::cerr << "[trtf] Backend loaded: " << backend->name() << " (" << dso_name << ")"
+              << std::endl;
+    return backend;
+}
+
+std::string join_backend_names(const std::vector<std::string>& backend_names) {
+    std::string names;
+    for (const auto& name : backend_names) {
+        if (!names.empty())
+            names += ", ";
+        names += name;
+    }
+    return names;
+}
+
+[[noreturn]] void throw_backend_load_failure(const std::vector<std::string>& backend_names,
+                                             const std::string& all_tried) {
+    if (backend_names.size() == 1) {
+        const std::string& backend_name = backend_names.front();
+        const std::string dso_name = backend_dso_name(backend_name);
+        throw std::runtime_error("Backend \"" + backend_name +
+                                 "\" not available.\n"
+                                 "Could not load " +
+                                 dso_name + ":\n" + all_tried +
+                                 "\n"
+                                 "To use " +
+                                 backend_name + " bundles, ensure " + dso_name +
+                                 " is next to the trtf binary,\n"
+                                 "in a LoadOptions::backend_search_paths / --backend-dir "
+                                 "directory, or in LD_LIBRARY_PATH.");
+    }
+
+    throw std::runtime_error("No compatible backend DSO available for candidates: " +
+                             join_backend_names(backend_names) + ".\n" + all_tried +
+                             "\nEnsure the matching libtrtf_backend_<backend>.so is next to the "
+                             "trtf binary, in a LoadOptions::backend_search_paths / --backend-dir "
+                             "directory, or in LD_LIBRARY_PATH.");
+}
+
 } // namespace
 
 IBackend* BackendLoader::load(const std::string& backend_name) {
@@ -193,61 +275,14 @@ IBackend* BackendLoader::load_first_available(const std::vector<std::string>& ba
 
     std::string all_tried;
     for (const std::string& backend_name : backend_names) {
-        auto it = g_cache.find(backend_name);
-        if (it != g_cache.end()) {
-            if (loaded_backend_name)
-                *loaded_backend_name = backend_name;
-            if (metadata)
-                *metadata = it->second.metadata;
-            return it->second.backend;
-        }
-
-        std::string dso_name = "libtrtf_backend_" + backend_name + ".so";
-        std::string tried;
-        void* handle = open_backend_dso(dso_name, search_dirs, tried);
-        if (!handle) {
-            all_tried += "Candidate \"" + backend_name + "\" (" + dso_name + "):\n" + tried;
-            continue;
-        }
-
-        CachedBackend entry = create_backend(backend_name, dso_name, handle);
-        IBackend* backend = entry.backend;
-        g_cache[backend_name] = entry;
-        if (loaded_backend_name)
-            *loaded_backend_name = backend_name;
-        if (metadata)
-            *metadata = g_cache[backend_name].metadata;
-        std::cerr << "[trtf] Backend loaded: " << backend->name() << " (" << dso_name << ")"
-                  << std::endl;
-        return backend;
+        if (IBackend* cached = load_cached_backend(backend_name, loaded_backend_name, metadata))
+            return cached;
+        if (IBackend* backend = load_backend_candidate(backend_name, search_dirs, all_tried,
+                                                       loaded_backend_name, metadata))
+            return backend;
     }
 
-    if (backend_names.size() == 1) {
-        const std::string& backend_name = backend_names.front();
-        const std::string dso_name = "libtrtf_backend_" + backend_name + ".so";
-        throw std::runtime_error("Backend \"" + backend_name +
-                                 "\" not available.\n"
-                                 "Could not load " +
-                                 dso_name + ":\n" + all_tried +
-                                 "\n"
-                                 "To use " +
-                                 backend_name + " bundles, ensure " + dso_name +
-                                 " is next to the trtf binary,\n"
-                                 "in a LoadOptions::backend_search_paths / --backend-dir "
-                                 "directory, or in LD_LIBRARY_PATH.");
-    }
-
-    std::string names;
-    for (const auto& name : backend_names) {
-        if (!names.empty())
-            names += ", ";
-        names += name;
-    }
-    throw std::runtime_error("No compatible backend DSO available for candidates: " + names +
-                             ".\n" + all_tried +
-                             "\nEnsure the matching libtrtf_backend_<backend>.so is next to the "
-                             "trtf binary, in a LoadOptions::backend_search_paths / --backend-dir "
-                             "directory, or in LD_LIBRARY_PATH.");
+    throw_backend_load_failure(backend_names, all_tried);
 }
 
 } // namespace trtf

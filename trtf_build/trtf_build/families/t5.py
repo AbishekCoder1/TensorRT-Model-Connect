@@ -5,9 +5,10 @@ import sys
 from pathlib import Path
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 from ..checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor, _transpose_2d
 from .. import graph_ops
+
+trt = trt_compat.get_trt()
 
 class T5Plugin:
     name = "t5"

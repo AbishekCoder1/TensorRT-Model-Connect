@@ -29,7 +29,6 @@ from pathlib import Path
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import (
@@ -41,6 +40,8 @@ from ..checkpoint_mapper import (
 )
 from .. import graph_ops
 
+
+trt = trt_compat.get_trt()
 
 class MarianPlugin:
     name = "marian"

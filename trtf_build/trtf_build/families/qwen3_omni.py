@@ -42,7 +42,6 @@ from pathlib import Path
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import (
@@ -57,6 +56,8 @@ from .. import graph_ops
 from .. import graph_blocks
 from ..standard_decoder_builder import _mark_debug_output
 
+
+trt = trt_compat.get_trt()
 
 class Qwen3OmniPlugin:
     name = "qwen3_omni"

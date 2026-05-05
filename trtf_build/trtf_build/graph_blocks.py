@@ -23,9 +23,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from . import graph_ops
+
+trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict

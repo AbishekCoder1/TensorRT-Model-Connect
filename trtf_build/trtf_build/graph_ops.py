@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
+
+trt = trt_compat.get_trt()
 
 # ---------------------------------------------------------------------------
 # Helpers

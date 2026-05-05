@@ -22,7 +22,6 @@ from pathlib import Path
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import (
@@ -35,6 +34,8 @@ from ..checkpoint_mapper import (
 from .. import graph_ops
 from .. import graph_blocks
 
+
+trt = trt_compat.get_trt()
 
 def _load_bias_or_zeros(readers, hf_key: str, size: int, dtype=np.float32) -> np.ndarray:
     """Load bias if it exists, otherwise return zeros."""

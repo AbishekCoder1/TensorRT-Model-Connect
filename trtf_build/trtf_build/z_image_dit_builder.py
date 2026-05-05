@@ -41,11 +41,12 @@ from pathlib import Path
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from . import graph_ops
 from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor
 
+
+trt = trt_compat.get_trt()
 
 def load_z_image_dit_weights(
     model_dir: str,

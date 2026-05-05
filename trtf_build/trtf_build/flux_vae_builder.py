@@ -32,9 +32,10 @@ import time
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from .build_timing import add_trt_compile_timing
+
+trt = trt_compat.get_trt()
 
 # ---------------------------------------------------------------------------
 # Weight loading

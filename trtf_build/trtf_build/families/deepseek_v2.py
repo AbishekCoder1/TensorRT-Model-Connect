@@ -40,7 +40,6 @@ from pathlib import Path
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import (
@@ -54,6 +53,8 @@ from .. import graph_ops
 from .. import graph_blocks
 from ..standard_decoder_builder import _apply_norm, _mark_debug_output
 
+
+trt = trt_compat.get_trt()
 
 class DeepSeekV2Plugin:
     name = "deepseek_v2"

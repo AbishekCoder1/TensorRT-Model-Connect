@@ -21,9 +21,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from . import graph_ops
+
+trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
@@ -355,9 +356,6 @@ def build_phi4mm_vision_engine(
         # Slice off CLS: [1+num_patches, embed_dim] -> [num_patches, embed_dim]
         # Use gather to select indices 1..num_patches
         indices = np.arange(1, 1 + num_patches, dtype=np.int32)
-        idx_const = graph_ops.add_constant(
-            network, (num_patches,),
-            indices.astype(np.float32))
         # Need int32 for gather index
         idx_w = trt.Weights(np.ascontiguousarray(indices))
         idx_layer = network.add_constant((num_patches,), idx_w)

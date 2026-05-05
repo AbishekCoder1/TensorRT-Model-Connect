@@ -31,9 +31,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from trtf_build import trt_compat
-trt = trt_compat.get_trt()
 
 from . import graph_ops
+
+trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
@@ -499,10 +500,9 @@ def build_internvit_vision_engine(
     # [num_patches, embed_dim] -> [num_output_tokens, concat_dim]
     # ---------------------------------------------------------------
     if downsample_ratio < 1.0:
-        hidden, num_output_tokens_actual, concat_dim = _add_pixel_shuffle_downsample(
+        hidden, _, concat_dim = _add_pixel_shuffle_downsample(
             network, hidden, grid_h, grid_w, embed_dim, downsample_ratio)
     else:
-        num_output_tokens_actual = num_patches
         concat_dim = embed_dim
 
     # ---------------------------------------------------------------
