@@ -32,16 +32,12 @@ The GitHub Pages site is private while this repository is private. Use the local
 The recommended first path is to let a repo-aware coding agent adapt the setup to the machine it is running on. Open Claude Code, Codex, or another local coding agent and give it this task:
 
 ```text
-Clone the repo at https://github.com/NVIDIA-dev/TensorRT-Model-Connct.
-Inspect my current NVIDIA GPU, CUDA, TensorRT, Docker, and Python environment.
-Modify the Dockerfile or dev-container setup only if my environment needs it.
-Set up the project, build the C++ runtime with TensorRT backend support enabled,
-build a Qwen/Qwen3-0.6B .trtfb bundle, and run a greedy C++ smoke test.
-Use the C++ tokenizer path for Qwen; do not add --hf-python unless validation proves it is needed.
-Report every command you ran and keep the manual steps as a fallback.
+Clone https://github.com/NVIDIA-dev/TensorRT-Model-Connct, adapt the dev
+container to this machine if needed, build the project, build a Qwen/Qwen3-0.6B
+bundle, and run a greedy C++ smoke test. Report the commands you ran.
 ```
 
-The successful Qwen smoke test should show `Using native BPE tokenizer` in the runtime log. That means the prompt and generated token IDs were handled by the C++ tokenizer from the bundle, not by a HuggingFace Python tokenizer process.
+For Qwen, the smoke test should run without `--hf-python` and log `Using native BPE tokenizer`.
 
 ## Manual Fallback
 
