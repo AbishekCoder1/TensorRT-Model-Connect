@@ -21,8 +21,7 @@ flowchart TB
 ```bash
 pytest tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16] -v \
   --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
-  --trtmc-binary ./build/trtmc \
-  --hf-python /opt/venv/bin/python
+  --trtmc-binary ./build/trtmc
 ```
 
 The model manifest supplies the family, runtime strategy, bundle name, prompt or modality input, thresholds, reference backend, and test contract.

@@ -69,11 +69,12 @@ Inspection should become the first debugging habit. The important fields are `fa
 ./build/trtmc run /tmp/qwen3-0.6b.trtfb \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
-  --greedy \
-  --hf-python /opt/venv/bin/python
+  --greedy
 ```
 
-`--greedy` makes the smoke test deterministic: each step chooses the highest-score token instead of sampling randomly. The `--hf-python` flag points the runtime at the helper Python environment used for tokenizer or model-family support code. Engine execution remains in the C++/TensorRT runtime path.
+`--greedy` makes the smoke test deterministic: each step chooses the highest-score token instead of sampling randomly. For Qwen3-0.6B, the runtime should log `Using native BPE tokenizer`; no `--hf-python` path is needed for this text-generation smoke test.
+
+Add `--hf-python /opt/venv/bin/python` only when a runtime strategy still needs helper Python code, such as speech-to-speech prompt handling or a legacy fallback path.
 
 ## 5. Interpret The Result
 

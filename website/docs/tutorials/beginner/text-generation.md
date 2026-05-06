@@ -178,13 +178,12 @@ You are ready to continue when you can explain why `runtime_strategy` is more im
 ./build/trtmc run /tmp/qwen3-0.6b.trtfb \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
-  --greedy \
-  --hf-python /opt/venv/bin/python
+  --greedy
 ```
 
 Use `--greedy` for the most deterministic smoke test. Use `--temperature`, `--top-p`, `--top-k`, and `--seed` only after the deterministic path works.
 
-`--hf-python` points the runtime at the Python helper environment for tokenizer or model-family support code. The engine plan itself is still executed by the C++/TensorRT runtime.
+For Qwen3-0.6B, the runtime should log `Using native BPE tokenizer`; no `--hf-python` path is needed for this text-generation smoke test. Add `--hf-python /opt/venv/bin/python` only for runtime strategies that still need helper Python code, such as speech-to-speech prompt handling or a legacy fallback path.
 
 Runtime creation follows this path:
 
@@ -237,7 +236,6 @@ You understand this stage when you can explain why two successful runs can produ
 /opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b-fp16] -v \
   --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
   --trtmc-binary ./build/trtmc \
-  --hf-python /opt/venv/bin/python \
   --rebuild-engines
 ```
 

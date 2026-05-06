@@ -27,22 +27,49 @@ The GitHub Pages site is private while this repository is private. Use the local
 | Understand internals | [Architecture](https://legendary-doodle-r37686v.pages.github.io/architecture/overview) | [website/docs/architecture/overview.md](website/docs/architecture/overview.md) |
 | Run validation | [Testing](https://legendary-doodle-r37686v.pages.github.io/reference/testing) | [website/docs/reference/testing.md](website/docs/reference/testing.md) |
 
-## Quick Start
+## AI-First Quick Start
 
-The standard workflow runs inside the project dev container.
+The recommended first path is to let a repo-aware coding agent adapt the setup to the machine it is running on. Open Claude Code, Codex, or another local coding agent and give it this task:
+
+```text
+Clone the repo at https://github.com/NVIDIA-dev/TensorRT-Model-Connct.
+Inspect my current NVIDIA GPU, CUDA, TensorRT, Docker, and Python environment.
+Modify the Dockerfile or dev-container setup only if my environment needs it.
+Set up the project, build the C++ runtime with TensorRT backend support enabled,
+build a Qwen/Qwen3-0.6B .trtfb bundle, and run a greedy C++ smoke test.
+Use the C++ tokenizer path for Qwen; do not add --hf-python unless validation proves it is needed.
+Report every command you ran and keep the manual steps as a fallback.
+```
+
+The successful Qwen smoke test should show `Using native BPE tokenizer` in the runtime log. That means the prompt and generated token IDs were handled by the C++ tokenizer from the bundle, not by a HuggingFace Python tokenizer process.
+
+## Manual Fallback
+
+Use these commands when you want to do the setup yourself or verify what the agent did.
 
 ```bash
+git clone https://github.com/NVIDIA-dev/TensorRT-Model-Connct.git
+cd TensorRT-Model-Connct
+
 ./scripts/docker_build_gb300.sh
 ./scripts/docker_run_gb300.sh
 ```
 
-Inside the container, install the Python builder and build the C++ runtime:
+Inside the container, install the Python builder and build the C++ runtime. If your TensorRT installation lives somewhere else, adjust the two `TRTMC_TRT_*` paths.
 
 ```bash
 pip install -e tensorrt_model_connect/
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+  -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
+  -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+
 cmake --build build -j
 ```
+
+The CMake configure output should say `TRT backend DSO: enabled`. If it says the backend is skipped, fix the TensorRT include/library paths before running a model.
 
 Build a small text-generation bundle and run it from C++:
 
@@ -54,7 +81,7 @@ trtmc-build build Qwen/Qwen3-0.6B \
 ./build/trtmc run /tmp/qwen3.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
-  --hf-python /opt/venv/bin/python
+  --greedy
 ```
 
 See [Installation](website/docs/getting-started/installation.md) and [Build and Run](website/docs/getting-started/build-and-run.md) for the full setup and workload-specific examples.
@@ -97,7 +124,7 @@ C++ runtime:
 #include <iostream>
 
 int main() {
-    auto pipe = trtmc::load("/tmp/qwen3.trtfb", "/opt/venv/bin/python");
+    auto pipe = trtmc::load("/tmp/qwen3.trtfb");
 
     trtmc::GenerateConfig cfg;
     cfg.max_new_tokens = 20;
@@ -140,9 +167,10 @@ Run an E2E model path when engines and model assets are available:
 ```bash
 pytest tests/test_e2e.py \
   --engine-dir /path/to/engines \
-  --trtmc-binary ./build/trtmc \
-  --hf-python /opt/venv/bin/python
+  --trtmc-binary ./build/trtmc
 ```
+
+Add `--hf-python /opt/venv/bin/python` only for runtime strategies that still need helper Python code, such as speech-to-speech prompt handling or legacy fallback paths. Qwen3-0.6B text generation uses the native C++ BPE tokenizer from the bundle.
 
 The GitHub workflow separates normal branch or pull-request checks from scheduled and manually requested full E2E runs. See [Testing](website/docs/reference/testing.md) for the full matrix and artifact expectations.
 

@@ -28,9 +28,15 @@ Then, inside the container:
 
 ```bash
 pip install -e tensorrt_model_connect/
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+  -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
+  -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
 cmake --build build -j
 ```
+
+The configure step should print `TRT backend DSO: enabled`. If it says the TensorRT backend is skipped, fix the `TRTMC_TRT_INCLUDE_DIR` and `TRTMC_TRT_LIBRARY` paths before building bundles.
 
 Use `pip install --no-deps -e tensorrt_model_connect/` only when the container already has the builder dependencies installed and you intentionally want to avoid dependency resolution.
 
@@ -47,7 +53,11 @@ The builder dependencies include `safetensors`, `numpy`, `ml_dtypes`, `onnx`, `o
 ## C++ runtime build
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+  -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
+  -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
 cmake --build build -j
 ```
 

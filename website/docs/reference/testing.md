@@ -10,9 +10,10 @@ pytest tests/tools -q
 ctest --test-dir build --output-on-failure
 pytest tests/test_e2e.py::test_e2e[<manifest-name>] -v \
   --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
-  --trtmc-binary ./build/trtmc \
-  --hf-python /opt/venv/bin/python
+  --trtmc-binary ./build/trtmc
 ```
+
+Add `--hf-python /opt/venv/bin/python` only for runtime strategies that still need helper Python code, such as speech-to-speech prompt handling or legacy fallback paths.
 
 ## When to use which test
 

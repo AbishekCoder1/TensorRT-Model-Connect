@@ -27,8 +27,7 @@ trtmc-build build Qwen/Qwen2.5-VL-3B-Instruct \
 ./build/trtmc run /tmp/qwen25vl.trtfb \
   --prompt "Describe this image in one sentence." \
   --image tests/assets/test_image.jpg \
-  --max-new-tokens 48 \
-  --hf-python /opt/venv/bin/python
+  --max-new-tokens 48
 ```
 
 The family plugin builds a vision encoder and a text decoder. The runtime plugin creates a `VLPipeline`, preprocesses the image, injects image embeddings into the prompt flow, and decodes text.
@@ -64,8 +63,7 @@ trtmc-build build openai/whisper-large-v3-turbo \
 
 ./build/trtmc transcribe /tmp/whisper.trtfb \
   --audio tests/e2e/data/Recording.wav \
-  --max-new-tokens 224 \
-  --hf-python /opt/venv/bin/python
+  --max-new-tokens 224
 ```
 
 `speech_to_text` bundles use audio preprocessing, mel feature extraction, encoder/decoder execution, and text decoding.
@@ -89,8 +87,7 @@ The important beginner mistake is to treat audio as if it were text. Speech mode
   --audio tests/e2e/data/Recording.wav \
   --stream \
   --chunk-ms 160 \
-  --att-context-size 70,13 \
-  --hf-python /opt/venv/bin/python
+  --att-context-size 70,13
 ```
 
 Cache-aware streaming uses `TranscriptionStreamConfig` in `include/trtmc/pipeline.h`. Right contexts `{0, 1, 6, 13}` correspond to the supported FastConformer-RNNT schedules documented in code comments.
@@ -130,8 +127,7 @@ Streaming adds two concerns that offline transcription does not have:
 ```bash
 ./build/trtmc generate-audio /tmp/magpie.trtfb \
   --prompt "A calm narration for a product demo." \
-  --output /tmp/out.wav \
-  --hf-python /opt/venv/bin/python
+  --output /tmp/out.wav
 ```
 
 Magpie supports chunked audio callbacks in the C++ API and `trtmc serve-audio` in the CLI.

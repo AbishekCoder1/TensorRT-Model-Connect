@@ -13,11 +13,10 @@ trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --precision fp16
   --prompt "Write one sentence about TensorRT." \
   --max-new-tokens 32 \
   --temperature 0.7 \
-  --top-p 0.9 \
-  --hf-python /opt/venv/bin/python
+  --top-p 0.9
 ```
 
-Useful runtime knobs include `--greedy`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`. Use `--greedy` for deterministic smoke tests before trying sampling.
+Useful runtime knobs include `--greedy`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`. Use `--greedy` for deterministic smoke tests before trying sampling. Qwen text generation uses the native C++ BPE tokenizer from the bundle, so `--hf-python` is not needed for this path.
 
 ## Vision-language generation
 
@@ -30,8 +29,7 @@ trtmc-build build Qwen/Qwen2.5-VL-3B-Instruct \
 ./build/trtmc run /tmp/qwen25vl.trtfb \
   --prompt "Describe this image." \
   --image tests/assets/test_image.jpg \
-  --max-new-tokens 48 \
-  --hf-python /opt/venv/bin/python
+  --max-new-tokens 48
 ```
 
 Vision-language families build a vision engine plus a text decoder and route through `runtime_strategy="vision_language"`.
@@ -43,8 +41,7 @@ trtmc-build build openai/whisper-large-v3-turbo -o /tmp/whisper.trtfb --precisio
 
 ./build/trtmc transcribe /tmp/whisper.trtfb \
   --audio tests/e2e/data/Recording.wav \
-  --max-new-tokens 224 \
-  --hf-python /opt/venv/bin/python
+  --max-new-tokens 224
 ```
 
 ```bash
@@ -52,11 +49,10 @@ trtmc-build build nvidia/magpie_tts_multilingual_357m -o /tmp/magpie.trtfb --pre
 
 ./build/trtmc generate-audio /tmp/magpie.trtfb \
   --prompt "A clear short test sentence." \
-  --output /tmp/magpie.wav \
-  --hf-python /opt/venv/bin/python
+  --output /tmp/magpie.wav
 ```
 
-Streaming paths are exposed through `trtmc transcribe --stream` for cache-aware ASR and `trtmc serve-audio` for prompt-driven audio serving.
+Streaming paths are exposed through `trtmc transcribe --stream` for cache-aware ASR and `trtmc serve-audio` for prompt-driven audio serving. Add `--hf-python /opt/venv/bin/python` only for runtime strategies that still need helper Python code.
 
 ## Diffusion and video
 
