@@ -42,15 +42,20 @@ jobs:
         run: npm ci
 
       - name: Configure GitHub Pages
+        id: pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Build site
         env:
-          BASE_URL: /${{ github.event.repository.name }}/
-          SITE_URL: https://nvidia-dev.github.io
-        run: npm run build
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          SITE_URL: ${{ steps.pages.outputs.origin }}
+        run: |
+          if [ -n "$PAGES_BASE_PATH" ]; then
+            export BASE_URL="${PAGES_BASE_PATH%/}/"
+          else
+            export BASE_URL="/"
+          fi
+          npm run build
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
