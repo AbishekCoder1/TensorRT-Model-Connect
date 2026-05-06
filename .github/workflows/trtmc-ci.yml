@@ -63,10 +63,26 @@ jobs:
         shell: bash
 
     steps:
+      - name: Pre-clean self-hosted workspace
+        run: |
+          set -euo pipefail
+          if [ -d "$GITHUB_WORKSPACE" ]; then
+            docker image inspect "$TRTMC_CI_IMAGE" >/dev/null || {
+              echo "::error::Docker image '$TRTMC_CI_IMAGE' is not present on the self-hosted runner. Set repository variable TRTMC_CI_IMAGE if the runner uses a different local image tag."
+              exit 1
+            }
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+              -w "$GITHUB_WORKSPACE" \
+              "$TRTMC_CI_IMAGE" \
+              bash -lc 'find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +'
+          fi
+
       - name: Check out source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: false
           lfs: false
 
       - name: Resolve comparison base
