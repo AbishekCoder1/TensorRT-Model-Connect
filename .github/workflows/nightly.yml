@@ -1,28 +1,16 @@
-name: TensorRT-Model-Connect Premerge CI
+name: TensorRT-Model-Connect Nightly CI
 
 on:
-  push:
-    branches:
-      - master
-      - ai-staging
-    paths-ignore:
-      - "website/**"
-      - ".github/workflows/pages.yml"
-  pull_request:
-    branches:
-      - master
-      - ai-staging
-    paths-ignore:
-      - "website/**"
-      - ".github/workflows/pages.yml"
+  schedule:
+    - cron: "0 10 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: trtmc-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: trtmc-nightly-master
+  cancel-in-progress: false
 
 env:
   ENGINE_DIR: ${{ vars.TRTMC_ENGINE_DIR || '/workspace/users/yifeif/tensorrt-model-connect/engines' }}
@@ -34,15 +22,15 @@ env:
   CPP_COVERAGE_MIN_LINE: "36"
   CPP_COVERAGE_MIN_FUNCTION: "46"
   CPP_COVERAGE_MIN_BRANCH: "21"
-  FULL_E2E: "false"
-  RUN_COVERAGE_MAP: "false"
+  FULL_E2E: "true"
+  RUN_COVERAGE_MAP: "true"
   REBUILD_ENGINES: "true"
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
   HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
-  premerge-ci:
-    name: Premerge CI
+  nightly-ci:
+    name: Nightly Full CI on GitHub master
     runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 720
 
@@ -77,52 +65,28 @@ jobs:
               '
           fi
 
-      - name: Check out source
+      - name: Check out GitHub master tip
         uses: actions/checkout@v4
         with:
+          ref: master
           fetch-depth: 0
           clean: false
           lfs: false
 
       - name: Resolve comparison base
-        id: base
         run: |
           set -euo pipefail
-          base=""
-          case "${GITHUB_EVENT_NAME}" in
-            pull_request)
-              base="${{ github.event.pull_request.base.sha }}"
-              ;;
-            push)
-              base="${{ github.event.before }}"
-              ;;
-            workflow_dispatch)
-              base="origin/${GITHUB_REF_NAME:-master}"
-              ;;
-          esac
-
-          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            if git rev-parse --verify "origin/${GITHUB_REF_NAME:-master}" >/dev/null 2>&1; then
-              base="origin/${GITHUB_REF_NAME:-master}"
-            else
-              base="HEAD~1"
-            fi
-          fi
-
-          echo "CI_BASE_REF=$base" >> "$GITHUB_ENV"
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-          echo "Using comparison base: $base"
+          git fetch origin master --quiet
+          echo "CI_BASE_REF=HEAD~1" >> "$GITHUB_ENV"
+          echo "Running nightly on GitHub master tip: $(git rev-parse HEAD)"
 
       - name: Report CI mode
         run: |
           set -euo pipefail
-          if [ "$FULL_E2E" = "true" ]; then
-            echo "CI mode: full E2E"
-          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            echo "CI mode: premerge/selective"
-          else
-            echo "CI mode: branch/manual unit gates"
-          fi
+          echo "CI mode: nightly/full E2E on GitHub master"
+          echo "FULL_E2E=$FULL_E2E"
+          echo "RUN_COVERAGE_MAP=$RUN_COVERAGE_MAP"
+          echo "REBUILD_ENGINES=$REBUILD_ENGINES"
 
       - name: Setup TensorRT-Model-Connect
         timeout-minutes: 5
@@ -157,7 +121,6 @@ jobs:
         run: bash .github/scripts/run-gha-stage.sh python-builder
 
       - name: C++ coverage
-        if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
         timeout-minutes: 40
         run: bash .github/scripts/run-gha-stage.sh cpp-coverage
 
@@ -165,18 +128,21 @@ jobs:
         timeout-minutes: 20
         run: bash .github/scripts/run-gha-stage.sh graph-ops
 
-      - name: Selective E2E tests
-        if: ${{ github.event_name == 'pull_request' && env.FULL_E2E != 'true' }}
-        timeout-minutes: 240
-        run: bash .github/scripts/run-gha-stage.sh selective-e2e
+      - name: Full E2E tests
+        timeout-minutes: 360
+        run: bash .github/scripts/run-gha-stage.sh full-e2e
 
-      - name: Upload CI artifacts
+      - name: Generate coverage map
+        timeout-minutes: 90
+        run: bash .github/scripts/run-gha-stage.sh coverage-map
+
+      - name: Upload nightly artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: trtmc-ci-${{ github.run_id }}
+          name: trtmc-nightly-${{ github.run_id }}
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 30
           path: |
             impact.json
             coverage_map.json
