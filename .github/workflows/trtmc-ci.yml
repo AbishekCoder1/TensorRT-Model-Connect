@@ -1,0 +1,401 @@
+name: TensorRT-Model-Connect CI
+
+on:
+  push:
+    branches:
+      - master
+      - ai-staging
+  pull_request:
+    branches:
+      - master
+      - ai-staging
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+    inputs:
+      full_e2e:
+        description: Run the full nightly E2E suite instead of only selective MR E2E.
+        required: false
+        type: boolean
+        default: false
+      coverage_map:
+        description: Generate the test coverage map artifact.
+        required: false
+        type: boolean
+        default: true
+      rebuild_engines:
+        description: Rebuild engine bundles during E2E.
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trtmc-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ENGINE_DIR: ${{ vars.TRTMC_ENGINE_DIR || '/workspace/users/yifeif/tensorrt-model-connect/engines' }}
+  PYTHONHASHSEED: "0"
+  PYTHON_COVERAGE_MIN_LINE: "38"
+  PYTHON_COVERAGE_MIN_BRANCH: "25"
+  CPP_COVERAGE_MIN_LINE: "36"
+  CPP_COVERAGE_MIN_FUNCTION: "46"
+  CPP_COVERAGE_MIN_BRANCH: "21"
+  FULL_E2E: ${{ github.event_name == 'schedule' || inputs.full_e2e == true || inputs.full_e2e == 'true' }}
+  RUN_COVERAGE_MAP: ${{ github.event_name == 'schedule' || inputs.coverage_map == true || inputs.coverage_map == 'true' }}
+  REBUILD_ENGINES: ${{ github.event_name == 'schedule' || inputs.rebuild_engines == true || inputs.rebuild_engines == 'true' }}
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+
+jobs:
+  full-ci:
+    name: Full CI
+    runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 720
+    container:
+      image: ${{ vars.TRTMC_CI_IMAGE || 'trtmc-dev-gb300:latest' }}
+      options: ${{ vars.TRTMC_CONTAINER_OPTIONS || '--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: false
+
+      - name: Resolve comparison base
+        id: base
+        run: |
+          set -euo pipefail
+          base=""
+          case "${GITHUB_EVENT_NAME}" in
+            pull_request)
+              base="${{ github.event.pull_request.base.sha }}"
+              ;;
+            push)
+              base="${{ github.event.before }}"
+              ;;
+            schedule|workflow_dispatch)
+              base="origin/${GITHUB_REF_NAME:-master}"
+              ;;
+          esac
+
+          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            if git rev-parse --verify "origin/${GITHUB_REF_NAME:-master}" >/dev/null 2>&1; then
+              base="origin/${GITHUB_REF_NAME:-master}"
+            else
+              base="HEAD~1"
+            fi
+          fi
+
+          echo "CI_BASE_REF=$base" >> "$GITHUB_ENV"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "Using comparison base: $base"
+
+      - name: Setup TensorRT-Model-Connect
+        uses: ./.github/actions/setup-trtmc
+
+      - name: Impact analysis
+        run: |
+          set -euo pipefail
+          python3 tools/test_impact.py --validate
+          python3 tools/coverage_map/fetch_latest.py \
+            --output coverage_map.json \
+            --local-fallback "${COVERAGE_MAP_PATH:-}" \
+            || echo "No coverage map available -- using tier-level selection"
+
+          if [ -f coverage_map.json ]; then
+            python3 tools/test_impact.py --base "$CI_BASE_REF" --coverage-map coverage_map.json --json > impact.json
+          else
+            python3 tools/test_impact.py --base "$CI_BASE_REF" --json > impact.json
+          fi
+
+          echo "--- Impact Analysis ---"
+          cat impact.json
+          python3 tools/test_impact.py --base "$CI_BASE_REF" --verbose
+
+      - name: Build all
+        run: |
+          set -euo pipefail
+          TRT_INCLUDE="${TRTMC_TRT_INCLUDE_DIR:-${TRT_INC_DIR:-}}"
+          TRT_LIBRARY="${TRTMC_TRT_LIBRARY:-}"
+          if [ -z "$TRT_LIBRARY" ] && [ -n "${TRT_LIB_DIR:-}" ]; then
+            TRT_LIBRARY="${TRT_LIB_DIR%/}/libnvinfer.so"
+          fi
+          if [ -z "$TRT_LIBRARY" ]; then
+            for candidate in \
+              /opt/venv/lib/python*/site-packages/tensorrt_libs/libnvinfer.so \
+              /usr/lib/x86_64-linux-gnu/libnvinfer.so \
+              /usr/local/tensorrt/lib/libnvinfer.so; do
+              if [ -f "$candidate" ]; then
+                TRT_LIBRARY="$candidate"
+                break
+              fi
+            done
+          fi
+          if [ -z "$TRT_INCLUDE" ]; then
+            for candidate in /usr/local/tensorrt/include /usr/include/x86_64-linux-gnu /usr/include; do
+              if [ -f "$candidate/NvInfer.h" ]; then
+                TRT_INCLUDE="$candidate"
+                break
+              fi
+            done
+          fi
+          CUDA_INCLUDE="${TRTMC_CUDA_INCLUDE_DIR:-/usr/local/cuda/include}"
+          CUDART_LIBRARY="${TRTMC_CUDART_LIBRARY:-/usr/local/cuda/lib64/libcudart.so}"
+
+          : "${TRT_INCLUDE:?TensorRT include directory was not found}"
+          : "${TRT_LIBRARY:?TensorRT libnvinfer.so was not found}"
+          : "${CUDA_INCLUDE:?CUDA include directory was not found}"
+          : "${CUDART_LIBRARY:?CUDA runtime library was not found}"
+
+          cmake -S . -B build -G Ninja \
+            -DTRTMC_TRT_INCLUDE_DIR="$TRT_INCLUDE" \
+            -DTRTMC_TRT_LIBRARY="$TRT_LIBRARY" \
+            -DTRTMC_CUDA_INCLUDE_DIR="$CUDA_INCLUDE" \
+            -DTRTMC_CUDART_LIBRARY="$CUDART_LIBRARY"
+          cmake --build build -j
+
+      - name: Check family coverage
+        run: python scripts/check_family_coverage.py
+
+      - name: Check cyclomatic complexity
+        run: |
+          set -euo pipefail
+          lizard --version
+          python tools/check_cyclomatic_complexity.py src --max-ccn "${CCM_MAX_CCN:-10}" --top 20
+
+      - name: Lint changed files
+        run: |
+          set -euo pipefail
+          if ! command -v ruff >/dev/null 2>&1 || ! command -v clang-format >/dev/null 2>&1; then
+            python -m pip install --disable-pip-version-check --quiet ruff clang-format
+          fi
+
+          BASE_REF="$CI_BASE_REF"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            BASE_REF="origin/${GITHUB_REF_NAME:-master}"
+          fi
+
+          CHANGED_PY=$(git diff --diff-filter=d --name-only "$BASE_REF"...HEAD -- '*.py' || true)
+          if [ -n "$CHANGED_PY" ]; then
+            echo "Checking Python lint on changed files:"
+            echo "$CHANGED_PY"
+            echo "$CHANGED_PY" | xargs ruff check --config ruff.toml
+          fi
+
+          CHANGED_CPP=$(git diff --diff-filter=d --name-only "$BASE_REF"...HEAD -- '*.cpp' '*.h' || true)
+          if [ -n "$CHANGED_CPP" ]; then
+            echo "Checking C++ formatting on changed files:"
+            echo "$CHANGED_CPP"
+            echo "$CHANGED_CPP" | xargs clang-format --dry-run --Werror
+          fi
+
+      - name: C++ unit tests
+        run: |
+          set -euo pipefail
+          if [ "$FULL_E2E" != "true" ]; then
+            if ! python3 -c "import json; d=json.load(open('impact.json')); exit(0 if 'cpp' in d['unit_tiers'] else 1)"; then
+              echo "Skipping: cpp tier not affected by this change"
+              exit 0
+            fi
+          fi
+
+          CPP_TESTS=""
+          if [ "$FULL_E2E" != "true" ]; then
+            CPP_TESTS=$(python3 -c "
+          import json, sys
+          d = json.load(open('impact.json'))
+          tests = d.get('cpp_tests', [])
+          fallback = d.get('fallback_tiers', [])
+          if 'cpp' in fallback or not tests:
+              sys.exit(0)
+          print('|'.join(tests))
+          " 2>/dev/null) || true
+          fi
+
+          if [ -n "$CPP_TESTS" ]; then
+            echo "Selective C++ tests: $CPP_TESTS"
+            ctest --test-dir build -R "$CPP_TESTS" --output-on-failure
+          else
+            echo "Running all C++ tests"
+            ctest --test-dir build --output-on-failure
+          fi
+
+      - name: Python builder and tools tests
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet "pytest-cov>=6.0"
+          mkdir -p coverage
+
+          if [ "$FULL_E2E" != "true" ]; then
+            if ! python3 -c "import json; d=json.load(open('impact.json')); tiers=d['unit_tiers']; exit(0 if 'builder' in tiers or 'tools' in tiers else 1)"; then
+              echo "Skipping: neither builder nor tools tier affected by this change"
+              echo '<?xml version="1.0" ?><coverage version="7.6" timestamp="0" lines-valid="0" lines-covered="0" line-rate="1.0" branches-valid="0" branches-covered="0" branch-rate="1.0" complexity="0"><packages/></coverage>' > coverage/python-cobertura.xml
+              echo "PYTHON_COVERAGE_LINE=100.00%"
+              echo "PYTHON_COVERAGE_BRANCH=100.00%"
+              echo "Skipped" > coverage/python-coverage.txt
+              exit 0
+            fi
+          fi
+
+          BUILDER_TESTS=""
+          if [ "$FULL_E2E" != "true" ]; then
+            BUILDER_TESTS=$(python3 -c "
+          import json, sys
+          d = json.load(open('impact.json'))
+          tests = d.get('builder_tests', [])
+          fallback = d.get('fallback_tiers', [])
+          if 'builder' in fallback or not tests:
+              sys.exit(0)
+          print(' or '.join(tests))
+          " 2>/dev/null) || true
+          fi
+
+          COV_ARGS="--cov=tensorrt_model_connect/tensorrt_model_connect --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml"
+          if [ -n "$BUILDER_TESTS" ]; then
+            echo "Selective builder tests: $BUILDER_TESTS"
+            python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v \
+              --ignore=tests/builder/test_cli.py \
+              --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
+              -k "$BUILDER_TESTS" -n auto $COV_ARGS
+          else
+            echo "Running all builder + tools tests"
+            python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v \
+              --ignore=tests/builder/test_cli.py \
+              --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
+              -n auto $COV_ARGS
+          fi
+
+          python -m coverage report --show-missing 2>/dev/null | tee coverage/python-coverage.txt || true
+          python3 -c "
+          import xml.etree.ElementTree as ET, sys
+          root = ET.parse('coverage/python-cobertura.xml').getroot()
+          line_pct = float(root.attrib.get('line-rate', '0')) * 100
+          branch_pct = float(root.attrib.get('branch-rate', '0')) * 100
+          line_min = float('${PYTHON_COVERAGE_MIN_LINE}')
+          branch_min = float('${PYTHON_COVERAGE_MIN_BRANCH}')
+          print(f'PYTHON_COVERAGE_LINE={line_pct:.2f}%')
+          print(f'PYTHON_COVERAGE_BRANCH={branch_pct:.2f}%')
+          ok = True
+          if line_pct + 1e-9 < line_min:
+              print(f'FAIL: Python line coverage {line_pct:.1f}% < {line_min}% gate', file=sys.stderr)
+              ok = False
+          if branch_pct + 1e-9 < branch_min:
+              print(f'FAIL: Python branch coverage {branch_pct:.1f}% < {branch_min}% gate', file=sys.stderr)
+              ok = False
+          sys.exit(0 if ok else 1)
+          "
+
+      - name: C++ coverage
+        if: env.FULL_E2E == 'true'
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet "gcovr==8.2"
+          bash tools/coverage_ci/run_cpp_coverage.sh
+
+      - name: Graph-op GPU tests
+        run: |
+          set -euo pipefail
+          nvidia-smi
+          python -m pytest tests/builder/test_graph_ops.py tests/builder/test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -n auto
+
+      - name: Selective E2E tests
+        if: github.event_name == 'pull_request' && env.FULL_E2E != 'true'
+        run: |
+          set -euo pipefail
+          python3 -c "
+          import json
+          d = json.load(open('impact.json'))
+          models = d.get('e2e_models', [])
+          with open('e2e_models.txt', 'w') as f:
+              for m in models:
+                  f.write(m + '\n')
+          print(f'Selective E2E: {len(models)} models')
+          for m in models[:10]:
+              print(f'  {m}')
+          if len(models) > 10:
+              print(f'  ... and {len(models) - 10} more')
+          "
+          MODEL_COUNT=$(wc -l < e2e_models.txt)
+          if [ "$MODEL_COUNT" -eq 0 ]; then
+            echo "No E2E models affected by this change -- skipping E2E tests"
+            exit 0
+          fi
+          echo "=== Phase 1: warming HF cache (online, sequential) ==="
+          env -u HF_HUB_OFFLINE python scripts/warm_hf_cache.py --models-file e2e_models.txt
+          echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
+          ARGS=(
+            --engine-dir "$ENGINE_DIR"
+            --result-dir e2e_artifacts
+            --trtmc-binary ./build/trtmc
+            --workers-per-gpu 4
+            --models-file e2e_models.txt
+          )
+          if [ "$REBUILD_ENGINES" = "true" ]; then
+            ARGS+=(--rebuild-engines)
+          fi
+          HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${ARGS[@]}"
+
+      - name: Full E2E tests
+        if: env.FULL_E2E == 'true'
+        run: |
+          set -euo pipefail
+          echo "=== Nightly Full E2E: all models ==="
+          nvidia-smi
+          echo "=== Phase 1: warming HF cache (online, sequential) ==="
+          python scripts/warm_hf_cache.py --exclude-ci-tier l0_only
+          echo "=== Phase 2: parallel rebuild (offline, local cache) ==="
+          ARGS=(
+            --engine-dir "$ENGINE_DIR"
+            --result-dir e2e_artifacts
+            --trtmc-binary ./build/trtmc
+            --workers-per-gpu 4
+            --exclude-ci-tier l0_only
+          )
+          if [ "$REBUILD_ENGINES" = "true" ]; then
+            ARGS+=(--rebuild-engines)
+          fi
+          HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${ARGS[@]}"
+
+      - name: Generate E2E report
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -d e2e_artifacts ]; then
+            python scripts/generate_e2e_report.py \
+              --artifacts-dir e2e_artifacts/artifacts \
+              -o e2e_artifacts/e2e_report.html \
+              --project-dir . \
+              --title "GitHub Actions E2E Report - ${GITHUB_RUN_ID}" \
+              || true
+          fi
+
+      - name: Generate coverage map
+        if: env.RUN_COVERAGE_MAP == 'true'
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet "coverage[toml]==7.6.10" "pytest-cov>=6.0" "gcovr==8.2"
+          python -m tools.coverage_map.generate --output coverage_map.json --python-bin python --build-dir build
+          python -m tools.coverage_map.generate --validate coverage_map.json
+          python -c "import json; d=json.load(open('coverage_map.json')); m=d['meta']; print('Python tests: %s, C++ tests: %s, Source files: %d' % (m['python_tests'], m['cpp_tests'], len(d['source_to_tests'])))"
+
+      - name: Upload CI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-ci-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            impact.json
+            coverage_map.json
+            coverage/
+            e2e_artifacts/
