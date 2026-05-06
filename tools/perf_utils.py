@@ -99,8 +99,8 @@ def resolve_model(model_id: str) -> str:
     except Exception:
         pass
     try:
-        from trtf_build.engine_builder import _resolve_model as _trtf_resolve
-        return _trtf_resolve(model_id)
+        from tensorrt_model_connect.engine_builder import _resolve_model as _trtmc_resolve
+        return _trtmc_resolve(model_id)
     except Exception:
         raise FileNotFoundError(
             f"Cannot resolve model: {model_id!r}. "
@@ -368,7 +368,7 @@ def bench_torchtrt_bundle(bundle_path: str, tokenizer, prompt: str,
                            max_new_tokens: int, warmup: int, iterations: int,
                            verbose: bool) -> dict:
     """Benchmark Torch-TRT bundle via dedicated TRT runner."""
-    from trtf_build.debug_runner import load_engine_from_bundle
+    from tensorrt_model_connect.debug_runner import load_engine_from_bundle
 
     engine_plan, header = load_engine_from_bundle(bundle_path)
     num_layers = header["num_layers"]
@@ -433,7 +433,7 @@ def build_torchtrt_bundle(model_id: str, max_cache_length: int,
     print(f"  Building Torch-TRT engine (precision={precision}) ...",
           file=sys.stderr)
     t0 = time.perf_counter()
-    from trtf_build.engine_defs.torch_trt.compiler import build_bundle
+    from tensorrt_model_connect.engine_defs.torch_trt.compiler import build_bundle
     build_bundle(model_dir, out_path, max_cache_length=max_cache_length,
                  precision=precision, verbose=verbose)
     build_s = time.perf_counter() - t0

@@ -100,10 +100,10 @@ HEAD
 hooks
 objects
 refs
-!include/trtf/config/
-!include/trtf/config/**
-!trtf_build/trtf_build/config/
-!trtf_build/trtf_build/config/**
+!include/trtmc/config/
+!include/trtmc/config/**
+!tensorrt_model_connect/tensorrt_model_connect/config/
+!tensorrt_model_connect/tensorrt_model_connect/config/**
 !tests/config/
 !tests/config/**
 !src/runtime/config/

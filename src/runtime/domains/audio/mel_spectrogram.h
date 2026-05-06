@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct MelResult {
     std::vector<float> data; // [n_mels, n_frames] row-major
@@ -42,4 +42,4 @@ MelResult extract_nemo_mel_spectrogram(const float* samples, int32_t n_samples,
                                        int32_t hop_length, int32_t chunk_length_s,
                                        int32_t sample_rate, float preemph);
 
-} // namespace trtf
+} // namespace trtmc

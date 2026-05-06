@@ -8,7 +8,7 @@
 #include <memory>
 #include <string_view>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -186,4 +186,4 @@ bool run_vision_encoder_with_deepstack(const VisionStepEngine& engine, const flo
     return run_and_copy_outputs(engine, stream, state.output_copies, error);
 }
 
-} // namespace trtf
+} // namespace trtmc

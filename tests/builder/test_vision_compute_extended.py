@@ -7,7 +7,7 @@ Pure-numpy tests run everywhere. TRT graph tests require TensorRT + CUDA GPU.
 
 Trace: ARCH-VIS-001, UD-VIS-GRAPH
 Intent: Validate vision encoder TRT graph construction, spatial merge, and DeepStack multi-level outputs
-Preconditions: trtf_build is importable; TRT+GPU available for graph-level tests
+Preconditions: tensorrt_model_connect is importable; TRT+GPU available for graph-level tests
 Postconditions: Vision encoder graphs produce correct spatial merge and multi-level feature outputs
 """
 
@@ -17,14 +17,14 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build import graph_ops
-    from trtf_build.qwen_vl_vision_builder import (
+    from tensorrt_model_connect import graph_ops
+    from tensorrt_model_connect.qwen_vl_vision_builder import (
         _compute_vision_rope_tables,
         build_qwen3_vl_vision_engine,
         build_qwen_vl_vision_engine,
     )
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.conftest import requires_trt, run_trt_graph
 

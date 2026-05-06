@@ -1,9 +1,9 @@
-#include "trtf/runtime/device_tensor.h"
+#include "trtmc/runtime/device_tensor.h"
 
 #include <algorithm>
 #include <cstring>
 
-namespace trtf {
+namespace trtmc {
 
 DeviceTensor::DeviceTensor(std::vector<int64_t> shape, DType dtype, cudaStream_t stream)
     : shape_(std::move(shape)), dtype_(dtype), stream_(stream) {
@@ -102,4 +102,4 @@ void DeviceTensor::free() {
     nbytes_ = 0;
 }
 
-} // namespace trtf
+} // namespace trtmc

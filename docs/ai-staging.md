@@ -27,7 +27,7 @@ The sanity path hides GPUs with `CUDA_VISIBLE_DEVICES=""`, builds on the `cpu`
 runner, runs the CLI help check, runs CTest with CUDA/TensorRT execution tests
 excluded, and runs pytest with `gpu`, `trt`, and `e2e` tests deselected.
 CPU-tagged jobs set the local development image pull policy to
-`if-not-present` so a runner with `trtf-dev-gb300:latest` already loaded does
+`if-not-present` so a runner with `trtmc-dev-gb300:latest` already loaded does
 not fail while trying to pull that local image from a registry.
 Expensive impact analysis, coverage, graph, and E2E jobs are skipped for
 `ai-staging`. Full CI still runs for normal MRs, scheduled pipelines, web
@@ -54,7 +54,7 @@ branches remain the durable source of truth.
 Preflight the GitLab setup with:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging preflight
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging preflight
 ```
 
 Manual branch setup still uses the lower-level command below.
@@ -100,7 +100,7 @@ The local staging loop files promotion MRs. It does not merge automatically.
 Run:
 
 ```bash
-python3 tools/ai_staging.py --project yifeif/trt-transformers --branch ai-staging rotate-promotion --target-branch master
+python3 tools/ai_staging.py --project yifeif/tensorrt-model-connect --branch ai-staging rotate-promotion --target-branch master
 ```
 
 The command is idempotent:
@@ -126,7 +126,7 @@ the timestamped promotion source branch to make that full CI green.
 Run:
 
 ```bash
-python3 tools/ai_staging.py --project yifeif/trt-transformers --branch ai-staging babysit-promotion --target-branch master --max-rebases 1
+python3 tools/ai_staging.py --project yifeif/tensorrt-model-connect --branch ai-staging babysit-promotion --target-branch master --max-rebases 1
 ```
 
 The command lists open promotion MRs, clean-rebases outdated promotion source

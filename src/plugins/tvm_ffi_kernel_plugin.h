@@ -5,14 +5,14 @@
 // Uses the stable V2 plugin API for maximum platform compatibility.
 // Guarded: requires both TRT and TVM-FFI at build time.
 
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI
 
 #include <NvInferRuntime.h>
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // Parsed output specification from shape_spec JSON.
 struct TvmFfiOutputSpec {
@@ -84,6 +84,6 @@ class TvmFfiKernelPlugin : public nvinfer1::IPluginV2DynamicExt {
     void* cached_fn_{nullptr};
 };
 
-} // namespace trtf
+} // namespace trtmc
 
-#endif // TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#endif // TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI

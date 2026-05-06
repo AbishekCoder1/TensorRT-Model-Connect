@@ -1,9 +1,9 @@
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
 #include <algorithm>
 #include <stdexcept>
 
-namespace trtf {
+namespace trtmc {
 
 extern void register_all_pipeline_plugins(PipelineRegistry& registry);
 
@@ -39,4 +39,4 @@ std::vector<std::string> PipelineRegistry::registered_strategies() const {
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -39,9 +39,9 @@ print("  Registered flashinfer.decode_f16_d64 (native CUDA, zero Python callback
 # 2. Load plugin shared library
 # ---------------------------------------------------------------------------
 
-shared_lib = os.path.join(os.path.dirname(__file__), "..", "build_shared", "libtrtf_core.so")
+shared_lib = os.path.join(os.path.dirname(__file__), "..", "build_shared", "libtrtmc_core.so")
 if not os.path.exists(shared_lib):
-    shared_lib = os.path.join(os.path.dirname(__file__), "..", "build", "libtrtf_tvm_ffi_plugin.so")
+    shared_lib = os.path.join(os.path.dirname(__file__), "..", "build", "libtrtmc_tvm_ffi_plugin.so")
 if not os.path.exists(shared_lib):
     print("SKIP: No plugin .so found")
     sys.exit(0)
@@ -55,16 +55,16 @@ print(f"  Loaded plugin: {shared_lib}")
 # ---------------------------------------------------------------------------
 
 # Set env var so the builder uses FlashInfer attention
-os.environ["TRTF_FFI_ATTENTION_KERNEL"] = "flashinfer.decode_f16_d64"
+os.environ["TRTMC_FFI_ATTENTION_KERNEL"] = "flashinfer.decode_f16_d64"
 
-import trtf_build  # noqa: E402
+import tensorrt_model_connect  # noqa: E402
 
 MODEL_ID = "Qwen/Qwen3-0.6B"
 MAX_CACHE = 256
 TMP_SIZE = 32 * 1024 * 1024  # 32MB FlashInfer workspace
 
 bundle_path = "/tmp/qwen3_flashinfer.trtfb"
-baseline_bundle = "/workspace/users/yifeif/trt-transformers/engines/qwen3-0.6b.trtfb"
+baseline_bundle = "/workspace/users/yifeif/tensorrt-model-connect/engines/qwen3-0.6b.trtfb"
 
 if os.path.exists(bundle_path) and "--rebuild" not in sys.argv:
     print(f"\nUsing existing bundle: {bundle_path}")
@@ -74,18 +74,18 @@ else:
     print(f"  Max cache: {MAX_CACHE}")
 
     # Build with FlashInfer attention (uses the env var)
-    trtf_build.build(MODEL_ID, bundle_path, max_cache_length=MAX_CACHE, verbose=False)
+    tensorrt_model_connect.build(MODEL_ID, bundle_path, max_cache_length=MAX_CACHE, verbose=False)
     print(f"  Bundle: {bundle_path}")
 
 # ---------------------------------------------------------------------------
 # 4. Run inference with debug_runner
 # ---------------------------------------------------------------------------
 
-from trtf_build.debug_runner import TrtRunner  # noqa: E402
+from tensorrt_model_connect.debug_runner import TrtRunner  # noqa: E402
 
 def run_generation(bundle_path, prompt_tokens, max_new_tokens, label):
     """Run autoregressive generation and return (tokens, latency_ms)."""
-    from trtf_build.debug_runner import load_section_from_bundle
+    from tensorrt_model_connect.debug_runner import load_section_from_bundle
     import json
 
     engine_plan = load_section_from_bundle(bundle_path, "engine_plan")

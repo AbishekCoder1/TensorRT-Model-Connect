@@ -25,19 +25,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Evaluate a model on MMLU multiple-choice QA. "
-            "Supports transformers reference or trtf binary inference."
+            "Supports transformers reference or trtmc binary inference."
         )
     )
     parser.add_argument(
         "--backend",
-        choices=["transformers", "trtf"],
+        choices=["transformers", "trtmc"],
         default="transformers",
         help="Inference backend to evaluate.",
     )
     parser.add_argument(
         "--model",
         required=True,
-        help="HF model id/path for transformers backend, or model id/path passed to trtf binary.",
+        help="HF model id/path for transformers backend, or model id/path passed to trtmc binary.",
     )
     parser.add_argument(
         "--split",
@@ -69,14 +69,14 @@ def parse_args() -> argparse.Namespace:
         help="Max generated tokens for each answer.",
     )
     parser.add_argument(
-        "--trtf-binary",
-        default="./build/trtf",
-        help="Path to trtf binary when --backend=trtf.",
+        "--trtmc-binary",
+        default="./build/trtmc",
+        help="Path to trtmc binary when --backend=trtmc.",
     )
     parser.add_argument(
         "--hf-python",
         default="",
-        help="Path to Python for HF tokenizer bridge (--backend=trtf).",
+        help="Path to Python for HF tokenizer bridge (--backend=trtmc).",
     )
     parser.add_argument(
         "--min-accuracy",
@@ -201,7 +201,7 @@ def evaluate_transformers(model_name: str, examples: list[MmluExample], max_new_
     return correct / float(denom), correct, answered
 
 
-def evaluate_trtf(
+def evaluate_trtmc(
     model_id: str, binary_path: str, examples: list[MmluExample],
     max_new_tokens: int, hf_python: str,
 ) -> tuple[float, int, int]:
@@ -223,7 +223,7 @@ def evaluate_trtf(
         if proc.returncode != 0:
             continue
 
-        # trtf run prints generated text to stdout (after [trtf] status on stderr)
+        # trtmc run prints generated text to stdout (after [trtmc] status on stderr)
         output_lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
         if not output_lines:
             continue
@@ -251,9 +251,9 @@ def main() -> int:
     if args.backend == "transformers":
         accuracy, correct, answered = evaluate_transformers(args.model, examples, args.max_new_tokens)
     else:
-        accuracy, correct, answered = evaluate_trtf(
+        accuracy, correct, answered = evaluate_trtmc(
             args.model,
-            args.trtf_binary,
+            args.trtmc_binary,
             examples,
             args.max_new_tokens,
             args.hf_python,

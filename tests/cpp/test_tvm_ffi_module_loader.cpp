@@ -8,7 +8,7 @@
 //   as a global function, and called from a TRT engine via the plugin.
 //
 // Preconditions:
-//   - TRTF_HAS_TRT=1 and TRTF_HAS_TVM_FFI=1
+//   - TRTMC_HAS_TRT=1 and TRTMC_HAS_TVM_FFI=1
 //   - FlashInfer .so cached at FLASHINFER_KERNEL_SO env var
 //
 // Trace IDs: ARCH-TVM-FFI-001, UD-TVM-FFI-LOADER-001, UT-TVM-FFI-PURE-CPP-001
@@ -20,7 +20,7 @@
 #include <iostream>
 #include <string>
 
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI
 
 #include "plugins/tvm_ffi_module_loader.h"
 
@@ -56,7 +56,7 @@ static void test_load_and_run() {
 
     // 1. Load FlashInfer .so and register "run" as global function
     std::cerr << "Loading FlashInfer kernel from: " << so_path << '\n';
-    bool ok = trtf::load_tvm_ffi_module_func(so_path, "run", "flashinfer.decode_test");
+    bool ok = trtmc::load_tvm_ffi_module_func(so_path, "run", "flashinfer.decode_test");
     check(ok, "load_tvm_ffi_module_func");
     if (!ok)
         return;
@@ -82,7 +82,7 @@ static void test_load_and_run() {
 #endif
 
 int main() {
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI
     tvm_ffi_plugin_force_link();
     test_load_and_run();
 

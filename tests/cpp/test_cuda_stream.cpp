@@ -23,7 +23,7 @@
 //   - CUDA runtime (cudaStreamCreate, cudaStreamSynchronize)
 //
 // Environment:
-//   Guarded by TRTF_HAS_TRT. Skips gracefully (exit 0) when TensorRT/CUDA
+//   Guarded by TRTMC_HAS_TRT. Skips gracefully (exit 0) when TensorRT/CUDA
 //   headers are not available. Requires a CUDA-capable GPU at runtime.
 // =============================================================================
 
@@ -48,7 +48,7 @@ static void check(bool condition, const char* test_name) {
 // Mechanism:  Check ok()==true and get()!=nullptr.
 // -----------------------------------------------------------------------------
 static void test_default_construction() {
-    trtf::CudaStream stream;
+    trtmc::CudaStream stream;
     check(stream.ok(), "default_ctor: ok()=true");
     check(stream.get() != nullptr, "default_ctor: get()!=nullptr");
 }
@@ -59,7 +59,7 @@ static void test_default_construction() {
 // Mechanism:  cudaStreamSynchronize should return cudaSuccess on a valid stream.
 // -----------------------------------------------------------------------------
 static void test_stream_is_usable() {
-    trtf::CudaStream stream;
+    trtmc::CudaStream stream;
     check(stream.ok(), "usable: stream ok");
     cudaError_t err = cudaStreamSynchronize(stream.get());
     check(err == cudaSuccess, "usable: cudaStreamSynchronize succeeds");
@@ -73,11 +73,11 @@ static void test_stream_is_usable() {
 //             have the original handle.
 // -----------------------------------------------------------------------------
 static void test_move_constructor() {
-    trtf::CudaStream src;
+    trtmc::CudaStream src;
     check(src.ok(), "move_ctor: src ok before move");
     cudaStream_t original_handle = src.get();
 
-    trtf::CudaStream dst(std::move(src));
+    trtmc::CudaStream dst(std::move(src));
 
     check(dst.ok(), "move_ctor: dst ok after move");
     check(dst.get() == original_handle, "move_ctor: dst has original handle");
@@ -92,8 +92,8 @@ static void test_move_constructor() {
 //             destination should have the source's original handle.
 // -----------------------------------------------------------------------------
 static void test_move_assignment() {
-    trtf::CudaStream src;
-    trtf::CudaStream dst;
+    trtmc::CudaStream src;
+    trtmc::CudaStream dst;
     check(src.ok(), "move_assign: src ok before move");
     check(dst.ok(), "move_assign: dst ok before move");
 
@@ -113,8 +113,8 @@ static void test_move_assignment() {
 // Mechanism:  Their get() pointers should differ.
 // -----------------------------------------------------------------------------
 static void test_distinct_streams() {
-    trtf::CudaStream a;
-    trtf::CudaStream b;
+    trtmc::CudaStream a;
+    trtmc::CudaStream b;
     check(a.ok(), "distinct: a ok");
     check(b.ok(), "distinct: b ok");
     check(a.get() != b.get(), "distinct: different handles");

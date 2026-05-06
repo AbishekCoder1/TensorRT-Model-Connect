@@ -56,7 +56,7 @@ namespace {
 // Mechanism: Calls starts_with, expects true.
 bool test_starts_with_match()
 {
-    return trtf::starts_with("hello world", "hello");
+    return trtmc::starts_with("hello world", "hello");
 }
 
 // Intention: Verify starts_with returns false when the prefix does not match
@@ -65,7 +65,7 @@ bool test_starts_with_match()
 // Mechanism: Calls starts_with, expects false.
 bool test_starts_with_no_match()
 {
-    return !trtf::starts_with("hello world", "world");
+    return !trtmc::starts_with("hello world", "world");
 }
 
 // Intention: Verify that an empty prefix matches any string (every string
@@ -74,7 +74,7 @@ bool test_starts_with_no_match()
 // Mechanism: Calls starts_with, expects true.
 bool test_starts_with_empty_prefix()
 {
-    return trtf::starts_with("hello", "");
+    return trtmc::starts_with("hello", "");
 }
 
 // Intention: Verify that an empty string does not start with a non-empty
@@ -83,7 +83,7 @@ bool test_starts_with_empty_prefix()
 // Mechanism: Calls starts_with, expects false.
 bool test_starts_with_empty_string()
 {
-    return !trtf::starts_with("", "hello");
+    return !trtmc::starts_with("", "hello");
 }
 
 // ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ bool test_starts_with_empty_string()
 // Mechanism: Calls ends_with, expects true.
 bool test_ends_with_match()
 {
-    return trtf::ends_with("hello world", "world");
+    return trtmc::ends_with("hello world", "world");
 }
 
 // Intention: Verify ends_with returns false when the suffix does not match
@@ -104,7 +104,7 @@ bool test_ends_with_match()
 // Mechanism: Calls ends_with, expects false.
 bool test_ends_with_no_match()
 {
-    return !trtf::ends_with("hello world", "hello");
+    return !trtmc::ends_with("hello world", "hello");
 }
 
 // Intention: Verify that an empty suffix matches any string (every string
@@ -113,7 +113,7 @@ bool test_ends_with_no_match()
 // Mechanism: Calls ends_with, expects true.
 bool test_ends_with_empty_suffix()
 {
-    return trtf::ends_with("hello", "");
+    return trtmc::ends_with("hello", "");
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +127,7 @@ bool test_ends_with_empty_suffix()
 // Mechanism: Calls to_lower_ascii, checks the result is "hello world 123!".
 bool test_to_lower_ascii()
 {
-    const std::string result = trtf::to_lower_ascii("Hello World 123!");
+    const std::string result = trtmc::to_lower_ascii("Hello World 123!");
     if (result != "hello world 123!")
     {
         std::cerr << "to_lower_ascii: got '" << result << "'" << std::endl;
@@ -145,7 +145,7 @@ bool test_to_lower_ascii()
 // Mechanism: Calls trim, checks the result is "hello".
 bool test_trim_leading()
 {
-    const std::string result = trtf::trim("  hello");
+    const std::string result = trtmc::trim("  hello");
     if (result != "hello")
     {
         std::cerr << "trim_leading: got '" << result << "'" << std::endl;
@@ -159,7 +159,7 @@ bool test_trim_leading()
 // Mechanism: Calls trim, checks the result is "hello".
 bool test_trim_trailing()
 {
-    const std::string result = trtf::trim("hello   ");
+    const std::string result = trtmc::trim("hello   ");
     if (result != "hello")
     {
         std::cerr << "trim_trailing: got '" << result << "'" << std::endl;
@@ -174,7 +174,7 @@ bool test_trim_trailing()
 // Mechanism: Calls trim, checks the result is "hello".
 bool test_trim_both()
 {
-    const std::string result = trtf::trim("  hello   ");
+    const std::string result = trtmc::trim("  hello   ");
     if (result != "hello")
     {
         std::cerr << "trim_both: got '" << result << "'" << std::endl;
@@ -188,7 +188,7 @@ bool test_trim_both()
 // Mechanism: Calls trim, checks the result is still empty.
 bool test_trim_empty()
 {
-    const std::string result = trtf::trim("");
+    const std::string result = trtmc::trim("");
     if (!result.empty())
     {
         std::cerr << "trim_empty: got '" << result << "'" << std::endl;
@@ -203,7 +203,7 @@ bool test_trim_empty()
 // Mechanism: Calls trim, checks the result is "hello" (identity case).
 bool test_trim_no_whitespace()
 {
-    const std::string result = trtf::trim("hello");
+    const std::string result = trtmc::trim("hello");
     if (result != "hello")
     {
         std::cerr << "trim_no_whitespace: got '" << result << "'" << std::endl;
@@ -223,7 +223,7 @@ bool test_trim_no_whitespace()
 //            trailing space before '#' is trimmed).
 bool test_strip_inline_comment_with_comment()
 {
-    const std::string result = trtf::strip_inline_comment("hello # comment");
+    const std::string result = trtmc::strip_inline_comment("hello # comment");
     if (result != "hello")
     {
         std::cerr << "strip_comment: got '" << result << "'" << std::endl;
@@ -238,7 +238,7 @@ bool test_strip_inline_comment_with_comment()
 // Mechanism: Calls strip_inline_comment, checks the result is "hello world".
 bool test_strip_inline_comment_no_comment()
 {
-    const std::string result = trtf::strip_inline_comment("hello world");
+    const std::string result = trtmc::strip_inline_comment("hello world");
     if (result != "hello world")
     {
         std::cerr << "strip_no_comment: got '" << result << "'" << std::endl;
@@ -253,7 +253,7 @@ bool test_strip_inline_comment_no_comment()
 // Mechanism: Calls strip_inline_comment, checks the result is empty.
 bool test_strip_inline_comment_only_comment()
 {
-    const std::string result = trtf::strip_inline_comment("# comment only");
+    const std::string result = trtmc::strip_inline_comment("# comment only");
     if (!result.empty())
     {
         std::cerr << "strip_only_comment: got '" << result << "'" << std::endl;
@@ -272,7 +272,7 @@ bool test_strip_inline_comment_only_comment()
 //            "hello" and "world".
 bool test_split_words_basic()
 {
-    const auto result = trtf::split_words("hello world");
+    const auto result = trtmc::split_words("hello world");
     if (result.size() != 2 || result[0] != "hello" || result[1] != "world")
     {
         std::cerr << "split_words_basic: size=" << result.size() << std::endl;
@@ -287,7 +287,7 @@ bool test_split_words_basic()
 // Mechanism: Calls split_words, checks the result is empty.
 bool test_split_words_empty()
 {
-    const auto result = trtf::split_words("");
+    const auto result = trtmc::split_words("");
     if (!result.empty())
     {
         std::cerr << "split_words_empty: size=" << result.size() << std::endl;
@@ -304,7 +304,7 @@ bool test_split_words_empty()
 //            "a", "b", and "c".
 bool test_split_words_multiple_spaces()
 {
-    const auto result = trtf::split_words("  a   b  c  ");
+    const auto result = trtmc::split_words("  a   b  c  ");
     if (result.size() != 3 || result[0] != "a" || result[1] != "b" || result[2] != "c")
     {
         std::cerr << "split_words_spaces: size=" << result.size() << std::endl;
@@ -323,7 +323,7 @@ bool test_split_words_multiple_spaces()
 // Mechanism: Calls iequals_ascii, expects true.
 bool test_iequals_ascii_match()
 {
-    return trtf::iequals_ascii("Hello", "hello");
+    return trtmc::iequals_ascii("Hello", "hello");
 }
 
 // Intention: Verify that iequals_ascii returns false for strings with
@@ -332,7 +332,7 @@ bool test_iequals_ascii_match()
 // Mechanism: Calls iequals_ascii, expects false.
 bool test_iequals_ascii_no_match()
 {
-    return !trtf::iequals_ascii("Hello", "world");
+    return !trtmc::iequals_ascii("Hello", "world");
 }
 
 // Intention: Verify that iequals_ascii returns false when strings have
@@ -341,7 +341,7 @@ bool test_iequals_ascii_no_match()
 // Mechanism: Calls iequals_ascii, expects false.
 bool test_iequals_ascii_different_length()
 {
-    return !trtf::iequals_ascii("Hello", "Hell");
+    return !trtmc::iequals_ascii("Hello", "Hell");
 }
 
 // ---------------------------------------------------------------------------
@@ -353,13 +353,13 @@ bool test_iequals_ascii_different_length()
 // Mechanism: Calls read_file and compares exact output bytes.
 bool test_read_file_success()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = std::filesystem::path(dir.path()) / "sample.txt";
     {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         out << "line1\nline2\n";
     }
-    const std::string text = trtf::read_file(path);
+    const std::string text = trtmc::read_file(path);
     if (text != "line1\nline2\n")
     {
         std::cerr << "read_file_success: got '" << text << "'" << std::endl;
@@ -373,11 +373,11 @@ bool test_read_file_success()
 // Mechanism: Calls read_file in try/catch and expects runtime_error.
 bool test_read_file_missing_throws()
 {
-    const std::filesystem::path missing = "/tmp/trtf_missing_read_file.txt";
+    const std::filesystem::path missing = "/tmp/trtmc_missing_read_file.txt";
     bool threw = false;
     try
     {
-        (void) trtf::read_file(missing);
+        (void) trtmc::read_file(missing);
     }
     catch (const std::runtime_error&) { threw = true; }
     return threw;
@@ -389,7 +389,7 @@ bool test_read_file_missing_throws()
 // Mechanism: Calls read_clean_lines and checks resulting SourceLine entries.
 bool test_read_clean_lines_success()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = std::filesystem::path(dir.path()) / "clean_lines.txt";
     {
         std::ofstream out(path, std::ios::trunc);
@@ -399,7 +399,7 @@ bool test_read_clean_lines_success()
         out << "beta\n";
     }
 
-    const auto lines = trtf::read_clean_lines(path);
+    const auto lines = trtmc::read_clean_lines(path);
     if (lines.size() != 2)
     {
         std::cerr << "read_clean_lines_success: size=" << lines.size() << std::endl;
@@ -423,7 +423,7 @@ bool test_read_clean_lines_success()
 // Mechanism: Calls load_vocab and checks resulting token list.
 bool test_load_vocab_success()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = std::filesystem::path(dir.path()) / "vocab.txt";
     {
         std::ofstream out(path, std::ios::trunc);
@@ -433,7 +433,7 @@ bool test_load_vocab_success()
         out << "\n";
     }
 
-    const auto vocab = trtf::load_vocab(path);
+    const auto vocab = trtmc::load_vocab(path);
     if (vocab.size() != 2 || vocab[0] != "foo" || vocab[1] != "bar")
     {
         std::cerr << "load_vocab_success: unexpected vocab size/content" << std::endl;
@@ -447,7 +447,7 @@ bool test_load_vocab_success()
 // Mechanism: Calls load_vocab and expects runtime_error.
 bool test_load_vocab_empty_throws()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = std::filesystem::path(dir.path()) / "empty_vocab.txt";
     {
         std::ofstream out(path, std::ios::trunc);
@@ -458,7 +458,7 @@ bool test_load_vocab_empty_throws()
     bool threw = false;
     try
     {
-        (void) trtf::load_vocab(path);
+        (void) trtmc::load_vocab(path);
     }
     catch (const std::runtime_error&) { threw = true; }
     return threw;
@@ -469,7 +469,7 @@ bool test_load_vocab_empty_throws()
 // Mechanism: Calls load_transitions and validates parsed pairs.
 bool test_load_transitions_success()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = std::filesystem::path(dir.path()) / "transitions.txt";
     {
         std::ofstream out(path, std::ios::trunc);
@@ -478,7 +478,7 @@ bool test_load_transitions_success()
         out << "# ignored\n";
     }
 
-    const auto transitions = trtf::load_transitions(path);
+    const auto transitions = trtmc::load_transitions(path);
     if (transitions.size() != 2)
     {
         std::cerr << "load_transitions_success: size=" << transitions.size() << std::endl;
@@ -502,7 +502,7 @@ bool test_load_transitions_success()
 // Mechanism: Calls load_transitions and expects runtime_error.
 bool test_load_transitions_invalid_line_throws()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = std::filesystem::path(dir.path()) / "bad_transitions.txt";
     {
         std::ofstream out(path, std::ios::trunc);
@@ -512,7 +512,7 @@ bool test_load_transitions_invalid_line_throws()
     bool threw = false;
     try
     {
-        (void) trtf::load_transitions(path);
+        (void) trtmc::load_transitions(path);
     }
     catch (const std::runtime_error&) { threw = true; }
     return threw;
@@ -524,7 +524,7 @@ bool test_load_transitions_invalid_line_throws()
 bool test_parse_int_success_and_suffix_error()
 {
     const std::filesystem::path path = "config.txt";
-    if (trtf::parse_int("42", path, 7, "field") != 42)
+    if (trtmc::parse_int("42", path, 7, "field") != 42)
     {
         std::cerr << "parse_int_success: unexpected value" << std::endl;
         return false;
@@ -533,7 +533,7 @@ bool test_parse_int_success_and_suffix_error()
     bool threw = false;
     try
     {
-        (void) trtf::parse_int("42x", path, 7, "field");
+        (void) trtmc::parse_int("42x", path, 7, "field");
     }
     catch (const std::runtime_error&) { threw = true; }
     return threw;
@@ -545,7 +545,7 @@ bool test_parse_int_success_and_suffix_error()
 bool test_parse_float_success_and_suffix_error()
 {
     const std::filesystem::path path = "config.txt";
-    const float value = trtf::parse_float("3.5", path, 9, "field");
+    const float value = trtmc::parse_float("3.5", path, 9, "field");
     if (std::abs(value - 3.5F) > 1e-6F)
     {
         std::cerr << "parse_float_success: unexpected value=" << value << std::endl;
@@ -555,7 +555,7 @@ bool test_parse_float_success_and_suffix_error()
     bool threw = false;
     try
     {
-        (void) trtf::parse_float("3.5x", path, 9, "field");
+        (void) trtmc::parse_float("3.5x", path, 9, "field");
     }
     catch (const std::runtime_error&) { threw = true; }
     return threw;

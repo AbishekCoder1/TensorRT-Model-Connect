@@ -5,7 +5,7 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -168,4 +168,4 @@ EmbeddingResult TimesFmPipeline::solve(const float* branch_input, int32_t branch
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

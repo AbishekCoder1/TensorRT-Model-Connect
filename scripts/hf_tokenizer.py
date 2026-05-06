@@ -7,7 +7,7 @@ import sys
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="HF tokenizer bridge for trtf C++ runtime")
+    parser = argparse.ArgumentParser(description="HF tokenizer bridge for trtmc C++ runtime")
     parser.add_argument("--model-dir", required=True, help="Local Hugging Face model directory")
     parser.add_argument("--check", action="store_true", help="Validate tokenizer can be loaded")
     parser.add_argument(

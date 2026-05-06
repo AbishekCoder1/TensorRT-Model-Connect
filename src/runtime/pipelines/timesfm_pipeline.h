@@ -2,15 +2,15 @@
 
 // TimesFmPipeline: numeric forecasting pipeline for TimesFM bundles.
 
-#include "trtf/pipeline.h"
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class TimesFmPipeline final : public IPipeline {
   public:
@@ -35,4 +35,4 @@ class TimesFmPipeline final : public IPipeline {
     std::string model_id_;
 };
 
-} // namespace trtf
+} // namespace trtmc

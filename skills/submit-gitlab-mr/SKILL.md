@@ -50,9 +50,9 @@ Create an ADR if ANY of these are found in the diff:
 | Signal | Detection |
 |--------|-----------|
 | New runtime strategy | New file in `src/runtime/plugins/` containing `PluginRegistrar` |
-| New family plugin | New `.py` file in `trtf_build/trtf_build/families/` (not `__init__.py` or `base.py`) |
+| New family plugin | New `.py` file in `tensorrt_model_connect/tensorrt_model_connect/families/` (not `__init__.py` or `base.py`) |
 | New pipeline class | New `.cpp` or `.h` in `src/runtime/pipelines/` |
-| Config schema change | New field parsed in `src/runtime/registry/pipeline_plugin.cpp` or `trtf_build/trtf_build/config.py` |
+| Config schema change | New field parsed in `src/runtime/registry/pipeline_plugin.cpp` or `tensorrt_model_connect/tensorrt_model_connect/config.py` |
 | New E2E task strategy | New file in `tests/e2e_harness/runners/` |
 | New comparator/reference | New file in `tests/e2e_harness/comparators/` or `references/` |
 | Architectural refactor | 5+ files moved/renamed under `src/runtime/` |

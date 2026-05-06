@@ -8,20 +8,20 @@
 # 4. Safety-critical docs require two reviewers
 
 # Architecture and safety documentation — require independent review
-docs/wiki/                          @trt-transformers/architecture-reviewers
-docs/wiki/ISO-26262-Compliance.md   @trt-transformers/safety-manager
-docs/wiki/Traceability-Matrix.md    @trt-transformers/safety-manager
+docs/wiki/                          @tensorrt-model-connect/architecture-reviewers
+docs/wiki/ISO-26262-Compliance.md   @tensorrt-model-connect/safety-manager
+docs/wiki/Traceability-Matrix.md    @tensorrt-model-connect/safety-manager
 
 # C++ runtime — require code review
-src/                                @trt-transformers/runtime-reviewers
-include/                            @trt-transformers/runtime-reviewers
+src/                                @tensorrt-model-connect/runtime-reviewers
+include/                            @tensorrt-model-connect/runtime-reviewers
 
 # Python builder — require builder team review
-trtf_build/                         @trt-transformers/builder-reviewers
+tensorrt_model_connect/                         @tensorrt-model-connect/builder-reviewers
 
 # Tests — should be reviewed by someone other than implementation author
-tests/                              @trt-transformers/test-reviewers
+tests/                              @tensorrt-model-connect/test-reviewers
 
 # CI configuration — require infrastructure review
-.gitlab-ci.yml                      @trt-transformers/infrastructure
-CODEOWNERS                          @trt-transformers/safety-manager
+.gitlab-ci.yml                      @tensorrt-model-connect/infrastructure
+CODEOWNERS                          @tensorrt-model-connect/safety-manager

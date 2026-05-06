@@ -35,7 +35,7 @@ void check_close(float actual, float expected, float tolerance, const char* name
 }
 
 void test_flux_generation_plan_derives_layout_and_scheduler() {
-    trtf::DiffusionConfig config;
+    trtmc::DiffusionConfig config;
     config.num_inference_steps = 28;
     config.guidance_scale = 4.5F;
     config.z_dim = 16;
@@ -49,11 +49,11 @@ void test_flux_generation_plan_derives_layout_and_scheduler() {
     config.base_image_seq_len = 256;
     config.max_image_seq_len = 4096;
 
-    trtf::PreprocessorWeights weights;
+    trtmc::PreprocessorWeights weights;
     weights.vae_bn_mean = {0.0F};
 
     const auto plan =
-        trtf::diffusion::make_flux_generation_plan(config, weights, 0, -1.0F, 128, 128, 4096);
+        trtmc::diffusion::make_flux_generation_plan(config, weights, 0, -1.0F, 128, 128, 4096);
 
     check(plan.num_inference_steps == 28, "flux plan uses fallback steps when request is zero");
     check_close(plan.guidance_scale, 4.5F, 1e-6F, "flux plan uses fallback guidance");
@@ -68,13 +68,13 @@ void test_flux_generation_plan_derives_layout_and_scheduler() {
     check(plan.scheduler_config.use_empirical_mu, "flux plan uses empirical mu for flux2");
     check(plan.scheduler_config.image_seq_len == 4096, "flux plan forwards image token count");
 
-    const auto scheduler = trtf::diffusion::make_flux_scheduler_state(plan);
+    const auto scheduler = trtmc::diffusion::make_flux_scheduler_state(plan);
     check(scheduler.timesteps.size() == 28, "flux scheduler size matches plan");
     check(scheduler.last_used_dynamic_shifting, "flux scheduler records dynamic shifting");
 }
 
 void test_ltx_dynamic_flow_match_scheduler_fields() {
-    trtf::diffusion::FlowMatchEulerState scheduler;
+    trtmc::diffusion::FlowMatchEulerState scheduler;
     scheduler.num_train_timesteps = 1000;
     scheduler.use_dynamic_shifting = true;
     scheduler.base_shift = 0.95F;
@@ -97,7 +97,7 @@ void test_ltx_dynamic_flow_match_scheduler_fields() {
 }
 
 void test_wan_generation_plan_derives_layout_and_scheduler_mode() {
-    trtf::DiffusionConfig config;
+    trtmc::DiffusionConfig config;
     config.scheduler = "ddim";
     config.num_inference_steps = 30;
     config.guidance_scale = 6.0F;
@@ -112,7 +112,7 @@ void test_wan_generation_plan_derives_layout_and_scheduler_mode() {
     config.patch_size = {1, 2, 2};
     config.flow_shift = 1.15F;
 
-    const auto plan = trtf::diffusion::make_wan_generation_plan(config, -1, -1.0F);
+    const auto plan = trtmc::diffusion::make_wan_generation_plan(config, -1, -1.0F);
 
     check(plan.num_inference_steps == 30, "wan plan uses fallback steps for negative request");
     check_close(plan.guidance_scale, 6.0F, 1e-6F, "wan plan uses fallback guidance");
@@ -127,17 +127,17 @@ void test_wan_generation_plan_derives_layout_and_scheduler_mode() {
 }
 
 void test_wan_flow_match_scheduler_builds_when_not_using_ddim() {
-    trtf::DiffusionConfig config;
+    trtmc::DiffusionConfig config;
     config.scheduler = "flow_match_euler";
     config.num_inference_steps = 12;
     config.flow_shift = 1.35F;
 
-    const auto plan = trtf::diffusion::make_wan_generation_plan(config, 8, 3.0F);
+    const auto plan = trtmc::diffusion::make_wan_generation_plan(config, 8, 3.0F);
     check(!plan.use_ddim, "wan flow-match plan keeps native scheduler");
     check(plan.num_inference_steps == 8, "wan flow-match plan uses explicit request");
     check_close(plan.guidance_scale, 3.0F, 1e-6F, "wan flow-match plan uses explicit guidance");
 
-    const auto scheduler = trtf::diffusion::make_wan_flow_match_scheduler(plan);
+    const auto scheduler = trtmc::diffusion::make_wan_flow_match_scheduler(plan);
     check(scheduler.timesteps.size() == 8, "wan flow-match scheduler size matches request");
     check_close(scheduler.shift, 1.35F, 1e-6F, "wan flow-match scheduler forwards shift");
 }

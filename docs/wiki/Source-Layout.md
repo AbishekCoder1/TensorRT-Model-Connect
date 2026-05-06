@@ -9,9 +9,9 @@ path listed here exists in the source tree.
 
 | Path | Purpose |
 |------|---------|
-| `include/trtf/` | Public C/C++ API headers |
+| `include/trtmc/` | Public C/C++ API headers |
 | `src/` | C++ runtime implementation |
-| `trtf_build/` | Python builder package |
+| `tensorrt_model_connect/` | Python builder package |
 | `tests/` | All test suites (C++, Python builder, tools, E2E) |
 | `tools/` | Diff test framework, perf comparison, complexity checker |
 | `scripts/` | Infrastructure and utility scripts |
@@ -19,16 +19,16 @@ path listed here exists in the source tree.
 
 ---
 
-## Public API Headers (`include/trtf/`)
+## Public API Headers (`include/trtmc/`)
 
 | File | Purpose |
 |------|---------|
-| `pipeline.h` | `IPipeline` interface, result types (`TextResult`, `ImageResult`, `AudioResult`, `EmbeddingResult`, `SegmentResult`, `TextEmbedding`), `GenerateConfig`, `trtf::load()` factory, C ABI entry points |
+| `pipeline.h` | `IPipeline` interface, result types (`TextResult`, `ImageResult`, `AudioResult`, `EmbeddingResult`, `SegmentResult`, `TextEmbedding`), `GenerateConfig`, `trtmc::load()` factory, C ABI entry points |
 | `bundle.h` | `BundleInfo` struct, `InspectBundle()`, `IsBundle()` |
 | `tokenizer.h` | `ITokenizer` interface (full: `encode`, `decode`, `id_for_token`, `token_for_id`), factory functions for `VocabTokenizer`, `HfPythonTokenizer`, `IpaTokenizer` |
-| `trtf_io.hpp` | I/O helper types |
+| `trtmc_io.hpp` | I/O helper types |
 
-### `include/trtf/runtime/`
+### `include/trtmc/runtime/`
 
 | File | Purpose |
 |------|---------|
@@ -42,14 +42,14 @@ path listed here exists in the source tree.
 | `device_tensor.h` | `DeviceTensor` -- GPU-resident tensor with RAII |
 | `tokenizer_interface.h` | Minimal `ITokenizer` (encode/decode only) |
 
-### `include/trtf/runtime/domains/audio/`
+### `include/trtmc/runtime/domains/audio/`
 
 | File | Purpose |
 |------|---------|
 | `speech_decode_stop_policy.h` | Speech decode stopping criterion |
 | `subprocess_runner.h` | Subprocess execution helper |
 
-### `include/trtf/runtime/domains/multimodal/`
+### `include/trtmc/runtime/domains/multimodal/`
 
 | File | Purpose |
 |------|---------|
@@ -70,7 +70,7 @@ path listed here exists in the source tree.
 
 | File | Purpose |
 |------|---------|
-| `trtf_c.cpp` | C ABI entry: `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()` |
+| `trtmc_c.cpp` | C ABI entry: `trtmc_create_pipeline()`, `trtmc_create_pipeline_ex()`, `trtmc_last_error()`, `trtmc_version()`, `trtmc_has_trt()` |
 
 ### `src/cabi/config/`
 
@@ -94,8 +94,8 @@ Backend DSO implementations. The main binary does not link libnvinfer -- it dlop
 |------|---------|
 | `backend_loader.h/cpp` | `BackendLoader::load()` -- dlopen's backend DSOs from the executable directory, explicit search dirs, or loader path; caches handles |
 | `trt_module_impl.h/cpp` | `TrtModuleImpl` : `ITrtModule` -- shared engine wrapper compiled into both DSOs |
-| `trt_backend.cpp` | Standard TRT `IBackend` impl. Links libnvinfer. Produces `libtrtf_backend_trt.so` |
-| `rtx_backend.cpp` | TRT-RTX `IBackend` impl. Links libtensorrt_rtx. Adds `IRuntimeCache` + `CudaGraphStrategy`. Produces `libtrtf_backend_trt_rtx.so` |
+| `trt_backend.cpp` | Standard TRT `IBackend` impl. Links libnvinfer. Produces `libtrtmc_backend_trt.so` |
+| `rtx_backend.cpp` | TRT-RTX `IBackend` impl. Links libtensorrt_rtx. Adds `IRuntimeCache` + `CudaGraphStrategy`. Produces `libtrtmc_backend_trt_rtx.so` |
 
 ### `src/runtime/registry/`
 
@@ -132,7 +132,7 @@ Self-registering pipeline plugins. Each plugin handles one or more `runtime_stra
 | `wan_plugin.cpp` | `diffusion_wan`, `diffusion_pixart` |
 | `whisper_plugin.cpp` | `speech_to_text` |
 | `zimage_plugin.cpp` | `diffusion_zimage` |
-| `cmake/trtf_pipeline_plugins.cmake` | Plugin source/anchor manifest |
+| `cmake/trtmc_pipeline_plugins.cmake` | Plugin source/anchor manifest |
 
 Shared helpers in `plugins/shared/`: `plugin_helpers.h/cpp` (ITrtModule loading via backend, tokenizer creation, KV-dim), `diffusion_helpers.h/cpp`, `audio_helpers.h/cpp`.
 
@@ -303,15 +303,15 @@ Recurrent model backends (Mamba, RWKV, Hybrid).
 
 ---
 
-## Python Builder Package (`trtf_build/trtf_build/`)
+## Python Builder Package (`tensorrt_model_connect/tensorrt_model_connect/`)
 
 ### Core Modules
 
 | File | Purpose |
 |------|---------|
 | `__init__.py` | Package init, public `build()` API |
-| `__main__.py` | `python -m trtf_build` entry |
-| `cli.py` | CLI: `trtf-build build|inspect|version` |
+| `__main__.py` | `python -m tensorrt_model_connect` entry |
+| `cli.py` | CLI: `trtmc-build build|inspect|version` |
 | `config.py` | `ModelConfig` from HF `config.json` |
 | `checkpoint_mapper.py` | HF safetensors -> weight dict |
 | `graph_ops.py` | Layer 1: atomic TRT graph ops |
@@ -347,7 +347,7 @@ Recurrent model backends (Mamba, RWKV, Hybrid).
 | `nanocodec_builder.py` | NanoCodec builder |
 | `diffusion_runner.py` | Python-side diffusion inference runner |
 
-### Family Plugins (`trtf_build/trtf_build/families/`)
+### Family Plugins (`tensorrt_model_connect/tensorrt_model_connect/families/`)
 
 63 auto-discovered family plugins. Each exports a module-level `plugin` attribute
 implementing the `FamilyPlugin` protocol from `base.py`.
@@ -431,7 +431,7 @@ graph ops, graph blocks, standard decoder, bundle writer, engine builder,
 debug runner, cache state machine, CLI, vision compute, and pipeline wrapper.
 
 Key fixtures in `conftest.py`: `trt_runner` (GPU graph op testing),
-`requires_trt` and `requires_trtf_build` skip markers.
+`requires_trt` and `requires_tensorrt_model_connect` skip markers.
 
 ### `tests/cpp/` -- C++ Runtime Unit Tests
 

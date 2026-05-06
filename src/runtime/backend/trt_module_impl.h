@@ -1,10 +1,10 @@
 #pragma once
 
 // TrtModuleImpl: concrete ITrtModule backed by a TRT engine.
-// Compiled inside backend DSOs only (libtrtf_backend_trt.so / _rtx.so).
+// Compiled inside backend DSOs only (libtrtmc_backend_trt.so / _rtx.so).
 
 #include "runtime/backend/trt_logger.h"
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <NvInfer.h>
 #include <cstddef>
@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class CudaGraphExec;
 
@@ -114,4 +114,4 @@ class TrtModuleImpl final : public ITrtModule {
     static DType from_trt_dtype(nvinfer1::DataType dt);
 };
 
-} // namespace trtf
+} // namespace trtmc

@@ -84,9 +84,9 @@ def _get_peak_memory_mb() -> float | None:
 def build_trt_engine(model_id_or_path: str, max_cache_length: int,
                      verbose: bool):
     """Build TRT engine and return (engine_plan_bytes, config, model_dir)."""
-    from trtf_build.engine_builder import _resolve_model
-    from trtf_build.config import ModelConfig
-    from trtf_build.families import find_plugin
+    from tensorrt_model_connect.engine_builder import _resolve_model
+    from tensorrt_model_connect.config import ModelConfig
+    from tensorrt_model_connect.families import find_plugin
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)
@@ -120,7 +120,7 @@ def load_trt_from_bundle(bundle_path: str):
     Returns (engine_plan_bytes, num_layers, max_cache_length, bundle_config,
              is_mamba).
     """
-    from trtf_build.debug_runner import load_engine_from_bundle, \
+    from tensorrt_model_connect.debug_runner import load_engine_from_bundle, \
         load_config_from_bundle
 
     engine_plan, header = load_engine_from_bundle(bundle_path)
@@ -184,7 +184,7 @@ def bench_trt(engine_plan: bytes, num_layers: int, max_cache_length: int,
 
     Returns dict with timing lists and generated token IDs.
     """
-    from trtf_build.debug_runner import TrtRunner
+    from tensorrt_model_connect.debug_runner import TrtRunner
 
     # Create runner once (deserialization outside timing)
     runner = TrtRunner(
@@ -254,7 +254,7 @@ def bench_trt_mamba(engine_plan: bytes, num_layers: int,
 
     Returns dict with timing lists and generated token IDs.
     """
-    from trtf_build.debug_runner import MambaTrtRunner
+    from tensorrt_model_connect.debug_runner import MambaTrtRunner
 
     # Create runner once (deserialization outside timing)
     runner = MambaTrtRunner(
@@ -315,7 +315,7 @@ def bench_trt_mamba(engine_plan: bytes, num_layers: int,
     }
 
 
-def bench_trtf_cpp(
+def bench_trtmc_cpp(
     binary: str,
     bundle_path: str,
     prompt: str,
@@ -325,10 +325,10 @@ def bench_trtf_cpp(
     hf_python: str | None,
     verbose: bool,
 ) -> dict | None:
-    """Benchmark the C++ trtf binary using --benchmark / --warmup flags.
+    """Benchmark the C++ trtmc binary using --benchmark / --warmup flags.
 
     Parses timing from lines printed to stderr by the binary:
-      [trtf.benchmark] prefill_ms=X decode_ms=Y tokens_per_sec=Z
+      [trtmc.benchmark] prefill_ms=X decode_ms=Y tokens_per_sec=Z
 
     Returns a dict with the same schema as bench_trt(), or None on error.
     """
@@ -358,9 +358,9 @@ def bench_trtf_cpp(
               file=sys.stderr)
         return None
 
-    # Parse "[trtf.benchmark] prefill_ms=X decode_ms=Y tokens_per_sec=Z"
+    # Parse "[trtmc.benchmark] prefill_ms=X decode_ms=Y tokens_per_sec=Z"
     m = re.search(
-        r"\[trtf\.benchmark\]\s+prefill_ms=([\d.]+)\s+decode_ms=([\d.]+)"
+        r"\[trtmc\.benchmark\]\s+prefill_ms=([\d.]+)\s+decode_ms=([\d.]+)"
         r"\s+tokens_per_sec=([\d.]+)",
         result.stderr)
     if not m:
@@ -855,17 +855,17 @@ def main():
                         help="Save results to JSON file")
     parser.add_argument("--perf-db", dest="perf_db_path", metavar="PATH",
                         help="SQLite perf database path (enables perf tracking)")
-    parser.add_argument("--trtf-binary", dest="trtf_binary", metavar="PATH",
-                        help="Path to trtf C++ binary for C++ runtime benchmark "
+    parser.add_argument("--trtmc-binary", dest="trtmc_binary", metavar="PATH",
+                        help="Path to trtmc C++ binary for C++ runtime benchmark "
                              "(requires --bundle)")
     parser.add_argument("--hf-python", dest="hf_python", metavar="PATH",
                         help="Path to Python interpreter for HF tokenizer in C++ binary "
-                             "(passed to --trtf-binary runs)")
+                             "(passed to --trtmc-binary runs)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     # -- Resolve model directory --
-    from trtf_build.engine_builder import _resolve_model
+    from tensorrt_model_connect.engine_builder import _resolve_model
     model_dir = _resolve_model(args.model)
 
     # -- Tokenize --
@@ -1035,19 +1035,19 @@ def main():
 
     # -- Bench C++ binary (optional) --
     cpp_res = None
-    trtf_binary = getattr(args, "trtf_binary", None)
-    if trtf_binary and args.bundle:
+    trtmc_binary = getattr(args, "trtmc_binary", None)
+    if trtmc_binary and args.bundle:
         hf_python = getattr(args, "hf_python", None)
         print(f"[perf] Benchmarking C++ binary ({args.warmup} warmup + "
               f"{args.iterations} iterations) ...", file=sys.stderr)
-        cpp_res = bench_trtf_cpp(
-            trtf_binary, args.bundle, args.prompt, args.max_new_tokens,
+        cpp_res = bench_trtmc_cpp(
+            trtmc_binary, args.bundle, args.prompt, args.max_new_tokens,
             args.warmup, args.iterations, hf_python, args.verbose)
         if cpp_res is None:
             print("[perf] WARNING: C++ benchmark failed; omitting from report.",
                   file=sys.stderr)
-    elif trtf_binary and not args.bundle:
-        print("[perf] WARNING: --trtf-binary requires --bundle; skipping C++ bench.",
+    elif trtmc_binary and not args.bundle:
+        print("[perf] WARNING: --trtmc-binary requires --bundle; skipping C++ bench.",
               file=sys.stderr)
 
     # -- Report --
@@ -1102,7 +1102,7 @@ def run_as_diff_test(ctx, include_compile: bool = False):
 
     t0 = _time.monotonic()
     try:
-        from trtf_build.engine_builder import _resolve_model
+        from tensorrt_model_connect.engine_builder import _resolve_model
         model_dir = _resolve_model(ctx.model)
 
         from transformers import AutoTokenizer

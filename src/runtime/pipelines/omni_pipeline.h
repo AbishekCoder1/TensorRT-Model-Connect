@@ -3,11 +3,11 @@
 // OmniPipeline: omni multimodal pipeline with thinker + talker + code2wav.
 // Uses TrtModule(thinker) + KvCache + TrtModule(talker) + KvCache + TrtModule(code2wav).
 
-#include "trtf/pipeline.h"
-#include "trtf/runtime/inference_state.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/inference_state.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct OmniConfig;
 
@@ -54,4 +54,4 @@ class OmniPipeline final : public IPipeline {
     std::string model_id_;
 };
 
-} // namespace trtf
+} // namespace trtmc

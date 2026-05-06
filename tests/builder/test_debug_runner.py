@@ -1,4 +1,4 @@
-"""Unit tests for trtf_build.debug_runner — load_engine_from_bundle,
+"""Unit tests for tensorrt_model_connect.debug_runner — load_engine_from_bundle,
 load_vision_engine_from_bundle, and runner resource cleanup.
 
 Mock-based, no TRT/GPU needed. Tests bundle parsing logic and
@@ -66,7 +66,7 @@ class TestLoadEngineFromBundle:
     """Tests for load_engine_from_bundle() bundle parsing."""
 
     def test_roundtrip(self, tmp_path):
-        from trtf_build.debug_runner import load_engine_from_bundle
+        from tensorrt_model_connect.debug_runner import load_engine_from_bundle
 
         header = {
             "model_id": "test-model",
@@ -86,7 +86,7 @@ class TestLoadEngineFromBundle:
         assert hdr["num_layers"] == 4
 
     def test_invalid_magic(self, tmp_path):
-        from trtf_build.debug_runner import load_engine_from_bundle
+        from tensorrt_model_connect.debug_runner import load_engine_from_bundle
 
         path = tmp_path / "bad.trtfb"
         path.write_bytes(b"NOT_A_BUNDLE_xxxxxxxxxxxx")
@@ -103,7 +103,7 @@ class TestLoadVisionEngineFromBundle:
     """Tests for load_vision_engine_from_bundle()."""
 
     def test_with_vision_section(self, tmp_path):
-        from trtf_build.debug_runner import load_vision_engine_from_bundle
+        from tensorrt_model_connect.debug_runner import load_vision_engine_from_bundle
 
         header = {"num_layers": 2, "max_cache_length": 64}
         engine_data = b"TEXT_ENGINE"
@@ -119,7 +119,7 @@ class TestLoadVisionEngineFromBundle:
         assert hdr["num_layers"] == 2
 
     def test_without_vision_section(self, tmp_path):
-        from trtf_build.debug_runner import load_vision_engine_from_bundle
+        from tensorrt_model_connect.debug_runner import load_vision_engine_from_bundle
 
         header = {"num_layers": 2, "max_cache_length": 64}
         bundle = _make_bundle_bytes(header, engine_plan=b"TEXT_ONLY")
@@ -140,7 +140,7 @@ class TestBundleSectionUtils:
     """Tests for section loading utilities."""
 
     def test_load_section_missing(self, tmp_path):
-        from trtf_build.debug_runner import load_section_from_bundle
+        from tensorrt_model_connect.debug_runner import load_section_from_bundle
 
         header = {"num_layers": 1, "max_cache_length": 32}
         bundle = _make_bundle_bytes(header, engine_plan=b"X")
@@ -152,7 +152,7 @@ class TestBundleSectionUtils:
         assert result is None
 
     def test_load_config_from_bundle(self, tmp_path):
-        from trtf_build.debug_runner import load_config_from_bundle
+        from tensorrt_model_connect.debug_runner import load_config_from_bundle
 
         # Build a bundle with a config.json section
         config_data = json.dumps({"model_type": "qwen3"}).encode("utf-8")
@@ -177,7 +177,7 @@ class TestBundleSectionUtils:
         assert cfg["model_type"] == "qwen3"
 
     def test_load_triattention_stats_from_bundle(self, tmp_path):
-        from trtf_build.debug_runner import load_triattention_stats_from_bundle
+        from tensorrt_model_connect.debug_runner import load_triattention_stats_from_bundle
 
         stats_data = json.dumps({
             "version": 1,
@@ -201,7 +201,7 @@ class TestBundleSectionUtils:
 
 class TestRunnerFromBundle:
     def test_triattention_bundle_uses_triattention_runner(self, tmp_path):
-        from trtf_build.debug_runner import runner_from_bundle
+        from tensorrt_model_connect.debug_runner import runner_from_bundle
 
         config_data = json.dumps({
             "runtime_strategy": "decoder_kv_cache",
@@ -237,7 +237,7 @@ class TestRunnerFromBundle:
         path = tmp_path / "tri_dispatch.trtfb"
         path.write_bytes(bundle)
 
-        with patch("trtf_build.debug_runner.TriAttentionTrtRunner",
+        with patch("tensorrt_model_connect.debug_runner.TriAttentionTrtRunner",
                    return_value="tri-runner") as mock_tri:
             runner = runner_from_bundle(str(path))
 
@@ -257,7 +257,7 @@ class TestTrtRunnerCleanup:
 
     def test_del_frees_all_buffers(self):
         """__del__ should cudaFree all device buffers then destroy stream."""
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
 
         runner = TrtRunner.__new__(TrtRunner)
         runner.num_layers = 2
@@ -282,7 +282,7 @@ class TestTrtRunnerCleanup:
         runner.engine = MagicMock()
 
         mock_cudart = MagicMock()
-        with patch("trtf_build.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
             runner.__del__()
             # Neutralize so GC won't call __del__ again with real cudart
             del runner._d_token_id
@@ -295,7 +295,7 @@ class TestTrtRunnerCleanup:
 
     def test_del_noop_before_init(self):
         """__del__ should not crash if called before __init__ completes."""
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
 
         runner = TrtRunner.__new__(TrtRunner)
         runner.__del__()  # Should not raise
@@ -309,7 +309,7 @@ class TestMambaTrtRunnerCleanup:
     """Verify MambaTrtRunner.__del__ frees device buffers and stream."""
 
     def test_del_frees_all_buffers(self):
-        from trtf_build.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.debug_runner import MambaTrtRunner
 
         runner = MambaTrtRunner.__new__(MambaTrtRunner)
         runner.num_layers = 1
@@ -328,7 +328,7 @@ class TestMambaTrtRunnerCleanup:
         runner.engine = MagicMock()
 
         mock_cudart = MagicMock()
-        with patch("trtf_build.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
             runner.__del__()
             # Neutralize so GC won't call __del__ again with real cudart
             del runner._d_token_id
@@ -339,7 +339,7 @@ class TestMambaTrtRunnerCleanup:
         mock_cudart.cudaStreamDestroy.assert_called_once_with(8888)
 
     def test_del_noop_before_init(self):
-        from trtf_build.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.debug_runner import MambaTrtRunner
 
         runner = MambaTrtRunner.__new__(MambaTrtRunner)
         runner.__del__()  # Should not raise
@@ -433,7 +433,7 @@ class TestMambaStateReset:
     """Test that MambaTrtRunner.reset() calls cudaMemsetAsync for all states."""
 
     def test_reset_calls_memset(self):
-        from trtf_build.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.debug_runner import MambaTrtRunner
 
         runner = MambaTrtRunner.__new__(MambaTrtRunner)
         runner.num_layers = 2
@@ -452,7 +452,7 @@ class TestMambaStateReset:
         success = mock_cudart.cudaError_t.cudaSuccess
         mock_cudart.cudaMemsetAsync.return_value = (success,)
 
-        with patch("trtf_build.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
             runner.reset()
 
         # Should have called cudaMemsetAsync 4 times (2 conv + 2 ssm)

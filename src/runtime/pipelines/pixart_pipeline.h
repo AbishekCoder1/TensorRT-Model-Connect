@@ -5,17 +5,17 @@
 // DiT denoiser, VAE decoder). Standalone copy — no delegation to WanPipeline.
 
 #include "runtime/domains/diffusion/diffusion_types.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/device_tensor.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/device_tensor.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class PixArtPipeline final : public IPipeline {
   public:
@@ -79,4 +79,4 @@ class PixArtPipeline final : public IPipeline {
     bool vae_caches_initialized_{false};
 };
 
-} // namespace trtf
+} // namespace trtmc

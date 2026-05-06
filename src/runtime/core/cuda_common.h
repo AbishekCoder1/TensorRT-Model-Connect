@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cuda_runtime_api.h>
 
-namespace trtf {
+namespace trtmc {
 
 class CudaStream final {
   public:
@@ -42,4 +42,4 @@ class CudaBuffer final {
     cudaError_t mStatus{cudaSuccess};
 };
 
-} // namespace trtf
+} // namespace trtmc

@@ -13,9 +13,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-_TRTF_BUILD_ROOT = Path(__file__).resolve().parents[3] / "trtf_build"
-if str(_TRTF_BUILD_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TRTF_BUILD_ROOT))
+_TRTMC_BUILD_ROOT = Path(__file__).resolve().parents[3] / "tensorrt_model_connect"
+if str(_TRTMC_BUILD_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TRTMC_BUILD_ROOT))
 
 try:
     import torch
@@ -24,14 +24,14 @@ except ImportError:
     HAS_TORCH = False
 
 try:
-    from trtf_build.engine_defs.torch_trt.families.timesfm import plugin as timesfm_plugin
-    from trtf_build.engine_defs.torch_trt.strategies import get_strategy
-    from trtf_build.engine_defs.torch_trt.strategies.timesfm import (
+    from tensorrt_model_connect.engine_defs.torch_trt.families.timesfm import plugin as timesfm_plugin
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies import get_strategy
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies.timesfm import (
         TimesFmBuildStrategy,
         TimesFmWrapper,
     )
 except ImportError:
-    pytest.skip("trtf_build timesfm support not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect timesfm support not importable", allow_module_level=True)
 
 requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="torch not available")
 

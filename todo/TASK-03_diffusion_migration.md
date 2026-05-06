@@ -91,7 +91,7 @@ All three backends follow the same structure:
 
 ## Verification
 ```bash
-pytest tests/test_e2e.py::test_e2e[flux-schnell] tests/test_e2e.py::test_e2e[flux-2-dev] tests/test_e2e.py::test_e2e[wan21-t2v-1.3b] tests/test_e2e.py::test_e2e[z-image-turbo] tests/test_e2e.py::test_e2e[pixart-sigma-1024] -v --engine-dir /workspace/users/yifeif/trt-transformers/engines --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+pytest tests/test_e2e.py::test_e2e[flux-schnell] tests/test_e2e.py::test_e2e[flux-2-dev] tests/test_e2e.py::test_e2e[wan21-t2v-1.3b] tests/test_e2e.py::test_e2e[z-image-turbo] tests/test_e2e.py::test_e2e[pixart-sigma-1024] -v --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 ```
 
 ## Independent of TASK-01/02

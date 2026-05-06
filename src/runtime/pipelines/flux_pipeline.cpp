@@ -24,7 +24,7 @@
 #include <numeric>
 #include <random>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -1322,4 +1322,4 @@ ImageResult FluxPipeline::generate_image(const std::string& prompt, const Genera
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

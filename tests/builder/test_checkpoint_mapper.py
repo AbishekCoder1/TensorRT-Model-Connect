@@ -4,7 +4,7 @@ Uses synthetic safetensors files. No TRT needed.
 
 Trace: ARCH-CHK-001, UD-CHK-01
 Intent: Validate weight transform helpers (transpose, compact GQA/MQA K/V, head norm repeat) and full weight loading from synthetic safetensors.
-Preconditions: trtf_build and safetensors are importable; no TRT or GPU required.
+Preconditions: tensorrt_model_connect and safetensors are importable; no TRT or GPU required.
 Postconditions: Weight shapes, dtypes, and values are correct after transpose, compact K/V load, head norm repeat, and end-to-end load_standard_weights.
 """
 
@@ -16,15 +16,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
-from trtf_build.checkpoint_mapper import (
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+from tensorrt_model_connect.checkpoint_mapper import (
     _transpose_2d,
     _repeat_head_norm,
     _has_tensor,
     _load_tensor,
     load_standard_weights,
 )
-from trtf_build.config import ModelConfig
+from tensorrt_model_connect.config import ModelConfig
 
 
 class TestTranspose2d:

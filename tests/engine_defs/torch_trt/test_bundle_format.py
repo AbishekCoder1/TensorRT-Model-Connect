@@ -1,4 +1,4 @@
-"""Tests for ttrt_build bundle writer + reader — round-trip, magic, sections.
+"""Tests for tensorrt_model_connect bundle writer + reader — round-trip, magic, sections.
 
 After LibTorch removal, bundles use TRTFB magic (same as raw TRT pipeline).
 The reader still accepts legacy TTRTB magic for backward compatibility.
@@ -10,14 +10,14 @@ import json
 import pytest
 
 try:
-    from trtf_build.engine_defs.torch_trt.bundle_writer import (
+    from tensorrt_model_connect.engine_defs.torch_trt.bundle_writer import (
         BUNDLE_MAGIC, TtrtBundleInfo, BundleSection, write_bundle,
     )
-    from trtf_build.engine_defs.torch_trt.bundle_reader import (
+    from tensorrt_model_connect.engine_defs.torch_trt.bundle_reader import (
         has_ttrtb_magic, read_bundle_header, read_bundle_section,
     )
 except ImportError:
-    pytest.skip("ttrt_build not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 
 class TestBundleMagic:
@@ -212,5 +212,5 @@ class TestHasMagic:
 
     def test_too_short_file(self, tmp_path):
         short = tmp_path / "short"
-        short.write_bytes(b"TRTF")
+        short.write_bytes(b"TRTMC")
         assert not has_ttrtb_magic(str(short))

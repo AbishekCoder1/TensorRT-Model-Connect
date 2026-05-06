@@ -5,7 +5,7 @@
 #include <functional>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 constexpr int32_t kMagpieBosToken = 2016;
 constexpr int32_t kMagpieEosToken = 2017;
@@ -107,4 +107,4 @@ inline bool should_stop_magpie_on_eos(bool eos, int32_t frame, int32_t min_frame
     return eos && frame >= min_frames;
 }
 
-} // namespace trtf
+} // namespace trtmc

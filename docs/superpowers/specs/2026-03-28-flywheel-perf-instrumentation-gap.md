@@ -16,10 +16,10 @@ Without per-stage timing, the agent cannot determine:
 
 ### 1. C++ Binary Instrumented Timing
 
-The `./build/trtf run` binary should output JSON timing when asked:
+The `./build/trtmc run` binary should output JSON timing when asked:
 
 ```bash
-./build/trtf run bundle.trtfb --prompt "test" --max-new-tokens 20 \
+./build/trtmc run bundle.trtfb --prompt "test" --max-new-tokens 20 \
   --hf-python /opt/venv/bin/python --perf-json /tmp/perf.json
 ```
 
@@ -80,7 +80,7 @@ For detailed GPU kernel analysis:
 
 ```bash
 nsys profile --output /tmp/whisper_fp16.nsys-rep \
-  ./build/trtf run bundle.trtfb --prompt "test" --max-new-tokens 20
+  ./build/trtmc run bundle.trtfb --prompt "test" --max-new-tokens 20
 ```
 
 This produces flame graphs showing exactly which TRT kernels run and
@@ -101,7 +101,7 @@ With instrumented timing, the agent can:
 |------|--------|
 | `src/runtime/pipelines/text_generation_pipeline.cpp` | Add CUDA event timing around decode loop |
 | `src/runtime/trt/core/device_kv_cache.cpp` | Add timing around `enqueueV3` |
-| `src/cabi/api/trtf_c.cpp` | Expose timing via C API |
-| `trtf_build/trtf_build/debug_runner.py` | Add per-step timing |
+| `src/cabi/api/trtmc_c.cpp` | Expose timing via C API |
+| `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` | Add per-step timing |
 | `tests/e2e_harness/orchestrator.py` | Write stage timing to result JSON |
 | CLI argument parsing in `src/` | Add `--perf-json` flag |

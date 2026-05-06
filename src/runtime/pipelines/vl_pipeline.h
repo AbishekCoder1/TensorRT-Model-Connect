@@ -4,12 +4,12 @@
 // Composes: vision_encoder TrtModule + text_decoder TrtModule + KvCache.
 
 #include "runtime/domains/multimodal/image_preprocessor.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/inference_state.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/sampler.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/inference_state.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/sampler.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct VLConfig {
     int32_t vocab_size{0};
@@ -89,4 +89,4 @@ class VLPipeline final : public IPipeline {
                             std::vector<float>& image_features);
 };
 
-} // namespace trtf
+} // namespace trtmc

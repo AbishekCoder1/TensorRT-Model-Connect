@@ -18,7 +18,7 @@ You receive:
 - `PROGRESS_FILE`: path to read/write persistent progress
 - `ACCURACY_THRESHOLD`: minimum accuracy (default 0.95)
 - `CONTAINER`: docker container name
-- `REPO`: path to trt-transformers-cpp repo
+- `REPO`: path to tensorrt-model-connect repo
 
 At startup, READ the progress file if it exists. Resume from where the
 previous agent left off. Do not repeat completed attempts.
@@ -32,7 +32,7 @@ docker exec CONTAINER bash -c "cd REPO && COMMAND"
 
 ### Build
 ```
-trtf-build build MODEL_ID -o OUTPUT.trtfb \
+trtmc-build build MODEL_ID -o OUTPUT.trtfb \
   --precision fp16 \
   [--quantize fp8|int8|int4|nvfp4|w4a8] \
   [--quant-scales SCALES.json] \
@@ -42,8 +42,8 @@ trtf-build build MODEL_ID -o OUTPUT.trtfb \
 ### Validate (DETERMINISTIC — works for ALL modalities)
 ```
 /opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[MANIFEST_NAME] -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf \
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc \
   --hf-python /opt/venv/bin/python \
   --rebuild-engines
 ```
@@ -57,7 +57,7 @@ If not, create one (see "Creating Manifests" below).
 
 ### Inspect bundle (verify FP16 actually took effect)
 ```
-trtf-build inspect BUNDLE.trtfb
+trtmc-build inspect BUNDLE.trtfb
 ```
 Check the engine size. An FP16 bundle should be roughly HALF the size
 of FP32. If `--precision fp16` produces the same size as FP32, the
@@ -65,7 +65,7 @@ builder is NOT threading precision — you must fix the builder code.
 
 ### Quick inference sanity check
 ```
-./build/trtf run BUNDLE.trtfb --prompt "test" --max-new-tokens 5 \
+./build/trtmc run BUNDLE.trtfb --prompt "test" --max-new-tokens 5 \
   --hf-python /opt/venv/bin/python
 ```
 

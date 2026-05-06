@@ -1,12 +1,12 @@
 // Registration for the "runtime" namespace schema.
-// Mirrors trtf_build/trtf_build/runtime_config/schemas/runtime.py.
+// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/runtime.py.
 
-#include "trtf/config/schemas/runtime.h"
+#include "trtmc/config/schemas/runtime.h"
 
 #include <any>
 #include <set>
 
-namespace trtf::config::schemas {
+namespace trtmc::config::schemas {
 
 Schema make_runtime_schema() {
     const std::set<Layer> session = {Layer::SessionRequest, Layer::PlatformProfile};
@@ -20,4 +20,4 @@ Schema make_runtime_schema() {
 }
 
 REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_runtime_schema, make_runtime_schema);
-} // namespace trtf::config::schemas
+} // namespace trtmc::config::schemas

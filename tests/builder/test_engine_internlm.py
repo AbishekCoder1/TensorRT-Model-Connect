@@ -6,7 +6,7 @@ to produce the correct synthetic weight layout.
 
 Trace: ARCH-FAM-001, UD-FAM-INTERNLM-01
 Intent: Validate the InternLM2 family plugin weight loading including group-interleaved fused QKV splitting and non-standard HF key names (tok_embeddings, attention.wqkv, output.weight).
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: Fused QKV is correctly split from group-interleaved layout, non-standard keys are mapped to canonical names, and all weight shapes match expected dimensions.
 """
 import numpy as np
@@ -16,7 +16,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class InternLMPluginTester(FamilyPluginTester):
-    plugin_module = "trtf_build.families.internlm"
+    plugin_module = "tensorrt_model_connect.families.internlm"
     model_type = "internlm2"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

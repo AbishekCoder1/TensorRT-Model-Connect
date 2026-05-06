@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct MimiDecodeLayout
 {
@@ -81,4 +81,4 @@ inline void waveform_stats(
     rms = std::sqrt(rms / std::max(1, total_output_elems));
 }
 
-} // namespace trtf
+} // namespace trtmc

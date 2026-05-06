@@ -69,10 +69,10 @@ def test_is_protected_matches_all_prefixes_from_module_tuple() -> None:
     [
         "src/runtime/plugins/decoder_plugin.cpp",
         "tools/ai_agent_system.py",
-        "include/trtf/runtime/pipeline_plugin.h",
+        "include/trtmc/runtime/pipeline_plugin.h",
         "README.md",
         "",
-        "src/cabi/api/trtf_c.cpp",  # cabi/api/ is NOT protected
+        "src/cabi/api/trtmc_c.cpp",  # cabi/api/ is NOT protected
     ],
 )
 def test_is_protected_rejects_non_matching_paths(path: str) -> None:

@@ -19,7 +19,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-OLMO-01
 Intent: Validate the OLMo family plugin weight loading including synthesized LayerNorm weights when absent, SwiGLU MLP, and tied embedding handling.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: Norm weights are correctly loaded or synthesized as ones/zeros, all standard decoder keys are present, and tied embeddings are handled.
 """
 
@@ -34,9 +34,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -57,7 +57,7 @@ class OlmoPluginTester(FamilyPluginTester):
     by omitting norm weights; the plugin falls back to ones/zeros.
     """
 
-    plugin_module = "trtf_build.families.olmo"
+    plugin_module = "tensorrt_model_connect.families.olmo"
     model_type = "olmo"
 
     def expected_weight_keys(self) -> set[str]:

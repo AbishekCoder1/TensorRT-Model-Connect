@@ -4,7 +4,7 @@ Pure Python, no TRT needed.
 
 Trace: ARCH-BDL-001, UD-BDL-01
 Intent: Validate that .trtfb bundles are written with correct magic, header, and section layout and can be read back faithfully.
-Preconditions: trtf_build is importable; no TRT or GPU required.
+Preconditions: tensorrt_model_connect is importable; no TRT or GPU required.
 Postconditions: Bundle magic bytes, header JSON, section offsets/sizes, and payload data survive a write-then-read round-trip.
 """
 
@@ -16,8 +16,8 @@ import struct
 import numpy as np
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
-from trtf_build.bundle_writer import (
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+from tensorrt_model_connect.bundle_writer import (
     BUNDLE_MAGIC,
     BundleInfo,
     BundleSection,

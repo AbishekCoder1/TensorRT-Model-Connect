@@ -6,7 +6,7 @@ Intent:
     correct output matching their existing reference implementations.
 
 Preconditions:
-    trtf_build importable; TensorRT 10+ and CUDA GPU available for TRT tests.
+    tensorrt_model_connect importable; TensorRT 10+ and CUDA GPU available for TRT tests.
 
 Postconditions:
     Each native API produces output within 1e-4 absolute tolerance of the
@@ -20,8 +20,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
-from trtf_build import graph_ops
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+from tensorrt_model_connect import graph_ops
 
 from tests.builder.conftest import requires_trt
 

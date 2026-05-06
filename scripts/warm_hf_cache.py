@@ -45,7 +45,7 @@ except ImportError:
     print("ERROR: huggingface_hub not available", file=sys.stderr)
     sys.exit(1)
 
-# Keep this intentionally aligned with trtf_build.engine_builder._HF_ALLOW_PATTERNS
+# Keep this intentionally aligned with tensorrt_model_connect.engine_builder._HF_ALLOW_PATTERNS
 # without importing engine_builder here; that import pulls in the whole builder
 # plugin registry before the cache warm script needs it.
 _HF_ALLOW_PATTERNS = [
@@ -80,7 +80,7 @@ _HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
 _ENTRYPOINT_PATTERNS = ["config.json", "model_index.json", "*/config.json"]
 _WEIGHT_PATTERNS = ["*.safetensors", "*.bin", "*.nemo"]
 _TTS_ASR_VERIFIER_MODEL = os.environ.get(
-    "TRTF_TTS_ASR_MODEL",
+    "TRTMC_TTS_ASR_MODEL",
     "openai/whisper-large-v3-turbo",
 )
 

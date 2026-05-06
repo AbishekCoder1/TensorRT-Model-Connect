@@ -4,7 +4,7 @@
 |-------|-------|
 | Document ID | PDD-001 |
 | ISO 26262-6 clause | 7.4.5 (Software unit design and implementation) |
-| Applicable to | trt-transformers-cpp C++ runtime |
+| Applicable to | tensorrt-model-connect C++ runtime |
 | Revision | 2.0 |
 | Date | 2026-03-12 |
 | Status | Living document -- reflects code as of this revision date |
@@ -21,28 +21,28 @@ exists in the codebase.  There is no `PipelineRouter`, `PipelineServices`,
 
 ---
 
-## 1. Entry Point: `trtf_create_pipeline_ex()`
+## 1. Entry Point: `trtmc_create_pipeline_ex()`
 
-**File:** `src/cabi/api/trtf_c.cpp` (108 LOC)
+**File:** `src/cabi/api/trtmc_c.cpp` (108 LOC)
 
 This is the C ABI entry point. Its responsibilities are deliberately narrow:
 
 1. Validate `bundle_path` is non-null and non-empty.
-2. Call `trtf::IsBundle(path)` to verify the file has `.trtfb` magic bytes.
-3. Extract `hf_python` from `TrtfPipelineOptions` if provided.
-4. Delegate entirely to `trtf::PipelineFactory::from_bundle(path, hf_python)`.
+2. Call `trtmc::IsBundle(path)` to verify the file has `.trtfb` magic bytes.
+3. Extract `hf_python` from `TrtmcPipelineOptions` if provided.
+4. Delegate entirely to `trtmc::PipelineFactory::from_bundle(path, hf_python)`.
 5. On success: log timing, return `pipeline.release()` (raw pointer transfer).
 6. On exception: store error in `thread_local g_last_error`, return `nullptr`.
 
-The backward-compatible `trtf_create_pipeline(bundle_path, flags)` is a thin
-wrapper that calls `trtf_create_pipeline_ex` with default options.
+The backward-compatible `trtmc_create_pipeline(bundle_path, flags)` is a thin
+wrapper that calls `trtmc_create_pipeline_ex` with default options.
 
 Additional C ABI functions:
-- `trtf_last_error()` -- returns the thread-local error string.
-- `trtf_version()` -- returns `TRTF_VERSION_STRING`.
-- `trtf_has_trt()` -- returns 1 if compiled with TRT, 0 otherwise.
+- `trtmc_last_error()` -- returns the thread-local error string.
+- `trtmc_version()` -- returns `TRTMC_VERSION_STRING`.
+- `trtmc_has_trt()` -- returns 1 if compiled with TRT, 0 otherwise.
 
-**Note:** `trtf_create_pipeline_ex` does NOT own any modality-specific logic.
+**Note:** `trtmc_create_pipeline_ex` does NOT own any modality-specific logic.
 All construction logic is in `pipeline_factory.cpp`.
 
 ---
@@ -50,7 +50,7 @@ All construction logic is in `pipeline_factory.cpp`.
 ## 2. Pipeline Factory: `PipelineFactory::from_bundle()`
 
 **File:** `src/runtime/registry/pipeline_factory.cpp` (~124 LOC)
-**Header:** `include/trtf/runtime/pipeline_factory.h`
+**Header:** `include/trtmc/runtime/pipeline_factory.h`
 
 This single static method is the entire pipeline assembly path:
 
@@ -83,7 +83,7 @@ PipelineFactory::from_bundle(bundle_path, hf_python)
         Returns unique_ptr<IPipeline>
 ```
 
-A free function `trtf::load()` is also provided as a convenience alias:
+A free function `trtmc::load()` is also provided as a convenience alias:
 ```cpp
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python)
 {
@@ -95,7 +95,7 @@ std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::strin
 
 ## 3. Plugin Registry: Strategy Dispatch
 
-**Defined in:** `include/trtf/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp`
+**Defined in:** `include/trtmc/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp`
 
 The runtime uses a **registry-based plugin pattern** for strategy dispatch.
 There is no enum, no switch/case, and no centralized factory function per
@@ -115,7 +115,7 @@ public:
 
 ### IPipelinePlugin (interface)
 
-**Defined in:** `include/trtf/runtime/pipeline_plugin.h`
+**Defined in:** `include/trtmc/runtime/pipeline_plugin.h`
 
 ```cpp
 class IPipelinePlugin {
@@ -136,7 +136,7 @@ caches, and returning a fully constructed pipeline.
 Plugins expose a registrar function via the registry macro:
 
 ```cpp
-// In decoder_plugin.cpp, inside namespace trtf:
+// In decoder_plugin.cpp, inside namespace trtmc:
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_decoder_plugin, DecoderPlugin,
                                          "decoder_kv_cache", "decoder_moe");
 ```
@@ -144,7 +144,7 @@ REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_decoder_plugin, DecoderPlugin,
 The `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST` macro in `pipeline_registry.h`
 defines the function expected by the manifest-generated registrar source.
 
-`cmake/trtf_pipeline_plugins.cmake` generates the source that calls every
+`cmake/trtmc_pipeline_plugins.cmake` generates the source that calls every
 listed registrar explicitly.
 
 ### 25 Registered Strategies (20 plugin files, 14 pipeline implementations)
@@ -226,10 +226,10 @@ Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
 **Key files:**
 - `src/runtime/pipelines/text_generation_pipeline.h` -- `TextGenerationPipeline`
 - `src/runtime/pipelines/recurrent_pipeline.h` -- `RecurrentPipeline`
-- `include/trtf/runtime/inference_state.h` -- `IInferenceState` interface
-- `include/trtf/runtime/hybrid_state.h` -- `HybridState` (KvCache + RecurrentState)
-- `include/trtf/runtime/kv_cache.h` -- `KvCache`
-- `include/trtf/runtime/recurrent_state.h` -- `RecurrentState`
+- `include/trtmc/runtime/inference_state.h` -- `IInferenceState` interface
+- `include/trtmc/runtime/hybrid_state.h` -- `HybridState` (KvCache + RecurrentState)
+- `include/trtmc/runtime/kv_cache.h` -- `KvCache`
+- `include/trtmc/runtime/recurrent_state.h` -- `RecurrentState`
 
 ### 4.2 Vision and Perception Plugins
 
@@ -318,7 +318,7 @@ Shared helpers in `src/runtime/plugins/shared/` provide common loading logic:
 
 ## 5. TrtModule: The Forward Pass Abstraction
 
-**Header:** `include/trtf/runtime/trt_module.h`
+**Header:** `include/trtmc/runtime/trt_module.h`
 **Implementation:** `src/runtime/core/trt_module.cpp`
 
 `TrtModule` wraps a TRT `ICudaEngine` + `IExecutionContext`. It pre-allocates
@@ -363,7 +363,7 @@ execution context. Called by `pipeline_factory.cpp` after engine deserialization
 
 ## 6. KvCache Lifecycle
 
-**Header:** `include/trtf/runtime/kv_cache.h`
+**Header:** `include/trtmc/runtime/kv_cache.h`
 **Implementation:** `src/runtime/core/kv_cache.cpp`
 
 ### 6.1 Construction
@@ -415,7 +415,7 @@ Sets `position_ = 0`. Synchronizes the stream.
 
 ## 7. RecurrentState Lifecycle
 
-**Header:** `include/trtf/runtime/recurrent_state.h`
+**Header:** `include/trtmc/runtime/recurrent_state.h`
 **Implementation:** `src/runtime/core/recurrent_state.cpp`
 
 Generic state manager for SSM (Mamba) and RWKV models.
@@ -450,7 +450,7 @@ Zeros all state and present buffers.
 
 ## 8. IInferenceState: Unifying KvCache and RecurrentState
 
-**Defined in:** `include/trtf/runtime/inference_state.h`
+**Defined in:** `include/trtmc/runtime/inference_state.h`
 
 ```cpp
 class IInferenceState {
@@ -470,9 +470,9 @@ Three concrete implementations:
 
 | Class | Header | Used by | Mask? |
 |-------|--------|---------|-------|
-| `KvCache` | `include/trtf/runtime/kv_cache.h` | Standard decoders, VL | Yes |
-| `RecurrentState` | `include/trtf/runtime/recurrent_state.h` | Mamba, RWKV | No |
-| `HybridState` | `include/trtf/runtime/hybrid_state.h` | Nemotron-H | Yes (delegates to KvCache) |
+| `KvCache` | `include/trtmc/runtime/kv_cache.h` | Standard decoders, VL | Yes |
+| `RecurrentState` | `include/trtmc/runtime/recurrent_state.h` | Mamba, RWKV | No |
+| `HybridState` | `include/trtmc/runtime/hybrid_state.h` | Nemotron-H | Yes (delegates to KvCache) |
 
 All three implement `IInferenceState`. Pipelines program against the
 interface -- `TextGenerationPipeline` and `RecurrentPipeline` both accept
@@ -482,7 +482,7 @@ interface -- `TextGenerationPipeline` and `RecurrentPipeline` both accept
 
 ## 9. IPipeline: The Public API
 
-**Header:** `include/trtf/pipeline.h`
+**Header:** `include/trtmc/pipeline.h`
 
 `IPipeline` is a pure virtual interface with default implementations that throw
 `std::runtime_error` for unsupported operations. Each pipeline type overrides
@@ -538,7 +538,7 @@ The `BundleFile` must outlive any use of section pointers.
 
 ## 11. BaseConfig: Universal Bundle Metadata
 
-**Header:** `include/trtf/runtime/pipeline_plugin.h`
+**Header:** `include/trtmc/runtime/pipeline_plugin.h`
 **Implementation:** `src/runtime/registry/pipeline_plugin.cpp`
 
 `BaseConfig` holds the ~10 universal fields that every pipeline needs:
@@ -571,7 +571,7 @@ each plugin reads only the fields it requires.
 
 ## 12. Known Limitations
 
-1. **No pipeline reuse.** Each `trtf_create_pipeline_ex()` call deserializes
+1. **No pipeline reuse.** Each `trtmc_create_pipeline_ex()` call deserializes
    engines from scratch. There is no caching of deserialized engines across
    pipeline instances.
 
@@ -587,14 +587,14 @@ each plugin reads only the fields it requires.
 
 | Component | File |
 |-----------|------|
-| C ABI entry point | `src/cabi/api/trtf_c.cpp` |
+| C ABI entry point | `src/cabi/api/trtmc_c.cpp` |
 | Pipeline factory | `src/runtime/registry/pipeline_factory.cpp` |
-| Pipeline factory header | `include/trtf/runtime/pipeline_factory.h` |
-| Pipeline registry | `include/trtf/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp` |
-| Plugin interface + BaseConfig | `include/trtf/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
+| Pipeline factory header | `include/trtmc/runtime/pipeline_factory.h` |
+| Pipeline registry | `include/trtmc/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp` |
+| Plugin interface + BaseConfig | `include/trtmc/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
 | Plugin shared helpers | `src/runtime/plugins/shared/plugin_helpers.h`, `.cpp` |
-| Plugin source/anchor manifest | `cmake/trtf_pipeline_plugins.cmake` |
-| IPipeline interface | `include/trtf/pipeline.h` |
+| Plugin source/anchor manifest | `cmake/trtmc_pipeline_plugins.cmake` |
+| IPipeline interface | `include/trtmc/pipeline.h` |
 | TextGenerationPipeline | `src/runtime/pipelines/text_generation_pipeline.h`, `.cpp` |
 | RecurrentPipeline | `src/runtime/pipelines/recurrent_pipeline.h`, `.cpp` |
 | VLPipeline | `src/runtime/pipelines/vl_pipeline.h`, `.cpp` |
@@ -602,15 +602,15 @@ each plugin reads only the fields it requires.
 | Audio pipelines | `src/runtime/pipelines/whisper_pipeline.h`, `bark_pipeline.h`, `magpie_pipeline.h`, `speech_pipeline.h`, `omni_pipeline.h`, `.cpp` |
 | Segment/SAM pipelines | `src/runtime/pipelines/segment_pipeline.h`, `sam_pipeline.h`, `.cpp` |
 | Encoder pipelines | `src/runtime/pipelines/encoder_pipeline.h`, `.cpp` |
-| TrtModule | `include/trtf/runtime/trt_module.h`, `src/runtime/core/trt_module.cpp` |
-| KvCache | `include/trtf/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp` |
-| RecurrentState | `include/trtf/runtime/recurrent_state.h`, `src/runtime/core/recurrent_state.cpp` |
+| TrtModule | `include/trtmc/runtime/trt_module.h`, `src/runtime/core/trt_module.cpp` |
+| KvCache | `include/trtmc/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp` |
+| RecurrentState | `include/trtmc/runtime/recurrent_state.h`, `src/runtime/core/recurrent_state.cpp` |
 | Bundle format | `src/bundle/bundle_format.h`, `.cpp` |
 | Image preprocessor | `src/runtime/domains/multimodal/image_preprocessor.h`, `.cpp` |
 | Diffusion types | `src/runtime/domains/diffusion/diffusion_types.h` |
 | Diffusion helpers | `src/runtime/plugins/shared/diffusion_helpers.h`, `.cpp` |
 | Audio helpers | `src/runtime/plugins/shared/audio_helpers.h`, `.cpp` |
 | Scheduler | `src/runtime/core/flow_match_euler_scheduler.cpp` |
-| Tokenizer interface | `include/trtf/runtime/tokenizer_interface.h` |
+| Tokenizer interface | `include/trtmc/runtime/tokenizer_interface.h` |
 | HF Python tokenizer | `src/tokenizer/hf_python_tokenizer.cpp` |
 | Vocab tokenizer | `src/tokenizer/vocab_tokenizer.cpp` |

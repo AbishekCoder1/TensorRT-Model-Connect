@@ -17,7 +17,7 @@
 // known values from HF's FlowMatchEulerDiscreteScheduler.
 // =============================================================================
 
-#include "trtf/runtime/scheduler.h"
+#include "trtmc/runtime/scheduler.h"
 
 #include <cmath>
 #include <cstdint>
@@ -42,7 +42,7 @@ static bool approx_eq(float a, float b, float tol = 1e-3f)
 
 static void test_set_timesteps_no_shift()
 {
-    trtf::FlowMatchEulerScheduler sched(1.0f, 1000);
+    trtmc::FlowMatchEulerScheduler sched(1.0f, 1000);
     sched.set_timesteps(4);
 
     const auto& ts = sched.timesteps();
@@ -60,7 +60,7 @@ static void test_set_timesteps_no_shift()
 
 static void test_set_timesteps_with_shift()
 {
-    trtf::FlowMatchEulerScheduler sched(3.0f, 1000);
+    trtmc::FlowMatchEulerScheduler sched(3.0f, 1000);
     sched.set_timesteps(28);
 
     const auto& ts = sched.timesteps();
@@ -78,7 +78,7 @@ static void test_set_timesteps_with_shift()
 
 static void test_euler_step()
 {
-    trtf::FlowMatchEulerScheduler sched(1.0f, 1000);
+    trtmc::FlowMatchEulerScheduler sched(1.0f, 1000);
     sched.set_timesteps(4);
 
     const auto& sig = sched.sigmas();
@@ -105,16 +105,16 @@ static void test_euler_step()
 
 static void test_factory()
 {
-    auto sched = trtf::create_scheduler("flow_match_euler", 3.0f);
+    auto sched = trtmc::create_scheduler("flow_match_euler", 3.0f);
     check(sched != nullptr, "factory creates flow_match_euler");
 
-    auto bad = trtf::create_scheduler("nonexistent");
+    auto bad = trtmc::create_scheduler("nonexistent");
     check(bad == nullptr, "factory returns null for unknown");
 }
 
 static void test_single_step()
 {
-    trtf::FlowMatchEulerScheduler sched(1.0f, 1000);
+    trtmc::FlowMatchEulerScheduler sched(1.0f, 1000);
     sched.set_timesteps(1);
 
     check(sched.timesteps().size() == 1, "1 timestep");

@@ -32,13 +32,13 @@ void check(bool condition, const char* name)
 
 void test_conditioning_inputs_build_mask_and_null_ids()
 {
-    trtf::DiffusionConfig config;
+    trtmc::DiffusionConfig config;
     config.use_rope = false;
 
-    trtf::diffusion::WanLayout layout;
+    trtmc::diffusion::WanLayout layout;
     layout.seq_len = 5;
 
-    const auto inputs = trtf::diffusion::make_wan_conditioning_inputs(
+    const auto inputs = trtmc::diffusion::make_wan_conditioning_inputs(
         config,
         layout,
         {11, 0, 13});
@@ -53,14 +53,14 @@ void test_conditioning_inputs_build_mask_and_null_ids()
 
 void test_text_conditioning_uses_both_prompt_and_null_prompt()
 {
-    trtf::diffusion::WanConditioningInputs inputs;
+    trtmc::diffusion::WanConditioningInputs inputs;
     inputs.null_ids = {1, 0, 0};
     std::string error;
     int encoder_calls = 0;
     int projector_calls = 0;
-    trtf::diffusion::WanTextConditioning conditioning;
+    trtmc::diffusion::WanTextConditioning conditioning;
 
-    const bool ok = trtf::diffusion::build_wan_text_conditioning(
+    const bool ok = trtmc::diffusion::build_wan_text_conditioning(
         {7, 8, 9},
         inputs,
         3,
@@ -87,13 +87,13 @@ void test_text_conditioning_uses_both_prompt_and_null_prompt()
 
 void test_conditioning_inputs_skip_attention_mask_when_rope_enabled()
 {
-    trtf::DiffusionConfig config;
+    trtmc::DiffusionConfig config;
     config.use_rope = true;
 
-    trtf::diffusion::WanLayout layout;
+    trtmc::diffusion::WanLayout layout;
     layout.seq_len = 4;
 
-    const auto inputs = trtf::diffusion::make_wan_conditioning_inputs(
+    const auto inputs = trtmc::diffusion::make_wan_conditioning_inputs(
         config,
         layout,
         {});
@@ -106,12 +106,12 @@ void test_conditioning_inputs_skip_attention_mask_when_rope_enabled()
 
 void test_text_conditioning_propagates_encoder_failures()
 {
-    trtf::diffusion::WanConditioningInputs inputs;
+    trtmc::diffusion::WanConditioningInputs inputs;
     inputs.null_ids = {1, 0, 0};
     std::string error;
-    trtf::diffusion::WanTextConditioning conditioning;
+    trtmc::diffusion::WanTextConditioning conditioning;
 
-    const bool prompt_fail = trtf::diffusion::build_wan_text_conditioning(
+    const bool prompt_fail = trtmc::diffusion::build_wan_text_conditioning(
         {1, 2},
         inputs,
         2,
@@ -129,7 +129,7 @@ void test_text_conditioning_propagates_encoder_failures()
 
     error.clear();
     int encoder_calls = 0;
-    const bool null_fail = trtf::diffusion::build_wan_text_conditioning(
+    const bool null_fail = trtmc::diffusion::build_wan_text_conditioning(
         {1, 2},
         inputs,
         2,
@@ -156,9 +156,9 @@ void test_text_conditioning_propagates_encoder_failures()
 
 void test_initial_latents_are_deterministic_by_seed()
 {
-    const auto a = trtf::diffusion::make_wan_initial_latents(6, 42U);
-    const auto b = trtf::diffusion::make_wan_initial_latents(6, 42U);
-    const auto c = trtf::diffusion::make_wan_initial_latents(6, 7U);
+    const auto a = trtmc::diffusion::make_wan_initial_latents(6, 42U);
+    const auto b = trtmc::diffusion::make_wan_initial_latents(6, 42U);
+    const auto c = trtmc::diffusion::make_wan_initial_latents(6, 7U);
 
     check(a == b, "wan initial latents are deterministic for identical seeds");
     check(a != c, "wan initial latents change for different seeds");
@@ -167,7 +167,7 @@ void test_initial_latents_are_deterministic_by_seed()
 
 void test_initial_latents_handle_odd_sizes()
 {
-    const auto latents = trtf::diffusion::make_wan_initial_latents(5, 9U);
+    const auto latents = trtmc::diffusion::make_wan_initial_latents(5, 9U);
     check(latents.size() == 5, "wan initial latents preserve odd latent count");
     check(std::fabs(latents[4]) > 0.0F, "wan initial latents fill trailing odd element");
 }

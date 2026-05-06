@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -105,4 +105,4 @@ PreprocessorWeights parse_preprocessor_weights(const std::vector<char>& data)
     return w;
 }
 
-} // namespace trtf
+} // namespace trtmc

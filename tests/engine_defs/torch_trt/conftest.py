@@ -61,7 +61,7 @@ def sample_config_dict():
 @pytest.fixture
 def sample_config(sample_config_dict):
     """ModelConfig from a minimal Qwen-like config."""
-    from trtf_build.engine_defs.torch_trt.config import ModelConfig
+    from tensorrt_model_connect.engine_defs.torch_trt.config import ModelConfig
     return ModelConfig(
         model_type=sample_config_dict.get("model_type", ""),
         raw=sample_config_dict,

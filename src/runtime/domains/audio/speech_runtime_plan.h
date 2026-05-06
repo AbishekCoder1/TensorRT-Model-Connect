@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct EncoderShapeInfo {
     int32_t encode_codebooks{0};
@@ -89,4 +89,4 @@ make_speech_generation_settings(const SpeechConfig& cfg, int32_t hidden,
     return settings;
 }
 
-} // namespace trtf
+} // namespace trtmc

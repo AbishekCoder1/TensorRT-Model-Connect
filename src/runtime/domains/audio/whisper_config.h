@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct WhisperConfig {
     int32_t num_mel_bins{80};
@@ -29,4 +29,4 @@ struct WhisperConfig {
     std::vector<int32_t> decoder_start_token_ids;
 };
 
-} // namespace trtf
+} // namespace trtmc

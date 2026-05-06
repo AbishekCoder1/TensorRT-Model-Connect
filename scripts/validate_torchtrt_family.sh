@@ -7,9 +7,9 @@
 # Usage:
 #   ./scripts/validate_torchtrt_family.sh Qwen/Qwen3-0.6B
 #   ./scripts/validate_torchtrt_family.sh Qwen/Qwen3-0.6B --max-cache-length 512
-#   ./scripts/validate_torchtrt_family.sh Qwen/Qwen3-0.6B --binary ./build/trtf
+#   ./scripts/validate_torchtrt_family.sh Qwen/Qwen3-0.6B --binary ./build/trtmc
 #
-# Requirements: torch, torch_tensorrt, trtf_build[torch-trt] installed, C++ binary built.
+# Requirements: torch, torch_tensorrt, tensorrt_model_connect[torch-trt] installed, C++ binary built.
 
 set -euo pipefail
 
@@ -18,7 +18,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Defaults
 MAX_CACHE_LENGTH=256
-BINARY="${PROJECT_DIR}/build/trtf"
+BINARY="${PROJECT_DIR}/build/trtmc"
 BUNDLE_DIR="/tmp"
 TRUST_REMOTE_CODE=""
 PRECISION="fp16"
@@ -84,7 +84,7 @@ run_step() {
 
 # Step 1: Build bundle
 run_step "Build .ttrtb bundle" \
-    trtf-build build --torch-trt "$MODEL" -o "$BUNDLE_PATH" \
+    trtmc-build build --torch-trt "$MODEL" -o "$BUNDLE_PATH" \
         --max-cache-length "$MAX_CACHE_LENGTH" \
         --precision "$PRECISION"
 

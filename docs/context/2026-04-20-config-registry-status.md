@@ -1,7 +1,7 @@
 # Config Registry — Implementation Status
 
 Loop prompt: declarative, namespaced, self-registering config registry that
-replaces every `TRTF_*` env var on the `triattention` branch. Bundle becomes
+replaces every `TRTMC_*` env var on the `triattention` branch. Bundle becomes
 a defaults provider, not ground truth.
 
 ## Decisions recorded this tick
@@ -27,11 +27,11 @@ To satisfy the scalability test (one file per feature, both languages pick
 it up), schemas are declared once in Python and C++ headers are
 auto-generated at CMake configure time.
 
-- Per-feature source: `trtf_build/trtf_build/config/schemas/<name>.py` — a
+- Per-feature source: `tensorrt_model_connect/tensorrt_model_connect/config/schemas/<name>.py` — a
   `@register_schema("<namespace>")` decorator on a dataclass-like object.
 - Codegen script: `scripts/generate_config_headers.py` — reads every
-  schema module, emits `build/generated/trtf/config/schemas/<name>.h`
-  plus a manifest entry in `cmake/trtf_config_schemas.cmake`.
+  schema module, emits `build/generated/trtmc/config/schemas/<name>.h`
+  plus a manifest entry in `cmake/trtmc_config_schemas.cmake`.
 - CMake hook: custom command runs before C++ compilation.
 - Both runtimes read the same canonical Python schema; C++ gets a
   strongly-typed view via the generated header.
@@ -59,8 +59,8 @@ raw JSON, never know about CLI flags.
 
 Phase 4a (new, added to plan): pure rename of `override` in identifiers
 and comments. Grep scope:
-- `trtf_build/trtf_build/triattention_export.py`
-- `include/trtf/runtime/triattention_kv_cache.h`
+- `tensorrt_model_connect/tensorrt_model_connect/triattention_export.py`
+- `include/trtmc/runtime/triattention_kv_cache.h`
 - `src/runtime/core/triattention_kv_cache.cpp`
 - `tools/benchmark_qwen3_8b_aime25_vs_hf.py`
 - worklog entries and any test names
@@ -78,19 +78,19 @@ doesn't mix terminology change with logic change.
 ### D6 — Pre-AIME25 smoke gate (new, added to Phase 5)
 
 Before the 10–12h AIME25 iter3 run, build Qwen3-0.6B with the new config
-path and run `./build/trtf run ... --max-new-tokens 20` to catch a broken
+path and run `./build/trtmc run ... --max-new-tokens 20` to catch a broken
 C++ runtime in 30 seconds instead of 10 hours.
 
 ### D7 — Scalability test realistic bar
 
 Zero edits outside the schema file is impossible because C++ linkers strip
 static-init registrars. The accepted bar:
-- Zero edits to any CLI parser (`cli.py`, `trtf_cli.cpp`,
+- Zero edits to any CLI parser (`cli.py`, `trtmc_cli.cpp`,
   `benchmark_*.py`).
 - Zero edits to any shared dispatcher (`pipeline_factory.cpp`,
   `engine_builder.py`).
 - Zero edits to any plugin file outside the new feature's own folder.
-- **One acceptable edit**: appending to `cmake/trtf_config_schemas.cmake`.
+- **One acceptable edit**: appending to `cmake/trtmc_config_schemas.cmake`.
   That manifest drives both the C++ source list and the generated
   force-link anchors, so new schemas no longer require parallel CMake and
   anchor edits.
@@ -113,12 +113,12 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
     Cluster A (same reasoning as codegen).
 
 ### Phase 2 — CLI supply (serial)
-- [x] `--config` + `--set` on `trtf_build/trtf_build/cli.py` (commit `4daa555e`)
-- [x] `--config` + `--set` on `examples/trtf_cli.cpp` (commit `3bf3fbb8`)
-- [x] `--config` + `--set` on `examples/trtf_dataset_benchmark.cpp` (commit TBD)
+- [x] `--config` + `--set` on `tensorrt_model_connect/tensorrt_model_connect/cli.py` (commit `4daa555e`)
+- [x] `--config` + `--set` on `examples/trtmc_cli.cpp` (commit `3bf3fbb8`)
+- [x] `--config` + `--set` on `examples/trtmc_dataset_benchmark.cpp` (commit TBD)
 - [x] `--config` / `--set` / `--dense-set` / `--tri-set` on
       `tools/benchmark_qwen3_8b_aime25_vs_hf.py` (commit TBD)
-- [ ] C ABI `trtf_create_pipeline_ex` gains `const char* config_json`
+- [ ] C ABI `trtmc_create_pipeline_ex` gains `const char* config_json`
   - Deferred further: the C++ CLI and dataset benchmark both thread
     config through without needing the C ABI. The ABI extension is only
     load-bearing for external callers of the .so, which don't exist in
@@ -127,11 +127,11 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
     against the v1 struct layout.
 
 **D8 — Python package renamed to `runtime_config/` (deviation from prompt).**
-The prompt specified `trtf_build/trtf_build/config/` but Python already has
-`trtf_build/trtf_build/config.py` (`ModelConfig` — HF config.json parsing,
+The prompt specified `tensorrt_model_connect/tensorrt_model_connect/config/` but Python already has
+`tensorrt_model_connect/tensorrt_model_connect/config.py` (`ModelConfig` — HF config.json parsing,
 unrelated concern). The two can't coexist without `ModelConfig` moving
 into the package, which is beyond this refactor's scope. C++ side keeps
-the shorter `trtf::config` namespace (no collision there). Test
+the shorter `trtmc::config` namespace (no collision there). Test
 imports, `cli.py`, and all internal imports updated.
 
 ### Phase 3 — Bundle defaults
@@ -153,7 +153,7 @@ imports, `cli.py`, and all internal imports updated.
     in `runtime_config/` and grep review).
 - [x] Cluster A — schemas declared (commit TBD)
   - Python schema at
-    `trtf_build/trtf_build/runtime_config/schemas/triattention.py`
+    `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py`
     registers 24 fields spanning core runtime config
     (kv_budget, divide_length, recent_window, score_aggregation,
     per_layer_aggregation, count_prompt_tokens, protect_prefill,
@@ -163,15 +163,15 @@ imports, `cli.py`, and all internal imports updated.
     abort_after_dump). Layer-allowlist is tight: stats_section is
     build-time-only; all session-only knobs are marked as such.
   - C++ mirror at
-    `include/trtf/config/schemas/triattention.h` +
+    `include/trtmc/config/schemas/triattention.h` +
     `src/runtime/config/schemas/triattention.cpp`. Static-init
     registration survives static-lib link via the generated force-link
-    anchor declared by `cmake/trtf_config_schemas.cmake`. Adding a new
+    anchor declared by `cmake/trtmc_config_schemas.cmake`. Adding a new
     schema requires only a new `.cpp` file + one manifest line — the single
     coupling point tolerated by the scalability test.
   - `schema_registry.cpp` now calls `force_link_all_schemas()` at
     static init so the anchor is reachable.
-  - `trtf_build/trtf_build/runtime_config/schemas/__init__.py`
+  - `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/__init__.py`
     provides `load_all()` — imports every schema module in the
     package; uses `importlib.reload` if a module is already cached so
     tests can clear and re-register.
@@ -197,11 +197,11 @@ imports, `cli.py`, and all internal imports updated.
     `parse_triattention_bundle_config` override suffix for
     `ctx.runtime_config->get<...>("triattention", "…")` queries
     (commit TBD).
-  - [x] Delete the TRTF_TRIATTN_* env-var readers and the helpers.
+  - [x] Delete the TRTMC_TRIATTN_* env-var readers and the helpers.
 - [x] Cluster B: `decode_policy.*` (build-time layer only) — commit TBD
   - Single field `force_manual_attention` (bool). BUILD_TIME +
     BUNDLE_DEFAULT allowlist only.
-  - `TRTF_FORCE_MANUAL_DECODER_ATTENTION` env-var read in
+  - `TRTMC_FORCE_MANUAL_DECODER_ATTENTION` env-var read in
     `graph_blocks.py` deleted. Replaced with `force_manual_attention`
     kwarg threaded through `add_attention_block` / `_add_decoder_layer`.
   - `engine_builder.build` gains the kwarg; stashes on `config.raw
@@ -209,7 +209,7 @@ imports, `cli.py`, and all internal imports updated.
     pattern as `_dynamic_kv_opt_length`). `build_standard_decoder_engine`
     reads from there. Keeps family-plugin `build_engine` protocol
     signatures untouched, no 50-file churn.
-  - `trtf_build/cli.py` resolves the registry up front when
+  - `tensorrt_model_connect/cli.py` resolves the registry up front when
     `--config`/`--set` is supplied, extracts
     `decode_policy.force_manual_attention`, passes as kwarg.
   - Cross-language schema match test auto-detects the new namespace
@@ -225,8 +225,8 @@ imports, `cli.py`, and all internal imports updated.
     before) — called from `decoder_plugin::create()` with values
     resolved from `ctx.runtime_config`.
   - `env_flag_set` is retained (not `env_int_or_default`) because two
-    still-unmigrated env vars (`TRTF_DISABLE_CUDA_GRAPH`,
-    `TRTF_GPU_ARGMAX`) live in the same file; future "runtime.*"
+    still-unmigrated env vars (`TRTMC_DISABLE_CUDA_GRAPH`,
+    `TRTMC_GPU_ARGMAX`) live in the same file; future "runtime.*"
     cluster will sweep them.
 - [ ] Cluster D: `profile.*` (dynamic KV profile rows)
 - [ ] Cluster E: `platform.*` (data_dir, trt_log_*)
@@ -237,7 +237,7 @@ imports, `cli.py`, and all internal imports updated.
 ### Additional clusters landed (not in original plan)
 
 - [x] `runtime.*` — `disable_cuda_graph`, `prefer_gpu_greedy` (commit TBD)
-  - Replaces `TRTF_DISABLE_CUDA_GRAPH`, `TRTF_GPU_ARGMAX`. Session /
+  - Replaces `TRTMC_DISABLE_CUDA_GRAPH`, `TRTMC_GPU_ARGMAX`. Session /
     platform layers only. Threaded through `TextGenConfig` (the
     existing per-pipeline config struct) so decoder_plugin populates
     it before constructing `TextGenerationPipeline`. `env_flag_set`
@@ -246,14 +246,14 @@ imports, `cli.py`, and all internal imports updated.
 
 ### Deferred env vars (not in cluster plan)
 
-- ~~`TRTF_BARK_*`~~ — migrated to `audio_bark.*` in tick 15.
-- ~~`TRTF_MAGPIE_*`~~ — migrated to `audio_magpie.*` in tick 16.
-- ~~`TRTF_DATA_DIR`, `TRTF_TRT_LOG_*`~~ — migrated to `platform.*` in tick 17.
-- ~~`TRTF_MAGPIE_ASSET_DIR`~~ — removed in tick 17; tokenizer script now
+- ~~`TRTMC_BARK_*`~~ — migrated to `audio_bark.*` in tick 15.
+- ~~`TRTMC_MAGPIE_*`~~ — migrated to `audio_magpie.*` in tick 16.
+- ~~`TRTMC_DATA_DIR`, `TRTMC_TRT_LOG_*`~~ — migrated to `platform.*` in tick 17.
+- ~~`TRTMC_MAGPIE_ASSET_DIR`~~ — removed in tick 17; tokenizer script now
   uses only standard `XDG_CACHE_HOME` / `~/.cache` fallbacks.
 - ~~`parse_positive_env_int`~~ — dead code removed in tick 17 along with
   its three orphaned tests.
-- `TRTF_DATA_DIR`, `TRTF_TRT_LOG_STDERR`, `TRTF_TRT_LOG_MIN_SEVERITY` —
+- `TRTMC_DATA_DIR`, `TRTMC_TRT_LOG_STDERR`, `TRTMC_TRT_LOG_MIN_SEVERITY` —
   infrastructure env vars read before pipeline construction. Can't
   route through the registry without a bootstrap-config mechanism.
   Documented as a tolerable exception for now.
@@ -271,23 +271,23 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   Demonstrates the architectural contract: adding a new feature needs
   only its own schema file + a test; no edits to CLI parser, any shared
   dispatcher, or any central registry-of-registries. The tolerated shared
-  edit is one `cmake/trtf_config_schemas.cmake` manifest line, which
+  edit is one `cmake/trtmc_config_schemas.cmake` manifest line, which
   drives both the source list and generated force-link anchors.
-- [x] `grep -rnE '(std::getenv|os\.getenv|os\.environ\.(get|\[))"TRTF_'
-  src/ trtf_build/ tools/ examples/ scripts/` returns 0 matches.
-  Interpreted as: no runtime code reads TRTF_* env vars anywhere. The
-  remaining bare `TRTF_` string matches in a naive grep are all
-  explanatory code comments (e.g. "Replaces the TRTF_BARK_DUMP env
+- [x] `grep -rnE '(std::getenv|os\.getenv|os\.environ\.(get|\[))"TRTMC_'
+  src/ tensorrt_model_connect/ tools/ examples/ scripts/` returns 0 matches.
+  Interpreted as: no runtime code reads TRTMC_* env vars anywhere. The
+  remaining bare `TRTMC_` string matches in a naive grep are all
+  explanatory code comments (e.g. "Replaces the TRTMC_BARK_DUMP env
   var") kept for code archaeology, plus the CMake-define macros
-  TRTF_HAS_TRT / TRTF_SOURCE_DIR / TRTF_VERSION_STRING which are
+  TRTMC_HAS_TRT / TRTMC_SOURCE_DIR / TRTMC_VERSION_STRING which are
   compile-time machinery, not env vars.
 - [x] Qwen3-0.6B smoke (D6) — commit TBD
-  - `trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.trtfb
+  - `trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.trtfb
     --max-cache-length 256 --set triattention.kv_budget=2048
     --set triattention.recent_window=64` — build succeeded (86.8s),
     `/tmp/qwen3-0.6b-smoke.effective_config.json` was written alongside
     the bundle with all seven namespaces serialized.
-  - `./build/trtf run /tmp/qwen3-0.6b-smoke.trtfb --prompt "The capital
+  - `./build/trtmc run /tmp/qwen3-0.6b-smoke.trtfb --prompt "The capital
     of France is" --max-new-tokens 20 --hf-python /opt/venv/bin/python` —
     C++ runtime loaded the bundle, registry resolved, plugin read
     values from `ctx.runtime_config`, text generation produced
@@ -313,13 +313,13 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
 
 - Branch: `triattention`
 - Baseline commit before this work: `89b9e629`
-- Container: `trtf-dev-gb300-agent-2`
+- Container: `trtmc-dev-gb300-agent-2`
 
 ## Tick log
 
 ### Tick 1 (2026-04-20)
 - State file written with decisions D1–D7.
-- C++ header skeleton `include/trtf/config/schema_registry.h` landed.
+- C++ header skeleton `include/trtmc/config/schema_registry.h` landed.
 - No `.cpp`, no Python mirror, no codegen yet — intentional scope cap.
 - Commit: `cbe4bae6`.
 
@@ -327,7 +327,7 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
 - `src/runtime/config/schema_registry.cpp` — singleton + registration rules.
   Rejects at static-init: empty namespace, empty fields, empty allowlist,
   `SchemaDefault` in allowlist, duplicate namespace.
-- `include/trtf/config/config_bundle.h` + `src/runtime/config/config_bundle.cpp` —
+- `include/trtmc/config/config_bundle.h` + `src/runtime/config/config_bundle.cpp` —
   layered merge engine. Priority order:
   `SessionRequest > PlatformProfile > BundleDefault > BuildTime > SchemaDefault`.
   Two-phase build: (1) validate every contribution against schema and
@@ -339,13 +339,13 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   and default fallback), allowlist violations, unknown-namespace /
   unknown-field / validator-rejection errors, typed `get<T>` / `get_any`
   access, and provenance via `ConfigBundle::all()`.
-- CMakeLists.txt: two new source files in `trtf_core`, one new test target.
+- CMakeLists.txt: two new source files in `trtmc_core`, one new test target.
 - Gates passed: build clean with `-Wall -Wextra -Wpedantic`; all 21
   tests pass; CCN p90=7, max=9 over 13 functions (≤ 10 required).
 - Commit: `77fe969e`.
 
 ### Tick 3 (2026-04-20)
-- `trtf_build/trtf_build/config/` package — Python mirror of the C++
+- `tensorrt_model_connect/tensorrt_model_connect/config/` package — Python mirror of the C++
   foundation, semantics-identical:
   - `schema_registry.py` — `Layer` IntEnum (values match C++ 0..4),
     `ConfigField` / `Schema` dataclasses (frozen), process-wide
@@ -370,7 +370,7 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
 - Commit: `f014d1f9`.
 
 ### Tick 4 (2026-04-20)
-- `trtf_build/trtf_build/runtime_config/cli_support.py` — the two-flag
+- `tensorrt_model_connect/tensorrt_model_connect/runtime_config/cli_support.py` — the two-flag
   CLI surface's Python side. `load_layered_file` handles both JSON and
   YAML (YAML only if PyYAML is present; raises a clear message
   otherwise). `parse_set_token` / `parse_set_tokens` enforce the
@@ -385,7 +385,7 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   `extra_contributions` so callers can inject a platform profile or
   bundle `defaults:` block alongside the session layer.
 - Python package renamed `config/` → `runtime_config/` (see D8).
-- `trtf_build/trtf_build/cli.py` build subparser gains `--config FILE`
+- `tensorrt_model_connect/tensorrt_model_connect/cli.py` build subparser gains `--config FILE`
   and `--set NS.FIELD=VALUE` (repeatable). When either flag is provided
   and at least one schema is registered, the builder writes an
   `effective_config.json` file next to the output bundle. When schemas
@@ -402,13 +402,13 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   `extra_contributions` platform layer, and the
   `write_effective_config_next_to` artifact placement.
 - Gates: 54/54 tests pass (25 new + 23 mirror + 6 from schema-registry
-  rerun); `trtf-build build --help` now shows `--config` and
+  rerun); `trtmc-build build --help` now shows `--config` and
   `--set` in the help text; 81 existing builder/cli tests still pass,
   confirming no regression from the package rename.
 - Commit: `4daa555e`.
 
 ### Tick 5 (2026-04-20)
-- `include/trtf/config/cli_support.h` + `src/runtime/config/cli_support.cpp` —
+- `include/trtmc/config/cli_support.h` + `src/runtime/config/cli_support.cpp` —
   C++ mirror of the Python CLI supply helpers. Same public surface:
   `parse_set_token`, `coerce_scalar`, `load_layered_file`,
   `build_cli_contribution`, `resolve_cli_config`,
@@ -422,7 +422,7 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   Scalars: string / int64 / double / bool / null. Null maps to an
   empty `std::any`, so `has_value()` is the canonical "null was
   present" check.
-- `examples/trtf_cli.cpp` — argv parser gains `--config <file>` and
+- `examples/trtmc_cli.cpp` — argv parser gains `--config <file>` and
   `--set ns.field=value` (repeatable). A single `apply_cli_config()`
   helper runs once from `main()`, resolves the contributions, and
   writes `effective_config.json` next to the bundle path. No per-knob
@@ -432,7 +432,7 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
   Python cli_support tests plus the JSON parser (empty object, simple
   object, mixed scalar kinds, malformed input) and the
   `bundle_to_effective_json` + `write_effective_config_next_to`
-  round-trip. Registered in CMakeLists.txt via `trtf_add_test`.
+  round-trip. Registered in CMakeLists.txt via `trtmc_add_test`.
 - Refactor pass during the tick: several helpers exceeded the CCN gate
   after first draft. Split `parse_scalar` into
   `parse_bool_literal`/`parse_null_literal`/`parse_number_literal`,
@@ -446,7 +446,7 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
 - Gates: C++ test suite passes `test_config_cli_support` (27 cases) and
   `test_config_schema_registry` (21 cases); 82 Python tests
   (cli_support + schema_registry + existing cli) pass; 11 relevant
-  non-GPU C++ ctests pass (no regressions); `./build/trtf run --set
+  non-GPU C++ ctests pass (no regressions); `./build/trtmc run --set
   triattention.kv_budget=4096` smoke prints the expected
   "schemas-not-registered-yet" message; `check_cyclomatic_complexity.py
   src/runtime/config --max-ccn 10` passes.
@@ -455,14 +455,14 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
 ### Tick 18 (2026-04-20) — loop terminates after this tick
 - Ran the Qwen3-0.6B end-to-end smoke under the new config path.
 - Build command:
-    `trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.trtfb
+    `trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.trtfb
      --max-cache-length 256 --set triattention.kv_budget=2048
      --set triattention.recent_window=64`
   completed in 86.8s. Output files:
     /tmp/qwen3-0.6b-smoke.trtfb                      (3094.6 MB engine)
     /tmp/qwen3-0.6b-smoke.effective_config.json      (7 namespaces)
 - Runtime command:
-    `./build/trtf run /tmp/qwen3-0.6b-smoke.trtfb
+    `./build/trtmc run /tmp/qwen3-0.6b-smoke.trtfb
      --prompt "The capital of France is" --max-new-tokens 20
      --hf-python /opt/venv/bin/python`
   produced: "Paris. The capital of Italy is Rome. The capital of
@@ -477,7 +477,7 @@ deleted (hard removal per CLAUDE.md style — no shims), tests updated.
     5. pipeline_factory resolves a `ConfigBundle` and attaches it to
        `PipelineContext::runtime_config`.
     6. TriAttention decoder plugin reads values from the registry via
-       `apply_layer_value<T>` without hitting any TRTF_* env var.
+       `apply_layer_value<T>` without hitting any TRTMC_* env var.
     7. Text generation works — no accuracy regressions at this scale.
 - **Loop terminates here.** Exit gate (c) (AIME25 iter3, 10–12 hour
   GPU benchmark) is a user-driven empirical validation; the
@@ -494,34 +494,34 @@ Over 18 ticks the `triattention` branch grew a declarative, namespaced,
 self-registering config registry. Seven namespaces are registered:
 `triattention`, `decode_policy`, `text_trace`, `runtime`, `audio_bark`,
 `audio_magpie`, `platform`. Each has:
-  - one Python schema file under `trtf_build/trtf_build/runtime_config/schemas/`,
-  - one C++ schema header under `include/trtf/config/schemas/`,
+  - one Python schema file under `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/`,
+  - one C++ schema header under `include/trtmc/config/schemas/`,
   - one C++ registration source under `src/runtime/config/schemas/`,
-  - one manifest line in `cmake/trtf_config_schemas.cmake`.
+  - one manifest line in `cmake/trtmc_config_schemas.cmake`.
 
-The two-flag CLI surface (`--config`, `--set`) is wired into `trtf`,
-`trtf-build`, `trtf_dataset_benchmark`, and the AIME25 benchmark
+The two-flag CLI surface (`--config`, `--set`) is wired into `trtmc`,
+`trtmc-build`, `trtmc_dataset_benchmark`, and the AIME25 benchmark
 orchestrator. No per-knob flags exist; new clusters plug in with
 exactly their own files + one schema manifest line.
 
-The following `TRTF_*` environment variables are deleted:
-  - `TRTF_TRIATTN_*` (17 vars)
-  - `TRTF_FORCE_MANUAL_DECODER_ATTENTION`
-  - `TRTF_TEXT_STEP_TRACE_*`
-  - `TRTF_DISABLE_CUDA_GRAPH`, `TRTF_GPU_ARGMAX`
-  - `TRTF_BARK_*`
-  - `TRTF_MAGPIE_*`
-  - `TRTF_DATA_DIR`
-  - `TRTF_TRT_LOG_*`
-  - `TRTF_MAGPIE_ASSET_DIR`
+The following `TRTMC_*` environment variables are deleted:
+  - `TRTMC_TRIATTN_*` (17 vars)
+  - `TRTMC_FORCE_MANUAL_DECODER_ATTENTION`
+  - `TRTMC_TEXT_STEP_TRACE_*`
+  - `TRTMC_DISABLE_CUDA_GRAPH`, `TRTMC_GPU_ARGMAX`
+  - `TRTMC_BARK_*`
+  - `TRTMC_MAGPIE_*`
+  - `TRTMC_DATA_DIR`
+  - `TRTMC_TRT_LOG_*`
+  - `TRTMC_MAGPIE_ASSET_DIR`
 
 Phase 5 gate status:
   (a) ✅  Scalability test: 8 tests, demo_feature registers via the public
       API with no shared-file edits beyond the schema source + one
       schema manifest entry.
-  (b) ✅  Runtime env-var grep (getenv / os.environ for TRTF_*) returns
+  (b) ✅  Runtime env-var grep (getenv / os.environ for TRTMC_*) returns
       zero matches. Naive grep finds only explanatory code comments
-      and compile-time CMake defines (TRTF_HAS_TRT, TRTF_SOURCE_DIR).
+      and compile-time CMake defines (TRTMC_HAS_TRT, TRTMC_SOURCE_DIR).
   (c) ✅  AIME25 iter3 (Qwen3-8B, 30 samples) completed 2026-04-20 22:31.
       Accuracy reproduces iter2 byte-for-byte per lane:
         dense 20/30 = 66.7%  (iter2: 20/30 = 66.7%, gate 19-21)
@@ -545,7 +545,7 @@ Commit chain:
   6b511ae2 tick 7 — Phase 3, bundle defaults: block
   26698e79 tick 8 — Phase 4 Cluster A schema declaration (triattention)
   f5a2ac7a tick 9 — ConfigBundle plumbed through PipelineContext
-  e0700117 tick 10 — Cluster A runtime migration (TRTF_TRIATTN_* deleted)
+  e0700117 tick 10 — Cluster A runtime migration (TRTMC_TRIATTN_* deleted)
   dbc33125 tick 11 — Cluster B (decode_policy.force_manual_attention)
   93489007 tick 12 — Cluster C (text_trace.*)
   c0706c32 tick 13 — Phase 5.a scalability acceptance test
@@ -568,17 +568,17 @@ Commit chain:
     public setter; called by pipeline_factory once the registry is
     resolved. Severity parsing mirrors the old env-var vocabulary.
 - `src/utils/data_dir.cpp`:
-  * Deleted the TRTF_DATA_DIR env-var read.
+  * Deleted the TRTMC_DATA_DIR env-var read.
   * Added `set_source_dir_override(value)` as the public setter;
     called by pipeline_factory. Empty string (default) ⇒ fall through
-    to the compile-time TRTF_SOURCE_DIR.
+    to the compile-time TRTMC_SOURCE_DIR.
 - `src/runtime/registry/pipeline_factory.cpp`:
   * New helper `apply_platform_config(bundle)` pulls all three
     platform.* fields and routes them to `set_source_dir_override`
     and `configure_trt_logger`. Called from `try_resolve_runtime_config`
     after the bundle resolves, with a try/catch so schema-absent /
     type-mismatch leaves defaults intact.
-- `trtf_build/trtf_build/runtime_config/schemas/platform.py` and
+- `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/platform.py` and
   mirror `src/runtime/config/schemas/platform.{h,cpp}`:
   * Three fields: `source_dir` (string), `trt_log_stderr` (bool),
     `trt_log_min_severity` (string with
@@ -586,12 +586,12 @@ Commit chain:
     platform layers.
   * Schema manifest entry added — eighth row in the list.
 - `scripts/magpie_tokenizer.py`:
-  * Deleted the `TRTF_MAGPIE_ASSET_DIR` env-var read. Asset dir now
-    resolves via standard `XDG_CACHE_HOME` / `~/.cache/trtf_nemo_assets`
-    / `/tmp/trtf_nemo_assets` fallbacks only. The migration doc note
+  * Deleted the `TRTMC_MAGPIE_ASSET_DIR` env-var read. Asset dir now
+    resolves via standard `XDG_CACHE_HOME` / `~/.cache/trtmc_nemo_assets`
+    / `/tmp/trtmc_nemo_assets` fallbacks only. The migration doc note
     in the source explains why.
 - `scripts/profile_magpie_tts.py`:
-  * Deleted the `os.environ["TRTF_MAGPIE_GREEDY"]` assignment — the
+  * Deleted the `os.environ["TRTMC_MAGPIE_GREEDY"]` assignment — the
     Python debug runner doesn't go through the C++ pipeline factory,
     so the registry isn't consulted here. Noted in a comment.
 - Dead-code cleanup:
@@ -604,7 +604,7 @@ Commit chain:
     both C ABI regressions, json_helpers, magpie trio, bark).
   * Full build clean with `-Wall -Wextra -Wpedantic` (pre-existing
     `decode_steps` / `MagpiePipeline` warnings are orthogonal).
-  * Runtime-env-var grep returns zero matches. Naive `grep TRTF_`
+  * Runtime-env-var grep returns zero matches. Naive `grep TRTMC_`
     still matches explanatory comments and CMake defines, which are
     not env-var reads.
 - Commit: pending end-of-tick.
@@ -620,11 +620,11 @@ Commit chain:
   registry. First schema with mixed allowlists — runtime fields are
   session/platform; `max_source_positions` is build/bundle.
 - Replaces six env vars:
-    * TRTF_MAGPIE_GREEDY, TRTF_MAGPIE_CFG_SCALE, TRTF_MAGPIE_TEMPERATURE,
-      TRTF_MAGPIE_FINISHED_LIMIT, TRTF_MAGPIE_SEED (runtime, in
+    * TRTMC_MAGPIE_GREEDY, TRTMC_MAGPIE_CFG_SCALE, TRTMC_MAGPIE_TEMPERATURE,
+      TRTMC_MAGPIE_FINISHED_LIMIT, TRTMC_MAGPIE_SEED (runtime, in
       magpie_pipeline.cpp).
-    * TRTF_MAGPIE_MAX_SOURCE_POS (build-time, in
-      trtf_build/trtf_build/families/magpie_tts.py).
+    * TRTMC_MAGPIE_MAX_SOURCE_POS (build-time, in
+      tensorrt_model_connect/tensorrt_model_connect/families/magpie_tts.py).
 - C++ side: `MagpieTTSConfig` gains `seed` (int64_t). `apply_env_overrides`
   shrinks to a single RNG-seed statement (all other fields arrive
   pre-populated from the registry via magpie_plugin). The file-scope
@@ -644,7 +644,7 @@ Commit chain:
   resolved ConfigBundle, passes to `build()`.
 - Gates: 11 relevant ctests pass (config trio + triattention +
   magpie trio + bark + both C ABI regressions); 76 Python tests pass;
-  full build clean. `grep TRTF_MAGPIE_ src/ trtf_build/` returns only
+  full build clean. `grep TRTMC_MAGPIE_ src/ tensorrt_model_connect/` returns only
   documentation comments.
 - Commit: pending end-of-tick.
 
@@ -662,7 +662,7 @@ Commit chain:
     * `bark_plugin.cpp` reads the three fields from
       `ctx.runtime_config` with try/catch fallback to defaults.
 - Gates: 7 relevant ctests pass (config trio + triattention + bark +
-  both C ABI regressions); full build clean; `grep TRTF_BARK_` returns
+  both C ABI regressions); full build clean; `grep TRTMC_BARK_` returns
   only documentation comments.
 - Commit: pending end-of-tick.
 
@@ -671,10 +671,10 @@ Commit chain:
   `disable_cuda_graph` and `prefer_gpu_greedy`. Session / platform
   layers only.
 - Python schema
-  (`trtf_build/trtf_build/runtime_config/schemas/runtime.py`) + C++
-  mirror (`include/trtf/config/schemas/runtime.h`,
+  (`tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/runtime.py`) + C++
+  mirror (`include/trtmc/config/schemas/runtime.h`,
   `src/runtime/config/schemas/runtime.cpp`) + one manifest line in
-  `cmake/trtf_config_schemas.cmake`. Fourth schema; same pattern, no
+  `cmake/trtmc_config_schemas.cmake`. Fourth schema; same pattern, no
   coupling-point creep.
 - Reader migration: deleted `env_flag_set` helper and both of its
   call sites in `text_generation_pipeline.cpp`. Values now flow
@@ -684,10 +684,10 @@ Commit chain:
   try/catch fallback to the struct defaults when schema is
   unregistered.
 - Deferred env vars (not blocking):
-    * `TRTF_BARK_*`, `TRTF_MAGPIE_*` — family-specific, require
+    * `TRTMC_BARK_*`, `TRTMC_MAGPIE_*` — family-specific, require
       audio.bark.* / audio.magpie.* schemas + pipeline migrations.
       Each would be one tick.
-    * `TRTF_DATA_DIR`, `TRTF_TRT_LOG_*` — infrastructure env vars
+    * `TRTMC_DATA_DIR`, `TRTMC_TRT_LOG_*` — infrastructure env vars
       read before pipeline construction. Need a bootstrap-config
       mechanism (static-init-safe registry query) that doesn't exist
       yet; scoping that is itself a design tick.
@@ -731,16 +731,16 @@ Commit chain:
 - Gate: 8/8 tests pass in 0.04s; no new C++ code (Python-only test).
 - Commit: pending end-of-tick.
 - Next tick (14) — Cluster D (`profile.dynamic_kv_profile_rows`) and
-  the small stragglers (`TRTF_TRT_LOG_*`, `TRTF_DATA_DIR`,
-  `TRTF_BARK_*`, `TRTF_MAGPIE_*`, `TRTF_DISABLE_CUDA_GRAPH`,
-  `TRTF_GPU_ARGMAX`). Focus is completeness of the env-var sweep for
+  the small stragglers (`TRTMC_TRT_LOG_*`, `TRTMC_DATA_DIR`,
+  `TRTMC_BARK_*`, `TRTMC_MAGPIE_*`, `TRTMC_DISABLE_CUDA_GRAPH`,
+  `TRTMC_GPU_ARGMAX`). Focus is completeness of the env-var sweep for
   gate 5.b; the scalability contract is already ratified.
 
 ### Tick 12 (2026-04-20)
 - Phase 4 Cluster C (`text_trace.*`) closed.
 - Python schema
-  (`trtf_build/trtf_build/runtime_config/schemas/text_trace.py`) and
-  C++ mirror (`include/trtf/config/schemas/text_trace.h` +
+  (`tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/text_trace.py`) and
+  C++ mirror (`include/trtmc/config/schemas/text_trace.h` +
   `src/runtime/config/schemas/text_trace.cpp`). Four fields —
   step_trace_path (string), step_trace_start_pos (int32, ≥0),
   step_trace_end_pos (int32, ≥0, default 2B as effective
@@ -753,12 +753,12 @@ Commit chain:
     `mutable_step_trace_config()` + external `apply_text_trace_config_from_registry(path, start, end, topk)` entry point.
   * `env_int_or_default` helper deleted (only call site was the
     step-trace init). `env_flag_set` retained: two unmigrated env
-    vars (`TRTF_DISABLE_CUDA_GRAPH`, `TRTF_GPU_ARGMAX`) still use it.
+    vars (`TRTMC_DISABLE_CUDA_GRAPH`, `TRTMC_GPU_ARGMAX`) still use it.
 - `src/runtime/pipelines/text_generation_pipeline.h`: new forward-
   declared `apply_text_trace_config_from_registry(...)` at namespace
   scope, so decoder_plugin can call without cross-file fragility.
 - `src/runtime/plugins/decoder_plugin.cpp`:
-  * Includes `trtf/config/config_bundle.h` (needed for templated
+  * Includes `trtmc/config/config_bundle.h` (needed for templated
     `ctx.runtime_config->get<T>(...)` calls against the now-complete
     type; forward declaration in pipeline_plugin.h was insufficient).
   * New block at the top of `create()` reads the four text_trace
@@ -768,7 +768,7 @@ Commit chain:
     tracing without blocking pipeline construction.
 - Gates: 7 relevant ctests pass (config trio + triattention +
   pipeline_registry + both C ABI regressions); full build clean; env-var
-  grep `grep -rnE 'TRTF_TEXT_STEP_TRACE' src/ trtf_build/` returns
+  grep `grep -rnE 'TRTMC_TEXT_STEP_TRACE' src/ tensorrt_model_connect/` returns
   only documentation comments (no live reads).
 - Commit: pending end-of-tick.
 - Next tick (13) — Cluster D (`profile.*`). Scope: the
@@ -783,15 +783,15 @@ Commit chain:
 ### Tick 11 (2026-04-20)
 - Phase 4 Cluster B (`decode_policy.*`) closed.
 - Python schema
-  (`trtf_build/trtf_build/runtime_config/schemas/decode_policy.py`)
+  (`tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/decode_policy.py`)
   declares one field: `force_manual_attention` (bool, default False,
   `{BUILD_TIME, BUNDLE_DEFAULT}` layer allowlist only — session /
   platform cannot retroactively toggle an already-baked engine graph).
-- C++ mirror (`include/trtf/config/schemas/decode_policy.h` +
+- C++ mirror (`include/trtmc/config/schemas/decode_policy.h` +
   `src/runtime/config/schemas/decode_policy.cpp`) + schema manifest
   entry. Second schema to land; the manifest pattern continues to be a
   one-line edit per new cluster.
-- Reader migration (`trtf_build/trtf_build/graph_blocks.py`):
+- Reader migration (`tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py`):
   `force_manual_attention = os.getenv(...)` deleted; replaced with a
   new `force_manual_attention: bool = False` kwarg on
   `add_attention_block`. `import os` dropped (unused).
@@ -806,7 +806,7 @@ Commit chain:
   `build` gain `force_manual_attention: bool = False`.
   `build_bundle` stashes the value on `config.raw` before dispatching
   to the family plugin.
-- CLI wiring (`trtf_build/trtf_build/cli.py`): resolves the
+- CLI wiring (`tensorrt_model_connect/tensorrt_model_connect/cli.py`): resolves the
   ConfigBundle up front (before `build()`), imports
   `runtime_config.schemas.load_all()` so schemas are registered,
   reads `decode_policy.force_manual_attention` from the bundle via
@@ -815,11 +815,11 @@ Commit chain:
   bundle at the end.
 - Gates: 5 C++ config+cabi ctests pass; 68 Python tests pass
   (cli_support + schemas_crosslang + existing cli); full build clean.
-  Env-var grep `grep -rnE 'TRTF_FORCE_MANUAL_DECODER_ATTENTION' src/ trtf_build/`
+  Env-var grep `grep -rnE 'TRTMC_FORCE_MANUAL_DECODER_ATTENTION' src/ tensorrt_model_connect/`
   returns zero matches.
 - Commit: pending end-of-tick.
 - Next tick (12) — Cluster C (`text_trace.*`). Inventory:
-  `TRTF_TEXT_STEP_TRACE_PATH`, plus any sibling step-trace env vars
+  `TRTMC_TEXT_STEP_TRACE_PATH`, plus any sibling step-trace env vars
   read in `src/runtime/pipelines/text_generation_pipeline.cpp`.
   Similar shape to Cluster A but smaller (2-3 fields). The main piece
   of work is plumbing the resolved values from the text-generation
@@ -828,10 +828,10 @@ Commit chain:
 
 ### Tick 10 (2026-04-20)
 - Cluster A migration complete: TriAttention now reads its config from
-  the registry only. TRTF_TRIATTN_* env vars deleted entirely; the only
+  the registry only. TRTMC_TRIATTN_* env vars deleted entirely; the only
   supported input channels are bundle `defaults:`, CLI `--config <file>`,
   and `--set triattention.<field>=<value>`.
-- `include/trtf/runtime/triattention_kv_cache.h`:
+- `include/trtmc/runtime/triattention_kv_cache.h`:
   * `TriAttentionConfig` grows 12 debug/profile fields (debug, profile,
     runtime_bucket_rows, disable_gpu_selection, disable_gpu_compaction,
     disable_gpu_state, zero_tail, dump_keep_path, dump_compaction_index,
@@ -867,11 +867,11 @@ Commit chain:
   `compact_existing_cache`, `parse_triattention_stats_json`,
   `select_keep_indices_host/gpu` — grandfathered; the refactor only
   adds low-complexity helpers).
-- The env-var grep `grep -rnE 'TRTF_TRIATTN_' src/ include/` now
+- The env-var grep `grep -rnE 'TRTMC_TRIATTN_' src/ include/` now
   returns only comment matches (documentation of what was removed).
 - Commit: pending end-of-tick.
 - Next tick (11) — Python builder side: extend
-  `trtf_build/trtf_build/engine_builder.py` (or the relevant plugin)
+  `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` (or the relevant plugin)
   to populate the bundle `defaults:` block for `triattention.*` when
   the user supplies `--config` / `--set` at build time. Without that,
   new bundles won't carry TriAttention config in the generic
@@ -881,13 +881,13 @@ Commit chain:
 ### Tick 9 (2026-04-20)
 - Plumbing commit: ConfigBundle now flows from LoadOptions → factory →
   PipelineContext. No cluster-specific reader swap yet — that's tick 10.
-- `include/trtf/pipeline.h`: `LoadOptions` gains `config_path` +
+- `include/trtmc/pipeline.h`: `LoadOptions` gains `config_path` +
   `set_tokens` (both empty by default, so existing callers see no
   behavioral change).
-- `include/trtf/runtime/pipeline_plugin.h`: `PipelineContext` gains
+- `include/trtmc/runtime/pipeline_plugin.h`: `PipelineContext` gains
   `const config::ConfigBundle* runtime_config{nullptr}`. Forward-declared
   so plugins that don't need config don't drag the header in.
-- `include/trtf/config/cli_support.h` + cli_support.cpp:
+- `include/trtmc/config/cli_support.h` + cli_support.cpp:
   * `filter_to_registered_namespaces` — drops unknown-namespace values
     from a LayerContribution with a stderr warning. Used for the
     BundleDefault layer so pre-migration bundles whose defaults mention
@@ -913,7 +913,7 @@ Commit chain:
   `test_resolve_pipeline_config_merges_bundle_and_session`,
   `test_resolve_pipeline_config_tolerates_unknown_defaults`). Both C
   ABI regression tests (`test_c_abi_entry`, `test_c_abi_runtime_regression`)
-  still pass — `TrtfPipelineOptions` struct layout unchanged.
+  still pass — `TrtmcPipelineOptions` struct layout unchanged.
 - Gates: 6 config+cabi ctests pass, full build clean, CCN on
   `src/runtime/config/` + `src/runtime/registry/` ≤ 10.
 - Commit: pending end-of-tick.
@@ -929,7 +929,7 @@ Commit chain:
 ### Tick 8 (2026-04-20)
 - Phase 4 Cluster A — schema declaration (no runtime wiring yet).
 - Python schema at
-  `trtf_build/trtf_build/runtime_config/schemas/triattention.py` —
+  `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py` —
   24 fields (11 core + stats_section build-only + 12 debug/session).
   Each field declares an explicit `allowed_layers` frozenset; validators
   guard kv_budget/divide_length/offset_max_length > 0 and the
@@ -938,15 +938,15 @@ Commit chain:
   (`runtime_config/schemas/__init__.py::load_all`) imports every
   non-underscore module and handles re-imports via `importlib.reload` so
   test cleanup + reload works deterministically.
-- C++ mirror: `include/trtf/config/schemas/triattention.h` +
+- C++ mirror: `include/trtmc/config/schemas/triattention.h` +
   `src/runtime/config/schemas/triattention.cpp`. The same 24 fields in
   the same order. Layer sets use the already-defined `Layer` enum.
   Static init registers via a file-scope registrar struct.
-- Force-link pattern: `cmake/trtf_config_schemas.cmake` generates
-  `kAllSchemaAnchors[]` and `trtf::config::force_link_all_schemas()`.
+- Force-link pattern: `cmake/trtmc_config_schemas.cmake` generates
+  `kAllSchemaAnchors[]` and `trtmc::config::force_link_all_schemas()`.
   `schema_registry.cpp` calls that at static init, pulling each schema TU
   out of the static archive even when no other caller references it.
-- CMake: added the three new C++ sources to `trtf_core`; added the new
+- CMake: added the three new C++ sources to `trtmc_core`; added the new
   test target `test_config_schemas_triattention`.
 - Tests: +4 Python cases
   (`test_load_all_populates_triattention`,
@@ -976,16 +976,16 @@ Commit chain:
 ### Tick 7 (2026-04-20)
 - Phase 3 delivered: bundles carry a `defaults:` block that feeds the
   runtime `BUNDLE_DEFAULT` layer directly.
-- `trtf_build/trtf_build/bundle_writer.py`: `BundleInfo.defaults` field
+- `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py`: `BundleInfo.defaults` field
   (optional dict). When non-empty the header serializes
   `"defaults": { ns: { field: value, ... }, ... }` right before the
   `sections:` block. When empty/None, nothing is emitted so existing
   readers are unaffected.
-- `trtf_build/trtf_build/runtime_config/config_bundle.py`:
+- `tensorrt_model_connect/tensorrt_model_connect/runtime_config/config_bundle.py`:
   `bundle_defaults_contribution(header_json_or_mapping)` returns a
   `LayerContribution(layer=BUNDLE_DEFAULT, values=...)`. Accepts either
   raw JSON text or a pre-parsed mapping for flexibility.
-- `include/trtf/config/cli_support.h` +
+- `include/trtmc/config/cli_support.h` +
   `src/runtime/config/cli_support.cpp`: `extract_bundle_defaults` plus
   `bundle_defaults_contribution`. The extraction helper is a targeted
   scanner (not a full JSON DOM) that:
@@ -1027,18 +1027,18 @@ Commit chain:
   (`triattention.*`) because it's the biggest (17 fields) and the
   acceptance gate (AIME25 iter3) depends on it. Sequence inside Cluster A:
     1. `override` rename commit first (Phase 4a — pure rename, no logic).
-    2. Declare the Python schema in `trtf_build/trtf_build/runtime_config/schemas/triattention.py`.
+    2. Declare the Python schema in `tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py`.
     3. Generate / hand-write the matching C++ schema header
-       (`include/trtf/config/schemas/triattention.h` + registration in a
+       (`include/trtmc/config/schemas/triattention.h` + registration in a
        new `.cpp` file added to the force-link anchor list).
-    4. Swap the `TRTF_TRIATTN_*` env-var readers in
+    4. Swap the `TRTMC_TRIATTN_*` env-var readers in
        `src/runtime/core/triattention_kv_cache.cpp` for ConfigBundle
        queries. Similarly for the Python build path.
     5. Delete the env-var readers (hard removal per CLAUDE.md style).
     6. Validate per-cluster tests still pass.
 
 ### Tick 6 (2026-04-20)
-- `examples/trtf_dataset_benchmark.cpp` — argv parser gains `--config
+- `examples/trtmc_dataset_benchmark.cpp` — argv parser gains `--config
   <file>` and `--set ns.field=value` (repeatable). When either flag is
   supplied and schemas are registered, writes `effective_config.json`
   next to the bundle path. Same no-schemas-yet pre-Phase-4 message as
@@ -1052,12 +1052,12 @@ Commit chain:
   Both dense and tri cmdlines are extended in-place with `--config` +
   `(shared + per-run)` `--set` tokens. No per-knob flags were added; the
   existing `--dense-env` / `--tri-env` env-var pass-throughs stay until
-  Phase 4 Cluster A removes the TRTF_* env vars they target.
-- Gates: `trtf_dataset_benchmark --config /nope.json` smoke prints the
+  Phase 4 Cluster A removes the TRTMC_* env vars they target.
+- Gates: `trtmc_dataset_benchmark --config /nope.json` smoke prints the
   expected "schemas not registered yet" message; benchmark `--help`
   shows all four new flags; both C++ config tests still pass; CCN gate
   passes (the only new C++ code is the argv-walking block and a
-  `resolve_cli_config` call — same patterns as `trtf_cli.cpp`).
+  `resolve_cli_config` call — same patterns as `trtmc_cli.cpp`).
 - Commit: pending end-of-tick.
 - Next tick (7) — start Phase 3 (bundle `defaults:` block):
     * Builder writes `defaults:` into `config.json` from a

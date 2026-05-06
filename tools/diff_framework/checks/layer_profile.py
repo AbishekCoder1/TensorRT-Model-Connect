@@ -26,8 +26,8 @@ class LayerProfileTest:
         try:
             from layer_profiler import LayerProfiler
             from perf_compare import build_trt_engine, load_trt_from_bundle
-            from trtf_build.debug_runner import TrtRunner
-            from trtf_build.engine_builder import _resolve_model
+            from tensorrt_model_connect.debug_runner import TrtRunner
+            from tensorrt_model_connect.engine_builder import _resolve_model
             from transformers import AutoTokenizer
             import numpy as np
 

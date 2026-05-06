@@ -6,7 +6,7 @@ This page explains how the TensorRT engine is built (Python) and how it runs (C+
 
 The TRT pipeline has two phases:
 
-1. **Build phase (Python)**: `trtf_build/` reads HF model weights, constructs a TRT `INetworkDefinition` via the TensorRT Python API, compiles it to an `ICudaEngine`, and serializes the engine plan into a `.trtfb` bundle.
+1. **Build phase (Python)**: `tensorrt_model_connect/` reads HF model weights, constructs a TRT `INetworkDefinition` via the TensorRT Python API, compiles it to an `ICudaEngine`, and serializes the engine plan into a `.trtfb` bundle.
 2. **Run phase (C++)**: The C++ runtime deserializes the engine plan from the bundle, creates an execution context, and runs the autoregressive generation loop on GPU with KV-cache management.
 
 ---
@@ -84,7 +84,7 @@ logits = hidden * W_lm_head
 
 ## Graph Building (Python)
 
-The Python `trtf_build/` package builds the TRT network graph using the TensorRT Python API. Shared ops in `trtf_build/trtf_build/graph_ops.py` provide reusable building blocks:
+The Python `tensorrt_model_connect/` package builds the TRT network graph using the TensorRT Python API. Shared ops in `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` provide reusable building blocks:
 
 | Function | Description |
 |----------|-------------|
@@ -137,14 +137,14 @@ Interpolation is configurable: `"bicubic"` (default, Catmull-Rom), `"bilinear"` 
 
 ### Engine Compilation (Python)
 
-Engine compilation happens during `trtf-build build`:
+Engine compilation happens during `trtmc-build build`:
 - TensorRT compiles the network graph into optimized CUDA kernels
 - Compilation takes 30-300 seconds depending on model size
 - The serialized plan is written into the `.trtfb` bundle
 
 ### Engine Deserialization (C++)
 
-Engine deserialization happens during `trtf_create_pipeline()`:
+Engine deserialization happens during `trtmc_create_pipeline()`:
 - `ReadBundleFile()` extracts the engine plan bytes from the bundle
 - `createInferRuntime(logger)` creates a TRT runtime
 - `deserializeCudaEngine(plan_bytes)` recreates the `ICudaEngine` (~5s)
@@ -152,7 +152,7 @@ Engine deserialization happens during `trtf_create_pipeline()`:
 
 ### TrtModule
 
-The deserialized engine is wrapped in `TrtModule` (C++, `include/trtf/runtime/trt_module.h`):
+The deserialized engine is wrapped in `TrtModule` (C++, `include/trtmc/runtime/trt_module.h`):
 
 `TrtModule` wraps a TRT `ICudaEngine` + `IExecutionContext`. It pre-allocates
 all device buffers at construction and provides forward pass modes:
@@ -192,7 +192,7 @@ generate(prompt, cfg):
 
 ### KV-Cache Management
 
-The cache uses a fixed-size buffer per layer, held in device memory (`KvCache` in `include/trtf/runtime/kv_cache.h`):
+The cache uses a fixed-size buffer per layer, held in device memory (`KvCache` in `include/trtmc/runtime/kv_cache.h`):
 - Size: `[max_cache_length, kv_dim]` per layer, per K and V, resident on GPU
 - `bind_to(module)` injects cache pointers directly into the TrtModule's execution context
 - `advance()` does D2D async copy of present K/V into cache slots, then increments position

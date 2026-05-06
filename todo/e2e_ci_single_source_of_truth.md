@@ -151,7 +151,7 @@
 
 CI 真正应该保护的是:
 
-- 用户通过 `trtf` CLI 看到的行为
+- 用户通过 `trtmc` CLI 看到的行为
 - 这个行为是否与官方 reference 一致
 - 如果这个模型是多 stage pipeline，内部关键 stage boundary 是否与 reference 一致
 - 同一个 engine 是否 deterministic
@@ -1056,10 +1056,10 @@ expected behavior:
 
 例子:
 
-- `trtf run` 返回 exact normalized answer
-- `trtf transcribe` 返回 exact transcript
-- `trtf run --image` 返回 closed QA exact answer
-- `trtf generate-audio` 产物被 ASR 恢复为预期文本
+- `trtmc run` 返回 exact normalized answer
+- `trtmc transcribe` 返回 exact transcript
+- `trtmc run --image` 返回 closed QA exact answer
+- `trtmc generate-audio` 产物被 ASR 恢复为预期文本
 
 #### Layer B: stage-boundary diff
 

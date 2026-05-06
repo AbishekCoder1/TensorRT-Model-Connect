@@ -12,14 +12,14 @@ description: >-
 ## Overview
 
 You are a performance profiling agent. Run a structured profiling workflow for any
-model supported by trt-transformers, producing actionable bottleneck analysis. All
+model supported by tensorrt-model-connect, producing actionable bottleneck analysis. All
 commands run inside the dev container.
 
 ## Preconditions
 
 - GPU + CUDA + TensorRT available (container environment)
-- `trtf_build` installed in editable mode (`pip install --no-deps -e trtf_build/`)
-- C++ binary built at `./build/trtf` (optional, for C++ pass)
+- `tensorrt_model_connect` installed in editable mode (`pip install --no-deps -e tensorrt_model_connect/`)
+- C++ binary built at `./build/trtmc` (optional, for C++ pass)
 - Model accessible via HuggingFace ID or local directory
 
 ## Workflow
@@ -32,36 +32,36 @@ Before doing anything else, verify the environment can run profiling:
 # Check all preconditions in one shot
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null && echo "GPU: OK" || echo "GPU: MISSING"
 python3 -c "import tensorrt as trt; print(f'TRT: {trt.__version__}')" 2>/dev/null || echo "TRT: MISSING"
-which trtf-build 2>/dev/null && echo "trtf-build: OK" || echo "trtf-build: MISSING (run: pip install --no-deps -e trtf_build/)"
-test -x ./build/trtf && echo "C++ binary: OK" || echo "C++ binary: MISSING (optional — run: cmake --build build -j)"
+which trtmc-build 2>/dev/null && echo "trtmc-build: OK" || echo "trtmc-build: MISSING (run: pip install --no-deps -e tensorrt_model_connect/)"
+test -x ./build/trtmc && echo "C++ binary: OK" || echo "C++ binary: MISSING (optional — run: cmake --build build -j)"
 python3 -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')" 2>/dev/null || echo "PyTorch: MISSING"
 ```
 
-**If any required check fails (GPU, TRT, or trtf-build), auto-recover:**
+**If any required check fails (GPU, TRT, or trtmc-build), auto-recover:**
 
 **Case A: No GPU detected (not inside a container)**
 
 Check if a team container already exists:
 ```bash
-docker ps -a --filter "name=trtf-dev-gb300" --format "{{.Names}} {{.Status}}"
+docker ps -a --filter "name=trtmc-dev-gb300" --format "{{.Names}} {{.Status}}"
 ```
 
-- **If a running container exists** (e.g., `trtf-dev-gb300-vivian`):
+- **If a running container exists** (e.g., `trtmc-dev-gb300-vivian`):
   Run all subsequent commands inside it via `docker exec`:
   ```bash
-  docker exec trtf-dev-gb300-<team-id> <command>
+  docker exec trtmc-dev-gb300-<team-id> <command>
   ```
 
 - **If a stopped container exists**: Start it first:
   ```bash
-  docker start trtf-dev-gb300-<team-id>
+  docker start trtmc-dev-gb300-<team-id>
   ```
 
 - **If no container exists**: Bootstrap a new isolated workspace:
   ```bash
   ./scripts/bootstrap_workspace.sh --id <team-id> --branch $(git branch --show-current) --detach
   ```
-  This creates a new container `trtf-dev-gb300-<team-id>` with a full repo clone,
+  This creates a new container `trtmc-dev-gb300-<team-id>` with a full repo clone,
   runs `setup_container.sh` inside it (editable install + C++ build + tests), and
   leaves it running in the background. Then use `docker exec` for all commands.
 
@@ -70,9 +70,9 @@ docker ps -a --filter "name=trtf-dev-gb300" --format "{{.Names}} {{.Status}}"
   ./scripts/docker_build_gb300.sh
   ```
 
-**Case B: Inside container but trtf_build not installed**
+**Case B: Inside container but tensorrt_model_connect not installed**
 ```bash
-pip install --no-deps -e trtf_build/
+pip install --no-deps -e tensorrt_model_connect/
 ```
 
 **Case C: Inside container but C++ binary missing (needed for C++/nsight passes)**
@@ -82,10 +82,10 @@ pip install --no-deps -e trtf_build/
 Or manually:
 ```bash
 cmake -S . -B build -G Ninja \
-  -DTRTF_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
-  -DTRTF_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
-  -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-  -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+  -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+  -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
+  -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
 cmake --build build -j
 ```
 
@@ -93,7 +93,7 @@ cmake --build build -j
 Do NOT proceed to Step 1 until all required preconditions pass.
 
 **Important:** When running commands via `docker exec`, prefix every command in
-Steps 1-8 with `docker exec trtf-dev-gb300-<team-id>`. For multi-line commands,
+Steps 1-8 with `docker exec trtmc-dev-gb300-<team-id>`. For multi-line commands,
 wrap in `bash -c '...'`.
 
 ### Step 1: Determine what to profile
@@ -121,7 +121,7 @@ If the user just says "profile X", default to full depth.
 cat tests/e2e/models/<model-name>.json | grep runtime_strategy
 
 # Or from bundle:
-./build/trtf inspect <bundle.trtfb> | grep "Runtime strategy"
+./build/trtmc inspect <bundle.trtfb> | grep "Runtime strategy"
 ```
 
 ### Step 2: Build the bundle (if needed)
@@ -129,12 +129,12 @@ cat tests/e2e/models/<model-name>.json | grep runtime_strategy
 Skip if the user provides `--bundle`.
 
 ```bash
-trtf-build build <model> -o /tmp/<model-name>.trtfb --max-cache-length 256 --verbose
+trtmc-build build <model> -o /tmp/<model-name>.trtfb --max-cache-length 256 --verbose
 ```
 
 Verify the bundle:
 ```bash
-trtf-build inspect /tmp/<model-name>.trtfb
+trtmc-build inspect /tmp/<model-name>.trtfb
 ```
 
 ### Step 3: Run the unified profiler
@@ -142,7 +142,7 @@ trtf-build inspect /tmp/<model-name>.trtfb
 **Quick profile (e2e comparison only):**
 
 ```bash
-python tools/trtf_profile.py \
+python tools/trtmc_profile.py \
   --model <model> \
   --bundle /tmp/<model-name>.trtfb \
   --prompt "The capital of France is" \
@@ -155,14 +155,14 @@ python tools/trtf_profile.py \
 **Full profile (e2e + per-layer + CPU phases + C++ binary):**
 
 ```bash
-python tools/trtf_profile.py \
+python tools/trtmc_profile.py \
   --model <model> \
   --bundle /tmp/<model-name>.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --warmup 3 --iterations 10 \
   --dtype float16 \
-  --trtf-binary ./build/trtf \
+  --trtmc-binary ./build/trtmc \
   --hf-python /opt/venv/bin/python \
   --cpu-profile \
   --json --output-dir /tmp/<model-name>_profile
@@ -175,7 +175,7 @@ python tools/trtf_profile.py \
 | `--compile-mode max-autotune` | Thorough torch.compile | When comparing kernel quality |
 | `--no-layer-profile` | Skip IProfiler pass | Quick e2e-only comparison |
 | `--cpu-profile` | CPU phase breakdown | When investigating decode overhead |
-| `--nsight` | Nsight Systems capture | Deep kernel analysis (needs --trtf-binary + --bundle) |
+| `--nsight` | Nsight Systems capture | Deep kernel analysis (needs --trtmc-binary + --bundle) |
 | `--trust-remote-code` | HF custom code | Phi-3, StarCoder2, etc. |
 
 ### Step 4: Run standalone CPU phase breakdown (decoder models only)
@@ -208,7 +208,7 @@ When comparing CPU bottlenecks across different model types:
 
 ```bash
 python tools/cpu_profile_matrix.py \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
   --strategies decoder_kv_cache ssm_recurrent \
   --json /tmp/matrix_profile.json \
   --html /tmp/matrix_profile.html
@@ -216,7 +216,7 @@ python tools/cpu_profile_matrix.py \
 
 ### Step 6: Generate HTML report
 
-If `--json` was used with `trtf_profile.py`, the HTML report is auto-generated.
+If `--json` was used with `trtmc_profile.py`, the HTML report is auto-generated.
 Otherwise, generate manually:
 
 ```bash
@@ -233,7 +233,7 @@ Read the JSON artifacts and provide analysis. Use this decision tree:
 
 | Condition | Classification | Recommendation |
 |-----------|---------------|----------------|
-| `d2h + argmax > 15%` of step time | **Sync bottleneck** | GPU argmax (`TRTF_GPU_ARGMAX=1`) eliminates D2H + CPU argmax |
+| `d2h + argmax > 15%` of step time | **Sync bottleneck** | GPU argmax (`TRTMC_GPU_ARGMAX=1`) eliminates D2H + CPU argmax |
 | `tensor_bind > 10%` of step time | **Launch overhead** | CUDA Graphs capture/replay eliminates per-step binding |
 | `execute > 75%` of step time | **Compute-bound** | FP16/BF16 precision (`--precision fp16`) |
 | `execute < 50%`, no single dominant | **Mixed overhead** | GPU argmax + CUDA Graphs + FP16 combined |
@@ -294,13 +294,13 @@ When the user wants to measure the impact of an optimization:
 
 ```bash
 # 1. Profile baseline
-python tools/trtf_profile.py --model <model> --bundle <bundle> \
+python tools/trtmc_profile.py --model <model> --bundle <bundle> \
   --json --output-dir /tmp/before --cpu-profile
 
 # 2. Apply optimization (e.g., rebuild with FP16, enable CUDA graphs)
 
 # 3. Profile after
-python tools/trtf_profile.py --model <model> --bundle <new_bundle> \
+python tools/trtmc_profile.py --model <model> --bundle <new_bundle> \
   --json --output-dir /tmp/after --cpu-profile
 
 # 4. Compare JSONs manually
@@ -326,7 +326,7 @@ python tools/perf_compare.py \
 python tools/perf_compare.py \
   --model <model> \
   --bundle <bundle> \
-  --trtf-binary ./build/trtf \
+  --trtmc-binary ./build/trtmc \
   --hf-python /opt/venv/bin/python \
   --json /tmp/perf.json
 
@@ -340,7 +340,7 @@ python tools/perf_compare.py \
 
 ## Real Output Examples
 
-### trtf_profile.py console output (Qwen3-0.6B on GB300):
+### trtmc_profile.py console output (Qwen3-0.6B on GB300):
 
 ```
 ────────────────────────────────────────────────────────────────────────────────
@@ -392,10 +392,10 @@ python tools/perf_compare.py \
 
 | Variable | Values | Description |
 |----------|--------|-------------|
-| `TRTF_GPU_ARGMAX` | `0` (default), `1` | GPU-side argmax; eliminates D2H logits transfer |
-| `TRTF_DISABLE_CUDA_GRAPH` | `0` (default), `1` | Disable CUDA Graph capture/replay |
-| `TRTF_TRT_LOG_STDERR` | `0`, `1` | TRT logger output to stderr |
-| `TRTF_TRT_LOG_MIN_SEVERITY` | `0`-`4` | TRT log severity filter |
+| `TRTMC_GPU_ARGMAX` | `0` (default), `1` | GPU-side argmax; eliminates D2H logits transfer |
+| `TRTMC_DISABLE_CUDA_GRAPH` | `0` (default), `1` | Disable CUDA Graph capture/replay |
+| `TRTMC_TRT_LOG_STDERR` | `0`, `1` | TRT logger output to stderr |
+| `TRTMC_TRT_LOG_MIN_SEVERITY` | `0`-`4` | TRT log severity filter |
 
 ## Composability with Other Skills
 
@@ -415,5 +415,5 @@ python tools/perf_compare.py \
 | OOM on HF model load | Model too large for GPU | Use `--dtype float16` (default) or `--trt-only` on perf_compare |
 | Mamba model detected | IProfiler not supported for SSM | Profiler auto-skips per-layer pass; CPU profile still works with `--runner mamba` |
 | CPU profile timings noisy | Missing cuda-python sync | Ensure `cuda-python` >= 13 for proper `cudaStreamSynchronize` |
-| C++ binary not found | Not built or wrong path | Run `cmake --build build -j` first, then pass `--trtf-binary ./build/trtf` |
-| HTML report empty | No JSON artifacts generated | Ensure `--json` flag was passed to trtf_profile.py |
+| C++ binary not found | Not built or wrong path | Run `cmake --build build -j` first, then pass `--trtmc-binary ./build/trtmc` |
+| HTML report empty | No JSON artifacts generated | Ensure `--json` flag was passed to trtmc_profile.py |

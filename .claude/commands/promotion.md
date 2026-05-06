@@ -13,7 +13,7 @@ Workflow:
 
 ```bash
 python3 tools/ai_staging.py \
-  --project yifeif/trt-transformers \
+  --project yifeif/tensorrt-model-connect \
   --branch ai-staging \
   babysit-promotion \
   --target-branch master \

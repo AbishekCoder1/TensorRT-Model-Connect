@@ -2,12 +2,12 @@
 
 // BackendLoader: loads backend DSOs via dlopen and caches them.
 
-#include "trtf/runtime/trt_backend.h"
+#include "trtmc/runtime/trt_backend.h"
 
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct BackendLoadMetadata {
     std::string requested_name;
@@ -32,4 +32,4 @@ class BackendLoader {
     static void preload_dependency(const std::string& path);
 };
 
-} // namespace trtf
+} // namespace trtmc

@@ -10,10 +10,10 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build.config import ModelConfig
-    import trtf_build.families.ltx_video as ltx_mod
+    from tensorrt_model_connect.config import ModelConfig
+    import tensorrt_model_connect.families.ltx_video as ltx_mod
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _cfg(**raw_overrides: object) -> ModelConfig:
@@ -108,9 +108,9 @@ def test_build_components_calls_native_subbuilders(
 
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.t5_encoder_builder",
+        "tensorrt_model_connect.t5_encoder_builder",
         _module(
-            "trtf_build.t5_encoder_builder",
+            "tensorrt_model_connect.t5_encoder_builder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
@@ -205,7 +205,7 @@ def test_get_diffusion_config_uses_ltx_scheduler_fields() -> None:
 
 
 def test_ltx_rope_tables_use_diffusers_frequency_triplet_order() -> None:
-    from trtf_build.ltx_dit_builder import make_ltx_rope_tables
+    from tensorrt_model_connect.ltx_dit_builder import make_ltx_rope_tables
 
     dim = 14
     latent_frames = 1
@@ -257,7 +257,7 @@ def test_ltx_rope_tables_use_diffusers_frequency_triplet_order() -> None:
 
 
 def test_ltx_rotate_half_matrix_rotates_within_each_head() -> None:
-    from trtf_build.ltx_dit_builder import _make_ltx_rotate_half_matrix
+    from tensorrt_model_connect.ltx_dit_builder import _make_ltx_rotate_half_matrix
 
     interleaved = _make_ltx_rotate_half_matrix(8, 2, interleaved=True)
     x = np.arange(8, dtype=np.float32)

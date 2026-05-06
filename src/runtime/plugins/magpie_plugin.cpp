@@ -4,13 +4,13 @@
 #include "runtime/pipelines/magpie_pipeline.h"
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/config/config_bundle.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/config/config_bundle.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
 #include <cstdint>
 #include <exception>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -24,7 +24,7 @@ int32_t compute_magpie_kv_dim(const BaseConfig& base_cfg, const MagpieTTSConfig&
 
 } // namespace
 
-// audio_magpie.* registry overlay — replaces the TRTF_MAGPIE_{GREEDY,
+// audio_magpie.* registry overlay — replaces the TRTMC_MAGPIE_{GREEDY,
 // CFG_SCALE,TEMPERATURE,FINISHED_LIMIT,SEED} env vars. Only apply
 // non-default registry values so pre-migration bundles keep their
 // config-derived defaults for fields the caller never touched.
@@ -141,4 +141,4 @@ class MagpiePlugin final : public IPipelinePlugin {
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_magpie_plugin, MagpiePlugin,
                                        "text_to_audio_magpie");
 
-} // namespace trtf
+} // namespace trtmc

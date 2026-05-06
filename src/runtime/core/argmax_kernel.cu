@@ -13,7 +13,7 @@
 #include <cuda_runtime.h>
 #include <cfloat>
 
-namespace trtf {
+namespace trtmc {
 
 static constexpr int kBlockSize = 256;
 
@@ -83,4 +83,4 @@ void gpu_argmax(
         d_logits, vocab_size, d_token_id, d_logit_val);
 }
 
-} // namespace trtf
+} // namespace trtmc

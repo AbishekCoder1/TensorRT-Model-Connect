@@ -15,8 +15,8 @@ AGENT_ID="${4:-agent-3}"
 
 SAFE_NAME="$(echo "$MODEL_ID" | tr '/' '_' | tr '.' '_')"
 PROGRESS_FILE="/tmp/optimize_progress_${SAFE_NAME}.json"
-CONTAINER="trtf-dev-gb300-${AGENT_ID}"
-REPO_DIR="/workspace/users/yifeif/workspaces/${AGENT_ID}/trt-transformers-cpp"
+CONTAINER="trtmc-dev-gb300-${AGENT_ID}"
+REPO_DIR="/workspace/users/yifeif/workspaces/${AGENT_ID}/tensorrt-model-connect"
 
 echo "[supervisor] Model:        $MODEL_ID"
 echo "[supervisor] Max attempts:  $MAX_ATTEMPTS"

@@ -1,8 +1,8 @@
-#include "trtf/runtime/recurrent_state.h"
+#include "trtmc/runtime/recurrent_state.h"
 
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/runtime/trt_module.h"
 
-namespace trtf {
+namespace trtmc {
 
 RecurrentState::RecurrentState(int32_t num_layers, std::vector<TensorSpec> specs,
                                cudaStream_t stream)
@@ -89,4 +89,4 @@ bool RecurrentState::ok() const {
     return true;
 }
 
-} // namespace trtf
+} // namespace trtmc

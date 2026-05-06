@@ -33,7 +33,7 @@ void check(bool condition, const char* test_name) {
 
 void test_runtime_factory_logger_lifetime() {
     for (int i = 0; i < 20; ++i) {
-        auto runtime = trtf::create_trt_runtime();
+        auto runtime = trtmc::create_trt_runtime();
         check(static_cast<bool>(runtime), "create_trt_runtime returns non-null");
         if (!runtime) {
             continue;
@@ -41,7 +41,7 @@ void test_runtime_factory_logger_lifetime() {
 
         // Force TensorRT to emit an error log through ILogger.
         // If logger lifetime is invalid, this path can crash.
-        auto engine = trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+        auto engine = trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
             runtime->deserializeCudaEngine(nullptr, static_cast<std::size_t>(0)));
         check(!engine, "deserialize invalid blob returns null engine");
     }

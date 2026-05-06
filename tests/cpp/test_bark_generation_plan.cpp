@@ -28,9 +28,9 @@ void check(bool condition, const char* name)
     }
 }
 
-trtf::BarkConfig make_config()
+trtmc::BarkConfig make_config()
 {
-    trtf::BarkConfig cfg;
+    trtmc::BarkConfig cfg;
     cfg.semantic_pad_token = 10000;
     cfg.coarse_semantic_pad_token = 12048;
     cfg.coarse_infer_token = 12050;
@@ -45,10 +45,10 @@ trtf::BarkConfig make_config()
 
 void test_coarse_plan_derives_total_steps_and_windows()
 {
-    const trtf::BarkConfig cfg = make_config();
+    const trtmc::BarkConfig cfg = make_config();
     const std::vector<int32_t> semantic_tokens = {1, 2, cfg.semantic_pad_token, 4, 5};
 
-    const auto plan = trtf::make_bark_coarse_plan(semantic_tokens, cfg);
+    const auto plan = trtmc::make_bark_coarse_plan(semantic_tokens, cfg);
 
     check(plan.total_steps == 20, "bark coarse plan computes total steps");
     check(plan.num_windows == 7, "bark coarse plan computes number of windows");
@@ -58,11 +58,11 @@ void test_coarse_plan_derives_total_steps_and_windows()
 
 void test_coarse_window_plan_builds_context_and_history()
 {
-    const trtf::BarkConfig cfg = make_config();
-    const auto coarse_plan = trtf::make_bark_coarse_plan({10, 11, 12, 13, 14}, cfg);
+    const trtmc::BarkConfig cfg = make_config();
+    const auto coarse_plan = trtmc::make_bark_coarse_plan({10, 11, 12, 13, 14}, cfg);
     const std::vector<int32_t> generated_tokens = {20001, 20002, 20003, 20004};
 
-    const auto window = trtf::make_bark_coarse_window_plan(coarse_plan, generated_tokens, cfg);
+    const auto window = trtmc::make_bark_coarse_window_plan(coarse_plan, generated_tokens, cfg);
 
     check(window.start_generated_count == 4, "bark window plan records generated count");
     check(window.generated_this_window == 3, "bark window plan caps work by sliding window");
@@ -78,20 +78,20 @@ void test_codec_plan_prefers_fine_codes_when_available()
     const std::vector<int32_t> fine_codes(16, 7);
     const std::vector<int32_t> coarse_tokens(12, 3);
 
-    const auto fine_plan = trtf::make_bark_codec_plan(fine_codes, true, coarse_tokens, 2);
+    const auto fine_plan = trtmc::make_bark_codec_plan(fine_codes, true, coarse_tokens, 2);
     check(fine_plan.use_fine_codes, "bark codec plan prefers fine codes when available");
     check(fine_plan.frame_count == 2, "bark codec plan derives fine frame count");
 
-    const auto coarse_plan = trtf::make_bark_codec_plan({}, false, coarse_tokens, 2);
+    const auto coarse_plan = trtmc::make_bark_codec_plan({}, false, coarse_tokens, 2);
     check(!coarse_plan.use_fine_codes, "bark codec plan falls back to coarse tokens");
     check(coarse_plan.frame_count == 6, "bark codec plan derives coarse frame count");
-    check(trtf::bark_coarse_codebook_index(5, make_config()) == 1,
+    check(trtmc::bark_coarse_codebook_index(5, make_config()) == 1,
         "bark codebook helper alternates by coarse codebook count");
 }
 
 void test_fine_plan_and_code_initialization()
 {
-    trtf::BarkConfig cfg = make_config();
+    trtmc::BarkConfig cfg = make_config();
     cfg.codebook_size = 1024;
     cfg.semantic_vocab_size = 10000;
     cfg.fine_seq_length = 3;
@@ -103,7 +103,7 @@ void test_fine_plan_and_code_initialization()
         10003, 11027,
     };
 
-    const auto fine_plan = trtf::make_bark_fine_plan(
+    const auto fine_plan = trtmc::make_bark_fine_plan(
         cfg,
         coarse_tokens.size(),
         true,
@@ -113,7 +113,7 @@ void test_fine_plan_and_code_initialization()
     check(fine_plan.actual_frames == 3, "bark fine plan derives actual frame count");
     check(fine_plan.should_run_trt, "bark fine plan enables TRT when resources exist");
 
-    const auto codes = trtf::initialize_bark_fine_codes(coarse_tokens, fine_plan.n_frames, cfg);
+    const auto codes = trtmc::initialize_bark_fine_codes(coarse_tokens, fine_plan.n_frames, cfg);
     check(codes.size() == 24, "bark fine code init allocates eight codebooks");
     check(codes[0] == 0 && codes[1] == 1 && codes[2] == 2,
         "bark fine code init maps codebook zero tokens");
@@ -128,7 +128,7 @@ void test_codec_input_builder_transposes_codebooks()
         20, 21, 22,
         30, 31, 32,
     };
-    const auto input_codes = trtf::make_bark_codec_input_codes(
+    const auto input_codes = trtmc::make_bark_codec_input_codes(
         codes_flat,
         3,
         3,

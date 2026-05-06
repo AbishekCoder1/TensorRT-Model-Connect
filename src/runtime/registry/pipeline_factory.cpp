@@ -1,15 +1,15 @@
-#include "trtf/runtime/pipeline_factory.h"
+#include "trtmc/runtime/pipeline_factory.h"
 
 #include "bundle/bundle_format.h"
 #include "runtime/backend/backend_loader.h"
 #include "runtime/backend/trt_version.h"
 #include "runtime/core/trt_common.h"
-#include "trtf/config/cli_support.h"
-#include "trtf/config/config_bundle.h"
-#include "trtf/config/schema_registry.h"
-#include "trtf/runtime/pipeline_plugin.h"
-#include "trtf/runtime/pipeline_registry.h"
-#include "trtf/runtime/trt_backend.h"
+#include "trtmc/config/cli_support.h"
+#include "trtmc/config/config_bundle.h"
+#include "trtmc/config/schema_registry.h"
+#include "trtmc/runtime/pipeline_plugin.h"
+#include "trtmc/runtime/pipeline_registry.h"
+#include "trtmc/runtime/trt_backend.h"
 #include "utils/data_dir.h"
 #include "utils/json_helpers.h"
 
@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -84,7 +84,7 @@ IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy) {
 }
 
 // Apply platform.* values to their process-wide sinks. Replaces the old
-// TRTF_DATA_DIR and TRTF_TRT_LOG_{STDERR,MIN_SEVERITY} env-var reads.
+// TRTMC_DATA_DIR and TRTMC_TRT_LOG_{STDERR,MIN_SEVERITY} env-var reads.
 // Called from try_resolve_runtime_config once a bundle has resolved.
 void apply_platform_config(const config::ConfigBundle& bundle) {
     try {
@@ -179,7 +179,7 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
                               "selected backend TensorRT runtime");
 
     if (required) {
-        std::cerr << "[trtf] TensorRT ABI resolved: bundle=" << trt_abi_string(*required)
+        std::cerr << "[trtmc] TensorRT ABI resolved: bundle=" << trt_abi_string(*required)
                   << ", backend=" << loaded_backend_name;
         if (!metadata.trt_runtime_version.empty())
             std::cerr << ", runtime=" << metadata.trt_runtime_version;
@@ -198,7 +198,7 @@ try_resolve_runtime_config(const std::string& config_text, const std::string& bu
         apply_platform_config(resolution.bundle);
         return std::move(resolution.bundle);
     } catch (const std::exception& e) {
-        std::cerr << "[trtf.config] Failed to resolve runtime config: " << e.what()
+        std::cerr << "[trtmc.config] Failed to resolve runtime config: " << e.what()
                   << "\n          Proceeding with schema defaults.\n";
         return std::nullopt;
     }
@@ -263,7 +263,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         resolved ? &*resolved : nullptr};
     auto pipeline = plugin->create(ctx);
 
-    std::cerr << "[trtf] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
+    std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
               << std::endl;
     return pipeline;
 }
@@ -311,7 +311,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         resolved ? &*resolved : nullptr};
     auto pipeline = plugin->create(ctx);
 
-    std::cerr << "[trtf] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
+    std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
               << std::endl;
     return pipeline;
 }
@@ -325,4 +325,4 @@ std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOption
     return PipelineFactory::from_bundle(bundle_path, options);
 }
 
-} // namespace trtf
+} // namespace trtmc

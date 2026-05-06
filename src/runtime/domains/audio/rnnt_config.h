@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <stdexcept>
 
-namespace trtf {
+namespace trtmc {
 
 struct RnntConfig {
     int32_t sample_rate{16000};
@@ -101,4 +101,4 @@ inline RnntGreedyDecision make_rnnt_greedy_decision(int32_t token_id, int32_t bl
     return {true, false};
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -17,7 +17,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-STABLELM-01
 Intent: Validate the StableLM-2 family plugin weight loading including LayerNorm with beta, SwiGLU MLP, QKV biases, and RoPE configuration.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: LayerNorm biases are loaded, QKV biases are mapped correctly, SwiGLU gate/up/down keys are present, and all weight shapes match expected dimensions.
 """
 
@@ -32,9 +32,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -51,7 +51,7 @@ class StableLMPluginTester(FamilyPluginTester):
       - QKV biases
     """
 
-    plugin_module = "trtf_build.families.stablelm"
+    plugin_module = "tensorrt_model_connect.families.stablelm"
     model_type = "stablelm"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

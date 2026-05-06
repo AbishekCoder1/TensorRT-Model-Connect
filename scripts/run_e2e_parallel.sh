@@ -11,13 +11,13 @@
 #   ./scripts/run_e2e_parallel.sh --task-strategy text_generation_causal --rebuild-engines
 #
 # Usage (from host):
-#   docker exec trtf-dev-gb300 bash -c \
-#     "cd /workspace/trt-transformers-cpp && ./scripts/run_e2e_parallel.sh --rebuild-engines"
+#   docker exec trtmc-dev-gb300 bash -c \
+#     "cd /workspace/tensorrt-model-connect && ./scripts/run_e2e_parallel.sh --rebuild-engines"
 #
 # CLI options (override defaults):
-#   --engine-dir PATH        Engine/bundle storage  (default: /workspace/users/yifeif/trt-transformers/engines)
-#   --result-dir PATH        Test output directory  (default: /workspace/users/yifeif/trt-transformers/test-result)
-#   --trtf-binary PATH       Path to trtf binary    (default: ./build/trtf)
+#   --engine-dir PATH        Engine/bundle storage  (default: /workspace/users/yifeif/tensorrt-model-connect/engines)
+#   --result-dir PATH        Test output directory  (default: /workspace/users/yifeif/tensorrt-model-connect/test-result)
+#   --trtmc-binary PATH       Path to trtmc binary    (default: ./build/trtmc)
 #   --hf-python PATH         Python with HF deps    (default: /opt/venv/bin/python)
 #   --num-gpus N             Number of GPUs to use  (default: auto-detect)
 #   --workers-per-gpu N      Concurrent workers per GPU (default: 4)
@@ -27,15 +27,15 @@
 #   All other args are passed through to pytest (e.g., --rebuild-engines)
 #
 # Environment variables (lower priority than CLI):
-#   ENGINE_DIR, RESULT_DIR, NUM_GPUS, WORKERS_PER_GPU, TRTF_BINARY, HF_PYTHON
+#   ENGINE_DIR, RESULT_DIR, NUM_GPUS, WORKERS_PER_GPU, TRTMC_BINARY, HF_PYTHON
 
 set -euo pipefail
 
 # --- Configuration -----------------------------------------------------------
 
-ENGINE_DIR="${ENGINE_DIR:-/workspace/users/yifeif/trt-transformers/engines}"
-RESULT_DIR="${RESULT_DIR:-/workspace/users/yifeif/trt-transformers/test-result}"
-TRTF_BINARY="${TRTF_BINARY:-./build/trtf}"
+ENGINE_DIR="${ENGINE_DIR:-/workspace/users/yifeif/tensorrt-model-connect/engines}"
+RESULT_DIR="${RESULT_DIR:-/workspace/users/yifeif/tensorrt-model-connect/test-result}"
+TRTMC_BINARY="${TRTMC_BINARY:-./build/trtmc}"
 HF_PYTHON="${HF_PYTHON:-/opt/venv/bin/python}"
 WORKERS_PER_GPU="${WORKERS_PER_GPU:-4}"
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
@@ -58,7 +58,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --engine-dir)         ENGINE_DIR="$2"; shift 2 ;;
         --result-dir)         RESULT_DIR="$2"; shift 2 ;;
-        --trtf-binary)        TRTF_BINARY="$2"; shift 2 ;;
+        --trtmc-binary)        TRTMC_BINARY="$2"; shift 2 ;;
         --hf-python)          HF_PYTHON="$2"; shift 2 ;;
         --num-gpus)           NUM_GPUS="$2"; shift 2 ;;
         --workers-per-gpu)    WORKERS_PER_GPU="$2"; shift 2 ;;
@@ -97,7 +97,7 @@ echo "  GPUs:            $NUM_GPUS"
 echo "  Workers/GPU:     $WORKERS_PER_GPU"
 echo "  Engines:         $ENGINE_DIR"
 echo "  Results:         $RESULT_DIR"
-echo "  Binary:          $TRTF_BINARY"
+echo "  Binary:          $TRTMC_BINARY"
 echo "  HF Python:       $HF_PYTHON"
 echo "  Progress every:  ${PROGRESS_INTERVAL}s"
 echo "  Extra args:      ${EXTRA_ARGS[*]:-none}"
@@ -162,7 +162,7 @@ while IFS= read -r line; do
         # shellcheck disable=SC2086
         "$HF_PYTHON" -m pytest $WORKER_TESTS -v \
             --engine-dir "$ENGINE_DIR" \
-            --trtf-binary "$TRTF_BINARY" \
+            --trtmc-binary "$TRTMC_BINARY" \
             --hf-python "$HF_PYTHON" \
             --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
             --junitxml="$RESULT_DIR/junit-${LABEL}.xml" \

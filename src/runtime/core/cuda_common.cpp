@@ -1,6 +1,6 @@
 #include "runtime/core/cuda_common.h"
 
-namespace trtf {
+namespace trtmc {
 
 CudaStream::CudaStream() {
     mStatus = cudaStreamCreate(&mStream);
@@ -82,4 +82,4 @@ std::size_t CudaBuffer::size() const {
     return mBytes;
 }
 
-} // namespace trtf
+} // namespace trtmc

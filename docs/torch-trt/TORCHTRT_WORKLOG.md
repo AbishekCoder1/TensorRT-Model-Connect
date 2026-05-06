@@ -73,8 +73,8 @@ The v6 engine used multiplicative masking — `encoder_hidden_states * mask` zer
 3. C++ pipeline (`torchtrt_diffusion_pipeline.cpp`) unchanged — it still builds `{0,1}` fp16 masks. The conversion to additive happens inside the engine.
 
 **Files changed:**
-- `ttrt_build/ttrt_build/strategies/diffusion.py` — Added `_TrtSafeAttnProcessor`, updated `PixArtDiTWrapper` to use additive masking
-- `ttrt_build/ttrt_build/families/pixart.py` — Updated comments for additive masking, mixed trace mask
+- `tensorrt_model_connect/tensorrt_model_connect/strategies/diffusion.py` — Added `_TrtSafeAttnProcessor`, updated `PixArtDiTWrapper` to use additive masking
+- `tensorrt_model_connect/tensorrt_model_connect/families/pixart.py` — Updated comments for additive masking, mixed trace mask
 - `src/runtime/pipelines/torchtrt_diffusion_pipeline.cpp` — Removed debug output, updated comments
 
 **Verification:**
@@ -98,7 +98,7 @@ The v6 engine used multiplicative masking — `encoder_hidden_states * mask` zer
 
 ### What was done
 
-Made the `--precision` flag in `ttrt-build` actually functional. Previously it was accepted but ignored — the model always loaded as fp16 regardless.
+Made the `--precision` flag in `trtmc-build` actually functional. Previously it was accepted but ignored — the model always loaded as fp16 regardless.
 
 **Pipeline changes:**
 - `compiler.py`: Added `PRECISION_DTYPE_MAP` / `precision_to_dtype()`. `build_bundle()` now converts precision string to `torch.dtype` and passes it to `plugin.load_model(dtype=...)` and `strategy.wrap_model(compute_dtype=...)`.
@@ -126,7 +126,7 @@ All changes are backward compatible — new params are keyword-only with default
 
 ### What was done
 
-Created `ttrt_build/` package (12 source files) and `tests/torchtrt_builder/` (7 test files).
+Created `tensorrt_model_connect/` package (12 source files) and `tests/torchtrt_builder/` (7 test files).
 
 **Package files:** `pyproject.toml`, `__init__.py`, `__main__.py`, `cli.py`, `config.py`, `compiler.py`, `cache_config.py`, `bundle_writer.py`, `bundle_reader.py`, `families/__init__.py`, `families/base.py`, `families/qwen.py`
 
@@ -136,11 +136,11 @@ Created `ttrt_build/` package (12 source files) and `tests/torchtrt_builder/` (7
 
 ### What was tried and what happened
 - Initial `conftest.py` had functions defined after markers referenced them → `NameError`. Fixed by reordering.
-- `cli.py` used `from . import build` which failed with editable install → changed to `import ttrt_build`.
+- `cli.py` used `from . import build` which failed with editable install → changed to `import tensorrt_model_connect`.
 - **Result: 46/46 Python tests pass.** Existing tests unaffected.
 
 ### Decisions
-- Config reuses `trtf_build.config.ModelConfig` if available, standalone fallback otherwise.
+- Config reuses `tensorrt_model_connect.config.ModelConfig` if available, standalone fallback otherwise.
 - KV cache as explicit `[layers, 2, batch, heads, cache_len, head_dim]` tensor input.
 - Bundle magic: `TTRTB\x00\x01\x00`.
 
@@ -150,38 +150,38 @@ Created `ttrt_build/` package (12 source files) and `tests/torchtrt_builder/` (7
 
 ### What was done
 
-Created `src/torchtrt/` (7 files) and `tests/cpp/test_ttrt_*.cpp` (2 files). Modified `CMakeLists.txt` (additive) and `examples/trtf_cli.cpp` (magic-sniff dispatch).
+Created `src/torchtrt/` (7 files) and `tests/cpp/test_ttrt_*.cpp` (2 files). Modified `CMakeLists.txt` (additive) and `examples/trtmc_cli.cpp` (magic-sniff dispatch).
 
 **Source files:**
 - `src/torchtrt/ttrt_bundle_format.h/.cpp` — `.ttrtb` reader (mirrors `bundle_format.h/.cpp`)
 - `src/torchtrt/ttrt_kv_cache.h/.cpp` — cache position/mask/position_ids tracking
-- `src/torchtrt/ttrt_pipeline.h/.cpp` — `TorchTrtPipeline : IPipeline` (LibTorch inference, guarded by `#if TRTF_HAS_TORCHTRT`)
+- `src/torchtrt/ttrt_pipeline.h/.cpp` — `TorchTrtPipeline : IPipeline` (LibTorch inference, guarded by `#if TRTMC_HAS_TORCHTRT`)
 - `src/torchtrt/ttrt_c.cpp` — C ABI entry point `ttrt_create_pipeline()`
-- `include/trtf/ttrt_pipeline.h` — public header
+- `include/trtmc/ttrt_pipeline.h` — public header
 
 **Test files:**
 - `tests/cpp/test_ttrt_bundle_format.cpp` — 7 tests: magic, read, sections, errors
 - `tests/cpp/test_ttrt_kv_cache.cpp` — 10 tests: init, advance, clamp, reset, masks, positions, full sequence
 
 **Modified files:**
-- `CMakeLists.txt` — added `TRTF_ENABLE_TORCHTRT` option, LibTorch `find_package`, new source files, 2 new test targets
-- `examples/trtf_cli.cpp` — added `#include "trtf/ttrt_pipeline.h"`, magic-sniff dispatch in `cmd_run()` (~10 lines)
+- `CMakeLists.txt` — added `TRTMC_ENABLE_TORCHTRT` option, LibTorch `find_package`, new source files, 2 new test targets
+- `examples/trtmc_cli.cpp` — added `#include "trtmc/ttrt_pipeline.h"`, magic-sniff dispatch in `cmd_run()` (~10 lines)
 
 ### What was tried and what happened
-- Built with both TRT and TorchTRT disabled (`-DTRTF_ENABLE_TRT=OFF -DTRTF_ENABLE_TORCHTRT=OFF`) — all 102 compilation units compile cleanly.
-- `ttrt_pipeline.cpp` compiles without LibTorch because the implementation is guarded by `#if TRTF_HAS_TORCHTRT`.
+- Built with both TRT and TorchTRT disabled (`-DTRTMC_ENABLE_TRT=OFF -DTRTMC_ENABLE_TORCHTRT=OFF`) — all 102 compilation units compile cleanly.
+- `ttrt_pipeline.cpp` compiles without LibTorch because the implementation is guarded by `#if TRTMC_HAS_TORCHTRT`.
 - **Result: 25/25 C++ tests pass** (23 existing + 2 new). No regressions.
 - **Result: 46/46 Python tests still pass.** No regressions.
 
 ### Design decisions
 - `TorchTrtPipeline` implements `IPipeline` (same interface as raw-TRT backends). This lets the CLI use the exact same `generate()` call regardless of backend — only the pipeline creation differs.
-- Bundle format/cache tracker compile without LibTorch. Only the pipeline + C ABI need the `#if TRTF_HAS_TORCHTRT` guard.
-- CLI dispatches via magic-byte sniffing: `ttrt_is_bundle()` checks for `TTRTB` magic → `ttrt_create_pipeline()`. Falls through to `trtf_create_pipeline_ex()` for `TRTFB`.
+- Bundle format/cache tracker compile without LibTorch. Only the pipeline + C ABI need the `#if TRTMC_HAS_TORCHTRT` guard.
+- CLI dispatches via magic-byte sniffing: `ttrt_is_bundle()` checks for `TTRTB` magic → `ttrt_create_pipeline()`. Falls through to `trtmc_create_pipeline_ex()` for `TRTFB`.
 
 ### What still needs to be done (at time of Phase 3+4)
 - [x] **Phase 6**: Diff tools — done, see below
 - [x] **Phase 7**: Agent onboarding scaffold — done, see below
-- [ ] **GPU validation**: Build with `-DTRTF_ENABLE_TORCHTRT=ON` in the dev container (requires LibTorch). Compile Qwen3-0.6B, run through the full pipeline.
+- [ ] **GPU validation**: Build with `-DTRTMC_ENABLE_TORCHTRT=ON` in the dev container (requires LibTorch). Compile Qwen3-0.6B, run through the full pipeline.
 - [ ] **EOS token**: Currently hardcoded per model_type. Should extract from `config.json` or tokenizer config in the bundle.
 - [ ] **Cache reset**: Need to verify whether `torch::jit::load` modules allow cache tensor zeroing between generations without reloading the model. If not, may need to re-load per generation (slow) or restructure the export.
 - [ ] **Temp dir cleanup**: Tokenizer temp files extracted from bundle should be cleaned up on pipeline destruction.
@@ -216,7 +216,7 @@ Tests were created alongside each phase. Final count: **63 Python tests + 25 C++
 ### What still needs to be done (at time of Phase 6+7)
 - [x] **StaticCache integration** — done, see below
 - [x] **EOS token** — done, see below
-- [ ] **GPU validation**: Build with `-DTRTF_ENABLE_TORCHTRT=ON`, compile Qwen3-0.6B end-to-end.
+- [ ] **GPU validation**: Build with `-DTRTMC_ENABLE_TORCHTRT=ON`, compile Qwen3-0.6B end-to-end.
 - [ ] **Temp dir cleanup**: Clean up tokenizer temp files on pipeline destruction.
 
 ---
@@ -256,7 +256,7 @@ Fixed three issues identified during pre-GPU review of the Qwen3-0.6B import pat
 - [x] **GPU validation**: See below.
 - [ ] **Temp dir cleanup**: Clean up tokenizer temp files on pipeline destruction.
 - [ ] **Dynamic prefill** (optimization): Current token-by-token prefill works but is slower than batch prefill. Could add dynamic shapes or a separate prefill graph later.
-- [ ] **C++ runtime with LibTorch+TorchTRT**: The TorchScript model requires `torch_tensorrt` C++ extensions. Need to build C++ with `-DTRTF_ENABLE_TORCHTRT=ON` and link against LibTorch + torch_tensorrt.
+- [ ] **C++ runtime with LibTorch+TorchTRT**: The TorchScript model requires `torch_tensorrt` C++ extensions. Need to build C++ with `-DTRTMC_ENABLE_TORCHTRT=ON` and link against LibTorch + torch_tensorrt.
 
 ---
 
@@ -279,9 +279,9 @@ Replaced the manual StaticCache/LogitsWrapper approach with HF's `TorchExportabl
 `torch_tensorrt.dynamo.compile()` calls `exported_program.run_decompositions()` internally, which fails with `AssertionError` on stateful modules (cache buffer mutations). Added `_patch_run_decompositions()` in `compiler.py` that catches this specific failure and returns the program unchanged. The non-decomposed graph compiles correctly via TRT.
 
 **Files changed:**
-- `ttrt_build/ttrt_build/compiler.py` — Added `_patch_run_decompositions()`, wrapper integration in `build_bundle()`, switched to `use_explicit_typing=True`
-- `ttrt_build/ttrt_build/cache_config.py` — Simplified `make_export_args()` to produce only `input_ids + cache_position` kwargs
-- `ttrt_build/ttrt_build/families/qwen.py` — Simplified `get_export_args()` (no longer needs `model.config`)
+- `tensorrt_model_connect/tensorrt_model_connect/compiler.py` — Added `_patch_run_decompositions()`, wrapper integration in `build_bundle()`, switched to `use_explicit_typing=True`
+- `tensorrt_model_connect/tensorrt_model_connect/cache_config.py` — Simplified `make_export_args()` to produce only `input_ids + cache_position` kwargs
+- `tensorrt_model_connect/tensorrt_model_connect/families/qwen.py` — Simplified `get_export_args()` (no longer needs `model.config`)
 - `scripts/new_torchtrt_family.py` — Updated scaffold template
 - `src/torchtrt/ttrt_pipeline.cpp` — Simplified `forward_one_token()` to 2 inputs only
 - `tests/torchtrt_builder/test_cache_config.py` — Updated for 2-input signature
@@ -297,7 +297,7 @@ Replaced the manual StaticCache/LogitsWrapper approach with HF's `TorchExportabl
    - `torch.compile(backend="torch_tensorrt")` — Failed: shape broadcasting error in cache `index_put` op
    - Manual decomposition skip — Failed: `trt_convert` not importable from torch_tensorrt's internal API
 5. **Save/reload** — `torch_tensorrt.save()` with `inputs=[input_ids, cache_position]` parameter succeeded.
-6. **Full bundle build** — `ttrt-build build Qwen/Qwen3-0.6B` completed in 220s, producing 1951 MB bundle.
+6. **Full bundle build** — `trtmc-build build Qwen/Qwen3-0.6B` completed in 220s, producing 1951 MB bundle.
 7. **Bundle inference** — Loaded from bundle, generated "The capital of France is Paris. The capital of Italy is Rome..." ✓
 8. **Cache reset** — Zeroing 4D buffers produces identical output on re-generation ✓
 
@@ -340,9 +340,9 @@ Fixed 5 issues preventing the Docker container from working end-to-end on x86_64
 - Added the include.
 
 **Issue 4: LibTorch segfaults in tests**
-- All tests linked against `trtf_core` which now included LibTorch. LibTorch's bundled CUDA 12.8 conflicted with system CUDA 13.0, causing segfaults in 4 tests.
-- Split Torch-TRT code into separate `trtf_torchtrt` library. Only CLI links LibTorch; tests link `trtf_core` without it.
-- Created `ttrt_c_stubs.cpp` (weak symbol stubs in `trtf_core`) + `ttrt_c.cpp` (real impl in `trtf_torchtrt`).
+- All tests linked against `trtmc_core` which now included LibTorch. LibTorch's bundled CUDA 12.8 conflicted with system CUDA 13.0, causing segfaults in 4 tests.
+- Split Torch-TRT code into separate `trtmc_torchtrt` library. Only CLI links LibTorch; tests link `trtmc_core` without it.
+- Created `ttrt_c_stubs.cpp` (weak symbol stubs in `trtmc_core`) + `ttrt_c.cpp` (real impl in `trtmc_torchtrt`).
 
 **Issue 5: `libtorchtrt_runtime.so` not loadable at C++ runtime**
 - `torch::jit::load()` fails with "Unknown type name `tensorrt.Engine`" because the Torch-TRT runtime extensions aren't loaded.
@@ -354,10 +354,10 @@ Fixed 5 issues preventing the Docker container from working end-to-end on x86_64
 
 ### Files changed
 - `Dockerfile.gb300` — Removed aarch64 TRT_INC_DIR, added CUDA version fix, added torch lib dirs to LD_LIBRARY_PATH
-- `scripts/setup_container.sh` — Auto-detect TRT_INC_DIR, install both trtf_build and ttrt_build
-- `CMakeLists.txt` — Separated `trtf_torchtrt` library from `trtf_core`
-- `src/torchtrt/ttrt_c.cpp` — Real implementation only (in `trtf_torchtrt`)
-- `src/torchtrt/ttrt_c_stubs.cpp` — New: weak stubs (in `trtf_core`)
+- `scripts/setup_container.sh` — Auto-detect TRT_INC_DIR, install both tensorrt_model_connect and tensorrt_model_connect
+- `CMakeLists.txt` — Separated `trtmc_torchtrt` library from `trtmc_core`
+- `src/torchtrt/ttrt_c.cpp` — Real implementation only (in `trtmc_torchtrt`)
+- `src/torchtrt/ttrt_c_stubs.cpp` — New: weak stubs (in `trtmc_core`)
 - `src/torchtrt/ttrt_pipeline.cpp` — Added `dlopen()` for torch_tensorrt runtime
 - `tools/diff_torchtrt.py` — Fixed argmax on multi-dimensional logits
 
@@ -367,7 +367,7 @@ Fixed 5 issues preventing the Docker container from working end-to-end on x86_64
 - **211/211 tools tests pass**
 - **63/65 Torch-TRT builder tests pass** (2 pre-existing: StaticCache shape change in transformers 5.2.0)
 - **Bundle build**: Qwen3-0.6B → 2047 MB `.ttrtb` in ~236s
-- **C++ inference**: `./build/trtf run /tmp/qwen3.ttrtb --prompt "The capital of France is" --max-new-tokens 20 --hf-python /opt/venv/bin/python`
+- **C++ inference**: `./build/trtmc run /tmp/qwen3.ttrtb --prompt "The capital of France is" --max-new-tokens 20 --hf-python /opt/venv/bin/python`
   → Output: `" Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China"`
 
 ### What still needs to be done
@@ -384,7 +384,7 @@ Fixed 5 issues preventing the Docker container from working end-to-end on x86_64
 
 **1. Suppressed 3 of 4 noisy third-party warnings in `compiler.py`**
 
-Four warnings were emitted on every `ttrt-build` invocation. Investigated root cause of each:
+Four warnings were emitted on every `trtmc-build` invocation. Investigated root cause of each:
 
 | Warning | Source | Root Cause | Fix |
 |---------|--------|------------|-----|
@@ -401,12 +401,12 @@ Four warnings were emitted on every `ttrt-build` invocation. Investigated root c
 - Added Torch-TRT docs links to Documentation table
 - Renamed existing sections to distinguish "Raw TRT pipeline" from "Torch-TRT pipeline"
 
-**3. Fixed file ownership for ttrt_build/**
+**3. Fixed file ownership for tensorrt_model_connect/**
 
 Files created inside container were owned by root (UID 1000), not the host user (UID 1776778147). Fixed via `docker exec chown`.
 
 ### Files changed
-- `ttrt_build/ttrt_build/compiler.py` — Added warning suppression for 3 known harmless warnings
+- `tensorrt_model_connect/tensorrt_model_connect/compiler.py` — Added warning suppression for 3 known harmless warnings
 - `README.md` — Added Torch-TRT pipeline documentation, unified quick start
 
 ### What still needs to be done
@@ -486,7 +486,7 @@ HF model (safetensors + config.json)
 - [ ] **I/O tensor naming**: Rename TRT engine I/O from `flat_cache_N` / `outputN` to `cache_k_N` / `cache_v_N` / `present_k_N` / `present_v_N` / `logits` to match the existing C++ `DeviceKvCache` naming convention.
 - [ ] **Attention mask format**: Align with the raw TRT pipeline's mask format (which uses `kMaskedScore = -1.0e4F`). Currently using `torch.finfo(fp16).min = -65504`.
 - [ ] **First-token divergence**: Investigate whether this is a mask format issue. May need to pass `attention_mask` as a 2D mask and let the model compute its own 4D causal mask.
-- [ ] **Remove LibTorch code**: Remove `trtf_torchtrt` library, `ttrt_c.cpp`, `ttrt_c_stubs.cpp`, `.ttrtb` format, and all LibTorch-related CMake code once the new pipeline is validated.
+- [ ] **Remove LibTorch code**: Remove `trtmc_torchtrt` library, `ttrt_c.cpp`, `ttrt_c_stubs.cpp`, `.ttrtb` format, and all LibTorch-related CMake code once the new pipeline is validated.
 - [ ] **End-to-end C++ validation**: Package the raw engine as `.trtfb` and run through the existing C++ runtime.
 - [ ] **diff_torchtrt validation**: Run the diff tool battery to measure logit agreement vs HF reference.
 
@@ -558,13 +558,13 @@ Only difference is tensor **naming** (torch.export auto-names vs manual names). 
 **C++ changes (`bundle_helpers.cpp`)**:
 - `make_decoder_engine()`: when `runtime_strategy == "torchtrt_decoder"`, uses Torch-TRT naming convention: `cache_kv_{2i}`/`cache_kv_{2i+1}` for cache inputs, `output{N}` for outputs
 
-**C++ changes (`trtf_c.cpp`)**:
+**C++ changes (`trtmc_c.cpp`)**:
 - Added `torchtrt_decoder` to `create_decoder_pipeline` strategy check — routes to same DeviceKvCache backend
 
 ### Phase 3: LibTorch removal (PLANNED)
 
-- Remove `trtf_torchtrt` library from CMakeLists.txt
-- Remove `find_package(Torch)` and TRTF_ENABLE_TORCHTRT option
+- Remove `trtmc_torchtrt` library from CMakeLists.txt
+- Remove `find_package(Torch)` and TRTMC_ENABLE_TORCHTRT option
 - Remove LibTorch/torch_tensorrt from Dockerfile.gb300 LD_LIBRARY_PATH
 - Remove TORCH_CMAKE_PREFIX env var
 - Remove `ttrt_c_stubs.cpp` weak symbols
@@ -575,8 +575,8 @@ Only difference is tensor **naming** (torch.export auto-names vs manual names). 
 - [x] **Python wrapper adaptation**: StatelessCacheWrapper accepts raw TRT I/O format
 - [x] **C++ tensor naming**: `make_decoder_engine()` handles `torchtrt_decoder` naming
 - [x] **C++ strategy dispatch**: `torchtrt_decoder` routes to existing DeviceKvCache
-- [x] **GPU validation**: Built bundle with `ttrt-build build Qwen/Qwen3-0.6B` (21s, 1139 MB)
-- [x] **C++ inference**: `./build/trtf run` produces correct output ("Paris" etc.)
+- [x] **GPU validation**: Built bundle with `trtmc-build build Qwen/Qwen3-0.6B` (21s, 1139 MB)
+- [x] **C++ inference**: `./build/trtmc run` produces correct output ("Paris" etc.)
 - [ ] **LibTorch cleanup**: Remove from CMakeLists.txt, Dockerfile, C++ sources
 - [ ] **Tests**: Update Python tests, run C++ tests
 - [ ] **diff_torchtrt validation**: Run logit comparison battery
@@ -591,13 +591,13 @@ with `hf_mask.scatter(1, cache_position.view(1,1), 0.0)`.
 ### GPU validation results (2026-03-09)
 
 ```
-$ ttrt-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
-[ttrt-build] Model: qwen3 (layers=28, hidden=1024, vocab=151936)
-[ttrt-build] torch.export complete [2.0s] (61 user inputs, 311 weights)
-[ttrt-build] Raw TRT engine: 1139.2 MB [15.8s]
-[ttrt-build] Bundle saved [21.0s total]
+$ trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+[trtmc-build] Model: qwen3 (layers=28, hidden=1024, vocab=151936)
+[trtmc-build] torch.export complete [2.0s] (61 user inputs, 311 weights)
+[trtmc-build] Raw TRT engine: 1139.2 MB [15.8s]
+[trtmc-build] Bundle saved [21.0s total]
 
-$ ./build/trtf run /tmp/qwen3.trtfb --prompt "The capital of France is" --max-new-tokens 20
+$ ./build/trtmc run /tmp/qwen3.trtfb --prompt "The capital of France is" --max-new-tokens 20
 The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China
 ```
 
@@ -606,7 +606,7 @@ float32 [256,2048] cache, float32 [1,151936] logits, float32 [1,2048] present.
 All shapes/dtypes match the raw TRT pipeline exactly.
 
 Note: first build with LibTorch linked caused segfault. Rebuilding with
-`-DTRTF_ENABLE_TORCHTRT=OFF` fixed it (LibTorch symbols conflicted).
+`-DTRTMC_ENABLE_TORCHTRT=OFF` fixed it (LibTorch symbols conflicted).
 
 ### Phase 3: LibTorch removal (DONE)
 
@@ -614,7 +614,7 @@ Removed ALL LibTorch/Torch-TRT C++ runtime dependencies. The Torch-TRT pipeline 
 produces raw `.trtfb` bundles that run on the existing C++ runtime — no LibTorch needed.
 
 **Deleted files** (removed from git index):
-- `include/trtf/ttrt_pipeline.h` — public header
+- `include/trtmc/ttrt_pipeline.h` — public header
 - `src/torchtrt/ttrt_pipeline.h/.cpp` — C++ LibTorch inference pipeline
 - `src/torchtrt/ttrt_c.cpp` — C ABI entry point
 - `src/torchtrt/ttrt_c_stubs.cpp` — weak symbol stubs
@@ -624,15 +624,15 @@ produces raw `.trtfb` bundles that run on the existing C++ runtime — no LibTor
 - `tests/cpp/test_ttrt_kv_cache.cpp` — KV cache test
 
 **Modified files**:
-- `CMakeLists.txt` — Removed `TRTF_ENABLE_TORCHTRT` option, `find_package(Torch)`, `trtf_torchtrt` library target, `TRTF_HAS_TORCHTRT` defines, ttrt source files from `trtf_core`, `test_ttrt_*` test targets
-- `examples/trtf_cli.cpp` — Removed `#include "trtf/ttrt_pipeline.h"`, `.ttrtb` magic-sniff dispatch (`ttrt_is_bundle` / `ttrt_create_pipeline`)
+- `CMakeLists.txt` — Removed `TRTMC_ENABLE_TORCHTRT` option, `find_package(Torch)`, `trtmc_torchtrt` library target, `TRTMC_HAS_TORCHTRT` defines, ttrt source files from `trtmc_core`, `test_ttrt_*` test targets
+- `examples/trtmc_cli.cpp` — Removed `#include "trtmc/ttrt_pipeline.h"`, `.ttrtb` magic-sniff dispatch (`ttrt_is_bundle` / `ttrt_create_pipeline`)
 - `Dockerfile` — Removed `TORCH_CMAKE_PREFIX` env var
 - `Dockerfile.gb300` — Removed torch/torch_tensorrt from `LD_LIBRARY_PATH`, removed `TORCH_CMAKE_PREFIX`
-- `scripts/setup_container.sh` — Removed `TRTF_ENABLE_TORCHTRT=ON`, `TORCH_CMAKE_PREFIX`, `torch_tensorrt` import check, `ttrt_build/` editable install
+- `scripts/setup_container.sh` — Removed `TRTMC_ENABLE_TORCHTRT=ON`, `TORCH_CMAKE_PREFIX`, `torch_tensorrt` import check, `tensorrt_model_connect/` editable install
 - `.gitignore` — Added `/src/torchtrt/` (root-owned files may linger on disk)
 
 **What was kept** (still needed for BUILD pipeline):
-- `torch`, `torchvision`, `torchaudio` pip packages in Dockerfiles — needed by `ttrt_build/` Python build package
+- `torch`, `torchvision`, `torchaudio` pip packages in Dockerfiles — needed by `tensorrt_model_connect/` Python build package
 - `torch_tensorrt` pip package — needed for `convert_exported_program_to_serialized_trt_engine`
 - `nvidia-modelopt` pip package — quantized model support
 
@@ -684,25 +684,25 @@ Note: C++ runtime does not yet handle `torchtrt_encoder` bundles. This enables P
 
 | File | Change |
 |------|--------|
-| **New** `ttrt_build/ttrt_build/strategies/__init__.py` | Strategy registry with `get_strategy()` |
-| **New** `ttrt_build/ttrt_build/strategies/base.py` | `BuildStrategy` Protocol |
-| **New** `ttrt_build/ttrt_build/strategies/decoder.py` | `DecoderBuildStrategy` + `StatelessCacheWrapper` + `patch_static_cache_scatter` (moved from compiler.py) |
-| **New** `ttrt_build/ttrt_build/strategies/encoder_only.py` | `EncoderOnlyBuildStrategy` + `EncoderOnlyWrapper` |
-| **New** `ttrt_build/ttrt_build/families/bert.py` | BERT plugin stub |
+| **New** `tensorrt_model_connect/tensorrt_model_connect/strategies/__init__.py` | Strategy registry with `get_strategy()` |
+| **New** `tensorrt_model_connect/tensorrt_model_connect/strategies/base.py` | `BuildStrategy` Protocol |
+| **New** `tensorrt_model_connect/tensorrt_model_connect/strategies/decoder.py` | `DecoderBuildStrategy` + `StatelessCacheWrapper` + `patch_static_cache_scatter` (moved from compiler.py) |
+| **New** `tensorrt_model_connect/tensorrt_model_connect/strategies/encoder_only.py` | `EncoderOnlyBuildStrategy` + `EncoderOnlyWrapper` |
+| **New** `tensorrt_model_connect/tensorrt_model_connect/families/bert.py` | BERT plugin stub |
 | **New** `tests/torchtrt_builder/test_strategies.py` | 15 strategy tests |
-| `ttrt_build/ttrt_build/compiler.py` | Removed wrapper/patch (moved), added strategy dispatch, GPU cleanup, backward-compat aliases |
-| `ttrt_build/ttrt_build/families/base.py` | Docstring update for optional `runtime_strategy` |
-| `ttrt_build/ttrt_build/families/qwen.py` | Added explicit `runtime_strategy = "decoder"` |
+| `tensorrt_model_connect/tensorrt_model_connect/compiler.py` | Removed wrapper/patch (moved), added strategy dispatch, GPU cleanup, backward-compat aliases |
+| `tensorrt_model_connect/tensorrt_model_connect/families/base.py` | Docstring update for optional `runtime_strategy` |
+| `tensorrt_model_connect/tensorrt_model_connect/families/qwen.py` | Added explicit `runtime_strategy = "decoder"` |
 
 ### Validation results
 
 - **148/148 Python tests pass** (133 existing + 15 new). Zero regressions.
-- Backward-compat aliases confirmed: `from ttrt_build.compiler import StatelessCacheWrapper` resolves to `strategies.decoder.StatelessCacheWrapper`.
+- Backward-compat aliases confirmed: `from tensorrt_model_connect.compiler import StatelessCacheWrapper` resolves to `strategies.decoder.StatelessCacheWrapper`.
 
 ### What still needs to be done
 
 - [ ] **GPU validation**: Build Qwen3-0.6B bundle with strategy dispatch and verify C++ inference output matches pre-refactor.
-- [ ] **Encoder-only C++ runtime**: Add `torchtrt_encoder` handling to `bundle_helpers.cpp` and `trtf_c.cpp`.
+- [ ] **Encoder-only C++ runtime**: Add `torchtrt_encoder` handling to `bundle_helpers.cpp` and `trtmc_c.cpp`.
 - [ ] **Additional strategies**: SSM/Mamba (`ssm_recurrent`), vision-language, diffusion — as needed.
 - [ ] **Temp dir cleanup**: Clean up tokenizer temp files on pipeline destruction.
 - [ ] **Dynamic prefill** (optimization): Token-by-token prefill works but is O(n²).

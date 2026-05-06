@@ -1,11 +1,11 @@
-#include "trtf/runtime/pipeline_plugin.h"
+#include "trtmc/runtime/pipeline_plugin.h"
 
 #include "utils/json_helpers.h"
 
 #include <algorithm>
 #include <initializer_list>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -119,4 +119,4 @@ BaseConfig parse_base_config(const std::string& config_text, int32_t max_cache_l
     return cfg;
 }
 
-} // namespace trtf
+} // namespace trtmc

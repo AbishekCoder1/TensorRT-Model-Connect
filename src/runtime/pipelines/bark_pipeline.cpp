@@ -2,7 +2,7 @@
 
 #include "runtime/core/trt_decode_runtime.h"
 #include "runtime/domains/audio/bark_generation_plan.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -14,7 +14,7 @@
 #include <numeric>
 #include <stdexcept>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -75,7 +75,7 @@ void mask_coarse_logits_for_codebook(std::vector<float>& logits, int32_t codeboo
 }
 
 // Dump tokens to ``<dump_path><suffix>`` when dump_path is non-empty.
-// Replaces the TRTF_BARK_DUMP env var. Value flows in through the
+// Replaces the TRTMC_BARK_DUMP env var. Value flows in through the
 // ``audio_bark.dump_path`` schema field.
 void maybe_dump_tokens(const std::string& dump_path, const char* suffix,
                        const std::vector<int32_t>& tokens) {
@@ -88,13 +88,13 @@ void maybe_dump_tokens(const std::string& dump_path, const char* suffix,
 }
 
 // Seed the sampler RNG from audio_bark.seed. A value of -1 (default)
-// means "leave the RNG at its constructed state." Replaces TRTF_BARK_SEED.
+// means "leave the RNG at its constructed state." Replaces TRTMC_BARK_SEED.
 void maybe_seed_bark_rng(std::mt19937& rng, std::int64_t seed) {
     if (seed < 0)
         return;
     const auto converted = static_cast<std::mt19937::result_type>(seed);
     rng.seed(converted);
-    std::cerr << "[trtf] Bark: sampler seed=" << converted << std::endl;
+    std::cerr << "[trtmc] Bark: sampler seed=" << converted << std::endl;
 }
 
 std::vector<float> synthesize_simple_waveform(const std::vector<int32_t>& codes_flat,
@@ -212,14 +212,14 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt, const Genera
     // anywhere in this file.
     maybe_seed_bark_rng(rng_, config_.seed);
 
-    std::cerr << "[trtf] Bark: starting pipeline with " << input_ids.size()
+    std::cerr << "[trtmc] Bark: starting pipeline with " << input_ids.size()
               << " text tokens, max_semantic=" << max_tokens << (config_.greedy ? " (greedy)" : "")
               << std::endl;
 
     // Stage 1: Text -> Semantic tokens
     auto semantic_tokens = run_semantic(input_ids, max_tokens);
     if (semantic_tokens.empty()) {
-        std::cerr << "[trtf] Bark: semantic stage produced no tokens" << std::endl;
+        std::cerr << "[trtmc] Bark: semantic stage produced no tokens" << std::endl;
         AudioResult out;
         out.sample_rate = config_.sample_rate;
         return out;
@@ -228,7 +228,7 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt, const Genera
     // Stage 2: Semantic -> Coarse acoustic codes
     auto coarse_tokens = run_coarse(semantic_tokens);
     if (coarse_tokens.empty()) {
-        std::cerr << "[trtf] Bark: coarse stage produced no tokens" << std::endl;
+        std::cerr << "[trtmc] Bark: coarse stage produced no tokens" << std::endl;
         AudioResult out;
         out.sample_rate = config_.sample_rate;
         return out;
@@ -243,7 +243,7 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt, const Genera
                                       ? run_codec(fine_codes, codec_plan.frame_count)
                                       : run_codec(coarse_tokens);
     if (waveform.empty()) {
-        std::cerr << "[trtf] Bark: codec produced no audio" << std::endl;
+        std::cerr << "[trtmc] Bark: codec produced no audio" << std::endl;
         AudioResult out;
         out.sample_rate = config_.sample_rate;
         return out;
@@ -253,7 +253,7 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt, const Genera
     out.samples = std::move(waveform);
     out.num_samples = static_cast<int32_t>(out.samples.size());
     out.sample_rate = config_.sample_rate;
-    std::cerr << "[trtf] Bark: generated " << out.num_samples << " samples ("
+    std::cerr << "[trtmc] Bark: generated " << out.num_samples << " samples ("
               << static_cast<float>(out.num_samples) / out.sample_rate << "s @ " << out.sample_rate
               << " Hz)" << std::endl;
     return out;
@@ -424,7 +424,7 @@ std::vector<int32_t> BarkPipeline::run_semantic(const std::vector<int32_t>& text
         run_step_with_token(*semantic_, *semantic_state_, token, logits);
     }
 
-    std::cerr << "[trtf] Bark semantic: generated " << semantic_tokens.size() << " tokens"
+    std::cerr << "[trtmc] Bark semantic: generated " << semantic_tokens.size() << " tokens"
               << std::endl;
     maybe_dump_tokens(config_.dump_path, ".sem_tokens", semantic_tokens);
     return semantic_tokens;
@@ -440,7 +440,7 @@ std::vector<int32_t> BarkPipeline::run_coarse(const std::vector<int32_t>& semant
     const int32_t n_steps = coarse_plan.total_steps;
 
     if (n_steps == 0) {
-        std::cerr << "[trtf] Bark coarse: no steps to generate" << std::endl;
+        std::cerr << "[trtmc] Bark coarse: no steps to generate" << std::endl;
         return {};
     }
 
@@ -491,7 +491,7 @@ std::vector<int32_t> BarkPipeline::run_coarse(const std::vector<int32_t>& semant
         }
     }
 
-    std::cerr << "[trtf] Bark coarse: generated " << x_coarse.size() << " tokens" << std::endl;
+    std::cerr << "[trtmc] Bark coarse: generated " << x_coarse.size() << " tokens" << std::endl;
     maybe_dump_tokens(config_.dump_path, ".coarse_tokens", x_coarse);
     return x_coarse;
 }
@@ -507,7 +507,7 @@ std::vector<int32_t> BarkPipeline::run_fine(const std::vector<int32_t>& coarse_t
     std::vector<int32_t> codes = initialize_bark_fine_codes(coarse_tokens, plan.n_frames, cfg);
 
     if (!plan.should_run_trt) {
-        std::cerr << "[trtf] Bark fine: no TRT fine engine, "
+        std::cerr << "[trtmc] Bark fine: no TRT fine engine, "
                   << "codebooks 2-7 will be zero" << std::endl;
         return codes;
     }
@@ -541,7 +541,7 @@ std::vector<int32_t> BarkPipeline::run_fine(const std::vector<int32_t>& coarse_t
         const std::string head_name = "logits_cb" + std::to_string(head_idx + 1);
         auto it = outputs.find(head_name);
         if (it == outputs.end()) {
-            std::cerr << "[trtf] Bark fine: missing output " << head_name << std::endl;
+            std::cerr << "[trtmc] Bark fine: missing output " << head_name << std::endl;
             return codes;
         }
 
@@ -555,7 +555,7 @@ std::vector<int32_t> BarkPipeline::run_fine(const std::vector<int32_t>& coarse_t
                                       fine_cb_size, cfg.codebook_size);
     }
 
-    std::cerr << "[trtf] Bark fine: predicted codebooks 2-7 for " << plan.n_frames << " frames"
+    std::cerr << "[trtmc] Bark fine: predicted codebooks 2-7 for " << plan.n_frames << " frames"
               << std::endl;
     return codes;
 }
@@ -582,7 +582,7 @@ std::vector<float> BarkPipeline::run_codec(const std::vector<int32_t>& coarse_to
     }
 
     if (!codec_ || !codec_->ok() || cfg.codec_seq_length <= 0) {
-        std::cerr << "[trtf] Bark codec: no TRT codec engine, "
+        std::cerr << "[trtmc] Bark codec: no TRT codec engine, "
                   << "generating simple waveform from codes" << std::endl;
         return synthesize_simple_waveform(codes, n_frames, cfg);
     }
@@ -597,7 +597,7 @@ std::vector<float> BarkPipeline::run_codec(const std::vector<int32_t>& codes_fla
         return {};
 
     if (!codec_ || !codec_->ok() || cfg.codec_seq_length <= 0) {
-        std::cerr << "[trtf] Bark codec: no TRT codec engine, "
+        std::cerr << "[trtmc] Bark codec: no TRT codec engine, "
                   << "generating simple waveform from codes" << std::endl;
         return synthesize_simple_waveform(codes_flat, n_frames, cfg);
     }
@@ -607,7 +607,7 @@ std::vector<float> BarkPipeline::run_codec(const std::vector<int32_t>& codes_fla
     const int32_t upsample = cfg.codec_upsample_factor;
 
     if (n_frames > max_T) {
-        std::cerr << "[trtf] Bark codec: n_frames=" << n_frames
+        std::cerr << "[trtmc] Bark codec: n_frames=" << n_frames
                   << " exceeds codec_seq_length=" << max_T << ", truncating" << std::endl;
     }
     const int32_t actual_frames = std::min(n_frames, max_T);
@@ -631,7 +631,7 @@ std::vector<float> BarkPipeline::run_codec(const std::vector<int32_t>& codes_fla
 
     auto it = outputs.find("waveform");
     if (it == outputs.end()) {
-        std::cerr << "[trtf] Bark codec: no 'waveform' output" << std::endl;
+        std::cerr << "[trtmc] Bark codec: no 'waveform' output" << std::endl;
         return {};
     }
 
@@ -642,9 +642,9 @@ std::vector<float> BarkPipeline::run_codec(const std::vector<int32_t>& codes_fla
 
     std::vector<float> waveform(wav_data, wav_data + std::min(trimmed, total_elems));
 
-    std::cerr << "[trtf] Bark codec: TRT decode " << actual_frames << " frames -> "
+    std::cerr << "[trtmc] Bark codec: TRT decode " << actual_frames << " frames -> "
               << waveform.size() << " samples" << std::endl;
     return waveform;
 }
 
-} // namespace trtf
+} // namespace trtmc

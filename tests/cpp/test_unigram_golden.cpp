@@ -11,7 +11,7 @@
 //
 // Trace: ARCH-TOK-UNI, UD-TOK-UNI-02
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -132,7 +132,7 @@ void run_builtin_golden_tests()
 
     // Without special tokens
     {
-        auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
         check_ids(tok->encode("hello"), {1}, "golden_hello");
         check_ids(tok->encode("hello world"), {1, 2}, "golden_hello_world");
         check_ids(tok->encode("the cat"), {3, 9}, "golden_the_cat");
@@ -144,7 +144,7 @@ void run_builtin_golden_tests()
 
     // With special tokens
     {
-        auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), true);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), true);
         check_ids(tok->encode("hello"), {10, 1, 11}, "golden_hello_special");
         check_ids(tok->encode(""), {10, 11}, "golden_empty_special");
     }
@@ -157,7 +157,7 @@ int run_file_golden_tests(const std::string& json_data, const std::string& golde
 {
     std::cerr << "\n=== File Golden: " << golden_path << " ===\n";
 
-    auto tok = trtf::CreateUnigramTokenizer(json_data.data(), json_data.size(), add_special);
+    auto tok = trtmc::CreateUnigramTokenizer(json_data.data(), json_data.size(), add_special);
     if (!tok) { std::cerr << "ERROR: failed to create tokenizer\n"; return 1; }
 
     std::ifstream f(golden_path);

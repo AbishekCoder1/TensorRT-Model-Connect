@@ -14,9 +14,9 @@
 // No preprocessor_weights needed.
 
 #include "runtime/domains/diffusion/diffusion_types.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cmath>
 #include <cstdint>
@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // DPM-Solver++ Multistep Scheduler (matches HF diffusers exactly).
 // See pixart_torchtrt_pipeline.cpp for detailed algorithm comments.
@@ -80,4 +80,4 @@ class PixArtTorchTrtPipeline final : public IPipeline {
     std::string model_id_;
 };
 
-} // namespace trtf
+} // namespace trtmc

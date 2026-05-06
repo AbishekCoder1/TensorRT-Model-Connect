@@ -18,7 +18,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-MAMBA-01
 Intent: Validate the Mamba SSM family plugin weight loading including conv1d state, SSM parameters, and non-decoder engine IO (no attention mask, no KV cache).
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: All SSM weight keys (in_proj, conv1d, x_proj, dt_proj, etc.) are present, engine inputs/outputs match recurrent SSM contract, and shapes are correct.
 """
 
@@ -33,9 +33,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -54,7 +54,7 @@ class MambaPluginTester(FamilyPluginTester):
       - HF prefix: backbone.layers.{i}.mixer.* and backbone.layers.{i}.norm.*
     """
 
-    plugin_module = "trtf_build.families.mamba"
+    plugin_module = "tensorrt_model_connect.families.mamba"
     model_type = "mamba"
     spec = TinyModelSpec(
         vocab_size=32,

@@ -30,21 +30,21 @@ _MAX_EMBED_BYTES = 10 * 1024 * 1024
 # Number of evenly-spaced frames to embed for diffusion models.
 _MAX_DIFFUSION_FRAMES = 6
 
-_TRTF_TIMING_RE = re.compile(
-    r"^\[trtf\.timing\]\s+"
+_TRTMC_TIMING_RE = re.compile(
+    r"^\[trtmc\.timing\]\s+"
     r"prefill_ms=(?P<prefill_ms>[-+0-9.eE]+)\s+"
     r"decode_ms=(?P<decode_ms>[-+0-9.eE]+)\s+"
     r"total_ms=(?P<total_ms>[-+0-9.eE]+)\s*$",
     re.MULTILINE,
 )
-_TRTF_LOAD_TIMING_RE = re.compile(
-    r"^\[trtf\.load_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
+_TRTMC_LOAD_TIMING_RE = re.compile(
+    r"^\[trtmc\.load_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
     r"load_deserialize_ms=(?P<ms>[-+0-9.eE]+)"
     r"(?:\s+plan_bytes=(?P<plan_bytes>[0-9]+))?",
     re.MULTILINE,
 )
-_TRTF_ENGINE_TIMING_RE = re.compile(
-    r"^\[trtf\.engine_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
+_TRTMC_ENGINE_TIMING_RE = re.compile(
+    r"^\[trtmc\.engine_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
     r"execute_ms=(?P<ms>[-+0-9.eE]+)",
     re.MULTILINE,
 )
@@ -414,7 +414,7 @@ def _extract_labeled_timing(
 def _extract_labeled_load_stats(blobs: List[str]) -> Dict[str, Tuple[int, int]]:
     stats: Dict[str, Tuple[int, int]] = {}
     for text in blobs:
-        for match in _TRTF_LOAD_TIMING_RE.finditer(text or ""):
+        for match in _TRTMC_LOAD_TIMING_RE.finditer(text or ""):
             key = _timing_label_key(match.group("label"))
             try:
                 plan_bytes = int(match.group("plan_bytes") or 0)
@@ -438,7 +438,7 @@ def _collect_load_component_stats(result: Dict[str, Any]) -> Dict[str, Tuple[int
 
 def _extract_cli_generation_timing(blobs: List[str]) -> float | None:
     for text in blobs:
-        match = _TRTF_TIMING_RE.search(text or "")
+        match = _TRTMC_TIMING_RE.search(text or "")
         if match is None:
             continue
         try:
@@ -450,7 +450,7 @@ def _extract_cli_generation_timing(blobs: List[str]) -> float | None:
 
 def _augment_timing_from_stage_outputs(result: Dict[str, Any], timing: Dict[str, Any]) -> None:
     for stage_name, blobs in _stage_text_blobs(result):
-        engine_components = _extract_labeled_timing(_TRTF_ENGINE_TIMING_RE, blobs)
+        engine_components = _extract_labeled_timing(_TRTMC_ENGINE_TIMING_RE, blobs)
         if engine_components:
             timing[f"trt_engine_{stage_name}_s"] = sum(engine_components.values())
             for label, value in engine_components.items():
@@ -460,7 +460,7 @@ def _augment_timing_from_stage_outputs(result: Dict[str, Any], timing: Dict[str,
             if cli_engine is not None:
                 timing[f"trt_engine_{stage_name}_s"] = cli_engine
 
-        load_components = _extract_labeled_timing(_TRTF_LOAD_TIMING_RE, blobs)
+        load_components = _extract_labeled_timing(_TRTMC_LOAD_TIMING_RE, blobs)
         if load_components:
             timing[f"trt_load_deserialize_{stage_name}_s"] = sum(load_components.values())
             for label, value in load_components.items():

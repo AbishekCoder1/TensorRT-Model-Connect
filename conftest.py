@@ -1,7 +1,7 @@
 def pytest_addoption(parser):
     opts = [
         ('--engine-dir', dict(default=None, help='Engine directory')),
-        ('--trtf-binary', dict(default=None, help='Path to trtf binary')),
+        ('--trtmc-binary', dict(default=None, help='Path to trtmc binary')),
         ('--hf-python', dict(default=None, help='Python with HF tokenizers')),
         ('--rebuild-engines', dict(action='store_true', default=False, help='Rebuild bundles')),
         ('--e2e-task-strategy', dict(default=None, help='Filter by task strategy')),

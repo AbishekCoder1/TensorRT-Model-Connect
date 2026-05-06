@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace diffusion {
 
 inline bool extract_preprocessor_index(
@@ -153,5 +153,5 @@ inline bool load_with_fallback(
 }
 
 } // namespace diffusion
-} // namespace trtf
+} // namespace trtmc
 

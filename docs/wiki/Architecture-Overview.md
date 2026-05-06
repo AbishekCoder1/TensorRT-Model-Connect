@@ -14,17 +14,17 @@
 | Last Updated | 2026-03-30 |
 | Supersedes | ARCH-001 v1.0 (aspirational architecture document) |
 
-This document describes the software architecture of the trt-transformers-cpp system as implemented in the codebase. All file paths referenced in this document have been verified to exist. Aspirational or planned changes are explicitly marked as **PLANNED** in Section 11.
+This document describes the software architecture of the tensorrt-model-connect system as implemented in the codebase. All file paths referenced in this document have been verified to exist. Aspirational or planned changes are explicitly marked as **PLANNED** in Section 11.
 
 ---
 
 ## 1. Scope and Purpose
 
-This document defines the software architectural design for the trt-transformers-cpp system: a two-phase inference platform that converts HuggingFace models into optimized TensorRT bundles (Python build phase) and runs autoregressive or single-pass inference from those bundles (C++ runtime phase).
+This document defines the software architectural design for the tensorrt-model-connect system: a two-phase inference platform that converts HuggingFace models into optimized TensorRT bundles (Python build phase) and runs autoregressive or single-pass inference from those bundles (C++ runtime phase).
 
 The scope covers:
 
-- The Python builder package (`trtf_build/`) and its plugin-based family architecture.
+- The Python builder package (`tensorrt_model_connect/`) and its plugin-based family architecture.
 - The C++ runtime and its manifest-registered plugin-based pipeline dispatch.
 - The `.trtfb` bundle format that bridges the two phases.
 - Core runtime abstractions: `TrtModule`, `KvCache`, `RecurrentState`.
@@ -38,8 +38,8 @@ The system operates in two strictly separated phases:
 
 | Phase | Language | Entry Point | Input | Output |
 |-------|----------|-------------|-------|--------|
-| **Build** | Python | `trtf-build build` / `trtf_build.build()` | HF repo ID or local directory | `.trtfb` bundle |
-| **Run** | C++ | `trtf run` / `trtf::load()` / C ABI | `.trtfb` bundle | Task-specific results |
+| **Build** | Python | `trtmc-build build` / `tensorrt_model_connect.build()` | HF repo ID or local directory | `.trtfb` bundle |
+| **Run** | C++ | `trtmc run` / `trtmc::load()` / C ABI | `.trtfb` bundle | Task-specific results |
 
 The bundle is the sole interface between the two phases. The C++ runtime never reads HuggingFace model directories directly. All model-specific architectural decisions (attention type, normalization, activation functions, weight layout) are baked into the TRT engine plan at build time.
 
@@ -67,12 +67,12 @@ The Python builder is a fully plugin-based system. Adding a new model family req
 
 ### 3.1 Package Structure
 
-- **Package root**: `trtf_build/trtf_build/`
+- **Package root**: `tensorrt_model_connect/tensorrt_model_connect/`
 - **Entry points**: `cli.py` (CLI), `__init__.py` (Python API), `__main__.py`
 
 ### 3.2 Orchestration Flow
 
-The orchestrator in `trtf_build/trtf_build/engine_builder.py` executes:
+The orchestrator in `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` executes:
 
 1. **Resolve model** -- download from HuggingFace or use local directory.
 2. **Parse config** -- `config.py` reads `config.json` into `ModelConfig`.
@@ -83,7 +83,7 @@ The orchestrator in `trtf_build/trtf_build/engine_builder.py` executes:
 
 ### 3.3 Family Plugin Protocol
 
-Defined in `trtf_build/trtf_build/families/base.py` as a Python `Protocol`:
+Defined in `tensorrt_model_connect/tensorrt_model_connect/families/base.py` as a Python `Protocol`:
 
 ```python
 class FamilyPlugin(Protocol):
@@ -98,7 +98,7 @@ class FamilyPlugin(Protocol):
 
 ### 3.4 Plugin Auto-Discovery
 
-`trtf_build/trtf_build/families/__init__.py` uses `pkgutil.iter_modules()` to scan all `.py` files in the families directory. Any module exposing a `plugin` attribute is registered automatically. There are currently 65 Python files in the families directory (63 plugins + `base.py` protocol + `__init__.py` auto-discovery module). New plugins are added continuously via the autopilot system (`scripts/autopilot/autorun.py`).
+`tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` uses `pkgutil.iter_modules()` to scan all `.py` files in the families directory. Any module exposing a `plugin` attribute is registered automatically. There are currently 65 Python files in the families directory (63 plugins + `base.py` protocol + `__init__.py` auto-discovery module). New plugins are added continuously via the autopilot system (`scripts/autopilot/autorun.py`).
 
 Key discovery functions:
 - `find_plugin(model_type)` -- matches standard models by HF `model_type`.
@@ -110,9 +110,9 @@ The TRT graph building is layered:
 
 | Layer | File | Responsibility |
 |-------|------|----------------|
-| 1. Atomic ops | `trtf_build/trtf_build/graph_ops.py` | Tensor-in/tensor-out ops: RoPE, RMSNorm, attention, ALiBi, conv, etc. |
-| 2. Composable blocks | `trtf_build/trtf_build/graph_blocks.py` | Multi-op blocks: SwiGLU MLP, GELU MLP, attention block, apply_norm |
-| 3. Standard decoder | `trtf_build/trtf_build/standard_decoder_builder.py` | Full decoder engine: embedding, N transformer layers, LM head |
+| 1. Atomic ops | `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` | Tensor-in/tensor-out ops: RoPE, RMSNorm, attention, ALiBi, conv, etc. |
+| 2. Composable blocks | `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` | Multi-op blocks: SwiGLU MLP, GELU MLP, attention block, apply_norm |
+| 3. Standard decoder | `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` | Full decoder engine: embedding, N transformer layers, LM head |
 
 Most decoder families call into `standard_decoder_builder.py`. Specialized architectures (Mamba, Whisper, Bark, diffusion) build custom graphs in their plugin or dedicated builder modules.
 
@@ -143,7 +143,7 @@ Beyond the standard decoder, the build package contains dedicated engine builder
 
 ### 3.7 Debug Runner
 
-`trtf_build/trtf_build/debug_runner.py` provides pure-Python TRT inference runners that mirror C++ runtime behavior:
+`tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` provides pure-Python TRT inference runners that mirror C++ runtime behavior:
 
 - `TrtRunner` -- standard decoder with device-resident KV cache.
 - `MambaTrtRunner` -- SSM with device-resident conv + SSM state.
@@ -151,11 +151,11 @@ Beyond the standard decoder, the build package contains dedicated engine builder
 
 These are used by diff-testing tools (`tools/diff_logits.py`, `tools/diff_layers.py`, `tools/diff_vl.py`) and the E2E test harness.
 
-Additionally, `trtf_build/trtf_build/diffusion_runner.py` provides a `DiffusionRunner` for pure-Python TRT inference of diffusion models (text encoding, denoising loop, VAE decode), following the same pattern as the decoder `TrtRunner`.
+Additionally, `tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py` provides a `DiffusionRunner` for pure-Python TRT inference of diffusion models (text encoding, denoising loop, VAE decode), following the same pattern as the decoder `TrtRunner`.
 
 ### 3.8 Scheduler Package
 
-`trtf_build/trtf_build/schedulers/` contains Python diffusion noise schedulers used during build-time validation and debug runner inference. Currently implements `flow_match_euler.py` (Flow Matching Euler Discrete), matching the C++ `FlowMatchEulerScheduler`.
+`tensorrt_model_connect/tensorrt_model_connect/schedulers/` contains Python diffusion noise schedulers used during build-time validation and debug runner inference. Currently implements `flow_match_euler.py` (Flow Matching Euler Discrete), matching the C++ `FlowMatchEulerScheduler`.
 
 ---
 
@@ -167,9 +167,9 @@ The public API consists of three headers:
 
 | Header | Contents |
 |--------|----------|
-| `include/trtf/pipeline.h` | `IPipeline` (abstract base with 14 virtual methods), result types (`TextResult`, `ImageResult`, `AudioResult`, `EmbeddingResult`, `SegmentResult`, `TextEmbedding`), `GenerateConfig`, factory function `trtf::load()`, C ABI functions |
-| `include/trtf/bundle.h` | `BundleInfo` struct, `InspectBundle()`, `IsBundle()` |
-| `include/trtf/tokenizer.h` | `ITokenizer` interface, factory functions for `VocabTokenizer`, `BpeTokenizer`, `WordPieceTokenizer`, `UnigramTokenizer`, `IpaTokenizer` |
+| `include/trtmc/pipeline.h` | `IPipeline` (abstract base with 14 virtual methods), result types (`TextResult`, `ImageResult`, `AudioResult`, `EmbeddingResult`, `SegmentResult`, `TextEmbedding`), `GenerateConfig`, factory function `trtmc::load()`, C ABI functions |
+| `include/trtmc/bundle.h` | `BundleInfo` struct, `InspectBundle()`, `IsBundle()` |
+| `include/trtmc/tokenizer.h` | `ITokenizer` interface, factory functions for `VocabTokenizer`, `BpeTokenizer`, `WordPieceTokenizer`, `UnigramTokenizer`, `IpaTokenizer` |
 
 `IPipeline` defines 14 virtual methods spanning all modalities:
 
@@ -183,16 +183,16 @@ Each method has a default implementation that throws `std::runtime_error`, so pi
 
 ### 4.2 C ABI Entry
 
-- **File**: `src/cabi/api/trtf_c.cpp` (~108 LOC)
-- Exposes `trtf_create_pipeline_ex()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`.
+- **File**: `src/cabi/api/trtmc_c.cpp` (~108 LOC)
+- Exposes `trtmc_create_pipeline_ex()`, `trtmc_last_error()`, `trtmc_version()`, `trtmc_has_trt()`.
 - Delegates immediately to `PipelineFactory::from_bundle()`.
 
 ### 4.3 Pipeline Factory (Registry-Based Dispatch)
 
-- **Header**: `include/trtf/runtime/pipeline_factory.h`
+- **Header**: `include/trtmc/runtime/pipeline_factory.h`
 - **Implementation**: `src/runtime/registry/pipeline_factory.cpp` (~124 LOC)
-- **Registry**: `include/trtf/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp`
-- **Plugin interface**: `include/trtf/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp`
+- **Registry**: `include/trtmc/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp`
+- **Plugin interface**: `include/trtmc/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp`
 
 The factory is the single entry point for creating pipelines from bundles. It performs:
 
@@ -207,14 +207,14 @@ The factory is the single entry point for creating pipelines from bundles. It pe
 **Manifest-registered plugin architecture**: Each plugin file in `src/runtime/plugins/` defines a class implementing `IPipelinePlugin` and exposes a registrar function via `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`:
 
 ```cpp
-// Inside namespace trtf in each plugin .cpp:
+// Inside namespace trtmc in each plugin .cpp:
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_decoder_plugin, DecoderPlugin,
                                          "decoder_kv_cache", "decoder_moe");
 ```
 
 `PipelineRegistry` is a singleton mapping strategy strings to `IPipelinePlugin*` instances. Adding a new strategy requires only a new `.cpp` file plus one manifest entry -- no edits to `pipeline_factory.cpp` or any central dispatch logic.
 
-The plugin manifest `cmake/trtf_pipeline_plugins.cmake` lists each plugin source and registrar function. Functional plugin files register 25 strategy strings:
+The plugin manifest `cmake/trtmc_pipeline_plugins.cmake` lists each plugin source and registrar function. Functional plugin files register 25 strategy strings:
 
 | Plugin File | Strategies Registered |
 |-------------|----------------------|
@@ -237,11 +237,11 @@ The plugin manifest `cmake/trtf_pipeline_plugins.cmake` lists each plugin source
 | `flux_plugin.cpp` | `diffusion_flux` |
 | `wan_plugin.cpp` | `diffusion_wan`, `diffusion_pixart` |
 | `zimage_plugin.cpp` | `diffusion_zimage` |
-| `cmake/trtf_pipeline_plugins.cmake` | source/anchor manifest for generated linker retention |
+| `cmake/trtmc_pipeline_plugins.cmake` | source/anchor manifest for generated linker retention |
 
 ### 4.4 Configuration
 
-- **Header**: `include/trtf/runtime/pipeline_plugin.h`
+- **Header**: `include/trtmc/runtime/pipeline_plugin.h`
 - **Implementation**: `src/runtime/registry/pipeline_plugin.cpp`
 
 `BaseConfig` is a universal struct with ~14 fields that every pipeline needs (vocab_size, hidden_size, num_layers, num_heads, num_kv_heads, head_dim, max_cache_length, bos/eos IDs, runtime_strategy, precision, tokenizer flags). Parsed by `parse_base_config()`. Each plugin parses its own strategy-specific fields directly from the raw JSON config text, keeping plugin-specific knowledge out of shared code.
@@ -259,7 +259,7 @@ Provides `find_section(bundle, name)` for exact-name lookup and `find_sections_b
 
 - **Header**: `src/bundle/bundle_format.h`
 - **Implementation**: `src/bundle/bundle_format.cpp`
-- **Writer**: `trtf_build/trtf_build/bundle_writer.py`
+- **Writer**: `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py`
 
 ### 5.1 Binary Layout
 
@@ -303,7 +303,7 @@ The bundle's `config.json` section carries all build-time decisions. The C++ run
 ### 6.1 Complete Dispatch Flow
 
 ```
-trtf::load(bundle_path)
+trtmc::load(bundle_path)
   -> PipelineFactory::from_bundle()           [src/runtime/registry/pipeline_factory.cpp]
     -> ReadBundleFile()                       [src/bundle/bundle_format.cpp]
     -> extract config.json section from bundle
@@ -413,7 +413,7 @@ Note: Whisper, Bark, Magpie, and Speech pipelines delegate to legacy backend cla
 
 ### 8.1 TrtModule
 
-- **Header**: `include/trtf/runtime/trt_module.h`
+- **Header**: `include/trtmc/runtime/trt_module.h`
 - **Implementation**: `src/runtime/core/trt_module.cpp`
 
 The `model.forward()` abstraction for TensorRT engines. Wraps an engine + execution context. Provides:
@@ -427,7 +427,7 @@ The `model.forward()` abstraction for TensorRT engines. Wraps an engine + execut
 
 ### 8.2 KvCache
 
-- **Header**: `include/trtf/runtime/kv_cache.h`
+- **Header**: `include/trtmc/runtime/kv_cache.h`
 - **Implementation**: `src/runtime/core/kv_cache.cpp`
 
 Autoregressive KV cache state manager. HF equivalent: `DynamicCache` / `past_key_values`. Manages:
@@ -440,7 +440,7 @@ Autoregressive KV cache state manager. HF equivalent: `DynamicCache` / `past_key
 
 ### 8.3 RecurrentState
 
-- **Header**: `include/trtf/runtime/recurrent_state.h`
+- **Header**: `include/trtmc/runtime/recurrent_state.h`
 - **Implementation**: `src/runtime/core/recurrent_state.cpp`
 
 Generic config-driven SSM/RWKV state manager. Replaces the original separate `MambaStepState` and `RwkvStepState` with a single class parameterized by `TensorSpec` vectors:
@@ -450,7 +450,7 @@ Generic config-driven SSM/RWKV state manager. Replaces the original separate `Ma
 
 ### 8.4 IScheduler
 
-- **Header**: `include/trtf/runtime/scheduler.h`
+- **Header**: `include/trtmc/runtime/scheduler.h`
 - **Implementation**: `src/runtime/core/flow_match_euler_scheduler.cpp`
 
 Diffusion noise scheduler interface. HF equivalent: `SchedulerMixin` / `FlowMatchEulerDiscreteScheduler`. Provides:
@@ -463,7 +463,7 @@ One concrete implementation: `FlowMatchEulerScheduler` (used by FLUX, Wan, Z-Ima
 
 ### 8.5 ITokenizer
 
-- **Header**: `include/trtf/tokenizer.h`
+- **Header**: `include/trtmc/tokenizer.h`
 - **Implementations**: `src/tokenizer/`
 
 Five concrete implementations (all native C++, no Python subprocess dependency):
@@ -476,7 +476,7 @@ Five concrete implementations (all native C++, no Python subprocess dependency):
 | `UnigramTokenizer` | `unigram_tokenizer.cpp` | Native Unigram tokenizer (parses HF `tokenizer.json`) |
 | `IpaTokenizer` | `ipa_tokenizer.cpp` | Phoneme tokenizer for MagpieTTS |
 
-All implementations live in `src/tokenizer/`. The public API is `trtf/tokenizer.h`, which exports factory functions `CreateVocabTokenizer()`, `CreateBpeTokenizer()`, `CreateWordPieceTokenizer()`, `CreateUnigramTokenizer()`, and `CreateIpaTokenizer()`. Plugin helpers in `plugin_helpers.h` provide `create_tokenizer_from_bundle()` which auto-detects the tokenizer type from the bundle's `tokenizer.json` section, trying BPE, WordPiece, and Unigram in order.
+All implementations live in `src/tokenizer/`. The public API is `trtmc/tokenizer.h`, which exports factory functions `CreateVocabTokenizer()`, `CreateBpeTokenizer()`, `CreateWordPieceTokenizer()`, `CreateUnigramTokenizer()`, and `CreateIpaTokenizer()`. Plugin helpers in `plugin_helpers.h` provide `create_tokenizer_from_bundle()` which auto-detects the tokenizer type from the bundle's `tokenizer.json` section, trying BPE, WordPiece, and Unigram in order.
 
 ---
 
@@ -500,11 +500,11 @@ Backend executor code lives in `src/runtime/core/` and `src/runtime/domains/` or
 
 ### 10.1 (Resolved) FastPathModelConfig God Struct
 
-The former `FastPathModelConfig` monolithic struct has been replaced by `BaseConfig` (~14 universal fields) in `include/trtf/runtime/pipeline_plugin.h`. Each plugin now parses its own strategy-specific fields directly from the raw JSON config, keeping plugin-specific knowledge localized. This item is resolved.
+The former `FastPathModelConfig` monolithic struct has been replaced by `BaseConfig` (~14 universal fields) in `include/trtmc/runtime/pipeline_plugin.h`. Each plugin now parses its own strategy-specific fields directly from the raw JSON config, keeping plugin-specific knowledge localized. This item is resolved.
 
 ### 10.2 (Resolved) Centralized Pipeline Factory
 
-The former centralized `pipeline_factory.cpp` (~700 LOC) has been replaced by a registry-based dispatch (`src/runtime/registry/pipeline_factory.cpp`, ~124 LOC). Each strategy plugin exposes a registrar function listed in `cmake/trtf_pipeline_plugins.cmake`; the generated registrar source calls those functions explicitly. Adding a new strategy requires a new `.cpp` file and one manifest entry -- no edits to the factory or any central dispatch logic. This item is resolved.
+The former centralized `pipeline_factory.cpp` (~700 LOC) has been replaced by a registry-based dispatch (`src/runtime/registry/pipeline_factory.cpp`, ~124 LOC). Each strategy plugin exposes a registrar function listed in `cmake/trtmc_pipeline_plugins.cmake`; the generated registrar source calls those functions explicitly. Adding a new strategy requires a new `.cpp` file and one manifest entry -- no edits to the factory or any central dispatch logic. This item is resolved.
 
 ### 10.3 Legacy Audio Backends
 
@@ -547,40 +547,40 @@ All paths below are relative to the repository root and have been verified to ex
 ### Python Builder
 | Path | Purpose |
 |------|---------|
-| `trtf_build/trtf_build/engine_builder.py` | Build orchestrator |
-| `trtf_build/trtf_build/config.py` | HF config.json parser |
-| `trtf_build/trtf_build/checkpoint_mapper.py` | Safetensors weight loader |
-| `trtf_build/trtf_build/bundle_writer.py` | Bundle file writer |
-| `trtf_build/trtf_build/graph_ops.py` | Atomic TRT graph ops |
-| `trtf_build/trtf_build/graph_blocks.py` | Composable graph blocks |
-| `trtf_build/trtf_build/standard_decoder_builder.py` | Standard decoder engine builder |
-| `trtf_build/trtf_build/debug_runner.py` | Python TRT inference runners (decoder, Mamba, VL) |
-| `trtf_build/trtf_build/diffusion_runner.py` | Python TRT diffusion runner |
-| `trtf_build/trtf_build/pipeline.py` | Subprocess wrapper around C++ trtf binary |
-| `trtf_build/trtf_build/schedulers/` | Python diffusion schedulers (flow_match_euler) |
-| `trtf_build/trtf_build/families/__init__.py` | Plugin auto-discovery |
-| `trtf_build/trtf_build/families/base.py` | FamilyPlugin protocol |
-| `trtf_build/trtf_build/cli.py` | CLI entry point |
+| `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` | Build orchestrator |
+| `tensorrt_model_connect/tensorrt_model_connect/config.py` | HF config.json parser |
+| `tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py` | Safetensors weight loader |
+| `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` | Bundle file writer |
+| `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` | Atomic TRT graph ops |
+| `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` | Composable graph blocks |
+| `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` | Standard decoder engine builder |
+| `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` | Python TRT inference runners (decoder, Mamba, VL) |
+| `tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py` | Python TRT diffusion runner |
+| `tensorrt_model_connect/tensorrt_model_connect/pipeline.py` | Subprocess wrapper around C++ trtmc binary |
+| `tensorrt_model_connect/tensorrt_model_connect/schedulers/` | Python diffusion schedulers (flow_match_euler) |
+| `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` | Plugin auto-discovery |
+| `tensorrt_model_connect/tensorrt_model_connect/families/base.py` | FamilyPlugin protocol |
+| `tensorrt_model_connect/tensorrt_model_connect/cli.py` | CLI entry point |
 
 ### C++ Runtime -- Public API
 | Path | Purpose |
 |------|---------|
-| `include/trtf/pipeline.h` | IPipeline interface, result types, C ABI |
-| `include/trtf/bundle.h` | BundleInfo, InspectBundle |
-| `include/trtf/tokenizer.h` | ITokenizer interface |
-| `include/trtf/runtime/trt_module.h` | TrtModule abstraction |
-| `include/trtf/runtime/kv_cache.h` | KvCache state manager |
-| `include/trtf/runtime/recurrent_state.h` | RecurrentState manager |
-| `include/trtf/runtime/scheduler.h` | IScheduler interface, FlowMatchEulerScheduler |
-| `include/trtf/runtime/tensor.h` | Tensor, TensorMap, TensorInfo types |
-| `include/trtf/runtime/device_tensor.h` | DeviceTensor, DeviceTensorMap types |
-| `include/trtf/runtime/pipeline_factory.h` | PipelineFactory |
-| `include/trtf/runtime/pipeline_registry.h` | PipelineRegistry singleton, manifest registration macro |
-| `include/trtf/runtime/pipeline_plugin.h` | IPipelinePlugin interface, BaseConfig, PipelineContext |
-| `include/trtf/runtime/tokenizer_interface.h` | ITokenizer abstract interface (re-exported by `tokenizer.h`) |
-| `include/trtf/runtime/domains/audio/speech_decode_stop_policy.h` | Speech decode stop policy for audio pipelines |
-| `include/trtf/runtime/domains/audio/subprocess_runner.h` | Subprocess runner utility for tokenizer bridge |
-| `include/trtf/runtime/domains/multimodal/image_transform_helper.h` | Image transformation utilities for VL preprocessing |
+| `include/trtmc/pipeline.h` | IPipeline interface, result types, C ABI |
+| `include/trtmc/bundle.h` | BundleInfo, InspectBundle |
+| `include/trtmc/tokenizer.h` | ITokenizer interface |
+| `include/trtmc/runtime/trt_module.h` | TrtModule abstraction |
+| `include/trtmc/runtime/kv_cache.h` | KvCache state manager |
+| `include/trtmc/runtime/recurrent_state.h` | RecurrentState manager |
+| `include/trtmc/runtime/scheduler.h` | IScheduler interface, FlowMatchEulerScheduler |
+| `include/trtmc/runtime/tensor.h` | Tensor, TensorMap, TensorInfo types |
+| `include/trtmc/runtime/device_tensor.h` | DeviceTensor, DeviceTensorMap types |
+| `include/trtmc/runtime/pipeline_factory.h` | PipelineFactory |
+| `include/trtmc/runtime/pipeline_registry.h` | PipelineRegistry singleton, manifest registration macro |
+| `include/trtmc/runtime/pipeline_plugin.h` | IPipelinePlugin interface, BaseConfig, PipelineContext |
+| `include/trtmc/runtime/tokenizer_interface.h` | ITokenizer abstract interface (re-exported by `tokenizer.h`) |
+| `include/trtmc/runtime/domains/audio/speech_decode_stop_policy.h` | Speech decode stop policy for audio pipelines |
+| `include/trtmc/runtime/domains/audio/subprocess_runner.h` | Subprocess runner utility for tokenizer bridge |
+| `include/trtmc/runtime/domains/multimodal/image_transform_helper.h` | Image transformation utilities for VL preprocessing |
 
 ### C++ Runtime -- Registry and Plugins
 | Path | Purpose |
@@ -607,13 +607,13 @@ All paths below are relative to the repository root and have been verified to ex
 | `src/runtime/plugins/flux_plugin.cpp` | diffusion_flux |
 | `src/runtime/plugins/wan_plugin.cpp` | diffusion_wan, diffusion_pixart |
 | `src/runtime/plugins/zimage_plugin.cpp` | diffusion_zimage |
-| `cmake/trtf_pipeline_plugins.cmake` | Plugin source/anchor manifest |
+| `cmake/trtmc_pipeline_plugins.cmake` | Plugin source/anchor manifest |
 | `src/runtime/plugins/shared/plugin_helpers.h` | Shared plugin helpers (TrtModule loading, tokenizer, KV) |
 
 ### C++ Runtime -- Implementation
 | Path | Purpose |
 |------|---------|
-| `src/cabi/api/trtf_c.cpp` | C ABI entry point |
+| `src/cabi/api/trtmc_c.cpp` | C ABI entry point |
 | `src/bundle/bundle_format.h` | Bundle magic, section types |
 | `src/bundle/bundle_format.cpp` | Bundle reader |
 | `src/bundle/bundle_view.h` | find_section(), find_sections_by_prefix() |

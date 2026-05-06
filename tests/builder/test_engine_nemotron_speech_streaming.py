@@ -7,9 +7,9 @@ import json
 import pytest
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.test_family_plugins import TestCanaryPlugin
 
@@ -30,7 +30,7 @@ class TestNemotronSpeechStreamingPlugin:
         except ImportError:
             pytest.skip("torch required for synthetic NeMo archive test")
 
-        from trtf_build.families.nemotron_speech_streaming import plugin
+        from tensorrt_model_connect.families.nemotron_speech_streaming import plugin
 
         sd = TestCanaryPlugin._make_nemo_state_dict(
             self.VOCAB,

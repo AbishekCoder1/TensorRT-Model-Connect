@@ -11,14 +11,14 @@ Monitor all open non-draft GitLab MRs, detect CI failures, diagnose root causes 
 
 ## Environment
 
-- **Workspace:** `/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp`
-- **Container:** `trtf-dev-gb300-agent-1`
-- **GitLab project:** `yifeif/trt-transformers` on `gitlab-master.nvidia.com`
-- **Project slug (URL-encoded):** `yifeif%2Ftrt-transformers`
+- **Workspace:** `/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect`
+- **Container:** `trtmc-dev-gb300-agent-1`
+- **GitLab project:** `yifeif/tensorrt-model-connect` on `gitlab-master.nvidia.com`
+- **Project slug (URL-encoded):** `yifeif%2Ftensorrt-model-connect`
 
 Ensure the container is running before any build/test commands:
 ```bash
-docker start trtf-dev-gb300-agent-1 2>/dev/null
+docker start trtmc-dev-gb300-agent-1 2>/dev/null
 ```
 
 ## Workflow
@@ -66,7 +66,7 @@ Use a single script that fetches everything in one pass. Write a helper script t
 """Fetch all open non-draft MRs with pipeline status and behind-master count."""
 import json, subprocess, sys
 
-PROJECT = "yifeif%2Ftrt-transformers"
+PROJECT = "yifeif%2Ftensorrt-model-connect"
 
 def api(path):
     r = subprocess.run(
@@ -141,7 +141,7 @@ For each MR in the queue:
 #### 3a. Stash and checkout
 
 ```bash
-cd /workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp
+cd /workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect
 git stash --include-untracked
 git fetch origin
 git checkout {branch}
@@ -192,14 +192,14 @@ Do NOT just push a rebase and wait — always diagnose+fix now.
 ##### Step 1: Identify which jobs failed
 
 ```bash
-glab api "projects/yifeif%2Ftrt-transformers/pipelines/{pipeline_id}/jobs"
+glab api "projects/yifeif%2Ftensorrt-model-connect/pipelines/{pipeline_id}/jobs"
 ```
 
 ##### Step 2: Get failure details
 
 For **build failures** — read the job log:
 ```bash
-glab api "projects/yifeif%2Ftrt-transformers/jobs/{job_id}/trace"
+glab api "projects/yifeif%2Ftensorrt-model-connect/jobs/{job_id}/trace"
 ```
 Read the last 100-200 lines. Look for the actual `error:` line (ignore stb/third-party warnings).
 
@@ -209,7 +209,7 @@ TOKEN=$(glab auth status -t 2>&1 | awk '/Token found:/{print $NF}')
 ARTIFACT_DIR=".ci_artifacts/mr{iid}"
 mkdir -p "$ARTIFACT_DIR"
 curl -s --header "PRIVATE-TOKEN: $TOKEN" \
-  "https://gitlab-master.nvidia.com/api/v4/projects/yifeif%2Ftrt-transformers/jobs/{job_id}/artifacts" \
+  "https://gitlab-master.nvidia.com/api/v4/projects/yifeif%2Ftensorrt-model-connect/jobs/{job_id}/artifacts" \
   -o "$ARTIFACT_DIR/artifacts.zip"
 unzip -o -q "$ARTIFACT_DIR/artifacts.zip" -d "$ARTIFACT_DIR/extracted"
 ```
@@ -240,7 +240,7 @@ For **unit test / other job failures** — read the job log trace.
 For E2E failures, compare against master's latest successful pipeline:
 ```bash
 # Get master's latest successful E2E job
-glab api "projects/yifeif%2Ftrt-transformers/pipelines?ref=master&per_page=1&status=success"
+glab api "projects/yifeif%2Ftensorrt-model-connect/pipelines?ref=master&per_page=1&status=success"
 # Download its artifacts and check the same failing models
 ```
 
@@ -268,7 +268,7 @@ Now decide what code changes are needed:
 ##### Step 5: Fix the code
 
 Based on the diagnosis:
-- **Family plugin weight mapping error:** Fix `trtf_build/trtf_build/families/{family}.py`
+- **Family plugin weight mapping error:** Fix `tensorrt_model_connect/tensorrt_model_connect/families/{family}.py`
 - **Runtime crash in a pipeline touched by MR:** Read the MR's diff for the affected
   pipeline. Look for buffer size mismatches, null pointer issues, incorrect tensor
   shapes/dtypes, missing engine bindings, or CUDA synchronization errors.
@@ -276,20 +276,20 @@ Based on the diagnosis:
   (only if values are very close to threshold AND the model also nearly-fails on master)
 - **C++ compilation error:** Fix the relevant source in `src/`
 - **Test code error:** Fix the test
-- **Missing registration:** Check `cmake/trtf_pipeline_plugins.cmake` and the plugin's registration macro
+- **Missing registration:** Check `cmake/trtmc_pipeline_plugins.cmake` and the plugin's registration macro
 
 ##### Step 6: Validate locally before pushing (Tier 1)
 
 ```bash
 # Python unit tests
-docker exec trtf-dev-gb300-agent-1 /opt/venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
+docker exec trtmc-dev-gb300-agent-1 /opt/venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py
 
 # C++ unit tests (if C++ changed, rebuild first)
-docker exec trtf-dev-gb300-agent-1 cmake --build build -j
-docker exec trtf-dev-gb300-agent-1 ctest --test-dir build --output-on-failure
+docker exec trtmc-dev-gb300-agent-1 cmake --build build -j
+docker exec trtmc-dev-gb300-agent-1 ctest --test-dir build --output-on-failure
 
 # Cyclomatic complexity (if C++ changed)
-docker exec trtf-dev-gb300-agent-1 python tools/check_cyclomatic_complexity.py src --max-ccn 10
+docker exec trtmc-dev-gb300-agent-1 python tools/check_cyclomatic_complexity.py src --max-ccn 10
 ```
 
 ##### Step 7: Commit and push
@@ -347,7 +347,7 @@ Use these action labels:
 ## Important Rules
 
 - **NEVER hardcode MR IIDs.** Always dynamically discover ALL open MRs via the API every cycle. MRs are created, closed, and un-drafted between cycles.
-- ALL build/test commands go through `docker exec trtf-dev-gb300-agent-1`
+- ALL build/test commands go through `docker exec trtmc-dev-gb300-agent-1`
 - Never force push to master
 - Use `--force-with-lease` (not `--force`) when pushing rebases
 - Do NOT modify unrelated code on other MR branches

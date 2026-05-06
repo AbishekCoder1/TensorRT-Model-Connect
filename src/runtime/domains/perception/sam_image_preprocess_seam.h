@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct SamImageEncodePlan {
     std::vector<float> pixel_values;
@@ -88,4 +88,4 @@ build_sam_image_encode_plan(const runtime::adapters::io::DecodedImage& image,
     return plan;
 }
 
-} // namespace trtf
+} // namespace trtmc

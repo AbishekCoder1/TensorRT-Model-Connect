@@ -5,7 +5,7 @@
 // Architecture:   ARCH-MULTI-001
 // Unit Design:    UD-IO-01
 // Intent:         read_image: valid BMP load, pixel normalisation, failure paths
-// Preconditions:  Writable temp directory; stb_image compiled into trtf_core
+// Preconditions:  Writable temp directory; stb_image compiled into trtmc_core
 // Postconditions: Pixel values are normalised to [0,1]; empty result returned
 //                 on decode failure or missing file
 // =============================================================================
@@ -13,7 +13,7 @@
 // test_image_reader.cpp — Unit tests for src/utils/image_reader.cpp
 //
 // Purpose:
-//   Validates read_image() from trtf::io: load an image file and return
+//   Validates read_image() from trtmc::io: load an image file and return
 //   float32 RGB pixels normalised to [0, 1] in HWC layout.
 //
 //   Tests create minimal BMP files in-process (no external assets needed)
@@ -22,11 +22,11 @@
 //   to return an empty LoadedImage without throwing.
 //
 // Dependencies:
-//   - trtf/trtf_io.hpp : trtf::io::read_image, trtf::io::LoadedImage
+//   - trtmc/trtmc_io.hpp : trtmc::io::read_image, trtmc::io::LoadedImage
 //   - test_helpers.h   : TempDirGuard
 //   No TRT, GPU, or CUDA required.
 
-#include "trtf/trtf_io.hpp"
+#include "trtmc/trtmc_io.hpp"
 #include "test_helpers.h"
 
 #include <cmath>
@@ -106,11 +106,11 @@ static void write_bmp_2x1(const std::string& path,
 // Postconditions: LoadedImage has width=2, height=1, pixels.size()==6
 static bool test_read_image_dimensions()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = (std::filesystem::path(dir.path()) / "dims.bmp").string();
     write_bmp_2x1(path, 255, 0, 0, 0, 255, 0);
 
-    const auto img = trtf::io::read_image(path);
+    const auto img = trtmc::io::read_image(path);
     if (img.empty())
     {
         std::cerr << "read_image_dimensions: returned empty\n";
@@ -135,12 +135,12 @@ static bool test_read_image_dimensions()
 // Postconditions: pixels[0] ≈ 1.0, pixels[1] ≈ 0.0, pixels[2] ≈ 0.0
 static bool test_read_image_pixel_normalisation()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = (std::filesystem::path(dir.path()) / "norm.bmp").string();
     // Pixel 0 = red (R=255, G=0, B=0); Pixel 1 = green (R=0, G=255, B=0)
     write_bmp_2x1(path, 255, 0, 0, 0, 255, 0);
 
-    const auto img = trtf::io::read_image(path);
+    const auto img = trtmc::io::read_image(path);
     if (img.empty()) return false;
 
     // Pixel 0: R channel should be ~1.0
@@ -170,10 +170,10 @@ static bool test_read_image_pixel_normalisation()
 static bool test_read_image_missing_file_returns_empty()
 {
     bool threw = false;
-    trtf::io::LoadedImage img;
+    trtmc::io::LoadedImage img;
     try
     {
-        img = trtf::io::read_image("/nonexistent/path/to/image.bmp");
+        img = trtmc::io::read_image("/nonexistent/path/to/image.bmp");
     }
     catch (...) { threw = true; }
 
@@ -187,17 +187,17 @@ static bool test_read_image_missing_file_returns_empty()
 // Postconditions: result.empty() == true
 static bool test_read_image_invalid_content_returns_empty()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = (std::filesystem::path(dir.path()) / "bad.bmp").string();
     {
         std::ofstream f(path, std::ios::binary);
         f.write("NOT_AN_IMAGE_FILE", 17);
     }
 
-    trtf::io::LoadedImage img;
+    trtmc::io::LoadedImage img;
     try
     {
-        img = trtf::io::read_image(path);
+        img = trtmc::io::read_image(path);
     }
     catch (...) {}
 
@@ -210,12 +210,12 @@ static bool test_read_image_invalid_content_returns_empty()
 // Postconditions: h==1, w==2, pixel vector size==6
 static bool test_decode_image_legacy_wrapper()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = (std::filesystem::path(dir.path()) / "legacy.bmp").string();
     write_bmp_2x1(path, 128, 64, 32, 32, 64, 128);
 
     int h = 0, w = 0;
-    const auto pixels = trtf::io::decode_image(path, h, w);
+    const auto pixels = trtmc::io::decode_image(path, h, w);
 
     return h == 1 && w == 2 && pixels.size() == 6;
 }

@@ -6,11 +6,11 @@
 #include "runtime/core/trt_common.h"
 #include "runtime/domains/audio/audio_configs.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/inference_state.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/inference_state.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class MagpiePipeline final : public IPipeline {
   public:
@@ -254,4 +254,4 @@ class MagpiePipeline final : public IPipeline {
     int32_t text_length_{0};
 };
 
-} // namespace trtf
+} // namespace trtmc

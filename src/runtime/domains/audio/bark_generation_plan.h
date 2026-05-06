@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct BarkCoarsePlan {
     std::vector<int32_t> remapped_semantic;
@@ -181,4 +181,4 @@ inline std::vector<int32_t> make_bark_codec_input_codes(const std::vector<int32_
     return input_codes;
 }
 
-} // namespace trtf
+} // namespace trtmc

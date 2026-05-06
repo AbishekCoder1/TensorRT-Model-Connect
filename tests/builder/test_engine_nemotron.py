@@ -19,7 +19,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-NEMOTRON-01
 Intent: Validate the Nemotron-4 family plugin weight loading including LayerNorm1P gamma offset, 2-projection MLP with squared ReLU, partial RoPE, and LayerNorm biases.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: Norm gamma weights are offset by +1.0, fc1/fc2 MLP keys map correctly, norm biases are loaded, and partial RoPE config is parsed.
 """
 
@@ -34,9 +34,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -52,7 +52,7 @@ class NemotronPluginTester(FamilyPluginTester):
       - Partial RoPE (partial_rotary_factor = 0.5)
     """
 
-    plugin_module = "trtf_build.families.nemotron"
+    plugin_module = "tensorrt_model_connect.families.nemotron"
     model_type = "nemotron"
 
     def get_config_dict(self) -> dict:

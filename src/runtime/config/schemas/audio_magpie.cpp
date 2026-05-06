@@ -1,13 +1,13 @@
 // Registration for the "audio_magpie" namespace schema.
-// Mirrors trtf_build/trtf_build/runtime_config/schemas/audio_magpie.py.
+// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/audio_magpie.py.
 
-#include "trtf/config/schemas/audio_magpie.h"
+#include "trtmc/config/schemas/audio_magpie.h"
 
 #include <any>
 #include <cstdint>
 #include <set>
 
-namespace trtf::config::schemas {
+namespace trtmc::config::schemas {
 
 namespace {
 bool is_nonneg_float(const std::any& v) {
@@ -43,4 +43,4 @@ Schema make_audio_magpie_schema() {
 
 REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_audio_magpie_schema,
                                              make_audio_magpie_schema);
-} // namespace trtf::config::schemas
+} // namespace trtmc::config::schemas

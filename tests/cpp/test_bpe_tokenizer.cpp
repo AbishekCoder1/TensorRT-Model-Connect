@@ -10,7 +10,7 @@
 // handled correctly
 // =============================================================================
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <iostream>
 #include <string>
@@ -264,13 +264,13 @@ int main() {
     {
         std::cerr << "=== Factory & JSON Parsing ===\n";
 
-        auto tok = trtf::CreateBpeTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
         check(tok != nullptr, "create_from_valid_json");
 
         // Invalid JSON
         bool threw = false;
         try {
-            trtf::CreateBpeTokenizer("not json", 8, false);
+            trtmc::CreateBpeTokenizer("not json", 8, false);
         } catch (const std::exception&) {
             threw = true;
         }
@@ -280,7 +280,7 @@ int main() {
         threw = false;
         std::string not_bpe = R"({"model":{"type":"WordPiece","vocab":{},"merges":[]}})";
         try {
-            trtf::CreateBpeTokenizer(not_bpe.data(), not_bpe.size(), false);
+            trtmc::CreateBpeTokenizer(not_bpe.data(), not_bpe.size(), false);
         } catch (const std::exception&) {
             threw = true;
         }
@@ -291,7 +291,7 @@ int main() {
     {
         std::cerr << "\n=== Token/ID Lookup ===\n";
 
-        auto tok = trtf::CreateBpeTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
 
         check(tok->id_for_token("h") == 0, "id_for_token_h");
         check(tok->id_for_token("hello") == 8, "id_for_token_hello");
@@ -307,7 +307,7 @@ int main() {
     {
         std::cerr << "\n=== Added Tokens ===\n";
 
-        auto tok = trtf::CreateBpeTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
 
         check(tok->id_for_token("<eos>") == 19, "added_token_eos");
         check(tok->id_for_token("<pad>") == 20, "added_token_pad");
@@ -319,7 +319,7 @@ int main() {
     {
         std::cerr << "\n=== Encode ===\n";
 
-        auto tok = trtf::CreateBpeTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
 
         // "hello" → h,e,l,l,o → he,l,l,o → he,ll,o → [he(4), ll(5), o(3)]
         auto ids = tok->encode("hello");
@@ -337,7 +337,7 @@ int main() {
     {
         std::cerr << "\n=== Decode ===\n";
 
-        auto tok = trtf::CreateBpeTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
 
         check(tok->decode({}).empty(), "decode_empty");
         check(tok->decode({8}) == "hello", "decode_hello");
@@ -353,7 +353,7 @@ int main() {
     {
         std::cerr << "\n=== Round-trip ===\n";
 
-        auto tok = trtf::CreateBpeTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
 
         auto rt = [&](const std::string& text, const std::string& label) {
             auto decoded = tok->decode(tok->encode(text));
@@ -369,8 +369,8 @@ int main() {
     {
         std::cerr << "\n=== add_special_tokens behavior ===\n";
 
-        auto tok_no = trtf::CreateBpeTokenizer(json.data(), json.size(), false);
-        auto tok_yes = trtf::CreateBpeTokenizer(json.data(), json.size(), true);
+        auto tok_no = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
+        auto tok_yes = trtmc::CreateBpeTokenizer(json.data(), json.size(), true);
 
         auto ids_no = tok_no->encode("hello");
         auto ids_yes = tok_yes->encode("hello");
@@ -382,7 +382,7 @@ int main() {
         std::cerr << "\n=== String Merge Format ===\n";
 
         std::string sj(kStringMergesJson);
-        auto tok = trtf::CreateBpeTokenizer(sj.data(), sj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(sj.data(), sj.size(), false);
         check(tok != nullptr, "string_merges_create");
 
         // Should produce identical encoding as array format
@@ -400,7 +400,7 @@ int main() {
         std::cerr << "\n=== GPT-2 Pre-tokenizer Config ===\n";
 
         std::string gj(kGpt2StyleJson);
-        auto tok = trtf::CreateBpeTokenizer(gj.data(), gj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(gj.data(), gj.size(), false);
         check(tok != nullptr, "gpt2_style_create");
 
         auto ids = tok->encode("hello");
@@ -416,7 +416,7 @@ int main() {
         std::cerr << "\n=== Qwen3 Pre-tokenizer Config ===\n";
 
         std::string qj(kQwen3StyleJson);
-        auto tok = trtf::CreateBpeTokenizer(qj.data(), qj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(qj.data(), qj.size(), false);
         check(tok != nullptr, "qwen3_style_create");
 
         auto ids = tok->encode("hello");
@@ -432,7 +432,7 @@ int main() {
         std::cerr << "\n=== LLaMA Style Special Tokens ===\n";
 
         std::string lj(kLlamaStyleJson);
-        auto tok = trtf::CreateBpeTokenizer(lj.data(), lj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(lj.data(), lj.size(), false);
         check(tok != nullptr, "llama_style_create");
 
         check(tok->id_for_token("<|begin_of_text|>") == 9, "llama_bos_token");
@@ -466,7 +466,7 @@ int main() {
           "added_tokens": []
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(opt_json.data(), opt_json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(opt_json.data(), opt_json.size(), false);
         check(tok != nullptr, "merge_all_create");
 
         // "llll" → l,l,l,l → (merge l+l all) → ll,ll → (merge ll+ll) → llll
@@ -483,7 +483,7 @@ int main() {
         std::cerr << "\n=== Pre-tokenizer: Contraction Splitting ===\n";
 
         std::string bj(kBoundaryTestJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "don't" → pre-tokenize ["don", "'t"]
         //   "don": d,o,n → no applicable merges → [3,9,8]
@@ -527,7 +527,7 @@ int main() {
         std::cerr << "\n=== Pre-tokenizer: Word Boundary ===\n";
 
         std::string bj(kBoundaryTestJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "o b" → pre-tokenize ["o", " b"]
         //   "o": o → [9]
@@ -551,7 +551,7 @@ int main() {
         std::cerr << "\n=== Pre-tokenizer: Digit Boundary ===\n";
 
         std::string bj(kBoundaryTestJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "c123" → pre-tokenize ["c", "123"]
         //   "c": c → [2]
@@ -575,7 +575,7 @@ int main() {
         std::cerr << "\n=== Pre-tokenizer: Punctuation Boundary ===\n";
 
         std::string bj(kBoundaryTestJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "o!" → pre-tokenize ["o", "!"]
         //   "o": o → [9]
@@ -598,7 +598,7 @@ int main() {
         std::cerr << "\n=== Pre-tokenizer: Whitespace Runs ===\n";
 
         std::string bj(kBoundaryTestJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "a  b" → pre-tokenize ["a", " ", " b"]
         //   GPT-2 regex: \s+(?!\S) leaves last space for next token
@@ -625,7 +625,7 @@ int main() {
         std::cerr << "\n=== Pre-tokenizer: Within-Boundary Merges ===\n";
 
         std::string bj(kBoundaryTestJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "hello" → pre-tokenize ["hello"]
         //   byte: h,e,l,l,o → merge h+e → he,l,l,o → [20,6,6,9]
@@ -678,7 +678,7 @@ int main() {
           }
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(bloom_json.data(), bloom_json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bloom_json.data(), bloom_json.size(), false);
         check(tok != nullptr, "bloom_create");
 
         // "hello!" → BLOOM splits: ["hello", "!"]
@@ -748,7 +748,7 @@ int main() {
           }
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(meta_json.data(), meta_json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(meta_json.data(), meta_json.size(), false);
         check(tok != nullptr, "metaspace_create");
 
         // "hello" → chars: h,e,l,l,o
@@ -847,7 +847,7 @@ int main() {
           ]
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(added_json.data(), added_json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(added_json.data(), added_json.size(), false);
         check(tok != nullptr, "added_tokens_create");
 
         // "he  ll" → added token "  " (id=16) splits the text:
@@ -904,7 +904,7 @@ int main() {
 
         bool threw = false;
         try {
-            trtf::CreateBpeTokenizer(unknown_json.data(), unknown_json.size(), false);
+            trtmc::CreateBpeTokenizer(unknown_json.data(), unknown_json.size(), false);
         } catch (const std::exception& e) {
             threw = true;
             std::string msg = e.what();
@@ -929,7 +929,7 @@ int main() {
 
         // This should default to GPT-2, not throw (unrecognized regex → fallback)
         auto tok =
-            trtf::CreateBpeTokenizer(unknown_regex_json.data(), unknown_regex_json.size(), false);
+            trtmc::CreateBpeTokenizer(unknown_regex_json.data(), unknown_regex_json.size(), false);
         check(tok != nullptr, "unknown_regex_falls_back_to_gpt2");
     }
 
@@ -953,7 +953,7 @@ int main() {
           }
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(meta_json.data(), meta_json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(meta_json.data(), meta_json.size(), false);
 
         // decode empty
         check(tok->decode({}).empty(), "metaspace_decode_empty");
@@ -975,7 +975,7 @@ int main() {
         std::string no_vocab = R"({"model":{"type":"BPE","merges":[]}})";
         bool threw = false;
         try {
-            trtf::CreateBpeTokenizer(no_vocab.data(), no_vocab.size(), false);
+            trtmc::CreateBpeTokenizer(no_vocab.data(), no_vocab.size(), false);
         } catch (const std::exception&) {
             threw = true;
         }
@@ -984,7 +984,7 @@ int main() {
         std::string no_merges = R"({"model":{"type":"BPE","vocab":{"a":0}}})";
         threw = false;
         try {
-            trtf::CreateBpeTokenizer(no_merges.data(), no_merges.size(), false);
+            trtmc::CreateBpeTokenizer(no_merges.data(), no_merges.size(), false);
         } catch (const std::exception&) {
             threw = true;
         }
@@ -1005,7 +1005,7 @@ int main() {
           "pre_tokenizer": null
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(null_pt_json.data(), null_pt_json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(null_pt_json.data(), null_pt_json.size(), false);
         check(tok != nullptr, "null_pretok_create");
         // "he" → entire text as one chunk → byte_encode → h,e → merge → he → [4]
         auto ids = tok->encode("he");
@@ -1017,7 +1017,7 @@ int main() {
         std::cerr << "\n=== Contractions re/ve/ll ===\n";
 
         std::string bj(kBoundaryTestJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "we're" → pre-tokenize ["we", "'re"]
         //   "we" → w,e → [12,4]
@@ -1050,7 +1050,7 @@ int main() {
         std::cerr << "\n=== Non-contraction Apostrophe ===\n";
 
         std::string bj(kBoundaryTestJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "a'b" → pre-tokenize: "a" (letter), "'" (other, not contraction), "b" (letter)
         // The apostrophe is NOT followed by s/t/m/d/re/ve/ll → treated as punctuation
@@ -1093,7 +1093,7 @@ int main() {
           }
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(q_json.data(), q_json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(q_json.data(), q_json.size(), false);
         check(tok != nullptr, "qwen3_trailing_nl_create");
 
         // "!\n" with Qwen3: pre-tokenize as one chunk "!\n" (! is other, \n absorbed)
@@ -1139,7 +1139,7 @@ int main() {
           }
         })";
         auto tok_double =
-            trtf::CreateBpeTokenizer(q_double_nl_json.data(), q_double_nl_json.size(), false);
+            trtmc::CreateBpeTokenizer(q_double_nl_json.data(), q_double_nl_json.size(), false);
         check(tok_double != nullptr, "qwen3_double_nl_create");
         {
             auto ids = tok_double->encode(".\n\n");
@@ -1152,7 +1152,7 @@ int main() {
         std::cerr << "\n=== Digit Run Without Prefix ===\n";
 
         std::string bj(kBoundaryTestJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "123" (no leading space) → pre-tokenize ["123"] (GPT-2: \p{N}+)
         //   byte-encode: 1,2,3 → [14,15,16]
@@ -1177,7 +1177,7 @@ int main() {
             ]
           }
         })";
-        auto tok_q = trtf::CreateBpeTokenizer(q_digit_json.data(), q_digit_json.size(), false);
+        auto tok_q = trtmc::CreateBpeTokenizer(q_digit_json.data(), q_digit_json.size(), false);
         {
             auto ids = tok_q->encode("123");
             // Qwen3: each digit is a separate pre-tokenized chunk → "1","2","3"
@@ -1218,7 +1218,7 @@ int main() {
           }
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(bloom_json.data(), bloom_json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bloom_json.data(), bloom_json.size(), false);
 
         // "hello  world" → BLOOM: ["hello", " ", " world"]
         //   (leave-last-space rule applies to BLOOM whitespace too)
@@ -1240,7 +1240,7 @@ int main() {
         std::cerr << "\n=== Newline Handling ===\n";
 
         std::string bj(kBoundaryTestJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
 
         // "a\nb" → GPT-2: \n is whitespace, byte-encoded to non-ASCII char
         // The boundary test vocab doesn't have the byte-encoded newline token,
@@ -1268,7 +1268,7 @@ int main() {
             ]
           }
         })";
-        auto tok_q = trtf::CreateBpeTokenizer(q_nl_json.data(), q_nl_json.size(), false);
+        auto tok_q = trtmc::CreateBpeTokenizer(q_nl_json.data(), q_nl_json.size(), false);
         {
             auto ids = tok_q->encode("a\nb");
             // Qwen3: "a" (letter), "\n" (newline sequence), "b" (letter)
@@ -1322,7 +1322,7 @@ int main() {
         })";
 
         std::string sj(kSeqDecoderJson);
-        auto tok = trtf::CreateBpeTokenizer(sj.data(), sj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(sj.data(), sj.size(), false);
         check(tok != nullptr, "seq_decoder_create");
 
         // Decode: ▁hello ▁world → " hello world" → strip → "hello world"
@@ -1402,7 +1402,7 @@ int main() {
         })";
 
         std::string bj(kExplicitByteLevelJson);
-        auto tok = trtf::CreateBpeTokenizer(bj.data(), bj.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(bj.data(), bj.size(), false);
         check(tok != nullptr, "explicit_bytelevel_decoder_create");
 
         auto text = tok->decode({7, 11});
@@ -1454,7 +1454,7 @@ int main() {
         })";
 
         // With add_special_tokens=true: BOS should be prepended
-        auto tok_sp = trtf::CreateBpeTokenizer(seq_pp_json.data(), seq_pp_json.size(), true);
+        auto tok_sp = trtmc::CreateBpeTokenizer(seq_pp_json.data(), seq_pp_json.size(), true);
         check(tok_sp != nullptr, "seq_pp_create_with_special");
         {
             auto ids = tok_sp->encode("hello");
@@ -1462,7 +1462,7 @@ int main() {
         }
 
         // With add_special_tokens=false: no BOS
-        auto tok_no_sp = trtf::CreateBpeTokenizer(seq_pp_json.data(), seq_pp_json.size(), false);
+        auto tok_no_sp = trtmc::CreateBpeTokenizer(seq_pp_json.data(), seq_pp_json.size(), false);
         {
             auto ids = tok_no_sp->encode("hello");
             check(!ids.empty() && ids[0] != 100, "seq_pp_no_bos_without_special");
@@ -1512,7 +1512,7 @@ int main() {
           }
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(multi_bos_json.data(), multi_bos_json.size(), true);
+        auto tok = trtmc::CreateBpeTokenizer(multi_bos_json.data(), multi_bos_json.size(), true);
         check(tok != nullptr, "multi_bos_create");
         {
             auto ids = tok->encode("hello");
@@ -1524,7 +1524,7 @@ int main() {
         }
 
         // Without special tokens: no BOS/EOS
-        auto tok_ns = trtf::CreateBpeTokenizer(multi_bos_json.data(), multi_bos_json.size(), false);
+        auto tok_ns = trtmc::CreateBpeTokenizer(multi_bos_json.data(), multi_bos_json.size(), false);
         {
             auto ids = tok_ns->encode("hello");
             check(!ids.empty() && ids[0] != 200 && ids.back() != 202,
@@ -1562,7 +1562,7 @@ int main() {
           ]
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(vl_json.data(), vl_json.size(), false);
+        auto tok = trtmc::CreateBpeTokenizer(vl_json.data(), vl_json.size(), false);
         check(tok != nullptr, "vl_special_create");
 
         // Single special token should be matched directly
@@ -1638,7 +1638,7 @@ int main() {
           }
         })";
 
-        auto tok = trtf::CreateBpeTokenizer(nested_json.data(), nested_json.size(), true);
+        auto tok = trtmc::CreateBpeTokenizer(nested_json.data(), nested_json.size(), true);
         check(tok != nullptr, "nested_pp_create");
         {
             auto ids = tok->encode("a");

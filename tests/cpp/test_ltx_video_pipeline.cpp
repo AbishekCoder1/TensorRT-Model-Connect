@@ -1,7 +1,7 @@
 #include "runtime/pipelines/ltx_video_pipeline.h"
 #include "runtime/plugins/shared/diffusion_helpers.h"
 
-#if TRTF_HAS_TRT
+#if TRTMC_HAS_TRT
 
 #include <cmath>
 #include <cstdlib>
@@ -25,7 +25,7 @@ void test_parse_ltx_video_options() {
       "guidance_rescale": 0.35
     })JSON";
 
-    const auto opts = trtf::parse_ltx_video_options(json);
+    const auto opts = trtmc::parse_ltx_video_options(json);
     check(opts.negative_prompt == "bad frames", "negative prompt parsed");
     check(opts.frame_rate == 24, "frame rate parsed");
     check(std::fabs(opts.guidance_rescale - 0.35F) < 1e-6F, "guidance rescale parsed");
@@ -51,7 +51,7 @@ void test_ltx_latent_stats_parse_full_channel_count() {
                              stddev.str() + R"JSON(]
     })JSON";
 
-    const auto config = trtf::make_diffusion_config(json);
+    const auto config = trtmc::make_diffusion_config(json);
     check(config.latents_mean.size() == 128, "ltx parses all latent mean channels");
     check(config.latents_std.size() == 128, "ltx parses all latent std channels");
     check(std::fabs(config.latents_mean.back() - 1.27F) < 1e-5F, "ltx parses last latent mean");

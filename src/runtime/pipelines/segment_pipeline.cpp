@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -99,4 +99,4 @@ SegmentResult SegmentPipeline::segment(const float* pixels, int32_t height, int3
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

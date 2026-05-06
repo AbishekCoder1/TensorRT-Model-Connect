@@ -3,9 +3,9 @@
 
 #include "runtime/core/trt_decode_runtime.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/pipeline_plugin.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/pipeline_plugin.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class Seq2SeqPipeline final : public IPipeline {
   public:
@@ -237,4 +237,4 @@ class Seq2SeqPlugin final : public IPipelinePlugin {
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_seq2seq_plugin, Seq2SeqPlugin,
                                        "seq2seq_encoder_decoder");
 
-} // namespace trtf
+} // namespace trtmc

@@ -28,9 +28,9 @@ void check(bool condition, const char* name)
     }
 }
 
-trtf::OmniConfig make_config()
+trtmc::OmniConfig make_config()
 {
-    trtf::OmniConfig cfg;
+    trtmc::OmniConfig cfg;
     cfg.audio_embed_dim = 1280;
     cfg.audio_num_frames = 8;
     cfg.talker_n_codebooks = 4;
@@ -39,8 +39,8 @@ trtf::OmniConfig make_config()
 
 void test_audio_encode_plan_pads_and_trims_frames()
 {
-    const trtf::OmniConfig cfg = make_config();
-    const auto plan = trtf::make_omni_audio_encode_plan(cfg, 3, 10);
+    const trtmc::OmniConfig cfg = make_config();
+    const auto plan = trtmc::make_omni_audio_encode_plan(cfg, 3, 10);
 
     check(plan.actual_frames == 8, "omni audio plan clamps to max frames");
     check(plan.output_frames == 4, "omni audio plan derives output frames");
@@ -51,11 +51,11 @@ void test_audio_encode_plan_pads_and_trims_frames()
 
 void test_audio_encode_input_builder_zero_pads_tail()
 {
-    const trtf::OmniConfig cfg = make_config();
-    const auto plan = trtf::make_omni_audio_encode_plan(cfg, 2, 3);
+    const trtmc::OmniConfig cfg = make_config();
+    const auto plan = trtmc::make_omni_audio_encode_plan(cfg, 2, 3);
     const std::vector<float> mel = {1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F};
 
-    const auto padded = trtf::build_omni_audio_encoder_input(mel.data(), plan);
+    const auto padded = trtmc::build_omni_audio_encoder_input(mel.data(), plan);
     check(padded.size() == plan.input_size, "omni input builder uses padded size");
     check(padded[0] == 1.0F && padded[5] == 6.0F,
         "omni input builder copies active mel frames");
@@ -65,15 +65,15 @@ void test_audio_encode_input_builder_zero_pads_tail()
 
 void test_generation_plans_gate_talker_and_codec()
 {
-    const trtf::OmniConfig cfg = make_config();
-    const auto talker_plan = trtf::make_omni_talker_plan(5, 0, true);
+    const trtmc::OmniConfig cfg = make_config();
+    const auto talker_plan = trtmc::make_omni_talker_plan(5, 0, true);
     check(!talker_plan.should_run_talker, "omni talker plan requires hidden states");
 
-    const auto active_talker_plan = trtf::make_omni_talker_plan(5, 10, true);
+    const auto active_talker_plan = trtmc::make_omni_talker_plan(5, 10, true);
     check(active_talker_plan.should_run_talker, "omni talker plan enables active talker stage");
     check(active_talker_plan.num_tokens == 5, "omni talker plan forwards token count");
 
-    const auto codec_plan = trtf::make_omni_codec_plan(cfg, 8);
+    const auto codec_plan = trtmc::make_omni_codec_plan(cfg, 8);
     check(codec_plan.should_run_codec, "omni codec plan enables codec with token payload");
     check(codec_plan.n_codebooks == 4, "omni codec plan forwards codebook count");
     check(codec_plan.n_frames == 2, "omni codec plan derives frame count");
@@ -81,20 +81,20 @@ void test_generation_plans_gate_talker_and_codec()
 
 void test_talker_decode_helpers_extract_codebook_argmax()
 {
-    const auto decode_plan = trtf::make_omni_talker_decode_plan(2, 4, 3);
+    const auto decode_plan = trtmc::make_omni_talker_decode_plan(2, 4, 3);
     std::vector<int32_t> all_codes;
     const std::vector<float> logits = {
         0.1F, 0.4F, 0.3F, 0.2F,
         0.0F, 1.0F, 0.5F, 0.6F,
     };
 
-    trtf::append_omni_talker_codes_from_logits(logits, decode_plan, all_codes);
+    trtmc::append_omni_talker_codes_from_logits(logits, decode_plan, all_codes);
 
     check(decode_plan.num_tokens == 3, "omni talker decode plan forwards token count");
     check(all_codes.size() == 2, "omni talker decode helper appends one code per codebook");
     check(all_codes[0] == 1 && all_codes[1] == 1,
         "omni talker decode helper selects argmax in each codebook slice");
-    check(trtf::select_omni_codebook_argmax(logits, 20, 4) == 0,
+    check(trtmc::select_omni_codebook_argmax(logits, 20, 4) == 0,
         "omni talker argmax helper returns zero for out-of-range slices");
 }
 
@@ -104,7 +104,7 @@ void test_code2wav_input_builder_transposes_frame_major_tokens()
         10, 20, 30,
         11, 21, 31,
     };
-    const auto input_codes = trtf::build_omni_code2wav_input_codes(
+    const auto input_codes = trtmc::build_omni_code2wav_input_codes(
         codec_tokens,
         3,
         4,

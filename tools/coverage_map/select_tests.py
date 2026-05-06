@@ -62,7 +62,7 @@ def _classify_tier(path: str) -> Optional[str]:
         return "cpp"
     if path == "CMakeLists.txt" or path.startswith("cmake/"):
         return "cpp"
-    if path.startswith("trtf_build/"):
+    if path.startswith("tensorrt_model_connect/"):
         return "builder"
     if path.startswith("tests/builder/"):
         return "builder"

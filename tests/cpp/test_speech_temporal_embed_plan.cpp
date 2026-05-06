@@ -39,9 +39,9 @@ void check_close(float actual, float expected, float tolerance, const char* name
     }
 }
 
-trtf::SpeechConfig make_test_config()
+trtmc::SpeechConfig make_test_config()
 {
-    trtf::SpeechConfig cfg;
+    trtmc::SpeechConfig cfg;
     cfg.temporal_text_vocab = 4;
     cfg.audio_vocab_size = 3;
     cfg.temporal_text_embedding = {
@@ -65,7 +65,7 @@ void test_dual_stream_embed_sums_text_moshi_and_user_streams()
     const int32_t moshi_tokens[] = {1, 2};
     const int32_t user_tokens[] = {0, 2};
     float out[2] = {0.0F, 0.0F};
-    trtf::compute_dual_stream_summed_embed(
+    trtmc::compute_dual_stream_summed_embed(
         cfg, 2, 2, moshi_tokens, user_tokens, 1, out);
 
     check_close(out[0], 3.0F + 12.0F + 24.0F + 30.0F + 44.0F, 1e-6F,
@@ -78,8 +78,8 @@ void test_temporal_embed_clamps_tokens_to_vocab()
 {
     auto cfg = make_test_config();
     float out[2] = {0.0F, 0.0F};
-    trtf::add_temporal_text_embedding(cfg, 2, 100, out);
-    trtf::add_temporal_audio_embedding(cfg, 2, 0, 99, out);
+    trtmc::add_temporal_text_embedding(cfg, 2, 100, out);
+    trtmc::add_temporal_audio_embedding(cfg, 2, 0, 99, out);
 
     check_close(out[0], 7.0F + 14.0F, 1e-6F, "clamped embed value 0");
     check_close(out[1], 8.0F + 15.0F, 1e-6F, "clamped embed value 1");
@@ -88,7 +88,7 @@ void test_temporal_embed_clamps_tokens_to_vocab()
 void test_hidden_helpers_pad_or_truncate_logits()
 {
     std::vector<float> all_hidden;
-    trtf::append_hidden_from_logits(all_hidden, {1.0F, 2.0F}, 4);
+    trtmc::append_hidden_from_logits(all_hidden, {1.0F, 2.0F}, 4);
     check(all_hidden.size() == 4, "append hidden extends output");
     check_close(all_hidden[0], 1.0F, 1e-6F, "append hidden first value");
     check_close(all_hidden[1], 2.0F, 1e-6F, "append hidden second value");
@@ -96,7 +96,7 @@ void test_hidden_helpers_pad_or_truncate_logits()
     check_close(all_hidden[3], 0.0F, 1e-6F, "append hidden pads fourth value");
 
     std::vector<float> frame_hidden(3, -1.0F);
-    trtf::fill_hidden_from_logits(frame_hidden, {9.0F}, 3);
+    trtmc::fill_hidden_from_logits(frame_hidden, {9.0F}, 3);
     check_close(frame_hidden[0], 9.0F, 1e-6F, "fill hidden first value");
     check_close(frame_hidden[1], 0.0F, 1e-6F, "fill hidden pads");
     check_close(frame_hidden[2], 0.0F, 1e-6F, "fill hidden pads tail");

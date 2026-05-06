@@ -6,7 +6,7 @@
 
 #include "runtime/pipelines/chronos_bolt_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <memory>
@@ -14,7 +14,7 @@
 #include <string>
 #include <utility>
 
-namespace trtf {
+namespace trtmc {
 
 class ChronosBoltPlugin final : public IPipelinePlugin {
   public:
@@ -42,4 +42,4 @@ class ChronosBoltPlugin final : public IPipelinePlugin {
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_chronos_bolt_plugin, ChronosBoltPlugin,
                                        "chronos_bolt_torchtrt");
 
-} // namespace trtf
+} // namespace trtmc

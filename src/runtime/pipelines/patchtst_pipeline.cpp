@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -162,4 +162,4 @@ EmbeddingResult PatchTSTPipeline::solve(const float* branch_input, int32_t branc
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

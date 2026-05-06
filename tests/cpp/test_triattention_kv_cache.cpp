@@ -2,7 +2,7 @@
 // TriAttentionKvCache native runtime tests
 // =============================================================================
 
-#include "trtf/runtime/triattention_kv_cache.h"
+#include "trtmc/runtime/triattention_kv_cache.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -21,9 +21,9 @@ static void check(bool condition, const char* name) {
 
 namespace {
 
-trtf::TriAttentionConfig make_config(int32_t kv_budget, int32_t recent_window = 1,
+trtmc::TriAttentionConfig make_config(int32_t kv_budget, int32_t recent_window = 1,
                                      bool protect_prefill = false) {
-    trtf::TriAttentionConfig cfg;
+    trtmc::TriAttentionConfig cfg;
     cfg.enabled = true;
     cfg.kv_budget = kv_budget;
     cfg.count_prompt_tokens = true;
@@ -31,21 +31,21 @@ trtf::TriAttentionConfig make_config(int32_t kv_budget, int32_t recent_window = 
     cfg.protect_prefill = protect_prefill;
     cfg.disable_trig = true;
     cfg.disable_mlr = false;
-    cfg.score_aggregation = trtf::TriAttentionScoreAggregation::kMean;
+    cfg.score_aggregation = trtmc::TriAttentionScoreAggregation::kMean;
     return cfg;
 }
 
-trtf::TriAttentionStats make_stats() {
-    trtf::TriAttentionStats stats;
+trtmc::TriAttentionStats make_stats() {
+    trtmc::TriAttentionStats stats;
     stats.head_dim = 4;
-    stats.rope_style = trtf::TriAttentionRopeStyle::kHalf;
+    stats.rope_style = trtmc::TriAttentionRopeStyle::kHalf;
     stats.num_attention_heads = 1;
     stats.num_key_value_heads = 1;
     stats.stats_head_count = 1;
     stats.num_layers = 1;
     stats.inv_freq = {1.0F, 0.1F};
 
-    trtf::TriAttentionHeadStats head;
+    trtmc::TriAttentionHeadStats head;
     head.q_mean_real = {0.0F, 0.0F};
     head.q_mean_imag = {0.0F, 0.0F};
     head.q_abs_mean = {1.0F, 0.0F};
@@ -54,7 +54,7 @@ trtf::TriAttentionStats make_stats() {
     return stats;
 }
 
-void write_present_row(trtf::TriAttentionKvCache& cache, const std::vector<float>& row) {
+void write_present_row(trtmc::TriAttentionKvCache& cache, const std::vector<float>& row) {
     cache.present_k(0).copy_from_host(row.data());
     cache.present_v(0).copy_from_host(row.data());
     cudaStreamSynchronize(cache.present_k(0).stream());
@@ -65,7 +65,7 @@ void test_absolute_position_and_mask() {
     cudaStreamCreate(&stream);
 
     {
-        trtf::TriAttentionKvCache cache(1, 1, 3, 4, stream, make_config(3), make_stats());
+        trtmc::TriAttentionKvCache cache(1, 1, 3, 4, stream, make_config(3), make_stats());
         for (int i = 0; i < 6; ++i) {
             write_present_row(cache, {1.0F + static_cast<float>(i), 0.0F, 0.0F, 0.0F});
             cache.advance();
@@ -90,7 +90,7 @@ void test_score_based_compaction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TriAttentionKvCache cache(1, 1, 3, 4, stream, make_config(3), make_stats());
+    trtmc::TriAttentionKvCache cache(1, 1, 3, 4, stream, make_config(3), make_stats());
 
     write_present_row(cache, {10.0F, 0.0F, 0.0F, 0.0F});
     cache.advance(); // pos 0
@@ -114,7 +114,7 @@ void test_protect_prefill() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TriAttentionKvCache cache(1, 1, 3, 4, stream, make_config(3, 1, true), make_stats());
+    trtmc::TriAttentionKvCache cache(1, 1, 3, 4, stream, make_config(3, 1, true), make_stats());
 
     write_present_row(cache, {1.0F, 0.0F, 0.0F, 0.0F});
     cache.advance(); // pos 0
@@ -143,7 +143,7 @@ void test_prefill_protection_during_overflow() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TriAttentionKvCache cache(1, 1, 3, 4, stream, make_config(3, 1, true), make_stats());
+    trtmc::TriAttentionKvCache cache(1, 1, 3, 4, stream, make_config(3, 1, true), make_stats());
     cache.set_prompt_length(5);
 
     for (int i = 0; i < 5; ++i) {
@@ -164,7 +164,7 @@ void test_slack_window_delays_compaction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TriAttentionKvCache cache(1, 1, 5, 4, stream, make_config(3, 1, false), make_stats());
+    trtmc::TriAttentionKvCache cache(1, 1, 5, 4, stream, make_config(3, 1, false), make_stats());
 
     for (int i = 0; i < 5; ++i) {
         write_present_row(cache, {1.0F + static_cast<float>(i), 0.0F, 0.0F, 0.0F});
@@ -191,7 +191,7 @@ void test_prefill_overflow_uses_physical_slack() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TriAttentionKvCache cache(1, 1, 5, 4, stream, make_config(3, 1, false), make_stats());
+    trtmc::TriAttentionKvCache cache(1, 1, 5, 4, stream, make_config(3, 1, false), make_stats());
     cache.set_prompt_length(6);
 
     for (int i = 0; i < 6; ++i) {
@@ -221,7 +221,7 @@ void test_slack_window_uses_full_logical_budget() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::TriAttentionKvCache cache(1, 1, 5, 4, stream, make_config(3, 1, false), make_stats());
+    trtmc::TriAttentionKvCache cache(1, 1, 5, 4, stream, make_config(3, 1, false), make_stats());
 
     for (int i = 0; i < 6; ++i) {
         write_present_row(cache, {1.0F + static_cast<float>(i), 0.0F, 0.0F, 0.0F});
@@ -279,16 +279,16 @@ void test_bundle_parsing() {
 }
 )json";
 
-    auto cfg = trtf::parse_triattention_bundle_config(config_json, 128);
-    auto stats = trtf::parse_triattention_stats_json(stats_json, 1, 1, 1);
+    auto cfg = trtmc::parse_triattention_bundle_config(config_json, 128);
+    auto stats = trtmc::parse_triattention_stats_json(stats_json, 1, 1, 1);
     check(cfg.enabled, "bundle config enables triattention");
     check(cfg.kv_budget == 64, "bundle config parses kv_budget");
     check(cfg.divide_length == 16, "bundle config parses divide_length");
     check(cfg.recent_window == 8, "bundle config parses recent_window");
     check(!cfg.count_prompt_tokens, "bundle config parses count_prompt_tokens");
-    check(cfg.score_aggregation == trtf::TriAttentionScoreAggregation::kMax,
+    check(cfg.score_aggregation == trtmc::TriAttentionScoreAggregation::kMax,
           "bundle config parses score aggregation");
-    check(cfg.per_layer_aggregation == trtf::TriAttentionScoreAggregation::kMax,
+    check(cfg.per_layer_aggregation == trtmc::TriAttentionScoreAggregation::kMax,
           "bundle config parses per-layer aggregation");
     check(stats.head_dim == 4, "stats parse head_dim");
     check(stats.layer_stats.size() == 1, "stats parse layer stats");

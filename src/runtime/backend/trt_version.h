@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct TrtVersion {
     int major{-1};
@@ -47,4 +47,4 @@ std::vector<std::string> trt_backend_candidates(const std::string& backend_name,
                                                 const std::optional<TrtVersion>& required_version,
                                                 const std::optional<TrtVersion>& installed_version);
 
-} // namespace trtf
+} // namespace trtmc

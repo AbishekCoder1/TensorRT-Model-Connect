@@ -3,13 +3,13 @@
 #include "runtime/pipelines/ltx_video_pipeline.h"
 #include "runtime/plugins/shared/diffusion_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
 #include <memory>
 #include <stdexcept>
 #include <utility>
 
-namespace trtf {
+namespace trtmc {
 
 class LTXVideoPlugin final : public IPipelinePlugin {
   public:
@@ -38,4 +38,4 @@ class LTXVideoPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_ltx_video_plugin, LTXVideoPlugin, "diffusion_ltx");
 
-} // namespace trtf
+} // namespace trtmc

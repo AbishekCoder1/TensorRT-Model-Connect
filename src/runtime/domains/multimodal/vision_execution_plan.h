@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct VisionPendingCopy
 {
@@ -67,4 +67,4 @@ inline bool run_vision_copy_plan(
     return true;
 }
 
-} // namespace trtf
+} // namespace trtmc

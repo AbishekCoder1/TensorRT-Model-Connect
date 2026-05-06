@@ -1,4 +1,4 @@
-#include "trtf/config/cli_support.h"
+#include "trtmc/config/cli_support.h"
 
 #include <algorithm>
 #include <cctype>
@@ -12,7 +12,7 @@
 #include <string>
 #include <typeinfo>
 
-namespace trtf::config {
+namespace trtmc::config {
 
 namespace {
 
@@ -508,7 +508,7 @@ LayeredFileValues load_layered_file(const std::string& path) {
     if (ext_low == ".yaml" || ext_low == ".yml") {
         throw std::invalid_argument("--config " + path +
                                     ": YAML is not supported by the C++ loader; convert to JSON or "
-                                    "load via a wrapper (trtf_build/cli.py accepts YAML).");
+                                    "load via a wrapper (tensorrt_model_connect/cli.py accepts YAML).");
     }
     throw std::invalid_argument("--config " + path + ": unsupported extension '" + ext +
                                 "' (expected .json)");
@@ -694,7 +694,7 @@ std::vector<std::string> filter_to_registered_namespaces(LayerContribution& cont
     std::vector<std::string> dropped;
     for (auto it = contrib.values.begin(); it != contrib.values.end();) {
         if (registry.lookup(it->first) == nullptr) {
-            std::cerr << "[trtf.config] dropping bundle default for "
+            std::cerr << "[trtmc.config] dropping bundle default for "
                       << "unregistered namespace: " << it->first << " (layer "
                       << layer_name(contrib.layer) << ")\n";
             dropped.push_back(it->first);
@@ -747,4 +747,4 @@ std::string write_effective_config_next_to(const ConfigBundle& bundle,
     return p.string();
 }
 
-} // namespace trtf::config
+} // namespace trtmc::config

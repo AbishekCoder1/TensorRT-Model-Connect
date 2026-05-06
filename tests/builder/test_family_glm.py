@@ -9,10 +9,10 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build.config import ModelConfig
-    from trtf_build.families.glm import plugin
+    from tensorrt_model_connect.config import ModelConfig
+    from tensorrt_model_connect.families.glm import plugin
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _write_model(path: Path) -> None:

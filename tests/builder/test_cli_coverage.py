@@ -1,8 +1,8 @@
-"""Coverage-focused tests for CLI control flow in trtf_build.cli.
+"""Coverage-focused tests for CLI control flow in tensorrt_model_connect.cli.
 
 Trace: ARCH-ENG-001, UD-ENG-02
 Intent: Validate CLI control flow branches including version lookup fallbacks, inspect output formatting, build dispatch, and error handling.
-Preconditions: trtf_build is importable; uses mocks for TRT/GPU dependencies.
+Preconditions: tensorrt_model_connect is importable; uses mocks for TRT/GPU dependencies.
 Postconditions: Version resolution follows the correct fallback chain, inspect prints expected output, and build errors propagate cleanly.
 """
 
@@ -19,9 +19,9 @@ from unittest.mock import patch
 
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
-import trtf_build  # noqa: E402
-import trtf_build.cli as cli  # noqa: E402
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+import tensorrt_model_connect  # noqa: E402
+import tensorrt_model_connect.cli as cli  # noqa: E402
 
 
 def test_get_version_prefers_importlib_metadata():
@@ -37,10 +37,10 @@ def test_get_version_uses_package_fallback_when_metadata_lookup_fails(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Intent: validate fallback from metadata lookup to package __version__.
-    Preconditions: importlib.metadata.version raises, and trtf_build.__version__ is set.
+    Preconditions: importlib.metadata.version raises, and tensorrt_model_connect.__version__ is set.
     Postconditions: _get_version returns the package-level __version__ value.
     """
-    monkeypatch.setattr(trtf_build, "__version__", "7.8.9", raising=False)
+    monkeypatch.setattr(tensorrt_model_connect, "__version__", "7.8.9", raising=False)
     with patch("importlib.metadata.version", side_effect=RuntimeError("boom")):
         assert cli._get_version() == "7.8.9"
 
@@ -55,7 +55,7 @@ def test_get_version_uses_literal_default_when_relative_import_fails():
     def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
         package = (globals or {}).get("__package__")
         if "__version__" in (fromlist or ()) and (
-            package == "trtf_build" or level == 1 or name in ("", "trtf_build")
+            package == "tensorrt_model_connect" or level == 1 or name in ("", "tensorrt_model_connect")
         ):
             raise ImportError("synthetic import failure for __version__")
         return real_import(name, globals, locals, fromlist, level)
@@ -160,7 +160,7 @@ def test_main_implicit_build_dispatches_to_build_handler(monkeypatch):
         sys,
         "argv",
         [
-            "trtf-build",
+            "trtmc-build",
             "repo/model",
             "-o",
             "/tmp/out.trtfb",
@@ -195,7 +195,7 @@ def test_main_without_args_prints_help_and_exits_zero(monkeypatch):
     Preconditions: argv contains only program name, so no command or build args are provided.
     Postconditions: main prints help and exits with code 0.
     """
-    monkeypatch.setattr(sys, "argv", ["trtf-build"])
+    monkeypatch.setattr(sys, "argv", ["trtmc-build"])
 
     with pytest.raises(SystemExit) as exc:
         cli.main()
@@ -215,7 +215,7 @@ def test_main_explicit_version_dispatch(monkeypatch):
         return 23
 
     monkeypatch.setattr(cli, "_cmd_version", fake_cmd_version)
-    monkeypatch.setattr(sys, "argv", ["trtf-build", "version"])
+    monkeypatch.setattr(sys, "argv", ["trtmc-build", "version"])
 
     with pytest.raises(SystemExit) as exc:
         cli.main()
@@ -243,7 +243,7 @@ def test_main_unknown_command_prints_help_and_exits_one(monkeypatch):
         fake_parse_known_args,
     )
     monkeypatch.setattr(argparse.ArgumentParser, "print_help", fake_print_help)
-    monkeypatch.setattr(sys, "argv", ["trtf-build", "unknown-command"])
+    monkeypatch.setattr(sys, "argv", ["trtmc-build", "unknown-command"])
 
     with pytest.raises(SystemExit) as exc:
         cli.main()
@@ -261,8 +261,8 @@ def test_auto_select_build_backend_prefers_raw_trt(tmp_path, monkeypatch):
     model_dir.mkdir()
     (model_dir / "config.json").write_text(json.dumps({"model_type": "qwen2"}), encoding="utf-8")
 
-    import trtf_build.engine_builder as engine_builder
-    import trtf_build.engine_defs as engine_defs
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.engine_defs as engine_defs
 
     monkeypatch.setattr(engine_builder, "_resolve_model", lambda model_ref: str(model_dir))
     monkeypatch.setattr(engine_builder, "find_plugin", lambda model_type: object())
@@ -284,9 +284,9 @@ def test_auto_select_build_backend_falls_back_to_torchtrt(tmp_path, monkeypatch)
     model_dir.mkdir()
     (model_dir / "config.json").write_text(json.dumps({"model_type": "patchtst"}), encoding="utf-8")
 
-    import trtf_build.engine_builder as engine_builder
-    import trtf_build.engine_defs as engine_defs
-    torchtrt_families = importlib.import_module("trtf_build.engine_defs.torch_trt.families")
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.engine_defs as engine_defs
+    torchtrt_families = importlib.import_module("tensorrt_model_connect.engine_defs.torch_trt.families")
 
     monkeypatch.setattr(engine_builder, "_resolve_model", lambda model_ref: str(model_dir))
     monkeypatch.setattr(engine_builder, "find_plugin", lambda model_type: None)
@@ -321,9 +321,9 @@ def test_auto_select_build_backend_prefers_config_specific_torchtrt_over_generic
         encoding="utf-8",
     )
 
-    import trtf_build.engine_builder as engine_builder
-    import trtf_build.engine_defs as engine_defs
-    torchtrt_families = importlib.import_module("trtf_build.engine_defs.torch_trt.families")
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.engine_defs as engine_defs
+    torchtrt_families = importlib.import_module("tensorrt_model_connect.engine_defs.torch_trt.families")
 
     class GenericRawPlugin:
         pass
@@ -354,8 +354,8 @@ def test_auto_select_build_backend_errors_when_fallback_backend_missing(tmp_path
     model_dir.mkdir()
     (model_dir / "config.json").write_text(json.dumps({"model_type": "patchtst"}), encoding="utf-8")
 
-    import trtf_build.engine_builder as engine_builder
-    import trtf_build.engine_defs as engine_defs
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.engine_defs as engine_defs
 
     monkeypatch.setattr(engine_builder, "_resolve_model", lambda model_ref: str(model_dir))
     monkeypatch.setattr(engine_builder, "find_plugin", lambda model_type: None)

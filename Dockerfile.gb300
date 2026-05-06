@@ -75,7 +75,7 @@ RUN pip install \
     sentencepiece \
     ftfy
 
-# ModelOpt: FP8/INT8 quantization calibration (used by trtf-build --fp8)
+# ModelOpt: FP8/INT8 quantization calibration (used by trtmc-build --fp8)
 RUN pip install nvidia-modelopt
 
 # NeMo currently declares transformers~=4.57; force the runtime pin we need.
@@ -119,6 +119,6 @@ ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 #   python3 -m pytest --help | grep -- '--cov' && \
 #   gcovr --version && lcov --version && genhtml --version
 
-WORKDIR /workspace/trt-transformers-cpp
+WORKDIR /workspace/tensorrt-model-connect
 
 CMD ["bash"]

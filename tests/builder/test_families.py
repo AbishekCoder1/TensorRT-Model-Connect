@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from trtf_build.families import find_plugin, _ALL_PLUGINS
+from tensorrt_model_connect.families import find_plugin, _ALL_PLUGINS
 
 
 def _discover_plugin_names_from_filesystem() -> set[str]:
@@ -37,7 +37,7 @@ def _discover_plugin_names_from_filesystem() -> set[str]:
     ``plugin = ClassName()`` assignment.
     """
     names: set[str] = set()
-    repo_root = Path(__file__).resolve().parent.parent.parent / "trtf_build" / Path("trtf_build")
+    repo_root = Path(__file__).resolve().parent.parent.parent / "tensorrt_model_connect" / Path("tensorrt_model_connect")
     plugin_dirs = [
         repo_root / "families",
         repo_root / "engine_defs" / "torch_trt" / "families",
@@ -520,7 +520,7 @@ class TestRuntimeStrategy:
         assert getattr(plugin, "runtime_strategy", None) == "speech_to_speech"
 
     def test_personaplex_bundle_overrides(self):
-        from trtf_build.config import ModelConfig
+        from tensorrt_model_connect.config import ModelConfig
 
         plugin = find_plugin("personaplex")
         overrides = plugin.get_bundle_config_overrides(

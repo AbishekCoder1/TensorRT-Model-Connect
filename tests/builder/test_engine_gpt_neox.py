@@ -18,7 +18,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-GPTNEOX-01
 Intent: Validate the GPT-NeoX family plugin weight loading including per-head interleaved fused QKV splitting, parallel residual, partial RoPE, and non-standard HF prefixes.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: Fused QKV is split from per-head interleaved layout, FC MLP keys resolve correctly, and all weight shapes match expected dimensions.
 """
 
@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("safetensors.numpy")
-pytest.importorskip("trtf_build.config")
+pytest.importorskip("tensorrt_model_connect.config")
 
 from tests.builder.family_plugin_tester import FamilyPluginTester
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -46,7 +46,7 @@ class GPTNeoXPluginTester(FamilyPluginTester):
       - Non-standard HF prefixes: gpt_neox.embed_in, gpt_neox.layers.*
     """
 
-    plugin_module = "trtf_build.families.gpt_neox"
+    plugin_module = "tensorrt_model_connect.families.gpt_neox"
     model_type = "gpt_neox"
 
     def get_config_dict(self) -> dict:

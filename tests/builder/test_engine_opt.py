@@ -12,7 +12,7 @@ OPT uses a different HF weight layout from standard decoders:
 
 Trace: ARCH-FAM-001, UD-FAM-OPT-01
 Intent: Validate the OPT family plugin weight loading including model.decoder.* prefix mapping, learned positions with offset, fc1/fc2 MLP, and biases on all linear layers and LayerNorms.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: All weight keys map correctly from OPT's non-standard HF layout, position embeddings include the 2-position offset, and biases are loaded for all projections and norms.
 """
 import numpy as np
@@ -22,7 +22,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class OPTPluginTester(FamilyPluginTester):
-    plugin_module = "trtf_build.families.opt"
+    plugin_module = "tensorrt_model_connect.families.opt"
     model_type = "opt"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

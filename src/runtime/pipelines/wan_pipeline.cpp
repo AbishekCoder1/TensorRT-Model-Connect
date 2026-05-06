@@ -17,7 +17,7 @@
 #include <numeric>
 #include <random>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -1221,4 +1221,4 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
     return video_to_image(result, config_.video_height, config_.video_width);
 }
 
-} // namespace trtf
+} // namespace trtmc

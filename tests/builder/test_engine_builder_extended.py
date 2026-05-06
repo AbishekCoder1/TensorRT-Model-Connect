@@ -4,7 +4,7 @@ Uses mocks for TRT, GPU, and filesystem access. No GPU or TRT needed.
 
 Trace: ARCH-ENG-001, UD-ENG-04
 Intent: Validate engine builder helper functions including TRT version detection, GPU name retrieval, tokenizer JSON provisioning, and build_bundle orchestration.
-Preconditions: trtf_build is importable; uses mocks for TRT and GPU introspection.
+Preconditions: tensorrt_model_connect is importable; uses mocks for TRT and GPU introspection.
 Postconditions: TRT version is correctly retrieved or falls back to 'unknown', GPU name is detected, tokenizer JSON is ensured, and build_bundle dispatches correctly.
 """
 
@@ -18,14 +18,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 try:
-    from trtf_build.engine_builder import (
+    from tensorrt_model_connect.engine_builder import (
         _get_trt_version,
         _get_gpu_name,
         _ensure_tokenizer_json,
         build_bundle,
     )
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 # ---------------------------------------------------------------------------
@@ -261,14 +261,14 @@ class TestBuildBundleOrchestration:
         del mock_plugin.get_audio_config
         del mock_plugin.get_bundle_config_overrides
 
-        with patch("trtf_build.engine_builder.find_plugin",
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
                     return_value=mock_plugin):
-            with patch("trtf_build.engine_builder._get_trt_version",
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
                         return_value="10.3.0"):
-                with patch("trtf_build.engine_builder._get_gpu_name",
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                             return_value="NVIDIA H100"):
-                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
-                        with patch("trtf_build.engine_builder.write_bundle") as mock_write:
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
                             build_bundle(str(model_dir), output_path)
 
                             # Verify plugin was called with correct arguments
@@ -310,14 +310,14 @@ class TestBuildBundleOrchestration:
         del mock_plugin.get_audio_config
         del mock_plugin.get_bundle_config_overrides
 
-        with patch("trtf_build.engine_builder.find_plugin",
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
                     return_value=mock_plugin):
-            with patch("trtf_build.engine_builder._get_trt_version",
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
                         return_value="10.0"):
-                with patch("trtf_build.engine_builder._get_gpu_name",
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                             return_value=""):
-                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
-                        with patch("trtf_build.engine_builder.write_bundle") as mock_write:
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
                             build_bundle(str(model_dir), output_path)
 
                             sections = mock_write.call_args[0][2]
@@ -344,14 +344,14 @@ class TestBuildBundleOrchestration:
         del mock_plugin.get_audio_config
         del mock_plugin.get_bundle_config_overrides
 
-        with patch("trtf_build.engine_builder.find_plugin",
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
                     return_value=mock_plugin):
-            with patch("trtf_build.engine_builder._get_trt_version",
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
                         return_value="10.0"):
-                with patch("trtf_build.engine_builder._get_gpu_name",
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                             return_value=""):
-                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
-                        with patch("trtf_build.engine_builder.write_bundle"):
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle"):
                             build_bundle(
                                 str(model_dir), output_path,
                                 max_cache_length=512)
@@ -378,14 +378,14 @@ class TestBuildBundleOrchestration:
         del mock_plugin.get_audio_config
         del mock_plugin.get_bundle_config_overrides
 
-        with patch("trtf_build.engine_builder.find_plugin",
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
                     return_value=mock_plugin):
-            with patch("trtf_build.engine_builder._get_trt_version",
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
                         return_value="10.0"):
-                with patch("trtf_build.engine_builder._get_gpu_name",
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                             return_value=""):
-                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
-                        with patch("trtf_build.engine_builder.write_bundle") as mock_write:
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
                             build_bundle(str(model_dir), output_path)
 
                             sections = mock_write.call_args[0][2]
@@ -411,14 +411,14 @@ class TestBuildBundleOrchestration:
         del mock_plugin.get_audio_config
         del mock_plugin.get_bundle_config_overrides
 
-        with patch("trtf_build.engine_builder.find_plugin",
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
                     return_value=mock_plugin):
-            with patch("trtf_build.engine_builder._get_trt_version",
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
                         return_value="10.0"):
-                with patch("trtf_build.engine_builder._get_gpu_name",
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                             return_value=""):
-                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
-                        with patch("trtf_build.engine_builder.write_bundle") as mock_write:
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
                             build_bundle(str(model_dir), output_path)
 
                             sections = mock_write.call_args[0][2]
@@ -451,14 +451,14 @@ class TestBuildBundleOrchestration:
         del mock_plugin.get_audio_config
         del mock_plugin.get_bundle_config_overrides
 
-        with patch("trtf_build.engine_builder.find_plugin",
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
                     return_value=mock_plugin):
-            with patch("trtf_build.engine_builder._get_trt_version",
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
                         return_value="10.0"):
-                with patch("trtf_build.engine_builder._get_gpu_name",
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                             return_value=""):
-                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
-                        with patch("trtf_build.engine_builder.write_bundle") as mock_write:
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
                             build_bundle(
                                 str(model_dir), output_path,
                                 max_cache_length=1024)
@@ -487,18 +487,18 @@ class TestBuildBundleOrchestration:
 
         tri_stats = b'{"version": 1, "sampled_heads": [[0, 0]], "stats": {}}'
 
-        with patch("trtf_build.engine_builder.find_plugin",
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
                     return_value=mock_plugin):
-            with patch("trtf_build.engine_builder._get_trt_version",
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
                         return_value="10.0"):
-                with patch("trtf_build.engine_builder._get_gpu_name",
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                             return_value=""):
-                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
                         with patch(
-                            "trtf_build.engine_builder.export_triattention_stats_section",
+                            "tensorrt_model_connect.engine_builder.export_triattention_stats_section",
                             return_value=tri_stats,
                         ) as mock_export:
-                            with patch("trtf_build.engine_builder.write_bundle") as mock_write:
+                            with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
                                 build_bundle(
                                     str(model_dir),
                                     output_path,
@@ -551,18 +551,18 @@ class TestBuildBundleOrchestration:
 
         tri_stats = b'{"version": 1, "sampled_heads": [[0, 0]], "stats": {}}'
 
-        with patch("trtf_build.engine_builder.find_plugin",
+        with patch("tensorrt_model_connect.engine_builder.find_plugin",
                     return_value=mock_plugin):
-            with patch("trtf_build.engine_builder._get_trt_version",
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version",
                         return_value="10.0"):
-                with patch("trtf_build.engine_builder._get_gpu_name",
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name",
                             return_value=""):
-                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
                         with patch(
-                            "trtf_build.engine_builder.export_triattention_stats_section",
+                            "tensorrt_model_connect.engine_builder.export_triattention_stats_section",
                             return_value=tri_stats,
                         ):
-                            with patch("trtf_build.engine_builder.write_bundle") as mock_write:
+                            with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
                                 build_bundle(
                                     str(model_dir),
                                     output_path,
@@ -597,11 +597,11 @@ class TestBuildBundleOrchestration:
 
         plugin = _Plugin()
 
-        with patch("trtf_build.engine_builder.find_plugin", return_value=plugin):
-            with patch("trtf_build.engine_builder._get_trt_version", return_value="10.0"):
-                with patch("trtf_build.engine_builder._get_gpu_name", return_value=""):
-                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
-                        with patch("trtf_build.engine_builder.write_bundle"):
+        with patch("tensorrt_model_connect.engine_builder.find_plugin", return_value=plugin):
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version", return_value="10.0"):
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name", return_value=""):
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle"):
                             build_bundle(
                                 str(model_dir),
                                 output_path,
@@ -627,11 +627,11 @@ class TestBuildBundleOrchestration:
 
         plugin = _Plugin()
 
-        with patch("trtf_build.engine_builder.find_plugin", return_value=plugin):
-            with patch("trtf_build.engine_builder._get_trt_version", return_value="10.0"):
-                with patch("trtf_build.engine_builder._get_gpu_name", return_value=""):
-                    with patch("trtf_build.engine_builder._ensure_tokenizer_json"):
-                        with patch("trtf_build.engine_builder.write_bundle"):
+        with patch("tensorrt_model_connect.engine_builder.find_plugin", return_value=plugin):
+            with patch("tensorrt_model_connect.engine_builder._get_trt_version", return_value="10.0"):
+                with patch("tensorrt_model_connect.engine_builder._get_gpu_name", return_value=""):
+                    with patch("tensorrt_model_connect.engine_builder._ensure_tokenizer_json"):
+                        with patch("tensorrt_model_connect.engine_builder.write_bundle"):
                             build_bundle(
                                 str(model_dir),
                                 output_path,

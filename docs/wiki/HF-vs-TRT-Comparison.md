@@ -1,17 +1,17 @@
-# HuggingFace Transformers vs TRT-Transformers-CPP
+# HuggingFace Transformers vs TensorRT-Model-Connect
 
 This page provides a detailed comparison between HuggingFace's Python `transformers` library and this library. Understanding these similarities and differences helps when porting models or debugging parity issues.
 
 ## API Comparison
 
-| Concept | HuggingFace Transformers | TRT-Transformers-CPP |
+| Concept | HuggingFace Transformers | TensorRT-Model-Connect |
 |---------|-------------------------|---------------------|
-| Build engine | N/A (eager execution) | `trtf-build build <model-dir> -o model.trtfb` (Python) |
-| Run inference | `pipeline("Hello")` | `trtf run model.trtfb --prompt "Hello"` (C++) |
-| Programmatic API | `pipeline("text-generation", model=...)` | `trtf_create_pipeline("model.trtfb", flags)` (C ABI) |
-| Model loading | `AutoModelForCausalLM.from_pretrained()` | Python checkpoint mapper in `trtf_build/` |
+| Build engine | N/A (eager execution) | `trtmc-build build <model-dir> -o model.trtfb` (Python) |
+| Run inference | `pipeline("Hello")` | `trtmc run model.trtfb --prompt "Hello"` (C++) |
+| Programmatic API | `pipeline("text-generation", model=...)` | `trtmc_create_pipeline("model.trtfb", flags)` (C ABI) |
+| Model loading | `AutoModelForCausalLM.from_pretrained()` | Python checkpoint mapper in `tensorrt_model_connect/` |
 | Tokenizer | `AutoTokenizer.from_pretrained()` | `HfPythonTokenizer` (subprocess) or `VocabTokenizer` |
-| Config | `AutoConfig.from_pretrained()` | Python `config.json` parsing in `trtf_build/trtf_build/config.py` |
+| Config | `AutoConfig.from_pretrained()` | Python `config.json` parsing in `tensorrt_model_connect/tensorrt_model_connect/config.py` |
 
 ## Architectural Parallels
 
@@ -19,7 +19,7 @@ This page provides a detailed comparison between HuggingFace's Python `transform
 
 **HuggingFace**: Uses `AutoModelForCausalLM` which reads `config.json`'s `architectures` field to dispatch to a specific Python model class (e.g., `Qwen2ForCausalLM`).
 
-**TRT-Transformers-CPP**: The Python `trtf_build/` package reads `config.json`'s `model_type` to dispatch to a registered family plugin (e.g., Qwen plugin). Same metadata, different dispatch mechanism.
+**TensorRT-Model-Connect**: The Python `tensorrt_model_connect/` package reads `config.json`'s `model_type` to dispatch to a registered family plugin (e.g., Qwen plugin). Same metadata, different dispatch mechanism.
 
 ```python
 # HF: Dynamic class dispatch
@@ -28,8 +28,8 @@ model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-0.6B")
 ```
 
 ```bash
-# trtf: Family plugin dispatch (Python build)
-trtf-build build path/to/Qwen3-0.6B -o qwen3.trtfb
+# trtmc: Family plugin dispatch (Python build)
+trtmc-build build path/to/Qwen3-0.6B -o qwen3.trtfb
 # Internally: model_type="qwen3" -> QwenPlugin -> checkpoint mapper -> TRT graph
 ```
 
@@ -37,7 +37,7 @@ trtf-build build path/to/Qwen3-0.6B -o qwen3.trtfb
 
 **HuggingFace**: `from_pretrained()` downloads safetensors, uses `safetensors` library to load tensors directly into PyTorch `nn.Parameter` objects using the exact HF tensor key names.
 
-**TRT-Transformers-CPP**: The Python `trtf_build/` package uses the same `safetensors` Python library, then the **checkpoint mapper** translates HF key names to canonical format with explicit transposition.
+**TensorRT-Model-Connect**: The Python `tensorrt_model_connect/` package uses the same `safetensors` Python library, then the **checkpoint mapper** translates HF key names to canonical format with explicit transposition.
 
 Key difference: **HF stores weights as `[out_features, in_features]`** (PyTorch convention). The checkpoint mapper transposes them to `[in_features, out_features]` during mapping for efficient right-side matmul in TRT.
 
@@ -45,7 +45,7 @@ Key difference: **HF stores weights as `[out_features, in_features]`** (PyTorch 
 
 Both implement the same mathematical operations. The differences are in execution strategy:
 
-| Operation | HuggingFace | TRT-Transformers-CPP |
+| Operation | HuggingFace | TensorRT-Model-Connect |
 |-----------|-------------|---------------------|
 | RMSNorm | `Qwen2RMSNorm(nn.Module)` -- Python class, eager PyTorch op | TRT graph op, fused kernel |
 | QKV Projection | `nn.Linear` (separate Q, K, V modules) | TRT `addMatrixMultiply` -- constant folded |
@@ -58,19 +58,19 @@ Both implement the same mathematical operations. The differences are in executio
 
 **HuggingFace**: Keeps K/V at their natural smaller size (`num_key_value_heads`), then `repeat_kv()` expands them at attention time.
 
-**TRT-Transformers-CPP**: Expands K/V projections at **checkpoint loading time** (in the Python checkpoint mapper). The TRT graph builder always sees matching head counts.
+**TensorRT-Model-Connect**: Expands K/V projections at **checkpoint loading time** (in the Python checkpoint mapper). The TRT graph builder always sees matching head counts.
 
 ### KV Cache
 
 **HuggingFace**: `DynamicCache` class. K/V tensors grow dynamically as the sequence extends.
 
-**TRT-Transformers-CPP**: Fixed-size `CudaBuffer` per layer (C++ runtime). Circular buffer with `max_cache_length` slots. The cache length is set at engine build time.
+**TensorRT-Model-Connect**: Fixed-size `CudaBuffer` per layer (C++ runtime). Circular buffer with `max_cache_length` slots. The cache length is set at engine build time.
 
 ## Tokenization
 
 **HuggingFace**: `tokenizers` library (Rust-backed, called from Python). BPE, WordPiece, SentencePiece, etc.
 
-**TRT-Transformers-CPP**: Two paths:
+**TensorRT-Model-Connect**: Two paths:
 1. **HfPythonTokenizer**: Spawns a Python subprocess that imports `transformers` and calls the same HF tokenizer. Exact parity guaranteed.
 2. **VocabTokenizer**: Simple word-to-id lookup from vocabulary list.
 
@@ -110,7 +110,7 @@ python3 tools/perf_compare.py \
 
 ## What HF Has That We Don't (Yet)
 
-| Feature | HF | TRT-Transformers |
+| Feature | HF | TensorRT-Model-Connect |
 |---------|-----|-----------------|
 | Auto model download | Hub integration, `from_pretrained("Qwen/Qwen3-0.6B")` downloads automatically | Must pre-download weights to local directory |
 | Sampling strategies | top-k, top-p, beam search, temperature, repetition penalty | Greedy argmax only (currently) |
@@ -139,10 +139,10 @@ HuggingFace:
   output = model.generate(input_ids)
   # Everything happens in Python, single process
 
-TRT-Transformers-CPP:
+TensorRT-Model-Connect:
   # Step 1: Build (Python, once per model per GPU)
-  trtf-build build path/to/Qwen3-0.6B -o qwen3.trtfb
+  trtmc-build build path/to/Qwen3-0.6B -o qwen3.trtfb
 
   # Step 2: Run (C++, no Python needed except for tokenizer)
-  trtf run qwen3.trtfb --prompt "Hello" --max-new-tokens 30
+  trtmc run qwen3.trtfb --prompt "Hello" --max-new-tokens 30
 ```

@@ -15,16 +15,16 @@ torch = pytest.importorskip("torch")
 transformers = pytest.importorskip("transformers")
 
 PatchTSTWrapper = importlib.import_module(
-    "trtf_build.engine_defs.torch_trt.strategies.patchtst"
+    "tensorrt_model_connect.engine_defs.torch_trt.strategies.patchtst"
 ).PatchTSTWrapper
 PatchTSMixerWrapper = importlib.import_module(
-    "trtf_build.engine_defs.torch_trt.strategies.patchtsmixer"
+    "tensorrt_model_connect.engine_defs.torch_trt.strategies.patchtsmixer"
 ).PatchTSMixerWrapper
 ChronosBoltForecastWrapper = importlib.import_module(
-    "trtf_build.engine_defs.torch_trt.strategies.chronos_bolt"
+    "tensorrt_model_connect.engine_defs.torch_trt.strategies.chronos_bolt"
 ).ChronosBoltForecastWrapper
 TimesFmWrapper = importlib.import_module(
-    "trtf_build.engine_defs.torch_trt.strategies.timesfm"
+    "tensorrt_model_connect.engine_defs.torch_trt.strategies.timesfm"
 ).TimesFmWrapper
 
 

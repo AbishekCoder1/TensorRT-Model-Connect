@@ -4,13 +4,13 @@
 
 #include "runtime/pipelines/recurrent_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/hybrid_state.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/hybrid_state.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
 
-namespace trtf {
+namespace trtmc {
 
 class HybridPlugin final : public IPipelinePlugin {
   public:
@@ -70,4 +70,4 @@ class HybridPlugin final : public IPipelinePlugin {
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_hybrid_plugin, HybridPlugin,
                                        "hybrid_mamba_attention");
 
-} // namespace trtf
+} // namespace trtmc

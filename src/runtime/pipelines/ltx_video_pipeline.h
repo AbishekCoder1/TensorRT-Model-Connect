@@ -4,16 +4,16 @@
 // All model execution goes through TensorRT component engines.
 
 #include "runtime/domains/diffusion/diffusion_types.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct LTXVideoOptions {
     std::string negative_prompt{"worst quality, inconsistent motion, blurry, jittery, distorted"};
@@ -69,4 +69,4 @@ class LTXVideoPipeline final : public IPipeline {
     std::string model_id_;
 };
 
-} // namespace trtf
+} // namespace trtmc

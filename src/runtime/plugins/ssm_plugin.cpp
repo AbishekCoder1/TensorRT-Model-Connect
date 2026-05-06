@@ -3,10 +3,10 @@
 
 #include "runtime/pipelines/recurrent_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-namespace trtf {
+namespace trtmc {
 
 class SsmPlugin final : public IPipelinePlugin {
   public:
@@ -44,4 +44,4 @@ class SsmPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_ssm_plugin, SsmPlugin, "ssm_recurrent");
 
-} // namespace trtf
+} // namespace trtmc

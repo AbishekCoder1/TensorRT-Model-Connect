@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct SamConfig {
     int32_t image_size{1024};
@@ -46,4 +46,4 @@ struct SegmentationResult {
     int32_t num_classes{0};
 };
 
-} // namespace trtf
+} // namespace trtmc

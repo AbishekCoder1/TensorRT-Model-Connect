@@ -9,10 +9,10 @@ import json
 import numpy as np
 import pytest
 
-from trtf_build.quantization import get_format, list_formats, QuantScaleMap, LayerScales
-from trtf_build.quantization.plan import QuantPlan, canonicalize_quant_format
-from trtf_build.quantization.formats import QuantFormat
-from trtf_build.quantization.profile import QuantProfile
+from tensorrt_model_connect.quantization import get_format, list_formats, QuantScaleMap, LayerScales
+from tensorrt_model_connect.quantization.plan import QuantPlan, canonicalize_quant_format
+from tensorrt_model_connect.quantization.formats import QuantFormat
+from tensorrt_model_connect.quantization.profile import QuantProfile
 
 
 class TestFormatRegistry:
@@ -101,8 +101,8 @@ class TestQuantFormatProtocol:
 class TestPreQuantizedCheckpointProvider:
     def test_detect_awq_format(self, tmp_path):
         """AWQ path reached (not NotImplementedError)."""
-        from trtf_build.quantization.scale_providers import PreQuantizedCheckpointProvider
-        from trtf_build.config import ModelConfig
+        from tensorrt_model_connect.quantization.scale_providers import PreQuantizedCheckpointProvider
+        from tensorrt_model_connect.config import ModelConfig
 
         config = ModelConfig.from_json(json.dumps({
             "model_type": "llama",
@@ -135,7 +135,7 @@ class _FakeAdapter:
 
 class TestModelOptScaleMapping:
     def test_family_adapter_maps_layer_names(self):
-        from trtf_build.quantization.scale_providers import ModelOptCalibrationProvider
+        from tensorrt_model_connect.quantization.scale_providers import ModelOptCalibrationProvider
 
         provider = ModelOptCalibrationProvider()
         state_dict = {
@@ -158,7 +158,7 @@ class TestModelOptScaleMapping:
         assert abs(scale_map.scales["qwen/layer.0.w_q"].input_scale - 0.1) < 1e-6
 
     def test_family_adapter_exclude_patterns_apply_after_mapping(self):
-        from trtf_build.quantization.scale_providers import ModelOptCalibrationProvider
+        from tensorrt_model_connect.quantization.scale_providers import ModelOptCalibrationProvider
 
         provider = ModelOptCalibrationProvider()
         state_dict = {
@@ -168,7 +168,7 @@ class TestModelOptScaleMapping:
             "model.layers.0.self_attn.o_proj.weight_quantizer._amax": np.array(22.4, dtype=np.float32),
         }
 
-        from trtf_build.quantization.adapters import StandardDecoderCalibrationAdapter
+        from tensorrt_model_connect.quantization.adapters import StandardDecoderCalibrationAdapter
         scale_map = provider._build_scale_map(
             state_dict,
             adapter=StandardDecoderCalibrationAdapter(family="qwen"),
@@ -181,7 +181,7 @@ class TestModelOptScaleMapping:
         assert "qwen/layer.0.w_o" not in scale_map.scales
 
     def test_standard_decoder_adapter_maps_qwen_names(self):
-        from trtf_build.quantization.adapters import StandardDecoderCalibrationAdapter
+        from tensorrt_model_connect.quantization.adapters import StandardDecoderCalibrationAdapter
 
         adapter = StandardDecoderCalibrationAdapter(family="qwen")
 

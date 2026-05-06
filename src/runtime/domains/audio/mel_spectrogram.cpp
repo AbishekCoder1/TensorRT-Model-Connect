@@ -5,7 +5,7 @@
 #include <cstring>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -266,4 +266,4 @@ MelResult extract_nemo_mel_spectrogram(const float* samples, int32_t n_samples,
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

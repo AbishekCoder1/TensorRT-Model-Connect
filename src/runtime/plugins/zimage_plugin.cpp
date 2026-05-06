@@ -7,13 +7,13 @@
 #include "runtime/pipelines/z_image_pipeline.h"
 #include "runtime/plugins/shared/diffusion_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
 #include <iostream>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace {
 
 // Parse Z-Image-specific preprocessor weights from the preprocessor_weights
@@ -96,4 +96,4 @@ class ZImagePlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_zimage_plugin, ZImagePlugin, "diffusion_zimage");
 
-} // namespace trtf
+} // namespace trtmc

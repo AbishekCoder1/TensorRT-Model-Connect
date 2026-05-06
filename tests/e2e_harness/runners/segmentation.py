@@ -69,7 +69,7 @@ class SegmentationRunner:
     def _run_full_inference(
         self, case: E2ECase, ctx: RunContext
     ) -> StageOutput:
-        """Run segmentation via C++ binary: trtf segment --image <path>."""
+        """Run segmentation via C++ binary: trtmc segment --image <path>."""
         bundle_path = self._resolve_bundle_path(case, ctx)
         image_path = self._resolve_image_path(case, ctx)
 
@@ -191,7 +191,7 @@ class PromptedSegmentationRunner:
     def _run_full_inference(
         self, case: E2ECase, ctx: RunContext
     ) -> StageOutput:
-        """Run prompted segmentation via `trtf segment-sam`."""
+        """Run prompted segmentation via `trtmc segment-sam`."""
         bundle_path = self._resolve_bundle_path(case, ctx)
         image_path = self._resolve_image_path(case, ctx)
 

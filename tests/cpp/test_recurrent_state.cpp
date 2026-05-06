@@ -19,7 +19,7 @@
 // Requires CUDA GPU. Skips gracefully without TRT.
 // =============================================================================
 
-#include "trtf/runtime/recurrent_state.h"
+#include "trtmc/runtime/recurrent_state.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -40,12 +40,12 @@ static void test_mamba_spec() {
     cudaStreamCreate(&stream);
 
     // Mamba: 2 state tensors per layer (conv + ssm)
-    std::vector<trtf::RecurrentState::TensorSpec> specs = {
+    std::vector<trtmc::RecurrentState::TensorSpec> specs = {
         {"conv_state", {96}}, // d_inner * (conv_kernel - 1) = 32 * 3
         {"ssm_state", {512}}, // state_size * d_inner = 16 * 32
     };
 
-    trtf::RecurrentState state(4, specs, stream);
+    trtmc::RecurrentState state(4, specs, stream);
     check(state.ok(), "mamba state ok");
     check(state.num_layers() == 4, "num_layers = 4");
     check(state.specs().size() == 2, "2 specs");
@@ -60,12 +60,12 @@ static void test_rwkv_spec() {
     cudaStreamCreate(&stream);
 
     // RWKV: 5 state tensors per layer
-    std::vector<trtf::RecurrentState::TensorSpec> specs = {
+    std::vector<trtmc::RecurrentState::TensorSpec> specs = {
         {"attn_state", {128}}, {"ff_state", {128}},  {"num_state", {128}},
         {"den_state", {128}},  {"max_state", {128}},
     };
 
-    trtf::RecurrentState state(6, specs, stream);
+    trtmc::RecurrentState state(6, specs, stream);
     check(state.ok(), "rwkv state ok");
     check(state.num_layers() == 6, "rwkv num_layers = 6");
     check(state.specs().size() == 5, "rwkv has 5 specs");
@@ -77,11 +77,11 @@ static void test_reset() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    std::vector<trtf::RecurrentState::TensorSpec> specs = {
+    std::vector<trtmc::RecurrentState::TensorSpec> specs = {
         {"state_a", {4}},
     };
 
-    trtf::RecurrentState state(2, specs, stream);
+    trtmc::RecurrentState state(2, specs, stream);
     state.reset();
     check(state.ok(), "ok after reset");
 
@@ -92,11 +92,11 @@ static void test_advance() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    std::vector<trtf::RecurrentState::TensorSpec> specs = {
+    std::vector<trtmc::RecurrentState::TensorSpec> specs = {
         {"s", {2}},
     };
 
-    trtf::RecurrentState state(1, specs, stream);
+    trtmc::RecurrentState state(1, specs, stream);
 
     // Advance should not crash (copies present→state internally)
     state.advance();

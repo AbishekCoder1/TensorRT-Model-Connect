@@ -126,7 +126,7 @@ def run_cmd(cmd: str, timeout: int = 600, dry_run: bool = False) -> tuple[int, s
 def step_build(model: str, output: str, precision: str = "fp32",
                max_cache: int = 256, dry_run: bool = False) -> bool:
     """Build a .trtfb bundle."""
-    cmd = (f"trtf-build build {model} -o {output} "
+    cmd = (f"trtmc-build build {model} -o {output} "
            f"--max-cache-length {max_cache} --precision {precision}")
     print(f"\n[build] {precision.upper()} bundle: {model}")
     rc, out = run_cmd(cmd, timeout=600, dry_run=dry_run)
@@ -192,7 +192,7 @@ def _build_bench_cmd(
     bundle: str, prompt: str, mode: str, pipeline_type: str,
     max_tokens: int, gpu_argmax: bool,
 ) -> tuple[str, str]:
-    """Build the trtf CLI command and output dir for the given mode.
+    """Build the trtmc CLI command and output dir for the given mode.
 
     Returns (shell_command, metric_name).
     metric_name is 'tok/s', 'pipeline_ms', or 'rtf'.
@@ -200,18 +200,18 @@ def _build_bench_cmd(
     config_flags = "--set platform.trt_log_stderr=true"
     if gpu_argmax:
         config_flags += " --set runtime.prefer_gpu_greedy=true"
-    binary = "/tmp/build/trtf"
+    binary = "/tmp/build/trtmc"
     hf = "--hf-python /opt/venv/bin/python"
 
     if mode == "decode" or pipeline_type in (
         "text_to_text", "vision_language", "seq2seq_encoder_decoder", "marian_translation"):
-        # Autoregressive: trtf run → tok/s
+        # Autoregressive: trtmc run → tok/s
         cmd = (f'{binary} run {bundle} '
                f'--prompt "{prompt}" --max-new-tokens {max_tokens} {hf} {config_flags} 2>&1')
         return cmd, "tok/s"
 
     elif pipeline_type == "speech_to_text":
-        # Whisper: trtf transcribe --audio <wav>
+        # Whisper: trtmc transcribe --audio <wav>
         # Generate a short test WAV if none exists
         test_wav = "/tmp/bench_whisper_test.wav"
         if not os.path.exists(test_wav):
@@ -221,7 +221,7 @@ def _build_bench_cmd(
         return cmd, "pipeline_ms"
 
     elif pipeline_type in ("segmentation", "prompted_segmentation"):
-        # Segmentation: trtf segment --image <img> --output <out>
+        # Segmentation: trtmc segment --image <img> --output <out>
         test_img = "/tmp/bench_seg_test.png"
         if not os.path.exists(test_img):
             _generate_test_image(test_img)
@@ -231,25 +231,25 @@ def _build_bench_cmd(
         return cmd, "pipeline_ms"
 
     elif pipeline_type == "embedding":
-        # Embedding: trtf embed → measure latency
+        # Embedding: trtmc embed → measure latency
         cmd = (f'{env} {binary} embed {bundle} '
                f'--prompt "{prompt}" {hf} 2>&1')
         return cmd, "pipeline_ms"
 
     elif pipeline_type == "reranking":
-        # Reranking: trtf rerank → measure latency
+        # Reranking: trtmc rerank → measure latency
         cmd = (f'{env} {binary} rerank {bundle} '
                f'--prompt "query" --document "{prompt}" {hf} 2>&1')
         return cmd, "pipeline_ms"
 
     elif mode == "single_pass":
-        # Encoder-only (BERT, etc.): trtf encode → measure latency
+        # Encoder-only (BERT, etc.): trtmc encode → measure latency
         cmd = (f'{env} {binary} encode {bundle} '
                f'--prompt "{prompt}" {hf} 2>&1')
         return cmd, "pipeline_ms"
 
     elif pipeline_type == "speech_to_speech":
-        # Speech-to-speech: trtf speak --audio-in <wav> --audio-out <wav>
+        # Speech-to-speech: trtmc speak --audio-in <wav> --audio-out <wav>
         test_wav = "/tmp/bench_whisper_test.wav"
         if not os.path.exists(test_wav):
             _generate_test_wav(test_wav)
@@ -259,7 +259,7 @@ def _build_bench_cmd(
         return cmd, "pipeline_ms"
 
     elif mode == "multi_stage":
-        # Audio generation: trtf generate-audio → RTF and pipeline_ms
+        # Audio generation: trtmc generate-audio → RTF and pipeline_ms
         out_wav = f"/tmp/bench_{os.getpid()}.wav"
         cmd = (f'{env} {binary} generate-audio {bundle} '
                f'--prompt "{prompt}" --output {out_wav} '
@@ -267,21 +267,21 @@ def _build_bench_cmd(
         return cmd, "pipeline_ms"
 
     elif mode == "diffusion":
-        # Diffusion: trtf generate-video/generate-image → pipeline_ms
+        # Diffusion: trtmc generate-video/generate-image → pipeline_ms
         out_dir = f"/tmp/bench_diff_{os.getpid()}"
         cmd = (f'{env} {binary} generate-video {bundle} '
                f'--prompt "{prompt}" --output {out_dir} {hf} 2>&1')
         return cmd, "pipeline_ms"
 
     else:
-        # Fallback: trtf run
+        # Fallback: trtmc run
         cmd = (f'{env} {binary} run {bundle} '
                f'--prompt "{prompt}" --max-new-tokens {max_tokens} {hf} 2>&1')
         return cmd, "tok/s"
 
 
 def _parse_metric(out: str, metric_name: str) -> float:
-    """Parse performance metric from trtf output.
+    """Parse performance metric from trtmc output.
 
     Supported metrics:
         tok/s       — from "Decode: N tokens, X ms, Y tok/s"
@@ -289,7 +289,7 @@ def _parse_metric(out: str, metric_name: str) -> float:
         rtf         — from "RTF (real-time factor): X"
     """
     for line in out.split("\n"):
-        # tok/s: "[trtf] Decode: 20 tokens, 67.4 ms, 296.6 tok/s"
+        # tok/s: "[trtmc] Decode: 20 tokens, 67.4 ms, 296.6 tok/s"
         if metric_name == "tok/s" and "Decode:" in line and "tok/s" in line:
             parts = line.split(",")
             for part in parts:
@@ -300,7 +300,7 @@ def _parse_metric(out: str, metric_name: str) -> float:
                         pass
 
         # pipeline_ms: "[magpie-tts]   Total pipeline: 867.361 ms"
-        # or "[trtf] Inference: X ms"
+        # or "[trtmc] Inference: X ms"
         if metric_name == "pipeline_ms" and "Total pipeline:" in line:
             try:
                 ms = float(line.split("Total pipeline:")[1].strip().split()[0])
@@ -388,26 +388,26 @@ def step_nsys_profile(bundle: str, prompt: str, output_prefix: str,
         print("[nsys] Not installed, skipping profile")
         return None
 
-    # Build the trtf command for profiling (same logic as benchmark)
-    trtf_cmd, _ = _build_bench_cmd(
+    # Build the trtmc command for profiling (same logic as benchmark)
+    trtmc_cmd, _ = _build_bench_cmd(
         bundle, prompt, mode, pipeline_type, max_tokens, gpu_argmax=False)
     # Strip the "2>&1" from the end and env prefix — nsys wraps the command
-    # Extract just the trtf binary + args part
-    trtf_part = trtf_cmd
-    # Remove env vars prefix (everything before /tmp/build/trtf)
-    if "/tmp/build/trtf" in trtf_part:
-        idx = trtf_part.index("/tmp/build/trtf")
-        env_part = trtf_part[:idx].strip()
-        trtf_part = trtf_part[idx:]
+    # Extract just the trtmc binary + args part
+    trtmc_part = trtmc_cmd
+    # Remove env vars prefix (everything before /tmp/build/trtmc)
+    if "/tmp/build/trtmc" in trtmc_part:
+        idx = trtmc_part.index("/tmp/build/trtmc")
+        env_part = trtmc_part[:idx].strip()
+        trtmc_part = trtmc_part[idx:]
     else:
         env_part = ""
     # Remove trailing 2>&1
-    trtf_part = trtf_part.replace("2>&1", "").strip()
+    trtmc_part = trtmc_part.replace("2>&1", "").strip()
 
     rep = f"{output_prefix}.nsys-rep"
     cmd = (f"{env_part} {nsys} profile -t cuda,nvtx --cuda-graph-trace=node "
            f"-o {output_prefix} --force-overwrite true "
-           f"{trtf_part} 2>&1")
+           f"{trtmc_part} 2>&1")
     print("[nsys] Profiling...")
     rc, out = run_cmd(cmd, timeout=300, dry_run=dry_run)
     if dry_run:

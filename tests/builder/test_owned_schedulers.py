@@ -20,7 +20,7 @@ import pytest
 
 
 # Ensure imports resolve to this workspace's Python package.
-_PKG_ROOT = Path(__file__).resolve().parents[2] / "trtf_build"
+_PKG_ROOT = Path(__file__).resolve().parents[2] / "tensorrt_model_connect"
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
@@ -32,7 +32,7 @@ def test_flow_match_set_timesteps_builds_expected_schedule() -> None:
     Preconditions: Scheduler is created with default train timesteps and shift.
     Postconditions: Timesteps are decreasing float32 values and sigma appends 0.
     """
-    from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
 
     scheduler = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=1.0)
     scheduler.set_timesteps(num_inference_steps=4)
@@ -53,7 +53,7 @@ def test_flow_match_set_timesteps_with_shift_changes_tail() -> None:
     Preconditions: Scheduler is created with non-default shift value.
     Postconditions: Final timestep is larger than unshifted schedule tail.
     """
-    from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
 
     scheduler = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=2.0)
     scheduler.set_timesteps(num_inference_steps=4)
@@ -70,7 +70,7 @@ def test_flow_match_step_uses_sigma_delta_and_returns_float32() -> None:
     Preconditions: Internal sigma schedule is initialized with two values.
     Postconditions: Step output matches expected update and is float32.
     """
-    from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
 
     scheduler = FlowMatchEulerScheduler()
     scheduler._sigmas = np.array([1.0, 0.5], dtype=np.float64)
@@ -96,7 +96,7 @@ def test_flow_match_add_noise_is_linear_interpolation() -> None:
     Preconditions: Original sample, noise sample, and timestep are provided.
     Postconditions: Output equals the expected convex combination.
     """
-    from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
 
     scheduler = FlowMatchEulerScheduler(num_train_timesteps=1000)
     original = np.array([4.0, -4.0], dtype=np.float32)
@@ -115,7 +115,7 @@ def test_get_scheduler_factory_and_unknown_error() -> None:
     Preconditions: Scheduler name is valid once and invalid once.
     Postconditions: Valid name returns instance; invalid name raises ValueError.
     """
-    from trtf_build.schedulers import FlowMatchEulerScheduler, get_scheduler
+    from tensorrt_model_connect.schedulers import FlowMatchEulerScheduler, get_scheduler
 
     scheduler = get_scheduler("flow_match_euler", shift=1.5)
     assert isinstance(scheduler, FlowMatchEulerScheduler)
@@ -132,7 +132,7 @@ def test_scheduler_protocol_declares_required_methods() -> None:
     Preconditions: Scheduler protocol is importable.
     Postconditions: Protocol exposes all required API method names.
     """
-    from trtf_build.schedulers.base import Scheduler
+    from tensorrt_model_connect.schedulers.base import Scheduler
 
     assert hasattr(Scheduler, "timesteps")
     assert hasattr(Scheduler, "set_timesteps")
@@ -142,24 +142,24 @@ def test_scheduler_protocol_declares_required_methods() -> None:
 
 @pytest.mark.unit
 def test_package_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Intent: validate `python -m trtf_build` delegates to cli.main.
+    """Intent: validate `python -m tensorrt_model_connect` delegates to cli.main.
 
-    Preconditions: A fake `trtf_build.cli` module with callable `main` is injected.
-    Postconditions: Importing/executing `trtf_build.__main__` calls fake `main` once.
+    Preconditions: A fake `tensorrt_model_connect.cli` module with callable `main` is injected.
+    Postconditions: Importing/executing `tensorrt_model_connect.__main__` calls fake `main` once.
     """
     calls: list[str] = []
 
-    fake_cli = types.ModuleType("trtf_build.cli")
+    fake_cli = types.ModuleType("tensorrt_model_connect.cli")
 
     def _fake_main() -> None:
         calls.append("called")
 
     fake_cli.main = _fake_main  # type: ignore[attr-defined]
 
-    monkeypatch.setitem(sys.modules, "trtf_build.cli", fake_cli)
-    sys.modules.pop("trtf_build.__main__", None)
+    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.cli", fake_cli)
+    sys.modules.pop("tensorrt_model_connect.__main__", None)
 
-    runpy.run_module("trtf_build.__main__", run_name="__main__")
+    runpy.run_module("tensorrt_model_connect.__main__", run_name="__main__")
 
     assert calls == ["called"]
 
@@ -168,17 +168,17 @@ def test_package_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -
 def test_package_init_exports_expected_symbols() -> None:
     """Intent: verify top-level package re-exports expected public API.
 
-    Preconditions: Local `trtf_build` package is importable.
-    Postconditions: Public symbols from `trtf_build.__init__` exist and are usable.
+    Preconditions: Local `tensorrt_model_connect` package is importable.
+    Postconditions: Public symbols from `tensorrt_model_connect.__init__` exist and are usable.
     """
     import importlib
-    import trtf_build
+    import tensorrt_model_connect
 
-    # Repo layout may expose an outer namespace package at `trtf_build`.
+    # Repo layout may expose an outer namespace package at `tensorrt_model_connect`.
     # Validate exports from the concrete runtime package in either layout.
-    pkg = trtf_build
-    if getattr(trtf_build, "__file__", None) is None:
-        pkg = importlib.import_module("trtf_build.trtf_build")
+    pkg = tensorrt_model_connect
+    if getattr(tensorrt_model_connect, "__file__", None) is None:
+        pkg = importlib.import_module("tensorrt_model_connect.tensorrt_model_connect")
 
     if hasattr(pkg, "__version__"):
         assert pkg.__version__ == "0.1.0"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-validation: verify Python TrtRunner matches C++ trtf binary.
+"""Cross-validation: verify Python TrtRunner matches C++ trtmc binary.
 
 Runs the same bundle+prompt through both paths and asserts identical
 generated tokens. This is the consistency guarantee between the Python
@@ -12,7 +12,7 @@ models (MambaTrtRunner), auto-detected from the bundle's config.json.
 Usage (inside container):
     python3 tools/test_runner_parity.py \
       --bundle /tmp/qwen3.trtfb \
-      --binary ./build/trtf \
+      --binary ./build/trtmc \
       --hf-python .venv/bin/python \
       --prompt "The capital of France is" \
       --max-new-tokens 20
@@ -49,7 +49,7 @@ def _read_bundle_header(bundle: str) -> tuple[dict, dict, int]:
 def _extract_bundle_files(bundle: str, sections: dict,
                           data_start: int) -> str:
     """Extract tokenizer and config files from bundle into a temp dir."""
-    tmpdir = tempfile.mkdtemp(prefix="trtf_parity_")
+    tmpdir = tempfile.mkdtemp(prefix="trtmc_parity_")
     with open(bundle, "rb") as f:
         for name in ("tokenizer.json", "tokenizer_config.json",
                      "config.json", "special_tokens_map.json",
@@ -75,7 +75,7 @@ def _read_bundle_config(bundle: str, sections: dict,
 
 def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int,
             hf_python: str) -> str:
-    """Run C++ trtf binary, return generated text."""
+    """Run C++ trtmc binary, return generated text."""
     cmd = [binary, "run", bundle, "--prompt", prompt,
            "--max-new-tokens", str(max_new_tokens)]
     if hf_python:
@@ -95,7 +95,7 @@ def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int,
 def run_python(bundle: str, prompt: str,
                max_new_tokens: int) -> tuple[str, list[int]]:
     """Run Python TrtRunner (or MambaTrtRunner), return (text, token_ids)."""
-    from trtf_build.debug_runner import load_engine_from_bundle, TrtRunner
+    from tensorrt_model_connect.debug_runner import load_engine_from_bundle, TrtRunner
 
     engine_plan, _header = load_engine_from_bundle(bundle)
 
@@ -118,7 +118,7 @@ def run_python(bundle: str, prompt: str,
 
     # Create the appropriate runner
     if runtime_strategy == "ssm_recurrent":
-        from trtf_build.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.debug_runner import MambaTrtRunner
         runner = MambaTrtRunner(
             engine_plan=engine_plan,
             num_layers=header_raw["num_layers"],
@@ -159,10 +159,10 @@ def run_python(bundle: str, prompt: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Cross-validate Python TrtRunner vs C++ trtf binary")
+        description="Cross-validate Python TrtRunner vs C++ trtmc binary")
     parser.add_argument("--bundle", required=True, help=".trtfb bundle path")
-    parser.add_argument("--binary", default="./build/trtf",
-                        help="Path to trtf C++ binary")
+    parser.add_argument("--binary", default="./build/trtmc",
+                        help="Path to trtmc C++ binary")
     parser.add_argument("--hf-python", default="",
                         help="Python path for HF tokenizer bridge")
     parser.add_argument("--prompt", default="The capital of France is")
@@ -228,7 +228,7 @@ def run_as_diff_test(ctx):
     t0 = _time.monotonic()
     try:
         bundle = ctx.bundle_path
-        binary = ctx.binary_path or "./build/trtf"
+        binary = ctx.binary_path or "./build/trtmc"
         hf_python = ctx.hf_python or ""
         prompt = "The capital of France is"
 
@@ -269,7 +269,7 @@ def run_as_diff_test(ctx):
     t0 = _time.monotonic()
     try:
         bundle = ctx.bundle_path
-        binary = ctx.binary_path or "./build/trtf"
+        binary = ctx.binary_path or "./build/trtmc"
         hf_python = ctx.hf_python or ""
         prompt = "The capital of France is"
 

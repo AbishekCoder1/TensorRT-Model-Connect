@@ -2,16 +2,16 @@
 
 #include <string>
 
-#ifndef TRTF_SOURCE_DIR
-#define TRTF_SOURCE_DIR "."
+#ifndef TRTMC_SOURCE_DIR
+#define TRTMC_SOURCE_DIR "."
 #endif
 
-namespace trtf {
+namespace trtmc {
 
 // Process-wide runtime source-dir setting. Populated by
 // set_source_dir(...) from pipeline_factory after resolving the
 // platform.* registry namespace. Empty (the default) means "use the
-// compile-time TRTF_SOURCE_DIR." Replaces the old TRTF_DATA_DIR env var.
+// compile-time TRTMC_SOURCE_DIR." Replaces the old TRTMC_DATA_DIR env var.
 static std::string& mutable_source_dir() {
     static std::string value;
     return value;
@@ -25,7 +25,7 @@ std::string source_dir() {
     const auto& configured_value = mutable_source_dir();
     if (!configured_value.empty())
         return configured_value;
-    return TRTF_SOURCE_DIR;
+    return TRTMC_SOURCE_DIR;
 }
 
 std::string scripts_dir() {
@@ -44,4 +44,4 @@ std::string model_path(const char* relative_path) {
     return models_dir() + "/" + relative_path;
 }
 
-} // namespace trtf
+} // namespace trtmc

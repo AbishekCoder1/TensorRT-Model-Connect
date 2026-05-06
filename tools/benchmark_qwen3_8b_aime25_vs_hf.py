@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hf-attn-impl", default="eager")
     parser.add_argument("--hf-dtype", choices=["auto", "bfloat16", "float16"], default="auto")
     parser.add_argument("--hf-python", default=sys.executable)
-    parser.add_argument("--trtf-benchmark-binary", default="build/trtf_dataset_benchmark")
+    parser.add_argument("--trtmc-benchmark-binary", default="build/trtmc_dataset_benchmark")
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Extra KEY=VALUE env override for the TriAttention TRT run (repeatable)",
     )
-    # Generic config surface. No per-knob flags. Forwards to the trtf
+    # Generic config surface. No per-knob flags. Forwards to the trtmc
     # binary via --config / --set; dense- and tri-specific setters layer on
     # top of the shared --config for asymmetric runs.
     parser.add_argument(
@@ -395,7 +395,7 @@ def main() -> None:
     hf_envs = [base_env | {"CUDA_VISIBLE_DEVICES": gpu} for gpu in hf_gpus]
 
     dense_cmd = [
-        args.trtf_benchmark_binary,
+        args.trtmc_benchmark_binary,
         args.dense_bundle,
         str(dataset_path),
         str(dense_out),
@@ -414,7 +414,7 @@ def main() -> None:
         "--stop-on-answer",
     ]
     tri_cmd = [
-        args.trtf_benchmark_binary,
+        args.trtmc_benchmark_binary,
         args.tri_bundle,
         str(dataset_path),
         str(tri_out),

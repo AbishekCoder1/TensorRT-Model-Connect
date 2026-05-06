@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 namespace {
 
 std::string normalize_task_kind(const std::string& raw) {
@@ -177,4 +177,4 @@ EmbeddingResult PatchTSMixerPipeline::solve(const float* branch_input, int32_t b
     return tensor_to_embedding_result(*selected);
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -1,14 +1,14 @@
 // Registration for the "audio_bark" namespace schema.
-// Mirrors trtf_build/trtf_build/runtime_config/schemas/audio_bark.py.
+// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/audio_bark.py.
 
-#include "trtf/config/schemas/audio_bark.h"
+#include "trtmc/config/schemas/audio_bark.h"
 
 #include <any>
 #include <cstdint>
 #include <set>
 #include <string>
 
-namespace trtf::config::schemas {
+namespace trtmc::config::schemas {
 
 Schema make_audio_bark_schema() {
     const std::set<Layer> session = {Layer::SessionRequest, Layer::PlatformProfile};
@@ -23,4 +23,4 @@ Schema make_audio_bark_schema() {
 }
 
 REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_audio_bark_schema, make_audio_bark_schema);
-} // namespace trtf::config::schemas
+} // namespace trtmc::config::schemas

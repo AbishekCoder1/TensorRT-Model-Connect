@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 SamPipeline::SamPipeline(std::unique_ptr<TrtModule> image_encoder,
                          std::unique_ptr<TrtModule> mask_decoder, std::string model_id_str)
@@ -49,4 +49,4 @@ SegmentResult SamPipeline::segment(const float* pixels, int32_t height, int32_t 
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

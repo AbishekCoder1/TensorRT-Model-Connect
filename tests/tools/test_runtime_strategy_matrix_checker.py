@@ -53,8 +53,8 @@ def test_extract_runtime_strategies_from_cpp_files_aggregates_entrypoint_and_bui
 ):
     mod = _import_checker()
 
-    trtf_c = tmp_path / "trtf_c.cpp"
-    trtf_c.write_text(
+    trtmc_c = tmp_path / "trtmc_c.cpp"
+    trtmc_c.write_text(
         """
         static const std::unordered_map<std::string, int> kStrategyFamilies = {
             {"decoder_kv_cache", 1},
@@ -76,7 +76,7 @@ def test_extract_runtime_strategies_from_cpp_files_aggregates_entrypoint_and_bui
     )
 
     strategies = mod.extract_runtime_strategies_from_cpp_files(
-        [trtf_c, builder],
+        [trtmc_c, builder],
         {"decoder_kv_cache", "diffusion", "vision_language", "segmentation"},
     )
     assert strategies == {
@@ -172,7 +172,7 @@ RUNTIME_TO_TASK_STRATEGY = {
         encoding="utf-8",
     )
 
-    cpp_path = tmp_path / "src" / "cabi" / "api" / "trtf_c.cpp"
+    cpp_path = tmp_path / "src" / "cabi" / "api" / "trtmc_c.cpp"
     cpp_path.parent.mkdir(parents=True)
     cpp_path.write_text(
         """

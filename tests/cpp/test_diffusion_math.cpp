@@ -60,7 +60,7 @@ static bool test_matmul_1x1_with_bias()
     const float bias[1] = {2.0F};
     float out[1]        = {0.0F};
 
-    trtf::diffusion_math::cpu_matmul_bias(A, B, bias, out, 1, 1, 1);
+    trtmc::diffusion_math::cpu_matmul_bias(A, B, bias, out, 1, 1, 1);
     return near(out[0], 14.0F);  // 3*4 + 2 = 14
 }
 
@@ -76,7 +76,7 @@ static bool test_matmul_2x2_no_bias()
     const float B[4] = {5.0F, 6.0F, 7.0F, 8.0F};
     float out[4]     = {0.0F};
 
-    trtf::diffusion_math::cpu_matmul_bias(A, B, nullptr, out, 2, 2, 2);
+    trtmc::diffusion_math::cpu_matmul_bias(A, B, nullptr, out, 2, 2, 2);
 
     return near(out[0], 19.0F) && near(out[1], 22.0F) &&
            near(out[2], 43.0F) && near(out[3], 50.0F);
@@ -92,7 +92,7 @@ static bool test_matmul_2x2_no_bias()
 static bool test_silu_values()
 {
     float data[3] = {0.0F, 2.0F, -1.0F};
-    trtf::diffusion_math::cpu_silu_inplace(data, 3);
+    trtmc::diffusion_math::cpu_silu_inplace(data, 3);
 
     // SiLU(0) = 0 / (1 + exp(0)) = 0
     if (!near(data[0], 0.0F)) return false;
@@ -108,7 +108,7 @@ static bool test_silu_values()
 // Postconditions: no side effects, no crash
 static bool test_silu_empty()
 {
-    trtf::diffusion_math::cpu_silu_inplace(nullptr, 0);
+    trtmc::diffusion_math::cpu_silu_inplace(nullptr, 0);
     return true;
 }
 
@@ -122,7 +122,7 @@ static bool test_silu_empty()
 static bool test_gelu_tanh_values()
 {
     float data[3] = {0.0F, 1.0F, -1.0F};
-    trtf::diffusion_math::cpu_gelu_tanh_inplace(data, 3);
+    trtmc::diffusion_math::cpu_gelu_tanh_inplace(data, 3);
 
     if (!near(data[0], 0.0F, 1e-4F)) return false;
     if (data[1] <= 0.0F) return false;  // GELU(1) ≈ 0.841
@@ -141,7 +141,7 @@ static bool test_gelu_tanh_values()
 static bool test_sinusoidal_embedding_zero_value()
 {
     std::vector<float> emb;
-    trtf::diffusion_math::fill_sinusoidal_embedding(0.0F, 4, emb);
+    trtmc::diffusion_math::fill_sinusoidal_embedding(0.0F, 4, emb);
 
     if (emb.size() != 4) return false;
     // cos(0 * freq) = 1.0 for any freq
@@ -159,7 +159,7 @@ static bool test_sinusoidal_embedding_zero_value()
 static bool test_sinusoidal_embedding_range()
 {
     std::vector<float> emb;
-    trtf::diffusion_math::fill_sinusoidal_embedding(3.14F, 8, emb);
+    trtmc::diffusion_math::fill_sinusoidal_embedding(3.14F, 8, emb);
 
     if (emb.size() != 8) return false;
     for (float v : emb)
@@ -190,7 +190,7 @@ static bool test_timestep_mlp_output_size()
     const std::vector<float> b2(static_cast<std::size_t>(dim), 0.0F);
 
     std::vector<float> output;
-    trtf::diffusion_math::compute_timestep_mlp(
+    trtmc::diffusion_math::compute_timestep_mlp(
         1.0F, freq_dim, dim, w0, b0, w2, b2, output);
 
     return output.size() == static_cast<std::size_t>(dim);
@@ -209,7 +209,7 @@ static bool test_timestep_mlp_zero_weights()
     const std::vector<float> zeros_2x2(static_cast<std::size_t>(dim * dim), 0.0F);
 
     std::vector<float> output;
-    trtf::diffusion_math::compute_timestep_mlp(
+    trtmc::diffusion_math::compute_timestep_mlp(
         5.0F, freq_dim, dim, zeros_4x2, zeros_2, zeros_2x2, zeros_2, output);
 
     if (output.size() != static_cast<std::size_t>(dim)) return false;

@@ -15,7 +15,7 @@
 // Preconditions: TOKENIZER_JSON and GOLDEN_VECTORS env vars set.
 // Postconditions: All golden vectors match (exit 0).
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdlib>
 #include <fstream>
@@ -102,21 +102,21 @@ std::string read_file(const std::string& path)
 }
 
 // Try BPE → WordPiece → Unigram (mirrors try_create_native_tokenizer)
-std::unique_ptr<trtf::ITokenizer> create_tokenizer(
+std::unique_ptr<trtmc::ITokenizer> create_tokenizer(
     const char* data, size_t size, bool add_special)
 {
     try {
-        auto tok = trtf::CreateBpeTokenizer(data, size, add_special);
+        auto tok = trtmc::CreateBpeTokenizer(data, size, add_special);
         if (tok) { std::cerr << "  [type: BPE]\n"; return tok; }
     } catch (...) {}
 
     try {
-        auto tok = trtf::CreateWordPieceTokenizer(data, size, add_special);
+        auto tok = trtmc::CreateWordPieceTokenizer(data, size, add_special);
         if (tok) { std::cerr << "  [type: WordPiece]\n"; return tok; }
     } catch (...) {}
 
     try {
-        auto tok = trtf::CreateUnigramTokenizer(data, size, add_special);
+        auto tok = trtmc::CreateUnigramTokenizer(data, size, add_special);
         if (tok) { std::cerr << "  [type: Unigram]\n"; return tok; }
     } catch (...) {}
 

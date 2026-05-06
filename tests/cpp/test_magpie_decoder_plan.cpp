@@ -29,7 +29,7 @@ void check(bool condition, const char* name)
 
 void test_magpie_decoder_plan_enables_cfg_and_gpu_greedy()
 {
-    trtf::MagpieTTSConfig cfg;
+    trtmc::MagpieTTSConfig cfg;
     cfg.hidden_size = 1024;
     cfg.num_codebooks = 8;
     cfg.codebook_size = 2018;
@@ -38,7 +38,7 @@ void test_magpie_decoder_plan_enables_cfg_and_gpu_greedy()
     cfg.finished_limit_with_eot = 12;
     cfg.max_source_positions = 256;
 
-    const auto plan = trtf::make_magpie_decoder_plan(
+    const auto plan = trtmc::make_magpie_decoder_plan(
         cfg,
         true,
         true,
@@ -61,13 +61,13 @@ void test_magpie_decoder_plan_enables_cfg_and_gpu_greedy()
 
 void test_magpie_decoder_plan_uses_fallback_estimate_without_cross_attention()
 {
-    trtf::MagpieTTSConfig cfg;
+    trtmc::MagpieTTSConfig cfg;
     cfg.num_codebooks = 4;
     cfg.codebook_size = 128;
     cfg.cfg_scale = 0.9F;
     cfg.greedy = false;
 
-    const auto plan = trtf::make_magpie_decoder_plan(
+    const auto plan = trtmc::make_magpie_decoder_plan(
         cfg,
         false,
         false,
@@ -82,9 +82,9 @@ void test_magpie_decoder_plan_uses_fallback_estimate_without_cross_attention()
     check(!plan.use_gpu_greedy, "magpie decoder plan disables gpu greedy when generation is not greedy");
     check(!plan.use_cross_attn_tracking, "magpie decoder plan disables cross-attention tracking without output tensor");
     check(plan.estimated_frames == 21, "magpie decoder plan falls back to heuristic frame estimate");
-    check(trtf::should_enable_magpie_cfg(cfg, true, true, true) == false,
+    check(trtmc::should_enable_magpie_cfg(cfg, true, true, true) == false,
         "magpie cfg helper requires cfg_scale above one");
-    check(trtf::should_enable_magpie_gpu_greedy(true, false) == false,
+    check(trtmc::should_enable_magpie_gpu_greedy(true, false) == false,
         "magpie gpu greedy helper requires greedy mode");
 }
 

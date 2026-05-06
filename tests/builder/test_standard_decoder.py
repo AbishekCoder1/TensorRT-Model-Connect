@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
 from tests.builder.conftest import requires_trt
 
 
@@ -24,7 +24,7 @@ def _make_weights(hidden: int, vocab: int, num_layers: int,
                   position_type: str = "rope",
                   has_bias: bool = False) -> dict:
     """Create a minimal synthetic weight dict for the standard decoder builder."""
-    from trtf_build.checkpoint_mapper import WeightDict
+    from tensorrt_model_connect.checkpoint_mapper import WeightDict
     rng = np.random.RandomState(42)
     w = WeightDict()
     w["embedding"] = rng.randn(vocab, hidden).astype(np.float32)
@@ -87,8 +87,8 @@ class TestTensorNamingContract:
     """Verify that built engines have the exact I/O tensor names the C++ runtime expects."""
 
     def _build_engine(self, **kwargs):
-        from trtf_build.config import ModelConfig
-        from trtf_build.standard_decoder_builder import build_standard_decoder_engine
+        from tensorrt_model_connect.config import ModelConfig
+        from tensorrt_model_connect.standard_decoder_builder import build_standard_decoder_engine
 
         hidden, vocab, num_layers = 16, 32, 2
         num_heads = 4
@@ -194,8 +194,8 @@ class TestTensorNamingContract:
         assert "logits" in outputs
 
     def test_dynamic_kv_cache_shapes(self):
-        from trtf_build.config import ModelConfig
-        from trtf_build.standard_decoder_builder import build_standard_decoder_engine
+        from tensorrt_model_connect.config import ModelConfig
+        from tensorrt_model_connect.standard_decoder_builder import build_standard_decoder_engine
 
         hidden, vocab, num_layers = 16, 32, 2
         num_heads = 4
@@ -226,8 +226,8 @@ class TestTensorNamingContract:
         assert tuple(engine.get_tensor_shape("cache_v_0")) == (-1, attention_size)
 
     def test_dynamic_kv_cache_multiple_profiles(self):
-        from trtf_build.config import ModelConfig
-        from trtf_build.standard_decoder_builder import build_standard_decoder_engine
+        from tensorrt_model_connect.config import ModelConfig
+        from tensorrt_model_connect.standard_decoder_builder import build_standard_decoder_engine
 
         hidden, vocab, num_layers = 16, 32, 2
         num_heads = 4
@@ -267,8 +267,8 @@ class TestTensorNamingContract:
                                                                     (4, attention_size)]
 
     def test_dynamic_kv_cache_rejects_alibi(self):
-        from trtf_build.config import ModelConfig
-        from trtf_build.standard_decoder_builder import build_standard_decoder_engine
+        from tensorrt_model_connect.config import ModelConfig
+        from tensorrt_model_connect.standard_decoder_builder import build_standard_decoder_engine
 
         hidden, vocab, num_layers = 16, 32, 2
         num_heads = 4

@@ -35,9 +35,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -54,7 +54,7 @@ class XGLMPluginTester(FamilyPluginTester):
       - Config uses d_model, ffn_dim, attention_heads, num_layers
     """
 
-    plugin_module = "trtf_build.families.xglm"
+    plugin_module = "tensorrt_model_connect.families.xglm"
     model_type = "xglm"
 
     def get_config_dict(self) -> dict:

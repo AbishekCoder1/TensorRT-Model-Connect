@@ -21,10 +21,10 @@
 // =============================================================================
 
 #include "runtime/pipelines/text_generation_pipeline.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
-// pipeline_interface.h was removed; GenerateConfig is in trtf/pipeline.h
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
+// pipeline_interface.h was removed; GenerateConfig is in trtmc/pipeline.h
 // (already included transitively via text_generation_pipeline.h)
 
 #include "runtime/backend/trt_module_impl.h"
@@ -46,9 +46,9 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
-static trtf::TrtLogger g_logger;
+static trtmc::TrtLogger g_logger;
 
-class MockTokenizer final : public trtf::ITokenizer {
+class MockTokenizer final : public trtmc::ITokenizer {
   public:
     std::vector<int32_t> encode(const std::string& text) const override {
         (void)text;
@@ -91,15 +91,15 @@ class MockTokenizer final : public trtf::ITokenizer {
     }
 };
 
-class SequenceSampler final : public trtf::ISampler {
+class SequenceSampler final : public trtmc::ISampler {
   public:
     explicit SequenceSampler(std::vector<int32_t> tokens) : tokens_(std::move(tokens)) {}
 
-    trtf::SampleResult sample(const float* logits, int32_t vocab_size,
-                              const trtf::SamplingParams& params) override {
+    trtmc::SampleResult sample(const float* logits, int32_t vocab_size,
+                              const trtmc::SamplingParams& params) override {
         (void)logits;
         (void)vocab_size;
-        trtf::SampleResult result;
+        trtmc::SampleResult result;
         const std::size_t idx = cursor_ < tokens_.size() ? cursor_ : (tokens_.size() - 1);
         result.token_id = tokens_[idx];
         result.is_eos = (result.token_id == params.eos_token_id);
@@ -108,7 +108,7 @@ class SequenceSampler final : public trtf::ISampler {
         return result;
     }
 
-    trtf::LogitsLocation logits_location() const override { return trtf::LogitsLocation::HOST; }
+    trtmc::LogitsLocation logits_location() const override { return trtmc::LogitsLocation::HOST; }
     const char* sampler_type() const override { return "sequence"; }
     void reset() override { cursor_ = 0; }
 
@@ -122,13 +122,13 @@ class SequenceSampler final : public trtf::ISampler {
 // Outputs: logits [4] float32
 // The engine produces fixed logits [0.1, 0.2, 0.9, 0.3] regardless of input
 // (identity on a constant), so argmax always returns 2.
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder)
         return nullptr;
 
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    auto network = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     // Inputs
@@ -157,13 +157,13 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
     auto* id_mask = network->addIdentity(*mask_inp);
     id_mask->getOutput(0)->setName("_unused_mask");
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
     if (!plan)
         return nullptr;
 
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
@@ -177,17 +177,17 @@ static void test_pipeline_construction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                         engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::TextGenConfig cfg;
+    trtmc::TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_bos = 0;
     cfg.id_eos = 2; // argmax will always hit this!
     cfg.has_position_input = false;
 
-    trtf::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+    trtmc::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
     check(std::string(pipeline.pipeline_type()) == "TextGenerationPipeline", "pipeline name");
 
@@ -204,19 +204,19 @@ static void test_generate_stops_at_eos() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                         engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::TextGenConfig cfg;
+    trtmc::TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_bos = 0;
     cfg.id_eos = 2; // argmax of [0.1, 0.2, 0.9, 0.3] = 2 = eos
     cfg.has_position_input = false;
 
-    trtf::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+    trtmc::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 10;
 
     auto result = pipeline.generate_ids({1}, gen_cfg);
@@ -239,19 +239,19 @@ static void test_generate_max_tokens() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                         engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::TextGenConfig cfg;
+    trtmc::TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_bos = 0;
     cfg.id_eos = 99; // EOS token that argmax will never produce
     cfg.has_position_input = false;
 
-    trtf::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+    trtmc::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 3;
 
     auto result = pipeline.generate_ids({1}, gen_cfg);
@@ -268,14 +268,14 @@ static void test_generate_max_tokens() {
 
 static void test_argmax() {
     std::vector<float> logits = {0.1f, 0.5f, 0.3f, 0.8f, 0.2f};
-    int32_t result = trtf::TextGenerationPipeline::argmax(logits);
+    int32_t result = trtmc::TextGenerationPipeline::argmax(logits);
     check(result == 3, "argmax of [0.1, 0.5, 0.3, 0.8, 0.2] = 3");
 
     std::vector<float> single = {42.0f};
-    check(trtf::TextGenerationPipeline::argmax(single) == 0, "argmax of single = 0");
+    check(trtmc::TextGenerationPipeline::argmax(single) == 0, "argmax of single = 0");
 
     std::vector<float> empty;
-    check(trtf::TextGenerationPipeline::argmax(empty) == 0, "argmax of empty = 0");
+    check(trtmc::TextGenerationPipeline::argmax(empty) == 0, "argmax of empty = 0");
 }
 
 static void test_zero_max_tokens() {
@@ -286,18 +286,18 @@ static void test_zero_max_tokens() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                         engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::TextGenConfig cfg;
+    trtmc::TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 2;
     cfg.has_position_input = false;
 
-    trtf::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
+    trtmc::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream);
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 0;
 
     auto result = pipeline.generate_ids({1, 2, 3}, gen_cfg);
@@ -314,21 +314,21 @@ static void test_stop_on_boxed_answer() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                         engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
     auto tokenizer = std::make_shared<MockTokenizer>();
     auto sampler = std::make_unique<SequenceSampler>(std::vector<int32_t>{1, 2, 3, 4});
 
-    trtf::TextGenConfig cfg;
+    trtmc::TextGenConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 99;
     cfg.has_position_input = false;
 
-    trtf::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream,
+    trtmc::TextGenerationPipeline pipeline(std::move(module), std::move(cache), cfg, stream,
                                           tokenizer, "mock", std::move(sampler));
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 10;
     gen_cfg.stop_on_boxed_answer = true;
     gen_cfg.stop_check_interval = 1;

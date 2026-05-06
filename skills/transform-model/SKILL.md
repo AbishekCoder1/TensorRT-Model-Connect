@@ -10,9 +10,9 @@ Transform the given HF model to a torch-trt `.trtfb` bundle.
 **Required arguments (pass after skill name):**
 - `hf_model` — HuggingFace model ID (e.g. `Qwen/Qwen3-0.6B`)
 - `branch` — Git branch to work on (created if it doesn't exist)
-- `container` (optional) — Docker container name (default: `trtf-dev-torchtrt`)
+- `container` (optional) — Docker container name (default: `trtmc-dev-torchtrt`)
 
-**Container workspace:** `/workspace/trt-transformers-cpp/`
+**Container workspace:** `/workspace/tensorrt-model-connect/`
 
 ## Hard Rules
 
@@ -51,7 +51,7 @@ After user confirmation:
 2. Read docs/torch-trt/TORCHTRT_TRANSFORM_GUIDE.md
 3. Read docs/torch-trt/TORCHTRT_KNOWN_ISSUES.md
 4. Identify model architecture type (decoder, encoder-only, diffusion, etc.)
-5. Check if a family plugin already exists in ttrt_build/ttrt_build/families/
+5. Check if a family plugin already exists in tensorrt_model_connect/tensorrt_model_connect/families/
 ```
 
 ### Phase 2: Implement
@@ -59,41 +59,41 @@ After user confirmation:
 Choose the right path based on model type:
 
 **Decoder models (causal LM):**
-- Strategy: `decoder` (in `ttrt_build/ttrt_build/strategies/decoder.py`)
+- Strategy: `decoder` (in `tensorrt_model_connect/tensorrt_model_connect/strategies/decoder.py`)
 - Wrapper: `StatelessCacheWrapper` handles KV cache I/O automatically
-- You only need a family plugin in `ttrt_build/ttrt_build/families/` if one doesn't exist
-- Reference: `ttrt_build/ttrt_build/families/qwen.py` (standard decoder)
+- You only need a family plugin in `tensorrt_model_connect/tensorrt_model_connect/families/` if one doesn't exist
+- Reference: `tensorrt_model_connect/tensorrt_model_connect/families/qwen.py` (standard decoder)
 
 **Encoder-only models:**
-- Strategy: `encoder_only` (in `ttrt_build/ttrt_build/strategies/encoder_only.py`)
-- Reference: `ttrt_build/ttrt_build/families/bert.py`
+- Strategy: `encoder_only` (in `tensorrt_model_connect/tensorrt_model_connect/strategies/encoder_only.py`)
+- Reference: `tensorrt_model_connect/tensorrt_model_connect/families/bert.py`
 
 **Diffusion models (multi-engine):**
-- Strategy: `diffusion` (in `ttrt_build/ttrt_build/strategies/diffusion.py`)
+- Strategy: `diffusion` (in `tensorrt_model_connect/tensorrt_model_connect/strategies/diffusion.py`)
 - Must implement `build_components()` in the family plugin
-- Reference: `ttrt_build/ttrt_build/families/pixart.py`, `flux.py`, `wan_t2v.py`
+- Reference: `tensorrt_model_connect/tensorrt_model_connect/families/pixart.py`, `flux.py`, `wan_t2v.py`
 - CRITICAL: Read Known Issue #1 (SDPA + masks = NaN) and #3 (multiplicative masking)
 
 **Key files to know:**
 | File | Purpose |
 |------|---------|
-| `ttrt_build/ttrt_build/strategies/__init__.py` | Strategy registry |
-| `ttrt_build/ttrt_build/strategies/base.py` | BuildStrategy Protocol |
-| `ttrt_build/ttrt_build/compiler.py` | Build orchestrator |
-| `ttrt_build/ttrt_build/families/base.py` | FamilyPlugin protocol |
+| `tensorrt_model_connect/tensorrt_model_connect/strategies/__init__.py` | Strategy registry |
+| `tensorrt_model_connect/tensorrt_model_connect/strategies/base.py` | BuildStrategy Protocol |
+| `tensorrt_model_connect/tensorrt_model_connect/compiler.py` | Build orchestrator |
+| `tensorrt_model_connect/tensorrt_model_connect/families/base.py` | FamilyPlugin protocol |
 | `scripts/new_family.py` | Auto-scaffold a plugin from HF repo |
 
 ### Phase 3: Build
 
 ```bash
 # Decoder / encoder-only models
-docker exec <container> /opt/venv/bin/python -m ttrt_build build <hf_model> \
-  -o /workspace/trt-transformers-cpp/engines/<model>.trtfb \
+docker exec <container> /opt/venv/bin/python -m tensorrt_model_connect build <hf_model> \
+  -o /workspace/tensorrt-model-connect/engines/<model>.trtfb \
   --max-cache-length 256 --verbose
 
 # Diffusion models
-docker exec <container> /opt/venv/bin/python -m ttrt_build build <hf_model> \
-  -o /workspace/trt-transformers-cpp/engines/<model>.trtfb --verbose
+docker exec <container> /opt/venv/bin/python -m tensorrt_model_connect build <hf_model> \
+  -o /workspace/tensorrt-model-connect/engines/<model>.trtfb --verbose
 ```
 
 If build fails: read error, check KNOWN_ISSUES.md, fix, retry. Log new issues.
@@ -111,8 +111,8 @@ REPEAT until correct output:
 **For text models:**
 ```bash
 # Torch-TRT inference
-docker exec <container> ./build/trtf run \
-  /workspace/trt-transformers-cpp/engines/<model>.trtfb \
+docker exec <container> ./build/trtmc run \
+  /workspace/tensorrt-model-connect/engines/<model>.trtfb \
   --prompt "The capital of France is" --max-new-tokens 20 \
   --hf-python /opt/venv/bin/python
 
@@ -126,17 +126,17 @@ Pass criteria: `top1_match_rate >= 80%`, `mean_cosine_sim > 0.99`
 **For diffusion models:**
 ```bash
 # Run two semantically distinct prompts
-docker exec <container> ./build/trtf run \
-  /workspace/trt-transformers-cpp/engines/<model>.trtfb \
+docker exec <container> ./build/trtmc run \
+  /workspace/tensorrt-model-connect/engines/<model>.trtfb \
   --prompt "a golden retriever playing in snow" \
   --hf-python /opt/venv/bin/python \
-  -o /workspace/trt-transformers-cpp/outputs/<model>/dog_v1.png
+  -o /workspace/tensorrt-model-connect/outputs/<model>/dog_v1.png
 
-docker exec <container> ./build/trtf run \
-  /workspace/trt-transformers-cpp/engines/<model>.trtfb \
+docker exec <container> ./build/trtmc run \
+  /workspace/tensorrt-model-connect/engines/<model>.trtfb \
   --prompt "a red sports car on a highway" \
   --hf-python /opt/venv/bin/python \
-  -o /workspace/trt-transformers-cpp/outputs/<model>/car_v1.png
+  -o /workspace/tensorrt-model-connect/outputs/<model>/car_v1.png
 ```
 
 Pass criteria: images visually match prompts, outputs from different prompts are clearly distinct.
@@ -161,8 +161,8 @@ Run the E2E test:
 ```bash
 docker exec <container> /opt/venv/bin/python -m pytest \
   tests/test_e2e.py::test_e2e[<model-name>] -v \
-  --engine-dir /workspace/trt-transformers-cpp/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+  --engine-dir /workspace/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
   --rebuild-engines
 ```
 

@@ -26,20 +26,20 @@ Staged comparison to isolate audio quality issues:
 Usage:
     # Stage 1: Quick smoke test -- does C++ produce speech?
     python3 tools/diff_audio.py \\
-      --bundle bark.trtfb --binary ./build/trtf \\
+      --bundle bark.trtfb --binary ./build/trtmc \\
       --prompt "Hello, my dog is cute" \\
       --hf-python .venv/bin/python --stage 1
 
     # Stage 2: Token distribution comparison
     python3 tools/diff_audio.py \\
-      --bundle bark.trtfb --binary ./build/trtf \\
+      --bundle bark.trtfb --binary ./build/trtmc \\
       --model suno/bark-small \\
       --prompt "Hello, my dog is cute" \\
       --hf-python .venv/bin/python --stage 2
 
     # Stage 3: Codec waveform comparison
     python3 tools/diff_audio.py \\
-      --bundle bark.trtfb --binary ./build/trtf \\
+      --bundle bark.trtfb --binary ./build/trtmc \\
       --model suno/bark-small \\
       --prompt "Hello, my dog is cute" \\
       --hf-python .venv/bin/python --stage 3
@@ -51,7 +51,7 @@ Usage:
 
     # All stages 1-3 (default)
     python3 tools/diff_audio.py \\
-      --bundle bark.trtfb --binary ./build/trtf \\
+      --bundle bark.trtfb --binary ./build/trtmc \\
       --model suno/bark-small \\
       --prompt "Hello, my dog is cute" \\
       --hf-python .venv/bin/python
@@ -603,10 +603,10 @@ def stage4_greedy_parity(args) -> bool:
             )
         except ImportError:
             BarkFineGenerationConfig = None
-        from trtf_build.engine_builder import _resolve_model
-        from trtf_build.config import ModelConfig
-        from trtf_build.families import find_plugin
-        from trtf_build.debug_runner import TrtRunner, VisionTrtRunner
+        from tensorrt_model_connect.engine_builder import _resolve_model
+        from tensorrt_model_connect.config import ModelConfig
+        from tensorrt_model_connect.families import find_plugin
+        from tensorrt_model_connect.debug_runner import TrtRunner, VisionTrtRunner
     except ImportError as e:
         print(f"  SKIP: missing dependency: {e}", file=sys.stderr)
         return True
@@ -1129,7 +1129,7 @@ Stages:
 
 Examples:
   # Quick smoke test
-  python3 tools/diff_audio.py --bundle bark.trtfb --binary ./build/trtf \\
+  python3 tools/diff_audio.py --bundle bark.trtfb --binary ./build/trtmc \\
     --prompt "Hello, my dog is cute" --hf-python .venv/bin/python --stage 1
 
   # Greedy parity (TRT engine vs HF)
@@ -1137,7 +1137,7 @@ Examples:
     --max-semantic-tokens 100
 
   # Stages 1-3 comparison
-  python3 tools/diff_audio.py --bundle bark.trtfb --binary ./build/trtf \\
+  python3 tools/diff_audio.py --bundle bark.trtfb --binary ./build/trtmc \\
     --model suno/bark-small --prompt "Hello, my dog is cute" \\
     --hf-python .venv/bin/python
 """)
@@ -1146,7 +1146,7 @@ Examples:
     parser.add_argument("--bundle", default=None,
                         help="Path to .trtfb bundle")
     parser.add_argument("--binary", default=None,
-                        help="Path to trtf binary (e.g. ./build/trtf)")
+                        help="Path to trtmc binary (e.g. ./build/trtmc)")
     parser.add_argument("--prompt", default="Hello, my dog is cute.",
                         help="Text prompt")
     parser.add_argument("--hf-python", default="",

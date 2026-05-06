@@ -22,7 +22,7 @@
 
 #include "runtime/domains/multimodal/image_preprocessor.h"
 #include "test_helpers.h"
-#include "trtf/runtime/domains/multimodal/image_transform_helper.h"
+#include "trtmc/runtime/domains/multimodal/image_transform_helper.h"
 
 #include <cmath>
 #include <cstdio>
@@ -59,7 +59,7 @@ static void test_helper_normalize_hwc_to_chw()
         255, 128, 0
     };
 
-    trtf::ImageNormalizationParams params;
+    trtmc::ImageNormalizationParams params;
     params.width = 2;
     params.height = 1;
     params.channels = 3;
@@ -71,7 +71,7 @@ static void test_helper_normalize_hwc_to_chw()
     params.image_std[2] = 1.0F;
 
     std::vector<float> out_chw;
-    const bool ok = trtf::normalize_hwc_u8_to_chw(image_hwc, params, out_chw);
+    const bool ok = trtmc::normalize_hwc_u8_to_chw(image_hwc, params, out_chw);
     check(ok, "helper normalize: returns true");
     check(out_chw.size() == 6, "helper normalize: output size is C*H*W");
 
@@ -88,7 +88,7 @@ static void test_helper_normalize_std_floor_branch()
 {
     const std::vector<unsigned char> image_hwc = {128, 10, 20};
 
-    trtf::ImageNormalizationParams params;
+    trtmc::ImageNormalizationParams params;
     params.width = 1;
     params.height = 1;
     params.channels = 3;
@@ -100,7 +100,7 @@ static void test_helper_normalize_std_floor_branch()
     params.image_std[2] = 1.0F;
 
     std::vector<float> out_chw;
-    const bool ok = trtf::normalize_hwc_u8_to_chw(image_hwc, params, out_chw);
+    const bool ok = trtmc::normalize_hwc_u8_to_chw(image_hwc, params, out_chw);
     check(ok, "helper normalize std floor: returns true");
     check(out_chw.size() == 3, "helper normalize std floor: output size is 3");
 
@@ -118,14 +118,14 @@ static void test_helper_transform_simple_chw_branch()
         5.0F, 6.0F, 7.0F, 8.0F
     };
 
-    trtf::ImageTransformParams params;
-    params.layout = trtf::ImageTransformLayout::kSimpleChw;
+    trtmc::ImageTransformParams params;
+    params.layout = trtmc::ImageTransformLayout::kSimpleChw;
     params.target_size = 2;
     params.channels = 2;
 
     std::vector<float> out_values;
     int32_t out_channels = 0;
-    const bool ok = trtf::transform_chw_layout(input_chw, params, out_values, out_channels);
+    const bool ok = trtmc::transform_chw_layout(input_chw, params, out_values, out_channels);
 
     check(ok, "helper simple transform: returns true");
     check(out_channels == 2, "helper simple transform: out_channels=2");
@@ -141,8 +141,8 @@ static void test_helper_transform_qwen_merge_group_branch()
         input_chw[static_cast<std::size_t>(i)] = static_cast<float>(i);
     }
 
-    trtf::ImageTransformParams params;
-    params.layout = trtf::ImageTransformLayout::kQwenMergeGroup;
+    trtmc::ImageTransformParams params;
+    params.layout = trtmc::ImageTransformLayout::kQwenMergeGroup;
     params.target_size = 4;
     params.channels = 1;
     params.patch_size = 1;
@@ -151,7 +151,7 @@ static void test_helper_transform_qwen_merge_group_branch()
 
     std::vector<float> out_values;
     int32_t out_channels = 0;
-    const bool ok = trtf::transform_chw_layout(input_chw, params, out_values, out_channels);
+    const bool ok = trtmc::transform_chw_layout(input_chw, params, out_values, out_channels);
     check(ok, "helper qwen transform: returns true");
     check(out_channels == 2, "helper qwen transform: out_channels=C*T=2");
     check(out_values.size() == 32, "helper qwen transform: output size=2*4*4");
@@ -210,14 +210,14 @@ static std::string write_test_ppm(const std::string& dir)
 // Test: qwen_merge_group strategy — default, produces [C*T, H, W] with permutation.
 static void test_qwen_merge_group_strategy()
 {
-    trtf_test::TempDirGuard tmp;
+    trtmc_test::TempDirGuard tmp;
     const std::string& dir = tmp.path();
 
     // Write test image
     const std::string image_path = write_test_ppm(dir);
 
     // Configure for a small fixed size
-    trtf::VLPreprocessConfig config;
+    trtmc::VLPreprocessConfig config;
     config.fixed_image_size = 8;  // small for testing
     config.temporal_patch_size = 2;
     config.in_channels = 3;
@@ -229,7 +229,7 @@ static void test_qwen_merge_group_strategy()
     config.image_std[1] = 0.5F;
     config.image_std[2] = 0.5F;
 
-    auto result = trtf::load_and_preprocess_image(image_path, config);
+    auto result = trtmc::load_and_preprocess_image(image_path, config);
 
     check(result.ok, "qwen_merge_group: image loaded successfully");
     check(result.channels == 6, "qwen_merge_group: channels = T*C = 2*3 = 6");
@@ -256,13 +256,13 @@ static void test_qwen_merge_group_strategy()
 // Test: simple_chw strategy — produces [C, H, W] without permutation.
 static void test_simple_chw_strategy()
 {
-    trtf_test::TempDirGuard tmp;
+    trtmc_test::TempDirGuard tmp;
     const std::string& dir = tmp.path();
 
     // Write test image
     const std::string image_path = write_test_ppm(dir);
 
-    trtf::VLPreprocessConfig config;
+    trtmc::VLPreprocessConfig config;
     config.fixed_image_size = 8;
     config.in_channels = 3;
     config.preprocessor_type = "simple_chw";
@@ -273,7 +273,7 @@ static void test_simple_chw_strategy()
     config.image_std[1] = 0.5F;
     config.image_std[2] = 0.5F;
 
-    auto result = trtf::load_and_preprocess_image(image_path, config);
+    auto result = trtmc::load_and_preprocess_image(image_path, config);
 
     check(result.ok, "simple_chw: image loaded successfully");
     check(result.channels == 3, "simple_chw: channels = C = 3 (no temporal)");
@@ -300,22 +300,22 @@ static void test_simple_chw_strategy()
 // Test: load non-existent image returns ok=false.
 static void test_load_missing_image()
 {
-    trtf::VLPreprocessConfig config;
+    trtmc::VLPreprocessConfig config;
     config.fixed_image_size = 8;
 
-    auto result = trtf::load_and_preprocess_image("/nonexistent/image.jpg", config);
+    auto result = trtmc::load_and_preprocess_image("/nonexistent/image.jpg", config);
     check(!result.ok, "missing image returns ok=false");
 }
 
 // Test: format_vl_prompt replaces {image_pads} and {prompt}.
 static void test_format_vl_prompt()
 {
-    trtf::VLPreprocessConfig config;
+    trtmc::VLPreprocessConfig config;
     config.num_image_pad_tokens = 3;
     config.image_token_str = "<|pad|>";
     config.vl_prompt_template = "USER: {image_pads}\n{prompt}\nASST:";
 
-    const std::string result = trtf::format_vl_prompt("Describe this", config);
+    const std::string result = trtmc::format_vl_prompt("Describe this", config);
 
     // Should contain 3 copies of <|pad|>
     check(result.find("<|pad|><|pad|><|pad|>") != std::string::npos,
@@ -351,7 +351,7 @@ static void test_parse_vl_config()
         "image_std": [0.26862954, 0.26130258, 0.27577711]
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, preproc_json);
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, preproc_json);
 
     check(cfg.image_token_id == 151655, "image_token_id = 151655");
     check(cfg.fixed_image_size == 448, "fixed_image_size = 448");
@@ -376,7 +376,7 @@ static void test_parse_vl_config_default_preprocessor_type()
         "image_token_id": 100
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, "");
     check(cfg.preprocessor_type == "qwen_merge_group",
           "preprocessor_type defaults to qwen_merge_group");
 }
@@ -388,7 +388,7 @@ static void test_parse_vl_config_simple_chw()
         "preprocessor_type": "simple_chw"
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, "");
     check(cfg.preprocessor_type == "simple_chw",
           "preprocessor_type simple_chw parsed correctly");
 }
@@ -416,11 +416,11 @@ static std::string write_test_ppm_nonsquare(const std::string& dir)
 // Test Gap 1: unknown preprocessor_type falls back to qwen_merge_group with ok=true.
 static void test_unknown_preprocessor_type_fallback()
 {
-    trtf_test::TempDirGuard tmp;
+    trtmc_test::TempDirGuard tmp;
     const std::string& dir = tmp.path();
     const std::string image_path = write_test_ppm(dir);
 
-    trtf::VLPreprocessConfig config;
+    trtmc::VLPreprocessConfig config;
     config.fixed_image_size = 8;
     config.temporal_patch_size = 2;
     config.in_channels = 3;
@@ -432,7 +432,7 @@ static void test_unknown_preprocessor_type_fallback()
     config.image_std[1] = 0.5F;
     config.image_std[2] = 0.5F;
 
-    auto result = trtf::load_and_preprocess_image(image_path, config);
+    auto result = trtmc::load_and_preprocess_image(image_path, config);
 
     check(result.ok, "unknown type fallback: ok=true");
     // Should produce qwen_merge_group output (C*T channels)
@@ -444,11 +444,11 @@ static void test_unknown_preprocessor_type_fallback()
 // Test Gap 2: center_crop_chw strategy with non-square image.
 static void test_center_crop_chw_strategy()
 {
-    trtf_test::TempDirGuard tmp;
+    trtmc_test::TempDirGuard tmp;
     const std::string& dir = tmp.path();
     const std::string image_path = write_test_ppm_nonsquare(dir);
 
-    trtf::VLPreprocessConfig config;
+    trtmc::VLPreprocessConfig config;
     config.fixed_image_size = 8;
     config.in_channels = 3;
     config.preprocessor_type = "center_crop_chw";
@@ -459,7 +459,7 @@ static void test_center_crop_chw_strategy()
     config.image_std[1] = 0.5F;
     config.image_std[2] = 0.5F;
 
-    auto result = trtf::load_and_preprocess_image(image_path, config);
+    auto result = trtmc::load_and_preprocess_image(image_path, config);
 
     check(result.ok, "center_crop_chw: ok=true");
     check(result.channels == 3, "center_crop_chw: channels = 3");
@@ -485,11 +485,11 @@ static void test_center_crop_chw_strategy()
 // Test Gap 3: aspect_preserve_chw strategy with non-square image.
 static void test_aspect_preserve_chw_strategy()
 {
-    trtf_test::TempDirGuard tmp;
+    trtmc_test::TempDirGuard tmp;
     const std::string& dir = tmp.path();
     const std::string image_path = write_test_ppm_nonsquare(dir);
 
-    trtf::VLPreprocessConfig config;
+    trtmc::VLPreprocessConfig config;
     config.fixed_image_size = 8;
     config.in_channels = 3;
     config.preprocessor_type = "aspect_preserve_chw";
@@ -500,7 +500,7 @@ static void test_aspect_preserve_chw_strategy()
     config.image_std[1] = 0.5F;
     config.image_std[2] = 0.5F;
 
-    auto result = trtf::load_and_preprocess_image(image_path, config);
+    auto result = trtmc::load_and_preprocess_image(image_path, config);
 
     check(result.ok, "aspect_preserve_chw: ok=true");
     check(result.channels == 3, "aspect_preserve_chw: channels = 3");
@@ -534,11 +534,11 @@ static void test_aspect_preserve_chw_strategy()
 // Test: pad_center_chw strategy — aspect-ratio-preserving resize + center-pad with mean color.
 static void test_pad_center_chw_strategy()
 {
-    trtf_test::TempDirGuard tmp;
+    trtmc_test::TempDirGuard tmp;
     const std::string& dir = tmp.path();
     const std::string image_path = write_test_ppm_nonsquare(dir);
 
-    trtf::VLPreprocessConfig config;
+    trtmc::VLPreprocessConfig config;
     config.fixed_image_size = 8;
     config.in_channels = 3;
     config.preprocessor_type = "pad_center_chw";
@@ -549,7 +549,7 @@ static void test_pad_center_chw_strategy()
     config.image_std[1] = 0.5F;
     config.image_std[2] = 0.5F;
 
-    auto result = trtf::load_and_preprocess_image(image_path, config);
+    auto result = trtmc::load_and_preprocess_image(image_path, config);
 
     check(result.ok, "pad_center_chw: ok=true");
     check(result.channels == 3, "pad_center_chw: channels = 3");
@@ -589,7 +589,7 @@ static void test_parse_interpolation_default()
         "preprocessor_type": "simple_chw"
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, "");
     check(cfg.interpolation == "bicubic",
           "interpolation defaults to bicubic");
 }
@@ -601,7 +601,7 @@ static void test_parse_interpolation_bilinear()
         "interpolation": "bilinear"
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, "");
     check(cfg.interpolation == "bilinear",
           "interpolation bilinear parsed from config.json");
 }
@@ -618,7 +618,7 @@ static void test_parse_resample_from_preprocessor()
         "resample": 2
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, preproc_json);
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, preproc_json);
     check(cfg.interpolation == "bilinear",
           "resample=2 maps to bilinear");
 
@@ -626,7 +626,7 @@ static void test_parse_resample_from_preprocessor()
     const std::string preproc_json3 = R"({
         "resample": 3
     })";
-    auto cfg3 = trtf::parse_vl_preprocess_config(config_json, preproc_json3);
+    auto cfg3 = trtmc::parse_vl_preprocess_config(config_json, preproc_json3);
     check(cfg3.interpolation == "bicubic",
           "resample=3 maps to bicubic");
 
@@ -634,7 +634,7 @@ static void test_parse_resample_from_preprocessor()
     const std::string preproc_json0 = R"({
         "resample": 0
     })";
-    auto cfg0 = trtf::parse_vl_preprocess_config(config_json, preproc_json0);
+    auto cfg0 = trtmc::parse_vl_preprocess_config(config_json, preproc_json0);
     check(cfg0.interpolation == "nearest",
           "resample=0 maps to nearest");
 
@@ -642,7 +642,7 @@ static void test_parse_resample_from_preprocessor()
     const std::string config_explicit = R"({
         "interpolation": "nearest"
     })";
-    auto cfg_override = trtf::parse_vl_preprocess_config(config_explicit, preproc_json);
+    auto cfg_override = trtmc::parse_vl_preprocess_config(config_explicit, preproc_json);
     check(cfg_override.interpolation == "nearest",
           "explicit interpolation overrides resample");
 }
@@ -669,7 +669,7 @@ static void test_parse_complete_json()
         "image_std": [0.25, 0.25, 0.25]
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, preproc_json);
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, preproc_json);
 
     check(cfg.image_token_id == 200, "complete: image_token_id=200");
     check(cfg.fixed_image_size == 336, "complete: fixed_image_size=336");
@@ -701,7 +701,7 @@ static void test_parse_missing_fields_defaults()
         "image_token_id": 42
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, "");
 
     check(cfg.image_token_id == 42, "defaults: image_token_id=42");
     check(cfg.fixed_image_size == 448, "defaults: fixed_image_size=448");
@@ -719,7 +719,7 @@ static void test_parse_missing_fields_defaults()
 // Test: parse_vl_preprocess_config with empty JSON string.
 static void test_parse_empty_json()
 {
-    auto cfg = trtf::parse_vl_preprocess_config("", "");
+    auto cfg = trtmc::parse_vl_preprocess_config("", "");
 
     // All fields should be at their struct default values
     check(cfg.image_token_id == -1, "empty: image_token_id=-1");
@@ -742,7 +742,7 @@ static void test_parse_only_preprocessor_config()
         "image_std": [0.4, 0.5, 0.6]
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config("{}", preproc_json);
+    auto cfg = trtmc::parse_vl_preprocess_config("{}", preproc_json);
 
     check(cfg.patch_size == 32, "preproc_only: patch_size=32");
     check(cfg.merge_size == 1, "preproc_only: merge_size=1");
@@ -758,24 +758,24 @@ static void test_parse_only_preprocessor_config()
 // Test: format_vl_prompt with empty template returns empty string.
 static void test_format_vl_prompt_empty_template()
 {
-    trtf::VLPreprocessConfig config;
+    trtmc::VLPreprocessConfig config;
     config.num_image_pad_tokens = 5;
     config.image_token_str = "<pad>";
     config.vl_prompt_template = "";
 
-    const std::string result = trtf::format_vl_prompt("Hello", config);
+    const std::string result = trtmc::format_vl_prompt("Hello", config);
     check(result.empty(), "empty_template: returns empty string");
 }
 
 // Test: format_vl_prompt with template missing placeholders.
 static void test_format_vl_prompt_no_placeholders()
 {
-    trtf::VLPreprocessConfig config;
+    trtmc::VLPreprocessConfig config;
     config.num_image_pad_tokens = 2;
     config.image_token_str = "<tok>";
     config.vl_prompt_template = "Fixed template with no substitution.";
 
-    const std::string result = trtf::format_vl_prompt("User input", config);
+    const std::string result = trtmc::format_vl_prompt("User input", config);
     check(result == "Fixed template with no substitution.",
           "no_placeholders: template returned unchanged");
 }
@@ -787,7 +787,7 @@ static void test_parse_vl_config_aspect_preserve()
         "preprocessor_type": "aspect_preserve_chw"
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, "");
     check(cfg.preprocessor_type == "aspect_preserve_chw",
           "preprocessor_type aspect_preserve_chw parsed correctly");
 }
@@ -799,7 +799,7 @@ static void test_parse_vl_config_center_crop()
         "preprocessor_type": "center_crop_chw"
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, "");
     check(cfg.preprocessor_type == "center_crop_chw",
           "preprocessor_type center_crop_chw parsed correctly");
 }
@@ -811,7 +811,7 @@ static void test_parse_vl_prompt_template_newline_unescape()
         "vl_prompt_template": "Line1\\nLine2\\nLine3"
     })";
 
-    auto cfg = trtf::parse_vl_preprocess_config(config_json, "");
+    auto cfg = trtmc::parse_vl_preprocess_config(config_json, "");
     // The \\n sequences should be unescaped to real newlines
     check(cfg.vl_prompt_template.find('\n') != std::string::npos,
           "newline_unescape: template contains real newlines");

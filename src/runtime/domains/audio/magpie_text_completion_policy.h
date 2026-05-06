@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace trtf {
+namespace trtmc {
 
 inline bool scan_xattn_peak(
     const float* xattn,
@@ -78,4 +78,4 @@ inline bool advance_magpie_finished_limit(
         && frames_past_text_consumed >= finished_limit;
 }
 
-} // namespace trtf
+} // namespace trtmc

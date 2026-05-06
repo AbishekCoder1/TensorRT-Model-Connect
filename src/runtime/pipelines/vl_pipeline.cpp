@@ -7,7 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 
-namespace trtf {
+namespace trtmc {
 
 VLPipeline::VLPipeline(std::unique_ptr<TrtModule> text_decoder,
                        std::unique_ptr<TrtModule> vision_encoder,
@@ -334,7 +334,7 @@ bool VLPipeline::run_vision_encoder(const float* pixel_values, std::size_t pixel
     // Extract image_features output
     auto it = outputs.find("image_features");
     if (it == outputs.end()) {
-        std::cerr << "[trtf] Vision encoder has no 'image_features' output" << std::endl;
+        std::cerr << "[trtmc] Vision encoder has no 'image_features' output" << std::endl;
         return false;
     }
 
@@ -352,4 +352,4 @@ int32_t VLPipeline::argmax(const std::vector<float>& logits) {
         std::distance(logits.begin(), std::max_element(logits.begin(), logits.end())));
 }
 
-} // namespace trtf
+} // namespace trtmc

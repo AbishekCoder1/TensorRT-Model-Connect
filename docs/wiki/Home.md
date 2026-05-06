@@ -1,6 +1,6 @@
-# TRT-Transformers-CPP Wiki
+# TensorRT-Model-Connect Wiki
 
-A split-language system for TensorRT inference: **Python builds** optimized TRT engines from HuggingFace model checkpoints, **C++ runs** them at maximum speed. The Python `trtf_build/` package reads safetensors, constructs TRT networks via the TensorRT Python API, and produces self-contained `.trtfb` bundles. The C++ runtime loads those bundles, deserializes TRT engines, resolves the `runtime_strategy`, and runs inference through the appropriate pipeline implementation.
+A split-language system for TensorRT inference: **Python builds** optimized TRT engines from HuggingFace model checkpoints, **C++ runs** them at maximum speed. The Python `tensorrt_model_connect/` package reads safetensors, constructs TRT networks via the TensorRT Python API, and produces self-contained `.trtfb` bundles. The C++ runtime loads those bundles, deserializes TRT engines, resolves the `runtime_strategy`, and runs inference through the appropriate pipeline implementation.
 
 ## Quick Navigation
 
@@ -22,10 +22,10 @@ A split-language system for TensorRT inference: **Python builds** optimized TRT 
 
 ## Core Design Principles
 
-1. **Python builds, C++ runs.** Checkpoint loading, graph construction, and engine compilation stay in Python (`trtf_build/`). Low-latency inference stays in C++ (`src/`).
+1. **Python builds, C++ runs.** Checkpoint loading, graph construction, and engine compilation stay in Python (`tensorrt_model_connect/`). Low-latency inference stays in C++ (`src/`).
 2. **The bundle is self-describing.** Each `.trtfb` bundle carries a `config.json` with `runtime_strategy`, model dimensions, tokenizer settings, and all metadata the C++ runtime needs. No external configuration files are required.
 3. **Strategy is resolved once at bundle load.** `PipelineFactory::from_bundle()` reads `runtime_strategy` from the bundle's config, looks up the matching `IPipelinePlugin` in the `PipelineRegistry` singleton, and delegates pipeline construction to the plugin. There is no per-request strategy redispatch.
-4. **Family plugins are auto-discovered.** Python family plugins in `trtf_build/trtf_build/families/` are found via `pkgutil.iter_modules()`. Adding a new family requires only a new `.py` file with a module-level `plugin` attribute -- no edits to shared registration code.
+4. **Family plugins are auto-discovered.** Python family plugins in `tensorrt_model_connect/tensorrt_model_connect/families/` are found via `pkgutil.iter_modules()`. Adding a new family requires only a new `.py` file with a module-level `plugin` attribute -- no edits to shared registration code.
 5. **Complexity budget is enforced.** C++ cyclomatic complexity must stay at or below the repository gate (CCN <= 10), checked by `tools/check_cyclomatic_complexity.py` and CI.
 6. **Traceability is required.** Architecture decisions (ARCH-*), unit designs (UD-*), and tests (UT-*/IT-*) must stay linked per the traceability matrix.
 
@@ -36,7 +36,7 @@ The system has two phases.
 ### 1. Build Phase (Python)
 
 ```
-trtf-build build <hf-model-or-dir> -o model.trtfb
+trtmc-build build <hf-model-or-dir> -o model.trtfb
 ```
 
 - Family plugin matches `config.json` model_type
@@ -48,17 +48,17 @@ trtf-build build <hf-model-or-dir> -o model.trtfb
 ### 2. Run Phase (C++)
 
 ```
-trtf run model.trtfb --prompt "Hello" --max-new-tokens 20
+trtmc run model.trtfb --prompt "Hello" --max-new-tokens 20
 ```
 
-- `trtf_create_pipeline_ex()` validates input and reads the `.trtfb` bundle
+- `trtmc_create_pipeline_ex()` validates input and reads the `.trtfb` bundle
 - `PipelineFactory::from_bundle()` extracts `config.json`, parses `runtime_strategy`
 - `PipelineRegistry::instance().lookup(strategy)` finds the registered `IPipelinePlugin`
 - The plugin's `create()` method loads TRT engines, creates tokenizers, allocates KV cache or recurrent state
 - Returns an `IPipeline` pointer to the caller
 
 ```text
-trtf_create_pipeline_ex(bundle_path)
+trtmc_create_pipeline_ex(bundle_path)
   -> ReadBundleFile()
   -> extract_json_string("runtime_strategy")
   -> normalize_legacy_strategy()
@@ -84,17 +84,17 @@ For isolated multi-agent workflows, use per-team containers:
 
 ```bash
 ./scripts/bootstrap_workspace.sh --id <team-id> --branch <branch> --detach
-docker exec trtf-dev-gb300-<team-id> <command>
+docker exec trtmc-dev-gb300-<team-id> <command>
 ```
 
 ## Built-In Model Support
 
-Family plugins are auto-discovered from `trtf_build/trtf_build/families/`. Any HF model whose `model_type` maps to a plugin is buildable. There is no static registration list to update.
+Family plugins are auto-discovered from `tensorrt_model_connect/tensorrt_model_connect/families/`. Any HF model whose `model_type` maps to a plugin is buildable. There is no static registration list to update.
 
 To enumerate all family plugins in your checkout:
 
 ```bash
-ls trtf_build/trtf_build/families/*.py \
+ls tensorrt_model_connect/tensorrt_model_connect/families/*.py \
   | sed 's|.*/||; s|\.py$||' \
   | grep -v -E '^(__init__|base)$' \
   | sort
@@ -111,25 +111,25 @@ python3 scripts/autopilot/autorun.py --auto
 
 ```bash
 # Build a bundle from HuggingFace (inside container)
-trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
 
 # Inspect the bundle
-trtf-build inspect /tmp/qwen3.trtfb
+trtmc-build inspect /tmp/qwen3.trtfb
 
 # Run inference
-./build/trtf run /tmp/qwen3.trtfb \
+./build/trtmc run /tmp/qwen3.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --hf-python /opt/venv/bin/python
 
 # Vision-language model
-trtf-build build Qwen/Qwen2.5-VL-3B-Instruct -o /tmp/qwen25vl.trtfb --max-cache-length 384
-./build/trtf run /tmp/qwen25vl.trtfb \
+trtmc-build build Qwen/Qwen2.5-VL-3B-Instruct -o /tmp/qwen25vl.trtfb --max-cache-length 384
+./build/trtmc run /tmp/qwen25vl.trtfb \
   --prompt "Describe this image." --image photo.jpg \
   --max-new-tokens 30 --hf-python /opt/venv/bin/python
 
 # Run E2E validation (single model)
 pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 ```

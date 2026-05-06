@@ -118,10 +118,10 @@ if [[ -n "${CMAKE_GENERATOR}" ]]; then
 fi
 
 if [[ -n "${TRT_INC_DIR}" && -n "${TRT_LIB_DIR}" ]]; then
-  cmake_args+=("-DTRTF_TRT_INCLUDE_DIR=${TRT_INC_DIR}")
-  cmake_args+=("-DTRTF_TRT_LIBRARY=${TRT_LIB_DIR}/libnvinfer.so")
-  cmake_args+=("-DTRTF_CUDA_INCLUDE_DIR=${CUDA_INC_DIR}")
-  cmake_args+=("-DTRTF_CUDART_LIBRARY=${CUDART_LIBRARY}")
+  cmake_args+=("-DTRTMC_TRT_INCLUDE_DIR=${TRT_INC_DIR}")
+  cmake_args+=("-DTRTMC_TRT_LIBRARY=${TRT_LIB_DIR}/libnvinfer.so")
+  cmake_args+=("-DTRTMC_CUDA_INCLUDE_DIR=${CUDA_INC_DIR}")
+  cmake_args+=("-DTRTMC_CUDART_LIBRARY=${CUDART_LIBRARY}")
 fi
 
 if [[ -n "${CMAKE_EXTRA_ARGS:-}" ]]; then

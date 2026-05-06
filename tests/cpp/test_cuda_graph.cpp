@@ -25,8 +25,8 @@
 
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
-#include "trtf/runtime/tensor.h"
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/runtime/tensor.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <NvInfer.h>
 #include <cmath>
@@ -44,16 +44,16 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
-static trtf::TrtLogger g_logger;
+static trtmc::TrtLogger g_logger;
 
 // Build a tiny TRT engine: y = x (identity), fixed shape [4] float32
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder)
         return nullptr;
 
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    auto network = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* inp = network->addInput("x", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {4}});
@@ -67,27 +67,27 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
     out->setName("y");
     network->markOutput(*out);
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
     if (!plan)
         return nullptr;
 
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
     if (!runtime)
         return nullptr;
 
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
 // Helper: run forward_async + sync, read back output
-static void run_and_read(trtf::ITrtModule& module, const float* input, float* output) {
-    trtf::Tensor input_tensor;
+static void run_and_read(trtmc::ITrtModule& module, const float* input, float* output) {
+    trtmc::Tensor input_tensor;
     input_tensor.data = const_cast<float*>(input);
     input_tensor.shape = {4};
-    input_tensor.dtype = trtf::DType::kFloat32;
+    input_tensor.dtype = trtmc::DType::kFloat32;
 
-    trtf::TensorMap inputs;
+    trtmc::TensorMap inputs;
     inputs["x"] = input_tensor;
 
     module.forward_async(inputs);
@@ -96,16 +96,16 @@ static void run_and_read(trtf::ITrtModule& module, const float* input, float* ou
     cudaMemcpy(output, module.device_ptr("y"), 4 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
-static std::unique_ptr<trtf::TrtModuleImpl>
+static std::unique_ptr<trtmc::TrtModuleImpl>
 make_module(nvinfer1::ICudaEngine* engine, cudaStream_t stream, int32_t profile_idx = 0) {
     auto* ctx = engine->createExecutionContext();
-    return std::make_unique<trtf::TrtModuleImpl>(engine, ctx, stream, profile_idx);
+    return std::make_unique<trtmc::TrtModuleImpl>(engine, ctx, stream, profile_idx);
 }
 
 // --- CudaGraphExec unit tests ---
 
 static void test_default_state() {
-    trtf::CudaGraphExec graph;
+    trtmc::CudaGraphExec graph;
     check(!graph.ready(), "default: not ready");
     check(!graph.launch(nullptr), "default: launch returns false");
 }
@@ -120,7 +120,7 @@ static void test_capture_and_replay() {
     void* d_buf = nullptr;
     cudaMalloc(&d_buf, 16);
 
-    trtf::CudaGraphExec graph;
+    trtmc::CudaGraphExec graph;
 
     // Capture: H2D copy
     check(graph.begin_capture(stream), "capture: begin ok");
@@ -148,7 +148,7 @@ static void test_reset() {
     cudaMalloc(&d_buf, 16);
     float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
 
-    trtf::CudaGraphExec graph;
+    trtmc::CudaGraphExec graph;
     graph.begin_capture(stream);
     cudaMemcpyAsync(d_buf, data, 16, cudaMemcpyHostToDevice, stream);
     graph.end_capture(stream);
@@ -163,7 +163,7 @@ static void test_reset() {
 }
 
 static void test_double_reset() {
-    trtf::CudaGraphExec graph;
+    trtmc::CudaGraphExec graph;
     graph.reset(); // reset on default-constructed — should not crash
     graph.reset(); // double reset — should not crash
     check(!graph.ready(), "double_reset: still not ready");
@@ -177,13 +177,13 @@ static void test_move_constructor() {
     cudaMalloc(&d_buf, 16);
     float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
 
-    trtf::CudaGraphExec src;
+    trtmc::CudaGraphExec src;
     src.begin_capture(stream);
     cudaMemcpyAsync(d_buf, data, 16, cudaMemcpyHostToDevice, stream);
     src.end_capture(stream);
     check(src.ready(), "move_ctor: src ready before move");
 
-    trtf::CudaGraphExec dst(std::move(src));
+    trtmc::CudaGraphExec dst(std::move(src));
     check(dst.ready(), "move_ctor: dst ready after move");
     check(!src.ready(), "move_ctor: src not ready after move");
 
@@ -203,12 +203,12 @@ static void test_move_assignment() {
     cudaMalloc(&d_buf, 16);
     float data[4] = {5.0f, 6.0f, 7.0f, 8.0f};
 
-    trtf::CudaGraphExec src;
+    trtmc::CudaGraphExec src;
     src.begin_capture(stream);
     cudaMemcpyAsync(d_buf, data, 16, cudaMemcpyHostToDevice, stream);
     src.end_capture(stream);
 
-    trtf::CudaGraphExec dst;
+    trtmc::CudaGraphExec dst;
     dst = std::move(src);
     check(dst.ready(), "move_assign: dst ready after move");
     check(!src.ready(), "move_assign: src not ready after move");

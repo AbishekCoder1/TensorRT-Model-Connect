@@ -69,9 +69,9 @@ def detect_runtime_strategy(
     warning/skip/error semantics.
     """
     try:
-        from trtf_build.engine_builder import _resolve_model
-        from trtf_build.config import ModelConfig
-        from trtf_build.families import find_plugin
+        from tensorrt_model_connect.engine_builder import _resolve_model
+        from tensorrt_model_connect.config import ModelConfig
+        from tensorrt_model_connect.families import find_plugin
 
         model_dir = _resolve_model(model)
         config = ModelConfig.from_dir(model_dir)

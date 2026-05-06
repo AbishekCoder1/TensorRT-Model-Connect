@@ -6,13 +6,13 @@
 // Unit Design:    UD-CFG-REG-01
 // Intent:         Verify the triattention schema manifest registration
 //                 survives the static-library link.
-// Preconditions:  libtrtf_core linked; no prior SchemaRegistry mutation.
+// Preconditions:  libtrtmc_core linked; no prior SchemaRegistry mutation.
 // Postconditions: SchemaRegistry::instance().lookup("triattention") returns
 //                 a schema whose field set matches the declared fields.
 // =============================================================================
 
-#include "trtf/config/schema_registry.h"
-#include "trtf/config/schemas/triattention.h"
+#include "trtmc/config/schema_registry.h"
+#include "trtmc/config/schemas/triattention.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -31,9 +31,9 @@ void check(bool condition, const char* name) {
     }
 }
 
-using trtf::config::Layer;
-using trtf::config::Schema;
-using trtf::config::SchemaRegistry;
+using trtmc::config::Layer;
+using trtmc::config::Schema;
+using trtmc::config::SchemaRegistry;
 
 void test_manifest_registered_triattention() {
     // The generated schema registrar references triattention.cpp directly,
@@ -93,7 +93,7 @@ void test_make_triattention_schema_standalone() {
     // Construct without using the singleton — helps diagnose whether a
     // failure in the other test is a registration problem or a declaration
     // problem.
-    Schema schema = trtf::config::schemas::make_triattention_schema();
+    Schema schema = trtmc::config::schemas::make_triattention_schema();
     check(schema.namespace_name == "triattention", "make_schema: namespace");
     check(schema.fields.size() >= 20, "make_schema: at least 20 fields");
     // kv_budget field must be int32 with default 4096 and allow Bundle+Session.

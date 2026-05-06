@@ -80,7 +80,7 @@ class TestJsonOutput:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `docker exec trtf-dev-gb300-agent-3 bash -c "cd /workspace/trt-transformers-cpp && /opt/venv/bin/python -m pytest tests/tools/test_diff_logits.py::TestJsonOutput -v"`
+Run: `docker exec trtmc-dev-gb300-agent-3 bash -c "cd /workspace/tensorrt-model-connect && /opt/venv/bin/python -m pytest tests/tools/test_diff_logits.py::TestJsonOutput -v"`
 
 Expected: FAIL — `_build_json_report` does not exist yet
 
@@ -123,7 +123,7 @@ Read the actual file to find the exact variable names for `per_step_results`, `o
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `docker exec trtf-dev-gb300-agent-3 bash -c "cd /workspace/trt-transformers-cpp && /opt/venv/bin/python -m pytest tests/tools/test_diff_logits.py::TestJsonOutput -v"`
+Run: `docker exec trtmc-dev-gb300-agent-3 bash -c "cd /workspace/tensorrt-model-connect && /opt/venv/bin/python -m pytest tests/tools/test_diff_logits.py::TestJsonOutput -v"`
 
 Expected: PASS
 
@@ -171,7 +171,7 @@ If the JSON output is missing fields, add them. If it works, this step is a no-o
 
 - [ ] **Step 4: Run tests**
 
-Run: `docker exec trtf-dev-gb300-agent-3 bash -c "cd /workspace/trt-transformers-cpp && /opt/venv/bin/python -m pytest tests/tools/test_perf_compare.py -v"`
+Run: `docker exec trtmc-dev-gb300-agent-3 bash -c "cd /workspace/tensorrt-model-connect && /opt/venv/bin/python -m pytest tests/tools/test_perf_compare.py -v"`
 
 Expected: PASS
 
@@ -219,11 +219,11 @@ previous agent left off. Do not repeat completed attempts.
 ## Available Tools
 
 All commands run inside the container:
-`docker exec trtf-dev-gb300-{agent-id} bash -c "cd /workspace/trt-transformers-cpp && COMMAND"`
+`docker exec trtmc-dev-gb300-{agent-id} bash -c "cd /workspace/tensorrt-model-connect && COMMAND"`
 
 ### Build a variant
 ```
-trtf-build build MODEL_ID -o OUTPUT.trtfb \
+trtmc-build build MODEL_ID -o OUTPUT.trtfb \
   --precision fp16 \
   [--quantize fp8|int8|int4|nvfp4|w4a8] \
   [--quant-scales SCALES.json] \
@@ -252,14 +252,14 @@ python3 tools/perf_compare.py \
 
 ### Quick sanity check (not a pass/fail gate)
 ```
-./build/trtf run BUNDLE.trtfb \
+./build/trtmc run BUNDLE.trtfb \
   --prompt "Hello, how are you?" --max-new-tokens 10 \
   --hf-python /opt/venv/bin/python
 ```
 
 ### Inspect a bundle
 ```
-trtf-build inspect BUNDLE.trtfb
+trtmc-build inspect BUNDLE.trtfb
 ```
 
 ## Invariants (NEVER violate)
@@ -375,8 +375,8 @@ AGENT_ID="${4:-agent-3}"
 
 SAFE_NAME="$(echo "$MODEL_ID" | tr '/' '_' | tr '.' '_')"
 PROGRESS_FILE="/tmp/optimize_progress_${SAFE_NAME}.json"
-CONTAINER="trtf-dev-gb300-${AGENT_ID}"
-REPO_DIR="/workspace/users/yifeif/workspaces/${AGENT_ID}/trt-transformers-cpp"
+CONTAINER="trtmc-dev-gb300-${AGENT_ID}"
+REPO_DIR="/workspace/users/yifeif/workspaces/${AGENT_ID}/tensorrt-model-connect"
 
 echo "[supervisor] Model:      $MODEL_ID"
 echo "[supervisor] Max attempts: $MAX_ATTEMPTS"
@@ -474,7 +474,7 @@ git commit -m "feat: add optimize supervisor loop for agent-driven precision sea
 Extends quantization to cover vision, audio, and diffusion models that use convolutions.
 
 **Files:**
-- Modify: `trtf_build/trtf_build/quantization/formats.py`
+- Modify: `tensorrt_model_connect/tensorrt_model_connect/quantization/formats.py`
 - Test: `tests/builder/test_quantization.py` (new)
 
 - [ ] **Step 1: Write failing test**
@@ -486,8 +486,8 @@ Create `tests/builder/test_quantization.py`:
 import numpy as np
 import pytest
 
-from trtf_build.quantization import get_format, list_formats, QuantScaleMap, LayerScales
-from trtf_build.quantization.formats import QuantFormat
+from tensorrt_model_connect.quantization import get_format, list_formats, QuantScaleMap, LayerScales
+from tensorrt_model_connect.quantization.formats import QuantFormat
 
 
 class TestFormatRegistry:
@@ -540,13 +540,13 @@ class TestQuantFormatProtocol:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `docker exec trtf-dev-gb300-agent-3 bash -c "cd /workspace/trt-transformers-cpp && /opt/venv/bin/python -m pytest tests/builder/test_quantization.py -v"`
+Run: `docker exec trtmc-dev-gb300-agent-3 bash -c "cd /workspace/tensorrt-model-connect && /opt/venv/bin/python -m pytest tests/builder/test_quantization.py -v"`
 
 Expected: `test_all_formats_have_wrap_conv2d` FAILS (method doesn't exist yet)
 
 - [ ] **Step 3: Add `wrap_conv2d` to protocol and all 5 format classes**
 
-In `trtf_build/trtf_build/quantization/formats.py`:
+In `tensorrt_model_connect/tensorrt_model_connect/quantization/formats.py`:
 
 1. Add to `QuantFormat` protocol (after `wrap_matmul`):
 ```python
@@ -575,14 +575,14 @@ Read the existing `graph_ops.add_conv2d()` function to understand the exact TRT 
 
 - [ ] **Step 4: Run tests**
 
-Run: `docker exec trtf-dev-gb300-agent-3 bash -c "cd /workspace/trt-transformers-cpp && /opt/venv/bin/python -m pytest tests/builder/test_quantization.py -v"`
+Run: `docker exec trtmc-dev-gb300-agent-3 bash -c "cd /workspace/tensorrt-model-connect && /opt/venv/bin/python -m pytest tests/builder/test_quantization.py -v"`
 
 Expected: All PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add trtf_build/trtf_build/quantization/formats.py tests/builder/test_quantization.py
+git add tensorrt_model_connect/tensorrt_model_connect/quantization/formats.py tests/builder/test_quantization.py
 git commit -m "feat: add wrap_conv2d to QuantFormat protocol for vision/audio quantization"
 ```
 
@@ -593,7 +593,7 @@ git commit -m "feat: add wrap_conv2d to QuantFormat protocol for vision/audio qu
 Completes the pre-quantized checkpoint provider so users can load AWQ models from HuggingFace without re-calibrating.
 
 **Files:**
-- Modify: `trtf_build/trtf_build/quantization/scale_providers.py`
+- Modify: `tensorrt_model_connect/tensorrt_model_connect/quantization/scale_providers.py`
 - Test: `tests/builder/test_quantization.py` (extend)
 
 - [ ] **Step 1: Write failing test**
@@ -604,8 +604,8 @@ Add to `tests/builder/test_quantization.py`:
 class TestPreQuantizedCheckpointProvider:
     def test_detect_awq_format(self, tmp_path):
         """AWQ checkpoint has quantization_config.quant_method == 'awq'."""
-        from trtf_build.quantization.scale_providers import PreQuantizedCheckpointProvider
-        from trtf_build.config import ModelConfig
+        from tensorrt_model_connect.quantization.scale_providers import PreQuantizedCheckpointProvider
+        from tensorrt_model_connect.config import ModelConfig
 
         config = ModelConfig.from_json(json.dumps({
             "model_type": "llama",
@@ -676,7 +676,7 @@ Expected: `test_detect_awq_format` now raises a file-not-found error (not NotImp
 - [ ] **Step 5: Commit**
 
 ```bash
-git add trtf_build/trtf_build/quantization/scale_providers.py tests/builder/test_quantization.py
+git add tensorrt_model_connect/tensorrt_model_connect/quantization/scale_providers.py tests/builder/test_quantization.py
 git commit -m "feat: implement AWQ checkpoint scale extraction for pre-quantized HF models"
 ```
 
@@ -746,7 +746,7 @@ This is the gold-standard test. The supervisor launches an agent, the agent buil
 
 ```bash
 # From the host (not inside container)
-cd /workspace/users/yifeif/workspaces/agent-3/trt-transformers-cpp
+cd /workspace/users/yifeif/workspaces/agent-3/tensorrt-model-connect
 bash scripts/autopilot/optimize_supervisor.sh Qwen/Qwen3-0.6B 3 0.95 agent-3
 ```
 
@@ -769,8 +769,8 @@ Expected: JSON with at least one attempt with `"verified": true` and `"status": 
 - [ ] **Step 3: Verify the bundle works**
 
 ```bash
-docker exec trtf-dev-gb300-agent-3 bash -c "cd /workspace/trt-transformers-cpp && \
-  ./build/trtf run BUNDLE_PATH --prompt 'The capital of France is' --max-new-tokens 10 \
+docker exec trtmc-dev-gb300-agent-3 bash -c "cd /workspace/tensorrt-model-connect && \
+  ./build/trtmc run BUNDLE_PATH --prompt 'The capital of France is' --max-new-tokens 10 \
   --hf-python /opt/venv/bin/python"
 ```
 

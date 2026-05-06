@@ -1,9 +1,9 @@
-#include "trtf/config/schema_registry.h"
+#include "trtmc/config/schema_registry.h"
 
 #include <algorithm>
 #include <stdexcept>
 
-namespace trtf::config {
+namespace trtmc::config {
 
 namespace schemas {
 void register_all_config_schemas(SchemaRegistry& registry);
@@ -73,4 +73,4 @@ void SchemaRegistry::clear_for_testing() {
     schemas_.clear();
 }
 
-} // namespace trtf::config
+} // namespace trtmc::config

@@ -8,11 +8,11 @@
 //   4. Detokenize output
 
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/pipeline_registry.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/pipeline_registry.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // ---------------------------------------------------------------------------
 // MarianPipeline: encoder-decoder machine translation
@@ -287,7 +287,7 @@ class MarianPlugin final : public IPipelinePlugin {
 
         auto tok = create_tokenizer_from_bundle(ctx.bundle);
         if (!tok) {
-            std::cerr << "[trtf] MarianPlugin: tokenizer creation failed" << std::endl;
+            std::cerr << "[trtmc] MarianPlugin: tokenizer creation failed" << std::endl;
         }
 
         return std::make_unique<MarianPipeline>(
@@ -300,4 +300,4 @@ class MarianPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_marian_plugin, MarianPlugin, "marian_translation");
 
-} // namespace trtf
+} // namespace trtmc

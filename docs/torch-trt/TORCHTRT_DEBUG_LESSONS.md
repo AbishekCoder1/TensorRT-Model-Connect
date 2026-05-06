@@ -176,5 +176,5 @@ is much faster to iterate on than rebuilding C++.
 
 Debug prints (embedding stats, per-step metrics) are invaluable during
 investigation but must be removed before merging. Consider adding a
-`--verbose` or `TRTF_DEBUG_DIFFUSION` env var check rather than inline
+`--verbose` or `TRTMC_DEBUG_DIFFUSION` env var check rather than inline
 `std::cerr` statements that need manual cleanup.

@@ -19,7 +19,7 @@
 // Preconditions: For file mode, TOKENIZER_JSON and GOLDEN_VECTORS env vars set.
 // Postconditions: All golden vectors match (exit 0).
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -154,7 +154,7 @@ void run_builtin_golden_tests()
 
     // Without special tokens
     {
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
         // "hello" → [4]
         check_ids(tok->encode("hello"), {4}, "golden_hello");
@@ -193,7 +193,7 @@ void run_builtin_golden_tests()
 
     // With special tokens
     {
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), true);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), true);
 
         // [CLS] + tokens + [SEP]
         check_ids(tok->encode("hello"), {2, 4, 3}, "golden_hello_special");
@@ -209,7 +209,7 @@ int run_file_golden_tests(const std::string& json_data, const std::string& golde
 {
     std::cerr << "\n=== File Golden Vectors: " << golden_path << " ===\n";
 
-    auto tok = trtf::CreateWordPieceTokenizer(
+    auto tok = trtmc::CreateWordPieceTokenizer(
         json_data.data(), json_data.size(), add_special);
     if (!tok) {
         std::cerr << "ERROR: failed to create tokenizer\n";

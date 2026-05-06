@@ -47,10 +47,10 @@ static void test_flux_construction() {
     //   h_latent = video_height(480) / scale_factor_spatial(8) = 60
     //   w_latent = video_width(832)  / scale_factor_spatial(8) = 104
     //   num_img_tokens = (60/2) * (104/2) = 30 * 52 = 1560
-    trtf::DiffusionConfig cfg;
-    trtf::PreprocessorWeights weights;
+    trtmc::DiffusionConfig cfg;
+    trtmc::PreprocessorWeights weights;
 
-    trtf::FluxPipeline pipeline(
+    trtmc::FluxPipeline pipeline(
         /*text_encoders=*/{},
         /*denoiser=*/nullptr,
         /*vae=*/nullptr, cfg, weights,
@@ -63,10 +63,10 @@ static void test_flux_construction() {
 }
 
 static void test_wan_construction() {
-    trtf::DiffusionConfig cfg;
-    trtf::PreprocessorWeights weights;
+    trtmc::DiffusionConfig cfg;
+    trtmc::PreprocessorWeights weights;
 
-    trtf::WanPipeline pipeline(
+    trtmc::WanPipeline pipeline(
         /*text_encoder=*/nullptr,
         /*denoiser=*/nullptr,
         /*vae=*/nullptr, cfg, weights,
@@ -78,11 +78,11 @@ static void test_wan_construction() {
 }
 
 static void test_zimage_construction() {
-    trtf::DiffusionConfig cfg;
-    trtf::PreprocessorWeights weights;
-    trtf::ZImagePreprocessorWeights z_weights;
+    trtmc::DiffusionConfig cfg;
+    trtmc::PreprocessorWeights weights;
+    trtmc::ZImagePreprocessorWeights z_weights;
 
-    trtf::ZImagePipeline pipeline(
+    trtmc::ZImagePipeline pipeline(
         /*text_encoder=*/nullptr,
         /*denoiser=*/nullptr,
         /*vae=*/nullptr, cfg, weights, z_weights,
@@ -98,13 +98,13 @@ static void test_zimage_construction() {
 static void test_flux_with_custom_config() {
     // Test FluxPipeline with non-default config to exercise the latent layout
     // computation path with patch_size override.
-    trtf::DiffusionConfig cfg;
+    trtmc::DiffusionConfig cfg;
     cfg.video_height = 256;
     cfg.video_width = 256;
     cfg.scale_factor_spatial = 8;
     cfg.patch_size = {1, 2, 2}; // ph=2, pw=2
 
-    trtf::FluxPipeline pipeline({}, nullptr, nullptr, cfg, trtf::PreprocessorWeights{}, nullptr,
+    trtmc::FluxPipeline pipeline({}, nullptr, nullptr, cfg, trtmc::PreprocessorWeights{}, nullptr,
                                 nullptr, "test-flux-custom");
 
     check(std::string(pipeline.pipeline_type()) == "FluxPipeline",

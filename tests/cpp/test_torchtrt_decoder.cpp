@@ -10,7 +10,7 @@
 //   - Cache length override and cap
 //
 // Dependencies:
-//   - trtf/runtime/pipeline_plugin.h (parse_base_config, BaseConfig)
+//   - trtmc/runtime/pipeline_plugin.h (parse_base_config, BaseConfig)
 //
 // Environment:
 //   CPU-only for config parsing tests.
@@ -20,7 +20,7 @@
 // respectively. No explicit naming scheme selection is needed.
 // =============================================================================
 
-#include "trtf/runtime/pipeline_plugin.h"
+#include "trtmc/runtime/pipeline_plugin.h"
 
 #include <iostream>
 #include <string>
@@ -57,7 +57,7 @@ static void test_decoder_config_basic() {
         "max_position_embeddings": 32768
     })";
 
-    const auto cfg = trtf::parse_base_config(config, 256);
+    const auto cfg = trtmc::parse_base_config(config, 256);
     check(cfg.runtime_strategy == "decoder_kv_cache", "decoder: runtime_strategy parsed");
     check(cfg.vocab_size == 151936, "decoder: vocab_size");
     check(cfg.hidden_size == 1024, "decoder: hidden_size");
@@ -88,7 +88,7 @@ static void test_decoder_gqa_attention_size() {
         "runtime_strategy": "decoder_kv_cache"
     })";
 
-    const auto cfg = trtf::parse_base_config(config, 128);
+    const auto cfg = trtmc::parse_base_config(config, 128);
     // attention_size remains the query projection width.
     check(cfg.attention_size == 16 * 64,
           "decoder GQA: attention_size = num_heads * head_dim = 1024");
@@ -111,7 +111,7 @@ static void test_decoder_mha() {
         "runtime_strategy": "decoder_kv_cache"
     })";
 
-    const auto cfg = trtf::parse_base_config(config, 512);
+    const auto cfg = trtmc::parse_base_config(config, 512);
     check(cfg.num_heads == cfg.num_kv_heads, "decoder MHA: heads == kv_heads");
     check(cfg.attention_size == 16 * 128, "decoder MHA: attention_size = 2048");
 }
@@ -136,7 +136,7 @@ static void test_decoder_tokenizer_config() {
         "eos_token_id": [151645, 151643]
     })";
 
-    const auto cfg = trtf::parse_base_config(config, 128);
+    const auto cfg = trtmc::parse_base_config(config, 128);
     check(cfg.tokenizer_add_special_tokens == true, "decoder: tokenizer_add_special_tokens = true");
     check(cfg.tokenizer_add_special_tokens_present == true,
           "decoder: tokenizer_add_special_tokens_present = true");
@@ -163,7 +163,7 @@ static void test_decoder_cache_length_override() {
     })";
 
     // Override = 256 (from bundle config's max_cache_length)
-    const auto cfg = trtf::parse_base_config(config, 256);
+    const auto cfg = trtmc::parse_base_config(config, 256);
     check(cfg.max_cache_length == 256, "decoder: cache_length override = 256");
 }
 
@@ -184,7 +184,7 @@ static void test_decoder_cache_length_cap() {
         "runtime_strategy": "decoder_kv_cache"
     })";
 
-    const auto cfg = trtf::parse_base_config(config, -1);
+    const auto cfg = trtmc::parse_base_config(config, -1);
     check(cfg.max_cache_length == 4096, "decoder: cache_length capped at 4096");
 }
 

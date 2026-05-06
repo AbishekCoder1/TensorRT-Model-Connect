@@ -4,9 +4,9 @@
 #include "runtime/pipelines/speech_pipeline.h"
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
-namespace trtf {
+namespace trtmc {
 
 class SpeechPlugin final : public IPipelinePlugin {
   public:
@@ -63,4 +63,4 @@ class SpeechPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_speech_plugin, SpeechPlugin, "speech_to_speech");
 
-} // namespace trtf
+} // namespace trtmc

@@ -22,13 +22,13 @@ The critical runtime pieces are:
 
 Important consequence: the upstream implementation assumes it can change runtime cache semantics. It does not just swap one attention op for another.
 
-## Fit With `trt-transformers-cpp`
+## Fit With `tensorrt-model-connect`
 
 The current repo splits into:
 
-- Build-time graph construction in `trtf_build/`.
+- Build-time graph construction in `tensorrt_model_connect/`.
 - Native runtime/cache management in C++ under `src/runtime/`.
-- A Python debug/runtime path in `trtf_build/trtf_build/debug_runner.py`.
+- A Python debug/runtime path in `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py`.
 
 Today there is no generic attention-backend abstraction in either the builder or the C++ runtime. The dense decoder cache is treated as a standard fixed-row KV buffer.
 

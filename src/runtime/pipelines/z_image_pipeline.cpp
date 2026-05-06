@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 using diffusion::FlowMatchEulerState;
 using diffusion::resolve_requested_guidance;
@@ -706,4 +706,4 @@ ImageResult ZImagePipeline::generate_image(const std::string& prompt, const Gene
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

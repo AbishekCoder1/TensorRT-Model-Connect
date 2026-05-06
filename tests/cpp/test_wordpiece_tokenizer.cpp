@@ -8,7 +8,7 @@
 // Preconditions: None (self-contained JSON test data).
 // Postconditions: All checks pass (exit 0) or report failures (exit 1).
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstring>
 #include <iostream>
@@ -163,13 +163,13 @@ int main()
 
         // Valid WordPiece JSON
         std::string json(kWordPieceJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), true);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), true);
         check(tok != nullptr, "create_from_valid_json");
 
         // Invalid JSON
         bool threw = false;
         try {
-            trtf::CreateWordPieceTokenizer("not json", 8, true);
+            trtmc::CreateWordPieceTokenizer("not json", 8, true);
         } catch (const std::exception&) { threw = true; }
         check(threw, "reject_invalid_json");
 
@@ -177,7 +177,7 @@ int main()
         const char* bpe_json = R"({"model":{"type":"BPE","vocab":{},"merges":[]}})";
         threw = false;
         try {
-            trtf::CreateWordPieceTokenizer(bpe_json, std::strlen(bpe_json), true);
+            trtmc::CreateWordPieceTokenizer(bpe_json, std::strlen(bpe_json), true);
         } catch (const std::exception&) { threw = true; }
         check(threw, "reject_bpe_type");
 
@@ -185,7 +185,7 @@ int main()
         const char* no_vocab = R"({"model":{"type":"WordPiece"}})";
         threw = false;
         try {
-            trtf::CreateWordPieceTokenizer(no_vocab, std::strlen(no_vocab), true);
+            trtmc::CreateWordPieceTokenizer(no_vocab, std::strlen(no_vocab), true);
         } catch (const std::exception&) { threw = true; }
         check(threw, "reject_missing_vocab");
 
@@ -193,7 +193,7 @@ int main()
         const char* no_type = R"({"model":{"vocab":{}}})";
         threw = false;
         try {
-            trtf::CreateWordPieceTokenizer(no_type, std::strlen(no_type), true);
+            trtmc::CreateWordPieceTokenizer(no_type, std::strlen(no_type), true);
         } catch (const std::exception&) { threw = true; }
         check(threw, "reject_missing_type");
     }
@@ -205,7 +205,7 @@ int main()
         std::cerr << "\n=== Token/ID Lookup ===\n";
 
         std::string json(kWordPieceJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
         check(tok->id_for_token("hello") == 5, "id_for_token_hello");
         check(tok->id_for_token("[UNK]") == 1, "id_for_token_unk");
@@ -225,7 +225,7 @@ int main()
         std::cerr << "\n=== Encoding (basic) ===\n";
 
         std::string json(kWordPieceJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
         // Simple single word
         check_ids(tok->encode("hello"), {5}, "encode_hello");
@@ -256,7 +256,7 @@ int main()
         std::cerr << "\n=== Encoding (special tokens) ===\n";
 
         std::string json(kWordPieceJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), true);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), true);
 
         // With special tokens: [CLS] + tokens + [SEP]
         check_ids(tok->encode("hello"), {2, 5, 3}, "encode_hello_with_special");
@@ -274,7 +274,7 @@ int main()
         std::cerr << "\n=== Encoding (normalizer) ===\n";
 
         std::string json(kWordPieceJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
         // Uppercase input → lowercase by normalizer
         check_ids(tok->encode("HELLO"), {5}, "encode_uppercase");
@@ -295,7 +295,7 @@ int main()
         std::cerr << "\n=== Encoding (cased model) ===\n";
 
         std::string json(kCasedJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
         // Case-sensitive: "Hello" != "hello"
         check_ids(tok->encode("Hello"), {4}, "encode_cased_Hello");
@@ -324,7 +324,7 @@ int main()
                 }
             }
         })";
-        auto tok = trtf::CreateWordPieceTokenizer(short_max_json,
+        auto tok = trtmc::CreateWordPieceTokenizer(short_max_json,
             std::strlen(short_max_json), false);
 
         // "hello" is exactly 5 chars — should work
@@ -344,7 +344,7 @@ int main()
         std::cerr << "\n=== Decoding ===\n";
 
         std::string json(kWordPieceJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
         // Basic decode
         check(tok->decode({5}) == "hello", "decode_single");
@@ -373,7 +373,7 @@ int main()
         std::cerr << "\n=== Round-trip ===\n";
 
         std::string json(kWordPieceJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
         // Round-trip for in-vocab words (normalizer lowercases, so compare lowercase)
         auto rt = [&](const std::string& input, const std::string& expected) {
@@ -396,7 +396,7 @@ int main()
         std::cerr << "\n=== BertNormalizer (control chars) ===\n";
 
         std::string json(kWordPieceJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
         // Tab/newline replaced with space (then split as whitespace)
         check_ids(tok->encode("hello\tworld"), {5, 6}, "norm_tab");
@@ -445,7 +445,7 @@ int main()
                 {"id": 2, "content": "[SEP]", "special": true}
             ]
         })";
-        auto tok = trtf::CreateWordPieceTokenizer(cjk_json, std::strlen(cjk_json), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(cjk_json, std::strlen(cjk_json), false);
 
         // CJK chars get spaces around them, so each becomes its own word
         // "\u4f60\u597d" → " \u4f60 " + " \u597d " → ["你", "好"]
@@ -462,7 +462,7 @@ int main()
         std::cerr << "\n=== BertPreTokenizer (punctuation) ===\n";
 
         std::string json(kWordPieceJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
         // Punctuation becomes separate tokens
         check_ids(tok->encode("hello."), {5, 15}, "pretok_trailing_dot");
@@ -478,7 +478,7 @@ int main()
         std::cerr << "\n=== Edge Cases ===\n";
 
         std::string json(kWordPieceJson);
-        auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
         // Single character that is in vocab
         check_ids(tok->encode("a"), {18}, "edge_single_char");
@@ -512,7 +512,7 @@ int main()
                 }
             }
         })";
-        auto tok = trtf::CreateWordPieceTokenizer(no_norm_json,
+        auto tok = trtmc::CreateWordPieceTokenizer(no_norm_json,
             std::strlen(no_norm_json), false);
 
         // Without normalizer, case is preserved

@@ -28,9 +28,9 @@
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/pipelines/vl_pipeline.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <NvInfer.h>
 #include <cstdint>
@@ -48,12 +48,12 @@ static void check(bool c, const char* n) {
     }
 }
 
-static trtf::TrtLogger g_logger;
+static trtmc::TrtLogger g_logger;
 
 // ---------------------------------------------------------------------------
 // Inline FixedTokenizer for string-based generate() tests
 // ---------------------------------------------------------------------------
-class VLFixedTokenizer : public trtf::ITokenizer {
+class VLFixedTokenizer : public trtmc::ITokenizer {
   public:
     std::vector<int32_t> encode(const std::string&) const override { return {1, 2, 3}; }
     std::string decode(const std::vector<int32_t>&) const override { return "out"; }
@@ -65,10 +65,10 @@ class VLFixedTokenizer : public trtf::ITokenizer {
 // Engine builders
 // ---------------------------------------------------------------------------
 
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
-    auto b = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
-    auto n = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
-    auto c = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(b->createBuilderConfig());
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
+    auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
+    auto c = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(b->createBuilderConfig());
     c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* tok = n->addInput("token_id", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
@@ -83,20 +83,20 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
     n->addIdentity(*tok)->getOutput(0)->setName("_t");
     n->addIdentity(*mask)->getOutput(0)->setName("_m");
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
     if (!plan)
         return nullptr;
-    auto rt = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
 // Mock vision encoder: pixel_values[3,4,4] float32 -> image_features[4] float32
 // Used to exercise the full VL image generation path in vl_pipeline.cpp
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_vision_encoder() {
-    auto b = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
-    auto n = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
-    auto c = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(b->createBuilderConfig());
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_vision_encoder() {
+    auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
+    auto c = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(b->createBuilderConfig());
     c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     // pixel_values[3,4,4] matches preprocessed output with fixed_image_size=4, in_channels=3
@@ -111,11 +111,11 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_vision_encoder() {
 
     n->addIdentity(*pv)->getOutput(0)->setName("_pv");
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
     if (!plan)
         return nullptr;
-    auto rt = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
@@ -133,21 +133,21 @@ static void test_vl_text_only() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 2;
     cfg.has_position_input = false;
 
     // No vision encoder (text-only mode)
-    trtf::VLPreprocessConfig vl_pp;
-    trtf::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream);
+    trtmc::VLPreprocessConfig vl_pp;
+    trtmc::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream);
     check(std::string(pipeline.pipeline_type()) == "VLPipeline", "vl name");
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 5;
     auto result = pipeline.generate_ids({1}, gen_cfg);
 
@@ -168,19 +168,19 @@ static void test_vl_text_only_max_tokens() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 99;
     cfg.has_position_input = false;
 
-    trtf::VLPreprocessConfig vl_pp;
-    trtf::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream);
+    trtmc::VLPreprocessConfig vl_pp;
+    trtmc::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream);
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 3;
     auto result = pipeline.generate_ids({0, 1}, gen_cfg);
 
@@ -200,16 +200,16 @@ static void test_vl_validates_decoder() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.has_position_input = false;
-    trtf::VLPreprocessConfig vl_pp;
+    trtmc::VLPreprocessConfig vl_pp;
 
     // null text_decoder -> throws
     bool threw = false;
     try {
-        trtf::VLPipeline p(nullptr, nullptr, std::move(cache), cfg, vl_pp, stream);
+        trtmc::VLPipeline p(nullptr, nullptr, std::move(cache), cfg, vl_pp, stream);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -228,17 +228,17 @@ static void test_vl_validates_cache() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.has_position_input = false;
-    trtf::VLPreprocessConfig vl_pp;
+    trtmc::VLPreprocessConfig vl_pp;
 
     // null cache -> throws
     bool threw = false;
     try {
-        trtf::VLPipeline p(std::move(decoder), nullptr, nullptr, cfg, vl_pp, stream);
+        trtmc::VLPipeline p(std::move(decoder), nullptr, nullptr, cfg, vl_pp, stream);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -260,20 +260,20 @@ static void test_vl_config_sync() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.has_position_input = false;
     cfg.image_token_id = -1;   // will be synced from vl_pp
     cfg.vision_output_dim = 0; // will be synced from vl_pp
 
-    trtf::VLPreprocessConfig vl_pp;
+    trtmc::VLPreprocessConfig vl_pp;
     vl_pp.image_token_id = 1;
     vl_pp.vision_output_dim = 64;
 
-    trtf::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream);
+    trtmc::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream);
 
     // Construction succeeded; pipeline type is correct
     check(std::string(pipeline.pipeline_type()) == "VLPipeline", "config_sync: type correct");
@@ -296,19 +296,19 @@ static void test_vl_zero_max_tokens() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 2;
     cfg.has_position_input = false;
 
-    trtf::VLPreprocessConfig vl_pp;
-    trtf::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream);
+    trtmc::VLPreprocessConfig vl_pp;
+    trtmc::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream);
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 0; // triggers early return in generate_from_ids
     auto result = pipeline.generate_ids({1, 2, 3}, gen_cfg);
 
@@ -332,18 +332,18 @@ static void test_vl_no_tokenizer_throws() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.has_position_input = false;
-    trtf::VLPreprocessConfig vl_pp;
+    trtmc::VLPreprocessConfig vl_pp;
 
     // No tokenizer
-    trtf::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream);
+    trtmc::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream);
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
 
     // Text-only path: covers line 48
@@ -380,25 +380,25 @@ static void test_vl_generate_with_image_no_encoder() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 2;
     cfg.has_position_input = false;
-    trtf::VLPreprocessConfig vl_pp;
+    trtmc::VLPreprocessConfig vl_pp;
 
     auto tokenizer = std::make_shared<VLFixedTokenizer>();
 
     // No vision encoder -> !vision_encoder_ -> early return to text-only path (line 113)
-    trtf::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream,
+    trtmc::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream,
                               tokenizer);
 
     float pixels[2 * 2 * 3] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,
                                0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
     auto result = pipeline.generate("hello", pixels, 2, 2, gen_cfg);
 
@@ -423,33 +423,33 @@ static void test_vl_generate_with_vision_encoder() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
-    auto vision = std::make_unique<trtf::TrtModuleImpl>(
+    auto vision = std::make_unique<trtmc::TrtModuleImpl>(
         vis_engine.get(), vis_engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 2;
     cfg.has_position_input = false;
     cfg.image_token_id = 1;    // token 1 from VLFixedTokenizer is treated as image token
     cfg.vision_output_dim = 4; // 4-dim features from mock vision encoder
 
-    trtf::VLPreprocessConfig vl_pp;
+    trtmc::VLPreprocessConfig vl_pp;
     vl_pp.preprocessor_type = "simple_chw"; // resize + CHW normalize, no patch merging
     vl_pp.fixed_image_size = 4;             // resize to 4x4 (matches pixel_values[3,4,4])
     vl_pp.in_channels = 3;
 
     auto tokenizer = std::make_shared<VLFixedTokenizer>(); // encodes as {1, 2, 3}
 
-    trtf::VLPipeline pipeline(std::move(decoder), std::move(vision), std::move(cache), cfg, vl_pp,
+    trtmc::VLPipeline pipeline(std::move(decoder), std::move(vision), std::move(cache), cfg, vl_pp,
                               stream, tokenizer);
 
     // Provide a 2x2 RGB image (float pixels in [0,1], will be converted and resized to 4x4)
     float pixels[2 * 2 * 3] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,
                                0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
     gen_cfg.eos_token_id = 2;
 
@@ -472,10 +472,10 @@ static void test_vl_generate_with_vision_encoder() {
 // run_text_step_with_embed full body (lines 285-361 in vl_pipeline.cpp).
 // Constant logits {0.1, 0.9, 0.2, 0.3} -> argmax=1 (non-eos when eos=2),
 // allowing the autoregressive loop to call run_text_step (line 224).
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder_with_embed() {
-    auto b = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
-    auto n = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
-    auto c = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(b->createBuilderConfig());
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder_with_embed() {
+    auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
+    auto c = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(b->createBuilderConfig());
     c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* tok = n->addInput("token_id", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
@@ -496,11 +496,11 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder_with_embed()
     n->addIdentity(*ue)->getOutput(0)->setName("_ue");
     n->addIdentity(*emb)->getOutput(0)->setName("_e");
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
     if (!plan)
         return nullptr;
-    auto rt = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
@@ -525,34 +525,34 @@ static void test_vl_generate_with_embed_decoder() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
-    auto vision = std::make_unique<trtf::TrtModuleImpl>(
+    auto vision = std::make_unique<trtmc::TrtModuleImpl>(
         vis_engine.get(), vis_engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 2;
     cfg.image_token_id = 1;    // token 1 from VLFixedTokenizer is the image token
     cfg.vision_output_dim = 4; // 4-dim features from mock vision encoder
     cfg.has_position_input = false;
 
-    trtf::VLPreprocessConfig vl_pp;
+    trtmc::VLPreprocessConfig vl_pp;
     vl_pp.preprocessor_type = "simple_chw";
     vl_pp.fixed_image_size = 4; // resize to 4x4 CHW
     vl_pp.in_channels = 3;
 
     auto tokenizer = std::make_shared<VLFixedTokenizer>(); // encodes as {1, 2, 3}
 
-    trtf::VLPipeline pipeline(std::move(decoder), std::move(vision), std::move(cache), cfg, vl_pp,
+    trtmc::VLPipeline pipeline(std::move(decoder), std::move(vision), std::move(cache), cfg, vl_pp,
                               stream, tokenizer);
 
     // 2x2 RGB image float pixels in [0,1]
     float pixels[2 * 2 * 3] = {0.5f, 0.5f, 0.5f, 0.4f, 0.4f, 0.4f,
                                0.3f, 0.3f, 0.3f, 0.2f, 0.2f, 0.2f};
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 2; // 2 autoregressive steps to cover line 224
     gen_cfg.eos_token_id = 2;
 
@@ -577,22 +577,22 @@ static void test_vl_generate_with_tokenizer() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(engine.get(),
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(1, 8, 4, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(1, 8, 4, stream);
 
-    trtf::VLConfig cfg;
+    trtmc::VLConfig cfg;
     cfg.vocab_size = 4;
     cfg.id_eos = 2; // argmax=2 -> stops after 1 generated token
     cfg.has_position_input = false;
 
-    trtf::VLPreprocessConfig vl_pp;
+    trtmc::VLPreprocessConfig vl_pp;
     auto tokenizer = std::make_shared<VLFixedTokenizer>();
 
-    trtf::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream,
+    trtmc::VLPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp, stream,
                               tokenizer);
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
     // VLFixedTokenizer::encode() returns {1,2,3}; argmax=2=eos -> 1 new token generated
     auto result = pipeline.generate("hello world", gen_cfg);

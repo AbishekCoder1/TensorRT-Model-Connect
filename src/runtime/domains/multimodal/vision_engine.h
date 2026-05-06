@@ -1,12 +1,12 @@
 #pragma once
 
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct VisionStepEngine {
     TrtModule* module{nullptr};
@@ -31,4 +31,4 @@ bool run_vision_encoder_with_deepstack(const VisionStepEngine& engine, const flo
                                        std::vector<std::vector<float>>& deepstack_features,
                                        std::string& error);
 
-} // namespace trtf
+} // namespace trtmc

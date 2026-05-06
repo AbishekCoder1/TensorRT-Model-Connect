@@ -13,7 +13,7 @@ BLOOM uses:
 
 Trace: ARCH-FAM-001, UD-FAM-BLOOM-01
 Intent: Validate the BLOOM family plugin weight loading including ALiBi, fused QKV splitting, embedding LayerNorm, tied embeddings, and non-standard HF key aliases.
-Preconditions: safetensors and trtf_build are importable; no TRT or GPU required for weight-loading tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; no TRT or GPU required for weight-loading tests.
 Postconditions: All weight keys map correctly from BLOOM's HF layout, fused QKV is split per-head, biases are loaded, and config aliases (d_model, attention_heads) resolve properly.
 """
 import numpy as np
@@ -23,7 +23,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class BloomPluginTester(FamilyPluginTester):
-    plugin_module = "trtf_build.families.bloom"
+    plugin_module = "tensorrt_model_connect.families.bloom"
     model_type = "bloom"
 
     def get_config_dict(self) -> dict:

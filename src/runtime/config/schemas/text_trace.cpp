@@ -1,8 +1,8 @@
 // Registration for the "text_trace" namespace schema.
 //
-// Mirrors trtf_build/trtf_build/runtime_config/schemas/text_trace.py.
+// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/text_trace.py.
 
-#include "trtf/config/schemas/text_trace.h"
+#include "trtmc/config/schemas/text_trace.h"
 
 #include <any>
 #include <cstdint>
@@ -10,7 +10,7 @@
 #include <set>
 #include <string>
 
-namespace trtf::config::schemas {
+namespace trtmc::config::schemas {
 
 namespace {
 bool is_nonneg_int32(const std::any& v) {
@@ -42,4 +42,4 @@ Schema make_text_trace_schema() {
 }
 
 REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_text_trace_schema, make_text_trace_schema);
-} // namespace trtf::config::schemas
+} // namespace trtmc::config::schemas

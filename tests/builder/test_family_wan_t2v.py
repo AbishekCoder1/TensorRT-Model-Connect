@@ -17,10 +17,10 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build.config import ModelConfig
-    import trtf_build.families.wan_t2v as wan_mod
+    from tensorrt_model_connect.config import ModelConfig
+    import tensorrt_model_connect.families.wan_t2v as wan_mod
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _cfg(**raw_overrides: object) -> ModelConfig:
@@ -125,27 +125,27 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.t5_encoder_builder",
+        "tensorrt_model_connect.t5_encoder_builder",
         _module(
-            "trtf_build.t5_encoder_builder",
+            "tensorrt_model_connect.t5_encoder_builder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.standard_dit_builder",
+        "tensorrt_model_connect.standard_dit_builder",
         _module(
-            "trtf_build.standard_dit_builder",
+            "tensorrt_model_connect.standard_dit_builder",
             load_dit_weights=load_dit_weights,
             build_standard_dit_engine=build_standard_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.causal_vae_3d_builder",
+        "tensorrt_model_connect.causal_vae_3d_builder",
         _module(
-            "trtf_build.causal_vae_3d_builder",
+            "tensorrt_model_connect.causal_vae_3d_builder",
             load_vae_weights=load_vae_weights,
             build_causal_vae_3d_engine=build_causal_vae_3d_engine,
             count_vae_caches=lambda **_kwargs: 0,
@@ -188,9 +188,9 @@ def test_get_diffusion_config_uses_count_vae_caches(monkeypatch: pytest.MonkeyPa
     """
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.causal_vae_3d_builder",
+        "tensorrt_model_connect.causal_vae_3d_builder",
         _module(
-            "trtf_build.causal_vae_3d_builder",
+            "tensorrt_model_connect.causal_vae_3d_builder",
             count_vae_caches=lambda **_kwargs: 13,
         ),
     )

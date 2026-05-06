@@ -4,9 +4,9 @@
 #include "runtime/pipelines/flux_pipeline.h"
 #include "runtime/plugins/shared/diffusion_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
-namespace trtf {
+namespace trtmc {
 
 class FluxPlugin final : public IPipelinePlugin {
   public:
@@ -34,4 +34,4 @@ class FluxPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_flux_plugin, FluxPlugin, "diffusion_flux");
 
-} // namespace trtf
+} // namespace trtmc

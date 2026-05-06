@@ -4,10 +4,10 @@
 #include "runtime/pipelines/whisper_pipeline.h"
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-namespace trtf {
+namespace trtmc {
 
 class WhisperPlugin final : public IPipelinePlugin {
   public:
@@ -73,4 +73,4 @@ class WhisperPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_whisper_plugin, WhisperPlugin, "speech_to_text");
 
-} // namespace trtf
+} // namespace trtmc

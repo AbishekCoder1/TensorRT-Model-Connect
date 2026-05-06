@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <cuda_runtime_api.h>
 
-namespace trtf {
+namespace trtmc {
 
 // GPU-side greedy argmax for multi-codebook logits.
 // Finds argmax within [0, audio_range) and full [0, codebook_size) per codebook.
@@ -56,4 +56,4 @@ void magpie_cfg_interpolate_device(const float* d_cond_logits, const float* d_un
                                    float* d_out_logits, float cfg_scale, int32_t num_elements,
                                    cudaStream_t stream);
 
-} // namespace trtf
+} // namespace trtmc

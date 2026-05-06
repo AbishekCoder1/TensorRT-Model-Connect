@@ -4,7 +4,7 @@ Tests plugin discovery and model resolution without requiring TRT.
 
 Trace: ARCH-ENG-001, UD-ENG-03
 Intent: Validate the engine builder orchestrator's model resolution, plugin discovery, and family dispatch logic.
-Preconditions: trtf_build is importable; no TRT or GPU required.
+Preconditions: tensorrt_model_connect is importable; no TRT or GPU required.
 Postconditions: Local directories with config.json resolve correctly, HF repo IDs are detected, and all registered family plugins are discoverable.
 """
 
@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
-from trtf_build.engine_builder import _resolve_model
-from trtf_build.families import find_plugin, _ALL_PLUGINS
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+from tensorrt_model_connect.engine_builder import _resolve_model
+from tensorrt_model_connect.families import find_plugin, _ALL_PLUGINS
 
 engine_builder = importlib.import_module(_resolve_model.__module__)
 

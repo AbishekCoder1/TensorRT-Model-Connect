@@ -9,7 +9,7 @@
 #include <string>
 #include <utility>
 
-namespace trtf {
+namespace trtmc {
 namespace {
 
 struct ParsedWav
@@ -288,4 +288,4 @@ std::vector<float> resample_linear(
     return resampled;
 }
 
-} // namespace trtf
+} // namespace trtmc

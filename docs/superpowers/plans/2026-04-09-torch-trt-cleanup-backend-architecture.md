@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Normalize torch-trt as an optional build backend — eliminate C++ runtime awareness of torch-trt, absorb `ttrt_build/` into `trtf_build/backends/torch_trt/`, and unify strategy registries.
+**Goal:** Normalize torch-trt as an optional build backend — eliminate C++ runtime awareness of torch-trt, absorb `tensorrt_model_connect/` into `tensorrt_model_connect/backends/torch_trt/`, and unify strategy registries.
 
-**Architecture:** The C++ runtime auto-detects IO naming from engine tensor names (existing `has_input()`/`has_output()` pattern). The Python builder gains a `--backend` flag; `ttrt_build/` becomes `trtf_build/backends/torch_trt/`. Strategy registries are deduplicated — `test_impact.py` imports from `contracts.py` instead of maintaining its own copy.
+**Architecture:** The C++ runtime auto-detects IO naming from engine tensor names (existing `has_input()`/`has_output()` pattern). The Python builder gains a `--backend` flag; `tensorrt_model_connect/` becomes `tensorrt_model_connect/backends/torch_trt/`. Strategy registries are deduplicated — `test_impact.py` imports from `contracts.py` instead of maintaining its own copy.
 
 **Tech Stack:** C++17, Python 3.12, TensorRT, torch_tensorrt (optional), pytest, CMake/Ninja
 
@@ -13,27 +13,27 @@
 ## File Structure
 
 ### Files to Create
-- `trtf_build/trtf_build/backends/__init__.py` — Backend registry with auto-discovery
-- `trtf_build/trtf_build/backends/base.py` — `BuildBackend` protocol
-- `trtf_build/trtf_build/backends/torch_trt/__init__.py` — Entry point (moved from `ttrt_build/__init__.py`)
-- `trtf_build/trtf_build/backends/torch_trt/compiler.py` — (moved from `ttrt_build/compiler.py`)
-- `trtf_build/trtf_build/backends/torch_trt/cache_config.py` — (moved)
-- `trtf_build/trtf_build/backends/torch_trt/config.py` — (moved)
-- `trtf_build/trtf_build/backends/torch_trt/bundle_writer.py` — (moved)
-- `trtf_build/trtf_build/backends/torch_trt/bundle_reader.py` — (moved)
-- `trtf_build/trtf_build/backends/torch_trt/families/` — (moved from `ttrt_build/families/`)
-- `trtf_build/trtf_build/backends/torch_trt/strategies/` — (moved from `ttrt_build/strategies/`)
+- `tensorrt_model_connect/tensorrt_model_connect/backends/__init__.py` — Backend registry with auto-discovery
+- `tensorrt_model_connect/tensorrt_model_connect/backends/base.py` — `BuildBackend` protocol
+- `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/__init__.py` — Entry point (moved from `tensorrt_model_connect/__init__.py`)
+- `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/compiler.py` — (moved from `tensorrt_model_connect/compiler.py`)
+- `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/cache_config.py` — (moved)
+- `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/config.py` — (moved)
+- `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/bundle_writer.py` — (moved)
+- `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/bundle_reader.py` — (moved)
+- `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/families/` — (moved from `tensorrt_model_connect/families/`)
+- `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/strategies/` — (moved from `tensorrt_model_connect/strategies/`)
 - `tests/backends/__init__.py`
 - `tests/backends/torch_trt/` — (moved from `tests/torchtrt_builder/`)
 
 ### Files to Modify
-- `include/trtf/runtime/kv_cache.h` — Remove `NamingScheme` enum, simplify constructor
+- `include/trtmc/runtime/kv_cache.h` — Remove `NamingScheme` enum, simplify constructor
 - `src/runtime/core/kv_cache.cpp` — Auto-detect naming in `bind_to()` via `has_input()`
 - `src/runtime/plugins/decoder_plugin.cpp` — Remove `is_torchtrt` branch + `"torchtrt_decoder"` registration
 - `src/runtime/plugins/force_link_plugins.cpp` — Rename anchor: `TorchTrtDiffusion` → `PixArt`
 - `src/runtime/pipelines/text_generation_pipeline.h` — Auto-detect `logits_output_name` in constructor
 - `CMakeLists.txt` — Rename source files
-- `trtf_build/trtf_build/cli.py` — `--torch-trt` → `--backend`
+- `tensorrt_model_connect/tensorrt_model_connect/cli.py` — `--torch-trt` → `--backend`
 - `tests/e2e_harness/contracts.py:812-842` — Remove `torchtrt_decoder` and `torchtrt_diffusion`
 - `tests/e2e_harness/manifest_loader.py:425-453` — Remove from `_KNOWN_RUNTIME_STRATEGIES`
 - `tools/test_impact.py:28-103` — Import from `contracts.py` instead of maintaining copies
@@ -46,7 +46,7 @@
 - `src/runtime/pipelines/torchtrt_diffusion_pipeline.cpp` → `src/runtime/pipelines/pixart_pipeline.cpp`
 
 ### Files to Delete (after move)
-- `ttrt_build/` (entire directory — absorbed into `trtf_build/backends/torch_trt/`)
+- `tensorrt_model_connect/` (entire directory — absorbed into `tensorrt_model_connect/backends/torch_trt/`)
 - `tests/torchtrt_builder/` (moved to `tests/backends/torch_trt/`)
 
 ---
@@ -56,14 +56,14 @@
 Remove torch-trt awareness from KV cache. The runtime probes the engine's tensor names instead of reading a `NamingScheme` enum.
 
 **Files:**
-- Modify: `include/trtf/runtime/kv_cache.h`
+- Modify: `include/trtmc/runtime/kv_cache.h`
 - Modify: `src/runtime/core/kv_cache.cpp:73-95`
 - Test: `tests/cpp/test_torchtrt_decoder.cpp` (update to validate auto-detect)
 
 - [ ] **Step 1: Modify `kv_cache.h` — remove NamingScheme enum, simplify constructor**
 
 ```cpp
-// include/trtf/runtime/kv_cache.h
+// include/trtmc/runtime/kv_cache.h
 // Remove the NamingScheme enum entirely (lines 27-30).
 // Remove the NamingScheme parameter from the constructor (line 32).
 // Remove the naming_ member (line 74).
@@ -137,13 +137,13 @@ Each call site that passes `NamingScheme::kStandard` or `NamingScheme::kTorchTrt
 - [ ] **Step 4: Build and run C++ tests**
 
 ```bash
-docker exec trtf-dev-gb300-agent-4 bash -c "cd /workspace/trt-transformers-cpp && cmake --build build -j && ctest --test-dir build --output-on-failure"
+docker exec trtmc-dev-gb300-agent-4 bash -c "cd /workspace/tensorrt-model-connect && cmake --build build -j && ctest --test-dir build --output-on-failure"
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add include/trtf/runtime/kv_cache.h src/runtime/core/kv_cache.cpp
+git add include/trtmc/runtime/kv_cache.h src/runtime/core/kv_cache.cpp
 git commit -m "refactor(kv_cache): auto-detect IO naming from engine tensors
 
 Remove NamingScheme enum. bind_to() probes has_input(\"cache_kv_0\")
@@ -211,14 +211,14 @@ Add `std::string logits_output_name_;` as a private member on the class.
 //         tgc.logits_output_name = "output0";
 
 // Remove the "torchtrt_decoder" registration at line 63:
-//     static trtf::PluginRegistrar g_DecoderPlugin_reg3("torchtrt_decoder", ...);
+//     static trtmc::PluginRegistrar g_DecoderPlugin_reg3("torchtrt_decoder", ...);
 // Keep "decoder_kv_cache" and "decoder_moe" registrations.
 ```
 
 - [ ] **Step 4: Build and run tests**
 
 ```bash
-docker exec trtf-dev-gb300-agent-4 bash -c "cd /workspace/trt-transformers-cpp && cmake --build build -j && ctest --test-dir build --output-on-failure"
+docker exec trtmc-dev-gb300-agent-4 bash -c "cd /workspace/tensorrt-model-connect && cmake --build build -j && ctest --test-dir build --output-on-failure"
 ```
 
 - [ ] **Step 5: Commit**
@@ -273,8 +273,8 @@ In `pixart_plugin.cpp`:
 // → volatile int kForceLink_PixArtPlugin = 0;
 
 // Change registration — register under "diffusion_pixart" (already a known strategy):
-// static trtf::PluginRegistrar g_... ("torchtrt_diffusion", ...);
-// → static trtf::PluginRegistrar g_... ("diffusion_pixart", ...);
+// static trtmc::PluginRegistrar g_... ("torchtrt_diffusion", ...);
+// → static trtmc::PluginRegistrar g_... ("diffusion_pixart", ...);
 ```
 
 In `pixart_pipeline.h` and `pixart_pipeline.cpp`:
@@ -308,7 +308,7 @@ torchtrt_diffusion_pipeline.cpp → pixart_pipeline.cpp
 - [ ] **Step 5: Build and test**
 
 ```bash
-docker exec trtf-dev-gb300-agent-4 bash -c "cd /workspace/trt-transformers-cpp && cmake --build build -j && ctest --test-dir build --output-on-failure"
+docker exec trtmc-dev-gb300-agent-4 bash -c "cd /workspace/tensorrt-model-connect && cmake --build build -j && ctest --test-dir build --output-on-failure"
 ```
 
 - [ ] **Step 6: Commit**
@@ -328,13 +328,13 @@ was built via TRT API or torch-trt. Register under diffusion_pixart."
 Create the `backends/` package with the protocol and registry.
 
 **Files:**
-- Create: `trtf_build/trtf_build/backends/__init__.py`
-- Create: `trtf_build/trtf_build/backends/base.py`
+- Create: `tensorrt_model_connect/tensorrt_model_connect/backends/__init__.py`
+- Create: `tensorrt_model_connect/tensorrt_model_connect/backends/base.py`
 
 - [ ] **Step 1: Create `backends/base.py` — BuildBackend protocol**
 
 ```python
-# trtf_build/trtf_build/backends/base.py
+# tensorrt_model_connect/tensorrt_model_connect/backends/base.py
 """Build backend protocol — all backends implement this interface."""
 
 from __future__ import annotations
@@ -372,7 +372,7 @@ class BuildBackend(Protocol):
 - [ ] **Step 2: Create `backends/__init__.py` — registry with lazy discovery**
 
 ```python
-# trtf_build/trtf_build/backends/__init__.py
+# tensorrt_model_connect/tensorrt_model_connect/backends/__init__.py
 """Backend registry — discovers and dispatches to build backends.
 
 The default backend is 'trt' (TRT Network API). Optional backends like
@@ -407,7 +407,7 @@ def _discover() -> None:
 
     for name, mod_path in _BACKEND_MODULES.items():
         try:
-            mod = importlib.import_module(mod_path, package="trtf_build")
+            mod = importlib.import_module(mod_path, package="tensorrt_model_connect")
             backend = getattr(mod, "backend", None)
             if backend is not None and isinstance(backend, BuildBackend):
                 _backends[name] = backend
@@ -433,25 +433,25 @@ def list_backends() -> Dict[str, BuildBackend]:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add trtf_build/trtf_build/backends/
+git add tensorrt_model_connect/tensorrt_model_connect/backends/
 git commit -m "feat(backends): add BuildBackend protocol and registry scaffold"
 ```
 
 ---
 
-## Task 5: Python — Move ttrt_build into backends/torch_trt
+## Task 5: Python — Move tensorrt_model_connect into backends/torch_trt
 
-Move the entire `ttrt_build/ttrt_build/` tree into `trtf_build/trtf_build/backends/torch_trt/` and fix all internal imports.
+Move the entire `tensorrt_model_connect/tensorrt_model_connect/` tree into `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/` and fix all internal imports.
 
 **Files:**
-- Move: `ttrt_build/ttrt_build/*` → `trtf_build/trtf_build/backends/torch_trt/`
-- Delete: `ttrt_build/` (after move)
+- Move: `tensorrt_model_connect/tensorrt_model_connect/*` → `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/`
+- Delete: `tensorrt_model_connect/` (after move)
 
 - [ ] **Step 1: Move files**
 
 ```bash
 # Move all source files
-cp -r ttrt_build/ttrt_build/* trtf_build/trtf_build/backends/torch_trt/
+cp -r tensorrt_model_connect/tensorrt_model_connect/* tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/
 
 # The __init__.py needs rewriting (Step 2), but families/, strategies/,
 # compiler.py, cache_config.py, config.py, bundle_writer.py, bundle_reader.py
@@ -461,7 +461,7 @@ cp -r ttrt_build/ttrt_build/* trtf_build/trtf_build/backends/torch_trt/
 - [ ] **Step 2: Rewrite `backends/torch_trt/__init__.py` to implement BuildBackend**
 
 ```python
-# trtf_build/trtf_build/backends/torch_trt/__init__.py
+# tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/__init__.py
 """Torch-TRT build backend — optional performance optimization.
 
 Compiles HuggingFace models into .trtfb bundles via torch.export +
@@ -515,11 +515,11 @@ backend = TorchTrtBackend()
 
 - [ ] **Step 3: Fix all internal imports in moved files**
 
-In every `.py` file under `trtf_build/trtf_build/backends/torch_trt/`:
+In every `.py` file under `tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/`:
 
 Replace:
 ```python
-from ttrt_build.xxx import yyy
+from tensorrt_model_connect.xxx import yyy
 from .xxx import yyy  # these are fine — relative imports still work
 ```
 
@@ -529,14 +529,14 @@ Specifically in `compiler.py`:
 from .config import ModelConfig
 # This still works (relative import within backends/torch_trt/)
 
-# The soft import of trtf_build.config.ModelConfig is now a sibling:
+# The soft import of tensorrt_model_connect.config.ModelConfig is now a sibling:
 # Change:
-#   from trtf_build.config import ModelConfig
+#   from tensorrt_model_connect.config import ModelConfig
 # To:
-#   from trtf_build.config import ModelConfig  # still works — same package
+#   from tensorrt_model_connect.config import ModelConfig  # still works — same package
 ```
 
-In `config.py`, the fallback import of `trtf_build.config.ModelConfig` now works directly since we're inside `trtf_build`.
+In `config.py`, the fallback import of `tensorrt_model_connect.config.ModelConfig` now works directly since we're inside `tensorrt_model_connect`.
 
 - [ ] **Step 4: Update `compiler.py` — bundles must use standard runtime_strategy**
 
@@ -566,20 +566,20 @@ info.runtime_strategy = _TORCHTRT_TO_STANDARD_STRATEGY.get(
 - [ ] **Step 5: Verify the moved package imports correctly**
 
 ```bash
-cd trtf_build && python -c "from trtf_build.backends import get_backend; b = get_backend('torch_trt'); print(b.name if b else 'not available')"
+cd tensorrt_model_connect && python -c "from tensorrt_model_connect.backends import get_backend; b = get_backend('torch_trt'); print(b.name if b else 'not available')"
 ```
 
-- [ ] **Step 6: Delete the old `ttrt_build/` directory**
+- [ ] **Step 6: Delete the old `tensorrt_model_connect/` directory**
 
 ```bash
-git rm -r ttrt_build/
+git rm -r tensorrt_model_connect/
 ```
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add trtf_build/trtf_build/backends/torch_trt/ ttrt_build/
-git commit -m "refactor: absorb ttrt_build into trtf_build/backends/torch_trt
+git add tensorrt_model_connect/tensorrt_model_connect/backends/torch_trt/ tensorrt_model_connect/
+git commit -m "refactor: absorb tensorrt_model_connect into tensorrt_model_connect/backends/torch_trt
 
 Single package, optional backend. Torch-TRT bundles now emit standard
 runtime_strategy values (decoder_kv_cache, diffusion_pixart).
@@ -593,7 +593,7 @@ build_backend: torch_trt recorded in bundle metadata."
 Replace `--torch-trt` boolean flag with `--backend` choice.
 
 **Files:**
-- Modify: `trtf_build/trtf_build/cli.py:28-62`
+- Modify: `tensorrt_model_connect/tensorrt_model_connect/cli.py:28-62`
 
 - [ ] **Step 1: Replace --torch-trt with --backend in argument parser**
 
@@ -613,7 +613,7 @@ build_parser.add_argument(
 - [ ] **Step 2: Update `_cmd_build()` dispatch logic**
 
 ```python
-# trtf_build/trtf_build/cli.py
+# tensorrt_model_connect/tensorrt_model_connect/cli.py
 
 def _cmd_build(args: argparse.Namespace) -> int:
     if not args.model:
@@ -657,17 +657,17 @@ def _cmd_build(args: argparse.Namespace) -> int:
 - [ ] **Step 3: Run CLI tests**
 
 ```bash
-docker exec trtf-dev-gb300-agent-4 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/builder/test_cli.py -v"
+docker exec trtmc-dev-gb300-agent-4 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/builder/test_cli.py -v"
 ```
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add trtf_build/trtf_build/cli.py
+git add tensorrt_model_connect/tensorrt_model_connect/cli.py
 git commit -m "refactor(cli): replace --torch-trt flag with --backend choice
 
-trtf-build build <model> -o out.trtfb                    # TRT API (default)
-trtf-build build <model> -o out.trtfb --backend torchtrt  # Torch-TRT"
+trtmc-build build <model> -o out.trtfb                    # TRT API (default)
+trtmc-build build <model> -o out.trtfb --backend torchtrt  # Torch-TRT"
 ```
 
 ---
@@ -717,7 +717,7 @@ from e2e_harness.contracts import RUNTIME_TO_TASK_STRATEGY
 - [ ] **Step 4: Run E2E harness tests**
 
 ```bash
-docker exec trtf-dev-gb300-agent-4 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/ -v"
+docker exec trtmc-dev-gb300-agent-4 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/ -v"
 ```
 
 - [ ] **Step 5: Commit**
@@ -812,15 +812,15 @@ git mv tests/torchtrt_builder tests/backends/torch_trt
 In all `tests/backends/torch_trt/test_*.py` files, update imports:
 ```python
 # Change:
-from ttrt_build.xxx import yyy
+from tensorrt_model_connect.xxx import yyy
 # To:
-from trtf_build.backends.torch_trt.xxx import yyy
+from tensorrt_model_connect.backends.torch_trt.xxx import yyy
 ```
 
 - [ ] **Step 3: Run the moved tests**
 
 ```bash
-docker exec trtf-dev-gb300-agent-4 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/backends/ -v --co"
+docker exec trtmc-dev-gb300-agent-4 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/backends/ -v --co"
 ```
 
 - [ ] **Step 4: Update any CI config referencing old paths**
@@ -851,8 +851,8 @@ Update CLAUDE.md, torch-trt docs, and any references to the old structure.
 - [ ] **Step 1: Update CLAUDE.md**
 
 In the source layout section:
-- Remove `ttrt_build/` as a top-level entry
-- Add `trtf_build/trtf_build/backends/` section describing torch_trt backend
+- Remove `tensorrt_model_connect/` as a top-level entry
+- Add `tensorrt_model_connect/tensorrt_model_connect/backends/` section describing torch_trt backend
 - Update `torchtrt_diffusion_plugin.cpp` → `pixart_plugin.cpp`
 - Update `torchtrt_diffusion_pipeline.h/.cpp` → `pixart_pipeline.h/.cpp`
 - Update CLI examples: `--torch-trt` → `--backend torchtrt`
@@ -861,8 +861,8 @@ In the source layout section:
 - [ ] **Step 2: Update torch-trt docs**
 
 In `TORCHTRT_TRANSFORM_GUIDE.md` and `TORCHTRT_AGENT_GUIDE.md`:
-- Update package name: `ttrt_build` → `trtf_build.backends.torch_trt`
-- Update CLI: `trtf-build build --torch-trt` → `trtf-build build --backend torchtrt`
+- Update package name: `tensorrt_model_connect` → `tensorrt_model_connect.backends.torch_trt`
+- Update CLI: `trtmc-build build --torch-trt` → `trtmc-build build --backend torchtrt`
 - Update import paths in code examples
 - Note that bundles now use standard runtime_strategy values
 
@@ -882,7 +882,7 @@ Task 1 (KV auto-detect) ──┐
 Task 2 (logits auto-detect)├── Can run in parallel (C++ only)
 Task 3 (rename pixart) ───┘
 
-Task 4 (backend scaffold) → Task 5 (move ttrt_build) → Task 6 (CLI update)
+Task 4 (backend scaffold) → Task 5 (move tensorrt_model_connect) → Task 6 (CLI update)
                                                           ↓
 Task 7 (strategy cleanup) ─────────────────────────── Task 8 (manifests)
                                                           ↓

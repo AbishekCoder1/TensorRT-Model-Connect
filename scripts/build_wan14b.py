@@ -3,7 +3,7 @@
 
 Usage (inside container):
     /opt/venv/bin/python scripts/build_wan14b.py --frames 33 \
-        -o /workspace/users/yifeif/trt-transformers/engines/wan21-14b-33fr.trtfb
+        -o /workspace/users/yifeif/tensorrt-model-connect/engines/wan21-14b-33fr.trtfb
 """
 import argparse
 import json
@@ -24,7 +24,7 @@ def main():
     args = parser.parse_args()
 
     # 1. Download model
-    from trtf_build.engine_builder import _resolve_model
+    from tensorrt_model_connect.engine_builder import _resolve_model
     model_dir = _resolve_model(args.model_id)
 
     # 2. Read the actual DiT config from HF
@@ -36,7 +36,7 @@ def main():
           file=sys.stderr)
 
     # 3. Override plugin class variables for 14B
-    from trtf_build.families.wan_t2v import WanT2VPlugin
+    from tensorrt_model_connect.families.wan_t2v import WanT2VPlugin
     WanT2VPlugin._DIT_DIM = dit_dim
     WanT2VPlugin._DIT_NUM_HEADS = dit_cfg["num_attention_heads"]
     WanT2VPlugin._DIT_NUM_LAYERS = dit_cfg["num_layers"]
@@ -54,12 +54,12 @@ def main():
     model_index_path.write_text(json.dumps(model_index, indent=2))
 
     # 5. Build using the standard pipeline
-    from trtf_build.engine_builder import build_bundle
+    from tensorrt_model_connect.engine_builder import build_bundle
     build_bundle._model_id_or_path_orig = args.model_id
     build_bundle(model_dir, args.output, verbose=args.verbose)
 
     print(f"\n[14b] Done! Run with:", file=sys.stderr)
-    print(f"  ./build/trtf generate-video {args.output} "
+    print(f"  ./build/trtmc generate-video {args.output} "
           f"--prompt 'A cat walking in the garden' "
           f"--num-steps 30 --hf-python /opt/venv/bin/python",
           file=sys.stderr)

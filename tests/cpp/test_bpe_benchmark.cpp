@@ -17,7 +17,7 @@
 //
 // Measures: init time, encode latency, decode latency, throughput.
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <algorithm>
 #include <chrono>
@@ -185,7 +185,7 @@ int main()
         std::vector<double> times;
         for (int i = 0; i < N; ++i) {
             auto t0 = Clock::now();
-            auto tok = trtf::CreateBpeTokenizer(json_data.data(), json_data.size(), false);
+            auto tok = trtmc::CreateBpeTokenizer(json_data.data(), json_data.size(), false);
             auto t1 = Clock::now();
             (void)tok;
             double us = std::chrono::duration_cast<Us>(t1 - t0).count();
@@ -198,7 +198,7 @@ int main()
     }
 
     // Create tokenizer for encode/decode benchmarks
-    auto tok = trtf::CreateBpeTokenizer(json_data.data(), json_data.size(), false);
+    auto tok = trtmc::CreateBpeTokenizer(json_data.data(), json_data.size(), false);
     auto test_strings = make_test_strings();
 
     // --- 2. Encode benchmarks ---

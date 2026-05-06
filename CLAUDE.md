@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-C++ bundle-only runtime for TensorRT inference, paired with a Python build package (`trtf_build/`) that converts HuggingFace models into `.trtfb` bundles. The Python package handles model loading, TRT engine building, and bundle packaging. The C++ runtime loads `.trtfb` bundles, deserializes TRT engines, and runs autoregressive inference. Public C++ API lives in `include/trtf/`. Everything is in the `trtf` namespace. C++17, compiled with `-Wall -Wextra -Wpedantic`.
+C++ bundle-only runtime for TensorRT inference, paired with a Python build package (`tensorrt_model_connect/`) that converts HuggingFace models into `.trtfb` bundles. The Python package handles model loading, TRT engine building, and bundle packaging. The C++ runtime loads `.trtfb` bundles, deserializes TRT engines, and runs autoregressive inference. Public C++ API lives in `include/trtmc/`. Everything is in the `trtmc` namespace. C++17, compiled with `-Wall -Wextra -Wpedantic`.
 
 ## Workspace isolation
 
 Use isolated repo clones and containers per team on shared GB300 hosts.
 
-- **Repo clone per team**: `/workspace/users/yifeif/workspaces/<id>/trt-transformers-cpp`
-- **Container per team**: `trtf-dev-gb300-<id>` (do not use shared `trtf-dev-gb300`)
-- **Shared read-only resources**: HF cache (`/mnt/storage/trt-transformers/model-weights`), engines (`/workspace/users/yifeif/trt-transformers/engines`)
+- **Repo clone per team**: `/workspace/users/yifeif/workspaces/<id>/tensorrt-model-connect`
+- **Container per team**: `trtmc-dev-gb300-<id>` (do not use shared `trtmc-dev-gb300`)
+- **Shared read-only resources**: HF cache (`/mnt/storage/tensorrt-model-connect/model-weights`), engines (`/workspace/users/yifeif/tensorrt-model-connect/engines`)
 - **Isolated per team**: git state, `build/`, editable installs, branches
 
 Bootstrap a new isolated workspace:
@@ -22,57 +22,57 @@ Bootstrap a new isolated workspace:
 
 Run commands in your team container:
 ```bash
-docker exec trtf-dev-gb300-<team-id> <command>
+docker exec trtmc-dev-gb300-<team-id> <command>
 ```
 
 Rely on CI (GitLab pipeline) as the quality gate — push your branch and let CI validate. Do NOT run the full E2E suite locally unless specifically asked.
 
 ## Build commands
 
-ALWAYS DO EVERYTHING IN CONTAINER. Run command with `docker exec trtf-dev-gb300-<your-team-id>`
+ALWAYS DO EVERYTHING IN CONTAINER. Run command with `docker exec trtmc-dev-gb300-<your-team-id>`
 
 ### C++ runtime
 
 Use the container-baked TRT/CUDA paths:
 ```bash
 cmake -S . -B build -G Ninja \
-  -DTRTF_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
-  -DTRTF_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
-  -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-  -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+  -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+  -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
+  -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
 cmake --build build -j
 ```
 
 With TRT-RTX backend DSO (optional, needs TRT-RTX SDK):
 ```bash
 cmake -S . -B build -G Ninja \
-  -DTRTF_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
-  -DTRTF_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
-  -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-  -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so \
-  -DTRTF_BUILD_BACKEND_RTX=ON \
-  -DTRTF_RTX_LIBRARY_DIR=<path-to-libtensorrt_rtx> \
-  -DTRTF_RTX_INCLUDE_DIR=<path-to-TensorRT-RTX-SDK/include>
+  -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+  -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
+  -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so \
+  -DTRTMC_BUILD_BACKEND_RTX=ON \
+  -DTRTMC_RTX_LIBRARY_DIR=<path-to-libtensorrt_rtx> \
+  -DTRTMC_RTX_INCLUDE_DIR=<path-to-TensorRT-RTX-SDK/include>
 cmake --build build -j
 ```
 
 ### Python build package
 
 ```bash
-pip install --no-deps -e trtf_build/
+pip install --no-deps -e tensorrt_model_connect/
 
 # Build from HF repo ID (auto-downloads) or local directory
-trtf-build build Qwen/Qwen3-0.6B -o <output.trtfb> [--max-cache-length N] [--verbose]
-trtf-build build <model-dir> -o <output.trtfb> [--max-cache-length N] [--verbose]
+trtmc-build build Qwen/Qwen3-0.6B -o <output.trtfb> [--max-cache-length N] [--verbose]
+trtmc-build build <model-dir> -o <output.trtfb> [--max-cache-length N] [--verbose]
 
 # Build for TRT-RTX backend (sets engine_backend="trt_rtx" in bundle metadata)
-trtf-build build Qwen/Qwen3-0.6B -o <output.trtfb> [--rtx]
+trtmc-build build Qwen/Qwen3-0.6B -o <output.trtfb> [--rtx]
 
 # Or use the Python API
-python3 -c "import trtf_build; trtf_build.build('Qwen/Qwen3-0.6B', 'qwen3.trtfb')"
+python3 -c "import tensorrt_model_connect; tensorrt_model_connect.build('Qwen/Qwen3-0.6B', 'qwen3.trtfb')"
 
-trtf-build inspect <bundle.trtfb>
-trtf-build version
+trtmc-build inspect <bundle.trtfb>
+trtmc-build version
 ```
 
 ## Running tests
@@ -106,28 +106,28 @@ Unified E2E tests (requires GPU + engine bundles):
 ```bash
 # All models (68 models — auto-builds missing bundles):
 pytest tests/test_e2e.py -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 
 # Single model:
 pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 
 # Force rebuild all bundles from HF:
 pytest tests/test_e2e.py -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python --rebuild-engines
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python --rebuild-engines
 
 # Filter by task strategy:
 pytest tests/test_e2e.py -v --e2e-task-strategy text_generation_causal \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 
 # With artifact output (WAV, PNG, frames, logits):
 pytest tests/test_e2e.py -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
   --e2e-artifacts-dir /tmp/e2e_artifacts
 ```
 
@@ -165,7 +165,7 @@ plugin dispatch, graph ops, and debug runner infrastructure.
 **Implementation:**
 - Tests use `pytest` with shared fixtures from `tests/builder/conftest.py`.
 - Two skip markers: `requires_trt` (TRT + CUDA available) and
-  `requires_trtf_build` (trtf_build importable). All files use
+  `requires_tensorrt_model_connect` (tensorrt_model_connect importable). All files use
   `try/except` with `pytest.skip(allow_module_level=True)` so they skip
   cleanly when TRT is not installed.
 - TRT graph tests use the `trt_runner` fixture: a `build_fn(network, inputs)`
@@ -207,7 +207,7 @@ preprocessing, CLI argument parsing, and helper utilities.
 - Plain `main()` executables with no test framework. A `check(condition, name)`
   helper accumulates `failures`; `main()` returns non-zero if any failed.
 - Registered in `CMakeLists.txt` with `add_executable` + `add_test`.
-- TRT-dependent tests guard with `#if TRTF_HAS_TRT` and skip gracefully
+- TRT-dependent tests guard with `#if TRTMC_HAS_TRT` and skip gracefully
   (exit 0) when TRT headers are unavailable.
 - Shared utilities in `test_helpers.h`: temp dirs, safetensors writing,
   standard decoder checkpoint generation.
@@ -403,8 +403,8 @@ the bundle from scratch — avoids testing against stale cached bundles.
 
 ```bash
 /opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
   --rebuild-engines
 ```
 
@@ -416,15 +416,15 @@ infer/compare. This is the gold-standard regression gate.
 ```bash
 # All models:
 /opt/venv/bin/python -m pytest tests/test_e2e.py -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
   --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
 
 # By modality (faster targeted runs):
 /opt/venv/bin/python -m pytest tests/test_e2e.py -v \
   --e2e-task-strategy text_generation_causal \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 
 # Available task strategies for filtering:
 #   text_generation_causal    (26 models — decoders, MoE, SSM, RWKV)
@@ -448,7 +448,7 @@ perf-sensitive changes.
 ```bash
 python3 tools/perf_compare.py \
   --model Qwen/Qwen3-0.6B \
-  --bundle /workspace/users/yifeif/trt-transformers/engines/qwen3-0.6b.trtfb \
+  --bundle /workspace/users/yifeif/tensorrt-model-connect/engines/qwen3-0.6b.trtfb \
   --prompt "The capital of France is" --max-new-tokens 20 --json results.json
 ```
 
@@ -474,17 +474,17 @@ python3 tools/perf_compare.py \
 ## Running executables
 
 ```bash
-./build/trtf run     <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
-./build/trtf run     <bundle.trtfb> --prompt "text" --image <image.jpg> [--max-new-tokens N] [--hf-python PATH]
-./build/trtf run     <bundle.trtfb> --prompt "text" [--runtime-cache PATH] [--cuda-graphs]
-./build/trtf inspect <bundle.trtfb>
-./build/trtf version
+./build/trtmc run     <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--hf-python PATH]
+./build/trtmc run     <bundle.trtfb> --prompt "text" --image <image.jpg> [--max-new-tokens N] [--hf-python PATH]
+./build/trtmc run     <bundle.trtfb> --prompt "text" [--runtime-cache PATH] [--cuda-graphs]
+./build/trtmc inspect <bundle.trtfb>
+./build/trtmc version
 ```
 
 For vision-language models, pass `--image` with the path to an image file. The VL bundle must have been built from a VL model (e.g. Qwen2.5-VL) and contains both a text decoder and vision encoder engine.
 
 For TRT-RTX bundles, `--runtime-cache PATH` persists JIT compilation results to disk (speeds up subsequent runs), and `--cuda-graphs` enables CUDA graph capture/replay for reduced kernel launch overhead.
-If backend DSOs are not next to the `trtf` executable or visible through the
+If backend DSOs are not next to the `trtmc` executable or visible through the
 platform loader path, pass `--backend-dir PATH` explicitly.
 
 ## Runtime configuration
@@ -498,16 +498,16 @@ TensorRT logger controls live under `platform.trt_log_stderr` and
 
 The system is split into two stages:
 
-1. **Python build** (`trtf_build/`) — takes an HF model directory (with `config.json` + safetensors), builds a TRT engine via TensorRT's Python API, and packages it into a `.trtfb` bundle. Model family plugins in `trtf_build/trtf_build/families/` handle family-specific weight mapping and graph construction.
+1. **Python build** (`tensorrt_model_connect/`) — takes an HF model directory (with `config.json` + safetensors), builds a TRT engine via TensorRT's Python API, and packages it into a `.trtfb` bundle. Model family plugins in `tensorrt_model_connect/tensorrt_model_connect/families/` handle family-specific weight mapping and graph construction.
 
 2. **C++ runtime** — loads a `.trtfb` bundle, deserializes the TRT engine plan, and runs inference. The runtime is bundle-only: it does not load HF model directories directly.
 
-**Backend abstraction (dlopen-based dispatch):** The main `trtf` binary links only libcudart -- it does not link libnvinfer or any TRT SDK at compile time. TRT engine execution is delegated to dynamically loaded backend DSOs. At runtime, `BackendLoader::load()` reads the `engine_backend` field from the bundle's `config.json` and `dlopen`s the matching shared library:
-- `libtrtf_backend_trt.so` -- standard TRT backend, links libnvinfer.
-- `libtrtf_backend_trt_rtx.so` -- TRT-RTX backend, links libtensorrt_rtx. Adds `IRuntimeCache` (JIT compilation cache persisted to disk) and `CudaGraphStrategy` (CUDA graph capture/replay for reduced launch overhead).
+**Backend abstraction (dlopen-based dispatch):** The main `trtmc` binary links only libcudart -- it does not link libnvinfer or any TRT SDK at compile time. TRT engine execution is delegated to dynamically loaded backend DSOs. At runtime, `BackendLoader::load()` reads the `engine_backend` field from the bundle's `config.json` and `dlopen`s the matching shared library:
+- `libtrtmc_backend_trt.so` -- standard TRT backend, links libnvinfer.
+- `libtrtmc_backend_trt_rtx.so` -- TRT-RTX backend, links libtensorrt_rtx. Adds `IRuntimeCache` (JIT compilation cache persisted to disk) and `CudaGraphStrategy` (CUDA graph capture/replay for reduced launch overhead).
 - Old bundles without an `engine_backend` field default to `"trt"`.
 
-All pipelines interact with TRT engines through `ITrtModule`, a pure virtual interface declared in `include/trtf/runtime/trt_module.h`. The concrete implementation (`TrtModuleImpl`) lives inside the backend DSOs. Each DSO exports an `IBackend` factory that creates `ITrtModule` instances with backend-specific options (e.g., runtime cache path, CUDA graph enablement).
+All pipelines interact with TRT engines through `ITrtModule`, a pure virtual interface declared in `include/trtmc/runtime/trt_module.h`. The concrete implementation (`TrtModuleImpl`) lives inside the backend DSOs. Each DSO exports an `IBackend` factory that creates `ITrtModule` instances with backend-specific options (e.g., runtime cache path, CUDA graph enablement).
 
 **Plugin registry dispatch:** The `runtime_strategy` field in the bundle's `config.json` selects the backend via `PipelineRegistry` — a singleton that maps strategy strings to `IPipelinePlugin` instances. Each plugin lives in its own `.cpp` file under `src/runtime/plugins/`; the CMake manifest generates explicit registrar calls for those plugins. The registry and factory live in `src/runtime/registry/` — `pipeline_factory.cpp` is ~124 LOC: it reads the bundle, extracts the strategy, normalizes legacy strategy strings (e.g. `"diffusion"` → `"diffusion_flux"`), looks up the plugin, and calls `plugin->create(ctx)`. No switch/case, no edits needed when adding new strategies.
 
@@ -535,7 +535,7 @@ All pipelines interact with TRT engines through `ITrtModule`, a pure virtual int
 
 **Legacy strategy normalization:** Old bundles may contain ambiguous strategy strings (`"text_to_audio"`, `"diffusion"`). `pipeline_factory.cpp` auto-rewrites these to their unambiguous equivalents using bundle config fields (`magpie_tts`, `diffusion_backend_type`).
 
-**BaseConfig:** Universal bundle metadata parsed by `parse_base_config()` in `pipeline_plugin.cpp` — vocab_size, hidden_size, num_layers, num_heads, num_kv_heads, head_dim, max_cache_length, bos/eos IDs, runtime_strategy, tokenizer flags. Each plugin parses additional strategy-specific fields from the raw config JSON. See `include/trtf/runtime/pipeline_plugin.h` for all fields.
+**BaseConfig:** Universal bundle metadata parsed by `parse_base_config()` in `pipeline_plugin.cpp` — vocab_size, hidden_size, num_layers, num_heads, num_kv_heads, head_dim, max_cache_length, bos/eos IDs, runtime_strategy, tokenizer flags. Each plugin parses additional strategy-specific fields from the raw config JSON. See `include/trtmc/runtime/pipeline_plugin.h` for all fields.
 
 Tokenizer implementations (`ITokenizer`):
 - `VocabTokenizer` — vocab.txt-based lookup.
@@ -546,11 +546,11 @@ Bundle self-describing config: The `.trtfb` bundle header contains JSON metadata
 ## Source layout
 
 ```
-trtf_build/                          # Python package (engine builder)
-  trtf_build/
+tensorrt_model_connect/                          # Python package (engine builder)
+  tensorrt_model_connect/
     __init__.py
     __main__.py
-    cli.py                           # CLI: trtf-build build|inspect|version
+    cli.py                           # CLI: trtmc-build build|inspect|version
     config.py                        # ModelConfig from config.json
     graph_ops.py                     # Layer 1: Atomic TRT graph ops (tensor-in/tensor-out)
     graph_blocks.py                  # Layer 2: Composable blocks (attention, SwiGLU, GELU MLP, norm)
@@ -575,7 +575,7 @@ trtf_build/                          # Python package (engine builder)
       wan_t2v.py flux.py z_image.py                # Diffusion T2V/T2I
       electra.py modernbert.py deberta.py t5.py     # Autopilot-generated
   pyproject.toml
-include/trtf/runtime/                # Public C++ headers (plugin system)
+include/trtmc/runtime/                # Public C++ headers (plugin system)
   pipeline_factory.h                 # PipelineFactory::from_bundle()
   pipeline_plugin.h                  # IPipelinePlugin interface, BaseConfig, PipelineContext
   pipeline_registry.h                # PipelineRegistry singleton, manifest registration macro
@@ -585,7 +585,7 @@ src/                                 # C++ bundle-only runtime
   bundle/
     bundle_format.h/cpp              # Read .trtfb files
   cabi/
-    api/trtf_c.cpp                   # C ABI: trtf_create_pipeline_ex()
+    api/trtmc_c.cpp                   # C ABI: trtmc_create_pipeline_ex()
   runtime/
     registry/                        # Factory + plugin dispatch
       pipeline_factory.cpp           # Registry-based dispatch (~124 LOC, no switch/case)
@@ -594,8 +594,8 @@ src/                                 # C++ bundle-only runtime
     backend/                         # Backend DSO implementations (dlopen-loaded)
       backend_loader.h/cpp           # dlopen dispatch, DSO caching
       trt_module_impl.h/cpp          # TrtModuleImpl : ITrtModule (compiled into both DSOs)
-      trt_backend.cpp                # Standard TRT IBackend → libtrtf_backend_trt.so
-      rtx_backend.cpp                # TRT-RTX IBackend → libtrtf_backend_trt_rtx.so
+      trt_backend.cpp                # Standard TRT IBackend → libtrtmc_backend_trt.so
+      rtx_backend.cpp                # TRT-RTX IBackend → libtrtmc_backend_trt_rtx.so
     plugins/                         # Self-registering pipeline plugins (strategy → pipeline factories)
       shared/
         plugin_helpers.h/cpp         # ITrtModule loading via backend, tokenizer, KV helpers
@@ -618,7 +618,7 @@ src/                                 # C++ bundle-only runtime
       wan_plugin.cpp                 # diffusion_wan, diffusion_pixart
       zimage_plugin.cpp              # diffusion_zimage
       t5_plugin.cpp                  # text_to_text (encoder-decoder seq2seq)
-      cmake/trtf_pipeline_plugins.cmake # Plugin source/anchor manifest
+      cmake/trtmc_pipeline_plugins.cmake # Plugin source/anchor manifest
     pipelines/                       # Pipeline implementations (one class per file, fully isolated)
       text_generation_pipeline.h/cpp # TextGenerationPipeline: standard decoder + MoE
       recurrent_pipeline.h/cpp       # RecurrentPipeline: SSM, RWKV, hybrid (via IStateManager)
@@ -685,7 +685,7 @@ src/                                 # C++ bundle-only runtime
     text_parsers.h/cpp               # shared string/file parsing (starts_with, read_file, etc.)
     json_helpers.h/cpp               # shared JSON extraction (extract_json_string, etc.)
 tools/                               # Diff test framework (TRT vs HF comparison)
-  diff_logits.py                     # E2E logit comparison (trtf vs HF transformers)
+  diff_logits.py                     # E2E logit comparison (trtmc vs HF transformers)
   diff_layers.py                     # Per-layer hidden state comparison
   diff_vl.py                         # VL diff testing (vision features, generation, C++ parity)
   test_runner_parity.py              # Python vs C++ runtime parity
@@ -700,7 +700,7 @@ scripts/                             # Infrastructure & utility scripts
     run.sh                           # Shell wrapper for discover + dispatch
 tests/
   test_e2e.py                        # Unified E2E entrypoint (parametrized over all manifests)
-  conftest.py                        # Shared CLI options (--engine-dir, --trtf-binary, etc.)
+  conftest.py                        # Shared CLI options (--engine-dir, --trtmc-binary, etc.)
   cpp/                               # C++ runtime unit tests
     test_helpers.h                   # Shared helpers: temp dirs, safetensors writing
     test_bundle_format.cpp ...       # 61 test executables (bundle, tokenizers, CUDA, KV cache, etc.)
@@ -743,12 +743,12 @@ tests/
 
 ## Torch-TRT model transforms
 
-When transforming a new model to torch-trt (building a `.trtfb` bundle via `ttrt_build/`):
+When transforming a new model to torch-trt (building a `.trtfb` bundle via `tensorrt_model_connect/`):
 
 1. **Read `docs/torch-trt/TORCHTRT_TRANSFORM_GUIDE.md` first** — step-by-step playbook covering wrapper rules, the validation loop, output conventions, and deliverables checklist.
 2. **Consult `docs/torch-trt/TORCHTRT_KNOWN_ISSUES.md`** — living registry of compilation failures, masking bugs, and workarounds discovered during previous transforms. Check it before writing wrapper code.
 3. **Log new issues** — if you discover a new issue during the transform, add it to `docs/torch-trt/TORCHTRT_KNOWN_ISSUES.md` with symptom, root cause, and fix.
-4. **Do not stop until output is produced and validated** — iterate through build → inference → diagnose → fix cycles until the model produces correct output. Save all outputs to `/workspace/trt-transformers-cpp/outputs/<model_name>/` with descriptive filenames so the user can inspect them.
+4. **Do not stop until output is produced and validated** — iterate through build → inference → diagnose → fix cycles until the model produces correct output. Save all outputs to `/workspace/tensorrt-model-connect/outputs/<model_name>/` with descriptive filenames so the user can inspect them.
 5. **Log work** in `docs/torch-trt/TORCHTRT_WORKLOG.md` — what was done, what failed, decisions made.
 
 The agent guide at `docs/torch-trt/TORCHTRT_AGENT_GUIDE.md` has the detailed execution plan for decoder/encoder models.
@@ -789,14 +789,14 @@ python3 scripts/autopilot/autorun.py --dry-run
 
 4. **Agent loop** (per model): Each agent autonomously runs:
    - Scaffold plugin via `new_family.py`
-   - Build bundle via `trtf-build build`
+   - Build bundle via `trtmc-build build`
    - Validate: compare TRT output against HuggingFace (agent picks the
      metric — cosine similarity, text match, PSNR, etc.)
    - If build or validation fails → read error, read HF source code, fix
      plugin, rebuild, re-validate
    - If no existing C++ runtime strategy fits → create a new C++ plugin
      (.cpp file), register it, rebuild C++ binary
-   - Iterate until `./build/trtf run <bundle> --prompt "..." --max-new-tokens N`
+   - Iterate until `./build/trtmc run <bundle> --prompt "..." --max-new-tokens N`
      produces correct output
    - Create E2E manifest (no skip field)
 
@@ -841,7 +841,7 @@ python3 scripts/new_family.py \
   --family-name phi
 
 # 2. Review and customize the generated plugin
-$EDITOR trtf_build/trtf_build/families/phi.py
+$EDITOR tensorrt_model_connect/tensorrt_model_connect/families/phi.py
 
 # 3. Validate end-to-end
 ./scripts/validate_family.sh microsoft/Phi-3-mini-4k-instruct
@@ -849,7 +849,7 @@ $EDITOR trtf_build/trtf_build/families/phi.py
 
 ### Manual path
 
-1. **Create `trtf_build/trtf_build/families/<family>.py`** — implement the `FamilyPlugin` protocol (see `base.py`). This handles:
+1. **Create `tensorrt_model_connect/tensorrt_model_connect/families/<family>.py`** — implement the `FamilyPlugin` protocol (see `base.py`). This handles:
    - Matching HF `model_type` / `architectures`
    - Mapping HF safetensors weight keys to the engine builder's expected names
    - Any family-specific weight pre-processing (e.g., Gemma's +1.0 to RMSNorm gamma, embedding scaling)
@@ -877,8 +877,8 @@ $EDITOR trtf_build/trtf_build/families/phi.py
    stages, and thresholds. No code changes needed. Run:
    ```bash
    pytest tests/test_e2e.py::test_e2e[my-model] -v \
-     --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-     --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+     --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+     --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
      --rebuild-engines
    ```
 
@@ -904,8 +904,8 @@ EOF
 
 # 2. Run E2E (auto-builds bundle, runs TRT, compares against HF)
 pytest tests/test_e2e.py::test_e2e[my-new-model] -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
   --rebuild-engines
 ```
 
@@ -941,15 +941,15 @@ Legacy aliases (`text_to_audio`, `diffusion`) are auto-normalized by `pipeline_f
 
 ### Example
 
-See `trtf_build/trtf_build/families/qwen.py` for the Qwen3 plugin (standard decoder).
-See `trtf_build/trtf_build/families/phi.py` for Phi-3 (fused QKV/gate_up weight splitting).
-See `trtf_build/trtf_build/families/phi_moe.py` for Phi-MoE (MoE with SparseMixer routing, uses `graph_blocks.add_attention_block`).
-See `trtf_build/trtf_build/families/qwen_vl.py` for Qwen VL (Qwen2.5-VL standard + Qwen3-VL DeepStack via `graph_blocks` composition).
-See `trtf_build/trtf_build/families/mamba.py` for Mamba (SSM, custom graph + C++ backend).
-See `trtf_build/trtf_build/families/t5.py` for T5 (encoder-decoder seq2seq, custom graph + `text_to_text` C++ plugin).
-See `trtf_build/trtf_build/families/deberta.py` for DeBERTa (disentangled attention, custom encoder graph).
-See `trtf_build/trtf_build/families/modernbert.py` for ModernBERT (PRE-norm, fused QKV, GeGLU, per-layer RoPE).
-See `trtf_build/trtf_build/families/base.py` for the plugin protocol.
+See `tensorrt_model_connect/tensorrt_model_connect/families/qwen.py` for the Qwen3 plugin (standard decoder).
+See `tensorrt_model_connect/tensorrt_model_connect/families/phi.py` for Phi-3 (fused QKV/gate_up weight splitting).
+See `tensorrt_model_connect/tensorrt_model_connect/families/phi_moe.py` for Phi-MoE (MoE with SparseMixer routing, uses `graph_blocks.add_attention_block`).
+See `tensorrt_model_connect/tensorrt_model_connect/families/qwen_vl.py` for Qwen VL (Qwen2.5-VL standard + Qwen3-VL DeepStack via `graph_blocks` composition).
+See `tensorrt_model_connect/tensorrt_model_connect/families/mamba.py` for Mamba (SSM, custom graph + C++ backend).
+See `tensorrt_model_connect/tensorrt_model_connect/families/t5.py` for T5 (encoder-decoder seq2seq, custom graph + `text_to_text` C++ plugin).
+See `tensorrt_model_connect/tensorrt_model_connect/families/deberta.py` for DeBERTa (disentangled attention, custom encoder graph).
+See `tensorrt_model_connect/tensorrt_model_connect/families/modernbert.py` for ModernBERT (PRE-norm, fused QKV, GeGLU, per-layer RoPE).
+See `tensorrt_model_connect/tensorrt_model_connect/families/base.py` for the plugin protocol.
 
 ### Adding a new C++ runtime plugin
 
@@ -957,10 +957,10 @@ When a model family requires fundamentally different runtime behavior (new state
 
 1. **Create `src/runtime/plugins/<name>_plugin.cpp`** — implement `IPipelinePlugin`:
    ```cpp
-   #include "trtf/runtime/pipeline_registry.h"
+   #include "trtmc/runtime/pipeline_registry.h"
    #include "runtime/plugins/shared/plugin_helpers.h"
 
-   namespace trtf {
+   namespace trtmc {
    class MyPlugin final : public IPipelinePlugin {
    public:
        std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
@@ -971,19 +971,19 @@ When a model family requires fundamentally different runtime behavior (new state
            // ... construct and return pipeline
        }
    };
-   } // namespace trtf
+   } // namespace trtmc
 
-   // Register through the generated plugin manifest (inside namespace trtf):
+   // Register through the generated plugin manifest (inside namespace trtmc):
    REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_my_plugin, MyPlugin, "my_strategy");
    // Or for multiple strategies:
    // REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_my_plugin, MyPlugin,
    //                                          "strategy_a", "strategy_b");
    ```
 
-2. **Add one manifest entry** to `cmake/trtf_pipeline_plugins.cmake`:
+2. **Add one manifest entry** to `cmake/trtmc_pipeline_plugins.cmake`:
    `my_plugin.cpp|register_my_plugin`.
 
-3. Reconfigure/rebuild. The manifest adds the `.cpp` to `trtf_core` and
+3. Reconfigure/rebuild. The manifest adds the `.cpp` to `trtmc_core` and
    generates the explicit registrar call.
 
 4. **Create or reuse a pipeline class** in `src/runtime/pipelines/` that implements `IPipeline`.
@@ -1018,7 +1018,7 @@ python3 tools/diff_logits.py \
   --model microsoft/Phi-3-mini-4k-instruct --atol 1e-3 --battery --trust-remote-code
 ```
 
-The diff-test framework uses `trtf_build.debug_runner.TrtRunner` for pure-Python TRT inference with device-resident KV cache, matching the C++ `DeviceKvCache` behavior exactly. For Mamba/SSM models, `MambaTrtRunner` handles device-resident recurrent state. For VL models, `VLTrtRunner` combines vision + text decoders with image preprocessing. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.
+The diff-test framework uses `tensorrt_model_connect.debug_runner.TrtRunner` for pure-Python TRT inference with device-resident KV cache, matching the C++ `DeviceKvCache` behavior exactly. For Mamba/SSM models, `MambaTrtRunner` handles device-resident recurrent state. For VL models, `VLTrtRunner` combines vision + text decoders with image preprocessing. `diff_layers.py` builds a debug engine with per-layer hidden state outputs via `debug_layer_outputs=True`.
 
 **VL diff testing** (`diff_vl.py`):
 ```bash
@@ -1035,13 +1035,13 @@ python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
 
 # Full VL generation + C++ binary parity
 python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
-  --binary ./build/trtf --hf-python /opt/venv/bin/python
+  --binary ./build/trtmc --hf-python /opt/venv/bin/python
 ```
 
 **Runner parity guarantee**: If you change the C++ mask/cache/position logic (`trt_decode_runtime.cpp`, `device_kv_cache.cpp`), you MUST also update `debug_runner.py` and verify with:
 ```bash
 python3 tools/test_runner_parity.py \
-  --bundle /tmp/qwen3.trtfb --binary ./build/trtf \
+  --bundle /tmp/qwen3.trtfb --binary ./build/trtmc \
   --hf-python /opt/venv/bin/python --max-new-tokens 20
 ```
 
@@ -1057,14 +1057,14 @@ Prerequisites: Docker + NVIDIA Container Toolkit. The container is fully self-co
 
 ### 2) Install local packages and build (inside container)
 ```bash
-pip install --no-deps -e trtf_build/
-pip install --no-deps -e ttrt_build/
+pip install --no-deps -e tensorrt_model_connect/
+pip install --no-deps -e tensorrt_model_connect/
 
 cmake -S . -B build -G Ninja \
-  -DTRTF_TRT_INCLUDE_DIR=$TRT_INC_DIR \
-  -DTRTF_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so \
-  -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-  -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+  -DTRTMC_TRT_INCLUDE_DIR=$TRT_INC_DIR \
+  -DTRTMC_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so \
+  -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+  -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
 cmake --build build -j
 ```
 
@@ -1072,13 +1072,13 @@ cmake --build build -j
 ```bash
 
 # Build a bundle (auto-downloads from HuggingFace)
-trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
 
 # Inspect it
-trtf-build inspect /tmp/qwen3.trtfb
+trtmc-build inspect /tmp/qwen3.trtfb
 
 # Run from bundle using the C++ runtime
-./build/trtf run /tmp/qwen3.trtfb --prompt "Hello" --max-new-tokens 5 \
+./build/trtmc run /tmp/qwen3.trtfb --prompt "Hello" --max-new-tokens 5 \
   --hf-python /opt/venv/bin/python
 ```
 
@@ -1086,10 +1086,10 @@ trtf-build inspect /tmp/qwen3.trtfb
 ```bash
 
 # Build a VL bundle (text decoder + vision encoder)
-trtf-build build Qwen/Qwen2.5-VL-3B-Instruct -o /tmp/qwen25vl.trtfb --max-cache-length 384
+trtmc-build build Qwen/Qwen2.5-VL-3B-Instruct -o /tmp/qwen25vl.trtfb --max-cache-length 384
 
 # Run with an image
-./build/trtf run /tmp/qwen25vl.trtfb --prompt "Describe this image." \
+./build/trtmc run /tmp/qwen25vl.trtfb --prompt "Describe this image." \
   --image /path/to/image.jpg --max-new-tokens 30 \
   --hf-python /opt/venv/bin/python
 ```
@@ -1098,14 +1098,14 @@ trtf-build build Qwen/Qwen2.5-VL-3B-Instruct -o /tmp/qwen25vl.trtfb --max-cache-
 ```bash
 
 # Build a Qwen3-VL bundle (text decoder with DeepStack + vision encoder with multi-level outputs)
-trtf-build build Qwen/Qwen3-VL-2B-Instruct -o /tmp/qwen3vl.trtfb --max-cache-length 256
+trtmc-build build Qwen/Qwen3-VL-2B-Instruct -o /tmp/qwen3vl.trtfb --max-cache-length 256
 
 # Text-only inference (DeepStack inactive during text-only)
-./build/trtf run /tmp/qwen3vl.trtfb --prompt "The capital of France is" \
+./build/trtmc run /tmp/qwen3vl.trtfb --prompt "The capital of France is" \
   --max-new-tokens 20 --hf-python /opt/venv/bin/python
 
 # VL inference with image (DeepStack active during image token prefill)
-./build/trtf run /tmp/qwen3vl.trtfb --prompt "Describe this image." \
+./build/trtmc run /tmp/qwen3vl.trtfb --prompt "Describe this image." \
   --image /path/to/image.jpg --max-new-tokens 30 \
   --hf-python /opt/venv/bin/python
 ```
@@ -1115,26 +1115,26 @@ trtf-build build Qwen/Qwen3-VL-2B-Instruct -o /tmp/qwen3vl.trtfb --max-cache-len
 
 # Single model (auto-builds bundle if missing):
 python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 
 # All 68 models (force rebuild):
 python -m pytest tests/test_e2e.py -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
   --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
 
 # Text-gen models only (~30 min):
 python -m pytest tests/test_e2e.py -v \
   --e2e-task-strategy text_generation_causal \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 
 # Diffusion models (Wan T2V, FLUX, Z-Image — ~45 min):
 python -m pytest tests/test_e2e.py -v \
   --e2e-task-strategy diffusion_media_generation \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 ```
 
 Artifacts (WAV audio, PNG frames/images, logits, transcripts) are saved to
@@ -1143,8 +1143,8 @@ Artifacts (WAV audio, PNG frames/images, logits, transcripts) are saved to
 ### 7) MMLU sanity check (inside container)
 ```bash
 /opt/venv/bin/python scripts/eval_mmlu.py \
-  --backend trtf --model /tmp/qwen3.trtfb \
-  --trtf-binary ./build/trtf \
+  --backend trtmc --model /tmp/qwen3.trtfb \
+  --trtmc-binary ./build/trtmc \
   --subject all --split test \
   --num-samples 4 --min-accuracy 0.0
 ```

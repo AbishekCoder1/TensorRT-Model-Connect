@@ -19,9 +19,9 @@ import pytest
 
 try:
     from safetensors.numpy import save_file
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 pytest.skip("YOLOX plugin not yet implemented", allow_module_level=True)
 
@@ -177,31 +177,31 @@ class TestYoloxPluginMatch:
     """Verify YOLOX plugin matches the expected model types."""
 
     def test_matches_yolox(self):
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
         assert plugin.matches("yolox")
 
     def test_matches_yolox_document(self):
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
         assert plugin.matches("yolox_document")
 
     def test_matches_yolox_doc(self):
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
         assert plugin.matches("yolox-doc")
 
     def test_no_match_yolo(self):
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
         assert not plugin.matches("yolo")
 
     def test_no_match_detr(self):
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
         assert not plugin.matches("detr")
 
     def test_name(self):
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
         assert plugin.name == "yolox"
 
     def test_runtime_strategy(self):
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
         assert plugin.runtime_strategy == "object_detection"
 
 
@@ -215,7 +215,7 @@ class TestYoloxLoadWeights:
     NUM_CLASSES = 4
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
 
         config = _make_config(num_classes=self.NUM_CLASSES)
         tensors = _make_yolox_tensors(num_classes=self.NUM_CLASSES)
@@ -261,7 +261,7 @@ class TestYoloxLoadWeights:
 
     def test_load_weights_shapes(self, tmp_path):
         """Verify weight tensor shapes are preserved correctly."""
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
 
         config = _make_config(num_classes=self.NUM_CLASSES)
         tensors = _make_yolox_tensors(num_classes=self.NUM_CLASSES)
@@ -287,7 +287,7 @@ class TestYoloxLoadWeights:
 
     def test_bn_tensors_present(self, tmp_path):
         """Verify BN running_mean/running_var are loaded (needed for folding)."""
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
 
         config = _make_config(num_classes=self.NUM_CLASSES)
         tensors = _make_yolox_tensors(num_classes=self.NUM_CLASSES)
@@ -314,7 +314,7 @@ class TestYoloxDetectionConfig:
     """Verify get_detection_config() returns correct values."""
 
     def test_default_config(self, tmp_path):
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
 
         config = _make_config(num_classes=10)
         _write_config(tmp_path, config)
@@ -333,7 +333,7 @@ class TestYoloxDetectionConfig:
         assert len(det_cfg["image_std"]) == 3
 
     def test_custom_image_size(self, tmp_path):
-        from trtf_build.families.yolox import plugin
+        from tensorrt_model_connect.families.yolox import plugin
 
         config = _make_config(num_classes=4)
         _write_config(tmp_path, config)
@@ -353,19 +353,19 @@ class TestResolveImageSize:
     """Verify _resolve_image_size reads preprocessor_config.json."""
 
     def test_from_preprocessor_config(self, tmp_path):
-        from trtf_build.families.yolox import _resolve_image_size
+        from tensorrt_model_connect.families.yolox import _resolve_image_size
 
         pp = {"size": {"height": 1024, "width": 1024}}
         (tmp_path / "preprocessor_config.json").write_text(json.dumps(pp))
         assert _resolve_image_size(str(tmp_path)) == 1024
 
     def test_default_when_missing(self, tmp_path):
-        from trtf_build.families.yolox import _resolve_image_size
+        from tensorrt_model_connect.families.yolox import _resolve_image_size
 
         assert _resolve_image_size(str(tmp_path)) == 640
 
     def test_int_size_format(self, tmp_path):
-        from trtf_build.families.yolox import _resolve_image_size
+        from tensorrt_model_connect.families.yolox import _resolve_image_size
 
         pp = {"size": 512}
         (tmp_path / "preprocessor_config.json").write_text(json.dumps(pp))
@@ -380,7 +380,7 @@ class TestBatchNormFolding:
     """Verify BN folding produces correct fused weights."""
 
     def test_fuse_conv_bn(self):
-        from trtf_build.cnn_builder import _fuse_conv_bn
+        from tensorrt_model_connect.cnn_builder import _fuse_conv_bn
 
         out_ch, in_ch, kh, kw = 8, 3, 3, 3
         conv_w = _rand(out_ch, in_ch, kh, kw)
@@ -398,7 +398,7 @@ class TestBatchNormFolding:
         np.testing.assert_allclose(fused_b, conv_b, atol=1e-4)
 
     def test_fuse_conv_bn_nontrivial(self):
-        from trtf_build.cnn_builder import _fuse_conv_bn
+        from tensorrt_model_connect.cnn_builder import _fuse_conv_bn
 
         out_ch, in_ch = 4, 3
         conv_w = np.ones((out_ch, in_ch, 1, 1), dtype=np.float32)

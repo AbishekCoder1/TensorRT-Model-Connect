@@ -1,7 +1,7 @@
 // TVM-FFI kernel plugin creator (IPluginCreator) + REGISTER_TENSORRT_PLUGIN.
 // Uses the stable V2 plugin path for maximum platform compatibility.
 
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI
 
 #include "plugins/tvm_ffi_kernel_plugin.h"
 
@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class TvmFfiKernelCreator : public nvinfer1::IPluginCreator {
   public:
@@ -67,14 +67,14 @@ class TvmFfiKernelCreator : public nvinfer1::IPluginCreator {
     std::string ns_;
 };
 
-} // namespace trtf
+} // namespace trtmc
 
 // V2 static registration — proven stable on all platforms.
-// Can't use REGISTER_TENSORRT_PLUGIN(trtf::TvmFfiKernelCreator) because the
+// Can't use REGISTER_TENSORRT_PLUGIN(trtmc::TvmFfiKernelCreator) because the
 // macro concatenates the name into an identifier and :: is invalid in identifiers.
-static nvinfer1::PluginRegistrar<trtf::TvmFfiKernelCreator> pluginRegistrarTvmFfiKernel{};
+static nvinfer1::PluginRegistrar<trtmc::TvmFfiKernelCreator> pluginRegistrarTvmFfiKernel{};
 
 // Force-link symbol for static library usage.
 extern "C" void tvm_ffi_plugin_force_link() {}
 
-#endif // TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#endif // TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI

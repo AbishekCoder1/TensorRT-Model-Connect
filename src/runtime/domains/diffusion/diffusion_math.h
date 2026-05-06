@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace diffusion_math {
 
 /// CPU matrix multiply: out[M,N] = A[M,K] * B[K,N] + bias[N]
@@ -96,4 +96,4 @@ inline void compute_timestep_mlp(
 }
 
 } // namespace diffusion_math
-} // namespace trtf
+} // namespace trtmc

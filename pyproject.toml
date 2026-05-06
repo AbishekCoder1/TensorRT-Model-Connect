@@ -13,7 +13,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["trtf_build/trtf_build"]
+source = ["tensorrt_model_connect/tensorrt_model_connect"]
 omit = ["*/tests/*", "*/__pycache__/*"]
 
 [tool.coverage.report]

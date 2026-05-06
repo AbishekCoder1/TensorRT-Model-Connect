@@ -3,12 +3,12 @@
 // RecurrentPipeline: Mamba, RWKV, and Hybrid models.
 // Uses IStateManager to abstract recurrent vs KV cache state.
 
-#include "trtf/pipeline.h"
-#include "trtf/runtime/inference_state.h"
-#include "trtf/runtime/recurrent_state.h"
-#include "trtf/runtime/sampler.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/inference_state.h"
+#include "trtmc/runtime/recurrent_state.h"
+#include "trtmc/runtime/sampler.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <chrono>
 #include <cstdint>
@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct RecurrentGenConfig {
     int32_t vocab_size{0};
@@ -78,4 +78,4 @@ class RecurrentPipeline final : public IPipeline {
     int prof_steps_{0};
 };
 
-} // namespace trtf
+} // namespace trtmc

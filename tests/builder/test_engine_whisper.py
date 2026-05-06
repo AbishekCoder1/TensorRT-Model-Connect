@@ -25,7 +25,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-WHISPER-01
 Intent: Validate the Whisper family plugin weight loading for encoder-decoder ASR including conv stem, encoder/decoder layers, cross-attention, learned positions, and dual-engine key layout.
-Preconditions: safetensors and trtf_build are importable; no TRT or GPU required for weight-loading tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; no TRT or GPU required for weight-loading tests.
 Postconditions: All encoder (enc_layer.*), decoder (layer.*), and cross-attention (cross_*) weight keys are present with correct shapes for the dual-engine architecture.
 """
 
@@ -40,9 +40,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -75,7 +75,7 @@ class WhisperPluginTester(FamilyPluginTester):
       - HF prefix: model.encoder.layers.{i}.* + model.decoder.layers.{i}.*
     """
 
-    plugin_module = "trtf_build.families.whisper"
+    plugin_module = "tensorrt_model_connect.families.whisper"
     model_type = "whisper"
     spec = TinyModelSpec(
         vocab_size=_VOCAB,

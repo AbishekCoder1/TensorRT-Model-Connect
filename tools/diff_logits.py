@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pure-Python E2E logit comparison between TRT engine and HF transformers.
 
-No C++ binary needed. Builds a TRT engine via trtf_build, runs inference
+No C++ binary needed. Builds a TRT engine via tensorrt_model_connect, runs inference
 in Python, and compares per-step logits against HF transformers.
 
 Usage:
@@ -37,9 +37,9 @@ def build_trt_engine(model_id_or_path, max_cache_length, verbose):
 
     For Whisper, also returns encoder_plan via config._encoder_plan.
     """
-    from trtf_build.engine_builder import _resolve_model
-    from trtf_build.config import ModelConfig
-    from trtf_build.families import find_plugin
+    from tensorrt_model_connect.engine_builder import _resolve_model
+    from tensorrt_model_connect.config import ModelConfig
+    from tensorrt_model_connect.families import find_plugin
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)
@@ -74,19 +74,19 @@ def run_trt(engine_plan, config, input_ids, max_new_tokens, max_cache_length):
     """Run TRT inference, return list of logit arrays (one per step)."""
     # Use model-specific runner based on model_type.
     if config.model_type.lower() == "mamba":
-        from trtf_build.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.debug_runner import MambaTrtRunner
         runner = MambaTrtRunner(
             engine_plan=engine_plan,
             num_layers=config.num_hidden_layers,
         )
     elif config.model_type.lower() == "rwkv":
-        from trtf_build.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
         runner = RwkvTrtRunner(
             engine_plan=engine_plan,
             num_layers=config.num_hidden_layers,
         )
     elif config.model_type.lower() == "whisper":
-        from trtf_build.debug_runner import WhisperTrtRunner
+        from tensorrt_model_connect.debug_runner import WhisperTrtRunner
         encoder_plan = getattr(config, '_encoder_plan', None)
         if encoder_plan is None:
             raise RuntimeError("Whisper encoder plan not built")
@@ -109,7 +109,7 @@ def run_trt(engine_plan, config, input_ids, max_new_tokens, max_cache_length):
               file=sys.stderr)
         runner.run_encoder(mel_features)
     else:
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
         runner = TrtRunner(
             engine_plan=engine_plan,
             max_cache_length=max_cache_length,

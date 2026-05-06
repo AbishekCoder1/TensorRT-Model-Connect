@@ -6,7 +6,7 @@ import importlib
 
 
 def _import():
-    return importlib.import_module("trtf_profile")
+    return importlib.import_module("trtmc_profile")
 
 
 def _make_bench_result(prefill_ms, decode_ms, num_tokens, gen_ids):

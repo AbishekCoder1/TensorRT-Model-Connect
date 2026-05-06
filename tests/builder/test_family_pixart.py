@@ -17,10 +17,10 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build.config import ModelConfig
-    import trtf_build.families.pixart as pixart_mod
+    from tensorrt_model_connect.config import ModelConfig
+    import tensorrt_model_connect.families.pixart as pixart_mod
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _cfg(**raw_overrides: object) -> ModelConfig:
@@ -191,26 +191,26 @@ def test_build_components_uses_transformer_and_t5_configs(
 
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.t5_encoder_builder",
+        "tensorrt_model_connect.t5_encoder_builder",
         _module(
-            "trtf_build.t5_encoder_builder",
+            "tensorrt_model_connect.t5_encoder_builder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.standard_dit_builder",
+        "tensorrt_model_connect.standard_dit_builder",
         _module(
-            "trtf_build.standard_dit_builder",
+            "tensorrt_model_connect.standard_dit_builder",
             build_standard_dit_engine=build_standard_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.vae_2d_builder",
+        "tensorrt_model_connect.vae_2d_builder",
         _module(
-            "trtf_build.vae_2d_builder",
+            "tensorrt_model_connect.vae_2d_builder",
             build_vae_2d_decoder_engine=build_vae_2d_decoder_engine,
         ),
     )
@@ -310,7 +310,7 @@ def test_load_pixart_dit_weights_maps_optional_biases(
 
     # Depending on import path, checkpoint_mapper may be loaded under either
     # module name; patch both to keep this test layout-agnostic.
-    for mod_name in ("trtf_build.checkpoint_mapper", "trtf_build.trtf_build.checkpoint_mapper"):
+    for mod_name in ("tensorrt_model_connect.checkpoint_mapper", "tensorrt_model_connect.tensorrt_model_connect.checkpoint_mapper"):
         try:
             cm = importlib.import_module(mod_name)
         except ModuleNotFoundError:

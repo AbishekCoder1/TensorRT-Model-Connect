@@ -179,8 +179,8 @@ def load_model_arch_from_hf(model_id: str) -> ModelArch:
 def load_model_arch_from_bundle(bundle_path: str) -> ModelArch:
     """Load model architecture from a .trtfb bundle."""
     try:
-        sys.path.insert(0, "trtf_build")
-        from trtf_build.bundle_writer import BundleReader
+        sys.path.insert(0, "tensorrt_model_connect")
+        from tensorrt_model_connect.bundle_writer import BundleReader
         reader = BundleReader(bundle_path)
         config = json.loads(reader.read_section("config"))
     except Exception:
@@ -647,7 +647,7 @@ def parse_benchmark_json(path: str) -> float:
 
     Supports multiple formats:
     - perf_compare.py: json["trt"]["throughput_tps"]["mean"]
-    - trtf run stderr (future): json["throughput_tps"]
+    - trtmc run stderr (future): json["throughput_tps"]
     - Flat format: json["throughput_tps"] or json["actual_tps"]
 
     Raises:

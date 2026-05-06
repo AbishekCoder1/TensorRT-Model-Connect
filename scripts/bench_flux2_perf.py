@@ -27,7 +27,7 @@ Usage (inside container):
         --backends torch_eager torch_compile trt_denoiser
 
     # Generate a cat image with TRT BF16 (via C++ binary):
-    ./build/trtf generate-video /tmp/flux2_bf16.trtfb \\
+    ./build/trtmc generate-video /tmp/flux2_bf16.trtfb \\
         --prompt "A photo of a cat sitting on a windowsill at sunset" \\
         --output /tmp/flux2_out --num-steps 28 \\
         --hf-python /opt/venv/bin/python

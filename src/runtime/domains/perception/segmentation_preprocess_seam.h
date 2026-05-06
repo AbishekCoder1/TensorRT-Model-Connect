@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 inline std::vector<float>
 preprocess_segmentation_image(const runtime::adapters::io::DecodedImage& image,
@@ -42,4 +42,4 @@ preprocess_segmentation_image(const runtime::adapters::io::DecodedImage& image,
     return pixel_values;
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -1,10 +1,10 @@
-#include "trtf/config/config_bundle.h"
+#include "trtmc/config/config_bundle.h"
 
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 
-namespace trtf::config {
+namespace trtmc::config {
 
 const char* layer_name(Layer layer) {
     switch (layer) {
@@ -144,4 +144,4 @@ Layer ConfigBundle::source_of(const std::string& namespace_name, const std::stri
     return f_it->second.source;
 }
 
-} // namespace trtf::config
+} // namespace trtmc::config

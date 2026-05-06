@@ -38,7 +38,7 @@ these limitations, and has since been fully implemented.
 ## 2. Implementation (Current State)
 
 ```text
-trtf_create_pipeline_ex(bundle_path)
+trtmc_create_pipeline_ex(bundle_path)
   -> ReadBundleFile()
   -> extract_json_string("runtime_strategy")
   -> normalize_legacy_strategy()
@@ -52,16 +52,16 @@ Key files:
 
 | File | Role |
 |------|------|
-| `include/trtf/runtime/pipeline_factory.h` | `PipelineFactory::from_bundle()` declaration |
+| `include/trtmc/runtime/pipeline_factory.h` | `PipelineFactory::from_bundle()` declaration |
 | `src/runtime/registry/pipeline_factory.cpp` | Thin dispatch: read strategy, lookup plugin, delegate (~124 LOC) |
-| `include/trtf/runtime/pipeline_registry.h` | `PipelineRegistry` singleton, manifest registration macro |
+| `include/trtmc/runtime/pipeline_registry.h` | `PipelineRegistry` singleton, manifest registration macro |
 | `src/runtime/registry/pipeline_registry.cpp` | Registry implementation |
-| `include/trtf/runtime/pipeline_plugin.h` | `IPipelinePlugin`, `BaseConfig`, `PipelineContext` |
+| `include/trtmc/runtime/pipeline_plugin.h` | `IPipelinePlugin`, `BaseConfig`, `PipelineContext` |
 | `src/runtime/registry/pipeline_plugin.cpp` | `parse_base_config()` |
 | `src/runtime/plugins/*.cpp` | Manifest-registered plugin files (25 strategies) |
 | `src/runtime/plugins/shared/` | Shared helpers: `plugin_helpers`, `diffusion_helpers`, `audio_helpers` |
-| `cmake/trtf_pipeline_plugins.cmake` | Plugin source/anchor manifest |
-| `src/cabi/api/trtf_c.cpp` | C ABI entry point, calls `PipelineFactory::from_bundle()` |
+| `cmake/trtmc_pipeline_plugins.cmake` | Plugin source/anchor manifest |
+| `src/cabi/api/trtmc_c.cpp` | C ABI entry point, calls `PipelineFactory::from_bundle()` |
 | `src/runtime/pipelines/*.h/*.cpp` | 14 concrete `IPipeline` implementations |
 
 ## 3. Design Details (Implemented)
@@ -69,7 +69,7 @@ Key files:
 ### 3.1 IPipelinePlugin
 
 ```cpp
-// include/trtf/runtime/pipeline_plugin.h
+// include/trtmc/runtime/pipeline_plugin.h
 class IPipelinePlugin {
 public:
     virtual ~IPipelinePlugin() = default;
@@ -84,7 +84,7 @@ strategy-specific config directly from the raw JSON.
 ### 3.2 PipelineRegistry
 
 ```cpp
-// include/trtf/runtime/pipeline_registry.h
+// include/trtmc/runtime/pipeline_registry.h
 class PipelineRegistry {
 public:
     static PipelineRegistry& instance();
@@ -101,7 +101,7 @@ universal fields into `BaseConfig`. Each plugin reads its own strategy-specific
 fields from the raw JSON:
 
 ```cpp
-// include/trtf/runtime/pipeline_plugin.h
+// include/trtmc/runtime/pipeline_plugin.h
 struct BaseConfig {
     int32_t vocab_size{0};
     int32_t hidden_size{0};
@@ -160,8 +160,8 @@ All phases have been **completed**.
 
 ### Phase 1: Introduce IPipelinePlugin + PipelineRegistry -- DONE
 
-- Defined `IPipelinePlugin` interface in `include/trtf/runtime/pipeline_plugin.h`.
-- Implemented `PipelineRegistry` singleton in `include/trtf/runtime/pipeline_registry.h`.
+- Defined `IPipelinePlugin` interface in `include/trtmc/runtime/pipeline_plugin.h`.
+- Implemented `PipelineRegistry` singleton in `include/trtmc/runtime/pipeline_registry.h`.
 - Added `PipelineRegistry` and initial registration macros.
 
 ### Phase 2: Decompose FastPathModelConfig -- DONE
@@ -183,15 +183,15 @@ All phases have been **completed**.
 ### Phase 5: Plugin manifest registration -- DONE
 
 - Each plugin exposes a registrar function via `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`.
-- `cmake/trtf_pipeline_plugins.cmake` drives source inclusion and generated registrar calls.
+- `cmake/trtmc_pipeline_plugins.cmake` drives source inclusion and generated registrar calls.
 - External out-of-tree plugins are now architecturally possible.
 
 ## 5. C ABI Stability Constraint
 
-The public C ABI defined in `include/trtf/pipeline.h` **must remain stable throughout the entire migration**:
+The public C ABI defined in `include/trtmc/pipeline.h` **must remain stable throughout the entire migration**:
 
-- `trtf_create_pipeline()` and `trtf_create_pipeline_ex()` continue to take a bundle path and return an `IPipeline*`.
-- `TrtfPipelineOptions` struct is not changed.
+- `trtmc_create_pipeline()` and `trtmc_create_pipeline_ex()` continue to take a bundle path and return an `IPipeline*`.
+- `TrtmcPipelineOptions` struct is not changed.
 - The `IPipeline` virtual interface (generate, embed, segment, transcribe, etc.) is not changed.
 - All changes are internal to the factory and strategy assembly layer.
 

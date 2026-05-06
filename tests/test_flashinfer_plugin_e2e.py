@@ -61,9 +61,9 @@ _tmp_buf = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device="cuda")
 # 2. Load plugin shared library
 # ---------------------------------------------------------------------------
 
-shared_lib = os.path.join(os.path.dirname(__file__), "..", "build_shared", "libtrtf_core.so")
+shared_lib = os.path.join(os.path.dirname(__file__), "..", "build_shared", "libtrtmc_core.so")
 if not os.path.exists(shared_lib):
-    shared_lib = os.path.join(os.path.dirname(__file__), "..", "build", "libtrtf_tvm_ffi_plugin.so")
+    shared_lib = os.path.join(os.path.dirname(__file__), "..", "build", "libtrtmc_tvm_ffi_plugin.so")
 if not os.path.exists(shared_lib):
     print("SKIP: No plugin .so found")
     sys.exit(0)

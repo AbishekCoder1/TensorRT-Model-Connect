@@ -30,10 +30,10 @@ void check(bool condition, const char* name)
 
 void test_encoder_shape_falls_back_to_config_when_cache_shape_is_invalid()
 {
-    trtf::SpeechConfig cfg;
+    trtmc::SpeechConfig cfg;
     cfg.num_codebooks = 8;
 
-    const auto info = trtf::resolve_encoder_shape_without_engine(
+    const auto info = trtmc::resolve_encoder_shape_without_engine(
         cfg,
         4,
         2,
@@ -45,10 +45,10 @@ void test_encoder_shape_falls_back_to_config_when_cache_shape_is_invalid()
 
 void test_encoder_shape_uses_config_when_no_cached_shape_exists()
 {
-    trtf::SpeechConfig cfg;
+    trtmc::SpeechConfig cfg;
     cfg.num_codebooks = 6;
 
-    const auto info = trtf::resolve_encoder_shape_without_engine(
+    const auto info = trtmc::resolve_encoder_shape_without_engine(
         cfg,
         0,
         0,
@@ -60,7 +60,7 @@ void test_encoder_shape_uses_config_when_no_cached_shape_exists()
 
 void test_prompt_injection_and_generation_settings()
 {
-    trtf::SpeechConfig cfg;
+    trtmc::SpeechConfig cfg;
     cfg.num_codebooks = 16;
     cfg.audio_initial_token_id = 2048;
     cfg.text_initial_token_id = 32000;
@@ -69,16 +69,16 @@ void test_prompt_injection_and_generation_settings()
     cfg.system_prompt = "hello";
     cfg.hf_python = "/usr/bin/python";
 
-    check(trtf::should_run_text_prompt_injection(cfg),
+    check(trtmc::should_run_text_prompt_injection(cfg),
         "speech runtime plan enables prompt injection when system prompt and hf_python exist");
     cfg.system_prompt.clear();
     cfg.hf_python.clear();
     cfg.text_prompt_ids = {1, 2, 3};
-    check(trtf::should_run_text_prompt_injection(cfg),
+    check(trtmc::should_run_text_prompt_injection(cfg),
         "speech runtime plan enables prompt injection when pretokenized ids exist");
 
-    const trtf::EncoderShapeInfo shape{32, 10};
-    const auto settings = trtf::make_speech_generation_settings(cfg, 4096, shape);
+    const trtmc::EncoderShapeInfo shape{32, 10};
+    const auto settings = trtmc::make_speech_generation_settings(cfg, 4096, shape);
     check(settings.hidden == 4096, "speech runtime plan forwards hidden size");
     check(settings.num_cb == 16 && settings.stream_cb == 8,
         "speech runtime plan derives stream split from codebook count");
@@ -92,10 +92,10 @@ void test_prompt_injection_and_generation_settings()
 
 void test_encoder_shape_uses_fallback_codebooks_when_cached_shape_is_invalid()
 {
-    trtf::SpeechConfig cfg;
+    trtmc::SpeechConfig cfg;
     cfg.num_codebooks = 16;
 
-    const auto info = trtf::resolve_encoder_shape_with_fallback_codebooks(
+    const auto info = trtmc::resolve_encoder_shape_with_fallback_codebooks(
         cfg,
         0,
         0,

@@ -72,7 +72,7 @@ BarkPipeline    → TrtModule(semantic) + TrtModule(coarse) + TrtModule(fine) + 
 
 ## Verification
 ```bash
-pytest tests/test_e2e.py::test_e2e[whisper-tiny] tests/test_e2e.py::test_e2e[whisper-large-v3-turbo] tests/test_e2e.py::test_e2e[canary-1b-v2] tests/test_e2e.py::test_e2e[bark-small] tests/test_e2e.py::test_e2e[bark-large] -v --engine-dir /workspace/users/yifeif/trt-transformers/engines --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+pytest tests/test_e2e.py::test_e2e[whisper-tiny] tests/test_e2e.py::test_e2e[whisper-large-v3-turbo] tests/test_e2e.py::test_e2e[canary-1b-v2] tests/test_e2e.py::test_e2e[bark-small] tests/test_e2e.py::test_e2e[bark-large] -v --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 ```
 
 All 5 models must pass E2E. Output must be identical to pre-migration.

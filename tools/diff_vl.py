@@ -14,7 +14,7 @@ Usage:
 
   # Full VL generation with C++ binary
   python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
-    --binary ./build/trtf --hf-python .venv/bin/python
+    --binary ./build/trtmc --hf-python .venv/bin/python
 
   # Vision-only (no HF model needed)
   python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg --vision-only
@@ -250,7 +250,7 @@ def test_vision_features(
     If model_id is provided, does a full numerical comparison.
     Otherwise, just verifies TRT produces non-zero output.
     """
-    from trtf_build.debug_runner import (
+    from tensorrt_model_connect.debug_runner import (
         VisionTrtRunner, load_vision_engine_from_bundle,
         preprocess_image_for_trt, load_preprocessor_config_from_bundle,
         load_config_from_bundle,
@@ -400,7 +400,7 @@ def test_vision_features(
 
 def test_embed_input(bundle_path: str) -> bool:
     """Verify the text decoder accepts embed_input mode."""
-    from trtf_build.debug_runner import runner_from_bundle
+    from tensorrt_model_connect.debug_runner import runner_from_bundle
 
     runner = runner_from_bundle(bundle_path)
     if not runner.has_embed_input:
@@ -436,7 +436,7 @@ def test_vl_generation(
     max_new_tokens: int = 20,
 ) -> bool:
     """Run full VL generation in Python using VLTrtRunner."""
-    from trtf_build.debug_runner import VLTrtRunner
+    from tensorrt_model_connect.debug_runner import VLTrtRunner
 
     print("[diff_vl] Loading VL runner from bundle ...", file=sys.stderr)
     runner = VLTrtRunner(bundle_path)
@@ -538,7 +538,7 @@ def test_cpp_binary(
 
 
 # Need this import at module level for test_vl_generation
-from trtf_build.debug_runner import load_section_from_bundle
+from tensorrt_model_connect.debug_runner import load_section_from_bundle
 
 
 def test_debug_layers(
@@ -681,8 +681,8 @@ def main():
     parser.add_argument("--image", default=None, help="Path to test image")
     parser.add_argument("--model", default=None,
                         help="HF model ID for reference comparison")
-    parser.add_argument("--binary", default="./build/trtf",
-                        help="Path to trtf binary")
+    parser.add_argument("--binary", default="./build/trtmc",
+                        help="Path to trtmc binary")
     parser.add_argument("--hf-python", default=None,
                         help="Python interpreter path")
     parser.add_argument("--atol", type=float, default=0.1,

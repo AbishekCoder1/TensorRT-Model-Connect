@@ -25,7 +25,7 @@ def test_validate_task_description_reports_missing_sections() -> None:
 
 
 def test_encoded_project_path_escapes_namespace() -> None:
-    assert ai_agent_system.encoded_project("yifeif/trt-transformers") == "yifeif%2Ftrt-transformers"
+    assert ai_agent_system.encoded_project("yifeif/tensorrt-model-connect") == "yifeif%2Ftensorrt-model-connect"
     assert ai_agent_system.encoded_project("12345") == "12345"
 
 

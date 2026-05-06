@@ -99,6 +99,6 @@ ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
 #   python3 -m pytest --help | grep -- '--cov' && \
 #   gcovr --version && lcov --version && genhtml --version
 
-WORKDIR /workspace/trt-transformers-cpp
+WORKDIR /workspace/tensorrt-model-connect
 
 CMD ["bash"]

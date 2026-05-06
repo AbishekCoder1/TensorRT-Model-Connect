@@ -66,7 +66,7 @@ class ObjectDetectionRunner:
     def _run_full_inference(
         self, case: E2ECase, ctx: RunContext
     ) -> StageOutput:
-        """Run detection via C++ binary: trtf detect --image <path>."""
+        """Run detection via C++ binary: trtmc detect --image <path>."""
         bundle_path = self._resolve_bundle_path(case, ctx)
         image_path = self._resolve_image_path(case, ctx)
 

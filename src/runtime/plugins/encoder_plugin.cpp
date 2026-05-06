@@ -3,9 +3,9 @@
 
 #include "runtime/pipelines/encoder_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
-namespace trtf {
+namespace trtmc {
 
 class EncoderPlugin final : public IPipelinePlugin {
   public:
@@ -29,4 +29,4 @@ class EncoderPlugin final : public IPipelinePlugin {
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_encoder_plugin, EncoderPlugin, "encoder_only",
                                        "embedding", "reranking", "neural_operator");
 
-} // namespace trtf
+} // namespace trtmc

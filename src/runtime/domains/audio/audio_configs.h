@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 /// Configuration for the MagpieTTS pipeline.
 struct MagpieTTSConfig {
@@ -35,7 +35,7 @@ struct MagpieTTSConfig {
     // NeMo's standard do_tts() path does not hard-stop on text completion, so
     // keep the finished-limit guard opt-in for parity/debugging only.
     bool enable_finished_limit_stop{false};
-    // audio_magpie.* namespace replaces the TRTF_MAGPIE_{GREEDY, CFG_SCALE,
+    // audio_magpie.* namespace replaces the TRTMC_MAGPIE_{GREEDY, CFG_SCALE,
     // TEMPERATURE, FINISHED_LIMIT, SEED} env vars. magpie_plugin populates
     // these from ctx.runtime_config at construction.
     int64_t seed{-1}; // -1 -> leave RNG at constructed state
@@ -151,4 +151,4 @@ struct OmniConfig {
     int32_t top_k{50};
 };
 
-} // namespace trtf
+} // namespace trtmc

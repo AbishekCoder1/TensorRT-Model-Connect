@@ -8,7 +8,7 @@
 #include <cstring>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 inline int32_t resolve_whisper_expected_mel_length(const WhisperConfig& cfg)
 {
@@ -107,4 +107,4 @@ inline std::vector<int32_t> make_whisper_initial_decoder_tokens(const WhisperCon
     };
 }
 
-} // namespace trtf
+} // namespace trtmc

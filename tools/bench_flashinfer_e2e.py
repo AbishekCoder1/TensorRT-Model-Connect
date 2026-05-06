@@ -23,8 +23,8 @@ import sys
 import time
 
 
-def _run_trtf_binary(binary, bundle, prompt, max_new_tokens, hf_python):
-    """Run the C++ trtf binary and measure wall-clock time."""
+def _run_trtmc_binary(binary, bundle, prompt, max_new_tokens, hf_python):
+    """Run the C++ trtmc binary and measure wall-clock time."""
     cmd = [
         binary, "run", bundle,
         "--prompt", prompt,
@@ -38,8 +38,8 @@ def _run_trtf_binary(binary, bundle, prompt, max_new_tokens, hf_python):
     elapsed = time.perf_counter() - start
 
     if result.returncode != 0:
-        print(f"[trtf] stderr: {result.stderr[:500]}", file=sys.stderr)
-        raise RuntimeError(f"trtf binary failed with code {result.returncode}")
+        print(f"[trtmc] stderr: {result.stderr[:500]}", file=sys.stderr)
+        raise RuntimeError(f"trtmc binary failed with code {result.returncode}")
 
     output_text = result.stdout.strip()
     return elapsed, output_text
@@ -126,12 +126,12 @@ def main():
     parser = argparse.ArgumentParser(description="TRT vs FlashInfer E2E benchmark")
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
     parser.add_argument("--bundle", default=None, help="Pre-built .trtfb bundle path")
-    parser.add_argument("--binary", default="./build/trtf")
+    parser.add_argument("--binary", default="./build/trtmc")
     parser.add_argument("--hf-python", default="/opt/venv/bin/python")
     parser.add_argument("--prompt", default="The capital of France is")
     parser.add_argument("--max-new-tokens", type=int, default=20)
     parser.add_argument("--engine-dir",
-                        default="/workspace/users/yifeif/trt-transformers/engines")
+                        default="/workspace/users/yifeif/tensorrt-model-connect/engines")
     parser.add_argument("--skip-trt", action="store_true")
     parser.add_argument("--skip-flashinfer", action="store_true")
     parser.add_argument("--skip-hf-eager", action="store_true")
@@ -146,7 +146,7 @@ def main():
         if not os.path.exists(bundle):
             print(f"Bundle not found at {bundle}, building...")
             subprocess.run([
-                sys.executable, "-m", "trtf_build", "build",
+                sys.executable, "-m", "tensorrt_model_connect", "build",
                 args.model, "-o", bundle,
                 "--max-cache-length", "256",
             ], check=True)
@@ -167,7 +167,7 @@ def main():
         times = []
         output = None
         for i in range(args.runs):
-            t, text = _run_trtf_binary(
+            t, text = _run_trtmc_binary(
                 args.binary, bundle, args.prompt,
                 args.max_new_tokens, args.hf_python,
             )

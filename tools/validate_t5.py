@@ -63,8 +63,8 @@ def main():
 
     # --- TRT ---
     print("[validate] Loading T5 weights ...", file=sys.stderr)
-    sys.path.insert(0, str(Path(__file__).parent.parent / "trtf_build"))
-    from trtf_build.t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
+    sys.path.insert(0, str(Path(__file__).parent.parent / "tensorrt_model_connect"))
+    from tensorrt_model_connect.t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
 
     cfg = hf_model.config
     t0 = time.time()

@@ -13,9 +13,9 @@ import numpy as np
 
 def build_trt_engine(model_id_or_path, max_cache_length, verbose, *, tag="diff"):
     """Build TRT engine and return (engine_plan_bytes, config, model_dir)."""
-    from trtf_build.engine_builder import _resolve_model
-    from trtf_build.config import ModelConfig
-    from trtf_build.families import find_plugin
+    from tensorrt_model_connect.engine_builder import _resolve_model
+    from tensorrt_model_connect.config import ModelConfig
+    from tensorrt_model_connect.families import find_plugin
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)

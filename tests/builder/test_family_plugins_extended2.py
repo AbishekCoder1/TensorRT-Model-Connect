@@ -21,9 +21,9 @@ import pytest
 
 try:
     from safetensors.numpy import save_file
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 RNG = np.random.RandomState(456)
 
@@ -49,24 +49,24 @@ class TestM2M100SinusoidalPosEmbed:
     """Test the _make_sinusoidal_pos_embed utility function."""
 
     def test_output_shape(self):
-        from trtf_build.families.m2m_100 import _make_sinusoidal_pos_embed
+        from tensorrt_model_connect.families.m2m_100 import _make_sinusoidal_pos_embed
         result = _make_sinusoidal_pos_embed(10, 16)
         assert result.shape == (10, 16)
         assert result.dtype == np.float32
 
     def test_padding_idx_zeroed(self):
-        from trtf_build.families.m2m_100 import _make_sinusoidal_pos_embed
+        from tensorrt_model_connect.families.m2m_100 import _make_sinusoidal_pos_embed
         result = _make_sinusoidal_pos_embed(10, 16, padding_idx=1)
         np.testing.assert_array_equal(result[1], np.zeros(16))
 
     def test_first_position_pattern(self):
-        from trtf_build.families.m2m_100 import _make_sinusoidal_pos_embed
+        from tensorrt_model_connect.families.m2m_100 import _make_sinusoidal_pos_embed
         result = _make_sinusoidal_pos_embed(10, 16, padding_idx=None)
         # Position 0 should have specific sin/cos pattern
         assert result[0, 0] == pytest.approx(0.0, abs=1e-6)  # sin(0) = 0
 
     def test_odd_dimension(self):
-        from trtf_build.families.m2m_100 import _make_sinusoidal_pos_embed
+        from tensorrt_model_connect.families.m2m_100 import _make_sinusoidal_pos_embed
         result = _make_sinusoidal_pos_embed(10, 17)
         assert result.shape == (10, 17)
 
@@ -133,7 +133,7 @@ class TestM2M100Plugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.m2m_100 import plugin
+        from tensorrt_model_connect.families.m2m_100 import plugin
 
         config = {
             "model_type": "m2m_100",
@@ -170,7 +170,7 @@ class TestM2M100Plugin:
                 assert f"enc_layer.{i}.{key}" in weights, f"Missing enc_layer.{i}.{key}"
 
     def test_matches(self):
-        from trtf_build.families.m2m_100 import plugin
+        from tensorrt_model_connect.families.m2m_100 import plugin
         assert plugin.matches("m2m_100")
         assert plugin.matches("nllb")
         assert not plugin.matches("bart")
@@ -240,7 +240,7 @@ class TestMarianPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.marian import plugin
+        from tensorrt_model_connect.families.marian import plugin
 
         config = {
             "model_type": "marian",
@@ -270,7 +270,7 @@ class TestMarianPlugin:
         assert "enc_pos_embedding" in weights
 
     def test_matches(self):
-        from trtf_build.families.marian import plugin
+        from tensorrt_model_connect.families.marian import plugin
         assert plugin.matches("marian")
         assert not plugin.matches("bart")
 
@@ -306,7 +306,7 @@ class TestOlmoPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.olmo import plugin
+        from tensorrt_model_connect.families.olmo import plugin
 
         config = {
             "model_type": "olmo",
@@ -329,7 +329,7 @@ class TestOlmoPlugin:
         assert "w_out" in weights
 
     def test_matches(self):
-        from trtf_build.families.olmo import plugin
+        from tensorrt_model_connect.families.olmo import plugin
         assert plugin.matches("olmo")
         assert not plugin.matches("olmo2")
 
@@ -371,7 +371,7 @@ class TestStablelmPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.stablelm import plugin
+        from tensorrt_model_connect.families.stablelm import plugin
 
         config = {
             "model_type": "stablelm",
@@ -393,7 +393,7 @@ class TestStablelmPlugin:
         assert "final_norm" in weights
 
     def test_matches(self):
-        from trtf_build.families.stablelm import plugin
+        from tensorrt_model_connect.families.stablelm import plugin
         assert plugin.matches("stablelm")
         assert not plugin.matches("llama")
 
@@ -437,7 +437,7 @@ class TestStarcoder2Plugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.starcoder2 import plugin
+        from tensorrt_model_connect.families.starcoder2 import plugin
 
         config = {
             "model_type": "starcoder2",
@@ -465,7 +465,7 @@ class TestStarcoder2Plugin:
         assert weights["layer.0.v_bias"].shape == (kv_hidden,)
 
     def test_matches(self):
-        from trtf_build.families.starcoder2 import plugin
+        from tensorrt_model_connect.families.starcoder2 import plugin
         assert plugin.matches("starcoder2")
         assert not plugin.matches("gpt2")
 
@@ -501,7 +501,7 @@ class TestGranitePlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.granite import plugin
+        from tensorrt_model_connect.families.granite import plugin
 
         config = {
             "model_type": "granite",
@@ -522,7 +522,7 @@ class TestGranitePlugin:
         assert "embedding" in weights
 
     def test_matches(self):
-        from trtf_build.families.granite import plugin
+        from tensorrt_model_connect.families.granite import plugin
         assert plugin.matches("granite")
         assert plugin.matches("granitemoeshared")
         assert not plugin.matches("llama")
@@ -565,7 +565,7 @@ class TestXglmPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.xglm import plugin
+        from tensorrt_model_connect.families.xglm import plugin
 
         config = {
             "model_type": "xglm",
@@ -587,6 +587,6 @@ class TestXglmPlugin:
         assert "embedding" in weights
 
     def test_matches(self):
-        from trtf_build.families.xglm import plugin
+        from tensorrt_model_connect.families.xglm import plugin
         assert plugin.matches("xglm")
         assert not plugin.matches("gpt2")

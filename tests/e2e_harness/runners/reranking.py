@@ -1,6 +1,6 @@
 """Reranking strategy runner — TRT inference for reranking models.
 
-Runs the C++ binary with ``trtf rerank`` to produce a relevance score for a
+Runs the C++ binary with ``trtmc rerank`` to produce a relevance score for a
 single (prompt, document) pair. The binary prints ``Relevance score: <float>``
 on stdout; this runner parses that single score and wraps it as a one-element
 ``scores`` list so the reranking comparator contract is satisfied.
@@ -89,7 +89,7 @@ class RerankingRunner:
 
 
 def _parse_score(stdout: str) -> float:
-    """Parse the single relevance score from ``trtf rerank`` stdout."""
+    """Parse the single relevance score from ``trtmc rerank`` stdout."""
     match = _SCORE_RE.search(stdout)
     if match:
         return float(match.group(1))

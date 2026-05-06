@@ -14,15 +14,15 @@ except ImportError:
     pytest.skip("torch not available", allow_module_level=True)
 
 try:
-    from trtf_build.engine_defs.torch_trt.config import ModelConfig
-    from trtf_build.engine_defs.torch_trt.families.patchtst import plugin as patchtst_plugin
-    from trtf_build.engine_defs.torch_trt.strategies import get_strategy
-    from trtf_build.engine_defs.torch_trt.strategies.patchtst import (
+    from tensorrt_model_connect.engine_defs.torch_trt.config import ModelConfig
+    from tensorrt_model_connect.engine_defs.torch_trt.families.patchtst import plugin as patchtst_plugin
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies import get_strategy
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies.patchtst import (
         PatchTSTBuildStrategy,
         PatchTSTWrapper,
     )
 except ImportError:
-    pytest.skip("ttrt_build not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 
 class TestPatchTSTRegistry:

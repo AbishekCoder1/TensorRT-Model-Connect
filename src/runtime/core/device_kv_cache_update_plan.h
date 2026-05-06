@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace trtf::detail {
+namespace trtmc::detail {
 
 struct CacheRowUpdatePlan {
     bool shift_existing_rows{false};
@@ -19,4 +19,4 @@ CacheRowUpdatePlan plan_cache_row_update(
     int32_t max_cache_length,
     std::size_t row_bytes);
 
-} // namespace trtf::detail
+} // namespace trtmc::detail

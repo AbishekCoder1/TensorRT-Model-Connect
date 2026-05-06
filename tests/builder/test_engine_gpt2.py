@@ -12,7 +12,7 @@ GPT-2 uses:
 
 Trace: ARCH-FAM-001, UD-FAM-GPT2-01
 Intent: Validate the GPT-2 family plugin weight loading including Conv1D transpose, fused QKV splitting, learned positions, tied embeddings, and non-standard HF config aliases.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: Conv1D weights are transposed to [out, in], fused QKV is split correctly, position embeddings are loaded, and config aliases (n_embd, n_head) resolve properly.
 """
 import numpy as np
@@ -22,7 +22,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class GPT2PluginTester(FamilyPluginTester):
-    plugin_module = "trtf_build.families.gpt2"
+    plugin_module = "tensorrt_model_connect.families.gpt2"
     model_type = "gpt2"
 
     def get_config_dict(self) -> dict:

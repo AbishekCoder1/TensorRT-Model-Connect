@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct WavData {
     std::vector<float> samples;  // mono float32 [-1, 1]
@@ -23,4 +23,4 @@ std::vector<float> resample_linear(
     const float* samples, int32_t n_samples,
     int32_t source_rate, int32_t target_rate);
 
-} // namespace trtf
+} // namespace trtmc

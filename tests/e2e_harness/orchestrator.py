@@ -52,20 +52,20 @@ from .registry import get_comparator, get_contract_plugin, get_reference, get_ru
 
 logger = logging.getLogger(__name__)
 
-_TRTF_TIMING_RE = re.compile(
-    r"^\[trtf\.timing\]\s+"
+_TRTMC_TIMING_RE = re.compile(
+    r"^\[trtmc\.timing\]\s+"
     r"prefill_ms=(?P<prefill_ms>[-+0-9.eE]+)\s+"
     r"decode_ms=(?P<decode_ms>[-+0-9.eE]+)\s+"
     r"total_ms=(?P<total_ms>[-+0-9.eE]+)\s*$",
     re.MULTILINE,
 )
-_TRTF_LOAD_TIMING_RE = re.compile(
-    r"^\[trtf\.load_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
+_TRTMC_LOAD_TIMING_RE = re.compile(
+    r"^\[trtmc\.load_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
     r"load_deserialize_ms=(?P<ms>[-+0-9.eE]+)",
     re.MULTILINE,
 )
-_TRTF_ENGINE_TIMING_RE = re.compile(
-    r"^\[trtf\.engine_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
+_TRTMC_ENGINE_TIMING_RE = re.compile(
+    r"^\[trtmc\.engine_timing\]\s+.*?label=\"(?P<label>[^\"]+)\".*?"
     r"execute_ms=(?P<ms>[-+0-9.eE]+)",
     re.MULTILINE,
 )
@@ -105,7 +105,7 @@ _LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"
 
 
 def _check_binary_exists(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, str]:
-    """Check that the trtf binary exists."""
+    """Check that the trtmc binary exists."""
     path = req.args.get("path", ctx.binary_path)
     if path and Path(path).is_file():
         return True, f"Binary found: {path}"
@@ -277,7 +277,7 @@ def _resolve_bundle(
 
     build_python = ctx.build_python_path() or sys.executable
     cmd = [
-        build_python, "-m", "trtf_build.__main__", "build",
+        build_python, "-m", "tensorrt_model_connect.__main__", "build",
         hf_id, "-o", str(bundle_path),
         "--max-cache-length", str(max_cache),
     ]
@@ -626,7 +626,7 @@ def _build_repro_commands(
     max_cache = case.inputs.get("max_cache_length", 256)
     bundle_target = bundle_path or str(Path(ctx.engine_dir) / case.bundle)
     build_parts = [
-        ctx.build_python_path() or "python", "-m", "trtf_build.__main__", "build", case.hf_id,
+        ctx.build_python_path() or "python", "-m", "tensorrt_model_connect.__main__", "build", case.hf_id,
         "-o", bundle_target,
         "--max-cache-length", str(max_cache),
     ]
@@ -659,7 +659,7 @@ def _build_repro_commands(
             infer_parts = [
                 ctx.binary_path, "generate-video", bundle_path,
                 "--prompt", _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
-                "--output", "/tmp/trtf_frames",
+                "--output", "/tmp/trtmc_frames",
                 "--num-steps", str(case.inputs.get("num_inference_steps", 30)),
             ]
             guidance_scale = case.inputs.get("guidance_scale")
@@ -674,7 +674,7 @@ def _build_repro_commands(
             infer_parts = [
                 ctx.binary_path, "segment-sam", bundle_path,
                 "--image", str(image or ""),
-                "--output", "/tmp/trtf_masks",
+                "--output", "/tmp/trtmc_masks",
                 "--point-x", str(case.inputs.get("point_x", 0.5)),
                 "--point-y", str(case.inputs.get("point_y", 0.5)),
             ]
@@ -684,7 +684,7 @@ def _build_repro_commands(
             infer_parts = [
                 ctx.binary_path, "segment", bundle_path,
                 "--image", str(image or ""),
-                "--output", "/tmp/trtf_segmentation.png",
+                "--output", "/tmp/trtmc_segmentation.png",
             ]
         else:
             infer_parts = [
@@ -703,7 +703,7 @@ def _build_repro_commands(
     rerun_parts = [
         "pytest", f"tests/test_e2e.py::test_e2e[{case.name}]", "-v",
         "--engine-dir", ctx.engine_dir,
-        "--trtf-binary", ctx.binary_path,
+        "--trtmc-binary", ctx.binary_path,
         "--hf-python", ctx.hf_python or "python",
     ]
     repro["rerun_test"] = " ".join(rerun_parts)
@@ -894,7 +894,7 @@ def _extract_labeled_timing(
 
 def _extract_cli_generation_timing(blobs: list[str]) -> float | None:
     for text in blobs:
-        match = _TRTF_TIMING_RE.search(text or "")
+        match = _TRTMC_TIMING_RE.search(text or "")
         if match is None:
             continue
         try:
@@ -908,7 +908,7 @@ def _collect_trt_stage_timing(output: StageOutput, stage_name: str) -> dict[str,
     timings: dict[str, float] = {}
     blobs = _stage_text_blobs(output)
 
-    engine_components = _extract_labeled_timing(_TRTF_ENGINE_TIMING_RE, blobs)
+    engine_components = _extract_labeled_timing(_TRTMC_ENGINE_TIMING_RE, blobs)
     if engine_components:
         total = sum(engine_components.values())
         timings[f"trt_engine_{stage_name}_s"] = total
@@ -921,7 +921,7 @@ def _collect_trt_stage_timing(output: StageOutput, stage_name: str) -> dict[str,
         if engine_time_s is not None:
             timings[f"trt_engine_{stage_name}_s"] = engine_time_s
 
-    load_components = _extract_labeled_timing(_TRTF_LOAD_TIMING_RE, blobs)
+    load_components = _extract_labeled_timing(_TRTMC_LOAD_TIMING_RE, blobs)
     if load_components:
         total = sum(load_components.values())
         timings[f"trt_load_deserialize_{stage_name}_s"] = total

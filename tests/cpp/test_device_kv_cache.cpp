@@ -31,7 +31,7 @@
 //   scalar fields, so null engine/context is safe.
 //
 // Environment:
-//   Guarded by TRTF_HAS_TRT. Skips gracefully (exit 0) when TensorRT/CUDA
+//   Guarded by TRTMC_HAS_TRT. Skips gracefully (exit 0) when TensorRT/CUDA
 //   headers are not available. Requires a CUDA-capable GPU at runtime.
 // =============================================================================
 
@@ -55,8 +55,8 @@ static void check(bool condition, const char* test_name) {
 
 static void test_cache_row_update_plan_append_mode() {
     constexpr std::size_t row_bytes = 16;
-    const trtf::detail::CacheRowUpdatePlan plan =
-        trtf::detail::plan_cache_row_update(2, 4, row_bytes);
+    const trtmc::detail::CacheRowUpdatePlan plan =
+        trtmc::detail::plan_cache_row_update(2, 4, row_bytes);
 
     check(!plan.shift_existing_rows, "plan_append: append mode");
     check(plan.append_offset_bytes == 2 * row_bytes, "plan_append: append offset");
@@ -65,8 +65,8 @@ static void test_cache_row_update_plan_append_mode() {
 
 static void test_cache_row_update_plan_shift_mode() {
     constexpr std::size_t row_bytes = 16;
-    const trtf::detail::CacheRowUpdatePlan plan =
-        trtf::detail::plan_cache_row_update(4, 4, row_bytes);
+    const trtmc::detail::CacheRowUpdatePlan plan =
+        trtmc::detail::plan_cache_row_update(4, 4, row_bytes);
 
     check(plan.shift_existing_rows, "plan_shift: shift mode");
     check(plan.shift_source_offset_bytes == row_bytes, "plan_shift: shift source offset");
@@ -78,13 +78,13 @@ static void test_cache_row_update_plan_shift_mode() {
 static void test_cache_row_update_plan_edge_cases() {
     constexpr std::size_t row_bytes = 32;
 
-    const trtf::detail::CacheRowUpdatePlan overflow_plan =
-        trtf::detail::plan_cache_row_update(9, 4, row_bytes);
+    const trtmc::detail::CacheRowUpdatePlan overflow_plan =
+        trtmc::detail::plan_cache_row_update(9, 4, row_bytes);
     check(overflow_plan.shift_existing_rows, "plan_edge_overflow: uses shift mode");
     check(overflow_plan.next_cache_length == 4, "plan_edge_overflow: next length clamped");
 
-    const trtf::detail::CacheRowUpdatePlan single_slot_plan =
-        trtf::detail::plan_cache_row_update(1, 1, row_bytes);
+    const trtmc::detail::CacheRowUpdatePlan single_slot_plan =
+        trtmc::detail::plan_cache_row_update(1, 1, row_bytes);
     check(single_slot_plan.shift_existing_rows, "plan_edge_single_slot: uses shift mode");
     check(single_slot_plan.shift_copy_bytes == 0, "plan_edge_single_slot: zero shift bytes");
     check(single_slot_plan.tail_offset_bytes == 0, "plan_edge_single_slot: zero tail offset");
@@ -92,9 +92,9 @@ static void test_cache_row_update_plan_edge_cases() {
 }
 
 // Helper: Create a DecoderStepEngine with test parameters (null TRT engine/context).
-static trtf::DecoderStepEngine make_test_engine(int32_t max_cache, int32_t num_layers,
+static trtmc::DecoderStepEngine make_test_engine(int32_t max_cache, int32_t num_layers,
                                                 int32_t cache_state_size, bool requires_position) {
-    trtf::DecoderStepEngine engine;
+    trtmc::DecoderStepEngine engine;
     engine.max_cache_length = max_cache;
     engine.num_layers = num_layers;
     engine.cache_state_size = cache_state_size;
@@ -114,7 +114,7 @@ static trtf::DecoderStepEngine make_test_engine(int32_t max_cache, int32_t num_l
 // -----------------------------------------------------------------------------
 static void test_construction() {
     auto engine = make_test_engine(8, 2, 4, false);
-    trtf::DeviceKvCache cache(engine);
+    trtmc::DeviceKvCache cache(engine);
     check(cache.ok(), "construction: ok()=true");
     check(cache.cache_k_device_ptr(0) != nullptr, "construction: cache_k[0] non-null");
     check(cache.cache_v_device_ptr(0) != nullptr, "construction: cache_v[0] non-null");
@@ -134,13 +134,13 @@ static void test_construction() {
 // -----------------------------------------------------------------------------
 static void test_prepare_step_progression() {
     auto engine = make_test_engine(4, 1, 2, false);
-    trtf::DeviceKvCache cache(engine);
-    trtf::CudaStream stream;
+    trtmc::DeviceKvCache cache(engine);
+    trtmc::CudaStream stream;
     check(stream.ok(), "step_progression: stream ok");
 
     // We need present_k/v buffers for update_after_step. Each is cache_state_size floats.
-    std::vector<trtf::CudaBuffer> present_k;
-    std::vector<trtf::CudaBuffer> present_v;
+    std::vector<trtmc::CudaBuffer> present_k;
+    std::vector<trtmc::CudaBuffer> present_v;
     present_k.emplace_back(2 * sizeof(float));
     present_v.emplace_back(2 * sizeof(float));
     check(present_k[0].ok(), "step_progression: present_k ok");
@@ -198,11 +198,11 @@ static void test_prepare_step_progression() {
 // -----------------------------------------------------------------------------
 static void test_position_clamping_no_position_input() {
     auto engine = make_test_engine(4, 1, 2, false);
-    trtf::DeviceKvCache cache(engine);
-    trtf::CudaStream stream;
+    trtmc::DeviceKvCache cache(engine);
+    trtmc::CudaStream stream;
 
-    std::vector<trtf::CudaBuffer> present_k;
-    std::vector<trtf::CudaBuffer> present_v;
+    std::vector<trtmc::CudaBuffer> present_k;
+    std::vector<trtmc::CudaBuffer> present_v;
     present_k.emplace_back(2 * sizeof(float));
     present_v.emplace_back(2 * sizeof(float));
 
@@ -240,11 +240,11 @@ static void test_position_clamping_no_position_input() {
 // -----------------------------------------------------------------------------
 static void test_position_clamping_with_position_input() {
     auto engine = make_test_engine(4, 1, 2, true);
-    trtf::DeviceKvCache cache(engine);
-    trtf::CudaStream stream;
+    trtmc::DeviceKvCache cache(engine);
+    trtmc::CudaStream stream;
 
-    std::vector<trtf::CudaBuffer> present_k;
-    std::vector<trtf::CudaBuffer> present_v;
+    std::vector<trtmc::CudaBuffer> present_k;
+    std::vector<trtmc::CudaBuffer> present_v;
     present_k.emplace_back(2 * sizeof(float));
     present_v.emplace_back(2 * sizeof(float));
 
@@ -277,11 +277,11 @@ static void test_position_clamping_with_position_input() {
 // -----------------------------------------------------------------------------
 static void test_reset() {
     auto engine = make_test_engine(8, 2, 4, false);
-    trtf::DeviceKvCache cache(engine);
-    trtf::CudaStream stream;
+    trtmc::DeviceKvCache cache(engine);
+    trtmc::CudaStream stream;
 
-    std::vector<trtf::CudaBuffer> present_k;
-    std::vector<trtf::CudaBuffer> present_v;
+    std::vector<trtmc::CudaBuffer> present_k;
+    std::vector<trtmc::CudaBuffer> present_v;
     for (int i = 0; i < 2; ++i) {
         present_k.emplace_back(4 * sizeof(float));
         present_v.emplace_back(4 * sizeof(float));
@@ -318,7 +318,7 @@ static void test_reset() {
 // -----------------------------------------------------------------------------
 static void test_multi_layer_distinct_pointers() {
     auto engine = make_test_engine(4, 3, 8, false);
-    trtf::DeviceKvCache cache(engine);
+    trtmc::DeviceKvCache cache(engine);
     check(cache.ok(), "multi_layer: ok()");
 
     // Verify all layer pointers are distinct

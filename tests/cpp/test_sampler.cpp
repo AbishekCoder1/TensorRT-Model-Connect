@@ -2,8 +2,8 @@
 // Sampling parameter and sampler behavior tests
 // =============================================================================
 
-#include "trtf/pipeline.h"
-#include "trtf/runtime/sampler.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/sampler.h"
 
 #include <cmath>
 #include <iostream>
@@ -21,14 +21,14 @@ static void check(bool condition, const char* test_name) {
 }
 
 static void test_sampling_params_from_config() {
-    trtf::GenerateConfig cfg;
+    trtmc::GenerateConfig cfg;
     cfg.temperature = 0.6F;
     cfg.top_k = 20;
     cfg.top_p = 0.95F;
     cfg.min_p = 0.1F;
     cfg.seed = 123;
     cfg.eos_token_id = 99;
-    auto params = trtf::sampling_params_from_config(cfg, 42);
+    auto params = trtmc::sampling_params_from_config(cfg, 42);
     check(params.temperature == 0.6F, "temperature forwarded");
     check(params.top_k == 20, "top_k forwarded");
     check(params.top_p == 0.95F, "top_p forwarded");
@@ -38,29 +38,29 @@ static void test_sampling_params_from_config() {
 }
 
 static void test_create_sampler_greedy_only_when_sampling_disabled() {
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.top_k = 1;
     params.top_p = 1.0F;
     params.min_p = 0.0F;
     params.seed = -1;
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     check(std::string(sampler->sampler_type()) == "greedy", "greedy factory path");
 
     params.top_p = 0.95F;
-    sampler = trtf::create_sampler(params);
+    sampler = trtmc::create_sampler(params);
     const std::string sampler_type = sampler->sampler_type();
     check(sampler_type == "top_k" || sampler_type == "torch_multinomial",
           "top_p forces sampling path");
 }
 
 static void test_top_p_alone_uses_full_vocab() {
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 1;
     params.top_p = 0.95F;
     params.min_p = 0.0F;
     params.seed = 99;
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
 
     const std::vector<float> logits = {1.0F, 1.0F, 1.0F, 1.0F, 1.0F};
     std::set<int32_t> seen;
@@ -72,13 +72,13 @@ static void test_top_p_alone_uses_full_vocab() {
 }
 
 static void test_top_k_zero_means_no_topk_limit() {
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 0;
     params.top_p = 0.95F;
     params.min_p = 0.0F;
     params.seed = 17;
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
 
     const std::vector<float> logits = {1.0F, 1.0F, 1.0F, 1.0F, 1.0F};
     std::set<int32_t> seen;
@@ -90,13 +90,13 @@ static void test_top_k_zero_means_no_topk_limit() {
 }
 
 static void test_min_p_without_top_p_keeps_default_top_k() {
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 1;
     params.top_p = 1.0F;
     params.min_p = 0.5F;
     params.seed = 33;
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
 
     const float logits[] = {5.0F, 4.0F, 4.0F, 4.0F};
     for (int i = 0; i < 64; ++i) {
@@ -107,38 +107,38 @@ static void test_min_p_without_top_p_keeps_default_top_k() {
 
 static void test_top_p_zero_is_greedy() {
     const float logits[] = {0.1F, 5.0F, 2.3F, 0.7F};
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 4;
     params.top_p = 0.0F;
     params.min_p = 0.0F;
     params.seed = 7;
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     auto result = sampler->sample(logits, 4, params);
     check(result.token_id == 1, "top_p zero is greedy");
 }
 
 static void test_invalid_sampling_values_are_sanitized() {
     const float logits[] = {0.1F, 5.0F, 2.3F, 0.7F};
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = -1.0F;
     params.top_k = 4;
     params.top_p = 1.5F;
     params.min_p = -0.2F;
     params.seed = 7;
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     auto result = sampler->sample(logits, 4, params);
     check(result.token_id == 1, "invalid sampling values are sanitized");
 }
 
 static void test_sampler_reset_replays_seeded_sequence() {
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 0;
     params.top_p = 0.95F;
     params.min_p = 0.0F;
     params.seed = 123;
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
 
     const std::vector<float> logits = {1.0F, 0.9F, 0.8F, 0.7F, 0.6F};
     std::vector<int32_t> first;
@@ -155,53 +155,53 @@ static void test_sampler_reset_replays_seeded_sequence() {
 }
 
 static void test_create_sampler_can_force_host_topk() {
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.top_k = 4;
     params.seed = 123;
-    trtf::SamplerFactoryOptions options;
+    trtmc::SamplerFactoryOptions options;
     options.prefer_torch_cuda_multinomial = false;
-    auto sampler = trtf::create_sampler(params, options);
+    auto sampler = trtmc::create_sampler(params, options);
     check(std::string(sampler->sampler_type()) == "top_k", "factory can force host top_k");
 }
 
 static void test_top_p_truncates_tail_tokens() {
     const float logits[] = {10.0F, 9.0F, -10.0F};
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 3;
     params.top_p = 0.55F;
     params.min_p = 0.0F;
     params.seed = 17;
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     auto result = sampler->sample(logits, 3, params);
     check(result.token_id == 0, "top_p keeps only the highest-prob token");
 }
 
 static void test_min_p_drops_low_probability_tail() {
     const float logits[] = {5.0F, 5.0F, 0.0F};
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 3;
     params.top_p = 1.0F;
     params.min_p = 0.75F;
     params.seed = 9;
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     for (int i = 0; i < 32; ++i) {
         auto result = sampler->sample(logits, 3, params);
         check(result.token_id != 2, "min_p excludes low-probability token");
     }
 }
 
-#if TRTF_HAS_LIBTORCH_MULTINOMIAL && TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_LIBTORCH_MULTINOMIAL && TRTMC_HAS_CUDA_KERNELS
 static void test_torch_multinomial_matches_known_hf_sequence() {
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 20;
     params.top_p = 0.95F;
     params.min_p = 0.0F;
     params.seed = 1235;
 
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     check(std::string(sampler->sampler_type()) == "torch_multinomial", "torch sampler enabled");
 
     const float step0[] = {46.041664F, 43.75F, 43.541664F};
@@ -218,14 +218,14 @@ static void test_torch_multinomial_matches_known_hf_sequence() {
 }
 
 static void test_torch_multinomial_uses_full_vocab_semantics() {
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 2;
     params.top_p = 1.0F;
     params.min_p = 0.0F;
     params.seed = 1235;
 
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     check(std::string(sampler->sampler_type()) == "torch_multinomial",
           "torch sampler enabled for sparse full-vocab test");
 
@@ -238,14 +238,14 @@ static void test_torch_multinomial_uses_full_vocab_semantics() {
 }
 
 static void test_torch_multinomial_advances_offset_like_full_vocab_cuda() {
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 1.0F;
     params.top_k = 2;
     params.top_p = 1.0F;
     params.min_p = 0.0F;
     params.seed = 1235;
 
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     check(std::string(sampler->sampler_type()) == "torch_multinomial",
           "torch sampler enabled for offset test");
 
@@ -261,14 +261,14 @@ static void test_torch_multinomial_advances_offset_like_full_vocab_cuda() {
 }
 
 static void test_torch_multinomial_matches_live_step_three_way_case() {
-    trtf::SamplingParams params;
+    trtmc::SamplingParams params;
     params.temperature = 0.6F;
     params.top_k = 20;
     params.top_p = 0.95F;
     params.min_p = 0.0F;
     params.seed = 1235;
 
-    auto sampler = trtf::create_sampler(params);
+    auto sampler = trtmc::create_sampler(params);
     check(std::string(sampler->sampler_type()) == "torch_multinomial",
           "torch sampler enabled for live three-way test");
 
@@ -294,7 +294,7 @@ int main() {
     test_create_sampler_can_force_host_topk();
     test_top_p_truncates_tail_tokens();
     test_min_p_drops_low_probability_tail();
-#if TRTF_HAS_LIBTORCH_MULTINOMIAL && TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_LIBTORCH_MULTINOMIAL && TRTMC_HAS_CUDA_KERNELS
     test_torch_multinomial_matches_known_hf_sequence();
     test_torch_multinomial_uses_full_vocab_semantics();
     test_torch_multinomial_advances_offset_like_full_vocab_cuda();

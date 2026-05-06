@@ -49,7 +49,7 @@ void test_build_sam_point_sparse_prompt_happy_path()
     const std::vector<float> point_embed_bg = {9.0F, 9.0F, 9.0F, 9.0F};
     const std::vector<float> not_a_point_embed = {9.0F, 8.0F, 7.0F, 6.0F};
 
-    const auto sparse = trtf::build_sam_point_sparse_prompt(
+    const auto sparse = trtmc::build_sam_point_sparse_prompt(
         0.5F,
         0.5F,
         true,
@@ -84,7 +84,7 @@ void test_encode_sam_point_embedding_missing_data_returns_zeroes()
     const std::vector<float> point_embed_fg = {0.1F, 0.2F, 0.3F, 0.4F};
     const std::vector<float> point_embed_bg = {5.0F, 6.0F, 7.0F};
 
-    const auto embedding = trtf::encode_sam_point_embedding(
+    const auto embedding = trtmc::encode_sam_point_embedding(
         2.0F,
         3.0F,
         false,
@@ -113,7 +113,7 @@ void test_build_sam_point_sparse_prompt_short_padding_embedding()
     const std::vector<float> point_embed_bg = {0.5F, 0.5F, 0.5F, 0.5F};
     const std::vector<float> not_a_point_embed = {1.0F, 2.0F, 3.0F};
 
-    const auto sparse = trtf::build_sam_point_sparse_prompt(
+    const auto sparse = trtmc::build_sam_point_sparse_prompt(
         0.5F,
         0.5F,
         false,
@@ -144,7 +144,7 @@ void test_build_sam_point_sparse_prompt_short_padding_embedding()
 
 void test_select_sam_multimask_outputs_keeps_trailing_masks()
 {
-    trtf::SamResult result;
+    trtmc::SamResult result;
     result.mask_height = 1;
     result.mask_width = 2;
     result.num_masks = 4;
@@ -156,7 +156,7 @@ void test_select_sam_multimask_outputs_keeps_trailing_masks()
     };
     result.iou_scores = {0.1F, 0.2F, 0.3F, 0.4F};
 
-    const auto trimmed = trtf::select_sam_multimask_outputs(std::move(result), 3);
+    const auto trimmed = trtmc::select_sam_multimask_outputs(std::move(result), 3);
 
     check(trimmed.num_masks == 3, "multimask: keeps requested count");
     check(trimmed.masks == std::vector<float>({20.0F, 21.0F, 30.0F, 31.0F, 40.0F, 41.0F}),
@@ -167,19 +167,19 @@ void test_select_sam_multimask_outputs_keeps_trailing_masks()
 
 void test_select_sam_multimask_outputs_keeps_original_for_invalid_requests()
 {
-    trtf::SamResult result;
+    trtmc::SamResult result;
     result.mask_height = 1;
     result.mask_width = 2;
     result.num_masks = 2;
     result.masks = {1.0F, 2.0F, 3.0F, 4.0F};
     result.iou_scores = {0.1F, 0.2F};
 
-    const auto keep_all = trtf::select_sam_multimask_outputs(result, 2);
+    const auto keep_all = trtmc::select_sam_multimask_outputs(result, 2);
     check(keep_all.num_masks == 2, "multimask invalid: keeps original when count already fits");
     check(keep_all.masks == result.masks, "multimask invalid: preserves masks");
 
-    const auto invalid_shape = trtf::select_sam_multimask_outputs(
-        trtf::SamResult{result.masks, result.iou_scores, 2, 0, 2},
+    const auto invalid_shape = trtmc::select_sam_multimask_outputs(
+        trtmc::SamResult{result.masks, result.iou_scores, 2, 0, 2},
         1);
     check(invalid_shape.num_masks == 2, "multimask invalid: keeps original when mask shape invalid");
 }
@@ -191,24 +191,24 @@ void test_sample_and_resize_sam_mask_helpers_handle_clamp_identity_and_invalid_i
         3.0F, 4.0F,
     };
 
-    check_close(trtf::sample_mask_bilinear(mask, 2, 2, -5.0F, -5.0F), 1.0F,
+    check_close(trtmc::sample_mask_bilinear(mask, 2, 2, -5.0F, -5.0F), 1.0F,
         "sample bilinear: clamps to top-left");
-    check_close(trtf::sample_mask_bilinear(mask, 2, 2, 5.0F, 5.0F), 4.0F,
+    check_close(trtmc::sample_mask_bilinear(mask, 2, 2, 5.0F, 5.0F), 4.0F,
         "sample bilinear: clamps to bottom-right");
-    check_close(trtf::sample_mask_bilinear(mask, 2, 2, 0.5F, 0.5F), 2.5F,
+    check_close(trtmc::sample_mask_bilinear(mask, 2, 2, 0.5F, 0.5F), 2.5F,
         "sample bilinear: averages center point");
-    check_close(trtf::sample_mask_bilinear({}, 2, 2, 0.0F, 0.0F), 0.0F,
+    check_close(trtmc::sample_mask_bilinear({}, 2, 2, 0.0F, 0.0F), 0.0F,
         "sample bilinear: returns zero for empty mask");
 
-    check(trtf::resize_mask_bilinear(mask, 2, 2, 2, 2) == mask,
+    check(trtmc::resize_mask_bilinear(mask, 2, 2, 2, 2) == mask,
         "resize bilinear: identity resize preserves mask");
-    check(trtf::resize_mask_bilinear(mask, 2, 2, 0, 2).empty(),
+    check(trtmc::resize_mask_bilinear(mask, 2, 2, 0, 2).empty(),
         "resize bilinear: invalid destination returns empty mask");
 }
 
 void test_postprocess_sam_result_crops_padding_region()
 {
-    trtf::SamResult result;
+    trtmc::SamResult result;
     result.num_masks = 1;
     result.mask_width = 4;
     result.mask_height = 4;
@@ -219,7 +219,7 @@ void test_postprocess_sam_result_crops_padding_region()
         0.0F, 0.0F, 1.0F, 1.0F,
     };
 
-    const auto processed = trtf::postprocess_sam_result(
+    const auto processed = trtmc::postprocess_sam_result(
         std::move(result),
         /*image_size=*/4,
         /*rescaled_w=*/2,
@@ -235,13 +235,13 @@ void test_postprocess_sam_result_crops_padding_region()
 
 void test_postprocess_sam_result_preserves_invalid_requests_and_incomplete_payload()
 {
-    trtf::SamResult invalid_request;
+    trtmc::SamResult invalid_request;
     invalid_request.num_masks = 1;
     invalid_request.mask_width = 2;
     invalid_request.mask_height = 2;
     invalid_request.masks = {1.0F, 2.0F, 3.0F, 4.0F};
 
-    const auto unchanged_invalid = trtf::postprocess_sam_result(
+    const auto unchanged_invalid = trtmc::postprocess_sam_result(
         invalid_request,
         /*image_size=*/0,
         /*rescaled_w=*/2,
@@ -251,9 +251,9 @@ void test_postprocess_sam_result_preserves_invalid_requests_and_incomplete_paylo
     check(unchanged_invalid.masks == invalid_request.masks,
         "postprocess invalid: returns original result");
 
-    trtf::SamResult incomplete_payload = invalid_request;
+    trtmc::SamResult incomplete_payload = invalid_request;
     incomplete_payload.masks = {1.0F, 2.0F, 3.0F};
-    const auto unchanged_incomplete = trtf::postprocess_sam_result(
+    const auto unchanged_incomplete = trtmc::postprocess_sam_result(
         incomplete_payload,
         /*image_size=*/2,
         /*rescaled_w=*/2,

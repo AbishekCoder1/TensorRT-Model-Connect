@@ -21,9 +21,9 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build import graph_ops, graph_blocks
+    from tensorrt_model_connect import graph_ops, graph_blocks
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.conftest import requires_trt
 

@@ -18,7 +18,7 @@
 #include <random>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // ─── fp32 ↔ fp16 conversion helpers ─────────────────────────────────────
 // TRT engines compiled with use_explicit_typing=True keep their original
@@ -560,4 +560,4 @@ ImageResult PixArtTorchTrtPipeline::generate_image(const std::string& prompt,
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

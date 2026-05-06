@@ -8,7 +8,7 @@
 // Preconditions: None (self-contained JSON test data).
 // Postconditions: All checks pass (exit 0) or report failures (exit 1).
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstring>
 #include <iostream>
@@ -128,26 +128,26 @@ int main()
         std::cerr << "=== Factory & JSON Parsing ===\n";
 
         std::string json(kUnigramJson);
-        auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
         check(tok != nullptr, "create_from_valid_json");
 
         // Invalid JSON
         bool threw = false;
-        try { trtf::CreateUnigramTokenizer("bad", 3, false); }
+        try { trtmc::CreateUnigramTokenizer("bad", 3, false); }
         catch (...) { threw = true; }
         check(threw, "reject_invalid_json");
 
         // BPE type rejected
         const char* bpe = R"({"model":{"type":"BPE","vocab":{},"merges":[]}})";
         threw = false;
-        try { trtf::CreateUnigramTokenizer(bpe, std::strlen(bpe), false); }
+        try { trtmc::CreateUnigramTokenizer(bpe, std::strlen(bpe), false); }
         catch (...) { threw = true; }
         check(threw, "reject_bpe_type");
 
         // WordPiece type rejected
         const char* wp = R"({"model":{"type":"WordPiece","vocab":{},"continuing_subword_prefix":"##"}})";
         threw = false;
-        try { trtf::CreateUnigramTokenizer(wp, std::strlen(wp), false); }
+        try { trtmc::CreateUnigramTokenizer(wp, std::strlen(wp), false); }
         catch (...) { threw = true; }
         check(threw, "reject_wordpiece_type");
     }
@@ -159,7 +159,7 @@ int main()
         std::cerr << "\n=== Token/ID Lookup ===\n";
 
         std::string json(kUnigramJson);
-        auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
 
         check(tok->id_for_token("<unk>") == 0, "id_for_unk");
         check(tok->id_for_token("\xe2\x96\x81hello") == 2, "id_for_hello");
@@ -178,7 +178,7 @@ int main()
         std::cerr << "\n=== Encoding (no special) ===\n";
 
         std::string json(kUnigramJson);
-        auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
 
         // "hello" → metaspace "▁hello" → token id 2
         check_ids(tok->encode("hello"), {2}, "encode_hello");
@@ -197,7 +197,7 @@ int main()
         std::cerr << "\n=== Encoding (with special) ===\n";
 
         std::string json(kUnigramJson);
-        auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), true);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), true);
 
         // With special: <s> + tokens + </s>
         check_ids(tok->encode("hello"), {19, 2, 20}, "encode_hello_special");
@@ -211,7 +211,7 @@ int main()
         std::cerr << "\n=== Decoding ===\n";
 
         std::string json(kUnigramJson);
-        auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
 
         // Decode single token
         check(tok->decode({2}) == "hello", "decode_hello");
@@ -233,7 +233,7 @@ int main()
         std::cerr << "\n=== Round-trip ===\n";
 
         std::string json(kUnigramJson);
-        auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
 
         auto rt = [&](const std::string& input) {
             auto decoded = tok->decode(tok->encode(input));
@@ -253,7 +253,7 @@ int main()
         std::cerr << "\n=== Auto-detect ===\n";
 
         std::string json(kUnigramNoSpecialJson);
-        auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), false);
+        auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
         check(tok != nullptr, "autodetect_unigram");
         check_ids(tok->encode("hello"), {1}, "autodetect_encode");
     }

@@ -1,6 +1,6 @@
-"""Thin wrapper over the shared trtf-build Python profile registry."""
+"""Thin wrapper over the shared trtmc-build Python profile registry."""
 
-from trtf_build.python_profiles import (
+from tensorrt_model_connect.python_profiles import (
     DEFAULT_PROFILE,
     PROFILE_PHASES,
     profile_env_var,

@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 template <std::size_t N>
 bool validate_state_layer_count(
@@ -90,4 +90,4 @@ inline void initialize_mamba_outputs(
     initialize_layer_outputs(num_layers, ssm_elems, present_ssm_by_layer);
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct DepthProjectionView {
     bool has_projection{false};
@@ -123,4 +123,4 @@ inline int32_t resolve_depth_prev_token(int32_t codebook, int32_t sampled_token,
     return clamp_speech_depth_token(forced_audio_tokens[codebook], cfg.audio_vocab_size);
 }
 
-} // namespace trtf
+} // namespace trtmc

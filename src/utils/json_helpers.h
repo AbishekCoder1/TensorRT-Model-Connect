@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 std::string extract_json_string(const std::string& text, const std::string& key,
                                 const std::string& fallback);
@@ -18,4 +18,4 @@ std::vector<float> extract_json_float_array(const std::string& text, const std::
 std::vector<int32_t> extract_json_int_array(const std::string& text, const std::string& key,
                                             std::size_t max_count = 16);
 
-} // namespace trtf
+} // namespace trtmc

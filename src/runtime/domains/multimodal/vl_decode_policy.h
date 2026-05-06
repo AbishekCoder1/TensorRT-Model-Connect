@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct VlTokenEmbedding
 {
@@ -91,4 +91,4 @@ inline bool run_vl_decode_loop(
     return true;
 }
 
-} // namespace trtf
+} // namespace trtmc

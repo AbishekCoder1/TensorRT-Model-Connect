@@ -15,7 +15,7 @@
 //   Validates the bundle reader for .trtfb files. Tests cover magic byte
 //   validation, error handling for truncated/invalid files, and the
 //   IsBundle/InspectBundle utility functions. Write tests are omitted
-//   because bundle writing is now handled by the Python trtf_build package.
+//   because bundle writing is now handled by the Python tensorrt_model_connect package.
 //
 // Dependencies:
 //   - bundle/bundle_format.h: BundleFile, ReadBundleFile, IsBundle,
@@ -56,7 +56,7 @@ static std::filesystem::path make_temp_dir() {
 // Helper: write a minimal valid .trtfb file manually (bypasses WriteBundleFile).
 static void write_minimal_bundle(const std::string& path, const std::string& header_json) {
     std::ofstream out(path, std::ios::binary);
-    out.write(reinterpret_cast<const char*>(trtf::kBundleMagic), 8);
+    out.write(reinterpret_cast<const char*>(trtmc::kBundleMagic), 8);
     uint64_t len = header_json.size();
     unsigned char bytes[8];
     for (int i = 0; i < 8; ++i)
@@ -69,7 +69,7 @@ static void write_minimal_bundle(const std::string& path, const std::string& hea
 static void write_bundle_with_sections(const std::string& path, const std::string& header_json,
                                        const std::vector<std::vector<char>>& section_data) {
     std::ofstream out(path, std::ios::binary);
-    out.write(reinterpret_cast<const char*>(trtf::kBundleMagic), 8);
+    out.write(reinterpret_cast<const char*>(trtmc::kBundleMagic), 8);
     uint64_t len = header_json.size();
     unsigned char bytes[8];
     for (int i = 0; i < 8; ++i)
@@ -109,7 +109,7 @@ static void test_read_valid_bundle() {
     std::vector<char> tok_data = {'{', '}'};
     write_bundle_with_sections(path, json, {plan_data, tok_data});
 
-    const auto loaded = trtf::ReadBundleFile(path);
+    const auto loaded = trtmc::ReadBundleFile(path);
     check(loaded.info.model_id == "test-model", "read model_id");
     check(loaded.info.model_type == "qwen3", "read model_type");
     check(loaded.info.family == "qwen", "read family");
@@ -129,7 +129,7 @@ static void test_read_valid_bundle() {
     check(loaded.sections[1].name == "tokenizer_json", "read section 1 name");
     check(loaded.sections[1].data == tok_data, "read section 1 data");
 
-    trtf_test::remove_all_safe(tmp);
+    trtmc_test::remove_all_safe(tmp);
 }
 
 static void test_magic_validation() {
@@ -142,7 +142,7 @@ static void test_magic_validation() {
 
     bool threw = false;
     try {
-        trtf::ReadBundleFile(path);
+        trtmc::ReadBundleFile(path);
     } catch (const std::runtime_error& e) {
         threw = true;
         const std::string msg = e.what();
@@ -151,7 +151,7 @@ static void test_magic_validation() {
     }
     check(threw, "invalid magic throws");
 
-    trtf_test::remove_all_safe(tmp);
+    trtmc_test::remove_all_safe(tmp);
 }
 
 static void test_empty_sections() {
@@ -161,11 +161,11 @@ static void test_empty_sections() {
     const std::string json = R"({"model_id": "empty", "sections": {}})";
     write_minimal_bundle(path, json);
 
-    const auto loaded = trtf::ReadBundleFile(path);
+    const auto loaded = trtmc::ReadBundleFile(path);
     check(loaded.info.model_id == "empty", "empty sections model_id");
     check(loaded.sections.empty(), "empty sections count");
 
-    trtf_test::remove_all_safe(tmp);
+    trtmc_test::remove_all_safe(tmp);
 }
 
 static void test_is_bundle_valid() {
@@ -173,9 +173,9 @@ static void test_is_bundle_valid() {
     const auto path = (tmp / "valid.trtfb").string();
 
     write_minimal_bundle(path, R"({"model_id": "valid"})");
-    check(trtf::IsBundle(path), "IsBundle true for valid file");
+    check(trtmc::IsBundle(path), "IsBundle true for valid file");
 
-    trtf_test::remove_all_safe(tmp);
+    trtmc_test::remove_all_safe(tmp);
 }
 
 static void test_is_bundle_invalid() {
@@ -183,11 +183,11 @@ static void test_is_bundle_invalid() {
 
     const auto text_path = (tmp / "readme.txt").string();
     std::ofstream(text_path) << "Hello world";
-    check(!trtf::IsBundle(text_path), "IsBundle false for text file");
-    check(!trtf::IsBundle(tmp.string()), "IsBundle false for directory");
-    check(!trtf::IsBundle((tmp / "nonexistent").string()), "IsBundle false for nonexistent");
+    check(!trtmc::IsBundle(text_path), "IsBundle false for text file");
+    check(!trtmc::IsBundle(tmp.string()), "IsBundle false for directory");
+    check(!trtmc::IsBundle((tmp / "nonexistent").string()), "IsBundle false for nonexistent");
 
-    trtf_test::remove_all_safe(tmp);
+    trtmc_test::remove_all_safe(tmp);
 }
 
 static void test_inspect_returns_metadata() {
@@ -204,12 +204,12 @@ static void test_inspect_returns_metadata() {
 })";
     write_bundle_with_sections(path, json, {{'X', 'Y', 'Z'}});
 
-    const auto info = trtf::InspectBundle(path);
+    const auto info = trtmc::InspectBundle(path);
     check(info.model_id == "inspectable", "inspect model_id");
     check(info.vocab_size == 50000, "inspect vocab_size");
     check(info.num_layers == 12, "inspect num_layers");
 
-    trtf_test::remove_all_safe(tmp);
+    trtmc_test::remove_all_safe(tmp);
 }
 
 static void test_tokenizer_add_special_tokens_header() {
@@ -223,11 +223,11 @@ static void test_tokenizer_add_special_tokens_header() {
 })";
     write_minimal_bundle(path, json);
 
-    const auto loaded = trtf::ReadBundleFile(path);
+    const auto loaded = trtmc::ReadBundleFile(path);
     check(loaded.info.tokenizer_add_special_tokens_present, "tokenizer_add_special_tokens present");
     check(!loaded.info.tokenizer_add_special_tokens, "tokenizer_add_special_tokens false");
 
-    trtf_test::remove_all_safe(tmp);
+    trtmc_test::remove_all_safe(tmp);
 }
 
 static void test_truncated_bundle_throws() {
@@ -236,7 +236,7 @@ static void test_truncated_bundle_throws() {
 
     {
         std::ofstream out(path, std::ios::binary);
-        out.write(reinterpret_cast<const char*>(trtf::kBundleMagic), 8);
+        out.write(reinterpret_cast<const char*>(trtmc::kBundleMagic), 8);
         uint64_t len = 1000;
         unsigned char bytes[8];
         for (int i = 0; i < 8; ++i)
@@ -247,13 +247,13 @@ static void test_truncated_bundle_throws() {
 
     bool threw = false;
     try {
-        trtf::ReadBundleFile(path);
+        trtmc::ReadBundleFile(path);
     } catch (const std::runtime_error&) {
         threw = true;
     }
     check(threw, "truncated bundle throws");
 
-    trtf_test::remove_all_safe(tmp);
+    trtmc_test::remove_all_safe(tmp);
 }
 
 int main() {

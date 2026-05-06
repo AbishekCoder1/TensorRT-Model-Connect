@@ -12,14 +12,14 @@ from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 
 try:
-    from trtf_build.engine_defs.torch_trt.compiler import precision_to_dtype, PRECISION_DTYPE_MAP
-    from trtf_build.engine_defs.torch_trt.strategies.decoder import (
+    from tensorrt_model_connect.engine_defs.torch_trt.compiler import precision_to_dtype, PRECISION_DTYPE_MAP
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies.decoder import (
         DecoderBuildStrategy,
         StatelessCacheWrapper,
     )
-    from trtf_build.engine_defs.torch_trt.strategies.encoder_only import EncoderOnlyBuildStrategy
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies.encoder_only import EncoderOnlyBuildStrategy
 except ImportError:
-    pytest.skip("ttrt_build not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 try:
     import torch
@@ -354,14 +354,14 @@ class TestPluginDtypePropagation:
 
     def test_qwen_plugin_accepts_dtype(self):
         """QwenTorchTrtPlugin.load_model() accepts dtype kwarg."""
-        from trtf_build.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
+        from tensorrt_model_connect.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
         import inspect
         sig = inspect.signature(QwenTorchTrtPlugin.load_model)
         assert "dtype" in sig.parameters
 
     def test_bert_plugin_accepts_dtype(self):
         """BertTorchTrtPlugin.load_model() accepts dtype kwarg."""
-        from trtf_build.engine_defs.torch_trt.families.bert import BertTorchTrtPlugin
+        from tensorrt_model_connect.engine_defs.torch_trt.families.bert import BertTorchTrtPlugin
         import inspect
         sig = inspect.signature(BertTorchTrtPlugin.load_model)
         assert "dtype" in sig.parameters
@@ -369,7 +369,7 @@ class TestPluginDtypePropagation:
     @requires_torch
     def test_qwen_plugin_passes_dtype_to_from_pretrained(self):
         """Verify Qwen plugin actually passes dtype to from_pretrained."""
-        from trtf_build.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
+        from tensorrt_model_connect.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
 
         plugin = QwenTorchTrtPlugin()
         mock_model = MagicMock()
@@ -393,7 +393,7 @@ class TestPluginDtypePropagation:
     @requires_torch
     def test_qwen_plugin_default_dtype_is_fp16(self):
         """When dtype=None, Qwen plugin defaults to torch.float16."""
-        from trtf_build.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
+        from tensorrt_model_connect.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
 
         plugin = QwenTorchTrtPlugin()
         mock_model = MagicMock()
@@ -414,7 +414,7 @@ class TestPluginDtypePropagation:
     @requires_torch
     def test_qwen_plugin_fp32_is_different_from_default(self):
         """Explicitly passing fp32 must differ from the default fp16."""
-        from trtf_build.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
+        from tensorrt_model_connect.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
 
         plugin = QwenTorchTrtPlugin()
         mock_model = MagicMock()
@@ -449,7 +449,7 @@ class TestPluginDtypePropagation:
     @requires_torch
     def test_qwen_plugin_forces_eager_attention(self):
         """Qwen plugin should disable fused attention kernels during export."""
-        from trtf_build.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
+        from tensorrt_model_connect.engine_defs.torch_trt.families.qwen import QwenTorchTrtPlugin
 
         plugin = QwenTorchTrtPlugin()
         mock_model = MagicMock()
@@ -475,7 +475,7 @@ class TestBuildBundlePrecision:
 
     def test_build_bundle_invalid_precision_raises(self, tmp_path):
         """build_bundle rejects invalid precision strings."""
-        from trtf_build.engine_defs.torch_trt.compiler import build_bundle
+        from tensorrt_model_connect.engine_defs.torch_trt.compiler import build_bundle
         import json
 
         (tmp_path / "config.json").write_text(json.dumps({

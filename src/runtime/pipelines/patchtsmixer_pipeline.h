@@ -2,14 +2,14 @@
 
 // PatchTSMixerPipeline: numeric time-series inference via a single TRT engine.
 
-#include "trtf/pipeline.h"
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 struct PatchTSMixerConfig {
     int32_t context_length{1};
@@ -39,4 +39,4 @@ class PatchTSMixerPipeline final : public IPipeline {
     std::string model_id_;
 };
 
-} // namespace trtf
+} // namespace trtmc

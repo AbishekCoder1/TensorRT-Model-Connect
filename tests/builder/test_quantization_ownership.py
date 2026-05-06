@@ -14,17 +14,17 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 POLICY_DOC = REPO_ROOT / "docs/wiki/Agentic-Quantization-Core-Minimal-Plan.md"
 
 SHARED_CORE_FILES = [
-    "trtf_build/trtf_build/quantization/plan.py",
-    "trtf_build/trtf_build/quantization/context.py",
-    "trtf_build/trtf_build/quantization/formats.py",
-    "trtf_build/trtf_build/quantization/profile.py",
-    "trtf_build/trtf_build/quantization/scales.py",
-    "trtf_build/trtf_build/quantization/scale_providers.py",
-    "trtf_build/trtf_build/quantization/adapters.py",
-    "trtf_build/trtf_build/quantization/__init__.py",
-    "trtf_build/trtf_build/graph_blocks.py",
-    "trtf_build/trtf_build/graph_ops.py",
-    "trtf_build/trtf_build/standard_decoder_builder.py",
+    "tensorrt_model_connect/tensorrt_model_connect/quantization/plan.py",
+    "tensorrt_model_connect/tensorrt_model_connect/quantization/context.py",
+    "tensorrt_model_connect/tensorrt_model_connect/quantization/formats.py",
+    "tensorrt_model_connect/tensorrt_model_connect/quantization/profile.py",
+    "tensorrt_model_connect/tensorrt_model_connect/quantization/scales.py",
+    "tensorrt_model_connect/tensorrt_model_connect/quantization/scale_providers.py",
+    "tensorrt_model_connect/tensorrt_model_connect/quantization/adapters.py",
+    "tensorrt_model_connect/tensorrt_model_connect/quantization/__init__.py",
+    "tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py",
+    "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py",
+    "tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py",
 ]
 
 # Keep this list to unambiguous, multi-character family names so the regex
@@ -103,7 +103,7 @@ class TestQuantizationSharedCoreBoundary:
 
 class TestFamilyLocalQuantHooks:
     def test_qwen_quant_policy_lives_in_family_plugin(self):
-        text = _read("trtf_build/trtf_build/families/qwen.py")
+        text = _read("tensorrt_model_connect/tensorrt_model_connect/families/qwen.py")
         assert "def quant_exclude_patterns" in text
         assert "def quant_adapter" in text
 

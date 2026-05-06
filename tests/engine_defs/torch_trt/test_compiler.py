@@ -1,4 +1,4 @@
-"""Tests for ttrt_build.compiler — compilation pipeline.
+"""Tests for tensorrt_model_connect.compiler — compilation pipeline.
 
 Tests cover:
   - _detect_tokenizer_add_special_tokens(): tokenizer config parsing
@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 from types import SimpleNamespace
 
 try:
-    from trtf_build.engine_defs.torch_trt.compiler import (
+    from tensorrt_model_connect.engine_defs.torch_trt.compiler import (
         _detect_tokenizer_add_special_tokens,
         _parse_model_config,
         _get_torch_version,
@@ -25,9 +25,9 @@ try:
         StatelessCacheWrapper,
         patch_static_cache_scatter,
     )
-    from trtf_build.engine_defs.torch_trt import _resolve_model
+    from tensorrt_model_connect.engine_defs.torch_trt import _resolve_model
 except ImportError:
-    pytest.skip("ttrt_build not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 try:
     import torch  # noqa: F401
@@ -157,7 +157,7 @@ class TestBuildBundle:
     """Mock-based tests for the build_bundle orchestrator."""
 
     def test_missing_plugin_raises(self, tmp_path):
-        from trtf_build.engine_defs.torch_trt.compiler import build_bundle
+        from tensorrt_model_connect.engine_defs.torch_trt.compiler import build_bundle
 
         (tmp_path / "config.json").write_text(json.dumps({
             "model_type": "nonexistent_model_xyz",
@@ -169,7 +169,7 @@ class TestBuildBundle:
 
     def test_config_parsed_correctly(self, tmp_path):
         """Verify config is parsed before plugin lookup."""
-        from trtf_build.engine_defs.torch_trt.config import ModelConfig
+        from tensorrt_model_connect.engine_defs.torch_trt.config import ModelConfig
         (tmp_path / "config.json").write_text(json.dumps({
             "model_type": "qwen3",
             "hidden_size": 1024,
@@ -184,7 +184,7 @@ class TestBuildBundle:
 
     def test_output_extension_trtfb(self, tmp_path):
         """build_bundle writes .trtfb files (not .ttrtb)."""
-        from trtf_build.engine_defs.torch_trt.compiler import build_bundle
+        from tensorrt_model_connect.engine_defs.torch_trt.compiler import build_bundle
 
         (tmp_path / "config.json").write_text(json.dumps({
             "model_type": "nonexistent_model_xyz",
@@ -198,7 +198,7 @@ class TestBuildBundle:
 
     def test_runtime_strategy_is_torchtrt_decoder(self, tmp_path):
         """build_bundle sets runtime_strategy='torchtrt_decoder' in the bundle."""
-        from trtf_build.engine_defs.torch_trt.bundle_writer import TtrtBundleInfo
+        from tensorrt_model_connect.engine_defs.torch_trt.bundle_writer import TtrtBundleInfo
         info = TtrtBundleInfo(runtime_strategy="torchtrt_decoder")
         assert info.runtime_strategy == "torchtrt_decoder"
 

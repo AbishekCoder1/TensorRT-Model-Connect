@@ -1,4 +1,4 @@
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <algorithm>
 #include <cassert>
@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace {
 
 // ─── UTF-8 helpers ───
@@ -667,4 +667,4 @@ std::unique_ptr<ITokenizer> CreateWordPieceTokenizer(
         tokenizer_json_data, tokenizer_json_size, add_special_tokens);
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -2,28 +2,28 @@
 
 #include <stdexcept>
 
-namespace trtf::runtime::builders::audio {
+namespace trtmc::runtime::builders::audio {
 
 namespace {
 
-void require_section(const trtf::BundleFile& bundle, const std::string& name,
+void require_section(const trtmc::BundleFile& bundle, const std::string& name,
                      const std::string& bundle_path)
 {
-    auto* data = trtf::find_section(bundle, name);
+    auto* data = trtmc::find_section(bundle, name);
     if (!data || data->empty())
         throw std::runtime_error(bundle_path + ": missing " + name + " section");
 }
 
 } // namespace
 
-static void validate_bark(const trtf::BundleFile& bundle, const std::string& bundle_path)
+static void validate_bark(const trtmc::BundleFile& bundle, const std::string& bundle_path)
 {
     require_section(bundle, "semantic_embed", bundle_path);
     require_section(bundle, "coarse_embed", bundle_path);
     require_section(bundle, "coarse_engine_plan", bundle_path);
 }
 
-static void validate_magpie(const trtf::BundleFile& bundle, const std::string& bundle_path)
+static void validate_magpie(const trtmc::BundleFile& bundle, const std::string& bundle_path)
 {
     require_section(bundle, "magpie_audio_embed", bundle_path);
     require_section(bundle, "magpie_text_embed", bundle_path);
@@ -34,7 +34,7 @@ static void validate_magpie(const trtf::BundleFile& bundle, const std::string& b
 
 void validate_text_to_audio_bundle_sections(
     TextToAudioBundleKind kind,
-    const trtf::BundleFile& bundle,
+    const trtmc::BundleFile& bundle,
     const std::string& bundle_path)
 {
     switch (kind)
@@ -48,4 +48,4 @@ void validate_text_to_audio_bundle_sections(
     }
 }
 
-} // namespace trtf::runtime::builders::audio
+} // namespace trtmc::runtime::builders::audio

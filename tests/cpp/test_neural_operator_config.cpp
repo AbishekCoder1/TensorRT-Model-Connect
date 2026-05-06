@@ -43,7 +43,7 @@ void check_eq(
 
 void test_segmentation_postprocess_argmax_basic()
 {
-    const trtf::SegmentationLogitsShape shape{
+    const trtmc::SegmentationLogitsShape shape{
         3,  // classes
         2,  // output_h
         2   // output_w
@@ -61,10 +61,10 @@ void test_segmentation_postprocess_argmax_basic()
 
     std::vector<int32_t> class_map;
     const auto status =
-        trtf::compute_segmentation_class_map_from_logits(logits, shape, class_map);
+        trtmc::compute_segmentation_class_map_from_logits(logits, shape, class_map);
 
     check(
-        status == trtf::SegmentationPostprocessStatus::kOk,
+        status == trtmc::SegmentationPostprocessStatus::kOk,
         "postprocess basic: status ok");
     check_eq(
         class_map,
@@ -74,7 +74,7 @@ void test_segmentation_postprocess_argmax_basic()
 
 void test_segmentation_postprocess_tie_selects_first_class()
 {
-    const trtf::SegmentationLogitsShape shape{2, 1, 1};
+    const trtmc::SegmentationLogitsShape shape{2, 1, 1};
     const std::vector<float> logits = {
         5.0F,  // class 0
         5.0F   // class 1 (tie, should keep class 0)
@@ -82,10 +82,10 @@ void test_segmentation_postprocess_tie_selects_first_class()
 
     std::vector<int32_t> class_map;
     const auto status =
-        trtf::compute_segmentation_class_map_from_logits(logits, shape, class_map);
+        trtmc::compute_segmentation_class_map_from_logits(logits, shape, class_map);
 
     check(
-        status == trtf::SegmentationPostprocessStatus::kOk,
+        status == trtmc::SegmentationPostprocessStatus::kOk,
         "postprocess tie: status ok");
     check(class_map.size() == 1, "postprocess tie: output size");
     if (class_map.size() == 1)
@@ -96,7 +96,7 @@ void test_segmentation_postprocess_tie_selects_first_class()
 
 void test_segmentation_postprocess_invalid_shape()
 {
-    const trtf::SegmentationLogitsShape shape{
+    const trtmc::SegmentationLogitsShape shape{
         0,  // invalid classes
         2,
         2
@@ -105,17 +105,17 @@ void test_segmentation_postprocess_invalid_shape()
 
     std::vector<int32_t> class_map = {9, 9};
     const auto status =
-        trtf::compute_segmentation_class_map_from_logits(logits, shape, class_map);
+        trtmc::compute_segmentation_class_map_from_logits(logits, shape, class_map);
 
     check(
-        status == trtf::SegmentationPostprocessStatus::kInvalidShape,
+        status == trtmc::SegmentationPostprocessStatus::kInvalidShape,
         "postprocess invalid shape: status");
     check(class_map.empty(), "postprocess invalid shape: class_map cleared");
 }
 
 void test_segmentation_postprocess_logits_size_mismatch()
 {
-    const trtf::SegmentationLogitsShape shape{2, 2, 2};  // expected logits size = 8
+    const trtmc::SegmentationLogitsShape shape{2, 2, 2};  // expected logits size = 8
     const std::vector<float> logits = {
         0.1F, 0.2F, 0.3F, 0.4F,  // class 0
         1.1F, 1.2F, 1.3F         // class 1 (one element missing)
@@ -123,10 +123,10 @@ void test_segmentation_postprocess_logits_size_mismatch()
 
     std::vector<int32_t> class_map = {7};
     const auto status =
-        trtf::compute_segmentation_class_map_from_logits(logits, shape, class_map);
+        trtmc::compute_segmentation_class_map_from_logits(logits, shape, class_map);
 
     check(
-        status == trtf::SegmentationPostprocessStatus::kLogitsSizeMismatch,
+        status == trtmc::SegmentationPostprocessStatus::kLogitsSizeMismatch,
         "postprocess logits mismatch: status");
     check(class_map.empty(), "postprocess logits mismatch: class_map cleared");
 }

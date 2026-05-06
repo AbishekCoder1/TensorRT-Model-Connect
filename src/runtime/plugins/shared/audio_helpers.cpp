@@ -5,7 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -119,7 +119,7 @@ std::shared_ptr<ITokenizer> make_ipa_tok(const BundleFile& bundle) {
     if (!has_section_data(phoneme) || !has_section_data(vocab)) {
         throw std::runtime_error(
             "Bundle missing IPA tokenizer sections (magpie_ipa_phoneme_dict, "
-            "magpie_ipa_vocab). Rebuild the bundle with the latest trtf-build.");
+            "magpie_ipa_vocab). Rebuild the bundle with the latest trtmc-build.");
     }
     return CreateIpaTokenizer(phoneme->data(), phoneme->size(),
                               has_section_data(heteronyms) ? heteronyms->data() : nullptr,
@@ -213,4 +213,4 @@ BaseConfig make_depth_engine_config(const std::string& json, const BaseConfig& b
     return dc;
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -1,5 +1,5 @@
 #include "runtime/domains/multimodal/image_preprocessor.h"
-#include "trtf/runtime/domains/multimodal/image_transform_helper.h"
+#include "trtmc/runtime/domains/multimodal/image_transform_helper.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -10,7 +10,7 @@
 #include "stb_image.h"
 #include "stb_image_resize2.h"
 
-namespace trtf {
+namespace trtmc {
 
 // ---------------------------------------------------------------------------
 // Interpolation filter resolution
@@ -89,7 +89,7 @@ static LoadedImage load_resize_normalize(
 
     if (image.empty())
     {
-        std::cerr << "[trtf] Failed to preprocess image: decoded image missing" << std::endl;
+        std::cerr << "[trtmc] Failed to preprocess image: decoded image missing" << std::endl;
         return loaded;
     }
 
@@ -101,14 +101,14 @@ static LoadedImage load_resize_normalize(
 
     if (resized.empty())
     {
-        std::cerr << "[trtf] Failed to resize image" << std::endl;
+        std::cerr << "[trtmc] Failed to resize image" << std::endl;
         return loaded;
     }
 
     // 3. Normalize to [C, H, W]
     if (!normalize_to_chw(resized, target_size, config, loaded.img_chw))
     {
-        std::cerr << "[trtf] Failed to normalize image" << std::endl;
+        std::cerr << "[trtmc] Failed to normalize image" << std::endl;
         return loaded;
     }
     loaded.target_size = target_size;
@@ -126,7 +126,7 @@ static LoadedImage load_crop_resize_normalize(
 
     if (image.empty())
     {
-        std::cerr << "[trtf] Failed to preprocess cropped image: decoded image missing" << std::endl;
+        std::cerr << "[trtmc] Failed to preprocess cropped image: decoded image missing" << std::endl;
         return loaded;
     }
 
@@ -150,13 +150,13 @@ static LoadedImage load_crop_resize_normalize(
                               resolve_stbir_filter(config.interpolation));
     if (resized.empty())
     {
-        std::cerr << "[trtf] Failed to resize cropped image" << std::endl;
+        std::cerr << "[trtmc] Failed to resize cropped image" << std::endl;
         return loaded;
     }
 
     if (!normalize_to_chw(resized, target_size, config, loaded.img_chw))
     {
-        std::cerr << "[trtf] Failed to normalize cropped image" << std::endl;
+        std::cerr << "[trtmc] Failed to normalize cropped image" << std::endl;
         return loaded;
     }
     loaded.target_size = target_size;
@@ -174,7 +174,7 @@ static LoadedImage load_aspect_preserve_resize_normalize(
 
     if (image.empty())
     {
-        std::cerr << "[trtf] Failed to preprocess aspect-preserve image: decoded image missing" << std::endl;
+        std::cerr << "[trtmc] Failed to preprocess aspect-preserve image: decoded image missing" << std::endl;
         return loaded;
     }
 
@@ -199,7 +199,7 @@ static LoadedImage load_aspect_preserve_resize_normalize(
 
     if (resize_result == nullptr)
     {
-        std::cerr << "[trtf] Failed to resize image (aspect-preserve)" << std::endl;
+        std::cerr << "[trtmc] Failed to resize image (aspect-preserve)" << std::endl;
         return loaded;
     }
 
@@ -215,7 +215,7 @@ static LoadedImage load_aspect_preserve_resize_normalize(
 
     if (!normalize_to_chw(padded, target_size, config, loaded.img_chw))
     {
-        std::cerr << "[trtf] Failed to normalize aspect-preserve image" << std::endl;
+        std::cerr << "[trtmc] Failed to normalize aspect-preserve image" << std::endl;
         return loaded;
     }
     loaded.target_size = target_size;
@@ -234,7 +234,7 @@ static LoadedImage load_pad_center_resize_normalize(
 
     if (image.empty())
     {
-        std::cerr << "[trtf] Failed to preprocess pad-center image: decoded image missing" << std::endl;
+        std::cerr << "[trtmc] Failed to preprocess pad-center image: decoded image missing" << std::endl;
         return loaded;
     }
 
@@ -261,7 +261,7 @@ static LoadedImage load_pad_center_resize_normalize(
 
     if (resize_result == nullptr)
     {
-        std::cerr << "[trtf] Failed to resize image (pad-center)" << std::endl;
+        std::cerr << "[trtmc] Failed to resize image (pad-center)" << std::endl;
         return loaded;
     }
 
@@ -293,7 +293,7 @@ static LoadedImage load_pad_center_resize_normalize(
 
     if (!normalize_to_chw(padded, target_size, config, loaded.img_chw))
     {
-        std::cerr << "[trtf] Failed to normalize pad-center image" << std::endl;
+        std::cerr << "[trtmc] Failed to normalize pad-center image" << std::endl;
         return loaded;
     }
     loaded.target_size = target_size;
@@ -409,7 +409,7 @@ runtime::adapters::io::DecodedImage decode_image_rgb(const std::string& image_pa
     unsigned char* raw = stbi_load(image_path.c_str(), &width, &height, &channels, 3);
     if (raw == nullptr)
     {
-        std::cerr << "[trtf] Failed to load image: " << image_path
+        std::cerr << "[trtmc] Failed to load image: " << image_path
                   << " (" << stbi_failure_reason() << ")" << std::endl;
         return image;
     }
@@ -429,7 +429,7 @@ PreprocessedImage preprocess_decoded_image(
     const auto dispatch = resolve_preprocess_dispatch(config.preprocessor_type);
     if (dispatch.warn_unknown_type)
     {
-        std::cerr << "[trtf] WARNING: Unknown preprocessor_type \""
+        std::cerr << "[trtmc] WARNING: Unknown preprocessor_type \""
                   << config.preprocessor_type << "\", falling back to qwen_merge_group"
                   << std::endl;
     }
@@ -579,4 +579,4 @@ VLPreprocessConfig parse_vl_preprocess_config(
     return cfg;
 }
 
-} // namespace trtf
+} // namespace trtmc

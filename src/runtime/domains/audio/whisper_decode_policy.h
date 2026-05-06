@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct WhisperDecodeLoopResult
 {
@@ -60,4 +60,4 @@ inline WhisperDecodeLoopResult run_whisper_decode_loop(
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

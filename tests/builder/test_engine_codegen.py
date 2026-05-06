@@ -18,7 +18,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-CODEGEN-01
 Intent: Validate the CodeGen family plugin weight loading including fused QKV with mp_num interleaving, partial RoPE, parallel residual, and non-standard HF prefixes.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: All weight keys are present with correct shapes, fused QKV is split correctly from interleaved layout, and engine IO tensors match expected names.
 """
 
@@ -33,9 +33,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -54,7 +54,7 @@ class CodeGenPluginTester(FamilyPluginTester):
       - Separate lm_head with optional bias
     """
 
-    plugin_module = "trtf_build.families.codegen"
+    plugin_module = "tensorrt_model_connect.families.codegen"
     model_type = "codegen"
     # CodeGen needs num_attention_heads divisible by mp_num=4
     spec = TinyModelSpec(

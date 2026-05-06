@@ -1,5 +1,5 @@
 // RtxBackend: IBackend implementation for TensorRT-RTX.
-// Compiled into libtrtf_backend_rtx.so. Links libtensorrt_rtx.so.
+// Compiled into libtrtmc_backend_rtx.so. Links libtensorrt_rtx.so.
 //
 // Uses the RTX-specific NvInfer.h headers which declare IRuntimeCache,
 // CudaGraphStrategy, and DynamicShapesKernelSpecializationStrategy.
@@ -7,7 +7,7 @@
 #include "runtime/backend/trt_logger.h"
 #include "runtime/core/cuda_common.h"
 #include "trt_module_impl.h"
-#include "trtf/runtime/trt_backend.h"
+#include "trtmc/runtime/trt_backend.h"
 
 #include <NvInfer.h>
 #include <fstream>
@@ -16,7 +16,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -32,7 +32,7 @@ StreamSetup resolve_stream(cudaStream_t requested_stream) {
 
     auto owned = std::make_shared<CudaStream>();
     if (!owned->ok()) {
-        throw std::runtime_error("[trtf] Failed to create CUDA stream");
+        throw std::runtime_error("[trtmc] Failed to create CUDA stream");
     }
 
     return StreamSetup{owned->get(), owned};
@@ -44,7 +44,7 @@ class RtxBackend final : public IBackend {
   public:
     RtxBackend() : runtime_(create_trt_runtime()) {
         if (!runtime_)
-            throw std::runtime_error("[trtf] Failed to create TRT-RTX runtime");
+            throw std::runtime_error("[trtmc] Failed to create TRT-RTX runtime");
     }
 
     ~RtxBackend() override {
@@ -56,13 +56,13 @@ class RtxBackend final : public IBackend {
                                               const ModuleCreateOptions& options) override {
         auto* engine = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine)
-            throw std::runtime_error("[trtf] Failed to deserialize engine (RTX)");
+            throw std::runtime_error("[trtmc] Failed to deserialize engine (RTX)");
 
         // Create IRuntimeConfig with RTX-specific features
         auto* rt_config = engine->createRuntimeConfig();
         if (!rt_config) {
             delete engine;
-            throw std::runtime_error("[trtf] Failed to create RTX runtime config");
+            throw std::runtime_error("[trtmc] Failed to create RTX runtime config");
         }
 
         // JIT kernel cache
@@ -73,14 +73,14 @@ class RtxBackend final : public IBackend {
         // CUDA graph capture
         if (options.cuda_graphs) {
             rt_config->setCudaGraphStrategy(nvinfer1::CudaGraphStrategy::kWHOLE_GRAPH_CAPTURE);
-            std::cerr << "[trtf] CUDA graphs enabled (whole-graph capture)\n";
+            std::cerr << "[trtmc] CUDA graphs enabled (whole-graph capture)\n";
         }
 
         auto* ctx = engine->createExecutionContext(rt_config);
         delete rt_config;
         if (!ctx) {
             delete engine;
-            throw std::runtime_error("[trtf] Failed to create RTX execution context");
+            throw std::runtime_error("[trtmc] Failed to create RTX execution context");
         }
 
         StreamSetup stream_setup;
@@ -95,7 +95,7 @@ class RtxBackend final : public IBackend {
         auto module = std::make_unique<TrtModuleImpl>(engine, ctx, stream_setup.stream);
         if (!module->ok()) {
             delete engine;
-            throw std::runtime_error("[trtf] TrtModuleImpl creation failed (RTX)");
+            throw std::runtime_error("[trtmc] TrtModuleImpl creation failed (RTX)");
         }
 
         module->keep_alive(std::shared_ptr<nvinfer1::ICudaEngine>(
@@ -111,7 +111,7 @@ class RtxBackend final : public IBackend {
                                 const ModuleCreateOptions& options) override {
         auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine_raw)
-            throw std::runtime_error("[trtf] Failed to deserialize engine (RTX)");
+            throw std::runtime_error("[trtmc] Failed to deserialize engine (RTX)");
         std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
                                                       [](nvinfer1::ICudaEngine* p) { delete p; });
 
@@ -138,7 +138,7 @@ class RtxBackend final : public IBackend {
                            const std::vector<int32_t>& profile_indices) override {
         auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine_raw)
-            throw std::runtime_error("[trtf] Failed to deserialize engine (RTX)");
+            throw std::runtime_error("[trtmc] Failed to deserialize engine (RTX)");
         std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
                                                       [](nvinfer1::ICudaEngine* p) { delete p; });
 
@@ -168,7 +168,7 @@ class RtxBackend final : public IBackend {
                           int32_t profile_idx) {
         auto* rt_config = engine->createRuntimeConfig();
         if (!rt_config)
-            throw std::runtime_error("[trtf] Failed to create RTX runtime config");
+            throw std::runtime_error("[trtmc] Failed to create RTX runtime config");
         if (options.runtime_cache_path && options.runtime_cache_path[0] != '\0')
             ensure_runtime_cache(rt_config, options.runtime_cache_path);
         if (options.cuda_graphs)
@@ -177,12 +177,12 @@ class RtxBackend final : public IBackend {
         auto* ctx = engine->createExecutionContext(rt_config);
         delete rt_config;
         if (!ctx)
-            throw std::runtime_error("[trtf] Failed to create RTX execution context");
+            throw std::runtime_error("[trtmc] Failed to create RTX execution context");
 
         auto mod =
             std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream_setup.stream, profile_idx);
         if (!mod->ok())
-            throw std::runtime_error("[trtf] TrtModuleImpl creation failed (RTX)");
+            throw std::runtime_error("[trtmc] TrtModuleImpl creation failed (RTX)");
         mod->keep_alive(engine);
         if (stream_setup.owner)
             mod->keep_alive(stream_setup.owner);
@@ -201,7 +201,7 @@ class RtxBackend final : public IBackend {
                     ifs.seekg(0);
                     ifs.read(buf.data(), sz);
                     runtime_cache_->deserialize(buf.data(), buf.size());
-                    std::cerr << "[trtf] RTX runtime cache loaded: " << path << " (" << sz
+                    std::cerr << "[trtmc] RTX runtime cache loaded: " << path << " (" << sz
                               << " bytes)\n";
                 }
             }
@@ -218,7 +218,7 @@ class RtxBackend final : public IBackend {
             if (ofs) {
                 ofs.write(static_cast<const char*>(mem->data()),
                           static_cast<std::streamsize>(mem->size()));
-                std::cerr << "[trtf] RTX runtime cache saved: " << cache_path_ << " ("
+                std::cerr << "[trtmc] RTX runtime cache saved: " << cache_path_ << " ("
                           << mem->size() << " bytes)\n";
             }
             delete mem;
@@ -226,17 +226,17 @@ class RtxBackend final : public IBackend {
     }
 };
 
-} // namespace trtf
+} // namespace trtmc
 
-extern "C" trtf::IBackend* trtf_create_backend() {
+extern "C" trtmc::IBackend* trtmc_create_backend() {
     try {
-        return new trtf::RtxBackend();
+        return new trtmc::RtxBackend();
     } catch (const std::exception& e) {
-        std::cerr << "[trtf] RTX backend init failed: " << e.what() << std::endl;
+        std::cerr << "[trtmc] RTX backend init failed: " << e.what() << std::endl;
         return nullptr;
     }
 }
 
-extern "C" void trtf_destroy_backend(trtf::IBackend* b) {
+extern "C" void trtmc_destroy_backend(trtmc::IBackend* b) {
     delete b;
 }

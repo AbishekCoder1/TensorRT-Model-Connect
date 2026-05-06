@@ -37,8 +37,8 @@ void check_close(float actual, float expected, float tolerance, const char* name
     }
 }
 
-trtf::runtime::adapters::io::DecodedImage make_two_pixel_image() {
-    trtf::runtime::adapters::io::DecodedImage image;
+trtmc::runtime::adapters::io::DecodedImage make_two_pixel_image() {
+    trtmc::runtime::adapters::io::DecodedImage image;
     image.width = 2;
     image.height = 1;
     image.channels = 3;
@@ -49,13 +49,13 @@ trtf::runtime::adapters::io::DecodedImage make_two_pixel_image() {
 }
 
 void test_segmentation_preprocess_normalizes_decoded_image() {
-    trtf::SegmentationConfig config;
+    trtmc::SegmentationConfig config;
     config.input_image_h = 1;
     config.input_image_w = 2;
     config.image_mean = {0.0F, 0.0F, 0.0F};
     config.image_std = {1.0F, 1.0F, 1.0F};
 
-    const auto pixel_values = trtf::preprocess_segmentation_image(make_two_pixel_image(), config);
+    const auto pixel_values = trtmc::preprocess_segmentation_image(make_two_pixel_image(), config);
     check(pixel_values.size() == 6, "segmentation preprocess size");
     if (pixel_values.size() != 6) {
         return;
@@ -70,8 +70,8 @@ void test_segmentation_preprocess_normalizes_decoded_image() {
 void test_segmentation_preprocess_rejects_empty_image() {
     bool threw = false;
     try {
-        trtf::SegmentationConfig config;
-        (void)trtf::preprocess_segmentation_image({}, config);
+        trtmc::SegmentationConfig config;
+        (void)trtmc::preprocess_segmentation_image({}, config);
     } catch (const std::runtime_error&) {
         threw = true;
     }
@@ -79,7 +79,7 @@ void test_segmentation_preprocess_rejects_empty_image() {
 }
 
 void test_sam_image_plan_tracks_resize_and_padding() {
-    trtf::runtime::adapters::io::DecodedImage image;
+    trtmc::runtime::adapters::io::DecodedImage image;
     image.width = 1;
     image.height = 2;
     image.channels = 3;
@@ -87,12 +87,12 @@ void test_sam_image_plan_tracks_resize_and_padding() {
         255, 0, 0, 255, 0, 0,
     };
 
-    trtf::SamConfig config;
+    trtmc::SamConfig config;
     config.image_size = 4;
     config.image_mean = {0.0F, 0.0F, 0.0F};
     config.image_std = {1.0F, 1.0F, 1.0F};
 
-    const auto plan = trtf::build_sam_image_encode_plan(image, config);
+    const auto plan = trtmc::build_sam_image_encode_plan(image, config);
     check(plan.ok(), "sam image plan ok");
     check(plan.original_width == 1 && plan.original_height == 2, "sam image plan original dims");
     check(plan.rescaled_width == 2 && plan.rescaled_height == 4, "sam image plan rescaled dims");

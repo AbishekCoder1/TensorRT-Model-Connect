@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
-DEFAULT_ENGINE_DIR = Path("/mnt/storage/trt-transformers/engines")
-DEFAULT_BINARY = PROJECT_DIR / "build" / "trtf"
+DEFAULT_ENGINE_DIR = Path("/mnt/storage/tensorrt-model-connect/engines")
+DEFAULT_BINARY = PROJECT_DIR / "build" / "trtmc"
 DEFAULT_HF_PYTHON = PROJECT_DIR / ".venv" / "bin" / "python"
 
 BUNDLE_NAME = "qwen3-0.6b.trtfb"
@@ -40,8 +40,8 @@ def pytest_addoption(parser):
         pass  # already registered by another conftest
     try:
         parser.addoption(
-            "--trtf-binary", default=None,
-            help="Path to the C++ trtf binary")
+            "--trtmc-binary", default=None,
+            help="Path to the C++ trtmc binary")
     except ValueError:
         pass
     try:
@@ -57,7 +57,7 @@ def _get_paths(request):
     engine_dir = request.config.getoption("--engine-dir", default=None)
     engine_dir = Path(engine_dir) if engine_dir else DEFAULT_ENGINE_DIR
 
-    binary = request.config.getoption("--trtf-binary", default=None)
+    binary = request.config.getoption("--trtmc-binary", default=None)
     binary = Path(binary) if binary else DEFAULT_BINARY
 
     hf_python = request.config.getoption("--hf-python", default=None)
@@ -133,8 +133,8 @@ def _run_python(hf_python: Path, bundle: Path) -> tuple[str, float]:
     """Run Python TrtRunner via subprocess and return (output_text, wall_clock_seconds)."""
     script = f"""
 import sys
-sys.path.insert(0, "{PROJECT_DIR / 'trtf_build'}")
-from trtf_build.debug_runner import TrtRunner, load_engine_from_bundle
+sys.path.insert(0, "{PROJECT_DIR / 'tensorrt_model_connect'}")
+from tensorrt_model_connect.debug_runner import TrtRunner, load_engine_from_bundle
 import numpy as np
 
 bundle_path = "{bundle}"

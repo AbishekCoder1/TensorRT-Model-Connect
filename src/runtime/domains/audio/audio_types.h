@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct LegacyAudioResult {
     std::vector<float> waveform;  // [num_samples] float32
@@ -19,4 +19,4 @@ struct LegacyAudioResult {
 bool write_wav(const std::string& path, const float* samples,
                int32_t num_samples, int32_t sample_rate);
 
-} // namespace trtf
+} // namespace trtmc

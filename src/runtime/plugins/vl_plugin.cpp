@@ -5,12 +5,12 @@
 #include "runtime/domains/multimodal/image_preprocessor.h"
 #include "runtime/pipelines/vl_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <iostream>
 
-namespace trtf {
+namespace trtmc {
 
 class VLPlugin final : public IPipelinePlugin {
   public:
@@ -67,9 +67,9 @@ class VLPlugin final : public IPipelinePlugin {
         if (vision_loaded.module && vision_loaded.module->ok()) {
             vision_loaded.module->keep_alive(shared_stream);
             vision_module = std::move(vision_loaded.module);
-            std::cerr << "[trtf] Vision encoder loaded" << std::endl;
+            std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
         } else if (has_vision_engine) {
-            std::cerr << "[trtf] WARNING: Bundle declares vision engine but "
+            std::cerr << "[trtmc] WARNING: Bundle declares vision engine but "
                          "deserialization failed"
                       << std::endl;
         }
@@ -93,4 +93,4 @@ class VLPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_vl_plugin, VLPlugin, "vision_language");
 
-} // namespace trtf
+} // namespace trtmc

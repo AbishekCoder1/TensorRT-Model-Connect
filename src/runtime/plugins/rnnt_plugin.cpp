@@ -3,7 +3,7 @@
 #include "runtime/pipelines/rnnt_pipeline.h"
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <map>
@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class RnntPlugin final : public IPipelinePlugin {
   public:
@@ -88,4 +88,4 @@ class RnntPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_rnnt_plugin, RnntPlugin, "speech_to_text_rnnt");
 
-} // namespace trtf
+} // namespace trtmc

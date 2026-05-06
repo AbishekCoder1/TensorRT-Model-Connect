@@ -6,20 +6,20 @@
 // Unit Design:    UD-CABI-01
 // Intent:         C ABI runtime regression: invalid engine plans report errors without crashing
 // Preconditions:  Syntactically valid .trtfb with invalid engine_plan payload
-// Postconditions: trtf_last_error() returns descriptive message, no crash on repeated calls
+// Postconditions: trtmc_last_error() returns descriptive message, no crash on repeated calls
 // =============================================================================
 
 // =============================================================================
 // C ABI runtime regression tests for bundle -> TRT runtime -> deserialize path.
 //
 // These tests build a syntactically valid .trtfb file with an invalid
-// engine_plan payload, then call trtf_create_pipeline repeatedly. This catches
+// engine_plan payload, then call trtmc_create_pipeline repeatedly. This catches
 // crashes in runtime/logger lifetime and validates that failures are reported
-// through trtf_last_error().
+// through trtmc_last_error().
 // =============================================================================
 
 #include "test_helpers.h"
-#include "trtf/pipeline.h"
+#include "trtmc/pipeline.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -128,11 +128,11 @@ bool message_contains_any_expected_failure(const std::string& msg) {
 }
 
 void expect_invalid_bundle_creation_fails(const std::string& bundle_path, const char* test_name) {
-    auto* pipeline = trtf_create_pipeline(bundle_path.c_str(), 0);
+    auto* pipeline = trtmc_create_pipeline(bundle_path.c_str(), 0);
     check(pipeline == nullptr, test_name);
 
-    const char* err = trtf_last_error();
-    check(err != nullptr && std::strlen(err) > 0, "trtf_last_error set for invalid plan bundle");
+    const char* err = trtmc_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "trtmc_last_error set for invalid plan bundle");
     if (err != nullptr) {
         check(message_contains_any_expected_failure(err),
               "error message indicates TRT runtime failure");
@@ -140,7 +140,7 @@ void expect_invalid_bundle_creation_fails(const std::string& bundle_path, const 
 }
 
 void test_invalid_plan_bundle_reports_error() {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
         std::filesystem::path(dir.path()) / "invalid_engine_plan.trtfb";
     write_invalid_engine_bundle(bundle_path);
@@ -149,7 +149,7 @@ void test_invalid_plan_bundle_reports_error() {
 }
 
 void test_missing_engine_plan_bundle_reports_error() {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
         std::filesystem::path(dir.path()) / "missing_engine_plan.trtfb";
 
@@ -162,11 +162,11 @@ void test_missing_engine_plan_bundle_reports_error() {
 })";
     write_bundle_with_sections(bundle_path, {BundleSectionSpec{"config.json", config}});
 
-    auto* pipeline = trtf_create_pipeline(bundle_path.string().c_str(), 0);
+    auto* pipeline = trtmc_create_pipeline(bundle_path.string().c_str(), 0);
     check(pipeline == nullptr, "bundle missing engine_plan returns nullptr");
 
-    const char* err = trtf_last_error();
-    check(err != nullptr && std::strlen(err) > 0, "trtf_last_error set for missing engine_plan");
+    const char* err = trtmc_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "trtmc_last_error set for missing engine_plan");
     if (err != nullptr) {
         check(message_contains_any(err, {"New runtime build failed", "engine_plan",
                                          "Bundle missing engine plan", "Bundle missing"}),
@@ -175,7 +175,7 @@ void test_missing_engine_plan_bundle_reports_error() {
 }
 
 void test_diffusion_bundle_missing_required_section_reports_error() {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
         std::filesystem::path(dir.path()) / "diffusion_missing_sections.trtfb";
 
@@ -187,11 +187,11 @@ void test_diffusion_bundle_missing_required_section_reports_error() {
 })";
     write_bundle_with_sections(bundle_path, {BundleSectionSpec{"config.json", config}});
 
-    auto* pipeline = trtf_create_pipeline(bundle_path.string().c_str(), 0);
+    auto* pipeline = trtmc_create_pipeline(bundle_path.string().c_str(), 0);
     check(pipeline == nullptr, "diffusion bundle without required plans returns nullptr");
 
-    const char* err = trtf_last_error();
-    check(err != nullptr && std::strlen(err) > 0, "trtf_last_error set for diffusion guard path");
+    const char* err = trtmc_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "trtmc_last_error set for diffusion guard path");
     if (err != nullptr) {
         check(message_contains_any(err, {"New runtime build failed", "denoiser_plan",
                                          "multi-engine bundles", "Diffusion pipeline",
@@ -201,7 +201,7 @@ void test_diffusion_bundle_missing_required_section_reports_error() {
 }
 
 void test_unknown_strategy_reports_new_runtime_unsupported_strategy_error() {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
         std::filesystem::path(dir.path()) / "unknown_strategy_missing_engine_plan.trtfb";
 
@@ -213,11 +213,11 @@ void test_unknown_strategy_reports_new_runtime_unsupported_strategy_error() {
 })";
     write_bundle_with_sections(bundle_path, {BundleSectionSpec{"config.json", config}});
 
-    auto* pipeline = trtf_create_pipeline(bundle_path.string().c_str(), 0);
+    auto* pipeline = trtmc_create_pipeline(bundle_path.string().c_str(), 0);
     check(pipeline == nullptr, "unknown strategy without engine_plan returns nullptr");
 
-    const char* err = trtf_last_error();
-    check(err != nullptr && std::strlen(err) > 0, "trtf_last_error set for unknown strategy");
+    const char* err = trtmc_last_error();
+    check(err != nullptr && std::strlen(err) > 0, "trtmc_last_error set for unknown strategy");
     if (err != nullptr) {
         check(message_contains_any(err,
                                    {"Unsupported runtime_strategy for new runtime path",
@@ -230,7 +230,7 @@ void test_unknown_strategy_reports_new_runtime_unsupported_strategy_error() {
 }
 
 void test_invalid_plan_bundle_repeatable() {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
         std::filesystem::path(dir.path()) / "invalid_engine_plan_loop.trtfb";
     write_invalid_engine_bundle(bundle_path);

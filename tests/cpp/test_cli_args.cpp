@@ -10,20 +10,20 @@
 // =============================================================================
 
 // =============================================================================
-// Test suite: CLI argument parsing for the `trtf` command-line interface.
+// Test suite: CLI argument parsing for the `trtmc` command-line interface.
 //
 // Purpose:
-//   Validates the CLI argument parser that powers the `trtf` executable. The
+//   Validates the CLI argument parser that powers the `trtmc` executable. The
 //   parser handles subcommands (run, detect, inspect, version, help),
 //   positional arguments (bundle path), and option flags (--prompt,
 //   --max-new-tokens, --hf-python, detection aliases).
 //
 // Dependencies:
-//   - trtf/pipeline.h: only for basic type references. No GPU, TRT, or
+//   - trtmc/pipeline.h: only for basic type references. No GPU, TRT, or
 //     filesystem access required.
 //
 // Approach:
-//   The production CLI parser lives inside trtf_cli.cpp, which has its own
+//   The production CLI parser lives inside trtmc_cli.cpp, which has its own
 //   main(). To test in isolation without linking two main() symbols, this file
 //   replicates the CliArgs struct and parse_args() function matching the
 //   simplified production code. A convenience wrapper parse(vector<const char*>)
@@ -39,7 +39,7 @@
 //   - No-args: bare invocation shows help
 // =============================================================================
 
-#include "trtf/pipeline.h"
+#include "trtmc/pipeline.h"
 
 #include <algorithm>
 #include <cctype>
@@ -258,14 +258,14 @@ CliArgs parse(std::vector<const char*> argv_vec) {
 } // namespace
 
 // -----------------------------------------------------------------------------
-// Intention: Verify that "trtf run bundle.trtfb --prompt 'hello world'"
+// Intention: Verify that "trtmc run bundle.trtfb --prompt 'hello world'"
 //   correctly parses the run subcommand and captures the prompt string.
 // Setup: Simulated argv with "run", a bundle path, and a multi-word prompt.
 // Mechanism: Calls parse(), checks command=="run", model_or_bundle=="bundle.trtfb",
 //   and prompt=="hello world".
 // -----------------------------------------------------------------------------
 static void test_run_with_prompt() {
-    auto args = parse({"trtf", "run", "bundle.trtfb", "--prompt", "hello world"});
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello world"});
     check(args.command == "run", "run command");
     check(args.model_or_bundle == "bundle.trtfb", "run bundle path");
     check(args.prompt == "hello world", "run prompt");
@@ -278,7 +278,7 @@ static void test_run_with_prompt() {
 // Mechanism: Calls parse(), checks max_new_tokens==50.
 // -----------------------------------------------------------------------------
 static void test_run_max_tokens() {
-    auto args = parse({"trtf", "run", "bundle.trtfb", "--prompt", "hi", "--max-new-tokens", "50"});
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hi", "--max-new-tokens", "50"});
     check(args.max_new_tokens == 50, "run max_new_tokens");
 }
 
@@ -290,7 +290,7 @@ static void test_run_max_tokens() {
 // -----------------------------------------------------------------------------
 static void test_hf_python_flag() {
     auto args =
-        parse({"trtf", "run", "bundle.trtfb", "--prompt", "hi", "--hf-python", "/usr/bin/python3"});
+        parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hi", "--hf-python", "/usr/bin/python3"});
     check(!args.parse_error, "hf-python no parse error");
     check(args.hf_python == "/usr/bin/python3", "hf-python value");
 }
@@ -298,44 +298,44 @@ static void test_hf_python_flag() {
 // -----------------------------------------------------------------------------
 // Intention: Verify that the "inspect" subcommand correctly parses and captures
 //   the positional bundle file path.
-// Setup: Simulated argv: {"trtf", "inspect", "file.trtfb"}.
+// Setup: Simulated argv: {"trtmc", "inspect", "file.trtfb"}.
 // Mechanism: Calls parse(), checks command=="inspect" and
 //   model_or_bundle=="file.trtfb".
 // -----------------------------------------------------------------------------
 static void test_inspect_subcommand() {
-    auto args = parse({"trtf", "inspect", "file.trtfb"});
+    auto args = parse({"trtmc", "inspect", "file.trtfb"});
     check(args.command == "inspect", "inspect command");
     check(args.model_or_bundle == "file.trtfb", "inspect file path");
 }
 
 // -----------------------------------------------------------------------------
-// Intention: Verify that invoking "trtf" with no arguments sets show_help=true
+// Intention: Verify that invoking "trtmc" with no arguments sets show_help=true
 //   (the expected behavior for a bare invocation with no subcommand).
-// Setup: Simulated argv: {"trtf"} (argc==1, no subcommand).
+// Setup: Simulated argv: {"trtmc"} (argc==1, no subcommand).
 // Mechanism: Calls parse(), checks show_help==true.
 // -----------------------------------------------------------------------------
 static void test_no_args_shows_usage() {
-    auto args = parse({"trtf"});
+    auto args = parse({"trtmc"});
     check(args.show_help, "no args shows help");
 }
 
 // -----------------------------------------------------------------------------
-// Intention: Verify that "trtf --help" sets show_help=true.
-// Setup: Simulated argv: {"trtf", "--help"}.
+// Intention: Verify that "trtmc --help" sets show_help=true.
+// Setup: Simulated argv: {"trtmc", "--help"}.
 // Mechanism: Calls parse(), checks show_help==true.
 // -----------------------------------------------------------------------------
 static void test_help_flag() {
-    auto args = parse({"trtf", "--help"});
+    auto args = parse({"trtmc", "--help"});
     check(args.show_help, "--help shows help");
 }
 
 // -----------------------------------------------------------------------------
-// Intention: Verify that "trtf version" parses the version subcommand.
-// Setup: Simulated argv: {"trtf", "version"}.
+// Intention: Verify that "trtmc version" parses the version subcommand.
+// Setup: Simulated argv: {"trtmc", "version"}.
 // Mechanism: Calls parse(), checks command=="version".
 // -----------------------------------------------------------------------------
 static void test_version_subcommand() {
-    auto args = parse({"trtf", "version"});
+    auto args = parse({"trtmc", "version"});
     check(args.command == "version", "version command");
 }
 
@@ -347,7 +347,7 @@ static void test_version_subcommand() {
 //   "--bogus".
 // -----------------------------------------------------------------------------
 static void test_unknown_flag_errors() {
-    auto args = parse({"trtf", "run", "bundle.trtfb", "--bogus"});
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--bogus"});
     check(args.parse_error, "unknown flag causes error");
     check(args.error_message.find("--bogus") != std::string::npos, "error message mentions flag");
 }
@@ -355,12 +355,12 @@ static void test_unknown_flag_errors() {
 // -----------------------------------------------------------------------------
 // Intention: Verify that an unknown subcommand (e.g., "foobar") is rejected
 //   with a parse error whose message mentions the unknown command name.
-// Setup: Simulated argv: {"trtf", "foobar"}.
+// Setup: Simulated argv: {"trtmc", "foobar"}.
 // Mechanism: Calls parse(), checks parse_error==true and error_message contains
 //   "foobar".
 // -----------------------------------------------------------------------------
 static void test_unknown_command_errors() {
-    auto args = parse({"trtf", "foobar"});
+    auto args = parse({"trtmc", "foobar"});
     check(args.parse_error, "unknown command causes error");
     check(args.error_message.find("foobar") != std::string::npos, "error message mentions command");
 }
@@ -373,7 +373,7 @@ static void test_unknown_command_errors() {
 //   and no parse error occurred.
 // -----------------------------------------------------------------------------
 static void test_all_run_flags_combined() {
-    auto args = parse({"trtf", "run", "bundle.trtfb", "--prompt", "hello", "--max-new-tokens", "10",
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hello", "--max-new-tokens", "10",
                        "--hf-python", "/usr/bin/python3", "--kv-cache-size", "2GiB"});
     check(!args.parse_error, "combined flags no parse error");
     check(args.model_or_bundle == "bundle.trtfb", "combined bundle path");
@@ -385,19 +385,19 @@ static void test_all_run_flags_combined() {
 }
 
 static void test_kv_cache_size_flag() {
-    auto args = parse({"trtf", "run", "bundle.trtfb", "--kv-cache-size", "90GB"});
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--kv-cache-size", "90GB"});
     check(!args.parse_error, "kv-cache-size no parse error");
     check(args.kv_cache_size_bytes == 90000000000ULL, "kv-cache-size parsed");
 }
 
 static void test_kv_cache_size_alias_flag() {
-    auto args = parse({"trtf", "run", "bundle.trtfb", "--kv_cache_size", "90GB"});
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--kv_cache_size", "90GB"});
     check(!args.parse_error, "kv_cache_size alias no parse error");
     check(args.kv_cache_size_bytes == 90000000000ULL, "kv_cache_size alias parsed");
 }
 
 static void test_kv_cache_size_equals_flag() {
-    auto args = parse({"trtf", "run", "bundle.trtfb", "--kv-cache-size=90GB"});
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--kv-cache-size=90GB"});
     check(!args.parse_error, "kv-cache-size equals no parse error");
     check(args.kv_cache_size_bytes == 90000000000ULL, "kv-cache-size equals parsed");
 }
@@ -408,7 +408,7 @@ static void test_kv_cache_size_equals_flag() {
 // Mechanism: Calls parse(), checks parsed command and values.
 // -----------------------------------------------------------------------------
 static void test_detect_alias_flags() {
-    auto args = parse({"trtf", "detect", "bundle.trtfb", "--image", "img.jpg", "--output-json",
+    auto args = parse({"trtmc", "detect", "bundle.trtfb", "--image", "img.jpg", "--output-json",
                        "det.json", "--score-threshold", "0.25"});
     check(!args.parse_error, "detect aliases no parse error");
     check(args.command == "detect", "detect command");
@@ -424,7 +424,7 @@ static void test_detect_alias_flags() {
 // Mechanism: Calls parse(), checks parse_error and unknown flag message.
 // -----------------------------------------------------------------------------
 static void test_detect_unknown_flag_still_errors() {
-    auto args = parse({"trtf", "detect", "bundle.trtfb", "--image", "img.jpg", "--output-json",
+    auto args = parse({"trtmc", "detect", "bundle.trtfb", "--image", "img.jpg", "--output-json",
                        "det.json", "--score-threshold", "0.25", "--not-a-real-flag"});
     check(args.parse_error, "detect unknown flag causes error");
     check(args.error_message.find("--not-a-real-flag") != std::string::npos,

@@ -3,9 +3,9 @@
 
 #include "runtime/pipelines/recurrent_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
-namespace trtf {
+namespace trtmc {
 
 class RwkvPlugin final : public IPipelinePlugin {
   public:
@@ -40,4 +40,4 @@ class RwkvPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_rwkv_plugin, RwkvPlugin, "rwkv_recurrent");
 
-} // namespace trtf
+} // namespace trtmc

@@ -25,7 +25,7 @@
 //   2. ResolveTextGenerationModel() and validate checkpoint structure
 // - Run: ctest --test-dir build -R test_your_family --output-on-failure
 
-#include "trtf/hf_family_registry.h"
+#include "trtmc/hf_family_registry.h"
 #include "model/checkpoint_mapper.h"
 #include "runtime/trt/model_runtime_fwd.h"
 #include "utils/text_parsers.h"
@@ -34,7 +34,7 @@
 #include <memory>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 namespace your_family {
 
 // --- Checkpoint Mapper ---
@@ -95,7 +95,7 @@ void RegisterYourFamily()
     // (C) Exotic architecture (Mamba/SSM, custom state):
     //     Implement IModelRuntime directly in your_family/runtime.h/cpp.
     //
-#if TRTF_HAS_TRT
+#if TRTMC_HAS_TRT
     // --- Pattern A: standard dense decoder ---
     RegisterModelRuntime("your_family", CreateStandardDecoderRuntime());
 
@@ -129,4 +129,4 @@ void RegisterYourFamily()
 }
 
 } // namespace your_family
-} // namespace trtf
+} // namespace trtmc

@@ -3,7 +3,7 @@
 Contains FamilyPluginTestMixin with 15+ test methods organized in three tiers:
 
   Tier 0: No GPU, no TRT — basic plugin interface checks.
-  Tier 1: No GPU, needs safetensors + trtf_build — weight loading validation.
+  Tier 1: No GPU, needs safetensors + tensorrt_model_connect — weight loading validation.
   Tier 2: Needs TRT + GPU — engine build and IO validation.
 
 Usage:
@@ -11,7 +11,7 @@ Usage:
     from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
     class QwenPluginTester(FamilyPluginTester):
-        plugin_module = "trtf_build.families.qwen"
+        plugin_module = "tensorrt_model_connect.families.qwen"
         model_type = "qwen3"
 
     class TestQwenEngine(FamilyPluginTestMixin):
@@ -24,10 +24,10 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build.config import ModelConfig
-    from trtf_build.checkpoint_mapper import WeightDict
+    from tensorrt_model_connect.config import ModelConfig
+    from tensorrt_model_connect.checkpoint_mapper import WeightDict
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 # Check TRT availability for Tier 2 tests.
 _TRT_AVAILABLE = False
@@ -152,7 +152,7 @@ class FamilyPluginTestMixin:
             )
 
     # ===================================================================
-    # Tier 1: No GPU, needs safetensors + trtf_build — weight loading
+    # Tier 1: No GPU, needs safetensors + tensorrt_model_connect — weight loading
     # ===================================================================
 
     @pytest.mark.unit

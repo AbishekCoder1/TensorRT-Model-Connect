@@ -1,6 +1,6 @@
 #include "runtime/plugins/shared/plugin_helpers.h"
 
-#include "trtf/runtime/trt_backend.h"
+#include "trtmc/runtime/trt_backend.h"
 #include "utils/json_helpers.h"
 
 #include <chrono>
@@ -13,11 +13,11 @@
 #include <string_view>
 #include <utility>
 
-#if TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TVM_FFI
 #include "plugins/tvm_ffi_module_loader.h"
 #endif
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -31,7 +31,7 @@ double elapsed_ms(SteadyClock::time_point start, SteadyClock::time_point end) {
 
 void log_trt_load_timing(const char* label, double load_deserialize_ms, std::size_t plan_bytes) {
     std::ostringstream line;
-    line << std::fixed << std::setprecision(6) << "[trtf.load_timing] label=\""
+    line << std::fixed << std::setprecision(6) << "[trtmc.load_timing] label=\""
          << (label ? label : "engine") << "\" load_deserialize_ms=" << load_deserialize_ms
          << " plan_bytes=" << plan_bytes;
     std::cerr << line.str() << '\n';
@@ -81,7 +81,7 @@ std::shared_ptr<ITokenizer> try_create_native_bpe(const BundleFile& bundle, bool
     try {
         auto tok = CreateBpeTokenizer(tok_data->data(), tok_data->size(), add_special);
         if (tok) {
-            std::cerr << "[trtf] Using native BPE tokenizer" << std::endl;
+            std::cerr << "[trtmc] Using native BPE tokenizer" << std::endl;
         }
         return tok;
     } catch (const std::exception& e) {
@@ -94,7 +94,7 @@ std::shared_ptr<ITokenizer> try_create_native_bpe(const BundleFile& bundle, bool
             throw std::runtime_error(std::string("Native BPE tokenizer failed for BPE model: ") +
                                      e.what());
         }
-        std::cerr << "[trtf] Native BPE unavailable (" << e.what() << "), falling back to HF Python"
+        std::cerr << "[trtmc] Native BPE unavailable (" << e.what() << "), falling back to HF Python"
                   << std::endl;
     }
     return nullptr;
@@ -113,7 +113,7 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle
     try {
         auto tok = CreateBpeTokenizer(data, size, add_special_tokens);
         if (tok) {
-            std::cerr << "[trtf] Using native BPE tokenizer" << std::endl;
+            std::cerr << "[trtmc] Using native BPE tokenizer" << std::endl;
             return tok;
         }
     } catch (...) {
@@ -123,7 +123,7 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle
     try {
         auto tok = CreateWordPieceTokenizer(data, size, add_special_tokens);
         if (tok) {
-            std::cerr << "[trtf] Using native WordPiece tokenizer" << std::endl;
+            std::cerr << "[trtmc] Using native WordPiece tokenizer" << std::endl;
             return tok;
         }
     } catch (...) {
@@ -133,7 +133,7 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle
     try {
         auto tok = CreateUnigramTokenizer(data, size, add_special_tokens);
         if (tok) {
-            std::cerr << "[trtf] Using native Unigram tokenizer" << std::endl;
+            std::cerr << "[trtmc] Using native Unigram tokenizer" << std::endl;
             return tok;
         }
     } catch (...) {
@@ -174,7 +174,7 @@ LoadedModule try_load_trt_module_from_plan(IBackend* backend, const std::vector<
     try {
         return load_trt_module_from_plan(backend, plan, label, options);
     } catch (...) {
-        std::cerr << "[trtf] WARNING: failed to load optional engine: " << label << std::endl;
+        std::cerr << "[trtmc] WARNING: failed to load optional engine: " << label << std::endl;
         return LoadedModule{};
     }
 }
@@ -305,17 +305,17 @@ std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(const BundleFile& 
         auto tok =
             CreateBpeTokenizer(tok_data->data(), tok_data->size(), /*add_special_tokens=*/true);
         if (tok)
-            std::cerr << "[trtf] Using native BPE CLIP tokenizer" << std::endl;
+            std::cerr << "[trtmc] Using native BPE CLIP tokenizer" << std::endl;
         return tok;
     } catch (const std::exception& e) {
-        std::cerr << "[trtf] WARNING: CLIP tokenizer failed: " << e.what() << std::endl;
+        std::cerr << "[trtmc] WARNING: CLIP tokenizer failed: " << e.what() << std::endl;
     }
     return nullptr;
 }
 
 // ─── FFI kernel loading ───
 
-#if TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TVM_FFI
 
 namespace {
 
@@ -327,7 +327,7 @@ std::string write_kernel_so_to_temp(const std::string& global_name, const char* 
         if (c == '.')
             c = '_';
     }
-    std::string tmp_path = "/tmp/trtf_kernel_" + safe_name + ".so";
+    std::string tmp_path = "/tmp/trtmc_kernel_" + safe_name + ".so";
     std::ofstream ofs(tmp_path, std::ios::binary);
     ofs.write(data, static_cast<std::streamsize>(size));
     return tmp_path;
@@ -372,10 +372,10 @@ std::pair<std::size_t, std::size_t> find_kernels_array_bounds(const std::string&
 
 } // namespace
 
-#endif // TRTF_HAS_TVM_FFI
+#endif // TRTMC_HAS_TVM_FFI
 
 void load_ffi_kernels_from_bundle(const BundleFile& bundle) {
-#if TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TVM_FFI
     const auto* manifest_sec = find_section(bundle, "kernel_manifest.json");
     if (!manifest_sec)
         return;
@@ -401,4 +401,4 @@ void load_ffi_kernels_from_bundle(const BundleFile& bundle) {
 #endif
 }
 
-} // namespace trtf
+} // namespace trtmc

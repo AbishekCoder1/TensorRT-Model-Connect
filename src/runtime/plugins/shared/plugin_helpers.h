@@ -9,19 +9,19 @@
 #include "bundle/bundle_view.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/pipelines/recurrent_pipeline.h"
-#include "trtf/runtime/inference_state.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/pipeline_plugin.h"
-#include "trtf/runtime/trt_backend.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/runtime/inference_state.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/pipeline_plugin.h"
+#include "trtmc/runtime/trt_backend.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // A loaded TRT engine, ready for inference.
 // The stream is owned internally by the module — callers get it via module->stream().
@@ -129,4 +129,4 @@ std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(const BundleFile& 
 // No-op if the bundle has no kernel_manifest.json section (non-FFI bundles).
 void load_ffi_kernels_from_bundle(const BundleFile& bundle);
 
-} // namespace trtf
+} // namespace trtmc

@@ -10,7 +10,7 @@
 // Postconditions: All tokenizers handle edge cases without crash or hang
 // =============================================================================
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstring>
 #include <iostream>
@@ -119,7 +119,7 @@ static std::string bytes(std::initializer_list<unsigned char> bs) {
 
 static void test_bpe_malformed_utf8() {
     std::string json(kBpeJson);
-    auto tok = trtf::CreateBpeTokenizer(json.data(), json.size(), false);
+    auto tok = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
 
     // Truncated 2-byte sequence: 0xC3 without continuation
     {
@@ -199,7 +199,7 @@ static void test_bpe_malformed_utf8() {
 
 static void test_wordpiece_malformed_utf8() {
     std::string json(kWordPieceJson);
-    auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+    auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
     // Truncated 2-byte sequence
     {
@@ -246,7 +246,7 @@ static void test_wordpiece_malformed_utf8() {
 
 static void test_unigram_malformed_utf8() {
     std::string json(kUnigramJson);
-    auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), false);
+    auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
 
     // Truncated multi-byte
     {
@@ -279,7 +279,7 @@ static void test_unigram_malformed_utf8() {
 
 static void test_bpe_out_of_range_ids() {
     std::string json(kBpeJson);
-    auto tok = trtf::CreateBpeTokenizer(json.data(), json.size(), false);
+    auto tok = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
 
     // Negative ID
     check(tok->token_for_id(-1).empty(), "bpe_token_for_id_negative");
@@ -302,7 +302,7 @@ static void test_bpe_out_of_range_ids() {
 
 static void test_wordpiece_out_of_range_ids() {
     std::string json(kWordPieceJson);
-    auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+    auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
     check(tok->token_for_id(INT32_MIN).empty(), "wp_token_for_id_int32_min");
     check(tok->token_for_id(INT32_MAX).empty(), "wp_token_for_id_int32_max");
@@ -317,7 +317,7 @@ static void test_wordpiece_out_of_range_ids() {
 
 static void test_unigram_out_of_range_ids() {
     std::string json(kUnigramJson);
-    auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), false);
+    auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
 
     check(tok->token_for_id(INT32_MIN).empty(), "uni_token_for_id_int32_min");
     check(tok->token_for_id(INT32_MAX).empty(), "uni_token_for_id_int32_max");
@@ -336,7 +336,7 @@ static void test_unigram_out_of_range_ids() {
 
 static void test_bpe_extreme_inputs() {
     std::string json(kBpeJson);
-    auto tok = trtf::CreateBpeTokenizer(json.data(), json.size(), false);
+    auto tok = trtmc::CreateBpeTokenizer(json.data(), json.size(), false);
 
     // Very long string (10K characters)
     {
@@ -382,7 +382,7 @@ static void test_bpe_extreme_inputs() {
 
 static void test_wordpiece_extreme_inputs() {
     std::string json(kWordPieceJson);
-    auto tok = trtf::CreateWordPieceTokenizer(json.data(), json.size(), false);
+    auto tok = trtmc::CreateWordPieceTokenizer(json.data(), json.size(), false);
 
     // Very long word (exceeds max_input_chars_per_word=100) → UNK
     {
@@ -411,7 +411,7 @@ static void test_wordpiece_extreme_inputs() {
 
 static void test_unigram_extreme_inputs() {
     std::string json(kUnigramJson);
-    auto tok = trtf::CreateUnigramTokenizer(json.data(), json.size(), false);
+    auto tok = trtmc::CreateUnigramTokenizer(json.data(), json.size(), false);
 
     // Very long string
     {
@@ -443,7 +443,7 @@ static void test_unigram_extreme_inputs() {
 
 static void test_valid_multibyte_utf8() {
     std::string bpe_json(kBpeJson);
-    auto bpe = trtf::CreateBpeTokenizer(bpe_json.data(), bpe_json.size(), false);
+    auto bpe = trtmc::CreateBpeTokenizer(bpe_json.data(), bpe_json.size(), false);
 
     // 2-byte: é (U+00E9) = 0xC3 0xA9
     {

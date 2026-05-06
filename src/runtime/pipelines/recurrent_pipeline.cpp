@@ -16,7 +16,7 @@ inline double elapsed_ms(TimePoint start, TimePoint end) {
 }
 } // namespace
 
-namespace trtf {
+namespace trtmc {
 
 RecurrentPipeline::RecurrentPipeline(std::unique_ptr<TrtModule> decoder,
                                      std::unique_ptr<IInferenceState> state,
@@ -119,29 +119,29 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
     double total_ms = elapsed_ms(t_prefill_start, t_decode_end);
 
     std::cerr << std::fixed << std::setprecision(1);
-    std::cerr << "[trtf-perf] Prefill: " << prefill_tokens << " tokens, " << prefill_ms << " ms";
+    std::cerr << "[trtmc-perf] Prefill: " << prefill_tokens << " tokens, " << prefill_ms << " ms";
     if (prefill_tokens > 0)
         std::cerr << " (" << std::setprecision(1) << (prefill_tokens / (prefill_ms / 1000.0))
                   << " tok/s)";
     std::cerr << "\n";
 
-    std::cerr << "[trtf-perf] Decode:  " << decode_steps << " steps, " << decode_ms << " ms";
+    std::cerr << "[trtmc-perf] Decode:  " << decode_steps << " steps, " << decode_ms << " ms";
     if (decode_steps > 0)
         std::cerr << " (" << std::setprecision(1) << (decode_steps / (decode_ms / 1000.0))
                   << " tok/s, " << std::setprecision(2) << (decode_ms / decode_steps) << " ms/tok)";
     std::cerr << "\n";
 
-    std::cerr << "[trtf-perf] Total generation: " << total_ms << " ms"
+    std::cerr << "[trtmc-perf] Total generation: " << total_ms << " ms"
               << " (" << (prefill_tokens + decode_steps) << " tokens)\n";
 
     if (prof_steps_ > 0) {
         std::cerr << std::setprecision(2);
-        std::cerr << "[trtf-perf] Per-step breakdown (avg over " << prof_steps_ << " steps):\n";
-        std::cerr << "[trtf-perf]   prepare_step:  " << (prof_prepare_ms_ / prof_steps_) << " ms\n";
-        std::cerr << "[trtf-perf]   forward (TRT): " << (prof_forward_ms_ / prof_steps_) << " ms\n";
-        std::cerr << "[trtf-perf]   logits copy:   " << (prof_logits_copy_ms_ / prof_steps_)
+        std::cerr << "[trtmc-perf] Per-step breakdown (avg over " << prof_steps_ << " steps):\n";
+        std::cerr << "[trtmc-perf]   prepare_step:  " << (prof_prepare_ms_ / prof_steps_) << " ms\n";
+        std::cerr << "[trtmc-perf]   forward (TRT): " << (prof_forward_ms_ / prof_steps_) << " ms\n";
+        std::cerr << "[trtmc-perf]   logits copy:   " << (prof_logits_copy_ms_ / prof_steps_)
                   << " ms\n";
-        std::cerr << "[trtf-perf]   state advance: " << (prof_advance_ms_ / prof_steps_) << " ms\n";
+        std::cerr << "[trtmc-perf]   state advance: " << (prof_advance_ms_ / prof_steps_) << " ms\n";
 
         std::size_t output_bytes = 0;
         for (const auto& info : decoder_->output_info()) {
@@ -151,7 +151,7 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
             n *= dtype_size(info.dtype);
             output_bytes += n;
         }
-        std::cerr << "[trtf-perf]   D2H output size: " << std::setprecision(1)
+        std::cerr << "[trtmc-perf]   D2H output size: " << std::setprecision(1)
                   << (output_bytes / (1024.0 * 1024.0)) << " MB (" << decoder_->output_info().size()
                   << " tensors)\n";
     }
@@ -227,4 +227,4 @@ int32_t RecurrentPipeline::argmax(const std::vector<float>& logits) {
         std::distance(logits.begin(), std::max_element(logits.begin(), logits.end())));
 }
 
-} // namespace trtf
+} // namespace trtmc

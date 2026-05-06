@@ -10,11 +10,11 @@ full-pipeline pixel comparison (which diverges due to scheduler differences).
 
 Usage (inside container):
     pytest tests/engine_defs/torch_trt/test_pixart_vs_hf.py -v \
-        --bundle /workspace/trt-transformers-cpp/engines/pixart_sigma.trtfb
+        --bundle /workspace/tensorrt-model-connect/engines/pixart_sigma.trtfb
 
 Or standalone:
     python tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
-        --bundle /workspace/trt-transformers-cpp/engines/pixart_sigma.trtfb
+        --bundle /workspace/tensorrt-model-connect/engines/pixart_sigma.trtfb
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ requires_gpu = pytest.mark.skipif(
 )
 
 # Default bundle path (overridable via --bundle)
-_DEFAULT_BUNDLE = "/workspace/trt-transformers-cpp/engines/pixart_sigma.trtfb"
+_DEFAULT_BUNDLE = "/workspace/tensorrt-model-connect/engines/pixart_sigma.trtfb"
 _HF_MODEL_ID = "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS"
 
 
@@ -66,8 +66,8 @@ def _get_bundle_path(request=None):
 
 def _load_trt_engine(bundle_path: str, section_name: str):
     """Load a TRT engine from a bundle section."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ttrt_build"))
-    from trtf_build.engine_defs.torch_trt.bundle_reader import read_bundle_section
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tensorrt_model_connect"))
+    from tensorrt_model_connect.engine_defs.torch_trt.bundle_reader import read_bundle_section
     data = read_bundle_section(bundle_path, section_name)
     logger = trt.Logger(trt.Logger.WARNING)
     runtime = trt.Runtime(logger)
@@ -375,7 +375,7 @@ class TestFullPipelineSanity:
         import tempfile
         from PIL import Image
 
-        binary = "/workspace/trt-transformers-cpp/build/trtf"
+        binary = "/workspace/tensorrt-model-connect/build/trtmc"
         if not Path(binary).exists():
             pytest.skip(f"C++ binary not found: {binary}")
 

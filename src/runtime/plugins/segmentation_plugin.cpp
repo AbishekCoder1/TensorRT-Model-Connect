@@ -4,9 +4,9 @@
 #include "runtime/pipelines/sam_pipeline.h"
 #include "runtime/pipelines/segment_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
-namespace trtf {
+namespace trtmc {
 
 class SegmentationPlugin final : public IPipelinePlugin {
   public:
@@ -41,4 +41,4 @@ class SegmentationPlugin final : public IPipelinePlugin {
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_segmentation_plugin, SegmentationPlugin,
                                        "segmentation", "prompted_segmentation");
 
-} // namespace trtf
+} // namespace trtmc

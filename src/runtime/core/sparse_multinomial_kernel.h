@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <cuda_runtime_api.h>
 
-namespace trtf {
+namespace trtmc {
 
 struct TorchMultinomialExecutionPolicy {
     int32_t total_threads{0};
@@ -17,4 +17,4 @@ void gpu_sparse_torch_multinomial_exact(const int32_t* d_indices, const float* d
                                         int32_t total_threads, int32_t* d_token_id,
                                         cudaStream_t stream);
 
-} // namespace trtf
+} // namespace trtmc

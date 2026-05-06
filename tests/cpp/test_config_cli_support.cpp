@@ -15,9 +15,9 @@
 // =============================================================================
 
 #include "test_helpers.h"
-#include "trtf/config/cli_support.h"
-#include "trtf/config/config_bundle.h"
-#include "trtf/config/schema_registry.h"
+#include "trtmc/config/cli_support.h"
+#include "trtmc/config/config_bundle.h"
+#include "trtmc/config/schema_registry.h"
 
 #include <any>
 #include <cstdint>
@@ -56,12 +56,12 @@ void expect_throws(Fn fn, const char* substring, const char* test_name) {
     }
 }
 
-using trtf::config::ConfigBundle;
-using trtf::config::ConfigField;
-using trtf::config::Layer;
-using trtf::config::LayerContribution;
-using trtf::config::Schema;
-using trtf::config::SchemaRegistry;
+using trtmc::config::ConfigBundle;
+using trtmc::config::ConfigField;
+using trtmc::config::Layer;
+using trtmc::config::LayerContribution;
+using trtmc::config::Schema;
+using trtmc::config::SchemaRegistry;
 
 ConfigField int_field(const std::string& name, std::int32_t default_value, std::set<Layer> layers) {
     return ConfigField{name, "int32", std::any{default_value}, std::move(layers), nullptr};
@@ -90,88 +90,88 @@ void register_demo_schema() {
 // ---- parse_set_token -------------------------------------------------------
 
 void test_parse_set_token_basic() {
-    auto t = trtf::config::parse_set_token("ns.field=42");
+    auto t = trtmc::config::parse_set_token("ns.field=42");
     check(t.namespace_name == "ns" && t.field_name == "field" && t.raw_value == "42",
           "parse_set_token_basic");
 }
 
 void test_parse_set_token_equals_in_value() {
-    auto t = trtf::config::parse_set_token("ns.field=a=b=c");
+    auto t = trtmc::config::parse_set_token("ns.field=a=b=c");
     check(t.raw_value == "a=b=c", "parse_set_token_equals_in_value");
 }
 
 void test_parse_set_token_missing_equals() {
-    expect_throws([] { trtf::config::parse_set_token("ns.field42"); }, "missing '='",
+    expect_throws([] { trtmc::config::parse_set_token("ns.field42"); }, "missing '='",
                   "parse_set_token_missing_equals");
 }
 
 void test_parse_set_token_missing_dot() {
-    expect_throws([] { trtf::config::parse_set_token("nsfield=42"); }, "missing '.'",
+    expect_throws([] { trtmc::config::parse_set_token("nsfield=42"); }, "missing '.'",
                   "parse_set_token_missing_dot");
 }
 
 void test_parse_set_token_empty_parts() {
-    expect_throws([] { trtf::config::parse_set_token(".field=42"); }, "empty",
+    expect_throws([] { trtmc::config::parse_set_token(".field=42"); }, "empty",
                   "parse_set_token_empty_ns");
-    expect_throws([] { trtf::config::parse_set_token("ns.=42"); }, "empty",
+    expect_throws([] { trtmc::config::parse_set_token("ns.=42"); }, "empty",
                   "parse_set_token_empty_field");
 }
 
 // ---- coerce_scalar --------------------------------------------------------
 
 void test_coerce_int() {
-    auto v = trtf::config::coerce_scalar("42", "int32", "x.y");
+    auto v = trtmc::config::coerce_scalar("42", "int32", "x.y");
     check(std::any_cast<std::int32_t>(v) == 42, "coerce_int");
-    auto v64 = trtf::config::coerce_scalar("-7", "int64", "x.y");
+    auto v64 = trtmc::config::coerce_scalar("-7", "int64", "x.y");
     check(std::any_cast<std::int64_t>(v64) == -7, "coerce_int64");
 }
 
 void test_coerce_int_rejects_float_text() {
-    expect_throws([] { trtf::config::coerce_scalar("3.14", "int32", "x.y"); }, "expected integer",
+    expect_throws([] { trtmc::config::coerce_scalar("3.14", "int32", "x.y"); }, "expected integer",
                   "coerce_int_rejects_float_text");
 }
 
 void test_coerce_float() {
-    auto v = trtf::config::coerce_scalar("3.14", "float", "x.y");
+    auto v = trtmc::config::coerce_scalar("3.14", "float", "x.y");
     check(std::any_cast<float>(v) > 3.13F && std::any_cast<float>(v) < 3.15F, "coerce_float");
 }
 
 void test_coerce_bool_vocab() {
     for (const std::string& t : {"true", "True", "TRUE", "1", "yes", "on"}) {
-        auto v = trtf::config::coerce_scalar(t, "bool", "x.y");
+        auto v = trtmc::config::coerce_scalar(t, "bool", "x.y");
         check(std::any_cast<bool>(v) == true, ("coerce_bool_true:" + t).c_str());
     }
     for (const std::string& t : {"false", "False", "FALSE", "0", "no", "off"}) {
-        auto v = trtf::config::coerce_scalar(t, "bool", "x.y");
+        auto v = trtmc::config::coerce_scalar(t, "bool", "x.y");
         check(std::any_cast<bool>(v) == false, ("coerce_bool_false:" + t).c_str());
     }
 }
 
 void test_coerce_bool_rejects_unknown() {
-    expect_throws([] { trtf::config::coerce_scalar("maybe", "bool", "x.y"); }, "expected bool",
+    expect_throws([] { trtmc::config::coerce_scalar("maybe", "bool", "x.y"); }, "expected bool",
                   "coerce_bool_rejects_unknown");
 }
 
 void test_coerce_string_identity() {
-    auto v = trtf::config::coerce_scalar("hello", "string", "x.y");
+    auto v = trtmc::config::coerce_scalar("hello", "string", "x.y");
     check(std::any_cast<std::string>(v) == "hello", "coerce_string_identity");
 }
 
 void test_coerce_unknown_type_tag_raises() {
-    expect_throws([] { trtf::config::coerce_scalar("x", "list<int>", "x.y"); },
+    expect_throws([] { trtmc::config::coerce_scalar("x", "list<int>", "x.y"); },
                   "unsupported type_tag", "coerce_unknown_type_tag_raises");
 }
 
 // ---- parse_layered_json ---------------------------------------------------
 
 void test_parse_empty_object() {
-    auto out = trtf::config::parse_layered_json("{}");
+    auto out = trtmc::config::parse_layered_json("{}");
     check(out.empty(), "parse_empty_object");
 }
 
 void test_parse_simple_object() {
     const char* text = R"({ "triattention": { "kv_budget": 4096, "protect_prefill": true } })";
-    auto out = trtf::config::parse_layered_json(text);
+    auto out = trtmc::config::parse_layered_json(text);
     check(out.size() == 1, "parse_simple_object: count");
     check(out.count("triattention") == 1, "parse_simple_object: ns");
     const auto& body = out.at("triattention");
@@ -186,7 +186,7 @@ void test_parse_scalar_kinds() {
     const char* text = R"({ "ns": {
         "i": 42, "neg": -17, "f": 3.14, "b_t": true, "b_f": false, "n": null, "s": "hi"
     }})";
-    auto out = trtf::config::parse_layered_json(text);
+    auto out = trtmc::config::parse_layered_json(text);
     const auto& body = out.at("ns");
     check(std::any_cast<std::int64_t>(body.at("i")) == 42, "parse_scalar:int");
     check(std::any_cast<std::int64_t>(body.at("neg")) == -17, "parse_scalar:neg");
@@ -198,12 +198,12 @@ void test_parse_scalar_kinds() {
 }
 
 void test_parse_rejects_malformed() {
-    expect_throws([] { trtf::config::parse_layered_json("{ \"ns\" { } }"); }, "expected ':'",
+    expect_throws([] { trtmc::config::parse_layered_json("{ \"ns\" { } }"); }, "expected ':'",
                   "parse_missing_colon");
-    expect_throws([] { trtf::config::parse_layered_json("{ \"ns\": [1,2] }"); }, "expected '{'",
+    expect_throws([] { trtmc::config::parse_layered_json("{ \"ns\": [1,2] }"); }, "expected '{'",
                   "parse_rejects_array");
     // Empty input yields an empty map (no throw) — treated as "no profile".
-    auto empty = trtf::config::parse_layered_json("");
+    auto empty = trtmc::config::parse_layered_json("");
     check(empty.empty(), "parse_empty_string_returns_empty");
 }
 
@@ -218,11 +218,11 @@ LayerContribution session_with(const std::string& ns, const std::string& field, 
 
 void test_build_cli_contribution_from_config_only() {
     register_demo_schema();
-    trtf::config::LayeredFileValues file_values;
+    trtmc::config::LayeredFileValues file_values;
     file_values["triattention"]["kv_budget"] = std::any{std::int64_t{4096}};
     file_values["triattention"]["protect_prefill"] = std::any{false};
 
-    auto contrib = trtf::config::build_cli_contribution(file_values, {});
+    auto contrib = trtmc::config::build_cli_contribution(file_values, {});
     check(contrib.layer == Layer::SessionRequest, "cli_contrib: layer");
     check(contrib.values.at("triattention").size() == 2, "cli_contrib: fields merged");
     check(std::any_cast<std::int64_t>(contrib.values.at("triattention").at("kv_budget")) == 4096,
@@ -233,7 +233,7 @@ void test_build_cli_contribution_from_config_only() {
 
 void test_build_cli_contribution_coerces_set_tokens() {
     register_demo_schema();
-    auto contrib = trtf::config::build_cli_contribution(
+    auto contrib = trtmc::config::build_cli_contribution(
         {}, {"triattention.kv_budget=8192", "triattention.protect_prefill=false",
              "triattention.dump_scores_path=/tmp/x.pt"});
     check(std::any_cast<std::int32_t>(contrib.values.at("triattention").at("kv_budget")) == 8192,
@@ -247,32 +247,32 @@ void test_build_cli_contribution_coerces_set_tokens() {
 
 void test_set_overrides_config_within_session_layer() {
     register_demo_schema();
-    trtf::config::LayeredFileValues file_values;
+    trtmc::config::LayeredFileValues file_values;
     file_values["triattention"]["kv_budget"] = std::any{std::int64_t{4096}};
     auto contrib =
-        trtf::config::build_cli_contribution(file_values, {"triattention.kv_budget=8192"});
+        trtmc::config::build_cli_contribution(file_values, {"triattention.kv_budget=8192"});
     check(std::any_cast<std::int32_t>(contrib.values.at("triattention").at("kv_budget")) == 8192,
           "set_overrides_config: value");
 }
 
 void test_unknown_namespace_raises() {
     register_demo_schema();
-    trtf::config::LayeredFileValues bad;
+    trtmc::config::LayeredFileValues bad;
     bad["missing"]["x"] = std::any{std::int64_t{1}};
-    expect_throws([&] { trtf::config::build_cli_contribution(bad, {}); },
+    expect_throws([&] { trtmc::config::build_cli_contribution(bad, {}); },
                   "unknown namespace 'missing'", "cli_contrib:unknown_ns");
 }
 
 void test_unknown_field_raises() {
     register_demo_schema();
-    expect_throws([] { trtf::config::build_cli_contribution({}, {"triattention.nope=1"}); },
+    expect_throws([] { trtmc::config::build_cli_contribution({}, {"triattention.nope=1"}); },
                   "unknown field 'nope'", "cli_contrib:unknown_field");
 }
 
 void test_coercion_error_surfaces_field() {
     register_demo_schema();
     expect_throws(
-        [] { trtf::config::build_cli_contribution({}, {"triattention.kv_budget=not_a_number"}); },
+        [] { trtmc::config::build_cli_contribution({}, {"triattention.kv_budget=not_a_number"}); },
         "triattention.kv_budget", "cli_contrib:coerce_err_field");
 }
 
@@ -294,7 +294,7 @@ void test_resolve_builds_bundle_from_file_and_set() {
     register_demo_schema();
     const std::string path =
         make_temp_json(R"({"triattention":{"kv_budget":4096,"protect_prefill":false}})");
-    auto bundle = trtf::config::resolve_cli_config(path, {"triattention.kv_budget=8192"});
+    auto bundle = trtmc::config::resolve_cli_config(path, {"triattention.kv_budget=8192"});
     check(bundle.get<std::int32_t>("triattention", "kv_budget") == 8192, "resolve: set wins");
     check(bundle.get<bool>("triattention", "protect_prefill") == false,
           "resolve: config value retained");
@@ -311,7 +311,7 @@ void test_resolve_session_beats_platform() {
     LayerContribution platform;
     platform.layer = Layer::PlatformProfile;
     platform.values["triattention"]["kv_budget"] = std::any{std::int32_t{10240}};
-    auto bundle = trtf::config::resolve_cli_config("", {"triattention.kv_budget=8192"}, {platform});
+    auto bundle = trtmc::config::resolve_cli_config("", {"triattention.kv_budget=8192"}, {platform});
     check(bundle.get<std::int32_t>("triattention", "kv_budget") == 8192,
           "resolve: session beats platform");
     check(bundle.source_of("triattention", "kv_budget") == Layer::SessionRequest,
@@ -322,8 +322,8 @@ void test_resolve_session_beats_platform() {
 
 void test_bundle_to_effective_json_contains_source() {
     register_demo_schema();
-    auto bundle = trtf::config::resolve_cli_config("", {"triattention.kv_budget=8192"});
-    std::string json = trtf::config::bundle_to_effective_json(bundle);
+    auto bundle = trtmc::config::resolve_cli_config("", {"triattention.kv_budget=8192"});
+    std::string json = trtmc::config::bundle_to_effective_json(bundle);
     check(json.find("\"triattention\"") != std::string::npos, "effective_json: ns present");
     check(json.find("\"kv_budget\"") != std::string::npos, "effective_json: field present");
     check(json.find("\"source\": \"session_request\"") != std::string::npos,
@@ -337,11 +337,11 @@ void test_bundle_to_effective_json_contains_source() {
 void test_write_effective_config_next_to_places_file(std::string tmp_dir) {
     namespace fs = std::filesystem;
     register_demo_schema();
-    auto bundle = trtf::config::resolve_cli_config("", {"triattention.kv_budget=8192"});
+    auto bundle = trtmc::config::resolve_cli_config("", {"triattention.kv_budget=8192"});
     fs::path bundle_path = fs::path(tmp_dir) / "some" / "bundle.trtfb";
     fs::create_directories(bundle_path.parent_path());
     std::string written =
-        trtf::config::write_effective_config_next_to(bundle, bundle_path.string());
+        trtmc::config::write_effective_config_next_to(bundle, bundle_path.string());
     check(fs::exists(written), "write_effective: file exists");
     check(fs::path(written).filename() == "bundle.effective_config.json",
           "write_effective: sibling filename");
@@ -358,7 +358,7 @@ void test_extract_bundle_defaults_finds_block() {
         },
         "sections": {}
     })";
-    auto out = trtf::config::extract_bundle_defaults(header);
+    auto out = trtmc::config::extract_bundle_defaults(header);
     check(out.size() == 1, "extract_defaults: one namespace");
     check(std::any_cast<std::int64_t>(out.at("triattention").at("kv_budget")) == 4096,
           "extract_defaults: kv_budget");
@@ -368,7 +368,7 @@ void test_extract_bundle_defaults_finds_block() {
 
 void test_extract_bundle_defaults_absent_block() {
     std::string header = R"({ "model_id": "x", "sections": {} })";
-    auto out = trtf::config::extract_bundle_defaults(header);
+    auto out = trtmc::config::extract_bundle_defaults(header);
     check(out.empty(), "extract_defaults: absent => empty");
 }
 
@@ -378,7 +378,7 @@ void test_extract_bundle_defaults_key_in_string_not_confused() {
         "comment": "default key: defaults",
         "defaults": { "ns": { "f": 1 } }
     })";
-    auto out = trtf::config::extract_bundle_defaults(header);
+    auto out = trtmc::config::extract_bundle_defaults(header);
     check(out.size() == 1 && out.count("ns") == 1,
           "extract_defaults: skips key-like string literal");
 }
@@ -393,7 +393,7 @@ void test_filter_drops_unregistered_namespaces() {
     contrib.values["known"]["f"] = std::any{std::int64_t{1}};
     contrib.values["stranger_danger"]["f"] = std::any{std::int64_t{2}};
 
-    auto dropped = trtf::config::filter_to_registered_namespaces(contrib, reg);
+    auto dropped = trtmc::config::filter_to_registered_namespaces(contrib, reg);
     check(dropped.size() == 1 && dropped.front() == "stranger_danger",
           "filter: dropped unknown namespace");
     check(contrib.values.count("known") == 1 && contrib.values.count("stranger_danger") == 0,
@@ -411,7 +411,7 @@ void test_resolve_pipeline_config_merges_bundle_and_session(std::string tmp_dir)
     fs::path profile = fs::path(tmp_dir) / "profile.json";
     std::ofstream(profile) << R"({"triattention": {"dump_scores_path": "/tmp/x"}})";
 
-    auto res = trtf::config::resolve_pipeline_config(header, profile.string(),
+    auto res = trtmc::config::resolve_pipeline_config(header, profile.string(),
                                                      {"triattention.kv_budget=8192"});
 
     // bundle_default + session contributions both land
@@ -437,7 +437,7 @@ void test_resolve_pipeline_config_tolerates_unknown_defaults() {
         "known": {"f": 10},
         "not_yet_migrated": {"old": 1}
     }})";
-    auto res = trtf::config::resolve_pipeline_config(header, "", {});
+    auto res = trtmc::config::resolve_pipeline_config(header, "", {});
     // Known namespace retained; unknown dropped at filter step.
     check(res.bundle.get<std::int64_t>("known", "f") == 10, "resolve: known ns kept");
     check(res.contributions.size() == 1, "resolve: only bundle_default layer survives");
@@ -446,7 +446,7 @@ void test_resolve_pipeline_config_tolerates_unknown_defaults() {
 void test_bundle_defaults_contribution_produces_bundle_default_layer() {
     register_demo_schema();
     std::string header = R"({ "defaults": { "triattention": { "kv_budget": 4096 } } })";
-    auto contrib = trtf::config::bundle_defaults_contribution(header);
+    auto contrib = trtmc::config::bundle_defaults_contribution(header);
     check(contrib.layer == Layer::BundleDefault, "contrib: layer");
     check(std::any_cast<std::int64_t>(contrib.values.at("triattention").at("kv_budget")) == 4096,
           "contrib: kv_budget");
@@ -455,12 +455,12 @@ void test_bundle_defaults_contribution_produces_bundle_default_layer() {
     LayerContribution session;
     session.layer = Layer::SessionRequest;
     session.values["triattention"]["kv_budget"] = std::any{std::int32_t{8192}};
-    auto merged = trtf::config::ConfigBundle::build({contrib, session});
+    auto merged = trtmc::config::ConfigBundle::build({contrib, session});
     check(merged.get<std::int32_t>("triattention", "kv_budget") == 8192, "merge: session wins");
     check(merged.source_of("triattention", "kv_budget") == Layer::SessionRequest,
           "merge: session source");
 
-    auto without_session = trtf::config::ConfigBundle::build({contrib});
+    auto without_session = trtmc::config::ConfigBundle::build({contrib});
     check(without_session.source_of("triattention", "kv_budget") == Layer::BundleDefault,
           "merge: bundle default fills gap");
 }
@@ -508,7 +508,7 @@ int main() {
     {
         namespace fs = std::filesystem;
         fs::path tmp = fs::temp_directory_path() / "test_resolve_pipeline";
-        trtf_test::remove_all_safe(tmp.string());
+        trtmc_test::remove_all_safe(tmp.string());
         fs::create_directories(tmp);
         test_resolve_pipeline_config_merges_bundle_and_session(tmp.string());
     }
@@ -517,7 +517,7 @@ int main() {
     {
         namespace fs = std::filesystem;
         fs::path tmp = fs::temp_directory_path() / "test_config_cli_support_write";
-        trtf_test::remove_all_safe(tmp.string());
+        trtmc_test::remove_all_safe(tmp.string());
         fs::create_directories(tmp);
         test_write_effective_config_next_to_places_file(tmp.string());
     }

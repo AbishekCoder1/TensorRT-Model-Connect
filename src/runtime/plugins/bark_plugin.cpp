@@ -4,15 +4,15 @@
 #include "runtime/pipelines/bark_pipeline.h"
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/config/config_bundle.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/config/config_bundle.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <cstdint>
 #include <exception>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 class BarkPlugin final : public IPipelinePlugin {
   public:
@@ -61,7 +61,7 @@ class BarkPlugin final : public IPipelinePlugin {
         bark_cfg.fine_codebook_size = extract_json_int(json, "fine_codebook_size", 1056);
         bark_cfg.fine_seq_length = extract_json_int(json, "fine_seq_length", 0);
 
-        // audio_bark.* namespace (replaces TRTF_BARK_{DUMP,GREEDY,SEED}).
+        // audio_bark.* namespace (replaces TRTMC_BARK_{DUMP,GREEDY,SEED}).
         if (ctx.runtime_config != nullptr) {
             try {
                 bark_cfg.dump_path =
@@ -120,4 +120,4 @@ class BarkPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_bark_plugin, BarkPlugin, "text_to_audio_bark");
 
-} // namespace trtf
+} // namespace trtmc

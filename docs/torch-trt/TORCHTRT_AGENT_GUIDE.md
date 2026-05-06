@@ -1,4 +1,4 @@
-You are working in trt-transformers-cpp. Add one model end-to-end to the
+You are working in tensorrt-model-connect. Add one model end-to-end to the
   Torch-TRT pipeline so it is truly working and CI-ready, not just compiling.
 
   The Torch-TRT pipeline converts HuggingFace models into `.trtfb` bundles
@@ -41,18 +41,18 @@ You are working in trt-transformers-cpp. Add one model end-to-end to the
 
   | File | Purpose |
   |------|---------|
-  | `trtf_build/trtf_build/engine_defs/torch_trt/families/<family>.py` | Family plugin (you create this) |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/families/base.py` | Plugin protocol definition |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/families/qwen.py` | Reference plugin (Qwen family — decoder strategy) |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/families/bert.py` | BERT plugin (encoder_only strategy) |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/strategies/__init__.py` | Strategy registry: `get_strategy(name)` |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/strategies/base.py` | `BuildStrategy` Protocol |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/strategies/decoder.py` | `DecoderBuildStrategy` + `StatelessCacheWrapper` |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/strategies/encoder_only.py` | `EncoderOnlyBuildStrategy` + `EncoderOnlyWrapper` |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/cache_config.py` | KV cache tensors + export args (raw TRT format) |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/compiler.py` | Build orchestrator (strategy dispatch + export + TRT convert) |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/config.py` | Model config parser (uses trtf_build.config.ModelConfig) |
-  | `trtf_build/trtf_build/engine_defs/torch_trt/bundle_writer.py` | Bundle packaging (.trtfb) |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/<family>.py` | Family plugin (you create this) |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/base.py` | Plugin protocol definition |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/qwen.py` | Reference plugin (Qwen family — decoder strategy) |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/bert.py` | BERT plugin (encoder_only strategy) |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/strategies/__init__.py` | Strategy registry: `get_strategy(name)` |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/strategies/base.py` | `BuildStrategy` Protocol |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/strategies/decoder.py` | `DecoderBuildStrategy` + `StatelessCacheWrapper` |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/strategies/encoder_only.py` | `EncoderOnlyBuildStrategy` + `EncoderOnlyWrapper` |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/cache_config.py` | KV cache tensors + export args (raw TRT format) |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/compiler.py` | Build orchestrator (strategy dispatch + export + TRT convert) |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/config.py` | Model config parser (uses tensorrt_model_connect.config.ModelConfig) |
+  | `tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/bundle_writer.py` | Bundle packaging (.trtfb) |
   | `src/runtime/core/kv_cache.cpp` | C++ auto-detects tensor naming from engine |
   | `scripts/new_torchtrt_family.py` | Auto-scaffold a plugin from HF repo |
   | `scripts/validate_torchtrt_family.sh` | One-command validation gate |
@@ -63,17 +63,17 @@ You are working in trt-transformers-cpp. Add one model end-to-end to the
 
   A) Environment precheck/build
   - python3 -c "import tensorrt, torch, transformers, torch_tensorrt; print('ok')"
-  - pip install --no-deps -e trtf_build/
-  # Note: torch-trt backend is now part of trtf_build (trtf_build/engine_defs/torch_trt/)
+  - pip install --no-deps -e tensorrt_model_connect/
+  # Note: torch-trt backend is now part of tensorrt_model_connect (tensorrt_model_connect/engine_defs/torch_trt/)
   - Auto-detect TRT include dir:
     TRT_INC_DIR=$(find /usr/include -maxdepth 2 -name NvInferRuntime.h \
       -printf '%h' -quit 2>/dev/null || echo "/usr/include")
   - cmake -S . -B build -G Ninja \
-    -DTRTF_TRT_INCLUDE_DIR="$TRT_INC_DIR" \
-    -DTRTF_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/
+    -DTRTMC_TRT_INCLUDE_DIR="$TRT_INC_DIR" \
+    -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/
     tensorrt_libs}/libnvinfer.so" \
-    -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-    -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+    -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+    -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
   - cmake --build build -j
 
   B) Implement model support
@@ -82,7 +82,7 @@ You are working in trt-transformers-cpp. Add one model end-to-end to the
   - If new family required:
     - Scaffold: python3 scripts/new_family.py \
         --model-type MODEL_TYPE --hf-repo HF_ID --family-name FAMILY
-    - Review generated trtf_build/trtf_build/engine_defs/torch_trt/families/<family>.py
+    - Review generated tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/<family>.py
     - Plugin has 3 methods:
       - matches(model_type) -> bool: return True for matching model_type strings
       - load_model(model_dir, config, max_cache_length) -> nn.Module:
@@ -93,8 +93,8 @@ You are working in trt-transformers-cpp. Add one model end-to-end to the
     - Plugin is auto-discovered (no __init__.py edits needed)
 
   C) Build bundle
-  - trtf-build build --backend torchtrt HF_ID -o /tmp/BUNDLE_NAME --max-cache-length MAX_CACHE_LENGTH [--precision fp16|bf16|fp32] --verbose
-  - Verify bundle: trtf-build inspect /tmp/BUNDLE_NAME
+  - trtmc-build build --backend torchtrt HF_ID -o /tmp/BUNDLE_NAME --max-cache-length MAX_CACHE_LENGTH [--precision fp16|bf16|fp32] --verbose
+  - Verify bundle: trtmc-build inspect /tmp/BUNDLE_NAME
   - Expected output: JSON with sections (engine_plan, tokenizer.json, config.json, etc.)
   - Bundle uses TRTFB magic and runtime_strategy=decoder_kv_cache (build_backend=torch_trt)
 
@@ -108,7 +108,7 @@ You are working in trt-transformers-cpp. Add one model end-to-end to the
   - If model needs trust_remote_code, add --trust-remote-code flag.
 
   E) C++ inference validation
-  - ./build/trtf run /tmp/BUNDLE_NAME \
+  - ./build/trtmc run /tmp/BUNDLE_NAME \
       --prompt "PROMPT" --max-new-tokens 20 \
       --hf-python /opt/venv/bin/python
   - Verify output text makes sense (not garbage/repetition).

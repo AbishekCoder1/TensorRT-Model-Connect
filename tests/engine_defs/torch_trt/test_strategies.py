@@ -1,4 +1,4 @@
-"""Tests for ttrt_build.strategies — build strategy dispatch and wrappers.
+"""Tests for tensorrt_model_connect.strategies — build strategy dispatch and wrappers.
 
 Tests cover:
   - Strategy registry: get_strategy() dispatch, unknown strategy error
@@ -17,24 +17,24 @@ from unittest.mock import MagicMock
 from types import SimpleNamespace
 
 try:
-    from trtf_build.engine_defs.torch_trt.strategies import get_strategy
-    from trtf_build.engine_defs.torch_trt.strategies.base import BuildStrategy  # noqa: F401
-    from trtf_build.engine_defs.torch_trt.strategies.decoder import (
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies import get_strategy
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies.base import BuildStrategy  # noqa: F401
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies.decoder import (
         DecoderBuildStrategy,
         StatelessCacheWrapper,
     )
-    from trtf_build.engine_defs.torch_trt.strategies.encoder_only import (
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies.encoder_only import (
         EncoderOnlyBuildStrategy,
         EncoderOnlyWrapper,
     )
-    from trtf_build.engine_defs.torch_trt.strategies.diffusion import (
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies.diffusion import (
         DiffusionBuildStrategy,
         T5EncoderWrapper,
         PixArtDiTWrapper,
         VAEDecoderWrapper,
     )
 except ImportError:
-    pytest.skip("ttrt_build not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 try:
     import torch
@@ -338,11 +338,11 @@ class TestBackwardCompatImports:
     """Test that backward-compat aliases in compiler.py still work."""
 
     def test_import_stateless_cache_wrapper_from_compiler(self):
-        from trtf_build.engine_defs.torch_trt.compiler import StatelessCacheWrapper as SCW
-        from trtf_build.engine_defs.torch_trt.strategies.decoder import StatelessCacheWrapper as SCW2
+        from tensorrt_model_connect.engine_defs.torch_trt.compiler import StatelessCacheWrapper as SCW
+        from tensorrt_model_connect.engine_defs.torch_trt.strategies.decoder import StatelessCacheWrapper as SCW2
         assert SCW is SCW2
 
     def test_import_patch_from_compiler(self):
-        from trtf_build.engine_defs.torch_trt.compiler import patch_static_cache_scatter as p1
-        from trtf_build.engine_defs.torch_trt.strategies.decoder import patch_static_cache_scatter as p2
+        from tensorrt_model_connect.engine_defs.torch_trt.compiler import patch_static_cache_scatter as p1
+        from tensorrt_model_connect.engine_defs.torch_trt.strategies.decoder import patch_static_cache_scatter as p2
         assert p1 is p2

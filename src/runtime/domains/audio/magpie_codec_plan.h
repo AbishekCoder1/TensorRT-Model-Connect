@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 constexpr int32_t kMagpieCodecInputLimit = 2016;
 constexpr int32_t kMagpieCodecSamplesPerFrame = 1024;
@@ -70,4 +70,4 @@ inline std::vector<int32_t> build_magpie_codec_input(
     return codec_input;
 }
 
-} // namespace trtf
+} // namespace trtmc

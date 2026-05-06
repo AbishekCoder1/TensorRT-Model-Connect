@@ -5,7 +5,7 @@
     </marker>
   </defs>
 
-  <text x="550" y="30" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">HuggingFace Transformers vs TRT-Transformers-CPP</text>
+  <text x="550" y="30" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">HuggingFace Transformers vs TensorRT-Model-Connect</text>
 
   <!-- HF Column -->
   <rect x="30" y="50" width="490" height="640" rx="12" fill="#fffbeb" stroke="#f59e0b" stroke-width="2"/>
@@ -58,7 +58,7 @@
 
   <!-- TRT Column -->
   <rect x="580" y="50" width="490" height="640" rx="12" fill="#f0fdf4" stroke="#16a34a" stroke-width="2"/>
-  <text x="825" y="78" text-anchor="middle" font-size="16" font-weight="bold" fill="#166534">TRT-Transformers-CPP (C++/TensorRT)</text>
+  <text x="825" y="78" text-anchor="middle" font-size="16" font-weight="bold" fill="#166534">TensorRT-Model-Connect (C++/TensorRT)</text>
 
   <rect x="605" y="95" width="440" height="45" rx="6" fill="white" stroke="#86efac" stroke-width="1"/>
   <text x="825" y="115" text-anchor="middle" font-size="12" font-weight="600" fill="#14532d">Pipeline::CreateTextGeneration("QWEN3")</text>

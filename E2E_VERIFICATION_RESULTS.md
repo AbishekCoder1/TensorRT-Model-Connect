@@ -1,7 +1,7 @@
 # E2E Verification Results — 18 Model Families
 
 **Date**: 2026-02-16
-**Container**: trtf-dev (TRT 10.15.1, CUDA 12.x, RTX 3090 24GB)
+**Container**: trtmc-dev (TRT 10.15.1, CUDA 12.x, RTX 3090 24GB)
 **C++ Tests**: 11/11 passed
 
 ## Summary — Original 15 Families
@@ -43,13 +43,13 @@
 ## Changes Made
 
 ### New Files
-- `trtf_build/trtf_build/families/olmo.py` — OLMo plugin (non-parametric LayerNorm, tied embeddings)
-- `trtf_build/trtf_build/families/xglm.py` — XGLM plugin (sinusoidal positions, GELU FC, 256k vocab)
-- `trtf_build/trtf_build/families/gpt_neox.py` — GPT-NeoX/Pythia plugin (parallel residual, partial RoPE, fused QKV)
+- `tensorrt_model_connect/tensorrt_model_connect/families/olmo.py` — OLMo plugin (non-parametric LayerNorm, tied embeddings)
+- `tensorrt_model_connect/tensorrt_model_connect/families/xglm.py` — XGLM plugin (sinusoidal positions, GELU FC, 256k vocab)
+- `tensorrt_model_connect/tensorrt_model_connect/families/gpt_neox.py` — GPT-NeoX/Pythia plugin (parallel residual, partial RoPE, fused QKV)
 
 ### Modified Files
-- `trtf_build/trtf_build/config.py` — Added config key aliases for XGLM/Bloom (d_model, ffn_dim, attention_heads, num_layers, activation_function)
-- `trtf_build/trtf_build/standard_decoder_builder.py` — Added `parallel_residual` parameter for GPT-NeoX-style parallel attention+MLP
+- `tensorrt_model_connect/tensorrt_model_connect/config.py` — Added config key aliases for XGLM/Bloom (d_model, ffn_dim, attention_heads, num_layers, activation_function)
+- `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` — Added `parallel_residual` parameter for GPT-NeoX-style parallel attention+MLP
 - `src/cabi/fast_path_config.cpp` — Added config key aliases (d_model, n_embed, num_layers, attention_heads, num_heads) so C++ runtime correctly parses XGLM/Bloom configs
 
 ## C++ Runtime Output Samples
@@ -200,7 +200,7 @@ Validates that the C++ runtime produces identical output to the Python TRT runne
 
 ## Bundles Saved
 
-All bundles at `/mnt/storage/trt-transformers/engines/`:
+All bundles at `/mnt/storage/tensorrt-model-connect/engines/`:
 ```
 qwen3-0.6b.trtfb      2.5G
 tinyllama-1.1b.trtfb   4.8G

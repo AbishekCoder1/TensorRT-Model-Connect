@@ -26,9 +26,9 @@ from pathlib import Path
 import pytest
 
 try:
-    import trtf_build  # noqa: F401
+    import tensorrt_model_connect  # noqa: F401
 except ImportError:
-    pytest.skip("trtf_build not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +41,7 @@ class TestBundleKernelManifest:
 
     def test_kernel_manifest_round_trip(self):
         """Write a bundle with kernel_manifest.json + fake .so, read it back."""
-        from trtf_build.bundle_writer import BundleInfo, BundleSection, write_bundle
+        from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
 
         info = BundleInfo(model_id="test-model", model_type="test")
 
@@ -97,7 +97,7 @@ class TestBundleKernelManifest:
 
     def test_bundle_without_kernel_manifest(self):
         """Bundles without kernel_manifest.json still work (backward compat)."""
-        from trtf_build.bundle_writer import BundleInfo, BundleSection, write_bundle
+        from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
 
         info = BundleInfo(model_id="test-model", model_type="test")
         sections = [BundleSection("config.json", b"{}")]
@@ -116,7 +116,7 @@ class TestBundleKernelManifest:
 
     def test_multiple_kernels_in_manifest(self):
         """Bundle can contain multiple kernel .so sections."""
-        from trtf_build.bundle_writer import BundleInfo, BundleSection, write_bundle
+        from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
 
         info = BundleInfo(model_id="test-model", model_type="test")
         fake_so_1 = b"\x7fELF_kernel_1" + b"\x00" * 50
@@ -180,7 +180,7 @@ class TestFlashInferKernelSetup:
     @requires_flashinfer
     def test_setup_returns_valid_kernel_name_and_so_path(self):
         """setup() returns (kernel_name, so_path) with valid .so file."""
-        from trtf_build.kernels import flashinfer_decode
+        from tensorrt_model_connect.kernels import flashinfer_decode
 
         name, so_path = flashinfer_decode.setup(head_dim=64)
 
@@ -192,7 +192,7 @@ class TestFlashInferKernelSetup:
     def test_setup_registers_tvm_ffi_global(self):
         """setup() registers the kernel as a TVM-FFI global function."""
         import tvm_ffi
-        from trtf_build.kernels import flashinfer_decode
+        from tensorrt_model_connect.kernels import flashinfer_decode
 
         name, _ = flashinfer_decode.setup(head_dim=64)
         func = tvm_ffi.get_global_func(name)
@@ -201,7 +201,7 @@ class TestFlashInferKernelSetup:
     @requires_flashinfer
     def test_setup_different_head_dims(self):
         """setup() works for different head dimensions."""
-        from trtf_build.kernels import flashinfer_decode
+        from tensorrt_model_connect.kernels import flashinfer_decode
 
         for hd in (64, 128):
             name, so_path = flashinfer_decode.setup(head_dim=hd)
@@ -220,7 +220,7 @@ class TestEngineBuilderKernelArtifacts:
     def test_build_bundle_signature_has_kernel_artifacts(self):
         """build_bundle() accepts kernel_artifacts keyword argument."""
         import inspect
-        from trtf_build.engine_builder import build_bundle
+        from tensorrt_model_connect.engine_builder import build_bundle
 
         sig = inspect.signature(build_bundle)
         assert "kernel_artifacts" in sig.parameters

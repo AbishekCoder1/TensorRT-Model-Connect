@@ -21,7 +21,7 @@ Run:
 
 ```bash
 python3 skills/gitlab-ai-staging-autopilot/scripts/ai_staging_autopilot.py \
-  --project yifeif/trt-transformers \
+  --project yifeif/tensorrt-model-connect \
   --target ai-staging \
   --source-prefix ai-task- \
   --required-label ai:staging-mr \

@@ -511,7 +511,7 @@ class RunContext:
     Attributes:
         case: The E2ECase being executed.
         artifacts_dir: Directory for writing stage outputs and logs.
-        binary_path: Path to the C++ trtf binary.
+        binary_path: Path to the C++ trtmc binary.
         hf_python: Base Python interpreter used for the default "base" profile.
         build_python: Resolved Python interpreter for bundle build.
         runtime_python: Resolved Python interpreter for TRT-side Python helpers.

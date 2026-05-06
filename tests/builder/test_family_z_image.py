@@ -17,10 +17,10 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build.config import ModelConfig
-    import trtf_build.families.z_image as zimg_mod
+    from tensorrt_model_connect.config import ModelConfig
+    import tensorrt_model_connect.families.z_image as zimg_mod
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _cfg(**raw_overrides: object) -> ModelConfig:
@@ -125,27 +125,27 @@ def test_build_components_calls_all_subbuilders(
 
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.qwen3_encoder_builder",
+        "tensorrt_model_connect.qwen3_encoder_builder",
         _module(
-            "trtf_build.qwen3_encoder_builder",
+            "tensorrt_model_connect.qwen3_encoder_builder",
             load_qwen3_encoder_weights=load_qwen3_encoder_weights,
             build_qwen3_encoder_engine=build_qwen3_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.z_image_dit_builder",
+        "tensorrt_model_connect.z_image_dit_builder",
         _module(
-            "trtf_build.z_image_dit_builder",
+            "tensorrt_model_connect.z_image_dit_builder",
             load_z_image_dit_weights=load_z_image_dit_weights,
             build_z_image_dit_engine=build_z_image_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "trtf_build.vae_2d_builder",
+        "tensorrt_model_connect.vae_2d_builder",
         _module(
-            "trtf_build.vae_2d_builder",
+            "tensorrt_model_connect.vae_2d_builder",
             build_vae_2d_decoder_engine=build_vae_2d_decoder_engine,
         ),
     )

@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-namespace trtf {
+namespace trtmc {
 
 void gpu_matmul_init();
 void gpu_matmul_shutdown();
@@ -13,4 +13,4 @@ void gpu_matmul_shutdown();
 void gpu_matmul_bias(const float* A, const float* B, const float* bias, float* out, int32_t M,
                      int32_t K, int32_t N);
 
-} // namespace trtf
+} // namespace trtmc

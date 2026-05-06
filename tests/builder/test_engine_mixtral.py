@@ -19,7 +19,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-MIXTRAL-01
 Intent: Validate the Mixtral MoE family plugin weight loading including router weights, per-expert SwiGLU MLP mapping, and MoE config fields (num_local_experts, num_experts_per_tok).
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: Router and per-expert weight keys are present, expert MLP shapes are correct, and MoE-specific config fields are parsed.
 """
 
@@ -34,9 +34,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -58,7 +58,7 @@ class MixtralPluginTester(FamilyPluginTester):
       - Standard top-k softmax routing with renormalized weights
     """
 
-    plugin_module = "trtf_build.families.mixtral"
+    plugin_module = "tensorrt_model_connect.families.mixtral"
     model_type = "mixtral"
 
     def get_config_dict(self) -> dict:

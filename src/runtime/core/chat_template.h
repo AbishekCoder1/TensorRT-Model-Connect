@@ -6,7 +6,7 @@
 
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 /// Known chat template formats, auto-detected from tokenizer_config.json.
 enum class ChatTemplateFormat {
@@ -33,4 +33,4 @@ ChatTemplateFormat detect_chat_template_format(const std::string& jinja_template
 std::string apply_chat_template(ChatTemplateFormat format, const std::string& prompt,
                                 bool enable_thinking = true);
 
-} // namespace trtf
+} // namespace trtmc

@@ -5,7 +5,7 @@ make_t5_relative_position_bias, and make_yarn_rope_table.
 
 Trace: ARCH-GRP-001, UD-GRP-OPS-EXT
 Intent: Validate pure-NumPy graph op helpers (YaRN correction, T5 bias, ALiBi slopes, RoPE tables)
-Preconditions: trtf_build is importable; no GPU or TRT required
+Preconditions: tensorrt_model_connect is importable; no GPU or TRT required
 Postconditions: Helper functions produce mathematically correct values matching hand-computed references
 """
 from __future__ import annotations
@@ -14,9 +14,9 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build import graph_ops
+    from tensorrt_model_connect import graph_ops
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 # ===================================================================

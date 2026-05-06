@@ -8,7 +8,7 @@
 #include <initializer_list>
 #include <string_view>
 
-namespace trtf::detail {
+namespace trtmc::detail {
 
 CacheRowUpdatePlan plan_cache_row_update(int32_t cache_length, int32_t max_cache_length,
                                          std::size_t row_bytes) {
@@ -25,9 +25,9 @@ CacheRowUpdatePlan plan_cache_row_update(int32_t cache_length, int32_t max_cache
     return plan;
 }
 
-} // namespace trtf::detail
+} // namespace trtmc::detail
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -568,4 +568,4 @@ bool run_decoder_step_device(const DecoderStepEngine& engine, DeviceKvCache& cac
                                       skip_sync, fail);
 }
 
-} // namespace trtf
+} // namespace trtmc

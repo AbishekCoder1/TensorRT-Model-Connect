@@ -32,17 +32,17 @@ void check(bool condition, const char* name)
 void test_greedy_decode_uses_audio_range_but_still_detects_eos()
 {
     const int32_t num_cb = 2;
-    const int32_t cb_size = trtf::kMagpieEosToken + 1;
+    const int32_t cb_size = trtmc::kMagpieEosToken + 1;
     std::vector<float> logits(static_cast<std::size_t>(num_cb) * cb_size, -10.0F);
 
     logits[10] = 4.0F;
-    logits[trtf::kMagpieEosToken] = 5.0F;
+    logits[trtmc::kMagpieEosToken] = 5.0F;
 
     const auto cb1_offset = static_cast<std::size_t>(cb_size);
     logits[cb1_offset + 7] = 3.0F;
 
     int sampler_calls = 0;
-    const auto result = trtf::decode_magpie_frame_codes(
+    const auto result = trtmc::decode_magpie_frame_codes(
         logits,
         num_cb,
         cb_size,
@@ -64,12 +64,12 @@ void test_greedy_decode_uses_audio_range_but_still_detects_eos()
 void test_sampling_decode_uses_sampler()
 {
     const int32_t num_cb = 2;
-    const int32_t cb_size = trtf::kMagpieEosToken + 1;
+    const int32_t cb_size = trtmc::kMagpieEosToken + 1;
     std::vector<float> logits(static_cast<std::size_t>(num_cb) * cb_size, -5.0F);
-    logits[trtf::kMagpieEosToken] = 2.0F;
+    logits[trtmc::kMagpieEosToken] = 2.0F;
 
     int sampler_calls = 0;
-    const auto result = trtf::decode_magpie_frame_codes(
+    const auto result = trtmc::decode_magpie_frame_codes(
         logits,
         num_cb,
         cb_size,
@@ -94,13 +94,13 @@ void test_sampling_decode_uses_sampler()
 void test_sampling_decode_stops_on_sampled_eos()
 {
     const int32_t num_cb = 2;
-    const int32_t cb_size = trtf::kMagpieEosToken + 1;
+    const int32_t cb_size = trtmc::kMagpieEosToken + 1;
     std::vector<float> logits(static_cast<std::size_t>(num_cb) * cb_size, -5.0F);
     logits[11] = 3.0F;
     logits[cb_size + 7] = 3.0F;
 
     int sampler_calls = 0;
-    const auto result = trtf::decode_magpie_frame_codes(
+    const auto result = trtmc::decode_magpie_frame_codes(
         logits,
         num_cb,
         cb_size,
@@ -110,7 +110,7 @@ void test_sampling_decode_stops_on_sampled_eos()
         [&sampler_calls](const float*, int32_t, float, int32_t)
         {
             ++sampler_calls;
-            return sampler_calls == 1 ? trtf::kMagpieEosToken : 17;
+            return sampler_calls == 1 ? trtmc::kMagpieEosToken : 17;
         });
 
     check(result.eos, "sampling decode treats sampled eos as stop");
@@ -121,13 +121,13 @@ void test_sampling_decode_stops_on_sampled_eos()
 
 void test_stop_rule_helpers()
 {
-    check(trtf::should_run_magpie_periodic_check(15, 4, 16),
+    check(trtmc::should_run_magpie_periodic_check(15, 4, 16),
         "periodic helper triggers on configured interval");
-    check(!trtf::should_run_magpie_periodic_check(3, 4, 16),
+    check(!trtmc::should_run_magpie_periodic_check(3, 4, 16),
         "periodic helper skips early frames");
-    check(trtf::should_stop_magpie_on_eos(true, trtf::kMagpieMinFrames, trtf::kMagpieMinFrames),
+    check(trtmc::should_stop_magpie_on_eos(true, trtmc::kMagpieMinFrames, trtmc::kMagpieMinFrames),
         "eos helper stops after minimum frames");
-    check(!trtf::should_stop_magpie_on_eos(true, 1, trtf::kMagpieMinFrames),
+    check(!trtmc::should_stop_magpie_on_eos(true, 1, trtmc::kMagpieMinFrames),
         "eos helper keeps short outputs alive");
 }
 

@@ -9,8 +9,8 @@
 #include "runtime/domains/audio/speech_runtime_plan.h"
 #include "runtime/domains/audio/speech_temporal_embed_plan.h"
 #include "runtime/domains/audio/speech_waveform_postprocess.h"
-#include "trtf/runtime/domains/audio/speech_decode_stop_policy.h"
-#include "trtf/runtime/domains/audio/subprocess_runner.h"
+#include "trtmc/runtime/domains/audio/speech_decode_stop_policy.h"
+#include "trtmc/runtime/domains/audio/subprocess_runner.h"
 #include "utils/wav_reader.h"
 
 #include <algorithm>
@@ -23,7 +23,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-namespace trtf {
+namespace trtmc {
 
 // ─── PosixSubprocessRunner (moved from speech_backend.cpp) ───
 
@@ -994,4 +994,4 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

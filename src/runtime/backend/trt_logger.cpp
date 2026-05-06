@@ -2,7 +2,7 @@
 
 #include <iostream>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -53,4 +53,4 @@ TrtUniquePtr<nvinfer1::IRuntime> create_trt_runtime() {
     return TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -8,7 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -254,4 +254,4 @@ BundleInfo InspectBundle(const std::string& bundle_path) {
     return ReadBundleHeader(bundle_path);
 }
 
-} // namespace trtf
+} // namespace trtmc

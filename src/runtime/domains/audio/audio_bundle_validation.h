@@ -5,7 +5,7 @@
 
 #include <string>
 
-namespace trtf::runtime::builders::audio {
+namespace trtmc::runtime::builders::audio {
 
 enum class TextToAudioBundleKind {
     kBark,
@@ -14,7 +14,7 @@ enum class TextToAudioBundleKind {
 
 void validate_text_to_audio_bundle_sections(
     TextToAudioBundleKind kind,
-    const trtf::BundleFile& bundle,
+    const trtmc::BundleFile& bundle,
     const std::string& bundle_path);
 
-} // namespace trtf::runtime::builders::audio
+} // namespace trtmc::runtime::builders::audio

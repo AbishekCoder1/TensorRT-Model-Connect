@@ -29,7 +29,7 @@ def _make_ctx(tmp_path: Path) -> RunContext:
     return RunContext(
         case=_make_case("decoder_kv_cache"),
         artifacts_dir=str(tmp_path),
-        binary_path="/tmp/build/trtf",
+        binary_path="/tmp/build/trtmc",
         hf_python="/usr/bin/python3",
         engine_dir=str(tmp_path),
     )
@@ -42,7 +42,7 @@ def test_runtime_guard_accepts_new_runtime_marker_in_metadata(tmp_path: Path) ->
         stage_name="full_generation",
         metadata={
             "command": [ctx.binary_path, "run", "/tmp/model.trtfb"],
-            "stderr": "[trtf] Runtime ready (backend=trt_new_runtime_default, strategy=decoder_kv_cache)",
+            "stderr": "[trtmc] Runtime ready (backend=trt_new_runtime_default, strategy=decoder_kv_cache)",
         },
     )
 
@@ -56,7 +56,7 @@ def test_runtime_guard_rejects_legacy_runtime_marker(tmp_path: Path) -> None:
         stage_name="full_generation",
         metadata={
             "command": [ctx.binary_path, "run", "/tmp/model.trtfb"],
-            "stderr": "[trtf] Runtime path: compatibility factory mode",
+            "stderr": "[trtmc] Runtime path: compatibility factory mode",
         },
     )
 
@@ -86,7 +86,7 @@ def test_runtime_guard_reads_stderr_log_from_stage_data(tmp_path: Path) -> None:
     ctx = _make_ctx(tmp_path)
     stderr_log = tmp_path / "speech_to_text_stderr.log"
     stderr_log.write_text(
-        "[trtf] Runtime ready (backend=trt_new_runtime_default, strategy=speech_to_text)\n",
+        "[trtmc] Runtime ready (backend=trt_new_runtime_default, strategy=speech_to_text)\n",
         encoding="utf-8",
     )
     output = StageOutput(
@@ -111,11 +111,11 @@ def test_runtime_guard_ignores_legacy_marker_from_unrelated_subprocess(tmp_path:
         metadata={
             "cpp": {
                 "command": [ctx.binary_path, "run", "/tmp/model.trtfb"],
-                "stderr": "[trtf] Runtime ready (backend=trt_new_runtime_default, strategy=decoder_kv_cache)",
+                "stderr": "[trtmc] Runtime ready (backend=trt_new_runtime_default, strategy=decoder_kv_cache)",
             },
             "debug_runner": {
-                "command": [ctx.hf_python, "-m", "trtf_build.debug_runner"],
-                "stderr": "[trtf] Runtime path: compatibility factory mode",
+                "command": [ctx.hf_python, "-m", "tensorrt_model_connect.debug_runner"],
+                "stderr": "[trtmc] Runtime path: compatibility factory mode",
             },
         },
     )
@@ -130,7 +130,7 @@ def test_runtime_guard_skips_unknown_strategies(tmp_path: Path) -> None:
         stage_name="full_generation",
         metadata={
             "command": [ctx.binary_path, "run", "/tmp/model.trtfb"],
-            "stderr": "[trtf] Runtime path: compatibility factory mode",
+            "stderr": "[trtmc] Runtime path: compatibility factory mode",
         },
     )
 

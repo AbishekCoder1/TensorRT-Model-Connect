@@ -7,7 +7,7 @@
 #include <string>
 #include <utility>
 
-namespace trtf {
+namespace trtmc {
 
 enum class WhisperCrossKvBufferKind
 {
@@ -75,4 +75,4 @@ inline bool apply_whisper_cross_kv_plan(
     return true;
 }
 
-} // namespace trtf
+} // namespace trtmc

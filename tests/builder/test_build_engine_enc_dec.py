@@ -21,9 +21,9 @@ import pytest
 
 try:
     from safetensors.numpy import save_file
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _trt_available() -> bool:
@@ -115,7 +115,7 @@ class TestBartBuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from trtf_build.families.bart import plugin
+        from tensorrt_model_connect.families.bart import plugin
         config = {
             "model_type": "bart",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
@@ -195,7 +195,7 @@ class TestM2M100BuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from trtf_build.families.m2m_100 import plugin
+        from tensorrt_model_connect.families.m2m_100 import plugin
         config = {
             "model_type": "m2m_100",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,

@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace trtf {
+namespace trtmc {
 
 struct SpeechOutputPlan
 {
@@ -65,4 +65,4 @@ inline SpeechOutputPlan ComputeSpeechOutputPlan(const SpeechOutputPlanInput& inp
     return plan;
 }
 
-} // namespace trtf
+} // namespace trtmc

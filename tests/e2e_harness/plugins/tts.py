@@ -186,7 +186,7 @@ class TTSPlugin:
         asr_info: dict[str, str] | None = None
         asr_model = str(
             case.metadata.get("tts_asr_model")
-            or os.environ.get("TRTF_TTS_ASR_MODEL")
+            or os.environ.get("TRTMC_TTS_ASR_MODEL")
             or _DEFAULT_HF_WHISPER_MODEL
         )
 

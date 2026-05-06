@@ -58,7 +58,7 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
-static trtf::TrtLogger g_logger;
+static trtmc::TrtLogger g_logger;
 
 // ---------------------------------------------------------------------------
 // Build a minimal TRT engine suitable for DeviceResources testing.
@@ -68,13 +68,13 @@ static trtf::TrtLogger g_logger;
 //             attention_mask [4] float32
 //   Outputs: logits [4] float32 — constant [0.1, 0.2, 0.9, 0.3], argmax=2
 // ---------------------------------------------------------------------------
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_engine_for_resources() {
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_engine_for_resources() {
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder)
         return nullptr;
 
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    auto network = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     // Inputs (must be present for binding to succeed)
@@ -100,21 +100,21 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_engine_for_resources() {
     auto* id_mask = network->addIdentity(*mask_inp);
     id_mask->getOutput(0)->setName("_mask_unused");
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
     if (!plan)
         return nullptr;
 
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
 struct StepFixture {
-    trtf::TrtUniquePtr<nvinfer1::ICudaEngine> engine;
-    trtf::CudaStream stream;
-    std::unique_ptr<trtf::TrtModuleImpl> module;
-    trtf::DecoderStepEngine step;
+    trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> engine;
+    trtmc::CudaStream stream;
+    std::unique_ptr<trtmc::TrtModuleImpl> module;
+    trtmc::DecoderStepEngine step;
 };
 
 // Build a populated DecoderStepEngine (no cache layers) from the mock engine.
@@ -136,7 +136,7 @@ static std::unique_ptr<StepFixture> make_step_fixture() {
         std::cerr << "WARNING: createExecutionContext failed, skipping\n";
         return nullptr;
     }
-    fixture->module = std::make_unique<trtf::TrtModuleImpl>(
+    fixture->module = std::make_unique<trtmc::TrtModuleImpl>(
         fixture->engine.get(), context, fixture->stream.get(), /*profile_idx=*/0);
     if (!fixture->module->ok()) {
         std::cerr << "WARNING: TrtModuleImpl creation failed, skipping\n";
@@ -166,7 +166,7 @@ static bool test_device_resources_construction() {
     if (!fixture)
         return true; // not a test failure — just unavailable TRT
 
-    trtf::DeviceResources res(fixture->step);
+    trtmc::DeviceResources res(fixture->step);
     if (!res.ok()) {
         std::cerr << "device_resources_construction: ok() returned false\n";
         return false;
@@ -186,13 +186,13 @@ static bool test_run_decoder_step_device_basic() {
         return true;
     auto& eng = fixture->step;
 
-    trtf::DeviceKvCache cache(eng);
+    trtmc::DeviceKvCache cache(eng);
     if (!cache.ok()) {
         std::cerr << "run_decoder_step_device_basic: cache.ok() = false\n";
         return false;
     }
 
-    trtf::DeviceResources res(eng);
+    trtmc::DeviceResources res(eng);
     if (!res.ok()) {
         std::cerr << "run_decoder_step_device_basic: res.ok() = false\n";
         return false;
@@ -201,7 +201,7 @@ static bool test_run_decoder_step_device_basic() {
     std::vector<float> logits;
     std::string error;
 
-    const bool ok = trtf::run_decoder_step_device(eng, cache, res,
+    const bool ok = trtmc::run_decoder_step_device(eng, cache, res,
                                                   /*token_id=*/1, logits, error,
                                                   /*input_embed_host=*/nullptr,
                                                   /*embed_dim=*/0,
@@ -251,8 +251,8 @@ static bool test_run_decoder_step_device_skip_bind() {
         return true;
     auto& eng = fixture->step;
 
-    trtf::DeviceKvCache cache(eng);
-    trtf::DeviceResources res(eng);
+    trtmc::DeviceKvCache cache(eng);
+    trtmc::DeviceResources res(eng);
     if (!res.ok())
         return false;
 
@@ -260,14 +260,14 @@ static bool test_run_decoder_step_device_skip_bind() {
     std::string error;
 
     // First step: bind tensor addresses
-    if (!trtf::run_decoder_step_device(eng, cache, res, 1, logits, error, nullptr, 0, 0.0F, {},
+    if (!trtmc::run_decoder_step_device(eng, cache, res, 1, logits, error, nullptr, 0, 0.0F, {},
                                        0.0F, false, false, false, /*skip_bind=*/false)) {
         std::cerr << "step_skip_bind: step 1 failed: " << error << '\n';
         return false;
     }
 
     // Second step: skip rebind (addresses haven't changed)
-    if (!trtf::run_decoder_step_device(eng, cache, res, 1, logits, error, nullptr, 0, 0.0F, {},
+    if (!trtmc::run_decoder_step_device(eng, cache, res, 1, logits, error, nullptr, 0, 0.0F, {},
                                        0.0F, false, false, false, /*skip_bind=*/true)) {
         std::cerr << "step_skip_bind: step 2 (skip_bind) failed: " << error << '\n';
         return false;
@@ -288,15 +288,15 @@ static bool test_run_decoder_step_device_skip_d2h() {
         return true;
     auto& eng = fixture->step;
 
-    trtf::DeviceKvCache cache(eng);
-    trtf::DeviceResources res(eng);
+    trtmc::DeviceKvCache cache(eng);
+    trtmc::DeviceResources res(eng);
     if (!res.ok())
         return false;
 
     std::vector<float> logits;
     std::string error;
 
-    const bool ok = trtf::run_decoder_step_device(eng, cache, res, 1, logits, error, nullptr, 0,
+    const bool ok = trtmc::run_decoder_step_device(eng, cache, res, 1, logits, error, nullptr, 0,
                                                   0.0F, {}, 0.0F, false,
                                                   /*skip_logits_d2h=*/true,
                                                   /*skip_sync=*/false,

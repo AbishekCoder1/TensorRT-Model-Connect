@@ -10,7 +10,7 @@ Falcon-3 uses:
 
 Trace: ARCH-FAM-001, UD-FAM-FALCON-01
 Intent: Validate the Falcon family plugin weight loading including LayerNorm with bias, GELU FC MLP, RoPE config, and GQA projections.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: All weight keys map correctly from Falcon's HF layout, LayerNorm biases are loaded, and FC MLP keys (dense_h_to_4h/dense_4h_to_h) resolve to fc1/fc2.
 """
 import numpy as np
@@ -20,7 +20,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class FalconPluginTester(FamilyPluginTester):
-    plugin_module = "trtf_build.families.falcon"
+    plugin_module = "tensorrt_model_connect.families.falcon"
     model_type = "falcon"
 
     def get_config_dict(self) -> dict:

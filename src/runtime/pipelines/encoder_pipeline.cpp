@@ -4,7 +4,7 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -151,4 +151,4 @@ EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_id
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

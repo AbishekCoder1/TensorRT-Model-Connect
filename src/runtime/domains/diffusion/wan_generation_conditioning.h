@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace diffusion {
 
 struct WanConditioningInputs {
@@ -91,4 +91,4 @@ inline std::vector<float> make_wan_initial_latents(std::size_t latent_count, uin
 }
 
 } // namespace diffusion
-} // namespace trtf
+} // namespace trtmc

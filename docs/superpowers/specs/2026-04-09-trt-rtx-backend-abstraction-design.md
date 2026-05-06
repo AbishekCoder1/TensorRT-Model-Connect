@@ -14,11 +14,11 @@ compile-time macros (`#ifdef`) and without making either a link-time dependency.
 
 ## Goals
 
-1. **Zero link-time TRT dependency** — the main binary and `trtf_core` link only `libcudart`
+1. **Zero link-time TRT dependency** — the main binary and `trtmc_core` link only `libcudart`
 2. **Runtime backend selection** — bundle metadata (`engine_backend` field) drives which DSO is loaded via `dlopen`
 3. **Single virtual interface** — `ITrtModule` replaces concrete `TrtModule`; all pipeline code is backend-agnostic
 4. **Python `--rtx` flag** — builder dynamically imports `tensorrt_rtx` instead of `tensorrt`, records backend in bundle
-5. **No macros** — no `#ifdef TRT_MAJOR_RTX`, no `#if TRTF_HAS_TRT` gating in the main binary's runtime code
+5. **No macros** — no `#ifdef TRT_MAJOR_RTX`, no `#if TRTMC_HAS_TRT` gating in the main binary's runtime code
 6. **RTX-specific features** — runtime cache (JIT kernel persistence) and CUDA graph capture exposed via `ModuleCreateOptions`
 
 ## Non-Goals
@@ -33,15 +33,15 @@ compile-time macros (`#ifdef`) and without making either a link-time dependency.
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                 trtf main binary                      │
+│                 trtmc main binary                      │
 │                                                       │
 │  Links: libcudart ONLY (no libnvinfer, no TRT headers)│
 │                                                       │
 │  pipeline_factory reads config.json from bundle:      │
 │    "engine_backend": "trt" | "trt_rtx"                │
 │    → BackendLoader::load("trt")                       │
-│      → dlopen("libtrtf_backend_trt.so")               │
-│      → trtf_create_backend() → IBackend*              │
+│      → dlopen("libtrtmc_backend_trt.so")               │
+│      → trtmc_create_backend() → IBackend*              │
 │    → backend->create_module(plan, size, opts)          │
 │      → ITrtModule*                                    │
 │                                                       │
@@ -51,7 +51,7 @@ compile-time macros (`#ifdef`) and without making either a link-time dependency.
         dlopen()           dlopen()
              │                  │
 ┌────────────▼───────┐  ┌──────▼────────────────────────┐
-│ libtrtf_backend_   │  │ libtrtf_backend_              │
+│ libtrtmc_backend_   │  │ libtrtmc_backend_              │
 │   trt.so           │  │   rtx.so                      │
 │                    │  │                                │
 │ Links: libnvinfer  │  │ Links: libtensorrt_rtx        │
@@ -63,10 +63,10 @@ compile-time macros (`#ifdef`) and without making either a link-time dependency.
 │   (IBackend impl)  │  │   (IBackend impl)             │
 │                    │  │   + IRuntimeCache mgmt        │
 │ Exports:           │  │   + CudaGraphStrategy         │
-│  trtf_create_      │  │                                │
+│  trtmc_create_      │  │                                │
 │    backend()       │  │ Exports:                      │
-│  trtf_destroy_     │  │  trtf_create_backend()        │
-│    backend()       │  │  trtf_destroy_backend()       │
+│  trtmc_destroy_     │  │  trtmc_create_backend()        │
+│    backend()       │  │  trtmc_destroy_backend()       │
 └────────────────────┘  └────────────────────────────────┘
 ```
 
@@ -74,7 +74,7 @@ compile-time macros (`#ifdef`) and without making either a link-time dependency.
 
 ## Section 1: Interface — `ITrtModule` and `IBackend`
 
-### Header: `include/trtf/runtime/trt_module.h`
+### Header: `include/trtmc/runtime/trt_module.h`
 
 Replaces the current concrete `TrtModule` class. No TRT headers — only CUDA
 runtime types and our own tensor types.
@@ -82,8 +82,8 @@ runtime types and our own tensor types.
 ```cpp
 #pragma once
 
-#include "trtf/runtime/device_tensor.h"
-#include "trtf/runtime/tensor.h"
+#include "trtmc/runtime/device_tensor.h"
+#include "trtmc/runtime/tensor.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -92,7 +92,7 @@ runtime types and our own tensor types.
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // Per-engine module interface. Wraps engine deserialization, buffer allocation,
 // and execution. All methods match today's TrtModule API exactly.
@@ -124,20 +124,20 @@ public:
     virtual void keep_alive(std::shared_ptr<void> resource) = 0;
 };
 
-} // namespace trtf
+} // namespace trtmc
 ```
 
-### Header: `include/trtf/runtime/trt_backend.h`
+### Header: `include/trtmc/runtime/trt_backend.h`
 
 ```cpp
 #pragma once
 
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/runtime/trt_module.h"
 #include <cuda_runtime_api.h>
 #include <memory>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 // Options for module creation. RTX-specific fields are silently ignored
 // by the standard TRT backend.
@@ -162,12 +162,12 @@ public:
     virtual const char* name() const = 0;
 };
 
-} // namespace trtf
+} // namespace trtmc
 
 // C ABI exported by each DSO. The main binary resolves these via dlsym.
 extern "C" {
-    trtf::IBackend* trtf_create_backend();
-    void trtf_destroy_backend(trtf::IBackend* backend);
+    trtmc::IBackend* trtmc_create_backend();
+    void trtmc_destroy_backend(trtmc::IBackend* backend);
 }
 ```
 
@@ -212,10 +212,10 @@ as constructor args (created by the backend), rather than creating the context i
 ```cpp
 // src/runtime/backend/trt_module_impl.h (compiled inside DSOs only)
 #pragma once
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/runtime/trt_module.h"
 #include <NvInfer.h>
 
-namespace trtf {
+namespace trtmc {
 
 class TrtModuleImpl final : public ITrtModule {
 public:
@@ -246,18 +246,18 @@ private:
     // ...
 };
 
-} // namespace trtf
+} // namespace trtmc
 ```
 
 ### Standard TRT backend: `src/runtime/backend/trt_backend.cpp`
 
 ```cpp
-// Compiled into libtrtf_backend_trt.so, links libnvinfer.so
-#include "trtf/runtime/trt_backend.h"
+// Compiled into libtrtmc_backend_trt.so, links libnvinfer.so
+#include "trtmc/runtime/trt_backend.h"
 #include "trt_module_impl.h"
 #include <NvInfer.h>
 
-namespace trtf {
+namespace trtmc {
 
 class TrtBackend final : public IBackend {
 public:
@@ -301,23 +301,23 @@ private:
     TrtUniquePtr<nvinfer1::IRuntime> runtime_;
 };
 
-} // namespace trtf
+} // namespace trtmc
 
-extern "C" trtf::IBackend* trtf_create_backend() { return new trtf::TrtBackend(); }
-extern "C" void trtf_destroy_backend(trtf::IBackend* b) { delete b; }
+extern "C" trtmc::IBackend* trtmc_create_backend() { return new trtmc::TrtBackend(); }
+extern "C" void trtmc_destroy_backend(trtmc::IBackend* b) { delete b; }
 ```
 
 ### TRT-RTX backend: `src/runtime/backend/rtx_backend.cpp`
 
 ```cpp
-// Compiled into libtrtf_backend_rtx.so, links libtensorrt_rtx.so
-#include "trtf/runtime/trt_backend.h"
+// Compiled into libtrtmc_backend_rtx.so, links libtensorrt_rtx.so
+#include "trtmc/runtime/trt_backend.h"
 #include "trt_module_impl.h"
 #include <NvInfer.h>  // RTX copy — same nvinfer1 namespace
 #include <fstream>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class RtxBackend final : public IBackend {
 public:
@@ -391,7 +391,7 @@ private:
                     ifs.seekg(0);
                     ifs.read(buf.data(), sz);
                     runtime_cache_->deserialize(buf.data(), buf.size());
-                    std::cerr << "[trtf] RTX runtime cache loaded: "
+                    std::cerr << "[trtmc] RTX runtime cache loaded: "
                               << path << " (" << sz << " bytes)\n";
                 }
             }
@@ -407,7 +407,7 @@ private:
             if (ofs) {
                 ofs.write(static_cast<const char*>(mem->data()),
                           static_cast<std::streamsize>(mem->size()));
-                std::cerr << "[trtf] RTX runtime cache saved: "
+                std::cerr << "[trtmc] RTX runtime cache saved: "
                           << cache_path_ << " (" << mem->size() << " bytes)\n";
             }
             delete mem;
@@ -415,10 +415,10 @@ private:
     }
 };
 
-} // namespace trtf
+} // namespace trtmc
 
-extern "C" trtf::IBackend* trtf_create_backend() { return new trtf::RtxBackend(); }
-extern "C" void trtf_destroy_backend(trtf::IBackend* b) { delete b; }
+extern "C" trtmc::IBackend* trtmc_create_backend() { return new trtmc::RtxBackend(); }
+extern "C" void trtmc_destroy_backend(trtmc::IBackend* b) { delete b; }
 ```
 
 ---
@@ -431,10 +431,10 @@ Lives in the main binary. Uses `dlopen` / `dlsym` / `dlclose` (POSIX). No TRT he
 
 ```cpp
 #pragma once
-#include "trtf/runtime/trt_backend.h"
+#include "trtmc/runtime/trt_backend.h"
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 class BackendLoader {
 public:
@@ -444,15 +444,15 @@ public:
     static IBackend* load(const std::string& backend_name);
 };
 
-} // namespace trtf
+} // namespace trtmc
 ```
 
 **DSO search order:**
 1. Directory of the running binary (`/proc/self/exe` → dirname)
-2. `TRTF_BACKEND_DIR` environment variable
+2. `TRTMC_BACKEND_DIR` environment variable
 3. Default `dlopen` search path (`LD_LIBRARY_PATH`, system dirs)
 
-**DSO naming:** `libtrtf_backend_{name}.so` — e.g., `libtrtf_backend_trt.so`.
+**DSO naming:** `libtrtmc_backend_{name}.so` — e.g., `libtrtmc_backend_trt.so`.
 
 **Lifetime:** `IBackend*` is process-lifetime (stored in a static map). `dlclose`
 is called via `atexit`. The backend must outlive all modules it created.
@@ -460,12 +460,12 @@ is called via `atexit`. The backend must outlive all modules it created.
 **Error message on missing DSO:**
 ```
 Error: backend "trt_rtx" not available.
-  Could not load libtrtf_backend_rtx.so: libtensorrt_rtx.so: cannot open shared object file
+  Could not load libtrtmc_backend_rtx.so: libtensorrt_rtx.so: cannot open shared object file
   
   To use TRT-RTX bundles:
     1. Install TensorRT-RTX: pip install tensorrt_rtx
-    2. Build the RTX backend: cmake -DTRTF_RTX_LIBRARY_DIR=<path> ...
-    3. Ensure libtrtf_backend_rtx.so is next to the trtf binary or in LD_LIBRARY_PATH
+    2. Build the RTX backend: cmake -DTRTMC_RTX_LIBRARY_DIR=<path> ...
+    3. Ensure libtrtmc_backend_rtx.so is next to the trtmc binary or in LD_LIBRARY_PATH
   
   To use standard TRT bundles, build with engine_backend="trt" (the default).
 ```
@@ -555,21 +555,21 @@ auto loaded = load_trt_module_from_plan(ctx.backend,
 
 ---
 
-## Section 5: `TRTF_HAS_TRT` Removal Strategy
+## Section 5: `TRTMC_HAS_TRT` Removal Strategy
 
-Today, `TRTF_HAS_TRT` gates ALL TRT-touching code. After this change:
+Today, `TRTMC_HAS_TRT` gates ALL TRT-touching code. After this change:
 
 | Code location | Before | After |
 |---|---|---|
-| `trt_module.h` | `#if TRTF_HAS_TRT` around concrete class | Pure virtual interface, no guard needed |
-| `trt_module.cpp` | `#if TRTF_HAS_TRT` around implementation | Moves to DSO (`trt_module_impl.cpp`), guarded internally |
-| `trt_common.h/cpp` | `#if TRTF_HAS_TRT` around CudaStream/Buffer/Logger | Split: CudaStream/CudaBuffer stay in main binary (pure CUDA, no guard). Logger moves to DSOs. |
+| `trt_module.h` | `#if TRTMC_HAS_TRT` around concrete class | Pure virtual interface, no guard needed |
+| `trt_module.cpp` | `#if TRTMC_HAS_TRT` around implementation | Moves to DSO (`trt_module_impl.cpp`), guarded internally |
+| `trt_common.h/cpp` | `#if TRTMC_HAS_TRT` around CudaStream/Buffer/Logger | Split: CudaStream/CudaBuffer stay in main binary (pure CUDA, no guard). Logger moves to DSOs. |
 | `trt_engine_lifecycle.h/cpp` | TRT engine helpers | Moves to DSOs |
-| Pipeline headers | `#if TRTF_HAS_TRT` around entire class | No guard — uses `ITrtModule*` (always defined) |
-| Plugin `.cpp` files | `#if TRTF_HAS_TRT` around entire file | No guard — uses `IBackend*` and `ITrtModule*` |
-| `pipeline_factory.cpp` | `#if TRTF_HAS_TRT` block | No guard — uses `BackendLoader::load()` which throws at runtime if no DSO |
+| Pipeline headers | `#if TRTMC_HAS_TRT` around entire class | No guard — uses `ITrtModule*` (always defined) |
+| Plugin `.cpp` files | `#if TRTMC_HAS_TRT` around entire file | No guard — uses `IBackend*` and `ITrtModule*` |
+| `pipeline_factory.cpp` | `#if TRTMC_HAS_TRT` block | No guard — uses `BackendLoader::load()` which throws at runtime if no DSO |
 
-The `TRTF_HAS_TRT` define is **removed entirely** from the main binary. If no backend
+The `TRTMC_HAS_TRT` define is **removed entirely** from the main binary. If no backend
 DSO is available, `BackendLoader::load()` throws at runtime with a clear error —
 exactly like Python's `ImportError` for missing packages.
 
@@ -582,7 +582,7 @@ exactly like Python's `ImportError` for missing packages.
 find_package(CUDAToolkit REQUIRED)
 
 # ─── Main library (NO TRT link) ───
-add_library(trtf_core
+add_library(trtmc_core
     # Everything currently listed MINUS:
     #   src/runtime/core/trt_common.cpp  (logger portion → DSOs)
     #   src/runtime/core/trt_module.cpp  (→ DSOs as trt_module_impl.cpp)
@@ -594,7 +594,7 @@ add_library(trtf_core
     src/runtime/core/cuda_common.cpp
     src/runtime/backend/backend_loader.cpp
 )
-target_link_libraries(trtf_core PRIVATE CUDA::cudart dl)  # dl for dlopen
+target_link_libraries(trtmc_core PRIVATE CUDA::cudart dl)  # dl for dlopen
 # NO libnvinfer, NO TRT include dirs
 
 # ─── Shared DSO sources (compiled into both backends) ───
@@ -605,47 +605,47 @@ set(BACKEND_COMMON_SOURCES
 )
 
 # ─── Standard TRT backend (optional) ───
-option(TRTF_BUILD_BACKEND_TRT "Build standard TRT backend DSO" ON)
-if(TRTF_BUILD_BACKEND_TRT)
-    find_library(NVINFER_LIB nvinfer HINTS ${TRTF_TRT_LIBRARY_DIR})
-    find_path(TRT_INCLUDE_DIR NvInferRuntime.h HINTS ${TRTF_TRT_INCLUDE_DIR})
+option(TRTMC_BUILD_BACKEND_TRT "Build standard TRT backend DSO" ON)
+if(TRTMC_BUILD_BACKEND_TRT)
+    find_library(NVINFER_LIB nvinfer HINTS ${TRTMC_TRT_LIBRARY_DIR})
+    find_path(TRT_INCLUDE_DIR NvInferRuntime.h HINTS ${TRTMC_TRT_INCLUDE_DIR})
     if(NVINFER_LIB AND TRT_INCLUDE_DIR)
-        add_library(trtf_backend_trt SHARED
+        add_library(trtmc_backend_trt SHARED
             ${BACKEND_COMMON_SOURCES}
             src/runtime/backend/trt_backend.cpp
         )
-        target_include_directories(trtf_backend_trt PRIVATE
+        target_include_directories(trtmc_backend_trt PRIVATE
             ${PROJECT_SOURCE_DIR}/include
             ${PROJECT_SOURCE_DIR}/src
             ${TRT_INCLUDE_DIR}
         )
-        target_link_libraries(trtf_backend_trt PRIVATE
+        target_link_libraries(trtmc_backend_trt PRIVATE
             ${NVINFER_LIB} CUDA::cudart
         )
-        # Install next to the trtf binary
-        install(TARGETS trtf_backend_trt LIBRARY DESTINATION ${CMAKE_INSTALL_BINDIR})
+        # Install next to the trtmc binary
+        install(TARGETS trtmc_backend_trt LIBRARY DESTINATION ${CMAKE_INSTALL_BINDIR})
     endif()
 endif()
 
 # ─── TRT-RTX backend (optional) ───
-option(TRTF_BUILD_BACKEND_RTX "Build TRT-RTX backend DSO" OFF)
-if(TRTF_BUILD_BACKEND_RTX)
-    find_library(TENSORRT_RTX_LIB tensorrt_rtx HINTS ${TRTF_RTX_LIBRARY_DIR})
-    find_path(TRT_RTX_INCLUDE_DIR NvInferRuntime.h HINTS ${TRTF_RTX_INCLUDE_DIR})
+option(TRTMC_BUILD_BACKEND_RTX "Build TRT-RTX backend DSO" OFF)
+if(TRTMC_BUILD_BACKEND_RTX)
+    find_library(TENSORRT_RTX_LIB tensorrt_rtx HINTS ${TRTMC_RTX_LIBRARY_DIR})
+    find_path(TRT_RTX_INCLUDE_DIR NvInferRuntime.h HINTS ${TRTMC_RTX_INCLUDE_DIR})
     if(TENSORRT_RTX_LIB AND TRT_RTX_INCLUDE_DIR)
-        add_library(trtf_backend_rtx SHARED
+        add_library(trtmc_backend_rtx SHARED
             ${BACKEND_COMMON_SOURCES}
             src/runtime/backend/rtx_backend.cpp
         )
-        target_include_directories(trtf_backend_rtx PRIVATE
+        target_include_directories(trtmc_backend_rtx PRIVATE
             ${PROJECT_SOURCE_DIR}/include
             ${PROJECT_SOURCE_DIR}/src
             ${TRT_RTX_INCLUDE_DIR}
         )
-        target_link_libraries(trtf_backend_rtx PRIVATE
+        target_link_libraries(trtmc_backend_rtx PRIVATE
             ${TENSORRT_RTX_LIB} CUDA::cudart
         )
-        install(TARGETS trtf_backend_rtx LIBRARY DESTINATION ${CMAKE_INSTALL_BINDIR})
+        install(TARGETS trtmc_backend_rtx LIBRARY DESTINATION ${CMAKE_INSTALL_BINDIR})
     endif()
 endif()
 ```
@@ -736,7 +736,7 @@ else:
 
 The C++ runtime reads this field to decide which DSO to `dlopen`.
 
-### `trtf-build inspect` output
+### `trtmc-build inspect` output
 
 Add `engine_backend` to the inspect display:
 
@@ -748,20 +748,20 @@ Engine backend:  trt_rtx
 
 ## Section 8: CLI Changes (C++ Runtime)
 
-### `trtf run` gains two flags
+### `trtmc run` gains two flags
 
 ```
 --runtime-cache PATH   TRT-RTX JIT kernel cache file (ignored for standard TRT bundles)
 --cuda-graphs          TRT-RTX CUDA graph capture (ignored for standard TRT bundles)
 ```
 
-These are passed through `trtf::load()` → `PipelineFactory::from_bundle()` →
+These are passed through `trtmc::load()` → `PipelineFactory::from_bundle()` →
 `PipelineContext` → plugin → `ModuleCreateOptions` → `IBackend::create_module()`.
 
 ### Public API change
 
 ```cpp
-// include/trtf/pipeline.h
+// include/trtmc/pipeline.h
 std::unique_ptr<IPipeline> load(
     const std::string& bundle_path,
     const std::string& hf_python = "",
@@ -772,7 +772,7 @@ std::unique_ptr<IPipeline> load(
 ### C ABI change
 
 ```cpp
-struct TrtfPipelineOptions {
+struct TrtmcPipelineOptions {
     int max_new_tokens;
     const char* hf_python;
     const char* image_path;
@@ -788,7 +788,7 @@ struct TrtfPipelineOptions {
 ### New files
 
 ```
-include/trtf/runtime/trt_backend.h           # IBackend interface + ModuleCreateOptions
+include/trtmc/runtime/trt_backend.h           # IBackend interface + ModuleCreateOptions
 src/runtime/core/cuda_common.h                # CudaStream, CudaBuffer (extracted from trt_common)
 src/runtime/core/cuda_common.cpp
 src/runtime/backend/backend_loader.h          # BackendLoader (dlopen dispatch)
@@ -801,24 +801,24 @@ src/runtime/backend/trt_engine_helpers.h      # Engine deserialization helpers (
 src/runtime/backend/trt_engine_helpers.cpp
 src/runtime/backend/trt_backend.cpp           # TrtBackend : IBackend (standard TRT DSO)
 src/runtime/backend/rtx_backend.cpp           # RtxBackend : IBackend (TRT-RTX DSO)
-trtf_build/trtf_build/trt_import.py           # (optional if using sys.modules approach)
+tensorrt_model_connect/tensorrt_model_connect/trt_import.py           # (optional if using sys.modules approach)
 ```
 
 ### Modified files
 
 ```
-include/trtf/runtime/trt_module.h             # Concrete class → ITrtModule interface
-include/trtf/pipeline.h                       # load() signature gains 2 params
-include/trtf/runtime/pipeline_plugin.h        # PipelineContext gains backend/cache/graphs fields
-CMakeLists.txt                                # Remove libnvinfer link from trtf_core, add DSO targets
+include/trtmc/runtime/trt_module.h             # Concrete class → ITrtModule interface
+include/trtmc/pipeline.h                       # load() signature gains 2 params
+include/trtmc/runtime/pipeline_plugin.h        # PipelineContext gains backend/cache/graphs fields
+CMakeLists.txt                                # Remove libnvinfer link from trtmc_core, add DSO targets
 src/runtime/registry/pipeline_factory.cpp     # BackendLoader integration
 src/runtime/plugins/shared/plugin_helpers.h   # LoadedModule uses ITrtModule, takes IBackend*
 src/runtime/plugins/shared/plugin_helpers.cpp # Delegates to IBackend::create_module()
-src/runtime/plugins/*.cpp                     # Remove TRTF_HAS_TRT guards, use ctx.backend
+src/runtime/plugins/*.cpp                     # Remove TRTMC_HAS_TRT guards, use ctx.backend
 src/runtime/pipelines/*.h                     # TrtModule → ITrtModule member type
-examples/trtf_cli.cpp                         # --runtime-cache, --cuda-graphs flags
-trtf_build/trtf_build/cli.py                  # --rtx flag
-trtf_build/trtf_build/engine_builder.py       # sys.modules monkeypatch, engine_backend metadata
+examples/trtmc_cli.cpp                         # --runtime-cache, --cuda-graphs flags
+tensorrt_model_connect/tensorrt_model_connect/cli.py                  # --rtx flag
+tensorrt_model_connect/tensorrt_model_connect/engine_builder.py       # sys.modules monkeypatch, engine_backend metadata
 ```
 
 ### Deleted files
@@ -837,8 +837,8 @@ src/runtime/core/trt_engine_lifecycle.h/cpp    # → backend/trt_engine_helpers.
 - **Old bundles (no `engine_backend` field):** Default to `"trt"` — fully backward compatible
 - **Old C ABI callers (no `runtime_cache`/`cuda_graphs` fields):** New fields are at the end of the struct, initialized to zero/null — ABI compatible if callers use `{0}` initialization
 - **Python builder without `--rtx`:** Produces standard TRT bundles — no change in behavior
-- **Build without either TRT SDK:** Main binary compiles fine. `trtf inspect` works. `trtf run` fails at runtime with a clear message about missing backend DSO
-- **Build with only standard TRT:** Only `libtrtf_backend_trt.so` is produced. RTX bundles fail to load with a clear error
+- **Build without either TRT SDK:** Main binary compiles fine. `trtmc inspect` works. `trtmc run` fails at runtime with a clear message about missing backend DSO
+- **Build with only standard TRT:** Only `libtrtmc_backend_trt.so` is produced. RTX bundles fail to load with a clear error
 
 ---
 
@@ -853,7 +853,7 @@ src/runtime/core/trt_engine_lifecycle.h/cpp    # → backend/trt_engine_helpers.
 ### Integration tests (needs TRT SDK)
 
 - Build a standard TRT bundle, verify `engine_backend: "trt"` in config.json
-- Load via `BackendLoader`, verify `libtrtf_backend_trt.so` is dlopen'd
+- Load via `BackendLoader`, verify `libtrtmc_backend_trt.so` is dlopen'd
 - Run inference, verify identical results to pre-migration
 
 ### Python builder tests
@@ -879,12 +879,12 @@ src/runtime/core/trt_engine_lifecycle.h/cpp    # → backend/trt_engine_helpers.
 6. **Update `PipelineContext`** with `IBackend*`, cache path, CUDA graphs
 7. **Update `plugin_helpers`** — `load_trt_module_from_plan()` takes `IBackend*`
 8. **Update all pipeline headers** — `TrtModule` → `ITrtModule`
-9. **Update all plugins** — use `ctx.backend`, remove `TRTF_HAS_TRT` guards
+9. **Update all plugins** — use `ctx.backend`, remove `TRTMC_HAS_TRT` guards
 10. **Update `pipeline_factory.cpp`** — read `engine_backend`, use `BackendLoader`
-11. **Update CMakeLists.txt** — DSO targets, remove libnvinfer from trtf_core
+11. **Update CMakeLists.txt** — DSO targets, remove libnvinfer from trtmc_core
 12. **Update CLI** — `--runtime-cache`, `--cuda-graphs` flags
 13. **Update public API** — `load()` signature
 14. **Create `RtxBackend`** (`rtx_backend.cpp`) — TRT-RTX IBackend with runtime cache
 15. **Python `--rtx` flag** — `sys.modules` monkeypatch, `engine_backend` metadata
-16. **Remove `TRTF_HAS_TRT`** guards from all main binary code
+16. **Remove `TRTMC_HAS_TRT`** guards from all main binary code
 17. **Tests** — backend loader, interface, E2E regression

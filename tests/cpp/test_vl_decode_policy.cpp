@@ -31,8 +31,8 @@ void check(bool condition, const char* name)
 
 void test_current_vl_token_and_embedding_selection()
 {
-    check(trtf::current_vl_token({}, 7) == 7, "vl current token falls back to bos");
-    check(trtf::current_vl_token({1, 2, 3}, 7) == 3, "vl current token uses last prompt token");
+    check(trtmc::current_vl_token({}, 7) == 7, "vl current token falls back to bos");
+    check(trtmc::current_vl_token({1, 2, 3}, 7) == 3, "vl current token uses last prompt token");
 
     const std::vector<float> image_features = {
         1.0F, 2.0F,
@@ -48,7 +48,7 @@ void test_current_vl_token_and_embedding_selection()
         },
     };
     int32_t feature_index = 0;
-    auto embedding = trtf::build_vl_token_embedding(
+    auto embedding = trtmc::build_vl_token_embedding(
         99,
         99,
         image_features.data(),
@@ -65,7 +65,7 @@ void test_current_vl_token_and_embedding_selection()
     check(embedding.deepstack_embeds[0] == deepstack[0].data(), "vl embedding selects matching deepstack level");
     check(embedding.deepstack_embeds[1] == deepstack[1].data(), "vl embedding allows sparse deepstack coverage");
 
-    embedding = trtf::build_vl_token_embedding(
+    embedding = trtmc::build_vl_token_embedding(
         5,
         99,
         image_features.data(),
@@ -84,7 +84,7 @@ void test_vl_decode_loop_stops_on_eos_and_reports_failures()
     std::vector<int32_t> output;
     std::string error;
 
-    bool ok = trtf::run_vl_decode_loop(
+    bool ok = trtmc::run_vl_decode_loop(
         4,
         77,
         logits,
@@ -109,7 +109,7 @@ void test_vl_decode_loop_stops_on_eos_and_reports_failures()
     output.clear();
     error.clear();
     step_calls = 0;
-    ok = trtf::run_vl_decode_loop(
+    ok = trtmc::run_vl_decode_loop(
         2,
         77,
         logits,

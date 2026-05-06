@@ -25,7 +25,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-BARK-01
 Intent: Validate the Bark family plugin weight loading, fused QKV splitting, and multi-prefix key mapping for semantic/coarse/fine sub-models.
-Preconditions: safetensors and trtf_build are importable; no TRT or GPU required for weight-loading tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; no TRT or GPU required for weight-loading tests.
 Postconditions: All weight keys are present with correct shapes, fused QKV is split into separate Q/K/V, and multi-prefix layout matches expectations.
 """
 
@@ -40,9 +40,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -85,7 +85,7 @@ class BarkPluginTester(FamilyPluginTester):
       - HF prefix: semantic.*, coarse_acoustics.*, fine_acoustics.*
     """
 
-    plugin_module = "trtf_build.families.bark"
+    plugin_module = "tensorrt_model_connect.families.bark"
     model_type = "bark"
     spec = TinyModelSpec(
         vocab_size=_SEM_VOCAB,

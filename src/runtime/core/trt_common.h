@@ -5,7 +5,7 @@
 #include <cuda_runtime_api.h>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 enum class TrtLogSeverity {
     kInternalError,
@@ -20,8 +20,8 @@ bool trt_log_to_stderr_enabled();
 TrtLogSeverity trt_log_stderr_min_severity();
 
 // Configure the process-wide TRT logger. Called by pipeline_factory after
-// resolving the platform.* namespace (replaces the old TRTF_TRT_LOG_STDERR
-// and TRTF_TRT_LOG_MIN_SEVERITY env vars).
+// resolving the platform.* namespace (replaces the old TRTMC_TRT_LOG_STDERR
+// and TRTMC_TRT_LOG_MIN_SEVERITY env vars).
 void configure_trt_logger(bool verbose_stderr, const std::string& min_severity);
 
 // RAII wrapper for CUDA graph + executable graph.
@@ -57,4 +57,4 @@ class CudaGraphExec final {
     cudaGraphExec_t exec_{nullptr};
 };
 
-} // namespace trtf
+} // namespace trtmc

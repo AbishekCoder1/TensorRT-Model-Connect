@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 /// Configuration for the diffusion pipeline.
 struct DiffusionConfig {
@@ -100,4 +100,4 @@ struct VideoResult {
 /// Parse preprocessor weights from bundle section bytes.
 PreprocessorWeights parse_preprocessor_weights(const std::vector<char>& data);
 
-} // namespace trtf
+} // namespace trtmc

@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct DelayCacheState
 {
@@ -227,4 +227,4 @@ inline bool collect_output_codes_from_delay_cache(
     return true;
 }
 
-} // namespace trtf
+} // namespace trtmc

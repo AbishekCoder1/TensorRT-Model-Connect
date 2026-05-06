@@ -2,7 +2,7 @@
 
 #include "runtime/core/trt_common.h"
 #include "runtime/core/trt_engine_lifecycle.h"
-#include "trtf/runtime/kv_cache.h"
+#include "trtmc/runtime/kv_cache.h"
 
 #include <algorithm>
 #include <chrono>
@@ -15,7 +15,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -30,7 +30,7 @@ struct StepTraceConfig {
 // Process-wide step-trace state. Populated once from the resolved
 // ConfigBundle by `apply_text_trace_config_from_registry` (below), called
 // from the decoder plugin before pipeline construction. Replaces the
-// TRTF_TEXT_STEP_TRACE_* environment variables, which are now deleted.
+// TRTMC_TEXT_STEP_TRACE_* environment variables, which are now deleted.
 StepTraceConfig& mutable_step_trace_config() {
     static StepTraceConfig cfg;
     return cfg;
@@ -176,14 +176,14 @@ TextGenerationPipeline::TextGenerationPipeline(
 
     // CUDA Graphs: capture TRT kernels on first step, replay on subsequent
     // steps. Disabled via --set runtime.disable_cuda_graph=true (replaces
-    // the deleted TRTF_DISABLE_CUDA_GRAPH env var).
+    // the deleted TRTMC_DISABLE_CUDA_GRAPH env var).
     if (!config_.disable_cuda_graph) {
         for (auto& decoder_ctx : decoders_)
             decoder_ctx.module->enable_cuda_graph();
     }
 
     // GPU-side argmax is only valid for truly greedy decoding. Populated
-    // from runtime.prefer_gpu_greedy (replaces the deleted TRTF_GPU_ARGMAX
+    // from runtime.prefer_gpu_greedy (replaces the deleted TRTMC_GPU_ARGMAX
     // env var). We record the preference here and instantiate per-call
     // when the requested sampling parameters are actually greedy.
     prefer_gpu_greedy_ = config_.prefer_gpu_greedy;
@@ -316,7 +316,7 @@ bool TextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& inp
         return false;
     kv->write_prefill_kv(pk, pv, sq);
     if (trt_log_to_stderr_enabled())
-        std::cerr << "[trtf] Batched prefill (profile 0): " << sq << " tokens in one call\n";
+        std::cerr << "[trtmc] Batched prefill (profile 0): " << sq << " tokens in one call\n";
     return true;
 }
 
@@ -400,7 +400,7 @@ void TextGenerationPipeline::log_decode_summary(int32_t steps, double ms) const 
     const bool cuda_graph_on =
         active_decoder_index_ >= 0 &&
         decoders_[static_cast<std::size_t>(active_decoder_index_)].module->cuda_graph_active();
-    std::cerr << "[trtf] Decode: " << steps << " tokens, " << ms << " ms, " << tps << " tok/s"
+    std::cerr << "[trtmc] Decode: " << steps << " tokens, " << ms << " ms, " << tps << " tok/s"
               << (cuda_graph_on ? " [CUDA Graph ON]" : "") << '\n';
 }
 
@@ -525,4 +525,4 @@ int32_t TextGenerationPipeline::argmax(const std::vector<float>& logits) {
         std::distance(logits.begin(), std::max_element(logits.begin(), logits.end())));
 }
 
-} // namespace trtf
+} // namespace trtmc

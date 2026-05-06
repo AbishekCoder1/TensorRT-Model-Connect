@@ -2,7 +2,7 @@
 
 Trace: ARCH-CFG-002, UD-CFG-01
 Intent: Validate ModelConfig parsing from HF config.json across all supported model families, including field aliases, VL text_config merge, and edge cases.
-Preconditions: trtf_build is importable; no TRT or GPU required.
+Preconditions: tensorrt_model_connect is importable; no TRT or GPU required.
 Postconditions: All parsed fields (model_type, hidden_size, num_heads, etc.) match expected values for each model family's config format.
 """
 
@@ -11,8 +11,8 @@ from __future__ import annotations
 import json
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
-from trtf_build.config import ModelConfig
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+from tensorrt_model_connect.config import ModelConfig
 
 
 class TestModelConfigFromJson:

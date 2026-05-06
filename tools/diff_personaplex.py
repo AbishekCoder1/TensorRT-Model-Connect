@@ -13,7 +13,7 @@ Usage:
     python3 tools/diff_personaplex.py \
         --input-wav test_input.wav \
         --bundle /path/to/personaplex.trtfb \
-        --trtf-binary ./build/trtf \
+        --trtmc-binary ./build/trtmc \
         --hf-python .venv/bin/python \
         --official-repo /path/to/personaplex/moshi
 
@@ -27,7 +27,7 @@ Usage:
     python3 tools/diff_personaplex.py \
         --input-wav test_input.wav \
         --bundle /path/to/personaplex.trtfb \
-        --trtf-binary ./build/trtf \
+        --trtmc-binary ./build/trtmc \
         --hf-python .venv/bin/python \
         --reference-dir /path/to/saved_reference
 """
@@ -258,13 +258,13 @@ def run_official_reference(
 def run_trt_pipeline(
     input_wav: str,
     bundle: str,
-    trtf_binary: str,
+    trtmc_binary: str,
     hf_python: str,
     output_dir: str,
 ) -> dict:
     """Run our TRT C++ pipeline and capture output.
 
-    Uses `trtf speak` command to process audio, then parses the output.
+    Uses `trtmc speak` command to process audio, then parses the output.
     Also captures intermediate debug output if available.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -288,7 +288,7 @@ def run_trt_pipeline(
     env["LD_LIBRARY_PATH"] = ld_path
 
     cmd = [
-        trtf_binary, "speak",
+        trtmc_binary, "speak",
         bundle,
         "--audio-in", input_wav,
         "--audio-out", output_wav,
@@ -307,7 +307,7 @@ def run_trt_pipeline(
                 print(f"[trt] {line}")
 
     if proc.returncode != 0:
-        print(f"[trt] ERROR: trtf speak failed")
+        print(f"[trt] ERROR: trtmc speak failed")
         print(proc.stderr[-2000:] if len(proc.stderr) > 2000 else proc.stderr)
         return {"audio_out": np.array([])}
 
@@ -545,7 +545,7 @@ def main():
     parser = argparse.ArgumentParser(description="Diff test: TRT PersonaPlex vs official code")
     parser.add_argument("--input-wav", required=True, help="Path to input WAV file")
     parser.add_argument("--bundle", help="Path to PersonaPlex .trtfb bundle")
-    parser.add_argument("--trtf-binary", default="./build/trtf", help="Path to trtf binary")
+    parser.add_argument("--trtmc-binary", default="./build/trtmc", help="Path to trtmc binary")
     parser.add_argument("--hf-python", default="", help="Path to Python with HF transformers")
     parser.add_argument("--official-repo", help="Path to cloned NVIDIA/personaplex/moshi directory")
     parser.add_argument("--hf-repo", default="nvidia/personaplex-7b-v1", help="HF repo ID")
@@ -599,7 +599,7 @@ def main():
         trt_data = run_trt_pipeline(
             input_wav=args.input_wav,
             bundle=args.bundle,
-            trtf_binary=args.trtf_binary,
+            trtmc_binary=args.trtmc_binary,
             hf_python=args.hf_python,
             output_dir=trt_dir,
         )

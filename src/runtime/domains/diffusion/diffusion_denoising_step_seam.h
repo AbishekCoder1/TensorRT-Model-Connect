@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace diffusion {
 
 template <typename ComputeTembFn, typename PrepareHiddenFn, typename RunDenoiserFn,
@@ -97,4 +97,4 @@ bool run_wan_denoising_steps(int32_t num_inference_steps, const std::vector<floa
 }
 
 } // namespace diffusion
-} // namespace trtf
+} // namespace trtmc

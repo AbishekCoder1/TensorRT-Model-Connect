@@ -25,9 +25,9 @@ import pytest
 
 try:
     from safetensors.numpy import save_file
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 # ---- helpers shared across all tests ----
 
@@ -108,7 +108,7 @@ class TestT5Plugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.t5 import plugin
+        from tensorrt_model_connect.families.t5 import plugin
 
         config = {
             "model_type": "t5",
@@ -149,12 +149,12 @@ class TestT5Plugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from trtf_build.families.t5 import plugin
+        from tensorrt_model_connect.families.t5 import plugin
         assert plugin.matches("t5")
         assert not plugin.matches("bart")
 
     def test_runtime_strategy(self):
-        from trtf_build.families.t5 import plugin
+        from tensorrt_model_connect.families.t5 import plugin
         assert plugin.runtime_strategy == "text_to_text"
 
 
@@ -228,7 +228,7 @@ class TestBartPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.bart import plugin
+        from tensorrt_model_connect.families.bart import plugin
 
         config = {
             "model_type": "bart",
@@ -276,7 +276,7 @@ class TestBartPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from trtf_build.families.bart import plugin
+        from tensorrt_model_connect.families.bart import plugin
         assert plugin.matches("bart")
         assert plugin.matches("mbart")
         assert not plugin.matches("t5")
@@ -315,7 +315,7 @@ class TestOlmo2Plugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.olmo2 import plugin
+        from tensorrt_model_connect.families.olmo2 import plugin
 
         config = {
             "model_type": "olmo2",
@@ -344,12 +344,12 @@ class TestOlmo2Plugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from trtf_build.families.olmo2 import plugin
+        from tensorrt_model_connect.families.olmo2 import plugin
         assert plugin.matches("olmo2")
         assert not plugin.matches("olmo")
 
     def test_runtime_strategy(self):
-        from trtf_build.families.olmo2 import plugin
+        from tensorrt_model_connect.families.olmo2 import plugin
         assert plugin.runtime_strategy == "decoder_kv_cache"
 
 
@@ -382,7 +382,7 @@ class TestModernbertPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.modernbert import plugin
+        from tensorrt_model_connect.families.modernbert import plugin
 
         config = {
             "model_type": "modernbert",
@@ -413,7 +413,7 @@ class TestModernbertPlugin:
 
     def test_fused_qkv_split(self, tmp_path):
         """Verify the fused QKV weight is split correctly into Q, K, V."""
-        from trtf_build.families.modernbert import plugin
+        from tensorrt_model_connect.families.modernbert import plugin
 
         config = {
             "model_type": "modernbert",
@@ -455,7 +455,7 @@ class TestModernbertPlugin:
 
     def test_geglu_split(self, tmp_path):
         """Verify the fused GeGLU Wi weight is split into input and gate."""
-        from trtf_build.families.modernbert import plugin
+        from tensorrt_model_connect.families.modernbert import plugin
 
         config = {
             "model_type": "modernbert",
@@ -491,13 +491,13 @@ class TestModernbertPlugin:
                                        np.ascontiguousarray(gate_raw.T.astype(np.float32)))
 
     def test_matches(self):
-        from trtf_build.families.modernbert import plugin
+        from tensorrt_model_connect.families.modernbert import plugin
         assert plugin.matches("modernbert")
         assert plugin.matches("ModernBert")
         assert not plugin.matches("bert")
 
     def test_runtime_strategy(self):
-        from trtf_build.families.modernbert import plugin
+        from tensorrt_model_connect.families.modernbert import plugin
         assert plugin.runtime_strategy == "encoder_only"
 
 
@@ -547,7 +547,7 @@ class TestDebertaPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.deberta import plugin
+        from tensorrt_model_connect.families.deberta import plugin
 
         config = {
             "model_type": "deberta",
@@ -581,12 +581,12 @@ class TestDebertaPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from trtf_build.families.deberta import plugin
+        from tensorrt_model_connect.families.deberta import plugin
         assert plugin.matches("deberta")
         assert not plugin.matches("deberta-v2")
 
     def test_runtime_strategy(self):
-        from trtf_build.families.deberta import plugin
+        from tensorrt_model_connect.families.deberta import plugin
         assert plugin.runtime_strategy == "encoder_only"
 
 
@@ -630,7 +630,7 @@ class TestElectraPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.electra import plugin
+        from tensorrt_model_connect.families.electra import plugin
 
         config = {
             "model_type": "electra",
@@ -663,12 +663,12 @@ class TestElectraPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from trtf_build.families.electra import plugin
+        from tensorrt_model_connect.families.electra import plugin
         assert plugin.matches("electra")
         assert not plugin.matches("bert")
 
     def test_runtime_strategy(self):
-        from trtf_build.families.electra import plugin
+        from tensorrt_model_connect.families.electra import plugin
         assert plugin.runtime_strategy == "encoder_only"
 
 
@@ -706,7 +706,7 @@ class TestFNetPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.fnet import plugin
+        from tensorrt_model_connect.families.fnet import plugin
 
         config = {
             "model_type": "fnet",
@@ -739,7 +739,7 @@ class TestFNetPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from trtf_build.families.fnet import plugin
+        from tensorrt_model_connect.families.fnet import plugin
         assert plugin.matches("fnet")
         assert not plugin.matches("bert")
 
@@ -785,7 +785,7 @@ class TestDPRPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.dpr import plugin
+        from tensorrt_model_connect.families.dpr import plugin
 
         config = {
             "model_type": "dpr",
@@ -813,7 +813,7 @@ class TestDPRPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from trtf_build.families.dpr import plugin
+        from tensorrt_model_connect.families.dpr import plugin
         assert plugin.matches("dpr")
         assert not plugin.matches("bert")
 
@@ -873,7 +873,7 @@ class TestConvBERTPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.convbert import plugin
+        from tensorrt_model_connect.families.convbert import plugin
 
         config = {
             "model_type": "convbert",
@@ -903,7 +903,7 @@ class TestConvBERTPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from trtf_build.families.convbert import plugin
+        from tensorrt_model_connect.families.convbert import plugin
         assert plugin.matches("convbert")
         assert not plugin.matches("bert")
 
@@ -944,7 +944,7 @@ class TestXLNetPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.xlnet import plugin
+        from tensorrt_model_connect.families.xlnet import plugin
 
         config = {
             "model_type": "xlnet",
@@ -969,7 +969,7 @@ class TestXLNetPlugin:
         assert weights["embedding"].shape == (self.VOCAB, self.HIDDEN)
 
     def test_matches(self):
-        from trtf_build.families.xlnet import plugin
+        from tensorrt_model_connect.families.xlnet import plugin
         assert plugin.matches("xlnet")
         assert not plugin.matches("bert")
 
@@ -1022,7 +1022,7 @@ class TestAlbertPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.albert import plugin
+        from tensorrt_model_connect.families.albert import plugin
 
         config = {
             "model_type": "albert",
@@ -1050,7 +1050,7 @@ class TestAlbertPlugin:
         assert "embed_norm" in weights
 
     def test_matches(self):
-        from trtf_build.families.albert import plugin
+        from tensorrt_model_connect.families.albert import plugin
         assert plugin.matches("albert")
         assert not plugin.matches("bert")
 
@@ -1064,12 +1064,12 @@ class TestFp8Calibrate:
 
     def test_import(self):
         """Verify fp8_calibrate can be imported."""
-        from trtf_build import fp8_calibrate
+        from tensorrt_model_connect import fp8_calibrate
         assert hasattr(fp8_calibrate, "extract_scales_from_state_dict")
 
     def test_maxbound_constants(self):
         """Verify maxbound constants are defined correctly."""
-        from trtf_build.fp8_calibrate import _MAXBOUND, _DEFAULT_MAXBOUND
+        from tensorrt_model_connect.fp8_calibrate import _MAXBOUND, _DEFAULT_MAXBOUND
         assert _MAXBOUND[(4, 3)] == 448.0  # FP8 E4M3
         assert _MAXBOUND[(5, 2)] == 57344.0  # FP8 E5M2
         assert _MAXBOUND[(0, 8)] == 127.0  # INT8
@@ -1077,14 +1077,14 @@ class TestFp8Calibrate:
 
     def test_extract_scales_empty(self):
         """Scale extraction with empty state dict returns empty."""
-        from trtf_build.fp8_calibrate import extract_scales_from_state_dict
+        from tensorrt_model_connect.fp8_calibrate import extract_scales_from_state_dict
         result = extract_scales_from_state_dict({})
         assert isinstance(result, dict)
         assert len(result) == 0
 
     def test_extract_scales_with_amax(self):
         """Scale extraction finds and maps _amax tensors."""
-        from trtf_build.fp8_calibrate import extract_scales_from_state_dict
+        from tensorrt_model_connect.fp8_calibrate import extract_scales_from_state_dict
 
         state = {
             "model.layers.0.self_attn.q_proj.input_quantizer._amax": 224.0,
@@ -1105,7 +1105,7 @@ class TestFp8Calibrate:
     def test_extract_scales_with_exclude(self):
         """Scale extraction respects exclude_pattern."""
         import re
-        from trtf_build.fp8_calibrate import extract_scales_from_state_dict
+        from tensorrt_model_connect.fp8_calibrate import extract_scales_from_state_dict
 
         state = {
             "model.layers.0.self_attn.q_proj.input_quantizer._amax": 224.0,
@@ -1118,7 +1118,7 @@ class TestFp8Calibrate:
 
     def test_maxbound_from_config(self):
         """Maxbound extraction from ModelOpt config."""
-        from trtf_build.fp8_calibrate import _maxbound_from_config
+        from tensorrt_model_connect.fp8_calibrate import _maxbound_from_config
 
         config = {"quant_cfg": {"*weight_quantizer": {"num_bits": (4, 3)}}}
         assert _maxbound_from_config(config) == 448.0
@@ -1138,13 +1138,13 @@ class TestSchedulers:
     """Test scheduler base class and flow match Euler implementation."""
 
     def test_flow_match_euler_init(self):
-        from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+        from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
         scheduler = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=1.0)
         assert scheduler.num_train_timesteps == 1000
         assert scheduler.shift == 1.0
 
     def test_flow_match_euler_set_timesteps(self):
-        from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+        from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
         scheduler = FlowMatchEulerScheduler(num_train_timesteps=1000)
         scheduler.set_timesteps(4)
         timesteps = scheduler.timesteps
@@ -1155,7 +1155,7 @@ class TestSchedulers:
 
     def test_flow_match_euler_step(self):
         """Verify Euler step computes prev_sample correctly."""
-        from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+        from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
         scheduler = FlowMatchEulerScheduler(num_train_timesteps=1000)
         scheduler.set_timesteps(4)
 
@@ -1167,7 +1167,7 @@ class TestSchedulers:
 
     def test_flow_match_euler_add_noise(self):
         """Verify add_noise interpolates between original and noise."""
-        from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+        from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
         scheduler = FlowMatchEulerScheduler(num_train_timesteps=1000)
         original = np.zeros((1, 4), dtype=np.float32)
         noise = np.ones((1, 4), dtype=np.float32)
@@ -1180,7 +1180,7 @@ class TestSchedulers:
 
     def test_flow_match_euler_shift(self):
         """Verify shift parameter affects timestep schedule."""
-        from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+        from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
         s1 = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=1.0)
         s2 = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=3.0)
         s1.set_timesteps(4)
@@ -1189,12 +1189,12 @@ class TestSchedulers:
         assert not np.allclose(s1.timesteps, s2.timesteps)
 
     def test_scheduler_registry(self):
-        from trtf_build.schedulers import get_scheduler
+        from tensorrt_model_connect.schedulers import get_scheduler
         scheduler = get_scheduler("flow_match_euler", num_train_timesteps=1000)
         assert scheduler is not None
         assert scheduler.num_train_timesteps == 1000
 
     def test_scheduler_registry_unknown(self):
-        from trtf_build.schedulers import get_scheduler
+        from tensorrt_model_connect.schedulers import get_scheduler
         with pytest.raises(ValueError, match="Unknown scheduler"):
             get_scheduler("nonexistent_scheduler")

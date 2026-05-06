@@ -26,7 +26,7 @@ Promotion MRs are from timestamped `ai-staging-promotion-*` branches to `master`
 
 ```bash
 python3 tools/ai_staging.py \
-  --project yifeif/trt-transformers \
+  --project yifeif/tensorrt-model-connect \
   --branch ai-staging \
   babysit-promotion \
   --target-branch master \

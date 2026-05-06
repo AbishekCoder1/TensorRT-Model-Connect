@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from trtf_build.build_timing import add_build_timing, new_build_timing, write_build_timing
+from tensorrt_model_connect.build_timing import add_build_timing, new_build_timing, write_build_timing
 
 
 def test_write_build_timing_uses_explicit_output_path(tmp_path) -> None:

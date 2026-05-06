@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace diffusion {
 
 struct FluxPackLayout {
@@ -189,4 +189,4 @@ inline FlowMatchEulerState make_wan_flow_match_scheduler(const WanGenerationPlan
 }
 
 } // namespace diffusion
-} // namespace trtf
+} // namespace trtmc

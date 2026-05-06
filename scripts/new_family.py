@@ -2,7 +2,7 @@
 """Scaffold a new model family plugin.
 
 Downloads the model's config.json, detects architecture features, and generates
-a plugin file in trtf_build/trtf_build/families/<family>.py.
+a plugin file in tensorrt_model_connect/tensorrt_model_connect/families/<family>.py.
 
 Usage:
     python3 scripts/new_family.py \
@@ -23,7 +23,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-FAMILIES_DIR = Path(__file__).resolve().parent.parent / "trtf_build" / "trtf_build" / "families"
+FAMILIES_DIR = Path(__file__).resolve().parent.parent / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
 
 
 def fetch_config(hf_repo: str) -> dict:
@@ -167,7 +167,7 @@ def generate_plugin(family_name: str, model_type: str, features: dict,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Scaffold a new model family plugin for trtf_build.")
+        description="Scaffold a new model family plugin for tensorrt_model_connect.")
     parser.add_argument("--model-type", required=True,
                         help="HF model_type string (e.g. phi3, yi, starcoder2)")
     parser.add_argument("--hf-repo", required=True,

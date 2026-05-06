@@ -4,7 +4,7 @@ Status of non-standard architecture support. MoE, Mamba/SSM, vision-language (Qw
 
 ## Executive Summary
 
-With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by a C++ plugin in `src/runtime/plugins/`. New strategy/state types require a new C++ plugin file in `src/runtime/plugins/` plus one manifest entry in `cmake/trtf_pipeline_plugins.cmake` -- no edits to `pipeline_factory.cpp` are needed.
+With the Python build / C++ runtime split, adding a new family is Python-only **when it reuses an existing `runtime_strategy`** already handled by a C++ plugin in `src/runtime/plugins/`. New strategy/state types require a new C++ plugin file in `src/runtime/plugins/` plus one manifest entry in `cmake/trtmc_pipeline_plugins.cmake` -- no edits to `pipeline_factory.cpp` are needed.
 
 As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support are **fully implemented**. The standard decoder builder is parameterized to support LayerNorm, GELU, learned positions, and multiple activations. The VL image preprocessor supports 4 strategies with configurable interpolation. The diffusion pipeline supports text-to-video with T5 encoding, DiT denoising, and causal 3D VAE decoding.
 
@@ -28,7 +28,7 @@ As of 2026-02-20, MoE, Mamba/SSM, vision-language, and diffusion (T2V) support a
 
 ### Adding a standard dense decoder family
 
-Create a Python plugin file in `trtf_build/trtf_build/families/` with a checkpoint mapper. Uses the parameterized standard decoder builder. ~30-60 LOC.
+Create a Python plugin file in `tensorrt_model_connect/tensorrt_model_connect/families/` with a checkpoint mapper. Uses the parameterized standard decoder builder. ~30-60 LOC.
 
 **Implemented**: Qwen, LLaMA, Mistral, Gemma, Phi, Granite, InternLM (standard decoder); StarCoder2, GPT-2, OPT, Falcon, StableLM, OLMo, XGLM, GPT-NeoX, GPT-Neo, CodeGen, BLOOM, Nemotron (extended decoder).
 
@@ -73,7 +73,7 @@ The C++ runtime supports multiple state management patterns via the plugin regis
 New state types require:
 1. A new plugin `.cpp` file in `src/runtime/plugins/` implementing `IPipelinePlugin`
 2. Manifest registration via `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST`
-3. A source/symbol entry in `cmake/trtf_pipeline_plugins.cmake`
+3. A source/symbol entry in `cmake/trtmc_pipeline_plugins.cmake`
 4. A new or existing pipeline class in `src/runtime/pipelines/`
 
 No edits to `pipeline_factory.cpp` are needed -- the registry handles dispatch automatically.
@@ -109,7 +109,7 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 **C++** (plugin-based):
 - `ssm_plugin.cpp`: Self-registering plugin for `ssm_recurrent` strategy
 - Constructs `RecurrentPipeline` with `RecurrentStateManager` wrapping `RecurrentState` (conv_state + ssm_state specs)
-- State management via `RecurrentState` (`include/trtf/runtime/recurrent_state.h`)
+- State management via `RecurrentState` (`include/trtmc/runtime/recurrent_state.h`)
 
 **Debug runner**: `MambaTrtRunner` in `debug_runner.py` for pure-Python Mamba TRT inference.
 
@@ -168,7 +168,7 @@ Compressed KV caches (e.g., `[cache_len, kv_lora_rank]` instead of `[cache_len, 
 **Schedulers**:
 - Flow matching: `z_t = (1-t)*x + t*noise`, Euler step: `z_{t-dt} = z_t - dt*v`
 - Configurable shift parameter for timestep adjustment
-- C++ implementation in `flow_match_euler_scheduler.cpp`, Python in `trtf_build/trtf_build/diffusion_runner.py`
+- C++ implementation in `flow_match_euler_scheduler.cpp`, Python in `tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py`
 
 **Testing**: See [Testing and Validation](Testing-and-Validation.md#diffusion-diffusion) for the 9-step component validation and frame quality checks.
 

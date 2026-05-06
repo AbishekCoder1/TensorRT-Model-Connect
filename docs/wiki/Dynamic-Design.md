@@ -4,7 +4,7 @@
 |-------|-------|
 | Document ID | DD-001 |
 | ISO 26262-6 clause | 7 (Dynamic aspects of the software architectural design) |
-| Applicable to | trt-transformers-cpp (Python build + C++ runtime) |
+| Applicable to | tensorrt-model-connect (Python build + C++ runtime) |
 | Revision | 2.0 |
 | Date | 2026-03-12 |
 | Status | Living document -- reflects code as of this revision date |
@@ -22,7 +22,7 @@ There is no `PipelineRouter`, `PipelineServices`, `BuildContext`, or `StrategyBu
 
 ## 1. Bundle Build Flow (Python)
 
-Entry point: `trtf_build/trtf_build/engine_builder.py` function `build()`.
+Entry point: `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` function `build()`.
 
 ```mermaid
 sequenceDiagram
@@ -35,7 +35,7 @@ sequenceDiagram
     participant Plugin as FamilyPlugin
     participant Writer as bundle_writer.py write_bundle()
 
-    User->>CLI: trtf-build build <model> -o model.trtfb
+    User->>CLI: trtmc-build build <model> -o model.trtfb
     CLI->>EB: build(model_id_or_path, output_path, max_cache_length)
     EB->>Resolve: _resolve_model(model_id_or_path)
     Note over Resolve: Local dir with config.json? Return directly.<br/>HF repo ID? snapshot_download().<br/>.nemo archive? Extract to synthetic HF dir.
@@ -72,25 +72,25 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `trtf_build/trtf_build/cli.py` -- CLI dispatch
-- `trtf_build/trtf_build/engine_builder.py` -- `build()`, `build_bundle()`, `_build_diffusion_bundle()`
-- `trtf_build/trtf_build/config.py` -- `ModelConfig.from_dir()`
-- `trtf_build/trtf_build/families/__init__.py` -- `find_plugin()`, `find_diffusion_plugin()`
-- `trtf_build/trtf_build/families/base.py` -- `FamilyPlugin` protocol
-- `trtf_build/trtf_build/bundle_writer.py` -- `write_bundle()`
+- `tensorrt_model_connect/tensorrt_model_connect/cli.py` -- CLI dispatch
+- `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` -- `build()`, `build_bundle()`, `_build_diffusion_bundle()`
+- `tensorrt_model_connect/tensorrt_model_connect/config.py` -- `ModelConfig.from_dir()`
+- `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` -- `find_plugin()`, `find_diffusion_plugin()`
+- `tensorrt_model_connect/tensorrt_model_connect/families/base.py` -- `FamilyPlugin` protocol
+- `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` -- `write_bundle()`
 
 ---
 
 ## 2. Runtime Pipeline Creation Flow (C++)
 
-Entry point: `trtf_create_pipeline_ex()` in `src/cabi/api/trtf_c.cpp`.
+Entry point: `trtmc_create_pipeline_ex()` in `src/cabi/api/trtmc_c.cpp`.
 Factory logic lives in `PipelineFactory::from_bundle()` in `src/runtime/registry/pipeline_factory.cpp`.
 Plugin dispatch uses `PipelineRegistry` in `src/runtime/registry/pipeline_registry.cpp`.
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant CABI as trtf_c.cpp<br/>trtf_create_pipeline_ex()
+    participant CABI as trtmc_c.cpp<br/>trtmc_create_pipeline_ex()
     participant Factory as PipelineFactory::from_bundle()<br/>(pipeline_factory.cpp)
     participant Bundle as bundle_format.cpp<br/>ReadBundleFile()
     participant Config as pipeline_plugin.cpp<br/>parse_base_config()
@@ -98,7 +98,7 @@ sequenceDiagram
     participant Plugin as IPipelinePlugin<br/>::create()
     participant Pipeline as Concrete IPipeline
 
-    User->>CABI: trtf_create_pipeline_ex(bundle_path, options)
+    User->>CABI: trtmc_create_pipeline_ex(bundle_path, options)
     CABI->>CABI: validate bundle_path \!= null/empty
     CABI->>CABI: IsBundle(path) -- check magic bytes
     CABI->>Factory: PipelineFactory::from_bundle(path, hf_python)
@@ -122,13 +122,13 @@ sequenceDiagram
 ```
 
 **Key files:**
-- `src/cabi/api/trtf_c.cpp` -- C ABI entry point
+- `src/cabi/api/trtmc_c.cpp` -- C ABI entry point
 - `src/runtime/registry/pipeline_factory.cpp` -- `PipelineFactory::from_bundle()` (~124 LOC)
 - `src/runtime/registry/pipeline_registry.cpp` -- `PipelineRegistry` singleton
 - `src/runtime/registry/pipeline_plugin.cpp` -- `parse_base_config()`
-- `include/trtf/runtime/pipeline_factory.h` -- `PipelineFactory` class declaration
-- `include/trtf/runtime/pipeline_registry.h` -- `PipelineRegistry`, manifest registration macro
-- `include/trtf/runtime/pipeline_plugin.h` -- `IPipelinePlugin`, `BaseConfig`, `PipelineContext`
+- `include/trtmc/runtime/pipeline_factory.h` -- `PipelineFactory` class declaration
+- `include/trtmc/runtime/pipeline_registry.h` -- `PipelineRegistry`, manifest registration macro
+- `include/trtmc/runtime/pipeline_plugin.h` -- `IPipelinePlugin`, `BaseConfig`, `PipelineContext`
 - `src/runtime/plugins/` -- 20 manifest-registered plugin files (25 strategies total)
 - `src/bundle/bundle_format.cpp` -- `ReadBundleFile()`, `HasBundleMagic()`
 
@@ -217,9 +217,9 @@ sequenceDiagram
 
 **Key files:**
 - `src/runtime/pipelines/recurrent_pipeline.h` -- `RecurrentPipeline`
-- `include/trtf/runtime/inference_state.h` -- `IInferenceState` interface
+- `include/trtmc/runtime/inference_state.h` -- `IInferenceState` interface
 - `src/runtime/pipelines/recurrent_pipeline.cpp` -- `generate()`, `run_step()`
-- `include/trtf/runtime/recurrent_state.h` -- `RecurrentState` class
+- `include/trtmc/runtime/recurrent_state.h` -- `RecurrentState` class
 
 ---
 
@@ -379,18 +379,18 @@ sequenceDiagram
 
 All flows use the same error pattern:
 
-1. `trtf_create_pipeline_ex()` catches all exceptions via `try/catch(...)`.
+1. `trtmc_create_pipeline_ex()` catches all exceptions via `try/catch(...)`.
 2. On failure, `set_last_error(msg)` stores the message in a thread-local string.
 3. The function returns `nullptr`.
-4. The caller retrieves the error via `trtf_last_error()`.
+4. The caller retrieves the error via `trtmc_last_error()`.
 
-Pipeline method errors (e.g., `generate()` on an unsupported pipeline type) throw `std::runtime_error` from the default `IPipeline` virtual method implementations in `include/trtf/pipeline.h`.
+Pipeline method errors (e.g., `generate()` on an unsupported pipeline type) throw `std::runtime_error` from the default `IPipeline` virtual method implementations in `include/trtmc/pipeline.h`.
 
 ---
 
 ## 10. Thread Safety
 
-- `g_last_error` in `trtf_c.cpp` is `thread_local` -- safe for concurrent pipeline creation on different threads.
+- `g_last_error` in `trtmc_c.cpp` is `thread_local` -- safe for concurrent pipeline creation on different threads.
 - Individual `IPipeline` instances are NOT thread-safe. Each pipeline owns an exclusive CUDA stream and device state (KvCache, RecurrentState, TrtModule execution context). Concurrent `generate()` calls on the same pipeline instance produce undefined behavior.
 - Different pipeline instances on different CUDA streams can run concurrently.
 

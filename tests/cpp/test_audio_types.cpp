@@ -53,20 +53,20 @@ static void check(bool condition, const char* test_name)
 // Postconditions: decoded samples match input within float32 precision
 static bool test_write_wav_roundtrip()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = (std::filesystem::path(dir.path()) / "out.wav").string();
 
     const std::vector<float> samples = {0.0F, 0.5F, 1.0F, -1.0F, -0.5F, 0.25F};
     const int32_t sample_rate = 22050;
 
-    if (!trtf::write_wav(path, samples.data(),
+    if (!trtmc::write_wav(path, samples.data(),
                          static_cast<int32_t>(samples.size()), sample_rate))
     {
         std::cerr << "write_wav_roundtrip: write_wav returned false\n";
         return false;
     }
 
-    const auto wav = trtf::read_wav(path);
+    const auto wav = trtmc::read_wav(path);
     if (wav.sample_rate != sample_rate)
     {
         std::cerr << "write_wav_roundtrip: sample_rate mismatch "
@@ -97,19 +97,19 @@ static bool test_write_wav_roundtrip()
 // Postconditions: returned sample_rate equals the written rate
 static bool test_write_wav_sample_rate_preserved()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = (std::filesystem::path(dir.path()) / "rate.wav").string();
 
     const std::vector<float> samples = {0.1F, 0.2F, 0.3F};
     const int32_t sample_rate = 44100;
 
-    if (!trtf::write_wav(path, samples.data(),
+    if (!trtmc::write_wav(path, samples.data(),
                          static_cast<int32_t>(samples.size()), sample_rate))
     {
         return false;
     }
 
-    const auto wav = trtf::read_wav(path);
+    const auto wav = trtmc::read_wav(path);
     return wav.sample_rate == sample_rate;
 }
 
@@ -118,16 +118,16 @@ static bool test_write_wav_sample_rate_preserved()
 // Postconditions: decoded result has exactly one sample matching the input
 static bool test_write_wav_single_sample()
 {
-    trtf_test::TempDirGuard dir;
+    trtmc_test::TempDirGuard dir;
     const auto path = (std::filesystem::path(dir.path()) / "single.wav").string();
 
     const float sample = 0.75F;
-    if (!trtf::write_wav(path, &sample, 1, 16000))
+    if (!trtmc::write_wav(path, &sample, 1, 16000))
     {
         return false;
     }
 
-    const auto wav = trtf::read_wav(path);
+    const auto wav = trtmc::read_wav(path);
     return wav.samples.size() == 1 &&
            std::abs(wav.samples[0] - sample) < 1e-6F;
 }
@@ -139,7 +139,7 @@ static bool test_write_wav_single_sample()
 static bool test_write_wav_bad_path_returns_false()
 {
     const std::vector<float> samples = {0.0F};
-    return !trtf::write_wav("/nonexistent/dir/out.wav",
+    return !trtmc::write_wav("/nonexistent/dir/out.wav",
                             samples.data(), 1, 16000);
 }
 

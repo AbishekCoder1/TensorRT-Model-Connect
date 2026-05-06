@@ -5,9 +5,9 @@
 #   ./scripts/validate_family.sh Qwen/Qwen3-0.6B                       # HF repo ID
 #   ./scripts/validate_family.sh models/hf/Qwen__Qwen3-0.6B            # local dir
 #   ./scripts/validate_family.sh Qwen/Qwen3-0.6B --max-cache-length 512
-#   ./scripts/validate_family.sh Qwen/Qwen3-0.6B --binary ./build/trtf
+#   ./scripts/validate_family.sh Qwen/Qwen3-0.6B --binary ./build/trtmc
 #
-# Requirements: torch, trtf_build installed, C++ binary built.
+# Requirements: torch, tensorrt_model_connect installed, C++ binary built.
 
 set -euo pipefail
 
@@ -16,7 +16,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Defaults
 MAX_CACHE_LENGTH=256
-BINARY="${PROJECT_DIR}/build/trtf"
+BINARY="${PROJECT_DIR}/build/trtmc"
 BUNDLE_DIR="/tmp"
 TRUST_REMOTE_CODE=""
 
@@ -88,7 +88,7 @@ run_step() {
 
 # Step 1: Build bundle
 run_step "Build bundle" \
-    trtf-build build "$MODEL" -o "$BUNDLE_PATH" --max-cache-length "$MAX_CACHE_LENGTH"
+    trtmc-build build "$MODEL" -o "$BUNDLE_PATH" --max-cache-length "$MAX_CACHE_LENGTH"
 
 # Detect runtime strategy from the built bundle to skip decoder-only tools
 # for encoder-only / seq2seq models (diff_logits, diff_layers, parity only
@@ -158,11 +158,11 @@ for manifest in "${PROJECT_DIR}"/tests/e2e/models/*.json; do
 done
 
 if [[ -n "$E2E_MODEL" ]] && [[ -x "$BINARY" ]]; then
-    ENGINE_DIR="${ENGINE_DIR:-/workspace/users/yifeif/trt-transformers/engines}"
+    ENGINE_DIR="${ENGINE_DIR:-/workspace/users/yifeif/tensorrt-model-connect/engines}"
     run_step "E2E pytest [${E2E_MODEL}]" \
         "$HF_PYTHON" -m pytest "${PROJECT_DIR}/tests/test_e2e.py::test_e2e[${E2E_MODEL}]" -v \
             --engine-dir "$ENGINE_DIR" \
-            --trtf-binary "$BINARY" --hf-python "$HF_PYTHON" \
+            --trtmc-binary "$BINARY" --hf-python "$HF_PYTHON" \
             --rebuild-engines
 elif [[ -z "$E2E_MODEL" ]]; then
     echo ""

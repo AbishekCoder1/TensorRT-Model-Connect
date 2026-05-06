@@ -23,7 +23,7 @@ def _make_ctx(tmp_path) -> RunContext:
             stages=[],
         ),
         artifacts_dir=str(tmp_path),
-        binary_path="./build/trtf",
+        binary_path="./build/trtmc",
         hf_python="/usr/bin/python3",
         engine_dir="/tmp/engines",
     )
@@ -53,7 +53,7 @@ def test_repro_commands_use_segment_sam_for_prompted_segmentation(tmp_path) -> N
 
     cmd = repro["trt_inference"]
     assert " segment-sam " in f" {cmd} "
-    assert "--output /tmp/trtf_masks" in cmd
+    assert "--output /tmp/trtmc_masks" in cmd
     assert "--point-x 0.5" in cmd
     assert "--point-y 0.25" in cmd
 
@@ -84,7 +84,7 @@ def test_repro_commands_use_generate_video_for_diffusion(tmp_path) -> None:
 
     cmd = repro["trt_inference"]
     assert " generate-video " in f" {cmd} "
-    assert "--output /tmp/trtf_frames" in cmd
+    assert "--output /tmp/trtmc_frames" in cmd
     assert "--num-steps 28" in cmd
     assert "--guidance-scale 3.0" in cmd
     assert "--seed 42" in cmd

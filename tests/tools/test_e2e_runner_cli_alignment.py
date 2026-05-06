@@ -35,7 +35,7 @@ def _make_case(task_strategy: str, inputs: dict | None = None, **overrides) -> E
 
 
 def _make_ctx(case: E2ECase, tmp_path) -> RunContext:
-    binary_path = tmp_path / "trtf"
+    binary_path = tmp_path / "trtmc"
     binary_path.write_text("", encoding="utf-8")
     return RunContext(
         case=case,
@@ -159,7 +159,7 @@ def test_audio_runner_maps_runtime_config_to_set_flags(monkeypatch, tmp_path):
     assert "audio_magpie.cfg_scale=2.5" in cmd
     assert "audio_magpie.temperature=0.6" in cmd
     assert "audio_magpie.seed=42" in cmd
-    assert "TRTF_MAGPIE_SEED" not in captured["env"]
+    assert "TRTMC_MAGPIE_SEED" not in captured["env"]
     assert out.metadata["command"] == cmd
 
 

@@ -43,7 +43,7 @@ static void check(bool condition, const char* test_name) {
 }
 
 static std::filesystem::path make_temp_dir() {
-    char pattern[] = "/tmp/trtf_wav_test_XXXXXX";
+    char pattern[] = "/tmp/trtmc_wav_test_XXXXXX";
     char* dir = mkdtemp(pattern);
     if (dir == nullptr)
         throw std::runtime_error("mkdtemp failed");
@@ -148,7 +148,7 @@ int main() {
         std::vector<int16_t> pcm = {0, 16384, 32767, -32768, -16384, 0};
         auto path = (tmp / "mono16.wav").string();
         write_pcm16_wav(path, pcm, 16000);
-        auto wav = trtf::read_wav(path);
+        auto wav = trtmc::read_wav(path);
         check(wav.sample_rate == 16000, "pcm16_mono: sample_rate");
         check(wav.samples.size() == 6, "pcm16_mono: sample count");
         check(std::abs(wav.samples[0]) < 1e-5F, "pcm16_mono: sample[0] == 0");
@@ -161,7 +161,7 @@ int main() {
         std::vector<float> flt = {0.0F, 0.5F, 1.0F, -1.0F, -0.5F};
         auto path = (tmp / "monof32.wav").string();
         write_float32_wav(path, flt, 44100);
-        auto wav = trtf::read_wav(path);
+        auto wav = trtmc::read_wav(path);
         check(wav.sample_rate == 44100, "float32_mono: sample_rate");
         check(wav.samples.size() == 5, "float32_mono: sample count");
         check(std::abs(wav.samples[1] - 0.5F) < 1e-6F, "float32_mono: sample[1]");
@@ -174,7 +174,7 @@ int main() {
         std::vector<int16_t> stereo = {1000, 3000, -2000, -4000};
         auto path = (tmp / "stereo16.wav").string();
         write_stereo_pcm16_wav(path, stereo, 16000);
-        auto wav = trtf::read_wav(path);
+        auto wav = trtmc::read_wav(path);
         check(wav.samples.size() == 2, "stereo_to_mono: 2 mono samples");
         // Expected: (1000+3000)/2/32768 ~ 0.061, (-2000-4000)/2/32768 ~ -0.0916
         float expected0 = (1000.0F / 32768.0F + 3000.0F / 32768.0F) * 0.5F;
@@ -184,14 +184,14 @@ int main() {
     // Test 4: resample_linear (16kHz -> 8kHz: half the samples)
     {
         std::vector<float> src = {0.0F, 1.0F, 0.0F, -1.0F, 0.0F, 1.0F, 0.0F, -1.0F};
-        auto resampled = trtf::resample_linear(src.data(), 8, 16000, 8000);
+        auto resampled = trtmc::resample_linear(src.data(), 8, 16000, 8000);
         check(resampled.size() == 4, "resample: half count");
     }
 
     // Test 5: resample_linear identity (same rate)
     {
         std::vector<float> src = {0.1F, 0.2F, 0.3F};
-        auto resampled = trtf::resample_linear(src.data(), 3, 16000, 16000);
+        auto resampled = trtmc::resample_linear(src.data(), 3, 16000, 16000);
         check(resampled.size() == 3, "resample_identity: same count");
         check(std::abs(resampled[1] - 0.2F) < 1e-6F, "resample_identity: values match");
     }
@@ -200,14 +200,14 @@ int main() {
     {
         bool caught = false;
         try {
-            trtf::read_wav("/nonexistent/file.wav");
+            trtmc::read_wav("/nonexistent/file.wav");
         } catch (...) {
             caught = true;
         }
         check(caught, "invalid_file: throws");
     }
 
-    trtf_test::remove_all_safe(tmp);
+    trtmc_test::remove_all_safe(tmp);
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
     }

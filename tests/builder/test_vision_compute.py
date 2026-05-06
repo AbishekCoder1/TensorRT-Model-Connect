@@ -5,7 +5,7 @@ permutation. No TRT needed.
 
 Trace: ARCH-VIS-001, UD-VIS-ROPE
 Intent: Validate vision 2D RoPE table computation shapes, frequency correctness, and window index permutation
-Preconditions: trtf_build is importable; no TRT or GPU required
+Preconditions: tensorrt_model_connect is importable; no TRT or GPU required
 Postconditions: RoPE cos/sin tables and window indices have correct shapes and mathematical properties
 """
 
@@ -14,8 +14,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
-from trtf_build.qwen_vl_vision_builder import _compute_vision_rope_tables
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+from tensorrt_model_connect.qwen_vl_vision_builder import _compute_vision_rope_tables
 
 
 class TestComputeVisionRopeTables:

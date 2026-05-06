@@ -8,11 +8,11 @@
 #include "runtime/domains/audio/magpie_decoder_plan.h"
 #include "runtime/domains/audio/magpie_text_completion_policy.h"
 
-#ifndef TRTF_HAS_CUDA_KERNELS
-#define TRTF_HAS_CUDA_KERNELS 0
+#ifndef TRTMC_HAS_CUDA_KERNELS
+#define TRTMC_HAS_CUDA_KERNELS 0
 #endif
 
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
 #include "runtime/domains/audio/magpie_kernels.h"
 #endif
 
@@ -26,7 +26,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 using SteadyClock = std::chrono::steady_clock;
@@ -64,7 +64,7 @@ bool check_magpie_gpu_kernels_available([[maybe_unused]] const CudaBuffer& audio
                                         [[maybe_unused]] const CudaBuffer& codes,
                                         [[maybe_unused]] const CudaBuffer& full_argmax,
                                         [[maybe_unused]] const CudaBuffer& prev_codes) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     return audio_embed.ok() && codes.ok() && full_argmax.ok() && prev_codes.ok();
 #else
     return false;
@@ -76,7 +76,7 @@ void upload_magpie_prev_codes_to_device([[maybe_unused]] CudaBuffer& d_prev,
                                         [[maybe_unused]] int32_t num_cb,
                                         [[maybe_unused]] bool use_gpu,
                                         [[maybe_unused]] bool use_gpu_greedy) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     if (use_gpu && !use_gpu_greedy) {
         cudaMemcpy(d_prev.data(), host_codes, static_cast<std::size_t>(num_cb) * sizeof(int32_t),
                    cudaMemcpyHostToDevice);
@@ -579,7 +579,7 @@ bool MagpiePipeline::prefill_context_sequential(DecoderLoopState& state, int32_t
 // ---------------------------------------------------------------------------
 
 bool MagpiePipeline::run_cfg_uncond_pass_gpu(DecoderLoopState& state, int32_t frame) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     // Save conditioned logits
     void* cond_logits_ptr = decoder_->device_ptr("logits");
     cudaMemcpyAsync(device_logits_cond_.data(), cond_logits_ptr,
@@ -714,7 +714,7 @@ void MagpiePipeline::cpu_compute_frame_embed(DecoderLoopState& state,
 
 bool MagpiePipeline::gpu_greedy_frame_step(DecoderLoopState& state, int32_t frame,
                                            CudaBuffer& d_eos_flag) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     constexpr int32_t EOS_TOKEN = 2017;
     constexpr int32_t AUDIO_RANGE = 2016;
 
@@ -804,7 +804,7 @@ bool MagpiePipeline::gpu_greedy_frame_step(DecoderLoopState& state, int32_t fram
 }
 
 void MagpiePipeline::gpu_greedy_update_text_consumed(DecoderLoopState& state, int32_t frame) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     if (state.text_consumed)
         return;
     if (state.use_cross_attn_tracking) {
@@ -833,7 +833,7 @@ void MagpiePipeline::gpu_greedy_update_text_consumed(DecoderLoopState& state, in
 
 std::vector<int32_t> MagpiePipeline::run_gpu_greedy_loop(DecoderLoopState& state,
                                                          int32_t max_frames) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     constexpr int32_t EOS_CHECK_INTERVAL = 16;
     constexpr int32_t MIN_FRAMES = 4;
 
@@ -1002,7 +1002,7 @@ std::vector<int32_t> MagpiePipeline::run_decoder(int32_t max_frames) {
 bool MagpiePipeline::gpu_sampling_frame_step(DecoderLoopState& state, int32_t frame,
                                              CudaBuffer& d_eos_flag,
                                              std::vector<int32_t>& h_codes) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     constexpr int32_t EOS_TOKEN = kMagpieEosToken;
     constexpr int32_t AUDIO_RANGE = kMagpieAudioRange;
 
@@ -1120,7 +1120,7 @@ bool MagpiePipeline::gpu_sampling_frame_step(DecoderLoopState& state, int32_t fr
 
 std::vector<int32_t> MagpiePipeline::run_gpu_sampling_loop(DecoderLoopState& state,
                                                            int32_t max_frames) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     constexpr int32_t MIN_FRAMES = 4;
 
     const int32_t num_cb = state.num_cb;
@@ -1164,7 +1164,7 @@ std::vector<int32_t> MagpiePipeline::run_gpu_sampling_loop(DecoderLoopState& sta
 bool MagpiePipeline::gpu_check_stop_conditions(DecoderLoopState& state, int32_t frame,
                                                CudaBuffer& d_eos_flag, int32_t& h_eos_flag,
                                                int32_t& gen_frames_actual) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     (void)state;
     (void)frame;
     (void)gen_frames_actual;
@@ -1184,7 +1184,7 @@ bool MagpiePipeline::gpu_check_stop_conditions(DecoderLoopState& state, int32_t 
 }
 
 void MagpiePipeline::gpu_update_text_completion(DecoderLoopState& state, int32_t frame) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     if (state.text_consumed)
         return;
     if (state.use_cross_attn_tracking) {
@@ -1977,7 +1977,7 @@ void MagpiePipeline::log_pipeline_profiling(int32_t num_frames, int32_t num_samp
 void MagpiePipeline::apply_env_overrides() {
     // All values now arrive pre-populated from the audio_magpie.* namespace
     // (magpie_plugin does the ctx.runtime_config reads at construction).
-    // Formerly this method read TRTF_MAGPIE_{GREEDY,CFG_SCALE,TEMPERATURE,
+    // Formerly this method read TRTMC_MAGPIE_{GREEDY,CFG_SCALE,TEMPERATURE,
     // FINISHED_LIMIT,SEED} directly — those env vars are deleted.
     if (config_.seed >= 0)
         rng_.seed(static_cast<std::mt19937::result_type>(config_.seed));
@@ -2103,4 +2103,4 @@ AudioResult MagpiePipeline::generate_audio(const std::string& prompt, const Gene
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

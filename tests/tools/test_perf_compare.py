@@ -545,7 +545,7 @@ class TestSerialGpuExecution:
 
         # Patch _resolve_model
         monkeypatch.setattr(
-            "trtf_build.engine_builder._resolve_model",
+            "tensorrt_model_connect.engine_builder._resolve_model",
             lambda _: "/fake/model_dir")
 
         # Patch AutoTokenizer — patch via sys.modules to avoid triggering

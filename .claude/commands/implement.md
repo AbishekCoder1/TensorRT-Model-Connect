@@ -9,16 +9,16 @@ Rules:
 
 Workflow:
 1. Run `git fetch origin ai-staging`.
-2. Run `python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging dashboard`.
-3. If there is an open generated MR targeting `ai-staging` with a failed or canceled current head pipeline and no active fix pipeline, run `python3 tools/ai_agent_system.py --project yifeif/trt-transformers mark-rework --mr <mr-iid> --skip-if-active-pipeline --reason "<short failed pipeline reason>"`.
-4. Run `python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging next-task --json`.
+2. Run `python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging dashboard`.
+3. If there is an open generated MR targeting `ai-staging` with a failed or canceled current head pipeline and no active fix pipeline, run `python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect mark-rework --mr <mr-iid> --skip-if-active-pipeline --reason "<short failed pipeline reason>"`.
+4. Run `python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging next-task --json`.
 5. If no ready or rework task is available, stop with a concise idle report.
 6. Read the issue and verify it has the required task contract: scope, change, acceptance criteria, verification, non-goals, and risk.
-7. If the issue has `ai:needs-rework`, run `python3 tools/ai_agent_system.py --project yifeif/trt-transformers related-mrs <issue-iid> --json`.
+7. If the issue has `ai:needs-rework`, run `python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect related-mrs <issue-iid> --json`.
    - If an open related MR targeting `ai-staging` has a head pipeline in `created`, `waiting_for_resource`, `preparing`, `pending`, or `running`, stop and report that a fix pipeline is already in flight.
    - If an open related MR targeting `ai-staging` exists and has no active head pipeline, set `<branch>` to that MR's source branch and repair that existing MR.
    - If no open related MR exists, treat the issue as a normal ready task and create a new MR.
-8. Claim the issue with `python3 tools/ai_agent_system.py --project yifeif/trt-transformers claim-task <issue-iid>`.
+8. Claim the issue with `python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect claim-task <issue-iid>`.
 9. For a new task, create a branch name `ai-task-<issue-iid>-<short-slug>` and verify it does not already exist with `git ls-remote --heads origin <branch>`.
 10. Create an isolated implementation worktree under `.ai-pipeline/worktrees/<branch>`.
    - For a new task, create it from `origin/ai-staging`.

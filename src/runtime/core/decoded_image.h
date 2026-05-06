@@ -2,7 +2,7 @@
 
 // Internal definition of DecodedImage.
 // This header replaces the deleted public
-// include/trtf/runtime/adapters/io/media_io_adapter.h.
+// include/trtmc/runtime/adapters/io/media_io_adapter.h.
 // It is used only inside src/runtime/domains/ for image preprocessing,
 // perception, and embedding backends.
 
@@ -10,7 +10,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace runtime {
 namespace adapters {
 namespace io {
@@ -31,4 +31,4 @@ struct DecodedImage {
 } // namespace io
 } // namespace adapters
 } // namespace runtime
-} // namespace trtf
+} // namespace trtmc

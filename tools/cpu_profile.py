@@ -86,7 +86,7 @@ class _TimedDecoderRunner:
 
     def __init__(self, engine_plan: bytes, max_cache_length: int,
                  num_layers: int):
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
         self._runner = TrtRunner(
             engine_plan=engine_plan,
             max_cache_length=max_cache_length,
@@ -230,7 +230,7 @@ class _TimedMambaRunner:
     PHASES = MAMBA_PHASES
 
     def __init__(self, engine_plan: bytes, num_layers: int):
-        from trtf_build.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.debug_runner import MambaTrtRunner
         self._runner = MambaTrtRunner(
             engine_plan=engine_plan,
             num_layers=num_layers,
@@ -474,7 +474,7 @@ def main():
     args = parser.parse_args()
 
     # -- Resolve model and tokenize --
-    from trtf_build.engine_builder import _resolve_model
+    from tensorrt_model_connect.engine_builder import _resolve_model
     from transformers import AutoTokenizer
 
     model_dir = _resolve_model(args.model)

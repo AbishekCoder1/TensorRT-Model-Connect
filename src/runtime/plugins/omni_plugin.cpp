@@ -4,10 +4,10 @@
 #include "runtime/pipelines/omni_pipeline.h"
 #include "runtime/plugins/shared/audio_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
-namespace trtf {
+namespace trtmc {
 
 class OmniPlugin final : public IPipelinePlugin {
   public:
@@ -82,4 +82,4 @@ class OmniPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_omni_plugin, OmniPlugin, "omni_multimodal");
 
-} // namespace trtf
+} // namespace trtmc

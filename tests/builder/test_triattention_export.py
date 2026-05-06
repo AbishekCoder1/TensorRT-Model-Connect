@@ -1,4 +1,4 @@
-"""Unit tests for trtf_build.triattention_export."""
+"""Unit tests for tensorrt_model_connect.triattention_export."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import json
 import sys
 import types
 
-from trtf_build.config import ModelConfig
-from trtf_build.triattention_export import export_triattention_stats_section
+from tensorrt_model_connect.config import ModelConfig
+from tensorrt_model_connect.triattention_export import export_triattention_stats_section
 
 
 def test_export_rkv_stats_embeds_inv_freq_and_layer_stats(tmp_path, monkeypatch):

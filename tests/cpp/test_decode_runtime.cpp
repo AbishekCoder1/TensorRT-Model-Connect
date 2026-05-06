@@ -40,7 +40,7 @@
 //      with/without current-token slot).
 //
 // Environment:
-//   Guarded by TRTF_HAS_TRT. Skips gracefully (exit 0) when TensorRT headers
+//   Guarded by TRTMC_HAS_TRT. Skips gracefully (exit 0) when TensorRT headers
 //   are not available. No GPU execution — tests only exercise CPU logic.
 // =============================================================================
 
@@ -63,7 +63,7 @@ namespace {
 // -----------------------------------------------------------------------------
 bool test_argmax_basic() {
     const std::vector<float> logits = {0.1F, 0.9F, 0.3F};
-    const int32_t result = trtf::select_argmax_token(logits);
+    const int32_t result = trtmc::select_argmax_token(logits);
     if (result != 1) {
         std::cerr << "argmax_basic: got " << result << std::endl;
         return false;
@@ -79,7 +79,7 @@ bool test_argmax_basic() {
 // -----------------------------------------------------------------------------
 bool test_argmax_single() {
     const std::vector<float> logits = {5.0F};
-    const int32_t result = trtf::select_argmax_token(logits);
+    const int32_t result = trtmc::select_argmax_token(logits);
     if (result != 0) {
         std::cerr << "argmax_single: got " << result << std::endl;
         return false;
@@ -95,7 +95,7 @@ bool test_argmax_single() {
 // -----------------------------------------------------------------------------
 bool test_argmax_empty() {
     const std::vector<float> logits;
-    const int32_t result = trtf::select_argmax_token(logits);
+    const int32_t result = trtmc::select_argmax_token(logits);
     if (result != 0) {
         std::cerr << "argmax_empty: got " << result << std::endl;
         return false;
@@ -111,7 +111,7 @@ bool test_argmax_empty() {
 // -----------------------------------------------------------------------------
 bool test_argmax_all_negative() {
     const std::vector<float> logits = {-3.0F, -1.0F, -5.0F, -2.0F};
-    const int32_t result = trtf::select_argmax_token(logits);
+    const int32_t result = trtmc::select_argmax_token(logits);
     if (result != 1) {
         std::cerr << "argmax_all_negative: got " << result << std::endl;
         return false;
@@ -130,7 +130,7 @@ bool test_argmax_all_negative() {
 bool test_argmax_tie() {
     // std::max_element returns first occurrence
     const std::vector<float> logits = {1.0F, 5.0F, 5.0F, 2.0F};
-    const int32_t result = trtf::select_argmax_token(logits);
+    const int32_t result = trtmc::select_argmax_token(logits);
     if (result != 1) {
         std::cerr << "argmax_tie: got " << result << std::endl;
         return false;
@@ -148,7 +148,7 @@ bool test_argmax_tie() {
 // -----------------------------------------------------------------------------
 bool test_topk_basic() {
     const std::vector<float> logits = {0.1F, 0.9F, 0.3F, 0.7F};
-    const auto result = trtf::select_topk_tokens(logits, 2);
+    const auto result = trtmc::select_topk_tokens(logits, 2);
     if (result.size() != 2) {
         std::cerr << "topk_basic: size=" << result.size() << std::endl;
         return false;
@@ -171,7 +171,7 @@ bool test_topk_basic() {
 // -----------------------------------------------------------------------------
 bool test_topk_k_greater_than_size() {
     const std::vector<float> logits = {0.1F, 0.9F};
-    const auto result = trtf::select_topk_tokens(logits, 5);
+    const auto result = trtmc::select_topk_tokens(logits, 5);
     if (result.size() != 2) {
         std::cerr << "topk_k_greater: size=" << result.size() << std::endl;
         return false;
@@ -186,7 +186,7 @@ bool test_topk_k_greater_than_size() {
 // -----------------------------------------------------------------------------
 bool test_topk_k_zero() {
     const std::vector<float> logits = {0.1F, 0.9F};
-    const auto result = trtf::select_topk_tokens(logits, 0);
+    const auto result = trtmc::select_topk_tokens(logits, 0);
     if (!result.empty()) {
         std::cerr << "topk_k_zero: size=" << result.size() << std::endl;
         return false;
@@ -202,7 +202,7 @@ bool test_topk_k_zero() {
 // -----------------------------------------------------------------------------
 bool test_topk_empty() {
     const std::vector<float> logits;
-    const auto result = trtf::select_topk_tokens(logits, 3);
+    const auto result = trtmc::select_topk_tokens(logits, 3);
     if (!result.empty()) {
         std::cerr << "topk_empty: size=" << result.size() << std::endl;
         return false;
@@ -220,7 +220,7 @@ bool test_sample_topk_empty_logits_returns_zero() {
     const std::vector<float> logits;
     uint64_t rng_state = 0x123456789ABCDEF0ULL;
     const uint64_t rng_before = rng_state;
-    const int32_t result = trtf::sample_token_topk(logits, 1.0F, 4, rng_state);
+    const int32_t result = trtmc::sample_token_topk(logits, 1.0F, 4, rng_state);
     if (result != 0) {
         std::cerr << "sample_topk_empty: got " << result << std::endl;
         return false;
@@ -243,7 +243,7 @@ bool test_sample_topk_near_zero_temperature_uses_argmax() {
     const std::vector<float> logits = {0.2F, 2.7F, 1.5F, 2.1F};
     uint64_t rng_state = 0x0FEDCBA987654321ULL;
     const uint64_t rng_before = rng_state;
-    const int32_t result = trtf::sample_token_topk(logits, 1.0e-8F, 4, rng_state);
+    const int32_t result = trtmc::sample_token_topk(logits, 1.0e-8F, 4, rng_state);
     if (result != 1) {
         std::cerr << "sample_topk_near_zero_temp: got " << result << std::endl;
         return false;
@@ -266,8 +266,8 @@ bool test_sample_topk_k_one_is_deterministic_argmax() {
     const std::vector<float> logits = {0.4F, 0.9F, 1.8F, -0.1F};
     uint64_t rng_a = 0x1111111111111111ULL;
     uint64_t rng_b = 0x2222222222222222ULL;
-    const int32_t result_a = trtf::sample_token_topk(logits, 0.7F, 1, rng_a);
-    const int32_t result_b = trtf::sample_token_topk(logits, 0.7F, 1, rng_b);
+    const int32_t result_a = trtmc::sample_token_topk(logits, 0.7F, 1, rng_a);
+    const int32_t result_b = trtmc::sample_token_topk(logits, 0.7F, 1, rng_b);
     if (result_a != 2 || result_b != 2) {
         std::cerr << "sample_topk_k1: got [" << result_a << ", " << result_b << "]" << std::endl;
         return false;
@@ -283,7 +283,7 @@ bool test_sample_topk_k_one_is_deterministic_argmax() {
 bool test_sample_topk_non_positive_k_clamps_to_one() {
     const std::vector<float> logits = {-1.0F, 3.0F, 0.5F};
     uint64_t rng_state = 0xABCDEF0011223344ULL;
-    const int32_t result = trtf::sample_token_topk(logits, 1.0F, -7, rng_state);
+    const int32_t result = trtmc::sample_token_topk(logits, 1.0F, -7, rng_state);
     if (result != 1) {
         std::cerr << "sample_topk_k_non_positive: got " << result << std::endl;
         return false;
@@ -300,7 +300,7 @@ bool test_sample_topk_mutates_rng_state() {
     const std::vector<float> logits = {0.1F, 0.8F, 1.6F, -0.5F};
     uint64_t rng_state = 0x0123456789ABCDEFULL;
     const uint64_t rng_before = rng_state;
-    const int32_t sampled = trtf::sample_token_topk(logits, 0.8F, 2, rng_state);
+    const int32_t sampled = trtmc::sample_token_topk(logits, 0.8F, 2, rng_state);
     if (sampled != 1 && sampled != 2) {
         std::cerr << "sample_topk_rng_mutates: sampled=" << sampled << std::endl;
         return false;
@@ -318,13 +318,13 @@ bool test_sample_topk_mutates_rng_state() {
 // Mechanism:  Calls build_attention_mask and checks both results are empty.
 // -----------------------------------------------------------------------------
 bool test_mask_non_positive_width_returns_empty() {
-    const auto zero_width = trtf::build_attention_mask(0, 0, false);
+    const auto zero_width = trtmc::build_attention_mask(0, 0, false);
     if (!zero_width.empty()) {
         std::cerr << "mask_non_positive_width: zero_width size=" << zero_width.size() << std::endl;
         return false;
     }
 
-    const auto negative_width = trtf::build_attention_mask(2, -1, true);
+    const auto negative_width = trtmc::build_attention_mask(2, -1, true);
     if (!negative_width.empty()) {
         std::cerr << "mask_non_positive_width: negative_width size=" << negative_width.size()
                   << std::endl;
@@ -341,7 +341,7 @@ bool test_mask_non_positive_width_returns_empty() {
 //             (current slot) visible.
 // -----------------------------------------------------------------------------
 bool test_mask_negative_cache_with_current_slot() {
-    const auto mask = trtf::build_attention_mask(-3, 3, true);
+    const auto mask = trtmc::build_attention_mask(-3, 3, true);
     if (mask.size() != 4) {
         std::cerr << "mask_negative_cache_current: size=" << mask.size() << std::endl;
         return false;
@@ -372,7 +372,7 @@ bool test_mask_negative_cache_with_current_slot() {
 bool test_mask_cache0_no_current() {
     // cache_length=0, max=4, include_current=false
     // First position visible (else clause), rest masked
-    const auto mask = trtf::build_attention_mask(0, 4, false);
+    const auto mask = trtmc::build_attention_mask(0, 4, false);
     if (mask.size() != 4) {
         std::cerr << "mask_cache0: size=" << mask.size() << std::endl;
         return false;
@@ -401,7 +401,7 @@ bool test_mask_cache0_no_current() {
 // -----------------------------------------------------------------------------
 bool test_mask_cache3_no_current() {
     // cache_length=3, max=4, include_current=false -> 3 visible, 1 masked
-    const auto mask = trtf::build_attention_mask(3, 4, false);
+    const auto mask = trtmc::build_attention_mask(3, 4, false);
     if (mask.size() != 4) {
         std::cerr << "mask_cache3: size=" << mask.size() << std::endl;
         return false;
@@ -430,7 +430,7 @@ bool test_mask_cache3_no_current() {
 // -----------------------------------------------------------------------------
 bool test_mask_with_current_slot() {
     // cache_length=0, max=4, include_current=true -> width=5, last slot visible
-    const auto mask = trtf::build_attention_mask(0, 4, true);
+    const auto mask = trtmc::build_attention_mask(0, 4, true);
     if (mask.size() != 5) {
         std::cerr << "mask_current: size=" << mask.size() << std::endl;
         return false;
@@ -453,7 +453,7 @@ bool test_mask_with_current_slot() {
 // -----------------------------------------------------------------------------
 bool test_mask_full_cache() {
     // cache_length >= max -> all positions visible
-    const auto mask = trtf::build_attention_mask(5, 4, false);
+    const auto mask = trtmc::build_attention_mask(5, 4, false);
     if (mask.size() != 4) {
         std::cerr << "mask_full: size=" << mask.size() << std::endl;
         return false;

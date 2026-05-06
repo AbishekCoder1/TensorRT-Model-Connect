@@ -56,7 +56,7 @@ TRT void* device pointers + known shapes/dtypes
 - [ ] `src/plugins/tvm_ffi_kernel_plugin.cpp` — implementation
 - [ ] `src/plugins/tvm_ffi_kernel_creator.cpp` — IPluginCreatorV3One registration
 - [ ] CMake: find/link `libtvm_ffi`, compile plugin sources, register plugin .so
-- [ ] `trtf_build/trtf_build/graph_ops.py`: `add_tvm_ffi_kernel()` helper
+- [ ] `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py`: `add_tvm_ffi_kernel()` helper
 - [ ] `tests/cpp/test_tvm_ffi_plugin.cpp` — dummy kernel round-trip through TRT engine
 
 ### IPluginV3 Bridge Design
@@ -139,12 +139,12 @@ find_library(TVM_FFI_LIBRARY tvm_ffi
   HINTS /opt/venv/lib ${TVM_FFI_ROOT}/lib)
 
 if(TVM_FFI_INCLUDE_DIR AND TVM_FFI_LIBRARY)
-  target_sources(trtf_core PRIVATE
+  target_sources(trtmc_core PRIVATE
     src/plugins/tvm_ffi_kernel_plugin.cpp
     src/plugins/tvm_ffi_kernel_creator.cpp)
-  target_include_directories(trtf_core PRIVATE ${TVM_FFI_INCLUDE_DIR})
-  target_link_libraries(trtf_core PRIVATE ${TVM_FFI_LIBRARY})
-  target_compile_definitions(trtf_core PRIVATE TRTF_HAS_TVM_FFI=1)
+  target_include_directories(trtmc_core PRIVATE ${TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(trtmc_core PRIVATE ${TVM_FFI_LIBRARY})
+  target_compile_definitions(trtmc_core PRIVATE TRTMC_HAS_TVM_FFI=1)
 endif()
 ```
 
@@ -152,7 +152,7 @@ endif()
 
 - Dummy kernel round-trip passes (build engine → run → verify output).
 - Plugin serializes/deserializes correctly (engine save → load → run).
-- `TRTF_HAS_TVM_FFI=0` builds cleanly without tvm-ffi installed.
+- `TRTMC_HAS_TVM_FFI=0` builds cleanly without tvm-ffi installed.
 
 ---
 
@@ -161,7 +161,7 @@ endif()
 ### Deliverables
 
 - [ ] Container setup: `pip install flashinfer` (brings tvm-ffi dependency)
-- [ ] `trtf_build/trtf_build/ffi_kernels/flashinfer_attention.py` — register
+- [ ] `tensorrt_model_connect/tensorrt_model_connect/ffi_kernels/flashinfer_attention.py` — register
       FlashInfer decode + prefill attention as TVM-FFI functions with shape specs
 - [ ] `graph_ops.py`: `add_fused_attention()` that uses `add_tvm_ffi_kernel()`
       instead of the current multi-layer attention composition
@@ -197,11 +197,11 @@ The plugin receives cache pointers as additional inputs alongside Q.
 ### Deliverables
 
 - [ ] Container setup: `pip install nvidia-cutlass-dsl` (CUTLASS 4.3+)
-- [ ] `trtf_build/trtf_build/ffi_kernels/fused_rmsnorm.py` — CuTe DSL fused
+- [ ] `tensorrt_model_connect/tensorrt_model_connect/ffi_kernels/fused_rmsnorm.py` — CuTe DSL fused
       RMSNorm + residual add, compiled with `compile_with_tvm_ffi`
-- [ ] `trtf_build/trtf_build/ffi_kernels/fused_swiglu.py` — CuTe DSL fused
+- [ ] `tensorrt_model_connect/tensorrt_model_connect/ffi_kernels/fused_swiglu.py` — CuTe DSL fused
       SwiGLU (gate_proj + up_proj + silu + elementwise mul)
-- [ ] `trtf_build/trtf_build/ffi_kernels/fused_rope.py` — CuTe DSL fused
+- [ ] `tensorrt_model_connect/tensorrt_model_connect/ffi_kernels/fused_rope.py` — CuTe DSL fused
       RoPE application (sin/cos bake + rotate)
 - [ ] `graph_blocks.py`: opt-in `use_cute_fused_ops=True` for fused paths
 - [ ] Unit tests: each fused op vs PyTorch/NumPy reference
@@ -248,7 +248,7 @@ def fused_rmsnorm_residual(x, residual, weight, eps, out):
 
 ### Deliverables
 
-- [ ] `trtf_build/trtf_build/ffi_kernels/tile_attention.py` — CUDA Tile
+- [ ] `tensorrt_model_connect/tensorrt_model_connect/ffi_kernels/tile_attention.py` — CUDA Tile
       attention kernel (cuTile Python), portable across Ampere/Ada/Blackwell/Rubin
 - [ ] Arch-dispatch convention: `kernel_name.sm90` / `kernel_name.sm100` with
       fallback to generic
@@ -259,9 +259,9 @@ def fused_rmsnorm_residual(x, residual, weight, eps, out):
 ### Kernel Name Convention for Arch Dispatch
 
 ```
-trtf.attention.decode          → generic (any arch)
-trtf.attention.decode.sm90     → Blackwell-optimized
-trtf.attention.decode.sm100    → Rubin-optimized
+trtmc.attention.decode          → generic (any arch)
+trtmc.attention.decode.sm90     → Blackwell-optimized
+trtmc.attention.decode.sm100    → Rubin-optimized
 ```
 
 Plugin `enqueue()` resolves: try `name.smXX` first, fall back to `name`.

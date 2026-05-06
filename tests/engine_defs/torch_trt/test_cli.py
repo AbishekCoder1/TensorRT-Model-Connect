@@ -1,13 +1,13 @@
-"""Tests for ttrt_build.cli — CLI argument parsing and dispatch."""
+"""Tests for tensorrt_model_connect.cli — CLI argument parsing and dispatch."""
 
 from __future__ import annotations
 
 import pytest
 
 try:
-    from ttrt_build import cli
+    from tensorrt_model_connect import cli
 except ImportError:
-    pytest.skip("ttrt_build not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 
 class TestCliVersion:
@@ -40,7 +40,7 @@ class TestCliInspect:
         assert result == 1
 
     def test_inspect_valid_bundle(self, tmp_path):
-        from trtf_build.engine_defs.torch_trt.bundle_writer import TtrtBundleInfo, write_bundle
+        from tensorrt_model_connect.engine_defs.torch_trt.bundle_writer import TtrtBundleInfo, write_bundle
         bundle_path = tmp_path / "test.ttrtb"
         write_bundle(str(bundle_path), TtrtBundleInfo(model_type="test"), [])
 

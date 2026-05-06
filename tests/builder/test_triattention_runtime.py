@@ -1,10 +1,10 @@
-"""Unit tests for trtf_build.triattention_runtime."""
+"""Unit tests for tensorrt_model_connect.triattention_runtime."""
 
 from __future__ import annotations
 
 import numpy as np
 
-from trtf_build.triattention_runtime import (
+from tensorrt_model_connect.triattention_runtime import (
     TriAttentionRuntimeConfig,
     TriAttentionSelector,
 )

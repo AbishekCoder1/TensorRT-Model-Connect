@@ -7,8 +7,8 @@ import pytest
 
 
 @pytest.mark.e2e
-def test_inference_produces_text(model_entry, trtf_binary, hf_python, ld_library_path):
-    """trtf run <bundle> should generate non-empty text."""
+def test_inference_produces_text(model_entry, trtmc_binary, hf_python, ld_library_path):
+    """trtmc run <bundle> should generate non-empty text."""
     if model_entry.get("test_type") == "diffusion":
         pytest.skip("Diffusion model — no text inference")
     if model_entry.get("test_type") == "segmentation":
@@ -20,7 +20,7 @@ def test_inference_produces_text(model_entry, trtf_binary, hf_python, ld_library
 
     env = {"LD_LIBRARY_PATH": ld_library_path}
     result = subprocess.run(
-        [str(trtf_binary), "run", model_entry["bundle_path"],
+        [str(trtmc_binary), "run", model_entry["bundle_path"],
          "--prompt", prompt,
          "--max-new-tokens", str(max_new),
          "--hf-python", str(hf_python)],
@@ -32,7 +32,7 @@ def test_inference_produces_text(model_entry, trtf_binary, hf_python, ld_library
 
 
 @pytest.mark.e2e
-def test_inference_deterministic(model_entry, trtf_binary, hf_python, ld_library_path):
+def test_inference_deterministic(model_entry, trtmc_binary, hf_python, ld_library_path):
     """Two runs with the same prompt should produce identical output."""
     if model_entry.get("test_type") == "diffusion":
         pytest.skip("Diffusion model — no text inference")
@@ -44,7 +44,7 @@ def test_inference_deterministic(model_entry, trtf_binary, hf_python, ld_library
     max_new = min(model_entry.get("max_new_tokens", 10), 5)
 
     env = {"LD_LIBRARY_PATH": ld_library_path}
-    cmd = [str(trtf_binary), "run", model_entry["bundle_path"],
+    cmd = [str(trtmc_binary), "run", model_entry["bundle_path"],
            "--prompt", prompt,
            "--max-new-tokens", str(max_new),
            "--hf-python", str(hf_python)]

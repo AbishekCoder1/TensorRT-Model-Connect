@@ -3,15 +3,15 @@
 // SegmentPipeline: single-pass segmentation (SegFormer).
 // Uses a single TrtModule for pixel_values -> logits/mask output.
 
-#include "trtf/pipeline.h"
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class SegmentPipeline final : public IPipeline {
   public:
@@ -27,4 +27,4 @@ class SegmentPipeline final : public IPipeline {
     std::string model_id_;
 };
 
-} // namespace trtf
+} // namespace trtmc

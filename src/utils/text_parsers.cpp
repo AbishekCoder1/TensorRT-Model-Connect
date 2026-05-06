@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 bool starts_with(std::string_view value, std::string_view prefix)
 {
@@ -213,4 +213,4 @@ bool iequals_ascii(std::string_view a, std::string_view b)
     return true;
 }
 
-} // namespace trtf
+} // namespace trtmc

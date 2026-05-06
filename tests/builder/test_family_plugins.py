@@ -23,9 +23,9 @@ import pytest
 
 try:
     from safetensors.numpy import save_file
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 # ---- helpers shared across all tests ----
 
@@ -76,7 +76,7 @@ class TestQwenPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.qwen import plugin
+        from tensorrt_model_connect.families.qwen import plugin
 
         config = {
             "model_type": "qwen3",
@@ -107,7 +107,7 @@ class TestQwenPlugin:
 
     def test_transpose_applied(self, tmp_path):
         """Projections are transposed from [out, in] to [in, out]."""
-        from trtf_build.families.qwen import plugin
+        from tensorrt_model_connect.families.qwen import plugin
 
         config = {
             "model_type": "qwen3",
@@ -157,7 +157,7 @@ class TestGemmaPlugin:
 
     def test_gamma_plus_one(self, tmp_path):
         """RMSNorm weights should have +1.0 added (Gemma offset)."""
-        from trtf_build.families.gemma import plugin
+        from tensorrt_model_connect.families.gemma import plugin
 
         tensors = self._setup(tmp_path)
         cfg = ModelConfig.from_dir(tmp_path)
@@ -179,7 +179,7 @@ class TestGemmaPlugin:
 
     def test_embedding_scaling(self, tmp_path):
         """Embedding should be scaled by sqrt(hidden_size)."""
-        from trtf_build.families.gemma import plugin
+        from tensorrt_model_connect.families.gemma import plugin
 
         tensors = self._setup(tmp_path)
         cfg = ModelConfig.from_dir(tmp_path)
@@ -223,7 +223,7 @@ class TestPhiPlugin:
 
     def test_qkv_split(self, tmp_path):
         """Fused QKV should be correctly split into Q, K, V."""
-        from trtf_build.families.phi import plugin
+        from tensorrt_model_connect.families.phi import plugin
 
         config = {
             "model_type": "phi3",
@@ -260,7 +260,7 @@ class TestPhiPlugin:
 
     def test_gate_up_split(self, tmp_path):
         """Fused gate_up should be correctly split into gate and up."""
-        from trtf_build.families.phi import plugin
+        from tensorrt_model_connect.families.phi import plugin
 
         config = {
             "model_type": "phi3",
@@ -290,7 +290,7 @@ class TestPhiPlugin:
             up_raw.T.astype(np.float32), atol=1e-6)
 
     def test_all_keys_present(self, tmp_path):
-        from trtf_build.families.phi import plugin
+        from tensorrt_model_connect.families.phi import plugin
 
         config = {
             "model_type": "phi3",
@@ -355,7 +355,7 @@ class TestFalconPlugin:
 
     def test_bias_weights_loaded(self, tmp_path):
         """Falcon uses LayerNorm with bias — verify bias keys present."""
-        from trtf_build.families.falcon import plugin
+        from tensorrt_model_connect.families.falcon import plugin
 
         config = {
             "model_type": "falcon",
@@ -381,7 +381,7 @@ class TestFalconPlugin:
 
     def test_fc_mlp_keys(self, tmp_path):
         """Falcon uses fc1/fc2 MLP naming (not gate/up/down)."""
-        from trtf_build.families.falcon import plugin
+        from tensorrt_model_connect.families.falcon import plugin
 
         config = {
             "model_type": "falcon",
@@ -407,7 +407,7 @@ class TestFalconPlugin:
             assert weights[f"layer.{i}.w_fc1"].shape == (self.HIDDEN, self.MLP)
 
     def test_final_norm_beta(self, tmp_path):
-        from trtf_build.families.falcon import plugin
+        from tensorrt_model_connect.families.falcon import plugin
 
         config = {
             "model_type": "falcon",
@@ -470,7 +470,7 @@ class TestMambaPlugin:
 
     def test_a_log_transform(self, tmp_path):
         """A_log should be transformed to A = -exp(A_log)."""
-        from trtf_build.families.mamba import plugin
+        from tensorrt_model_connect.families.mamba import plugin
 
         config = {
             "model_type": "mamba",
@@ -497,7 +497,7 @@ class TestMambaPlugin:
 
     def test_in_proj_split(self, tmp_path):
         """in_proj should be split into w_in_x and w_in_z."""
-        from trtf_build.families.mamba import plugin
+        from tensorrt_model_connect.families.mamba import plugin
 
         config = {
             "model_type": "mamba",
@@ -530,7 +530,7 @@ class TestMambaPlugin:
 
     def test_x_proj_split(self, tmp_path):
         """x_proj should be split into dt, B, C projections."""
-        from trtf_build.families.mamba import plugin
+        from tensorrt_model_connect.families.mamba import plugin
 
         config = {
             "model_type": "mamba",
@@ -567,7 +567,7 @@ class TestMambaPlugin:
 
     def test_conv1d_reshaped(self, tmp_path):
         """conv1d weight [d_inner, 1, conv_kernel] should be reshaped to [d_inner, conv_kernel]."""
-        from trtf_build.families.mamba import plugin
+        from tensorrt_model_connect.families.mamba import plugin
 
         config = {
             "model_type": "mamba",
@@ -591,7 +591,7 @@ class TestMambaPlugin:
 
     def test_metadata_keys(self, tmp_path):
         """Mamba-specific dimension metadata should be stored."""
-        from trtf_build.families.mamba import plugin
+        from tensorrt_model_connect.families.mamba import plugin
 
         config = {
             "model_type": "mamba",
@@ -656,7 +656,7 @@ class TestMixtralPlugin:
 
     def test_expert_weights_mapped(self, tmp_path):
         """Expert gate/up/down weights should be correctly mapped and transposed."""
-        from trtf_build.families.mixtral import plugin
+        from tensorrt_model_connect.families.mixtral import plugin
 
         config = {
             "model_type": "mixtral",
@@ -693,7 +693,7 @@ class TestMixtralPlugin:
                     self.MOE_INTER, self.HIDDEN)
 
     def test_moe_metadata(self, tmp_path):
-        from trtf_build.families.mixtral import plugin
+        from tensorrt_model_connect.families.mixtral import plugin
 
         config = {
             "model_type": "mixtral",
@@ -719,7 +719,7 @@ class TestMixtralPlugin:
 
     def test_expert_transpose_values(self, tmp_path):
         """Verify expert weight values are transposed correctly."""
-        from trtf_build.families.mixtral import plugin
+        from tensorrt_model_connect.families.mixtral import plugin
 
         config = {
             "model_type": "mixtral",
@@ -785,7 +785,7 @@ class TestBloomPlugin:
 
     def test_qkv_interleaved_split(self, tmp_path):
         """BLOOM QKV is per-head interleaved; verify correct split."""
-        from trtf_build.families.bloom import plugin
+        from tensorrt_model_connect.families.bloom import plugin
 
         config = {
             "model_type": "bloom",
@@ -819,7 +819,7 @@ class TestBloomPlugin:
 
     def test_embedding_layernorm(self, tmp_path):
         """BLOOM has an embedding LayerNorm."""
-        from trtf_build.families.bloom import plugin
+        from tensorrt_model_connect.families.bloom import plugin
 
         config = {
             "model_type": "bloom",
@@ -845,7 +845,7 @@ class TestBloomPlugin:
 
     def test_qkv_bias_split(self, tmp_path):
         """QKV biases should be split per-head interleaved just like weights."""
-        from trtf_build.families.bloom import plugin
+        from tensorrt_model_connect.families.bloom import plugin
 
         config = {
             "model_type": "bloom",
@@ -868,7 +868,7 @@ class TestBloomPlugin:
         assert weights["layer.0.q_bias"].shape == (self.HIDDEN,)
 
     def test_all_keys(self, tmp_path):
-        from trtf_build.families.bloom import plugin
+        from tensorrt_model_connect.families.bloom import plugin
 
         config = {
             "model_type": "bloom",
@@ -908,7 +908,7 @@ class TestLlamaPlugin:
 
     def test_load_weights(self, tmp_path):
         """LLaMA uses load_standard_weights — verify compact GQA K/V."""
-        from trtf_build.families.llama import plugin
+        from tensorrt_model_connect.families.llama import plugin
 
         head_dim = self.HIDDEN // self.HEADS  # 4
         kv_hidden = self.KV_HEADS * head_dim  # 8
@@ -938,7 +938,7 @@ class TestLlamaPlugin:
 
     def test_tied_embeddings(self, tmp_path):
         """When lm_head.weight is missing, w_out = transposed embedding."""
-        from trtf_build.families.llama import plugin
+        from tensorrt_model_connect.families.llama import plugin
 
         config = {
             "model_type": "llama",
@@ -1058,7 +1058,7 @@ class TestDeepSeekV2Plugin:
 
     def test_mla_keys_present(self, tmp_path):
         """MLA-specific weight keys should be present."""
-        from trtf_build.families.deepseek_v2 import plugin
+        from tensorrt_model_connect.families.deepseek_v2 import plugin
 
         config = {
             "model_type": "deepseek_v2",
@@ -1112,7 +1112,7 @@ class TestDeepSeekV2Plugin:
 
     def test_mla_metadata(self, tmp_path):
         """DeepSeek-V2 metadata keys should be stored."""
-        from trtf_build.families.deepseek_v2 import plugin
+        from tensorrt_model_connect.families.deepseek_v2 import plugin
 
         config = {
             "model_type": "deepseek_v2",
@@ -1153,7 +1153,7 @@ class TestDeepSeekV2Plugin:
 
     def test_kv_a_transpose(self, tmp_path):
         """KV-A projection should be transposed."""
-        from trtf_build.families.deepseek_v2 import plugin
+        from tensorrt_model_connect.families.deepseek_v2 import plugin
 
         config = {
             "model_type": "deepseek_v2",
@@ -1228,7 +1228,7 @@ class TestQwenVLPlugin:
 
     def test_qwen25_vl_delegates_to_standard(self, tmp_path):
         """Qwen2.5-VL (no deepstack) delegates to load_standard_weights."""
-        from trtf_build.families.qwen_vl import plugin
+        from tensorrt_model_connect.families.qwen_vl import plugin
 
         config = {
             "model_type": "qwen2_vl",
@@ -1256,7 +1256,7 @@ class TestQwenVLPlugin:
 
     def test_qwen3_vl_language_model_prefix(self, tmp_path):
         """Qwen3-VL uses model.language_model.layers.{i} prefix."""
-        from trtf_build.families.qwen_vl import plugin
+        from tensorrt_model_connect.families.qwen_vl import plugin
 
         config = {
             "model_type": "qwen3_vl",
@@ -1314,7 +1314,7 @@ class TestQwenVLPlugin:
 
     def test_qwen3_vl_vision_weights_not_in_text(self, tmp_path):
         """Vision weights (visual.*) should NOT appear in text weight dict."""
-        from trtf_build.families.qwen_vl import plugin
+        from tensorrt_model_connect.families.qwen_vl import plugin
 
         config = {
             "model_type": "qwen3_vl",
@@ -1399,7 +1399,7 @@ class TestInternVLPlugin:
         return t
 
     def test_load_text_weights_keys(self, tmp_path):
-        from trtf_build.families.internvl import plugin
+        from tensorrt_model_connect.families.internvl import plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -1446,7 +1446,7 @@ class TestInternVLPlugin:
 
     def test_qkv_biases_loaded(self, tmp_path):
         """InternVL3 (Qwen2) has q/k biases."""
-        from trtf_build.families.internvl import plugin
+        from tensorrt_model_connect.families.internvl import plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -1479,7 +1479,7 @@ class TestInternVLPlugin:
 
     def test_vision_weights_not_in_text(self, tmp_path):
         """Vision and projector keys should NOT appear in text weight dict."""
-        from trtf_build.families.internvl import plugin
+        from tensorrt_model_connect.families.internvl import plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -1512,7 +1512,7 @@ class TestInternVLPlugin:
 
     def test_transpose_applied(self, tmp_path):
         """Projections should be transposed from [out, in] to [in, out]."""
-        from trtf_build.families.internvl import plugin
+        from tensorrt_model_connect.families.internvl import plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -1546,7 +1546,7 @@ class TestInternVLPlugin:
 
     def test_get_vl_config(self, tmp_path):
         """get_vl_config should return correct VL config for InternVL."""
-        from trtf_build.families.internvl import plugin
+        from tensorrt_model_connect.families.internvl import plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -1584,7 +1584,7 @@ class TestInternVLPlugin:
 
     def test_no_vl_config_without_vision(self, tmp_path):
         """get_vl_config returns None when no vision_config present."""
-        from trtf_build.families.internvl import plugin
+        from tensorrt_model_connect.families.internvl import plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -1636,7 +1636,7 @@ class TestEagleVLMPlugin:
 
     def test_load_weights_embedding(self, tmp_path):
         """Embedding mode: loads Llama backbone weights, no score head."""
-        from trtf_build.families.eagle_vlm import plugin
+        from tensorrt_model_connect.families.eagle_vlm import plugin
 
         config = {
             "model_type": "eagle",
@@ -1676,7 +1676,7 @@ class TestEagleVLMPlugin:
 
     def test_load_weights_reranking(self, tmp_path):
         """Reranking mode: loads score head weights."""
-        from trtf_build.families.eagle_vlm import plugin
+        from tensorrt_model_connect.families.eagle_vlm import plugin
 
         config = {
             "model_type": "eagle",
@@ -1704,7 +1704,7 @@ class TestEagleVLMPlugin:
 
     def test_get_vl_config(self, tmp_path):
         """get_vl_config returns embedding config with vision info."""
-        from trtf_build.families.eagle_vlm import plugin
+        from tensorrt_model_connect.families.eagle_vlm import plugin
 
         config = {
             "model_type": "eagle",
@@ -1731,7 +1731,7 @@ class TestEagleVLMPlugin:
 
     def test_bundle_config_overrides_embedding(self, tmp_path):
         """Bundle config overrides: embedding mode."""
-        from trtf_build.families.eagle_vlm import plugin
+        from tensorrt_model_connect.families.eagle_vlm import plugin
 
         config = {
             "model_type": "eagle",
@@ -1749,7 +1749,7 @@ class TestEagleVLMPlugin:
 
     def test_bundle_config_overrides_reranking(self, tmp_path):
         """Bundle config overrides: reranking mode."""
-        from trtf_build.families.eagle_vlm import plugin
+        from tensorrt_model_connect.families.eagle_vlm import plugin
 
         config = {
             "model_type": "eagle",
@@ -1803,7 +1803,7 @@ class TestGlmPlugin:
 
     def test_gate_up_split(self, tmp_path):
         """Fused gate_up should be correctly split into gate and up."""
-        from trtf_build.families.glm import plugin
+        from tensorrt_model_connect.families.glm import plugin
 
         config = {
             "model_type": "glm",
@@ -1833,7 +1833,7 @@ class TestGlmPlugin:
 
     def test_qkv_biases_stay_compact(self, tmp_path):
         """Q/K/V biases should be loaded; K/V biases stay compact."""
-        from trtf_build.families.glm import plugin
+        from tensorrt_model_connect.families.glm import plugin
 
         config = {
             "model_type": "glm",
@@ -1976,7 +1976,7 @@ class TestCanaryPlugin:
         pytest.importorskip("torch", reason="torch required for canary test")
         pytest.importorskip("yaml", reason="yaml required for canary test")
 
-        from trtf_build.families.canary import plugin
+        from tensorrt_model_connect.families.canary import plugin
 
         sd = self._make_nemo_state_dict(
             self.VOCAB, self.HIDDEN, self.ENC_LAYERS, self.DEC_LAYERS,

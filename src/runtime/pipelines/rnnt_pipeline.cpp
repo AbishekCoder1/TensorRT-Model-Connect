@@ -14,7 +14,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -49,7 +49,7 @@ int32_t subsampled_frame_count(int32_t frames, bool causal) {
 }
 
 bool rnnt_stream_debug_enabled() {
-    const char* v = std::getenv("TRTF_RNNT_STREAM_DEBUG");
+    const char* v = std::getenv("TRTMC_RNNT_STREAM_DEBUG");
     return v && std::string(v) != "0";
 }
 
@@ -689,4 +689,4 @@ std::vector<float> RnntPipeline::run_joint(const float* encoder_frame, const flo
     return std::vector<float>(logits, logits + count);
 }
 
-} // namespace trtf
+} // namespace trtmc

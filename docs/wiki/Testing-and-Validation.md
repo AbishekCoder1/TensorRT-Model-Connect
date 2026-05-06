@@ -1,6 +1,6 @@
 # Testing and Validation
 
-Comprehensive manual for the trt-transformers-cpp test infrastructure. Covers every abstraction layer, source file locations, intentions, pytest markers, and commands for running each suite.
+Comprehensive manual for the tensorrt-model-connect test infrastructure. Covers every abstraction layer, source file locations, intentions, pytest markers, and commands for running each suite.
 
 ---
 
@@ -63,7 +63,7 @@ C++ example:
 // Intent: Validate FastPathModelConfig preserves diffusion runtime strategy from bundle config.
 // Preconditions:
 //   - Input config JSON includes "runtime_strategy": "diffusion".
-//   - Parser is called through fast-path config load flow used by trtf_c.cpp.
+//   - Parser is called through fast-path config load flow used by trtmc_c.cpp.
 // Postconditions:
 //   - Parsed runtime strategy equals "diffusion".
 //   - Downstream dispatch can branch to create_diffusion_pipeline(...).
@@ -109,7 +109,7 @@ for the majority of tests.
 
 **Pytest markers used**: `@pytest.mark.unit` (no GPU), `@pytest.mark.trt` (needs TRT), `@pytest.mark.gpu` (needs GPU).
 
-**Skip markers**: All files use `try/except` with `pytest.skip(allow_module_level=True)` so they skip cleanly when TRT or `trtf_build` is not installed. GPU tests also use a `@requires_trt` skipif decorator.
+**Skip markers**: All files use `try/except` with `pytest.skip(allow_module_level=True)` so they skip cleanly when TRT or `tensorrt_model_connect` is not installed. GPU tests also use a `@requires_trt` skipif decorator.
 
 ### Sub-categories
 
@@ -262,7 +262,7 @@ ctest --test-dir build -R test_bundle_format --output-on-failure
 
 **Implementation**: Plain `main()` executables with no test framework. A
 `check(condition, name)` helper accumulates `failures`; `main()` returns
-non-zero if any failed. TRT-dependent tests guard with `#if TRTF_HAS_TRT`
+non-zero if any failed. TRT-dependent tests guard with `#if TRTMC_HAS_TRT`
 and skip gracefully (exit 0).
 
 **RAII guards** (`test_helpers.h`):
@@ -278,7 +278,7 @@ and skip gracefully (exit 0).
 | `test_bundle_format.cpp` | Bundle magic, section parsing, round-trip | No |
 | `test_bundle_e2e.cpp` | Bundle build + load round-trip | TRT |
 | `test_bundle_view.cpp` | Bundle view API | No |
-| `test_trtf_io.cpp` | Bundle I/O operations | No |
+| `test_trtmc_io.cpp` | Bundle I/O operations | No |
 
 #### Tokenizer tests
 
@@ -485,26 +485,26 @@ gold-standard correctness gate. All modalities use the same harness.
 ```bash
 # Single model (auto-builds bundle if missing)
 .venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+  --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python .venv/bin/python
 
 # Force rebuild bundle from HF
 .venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
   --rebuild-engines
 
 # All 84 models with artifact output
 .venv/bin/python -m pytest tests/test_e2e.py -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
   --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
 
 # Filter by modality
 .venv/bin/python -m pytest tests/test_e2e.py -v \
   --e2e-task-strategy text_generation_causal \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python
+  --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python .venv/bin/python
 ```
 
 **Available `--e2e-task-strategy` values**:
@@ -659,12 +659,12 @@ python tools/diff.py run --model Qwen/Qwen3-0.6B
 
 # Specific checks with a bundle
 python tools/diff.py run --model Qwen/Qwen3-0.6B \
-  --bundle qwen3.trtfb --binary ./build/trtf \
+  --bundle qwen3.trtfb --binary ./build/trtmc \
   --test logit_diff --test runner_parity
 
 # VL model with test image
 python tools/diff.py run --model Qwen/Qwen2.5-VL-3B-Instruct \
-  --bundle qwen25vl.trtfb --image test.jpg --binary ./build/trtf
+  --bundle qwen25vl.trtfb --image test.jpg --binary ./build/trtmc
 ```
 
 ### 6 registered checks
@@ -741,8 +741,8 @@ Current policy and status:
 
 ```bash
 .venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
   --rebuild-engines
 ```
 
@@ -752,8 +752,8 @@ All 84 models, force-rebuild every bundle. Gold-standard regression gate.
 
 ```bash
 .venv/bin/python -m pytest tests/test_e2e.py -v \
-  --engine-dir /mnt/storage/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+  --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
   --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
 ```
 
@@ -762,7 +762,7 @@ All 84 models, force-rebuild every bundle. Gold-standard regression gate.
 ```bash
 python3 tools/perf_compare.py \
   --model Qwen/Qwen3-0.6B \
-  --bundle /mnt/storage/trt-transformers/engines/qwen3-0.6b.trtfb \
+  --bundle /mnt/storage/tensorrt-model-connect/engines/qwen3-0.6b.trtfb \
   --prompt "The capital of France is" --max-new-tokens 20 --json results.json
 ```
 
@@ -835,7 +835,7 @@ tools/coverage/run_coverage_all.sh
 ```
 
 Configuration:
-- **Source**: `trtf_build/trtf_build` (the build package)
+- **Source**: `tensorrt_model_connect/tensorrt_model_connect` (the build package)
 - **Omit**: `*/tests/*`, `*/__pycache__/*`
 - **Excluded lines**: `pragma: no cover`, `if __name__ == "__main__"`, `raise NotImplementedError`
 
@@ -864,7 +864,7 @@ The primary validation gate for new model families:
 validate_family.sh <hf-repo-or-path> [options]
   |
   +-- Step 1: Build bundle
-  |     trtf-build build <model> -o /tmp/<name>.trtfb --max-cache-length 256
+  |     trtmc-build build <model> -o /tmp/<name>.trtfb --max-cache-length 256
   |
   +-- Step 2: diff_logits battery
   |     python tools/diff_logits.py --model <model> --atol 1e-3 --battery
@@ -874,10 +874,10 @@ validate_family.sh <hf-repo-or-path> [options]
   |
   +-- Step 4: runner_parity (if binary exists)
         python tools/test_runner_parity.py --bundle /tmp/<name>.trtfb \
-          --binary ./build/trtf --hf-python .venv/bin/python --max-new-tokens 20
+          --binary ./build/trtmc --hf-python .venv/bin/python --max-new-tokens 20
 ```
 
-All 4 steps must pass. Step 4 is skipped if `./build/trtf` is not found.
+All 4 steps must pass. Step 4 is skipped if `./build/trtmc` is not found.
 
 ---
 
@@ -890,8 +890,8 @@ All 4 steps must pass. Step 4 is skipped if `./build/trtf` is not found.
 3. **Run Tier 3 smoke test**:
    ```bash
    .venv/bin/python -m pytest tests/test_e2e.py::test_e2e[my-model] -v \
-     --engine-dir /mnt/storage/trt-transformers/engines \
-     --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+     --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+     --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
      --rebuild-engines
    ```
 

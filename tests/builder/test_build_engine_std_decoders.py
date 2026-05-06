@@ -20,9 +20,9 @@ import pytest
 
 try:
     from safetensors.numpy import save_file
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _trt_available() -> bool:
@@ -87,7 +87,7 @@ class TestGPT2BuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from trtf_build.families.gpt2 import plugin
+        from tensorrt_model_connect.families.gpt2 import plugin
         config = {
             "model_type": "gpt2",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
@@ -103,7 +103,7 @@ class TestGPT2BuildEngine:
         assert isinstance(engine, bytes) and len(engine) > 0
 
     def test_load_weights(self, tmp_path):
-        from trtf_build.families.gpt2 import plugin
+        from tensorrt_model_connect.families.gpt2 import plugin
         config = {
             "model_type": "gpt2",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
@@ -155,7 +155,7 @@ class TestGPTNeoBuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from trtf_build.families.gpt_neo import plugin
+        from tensorrt_model_connect.families.gpt_neo import plugin
         config = {
             "model_type": "gpt_neo",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
@@ -205,7 +205,7 @@ class TestGPTNeoXBuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from trtf_build.families.gpt_neox import plugin
+        from tensorrt_model_connect.families.gpt_neox import plugin
         config = {
             "model_type": "gpt_neox",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
@@ -252,7 +252,7 @@ class TestInternLMBuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from trtf_build.families.internlm import plugin
+        from tensorrt_model_connect.families.internlm import plugin
         config = {
             "model_type": "internlm2",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
@@ -298,7 +298,7 @@ class TestCodeGenBuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from trtf_build.families.codegen import plugin
+        from tensorrt_model_connect.families.codegen import plugin
         config = {
             "model_type": "codegen",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,

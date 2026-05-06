@@ -16,7 +16,7 @@ except ImportError:
     from cuda import cudart
 
 ENGINE_PATH = "/tmp/flux2_dit_fp8_bf16_v2.engine"
-OUTPUT_PATH = "/workspace/trt-transformers-cpp/flux2_fp8_bf16_result.png"
+OUTPUT_PATH = "/workspace/tensorrt-model-connect/flux2_fp8_bf16_result.png"
 PROMPT = "A photo of a cat sitting on a windowsill at sunset"
 NUM_STEPS = 28
 GUIDANCE = 3.5

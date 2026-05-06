@@ -71,13 +71,13 @@ mask[0, seq_len // 2:] = 0.0
 
 ```bash
 # Decoder models
-docker exec <container> trtf-build build --backend torchtrt <HF_ID> \
-  -o /workspace/trt-transformers-cpp/engines/<model>.trtfb \
+docker exec <container> trtmc-build build --backend torchtrt <HF_ID> \
+  -o /workspace/tensorrt-model-connect/engines/<model>.trtfb \
   --max-cache-length 256 --verbose
 
 # Diffusion models (uses build_components path)
-docker exec <container> trtf-build build --backend torchtrt <HF_ID> \
-  -o /workspace/trt-transformers-cpp/engines/<model>.trtfb --verbose
+docker exec <container> trtmc-build build --backend torchtrt <HF_ID> \
+  -o /workspace/tensorrt-model-connect/engines/<model>.trtfb --verbose
 ```
 
 If the build fails, check `docs/torch-trt/TORCHTRT_KNOWN_ISSUES.md` for the error
@@ -112,22 +112,22 @@ correct output. Follow this loop:
 
 ```bash
 # Text models — output printed to stdout
-docker exec <container> ./build/trtf run \
-  /workspace/trt-transformers-cpp/engines/<model>.trtfb \
+docker exec <container> ./build/trtmc run \
+  /workspace/tensorrt-model-connect/engines/<model>.trtfb \
   --prompt "<test prompt>" --max-new-tokens 20 \
   --hf-python /opt/venv/bin/python
 
 # Diffusion models — output saved as PNG
-docker exec <container> ./build/trtf run \
-  /workspace/trt-transformers-cpp/engines/<model>.trtfb \
+docker exec <container> ./build/trtmc run \
+  /workspace/tensorrt-model-connect/engines/<model>.trtfb \
   --prompt "<test prompt>" \
   --hf-python /opt/venv/bin/python \
-  -o /workspace/trt-transformers-cpp/outputs/<model_name>/<descriptive_name>.png
+  -o /workspace/tensorrt-model-connect/outputs/<model_name>/<descriptive_name>.png
 ```
 
 **Path convention:**
-- Container path: `/workspace/trt-transformers-cpp/outputs/<model_name>/`
-- Host path: `~/trt_repos/trt-transformers/outputs/<model_name>/`
+- Container path: `/workspace/tensorrt-model-connect/outputs/<model_name>/`
+- Host path: `~/trt_repos/tensorrt-model-connect/outputs/<model_name>/`
 - NEVER use host paths in `docker exec` commands — the container filesystem
   is different.
 
@@ -224,7 +224,7 @@ user can see cold-start cost vs steady-state throughput.
 ```python
 # WRONG — subprocess per iteration includes engine deser every time
 for i in range(iterations):
-    subprocess.run(["./build/trtf", "run", bundle, ...])  # 15s = 12s startup + 3s inference
+    subprocess.run(["./build/trtmc", "run", bundle, ...])  # 15s = 12s startup + 3s inference
 
 # RIGHT — load once, loop inference
 engine = deserialize(bundle)  # 6s one-time
@@ -305,9 +305,9 @@ This means:
 
 | Container path | Host path |
 |---------------|-----------|
-| `/workspace/trt-transformers-cpp/` | `~/trt_repos/trt-transformers/` |
-| `/workspace/trt-transformers-cpp/engines/` | `~/trt_repos/trt-transformers/engines/` |
-| `/workspace/trt-transformers-cpp/outputs/` | `~/trt_repos/trt-transformers/outputs/` |
+| `/workspace/tensorrt-model-connect/` | `~/trt_repos/tensorrt-model-connect/` |
+| `/workspace/tensorrt-model-connect/engines/` | `~/trt_repos/tensorrt-model-connect/engines/` |
+| `/workspace/tensorrt-model-connect/outputs/` | `~/trt_repos/tensorrt-model-connect/outputs/` |
 
 ### Model type → strategy mapping
 

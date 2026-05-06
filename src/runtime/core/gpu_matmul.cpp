@@ -6,7 +6,7 @@
 #include <cublas_v2.h>
 #include <cuda_runtime_api.h>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -86,4 +86,4 @@ void gpu_matmul_bias(const float* A, const float* B, const float* bias, float* o
     }
 }
 
-} // namespace trtf
+} // namespace trtmc

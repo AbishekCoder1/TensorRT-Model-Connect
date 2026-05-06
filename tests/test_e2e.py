@@ -23,7 +23,7 @@ Usage:
     pytest tests/test_e2e.py --e2e-platform GB300
 
     # With legacy options (compat with tests/e2e/conftest.py):
-    pytest tests/test_e2e.py --engine-dir /mnt/storage/engines --trtf-binary ./build/trtf
+    pytest tests/test_e2e.py --engine-dir /mnt/storage/engines --trtmc-binary ./build/trtmc
 """
 
 from __future__ import annotations
@@ -52,12 +52,12 @@ _WAIVES_FILE = Path(__file__).resolve().parent / "e2e" / "waives.txt"
 
 
 def _resolve_binary(config) -> str:
-    """Resolve the trtf binary path."""
-    cli_val = config.getoption("--trtf-binary", default=None)
+    """Resolve the trtmc binary path."""
+    cli_val = config.getoption("--trtmc-binary", default=None)
     if cli_val:
         # Use absolute() not resolve() to preserve venv symlinks
         return str(Path(cli_val).absolute())
-    default = PROJECT_DIR / "build" / "trtf"
+    default = PROJECT_DIR / "build" / "trtmc"
     return str(default) if default.is_file() else ""
 
 
@@ -80,7 +80,7 @@ def _resolve_engine_dir(config) -> str:
     if cli_val:
         d = Path(cli_val)
     else:
-        d = Path("/mnt/storage/trt-transformers/engines")
+        d = Path("/mnt/storage/tensorrt-model-connect/engines")
     d.mkdir(parents=True, exist_ok=True)
     return str(d)
 

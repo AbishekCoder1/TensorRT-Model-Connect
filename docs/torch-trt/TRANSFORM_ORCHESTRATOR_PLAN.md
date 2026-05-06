@@ -261,7 +261,7 @@ worktrees/                 # Git worktrees (gitignored, already in .gitignore)
 # Launch dashboard + agents for specific models
 python3 scripts/transform_orchestrator/cli.py \
   --models "meta-llama/Llama-3.2-1B" "microsoft/phi-4-mini" "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS" \
-  --container trtf-dev-torchtrt \
+  --container trtmc-dev-torchtrt \
   --port 8765
 
 # Launch dashboard only (agents launched via UI)
@@ -269,7 +269,7 @@ python3 scripts/transform_orchestrator/cli.py --port 8765
 
 # Add a model to running dashboard
 curl -X POST http://localhost:8765/api/launch \
-  -d '{"hf_model": "Qwen/Qwen3-0.6B", "branch": "torchtrt/qwen3", "container": "trtf-dev-torchtrt"}'
+  -d '{"hf_model": "Qwen/Qwen3-0.6B", "branch": "torchtrt/qwen3", "container": "trtmc-dev-torchtrt"}'
 ```
 
 **What happens on launch:**
@@ -345,7 +345,7 @@ see agent resume and update status.
    for full isolation like autopilot does. Tradeoff: heavier but safer.
 
 2. **Container sharing?** All agents currently target one container
-   (`trtf-dev-torchtrt`). If two agents try to build bundles simultaneously,
+   (`trtmc-dev-torchtrt`). If two agents try to build bundles simultaneously,
    GPU memory may be an issue. Options:
    - Sequential GPU access (orchestrator queues build phases)
    - Multiple containers (one per agent, like autopilot's agent-1..agent-4)

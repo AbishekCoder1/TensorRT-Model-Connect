@@ -7,7 +7,7 @@
 #include <cctype>
 #include <iostream>
 
-namespace trtf {
+namespace trtmc {
 
 const char* trt_severity_name(TrtLogSeverity severity) {
     switch (severity) {
@@ -49,7 +49,7 @@ TrtLogSeverity trt_log_stderr_min_severity() {
 }
 
 // Public setter used by the pipeline factory after resolving the runtime
-// config. Replaces the old TRTF_TRT_LOG_{STDERR,MIN_SEVERITY} env vars.
+// config. Replaces the old TRTMC_TRT_LOG_{STDERR,MIN_SEVERITY} env vars.
 // Severity values: INTERNAL_ERROR, ERROR, WARNING, INFO, VERBOSE.
 void configure_trt_logger(bool verbose_stderr, const std::string& min_severity) {
     TrtLogState& state = mutable_trt_log_state();
@@ -141,4 +141,4 @@ void CudaGraphExec::reset() {
     }
 }
 
-} // namespace trtf
+} // namespace trtmc

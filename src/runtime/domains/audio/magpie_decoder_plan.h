@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace trtf {
+namespace trtmc {
 
 struct MagpieDecoderPlan {
     int32_t hidden{0};
@@ -61,4 +61,4 @@ inline MagpieDecoderPlan make_magpie_decoder_plan(const MagpieTTSConfig& config,
     return plan;
 }
 
-} // namespace trtf
+} // namespace trtmc

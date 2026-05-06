@@ -29,8 +29,8 @@
 
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
-#include "trtf/runtime/tensor.h"
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/runtime/tensor.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <NvInfer.h>
 #include <cstdint>
@@ -49,16 +49,16 @@ static void check(bool condition, const char* test_name) {
 }
 
 // Process-wide logger (TRT requires a single logger for all objects).
-static trtf::TrtLogger g_logger;
+static trtmc::TrtLogger g_logger;
 
 // Build a tiny TRT engine: identity mapping input[4] → output[4] (float32)
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder)
         return nullptr;
 
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    auto network = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     // Single input: "x" [4] float32
@@ -74,21 +74,21 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
     out->setName("y");
     network->markOutput(*out);
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
     if (!plan)
         return nullptr;
 
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
     if (!runtime)
         return nullptr;
 
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_dynamic_identity_engine() {
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_dynamic_identity_engine() {
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder)
         return nullptr;
 
@@ -97,8 +97,8 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_dynamic_identity_engine()
     flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
 #endif
     auto network =
-        trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(flags));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+        trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(flags));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* inp = network->addInput("x", nvinfer1::DataType::kFLOAT, nvinfer1::Dims2{-1, 4});
@@ -120,16 +120,16 @@ static trtf::TrtUniquePtr<nvinfer1::ICudaEngine> build_dynamic_identity_engine()
     out->setName("y");
     network->markOutput(*out);
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
     if (!plan)
         return nullptr;
 
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
     if (!runtime)
         return nullptr;
 
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
@@ -143,17 +143,17 @@ static void test_forward_cpu() {
     cudaStreamCreate(&stream);
 
     auto* ctx = engine->createExecutionContext();
-    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
     check(module.ok(), "module is ok");
 
     // Create input tensor
     float input_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    trtf::Tensor input_tensor;
+    trtmc::Tensor input_tensor;
     input_tensor.data = input_data;
     input_tensor.shape = {4};
-    input_tensor.dtype = trtf::DType::kFloat32;
+    input_tensor.dtype = trtmc::DType::kFloat32;
 
-    trtf::TensorMap inputs;
+    trtmc::TensorMap inputs;
     inputs["x"] = input_tensor;
 
     // Forward pass
@@ -183,15 +183,15 @@ static void test_forward_async() {
     cudaStreamCreate(&stream);
 
     auto* ctx = engine->createExecutionContext();
-    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
 
     float input_data[4] = {10.0f, 20.0f, 30.0f, 40.0f};
-    trtf::Tensor input_tensor;
+    trtmc::Tensor input_tensor;
     input_tensor.data = input_data;
     input_tensor.shape = {4};
-    input_tensor.dtype = trtf::DType::kFloat32;
+    input_tensor.dtype = trtmc::DType::kFloat32;
 
-    trtf::TensorMap inputs;
+    trtmc::TensorMap inputs;
     inputs["x"] = input_tensor;
 
     // Async forward
@@ -219,7 +219,7 @@ static void test_introspection() {
     cudaStreamCreate(&stream);
 
     auto* ctx = engine->createExecutionContext();
-    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
 
     auto ins = module.input_info();
     check(ins.size() == 1, "1 input");
@@ -253,7 +253,7 @@ static void test_device_ptr() {
     cudaStreamCreate(&stream);
 
     auto* ctx = engine->createExecutionContext();
-    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
 
     check(module.device_ptr("x") != nullptr, "input device_ptr not null");
     check(module.device_ptr("y") != nullptr, "output device_ptr not null");
@@ -278,7 +278,7 @@ static void test_bind_external() {
     cudaStreamCreate(&stream);
 
     auto* ctx = engine->createExecutionContext();
-    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
 
     // Allocate external buffer
     void* ext_ptr = nullptr;
@@ -297,7 +297,7 @@ static void test_bind_external() {
 
     // Forward should use the external buffer
     // We don't pass "x" in inputs — it's already bound
-    trtf::TensorMap empty_inputs;
+    trtmc::TensorMap empty_inputs;
     module.forward_async(empty_inputs);
     module.sync();
 
@@ -320,19 +320,19 @@ static void test_unique_ptr_ownership() {
     cudaStreamCreate(&stream);
 
     auto* ctx = engine->createExecutionContext();
-    auto module = std::make_unique<trtf::TrtModuleImpl>(engine.get(), ctx, stream);
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(), ctx, stream);
     check(module->ok(), "module is ok via unique_ptr");
 
     float data[4] = {5.0f, 6.0f, 7.0f, 8.0f};
-    trtf::Tensor t;
+    trtmc::Tensor t;
     t.data = data;
     t.shape = {4};
-    t.dtype = trtf::DType::kFloat32;
+    t.dtype = trtmc::DType::kFloat32;
     auto out = module->forward({{"x", t}});
     check(out.count("y") == 1, "unique_ptr module forward works");
 
     // Transfer ownership
-    std::unique_ptr<trtf::ITrtModule> base = std::move(module);
+    std::unique_ptr<trtmc::ITrtModule> base = std::move(module);
     check(base->ok(), "ITrtModule base ptr works after move");
 
     cudaStreamDestroy(stream);
@@ -348,7 +348,7 @@ static void test_keep_alive() {
     cudaStreamCreate(&stream);
 
     auto* ctx = engine->createExecutionContext();
-    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
 
     // keep_alive with a trivial shared_ptr<void> resource
     module.keep_alive(std::make_shared<int>(42));
@@ -356,10 +356,10 @@ static void test_keep_alive() {
 
     // Module still functions correctly after keep_alive
     float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    trtf::Tensor t;
+    trtmc::Tensor t;
     t.data = data;
     t.shape = {4};
-    t.dtype = trtf::DType::kFloat32;
+    t.dtype = trtmc::DType::kFloat32;
     auto out = module.forward({{"x", t}});
     check(out.count("y") == 1, "keep_alive: forward still works");
 
@@ -377,11 +377,11 @@ static void test_forward_device() {
     cudaStreamCreate(&stream);
 
     auto* ctx = engine->createExecutionContext();
-    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
 
     // forward_device with empty inputs: runs inference on pre-zeroed buffers,
     // returns a DeviceTensorMap of name->nullptr
-    trtf::DeviceTensorMap empty_inputs;
+    trtmc::DeviceTensorMap empty_inputs;
     auto out = module.forward_device(empty_inputs);
 
     // Should contain output "y" mapped to nullptr
@@ -404,16 +404,16 @@ static void test_profile_idx_default() {
     cudaStreamCreate(&stream);
 
     auto* ctx = engine->createExecutionContext();
-    trtf::TrtModuleImpl module(engine.get(), ctx, stream, 0);
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream, 0);
     check(module.ok(), "profile_idx=0: module is ok");
     check(module.profile_idx() == 0, "profile_idx=0: accessor returns 0");
 
     float input_data[4] = {5.0f, 6.0f, 7.0f, 8.0f};
-    trtf::Tensor input_tensor;
+    trtmc::Tensor input_tensor;
     input_tensor.data = input_data;
     input_tensor.shape = {4};
-    input_tensor.dtype = trtf::DType::kFloat32;
-    trtf::TensorMap inputs;
+    input_tensor.dtype = trtmc::DType::kFloat32;
+    trtmc::TensorMap inputs;
     inputs["x"] = input_tensor;
 
     auto outputs = module.forward(inputs);
@@ -438,7 +438,7 @@ static void test_profile_idx_invalid() {
 
     // Identity engine has 0 optimization profiles (static shapes), so profile 1 should fail
     auto* ctx = engine->createExecutionContext();
-    trtf::TrtModuleImpl module(engine.get(), ctx, stream, 1);
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream, 1);
     check(!module.ok(), "profile_idx=1 on static engine: module should not be ok");
 
     cudaStreamDestroy(stream);
@@ -454,16 +454,16 @@ static void test_forward_device_with_input() {
     cudaStreamCreate(&stream);
 
     auto* ctx = engine->createExecutionContext();
-    trtf::TrtModuleImpl module(engine.get(), ctx, stream);
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
 
     // Create a DeviceTensor for input "x", upload data
-    trtf::DeviceTensor dt({4}, trtf::DType::kFloat32, stream);
+    trtmc::DeviceTensor dt({4}, trtmc::DType::kFloat32, stream);
     check(dt.ok(), "DeviceTensor allocated");
     float host_data[4] = {7.0f, 8.0f, 9.0f, 10.0f};
     dt.copy_from_host(host_data);
 
     // forward_device_async with DeviceTensor input covers D2D copy path (lines 220-228)
-    trtf::DeviceTensorMap inputs;
+    trtmc::DeviceTensorMap inputs;
     inputs["x"] = &dt;
     module.forward_device_async(inputs);
     module.sync();

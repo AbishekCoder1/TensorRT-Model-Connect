@@ -20,13 +20,13 @@
 //   uppercase letters (no prefix by default).
 //
 // Dependencies:
-//   - trtf/tokenizer.h (ITokenizer, CreateIpaTokenizer)
+//   - trtmc/tokenizer.h (ITokenizer, CreateIpaTokenizer)
 //
 // Environment:
 //   CPU-only. No GPU, CUDA, TRT, or filesystem access required.
 // =============================================================================
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <iostream>
@@ -136,14 +136,14 @@ static const char* make_test_config()
     return "{\"grapheme_prefix\": \"\", \"eos_id\": 99, \"ignore_ambiguous_words\": 0}";
 }
 
-static std::unique_ptr<trtf::ITokenizer> make_test_tokenizer()
+static std::unique_ptr<trtmc::ITokenizer> make_test_tokenizer()
 {
     const auto* vocab = make_test_vocab();
     const auto* dict = make_test_dict();
     const auto* het = make_test_heteronyms();
     const auto* cfg = make_test_config();
 
-    return trtf::CreateIpaTokenizer(
+    return trtmc::CreateIpaTokenizer(
         dict, std::string(dict).size(),
         het, std::string(het).size(),
         vocab, std::string(vocab).size(),
@@ -298,7 +298,7 @@ static void test_empty_dict_throws()
     try
     {
         const auto* vocab = make_test_vocab();
-        trtf::CreateIpaTokenizer(nullptr, 0, nullptr, 0,
+        trtmc::CreateIpaTokenizer(nullptr, 0, nullptr, 0,
             vocab, std::string(vocab).size(), nullptr, 0);
     }
     catch (const std::invalid_argument&) { threw = true; }
@@ -311,7 +311,7 @@ static void test_empty_vocab_throws()
     try
     {
         const auto* dict = make_test_dict();
-        trtf::CreateIpaTokenizer(dict, std::string(dict).size(),
+        trtmc::CreateIpaTokenizer(dict, std::string(dict).size(),
             nullptr, 0, nullptr, 0, nullptr, 0);
     }
     catch (const std::invalid_argument&) { threw = true; }

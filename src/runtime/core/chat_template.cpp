@@ -3,7 +3,7 @@
 #include <array>
 #include <utility>
 
-namespace trtf {
+namespace trtmc {
 
 // Detection table: each entry maps a marker string to a format.
 // Order matters — first match wins.
@@ -82,4 +82,4 @@ std::string apply_chat_template(ChatTemplateFormat format, const std::string& pr
     }
 }
 
-} // namespace trtf
+} // namespace trtmc

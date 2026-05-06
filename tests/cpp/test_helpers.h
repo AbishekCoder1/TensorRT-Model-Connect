@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf_test {
+namespace trtmc_test {
 
 // POSIX-based recursive remove. Avoids std::filesystem::remove_all, which on
 // the aarch64 CI image has been observed to trampoline into libtorch's
@@ -74,7 +74,7 @@ class EnvVarGuard {
 class TempDirGuard {
   public:
     TempDirGuard() {
-        char tmpl[] = "/tmp/trtf_test_XXXXXX";
+        char tmpl[] = "/tmp/trtmc_test_XXXXXX";
         char* result = mkdtemp(tmpl);
         if (!result)
             throw std::runtime_error("mkdtemp failed");
@@ -258,4 +258,4 @@ inline void write_standard_decoder_checkpoint(const std::filesystem::path& dir, 
     write_safetensors_f32(dir / "model.safetensors", tensors);
 }
 
-} // namespace trtf_test
+} // namespace trtmc_test

@@ -14,10 +14,10 @@ import types
 
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
-import trtf_build.families as families
-from trtf_build.config import ModelConfig
-from trtf_build.families.base import FamilyPlugin
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+import tensorrt_model_connect.families as families
+from tensorrt_model_connect.config import ModelConfig
+from tensorrt_model_connect.families.base import FamilyPlugin
 
 
 class _DummyFamilyPlugin:
@@ -73,9 +73,9 @@ def test_family_module_discovery_skips_private_base_import_errors_and_missing_pl
     Postconditions: discovery appends only the valid module's plugin and ignores all skipped/error cases.
     """
     good_plugin = _DummyFamilyPlugin(name="good")
-    good_mod = types.ModuleType("trtf_build.families.good")
+    good_mod = types.ModuleType("tensorrt_model_connect.families.good")
     good_mod.plugin = good_plugin
-    no_plugin_mod = types.ModuleType("trtf_build.families.no_plugin")
+    no_plugin_mod = types.ModuleType("tensorrt_model_connect.families.no_plugin")
 
     iter_rows = [
         (None, "_private", False),

@@ -1,11 +1,11 @@
 """E2E tests for error handling -- malformed/missing bundles.
 
-These tests verify that the C++ trtf binary fails gracefully with informative
+These tests verify that the C++ trtmc binary fails gracefully with informative
 error messages when given bad inputs.  Most tests do NOT require a GPU or a
 real engine bundle; they exercise the early-exit error paths.
 
 Usage:
-    pytest tests/e2e/test_error_handling.py -v --trtf-binary ./build/trtf
+    pytest tests/e2e/test_error_handling.py -v --trtmc-binary ./build/trtmc
 """
 
 from __future__ import annotations
@@ -23,11 +23,11 @@ import pytest
 class TestMissingBundle:
     """Error paths for bundles that don't exist or can't be read."""
 
-    def test_missing_bundle_file(self, trtf_binary, ld_library_path):
+    def test_missing_bundle_file(self, trtmc_binary, ld_library_path):
         """Non-existent bundle path -> non-zero exit with error message."""
         env = {"LD_LIBRARY_PATH": ld_library_path}
         result = subprocess.run(
-            [str(trtf_binary), "run", "/nonexistent/path.trtfb",
+            [str(trtmc_binary), "run", "/nonexistent/path.trtfb",
              "--prompt", "hello"],
             capture_output=True, text=True, timeout=30, env=env)
 
@@ -41,11 +41,11 @@ class TestMissingBundle:
             f"Expected error message, got:\nstdout={result.stdout}\n"
             f"stderr={result.stderr}")
 
-    def test_directory_as_bundle(self, tmp_path, trtf_binary, ld_library_path):
+    def test_directory_as_bundle(self, tmp_path, trtmc_binary, ld_library_path):
         """Passing a directory instead of a file -> non-zero exit."""
         env = {"LD_LIBRARY_PATH": ld_library_path}
         result = subprocess.run(
-            [str(trtf_binary), "run", str(tmp_path),
+            [str(trtmc_binary), "run", str(tmp_path),
              "--prompt", "hello"],
             capture_output=True, text=True, timeout=30, env=env)
 
@@ -56,42 +56,42 @@ class TestMissingBundle:
 class TestMalformedBundle:
     """Error paths for bundles that exist but have invalid content."""
 
-    def test_truncated_bundle(self, tmp_path, trtf_binary, ld_library_path):
+    def test_truncated_bundle(self, tmp_path, trtmc_binary, ld_library_path):
         """Truncated/corrupt bundle -> non-zero exit with error."""
         bad_bundle = tmp_path / "truncated.trtfb"
         bad_bundle.write_bytes(b"NOT_A_VALID_BUNDLE_FILE")
 
         env = {"LD_LIBRARY_PATH": ld_library_path}
         result = subprocess.run(
-            [str(trtf_binary), "run", str(bad_bundle),
+            [str(trtmc_binary), "run", str(bad_bundle),
              "--prompt", "hello"],
             capture_output=True, text=True, timeout=30, env=env)
 
         assert result.returncode != 0, (
             "Expected non-zero exit for corrupt bundle")
 
-    def test_empty_file_as_bundle(self, tmp_path, trtf_binary, ld_library_path):
+    def test_empty_file_as_bundle(self, tmp_path, trtmc_binary, ld_library_path):
         """Zero-byte file -> non-zero exit."""
         empty = tmp_path / "empty.trtfb"
         empty.write_bytes(b"")
 
         env = {"LD_LIBRARY_PATH": ld_library_path}
         result = subprocess.run(
-            [str(trtf_binary), "run", str(empty),
+            [str(trtmc_binary), "run", str(empty),
              "--prompt", "hello"],
             capture_output=True, text=True, timeout=30, env=env)
 
         assert result.returncode != 0, (
             "Expected non-zero exit for empty bundle")
 
-    def test_random_bytes_bundle(self, tmp_path, trtf_binary, ld_library_path):
+    def test_random_bytes_bundle(self, tmp_path, trtmc_binary, ld_library_path):
         """Random bytes -> non-zero exit (no crash/segfault)."""
         bad_bundle = tmp_path / "random.trtfb"
         bad_bundle.write_bytes(os.urandom(4096))
 
         env = {"LD_LIBRARY_PATH": ld_library_path}
         result = subprocess.run(
-            [str(trtf_binary), "run", str(bad_bundle),
+            [str(trtmc_binary), "run", str(bad_bundle),
              "--prompt", "hello"],
             capture_output=True, text=True, timeout=30, env=env)
 
@@ -105,11 +105,11 @@ class TestMalformedBundle:
 class TestBadArguments:
     """Error paths for invalid CLI arguments."""
 
-    def test_no_subcommand(self, trtf_binary, ld_library_path):
+    def test_no_subcommand(self, trtmc_binary, ld_library_path):
         """No subcommand at all -> non-zero exit or help text."""
         env = {"LD_LIBRARY_PATH": ld_library_path}
         result = subprocess.run(
-            [str(trtf_binary)],
+            [str(trtmc_binary)],
             capture_output=True, text=True, timeout=30, env=env)
 
         # Either non-zero exit or prints usage info
@@ -118,17 +118,17 @@ class TestBadArguments:
                 or "help" in (result.stdout + result.stderr).lower()), (
             "Expected error or usage info with no subcommand")
 
-    def test_unknown_subcommand(self, trtf_binary, ld_library_path):
+    def test_unknown_subcommand(self, trtmc_binary, ld_library_path):
         """Unknown subcommand -> non-zero exit."""
         env = {"LD_LIBRARY_PATH": ld_library_path}
         result = subprocess.run(
-            [str(trtf_binary), "nonexistent_command"],
+            [str(trtmc_binary), "nonexistent_command"],
             capture_output=True, text=True, timeout=30, env=env)
 
         assert result.returncode != 0, (
             "Expected non-zero exit for unknown subcommand")
 
-    def test_run_missing_prompt(self, tmp_path, trtf_binary, ld_library_path):
+    def test_run_missing_prompt(self, tmp_path, trtmc_binary, ld_library_path):
         """run subcommand without --prompt -> non-zero exit."""
         # Create a dummy file so we get past the "file not found" check
         dummy = tmp_path / "dummy.trtfb"
@@ -136,7 +136,7 @@ class TestBadArguments:
 
         env = {"LD_LIBRARY_PATH": ld_library_path}
         result = subprocess.run(
-            [str(trtf_binary), "run", str(dummy)],
+            [str(trtmc_binary), "run", str(dummy)],
             capture_output=True, text=True, timeout=30, env=env)
 
         assert result.returncode != 0, (
@@ -151,7 +151,7 @@ class TestEmptyPrompt:
     """Tests for edge-case prompts that require a real bundle."""
 
     @pytest.mark.e2e
-    def test_empty_prompt_string(self, model_entry, trtf_binary,
+    def test_empty_prompt_string(self, model_entry, trtmc_binary,
                                  hf_python, ld_library_path):
         """Empty prompt string -> should either produce output or fail cleanly."""
         # Skip non-text models
@@ -164,7 +164,7 @@ class TestEmptyPrompt:
 
         env = {"LD_LIBRARY_PATH": ld_library_path}
         result = subprocess.run(
-            [str(trtf_binary), "run", model_entry["bundle_path"],
+            [str(trtmc_binary), "run", model_entry["bundle_path"],
              "--prompt", "",
              "--max-new-tokens", "5",
              "--hf-python", str(hf_python)],

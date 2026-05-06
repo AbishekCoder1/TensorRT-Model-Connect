@@ -2,8 +2,8 @@
 """Unified 4-way inference performance comparison.
 
 Compares all four inference backends for the same HF model:
-  1. Torch-TRT  (StatelessCacheWrapper -> raw TRT engine via trtf_build.engine_defs.torch_trt)
-  2. Raw TRT    (trtf_build graph API -> raw TRT engine)
+  1. Torch-TRT  (StatelessCacheWrapper -> raw TRT engine via tensorrt_model_connect.engine_defs.torch_trt)
+  2. Raw TRT    (tensorrt_model_connect graph API -> raw TRT engine)
   3. torch.compile (PyTorch 2.x compiler, default backend)
   4. HF eager   (baseline, no compilation)
 
@@ -57,13 +57,13 @@ from perf_utils import (
 
 
 # ---------------------------------------------------------------------------
-# Backend: Raw TRT (trtf_build graph API)
+# Backend: Raw TRT (tensorrt_model_connect graph API)
 # ---------------------------------------------------------------------------
 
 def bench_rawtrt(engine_plan: bytes, num_layers: int, max_cache_length: int,
                  tokenizer, prompt: str, max_new_tokens: int,
                  warmup: int, iterations: int, verbose: bool) -> dict:
-    from trtf_build.debug_runner import TrtRunner
+    from tensorrt_model_connect.debug_runner import TrtRunner
 
     runner = TrtRunner(
         engine_plan=engine_plan,
@@ -114,11 +114,11 @@ def bench_rawtrt(engine_plan: bytes, num_layers: int, max_cache_length: int,
 def build_rawtrt_engine(model_id: str, max_cache_length: int,
                          verbose: bool):
     """Returns (engine_plan, num_layers, max_cache_length)."""
-    from trtf_build.engine_builder import _resolve_model as _trtf_resolve
-    from trtf_build.config import ModelConfig
-    from trtf_build.families import find_plugin
+    from tensorrt_model_connect.engine_builder import _resolve_model as _trtmc_resolve
+    from tensorrt_model_connect.config import ModelConfig
+    from tensorrt_model_connect.families import find_plugin
 
-    model_dir = _trtf_resolve(model_id)
+    model_dir = _trtmc_resolve(model_id)
     config = ModelConfig.from_dir(model_dir)
     plugin = find_plugin(config.model_type)
     if plugin is None:
@@ -413,7 +413,7 @@ def main():
     if not args.skip_rawtrt:
         print(f"\n{_CYAN}[2/4] Raw TRT (float32){_RESET}", file=sys.stderr)
         if args.rawtrt_bundle:
-            from trtf_build.debug_runner import load_engine_from_bundle
+            from tensorrt_model_connect.debug_runner import load_engine_from_bundle
             engine_plan, header = load_engine_from_bundle(args.rawtrt_bundle)
             num_layers = header["num_layers"]
             max_cache = header.get("max_cache_length", args.max_cache_length)

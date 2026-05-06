@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 inline SamResult select_sam_multimask_outputs(SamResult result, int32_t num_multimask_outputs)
 {
@@ -38,4 +38,4 @@ inline SamResult select_sam_multimask_outputs(SamResult result, int32_t num_mult
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

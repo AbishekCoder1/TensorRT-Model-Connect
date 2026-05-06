@@ -6,7 +6,7 @@ these fused weights in the correct layout.
 
 Trace: ARCH-FAM-001, UD-FAM-PHI-01
 Intent: Validate the Phi-3 family plugin weight loading including fused QKV splitting and fused gate_up_proj splitting into separate gate and up projections.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: Fused QKV is split into separate Q/K/V with correct shapes, fused gate_up is split into gate and up projections, and all weight keys are present.
 """
 import numpy as np
@@ -16,7 +16,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class PhiPluginTester(FamilyPluginTester):
-    plugin_module = "trtf_build.families.phi"
+    plugin_module = "tensorrt_model_connect.families.phi"
     model_type = "phi3"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

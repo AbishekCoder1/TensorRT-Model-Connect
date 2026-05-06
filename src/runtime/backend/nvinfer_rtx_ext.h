@@ -43,7 +43,7 @@ class IRuntimeCache {
 // IMPORTANT: These are NOT safe to call when linked against standard libnvinfer.
 // They are ONLY valid when linked against libtensorrt_rtx.
 
-namespace trtf {
+namespace trtmc {
 namespace rtx_ext {
 
 // These free functions cast and call through the pimpl.  The RTX IRuntimeConfig
@@ -55,4 +55,4 @@ namespace rtx_ext {
 // replace this shim with a direct #include of the RTX NvInfer.h.
 
 } // namespace rtx_ext
-} // namespace trtf
+} // namespace trtmc

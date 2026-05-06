@@ -11,7 +11,7 @@ Run from the HOST terminal (not inside a container or Claude Code session):
 Prerequisites:
     - Agent workspaces bootstrapped: ./scripts/bootstrap_workspace.sh --id agent-N --detach
     - claude CLI in PATH
-    - At least one running container: trtf-dev-gb300-agent-N
+    - At least one running container: trtmc-dev-gb300-agent-N
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from pathlib import Path
 # Config — edit these to match your setup
 # ---------------------------------------------------------------------------
 WORKSPACE_ROOT = "/workspace/users/yifeif/workspaces"
-DISCOVER_CONTAINER = "trtf-dev-gb300-agent-1"
+DISCOVER_CONTAINER = "trtmc-dev-gb300-agent-1"
 
 # Architecture types that are vision/audio/exotic and unlikely to work
 # with the standard encoder/decoder scaffold without C++ runtime changes.
@@ -46,7 +46,7 @@ SKIP_TYPES = {
 # Worker prompt — the LLM agent IS the automation
 # ---------------------------------------------------------------------------
 WORKER_PROMPT = textwrap.dedent("""\
-    You are an autonomous agent implementing a new model family for the trtf
+    You are an autonomous agent implementing a new model family for the trtmc
     framework. Work entirely inside the container. Do not ask questions — make
     decisions and proceed. If something fails, read the error, fix it, and retry.
 
@@ -54,7 +54,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     - model_type:  {model_type}
     - hf_id:       {hf_id}
     - family_name: {family_name}
-    - container:   trtf-dev-gb300-{agent_id}
+    - container:   trtmc-dev-gb300-{agent_id}
     {trust_remote_code_line}
 
     ## The loop: build → validate → fix → repeat
@@ -63,10 +63,10 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     ### Build
     ```
-    docker exec trtf-dev-gb300-{agent_id} python3 scripts/new_family.py \\
+    docker exec trtmc-dev-gb300-{agent_id} python3 scripts/new_family.py \\
         --model-type {model_type} --hf-repo {hf_id} --family-name {family_name}
-    docker exec trtf-dev-gb300-{agent_id} bash -c \\
-        'trtf-build build {hf_id} -o /tmp/{family_name}.trtfb --max-cache-length 256 --verbose 2>&1; echo EXIT=$?'
+    docker exec trtmc-dev-gb300-{agent_id} bash -c \\
+        'trtmc-build build {hf_id} -o /tmp/{family_name}.trtfb --max-cache-length 256 --verbose 2>&1; echo EXIT=$?'
     ```
 
     ### Validate (3 mandatory gates — ALL must pass)
@@ -76,7 +76,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     **Gate 1: C++ binary smoke test**
     Run the model through the actual C++ binary and verify non-garbage output:
     ```
-    docker exec trtf-dev-gb300-{agent_id} ./build/trtf run /tmp/{family_name}.trtfb \
+    docker exec trtmc-dev-gb300-{agent_id} ./build/trtmc run /tmp/{family_name}.trtfb \
         --prompt "The capital of France is" --max-new-tokens 10 \
         --hf-python /opt/venv/bin/python
     ```
@@ -84,7 +84,7 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     **Gate 2: validate_family.sh (includes diff_logits, diff_layers, runner parity, E2E pytest)**
     ```
-    docker exec trtf-dev-gb300-{agent_id} ./scripts/validate_family.sh {hf_id}
+    docker exec trtmc-dev-gb300-{agent_id} ./scripts/validate_family.sh {hf_id}
     ```
     This runs: build → diff_logits battery → diff_layers → C++ runner parity → E2E pytest.
     ALL steps must PASS. If validate_family.sh fails, the model is NOT done.
@@ -96,7 +96,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     - `tools/test_impact.py` → add to RUNTIME_TO_TASK_STRATEGY and CPP_PLUGIN_STRATEGIES
     Verify no "unknown runtime_strategy" warnings when running:
     ```
-    docker exec trtf-dev-gb300-{agent_id} python3 -c "
+    docker exec trtmc-dev-gb300-{agent_id} python3 -c "
     from tests.e2e_harness.manifest_loader import load_all_manifests
     import warnings; warnings.simplefilter('error')
     cases = load_all_manifests()
@@ -108,13 +108,13 @@ WORKER_PROMPT = textwrap.dedent("""\
       tests/e2e_harness/comparators/  (text.py, diffusion.py, segmentation.py, etc.)
       tests/e2e_harness/runners/      (how different modalities run inference)
       tools/diff_logits.py            (decoder logit comparison)
-      trtf_build/debug_runner.py      (TrtRunner, pure-Python TRT inference)
+      tensorrt_model_connect/debug_runner.py      (TrtRunner, pure-Python TRT inference)
 
     ### Fix
     If build OR validation fails, diagnose and fix. Resources:
     - Check HF weight keys:
       ```
-      docker exec trtf-dev-gb300-{agent_id} python3 -c "
+      docker exec trtmc-dev-gb300-{agent_id} python3 -c "
       from safetensors import safe_open
       from huggingface_hub import snapshot_download
       import glob, os
@@ -126,32 +126,32 @@ WORKER_PROMPT = textwrap.dedent("""\
       "
       ```
     - Read existing plugins for reference (BERT, Qwen, Phi, Mamba, etc.) at:
-      /workspace/users/yifeif/workspaces/{agent_id}/trt-transformers-cpp/trtf_build/trtf_build/families/
+      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/tensorrt_model_connect/tensorrt_model_connect/families/
     - Read graph_ops.py and graph_blocks.py for available TRT operations.
     - Read the HF model's modeling code to understand the EXACT computation.
     - If the model uses a novel attention mechanism (disentangled, sliding
       window, linear, etc.), you MUST implement it correctly in the plugin's
       build_engine() — do not approximate or skip it.
     - Edit the plugin on the HOST at:
-      /workspace/users/yifeif/workspaces/{agent_id}/trt-transformers-cpp/trtf_build/trtf_build/families/{family_name}.py
+      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/tensorrt_model_connect/tensorrt_model_connect/families/{family_name}.py
 
     ### C++ runtime plugin (if needed for full E2E)
     The goal is FULL onboarding: a user must be able to run the model via
-    the C++ binary (`./build/trtf run <bundle> --prompt "..." --max-new-tokens N`).
+    the C++ binary (`./build/trtmc run <bundle> --prompt "..." --max-new-tokens N`).
     If no existing C++ runtime strategy handles this model, you MUST create one.
 
     How to add a C++ runtime plugin:
     1. Read an existing plugin for reference. Key files at:
-       /workspace/users/yifeif/workspaces/{agent_id}/trt-transformers-cpp/src/runtime/plugins/
+       /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/src/runtime/plugins/
        - decoder_plugin.cpp (decoder-only text gen)
        - whisper_plugin.cpp (encoder-decoder speech-to-text)
        - encoder_plugin.cpp (encoder-only)
        - shared/plugin_helpers.h (TrtModule loading, tokenizer, helpers)
     2. Create your plugin .cpp file with REGISTER_PIPELINE_PLUGIN_WITH_FORCE_LINK.
-    3. Add one source/symbol entry to cmake/trtf_pipeline_plugins.cmake.
+    3. Add one source/symbol entry to cmake/trtmc_pipeline_plugins.cmake.
     4. Reconfigure so CMake generates linker anchors and adds the source.
-    5. Rebuild: `docker exec trtf-dev-gb300-{agent_id} cmake --build build -j`
-    6. Test: `docker exec trtf-dev-gb300-{agent_id} ./build/trtf run /tmp/{family_name}.trtfb --prompt "test" --max-new-tokens 5`
+    5. Rebuild: `docker exec trtmc-dev-gb300-{agent_id} cmake --build build -j`
+    6. Test: `docker exec trtmc-dev-gb300-{agent_id} ./build/trtmc run /tmp/{family_name}.trtfb --prompt "test" --max-new-tokens 5`
 
     Do NOT skip this step. Do NOT mark the E2E manifest with "skip".
     The model must work end-to-end through the C++ binary.
@@ -161,15 +161,15 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     ### Done
     When ALL THREE validation gates pass, create the E2E manifest at (HOST path):
-    /workspace/users/yifeif/workspaces/{agent_id}/trt-transformers-cpp/tests/e2e/models/{family_name}.json
+    /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/tests/e2e/models/{family_name}.json
     The manifest must NOT have a "skip" field.
 
     Then run the final E2E test to confirm:
     ```
-    docker exec trtf-dev-gb300-{agent_id} /opt/venv/bin/python -m pytest \
+    docker exec trtmc-dev-gb300-{agent_id} /opt/venv/bin/python -m pytest \
         tests/test_e2e.py::test_e2e[{family_name}] -v \
-        --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-        --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+        --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+        --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
         --rebuild-engines
     ```
     This MUST pass. If it fails, debug and fix. Do NOT report success
@@ -187,15 +187,15 @@ WORKER_PROMPT = textwrap.dedent("""\
     - Whether C++ binary E2E works
 
     ## Rules
-    - ALL commands (build, test, AND file writes) via `docker exec trtf-dev-gb300-{agent_id}`.
+    - ALL commands (build, test, AND file writes) via `docker exec trtmc-dev-gb300-{agent_id}`.
     - To write/create files, use docker exec with Python:
       ```
-      docker exec trtf-dev-gb300-{agent_id} python3 -c "
+      docker exec trtmc-dev-gb300-{agent_id} python3 -c "
       import pathlib
       pathlib.Path('<path-inside-container>').write_text('''<content>''')
       "
       ```
-      The container's /workspace/trt-transformers-cpp/ maps to the host workspace.
+      The container's /workspace/tensorrt-model-connect/ maps to the host workspace.
       Do NOT try to write directly to /workspace/users/yifeif/workspaces/{agent_id}/
       — that path is read-only from the sandbox. Always write via docker exec.
     - **Decoupling**: Create NEW files for your plugin — do NOT modify existing
@@ -209,9 +209,9 @@ WORKER_PROMPT = textwrap.dedent("""\
       copy-paste is better than tight coupling. Each plugin must be self-contained.
     - Do NOT edit shared framework files (checkpoint_mapper.py, standard_decoder_builder.py,
       pipeline_factory.cpp, pipeline_registry.cpp). You CAN add new plugin files and
-      edit cmake/trtf_pipeline_plugins.cmake to register your new plugin.
+      edit cmake/trtmc_pipeline_plugins.cmake to register your new plugin.
     - Do NOT skip C++ runtime implementation. The model must work end-to-end.
-    - The final test is: `./build/trtf run <bundle> --prompt "..." --max-new-tokens N`
+    - The final test is: `./build/trtmc run <bundle> --prompt "..." --max-new-tokens N`
       must produce correct output. If it doesn't, keep fixing.
 """)
 
@@ -297,7 +297,7 @@ _OPTIMIZE_SECTION = """\
     After all validation gates pass, optimize the model for low precision:
 
     1. Read the optimization skill:
-       cat /workspace/users/yifeif/workspaces/{agent_id}/trt-transformers-cpp/.claude/skills/optimize-model-precision.md
+       cat /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/.claude/skills/optimize-model-precision.md
     2. Follow the skill instructions to find the best non-FP32 precision config
     3. Use the progress file at /tmp/optimize_progress_{family_name}.json
     4. At minimum, build and validate an FP16 variant (guaranteed to work for standard decoders)
@@ -347,7 +347,7 @@ def launch_batch(
 
     procs = {}
     for agent_id, task in batch:
-        workspace = f"{WORKSPACE_ROOT}/{agent_id}/trt-transformers-cpp"
+        workspace = f"{WORKSPACE_ROOT}/{agent_id}/tensorrt-model-connect"
         prompt = build_prompt(task, agent_id, optimize=optimize)
         family = task["family_name"]
 
@@ -480,7 +480,7 @@ def main():
     agent_ids = [f"agent-{i+1}" for i in range(args.agents)]
 
     print("=" * 60)
-    print("  trtf Autopilot")
+    print("  trtmc Autopilot")
     print("=" * 60)
     print(f"  Mode:       {'auto' if args.auto else 'interactive'}")
     print(f"  Agents:     {len(agent_ids)} ({', '.join(agent_ids)})")

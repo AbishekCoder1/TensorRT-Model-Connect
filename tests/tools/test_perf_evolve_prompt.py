@@ -37,7 +37,7 @@ def full_prompt():
     """Generate a full prompt with all data."""
     return build_evolve_prompt(
         model="Qwen/Qwen2.5-1.5B",
-        container="trtf-test-evolve",
+        container="trtmc-test-evolve",
         baseline=BASELINE,
         max_iterations=5,
         max_cache_length=256,
@@ -50,7 +50,7 @@ def prompt_no_sol():
     """Generate a prompt without SOL data."""
     return build_evolve_prompt(
         model="Qwen/Qwen2.5-1.5B",
-        container="trtf-test-evolve",
+        container="trtmc-test-evolve",
         baseline=BASELINE,
         max_iterations=5,
         max_cache_length=256,
@@ -142,8 +142,8 @@ class TestProfilingCommands:
     def test_cpu_profile_command(self, full_prompt):
         assert "cpu_profile.py" in full_prompt
 
-    def test_trtf_profile_command(self, full_prompt):
-        assert "trtf profile" in full_prompt
+    def test_trtmc_profile_command(self, full_prompt):
+        assert "trtmc profile" in full_prompt
 
     def test_perf_compare_command(self, full_prompt):
         assert "perf_compare.py" in full_prompt
@@ -158,7 +158,7 @@ class TestProfilingCommands:
 
 class TestValidation:
     def test_build_step(self, full_prompt):
-        assert "trtf-build build" in full_prompt
+        assert "trtmc-build build" in full_prompt
 
     def test_correctness_step(self, full_prompt):
         assert "diff_logits" in full_prompt
@@ -181,7 +181,7 @@ class TestValidation:
 
 class TestInterpolation:
     def test_container_name(self, full_prompt):
-        assert "trtf-test-evolve" in full_prompt
+        assert "trtmc-test-evolve" in full_prompt
 
     def test_model_name(self, full_prompt):
         assert "Qwen/Qwen2.5-1.5B" in full_prompt

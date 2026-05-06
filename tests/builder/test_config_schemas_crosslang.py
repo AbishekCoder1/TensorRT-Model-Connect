@@ -7,7 +7,7 @@
 # Intent:         Gate against Python/C++ schema drift. If the two sides of a
 #                 feature's schema diverge, runtime merges silently produce
 #                 different results — this test catches that at PR time.
-# Preconditions:  trtf test binary built (so the registry state reflects
+# Preconditions:  trtmc test binary built (so the registry state reflects
 #                 generated manifest registrations).
 # Postconditions: For every namespace registered on either side, field
 #                 names and types match. Missing namespaces on one side
@@ -16,7 +16,7 @@
 
 """Cross-language schema-parity gate.
 
-Python side: importing ``trtf_build.runtime_config.schemas`` populates the
+Python side: importing ``tensorrt_model_connect.runtime_config.schemas`` populates the
 registry via ``load_all()``.
 
 C++ side: there's no cheap way to query the C++ registry from Python. We
@@ -38,13 +38,13 @@ from pathlib import Path
 import pytest
 
 try:
-    from trtf_build.runtime_config import (
+    from tensorrt_model_connect.runtime_config import (
         clear_for_testing,
         lookup,
     )
-    from trtf_build.runtime_config.schemas import load_all
+    from tensorrt_model_connect.runtime_config.schemas import load_all
 except ImportError:  # pragma: no cover
-    pytest.skip("trtf_build.runtime_config not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect.runtime_config not importable", allow_module_level=True)
 
 
 _CPP_FIELD_PATTERN = re.compile(

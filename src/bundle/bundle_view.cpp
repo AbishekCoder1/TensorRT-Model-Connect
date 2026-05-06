@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace trtf {
+namespace trtmc {
 
 const std::vector<char>* find_section(const BundleFile& bundle, const std::string& name)
 {
@@ -43,4 +43,4 @@ std::vector<const std::vector<char>*> find_sections_by_prefix(
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

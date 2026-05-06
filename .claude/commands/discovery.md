@@ -6,7 +6,7 @@ Rules:
 - Do not implement tasks.
 
 Before publishing new issues, inspect the current GitLab issue/MR state. Use
-`python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging dashboard`
+`python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging dashboard`
 or equivalent GitLab queries.
 
 If the existing `ai:ready`, `ai:claimed`, and `ai:implementing` backlog is

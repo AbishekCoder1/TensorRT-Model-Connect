@@ -7,10 +7,10 @@
 // TopKSampler handles temperature, top-k, top-p, and min-p sampling on host
 // logits, with internal xorshift64 RNG state.
 
-#include "trtf/runtime/sampler.h"
+#include "trtmc/runtime/sampler.h"
 
-#include "trtf/pipeline.h"
-#if TRTF_HAS_CUDA_KERNELS
+#include "trtmc/pipeline.h"
+#if TRTMC_HAS_CUDA_KERNELS
 #include "runtime/core/argmax_kernel.h"
 #include "runtime/core/sparse_multinomial_kernel.h"
 
@@ -23,7 +23,7 @@
 #include <numeric>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // Shared argmax helper — returns {token_id, logprob} for the highest logit.
 static SampleResult argmax_over_logits(const float* logits, int32_t vocab_size,
@@ -250,7 +250,7 @@ class TopKSampler final : public ISampler {
     uint64_t initial_seed_;
 };
 
-#if TRTF_HAS_LIBTORCH_MULTINOMIAL && TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_LIBTORCH_MULTINOMIAL && TRTMC_HAS_CUDA_KERNELS
 class TorchCudaMultinomialSampler final : public ISampler {
   public:
     explicit TorchCudaMultinomialSampler(uint64_t initial_seed)
@@ -354,7 +354,7 @@ class TorchCudaMultinomialSampler final : public ISampler {
 // GpuGreedySampler: on-device argmax (no D2H logit transfer)
 // ─────────────────────────────────────────────────────────────
 
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
 class GpuGreedySampler final : public ISampler {
   public:
     explicit GpuGreedySampler(cudaStream_t stream) : stream_(stream) {
@@ -405,7 +405,7 @@ class GpuGreedySampler final : public ISampler {
     int32_t h_token_id_{0};
     float h_logit_val_{0.0f};
 };
-#endif // TRTF_HAS_CUDA_KERNELS
+#endif // TRTMC_HAS_CUDA_KERNELS
 
 // ─────────────────────────────────────────────────────────────
 // Factory
@@ -433,7 +433,7 @@ std::unique_ptr<ISampler> create_sampler(const SamplingParams& params,
 
     uint64_t seed = (params.seed >= 0) ? static_cast<uint64_t>(params.seed)
                                        : 42ULL; // deterministic default for reproducibility
-#if TRTF_HAS_LIBTORCH_MULTINOMIAL && TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_LIBTORCH_MULTINOMIAL && TRTMC_HAS_CUDA_KERNELS
     if (options.prefer_torch_cuda_multinomial)
         return std::make_unique<TorchCudaMultinomialSampler>(seed);
 #endif
@@ -447,7 +447,7 @@ std::unique_ptr<ISampler> create_sampler(const SamplingParams& params) {
 }
 
 std::unique_ptr<ISampler> create_gpu_greedy_sampler(void* stream) {
-#if TRTF_HAS_CUDA_KERNELS
+#if TRTMC_HAS_CUDA_KERNELS
     return std::make_unique<GpuGreedySampler>(static_cast<cudaStream_t>(stream));
 #else
     (void)stream;
@@ -455,4 +455,4 @@ std::unique_ptr<ISampler> create_gpu_greedy_sampler(void* stream) {
 #endif
 }
 
-} // namespace trtf
+} // namespace trtmc

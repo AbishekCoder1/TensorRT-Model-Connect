@@ -47,7 +47,7 @@ factory adapters, and shared legacy infrastructure (`DecoderStepEngine`,
 ## Steps
 
 1. Verify no remaining `#include` references to deleted files
-2. Remove from `CMakeLists.txt` `trtf_core` source list
+2. Remove from `CMakeLists.txt` `trtmc_core` source list
 3. Remove associated test files that only test old backends
 4. Update `CLAUDE.md` source layout section
 5. Run full build + ctest + E2E smoke test
@@ -61,7 +61,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 
 # E2E smoke test across modalities
-pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] tests/test_e2e.py::test_e2e[bert-base-uncased] tests/test_e2e.py::test_e2e[qwen25vl-3b] tests/test_e2e.py::test_e2e[whisper-tiny] tests/test_e2e.py::test_e2e[bark-small] tests/test_e2e.py::test_e2e[flux-schnell] tests/test_e2e.py::test_e2e[segformer-b0-ade] tests/test_e2e.py::test_e2e[mamba-130m] -v --engine-dir /workspace/users/yifeif/trt-transformers/engines --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] tests/test_e2e.py::test_e2e[bert-base-uncased] tests/test_e2e.py::test_e2e[qwen25vl-3b] tests/test_e2e.py::test_e2e[whisper-tiny] tests/test_e2e.py::test_e2e[bark-small] tests/test_e2e.py::test_e2e[flux-schnell] tests/test_e2e.py::test_e2e[segformer-b0-ade] tests/test_e2e.py::test_e2e[mamba-130m] -v --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 
 # CCN gate
 python tools/check_cyclomatic_complexity.py src --max-ccn 10

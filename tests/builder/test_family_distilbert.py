@@ -17,10 +17,10 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build.config import ModelConfig
-    import trtf_build.families.distilbert as distilbert_mod
+    from tensorrt_model_connect.config import ModelConfig
+    import tensorrt_model_connect.families.distilbert as distilbert_mod
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _cfg(**raw_overrides: object) -> ModelConfig:

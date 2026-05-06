@@ -1,4 +1,4 @@
-# ruff configuration for trtf quality gate.
+# ruff configuration for trtmc quality gate.
 # Start permissive (E, W, F only), tighten over time.
 
 line-length = 100

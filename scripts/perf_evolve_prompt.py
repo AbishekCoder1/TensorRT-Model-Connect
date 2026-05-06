@@ -91,7 +91,7 @@ def build_evolve_prompt(
 
     ### L2: Per-Layer TRT Profiling
     ```bash
-    docker exec {container} ./build/trtf profile /tmp/baseline.trtfb --json --warmup 5 --runs 20
+    docker exec {container} ./build/trtmc profile /tmp/baseline.trtfb --json --warmup 5 --runs 20
     ```
     Record: attention_pct, mlp_pct, norm_pct, other_pct, total_ms.
 
@@ -126,7 +126,7 @@ def build_evolve_prompt(
     ### Step 1: Build
     ```bash
     docker exec {container} bash -c \\
-        'trtf-build build {model} -o /tmp/evolve_test.trtfb \\
+        'trtmc-build build {model} -o /tmp/evolve_test.trtfb \\
          --max-cache-length {max_cache_length} --verbose 2>&1; echo EXIT=$?'
     ```
     If the build fails, read the error, fix the code, and retry the build.
@@ -144,7 +144,7 @@ def build_evolve_prompt(
     Use the C++ binary for decode throughput (captures CUDA Graph benefits):
     ```bash
     docker exec {container} bash -c \\
-        './build/trtf run /tmp/evolve_test.trtfb \\
+        './build/trtmc run /tmp/evolve_test.trtfb \\
          --prompt "The capital of France is" --max-new-tokens 100 \\
          --hf-python /opt/venv/bin/python \\
          --set platform.trt_log_stderr=true 2>&1 | grep "Decode:"'
@@ -194,11 +194,11 @@ def build_evolve_prompt(
     ## Files You May Modify
 
     ### Python builder (engine construction):
-    - `trtf_build/trtf_build/families/{family_name}.py` — family plugin config
-    - `trtf_build/trtf_build/standard_decoder_builder.py` — builder parameters
-    - `trtf_build/trtf_build/graph_ops.py` — TRT graph operations (atomic ops)
-    - `trtf_build/trtf_build/graph_blocks.py` — composable graph blocks
-    - `trtf_build/trtf_build/engine_builder.py` — build orchestrator
+    - `tensorrt_model_connect/tensorrt_model_connect/families/{family_name}.py` — family plugin config
+    - `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` — builder parameters
+    - `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` — TRT graph operations (atomic ops)
+    - `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` — composable graph blocks
+    - `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` — build orchestrator
 
     ### C++ runtime (execution — for L1 Runtime optimizations):
     - `src/runtime/trt/core/device_kv_cache.h/cpp` — KV cache + decode step
@@ -210,8 +210,8 @@ def build_evolve_prompt(
     - `tools/perf_compare.py` — benchmarking tool
     - `tools/cpu_profile.py` — CPU phase profiling
     - `tools/diff_logits.py` — correctness checker
-    - `trtf_build/trtf_build/debug_runner.py` — Python TRT inference runner
-    - `trtf_build/trtf_build/config.py` — ModelConfig dataclass
+    - `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` — Python TRT inference runner
+    - `tensorrt_model_connect/tensorrt_model_connect/config.py` — ModelConfig dataclass
 
     ## CRITICAL RULES
     1. **Profile FIRST** — run all 3 profiling levels before any optimization.
@@ -385,7 +385,7 @@ def _build_search_space(focus_area: str | None = None) -> str:
 
         **Benchmark with both enabled:**
         ```bash
-        ./build/trtf run /tmp/test.trtfb \\
+        ./build/trtmc run /tmp/test.trtfb \\
             --prompt "The capital of France is" --max-new-tokens 100 \\
             --hf-python /opt/venv/bin/python \\
             --set platform.trt_log_stderr=true \\
@@ -402,14 +402,14 @@ def _build_search_space(focus_area: str | None = None) -> str:
 
         Already implemented in the quantization framework. Just pass `--precision fp16`:
         ```bash
-        trtf-build build <model> -o /tmp/test_fp16.trtfb --max-cache-length 256 --precision fp16
+        trtmc-build build <model> -o /tmp/test_fp16.trtfb --max-cache-length 256 --precision fp16
         ```
         Correctness: use `--atol 0.1` (relaxed for FP16).
         Bundle size halves (~2.5GB → ~1.3GB for 0.6B model).
 
         **BF16 — similar to FP16, better numerical stability**
         ```bash
-        trtf-build build <model> -o /tmp/test_bf16.trtfb --max-cache-length 256 --precision bf16
+        trtmc-build build <model> -o /tmp/test_bf16.trtfb --max-cache-length 256 --precision bf16
         ```
         Only on B100/B200/H100 (native BF16 support).
 

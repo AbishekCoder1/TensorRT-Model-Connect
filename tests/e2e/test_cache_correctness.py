@@ -1,13 +1,13 @@
 """E2E tests for KV cache correctness -- overflow and consistency.
 
 These tests verify that the KV cache behaves correctly when prompts approach
-or exceed the configured max_cache_length.  They require GPU + the trtf-build
+or exceed the configured max_cache_length.  They require GPU + the trtmc-build
 CLI + the C++ binary.
 
 Usage:
     pytest tests/e2e/test_cache_correctness.py -v \
-      --trtf-binary ./build/trtf --hf-python .venv/bin/python \
-      --engine-dir /mnt/storage/trt-transformers/engines
+      --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
+      --engine-dir /mnt/storage/tensorrt-model-connect/engines
 
 The tests build small bundles with specific cache sizes, so they are slower
 than pure-binary tests but faster than the full E2E suite.
@@ -47,7 +47,7 @@ SHORT_PROMPT = "The capital of France is"
 def _build_bundle(hf_id, output_path, max_cache_length, timeout=600):
     """Build a .trtfb bundle with a specific cache size."""
     cmd = [
-        "trtf-build", "build",
+        "trtmc-build", "build",
         hf_id, "-o", str(output_path),
         "--max-cache-length", str(max_cache_length),
     ]
@@ -60,11 +60,11 @@ def _build_bundle(hf_id, output_path, max_cache_length, timeout=600):
     return output_path
 
 
-def _run_inference(trtf_binary, bundle_path, prompt, max_new_tokens,
+def _run_inference(trtmc_binary, bundle_path, prompt, max_new_tokens,
                    hf_python, ld_library_path, timeout=120):
     """Run C++ inference and return (returncode, stdout, stderr)."""
     cmd = [
-        str(trtf_binary), "run", str(bundle_path),
+        str(trtmc_binary), "run", str(bundle_path),
         "--prompt", prompt,
         "--max-new-tokens", str(max_new_tokens),
         "--hf-python", str(hf_python),
@@ -75,30 +75,30 @@ def _run_inference(trtf_binary, bundle_path, prompt, max_new_tokens,
     return result.returncode, result.stdout.strip(), result.stderr
 
 
-def _has_trtf_build():
-    """Check if trtf-build CLI is available."""
+def _has_tensorrt_model_connect():
+    """Check if trtmc-build CLI is available."""
     try:
         result = subprocess.run(
-            ["trtf-build", "version"],
+            ["trtmc-build", "version"],
             capture_output=True, text=True, timeout=10)
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
-# Skip the entire module if trtf-build is not installed
+# Skip the entire module if trtmc-build is not installed
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.skipif(
-        not _has_trtf_build(),
-        reason="trtf-build CLI not available (pip install -e trtf_build/)"),
+        not _has_tensorrt_model_connect(),
+        reason="trtmc-build CLI not available (pip install -e tensorrt_model_connect/)"),
 ]
 
 
 class TestCacheOverflow:
     """Verify inference doesn't crash when the prompt exceeds max_cache_length."""
 
-    def test_cache_overflow_produces_output(self, trtf_binary, hf_python,
+    def test_cache_overflow_produces_output(self, trtmc_binary, hf_python,
                                             ld_library_path, engine_dir):
         """Generate with prompt exceeding max_cache_length=32 -> non-empty output."""
         bundle_path = engine_dir / "cache_test_32.trtfb"
@@ -107,7 +107,7 @@ class TestCacheOverflow:
         _build_bundle(CACHE_TEST_MODEL, bundle_path, max_cache_length=32)
 
         rc, stdout, stderr = _run_inference(
-            trtf_binary, bundle_path, LONG_PROMPT, max_new_tokens=10,
+            trtmc_binary, bundle_path, LONG_PROMPT, max_new_tokens=10,
             hf_python=hf_python, ld_library_path=ld_library_path)
 
         assert rc == 0, (
@@ -115,7 +115,7 @@ class TestCacheOverflow:
         assert len(stdout) > 0, (
             "Inference produced no output with cache overflow")
 
-    def test_cache_overflow_no_segfault(self, trtf_binary, hf_python,
+    def test_cache_overflow_no_segfault(self, trtmc_binary, hf_python,
                                         ld_library_path, engine_dir):
         """Specifically verify no segfault (signal -11) on cache overflow."""
         bundle_path = engine_dir / "cache_test_32.trtfb"
@@ -125,7 +125,7 @@ class TestCacheOverflow:
             _build_bundle(CACHE_TEST_MODEL, bundle_path, max_cache_length=32)
 
         rc, stdout, stderr = _run_inference(
-            trtf_binary, bundle_path, LONG_PROMPT, max_new_tokens=10,
+            trtmc_binary, bundle_path, LONG_PROMPT, max_new_tokens=10,
             hf_python=hf_python, ld_library_path=ld_library_path)
 
         assert rc != -11, f"Segfault on cache overflow: {stderr}"
@@ -136,7 +136,7 @@ class TestCacheConsistency:
     for short prompts that fit in all cache sizes."""
 
     def test_first_tokens_match_across_cache_sizes(
-            self, trtf_binary, hf_python, ld_library_path, engine_dir):
+            self, trtmc_binary, hf_python, ld_library_path, engine_dir):
         """Same short prompt with cache=64 vs cache=256 -> first N tokens match.
 
         When the prompt fits in both caches, the first generated tokens
@@ -152,10 +152,10 @@ class TestCacheConsistency:
         max_new = 10
 
         rc_64, out_64, stderr_64 = _run_inference(
-            trtf_binary, bundle_64, SHORT_PROMPT, max_new,
+            trtmc_binary, bundle_64, SHORT_PROMPT, max_new,
             hf_python=hf_python, ld_library_path=ld_library_path)
         rc_256, out_256, stderr_256 = _run_inference(
-            trtf_binary, bundle_256, SHORT_PROMPT, max_new,
+            trtmc_binary, bundle_256, SHORT_PROMPT, max_new,
             hf_python=hf_python, ld_library_path=ld_library_path)
 
         assert rc_64 == 0, f"cache=64 inference failed:\n{stderr_64}"
@@ -176,7 +176,7 @@ class TestCacheConsistency:
 class TestCacheBoundary:
     """Edge case: prompt length exactly equals max_cache_length."""
 
-    def test_prompt_at_cache_boundary(self, trtf_binary, hf_python,
+    def test_prompt_at_cache_boundary(self, trtmc_binary, hf_python,
                                       ld_library_path, engine_dir):
         """Prompt tokenising to ~64 tokens with cache=64 -> should succeed.
 
@@ -198,7 +198,7 @@ class TestCacheBoundary:
         )
 
         rc, stdout, stderr = _run_inference(
-            trtf_binary, bundle_path, boundary_prompt, max_new_tokens=5,
+            trtmc_binary, bundle_path, boundary_prompt, max_new_tokens=5,
             hf_python=hf_python, ld_library_path=ld_library_path)
 
         # Must not crash

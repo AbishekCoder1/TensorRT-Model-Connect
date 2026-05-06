@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct SourceLine {
     int number{0};
@@ -28,4 +28,4 @@ int32_t parse_int(const std::string& text, const std::filesystem::path& path, in
 float parse_float(const std::string& text, const std::filesystem::path& path, int line_number, const char* field);
 bool iequals_ascii(std::string_view a, std::string_view b);
 
-} // namespace trtf
+} // namespace trtmc

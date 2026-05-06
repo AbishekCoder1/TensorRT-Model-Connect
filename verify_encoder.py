@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify MagpieTTS TRT encoder output against NeMo reference.
 
-Usage (inside trtf-magpie container):
+Usage (inside trtmc-magpie container):
     source .venv/bin/activate
     python3 /tmp/verify_encoder.py
 """
@@ -66,8 +66,8 @@ print(f"Reference: {seq_len} tokens, output shape {ref_output.shape}")
 # ---------------------------------------------------------------------------
 
 sys.path.insert(0, ".")
-from trtf_build.families.magpie_tts import MagpieTTSPlugin
-from trtf_build.config import ModelConfig
+from tensorrt_model_connect.families.magpie_tts import MagpieTTSPlugin
+from tensorrt_model_connect.config import ModelConfig
 
 plugin = MagpieTTSPlugin()
 

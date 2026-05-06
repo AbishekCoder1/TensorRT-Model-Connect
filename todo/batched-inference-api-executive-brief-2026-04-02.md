@@ -22,8 +22,8 @@ this proposal.
 
 The local inference library and the CLI should not have the same contract.
 
-- `trtf-build` produces a `.trtfb` bundle.
-- `trtf` CLI may accept files such as `png`, `jpg`, or `wav` because the CLI can
+- `trtmc-build` produces a `.trtfb` bundle.
+- `trtmc` CLI may accept files such as `png`, `jpg`, or `wav` because the CLI can
   decode files before calling the library.
 - the public C++ library API should accept in-memory data, not file paths
   and not compressed file formats
@@ -36,17 +36,17 @@ That means:
 - lower-level APIs should accept tensors directly
 
 This matches the real current load path in
-[pipeline_factory.cpp](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/src/runtime/registry/pipeline_factory.cpp),
-[pipeline_registry.h](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/include/trtf/runtime/pipeline_registry.h),
-[pipeline_plugin.h](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/include/trtf/runtime/pipeline_plugin.h),
-and [pipeline.h](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/include/trtf/pipeline.h).
+[pipeline_factory.cpp](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/src/runtime/registry/pipeline_factory.cpp),
+[pipeline_registry.h](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/include/trtmc/runtime/pipeline_registry.h),
+[pipeline_plugin.h](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/include/trtmc/runtime/pipeline_plugin.h),
+and [pipeline.h](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/include/trtmc/pipeline.h).
 
 ## Existing Wiring
 
 Every story in this document follows the same runtime wiring:
 
-1. user builds a `.trtfb` bundle with `trtf-build`
-2. runtime calls `trtf::load(bundle_path)`
+1. user builds a `.trtfb` bundle with `trtmc-build`
+2. runtime calls `trtmc::load(bundle_path)`
 3. `PipelineFactory::from_bundle()` reads `config.json`
 4. `runtime_strategy` selects a plugin through `PipelineRegistry`
 5. the plugin builds one concrete `IPipeline`
@@ -142,7 +142,7 @@ What functionality they need:
 How they build the bundle:
 
 ```bash
-trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
+trtmc-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
 ```
 
 What that bundle means:
@@ -157,22 +157,22 @@ How they use the bundle at runtime:
 CLI today:
 
 ```bash
-./build/trtf run qwen3.trtfb --prompt "Hello" --max-new-tokens 50 \
+./build/trtmc run qwen3.trtfb --prompt "Hello" --max-new-tokens 50 \
   --hf-python /opt/venv/bin/python
 ```
 
 Local C++ API today:
 
 ```cpp
-auto pipe = trtf::load("qwen3.trtfb");
-trtf::TextResult out = pipe->generate("Hello", {.max_new_tokens = 50});
+auto pipe = trtmc::load("qwen3.trtfb");
+trtmc::TextResult out = pipe->generate("Hello", {.max_new_tokens = 50});
 ```
 
 Preferred local C++ API design:
 
 ```cpp
-auto pipe = trtf::load("qwen3.trtfb");
-trtf::TextResult out = pipe->generate_text("Hello", {.max_new_tokens = 50});
+auto pipe = trtmc::load("qwen3.trtfb");
+trtmc::TextResult out = pipe->generate_text("Hello", {.max_new_tokens = 50});
 ```
 
 Why this should be a semantic API:
@@ -230,14 +230,14 @@ How they build the bundle:
 Examples:
 
 ```bash
-trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
-trtf-build build models/hf/Qwen__Qwen3-0.6B -o qwen3.trtfb
+trtmc-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
+trtmc-build build models/hf/Qwen__Qwen3-0.6B -o qwen3.trtfb
 ```
 
 or for a different tensor-oriented model:
 
 ```bash
-trtf-build build <model> -o model.trtfb
+trtmc-build build <model> -o model.trtfb
 ```
 
 What that bundle must provide:
@@ -251,14 +251,14 @@ How they use the bundle at runtime:
 Target local C++ API:
 
 ```cpp
-trtf::InvokeRequest req;
+trtmc::InvokeRequest req;
 req.inputs = {
     {"pixel_values", {/* tensor view */}},
 };
 req.requested_outputs = {"mask"};
 
-auto pipe = trtf::load("model.trtfb");
-trtf::InvokeResponse out = pipe->invoke(req);
+auto pipe = trtmc::load("model.trtfb");
+trtmc::InvokeResponse out = pipe->invoke(req);
 ```
 
 Why this should be the lower-level API:
@@ -324,7 +324,7 @@ What functionality they need:
 How they build the bundle:
 
 ```bash
-trtf-build build <segformer-or-other-segmentation-model> -o segformer.trtfb
+trtmc-build build <segformer-or-other-segmentation-model> -o segformer.trtfb
 ```
 
 How they use the bundle at runtime:
@@ -332,16 +332,16 @@ How they use the bundle at runtime:
 CLI today for one image:
 
 ```bash
-./build/trtf segment segformer.trtfb --image input.png --output mask.png
+./build/trtmc segment segformer.trtfb --image input.png --output mask.png
 ```
 
 Target local C++ API:
 
 ```cpp
-std::vector<trtf::ImageView> images = {/* 5 decoded images */};
+std::vector<trtmc::ImageView> images = {/* 5 decoded images */};
 
-auto pipe = trtf::load("segformer.trtfb");
-std::vector<trtf::SegmentResult> out = pipe->segment_batch(images);
+auto pipe = trtmc::load("segformer.trtfb");
+std::vector<trtmc::SegmentResult> out = pipe->segment_batch(images);
 ```
 
 What the library contract should be:
@@ -396,7 +396,7 @@ What functionality they need:
 How they build the bundle:
 
 ```bash
-trtf-build build <bert-or-other-encoder-model> -o bert.trtfb
+trtmc-build build <bert-or-other-encoder-model> -o bert.trtfb
 ```
 
 How they use the bundle at runtime:
@@ -404,7 +404,7 @@ How they use the bundle at runtime:
 CLI today for one text:
 
 ```bash
-./build/trtf embed bert.trtfb --prompt "Hello"
+./build/trtmc embed bert.trtfb --prompt "Hello"
 ```
 
 Target local C++ API:
@@ -416,8 +416,8 @@ std::vector<std::string> texts = {
     "third text",
 };
 
-auto pipe = trtf::load("bert.trtfb");
-std::vector<trtf::EmbeddingResult> out = pipe->embed_batch(texts);
+auto pipe = trtmc::load("bert.trtfb");
+std::vector<trtmc::EmbeddingResult> out = pipe->embed_batch(texts);
 ```
 
 Why this should be a semantic batch API:
@@ -469,7 +469,7 @@ What functionality they need:
 How they build the bundle:
 
 ```bash
-trtf-build build <whisper-or-other-asr-model> -o whisper.trtfb
+trtmc-build build <whisper-or-other-asr-model> -o whisper.trtfb
 ```
 
 How they use the bundle at runtime:
@@ -477,23 +477,23 @@ How they use the bundle at runtime:
 CLI today for one clip:
 
 ```bash
-./build/trtf transcribe whisper.trtfb --audio sample.wav
+./build/trtmc transcribe whisper.trtfb --audio sample.wav
 ```
 
 Local C++ API today for one clip:
 
 ```cpp
-auto pipe = trtf::load("whisper.trtfb");
-trtf::TextResult out = pipe->transcribe(samples, num_samples, 224, sample_rate);
+auto pipe = trtmc::load("whisper.trtfb");
+trtmc::TextResult out = pipe->transcribe(samples, num_samples, 224, sample_rate);
 ```
 
 Target local C++ API:
 
 ```cpp
-std::vector<trtf::AudioView> audio_inputs = {/* 8 clips */};
+std::vector<trtmc::AudioView> audio_inputs = {/* 8 clips */};
 
-auto pipe = trtf::load("whisper.trtfb");
-std::vector<trtf::TextResult> out = pipe->transcribe_batch(audio_inputs, 224);
+auto pipe = trtmc::load("whisper.trtfb");
+std::vector<trtmc::TextResult> out = pipe->transcribe_batch(audio_inputs, 224);
 ```
 
 Why this should be a semantic batch API:
@@ -545,7 +545,7 @@ How they build the bundle:
 Example:
 
 ```bash
-trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
+trtmc-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
 ```
 
 How they use the bundle at runtime:
@@ -553,7 +553,7 @@ How they use the bundle at runtime:
 CLI today for one request:
 
 ```bash
-./build/trtf run qwen3.trtfb --prompt "Hello" --max-new-tokens 50 \
+./build/trtmc run qwen3.trtfb --prompt "Hello" --max-new-tokens 50 \
   --hf-python /opt/venv/bin/python
 ```
 
@@ -566,8 +566,8 @@ std::vector<std::string> prompts = {
     "Explain dynamic programming simply.",
 };
 
-auto pipe = trtf::load("qwen3.trtfb");
-std::vector<trtf::TextResult> out =
+auto pipe = trtmc::load("qwen3.trtfb");
+std::vector<trtmc::TextResult> out =
     pipe->generate_text_batch(prompts, {.max_new_tokens = 128});
 ```
 
@@ -618,9 +618,9 @@ How they build the bundle:
 Examples:
 
 ```bash
-trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
-trtf-build build <whisper-or-other-asr-model> -o whisper.trtfb
-trtf-build build <bark-or-magpie-model> -o bark.trtfb
+trtmc-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
+trtmc-build build <whisper-or-other-asr-model> -o whisper.trtfb
+trtmc-build build <bark-or-magpie-model> -o bark.trtfb
 ```
 
 How they use the bundle at runtime:
@@ -628,11 +628,11 @@ How they use the bundle at runtime:
 Local C++ API target for one text stream:
 
 ```cpp
-auto pipe = trtf::load("qwen3.trtfb");
+auto pipe = trtmc::load("qwen3.trtfb");
 pipe->generate_text_stream(
     "Write a short welcome message.",
     {.max_new_tokens = 64},
-    [](const trtf::TextStreamEvent& ev) {
+    [](const trtmc::TextStreamEvent& ev) {
         // consume token/text deltas
     });
 ```
@@ -645,11 +645,11 @@ std::vector<std::string> prompts = {
     "Second request",
 };
 
-auto pipe = trtf::load("qwen3.trtfb");
+auto pipe = trtmc::load("qwen3.trtfb");
 pipe->generate_text_batch_stream(
     prompts,
     {.max_new_tokens = 64},
-    [](const trtf::TextStreamEvent& ev) {
+    [](const trtmc::TextStreamEvent& ev) {
         // ev.item_index identifies which request this delta belongs to
     });
 ```
@@ -657,7 +657,7 @@ pipe->generate_text_batch_stream(
 Existing C++ API today for one audio stream:
 
 ```cpp
-auto pipe = trtf::load("bark.trtfb");
+auto pipe = trtmc::load("bark.trtfb");
 pipe->generate_audio_streaming(
     "A calm narration",
     {},
@@ -723,12 +723,12 @@ covers them.
 ### What Works Today In Principle
 
 - Story 1 is mostly supported today through existing single-item semantic APIs in
-  [pipeline.h](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/include/trtf/pipeline.h)
+  [pipeline.h](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/include/trtmc/pipeline.h)
   such as `generate(...)`, `segment(...)`, `embed(...)`, `transcribe(...)`, and
   `generate_audio(...)`.
 - Story 7 has a narrow existing example through
   `generate_audio_streaming(...)` in
-  [pipeline.h](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/include/trtf/pipeline.h).
+  [pipeline.h](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/include/trtmc/pipeline.h).
 - Story 8 is intentionally out of scope for the local library.
 
 Everything else is either missing as a public contract, limited to single-item
@@ -766,7 +766,7 @@ Why this matters:
 
 Current state:
 
-- [pipeline.h](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/include/trtf/pipeline.h)
+- [pipeline.h](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/include/trtmc/pipeline.h)
   exposes task-specific single-item calls.
 - there is no public `invoke(...)`
 - there is no public `segment_batch(...)`, `embed_batch(...)`,
@@ -788,7 +788,7 @@ Why this matters:
 Current state:
 
 - vision preprocessing explicitly says only single-image input is supported in
-  [image_preprocessor.h](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/src/runtime/domains/multimodal/image_preprocessor.h)
+  [image_preprocessor.h](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/src/runtime/domains/multimodal/image_preprocessor.h)
 - the current library surface also takes one text, one image, or one audio clip
   at a time
 
@@ -806,13 +806,13 @@ Why this matters:
 
 Current state:
 
-- [segment_pipeline.cpp](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/src/runtime/pipelines/segment_pipeline.cpp)
+- [segment_pipeline.cpp](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/src/runtime/pipelines/segment_pipeline.cpp)
   implements `segment(const float*, int32_t, int32_t)` and feeds one image
   through `model_->forward(...)`
-- [encoder_pipeline.cpp](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/src/runtime/pipelines/encoder_pipeline.cpp)
+- [encoder_pipeline.cpp](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/src/runtime/pipelines/encoder_pipeline.cpp)
   tokenizes one text and `encode_ids(...)` builds one `input_ids` tensor and one
   `attention_mask`
-- [whisper_pipeline.cpp](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/src/runtime/pipelines/whisper_pipeline.cpp)
+- [whisper_pipeline.cpp](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/src/runtime/pipelines/whisper_pipeline.cpp)
   transcribes one audio clip end to end: resample, mel extraction, encoder,
   cross-attention setup, decoder
 
@@ -832,13 +832,13 @@ Why this matters:
 
 Current state:
 
-- [segformer.py](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/trtf_build/trtf_build/families/segformer.py)
+- [segformer.py](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/tensorrt_model_connect/tensorrt_model_connect/families/segformer.py)
   builds `pixel_values` as `(1, 3, H, W)`
-- [sam.py](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/trtf_build/trtf_build/families/sam.py)
+- [sam.py](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/tensorrt_model_connect/tensorrt_model_connect/families/sam.py)
   builds the image encoder input as `(1, 3, image_size, image_size)`
-- [modernbert.py](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/trtf_build/trtf_build/families/modernbert.py)
+- [modernbert.py](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/tensorrt_model_connect/tensorrt_model_connect/families/modernbert.py)
   builds `input_ids` and `attention_mask` as `(max_seq,)`
-- [deberta.py](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/trtf_build/trtf_build/families/deberta.py)
+- [deberta.py](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/tensorrt_model_connect/tensorrt_model_connect/families/deberta.py)
   builds encoder inputs as `(max_seq_length,)`
 
 Resulting gap:
@@ -861,7 +861,7 @@ Why this matters:
 
 Current state:
 
-- [trt_module.cpp](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/src/runtime/core/trt_module.cpp)
+- [trt_module.cpp](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/src/runtime/core/trt_module.cpp)
   already detects dynamic shapes and queries optimization profiles
 - but `TrtModule::forward()` still behaves as a host-centric seam:
   upload inputs, enqueue, sync, download outputs
@@ -873,9 +873,9 @@ Current state:
 
 Concrete evidence that this matters:
 
-- [magpie_tts.py](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/trtf_build/trtf_build/families/magpie_tts.py)
+- [magpie_tts.py](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/tensorrt_model_connect/tensorrt_model_connect/families/magpie_tts.py)
   already builds two optimization profiles for one decoder engine
-- [magpie_pipeline.cpp](/workspace/users/yifeif/workspaces/agent-1/trt-transformers-cpp/src/runtime/pipelines/magpie_pipeline.cpp)
+- [magpie_pipeline.cpp](/workspace/users/yifeif/workspaces/agent-1/tensorrt-model-connect/src/runtime/pipelines/magpie_pipeline.cpp)
   explicitly says batched prefill wants profile 1 but `TrtModule` does not yet
   expose that path
 
@@ -1008,8 +1008,8 @@ The user stories point to a simple API shape:
 
 And they point to a simple wiring model:
 
-- build a bundle with `trtf-build`
-- load that bundle with `trtf::load(...)`
+- build a bundle with `trtmc-build`
+- load that bundle with `trtmc::load(...)`
 - let `runtime_strategy` choose the plugin
 - let the concrete pipeline own which APIs it implements
 

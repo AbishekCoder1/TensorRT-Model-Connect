@@ -4,7 +4,7 @@
 #include <cmath>
 #include <numeric>
 
-namespace trtf {
+namespace trtmc {
 
 int32_t select_argmax_token(const std::vector<float>& logits) {
     if (logits.empty()) {
@@ -113,4 +113,4 @@ std::vector<float> build_attention_mask(int32_t cache_length, int32_t max_cache_
     return mask;
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -72,7 +72,7 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     if not isinstance(cfg.get("extra_special_tokens"), list):
         return str(snapshot)
 
-    patched_root = Path(tempfile.gettempdir()) / "trtf_hf_patched" / hashlib.sha256(
+    patched_root = Path(tempfile.gettempdir()) / "trtmc_hf_patched" / hashlib.sha256(
         str(snapshot).encode("utf-8")).hexdigest()
     patched_cfg = patched_root / "tokenizer" / "tokenizer_config.json"
     if not patched_cfg.exists():
@@ -87,7 +87,7 @@ def _ltx_initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
     if ctx.artifacts_dir:
         base_dir = _case_artifact_dir(ctx.artifacts_dir, case.name)
     else:
-        base_dir = os.path.join(tempfile.gettempdir(), "trtf_ltx_latents", case.name)
+        base_dir = os.path.join(tempfile.gettempdir(), "trtmc_ltx_latents", case.name)
     return os.path.join(base_dir, "initial_latents.raw")
 
 

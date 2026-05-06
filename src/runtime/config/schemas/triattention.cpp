@@ -1,16 +1,16 @@
 // Registration for the "triattention" namespace schema.
 //
-// Mirrors trtf_build/trtf_build/runtime_config/schemas/triattention.py.
+// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/triattention.py.
 // Only edit both sides together; the cross-language match test gates on it.
 
-#include "trtf/config/schemas/triattention.h"
+#include "trtmc/config/schemas/triattention.h"
 
 #include <any>
 #include <cstdint>
 #include <set>
 #include <string>
 
-namespace trtf::config::schemas {
+namespace trtmc::config::schemas {
 
 namespace {
 
@@ -100,9 +100,9 @@ Schema make_triattention_schema() {
     };
 }
 
-} // namespace trtf::config::schemas
+} // namespace trtmc::config::schemas
 
-namespace trtf::config::schemas {
+namespace trtmc::config::schemas {
 REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_triattention_schema,
                                              make_triattention_schema);
-} // namespace trtf::config::schemas
+} // namespace trtmc::config::schemas

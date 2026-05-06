@@ -105,7 +105,7 @@ Each tool has a single responsibility and produces machine-readable output.
 #### Tool 1: Build
 
 ```bash
-trtf-build build HF_ID -o BUNDLE.trtfb \
+trtmc-build build HF_ID -o BUNDLE.trtfb \
   --precision fp16 \
   --quantize fp8 \
   --quant-scales scales.json  # optional
@@ -162,7 +162,7 @@ Output:
 #### Tool 4: Quick Sanity Check
 
 ```bash
-./build/trtf run BUNDLE.trtfb \
+./build/trtmc run BUNDLE.trtfb \
   --prompt "Hello" --max-new-tokens 10 --hf-python /opt/venv/bin/python
 ```
 
@@ -171,7 +171,7 @@ Output: generated text (for agent to sanity-check, not for pass/fail)
 #### Tool 5: Inspect Bundle
 
 ```bash
-trtf-build inspect BUNDLE.trtfb
+trtmc-build inspect BUNDLE.trtfb
 ```
 
 Output: precision, quantization, engine size, layer count, etc.

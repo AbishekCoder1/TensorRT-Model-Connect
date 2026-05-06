@@ -1,9 +1,9 @@
-#include "trtf/runtime/triattention_kv_cache.h"
+#include "trtmc/runtime/triattention_kv_cache.h"
 
-#include "trtf/config/config_bundle.h"
-#include "trtf/config/schema_registry.h"
-#include "trtf/runtime/trt_module.h"
-#ifdef TRTF_HAS_CUDA_KERNELS
+#include "trtmc/config/config_bundle.h"
+#include "trtmc/config/schema_registry.h"
+#include "trtmc/runtime/trt_module.h"
+#ifdef TRTMC_HAS_CUDA_KERNELS
 #include "runtime/core/triattention_kernels.h"
 #endif
 
@@ -24,7 +24,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -167,19 +167,19 @@ float complex_abs(float real, float imag) {
 // Previously this file contained a cluster of std::getenv readers
 // (triattention_debug_enabled, triattention_profile_enabled, etc.) plus
 // override helpers that patched TriAttentionConfig with
-// TRTF_TRIATTN_OVERRIDE_* values. All of them are deleted here — values
+// TRTMC_TRIATTN_OVERRIDE_* values. All of them are deleted here — values
 // now flow through the config registry exclusively.
 template <typename T>
-bool registry_has_value(const ::trtf::config::ConfigBundle& bundle, const std::string& field) {
+bool registry_has_value(const ::trtmc::config::ConfigBundle& bundle, const std::string& field) {
     try {
-        return bundle.source_of("triattention", field) != ::trtf::config::Layer::SchemaDefault;
+        return bundle.source_of("triattention", field) != ::trtmc::config::Layer::SchemaDefault;
     } catch (const std::exception&) {
         return false;
     }
 }
 
 template <typename T>
-void apply_layer_value(const ::trtf::config::ConfigBundle& bundle, const std::string& field,
+void apply_layer_value(const ::trtmc::config::ConfigBundle& bundle, const std::string& field,
                        T& out) {
     if (!registry_has_value<T>(bundle, field))
         return;
@@ -189,7 +189,7 @@ void apply_layer_value(const ::trtf::config::ConfigBundle& bundle, const std::st
     }
 }
 
-void apply_aggregation_from_registry(const ::trtf::config::ConfigBundle& bundle,
+void apply_aggregation_from_registry(const ::trtmc::config::ConfigBundle& bundle,
                                      const std::string& field, TriAttentionScoreAggregation& out) {
     if (!registry_has_value<std::string>(bundle, field))
         return;
@@ -234,7 +234,7 @@ namespace {
 // win; SchemaDefault reads are skipped so JSON-only bundles keep their
 // values.
 void overlay_core_runtime_from_registry(TriAttentionConfig& cfg,
-                                        const ::trtf::config::ConfigBundle& bundle) {
+                                        const ::trtmc::config::ConfigBundle& bundle) {
     apply_layer_value<bool>(bundle, "enabled", cfg.enabled);
     apply_layer_value<std::int32_t>(bundle, "kv_budget", cfg.kv_budget);
     apply_layer_value<std::int32_t>(bundle, "divide_length", cfg.divide_length);
@@ -251,8 +251,8 @@ void overlay_core_runtime_from_registry(TriAttentionConfig& cfg,
 
 // Populate the debug/profile fields from the registry. These have no
 // legacy JSON representation — they previously came from
-// TRTF_TRIATTN_* env vars, which are now gone.
-void fill_debug_from_registry(TriAttentionConfig& cfg, const ::trtf::config::ConfigBundle& bundle) {
+// TRTMC_TRIATTN_* env vars, which are now gone.
+void fill_debug_from_registry(TriAttentionConfig& cfg, const ::trtmc::config::ConfigBundle& bundle) {
     apply_layer_value<bool>(bundle, "debug", cfg.debug);
     apply_layer_value<bool>(bundle, "profile", cfg.profile);
     apply_layer_value<std::int32_t>(bundle, "runtime_bucket_rows", cfg.runtime_bucket_rows);
@@ -308,7 +308,7 @@ static void validate_triattention_config(const TriAttentionConfig& cfg, int32_t 
 
 TriAttentionConfig
 parse_triattention_bundle_config(const std::string& config_json, int32_t max_cache_length,
-                                 const ::trtf::config::ConfigBundle* runtime_config) {
+                                 const ::trtmc::config::ConfigBundle* runtime_config) {
     TriAttentionConfig cfg;
     // Legacy bundle path: pull core fields from the root-level
     // "triattention" object. New bundles route the same values through
@@ -638,7 +638,7 @@ void TriAttentionKvCache::normalize_sampled_heads() {
 void TriAttentionKvCache::log_init_debug() const {
     if (!config_.debug)
         return;
-    std::cerr << "[trtf.triattention] init kv_budget=" << config_.kv_budget
+    std::cerr << "[trtmc.triattention] init kv_budget=" << config_.kv_budget
               << " divide_length=" << config_.divide_length
               << " recent_window=" << config_.recent_window
               << " per_layer_aggregation=" << score_aggregation_name(config_.per_layer_aggregation)
@@ -684,14 +684,14 @@ TriAttentionKvCache::TriAttentionKvCache(int32_t num_layers, int32_t num_kv_head
     log_init_debug();
     maybe_generate_default_names(num_layers_, names_);
     allocate_layer_tensors();
-#ifdef TRTF_HAS_CUDA_KERNELS
+#ifdef TRTMC_HAS_CUDA_KERNELS
     if (!config_.disable_gpu_state)
         initialize_gpu_state();
 #endif
     reset();
 }
 
-#ifdef TRTF_HAS_CUDA_KERNELS
+#ifdef TRTMC_HAS_CUDA_KERNELS
 void TriAttentionKvCache::allocate_core_selection_buffers(int32_t half_dim) {
     candidate_indices_device_ = DeviceTensor({max_length_}, DType::kInt32, stream_);
     keep_indices_device_ = DeviceTensor({static_cast<int64_t>(cache_head_count_) * max_length_},
@@ -1018,7 +1018,7 @@ TriAttentionKvCache::select_keep_indices(int32_t keep_budget,
     if (candidates.empty())
         return broadcast_indices_per_head(std::move(reserved), old_budget);
 
-#ifdef TRTF_HAS_CUDA_KERNELS
+#ifdef TRTMC_HAS_CUDA_KERNELS
     if (can_use_gpu_selection())
         return select_keep_indices_gpu(old_budget, reserved, candidates, profile);
 #endif
@@ -1438,7 +1438,7 @@ std::vector<int32_t> TriAttentionKvCache::select_keep_indices_host(
     return keep;
 }
 
-#ifdef TRTF_HAS_CUDA_KERNELS
+#ifdef TRTMC_HAS_CUDA_KERNELS
 void TriAttentionKvCache::standardize_score_rows(float* rows, int32_t num_rows,
                                                  int32_t total_tokens) const {
     for (int32_t r = 0; r < num_rows; ++r) {
@@ -1760,7 +1760,7 @@ void TriAttentionKvCache::maybe_dump_score_cache(int32_t rows, const char* k_pat
     }
 }
 
-#ifdef TRTF_HAS_CUDA_KERNELS
+#ifdef TRTMC_HAS_CUDA_KERNELS
 bool TriAttentionKvCache::gpu_compaction_upload_keep(int32_t keep_count,
                                                      const std::vector<int32_t>& keep_indices) {
     if (config_.disable_gpu_compaction || keep_count <= 0 || !keep_indices_device_.ok())
@@ -1799,7 +1799,7 @@ bool TriAttentionKvCache::compact_layer_on_gpu(int32_t layer,
                                                const std::vector<int32_t>& keep_indices,
                                                int32_t keep_count, std::size_t row_bytes,
                                                int64_t& repack_calls, std::size_t& repack_bytes) {
-#ifdef TRTF_HAS_CUDA_KERNELS
+#ifdef TRTMC_HAS_CUDA_KERNELS
     if (!gpu_compaction_upload_keep(keep_count, keep_indices))
         return false;
     if (!gpu_compact_one_layer(layer, keep_count, row_bytes))
@@ -1985,7 +1985,7 @@ void TriAttentionKvCache::log_compact_debug(const std::vector<int32_t>& represen
         representative_positions.empty() ? -1 : representative_positions.front();
     const int32_t last_pos =
         representative_positions.empty() ? -1 : representative_positions.back();
-    std::cerr << "[trtf.triattention] compact abs_pos=" << absolute_position_
+    std::cerr << "[trtmc.triattention] compact abs_pos=" << absolute_position_
               << " old_rows=" << cache_length_ << " kept_rows=" << keep_count
               << " kept_prefix=" << kept_prefix << " first_pos=" << first_pos
               << " last_pos=" << last_pos;
@@ -2004,7 +2004,7 @@ void TriAttentionKvCache::log_compact_profile(const TriAttentionCompactionProfil
                                               int32_t keep_count) const {
     if (profile_ptr == nullptr)
         return;
-    std::cerr << "[trtf.triattention.profile] compact#" << compaction_count_
+    std::cerr << "[trtmc.triattention.profile] compact#" << compaction_count_
               << " abs_pos=" << absolute_position_ << " old_rows=" << cache_length_
               << " kept_rows=" << keep_count << " reserved=" << profile_ptr->reserved_count
               << " candidates=" << profile_ptr->candidate_count
@@ -2157,7 +2157,7 @@ std::size_t TriAttentionKvCache::device_memory_bytes() const {
         total += t.nbytes();
     for (const auto& t : present_v_)
         total += t.nbytes();
-#ifdef TRTF_HAS_CUDA_KERNELS
+#ifdef TRTMC_HAS_CUDA_KERNELS
     total += candidate_indices_device_.nbytes();
     total += keep_indices_device_.nbytes();
     total += positions_device_.nbytes();
@@ -2201,4 +2201,4 @@ bool TriAttentionKvCache::ok() const {
     return true;
 }
 
-} // namespace trtf
+} // namespace trtmc

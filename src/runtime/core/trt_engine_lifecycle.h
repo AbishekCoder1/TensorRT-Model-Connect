@@ -1,12 +1,12 @@
 #pragma once
 
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // Expand a layer-name pattern by replacing {i}, {2i}, {2i+1}, {2i+2} tokens.
 // Pure string logic — no TRT dependency.
@@ -43,4 +43,4 @@ bool has_all_required_tensors(const DecoderStepEngine& engine);
 
 std::string layer_tensor_name(const char* stem, int32_t layer);
 
-} // namespace trtf
+} // namespace trtmc

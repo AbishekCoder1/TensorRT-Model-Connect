@@ -3,7 +3,7 @@
 #include <cfloat>
 #include <cstdint>
 
-namespace trtf {
+namespace trtmc {
 
 // ---------------------------------------------------------------------------
 // Kernel: segmented argmax over num_codebooks segments of codebook_size each.
@@ -394,4 +394,4 @@ void magpie_cfg_interpolate_device(
         cfg_scale, num_elements);
 }
 
-} // namespace trtf
+} // namespace trtmc

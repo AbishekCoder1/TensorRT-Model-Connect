@@ -23,7 +23,7 @@ On each rotation, snapshot the current `ai-staging` tree into a timestamped bran
 
 ```bash
 python3 tools/ai_staging.py \
-  --project yifeif/trt-transformers \
+  --project yifeif/tensorrt-model-connect \
   --branch ai-staging \
   rotate-promotion \
   --target-branch master

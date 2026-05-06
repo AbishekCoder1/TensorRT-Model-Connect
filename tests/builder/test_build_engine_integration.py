@@ -25,9 +25,9 @@ import pytest
 
 try:
     from safetensors.numpy import save_file
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _trt_available() -> bool:
@@ -95,7 +95,7 @@ class TestOlmo2BuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.olmo2 import plugin
+        from tensorrt_model_connect.families.olmo2 import plugin
 
         config = {
             "model_type": "olmo2",
@@ -147,7 +147,7 @@ class TestModernbertBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.modernbert import plugin
+        from tensorrt_model_connect.families.modernbert import plugin
 
         config = {
             "model_type": "modernbert",
@@ -210,7 +210,7 @@ class TestDebertaBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.deberta import plugin
+        from tensorrt_model_connect.families.deberta import plugin
 
         config = {
             "model_type": "deberta",
@@ -276,7 +276,7 @@ class TestElectraBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.electra import plugin
+        from tensorrt_model_connect.families.electra import plugin
 
         config = {
             "model_type": "electra",
@@ -334,7 +334,7 @@ class TestFNetBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.fnet import plugin
+        from tensorrt_model_connect.families.fnet import plugin
 
         config = {
             "model_type": "fnet",
@@ -404,7 +404,7 @@ class TestAlbertBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.albert import plugin
+        from tensorrt_model_connect.families.albert import plugin
 
         config = {
             "model_type": "albert",
@@ -468,7 +468,7 @@ class TestXLNetBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.xlnet import plugin
+        from tensorrt_model_connect.families.xlnet import plugin
 
         config = {
             "model_type": "xlnet",

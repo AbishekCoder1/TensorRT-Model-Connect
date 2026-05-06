@@ -4,7 +4,7 @@ Pure-numpy tests run everywhere. TRT graph tests require TensorRT + CUDA GPU.
 
 Trace: ARCH-GRP-001, UD-GRP-OPS
 Intent: Validate atomic TRT graph ops (RoPE, ALiBi, RMSNorm, attention, etc.) against NumPy/PyTorch references
-Preconditions: trtf_build is importable; TRT+GPU available for graph-level tests
+Preconditions: tensorrt_model_connect is importable; TRT+GPU available for graph-level tests
 Postconditions: Each graph op produces numerically correct output matching its reference implementation
 """
 
@@ -15,8 +15,8 @@ import math
 import numpy as np
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
-from trtf_build import graph_ops
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+from tensorrt_model_connect import graph_ops
 
 from tests.builder.conftest import requires_trt
 

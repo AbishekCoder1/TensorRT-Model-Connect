@@ -33,7 +33,7 @@ void check(bool condition, const char* name)
 void test_decode_loop_stops_on_eot()
 {
     int step_calls = 0;
-    const auto result = trtf::run_whisper_decode_loop(
+    const auto result = trtmc::run_whisper_decode_loop(
         {11, 12},
         4,
         99,
@@ -75,7 +75,7 @@ void test_decode_loop_stops_on_eot()
 void test_decode_loop_reports_prefill_failure()
 {
     int step_calls = 0;
-    const auto result = trtf::run_whisper_decode_loop(
+    const auto result = trtmc::run_whisper_decode_loop(
         {21, 22},
         3,
         99,
@@ -105,7 +105,7 @@ void test_decode_loop_reports_prefill_failure()
 void test_decode_loop_reports_decode_failure_after_emitting_token()
 {
     int step_calls = 0;
-    const auto result = trtf::run_whisper_decode_loop(
+    const auto result = trtmc::run_whisper_decode_loop(
         {31},
         3,
         99,
@@ -136,7 +136,7 @@ void test_decode_loop_reports_decode_failure_after_emitting_token()
 
 void test_decode_loop_handles_zero_budget_and_empty_logits()
 {
-    const auto zero_budget = trtf::run_whisper_decode_loop(
+    const auto zero_budget = trtmc::run_whisper_decode_loop(
         {41},
         0,
         99,
@@ -151,7 +151,7 @@ void test_decode_loop_handles_zero_budget_and_empty_logits()
         });
     check(zero_budget.output_ids.empty(), "whisper decode loop emits nothing with zero token budget");
 
-    const auto empty_logits = trtf::run_whisper_decode_loop(
+    const auto empty_logits = trtmc::run_whisper_decode_loop(
         {},
         2,
         99,

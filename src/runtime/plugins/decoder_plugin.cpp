@@ -5,9 +5,9 @@
 #include "runtime/core/trt_engine_lifecycle.h"
 #include "runtime/pipelines/text_generation_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/config/config_bundle.h"
-#include "trtf/runtime/pipeline_registry.h"
-#include "trtf/runtime/triattention_kv_cache.h"
+#include "trtmc/config/config_bundle.h"
+#include "trtmc/runtime/pipeline_registry.h"
+#include "trtmc/runtime/triattention_kv_cache.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -19,7 +19,7 @@
 #include <sstream>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -118,7 +118,7 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
     if (!cache_input_supports_runtime_rows(module, kv_names.cache_k.front())) {
         throw std::runtime_error(
             "This bundle was not built with runtime-resizable KV cache support. "
-            "Rebuild with trtf-build --dynamic-kv-cache to use --kv-cache-size.");
+            "Rebuild with trtmc-build --dynamic-kv-cache to use --kv-cache-size.");
     }
 
     const std::uint64_t requested_rows_u64 = ctx.kv_cache_size_bytes / sizing.row_bytes;
@@ -337,7 +337,7 @@ class DecoderPlugin final : public IPipelinePlugin {
 
     static void log_kv_cache_sizing(const PipelineContext& ctx, const KvCacheRuntimeSizing& sizing,
                                     IInferenceState* state) {
-        std::cerr << "[trtf] KV cache rows=" << sizing.runtime_rows
+        std::cerr << "[trtmc] KV cache rows=" << sizing.runtime_rows
                   << " (bundle max=" << ctx.config.max_cache_length
                   << ", row=" << format_bytes(sizing.row_bytes)
                   << ", cache=" << format_bytes(sizing.cache_bytes) << ", state="
@@ -383,4 +383,4 @@ class DecoderPlugin final : public IPipelinePlugin {
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_decoder_plugin, DecoderPlugin, "decoder_kv_cache",
                                        "decoder_moe");
 
-} // namespace trtf
+} // namespace trtmc

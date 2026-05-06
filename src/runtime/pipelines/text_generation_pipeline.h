@@ -8,18 +8,18 @@
 // the TRT engine. This pipeline just runs prefill → decode loop.
 
 #include "runtime/core/chat_template.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/inference_state.h"
-#include "trtf/runtime/sampler.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/inference_state.h"
+#include "trtmc/runtime/sampler.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct TextGenConfig {
     int32_t vocab_size{0};
@@ -29,7 +29,7 @@ struct TextGenConfig {
     ChatTemplateFormat chat_template_format{ChatTemplateFormat::kNone};
     std::string token_id_name{"token_id"};
     std::string logits_output_name{"logits"};
-    // runtime.* namespace (replaces TRTF_DISABLE_CUDA_GRAPH, TRTF_GPU_ARGMAX).
+    // runtime.* namespace (replaces TRTMC_DISABLE_CUDA_GRAPH, TRTMC_GPU_ARGMAX).
     // decoder_plugin::create() populates these from ctx.runtime_config.
     bool disable_cuda_graph{false};
     bool prefer_gpu_greedy{false};
@@ -48,7 +48,7 @@ struct TextGenConfig {
 
 // Populate the process-wide step-trace state from the resolved ConfigBundle.
 // Called by decoder_plugin::create() before constructing the pipeline.
-// Replaces the TRTF_TEXT_STEP_TRACE_* env vars (deleted). Empty `path`
+// Replaces the TRTMC_TEXT_STEP_TRACE_* env vars (deleted). Empty `path`
 // keeps tracing disabled; a non-empty path truncates the target file.
 void apply_text_trace_config_from_registry(const std::string& path, std::int32_t start_position,
                                            std::int32_t end_position, std::int32_t top_k);
@@ -137,4 +137,4 @@ class TextGenerationPipeline final : public IPipeline {
     void log_decode_summary(int32_t steps, double ms) const;
 };
 
-} // namespace trtf
+} // namespace trtmc

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MagpieTTS IPA tokenizer bridge for trtf C++ runtime.
+"""MagpieTTS IPA tokenizer bridge for trtmc C++ runtime.
 
 Same CLI protocol as hf_tokenizer.py. Loads a MagpieTTS .nemo archive
 via NeMo's model restore, extracts the IPATokenizer for the selected
@@ -26,7 +26,7 @@ warnings.filterwarnings("ignore")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="MagpieTTS IPA tokenizer bridge for trtf C++ runtime")
+        description="MagpieTTS IPA tokenizer bridge for trtmc C++ runtime")
     parser.add_argument("--nemo-path", required=True,
                         help="Path to MagpieTTS .nemo archive or directory containing one")
     parser.add_argument("--check", action="store_true",
@@ -144,17 +144,17 @@ def _extract_nemo_assets(nemo_path: pathlib.Path, extract_dir: pathlib.Path) -> 
 
 
 def _resolve_asset_dir() -> pathlib.Path:
-    # Asset-dir resolution. The previous TRTF_MAGPIE_ASSET_DIR env var is
+    # Asset-dir resolution. The previous TRTMC_MAGPIE_ASSET_DIR env var is
     # removed as part of the config-registry migration. This script is
     # invoked as a subprocess by the runtime for tokenizer setup — it has
     # no access to the registry. Users who need to relocate the cache can
-    # set the standard XDG_CACHE_HOME env var (not a TRTF_* var).
+    # set the standard XDG_CACHE_HOME env var (not a TRTMC_* var).
     candidates = [
-        pathlib.Path(os.environ.get("XDG_CACHE_HOME", "")).expanduser() / "trtf_nemo_assets"
+        pathlib.Path(os.environ.get("XDG_CACHE_HOME", "")).expanduser() / "trtmc_nemo_assets"
         if os.environ.get("XDG_CACHE_HOME", "").strip()
         else None,
-        pathlib.Path.home() / ".cache" / "trtf_nemo_assets",
-        pathlib.Path("/tmp/trtf_nemo_assets"),
+        pathlib.Path.home() / ".cache" / "trtmc_nemo_assets",
+        pathlib.Path("/tmp/trtmc_nemo_assets"),
     ]
 
     for candidate in candidates:
@@ -211,7 +211,7 @@ def load_tokenizer(nemo_path: pathlib.Path, lang_key: str = "english_phoneme"):
     if target == "AutoTokenizer":
         raise RuntimeError(
             f"Magpie tokenizer '{lang_key}' requires HF AutoTokenizer path, "
-            "which is not supported in trtf runtime yet. Use english_phoneme."
+            "which is not supported in trtmc runtime yet. Use english_phoneme."
         )
 
     try:

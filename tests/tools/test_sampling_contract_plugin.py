@@ -29,7 +29,7 @@ def test_sampling_contract_accepts_forwarded_top_p_flags() -> None:
         metadata={
             "cpp": {
                 "command": [
-                    "./build/trtf",
+                    "./build/trtmc",
                     "run",
                     "qwen3-0.6b.trtfb",
                     "--temperature",
@@ -64,7 +64,7 @@ def test_sampling_contract_rejects_missing_top_p_flag() -> None:
         metadata={
             "cpp": {
                 "command": [
-                    "./build/trtf",
+                    "./build/trtmc",
                     "run",
                     "qwen3-0.6b.trtfb",
                     "--temperature",

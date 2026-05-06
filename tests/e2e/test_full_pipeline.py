@@ -1,6 +1,6 @@
 """E2E: Full pipeline — build bundle, run inference (C++ & Python), compare to HF reference.
 
-Exercises the complete flow: trtf_build.build() -> C++ runtime -> Python TrtRunner -> HF
+Exercises the complete flow: tensorrt_model_connect.build() -> C++ runtime -> Python TrtRunner -> HF
 transformers, then saves a results JSON alongside the bundle for traceability.
 
 All GPU-heavy work (TRT inference, HF model loading) runs in subprocesses to avoid OOM
@@ -9,16 +9,16 @@ when multiple engines share a single GPU.
 Usage:
     # Full pipeline with fresh build (GPU required):
     pytest tests/e2e/test_full_pipeline.py -v \
-      --engine-dir /mnt/storage/trt-transformers/engines --rebuild-engines
+      --engine-dir /mnt/storage/tensorrt-model-connect/engines --rebuild-engines
 
     # Use cached bundles (default):
     pytest tests/e2e/test_full_pipeline.py -v \
-      --engine-dir /mnt/storage/trt-transformers/engines
+      --engine-dir /mnt/storage/tensorrt-model-connect/engines
 
     # With explicit binary and python paths:
     pytest tests/e2e/test_full_pipeline.py -v \
-      --engine-dir /mnt/storage/trt-transformers/engines \
-      --trtf-binary ./build/trtf \
+      --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+      --trtmc-binary ./build/trtmc \
       --hf-python .venv/bin/python
 """
 
@@ -51,7 +51,7 @@ if str(TOOLS_DIR) not in sys.path:
 
 def _run_cpp_inference(binary, bundle_path, prompt, max_new_tokens,
                        hf_python, ld_library_path, image_path=None):
-    """Run C++ trtf binary inference (subprocess — no in-process GPU usage).
+    """Run C++ trtmc binary inference (subprocess — no in-process GPU usage).
 
     Returns:
         dict with keys: text, time_s, returncode, stderr
@@ -259,7 +259,7 @@ def _save_results(bundle_path, results_dict):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.e2e
-def test_full_pipeline(built_bundle, trtf_binary, hf_python, ld_library_path):
+def test_full_pipeline(built_bundle, trtmc_binary, hf_python, ld_library_path):
     """Full pipeline: build -> C++ inference -> diff_logits (HF vs Python runner)."""
     entry = built_bundle["entry"]
     bundle_path = built_bundle["path"]
@@ -293,7 +293,7 @@ def test_full_pipeline(built_bundle, trtf_binary, hf_python, ld_library_path):
 
     # Step 1: C++ binary inference (subprocess)
     cpp_result = _run_cpp_inference(
-        trtf_binary, bundle_path, prompt, max_new_tokens,
+        trtmc_binary, bundle_path, prompt, max_new_tokens,
         hf_python, ld_library_path)
     assert cpp_result["returncode"] == 0, (
         f"C++ inference failed (rc={cpp_result['returncode']}):\n"
@@ -379,7 +379,7 @@ def test_full_pipeline(built_bundle, trtf_binary, hf_python, ld_library_path):
 
 
 @pytest.mark.e2e
-def test_full_pipeline_vlm(built_bundle, trtf_binary, hf_python, ld_library_path,
+def test_full_pipeline_vlm(built_bundle, trtmc_binary, hf_python, ld_library_path,
                            engine_dir):
     """Full VL pipeline: build -> C++ inference -> diff_vl (HF vs Python runner)."""
     entry = built_bundle["entry"]
@@ -406,7 +406,7 @@ def test_full_pipeline_vlm(built_bundle, trtf_binary, hf_python, ld_library_path
 
     # Step 1: C++ binary with image (subprocess)
     cpp_result = _run_cpp_inference(
-        trtf_binary, bundle_path, prompt, max_new_tokens,
+        trtmc_binary, bundle_path, prompt, max_new_tokens,
         hf_python, ld_library_path, image_path=str(image_path))
     assert cpp_result["returncode"] == 0, (
         f"C++ VL inference failed (rc={cpp_result['returncode']}):\n"
@@ -415,7 +415,7 @@ def test_full_pipeline_vlm(built_bundle, trtf_binary, hf_python, ld_library_path
 
     # Step 2: diff_vl — HF vs Python VLTrtRunner (subprocess, memory-isolated)
     diff_result = _run_diff_vl_subprocess(
-        bundle_path, str(image_path), hf_id, trtf_binary, hf_python,
+        bundle_path, str(image_path), hf_id, trtmc_binary, hf_python,
         ld_library_path, atol=atol, max_new_tokens=max_new_tokens)
 
     # Step 3: Build and save results
@@ -502,7 +502,7 @@ def _run_segmentation_hf_subprocess(hf_id, image_path, output_path):
 
 
 @pytest.mark.e2e
-def test_segmentation_pipeline(built_bundle, trtf_binary, hf_python,
+def test_segmentation_pipeline(built_bundle, trtmc_binary, hf_python,
                                ld_library_path, engine_dir):
     """Full segmentation pipeline: build -> C++ segment -> compare with HF."""
     entry = built_bundle["entry"]
@@ -528,7 +528,7 @@ def test_segmentation_pipeline(built_bundle, trtf_binary, hf_python,
 
     # Step 1: C++ segmentation
     cmd = [
-        str(trtf_binary), "segment", str(bundle_path),
+        str(trtmc_binary), "segment", str(bundle_path),
         "--image", str(image_path),
         "--output", str(output_path),
     ]
@@ -626,9 +626,9 @@ def _run_segmentation_engine_parity_subprocess(hf_id, image_path):
         "    hf_logits = model(pv).logits[0].numpy()\n"
         "del model\n"
         "# TRT\n"
-        "from trtf_build.engine_builder import _resolve_model\n"
-        "from trtf_build.config import ModelConfig\n"
-        "from trtf_build.families import find_plugin\n"
+        "from tensorrt_model_connect.engine_builder import _resolve_model\n"
+        "from tensorrt_model_connect.config import ModelConfig\n"
+        "from tensorrt_model_connect.families import find_plugin\n"
         "model_dir = _resolve_model(hf_id)\n"
         "config = ModelConfig.from_dir(model_dir)\n"
         "plugin = find_plugin(config.model_type)\n"
@@ -980,7 +980,7 @@ def _speech_token_match_metrics(
 
 
 @pytest.mark.e2e
-def test_bark_stage_parity(built_bundle, trtf_binary, hf_python,
+def test_bark_stage_parity(built_bundle, trtmc_binary, hf_python,
                            ld_library_path):
     """Bark stage-by-stage greedy parity: TRT engine vs HF, per stage.
 
@@ -1008,7 +1008,7 @@ def test_bark_stage_parity(built_bundle, trtf_binary, hf_python,
     bundle_p = Path(bundle_path)
     wav_path = bundle_p.with_suffix(".wav")
     cpp_ok, wav_size, cpp_stderr = _run_cpp_audio_generation(
-        trtf_binary, bundle_path, prompt, str(wav_path),
+        trtmc_binary, bundle_path, prompt, str(wav_path),
         hf_python, ld_library_path)
 
     # Step 3: Build and save results.json next to the bundle
@@ -1066,7 +1066,7 @@ def test_bark_stage_parity(built_bundle, trtf_binary, hf_python,
 
 
 @pytest.mark.e2e
-def test_audio_pipeline(built_bundle, trtf_binary, hf_python,
+def test_audio_pipeline(built_bundle, trtmc_binary, hf_python,
                         ld_library_path):
     """Full audio pipeline: build -> C++ generate-audio -> verify output."""
     entry = built_bundle["entry"]
@@ -1080,7 +1080,7 @@ def test_audio_pipeline(built_bundle, trtf_binary, hf_python,
 
     # Run audio generation via C++ binary
     cmd = [
-        str(trtf_binary), "generate-audio", str(bundle_path),
+        str(trtmc_binary), "generate-audio", str(bundle_path),
         "--prompt", prompt,
         "--output", str(output_path),
     ]
@@ -1103,9 +1103,9 @@ def test_audio_pipeline(built_bundle, trtf_binary, hf_python,
 
 
 @pytest.mark.e2e
-def test_speech_to_speech_pipeline(model_entry, trtf_binary, hf_python,
+def test_speech_to_speech_pipeline(model_entry, trtmc_binary, hf_python,
                                    ld_library_path):
-    """Speech pipeline parity: run `trtf speak` and compare tokens to reference."""
+    """Speech pipeline parity: run `trtmc speak` and compare tokens to reference."""
     entry = model_entry
     bundle_path = entry["bundle_path"]
 
@@ -1141,7 +1141,7 @@ def test_speech_to_speech_pipeline(model_entry, trtf_binary, hf_python,
     _make_speech_greedy_bundle(bundle_path, greedy_bundle)
 
     run = _run_cpp_speech_generation(
-        trtf_binary, greedy_bundle, input_audio, output_wav,
+        trtmc_binary, greedy_bundle, input_audio, output_wav,
         max_frames, hf_python, ld_library_path)
     assert run["returncode"] == 0, (
         f"Speech generation failed (rc={run['returncode']}):\n{run['stderr']}")

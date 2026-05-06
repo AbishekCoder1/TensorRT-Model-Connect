@@ -13,21 +13,21 @@ Usage:
     # All three backends
     python3 tools/perf_compare_diffusion.py \
       --model PixArt-alpha/PixArt-Sigma-XL-2-1024-MS \
-      --bundle /workspace/trt-transformers-cpp/engines/pixart_sigma_v8.trtfb \
+      --bundle /workspace/tensorrt-model-connect/engines/pixart_sigma_v8.trtfb \
       --prompt "A photo of a dog chewing on a bone" \
-      --output-dir /workspace/trt-transformers-cpp/outputs/pixart/perf
+      --output-dir /workspace/tensorrt-model-connect/outputs/pixart/perf
 
     # Skip torch.compile (slow compilation)
     python3 tools/perf_compare_diffusion.py \
       --model PixArt-alpha/PixArt-Sigma-XL-2-1024-MS \
-      --bundle /workspace/trt-transformers-cpp/engines/pixart_sigma_v8.trtfb \
+      --bundle /workspace/tensorrt-model-connect/engines/pixart_sigma_v8.trtfb \
       --prompt "A photo of a dog chewing on a bone" \
       --skip-compile
 
     # Save results as JSON
     python3 tools/perf_compare_diffusion.py \
       --model PixArt-alpha/PixArt-Sigma-XL-2-1024-MS \
-      --bundle /workspace/trt-transformers-cpp/engines/pixart_sigma_v8.trtfb \
+      --bundle /workspace/tensorrt-model-connect/engines/pixart_sigma_v8.trtfb \
       --prompt "A red sports car on a highway" \
       --json results.json
 """
@@ -329,7 +329,7 @@ def bench_torchtrt(bundle_path: str, prompt: str, num_steps: int,
     This gives a fair apples-to-apples comparison with HF eager/compile.
     """
     import torch
-    from trtf_build.debug_runner import load_section_from_bundle, \
+    from tensorrt_model_connect.debug_runner import load_section_from_bundle, \
         load_config_from_bundle
 
     print("[perf] Loading TRT engines from bundle ...", file=sys.stderr)
@@ -706,8 +706,8 @@ def main():
                         help="HF repo ID (e.g. PixArt-alpha/PixArt-Sigma-XL-2-1024-MS)")
     parser.add_argument("--bundle", required=True,
                         help="Torch-TRT .trtfb bundle path (container path)")
-    parser.add_argument("--trtf-binary", default="./build/trtf",
-                        help="Path to trtf binary (default: ./build/trtf)")
+    parser.add_argument("--trtmc-binary", default="./build/trtmc",
+                        help="Path to trtmc binary (default: ./build/trtmc)")
     parser.add_argument("--hf-python", default="/opt/venv/bin/python",
                         help="Path to Python with HF tokenizers")
     parser.add_argument("--prompt",

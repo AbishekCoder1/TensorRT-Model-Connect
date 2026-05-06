@@ -62,9 +62,9 @@ def test_expand_path_h_hpp_shorthand_splits_into_header_pair() -> None:
     # "foo.h/hpp" is the header-only variant of the shorthand and must expand
     # to [foo.h, foo.hpp] — the .hpp suffix, not .cpp. Guards against a
     # regex regression where H_HPP_SHORTHAND accidentally emits a .cpp.
-    assert cdfr._expand_path("include/trtf/bar.h/hpp") == [
-        "include/trtf/bar.h",
-        "include/trtf/bar.hpp",
+    assert cdfr._expand_path("include/trtmc/bar.h/hpp") == [
+        "include/trtmc/bar.h",
+        "include/trtmc/bar.hpp",
     ]
 
 

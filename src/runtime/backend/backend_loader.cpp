@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -50,7 +50,7 @@ void cleanup_backends() {
     for (auto& [name, entry] : g_cache) {
         if (entry.backend) {
             auto destroy = reinterpret_cast<void (*)(IBackend*)>(
-                dlsym(entry.dl_handle, "trtf_destroy_backend"));
+                dlsym(entry.dl_handle, "trtmc_destroy_backend"));
             if (destroy)
                 destroy(entry.backend);
             entry.backend = nullptr;
@@ -127,30 +127,30 @@ const char* optional_string_symbol(void* handle, const char* symbol) {
 
 CachedBackend create_backend(const std::string& requested_name, const std::string& dso_name,
                              void* handle) {
-    auto create_fn = reinterpret_cast<IBackend* (*)()>(dlsym(handle, "trtf_create_backend"));
+    auto create_fn = reinterpret_cast<IBackend* (*)()>(dlsym(handle, "trtmc_create_backend"));
     if (!create_fn) {
         dlclose(handle);
-        throw std::runtime_error(dso_name + " loaded but missing trtf_create_backend symbol");
+        throw std::runtime_error(dso_name + " loaded but missing trtmc_create_backend symbol");
     }
 
     IBackend* backend = create_fn();
     if (!backend) {
         dlclose(handle);
-        throw std::runtime_error(dso_name + ": trtf_create_backend() returned nullptr");
+        throw std::runtime_error(dso_name + ": trtmc_create_backend() returned nullptr");
     }
 
     BackendLoadMetadata metadata;
     metadata.requested_name = requested_name;
     metadata.dso_name = dso_name;
     metadata.backend_name = backend->name() ? backend->name() : "";
-    metadata.trt_abi = optional_string_symbol(handle, "trtf_backend_abi");
-    metadata.trt_runtime_version = optional_string_symbol(handle, "trtf_backend_runtime_version");
+    metadata.trt_abi = optional_string_symbol(handle, "trtmc_backend_abi");
+    metadata.trt_runtime_version = optional_string_symbol(handle, "trtmc_backend_runtime_version");
 
     return CachedBackend{handle, backend, std::move(metadata)};
 }
 
 std::string backend_dso_name(const std::string& backend_name) {
-    return "libtrtf_backend_" + backend_name + ".so";
+    return "libtrtmc_backend_" + backend_name + ".so";
 }
 
 void populate_load_outputs(const std::string& backend_name,
@@ -189,7 +189,7 @@ IBackend* load_backend_candidate(const std::string& backend_name,
     g_cache[backend_name] = entry;
     populate_load_outputs(backend_name, g_cache[backend_name].metadata, loaded_backend_name,
                           metadata);
-    std::cerr << "[trtf] Backend loaded: " << backend->name() << " (" << dso_name << ")"
+    std::cerr << "[trtmc] Backend loaded: " << backend->name() << " (" << dso_name << ")"
               << std::endl;
     return backend;
 }
@@ -216,15 +216,15 @@ std::string join_backend_names(const std::vector<std::string>& backend_names) {
                                  "\n"
                                  "To use " +
                                  backend_name + " bundles, ensure " + dso_name +
-                                 " is next to the trtf binary,\n"
+                                 " is next to the trtmc binary,\n"
                                  "in a LoadOptions::backend_search_paths / --backend-dir "
                                  "directory, or in LD_LIBRARY_PATH.");
     }
 
     throw std::runtime_error("No compatible backend DSO available for candidates: " +
                              join_backend_names(backend_names) + ".\n" + all_tried +
-                             "\nEnsure the matching libtrtf_backend_<backend>.so is next to the "
-                             "trtf binary, in a LoadOptions::backend_search_paths / --backend-dir "
+                             "\nEnsure the matching libtrtmc_backend_<backend>.so is next to the "
+                             "trtmc binary, in a LoadOptions::backend_search_paths / --backend-dir "
                              "directory, or in LD_LIBRARY_PATH.");
 }
 
@@ -258,7 +258,7 @@ void BackendLoader::preload_dependency(const std::string& path) {
                                  (error ? error : "unknown dlopen error"));
     }
     g_preloaded_dependencies[path] = handle;
-    std::cerr << "[trtf] Preloaded dependency: " << path << std::endl;
+    std::cerr << "[trtmc] Preloaded dependency: " << path << std::endl;
 }
 
 IBackend* BackendLoader::load_first_available(const std::vector<std::string>& backend_names,
@@ -281,4 +281,4 @@ IBackend* BackendLoader::load_first_available(const std::vector<std::string>& ba
     throw_backend_load_failure(backend_names, all_tried);
 }
 
-} // namespace trtf
+} // namespace trtmc

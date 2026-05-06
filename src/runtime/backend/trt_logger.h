@@ -6,7 +6,7 @@
 #include <memory>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 class TrtLogger final : public nvinfer1::ILogger {
   public:
@@ -36,4 +36,4 @@ using TrtUniquePtr = std::unique_ptr<T, TrtDeleter<T>>;
 
 TrtUniquePtr<nvinfer1::IRuntime> create_trt_runtime();
 
-} // namespace trtf
+} // namespace trtmc

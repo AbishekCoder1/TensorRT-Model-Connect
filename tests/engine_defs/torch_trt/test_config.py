@@ -1,4 +1,4 @@
-"""Tests for ttrt_build.config — ModelConfig parsing."""
+"""Tests for tensorrt_model_connect.config — ModelConfig parsing."""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ import json
 import pytest
 
 try:
-    from trtf_build.engine_defs.torch_trt.config import ModelConfig
+    from tensorrt_model_connect.engine_defs.torch_trt.config import ModelConfig
 except ImportError:
-    pytest.skip("ttrt_build not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 
 class TestModelConfig:

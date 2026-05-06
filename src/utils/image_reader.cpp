@@ -1,13 +1,13 @@
-// image_reader.cpp — implements trtf::io::read_image() using stb_image.
+// image_reader.cpp — implements trtmc::io::read_image() using stb_image.
 
-#include "trtf/trtf_io.hpp"
+#include "trtmc/trtmc_io.hpp"
 
 #include "stb_image.h"
 
 #include <cstddef>
 #include <stdexcept>
 
-namespace trtf::io {
+namespace trtmc::io {
 
 LoadedImage read_image(const std::string& path)
 {
@@ -37,4 +37,4 @@ LoadedImage read_image(const std::string& path)
     return result;
 }
 
-} // namespace trtf::io
+} // namespace trtmc::io

@@ -7,22 +7,22 @@ import pytest
 
 
 @pytest.mark.e2e
-def test_inspect_produces_output(model_entry, trtf_binary, ld_library_path):
-    """trtf inspect <bundle> should produce valid output."""
+def test_inspect_produces_output(model_entry, trtmc_binary, ld_library_path):
+    """trtmc inspect <bundle> should produce valid output."""
     env = {"LD_LIBRARY_PATH": ld_library_path}
     result = subprocess.run(
-        [str(trtf_binary), "inspect", model_entry["bundle_path"]],
+        [str(trtmc_binary), "inspect", model_entry["bundle_path"]],
         capture_output=True, text=True, timeout=30, env=env)
     assert result.returncode == 0, f"inspect failed: {result.stderr}"
     assert len(result.stdout.strip()) > 0, "inspect produced no output"
 
 
 @pytest.mark.e2e
-def test_inspect_shows_runtime_strategy(model_entry, trtf_binary, ld_library_path):
+def test_inspect_shows_runtime_strategy(model_entry, trtmc_binary, ld_library_path):
     """Inspect output should mention the runtime strategy."""
     env = {"LD_LIBRARY_PATH": ld_library_path}
     result = subprocess.run(
-        [str(trtf_binary), "inspect", model_entry["bundle_path"]],
+        [str(trtmc_binary), "inspect", model_entry["bundle_path"]],
         capture_output=True, text=True, timeout=30, env=env)
     assert result.returncode == 0
     # Verify runtime_strategy is printed and matches the expected value.

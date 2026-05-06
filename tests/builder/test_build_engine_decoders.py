@@ -21,9 +21,9 @@ import pytest
 
 try:
     from safetensors.numpy import save_file
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _trt_available() -> bool:
@@ -111,7 +111,7 @@ class TestT5BuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.t5 import plugin
+        from tensorrt_model_connect.families.t5 import plugin
 
         config = {
             "model_type": "t5",
@@ -193,7 +193,7 @@ class TestConvBERTBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.convbert import plugin
+        from tensorrt_model_connect.families.convbert import plugin
 
         config = {
             "model_type": "convbert",
@@ -259,7 +259,7 @@ class TestDPRBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.dpr import plugin
+        from tensorrt_model_connect.families.dpr import plugin
 
         config = {
             "model_type": "dpr",
@@ -322,7 +322,7 @@ class TestDistilBERTBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from trtf_build.families.distilbert import plugin
+        from tensorrt_model_connect.families.distilbert import plugin
 
         config = {
             "model_type": "distilbert",

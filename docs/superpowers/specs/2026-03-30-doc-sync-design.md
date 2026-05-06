@@ -82,7 +82,7 @@ for high-confidence triggers:
 | Signal | Detection method |
 |--------|-----------------|
 | New runtime strategy | New `REGISTER_PIPELINE_PLUGIN` call in `src/runtime/plugins/` |
-| New family plugin | New `.py` in `trtf_build/trtf_build/families/` with `plugin` attribute |
+| New family plugin | New `.py` in `tensorrt_model_connect/tensorrt_model_connect/families/` with `plugin` attribute |
 | New pipeline class | New `.cpp/.h` pair in `src/runtime/pipelines/` |
 | Config schema change | New fields parsed in `pipeline_plugin.cpp` or `config.py` |
 | New E2E task strategy | New runner in `tests/e2e_harness/runners/` |
@@ -115,7 +115,7 @@ families.
 
 Invocation modes:
 - Interactive: `/loop 24h /doc-sync`
-- Cron: `cd /workspace/users/yifeif/workspaces/<agent-id>/trt-transformers-cpp && claude --print -p "/doc-sync"`
+- Cron: `cd /workspace/users/yifeif/workspaces/<agent-id>/tensorrt-model-connect && claude --print -p "/doc-sync"`
 - Manual: `/doc-sync`
 
 ### State Management
@@ -207,7 +207,7 @@ Purely mechanical scan of the ARCH-*/UD-*/UT-*/IT-* trace ID system.
 | Tests missing trace IDs | Scan test docstrings/comments for missing `Trace:` | Add trace ID annotations |
 | Orphaned trace IDs | UT-*/IT-* in matrix referencing deleted test files | Remove entries |
 | Unverified ARCH-* | ARCH-* entries with zero linked UT-*/IT-* | Add links to matching tests |
-| Missing UD-* coverage | Source files in `src/` and `trtf_build/` not referenced by any UD-* | Add UD-* entries |
+| Missing UD-* coverage | Source files in `src/` and `tensorrt_model_connect/` not referenced by any UD-* | Add UD-* entries |
 | Stale UD-* references | UD-* references nonexistent source file | Fix paths or remove |
 | Unlinked E2E manifests | Manifests in `tests/e2e/models/` with no IT-* entry | Add IT-* entries |
 | Trace ID format violations | Malformed IDs in test docstrings | Fix formatting |

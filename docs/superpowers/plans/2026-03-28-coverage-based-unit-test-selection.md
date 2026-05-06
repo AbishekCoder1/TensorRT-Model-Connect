@@ -97,21 +97,21 @@ class TestPythonCollector:
         """Parses a fake .coverage DB and returns source -> test mapping."""
         db_path = tmp_path / ".coverage"
         _create_fake_coverage_db(db_path, {
-            "trtf_build/trtf_build/config.py": {
+            "tensorrt_model_connect/tensorrt_model_connect/config.py": {
                 "tests/builder/test_config.py::TestModelConfig::test_parse|run": [1, 2, 3],
                 "tests/builder/test_config.py::TestModelConfig::test_vl|run": [1, 5],
             },
-            "trtf_build/trtf_build/graph_ops.py": {
+            "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py": {
                 "tests/builder/test_graph_ops.py::TestRoPE::test_basic|run": [10, 20],
             },
         })
         result = parse_coverage_db(db_path)
-        assert "trtf_build/trtf_build/config.py" in result
-        assert sorted(result["trtf_build/trtf_build/config.py"]) == [
+        assert "tensorrt_model_connect/tensorrt_model_connect/config.py" in result
+        assert sorted(result["tensorrt_model_connect/tensorrt_model_connect/config.py"]) == [
             "tests/builder/test_config.py::TestModelConfig::test_parse",
             "tests/builder/test_config.py::TestModelConfig::test_vl",
         ]
-        assert result["trtf_build/trtf_build/graph_ops.py"] == [
+        assert result["tensorrt_model_connect/tensorrt_model_connect/graph_ops.py"] == [
             "tests/builder/test_graph_ops.py::TestRoPE::test_basic",
         ]
 
@@ -119,7 +119,7 @@ class TestPythonCollector:
         """Strips |run, |setup, |teardown from context names."""
         db_path = tmp_path / ".coverage"
         _create_fake_coverage_db(db_path, {
-            "trtf_build/trtf_build/config.py": {
+            "tensorrt_model_connect/tensorrt_model_connect/config.py": {
                 "tests/builder/test_config.py::test_a|setup": [1],
                 "tests/builder/test_config.py::test_a|run": [2],
                 "tests/builder/test_config.py::test_a|teardown": [3],
@@ -127,7 +127,7 @@ class TestPythonCollector:
         })
         result = parse_coverage_db(db_path)
         # Should deduplicate after stripping phase
-        assert result["trtf_build/trtf_build/config.py"] == [
+        assert result["tensorrt_model_connect/tensorrt_model_connect/config.py"] == [
             "tests/builder/test_config.py::test_a",
         ]
 
@@ -146,7 +146,7 @@ class TestPythonCollector:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py -v"`
 Expected: FAIL with `ModuleNotFoundError: No module named 'coverage_map.python_collector'`
 
 - [ ] **Step 3: Create package and implement python_collector.py**
@@ -207,7 +207,7 @@ def parse_coverage_db(db_path: Path) -> Dict[str, List[str]]:
 def collect_python_coverage(
     repo_root: Path,
     test_targets: Optional[List[str]] = None,
-    cov_source: str = "trtf_build",
+    cov_source: str = "tensorrt_model_connect",
     python_bin: str = "python",
 ) -> Dict[str, List[str]]:
     """Run Python tests with per-test coverage and return source->tests map.
@@ -265,7 +265,7 @@ def collect_python_coverage(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py::TestPythonCollector -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py::TestPythonCollector -v"`
 Expected: All 4 tests PASS
 
 - [ ] **Step 5: Commit**
@@ -297,17 +297,17 @@ class TestCppCollector:
         gcovr_data = {
             "files": [
                 {
-                    "filename": "/workspace/trt-transformers-cpp/src/tokenizer/vocab_tokenizer.cpp",
+                    "filename": "/workspace/tensorrt-model-connect/src/tokenizer/vocab_tokenizer.cpp",
                     "line_covered": 20,
                     "line_total": 50,
                 },
                 {
-                    "filename": "/workspace/trt-transformers-cpp/src/bundle/bundle_format.cpp",
+                    "filename": "/workspace/tensorrt-model-connect/src/bundle/bundle_format.cpp",
                     "line_covered": 0,
                     "line_total": 30,
                 },
                 {
-                    "filename": "/workspace/trt-transformers-cpp/include/trtf/runtime/pipeline_plugin.h",
+                    "filename": "/workspace/tensorrt-model-connect/include/trtmc/runtime/pipeline_plugin.h",
                     "line_covered": 5,
                     "line_total": 10,
                 },
@@ -315,10 +315,10 @@ class TestCppCollector:
         }
         json_path = tmp_path / "cov.json"
         json_path.write_text(json.dumps(gcovr_data))
-        result = parse_gcovr_json(json_path, repo_root=Path("/workspace/trt-transformers-cpp"))
+        result = parse_gcovr_json(json_path, repo_root=Path("/workspace/tensorrt-model-connect"))
         # Only files with line_covered > 0
         assert "src/tokenizer/vocab_tokenizer.cpp" in result
-        assert "include/trtf/runtime/pipeline_plugin.h" in result
+        assert "include/trtmc/runtime/pipeline_plugin.h" in result
         assert "src/bundle/bundle_format.cpp" not in result
 
     def test_parse_gcovr_json_empty(self, tmp_path):
@@ -358,7 +358,7 @@ class TestCppCollector:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py::TestCppCollector -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py::TestCppCollector -v"`
 Expected: FAIL with `ImportError: cannot import name 'parse_gcovr_json'`
 
 - [ ] **Step 3: Implement cpp_collector.py**
@@ -491,7 +491,7 @@ def collect_cpp_coverage(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py::TestCppCollector -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py::TestCppCollector -v"`
 Expected: All 4 tests PASS
 
 - [ ] **Step 5: Commit**
@@ -520,10 +520,10 @@ from coverage_map.generate import merge_maps, validate_map, load_coverage_map
 class TestGenerate:
     def test_merge_maps_disjoint(self):
         """Merging two disjoint maps produces their union."""
-        py_map = {"trtf_build/config.py": ["test_config.py::test_a"]}
+        py_map = {"tensorrt_model_connect/config.py": ["test_config.py::test_a"]}
         cpp_map = {"src/vocab.cpp": ["test_vocab"]}
         merged = merge_maps(py_map, cpp_map)
-        assert merged["trtf_build/config.py"] == ["test_config.py::test_a"]
+        assert merged["tensorrt_model_connect/config.py"] == ["test_config.py::test_a"]
         assert merged["src/vocab.cpp"] == ["test_vocab"]
 
     def test_merge_maps_overlapping(self):
@@ -569,7 +569,7 @@ class TestGenerate:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py::TestGenerate -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py::TestGenerate -v"`
 Expected: FAIL with `ImportError: cannot import name 'merge_maps'`
 
 - [ ] **Step 3: Implement generate.py**
@@ -765,7 +765,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py::TestGenerate -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py::TestGenerate -v"`
 Expected: All 6 tests PASS
 
 - [ ] **Step 5: Commit**
@@ -798,11 +798,11 @@ class TestSelectTests:
             "src/tokenizer/vocab_tokenizer.cpp": ["test_vocab_tokenizer"],
             "src/bundle/bundle_format.cpp": ["test_bundle_format", "test_bundle_e2e"],
             "src/utils/text_parsers.cpp": ["test_text_parsers", "test_vocab_tokenizer"],
-            "trtf_build/trtf_build/config.py": [
+            "tensorrt_model_connect/tensorrt_model_connect/config.py": [
                 "tests/builder/test_config.py::TestModelConfig::test_parse",
                 "tests/builder/test_config.py::TestModelConfig::test_vl",
             ],
-            "trtf_build/trtf_build/graph_ops.py": [
+            "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py": [
                 "tests/builder/test_graph_ops.py::TestRoPE::test_basic",
             ],
         }
@@ -816,7 +816,7 @@ class TestSelectTests:
 
     def test_known_python_file(self, sample_map):
         """Known Python source file returns its mapped tests."""
-        result = select_tests(["trtf_build/trtf_build/config.py"], sample_map)
+        result = select_tests(["tensorrt_model_connect/tensorrt_model_connect/config.py"], sample_map)
         assert sorted(result.builder_tests) == [
             "tests/builder/test_config.py::TestModelConfig::test_parse",
             "tests/builder/test_config.py::TestModelConfig::test_vl",
@@ -830,8 +830,8 @@ class TestSelectTests:
         assert result.cpp_tests == []
 
     def test_unknown_python_file_fallback(self, sample_map):
-        """Unknown trtf_build/ file triggers builder tier fallback."""
-        result = select_tests(["trtf_build/trtf_build/new_module.py"], sample_map)
+        """Unknown tensorrt_model_connect/ file triggers builder tier fallback."""
+        result = select_tests(["tensorrt_model_connect/tensorrt_model_connect/new_module.py"], sample_map)
         assert "builder" in result.fallback_tiers
         assert result.builder_tests == []
 
@@ -854,14 +854,14 @@ class TestSelectTests:
 
     def test_include_header_fallback(self, sample_map):
         """Unknown include/ header triggers cpp fallback."""
-        result = select_tests(["include/trtf/new_header.h"], sample_map)
+        result = select_tests(["include/trtmc/new_header.h"], sample_map)
         assert "cpp" in result.fallback_tiers
 
     def test_mixed_cpp_and_python(self, sample_map):
         """Changes in both languages select tests from both."""
         result = select_tests([
             "src/tokenizer/vocab_tokenizer.cpp",
-            "trtf_build/trtf_build/config.py",
+            "tensorrt_model_connect/tensorrt_model_connect/config.py",
         ], sample_map)
         assert "test_vocab_tokenizer" in result.cpp_tests
         assert "tests/builder/test_config.py::TestModelConfig::test_parse" in result.builder_tests
@@ -876,7 +876,7 @@ class TestSelectTests:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py::TestSelectTests -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py::TestSelectTests -v"`
 Expected: FAIL with `ImportError: cannot import name 'select_tests'`
 
 - [ ] **Step 3: Implement select_tests.py**
@@ -951,7 +951,7 @@ def _classify_tier(path: str) -> Optional[str]:
         return "cpp"
     if path == "CMakeLists.txt" or path.startswith("cmake/"):
         return "cpp"
-    if path.startswith("trtf_build/"):
+    if path.startswith("tensorrt_model_connect/"):
         return "builder"
     if path.startswith("tests/builder/"):
         return "builder"
@@ -1060,7 +1060,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py::TestSelectTests -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py::TestSelectTests -v"`
 Expected: All 9 tests PASS
 
 - [ ] **Step 5: Commit**
@@ -1087,12 +1087,12 @@ class TestCoverageMapIntegration:
     def test_impact_result_has_test_lists(self, imap):
         """ImpactResult with coverage map includes per-tier test lists."""
         coverage_map = {
-            "trtf_build/trtf_build/families/qwen.py": [
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py": [
                 "tests/builder/test_engine_qwen.py::TestQwen::test_plugin",
             ],
         }
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
             coverage_map=coverage_map,
         )
         assert "tests/builder/test_engine_qwen.py::TestQwen::test_plugin" in result.builder_tests
@@ -1100,9 +1100,9 @@ class TestCoverageMapIntegration:
 
     def test_unknown_file_triggers_fallback(self, imap):
         """File not in coverage map triggers tier fallback."""
-        coverage_map = {"trtf_build/trtf_build/config.py": ["tests/builder/test_config.py::test_a"]}
+        coverage_map = {"tensorrt_model_connect/tensorrt_model_connect/config.py": ["tests/builder/test_config.py::test_a"]}
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
             coverage_map=coverage_map,
         )
         # qwen.py not in coverage_map -> builder fallback
@@ -1111,7 +1111,7 @@ class TestCoverageMapIntegration:
     def test_no_coverage_map_no_test_lists(self, imap):
         """Without coverage map, test lists are empty and fallback_tiers empty."""
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
         )
         assert result.builder_tests == []
         assert result.cpp_tests == []
@@ -1138,7 +1138,7 @@ class TestCoverageMapIntegration:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_test_impact.py::TestCoverageMapIntegration -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_test_impact.py::TestCoverageMapIntegration -v"`
 Expected: FAIL with `TypeError` (analyze_impact doesn't accept coverage_map parameter)
 
 - [ ] **Step 3: Modify test_impact.py to integrate coverage map**
@@ -1260,7 +1260,7 @@ Then pass `coverage_map=coverage_map` to the `analyze_impact(...)` call.
 
 - [ ] **Step 4: Run all test_impact tests to verify nothing broke**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_test_impact.py -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_test_impact.py -v"`
 Expected: All existing tests PASS + 4 new tests PASS
 
 - [ ] **Step 5: Commit**
@@ -1325,7 +1325,7 @@ class TestFetchLatest:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py::TestFetchLatest -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py::TestFetchLatest -v"`
 Expected: FAIL with `ImportError`
 
 - [ ] **Step 3: Implement fetch_latest.py**
@@ -1435,7 +1435,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py::TestFetchLatest -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py::TestFetchLatest -v"`
 Expected: All 3 tests PASS
 
 - [ ] **Step 5: Commit**
@@ -1609,27 +1609,27 @@ git commit -m "ci: integrate coverage-map-based selective unit test execution"
 
 - [ ] **Step 1: Run all coverage_map tests**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_coverage_map.py -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_coverage_map.py -v"`
 Expected: All tests PASS (approximately 23 tests)
 
 - [ ] **Step 2: Run all test_impact tests (including new integration tests)**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/test_test_impact.py -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/test_test_impact.py -v"`
 Expected: All existing + new tests PASS
 
 - [ ] **Step 3: Run the full tools test suite**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m pytest tests/tools/ -v"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m pytest tests/tools/ -v"`
 Expected: All tools tests PASS
 
 - [ ] **Step 4: Validate test_impact.py --validate still passes**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python tools/test_impact.py --validate"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python tools/test_impact.py --validate"`
 Expected: Validation passed
 
 - [ ] **Step 5: Dry-run select_tests.py with a sample file**
 
-Run: `docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python -m tools.coverage_map.select_tests --coverage-map /dev/null --files src/tokenizer/vocab_tokenizer.cpp 2>&1 || true"`
+Run: `docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python -m tools.coverage_map.select_tests --coverage-map /dev/null --files src/tokenizer/vocab_tokenizer.cpp 2>&1 || true"`
 Expected: Error about missing map (correct behavior -- no map yet)
 
 - [ ] **Step 6: Final commit (if any fixups needed)**

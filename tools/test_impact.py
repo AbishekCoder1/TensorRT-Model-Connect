@@ -10,7 +10,7 @@ Usage:
     python3 tools/test_impact.py --files path/to/file1.py,path/to/file2.cpp
     python3 tools/test_impact.py --validate
     python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/plugins/decoder_plugin.cpp
-    python3 tools/test_impact.py --files trtf_build/trtf_build/families/qwen.py --cap 15
+    python3 tools/test_impact.py --files tensorrt_model_connect/tensorrt_model_connect/families/qwen.py --cap 15
 """
 
 import argparse
@@ -184,7 +184,7 @@ SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     ],
 }
 
-# Orchestrator modules in trtf_build/ -- not treated as specialized builders
+# Orchestrator modules in tensorrt_model_connect/ -- not treated as specialized builders
 _ORCHESTRATOR_MODULES = {
     "engine_builder", "cli", "__init__", "__main__", "pipeline",
     "debug_runner", "diffusion_runner",
@@ -287,7 +287,7 @@ def _scan_family_imports(families_dir: Path) -> Dict[str, List[str]]:
 def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family plugins."""
     models_dir = repo_root / "tests" / "e2e" / "models"
-    families_dir = repo_root / "trtf_build" / "trtf_build" / "families"
+    families_dir = repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
     pipelines_dir = repo_root / "src" / "runtime" / "pipelines"
 
     family_to_models: Dict[str, List[str]] = {}
@@ -472,7 +472,7 @@ def _apply_l0_replacements(
 def _infer_unit_tiers(path: str) -> List[str]:
     """Infer which unit test tiers a file change implies."""
     tiers: List[str] = []
-    if path.startswith("trtf_build/") or path.startswith("ttrt_build/"):
+    if path.startswith("tensorrt_model_connect/"):
         tiers.append("builder")
     if (path.startswith("src/") or path.startswith("include/")
             or path == "CMakeLists.txt" or path.startswith("cmake/")):
@@ -512,31 +512,31 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
         return RuleMatch("manifest", models, unit_tiers, rebuild)
 
     # Rule 1: Family plugin (not __init__ or base)
-    m = re.match(r"trtf_build/trtf_build/families/(\w+)\.py$", path)
+    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/families/(\w+)\.py$", path)
     if m and m.group(1) not in ("__init__", "base"):
         family = m.group(1)
         models = imap.family_to_models.get(family, [])
         return RuleMatch("family_plugin", sorted(models), unit_tiers, rebuild)
 
     # Rule 1b: Family __init__.py or base.py -> ALL models
-    m = re.match(r"trtf_build/trtf_build/families/((__init__|base)\.py)$", path)
+    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/families/((__init__|base)\.py)$", path)
     if m:
         return RuleMatch("family_base", list(imap.all_model_names), unit_tiers, rebuild)
 
     # Rule 1c: Torch-TRT family plugin (not __init__ or base)
-    m = re.match(r"trtf_build/trtf_build/engine_defs/torch_trt/families/(\w+)\.py$", path)
+    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/(\w+)\.py$", path)
     if m and m.group(1) not in ("__init__", "base"):
         family = m.group(1)
         models = imap.family_to_models.get(family, [])
         return RuleMatch("torchtrt_family_plugin", sorted(models), unit_tiers, rebuild)
 
     # Rule 1d: Torch-TRT family __init__.py or base.py -> ALL models
-    m = re.match(r"trtf_build/trtf_build/engine_defs/torch_trt/families/((__init__|base)\.py)$", path)
+    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/((__init__|base)\.py)$", path)
     if m:
         return RuleMatch("torchtrt_family_base", list(imap.all_model_names), unit_tiers, rebuild)
 
     # Rule 2: Specialized builder (auto-detected via import scan)
-    m = re.match(r"trtf_build/trtf_build/(\w+)\.py$", path)
+    m = re.match(r"tensorrt_model_connect/tensorrt_model_connect/(\w+)\.py$", path)
     if m:
         module_name = m.group(1)
         if (module_name.endswith("_builder")
@@ -550,8 +550,8 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
                 return RuleMatch("specialized_builder", sorted(models), unit_tiers, rebuild)
         # Fall through to Rule 3 for non-builder or unmatched builder
 
-    # Rule 3: Any other file under trtf_build/ or ttrt_build/
-    if path.startswith("trtf_build/") or path.startswith("ttrt_build/"):
+    # Rule 3: Any other file under tensorrt_model_connect/
+    if path.startswith("tensorrt_model_connect/"):
         return RuleMatch("shared_builder_module", list(imap.all_model_names), unit_tiers, rebuild)
 
     # Rule 4: C++ plugin
@@ -887,7 +887,7 @@ def maybe_refine_match_with_diff(
                 match.unit_tiers, match.rebuild_cpp,
             )
 
-    if path == "trtf_build/trtf_build/cli.py":
+    if path == "tensorrt_model_connect/tensorrt_model_connect/cli.py":
         allowed_tokens = ("fp8_scales", "save_fp8_scales")
         if all(
             any(token in _normalize_diff_line(line) for token in allowed_tokens)
@@ -898,7 +898,7 @@ def maybe_refine_match_with_diff(
                 match.unit_tiers, match.rebuild_cpp,
             )
 
-    if path == "trtf_build/trtf_build/engine_builder.py":
+    if path == "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py":
         allowed_tokens = (
             "fp8_scales",
             "save_fp8_scales",
@@ -929,9 +929,9 @@ def validate_map(imap: ImpactMap, repo_root: Path) -> List[str]:
     """Validate impact map consistency. Returns list of error strings."""
     errors: List[str] = []
     warnings: List[str] = []
-    families_dir = repo_root / "trtf_build" / "trtf_build" / "families"
+    families_dir = repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
     torchtrt_families_dir = (
-        repo_root / "trtf_build" / "trtf_build" / "engine_defs" / "torch_trt" / "families"
+        repo_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "engine_defs" / "torch_trt" / "families"
     )
 
     # 1. Every family in a manifest has a corresponding .py plugin file

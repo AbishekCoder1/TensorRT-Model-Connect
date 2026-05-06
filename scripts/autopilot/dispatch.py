@@ -39,7 +39,7 @@ DEFAULT_AGENTS = ["agent-1", "agent-2", "agent-3", "agent-4"]
 
 # The prompt is the ENTIRE automation. The LLM agent IS the worker.
 WORKER_PROMPT = textwrap.dedent("""\
-    You are an autonomous agent implementing a new model family for the trtf
+    You are an autonomous agent implementing a new model family for the trtmc
     framework. Work entirely inside the container. Do not ask questions — make
     decisions and proceed. If something fails, read the error, fix it, and retry.
 
@@ -47,13 +47,13 @@ WORKER_PROMPT = textwrap.dedent("""\
     - model_type:  {model_type}
     - hf_id:       {hf_id}
     - family_name: {family_name}
-    - container:   trtf-dev-gb300-{agent_id}
+    - container:   trtmc-dev-gb300-{agent_id}
     {trust_remote_code_line}
 
     ## Step 1: Scaffold the plugin
     Run inside the container:
     ```
-    docker exec trtf-dev-gb300-{agent_id} python3 scripts/new_family.py \\
+    docker exec trtmc-dev-gb300-{agent_id} python3 scripts/new_family.py \\
         --model-type {model_type} --hf-repo {hf_id} --family-name {family_name}
     ```
     If the plugin file already exists, skip this step.
@@ -61,7 +61,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     ## Step 2: Validate
     Run inside the container:
     ```
-    docker exec trtf-dev-gb300-{agent_id} ./scripts/validate_family.sh {hf_id} \\
+    docker exec trtmc-dev-gb300-{agent_id} ./scripts/validate_family.sh {hf_id} \\
         --max-cache-length 256 {trust_flag}
     ```
 
@@ -69,13 +69,13 @@ WORKER_PROMPT = textwrap.dedent("""\
     If validation fails:
     1. Read the error output carefully.
     2. Read the generated plugin at:
-       trtf_build/trtf_build/families/{family_name}.py
+       tensorrt_model_connect/tensorrt_model_connect/families/{family_name}.py
     3. Read the HF model's source code to understand the architecture:
        - Look at the model's config.json for architecture details
        - If available, examine the HF modeling code to understand weight naming
        - Check weight key names by running:
          ```
-         docker exec trtf-dev-gb300-{agent_id} python3 -c "
+         docker exec trtmc-dev-gb300-{agent_id} python3 -c "
          from safetensors import safe_open
          from huggingface_hub import snapshot_download
          import glob, os
@@ -114,9 +114,9 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     ## Step 5: Commit and push
     ```
-    cd /workspace/users/yifeif/workspaces/{agent_id}/trt-transformers-cpp
+    cd /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect
     git checkout -b autopilot/{family_name}
-    git add trtf_build/trtf_build/families/{family_name}.py
+    git add tensorrt_model_connect/tensorrt_model_connect/families/{family_name}.py
     git add tests/e2e/models/{family_name}.json
     git commit -m "feat: add {family_name} family plugin (autopilot)"
     git push -u origin autopilot/{family_name}
@@ -126,7 +126,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     At the end, write a JSON status file to the WORKSPACE (not container /tmp):
     ```
     echo '{{"family": "{family_name}", "status": "PASS", "branch": "autopilot/{family_name}"}}' \\
-        > /workspace/users/yifeif/workspaces/{agent_id}/trt-transformers-cpp/.autopilot_status.json
+        > /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/.autopilot_status.json
     ```
     If all retries failed, write status "FAIL" with the last error message instead.
     Write this file on the HOST filesystem, not via docker exec.
@@ -134,7 +134,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     {optimize_section}
 
     ## Important rules
-    - ALL commands run via `docker exec trtf-dev-gb300-{agent_id}`.
+    - ALL commands run via `docker exec trtmc-dev-gb300-{agent_id}`.
     - Do NOT modify any file outside families/{family_name}.py and
       tests/e2e/models/{family_name}.json.
     - Do NOT edit shared files (checkpoint_mapper.py, standard_decoder_builder.py, etc.).
@@ -148,7 +148,7 @@ _OPTIMIZE_SECTION = """\
 ## Step 4b: Optimize precision (optional)
 
     After validation passes, optimize the model for low precision:
-    1. Read the skill: cat /workspace/users/yifeif/workspaces/{agent_id}/trt-transformers-cpp/.claude/skills/optimize-model-precision.md
+    1. Read the skill: cat /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/.claude/skills/optimize-model-precision.md
     2. Follow the skill to find the best non-FP32 precision config
     3. At minimum, build an FP16 variant
     4. Create a second E2E manifest for the optimized variant
@@ -188,7 +188,7 @@ def launch_agent(
     optimize: bool = False,
 ) -> subprocess.Popen | None:
     """Launch a Claude Code session for one task in one agent workspace."""
-    workspace = f"{WORKSPACE_ROOT}/{agent_id}/trt-transformers-cpp"
+    workspace = f"{WORKSPACE_ROOT}/{agent_id}/tensorrt-model-connect"
     prompt = build_prompt(task, agent_id, optimize=optimize)
 
     if dry_run:
@@ -248,7 +248,7 @@ def wait_for_batch(
                 # Check status file (written to workspace by agent)
                 status_file = (
                     f"{WORKSPACE_ROOT}/{agent_id}/"
-                    f"trt-transformers-cpp/.autopilot_status.json"
+                    f"tensorrt-model-connect/.autopilot_status.json"
                 )
                 status = {"family": family, "status": "UNKNOWN"}
                 if os.path.exists(status_file):
@@ -406,7 +406,7 @@ def main():
 
     # Verify agent workspaces exist
     for aid in agent_ids:
-        ws = Path(f"{WORKSPACE_ROOT}/{aid}/trt-transformers-cpp")
+        ws = Path(f"{WORKSPACE_ROOT}/{aid}/tensorrt-model-connect")
         if not ws.is_dir() and args.mode != "dry-run":
             print(f"WARNING: Workspace {ws} does not exist.", file=sys.stderr)
             print(f"  Bootstrap it: ./scripts/bootstrap_workspace.sh "

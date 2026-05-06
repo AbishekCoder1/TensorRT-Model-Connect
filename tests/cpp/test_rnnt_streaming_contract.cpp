@@ -15,7 +15,7 @@ void check(bool cond, const char* msg) {
 }
 
 void check_schedule(int right, int chunk_ms, int first_mel, int next_mel, int valid_out) {
-    const auto s = trtf::make_nemotron_streaming_schedule(70, right);
+    const auto s = trtmc::make_nemotron_streaming_schedule(70, right);
     check(s.att_context_left == 70, "left context is fixed at 70");
     check(s.att_context_right == right, "right context propagated");
     check(s.chunk_ms == chunk_ms, "chunk duration matches NeMo model card");
@@ -40,7 +40,7 @@ void test_supported_contexts() {
 void test_invalid_context_rejected() {
     bool threw = false;
     try {
-        (void)trtf::make_nemotron_streaming_schedule(70, 2);
+        (void)trtmc::make_nemotron_streaming_schedule(70, 2);
     } catch (const std::invalid_argument&) {
         threw = true;
     }
@@ -48,7 +48,7 @@ void test_invalid_context_rejected() {
 
     threw = false;
     try {
-        (void)trtf::make_nemotron_streaming_schedule(64, 13);
+        (void)trtmc::make_nemotron_streaming_schedule(64, 13);
     } catch (const std::invalid_argument&) {
         threw = true;
     }

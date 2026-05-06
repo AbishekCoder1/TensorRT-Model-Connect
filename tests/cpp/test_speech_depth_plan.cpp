@@ -38,9 +38,9 @@ void check_close(float actual, float expected, float tolerance, const char* name
     }
 }
 
-trtf::SpeechConfig make_config()
+trtmc::SpeechConfig make_config()
 {
-    trtf::SpeechConfig cfg;
+    trtmc::SpeechConfig cfg;
     cfg.depth_hidden_size = 2;
     cfg.temporal_hidden_size = 3;
     cfg.depth_text_vocab = 4;
@@ -81,9 +81,9 @@ trtf::SpeechConfig make_config()
 
 void test_projection_view_derives_dimensions_and_flag()
 {
-    const trtf::SpeechConfig cfg = make_config();
+    const trtmc::SpeechConfig cfg = make_config();
     const float temporal_hidden[] = {2.0F, 4.0F, 6.0F};
-    const auto view = trtf::make_depth_projection_view(cfg, temporal_hidden);
+    const auto view = trtmc::make_depth_projection_view(cfg, temporal_hidden);
 
     check(view.has_projection, "speech depth projection view enables projection when weights exist");
     check(view.depth_hidden == 2, "speech depth projection view tracks depth hidden size");
@@ -93,32 +93,32 @@ void test_projection_view_derives_dimensions_and_flag()
 
 void test_build_depth_input_embedding_uses_text_or_audio_seed_and_projection()
 {
-    const trtf::SpeechConfig cfg = make_config();
+    const trtmc::SpeechConfig cfg = make_config();
     const float temporal_hidden[] = {2.0F, 4.0F, 6.0F};
-    const auto view = trtf::make_depth_projection_view(cfg, temporal_hidden);
+    const auto view = trtmc::make_depth_projection_view(cfg, temporal_hidden);
 
     std::vector<float> embed(2, 0.0F);
-    trtf::build_depth_input_embedding(cfg, view, 0, 2, 1, 2, embed);
+    trtmc::build_depth_input_embedding(cfg, view, 0, 2, 1, 2, embed);
     check_close(embed[0], 5.0F, 1e-6F, "speech depth text seed plus projection dim0");
     check_close(embed[1], 8.0F, 1e-6F, "speech depth text seed plus projection dim1");
 
-    trtf::build_depth_input_embedding(cfg, view, 1, 2, 3, 2, embed);
+    trtmc::build_depth_input_embedding(cfg, view, 1, 2, 3, 2, embed);
     check_close(embed[0], 17.0F, 1e-6F, "speech depth audio seed plus projection dim0");
     check_close(embed[1], 19.0F, 1e-6F, "speech depth audio seed plus projection dim1");
 }
 
 void test_resolve_depth_prev_token_prefers_forced_audio_when_present()
 {
-    trtf::SpeechConfig cfg = make_config();
+    trtmc::SpeechConfig cfg = make_config();
     cfg.audio_vocab_size = 5;
     const int32_t forced_tokens[] = {9, 3};
     const uint8_t forced_provided[] = {0, 1};
 
-    check(trtf::resolve_depth_prev_token(0, 2, cfg, forced_tokens, forced_provided) == 2,
+    check(trtmc::resolve_depth_prev_token(0, 2, cfg, forced_tokens, forced_provided) == 2,
         "speech depth prev token keeps sampled token when forced token missing");
-    check(trtf::resolve_depth_prev_token(1, 2, cfg, forced_tokens, forced_provided) == 3,
+    check(trtmc::resolve_depth_prev_token(1, 2, cfg, forced_tokens, forced_provided) == 3,
         "speech depth prev token uses forced token when provided");
-    check(trtf::resolve_depth_prev_token(1, 2, cfg, nullptr, nullptr) == 2,
+    check(trtmc::resolve_depth_prev_token(1, 2, cfg, nullptr, nullptr) == 2,
         "speech depth prev token falls back when no forced arrays exist");
 }
 

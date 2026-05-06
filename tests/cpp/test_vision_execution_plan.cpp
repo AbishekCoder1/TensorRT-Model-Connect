@@ -31,10 +31,10 @@ void check(bool condition, const char* name)
 
 void test_feature_count_and_deepstack_name_collection()
 {
-    check(trtf::vision_output_feature_count(4, 8) == 32,
+    check(trtmc::vision_output_feature_count(4, 8) == 32,
         "vision execution plan computes output feature count");
 
-    const auto names = trtf::collect_vision_deepstack_output_names(
+    const auto names = trtmc::collect_vision_deepstack_output_names(
         [](const std::string& name)
         {
             return name == "deepstack_features_0" || name == "deepstack_features_1";
@@ -45,7 +45,7 @@ void test_feature_count_and_deepstack_name_collection()
 
 void test_run_vision_copy_plan_success_and_failures()
 {
-    std::vector<trtf::VisionPendingCopy> copies = {
+    std::vector<trtmc::VisionPendingCopy> copies = {
         {reinterpret_cast<void*>(1), reinterpret_cast<void*>(2), 16},
         {reinterpret_cast<void*>(3), reinterpret_cast<void*>(4), 32},
     };
@@ -54,7 +54,7 @@ void test_run_vision_copy_plan_success_and_failures()
     int copy_calls = 0;
     int sync_calls = 0;
 
-    bool ok = trtf::run_vision_copy_plan(
+    bool ok = trtmc::run_vision_copy_plan(
         copies,
         error,
         [&enqueue_calls]()
@@ -62,7 +62,7 @@ void test_run_vision_copy_plan_success_and_failures()
             ++enqueue_calls;
             return true;
         },
-        [&copy_calls](const trtf::VisionPendingCopy& copy)
+        [&copy_calls](const trtmc::VisionPendingCopy& copy)
         {
             ++copy_calls;
             return copy.bytes > 0;
@@ -79,14 +79,14 @@ void test_run_vision_copy_plan_success_and_failures()
     check(sync_calls == 1, "vision execution plan synchronizes once");
 
     error.clear();
-    ok = trtf::run_vision_copy_plan(
+    ok = trtmc::run_vision_copy_plan(
         copies,
         error,
         []()
         {
             return false;
         },
-        [](const trtf::VisionPendingCopy&)
+        [](const trtmc::VisionPendingCopy&)
         {
             return true;
         },
@@ -99,14 +99,14 @@ void test_run_vision_copy_plan_success_and_failures()
         "vision execution plan uses enqueue failure message");
 
     error.clear();
-    ok = trtf::run_vision_copy_plan(
+    ok = trtmc::run_vision_copy_plan(
         copies,
         error,
         []()
         {
             return true;
         },
-        [](const trtf::VisionPendingCopy& copy)
+        [](const trtmc::VisionPendingCopy& copy)
         {
             return copy.bytes == 16;
         },
@@ -119,14 +119,14 @@ void test_run_vision_copy_plan_success_and_failures()
         "vision execution plan uses copy failure message");
 
     error.clear();
-    ok = trtf::run_vision_copy_plan(
+    ok = trtmc::run_vision_copy_plan(
         copies,
         error,
         []()
         {
             return true;
         },
-        [](const trtf::VisionPendingCopy&)
+        [](const trtmc::VisionPendingCopy&)
         {
             return true;
         },

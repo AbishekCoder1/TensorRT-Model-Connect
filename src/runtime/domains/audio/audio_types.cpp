@@ -2,7 +2,7 @@
 
 #include <fstream>
 
-namespace trtf {
+namespace trtmc {
 
 bool write_wav(const std::string& path, const float* samples,
                int32_t num_samples, int32_t sample_rate)
@@ -49,4 +49,4 @@ bool write_wav(const std::string& path, const float* samples,
     return out.good();
 }
 
-} // namespace trtf
+} // namespace trtmc

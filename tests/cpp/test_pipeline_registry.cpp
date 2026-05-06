@@ -6,7 +6,7 @@
 // Postconditions: Registry correctly maps strategies to plugins, returns nullptr
 //   for unknown strategies, and lists registered strategies.
 
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -26,9 +26,9 @@ static void check(bool condition, const char* name)
 }
 
 // Dummy plugin for testing
-class DummyPlugin : public trtf::IPipelinePlugin {
+class DummyPlugin : public trtmc::IPipelinePlugin {
 public:
-    std::unique_ptr<trtf::IPipeline> create(const trtf::PipelineContext&) override
+    std::unique_ptr<trtmc::IPipeline> create(const trtmc::PipelineContext&) override
     {
         return nullptr; // Not testing actual pipeline creation
     }
@@ -38,7 +38,7 @@ public:
 static void test_register_and_lookup()
 {
     static DummyPlugin plugin;
-    auto& reg = trtf::PipelineRegistry::instance();
+    auto& reg = trtmc::PipelineRegistry::instance();
     reg.register_plugin("__test_dummy_strategy__", &plugin);
 
     auto* found = reg.lookup("__test_dummy_strategy__");
@@ -48,7 +48,7 @@ static void test_register_and_lookup()
 // Test: lookup unknown strategy returns nullptr
 static void test_lookup_unknown_returns_nullptr()
 {
-    auto& reg = trtf::PipelineRegistry::instance();
+    auto& reg = trtmc::PipelineRegistry::instance();
     auto* found = reg.lookup("__nonexistent_strategy_xyz__");
     check(found == nullptr, "lookup unknown strategy returns nullptr");
 }
@@ -56,7 +56,7 @@ static void test_lookup_unknown_returns_nullptr()
 // Test: registered_strategies includes our test strategy
 static void test_registered_strategies_includes_test()
 {
-    auto& reg = trtf::PipelineRegistry::instance();
+    auto& reg = trtmc::PipelineRegistry::instance();
     auto strategies = reg.registered_strategies();
     bool found = std::find(strategies.begin(), strategies.end(),
                            "__test_dummy_strategy__") != strategies.end();
@@ -68,7 +68,7 @@ static void test_overwrite_registration()
 {
     static DummyPlugin plugin_a;
     static DummyPlugin plugin_b;
-    auto& reg = trtf::PipelineRegistry::instance();
+    auto& reg = trtmc::PipelineRegistry::instance();
     reg.register_plugin("__test_overwrite__", &plugin_a);
     reg.register_plugin("__test_overwrite__", &plugin_b);
     auto* found = reg.lookup("__test_overwrite__");
@@ -79,7 +79,7 @@ static void test_overwrite_registration()
 static void test_empty_strategy_rejected()
 {
     static DummyPlugin plugin;
-    auto& reg = trtf::PipelineRegistry::instance();
+    auto& reg = trtmc::PipelineRegistry::instance();
     bool threw = false;
     try {
         reg.register_plugin("", &plugin);
@@ -92,7 +92,7 @@ static void test_empty_strategy_rejected()
 // Test: null plugin is rejected
 static void test_null_plugin_rejected()
 {
-    auto& reg = trtf::PipelineRegistry::instance();
+    auto& reg = trtmc::PipelineRegistry::instance();
     bool threw = false;
     try {
         reg.register_plugin("__test_null__", nullptr);

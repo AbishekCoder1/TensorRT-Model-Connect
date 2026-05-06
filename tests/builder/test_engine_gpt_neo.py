@@ -19,7 +19,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-GPTNEO-01
 Intent: Validate the GPT-Neo family plugin weight loading including learned positions, separate Q/K/V projections, GELU FC MLP, tied embeddings, and non-standard HF prefixes.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: All weight keys map correctly from GPT-Neo's HF layout, position embeddings are loaded, biases are present, and engine IO tensors match expectations.
 """
 
@@ -34,9 +34,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -54,7 +54,7 @@ class GPTNeoPluginTester(FamilyPluginTester):
       - Tied word embeddings (transformer.wte == lm_head)
     """
 
-    plugin_module = "trtf_build.families.gpt_neo"
+    plugin_module = "tensorrt_model_connect.families.gpt_neo"
     model_type = "gpt_neo"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

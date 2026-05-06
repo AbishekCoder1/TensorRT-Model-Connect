@@ -22,9 +22,9 @@ import pytest
 
 try:
     from safetensors.numpy import save_file
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 RNG = np.random.RandomState(42)
@@ -110,7 +110,7 @@ class TestBertPlugin:
         return t
 
     def test_matches(self):
-        from trtf_build.families.bert import plugin
+        from tensorrt_model_connect.families.bert import plugin
 
         assert plugin.matches("bert")
         assert not plugin.matches("gpt2")
@@ -118,17 +118,17 @@ class TestBertPlugin:
         assert not plugin.matches("roberta")
 
     def test_name(self):
-        from trtf_build.families.bert import plugin
+        from tensorrt_model_connect.families.bert import plugin
 
         assert plugin.name == "bert"
 
     def test_runtime_strategy(self):
-        from trtf_build.families.bert import plugin
+        from tensorrt_model_connect.families.bert import plugin
 
         assert plugin.runtime_strategy == "encoder_only"
 
     def test_load_weights_keys(self, tmp_path):
-        from trtf_build.families.bert import plugin
+        from tensorrt_model_connect.families.bert import plugin
 
         config = self._make_config(
             self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS,
@@ -166,7 +166,7 @@ class TestBertPlugin:
         assert "pooler_bias" in weights
 
     def test_weight_shapes(self, tmp_path):
-        from trtf_build.families.bert import plugin
+        from tensorrt_model_connect.families.bert import plugin
 
         config = self._make_config(
             self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS,
@@ -191,7 +191,7 @@ class TestBertPlugin:
 
     def test_weight_transpose_correctness(self, tmp_path):
         """Verify that HF [out, in] weights are correctly transposed to [in, out]."""
-        from trtf_build.families.bert import plugin
+        from tensorrt_model_connect.families.bert import plugin
 
         config = self._make_config(
             self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS,
@@ -214,7 +214,7 @@ class TestBertPlugin:
 
     def test_no_pooler(self, tmp_path):
         """BERT without pooler should not have pooler weights."""
-        from trtf_build.families.bert import plugin
+        from tensorrt_model_connect.families.bert import plugin
 
         config = self._make_config(
             self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS,

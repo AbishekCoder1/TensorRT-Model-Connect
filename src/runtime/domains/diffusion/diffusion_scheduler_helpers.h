@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace diffusion {
 
 inline int32_t resolve_requested_steps(int32_t requested, int32_t fallback,
@@ -214,4 +214,4 @@ struct FlowMatchEulerState {
 };
 
 } // namespace diffusion
-} // namespace trtf
+} // namespace trtmc

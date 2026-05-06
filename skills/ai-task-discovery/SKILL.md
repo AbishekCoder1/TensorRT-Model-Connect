@@ -61,13 +61,13 @@ If you cannot write clear exit criteria and a reasonable verification path, do n
 Ensure labels exist:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers ensure-labels
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect ensure-labels
 ```
 
 Dry-run a task before creating it:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers --dry-run create-task \
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --dry-run create-task \
   --title "tests: cover AI task contract validation" \
   --scope "tests/tools/test_ai_agent_system.py and tools/ai_agent_system.py only" \
   --change "Add coverage that validate-task rejects issue bodies missing required sections so implementation issues stay actionable." \
@@ -80,5 +80,5 @@ python3 tools/ai_agent_system.py --project yifeif/trt-transformers --dry-run cre
 Validate an issue body:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers validate-task --issue <iid>
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect validate-task --issue <iid>
 ```

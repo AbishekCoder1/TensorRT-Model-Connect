@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct PendingCopy {
     void* host_ptr{nullptr};
@@ -93,4 +93,4 @@ bool execute_recurrent_step(const StepEngine& engine, CudaStream& stream,
     return true;
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
@@ -310,7 +310,7 @@ static void test_v2_roundtrip() {
 #endif
 
 int main() {
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI
     // Register add_one kernel
     TVMFFIObjectHandle fn = nullptr;
     TVMFFIFunctionCreate(nullptr, &add_one_kernel, nullptr, &fn);

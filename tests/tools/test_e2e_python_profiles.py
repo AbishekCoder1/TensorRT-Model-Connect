@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import trtf_build.python_profiles as shared_profiles
+import tensorrt_model_connect.python_profiles as shared_profiles
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 from tests.e2e_harness.orchestrator import _build_repro_commands
 from tests.e2e_harness.python_profiles import (
@@ -73,7 +73,7 @@ def test_resolve_case_python_profiles_uses_family_default_named_env(monkeypatch,
 def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path):
     requirements = tmp_path / "empty.lock.txt"
     requirements.write_text("", encoding="utf-8")
-    monkeypatch.setenv("TRTF_PYTHON_PROFILE_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("TRTMC_PYTHON_PROFILE_ROOT", str(tmp_path / "profiles"))
     monkeypatch.setattr(
         shared_profiles,
         "load_python_profile_registry",
@@ -124,7 +124,7 @@ def test_repro_commands_record_profile_exports(tmp_path):
     ctx = RunContext(
         case=case,
         artifacts_dir=str(tmp_path),
-        binary_path="./build/trtf",
+        binary_path="./build/trtmc",
         hf_python="/usr/bin/python3",
         build_python="/tmp/chronos-python",
         reference_python="/tmp/chronos-python",
@@ -133,8 +133,8 @@ def test_repro_commands_record_profile_exports(tmp_path):
         engine_dir="/tmp/engines",
     )
     repro = _build_repro_commands(case, ctx, "/tmp/engines/case-a.trtfb", {})
-    assert repro["build_bundle"].startswith("/tmp/chronos-python -m trtf_build.__main__ build")
-    assert "TRTF_PYTHON_PROFILE_CHRONOS_PYTHON=/tmp/chronos-python" in repro["profile_env"]
+    assert repro["build_bundle"].startswith("/tmp/chronos-python -m tensorrt_model_connect.__main__ build")
+    assert "TRTMC_PYTHON_PROFILE_CHRONOS_PYTHON=/tmp/chronos-python" in repro["profile_env"]
 
 
 def test_torch_reference_time_series_uses_reference_python_subprocess(monkeypatch, tmp_path):

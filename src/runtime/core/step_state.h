@@ -1,6 +1,6 @@
 #pragma once
 
-namespace trtf {
+namespace trtmc {
 
 // Opaque base for per-step state during autoregressive generation.
 // KV-cache models use DeviceKvCache (device-resident, not an IStepState
@@ -11,4 +11,4 @@ public:
     virtual ~IStepState() = default;
 };
 
-} // namespace trtf
+} // namespace trtmc

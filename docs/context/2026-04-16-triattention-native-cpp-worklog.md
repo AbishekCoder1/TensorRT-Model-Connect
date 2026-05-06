@@ -68,9 +68,9 @@ Current reproducible MR-tip validation:
 - dense control bundle:
   `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-dense12288-dynkv-fp16-manual-samefam.trtfb`
 - runtime overrides:
-  `TRTF_TRIATTN_OVERRIDE_KV_BUDGET=6144`
-  `TRTF_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
-  `TRTF_TRIATTN_RUNTIME_BUCKET_ROWS=32`
+  `TRTMC_TRIATTN_OVERRIDE_KV_BUDGET=6144`
+  `TRTMC_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
+  `TRTMC_TRIATTN_RUNTIME_BUCKET_ROWS=32`
 - validation outputs:
   `artifacts/triattention/policy-sweeps/2026-04-17-current-bundle-override-validation/`
 
@@ -591,15 +591,15 @@ progress and the full-benchmark parity question remains open.
 After the stale-bundle baseline problem was identified, the next control was to
 use the exact same `tri32768` bundle in two modes:
 
-- `TRTF_TRIATTN_FORCE_ENABLE=0`
-- `TRTF_TRIATTN_FORCE_ENABLE=1`
+- `TRTMC_TRIATTN_FORCE_ENABLE=0`
+- `TRTMC_TRIATTN_FORCE_ENABLE=1`
 
 with compaction effectively disabled by runtime overrides:
 
-- `TRTF_TRIATTN_OVERRIDE_KV_BUDGET=16384`
-- `TRTF_TRIATTN_OVERRIDE_DIVIDE_LENGTH=2048`
-- `TRTF_TRIATTN_OVERRIDE_RECENT_WINDOW=256`
-- `TRTF_TRIATTN_RUNTIME_BUCKET_ROWS=32`
+- `TRTMC_TRIATTN_OVERRIDE_KV_BUDGET=16384`
+- `TRTMC_TRIATTN_OVERRIDE_DIVIDE_LENGTH=2048`
+- `TRTMC_TRIATTN_OVERRIDE_RECENT_WINDOW=256`
+- `TRTMC_TRIATTN_RUNTIME_BUCKET_ROWS=32`
 
 On `aime25_7`, greedy 3000-token generation from the same bundle was
 byte-identical between the forced-off and forced-on modes:
@@ -618,7 +618,7 @@ This was an important control:
 ### But the same-bundle dense control still missed HF on long sampled decoding
 
 The next focused test used that same `tri32768` bundle with
-`TRTF_TRIATTN_FORCE_ENABLE=0` on the full sampled stop-on-answer recipe for the
+`TRTMC_TRIATTN_FORCE_ENABLE=0` on the full sampled stop-on-answer recipe for the
 known bad sample `aime25_2`.
 
 Result:
@@ -630,7 +630,7 @@ That ruled out another attractive but incorrect explanation:
 
 - the remaining full-benchmark gap is not only "bad compaction keep-sets"
 
-Because `TRTF_TRIATTN_FORCE_ENABLE=0` takes the runtime back to the normal
+Because `TRTMC_TRIATTN_FORCE_ENABLE=0` takes the runtime back to the normal
 `KvCache` state in `decoder_plugin.cpp`, this miss must come from the engine
 family/build side, not from the TriAttention runtime state object.
 
@@ -676,7 +676,7 @@ This gave a same-family long-window comparison point with:
 That hybrid bundle immediately recovered the long sampled control behavior that
 the stale `tri32768` bundle had lost.
 
-On `aime25_2`, with `TRTF_TRIATTN_FORCE_ENABLE=0` and the full sampled
+On `aime25_2`, with `TRTMC_TRIATTN_FORCE_ENABLE=0` and the full sampled
 stop-on-answer recipe:
 
 - hybrid force-off control extracted `588`
@@ -692,9 +692,9 @@ Using the same hybrid bundle with TriAttention enabled:
 - default policy (`kv_budget=3072`, `divide_length=128`) also extracted `588`
   on `aime25_2`
 - conservative policy
-  (`TRTF_TRIATTN_OVERRIDE_KV_BUDGET=6144`,
-  `TRTF_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`,
-  `TRTF_TRIATTN_RUNTIME_BUCKET_ROWS=32`) also extracted `588`
+  (`TRTMC_TRIATTN_OVERRIDE_KV_BUDGET=6144`,
+  `TRTMC_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`,
+  `TRTMC_TRIATTN_RUNTIME_BUCKET_ROWS=32`) also extracted `588`
 
 That meant the repaired engine family plus native TriAttention could preserve
 the dense/HF answer on the previously bad sample `aime25_2`.
@@ -718,15 +718,15 @@ known bad focus cases were simultaneously correct under the native runtime.
 
 The exact conservative runtime recipe that achieved that state was:
 
-- `TRTF_TRIATTN_FORCE_ENABLE=1`
-- `TRTF_TRIATTN_OVERRIDE_KV_BUDGET=6144`
-- `TRTF_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
-- `TRTF_TRIATTN_RUNTIME_BUCKET_ROWS=32`
+- `TRTMC_TRIATTN_FORCE_ENABLE=1`
+- `TRTMC_TRIATTN_OVERRIDE_KV_BUDGET=6144`
+- `TRTMC_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
+- `TRTMC_TRIATTN_RUNTIME_BUCKET_ROWS=32`
 
 That repaired-engine conservative recipe is now the right candidate for the
 next full 30-sample apples-to-apples benchmark:
 
-- same hybrid bundle as dense control with `TRTF_TRIATTN_FORCE_ENABLE=0`
+- same hybrid bundle as dense control with `TRTMC_TRIATTN_FORCE_ENABLE=0`
 - same hybrid bundle as TriAttention run with the conservative policy above
 - HF eager as the external reference
 
@@ -751,7 +751,7 @@ the TRT side now also advances the configured base seed by `sample_idx`.
 
 ### Seed fix changed the interpretation of the `aime25_7` regression
 
-After rebuilding `trtf_dataset_benchmark` with the corrected per-row seed
+After rebuilding `trtmc_dataset_benchmark` with the corrected per-row seed
 schedule, the dense control was rechecked on `aime25_7` as a standalone sample:
 
 - seed `1234` still produced `821`
@@ -763,7 +763,7 @@ Then the crucial sequence-dependent focused replay was repeated with the rebuilt
 benchmark binary:
 
 - dataset: `aime25_2`, then `aime25_7`
-- dense control: same hybrid bundle with `TRTF_TRIATTN_FORCE_ENABLE=0`
+- dense control: same hybrid bundle with `TRTMC_TRIATTN_FORCE_ENABLE=0`
 
 Result:
 
@@ -772,7 +772,7 @@ Result:
 
 And that same focused replay stayed correct even with CUDA Graphs disabled:
 
-- `TRTF_DISABLE_CUDA_GRAPH=1`
+- `TRTMC_DISABLE_CUDA_GRAPH=1`
 - still `aime25_2 -> 588`
 - still `aime25_7 -> 821`
 
@@ -785,10 +785,10 @@ control reproduced the right answer path with and without CUDA Graphs.
 The same corrected focused replay (`aime25_2`, then `aime25_7`) was then run on
 the native TriAttention path using the conservative runtime policy:
 
-- `TRTF_TRIATTN_FORCE_ENABLE=1`
-- `TRTF_TRIATTN_OVERRIDE_KV_BUDGET=6144`
-- `TRTF_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
-- `TRTF_TRIATTN_RUNTIME_BUCKET_ROWS=32`
+- `TRTMC_TRIATTN_FORCE_ENABLE=1`
+- `TRTMC_TRIATTN_OVERRIDE_KV_BUDGET=6144`
+- `TRTMC_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
+- `TRTMC_TRIATTN_RUNTIME_BUCKET_ROWS=32`
 
 Result:
 
@@ -802,7 +802,7 @@ The next required step from that state is a fresh full 30-sample apples-to-
 apples rerun using:
 
 - the corrected TRT benchmark binary with per-row seed advancement
-- dense control = hybrid bundle with `TRTF_TRIATTN_FORCE_ENABLE=0`
+- dense control = hybrid bundle with `TRTMC_TRIATTN_FORCE_ENABLE=0`
 - TriAttention = same hybrid bundle with the conservative runtime policy
 - HF eager as the external reference
 
@@ -963,9 +963,9 @@ immediately after the first compaction, not thousands of tokens later.
 The same `7600`-token current-prompt run was repeated with the entire GPU
 TriAttention fast path disabled:
 
-- `TRTF_TRIATTN_DISABLE_GPU_SELECT=1`
-- `TRTF_TRIATTN_DISABLE_GPU_COMPACT=1`
-- `TRTF_TRIATTN_DISABLE_GPU_STATE=1`
+- `TRTMC_TRIATTN_DISABLE_GPU_SELECT=1`
+- `TRTMC_TRIATTN_DISABLE_GPU_COMPACT=1`
+- `TRTMC_TRIATTN_DISABLE_GPU_STATE=1`
 
 Result:
 
@@ -1116,7 +1116,7 @@ At this point the remaining explanations are narrower:
 
 - `src/runtime/core/triattention_kv_cache.cpp`
 - `src/runtime/core/triattention_kernels.cu`
-- `include/trtf/runtime/triattention_kv_cache.h`
+- `include/trtmc/runtime/triattention_kv_cache.h`
 - `tests/cpp/test_triattention_kv_cache.cpp`
 
 ## Short version
@@ -1307,8 +1307,8 @@ and HF both solve it while the fixed native `3072/128` run does not:
 Two targeted native sample9 probes were then started:
 
 - a `5000`-token native standalone run with
-  `TRTF_TRIATTN_DUMP_KEEP_PATH=/workspace/trt-transformers-cpp/tmp/aime25_9_plain_compaction1_dump`
-  and `TRTF_TRIATTN_ABORT_AFTER_DUMP=1`
+  `TRTMC_TRIATTN_DUMP_KEEP_PATH=/workspace/tensorrt-model-connect/tmp/aime25_9_plain_compaction1_dump`
+  and `TRTMC_TRIATTN_ABORT_AFTER_DUMP=1`
 - a focused trace around positions `3190..3220`
 
 The first surprising result is that the `5000`-token standalone native run
@@ -1357,9 +1357,9 @@ Using the same native current bundle on the exact benchmark prompt:
 - dataset row:
   `tmp/aime25_rescue_samples/aime25_09.jsonl`
 - runtime flags:
-  - `TRTF_TRIATTN_FORCE_ENABLE=1`
-  - `TRTF_TRIATTN_PROFILE=1`
-  - `TRTF_TRIATTN_DEBUG=1`
+  - `TRTMC_TRIATTN_FORCE_ENABLE=1`
+  - `TRTMC_TRIATTN_PROFILE=1`
+  - `TRTMC_TRIATTN_DEBUG=1`
 
 The profile logs showed native compaction firing exactly on the expected
 schedule:
@@ -1378,9 +1378,9 @@ The next check compared the exact same bundle in two modes on the sample9
 prompt:
 
 - TriAttention enabled:
-  `TRTF_TRIATTN_FORCE_ENABLE=1`
+  `TRTMC_TRIATTN_FORCE_ENABLE=1`
 - same bundle, force-off control:
-  `TRTF_TRIATTN_FORCE_ENABLE=0`
+  `TRTMC_TRIATTN_FORCE_ENABLE=0`
 
 Both runs used:
 
@@ -1393,8 +1393,8 @@ Both runs used:
 
 and recorded the same trace window:
 
-- `TRTF_TEXT_STEP_TRACE_START_POS=3190`
-- `TRTF_TEXT_STEP_TRACE_END_POS=3220`
+- `TRTMC_TEXT_STEP_TRACE_START_POS=3190`
+- `TRTMC_TEXT_STEP_TRACE_END_POS=3220`
 
 Trace artifacts:
 
@@ -1474,9 +1474,9 @@ The fair same-family run was already live on:
 - bundle:
   `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.trtfb`
 - runtime overrides:
-  - `TRTF_TRIATTN_OVERRIDE_KV_BUDGET=6144`
-  - `TRTF_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
-  - `TRTF_TRIATTN_RUNTIME_BUCKET_ROWS=32`
+  - `TRTMC_TRIATTN_OVERRIDE_KV_BUDGET=6144`
+  - `TRTMC_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
+  - `TRTMC_TRIATTN_RUNTIME_BUCKET_ROWS=32`
 
 and by the time the focused debugging resumed it had reached:
 
@@ -1525,7 +1525,7 @@ So on the fair hybrid path as well:
 - the first compaction boundary is clean and on schedule
 
 The next pending comparison is the same hybrid bundle with
-`TRTF_TRIATTN_FORCE_ENABLE=0` over the same `7150..7190` window, to see whether
+`TRTMC_TRIATTN_FORCE_ENABLE=0` over the same `7150..7190` window, to see whether
 the first fair-path numerical drift is again only a small post-compaction
 difference or something more severe.
 
@@ -2364,7 +2364,7 @@ New regression coverage was added in `test_sampler.cpp` for:
 
 One false alarm in the first live validation came from the benchmark driver:
 
-- `examples/trtf_dataset_benchmark.cpp` adds each sample's `seed_index` to the
+- `examples/trtmc_dataset_benchmark.cpp` adds each sample's `seed_index` to the
   CLI `--seed`
 
 So for:

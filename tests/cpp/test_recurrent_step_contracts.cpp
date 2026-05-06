@@ -39,18 +39,18 @@ void test_validate_state_layer_count_and_sizes()
     const auto ok_states = std::array<const std::vector<std::vector<float>>*, 2>{&a, &b};
     const auto bad_layer_states = std::array<const std::vector<std::vector<float>>*, 2>{&a, &bad_layers};
 
-    check(trtf::validate_state_layer_count(ok_states, 2), "layer count accepts matching inputs");
-    check(!trtf::validate_state_layer_count(bad_layer_states, 2), "layer count rejects mismatch");
+    check(trtmc::validate_state_layer_count(ok_states, 2), "layer count accepts matching inputs");
+    check(!trtmc::validate_state_layer_count(bad_layer_states, 2), "layer count rejects mismatch");
 
-    const auto ok_specs = std::array<trtf::StateTensorView, 2>{
-        trtf::StateTensorView{&a, 4},
-        trtf::StateTensorView{&b, 4}};
-    const auto bad_specs = std::array<trtf::StateTensorView, 2>{
-        trtf::StateTensorView{&a, 4},
-        trtf::StateTensorView{&bad_sizes, 4}};
+    const auto ok_specs = std::array<trtmc::StateTensorView, 2>{
+        trtmc::StateTensorView{&a, 4},
+        trtmc::StateTensorView{&b, 4}};
+    const auto bad_specs = std::array<trtmc::StateTensorView, 2>{
+        trtmc::StateTensorView{&a, 4},
+        trtmc::StateTensorView{&bad_sizes, 4}};
 
-    check(trtf::validate_state_tensor_sizes(ok_specs, 2), "tensor size accepts matching inputs");
-    check(!trtf::validate_state_tensor_sizes(bad_specs, 2), "tensor size rejects mismatch");
+    check(trtmc::validate_state_tensor_sizes(ok_specs, 2), "tensor size accepts matching inputs");
+    check(!trtmc::validate_state_tensor_sizes(bad_specs, 2), "tensor size rejects mismatch");
 }
 
 void test_initialize_rwkv_outputs()
@@ -62,7 +62,7 @@ void test_initialize_rwkv_outputs()
     std::vector<std::vector<float>> den;
     std::vector<std::vector<float>> maxv;
 
-    trtf::initialize_rwkv_outputs(
+    trtmc::initialize_rwkv_outputs(
         3,
         11,
         5,
@@ -87,7 +87,7 @@ void test_initialize_mamba_outputs()
     std::vector<std::vector<float>> conv;
     std::vector<std::vector<float>> ssm;
 
-    trtf::initialize_mamba_outputs(
+    trtmc::initialize_mamba_outputs(
         2,
         13,
         6,
@@ -104,7 +104,7 @@ void test_initialize_mamba_outputs()
 void test_initialize_layer_outputs_and_zero_layer_validation()
 {
     std::vector<std::vector<float>> outputs;
-    trtf::initialize_layer_outputs(3, 2, outputs);
+    trtmc::initialize_layer_outputs(3, 2, outputs);
     check(outputs.size() == 3, "layer outputs allocate requested layer count");
     check(outputs[0] == std::vector<float>({0.0F, 0.0F}),
         "layer outputs initialize with zeros");
@@ -112,12 +112,12 @@ void test_initialize_layer_outputs_and_zero_layer_validation()
     std::vector<std::vector<float>> empty_a;
     std::vector<std::vector<float>> empty_b;
     const auto states = std::array<const std::vector<std::vector<float>>*, 2>{&empty_a, &empty_b};
-    check(trtf::validate_state_layer_count(states, 0), "layer count accepts zero layers");
+    check(trtmc::validate_state_layer_count(states, 0), "layer count accepts zero layers");
 
-    const auto specs = std::array<trtf::StateTensorView, 2>{
-        trtf::StateTensorView{&empty_a, 0},
-        trtf::StateTensorView{&empty_b, 0}};
-    check(trtf::validate_state_tensor_sizes(specs, 0), "tensor size accepts zero layers");
+    const auto specs = std::array<trtmc::StateTensorView, 2>{
+        trtmc::StateTensorView{&empty_a, 0},
+        trtmc::StateTensorView{&empty_b, 0}};
+    check(trtmc::validate_state_tensor_sizes(specs, 0), "tensor size accepts zero layers");
 }
 
 } // namespace

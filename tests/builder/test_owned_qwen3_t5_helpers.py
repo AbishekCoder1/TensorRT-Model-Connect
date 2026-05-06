@@ -21,7 +21,7 @@ import pytest
 
 
 # Ensure imports resolve to this workspace's Python package.
-_PKG_ROOT = Path(__file__).resolve().parents[2] / "trtf_build"
+_PKG_ROOT = Path(__file__).resolve().parents[2] / "tensorrt_model_connect"
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
@@ -51,7 +51,7 @@ def _make_fake_trt() -> types.SimpleNamespace:
 
 
 def _import_with_fake_trt(module_name: str):
-    """Import a trtf_build submodule while tensorrt is mocked."""
+    """Import a tensorrt_model_connect submodule while tensorrt is mocked."""
     sentinel = object()
     old_trt = sys.modules.get("tensorrt", sentinel)
     sys.modules.pop(module_name, None)
@@ -72,7 +72,7 @@ def test_qwen3_native_rope_table_has_expected_identities() -> None:
     Preconditions: Qwen3 helper module is importable with fake trt.
     Postconditions: half-dim cos/sin tables satisfy position-0 identity and trig invariants.
     """
-    mod = _import_with_fake_trt("trtf_build.qwen3_encoder_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.qwen3_encoder_builder")
 
     cos = mod.graph_ops.make_rope_table_half_dim(
         max_cache_length=3,
@@ -103,7 +103,7 @@ def test_load_qwen3_encoder_weights_transposes_and_optional_norm() -> None:
     Preconditions: Safetensors reader helpers are mocked with deterministic arrays.
     Postconditions: Returned WeightDict has expected keys and transformed values.
     """
-    mod = _import_with_fake_trt("trtf_build.qwen3_encoder_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.qwen3_encoder_builder")
 
     tensors = {
         "model.embed_tokens.weight": np.arange(20, dtype=np.float32).reshape(5, 4),
@@ -171,7 +171,7 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
     Preconditions: checkpoint_mapper helpers are replaced by a fake deterministic module.
     Postconditions: Returned weights are float32 and include expected optional keys.
     """
-    mod = _import_with_fake_trt("trtf_build.t5_encoder_builder")
+    mod = _import_with_fake_trt("tensorrt_model_connect.t5_encoder_builder")
 
     tensors: dict[str, np.ndarray] = {
         "shared.weight": np.arange(28, dtype=np.float32).reshape(7, 4),
@@ -193,7 +193,7 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
         tensors[f"{prefix}.layer.1.DenseReluDense.wo.weight"] = np.arange(24, dtype=np.float32).reshape(4, 6) + layer + 2
         tensors[f"{prefix}.layer.1.layer_norm.weight"] = np.arange(4, dtype=np.float32) + layer + 10
 
-    fake_cm = types.ModuleType("trtf_build.checkpoint_mapper")
+    fake_cm = types.ModuleType("tensorrt_model_connect.checkpoint_mapper")
 
     class _WeightDict(dict):
         pass
@@ -206,7 +206,7 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
         lambda precision: np.float16 if precision == "fp16" else np.float32
     )
 
-    with patch.dict(sys.modules, {"trtf_build.checkpoint_mapper": fake_cm}):
+    with patch.dict(sys.modules, {"tensorrt_model_connect.checkpoint_mapper": fake_cm}):
         weights = mod.load_t5_weights(
             model_dir="unused",
             d_model=4,
@@ -229,7 +229,7 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
     assert "encoder.block.1.layer.0.SelfAttention.relative_attention_bias.weight" not in weights
     assert weights["encoder.final_layer_norm.weight"].dtype == np.float32
 
-    with patch.dict(sys.modules, {"trtf_build.checkpoint_mapper": fake_cm}):
+    with patch.dict(sys.modules, {"tensorrt_model_connect.checkpoint_mapper": fake_cm}):
         fp16_weights = mod.load_t5_weights(
             model_dir="unused",
             d_model=4,

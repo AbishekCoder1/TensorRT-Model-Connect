@@ -19,7 +19,7 @@
 // Requires CUDA GPU. Skips gracefully without TRT.
 // =============================================================================
 
-#include "trtf/runtime/kv_cache.h"
+#include "trtmc/runtime/kv_cache.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -39,7 +39,7 @@ static void test_construction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::KvCache cache(4, 128, 64, stream);
+    trtmc::KvCache cache(4, 128, 64, stream);
     check(cache.ok(), "cache is ok");
     check(cache.num_layers() == 4, "num_layers = 4");
     check(cache.max_length() == 128, "max_length = 128");
@@ -52,7 +52,7 @@ static void test_attention_mask_at_position_0() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::KvCache cache(1, 8, 4, stream);
+    trtmc::KvCache cache(1, 8, 4, stream);
     std::vector<float> mask;
     cache.build_attention_mask(mask);
 
@@ -70,7 +70,7 @@ static void test_advance_and_position() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::KvCache cache(2, 16, 8, stream);
+    trtmc::KvCache cache(2, 16, 8, stream);
     check(cache.position() == 0, "start at 0");
 
     cache.advance();
@@ -96,7 +96,7 @@ static void test_reset() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::KvCache cache(2, 16, 8, stream);
+    trtmc::KvCache cache(2, 16, 8, stream);
     cache.advance();
     cache.advance();
     check(cache.position() == 2, "position = 2 before reset");
@@ -117,7 +117,7 @@ static void test_direct_access() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::KvCache cache(3, 8, 4, stream);
+    trtmc::KvCache cache(3, 8, 4, stream);
 
     // Verify we can access individual layer buffers
     auto& k0 = cache.cache_k(0);
@@ -133,7 +133,7 @@ static void test_max_position_clamp() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    trtf::KvCache cache(1, 4, 2, stream);
+    trtmc::KvCache cache(1, 4, 2, stream);
 
     // Advance past max_length
     for (int i = 0; i < 10; ++i)

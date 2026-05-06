@@ -20,7 +20,7 @@
 This test mirrors what Phase 4 clusters do in production:
 
     1. Declare a namespaced schema (here inline — in production it would
-       be a file under ``trtf_build/trtf_build/runtime_config/schemas/``).
+       be a file under ``tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/``).
     2. Register it with the singleton SchemaRegistry.
     3. Supply values via ``--set`` tokens through
        :func:`resolve_cli_config`.
@@ -33,7 +33,7 @@ The entire production-surface diff for landing a new feature is:
 
     - One new schema file under runtime_config/schemas/
     - One corresponding C++ schema source under src/runtime/config/schemas/
-      plus one manifest line in cmake/trtf_config_schemas.cmake
+      plus one manifest line in cmake/trtmc_config_schemas.cmake
     - One test file here
 
 No edits to cli.py, engine_builder.py, pipeline_factory.cpp, or any
@@ -49,7 +49,7 @@ from pathlib import Path
 import pytest
 
 try:
-    from trtf_build.runtime_config import (
+    from tensorrt_model_connect.runtime_config import (
         ConfigField,
         Layer,
         LayerContribution,
@@ -62,7 +62,7 @@ try:
         write_effective_config_next_to,
     )
 except ImportError:  # pragma: no cover
-    pytest.skip("trtf_build.runtime_config not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect.runtime_config not importable", allow_module_level=True)
 
 
 _SESSION = frozenset({Layer.SESSION_REQUEST, Layer.PLATFORM_PROFILE})
@@ -226,14 +226,14 @@ def test_scalability_claim_documented():
     list, that's a coupling point; update the design before adding.
     """
     expected_new_files_per_feature = [
-        "trtf_build/trtf_build/runtime_config/schemas/<name>.py",
-        "include/trtf/config/schemas/<name>.h",
+        "tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/<name>.py",
+        "include/trtmc/config/schemas/<name>.h",
         "src/runtime/config/schemas/<name>.cpp",
         "tests/builder/test_config_<name>_or_similar.py",
     ]
     expected_modified_files_per_feature = [
         # One manifest entry drives both compilation and generated registration calls.
-        "cmake/trtf_config_schemas.cmake",
+        "cmake/trtmc_config_schemas.cmake",
     ]
     # No runtime change outside the feature's own consumer code.
     # This is an assertion-as-documentation; keep these lists in sync

@@ -19,13 +19,13 @@
 //   round-trip consistency, and edge cases (empty input, punctuation).
 //
 // Dependencies:
-//   - trtf/tokenizer.h (ITokenizer, CreateVocabTokenizer)
+//   - trtmc/tokenizer.h (ITokenizer, CreateVocabTokenizer)
 //
 // Environment:
 //   CPU-only. No GPU, CUDA, TRT, or filesystem access required.
 // =============================================================================
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <iostream>
@@ -62,7 +62,7 @@ static std::vector<std::string> make_test_vocab()
 
 static void test_id_for_token()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     check(tok->id_for_token("hello") == 4, "id_for_token hello == 4");
     check(tok->id_for_token("world") == 5, "id_for_token world == 5");
     check(tok->id_for_token("test") == 6, "id_for_token test == 6");
@@ -73,7 +73,7 @@ static void test_id_for_token()
 
 static void test_token_for_id()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     check(tok->token_for_id(4) == "hello", "token_for_id 4 == hello");
     check(tok->token_for_id(5) == "world", "token_for_id 5 == world");
     check(tok->token_for_id(0) == "<unk>", "token_for_id 0 == <unk>");
@@ -81,7 +81,7 @@ static void test_token_for_id()
 
 static void test_token_for_id_out_of_range()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     // Out-of-range ids should return the unk token
     check(tok->token_for_id(999) == "<unk>", "token_for_id 999 == <unk>");
     check(tok->token_for_id(-1) == "<unk>", "token_for_id -1 == <unk>");
@@ -89,7 +89,7 @@ static void test_token_for_id_out_of_range()
 
 static void test_encode_basic()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     const auto ids = tok->encode("hello world");
     check(ids.size() == 2, "encode hello world size == 2");
     check(ids[0] == 4, "encode hello world [0] == 4");
@@ -98,7 +98,7 @@ static void test_encode_basic()
 
 static void test_encode_with_punctuation()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     const auto ids = tok->encode("hello world.");
     check(ids.size() == 3, "encode hello world. size == 3");
     check(ids[0] == 4, "encode hello world. [0] == 4");
@@ -108,7 +108,7 @@ static void test_encode_with_punctuation()
 
 static void test_encode_unknown_token()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     // "foobar" is not in vocab, should map to unk_id (0)
     const auto ids = tok->encode("foobar");
     check(ids.size() == 1, "encode foobar size == 1");
@@ -117,21 +117,21 @@ static void test_encode_unknown_token()
 
 static void test_encode_empty()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     const auto ids = tok->encode("");
     check(ids.empty(), "encode empty == empty");
 }
 
 static void test_decode_basic()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     const std::string text = tok->decode({4, 5});
     check(text == "hello world", "decode {4,5} == 'hello world'");
 }
 
 static void test_decode_skips_special()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     // <bos>=1, <eos>=2, <pad>=3 should be skipped in decode
     const std::string text = tok->decode({1, 4, 5, 2, 3});
     check(text == "hello world", "decode skips bos/eos/pad");
@@ -139,7 +139,7 @@ static void test_decode_skips_special()
 
 static void test_decode_punctuation_no_space()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     // Punctuation should not have a leading space
     const std::string text = tok->decode({4, 7});
     check(text == "hello.", "decode punctuation no space");
@@ -147,7 +147,7 @@ static void test_decode_punctuation_no_space()
 
 static void test_roundtrip()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     const std::string original = "hello world";
     const auto ids = tok->encode(original);
     const std::string decoded = tok->decode(ids);
@@ -156,7 +156,7 @@ static void test_roundtrip()
 
 static void test_case_insensitive()
 {
-    auto tok = trtf::CreateVocabTokenizer(make_test_vocab());
+    auto tok = trtmc::CreateVocabTokenizer(make_test_vocab());
     // VocabTokenizer normalizes to lowercase, so "Hello" should match "hello"
     const auto ids = tok->encode("Hello World");
     check(ids.size() == 2, "case insensitive size == 2");
@@ -169,7 +169,7 @@ static void test_empty_vocab_throws()
     bool threw = false;
     try
     {
-        trtf::CreateVocabTokenizer({});
+        trtmc::CreateVocabTokenizer({});
     }
     catch (const std::invalid_argument&)
     {

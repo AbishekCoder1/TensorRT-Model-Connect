@@ -2,7 +2,7 @@
 
 #include "runtime/domains/audio/audio_configs.h"
 #include "runtime/domains/audio/omni_audio_plan.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,7 +10,7 @@
 #include <iostream>
 #include <stdexcept>
 
-namespace trtf {
+namespace trtmc {
 
 // ─── OmniPipeline (TrtModule-based) ───
 
@@ -135,7 +135,7 @@ std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input
         run_thinker_step(token, logits);
     }
 
-    std::cerr << "[trtf] Omni Thinker: generated " << output_ids.size() << " text tokens"
+    std::cerr << "[trtmc] Omni Thinker: generated " << output_ids.size() << " text tokens"
               << std::endl;
     return output_ids;
 }
@@ -143,7 +143,7 @@ std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input
 std::vector<int32_t> OmniPipeline::run_talker(const std::vector<float>& hidden_states,
                                               int32_t num_tokens) {
     if (!talker_ || !talker_state_) {
-        std::cerr << "[trtf] Omni: no Talker engine" << std::endl;
+        std::cerr << "[trtmc] Omni: no Talker engine" << std::endl;
         return {};
     }
 
@@ -167,7 +167,7 @@ std::vector<int32_t> OmniPipeline::run_talker(const std::vector<float>& hidden_s
         append_omni_talker_codes_from_logits(logits, decode_plan, all_codes);
     }
 
-    std::cerr << "[trtf] Omni Talker: generated " << all_codes.size() << " codec tokens ("
+    std::cerr << "[trtmc] Omni Talker: generated " << all_codes.size() << " codec tokens ("
               << num_tokens << " frames x " << n_codebooks << " codebooks)" << std::endl;
     return all_codes;
 }
@@ -175,7 +175,7 @@ std::vector<int32_t> OmniPipeline::run_talker(const std::vector<float>& hidden_s
 std::vector<float> OmniPipeline::run_code2wav(const std::vector<int32_t>& codec_tokens,
                                               int32_t n_codebooks, int32_t n_frames) {
     if (!code2wav_) {
-        std::cerr << "[trtf] Omni: no Code2Wav engine, generating simple waveform" << std::endl;
+        std::cerr << "[trtmc] Omni: no Code2Wav engine, generating simple waveform" << std::endl;
         const int32_t samples_per_frame = config_->sample_rate / 75;
         const int32_t total_samples = n_frames * samples_per_frame;
         std::vector<float> waveform(static_cast<std::size_t>(total_samples), 0.0F);
@@ -211,7 +211,7 @@ std::vector<float> OmniPipeline::run_code2wav(const std::vector<int32_t>& codec_
 
     auto it = outputs.find("waveform");
     if (it == outputs.end()) {
-        std::cerr << "[trtf] Omni Code2Wav: no 'waveform' output" << std::endl;
+        std::cerr << "[trtmc] Omni Code2Wav: no 'waveform' output" << std::endl;
         return {};
     }
 
@@ -224,7 +224,7 @@ std::vector<float> OmniPipeline::run_code2wav(const std::vector<int32_t>& codec_
     std::vector<float> waveform(static_cast<std::size_t>(copy_n));
     std::memcpy(waveform.data(), wt.data, copy_n * sizeof(float));
 
-    std::cerr << "[trtf] Omni Code2Wav: " << actual_frames << " frames -> " << waveform.size()
+    std::cerr << "[trtmc] Omni Code2Wav: " << actual_frames << " frames -> " << waveform.size()
               << " samples" << std::endl;
     return waveform;
 }
@@ -239,13 +239,13 @@ AudioResult OmniPipeline::generate_audio(const std::string& prompt, const Genera
     AudioResult result;
     result.sample_rate = config_->sample_rate;
 
-    std::cerr << "[trtf] Omni: starting pipeline with " << input_ids.size() << " input tokens"
+    std::cerr << "[trtmc] Omni: starting pipeline with " << input_ids.size() << " input tokens"
               << std::endl;
 
     std::vector<float> hidden_states;
     auto text_tokens = run_thinker(input_ids, max_tokens, hidden_states);
     if (text_tokens.empty()) {
-        std::cerr << "[trtf] Omni: Thinker produced no tokens" << std::endl;
+        std::cerr << "[trtmc] Omni: Thinker produced no tokens" << std::endl;
         return result;
     }
 
@@ -264,7 +264,7 @@ AudioResult OmniPipeline::generate_audio(const std::string& prompt, const Genera
         }
     }
 
-    std::cerr << "[trtf] Omni: generated " << result.num_samples << " samples ("
+    std::cerr << "[trtmc] Omni: generated " << result.num_samples << " samples ("
               << (result.num_samples > 0
                       ? static_cast<float>(result.num_samples) / result.sample_rate
                       : 0.0F)
@@ -273,4 +273,4 @@ AudioResult OmniPipeline::generate_audio(const std::string& prompt, const Genera
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

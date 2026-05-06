@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // Find a single section by exact name. Returns nullptr if not found.
 const std::vector<char>* find_section(const BundleFile& bundle, const std::string& name);
@@ -19,4 +19,4 @@ const std::vector<char>* find_section(const BundleFile& bundle, const std::strin
 std::vector<const std::vector<char>*> find_sections_by_prefix(
     const BundleFile& bundle, const std::string& prefix);
 
-} // namespace trtf
+} // namespace trtmc

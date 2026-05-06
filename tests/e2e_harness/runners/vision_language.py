@@ -361,7 +361,7 @@ logits_path = "{logits_path}"
 features_path = "{features_path}"
 text_path = "{text_path}"
 
-from trtf_build.debug_runner import VLTrtRunner
+from tensorrt_model_connect.debug_runner import VLTrtRunner
 
 runner = VLTrtRunner(bundle_path)
 if runner.vision_runner is None:
@@ -382,7 +382,7 @@ try:
     from transformers import AutoTokenizer
     import tempfile
     from pathlib import Path
-    from trtf_build.debug_runner import load_section_from_bundle
+    from tensorrt_model_connect.debug_runner import load_section_from_bundle
     tok_data = load_section_from_bundle(bundle_path, "tokenizer.json")
     if tok_data:
         with tempfile.TemporaryDirectory() as tmpdir:

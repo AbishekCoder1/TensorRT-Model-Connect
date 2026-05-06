@@ -237,7 +237,7 @@ class TextToAudioRunner:
         prompt = case.inputs.get("prompt", "Hello, this is a test.")
         ld_path = _build_ld_library_path(ctx)
 
-        with tempfile.TemporaryDirectory(prefix="trtf_audio_") as tmpdir:
+        with tempfile.TemporaryDirectory(prefix="trtmc_audio_") as tmpdir:
             wav_path = os.path.join(tmpdir, "output.wav")
 
             cmd = [
@@ -414,7 +414,7 @@ class SpeechToSpeechRunner:
             case.metadata.get("speech_test_max_frames", 50),
         )
 
-        with tempfile.TemporaryDirectory(prefix="trtf_s2s_") as tmpdir:
+        with tempfile.TemporaryDirectory(prefix="trtmc_s2s_") as tmpdir:
             wav_path = os.path.join(tmpdir, "output.wav")
             tokens_path = os.path.join(tmpdir, "output_tokens.npy")
 

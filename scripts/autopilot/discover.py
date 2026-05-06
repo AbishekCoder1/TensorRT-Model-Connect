@@ -4,8 +4,8 @@
 Queries HuggingFace Hub for popular transformer models, extracts unique
 model_type values, and diffs against existing family plugin coverage.
 
-Run inside a container (needs huggingface_hub + trtf_build):
-    docker exec trtf-dev-gb300-agent-1 python3 scripts/autopilot/discover.py
+Run inside a container (needs huggingface_hub + tensorrt_model_connect):
+    docker exec trtmc-dev-gb300-agent-1 python3 scripts/autopilot/discover.py
 
 Or from host if deps are available:
     python3 scripts/autopilot/discover.py --min-downloads 50000 --output gaps.json
@@ -23,13 +23,13 @@ from pathlib import Path
 def get_supported_model_types() -> set[str]:
     """Import find_plugin and test a wide set of known model_type strings.
 
-    Falls back to scanning source files if trtf_build is not importable.
+    Falls back to scanning source files if tensorrt_model_connect is not importable.
     """
     # Try the import path first (works inside containers)
     project_root = Path(__file__).resolve().parent.parent.parent
-    sys.path.insert(0, str(project_root / "trtf_build"))
+    sys.path.insert(0, str(project_root / "tensorrt_model_connect"))
     try:
-        from trtf_build.families import find_plugin
+        from tensorrt_model_connect.families import find_plugin
         return _probe_with_find_plugin(find_plugin)
     except ImportError:
         pass
@@ -75,7 +75,7 @@ def _scan_plugin_sources(project_root: Path) -> set[str]:
     """Extract supported model_types by scanning plugin source code."""
     import re
 
-    families_dir = project_root / "trtf_build" / "trtf_build" / "families"
+    families_dir = project_root / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
     supported = set()
 
     for py_file in families_dir.glob("*.py"):
@@ -177,9 +177,9 @@ def check_plugin_coverage(model_type: str) -> bool:
     against known supported types.
     """
     project_root = Path(__file__).resolve().parent.parent.parent
-    sys.path.insert(0, str(project_root / "trtf_build"))
+    sys.path.insert(0, str(project_root / "tensorrt_model_connect"))
     try:
-        from trtf_build.families import find_plugin
+        from tensorrt_model_connect.families import find_plugin
         return find_plugin(model_type) is not None
     except ImportError:
         # Fallback: check against scanned set

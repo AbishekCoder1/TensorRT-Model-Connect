@@ -15,8 +15,8 @@ Supported strategies:
 Usage:
     # Use pre-built bundles from engine-dir (recommended)
     python tools/cpu_profile_matrix.py \\
-      --engine-dir /workspace/users/yifeif/trt-transformers/engines \\
-      --hf-cache /mnt/storage/trt-transformers/model-weights
+      --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \\
+      --hf-cache /mnt/storage/tensorrt-model-connect/model-weights
 
     # Profile specific strategies only
     python tools/cpu_profile_matrix.py \\
@@ -152,7 +152,7 @@ def _profile_strategy(
                 break
 
     # Tokenize
-    from trtf_build.engine_builder import _resolve_model
+    from tensorrt_model_connect.engine_builder import _resolve_model
     from transformers import AutoTokenizer
 
     print(f"[matrix] [{spec.strategy}] loading tokenizer ...", file=sys.stderr)

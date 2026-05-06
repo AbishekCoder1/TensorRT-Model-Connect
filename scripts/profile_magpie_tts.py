@@ -13,13 +13,13 @@ import subprocess
 import time
 
 
-def profile_cpp_binary(bundle_path: str, trtf_binary: str, prompt: str,
+def profile_cpp_binary(bundle_path: str, trtmc_binary: str, prompt: str,
                        max_new_tokens: int, num_runs: int, greedy: bool):
     """Run the C++ binary and capture timing from stderr."""
     env = os.environ.copy()
 
     cmd = [
-        trtf_binary, "generate-audio", bundle_path,
+        trtmc_binary, "generate-audio", bundle_path,
         "--prompt", prompt,
         "--output", "/tmp/magpie_profile_output.wav",
         "--max-new-tokens", str(max_new_tokens),
@@ -88,9 +88,9 @@ def profile_with_cuda_events(bundle_path: str, prompt: str,
             return None
 
     try:
-        from trtf_build.debug_runner import MagpieTrtRunner
+        from tensorrt_model_connect.debug_runner import MagpieTrtRunner
     except ImportError:
-        print("ERROR: trtf_build not available; trying direct import")
+        print("ERROR: tensorrt_model_connect not available; trying direct import")
         return None
 
     print(f"\n{'='*60}")
@@ -133,8 +133,8 @@ def profile_with_cuda_events(bundle_path: str, prompt: str,
 def main():
     parser = argparse.ArgumentParser(description="Profile MagpieTTS")
     parser.add_argument("--bundle", required=True, help="Path to .trtfb bundle")
-    parser.add_argument("--trtf-binary", default="./build/trtf",
-                        help="Path to C++ trtf binary")
+    parser.add_argument("--trtmc-binary", default="./build/trtmc",
+                        help="Path to C++ trtmc binary")
     parser.add_argument("--prompt", default="Hello, this is a test of text to speech synthesis.",
                         help="Text prompt")
     parser.add_argument("--max-new-tokens", type=int, default=200,
@@ -147,7 +147,7 @@ def main():
     args = parser.parse_args()
 
     print(f"Bundle: {args.bundle}")
-    print(f"Binary: {args.trtf_binary}")
+    print(f"Binary: {args.trtmc_binary}")
     print(f"Prompt: {args.prompt!r}")
     print(f"Max frames: {args.max_new_tokens}")
     print(f"Runs: {args.num_runs}")
@@ -155,7 +155,7 @@ def main():
 
     # Phase 1: C++ binary profiling (wall-clock per run)
     cpp_results = profile_cpp_binary(
-        args.bundle, args.trtf_binary, args.prompt,
+        args.bundle, args.trtmc_binary, args.prompt,
         args.max_new_tokens, args.num_runs, args.greedy
     )
 

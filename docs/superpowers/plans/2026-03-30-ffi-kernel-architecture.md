@@ -15,13 +15,13 @@
 ### Task 1: Create `kernels/` package with FlashInfer decode setup
 
 **Files:**
-- Create: `trtf_build/trtf_build/kernels/__init__.py`
-- Create: `trtf_build/trtf_build/kernels/flashinfer_decode.py`
+- Create: `tensorrt_model_connect/tensorrt_model_connect/kernels/__init__.py`
+- Create: `tensorrt_model_connect/tensorrt_model_connect/kernels/flashinfer_decode.py`
 
 - [ ] **Step 1: Create empty `__init__.py`**
 
 ```python
-# trtf_build/trtf_build/kernels/__init__.py
+# tensorrt_model_connect/tensorrt_model_connect/kernels/__init__.py
 ```
 
 Create the file with no content (empty package marker).
@@ -69,7 +69,7 @@ def setup(head_dim, dtype=None):
 - [ ] **Step 3: Commit**
 
 ```bash
-git add trtf_build/trtf_build/kernels/__init__.py trtf_build/trtf_build/kernels/flashinfer_decode.py
+git add tensorrt_model_connect/tensorrt_model_connect/kernels/__init__.py tensorrt_model_connect/tensorrt_model_connect/kernels/flashinfer_decode.py
 git commit -m "feat(ffi): add kernels/ package with FlashInfer decode setup"
 ```
 
@@ -78,8 +78,8 @@ git commit -m "feat(ffi): add kernels/ package with FlashInfer decode setup"
 ### Task 2: Extract decomposed decoder attention into `graph_ops.py`
 
 **Files:**
-- Modify: `trtf_build/trtf_build/graph_ops.py` (add function before the TVM-FFI section at line ~2025)
-- Modify: `trtf_build/trtf_build/graph_blocks.py` (replace lines 188-246 with delegation call)
+- Modify: `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` (add function before the TVM-FFI section at line ~2025)
+- Modify: `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` (replace lines 188-246 with delegation call)
 
 - [ ] **Step 1: Add `add_decoder_attention_decomposed()` to `graph_ops.py`**
 
@@ -210,7 +210,7 @@ Note: the lines after this (`# Output projection`, `attn_out = ...`) reference `
 
 Run inside the container:
 ```bash
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && ctest --test-dir build --output-on-failure -j4 2>&1 | tail -5"
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && ctest --test-dir build --output-on-failure -j4 2>&1 | tail -5"
 ```
 
 Expected: all tests pass (C++ tests are unaffected by Python changes).
@@ -219,7 +219,7 @@ Expected: all tests pass (C++ tests are unaffected by Python changes).
 
 Run inside the container:
 ```bash
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && /opt/venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py 2>&1 | tail -20"
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && /opt/venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py 2>&1 | tail -20"
 ```
 
 Expected: all tests pass. The decomposed attention path is exercised by `test_standard_decoder.py` and `test_graph_blocks.py` if they exist.
@@ -227,7 +227,7 @@ Expected: all tests pass. The decomposed attention path is exercised by `test_st
 - [ ] **Step 5: Commit**
 
 ```bash
-git add trtf_build/trtf_build/graph_ops.py trtf_build/trtf_build/graph_blocks.py
+git add tensorrt_model_connect/tensorrt_model_connect/graph_ops.py tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py
 git commit -m "refactor(ffi): extract decomposed decoder attention into graph_ops"
 ```
 
@@ -236,8 +236,8 @@ git commit -m "refactor(ffi): extract decomposed decoder attention into graph_op
 ### Task 3: Extract FFI decoder attention into `graph_ops.py`
 
 **Files:**
-- Modify: `trtf_build/trtf_build/graph_ops.py` (add function after `add_decoder_attention_decomposed`)
-- Modify: `trtf_build/trtf_build/graph_blocks.py` (replace lines 154-187 with delegation call)
+- Modify: `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` (add function after `add_decoder_attention_decomposed`)
+- Modify: `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` (replace lines 154-187 with delegation call)
 
 - [ ] **Step 1: Add `add_decoder_attention_ffi()` to `graph_ops.py`**
 
@@ -318,7 +318,7 @@ Replace lines 154-187 (the `if ffi_attention_kernel is not None:` block) with:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add trtf_build/trtf_build/graph_ops.py trtf_build/trtf_build/graph_blocks.py
+git add tensorrt_model_connect/tensorrt_model_connect/graph_ops.py tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py
 git commit -m "refactor(ffi): extract FFI decoder attention into graph_ops"
 ```
 
@@ -327,7 +327,7 @@ git commit -m "refactor(ffi): extract FFI decoder attention into graph_ops"
 ### Task 4: Remove env var kernel selection from `standard_decoder_builder.py`
 
 **Files:**
-- Modify: `trtf_build/trtf_build/standard_decoder_builder.py`
+- Modify: `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py`
 
 - [ ] **Step 1: Remove the FP16 force-enable block (lines 110-112)**
 
@@ -335,7 +335,7 @@ Delete these lines:
 
 ```python
     # Enable FP16 if using FFI attention (FlashInfer requires fp16)
-    if os.environ.get("TRTF_FFI_ATTENTION_KERNEL"):
+    if os.environ.get("TRTMC_FFI_ATTENTION_KERNEL"):
         trt_config.set_flag(trt.BuilderFlag.FP16)
 ```
 
@@ -347,7 +347,7 @@ Replace:
     # ---------------------------------------------------------------
     # Optional: TVM-FFI attention kernel (FlashInfer, etc.)
     # ---------------------------------------------------------------
-    ffi_attention_kernel = os.environ.get("TRTF_FFI_ATTENTION_KERNEL")
+    ffi_attention_kernel = os.environ.get("TRTMC_FFI_ATTENTION_KERNEL")
     if ffi_attention_kernel:
         print(f"[standard_decoder_builder] Using FFI attention: {ffi_attention_kernel}",
               file=sys.stderr)
@@ -364,7 +364,7 @@ With:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add trtf_build/trtf_build/standard_decoder_builder.py
+git add tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py
 git commit -m "refactor(ffi): remove env var kernel selection, make explicit code"
 ```
 
@@ -373,7 +373,7 @@ git commit -m "refactor(ffi): remove env var kernel selection, make explicit cod
 ### Task 5: Add kernel `.so` bundling in Python builder
 
 **Files:**
-- Modify: `trtf_build/trtf_build/engine_builder.py` (~line 509, before `write_bundle`)
+- Modify: `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` (~line 509, before `write_bundle`)
 
 - [ ] **Step 1: Add kernel artifact collection to `build_bundle()`**
 
@@ -415,7 +415,7 @@ Then before `write_bundle(output_path, info, sections)` (line 509), insert:
 
 Run inside the container:
 ```bash
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && /opt/venv/bin/python -m pytest tests/builder/test_bundle_writer.py -v 2>&1 | tail -10"
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && /opt/venv/bin/python -m pytest tests/builder/test_bundle_writer.py -v 2>&1 | tail -10"
 ```
 
 Expected: all pass (we added an optional parameter with a default of None — no existing callers are affected).
@@ -423,7 +423,7 @@ Expected: all pass (we added an optional parameter with a default of None — no
 - [ ] **Step 3: Commit**
 
 ```bash
-git add trtf_build/trtf_build/engine_builder.py
+git add tensorrt_model_connect/tensorrt_model_connect/engine_builder.py
 git commit -m "feat(ffi): add kernel .so bundling support to engine builder"
 ```
 
@@ -437,7 +437,7 @@ git commit -m "feat(ffi): add kernel .so bundling support to engine builder"
 
 - [ ] **Step 1: Add declaration to `plugin_helpers.h`**
 
-Inside the `#if TRTF_HAS_TRT` block, before `#endif`, add:
+Inside the `#if TRTMC_HAS_TRT` block, before `#endif`, add:
 
 ```cpp
 // Load all TVM-FFI kernels listed in the bundle's kernel_manifest.json.
@@ -453,7 +453,7 @@ Find the end of the existing implementations in `plugin_helpers.cpp`. Add:
 ```cpp
 void load_ffi_kernels_from_bundle(const BundleFile& bundle)
 {
-#if TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TVM_FFI
     const auto* manifest_sec = find_section(bundle, "kernel_manifest.json");
     if (!manifest_sec) return;
 
@@ -497,7 +497,7 @@ void load_ffi_kernels_from_bundle(const BundleFile& bundle)
         // Build safe temp path: replace dots in global_name with underscores
         std::string safe_name = global_name;
         for (auto& c : safe_name) { if (c == '.') c = '_'; }
-        std::string tmp_path = "/tmp/trtf_kernel_" + safe_name + ".so";
+        std::string tmp_path = "/tmp/trtmc_kernel_" + safe_name + ".so";
         {
             std::ofstream ofs(tmp_path, std::ios::binary);
             ofs.write(so_sec->data.data(), static_cast<std::streamsize>(so_sec->data.size()));
@@ -527,7 +527,7 @@ Add the required includes at the top of plugin_helpers.cpp:
 And conditionally include the module loader:
 
 ```cpp
-#if TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TVM_FFI
 #include "plugins/tvm_ffi_module_loader.h"
 #endif
 ```
@@ -537,7 +537,7 @@ Also add `#include "utils/json_helpers.h"` if not already included.
 - [ ] **Step 3: Rebuild C++ runtime**
 
 ```bash
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && cmake --build build -j 2>&1 | tail -5"
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && cmake --build build -j 2>&1 | tail -5"
 ```
 
 Expected: builds successfully.
@@ -545,7 +545,7 @@ Expected: builds successfully.
 - [ ] **Step 4: Verify C++ unit tests still pass**
 
 ```bash
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && ctest --test-dir build --output-on-failure -j4 2>&1 | tail -5"
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && ctest --test-dir build --output-on-failure -j4 2>&1 | tail -5"
 ```
 
 Expected: all pass.
@@ -589,8 +589,8 @@ For each file found, add the call before the first `load_trt_module_from_plan`. 
 - [ ] **Step 3: Rebuild and test**
 
 ```bash
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && cmake --build build -j 2>&1 | tail -5"
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && ctest --test-dir build --output-on-failure -j4 2>&1 | tail -5"
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && cmake --build build -j 2>&1 | tail -5"
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && ctest --test-dir build --output-on-failure -j4 2>&1 | tail -5"
 ```
 
 Expected: builds and all tests pass.
@@ -613,14 +613,14 @@ git commit -m "feat(ffi): wire kernel loading into all pipeline plugins"
 
 The test at `tests/test_qwen3_flashinfer_e2e.py` currently uses the env var. Update it to use the new `kernels/` setup and explicit kernel selection. The key changes:
 
-1. Replace manual FlashInfer JIT + registration with `from trtf_build.kernels import flashinfer_decode`
-2. Remove `os.environ["TRTF_FFI_ATTENTION_KERNEL"]` — instead, temporarily patch the builder to use the FFI kernel
+1. Replace manual FlashInfer JIT + registration with `from tensorrt_model_connect.kernels import flashinfer_decode`
+2. Remove `os.environ["TRTMC_FFI_ATTENTION_KERNEL"]` — instead, temporarily patch the builder to use the FFI kernel
 
 For a quick E2E validation, the simplest approach is to directly test the extracted functions:
 
 ```bash
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python3 -c \"
-from trtf_build.kernels import flashinfer_decode
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python3 -c \"
+from tensorrt_model_connect.kernels import flashinfer_decode
 name, so_path = flashinfer_decode.setup(head_dim=64)
 print(f'Kernel: {name}')
 print(f'SO: {so_path}')
@@ -637,7 +637,7 @@ Expected: prints kernel name, `.so` path, confirms file exists with non-zero siz
 This test (`tests/test_flashinfer_plugin_e2e.py`) tests the C++ plugin directly and doesn't use the env var or the builder, so it should still pass:
 
 ```bash
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && python3 tests/test_flashinfer_plugin_e2e.py 2>&1"
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && python3 tests/test_flashinfer_plugin_e2e.py 2>&1"
 ```
 
 Expected: `Correctness: max_diff=0.000000 PASS`
@@ -645,7 +645,7 @@ Expected: `Correctness: max_diff=0.000000 PASS`
 - [ ] **Step 3: Run the full builder unit test suite**
 
 ```bash
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && /opt/venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py 2>&1 | tail -20"
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && /opt/venv/bin/python -m pytest tests/builder/ -v --ignore=tests/builder/test_cli.py 2>&1 | tail -20"
 ```
 
 Expected: all pass.
@@ -655,7 +655,7 @@ Expected: all pass.
 Verify the default decomposed path still works end-to-end:
 
 ```bash
-docker exec trtf-dev-gb300-agent-2 bash -c "cd /workspace/trt-transformers-cpp && /opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v --engine-dir /workspace/users/yifeif/trt-transformers/engines --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python --rebuild-engines 2>&1 | tail -20"
+docker exec trtmc-dev-gb300-agent-2 bash -c "cd /workspace/tensorrt-model-connect && /opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python --rebuild-engines 2>&1 | tail -20"
 ```
 
 Expected: PASS — the decomposed attention path builds and runs correctly through the refactored code.

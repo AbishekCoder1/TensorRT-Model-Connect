@@ -14,7 +14,7 @@
 #include <unordered_set>
 #include <utility>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -208,7 +208,7 @@ std::vector<std::string> nvinfer_candidates(const std::vector<std::string>& sear
     if (!bin_dir.empty())
         dirs.push_back(bin_dir);
     dirs.insert(dirs.end(), search_dirs.begin(), search_dirs.end());
-    if (const char* trt_dir = std::getenv("TRTF_TRT_LIBRARY_DIR"))
+    if (const char* trt_dir = std::getenv("TRTMC_TRT_LIBRARY_DIR"))
         dirs.push_back(trt_dir);
     append_python_tensorrt_lib_dirs(std::getenv("VIRTUAL_ENV"), dirs);
     append_python_tensorrt_lib_dirs(std::getenv("CONDA_PREFIX"), dirs);
@@ -485,4 +485,4 @@ trt_backend_candidates(const std::string& backend_name,
     return unique_preserving_order(std::move(candidates));
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 inline void add_speech_embedding_row(const std::vector<float>& table, std::size_t offset,
                                      int32_t hidden_size, float* out_embed) {
@@ -77,4 +77,4 @@ inline void fill_hidden_from_logits(std::vector<float>& frame_hidden,
     }
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -8,9 +8,9 @@ breaking down CPU-side overhead, and collecting GPU kernel traces.
 ## Quick start — one command for everything
 
 ```bash
-python tools/trtf_profile.py \
+python tools/trtmc_profile.py \
   --model Qwen/Qwen3-0.6B \
-  --bundle /workspace/users/yifeif/trt-transformers/engines/qwen3-0.6b.trtfb \
+  --bundle /workspace/users/yifeif/tensorrt-model-connect/engines/qwen3-0.6b.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --output-dir /tmp/qwen_profile \
@@ -32,21 +32,21 @@ Prints a combined console report and saves `perf_compare.json` +
 
 | Tool | What it does |
 |------|-------------|
-| `tools/trtf_profile.py` | Unified entry point: 3-way benchmark + per-layer timing |
+| `tools/trtmc_profile.py` | Unified entry point: 3-way benchmark + per-layer timing |
 | `tools/perf_compare.py` | E2E latency: TRT vs HF eager vs torch.compile |
-| `tools/layer_profiler.py` | TRT IProfiler wrapper (library, used by trtf_profile.py) |
+| `tools/layer_profiler.py` | TRT IProfiler wrapper (library, used by trtmc_profile.py) |
 | `tools/cpu_profile.py` | CPU-phase timing breakdown for TRT decode steps |
 | `tools/nsight_collect.py` | Nsight Systems / Nsight Compute kernel data collection |
 | `tools/profile_report.py` | HTML report from JSON artifacts |
 
 ---
 
-## trtf_profile.py — 3-way benchmark + per-layer timing
+## trtmc_profile.py — 3-way benchmark + per-layer timing
 
 Runs all profiling passes in a single process so GPU memory is not split.
 
 ```bash
-python tools/trtf_profile.py \
+python tools/trtmc_profile.py \
   --model Qwen/Qwen3-0.6B \
   [--bundle /path/to/model.trtfb]   # skip engine build if bundle exists
   [--prompt "Hello"]
@@ -59,7 +59,7 @@ python tools/trtf_profile.py \
   [--no-compile]                    # skip torch.compile pass
   [--compile-mode reduce-overhead|default|max-autotune]
   [--no-layer-profile]              # skip IProfiler (faster e2e-only run)
-  [--trtf-binary ./build/trtf]      # add C++ binary pass (requires --bundle)
+  [--trtmc-binary ./build/trtmc]      # add C++ binary pass (requires --bundle)
   [--hf-python /opt/venv/bin/python]# python for C++ binary tokenizer
   [--output-dir /tmp/out]
   [--json]                          # save JSON artifacts to --output-dir
@@ -308,7 +308,7 @@ python tools/profile_report.py \
   --nsight-hf nsight_hf.json \
   -o report.html
 
-# Auto-discover JSONs from a directory (trtf_profile.py output)
+# Auto-discover JSONs from a directory (trtmc_profile.py output)
 python tools/profile_report.py \
   --output-dir /tmp/qwen_profile \
   -o report.html
@@ -328,14 +328,14 @@ The report includes:
 
 ```bash
 MODEL="Qwen/Qwen3-0.6B"
-BUNDLE="/workspace/users/yifeif/trt-transformers/engines/qwen3-0.6b.trtfb"
+BUNDLE="/workspace/users/yifeif/tensorrt-model-connect/engines/qwen3-0.6b.trtfb"
 OUT="/tmp/profile_${MODEL//\//-}"
 
 # 1. 4-way benchmark (C++ + TRT Python + HF eager + HF compile) + per-layer timing
-python tools/trtf_profile.py \
+python tools/trtmc_profile.py \
   --model "$MODEL" --bundle "$BUNDLE" \
   --max-new-tokens 20 --warmup 3 --iterations 10 \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
   --output-dir "$OUT" --json
 
 # 2. CPU-phase breakdown

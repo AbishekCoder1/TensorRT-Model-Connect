@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace {
 
 using half_bits_t = uint16_t;
@@ -125,7 +125,7 @@ TensorMap::iterator find_output(TensorMap& outputs, const std::vector<std::strin
 }
 
 bool ltx_debug_enabled() {
-    const char* value = std::getenv("TRTF_LTX_DEBUG");
+    const char* value = std::getenv("TRTMC_LTX_DEBUG");
     return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
@@ -615,4 +615,4 @@ ImageResult LTXVideoPipeline::generate_image(const std::string& prompt, const Ge
     return video_to_image_result(std::move(video));
 }
 
-} // namespace trtf
+} // namespace trtmc

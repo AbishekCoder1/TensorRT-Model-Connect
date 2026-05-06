@@ -1,6 +1,6 @@
 """Embedding strategy runner — TRT inference for embedding models.
 
-Runs the C++ binary with ``trtf embed`` to produce L2-normalized vectors.
+Runs the C++ binary with ``trtmc embed`` to produce L2-normalized vectors.
 """
 
 from __future__ import annotations

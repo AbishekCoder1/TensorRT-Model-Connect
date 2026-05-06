@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // VL preprocessing config parsed from bundle's config.json + preprocessor_config.json.
 struct VLPreprocessConfig {
@@ -69,4 +69,4 @@ VLPreprocessConfig parse_vl_preprocess_config(
     const std::string& config_text,
     const std::string& preprocessor_config_text);
 
-} // namespace trtf
+} // namespace trtmc

@@ -4,9 +4,9 @@
 #include "runtime/pipelines/wan_pipeline.h"
 #include "runtime/plugins/shared/diffusion_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
-namespace trtf {
+namespace trtmc {
 
 class WanPlugin final : public IPipelinePlugin {
   public:
@@ -31,4 +31,4 @@ class WanPlugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_wan_plugin, WanPlugin, "diffusion_wan");
 
-} // namespace trtf
+} // namespace trtmc

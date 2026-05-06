@@ -1,4 +1,4 @@
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 
 #include <algorithm>
 #include <cctype>
@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace trtf {
+namespace trtmc {
 namespace {
 
 class VocabTokenizer final : public ITokenizer {
@@ -177,4 +177,4 @@ std::unique_ptr<ITokenizer> CreateVocabTokenizer(std::vector<std::string> vocab)
     return std::make_unique<VocabTokenizer>(std::move(vocab));
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -2,16 +2,16 @@
 
 // EncoderPipeline: single-pass encoder models (BERT, embedding, reranking).
 
-#include "trtf/pipeline.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class EncoderPipeline final : public IPipeline {
   public:
@@ -35,4 +35,4 @@ class EncoderPipeline final : public IPipeline {
     std::string model_id_;
 };
 
-} // namespace trtf
+} // namespace trtmc

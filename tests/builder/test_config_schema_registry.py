@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 try:
-    from trtf_build.runtime_config import (
+    from tensorrt_model_connect.runtime_config import (
         ConfigBundle,
         ConfigField,
         Layer,
@@ -40,9 +40,9 @@ try:
         registered_namespaces,
         write_effective_config,
     )
-    from trtf_build.runtime_config.schema_registry import layer_name
+    from tensorrt_model_connect.runtime_config.schema_registry import layer_name
 except ImportError:  # pragma: no cover - environment gate
-    pytest.skip("trtf_build.runtime_config not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect.runtime_config not importable", allow_module_level=True)
 
 
 # ---- helpers ---------------------------------------------------------------

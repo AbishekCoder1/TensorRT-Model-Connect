@@ -15,10 +15,10 @@ import numpy as np
 import pytest
 
 try:
-    from trtf_build.config import ModelConfig
-    import trtf_build.families.gpt_oss as gpt_oss
+    from tensorrt_model_connect.config import ModelConfig
+    import tensorrt_model_connect.families.gpt_oss as gpt_oss
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _seq(*shape: int, start: int = 0) -> np.ndarray:

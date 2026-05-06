@@ -18,7 +18,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-RWKV-01
 Intent: Validate the RWKV family plugin weight loading including time-mixing and channel-mixing blocks, 5 recurrent state tensors per layer, and non-decoder engine IO.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: All RWKV weight keys (time-mixing R/K/V, channel-mixing, decay, bonus) are present, engine inputs/outputs match recurrent WKV contract, and shapes are correct.
 """
 
@@ -33,9 +33,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -56,7 +56,7 @@ class RWKVPluginTester(FamilyPluginTester):
       - No attention mask, no position IDs, no KV cache
     """
 
-    plugin_module = "trtf_build.families.rwkv"
+    plugin_module = "tensorrt_model_connect.families.rwkv"
     model_type = "rwkv"
     spec = TinyModelSpec(
         vocab_size=32,

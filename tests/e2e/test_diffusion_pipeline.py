@@ -2,7 +2,7 @@
 
 Discovers manifests with test_type=="diffusion" and runs a multi-stage validation:
 
-1. Build bundle from HF model via trtf-build (subprocess)
+1. Build bundle from HF model via trtmc-build (subprocess)
 2. Run debug_diffusion_pipeline.py for 9-step TRT-vs-HF component comparison
 3. Run C++ binary: generate-video (30 steps, PNG frames)
 4. Check frame pixel statistics (catches washed-out / all-black / low-contrast)
@@ -10,8 +10,8 @@ Discovers manifests with test_type=="diffusion" and runs a multi-stage validatio
 
 Usage:
     pytest tests/e2e/test_diffusion_pipeline.py -v \
-      --engine-dir /mnt/storage/trt-transformers/engines \
-      --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+      --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+      --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
       --rebuild-engines
 """
 
@@ -68,7 +68,7 @@ def _diffusion_model_by_name(name):
 def _build_diffusion_bundle(hf_id, bundle_path, build_args, precision="fp32"):
     """Build a diffusion .trtfb bundle as a subprocess."""
     cmd = [
-        "trtf-build", "build",
+        "trtmc-build", "build",
         hf_id, "-o", str(bundle_path),
     ]
     max_cache = build_args.get("max_cache_length", 256)
@@ -306,7 +306,7 @@ def test_diffusion_debug_pipeline(diffusion_entry):
 
 
 @pytest.mark.e2e
-def test_diffusion_cpp_generate(diffusion_entry, trtf_binary, hf_python,
+def test_diffusion_cpp_generate(diffusion_entry, trtmc_binary, hf_python,
                                  ld_library_path, engine_dir):
     """Run C++ generate-video and verify correct frame count."""
     bundle_path = diffusion_entry["bundle_path"]
@@ -314,9 +314,9 @@ def test_diffusion_cpp_generate(diffusion_entry, trtf_binary, hf_python,
     num_steps = diffusion_entry.get("num_inference_steps", 30)
     expected_frames = diffusion_entry.get("video_num_frames", 17)
 
-    with tempfile.TemporaryDirectory(prefix="trtf_frames_") as frame_dir:
+    with tempfile.TemporaryDirectory(prefix="trtmc_frames_") as frame_dir:
         result = _run_cpp_generate_video(
-            trtf_binary, bundle_path, prompt, frame_dir,
+            trtmc_binary, bundle_path, prompt, frame_dir,
             num_steps, hf_python, ld_library_path)
 
         assert result["returncode"] == 0, (
@@ -335,7 +335,7 @@ def test_diffusion_cpp_generate(diffusion_entry, trtf_binary, hf_python,
 
 
 @pytest.mark.e2e
-def test_diffusion_frame_quality(diffusion_entry, trtf_binary, hf_python,
+def test_diffusion_frame_quality(diffusion_entry, trtmc_binary, hf_python,
                                   ld_library_path, engine_dir):
     """Generate frames and check pixel statistics for visual quality.
 
@@ -349,9 +349,9 @@ def test_diffusion_frame_quality(diffusion_entry, trtf_binary, hf_python,
     max_mean = diffusion_entry.get("max_pixel_mean", 0.85)
     min_std = diffusion_entry.get("min_pixel_std", 0.05)
 
-    with tempfile.TemporaryDirectory(prefix="trtf_quality_") as frame_dir:
+    with tempfile.TemporaryDirectory(prefix="trtmc_quality_") as frame_dir:
         result = _run_cpp_generate_video(
-            trtf_binary, bundle_path, prompt, frame_dir,
+            trtmc_binary, bundle_path, prompt, frame_dir,
             num_steps, hf_python, ld_library_path)
 
         if result["returncode"] != 0:

@@ -22,10 +22,10 @@ from tool_helpers import load_hf_model
 
 def build_debug_engine(model_id_or_path, max_cache_length, verbose):
     """Build TRT engine with debug layer outputs marked."""
-    from trtf_build.engine_builder import _resolve_model
-    from trtf_build.config import ModelConfig
-    from trtf_build.families import find_plugin
-    from trtf_build.standard_decoder_builder import build_standard_decoder_engine
+    from tensorrt_model_connect.engine_builder import _resolve_model
+    from tensorrt_model_connect.config import ModelConfig
+    from tensorrt_model_connect.families import find_plugin
+    from tensorrt_model_connect.standard_decoder_builder import build_standard_decoder_engine
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)
@@ -54,7 +54,7 @@ def build_debug_engine(model_id_or_path, max_cache_length, verbose):
 
 def run_trt_single_step(engine_plan, config, token_id, max_cache_length):
     """Run one TRT step at position 0. Returns dict with all outputs."""
-    from trtf_build.debug_runner import TrtRunner
+    from tensorrt_model_connect.debug_runner import TrtRunner
 
     runner = TrtRunner(
         engine_plan=engine_plan,

@@ -1,6 +1,6 @@
 // TVM-FFI kernel bridge plugin implementation (IPluginV2DynamicExt).
 
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI
 
 #include "plugins/tvm_ffi_kernel_plugin.h"
 
@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // ---------------------------------------------------------------------------
 // shape_spec parsing helpers (kept small for low CCN)
@@ -401,6 +401,6 @@ int32_t TvmFfiKernelPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
     return 0;
 }
 
-} // namespace trtf
+} // namespace trtmc
 
-#endif // TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#endif // TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI

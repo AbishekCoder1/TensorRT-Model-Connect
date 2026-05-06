@@ -20,7 +20,7 @@ The autopilot dispatches parallel Claude Code agents across isolated workspaces.
 2. Builds the TRT bundle
 3. Validates correctness (TRT vs HuggingFace comparison — agent picks the right metric per modality)
 4. Creates a C++ runtime plugin if no existing strategy handles the model
-5. Iterates until `./build/trtf run <bundle> --prompt "..."` produces correct output
+5. Iterates until `./build/trtmc run <bundle> --prompt "..."` produces correct output
 6. Creates the E2E manifest (no skip)
 
 **Prerequisites**: Agent workspaces bootstrapped (`./scripts/bootstrap_workspace.sh --id agent-N --detach`) and `claude` CLI in PATH.
@@ -31,7 +31,7 @@ See `scripts/autopilot/autorun.py` for full options and `CLAUDE.md` for detailed
 
 ## Manual Path
 
-Adding support for a new HuggingFace model family manually is a Python task in `trtf_build/` **when the model reuses an existing runtime strategy** already handled by a C++ plugin in `src/runtime/plugins/`. C++ edits are needed only when introducing a new `runtime_strategy` that no existing plugin handles.
+Adding support for a new HuggingFace model family manually is a Python task in `tensorrt_model_connect/` **when the model reuses an existing runtime strategy** already handled by a C++ plugin in `src/runtime/plugins/`. C++ edits are needed only when introducing a new `runtime_strategy` that no existing plugin handles.
 
 ## Prerequisites
 
@@ -65,7 +65,7 @@ python3 scripts/new_family.py \
   --family-name phi
 
 # 2. Review the generated plugin (customize if needed)
-$EDITOR trtf_build/trtf_build/families/phi.py
+$EDITOR tensorrt_model_connect/tensorrt_model_connect/families/phi.py
 
 # 3. Validate end-to-end (build + diff_logits + diff_layers + runner parity)
 ./scripts/validate_family.sh microsoft/Phi-3-mini-4k-instruct
@@ -81,7 +81,7 @@ The scaffolding script:
 
 ### Step 1: Create the plugin file
 
-Create `trtf_build/trtf_build/families/<family>.py`. The file must:
+Create `tensorrt_model_connect/tensorrt_model_connect/families/<family>.py`. The file must:
 - Define a class implementing the `FamilyPlugin` protocol (see `base.py`)
 - Expose a module-level `plugin` attribute (instance of the class)
 
@@ -151,7 +151,7 @@ def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
     return weights
 ```
 
-Some models use fused projections (e.g., Phi-3 ships a single `qkv_proj` instead of separate Q/K/V, and a single `gate_up_proj` instead of separate gate/up). In these cases, split the fused tensor during weight loading. See `trtf_build/trtf_build/families/phi.py` for an example.
+Some models use fused projections (e.g., Phi-3 ships a single `qkv_proj` instead of separate Q/K/V, and a single `gate_up_proj` instead of separate gate/up). In these cases, split the fused tensor during weight loading. See `tensorrt_model_connect/tensorrt_model_connect/families/phi.py` for an example.
 
 ### Step 3: Validate
 
@@ -162,7 +162,7 @@ Run the one-command validation gate:
 ```
 
 This runs:
-1. `trtf-build build` — builds a `.trtfb` bundle
+1. `trtmc-build build` — builds a `.trtfb` bundle
 2. `diff_logits.py --battery` — E2E logit comparison (4 prompts)
 3. `diff_layers.py` — per-layer hidden state comparison
 4. `test_runner_parity.py` — Python-vs-C++ cross-validation
@@ -171,7 +171,7 @@ Or run each step individually:
 
 ```bash
 # Build bundle
-trtf-build build <model> -o /tmp/test.trtfb --max-cache-length 256
+trtmc-build build <model> -o /tmp/test.trtfb --max-cache-length 256
 
 # E2E logit comparison (per-step, all tokens)
 python3 tools/diff_logits.py --model <model> --atol 1e-3 --battery
@@ -181,7 +181,7 @@ python3 tools/diff_layers.py --model <model> --atol 0.05
 
 # Python-vs-C++ runner parity
 python3 tools/test_runner_parity.py \
-  --bundle /tmp/test.trtfb --binary ./build/trtf \
+  --bundle /tmp/test.trtfb --binary ./build/trtmc \
   --hf-python .venv/bin/python --max-new-tokens 20
 ```
 
@@ -198,7 +198,7 @@ For models that require custom tokenizer code (e.g., Phi-3), add `--trust-remote
 
 ## FamilyPlugin Protocol
 
-From `trtf_build/trtf_build/families/base.py`:
+From `tensorrt_model_connect/tensorrt_model_connect/families/base.py`:
 
 ```python
 class FamilyPlugin(Protocol):
@@ -212,7 +212,7 @@ class FamilyPlugin(Protocol):
 
 ## Advanced: Custom Build Engine
 
-If your model has an architecture not covered by the parameterized standard builder, override `build_engine()` to use custom graph construction. The shared TRT graph ops in `trtf_build/trtf_build/graph_ops.py` (RMSNorm, LayerNorm, RoPE, matmul, attention, SwiGLU, GELU, etc.) are reusable building blocks -- compose them differently for your architecture.
+If your model has an architecture not covered by the parameterized standard builder, override `build_engine()` to use custom graph construction. The shared TRT graph ops in `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` (RMSNorm, LayerNorm, RoPE, matmul, attention, SwiGLU, GELU, etc.) are reusable building blocks -- compose them differently for your architecture.
 
 ### Already implemented custom architectures
 

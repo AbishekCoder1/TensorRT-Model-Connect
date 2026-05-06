@@ -7,7 +7,7 @@ identifies the root cause(s) of noisy output.
 
 Usage:
     python tools/debug_diffusion_pipeline.py \
-        --bundle /mnt/storage/trt-transformers/engines/wan21-t2v-1.3b.trtfb \
+        --bundle /mnt/storage/tensorrt-model-connect/engines/wan21-t2v-1.3b.trtfb \
         [--model-id Wan-AI/Wan2.1-T2V-1.3B-Diffusers] \
         [--atol 0.01] [--num-steps 10]
 """
@@ -171,7 +171,7 @@ def step3_t5_and_text_proj(bundle_path: str, pp: dict, atol: float) -> bool:
     print(f"  Tokens (first 8): {input_ids[0, :8].tolist()}")
 
     # TRT T5 (our bundle's engine)
-    from trtf_build.diffusion_runner import DiffusionRunner
+    from tensorrt_model_connect.diffusion_runner import DiffusionRunner
     print("  Loading TRT engines ...", file=sys.stderr)
     runner = DiffusionRunner(bundle_path)
     ctx.runner = runner
@@ -389,7 +389,7 @@ def step8_scheduler_sigmas(bundle_path: str, atol: float) -> bool:
     hf_timesteps = hf_sched.timesteps.numpy()
 
     num_steps = 30
-    from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
     our_sched = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=shift)
     our_sched.set_timesteps(num_steps)
     sigmas = our_sched._sigmas
@@ -454,7 +454,7 @@ def step9_full_pipeline(bundle_path: str, pp: dict, num_steps: int, atol: float)
     hf_latents = noise_torch.clone()
 
     # Our scheduler (matching C++ and HF)
-    from trtf_build.schedulers.flow_match_euler import FlowMatchEulerScheduler
+    from tensorrt_model_connect.schedulers.flow_match_euler import FlowMatchEulerScheduler
     our_sched = FlowMatchEulerScheduler(num_train_timesteps=1000, shift=shift)
     our_sched.set_timesteps(num_steps)
     sigmas = our_sched._sigmas

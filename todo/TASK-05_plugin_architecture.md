@@ -81,7 +81,7 @@ grep -c 'unique_ptr<TrtModule>' src/runtime/pipelines/audio_pipeline.h
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  trtf_create_pipeline_ex(bundle_path, options)                  │
+│  trtmc_create_pipeline_ex(bundle_path, options)                  │
 │    │                                                             │
 │    ▼                                                             │
 │  PipelineFactory::from_bundle(path, hf_python)                  │
@@ -274,15 +274,15 @@ register for multiple strategies. But the default is 1:1.
 ### `IPipelinePlugin` (new)
 
 ```cpp
-// include/trtf/runtime/pipeline_plugin.h
+// include/trtmc/runtime/pipeline_plugin.h
 
 #pragma once
-#include "trtf/pipeline.h"
+#include "trtmc/pipeline.h"
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct BundleFile;  // forward
 
@@ -331,20 +331,20 @@ public:
     virtual std::unique_ptr<IPipeline> create(const PipelineContext& ctx) = 0;
 };
 
-} // namespace trtf
+} // namespace trtmc
 ```
 
 ### `PipelineRegistry` (new)
 
 ```cpp
-// include/trtf/runtime/pipeline_registry.h
+// include/trtmc/runtime/pipeline_registry.h
 
 #pragma once
-#include "trtf/runtime/pipeline_plugin.h"
+#include "trtmc/runtime/pipeline_plugin.h"
 #include <string>
 #include <unordered_map>
 
-namespace trtf {
+namespace trtmc {
 
 class PipelineRegistry {
 public:
@@ -372,13 +372,13 @@ private:
 #define REGISTER_PIPELINE_PLUGIN(PluginClass) \
     namespace { \
     static const bool kRegistered_##PluginClass = [] { \
-        ::trtf::PipelineRegistry::instance().register_plugin( \
+        ::trtmc::PipelineRegistry::instance().register_plugin( \
             std::make_unique<PluginClass>()); \
         return true; \
     }(); \
     }
 
-} // namespace trtf
+} // namespace trtmc
 ```
 
 ### `BundleFile` section lookup helper (new)
@@ -436,11 +436,11 @@ Two strategies currently violate this and must be split:
 **After:** Each plugin writes a distinct strategy string:
 
 ```python
-# trtf_build/trtf_build/families/bark.py
+# tensorrt_model_connect/tensorrt_model_connect/families/bark.py
 class BarkPlugin(FamilyPlugin):
     runtime_strategy = "text_to_audio_bark"       # was "text_to_audio"
 
-# trtf_build/trtf_build/families/magpie_tts.py
+# tensorrt_model_connect/tensorrt_model_connect/families/magpie_tts.py
 class MagpieTTSPlugin(FamilyPlugin):
     runtime_strategy = "text_to_audio_magpie"     # was "text_to_audio"
 ```
@@ -455,19 +455,19 @@ class MagpieTTSPlugin(FamilyPlugin):
 **After:** Each plugin writes a distinct strategy string:
 
 ```python
-# trtf_build/trtf_build/families/flux.py
+# tensorrt_model_connect/tensorrt_model_connect/families/flux.py
 class FluxPlugin(FamilyPlugin):
     runtime_strategy = "diffusion_flux"           # was "diffusion"
 
-# trtf_build/trtf_build/families/wan_t2v.py
+# tensorrt_model_connect/tensorrt_model_connect/families/wan_t2v.py
 class WanPlugin(FamilyPlugin):
     runtime_strategy = "diffusion_wan"            # was "diffusion"
 
-# trtf_build/trtf_build/families/z_image.py
+# tensorrt_model_connect/tensorrt_model_connect/families/z_image.py
 class ZImagePlugin(FamilyPlugin):
     runtime_strategy = "diffusion_zimage"         # was "diffusion"
 
-# trtf_build/trtf_build/families/pixart.py
+# tensorrt_model_connect/tensorrt_model_connect/families/pixart.py
 class PixArtPlugin(FamilyPlugin):
     runtime_strategy = "diffusion_pixart"         # was "diffusion"
 ```
@@ -475,12 +475,12 @@ class PixArtPlugin(FamilyPlugin):
 #### Files that must be updated for the split
 
 **Python builder (strategy strings):**
-- `trtf_build/trtf_build/families/bark.py` — `runtime_strategy = "text_to_audio_bark"`
-- `trtf_build/trtf_build/families/magpie_tts.py` — `runtime_strategy = "text_to_audio_magpie"`
-- `trtf_build/trtf_build/families/flux.py` — `runtime_strategy = "diffusion_flux"`
-- `trtf_build/trtf_build/families/wan_t2v.py` — `runtime_strategy = "diffusion_wan"`
-- `trtf_build/trtf_build/families/z_image.py` — `runtime_strategy = "diffusion_zimage"`
-- `trtf_build/trtf_build/families/pixart.py` — `runtime_strategy = "diffusion_pixart"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/bark.py` — `runtime_strategy = "text_to_audio_bark"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/magpie_tts.py` — `runtime_strategy = "text_to_audio_magpie"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/flux.py` — `runtime_strategy = "diffusion_flux"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/wan_t2v.py` — `runtime_strategy = "diffusion_wan"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/z_image.py` — `runtime_strategy = "diffusion_zimage"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/pixart.py` — `runtime_strategy = "diffusion_pixart"`
 
 **E2E harness (strategy→task mapping):**
 - `tests/e2e_harness/contracts.py` — `RUNTIME_TO_TASK_STRATEGY`: add new keys
@@ -506,7 +506,7 @@ class PixArtPlugin(FamilyPlugin):
   strings, remove old `"text_to_audio"` and `"diffusion"` entries.
 
 **Python debug runner:**
-- `trtf_build/trtf_build/debug_runner.py` — handle new strategy strings.
+- `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` — handle new strategy strings.
 
 **Old bundles:** Must be rebuilt with new strategy strings. No backward compat
 shims — old bundles with `"text_to_audio"` or `"diffusion"` will fail with
@@ -550,8 +550,8 @@ shims — old bundles with `"text_to_audio"` or `"diffusion"` will fail with
 any existing logic yet. The old `pipeline_factory.cpp` dispatch still works.
 
 **Files created:**
-- `include/trtf/runtime/pipeline_plugin.h` — `IPipelinePlugin`, `BaseConfig`, `PipelineContext`
-- `include/trtf/runtime/pipeline_registry.h` — `PipelineRegistry`, `REGISTER_PIPELINE_PLUGIN`
+- `include/trtmc/runtime/pipeline_plugin.h` — `IPipelinePlugin`, `BaseConfig`, `PipelineContext`
+- `include/trtmc/runtime/pipeline_registry.h` — `PipelineRegistry`, `REGISTER_PIPELINE_PLUGIN`
 - `src/runtime/pipeline_registry.cpp` — `PipelineRegistry` implementation
 - `src/bundle/bundle_view.h` / `.cpp` — `find_section()`, `find_sections_by_prefix()`
 
@@ -569,12 +569,12 @@ cmake --build build -j && ctest --test-dir build --output-on-failure
 one pipeline class. No `can_handle()`, no secondary field inspection.
 
 **Python builder changes:**
-- `trtf_build/trtf_build/families/bark.py` — `runtime_strategy = "text_to_audio_bark"`
-- `trtf_build/trtf_build/families/magpie_tts.py` — `runtime_strategy = "text_to_audio_magpie"`
-- `trtf_build/trtf_build/families/flux.py` — `runtime_strategy = "diffusion_flux"`
-- `trtf_build/trtf_build/families/wan_t2v.py` — `runtime_strategy = "diffusion_wan"`
-- `trtf_build/trtf_build/families/z_image.py` — `runtime_strategy = "diffusion_zimage"`
-- `trtf_build/trtf_build/families/pixart.py` — `runtime_strategy = "diffusion_pixart"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/bark.py` — `runtime_strategy = "text_to_audio_bark"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/magpie_tts.py` — `runtime_strategy = "text_to_audio_magpie"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/flux.py` — `runtime_strategy = "diffusion_flux"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/wan_t2v.py` — `runtime_strategy = "diffusion_wan"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/z_image.py` — `runtime_strategy = "diffusion_zimage"`
+- `tensorrt_model_connect/tensorrt_model_connect/families/pixart.py` — `runtime_strategy = "diffusion_pixart"`
 
 **C++ runtime changes:**
 - `src/runtime/pipeline_factory.cpp` — add `normalize_legacy_strategy()` that
@@ -591,7 +591,7 @@ one pipeline class. No `can_handle()`, no secondary field inspection.
 - `tests/e2e/models/*.json` — update `runtime_strategy` in affected manifests
 
 **Debug runner:**
-- `trtf_build/trtf_build/debug_runner.py` — handle new strategy strings
+- `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` — handle new strategy strings
 
 **Verification:**
 ```bash
@@ -605,7 +605,7 @@ cmake --build build -j && ctest --test-dir build --output-on-failure
 pytest tests/test_e2e.py::test_e2e[bark-small] \
        tests/test_e2e.py::test_e2e[flux-schnell] \
        tests/test_e2e.py::test_e2e[wan21-t2v-1.3b] \
-  -v --engine-dir ... --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  -v --engine-dir ... --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 ```
 
 ### Phase 3: Extract first plugin (proof-of-concept) — `decoder_plugin.cpp`
@@ -637,7 +637,7 @@ return dispatch_pipeline(...);
 ```bash
 # Must pass — decoder_kv_cache and decoder_moe now served by plugin
 pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] tests/test_e2e.py::test_e2e[mixtral-small] -v \
-  --engine-dir ... --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir ... --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 ```
 
 ### Phase 4: Extract all text-family plugins
@@ -654,7 +654,7 @@ pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] tests/test_e2e.py::test_e2e[mixtr
 **Verification:**
 ```bash
 pytest tests/test_e2e.py -v --e2e-task-strategy text_generation_causal \
-  --engine-dir ... --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir ... --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 ```
 
 ### Phase 5: Extract encoder + vision plugins
@@ -739,7 +739,7 @@ that reads the raw JSON string.
 ## File Layout After Migration
 
 ```
-include/trtf/
+include/trtmc/
   pipeline.h                          # IPipeline (unchanged)
   runtime/
     pipeline_factory.h                # PipelineFactory (unchanged interface, ~50 LOC impl)
@@ -797,11 +797,11 @@ To add a brand new `runtime_strategy` (e.g., `graph_neural_network`):
 ```bash
 # 1. Create the plugin (one file)
 cat > src/runtime/plugins/gnn_plugin.cpp << 'CPP'
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "runtime/pipelines/encoder_pipeline.h"  // or a new GnnPipeline
 
-namespace trtf {
+namespace trtmc {
 
 class GnnPlugin : public IPipelinePlugin {
 public:
@@ -829,7 +829,7 @@ private:
 
 REGISTER_PIPELINE_PLUGIN(GnnPlugin);
 
-} // namespace trtf
+} // namespace trtmc
 CPP
 
 # 2. Add to CMakeLists.txt
@@ -891,13 +891,13 @@ pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] \
        tests/test_e2e.py::test_e2e[bark-small] \
        tests/test_e2e.py::test_e2e[flux-schnell] \
        tests/test_e2e.py::test_e2e[segformer-b0-ade] \
-  -v --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  -v --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 
 # Tier 4: Full E2E (all 50 models)
 pytest tests/test_e2e.py -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 
 # CCN gate
 python tools/check_cyclomatic_complexity.py src --max-ccn 10
@@ -1002,14 +1002,14 @@ COVERAGE_MAP = {
     ],
 
     # ── Shared utilities: test all plugins that depend on them ──
-    "include/trtf/runtime/kv_cache.*": [
+    "include/trtmc/runtime/kv_cache.*": [
         "qwen3-0.6b", "qwen25vl-3b", "whisper-tiny", "bark-small",
         "flux-schnell",  # any attention-based pipeline
     ],
     "src/runtime/trt/core/kv_cache.*": [
         "qwen3-0.6b", "qwen25vl-3b", "whisper-tiny", "bark-small",
     ],
-    "include/trtf/runtime/recurrent_state.*": [
+    "include/trtmc/runtime/recurrent_state.*": [
         "mamba-130m", "rwkv-7-0.1b", "nemotron-h-8b",
     ],
     "src/runtime/plugins/shared/diffusion_helpers.*": [
@@ -1021,9 +1021,9 @@ COVERAGE_MAP = {
     "src/runtime/plugins/shared/plugin_helpers.*": "ALL",
 
     # ── Infrastructure: full suite ──
-    "include/trtf/runtime/trt_module.*": "ALL",
+    "include/trtmc/runtime/trt_module.*": "ALL",
     "src/runtime/trt/core/trt_module.*": "ALL",
-    "include/trtf/pipeline.h": "ALL",
+    "include/trtmc/pipeline.h": "ALL",
     "src/runtime/pipeline_factory.cpp": "ALL",
     "src/runtime/pipeline_registry.cpp": "ALL",
     "src/bundle/bundle_view.*": "ALL",

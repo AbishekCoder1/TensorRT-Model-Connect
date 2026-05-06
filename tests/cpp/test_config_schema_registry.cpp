@@ -11,8 +11,8 @@
 //                 bundle merges layers by priority; provenance is preserved.
 // =============================================================================
 
-#include "trtf/config/config_bundle.h"
-#include "trtf/config/schema_registry.h"
+#include "trtmc/config/config_bundle.h"
+#include "trtmc/config/schema_registry.h"
 
 #include <any>
 #include <cstdint>
@@ -49,12 +49,12 @@ void expect_throws(Fn fn, const char* substring_match, const char* test_name) {
     }
 }
 
-using trtf::config::ConfigBundle;
-using trtf::config::ConfigField;
-using trtf::config::Layer;
-using trtf::config::LayerContribution;
-using trtf::config::Schema;
-using trtf::config::SchemaRegistry;
+using trtmc::config::ConfigBundle;
+using trtmc::config::ConfigField;
+using trtmc::config::Layer;
+using trtmc::config::LayerContribution;
+using trtmc::config::Schema;
+using trtmc::config::SchemaRegistry;
 
 // Convenience factory for a valid field usable by most tests.
 ConfigField int_field(const std::string& name, std::int32_t default_value, std::set<Layer> layers) {
@@ -312,7 +312,7 @@ void test_bundle_all_includes_every_field() {
 // --- layer_name diagnostic ----------------------------------------------------
 
 void test_layer_name_stable_strings() {
-    using trtf::config::layer_name;
+    using trtmc::config::layer_name;
     check(std::string(layer_name(Layer::SchemaDefault)) == "schema_default", "layer_name: schema");
     check(std::string(layer_name(Layer::BuildTime)) == "build_time", "layer_name: build");
     check(std::string(layer_name(Layer::BundleDefault)) == "bundle_default", "layer_name: bundle");

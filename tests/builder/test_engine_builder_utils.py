@@ -5,7 +5,7 @@ Tests _is_hf_model_dir, _detect_tokenizer_add_special_tokens, _resolve_model
 
 Trace: ARCH-ENG-001, UD-ENG-05
 Intent: Validate engine builder utility functions including HF model directory detection, tokenizer special-token detection, model resolution, and public API error paths.
-Preconditions: trtf_build is importable; no TRT or GPU required.
+Preconditions: tensorrt_model_connect is importable; no TRT or GPU required.
 Postconditions: HF directories are correctly identified, tokenizer special-token flags match HF config, local paths resolve as expected, and invalid inputs raise appropriate errors.
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 try:
-    from trtf_build.engine_builder import (
+    from tensorrt_model_connect.engine_builder import (
         _is_hf_model_dir,
         _detect_tokenizer_add_special_tokens,
         _resolve_model,
@@ -31,7 +31,7 @@ try:
         build_bundle,
     )
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 
 class TestIsHfModelDir:

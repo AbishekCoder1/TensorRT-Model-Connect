@@ -18,7 +18,7 @@
 //   - magpie_ipa_config: JSON with grapheme_prefix, eos_id, etc.
 // =============================================================================
 
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -34,7 +34,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -726,4 +726,4 @@ std::unique_ptr<ITokenizer> CreateIpaTokenizer(
         parsed_config.ignore_ambiguous);
 }
 
-} // namespace trtf
+} // namespace trtmc

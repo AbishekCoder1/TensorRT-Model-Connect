@@ -41,7 +41,7 @@ void check_close(float actual, float expected, float tolerance, const char* name
 
 void test_layout_computes_bytes_and_output_elems()
 {
-    const auto layout = trtf::build_mimi_decode_layout(8, 5, {1, 1, 40});
+    const auto layout = trtmc::build_mimi_decode_layout(8, 5, {1, 1, 40});
     check(layout.dec_codebooks == 8, "layout codebooks");
     check(layout.dec_frames == 5, "layout frames");
     check(layout.total_output_elems == 40, "layout output elems");
@@ -57,7 +57,7 @@ void test_decoder_input_transposes_frame_major_tokens()
         3, 4,
         5, 6,
     };
-    const auto input = trtf::build_mimi_decoder_input(codec_tokens, 3, 2, 4, 3);
+    const auto input = trtmc::build_mimi_decoder_input(codec_tokens, 3, 2, 4, 3);
     const std::vector<float> expected = {
         1.0F, 3.0F, 5.0F, 0.0F,
         2.0F, 4.0F, 6.0F, 0.0F,
@@ -70,7 +70,7 @@ void test_waveform_stats_report_rms_and_peak()
 {
     float rms = 0.0F;
     float peak = 0.0F;
-    trtf::waveform_stats({1.0F, -2.0F, 2.0F}, 3, rms, peak);
+    trtmc::waveform_stats({1.0F, -2.0F, 2.0F}, 3, rms, peak);
     check_close(peak, 2.0F, 1e-6F, "waveform peak");
     check_close(rms, std::sqrt(3.0F), 1e-6F, "waveform rms");
 }

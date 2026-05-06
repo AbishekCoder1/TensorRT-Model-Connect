@@ -8,7 +8,7 @@
 #include <cfloat>
 #include <cstdint>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -296,5 +296,5 @@ bool triattention_compact_rows_gpu(const void* d_src, void* d_scratch, DType cac
     }
 }
 
-} // namespace trtf
+} // namespace trtmc
 

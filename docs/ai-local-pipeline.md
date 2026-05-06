@@ -15,7 +15,7 @@ From the repo root:
 ```bash
 git fetch origin master ai-staging
 export REPO_ROOT="$PWD"
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging preflight
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging preflight
 ```
 
 Open five Claude Code windows in tmux:
@@ -109,7 +109,7 @@ promotion
 From any shell in the repo:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging dashboard
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging dashboard
 ```
 
 ## Stop

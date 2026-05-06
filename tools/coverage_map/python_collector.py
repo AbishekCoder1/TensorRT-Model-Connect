@@ -47,7 +47,7 @@ def parse_coverage_db(db_path: Path) -> Dict[str, List[str]]:
 def collect_python_coverage(
     repo_root: Path,
     test_targets: Optional[List[str]] = None,
-    cov_source: str = "trtf_build",
+    cov_source: str = "tensorrt_model_connect",
     python_bin: str = "python",
 ) -> Dict[str, List[str]]:
     """Run Python tests with per-test coverage and return source->tests map.

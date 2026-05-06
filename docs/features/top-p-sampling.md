@@ -32,7 +32,7 @@ to disabled top-p behavior.
 
 ### CLI
 ```bash
-./build/trtf run bundle.trtfb --prompt "Once upon a time" \
+./build/trtmc run bundle.trtfb --prompt "Once upon a time" \
   --temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50 --seed 42 \
   --hf-python /opt/venv/bin/python
 ```

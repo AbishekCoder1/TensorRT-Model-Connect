@@ -3,13 +3,13 @@
 
 #include "runtime/pipelines/patchtst_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
 #include <cctype>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -75,4 +75,4 @@ class PatchTSTPlugin final : public IPipelinePlugin {
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_patchtst_plugin, PatchTSTPlugin,
                                        "patchtst_torchtrt");
 
-} // namespace trtf
+} // namespace trtmc

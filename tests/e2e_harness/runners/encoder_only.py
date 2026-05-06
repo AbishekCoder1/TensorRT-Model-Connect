@@ -80,7 +80,7 @@ class EncoderOnlyRunner:
 def _parse_encoder_output(stdout: str) -> dict:
     """Parse encoder-only output (hidden states / CLS embedding).
 
-    trtf encode outputs:
+    trtmc encode outputs:
         Hidden states shape: [512, 768]
         [CLS] embedding (first 8 dims): -0.0522 0.0800 ...
     """
@@ -92,7 +92,7 @@ def _parse_encoder_output(stdout: str) -> dict:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Parse "trtf encode" text format
+    # Parse "trtmc encode" text format
     cls_embedding = []
     for line in stdout.splitlines():
         line = line.strip()

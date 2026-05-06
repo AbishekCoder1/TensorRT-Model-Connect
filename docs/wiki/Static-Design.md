@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Document ID** | TRTF-SD-001 |
+| **Document ID** | TRTMC-SD-001 |
 | **Title** | Software Unit Design Specification |
 | **Standard** | ISO 26262-6:2018 clause 8 |
 | **Scope** | C++ runtime and Python build package |
@@ -15,13 +15,13 @@
 
 ## 1. Purpose
 
-This document specifies the static structure of the trt-transformers-cpp
+This document specifies the static structure of the tensorrt-model-connect
 system: every class, interface, and dependency described here maps to a real
 source file. No aspirational content is included.
 
 The system has two stages:
 
-1. **Python build** (`trtf_build/`) -- converts HuggingFace models into
+1. **Python build** (`tensorrt_model_connect/`) -- converts HuggingFace models into
    self-describing `.trtfb` bundles containing serialized TensorRT engine
    plans, tokenizer data, and JSON config.
 2. **C++ runtime** -- loads `.trtfb` bundles, deserializes TRT engines, and
@@ -278,16 +278,16 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `src/cabi/api/trtf_c.cpp` |
-| **Public header** | `include/trtf/pipeline.h` (C ABI section at bottom) |
-| **Purpose** | Exposes `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()` as C-linkage functions. Bridges external callers (CLI, FFI) to the C++ `PipelineFactory`. |
-| **Behavior** | Delegates to `PipelineFactory::from_bundle()`. Catches all exceptions and stores the error message for retrieval via `trtf_last_error()`. Returns raw `IPipeline*` (caller owns). |
+| **Files** | `src/cabi/api/trtmc_c.cpp` |
+| **Public header** | `include/trtmc/pipeline.h` (C ABI section at bottom) |
+| **Purpose** | Exposes `trtmc_create_pipeline()`, `trtmc_create_pipeline_ex()`, `trtmc_last_error()`, `trtmc_version()`, `trtmc_has_trt()` as C-linkage functions. Bridges external callers (CLI, FFI) to the C++ `PipelineFactory`. |
+| **Behavior** | Delegates to `PipelineFactory::from_bundle()`. Catches all exceptions and stores the error message for retrieval via `trtmc_last_error()`. Returns raw `IPipeline*` (caller owns). |
 
 ### UD-CFG-01: Bundle Config Parsing
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
+| **Files** | `include/trtmc/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
 | **Purpose** | Parses the JSON config section from a `.trtfb` bundle into `BaseConfig` (universal fields). Each plugin parses its own strategy-specific fields directly from the raw JSON text. |
 | **Key fields** | `BaseConfig` contains: `runtime_strategy`, `vocab_size`, `hidden_size`, `num_layers`, `num_heads`, `num_kv_heads`, `head_dim`, `attention_size`, `max_cache_length`, `id_bos`, `id_eos`, `precision`, `tokenizer_add_special_tokens`. Strategy-specific fields (Mamba SSM, Whisper, VL, diffusion, audio, etc.) are parsed by each plugin from `ctx.config_json`. |
 | **Invariant** | All `BaseConfig` fields have safe defaults. Unknown JSON keys are silently ignored. |
@@ -297,7 +297,7 @@ classDiagram
 | Field | Value |
 |---|---|
 | **Files** | `src/bundle/bundle_format.h`, `src/bundle/bundle_format.cpp` |
-| **Public header** | `include/trtf/bundle.h` |
+| **Public header** | `include/trtmc/bundle.h` |
 | **Purpose** | Reads `.trtfb` bundle files. Format: 8-byte magic (`TRTFB\x00\x01\x00`), 8-byte LE JSON header length, JSON metadata, then binary sections at offsets. |
 | **Functions** | `ReadBundleFile()` (full load), `ReadBundleHeader()` (metadata only), `HasBundleMagic()` (validation). |
 | **Public API** | `BundleInfo InspectBundle()`, `bool IsBundle()` -- thin wrappers for external callers. |
@@ -313,26 +313,26 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/runtime/pipeline_factory.h`, `src/runtime/registry/pipeline_factory.cpp`, `include/trtf/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp`, `include/trtf/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
+| **Files** | `include/trtmc/runtime/pipeline_factory.h`, `src/runtime/registry/pipeline_factory.cpp`, `include/trtmc/runtime/pipeline_registry.h`, `src/runtime/registry/pipeline_registry.cpp`, `include/trtmc/runtime/pipeline_plugin.h`, `src/runtime/registry/pipeline_plugin.cpp` |
 | **Purpose** | Sole creation path for all pipelines. `PipelineFactory::from_bundle()` reads a `.trtfb`, parses `BaseConfig`, and delegates to the registry-resolved `IPipelinePlugin`. |
-| **Dispatch** | `PipelineRegistry` singleton maps `runtime_strategy` strings to manifest-registered `IPipelinePlugin` instances. Each plugin (in `src/runtime/plugins/`) handles one or more strategies and exposes a registrar function listed in `cmake/trtf_pipeline_plugins.cmake`. 25 strategies are registered across 20 plugin files. |
+| **Dispatch** | `PipelineRegistry` singleton maps `runtime_strategy` strings to manifest-registered `IPipelinePlugin` instances. Each plugin (in `src/runtime/plugins/`) handles one or more strategies and exposes a registrar function listed in `cmake/trtmc_pipeline_plugins.cmake`. 25 strategies are registered across 20 plugin files. |
 | **Strategy mapping** | `decoder_kv_cache`/`decoder_moe` -> `TextGenerationPipeline`; `ssm_recurrent`/`rwkv_recurrent`/`hybrid_mamba_attention` -> `RecurrentPipeline`; `encoder_only`/`embedding`/`reranking`/`neural_operator` -> `EncoderPipeline`; `vision_language` -> `VLPipeline`; `segmentation` -> `SegmentPipeline`; `prompted_segmentation` -> `SamPipeline`; `object_detection` -> `EncoderPipeline`; `speech_to_text` -> `WhisperPipeline`; `text_to_audio_bark` -> `BarkPipeline`; `text_to_audio_magpie` -> `MagpiePipeline`; `speech_to_speech` -> `SpeechPipeline`; `omni_multimodal` -> `OmniPipeline`; `text_to_text` -> `T5Pipeline`; `marian_translation` -> `MarianPipeline`; `seq2seq_encoder_decoder` -> `Seq2SeqPipeline`; `diffusion_flux` -> `FluxPipeline`; `diffusion_wan`/`diffusion_pixart` -> `WanPipeline`; `diffusion_zimage` -> `ZImagePipeline`. |
 
 ### UD-MOD-01: TRT Module
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/runtime/trt_module.h`, `src/runtime/core/trt_module.cpp` |
+| **Files** | `include/trtmc/runtime/trt_module.h`, `src/runtime/core/trt_module.cpp` |
 | **Purpose** | `model.forward()` abstraction for TensorRT engines. Wraps `ICudaEngine` + `IExecutionContext`. Manages all I/O binding, H2D/D2H transfers, and execution. |
 | **Key API** | `forward()` (CPU tensors, synchronous), `forward_device()` (GPU tensors, no copies), `forward_async()`/`sync()` (async), `bind_external()` (KvCache binding), `device_ptr()` (direct buffer access). |
 | **Ownership** | Non-copyable, movable. `keep_alive()` stores `shared_ptr<void>` to ensure TRT engine and CUDA stream outlive the execution context. |
-| **Related** | `include/trtf/runtime/tensor.h` (CPU Tensor, TensorMap, DType), `include/trtf/runtime/device_tensor.h` (GPU DeviceTensor). |
+| **Related** | `include/trtmc/runtime/tensor.h` (CPU Tensor, TensorMap, DType), `include/trtmc/runtime/device_tensor.h` (GPU DeviceTensor). |
 
 ### UD-KVC-01: KV Cache
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp`, `src/runtime/core/device_kv_cache.h`, `src/runtime/core/device_kv_cache.cpp` |
+| **Files** | `include/trtmc/runtime/kv_cache.h`, `src/runtime/core/kv_cache.cpp`, `src/runtime/core/device_kv_cache.h`, `src/runtime/core/device_kv_cache.cpp` |
 | **Purpose** | Autoregressive KV cache state manager. Allocates per-layer K/V device tensors, builds causal attention masks, and binds directly to TrtModule. |
 | **Key API** | `bind_to()` binds `cache_k_{i}`, `cache_v_{i}` (inputs) and `present_k_{i}`, `present_v_{i}` (outputs). `advance()` appends present into cache and increments position. `build_attention_mask()` produces `[max_length]` float mask. |
 | **Legacy** | `device_kv_cache.h/cpp` contains the older `DeviceKvCache` and `run_decoder_step_device()` used by legacy backends. |
@@ -341,7 +341,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/runtime/recurrent_state.h`, `src/runtime/core/recurrent_state.cpp` |
+| **Files** | `include/trtmc/runtime/recurrent_state.h`, `src/runtime/core/recurrent_state.cpp` |
 | **Purpose** | Config-driven SSM/RWKV state manager. Replaces old `MambaStepState` and `RwkvStepState` with a single class parametrized by `TensorSpec` array. |
 | **Key API** | `bind_to()` binds state tensors (`{name}_{i}`) and present tensors (`{output_prefix}_{i}`). `advance()` copies present->state (D2D async). `reset()` zeros all state. |
 | **Usage** | Mamba: `specs = {{"conv_state", ...}, {"ssm_state", ...}}`. RWKV: `specs = {{"attn_state", ...}, ...}`. |
@@ -350,8 +350,8 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/tokenizer.h`, `include/trtf/runtime/tokenizer_interface.h`, `src/tokenizer/vocab_tokenizer.cpp`, `src/tokenizer/hf_python_tokenizer.cpp`, `src/tokenizer/ipa_tokenizer.cpp` |
-| **Purpose** | `ITokenizer` interface with three concrete implementations. `include/trtf/tokenizer.h` defines the full interface (`encode`, `decode`, `id_for_token`, `token_for_id`) plus factory functions. `include/trtf/runtime/tokenizer_interface.h` defines a minimal `encode`/`decode`-only interface. |
+| **Files** | `include/trtmc/tokenizer.h`, `include/trtmc/runtime/tokenizer_interface.h`, `src/tokenizer/vocab_tokenizer.cpp`, `src/tokenizer/hf_python_tokenizer.cpp`, `src/tokenizer/ipa_tokenizer.cpp` |
+| **Purpose** | `ITokenizer` interface with three concrete implementations. `include/trtmc/tokenizer.h` defines the full interface (`encode`, `decode`, `id_for_token`, `token_for_id`) plus factory functions. `include/trtmc/runtime/tokenizer_interface.h` defines a minimal `encode`/`decode`-only interface. |
 | **Implementations** | `VocabTokenizer` -- vocab.txt lookup. `HfPythonTokenizer` -- bridges to HuggingFace via Python subprocess. `IpaTokenizer` -- IPA phoneme tokenizer for speech models. |
 
 ### UD-PIP-TEXT-01: Text Generation Pipeline
@@ -429,7 +429,7 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `include/trtf/runtime/scheduler.h`, `src/runtime/core/flow_match_euler_scheduler.cpp` |
+| **Files** | `include/trtmc/runtime/scheduler.h`, `src/runtime/core/flow_match_euler_scheduler.cpp` |
 | **Purpose** | `IScheduler` interface for diffusion noise scheduling. `FlowMatchEulerScheduler` implements the Flow Matching Euler Discrete schedule used by FLUX, Wan, and Z-Image. |
 
 ### UD-AUD-WHISPER-01: Whisper Audio Domain
@@ -636,14 +636,14 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `trtf_build/trtf_build/config.py` |
+| **Files** | `tensorrt_model_connect/tensorrt_model_connect/config.py` |
 | **Purpose** | Parses HuggingFace `config.json` into `ModelConfig` dataclass. Handles nested configs (VL `text_config`), architecture-specific field mapping, and safe defaults. |
 
 ### UD-BLD-FAM-01: Family Plugin System
 
 | Field | Value |
 |---|---|
-| **Files** | `trtf_build/trtf_build/families/base.py`, `trtf_build/trtf_build/families/__init__.py` |
+| **Files** | `tensorrt_model_connect/tensorrt_model_connect/families/base.py`, `tensorrt_model_connect/tensorrt_model_connect/families/__init__.py` |
 | **Purpose** | `FamilyPlugin` protocol in `base.py` defines the contract: `match()`, `load_weights()`, `runtime_strategy()`, `embed_input()`. `__init__.py` uses `pkgutil.iter_modules()` to auto-discover all `.py` files with a module-level `plugin` attribute. 63 family plugins currently exist. |
 | **Plugins** | `albert`, `bark`, `bart`, `bert`, `bloom`, `canary`, `codegen`, `convbert`, `deberta`, `deepseek_ocr`, `deepseek_v2`, `distilbert`, `dpr`, `eagle_vlm`, `electra`, `falcon`, `fnet`, `flux`, `gemma`, `glm`, `gpt2`, `gpt_neo`, `gpt_neox`, `gpt_oss`, `granite`, `internlm`, `internvl`, `llama`, `m2m_100`, `magpie_tts`, `mamba`, `marian`, `mistral`, `mixtral`, `modernbert`, `mpnet`, `nemotron`, `nemotron_h`, `olmo`, `olmo2`, `opt`, `personaplex`, `phi`, `phi4_multimodal`, `phi_moe`, `pixart`, `qwen`, `qwen3_5`, `qwen3_omni`, `qwen_moe`, `qwen_vl`, `roberta`, `rwkv`, `sam`, `segformer`, `stablelm`, `starcoder2`, `t5`, `wan_t2v`, `whisper`, `xglm`, `xlnet`, `z_image` |
 
@@ -651,49 +651,49 @@ classDiagram
 
 | Field | Value |
 |---|---|
-| **Files** | `trtf_build/trtf_build/checkpoint_mapper.py` |
+| **Files** | `tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py` |
 | **Purpose** | Loads HuggingFace safetensors, maps weight keys to engine builder's expected names, performs GQA head expansion, handles tied embeddings, and applies biases. |
 
 ### UD-BLD-GRP-01: Graph Ops
 
 | Field | Value |
 |---|---|
-| **Files** | `trtf_build/trtf_build/graph_ops.py` |
+| **Files** | `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` |
 | **Purpose** | Layer 1 atomic TRT graph operations (tensor-in/tensor-out). RoPE, ALiBi, RMSNorm, LayerNorm, attention (MHA/GQA), SwiGLU, GELU, convolutions, padding, ELU, and more. Each function takes `INetworkDefinition` tensors and returns tensors. |
 
 ### UD-BLD-BLK-01: Graph Blocks
 
 | Field | Value |
 |---|---|
-| **Files** | `trtf_build/trtf_build/graph_blocks.py` |
+| **Files** | `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` |
 | **Purpose** | Layer 2 composable blocks built from graph ops. `add_attention_block()`, `add_swiglu_mlp()`, `add_gelu_fc_mlp()`, `apply_norm()`. These compose multiple graph ops into reusable building blocks for decoder layers. |
 
 ### UD-BLD-STD-01: Standard Decoder Builder
 
 | Field | Value |
 |---|---|
-| **Files** | `trtf_build/trtf_build/standard_decoder_builder.py` |
+| **Files** | `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` |
 | **Purpose** | Layer 3 engine builder. Constructs a complete TRT network for standard decoder models by stacking graph blocks. Handles embedding, positional encoding, N transformer layers, final norm, and logit projection. |
 
 ### UD-BLD-BDL-01: Bundle Writer
 
 | Field | Value |
 |---|---|
-| **Files** | `trtf_build/trtf_build/bundle_writer.py` |
+| **Files** | `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` |
 | **Purpose** | Writes `.trtfb` bundle files. Serializes config JSON + engine plan + tokenizer data + optional extra sections into the bundle format. |
 
 ### UD-BLD-ENG-01: Engine Builder
 
 | Field | Value |
 |---|---|
-| **Files** | `trtf_build/trtf_build/engine_builder.py` |
-| **Purpose** | Top-level orchestrator. Loads HF model -> selects family plugin -> builds TRT engine -> packages bundle. Entry point for both CLI (`trtf-build build`) and Python API (`trtf_build.build()`). |
+| **Files** | `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` |
+| **Purpose** | Top-level orchestrator. Loads HF model -> selects family plugin -> builds TRT engine -> packages bundle. Entry point for both CLI (`trtmc-build build`) and Python API (`tensorrt_model_connect.build()`). |
 
 ### UD-BLD-DBG-01: Debug Runner
 
 | Field | Value |
 |---|---|
-| **Files** | `trtf_build/trtf_build/debug_runner.py` |
+| **Files** | `tensorrt_model_connect/tensorrt_model_connect/debug_runner.py` |
 | **Purpose** | Pure-Python TRT inference with device-resident state. `TrtRunner` for decoder KV cache models, `MambaTrtRunner` for SSM models, `VLTrtRunner` for vision-language models. Used by diff tools and E2E harness for Python-side TRT inference. |
 
 ---

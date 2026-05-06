@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, logging
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Hugging Face local model generation for trtf backend.")
+    parser = argparse.ArgumentParser(description="Run Hugging Face local model generation for trtmc backend.")
     parser.add_argument("--model-dir", required=True, help="Local model directory containing config + safetensors")
     parser.add_argument("--prompt-file", help="Path to prompt text file")
     parser.add_argument("--prompt", default="", help="Prompt text (ignored when --prompt-file is set)")

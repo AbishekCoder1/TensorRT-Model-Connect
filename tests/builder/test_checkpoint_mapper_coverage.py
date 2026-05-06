@@ -2,7 +2,7 @@
 
 Trace: ARCH-CHK-001, UD-CHK-02
 Intent: Validate edge-case branches in checkpoint_mapper including q/k norm tiling, final norm fallback, QKV bias loading, and compact GQA/MQA K/V shapes.
-Preconditions: trtf_build and safetensors are importable; no TRT or GPU required.
+Preconditions: tensorrt_model_connect and safetensors are importable; no TRT or GPU required.
 Postconditions: Optional norm weights are tiled per-head, missing final norm defaults to ones, biases are loaded when present, and compact K/V shapes are preserved.
 """
 
@@ -16,10 +16,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-pytest.importorskip("trtf_build", reason="trtf_build requires tensorrt")
+pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
 
-from trtf_build import checkpoint_mapper as cm
-from trtf_build.config import ModelConfig
+from tensorrt_model_connect import checkpoint_mapper as cm
+from tensorrt_model_connect.config import ModelConfig
 
 
 def _save_safetensors(path: Path, tensors: dict[str, np.ndarray]) -> None:

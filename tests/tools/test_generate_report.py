@@ -342,12 +342,12 @@ class TestRenderReport:
         mod = _import_report()
         r = _make_result(
             repro_commands={
-                "build_bundle": "trtf-build build X -o y.trtfb",
-                "trt_inference": "./trtf run y.trtfb --prompt 'Hi'",
+                "build_bundle": "trtmc-build build X -o y.trtfb",
+                "trt_inference": "./trtmc run y.trtfb --prompt 'Hi'",
             }
         )
         html = mod.render_report([r])
-        assert "trtf-build build X" in html
+        assert "trtmc-build build X" in html
         assert "Copy" in html
 
     def test_timing_rendered(self):
@@ -539,9 +539,9 @@ class TestRenderReport:
                     "stage_name": "end_to_end",
                     "data": {
                         "stderr": "\n".join([
-                            '[trtf.load_timing] label="denoiser_plan" '
+                            '[trtmc.load_timing] label="denoiser_plan" '
                             "load_deserialize_ms=2500.000000 plan_bytes=1",
-                            '[trtf.engine_timing] label="denoiser_plan" '
+                            '[trtmc.engine_timing] label="denoiser_plan" '
                             "execute_ms=600.000000 launches=20",
                         ]),
                     },
@@ -557,9 +557,9 @@ class TestRenderReport:
     def test_detailed_timing_does_not_double_count_saved_stderr_log(self, tmp_path):
         mod = _import_report()
         log_text = "\n".join([
-            '[trtf.load_timing] label="denoiser_plan" '
+            '[trtmc.load_timing] label="denoiser_plan" '
             "load_deserialize_ms=2500.000000 plan_bytes=1024",
-            '[trtf.engine_timing] label="denoiser_plan" '
+            '[trtmc.engine_timing] label="denoiser_plan" '
             "execute_ms=600.000000 launches=20",
         ])
         log_path = tmp_path / "end_to_end_stderr.log"
@@ -590,7 +590,7 @@ class TestRenderReport:
                     "stage_name": "prefill",
                     "data": {
                         "stderr": (
-                            '[trtf.load_timing] label="engine_plan" '
+                            '[trtmc.load_timing] label="engine_plan" '
                             "load_deserialize_ms=100.000000 plan_bytes=1073741824"
                         ),
                     },
@@ -599,7 +599,7 @@ class TestRenderReport:
                     "stage_name": "decode",
                     "data": {
                         "stderr": (
-                            '[trtf.load_timing] label="engine_plan" '
+                            '[trtmc.load_timing] label="engine_plan" '
                             "load_deserialize_ms=200.000000 plan_bytes=2147483648"
                         ),
                     },
@@ -668,8 +668,8 @@ class TestRenderReport:
         model_dir = _write_result(tmp_path, "test-model", r)
         (model_dir / "e2e_run.log").write_text(
             "\n".join([
-                "[trtf-build] Weights loaded [999.0s]",
-                "[trtf-build] Engine built [888.0s] (10.0 MB)",
+                "[trtmc-build] Weights loaded [999.0s]",
+                "[trtmc-build] Engine built [888.0s] (10.0 MB)",
             ]),
             encoding="utf-8",
         )

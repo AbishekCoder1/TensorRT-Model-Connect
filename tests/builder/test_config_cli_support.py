@@ -12,7 +12,7 @@
 #                 unknown namespace/field is a fail-fast error.
 # =============================================================================
 
-"""Unit tests for ``trtf_build.config.cli_support``."""
+"""Unit tests for ``tensorrt_model_connect.config.cli_support``."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 try:
-    from trtf_build.runtime_config import (
+    from tensorrt_model_connect.runtime_config import (
         ConfigBundle,
         ConfigField,
         Layer,
@@ -39,7 +39,7 @@ try:
         write_effective_config_next_to,
     )
 except ImportError:  # pragma: no cover
-    pytest.skip("trtf_build.runtime_config not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect.runtime_config not importable", allow_module_level=True)
 
 
 # ---- fixtures --------------------------------------------------------------
@@ -360,7 +360,7 @@ def test_write_effective_config_next_to_uses_suffix(tmp_path: Path):
 
 
 def test_bundle_defaults_contribution_reads_block():
-    from trtf_build.runtime_config import bundle_defaults_contribution
+    from tensorrt_model_connect.runtime_config import bundle_defaults_contribution
     header = json.dumps({
         "model_id": "demo",
         "vocab_size": 100,
@@ -377,7 +377,7 @@ def test_bundle_defaults_contribution_reads_block():
 
 
 def test_bundle_defaults_contribution_absent_block_is_empty():
-    from trtf_build.runtime_config import bundle_defaults_contribution
+    from tensorrt_model_connect.runtime_config import bundle_defaults_contribution
     header = json.dumps({"model_id": "demo", "sections": {}})
     contrib = bundle_defaults_contribution(header)
     assert contrib.layer == Layer.BUNDLE_DEFAULT
@@ -385,14 +385,14 @@ def test_bundle_defaults_contribution_absent_block_is_empty():
 
 
 def test_bundle_defaults_contribution_accepts_mapping():
-    from trtf_build.runtime_config import bundle_defaults_contribution
+    from tensorrt_model_connect.runtime_config import bundle_defaults_contribution
     parsed = {"defaults": {"ns": {"field": 1}}, "sections": {}}
     contrib = bundle_defaults_contribution(parsed)
     assert contrib.values == {"ns": {"field": 1}}
 
 
 def test_bundle_defaults_feeds_bundle_default_layer(tmp_path: Path):
-    from trtf_build.runtime_config import bundle_defaults_contribution
+    from tensorrt_model_connect.runtime_config import bundle_defaults_contribution
     _register_demo_schema()
     header = json.dumps({"defaults": {"triattention": {"kv_budget": 4096}}})
     defaults_contrib = bundle_defaults_contribution(header)
@@ -414,7 +414,7 @@ def test_bundle_defaults_feeds_bundle_default_layer(tmp_path: Path):
 def test_bundle_writer_round_trip_with_defaults(tmp_path: Path):
     """End-to-end: Python builder writes a .trtfb, reader gets defaults back."""
     pytest.importorskip("struct")
-    from trtf_build.bundle_writer import BundleInfo, BundleSection, BUNDLE_MAGIC, write_bundle
+    from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, BUNDLE_MAGIC, write_bundle
     import struct
 
     path = tmp_path / "bundle.trtfb"
@@ -435,7 +435,7 @@ def test_bundle_writer_round_trip_with_defaults(tmp_path: Path):
     }
 
     # Feed into the registry helper.
-    from trtf_build.runtime_config import bundle_defaults_contribution
+    from tensorrt_model_connect.runtime_config import bundle_defaults_contribution
     contrib = bundle_defaults_contribution(header_text)
     assert contrib.values == {
         "triattention": {"kv_budget": 4096, "protect_prefill": True},
@@ -444,7 +444,7 @@ def test_bundle_writer_round_trip_with_defaults(tmp_path: Path):
 
 def test_bundle_writer_omits_defaults_when_empty(tmp_path: Path):
     """No defaults: block → old readers unaffected."""
-    from trtf_build.bundle_writer import BundleInfo, BundleSection, write_bundle
+    from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
     import struct
 
     path = tmp_path / "bundle.trtfb"

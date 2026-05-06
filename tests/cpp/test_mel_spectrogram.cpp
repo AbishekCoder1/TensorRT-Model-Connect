@@ -96,7 +96,7 @@ int main()
         std::vector<float> silence(n_samples, 0.0F);
         auto fb = make_identity_filterbank(n_freq_bins, n_mel_bins);
 
-        auto mel = trtf::extract_mel_spectrogram(
+        auto mel = trtmc::extract_mel_spectrogram(
             silence.data(), n_samples,
             fb.data(), n_freq_bins, n_mel_bins,
             n_fft, hop_length, chunk_length_s, sample_rate);
@@ -123,7 +123,7 @@ int main()
         }
 
         auto fb = make_identity_filterbank(n_freq_bins, n_mel_bins);
-        auto mel = trtf::extract_mel_spectrogram(
+        auto mel = trtmc::extract_mel_spectrogram(
             sine.data(), n_samples,
             fb.data(), n_freq_bins, n_mel_bins,
             n_fft, hop_length, chunk_length_s, sample_rate);
@@ -160,7 +160,7 @@ int main()
         }
 
         auto fb = make_triangular_filterbank(n_freq_bins, n_mel_bins);
-        auto mel = trtf::extract_mel_spectrogram(
+        auto mel = trtmc::extract_mel_spectrogram(
             tone.data(), n_samples,
             fb.data(), n_freq_bins, n_mel_bins,
             n_fft, hop_length, chunk_length_s, sample_rate);
@@ -183,7 +183,7 @@ int main()
     // Test 4: Empty audio (0 samples) produces valid output
     {
         auto fb = make_identity_filterbank(n_freq_bins, n_mel_bins);
-        auto mel = trtf::extract_mel_spectrogram(
+        auto mel = trtmc::extract_mel_spectrogram(
             nullptr, 0,
             fb.data(), n_freq_bins, n_mel_bins,
             n_fft, hop_length, chunk_length_s, sample_rate);
@@ -197,7 +197,7 @@ int main()
     {
         std::vector<float> short_audio = {0.1F, 0.2F, 0.3F};
         auto fb = make_identity_filterbank(n_freq_bins, n_mel_bins);
-        auto mel = trtf::extract_mel_spectrogram(
+        auto mel = trtmc::extract_mel_spectrogram(
             short_audio.data(), 3,
             fb.data(), n_freq_bins, n_mel_bins,
             n_fft, hop_length, chunk_length_s, sample_rate);

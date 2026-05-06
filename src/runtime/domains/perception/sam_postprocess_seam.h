@@ -6,7 +6,7 @@
 #include <cmath>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 inline float sample_mask_bilinear(
     const std::vector<float>& mask,
@@ -190,4 +190,4 @@ inline SamResult postprocess_sam_result(
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

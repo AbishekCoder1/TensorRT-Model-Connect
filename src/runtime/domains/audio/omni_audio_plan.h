@@ -8,7 +8,7 @@
 #include <cstring>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct OmniAudioEncodePlan {
     int32_t actual_frames{0};
@@ -126,4 +126,4 @@ build_omni_code2wav_input_codes(const std::vector<int32_t>& codec_tokens, int32_
     return input_codes;
 }
 
-} // namespace trtf
+} // namespace trtmc

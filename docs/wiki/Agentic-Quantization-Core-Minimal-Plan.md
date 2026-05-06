@@ -20,7 +20,7 @@ The shared core is intentionally small:
    - still keyed by builder seam names in the current standard decoder path
 
 3. `FormatKernel`
-   - shared QDQ emitters in `trtf_build/trtf_build/quantization/formats.py`
+   - shared QDQ emitters in `tensorrt_model_connect/tensorrt_model_connect/quantization/formats.py`
    - owns format math, not model semantics
 
 4. `ScaleProvider`
@@ -31,21 +31,21 @@ The shared core is intentionally small:
 
 5. `Validation Contract`
    - E2E manifests now accept a generic `quantization` block
-   - orchestrator converts that block into `trtf-build build` args
+   - orchestrator converts that block into `trtmc-build build` args
 
 Authoritative shared-core files for quantization:
 
-- `trtf_build/trtf_build/quantization/plan.py`
-- `trtf_build/trtf_build/quantization/context.py`
-- `trtf_build/trtf_build/quantization/formats.py`
-- `trtf_build/trtf_build/quantization/profile.py`
-- `trtf_build/trtf_build/quantization/scales.py`
-- `trtf_build/trtf_build/quantization/scale_providers.py`
-- `trtf_build/trtf_build/quantization/adapters.py`
-- `trtf_build/trtf_build/quantization/__init__.py`
-- `trtf_build/trtf_build/graph_blocks.py`
-- `trtf_build/trtf_build/graph_ops.py`
-- `trtf_build/trtf_build/standard_decoder_builder.py`
+- `tensorrt_model_connect/tensorrt_model_connect/quantization/plan.py`
+- `tensorrt_model_connect/tensorrt_model_connect/quantization/context.py`
+- `tensorrt_model_connect/tensorrt_model_connect/quantization/formats.py`
+- `tensorrt_model_connect/tensorrt_model_connect/quantization/profile.py`
+- `tensorrt_model_connect/tensorrt_model_connect/quantization/scales.py`
+- `tensorrt_model_connect/tensorrt_model_connect/quantization/scale_providers.py`
+- `tensorrt_model_connect/tensorrt_model_connect/quantization/adapters.py`
+- `tensorrt_model_connect/tensorrt_model_connect/quantization/__init__.py`
+- `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py`
+- `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py`
+- `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py`
 
 ## Family-Local Layer
 
@@ -72,7 +72,7 @@ expected to follow.
 1. Family agent default scope
    - A family agent defaults to family-local files only.
    - Examples:
-     - `trtf_build/trtf_build/families/<family>.py`
+     - `tensorrt_model_connect/tensorrt_model_connect/families/<family>.py`
      - family-specific builder files
      - family-specific manifests and tests
 
@@ -102,8 +102,8 @@ expected to follow.
 
 Code changes in this branch:
 
-- added `trtf_build/trtf_build/quantization/plan.py`
-- added `trtf_build/trtf_build/quantization/adapters.py`
+- added `tensorrt_model_connect/tensorrt_model_connect/quantization/plan.py`
+- added `tensorrt_model_connect/tensorrt_model_connect/quantization/adapters.py`
 - refactored `ModelOptCalibrationProvider` to use a calibration adapter
   instead of hardcoding `AutoModelForCausalLM` logic directly
 - taught `build_quant_context()` to consume a `QuantPlan`

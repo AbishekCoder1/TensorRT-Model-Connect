@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace trtf {
+namespace trtmc {
 
 struct WhisperCrossKvPlan
 {
@@ -40,4 +40,4 @@ inline WhisperCrossKvPlan make_whisper_cross_kv_plan(
     return plan;
 }
 
-} // namespace trtf
+} // namespace trtmc

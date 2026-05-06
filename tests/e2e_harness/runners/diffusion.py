@@ -97,7 +97,7 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     if not isinstance(cfg.get("extra_special_tokens"), list):
         return str(snapshot)
 
-    patched_root = Path(tempfile.gettempdir()) / "trtf_hf_patched" / hashlib.sha256(
+    patched_root = Path(tempfile.gettempdir()) / "trtmc_hf_patched" / hashlib.sha256(
         str(snapshot).encode("utf-8")).hexdigest()
     patched_cfg = patched_root / "tokenizer" / "tokenizer_config.json"
     if not patched_cfg.exists():
@@ -112,7 +112,7 @@ def _ltx_initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
     if ctx.artifacts_dir:
         base_dir = _case_artifact_dir(ctx.artifacts_dir, case.name)
     else:
-        base_dir = os.path.join(tempfile.gettempdir(), "trtf_ltx_latents", case.name)
+        base_dir = os.path.join(tempfile.gettempdir(), "trtmc_ltx_latents", case.name)
     return os.path.join(base_dir, "initial_latents.raw")
 
 
@@ -264,7 +264,7 @@ class DiffusionMediaRunner:
             import sys
             sys.path.insert(0, {str(TOOLS_DIR)!r})
             import numpy as np
-            from trtf_build.diffusion_runner import DiffusionRunner
+            from tensorrt_model_connect.diffusion_runner import DiffusionRunner
 
             runner = DiffusionRunner({bundle_path!r})
             prompt_text = {prompt_text!r}
@@ -343,7 +343,7 @@ class DiffusionMediaRunner:
     def _run_end_to_end(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
-        """Run full generation via C++ binary (trtf generate-video)."""
+        """Run full generation via C++ binary (trtmc generate-video)."""
         bundle_path = _resolve_bundle_path(case, ctx)
         binary = ctx.binary_path
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
@@ -360,7 +360,7 @@ class DiffusionMediaRunner:
                 metadata={"command": "create_ltx_initial_latents"},
             )
 
-        with tempfile.TemporaryDirectory(prefix="trtf_frames_") as frame_dir:
+        with tempfile.TemporaryDirectory(prefix="trtmc_frames_") as frame_dir:
             cmd = [
                 binary, "generate-video", bundle_path,
                 "--prompt", prompt,
@@ -488,7 +488,7 @@ with torch.no_grad():
     hf_t5_out = pipe.text_encoder(tokens.input_ids)[0].numpy()
 
 # Step 2: TRT DiT with HF text embeddings
-from trtf_build.diffusion_runner import DiffusionRunner
+from tensorrt_model_connect.diffusion_runner import DiffusionRunner
 from diffusion_helpers import load_bundle_config, project_text as project_text_np
 from diffusion_helpers import compute_timestep_embedding as compute_timestep_embedding_np
 from diffusion_helpers import load_pp_weights
@@ -591,7 +591,7 @@ import transformers
 transformers.logging.set_verbosity_error()
 
 # Step 1: TRT T5 encoding
-from trtf_build.diffusion_runner import DiffusionRunner
+from tensorrt_model_connect.diffusion_runner import DiffusionRunner
 from diffusion_helpers import load_bundle_config
 
 runner = DiffusionRunner({bundle_path!r})

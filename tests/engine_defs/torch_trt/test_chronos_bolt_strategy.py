@@ -13,10 +13,10 @@ except ImportError:
     HAS_TORCH = False
 
 try:
-    from trtf_build.engine_defs.torch_trt.families.chronos_bolt import (
+    from tensorrt_model_connect.engine_defs.torch_trt.families.chronos_bolt import (
         ChronosBoltTorchTrtPlugin,
     )
-    from trtf_build.engine_defs.torch_trt.strategies.chronos_bolt import (
+    from tensorrt_model_connect.engine_defs.torch_trt.strategies.chronos_bolt import (
         ChronosBoltBuildStrategy,
         ChronosBoltForecastWrapper,
     )

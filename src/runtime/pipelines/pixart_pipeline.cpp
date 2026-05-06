@@ -18,7 +18,7 @@
 #include <numeric>
 #include <random>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -1228,4 +1228,4 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
     return video_to_image(result, config_.video_height, config_.video_width);
 }
 
-} // namespace trtf
+} // namespace trtmc

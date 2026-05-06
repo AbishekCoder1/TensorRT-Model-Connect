@@ -8,10 +8,10 @@
 #include "runtime/domains/audio/speech_delay_cache.h"
 #include "runtime/domains/audio/speech_generation_policy.h"
 #include "runtime/domains/audio/speech_runtime_plan.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/inference_state.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/inference_state.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class ISubprocessRunner;
 
@@ -83,4 +83,4 @@ class SpeechPipeline final : public IPipeline {
     int32_t depth_debug_call_count_{0};
 };
 
-} // namespace trtf
+} // namespace trtmc

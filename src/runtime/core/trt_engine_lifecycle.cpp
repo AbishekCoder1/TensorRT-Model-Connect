@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 
 // expand_layer_name: pure string logic, no TRT dependency.
 std::string expand_layer_name(const std::string& pattern, int32_t layer) {
@@ -91,4 +91,4 @@ std::string layer_tensor_name(const char* stem, int32_t layer) {
     return std::string(stem) + "_" + std::to_string(layer);
 }
 
-} // namespace trtf
+} // namespace trtmc

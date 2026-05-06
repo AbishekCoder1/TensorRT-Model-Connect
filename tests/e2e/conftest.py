@@ -20,7 +20,7 @@ PROJECT_DIR = E2E_DIR.parents[1]
 def _load_manifest():
     """Load model manifest from per-model JSON files in tests/e2e/models/."""
     models = []
-    engine_dir = "/mnt/storage/trt-transformers/engines"
+    engine_dir = "/mnt/storage/tensorrt-model-connect/engines"
 
     if MODELS_DIR.is_dir():
         for model_file in sorted(MODELS_DIR.glob("*.json")):
@@ -33,7 +33,7 @@ def _load_manifest():
 
 def _default_engine_dir():
     manifest = _load_manifest()
-    return Path(manifest.get("engine_dir", "/mnt/storage/trt-transformers/engines"))
+    return Path(manifest.get("engine_dir", "/mnt/storage/tensorrt-model-connect/engines"))
 
 
 def _models():
@@ -50,8 +50,8 @@ def pytest_addoption(parser):
         "--engine-dir", default=None,
         help="Directory containing .trtfb bundles (default: from engines.json)")
     parser.addoption(
-        "--trtf-binary", default=None,
-        help="Path to the C++ trtf binary (default: build/trtf)")
+        "--trtmc-binary", default=None,
+        help="Path to the C++ trtmc binary (default: build/trtmc)")
     parser.addoption(
         "--hf-python", default=None,
         help="Python interpreter with HuggingFace tokenizers (default: .venv/bin/python)")
@@ -77,15 +77,15 @@ def engine_dir(request):
 
 
 @pytest.fixture(scope="session")
-def trtf_binary(request):
-    """Path to the C++ trtf binary."""
-    cli_val = request.config.getoption("--trtf-binary")
+def trtmc_binary(request):
+    """Path to the C++ trtmc binary."""
+    cli_val = request.config.getoption("--trtmc-binary")
     if cli_val:
         binary = Path(cli_val)
     else:
-        binary = PROJECT_DIR / "build" / "trtf"
+        binary = PROJECT_DIR / "build" / "trtmc"
     if not binary.is_file():
-        pytest.skip(f"trtf binary not found: {binary}")
+        pytest.skip(f"trtmc binary not found: {binary}")
     return binary
 
 
@@ -159,7 +159,7 @@ def _build_bundle(hf_id, bundle_path, max_cache_length, precision="fp32"):
     Returns build time in seconds.
     """
     cmd = [
-        "trtf-build", "build",
+        "trtmc-build", "build",
         hf_id, "-o", str(bundle_path),
         "--max-cache-length", str(max_cache_length),
     ]

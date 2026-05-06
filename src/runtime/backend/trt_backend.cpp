@@ -1,7 +1,7 @@
 // TrtBackend: IBackend implementation for standard TensorRT.
-// Compiled into libtrtf_backend_trt.so. Links libnvinfer.so.
+// Compiled into libtrtmc_backend_trt.so. Links libnvinfer.so.
 
-#include "trtf/runtime/trt_backend.h"
+#include "trtmc/runtime/trt_backend.h"
 
 #include "runtime/backend/trt_logger.h"
 #include "runtime/core/cuda_common.h"
@@ -13,11 +13,11 @@
 #include <sstream>
 #include <stdexcept>
 
-#ifndef TRTF_TRT_BACKEND_ABI_STRING
-#define TRTF_TRT_BACKEND_ABI_STRING ""
+#ifndef TRTMC_TRT_BACKEND_ABI_STRING
+#define TRTMC_TRT_BACKEND_ABI_STRING ""
 #endif
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -29,7 +29,7 @@ std::string trt_runtime_version_string() {
 }
 
 std::string trt_backend_abi_string() {
-    const std::string configured = TRTF_TRT_BACKEND_ABI_STRING;
+    const std::string configured = TRTMC_TRT_BACKEND_ABI_STRING;
     if (!configured.empty())
         return configured;
     std::ostringstream oss;
@@ -43,19 +43,19 @@ class TrtBackend final : public IBackend {
   public:
     TrtBackend() : runtime_(create_trt_runtime()) {
         if (!runtime_)
-            throw std::runtime_error("[trtf] Failed to create TRT runtime");
+            throw std::runtime_error("[trtmc] Failed to create TRT runtime");
     }
 
     std::unique_ptr<ITrtModule> create_module(const void* plan_data, size_t plan_size,
                                               const ModuleCreateOptions& options) override {
         auto* engine = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine)
-            throw std::runtime_error("[trtf] Failed to deserialize engine (TRT)");
+            throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
 
         auto* ctx = engine->createExecutionContext();
         if (!ctx) {
             delete engine;
-            throw std::runtime_error("[trtf] Failed to create TRT execution context");
+            throw std::runtime_error("[trtmc] Failed to create TRT execution context");
         }
 
         cudaStream_t stream = options.stream;
@@ -65,7 +65,7 @@ class TrtBackend final : public IBackend {
             if (!owned->ok()) {
                 delete ctx;
                 delete engine;
-                throw std::runtime_error("[trtf] Failed to create CUDA stream");
+                throw std::runtime_error("[trtmc] Failed to create CUDA stream");
             }
             stream = owned->get();
             stream_owner = owned;
@@ -74,7 +74,7 @@ class TrtBackend final : public IBackend {
         auto module = std::make_unique<TrtModuleImpl>(engine, ctx, stream);
         if (!module->ok()) {
             delete engine;
-            throw std::runtime_error("[trtf] TrtModuleImpl creation failed");
+            throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
         }
 
         // Transfer engine + stream ownership to module
@@ -91,7 +91,7 @@ class TrtBackend final : public IBackend {
                                 const ModuleCreateOptions& options) override {
         auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine_raw)
-            throw std::runtime_error("[trtf] Failed to deserialize engine (TRT)");
+            throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
         std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
                                                       [](nvinfer1::ICudaEngine* p) { delete p; });
 
@@ -100,7 +100,7 @@ class TrtBackend final : public IBackend {
         if (!stream) {
             auto owned = std::make_shared<CudaStream>();
             if (!owned->ok())
-                throw std::runtime_error("[trtf] Failed to create CUDA stream");
+                throw std::runtime_error("[trtmc] Failed to create CUDA stream");
             stream = owned->get();
             stream_owner = owned;
         }
@@ -109,10 +109,10 @@ class TrtBackend final : public IBackend {
         auto make_ctx_module = [&](int32_t profile_idx) -> std::unique_ptr<ITrtModule> {
             auto* ctx = engine->createExecutionContext();
             if (!ctx)
-                throw std::runtime_error("[trtf] Failed to create TRT execution context");
+                throw std::runtime_error("[trtmc] Failed to create TRT execution context");
             auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx);
             if (!mod->ok())
-                throw std::runtime_error("[trtf] TrtModuleImpl creation failed");
+                throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
             mod->keep_alive(engine);
             if (stream_owner)
                 mod->keep_alive(stream_owner);
@@ -135,7 +135,7 @@ class TrtBackend final : public IBackend {
                            const std::vector<int32_t>& profile_indices) override {
         auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
         if (!engine_raw)
-            throw std::runtime_error("[trtf] Failed to deserialize engine (TRT)");
+            throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
         std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
                                                       [](nvinfer1::ICudaEngine* p) { delete p; });
 
@@ -144,7 +144,7 @@ class TrtBackend final : public IBackend {
         if (!stream) {
             auto owned = std::make_shared<CudaStream>();
             if (!owned->ok())
-                throw std::runtime_error("[trtf] Failed to create CUDA stream");
+                throw std::runtime_error("[trtmc] Failed to create CUDA stream");
             stream = owned->get();
             stream_owner = owned;
         }
@@ -157,10 +157,10 @@ class TrtBackend final : public IBackend {
                 continue;
             auto* ctx = engine->createExecutionContext();
             if (!ctx)
-                throw std::runtime_error("[trtf] Failed to create TRT execution context");
+                throw std::runtime_error("[trtmc] Failed to create TRT execution context");
             auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx);
             if (!mod->ok())
-                throw std::runtime_error("[trtf] TrtModuleImpl creation failed");
+                throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
             mod->keep_alive(engine);
             if (stream_owner)
                 mod->keep_alive(stream_owner);
@@ -175,27 +175,27 @@ class TrtBackend final : public IBackend {
     TrtUniquePtr<nvinfer1::IRuntime> runtime_;
 };
 
-} // namespace trtf
+} // namespace trtmc
 
-extern "C" trtf::IBackend* trtf_create_backend() {
+extern "C" trtmc::IBackend* trtmc_create_backend() {
     try {
-        return new trtf::TrtBackend();
+        return new trtmc::TrtBackend();
     } catch (const std::exception& e) {
-        std::cerr << "[trtf] TRT backend init failed: " << e.what() << std::endl;
+        std::cerr << "[trtmc] TRT backend init failed: " << e.what() << std::endl;
         return nullptr;
     }
 }
 
-extern "C" void trtf_destroy_backend(trtf::IBackend* b) {
+extern "C" void trtmc_destroy_backend(trtmc::IBackend* b) {
     delete b;
 }
 
-extern "C" const char* trtf_backend_abi() {
-    static const std::string abi = trtf::trt_backend_abi_string();
+extern "C" const char* trtmc_backend_abi() {
+    static const std::string abi = trtmc::trt_backend_abi_string();
     return abi.c_str();
 }
 
-extern "C" const char* trtf_backend_runtime_version() {
-    static const std::string version = trtf::trt_runtime_version_string();
+extern "C" const char* trtmc_backend_runtime_version() {
+    static const std::string version = trtmc::trt_runtime_version_string();
     return version.c_str();
 }

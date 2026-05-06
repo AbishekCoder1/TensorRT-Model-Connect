@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| Document ID | TRTF-ISO-001 |
+| Document ID | TRTMC-ISO-001 |
 | Applicable standard | ISO 26262:2018 Part 6 (Software Development) |
 | Revision | 1.0 |
 | Date | 2026-03-12 |
@@ -59,8 +59,8 @@ beyond QM.
 | ISO 26262-6 Clause | Requirement | Current Status | Evidence | Gap |
 |---------------------|------------|----------------|----------|-----|
 | **Section 7: Software architectural design** | Architecture shall be documented with sufficient detail to support verification. Safety-relevant interfaces and data flows shall be identified. | Implemented | `docs/wiki/Architecture-Overview.md`, `docs/wiki/Static-Design.md`, `docs/wiki/Dynamic-Design.md`, `docs/wiki/Pipeline-Deep-Dive.md` | None for QM |
-| **Section 7.4.1**: Hierarchical structure | Software architecture shall exhibit a hierarchical structure with well-defined interfaces. | Implemented | Source layout: `src/bundle/`, `src/cabi/`, `src/runtime/`, `src/tokenizer/`, `src/utils/`, `include/trtf/`. Public API in `include/trtf/`. All runtime communication through defined interfaces (`ITokenizer`, `TrtModule`, pipeline contracts). | None for QM |
-| **Section 7.4.3**: Restricted coupling | Coupling between components shall be restricted and documented. | Implemented | Pipeline factory (`src/runtime/registry/pipeline_factory.cpp`) delegates to manifest-registered plugins via `PipelineRegistry`. Each plugin in `src/runtime/plugins/` is self-contained. Pipelines depend only on `TrtModule` and `KvCache`/`RecurrentState` abstractions. Python build package (`trtf_build/`) is decoupled from C++ runtime. | None for QM |
+| **Section 7.4.1**: Hierarchical structure | Software architecture shall exhibit a hierarchical structure with well-defined interfaces. | Implemented | Source layout: `src/bundle/`, `src/cabi/`, `src/runtime/`, `src/tokenizer/`, `src/utils/`, `include/trtmc/`. Public API in `include/trtmc/`. All runtime communication through defined interfaces (`ITokenizer`, `TrtModule`, pipeline contracts). | None for QM |
+| **Section 7.4.3**: Restricted coupling | Coupling between components shall be restricted and documented. | Implemented | Pipeline factory (`src/runtime/registry/pipeline_factory.cpp`) delegates to manifest-registered plugins via `PipelineRegistry`. Each plugin in `src/runtime/plugins/` is self-contained. Pipelines depend only on `TrtModule` and `KvCache`/`RecurrentState` abstractions. Python build package (`tensorrt_model_connect/`) is decoupled from C++ runtime. | None for QM |
 | **Section 8: Software unit design and implementation** | Unit design shall be documented. Coding guidelines shall be applied. | Implemented | Unit designs documented via UD-* trace IDs in `docs/wiki/Traceability-Matrix.md`. C++17 with `-Wall -Wextra -Wpedantic`. Cyclomatic complexity gate: `python tools/check_cyclomatic_complexity.py src --max-ccn 10`. | None for QM |
 | **Section 8.4.3**: Coding guidelines | Static analysis and coding standards shall be enforced. | Partially implemented | Compiler warnings as errors (`-Wall -Wextra -Wpedantic`). Cyclomatic complexity gate enforced in CI. | No dedicated static analysis tool (e.g., clang-tidy) integrated in CI. |
 | **Section 9: Software unit verification** | Each software unit shall be verified against its design. Test methods: requirements-based testing, interface testing, structural coverage. | Implemented | 61 C++ test files in `tests/cpp/`, 74 Python test files in `tests/builder/`, 20 Python test files in `tests/tools/`. All linked to ARCH-* contracts via `docs/wiki/Traceability-Matrix.md`. | Coverage metrics tracked but not yet gated in CI at a specific threshold. |

@@ -6,7 +6,7 @@ and family-specific weight layouts).
 
 Usage in per-family test files:
     class QwenPluginTester(FamilyPluginTester):
-        plugin_module = "trtf_build.families.qwen"
+        plugin_module = "tensorrt_model_connect.families.qwen"
         model_type = "qwen3"
 
     class TestQwenEngine(FamilyPluginTestMixin):
@@ -30,10 +30,10 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
-    from trtf_build.checkpoint_mapper import WeightDict
+    from tensorrt_model_connect.config import ModelConfig
+    from tensorrt_model_connect.checkpoint_mapper import WeightDict
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 # Fixed seed RNG for reproducible synthetic weights.
@@ -71,7 +71,7 @@ class FamilyPluginTester:
     """Base class for per-family plugin testers.
 
     Subclasses MUST set:
-        plugin_module: str  -- importable module path (e.g. "trtf_build.families.qwen")
+        plugin_module: str  -- importable module path (e.g. "tensorrt_model_connect.families.qwen")
         model_type: str     -- HF model_type string (e.g. "qwen3")
 
     Subclasses MAY override:

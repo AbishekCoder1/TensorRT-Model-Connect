@@ -29,7 +29,7 @@ GitLab issues and merge requests are the queue. Do not use a repository file as 
 Standard labels are managed by:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers ensure-labels
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect ensure-labels
 ```
 
 Core labels:
@@ -98,19 +98,19 @@ commands `/discovery`, `/implement`, `/merge`, `/staging`, and `/promotion`.
 Preflight:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging preflight
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging preflight
 ```
 
 Dashboard:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging dashboard
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging dashboard
 ```
 
 Mark an MR and its linked issue for implementation rework:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers mark-rework \
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect mark-rework \
   --mr 123 \
   --skip-if-active-pipeline \
   --reason "rebase conflict against ai-staging"
@@ -119,7 +119,7 @@ python3 tools/ai_agent_system.py --project yifeif/trt-transformers mark-rework \
 Create a dry-run task:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers --dry-run create-task \
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --dry-run create-task \
   --title "tests: cover AI task contract validation" \
   --scope "tests/tools/test_ai_agent_system.py and tools/ai_agent_system.py only" \
   --change "Add coverage that validate-task rejects issue bodies missing required sections so implementation issues stay actionable." \
@@ -132,7 +132,7 @@ Run one autopilot merge action:
 
 ```bash
 python3 skills/gitlab-ai-staging-autopilot/scripts/ai_staging_autopilot.py \
-  --project yifeif/trt-transformers \
+  --project yifeif/tensorrt-model-connect \
   --target ai-staging \
   --source-prefix ai-task- \
   --once
@@ -141,7 +141,7 @@ python3 skills/gitlab-ai-staging-autopilot/scripts/ai_staging_autopilot.py \
 Promotion MR:
 
 ```bash
-python3 tools/ai_staging.py --project yifeif/trt-transformers --branch ai-staging rotate-promotion --target-branch master
+python3 tools/ai_staging.py --project yifeif/tensorrt-model-connect --branch ai-staging rotate-promotion --target-branch master
 ```
 
 Promotion MRs are generated from the actual `origin/master..origin/<snapshot>` tree diff. Their descriptions include branch SHAs, the ai-staging reset SHA, staged commit subjects, net file changes, changed paths, diffstat, and a review checklist. Implementation agents must write complete individual MR descriptions with the task link, scope, concrete changes, verification, risk, rollback, and non-goals so the aggregate promotion remains reviewable.
@@ -149,7 +149,7 @@ Promotion MRs are generated from the actual `origin/master..origin/<snapshot>` t
 Promotion babysitting:
 
 ```bash
-python3 tools/ai_staging.py --project yifeif/trt-transformers --branch ai-staging babysit-promotion --target-branch master --max-rebases 1
+python3 tools/ai_staging.py --project yifeif/tensorrt-model-connect --branch ai-staging babysit-promotion --target-branch master --max-rebases 1
 ```
 
 The promotion babysitter may clean-rebase and modify timestamped promotion source branches until the full MR pipeline is green. It never merges or approves the promotion MR.

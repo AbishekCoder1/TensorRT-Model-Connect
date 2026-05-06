@@ -14,7 +14,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX_PATH = PROJECT_ROOT / "tests" / "runtime_strategy_matrix.yaml"
-DEFAULT_CPP_PATH = PROJECT_ROOT / "src" / "cabi" / "api" / "trtf_c.cpp"
+DEFAULT_CPP_PATH = PROJECT_ROOT / "src" / "cabi" / "api" / "trtmc_c.cpp"
 DEFAULT_BUILDERS_DIR = PROJECT_ROOT / "src" / "runtime" / "builders"
 DEFAULT_CONTRACTS_PATH = PROJECT_ROOT / "tests" / "e2e_harness" / "contracts.py"
 DEFAULT_DIFF_CHECKS_DIR = PROJECT_ROOT / "tools" / "diff_framework" / "checks"
@@ -89,7 +89,7 @@ def extract_runtime_strategies_from_cpp(
     """Extract runtime strategy keys from a C++ source file.
 
     The new runtime expresses strategy coverage through `resolve_strategy_family(...)`
-    in `trtf_c.cpp` and the `kStrategies` / comparison literals inside
+    in `trtmc_c.cpp` and the `kStrategies` / comparison literals inside
     `src/runtime/builders/**/*.cpp`. To avoid false positives from unrelated string
     literals like section names, callers should usually pass the expected strategy
     candidate set derived from the contracts or matrix.
@@ -447,7 +447,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--cpp",
         type=Path,
         default=DEFAULT_CPP_PATH,
-        help="Path to src/cabi/api/trtf_c.cpp.",
+        help="Path to src/cabi/api/trtmc_c.cpp.",
     )
     parser.add_argument(
         "--builders-dir",

@@ -8,7 +8,7 @@
 //   inference, verify output, and test serialize/deserialize round-trip.
 //
 // Preconditions:
-//   - TRTF_HAS_TRT=1 and TRTF_HAS_TVM_FFI=1
+//   - TRTMC_HAS_TRT=1 and TRTMC_HAS_TVM_FFI=1
 //   - GPU with CUDA runtime available
 //
 // Postconditions:
@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
@@ -205,7 +205,7 @@ static void test_serialize_deserialize() {
 #endif
 
 int main() {
-#if TRTF_HAS_TRT && TRTF_HAS_TVM_FFI
+#if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI
     tvm_ffi_plugin_force_link();
 
     // Register add_one kernel

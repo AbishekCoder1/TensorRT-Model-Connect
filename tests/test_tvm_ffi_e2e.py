@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end test: TVM-FFI plugin round-trip via shared library.
 
-Loads libtrtf_core.so to register the TvmFfiKernel plugin, registers a
+Loads libtrtmc_core.so to register the TvmFfiKernel plugin, registers a
 trivial add_one kernel via tvm_ffi, builds a TRT engine, and verifies
 that input [1,2,3,4] -> output [2,3,4,5].
 """
@@ -102,7 +102,7 @@ assert ret == 0, f"TVMFFIFunctionSetGlobal failed: {ret}"
 print("Registered add_one kernel via C API")
 
 # 3. Load our shared library (uses already-loaded libtvm_ffi symbols)
-shared_lib = os.path.join(os.path.dirname(__file__), "..", "build_shared", "libtrtf_core.so")
+shared_lib = os.path.join(os.path.dirname(__file__), "..", "build_shared", "libtrtmc_core.so")
 if not os.path.exists(shared_lib):
     print(f"SKIP: {shared_lib} not found (build with BUILD_SHARED_LIBS=ON)")
     sys.exit(0)

@@ -6,7 +6,7 @@
 #include <cfloat>
 #include <limits>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -111,4 +111,4 @@ void gpu_sparse_torch_multinomial_exact(const int32_t* d_indices, const float* d
         d_indices, d_probs, keep, seed, base_offset, total_threads, d_token_id);
 }
 
-} // namespace trtf
+} // namespace trtmc

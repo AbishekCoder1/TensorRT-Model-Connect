@@ -5,7 +5,7 @@
 #include <limits>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct SegmentationLogitsShape {
     int32_t num_classes{0};
@@ -101,5 +101,5 @@ inline SegmentationPostprocessStatus compute_segmentation_class_map_from_logits(
     return SegmentationPostprocessStatus::kOk;
 }
 
-} // namespace trtf
+} // namespace trtmc
 

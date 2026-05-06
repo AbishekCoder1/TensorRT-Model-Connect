@@ -5,11 +5,11 @@
 // KvCaches + embeddings.
 
 #include "runtime/domains/audio/bark_config.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/inference_state.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/inference_state.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class BarkPipeline final : public IPipeline {
   public:
@@ -69,4 +69,4 @@ class BarkPipeline final : public IPipeline {
     std::mt19937 rng_{std::random_device{}()};
 };
 
-} // namespace trtf
+} // namespace trtmc

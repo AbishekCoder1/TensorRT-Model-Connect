@@ -10,7 +10,7 @@
 // =============================================================================
 
 #include "../../src/runtime/domains/audio/speech_generation_policy.h"
-#include "trtf/runtime/domains/audio/subprocess_runner.h"
+#include "trtmc/runtime/domains/audio/subprocess_runner.h"
 
 #include <cstdint>
 #include <cstring>
@@ -34,7 +34,7 @@ void check_contains(const std::string& text, const std::string& needle, const ch
 }
 
 void test_output_plan_resample_path() {
-    trtf::SpeechOutputPlanInput input;
+    trtmc::SpeechOutputPlanInput input;
     input.sample_rate = 24000;
     input.frame_rate = 12.5F;
     input.num_frames = 50;
@@ -44,7 +44,7 @@ void test_output_plan_resample_path() {
     input.max_output_frames = 100;
     input.max_delay = 4;
 
-    const auto plan = trtf::ComputeSpeechOutputPlan(input);
+    const auto plan = trtmc::ComputeSpeechOutputPlan(input);
 
     check(plan.effective_frames == 23, "output plan: resample effective frames");
     check(plan.extra_tail == 5, "output plan: resample extra tail");
@@ -53,7 +53,7 @@ void test_output_plan_resample_path() {
 }
 
 void test_output_plan_frame_rate_disabled_and_clamped() {
-    trtf::SpeechOutputPlanInput input;
+    trtmc::SpeechOutputPlanInput input;
     input.sample_rate = 24000;
     input.frame_rate = 0.0F;
     input.num_frames = 10;
@@ -63,7 +63,7 @@ void test_output_plan_frame_rate_disabled_and_clamped() {
     input.max_output_frames = 4;
     input.max_delay = 2;
 
-    const auto plan = trtf::ComputeSpeechOutputPlan(input);
+    const auto plan = trtmc::ComputeSpeechOutputPlan(input);
 
     check(plan.effective_frames == 8, "output plan: disabled frame-rate effective frames");
     check(plan.extra_tail == 0, "output plan: negative tail clamps to zero");
@@ -72,7 +72,7 @@ void test_output_plan_frame_rate_disabled_and_clamped() {
 }
 
 void test_output_plan_small_inputs_do_not_go_negative() {
-    trtf::SpeechOutputPlanInput input;
+    trtmc::SpeechOutputPlanInput input;
     input.sample_rate = 24000;
     input.frame_rate = 12.5F;
     input.num_frames = 1;
@@ -82,7 +82,7 @@ void test_output_plan_small_inputs_do_not_go_negative() {
     input.max_output_frames = 10;
     input.max_delay = 1;
 
-    const auto plan = trtf::ComputeSpeechOutputPlan(input);
+    const auto plan = trtmc::ComputeSpeechOutputPlan(input);
 
     check(plan.effective_frames == 0, "output plan: effective frames floor");
     check(plan.output_frames == 3, "output plan: small input output frames");
@@ -90,7 +90,7 @@ void test_output_plan_small_inputs_do_not_go_negative() {
 }
 
 void test_output_plan_large_target_clamps_to_max_output() {
-    trtf::SpeechOutputPlanInput input;
+    trtmc::SpeechOutputPlanInput input;
     input.sample_rate = 24000;
     input.frame_rate = 0.0F;
     input.num_frames = 100;
@@ -100,7 +100,7 @@ void test_output_plan_large_target_clamps_to_max_output() {
     input.max_output_frames = 60;
     input.max_delay = 4;
 
-    const auto plan = trtf::ComputeSpeechOutputPlan(input);
+    const auto plan = trtmc::ComputeSpeechOutputPlan(input);
 
     check(plan.effective_frames == 98, "output plan: large target effective frames");
     check(plan.extra_tail == 50, "output plan: large target tail");
@@ -108,7 +108,7 @@ void test_output_plan_large_target_clamps_to_max_output() {
     check(plan.total_iters == 65, "output plan: large target total iters");
 }
 
-class FakeSubprocessRunner final : public trtf::ISubprocessRunner {
+class FakeSubprocessRunner final : public trtmc::ISubprocessRunner {
   public:
     int rc{0};
     std::vector<char> stdout_data;
@@ -141,7 +141,7 @@ void test_tokenize_runtime_success_parses_tokens() {
     runner.stdout_data = make_token_bytes({11, 22, 33});
 
     const auto result =
-        trtf::TokenizeSpeechPromptRuntime("/usr/bin/python3", "hello world", runner);
+        trtmc::TokenizeSpeechPromptRuntime("/usr/bin/python3", "hello world", runner);
 
     check(runner.call_count == 1, "success: runner called once");
     check(runner.last_argv.size() == 3, "success: argv size");
@@ -166,7 +166,7 @@ void test_tokenize_runtime_failure_propagates_rc_and_stderr() {
     runner.stderr_data = "subprocess failed";
     runner.stdout_data = make_token_bytes({101, 202});
 
-    const auto result = trtf::TokenizeSpeechPromptRuntime("/usr/bin/python3", "ignored", runner);
+    const auto result = trtmc::TokenizeSpeechPromptRuntime("/usr/bin/python3", "ignored", runner);
 
     check(result.rc == 17, "failure: rc propagated");
     check(result.tokens.empty(), "failure: tokens empty");
@@ -178,7 +178,7 @@ void test_tokenize_runtime_empty_stdout_stays_empty() {
     runner.rc = 0;
     runner.stderr_data = "warnings only";
 
-    const auto result = trtf::TokenizeSpeechPromptRuntime("/usr/bin/python3", "ignored", runner);
+    const auto result = trtmc::TokenizeSpeechPromptRuntime("/usr/bin/python3", "ignored", runner);
 
     check(result.rc == 0, "empty stdout: rc preserved");
     check(result.tokens.empty(), "empty stdout: tokens empty");

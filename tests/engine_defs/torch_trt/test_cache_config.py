@@ -1,4 +1,4 @@
-"""Tests for ttrt_build.cache_config — raw TRT format cache tensors and export args.
+"""Tests for tensorrt_model_connect.cache_config — raw TRT format cache tensors and export args.
 
 Validates:
   - build_attention_mask(): correct mask shape, values, step progression
@@ -11,12 +11,12 @@ from __future__ import annotations
 import pytest
 
 try:
-    from trtf_build.engine_defs.torch_trt.config import ModelConfig
-    from trtf_build.engine_defs.torch_trt.cache_config import (
+    from tensorrt_model_connect.engine_defs.torch_trt.config import ModelConfig
+    from tensorrt_model_connect.engine_defs.torch_trt.cache_config import (
         build_attention_mask, make_cache_tensors, make_export_args,
     )
 except ImportError:
-    pytest.skip("ttrt_build not importable", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
 
 try:
     import torch

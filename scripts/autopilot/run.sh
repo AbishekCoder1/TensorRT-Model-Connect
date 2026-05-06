@@ -22,7 +22,7 @@ MIN_DOWNLOADS=10000
 MAX_MODELS=2000
 MODE="interactive"
 AGENTS=4
-DISCOVER_CONTAINER="trtf-dev-gb300-agent-1"
+DISCOVER_CONTAINER="trtmc-dev-gb300-agent-1"
 TASKS_FILE="/tmp/autopilot_tasks.json"
 
 # Parse args — anything not recognized is passed through to dispatch.py
@@ -39,14 +39,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "=== trtf Autopilot ==="
+echo "=== trtmc Autopilot ==="
 echo "  Min downloads:     ${MIN_DOWNLOADS}"
 echo "  Max models to scan: ${MAX_MODELS}"
 echo "  Mode:              ${MODE}"
 echo "  Agents:            ${AGENTS}"
 echo ""
 
-# Step 1: Discover gaps (runs inside a container for trtf_build imports)
+# Step 1: Discover gaps (runs inside a container for tensorrt_model_connect imports)
 echo "Step 1: Discovering unsupported model families..."
 docker exec "$DISCOVER_CONTAINER" python3 scripts/autopilot/discover.py \
     --min-downloads "$MIN_DOWNLOADS" \

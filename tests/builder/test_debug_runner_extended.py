@@ -1,4 +1,4 @@
-"""Extended unit tests for trtf_build.debug_runner — bundle section utilities,
+"""Extended unit tests for tensorrt_model_connect.debug_runner — bundle section utilities,
 runner cleanup for RwkvTrtRunner / WhisperTrtRunner / VisionTrtRunner /
 SegmentationTrtRunner, VLTrtRunner config loading, image preprocessing dispatch,
 and generate() sequencing.
@@ -8,7 +8,7 @@ with @requires_trt.
 
 Trace: ARCH-DBG-001, UD-DBG-03
 Intent: Validate extended debug runner functionality including multi-runner cleanup, VL config loading, image preprocessing dispatch, and autoregressive generate sequencing.
-Preconditions: trtf_build.debug_runner is importable; TRT-dependent tests require TRT+CUDA.
+Preconditions: tensorrt_model_connect.debug_runner is importable; TRT-dependent tests require TRT+CUDA.
 Postconditions: All runner variants clean up resources correctly, VL config fields parse from bundle headers, and generate produces the expected token sequence.
 """
 
@@ -22,11 +22,11 @@ from unittest.mock import MagicMock, patch, call
 import numpy as np
 import pytest
 
-# Module-level skip: trtf_build submodules need tensorrt installed
+# Module-level skip: tensorrt_model_connect submodules need tensorrt installed
 try:
-    import trtf_build.debug_runner  # noqa: F401
+    import tensorrt_model_connect.debug_runner  # noqa: F401
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build.debug_runner requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect.debug_runner requires tensorrt", allow_module_level=True)
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ class TestLoadConfigFromBundleExtended:
 
     def test_missing_config_section_returns_empty(self, tmp_path):
         """Bundle without a config.json section returns empty dict."""
-        from trtf_build.debug_runner import load_config_from_bundle
+        from tensorrt_model_connect.debug_runner import load_config_from_bundle
 
         header = {"num_layers": 2, "max_cache_length": 64}
         bundle = _make_bundle_bytes(header, engine_plan=b"FAKE")
@@ -123,7 +123,7 @@ class TestLoadConfigFromBundleExtended:
 
     def test_config_with_nested_values(self, tmp_path):
         """Config section with nested JSON is correctly round-tripped."""
-        from trtf_build.debug_runner import load_config_from_bundle
+        from tensorrt_model_connect.debug_runner import load_config_from_bundle
 
         config_data = json.dumps({
             "model_type": "llama",
@@ -159,7 +159,7 @@ class TestLoadPreprocessorConfigFromBundle:
 
     def test_present(self, tmp_path):
         """Extracts and parses preprocessor_config.json section."""
-        from trtf_build.debug_runner import load_preprocessor_config_from_bundle
+        from tensorrt_model_connect.debug_runner import load_preprocessor_config_from_bundle
 
         preproc_data = json.dumps({
             "temporal_patch_size": 2,
@@ -186,7 +186,7 @@ class TestLoadPreprocessorConfigFromBundle:
 
     def test_missing_returns_empty(self, tmp_path):
         """Bundle without preprocessor_config.json returns empty dict."""
-        from trtf_build.debug_runner import load_preprocessor_config_from_bundle
+        from tensorrt_model_connect.debug_runner import load_preprocessor_config_from_bundle
 
         header = {"num_layers": 1, "max_cache_length": 32}
         bundle = _make_bundle_bytes(header, engine_plan=b"EP")
@@ -229,7 +229,7 @@ class TestMultiSectionBundle:
 
     def test_engine_plan_extracted(self, tmp_path):
         """load_engine_from_bundle extracts the correct engine_plan section."""
-        from trtf_build.debug_runner import load_engine_from_bundle
+        from tensorrt_model_connect.debug_runner import load_engine_from_bundle
 
         path, engine_plan, _, _ = self._build_multi_section_bundle(tmp_path)
         plan, hdr = load_engine_from_bundle(path)
@@ -238,7 +238,7 @@ class TestMultiSectionBundle:
 
     def test_config_section_extracted(self, tmp_path):
         """load_config_from_bundle extracts config.json from multi-section bundle."""
-        from trtf_build.debug_runner import load_config_from_bundle
+        from tensorrt_model_connect.debug_runner import load_config_from_bundle
 
         path, _, _, _ = self._build_multi_section_bundle(tmp_path)
         cfg = load_config_from_bundle(path)
@@ -246,7 +246,7 @@ class TestMultiSectionBundle:
 
     def test_arbitrary_section_extracted(self, tmp_path):
         """load_section_from_bundle can extract tokenizer.json from bundle."""
-        from trtf_build.debug_runner import load_section_from_bundle
+        from tensorrt_model_connect.debug_runner import load_section_from_bundle
 
         path, _, _, tokenizer_data = self._build_multi_section_bundle(tmp_path)
         data = load_section_from_bundle(path, "tokenizer.json")
@@ -256,7 +256,7 @@ class TestMultiSectionBundle:
 
     def test_unknown_section_returns_none(self, tmp_path):
         """Requesting a non-existent section returns None (graceful)."""
-        from trtf_build.debug_runner import load_section_from_bundle
+        from tensorrt_model_connect.debug_runner import load_section_from_bundle
 
         path, _, _, _ = self._build_multi_section_bundle(tmp_path)
         result = load_section_from_bundle(path, "totally_unknown_section")
@@ -271,7 +271,7 @@ class TestLoadSectionInvalidBundle:
     """load_section_from_bundle should raise on corrupted bundles."""
 
     def test_invalid_magic_raises(self, tmp_path):
-        from trtf_build.debug_runner import load_section_from_bundle
+        from tensorrt_model_connect.debug_runner import load_section_from_bundle
 
         path = tmp_path / "bad.trtfb"
         path.write_bytes(b"GARBAGE_DATA_NOT_A_BUNDLE")
@@ -288,7 +288,7 @@ class TestRwkvTrtRunnerCleanup:
     """Verify RwkvTrtRunner.__del__ frees device buffers and stream."""
 
     def test_del_frees_all_buffers(self):
-        from trtf_build.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
 
         runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
         runner.num_layers = 1
@@ -309,7 +309,7 @@ class TestRwkvTrtRunnerCleanup:
         runner.stream = 7777
 
         mock_cudart = MagicMock()
-        with patch("trtf_build.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
             runner.__del__()
             # Prevent GC from calling __del__ again with real cudart
             del runner._d_logits
@@ -322,7 +322,7 @@ class TestRwkvTrtRunnerCleanup:
 
     def test_del_with_debug_buffers(self):
         """Debug output buffers are also freed."""
-        from trtf_build.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
 
         runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
         runner.num_layers = 1
@@ -343,7 +343,7 @@ class TestRwkvTrtRunnerCleanup:
         runner.stream = 7777
 
         mock_cudart = MagicMock()
-        with patch("trtf_build.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
             runner.__del__()
             del runner._d_logits
 
@@ -351,7 +351,7 @@ class TestRwkvTrtRunnerCleanup:
         assert 500 in freed
 
     def test_del_noop_before_init(self):
-        from trtf_build.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
 
         runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
         runner.__del__()  # Should not raise
@@ -365,7 +365,7 @@ class TestWhisperTrtRunnerCleanup:
     """Verify WhisperTrtRunner.__del__ frees device buffers and stream."""
 
     def test_del_frees_all_buffers(self):
-        from trtf_build.debug_runner import WhisperTrtRunner
+        from tensorrt_model_connect.debug_runner import WhisperTrtRunner
 
         runner = WhisperTrtRunner.__new__(WhisperTrtRunner)
         runner.num_layers = 1
@@ -384,7 +384,7 @@ class TestWhisperTrtRunnerCleanup:
         runner.stream = 5555
 
         mock_cudart = MagicMock()
-        with patch("trtf_build.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
             runner.__del__()
             del runner._d_logits
 
@@ -394,7 +394,7 @@ class TestWhisperTrtRunnerCleanup:
         mock_cudart.cudaStreamDestroy.assert_called_once_with(5555)
 
     def test_del_noop_before_init(self):
-        from trtf_build.debug_runner import WhisperTrtRunner
+        from tensorrt_model_connect.debug_runner import WhisperTrtRunner
 
         runner = WhisperTrtRunner.__new__(WhisperTrtRunner)
         runner.__del__()  # Should not raise
@@ -408,14 +408,14 @@ class TestVisionTrtRunnerCleanup:
     """Verify VisionTrtRunner.__del__ frees device buffers and stream."""
 
     def test_del_frees_all_buffers(self):
-        from trtf_build.debug_runner import VisionTrtRunner
+        from tensorrt_model_connect.debug_runner import VisionTrtRunner
 
         runner = VisionTrtRunner.__new__(VisionTrtRunner)
         runner._device_buffers = {"pixel_values": 100, "image_features": 200}
         runner.stream = 6666
 
         mock_cudart = MagicMock()
-        with patch("trtf_build.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
             runner.__del__()
             # Prevent GC double-free: clear ALL device state
             runner._device_buffers = {}
@@ -427,7 +427,7 @@ class TestVisionTrtRunnerCleanup:
 
     def test_del_noop_before_init(self):
         """__del__ does not crash if _device_buffers not yet set."""
-        from trtf_build.debug_runner import VisionTrtRunner
+        from tensorrt_model_connect.debug_runner import VisionTrtRunner
 
         runner = VisionTrtRunner.__new__(VisionTrtRunner)
         # VisionTrtRunner.__del__ iterates _device_buffers. If not set,
@@ -446,7 +446,7 @@ class TestSegmentationTrtRunnerCleanup:
     """Verify SegmentationTrtRunner.__del__ frees device buffers and stream."""
 
     def test_del_frees_all_buffers(self):
-        from trtf_build.debug_runner import SegmentationTrtRunner
+        from tensorrt_model_connect.debug_runner import SegmentationTrtRunner
 
         runner = SegmentationTrtRunner.__new__(SegmentationTrtRunner)
         runner._device_buffers = {
@@ -455,7 +455,7 @@ class TestSegmentationTrtRunnerCleanup:
         runner.stream = 4444
 
         mock_cudart = MagicMock()
-        with patch("trtf_build.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
             runner.__del__()
             runner._device_buffers = {}
             runner.stream = None
@@ -475,7 +475,7 @@ class TestTrtRunnerGenerate:
     def test_generate_calls_step_in_order(self):
         """generate() should call step() once per input token, then max_new_tokens
         times for autoregressive decode."""
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
 
         runner = TrtRunner.__new__(TrtRunner)
         vocab_size = 10
@@ -503,7 +503,7 @@ class TestTrtRunnerGenerate:
 
     def test_generate_empty_input(self):
         """generate() with empty input_ids should only produce decode steps."""
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
 
         runner = TrtRunner.__new__(TrtRunner)
         # With empty input_ids, generate() would try to access all_results[-1]
@@ -517,7 +517,7 @@ class TestTrtRunnerGenerate:
 
     def test_generate_returns_correct_result_dicts(self):
         """Each element in the returned list has the expected keys."""
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
 
         runner = TrtRunner.__new__(TrtRunner)
 
@@ -545,7 +545,7 @@ class TestMambaTrtRunnerGenerate:
     """Verify MambaTrtRunner.generate() calls step() correctly."""
 
     def test_generate_calls_step_in_order(self):
-        from trtf_build.debug_runner import MambaTrtRunner
+        from tensorrt_model_connect.debug_runner import MambaTrtRunner
 
         runner = MambaTrtRunner.__new__(MambaTrtRunner)
         call_log = []
@@ -572,7 +572,7 @@ class TestRwkvStateReset:
     """Test that RwkvTrtRunner.reset() calls memset/memcpy for all states."""
 
     def test_reset_zeros_four_states_and_sets_max_neg_inf(self):
-        from trtf_build.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
 
         runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
         runner.num_layers = 2
@@ -590,7 +590,7 @@ class TestRwkvStateReset:
         mock_cudart.cudaMemsetAsync.return_value = (success,)
         mock_cudart.cudaMemcpyKind.cudaMemcpyHostToDevice = 1
 
-        with patch("trtf_build.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
             runner.reset()
 
         # 4 states x 2 layers = 8 cudaMemsetAsync calls
@@ -610,7 +610,7 @@ class TestPreprocessImageDispatch:
     def test_unknown_type_warns_and_falls_back(self, tmp_path):
         """Unknown preprocessor_type emits a warning and falls back to
         qwen_merge_group."""
-        from trtf_build.debug_runner import preprocess_image_for_trt
+        from tensorrt_model_connect.debug_runner import preprocess_image_for_trt
 
         # Create a tiny test image
         from PIL import Image
@@ -634,7 +634,7 @@ class TestPreprocessImageDispatch:
 
     def test_simple_chw_dispatch(self, tmp_path):
         """simple_chw returns [C, H, W] with no temporal duplication by default."""
-        from trtf_build.debug_runner import preprocess_image_for_trt
+        from tensorrt_model_connect.debug_runner import preprocess_image_for_trt
 
         from PIL import Image
         img = Image.new("RGB", (56, 56), color=(100, 150, 200))
@@ -651,7 +651,7 @@ class TestPreprocessImageDispatch:
 
     def test_simple_chw_temporal_duplication(self, tmp_path):
         """simple_chw with temporal_patch_size > 1 tiles the channels."""
-        from trtf_build.debug_runner import preprocess_image_for_trt
+        from tensorrt_model_connect.debug_runner import preprocess_image_for_trt
 
         from PIL import Image
         img = Image.new("RGB", (28, 28), color=(100, 150, 200))
@@ -669,7 +669,7 @@ class TestPreprocessImageDispatch:
 
     def test_center_crop_chw_dispatch(self, tmp_path):
         """center_crop_chw returns [C, H, W] for rectangular input."""
-        from trtf_build.debug_runner import preprocess_image_for_trt
+        from tensorrt_model_connect.debug_runner import preprocess_image_for_trt
 
         from PIL import Image
         # Non-square input to test center-crop
@@ -687,7 +687,7 @@ class TestPreprocessImageDispatch:
 
     def test_aspect_preserve_chw_dispatch(self, tmp_path):
         """aspect_preserve_chw returns [C, H, W] for rectangular input."""
-        from trtf_build.debug_runner import preprocess_image_for_trt
+        from tensorrt_model_connect.debug_runner import preprocess_image_for_trt
 
         from PIL import Image
         img = Image.new("RGB", (200, 100), color=(30, 60, 90))
@@ -711,7 +711,7 @@ class TestResolvePilInterpolation:
     """Test the PIL interpolation mode resolver."""
 
     def test_known_modes(self):
-        from trtf_build.debug_runner import _resolve_pil_interpolation
+        from tensorrt_model_connect.debug_runner import _resolve_pil_interpolation
         from PIL import Image
 
         assert _resolve_pil_interpolation("bicubic") == Image.BICUBIC
@@ -719,7 +719,7 @@ class TestResolvePilInterpolation:
         assert _resolve_pil_interpolation("nearest") == Image.NEAREST
 
     def test_unknown_defaults_to_bicubic(self):
-        from trtf_build.debug_runner import _resolve_pil_interpolation
+        from tensorrt_model_connect.debug_runner import _resolve_pil_interpolation
         from PIL import Image
 
         assert _resolve_pil_interpolation("lanczos") == Image.BICUBIC
@@ -754,7 +754,7 @@ class TestVLTrtRunnerConfigLoading:
 
     def test_config_fields_loaded(self, tmp_path):
         """VLTrtRunner picks up VL config fields from bundle."""
-        from trtf_build.debug_runner import VLTrtRunner
+        from tensorrt_model_connect.debug_runner import VLTrtRunner
 
         config = {
             "image_token_id": 151655,
@@ -775,8 +775,8 @@ class TestVLTrtRunnerConfigLoading:
         path = self._make_vl_bundle(tmp_path, config, preproc)
 
         # Mock TrtRunner and VisionTrtRunner constructors so we don't need TRT
-        with patch("trtf_build.debug_runner.TrtRunner") as MockTrt, \
-             patch("trtf_build.debug_runner.VisionTrtRunner") as MockVision:
+        with patch("tensorrt_model_connect.debug_runner.TrtRunner") as MockTrt, \
+             patch("tensorrt_model_connect.debug_runner.VisionTrtRunner") as MockVision:
             runner = VLTrtRunner(path)
 
         assert runner.image_token_id == 151655
@@ -790,7 +790,7 @@ class TestVLTrtRunnerConfigLoading:
 
     def test_format_prompt(self, tmp_path):
         """VLTrtRunner.format_prompt() fills in image pads and user prompt."""
-        from trtf_build.debug_runner import VLTrtRunner
+        from tensorrt_model_connect.debug_runner import VLTrtRunner
 
         config = {
             "image_token_id": 42,
@@ -800,8 +800,8 @@ class TestVLTrtRunnerConfigLoading:
         }
         path = self._make_vl_bundle(tmp_path, config, {})
 
-        with patch("trtf_build.debug_runner.TrtRunner"), \
-             patch("trtf_build.debug_runner.VisionTrtRunner"):
+        with patch("tensorrt_model_connect.debug_runner.TrtRunner"), \
+             patch("tensorrt_model_connect.debug_runner.VisionTrtRunner"):
             runner = VLTrtRunner(path)
 
         result = runner.format_prompt("What is this?")
@@ -809,12 +809,12 @@ class TestVLTrtRunnerConfigLoading:
 
     def test_defaults_when_config_missing_fields(self, tmp_path):
         """VLTrtRunner uses sensible defaults when config fields are absent."""
-        from trtf_build.debug_runner import VLTrtRunner
+        from tensorrt_model_connect.debug_runner import VLTrtRunner
 
         path = self._make_vl_bundle(tmp_path, {}, {})
 
-        with patch("trtf_build.debug_runner.TrtRunner"), \
-             patch("trtf_build.debug_runner.VisionTrtRunner"):
+        with patch("tensorrt_model_connect.debug_runner.TrtRunner"), \
+             patch("tensorrt_model_connect.debug_runner.VisionTrtRunner"):
             runner = VLTrtRunner(path)
 
         assert runner.image_token_id == -1
@@ -836,7 +836,7 @@ class TestVLTrtRunnerEncodeImage:
 
     def test_multi_image_raises(self, tmp_path):
         """encode_image rejects list/tuple inputs with NotImplementedError."""
-        from trtf_build.debug_runner import VLTrtRunner
+        from tensorrt_model_connect.debug_runner import VLTrtRunner
 
         config_data = json.dumps({}).encode("utf-8")
         header = {"num_layers": 1, "max_cache_length": 32}
@@ -849,8 +849,8 @@ class TestVLTrtRunnerEncodeImage:
         path = tmp_path / "vl.trtfb"
         path.write_bytes(bundle)
 
-        with patch("trtf_build.debug_runner.TrtRunner"), \
-             patch("trtf_build.debug_runner.VisionTrtRunner"):
+        with patch("tensorrt_model_connect.debug_runner.TrtRunner"), \
+             patch("tensorrt_model_connect.debug_runner.VisionTrtRunner"):
             runner = VLTrtRunner(str(path))
 
         with pytest.raises(NotImplementedError, match="Multi-image"):
@@ -858,7 +858,7 @@ class TestVLTrtRunnerEncodeImage:
 
     def test_no_vision_engine_raises(self, tmp_path):
         """encode_image raises RuntimeError when bundle has no vision engine."""
-        from trtf_build.debug_runner import VLTrtRunner
+        from tensorrt_model_connect.debug_runner import VLTrtRunner
 
         config_data = json.dumps({}).encode("utf-8")
         header = {"num_layers": 1, "max_cache_length": 32}
@@ -871,7 +871,7 @@ class TestVLTrtRunnerEncodeImage:
         path = tmp_path / "text_only.trtfb"
         path.write_bytes(bundle)
 
-        with patch("trtf_build.debug_runner.TrtRunner"):
+        with patch("tensorrt_model_connect.debug_runner.TrtRunner"):
             runner = VLTrtRunner(str(path))
 
         with pytest.raises(RuntimeError, match="No vision engine"):
@@ -888,7 +888,7 @@ class TestTrtRunnerCleanupExtended:
     def test_del_frees_embed_and_deepstack(self):
         """__del__ should free input_embed, use_input_embed, deepstack, and
         deepstack_active device pointers when they are non-zero."""
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
 
         runner = TrtRunner.__new__(TrtRunner)
         runner.num_layers = 1
@@ -913,7 +913,7 @@ class TestTrtRunnerCleanupExtended:
         runner.engine = MagicMock()
 
         mock_cudart = MagicMock()
-        with patch("trtf_build.debug_runner.cudart", mock_cudart):
+        with patch("tensorrt_model_connect.debug_runner.cudart", mock_cudart):
             runner.__del__()
             del runner._d_token_id
 
@@ -935,7 +935,7 @@ class TestWhisperTrtRunnerGenerate:
     """Verify WhisperTrtRunner.generate() calls step() correctly."""
 
     def test_generate_prefill_then_decode(self):
-        from trtf_build.debug_runner import WhisperTrtRunner
+        from tensorrt_model_connect.debug_runner import WhisperTrtRunner
 
         runner = WhisperTrtRunner.__new__(WhisperTrtRunner)
         call_log = []
@@ -962,7 +962,7 @@ class TestRwkvTrtRunnerGenerate:
     """Verify RwkvTrtRunner.generate() calls step() correctly."""
 
     def test_generate_prefill_then_decode(self):
-        from trtf_build.debug_runner import RwkvTrtRunner
+        from tensorrt_model_connect.debug_runner import RwkvTrtRunner
 
         runner = RwkvTrtRunner.__new__(RwkvTrtRunner)
         call_log = []
@@ -1092,7 +1092,7 @@ class TestTrtRunnerWithEngine:
 
     def test_step_returns_logits(self, tiny_engine_plan):
         """TrtRunner.step() returns dict with 'logits' key."""
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
 
         plan, max_cache_length, num_layers, attention_size = tiny_engine_plan
         runner = TrtRunner(
@@ -1108,7 +1108,7 @@ class TestTrtRunnerWithEngine:
 
     def test_generate_returns_correct_length(self, tiny_engine_plan):
         """TrtRunner.generate() returns list of correct length."""
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
 
         plan, max_cache_length, num_layers, attention_size = tiny_engine_plan
         runner = TrtRunner(
@@ -1123,7 +1123,7 @@ class TestTrtRunnerWithEngine:
 
     def test_reset_clears_state(self, tiny_engine_plan):
         """TrtRunner.reset() zeroes cache and resets cache_length."""
-        from trtf_build.debug_runner import TrtRunner
+        from tensorrt_model_connect.debug_runner import TrtRunner
 
         plan, max_cache_length, num_layers, attention_size = tiny_engine_plan
         runner = TrtRunner(

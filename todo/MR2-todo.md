@@ -66,7 +66,7 @@ src/runtime/plugins/
 ## Risks
 - **Linker stripping**: Static initializers in plugins may be stripped if
   the TU has no external references. Mitigation: OBJECT library in CMake.
-- **Include dependencies**: Plugins need both public (`include/trtf/`) and
-  private (`src/`) headers. Already handled by `trtf_add_test()` pattern.
+- **Include dependencies**: Plugins need both public (`include/trtmc/`) and
+  private (`src/`) headers. Already handled by `trtmc_add_test()` pattern.
 - **CCN**: Each plugin should stay under CCN=10. Complex plugins (bark, speech)
   may need internal helper functions.

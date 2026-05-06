@@ -1,4 +1,4 @@
-"""Shared fixtures and markers for trtf_build tests."""
+"""Shared fixtures and markers for tensorrt_model_connect tests."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# trtf_build package availability check
+# tensorrt_model_connect package availability check
 # ---------------------------------------------------------------------------
 
-def _trtf_build_importable() -> bool:
-    """Check if trtf_build can be imported (requires tensorrt in the chain)."""
+def _tensorrt_model_connect_importable() -> bool:
+    """Check if tensorrt_model_connect can be imported (requires tensorrt in the chain)."""
     try:
-        import trtf_build  # noqa: F401
+        import tensorrt_model_connect  # noqa: F401
         return True
     except ImportError:
         return False
@@ -48,9 +48,9 @@ requires_trt = _gpu_trt_skipif(
     not _trt_available(), "TensorRT + CUDA not available"
 )
 
-requires_trtf_build = pytest.mark.skipif(
-    not _trtf_build_importable(),
-    reason="trtf_build not importable (TensorRT not installed)"
+requires_tensorrt_model_connect = pytest.mark.skipif(
+    not _tensorrt_model_connect_importable(),
+    reason="tensorrt_model_connect not importable (TensorRT not installed)"
 )
 
 

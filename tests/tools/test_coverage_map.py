@@ -58,21 +58,21 @@ class TestPythonCollector:
         """Parses a fake .coverage DB and returns source -> test mapping."""
         db_path = tmp_path / ".coverage"
         _create_fake_coverage_db(db_path, {
-            "trtf_build/trtf_build/config.py": {
+            "tensorrt_model_connect/tensorrt_model_connect/config.py": {
                 "tests/builder/test_config.py::TestModelConfig::test_parse|run": [1, 2, 3],
                 "tests/builder/test_config.py::TestModelConfig::test_vl|run": [1, 5],
             },
-            "trtf_build/trtf_build/graph_ops.py": {
+            "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py": {
                 "tests/builder/test_graph_ops.py::TestRoPE::test_basic|run": [10, 20],
             },
         })
         result = parse_coverage_db(db_path)
-        assert "trtf_build/trtf_build/config.py" in result
-        assert sorted(result["trtf_build/trtf_build/config.py"]) == [
+        assert "tensorrt_model_connect/tensorrt_model_connect/config.py" in result
+        assert sorted(result["tensorrt_model_connect/tensorrt_model_connect/config.py"]) == [
             "tests/builder/test_config.py::TestModelConfig::test_parse",
             "tests/builder/test_config.py::TestModelConfig::test_vl",
         ]
-        assert result["trtf_build/trtf_build/graph_ops.py"] == [
+        assert result["tensorrt_model_connect/tensorrt_model_connect/graph_ops.py"] == [
             "tests/builder/test_graph_ops.py::TestRoPE::test_basic",
         ]
 
@@ -80,14 +80,14 @@ class TestPythonCollector:
         """Strips |run, |setup, |teardown from context names."""
         db_path = tmp_path / ".coverage"
         _create_fake_coverage_db(db_path, {
-            "trtf_build/trtf_build/config.py": {
+            "tensorrt_model_connect/tensorrt_model_connect/config.py": {
                 "tests/builder/test_config.py::test_a|setup": [1],
                 "tests/builder/test_config.py::test_a|run": [2],
                 "tests/builder/test_config.py::test_a|teardown": [3],
             },
         })
         result = parse_coverage_db(db_path)
-        assert result["trtf_build/trtf_build/config.py"] == [
+        assert result["tensorrt_model_connect/tensorrt_model_connect/config.py"] == [
             "tests/builder/test_config.py::test_a",
         ]
 
@@ -110,17 +110,17 @@ class TestCppCollector:
         gcovr_data = {
             "files": [
                 {
-                    "filename": "/workspace/trt-transformers-cpp/src/tokenizer/vocab_tokenizer.cpp",
+                    "filename": "/workspace/tensorrt-model-connect/src/tokenizer/vocab_tokenizer.cpp",
                     "line_covered": 20,
                     "line_total": 50,
                 },
                 {
-                    "filename": "/workspace/trt-transformers-cpp/src/bundle/bundle_format.cpp",
+                    "filename": "/workspace/tensorrt-model-connect/src/bundle/bundle_format.cpp",
                     "line_covered": 0,
                     "line_total": 30,
                 },
                 {
-                    "filename": "/workspace/trt-transformers-cpp/include/trtf/runtime/pipeline_plugin.h",
+                    "filename": "/workspace/tensorrt-model-connect/include/trtmc/runtime/pipeline_plugin.h",
                     "line_covered": 5,
                     "line_total": 10,
                 },
@@ -128,10 +128,10 @@ class TestCppCollector:
         }
         json_path = tmp_path / "cov.json"
         json_path.write_text(json.dumps(gcovr_data))
-        result = parse_gcovr_json(json_path, repo_root=Path("/workspace/trt-transformers-cpp"))
+        result = parse_gcovr_json(json_path, repo_root=Path("/workspace/tensorrt-model-connect"))
         # Only files with line_covered > 0
         assert "src/tokenizer/vocab_tokenizer.cpp" in result
-        assert "include/trtf/runtime/pipeline_plugin.h" in result
+        assert "include/trtmc/runtime/pipeline_plugin.h" in result
         assert "src/bundle/bundle_format.cpp" not in result
 
     def test_parse_gcovr_json_empty(self, tmp_path):
@@ -170,10 +170,10 @@ class TestCppCollector:
 class TestGenerate:
     def test_merge_maps_disjoint(self):
         """Merging two disjoint maps produces their union."""
-        py_map = {"trtf_build/config.py": ["test_config.py::test_a"]}
+        py_map = {"tensorrt_model_connect/config.py": ["test_config.py::test_a"]}
         cpp_map = {"src/vocab.cpp": ["test_vocab"]}
         merged = merge_maps(py_map, cpp_map)
-        assert merged["trtf_build/config.py"] == ["test_config.py::test_a"]
+        assert merged["tensorrt_model_connect/config.py"] == ["test_config.py::test_a"]
         assert merged["src/vocab.cpp"] == ["test_vocab"]
 
     def test_merge_maps_overlapping(self):
@@ -224,11 +224,11 @@ class TestSelectTests:
             "src/tokenizer/vocab_tokenizer.cpp": ["test_vocab_tokenizer"],
             "src/bundle/bundle_format.cpp": ["test_bundle_format", "test_bundle_e2e"],
             "src/utils/text_parsers.cpp": ["test_text_parsers", "test_vocab_tokenizer"],
-            "trtf_build/trtf_build/config.py": [
+            "tensorrt_model_connect/tensorrt_model_connect/config.py": [
                 "tests/builder/test_config.py::TestModelConfig::test_parse",
                 "tests/builder/test_config.py::TestModelConfig::test_vl",
             ],
-            "trtf_build/trtf_build/graph_ops.py": [
+            "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py": [
                 "tests/builder/test_graph_ops.py::TestRoPE::test_basic",
             ],
         }
@@ -242,7 +242,7 @@ class TestSelectTests:
 
     def test_known_python_file(self, sample_map):
         """Known Python source file returns its mapped tests."""
-        result = select_tests(["trtf_build/trtf_build/config.py"], sample_map)
+        result = select_tests(["tensorrt_model_connect/tensorrt_model_connect/config.py"], sample_map)
         assert sorted(result.builder_tests) == [
             "tests/builder/test_config.py::TestModelConfig::test_parse",
             "tests/builder/test_config.py::TestModelConfig::test_vl",
@@ -256,8 +256,8 @@ class TestSelectTests:
         assert result.cpp_tests == []
 
     def test_unknown_python_file_fallback(self, sample_map):
-        """Unknown trtf_build/ file triggers builder tier fallback."""
-        result = select_tests(["trtf_build/trtf_build/new_module.py"], sample_map)
+        """Unknown tensorrt_model_connect/ file triggers builder tier fallback."""
+        result = select_tests(["tensorrt_model_connect/tensorrt_model_connect/new_module.py"], sample_map)
         assert "builder" in result.fallback_tiers
         assert result.builder_tests == []
 
@@ -280,14 +280,14 @@ class TestSelectTests:
 
     def test_include_header_fallback(self, sample_map):
         """Unknown include/ header triggers cpp fallback."""
-        result = select_tests(["include/trtf/new_header.h"], sample_map)
+        result = select_tests(["include/trtmc/new_header.h"], sample_map)
         assert "cpp" in result.fallback_tiers
 
     def test_mixed_cpp_and_python(self, sample_map):
         """Changes in both languages select tests from both."""
         result = select_tests([
             "src/tokenizer/vocab_tokenizer.cpp",
-            "trtf_build/trtf_build/config.py",
+            "tensorrt_model_connect/tensorrt_model_connect/config.py",
         ], sample_map)
         assert "test_vocab_tokenizer" in result.cpp_tests
         assert "tests/builder/test_config.py::TestModelConfig::test_parse" in result.builder_tests

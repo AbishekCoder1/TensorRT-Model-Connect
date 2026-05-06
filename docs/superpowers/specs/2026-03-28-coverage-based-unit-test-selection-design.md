@@ -6,7 +6,7 @@
 
 ## Problem
 
-Unit tests are gated at the tier level: any `src/` change runs all 72 C++ tests, any `trtf_build/` change runs all 71 Python builder tests. Python builder tests are the bottleneck because several build real TRT engines (~40m CI timeout). As the test suite grows, this becomes increasingly wasteful -- most changes only affect a handful of tests.
+Unit tests are gated at the tier level: any `src/` change runs all 72 C++ tests, any `tensorrt_model_connect/` change runs all 71 Python builder tests. Python builder tests are the bottleneck because several build real TRT engines (~40m CI timeout). As the test suite grows, this becomes increasingly wasteful -- most changes only affect a handful of tests.
 
 The existing `test_impact.py` handles E2E model selection well (rule-based, file-path heuristics), but unit tests lack fine-grained selection.
 
@@ -31,7 +31,7 @@ A single JSON file mapping source files to the tests that exercise them:
     "cpp_tests": 72
   },
   "source_to_tests": {
-    "trtf_build/trtf_build/config.py": [
+    "tensorrt_model_connect/tensorrt_model_connect/config.py": [
       "tests/builder/test_config.py::TestModelConfig::test_parse_qwen3",
       "tests/builder/test_config.py::TestModelConfig::test_vl_merge",
       "tests/builder/test_engine_qwen.py::TestQwenEngine::test_config_parsing"
@@ -55,7 +55,7 @@ A single JSON file mapping source files to the tests that exercise them:
 
 ### Python collection
 
-1. Run `pytest tests/builder/ tests/tools/ --cov=trtf_build --cov-context=test --cov-report=`
+1. Run `pytest tests/builder/ tests/tools/ --cov=tensorrt_model_connect --cov-context=test --cov-report=`
 2. Open the `.coverage` SQLite DB
 3. Query for per-test file coverage: `SELECT DISTINCT f.path, c.context FROM line_bits lb JOIN file f ON lb.file_id = f.id JOIN context c ON lb.context_id = c.id`
 4. Build reverse map: `{source_path: [test_node_ids]}`
@@ -112,7 +112,7 @@ Given a set of changed files from git diff:
    - Previously failed tests (from last CI run) -- always re-run
 3. Handle unknown source files (not in the map):
    - If the file is in `src/` or `include/` -- fall back to all C++ tests in the tier
-   - If the file is in `trtf_build/` -- fall back to all Python builder tests in the tier
+   - If the file is in `tensorrt_model_connect/` -- fall back to all Python builder tests in the tier
    - This preserves the zero-false-negative guarantee
 4. Output a filtered test list for pytest `-k` / ctest `-R` selection
 

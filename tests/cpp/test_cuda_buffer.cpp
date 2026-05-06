@@ -23,7 +23,7 @@
 //   - CUDA runtime (cudaMalloc, cudaMemcpy)
 //
 // Environment:
-//   Guarded by TRTF_HAS_TRT. Skips gracefully (exit 0) when TensorRT/CUDA
+//   Guarded by TRTMC_HAS_TRT. Skips gracefully (exit 0) when TensorRT/CUDA
 //   headers are not available. Requires a CUDA-capable GPU at runtime.
 // =============================================================================
 
@@ -52,7 +52,7 @@ static void check(bool condition, const char* test_name) {
 // Mechanism:  Check ok(), data()==nullptr, size()==0.
 // -----------------------------------------------------------------------------
 static void test_zero_size_buffer() {
-    trtf::CudaBuffer buf(0);
+    trtmc::CudaBuffer buf(0);
     check(buf.ok(), "zero_size: ok()=true");
     check(buf.data() == nullptr, "zero_size: data()=nullptr");
     check(buf.size() == 0, "zero_size: size()=0");
@@ -65,7 +65,7 @@ static void test_zero_size_buffer() {
 // Mechanism:  Check ok(), data()!=nullptr, size()==1024.
 // -----------------------------------------------------------------------------
 static void test_nonzero_size_buffer() {
-    trtf::CudaBuffer buf(1024);
+    trtmc::CudaBuffer buf(1024);
     check(buf.ok(), "nonzero_size: ok()=true");
     check(buf.data() != nullptr, "nonzero_size: data()!=nullptr");
     check(buf.size() == 1024, "nonzero_size: size()==1024");
@@ -79,11 +79,11 @@ static void test_nonzero_size_buffer() {
 //             Destination should have the original pointer and size.
 // -----------------------------------------------------------------------------
 static void test_move_constructor() {
-    trtf::CudaBuffer src(512);
+    trtmc::CudaBuffer src(512);
     check(src.ok(), "move_ctor: src ok before move");
     void* original_ptr = src.data();
 
-    trtf::CudaBuffer dst(std::move(src));
+    trtmc::CudaBuffer dst(std::move(src));
 
     check(dst.ok(), "move_ctor: dst ok after move");
     check(dst.data() == original_ptr, "move_ctor: dst has original ptr");
@@ -100,8 +100,8 @@ static void test_move_constructor() {
 //             should have the source's original pointer and size.
 // -----------------------------------------------------------------------------
 static void test_move_assignment() {
-    trtf::CudaBuffer src(256);
-    trtf::CudaBuffer dst(128);
+    trtmc::CudaBuffer src(256);
+    trtmc::CudaBuffer dst(128);
     check(src.ok(), "move_assign: src ok before move");
     check(dst.ok(), "move_assign: dst ok before move");
 
@@ -128,7 +128,7 @@ static void test_data_roundtrip() {
     const std::vector<float> host_data = {1.0F, 2.0F, 3.0F, 4.0F};
     const std::size_t bytes = host_data.size() * sizeof(float);
 
-    trtf::CudaBuffer buf(bytes);
+    trtmc::CudaBuffer buf(bytes);
     check(buf.ok(), "roundtrip: buffer ok");
     check(buf.data() != nullptr, "roundtrip: buffer non-null");
 
@@ -162,7 +162,7 @@ static void test_large_buffer_roundtrip() {
     const std::size_t num_floats = 256 * 1024; // 1 MB
     const std::size_t bytes = num_floats * sizeof(float);
 
-    trtf::CudaBuffer buf(bytes);
+    trtmc::CudaBuffer buf(bytes);
     check(buf.ok(), "large_roundtrip: buffer ok");
 
     std::vector<float> host_data(num_floats);

@@ -11,10 +11,10 @@ from unittest.mock import MagicMock
 
 import torch
 
-from trtf_build.engine_defs.torch_trt.families.patchtsmixer import (
+from tensorrt_model_connect.engine_defs.torch_trt.families.patchtsmixer import (
     PatchTSMixerTorchTrtPlugin,
 )
-from trtf_build.engine_defs.torch_trt.strategies.patchtsmixer import (
+from tensorrt_model_connect.engine_defs.torch_trt.strategies.patchtsmixer import (
     PatchTSMixerBuildStrategy,
     PatchTSMixerWrapper,
     infer_patchtsmixer_task_kind,

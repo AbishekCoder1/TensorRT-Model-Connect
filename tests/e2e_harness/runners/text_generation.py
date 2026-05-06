@@ -31,22 +31,22 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_STAGES = {"full_generation", "prefill", "decode"}
-_TRTF_TIMING_RE = re.compile(
-    r"^\[trtf\.timing\]\s+"
+_TRTMC_TIMING_RE = re.compile(
+    r"^\[trtmc\.timing\]\s+"
     r"prefill_ms=(?P<prefill_ms>[-+0-9.eE]+)\s+"
     r"decode_ms=(?P<decode_ms>[-+0-9.eE]+)\s+"
     r"total_ms=(?P<total_ms>[-+0-9.eE]+)\s*$",
     re.MULTILINE,
 )
-_TRTF_LOAD_TIMING_RE = re.compile(
-    r"^\[trtf\.load_timing\]\s+.*?"
+_TRTMC_LOAD_TIMING_RE = re.compile(
+    r"^\[trtmc\.load_timing\]\s+.*?"
     r"load_deserialize_ms=(?P<load_deserialize_ms>[-+0-9.eE]+)",
     re.MULTILINE,
 )
 
 
-def _extract_trtf_timing(stderr: str) -> dict[str, float]:
-    match = _TRTF_TIMING_RE.search(stderr or "")
+def _extract_trtmc_timing(stderr: str) -> dict[str, float]:
+    match = _TRTMC_TIMING_RE.search(stderr or "")
     if match is None:
         return {}
     try:
@@ -62,10 +62,10 @@ def _extract_trtf_timing(stderr: str) -> dict[str, float]:
     }
 
 
-def _extract_trtf_load_timing(stderr: str) -> dict[str, float]:
+def _extract_trtmc_load_timing(stderr: str) -> dict[str, float]:
     total_ms = 0.0
     found = False
-    for match in _TRTF_LOAD_TIMING_RE.finditer(stderr or ""):
+    for match in _TRTMC_LOAD_TIMING_RE.finditer(stderr or ""):
         try:
             total_ms += float(match.group("load_deserialize_ms"))
             found = True
@@ -243,7 +243,7 @@ class TextGenerationCausalRunner:
         case: E2ECase | None = None,
         inputs: dict | None = None,
     ) -> tuple[str, float, dict]:
-        """Run the C++ trtf binary as a subprocess. Returns (text, time_s, meta)."""
+        """Run the C++ trtmc binary as a subprocess. Returns (text, time_s, meta)."""
         cmd = [
             ctx.binary_path, "run", bundle_path,
             "--prompt", prompt,
@@ -295,8 +295,8 @@ class TextGenerationCausalRunner:
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
-        meta.update(_extract_trtf_timing(result.stderr))
-        meta.update(_extract_trtf_load_timing(result.stderr))
+        meta.update(_extract_trtmc_timing(result.stderr))
+        meta.update(_extract_trtmc_load_timing(result.stderr))
         if result.returncode != 0:
             truncated, log_path = save_full_stderr(
                 result.stderr, ctx.artifacts_dir or "", "cpp_binary")
@@ -341,7 +341,7 @@ class TextGenerationCausalRunner:
             phase = {phase!r}
 
             # Create runner from bundle (auto-detects strategy, loads engine)
-            from trtf_build.debug_runner import (
+            from tensorrt_model_connect.debug_runner import (
                 runner_from_bundle, load_config_from_bundle)
             runner = runner_from_bundle(bundle_path)
             config_json = load_config_from_bundle(bundle_path)
@@ -392,7 +392,7 @@ class TextGenerationCausalRunner:
                     padded[i, :l.shape[0]] = l
                 np.save(logits_path, padded)
                 print(f"OK steps={{len(logits_list)}} vocab={{max_len}}")
-            print("TRTF_DEBUG_META " + json.dumps({{
+            print("TRTMC_DEBUG_META " + json.dumps({{
                 "generated_text": generated_text,
                 "full_text": full_text,
                 "generated_token_count": len(generated_tokens),
@@ -422,9 +422,9 @@ class TextGenerationCausalRunner:
             "phase": phase,
         }
         for line in result.stdout.splitlines():
-            if line.startswith("TRTF_DEBUG_META "):
+            if line.startswith("TRTMC_DEBUG_META "):
                 try:
-                    parsed = json.loads(line[len("TRTF_DEBUG_META "):])
+                    parsed = json.loads(line[len("TRTMC_DEBUG_META "):])
                     if isinstance(parsed, dict):
                         meta.update(parsed)
                 except json.JSONDecodeError:

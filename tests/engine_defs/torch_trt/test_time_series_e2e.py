@@ -1,8 +1,8 @@
 """End-to-end Torch-TRT parity tests for numeric time-series models.
 
 These tests exercise the real user flow:
-  1. Build a local HF checkpoint into a `.trtfb` bundle via `trtf-build`
-  2. Run C++ inference via `build/trtf solve`
+  1. Build a local HF checkpoint into a `.trtfb` bundle via `trtmc-build`
+  2. Run C++ inference via `build/trtmc solve`
   3. Compare the output against the official Python reference implementation
 
 They are intentionally serial and tiny so they can run in CI on a single GPU.
@@ -24,7 +24,7 @@ transformers = pytest.importorskip("transformers")
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-TRTF_BIN = REPO_ROOT / "build" / "trtf"
+TRTMC_BIN = REPO_ROOT / "build" / "trtmc"
 
 
 def _has_torchtrt() -> bool:
@@ -69,11 +69,11 @@ def _parse_solve_stdout(stdout: str) -> torch.Tensor:
 
 
 def _build_bundle(model_dir: Path, bundle_path: Path, *, max_cache_length: int) -> None:
-    trtf_build_bin = shutil.which("trtf-build")
-    assert trtf_build_bin, "Expected trtf-build console script in PATH"
+    tensorrt_model_connect_bin = shutil.which("trtmc-build")
+    assert tensorrt_model_connect_bin, "Expected trtmc-build console script in PATH"
     _run(
         [
-            trtf_build_bin,
+            tensorrt_model_connect_bin,
             "build",
             str(model_dir),
             "-o",
@@ -89,7 +89,7 @@ def _build_bundle(model_dir: Path, bundle_path: Path, *, max_cache_length: int) 
 
 def _run_solve(bundle_path: Path, *, field_input: list[float] | None = None,
                branch_input: list[float] | None = None, trunk_input: list[float] | None = None) -> torch.Tensor:
-    cmd = [str(TRTF_BIN), "solve", str(bundle_path)]
+    cmd = [str(TRTMC_BIN), "solve", str(bundle_path)]
     if field_input is not None:
         cmd.extend(["--field-input", ",".join(str(v) for v in field_input)])
     if branch_input is not None:
@@ -107,13 +107,13 @@ def _run_solve(bundle_path: Path, *, field_input: list[float] | None = None,
 @requires_torchtrt
 @requires_gpu
 def test_time_series_models_match_reference_end_to_end():
-    assert TRTF_BIN.exists(), f"Expected built binary at {TRTF_BIN}"
+    assert TRTMC_BIN.exists(), f"Expected built binary at {TRTMC_BIN}"
 
     torch.manual_seed(0)
 
     artifacts_root = REPO_ROOT / "artifacts"
     artifacts_root.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="trtf_time_series_e2e_", dir=artifacts_root) as tmp:
+    with tempfile.TemporaryDirectory(prefix="trtmc_time_series_e2e_", dir=artifacts_root) as tmp:
         tmpdir = Path(tmp)
 
         # PatchTST classification: field_input -> logits

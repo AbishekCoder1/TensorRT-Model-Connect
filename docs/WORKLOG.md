@@ -10,7 +10,7 @@ architecture.
 ### What
 - Replaced compile-time TRT dependency with dlopen-based backend dispatch
 - Created ITrtModule virtual interface (was concrete TrtModule)
-- Two DSO backends: libtrtf_backend_trt.so (standard TRT) and libtrtf_backend_trt_rtx.so (TRT-RTX)
+- Two DSO backends: libtrtmc_backend_trt.so (standard TRT) and libtrtmc_backend_trt_rtx.so (TRT-RTX)
 - Python --rtx flag for building TRT-RTX engines
 - RTX-specific features: IRuntimeCache (JIT cache) and CudaGraphStrategy (CUDA graphs)
 
@@ -20,8 +20,8 @@ architecture.
 - Main binary is now GPU-SDK-agnostic -- can load any backend at runtime
 
 ### Key files
-- `include/trtf/runtime/trt_module.h` -- ITrtModule pure virtual interface
-- `include/trtf/runtime/trt_backend.h` -- IBackend + ModuleCreateOptions
+- `include/trtmc/runtime/trt_module.h` -- ITrtModule pure virtual interface
+- `include/trtmc/runtime/trt_backend.h` -- IBackend + ModuleCreateOptions
 - `src/runtime/backend/backend_loader.cpp` -- dlopen dispatch
 - `src/runtime/backend/trt_backend.cpp` -- standard TRT DSO
 - `src/runtime/backend/rtx_backend.cpp` -- TRT-RTX DSO
@@ -49,7 +49,7 @@ match from the TRT engine.
 1. **`fast_path_config.cpp`**: Parse `tokenizer_add_special_tokens` from bundle
    config JSON for all strategies (was previously VL-only). Track whether the
    field was explicitly present via `tokenizer_add_special_tokens_present`.
-2. **`trtf_c.cpp`**: Decoder pipeline uses bundle value if present, otherwise
+2. **`trtmc_c.cpp`**: Decoder pipeline uses bundle value if present, otherwise
    defaults to `true` (matching HF's `tokenizer.encode()` default).
 3. **`engine_builder.py`**: At build time, detect whether the HF tokenizer adds
    special tokens (checks `tokenizer_config.json` for `add_bos_token`, falls
@@ -151,26 +151,26 @@ non-overlapping file ownership.
 
 ## 2026-02-26 - E2E test commands
   Single model:                                                                                                                                                                          
-  docker exec trtf-dev-gb300 bash -c "cd /workspace/trt-transformers-cpp && \
+  docker exec trtmc-dev-gb300 bash -c "cd /workspace/tensorrt-model-connect && \
     source .venv/bin/activate && \                                                                                                                                                       
     python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \                                                                                                                      
-    --engine-dir /mnt/storage/trt-transformers/engines \
-    --trtf-binary ./build/trtf --hf-python .venv/bin/python"
+    --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+    --trtmc-binary ./build/trtmc --hf-python .venv/bin/python"
 
   All 50 models (use cached bundles):
-  docker exec trtf-dev-gb300 bash -c "cd /workspace/trt-transformers-cpp && \
+  docker exec trtmc-dev-gb300 bash -c "cd /workspace/tensorrt-model-connect && \
     source .venv/bin/activate && \
     python -m pytest tests/test_e2e.py -v \
-    --engine-dir /mnt/storage/trt-transformers/engines \
-    --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+    --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+    --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
     --e2e-artifacts-dir /tmp/e2e_artifacts"
 
   All 50 models (force rebuild bundles from HF):
-  docker exec trtf-dev-gb300 bash -c "cd /workspace/trt-transformers-cpp && \
+  docker exec trtmc-dev-gb300 bash -c "cd /workspace/tensorrt-model-connect && \
     source .venv/bin/activate && \
     python -m pytest tests/test_e2e.py -v \
-    --engine-dir /mnt/storage/trt-transformers/engines \
-    --trtf-binary ./build/trtf --hf-python .venv/bin/python \
+    --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+    --trtmc-binary ./build/trtmc --hf-python .venv/bin/python \
     --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts"
 
   Filter by modality:
@@ -188,14 +188,14 @@ non-overlapping file ownership.
   --e2e-task-strategy speech_to_text
 
   Multiple specific models:
-  docker exec trtf-dev-gb300 bash -c "cd /workspace/trt-transformers-cpp && \
+  docker exec trtmc-dev-gb300 bash -c "cd /workspace/tensorrt-model-connect && \
     source .venv/bin/activate && \
     python -m pytest \
     tests/test_e2e.py::test_e2e[bark-large] \
     tests/test_e2e.py::test_e2e[flux-schnell] \
     tests/test_e2e.py::test_e2e[qwen3-vl-2b] \
-    -v --engine-dir /mnt/storage/trt-transformers/engines \
-    --trtf-binary ./build/trtf --hf-python .venv/bin/python"
+    -v --engine-dir /mnt/storage/tensorrt-model-connect/engines \
+    --trtmc-binary ./build/trtmc --hf-python .venv/bin/python"
     
 ## 2026-02-26 — E2E harness round 2: rich artifacts, bug fixes, 41/50 passing
 
@@ -284,7 +284,7 @@ Build (3): bark.py (fine cap), debug_runner.py (temporal tiling), diff_vl.py (de
 ## 2026-02-26 - FLUX blur regression triage and E2E quality recovery
 
 Investigated FLUX image blur against HuggingFace reference and reran full
-containerized E2E (`trtf generate-video`) repeatedly until quality recovered.
+containerized E2E (`trtmc generate-video`) repeatedly until quality recovered.
 
 ### Root causes identified
 
@@ -362,7 +362,7 @@ mismatch, not an engine bug.
 - `tools/debug_diffusion_pipeline.py`: 9/9 PASS
 - `tools/diff_dit.py`: single-step cosine=1.0, 5-step cosine=1.0
 - `tools/diff_full_pipeline.py`: 30-step Python TRT pipeline produces clear cat
-- C++ `trtf generate-video`: 17 frames at 480×832, clear cat walking in garden
+- C++ `trtmc generate-video`: 17 frames at 480×832, clear cat walking in garden
 - 11/11 C++ unit tests pass, 64/64 Python family tests pass
 
 ### Files changed
@@ -371,9 +371,9 @@ mismatch, not an engine bug.
 - `src/runtime/domains/diffusion_backend.h` — (unchanged, text_seq_len already had default 512)
 - `src/cabi/config/fast_path_config.h` — added `text_seq_len` field
 - `src/cabi/config/fast_path_config.cpp` — parse `text_seq_len` from config JSON
-- `trtf_build/trtf_build/diffusion_runner.py` — encode_text mask + zeroing, unpatchify ordering
-- `trtf_build/trtf_build/families/wan_t2v.py` — `_T5_MAX_SEQ_LEN=226`, `text_seq_len` in config
-- `trtf_build/trtf_build/schedulers/flow_match_euler.py` — match HF sigma schedule
+- `tensorrt_model_connect/tensorrt_model_connect/diffusion_runner.py` — encode_text mask + zeroing, unpatchify ordering
+- `tensorrt_model_connect/tensorrt_model_connect/families/wan_t2v.py` — `_T5_MAX_SEQ_LEN=226`, `text_seq_len` in config
+- `tensorrt_model_connect/tensorrt_model_connect/schedulers/flow_match_euler.py` — match HF sigma schedule
 - `scripts/hf_tokenizer.py` — `add_special_tokens=True`
 - `tools/debug_diffusion_pipeline.py` — new: 9-step automated comparison
 - `tools/diff_dit.py` — new: DiT engine diff test
@@ -388,14 +388,14 @@ Set up the project on `gb300-nvl-019-compute01.nvidia.com` (aarch64, 4x GB300 28
 
 ### Changes
 
-**CMakeLists.txt** — Added aarch64 + SBSA search paths to `_trtf_default_search_paths`:
+**CMakeLists.txt** — Added aarch64 + SBSA search paths to `_trtmc_default_search_paths`:
 - `/usr/include/aarch64-linux-gnu`, `/usr/lib/aarch64-linux-gnu`, `/lib/aarch64-linux-gnu`
 - `/usr/local/cuda/targets/sbsa-linux/include`, `/usr/local/cuda/targets/sbsa-linux/lib`
 
 **New files:**
 - `Dockerfile.gb300` — based on `nvidia/cuda:13.0.0-devel-ubuntu24.04` (aarch64). No cmake/ninja from apt (installed via pip).
 - `scripts/setup_gb300.sh` — pip installs `tensorrt` (auto-selects `tensorrt_cu13`), `cmake`, `ninja`. Dynamically finds TRT headers with `find /usr/include -name NvInferRuntime.h`. Builds C++ runtime and runs tests.
-- `scripts/docker_build_gb300.sh` — builds `trtf-dev-gb300` Docker image.
+- `scripts/docker_build_gb300.sh` — builds `trtmc-dev-gb300` Docker image.
 - `scripts/docker_run_gb300.sh` — launches container with `--gpus all` and storage mounts.
 
 ### Verification results
@@ -471,7 +471,7 @@ by wrong rope_theta causing complete output mismatch):
 All produce correct text with perfect argmax and top10 overlap.
 
 **Files changed** (10 files, 66 insertions, 10 deletions):
-- `trtf_build/trtf_build/config.py` — rope_parameters fallback
+- `tensorrt_model_connect/tensorrt_model_connect/config.py` — rope_parameters fallback
 - `tests/builder/test_config.py` — 3 new rope_parameters tests
 - `tests/e2e/test_full_pipeline.py` — stdout/stderr separation
 - `tests/e2e/conftest.py` — skip field support in model JSON
@@ -523,7 +523,7 @@ Added two models to E2E test suite:
 
 **Problem**: `phi_moe.py` duplicated ~200 lines of attention code from `standard_decoder_builder.py` because the monolithic builder couldn't express MoE as a parameter. Every new architecture (DeepStack, hybrid SSM) would cause the same duplication.
 
-**Solution**: Extracted composable building blocks into `trtf_build/trtf_build/graph_blocks.py` (Layer 2):
+**Solution**: Extracted composable building blocks into `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` (Layer 2):
 - `add_attention_block()` — pre-norm → QKV → RoPE/ALiBi → cache → MHA → output proj. Returns dict without residuals.
 - `add_swiglu_mlp()` — gate/up/down SwiGLU MLP
 - `add_gelu_fc_mlp()` — fc1 → activation → fc2
@@ -535,11 +535,11 @@ Added two models to E2E test suite:
 
 ### Part A2: C++ dispatch refactoring (`bundle_helpers.{h,cpp}`)
 
-**Problem**: `trtf_c.cpp` had a 470-line `try_create_from_bundle()` with tokenizer extraction duplicated 3x and DecoderStepEngine init duplicated 2x.
+**Problem**: `trtmc_c.cpp` had a 470-line `try_create_from_bundle()` with tokenizer extraction duplicated 3x and DecoderStepEngine init duplicated 2x.
 
 **Solution**:
 - New `src/cabi/bundle/bundle_helpers.{h,cpp}`: `BundleSections` (section discovery), `extract_tokenizer_from_bundle()` (write to temp dir + create tokenizer), `make_decoder_engine()` (fill DecoderStepEngine from config).
-- Per-strategy factory functions in `trtf_c.cpp`: `create_mamba_pipeline()`, `create_vl_pipeline()`, `create_decoder_pipeline()`.
+- Per-strategy factory functions in `trtmc_c.cpp`: `create_mamba_pipeline()`, `create_vl_pipeline()`, `create_decoder_pipeline()`.
 - `try_create_from_bundle()` shrunk to ~50 lines of dispatch.
 
 ### Part B: Test scalability + documentation
@@ -605,7 +605,7 @@ Added two models to E2E test suite:
 
 ## 2026-02-17 — Add Nemotron-4 Family + NVIDIA Model Entries (22 → 23 families, 19 → 25 E2E models)
 
-- **Nemotron-4 plugin** (`trtf_build/trtf_build/families/nemotron.py`)
+- **Nemotron-4 plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/nemotron.py`)
   - Matches `model_type == "nemotron"` (NVIDIA Nemotron-4 / Minitron).
   - NemotronLayerNorm1P: LayerNorm with bias + gamma offset (+1 to stored weight, matching HF's `self.weight + 1`).
   - 2-projection MLP (up_proj → squared ReLU → down_proj), no gate projection. Maps to `gelu_fc` builder MLP type with `relu2` activation.
@@ -627,22 +627,22 @@ Added two models to E2E test suite:
 
 ## 2026-02-16 — Add GPT-Neo, CodeGen, BLOOM, Mixtral Families (18 → 22)
 
-- **GPT-Neo plugin** (`trtf_build/trtf_build/families/gpt_neo.py`)
+- **GPT-Neo plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/gpt_neo.py`)
   - Matches `model_type == "gpt_neo"` (EleutherAI/gpt-neo-125m).
   - Learned positions, LayerNorm, GELU, separate Q/K/V Linear projections, Conv1D MLP (like GPT-2), tied embeddings.
   - Local/global attention alternation ignored (causal mask handles it).
 
-- **CodeGen plugin** (`trtf_build/trtf_build/families/codegen.py`)
+- **CodeGen plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/codegen.py`)
   - Matches `model_type == "codegen"` (Salesforce/codegen-350M-mono).
   - GPT-J-like: parallel residual, partial RoPE (`rotary_dim / head_dim`), fused QKV, single LayerNorm per block.
   - `lm_head.bias` support (new in standard builder).
 
-- **BLOOM plugin** (`trtf_build/trtf_build/families/bloom.py`)
+- **BLOOM plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/bloom.py`)
   - Matches `model_type == "bloom"` (bigscience/bloom-560m).
   - ALiBi position encoding (new `position_type="alibi"` in builder).
   - Embedding LayerNorm, fused QKV with per-head interleaving (like GPT-NeoX), all biases, tied embeddings.
 
-- **Mixtral plugin** (`trtf_build/trtf_build/families/mixtral.py`)
+- **Mixtral plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/mixtral.py`)
   - Matches `model_type == "mixtral"` (mistralai/Mixtral-8x7B-v0.1).
   - Custom MoE builder adapted from `phi_moe.py`, standard top-k softmax routing (not SparseMixer).
   - RMSNorm + RoPE + GQA attention, `runtime_strategy="decoder_moe"`.
@@ -703,7 +703,7 @@ Added two models to E2E test suite:
 
 ## 2026-02-16 — Mamba/SSM Support with Recurrent State Runtime
 
-- **Mamba family plugin** (`trtf_build/trtf_build/families/mamba.py`)
+- **Mamba family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/mamba.py`)
   - Matches `model_type == "mamba"`.
   - Custom graph builder: selective scan, causal conv1d with cached state, input-dependent discretization.
   - Engine I/O: token_id + per-layer conv_state/ssm_state inputs, logits + present_conv/present_ssm outputs.
@@ -716,7 +716,7 @@ Added two models to E2E test suite:
   - `MambaStepEngine`: engine struct with SSM-specific tensor names and dimensions.
   - `run_mamba_step()`: single-step inference, updates conv + SSM state.
   - `MambaBackend`: autoregressive loop without prefill phase.
-  - Dispatch from `trtf_c.cpp` via `runtime_strategy == "ssm_recurrent"`.
+  - Dispatch from `trtmc_c.cpp` via `runtime_strategy == "ssm_recurrent"`.
 
 - **Python debug runner** (`debug_runner.py`)
   - Added `MambaTrtRunner` alongside `TrtRunner` for pure-Python Mamba TRT inference.
@@ -726,7 +726,7 @@ Added two models to E2E test suite:
 
 ## 2026-02-16 — Phi-MoE Family Plugin (Mixture of Experts)
 
-- **Phi-MoE family plugin** (`trtf_build/trtf_build/families/phi_moe.py`)
+- **Phi-MoE family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/phi_moe.py`)
   - Matches `model_type == "phimoe"`.
   - SparseMixer routing: independent masked softmax over all expert logits (not standard top-k), top-2 selection.
   - Custom graph builder: router + 16 expert SwiGLU MLPs with gather/scatter dispatch.
@@ -740,7 +740,7 @@ Added two models to E2E test suite:
   - `"decoder_kv_cache"`: standard attention decoder with KV cache.
   - `"decoder_moe"`: MoE decoder (same KV cache, routing in TRT graph).
   - `"ssm_recurrent"`: Mamba/SSM (conv_state + ssm_state, no KV cache).
-- **`trtf_c.cpp`** dispatches to the correct backend based on `runtime_strategy`.
+- **`trtmc_c.cpp`** dispatches to the correct backend based on `runtime_strategy`.
 - **`fast_path_config.cpp`** parses `runtime_strategy` from config.json, with SSM-specific fields (d_inner, state_size, conv_kernel).
 
 ## 2026-02-16 — Extended Standard Decoder Builder + 5 New Plugins
@@ -761,18 +761,18 @@ Added two models to E2E test suite:
 
 ## 2026-02-16 — Granite + InternLM2 Family Plugins
 
-- **Granite family plugin** (`trtf_build/trtf_build/families/granite.py`)
+- **Granite family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/granite.py`)
   - Matches `model_type` starting with `granite`.
   - Absorbs four Granite-specific multipliers (embedding, attention, residual, logits) into weight tensors at load time.
   - Standard decoder builder used without modification after multiplier absorption.
 
-- **InternLM2 family plugin** (`trtf_build/trtf_build/families/internlm.py`)
+- **InternLM2 family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/internlm.py`)
   - Matches `model_type` starting with `internlm`.
   - Handles fused wqkv projection splitting and non-standard key names (tok_embeddings, attention.wqkv, feed_forward.w1/w2/w3, etc.).
 
 ## 2026-02-16 — Phi-3 Family Plugin + Shared Script Hardening
 
-- **Phi-3 family plugin** (`trtf_build/trtf_build/families/phi.py`)
+- **Phi-3 family plugin** (`tensorrt_model_connect/tensorrt_model_connect/families/phi.py`)
   - Matches `model_type` starting with `phi3` or `phi`.
   - Handles fused QKV projection splitting (`qkv_proj` -> separate Q, K, V).
   - Handles fused gate-up projection splitting (`gate_up_proj` -> separate gate, up).
@@ -815,11 +815,11 @@ Added two models to E2E test suite:
 
 ## 2026-02-15 — HuggingFace-like Python API + Self-Contained Container + README Rewrite
 
-- **HuggingFace-like Python API** (`trtf_build.build()`)
+- **HuggingFace-like Python API** (`tensorrt_model_connect.build()`)
   - New `build(model_id_or_path, output_path, ...)` accepts HF repo IDs (auto-downloads) or local directories.
   - `_resolve_model()` helper: checks for local `config.json`, falls back to `huggingface_hub.snapshot_download()`.
-  - Exported from `trtf_build.__init__`: `from trtf_build import build`.
-  - CLI updated: `trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb` (auto-downloads).
+  - Exported from `tensorrt_model_connect.__init__`: `from tensorrt_model_connect import build`.
+  - CLI updated: `trtmc-build build Qwen/Qwen3-0.6B -o qwen3.trtfb` (auto-downloads).
 
 - **Self-contained Dockerfile**
   - Added `libnvinfer-headers-dev` to apt packages in Dockerfile (no host TRT mount needed).
@@ -827,7 +827,7 @@ Added two models to E2E test suite:
   - Simplified `docker_run.sh`: removed `/opt/trt` volume mount and `LD_LIBRARY_PATH` env var.
 
 - **One-shot container setup** (`scripts/setup_container.sh`)
-  - Creates `.venv`, installs TRT cu12 from pip, installs trtf_build, builds C++ runtime, runs tests.
+  - Creates `.venv`, installs TRT cu12 from pip, installs tensorrt_model_connect, builds C++ runtime, runs tests.
   - Single command: `./scripts/setup_container.sh` after `docker run`.
 
 - **Fix: bfloat16 loading without torch** (`checkpoint_mapper.py`)
@@ -843,7 +843,7 @@ Added two models to E2E test suite:
 
 ## 2026-02-15 — Pure-Python Diff Test Framework
 
-- **Pure-Python TRT inference runner** (`trtf_build/trtf_build/debug_runner.py`)
+- **Pure-Python TRT inference runner** (`tensorrt_model_connect/tensorrt_model_connect/debug_runner.py`)
   - `TrtRunner` class: deserializes TRT engine, runs single-step autoregressive decoding with KV cache management.
   - Matches C++ runtime behavior exactly (position tracking, attention mask, cache append/shift).
   - Auto-detects `attention_size` from engine tensor shapes (handles non-standard head_dim like Qwen3).
@@ -864,13 +864,13 @@ Added two models to E2E test suite:
   - Compares embedding, per-layer hidden states, and final logits against HF `output_hidden_states`.
   - Validated: Qwen3-0.6B, layers 0-26 match to 0.001465 max_diff, logits match to 0.000021.
 
-- **Fixed eval_mmlu.py** — updated CLI invocation to `trtf run <bundle> --prompt` format.
+- **Fixed eval_mmlu.py** — updated CLI invocation to `trtmc run <bundle> --prompt` format.
 
 ## 2026-02-15 — Python Build / C++ Runtime Architecture Split
 
 - **Migrated TRT Engine Build from C++ to Python**
   - **Architecture shift**: C++ is now a bundle-only runtime. Python builds engines, C++ runs them.
-  - New `trtf_build/` Python package uses TensorRT Python API + `safetensors` library to build TRT engines and produce `.trtfb` bundles.
+  - New `tensorrt_model_connect/` Python package uses TensorRT Python API + `safetensors` library to build TRT engines and produce `.trtfb` bundles.
   - C++ runtime simplified to bundle-only execution: ~13 source files, down from ~40.
   - **Removed ~3500 lines of C++ build code**:
     - Safetensors reader (`SafetensorReader`, `TensorSource`)
@@ -884,11 +884,11 @@ Added two models to E2E test suite:
     - Engine cache system (`engine_cache.h/cpp`)
     - Fast-path config (`FastPathModelConfig`)
     - Tensor math utilities (`transpose_2d`, `expand_kv_projection`, `repeat_head_norm`)
-  - **4 family plugins ported to Python**: Qwen, LLaMA, Mistral, Gemma — each as a Python module in `trtf_build/`.
+  - **4 family plugins ported to Python**: Qwen, LLaMA, Mistral, Gemma — each as a Python module in `tensorrt_model_connect/`.
   - **C++ tests reduced from 26 to 11**: removed tests for C++ build infrastructure (checkpoint mappers, model loader, engine cache, family registries, model runtime, tensor math, etc.). Remaining tests cover bundle format, C ABI, CLI, pipeline API, tokenizer, and TRT runtime.
   - **New CLI split**:
-    - `trtf-build build|inspect|version` — Python CLI for building bundles from HF model directories.
-    - `trtf run|inspect|version` — C++ CLI for running inference from `.trtfb` bundles.
+    - `trtmc-build build|inspect|version` — Python CLI for building bundles from HF model directories.
+    - `trtmc run|inspect|version` — C++ CLI for running inference from `.trtfb` bundles.
   - **What C++ still owns**: Bundle loading/deserialization, TRT engine deserialization, autoregressive generation loop (prefill + decode), KV-cache management, CUDA resource management, tokenizer bridge, C ABI entry point.
   - **What Python now owns**: HF config.json parsing, safetensors loading, checkpoint mapping (HF tensor keys to canonical format), TRT network graph construction (via TensorRT Python API), engine compilation, bundle packaging.
 
@@ -896,23 +896,23 @@ Added two models to E2E test suite:
 
 - **Complete Bundle System + Remove Environment Variables**
   - Implemented complete `.trtfb` bundle build/save/load pipeline:
-    - `trtf build <model-dir> -o model.trtfb` — compiles TRT engine + embeds tokenizer files
-    - `trtf run model.trtfb --prompt "text"` — loads self-contained bundle for inference
-    - `trtf inspect model.trtfb` — shows bundle metadata
+    - `trtmc build <model-dir> -o model.trtfb` — compiles TRT engine + embeds tokenizer files
+    - `trtmc run model.trtfb --prompt "text"` — loads self-contained bundle for inference
+    - `trtmc inspect model.trtfb` — shows bundle metadata
   - **Engine plan serialization**: Added `SerializeEnginePlan()` to `trt_engine_lifecycle`, `serialize_engine_plan()` virtual to `IGenerationBackend`, overridden in both `TrtBackend` and `TrtBackendFastPath`.
   - **Bundle save**: `PipelineImpl::save_bundle()` serializes engine plan + embeds `config.json`, `tokenizer.json`, `tokenizer_config.json` from model directory. Metadata includes TRT version, GPU name, timestamp, architecture info.
   - **Bundle load**: `try_create_from_bundle()` deserializes engine, extracts tokenizer files to temp dir, creates pipeline. Temp dir cleaned up in destructor.
-  - **`BuildBundle()` implementation**: Delegates to `trtf_create_pipeline_ex()` + `save_bundle()`.
+  - **`BuildBundle()` implementation**: Delegates to `trtmc_create_pipeline_ex()` + `save_bundle()`.
   - **Removed 5 user-facing environment variables** (replaced by CLI flags / API options):
-    - `TRTF_HF_PYTHON` → `--hf-python PATH` / `TrtfPipelineOptions::hf_python`
-    - `TRTF_MAX_CACHE_LENGTH` → `--max-cache-length N` / `TrtfPipelineOptions::max_cache_length`
-    - `TRTF_TRT_ENGINE_CACHE_DIR` → `--engine-cache-dir DIR` / `TrtfPipelineOptions::engine_cache_dir`
-    - `TRTF_DISABLE_ENGINE_CACHE` → `--no-engine-cache` / `TrtfPipelineOptions::no_engine_cache`
-    - `TRTF_MAX_NEW_TOKENS` → `--max-new-tokens N` / `TrtfPipelineOptions::max_new_tokens`
-  - Kept 3 env vars: `TRTF_DATA_DIR` (internal), `TRTF_TRT_LOG_STDERR`, `TRTF_TRT_LOG_MIN_SEVERITY` (TRT debug).
+    - `TRTMC_HF_PYTHON` → `--hf-python PATH` / `TrtmcPipelineOptions::hf_python`
+    - `TRTMC_MAX_CACHE_LENGTH` → `--max-cache-length N` / `TrtmcPipelineOptions::max_cache_length`
+    - `TRTMC_TRT_ENGINE_CACHE_DIR` → `--engine-cache-dir DIR` / `TrtmcPipelineOptions::engine_cache_dir`
+    - `TRTMC_DISABLE_ENGINE_CACHE` → `--no-engine-cache` / `TrtmcPipelineOptions::no_engine_cache`
+    - `TRTMC_MAX_NEW_TOKENS` → `--max-new-tokens N` / `TrtmcPipelineOptions::max_new_tokens`
+  - Kept 3 env vars: `TRTMC_DATA_DIR` (internal), `TRTMC_TRT_LOG_STDERR`, `TRTMC_TRT_LOG_MIN_SEVERITY` (TRT debug).
   - **Engine cache config**: Thread-local `EngineCacheConfig` struct with RAII guard. Set before pipeline creation, cleared after.
-  - **Python path threading**: Added `python_path` parameter to `CreateHfPythonTokenizer()`, `CreateHfPythonBackend()`, `BackendSelection`, threaded from `TrtfPipelineOptions`.
-  - Extended `TrtfPipelineOptions` C struct: added `hf_python`, `engine_cache_dir`, `no_engine_cache` fields.
+  - **Python path threading**: Added `python_path` parameter to `CreateHfPythonTokenizer()`, `CreateHfPythonBackend()`, `BackendSelection`, threaded from `TrtmcPipelineOptions`.
+  - Extended `TrtmcPipelineOptions` C struct: added `hf_python`, `engine_cache_dir`, `no_engine_cache` fields.
   - 5 new CLI tests for `--hf-python`, `--engine-cache-dir`, `--no-engine-cache`, build+hf-python, combined flags.
   - **Post-audit fixes**:
     - Fixed temp directory leak in `try_create_from_bundle()` — added RAII guard that cleans up temp dir on exception, transfers ownership to PipelineImpl on success.
@@ -924,7 +924,7 @@ Added two models to E2E test suite:
   - **New tests added in audit**:
     - `test_bundle_format`: realistic section names, int64 offset parsing, truncated bundle error handling (3 new)
     - `test_engine_cache_io`: RAII guard cleanup, nested guards (2 new)
-    - `test_c_abi_entry`: TrtfPipelineOptions zero-init, create_ex with options, non-bundle file path (3 new)
+    - `test_c_abi_entry`: TrtmcPipelineOptions zero-init, create_ex with options, non-bundle file path (3 new)
   - **E2E bundle validation** (all 4 families, container GPU):
     - Qwen3 (0.6B): build + inspect + inference from bundle matches direct
     - TinyLlama (1.1B): build + inspect + inference from bundle matches direct
@@ -971,7 +971,7 @@ Added two models to E2E test suite:
   - All 26 tests pass (16 host, 10 sandbox-blocked as expected).
 
 ## 2026-02-09
-- Created new repository scaffold at `/home/yifeif/repos/trt-transformers-cpp`.
+- Created new repository scaffold at `/home/yifeif/repos/tensorrt-model-connect`.
 - Chosen strategy: API-first TensorRT implementation, avoid default dependence on ONNX parser.
 - Verified host/system TensorRT artifacts and API surface (including newer attention/rotary/KV APIs in local TRT build headers).
 - Noted environment mismatch: early sandbox checks failed CUDA setup even though host GPU is available.
@@ -987,7 +987,7 @@ Added two models to E2E test suite:
   - Added CUDA dev-header/runtime checks before enabling TRT backend compilation.
 - Validated Docker flow:
   - Fixed CUDA base image tag to a valid one (`nvidia/cuda:12.6.3-devel-ubuntu22.04`).
-  - Built `trtf-dev` image successfully.
+  - Built `trtmc-dev` image successfully.
   - Verified GPU visibility with in-container `nvidia-smi`.
 - Verified in-container configure/build/test/example path with mounted TRT artifacts.
 - Added a minimal real TensorRT execution path:
@@ -1001,12 +1001,12 @@ Added two models to E2E test suite:
   - Kept deterministic toy-token behavior so current text-generation tests remain stable.
 - Validated real TRT execution in GPU container:
   - Updated container runtime library path setup so TensorRT builder/runtime resources load correctly.
-  - Built with `/opt/trt/Debug/lib/libnvinfer.so` and verified `./build-gpu-debug/trtf_text_generation --force-trt` runs with `backend=trt`.
+  - Built with `/opt/trt/Debug/lib/libnvinfer.so` and verified `./build-gpu-debug/trtmc_text_generation --force-trt` runs with `backend=trt`.
 - Completed model-driven M1 wiring:
   - Added `DecoderModel` loader (`config.json`, `vocab.txt`, `transitions.txt`) and built-in model assets at `models/tiny-cake-v1`.
   - Switched tokenizer construction to vocab-from-model and converted CPU/TRT backends to consume model transitions/default token.
   - Threaded model cache length into TRT decoder engine/input validation instead of fixed compile-time cache length.
-  - Updated CLI/tests/docs to use explicit built-in model id `trtf/tiny-cake-v1` (or a local model directory path).
+  - Updated CLI/tests/docs to use explicit built-in model id `trtmc/tiny-cake-v1` (or a local model directory path).
 - Replaced code-generated transition logits in TRT path with loaded checkpoint tensors:
   - Added `weights.txt` checkpoint parser in model loader (tensor blocks + simple ops).
   - Added `weights_file` support in `config.json` and built-in `models/tiny-cake-v1/weights.txt`.
@@ -1019,8 +1019,8 @@ Added two models to E2E test suite:
   - Added Python runner script `scripts/hf_generate.py` and a temporary parity helper script (later removed).
   - Installed Python deps in GPU container (`torch`, `transformers`, `safetensors`, etc.) and validated exact output match against direct transformers generation.
 - Decoupled pipeline orchestration from model/backend specifics:
-  - Added model resolver seam (`include/trtf/model_resolver.h`, `src/model/model_resolver.cpp`).
-  - Added runtime assembly seam (`include/trtf/runtime_factory.h`, `src/runtime/runtime_factory.cpp`).
+  - Added model resolver seam (`include/trtmc/model_resolver.h`, `src/model/model_resolver.cpp`).
+  - Added runtime assembly seam (`include/trtmc/runtime_factory.h`, `src/runtime/runtime_factory.cpp`).
   - Simplified `Pipeline::CreateTextGeneration` to orchestrate only through resolver + runtime factory.
   - Added custom extension hooks (`RegisterTextGenerationModelResolver`, `RegisterTextGenerationRuntimeAssembler`) for out-of-tree model support.
   - Added seam-level tests (`tests/test_model_resolver.cpp`, `tests/test_runtime_factory.cpp`) and custom extension E2E test (`tests/test_extension_registry.cpp`) to keep extension points stable.
@@ -1066,30 +1066,30 @@ Implementation progress started:
   - Added `src/model/hf_family_registry.cpp` and `test_hf_family_registry` target to `CMakeLists.txt`.
 - Added first built-in real family path (`qwen-style`) through shared infrastructure:
   - `RegisterBuiltinHfModelFamilies()` now registers `qwen-decoder-definition`.
-  - Match rule: HF local model with `model_type` prefix `qwen`/`qwq` and normalized definition files under `<model_dir>/trtf_decoder/`.
-  - Loader rule: family loader calls shared `LoadDecoderModel(...)` on `trtf_decoder/` and returns `kDecoderDefinition`.
-  - Fallback preserved: Qwen HF dirs without `trtf_decoder/` continue through raw `kHuggingFaceLocal` path.
+  - Match rule: HF local model with `model_type` prefix `qwen`/`qwq` and normalized definition files under `<model_dir>/trtmc_decoder/`.
+  - Loader rule: family loader calls shared `LoadDecoderModel(...)` on `trtmc_decoder/` and returns `kDecoderDefinition`.
+  - Fallback preserved: Qwen HF dirs without `trtmc_decoder/` continue through raw `kHuggingFaceLocal` path.
 - Added test coverage for built-in Qwen family:
   - `tests/test_qwen_family.cpp` validates match + load + shared runtime execution and no-regression fallback behavior.
 - Added end-to-end built-in QWEN3 alias path:
   - `ResolveHfModelViaFamilyRegistry(...)` now maps model id aliases (`QWEN3`) to bundled HF-style assets at `models/hf/qwen3`.
-  - Added bundled QWEN3 model assets with normalized decoder-definition files under `models/hf/qwen3/trtf_decoder`.
-  - Added ergonomic API wrapper path `trtf::loadModel(...).generate(...)` on top of `Pipeline` for direct model-style usage.
+  - Added bundled QWEN3 model assets with normalized decoder-definition files under `models/hf/qwen3/trtmc_decoder`.
+  - Added ergonomic API wrapper path `trtmc::loadModel(...).generate(...)` on top of `Pipeline` for direct model-style usage.
 - Hardened QWEN3 bundled model assets:
-  - Added `models/hf/qwen3/trtf_decoder/weights.txt` and wired `weights_file` in decoder config so TRT path uses checkpoint tensors.
+  - Added `models/hf/qwen3/trtmc_decoder/weights.txt` and wired `weights_file` in decoder config so TRT path uses checkpoint tensors.
 - Added direct model-style demo executable:
-  - `examples/load_model.cpp` (`trtf_load_model`) demonstrates `auto model = trtf::loadModel(\"QWEN3\", ...); std::string out = model.generate(\"Hello\");`.
+  - `examples/load_model.cpp` (`trtmc_load_model`) demonstrates `auto model = trtmc::loadModel(\"QWEN3\", ...); std::string out = model.generate(\"Hello\");`.
 - Validated QWEN3 E2E generation:
-  - Host non-GPU path: `./build/trtf_text_generation QWEN3 "Hello"` returns `backend=cpu-reference` with output `hello from qwen3.`.
-  - GPU container TRT path: built in `build-gpu-qwen3` and ran `./build-gpu-qwen3/trtf_text_generation --force-trt QWEN3 "Hello"` with result `backend=trt` and output `hello from qwen3.`.
+  - Host non-GPU path: `./build/trtmc_text_generation QWEN3 "Hello"` returns `backend=cpu-reference` with output `hello from qwen3.`.
+  - GPU container TRT path: built in `build-gpu-qwen3` and ran `./build-gpu-qwen3/trtmc_text_generation --force-trt QWEN3 "Hello"` with result `backend=trt` and output `hello from qwen3.`.
 - Started upstream Qwen3 safetensors bridge implementation:
   - Added native C++ safetensors reader (`src/model/safetensors_loader.cpp`) with F32/F16/BF16 decode support.
   - Extended model loader to accept `.safetensors` in `weights_file` and to auto-build placeholder vocab/transitions when checkpoint-backed models omit `vocab.txt`/`transitions.txt`.
   - Added initial Qwen bridge mapping (`architecture_family=qwen3`) from upstream tensor keys (`model.layers.0.*`, `model.embed_tokens.weight`, `lm_head.weight`) into shared decoder checkpoint tensors.
-  - Added a temporary prep script to scaffold `trtf_decoder/` for local upstream Qwen3 model dirs (later removed).
+  - Added a temporary prep script to scaffold `trtmc_decoder/` for local upstream Qwen3 model dirs (later removed).
   - Added safetensors coverage in `tests/test_model_loader.cpp` by generating a synthetic safetensors checkpoint and loading it through `LoadDecoderModel`.
 - Extended Qwen family resolver for direct upstream root loading:
-  - Qwen family now accepts either `trtf_decoder/` assets or direct HF root `config.json + model.safetensors`.
+  - Qwen family now accepts either `trtmc_decoder/` assets or direct HF root `config.json + model.safetensors`.
   - Model loader auto-detects root `model.safetensors` when `weights_file` is not explicitly set.
   - `tests/test_qwen_family.cpp` now validates qwen-root safetensors bridge resolution (`kDecoderDefinition` + checkpoint loaded).
 
@@ -1124,12 +1124,12 @@ Validation run results after full-stack iteration:
 - Host:
   - `cmake --build build -j` passed.
   - `ctest --test-dir build --output-on-failure` passed (`9/9`).
-  - `./build/trtf_load_model QWEN3 Hello` => `backend=cpu-reference`, output `hello from qwen3.`.
-  - `./build/trtf_load_model --force-trt QWEN3 Hello` fails on host as expected when TRT runtime is unavailable in host session.
-- GPU container (`trtf-dev`):
+  - `./build/trtmc_load_model QWEN3 Hello` => `backend=cpu-reference`, output `hello from qwen3.`.
+  - `./build/trtmc_load_model --force-trt QWEN3 Hello` fails on host as expected when TRT runtime is unavailable in host session.
+- GPU container (`trtmc-dev`):
   - `cmake --build build-container -j` passed.
   - `ctest --test-dir build-container --output-on-failure` passed (`9/9`).
-  - `./build-container/trtf_load_model --force-trt QWEN3 Hello` => `backend=trt`, output `hello from qwen3.`.
+  - `./build-container/trtmc_load_model --force-trt QWEN3 Hello` => `backend=trt`, output `hello from qwen3.`.
 
 Refactor + validation follow-up (model-definition ownership + MMLU):
 - Refactored TRT model-definition ownership out of runtime and into `src/model`:
@@ -1140,7 +1140,7 @@ Refactor + validation follow-up (model-definition ownership + MMLU):
 - Added MMLU evaluator:
   - `scripts/eval_mmlu.py` supports:
     - `--backend transformers` (reference quality path for upstream checkpoints),
-    - `--backend trtf` (direct binary-driven validation path).
+    - `--backend trtmc` (direct binary-driven validation path).
   - Reports `accuracy`, `answered`, and enforces `--min-accuracy`.
 - Qwen3 MMLU validation run:
   - Model: `Qwen/Qwen3-0.6B`
@@ -1170,7 +1170,7 @@ Refactor + validation follow-up (model-definition ownership + MMLU):
 - Added token-id and cache-config metadata handling:
   - `DecoderArchitectureConfig` now includes `bos_token_id`, `eos_token_id`, `pad_token_id`.
   - Loader parses token ids from config (int or first array element).
-  - Added optional env override `TRTF_MAX_CACHE_LENGTH`.
+  - Added optional env override `TRTMC_MAX_CACHE_LENGTH`.
   - Added default practical cap for Qwen root checkpoints when `max_cache_length` is not explicitly provided.
 - Test coverage updates:
   - `tests/test_model_loader.cpp` now validates sharded safetensors load path.
@@ -1178,14 +1178,14 @@ Refactor + validation follow-up (model-definition ownership + MMLU):
 - Build/test validation:
   - `cmake --build build -j` passed.
   - `ctest --test-dir build --output-on-failure` passed (`9/9`).
-  - `./build/trtf_load_model QWEN3 Hello` still works (`backend=cpu-reference`, output `hello from qwen3.`).
+  - `./build/trtmc_load_model QWEN3 Hello` still works (`backend=cpu-reference`, output `hello from qwen3.`).
 
 Remaining gap note:
 - Built-in `QWEN3` alias remains bundled demo assets for plumbing checks.
 - Real upstream production parity is improved but not yet complete end-to-end (notably beyond host CPU fallback this turn and with remaining TRT math/runtime fidelity work for large-scale upstream checkpoints).
 - GPU container validation after this iteration:
-  - Ran full container configure/build/test + force-TRT smoke in `trtf-dev`.
-  - Result: build succeeded, `ctest` passed (`9/9`), and `./build-container/trtf_load_model --force-trt QWEN3 Hello` returned `backend=trt` with `hello from qwen3.`.
+  - Ran full container configure/build/test + force-TRT smoke in `trtmc-dev`.
+  - Result: build succeeded, `ctest` passed (`9/9`), and `./build-container/trtmc_load_model --force-trt QWEN3 Hello` returned `backend=trt` with `hello from qwen3.`.
 
 ## 2026-02-13 (continued: real upstream Qwen3 TRT parity root-cause fix)
 
@@ -1213,8 +1213,8 @@ What was implemented this iteration:
     - Updated `add_rms_norm(...)`, `add_rms_norm_per_head(...)`, and `add_qwen_layer_block(...)` signatures/callers to consume shared tensors.
 
 - Added targeted diff instrumentation for TRT logits:
-  - `TRTF_DEBUG_LOGITS_TOPK=<k>` (env) in `src/runtime/trt_backend_qwen.cpp` prints per-step top-k `token_id:logit` for direct HF-vs-TRT comparison.
-  - Kept `TRTF_DEBUG_MASK` env-gated mask dump hook for attention-mask verification.
+  - `TRTMC_DEBUG_LOGITS_TOPK=<k>` (env) in `src/runtime/trt_backend_qwen.cpp` prints per-step top-k `token_id:logit` for direct HF-vs-TRT comparison.
+  - Kept `TRTMC_DEBUG_MASK` env-gated mask dump hook for attention-mask verification.
 
 Validation outcomes (real upstream assets, TRT backend):
 - Before tokenizer-sanitization fix:
@@ -1223,7 +1223,7 @@ Validation outcomes (real upstream assets, TRT backend):
   - TRT top-5 for prompt `Hello`:
     - `21806:8.13904`, `14582:8.07674`, `15846:7.63189`, `477:7.57898`, `1957:7.34415`
   - HF top-5 reference (same prompt/model) matched numerically at same ranking.
-  - `./build-container-qwen2/trtf_load_model --force-trt QWEN3 Hello` now yields:
+  - `./build-container-qwen2/trtmc_load_model --force-trt QWEN3 Hello` now yields:
     - `backend=trt`
     - `Hello Answer`
 - Longer generation sanity check:
@@ -1231,7 +1231,7 @@ Validation outcomes (real upstream assets, TRT backend):
   - Output example: `The capital of France is Paris. The capital of Italy is Rome. ...`
 
 MMLU TRT sanity check (post-fix):
-- Command used backend `trtf` with real `QWEN3` and forced TRT in container.
+- Command used backend `trtmc` with real `QWEN3` and forced TRT in container.
 - Sampled run: `num-samples=4` (small sanity pass due per-sample startup cost in current evaluator path).
 - Result:
   - `answered=4`, `correct=2`, `accuracy=0.5000`, `status=PASS`.
@@ -1242,7 +1242,7 @@ Current status:
 
 Next steps for future agents:
 1. Add regression tests for tokenizer warning-contamination behavior in HF tokenizer bridge.
-2. Keep `TRTF_DEBUG_LOGITS_TOPK` as gated debug tooling, and consider removing/limiting `TRTF_DEBUG_MASK` once no longer needed.
+2. Keep `TRTMC_DEBUG_LOGITS_TOPK` as gated debug tooling, and consider removing/limiting `TRTMC_DEBUG_MASK` once no longer needed.
 3. Improve `scripts/eval_mmlu.py` TRT mode to avoid one-process-per-question startup (persistent runner), then run a larger official sample (for example 64).
 4. Re-record full MMLU TRT metric after persistent-eval optimization.
 
@@ -1279,10 +1279,10 @@ Phase 1 implementation completed in this iteration:
 Engine cache behavior notes:
 - Cache key includes model-definition scalars and tensor contents (including Qwen per-layer tensors), plus runtime flags.
 - Cache location defaults to:
-  - `$TRTF_TRT_ENGINE_CACHE_DIR` when set, else
-  - `$HOME/.cache/trtf/trt_engine_plans`, else
-  - `/tmp/trtf/trt_engine_plans`.
-- Cache can be disabled with `TRTF_DISABLE_ENGINE_CACHE=1`.
+  - `$TRTMC_TRT_ENGINE_CACHE_DIR` when set, else
+  - `$HOME/.cache/trtmc/trt_engine_plans`, else
+  - `/tmp/trtmc/trt_engine_plans`.
+- Cache can be disabled with `TRTMC_DISABLE_ENGINE_CACHE=1`.
 
 Validation policy for this branch (requested by user):
 - After every code change set, run all unit tests and E2E tests (host + TRT container path).
@@ -1292,18 +1292,18 @@ Validation policy for this branch (requested by user):
 
 Implemented to support direct stdout-based debugging:
 - Added TRT logger passthrough (now in `src/runtime/domains/trt_common.cpp`):
-  - `TRTF_TRT_LOG_STDERR=1` enables forwarding TensorRT `ILogger` lines to stderr/stdout stream.
-  - `TRTF_TRT_LOG_MIN_SEVERITY=<INTERNAL_ERROR|ERROR|WARNING|INFO|VERBOSE>` controls verbosity (default: `INFO`).
+  - `TRTMC_TRT_LOG_STDERR=1` enables forwarding TensorRT `ILogger` lines to stderr/stdout stream.
+  - `TRTMC_TRT_LOG_MIN_SEVERITY=<INTERNAL_ERROR|ERROR|WARNING|INFO|VERBOSE>` controls verbosity (default: `INFO`).
 - Added new reproducible E2E diagnostics script:
   - `scripts/test_qwen3_trt_e2e.sh`
   - Runs configure/build/ctest, then two forced-TRT `QWEN3` runs with timing and log capture.
-  - Writes logs to `/tmp/trtf_qwen3_trt_e2e.log` by default.
+  - Writes logs to `/tmp/trtmc_qwen3_trt_e2e.log` by default.
 
 Validation run summary:
 - Host:
   - `cmake --build build -j` passed.
   - `ctest --test-dir build --output-on-failure` passed (`9/9`).
-  - `./build/trtf_load_model trtf/tiny-cake-v1 Hello` passed (`backend=cpu-reference`).
+  - `./build/trtmc_load_model trtmc/tiny-cake-v1 Hello` passed (`backend=cpu-reference`).
 - Container via `scripts/test_qwen3_trt_e2e.sh`:
   - configure/build/ctest passed (`9/9`).
   - Run 1 (`--force-trt QWEN3 Hello`) output:
@@ -1345,7 +1345,7 @@ HF Transformers comparison baseline:
   - Family-owned code in `transformers/models/<family>/` (configuration/modeling/tokenization/processing).
   - Shared generation and cache in common modules (for example generation utilities and cache abstractions).
   - Auto-mapping/registry routes model id/config to family class without touching core generation logic.
-- trtf target mapping:
+- trtmc target mapping:
   - `src/model/<family>/` should mirror HF family ownership for model-specific definitions.
   - `src/runtime/` should mirror HF shared generation runtime (family-agnostic decode + scheduling).
   - `src/model/hf_family_registry.cpp` should mirror HF auto-mapping role.
@@ -1397,7 +1397,7 @@ Implemented in this iteration (first concrete cut of bottleneck reduction):
 - Introduced family-owned loader seam in `src/model`:
   - Added `src/model/qwen3_decoder_model_loader.h/cpp` (since folded into `src/models/qwen/registration.cpp`).
   - `src/model/hf_family_registry.cpp` now routes HF-root Qwen checkpoint loading through a family-owned loader in `src/models/qwen/registration.cpp`.
-  - Kept normalized `trtf_decoder/` fixture path compatible (`LoadDecoderModel(...)`) and added fallback handling in the Qwen loader seam for fixture metadata.
+  - Kept normalized `trtmc_decoder/` fixture path compatible (`LoadDecoderModel(...)`) and added fallback handling in the Qwen loader seam for fixture metadata.
 - Wired build graph:
   - `CMakeLists.txt` now compiles `src/runtime/trt_backend.cpp` and `src/model/qwen3_decoder_model_loader.cpp`.
 
@@ -1411,7 +1411,7 @@ Validation after refactor:
   - `cmake --build build -j` passed.
   - `ctest --test-dir build --output-on-failure` passed (`9/9`).
 - Container full E2E script (authoritative TRT path):
-  - `./scripts/test_qwen3_trt_e2e.sh "Hello"` inside `trtf-dev` container passed.
+  - `./scripts/test_qwen3_trt_e2e.sh "Hello"` inside `trtmc-dev` container passed.
   - Container `ctest` passed (`9/9`).
   - TRT run 1 output: `backend=trt`, `Hello Answer`.
   - TRT run 2 output: `backend=trt`, `Hello Answer`.
@@ -1419,7 +1419,7 @@ Validation after refactor:
   - Prompt: `Tell me about nvidia`
   - Output (TRT): `Tell me about nvidia's latest update for the graphics card, and what are the features that make it different from previous models`
 - Accuracy sanity (TRT backend, real Qwen3):
-  - `scripts/eval_mmlu.py --backend trtf --model QWEN3 --force-trt --num-samples 4`
+  - `scripts/eval_mmlu.py --backend trtmc --model QWEN3 --force-trt --num-samples 4`
   - Result: `answered=4`, `correct=2`, `accuracy=0.5000`, `status=PASS`.
 
 Known validation gap from this iteration:
@@ -1442,7 +1442,7 @@ Next-step TODO (priority order):
 4. Validation gate after each refactor slice (required):
    - Host: `cmake --build build -j` + `ctest --test-dir build --output-on-failure`.
    - Container: `./scripts/test_qwen3_trt_e2e.sh "Hello"`.
-   - Accuracy sanity: `scripts/eval_mmlu.py --backend trtf --model QWEN3 --force-trt --num-samples 4`.
+   - Accuracy sanity: `scripts/eval_mmlu.py --backend trtmc --model QWEN3 --force-trt --num-samples 4`.
 5. Acceptance criteria for next checkpoint:
    - All tests pass (host + container).
    - Real Qwen3 TRT still returns `backend=trt` and coherent output.
@@ -1462,7 +1462,7 @@ New files created:
 - `src/utils/tensor_math.h/cpp` — 3 shared functions: `transpose_2d`, `repeat_head_norm`, `expand_kv_projection`.
 - Expanded `src/model/safetensors_loader.h/cpp` with `TensorSource` class and `is_safetensors_index_file()`, previously inlined in `model_loader.cpp`.
 
-All consumer files updated to include shared headers; duplicate anonymous-namespace copies removed. Functions moved from internal linkage to `namespace trtf`.
+All consumer files updated to include shared headers; duplicate anonymous-namespace copies removed. Functions moved from internal linkage to `namespace trtmc`.
 
 Validation: host build + ctest passed (same 5/9 baseline — 4 failures are sandbox `mkdtemp` restrictions, not code).
 
@@ -1519,8 +1519,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 ### Next steps for future agents
-1. Container TRT E2E validation: `./scripts/test_qwen3_trt_e2e.sh "Hello"` inside `trtf-dev`.
-2. MMLU sanity: `scripts/eval_mmlu.py --backend trtf --model QWEN3 --force-trt --num-samples 4`.
+1. Container TRT E2E validation: `./scripts/test_qwen3_trt_e2e.sh "Hello"` inside `trtmc-dev`.
+2. MMLU sanity: `scripts/eval_mmlu.py --backend trtmc --model QWEN3 --force-trt --num-samples 4`.
 3. Phase 4 (diff-test framework): per-op numerical parity tests against HF Python reference.
 4. Continue moving Qwen checkpoint mapping from `model_loader.cpp` into `src/models/qwen/checkpoint_mapper.cpp`.
 5. Wire `RegisterTrtGraphBuilder` into the Qwen registration so `CreateTrtBackend` dispatches via registry lookup instead of hardcoded `if/else`.
@@ -1596,7 +1596,7 @@ For a family that uses the standard HF tensor naming (model.embed_tokens, model.
 
 **Friction points identified:**
 1. **No `StandardTrtModelDefinitionPopulator`**: LLaMA registers `StandardDecoderGraphBuilder` but doesn't register its own `ITrtModelDefinitionPopulator`. Currently the Qwen populator handles all `has_decoder_layers` models (checked via `can_populate`). This works but is semantically wrong — a new family shouldn't depend on the Qwen populator being registered. A `StandardTrtModelDefinitionPopulator` should exist in `src/model/` for the common case.
-2. **Qwen registration has legacy coupling**: `src/models/qwen/registration.cpp` still references `qwen3_decoder_model_loader.h` for the `trtf_decoder/` subdir compatibility path. This is Qwen-specific historical baggage and doesn't affect other families.
+2. **Qwen registration has legacy coupling**: `src/models/qwen/registration.cpp` still references `qwen3_decoder_model_loader.h` for the `trtmc_decoder/` subdir compatibility path. This is Qwen-specific historical baggage and doesn't affect other families.
 3. **Test boilerplate**: Writing the synthetic safetensors fixture in each test file (~100 LOC of `write_safetensors_f32()` helper + tensor setup) is repetitive. A shared `tests/test_helpers.h` exists but the safetensors writer could be extracted there.
 4. **No auto-discovery of model families**: Each family must be explicitly called from `RegisterBuiltinHfModelFamilies()`. This is acceptable for a small number of families but won't scale to 100+ like HF transformers. A static-init or compile-time registration pattern could remove this.
 
@@ -1664,7 +1664,7 @@ Implemented the "extensibility foundation" commit from the Architecture-Extensib
 
 Added `extra_tensors`/`extra_params` maps so families can carry arbitrary weights and config:
 
-- `include/trtf/model.h`:
+- `include/trtmc/model.h`:
   - `DecoderLayerCheckpoint.extra_tensors` (`unordered_map<string, vector<float>>`)
   - `DecoderArchitectureConfig.extra_int_params`, `extra_float_params`, `extra_string_params`
 - `src/model/trt_model_definition.h`:
@@ -1672,7 +1672,7 @@ Added `extra_tensors`/`extra_params` maps so families can carry arbitrary weight
   - `TrtDecoderDefinition.extra_int_params`, `extra_float_params`, `extra_tensors`
 - `src/model/standard_trt_model_definition_populator.cpp`: copies `extra_tensors` in layer loop
 - `src/model/model_loader.cpp`: parses `intermediate_size` from config.json into `extra_int_params`
-- `src/utils/trt/engine_cache.cpp`: hashes all extra fields (sorted keys for determinism), bumped version to `"trtf-trt-plan-v4"`
+- `src/utils/trt/engine_cache.cpp`: hashes all extra fields (sorted keys for determinism), bumped version to `"trtmc-trt-plan-v4"`
 
 ### Phase B: Generalize engine I/O bindings
 
@@ -1713,7 +1713,7 @@ Extracted KV-cache management from `generate()` into an interface:
 
 | Action | File |
 |--------|------|
-| Edit | `include/trtf/model.h` |
+| Edit | `include/trtmc/model.h` |
 | Edit | `src/model/trt_model_definition.h` |
 | Edit | `src/model/standard_trt_model_definition_populator.cpp` |
 | Edit | `src/model/model_loader.cpp` |
@@ -1761,7 +1761,7 @@ Extended `tests/test_trt_graph_ops_gold.cpp` from 2 to 6 op tests:
 Updated a temporary op-gold tensor generator script (later removed):
 - Added `generate_bias_sum()` (seed=47)
 - Changed rope/rms_norm_per_head metadata to F32 for SafetensorReader compatibility
-- Updated rope reference implementation to match trtf's make_rope_table + rotate_half_matrix formula
+- Updated rope reference implementation to match trtmc's make_rope_table + rotate_half_matrix formula
 - Total: 6 gold tensor files generated
 
 ### Build integration
@@ -1787,7 +1787,7 @@ All source modules now have dedicated test coverage:
 - `src/runtime/domains/kv_cache_step_state.cpp` → test_kv_cache_step_state
 - `src/runtime/domains/step_state.h` → test_kv_cache_step_state
 - `src/runtime/domains/trt_engine_lifecycle.cpp` → test_extra_fields + test_trt_ops_gold
-- `include/trtf/model.h` (extra fields) → test_extra_fields
+- `include/trtmc/model.h` (extra fields) → test_extra_fields
 - `src/model/trt_model_definition.h` (extra fields) → test_extra_fields
 - `src/runtime/domains/trt_graph_ops.cpp` → test_trt_ops_gold (6 ops)
 - `src/model/standard_trt_model_definition_populator.cpp` → test_extra_fields
@@ -1901,7 +1901,7 @@ DeepSeek-R1-Distill-Qwen-1.5B (a Qwen2-architecture model) produced garbled outp
 Same pattern as `q_norm`/`k_norm` — empty vector = no bias (skip), non-empty = add bias after matmul. Auto-detected from safetensors presence.
 
 Changes:
-- **`include/trtf/model.h`**: Added `q_bias`, `k_bias`, `v_bias` fields to `DecoderLayerCheckpoint`
+- **`include/trtmc/model.h`**: Added `q_bias`, `k_bias`, `v_bias` fields to `DecoderLayerCheckpoint`
 - **`src/model/trt_model_definition.h`**: Added same fields to `TrtDecoderLayerDefinition`
 - **`src/model/standard_checkpoint_mapper.cpp`**: Loads `self_attn.{q,k,v}_proj.bias` when present. K/V biases expanded from `kv_hidden` to `q_hidden` for GQA models (same expansion pattern as K/V weights).
 - **`src/model/standard_trt_model_definition_populator.cpp`**: Copies biases through to TRT definition
@@ -1930,32 +1930,32 @@ Changes:
 
 ## 2026-02-14 — Library API: C ABI Entry Point + Bundle Format + CLI
 
-Packaged trt-transformers-cpp as a distributable library following the TensorRT pattern: a single `extern "C"` factory function returns a C++ virtual interface. All subsequent operations are C++ method calls.
+Packaged tensorrt-model-connect as a distributable library following the TensorRT pattern: a single `extern "C"` factory function returns a C++ virtual interface. All subsequent operations are C++ method calls.
 
-### Phase 1: TRTF_SOURCE_DIR Refactor
+### Phase 1: TRTMC_SOURCE_DIR Refactor
 
-Centralized all `TRTF_SOURCE_DIR` macro usage into `src/utils/data_dir.h/cpp`. Functions: `source_dir()`, `scripts_dir()`, `models_dir()`, `script_path()`, `model_path()`. Supports `TRTF_DATA_DIR` env override for relocatable installs.
+Centralized all `TRTMC_SOURCE_DIR` macro usage into `src/utils/data_dir.h/cpp`. Functions: `source_dir()`, `scripts_dir()`, `models_dir()`, `script_path()`, `model_path()`. Supports `TRTMC_DATA_DIR` env override for relocatable installs.
 
 Updated 4 sites: `hf_python_tokenizer.cpp`, `hf_python_backend.cpp`, `model_loader.cpp`, `hf_family_registry.cpp`.
 
 ### Phase 2: Bundle Format + C ABI Factory
 
-**New public API** (`include/trtf/pipeline.h`):
+**New public API** (`include/trtmc/pipeline.h`):
 - `IPipeline` virtual interface with `generate()`, `model_id()`, `backend_name()`, `save_bundle()`
-- `extern "C"` entry points: `trtf_create_pipeline()`, `trtf_last_error()`, `trtf_version()`, `trtf_has_trt()`
-- Flags: `TRTF_PREFER_TRT`, `TRTF_FORCE_TRT`, `TRTF_CPU_ONLY`
+- `extern "C"` entry points: `trtmc_create_pipeline()`, `trtmc_last_error()`, `trtmc_version()`, `trtmc_has_trt()`
+- Flags: `TRTMC_PREFER_TRT`, `TRTMC_FORCE_TRT`, `TRTMC_CPU_ONLY`
 - No `std::string` in the interface — `const char*` only for ABI safety
 
-**Old API preserved**: `include/trtf/pipeline_legacy.h` retains the original `Pipeline` class. All existing code updated to use legacy header.
+**Old API preserved**: `include/trtmc/pipeline_legacy.h` retains the original `Pipeline` class. All existing code updated to use legacy header.
 
 **Bundle format** (`.trtfb`):
 - Magic: `TRTFB\x00\x01\x00` (8 bytes)
 - JSON metadata header with section table
 - Binary sections (TRT plan, tokenizer data, etc.)
 - `src/bundle/bundle_format.h/cpp`: `WriteBundleFile()`, `ReadBundleFile()`, `HasBundleMagic()`
-- `include/trtf/bundle.h`: Public API: `BuildBundle()`, `InspectBundle()`, `IsBundle()`
+- `include/trtmc/bundle.h`: Public API: `BuildBundle()`, `InspectBundle()`, `IsBundle()`
 
-**C ABI implementation** (`src/cabi/api/trtf_c.cpp`):
+**C ABI implementation** (`src/cabi/api/trtmc_c.cpp`):
 - `PipelineImpl` concrete class implementing `IPipeline`
 - Thread-local error storage
 - Auto-detects `.trtfb` bundles vs model directories
@@ -1968,18 +1968,18 @@ Updated 4 sites: `hf_python_tokenizer.cpp`, `hf_python_backend.cpp`, `model_load
 
 ### Phase 4: CLI
 
-`examples/trtf_cli.cpp` — new `trtf` executable with subcommands:
+`examples/trtmc_cli.cpp` — new `trtmc` executable with subcommands:
 ```
-trtf build   <model-dir> -o <output.trtfb> [--max-cache-length N]
-trtf run     <model-or-bundle> --prompt "text" [--max-new-tokens N] [--force-trt] [--cpu-only]
-trtf inspect <bundle.trtfb>
-trtf version
+trtmc build   <model-dir> -o <output.trtfb> [--max-cache-length N]
+trtmc run     <model-or-bundle> --prompt "text" [--max-new-tokens N] [--force-trt] [--cpu-only]
+trtmc inspect <bundle.trtfb>
+trtmc version
 ```
 
 ### Phase 5: CMake Install
 
-- `install()` targets for `trtf_core` (static lib), public headers, `trtf` CLI binary
-- `cmake/trtfConfig.cmake.in` + version file for `find_package(trtf)` support
+- `install()` targets for `trtmc_core` (static lib), public headers, `trtmc` CLI binary
+- `cmake/trtmcConfig.cmake.in` + version file for `find_package(trtmc)` support
 - Generator expressions for proper build/install include path separation
 
 ### New files (15 created)
@@ -1987,14 +1987,14 @@ trtf version
 | File | Purpose |
 |------|---------|
 | `src/utils/data_dir.h/cpp` | Centralized source-dir resolution |
-| `include/trtf/pipeline.h` | IPipeline + C ABI factory (rewrote) |
-| `include/trtf/pipeline_legacy.h` | Old Pipeline class preserved |
-| `include/trtf/bundle.h` | Bundle public API |
+| `include/trtmc/pipeline.h` | IPipeline + C ABI factory (rewrote) |
+| `include/trtmc/pipeline_legacy.h` | Old Pipeline class preserved |
+| `include/trtmc/bundle.h` | Bundle public API |
 | `src/bundle/bundle_format.h/cpp` | .trtfb binary format read/write |
 | `src/bundle/bundle_api.cpp` | BuildBundle() stub |
-| `src/cabi/api/trtf_c.cpp` | C ABI factory implementation |
-| `examples/trtf_cli.cpp` | CLI with build/run/inspect/version |
-| `cmake/trtfConfig.cmake.in` | CMake package config template |
+| `src/cabi/api/trtmc_c.cpp` | C ABI factory implementation |
+| `examples/trtmc_cli.cpp` | CLI with build/run/inspect/version |
+| `cmake/trtmcConfig.cmake.in` | CMake package config template |
 | `tests/test_data_dir.cpp` | 7 tests |
 | `tests/test_bundle_format.cpp` | 8 tests |
 | `tests/test_c_abi_entry.cpp` | 12 tests |
@@ -2026,8 +2026,8 @@ Fix: Added `try_load_cached_engine()` that checks the cache *before* graph build
 
 **Other improvements:**
 
-- Added progress logging with wall-clock timing at every pipeline stage (`[trtf] ...`)
-- TRT warnings now always shown on stderr (not just with `TRTF_TRT_LOG_STDERR`)
+- Added progress logging with wall-clock timing at every pipeline stage (`[trtmc] ...`)
+- TRT warnings now always shown on stderr (not just with `TRTMC_TRT_LOG_STDERR`)
 - Suppressed TRT header deprecation warnings via `SYSTEM` include directories
 - Removed deprecated `kOBEY_PRECISION_CONSTRAINTS` flag from test code
 
@@ -2055,8 +2055,8 @@ Container tests: **30/30 pass**.
 - **Comprehensive test coverage for engine cache fast path** (3 new test files, 23 test cases):
   - `test_engine_cache_index.cpp` (10 tests): BuildModelDirIndexKey determinism, cache-length/config variation, save/lookup roundtrip, stale plan detection, auto-directory creation, cache-disable behavior, overwrite semantics.
   - `test_engine_cache_io.cpp` (6 tests): SaveTrtEnginePlanToCache/LoadTrtEnginePlanFromCache roundtrip, missing/empty file handling, 10MB large file mmap, cache-disable behavior.
-  - `test_fast_path_config.cpp` (7 tests): parse_fast_path_config with explicit vs computed head_dim, GQA attention_size, TRTF_MAX_CACHE_LENGTH override, 4096 cap, eos/bos from JSON array vs scalar.
-- **Extracted `FastPathModelConfig` struct** from `trtf_c.cpp` into `src/cabi/config/fast_path_config.h/cpp` for testability. Refactored `try_create_from_cached_engine()` to use it.
+  - `test_fast_path_config.cpp` (7 tests): parse_fast_path_config with explicit vs computed head_dim, GQA attention_size, TRTMC_MAX_CACHE_LENGTH override, 4096 cap, eos/bos from JSON array vs scalar.
+- **Extracted `FastPathModelConfig` struct** from `trtmc_c.cpp` into `src/cabi/config/fast_path_config.h/cpp` for testability. Refactored `try_create_from_cached_engine()` to use it.
 - **Added 2 fast-path integration tests** to `test_c_abi_entry.cpp`: fast-path miss falls through to slow path, fast-path skip for models without config.json.
 - **Documentation updates**: Dynamic-Design.md (fast-path sequence diagram, section 2), Static-Design.md (FastPathModelConfig class + CreateTrtBackendFromEngine), TRT-Internals.md (model-dir index description), Source-Layout.md (new files + test descriptions).
 - Container tests: **33/33 pass**. Qwen3 E2E parity confirmed.
@@ -2075,15 +2075,15 @@ Major simplification pass removing dead code, unused abstractions, and legacy co
 - Now 3 active registries: HfModelFamily (matching), CheckpointMapper (tensor key translation), TrtGraphBuilder (network construction).
 
 ### Removed legacy Pipeline class
-- Deleted `include/trtf/pipeline_legacy.h` and `src/pipeline/pipeline.cpp`.
-- Only C ABI entry points remain: `trtf_create_pipeline()`, `trtf_create_pipeline_ex()`.
+- Deleted `include/trtmc/pipeline_legacy.h` and `src/pipeline/pipeline.cpp`.
+- Only C ABI entry points remain: `trtmc_create_pipeline()`, `trtmc_create_pipeline_ex()`.
 
-### Added TrtfPipelineOptions
-- `trtf_create_pipeline_ex()` accepts a `TrtfPipelineOptions` struct with flags, `max_new_tokens`, `max_cache_length`.
+### Added TrtmcPipelineOptions
+- `trtmc_create_pipeline_ex()` accepts a `TrtmcPipelineOptions` struct with flags, `max_new_tokens`, `max_cache_length`.
 
 ### Removed example binaries
-- Deleted `trtf_text_generation` and `trtf_load_model` example executables.
-- Only the `trtf` CLI remains (`trtf run`, `trtf build`, `trtf inspect`, `trtf version`).
+- Deleted `trtmc_text_generation` and `trtmc_load_model` example executables.
+- Only the `trtmc` CLI remains (`trtmc run`, `trtmc build`, `trtmc inspect`, `trtmc version`).
 
 ### Removed tiny-cake-v1 model + CPU reference backend
 - Deleted `models/tiny-cake-v1/` bundled model assets.
@@ -2098,7 +2098,7 @@ Major simplification pass removing dead code, unused abstractions, and legacy co
 - Removed `kCustom` from `ResolvedModelKind`.
 
 ### Removed debug env vars
-- Removed `TRTF_DEBUG_LOGITS_TOPK` and `TRTF_DEBUG_MASK`.
+- Removed `TRTMC_DEBUG_LOGITS_TOPK` and `TRTMC_DEBUG_MASK`.
 
 ### Removed text-format checkpoint loading
 - Deleted `load_checkpoint_text()`, `ParsedTensor`, and related text-format weight parsing.

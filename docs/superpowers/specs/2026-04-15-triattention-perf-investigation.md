@@ -297,16 +297,16 @@ context task while using the smaller KV budget.
 ## Secondary bug found while landing the fix
 
 While enabling the CUDA-backed path, `TriAttentionKvCache` gained extra members
-behind `#ifdef TRTF_HAS_CUDA_KERNELS` in the public header. `trtf_core` was
-compiled with `TRTF_HAS_CUDA_KERNELS=1`, but downstream test translation units
+behind `#ifdef TRTMC_HAS_CUDA_KERNELS` in the public header. `trtmc_core` was
+compiled with `TRTMC_HAS_CUDA_KERNELS=1`, but downstream test translation units
 were not, so stack-allocated `TriAttentionKvCache` objects were compiled with a
 smaller class layout than the library implementation expected.
 
 That caused stack-smash failures in `test_triattention_kv_cache` even when the
 GPU path was disabled at runtime.
 
-The fix was to propagate `TRTF_HAS_CUDA_KERNELS=1` as a public compile
-definition from `trtf_core` in `CMakeLists.txt`, so all consumers of the public
+The fix was to propagate `TRTMC_HAS_CUDA_KERNELS=1` as a public compile
+definition from `trtmc_core` in `CMakeLists.txt`, so all consumers of the public
 header see the same class layout.
 
 ## Matched-precision correction

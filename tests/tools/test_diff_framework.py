@@ -46,13 +46,13 @@ def _mock_model_strategy_detection(
     runtime_strategy: str | None = "decoder_kv_cache",
     plugin_found: bool = True,
 ):
-    """Install fake trtf_build modules consumed by detect_runtime_strategy()."""
-    fake_pkg = types.ModuleType("trtf_build")
+    """Install fake tensorrt_model_connect modules consumed by detect_runtime_strategy()."""
+    fake_pkg = types.ModuleType("tensorrt_model_connect")
 
-    fake_engine_builder = types.ModuleType("trtf_build.engine_builder")
+    fake_engine_builder = types.ModuleType("tensorrt_model_connect.engine_builder")
     fake_engine_builder._resolve_model = lambda _model: "/tmp/fake-model-dir"
 
-    fake_config = types.ModuleType("trtf_build.config")
+    fake_config = types.ModuleType("tensorrt_model_connect.config")
 
     class _FakeModelConfig:
         @staticmethod
@@ -61,7 +61,7 @@ def _mock_model_strategy_detection(
 
     fake_config.ModelConfig = _FakeModelConfig
 
-    fake_families = types.ModuleType("trtf_build.families")
+    fake_families = types.ModuleType("tensorrt_model_connect.families")
     if plugin_found:
         plugin = types.SimpleNamespace()
         if runtime_strategy is not None:
@@ -74,10 +74,10 @@ def _mock_model_strategy_detection(
     fake_pkg.config = fake_config
     fake_pkg.families = fake_families
 
-    monkeypatch.setitem(sys.modules, "trtf_build", fake_pkg)
-    monkeypatch.setitem(sys.modules, "trtf_build.engine_builder", fake_engine_builder)
-    monkeypatch.setitem(sys.modules, "trtf_build.config", fake_config)
-    monkeypatch.setitem(sys.modules, "trtf_build.families", fake_families)
+    monkeypatch.setitem(sys.modules, "tensorrt_model_connect", fake_pkg)
+    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.engine_builder", fake_engine_builder)
+    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.config", fake_config)
+    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.families", fake_families)
 
 
 def _write_synthetic_bundle(path: Path, config: dict):

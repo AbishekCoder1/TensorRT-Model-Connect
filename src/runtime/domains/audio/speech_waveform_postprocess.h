@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct SpeechWaveformTrimResult
 {
@@ -80,4 +80,4 @@ inline SpeechPeakNormalizeResult peak_normalize_speech_waveform(
     return result;
 }
 
-} // namespace trtf
+} // namespace trtmc

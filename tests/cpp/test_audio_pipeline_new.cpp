@@ -73,9 +73,9 @@
 #include "runtime/pipelines/omni_pipeline.h"
 #include "runtime/pipelines/speech_pipeline.h"
 #include "runtime/pipelines/whisper_pipeline.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <NvInfer.h>
 #include <cstdint>
@@ -93,12 +93,12 @@ static void check(bool c, const char* n) {
     }
 }
 
-static trtf::TrtLogger g_logger;
+static trtmc::TrtLogger g_logger;
 
 // ---------------------------------------------------------------------------
 // Inline tokenizer for OmniPipeline tests
 // ---------------------------------------------------------------------------
-class OmniFixedTokenizer : public trtf::ITokenizer {
+class OmniFixedTokenizer : public trtmc::ITokenizer {
   public:
     std::vector<int32_t> encode(const std::string&) const override { return {1, 2}; }
     std::string decode(const std::vector<int32_t>&) const override { return ""; }
@@ -111,13 +111,13 @@ class OmniFixedTokenizer : public trtf::ITokenizer {
 // ---------------------------------------------------------------------------
 
 // Encoder: mel_features[mel_bins, mel_len] float32 → encoder_output[enc_out] float32 constant
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine>
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>
 build_mock_encoder(int32_t mel_bins, int32_t mel_len, int32_t enc_out_size) {
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder)
         return nullptr;
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    auto network = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* mel_inp = network->addInput("mel_features", nvinfer1::DataType::kFLOAT,
@@ -139,25 +139,25 @@ build_mock_encoder(int32_t mel_bins, int32_t mel_len, int32_t enc_out_size) {
     auto* id_mel = network->addIdentity(*mel_inp);
     id_mel->getOutput(0)->setName("_unused_mel");
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
     if (!plan)
         return nullptr;
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
 // Decoder/step engine: token_id[1] int32 + attention_mask[mask_size] float32
 // → logits[vocab_size] float32 constant
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine>
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>
 build_mock_step_engine(int32_t mask_size, int32_t vocab_size,
                        const std::vector<float>& const_logits) {
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder)
         return nullptr;
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    auto network = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* token_inp =
@@ -180,25 +180,25 @@ build_mock_step_engine(int32_t mask_size, int32_t vocab_size,
     auto* id_mask = network->addIdentity(*mask_inp);
     id_mask->getOutput(0)->setName("_unused_mask");
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
     if (!plan)
         return nullptr;
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
 // Attention-only step engine: only attention_mask[mask_size] float32 → logits[vocab_size] constant
 // Used for Bark semantic/coarse (token_id is optional, checked with has_input)
-static trtf::TrtUniquePtr<nvinfer1::ICudaEngine>
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>
 build_mock_mask_only_engine(int32_t mask_size, int32_t vocab_size,
                             const std::vector<float>& const_logits) {
-    auto builder = trtf::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder)
         return nullptr;
-    auto network = trtf::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
-    auto config = trtf::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    auto network = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* mask_inp = network->addInput("attention_mask", nvinfer1::DataType::kFLOAT,
@@ -217,12 +217,12 @@ build_mock_mask_only_engine(int32_t mask_size, int32_t vocab_size,
     auto* id_mask = network->addIdentity(*mask_inp);
     id_mask->getOutput(0)->setName("_unused_mask");
 
-    auto plan = trtf::TrtUniquePtr<nvinfer1::IHostMemory>(
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *config));
     if (!plan)
         return nullptr;
-    auto runtime = trtf::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
-    return trtf::TrtUniquePtr<nvinfer1::ICudaEngine>(
+    auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
@@ -250,28 +250,28 @@ static void test_whisper_transcribe() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto encoder = std::make_unique<trtf::TrtModuleImpl>(
+    auto encoder = std::make_unique<trtmc::TrtModuleImpl>(
         enc_engine.get(), enc_engine->createExecutionContext(), stream);
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
-    auto cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(0, 8, 0, stream);
 
     check(encoder->ok(), "whisper encoder ok");
     check(decoder->ok(), "whisper decoder ok");
     check(cache->ok(), "whisper cache ok");
 
-    trtf::WhisperConfig wcfg;
+    trtmc::WhisperConfig wcfg;
     wcfg.mel_length = 4;           // expected encoder input = [80, 4]
     wcfg.max_source_positions = 5; // small cross-kv plan
     wcfg.eot_token_id = 2;         // decoder stops on argmax=2
 
     // MelFilterbank: n_freq_bins=201 (= n_fft/2+1), n_mel_bins=80
-    trtf::MelFilterbank mel_fb;
+    trtmc::MelFilterbank mel_fb;
     mel_fb.n_freq_bins = 201;
     mel_fb.n_mel_bins = 80;
     mel_fb.data.assign(201 * 80, 0.1f);
 
-    trtf::WhisperPipeline pipeline(std::move(encoder), std::move(decoder), std::move(cache), wcfg,
+    trtmc::WhisperPipeline pipeline(std::move(encoder), std::move(decoder), std::move(cache), wcfg,
                                    /*hidden_size=*/4, /*num_decoder_layers=*/0, std::move(mel_fb),
                                    /*mel_n_fft=*/400, /*mel_hop_length=*/160,
                                    /*mel_chunk_length=*/1, /*mel_sampling_rate=*/16000, stream);
@@ -295,10 +295,10 @@ static void test_whisper_constructor_validates_encoder() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
-    trtf::WhisperConfig wcfg;
+    auto cache = std::make_unique<trtmc::KvCache>(0, 8, 0, stream);
+    trtmc::WhisperConfig wcfg;
     wcfg.mel_length = 4;
-    trtf::MelFilterbank mel_fb;
+    trtmc::MelFilterbank mel_fb;
     mel_fb.n_freq_bins = 201;
     mel_fb.n_mel_bins = 80;
     mel_fb.data.assign(201 * 80, 0.1f);
@@ -310,12 +310,12 @@ static void test_whisper_constructor_validates_encoder() {
         cudaStreamDestroy(stream);
         return;
     }
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
 
     bool threw = false;
     try {
-        trtf::WhisperPipeline pipeline(nullptr, std::move(decoder), std::move(cache), wcfg, 4, 0,
+        trtmc::WhisperPipeline pipeline(nullptr, std::move(decoder), std::move(cache), wcfg, 4, 0,
                                        std::move(mel_fb), 400, 160, 1, 16000, stream);
     } catch (const std::exception&) {
         threw = true;
@@ -351,26 +351,26 @@ static void test_whisper_with_cross_kv() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto encoder = std::make_unique<trtf::TrtModuleImpl>(
+    auto encoder = std::make_unique<trtmc::TrtModuleImpl>(
         enc_engine.get(), enc_engine->createExecutionContext(), stream);
-    auto decoder = std::make_unique<trtf::TrtModuleImpl>(
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
     // KvCache with num_layers=0 so ok()=true (no layer buffers needed)
-    auto cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
+    auto cache = std::make_unique<trtmc::KvCache>(0, 8, 0, stream);
 
-    trtf::WhisperConfig wcfg;
+    trtmc::WhisperConfig wcfg;
     wcfg.mel_length = 4;
     wcfg.max_source_positions = 5; // cross_kv_bytes = 5*4*4 = 80 bytes
     wcfg.eot_token_id = 2;         // stops after 1 generated token
 
-    trtf::MelFilterbank mel_fb;
+    trtmc::MelFilterbank mel_fb;
     mel_fb.n_freq_bins = 201;
     mel_fb.n_mel_bins = 80;
     mel_fb.data.assign(201 * 80, 0.1f);
 
     // num_decoder_layers=1: constructor allocates cross_k_ptrs_[0] and cross_v_ptrs_[0]
     // setup_cross_attention calls apply_whisper_cross_kv_plan with layer_count=1
-    trtf::WhisperPipeline pipeline(std::move(encoder), std::move(decoder), std::move(cache), wcfg,
+    trtmc::WhisperPipeline pipeline(std::move(encoder), std::move(decoder), std::move(cache), wcfg,
                                    /*hidden_size=*/4, /*num_decoder_layers=*/1, std::move(mel_fb),
                                    /*mel_n_fft=*/400, /*mel_hop_length=*/160,
                                    /*mel_chunk_length=*/1, /*mel_sampling_rate=*/16000, stream);
@@ -396,7 +396,7 @@ static void test_bark_generate_audio() {
     // BarkConfig with small token IDs to keep embed tables tiny.
     // semantic_pad_token=3: with greedy argmax=0 (from constant logits),
     // semantic generates 1 token (token 0) then exits (max_new_tokens=1).
-    trtf::BarkConfig bcfg;
+    trtmc::BarkConfig bcfg;
     bcfg.hidden_size = 4;
     bcfg.text_pad_token = 5;
     bcfg.semantic_pad_token = 3;
@@ -418,8 +418,8 @@ static void test_bark_generate_audio() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto sem_cache = std::make_unique<trtf::KvCache>(0, 512, 0, stream);
-    auto coarse_cache = std::make_unique<trtf::KvCache>(0, 16, 0, stream);
+    auto sem_cache = std::make_unique<trtmc::KvCache>(0, 512, 0, stream);
+    auto coarse_cache = std::make_unique<trtmc::KvCache>(0, 16, 0, stream);
 
     check(sem_cache->ok(), "bark semantic cache ok");
     check(coarse_cache->ok(), "bark coarse cache ok");
@@ -444,9 +444,9 @@ static void test_bark_generate_audio() {
         return;
     }
 
-    auto semantic = std::make_unique<trtf::TrtModuleImpl>(
+    auto semantic = std::make_unique<trtmc::TrtModuleImpl>(
         sem_engine.get(), sem_engine->createExecutionContext(), stream);
-    auto coarse = std::make_unique<trtf::TrtModuleImpl>(
+    auto coarse = std::make_unique<trtmc::TrtModuleImpl>(
         coarse_engine.get(), coarse_engine->createExecutionContext(), stream);
 
     // Embed tables: semantic covers tokens 0..5 (6 rows × 4 floats)
@@ -454,14 +454,14 @@ static void test_bark_generate_audio() {
     std::vector<float> sem_embed(6 * 4, 0.1f);
     std::vector<float> coarse_embed(11 * 4, 0.1f);
 
-    trtf::BarkPipeline pipeline(std::move(semantic), std::move(coarse), std::move(sem_cache),
+    trtmc::BarkPipeline pipeline(std::move(semantic), std::move(coarse), std::move(sem_cache),
                                 std::move(coarse_cache), sem_embed, coarse_embed, bcfg, stream);
 
     check(std::string(pipeline.pipeline_type()) == "BarkPipeline", "bark pipeline_type");
 
     // Run generate_audio with max_new_tokens=1 so semantic loop exits quickly.
     // No codec engine: synthesize_simple_waveform produces audio from coarse codes.
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
     auto out = pipeline.generate_audio("", gen_cfg);
 
@@ -475,8 +475,8 @@ static void test_bark_constructor_validates_semantic() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto coarse_cache = std::make_unique<trtf::KvCache>(0, 16, 0, stream);
-    auto sem_cache = std::make_unique<trtf::KvCache>(0, 512, 0, stream);
+    auto coarse_cache = std::make_unique<trtmc::KvCache>(0, 16, 0, stream);
+    auto sem_cache = std::make_unique<trtmc::KvCache>(0, 512, 0, stream);
 
     const std::vector<float> coarse_logits(12, 0.1f);
     auto coarse_engine = build_mock_mask_only_engine(17, 12, coarse_logits);
@@ -484,7 +484,7 @@ static void test_bark_constructor_validates_semantic() {
         cudaStreamDestroy(stream);
         return;
     }
-    auto coarse = std::make_unique<trtf::TrtModuleImpl>(
+    auto coarse = std::make_unique<trtmc::TrtModuleImpl>(
         coarse_engine.get(), coarse_engine->createExecutionContext(), stream);
 
     std::vector<float> sem_embed(24, 0.1f);
@@ -492,9 +492,9 @@ static void test_bark_constructor_validates_semantic() {
 
     bool threw = false;
     try {
-        trtf::BarkPipeline pipeline(nullptr, std::move(coarse), std::move(sem_cache),
+        trtmc::BarkPipeline pipeline(nullptr, std::move(coarse), std::move(sem_cache),
                                     std::move(coarse_cache), sem_embed, coarse_embed,
-                                    trtf::BarkConfig{}, stream);
+                                    trtmc::BarkConfig{}, stream);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -517,20 +517,20 @@ static void test_bark_constructor_validates_embed() {
         return;
     }
 
-    auto semantic = std::make_unique<trtf::TrtModuleImpl>(
+    auto semantic = std::make_unique<trtmc::TrtModuleImpl>(
         sem_engine.get(), sem_engine->createExecutionContext(), stream);
-    auto coarse = std::make_unique<trtf::TrtModuleImpl>(
+    auto coarse = std::make_unique<trtmc::TrtModuleImpl>(
         coarse_engine.get(), coarse_engine->createExecutionContext(), stream);
-    auto sem_cache = std::make_unique<trtf::KvCache>(0, 512, 0, stream);
-    auto coarse_cache = std::make_unique<trtf::KvCache>(0, 16, 0, stream);
+    auto sem_cache = std::make_unique<trtmc::KvCache>(0, 512, 0, stream);
+    auto coarse_cache = std::make_unique<trtmc::KvCache>(0, 16, 0, stream);
 
     bool threw = false;
     try {
         std::vector<float> empty_embed;
         std::vector<float> coarse_embed(44, 0.1f);
-        trtf::BarkPipeline pipeline(std::move(semantic), std::move(coarse), std::move(sem_cache),
+        trtmc::BarkPipeline pipeline(std::move(semantic), std::move(coarse), std::move(sem_cache),
                                     std::move(coarse_cache), empty_embed, coarse_embed,
-                                    trtf::BarkConfig{}, stream);
+                                    trtmc::BarkConfig{}, stream);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -556,16 +556,16 @@ static void test_speech_pipeline_construction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto temporal = std::make_unique<trtf::TrtModuleImpl>(
+    auto temporal = std::make_unique<trtmc::TrtModuleImpl>(
         temporal_engine.get(), temporal_engine->createExecutionContext(), stream);
-    auto temporal_cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
+    auto temporal_cache = std::make_unique<trtmc::KvCache>(0, 8, 0, stream);
 
     check(temporal->ok(), "speech temporal module ok");
     check(temporal_cache->ok(), "speech temporal cache ok");
 
-    trtf::SpeechConfig cfg;
+    trtmc::SpeechConfig cfg;
 
-    trtf::SpeechPipeline pipeline(
+    trtmc::SpeechPipeline pipeline(
         /*mimi_encoder=*/nullptr, std::move(temporal), std::move(temporal_cache),
         /*depth_engines=*/{},
         /*depth_cache=*/nullptr,
@@ -585,8 +585,8 @@ static void test_speech_validates_temporal() {
     try {
         cudaStream_t stream;
         cudaStreamCreate(&stream);
-        trtf::SpeechConfig cfg;
-        trtf::SpeechPipeline p(nullptr, nullptr, nullptr, {}, nullptr, nullptr, cfg, stream,
+        trtmc::SpeechConfig cfg;
+        trtmc::SpeechPipeline p(nullptr, nullptr, nullptr, {}, nullptr, nullptr, cfg, stream,
                                nullptr, "x");
         check(false, "null temporal should throw");
         cudaStreamDestroy(stream);
@@ -613,16 +613,16 @@ static void test_omni_pipeline_construction() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto thinker = std::make_unique<trtf::TrtModuleImpl>(
+    auto thinker = std::make_unique<trtmc::TrtModuleImpl>(
         thinker_engine.get(), thinker_engine->createExecutionContext(), stream);
-    auto thinker_cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
+    auto thinker_cache = std::make_unique<trtmc::KvCache>(0, 8, 0, stream);
 
     check(thinker->ok(), "omni thinker module ok");
     check(thinker_cache->ok(), "omni thinker cache ok");
 
-    trtf::OmniConfig cfg;
+    trtmc::OmniConfig cfg;
 
-    trtf::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache),
+    trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache),
                                 /*talker=*/nullptr,
                                 /*talker_cache=*/nullptr,
                                 /*code2wav=*/nullptr, cfg, stream,
@@ -647,17 +647,17 @@ static void test_omni_generate_audio() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto thinker = std::make_unique<trtf::TrtModuleImpl>(
+    auto thinker = std::make_unique<trtmc::TrtModuleImpl>(
         thinker_engine.get(), thinker_engine->createExecutionContext(), stream);
-    auto thinker_cache = std::make_unique<trtf::KvCache>(0, 8, 0, stream);
+    auto thinker_cache = std::make_unique<trtmc::KvCache>(0, 8, 0, stream);
 
-    trtf::OmniConfig cfg;
+    trtmc::OmniConfig cfg;
 
-    trtf::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, nullptr,
+    trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, nullptr,
                                 nullptr, cfg, stream, std::make_shared<OmniFixedTokenizer>(),
                                 "test-omni-gen");
 
-    trtf::GenerateConfig gen_cfg;
+    trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
 
     // tokenizer->encode("hello") = {1,2} -> run_thinker processes them
@@ -676,8 +676,8 @@ static void test_omni_validates_thinker() {
     try {
         cudaStream_t stream;
         cudaStreamCreate(&stream);
-        trtf::OmniConfig cfg;
-        trtf::OmniPipeline p(nullptr, nullptr, nullptr, nullptr, nullptr, cfg, stream, nullptr,
+        trtmc::OmniConfig cfg;
+        trtmc::OmniPipeline p(nullptr, nullptr, nullptr, nullptr, nullptr, cfg, stream, nullptr,
                              "x");
         check(false, "null thinker should throw");
         cudaStreamDestroy(stream);
@@ -698,8 +698,8 @@ static void test_magpie_validates_modules() {
     // null decoder -> constructor throws (checked before encoder)
     bool threw = false;
     try {
-        trtf::MagpieTTSConfig cfg;
-        trtf::MagpiePipeline p(
+        trtmc::MagpieTTSConfig cfg;
+        trtmc::MagpiePipeline p(
             /*encoder=*/nullptr,
             /*decoder=*/nullptr, // null decoder -> throws
             /*decoder_cache=*/nullptr,
@@ -710,7 +710,7 @@ static void test_magpie_validates_modules() {
             /*cross_k=*/{},
             /*cross_v=*/{},
             /*cross_k_uncond=*/{},
-            /*cross_v_uncond=*/{}, trtf::CudaBuffer(0), trtf::CudaBuffer(0),
+            /*cross_v_uncond=*/{}, trtmc::CudaBuffer(0), trtmc::CudaBuffer(0),
             /*audio_embed=*/{},
             /*text_embed=*/{},
             /*context_embed=*/{},
@@ -728,22 +728,22 @@ static void test_whisper_cross_kv_stats() {
     // Direct test of apply_whisper_cross_kv_plan with non-null WhisperCrossKvApplyStats.
     // Covers: stats->zero_ops increment (lines 46-48) and stats->copy_ops increments
     //         (lines 59-62 for K and lines 69-72 for V, per layer).
-    trtf::WhisperCrossKvPlan plan;
+    trtmc::WhisperCrossKvPlan plan;
     plan.buffer_bytes = 16; // non-zero: valid plan
     plan.zero_pad_encoder_output = true;
     plan.valid_bytes = 8;
     plan.pad_bytes = 8;
 
-    trtf::WhisperCrossKvApplyStats stats;
+    trtmc::WhisperCrossKvApplyStats stats;
     std::string error;
 
-    bool ok = trtf::apply_whisper_cross_kv_plan(
+    bool ok = trtmc::apply_whisper_cross_kv_plan(
         plan,
         /*layer_count=*/2,
         [](std::size_t /*valid*/, std::size_t /*pad*/) -> bool {
             return true; // zero-padding succeeds
         },
-        [](std::size_t /*layer*/, trtf::WhisperCrossKvBufferKind /*kind*/,
+        [](std::size_t /*layer*/, trtmc::WhisperCrossKvBufferKind /*kind*/,
            std::size_t /*bytes*/) -> bool {
             return true; // K/V copy succeeds
         },
@@ -757,15 +757,15 @@ static void test_whisper_cross_kv_stats() {
 
 static void test_whisper_cross_kv_invalid_plan() {
     // Plan with buffer_bytes=0 covers the early-return error path (lines 35-36)
-    trtf::WhisperCrossKvPlan plan;
+    trtmc::WhisperCrossKvPlan plan;
     plan.buffer_bytes = 0; // invalid: triggers "invalid whisper cross-kv plan" error
 
-    trtf::WhisperCrossKvApplyStats stats;
+    trtmc::WhisperCrossKvApplyStats stats;
     std::string error;
 
-    bool ok = trtf::apply_whisper_cross_kv_plan(
+    bool ok = trtmc::apply_whisper_cross_kv_plan(
         plan, 0, [](std::size_t, std::size_t) { return true; },
-        [](std::size_t, trtf::WhisperCrossKvBufferKind, std::size_t) { return true; }, error,
+        [](std::size_t, trtmc::WhisperCrossKvBufferKind, std::size_t) { return true; }, error,
         &stats);
 
     check(!ok, "cross_kv_invalid: buffer_bytes=0 returns false");

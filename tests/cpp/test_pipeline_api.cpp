@@ -4,27 +4,27 @@
 // Trace ID:       UT-PIP-CPP-01
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-FAC-01
-// Intent:         C API pipeline creation via trtf_create_pipeline_ex
+// Intent:         C API pipeline creation via trtmc_create_pipeline_ex
 // Preconditions:  TRT runtime available
 // Postconditions: Pipeline created or appropriate error returned
 // =============================================================================
 
 // =============================================================================
-// Test suite: Pipeline C ABI -- IPipeline virtual interface via trtf_create_pipeline
+// Test suite: Pipeline C ABI -- IPipeline virtual interface via trtmc_create_pipeline
 // =============================================================================
 //
 // Purpose:
-//   Validates the public C ABI entry point trtf_create_pipeline() and the
+//   Validates the public C ABI entry point trtmc_create_pipeline() and the
 //   IPipeline virtual interface it returns. Tests cover null/invalid input
 //   handling, version queries, and ABI stability guarantees.
 //
 // Dependencies:
-//   - trtf/pipeline.h (IPipeline, trtf_create_pipeline, trtf_last_error,
-//     trtf_version, trtf_has_trt)
+//   - trtmc/pipeline.h (IPipeline, trtmc_create_pipeline, trtmc_last_error,
+//     trtmc_version, trtmc_has_trt)
 //   - No TRT, GPU, or model files required.
 // =============================================================================
 
-#include "trtf/pipeline.h"
+#include "trtmc/pipeline.h"
 
 #include <cstdint>
 #include <cstring>
@@ -42,43 +42,43 @@ static void check(bool condition, const char* test_name) {
 }
 
 // Minimal DummyPipeline implementing only the two required pure virtuals.
-class DummyPipeline final : public trtf::IPipeline {
+class DummyPipeline final : public trtmc::IPipeline {
   public:
     const char* model_id() const override { return "dummy-model"; }
     const char* pipeline_type() const override { return "DummyPipeline"; }
 };
 
 static void test_null_input_returns_null() {
-    auto* p = trtf_create_pipeline(nullptr, 0);
+    auto* p = trtmc_create_pipeline(nullptr, 0);
     check(p == nullptr, "null input returns nullptr");
-    const char* err = trtf_last_error();
+    const char* err = trtmc_last_error();
     check(err != nullptr && std::strlen(err) > 0, "error set after null input");
 }
 
 static void test_invalid_path_returns_null() {
-    auto* p = trtf_create_pipeline("/nonexistent/path/to/bundle.trtfb", 0);
+    auto* p = trtmc_create_pipeline("/nonexistent/path/to/bundle.trtfb", 0);
     check(p == nullptr, "invalid path returns nullptr");
-    const char* err = trtf_last_error();
+    const char* err = trtmc_last_error();
     check(err != nullptr && std::strlen(err) > 0, "error set after invalid path");
 }
 
 static void test_version_available() {
-    const char* ver = trtf_version();
+    const char* ver = trtmc_version();
     check(ver != nullptr, "version is non-null");
     check(std::strlen(ver) > 0, "version is non-empty");
 }
 
 static void test_has_trt_returns_bool() {
-    const int val = trtf_has_trt();
-    check(val == 0 || val == 1, "trtf_has_trt returns 0 or 1");
+    const int val = trtmc_has_trt();
+    check(val == 0 || val == 1, "trtmc_has_trt returns 0 or 1");
 }
 
 static void test_sizeof_ipipeline_is_vtable() {
-    check(sizeof(trtf::IPipeline) == sizeof(void*), "sizeof(IPipeline) equals vtable pointer size");
+    check(sizeof(trtmc::IPipeline) == sizeof(void*), "sizeof(IPipeline) equals vtable pointer size");
 }
 
 static void test_delete_null_safe() {
-    trtf::IPipeline* p = nullptr;
+    trtmc::IPipeline* p = nullptr;
     delete p;
     check(true, "delete null IPipeline is safe");
 }
@@ -146,7 +146,7 @@ static void test_ipipeline_default_virtuals() {
 
     threw = false;
     try {
-        trtf::TranscriptionStreamConfig cfg;
+        trtmc::TranscriptionStreamConfig cfg;
         pipeline.transcribe_streaming(nullptr, 0, cfg);
     } catch (const std::runtime_error&) {
         threw = true;

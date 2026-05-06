@@ -19,7 +19,7 @@ import flashinfer.decode as fd
 # ---------------------------------------------------------------------------
 
 MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
-BASELINE_BUNDLE = "/workspace/users/yifeif/trt-transformers/engines/qwen3-4b-instruct-2507.trtfb"
+BASELINE_BUNDLE = "/workspace/users/yifeif/tensorrt-model-connect/engines/qwen3-4b-instruct-2507.trtfb"
 FI_BUNDLE = "/tmp/qwen3_4b_fi.trtfb"
 HEAD_DIM = 128
 MAX_CACHE = 256
@@ -39,7 +39,7 @@ tvm_ffi.register_global_func("flashinfer.decode_f16_d128", fi_mod.run, override=
 print("  Registered (native CUDA, zero Python callback)")
 
 # Load plugin
-lib = ct.CDLL("./build_shared/libtrtf_core.so", mode=ct.RTLD_GLOBAL)
+lib = ct.CDLL("./build_shared/libtrtmc_core.so", mode=ct.RTLD_GLOBAL)
 lib.tvm_ffi_plugin_force_link()
 
 # ---------------------------------------------------------------------------
@@ -47,12 +47,12 @@ lib.tvm_ffi_plugin_force_link()
 # ---------------------------------------------------------------------------
 
 if not os.path.exists(FI_BUNDLE):
-    os.environ["TRTF_FFI_ATTENTION_KERNEL"] = "flashinfer.decode_f16_d128"
-    from trtf_build.engine_builder import build
+    os.environ["TRTMC_FFI_ATTENTION_KERNEL"] = "flashinfer.decode_f16_d128"
+    from tensorrt_model_connect.engine_builder import build
     print(f"\nBuilding {MODEL_ID} with FlashInfer attention...")
     build(MODEL_ID, FI_BUNDLE, max_cache_length=MAX_CACHE)
     print(f"  Saved: {FI_BUNDLE}")
-    del os.environ["TRTF_FFI_ATTENTION_KERNEL"]
+    del os.environ["TRTMC_FFI_ATTENTION_KERNEL"]
 else:
     print(f"  FlashInfer bundle exists: {FI_BUNDLE}")
 
@@ -60,7 +60,7 @@ else:
 # 3. Runner helper
 # ---------------------------------------------------------------------------
 
-from trtf_build.debug_runner import load_section_from_bundle, TrtRunner  # noqa: E402
+from tensorrt_model_connect.debug_runner import load_section_from_bundle, TrtRunner  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 try:

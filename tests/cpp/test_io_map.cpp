@@ -11,7 +11,7 @@
 // =============================================================================
 
 #include "runtime/core/trt_engine_lifecycle.h"
-#include "trtf/runtime/pipeline_plugin.h"
+#include "trtmc/runtime/pipeline_plugin.h"
 
 #include <cstdio>
 #include <string>
@@ -28,42 +28,42 @@ static void check(bool cond, const char* name) {
 // --- expand_layer_name tests ---
 
 static void test_expand_simple_i() {
-    check(trtf::expand_layer_name("cache_k_{i}", 0) == "cache_k_0", "k_{i}_0");
-    check(trtf::expand_layer_name("cache_k_{i}", 5) == "cache_k_5", "k_{i}_5");
-    check(trtf::expand_layer_name("cache_k_{i}", 27) == "cache_k_27", "k_{i}_27");
+    check(trtmc::expand_layer_name("cache_k_{i}", 0) == "cache_k_0", "k_{i}_0");
+    check(trtmc::expand_layer_name("cache_k_{i}", 5) == "cache_k_5", "k_{i}_5");
+    check(trtmc::expand_layer_name("cache_k_{i}", 27) == "cache_k_27", "k_{i}_27");
 }
 
 static void test_expand_2i() {
-    check(trtf::expand_layer_name("cache_kv_{2i}", 0) == "cache_kv_0", "kv_{2i}_0");
-    check(trtf::expand_layer_name("cache_kv_{2i}", 3) == "cache_kv_6", "kv_{2i}_3");
+    check(trtmc::expand_layer_name("cache_kv_{2i}", 0) == "cache_kv_0", "kv_{2i}_0");
+    check(trtmc::expand_layer_name("cache_kv_{2i}", 3) == "cache_kv_6", "kv_{2i}_3");
 }
 
 static void test_expand_2i_plus_1() {
-    check(trtf::expand_layer_name("cache_kv_{2i+1}", 0) == "cache_kv_1", "kv_{2i+1}_0");
-    check(trtf::expand_layer_name("cache_kv_{2i+1}", 3) == "cache_kv_7", "kv_{2i+1}_3");
+    check(trtmc::expand_layer_name("cache_kv_{2i+1}", 0) == "cache_kv_1", "kv_{2i+1}_0");
+    check(trtmc::expand_layer_name("cache_kv_{2i+1}", 3) == "cache_kv_7", "kv_{2i+1}_3");
 }
 
 static void test_expand_2i_plus_2() {
-    check(trtf::expand_layer_name("output{2i+2}", 0) == "output2", "out_{2i+2}_0");
-    check(trtf::expand_layer_name("output{2i+2}", 4) == "output10", "out_{2i+2}_4");
+    check(trtmc::expand_layer_name("output{2i+2}", 0) == "output2", "out_{2i+2}_0");
+    check(trtmc::expand_layer_name("output{2i+2}", 4) == "output10", "out_{2i+2}_4");
 }
 
 static void test_expand_mixed() {
     // Pattern with both {2i+1} and {2i+2} — each replaced independently.
-    check(trtf::expand_layer_name("output{2i+1}", 0) == "output1", "out_{2i+1}_0");
-    check(trtf::expand_layer_name("output{2i+2}", 0) == "output2", "out_{2i+2}_0");
+    check(trtmc::expand_layer_name("output{2i+1}", 0) == "output1", "out_{2i+1}_0");
+    check(trtmc::expand_layer_name("output{2i+2}", 0) == "output2", "out_{2i+2}_0");
 }
 
 static void test_expand_literal() {
     // No tokens — should return the pattern unchanged.
-    check(trtf::expand_layer_name("my_tensor", 5) == "my_tensor", "literal_passthrough");
-    check(trtf::expand_layer_name("", 0) == "", "empty_pattern");
+    check(trtmc::expand_layer_name("my_tensor", 5) == "my_tensor", "literal_passthrough");
+    check(trtmc::expand_layer_name("", 0) == "", "empty_pattern");
 }
 
 // --- IoMap default tests ---
 
 static void test_io_map_defaults() {
-    trtf::IoMap io;
+    trtmc::IoMap io;
     check(io.token_id == "token_id", "default token_id");
     check(io.position_id == "position_id", "default position_id");
     check(io.attention_mask == "attention_mask", "default attention_mask");
@@ -77,7 +77,7 @@ static void test_io_map_defaults() {
 // --- BaseConfig io_map field default ---
 
 static void test_base_config_io_map_default() {
-    trtf::BaseConfig cfg;
+    trtmc::BaseConfig cfg;
     check(cfg.io_map.logits == "logits", "base_config io_map.logits default");
     check(cfg.io_map.cache_k_pattern == "cache_k_{i}", "base_config io_map.cache_k default");
 }
@@ -93,7 +93,7 @@ static void test_parse_io_map_absent() {
         "num_attention_heads": 8,
         "runtime_strategy": "decoder_kv_cache"
     })";
-    auto cfg = trtf::parse_base_config(config, 128);
+    auto cfg = trtmc::parse_base_config(config, 128);
     check(cfg.io_map.logits == "logits", "absent io_map: logits default");
     check(cfg.io_map.cache_k_pattern == "cache_k_{i}", "absent io_map: cache_k default");
 }
@@ -113,7 +113,7 @@ static void test_parse_io_map_present() {
             "present_v": "output{2i+2}"
         }
     })";
-    auto cfg = trtf::parse_base_config(config, 128);
+    auto cfg = trtmc::parse_base_config(config, 128);
     check(cfg.io_map.logits == "output0", "parsed io_map: logits");
     check(cfg.io_map.cache_k_pattern == "cache_kv_{2i}", "parsed io_map: cache_k");
     check(cfg.io_map.cache_v_pattern == "cache_kv_{2i+1}", "parsed io_map: cache_v");
@@ -134,7 +134,7 @@ static void test_parse_io_map_partial() {
             "logits": "my_logits"
         }
     })";
-    auto cfg = trtf::parse_base_config(config, 64);
+    auto cfg = trtmc::parse_base_config(config, 64);
     check(cfg.io_map.logits == "my_logits", "partial io_map: logits overridden");
     check(cfg.io_map.cache_k_pattern == "cache_k_{i}", "partial io_map: cache_k default");
     check(cfg.io_map.present_v_pattern == "present_v_{i}", "partial io_map: present_v default");

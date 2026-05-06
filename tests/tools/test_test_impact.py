@@ -40,13 +40,13 @@ def mock_repo(tmp_path):
     """Create a minimal mock repo with manifests and family plugins."""
     models_dir = tmp_path / "tests" / "e2e" / "models"
     models_dir.mkdir(parents=True)
-    families_dir = tmp_path / "trtf_build" / "trtf_build" / "families"
+    families_dir = tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "families"
     families_dir.mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "plugins" / "shared").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "pipelines").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "core").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "domains" / "diffusion").mkdir(parents=True)
-    (tmp_path / "include" / "trtf").mkdir(parents=True)
+    (tmp_path / "include" / "trtmc").mkdir(parents=True)
     (tmp_path / "tests" / "e2e" / "data").mkdir(parents=True)
     (tmp_path / "tests" / "e2e_harness" / "runners").mkdir(parents=True)
     (tmp_path / "tests" / "e2e_harness" / "comparators").mkdir(parents=True)
@@ -118,11 +118,11 @@ def mock_repo(tmp_path):
                   "from ..standard_decoder_builder import build\nfrom ..config import C\n")
 
     # Placeholder source files
-    (tmp_path / "trtf_build" / "trtf_build" / "standard_decoder_builder.py").write_text("")
-    (tmp_path / "trtf_build" / "trtf_build" / "encoder_builder.py").write_text("")
-    (tmp_path / "trtf_build" / "trtf_build" / "config.py").write_text("")
-    (tmp_path / "trtf_build" / "trtf_build" / "checkpoint_mapper.py").write_text("")
-    (tmp_path / "trtf_build" / "trtf_build" / "graph_ops.py").write_text("")
+    (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "standard_decoder_builder.py").write_text("")
+    (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "encoder_builder.py").write_text("")
+    (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "config.py").write_text("")
+    (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "checkpoint_mapper.py").write_text("")
+    (tmp_path / "tensorrt_model_connect" / "tensorrt_model_connect" / "graph_ops.py").write_text("")
     (tmp_path / "src" / "runtime" / "pipelines" / "flux_pipeline.cpp").write_text(
         '#include "runtime/core/gpu_matmul.h"\n'
         '#include "runtime/domains/diffusion/diffusion_denoising_step_seam.h"\n',
@@ -154,34 +154,34 @@ class TestFamilyPlugin:
     def test_family_only_change(self, imap):
         """families/qwen.py -> exactly qwen models."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/families/qwen.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py", imap)
         assert match.rule == "family_plugin"
         assert sorted(match.models) == ["qwen3-0.6b", "qwen3-4b"]
 
     def test_family_isolation(self, imap):
         """families/qwen.py does NOT affect llama models."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/families/qwen.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py", imap)
         assert "llama-7b" not in match.models
 
     def test_family_with_no_manifest(self, imap):
         """A family .py with no manifest -> empty models, no crash."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/families/nonexistent_family.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/families/nonexistent_family.py", imap)
         assert match.rule == "family_plugin"
         assert match.models == []
 
     def test_family_base_all_models(self, imap):
         """families/base.py -> ALL models."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/families/base.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/families/base.py", imap)
         assert match.rule == "family_base"
         assert sorted(match.models) == sorted(imap.all_model_names)
 
     def test_family_init_all_models(self, imap):
         """families/__init__.py -> ALL models."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/families/__init__.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/families/__init__.py", imap)
         assert match.rule == "family_base"
         assert len(match.models) == len(imap.all_model_names)
 
@@ -199,7 +199,7 @@ class TestFamilyPlugin:
         )
         imap = test_impact.build_impact_map(mock_repo)
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/engine_defs/torch_trt/families/patchtst.py",
+            "tensorrt_model_connect/tensorrt_model_connect/engine_defs/torch_trt/families/patchtst.py",
             imap,
         )
         assert match.rule == "torchtrt_family_plugin"
@@ -215,28 +215,28 @@ class TestSharedModules:
     def test_shared_module_all_models(self, imap):
         """checkpoint_mapper.py -> all models (no escalation)."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/checkpoint_mapper.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py", imap)
         assert match.rule == "shared_builder_module"
         assert sorted(match.models) == sorted(imap.all_model_names)
 
     def test_shared_module_with_cap(self, imap):
         """checkpoint_mapper.py + cap -> core models only."""
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/checkpoint_mapper.py"], imap, cap=5)
+            ["tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py"], imap, cap=5)
         assert result.cap_applied
         assert sorted(result.e2e_models) == sorted(imap.core_models)
 
     def test_graph_ops_all_models(self, imap):
         """graph_ops.py -> all models (shared utility, not a builder)."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/graph_ops.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/graph_ops.py", imap)
         assert match.rule == "shared_builder_module"
         assert len(match.models) == len(imap.all_model_names)
 
     def test_config_all_models(self, imap):
         """config.py -> all models."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/config.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/config.py", imap)
         assert match.rule == "shared_builder_module"
         assert len(match.models) == len(imap.all_model_names)
 
@@ -250,7 +250,7 @@ class TestSpecializedBuilder:
     def test_standard_decoder_builder(self, imap):
         """standard_decoder_builder.py -> only families that import it."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/standard_decoder_builder.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py", imap)
         assert match.rule == "specialized_builder"
         # qwen, llama, qwen_vl, bark, mixtral import standard_decoder_builder
         expected_families = {"qwen", "llama", "qwen_vl", "bark", "mixtral"}
@@ -262,7 +262,7 @@ class TestSpecializedBuilder:
     def test_encoder_builder(self, imap):
         """encoder_builder.py -> only bert family."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/encoder_builder.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/encoder_builder.py", imap)
         assert match.rule == "specialized_builder"
         assert set(match.models) == {"bert-base"}
 
@@ -401,7 +401,7 @@ class TestSafetyNet:
     def test_include_header(self, imap):
         """include/ header -> all models."""
         match = test_impact.classify_file(
-            "include/trtf/runtime/pipeline_factory.h", imap)
+            "include/trtmc/runtime/pipeline_factory.h", imap)
         assert match.rule == "cpp_source"
         assert len(match.models) == len(imap.all_model_names)
 
@@ -498,7 +498,7 @@ class TestUnitTiers:
     def test_builder_source_implies_unit_tier(self, imap):
         """Python builder source change implies 'builder' unit tier."""
         match = test_impact.classify_file(
-            "trtf_build/trtf_build/families/qwen.py", imap)
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py", imap)
         assert "builder" in match.unit_tiers
 
 
@@ -587,22 +587,22 @@ class TestDiffAwareBuilderRefinement:
     def test_cli_fp8_diff_can_be_refined(self, imap):
         """CLI fp8-only plumbing narrows to fp8-scales manifests."""
         diff_text = """
-diff --git a/trtf_build/trtf_build/cli.py b/trtf_build/trtf_build/cli.py
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/cli.py b/tensorrt_model_connect/tensorrt_model_connect/cli.py
 @@ -1 +1 @@
 +    save_fp8_scales = getattr(args, 'save_fp8_scales', None)
 +            save_fp8_scales=save_fp8_scales,
 +    build_p.add_argument("--save-fp8-scales", default=None,
 """
-        broad = test_impact.classify_file("trtf_build/trtf_build/cli.py", imap)
+        broad = test_impact.classify_file("tensorrt_model_connect/tensorrt_model_connect/cli.py", imap)
         refined = test_impact.maybe_refine_match_with_diff(
-            "trtf_build/trtf_build/cli.py", broad, diff_text, imap)
+            "tensorrt_model_connect/tensorrt_model_connect/cli.py", broad, diff_text, imap)
         assert refined.rule == "shared_builder_fp8_scales_cli"
         assert refined.models == ["flux-2-dev-fp8"]
 
     def test_engine_builder_fp8_diff_can_be_refined(self, imap):
         """Diffusion fp8-only engine_builder changes narrow to fp8-scales manifests."""
         diff_text = """
-diff --git a/trtf_build/trtf_build/engine_builder.py b/trtf_build/trtf_build/engine_builder.py
+diff --git a/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py b/tensorrt_model_connect/tensorrt_model_connect/engine_builder.py
 @@ -1 +1 @@
 +        save_fp8_scales = getattr(build_bundle, '_save_fp8_scales', None)
 +            fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales)
@@ -616,9 +616,9 @@ diff --git a/trtf_build/trtf_build/engine_builder.py b/trtf_build/trtf_build/eng
 +        save_fp8_scales: Path to save calibrated FP8 scales JSON.
 +    build_bundle._save_fp8_scales = save_fp8_scales
 """
-        broad = test_impact.classify_file("trtf_build/trtf_build/engine_builder.py", imap)
+        broad = test_impact.classify_file("tensorrt_model_connect/tensorrt_model_connect/engine_builder.py", imap)
         refined = test_impact.maybe_refine_match_with_diff(
-            "trtf_build/trtf_build/engine_builder.py", broad, diff_text, imap)
+            "tensorrt_model_connect/tensorrt_model_connect/engine_builder.py", broad, diff_text, imap)
         assert refined.rule == "shared_builder_fp8_scales_engine"
         assert refined.models == ["flux-2-dev-fp8"]
 
@@ -632,8 +632,8 @@ class TestAggregation:
     def test_multiple_families(self, imap):
         """Multiple family changes -> union of models."""
         result = test_impact.analyze_impact([
-            "trtf_build/trtf_build/families/qwen.py",
-            "trtf_build/trtf_build/families/llama.py",
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py",
+            "tensorrt_model_connect/tensorrt_model_connect/families/llama.py",
         ], imap)
         assert "qwen3-0.6b" in result.e2e_models
         assert "llama-7b" in result.e2e_models
@@ -642,14 +642,14 @@ class TestAggregation:
     def test_cap_not_applied_when_under(self, imap):
         """Cap not applied when affected models <= cap."""
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/families/qwen.py"], imap, cap=5)
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap, cap=5)
         assert not result.cap_applied
         assert sorted(result.e2e_models) == ["qwen3-0.6b", "qwen3-4b"]
 
     def test_cap_applied_when_over(self, imap):
         """Cap applied when affected models > cap."""
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/checkpoint_mapper.py"], imap, cap=5)
+            ["tensorrt_model_connect/tensorrt_model_connect/checkpoint_mapper.py"], imap, cap=5)
         assert result.cap_applied
         assert sorted(result.e2e_models) == sorted(imap.core_models)
 
@@ -663,7 +663,7 @@ class TestAggregation:
     def test_mixed_impact(self, imap):
         """Family plugin + unit test -> models + unit tier."""
         result = test_impact.analyze_impact([
-            "trtf_build/trtf_build/families/qwen.py",
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py",
             "tests/builder/test_config.py",
         ], imap)
         assert "qwen3-0.6b" in result.e2e_models
@@ -680,7 +680,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/families/qwen.py"], imap)
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap)
 
         assert result.e2e_models == ["qwen3-0.6b"]
         assert result.l0_replacements == [{
@@ -699,7 +699,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
             e2e_suite="nightly",
         )
 
@@ -809,12 +809,12 @@ class TestCoverageMapIntegration:
     def test_impact_result_has_test_lists(self, imap):
         """ImpactResult with coverage map includes per-tier test lists."""
         coverage_map = {
-            "trtf_build/trtf_build/families/qwen.py": [
+            "tensorrt_model_connect/tensorrt_model_connect/families/qwen.py": [
                 "tests/builder/test_engine_qwen.py::TestQwen::test_plugin",
             ],
         }
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
             coverage_map=coverage_map,
         )
         assert "tests/builder/test_engine_qwen.py::TestQwen::test_plugin" in result.builder_tests
@@ -822,9 +822,9 @@ class TestCoverageMapIntegration:
 
     def test_unknown_file_triggers_fallback(self, imap):
         """File not in coverage map triggers tier fallback."""
-        coverage_map = {"trtf_build/trtf_build/config.py": ["tests/builder/test_config.py::test_a"]}
+        coverage_map = {"tensorrt_model_connect/tensorrt_model_connect/config.py": ["tests/builder/test_config.py::test_a"]}
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
             coverage_map=coverage_map,
         )
         assert "builder" in result.fallback_tiers
@@ -832,7 +832,7 @@ class TestCoverageMapIntegration:
     def test_no_coverage_map_no_test_lists(self, imap):
         """Without coverage map, test lists are empty and fallback_tiers empty."""
         result = test_impact.analyze_impact(
-            ["trtf_build/trtf_build/families/qwen.py"], imap,
+            ["tensorrt_model_connect/tensorrt_model_connect/families/qwen.py"], imap,
         )
         assert result.builder_tests == []
         assert result.cpp_tests == []

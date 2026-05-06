@@ -1,4 +1,4 @@
-# trt-transformers-cpp
+# TensorRT-Model-Connect
 
 Python builds TensorRT engines from HuggingFace models. C++ runs them.
 
@@ -6,12 +6,12 @@ Two pipelines are available:
 
 | Pipeline | Builder | Bundle | Runtime | How it works |
 |----------|---------|--------|---------|--------------|
-| **Raw TRT** | `trtf-build` (Python) | `.trtfb` | C++ (TensorRT C API) | Builds a TRT engine from scratch using the TensorRT network API with hand-written graph ops. Fastest inference, most control. |
-| **Torch-TRT** | `trtf-build --torch-trt` (Python) | `.trtfb` | C++ (TensorRT C API) | Uses `torch.export` + `torch_tensorrt` to compile an HF model into a raw TRT engine. No manual graph construction needed — just a family plugin that loads the model. |
+| **Raw TRT** | `trtmc-build` (Python) | `.trtfb` | C++ (TensorRT C API) | Builds a TRT engine from scratch using the TensorRT network API with hand-written graph ops. Fastest inference, most control. |
+| **Torch-TRT** | `trtmc-build --torch-trt` (Python) | `.trtfb` | C++ (TensorRT C API) | Uses `torch.export` + `torch_tensorrt` to compile an HF model into a raw TRT engine. No manual graph construction needed — just a family plugin that loads the model. |
 
-Both pipelines produce `.trtfb` bundles that run on the same C++ runtime with the same `./build/trtf` CLI. No LibTorch dependency.
+Both pipelines produce `.trtfb` bundles that run on the same C++ runtime with the same `./build/trtmc` CLI. The bundle extension is retained for compatibility with existing engine artifacts. No LibTorch dependency.
 
-The live C++ runtime has one composition path: `trtf_c.cpp -> strategy builder -> PipelineServices -> PipelineRouter -> ports/adapters -> TRT executors`. Core services operate on in-memory request/result DTOs; file and artifact IO stays at the router and adapter edge.
+The live C++ runtime has one composition path: `trtmc_c.cpp -> strategy builder -> PipelineServices -> PipelineRouter -> ports/adapters -> TRT executors`. Core services operate on in-memory request/result DTOs; file and artifact IO stays at the router and adapter edge.
 
 ## Quick start
 
@@ -30,10 +30,10 @@ Prerequisites: Docker + NVIDIA Container Toolkit.
 
 ```bash
 # Build a bundle
-trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb
+trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb
 
 # Run inference
-./build/trtf run /tmp/qwen3.trtfb \
+./build/trtmc run /tmp/qwen3.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --hf-python /opt/venv/bin/python
@@ -43,10 +43,10 @@ trtf-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb
 
 ```bash
 # Build a bundle
-trtf-build build --torch-trt Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
+trtmc-build build --torch-trt Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
 
 # Run inference (same CLI — auto-detects bundle type)
-./build/trtf run /tmp/qwen3.trtfb \
+./build/trtmc run /tmp/qwen3.trtfb \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --hf-python /opt/venv/bin/python
@@ -62,95 +62,95 @@ The raw TRT pipeline builds engines from scratch using the TensorRT network API 
 ## Python API
 
 ```python
-import trtf_build
+import tensorrt_model_connect
 
 # From a HuggingFace repo ID (auto-downloads):
-trtf_build.build("Qwen/Qwen3-0.6B", "qwen3.trtfb")
+tensorrt_model_connect.build("Qwen/Qwen3-0.6B", "qwen3.trtfb")
 
 # From a local directory:
-trtf_build.build("models/hf/Qwen__Qwen3-0.6B", "qwen3.trtfb")
+tensorrt_model_connect.build("models/hf/Qwen__Qwen3-0.6B", "qwen3.trtfb")
 
 # With options:
-trtf_build.build("Qwen/Qwen3-0.6B", "qwen3.trtfb",
+tensorrt_model_connect.build("Qwen/Qwen3-0.6B", "qwen3.trtfb",
                   max_cache_length=512, verbose=True)
 ```
 
 Install the package:
 ```bash
-pip install --no-deps -e trtf_build/
+pip install --no-deps -e tensorrt_model_connect/
 ```
 
 All commands in this repo are expected to run inside the dev container image.
 
 ## CLI
 
-### Python builder (`trtf-build`)
+### Python builder (`trtmc-build`)
 
 ```bash
 # Build from HF repo ID (auto-downloads)
-trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
+trtmc-build build Qwen/Qwen3-0.6B -o qwen3.trtfb
 
 # Build from local directory
-trtf-build build models/hf/Qwen__Qwen3-0.6B -o qwen3.trtfb
+trtmc-build build models/hf/Qwen__Qwen3-0.6B -o qwen3.trtfb
 
 # Options
-trtf-build build Qwen/Qwen3-0.6B -o qwen3.trtfb --max-cache-length 512 --verbose
+trtmc-build build Qwen/Qwen3-0.6B -o qwen3.trtfb --max-cache-length 512 --verbose
 
 # Inspect a bundle
-trtf-build inspect qwen3.trtfb
+trtmc-build inspect qwen3.trtfb
 
 # Version info
-trtf-build version
+trtmc-build version
 ```
 
-### C++ runtime (`trtf`)
+### C++ runtime (`trtmc`)
 
 ```bash
 # Text generation (and VLM generation with --image when supported)
-./build/trtf run qwen3.trtfb --prompt "Hello" --max-new-tokens 50 \
+./build/trtmc run qwen3.trtfb --prompt "Hello" --max-new-tokens 50 \
   --hf-python /opt/venv/bin/python
 
 # Encoder-only hidden states
-./build/trtf encode qwen3.trtfb --prompt "Hello" --hf-python /opt/venv/bin/python
+./build/trtmc encode qwen3.trtfb --prompt "Hello" --hf-python /opt/venv/bin/python
 
 # Segmentation / prompted segmentation / detection
-./build/trtf segment segformer.trtfb --image input.png --output mask.png
-./build/trtf segment-sam sam.trtfb --image input.png --output sam_masks/
-./build/trtf detect yolox.trtfb --image input.png --output detections.json --threshold 0.5
+./build/trtmc segment segformer.trtfb --image input.png --output mask.png
+./build/trtmc segment-sam sam.trtfb --image input.png --output sam_masks/
+./build/trtmc detect yolox.trtfb --image input.png --output detections.json --threshold 0.5
 
 # Embedding / reranking
-./build/trtf embed bert.trtfb --prompt "Hello"
-./build/trtf rerank personaplex.trtfb --prompt "query" --document "candidate passage"
+./build/trtmc embed bert.trtfb --prompt "Hello"
+./build/trtmc rerank personaplex.trtfb --prompt "query" --document "candidate passage"
 
 # Audio + speech
-./build/trtf transcribe whisper.trtfb --audio sample.wav
-./build/trtf generate-audio bark.trtfb --prompt "A calm narration" --output out.wav
-./build/trtf speak qwen3_omni.trtfb --audio-in in.wav --audio-out out.wav
+./build/trtmc transcribe whisper.trtfb --audio sample.wav
+./build/trtmc generate-audio bark.trtfb --prompt "A calm narration" --output out.wav
+./build/trtmc speak qwen3_omni.trtfb --audio-in in.wav --audio-out out.wav
 
 # Neural operators (DeepONet / FNO)
-./build/trtf solve deeponet.trtfb --branch-input "0.1,0.2" --trunk-input "0.5,0.5"
-./build/trtf solve fno.trtfb --field-input "0.1,0.2,0.3,0.4"
+./build/trtmc solve deeponet.trtfb --branch-input "0.1,0.2" --trunk-input "0.5,0.5"
+./build/trtmc solve fno.trtfb --field-input "0.1,0.2,0.3,0.4"
 
 # Diffusion video
-./build/trtf generate-video wan_t2v.trtfb --prompt "A cat riding a bike" --output frames/
+./build/trtmc generate-video wan_t2v.trtfb --prompt "A cat riding a bike" --output frames/
 
 # Inspect bundle metadata
-./build/trtf inspect qwen3.trtfb
+./build/trtmc inspect qwen3.trtfb
 
 # Version info
-./build/trtf version
+./build/trtmc version
 ```
 
 ## C API
 
-The public C++ API is a single header (`include/trtf/pipeline.h`):
+The public C++ API is a single header (`include/trtmc/pipeline.h`):
 
 ```cpp
-#include <trtf/pipeline.h>
+#include <trtmc/pipeline.h>
 
 // Create from .trtfb bundle
-TrtfPipelineOptions opts = {.max_new_tokens = 50, .hf_python = "/path/to/python"};
-auto* p = trtf_create_pipeline_ex("model.trtfb", &opts);
+TrtmcPipelineOptions opts = {.max_new_tokens = 50, .hf_python = "/path/to/python"};
+auto* p = trtmc_create_pipeline_ex("model.trtfb", &opts);
 
 p->generate("Hello", 50);    // text generation
 p->generate("Describe image", "/tmp/input.png", 50);  // if supports_vision()
@@ -166,9 +166,9 @@ p->backend_name();           // returns const char*
 delete p;
 
 // Utilities
-trtf_last_error();           // thread-local error message
-trtf_version();
-trtf_has_trt();              // 1 if compiled with TRT support
+trtmc_last_error();           // thread-local error message
+trtmc_version();
+trtmc_has_trt();              // 1 if compiled with TRT support
 ```
 
 ## Torch-TRT pipeline
@@ -186,38 +186,38 @@ The Torch-TRT pipeline compiles HF models via `torch.export` and `torch_tensorrt
 ### Python API
 
 ```python
-import ttrt_build
+import tensorrt_model_connect
 
 # From a HuggingFace repo ID (auto-downloads):
-ttrt_build.build("Qwen/Qwen3-0.6B", "qwen3.trtfb")
+tensorrt_model_connect.build("Qwen/Qwen3-0.6B", "qwen3.trtfb")
 
 # With options:
-ttrt_build.build("Qwen/Qwen3-0.6B", "qwen3.trtfb",
+tensorrt_model_connect.build("Qwen/Qwen3-0.6B", "qwen3.trtfb",
                   max_cache_length=512, verbose=True)
 ```
 
 Install the package:
 ```bash
-pip install --no-deps -e ttrt_build/
+pip install --no-deps -e tensorrt_model_connect/
 ```
 
-### CLI (`trtf-build --torch-trt`)
+### CLI (`trtmc-build --torch-trt`)
 
 ```bash
 # Build from HF repo ID (default: fp16)
-trtf-build build --torch-trt Qwen/Qwen3-0.6B -o qwen3.trtfb --max-cache-length 256
+trtmc-build build --torch-trt Qwen/Qwen3-0.6B -o qwen3.trtfb --max-cache-length 256
 
 # Build with fp32 precision
-trtf-build build --torch-trt Qwen/Qwen3-0.6B -o qwen3_fp32.trtfb --precision fp32
+trtmc-build build --torch-trt Qwen/Qwen3-0.6B -o qwen3_fp32.trtfb --precision fp32
 
 # Build a smaller model
-trtf-build build --torch-trt Qwen/Qwen2.5-0.5B -o qwen2.5-0.5b.trtfb --max-cache-length 256
+trtmc-build build --torch-trt Qwen/Qwen2.5-0.5B -o qwen2.5-0.5b.trtfb --max-cache-length 256
 
 # Inspect a bundle
-trtf-build inspect qwen3.trtfb
+trtmc-build inspect qwen3.trtfb
 
 # Version info
-trtf-build version
+trtmc-build version
 ```
 
 ### Validation tools
@@ -280,12 +280,12 @@ The `--precision` flag controls Torch-TRT, HF eager, and torch.compile. Raw TRT 
 
 ## Supported models
 
-Model support is plugin-driven and auto-discovered from `trtf_build/trtf_build/families/` at build time. Any HF model whose `config.json` `model_type` matches a plugin is supported without C++ registration changes.
+Model support is plugin-driven and auto-discovered from `tensorrt_model_connect/tensorrt_model_connect/families/` at build time. Any HF model whose `config.json` `model_type` matches a plugin is supported without C++ registration changes.
 
 Canonical source of truth in your checkout:
 
 ```bash
-ls trtf_build/trtf_build/families/*.py \
+ls tensorrt_model_connect/tensorrt_model_connect/families/*.py \
   | sed 's|.*/||; s|\.py$||' \
   | rg -v '^(__init__|base)$' \
   | sort
@@ -295,7 +295,7 @@ As of **February 26, 2026**, this repository contains 44 family modules:
 
 `bark`, `bert`, `bloom`, `codegen`, `deeponet`, `deepseek_ocr`, `deepseek_v2`, `eagle_vlm`, `falcon`, `flux`, `fno`, `gemma`, `gpt2`, `gpt_neo`, `gpt_neox`, `granite`, `internlm`, `internvl`, `llama`, `mamba`, `mistral`, `mixtral`, `nemotron`, `nemotron_h`, `olmo`, `opt`, `personaplex`, `phi`, `phi4_multimodal`, `phi_moe`, `qwen`, `qwen3_omni`, `qwen_moe`, `qwen_vl`, `rwkv`, `sam`, `segformer`, `stablelm`, `starcoder2`, `wan_t2v`, `whisper`, `xglm`, `yolox`, `z_image`.
 
-These are composed at runtime by the strategy builders selected from `src/cabi/api/trtf_c.cpp`, including:
+These are composed at runtime by the strategy builders selected from `src/cabi/api/trtmc_c.cpp`, including:
 - `decoder_kv_cache`, `decoder_moe`
 - `ssm_recurrent`, `rwkv_recurrent`, `hybrid_mamba_attention`
 - `vision_language`, `segmentation`, `prompted_segmentation`, `object_detection`
@@ -303,7 +303,7 @@ These are composed at runtime by the strategy builders selected from `src/cabi/a
 - `encoder_only`, `embedding`, `reranking`, `neural_operator`
 - `omni_multimodal`, `diffusion`
 
-Store bundles on persistent storage with `-o /workspace/users/yifeif/trt-transformers/engines/model.trtfb`.
+Store bundles on persistent storage with `-o /workspace/users/yifeif/tensorrt-model-connect/engines/model.trtfb`.
 
 ## Adding a model family
 
@@ -313,7 +313,7 @@ python3 scripts/new_family.py \
   --model-type phi3 --hf-repo microsoft/Phi-3-mini-4k-instruct --family-name phi
 
 # 2. Review and customize the generated plugin
-#    (edit trtf_build/trtf_build/families/phi.py)
+#    (edit tensorrt_model_connect/tensorrt_model_connect/families/phi.py)
 
 # 3. One-command validation (build + diff_logits + diff_layers + runner parity)
 ./scripts/validate_family.sh microsoft/Phi-3-mini-4k-instruct
@@ -321,14 +321,14 @@ python3 scripts/new_family.py \
 
 Plugins are auto-discovered — no registration code needed. No C++ changes required.
 
-See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full guide, or `trtf_build/trtf_build/families/qwen.py` for an example.
+See [Adding a Model Family](docs/wiki/Adding-a-Model-Family.md) for the full guide, or `tensorrt_model_connect/tensorrt_model_connect/families/qwen.py` for an example.
 
 ## Environment variables
 
 | Variable | Description |
 |----------|-------------|
-| `TRTF_TRT_LOG_STDERR=1` | Enable TRT logger output to stderr |
-| `TRTF_TRT_LOG_MIN_SEVERITY` | Minimum TRT log severity |
+| `TRTMC_TRT_LOG_STDERR=1` | Enable TRT logger output to stderr |
+| `TRTMC_TRT_LOG_MIN_SEVERITY` | Minimum TRT log severity |
 
 ## Testing
 
@@ -374,15 +374,15 @@ tools/coverage/run_coverage_all.sh
 # === Tier 3: E2E single-model smoke test (~5 min, needs GPU) ===
 
 /opt/venv/bin/python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
   --rebuild-engines
 
 # === Tier 4: Full E2E suite (50 models, ~2-3 hours, needs GPU) ===
 
 /opt/venv/bin/python -m pytest tests/test_e2e.py -v \
-  --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-  --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python \
+  --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+  --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
   --rebuild-engines --e2e-artifacts-dir /tmp/e2e_artifacts
 
 # === Tier 5: Performance + accuracy comparison (manual, per model) ===

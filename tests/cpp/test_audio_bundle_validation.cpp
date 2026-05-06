@@ -35,10 +35,10 @@ std::vector<char> bytes_from_text(const std::string& text)
 }
 
 // Helper to add a named section to a BundleFile.
-void add_section(trtf::BundleFile& bundle, const std::string& name,
+void add_section(trtmc::BundleFile& bundle, const std::string& name,
                  const std::vector<char>& data)
 {
-    trtf::BundleSection sec;
+    trtmc::BundleSection sec;
     sec.name = name;
     sec.data = data;
     bundle.sections.push_back(std::move(sec));
@@ -47,12 +47,12 @@ void add_section(trtf::BundleFile& bundle, const std::string& name,
 void test_bark_validation_requires_semantic_and_coarse_assets()
 {
     // Empty bundle — missing all required sections.
-    trtf::BundleFile bundle;
+    trtmc::BundleFile bundle;
 
     try
     {
-        trtf::runtime::builders::audio::validate_text_to_audio_bundle_sections(
-            trtf::runtime::builders::audio::TextToAudioBundleKind::kBark,
+        trtmc::runtime::builders::audio::validate_text_to_audio_bundle_sections(
+            trtmc::runtime::builders::audio::TextToAudioBundleKind::kBark,
             bundle,
             "bark.trtfb");
         check(false, "bark validation rejects missing semantic/coarse sections");
@@ -67,7 +67,7 @@ void test_bark_validation_requires_semantic_and_coarse_assets()
 
 void test_magpie_validation_requires_ipa_tokenizer_sections()
 {
-    trtf::BundleFile bundle;
+    trtmc::BundleFile bundle;
     const auto audio = bytes_from_text("audio");
     const auto text = bytes_from_text("text");
     const auto context = bytes_from_text("context");
@@ -79,8 +79,8 @@ void test_magpie_validation_requires_ipa_tokenizer_sections()
 
     try
     {
-        trtf::runtime::builders::audio::validate_text_to_audio_bundle_sections(
-            trtf::runtime::builders::audio::TextToAudioBundleKind::kMagpieTts,
+        trtmc::runtime::builders::audio::validate_text_to_audio_bundle_sections(
+            trtmc::runtime::builders::audio::TextToAudioBundleKind::kMagpieTts,
             bundle,
             "magpie.trtfb");
         check(false, "magpie validation rejects missing IPA tokenizer sections");
@@ -95,7 +95,7 @@ void test_magpie_validation_requires_ipa_tokenizer_sections()
 
 void test_magpie_validation_accepts_complete_required_sections()
 {
-    trtf::BundleFile bundle;
+    trtmc::BundleFile bundle;
     const auto audio = bytes_from_text("audio");
     const auto text = bytes_from_text("text");
     const auto context = bytes_from_text("context");
@@ -110,8 +110,8 @@ void test_magpie_validation_accepts_complete_required_sections()
 
     try
     {
-        trtf::runtime::builders::audio::validate_text_to_audio_bundle_sections(
-            trtf::runtime::builders::audio::TextToAudioBundleKind::kMagpieTts,
+        trtmc::runtime::builders::audio::validate_text_to_audio_bundle_sections(
+            trtmc::runtime::builders::audio::TextToAudioBundleKind::kMagpieTts,
             bundle,
             "magpie.trtfb");
         check(true, "magpie validation accepts complete section set");

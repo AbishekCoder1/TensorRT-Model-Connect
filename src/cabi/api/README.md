@@ -1,6 +1,6 @@
 # C API Entrypoint
 
-`trtf_c.cpp` implements exported C API functions and wires API calls to the runtime pipeline.
+`trtmc_c.cpp` implements exported C API functions and wires API calls to the runtime pipeline.
 
 Focus areas:
 - Handle validation and error mapping

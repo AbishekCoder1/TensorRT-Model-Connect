@@ -3,9 +3,9 @@
 
 #include "runtime/pipelines/patchtsmixer_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
-namespace trtf {
+namespace trtmc {
 
 class PatchTSMixerPlugin final : public IPipelinePlugin {
   public:
@@ -21,4 +21,4 @@ class PatchTSMixerPlugin final : public IPipelinePlugin {
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_patchtsmixer_plugin, PatchTSMixerPlugin,
                                        "patchtsmixer_torchtrt");
 
-} // namespace trtf
+} // namespace trtmc

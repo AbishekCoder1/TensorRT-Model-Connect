@@ -8,11 +8,11 @@
 //   4. Detokenize output
 
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/kv_cache.h"
-#include "trtf/runtime/pipeline_registry.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/kv_cache.h"
+#include "trtmc/runtime/pipeline_registry.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -23,7 +23,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // ---------------------------------------------------------------------------
 // T5Pipeline: encoder-decoder text generation
@@ -319,4 +319,4 @@ class T5Plugin final : public IPipelinePlugin {
 
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_t5_plugin, T5Plugin, "text_to_text");
 
-} // namespace trtf
+} // namespace trtmc

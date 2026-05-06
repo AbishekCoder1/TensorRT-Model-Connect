@@ -29,7 +29,7 @@ void check(bool condition, const char* name)
 
 void test_codec_plan_computes_sizes_and_valid_samples()
 {
-    const auto plan = trtf::make_magpie_codec_plan(6, 8, 4);
+    const auto plan = trtmc::make_magpie_codec_plan(6, 8, 4);
     check(plan.max_codec_frames == 4, "codec plan max frames");
     check(plan.padded_frames == 4, "codec plan padded frames");
     check(plan.input_len == 4, "codec plan input len");
@@ -39,13 +39,13 @@ void test_codec_plan_computes_sizes_and_valid_samples()
 
 void test_codec_input_transposes_and_sanitizes_codes()
 {
-    const auto plan = trtf::make_magpie_codec_plan(3, 2, 4);
+    const auto plan = trtmc::make_magpie_codec_plan(3, 2, 4);
     const std::vector<int32_t> codes = {
-        1, trtf::kMagpieCodecInputLimit,
+        1, trtmc::kMagpieCodecInputLimit,
         3, 4,
         5, 6,
     };
-    const auto codec_input = trtf::build_magpie_codec_input(codes, 2, plan);
+    const auto codec_input = trtmc::build_magpie_codec_input(codes, 2, plan);
     const std::vector<int32_t> expected = {
         1, 3, 5, 0,
         0, 4, 6, 0,

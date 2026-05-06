@@ -19,7 +19,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-STARCODER2-01
 Intent: Validate the StarCoder2 family plugin weight loading including LayerNorm with beta, GELU FC MLP (c_fc/c_proj), QKV biases, and output projection bias.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: MLP keys map to fc1/fc2, all biases (QKV, output, norm) are loaded, and weight shapes match expected dimensions.
 """
 
@@ -34,9 +34,9 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("safetensors not available", allow_module_level=True)
 
 try:
-    from trtf_build.config import ModelConfig
+    from tensorrt_model_connect.config import ModelConfig
 except (ImportError, ModuleNotFoundError):
-    pytest.skip("trtf_build requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -52,7 +52,7 @@ class StarCoder2PluginTester(FamilyPluginTester):
       - Separate Q/K/V/O projections with GQA
     """
 
-    plugin_module = "trtf_build.families.starcoder2"
+    plugin_module = "tensorrt_model_connect.families.starcoder2"
     model_type = "starcoder2"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

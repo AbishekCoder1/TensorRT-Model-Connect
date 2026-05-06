@@ -5,7 +5,7 @@
 #include <cstring>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 inline std::vector<float> encode_sam_point_embedding(
     float x,
@@ -101,4 +101,4 @@ inline std::vector<float> build_sam_point_sparse_prompt(
     return sparse;
 }
 
-} // namespace trtf
+} // namespace trtmc

@@ -7,14 +7,14 @@
 //   Bytes 16..N:  JSON metadata header (UTF-8)
 //   Bytes N..EOF: Binary sections referenced by offset in the header
 
-#include "trtf/bundle.h"
+#include "trtmc/bundle.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // Magic bytes for .trtfb files.
 static constexpr unsigned char kBundleMagic[8] = {'T', 'R', 'T', 'F', 'B', '\0', '\x01', '\0'};
@@ -39,4 +39,4 @@ BundleInfo ReadBundleHeader(const std::string& path);
 // Check magic bytes without reading full file.
 bool HasBundleMagic(const std::string& path);
 
-} // namespace trtf
+} // namespace trtmc

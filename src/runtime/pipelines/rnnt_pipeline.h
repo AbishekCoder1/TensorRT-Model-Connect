@@ -6,10 +6,10 @@
 // runtime inference does not call Python.
 
 #include "runtime/domains/audio/rnnt_config.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/trt_backend.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/trt_backend.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 struct MelFilterbank;
 
@@ -83,4 +83,4 @@ class RnntPipeline final : public IPipeline {
     std::string model_id_;
 };
 
-} // namespace trtf
+} // namespace trtmc

@@ -8,7 +8,7 @@
 #include "runtime/domains/audio/whisper_decode_policy.h"
 #include "runtime/domains/audio/whisper_host_plan.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/tokenizer.h"
 #include "utils/wav_reader.h"
 
 #include <cstring>
@@ -16,7 +16,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WhisperPipeline
@@ -251,4 +251,4 @@ void WhisperPipeline::run_decoder_step(int32_t token_id, std::vector<float>& log
     state_->advance();
 }
 
-} // namespace trtf
+} // namespace trtmc

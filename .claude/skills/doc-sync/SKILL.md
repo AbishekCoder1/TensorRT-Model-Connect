@@ -187,7 +187,7 @@ For each `.md` file in `docs/context/adr/` (excluding README.md):
    `source_commits`, `superseded_by`.
 
 2. **Dead references** — scan the ADR body for file paths (patterns like
-   `src/...`, `trtf_build/...`, `tests/...`, `include/...`). For each path,
+   `src/...`, `tensorrt_model_connect/...`, `tests/...`, `include/...`). For each path,
    verify it exists in the repo. If a file was renamed or moved, use
    `git log --follow --diff-filter=R -- <old_path>` to find the new name.
    Update the reference inline.
@@ -199,7 +199,7 @@ For each `.md` file in `docs/context/adr/` (excluding README.md):
 4. **Stale factual claims** — look for numeric claims ("17 strategies",
    "54+ families", "68 models") and verify against current counts:
    - Strategy count: `grep -r "PluginRegistrar" src/runtime/plugins/ | grep -c "g_"`
-   - Family count: `find trtf_build/trtf_build/families/ -name "*.py" -not -name "__init__.py" -not -name "base.py" | wc -l`
+   - Family count: `find tensorrt_model_connect/tensorrt_model_connect/families/ -name "*.py" -not -name "__init__.py" -not -name "base.py" | wc -l`
    - Model count: `find tests/e2e/models/ -name "*.json" | wc -l`
    Update claims to match reality.
 
@@ -280,7 +280,7 @@ Build a lookup table: `{strategy_string -> (plugin_class, plugin_file)}`.
 
 ```bash
 # Count family plugin files (excluding base.py and __init__.py)
-find trtf_build/trtf_build/families/ -name "*.py" \
+find tensorrt_model_connect/tensorrt_model_connect/families/ -name "*.py" \
   -not -name "__init__.py" -not -name "base.py" | sort
 ```
 
@@ -319,7 +319,7 @@ find tests/tools/ -name "test_*.py" | wc -l
 ```bash
 # Generate actual directory tree for comparison
 find src/ -type f \( -name "*.cpp" -o -name "*.h" \) | sort
-find trtf_build/trtf_build/ -type f -name "*.py" | sort
+find tensorrt_model_connect/tensorrt_model_connect/ -type f -name "*.py" | sort
 find include/ -type f -name "*.h" | sort
 ```
 
@@ -364,8 +364,8 @@ For each wiki page, read the current content, then apply these checks:
    findable via grep. Fix renamed symbols.
 
 7. **Dispatch pattern description** — READ `src/runtime/registry/pipeline_factory.cpp`,
-   `include/trtf/runtime/pipeline_registry.h`, and
-   `include/trtf/runtime/pipeline_plugin.h` in full. Verify the wiki accurately
+   `include/trtmc/runtime/pipeline_registry.h`, and
+   `include/trtmc/runtime/pipeline_plugin.h` in full. Verify the wiki accurately
    describes the current dispatch mechanism. If it describes an obsolete pattern
    (e.g., enum-based dispatch, per-family factory functions), rewrite it based
    on what the actual source code does.
@@ -526,7 +526,7 @@ Each manifest should have a corresponding `IT-E2E-<MODEL>-NN` entry.
 
 ```bash
 find src/ -name "*.cpp" -o -name "*.h" | sort
-find trtf_build/trtf_build/ -name "*.py" -not -name "__init__.py" | sort
+find tensorrt_model_connect/tensorrt_model_connect/ -name "*.py" -not -name "__init__.py" | sort
 ```
 
 Each source file should be referenced by a `UD-*` entry.
@@ -539,16 +539,16 @@ what it actually tests, then pick the most specific ARCH-* ID from this table:
 | Source directory / topic | ARCH-* ID |
 |--------------------------|-----------|
 | `src/bundle/` or test_bundle_* | ARCH-BDL-001 |
-| `trtf_build/config.py` or test_config* | ARCH-CFG-002 |
-| `trtf_build/checkpoint_mapper.py` or test_checkpoint* | ARCH-CHK-001 |
-| `trtf_build/engine_builder.py` or test_engine_builder* | ARCH-ENG-001 |
-| `trtf_build/debug_runner.py` or test_debug_runner*, test_cache_state* | ARCH-DBG-001 |
-| `trtf_build/families/` or test_family_*, test_families* | ARCH-FAM-001 |
-| `trtf_build/graph_ops.py` or test_graph_ops* | ARCH-GRP-001 |
-| `trtf_build/graph_blocks.py` or test_graph_blocks* | ARCH-GRP-001 |
-| `trtf_build/standard_decoder_builder.py` or test_standard_decoder* | ARCH-GRP-001 |
-| `trtf_build/*vision*` or test_vision_compute* | ARCH-VIS-001 |
-| `trtf_build/bundle_writer.py` or test_bundle_writer* | ARCH-BDL-001 |
+| `tensorrt_model_connect/config.py` or test_config* | ARCH-CFG-002 |
+| `tensorrt_model_connect/checkpoint_mapper.py` or test_checkpoint* | ARCH-CHK-001 |
+| `tensorrt_model_connect/engine_builder.py` or test_engine_builder* | ARCH-ENG-001 |
+| `tensorrt_model_connect/debug_runner.py` or test_debug_runner*, test_cache_state* | ARCH-DBG-001 |
+| `tensorrt_model_connect/families/` or test_family_*, test_families* | ARCH-FAM-001 |
+| `tensorrt_model_connect/graph_ops.py` or test_graph_ops* | ARCH-GRP-001 |
+| `tensorrt_model_connect/graph_blocks.py` or test_graph_blocks* | ARCH-GRP-001 |
+| `tensorrt_model_connect/standard_decoder_builder.py` or test_standard_decoder* | ARCH-GRP-001 |
+| `tensorrt_model_connect/*vision*` or test_vision_compute* | ARCH-VIS-001 |
+| `tensorrt_model_connect/bundle_writer.py` or test_bundle_writer* | ARCH-BDL-001 |
 | `src/tokenizer/` or test_*tokenizer* | ARCH-TOK-001 |
 | `src/runtime/core/trt_common.*` or test_cuda_* | ARCH-CUDA-001 |
 | `src/runtime/core/device_kv_cache.*` or test_device_kv_cache* | ARCH-KV-001 |
@@ -574,7 +574,7 @@ what it actually tests, then pick the most specific ARCH-* ID from this table:
 | `tools/diff_*` or test_diff_* | ARCH-DIFF-001 |
 | `tools/perf_*` or test_perf_* | ARCH-PERF-001 |
 | `tests/e2e_harness/` or test_e2e_* | ARCH-E2E-001 |
-| `trtf_build/quantization*` or test_quantization* | ARCH-QUANT-001 |
+| `tensorrt_model_connect/quantization*` or test_quantization* | ARCH-QUANT-001 |
 
 If a test doesn't clearly match any row, read the test body to identify what
 module it exercises, then assign the ARCH-* for that module. Do not use

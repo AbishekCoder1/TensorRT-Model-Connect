@@ -9,7 +9,7 @@
 // Postconditions: EOS requires consecutive tokens, pad fallback needs tail+threshold, cap breaks correctly
 // =============================================================================
 
-#include "trtf/runtime/domains/audio/speech_decode_stop_policy.h"
+#include "trtmc/runtime/domains/audio/speech_decode_stop_policy.h"
 
 #include <iostream>
 
@@ -26,9 +26,9 @@ void check(bool condition, const char* test_name)
     }
 }
 
-trtf::SpeechDecodeStopInput make_base_input()
+trtmc::SpeechDecodeStopInput make_base_input()
 {
-    trtf::SpeechDecodeStopInput input;
+    trtmc::SpeechDecodeStopInput input;
     input.text_eos_token_id = 7;
     input.text_padding_id = 3;
     input.effective_frames = 10;
@@ -43,12 +43,12 @@ trtf::SpeechDecodeStopInput make_base_input()
 
 void test_text_eos_requires_two_consecutive_tokens_and_drains_delay()
 {
-    trtf::SpeechDecodeStopState state;
+    trtmc::SpeechDecodeStopState state;
     auto input = make_base_input();
     input.sampled_text_token = input.text_eos_token_id;
 
-    auto decision = trtf::UpdateSpeechDecodeStopState(state, input);
-    check(decision.reason == trtf::SpeechDecodeStopReason::kNone,
+    auto decision = trtmc::UpdateSpeechDecodeStopState(state, input);
+    check(decision.reason == trtmc::SpeechDecodeStopReason::kNone,
           "eos threshold: first eos has no stop reason");
     check(decision.state.text_eos_streak == 1,
           "eos threshold: first eos increments streak");
@@ -59,8 +59,8 @@ void test_text_eos_requires_two_consecutive_tokens_and_drains_delay()
 
     input.target_pos += 1;
     input.offset += 1;
-    decision = trtf::UpdateSpeechDecodeStopState(decision.state, input);
-    check(decision.reason == trtf::SpeechDecodeStopReason::kTextEos,
+    decision = trtmc::UpdateSpeechDecodeStopState(decision.state, input);
+    check(decision.reason == trtmc::SpeechDecodeStopReason::kTextEos,
           "eos threshold: second eos requests stop");
     check(decision.state.stop_requested,
           "eos threshold: second eos marks stop requested");
@@ -72,20 +72,20 @@ void test_text_eos_requires_two_consecutive_tokens_and_drains_delay()
     input.sampled_text_token = 0;
     input.target_pos += 1;
     input.offset = decision.state.stop_collect_until_offset;
-    decision = trtf::UpdateSpeechDecodeStopState(decision.state, input);
+    decision = trtmc::UpdateSpeechDecodeStopState(decision.state, input);
     check(decision.should_break,
           "eos threshold: stop breaks when drain offset reached");
 }
 
 void test_text_eos_reset_conditions()
 {
-    trtf::SpeechDecodeStopState state;
+    trtmc::SpeechDecodeStopState state;
     state.text_eos_streak = 1;
     auto input = make_base_input();
     input.sampled_text_token = input.text_eos_token_id;
     input.target_pos = input.effective_frames - 1;
 
-    auto decision = trtf::UpdateSpeechDecodeStopState(state, input);
+    auto decision = trtmc::UpdateSpeechDecodeStopState(state, input);
     check(decision.state.text_eos_streak == 0,
           "eos reset: before effective frames resets streak");
     check(!decision.state.stop_requested,
@@ -96,25 +96,25 @@ void test_text_eos_reset_conditions()
     input.sampled_text_token = input.text_eos_token_id;
     input.text_provided = true;
 
-    decision = trtf::UpdateSpeechDecodeStopState(state, input);
+    decision = trtmc::UpdateSpeechDecodeStopState(state, input);
     check(decision.state.text_eos_streak == 0,
           "eos reset: provided text resets streak");
-    check(decision.reason == trtf::SpeechDecodeStopReason::kNone,
+    check(decision.reason == trtmc::SpeechDecodeStopReason::kNone,
           "eos reset: provided text has no stop reason");
 }
 
 void test_pad_fallback_requires_tail_and_threshold()
 {
-    trtf::SpeechDecodeStopState state;
+    trtmc::SpeechDecodeStopState state;
     auto input = make_base_input();
     input.sampled_text_token = input.text_padding_id;
 
-    for (int32_t i = 0; i < trtf::kSpeechMinConsecutiveTextPadAfterInput - 1; ++i)
+    for (int32_t i = 0; i < trtmc::kSpeechMinConsecutiveTextPadAfterInput - 1; ++i)
     {
         input.target_pos = input.effective_frames + i;
         input.offset = 30 + i;
-        const auto decision = trtf::UpdateSpeechDecodeStopState(state, input);
-        check(decision.reason == trtf::SpeechDecodeStopReason::kNone,
+        const auto decision = trtmc::UpdateSpeechDecodeStopState(state, input);
+        check(decision.reason == trtmc::SpeechDecodeStopReason::kNone,
               "pad threshold: pre-threshold pad has no stop reason");
         check(!decision.state.stop_requested,
               "pad threshold: pre-threshold pad does not stop");
@@ -122,12 +122,12 @@ void test_pad_fallback_requires_tail_and_threshold()
     }
 
     input.target_pos = input.effective_frames
-        + trtf::kSpeechMinConsecutiveTextPadAfterInput - 1;
-    input.offset = 30 + trtf::kSpeechMinConsecutiveTextPadAfterInput - 1;
-    const auto decision = trtf::UpdateSpeechDecodeStopState(state, input);
-    check(decision.reason == trtf::SpeechDecodeStopReason::kTextPadFallback,
+        + trtmc::kSpeechMinConsecutiveTextPadAfterInput - 1;
+    input.offset = 30 + trtmc::kSpeechMinConsecutiveTextPadAfterInput - 1;
+    const auto decision = trtmc::UpdateSpeechDecodeStopState(state, input);
+    check(decision.reason == trtmc::SpeechDecodeStopReason::kTextPadFallback,
           "pad threshold: threshold pad requests stop");
-    check(decision.state.text_pad_streak == trtf::kSpeechMinConsecutiveTextPadAfterInput,
+    check(decision.state.text_pad_streak == trtmc::kSpeechMinConsecutiveTextPadAfterInput,
           "pad threshold: threshold pad records full streak");
     check(decision.state.stop_requested,
           "pad threshold: threshold pad marks stop requested");
@@ -137,32 +137,32 @@ void test_pad_fallback_requires_tail_and_threshold()
 
 void test_pad_fallback_disabled_without_tail()
 {
-    trtf::SpeechDecodeStopState state;
-    state.text_pad_streak = trtf::kSpeechMinConsecutiveTextPadAfterInput - 1;
+    trtmc::SpeechDecodeStopState state;
+    state.text_pad_streak = trtmc::kSpeechMinConsecutiveTextPadAfterInput - 1;
     auto input = make_base_input();
     input.extra_tail = 0;
     input.sampled_text_token = input.text_padding_id;
 
-    const auto decision = trtf::UpdateSpeechDecodeStopState(state, input);
+    const auto decision = trtmc::UpdateSpeechDecodeStopState(state, input);
     check(decision.state.text_pad_streak == 0,
           "pad disabled: zero tail resets streak");
     check(!decision.state.stop_requested,
           "pad disabled: zero tail prevents stop");
-    check(decision.reason == trtf::SpeechDecodeStopReason::kNone,
+    check(decision.reason == trtmc::SpeechDecodeStopReason::kNone,
           "pad disabled: zero tail has no stop reason");
 }
 
 void test_continuation_cap_can_break_immediately()
 {
-    trtf::SpeechDecodeStopState state;
+    trtmc::SpeechDecodeStopState state;
     auto input = make_base_input();
     input.extra_tail = 1;
     input.max_delay = 0;
-    input.target_pos = input.effective_frames + trtf::kSpeechMaxContinuationFramesAfterInput;
+    input.target_pos = input.effective_frames + trtmc::kSpeechMaxContinuationFramesAfterInput;
     input.offset = 99;
 
-    const auto decision = trtf::UpdateSpeechDecodeStopState(state, input);
-    check(decision.reason == trtf::SpeechDecodeStopReason::kContinuationCap,
+    const auto decision = trtmc::UpdateSpeechDecodeStopState(state, input);
+    check(decision.reason == trtmc::SpeechDecodeStopReason::kContinuationCap,
           "continuation cap: threshold requests stop");
     check(decision.state.stop_requested,
           "continuation cap: threshold marks stop requested");

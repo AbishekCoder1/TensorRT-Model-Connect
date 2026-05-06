@@ -12,7 +12,7 @@ The TVM-FFI kernel bridge lets a performance agent pull in arbitrary FFI-compati
 
 2. **No deployment path to C++ runtime** — the kernel only exists in the Python process that built the engine. The `.trtfb` bundle contains the kernel NAME but not the kernel CODE. The C++ runtime calls `TVMFFIFunctionGetGlobal()` at inference time and fails because nobody registered the kernel.
 
-3. **Kernel selection via environment variable** (`TRTF_FFI_ATTENTION_KERNEL`) is invisible shared state that force-enables FP16 as a side effect.
+3. **Kernel selection via environment variable** (`TRTMC_FFI_ATTENTION_KERNEL`) is invisible shared state that force-enables FP16 as a side effect.
 
 ## Design Constraints
 
@@ -28,9 +28,9 @@ Three changes. No new abstractions.
 
 ### Change 1: Extract kernel setup into `kernels/` directory
 
-Create `trtf_build/trtf_build/kernels/` — a flat directory of Python modules, one per kernel family. Each module has a `setup()` function that prepares the kernel (JIT compile, register, export `.so`).
+Create `tensorrt_model_connect/tensorrt_model_connect/kernels/` — a flat directory of Python modules, one per kernel family. Each module has a `setup()` function that prepares the kernel (JIT compile, register, export `.so`).
 
-**New file: `trtf_build/trtf_build/kernels/flashinfer_decode.py`**
+**New file: `tensorrt_model_connect/tensorrt_model_connect/kernels/flashinfer_decode.py`**
 
 ```python
 """FlashInfer single-decode kernel — JIT compile, register, export .so."""
@@ -147,11 +147,11 @@ Delete the env var mechanism (lines 111-112, 252-255):
 
 ```python
 # DELETE: Force FP16 via env var
-# if os.environ.get("TRTF_FFI_ATTENTION_KERNEL"):
+# if os.environ.get("TRTMC_FFI_ATTENTION_KERNEL"):
 #     trt_config.set_flag(trt.BuilderFlag.FP16)
 
 # DELETE: Env var lookup
-# ffi_attention_kernel = os.environ.get("TRTF_FFI_ATTENTION_KERNEL")
+# ffi_attention_kernel = os.environ.get("TRTMC_FFI_ATTENTION_KERNEL")
 ```
 
 Kernel selection becomes explicit code. The perf agent controls it on their branch by modifying the call site in `graph_blocks.py` (or the builder, or the family plugin — wherever makes sense for their optimization).
@@ -313,12 +313,12 @@ Composition: merge both branches. The `graph_ops.py` changes are additive functi
 
 | File | Change | Lines |
 |------|--------|-------|
-| `trtf_build/trtf_build/kernels/flashinfer_decode.py` | New file | ~25 |
-| `trtf_build/trtf_build/graph_ops.py` | Add `add_decoder_attention_decomposed()` + `add_decoder_attention_ffi()` | ~100 added |
-| `trtf_build/trtf_build/graph_blocks.py` | Replace inline attention with delegation calls | ~95 removed, ~10 added |
-| `trtf_build/trtf_build/standard_decoder_builder.py` | Remove env var mechanism | ~5 removed |
-| `trtf_build/trtf_build/bundle_writer.py` | No structural change — callers pass kernel sections via existing `BundleSection` list | 0 |
-| `trtf_build/trtf_build/engine_builder.py` | Collect kernel artifacts, add to sections list | ~15 |
+| `tensorrt_model_connect/tensorrt_model_connect/kernels/flashinfer_decode.py` | New file | ~25 |
+| `tensorrt_model_connect/tensorrt_model_connect/graph_ops.py` | Add `add_decoder_attention_decomposed()` + `add_decoder_attention_ffi()` | ~100 added |
+| `tensorrt_model_connect/tensorrt_model_connect/graph_blocks.py` | Replace inline attention with delegation calls | ~95 removed, ~10 added |
+| `tensorrt_model_connect/tensorrt_model_connect/standard_decoder_builder.py` | Remove env var mechanism | ~5 removed |
+| `tensorrt_model_connect/tensorrt_model_connect/bundle_writer.py` | No structural change — callers pass kernel sections via existing `BundleSection` list | 0 |
+| `tensorrt_model_connect/tensorrt_model_connect/engine_builder.py` | Collect kernel artifacts, add to sections list | ~15 |
 | `src/runtime/plugins/shared/plugin_helpers.h` | Add `load_ffi_kernels_from_bundle()` declaration | ~5 |
 | `src/runtime/plugins/shared/plugin_helpers.cpp` | Implement `load_ffi_kernels_from_bundle()` | ~30 |
 | `src/runtime/plugins/decoder_plugin.cpp` | Call `load_ffi_kernels_from_bundle()` before engine load | 1 |

@@ -1,13 +1,13 @@
-#include "trtf/runtime/kv_cache.h"
+#include "trtmc/runtime/kv_cache.h"
 
-#include "trtf/runtime/trt_module.h"
+#include "trtmc/runtime/trt_module.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <stdexcept>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -312,4 +312,4 @@ bool KvCache::ok() const {
     return true;
 }
 
-} // namespace trtf
+} // namespace trtmc

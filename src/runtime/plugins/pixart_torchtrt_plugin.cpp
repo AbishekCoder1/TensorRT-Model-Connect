@@ -6,9 +6,9 @@
 #include "runtime/pipelines/pixart_torchtrt_pipeline.h"
 #include "runtime/plugins/shared/diffusion_helpers.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
-#include "trtf/runtime/pipeline_registry.h"
+#include "trtmc/runtime/pipeline_registry.h"
 
-namespace trtf {
+namespace trtmc {
 
 class PixArtTorchTrtPlugin final : public IPipelinePlugin {
   public:
@@ -38,4 +38,4 @@ class PixArtTorchTrtPlugin final : public IPipelinePlugin {
 REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_pixart_torchtrt_plugin, PixArtTorchTrtPlugin,
                                        "diffusion_pixart_torchtrt");
 
-} // namespace trtf
+} // namespace trtmc

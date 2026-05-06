@@ -5,13 +5,13 @@ import sys
 import types
 from pathlib import Path
 
-from trtf_build import trt_compat
+from tensorrt_model_connect import trt_compat
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TRTF_BUILD_ROOT = REPO_ROOT / "trtf_build" / "trtf_build"
+TRTMC_BUILD_ROOT = REPO_ROOT / "tensorrt_model_connect" / "tensorrt_model_connect"
 ALLOWED_TRT_BOUNDARY_FILES = {
-    TRTF_BUILD_ROOT / "trt_compat.py",
+    TRTMC_BUILD_ROOT / "trt_compat.py",
 }
 
 
@@ -44,7 +44,7 @@ def _is_sys_modules_subscript(node: ast.AST) -> bool:
 def test_tensor_rt_python_api_is_imported_only_through_compat_layer():
     """Builder code must route TensorRT Python API access through trt_compat."""
     violations: list[str] = []
-    for path in sorted(TRTF_BUILD_ROOT.rglob("*.py")):
+    for path in sorted(TRTMC_BUILD_ROOT.rglob("*.py")):
         if path in ALLOWED_TRT_BOUNDARY_FILES:
             continue
         rel = path.relative_to(REPO_ROOT)

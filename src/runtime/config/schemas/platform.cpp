@@ -1,13 +1,13 @@
 // Registration for the "platform" namespace schema.
-// Mirrors trtf_build/trtf_build/runtime_config/schemas/platform.py.
+// Mirrors tensorrt_model_connect/tensorrt_model_connect/runtime_config/schemas/platform.py.
 
-#include "trtf/config/schemas/platform.h"
+#include "trtmc/config/schemas/platform.h"
 
 #include <any>
 #include <set>
 #include <string>
 
-namespace trtf::config::schemas {
+namespace trtmc::config::schemas {
 
 namespace {
 bool is_valid_severity(const std::any& v) {
@@ -32,4 +32,4 @@ Schema make_platform_schema() {
 }
 
 REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_platform_schema, make_platform_schema);
-} // namespace trtf::config::schemas
+} // namespace trtmc::config::schemas

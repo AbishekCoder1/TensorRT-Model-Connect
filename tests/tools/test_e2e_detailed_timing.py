@@ -4,9 +4,9 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TRTF_BUILD_ROOT = REPO_ROOT / "trtf_build"
-if str(TRTF_BUILD_ROOT) not in sys.path:
-    sys.path.insert(0, str(TRTF_BUILD_ROOT))
+TRTMC_BUILD_ROOT = REPO_ROOT / "tensorrt_model_connect"
+if str(TRTMC_BUILD_ROOT) not in sys.path:
+    sys.path.insert(0, str(TRTMC_BUILD_ROOT))
 
 from tests.e2e_harness.contracts import StageOutput  # noqa: E402
 from tests.e2e_harness.orchestrator import (  # noqa: E402
@@ -14,10 +14,10 @@ from tests.e2e_harness.orchestrator import (  # noqa: E402
     _collect_trt_stage_timing,
 )
 from tests.e2e_harness.runners.text_generation import (  # noqa: E402
-    _extract_trtf_load_timing,
-    _extract_trtf_timing,
+    _extract_trtmc_load_timing,
+    _extract_trtmc_timing,
 )
-from trtf_build.engine_builder import (  # noqa: E402
+from tensorrt_model_connect.engine_builder import (  # noqa: E402
     _compile_time_excluding_component_weight_load,
     _untracked_compile_time,
 )
@@ -81,8 +81,8 @@ def test_detailed_timing_does_not_treat_trt_wall_time_as_inference():
 
 
 def test_text_runner_extracts_engine_timing_from_cli_stderr():
-    timing = _extract_trtf_timing(
-        "noise\n[trtf.timing] prefill_ms=12.500000 decode_ms=7.250000 total_ms=19.750000\n"
+    timing = _extract_trtmc_timing(
+        "noise\n[trtmc.timing] prefill_ms=12.500000 decode_ms=7.250000 total_ms=19.750000\n"
     )
 
     assert timing["trt_engine_prefill_s"] == 0.0125
@@ -91,10 +91,10 @@ def test_text_runner_extracts_engine_timing_from_cli_stderr():
 
 
 def test_text_runner_extracts_load_deserialize_timing_from_cli_stderr():
-    timing = _extract_trtf_load_timing(
+    timing = _extract_trtmc_load_timing(
         "\n".join([
-            "[trtf.load_timing] label=\"engine_plan\" load_deserialize_ms=10.500000 plan_bytes=4",
-            "[trtf.load_timing] label=\"extra\" load_deserialize_ms=2.250000 plan_bytes=8",
+            "[trtmc.load_timing] label=\"engine_plan\" load_deserialize_ms=10.500000 plan_bytes=4",
+            "[trtmc.load_timing] label=\"extra\" load_deserialize_ms=2.250000 plan_bytes=8",
         ])
     )
 
@@ -103,8 +103,8 @@ def test_text_runner_extracts_load_deserialize_timing_from_cli_stderr():
 
 def test_orchestrator_does_not_double_count_saved_stderr_log(tmp_path):
     log_text = "\n".join([
-        '[trtf.load_timing] label="engine_plan" load_deserialize_ms=10.500000 plan_bytes=4',
-        '[trtf.engine_timing] label="engine_plan" execute_ms=3.250000 launches=1',
+        '[trtmc.load_timing] label="engine_plan" load_deserialize_ms=10.500000 plan_bytes=4',
+        '[trtmc.engine_timing] label="engine_plan" execute_ms=3.250000 launches=1',
     ])
     log_path = tmp_path / "generate_stderr.log"
     log_path.write_text(log_text, encoding="utf-8")

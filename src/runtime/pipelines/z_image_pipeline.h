@@ -4,16 +4,16 @@
 // denoiser, and VAE. Uses TrtModule::forward() for all GPU work.
 
 #include "runtime/domains/diffusion/diffusion_types.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 /// Z-Image-specific preprocessor weights (separate from standard PreprocessorWeights)
 struct ZImagePreprocessorWeights {
@@ -75,4 +75,4 @@ class ZImagePipeline final : public IPipeline {
     std::string bundle_path_;
 };
 
-} // namespace trtf
+} // namespace trtmc

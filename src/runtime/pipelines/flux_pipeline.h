@@ -5,16 +5,16 @@
 
 #include "runtime/domains/diffusion/diffusion_generation_plan.h"
 #include "runtime/domains/diffusion/diffusion_types.h"
-#include "trtf/pipeline.h"
-#include "trtf/runtime/trt_module.h"
-#include "trtf/tokenizer.h"
+#include "trtmc/pipeline.h"
+#include "trtmc/runtime/trt_module.h"
+#include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 class FluxPipeline final : public IPipeline {
   public:
@@ -81,4 +81,4 @@ class FluxPipeline final : public IPipeline {
     int32_t num_img_tokens_{0};
 };
 
-} // namespace trtf
+} // namespace trtmc

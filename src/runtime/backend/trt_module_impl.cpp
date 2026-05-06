@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace trtf {
+namespace trtmc {
 
 // --- DType conversion ---
 
@@ -465,7 +465,7 @@ void TrtModuleImpl::flush_timing_events() {
     if (launches <= 0)
         return;
     std::ostringstream line;
-    line << std::fixed << std::setprecision(6) << "[trtf.engine_timing] label=\"" << timing_label_
+    line << std::fixed << std::setprecision(6) << "[trtmc.engine_timing] label=\"" << timing_label_
          << "\" execute_ms=" << total_ms << " launches=" << launches;
     std::cerr << line.str() << '\n';
 }
@@ -645,4 +645,4 @@ void TrtModuleImpl::bind_external(const std::string& name, void* external_device
     }
 }
 
-} // namespace trtf
+} // namespace trtmc

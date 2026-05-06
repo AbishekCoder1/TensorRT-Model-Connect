@@ -16,26 +16,26 @@ Do not discover new tasks. Do not broaden scope. Do not wait on CI after opening
 1. Inspect the AI MR queue:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging dashboard
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging dashboard
 ```
 
 If a generated MR targeting `ai-staging` has a failed or canceled current head pipeline and no active fix pipeline, mark it for rework:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers mark-rework --mr <mr-iid> --skip-if-active-pipeline --reason "<short failed pipeline reason>"
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect mark-rework --mr <mr-iid> --skip-if-active-pipeline --reason "<short failed pipeline reason>"
 ```
 
 2. Pick the oldest ready or rework task:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers --target ai-staging next-task
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect --target ai-staging next-task
 ```
 
 3. Read the issue and verify it has the required task contract.
 4. If the issue has `ai:needs-rework`, inspect related MRs:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers related-mrs <issue-iid>
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect related-mrs <issue-iid>
 ```
 
 If a related MR targeting `ai-staging` has an active head pipeline, stop. If a related MR targeting `ai-staging` exists with no active pipeline, repair that MR's source branch instead of opening a duplicate MR.
@@ -43,7 +43,7 @@ If a related MR targeting `ai-staging` has an active head pipeline, stop. If a r
 5. Claim it:
 
 ```bash
-python3 tools/ai_agent_system.py --project yifeif/trt-transformers claim-task <issue-iid>
+python3 tools/ai_agent_system.py --project yifeif/tensorrt-model-connect claim-task <issue-iid>
 ```
 
 6. Create an isolated worktree under `.ai-pipeline/worktrees/<branch>`, then create or check out the source branch there:

@@ -18,7 +18,7 @@ import numpy as np
 import tvm_ffi  # noqa: F401
 
 # Load shared lib for plugin registration
-shared_lib = os.path.join(os.path.dirname(__file__), "..", "build_shared", "libtrtf_core.so")
+shared_lib = os.path.join(os.path.dirname(__file__), "..", "build_shared", "libtrtmc_core.so")
 if not os.path.exists(shared_lib):
     print(f"SKIP: {shared_lib} not found")
     sys.exit(0)
@@ -232,7 +232,7 @@ def build_decomposed_attention_engine():
 # --- Build TRT engine with FlashInfer plugin ---
 def build_flashinfer_attention_engine():
     """Build TRT engine using FlashInfer via TvmFfiKernel plugin."""
-    from trtf_build.graph_ops import add_tvm_ffi_kernel
+    from tensorrt_model_connect.graph_ops import add_tvm_ffi_kernel
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)

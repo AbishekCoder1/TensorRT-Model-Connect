@@ -1,10 +1,10 @@
-#include "trtf/runtime/scheduler.h"
+#include "trtmc/runtime/scheduler.h"
 
 #include <algorithm>
 #include <cmath>
 #include <numeric>
 
-namespace trtf {
+namespace trtmc {
 
 FlowMatchEulerScheduler::FlowMatchEulerScheduler(float shift,
                                                    int32_t num_train_timesteps)
@@ -89,4 +89,4 @@ void FlowMatchEulerScheduler::step(float* latents, const float* velocity,
     }
 }
 
-} // namespace trtf
+} // namespace trtmc

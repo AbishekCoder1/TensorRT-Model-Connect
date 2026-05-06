@@ -30,37 +30,37 @@ Before running any diff tool, verify the environment:
 ```bash
 nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null && echo "GPU: OK" || echo "GPU: MISSING"
 python3 -c "import tensorrt as trt; print(f'TRT: {trt.__version__}')" 2>/dev/null || echo "TRT: MISSING"
-python3 -c "import trtf_build; print('trtf_build: OK')" 2>/dev/null || echo "trtf_build: MISSING (run: pip install --no-deps -e trtf_build/)"
+python3 -c "import tensorrt_model_connect; print('tensorrt_model_connect: OK')" 2>/dev/null || echo "tensorrt_model_connect: MISSING (run: pip install --no-deps -e tensorrt_model_connect/)"
 python3 -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')" 2>/dev/null || echo "PyTorch: MISSING"
 ```
 
 For Level 4 (runner parity) only — also check C++ binary:
 ```bash
-test -x ./build/trtf && echo "C++ binary: OK" || echo "C++ binary: MISSING"
+test -x ./build/trtmc && echo "C++ binary: OK" || echo "C++ binary: MISSING"
 ```
 
 **If any check fails, auto-recover:**
 
 Check if a team container already exists:
 ```bash
-docker ps -a --filter "name=trtf-dev-gb300" --format "{{.Names}} {{.Status}}"
+docker ps -a --filter "name=trtmc-dev-gb300" --format "{{.Names}} {{.Status}}"
 ```
 
-- **Running container exists**: Use `docker exec trtf-dev-gb300-<team-id>` for all
+- **Running container exists**: Use `docker exec trtmc-dev-gb300-<team-id>` for all
   subsequent commands.
-- **Stopped container exists**: `docker start trtf-dev-gb300-<team-id>`, then exec.
+- **Stopped container exists**: `docker start trtmc-dev-gb300-<team-id>`, then exec.
 - **No container exists**: Bootstrap one:
   ```bash
   ./scripts/bootstrap_workspace.sh --id <team-id> --branch $(git branch --show-current) --detach
   ```
   This creates a container with editable install + C++ build. Then use docker exec.
 - **No Docker image**: Build it first: `./scripts/docker_build_gb300.sh`
-- **Inside container but trtf_build missing**: `pip install --no-deps -e trtf_build/`
+- **Inside container but tensorrt_model_connect missing**: `pip install --no-deps -e tensorrt_model_connect/`
 - **Inside container but C++ binary missing** (Level 4 only): `./scripts/setup_container.sh`
 
 After recovery, re-run the environment check. Do NOT proceed to Level 1 until all
 required checks pass. When running via docker exec, prefix every diff command with
-`docker exec trtf-dev-gb300-<team-id>`.
+`docker exec trtmc-dev-gb300-<team-id>`.
 
 ## Escalation Levels
 
@@ -247,7 +247,7 @@ python tools/diff_vl.py \
   --bundle /tmp/model.trtfb \
   --image /path/to/test.jpg \
   --model Qwen/Qwen2.5-VL-3B-Instruct \
-  --binary ./build/trtf \
+  --binary ./build/trtmc \
   --hf-python /opt/venv/bin/python \
   --max-new-tokens 30
 ```
@@ -271,14 +271,14 @@ Available preprocessor types: `qwen_merge_group`, `simple_chw`, and model-specif
 
 ## Level 4: Python vs C++ Binary Parity (test_runner_parity.py)
 
-**Purpose:** Check if the Python `TrtRunner` and C++ `trtf` binary produce identical
+**Purpose:** Check if the Python `TrtRunner` and C++ `trtmc` binary produce identical
 output from the same bundle. If they diverge, the bug is in the C++ runtime, not the
 engine.
 
 ```bash
 python tools/test_runner_parity.py \
   --bundle /tmp/model.trtfb \
-  --binary ./build/trtf \
+  --binary ./build/trtmc \
   --hf-python /opt/venv/bin/python \
   --prompt "The capital of France is" \
   --max-new-tokens 20
@@ -339,7 +339,7 @@ TRT graph and compare against PyTorch:
 # In a Python script or notebook:
 import numpy as np
 import torch
-from trtf_build.graph_ops import add_rms_norm  # or any op
+from tensorrt_model_connect.graph_ops import add_rms_norm  # or any op
 # ... build minimal TRT network with just that op
 # ... compare output against torch reference
 ```
@@ -366,7 +366,7 @@ ctx = TestContext(
     model="Qwen/Qwen3-0.6B",
     runtime_strategy="decoder_kv_cache",
     bundle_path="/tmp/qwen3.trtfb",
-    binary_path="./build/trtf",
+    binary_path="./build/trtmc",
     hf_python="/opt/venv/bin/python",
     max_cache_length=256,
     max_new_tokens=20,
@@ -406,7 +406,7 @@ python tools/diff_logits.py --model <model> --battery --atol 1e-3 --verbose
 # Level 2: Which layer diverges?
 python tools/diff_layers.py --model <model> --atol 0.05 --verbose
 
-# Then: Read the family plugin in trtf_build/trtf_build/families/<family>.py
+# Then: Read the family plugin in tensorrt_model_connect/tensorrt_model_connect/families/<family>.py
 # Compare load_weights() key mapping against HF model's state_dict keys
 # Check weight transforms (e.g., Gemma +1.0 gamma, Phi fused QKV split)
 ```
@@ -418,7 +418,7 @@ python tools/diff_layers.py --model <model> --atol 0.05 --verbose
 python tools/diff_logits.py --model <model> --atol 1e-3 --battery
 
 # Level 4: Is it Python or C++?
-python tools/test_runner_parity.py --bundle <bundle> --binary ./build/trtf
+python tools/test_runner_parity.py --bundle <bundle> --binary ./build/trtmc
 
 # If Python matches HF but C++ doesn't → C++ runtime bug
 # If Python doesn't match HF → engine builder or weight mapping bug
@@ -517,16 +517,16 @@ or op mismatch**. Check the family plugin's weight keys for layer 5 attention/ML
 - For new family plugins: run `/debug-trt-mismatch` Level 1 (battery) as the first
   correctness gate, before running the full E2E suite.
 - If Level 4 (runner parity) fails but Python TrtRunner matches HF, the issue is in
-  the **C++ runtime** — check `src/runtime/` code, not `trtf_build/`.
+  the **C++ runtime** — check `src/runtime/` code, not `tensorrt_model_connect/`.
 
 ## Error Handling
 
 | Error | Cause | Fix |
 |-------|-------|-----|
 | OOM during debug engine build | `debug_layer_outputs=True` doubles memory | Use smaller `--max-cache-length` (32 or 16) |
-| TrtRunner import fails | trtf_build not installed | `pip install --no-deps -e trtf_build/` |
+| TrtRunner import fails | tensorrt_model_connect not installed | `pip install --no-deps -e tensorrt_model_connect/` |
 | HF model not found | Typo or gated model | Check spelling; use `--trust-remote-code` if needed |
 | diff_layers all OK but diff_logits fails | Single-step clean, error accumulates | Precision issue — add FP32 boundary in norm ops |
 | diff_vl cosine_sim = 0 | Vision encoder returns zeros | Bundle missing `vision_engine_plan` section; rebuild with VL plugin |
-| runner_parity complete gibberish from C++ | Wrong TRT version or bundle corrupt | Verify `trtf-build inspect <bundle>` shows valid metadata |
-| "No module named trtf_build" | Python path wrong | Run from repo root, ensure `PYTHONPATH` includes trtf_build/ |
+| runner_parity complete gibberish from C++ | Wrong TRT version or bundle corrupt | Verify `trtmc-build inspect <bundle>` shows valid metadata |
+| "No module named tensorrt_model_connect" | Python path wrong | Run from repo root, ensure `PYTHONPATH` includes tensorrt_model_connect/ |

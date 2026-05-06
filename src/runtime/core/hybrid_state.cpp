@@ -1,8 +1,8 @@
-#include "trtf/runtime/hybrid_state.h"
+#include "trtmc/runtime/hybrid_state.h"
 
 #include <cassert>
 
-namespace trtf {
+namespace trtmc {
 
 HybridState::HybridState(std::unique_ptr<KvCache> kv, std::unique_ptr<RecurrentState> ssm)
     : kv_(std::move(kv)), ssm_(std::move(ssm)) {}
@@ -47,4 +47,4 @@ bool HybridState::ok() const {
     return kv_ && kv_->ok() && ssm_ && ssm_->ok();
 }
 
-} // namespace trtf
+} // namespace trtmc

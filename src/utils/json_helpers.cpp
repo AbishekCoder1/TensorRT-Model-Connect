@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace trtf {
+namespace trtmc {
 namespace {
 
 enum class ArrayParseState { kReady, kEnd };
@@ -275,4 +275,4 @@ std::vector<int32_t> extract_json_int_array(const std::string& text, const std::
     return extract_numeric_array_impl<int32_t>(text, key, max_count, is_int_char, parse_int);
 }
 
-} // namespace trtf
+} // namespace trtmc

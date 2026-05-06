@@ -1,6 +1,6 @@
-# .gitlab-ci.yml — GB300 GPU CI pipeline for trt-transformers
+# .gitlab-ci.yml — GB300 GPU CI pipeline for tensorrt-model-connect
 #
-# Fat image (trtf-dev-gb300:latest) has all Python deps baked in at /opt/venv.
+# Fat image (trtmc-dev-gb300:latest) has all Python deps baked in at /opt/venv.
 # ENV PATH includes /opt/venv/bin, so python/pip/pytest work without activation.
 # ENV vars TRT_LIB_DIR, TRT_INC_DIR, LD_LIBRARY_PATH are pre-set.
 #
@@ -19,7 +19,7 @@ stages:
   - nightly-coverage
 
 variables:
-  ENGINE_DIR: /workspace/users/yifeif/trt-transformers/engines
+  ENGINE_DIR: /workspace/users/yifeif/tensorrt-model-connect/engines
   GIT_STRATEGY: fetch
   PYTHONHASHSEED: "0"
   # Coverage gates: set to current measured levels as floor (measured 2026-03-12).
@@ -40,8 +40,8 @@ variables:
   AI_STAGING_PROMOTE: "0"
   AI_STAGING_PROMOTION_TARGET: "master"
 
-.local-trtf-image: &local_trtf_image
-  name: trtf-dev-gb300:latest
+.local-trtmc-image: &local_trtmc_image
+  name: trtmc-dev-gb300:latest
   pull_policy: if-not-present
 
 workflow:
@@ -54,13 +54,13 @@ workflow:
     - if: $CI_PIPELINE_SOURCE == "schedule"
 
 default:
-  image: trtf-dev-gb300:latest
+  image: trtmc-dev-gb300:latest
   tags: [gpu-gb300]
   interruptible: true
   before_script:
     - python -c "import transformers, sys; print(f'python={sys.executable} transformers={transformers.__version__}'); assert transformers.__version__ == '5.2.0', transformers.__version__"
-    - pip install --no-deps -e trtf_build/
-    - chmod +x ./build/trtf 2>/dev/null || true
+    - pip install --no-deps -e tensorrt_model_connect/
+    - chmod +x ./build/trtmc 2>/dev/null || true
 
 .ai-staging-rules: &ai_staging_rules
   - if: '$CI_PIPELINE_SOURCE == "schedule" && $AI_STAGING_PROMOTE == "1"'
@@ -115,7 +115,7 @@ impact-analysis:
 
 ai-staging-promotion-mr:
   stage: analyze
-  image: *local_trtf_image
+  image: *local_trtmc_image
   tags: [cpu]
   before_script: []
   variables:
@@ -134,10 +134,10 @@ build-all:
   script:
     - |
       cmake -S . -B build -G Ninja \
-        -DTRTF_TRT_INCLUDE_DIR=$TRT_INC_DIR \
-        -DTRTF_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so \
-        -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-        -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+        -DTRTMC_TRT_INCLUDE_DIR=$TRT_INC_DIR \
+        -DTRTMC_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so \
+        -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+        -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
     - cmake --build build -j
   artifacts:
     paths:
@@ -147,7 +147,7 @@ build-all:
 
 ai-staging-build:
   stage: build
-  image: *local_trtf_image
+  image: *local_trtmc_image
   tags: [cpu]
   rules: *ai_staging_rules
   variables:
@@ -155,10 +155,10 @@ ai-staging-build:
   script:
     - |
       cmake -S . -B build -G Ninja \
-        -DTRTF_TRT_INCLUDE_DIR=$TRT_INC_DIR \
-        -DTRTF_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so \
-        -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-        -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+        -DTRTMC_TRT_INCLUDE_DIR=$TRT_INC_DIR \
+        -DTRTMC_TRT_LIBRARY=$TRT_LIB_DIR/libnvinfer.so \
+        -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+        -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
     - cmake --build build -j
   artifacts:
     paths:
@@ -214,7 +214,7 @@ lint-check:
 
 ai-staging-lint-check:
   stage: tier1-unit
-  image: *local_trtf_image
+  image: *local_trtmc_image
   tags: [cpu]
   rules: *ai_staging_rules
   variables:
@@ -243,13 +243,13 @@ ai-staging-lint-check:
 ai-staging-sanity:
   stage: tier1-unit
   needs: [ai-staging-build]
-  image: *local_trtf_image
+  image: *local_trtmc_image
   tags: [cpu]
   rules: *ai_staging_rules
   variables:
     CUDA_VISIBLE_DEVICES: ""
   script:
-    - ./build/trtf --help >/tmp/trtf-help.txt
+    - ./build/trtmc --help >/tmp/trtmc-help.txt
     - |
       GPU_CTEST_REGEX='^(test_c_abi_runtime_regression|test_trt_runtime_lifetime|test_trt_module|test_cuda_buffer|test_cuda_stream|test_cuda_graph|test_device_kv_cache|test_device_tensor|test_kv_cache_new|test_recurrent_state|test_encoder_pipeline|test_vl_pipeline)$'
       ctest --test-dir build --output-on-failure -E "$GPU_CTEST_REGEX"
@@ -325,7 +325,7 @@ test-python-builder:
       " 2>/dev/null) || true
       # pytest-cov: collects coverage across xdist workers, compatible with -n auto.
       # Source path matches pyproject.toml [tool.coverage.run] source.
-      COV_ARGS="--cov=trtf_build/trtf_build --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml"
+      COV_ARGS="--cov=tensorrt_model_connect/tensorrt_model_connect --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml"
       if [ -n "$BUILDER_TESTS" ]; then
         echo "Selective builder tests (with coverage): $BUILDER_TESTS"
         python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v --ignore=tests/builder/test_cli.py --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py -k "$BUILDER_TESTS" -n auto $COV_ARGS
@@ -476,7 +476,7 @@ test-e2e-selective:
       ./scripts/run_e2e_parallel.sh \
         --engine-dir $ENGINE_DIR \
         --result-dir e2e_artifacts \
-        --trtf-binary ./build/trtf \
+        --trtmc-binary ./build/trtmc \
         --workers-per-gpu 4 \
         --models-file e2e_models.txt \
         --rebuild-engines
@@ -536,7 +536,7 @@ test-e2e-nightly:
       ./scripts/run_e2e_parallel.sh \
         --engine-dir $ENGINE_DIR \
         --result-dir e2e_artifacts \
-        --trtf-binary ./build/trtf \
+        --trtmc-binary ./build/trtmc \
         --workers-per-gpu 4 \
         --exclude-ci-tier l0_only \
         --rebuild-engines

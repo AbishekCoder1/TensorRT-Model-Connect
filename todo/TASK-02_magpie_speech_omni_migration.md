@@ -80,7 +80,7 @@ OmniPipeline    → OmniBackend           → 3 engines + KvCache
 
 ## Verification
 ```bash
-pytest tests/test_e2e.py::test_e2e[magpie-tts-357m] tests/test_e2e.py::test_e2e[personaplex-7b] -v --engine-dir /workspace/users/yifeif/trt-transformers/engines --trtf-binary ./build/trtf --hf-python /opt/venv/bin/python
+pytest tests/test_e2e.py::test_e2e[magpie-tts-357m] tests/test_e2e.py::test_e2e[personaplex-7b] -v --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python
 ```
 
 ## Depends On

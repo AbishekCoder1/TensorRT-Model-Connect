@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtf {
+namespace trtmc {
 
 namespace {
 
@@ -98,4 +98,4 @@ EmbeddingResult ChronosBoltPipeline::solve(const float* branch_input, int32_t br
     return tensor_to_embedding_result(*forecast_tensor);
 }
 
-} // namespace trtf
+} // namespace trtmc

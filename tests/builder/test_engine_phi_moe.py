@@ -29,7 +29,7 @@ Setup:
 
 Trace: ARCH-FAM-001, UD-FAM-PHIMOE-01
 Intent: Validate the Phi-MoE family plugin weight loading including SparseMixer router, per-expert SwiGLU MLP mapping, LayerNorm biases, QKV biases, and lm_head bias.
-Preconditions: safetensors and trtf_build are importable; TRT+GPU required for engine build tests.
+Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: Router and per-expert weight keys are present with biases, LayerNorm biases are loaded, and MoE-specific config fields are parsed correctly.
 """
 
@@ -39,7 +39,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("safetensors.numpy", reason="safetensors not available")
-pytest.importorskip("trtf_build.config", reason="trtf_build requires tensorrt")
+pytest.importorskip("tensorrt_model_connect.config", reason="tensorrt_model_connect requires tensorrt")
 
 from tests.builder.family_plugin_tester import FamilyPluginTester
 from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
@@ -64,7 +64,7 @@ class PhiMoEPluginTester(FamilyPluginTester):
       - lm_head weight + bias
     """
 
-    plugin_module = "trtf_build.families.phi_moe"
+    plugin_module = "tensorrt_model_connect.families.phi_moe"
     model_type = "phimoe"
 
     def get_config_dict(self) -> dict:

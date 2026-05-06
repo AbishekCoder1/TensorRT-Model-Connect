@@ -1,4 +1,4 @@
-You are working in trt-transformers-cpp. Add one model end-to-end so it is
+You are working in tensorrt-model-connect. Add one model end-to-end so it is
   truly working and CI-ready, not just compiling.
 
   Hard requirements:
@@ -23,13 +23,13 @@ You are working in trt-transformers-cpp. Add one model end-to-end so it is
 
   A) Environment precheck/build
   - python3 -c "import tensorrt, torch, transformers; print('ok')"
-  - pip install --no-deps -e trtf_build/
+  - pip install --no-deps -e tensorrt_model_connect/
   - cmake -S . -B build -G Ninja \
-    -DTRTF_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
-    -DTRTF_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/
+    -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
+    -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/
   tensorrt_libs}/libnvinfer.so" \
-    -DTRTF_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-    -DTRTF_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
+    -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
+    -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
   - cmake --build build -j
 
   B) Implement model support
@@ -37,7 +37,7 @@ You are working in trt-transformers-cpp. Add one model end-to-end so it is
     - Add/update manifest in tests/e2e/models/<MODEL_NAME>.json
   - If new family required:
     - Scaffold with scripts/new_family.py
-    - Implement plugin in trtf_build/trtf_build/families/<family>.py
+    - Implement plugin in tensorrt_model_connect/tensorrt_model_connect/families/<family>.py
     - Ensure family coverage check passes.
 
   C) Harness compatibility check
@@ -50,10 +50,10 @@ You are working in trt-transformers-cpp. Add one model end-to-end so it is
   D) Single-model E2E validation (mandatory)
   Run:
   - python -m pytest tests/test_e2e.py::test_e2e[<MODEL_NAME>] -v \
-    --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-    --trtf-binary ./build/trtf \
+    --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+    --trtmc-binary ./build/trtmc \
     --hf-python /opt/venv/bin/python \
-    --e2e-artifacts-dir /workspace/users/yifeif/trt-transformers/test-result
+    --e2e-artifacts-dir /workspace/users/yifeif/tensorrt-model-connect/test-result
 
   Then inspect artifacts/result.json and verify output quality:
   - text: continuation makes sense
@@ -77,8 +77,8 @@ You are working in trt-transformers-cpp. Add one model end-to-end so it is
   - python -m pytest tests/builder/test_graph_ops.py tests/builder/
   test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -n auto
   - python -m pytest tests/test_e2e.py::test_e2e[qwen3-0.6b] -v \
-    --engine-dir /workspace/users/yifeif/trt-transformers/engines \
-    --trtf-binary ./build/trtf \
+    --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+    --trtmc-binary ./build/trtmc \
     --hf-python /opt/venv/bin/python \
     --rebuild-engines
   - Re-run the target model e2e once more after all fixes.

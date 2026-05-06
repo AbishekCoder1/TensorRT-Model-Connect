@@ -39,7 +39,7 @@ void test_flux_step_runner_updates_latents_and_order()
     std::vector<int32_t> call_order;
     std::vector<float> logged_latents;
 
-    const bool ok = trtf::diffusion::run_flux_denoising_steps(
+    const bool ok = trtmc::diffusion::run_flux_denoising_steps(
         2,
         timesteps,
         latents,
@@ -100,7 +100,7 @@ void test_flux_step_runner_handles_zero_steps_and_failure()
     std::string error;
     int callback_calls = 0;
 
-    const bool zero_step_ok = trtf::diffusion::run_flux_denoising_steps(
+    const bool zero_step_ok = trtmc::diffusion::run_flux_denoising_steps(
         0,
         timesteps,
         latents,
@@ -138,7 +138,7 @@ void test_flux_step_runner_handles_zero_steps_and_failure()
 
     int run_calls = 0;
     error.clear();
-    const bool failure_ok = trtf::diffusion::run_flux_denoising_steps(
+    const bool failure_ok = trtmc::diffusion::run_flux_denoising_steps(
         1,
         timesteps,
         latents,
@@ -185,7 +185,7 @@ void test_wan_step_runner_updates_latents_and_handles_failure()
     int scheduler_calls = 0;
     int log_calls = 0;
 
-    const bool ok = trtf::diffusion::run_wan_denoising_steps(
+    const bool ok = trtmc::diffusion::run_wan_denoising_steps(
         2,
         timesteps,
         latents,
@@ -251,7 +251,7 @@ void test_wan_step_runner_handles_zero_steps_and_success()
     std::string error;
     int callback_calls = 0;
 
-    const bool zero_step_ok = trtf::diffusion::run_wan_denoising_steps(
+    const bool zero_step_ok = trtmc::diffusion::run_wan_denoising_steps(
         0,
         timesteps,
         latents,
@@ -287,7 +287,7 @@ void test_wan_step_runner_handles_zero_steps_and_success()
 
     int log_calls = 0;
     error.clear();
-    const bool success_ok = trtf::diffusion::run_wan_denoising_steps(
+    const bool success_ok = trtmc::diffusion::run_wan_denoising_steps(
         1,
         timesteps,
         latents,

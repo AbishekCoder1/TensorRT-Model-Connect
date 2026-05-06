@@ -23,13 +23,13 @@ static void check(bool condition, const char* name)
     }
 }
 
-static trtf::BundleFile make_test_bundle()
+static trtmc::BundleFile make_test_bundle()
 {
-    trtf::BundleFile bundle;
+    trtmc::BundleFile bundle;
     bundle.info.model_id = "test-model";
 
     auto add_section = [&](const std::string& name, const std::string& content) {
-        trtf::BundleSection sec;
+        trtmc::BundleSection sec;
         sec.name = name;
         sec.data.assign(content.begin(), content.end());
         bundle.sections.push_back(std::move(sec));
@@ -50,7 +50,7 @@ static trtf::BundleFile make_test_bundle()
 static void test_find_section_exact()
 {
     auto bundle = make_test_bundle();
-    auto* data = trtf::find_section(bundle, "config.json");
+    auto* data = trtmc::find_section(bundle, "config.json");
     check(data != nullptr, "find_section: config.json found");
     if (data)
     {
@@ -63,14 +63,14 @@ static void test_find_section_exact()
 static void test_find_section_missing()
 {
     auto bundle = make_test_bundle();
-    auto* data = trtf::find_section(bundle, "nonexistent_section");
+    auto* data = trtmc::find_section(bundle, "nonexistent_section");
     check(data == nullptr, "find_section: missing section returns nullptr");
 }
 
 static void test_find_sections_by_prefix()
 {
     auto bundle = make_test_bundle();
-    auto results = trtf::find_sections_by_prefix(bundle, "text_encoder_");
+    auto results = trtmc::find_sections_by_prefix(bundle, "text_encoder_");
     check(results.size() == 2, "find_sections_by_prefix: 2 text_encoder sections");
     if (results.size() == 2)
     {
@@ -84,7 +84,7 @@ static void test_find_sections_by_prefix()
 static void test_find_sections_by_prefix_sorted()
 {
     auto bundle = make_test_bundle();
-    auto results = trtf::find_sections_by_prefix(bundle, "depth_engine_plan_");
+    auto results = trtmc::find_sections_by_prefix(bundle, "depth_engine_plan_");
     check(results.size() == 3, "find_sections_by_prefix: 3 depth_engine sections");
     if (results.size() == 3)
     {
@@ -100,17 +100,17 @@ static void test_find_sections_by_prefix_sorted()
 static void test_find_sections_by_prefix_no_match()
 {
     auto bundle = make_test_bundle();
-    auto results = trtf::find_sections_by_prefix(bundle, "nonexistent_prefix_");
+    auto results = trtmc::find_sections_by_prefix(bundle, "nonexistent_prefix_");
     check(results.empty(), "find_sections_by_prefix: no match returns empty");
 }
 
 static void test_find_section_empty_bundle()
 {
-    trtf::BundleFile empty_bundle;
-    auto* data = trtf::find_section(empty_bundle, "config.json");
+    trtmc::BundleFile empty_bundle;
+    auto* data = trtmc::find_section(empty_bundle, "config.json");
     check(data == nullptr, "find_section: empty bundle returns nullptr");
 
-    auto results = trtf::find_sections_by_prefix(empty_bundle, "any_");
+    auto results = trtmc::find_sections_by_prefix(empty_bundle, "any_");
     check(results.empty(), "find_sections_by_prefix: empty bundle returns empty");
 }
 

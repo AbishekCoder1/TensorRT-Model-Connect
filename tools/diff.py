@@ -125,8 +125,8 @@ def main():
     p_run.add_argument("--test", action="append",
                        help="Specific test(s) to run (repeatable)")
     p_run.add_argument("--bundle", help="Pre-built .trtfb bundle")
-    p_run.add_argument("--binary", default="./build/trtf",
-                       help="C++ trtf binary path")
+    p_run.add_argument("--binary", default="./build/trtmc",
+                       help="C++ trtmc binary path")
     p_run.add_argument("--hf-python", help="Python for HF tokenizer bridge")
     p_run.add_argument("--image", help="Test image (VL models)")
     p_run.add_argument("--max-cache-length", type=int, default=256)
