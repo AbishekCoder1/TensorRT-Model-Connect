@@ -240,10 +240,26 @@ sys.exit(0 if ok else 1)
 }
 
 run_cpp_coverage() {
-  if [ "${FULL_E2E:-false}" != "true" ]; then
-    echo "Skipping: C++ coverage only runs for full E2E or scheduled pipelines"
-    return 0
-  fi
+  case "${GITHUB_EVENT_NAME:-}" in
+    schedule|workflow_dispatch)
+      ;;
+    pull_request)
+      local changed_cpp
+      changed_cpp=$(git diff --diff-filter=d --name-only "$CI_BASE_REF"...HEAD -- \
+        'src/**/*.cpp' 'src/**/*.h' 'include/**/*.h' \
+        'tests/cpp/**/*.cpp' 'tests/cpp/**/*.h' 'CMakeLists.txt' || true)
+      if [ -z "$changed_cpp" ]; then
+        echo "Skipping: no C++ source, C++ tests, or CMake changes in premerge diff"
+        return 0
+      fi
+      echo "C++ coverage triggered by changed files:"
+      echo "$changed_cpp"
+      ;;
+    *)
+      echo "Skipping: C++ coverage only runs for nightly/manual pipelines and C++-affected premerge PRs"
+      return 0
+      ;;
+  esac
   python -m pip install --disable-pip-version-check --quiet "gcovr==8.2"
   run_with_timeout "${CPP_COVERAGE_TIMEOUT:-40m}" bash tools/coverage_ci/run_cpp_coverage.sh
 }

@@ -47,7 +47,7 @@ env:
   CPP_COVERAGE_MIN_FUNCTION: "46"
   CPP_COVERAGE_MIN_BRANCH: "21"
   FULL_E2E: ${{ github.event_name == 'schedule' || inputs.full_e2e == true || inputs.full_e2e == 'true' }}
-  RUN_COVERAGE_MAP: ${{ github.event_name == 'schedule' || inputs.coverage_map == true || inputs.coverage_map == 'true' }}
+  RUN_COVERAGE_MAP: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.coverage_map == true || inputs.coverage_map == 'true')) }}
   REBUILD_ENGINES: ${{ github.event_name == 'schedule' || inputs.rebuild_engines == true || inputs.rebuild_engines == 'true' }}
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
   HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -125,6 +125,17 @@ jobs:
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "Using comparison base: $base"
 
+      - name: Report CI mode
+        run: |
+          set -euo pipefail
+          if [ "$FULL_E2E" = "true" ]; then
+            echo "CI mode: nightly/full E2E"
+          elif [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            echo "CI mode: premerge/selective"
+          else
+            echo "CI mode: branch/manual unit gates"
+          fi
+
       - name: Setup TensorRT-Model-Connect
         timeout-minutes: 5
         run: bash .github/scripts/run-gha-stage.sh setup
@@ -158,6 +169,7 @@ jobs:
         run: bash .github/scripts/run-gha-stage.sh python-builder
 
       - name: C++ coverage
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
         timeout-minutes: 40
         run: bash .github/scripts/run-gha-stage.sh cpp-coverage
 
@@ -166,14 +178,17 @@ jobs:
         run: bash .github/scripts/run-gha-stage.sh graph-ops
 
       - name: Selective E2E tests
+        if: ${{ github.event_name == 'pull_request' && env.FULL_E2E != 'true' }}
         timeout-minutes: 240
         run: bash .github/scripts/run-gha-stage.sh selective-e2e
 
       - name: Full E2E tests
+        if: ${{ env.FULL_E2E == 'true' }}
         timeout-minutes: 360
         run: bash .github/scripts/run-gha-stage.sh full-e2e
 
       - name: Generate coverage map
+        if: ${{ env.RUN_COVERAGE_MAP == 'true' }}
         timeout-minutes: 90
         run: bash .github/scripts/run-gha-stage.sh coverage-map
 
