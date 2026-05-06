@@ -17,6 +17,18 @@ run_step() {
   endgroup
 }
 
+run_with_timeout() {
+  local limit="$1"
+  shift
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --foreground --kill-after=2m "$limit" "$@"
+  else
+    echo "WARNING: timeout command not found; running without ${limit} limit" >&2
+    "$@"
+  fi
+}
+
 generate_e2e_report() {
   if [ -d e2e_artifacts ]; then
     python scripts/generate_e2e_report.py \
@@ -156,10 +168,10 @@ print('|'.join(tests))
 
   if [ -n "$cpp_tests" ]; then
     echo "Selective C++ tests: $cpp_tests"
-    ctest --test-dir build -R "$cpp_tests" --output-on-failure
+    run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" ctest --test-dir build -R "$cpp_tests" --output-on-failure
   else
     echo "Running all C++ tests"
-    ctest --test-dir build --output-on-failure
+    run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" ctest --test-dir build --output-on-failure
   fi
 }
 
@@ -194,13 +206,13 @@ print(' or '.join(tests))
   local cov_args="--cov=tensorrt_model_connect/tensorrt_model_connect --cov-branch --cov-report=term-missing --cov-report=xml:coverage/python-cobertura.xml"
   if [ -n "$builder_tests" ]; then
     echo "Selective builder tests: $builder_tests"
-    python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v \
+    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v \
       --ignore=tests/builder/test_cli.py \
       --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
       -k "$builder_tests" -n auto $cov_args
   else
     echo "Running all builder + tools tests"
-    python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v \
+    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/engine_defs/torch_trt/ -v \
       --ignore=tests/builder/test_cli.py \
       --ignore=tests/engine_defs/torch_trt/test_pixart_vs_hf.py \
       -n auto $cov_args
@@ -233,12 +245,12 @@ run_cpp_coverage() {
     return 0
   fi
   python -m pip install --disable-pip-version-check --quiet "gcovr==8.2"
-  bash tools/coverage_ci/run_cpp_coverage.sh
+  run_with_timeout "${CPP_COVERAGE_TIMEOUT:-40m}" bash tools/coverage_ci/run_cpp_coverage.sh
 }
 
 run_graph_op_tests() {
   nvidia-smi
-  python -m pytest tests/builder/test_graph_ops.py tests/builder/test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -n auto
+  run_with_timeout "${GRAPH_OP_TIMEOUT:-20m}" python -m pytest tests/builder/test_graph_ops.py tests/builder/test_graph_ops_extended.py tests/builder/test_graph_blocks.py -v -n auto
 }
 
 run_selective_e2e() {
@@ -280,7 +292,7 @@ if len(models) > 10:
   if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
     args+=(--rebuild-engines)
   fi
-  HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${args[@]}"
+  run_with_timeout "${SELECTIVE_E2E_TIMEOUT:-4h}" env HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${args[@]}"
 }
 
 run_full_e2e() {
@@ -304,7 +316,7 @@ run_full_e2e() {
   if [ "${REBUILD_ENGINES:-true}" = "true" ]; then
     args+=(--rebuild-engines)
   fi
-  HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${args[@]}"
+  run_with_timeout "${FULL_E2E_TIMEOUT:-6h}" env HF_HUB_OFFLINE=1 ./scripts/run_e2e_parallel.sh "${args[@]}"
 }
 
 generate_coverage_map() {
@@ -314,7 +326,7 @@ generate_coverage_map() {
   fi
 
   python -m pip install --disable-pip-version-check --quiet "coverage[toml]==7.6.10" "pytest-cov>=6.0" "gcovr==8.2"
-  python -m tools.coverage_map.generate --output coverage_map.json --python-bin python --build-dir build
+  run_with_timeout "${COVERAGE_MAP_TIMEOUT:-90m}" python -m tools.coverage_map.generate --output coverage_map.json --python-bin python --build-dir build
   python -m tools.coverage_map.generate --validate coverage_map.json
   python -c "import json; d=json.load(open('coverage_map.json')); m=d['meta']; print('Python tests: %s, C++ tests: %s, Source files: %d' % (m['python_tests'], m['cpp_tests'], len(d['source_to_tests'])))"
 }
