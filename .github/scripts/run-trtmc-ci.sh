@@ -22,7 +22,7 @@ run_with_timeout() {
   shift
 
   if command -v timeout >/dev/null 2>&1; then
-    timeout --foreground --kill-after=2m "$limit" "$@"
+    timeout --kill-after=2m "$limit" "$@"
   else
     echo "WARNING: timeout command not found; running without ${limit} limit" >&2
     "$@"
