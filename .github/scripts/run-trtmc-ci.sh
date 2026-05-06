@@ -331,6 +331,72 @@ generate_coverage_map() {
   python -c "import json; d=json.load(open('coverage_map.json')); m=d['meta']; print('Python tests: %s, C++ tests: %s, Source files: %d' % (m['python_tests'], m['cpp_tests'], len(d['source_to_tests'])))"
 }
 
+run_stage() {
+  local stage="$1"
+  case "$stage" in
+    setup)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      ;;
+    impact)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Impact analysis" impact_analysis
+      ;;
+    build)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Build all" build_all
+      ;;
+    family-coverage)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Check family coverage" check_family_coverage
+      ;;
+    complexity)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Check cyclomatic complexity" check_cyclomatic_complexity
+      ;;
+    lint)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Lint changed files" lint_changed_files
+      ;;
+    cpp-unit)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "C++ unit tests" run_cpp_unit_tests
+      ;;
+    python-builder)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Python builder and tools tests" run_python_builder_tests
+      ;;
+    cpp-coverage)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "C++ coverage" run_cpp_coverage
+      ;;
+    graph-ops)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Graph-op GPU tests" run_graph_op_tests
+      ;;
+    selective-e2e)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Selective E2E tests" run_selective_e2e
+      ;;
+    full-e2e)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Full E2E tests" run_full_e2e
+      ;;
+    coverage-map)
+      run_step "Setup TensorRT-Model-Connect" setup_environment
+      run_step "Generate coverage map" generate_coverage_map
+      ;;
+    *)
+      echo "ERROR: Unknown CI stage: $stage" >&2
+      exit 2
+      ;;
+  esac
+}
+
+if [ "$#" -gt 0 ]; then
+  run_stage "$1"
+  exit 0
+fi
+
 run_step "Setup TensorRT-Model-Connect" setup_environment
 run_step "Impact analysis" impact_analysis
 run_step "Build all" build_all
