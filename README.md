@@ -14,18 +14,21 @@ TensorRT-Model-Connect turns HuggingFace-style checkpoints into deployable `.trt
 For the fastest setup, open Claude Code, Codex, or another repo-aware coding agent and ask:
 
 ```text
-Clone https://github.com/NVIDIA-dev/TensorRT-Model-Connct, adapt the dev
-container to this machine if needed, build the project, build a Qwen/Qwen3-0.6B
-bundle, and run a greedy C++ smoke test. Report the commands you ran.
+Clone https://github.com/NVIDIA-dev/TensorRT-Model-Connct, set up the dev
+container for this machine, build the project, build a Qwen/Qwen3-0.6B bundle,
+and run the C++ smoke test. Report the commands you ran.
 ```
 
-For Qwen, the smoke test should run without `--hf-python` and log `Using native BPE tokenizer`.
+Success means the final `./build/trtmc run` command prints generated text.
 
 ## Manual Fallback
 
 Use the [Environment and First Repro](website/docs/getting-started/environment-and-repro.md) and [Quick Start](website/docs/getting-started/quick-start.md) guides for the full manual path. The short version is:
 
 ```bash
+git clone https://github.com/NVIDIA-dev/TensorRT-Model-Connct.git
+cd TensorRT-Model-Connct
+
 ./scripts/docker_build_gb300.sh
 ./scripts/docker_run_gb300.sh
 
@@ -40,7 +43,7 @@ trtmc-build build Qwen/Qwen3-0.6B -o /tmp/qwen3.trtfb --max-cache-length 256
   --greedy
 ```
 
-If CMake does not print `TRT backend DSO: enabled`, follow the [Installation](website/docs/getting-started/installation.md) TensorRT path override instructions before running a model.
+If CMake says the TensorRT backend was skipped, follow the [Installation](website/docs/getting-started/installation.md) TensorRT path instructions before running a model.
 
 ## Useful Docs
 
