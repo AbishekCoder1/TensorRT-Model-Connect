@@ -101,12 +101,12 @@ build_all() {
   : "${cuda_include:?CUDA include directory was not found}"
   : "${cudart_library:?CUDA runtime library was not found}"
 
-  cmake -S . -B build -G Ninja \
+  run_with_timeout "${BUILD_ALL_TIMEOUT:-15m}" cmake -S . -B build -G Ninja \
     -DTRTMC_TRT_INCLUDE_DIR="$trt_include" \
     -DTRTMC_TRT_LIBRARY="$trt_library" \
     -DTRTMC_CUDA_INCLUDE_DIR="$cuda_include" \
     -DTRTMC_CUDART_LIBRARY="$cudart_library"
-  cmake --build build -j
+  run_with_timeout "${BUILD_ALL_TIMEOUT:-15m}" cmake --build build -j
 }
 
 check_family_coverage() {
