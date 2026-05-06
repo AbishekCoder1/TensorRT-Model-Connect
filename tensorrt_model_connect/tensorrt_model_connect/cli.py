@@ -500,6 +500,23 @@ def _cmd_version(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build(args: argparse.Namespace) -> int:
+    """Compatibility wrapper for tests and callers that import command handlers."""
+    return _cmd_build(args)
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    """Compatibility wrapper accepting both historic ``bundle`` and ``bundle_path`` args."""
+    if not hasattr(args, "bundle_path") and hasattr(args, "bundle"):
+        args.bundle_path = args.bundle
+    return _cmd_inspect(args)
+
+
+def cmd_version(args: argparse.Namespace) -> int:
+    """Compatibility wrapper for tests and callers that import command handlers."""
+    return _cmd_version(args)
+
+
 def main() -> None:
     # RTX selection MUST happen before ANY tensorrt_model_connect module touches TRT.
     # We do an early argv scan before argparse touches anything.
