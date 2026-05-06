@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520" role="img" aria-labelledby="title desc">
+  <title id="title">Extension decision tree</title>
+  <desc id="desc">A decision board for selecting the correct owner when adding model support, runtime behavior, public methods, or tests.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 10 5 0 10Z" fill="#64748b"/>
+    </marker>
+    <style>
+      .title{font-family:Inter,Arial,sans-serif;font-size:30px;font-weight:800;fill:#101828}
+      .subtitle{font-family:Inter,Arial,sans-serif;font-size:16px;fill:#475467}
+      .label{font-family:Inter,Arial,sans-serif;font-size:18px;font-weight:800;fill:#101828}
+      .small{font-family:Inter,Arial,sans-serif;font-size:13px;fill:#475467}
+      .path{font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:700;fill:#344054}
+      .card{fill:#fff;stroke:#d0d7e2;stroke-width:1.5}
+    </style>
+  </defs>
+  <rect x="1" y="1" width="1118" height="518" rx="18" fill="#fbfcfe" stroke="#d0d7e2"/>
+  <text x="48" y="58" class="title">Extension owner</text>
+  <text x="48" y="88" class="subtitle">Start from user-visible behavior, then choose the smallest owner that can prove it.</text>
+
+  <rect x="378" y="122" width="364" height="76" rx="18" fill="#eef6ff" stroke="#93c5fd" stroke-width="2"/>
+  <text x="560" y="154" text-anchor="middle" class="label">What changes at request time?</text>
+  <text x="560" y="178" text-anchor="middle" class="small">The answer decides the owner.</text>
+
+  <g>
+    <rect x="60" y="260" width="300" height="118" rx="18" fill="#f0fdf4" stroke="#86efac" stroke-width="2"/>
+    <text x="210" y="296" text-anchor="middle" class="label">Same runtime behavior</text>
+    <text x="210" y="322" text-anchor="middle" class="small">New model fits an existing strategy.</text>
+    <rect x="110" y="342" width="200" height="26" rx="13" fill="#dcfce7"/>
+    <text x="210" y="360" text-anchor="middle" class="path">add or update FamilyPlugin</text>
+  </g>
+
+  <g>
+    <rect x="410" y="260" width="300" height="118" rx="18" fill="#fff7ed" stroke="#f59e0b" stroke-width="2"/>
+    <text x="560" y="296" text-anchor="middle" class="label">New runtime behavior</text>
+    <text x="560" y="322" text-anchor="middle" class="small">New scheduling, state, or backend use.</text>
+    <rect x="458" y="342" width="204" height="26" rx="13" fill="#fef3c7"/>
+    <text x="560" y="360" text-anchor="middle" class="path">strategy + plugin + pipeline</text>
+  </g>
+
+  <g>
+    <rect x="760" y="260" width="300" height="118" rx="18" fill="#ede9fe" stroke="#a78bfa" stroke-width="2"/>
+    <text x="910" y="296" text-anchor="middle" class="label">New public method</text>
+    <text x="910" y="322" text-anchor="middle" class="small">User API or task contract changes.</text>
+    <rect x="820" y="342" width="180" height="26" rx="13" fill="#ddd6fe"/>
+    <text x="910" y="360" text-anchor="middle" class="path">IPipeline + CLI + docs</text>
+  </g>
+
+  <line x1="500" y1="198" x2="210" y2="260" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="560" y1="198" x2="560" y2="260" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+  <line x1="620" y1="198" x2="910" y2="260" stroke="#64748b" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="60" y="424" width="300" height="48" rx="14" class="card"/>
+  <text x="210" y="445" text-anchor="middle" class="small">Prove with builder tests and E2E manifest.</text>
+  <text x="210" y="464" text-anchor="middle" class="path">family coverage</text>
+  <rect x="410" y="424" width="300" height="48" rx="14" class="card"/>
+  <text x="560" y="445" text-anchor="middle" class="small">Prove registry, plugin, backend, and pipeline paths.</text>
+  <text x="560" y="464" text-anchor="middle" class="path">C++ unit + E2E</text>
+  <rect x="760" y="424" width="300" height="48" rx="14" class="card"/>
+  <text x="910" y="445" text-anchor="middle" class="small">Prove compatibility and document the user contract.</text>
+  <text x="910" y="464" text-anchor="middle" class="path">API and behavior tests</text>
+
+  <line x1="210" y1="378" x2="210" y2="424" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="560" y1="378" x2="560" y2="424" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="910" y1="378" x2="910" y2="424" stroke="#64748b" stroke-width="2.5" marker-end="url(#arrow)"/>
+</svg>

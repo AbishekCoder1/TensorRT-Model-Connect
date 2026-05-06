@@ -5,10 +5,16 @@ on:
     branches:
       - master
       - ai-staging
+    paths-ignore:
+      - "website/**"
+      - ".github/workflows/pages.yml"
   pull_request:
     branches:
       - master
       - ai-staging
+    paths-ignore:
+      - "website/**"
+      - ".github/workflows/pages.yml"
   schedule:
     - cron: "0 10 * * *"
   workflow_dispatch:

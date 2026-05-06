@@ -59,6 +59,10 @@ dist/
 .ruff_cache/
 .ipynb_checkpoints/
 
+# Website local dependencies and generated state
+website/node_modules/
+website/.docusaurus/
+
 # Claude Code
 .claude/
 
