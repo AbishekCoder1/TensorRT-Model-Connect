@@ -75,7 +75,18 @@ jobs:
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
               -w "$GITHUB_WORKSPACE" \
               "$TRTMC_CI_IMAGE" \
-              bash -lc 'find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +'
+              bash -lc '
+                set -euo pipefail
+                cleanup_workspace() {
+                  find . -mindepth 1 -maxdepth 1 ! -name .git -exec chmod -R u+rwX {} + 2>/dev/null || true
+                  find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+                }
+                cleanup_workspace || {
+                  echo "::warning::Initial workspace cleanup failed; retrying after canceled-run processes settle"
+                  sleep 10
+                  cleanup_workspace
+                }
+              '
           fi
 
       - name: Check out source
