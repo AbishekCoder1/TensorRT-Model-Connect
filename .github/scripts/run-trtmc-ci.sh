@@ -49,13 +49,18 @@ mkdir_if_set() {
   fi
 }
 
-setup_environment() {
-  git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" || true
+prepare_shared_directories() {
   mkdir_if_set "${ENGINE_DIR:-}"
   mkdir_if_set "${HF_HOME:-}"
   mkdir_if_set "${HF_HUB_CACHE:-}"
   mkdir_if_set "${HUGGINGFACE_HUB_CACHE:-}"
   mkdir_if_set "${HF_MODULES_CACHE:-}"
+}
+
+prepare_shared_directories
+
+setup_environment() {
+  git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" || true
   echo "ENGINE_DIR=${ENGINE_DIR:-}"
   echo "HF_HOME=${HF_HOME:-}"
   echo "HF_HUB_CACHE=${HF_HUB_CACHE:-${HUGGINGFACE_HUB_CACHE:-}}"

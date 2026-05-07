@@ -16,7 +16,9 @@ fi
 mkdir_if_set() {
   local path="${1:-}"
   if [ -n "$path" ]; then
-    mkdir -p "$path"
+    mkdir -p "$path" 2>/dev/null || {
+      echo "::warning::Could not create '$path' on the host; the CI container will try through mounted storage."
+    }
   fi
 }
 
