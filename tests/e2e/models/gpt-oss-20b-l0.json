@@ -5,6 +5,7 @@
   "bundle": "gpt-oss-20b-l0.trtfb",
   "family": "gpt_oss",
   "runtime_strategy": "decoder_moe",
+  "e2e_parallel_resource": "exclusive_gpu",
   "ci_tier": "l0_only",
   "reference_family": "chat_instruct_template",
   "user_contract": "chat_response",

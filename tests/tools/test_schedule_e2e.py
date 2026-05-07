@@ -93,3 +93,11 @@ def test_qwen35_is_marked_exclusive_gpu() -> None:
     manifest = json.loads(manifest_path.read_text())
 
     assert schedule_e2e.classify_parallel_resource(manifest) == "exclusive_gpu"
+
+
+def test_gpt_oss_20b_is_marked_exclusive_gpu() -> None:
+    manifest_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+
+    for manifest_name in ("gpt-oss-20b.json", "gpt-oss-20b-l0.json"):
+        manifest = json.loads((manifest_dir / manifest_name).read_text())
+        assert schedule_e2e.classify_parallel_resource(manifest) == "exclusive_gpu"
