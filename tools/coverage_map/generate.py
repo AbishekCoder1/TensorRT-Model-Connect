@@ -120,7 +120,7 @@ def generate(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate coverage map for test selection.")
-    parser.add_argument("--output", "-o", required=True, help="Output coverage_map.json path")
+    parser.add_argument("--output", "-o", help="Output coverage_map.json path")
     parser.add_argument("--python-only", action="store_true", help="Only collect Python coverage")
     parser.add_argument("--cpp-only", action="store_true", help="Only collect C++ coverage")
     parser.add_argument("--build-dir", default=None, help="CMake build directory")
@@ -155,6 +155,9 @@ def main() -> int:
         else:
             print("Validation passed: all source files exist.", file=sys.stderr)
         return 0
+
+    if not args.output:
+        parser.error("--output/-o is required unless --validate is used")
 
     build_dir = Path(args.build_dir) if args.build_dir else None
     generate(

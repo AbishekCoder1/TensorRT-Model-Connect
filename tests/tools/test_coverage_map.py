@@ -16,11 +16,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
-from coverage_map.python_collector import parse_coverage_db
-from coverage_map.cpp_collector import parse_gcovr_json, build_cpp_map_from_jsons
-from coverage_map.generate import merge_maps, validate_map, load_coverage_map
-from coverage_map.select_tests import select_tests, SelectionResult
-from coverage_map.fetch_latest import resolve_coverage_map
+from coverage_map.python_collector import parse_coverage_db  # noqa: E402
+from coverage_map.cpp_collector import parse_gcovr_json, build_cpp_map_from_jsons  # noqa: E402
+from coverage_map.generate import merge_maps, validate_map, load_coverage_map, main as generate_main  # noqa: E402
+from coverage_map.select_tests import select_tests  # noqa: E402
+from coverage_map.fetch_latest import resolve_coverage_map  # noqa: E402
 
 
 def _create_fake_coverage_db(db_path: Path, data: dict) -> None:
@@ -215,6 +215,25 @@ class TestGenerate:
         """Returns None when the map file doesn't exist."""
         result = load_coverage_map(tmp_path / "missing.json")
         assert result is None
+
+    def test_validate_cli_does_not_require_output(self, tmp_path, monkeypatch):
+        """Validation mode accepts an existing map without --output."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "foo.py").write_text("")
+        path = tmp_path / "coverage_map.json"
+        path.write_text(json.dumps({
+            "meta": {},
+            "source_to_tests": {"src/foo.py": ["tests/test_foo.py::test_a"]},
+        }))
+        monkeypatch.setattr(sys, "argv", [
+            "generate.py",
+            "--repo-root",
+            str(tmp_path),
+            "--validate",
+            str(path),
+        ])
+
+        assert generate_main() == 0
 
 
 class TestSelectTests:
