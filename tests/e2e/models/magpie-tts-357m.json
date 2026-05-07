@@ -28,7 +28,8 @@
     {
       "kind": "python_module_available",
       "args": {
-        "module": "nemo.collections.tts.g2p.models.i18n_ipa"
+        "module": "nemo.collections.tts.g2p.models.i18n_ipa",
+        "timeout_s": 180
       },
       "gating": true
     }

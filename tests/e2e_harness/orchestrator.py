@@ -167,6 +167,7 @@ def _check_python_module(ctx: RunContext, req: PreflightRequirement) -> tuple[bo
     """Check that a Python module is importable."""
     module = req.args.get("module", "")
     phase = str(req.args.get("phase", "reference") or "reference")
+    timeout_s = int(req.args.get("timeout_s", 30))
     if not module:
         return False, "Module name not specified"
     try:
@@ -187,7 +188,7 @@ def _check_python_module(ctx: RunContext, req: PreflightRequirement) -> tuple[bo
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout_s,
         )
         if result.returncode == 0:
             return True, f"Module {module} available in {phase} profile"

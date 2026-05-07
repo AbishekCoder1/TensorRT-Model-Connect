@@ -5,6 +5,7 @@
   "bundle": "qwen35-9b.trtfb",
   "family": "qwen3_5",
   "runtime_strategy": "hybrid_mamba_attention",
+  "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 256,
   "prompt": "What is the capital of France? Answer in one word.",
   "max_new_tokens": 10,

@@ -81,3 +81,15 @@ def test_exclusive_gpu_resource_reserves_gpu(tmp_path: Path) -> None:
         _test_id("small-b"),
         _test_id("large-a"),
     ])
+
+
+def test_qwen35_is_marked_exclusive_gpu() -> None:
+    manifest_path = (
+        Path(__file__).resolve().parents[1]
+        / "e2e"
+        / "models"
+        / "qwen35-9b.json"
+    )
+    manifest = json.loads(manifest_path.read_text())
+
+    assert schedule_e2e.classify_parallel_resource(manifest) == "exclusive_gpu"

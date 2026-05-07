@@ -29,6 +29,21 @@ def test_vl_qa_ignores_terminal_punctuation_for_short_answers() -> None:
     assert result.metrics["exact_match"].passed
 
 
+def test_vl_qa_accepts_single_word_answer_inside_reference_sentence() -> None:
+    result = VLQAPlugin().verify(
+        StageOutput(stage_name="full_generation", data={"generated_text": "White"}),
+        StageOutput(
+            stage_name="full_generation",
+            data={"text": "The vehicle in this image is white."},
+        ),
+        _case(),
+        ThresholdProfile(task_strategy="vision_language_generation"),
+    )
+
+    assert result.status == StageStatus.PASSED.value
+    assert result.metrics["exact_match"].passed
+
+
 def test_vl_qa_preserves_ocr_punctuation() -> None:
     result = VLQAPlugin().verify(
         StageOutput(stage_name="full_generation", data={"generated_text": "Invoice"}),

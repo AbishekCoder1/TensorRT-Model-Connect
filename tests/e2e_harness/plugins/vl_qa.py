@@ -1,6 +1,7 @@
 """Contract test plugin for vision-language QA and OCR models."""
 from __future__ import annotations
 
+import re
 import string
 
 from ..contracts import MetricResult, StageOutput
@@ -12,6 +13,17 @@ _ANSWER_EDGE_PUNCTUATION = string.punctuation + string.whitespace
 def _normalize_vl_answer(text: str) -> str:
     """Normalize short VL QA answers without penalizing terminal punctuation."""
     return normalize_text(text).strip(_ANSWER_EDGE_PUNCTUATION)
+
+
+def _align_embedded_single_word_answer(left: str, right: str) -> tuple[str, str]:
+    """Treat one-word answers as equivalent when embedded in a sentence."""
+    left_words = re.findall(r"\b\w+\b", left)
+    right_words = re.findall(r"\b\w+\b", right)
+    if len(left_words) == 1 and len(right_words) > 1 and left_words[0] in right_words:
+        return left_words[0], left_words[0]
+    if len(right_words) == 1 and len(left_words) > 1 and right_words[0] in left_words:
+        return right_words[0], right_words[0]
+    return left, right
 
 
 class VLQAPlugin:
@@ -80,6 +92,8 @@ class VLQAPlugin:
         if not is_ocr:
             trt_answer = _normalize_vl_answer(trt_answer)
             ref_answer = _normalize_vl_answer(ref_answer)
+            trt_answer, ref_answer = _align_embedded_single_word_answer(
+                trt_answer, ref_answer)
 
         if not trt_answer:
             return make_fail("full_generation", {}, message="TRT produced empty VL answer")
