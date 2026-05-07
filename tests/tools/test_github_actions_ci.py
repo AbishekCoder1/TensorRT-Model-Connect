@@ -38,3 +38,30 @@ def test_shared_setup_action_creates_hf_cache_dirs() -> None:
     assert '"${HF_HUB_CACHE:-}"' in text
     assert '"${HUGGINGFACE_HUB_CACHE:-}"' in text
     assert '"${HF_MODULES_CACHE:-}"' in text
+
+
+def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> None:
+    premerge = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
+    nightly = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    assert "name: trtmc-ci-${{ github.run_id }}" in premerge
+    assert "retention-days: 1" in premerge
+    assert "name: trtmc-nightly-${{ github.run_id }}" in nightly
+    assert "retention-days: 14" in nightly
+
+
+def test_ci_report_workflow_uses_dedicated_report_environment() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "ci-reports.yml").read_text()
+    assert "workflow_run:" in text
+    assert "TensorRT-Model-Connect Premerge CI" in text
+    assert "TensorRT-Model-Connect Nightly CI" in text
+    assert "name: ci-reports" in text
+    assert "TRTMC_REPORTS_REPOSITORY" in text
+    assert "TRTMC_REPORTS_BASE_URL" in text
+    assert "TRTMC_REPORTS_DEPLOY_TOKEN" in text
+    assert "actions/deploy-pages" not in text
+
+
+def test_gitignore_allows_github_workflows_to_be_tracked() -> None:
+    text = (REPO_ROOT / ".gitignore").read_text()
+    assert "!.github/" in text
+    assert "!.github/**" in text

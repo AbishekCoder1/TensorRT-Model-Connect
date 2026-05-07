@@ -96,6 +96,8 @@ models/hf/*/.cache/
 tests/torchtrt_e2e/models/*.json
 
 .*
+!.github/
+!.github/**
 !.gitignore
 !.gitlab-ci.yml
 !.dockerignore

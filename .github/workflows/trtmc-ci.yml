@@ -181,7 +181,7 @@ jobs:
         with:
           name: trtmc-ci-${{ github.run_id }}
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 1
           path: |
             impact.json
             coverage_map.json
