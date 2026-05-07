@@ -45,7 +45,7 @@ def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
     if "qwen" in lower_id and "vl" in lower_id:
         return f"<|vision_start|><|image_pad|><|vision_end|>{prompt}"
     if "internvl" in lower_id:
-        return f"<image>\n{prompt}"
+        return f"<IMG_CONTEXT>\n{prompt}"
     return prompt
 
 

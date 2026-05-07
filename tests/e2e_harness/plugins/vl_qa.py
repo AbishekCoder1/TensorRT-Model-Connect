@@ -1,7 +1,18 @@
 """Contract test plugin for vision-language QA and OCR models."""
 from __future__ import annotations
-from ..contracts import (CompareResult, E2ECase, MetricResult, StageOutput, ThresholdProfile)
-from .base import (normalize_text, extract_answer, levenshtein_ned, make_pass, make_fail, make_error)
+
+import string
+
+from ..contracts import MetricResult, StageOutput
+from .base import (normalize_text, extract_answer, levenshtein_ned, make_pass, make_fail)
+
+_ANSWER_EDGE_PUNCTUATION = string.punctuation + string.whitespace
+
+
+def _normalize_vl_answer(text: str) -> str:
+    """Normalize short VL QA answers without penalizing terminal punctuation."""
+    return normalize_text(text).strip(_ANSWER_EDGE_PUNCTUATION)
+
 
 class VLQAPlugin:
     reference_families = ["vl_instruct_qa", "ocr_markdown"]
@@ -61,10 +72,14 @@ class VLQAPlugin:
             return make_fail("full_generation", metrics, "invariant: non-empty output",
                             "TRT produced empty output")
 
+        is_ocr = case.reference_family == "ocr_markdown"
         trt_answer = normalize_text(extract_answer(
             StageOutput(stage_name=stage, text=trt_text), prompt))
         ref_answer = normalize_text(extract_answer(
             StageOutput(stage_name=stage, text=ref_text), prompt))
+        if not is_ocr:
+            trt_answer = _normalize_vl_answer(trt_answer)
+            ref_answer = _normalize_vl_answer(ref_answer)
 
         if not trt_answer:
             return make_fail("full_generation", {}, message="TRT produced empty VL answer")
@@ -72,7 +87,6 @@ class VLQAPlugin:
         exact = (trt_answer == ref_answer)
         ned = levenshtein_ned(trt_answer, ref_answer)
 
-        is_ocr = case.reference_family == "ocr_markdown"
         ned_threshold = threshold.metrics.get(
             "contract_ned_threshold", 0.05 if is_ocr else 0.15)
 

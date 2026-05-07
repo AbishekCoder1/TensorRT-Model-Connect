@@ -13,7 +13,7 @@ def test_qwen_vl_fallback_prompt_includes_image_pad() -> None:
 
 def test_internvl_fallback_prompt_includes_image_placeholder() -> None:
     assert _vl_fallback_prompt("OpenGVLab/InternVL3-8B-hf", "Describe it") == (
-        "<image>\nDescribe it"
+        "<IMG_CONTEXT>\nDescribe it"
     )
 
 
