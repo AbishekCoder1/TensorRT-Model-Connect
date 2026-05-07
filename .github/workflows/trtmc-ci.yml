@@ -175,6 +175,28 @@ jobs:
         timeout-minutes: 240
         run: bash .github/scripts/run-gha-stage.sh selective-e2e
 
+      - name: Write CI summary
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 scripts/generate_ci_summary.py \
+            --mode premerge \
+            --artifacts-dir e2e_artifacts/artifacts \
+            --report-path e2e_artifacts/e2e_report.html \
+            --html-artifact-name "trtmc-ci-html-report-${GITHUB_RUN_ID}" \
+            --full-artifact-name "trtmc-ci-${GITHUB_RUN_ID}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload E2E HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-ci-html-report-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 1
+          path: e2e_artifacts/e2e_report.html
+
       - name: Upload CI artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -187,3 +209,4 @@ jobs:
             coverage_map.json
             coverage/
             e2e_artifacts/
+            !e2e_artifacts/e2e_report.html

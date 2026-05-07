@@ -141,6 +141,28 @@ jobs:
         timeout-minutes: 90
         run: bash .github/scripts/run-gha-stage.sh coverage-map
 
+      - name: Write CI summary
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 scripts/generate_ci_summary.py \
+            --mode nightly \
+            --artifacts-dir e2e_artifacts/artifacts \
+            --report-path e2e_artifacts/e2e_report.html \
+            --html-artifact-name "trtmc-nightly-html-report-${GITHUB_RUN_ID}" \
+            --full-artifact-name "trtmc-nightly-${GITHUB_RUN_ID}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload E2E HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-nightly-html-report-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: e2e_artifacts/e2e_report.html
+
       - name: Upload nightly artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -153,3 +175,4 @@ jobs:
             coverage_map.json
             coverage/
             e2e_artifacts/
+            !e2e_artifacts/e2e_report.html

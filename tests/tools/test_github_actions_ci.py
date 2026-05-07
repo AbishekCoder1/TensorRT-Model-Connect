@@ -47,3 +47,28 @@ def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> 
     assert "retention-days: 1" in premerge
     assert "name: trtmc-nightly-${{ github.run_id }}" in nightly
     assert "retention-days: 14" in nightly
+
+
+def test_github_workflows_upload_single_file_html_report_artifact() -> None:
+    expectations = {
+        "trtmc-ci.yml": ("trtmc-ci-html-report-${{ github.run_id }}", "retention-days: 1"),
+        "nightly.yml": (
+            "trtmc-nightly-html-report-${{ github.run_id }}",
+            "retention-days: 14",
+        ),
+    }
+    for workflow, (artifact_name, retention) in expectations.items():
+        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
+        assert "Upload E2E HTML report" in text
+        assert artifact_name in text
+        assert "path: e2e_artifacts/e2e_report.html" in text
+        assert retention in text
+        assert "!e2e_artifacts/e2e_report.html" in text
+
+
+def test_github_workflows_write_e2e_markdown_summary() -> None:
+    for workflow in ("trtmc-ci.yml", "nightly.yml"):
+        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
+        assert "Write CI summary" in text
+        assert "scripts/generate_ci_summary.py" in text
+        assert ">> \"$GITHUB_STEP_SUMMARY\"" in text
