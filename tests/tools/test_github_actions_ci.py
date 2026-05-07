@@ -57,6 +57,7 @@ def test_ci_report_workflow_uses_dedicated_report_environment() -> None:
     assert "name: ci-reports" in text
     assert "TRTMC_REPORTS_REPOSITORY" in text
     assert "TRTMC_REPORTS_BASE_URL" in text
+    assert "TRTMC_REPORTS_DEPLOY_KEY" in text
     assert "TRTMC_REPORTS_DEPLOY_TOKEN" in text
     assert "actions/deploy-pages" not in text
 

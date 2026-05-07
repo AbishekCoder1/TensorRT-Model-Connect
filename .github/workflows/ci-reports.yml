@@ -31,6 +31,7 @@ jobs:
       REPORTS_REPOSITORY: ${{ vars.TRTMC_REPORTS_REPOSITORY }}
       REPORTS_BRANCH: ${{ vars.TRTMC_REPORTS_BRANCH || 'gh-pages' }}
       REPORTS_BASE_URL: ${{ vars.TRTMC_REPORTS_BASE_URL }}
+      REPORTS_DEPLOY_KEY: ${{ secrets.TRTMC_REPORTS_DEPLOY_KEY }}
       REPORTS_DEPLOY_TOKEN: ${{ secrets.TRTMC_REPORTS_DEPLOY_TOKEN }}
 
     defaults:
@@ -49,7 +50,26 @@ jobs:
           : "${REPORTS_REPOSITORY:?Set TRTMC_REPORTS_REPOSITORY in the ci-reports environment}"
           : "${REPORTS_BRANCH:?Set TRTMC_REPORTS_BRANCH in the ci-reports environment, or leave it unset to use gh-pages}"
           : "${REPORTS_BASE_URL:?Set TRTMC_REPORTS_BASE_URL in the ci-reports environment}"
-          : "${REPORTS_DEPLOY_TOKEN:?Set TRTMC_REPORTS_DEPLOY_TOKEN in the ci-reports environment}"
+          if [ -z "${REPORTS_DEPLOY_KEY:-}" ] && [ -z "${REPORTS_DEPLOY_TOKEN:-}" ]; then
+            echo "::error::Set TRTMC_REPORTS_DEPLOY_KEY or TRTMC_REPORTS_DEPLOY_TOKEN in the ci-reports environment"
+            exit 1
+          fi
+
+      - name: Configure report deployment credentials
+        run: |
+          set -euo pipefail
+          if [ -n "${REPORTS_DEPLOY_KEY:-}" ]; then
+            mkdir -p ~/.ssh
+            printf '%s\n' "$REPORTS_DEPLOY_KEY" > ~/.ssh/trtmc_ci_reports
+            chmod 600 ~/.ssh/trtmc_ci_reports
+            ssh-keyscan github.com >> ~/.ssh/known_hosts
+            echo "REPORTS_REMOTE_URL=git@github.com:${REPORTS_REPOSITORY}.git" >> "$GITHUB_ENV"
+            echo "REPORTS_AUTH_MODE=ssh" >> "$GITHUB_ENV"
+            echo "GIT_SSH_COMMAND=ssh -i ~/.ssh/trtmc_ci_reports -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+          else
+            echo "REPORTS_REMOTE_URL=https://github.com/${REPORTS_REPOSITORY}.git" >> "$GITHUB_ENV"
+            echo "REPORTS_AUTH_MODE=token" >> "$GITHUB_ENV"
+          fi
 
       - name: Resolve source run
         id: context
@@ -141,12 +161,15 @@ jobs:
       - name: Check out report site
         run: |
           set -euo pipefail
+          git_auth=()
+          if [ "${REPORTS_AUTH_MODE}" = "token" ]; then
+            git_auth=(-c "http.extraheader=AUTHORIZATION: bearer ${REPORTS_DEPLOY_TOKEN}")
+          fi
           mkdir -p report-site
           cd report-site
           git init
-          git remote add origin "https://github.com/${REPORTS_REPOSITORY}.git"
-          if git -c "http.extraheader=AUTHORIZATION: bearer ${REPORTS_DEPLOY_TOKEN}" \
-              fetch --depth=1 origin "${REPORTS_BRANCH}"; then
+          git remote add origin "$REPORTS_REMOTE_URL"
+          if git "${git_auth[@]}" fetch --depth=1 origin "${REPORTS_BRANCH}"; then
             git checkout -B "${REPORTS_BRANCH}" FETCH_HEAD
           else
             git checkout --orphan "${REPORTS_BRANCH}"
@@ -194,5 +217,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Publish CI report ${{ steps.context.outputs.run_id || 'prune' }}"
-          git -c "http.extraheader=AUTHORIZATION: bearer ${REPORTS_DEPLOY_TOKEN}" \
-            push origin "HEAD:${REPORTS_BRANCH}"
+          git_auth=()
+          if [ "${REPORTS_AUTH_MODE}" = "token" ]; then
+            git_auth=(-c "http.extraheader=AUTHORIZATION: bearer ${REPORTS_DEPLOY_TOKEN}")
+          fi
+          git "${git_auth[@]}" push origin "HEAD:${REPORTS_BRANCH}"
