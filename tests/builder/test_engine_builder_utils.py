@@ -156,6 +156,20 @@ class TestHfAllowPatterns:
     def test_contains_sharded(self):
         assert "model-*.safetensors" in _HF_ALLOW_PATTERNS
 
+    def test_contains_sentencepiece_variants(self):
+        assert "*.model" in _HF_ALLOW_PATTERNS
+        assert "*.spm" in _HF_ALLOW_PATTERNS
+
+    def test_contains_remote_code(self):
+        assert "*.py" in _HF_ALLOW_PATTERNS
+
+    def test_contains_diffusers_component_dirs(self):
+        assert "text_encoder/**" in _HF_ALLOW_PATTERNS
+        assert "text_encoder_2/**" in _HF_ALLOW_PATTERNS
+        assert "transformer/**" in _HF_ALLOW_PATTERNS
+        assert "vae/**" in _HF_ALLOW_PATTERNS
+        assert "tokenizer_2/**" in _HF_ALLOW_PATTERNS
+
 
 class TestEnsureTokenizerJson:
     """Test _ensure_tokenizer_json skips when tokenizer.json exists."""

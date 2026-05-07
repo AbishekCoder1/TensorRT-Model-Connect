@@ -39,6 +39,16 @@ def _torch_dtype_for_case(case: E2ECase) -> str:
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 
+def _vl_fallback_prompt(hf_id: str, prompt: str) -> str:
+    """Return a model-family prompt that preserves one image placeholder."""
+    lower_id = hf_id.lower()
+    if "qwen" in lower_id and "vl" in lower_id:
+        return f"<|vision_start|><|image_pad|><|vision_end|>{prompt}"
+    if "internvl" in lower_id:
+        return f"<image>\n{prompt}"
+    return prompt
+
+
 def _resolve_cached_model_ref(hf_id: str) -> str:
     """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
     if not hf_id:
@@ -303,6 +313,7 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "Hello world")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
@@ -310,19 +321,20 @@ class HfTransformersReference:
             from transformers import AutoModel, AutoTokenizer
 
             hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
             prompt = {prompt!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
 
             tokenizer = AutoTokenizer.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
+                model_ref, trust_remote_code=trust_remote_code)
 
             # Load model — try AutoModel first, fall back to base model
             # for specialized wrappers (DPR, etc.) that don't return
             # last_hidden_state in the expected format.
             from transformers import AutoConfig
             config = AutoConfig.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
+                model_ref, trust_remote_code=trust_remote_code)
             model_type = getattr(config, 'model_type', '')
 
             if model_type == 'dpr':
@@ -332,12 +344,12 @@ class HfTransformersReference:
                 # Load as DPRContextEncoder and extract the inner BERT.
                 from transformers import DPRContextEncoder
                 _dpr = DPRContextEncoder.from_pretrained(
-                    hf_id, trust_remote_code=trust_remote_code,
+                    model_ref, trust_remote_code=trust_remote_code,
                     torch_dtype={torch_dtype_expr})
                 model = _dpr.ctx_encoder.bert_model
             else:
                 model = AutoModel.from_pretrained(
-                    hf_id, trust_remote_code=trust_remote_code,
+                    model_ref, trust_remote_code=trust_remote_code,
                     torch_dtype={torch_dtype_expr})
             model.eval()
 
@@ -421,6 +433,7 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "What is machine learning?")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
@@ -428,14 +441,15 @@ class HfTransformersReference:
             from transformers import AutoModel, AutoTokenizer
 
             hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
             prompt = {prompt!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
 
             tokenizer = AutoTokenizer.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
+                model_ref, trust_remote_code=trust_remote_code)
             model = AutoModel.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code,
+                model_ref, trust_remote_code=trust_remote_code,
                 torch_dtype={torch_dtype_expr})
             model.eval()
 
@@ -1072,6 +1086,8 @@ class HfTransformersReference:
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         hf_id = case.hf_id
+        model_ref = _resolve_cached_model_ref(hf_id)
+        fallback_text = _vl_fallback_prompt(hf_id, prompt)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
@@ -1080,14 +1096,16 @@ class HfTransformersReference:
             from PIL import Image
 
             hf_id = {hf_id!r}
+            model_ref = {model_ref!r}
             prompt = {prompt!r}
+            fallback_text = {fallback_text!r}
             max_new_tokens = {max_new_tokens}
             trust_remote_code = {trust_remote_code!r}
             image_path = {image_path!r}
             text_path = {text_path!r}
 
             processor = AutoProcessor.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
+                model_ref, trust_remote_code=trust_remote_code)
 
             # Try VL-specific auto classes in preference order
             import transformers
@@ -1097,7 +1115,7 @@ class HfTransformersReference:
                 try:
                     cls = getattr(transformers, cls_name)
                     model = cls.from_pretrained(
-                        hf_id, trust_remote_code=trust_remote_code,
+                        model_ref, trust_remote_code=trust_remote_code,
                         torch_dtype={torch_dtype_expr})
                     break
                 except (AttributeError, ImportError, ValueError, KeyError):
@@ -1106,7 +1124,7 @@ class HfTransformersReference:
             # inputs (e.g. Phi-4-multimodal)
             if model is None:
                 model = transformers.AutoModelForCausalLM.from_pretrained(
-                    hf_id, trust_remote_code=True,
+                    model_ref, trust_remote_code=True,
                     torch_dtype={torch_dtype_expr})
             model.eval()
 
@@ -1115,19 +1133,25 @@ class HfTransformersReference:
             # Build conversation for chat-template models
             messages = [
                 {{"role": "user", "content": [
-                    {{"type": "image"}},
+                    {{"type": "image", "image": image_path}},
                     {{"type": "text", "text": prompt}},
                 ]}}
             ]
             try:
                 text_input = processor.apply_chat_template(
-                    messages, add_generation_prompt=True)
+                    messages, tokenize=False, add_generation_prompt=True)
+                if not isinstance(text_input, str):
+                    raise TypeError("processor.apply_chat_template did not return text")
+                if not any(marker in text_input for marker in (
+                    "<|image_pad|>", "<|vision_start|>", "<image>"
+                )):
+                    raise ValueError("chat template produced no image placeholder")
                 inputs = processor(
                     text=text_input, images=image, return_tensors="pt")
             except Exception:
                 # Fallback for models without chat template
                 inputs = processor(
-                    text=prompt, images=image, return_tensors="pt")
+                    text=fallback_text, images=image, return_tensors="pt")
 
             with torch.no_grad():
                 generated_ids = model.generate(

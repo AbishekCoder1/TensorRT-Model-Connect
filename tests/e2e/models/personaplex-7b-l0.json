@@ -5,6 +5,7 @@
   "bundle": "personaplex-7b-l0.trtfb",
   "family": "personaplex",
   "runtime_strategy": "speech_to_speech",
+  "gated": true,
   "ci_tier": "l0_only",
   "reference_family": "s2s_personaplex",
   "user_contract": "speech_response",

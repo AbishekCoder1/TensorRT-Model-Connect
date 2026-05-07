@@ -6,6 +6,7 @@
   "model_type": "flux.2",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
+  "gated": true,
   "ci_tier": "nightly_only",
   "precision": "fp16",
   "l0_replacement": "flux-2-dev-fp8-l0",

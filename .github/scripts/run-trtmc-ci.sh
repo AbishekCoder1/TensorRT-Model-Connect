@@ -42,8 +42,24 @@ generate_e2e_report() {
 
 trap generate_e2e_report EXIT
 
+mkdir_if_set() {
+  local path="${1:-}"
+  if [ -n "$path" ]; then
+    mkdir -p "$path"
+  fi
+}
+
 setup_environment() {
   git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" || true
+  mkdir_if_set "${ENGINE_DIR:-}"
+  mkdir_if_set "${HF_HOME:-}"
+  mkdir_if_set "${HF_HUB_CACHE:-}"
+  mkdir_if_set "${HUGGINGFACE_HUB_CACHE:-}"
+  mkdir_if_set "${HF_MODULES_CACHE:-}"
+  echo "ENGINE_DIR=${ENGINE_DIR:-}"
+  echo "HF_HOME=${HF_HOME:-}"
+  echo "HF_HUB_CACHE=${HF_HUB_CACHE:-${HUGGINGFACE_HUB_CACHE:-}}"
+  echo "HF_MODULES_CACHE=${HF_MODULES_CACHE:-}"
   python -c "import transformers, sys; print(f'python={sys.executable} transformers={transformers.__version__}'); assert transformers.__version__ == '5.2.0', transformers.__version__"
   python -m pip install --disable-pip-version-check --no-deps -e tensorrt_model_connect/
   chmod +x ./build/trtmc 2>/dev/null || true

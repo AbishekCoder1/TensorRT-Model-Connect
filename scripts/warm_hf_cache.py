@@ -64,7 +64,16 @@ _HF_ALLOW_PATTERNS = [
     "normalizer.json",
     "special_tokens_map.json",
     "*.model",
+    "*.spm",
+    "*.py",
     "model_index.json",
+    "scheduler/**",
+    "text_encoder/**",
+    "text_encoder_2/**",
+    "transformer/**",
+    "vae/**",
+    "tokenizer/**",
+    "tokenizer_2/**",
     "*/config.json",
     "*/model.safetensors",
     "*/model-*.safetensors",
@@ -118,7 +127,7 @@ if args.models_file:
     filter_names = {line.strip() for line in p.read_text().splitlines() if line.strip()}
 excluded_ci_tiers = set(args.exclude_ci_tier or [])
 
-entries: list[tuple[str, str]] = []
+entries: list[tuple[str, str, bool]] = []
 needs_tts_asr_verifier = False
 for m in manifests:
     d = json.loads(m.read_text())
@@ -131,12 +140,29 @@ for m in manifests:
         continue
     if filter_names is not None and name not in filter_names:
         continue
-    entries.append((name, d["hf_id"]))
+    entries.append((name, d["hf_id"], bool(d.get("gated"))))
     if str(d.get("runtime_strategy", "")).startswith("text_to_audio"):
         needs_tts_asr_verifier = True
+        if str(d.get("family", "")) == "magpie_tts":
+            entries.append((
+                "magpie-nanocodec",
+                "nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps",
+                False,
+            ))
+    if str(d.get("runtime_strategy", "")) == "speech_to_speech":
+        entries.append(("personaplex-mimi-codec", "kyutai/mimi", False))
 
-if needs_tts_asr_verifier and _TTS_ASR_VERIFIER_MODEL not in {hf_id for _, hf_id in entries}:
-    entries.append(("tts-asr-verifier", _TTS_ASR_VERIFIER_MODEL))
+if needs_tts_asr_verifier and _TTS_ASR_VERIFIER_MODEL not in {hf_id for _, hf_id, _ in entries}:
+    entries.append(("tts-asr-verifier", _TTS_ASR_VERIFIER_MODEL, False))
+
+deduped_entries: list[tuple[str, str, bool]] = []
+seen_hf_ids: set[str] = set()
+for name, hf_id, gated in entries:
+    if hf_id in seen_hf_ids:
+        continue
+    seen_hf_ids.add(hf_id)
+    deduped_entries.append((name, hf_id, gated))
+entries = deduped_entries
 
 
 def _is_cached(hf_id: str) -> bool:
@@ -192,11 +218,19 @@ def _snapshot_has_required_files(snapshot_dir: pathlib.Path) -> bool:
 selective = filter_names is not None
 scope = f"selective ({len(entries)} models)" if selective else f"all {len(entries)} models"
 print(f"Warming HF cache — {scope}...")
+print(f"HF Hub cache: {hf_constants.HF_HUB_CACHE}")
 
 warned: list[str] = []
 skipped: list[str] = []
+hf_token_available = bool(
+    os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+)
 
-for i, (name, hf_id) in enumerate(entries, 1):
+for i, (name, hf_id, gated) in enumerate(entries, 1):
+    if gated and not hf_token_available:
+        print(f"  [{i:3d}/{len(entries)}] {name}  SKIP (gated, no HF token)")
+        skipped.append(name)
+        continue
     if selective and _is_cached(hf_id):
         print(f"  [{i:3d}/{len(entries)}] {name}  CACHED (skip)")
         skipped.append(name)

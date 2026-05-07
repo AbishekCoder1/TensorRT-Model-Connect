@@ -13,6 +13,20 @@ if [ -d /workspace/users/yifeif ]; then
   extra_mounts+=(-v /workspace/users/yifeif:/workspace/users/yifeif)
 fi
 
+mkdir_if_set() {
+  local path="${1:-}"
+  if [ -n "$path" ]; then
+    mkdir -p "$path"
+  fi
+}
+
+mkdir_if_set "${TRTMC_STORAGE_ROOT:-}"
+mkdir_if_set "${ENGINE_DIR:-}"
+mkdir_if_set "${HF_HOME:-}"
+mkdir_if_set "${HF_HUB_CACHE:-}"
+mkdir_if_set "${HUGGINGFACE_HUB_CACHE:-}"
+mkdir_if_set "${HF_MODULES_CACHE:-}"
+
 # shellcheck disable=SC2086
 docker run --rm \
   $TRTMC_CONTAINER_OPTIONS \
@@ -21,6 +35,11 @@ docker run --rm \
   -w "$GITHUB_WORKSPACE" \
   -e CI_BASE_REF \
   -e ENGINE_DIR \
+  -e TRTMC_STORAGE_ROOT \
+  -e HF_HOME \
+  -e HF_HUB_CACHE \
+  -e HUGGINGFACE_HUB_CACHE \
+  -e HF_MODULES_CACHE \
   -e FULL_E2E \
   -e RUN_COVERAGE_MAP \
   -e REBUILD_ENGINES \

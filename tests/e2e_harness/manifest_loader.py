@@ -269,8 +269,16 @@ def _build_preflight(manifest: dict, task_strategy: str) -> list[PreflightRequir
             gating=True,
         ))
 
-    # HF auth for gated models
-    if manifest.get("trust_remote_code"):
+    # HF auth for gated models.  trust_remote_code still gets a non-gating
+    # diagnostic because many public repos use remote code, but gated repos
+    # should skip cleanly when a CI runner has no HF token.
+    if manifest.get("gated"):
+        reqs.append(PreflightRequirement(
+            kind="hf_auth_token_present",
+            args={},
+            gating=True,
+        ))
+    elif manifest.get("trust_remote_code"):
         reqs.append(PreflightRequirement(
             kind="hf_auth_token_present",
             args={},

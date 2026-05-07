@@ -8,6 +8,11 @@ runs:
       run: |
         set -euo pipefail
         git config --global --add safe.directory "${GITHUB_WORKSPACE:-$PWD}" || true
+        for path in "${ENGINE_DIR:-}" "${HF_HOME:-}" "${HF_HUB_CACHE:-}" "${HUGGINGFACE_HUB_CACHE:-}" "${HF_MODULES_CACHE:-}"; do
+          if [ -n "$path" ]; then
+            mkdir -p "$path"
+          fi
+        done
         python -c "import transformers, sys; print(f'python={sys.executable} transformers={transformers.__version__}'); assert transformers.__version__ == '5.2.0', transformers.__version__"
 
     - name: Install Python builder package

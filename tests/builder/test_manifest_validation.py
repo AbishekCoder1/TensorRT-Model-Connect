@@ -125,6 +125,38 @@ class TestManifestValidation:
         with pytest.raises(ValueError, match="name"):
             load_manifest(path)
 
+    def test_gated_manifest_requires_auth_preflight(self, tmp_path):
+        path = self._write_manifest(tmp_path, {
+            "name": "gated-test",
+            "hf_id": "org/gated-model",
+            "family": "qwen",
+            "runtime_strategy": "decoder_kv_cache",
+            "gated": True,
+        })
+        case = load_manifest(path)
+        matches = [
+            req for req in case.preflight
+            if req.kind == "hf_auth_token_present"
+        ]
+        assert len(matches) == 1
+        assert matches[0].gating is True
+
+    def test_remote_code_manifest_auth_preflight_is_diagnostic(self, tmp_path):
+        path = self._write_manifest(tmp_path, {
+            "name": "remote-code-test",
+            "hf_id": "org/remote-code-model",
+            "family": "eagle_vlm",
+            "runtime_strategy": "embedding",
+            "trust_remote_code": True,
+        })
+        case = load_manifest(path)
+        matches = [
+            req for req in case.preflight
+            if req.kind == "hf_auth_token_present"
+        ]
+        assert len(matches) == 1
+        assert matches[0].gating is False
+
     def test_bool_not_accepted_as_int(self, tmp_path):
         """Boolean values should not pass the int type check."""
         data = {

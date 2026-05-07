@@ -6,6 +6,7 @@
   "model_type": "flux",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
+  "gated": true,
   "ci_tier": "nightly_only",
   "l0_replacement": "flux-schnell-l0",
   "l0_replacement_reason": "FLUX.1-schnell scale stays nightly; flux-schnell-l0 keeps the Flux image path at 384px/20 steps for MR L0.",
