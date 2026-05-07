@@ -45,17 +45,30 @@ jobs:
           fetch-depth: 1
 
       - name: Validate report deployment config
+        id: config
         run: |
           set -euo pipefail
-          : "${REPORTS_REPOSITORY:?Set TRTMC_REPORTS_REPOSITORY in the ci-reports environment}"
-          : "${REPORTS_BRANCH:?Set TRTMC_REPORTS_BRANCH in the ci-reports environment, or leave it unset to use gh-pages}"
-          : "${REPORTS_BASE_URL:?Set TRTMC_REPORTS_BASE_URL in the ci-reports environment}"
-          if [ -z "${REPORTS_DEPLOY_KEY:-}" ] && [ -z "${REPORTS_DEPLOY_TOKEN:-}" ]; then
-            echo "::error::Set TRTMC_REPORTS_DEPLOY_KEY or TRTMC_REPORTS_DEPLOY_TOKEN in the ci-reports environment"
-            exit 1
+          configured=true
+          if [ -z "${REPORTS_REPOSITORY:-}" ]; then
+            echo "::warning::Set TRTMC_REPORTS_REPOSITORY in the ci-reports environment to publish CI reports"
+            configured=false
           fi
+          if [ -z "${REPORTS_BRANCH:-}" ]; then
+            echo "::warning::Set TRTMC_REPORTS_BRANCH in the ci-reports environment, or leave it unset to use gh-pages"
+            configured=false
+          fi
+          if [ -z "${REPORTS_BASE_URL:-}" ]; then
+            echo "::warning::Set TRTMC_REPORTS_BASE_URL in the ci-reports environment to publish CI reports"
+            configured=false
+          fi
+          if [ -z "${REPORTS_DEPLOY_KEY:-}" ] && [ -z "${REPORTS_DEPLOY_TOKEN:-}" ]; then
+            echo "::warning::Set TRTMC_REPORTS_DEPLOY_KEY or TRTMC_REPORTS_DEPLOY_TOKEN in the ci-reports environment to publish CI reports"
+            configured=false
+          fi
+          echo "configured=$configured" >> "$GITHUB_OUTPUT"
 
       - name: Configure report deployment credentials
+        if: ${{ steps.config.outputs.configured == 'true' }}
         run: |
           set -euo pipefail
           if [ -n "${REPORTS_DEPLOY_KEY:-}" ]; then
@@ -72,6 +85,7 @@ jobs:
           fi
 
       - name: Resolve source run
+        if: ${{ steps.config.outputs.configured == 'true' }}
         id: context
         run: |
           set -euo pipefail
@@ -126,7 +140,7 @@ jobs:
           PY
 
       - name: Download CI artifact
-        if: ${{ steps.context.outputs.prune_only == 'false' }}
+        if: ${{ steps.config.outputs.configured == 'true' && steps.context.outputs.prune_only == 'false' }}
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -136,6 +150,7 @@ jobs:
           path: ci-artifact
 
       - name: Prepare HTML report
+        if: ${{ steps.config.outputs.configured == 'true' }}
         id: prepare
         run: |
           set -euo pipefail
@@ -159,6 +174,7 @@ jobs:
           echo "report_path=$report_path" >> "$GITHUB_OUTPUT"
 
       - name: Check out report site
+        if: ${{ steps.config.outputs.configured == 'true' }}
         run: |
           set -euo pipefail
           git_auth=()
@@ -177,6 +193,7 @@ jobs:
           fi
 
       - name: Publish or prune report indexes
+        if: ${{ steps.config.outputs.configured == 'true' }}
         id: publish
         run: |
           set -euo pipefail
@@ -206,6 +223,7 @@ jobs:
           python3 scripts/publish_ci_report.py "${args[@]}"
 
       - name: Commit report site
+        if: ${{ steps.config.outputs.configured == 'true' }}
         run: |
           set -euo pipefail
           cd report-site
