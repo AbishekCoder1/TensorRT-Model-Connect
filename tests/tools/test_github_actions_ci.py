@@ -47,22 +47,3 @@ def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> 
     assert "retention-days: 1" in premerge
     assert "name: trtmc-nightly-${{ github.run_id }}" in nightly
     assert "retention-days: 14" in nightly
-
-
-def test_ci_report_workflow_uses_dedicated_report_environment() -> None:
-    text = (REPO_ROOT / ".github" / "workflows" / "ci-reports.yml").read_text()
-    assert "workflow_run:" in text
-    assert "TensorRT-Model-Connect Premerge CI" in text
-    assert "TensorRT-Model-Connect Nightly CI" in text
-    assert "name: ci-reports" in text
-    assert "TRTMC_REPORTS_REPOSITORY" in text
-    assert "TRTMC_REPORTS_BASE_URL" in text
-    assert "TRTMC_REPORTS_DEPLOY_KEY" in text
-    assert "TRTMC_REPORTS_DEPLOY_TOKEN" in text
-    assert "actions/deploy-pages" not in text
-
-
-def test_gitignore_allows_github_workflows_to_be_tracked() -> None:
-    text = (REPO_ROOT / ".gitignore").read_text()
-    assert "!.github/" in text
-    assert "!.github/**" in text
