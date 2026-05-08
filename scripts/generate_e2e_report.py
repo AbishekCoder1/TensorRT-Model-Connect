@@ -993,6 +993,70 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _stage_output_returncode(stage: Dict[str, Any]) -> Any:
+    for key in ("data", "metadata"):
+        value = stage.get(key, {})
+        if isinstance(value, dict) and "returncode" in value:
+            return value.get("returncode")
+    return stage.get("returncode")
+
+
+def _stage_output_error_excerpt(stage: Dict[str, Any]) -> str:
+    data = stage.get("data", {})
+    metadata = stage.get("metadata", {})
+    candidates: List[Any] = []
+    if isinstance(data, dict):
+        candidates.extend([
+            data.get("error"),
+            data.get("parse_error"),
+            data.get("stderr_truncated"),
+            data.get("stderr"),
+        ])
+    for candidate in candidates:
+        if candidate:
+            raw = str(candidate)
+            for marker in (
+                "LocalEntryNotFoundError",
+                "OSError",
+                "Cannot find",
+                "couldn't connect",
+                "Error in call",
+            ):
+                for line in raw.splitlines():
+                    if marker in line:
+                        text = " ".join(line.split())
+                        return text[:297] + "..." if len(text) > 300 else text
+            text = " ".join(raw.split())
+            return text[:297] + "..." if len(text) > 300 else text
+    if isinstance(data, dict) and data.get("stderr_log"):
+        return f"see {data.get('stderr_log')}"
+    if isinstance(metadata, dict) and metadata.get("command"):
+        return f"command: {metadata.get('command')}"
+    return ""
+
+
+def _render_missing_reference_audio_notice(stage_outputs: Dict[str, Any]) -> str:
+    for stage_key, stage in stage_outputs.items():
+        if not str(stage_key).startswith("ref_") or not isinstance(stage, dict):
+            continue
+        returncode = _stage_output_returncode(stage)
+        error_excerpt = _stage_output_error_excerpt(stage)
+        failed = returncode not in (None, 0, "0")
+        if not failed and not error_excerpt:
+            continue
+        details = [f"reference stage {_esc(stage_key)}"]
+        if returncode is not None:
+            details.append(f"returned {_esc(returncode)}")
+        if error_excerpt:
+            details.append(_esc(error_excerpt))
+        return (
+            '<p class="failure-info"><strong>Reference Audio unavailable:</strong> '
+            + "; ".join(details)
+            + "</p>"
+        )
+    return ""
+
+
 def render_audio_model(result: Dict[str, Any]) -> str:
     """Render detail section for an audio model (Whisper, Bark, etc.)."""
     art_dir = Path(result.get("_artifact_dir", ""))
@@ -1030,6 +1094,12 @@ def render_audio_model(result: Dict[str, Any]) -> str:
         if uri:
             parts.append("<h4>Reference Audio</h4>")
             parts.append(f'<audio controls src="{uri}"></audio>')
+        else:
+            parts.append("<p><em>Reference WAV not found or too large.</em></p>")
+    elif task_strategy == "text_to_audio":
+        notice = _render_missing_reference_audio_notice(stage_outputs)
+        if notice:
+            parts.append(notice)
 
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))

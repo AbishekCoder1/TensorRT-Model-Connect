@@ -49,7 +49,7 @@ def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> 
     assert "retention-days: 14" in nightly
 
 
-def test_github_workflows_upload_single_file_html_report_artifact() -> None:
+def test_github_workflows_keep_html_report_in_full_artifacts() -> None:
     expectations = {
         "trtmc-ci.yml": ("trtmc-ci-html-report-${{ github.run_id }}", "retention-days: 1"),
         "nightly.yml": (
@@ -63,7 +63,8 @@ def test_github_workflows_upload_single_file_html_report_artifact() -> None:
         assert artifact_name in text
         assert "path: e2e_artifacts/e2e_report.html" in text
         assert retention in text
-        assert "!e2e_artifacts/e2e_report.html" in text
+        assert "e2e_artifacts/" in text
+        assert "!e2e_artifacts/e2e_report.html" not in text
 
 
 def test_github_workflows_write_e2e_markdown_summary() -> None:
@@ -72,3 +73,12 @@ def test_github_workflows_write_e2e_markdown_summary() -> None:
         assert "Write CI summary" in text
         assert "scripts/generate_ci_summary.py" in text
         assert ">> \"$GITHUB_STEP_SUMMARY\"" in text
+
+
+def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    zero_model_block = text.split(
+        'echo "No E2E models affected by this change -- skipping E2E tests"',
+        maxsplit=1,
+    )[1].split("fi", maxsplit=1)[0]
+    assert "mkdir -p e2e_artifacts/artifacts" in zero_model_block

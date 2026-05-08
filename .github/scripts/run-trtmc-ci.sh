@@ -313,6 +313,7 @@ if len(models) > 10:
   model_count=$(wc -l < e2e_models.txt)
   if [ "$model_count" -eq 0 ]; then
     echo "No E2E models affected by this change -- skipping E2E tests"
+    mkdir -p e2e_artifacts/artifacts
     return 0
   fi
 

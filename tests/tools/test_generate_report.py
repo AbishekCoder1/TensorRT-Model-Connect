@@ -812,17 +812,54 @@ class TestRenderAudioModel:
         mod = _import_report()
         model_dir = tmp_path / "bark"
         model_dir.mkdir()
-        wav_path = model_dir / "trt_output.wav"
-        _make_tiny_wav(wav_path)
+        trt_wav_path = model_dir / "trt_output.wav"
+        ref_wav_path = model_dir / "ref_output.wav"
+        _make_tiny_wav(trt_wav_path)
+        _make_tiny_wav(ref_wav_path)
         r = _make_result(
             name="bark",
             task_strategy="text_to_audio",
-            artifacts={"trt_wav": "trt_output.wav"},
+            artifacts={"trt_wav": "trt_output.wav", "ref_wav": "ref_output.wav"},
         )
         r["_artifact_dir"] = str(model_dir)
         html = mod.render_audio_model(r)
         assert "<audio" in html
+        assert "TRT Audio" in html
+        assert "Reference Audio" in html
         assert "data:audio/wav;base64," in html
+
+    def test_missing_reference_audio_failure_is_visible(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "magpie"
+        model_dir.mkdir()
+        trt_wav_path = model_dir / "trt_output.wav"
+        _make_tiny_wav(trt_wav_path)
+        r = _make_result(
+            name="magpie",
+            task_strategy="text_to_audio",
+            artifacts={"trt_wav": "trt_output.wav"},
+            stage_outputs={
+                "trt_full_generation": {
+                    "stage_name": "full_generation",
+                    "data": {},
+                    "metadata": {},
+                },
+                "ref_full_generation": {
+                    "stage_name": "full_generation",
+                    "data": {
+                        "returncode": 1,
+                        "stderr_truncated": "missing offline cache",
+                        "stderr_log": "nemo_magpie_ref_stderr.log",
+                    },
+                    "metadata": {"returncode": 1},
+                },
+            },
+        )
+        r["_artifact_dir"] = str(model_dir)
+        html = mod.render_audio_model(r)
+        assert "Reference Audio unavailable" in html
+        assert "ref_full_generation" in html
+        assert "missing offline cache" in html
 
     def test_speech_to_text_shows_transcript(self):
         mod = _import_report()

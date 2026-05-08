@@ -209,4 +209,3 @@ jobs:
             coverage_map.json
             coverage/
             e2e_artifacts/
-            !e2e_artifacts/e2e_report.html

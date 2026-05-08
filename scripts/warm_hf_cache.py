@@ -92,6 +92,20 @@ _TTS_ASR_VERIFIER_MODEL = os.environ.get(
     "TRTMC_TTS_ASR_MODEL",
     "openai/whisper-large-v3-turbo",
 )
+_MAGPIE_REFERENCE_DEPENDENCIES = [
+    (
+        "magpie-nanocodec",
+        "nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps",
+    ),
+    (
+        "magpie-byt5-tokenizer",
+        "google/byt5-small",
+    ),
+    (
+        "magpie-wavlm-discriminator",
+        "microsoft/wavlm-base-plus",
+    ),
+]
 
 parser = argparse.ArgumentParser(
     description=__doc__,
@@ -144,11 +158,12 @@ for m in manifests:
     if str(d.get("runtime_strategy", "")).startswith("text_to_audio"):
         needs_tts_asr_verifier = True
         if str(d.get("family", "")) == "magpie_tts":
-            entries.append((
-                "magpie-nanocodec",
-                "nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps",
-                False,
-            ))
+            # The NeMo Magpie reference restores the NanoCodec model, whose
+            # discriminator loads WavLM; Magpie tokenizer setup also loads ByT5.
+            entries.extend(
+                (name, hf_id, False)
+                for name, hf_id in _MAGPIE_REFERENCE_DEPENDENCIES
+            )
     if str(d.get("runtime_strategy", "")) == "speech_to_speech":
         entries.append(("personaplex-mimi-codec", "kyutai/mimi", False))
 
@@ -202,6 +217,8 @@ def _snapshot_has_required_files(snapshot_dir: pathlib.Path) -> bool:
         for path in snapshot_dir.rglob("*")
         if path.is_file()
     ]
+    if any(fnmatch.fnmatch(name, "*.nemo") for name in files):
+        return True
     has_entrypoint = any(
         fnmatch.fnmatch(name, pattern)
         for name in files
