@@ -892,6 +892,29 @@ class TestRenderSegmentationModel:
         assert "TRT Segmentation Map" in html
         assert "data:image/png;base64," in html
 
+    def test_embeds_prompted_segmentation_overlay(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "sam"
+        model_dir.mkdir()
+        trt_overlay = model_dir / "masks" / "segmented.png"
+        ref_overlay = model_dir / "hf_sam_segmented.png"
+        trt_overlay.parent.mkdir()
+        _make_tiny_png(trt_overlay)
+        _make_tiny_png(ref_overlay)
+        r = _make_result(
+            name="sam",
+            task_strategy="prompted_segmentation",
+            artifacts={
+                "trt_segmented_image": "masks/segmented.png",
+                "ref_segmented_image": "hf_sam_segmented.png",
+            },
+        )
+        r["_artifact_dir"] = str(model_dir)
+        html = mod.render_segmentation_model(r, project_dir=None)
+        assert "TRT Segmented Image" in html
+        assert "Reference Segmented Image" in html
+        assert html.count("data:image/png;base64,") == 2
+
 
 # ---------------------------------------------------------------------------
 # Tests: select_frames

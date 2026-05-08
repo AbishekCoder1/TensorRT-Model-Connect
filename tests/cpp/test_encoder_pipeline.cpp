@@ -175,6 +175,69 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine() {
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
+// Mock: pixel_values[1,3,4,4] float -> image_embeddings[1,4] float
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_sam_encoder_engine() {
+    auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
+    auto c = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(b->createBuilderConfig());
+    c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
+
+    auto* pv =
+        n->addInput("pixel_values", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{4, {1, 3, 4, 4}});
+
+    float cv[4] = {0.1f, 0.2f, 0.3f, 0.4f};
+    auto* cst = n->addConstant(nvinfer1::Dims{2, {1, 4}},
+                               nvinfer1::Weights{nvinfer1::DataType::kFLOAT, cv, 4});
+    cst->getOutput(0)->setName("image_embeddings");
+    n->markOutput(*cst->getOutput(0));
+
+    n->addIdentity(*pv)->getOutput(0)->setName("_pv");
+
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
+    if (!plan)
+        return nullptr;
+    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
+        rt->deserializeCudaEngine(plan->data(), plan->size()));
+}
+
+// Mock: image_embeddings + sparse_prompt_embeddings -> masks[1,1,4,4], iou_scores[1]
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_sam_decoder_engine() {
+    auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
+    auto c = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(b->createBuilderConfig());
+    c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
+
+    auto* image_embeddings =
+        n->addInput("image_embeddings", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{2, {1, 4}});
+    auto* sparse_prompt = n->addInput("sparse_prompt_embeddings", nvinfer1::DataType::kFLOAT,
+                                      nvinfer1::Dims{2, {2, 2}});
+
+    float masks[16];
+    for (int i = 0; i < 16; ++i)
+        masks[i] = static_cast<float>(i);
+    auto* mask_cst = n->addConstant(nvinfer1::Dims{4, {1, 1, 4, 4}},
+                                    nvinfer1::Weights{nvinfer1::DataType::kFLOAT, masks, 16});
+    mask_cst->getOutput(0)->setName("masks");
+    n->markOutput(*mask_cst->getOutput(0));
+
+    float iou[1] = {0.9f};
+    auto* iou_cst = n->addConstant(nvinfer1::Dims{1, {1}},
+                                   nvinfer1::Weights{nvinfer1::DataType::kFLOAT, iou, 1});
+    iou_cst->getOutput(0)->setName("iou_scores");
+    n->markOutput(*iou_cst->getOutput(0));
+
+    n->addIdentity(*image_embeddings)->getOutput(0)->setName("_image_embeddings");
+    n->addIdentity(*sparse_prompt)->getOutput(0)->setName("_sparse_prompt");
+
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
+    if (!plan)
+        return nullptr;
+    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
+        rt->deserializeCudaEngine(plan->data(), plan->size()));
+}
+
 // Mock: input_ids[4] int32 (no attention_mask) -> score[1] float
 // Covers: engine_mask_is_int32() return false (line 52) and name.find("score") (line 164)
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_encoder_engine_score_output() {
@@ -304,7 +367,7 @@ static void test_encoder_pipeline() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     trtmc::EncoderPipeline pipeline(std::move(module), "embedding");
 
     check(std::string(pipeline.pipeline_type()) == "EncoderPipeline", "encoder name");
@@ -327,7 +390,7 @@ static void test_encoder_embed_mode() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     auto tokenizer = std::make_shared<FixedTokenizer>();
     trtmc::EncoderPipeline pipeline(std::move(module), "embedding", tokenizer);
 
@@ -351,7 +414,7 @@ static void test_encoder_encode_mode() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     auto tokenizer = std::make_shared<FixedTokenizer>();
     trtmc::EncoderPipeline pipeline(std::move(module), "encode", tokenizer);
 
@@ -374,7 +437,7 @@ static void test_encoder_rerank() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     auto tokenizer = std::make_shared<FixedTokenizer>();
     trtmc::EncoderPipeline pipeline(std::move(module), "rerank", tokenizer);
 
@@ -397,7 +460,7 @@ static void test_encoder_int32_mask() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     auto tokenizer = std::make_shared<FixedTokenizer>();
     // mode="embedding" with int32 mask covers engine_mask_is_int32() == true path
     trtmc::EncoderPipeline pipeline(std::move(module), "embedding", tokenizer);
@@ -430,7 +493,7 @@ static void test_segment_pipeline() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     trtmc::SegmentPipeline pipeline(std::move(module));
 
     check(std::string(pipeline.pipeline_type()) == "SegmentPipeline", "segment name");
@@ -454,7 +517,7 @@ static void test_segment_with_class_output() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     trtmc::SegmentPipeline pipeline(std::move(module));
 
     float img[3 * 4 * 4] = {0};
@@ -478,9 +541,19 @@ static void test_segment_validates() {
     check(threw, "segment: null model throws");
 }
 
+static trtmc::SamConfig make_test_sam_config() {
+    trtmc::SamConfig config;
+    config.image_size = 4;
+    config.image_embedding_size = 1;
+    config.decoder_hidden_size = 2;
+    config.num_mask_outputs = 1;
+    config.num_multimask_outputs = 1;
+    return config;
+}
+
 static void test_sam_pipeline() {
-    auto enc_engine = build_segment_engine();
-    auto dec_engine = build_segment_engine();
+    auto enc_engine = build_sam_encoder_engine();
+    auto dec_engine = build_sam_decoder_engine();
     if (!enc_engine || !dec_engine) {
         std::cerr << "SKIP sam\n";
         return;
@@ -493,7 +566,7 @@ static void test_sam_pipeline() {
         enc_engine.get(), enc_engine->createExecutionContext(), stream);
     auto dec_mod = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
-    trtmc::SamPipeline pipeline(std::move(enc_mod), std::move(dec_mod));
+    trtmc::SamPipeline pipeline(std::move(enc_mod), std::move(dec_mod), make_test_sam_config());
 
     check(std::string(pipeline.pipeline_type()) == "SamPipeline", "sam name");
 
@@ -508,7 +581,7 @@ static void test_sam_validates() {
     // Null encoder -> constructor throws
     bool threw = false;
     try {
-        trtmc::SamPipeline pipeline(nullptr, nullptr);
+        trtmc::SamPipeline pipeline(nullptr, nullptr, make_test_sam_config());
     } catch (const std::exception&) {
         threw = true;
     }
@@ -529,7 +602,7 @@ static void test_encoder_score_output() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     trtmc::EncoderPipeline pipeline(std::move(module), "embedding");
 
     auto result = pipeline.encode_ids({1, 2, 3, 4});
@@ -551,7 +624,7 @@ static void test_encoder_no_tokenizer_embed() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     trtmc::EncoderPipeline pipeline(std::move(module), "embedding"); // no tokenizer
 
     bool threw = false;
@@ -577,7 +650,7 @@ static void test_encoder_no_tokenizer_encode() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     trtmc::EncoderPipeline pipeline(std::move(module), "encode"); // no tokenizer
 
     bool threw = false;
@@ -603,7 +676,7 @@ static void test_encoder_no_tokenizer_rerank() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     trtmc::EncoderPipeline pipeline(std::move(module), "rerank"); // no tokenizer
 
     bool threw = false;
@@ -629,7 +702,7 @@ static void test_segment_4d_output() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     trtmc::SegmentPipeline pipeline(std::move(module));
 
     float img[3 * 4 * 4] = {0};
@@ -654,7 +727,7 @@ static void test_segment_mask_named_output() {
     cudaStreamCreate(&stream);
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                        engine->createExecutionContext(), stream);
+                                                         engine->createExecutionContext(), stream);
     trtmc::SegmentPipeline pipeline(std::move(module));
 
     float img[3 * 4 * 4] = {0};

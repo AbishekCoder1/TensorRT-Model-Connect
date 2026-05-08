@@ -1210,6 +1210,7 @@ class HfTransformersReference:
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         output_path = str(Path(model_dir) / "hf_sam.json")
         masks_path = str(Path(model_dir) / "hf_sam_masks.npy")
+        segmented_image_path = str(Path(model_dir) / "hf_sam_segmented.png")
 
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         trust_remote_code = case.metadata.get("trust_remote_code", False)
@@ -1228,6 +1229,7 @@ class HfTransformersReference:
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
             masks_path = {masks_path!r}
+            segmented_image_path = {segmented_image_path!r}
             point_x_frac = {point_x!r}
             point_y_frac = {point_y!r}
 
@@ -1260,10 +1262,31 @@ class HfTransformersReference:
             mask_np = masks[0].cpu().numpy().astype(np.uint8)
             np.save(masks_path, mask_np)
 
+            selected_mask = int(np.argmax(iou_scores)) if iou_scores else 0
+            selected_mask = min(selected_mask, mask_np.shape[0] - 1)
+            overlay_mask = mask_np[selected_mask].astype(bool)
+            if overlay_mask.shape != (h, w):
+                mask_img = Image.fromarray(overlay_mask.astype(np.uint8) * 255)
+                mask_img = mask_img.resize((w, h), Image.NEAREST)
+                overlay_mask = np.asarray(mask_img, dtype=np.uint8) > 0
+
+            image_arr = np.asarray(image, dtype=np.float32)
+            overlay = np.zeros_like(image_arr)
+            overlay[..., 0] = 255.0
+            overlay[..., 1] = 96.0
+            alpha = 0.55
+            image_arr[overlay_mask] = (
+                image_arr[overlay_mask] * (1.0 - alpha)
+                + overlay[overlay_mask] * alpha
+            )
+            Image.fromarray(np.clip(image_arr, 0, 255).astype(np.uint8)).save(
+                segmented_image_path)
+
             result = {{
                 "iou_scores": iou_scores,
                 "num_masks": mask_np.shape[0],
                 "mask_shape": list(mask_np.shape),
+                "segmented_image_path": segmented_image_path,
             }}
             with open(output_path, "w") as f:
                 json.dump(result, f)
@@ -1297,6 +1320,8 @@ class HfTransformersReference:
             data = json.loads(Path(output_path).read_text())
         if Path(masks_path).is_file():
             data["masks_path"] = masks_path
+        if Path(segmented_image_path).is_file():
+            data["segmented_image_path"] = segmented_image_path
 
         return StageOutput(
             stage_name=stage.name, data=data, timing_s=elapsed,

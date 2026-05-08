@@ -5,8 +5,45 @@
 #include "runtime/pipelines/segment_pipeline.h"
 #include "runtime/plugins/shared/plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
+#include "utils/json_helpers.h"
+
+#include <utility>
 
 namespace trtmc {
+
+namespace {
+
+SamConfig make_sam_config(const std::string& json) {
+    SamConfig cfg;
+    cfg.image_size = extract_json_int(json, "sam_image_size",
+                                      extract_json_int(json, "input_image_h", cfg.image_size));
+    cfg.image_embedding_size =
+        extract_json_int(json, "sam_image_embedding_size", cfg.image_embedding_size);
+    cfg.decoder_hidden_size =
+        extract_json_int(json, "sam_decoder_hidden_size", cfg.decoder_hidden_size);
+    cfg.num_mask_outputs = extract_json_int(json, "sam_num_mask_outputs", cfg.num_mask_outputs);
+    cfg.num_multimask_outputs =
+        extract_json_int(json, "sam_num_multimask_outputs", cfg.num_multimask_outputs);
+
+    auto mean = extract_json_float_array(json, "image_mean", 3);
+    if (mean.size() == 3)
+        cfg.image_mean = std::move(mean);
+    auto stdv = extract_json_float_array(json, "image_std", 3);
+    if (stdv.size() == 3)
+        cfg.image_std = std::move(stdv);
+
+    cfg.point_embed_bg =
+        extract_json_float_array(json, "sam_point_embed_0", cfg.decoder_hidden_size);
+    cfg.point_embed_fg =
+        extract_json_float_array(json, "sam_point_embed_1", cfg.decoder_hidden_size);
+    cfg.not_a_point_embed =
+        extract_json_float_array(json, "sam_not_a_point_embed", cfg.decoder_hidden_size);
+    cfg.shared_image_pe =
+        extract_json_float_array(json, "sam_shared_image_pe", cfg.decoder_hidden_size);
+    return cfg;
+}
+
+} // namespace
 
 class SegmentationPlugin final : public IPipelinePlugin {
   public:
@@ -26,7 +63,8 @@ class SegmentationPlugin final : public IPipelinePlugin {
                 "vision_plan (SAM mask_decoder)", opts);
             if (decoder.module && decoder.module->ok())
                 return std::make_unique<SamPipeline>(
-                    std::move(loaded.module), std::move(decoder.module), ctx.bundle.info.model_id);
+                    std::move(loaded.module), std::move(decoder.module),
+                    make_sam_config(ctx.config_json), ctx.bundle.info.model_id);
             // Fallback to single-encoder segmentation if decoder failed
             return std::make_unique<SegmentPipeline>(std::move(loaded.module),
                                                      ctx.bundle.info.model_id);

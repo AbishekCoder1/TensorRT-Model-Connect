@@ -1129,8 +1129,24 @@ def render_segmentation_model(
                 f'<img src="{uri}" class="preview-img" />'
             )
 
+    segmented_image = artifacts.get("trt_segmented_image", "")
+    if segmented_image:
+        seg_path = art_dir / segmented_image
+        uri = encode_file_base64(seg_path, "image/png")
+        if uri:
+            parts.append("<h4>TRT Segmented Image</h4>")
+            parts.append(f'<img src="{uri}" class="preview-img" />')
+
+    ref_segmented_image = artifacts.get("ref_segmented_image", "")
+    if ref_segmented_image:
+        seg_path = art_dir / ref_segmented_image
+        uri = encode_file_base64(seg_path, "image/png")
+        if uri:
+            parts.append("<h4>Reference Segmented Image</h4>")
+            parts.append(f'<img src="{uri}" class="preview-img" />')
+
     # Segmentation map
-    seg_map = artifacts.get("trt_segmentation_map", "")
+    seg_map = artifacts.get("trt_segmentation_map", "") or artifacts.get("trt_output", "")
     if seg_map:
         seg_path = art_dir / seg_map
         uri = encode_file_base64(seg_path, "image/png")

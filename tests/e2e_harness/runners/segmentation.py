@@ -143,6 +143,7 @@ class SegmentationRunner:
             data={
                 "class_map": class_map,
                 "output_path": output_path,
+                "segmentation_map_path": output_path,
                 "image_path": str(image_path),
             },
             timing_s=elapsed,
@@ -253,8 +254,13 @@ class PromptedSegmentationRunner:
         # Parse mask outputs from the output directory
         masks = []
         mask_scores = []
+        segmented_image_path = None
         if result.returncode == 0:
             masks, mask_scores = _load_mask_outputs(output_dir, result.stdout)
+            segmented_image_path = str(Path(output_dir) / "segmented.png")
+            if not Path(segmented_image_path).is_file():
+                segmented_image_path = _write_segmented_overlay(
+                    image_path, masks, mask_scores, output_dir)
 
         stderr_truncated, stderr_log = save_full_stderr(
             result.stderr or "", ctx.artifacts_dir or "",
@@ -278,6 +284,7 @@ class PromptedSegmentationRunner:
                 "point_prompt": {"x": point_x, "y": point_y},
                 "output_dir": output_dir,
                 "image_path": str(image_path),
+                "segmented_image_path": segmented_image_path,
             },
             timing_s=elapsed,
             metadata=pseg_meta,
@@ -335,6 +342,57 @@ def _load_mask_outputs(
             logger.warning("Failed to load PNG masks: %s", e)
 
     return masks, scores
+
+
+def _write_segmented_overlay(
+    image_path: str,
+    masks: list,
+    mask_scores: list[float],
+    output_dir: str,
+) -> str | None:
+    """Write an input-image overlay for the highest-scoring SAM mask."""
+    if not masks:
+        return None
+
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return None
+
+    try:
+        image = Image.open(image_path).convert("RGB")
+    except Exception:
+        return None
+
+    mask_index = 0
+    if mask_scores and len(mask_scores) >= len(masks):
+        mask_index = max(range(len(masks)), key=lambda i: mask_scores[i])
+
+    mask_arr = np.asarray(masks[mask_index], dtype=np.float32)
+    if mask_arr.ndim > 2:
+        mask_arr = np.squeeze(mask_arr)
+    if mask_arr.ndim != 2:
+        return None
+
+    mask_img = Image.fromarray((mask_arr > 0).astype(np.uint8) * 255)
+    if mask_img.size != image.size:
+        mask_img = mask_img.resize(image.size, Image.NEAREST)
+
+    image_arr = np.asarray(image, dtype=np.float32)
+    mask_bool = np.asarray(mask_img, dtype=np.uint8) > 0
+    overlay = np.zeros_like(image_arr)
+    overlay[..., 1] = 220.0
+    overlay[..., 2] = 64.0
+    alpha = 0.55
+    image_arr[mask_bool] = image_arr[mask_bool] * (1.0 - alpha) + overlay[mask_bool] * alpha
+
+    out_path = Path(output_dir) / "segmented.png"
+    try:
+        Image.fromarray(np.clip(image_arr, 0, 255).astype(np.uint8)).save(out_path)
+    except Exception:
+        return None
+    return str(out_path)
 
 
 # The registry auto-discovers a single ``plugin``. Since we have two runners,

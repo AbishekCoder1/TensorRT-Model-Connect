@@ -26,6 +26,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -161,6 +162,8 @@ void print_usage() {
            "[--kv-cache-size SIZE] [--chat-template] [--no-thinking]\n"
            "  trtmc encode          <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc segment         <bundle.trtfb> --image PATH --output PATH [--hf-python PATH]\n"
+           "  trtmc segment-sam     <bundle.trtfb> --image PATH --output DIR "
+           "[--point-x F] [--point-y F] [--background] [--hf-python PATH]\n"
            "  trtmc generate-audio  <bundle.trtfb> --prompt \"text\" --output PATH "
            "[--max-new-tokens N] [--hf-python PATH]\n"
            "  trtmc serve-audio     <bundle.trtfb> [--chunk-frames N] [--max-new-tokens N] "
@@ -207,9 +210,10 @@ CliArgs parse_args(int argc, char** argv) {
         return args;
     }
 
-    static const char* known_cmds[] = {
-        "run",   "inspect", "generate-video", "segment", "generate-audio", "serve-audio", "encode",
-        "embed", "rerank",  "solve",          "speak",   "transcribe",     nullptr};
+    static const char* known_cmds[] = {"run",         "inspect",        "generate-video", "segment",
+                                       "segment-sam", "generate-audio", "serve-audio",    "encode",
+                                       "embed",       "rerank",         "solve",          "speak",
+                                       "transcribe",  nullptr};
     bool valid = false;
     for (const char** p = known_cmds; *p; ++p)
         if (args.command == *p) {
@@ -739,6 +743,116 @@ int cmd_segment(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+int write_sam_overlay(const trtmc::PromptedSegmentationResult& result,
+                      const trtmc::io::LoadedImage& image, const std::string& path) {
+    if (result.num_masks <= 0 || result.height <= 0 || result.width <= 0 || result.masks.empty() ||
+        image.empty())
+        return EXIT_FAILURE;
+
+    const auto mask_area =
+        static_cast<std::size_t>(result.height) * static_cast<std::size_t>(result.width);
+    int32_t selected = 0;
+    if (static_cast<int32_t>(result.iou_scores.size()) >= result.num_masks) {
+        selected = static_cast<int32_t>(
+            std::distance(result.iou_scores.begin(),
+                          std::max_element(result.iou_scores.begin(),
+                                           result.iou_scores.begin() + result.num_masks)));
+    }
+    const float* mask = result.masks.data() +
+                        static_cast<std::size_t>(selected) * static_cast<std::size_t>(mask_area);
+
+    std::vector<unsigned char> rgb(mask_area * 3U, 0);
+    for (int32_t y = 0; y < result.height; ++y) {
+        const int32_t src_y =
+            std::min(image.height - 1,
+                     static_cast<int32_t>(static_cast<float>(y) * image.height / result.height));
+        for (int32_t x = 0; x < result.width; ++x) {
+            const int32_t src_x =
+                std::min(image.width - 1,
+                         static_cast<int32_t>(static_cast<float>(x) * image.width / result.width));
+            const auto src_idx = static_cast<std::size_t>((src_y * image.width + src_x) * 3);
+            const auto dst_idx = static_cast<std::size_t>((y * result.width + x) * 3);
+            const bool active = mask[static_cast<std::size_t>(y) * result.width + x] > 0.0F;
+            const float alpha = active ? 0.55F : 0.0F;
+            const float overlay[3] = {0.0F, 0.85F, 0.25F};
+            for (int32_t c = 0; c < 3; ++c) {
+                const float base = std::clamp(image.pixels[src_idx + c], 0.0F, 1.0F);
+                const float mixed = base * (1.0F - alpha) + overlay[c] * alpha;
+                rgb[dst_idx + c] = static_cast<unsigned char>(mixed * 255.0F + 0.5F);
+            }
+        }
+    }
+
+    const int stride = result.width * 3;
+    return stbi_write_png(path.c_str(), result.width, result.height, 3, rgb.data(), stride)
+               ? EXIT_SUCCESS
+               : EXIT_FAILURE;
+}
+
+int cmd_segment_sam(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.image_path.empty()) {
+        std::cerr << "Error: segment-sam requires bundle + --image\n";
+        return EXIT_FAILURE;
+    }
+
+    const std::string out_dir = args.output_dir.empty() ? "/tmp/trtmc_masks" : args.output_dir;
+    std::filesystem::create_directories(out_dir);
+
+    auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
+    auto image = trtmc::io::read_image(args.image_path);
+    if (image.empty()) {
+        std::cerr << "Error: failed to load image: " << args.image_path << '\n';
+        return EXIT_FAILURE;
+    }
+
+    auto result = pipeline->segment_prompted(image.pixels.data(), image.height, image.width,
+                                             args.point_x, args.point_y, args.is_foreground);
+    if (result.num_masks <= 0 || result.height <= 0 || result.width <= 0 || result.masks.empty()) {
+        std::cerr << "Error: SAM produced no masks\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto mask_area =
+        static_cast<std::size_t>(result.height) * static_cast<std::size_t>(result.width);
+    if (result.masks.size() < static_cast<std::size_t>(result.num_masks) * mask_area) {
+        std::cerr << "Error: SAM mask payload is incomplete\n";
+        return EXIT_FAILURE;
+    }
+
+    for (int32_t mask_idx = 0; mask_idx < result.num_masks; ++mask_idx) {
+        const float* src = result.masks.data() +
+                           static_cast<std::size_t>(mask_idx) * static_cast<std::size_t>(mask_area);
+        std::vector<unsigned char> gray(mask_area, 0);
+        for (std::size_t i = 0; i < mask_area; ++i)
+            gray[i] = src[i] > 0.0F ? 255 : 0;
+
+        std::ostringstream mask_path;
+        mask_path << out_dir << "/mask_" << std::setw(3) << std::setfill('0') << mask_idx << ".png";
+        if (!stbi_write_png(mask_path.str().c_str(), result.width, result.height, 1, gray.data(),
+                            result.width)) {
+            std::cerr << "Error: failed to write " << mask_path.str() << '\n';
+            return EXIT_FAILURE;
+        }
+
+        if (mask_idx < static_cast<int32_t>(result.iou_scores.size())) {
+            std::ostringstream score_path;
+            score_path << out_dir << "/score_" << std::setw(3) << std::setfill('0') << mask_idx
+                       << ".txt";
+            std::ofstream score_out(score_path.str());
+            score_out << std::fixed << std::setprecision(6) << result.iou_scores[mask_idx] << '\n';
+        }
+    }
+
+    const std::string overlay_path = out_dir + "/segmented.png";
+    if (write_sam_overlay(result, image, overlay_path) != EXIT_SUCCESS) {
+        std::cerr << "Warning: failed to write " << overlay_path << '\n';
+    }
+
+    std::cout << "SAM segmentation saved: " << out_dir << " (" << result.num_masks << " masks, "
+              << result.width << "x" << result.height << ")\n";
+    return EXIT_SUCCESS;
+}
+
 // ---------------------------------------------------------------------------
 // serve-audio: persistent mode — load bundle once, read prompts from stdin,
 // stream PCM float32 to stdout. One prompt per line.
@@ -1125,6 +1239,8 @@ int main(int argc, char** argv) {
             return cmd_encode(args);
         if (args.command == "segment")
             return cmd_segment(args);
+        if (args.command == "segment-sam")
+            return cmd_segment_sam(args);
         if (args.command == "generate-audio")
             return cmd_generate_audio(args);
         if (args.command == "serve-audio")

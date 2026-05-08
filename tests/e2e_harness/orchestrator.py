@@ -500,6 +500,7 @@ def _auto_register_artifacts(sink: Any, output: StageOutput, prefix: str) -> Non
         "features_path": "features",
         "output_path": "output",
         "segmentation_map_path": "segmentation_map",
+        "segmented_image_path": "segmented_image",
     }
     for data_key, artifact_key in _ARTIFACT_KEYS.items():
         value = output.data.get(data_key)

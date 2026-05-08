@@ -13,7 +13,8 @@ import json
 import numpy as np
 
 from tests.e2e_harness.comparators.segmentation import PromptedSegmentationComparator
-from tests.e2e_harness.contracts import StageOutput, StageSpec, ThresholdProfile
+from tests.e2e_harness.contracts import E2ECase, StageOutput, StageSpec, ThresholdProfile
+from tests.e2e_harness.plugins.segmentation import SegmentationPlugin
 from tests.e2e_harness.manifest_loader import load_manifest
 
 
@@ -64,6 +65,108 @@ def test_prompted_segmentation_comparator_loads_reference_masks_from_npy(tmp_pat
     assert result.status == "passed"
     assert result.metrics["num_masks_consistency"].passed
     assert result.metrics["iou_per_prompt"].passed
+
+
+def test_prompted_segmentation_contract_plugin_verifies_masks_from_npy(tmp_path) -> None:
+    masks_path = tmp_path / "hf_sam_masks.npy"
+    np.save(
+        masks_path,
+        np.array(
+            [
+                [[1, 0], [0, 1]],
+                [[0, 1], [1, 0]],
+                [[1, 1], [0, 0]],
+            ],
+            dtype=np.uint8,
+        ),
+    )
+
+    trt = StageOutput(
+        stage_name="full_inference",
+        data={
+            "masks": [
+                np.array([[1, 0], [0, 1]], dtype=np.uint8),
+                np.array([[0, 1], [1, 0]], dtype=np.uint8),
+                np.array([[1, 1], [0, 0]], dtype=np.uint8),
+            ],
+        },
+    )
+    ref = StageOutput(
+        stage_name="full_inference",
+        data={"masks_path": str(masks_path)},
+    )
+    case = E2ECase(
+        name="sam-vit-base",
+        hf_id="facebook/sam-vit-base",
+        family="sam",
+        runtime_strategy="prompted_segmentation",
+        task_strategy="prompted_segmentation",
+        reference_family="prompted_segmentation_sam",
+    )
+    threshold = ThresholdProfile(
+        task_strategy="prompted_segmentation",
+        metrics={
+            "num_masks_consistency": 1.0,
+            "iou_per_prompt": 0.7,
+        },
+    )
+
+    result = SegmentationPlugin().verify(trt, ref, case, threshold)
+
+    assert result.status == "passed"
+    assert result.metrics["num_masks_consistency"].passed
+    assert result.metrics["iou_per_prompt"].passed
+
+
+def test_prompted_segmentation_contract_plugin_fails_bad_trt_masks(tmp_path) -> None:
+    masks_path = tmp_path / "hf_sam_masks.npy"
+    np.save(
+        masks_path,
+        np.array(
+            [
+                [[1, 1], [0, 0]],
+                [[0, 0], [1, 1]],
+                [[1, 0], [1, 0]],
+            ],
+            dtype=np.uint8,
+        ),
+    )
+
+    trt = StageOutput(
+        stage_name="full_inference",
+        data={
+            "masks": [
+                np.array([[0, 0], [1, 1]], dtype=np.uint8),
+                np.array([[1, 1], [0, 0]], dtype=np.uint8),
+                np.array([[0, 1], [0, 1]], dtype=np.uint8),
+            ],
+        },
+    )
+    ref = StageOutput(
+        stage_name="full_inference",
+        data={"masks_path": str(masks_path)},
+    )
+    case = E2ECase(
+        name="sam-vit-base",
+        hf_id="facebook/sam-vit-base",
+        family="sam",
+        runtime_strategy="prompted_segmentation",
+        task_strategy="prompted_segmentation",
+        reference_family="prompted_segmentation_sam",
+    )
+    threshold = ThresholdProfile(
+        task_strategy="prompted_segmentation",
+        metrics={
+            "num_masks_consistency": 1.0,
+            "iou_per_prompt": 0.7,
+        },
+    )
+
+    result = SegmentationPlugin().verify(trt, ref, case, threshold)
+
+    assert result.status == "failed"
+    assert result.metrics["num_masks_consistency"].passed
+    assert not result.metrics["iou_per_prompt"].passed
 
 
 def test_manifest_loader_promotes_num_expected_masks_into_inputs(tmp_path) -> None:

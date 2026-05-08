@@ -76,6 +76,14 @@ struct SegmentResult {
     int32_t width{0};
 };
 
+struct PromptedSegmentationResult {
+    std::vector<float> masks;      // [num_masks, H, W], logits after postprocess
+    std::vector<float> iou_scores; // [num_masks]
+    int32_t num_masks{0};
+    int32_t height{0};
+    int32_t width{0};
+};
+
 struct TextEmbedding {
     std::vector<float> data;
     std::vector<int64_t> shape;
@@ -251,6 +259,20 @@ class IPipeline {
         throw std::runtime_error(std::string(pipeline_type()) + " does not support segment()");
     }
 
+    virtual PromptedSegmentationResult segment_prompted(const float* image_pixels,
+                                                        int32_t image_height, int32_t image_width,
+                                                        float point_x = 0.5F, float point_y = 0.5F,
+                                                        bool is_foreground = true) {
+        (void)image_pixels;
+        (void)image_height;
+        (void)image_width;
+        (void)point_x;
+        (void)point_y;
+        (void)is_foreground;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support segment_prompted()");
+    }
+
     // -- Encoder-only hidden states (BERT) --
     virtual EmbeddingResult encode(const std::string& text) {
         (void)text;
@@ -316,7 +338,7 @@ struct TrtmcPipelineOptions {
 
 trtmc::IPipeline* trtmc_create_pipeline(const char* bundle_path, int flags);
 trtmc::IPipeline* trtmc_create_pipeline_ex(const char* bundle_path,
-                                         const TrtmcPipelineOptions* options);
+                                           const TrtmcPipelineOptions* options);
 const char* trtmc_last_error(void);
 const char* trtmc_version(void);
 int trtmc_has_trt(void);

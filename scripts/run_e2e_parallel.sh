@@ -28,6 +28,7 @@
 #
 # Environment variables (lower priority than CLI):
 #   ENGINE_DIR, RESULT_DIR, NUM_GPUS, WORKERS_PER_GPU, TRTMC_BINARY, HF_PYTHON
+#   TRTMC_E2E_EXCLUDE_GPU0, TRTMC_E2E_DEPRIORITIZE_GPU0
 
 set -euo pipefail
 
@@ -82,6 +83,68 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+PHYSICAL_GPU_COUNT="$NUM_GPUS"
+GPU_IDS=()
+for ((gpu_id = 0; gpu_id < PHYSICAL_GPU_COUNT; gpu_id++)); do
+    if CUDA_VISIBLE_DEVICES="$gpu_id" "$HF_PYTHON" - <<'PY' >/dev/null 2>&1
+import tensorrt as trt
+
+logger = trt.Logger(trt.Logger.ERROR)
+builder = trt.Builder(logger)
+if builder is None:
+    raise SystemExit(1)
+PY
+    then
+        GPU_IDS+=("$gpu_id")
+    else
+        echo "WARN: GPU $gpu_id failed TensorRT builder health check; excluding from E2E schedule." >&2
+    fi
+done
+
+if [ "${#GPU_IDS[@]}" -eq 0 ]; then
+    echo "ERROR: No GPUs passed TensorRT builder health check." >&2
+    exit 1
+fi
+
+EXCLUDE_GPU0="${TRTMC_E2E_EXCLUDE_GPU0:-}"
+if [ -z "$EXCLUDE_GPU0" ]; then
+    if [ -n "${GITHUB_RUN_ID:-}" ]; then
+        EXCLUDE_GPU0=1
+    else
+        EXCLUDE_GPU0=0
+    fi
+fi
+
+if [ "$EXCLUDE_GPU0" != "0" ] && [ "${#GPU_IDS[@]}" -gt 1 ]; then
+    FILTERED_GPU_IDS=()
+    for gpu_id in "${GPU_IDS[@]}"; do
+        if [ "$gpu_id" != "0" ]; then
+            FILTERED_GPU_IDS+=("$gpu_id")
+        fi
+    done
+    if [ "${#FILTERED_GPU_IDS[@]}" -gt 0 ] \
+        && [ "${#FILTERED_GPU_IDS[@]}" -lt "${#GPU_IDS[@]}" ]; then
+        # The shared GitHub GB300 runner can lose communication during large
+        # TensorRT/Myelin builds on physical GPU0. In CI, keep E2E parallel on
+        # the remaining GPUs instead of risking a runner-level disconnect.
+        GPU_IDS=("${FILTERED_GPU_IDS[@]}")
+        echo "INFO: Excluding physical GPU 0 from E2E worker assignment (${GPU_IDS[*]})." \
+            >&2
+    fi
+fi
+
+if [ "${TRTMC_E2E_DEPRIORITIZE_GPU0:-1}" != "0" ] \
+    && [ "${#GPU_IDS[@]}" -gt 1 ] \
+    && [ "${GPU_IDS[0]}" = "0" ]; then
+    # Shared GB300 runners can have physical GPU0 pass a lightweight builder
+    # probe but fail the first large TensorRT/Myelin build. Keep it available,
+    # while assigning the scheduler's first exclusive build bucket elsewhere.
+    GPU_IDS=("${GPU_IDS[@]:1}" "${GPU_IDS[0]}")
+    echo "INFO: Scheduling physical GPU 0 last for E2E worker assignment (${GPU_IDS[*]})." \
+        >&2
+fi
+NUM_GPUS="${#GPU_IDS[@]}"
+
 # --- Setup --------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -93,7 +156,7 @@ rm -f "$RESULT_DIR"/console-gpu*-w*.log \
       "$RESULT_DIR"/junit.xml
 
 echo "=== E2E Parallel Test Runner ==="
-echo "  GPUs:            $NUM_GPUS"
+echo "  GPUs:            $NUM_GPUS healthy of $PHYSICAL_GPU_COUNT (${GPU_IDS[*]})"
 echo "  Workers/GPU:     $WORKERS_PER_GPU"
 echo "  Engines:         $ENGINE_DIR"
 echo "  Results:         $RESULT_DIR"
@@ -155,10 +218,11 @@ while IFS= read -r line; do
     [ "$WORKER_COUNT" -eq 0 ] && continue
 
     LABEL="gpu${GPU_ID}-w${WORKER_IDX}"
+    PHYSICAL_GPU_ID="${GPU_IDS[$GPU_ID]}"
     echo "  $LABEL: $WORKER_COUNT tests"
 
     (
-        export CUDA_VISIBLE_DEVICES=$GPU_ID
+        export CUDA_VISIBLE_DEVICES=$PHYSICAL_GPU_ID
         # shellcheck disable=SC2086
         "$HF_PYTHON" -m pytest $WORKER_TESTS -v \
             --engine-dir "$ENGINE_DIR" \

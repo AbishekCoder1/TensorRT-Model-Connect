@@ -32,6 +32,12 @@ def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
         assert f"-e {name}" in text
 
 
+def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
+    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    assert "-e TRTMC_E2E_EXCLUDE_GPU0" in text
+    assert "-e TRTMC_E2E_DEPRIORITIZE_GPU0" in text
+
+
 def test_shared_setup_action_creates_hf_cache_dirs() -> None:
     text = (REPO_ROOT / ".github" / "actions" / "setup-trtmc" / "action.yml").read_text()
     assert '"${HF_HOME:-}"' in text
